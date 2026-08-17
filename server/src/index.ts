@@ -1166,45 +1166,52 @@ function broadcastTopicMessageToLocalSubscribers(
   opts?: { originatingConnectionId?: ConnectionId; requestId?: string },
 ): void {
   const subscribers = topicMessageSubscribersByTopicId.get(topicId)
-  if (subscribers === undefined || subscribers.size === 0) {
-    return
-  }
 
-  for (const subscriberConnectionId of [...subscribers]) {
-    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
-    const socket = socketRegistry.get(subscriberConnectionId)
+  // ВАЖНО: по-рано тук имаше early-return, ако НИКОЙ не гледа точно тази
+  // тема в момента (subscribers.size === 0) — това пропускаше и
+  // reconcileTopicUnreadForDirectorySubscribers по-долу, значи badge-ът за
+  // directory subscribers (напр. "Лафче" червената точка / ТЕМИ / Меню
+  // агрегатите) никога не се обновяваше realtime, ако никой активно не
+  // гледаше темата в момента на новия пост (production bug). Per-viewer
+  // push цикълът остава условен на реални subscribers, но directory
+  // reconciliation-ът ТРЯБВА да се извиква безусловно.
+  if (subscribers !== undefined && subscribers.size > 0) {
+    for (const subscriberConnectionId of [...subscribers]) {
+      const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+      const socket = socketRegistry.get(subscriberConnectionId)
 
-    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
-      subscribers.delete(subscriberConnectionId)
-      topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
-      continue
+      if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+        subscribers.delete(subscriberConnectionId)
+        topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
+        continue
+      }
+
+      // Viewer-side hard-exclude — СЪЩИЯТ getLobbyChatBlockedSet helper, ползван
+      // от Topics REST history (Етап 1) — realtime push НЕ трябва да заобикаля
+      // block semantics-а, който REST-ът вече налага (Етап 2 брифа т.9).
+      if (
+        subscriberConnection.profileId !== null &&
+        getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
+      ) {
+        continue
+      }
+
+      const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
+
+      safeSendToConnection(subscriberConnectionId, {
+        type: 'topic_message',
+        ...snapshot,
+        // replyCount override-ва shared base стойността (viewer-agnostic global
+        // count от hydrateTopicMessagesWithCurrentAvatars) с viewer-aware брой —
+        // blocked sender-и на ТОЗИ subscriber не се броят (виж viewerAwareReplyCount).
+        replyCount: viewerAwareReplyCount(snapshot.messageId, subscriberConnection.profileId),
+        unreadCount: subscriberConnection.profileId === null
+          ? 0
+          : getTopicThreadUnreadCountForProfile(subscriberConnection.profileId, snapshot.messageId),
+        viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
+        ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
+      })
     }
-
-    // Viewer-side hard-exclude — СЪЩИЯТ getLobbyChatBlockedSet helper, ползван
-    // от Topics REST history (Етап 1) — realtime push НЕ трябва да заобикаля
-    // block semantics-а, който REST-ът вече налага (Етап 2 брифа т.9).
-    if (
-      subscriberConnection.profileId !== null &&
-      getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
-    ) {
-      continue
-    }
-
-    const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
-
-    safeSendToConnection(subscriberConnectionId, {
-      type: 'topic_message',
-      ...snapshot,
-      // replyCount override-ва shared base стойността (viewer-agnostic global
-      // count от hydrateTopicMessagesWithCurrentAvatars) с viewer-aware брой —
-      // blocked sender-и на ТОЗИ subscriber не се броят (виж viewerAwareReplyCount).
-      replyCount: viewerAwareReplyCount(snapshot.messageId, subscriberConnection.profileId),
-      unreadCount: subscriberConnection.profileId === null
-        ? 0
-        : getTopicThreadUnreadCountForProfile(subscriberConnection.profileId, snapshot.messageId),
-      viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
-      ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
-    })
   }
 
   reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId, snapshot.messageId)
@@ -1427,19 +1434,42 @@ function broadcastTopicLockStateChangedToLocalSubscribers(
 // получаване, огледално на unsubscribe_topic_messages handling-а.
 function broadcastTopicDeletedToLocalSubscribers(topicId: string): void {
   const subscribers = topicMessageSubscribersByTopicId.get(topicId)
-  if (subscribers === undefined || subscribers.size === 0) {
-    return
+  const notifiedConnectionIds = new Set<ConnectionId>()
+
+  if (subscribers !== undefined && subscribers.size > 0) {
+    for (const subscriberConnectionId of [...subscribers]) {
+      safeSendToConnection(subscriberConnectionId, {
+        type: 'topic_deleted',
+        topicId,
+      })
+      notifiedConnectionIds.add(subscriberConnectionId)
+      topicMessageSubscribersByTopicId.get(topicId)?.delete(subscriberConnectionId)
+      if (topicMessageSubscriberTopicIdByConnectionId.get(subscriberConnectionId) === topicId) {
+        topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
+      }
+    }
   }
-  for (const subscriberConnectionId of [...subscribers]) {
-    safeSendToConnection(subscriberConnectionId, {
+
+  // Directory-wide известяване — БЕЗ това, потребители, които в момента не
+  // гледат точно тази тема (Lobby / Topics directory / друга тема), никога
+  // не научават, че е изтрита: state.topics остава stale, aggregate badge-ът
+  // (desktop "ТЕМИ"/mobile "Меню") показва фантомни непрочетени до следващ
+  // пълен refresh (production bug, виж investigation report-а). Клиентският
+  // 'topic_deleted' handler вече е безопасно generic (маха темата от
+  // state.topics безусловно, допълнителна active-topic логика само ако е
+  // била отворена) — просто разширяваме получателите.
+  for (const directorySubscriberConnectionId of [...topicsDirectorySubscriberConnectionIds]) {
+    if (notifiedConnectionIds.has(directorySubscriberConnectionId)) continue
+    safeSendToConnection(directorySubscriberConnectionId, {
       type: 'topic_deleted',
       topicId,
     })
-    topicMessageSubscribersByTopicId.get(topicId)?.delete(subscriberConnectionId)
-    if (topicMessageSubscriberTopicIdByConnectionId.get(subscriberConnectionId) === topicId) {
-      topicMessageSubscriberTopicIdByConnectionId.delete(subscriberConnectionId)
-    }
   }
+
+  // Безусловен unread reconcile — огледално на
+  // broadcastTopicMessageDeletedToLocalSubscribers (individual message
+  // delete), НЕ зависи от subscribers.size на самата тема.
+  reconcileTopicUnreadForDirectorySubscribers(topicId, undefined, undefined)
 }
 
 // Public broadcast при moderator delete на ОТДЕЛНО root съобщение или reply
@@ -8066,6 +8096,15 @@ async function handleTopicLockRequest(
   }
 
   const topicId = decodeURIComponent(match[1] ?? '')
+
+  // "Лафче" е fixed system тема — не може да се заключва (огледално на
+  // client-side guard-а в renderTopicHeaderModerationControls). Тесен guard
+  // само за този topicId, не засяга lock права за нормални теми.
+  if (topicId === LAFCHE_TOPIC_ID) {
+    sendJsonResponse(res, 403, { ok: false, message: '„Лафче“ не може да бъде заключвана.' })
+    return true
+  }
+
   const topic = topicStore.getTopicById(topicId)
   if (topic === null || topic.status === 'removed') {
     sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
@@ -8125,6 +8164,14 @@ async function handleTopicUnlockRequest(
   }
 
   const topicId = decodeURIComponent(match[1] ?? '')
+
+  // "Лафче" никога не може да бъде заключена (виж handleTopicLockRequest),
+  // значи unlock е defensively guard-нат тук също — не засяга нормални теми.
+  if (topicId === LAFCHE_TOPIC_ID) {
+    sendJsonResponse(res, 403, { ok: false, message: '„Лафче“ не може да бъде заключвана.' })
+    return true
+  }
+
   const topic = topicStore.getTopicById(topicId)
   if (topic === null || topic.status === 'removed') {
     sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
@@ -8494,6 +8541,14 @@ async function handleTopicDeleteRequest(
 
   const topicId = decodeURIComponent(match[1] ?? '')
 
+  // "Лафче" е fixed system тема — не може да се изтрива (огледално на
+  // client-side guard-а в renderTopicHeaderModerationControls). Тесен guard
+  // само за този topicId, не засяга delete права за нормални теми.
+  if (topicId === LAFCHE_TOPIC_ID) {
+    sendJsonResponse(res, 403, { ok: false, message: '„Лафче“ не може да бъде изтрита.' })
+    return true
+  }
+
   let body: unknown
   try {
     body = await readJsonRequestBody(req)
@@ -8647,6 +8702,17 @@ async function handleTopicMessageDeleteRequest(
     }
 
     sendJsonResponse(res, 200, { ok: true, topicId, messageId })
+    return true
+  }
+
+  // "Лафче" (topic-lafche) няма own-delete право изобщо — единственият
+  // валиден path е moderator (isModerator блокът по-горе, isLafcheModeratorSession).
+  // За разлика от normal Topics, фактът че потребителят е автор на поста
+  // НЕ му дава delete право тук — reuse-ва СЪЩИЯ topicId===LAFCHE_TOPIC_ID
+  // branch, който вече определи isModerator по-горе (не дублира permission
+  // helper). Normal Topics own-delete остава напълно непроменено.
+  if (topicId === LAFCHE_TOPIC_ID) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да изтриеш това съобщение.' })
     return true
   }
 

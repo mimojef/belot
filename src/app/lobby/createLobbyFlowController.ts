@@ -1014,6 +1014,8 @@ type InternalLobbyFlowState = {
   activeTopicLock: TopicLockSnapshot | null
   /** Текущ mute snapshot за viewer-а В активната тема — обновен от realtime topic_mute_state_changed push (target-only). null = не е muted (или все още не е известно). */
   activeTopicViewerMute: TopicMuteSnapshot | null
+  /** Popup за активен section-wide mute (заменя стария постоянен inline композер текст) — виж evaluateTopicsSectionMutePopup/acknowledgeTopicsSectionMutePopup. Acknowledgement tracking-ът е чист closure-local, не е част от state-а (не се нуждае render layer-ът от него). */
+  topicsSectionMutePopupOpen: boolean
   /** Discriminated popup state за lock/mute/unmute action — избор на duration + reason + потвърждение, огледално на subadminActionConfirm модела. 'unmute' е прост confirm (без duration/reason), отворен САМО след lazy-fetch потвърди active mute (виж openTopicMuteMenuForAuthor). */
   topicModerationActionPopup:
     | { kind: 'lock'; topicId: string; topicTitle: string }
@@ -1539,6 +1541,7 @@ function createInitialState(): InternalLobbyFlowState {
     topicsDirectorySubscribed: false,
     activeTopicLock: null,
     activeTopicViewerMute: null,
+    topicsSectionMutePopupOpen: false,
     topicModerationActionPopup: null,
     topicModerationActionDurationMs: null,
     topicModerationActionReason: '',
@@ -3478,6 +3481,7 @@ export function createLobbyFlowController(
       topicCreateTitleDraft: state.topicCreateTitleDraft,
       activeTopicLock: state.activeTopicLock,
       activeTopicViewerMute: state.activeTopicViewerMute,
+      topicsSectionMutePopupOpen: state.topicsSectionMutePopupOpen,
       topicModerationActionPopup: state.topicModerationActionPopup,
       topicModerationActionDurationMs: state.topicModerationActionDurationMs,
       topicModerationActionReason: state.topicModerationActionReason,
@@ -3809,6 +3813,10 @@ export function createLobbyFlowController(
       onTopicComposerNonVipTap: () => {
         handleTopicComposerNonVipTap()
       },
+      onTopicComposerMutedTap: () => {
+        openTopicsSectionMutePopupForAttempt()
+        render()
+      },
       onTopicComposerImageSelect: (topicId, file) => {
         selectTopicComposerImage(topicId, file)
       },
@@ -3844,6 +3852,14 @@ export function createLobbyFlowController(
       },
       onTopicMuteHistoryClose: () => {
         closeTopicMuteHistoryPopup()
+      },
+      onTopicsSectionMutePopupAcknowledge: () => {
+        acknowledgeTopicsSectionMutePopup()
+      },
+      onTopicsSectionMutePopupHistoryOpen: () => {
+        state.topicsSectionMutePopupOpen = false
+        resetActiveTopicsComposerDraft()
+        void openTopicMuteHistoryPopup()
       },
       onTopicMuteHistoryOpenForProfile: (targetProfileId) => {
         void openTopicMuteHistoryModeratorPopup(targetProfileId)
@@ -5636,6 +5652,7 @@ export function createLobbyFlowController(
 
   function updateTopicModerationActionDuration(durationMs: number): void {
     state.topicModerationActionDurationMs = durationMs
+    render()
   }
 
   function updateTopicModerationActionReason(reason: string): void {
@@ -7018,6 +7035,68 @@ export function createLobbyFlowController(
     return new Date(snapshot.mutedUntil).getTime() > Date.now()
   }
 
+  // Persistent inline композер текст/banner → popup (заменя стария постоянен
+  // червен текст под Topics composer-а И горния жълт banner). Acknowledgement
+  // tracking-ът е нарочно чист closure-local string (не state поле) — "не
+  // изграждай сложна persistence система само за acknowledgement" — пази
+  // КОЙ конкретен mute (по mutedUntil) вече е "Разбрах"-нат.
+  //
+  // ДВА отделни entry points, нарочно разделени (UX corrective fix):
+  //  - evaluateTopicsSectionMutePopup(): ack-gated, само за ПАСИВНИ пътища
+  //    (realtime topic_mute_state_changed push, докато потребителят не
+  //    взаимодейства активно с composer-а) — НЕ отваря повторно popup-а за
+  //    СЪЩИЯ вече потвърден mute при всеки generic render.
+  //  - openTopicsSectionMutePopupForAttempt(): БЕЗ ack-dedup, за ВСЕКИ
+  //    user-initiated опит (click/tap върху composer/send/image-picker) —
+  //    отваря popup-а безусловно, дори ако СЪЩИЯТ mute вече е бил "Разбрах"-
+  //    нат преди. Acknowledgement блокира само автоматичното повторно
+  //    отваряне, никога user-initiated опитите.
+  let topicsSectionMuteAcknowledgedMutedUntil: string | null = null
+
+  function evaluateTopicsSectionMutePopup(): void {
+    const snapshot = state.activeTopicViewerMute
+    const isActive = snapshot?.isMuted === true
+      && snapshot.mutedUntil !== null
+      && new Date(snapshot.mutedUntil).getTime() > Date.now()
+    if (!isActive) {
+      state.topicsSectionMutePopupOpen = false
+      return
+    }
+    if (snapshot!.mutedUntil !== topicsSectionMuteAcknowledgedMutedUntil) {
+      state.topicsSectionMutePopupOpen = true
+    }
+  }
+
+  function openTopicsSectionMutePopupForAttempt(): void {
+    if (!isLocallyKnownTopicsSectionMuted()) return
+    state.topicsSectionMutePopupOpen = true
+  }
+
+  // Composer draft/pending-image reset при "Разбрах" — потребителят не
+  // трябва да остане с "залепнал" незапазен draft, написан ПРЕДИ mute-а да е
+  // бил detect-нат (readonly/click-intercept пази от НОВО писане, но не
+  // изчиства текст, въведен по-рано). Идемпотентно/безопасно да се вика дори
+  // ако draft-ът вече е празен (напр. popup, отворен от passive realtime push).
+  // Общ reset helper — text draft + pending image/attachment (client state,
+  // не само DOM) за текущата активна Topics тема. Reuse-ван от ВСЕКИ изход
+  // от mute popup-а към друго действие ("Разбрах" И "История на
+  // ограниченията") — потребител с "залепнал" muted draft не трябва да го
+  // вижда обратно след връщане от историята. Идемпотентно/безопасно дори
+  // при вече празен draft.
+  function resetActiveTopicsComposerDraft(): void {
+    const topicId = state.activeTopicId
+    if (topicId === null) return
+    state.topicComposerDraftByTopicId[topicId] = ''
+    clearTopicComposerPendingImage(topicId)
+  }
+
+  function acknowledgeTopicsSectionMutePopup(): void {
+    topicsSectionMuteAcknowledgedMutedUntil = state.activeTopicViewerMute?.mutedUntil ?? null
+    state.topicsSectionMutePopupOpen = false
+    resetActiveTopicsComposerDraft()
+    render()
+  }
+
   function submitTopicComposerMessage(topicId: string): void {
     const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
     const trimmed = draft.trim()
@@ -7037,11 +7116,12 @@ export function createLobbyFlowController(
 
     // GLOBAL TOPICS MUTE брифа §11 — instant UX denial само при доказано
     // активен local snapshot, server остава authority при следващ опит.
+    // Опит за публикуване (SEND click) при активен mute показва popup-а
+    // БЕЗУСЛОВНО (не изпраща съдържание, не задава отделен inline композер
+    // текст) — user-initiated опит, значи openTopicsSectionMutePopupForAttempt
+    // (без ack-dedup), НЕ evaluateTopicsSectionMutePopup.
     if (isLocallyKnownTopicsSectionMuted()) {
-      state.topicComposerErrorTextByTopicId[topicId] = formatTopicsSectionMuteErrorText(
-        state.activeTopicViewerMute?.mutedUntil ?? null,
-        state.activeTopicViewerMute?.reason ?? null,
-      )
+      openTopicsSectionMutePopupForAttempt()
       render()
       return
     }
@@ -12541,10 +12621,11 @@ export function createLobbyFlowController(
       if (pendingTopicId !== undefined) {
         state.topicComposerPendingRequestIdByTopicId[pendingTopicId] = null
         // Draft НЕ се чисти при грешка — потребителят не губи текста (Етап 2 корекция т.4).
-        // GLOBAL TOPICS MUTE брифа §10 — exact сървърен mutedUntil/reason.
-        state.topicComposerErrorTextByTopicId[pendingTopicId] = message.code === 'topic_muted'
-          ? formatTopicsSectionMuteErrorText(message.mutedUntil, message.reason)
-          : message.message
+        // topic_muted вече НЕ пише в inline композер текста — показва се
+        // popup-ът вместо това (виж evaluateTopicsSectionMutePopup по-долу).
+        if (message.code !== 'topic_muted') {
+          state.topicComposerErrorTextByTopicId[pendingTopicId] = message.message
+        }
       }
 
       if (message.code === 'vip_required') {
@@ -12558,14 +12639,17 @@ export function createLobbyFlowController(
         state.topicsVipPopupOpen = true
       }
 
-      // Пропуснат mute realtime push (напр. mute-нат докато composer-ът е
+      // Пропуснат mute realtime push (напр. mute-нат докато композер-ът е
       // бил отворен, но преди target-only WS push-а да пристигне) — send
-      // опитът самия открива restriction-a. Обновяваме banner state-а
-      // веднага от error response-а, не чакаме отделен push. GLOBAL TOPICS
-      // MUTE брифа §9: state-ът е global — важи независимо от активната
-      // тема, значи НЕ е условен на message.topicId === state.activeTopicId.
+      // опитът самия открива restriction-a. Обновяваме state-а веднага от
+      // error response-а, не чакаме отделен push. GLOBAL TOPICS MUTE брифа
+      // §9: state-ът е global — важи независимо от активната тема, значи НЕ
+      // е условен на message.topicId === state.activeTopicId. Директен
+      // резултат от user SEND click → force-open (без ack-dedup), огледално
+      // на client-side pre-check-а в submitTopicComposerMessage.
       if (message.code === 'topic_muted') {
         state.activeTopicViewerMute = { isMuted: true, mutedUntil: message.mutedUntil ?? null, mutedByAccountId: null, reason: message.reason ?? null }
+        openTopicsSectionMutePopupForAttempt()
       }
 
       render()
@@ -12780,6 +12864,10 @@ export function createLobbyFlowController(
       // отворен таб на същия потребител получава own connection push и
       // прилага state-а идентично).
       state.activeTopicViewerMute = { isMuted: message.isMuted, mutedUntil: message.mutedUntil, mutedByAccountId: null, reason: message.reason }
+      // Нов realtime mute докато потребителят е в "Теми" → popup веднага
+      // (unmute: isMuted=false → evaluateTopicsSectionMutePopup затваря
+      // popup-а, ако е бил отворен).
+      evaluateTopicsSectionMutePopup()
       render()
       return true
     }

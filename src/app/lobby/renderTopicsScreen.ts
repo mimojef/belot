@@ -678,7 +678,7 @@ function renderLafcheMuteButton(state: LobbyScreenState, senderProfileId: string
       data-topic-mute-toggle-name="${escapeHtml(senderDisplayName)}"
       data-topic-mute-toggle-message-id="${escapeHtml(messageId)}"
       data-topic-mute-toggle-source-kind="lafche_post"
-      class="topic-message-action-btn"
+      class="topic-message-action-btn lafche-post-action-btn"
       title="Модерация"
       aria-label="Модерация на ${escapeHtml(senderDisplayName)}"
       ${isMuteStatusLoading ? 'disabled' : ''}
@@ -686,35 +686,59 @@ function renderLafcheMuteButton(state: LobbyScreenState, senderProfileId: string
   `
 }
 
-// "Лафче" delete бутон — moderator (isLafcheModerator, 3 роли) ИЛИ author
-// на самия пост. За разлика от renderTopicMessageDeleteButton (normal
-// Topics), няма "blocked own root with replies" клон — Лафче постовете
-// никога нямат replies (reply functionality не е активирано за
-// topic-lafche, "Лафче" брифа §4), значи авторът винаги може да трие
-// собствения си пост.
-function renderLafcheDeleteButton(state: LobbyScreenState, messageId: string, senderProfileId: string): string {
+// "Лафче" delete бутон — САМО moderator (isLafcheModerator, 3 роли:
+// admin/pika_team/top_chat_admin). За разлика от normal Topics own-delete,
+// авторството НЕ дава delete право тук — обикновен потребител никога не
+// вижда кошче върху собствен Lafche пост (server-side guard-нато огледално
+// в handleTopicMessageDeleteRequest/index.ts).
+function renderLafcheDeleteButton(state: LobbyScreenState, messageId: string): string {
   const isModerator = state.isLafcheModerator
-  const isOwner = state.profile.profileId !== null && senderProfileId === state.profile.profileId
-  if (!isModerator && !isOwner) return ''
+  if (!isModerator) return ''
   return `
     <button
       type="button"
       data-topic-message-delete="${escapeHtml(messageId)}"
       data-topic-message-delete-is-root="1"
       data-topic-message-delete-is-moderator-action="${isModerator ? '1' : '0'}"
-      class="topic-message-action-btn"
+      class="topic-message-action-btn lafche-post-action-btn"
       aria-label="Изтрий"
       data-tooltip="Изтрий"
     >${renderTopicActionIcon('delete')}</button>
   `
 }
 
+// "Лафче" пост timestamp — same-day: точен час ("13:59ч."); предишен
+// календарен ден: relative ден-брой ("преди 1д.", "преди 2д." ...).
+// Календарен ден = local/client time (Date.get{Full}Year/Month/Date), НЕ
+// 24-часов diff — пост от вчера 23:59 винаги е "преди 1д.", дори ако е
+// минал по-малко от час назад спрямо днес 00:xx.
+function formatLafchePostTime(value: string, nowMs = Date.now()): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const now = new Date(nowMs)
+  const isSameCalendarDay = date.getFullYear() === now.getFullYear()
+    && date.getMonth() === now.getMonth()
+    && date.getDate() === now.getDate()
+  if (isSameCalendarDay) {
+    const hours = String(date.getHours()).padStart(2, '0')
+    const minutes = String(date.getMinutes()).padStart(2, '0')
+    return `${hours}:${minutes}ч.`
+  }
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime()
+  const startOfPostDay = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
+  const dayDiff = Math.max(1, Math.round((startOfToday - startOfPostDay) / 86_400_000))
+  return `преди ${dayDiff}д.`
+}
+
 // "Лафче" пост — плосък елемент в общ поток (Лафче брифа §4): avatar+име+
-// съдържание+attachment, БЕЗ timestamp/"Преди ..."/бутон "Лично"/reply
-// button/reply counter/replies/thread. Разделителна линия между постовете
-// е CSS sibling selector (виж .lafche-post + .lafche-post::before по-долу,
-// mirror на established [data-topic-reply] + [data-topic-reply] pattern-а),
-// не border на самия елемент — избягва двойна линия при hover/last-child.
+// timestamp+moderation controls на ЕДИН author/meta ред (mirror на
+// .topic-message-author-meta pattern-а от renderTopicAuthorBlock, за normal
+// Topics), после съдържание+attachment. БЕЗ "Преди ..." activity row/бутон
+// "Лично"/reply button/reply counter/replies/thread. Разделителна линия
+// между постовете е CSS sibling selector (виж .lafche-post + .lafche-post::before
+// по-долу, mirror на established [data-topic-reply] + [data-topic-reply]
+// pattern-а), не border на самия елемент — избягва двойна линия при
+// hover/last-child.
 function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
   return `
@@ -728,21 +752,22 @@ function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSn
           aria-label="Профил на ${escapeHtml(message.senderDisplayName)}"
         >${renderMessageAvatar(message.senderDisplayName, message.senderAvatarUrl)}</button>
         <div style="flex:1;min-width:0;">
-          <button
-            type="button"
-            data-topic-message-author="${escapeHtml(message.senderProfileId)}"
-            data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
-          >${escapeHtml(message.senderDisplayName)}</button>
+          <div class="topic-message-author-meta">
+            <button
+              type="button"
+              data-topic-message-author="${escapeHtml(message.senderProfileId)}"
+              data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
+              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            >${escapeHtml(message.senderDisplayName)}</button>
+            <span style="font-size:12px;font-weight:400;color:rgba(248,250,252,0.42);white-space:nowrap;">${escapeHtml(formatLafchePostTime(message.createdAt))}</span>
+            ${renderLafcheMuteButton(state, message.senderProfileId, message.senderDisplayName, message.messageId)}
+            ${renderLafcheDeleteButton(state, message.messageId)}
+          </div>
           ${isEditing
             ? renderTopicMessageEditForm(state, message.messageId)
             : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
           }
           ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
-          <div style="margin-top:4px;margin-left:-9px;display:flex;align-items:center;gap:6px;">
-            ${renderLafcheMuteButton(state, message.senderProfileId, message.senderDisplayName, message.messageId)}
-            ${renderLafcheDeleteButton(state, message.messageId, message.senderProfileId)}
-          </div>
         </div>
       </div>
     </div>
@@ -990,6 +1015,23 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
       .lafche-post + .lafche-post {
         border-top: 1px solid rgba(255,255,255,0.12);
       }
+      /* "Лафче" author/meta ред moderation икони (кошче/зъбно колелце) —
+         визуално по-компактни от normal Topics действия (.topic-message-action-btn
+         базата остава непроменена, споделена с normal Topics), защото тук
+         седят на СЪЩИЯ ред с името и часа, не в собствен ред отдолу.
+         Wrapper padding и icon размер намалени заедно, clickable area остава
+         достатъчна за клик. */
+      .lafche-post-action-btn {
+        padding: 6px;
+      }
+      .lafche-post-action-btn .topic-message-action-icon {
+        width: 16px;
+        height: 16px;
+      }
+      .lafche-post-action-btn .topic-message-action-icon svg {
+        width: 16px;
+        height: 16px;
+      }
     </style>
     <div data-topic-messages-scroll="1" style="flex:1;min-height:0;display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;">
       ${loadOlderIndicator}
@@ -1077,6 +1119,14 @@ function renderTopicThreadView(state: LobbyScreenState): string {
 //   (preventDefault ПРЕДИ focus/mobile keyboard) вместо нормален focus.
 function renderTopicsComposer(state: LobbyScreenState, topicId: string): string {
   const isVip = state.topicsVipGate?.isActive ?? false
+  // Active section-wide "Теми" mute — mirror на isLocallyKnownTopicsSectionMuted
+  // (createLobbyFlowController.ts), тук чисто за render decision (readonly +
+  // click-intercept маркер), не за authority. Приоритет пред VIP-lock-а: ако
+  // потребителят е и non-VIP, И muted, показваме mute popup-а (по-специфично
+  // ограничение), не VIP popup-а.
+  const isMuted = state.activeTopicViewerMute?.isMuted === true
+    && state.activeTopicViewerMute.mutedUntil !== null
+    && new Date(state.activeTopicViewerMute.mutedUntil).getTime() > Date.now()
   const draft = state.topicComposerDraftByTopicId[topicId] ?? ''
   const isSending = Boolean(state.topicComposerPendingRequestIdByTopicId[topicId])
   const errorText = state.topicComposerErrorTextByTopicId[topicId] ?? null
@@ -1100,7 +1150,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
     <form
       data-topics-composer-form="1"
       data-topics-composer-topic-id="${escapeHtml(topicId)}"
-      ${isVip ? '' : 'data-topics-composer-vip-locked="1"'}
+      ${isMuted ? 'data-topics-composer-mute-locked="1"' : (isVip ? '' : 'data-topics-composer-vip-locked="1"')}
       style="
         flex:0 0 auto;
         display:flex;
@@ -1126,7 +1176,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
         rows="1"
         maxlength="2000"
         placeholder="Напиши съобщение..."
-        ${isVip ? '' : 'readonly'}
+        ${(isVip && !isMuted) ? '' : 'readonly'}
         style="
           flex:1;
           min-width:0;
@@ -1397,6 +1447,41 @@ function renderTopicMuteHistoryPopup(state: LobbyScreenState): string {
   `
 }
 
+// Popup за активен section-wide "Теми" mute — заменя стария постоянен inline
+// композер текст под composer-а. Показва се controller-driven (виж
+// evaluateTopicsSectionMutePopup в createLobbyFlowController.ts), НЕ на
+// всеки render — тук само рендерираме текущия state.activeTopicViewerMute,
+// не решаваме кога да се отвори. Reuse-ва СЪЩОТО user-facing "История на
+// ограниченията" действие (onTopicsSectionMutePopupHistoryOpen делегира
+// директно към openTopicMuteHistoryPopup), но с отделен data-attribute
+// (data-topics-section-mute-popup-history), за да не колидира с бутона
+// "Виж историята" в горния banner (renderTopicModerationBanners), който
+// остава непроменен и може да е в DOM-а едновременно.
+function renderTopicsSectionMutePopup(state: LobbyScreenState): string {
+  if (!state.topicsSectionMutePopupOpen) return ''
+  const snapshot = state.activeTopicViewerMute
+  if (!snapshot?.isMuted || !snapshot.mutedUntil) return ''
+
+  return `
+    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
+        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:12px;">Временно ограничение в „Теми“</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.82);line-height:1.5;margin-bottom:${snapshot.reason ? '10' : '18'}px;">
+          Временно сте заглушени в секция „Теми“ и не можете да публикувате до ${escapeHtml(formatModerationExpiry(snapshot.mutedUntil))}.
+        </div>
+        ${snapshot.reason ? `
+        <div style="font-size:13px;color:rgba(255,255,255,0.68);line-height:1.4;margin-bottom:18px;">
+          <span style="font-weight:800;color:rgba(255,255,255,0.85);">Причина:</span> ${escapeHtml(snapshot.reason)}
+        </div>` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-topics-section-mute-popup-history="1" style="flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);border-radius:10px;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;cursor:pointer;">История на ограниченията</button>
+          <button type="button" data-topics-section-mute-popup-ack="1" style="flex:1;padding:11px;border:0;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);border-radius:10px;color:#101010;font-size:13px;font-weight:900;cursor:pointer;">Разбрах</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 /**
  * Internal/moderator "история на профила" popup (mute-evidence брифа §7) —
  * отваря се от "История на ограниченията на този профил" линка в mute/
@@ -1642,6 +1727,10 @@ function renderTopicReportSuccessToast(state: LobbyScreenState): string {
 // popup-ите за duration/reason/confirm се отварят при click.
 function renderTopicHeaderModerationControls(state: LobbyScreenState, activeTopic: NonNullable<LobbyScreenState['topics']>[number]): string {
   if (activeTopic.isGeneral) return ''
+  // "Лафче" е fixed system тема (виж LAFCHE_TOPIC_ID) — не може да се
+  // заключва/отключва/изтрива, огледално на isGeneral по-горе. UI
+  // контролите просто не се рендират за нея.
+  if (activeTopic.topicId === LAFCHE_TOPIC_ID) return ''
 
   const isLocked = state.activeTopicLock?.isLocked ?? (activeTopic.status === 'locked')
   const buttons: string[] = []
@@ -1745,14 +1834,10 @@ function renderTopicModerationBanners(state: LobbyScreenState): string {
     `)
   }
 
-  if (state.activeTopicViewerMute?.isMuted && state.activeTopicViewerMute.mutedUntil) {
-    banners.push(`
-      <div style="padding:8px 12px;background:rgba(212,165,32,0.12);border-bottom:1px solid rgba(212,165,32,0.28);color:#fde68a;font-size:12px;font-weight:800;text-align:center;">
-        🔇 Заглушен сте в секция „Теми“ до ${escapeHtml(formatModerationExpiry(state.activeTopicViewerMute.mutedUntil))}${state.activeTopicViewerMute.reason ? ` — ${escapeHtml(state.activeTopicViewerMute.reason)}` : ''}
-        <button type="button" data-topic-mute-history-open="1" style="margin-left:8px;border:0;background:transparent;color:#fde68a;text-decoration:underline;font-size:12px;font-weight:800;cursor:pointer;padding:0;">Виж историята</button>
-      </div>
-    `)
-  }
+  // Active section-wide mute вече НЕ рендира отделен banner тук — заменено
+  // изцяло от renderTopicsSectionMutePopup + composer click-intercept
+  // (виж renderTopicsComposer/wiring-a в renderLobbyScreen.ts). Информацията
+  // (muted_until/reason/История) живее само в popup-а.
 
   return banners.join('')
 }
@@ -1821,9 +1906,14 @@ function renderTopicsHeader(state: LobbyScreenState): string {
   }
 
   return `
+    <style>
+      @media (max-width: 640px) {
+        [data-topics-list-title="1"] { display:none; }
+      }
+    </style>
     <div data-topics-header-row="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;">
       <div style="display:flex;align-items:center;gap:10px;min-width:0;">
-        <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
+        <h1 data-topics-list-title="1" style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
         ${activeTopic !== null ? renderTopicHeaderModerationControls(state, activeTopic) : ''}
       </div>
       <div data-topics-header-actions="1" style="display:flex;align-items:center;justify-content:flex-end;gap:8px;flex:0 0 auto;min-width:0;">
@@ -2017,6 +2107,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
     ${renderTopicsInfoToast(state)}
     ${renderTopicModerationActionPopup(state)}
     ${renderTopicMuteHistoryPopup(state)}
+    ${renderTopicsSectionMutePopup(state)}
     ${renderTopicMuteHistoryModeratorPopup(state)}
     ${renderTopicDeleteConfirmPopup(state)}
     ${renderTopicMessageDeleteConfirmPopup(state)}

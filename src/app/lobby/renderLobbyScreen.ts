@@ -398,6 +398,7 @@ export type LobbyScreenState = {
   // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
   activeTopicLock: TopicLockSnapshot | null
   activeTopicViewerMute: TopicMuteSnapshot | null
+  topicsSectionMutePopupOpen: boolean
   topicModerationActionPopup:
     | { kind: 'lock'; topicId: string; topicTitle: string }
     | {
@@ -864,6 +865,7 @@ export type RenderLobbyScreenOptions = {
   onTopicComposerInput: (topicId: string, value: string) => void
   onTopicComposerSubmit: (topicId: string) => void
   onTopicComposerNonVipTap: () => void
+  onTopicComposerMutedTap: () => void
   onTopicComposerImageSelect: (topicId: string, file: File) => void
   onTopicComposerImageRemove: (topicId: string) => void
   onTopicRepliesLoadMore: (rootMessageId: string) => void
@@ -885,6 +887,8 @@ export type RenderLobbyScreenOptions = {
   // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
   onTopicMuteHistoryOpen: () => void
   onTopicMuteHistoryClose: () => void
+  onTopicsSectionMutePopupAcknowledge: () => void
+  onTopicsSectionMutePopupHistoryOpen: () => void
   onTopicMuteHistoryOpenForProfile: (profileId: string) => void
   onTopicMuteHistoryCloseForProfile: () => void
   onTopicLockClick: (topicId: string, topicTitle: string) => void
@@ -10718,6 +10722,7 @@ export function renderLobbyScreen(
 
     if (topicsComposerForm) {
       const topicId = topicsComposerForm.dataset.topicsComposerTopicId ?? ''
+      const isMuted = topicsComposerForm.dataset.topicsComposerMuteLocked === '1'
       const isVipLocked = topicsComposerForm.dataset.topicsComposerVipLocked === '1'
 
       topicsComposerForm.addEventListener('submit', (event) => {
@@ -10725,9 +10730,9 @@ export function renderLobbyScreen(
         if (topicId) options.onTopicComposerSubmit(topicId)
       })
 
-      if (isVipLocked) {
-        // Non-VIP textarea — ДВА отделни handler-а с различна цел, нарочно
-        // разделени (regression fix, втора итерация):
+      if (isMuted || isVipLocked) {
+        // Non-VIP/muted textarea — ДВА отделни handler-а с различна цел,
+        // нарочно разделени (regression fix, втора итерация):
         //
         // 1) pointerdown: САМО preventDefault(), НИКАКВО popup тук. Focus (и
         //    оттам mobile keyboard) е browser-native default action на
@@ -10736,8 +10741,9 @@ export function renderLobbyScreen(
         //    focus вече ще се е случил преди click-ът изобщо да стигне (click
         //    винаги идва СЛЕД mousedown/mouseup в native event order), значи
         //    твърде късно за preventDefault() да го отмени.
-        // 2) click: отваря VIP popup-а. Изчаква пълен press-release цикъл
-        //    върху textarea-та, преди popup-ът изобщо да се появи — няма tap
+        // 2) click: отваря popup-а (mute — приоритет пред VIP, ако важат и
+        //    двете; иначе VIP). Изчаква пълен press-release цикъл върху
+        //    textarea-та, преди popup-ът изобщо да се появи — няма tap
         //    "остатък", който да падне върху вече отворения backdrop
         //    (position:fixed;inset:0) и да го затвори веднага (първата
         //    итерация на този fix направи точно тази грешка — отваряше
@@ -10745,20 +10751,25 @@ export function renderLobbyScreen(
         //
         // Резултат: readonly textarea никога не получава реален edit focus/
         // mobile keyboard (pointerdown продължава да го спира), а popup-ът
-        // отваря се едва след завършен tap, без self-closing race.
+        // отваря се едва след завършен tap, без self-closing race. За mute:
+        // popup-ът се отваря БЕЗ acknowledgement-dedup — всеки нов tap/click
+        // отваря го отново, дори след предишно "Разбрах" (виж
+        // onTopicComposerMutedTap/openTopicsSectionMutePopupForAttempt).
         topicsComposerTextEl?.addEventListener('pointerdown', (event) => {
           event.preventDefault()
         })
         topicsComposerTextEl?.addEventListener('click', (event) => {
           event.preventDefault()
-          options.onTopicComposerNonVipTap()
+          if (isMuted) options.onTopicComposerMutedTap()
+          else options.onTopicComposerNonVipTap()
         })
         // Send бутонът няма focus/keyboard side effect за preempt-ване
         // (не е editable input) — само click е нужен, mirror на established
         // image-pick бутона по-долу.
         topicsComposerSendBtn?.addEventListener('click', (event) => {
           event.preventDefault()
-          options.onTopicComposerNonVipTap()
+          if (isMuted) options.onTopicComposerMutedTap()
+          else options.onTopicComposerNonVipTap()
         })
       } else {
         submitTextareaOnEnter(topicsComposerTextEl)
@@ -10770,8 +10781,8 @@ export function renderLobbyScreen(
         keepComposerFocusOnPointerSubmit(topicsComposerSendBtn)
       }
 
-      // Image picker (Attachment feature) — non-VIP клик отваря СЪЩИЯ VIP gate
-      // като текстовото поле, БЕЗ да отваря file picker преди VIP check
+      // Image picker (Attachment feature) — non-VIP/muted клик отваря СЪЩИЯ
+      // gate като текстовото поле, БЕЗ да отваря file picker преди проверка
       // (Attachment брифа т.3 — "server-side authorization е задължителен
       // security boundary", но UI-то също не трябва да покаже file picker-а).
       const imagePickBtn = root.querySelector<HTMLButtonElement>(`[data-topics-image-pick="${cssEscape(topicId)}"]`)
@@ -10779,6 +10790,10 @@ export function renderLobbyScreen(
       const imageRemoveBtn = root.querySelector<HTMLButtonElement>(`[data-topics-image-remove="${cssEscape(topicId)}"]`)
 
       imagePickBtn?.addEventListener('click', () => {
+        if (isMuted) {
+          options.onTopicComposerMutedTap()
+          return
+        }
         if (isVipLocked) {
           options.onTopicComposerNonVipTap()
           return
@@ -11071,6 +11086,14 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-topic-mute-history-open="1"]')?.addEventListener('click', () => {
     options.onTopicMuteHistoryOpen()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topics-section-mute-popup-ack="1"]')?.addEventListener('click', () => {
+    options.onTopicsSectionMutePopupAcknowledge()
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-topics-section-mute-popup-history="1"]')?.addEventListener('click', () => {
+    options.onTopicsSectionMutePopupHistoryOpen()
   })
 
   root.querySelector<HTMLButtonElement>('[data-topic-mute-history-close="1"]')?.addEventListener('click', () => {
