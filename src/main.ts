@@ -621,7 +621,9 @@ async function loadAuthSession(): Promise<void> {
     syncLobbyWithAuthSession()
     void syncLobbyTopicsDirectoryMetadata()
     lobby.refreshDailyRewardsStatus()
-    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) lobby.render()
+    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
+      lobby.render()
+    }
   }
 
   try {
@@ -651,7 +653,9 @@ async function loadAuthSession(): Promise<void> {
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
     await syncLobbyTopicsDirectoryMetadata()
-    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) lobby.render()
+    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
+      lobby.render()
+    }
   } catch {
     if (currentAuthSession === null) currentAuthSession = null
   }

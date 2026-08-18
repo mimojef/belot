@@ -91,7 +91,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -4131,7 +4131,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
             position:relative;z-index:3;
           ">
             Меню
-            ${mobileMenuBadge !== null ? `<span data-mobile-menu-total-badge="1" style="position:absolute;right:-6px;top:-6px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:2px solid #050505;font-size:10px;font-weight:900;line-height:1;display:flex;align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${escapeHtml(mobileMenuBadge)}</span>` : ''}
+            <span data-mobile-menu-total-badge="1" style="position:absolute;right:-6px;top:-6px;min-width:18px;height:18px;border-radius:999px;background:#ef4444;color:#fff;border:2px solid #050505;font-size:10px;font-weight:900;line-height:1;display:${mobileMenuBadge !== null ? 'flex' : 'none'};align-items:center;justify-content:center;padding:0 5px;box-sizing:border-box;">${mobileMenuBadge !== null ? escapeHtml(mobileMenuBadge) : ''}</span>
           </summary>
           <button type="button" data-lobby-mobile-menu-backdrop="1" aria-label="Затвори менюто" style="
             position:fixed;inset:0;z-index:1;border:0;background:rgba(0,0,0,0.01);
@@ -4222,7 +4222,7 @@ function mobileMenuSvgItemContent(
   return `
     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="${stroke}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block;flex:0 0 auto;">${path}</svg>
     <span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(label)}</span>
-    ${badge !== null ? `<span data-mobile-menu-item-badge="${icon}" aria-hidden="true" style="margin-left:auto;min-width:22px;height:20px;border-radius:999px;background:#ef4444;color:#fff;border:1px solid rgba(5,5,5,0.96);font-size:11px;font-weight:900;line-height:1;display:inline-flex;align-items:center;justify-content:center;padding:0 6px;box-sizing:border-box;flex:0 0 auto;">${escapeHtml(badge)}</span>` : ''}
+    <span data-mobile-menu-item-badge="${icon}" aria-hidden="true" style="margin-left:auto;min-width:22px;height:20px;border-radius:999px;background:#ef4444;color:#fff;border:1px solid rgba(5,5,5,0.96);font-size:11px;font-weight:900;line-height:1;display:inline-flex;visibility:${badge !== null ? 'visible' : 'hidden'};align-items:center;justify-content:center;padding:0 6px;box-sizing:border-box;flex:0 0 auto;">${badge !== null ? escapeHtml(badge) : ''}</span>
   `
 }
 
@@ -9849,6 +9849,497 @@ function shouldHandleSpaLinkClick(event: MouseEvent): boolean {
   )
 }
 
+// Тесен callback subset за per-message wiring — targeted append пътя
+// (appendTopicMessageNode в createLobbyFlowController.ts) не build-ва
+// целия масивен RenderLobbyScreenOptions обект (скъпо, дублиращо build
+// логиката на renderLobby()), само тия конкретни callback-и, all от които
+// вече delegират 1:1 на съществуващи controller функции.
+export type TopicMessageNodeCallbacks = Pick<
+  RenderLobbyScreenOptions,
+  | 'onTopicMessageAuthorClick'
+  | 'onTopicMessagePersonalClick'
+  | 'onTopicMessageLikeToggleClick'
+  | 'onTopicReplyClick'
+  | 'onTopicThreadOpen'
+  | 'onTopicMuteClick'
+  | 'onTopicMessageDeleteClick'
+  | 'onTopicMessageEditClick'
+  | 'onTopicMessageEditSubmit'
+  | 'onTopicMessageEditInput'
+  | 'onTopicMessageEditCancel'
+  | 'onTopicsInfoToast'
+>
+
+// Reusable per-message event wiring — извиква се както от пълния render цикъл
+// (веднъж за всеки [data-topic-message] node в root, виж loop-а по-долу в
+// renderLobbyScreen), така и от targeted single-node append пътя (виж
+// appendTopicMessageNode в createLobbyFlowController.ts), за да не се дублира
+// wiring логиката на две места. querySelectorAll-ите тук са scope-нати ВЪТРЕ
+// в messageNode, не в целия root — с targeted append не искаме да re-wire-ваме
+// вече-mounted nodes (double-listener risk), само новия node.
+function wireTopicMessageNode(
+  root: HTMLElement,
+  state: LobbyScreenState,
+  options: TopicMessageNodeCallbacks,
+  messageNode: HTMLElement,
+): void {
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-author]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.topicMessageAuthor ?? ''
+      const displayName = button.dataset.topicMessageAuthorName ?? ''
+      if (profileId) options.onTopicMessageAuthorClick(profileId, displayName)
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-personal]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const profileId = button.dataset.topicMessagePersonal ?? ''
+      const displayName = button.dataset.topicMessagePersonalName ?? ''
+      if (profileId) options.onTopicMessagePersonalClick(profileId, displayName)
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-like]').forEach((btn) => {
+    const messageId = btn.dataset.topicMessageLike ?? ''
+    if (!messageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicMessageLikeToggleClick(messageId)
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-reply]').forEach((btn) => {
+    const rootMessageId = btn.dataset.topicMessageReply ?? ''
+    if (!rootMessageId) return
+    btn.addEventListener('click', () => {
+      const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(rootMessageId)}"]`)
+      const scrollAnchor = anchorEl
+        ? { messageId: rootMessageId, top: anchorEl.getBoundingClientRect().top }
+        : null
+      options.onTopicReplyClick(rootMessageId, scrollAnchor)
+    })
+  })
+
+  const topicCardInteractiveSelector = [
+    'button',
+    'a',
+    'input',
+    'textarea',
+    'select',
+    'label',
+    '[data-image-viewer-open="1"]',
+  ].join(',')
+  // FIX (self-match regression, виж git show d593ebc за pre-refactor
+  // поведение): data-topic-card-open е атрибут на САМИЯ messageNode (root
+  // card wrapper, виж renderTopicMessageRow: data-topic-message И
+  // data-topic-card-open са на един и същ <div>), не descendant.
+  // messageNode.querySelectorAll('[data-topic-card-open]') никога не матчва
+  // self — стария код (пре-consolidation) търсеше от root.querySelectorAll,
+  // където root е целия lobby container (не картата), значи descendant
+  // match-ът работеше правилно там. Тук messageNode Е картата, затова explicit
+  // self-check вместо querySelectorAll.
+  const card = messageNode.hasAttribute('data-topic-card-open') ? messageNode : null
+  if (card !== null) {
+    const rootMessageId = card.dataset.topicCardOpen ?? ''
+    if (rootMessageId) {
+      const openCard = () => {
+        const scrollAnchor = { messageId: rootMessageId, top: card.getBoundingClientRect().top }
+        options.onTopicThreadOpen(rootMessageId, scrollAnchor)
+      }
+      card.addEventListener('click', (event) => {
+        const target = event.target as HTMLElement | null
+        if (target?.closest(topicCardInteractiveSelector)) {
+          return
+        }
+        openCard()
+      })
+      card.addEventListener('keydown', (event) => {
+        if (event.target !== card) return
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        openCard()
+      })
+    }
+  }
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-mute-toggle]').forEach((btn) => {
+    const targetProfileId = btn.dataset.topicMuteToggle ?? ''
+    const targetDisplayName = btn.dataset.topicMuteToggleName ?? ''
+    const sourceMessageId = btn.dataset.topicMuteToggleMessageId || null
+    const sourceKind = (btn.dataset.topicMuteToggleSourceKind as 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified' | undefined) ?? 'unspecified'
+    if (!targetProfileId) return
+    btn.addEventListener('click', () => {
+      const topicId = state.activeTopicId
+      if (!topicId) return
+      options.onTopicMuteClick(topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind)
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-delete]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.topicMessageDeleteBlocked === '1') {
+        const reason = btn.dataset.topicMessageDeleteDeniedReason?.trim() ?? ''
+        btn.focus()
+        btn.dataset.tooltipOpen = '1'
+        if (reason.length > 0) options.onTopicsInfoToast(reason)
+        window.setTimeout(() => {
+          delete btn.dataset.tooltipOpen
+        }, 1800)
+        return
+      }
+      const messageId = btn.dataset.topicMessageDelete?.trim() ?? ''
+      const isRoot = btn.dataset.topicMessageDeleteIsRoot === '1'
+      const isModeratorAction = btn.dataset.topicMessageDeleteIsModeratorAction === '1'
+      if (messageId.length > 0 && state.activeTopicId) {
+        options.onTopicMessageDeleteClick(state.activeTopicId, messageId, isRoot, isModeratorAction)
+      }
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      if (btn.dataset.topicMessageEditBlocked === '1') {
+        const reason = btn.dataset.topicMessageEditDeniedReason?.trim() ?? ''
+        btn.focus()
+        btn.dataset.tooltipOpen = '1'
+        if (reason.length > 0) options.onTopicsInfoToast(reason)
+        window.setTimeout(() => {
+          delete btn.dataset.tooltipOpen
+        }, 1800)
+        return
+      }
+      const messageId = btn.dataset.topicMessageEdit?.trim() ?? ''
+      if (messageId.length > 0 && state.activeTopicId) {
+        options.onTopicMessageEditClick(state.activeTopicId, messageId)
+      }
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLFormElement>('[data-topic-message-edit-form]').forEach((form) => {
+    const messageId = form.dataset.topicMessageEditForm ?? ''
+    if (!messageId) return
+    form.addEventListener('submit', (event) => {
+      event.preventDefault()
+      options.onTopicMessageEditSubmit(messageId)
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLTextAreaElement>('[data-topic-message-edit-text]').forEach((textarea) => {
+    const messageId = textarea.dataset.topicMessageEditText ?? ''
+    if (!messageId) return
+    textarea.addEventListener('input', (event) => {
+      options.onTopicMessageEditInput(messageId, (event.currentTarget as HTMLTextAreaElement).value)
+    })
+  })
+
+  messageNode.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit-cancel]').forEach((btn) => {
+    const messageId = btn.dataset.topicMessageEditCancel ?? ''
+    if (!messageId) return
+    btn.addEventListener('click', () => {
+      options.onTopicMessageEditCancel(messageId)
+    })
+  })
+}
+
+/**
+ * Targeted patch за Topics/Lafche/mobile-menu unread badge-ове
+ * (topic_unread_count_changed / topic_seen_updated / thread variants push) —
+ * update-ва САМО textContent на вече-mounted badge <span> nodes, без да
+ * пипа родителския DOM (mobile menu <details> subtree остава напълно
+ * непокътнат, production flicker fix — виж call site в
+ * createLobbyFlowController.ts).
+ *
+ * Badge-овете се рендират conditionally (span присъства само при count > 0,
+ * виж generalUnreadBadge/lafcheHasUnread/mobileMenuBadge в
+ * renderTopicsScreen.ts/renderLobbyScreen.ts) — structural presence/absence
+ * промяна (0→>0 create, >0→0 remove) НЕ е безопасна за in-place text patch,
+ * затова връща false в тези случаи и caller-ът трябва да fallback-не към
+ * scheduleRender()/render().
+ *
+ * Връща true само ако ВСИЧКИ badge-и, засегнати от тази промяна, са могли
+ * да се patch-нат in-place (presence непроменено, само число/text различно).
+ */
+export function refreshTopicsUnreadDom(root: HTMLElement, state: LobbyScreenState): boolean {
+  let allPatchedSafely = true
+
+  // data-topics-general-badge и data-topics-lafche-badge са PERSISTENT nodes
+  // вече (Вариант A — display:none/inline-flex toggle, mirror на
+  // established data-mobile-menu-total-badge pattern по-долу) — само видими
+  // докато state.view === 'topics' (renderTopicsScreen mount), затова
+  // липсата им на друг екран е ОЧАКВАНА (viewNotTopics), не structural
+  // fallback trigger. Presence/absence на самия badge (0↔>0 count) вече не е
+  // structural промяна — display+textContent patch достатъчен.
+  const isOnTopicsScreen = root.querySelector('[data-topics-screen="1"]') !== null
+
+  const generalUnreadTotal = getTopicsMessagesUnreadRaw(state)
+  const generalBadgeText = formatTopicUnreadBadgeCount(generalUnreadTotal)
+  const generalBadgeEl = root.querySelector<HTMLElement>('[data-topics-general-badge="1"]')
+  if (generalBadgeEl !== null) {
+    generalBadgeEl.style.display = generalBadgeText !== null ? 'inline-flex' : 'none'
+    generalBadgeEl.textContent = generalBadgeText ?? ''
+  } else if (isOnTopicsScreen) {
+    allPatchedSafely = false
+  }
+
+  const lafcheHasUnread = getLafcheUnreadContribution(state) > 0
+  const lafcheBadgeEl = root.querySelector<HTMLElement>('[data-topics-lafche-badge="1"]')
+  if (lafcheBadgeEl !== null) {
+    lafcheBadgeEl.style.display = lafcheHasUnread ? 'inline-block' : 'none'
+  } else if (isOnTopicsScreen) {
+    allPatchedSafely = false
+  }
+
+  // data-mobile-menu-total-badge е PERSISTENT node (винаги в DOM, display:
+  // none/flex toggle — mirror на established data-support-unread-badge
+  // desktop pattern, виж renderMobileMenu) — presence/absence НЕ е structural
+  // промяна тук, само display+textContent patch (за разлика от general/lafche
+  // badge-овете по-горе, чиито node-ове остават conditionally rendered).
+  const mobileMenuBadgeCount = getMobileMenuNotificationRaw(state)
+  const mobileMenuBadgeText = formatNotificationBadgeCount(mobileMenuBadgeCount)
+  const mobileMenuBadgeEl = root.querySelector<HTMLElement>('[data-mobile-menu-total-badge="1"]')
+  if (mobileMenuBadgeEl !== null) {
+    mobileMenuBadgeEl.style.display = mobileMenuBadgeText !== null ? 'flex' : 'none'
+    mobileMenuBadgeEl.textContent = mobileMenuBadgeText ?? ''
+  } else {
+    allPatchedSafely = false
+  }
+
+  // Per-item badges вътре в menu panel-a (data-mobile-menu-item-badge="${icon}",
+  // виж mobileMenuSvgItemContent) — PERSISTENT nodes, `display:inline-flex`
+  // ПОСТОЯННО (запазено layout място в button row-a), само `visibility`
+  // toggle-ва между hidden/visible. Fix за residual 0→1 flicker: старият
+  // display:none↔inline-flex toggle вкарваше/махаше node-а от flex layout-a
+  // (margin-left:auto in-flow item), причинявайки видим reflow на button
+  // реда. visibility:hidden/visible пази node-а винаги in-flow (нулев layout
+  // shift), само repaint на самия badge — mirror на generic markup pattern-a
+  // за topics/support/chat/friends едновременно (един и същ template).
+  // data-mobile-menu-total-badge (по-горе) НЕ се пипа тук — той е
+  // position:absolute, вече без reflow проблем, различна geometry семантика.
+  const supportItemBadgeText = formatNotificationBadgeCount(getSupportUnreadRaw(state))
+  const supportItemBadgeEl = root.querySelector<HTMLElement>('[data-mobile-menu-item-badge="support"]')
+  if (supportItemBadgeEl !== null) {
+    supportItemBadgeEl.style.visibility = supportItemBadgeText !== null ? 'visible' : 'hidden'
+    supportItemBadgeEl.textContent = supportItemBadgeText ?? ''
+  } else {
+    allPatchedSafely = false
+  }
+
+  // Per-item "Теми" badge — reuse-ва ТОЧНО getTopicsTotalUnreadRaw() — СЪЩИЯТ
+  // derived source като markup-a при пълен render (mobileMenuSvgItemContent(
+  // 'topics', 'Теми', topicsUnreadCount) в renderMobileMenu) — не собствена
+  // формула (брифа §8).
+  const topicsItemBadgeText = formatNotificationBadgeCount(getTopicsTotalUnreadRaw(state))
+  const topicsItemBadgeEl = root.querySelector<HTMLElement>('[data-mobile-menu-item-badge="topics"]')
+  if (topicsItemBadgeEl !== null) {
+    topicsItemBadgeEl.style.visibility = topicsItemBadgeText !== null ? 'visible' : 'hidden'
+    topicsItemBadgeEl.textContent = topicsItemBadgeText ?? ''
+  } else {
+    allPatchedSafely = false
+  }
+
+  // Per-thread unread badge (само отваряния thread card в directory list-а) —
+  // patch-ва всички съществуващи thread badge nodes с текущата стойност от
+  // state.topicMessages; ако конкретен root message няма ВЕЧЕ badge node
+  // (defense-in-depth за списъци с много нишки), fallback се налага.
+  const threadMessages = state.topicMessages ?? []
+  for (const message of threadMessages) {
+    const badgeText = formatTopicUnreadBadgeCount(message.unreadCount)
+    const badgeEl = root.querySelector<HTMLElement>(`[data-topic-thread-unread-badge="${cssEscape(message.messageId)}"]`)
+    if ((badgeEl !== null) !== (badgeText !== null)) {
+      allPatchedSafely = false
+      continue
+    }
+    if (badgeEl !== null && badgeText !== null) {
+      badgeEl.textContent = badgeText
+    }
+  }
+
+  return allPatchedSafely
+}
+
+/**
+ * Targeted single-node append за нов Topics/Lafche съобщение (topic_message
+ * push) — reuse-ва СЪЩИТЕ renderTopicMessageRow/renderLafcheMessageRow
+ * markup builders като пълния render (виж renderTopicMessageStream), но
+ * вмъква само ЕДИН нов DOM node в съществуващия [data-topic-messages-list]
+ * container, вместо root.innerHTML replace на целия lobby subtree. Пази
+ * identity на scroll container-а и на всички вече-mounted post nodes
+ * (production flicker fix — виж call site в createLobbyFlowController.ts).
+ *
+ * Връща true при успешен targeted append; false ако DOM structure-ата не
+ * съвпада с очакваното (напр. containers липсват, view не е активната тема) —
+ * caller-ът трябва да fallback-не към пълен render() в този случай.
+ */
+export function appendTopicMessageNode(
+  root: HTMLElement,
+  state: LobbyScreenState,
+  options: TopicMessageNodeCallbacks,
+  message: TopicMessageSnapshot,
+): boolean {
+  if (state.view !== 'topics' || state.topicsMode !== 'topics') return false
+  if (state.activeTopicId === null || state.activeTopicId !== message.topicId) return false
+
+  const listEl = root.querySelector<HTMLElement>('[data-topic-messages-list="1"]')
+  const scrollEl = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
+  if (!listEl || !scrollEl) return false
+
+  // Node вече присъства (напр. own-message ack race, дублиран push) —
+  // третираме като success (нищо да append-ваме), не fallback.
+  if (listEl.querySelector(`[data-topic-message="${cssEscape(message.messageId)}"]`)) {
+    return true
+  }
+
+  const isLafche = state.activeTopicId === LAFCHE_TOPIC_ID
+  const html = isLafche ? renderLafcheMessageRow(state, message) : renderTopicMessageRow(state, message)
+
+  const template = document.createElement('template')
+  template.innerHTML = html.trim()
+  const newNode = template.content.firstElementChild as HTMLElement | null
+  if (!newNode) return false
+
+  // Lafche е chat-style (newest-at-bottom, DOM append) — General е card-feed
+  // (newest-at-top, DOM prepend). Mirror-ва exact реда, който пълният
+  // renderTopicMessageStream произвежда (виж isLafche reverse().map там).
+  if (isLafche) {
+    listEl.appendChild(newNode)
+  } else {
+    listEl.insertBefore(newNode, listEl.firstElementChild)
+  }
+
+  wireTopicMessageNode(root, state, options, newNode)
+
+  // Scroll semantics — reuse established near-bottom (Lafche) / near-top
+  // (General) thresholds, огледално на renderLobbyScreen-овата
+  // wasLafcheNearBottom/wasTopicMessagesNearTop логика: местим scroll САМО
+  // ако потребителят вече е бил close до "новото съдържание" края, никога
+  // насила при четене другаде.
+  const topicMessagesNearBottomThresholdPx = 96
+  if (isLafche) {
+    const distanceFromBottomBeforeAppend = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight - newNode.offsetHeight
+    if (distanceFromBottomBeforeAppend <= topicMessagesNearBottomThresholdPx) {
+      scrollEl.scrollTop = scrollEl.scrollHeight
+    }
+  }
+  // General card-feed prepend не мести scroll позицията изобщо (established
+  // семантика — нов root card се появява горе, без auto-scroll).
+
+  return true
+}
+
+/**
+ * Targeted patch за like button на конкретно съобщение (topic_message_like_
+ * changed / _changed_self / _error push) — reuse-ва renderTopicLikeButton
+ * (СЪЩИЯТ markup builder като пълния render) за outerHTML replace САМО на
+ * бутона (не целия message node, камо ли root), после re-wire-ва click
+ * listener-а (outerHTML replace унищожава стария node). Пази identity на
+ * заграждащия message/reply node и на scroll container-а.
+ *
+ * Връща true при успешен patch; false ако node-ът не е намерен (message
+ * вече не е mounted — thread switch race и подобни) — caller-ът трябва да
+ * fallback-не към render()/scheduleRender().
+ */
+export function refreshTopicMessageLikeDom(
+  root: HTMLElement,
+  state: LobbyScreenState,
+  options: Pick<TopicMessageNodeCallbacks, 'onTopicMessageLikeToggleClick'>,
+  messageId: string,
+  likeCount: number,
+  viewerHasLiked: boolean,
+): boolean {
+  const existingBtn = root.querySelector<HTMLButtonElement>(`[data-topic-message-like="${cssEscape(messageId)}"]`)
+  if (!existingBtn) return false
+
+  const html = renderTopicLikeButton(state, messageId, likeCount, viewerHasLiked)
+  const template = document.createElement('template')
+  template.innerHTML = html.trim()
+  const newBtn = template.content.firstElementChild as HTMLButtonElement | null
+  if (!newBtn) return false
+
+  existingBtn.replaceWith(newBtn)
+  newBtn.addEventListener('click', () => {
+    options.onTopicMessageLikeToggleClick(messageId)
+  })
+
+  return true
+}
+
+/**
+ * Targeted patch за редактирано съобщение/reply (topic_message_edited push) —
+ * outerHTML replace САМО на конкретния [data-topic-message]/[data-topic-reply]
+ * node (reuse-ва renderTopicMessageRow/renderLafcheMessageRow/
+ * renderTopicReplyRow, СЪЩИТЕ markup builders като пълния render), после
+ * re-wire-ва listeners-ите на новия node (wireTopicMessageNode) — outerHTML
+ * replace унищожава старите listeners. Пази identity на всички ДРУГИ nodes
+ * и на scroll container-а.
+ *
+ * Връща true при успешен patch; false ако node/message snapshot не е
+ * намерен — caller-ът трябва да fallback-не към render().
+ */
+export function refreshTopicMessageContentDom(
+  root: HTMLElement,
+  state: LobbyScreenState,
+  options: TopicMessageNodeCallbacks,
+  messageId: string,
+  parentMessageId: string | null,
+): boolean {
+  if (parentMessageId === null) {
+    const message = (state.topicMessages ?? []).find((m) => m.messageId === messageId)
+    if (!message) return false
+    const existingNode = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(messageId)}"]`)
+    if (!existingNode) return false
+
+    const isLafche = state.activeTopicId === LAFCHE_TOPIC_ID
+    const html = isLafche ? renderLafcheMessageRow(state, message) : renderTopicMessageRow(state, message)
+    const template = document.createElement('template')
+    template.innerHTML = html.trim()
+    const newNode = template.content.firstElementChild as HTMLElement | null
+    if (!newNode) return false
+
+    existingNode.replaceWith(newNode)
+    wireTopicMessageNode(root, state, options, newNode)
+    return true
+  }
+
+  const replies = state.topicRepliesByRootId[parentMessageId]
+  const reply = replies?.find((r) => r.messageId === messageId)
+  if (!reply) return false
+  const existingNode = root.querySelector<HTMLElement>(`[data-topic-reply="${cssEscape(messageId)}"]`)
+  if (!existingNode) return false
+
+  const html = renderTopicReplyRow(state, reply)
+  const template = document.createElement('template')
+  template.innerHTML = html.trim()
+  const newNode = template.content.firstElementChild as HTMLElement | null
+  if (!newNode) return false
+
+  existingNode.replaceWith(newNode)
+  wireTopicMessageNode(root, state, options, newNode)
+  return true
+}
+
+/**
+ * Targeted patch за изтрито съобщение/reply (topic_message_deleted push) —
+ * премахва САМО конкретния DOM node (element.remove()), вместо пълен
+ * innerHTML remount. Пази identity на всички останали nodes и на scroll
+ * container-а.
+ *
+ * Връща true при успешен removal; false ако node-ът не е намерен —
+ * caller-ът трябва да fallback-не към render() (напр. root delete с replies
+ * cleanup / thread-mode navigation промени, покрити от structural fallback).
+ */
+export function removeTopicMessageDom(
+  root: HTMLElement,
+  messageId: string,
+  parentMessageId: string | null,
+): boolean {
+  const selector = parentMessageId === null
+    ? `[data-topic-message="${cssEscape(messageId)}"]`
+    : `[data-topic-reply="${cssEscape(messageId)}"]`
+  const existingNode = root.querySelector<HTMLElement>(selector)
+  if (!existingNode) return false
+  existingNode.remove()
+  return true
+}
+
 export function renderLobbyScreen(
   root: HTMLElement,
   options: RenderLobbyScreenOptions,
@@ -10720,20 +11211,15 @@ export function renderLobbyScreen(
     })
   })
 
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-author]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const profileId = button.dataset.topicMessageAuthor ?? ''
-      const displayName = button.dataset.topicMessageAuthorName ?? ''
-      if (profileId) options.onTopicMessageAuthorClick(profileId, displayName)
-    })
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-personal]').forEach((button) => {
-    button.addEventListener('click', () => {
-      const profileId = button.dataset.topicMessagePersonal ?? ''
-      const displayName = button.dataset.topicMessagePersonalName ?? ''
-      if (profileId) options.onTopicMessagePersonalClick(profileId, displayName)
-    })
+  // Per-message wiring (author/personal/like/reply/card-open/mute-toggle/
+  // delete/edit) — консолидирано в wireTopicMessageNode (виж дефиницията ѝ
+  // по-горе), извикано веднъж за всеки [data-topic-message] И [data-topic-reply]
+  // node (replies reuse-ват СЪЩИТЕ data-topic-message-* child markers, само
+  // wrapper-ът е data-topic-reply вместо data-topic-message — виж
+  // renderTopicReplyRow), reuse-нато 1:1 и от targeted single-node append
+  // пътя (appendTopicMessageNode) — без дублиране на wiring логиката.
+  root.querySelectorAll<HTMLElement>('[data-topic-message], [data-topic-reply]').forEach((messageNode) => {
+    wireTopicMessageNode(root, state, options, messageNode)
   })
 
   const topicMessagesScroll = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
@@ -10991,60 +11477,11 @@ export function renderLobbyScreen(
     }
   }
 
-  // ─── Likes (Етап 3) — реален toggle, per-message data attribute ─────────
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-like]').forEach((btn) => {
-    const messageId = btn.dataset.topicMessageLike ?? ''
-    if (!messageId) return
-    btn.addEventListener('click', () => {
-      options.onTopicMessageLikeToggleClick(messageId)
-    })
-  })
-
-  // ─── Replies (Етап 3) — expand/collapse, load more, inline composer ─────
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-reply]').forEach((btn) => {
-    const rootMessageId = btn.dataset.topicMessageReply ?? ''
-    if (!rootMessageId) return
-    btn.addEventListener('click', () => {
-      const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(rootMessageId)}"]`)
-      const scrollAnchor = anchorEl
-        ? { messageId: rootMessageId, top: anchorEl.getBoundingClientRect().top }
-        : null
-      options.onTopicReplyClick(rootMessageId, scrollAnchor)
-    })
-  })
-
   // ─── Topics Moderation (Етап 4) ────────────────────────────────────────
+  // Likes/replies/card-open за отделните съобщения вече са wire-нати по-горе
+  // от wireTopicMessageNode loop-а (виж "Per-message wiring" коментара).
   root.querySelector<HTMLButtonElement>('[data-topic-thread-back="1"]')?.addEventListener('click', () => {
     options.onTopicThreadBack()
-  })
-
-  const topicCardInteractiveSelector = [
-    'button',
-    'a',
-    'input',
-    'textarea',
-    'select',
-    'label',
-    '[data-image-viewer-open="1"]',
-  ].join(',')
-  root.querySelectorAll<HTMLElement>('[data-topic-card-open]').forEach((card) => {
-    const rootMessageId = card.dataset.topicCardOpen ?? ''
-    if (!rootMessageId) return
-    const openCard = () => {
-      const scrollAnchor = { messageId: rootMessageId, top: card.getBoundingClientRect().top }
-      options.onTopicThreadOpen(rootMessageId, scrollAnchor)
-    }
-    card.addEventListener('click', (event) => {
-      const target = event.target as HTMLElement | null
-      if (target?.closest(topicCardInteractiveSelector)) return
-      openCard()
-    })
-    card.addEventListener('keydown', (event) => {
-      if (event.target !== card) return
-      if (event.key !== 'Enter' && event.key !== ' ') return
-      event.preventDefault()
-      openCard()
-    })
   })
 
   root.querySelector<HTMLButtonElement>('[data-topic-lock]')?.addEventListener('click', (event) => {
@@ -11068,21 +11505,6 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-topic-report="1"]')?.addEventListener('click', () => {
     options.onTopicReportClick()
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-mute-toggle]').forEach((btn) => {
-    const targetProfileId = btn.dataset.topicMuteToggle ?? ''
-    const targetDisplayName = btn.dataset.topicMuteToggleName ?? ''
-    // Post context за mute-evidence snapshot (виж §1/§3 в mute-evidence
-    // брифа) — undefined/'' означава mute инициирано без конкретен пост.
-    const sourceMessageId = btn.dataset.topicMuteToggleMessageId || null
-    const sourceKind = (btn.dataset.topicMuteToggleSourceKind as 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified' | undefined) ?? 'unspecified'
-    if (!targetProfileId) return
-    btn.addEventListener('click', () => {
-      const topicId = state.activeTopicId
-      if (!topicId) return
-      options.onTopicMuteClick(topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind)
-    })
   })
 
   // Lock/Mute/Unmute action popup — споделен form wiring (duration select +
@@ -11162,84 +11584,10 @@ export function renderLobbyScreen(
     options.onTopicDeleteConfirmSubmit()
   })
 
-  // Individual message/reply moderation delete — icon-only бутони, keyed по
-  // messageId (mirror на data-topic-message-reply wiring по-долу), plюs
-  // single-step confirm popup (виж renderTopicMessageDeleteConfirmPopup).
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-delete]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      // Blocked (own root с live replies, non-moderator) — aria-disabled, не
-      // native disabled, точно за да може tap/click да стигне тук и да
-      // покаже обяснението (data-tooltip вече е зададен от render-а с точния
-      // текст) БЕЗ да изпрати заявка (own-delete-own-content брифа §22: "tap
-      // показва кратко обяснение, но НЕ изпраща request"). Established
-      // .topic-message-action-btn tooltip pattern (:hover/:focus-visible
-      // ::after) вече покрива desktop; mobile browsers показват native
-      // aria-disabled focus behavior, плюс explicit data-tooltip-open state
-      // за touch devices, където :hover/:focus-visible не е надеждна обратна
-      // връзка.
-      if (btn.dataset.topicMessageDeleteBlocked === '1') {
-        const reason = btn.dataset.topicMessageDeleteDeniedReason?.trim() ?? ''
-        btn.focus()
-        btn.dataset.tooltipOpen = '1'
-        if (reason.length > 0) options.onTopicsInfoToast(reason)
-        window.setTimeout(() => {
-          delete btn.dataset.tooltipOpen
-        }, 1800)
-        return
-      }
-      const messageId = btn.dataset.topicMessageDelete?.trim() ?? ''
-      const isRoot = btn.dataset.topicMessageDeleteIsRoot === '1'
-      const isModeratorAction = btn.dataset.topicMessageDeleteIsModeratorAction === '1'
-      if (messageId.length > 0 && state.activeTopicId) {
-        options.onTopicMessageDeleteClick(state.activeTopicId, messageId, isRoot, isModeratorAction)
-      }
-    })
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      if (btn.dataset.topicMessageEditBlocked === '1') {
-        const reason = btn.dataset.topicMessageEditDeniedReason?.trim() ?? ''
-        btn.focus()
-        btn.dataset.tooltipOpen = '1'
-        if (reason.length > 0) options.onTopicsInfoToast(reason)
-        window.setTimeout(() => {
-          delete btn.dataset.tooltipOpen
-        }, 1800)
-        return
-      }
-      const messageId = btn.dataset.topicMessageEdit?.trim() ?? ''
-      if (messageId.length > 0 && state.activeTopicId) {
-        options.onTopicMessageEditClick(state.activeTopicId, messageId)
-      }
-    })
-  })
-
-  root.querySelectorAll<HTMLFormElement>('[data-topic-message-edit-form]').forEach((form) => {
-    const messageId = form.dataset.topicMessageEditForm ?? ''
-    if (!messageId) return
-
-    form.addEventListener('submit', (event) => {
-      event.preventDefault()
-      options.onTopicMessageEditSubmit(messageId)
-    })
-  })
-
-  root.querySelectorAll<HTMLTextAreaElement>('[data-topic-message-edit-text]').forEach((textarea) => {
-    const messageId = textarea.dataset.topicMessageEditText ?? ''
-    if (!messageId) return
-    textarea.addEventListener('input', (event) => {
-      options.onTopicMessageEditInput(messageId, (event.currentTarget as HTMLTextAreaElement).value)
-    })
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('[data-topic-message-edit-cancel]').forEach((btn) => {
-    const messageId = btn.dataset.topicMessageEditCancel ?? ''
-    if (!messageId) return
-    btn.addEventListener('click', () => {
-      options.onTopicMessageEditCancel(messageId)
-    })
-  })
+  // Individual message/reply moderation delete/edit wiring вече е покрито от
+  // wireTopicMessageNode loop-а по-горе (delete/edit/edit-form/edit-text/
+  // edit-cancel са всички per-message/per-reply markers, вложени вътре в
+  // [data-topic-message]/[data-topic-reply] wrapper-а).
 
   root.querySelector<HTMLDivElement>('[data-topic-message-delete-confirm-backdrop="1"]')?.addEventListener('click', (event) => {
     if (event.target === event.currentTarget) {

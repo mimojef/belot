@@ -26,6 +26,12 @@ import {
   resolveLobbyChatSenderRole,
   syncProfilePopup,
   clearProfileEditorPendingState,
+  appendTopicMessageNode,
+  refreshTopicsUnreadDom,
+  refreshTopicMessageLikeDom,
+  refreshTopicMessageContentDom,
+  removeTopicMessageDom,
+  type TopicMessageNodeCallbacks,
   type AvatarCropSelection,
   type GuestContactFormInput,
   type LobbyAuthModalMode,
@@ -3046,18 +3052,15 @@ export function createLobbyFlowController(
     }
   }
 
-  function renderLobby(): void {
-    stopWaitingRoomActivity()
-    resetFinalFillSequence()
-    clearServerRoomSnapshot()
-
+  // Pure snapshot builder — извлечена от renderLobby() (виж call site-а там)
+  // за reuse и от targeted-patch пътищата (appendTopicMessageNode/
+  // refreshTopicsUnreadDom, viж handleServerMessage topic_* handlers), които
+  // се нуждаят от актуален LobbyScreenState snapshot, БЕЗ да предизвикват
+  // страничните ефекти на renderLobby() (ensureProfilePopupTargetRoleLoaded/
+  // ensureOwnVipStatusLoaded остават САМО в renderLobby(), не тук — targeted
+  // patch не трябва да тригерва нови network заявки).
+  function buildLobbyScreenState(): LobbyScreenState {
     const authSession = options.getAuthSession?.() ?? null
-    ensureProfilePopupTargetRoleLoaded()
-    // Покрива входни точки, които отварят own profile popup-а само чрез
-    // plain render() (напр. onProfileClick), не renderPopupOnly() — иначе
-    // VIP статусът никога не се зарежда за own profile при тях (същия
-    // "покрий всички входни точки" pattern като ensureProfilePopupTargetRoleLoaded).
-    ensureOwnVipStatusLoaded()
     const friendshipAction = createProfileFriendshipAction(authSession)
     const acceptedRelationship =
       state.profilePopupProfile?.profileId
@@ -3524,6 +3527,69 @@ export function createLobbyFlowController(
       isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
       isLafcheModerator: isLafcheModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
+
+    return lobbyState
+  }
+
+  // Тесен callback subset за targeted per-message DOM wiring (виж
+  // TopicMessageNodeCallbacks/wireTopicMessageNode в renderLobbyScreen.ts) —
+  // 1:1 mapping към СЪЩИТЕ controller функции, извиквани от пълния
+  // renderLobby() options обект по-долу, без да build-ваме целия масивен
+  // options обект само за targeted single-node wiring.
+  function topicMessageNodeCallbacks(): TopicMessageNodeCallbacks {
+    return {
+      onTopicMessageAuthorClick: (profileId, displayName) => {
+        void openProtectedProfileById(profileId, displayName, 'topics')
+      },
+      onTopicMessagePersonalClick: (profileId, displayName) => {
+        void openTopicsPersonalMessageFromPost(profileId, displayName)
+      },
+      onTopicMessageLikeToggleClick: (messageId) => {
+        submitTopicMessageLikeToggle(messageId)
+      },
+      onTopicReplyClick: (rootMessageId, scrollAnchor) => {
+        openTopicThread(rootMessageId, scrollAnchor ?? null)
+      },
+      onTopicThreadOpen: (rootMessageId, scrollAnchor) => {
+        openTopicThread(rootMessageId, scrollAnchor ?? null)
+      },
+      onTopicMuteClick: (topicId, targetProfileId, targetDisplayName, sourceMessageId, sourceKind) => {
+        void openTopicMuteMenuForAuthor(topicId, targetProfileId, targetDisplayName, sourceMessageId ?? null, sourceKind ?? 'unspecified')
+      },
+      onTopicMessageDeleteClick: (topicId, messageId, isRoot, isModeratorAction) => {
+        openTopicMessageDeleteConfirm(topicId, messageId, isRoot, isModeratorAction)
+      },
+      onTopicMessageEditClick: (topicId, messageId) => {
+        openTopicMessageEditor(topicId, messageId)
+      },
+      onTopicMessageEditSubmit: (messageId) => {
+        void submitTopicMessageEdit(messageId)
+      },
+      onTopicMessageEditInput: (messageId, value) => {
+        updateTopicMessageEditDraft(messageId, value)
+      },
+      onTopicMessageEditCancel: (messageId) => {
+        closeTopicMessageEditor(messageId)
+      },
+      onTopicsInfoToast: (text) => {
+        showTopicsInfoToast(text)
+      },
+    }
+  }
+
+  function renderLobby(): void {
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    clearServerRoomSnapshot()
+
+    ensureProfilePopupTargetRoleLoaded()
+    // Покрива входни точки, които отварят own profile popup-а само чрез
+    // plain render() (напр. onProfileClick), не renderPopupOnly() — иначе
+    // VIP статусът никога не се зарежда за own profile при тях (същия
+    // "покрий всички входни точки" pattern като ensureProfilePopupTargetRoleLoaded).
+    ensureOwnVipStatusLoaded()
+
+    const lobbyState = buildLobbyScreenState()
 
     renderLobbyScreen(options.root, {
       state: lobbyState,
@@ -12564,20 +12630,48 @@ export function createLobbyFlowController(
       return true
     }
 
+    // Production flicker fix (§7 от брифа) — badge-only push-ове опитват
+    // targeted textContent patch (refreshTopicsUnreadDom) вместо unconditional
+    // пълен render(). Ако presence/absence на конкретен badge span трябва да
+    // се промени (0→>0 create / >0→0 remove), helper-ът връща false и
+    // fallback-ваме към scheduleRender() (debounce-нат coalescing, не
+    // synchronous render() — high-frequency badge push-ове не трябва да
+    // тригерват незабавен пълен remount дори във fallback пътя).
     if (message.type === 'topic_unread_count_changed') {
-      if (message.topicId === state.activeTopicId && !isGeneralTopicId(message.topicId)) {
+      // FIX: state.activeTopicId се задава при openTopic/openTopicThread, но
+      // НИКОГА не се reset-ва на null при напускане на Topics screen (виж
+      // switchToLobby/resetToLobby) — остава stale ("бил съм там веднъж
+      // тая сесия"), не отразява дали потребителят РЕАЛНО гледа темата сега.
+      // Старият guard third-ваше самò activeTopicId match, значи Lafche push
+      // винаги минаваше през markActiveTopicSeen (force count->0, DOM никога
+      // не вижда >0) дори когато потребителят отдавна е напуснал Topics.
+      // Добавен isReallyViewingThisTopic — mirror на established pattern-a в
+      // markActiveTopicSeen самата (`changed && state.currentScreen ===
+      // 'topics'`), за да third-ва "реално гледам сега", не само "последно
+      // отворена тема".
+      const isReallyViewingThisTopic = state.currentScreen === 'topics'
+        && state.topicsMode === 'topics'
+        && message.topicId === state.activeTopicId
+      if (isReallyViewingThisTopic && !isGeneralTopicId(message.topicId)) {
         void markActiveTopicSeen(message.topicId)
         return true
       }
-      if (updateTopicUnreadCount(message.topicId, message.unreadCount)) {
-        render()
+      const changed = updateTopicUnreadCount(message.topicId, message.unreadCount)
+      if (changed) {
+        const patched = refreshTopicsUnreadDom(options.root, buildLobbyScreenState())
+        if (!patched) {
+          scheduleRender()
+        }
       }
       return true
     }
 
     if (message.type === 'topic_seen_updated') {
-      if (updateTopicUnreadCount(message.topicId, message.unreadCount)) {
-        render()
+      const changed = updateTopicUnreadCount(message.topicId, message.unreadCount)
+      if (changed) {
+        if (!refreshTopicsUnreadDom(options.root, buildLobbyScreenState())) {
+          scheduleRender()
+        }
       }
       return true
     }
@@ -12593,7 +12687,9 @@ export function createLobbyFlowController(
         void markTopicThreadSeen(message.rootMessageId)
       }
       if (changedRoot || changedTopic) {
-        render()
+        if (!refreshTopicsUnreadDom(options.root, buildLobbyScreenState())) {
+          scheduleRender()
+        }
       }
       return true
     }
@@ -12602,7 +12698,9 @@ export function createLobbyFlowController(
       const changedRoot = updateTopicThreadUnreadCount(message.rootMessageId, message.unreadCount)
       const changedTopic = updateTopicUnreadCount(message.topicId, message.topicUnreadCount)
       if (changedRoot || changedTopic) {
-        render()
+        if (!refreshTopicsUnreadDom(options.root, buildLobbyScreenState())) {
+          scheduleRender()
+        }
       }
       return true
     }
@@ -12660,9 +12758,25 @@ export function createLobbyFlowController(
         clearTopicComposerPendingImage(message.topicId)
       }
 
+      void markActiveTopicSeen(message.topicId)
+
+      // Production flicker fix — high-frequency Lafche/Topics push (§2 от
+      // брифа): чужда own-message live-append при активна stream view опитва
+      // targeted single-node DOM insert (appendTopicMessageNode) вместо
+      // unconditional пълен render() (root.innerHTML remount). Own-message
+      // ack path (composer draft clear) и всеки edge case, който targeted
+      // append не покрива (thread view, различна тема, липсващи containers),
+      // fallback-ва безопасно към пълен render() със established scroll-
+      // preservation логика (topicMessagesScrollAnchor/RenderReason).
+      if (!isOwnRootMessageAck) {
+        const patched = appendTopicMessageNode(options.root, buildLobbyScreenState(), topicMessageNodeCallbacks(), incomingMessage)
+        if (patched) {
+          return true
+        }
+      }
+
       state.topicMessagesScrollAnchor = scrollAnchor
       state.topicMessagesRenderReason = isOwnRootMessageAck ? 'own-message' : 'live-append'
-      void markActiveTopicSeen(message.topicId)
       render()
       return true
     }
@@ -12803,6 +12917,11 @@ export function createLobbyFlowController(
       return true
     }
 
+    // Production flicker fix (§5 от брифа) — like push-ове patch-ват САМО
+    // конкретния бутон (refreshTopicMessageLikeDom, outerHTML replace на
+    // [data-topic-message-like], не целия message node/root) вместо
+    // unconditional пълен render(). Node липсва (thread switch race) →
+    // безопасен fallback към render() (rare path).
     if (message.type === 'topic_message_like_changed') {
       // PUBLIC broadcast — само count, viewer-agnostic. НИКОГА не пипа
       // topicMessageViewerHasLikedById (private state, само _self вариантът
@@ -12816,7 +12935,16 @@ export function createLobbyFlowController(
         const replyMatch = replies?.find((r) => r.messageId === message.messageId)
         if (replyMatch) replyMatch.likeCount = message.likeCount
       }
-      render()
+      const viewerHasLiked = state.topicMessageViewerHasLikedById[message.messageId] ?? (rootMatch?.viewerHasLiked ?? false)
+      const patched = refreshTopicMessageLikeDom(
+        options.root,
+        buildLobbyScreenState(),
+        topicMessageNodeCallbacks(),
+        message.messageId,
+        message.likeCount,
+        viewerHasLiked,
+      )
+      if (!patched) render()
       return true
     }
 
@@ -12841,7 +12969,15 @@ export function createLobbyFlowController(
           replyMatch.viewerHasLiked = message.viewerHasLiked
         }
       }
-      render()
+      const patched = refreshTopicMessageLikeDom(
+        options.root,
+        buildLobbyScreenState(),
+        topicMessageNodeCallbacks(),
+        message.messageId,
+        message.likeCount,
+        message.viewerHasLiked,
+      )
+      if (!patched) render()
       return true
     }
 
@@ -12950,11 +13086,21 @@ export function createLobbyFlowController(
       return true
     }
 
+    // Production flicker fix (§6 от брифа) — edit push patch-ва САМО
+    // конкретния message/reply node (refreshTopicMessageContentDom, outerHTML
+    // replace + re-wire, не целия root) вместо unconditional пълен render().
     if (message.type === 'topic_message_edited') {
       if (message.topicId === state.activeTopicId) {
         const changed = applyTopicMessageEdit(message.messageId, message.parentMessageId, message.body, message.editedAt)
         if (changed) {
-          render()
+          const patched = refreshTopicMessageContentDom(
+            options.root,
+            buildLobbyScreenState(),
+            topicMessageNodeCallbacks(),
+            message.messageId,
+            message.parentMessageId,
+          )
+          if (!patched) render()
         }
       }
       return true
@@ -13007,6 +13153,7 @@ export function createLobbyFlowController(
           state.topicMessageEditErrorText = null
           state.topicMessageEditBusy = false
         }
+        render()
       } else {
         // REPLY target — маха само него от родителския replies списък. Root
         // и sibling replies остават непокътнати; replyCount на root-а се
@@ -13025,8 +13172,13 @@ export function createLobbyFlowController(
         if (message.topicId === state.activeTopicId) {
           void refreshTopicMessagesAfterActivityChange(message.topicId)
         }
+        // Production flicker fix (§6 от брифа) — reply removal е чист
+        // structural DOM removal (element.remove()), без mode-навигационни
+        // side effects (за разлика от root-delete branch-а по-горе, който
+        // остава на пълен render — може да превключи topicsMode/thread view).
+        const patched = removeTopicMessageDom(options.root, message.messageId, message.parentMessageId)
+        if (!patched) render()
       }
-      render()
       return true
     }
 
@@ -13864,11 +14016,47 @@ export function createLobbyFlowController(
           state.adminGuestContactUnreadCount = result.guestUnreadCount ?? 0
           const totalUnread = state.supportUnreadCount + state.adminGuestContactUnreadCount
           const displayUnread = formatNotificationBadgeCount(totalUnread)
-          const badge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
-          if (badge) {
-            badge.style.display = displayUnread !== null ? 'flex' : 'none'
-            badge.textContent = displayUnread ?? ''
-          } else {
+
+          // Production flicker fix — background support-unread poll (30s
+          // interval, viж startSupportUnreadPolling в main.ts) не трябва да
+          // предизвика unconditional пълен render(), особено докато mobile
+          // menu е отворено (root.innerHTML remount унищожава/пресъздава
+          // <details> subtree-a → visible flicker). Desktop badge
+          // ([data-support-unread-badge]) съществува само в desktop
+          // renderNav() template — mobile menu total badge
+          // ([data-mobile-menu-total-badge]) е СЕПАРАТЕН persistent node
+          // (виж renderMobileMenu), патч-нат отделно чрез refreshTopicsUnreadDom
+          // (reuse на established Lafche-fix helper — тя вече агрегира
+          // support+topics+friendChat+friends в getMobileMenuNotificationRaw).
+          const desktopBadge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
+          let desktopPatched = false
+          if (desktopBadge) {
+            desktopBadge.style.display = displayUnread !== null ? 'flex' : 'none'
+            desktopBadge.textContent = displayUnread ?? ''
+            desktopPatched = true
+          }
+
+          // ВАЖНО: НЕ разчитаме на aggregate return value-то на
+          // refreshTopicsUnreadDom() тук — тя patch-ва и Topics-specific
+          // badges (general/lafche), чиито success/failure е НЕСВЪРЗАН с
+          // support unread targets. Ако utre Topics badge-ове structural
+          // fail-нат (напр. потребителят не е на Topics screen — layout-aware
+          // ok, но все пак различен branch), aggregate-ът не трябва да
+          // потиска support-specific success detection. Проверяваме
+          // mobile targets directно, СЛЕД като refreshTopicsUnreadDom вече
+          // ги е patch-нала (side effect), вместо да gate-ваме на нейния
+          // общ boolean.
+          refreshTopicsUnreadDom(options.root, buildLobbyScreenState())
+          const mobileTotalBadgeFound = options.root.querySelector('[data-mobile-menu-total-badge="1"]') !== null
+          const mobileItemBadgeFound = options.root.querySelector('[data-mobile-menu-item-badge="support"]') !== null
+          const mobilePatched = mobileTotalBadgeFound && mobileItemBadgeFound
+
+          // Layout-aware success (брифа §4): desktop badge липсва на mobile
+          // viewport по design (renderNav е desktop-only template) — това
+          // НЕ е failure. Fallback render() само ако буквално НИТО ЕДИН
+          // target (desktop ИЛИ mobile) не е бил намерен — истинска
+          // structural inconsistency (напр. lobby DOM изобщо не е mounted).
+          if (!desktopPatched && !mobilePatched) {
             render()
           }
         }

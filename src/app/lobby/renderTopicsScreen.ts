@@ -190,7 +190,7 @@ function renderMessageAvatar(senderDisplayName: string, senderAvatarUrl: string 
 // Reuse-ва СЪЩИЯ likeCount/viewerHasLiked overrides map за root И reply
 // (виж т.13 — state.topicMessageLikeCountById/topicMessageViewerHasLikedById
 // е authoritative, НЕ директно полето от snapshot-а, за realtime updates).
-function renderTopicLikeButton(state: LobbyScreenState, messageId: string, snapshotLikeCount: number, snapshotViewerHasLiked: boolean): string {
+export function renderTopicLikeButton(state: LobbyScreenState, messageId: string, snapshotLikeCount: number, snapshotViewerHasLiked: boolean): string {
   const likeCount = state.topicMessageLikeCountById[messageId] ?? snapshotLikeCount
   const viewerHasLiked = state.topicMessageViewerHasLikedById[messageId] ?? snapshotViewerHasLiked
   const isPending = Boolean(state.topicMessageLikePendingRequestIdById[messageId])
@@ -807,7 +807,7 @@ function formatLafchePostTime(value: string, nowMs = Date.now()): string {
 // по-долу, mirror на established [data-topic-reply] + [data-topic-reply]
 // pattern-а), не border на самия елемент — избягва двойна линия при
 // hover/last-child.
-function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
+export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMessageSnapshot): string {
   const isEditing = state.topicMessageEdit?.messageId === message.messageId
   return `
     <div data-topic-message="${escapeHtml(message.messageId)}" class="lafche-post">
@@ -2022,7 +2022,8 @@ function renderTopicsHeader(state: LobbyScreenState): string {
           "
         >
           <span>Лафче</span>
-          ${lafcheHasUnread ? `<span data-topics-lafche-badge="1" aria-hidden="true" style="width:9px;height:9px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 2px #050505;"></span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">Има непрочетени публикации</span>` : ''}
+          <span data-topics-lafche-badge="1" aria-hidden="true" style="width:9px;height:9px;border-radius:50%;background:#ef4444;box-shadow:0 0 0 2px #050505;display:${lafcheHasUnread ? 'inline-block' : 'none'};"></span>
+          <span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${lafcheHasUnread ? 'Има непрочетени публикации' : ''}</span>
         </button>
         <button
           type="button"
@@ -2036,7 +2037,8 @@ function renderTopicsHeader(state: LobbyScreenState): string {
           "
         >
           <span>Общи</span>
-          ${generalUnreadBadge !== null ? `<span data-topics-general-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(generalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${generalUnreadTotal} непрочетени в Общ чат`)}</span>` : ''}
+          <span data-topics-general-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:${generalUnreadBadge !== null ? 'inline-flex' : 'none'};align-items:center;justify-content:center;padding:0 5px;line-height:1;">${generalUnreadBadge !== null ? escapeHtml(generalUnreadBadge) : ''}</span>
+          <span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${generalUnreadBadge !== null ? escapeHtml(`${generalUnreadTotal} непрочетени в Общ чат`) : ''}</span>
         </button>
         <button
           type="button"
