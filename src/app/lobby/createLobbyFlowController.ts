@@ -47,7 +47,7 @@ import {
   computeShopPurchaseConfirmDispatch,
 } from './shopResumeConfirmState'
 import { createDebouncedPlayerSearch } from './createDebouncedPlayerSearch'
-import { formatTopicsSectionMuteErrorText, LAFCHE_TOPIC_ID } from './renderTopicsScreen'
+import { formatTopicsSectionMuteErrorText, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT } from './renderTopicsScreen'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -6191,7 +6191,7 @@ export function createLobbyFlowController(
       return
     }
 
-    state.topicMessages = sortTopicMessagesByActivity(result.messages)
+    state.topicMessages = capLafcheMessagesIfNeeded(topicId, sortTopicMessagesByActivity(result.messages))
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq
     state.topicMessagesErrorText = null
@@ -6461,8 +6461,13 @@ export function createLobbyFlowController(
   async function loadOlderTopicMessages(): Promise<void> {
     const topicId = state.activeTopicId
     const requestGeneration = state.topicMessagesRequestGeneration
+    // "Лафче" НЯМА older pagination by design, независимо от hasMore/DB
+    // history (production hotfix — root cause audit-а) — structural guard
+    // ТУК, на самото action ниво, не само на scroll-trigger-а по-горе, за
+    // да остане валиден дори ако бъде добавен бъдещ друг call site.
     if (
       topicId === null ||
+      topicId === LAFCHE_TOPIC_ID ||
       state.topicOlderMessagesLoading ||
       !state.topicMessagesHasMore ||
       state.topicMessagesOldestSeq === null ||
@@ -6497,7 +6502,9 @@ export function createLobbyFlowController(
     }
 
     // Prepend по-старите съобщения пред вече заредените (старо→ново ред).
-    state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
+    // (topicId тук никога не е Lafche — guard-нато в началото на функцията —
+    // но capLafcheMessagesIfNeeded е no-op за не-Lafche, пазим defense-in-depth.)
+    state.topicMessages = capLafcheMessagesIfNeeded(topicId, mergeTopicMessages(state.topicMessages ?? [], result.messages))
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq ?? state.topicMessagesOldestSeq
     seedLikeStateFromMessages(result.messages)
@@ -6737,6 +6744,30 @@ export function createLobbyFlowController(
     return sortTopicMessagesByActivity([...byId.values()])
   }
 
+  // Lafche state defense-in-depth cap (EMERGENCY production hotfix — root
+  // cause audit-а: unbounded merge growth през spontaneously re-triggered
+  // "load older", viж loadOlderTopicMessages guard-а по-горе). Lafche по
+  // design НЯМА history отвъд последните LAFCHE_MESSAGE_HISTORY_LIMIT (в
+  // момента 200, emergency-намалено от 300 — viж renderTopicsScreen.ts
+  // коментара) — прилага се СЛЕД sortTopicMessagesByActivity/
+  // mergeTopicMessages (вече newest-first, потвърдено в audit-а), затова
+  // `.slice(0, LIMIT)` пази именно canonical newest N, реже само
+  // по-старите опашка елементи. Server initial REST load все още може
+  // временно да върне до 300 (server-side retention е отделен, still-
+  // unfinished etap) — този cap прилага client-side hard ceiling НЕЗАВИСИМО
+  // от server batch размера. Normal Topics (различен topicId) минават
+  // непроменени — техният pagination/"load older" разчита на пълния
+  // зареден range.
+  function capLafcheMessagesIfNeeded(
+    topicId: string,
+    messages: readonly TopicMessageSnapshot[],
+  ): TopicMessageSnapshot[] {
+    if (topicId !== LAFCHE_TOPIC_ID || messages.length <= LAFCHE_MESSAGE_HISTORY_LIMIT) {
+      return [...messages]
+    }
+    return messages.slice(0, LAFCHE_MESSAGE_HISTORY_LIMIT)
+  }
+
   // Етап 3 — likeCount/viewerHasLiked "override" state-ът се захранва от
   // ВСЯКО място, откъдето root TopicMessageSnapshot[]/единично съобщение
   // влиза в state.topicMessages (initial load, load older, live-append,
@@ -6769,7 +6800,7 @@ export function createLobbyFlowController(
     const result = await options.onTopicMessagesLoad(topicId, null)
     if (state.currentScreen !== 'topics' || state.activeTopicId !== topicId) return
     if (!result.ok) return
-    state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
+    state.topicMessages = capLafcheMessagesIfNeeded(topicId, mergeTopicMessages(state.topicMessages ?? [], result.messages))
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq
     updateLatestKnownSeqFromMessages(topicId, result.messages)
@@ -6785,7 +6816,7 @@ export function createLobbyFlowController(
     const result = await options.onTopicMessagesLoad(topicId, null)
     if (state.currentScreen !== 'topics' || state.activeTopicId !== topicId) return
     if (!result.ok) return
-    state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], result.messages)
+    state.topicMessages = capLafcheMessagesIfNeeded(topicId, mergeTopicMessages(state.topicMessages ?? [], result.messages))
     state.topicMessagesHasMore = result.hasMore
     state.topicMessagesOldestSeq = result.oldestSeq
     updateLatestKnownSeqFromMessages(topicId, result.messages)
@@ -12713,7 +12744,7 @@ export function createLobbyFlowController(
       }
       if (message.messages.length > 0) {
         const scrollAnchor = isTopicMessagesNearTop() ? null : captureTopicMessagesScrollAnchor()
-        state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], message.messages)
+        state.topicMessages = capLafcheMessagesIfNeeded(message.topicId, mergeTopicMessages(state.topicMessages ?? [], message.messages))
         updateLatestKnownSeqFromMessages(message.topicId, message.messages)
         seedLikeStateFromMessages(message.messages)
         // reconnect-refresh поведение (near-bottom threshold, НЕ форсиран
@@ -12743,7 +12774,7 @@ export function createLobbyFlowController(
       const { type: _msgType, requestId, ...incomingMessage } = message
       const isOwnRootMessageAck = requestId !== undefined && requestId === state.topicComposerPendingRequestIdByTopicId[message.topicId]
       const scrollAnchor = isOwnRootMessageAck || isTopicMessagesNearTop() ? null : captureTopicMessagesScrollAnchor()
-      state.topicMessages = mergeTopicMessages(state.topicMessages ?? [], [incomingMessage])
+      state.topicMessages = capLafcheMessagesIfNeeded(message.topicId, mergeTopicMessages(state.topicMessages ?? [], [incomingMessage]))
       updateLatestKnownSeqFromMessages(message.topicId, [incomingMessage])
       seedLikeStateFromMessages([incomingMessage])
 

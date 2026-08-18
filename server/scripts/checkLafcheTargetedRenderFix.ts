@@ -357,6 +357,129 @@ check('[I-G] Keyboard accessibility (Enter/Space + preventDefault) непром�
   assert(wireTopicMessageNodeBody.includes('event.preventDefault()'), 'preventDefault must remain for keyboard activation')
 })
 
+// ─── J. Lafche 300-post retention DOM defense-in-depth (production hotfix,
+// unbounded-growth root cause audit) — appendTopicMessageNode остава
+// targeted (не regress-ва към пълен render), но вече cap-ва DOM nodes-ите
+// си, работейки по [data-topic-message] selector-и, не listEl.children.length.
+
+function extractAppendTopicMessageNodeBody(): string {
+  const start = renderSrc.indexOf('export function appendTopicMessageNode(')
+  const nextExportIdx = renderSrc.indexOf('\nexport function ', start + 1)
+  return nextExportIdx > 0 ? renderSrc.slice(start, nextExportIdx) : renderSrc.slice(start)
+}
+
+const appendTopicMessageNodeBody = extractAppendTopicMessageNodeBody()
+// stripComments() премахва prose коментарите (включително JSDoc за СЛЕДВАЩАТА
+// функция, който може да "изтече" в slice-а до nextExportIdx) — checks по-долу
+// за executable substrings (children.length/render()/LoadOnder) трябва да
+// пробват само реален код, не обяснителен текст, който legitimately СПОМЕНАВА
+// същите думи (mirror на established [F] check pattern-a по-горе).
+const appendTopicMessageNodeCode = stripComments(appendTopicMessageNodeBody)
+
+check('[J1] appendTopicMessageNode съдържа Lafche DOM eviction safety net (LAFCHE_MESSAGE_HISTORY_LIMIT)', () => {
+  assert(appendTopicMessageNodeBody.includes('LAFCHE_MESSAGE_HISTORY_LIMIT'), 'appendTopicMessageNode must reference LAFCHE_MESSAGE_HISTORY_LIMIT for its DOM eviction safety net')
+})
+
+check('[J2] Eviction-ът работи по [data-topic-message] querySelectorAll, НЕ listEl.children.length (контейнерът може да носи structural nodes)', () => {
+  assert(appendTopicMessageNodeCode.includes("querySelectorAll<HTMLElement>('[data-topic-message]')"), 'eviction must count via [data-topic-message] query, not raw children.length')
+  assert(!appendTopicMessageNodeCode.includes('listEl.children.length'), 'eviction must not rely on raw listEl.children.length (may include non-message structural nodes)')
+})
+
+check('[J3] Eviction-ът маха най-старите nodes (индекс 0 нагоре), не произволни/newest', () => {
+  const evictionIdx = appendTopicMessageNodeCode.indexOf('excessCount')
+  assert(evictionIdx >= 0, 'excessCount-based eviction logic not found')
+  const nearby = appendTopicMessageNodeCode.slice(evictionIdx, evictionIdx + 400)
+  assert(/messageNodes\[i\]/.test(nearby), 'eviction must remove from the front of the [data-topic-message] list (oldest-first for Lafche bottom-anchored append)')
+})
+
+check('[J4] appendTopicMessageNode targeted append остава непроменен — все още append-ва/reuse-ва renderLafcheMessageRow, не regress-ва към пълен render()', () => {
+  assert(appendTopicMessageNodeCode.includes('listEl.appendChild(newNode)'), 'targeted single-node append must remain (no regression to full render)')
+  assert(!appendTopicMessageNodeCode.includes('render()'), 'appendTopicMessageNode must never call the full render() function directly')
+})
+
+check('[J5] Lafche targeted append НЕ re-trigger-ва older pagination (никакво loadOlder/onTopicMessagesLoadOlder извикване вътре)', () => {
+  assert(!appendTopicMessageNodeCode.includes('LoadOlder'), 'appendTopicMessageNode must never call any *LoadOlder* pagination function — targeted append and older-pagination are fully independent code paths')
+})
+
+// ─── K. Generic scroll listener — Lafche guard (production hotfix root
+// cause) — Lafche е bottom-anchored, "близо до дъното" е нормалното resting
+// state след auto-scroll, НЕ user-intent за по-стара история. Listener-ът
+// трябва explicit да откаже да trigger-не onTopicMessagesLoadOlder за Lafche,
+// БЕЗ да маха trigger-а за General Topics (negative regression guard).
+
+function extractScrollListenerBlock(): string {
+  const marker = "root.querySelector<HTMLElement>('[data-topic-messages-scroll=\"1\"]')"
+  const start = renderSrc.indexOf(marker)
+  if (start < 0) return ''
+  const braceStart = renderSrc.indexOf('{', renderSrc.indexOf('if (topicMessagesScroll)', start))
+  if (braceStart < 0) return ''
+  let depth = 0
+  for (let i = braceStart; i < renderSrc.length; i++) {
+    if (renderSrc[i] === '{') depth++
+    else if (renderSrc[i] === '}') {
+      depth--
+      if (depth === 0) return renderSrc.slice(start, i + 1)
+    }
+  }
+  return ''
+}
+
+const scrollListenerBlock = extractScrollListenerBlock()
+
+check('[K1] Generic topic-messages scroll listener block found', () => {
+  assert(scrollListenerBlock.length > 0, 'scroll listener wiring block not found in renderLobbyScreen.ts')
+})
+
+check('[K2] Lafche explicit guard (LAFCHE_TOPIC_ID early return) присъства ВЪТРЕ в scroll listener callback-а', () => {
+  assert(scrollListenerBlock.includes('LAFCHE_TOPIC_ID'), 'scroll listener must reference LAFCHE_TOPIC_ID')
+  assert(/if\s*\(\s*state\.activeTopicId\s*===\s*LAFCHE_TOPIC_ID\s*\)\s*return/.test(scrollListenerBlock), 'scroll listener callback must early-return for Lafche BEFORE evaluating the near-bottom threshold')
+})
+
+check('[K3] Lafche guard-ът идва ПРЕДИ threshold проверката (early-exit ред, не след)', () => {
+  const guardIdx = scrollListenerBlock.indexOf('LAFCHE_TOPIC_ID')
+  const thresholdIdx = scrollListenerBlock.indexOf('<= 40')
+  assert(guardIdx >= 0 && thresholdIdx >= 0 && guardIdx < thresholdIdx, 'Lafche guard must appear before the near-bottom threshold check, not after')
+})
+
+check('[K4] onTopicMessagesLoadOlder() извикването остава ЗА GENERAL TOPICS (negative regression — guard-ът не e премахнал целия trigger)', () => {
+  assert(scrollListenerBlock.includes('options.onTopicMessagesLoadOlder()'), 'the loadOlder trigger must still exist for non-Lafche topics — General Topics infinite-scroll pagination must remain functional')
+})
+
+// ─── L. loadOlderTopicMessages action-level structural guard (defense-in-
+// depth — не разчита ЕДИНСТВЕНО на scroll listener-а да пресече trigger-а;
+// самото action отказва да paginate-не Lafche, независимо от hasMore).
+
+function extractLoadOlderTopicMessagesBody(): string {
+  const start = controllerSrc.indexOf('async function loadOlderTopicMessages(')
+  if (start < 0) return ''
+  const braceStart = controllerSrc.indexOf('{', start)
+  let depth = 0
+  for (let i = braceStart; i < controllerSrc.length; i++) {
+    if (controllerSrc[i] === '{') depth++
+    else if (controllerSrc[i] === '}') {
+      depth--
+      if (depth === 0) return controllerSrc.slice(start, i + 1)
+    }
+  }
+  return ''
+}
+
+const loadOlderTopicMessagesBody = extractLoadOlderTopicMessagesBody()
+
+check('[L1] loadOlderTopicMessages function body found', () => {
+  assert(loadOlderTopicMessagesBody.length > 0, 'loadOlderTopicMessages function not found in createLobbyFlowController.ts')
+})
+
+check('[L2] loadOlderTopicMessages explicit отказва Lafche В НАЧАЛОТО на функцията (topicId === LAFCHE_TOPIC_ID early-return guard)', () => {
+  const nullCheckIdx = loadOlderTopicMessagesBody.indexOf('topicId === null')
+  const lafcheGuardIdx = loadOlderTopicMessagesBody.indexOf('topicId === LAFCHE_TOPIC_ID')
+  const returnIdx = loadOlderTopicMessagesBody.indexOf('return', lafcheGuardIdx)
+  assert(nullCheckIdx >= 0, 'topicId === null guard clause not found')
+  assert(lafcheGuardIdx >= 0, 'topicId === LAFCHE_TOPIC_ID guard clause not found — Lafche must never paginate regardless of hasMore/DB history')
+  assert(lafcheGuardIdx > nullCheckIdx, 'LAFCHE_TOPIC_ID guard must be part of the same early-return condition block as the null check')
+  assert(returnIdx >= 0 && returnIdx - lafcheGuardIdx < 300, 'a return statement must follow shortly after the LAFCHE_TOPIC_ID guard (same early-exit block, not a separate later branch)')
+})
+
 // ─── Финален резултат ─────────────────────────────────────────────────────
 
 console.log(`\n  Passed: ${passed}  Failed: ${failed}\n`)

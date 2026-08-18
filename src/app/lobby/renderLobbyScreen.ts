@@ -91,7 +91,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -10222,6 +10222,36 @@ export function appendTopicMessageNode(
   // General card-feed prepend не мести scroll позицията изобщо (established
   // семантика — нов root card се появява горе, без auto-scroll).
 
+  // Targeted DOM defense-in-depth (EMERGENCY production hotfix, root cause
+  // audit-а) — safety net, НЕ основен growth-control механизъм (FIX A/B
+  // по-горе вече би трябвало да пазят state <=LAFCHE_MESSAGE_HISTORY_LIMIT
+  // преди да стигне дотук). Работи по
+  // [data-topic-message] selector-и (НЕ listEl.children.length — контейнерът
+  // може да съдържа structural nodes), маха най-старите (първите в DOM реда,
+  // тъй като Lafche append-ва newest в дъното). Пази viewport стабилен чрез
+  // delta-компенсация на scrollTop (mirror на established prepend distance-
+  // preservation pattern-а другаде в този файл) — премахване отгоре на
+  // bottom-anchored container иначе би "дръпнало" видимото съдържание.
+  if (isLafche) {
+    const messageNodes = listEl.querySelectorAll<HTMLElement>('[data-topic-message]')
+    const excessCount = messageNodes.length - LAFCHE_MESSAGE_HISTORY_LIMIT
+    if (excessCount > 0) {
+      const scrollTopBeforeTrim = scrollEl.scrollTop
+      let removedHeight = 0
+      for (let i = 0; i < excessCount; i++) {
+        const oldest = messageNodes[i]
+        removedHeight += oldest.offsetHeight
+        oldest.remove()
+      }
+      // Ако потребителят не е бил scroll-нат чак най-горе (обичайният случай,
+      // тъй като Lafche е bottom-anchored), компенсираме отрязаната височина,
+      // за да не "скочи" видимото съдържание надолу.
+      if (scrollTopBeforeTrim > 0) {
+        scrollEl.scrollTop = Math.max(0, scrollTopBeforeTrim - removedHeight)
+      }
+    }
+  }
+
   return true
 }
 
@@ -11225,6 +11255,15 @@ export function renderLobbyScreen(
   const topicMessagesScroll = root.querySelector<HTMLElement>('[data-topic-messages-scroll="1"]')
   if (topicMessagesScroll) {
     topicMessagesScroll.addEventListener('scroll', () => {
+      // "Лафче" е chat-style bottom-anchored (Лафче брифа §3) — "близо до
+      // дъното" е нормалното purchase resting position (auto-scroll след
+      // всеки initial/live-append render), НЕ "потребителят е scroll-нал за
+      // по-стара история". Lafche по design НЯМА "load older" pagination,
+      // независимо от DB history/hasMore (production hotfix — виж root
+      // cause audit-а: unguarded listener + programmatic scrollTop=scrollHeight
+      // спонтанно re-trigger-ваше onTopicMessagesLoadOlder при всяко
+      // bottom-anchor събитие, водещо до unbounded merge growth).
+      if (state.activeTopicId === LAFCHE_TOPIC_ID) return
       if (topicMessagesScroll.scrollHeight - topicMessagesScroll.scrollTop - topicMessagesScroll.clientHeight <= 40) {
         options.onTopicMessagesLoadOlder()
       }

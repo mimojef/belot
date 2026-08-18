@@ -23,6 +23,24 @@ const REPLY_INDENT_PX = 14
 const TOPIC_MESSAGE_EDIT_WINDOW_MS = 15 * 60 * 1000
 /** "Лафче" system topic fixed id — seed-нат от migration 20260817_002, mirror на server LAFCHE_TOPIC_ID (index.ts). */
 export const LAFCHE_TOPIC_ID = 'topic-lafche'
+/**
+ * Единствен client-side source of truth за Lafche root-post history cap —
+ * EMERGENCY hotfix стойност (200), нарочно НЕЗАВИСИМА от server
+ * LAFCHE_MESSAGE_HISTORY_LIMIT (index.ts, все още 300 — server-side
+ * retention/hard-delete е отделен, все още unfinished etap, виж git history).
+ * Client-ът трябва да свали до newest 200 НЕЗАВИСИМО от това какво връща
+ * initial REST load-ът в момента (все още може временно да е до 300) — виж
+ * capLafcheMessagesIfNeeded (createLobbyFlowController.ts), което cap-ва
+ * ВСЕКИ merge/replace резултат до тази стойност, независимо от source
+ * batch размера. Лафче по design НЯМА "load older"/pagination (виж
+ * scroll-listener guard-а в renderLobbyScreen.ts) — state/DOM никога не
+ * трябва да пазят повече от последните 200 (newest) root posts, независимо
+ * от merge източника (initial load, topic_message, catchup, reconnect
+ * refresh). Emergency production hotfix за unbounded-growth bug (930+/1170+
+ * nodes от спонтанно re-triggered "load older" заявки, viewport lag/freeze
+ * на mobile) — viж git commit message-а.
+ */
+export const LAFCHE_MESSAGE_HISTORY_LIMIT = 200
 type TopicActionIconKind = 'like' | 'reply' | 'edit' | 'delete' | 'moderate' | 'muted'
 
 function renderTopicActionIcon(kind: TopicActionIconKind, options: { filled?: boolean } = {}): string {
@@ -867,8 +885,19 @@ function renderTopicMessageStream(state: LobbyScreenState): string {
     `
   }
 
-  const messages = state.topicMessages ?? []
+  const rawMessages = state.topicMessages ?? []
   const isLafche = state.activeTopicId === LAFCHE_TOPIC_ID
+  // Full-render defense-in-depth (EMERGENCY production hotfix, root cause
+  // audit-а) — дори ако state.topicMessages по някаква причина е
+  // >LAFCHE_MESSAGE_HISTORY_LIMIT за Lafche (state cap-ът в
+  // createLobbyFlowController.ts вече го предотвратява при всеки writer, но
+  // пълният render не трябва да разчита само на upstream дисциплина). state
+  // е newest-first (sortTopicMessagesByActivity) — slice(0, LIMIT) пази
+  // canonical newest N, реже само по-старата опашка.
+  // Normal Topics (isLafche === false) остават НЕПИПНАТИ.
+  const messages = isLafche && rawMessages.length > LAFCHE_MESSAGE_HISTORY_LIMIT
+    ? rawMessages.slice(0, LAFCHE_MESSAGE_HISTORY_LIMIT)
+    : rawMessages
 
   if (messages.length === 0) {
     return `
