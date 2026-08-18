@@ -50,6 +50,7 @@ import {
   type CoinHidePurchaseResponse,
   type CoinPackageInput,
   type CoinPackageSnapshot,
+  type VipPackageSnapshot,
   type CoinPackageStatus,
   type CoinPurchaseSnapshot,
   type FriendshipsSnapshot,
@@ -403,6 +404,19 @@ type CoinPackagesResponse = {
   ok: boolean
   packages?: CoinPackageSnapshot[]
   package?: CoinPackageSnapshot
+  message?: string
+}
+
+type VipPackagesResponse = {
+  ok: boolean
+  packages?: VipPackageSnapshot[]
+  message?: string
+}
+
+type VipCheckoutResponse = {
+  ok: boolean
+  checkoutUrl?: string
+  checkoutSessionId?: string
   message?: string
 }
 
@@ -981,6 +995,72 @@ async function startShopPurchase(packageId: string): Promise<
     return {
       ok: true,
       purchases: purchasesResult.ok ? purchasesResult.purchases : [data.purchase],
+      message: 'Пренасочване към Stripe Checkout...',
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за Stripe плащане.',
+    }
+  }
+}
+
+async function loadVipPackages(): Promise<
+  | { ok: true; packages: VipPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/packages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as VipPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'VIP офертите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за VIP офертите.',
+    }
+  }
+}
+
+async function startVipPurchase(packageId: string): Promise<
+  | { ok: true; message: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/checkout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ packageId }),
+    })
+    const data = (await response.json()) as VipCheckoutResponse
+
+    if (!response.ok || !data.ok || !data.checkoutUrl) {
+      return {
+        ok: false,
+        message: data.message ?? 'Stripe плащането не беше стартирано.',
+      }
+    }
+
+    window.location.assign(data.checkoutUrl)
+
+    return {
+      ok: true,
       message: 'Пренасочване към Stripe Checkout...',
     }
   } catch {
@@ -4705,6 +4785,8 @@ lobby = createLobbyFlowController({
   onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
   onShopPurchaseResume: (purchaseId) => resumeShopPurchase(purchaseId),
   onShopPurchaseHide: (purchaseId) => hideShopPurchase(purchaseId),
+  onVipPackagesLoad: () => loadVipPackages(),
+  onVipPurchaseStart: (packageId) => startVipPurchase(packageId),
   onAdminDailyRewardsLoad: () => loadAdminDailyRewards(),
   onAdminDailyRewardAdd: (amount) => addAdminDailyReward(amount),
   onAdminDailyRewardRemove: (tierId) => removeAdminDailyReward(tierId),

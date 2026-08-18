@@ -376,6 +376,9 @@ export type GuestContactMessageListItem = {
 export type AdminSettingsSnapshot = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number
+  vipPrice30DaysCents: number
+  vipPrice180DaysCents: number
+  vipPrice365DaysCents: number
 }
 
 export type AdminPaymentPeriodStats = {
@@ -498,6 +501,16 @@ export type CoinPackageInput = {
   sortOrder: number
   showInLobby: boolean
   isTopOffer: boolean
+}
+
+export type VipPackageId = 'vip_30' | 'vip_180' | 'vip_365'
+
+export type VipPackageSnapshot = {
+  packageId: VipPackageId
+  title: string
+  days: number
+  priceCents: number
+  currency: string
 }
 
 export type MissionType =

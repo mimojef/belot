@@ -52,6 +52,7 @@ import type {
   CoinPackageSnapshot,
   CoinPackageStatus,
   CoinPurchaseSnapshot,
+  VipPackageSnapshot,
   FriendRelationshipSnapshot,
   FriendshipsSnapshot,
   LeaderboardCategory,
@@ -322,6 +323,14 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onShopPurchaseHide?: (purchaseId: string) => Promise<
     | { ok: true; purchases: CoinPurchaseSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onVipPackagesLoad?: () => Promise<
+    | { ok: true; packages: VipPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onVipPurchaseStart?: (packageId: string) => Promise<
+    | { ok: true; message: string }
     | { ok: false; message: string }
   >
   onAdminStatsLoad?: () => Promise<
@@ -1139,6 +1148,7 @@ type InternalLobbyFlowState = {
   leaderboardsErrorText: string | null
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
+  shopActiveTab: 'coins' | 'vip'
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -1151,6 +1161,11 @@ type InternalLobbyFlowState = {
   shopPurchaseResumeId: string | null
   shopPurchaseHideConfirmId: string | null
   shopPurchaseActionPurchaseId: string | null
+  vipPackages: VipPackageSnapshot[]
+  vipPackagesLoading: boolean
+  vipPackagesErrorText: string | null
+  vipPurchaseActionPackageId: string | null
+  vipPurchaseMessageText: string | null
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -1170,6 +1185,7 @@ type InternalLobbyFlowState = {
   adminSettings: AdminSettingsSnapshot | null
   adminSettingsLoading: boolean
   adminSettingsErrorText: string | null
+  adminSettingsSuccessText: string | null
   adminCoinPackages: CoinPackageSnapshot[]
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
@@ -1648,6 +1664,7 @@ function createInitialState(): InternalLobbyFlowState {
     leaderboardsErrorText: null,
     activeLeaderboardCategory: 'balance',
     lobbyPackages: [],
+    shopActiveTab: 'coins',
     shopPackages: [],
     shopPackagesLoading: false,
     shopPackagesErrorText: null,
@@ -1660,6 +1677,11 @@ function createInitialState(): InternalLobbyFlowState {
     shopPurchaseResumeId: null,
     shopPurchaseHideConfirmId: null,
     shopPurchaseActionPurchaseId: null,
+    vipPackages: [],
+    vipPackagesLoading: false,
+    vipPackagesErrorText: null,
+    vipPurchaseActionPackageId: null,
+    vipPurchaseMessageText: null,
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -1679,6 +1701,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminSettings: null,
     adminSettingsLoading: false,
     adminSettingsErrorText: null,
+    adminSettingsSuccessText: null,
     adminCoinPackages: [],
     adminCoinPackagesLoading: false,
     adminCoinPackagesErrorText: null,
@@ -3186,6 +3209,7 @@ export function createLobbyFlowController(
       leaderboardsErrorText: state.leaderboardsErrorText,
       activeLeaderboardCategory: state.activeLeaderboardCategory,
       lobbyPackages: state.lobbyPackages,
+      shopActiveTab: state.shopActiveTab,
       shopPackages: state.shopPackages,
       shopPackagesLoading: state.shopPackagesLoading,
       shopPackagesErrorText: state.shopPackagesErrorText,
@@ -3195,6 +3219,11 @@ export function createLobbyFlowController(
       shopPurchaseConfirmPackageId: state.shopPurchaseConfirmPackageId,
       shopPurchaseActionPackageId: state.shopPurchaseActionPackageId,
       shopPurchaseMessageText: state.shopPurchaseMessageText,
+      vipPackages: state.vipPackages,
+      vipPackagesLoading: state.vipPackagesLoading,
+      vipPackagesErrorText: state.vipPackagesErrorText,
+      vipPurchaseActionPackageId: state.vipPurchaseActionPackageId,
+      vipPurchaseMessageText: state.vipPurchaseMessageText,
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
@@ -3219,6 +3248,7 @@ export function createLobbyFlowController(
       adminSettings: state.adminSettings,
       adminSettingsLoading: state.adminSettingsLoading,
       adminSettingsErrorText: state.adminSettingsErrorText,
+      adminSettingsSuccessText: state.adminSettingsSuccessText,
       adminCoinPackages: state.adminCoinPackages,
       adminCoinPackagesLoading: state.adminCoinPackagesLoading,
       adminCoinPackagesErrorText: state.adminCoinPackagesErrorText,
@@ -3746,6 +3776,12 @@ export function createLobbyFlowController(
       onShopHistoryToggle: () => {
         state.shopPurchasesVisible = !state.shopPurchasesVisible
         render()
+      },
+      onShopTabClick: (tab) => {
+        switchShopTab(tab)
+      },
+      onVipPurchaseClick: (packageId) => {
+        void startVipPurchase(packageId)
       },
       onLeaderboardsClick: () => {
         void showLeaderboardsDirectory()
@@ -7750,7 +7786,7 @@ export function createLobbyFlowController(
 
     if (state.shopPackages.length > 0 && state.shopPackagesErrorText === null) {
       render()
-      await loadShopPurchases()
+      await Promise.all([loadShopPurchases(), loadVipPackages(true)])
       return
     }
 
@@ -7780,7 +7816,88 @@ export function createLobbyFlowController(
     state.shopPackagesErrorText = null
     render()
 
-    await loadShopPurchases()
+    await Promise.all([loadShopPurchases(), loadVipPackages(true)])
+  }
+
+  // ВАЖНО: за разлика от loadShopPackages/loadShopPurchases (coin пакети),
+  // VIP цените се редактират от Admin панела в СЪЩАТА клиентска сесия —
+  // "reuse ако вече е заредено" guard тук би показвал stale цена след admin
+  // Save, докато потребителят не презареди страницата. Затова VIP каталогът
+  // се refetch-ва при всяко влизане в Shop screen (viж showShopPanel) вместо
+  // да се кешира за целия lifetime на сесията. forceRefresh позволява explicit
+  // re-fetch (напр. веднага след admin Save) дори ако вече има кеширани данни.
+  async function loadVipPackages(forceRefresh = false): Promise<void> {
+    if (!options.onVipPackagesLoad) {
+      state.vipPackagesErrorText = 'VIP офертите временно не са налични.'
+      render()
+      return
+    }
+
+    if (!forceRefresh && state.vipPackages.length > 0 && state.vipPackagesErrorText === null) {
+      return
+    }
+
+    state.vipPackagesLoading = true
+    state.vipPackagesErrorText = null
+    render()
+
+    const result = await options.onVipPackagesLoad()
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    state.vipPackagesLoading = false
+
+    if (!result.ok) {
+      state.vipPackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.vipPackages = result.packages
+    state.vipPackagesErrorText = null
+    render()
+  }
+
+  function switchShopTab(tab: 'coins' | 'vip'): void {
+    if (state.shopActiveTab === tab) {
+      return
+    }
+    state.shopActiveTab = tab
+    render()
+    if (tab === 'vip' && state.vipPackages.length === 0 && !state.vipPackagesLoading) {
+      void loadVipPackages()
+    }
+  }
+
+  async function startVipPurchase(packageId: string): Promise<void> {
+    if (state.vipPurchaseActionPackageId !== null) {
+      return
+    }
+
+    if (!options.onVipPurchaseStart) {
+      state.vipPurchaseMessageText = 'VIP покупките временно не са налични.'
+      render()
+      return
+    }
+
+    state.vipPurchaseActionPackageId = packageId
+    state.vipPurchaseMessageText = null
+    render()
+
+    const result = await options.onVipPurchaseStart(packageId)
+
+    state.vipPurchaseActionPackageId = null
+
+    if (!result.ok) {
+      state.vipPurchaseMessageText = result.message
+      render()
+      return
+    }
+
+    state.vipPurchaseMessageText = result.message
+    render()
   }
 
   async function loadShopPurchases(): Promise<void> {
@@ -8652,6 +8769,7 @@ export function createLobbyFlowController(
 
     state.adminSettingsLoading = true
     state.adminSettingsErrorText = null
+    state.adminSettingsSuccessText = null
     state.adminCoinPackagesLoading = Boolean(options.onAdminCoinPackagesLoad)
     state.adminCoinPackagesErrorText = null
     state.adminActiveDailyRewardTiers = []
@@ -8701,23 +8819,32 @@ export function createLobbyFlowController(
   async function submitAdminSettings(settings: AdminSettingsSnapshot): Promise<void> {
     if (!options.onAdminSettingsSubmit) {
       state.adminSettingsErrorText = 'Админ настройките временно не са налични.'
+      state.adminSettingsSuccessText = null
       render()
       return
     }
 
     state.adminSettingsErrorText = null
+    state.adminSettingsSuccessText = null
     render()
 
     const result = await options.onAdminSettingsSubmit(settings)
 
     if (!result.ok) {
       state.adminSettingsErrorText = result.message
+      state.adminSettingsSuccessText = null
       render()
       return
     }
 
     state.adminSettings = result.settings
     state.adminSettingsErrorText = null
+    state.adminSettingsSuccessText = 'Настройките са запазени.'
+    // VIP цените може да са част от тази заявка — инвалидираме локалния VIP
+    // package snapshot, за да не остане stale ако администраторът отвори
+    // Shop -> VIP без пълен showShopPanel refresh cycle (viж loadVipPackages
+    // за детайлния reasoning защо VIP каталогът не се кешира за сесията).
+    state.vipPackages = []
     render()
   }
 
