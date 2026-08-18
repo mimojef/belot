@@ -63,6 +63,18 @@ export type TopicMessageAggregates = {
   viewerHasLiked: boolean
 }
 
+/**
+ * Lafche 200-post hard retention victim (production hotfix — root cause
+ * audit-а: unbounded scroll-triggered "load older" доведе до 900+ Lafche
+ * root nodes в client DOM). `attachmentFilename` е подаден explicit, за да
+ * може caller-ът (index.ts) да провери mute-evidence references и да copy-не
+ * файла в protected evidence storage ПРЕДИ hard delete, без допълнителен lookup.
+ */
+export type LafcheRetentionVictim = {
+  messageId: string
+  attachmentFilename: string | null
+}
+
 // Attachment metadata — reuse на СЪЩИЯ shape/модел като
 // ChatAttachmentSnapshot/support attachment (виж chatStore.ts): отделна
 // таблица (не колона в topic_messages), 1:1 с message_id, derived-at-read
@@ -212,6 +224,34 @@ export type TopicMessageStore = {
    * 180-day purge е authoritative за removed теми, виж имплементацията).
    */
   purgeDeletedTopicMessagesBefore: (cutoff: Date, batchSize: number) => number
+  /**
+   * Lafche 200-post hard retention (production hotfix). Read-only — връща
+   * LIVE (deleted_at IS NULL) root съобщения В ДАДЕНАТА тема ОТВЪД canonical
+   * newest `limit`, подредени по topic_messages.seq DESC (server-authoritative
+   * monotonic ordering — mirror на клиентския sortTopicMessagesByActivity
+   * newest-first semantics; за Lafche flat chat-style постовете нямат
+   * reply-bump reordering, значи seq DESC == activity DESC). Единствен
+   * source of truth за "кой е victim" — ползва се и от dry-run reporting
+   * (scripts/), и от реалния enforceLafcheRetention (index.ts).
+   */
+  getLafcheRetentionVictims: (topicId: string, limit: number) => LafcheRetentionVictim[]
+  /** Брой LIVE (deleted_at IS NULL) root съобщения в темата — dry-run/enforcement bookkeeping. */
+  countLiveRootMessages: (topicId: string) => number
+  /**
+   * Hard-delete на подадените root message ids (очаква се да идват от
+   * getLafcheRetentionVictims, СЛЕД caller-ът вече е copy-нал/repoint-нал
+   * евентуален mute-evidence attachment reference — виж
+   * index.ts enforceLafcheRetention). Единична BEGIN IMMEDIATE транзакция:
+   * enqueue-ва attachment файловете им за физически cleanup (established
+   * topic_message_attachment_deletions queue, СЪЩИЯТ механизъм като
+   * deleteMessage), после DELETE FROM topic_messages (CASCADE маха
+   * replies/likes/thread-read-state автоматично, виж migration коментарите).
+   * НЕ insert-ва deletion fanout event/audit ред (продуктово решение —
+   * retention не е moderator/self delete action, виж имплементацията).
+   * НЕ пипа topic_mute_evidence — source_message_id FK е ON DELETE SET
+   * NULL, не CASCADE, значи text snapshot оцелява автоматично.
+   */
+  hardDeleteRetentionVictims: (topicId: string, messageIds: readonly string[]) => { deletedAttachmentFilenames: string[] }
   /**
    * Batch likeCount/replyCount/viewerHasLiked за набор от messageId-та —
    * до 4 агрегатни заявки ОБЩО за целия набор (не per-message), захранва REST
@@ -1207,6 +1247,78 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     return totalDeleted
   }
 
+  const selectLiveRootCountStatement = database.prepare(`
+    SELECT COUNT(*) as cnt FROM topic_messages
+    WHERE topic_id = ? AND parent_message_id IS NULL AND deleted_at IS NULL;
+  `)
+
+  function countLiveRootMessages(topicId: string): number {
+    const row = selectLiveRootCountStatement.get(topicId) as { cnt: number }
+    return row.cnt
+  }
+
+  // OFFSET `limit` върху seq DESC (newest-first) landing точно на границата
+  // на canonical newest-N прозореца (N = LAFCHE_MESSAGE_HISTORY_LIMIT,
+  // подаден от caller-а — 200) — всичко в резултата Е "по-старо от
+  // newest N-тия", значи Е retention victim по дефиниция. LEFT JOIN към
+  // topic_message_attachments (max 1/съобщение) вместо отделен batch lookup —
+  // евтино за bounded batch размер.
+  const selectLafcheRetentionVictimsStatement = database.prepare(`
+    SELECT m.message_id, a.storage_filename
+    FROM topic_messages m
+    LEFT JOIN topic_message_attachments a ON a.message_id = m.message_id
+    WHERE m.topic_id = ? AND m.parent_message_id IS NULL AND m.deleted_at IS NULL
+    ORDER BY m.seq DESC
+    LIMIT -1 OFFSET ?;
+  `)
+
+  function getLafcheRetentionVictims(topicId: string, limit: number): LafcheRetentionVictim[] {
+    if (limit < 0) return []
+    const rows = selectLafcheRetentionVictimsStatement.all(topicId, limit) as Array<{
+      message_id: string
+      storage_filename: string | null
+    }>
+    return rows.map((row) => ({ messageId: row.message_id, attachmentFilename: row.storage_filename }))
+  }
+
+  function hardDeleteRetentionVictims(topicId: string, messageIds: readonly string[]): { deletedAttachmentFilenames: string[] } {
+    if (messageIds.length === 0) return { deletedAttachmentFilenames: [] }
+    const ids = [...messageIds]
+    const placeholders = ids.map(() => '?').join(',')
+    let deletedAttachmentFilenames: string[] = []
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const attachmentRows = database
+        .prepare(`SELECT storage_filename FROM topic_message_attachments WHERE message_id IN (${placeholders});`)
+        .all(...ids) as Array<{ storage_filename: string }>
+      deletedAttachmentFilenames = attachmentRows.map((row) => row.storage_filename)
+      for (const filename of deletedAttachmentFilenames) {
+        insertAttachmentDeletionStatement.run(filename)
+      }
+
+      // НЕ insert-ва deletion fanout event/audit ред тук нарочно (продуктово
+      // решение) — retention hard-delete НЕ е moderator/self delete
+      // действие, значи не носи семантиката, за която
+      // topic_message_deletion_events/*_audit_log съществуват (cross-
+      // instance realtime notify за subscriber-и, които currently виждат
+      // content-а). Client Lafche cap вече пази state/DOM самостоятелно —
+      // victim-ите по дефиниция никога не са в текущия зареден client range.
+      database.prepare(`DELETE FROM topic_messages WHERE message_id IN (${placeholders});`).run(...ids)
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // ignore rollback failure, surface the original error below
+      }
+      throw error
+    }
+
+    return { deletedAttachmentFilenames }
+  }
+
   // ─── Likes (Етап 3) ──────────────────────────────────────────────────────
 
   function getMessageAggregatesByIds(
@@ -1434,6 +1546,9 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     getMaxEditEventSeq,
     pollMessageEditEvents,
     purgeDeletedTopicMessagesBefore,
+    getLafcheRetentionVictims,
+    countLiveRootMessages,
+    hardDeleteRetentionVictims,
     getMessageAggregatesByIds,
     getAttachmentsByMessageIds,
     getAttachmentForDownload,

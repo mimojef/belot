@@ -37,6 +37,7 @@ const editMigrationPath = resolve(serverRoot, 'database/migrations/20260812_003_
 const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260814_001_create_topic_section_mutes.sql')
 const lafcheSeedMigrationPath = resolve(serverRoot, 'database/migrations/20260817_002_seed_topic_lafche.sql')
 const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
+const evidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
 
 let passed = 0
 let failed = 0
@@ -71,7 +72,15 @@ async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
   try {
     await fn(dir)
   } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    // Windows понякога държи handle към .sqlite-wal/.sqlite-shm за кратко
+    // СЛЕД db.close() (delayed OS-level release) — cleanup failure тук е
+    // ирелевантно за коректността на теста (вече е приключил), затова
+    // retry + swallow (established pattern, виж retryRm в
+    // checkTopicModerationAuthRealtime.ts) вместо необработено rejection,
+    // което би съборило целия process.
+    try {
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    } catch { /* best-effort temp dir cleanup — не е test failure */ }
   }
 }
 
@@ -125,6 +134,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, sectionMutesMigrationPath)
   await applyMigrationFile(db, lafcheSeedMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
+  await applyMigrationFile(db, evidenceAttachmentCopyMigrationPath)
   seedAccount(db, 'moderator-1')
   seedProfile(db, 'target-1')
   seedProfile(db, 'target-2')

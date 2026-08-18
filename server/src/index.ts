@@ -328,6 +328,15 @@ const SUPPORT_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'support-attachm
 // chat/support (НЕ в PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS по-долу) — Topics е
 // registered-only четене, а не публично достъпно съдържание.
 const TOPIC_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'topic-attachments')
+// Lafche retention hotfix — protected, moderation-ONLY evidence image copies
+// (виж 20260818_005_add_topic_mute_evidence_attachment_copy.sql). Отделна
+// директория от TOPIC_ATTACHMENT_UPLOADS_PATH нарочно: normal Lafche
+// attachment cleanup (enqueueAttachmentDeletion) никога не пипа тази папка,
+// значи hard-delete на source поста не може случайно да premahne evidence
+// копие, което живее тук. НЕ е в PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS — served
+// изключително през handleTopicMuteEvidenceAttachmentDownloadRequest
+// (moderator-only auth), никога през generic uploads route.
+const TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'topic-mute-evidence-attachments')
 // base64 data URL overhead е ~33% над бинарния размер; 10MB оригинал →
 // ~13.3MB base64 текст. 15MB праг покрива това с марж, съгласувано с
 // MAX_JSON_BODY_BYTES, ползван за profile avatar/gallery endpoint-ите.
@@ -914,12 +923,17 @@ const TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT = 50
 // на topic-general seed-a). Reuse-ва изцяло topics/topic_messages
 // инфраструктурата (Вариант A от inspection брифа), НЕ нова таблица.
 const LAFCHE_TOPIC_ID = 'topic-lafche'
-// "Последните 300 root posts" (Лафче брифа §3) — покрива TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT-а
-// по-горе (50) само за първоначален catch-up; getRecentMessages с explicit
-// по-висок limit се ползва за HTTP initial-load handler-а (виж handleTopicMessagesRequest).
-// Старите postове над 300 остават четими в DB (не се трият), просто не се
-// зареждат в клиента — client-ът никога не показва "load older" за тази тема.
-const LAFCHE_MESSAGE_HISTORY_LIMIT = 300
+// "Последните 200 root posts" (canonical retention limit, синхронизиран с
+// client LAFCHE_MESSAGE_HISTORY_LIMIT — renderTopicsScreen.ts) — покрива
+// TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT-а по-горе (50) само за първоначален
+// catch-up; getRecentMessages с explicit по-висок limit се ползва за HTTP
+// initial-load handler-а (виж handleTopicMessagesRequest). Server-side hard
+// retention (enforceLafcheRetention по-долу) поддържа DB-то самото <=200
+// steady-state след explicit backlog normalization (виж
+// scripts/lafcheRetentionCleanup.ts) — преди тази нормализация DB може
+// временно да съдържа legacy backlog >200, четим, но НЕ mass-delete-ван от
+// нормалния request path (виж enforceLafcheRetention guard-а).
+const LAFCHE_MESSAGE_HISTORY_LIMIT = 200
 const TOPIC_MESSAGE_POLL_BATCH_SIZE = 200
 const TOPIC_MESSAGE_RATE_LIMIT_WINDOW_MS = 10_000
 const TOPIC_MESSAGE_RATE_LIMIT_MAX_PER_WINDOW = 5
@@ -1089,6 +1103,24 @@ type TopicReplyBroadcastBase = Omit<TopicReplyBroadcastSnapshot, 'viewerHasLiked
 function buildTopicAttachmentUrls(topicId: string, storageFilename: string): { viewUrl: string; downloadUrl: string } {
   const base = `/api/topics/${encodeURIComponent(topicId)}/attachments/${encodeURIComponent(storageFilename)}`
   return { viewUrl: base, downloadUrl: `${base}?download=1` }
+}
+
+// Lafche retention hotfix — mute evidence attachment URL, разклонено по
+// isEvidenceCopy: false (default/legacy) → нормалният topic-attachment route
+// (source постът все още е жив, в рамките на newest-N, N=LAFCHE_MESSAGE_HISTORY_LIMIT); true → protected
+// moderation-only evidence endpoint (source вече hard-deleted от retention,
+// файлът живее в отделен protected storage, виж
+// handleTopicMuteEvidenceAttachmentDownloadRequest).
+function buildTopicMuteEvidenceAttachmentUrls(
+  topicId: string,
+  storageFilename: string,
+  isEvidenceCopy: boolean,
+): { viewUrl: string; downloadUrl: string } {
+  if (isEvidenceCopy) {
+    const base = `/api/topics/mute-evidence/attachments/${encodeURIComponent(storageFilename)}`
+    return { viewUrl: base, downloadUrl: base }
+  }
+  return buildTopicAttachmentUrls(topicId, storageFilename)
 }
 
 function hydrateTopicMessagesWithCurrentAvatars(
@@ -5080,6 +5112,172 @@ async function deleteTopicAttachmentFileByFilename(filename: string): Promise<bo
   return await deleteAttachmentFileByFilename(TOPIC_ATTACHMENT_UPLOADS_PATH, filename)
 }
 
+// Lafche retention hotfix (виж migration коментара при
+// TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH) — physical copy на normal
+// Lafche attachment в protected evidence-only storage, ПРЕДИ enforceLafcheRetention
+// enqueue-не оригинала за cleanup. Ново random filename (не reuse на
+// оригиналното) — двете storage roots пазят напълно независими namespace-и,
+// нулев риск от collision. Връща null при ЛЮБОЙ грешка (source липсва,
+// read/write fail) — caller-ът (enforceLafcheRetention) третира null като
+// "skip този victim за този цикъл, retry следващия път", НИКОГА не
+// hard-delete-ва source-а, ако copy-то не е доказано успешно.
+async function copyTopicAttachmentToEvidenceStorage(sourceFilename: string): Promise<string | null> {
+  if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(sourceFilename)) {
+    return null
+  }
+  try {
+    const sourceBuffer = await readFile(join(TOPIC_ATTACHMENT_UPLOADS_PATH, sourceFilename))
+    const newFilename = `${randomUUID()}.webp`
+    await writeWebpAttachmentFile(TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH, newFilename, sourceBuffer)
+    return newFilename
+  } catch (error) {
+    console.error('[topics] copyTopicAttachmentToEvidenceStorage failed:', error)
+    return null
+  }
+}
+
+// Lafche steady-state hard retention enforcement (production hotfix — root
+// cause audit-а: unbounded client-side scroll-triggered "load older" доведе
+// до 900+ Lafche root nodes; LAFCHE_MESSAGE_HISTORY_LIMIT вече cap-ва
+// initial REST load-а, но нищо не е пазило DB-то самото под лимита).
+// Извиква се fire-and-forget СЛЕД всеки успешен нов Lafche root insert (виж
+// send_topic_message handler-а по-долу) — конкретно чрез
+// enqueueLafcheRetentionEnforcement(), НЕ директно.
+//
+// КРИТИЧНО — steady-state guard (НЕ mass-delete на legacy backlog): тази
+// функция trim-ва до LIMIT В РАМКИТЕ НА ЕДНО извикване, САМО ако overshoot-ът
+// (liveCount - LIMIT) е в разумен "concurrent burst" диапазон
+// (LAFCHE_STEADY_STATE_BURST_TOLERANCE). Ако overshoot-ът е по-голям
+// (production legacy backlog, натрупан преди този hotfix), функцията explicit
+// ОТКАЗВА да пипа каквото и да е и само лог-ва предупреждение — bulk
+// backlog normalization е ИЗКЛЮЧИТЕЛНО отговорност на
+// scripts/lafcheRetentionCleanup.ts --mode=apply (explicit, ръчно
+// задействан, extends извън normal request path), НЕ на този hook.
+// Причина: първият нов Lafche пост след deploy на този hotfix НЕ трябва
+// synchronously да заличи стотици/хиляди historical rows в рамките на един
+// send_topic_message request.
+//
+// ЗАЩО BURST TOLERANCE (не просто LIMIT+1, corrective pass): real-concurrency
+// тест (checkLafcheRetentionConcurrency.ts) доказа, че fire-and-forget
+// извикването + awaited evidence-copy стъпката ПОЗВОЛЯВАТ реално interleaving
+// между 2+ Lafche постове, пристигнали близо един до друг — post A тика
+// count до LIMIT+1 и започва (евентуално await-ващо evidence-copy)
+// enforcement; докато A чака, post(ове) B/C/... тикат count по-нагоре и
+// техните собствени (бързи, sync, без evidence) enforcement извиквания viждат
+// count > LIMIT+1 и се отказват. Със стария exact "==LIMIT+1" design това
+// оставяше DB ЗАКЛЕЩЕНА над лимита завинаги (всеки следващ пост пак вижда
+// >LIMIT+1 и отказва) — заради ЛЕГИТИМЕН concurrent traffic, не заради
+// реален legacy backlog. Bounded loop + малка толеранс не мени safety
+// гаранцията за истински backlog (стотици/хиляди редове далеч надвишават
+// толеранса) — просто позволява на легитимни малки concurrent burst-ове да
+// се trim-нат coherentно в рамките на serialized turns (виж по-долу).
+//
+// СЕРИАЛИЗАЦИЯ (corrective pass) — enqueueLafcheRetentionEnforcement()
+// chain-ва последователни извиквания на promise опашка, за да НЕ overlap-ват
+// две enforcement извиквания едновременно (само ЕДНО в даден момент е
+// "в течение", включително docато await-ва evidence copy). Без това,
+// concurrent извиквания виждат несъгласувани/stale liveCount снимки помежду
+// си (виж по-горе). enforceLafcheRetentionOnce() никога не хвърля навън
+// (own try/catch) — опашката никога не се "заклещва" от失败.
+//
+// Двуфазов design за всяка отделна victim стъпка вътре в цикъла (async
+// file-copy ПРЕДИ синхронната DB транзакция, НИКОГА await ВЪТРЕ в
+// BEGIN IMMEDIATE...COMMIT) — node:sqlite DatabaseSync е ЕДНА споделена
+// synchronous connection за целия process (виж topicMessageStore.ts); await
+// посред отворена транзакция би позволил на друг handler да изпълни
+// несвързана заявка ВЪТРЕ в СЪЩАТА отворена транзакция (correctness риск) —
+// затова целият filesystem copy работи ИЗЦЯЛО извън всякаква open
+// transaction, а самото hard delete е чисто синхронно
+// (hardDeleteRetentionVictims). НЕ insert-ва deletion fanout event/audit
+// redove — retention не е moderator/self delete action (виж
+// hardDeleteRetentionVictims коментара).
+const LAFCHE_STEADY_STATE_BURST_TOLERANCE = 25
+
+async function enforceLafcheRetentionOnce(): Promise<void> {
+  try {
+    let liveCount = topicMessageStore.countLiveRootMessages(LAFCHE_TOPIC_ID)
+    if (liveCount <= LAFCHE_MESSAGE_HISTORY_LIMIT) return
+
+    const overshoot = liveCount - LAFCHE_MESSAGE_HISTORY_LIMIT
+    if (overshoot > LAFCHE_STEADY_STATE_BURST_TOLERANCE) {
+      console.warn(
+        `[topics] Lafche live root count (${liveCount}) е над steady-state burst tolerance ` +
+        `(${LAFCHE_MESSAGE_HISTORY_LIMIT} + ${LAFCHE_STEADY_STATE_BURST_TOLERANCE}) — вероятно legacy backlog отпреди retention hotfix-а. ` +
+        `НЕ mass-delete-вам от normal request path. Нормализирай явно чрез ` +
+        `"tsx scripts/lafcheRetentionCleanup.ts --mode=apply" (виж --mode=dry-run за преглед първо).`,
+      )
+      return
+    }
+
+    // Overshoot-ът е в concurrent-burst диапазона — trim-вай итеративно
+    // (ограничен loop, serialized turn) обратно до LIMIT.
+    while (liveCount > LAFCHE_MESSAGE_HISTORY_LIMIT) {
+      const victims = topicMessageStore.getLafcheRetentionVictims(LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT)
+      if (victims.length === 0) return
+      // getLafcheRetentionVictims връща по seq DESC (newest-of-the-victims
+      // първи, виж SQL коментара в topicMessageStore.ts) — при >1 victim
+      // (възможно само в bounded-loop-а тук, единичната стара
+      // steady-state==LIMIT+1 логика винаги имаше точно 1 victim, значи
+      // индексът никога не е имал значение там) ПОСЛЕДНИЯТ елемент е
+      // АБСОЛЮТНО най-стария, не victims[0]. Трием винаги най-стария първи
+      // (established инвариант — "trim exact oldest root").
+      const victim = victims[victims.length - 1]!
+
+      if (victim.attachmentFilename !== null) {
+        // Само ако filename-ът е реферирано от поне един ЖИВ (still-shared-
+        // storage) mute evidence ред трябва да се copy-не — normal victim без
+        // evidence reference просто ще бъде enqueue-нат за нормален cleanup
+        // вътре в hardDeleteRetentionVictims.
+        const referencedByEvidence = topicModerationStore.getActiveEvidenceAttachmentReferences([victim.attachmentFilename])
+        if (referencedByEvidence.has(victim.attachmentFilename)) {
+          const copiedFilename = await copyTopicAttachmentToEvidenceStorage(victim.attachmentFilename)
+          if (copiedFilename === null) {
+            // Copy неуспешен (напр. source файлът временно недостъпен) —
+            // retention НЕ трябва да hard-delete-ва source-а в ТОЗИ цикъл, за
+            // да не осиротее evidence-ът. Спираме ЦЕЛИЯ loop тук (не skip-ваме
+            // към следващия victim) — следващият root insert ще retry-не
+            // автоматично (getLafcheRetentionVictims пак ще върне СЪЩИЯ
+            // oldest victim първи).
+            return
+          }
+          topicModerationStore.repointMuteEvidenceAttachmentToEvidenceCopy(victim.attachmentFilename, copiedFilename)
+        }
+      }
+
+      // Благодарение на серилизацията (enqueueLafcheRetentionEnforcement)
+      // НИКОЕ друго enforceLafcheRetentionOnce() извикване не тече конкурентно
+      // с това — единствената причина victim-ът да е изчезнал междувременно е
+      // НЕСВЪРЗАНО concurrent действие (напр. moderator hard-delete чрез
+      // deleteMessage) по време на await-а по-горе, не race с друг retention
+      // цикъл. Ре-проверяваме explicit вместо да приемаме stale ID е все още валиден.
+      if (topicMessageStore.getMessageById(victim.messageId) === null) {
+        liveCount = topicMessageStore.countLiveRootMessages(LAFCHE_TOPIC_ID)
+        continue
+      }
+
+      topicMessageStore.hardDeleteRetentionVictims(LAFCHE_TOPIC_ID, [victim.messageId])
+      liveCount = topicMessageStore.countLiveRootMessages(LAFCHE_TOPIC_ID)
+    }
+  } catch (error) {
+    console.error('[topics] enforceLafcheRetentionOnce failed:', error)
+  }
+}
+
+// Promise-опашка сериализираща последователни enforceLafcheRetentionOnce()
+// извиквания (виж rationale-а по-горе) — enforceLafcheRetentionOnce()
+// никога не хвърля (own try/catch), но `.catch` тук е defense-in-depth: ако
+// бъдещ edit случайно въведе escaping error, опашката пак продължава напред
+// вместо permanently да се "заклещи" (следващите enqueue-вания никога не
+// биха изпълнили job-а си, ако tail promise остане rejected завинаги).
+let lafcheRetentionEnforcementQueueTail: Promise<void> = Promise.resolve()
+
+function enqueueLafcheRetentionEnforcement(): void {
+  lafcheRetentionEnforcementQueueTail = lafcheRetentionEnforcementQueueTail.then(
+    () => enforceLafcheRetentionOnce(),
+    () => enforceLafcheRetentionOnce(),
+  )
+}
+
 type ProfileImageProcessingError =
   | 'decode_failed'
   | 'unsupported_format'
@@ -7816,7 +8014,7 @@ async function handleTopicMessagesRequest(
 
   // "Лафче" initial load (без beforeSeq — не "load older" pagination, виж
   // клиента, който никога не изгражда load-more UI за тази тема): override
-  // до LAFCHE_MESSAGE_HISTORY_LIMIT (300), независимо от заявения client
+  // до LAFCHE_MESSAGE_HISTORY_LIMIT (200), независимо от заявения client
   // ?limit=, вместо стандартния TOPIC_MESSAGES_MAX_LIMIT (50) таван за
   // normal Topics (Лафче брифа §3).
   const limit = topicId === LAFCHE_TOPIC_ID && beforeSeq === null
@@ -8044,6 +8242,70 @@ async function handleTopicAttachmentDownloadRequest(
       ...(isDownload
         ? { 'Content-Disposition': `attachment; filename="pika-topic-${attachment.storageFilename}"` }
         : {}),
+    })
+    res.end(fileBuffer)
+    return true
+  } catch {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
+}
+
+// Protected evidence-copy attachment download (Lafche retention hotfix) —
+// СЪЩИЯТ response модел като handleTopicAttachmentDownloadRequest, но:
+//  - moderator-only auth (isTopicModeratorSession), НЕ обикновена registered
+//    сесия — evidence снимки не са normal public-to-registered Lafche
+//    съдържание, само модераторският "моята история"/evidence flow ги вижда;
+//  - authorization/isolation през topicModerationStore.isRegisteredEvidenceAttachmentCopy
+//    (СЪЩАТА цел като attachment↔topic JOIN isolation-a в normal handler-а —
+//    предотвратява enumeration на файлове в protected evidence storage-a
+//    чрез познат UUID.webp filename), НЕ topic_messages/topic_message_attachments
+//    JOIN (source-ът вече може да е hard-deleted до момента на този request).
+async function handleTopicMuteEvidenceAttachmentDownloadRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/topics\/mute-evidence\/attachments\/([^/]+)$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const filename = decodeURIComponent(match[1] ?? '')
+
+  if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно име на файл.' })
+    return true
+  }
+
+  if (!topicModerationStore.isRegisteredEvidenceAttachmentCopy(filename)) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+    return true
+  }
+
+  const filePath = join(TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH, filename)
+
+  try {
+    const fileStats = await stat(filePath)
+
+    if (!fileStats.isFile()) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
+      return true
+    }
+
+    const fileBuffer = await readFile(filePath)
+
+    res.writeHead(200, {
+      'Content-Type': 'image/webp',
+      'Cache-Control': 'private, max-age=86400',
     })
     res.end(fileBuffer)
     return true
@@ -8489,7 +8751,7 @@ async function handleTopicMuteEvidenceForSelfRequest(
       sourceKind: entry.sourceKind,
       sourceBodySnapshot: entry.sourceBodySnapshot,
       sourceAttachment: entry.sourceAttachment
-        ? { ...buildTopicAttachmentUrls(entry.sourceTopicId, entry.sourceAttachment.storageFilename), width: entry.sourceAttachment.width, height: entry.sourceAttachment.height }
+        ? { ...buildTopicMuteEvidenceAttachmentUrls(entry.sourceTopicId, entry.sourceAttachment.storageFilename, entry.sourceAttachment.isEvidenceCopy), width: entry.sourceAttachment.width, height: entry.sourceAttachment.height }
         : null,
       sourceCreatedAt: entry.sourceCreatedAt,
       originalMessagePostDeleted: entry.originalMessageDeletedAt !== null,
@@ -8552,7 +8814,7 @@ async function handleTopicMuteEvidenceForModeratorRequest(
       sourceKind: entry.sourceKind,
       sourceBodySnapshot: entry.sourceBodySnapshot,
       sourceAttachment: entry.sourceAttachment
-        ? { ...buildTopicAttachmentUrls(entry.sourceTopicId, entry.sourceAttachment.storageFilename), width: entry.sourceAttachment.width, height: entry.sourceAttachment.height }
+        ? { ...buildTopicMuteEvidenceAttachmentUrls(entry.sourceTopicId, entry.sourceAttachment.storageFilename, entry.sourceAttachment.isEvidenceCopy), width: entry.sourceAttachment.width, height: entry.sourceAttachment.height }
         : null,
       sourceCreatedAt: entry.sourceCreatedAt,
       originalMessageDeletedAt: entry.originalMessageDeletedAt,
@@ -13063,6 +13325,18 @@ async function handleHttpRequest(
     return
   }
 
+  // handleTopicMuteEvidenceAttachmentDownloadRequest ПРЕДИ handleTopicAttachmentDownloadRequest
+  // нарочно: и двата regex-а match-ват формата /api/topics/:x/attachments/:filename
+  // (generic-ят третира ":x" като произволен topicId, включително литералния
+  // сегмент "mute-evidence") — ако generic handler-ът е първи, moderator-only
+  // evidence route-ът никога не се достига (dead code), а normal handler-ът
+  // просто връща 404 (getAttachmentForDownload('mute-evidence', filename) не
+  // намира нищо, защото 'mute-evidence' не е реална тема) вместо да enforce-не
+  // moderator-only auth-а. По-специфичният route винаги първи.
+  if (await handleTopicMuteEvidenceAttachmentDownloadRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleTopicAttachmentDownloadRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -15600,6 +15874,16 @@ wsServer.on('connection', (socket, request) => {
               originatingConnectionId: connection.id,
               requestId,
             })
+          }
+
+          // Lafche 200-post hard retention (production hotfix) — fire-and-
+          // forget (serialized опашка, виж enqueueLafcheRetentionEnforcement),
+          // СЛЕД broadcast-а (append-first, prune-after реда: новото
+          // съобщение винаги стига до subscribers-ите ПРЕДИ евентуален
+          // victim да бъде hard-deleted). Само за Lafche — normal Topics
+          // pagination/history остава напълно непроменена.
+          if (message.topicId === LAFCHE_TOPIC_ID) {
+            enqueueLafcheRetentionEnforcement()
           }
         })().catch((error) => {
           console.error('[topics] send_topic_message attachment flow failed:', error)

@@ -76,7 +76,7 @@ export type TopicMuteEvidenceEntry = {
   sourceMessageId: string | null
   sourceKind: TopicMuteEvidenceSourceKind
   sourceBodySnapshot: string
-  sourceAttachment: { storageFilename: string; width: number; height: number } | null
+  sourceAttachment: { storageFilename: string; width: number; height: number; isEvidenceCopy: boolean } | null
   sourceCreatedAt: string | null
   originalMessageDeletedAt: string | null
   mutedByAccountId: string | null
@@ -192,6 +192,27 @@ export type TopicModerationStore = {
   // ─── Mute evidence/history (Лафче mute-evidence брифа) ──────────────────
   /** Internal/moderator изглед — пълен (носи moderator identity). User-facing mapping-ът маха identity полетата на HTTP response ниво (виж index.ts). */
   listMuteEvidenceForProfile: (profileId: string, limit: number) => TopicMuteEvidenceEntry[]
+  /**
+   * Lafche retention hotfix — за подаден batch storage filenames, връща кои
+   * от тях са реферирани от поне един ЖИВ (source_attachment_is_evidence_copy
+   * = 0, все още сочещ към споделения normal attachment storage, не към
+   * protected evidence copy) mute evidence ред. Retention (index.ts
+   * enforceLafcheRetention) ползва това ПРЕДИ да hard-delete-не source поста
+   * — ако филм е referenced, файлът трябва да се copy-не в protected evidence
+   * storage first (виж copyTopicAttachmentToEvidenceStorage), за да не стане
+   * evidence-ът orphan/broken.
+   */
+  getActiveEvidenceAttachmentReferences: (storageFilenames: readonly string[]) => Map<string, string[]>
+  /**
+   * Repoint-ва ВСИЧКИ ЖИВИ (is_evidence_copy=0) evidence redove, реферирали
+   * `oldFilename`, към `newFilename` в protected evidence storage, и маркира
+   * source_attachment_is_evidence_copy=1 — извиква се ТОЧНО ПРЕДИ retention
+   * hard-delete-ва source поста (index.ts enforceLafcheRetention). Връща
+   * броя обновени redove (за dry-run/logging).
+   */
+  repointMuteEvidenceAttachmentToEvidenceCopy: (oldFilename: string, newFilename: string) => number
+  /** Authorization guard за protected evidence-copy download endpoint — виж имплементацията. */
+  isRegisteredEvidenceAttachmentCopy: (storageFilename: string) => boolean
 
   // ─── Delete (attachments hard-delete + queue insertion, topic/messages
   // soft-delete — всичко в ЕДНА транзакция вътре в deleteTopic) ────────────
@@ -859,6 +880,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     SELECT
       e.mute_history_id, e.mute_audit_log_id, e.profile_id, e.source_topic_id, e.source_message_id, e.source_kind,
       e.source_body_snapshot, e.source_attachment_storage_filename, e.source_attachment_width, e.source_attachment_height,
+      e.source_attachment_is_evidence_copy,
       e.source_created_at, COALESCE(m.deleted_at, e.original_message_deleted_at) AS original_message_deleted_at,
       e.muted_by_account_id, e.muted_by_role,
       e.reason_text, e.reason_category, e.duration_ms, e.muted_until, e.status, e.unmuted_at, e.unmuted_by_account_id, e.created_at
@@ -880,6 +902,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     source_attachment_storage_filename: string | null
     source_attachment_width: number | null
     source_attachment_height: number | null
+    source_attachment_is_evidence_copy: number
     source_created_at: string | null
     original_message_deleted_at: string | null
     muted_by_account_id: string | null
@@ -913,7 +936,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
       sourceKind: row.source_kind,
       sourceBodySnapshot: row.source_body_snapshot,
       sourceAttachment: row.source_attachment_storage_filename !== null && row.source_attachment_width !== null && row.source_attachment_height !== null
-        ? { storageFilename: row.source_attachment_storage_filename, width: row.source_attachment_width, height: row.source_attachment_height }
+        ? { storageFilename: row.source_attachment_storage_filename, width: row.source_attachment_width, height: row.source_attachment_height, isEvidenceCopy: row.source_attachment_is_evidence_copy === 1 }
         : null,
       sourceCreatedAt: row.source_created_at !== null ? dbDateToUtc(row.source_created_at) : null,
       originalMessageDeletedAt: row.original_message_deleted_at !== null ? dbDateToUtc(row.original_message_deleted_at) : null,
@@ -935,6 +958,56 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     const rows = selectMuteEvidenceForProfileStatement.all(profileId, normalizedLimit) as TopicMuteEvidenceRow[]
     const now = Date.now()
     return rows.map((row) => toMuteEvidenceEntry(row, now))
+  }
+
+  // ─── Lafche retention — evidence attachment independence (production
+  // hotfix, виж 20260818_005_add_topic_mute_evidence_attachment_copy.sql) ──
+
+  function getActiveEvidenceAttachmentReferences(storageFilenames: readonly string[]): Map<string, string[]> {
+    const result = new Map<string, string[]>()
+    const uniqueFilenames = [...new Set(storageFilenames.filter((f) => f.trim().length > 0))]
+    if (uniqueFilenames.length === 0) return result
+
+    const placeholders = uniqueFilenames.map(() => '?').join(',')
+    const rows = database.prepare(`
+      SELECT mute_history_id, source_attachment_storage_filename FROM topic_mute_evidence
+      WHERE source_attachment_is_evidence_copy = 0 AND source_attachment_storage_filename IN (${placeholders});
+    `).all(...uniqueFilenames) as Array<{ mute_history_id: string; source_attachment_storage_filename: string }>
+
+    for (const row of rows) {
+      const existing = result.get(row.source_attachment_storage_filename) ?? []
+      existing.push(row.mute_history_id)
+      result.set(row.source_attachment_storage_filename, existing)
+    }
+    return result
+  }
+
+  const repointMuteEvidenceAttachmentStatement = database.prepare(`
+    UPDATE topic_mute_evidence
+    SET source_attachment_storage_filename = ?, source_attachment_is_evidence_copy = 1
+    WHERE source_attachment_storage_filename = ? AND source_attachment_is_evidence_copy = 0;
+  `)
+
+  function repointMuteEvidenceAttachmentToEvidenceCopy(oldFilename: string, newFilename: string): number {
+    const result = repointMuteEvidenceAttachmentStatement.run(newFilename, oldFilename)
+    return result.changes as number
+  }
+
+  const selectEvidenceCopyExistsStatement = database.prepare(`
+    SELECT 1 FROM topic_mute_evidence
+    WHERE source_attachment_storage_filename = ? AND source_attachment_is_evidence_copy = 1
+    LIMIT 1;
+  `)
+
+  /**
+   * Authorization guard за protected evidence-copy download endpoint
+   * (index.ts handleTopicMuteEvidenceAttachmentDownloadRequest) — филмът
+   * трябва действително да е регистриран evidence copy (is_evidence_copy=1)
+   * на поне един evidence ред, иначе 404. Предотвратява enumeration на
+   * произволни файлове в protected evidence storage чрез познат UUID.webp.
+   */
+  function isRegisteredEvidenceAttachmentCopy(storageFilename: string): boolean {
+    return selectEvidenceCopyExistsStatement.get(storageFilename) !== undefined
   }
 
   // ─── Delete (soft-delete + eager attachment cleanup) ────────────────────
@@ -1248,6 +1321,9 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     isProfileMutedInTopicsSection,
     getActiveSectionMutedProfileIds,
     listMuteEvidenceForProfile,
+    getActiveEvidenceAttachmentReferences,
+    repointMuteEvidenceAttachmentToEvidenceCopy,
+    isRegisteredEvidenceAttachmentCopy,
     getAttachmentFilenamesForTopic,
     deleteTopic,
     createReport,

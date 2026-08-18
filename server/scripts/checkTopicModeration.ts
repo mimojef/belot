@@ -83,6 +83,7 @@ const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/
 const editMigrationPath = resolve(serverRoot, 'database/migrations/20260812_003_add_topic_message_editing.sql')
 const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260814_001_create_topic_section_mutes.sql')
 const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
+const evidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
 
 let passed = 0
 let failed = 0
@@ -181,6 +182,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, editMigrationPath)
   await applyMigrationFile(db, sectionMutesMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
+  await applyMigrationFile(db, evidenceAttachmentCopyMigrationPath)
   seedAccount(db, 'moderator-1')
   seedAccount(db, 'moderator-2')
   seedProfile(db, 'target-1')
