@@ -60,7 +60,10 @@ function formatSofiaDate(isoUtc: string): string {
   }
 }
 
-function formatCoins(n: number): string {
+// VIP редове нямат yellowCoinsAmount (различна domain схема) — null означава
+// "не приложимо за тоя source", НЕ "0 жълтици". Показва "—", не хвърля.
+function formatCoins(n: number | null): string {
+  if (n === null) return '—'
   return n.toLocaleString('bg-BG')
 }
 
@@ -135,7 +138,9 @@ function renderRow(row: AdminPaymentListRow): string {
   const sessionShort = shortenSessionId(sessionId)
   const creditedAt = row.creditedAt ? formatSofiaDate(row.creditedAt) : '—'
   const money = formatMoney(row.priceCents, row.currency)
-  const coins = formatCoins(row.yellowCoinsAmount)
+  // VIP редове нямат yellowCoinsAmount (различна domain схема) — показва "—"
+  // без 🟡 суфикса, вместо да "измисля" жълтици за не-coin покупка.
+  const coinsCell = row.yellowCoinsAmount !== null ? `${formatCoins(row.yellowCoinsAmount)} 🟡` : '—'
   const methodLabel = getPaymentMethodLabel(row)
   const brandLabel = formatCardBrand(row.cardBrand)
   const last4 = row.cardLast4 ?? null
@@ -161,9 +166,9 @@ function renderRow(row: AdminPaymentListRow): string {
       <td style="${tdStyle}">${escapeHtml(email)}</td>
       <td style="${tdStyle}">
         <div style="font-weight:600;">${escapeHtml(row.packageTitle)}</div>
-        <div style="font-size:10px;color:rgba(255,255,255,0.35);">${escapeHtml(row.packageKey)}</div>
+        ${row.packageKey !== null ? `<div style="font-size:10px;color:rgba(255,255,255,0.35);">${escapeHtml(row.packageKey)}</div>` : ''}
       </td>
-      <td style="${tdStyle};text-align:right;font-variant-numeric:tabular-nums;">${escapeHtml(coins)} 🟡</td>
+      <td style="${tdStyle};text-align:right;font-variant-numeric:tabular-nums;">${escapeHtml(coinsCell)}</td>
       <td style="${tdStyle};text-align:right;font-weight:700;color:#d4a520;font-variant-numeric:tabular-nums;">${escapeHtml(money)}</td>
       <td style="${tdStyle}">${escapeHtml(methodLabel)}</td>
       <td style="${tdStyle};font-variant-numeric:tabular-nums;">${escapeHtml(cardDisplay)}</td>

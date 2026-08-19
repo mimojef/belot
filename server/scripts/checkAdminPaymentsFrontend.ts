@@ -12,6 +12,10 @@
  * [9]  Payment row: null displayName → username fallback
  * [10] Payment row: null displayName + null username → 'Липсващ профил'
  * [11] Payment row: email null → '—'
+ * [11b] VIP row rendering (production regression fix): null
+ *        yellowCoinsAmount/packageKey do not crash renderRow(); explicit
+ *        "VIP 365 дни" title, "—" for coin-only columns, correct amount;
+ *        mixed coin+VIP rows both render
  * [12] Sofia date formatting for creditedAt
  * [13] Coins formatted with thousands separator
  * [14] Amount formatted with Intl.NumberFormat bg-BG (e.g. "3,49 €")
@@ -43,6 +47,8 @@
  * [38] detail page: not-found state
  * [39] detail page: non-admin access denied
  * [40] detail page: full purchase data rendered
+ * [40b] detail page: VIP purchase (production regression fix) — renders
+ *        without throwing, "VIP 365 дни" title, no invented coin data
  * [41] detail page: Google Pay method
  * [42] detail page: standard card (Visa 4242)
  * [43] detail page: null payment method data
@@ -127,6 +133,7 @@ function baseState(overrides: Partial<AdminPaymentsPanelState> = {}): AdminPayme
 
 function makeRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentListRow {
   return {
+    source: 'coin',
     purchaseId: 'pid-001',
     profileId: 'prof-001',
     accountId: 'acc-001',
@@ -152,6 +159,29 @@ function makeRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentList
     hiddenAt: null,
     ...overrides,
   }
+}
+
+// VIP redove nqmat yellowCoinsAmount/packageKey (различна domain схема, виж
+// vipPurchaseStore.getAdminPaymentListByPeriod) — production regression:
+// renderRow() правеше unconditional n.toLocaleString()/escapeHtml(string)
+// върху тия nullable полета -> runtime TypeError -> UI остава на "Зареждане…"
+// завинаги (render() хвърля, root.innerHTML никога не се обновява).
+function makeVipRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentListRow {
+  return makeRow({
+    source: 'vip',
+    purchaseId: 'pid-vip-001',
+    packageKey: null,
+    packageTitle: 'VIP 365 дни',
+    yellowCoinsAmount: null,
+    priceCents: 100,
+    currency: 'EUR',
+    paymentMethodType: null,
+    walletType: null,
+    cardBrand: null,
+    cardLast4: null,
+    cardCountry: null,
+    ...overrides,
+  })
 }
 
 // ─── [1] Period labels ─────────────────────────────────────────────────────────
@@ -279,6 +309,32 @@ check('[11.1] null email shown as —', () => {
   const row = makeRow({ email: null })
   const html = renderAdminPaymentsPanel(baseState({ rows: [row], total: 1 }), NOOP_CALLBACKS)
   assertContains(html, '—', '')
+})
+
+// ─── [11b] VIP row rendering: production regression (null yellowCoinsAmount/packageKey) ──
+console.log('\n[11b] VIP row rendering does not throw, shows explicit VIP label + "—" for coin-only fields')
+check('[11b.1] VIP row renders without throwing (production crash: n.toLocaleString() on null)', () => {
+  renderAdminPaymentsPanel(baseState({ rows: [makeVipRow()], total: 1 }), NOOP_CALLBACKS)
+})
+check('[11b.2] VIP row shows packageTitle "VIP 365 дни", not a coin package name', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeVipRow()], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, 'VIP 365 дни', '')
+})
+check('[11b.3] VIP row shows "—" for coins column, not "null" or a crash', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeVipRow()], total: 1 }), NOOP_CALLBACKS)
+  assertNotContains(html, 'null', 'literal null must not leak into VIP row markup')
+})
+check('[11b.4] VIP row shows correct EUR amount (1.00 EUR from price_cents_snapshot=100)', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeVipRow({ priceCents: 100 })], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, '1,00', 'expected bg-BG formatted 1,00 € for 100 cents')
+})
+check('[11b.5] mixed coin+VIP rows in same list both render without throwing', () => {
+  const html = renderAdminPaymentsPanel(
+    baseState({ rows: [makeRow(), makeVipRow()], total: 2 }),
+    NOOP_CALLBACKS,
+  )
+  assertContains(html, 'Starter Pack', 'coin row must still render correctly')
+  assertContains(html, 'VIP 365 дни', 'VIP row must still render correctly')
 })
 
 // ─── [12] Sofia date formatting ───────────────────────────────────────────────
@@ -750,6 +806,7 @@ const NOOP_DETAIL = { onBack: () => {} }
 
 function makeDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPaymentDetailRow {
   return {
+    source: 'coin',
     purchaseId: 'pid-detail-001',
     profileId: 'prof-001',
     accountId: 'acc-001',
@@ -779,6 +836,32 @@ function makeDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPay
     currentYellowCoinsBalance: 1500,
     ...overrides,
   }
+}
+
+// VIP detail redove nqmat yellowCoinsAmount/packageKey/payment-method
+// snapshot полета (различна domain схема, виж vipPurchaseStore.
+// getAdminPaymentDetail) — production regression: detail panel-ът правеше
+// unconditional n.toLocaleString()/escapeHtml(string) върху тия nullable
+// полета.
+function makeVipDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPaymentDetailRow {
+  return makeDetailRow({
+    source: 'vip',
+    purchaseId: 'pid-vip-detail-001',
+    packageKey: null,
+    packageTitle: 'VIP 365 дни',
+    yellowCoinsAmount: null,
+    priceCents: 100,
+    currency: 'EUR',
+    stripePaymentIntentId: null,
+    stripeChargeId: null,
+    paymentMethodType: null,
+    walletType: null,
+    cardBrand: null,
+    cardLast4: null,
+    cardCountry: null,
+    currentYellowCoinsBalance: null,
+    ...overrides,
+  })
 }
 
 function detailState(overrides: Partial<AdminPaymentDetailState> = {}): AdminPaymentDetailState {
@@ -834,6 +917,20 @@ console.log('\n[40] detail page: full purchase data rendered')
   check('[40.10] PaymentIntent ID', () => assertContains(html, 'pi_test_xyz456', 'PaymentIntent ID not rendered'))
   check('[40.11] Charge ID', () => assertContains(html, 'ch_test_789', 'Charge ID not rendered'))
   check('[40.12] purchase ID', () => assertContains(html, 'pid-detail-001', 'Purchase ID not rendered'))
+}
+
+// ─── [40b] detail: VIP purchase (production regression, §D "Детайли" button on VIP row) ──
+console.log('\n[40b] detail page: VIP purchase renders without throwing, no coin data invented')
+{
+  check('[40b.1] VIP detail renders without throwing (production crash: n.toLocaleString() on null)', () => {
+    renderAdminPaymentDetailPanel(detailState({ purchase: makeVipDetailRow() }), NOOP_DETAIL)
+  })
+  const html = renderAdminPaymentDetailPanel(detailState({ purchase: makeVipDetailRow() }), NOOP_DETAIL)
+  check('[40b.2] package title shows "VIP 365 дни"', () => assertContains(html, 'VIP 365 дни', ''))
+  check('[40b.3] no literal "null" leaked into markup', () => assertNotContains(html, 'null', ''))
+  check('[40b.4] amount shows 1,00 € (100 cents)', () => assertContains(html, '1,00', ''))
+  check('[40b.5] status badge still renders (paid)', () => assertContains(html, 'paid', ''))
+  check('[40b.6] purchase ID still renders', () => assertContains(html, 'pid-vip-detail-001', ''))
 }
 
 // ─── [41] detail: Google Pay ─────────────────────────────────────────────────

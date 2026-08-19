@@ -36,7 +36,10 @@ function formatSofiaDate(isoUtc: string): string {
   }
 }
 
-function formatCoins(n: number): string {
+// VIP редове нямат yellowCoinsAmount (различна domain схема) — виж
+// renderAdminPaymentsPanel.ts formatCoins за същия null-safe контракт.
+function formatCoins(n: number | null): string {
+  if (n === null) return '—'
   return n.toLocaleString('bg-BG')
 }
 
@@ -169,8 +172,8 @@ export function renderAdminPaymentDetailPanel(
     row('Дата на създаване', p.createdAt ? escapeHtml(formatSofiaDate(p.createdAt)) : '—'),
     row('Дата на начисляване', p.creditedAt ? escapeHtml(formatSofiaDate(p.creditedAt)) : '—'),
     row('Статус', statusBadge(p.status)),
-    row('Пакет', `<strong>${escapeHtml(p.packageTitle)}</strong> <span style="color:rgba(255,255,255,0.35);font-size:11px;">${escapeHtml(p.packageKey)}</span>`),
-    row('Жълтици', escapeHtml(formatCoins(p.yellowCoinsAmount)) + ' 🟡'),
+    row('Пакет', `<strong>${escapeHtml(p.packageTitle)}</strong>${p.packageKey !== null ? ` <span style="color:rgba(255,255,255,0.35);font-size:11px;">${escapeHtml(p.packageKey)}</span>` : ''}`),
+    row('Жълтици', p.yellowCoinsAmount !== null ? escapeHtml(formatCoins(p.yellowCoinsAmount)) + ' 🟡' : '—'),
     row('Сума', `<strong style="color:#d4a520;">${escapeHtml(formatMoney(p.priceCents, p.currency))}</strong>`),
   ].join(''))
 

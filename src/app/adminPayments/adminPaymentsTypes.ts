@@ -12,7 +12,14 @@ export function isAdminPaymentPeriod(v: unknown): v is AdminPaymentPeriod {
   return ADMIN_PAYMENT_PERIOD_VALUES.includes(v as AdminPaymentPeriod)
 }
 
+// source различава coin ('/api/shop/checkout') от VIP ('/api/vip/checkout')
+// покупки в combined admin payment listing-а. VIP редовете НЯМАТ
+// yellowCoinsAmount/packageKey (различна domain схема) — тия полета са
+// nullable, НИКОГА "измислени" за VIP.
+export type AdminPaymentSource = 'coin' | 'vip'
+
 export type AdminPaymentListRow = {
+  source: AdminPaymentSource
   purchaseId: string
   profileId: string
   accountId: string | null
@@ -20,9 +27,9 @@ export type AdminPaymentListRow = {
   displayName: string | null
   email: string | null
   profileKind: string | null
-  packageKey: string
+  packageKey: string | null
   packageTitle: string
-  yellowCoinsAmount: number
+  yellowCoinsAmount: number | null
   priceCents: number
   currency: string
   provider: string
@@ -54,6 +61,7 @@ export type AdminPaymentListResult = {
 }
 
 export type AdminPaymentDetailRow = {
+  source: AdminPaymentSource
   purchaseId: string
   profileId: string
   accountId: string | null
@@ -61,9 +69,9 @@ export type AdminPaymentDetailRow = {
   displayName: string | null
   email: string | null
   profileKind: string | null
-  packageKey: string
+  packageKey: string | null
   packageTitle: string
-  yellowCoinsAmount: number
+  yellowCoinsAmount: number | null
   priceCents: number
   currency: string
   provider: string
