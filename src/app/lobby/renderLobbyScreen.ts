@@ -526,7 +526,6 @@ export type LobbyScreenState = {
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
   shopActiveTab: 'coins' | 'vip'
-  shopVipTabVisible: boolean
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -1645,6 +1644,29 @@ function getCoinPackageImage(sortOrder: number): string {
   if (sortOrder <= 60) return '/assets/lobby/coins-10000.png'
   if (sortOrder <= 80) return '/assets/lobby/coins-25000.png'
   return '/assets/lobby/coins-50000.png'
+}
+
+function getVipPackageImage(packageId: string): string {
+  if (packageId === 'vip_30') return '/images/vip/vip-30.webp'
+  if (packageId === 'vip_180') return '/images/vip/vip-180.webp'
+  if (packageId === 'vip_365') return '/images/vip/vip-365.webp'
+  return '/images/vip/vip-30.webp'
+}
+
+// Споделен между desktop (renderVipShopPanel) и mobile (renderMobileShopPanel)
+// VIP card image block — responsive, 5px inset от card border-а, width:100%
+// на wrapper-а, aspect-ratio:1/1 пази квадратната форма без fixed px размер.
+function renderVipPackageImageBlock(vipPackage: VipPackageSnapshot): string {
+  return `
+    <div style="width:100%;padding:5px;box-sizing:border-box;">
+      <img
+        src="${getVipPackageImage(vipPackage.packageId)}"
+        alt="VIP пакет за ${vipPackage.days} дни"
+        loading="lazy"
+        style="display:block;width:100%;height:auto;aspect-ratio:1/1;object-fit:contain;"
+      >
+    </div>
+  `
 }
 
 function parseUtcString(value: string): Date {
@@ -4776,13 +4798,61 @@ function renderMobileLeaderboardsDirectory(state: LobbyScreenState): string {
 }
 
 export function renderMobileShopPanel(state: LobbyScreenState): string {
-  if (state.shopPackagesLoading) return `${renderMobilePageTitle('Магазин')}${renderMobileStateMessage('Зареждане на магазина...')}`
-  if (state.shopPackagesErrorText) return `${renderMobilePageTitle('Магазин')}${renderMobileStateMessage(state.shopPackagesErrorText, 'error')}`
-
   const isLoggedIn = state.profile.profileId !== null
+  const tabBarHtml = `<div style="padding:12px 12px 0;">${renderShopTabBar(state.shopActiveTab)}</div>`
+
+  if (state.shopActiveTab === 'vip') {
+    const maxDays = state.vipPackages.reduce((max, current) => Math.max(max, current.days), 0)
+
+    return `
+      ${renderMobilePageTitle('Магазин VIP')}
+      ${tabBarHtml}
+      ${state.vipPackagesLoading ? renderMobileStateMessage('Зареждане на VIP офертите...')
+        : state.vipPackagesErrorText ? renderMobileStateMessage(state.vipPackagesErrorText, 'error')
+        : `
+          ${state.vipPurchaseMessageText ? `<div style="margin:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:10px;color:#f8fafc;font-size:13px;font-weight:800;">${escapeHtml(state.vipPurchaseMessageText)}</div>` : ''}
+          <section style="padding:12px;display:grid;gap:12px;">
+            ${state.vipPackages.map((vipPackage) => {
+              const isPurchasing = state.vipPurchaseActionPackageId === vipPackage.packageId
+              const isHighlighted = maxDays > 0 && vipPackage.days === maxDays
+              return `
+                <article style="
+                  position:relative;
+                  border:1px solid ${isHighlighted ? 'rgba(244,201,91,0.95)' : 'rgba(212,165,32,0.46)'};
+                  border-radius:12px;
+                  background:#080808;
+                  overflow:hidden;
+                  display:flex;
+                  flex-direction:column;
+                  align-items:center;
+                  text-align:center;
+                  ${isHighlighted ? 'box-shadow:0 6px 20px rgba(212,165,32,0.22);' : ''}
+                ">
+                  ${renderVipPackageImageBlock(vipPackage)}
+                  <div style="width:100%;padding:0 16px 18px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;">
+                    <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);"></div>
+                    <div style="margin-top:12px;font-size:24px;font-weight:900;color:#d4a520;white-space:nowrap;">${escapeHtml(formatPackagePrice(vipPackage.priceCents, vipPackage.currency))}</div>
+                    <button
+                      type="button"
+                      data-vip-purchase-package="${escapeHtml(vipPackage.packageId)}"
+                      ${isPurchasing ? 'disabled' : ''}
+                      style="margin-top:18px;height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};"
+                    >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи VIP' : 'Влез за покупка'}</button>
+                  </div>
+                </article>
+              `
+            }).join('')}
+          </section>
+        `}
+    `
+  }
+
+  if (state.shopPackagesLoading) return `${renderMobilePageTitle('Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage('Зареждане на магазина...')}`
+  if (state.shopPackagesErrorText) return `${renderMobilePageTitle('Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage(state.shopPackagesErrorText, 'error')}`
 
   return `
-    ${renderMobilePageTitle('Магазин', `Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)} жълтици`)}
+    ${renderMobilePageTitle('Магазин Жълтици', `Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)} жълтици`)}
+    ${tabBarHtml}
     ${state.shopPurchaseMessageText ? `<div style="margin:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:10px;color:#f8fafc;font-size:13px;font-weight:800;">${escapeHtml(state.shopPurchaseMessageText)}</div>` : ''}
     <section style="padding:12px;display:grid;gap:10px;">
       ${state.shopPackages.length === 0 ? renderMobileStateMessage('Няма активни пакети в магазина.') : state.shopPackages.map((coinPackage) => {
@@ -6294,23 +6364,24 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
-function renderShopTabBar(activeTab: 'coins' | 'vip', vipTabVisible: boolean): string {
+function renderShopTabBar(activeTab: 'coins' | 'vip', variant: 'desktop' | 'mobile' = 'mobile'): string {
   const tabButtonStyle = (isActive: boolean): string => `
     flex:1; height:44px; border-radius:8px; cursor:pointer;
     font-size:14px; font-weight:900; letter-spacing:0.02em;
-    border:1px solid ${isActive ? 'rgba(212,165,32,0.85)' : 'rgba(255,255,255,0.14)'};
+    border:1px solid ${isActive ? 'rgba(212,165,32,0.85)' : 'rgba(255,255,255,0.40)'};
     background:${isActive ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : '#0a0a0a'};
     color:${isActive ? '#080808' : 'rgba(255,255,255,0.62)'};
-    transition:filter 0.15s;
+    transition:filter 0.15s,border-color 0.15s;
   `.replace(/\s+/g, ' ')
 
-  // TEMP: VIP бутонът се рендира само когато vipTabVisible е true (виж
-  // shopVipTabVisible в createLobbyFlowController.ts) — не показва се в
-  // нормалната навигация, докато VIP Shop е скрит за production тестове.
+  const wrapStyle = variant === 'desktop'
+    ? 'display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);width:420px;margin:0 auto;'
+    : 'display:flex;gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);'
+
   return `
-    <div style="display:flex;gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);">
+    <div style="${wrapStyle}">
       <button type="button" data-shop-tab="coins" style="${tabButtonStyle(activeTab === 'coins')}">Жълтици</button>
-      ${vipTabVisible ? `<button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>` : ''}
+      <button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>
     </div>
   `
 }
@@ -6334,56 +6405,69 @@ function renderVipShopPanel(state: LobbyScreenState): string {
     `
   }
 
+  const maxDays = state.vipPackages.reduce((max, current) => Math.max(max, current.days), 0)
+
   return `
-    <div style="display:grid;gap:14px;">
+    <div style="display:grid;gap:16px;">
       ${state.vipPurchaseMessageText ? `
         <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:12px 14px;color:#f8fafc;font-size:13px;font-weight:800;">
           ${escapeHtml(state.vipPurchaseMessageText)}
         </div>
       ` : ''}
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+      <div data-vip-package-grid="1" style="display:grid;grid-template-columns:repeat(3,minmax(0,300px));justify-content:center;gap:20px;">
         ${state.vipPackages.map((vipPackage) => {
           const isPurchasing = state.vipPurchaseActionPackageId === vipPackage.packageId
+          const isHighlighted = maxDays > 0 && vipPackage.days === maxDays
           return `
           <article style="
+            position:relative;
             background:#000000;
-            border:1px solid rgba(212,165,32,0.72);
-            border-radius:12px;
-            padding:20px 16px;
+            border:1px solid ${isHighlighted ? 'rgba(244,201,91,0.95)' : 'rgba(212,165,32,0.42)'};
+            border-radius:14px;
+            overflow:hidden;
             display:flex;
             flex-direction:column;
             align-items:center;
-            gap:10px;
             text-align:center;
+            box-shadow:${isHighlighted ? '0 8px 26px rgba(212,165,32,0.24)' : '0 4px 14px rgba(0,0,0,0.28)'};
           ">
-            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;color:#d4a520;text-transform:uppercase;">VIP</div>
-            <div style="font-size:22px;font-weight:900;color:#f8fafc;">${escapeHtml(vipPackage.title)}</div>
-            <div style="font-size:28px;font-weight:900;color:#d4a520;">${escapeHtml(formatPackagePrice(vipPackage.priceCents, vipPackage.currency))}</div>
-            <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.48);margin-top:-4px;">${escapeHtml(formatPackagePriceBgn(vipPackage.priceCents))}</div>
-            <button
-              type="button"
-              data-vip-purchase-package="${escapeHtml(vipPackage.packageId)}"
-              ${isPurchasing ? 'disabled' : ''}
-              style="margin-top:8px;height:40px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};"
-            >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи VIP' : 'Влез за покупка'}</button>
+            ${renderVipPackageImageBlock(vipPackage)}
+
+            <div style="width:100%;padding:0 20px 20px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;">
+              <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);"></div>
+
+              <div style="margin-top:16px;font-size:28px;font-weight:900;color:#d4a520;line-height:1;white-space:nowrap;">${escapeHtml(formatPackagePrice(vipPackage.priceCents, vipPackage.currency))}</div>
+
+              <button
+                type="button"
+                data-vip-purchase-package="${escapeHtml(vipPackage.packageId)}"
+                ${isPurchasing ? 'disabled' : ''}
+                style="margin-top:22px;height:44px;width:100%;border:0;border-radius:9px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};transition:filter 0.15s;flex-shrink:0;"
+              >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}</button>
+            </div>
           </article>
           `
         }).join('')}
       </div>
+      <style>
+        [data-vip-purchase-package]:not(:disabled):hover { filter:brightness(1.12); }
+        @media (max-width:720px) {
+          [data-vip-package-grid="1"] { grid-template-columns:minmax(0,340px); }
+        }
+      </style>
     </div>
   `
 }
 
 export function renderShopPanel(state: LobbyScreenState): string {
-  const tabBar = renderShopTabBar(state.shopActiveTab, state.shopVipTabVisible)
+  const tabBar = renderShopTabBar(state.shopActiveTab, 'desktop')
 
   if (state.shopActiveTab === 'vip') {
     return `
       <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
         <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
           <div>
-            <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин</div>
-            <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">VIP оферти — плащане през Stripe в евро.</div>
+            <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин VIP</div>
           </div>
         </div>
         ${tabBar}
@@ -6493,8 +6577,7 @@ export function renderShopPanel(state: LobbyScreenState): string {
     <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
       <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
         <div>
-          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин</div>
-          <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">Избери пакет и завърши плащането през Stripe. Жълтиците се добавят след потвърждение.</div>
+          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин Жълтици</div>
         </div>
         <div style="border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#0a0a0a;padding:10px 12px;color:#d4a520;font-size:13px;font-weight:900;">
           Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)}
