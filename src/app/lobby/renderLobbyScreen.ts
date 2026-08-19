@@ -8,6 +8,7 @@ import type {
   CoinPackageSnapshot,
   CoinPackageStatus,
   CoinPurchaseSnapshot,
+  VipPackageSnapshot,
   FriendRelationshipSnapshot,
   FriendshipsSnapshot,
   LeaderboardCategory,
@@ -523,6 +524,7 @@ export type LobbyScreenState = {
   leaderboardsErrorText: string | null
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
+  shopActiveTab: 'coins' | 'vip'
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -535,6 +537,11 @@ export type LobbyScreenState = {
   shopPurchaseResumeId: string | null
   shopPurchaseHideConfirmId: string | null
   shopPurchaseActionPurchaseId: string | null
+  vipPackages: VipPackageSnapshot[]
+  vipPackagesLoading: boolean
+  vipPackagesErrorText: string | null
+  vipPurchaseActionPackageId: string | null
+  vipPurchaseMessageText: string | null
   /** Пълен администратор — вижда "Настройки", редакция на профили, чат с поддръжката, съобщения от гости. */
   isAdmin: boolean
   /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
@@ -568,6 +575,7 @@ export type LobbyScreenState = {
   adminSettings: AdminSettingsSnapshot | null
   adminSettingsLoading: boolean
   adminSettingsErrorText: string | null
+  adminSettingsSuccessText: string | null
   adminCoinPackages: CoinPackageSnapshot[]
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
@@ -847,6 +855,8 @@ export type RenderLobbyScreenOptions = {
   onShopPurchaseHideConfirm: () => void
   onShopPurchaseHideCancel: () => void
   onShopHistoryToggle: () => void
+  onShopTabClick: (tab: 'coins' | 'vip') => void
+  onVipPurchaseClick: (packageId: string) => void
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onTournamentsClick: () => void
@@ -6280,20 +6290,120 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
+function renderShopTabBar(activeTab: 'coins' | 'vip'): string {
+  const tabButtonStyle = (isActive: boolean): string => `
+    flex:1; height:44px; border-radius:8px; cursor:pointer;
+    font-size:14px; font-weight:900; letter-spacing:0.02em;
+    border:1px solid ${isActive ? 'rgba(212,165,32,0.85)' : 'rgba(255,255,255,0.14)'};
+    background:${isActive ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : '#0a0a0a'};
+    color:${isActive ? '#080808' : 'rgba(255,255,255,0.62)'};
+    transition:filter 0.15s;
+  `.replace(/\s+/g, ' ')
+
+  return `
+    <div style="display:flex;gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);">
+      <button type="button" data-shop-tab="coins" style="${tabButtonStyle(activeTab === 'coins')}">Жълтици</button>
+      <button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>
+    </div>
+  `
+}
+
+function renderVipShopPanel(state: LobbyScreenState): string {
+  const isLoggedIn = state.profile.profileId !== null
+
+  if (state.vipPackagesLoading) {
+    return `
+      <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на VIP офертите...
+      </div>
+    `
+  }
+
+  if (state.vipPackagesErrorText) {
+    return `
+      <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        ${escapeHtml(state.vipPackagesErrorText)}
+      </div>
+    `
+  }
+
+  return `
+    <div style="display:grid;gap:14px;">
+      ${state.vipPurchaseMessageText ? `
+        <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:12px 14px;color:#f8fafc;font-size:13px;font-weight:800;">
+          ${escapeHtml(state.vipPurchaseMessageText)}
+        </div>
+      ` : ''}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:14px;">
+        ${state.vipPackages.map((vipPackage) => {
+          const isPurchasing = state.vipPurchaseActionPackageId === vipPackage.packageId
+          return `
+          <article style="
+            background:#000000;
+            border:1px solid rgba(212,165,32,0.72);
+            border-radius:12px;
+            padding:20px 16px;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            gap:10px;
+            text-align:center;
+          ">
+            <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;color:#d4a520;text-transform:uppercase;">VIP</div>
+            <div style="font-size:22px;font-weight:900;color:#f8fafc;">${escapeHtml(vipPackage.title)}</div>
+            <div style="font-size:28px;font-weight:900;color:#d4a520;">${escapeHtml(formatPackagePrice(vipPackage.priceCents, vipPackage.currency))}</div>
+            <div style="font-size:12px;font-weight:700;color:rgba(255,255,255,0.48);margin-top:-4px;">${escapeHtml(formatPackagePriceBgn(vipPackage.priceCents))}</div>
+            <button
+              type="button"
+              data-vip-purchase-package="${escapeHtml(vipPackage.packageId)}"
+              ${isPurchasing ? 'disabled' : ''}
+              style="margin-top:8px;height:40px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};"
+            >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи VIP' : 'Влез за покупка'}</button>
+          </article>
+          `
+        }).join('')}
+      </div>
+    </div>
+  `
+}
+
 export function renderShopPanel(state: LobbyScreenState): string {
+  const tabBar = renderShopTabBar(state.shopActiveTab)
+
+  if (state.shopActiveTab === 'vip') {
+    return `
+      <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
+        <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+          <div>
+            <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин</div>
+            <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.56);">VIP оферти — плащане през Stripe в евро.</div>
+          </div>
+        </div>
+        ${tabBar}
+        ${renderVipShopPanel(state)}
+      </section>
+    `
+  }
+
   if (state.shopPackagesLoading) {
     return `
-      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
-        Зареждане на магазина...
-      </div>
+      <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
+        ${tabBar}
+        <div style="min-height:460px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+          Зареждане на магазина...
+        </div>
+      </section>
     `
   }
 
   if (state.shopPackagesErrorText) {
     return `
-      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
-        ${escapeHtml(state.shopPackagesErrorText)}
-      </div>
+      <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
+        ${tabBar}
+        <div style="min-height:460px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+          ${escapeHtml(state.shopPackagesErrorText)}
+        </div>
+      </section>
     `
   }
 
@@ -6383,6 +6493,8 @@ export function renderShopPanel(state: LobbyScreenState): string {
           Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)}
         </div>
       </div>
+
+      ${tabBar}
 
       ${packages.length === 0 ? `
         <div style="min-height:260px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,0.10);background:#080808;border-radius:8px;color:rgba(255,255,255,0.64);font-size:15px;font-weight:800;text-align:center;padding:20px;">
@@ -7538,6 +7650,9 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
   const settings = state.adminSettings ?? {
     signupBonusYellowCoins: state.signupBonusYellowCoins,
     profileNameChangePrice: 50_000,
+    vipPrice30DaysCents: 789,
+    vipPrice180DaysCents: 3_989,
+    vipPrice365DaysCents: 6_989,
   }
   const adminPackages = state.adminCoinPackages
   const settingsGridStyle = isMobile
@@ -7617,9 +7732,34 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
           </label>
         </div>
 
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">VIP оферти</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              VIP 30 дни (€ цент)
+              <input name="vipPrice30DaysCents" type="number" min="1" max="100000" step="1" value="${settings.vipPrice30DaysCents}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              VIP 180 дни (€ цент)
+              <input name="vipPrice180DaysCents" type="number" min="1" max="100000" step="1" value="${settings.vipPrice180DaysCents}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              VIP 365 дни (€ цент)
+              <input name="vipPrice365DaysCents" type="number" min="1" max="100000" step="1" value="${settings.vipPrice365DaysCents}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Цената е в евроцентове (напр. 789 = 7,89 €), минимум 1 цент. Дните на пакетите са фиксирани и не подлежат на промяна.</div>
+        </div>
+
         ${state.adminSettingsErrorText ? `
           <div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">
             ${escapeHtml(state.adminSettingsErrorText)}
+          </div>
+        ` : ''}
+
+        ${state.adminSettingsSuccessText ? `
+          <div style="border-radius:8px;border:1px solid rgba(52,211,153,0.30);background:rgba(6,60,40,0.42);padding:10px 12px;color:#86efac;font-size:13px;font-weight:800;">
+            ${escapeHtml(state.adminSettingsSuccessText)}
           </div>
         ` : ''}
 
@@ -11754,6 +11894,25 @@ export function renderLobbyScreen(
     })
   })
 
+  root.querySelectorAll<HTMLButtonElement>('[data-shop-tab]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const tab = button.dataset.shopTab
+      if (tab === 'coins' || tab === 'vip') {
+        options.onShopTabClick(tab)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-vip-purchase-package]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.vipPurchasePackage?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onVipPurchaseClick(packageId)
+      }
+    })
+  })
+
   root.querySelectorAll<HTMLElement>('[data-shop-purchase-confirm-close="1"], [data-shop-purchase-confirm-cancel="1"]')
     .forEach((element) => {
       element.addEventListener('click', options.onShopPurchaseCancel)
@@ -12255,10 +12414,16 @@ export function renderLobbyScreen(
       const data = new FormData(form)
       const signupBonusYellowCoins = Number(data.get('signupBonusYellowCoins'))
       const profileNameChangePrice = Number(data.get('profileNameChangePrice'))
+      const vipPrice30DaysCents = Number(data.get('vipPrice30DaysCents'))
+      const vipPrice180DaysCents = Number(data.get('vipPrice180DaysCents'))
+      const vipPrice365DaysCents = Number(data.get('vipPrice365DaysCents'))
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
         profileNameChangePrice,
+        vipPrice30DaysCents,
+        vipPrice180DaysCents,
+        vipPrice365DaysCents,
       })
     })
 

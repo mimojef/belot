@@ -141,6 +141,12 @@ import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createVipStore, type VipInterval } from './db/vipStore.js'
+import {
+  createVipPurchaseStore,
+  VIP_PACKAGE_CATALOG,
+  isVipPackageId,
+  type VipPackageId,
+} from './db/vipPurchaseStore.js'
 import { normalizeProfileSearchTerm } from './db/normalizeProfileIdentityText.js'
 import {
   computePlayersPageOrder,
@@ -2084,6 +2090,7 @@ setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
+const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
@@ -7538,16 +7545,11 @@ async function handleShopCheckoutRequest(
     return false
   }
 
-  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
-
-  if (!stripeSecretKey) {
-    sendJsonResponse(res, 500, {
-      ok: false,
-      message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.',
-    })
-    return true
-  }
-
+  // Auth+validation guard-овете вървят ПРЕДИ Stripe-configuration проверката
+  // (обратен ред спрямо по-стар код) — неавтентикиран/невалиден request не
+  // трябва да разкрива дали Stripe изобщо е конфигуриран на сървъра, а и
+  // позволява 401/400 да се тестват детерминистично без нужда от реален
+  // STRIPE_SECRET_KEY в тестова среда.
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
@@ -7578,6 +7580,16 @@ async function handleShopCheckoutRequest(
 
   if (!pendingResult.ok) {
     sendJsonResponse(res, 400, pendingResult)
+    return true
+  }
+
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+
+  if (!stripeSecretKey) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.',
+    })
     return true
   }
 
@@ -7631,6 +7643,220 @@ async function handleShopCheckoutRequest(
   }
 
   const attached = coinPurchaseStore.attachCheckoutSession(
+    purchase.purchaseId,
+    checkoutSession.id,
+  )
+
+  if (attached === null) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Checkout сесията не беше записана към покупката.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    checkoutUrl: checkoutSession.url,
+    checkoutSessionId: checkoutSession.id,
+    purchase: attached,
+  })
+
+  return true
+}
+
+// ─── VIP оферти: каталог + checkout ────────────────────────────────────────
+
+// Mirror на handleShopPurchasesRequest GET клона (coins) — client-side
+// "wait for paid" polling след Stripe redirect се нуждае от начин да прочете
+// providerCheckoutSessionId/status за собствените VIP покупки (webhook е
+// source of truth, success redirect URL сам по себе си не е достатъчен).
+async function handleVipPurchasesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/vip/purchases' || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    purchases: vipPurchaseStore.listProfilePurchases(session.profile.profileId),
+  })
+  return true
+}
+
+async function handleVipPackagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/vip/packages' || req.method !== 'GET') {
+    return false
+  }
+
+  const settings = adminSettingsStore.getSettings()
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    packages: [
+      {
+        packageId: 'vip_30' as VipPackageId,
+        title: VIP_PACKAGE_CATALOG.vip_30.title,
+        days: VIP_PACKAGE_CATALOG.vip_30.days,
+        priceCents: settings.vipPrice30DaysCents,
+        currency: 'EUR',
+      },
+      {
+        packageId: 'vip_180' as VipPackageId,
+        title: VIP_PACKAGE_CATALOG.vip_180.title,
+        days: VIP_PACKAGE_CATALOG.vip_180.days,
+        priceCents: settings.vipPrice180DaysCents,
+        currency: 'EUR',
+      },
+      {
+        packageId: 'vip_365' as VipPackageId,
+        title: VIP_PACKAGE_CATALOG.vip_365.title,
+        days: VIP_PACKAGE_CATALOG.vip_365.days,
+        priceCents: settings.vipPrice365DaysCents,
+        currency: 'EUR',
+      },
+    ],
+  })
+
+  return true
+}
+
+function getVipPackagePriceCents(packageId: VipPackageId): number {
+  const settings = adminSettingsStore.getSettings()
+  if (packageId === 'vip_30') return settings.vipPrice30DaysCents
+  if (packageId === 'vip_180') return settings.vipPrice180DaysCents
+  return settings.vipPrice365DaysCents
+}
+
+async function handleVipCheckoutRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/vip/checkout' || req.method !== 'POST') {
+    return false
+  }
+
+  // Auth+validation guard-овете вървят ПРЕДИ Stripe-configuration проверката
+  // (виж identичния коментар в handleShopCheckoutRequest по-горе) — 401/400
+  // трябва да са детерминистично testable без нужда от реален
+  // STRIPE_SECRET_KEY, а и неавтентикиран caller не научава дали Stripe е
+  // конфигуриран.
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да купиш VIP.',
+    })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req)
+
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+    return true
+  }
+
+  // Клиентът праща САМО package identifier — сървърът map-ва дни+цена сам
+  // (VIP брифа §5). custom EUR amount/days от клиента се игнорира изцяло.
+  const packageId = getStringField(body, 'packageId')
+
+  if (packageId === null || !isVipPackageId(packageId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден VIP пакет.' })
+    return true
+  }
+
+  const priceCents = getVipPackagePriceCents(packageId)
+
+  const pendingResult = vipPurchaseStore.createPendingPurchase(
+    session.profile.profileId,
+    packageId,
+    priceCents,
+  )
+
+  if (!pendingResult.ok) {
+    sendJsonResponse(res, 400, pendingResult)
+    return true
+  }
+
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+
+  if (!stripeSecretKey) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.',
+    })
+    return true
+  }
+
+  const { purchase } = pendingResult
+
+  const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173'
+  const successUrl =
+    process.env.STRIPE_SUCCESS_URL ??
+    `${clientOrigin}/lobby?payment=success&session_id={CHECKOUT_SESSION_ID}`
+  const cancelUrl =
+    process.env.STRIPE_CANCEL_URL ?? `${clientOrigin}/lobby?payment=cancel`
+
+  const stripe = new Stripe(stripeSecretKey)
+
+  let checkoutSession: Stripe.Checkout.Session
+
+  try {
+    checkoutSession = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      line_items: [
+        {
+          price_data: {
+            currency: purchase.currency.toLowerCase(),
+            unit_amount: purchase.priceCents,
+            product_data: {
+              name: VIP_PACKAGE_CATALOG[purchase.packageId].title,
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        purchaseType: 'vip',
+        purchaseId: purchase.purchaseId,
+        profileId: session.profile.profileId,
+        packageId: purchase.packageId,
+      },
+    })
+  } catch (error) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message:
+        error instanceof Error ? error.message : 'Stripe checkout не беше стартиран.',
+    })
+    return true
+  }
+
+  const attached = vipPurchaseStore.attachCheckoutSession(
     purchase.purchaseId,
     checkoutSession.id,
   )
@@ -10795,6 +11021,36 @@ async function handleStripeWebhookRequest(
   if (event.type === 'checkout.session.completed') {
     const stripeSession = event.data.object as Stripe.Checkout.Session
 
+    if (stripeSession.metadata?.purchaseType === 'vip') {
+      const purchaseId = stripeSession.metadata?.purchaseId ?? ''
+      const checkoutSessionId = stripeSession.id
+
+      const vipResult = vipPurchaseStore.fulfillPaidPurchase({
+        checkoutSessionId,
+        purchaseId,
+        stripePaymentStatus: stripeSession.payment_status,
+        stripeCurrency: (stripeSession.currency ?? '').toUpperCase(),
+        stripeAmountTotalCents: stripeSession.amount_total ?? -1,
+      })
+
+      if (!vipResult.ok) {
+        console.error(
+          `[stripe/webhook] VIP fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${vipResult.message}`,
+        )
+      } else if (vipResult.alreadyCredited) {
+        console.log(
+          `[stripe/webhook] VIP already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
+        )
+      } else {
+        console.log(
+          `[stripe/webhook] VIP fulfilled purchaseId=${vipResult.purchase.purchaseId} package=${vipResult.purchase.packageId} newActiveUntil=${vipResult.newActiveUntil}`,
+        )
+      }
+
+      sendJsonResponse(res, 200, { ok: true })
+      return true
+    }
+
     if (stripeSession.payment_status === 'paid') {
       const purchaseId = stripeSession.metadata?.purchaseId ?? ''
       const checkoutSessionId = stripeSession.id
@@ -10880,7 +11136,11 @@ async function handleStripeWebhookRequest(
     }
   } else if (event.type === 'checkout.session.expired') {
     const stripeSession = event.data.object as Stripe.Checkout.Session
-    coinPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
+    if (stripeSession.metadata?.purchaseType === 'vip') {
+      vipPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
+    } else {
+      coinPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
+    }
   }
 
   sendJsonResponse(res, 200, { ok: true })
@@ -10926,9 +11186,37 @@ async function handleAdminSettingsRequest(
       return true
     }
 
+    // getNumberField() връща null еднакво за "полето липсва" И "полето е
+    // подадено, но не е валидно число" (string/bool/array/null) — updateSettings
+    // третира ?? undefined като "не е подадено", значи невалиден тип тихо се
+    // пропуска (HTTP 200, стойността в базата остава непроменена). За explicit
+    // reject (VIP price audit брифа §6 — "NaN/string garbage -> 400", не silent
+    // ignore) правим локална проверка тук САМО за КЛЮЧОВЕ, реално присъстващи в
+    // body-то, без да пипаме споделения getNumberField helper (26 други call
+    // sites другаде в този файл).
+    const numericFieldKeys = [
+      'signupBonusYellowCoins',
+      'profileNameChangePrice',
+      'vipPrice30DaysCents',
+      'vipPrice180DaysCents',
+      'vipPrice365DaysCents',
+    ] as const
+    for (const key of numericFieldKeys) {
+      if (key in body && getNumberField(body, key) === null) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: `Полето "${key}" трябва да е валидно число.`,
+        })
+        return true
+      }
+    }
+
     const result = adminSettingsStore.updateSettings({
       signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
       profileNameChangePrice: getNumberField(body, 'profileNameChangePrice') ?? undefined,
+      vipPrice30DaysCents: getNumberField(body, 'vipPrice30DaysCents') ?? undefined,
+      vipPrice180DaysCents: getNumberField(body, 'vipPrice180DaysCents') ?? undefined,
+      vipPrice365DaysCents: getNumberField(body, 'vipPrice365DaysCents') ?? undefined,
     })
 
     if (!result.ok) {
@@ -13294,6 +13582,18 @@ async function handleHttpRequest(
   }
 
   if (await handleShopCheckoutRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleVipPurchasesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleVipPackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleVipCheckoutRequest(req, res, requestUrl.pathname)) {
     return
   }
 

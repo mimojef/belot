@@ -50,6 +50,8 @@ import {
   type CoinHidePurchaseResponse,
   type CoinPackageInput,
   type CoinPackageSnapshot,
+  type VipPackageSnapshot,
+  type VipPurchaseSnapshot,
   type CoinPackageStatus,
   type CoinPurchaseSnapshot,
   type FriendshipsSnapshot,
@@ -403,6 +405,25 @@ type CoinPackagesResponse = {
   ok: boolean
   packages?: CoinPackageSnapshot[]
   package?: CoinPackageSnapshot
+  message?: string
+}
+
+type VipPackagesResponse = {
+  ok: boolean
+  packages?: VipPackageSnapshot[]
+  message?: string
+}
+
+type VipCheckoutResponse = {
+  ok: boolean
+  checkoutUrl?: string
+  checkoutSessionId?: string
+  message?: string
+}
+
+type VipPurchasesResponse = {
+  ok: boolean
+  purchases?: VipPurchaseSnapshot[]
   message?: string
 }
 
@@ -995,6 +1016,102 @@ async function startShopPurchase(packageId: string): Promise<
   }
 }
 
+async function loadVipPackages(): Promise<
+  | { ok: true; packages: VipPackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/packages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as VipPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'VIP офертите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за VIP офертите.',
+    }
+  }
+}
+
+async function loadVipPurchases(): Promise<
+  | { ok: true; purchases: VipPurchaseSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/purchases`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as VipPurchasesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.purchases)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Историята на VIP покупки не беше заредена.',
+      }
+    }
+
+    return {
+      ok: true,
+      purchases: data.purchases,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за VIP покупки.',
+    }
+  }
+}
+
+async function startVipPurchase(packageId: string): Promise<
+  | { ok: true; message: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/vip/checkout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ packageId }),
+    })
+    const data = (await response.json()) as VipCheckoutResponse
+
+    if (!response.ok || !data.ok || !data.checkoutUrl) {
+      return {
+        ok: false,
+        message: data.message ?? 'Stripe плащането не беше стартирано.',
+      }
+    }
+
+    window.location.assign(data.checkoutUrl)
+
+    return {
+      ok: true,
+      message: 'Пренасочване към Stripe Checkout...',
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за Stripe плащане.',
+    }
+  }
+}
+
 async function resumeShopPurchase(purchaseId: string): Promise<
   | { ok: true; checkoutUrl: string }
   | { ok: false; message: string }
@@ -1169,6 +1286,48 @@ async function waitForPaidStripePurchase(
   return null
 }
 
+// Mirror на waitForPaidStripePurchase (coins), но полира /api/vip/purchases —
+// success redirect URL-ът е СПОДЕЛЕН template за coins/VIP/resume checkout
+// (виж STRIPE_SUCCESS_URL fallback-а в server/src/index.ts), значи клиентът
+// НЕ знае от URL-а самия дали sesion_id принадлежи на coin или VIP покупка.
+// Webhook-ът остава единственият source of truth за settlement — това е
+// само polling за "вече ли webhook-ът пристигна", никога fake-success само
+// от redirect параметъра.
+async function waitForPaidVipPurchase(
+  checkoutSessionId: string,
+): Promise<VipPurchaseSnapshot | null> {
+  const normalizedSessionId = checkoutSessionId.trim()
+  if (!normalizedSessionId) return null
+
+  const startedAt = Date.now()
+  const timeoutMs = 8500
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    const result = await loadVipPurchases()
+
+    if (result.ok) {
+      const purchase = result.purchases.find((item) => {
+        return item.providerCheckoutSessionId === normalizedSessionId
+      })
+
+      if (purchase?.status === 'paid') {
+        return purchase
+      }
+    }
+
+    await delay(700)
+  }
+
+  return null
+}
+
+function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): void {
+  lobby.invalidateOwnVipStatus()
+  lobby.showVipPurchaseSuccessMessage(
+    `VIP е активиран за ${purchase.days} дни. Провери профила си за новата дата на изтичане.`,
+  )
+}
+
 async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null): Promise<void> {
   const normalizedSessionId = checkoutSessionId?.trim() ?? ''
   if (!normalizedSessionId || currentAuthSession === null) return
@@ -1180,8 +1339,17 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
     // Ignore storage failures; the backend remains the source of truth.
   }
 
-  const purchase = await waitForPaidStripePurchase(normalizedSessionId)
-  if (purchase === null) return
+  // Success redirect URL е СПОДЕЛЕН template за coins/VIP (виж коментара
+  // до waitForPaidVipPurchase) — не знаем от URL-а сам по себе си кой тип
+  // покупка е session_id-то, затова опитваме и двата lookup-а паралелно.
+  // Само webhook-settled резултат (status==='paid' от сървъра) активира
+  // каквото и да е — redirect-ът сам по себе си НИКОГА не е достатъчен.
+  const [coinPurchase, vipPurchase] = await Promise.all([
+    waitForPaidStripePurchase(normalizedSessionId),
+    waitForPaidVipPurchase(normalizedSessionId),
+  ])
+
+  if (coinPurchase === null && vipPurchase === null) return
 
   try {
     sessionStorage.setItem(seenKey, '1')
@@ -1191,7 +1359,15 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
 
   await loadAuthSession()
   lobby.resetToLobby()
-  showStripeCoinRewardOverlay(purchase.yellowCoinsAmount)
+
+  if (coinPurchase !== null) {
+    showStripeCoinRewardOverlay(coinPurchase.yellowCoinsAmount)
+    return
+  }
+
+  if (vipPurchase !== null) {
+    showVipPurchaseSuccessMessage(vipPurchase)
+  }
 }
 
 async function loadPublicSettings(): Promise<void> {
@@ -4709,6 +4885,8 @@ lobby = createLobbyFlowController({
   onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
   onShopPurchaseResume: (purchaseId) => resumeShopPurchase(purchaseId),
   onShopPurchaseHide: (purchaseId) => hideShopPurchase(purchaseId),
+  onVipPackagesLoad: () => loadVipPackages(),
+  onVipPurchaseStart: (packageId) => startVipPurchase(packageId),
   onAdminDailyRewardsLoad: () => loadAdminDailyRewards(),
   onAdminDailyRewardAdd: (amount) => addAdminDailyReward(amount),
   onAdminDailyRewardRemove: (tierId) => removeAdminDailyReward(tierId),

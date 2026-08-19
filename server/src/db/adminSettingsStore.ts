@@ -3,6 +3,9 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 export type AdminSettingsSnapshot = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number
+  vipPrice30DaysCents: number
+  vipPrice180DaysCents: number
+  vipPrice365DaysCents: number
 }
 
 export type AdminSettingsStore = {
@@ -30,12 +33,27 @@ type SettingRow = {
 const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   signupBonusYellowCoins: 100_000,
   profileNameChangePrice: 50_000,
+  // Само fallback за база без seed-натата migration (20260818_006) — реалната
+  // production стойност идва от admin_settings реда, seed-нат веднъж.
+  vipPrice30DaysCents: 789,
+  vipPrice180DaysCents: 3_989,
+  vipPrice365DaysCents: 6_989,
 }
 
 const SETTING_KEYS = {
   signupBonusYellowCoins: 'signup_bonus_yellow_coins',
   profileNameChangePrice: 'profile_name_change_price',
+  vipPrice30DaysCents: 'vip_price_30_days_cents',
+  vipPrice180DaysCents: 'vip_price_180_days_cents',
+  vipPrice365DaysCents: 'vip_price_365_days_cents',
 } as const
+
+// VIP е платен пакет — 0 € не е валидна цена (би направило пакета безплатен
+// без изричен "безплатен VIP" flow). Долна граница 1 цент.
+const VIP_PRICE_MIN_CENTS = 1
+// VIP цена upper bound — 1000,00 € е далеч над всякаква разумна admin цена,
+// но пази от fat-finger вход (напр. случайно добавена нула).
+const VIP_PRICE_MAX_CENTS = 100_000
 
 const LOBBY_CHAT_PIKA_ANNOUNCEMENT_CUTOFF_SEQ_KEY = 'lobby_chat_pika_announcement_cutoff_seq'
 
@@ -83,7 +101,10 @@ export async function createAdminSettingsStore(
     FROM admin_settings
     WHERE setting_key IN (
       'signup_bonus_yellow_coins',
-      'profile_name_change_price'
+      'profile_name_change_price',
+      'vip_price_30_days_cents',
+      'vip_price_180_days_cents',
+      'vip_price_365_days_cents'
     );
   `)
 
@@ -120,6 +141,18 @@ export async function createAdminSettingsStore(
         values.get(SETTING_KEYS.profileNameChangePrice) ?? '',
         DEFAULT_SETTINGS.profileNameChangePrice,
       ),
+      vipPrice30DaysCents: parseStoredInteger(
+        values.get(SETTING_KEYS.vipPrice30DaysCents) ?? '',
+        DEFAULT_SETTINGS.vipPrice30DaysCents,
+      ),
+      vipPrice180DaysCents: parseStoredInteger(
+        values.get(SETTING_KEYS.vipPrice180DaysCents) ?? '',
+        DEFAULT_SETTINGS.vipPrice180DaysCents,
+      ),
+      vipPrice365DaysCents: parseStoredInteger(
+        values.get(SETTING_KEYS.vipPrice365DaysCents) ?? '',
+        DEFAULT_SETTINGS.vipPrice365DaysCents,
+      ),
     }
   }
 
@@ -134,6 +167,18 @@ export async function createAdminSettingsStore(
       input.profileNameChangePrice === undefined
         ? undefined
         : normalizeSettingNumber(input.profileNameChangePrice, 0, 10_000_000)
+    const nextVipPrice30 =
+      input.vipPrice30DaysCents === undefined
+        ? undefined
+        : normalizeSettingNumber(input.vipPrice30DaysCents, VIP_PRICE_MIN_CENTS, VIP_PRICE_MAX_CENTS)
+    const nextVipPrice180 =
+      input.vipPrice180DaysCents === undefined
+        ? undefined
+        : normalizeSettingNumber(input.vipPrice180DaysCents, VIP_PRICE_MIN_CENTS, VIP_PRICE_MAX_CENTS)
+    const nextVipPrice365 =
+      input.vipPrice365DaysCents === undefined
+        ? undefined
+        : normalizeSettingNumber(input.vipPrice365DaysCents, VIP_PRICE_MIN_CENTS, VIP_PRICE_MAX_CENTS)
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -149,6 +194,27 @@ export async function createAdminSettingsStore(
       }
     }
 
+    if (input.vipPrice30DaysCents !== undefined && nextVipPrice30 === null) {
+      return {
+        ok: false,
+        message: 'Цената за VIP 30 дни трябва да е между 0,01 € и 1000 € (макс. 2 знака след запетая).',
+      }
+    }
+
+    if (input.vipPrice180DaysCents !== undefined && nextVipPrice180 === null) {
+      return {
+        ok: false,
+        message: 'Цената за VIP 180 дни трябва да е между 0,01 € и 1000 € (макс. 2 знака след запетая).',
+      }
+    }
+
+    if (input.vipPrice365DaysCents !== undefined && nextVipPrice365 === null) {
+      return {
+        ok: false,
+        message: 'Цената за VIP 365 дни трябва да е между 0,01 € и 1000 € (макс. 2 знака след запетая).',
+      }
+    }
+
     if (nextSignupBonus !== undefined) {
       upsertSettingStatement.run(
         SETTING_KEYS.signupBonusYellowCoins,
@@ -161,6 +227,18 @@ export async function createAdminSettingsStore(
         SETTING_KEYS.profileNameChangePrice,
         String(nextNameChangePrice),
       )
+    }
+
+    if (nextVipPrice30 !== undefined) {
+      upsertSettingStatement.run(SETTING_KEYS.vipPrice30DaysCents, String(nextVipPrice30))
+    }
+
+    if (nextVipPrice180 !== undefined) {
+      upsertSettingStatement.run(SETTING_KEYS.vipPrice180DaysCents, String(nextVipPrice180))
+    }
+
+    if (nextVipPrice365 !== undefined) {
+      upsertSettingStatement.run(SETTING_KEYS.vipPrice365DaysCents, String(nextVipPrice365))
     }
 
     return {
