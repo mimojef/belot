@@ -1327,6 +1327,20 @@ function formatVipActiveUntilLabel(activeUntilIso: string): string | null {
   return parsed.toLocaleDateString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric' })
 }
 
+// Пуска се ТОЧНО веднъж, само на прехода loading -> server-confirmed paid
+// (виж handleStripePaymentSuccessReturn). Established fire-and-forget pattern
+// (mirror на playStripeRewardSound) — playback failure никога не блокира
+// popup-а/payment flow-а.
+function playVipPurchaseConfirmedSound(): void {
+  try {
+    const audio = new Audio('/audio/Notifications/notification-3.mp3')
+    audio.volume = 0.75
+    void audio.play().catch(() => {})
+  } catch {
+    // Browser audio policies can block playback after a redirect.
+  }
+}
+
 async function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): Promise<void> {
   lobby.invalidateOwnVipStatus()
 
@@ -1337,6 +1351,13 @@ async function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): Pro
   const statusResult = await loadOwnVipStatus()
   const activeUntilLabel =
     statusResult.ok && statusResult.activeUntil ? formatVipActiveUntilLabel(statusResult.activeUntil) : null
+
+  // Звукът се пуска ТОЧНО тук — единственото място, където loading фазата
+  // transition-ва в confirmed paid success. Никога при първоначалния loading
+  // popup, никога при delayed/timeout, никога повторно при re-render (тази
+  // функция се извиква само веднъж на успешен redirect, guard-нато от
+  // sessionStorage seenKey в handleStripePaymentSuccessReturn).
+  playVipPurchaseConfirmedSound()
 
   lobby.showVipPurchaseSuccessPopup(purchase.days, activeUntilLabel)
 }
@@ -1352,17 +1373,70 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
     // Ignore storage failures; the backend remains the source of truth.
   }
 
+  // UX fix: показва loading modal ВЕДНАГА при redirect landing, преди exact
+  // session correlation-ът по-долу да е резолвнат — потребителят вижда
+  // незабавна обратна връзка вместо "нищо не се случва" между Stripe
+  // redirect-а и webhook потвърждението. Same popup instance transition-ва
+  // към success/delayed по-долу — никога отделен втори stacked popup.
+  lobby.showVipPurchaseProcessingPopup()
+
   // Success redirect URL е СПОДЕЛЕН template за coins/VIP (виж коментара
   // до waitForPaidVipPurchase) — не знаем от URL-а сам по себе си кой тип
-  // покупка е session_id-то, затова опитваме и двата lookup-а паралелно.
-  // Само webhook-settled резултат (status==='paid' от сървъра) активира
-  // каквото и да е — redirect-ът сам по себе си НИКОГА не е достатъчен.
-  const [coinPurchase, vipPurchase] = await Promise.all([
-    waitForPaidStripePurchase(normalizedSessionId),
-    waitForPaidVipPurchase(normalizedSessionId),
-  ])
+  // покупка е session_id-то, затова стартираме и двата lookup-а паралелно.
+  // ВАЖНО: session_id принадлежи ТОЧНО на един purchase type — другият
+  // poller никога няма да намери match и ще изчерпи целия си 8.5s timeout
+  // напразно. Promise.all() тук би блокирал success прехода до по-бавния от
+  // двата (напр. VIP paid за 1-2s, но UI чака цели 8.5s заради coin poller-а,
+  // който гарантирано ще върне null). Затова reагираме на ПЪРВИЯ non-null
+  // резултат веднага, докато другият poller продължава в background-а
+  // (fire-and-forget — резултатът му вече е ирелевантен, session_id вече е
+  // разрешен еднозначно). Само ако И ДВАТА резултата дойдат null, значи
+  // нито едно потвърждение не пристигна до края на съответния timeout →
+  // delayed. Exact providerCheckoutSessionId correlation (вътре в самите
+  // poller функции) остава непроменена — само orchestration-ът на резултата
+  // тук е по-бърз.
+  type ResolvedPurchase =
+    | { kind: 'coin'; purchase: CoinPurchaseSnapshot }
+    | { kind: 'vip'; purchase: VipPurchaseSnapshot }
 
-  if (coinPurchase === null && vipPurchase === null) return
+  const resolved = await new Promise<ResolvedPurchase | null>((resolvePromise) => {
+    let settled = false
+    let nullCount = 0
+
+    const settleOnce = (value: ResolvedPurchase | null): void => {
+      if (settled) return
+      settled = true
+      resolvePromise(value)
+    }
+
+    waitForPaidStripePurchase(normalizedSessionId).then((purchase) => {
+      if (purchase !== null) {
+        settleOnce({ kind: 'coin', purchase })
+        return
+      }
+      nullCount += 1
+      if (nullCount === 2) settleOnce(null)
+    })
+
+    waitForPaidVipPurchase(normalizedSessionId).then((purchase) => {
+      if (purchase !== null) {
+        settleOnce({ kind: 'vip', purchase })
+        return
+      }
+      nullCount += 1
+      if (nullCount === 2) settleOnce(null)
+    })
+  })
+
+  if (resolved === null) {
+    // И двата poller-а изчерпаха собствения си timeout без нито едно
+    // потвърдено плащане. Coins flow-ът остава напълно непроменен (без
+    // delayed UX за него — извън обхвата на тази задача) — само VIP loading
+    // popup-ът се превключва в 'delayed', за да НЕ остане завинаги на
+    // "Изчакваме потвърждение" без изход.
+    lobby.showVipPurchaseDelayedPopup()
+    return
+  }
 
   try {
     sessionStorage.setItem(seenKey, '1')
@@ -1373,14 +1447,12 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
   await loadAuthSession()
   lobby.resetToLobby()
 
-  if (coinPurchase !== null) {
-    showStripeCoinRewardOverlay(coinPurchase.yellowCoinsAmount)
+  if (resolved.kind === 'coin') {
+    showStripeCoinRewardOverlay(resolved.purchase.yellowCoinsAmount)
     return
   }
 
-  if (vipPurchase !== null) {
-    await showVipPurchaseSuccessMessage(vipPurchase)
-  }
+  await showVipPurchaseSuccessMessage(resolved.purchase)
 }
 
 async function loadPublicSettings(): Promise<void> {

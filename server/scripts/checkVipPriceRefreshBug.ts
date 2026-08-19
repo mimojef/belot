@@ -47,6 +47,23 @@
  * [14] renderVipPurchaseSuccessPopup: точен текст/заглавие/бутон, no-op при
  *        isOpen=false
  * [15] onVipPurchaseSuccessClose затваря popup-а normally (isOpen: false)
+ *
+ * Loading -> paid success / delayed UX (production redirect UX fix,
+ * между Stripe redirect-а и webhook потвърждението показва loading вместо
+ * "нищо не се случва"):
+ * [16] loading фаза: точен текст (spinner, "Не затваряйте страницата"), без OK
+ * [17] delayed фаза: точен текст ("не грешка", auto-activate след webhook), с OK
+ * [18] Един popup instance за целия preход (processing/success/delayed/close
+ *        всички пишат в СЪЩОТО state.vipPurchaseSuccessPopup поле)
+ * [19] notification-3.mp3 се пуска ТОЧНО на loading->paid прехода
+ *        (showVipPurchaseSuccessMessage), никога в processing/delayed пътя,
+ *        никога от render функцията самата (би звучал при всеки re-render)
+ *
+ * Race-not-Promise.all fix (session_id принадлежи на ТОЧНО един purchase
+ * type — другият poller гарантирано връща null едва след пълния си 8.5s
+ * timeout; Promise.all() би блокирал по-бързия match до по-бавния):
+ * [12b] Двата poller-а racing-ват (fire независимо, settle на първия
+ *        non-null); delayed само след като И ДВАТА индивидуално timeout-нат
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -330,17 +347,48 @@ await check('[11] waitForPaidVipPurchase връща purchase САМО ако sta
   )
 })
 
-await check('[12] handleStripePaymentSuccessReturn показва popup САМО когато vipPurchase !== null (server-confirmed paid), redirect сам по себе си никога не е достатъчен', () => {
+await check('[12] handleStripePaymentSuccessReturn показва success popup САМО когато resolved.kind==="vip" (server-confirmed paid); timeout без нито едно потвърдено плащане показва delayed, НЕ success', () => {
   const fnMatch = mainSource.match(/async function handleStripePaymentSuccessReturn\([\s\S]*?\n\}/)
   assert(fnMatch !== null, 'handleStripePaymentSuccessReturn функцията трябва да съществува')
   const fnBody = fnMatch?.[0] ?? ''
   assert(
-    fnBody.includes('if (coinPurchase === null && vipPurchase === null) return'),
-    'функцията трябва да прекъсне рано, ако НИТО една покупка не е server-confirmed paid (redirect само/URL параметър никога не е достатъчен)',
+    /if \(resolved === null\) \{[\s\S]*?showVipPurchaseDelayedPopup\(\)[\s\S]*?return/.test(fnBody),
+    'ако НИТО една покупка не е server-confirmed paid (и двата poller-а изчерпаха собствения си timeout), функцията трябва да покаже delayed popup и да прекъсне — redirect само/URL параметър никога не е достатъчен за success',
   )
   assert(
-    /if \(vipPurchase !== null\) \{\s*await showVipPurchaseSuccessMessage\(vipPurchase\)/.test(fnBody),
-    'popup-ът трябва да се показва само вътре в guard-натия vipPurchase !== null branch',
+    /if \(resolved\.kind === 'coin'\) \{[\s\S]*?showStripeCoinRewardOverlay/.test(fnBody),
+    'coin success overlay-ят трябва да се показва само вътре в guard-натия resolved.kind==="coin" branch',
+  )
+  assert(
+    fnBody.includes('await showVipPurchaseSuccessMessage(resolved.purchase)'),
+    'VIP success popup-ът трябва да се показва само след coin branch guard-а (implicit VIP else path)',
+  )
+  assert(
+    fnBody.includes('lobby.showVipPurchaseProcessingPopup()'),
+    'loading popup-ът трябва да се покаже веднага при redirect landing, преди exact session correlation-ът да е резолвнат',
+  )
+})
+
+await check('[12b] handleStripePaymentSuccessReturn НЕ използва Promise.all за двата poller-а (би блокирал по-бързия success transition до по-бавния timeout на другия purchase type)', () => {
+  const fnMatch = mainSource.match(/async function handleStripePaymentSuccessReturn\([\s\S]*?\n\}/)
+  assert(fnMatch !== null, 'handleStripePaymentSuccessReturn функцията трябва да съществува')
+  const fnBody = fnMatch?.[0] ?? ''
+  assert(
+    !fnBody.includes('Promise.all(['),
+    'Promise.all() би изчаквало и двата poller-а (всеки до собствения си 8.5s timeout) преди success — session_id принадлежи на точно ЕДИН purchase type, другият poller гарантирано ще върне null едва след пълния си timeout, значи Promise.all() ненужно бави по-бързия match',
+  )
+  assert(
+    fnBody.includes('waitForPaidStripePurchase(normalizedSessionId).then(') &&
+    fnBody.includes('waitForPaidVipPurchase(normalizedSessionId).then('),
+    'двата poller-а трябва да стартират паралелно (fire независимо), не да се await-ват последователно',
+  )
+  assert(
+    fnBody.includes('settleOnce({ kind: \'coin\', purchase })') && fnBody.includes('settleOnce({ kind: \'vip\', purchase })'),
+    'първият non-null резултат от който и да е от двата poller-а трябва да settle-не веднага (race semantics), без да чака другия poller да приключи',
+  )
+  assert(
+    fnBody.includes('nullCount === 2'),
+    'delayed трябва да се показва само след като И ДВАТА poller-а индивидуално са потвърдили null (изчерпали собствения си timeout) — не след първия null',
   )
 })
 
@@ -381,6 +429,63 @@ await check('[15] onVipPurchaseSuccessClose затваря popup-а нормал
     popupSource.includes("attachVipPurchaseSuccessPopupEventListeners"),
     'popup модулът трябва да експортва wiring helper (backdrop click + OK button click), established pattern (renderGuestTrialPopup)',
   )
+})
+
+// ─── Loading -> paid success / delayed UX (production redirect UX fix) ─────
+
+await check('[16] renderVipPurchaseSuccessPopup: loading фаза показва точния текст (spinner + "Не затваряйте страницата"), без OK бутон', () => {
+  const loadingBranchMatch = popupSource.match(/if \(state\.phase === 'loading'\) \{[\s\S]*?\n  \}/)
+  assert(loadingBranchMatch !== null, "loading branch-ът трябва да съществува")
+  const branchBody = loadingBranchMatch?.[0] ?? ''
+  assert(branchBody.includes('Плащането се обработва'), 'loading заглавието трябва да е "Плащането се обработва"')
+  assert(branchBody.includes('Изчакваме потвърждение на плащането'), 'loading текстът трябва да съобщава изчакване на потвърждение')
+  assert(branchBody.includes('Не затваряйте страницата'), 'loading popup-ът трябва да предупреди да не се затваря страницата')
+  assert(!branchBody.includes('data-vip-purchase-success-popup-ok'), 'loading фазата НЕ трябва да показва OK бутон (само spinner, чака се пасивно)')
+})
+
+await check('[17] renderVipPurchaseSuccessPopup: delayed фаза показва точния текст ("не грешка", VIP ще се активира автоматично) + OK бутон', () => {
+  const delayedBranchMatch = popupSource.match(/if \(state\.phase === 'delayed'\) \{[\s\S]*?\n  \}/)
+  assert(delayedBranchMatch !== null, "delayed branch-ът трябва да съществува")
+  const branchBody = delayedBranchMatch?.[0] ?? ''
+  assert(branchBody.includes('Плащането се обработва'), 'delayed заглавието трябва да остане "Плащането се обработва" (не грешка)')
+  assert(branchBody.includes('Потвърждението от платежната система се забавя'), 'delayed текстът трябва да обясни забавяне, не failure')
+  assert(branchBody.includes('VIP ще бъде активиран автоматично'), 'delayed текстът трябва да потвърди автоматично активиране след webhook')
+  assert(!/Неуспешно|неуспеш/i.test(branchBody), 'delayed popup-ът НЕ трябва да съдържа "неуспешно" никъде — webhook просто закъснява')
+  assert(branchBody.includes('data-vip-purchase-success-popup-ok'), 'delayed фазата трябва да има OK бутон')
+})
+
+await check('[18] Един popup instance за целия loading -> success/delayed преход (никога два stacked popup-а)', () => {
+  assert(
+    controllerSource.includes('showVipPurchaseProcessingPopup: () =>') &&
+    controllerSource.includes('showVipPurchaseSuccessPopup: (days, activeUntilLabel) =>') &&
+    controllerSource.includes('showVipPurchaseDelayedPopup: () =>'),
+    'трите фази трябва да пишат в СЪЩОТО state.vipPurchaseSuccessPopup поле (единствен popup компонент, discriminated по state.phase)',
+  )
+  // И трите handler-а трябва да задават state.currentScreen/state.vipPurchaseSuccessPopup
+  // директно (не да отварят допълнителен отделен модал компонент/state field).
+  const vipPopupFieldOccurrences = (controllerSource.match(/state\.vipPurchaseSuccessPopup = \{/g) ?? []).length
+  assert(vipPopupFieldOccurrences === 4, `очаквах точно 4 присвоявания на state.vipPurchaseSuccessPopup (processing/success/delayed/close), намерих ${vipPopupFieldOccurrences}`)
+})
+
+await check('[19] Звукът (notification-3.mp3) се пуска ТОЧНО на прехода loading -> confirmed paid, никога при loading/delayed', () => {
+  const soundFnMatch = mainSource.match(/function playVipPurchaseConfirmedSound\(\): void \{[\s\S]*?\n\}/)
+  assert(soundFnMatch !== null, 'playVipPurchaseConfirmedSound функцията трябва да съществува')
+  const soundFnBody = soundFnMatch?.[0] ?? ''
+  assert(soundFnBody.includes("new Audio('/audio/Notifications/notification-3.mp3')"), 'трябва да ползва съществуващия asset, без нов copy')
+  assert(soundFnBody.includes('.play().catch(') || soundFnBody.includes('.play().catch ('), 'playback failure не трябва да хвърля/блокира (fire-and-forget catch)')
+
+  const successMsgFnMatch = mainSource.match(/async function showVipPurchaseSuccessMessage\([\s\S]*?\n\}/)
+  assert(successMsgFnMatch !== null, 'showVipPurchaseSuccessMessage функцията трябва да съществува')
+  const successFnBody = successMsgFnMatch?.[0] ?? ''
+  assert(successFnBody.includes('playVipPurchaseConfirmedSound()'), 'звукът трябва да се пуска вътре в showVipPurchaseSuccessMessage (единствения confirmed-paid entry point)')
+
+  // Негативни проверки: звукът НЕ трябва да присъства в processing/delayed показването.
+  const processingCallSite = mainSource.match(/lobby\.showVipPurchaseProcessingPopup\(\)/)
+  assert(processingCallSite !== null, 'showVipPurchaseProcessingPopup call site трябва да съществува')
+  const delayedFnRegion = mainSource.slice(mainSource.indexOf('if (coinPurchase === null && vipPurchase === null)'), mainSource.indexOf('if (coinPurchase === null && vipPurchase === null)') + 400)
+  assert(!delayedFnRegion.includes('playVipPurchaseConfirmedSound'), 'звукът НЕ трябва да се пуска в delayed/timeout branch-а')
+
+  assert(!popupSource.includes('playVipPurchaseConfirmedSound'), 'popup render функцията не трябва сама да решава кога да пусне звук (иначе би звучал при всеки re-render на success фазата) — звукът се пуска explicit САМО веднъж в main.ts на прехода')
 })
 
 console.log(`\n  Passed: ${passed}  Failed: ${failed}\n`)

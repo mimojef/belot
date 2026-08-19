@@ -863,7 +863,9 @@ export type LobbyFlowController = {
   refreshDailyRewardsStatus: () => void
   refreshSupportUnread: () => void
   invalidateOwnVipStatus: () => void
+  showVipPurchaseProcessingPopup: () => void
   showVipPurchaseSuccessPopup: (days: number, activeUntilLabel: string | null) => void
+  showVipPurchaseDelayedPopup: () => void
   removePendingFriendRequest: (friendshipId: string) => void
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
   isConversationOpen: (friendshipId: string) => boolean
@@ -1652,6 +1654,7 @@ function createInitialState(): InternalLobbyFlowState {
     },
     vipPurchaseSuccessPopup: {
       isOpen: false,
+      phase: 'loading',
       days: 0,
       activeUntilLabel: null,
     },
@@ -4432,7 +4435,7 @@ export function createLobbyFlowController(
         closeGuestTrialPopup()
       },
       onVipPurchaseSuccessClose: () => {
-        state.vipPurchaseSuccessPopup = { isOpen: false, days: 0, activeUntilLabel: null }
+        state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', days: 0, activeUntilLabel: null }
         render()
       },
       onGuestLockedStakePlay5000Click: () => {
@@ -14104,6 +14107,17 @@ export function createLobbyFlowController(
       state.ownVipActiveUntilLoadedForProfileId = null
       state.vipPackages = []
     },
+    showVipPurchaseProcessingPopup: () => {
+      // Извиква се ВЕДНАГА при landing на success redirect (payment=success&
+      // session_id=...), преди exact session correlation-a да е резолвнат —
+      // само loading UX, никога success/VIP grant claim. Same popup instance
+      // ще transition-не към 'success' или 'delayed' фаза по-долу (никога
+      // отделен втори popup stacked върху тоя).
+      state.currentScreen = 'shop'
+      state.shopActiveTab = 'vip'
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'loading', days: 0, activeUntilLabel: null }
+      render()
+    },
     showVipPurchaseSuccessPopup: (days, activeUntilLabel) => {
       // Success redirect landing — Stripe webhook вече е settle-нал точно
       // тази checkout сесия преди тази функция да се извика (виж
@@ -14114,7 +14128,16 @@ export function createLobbyFlowController(
       // не е client-side изчислено.
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, days, activeUntilLabel }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'success', days, activeUntilLabel }
+      render()
+    },
+    showVipPurchaseDelayedPopup: () => {
+      // Polling timeout изтече без server-confirmed paid — webhook просто
+      // може да закъснява (async забавяне, не failure). НЕ съобщение за
+      // грешка — VIP ще се активира автоматично, когато webhook пристигне.
+      state.currentScreen = 'shop'
+      state.shopActiveTab = 'vip'
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'delayed', days: 0, activeUntilLabel: null }
       render()
     },
     removePendingFriendRequest: (friendshipId: string) => {
