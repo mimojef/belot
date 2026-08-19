@@ -79,6 +79,7 @@ const MIGRATION_006 = '20260818_006_seed_vip_price_settings.sql'
 const MIGRATION_007 = '20260818_007_create_vip_purchase_ledger.sql'
 const MIGRATION_008 = '20260818_008_add_vip_purchase_audit_fields.sql'
 const MIGRATION_009 = '20260818_009_add_vip_grants_purchase_unique_index.sql'
+const MIGRATION_20260819_001 = '20260819_001_add_vip_purchase_payment_method_snapshot.sql'
 const ALREADY_APPLIED_005 = '20260818_005_add_topic_mute_evidence_attachment_copy.sql'
 
 const sourceServerRoot = resolve(
@@ -151,6 +152,7 @@ assert(realMigrationFileNames.includes(MIGRATION_006), `${MIGRATION_006} not fou
 assert(realMigrationFileNames.includes(MIGRATION_007), `${MIGRATION_007} not found`)
 assert(realMigrationFileNames.includes(MIGRATION_008), `${MIGRATION_008} not found`)
 assert(realMigrationFileNames.includes(MIGRATION_009), `${MIGRATION_009} not found`)
+assert(realMigrationFileNames.includes(MIGRATION_20260819_001), `${MIGRATION_20260819_001} not found`)
 
 // Пълната production история ДО и ВКЛЮЧИТЕЛНО 005 (лексикографски "005" и
 // по-рано) — реален upgrade сценарий, не hand-picked subset.
@@ -343,6 +345,84 @@ try {
       assertEqual(values.get('vip_price_30_days_cents'), '789', 'VIP 30 дни default цена')
       assertEqual(values.get('vip_price_180_days_cents'), '3989', 'VIP 180 дни default цена')
       assertEqual(values.get('vip_price_365_days_cents'), '6989', 'VIP 365 дни default цена')
+    } finally {
+      database.close()
+    }
+  })
+
+  let existingVipPurchaseId = ''
+
+  await check('[11] Seed: съществуващ paid VIP purchase (симулира production €1.00 реда) ПРЕДИ 20260819_001', async () => {
+    const database = await openDatabase(temp.databaseFilePath)
+    try {
+      existingVipPurchaseId = randomUUID()
+      database.prepare(`
+        INSERT INTO vip_purchase_ledger (
+          purchase_id, profile_id, package_id, days_snapshot, price_cents_snapshot,
+          currency, provider, status, created_at, updated_at, credited_at
+        ) VALUES (?, ?, 'vip_365', 365, 100, 'EUR', 'stripe', 'paid', '2026-08-18 12:00:00', '2026-08-18 12:00:00', '2026-08-18 12:00:00');
+      `).run(existingVipPurchaseId, launchGiftProfileId)
+    } finally {
+      database.close()
+    }
+  })
+
+  await check('[12] 20260819_001 (payment-method snapshot колони) се копира и РЕАЛНИЯТ runner я прилага без грешка', async () => {
+    await cp(join(sourceMigrationsDirectoryPath, MIGRATION_20260819_001), join(temp.migrationsDirectoryPath, MIGRATION_20260819_001))
+    const result = await ensureServerDatabaseReady({ serverRootOverride: temp.root })
+    assert(result.appliedCount === 1, `appliedCount=${result.appliedCount}, очаквах точно 1 (20260819_001)`)
+  })
+
+  await check('[13] 20260819_001 е записана в server_migrations ledger-а', async () => {
+    const database = await openDatabase(temp.databaseFilePath)
+    try {
+      assert(ledgerHas(database, MIGRATION_20260819_001), `${MIGRATION_20260819_001} липсва от ledger-а`)
+    } finally {
+      database.close()
+    }
+  })
+
+  await check('[14] Restart (трети run) → appliedCount=0, skip чрез ledger (restart-safe, не "duplicate column" грешка)', async () => {
+    const result = await ensureServerDatabaseReady({ serverRootOverride: temp.root })
+    assert(result.appliedCount === 0, `трети run appliedCount=${result.appliedCount}, очаквах 0`)
+  })
+
+  await check('[15] Новите 7 payment-method колони съществуват и съществуващият paid VIP ред остава непокътнат с NULL snapshot', async () => {
+    const database = await openDatabase(temp.databaseFilePath)
+    try {
+      const columns = getColumnNames(database, 'vip_purchase_ledger')
+      for (const col of ['stripe_payment_intent_id', 'stripe_charge_id', 'payment_method_type', 'wallet_type', 'card_brand', 'card_last4', 'card_country']) {
+        assert(columns.includes(col), `${col} колоната трябва да съществува след 20260819_001`)
+      }
+
+      const row = database.prepare(`
+        SELECT status, price_cents_snapshot, credited_at, stripe_payment_intent_id, payment_method_type, card_brand, card_last4
+        FROM vip_purchase_ledger WHERE purchase_id = ?;
+      `).get(existingVipPurchaseId) as {
+        status: string; price_cents_snapshot: number; credited_at: string | null
+        stripe_payment_intent_id: string | null; payment_method_type: string | null
+        card_brand: string | null; card_last4: string | null
+      } | undefined
+      assert(row !== undefined, 'съществуващият paid VIP ред трябва да оцелее непокътнат')
+      assertEqual(row?.status, 'paid', 'status непроменен (ALTER TABLE ADD COLUMN не пипа съществуващи данни)')
+      assertEqual(row?.price_cents_snapshot, 100, 'price_cents_snapshot непроменен')
+      assertEqual(row?.credited_at, '2026-08-18 12:00:00', 'credited_at непроменен')
+      assertEqual(row?.stripe_payment_intent_id, null, 'нови колони трябва да са NULL за pre-existing ред (нужен е отделен backfill, не тази migration)')
+      assertEqual(row?.payment_method_type, null, 'payment_method_type трябва да е NULL за pre-existing ред')
+      assertEqual(row?.card_brand, null, 'card_brand трябва да е NULL за pre-existing ред')
+      assertEqual(row?.card_last4, null, 'card_last4 трябва да е NULL за pre-existing ред')
+    } finally {
+      database.close()
+    }
+  })
+
+  await check('[16] integrity_check=ok, foreign_keys=1 след 20260819_001', async () => {
+    const database = await openDatabase(temp.databaseFilePath)
+    try {
+      const fk = (database.prepare('PRAGMA foreign_keys;').get() as { foreign_keys: number }).foreign_keys
+      assertEqual(fk, 1, 'PRAGMA foreign_keys трябва да е 1')
+      const integrity = (database.prepare('PRAGMA integrity_check;').get() as { integrity_check: string }).integrity_check
+      assertEqual(integrity, 'ok', 'integrity_check трябва да е ok')
     } finally {
       database.close()
     }

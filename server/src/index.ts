@@ -11053,6 +11053,60 @@ async function handleStripeWebhookRequest(
         )
       }
 
+      // Payment-method enrichment — mirror на coin flow-a (Step 2 по-долу).
+      // Settlement (grant/credit) вече е приключил (успешно ИЛИ е бил
+      // already-credited) преди тази точка — enrichment е чисто display-only
+      // обогатяване на Admin -> Плащания и НИКОГА не трябва да влияе на/да
+      // отменя вече settle-натото плащане. Ако vipResult.ok е false
+      // (settlement реално неуспешен, редът остава pending), enrichment
+      // изобщо не се опитва тук — следващ webhook retry ще опита пълния
+      // settlement отново, enrichment ще последва тогава.
+      if (vipResult.ok) {
+        const vipFulfilledPurchaseId = vipResult.purchase.purchaseId
+        const vipPaymentIntentId =
+          typeof stripeSession.payment_intent === 'string'
+            ? stripeSession.payment_intent
+            : (stripeSession.payment_intent as { id?: string } | null)?.id ?? null
+
+        if (vipPaymentIntentId && vipPurchaseStore.needsPaymentMethodSnapshot(vipFulfilledPurchaseId)) {
+          try {
+            const vipPi = await stripe.paymentIntents.retrieve(vipPaymentIntentId, {
+              expand: ['latest_charge'],
+            })
+
+            let vipCharge: Stripe.Charge | null = null
+            if (vipPi.latest_charge && typeof vipPi.latest_charge === 'object') {
+              vipCharge = vipPi.latest_charge as Stripe.Charge
+            } else if (vipPi.latest_charge && typeof vipPi.latest_charge === 'string') {
+              vipCharge = await stripe.charges.retrieve(vipPi.latest_charge)
+            }
+
+            const vipPmd = vipCharge?.payment_method_details ?? null
+            const vipCardDetails = vipPmd?.card ?? null
+            const vipWalletDetails = vipCardDetails?.wallet ?? null
+
+            vipPurchaseStore.updatePaymentMethodSnapshot(vipFulfilledPurchaseId, {
+              stripePaymentIntentId: vipPaymentIntentId,
+              stripeChargeId: vipCharge?.id ?? null,
+              paymentMethodType: vipPmd?.type ?? null,
+              walletType: vipWalletDetails?.type ?? null,
+              cardBrand: vipCardDetails?.brand ?? null,
+              cardLast4: vipCardDetails?.last4 ?? null,
+              cardCountry: vipCardDetails?.country ?? null,
+            })
+            console.log(
+              `[stripe/webhook] VIP enriched purchaseId=${vipFulfilledPurchaseId} method=${vipPmd?.type ?? 'null'} wallet=${vipWalletDetails?.type ?? 'null'}`,
+            )
+          } catch (vipEnrichErr) {
+            // Log and continue — enrichment failure must never risk/undo VIP credit.
+            console.warn(
+              `[stripe/webhook] VIP payment method enrichment failed purchaseId=${vipFulfilledPurchaseId}:`,
+              vipEnrichErr instanceof Error ? vipEnrichErr.message : String(vipEnrichErr),
+            )
+          }
+        }
+      }
+
       sendJsonResponse(res, 200, { ok: true })
       return true
     }

@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
-import type { AdminPaymentListRow, AdminPaymentDetailRow, PaymentPeriodStats, AdminPaymentStats } from './coinPurchaseStore.js'
+import type { AdminPaymentListRow, AdminPaymentDetailRow, PaymentPeriodStats, AdminPaymentStats, PaymentMethodSnapshot } from './coinPurchaseStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -103,6 +103,16 @@ export type VipPurchaseStore = {
   getAdminPaymentListByPeriod: (params: { period: AdminPaymentPeriod; now?: Date }) => AdminPaymentListRow[]
   /** Detail lookup само по purchase_id — връща null ако редът не е VIP (caller fallback-ва към coin store). */
   getAdminPaymentDetail: (purchaseId: string) => AdminPaymentDetailRow | null
+  /**
+   * Payment-method snapshot contribution — mirror на coinPurchaseStore
+   * needsPaymentMethodSnapshot/updatePaymentMethodSnapshot (established
+   * COALESCE non-destructive semantics, виж updatePaymentMethodSnapshot
+   * коментара по-долу). Webhook Step 2 enrichment (server/src/index.ts) ги
+   * вика СЛЕД успешен VIP credit — enrichment failure никога не влияе на
+   * вече settle-натата покупка.
+   */
+  needsPaymentMethodSnapshot: (purchaseId: string) => boolean
+  updatePaymentMethodSnapshot: (purchaseId: string, snapshot: PaymentMethodSnapshot) => void
   close: () => void
 }
 
@@ -260,6 +270,33 @@ export async function createVipPurchaseStore(
     SET status = 'failed', updated_at = CURRENT_TIMESTAMP
     WHERE provider_checkout_session_id = ?
       AND status = 'pending';
+  `)
+
+  // Payment-method snapshot — mirror на coinPurchaseStore
+  // updatePaymentMethodSnapshotStatement/needsPaymentMethodSnapshotStatement
+  // (20260703_001_add_payment_method_snapshot_to_coin_purchase_ledger.sql).
+  // Non-destructive: COALESCE запазва вече наличните non-null стойности.
+  // Webhook Step 2 enrichment и евентуален бъдещ backfill могат да викат
+  // това многократно безопасно.
+  const updatePaymentMethodSnapshotStatement = database.prepare(`
+    UPDATE vip_purchase_ledger
+    SET
+      stripe_payment_intent_id = COALESCE(stripe_payment_intent_id, ?),
+      stripe_charge_id         = COALESCE(stripe_charge_id, ?),
+      payment_method_type      = COALESCE(payment_method_type, ?),
+      wallet_type              = COALESCE(wallet_type, ?),
+      card_brand               = COALESCE(card_brand, ?),
+      card_last4               = COALESCE(card_last4, ?),
+      card_country             = COALESCE(card_country, ?),
+      updated_at               = CURRENT_TIMESTAMP
+    WHERE purchase_id = ?;
+  `)
+
+  const needsPaymentMethodSnapshotStatement = database.prepare(`
+    SELECT 1 FROM vip_purchase_ledger
+    WHERE purchase_id = ?
+      AND (stripe_payment_intent_id IS NULL OR payment_method_type IS NULL)
+    LIMIT 1;
   `)
 
   // CAS guard — идентичен pattern на coinPurchaseStore markPaidByPurchaseIdStatement:
@@ -589,6 +626,11 @@ export async function createVipPurchaseStore(
       provider: string
       status: VipPurchaseStatus
       provider_checkout_session_id: string | null
+      payment_method_type: string | null
+      wallet_type: string | null
+      card_brand: string | null
+      card_last4: string | null
+      card_country: string | null
       created_at: string
       credited_at: string | null
     }
@@ -609,6 +651,11 @@ export async function createVipPurchaseStore(
         vpl.provider,
         vpl.status,
         vpl.provider_checkout_session_id,
+        vpl.payment_method_type,
+        vpl.wallet_type,
+        vpl.card_brand,
+        vpl.card_last4,
+        vpl.card_country,
         vpl.created_at,
         vpl.credited_at
       FROM vip_purchase_ledger vpl
@@ -637,11 +684,11 @@ export async function createVipPurchaseStore(
       provider: r.provider,
       status: r.status,
       providerCheckoutSessionId: r.provider_checkout_session_id ?? null,
-      paymentMethodType: null,
-      walletType: null,
-      cardBrand: null,
-      cardLast4: null,
-      cardCountry: null,
+      paymentMethodType: r.payment_method_type ?? null,
+      walletType: r.wallet_type ?? null,
+      cardBrand: r.card_brand ?? null,
+      cardLast4: r.card_last4 ?? null,
+      cardCountry: r.card_country ?? null,
       createdAt: dbDateToUtc(r.created_at),
       creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
       hiddenAt: null,
@@ -664,6 +711,13 @@ export async function createVipPurchaseStore(
       provider: string
       status: VipPurchaseStatus
       provider_checkout_session_id: string | null
+      stripe_payment_intent_id: string | null
+      stripe_charge_id: string | null
+      payment_method_type: string | null
+      wallet_type: string | null
+      card_brand: string | null
+      card_last4: string | null
+      card_country: string | null
       created_at: string
       credited_at: string | null
       updated_at: string
@@ -685,6 +739,13 @@ export async function createVipPurchaseStore(
         vpl.provider,
         vpl.status,
         vpl.provider_checkout_session_id,
+        vpl.stripe_payment_intent_id,
+        vpl.stripe_charge_id,
+        vpl.payment_method_type,
+        vpl.wallet_type,
+        vpl.card_brand,
+        vpl.card_last4,
+        vpl.card_country,
         vpl.created_at,
         vpl.credited_at,
         vpl.updated_at
@@ -714,19 +775,38 @@ export async function createVipPurchaseStore(
       provider: r.provider,
       status: r.status,
       providerCheckoutSessionId: r.provider_checkout_session_id ?? null,
-      stripePaymentIntentId: null,
-      stripeChargeId: null,
-      paymentMethodType: null,
-      walletType: null,
-      cardBrand: null,
-      cardLast4: null,
-      cardCountry: null,
+      stripePaymentIntentId: r.stripe_payment_intent_id ?? null,
+      stripeChargeId: r.stripe_charge_id ?? null,
+      paymentMethodType: r.payment_method_type ?? null,
+      walletType: r.wallet_type ?? null,
+      cardBrand: r.card_brand ?? null,
+      cardLast4: r.card_last4 ?? null,
+      cardCountry: r.card_country ?? null,
       createdAt: dbDateToUtc(r.created_at),
       creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
       updatedAt: dbDateToUtc(r.updated_at),
       hiddenAt: null,
       currentYellowCoinsBalance: null,
     }
+  }
+
+  function needsPaymentMethodSnapshot(purchaseId: string): boolean {
+    const row = needsPaymentMethodSnapshotStatement.get(purchaseId)
+    return row !== undefined
+  }
+
+  function updatePaymentMethodSnapshot(purchaseId: string, snapshot: PaymentMethodSnapshot): void {
+    // Parameters match COALESCE(column, ?) order — existing non-null values are preserved.
+    updatePaymentMethodSnapshotStatement.run(
+      snapshot.stripePaymentIntentId,
+      snapshot.stripeChargeId,
+      snapshot.paymentMethodType,
+      snapshot.walletType,
+      snapshot.cardBrand,
+      snapshot.cardLast4,
+      snapshot.cardCountry,
+      purchaseId,
+    )
   }
 
   function close(): void {
@@ -742,6 +822,8 @@ export async function createVipPurchaseStore(
     markPurchaseCanceledByCheckoutSessionId,
     markPurchaseFailedByCheckoutSessionId,
     fulfillPaidPurchase,
+    needsPaymentMethodSnapshot,
+    updatePaymentMethodSnapshot,
     getAdminPaymentStats,
     getAdminPaymentListByPeriod,
     getAdminPaymentDetail,

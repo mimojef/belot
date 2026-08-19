@@ -185,6 +185,13 @@ function buildSchema(db: DatabaseSync): void {
       vip_grant_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      stripe_payment_intent_id TEXT,
+      stripe_charge_id TEXT,
+      payment_method_type TEXT,
+      wallet_type TEXT,
+      card_brand TEXT,
+      card_last4 TEXT,
+      card_country TEXT,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
     );
 
@@ -445,6 +452,79 @@ await withTempDir(async (dir) => {
     // coinPurchaseStore.getAdminPaymentDetail(id) ?? vipPurchaseStore.getAdminPaymentDetail(id)
     const combined = coinStore.getAdminPaymentDetail('purchase-prod-1eur') ?? vipStore.getAdminPaymentDetail('purchase-prod-1eur')
     assert(combined !== null && combined.source === 'vip', 'fallback стратегията трябва да резолвне VIP реда')
+  })
+
+  await check('[9] needsPaymentMethodSnapshot=true преди enrichment, updatePaymentMethodSnapshot записва реалните полета', () => {
+    assert(vipStore.needsPaymentMethodSnapshot('purchase-prod-1eur'), 'преди enrichment трябва да е needed (stripe_payment_intent_id/payment_method_type все още NULL)')
+
+    vipStore.updatePaymentMethodSnapshot('purchase-prod-1eur', {
+      stripePaymentIntentId: 'pi_test_vip_1eur',
+      stripeChargeId: 'ch_test_vip_1eur',
+      paymentMethodType: 'card',
+      walletType: null,
+      cardBrand: 'mastercard',
+      cardLast4: '7575',
+      cardCountry: 'BG',
+    })
+
+    const detail = vipStore.getAdminPaymentDetail('purchase-prod-1eur')
+    assert(detail !== null, 'detail трябва да съществува')
+    assertEqual(detail?.paymentMethodType, 'card', 'paymentMethodType трябва да е "card"')
+    assertEqual(detail?.cardBrand, 'mastercard', 'cardBrand трябва да е "mastercard"')
+    assertEqual(detail?.cardLast4, '7575', 'cardLast4 трябва да е "7575"')
+    assertEqual(detail?.cardCountry, 'BG', 'cardCountry трябва да е "BG"')
+    assertEqual(detail?.stripePaymentIntentId, 'pi_test_vip_1eur', 'stripePaymentIntentId трябва да е записан')
+    assertEqual(detail?.stripeChargeId, 'ch_test_vip_1eur', 'stripeChargeId трябва да е записан')
+
+    assert(!vipStore.needsPaymentMethodSnapshot('purchase-prod-1eur'), 'след enrichment вече не трябва да е needed')
+  })
+
+  await check('[10] updatePaymentMethodSnapshot е idempotent/non-destructive (COALESCE) — повторно извикване с различни стойности НЕ презаписва вече наличните', () => {
+    // Симулира duplicate webhook delivery — Stripe може да достави
+    // checkout.session.completed повече от веднъж. Второто извикване с
+    // РАЗЛИЧНИ (грешни/различни) стойности НЕ трябва да презапише вече
+    // записания snapshot от check [9].
+    vipStore.updatePaymentMethodSnapshot('purchase-prod-1eur', {
+      stripePaymentIntentId: 'pi_DIFFERENT_SHOULD_NOT_OVERWRITE',
+      stripeChargeId: 'ch_DIFFERENT_SHOULD_NOT_OVERWRITE',
+      paymentMethodType: 'wallet',
+      walletType: 'google_pay',
+      cardBrand: 'visa',
+      cardLast4: '0000',
+      cardCountry: 'US',
+    })
+
+    const detail = vipStore.getAdminPaymentDetail('purchase-prod-1eur')
+    assertEqual(detail?.cardBrand, 'mastercard', 'cardBrand трябва да остане "mastercard" от check [9] (COALESCE non-destructive)')
+    assertEqual(detail?.cardLast4, '7575', 'cardLast4 трябва да остане "7575"')
+    assertEqual(detail?.stripePaymentIntentId, 'pi_test_vip_1eur', 'stripePaymentIntentId трябва да остане непроменен')
+    assertEqual(detail?.paymentMethodType, 'card', 'paymentMethodType трябва да остане "card"')
+  })
+
+  await check('[11] getAdminPaymentListByPeriod (VIP) surfaces enriched snapshot полетата (не hardcoded null вече)', () => {
+    const rows = vipStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find(r => r.purchaseId === 'purchase-prod-1eur')
+    assert(row !== undefined, 'production ред трябва да присъства')
+    assertEqual(row?.paymentMethodType, 'card', 'list row трябва да отразява enriched paymentMethodType')
+    assertEqual(row?.cardBrand, 'mastercard', 'list row трябва да отразява enriched cardBrand')
+    assertEqual(row?.cardLast4, '7575', 'list row трябва да отразява enriched cardLast4')
+  })
+
+  await check('[12] Различна покупка (никога enriched) остава с null snapshot полета — enrichment на един ред не изтича към друг', () => {
+    const otherPending = insertVipPurchaseDirect(db, {
+      purchaseId: 'purchase-never-enriched',
+      profileId: 'profile-1',
+      packageId: 'vip_30',
+      priceCentsSnapshot: 789,
+      daysSnapshot: 30,
+      status: 'paid',
+      createdAt: nowSqlite,
+      creditedAt: nowSqlite,
+    })
+    assert(vipStore.needsPaymentMethodSnapshot(otherPending), 'нов ред трябва да е needed=true (никога enriched)')
+    const detail = vipStore.getAdminPaymentDetail(otherPending)
+    assertEqual(detail?.cardBrand, null, 'неенriched ред трябва да остане с null card полета')
+    assertEqual(detail?.paymentMethodType, null, 'неенriched ред трябва да остане с null paymentMethodType')
   })
 
   coinStore.close()
