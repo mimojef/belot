@@ -1321,11 +1321,24 @@ async function waitForPaidVipPurchase(
   return null
 }
 
-function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): void {
+function formatVipActiveUntilLabel(activeUntilIso: string): string | null {
+  const parsed = new Date(activeUntilIso)
+  if (!Number.isFinite(parsed.getTime())) return null
+  return parsed.toLocaleDateString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric' })
+}
+
+async function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): Promise<void> {
   lobby.invalidateOwnVipStatus()
-  lobby.showVipPurchaseSuccessMessage(
-    `VIP е активиран за ${purchase.days} дни. Провери профила си за новата дата на изтичане.`,
-  )
+
+  // Датата на popup-а идва от ОБНОВЕНИЯ server VIP status (не от client-side
+  // изчисление "днес + days") — webhook settlement-ът вече е приложил
+  // extend-not-overwrite логиката (27+30=57 и т.н.) сървърно, значи само
+  // сървърът знае реалния краен active_until.
+  const statusResult = await loadOwnVipStatus()
+  const activeUntilLabel =
+    statusResult.ok && statusResult.activeUntil ? formatVipActiveUntilLabel(statusResult.activeUntil) : null
+
+  lobby.showVipPurchaseSuccessPopup(purchase.days, activeUntilLabel)
 }
 
 async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null): Promise<void> {
@@ -1366,7 +1379,7 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
   }
 
   if (vipPurchase !== null) {
-    showVipPurchaseSuccessMessage(vipPurchase)
+    await showVipPurchaseSuccessMessage(vipPurchase)
   }
 }
 

@@ -40,6 +40,7 @@ import {
 } from './renderLobbyScreen'
 import type { PlayerAccountRole } from '../../ui/overlays/renderPlayerProfilePopup'
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
+import type { VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import type { LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 import {
@@ -862,7 +863,7 @@ export type LobbyFlowController = {
   refreshDailyRewardsStatus: () => void
   refreshSupportUnread: () => void
   invalidateOwnVipStatus: () => void
-  showVipPurchaseSuccessMessage: (message: string) => void
+  showVipPurchaseSuccessPopup: (days: number, activeUntilLabel: string | null) => void
   removePendingFriendRequest: (friendshipId: string) => void
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
   isConversationOpen: (friendshipId: string) => boolean
@@ -1133,6 +1134,7 @@ type InternalLobbyFlowState = {
   authErrorText: string | null
   authSubmitInFlight: boolean
   guestTrialPopup: GuestTrialPopupState
+  vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
   levelLockedStakePopup: LevelLockedStakePopupState
   lowCoinsModalOpen: boolean
@@ -1642,6 +1644,11 @@ function createInitialState(): InternalLobbyFlowState {
       errorText: null,
       isSubmitting: false,
       hasConfirmedStatus: false,
+    },
+    vipPurchaseSuccessPopup: {
+      isOpen: false,
+      days: 0,
+      activeUntilLabel: null,
     },
     guestLockedStakePopup: {
       isOpen: false,
@@ -3293,6 +3300,7 @@ export function createLobbyFlowController(
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
       guestTrialPopup: state.guestTrialPopup,
+      vipPurchaseSuccessPopup: state.vipPurchaseSuccessPopup,
       guestLockedStakePopup: state.guestLockedStakePopup,
       levelLockedStakePopup: state.levelLockedStakePopup,
       lowCoinsModalOpen: state.lowCoinsModalOpen,
@@ -4415,6 +4423,10 @@ export function createLobbyFlowController(
       },
       onGuestTrialClose: () => {
         closeGuestTrialPopup()
+      },
+      onVipPurchaseSuccessClose: () => {
+        state.vipPurchaseSuccessPopup = { isOpen: false, days: 0, activeUntilLabel: null }
+        render()
       },
       onGuestLockedStakePlay5000Click: () => {
         closeGuestLockedStakePopup()
@@ -14072,14 +14084,17 @@ export function createLobbyFlowController(
       state.ownVipActiveUntilLoadedForProfileId = null
       state.vipPackages = []
     },
-    showVipPurchaseSuccessMessage: (message: string) => {
-      // Success redirect landing — навигира към Shop -> VIP tab и показва
-      // потвърждение. Webhook-ът вече е settle-нал покупката преди тази
-      // функция да се извика (виж waitForPaidVipPurchase в main.ts) —
-      // никакъв fake success не се показва само от URL параметъра.
+    showVipPurchaseSuccessPopup: (days, activeUntilLabel) => {
+      // Success redirect landing — Stripe webhook вече е settle-нал точно
+      // тази checkout сесия преди тази функция да се извика (виж
+      // waitForPaidVipPurchase в main.ts, exact providerCheckoutSessionId
+      // match) — никакъв fake success не се показва само от URL параметъра.
+      // days идва от реално закупения пакет (VipPurchaseSnapshot.days),
+      // activeUntilLabel от обновения /api/vip/status отговор — нито едното
+      // не е client-side изчислено.
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseMessageText = message
+      state.vipPurchaseSuccessPopup = { isOpen: true, days, activeUntilLabel }
       render()
     },
     removePendingFriendRequest: (friendshipId: string) => {

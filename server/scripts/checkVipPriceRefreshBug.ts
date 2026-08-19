@@ -35,6 +35,18 @@
  * [10] switchShopTab() остава чист локален state switch (без network round-
  *        trip при просто превключване между табове) — брифът explicit
  *        забранява "ненужен global rerender"
+ *
+ * VIP purchase success popup (финален popup след потвърдена покупка):
+ * [11] waitForPaidVipPurchase връща purchase САМО status==="paid" (exact
+ *        session match) — pending/failed/canceled никога не trigger-ват popup
+ * [12] handleStripePaymentSuccessReturn показва popup САМО ако vipPurchase е
+ *        server-confirmed non-null — redirect URL сам по себе си не стига
+ * [13] showVipPurchaseSuccessMessage подава purchase.days (реалния пакет) и
+ *        чете activeUntil от /api/vip/status (loadOwnVipStatus), не client-
+ *        computed дата
+ * [14] renderVipPurchaseSuccessPopup: точен текст/заглавие/бутон, no-op при
+ *        isOpen=false
+ * [15] onVipPurchaseSuccessClose затваря popup-а normally (isOpen: false)
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -298,6 +310,77 @@ await check('[10] switchShopTab() остава чист локален state swi
   const fnBody = switchFnMatch?.[0] ?? ''
   assert(!fnBody.includes('loadVipPackages(true)'), 'switchShopTab НЕ трябва да форсира refresh при обикновено tab превключване (само showShopPanel entry прави force-refresh)')
   assert(fnBody.includes('state.shopActiveTab = tab'), 'tab switch трябва да остане локален state промяна')
+})
+
+// ─── VIP purchase success popup: paid показва popup с правилните дни, pending НЕ ──
+
+const mainSource = await readFile(join(projectRoot, 'src', 'main.ts'), 'utf8')
+
+await check('[11] waitForPaidVipPurchase връща purchase САМО ако status==="paid" (pending/failed/canceled → null, popup никога не се показва за тях)', () => {
+  const fnMatch = mainSource.match(/async function waitForPaidVipPurchase\([\s\S]*?\n\}/)
+  assert(fnMatch !== null, 'waitForPaidVipPurchase функцията трябва да съществува')
+  const fnBody = fnMatch?.[0] ?? ''
+  assert(
+    /if \(purchase\?\.status === 'paid'\) \{\s*return purchase\s*\}/.test(fnBody),
+    'функцията трябва да връща purchase-а САМО когато status е точно "paid" — pending/failed/canceled никога не minat този guard',
+  )
+  assert(
+    fnBody.includes("item.providerCheckoutSessionId === normalizedSessionId"),
+    'lookup-ът трябва да е EXACT match по providerCheckoutSessionId (не "any paid purchase") — старата paid покупка не може да trigger-не popup за нов checkout',
+  )
+})
+
+await check('[12] handleStripePaymentSuccessReturn показва popup САМО когато vipPurchase !== null (server-confirmed paid), redirect сам по себе си никога не е достатъчен', () => {
+  const fnMatch = mainSource.match(/async function handleStripePaymentSuccessReturn\([\s\S]*?\n\}/)
+  assert(fnMatch !== null, 'handleStripePaymentSuccessReturn функцията трябва да съществува')
+  const fnBody = fnMatch?.[0] ?? ''
+  assert(
+    fnBody.includes('if (coinPurchase === null && vipPurchase === null) return'),
+    'функцията трябва да прекъсне рано, ако НИТО една покупка не е server-confirmed paid (redirect само/URL параметър никога не е достатъчен)',
+  )
+  assert(
+    /if \(vipPurchase !== null\) \{\s*await showVipPurchaseSuccessMessage\(vipPurchase\)/.test(fnBody),
+    'popup-ът трябва да се показва само вътре в guard-натия vipPurchase !== null branch',
+  )
+})
+
+await check('[13] showVipPurchaseSuccessMessage подава purchase.days (реалния закупен пакет) към popup-а, датата идва от /api/vip/status, не client-computed', () => {
+  const fnMatch = mainSource.match(/async function showVipPurchaseSuccessMessage\([\s\S]*?\n\}/)
+  assert(fnMatch !== null, 'showVipPurchaseSuccessMessage функцията трябва да съществува')
+  const fnBody = fnMatch?.[0] ?? ''
+  assert(
+    fnBody.includes('await loadOwnVipStatus()'),
+    'popup-ната дата трябва да идва от РЕАЛНИЯ обновен /api/vip/status отговор (loadOwnVipStatus), не от client-side "днес + days" изчисление',
+  )
+  assert(
+    fnBody.includes('lobby.showVipPurchaseSuccessPopup(purchase.days, activeUntilLabel)'),
+    'дните, подадени към popup-а, трябва да са purchase.days — реалният закупен пакет (30/180/365), не хардкоднати',
+  )
+})
+
+const popupSource = await readFile(
+  join(projectRoot, 'src', 'app', 'lobby', 'renderVipPurchaseSuccessPopup.ts'),
+  'utf8',
+)
+
+await check('[14] renderVipPurchaseSuccessPopup: заглавие/текст/бутон точно по спецификацията, popup е no-op когато isOpen=false', () => {
+  assert(popupSource.includes('if (!state.isOpen) {'), 'popup-ът трябва да рендира нищо, докато isOpen е false')
+  assert(popupSource.includes('Успешно плащане'), 'заглавието трябва да е точно "Успешно плащане"')
+  assert(popupSource.includes('Вие успешно закупихте VIP за'), 'текстът трябва да съдържа реалния брой дни (интерполирани state.days)')
+  assert(popupSource.includes('Вашият VIP е активен до'), 'popup-ът трябва да показва active_until реда, когато е наличен')
+  assert(popupSource.includes('>OK<'), 'бутонът трябва да е точно "OK"')
+})
+
+await check('[15] onVipPurchaseSuccessClose затваря popup-а нормално (isOpen: false), reuse-ва established backdrop+button close pattern', () => {
+  const closeFnMatch = controllerSource.match(/onVipPurchaseSuccessClose: \(\) => \{[\s\S]*?\n      \},/)
+  assert(closeFnMatch !== null, 'onVipPurchaseSuccessClose handler-ът трябва да съществува')
+  const fnBody = closeFnMatch?.[0] ?? ''
+  assert(fnBody.includes('isOpen: false'), 'onVipPurchaseSuccessClose трябва explicit да сетне isOpen: false')
+  assert(fnBody.includes('render()'), 'затварянето трябва да тригерне render()')
+  assert(
+    popupSource.includes("attachVipPurchaseSuccessPopupEventListeners"),
+    'popup модулът трябва да експортва wiring helper (backdrop click + OK button click), established pattern (renderGuestTrialPopup)',
+  )
 })
 
 console.log(`\n  Passed: ${passed}  Failed: ${failed}\n`)

@@ -94,6 +94,7 @@ import {
 } from './renderTournamentsScreen'
 import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
+import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 
@@ -633,6 +634,7 @@ export type LobbyScreenState = {
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
+  vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
   levelLockedStakePopup: LevelLockedStakePopupState
   lowCoinsModalOpen: boolean
@@ -1035,6 +1037,7 @@ export type RenderLobbyScreenOptions = {
   onGuestTrialRegisterClick: () => void
   onGuestTrialLoginClick: () => void
   onGuestTrialClose: () => void
+  onVipPurchaseSuccessClose: () => void
   onGuestLockedStakePlay5000Click: () => void
   onGuestLockedStakeRegisterClick: () => void
   onGuestLockedStakeLoginClick: () => void
@@ -10716,6 +10719,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
+      ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderShopPurchaseConfirmModal(state)}
@@ -10998,6 +11002,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
+      ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderShopPurchaseConfirmModal(state)}
@@ -13450,6 +13455,14 @@ export function renderLobbyScreen(
     onRegisterClick: options.onGuestTrialRegisterClick,
     onLoginClick: options.onGuestTrialLoginClick,
     onClose: options.onGuestTrialClose,
+  })
+
+  root
+    .querySelector<HTMLElement>('[data-vip-purchase-success-popup-root="1"] [role="dialog"]')
+    ?.addEventListener('click', (e) => e.stopPropagation())
+
+  attachVipPurchaseSuccessPopupEventListeners(root, {
+    onClose: options.onVipPurchaseSuccessClose,
   })
 
   root
