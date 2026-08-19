@@ -66,3 +66,72 @@ export function getSofiaDayBoundsUtc(now: Date = new Date()): SofiaDayBoundsUtc 
     tomorrowStart:  toSqliteUtc(sofiaMidnightUtc(year, month, day + 1)),
   }
 }
+
+export const ADMIN_PAYMENT_PERIODS = ['today', 'yesterday', 'last7days', 'thisMonth', 'allTime'] as const
+export type AdminPaymentPeriod = (typeof ADMIN_PAYMENT_PERIODS)[number]
+
+// Builds a WHERE clause fragment for settlement-timestamp filtering by period
+// using Europe/Sofia calendar boundaries. Extracted from coinPurchaseStore.ts
+// (originally coin-only) so vipPurchaseStore.ts can reuse the EXACT SAME
+// timezone/period logic for VIP payment statistics, instead of a parallel
+// reimplementation. `col` must be a hardcoded column reference (qualified or
+// not) — never derived from HTTP input. `now` is injectable for deterministic
+// tests.
+export function buildPeriodWhereClause(
+  period: AdminPaymentPeriod,
+  now: Date,
+  col: string,
+): { sql: string; params: string[] } {
+  const bounds = getSofiaDayBoundsUtc(now)
+  // Base guard: paid records must have the settlement timestamp set.
+  const notNull = `${col} IS NOT NULL`
+
+  switch (period) {
+    case 'today':
+      return {
+        sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+        params: [bounds.todayStart, bounds.tomorrowStart],
+      }
+    case 'yesterday':
+      return {
+        sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+        params: [bounds.yesterdayStart, bounds.todayStart],
+      }
+    case 'last7days': {
+      // Current Sofia calendar day + previous 6 full days (7 days total).
+      // Start = Sofia midnight 6 days before today; end = tomorrowStart (exclusive).
+      const sofiaToday = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Sofia',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(now)
+      const y = parseInt(sofiaToday.find(p => p.type === 'year')!.value,  10)
+      const m = parseInt(sofiaToday.find(p => p.type === 'month')!.value, 10)
+      const d = parseInt(sofiaToday.find(p => p.type === 'day')!.value,   10)
+      const windowStart = toSqliteUtc(sofiaMidnightUtc(y, m, d - 6))
+      return {
+        sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+        params: [windowStart, bounds.tomorrowStart],
+      }
+    }
+    case 'thisMonth': {
+      // Sofia calendar month: from midnight on the 1st of the current Sofia month.
+      const sofiaToday = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Europe/Sofia',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).formatToParts(now)
+      const y = parseInt(sofiaToday.find(p => p.type === 'year')!.value,  10)
+      const m = parseInt(sofiaToday.find(p => p.type === 'month')!.value, 10)
+      const monthStart = toSqliteUtc(sofiaMidnightUtc(y, m, 1))
+      return {
+        sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
+        params: [monthStart, bounds.tomorrowStart],
+      }
+    }
+    case 'allTime':
+      return { sql: notNull, params: [] }
+  }
+}

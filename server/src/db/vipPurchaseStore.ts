@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
+import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
+import type { AdminPaymentListRow, AdminPaymentDetailRow, PaymentPeriodStats, AdminPaymentStats } from './coinPurchaseStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -82,6 +84,25 @@ export type VipPurchaseStore = {
   fulfillPaidPurchase: (params: FulfillPaidVipPurchaseParams) =>
     | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
     | { ok: false; message: string }
+  /**
+   * Admin payment statistics contribution от VIP покупки — mirror на
+   * coinPurchaseStore.getAdminPaymentStats(), reuse-ва СЪЩИЯ
+   * buildPeriodWhereClause (sofiaDayBounds.ts) за identичните Europe/Sofia
+   * period boundaries. Филтрира status='paid' по credited_at (settlement
+   * timestamp), НЕ created_at — pending/canceled/failed VIP покупки никога
+   * не допринасят. Caller-ът (server/src/index.ts) сумира резултата с
+   * coinPurchaseStore.getAdminPaymentStats() за combined тотали.
+   */
+  getAdminPaymentStats: (now?: Date) => AdminPaymentStats
+  /**
+   * Admin payment listing contribution от VIP покупки — нормализиран
+   * AdminPaymentListRow shape (source:'vip', yellowCoinsAmount/packageKey
+   * null — VIP domain няма тия полета). Caller-ът merge-ва с coin редовете,
+   * сортира по creditedAt DESC, и pagina-ва combined резултата.
+   */
+  getAdminPaymentListByPeriod: (params: { period: AdminPaymentPeriod; now?: Date }) => AdminPaymentListRow[]
+  /** Detail lookup само по purchase_id — връща null ако редът не е VIP (caller fallback-ва към coin store). */
+  getAdminPaymentDetail: (purchaseId: string) => AdminPaymentDetailRow | null
   close: () => void
 }
 
@@ -529,6 +550,185 @@ export async function createVipPurchaseStore(
     return fulfillByInternalRow(internalRow)
   }
 
+  function getAdminPaymentStats(now: Date = new Date()): AdminPaymentStats {
+    function query(period: AdminPaymentPeriod): PaymentPeriodStats {
+      const { sql, params } = buildPeriodWhereClause(period, now, 'credited_at')
+      const row = database.prepare(`
+        SELECT COUNT(*) AS count, COALESCE(SUM(price_cents_snapshot), 0) AS total_cents
+        FROM vip_purchase_ledger
+        WHERE status = 'paid' AND ${sql}
+      `).get(...params) as { count: number; total_cents: number }
+      return { count: row.count, totalCents: row.total_cents }
+    }
+
+    return {
+      today: query('today'),
+      yesterday: query('yesterday'),
+      last7days: query('last7days'),
+      thisMonth: query('thisMonth'),
+      allTime: query('allTime'),
+    }
+  }
+
+  function getAdminPaymentListByPeriod(params: { period: AdminPaymentPeriod; now?: Date }): AdminPaymentListRow[] {
+    const { period, now = new Date() } = params
+    const { sql, params: whereParams } = buildPeriodWhereClause(period, now, 'vpl.credited_at')
+
+    type ListRow = {
+      purchase_id: string
+      profile_id: string
+      account_id: string | null
+      username: string | null
+      display_name: string | null
+      email: string | null
+      profile_kind: string | null
+      package_id: VipPackageId
+      days_snapshot: number
+      price_cents_snapshot: number
+      currency: string
+      provider: string
+      status: VipPurchaseStatus
+      provider_checkout_session_id: string | null
+      created_at: string
+      credited_at: string | null
+    }
+
+    const listRows = database.prepare(`
+      SELECT
+        vpl.purchase_id,
+        vpl.profile_id,
+        p.account_id,
+        p.username,
+        p.display_name,
+        a.email,
+        p.profile_kind,
+        vpl.package_id,
+        vpl.days_snapshot,
+        vpl.price_cents_snapshot,
+        vpl.currency,
+        vpl.provider,
+        vpl.status,
+        vpl.provider_checkout_session_id,
+        vpl.created_at,
+        vpl.credited_at
+      FROM vip_purchase_ledger vpl
+      LEFT JOIN profiles p ON p.profile_id = vpl.profile_id
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE vpl.status = 'paid' AND ${sql}
+      ORDER BY vpl.credited_at DESC, vpl.purchase_id DESC;
+    `).all(...whereParams) as ListRow[]
+
+    return listRows.map((r): AdminPaymentListRow => ({
+      source: 'vip',
+      purchaseId: r.purchase_id,
+      profileId: r.profile_id,
+      accountId: r.account_id ?? null,
+      username: r.username ?? null,
+      displayName: r.display_name ?? null,
+      email: r.email ?? null,
+      profileKind: r.profile_kind ?? null,
+      packageKey: null,
+      // Explicit VIP title (брифа §7) — напр. "VIP 365 дни", никога представено
+      // като coin package.
+      packageTitle: VIP_PACKAGE_CATALOG[r.package_id].title,
+      yellowCoinsAmount: null,
+      priceCents: r.price_cents_snapshot,
+      currency: r.currency.toUpperCase(),
+      provider: r.provider,
+      status: r.status,
+      providerCheckoutSessionId: r.provider_checkout_session_id ?? null,
+      paymentMethodType: null,
+      walletType: null,
+      cardBrand: null,
+      cardLast4: null,
+      cardCountry: null,
+      createdAt: dbDateToUtc(r.created_at),
+      creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
+      hiddenAt: null,
+    }))
+  }
+
+  function getAdminPaymentDetail(purchaseId: string): AdminPaymentDetailRow | null {
+    type DetailRow = {
+      purchase_id: string
+      profile_id: string
+      account_id: string | null
+      username: string | null
+      display_name: string | null
+      email: string | null
+      profile_kind: string | null
+      package_id: VipPackageId
+      days_snapshot: number
+      price_cents_snapshot: number
+      currency: string
+      provider: string
+      status: VipPurchaseStatus
+      provider_checkout_session_id: string | null
+      created_at: string
+      credited_at: string | null
+      updated_at: string
+    }
+
+    const r = database.prepare(`
+      SELECT
+        vpl.purchase_id,
+        vpl.profile_id,
+        p.account_id,
+        p.username,
+        p.display_name,
+        a.email,
+        p.profile_kind,
+        vpl.package_id,
+        vpl.days_snapshot,
+        vpl.price_cents_snapshot,
+        vpl.currency,
+        vpl.provider,
+        vpl.status,
+        vpl.provider_checkout_session_id,
+        vpl.created_at,
+        vpl.credited_at,
+        vpl.updated_at
+      FROM vip_purchase_ledger vpl
+      LEFT JOIN profiles p ON p.profile_id = vpl.profile_id
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE vpl.purchase_id = ?
+      LIMIT 1;
+    `).get(normalizeId(purchaseId)) as DetailRow | undefined
+
+    if (!r) return null
+
+    return {
+      source: 'vip',
+      purchaseId: r.purchase_id,
+      profileId: r.profile_id,
+      accountId: r.account_id ?? null,
+      username: r.username ?? null,
+      displayName: r.display_name ?? null,
+      email: r.email ?? null,
+      profileKind: r.profile_kind ?? null,
+      packageKey: null,
+      packageTitle: VIP_PACKAGE_CATALOG[r.package_id].title,
+      yellowCoinsAmount: null,
+      priceCents: r.price_cents_snapshot,
+      currency: r.currency.toUpperCase(),
+      provider: r.provider,
+      status: r.status,
+      providerCheckoutSessionId: r.provider_checkout_session_id ?? null,
+      stripePaymentIntentId: null,
+      stripeChargeId: null,
+      paymentMethodType: null,
+      walletType: null,
+      cardBrand: null,
+      cardLast4: null,
+      cardCountry: null,
+      createdAt: dbDateToUtc(r.created_at),
+      creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
+      updatedAt: dbDateToUtc(r.updated_at),
+      hiddenAt: null,
+      currentYellowCoinsBalance: null,
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -542,6 +742,9 @@ export async function createVipPurchaseStore(
     markPurchaseCanceledByCheckoutSessionId,
     markPurchaseFailedByCheckoutSessionId,
     fulfillPaidPurchase,
+    getAdminPaymentStats,
+    getAdminPaymentListByPeriod,
+    getAdminPaymentDetail,
     close,
   }
 }

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
-import { getSofiaDayBoundsUtc, sofiaMidnightUtc, toSqliteUtc } from './sofiaDayBounds.js'
+import { buildPeriodWhereClause, type AdminPaymentPeriod as SharedAdminPaymentPeriod } from './sofiaDayBounds.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -53,10 +53,22 @@ export type AdminPaymentStats = {
   allTime: PaymentPeriodStats
 }
 
-export const ADMIN_PAYMENT_PERIODS = ['today', 'yesterday', 'last7days', 'thisMonth', 'allTime'] as const
-export type AdminPaymentPeriod = (typeof ADMIN_PAYMENT_PERIODS)[number]
+// Re-exported от sofiaDayBounds.ts (shared с vipPurchaseStore.ts) — запазва
+// съществуващия import contract (server/src/index.ts import-ва
+// ADMIN_PAYMENT_PERIODS от тук), без дублиране на дефиницията.
+export { ADMIN_PAYMENT_PERIODS } from './sofiaDayBounds.js'
+export type AdminPaymentPeriod = SharedAdminPaymentPeriod
+
+// source различава coin ('/api/shop/checkout') от VIP ('/api/vip/checkout')
+// покупки в combined admin payment listing-а (виж getAdminPaymentListByPeriod
+// в server/src/index.ts, който merge-ва coin+VIP резултати). VIP редовете
+// НЯМАТ yellowCoinsAmount/packageKey/payment-method snapshot полета (различна
+// domain схема — vip_purchase_ledger) — тия полета остават null за тях,
+// НИКОГА не се "измислят" за VIP.
+export type AdminPaymentSource = 'coin' | 'vip'
 
 export type AdminPaymentListRow = {
+  source: AdminPaymentSource
   purchaseId: string
   profileId: string
   accountId: string | null
@@ -64,9 +76,9 @@ export type AdminPaymentListRow = {
   displayName: string | null
   email: string | null
   profileKind: string | null
-  packageKey: string
+  packageKey: string | null
   packageTitle: string
-  yellowCoinsAmount: number
+  yellowCoinsAmount: number | null
   priceCents: number
   currency: string
   provider: string
@@ -83,6 +95,7 @@ export type AdminPaymentListRow = {
 }
 
 export type AdminPaymentDetailRow = {
+  source: AdminPaymentSource
   purchaseId: string
   profileId: string
   accountId: string | null
@@ -90,9 +103,9 @@ export type AdminPaymentDetailRow = {
   displayName: string | null
   email: string | null
   profileKind: string | null
-  packageKey: string
+  packageKey: string | null
   packageTitle: string
-  yellowCoinsAmount: number
+  yellowCoinsAmount: number | null
   priceCents: number
   currency: string
   provider: string
@@ -824,68 +837,6 @@ export async function createCoinPurchaseStore(
     return { ok: true, purchase: updated }
   }
 
-  // Builds the WHERE clause fragment for credited_at filtering by period using
-  // Europe/Sofia calendar boundaries. `now` is injectable for deterministic tests.
-  // `col` must be a hardcoded column reference — never derived from HTTP input.
-  function buildPeriodWhereClause(
-    period: AdminPaymentPeriod,
-    now: Date,
-    col: 'credited_at' | 'cpl.credited_at',
-  ): { sql: string; params: string[] } {
-    const bounds = getSofiaDayBoundsUtc(now)
-    // Base guard: paid records must have credited_at set.
-    const notNull = `${col} IS NOT NULL`
-
-    switch (period) {
-      case 'today':
-        return {
-          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
-          params: [bounds.todayStart, bounds.tomorrowStart],
-        }
-      case 'yesterday':
-        return {
-          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
-          params: [bounds.yesterdayStart, bounds.todayStart],
-        }
-      case 'last7days': {
-        // Current Sofia calendar day + previous 6 full days (7 days total).
-        // Start = Sofia midnight 6 days before today; end = tomorrowStart (exclusive).
-        const sofiaToday = new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'Europe/Sofia',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-        }).formatToParts(now)
-        const y = parseInt(sofiaToday.find(p => p.type === 'year')!.value,  10)
-        const m = parseInt(sofiaToday.find(p => p.type === 'month')!.value, 10)
-        const d = parseInt(sofiaToday.find(p => p.type === 'day')!.value,   10)
-        const windowStart = toSqliteUtc(sofiaMidnightUtc(y, m, d - 6))
-        return {
-          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
-          params: [windowStart, bounds.tomorrowStart],
-        }
-      }
-      case 'thisMonth': {
-        // Sofia calendar month: from midnight on the 1st of the current Sofia month.
-        const sofiaToday = new Intl.DateTimeFormat('en-CA', {
-          timeZone: 'Europe/Sofia',
-          year: 'numeric',
-          month: '2-digit',
-          day: '2-digit',
-        }).formatToParts(now)
-        const y = parseInt(sofiaToday.find(p => p.type === 'year')!.value,  10)
-        const m = parseInt(sofiaToday.find(p => p.type === 'month')!.value, 10)
-        const monthStart = toSqliteUtc(sofiaMidnightUtc(y, m, 1))
-        return {
-          sql: `${notNull} AND ${col} >= ? AND ${col} < ?`,
-          params: [monthStart, bounds.tomorrowStart],
-        }
-      }
-      case 'allTime':
-        return { sql: notNull, params: [] }
-    }
-  }
-
   function getAdminPaymentStats(now: Date = new Date()): AdminPaymentStats {
     function query(period: AdminPaymentPeriod): PaymentPeriodStats {
       const { sql, params } = buildPeriodWhereClause(period, now, 'credited_at')
@@ -1000,6 +951,7 @@ export async function createCoinPurchaseStore(
     `).all(...listParams, limit, offset) as ListRow[]
 
     const rows: AdminPaymentListRow[] = listRows.map(r => ({
+      source:                      'coin' as const,
       purchaseId:                  r.purchase_id,
       profileId:                   r.profile_id,
       accountId:                   r.account_id ?? null,
@@ -1061,6 +1013,7 @@ export async function createCoinPurchaseStore(
     const r = adminPaymentDetailStatement.get(normalizeId(purchaseId)) as DetailRow | undefined
     if (!r) return null
     return {
+      source:                     'coin' as const,
       purchaseId:                 r.purchase_id,
       profileId:                  r.profile_id,
       accountId:                  r.account_id ?? null,
