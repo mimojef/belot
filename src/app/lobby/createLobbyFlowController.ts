@@ -1159,6 +1159,11 @@ type InternalLobbyFlowState = {
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
   shopActiveTab: 'coins' | 'vip'
+  // TEMP frontend-only visibility gate — VIP Shop е в production diagnostics/
+  // Stripe testing, скрит от нормалната навигация. true само ако /shop е
+  // отворен с ?vipPreview=1 (виж showShopPanel). Премахни заедно с целия
+  // gate, когато VIP Shop-ът се пусне обратно в нормалната навигация.
+  shopVipTabVisible: boolean
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -1680,6 +1685,7 @@ function createInitialState(): InternalLobbyFlowState {
     activeLeaderboardCategory: 'balance',
     lobbyPackages: [],
     shopActiveTab: 'coins',
+    shopVipTabVisible: false,
     shopPackages: [],
     shopPackagesLoading: false,
     shopPackagesErrorText: null,
@@ -3222,6 +3228,7 @@ export function createLobbyFlowController(
       activeLeaderboardCategory: state.activeLeaderboardCategory,
       lobbyPackages: state.lobbyPackages,
       shopActiveTab: state.shopActiveTab,
+      shopVipTabVisible: state.shopVipTabVisible,
       shopPackages: state.shopPackages,
       shopPackagesLoading: state.shopPackagesLoading,
       shopPackagesErrorText: state.shopPackagesErrorText,
@@ -7881,6 +7888,16 @@ export function createLobbyFlowController(
   async function showShopPanel(): Promise<void> {
     leaveAdminServerIfActive()
     state.currentScreen = 'shop'
+    // TEMP frontend-only visibility gate (виж shopVipTabVisible коментара) —
+    // VIP tab-ът е достъпен само с explicit ?vipPreview=1 в URL-а. Без него
+    // /shop винаги показва Жълтици по default, VIP бутонът не се рендира.
+    const vipPreviewUnlocked = new URLSearchParams(window.location.search).get('vipPreview') === '1'
+    state.shopVipTabVisible = vipPreviewUnlocked
+    if (vipPreviewUnlocked) {
+      state.shopActiveTab = 'vip'
+    } else if (state.shopActiveTab === 'vip') {
+      state.shopActiveTab = 'coins'
+    }
     state.isSearching = false
     state.errorText = null
     state.profilePopupOpen = false
@@ -7972,6 +7989,9 @@ export function createLobbyFlowController(
   }
 
   function switchShopTab(tab: 'coins' | 'vip'): void {
+    if (tab === 'vip' && !state.shopVipTabVisible) {
+      return
+    }
     if (state.shopActiveTab === tab) {
       return
     }

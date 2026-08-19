@@ -526,6 +526,7 @@ export type LobbyScreenState = {
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
   shopActiveTab: 'coins' | 'vip'
+  shopVipTabVisible: boolean
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -6293,7 +6294,7 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
-function renderShopTabBar(activeTab: 'coins' | 'vip'): string {
+function renderShopTabBar(activeTab: 'coins' | 'vip', vipTabVisible: boolean): string {
   const tabButtonStyle = (isActive: boolean): string => `
     flex:1; height:44px; border-radius:8px; cursor:pointer;
     font-size:14px; font-weight:900; letter-spacing:0.02em;
@@ -6303,10 +6304,13 @@ function renderShopTabBar(activeTab: 'coins' | 'vip'): string {
     transition:filter 0.15s;
   `.replace(/\s+/g, ' ')
 
+  // TEMP: VIP бутонът се рендира само когато vipTabVisible е true (виж
+  // shopVipTabVisible в createLobbyFlowController.ts) — не показва се в
+  // нормалната навигация, докато VIP Shop е скрит за production тестове.
   return `
     <div style="display:flex;gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);">
       <button type="button" data-shop-tab="coins" style="${tabButtonStyle(activeTab === 'coins')}">Жълтици</button>
-      <button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>
+      ${vipTabVisible ? `<button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>` : ''}
     </div>
   `
 }
@@ -6371,7 +6375,7 @@ function renderVipShopPanel(state: LobbyScreenState): string {
 }
 
 export function renderShopPanel(state: LobbyScreenState): string {
-  const tabBar = renderShopTabBar(state.shopActiveTab)
+  const tabBar = renderShopTabBar(state.shopActiveTab, state.shopVipTabVisible)
 
   if (state.shopActiveTab === 'vip') {
     return `
