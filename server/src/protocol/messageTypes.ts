@@ -196,6 +196,10 @@ export type ClientMessage =
       type: 'request_private_rooms_list'
     }
   | {
+      // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
+      type: 'request_private_games_list'
+    }
+  | {
       type: 'add_bot_to_private_room_team'
       team: Team
     }
@@ -778,6 +782,47 @@ export type PrivateRoomCreatedNoticeMessage = {
   recipientInActiveGame: boolean
 }
 
+// --- Private table "Играещи"/"Приключили" lobby listing (виж
+// privateRoomMatchStore.ts) — тесен, lobby-safe DTO. НИКОГА hands/deck/
+// bidding internals/trick state — само public team/score/timestamp данни,
+// mirror на PrivateRoomOccupantSnapshot shape-а по-горе. ---
+
+export type PrivateRoomMatchOccupantSnapshot = {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+  isBot: boolean
+}
+
+export type PrivateRoomMatchSnapshot = {
+  roomId: RoomId
+  status: 'playing' | 'finished'
+  stake: MatchStake
+  teamA: [PrivateRoomMatchOccupantSnapshot, PrivateRoomMatchOccupantSnapshot]
+  teamB: [PrivateRoomMatchOccupantSnapshot, PrivateRoomMatchOccupantSnapshot]
+  teamAScore: number
+  teamBScore: number
+  startedAt: number
+  finishedAt: number | null
+}
+
+export type PrivateGamesListMessage = {
+  type: 'private_games_list'
+  playing: PrivateRoomMatchSnapshot[]
+  finished: PrivateRoomMatchSnapshot[]
+}
+
+// Targeted score-only delta push докато "Играещи" таб е отворен — избягва
+// пращане на пълния playing/finished списък при всяка score промяна (виж
+// §7 брифа: без global render, targeted patch). Клиентът merge-ва по roomId
+// в locally-cached playing списъка, не заменя целия масив.
+export type PrivateGameScoreUpdatedMessage = {
+  type: 'private_game_score_updated'
+  roomId: RoomId
+  teamAScore: number
+  teamBScore: number
+}
+
 // --- Private room waiting-room chat (изолиран, ефимерен чат за живота на
 // чакалнята — виж privateRoomChatStore.ts. Не се бърка с lobby/friend/game
 // chat.) ---
@@ -874,6 +919,8 @@ export type ServerMessage =
   | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
   | PrivateRoomCreatedNoticeMessage
+  | PrivateGamesListMessage
+  | PrivateGameScoreUpdatedMessage
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageReceivedMessage
   | PrivateRoomChatErrorMessage

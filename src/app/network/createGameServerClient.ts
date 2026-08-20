@@ -756,6 +756,10 @@ export type ClientMessage =
       type: 'request_private_rooms_list'
     }
   | {
+      // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
+      type: 'request_private_games_list'
+    }
+  | {
       type: 'add_bot_to_private_room_team'
       team: Team
     }
@@ -1359,6 +1363,41 @@ export type PrivateRoomCreatedNoticeMessage = {
   creatorDisplayName: string
   creatorAvatarUrl: string | null
   recipientInActiveGame: boolean
+}
+
+// --- "Играещи"/"Приключили" lobby listing — тесен, lobby-safe DTO. НИКОГА
+// hands/deck/bidding internals/trick state, само public team/score/timestamp. ---
+
+export type PrivateRoomMatchOccupantSnapshot = {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+  isBot: boolean
+}
+
+export type PrivateRoomMatchSnapshot = {
+  roomId: string
+  status: 'playing' | 'finished'
+  stake: MatchStake
+  teamA: [PrivateRoomMatchOccupantSnapshot, PrivateRoomMatchOccupantSnapshot]
+  teamB: [PrivateRoomMatchOccupantSnapshot, PrivateRoomMatchOccupantSnapshot]
+  teamAScore: number
+  teamBScore: number
+  startedAt: number
+  finishedAt: number | null
+}
+
+export type PrivateGamesListMessage = {
+  type: 'private_games_list'
+  playing: PrivateRoomMatchSnapshot[]
+  finished: PrivateRoomMatchSnapshot[]
+}
+
+export type PrivateGameScoreUpdatedMessage = {
+  type: 'private_game_score_updated'
+  roomId: string
+  teamAScore: number
+  teamBScore: number
 }
 
 // --- Чат в чакалнята на частна маса (изолиран от lobby/friend/game chat) ---
@@ -1991,6 +2030,8 @@ export type ServerMessage =
   | PrivateRoomClosedMessage
   | PrivateRoomFullMessage
   | PrivateRoomCreatedNoticeMessage
+  | PrivateGamesListMessage
+  | PrivateGameScoreUpdatedMessage
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageEventMessage
   | PrivateRoomChatErrorMessage
@@ -2067,6 +2108,7 @@ export type GameServerClient = {
   sendEmojiReaction: (roomId: string, emojiId: string) => void
   sendPhraseReaction: (roomId: string, phraseId: string) => void
   requestPrivateRoomsList: () => void
+  requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   leavePrivateRoom: () => void
@@ -2324,6 +2366,10 @@ export function createGameServerClient(
     send({ type: 'request_private_rooms_list' })
   }
 
+  function requestPrivateGamesList(): void {
+    send({ type: 'request_private_games_list' })
+  }
+
   function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30): void {
     send({ type: 'create_private_room', stake, isLocked, waitMinutes })
   }
@@ -2435,6 +2481,7 @@ export function createGameServerClient(
     sendEmojiReaction,
     sendPhraseReaction,
     requestPrivateRoomsList,
+    requestPrivateGamesList,
     createPrivateRoom,
     joinPrivateRoomSlot,
     leavePrivateRoom,

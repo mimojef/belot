@@ -74,6 +74,7 @@ import type {
   PlayerPublicProfileSnapshot,
   PrivateRoomChatMessageSnapshot,
   PrivateRoomSnapshot,
+  PrivateRoomMatchSnapshot,
   RoomSeatSnapshot,
   ServerMessage,
   Team,
@@ -514,6 +515,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminMatchRoomDelete?: (stakeAmount: number) => Promise<{ ok: true; rooms: MatchRoomSnapshot[] } | { ok: false; message: string }>
   onPrivateRoomsOpen?: () => void
   onPrivateRoomsClose?: () => void
+  /** "Играещи"/"Приключили" табове — извиква се веднъж при first-open на всеки от двата (lazy load, не при "Чакащи"). */
+  onPrivateGamesOpen?: () => void
   onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
   onPrivateRoomJoinSlot?: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   onPrivateRoomLeave?: () => void
@@ -1283,6 +1286,13 @@ type InternalLobbyFlowState = {
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
   myPrivateRoom: PrivateRoomSnapshot | null
+  // Чакащи/Играещи/Приключили — независим tab от privateRoomsTab (all/mine
+  // филтъра вътре в "Чакащи"). Local UI state, persist-ва докато потребителят
+  // стои на страницата, НЕ се reset-ва от realtime updates (виж §7 брифа).
+  privateRoomsLifecycleTab: 'waiting' | 'playing' | 'finished'
+  privateGamesPlaying: PrivateRoomMatchSnapshot[]
+  privateGamesFinished: PrivateRoomMatchSnapshot[]
+  privateGamesLoaded: boolean
   privateRoomInvite: {
     inviteId: string
     fromProfileId: string
@@ -1784,6 +1794,10 @@ function createInitialState(): InternalLobbyFlowState {
     adminMatchRoomEdit: null,
     privateRoomsCreatePopupOpen: false,
     privateRoomsTab: 'all',
+    privateRoomsLifecycleTab: 'waiting',
+    privateGamesPlaying: [],
+    privateGamesFinished: [],
+    privateGamesLoaded: false,
     privateRooms: [],
     myPrivateRoom: null,
     privateRoomInvite: null,
@@ -3346,6 +3360,9 @@ export function createLobbyFlowController(
       privateRoomsTab: state.privateRoomsTab,
       privateRooms: state.privateRooms,
       myPrivateRoom: state.myPrivateRoom,
+      privateRoomsLifecycleTab: state.privateRoomsLifecycleTab,
+      privateGamesPlaying: state.privateGamesPlaying,
+      privateGamesFinished: state.privateGamesFinished,
       privateRoomInvite: state.privateRoomInvite,
       privateRoomInviteQueue: state.privateRoomInviteQueue,
       privateRoomInfoText: state.privateRoomInfoText,
@@ -4584,6 +4601,14 @@ export function createLobbyFlowController(
       },
       onPrivateRoomsTabChange: (tab) => {
         state.privateRoomsTab = tab
+        render()
+      },
+      onPrivateRoomsLifecycleTabChange: (tab) => {
+        state.privateRoomsLifecycleTab = tab
+        if ((tab === 'playing' || tab === 'finished') && !state.privateGamesLoaded) {
+          state.privateGamesLoaded = true
+          options.onPrivateGamesOpen?.()
+        }
         render()
       },
       onPrivateRoomsCreateOpen: () => {
@@ -13393,6 +13418,52 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'private_games_list') {
+      state.privateGamesPlaying = message.playing
+      state.privateGamesFinished = message.finished
+      // §7 брифа: избраният lifecycle tab НЕ трябва да reset-не при realtime
+      // push. render() тук е safe — currentScreen/privateRoomsLifecycleTab
+      // остават непроменени, значи re-render просто препродуцира СЪЩИЯ tab
+      // (mirror на established private_rooms_list поведението по-горе, което
+      // също прави пълен render() без tab-reset оплаквания). Пропускаме
+      // render() изцяло, ако потребителят дори не е на "Частни маси" screen-а
+      // — избягва ненужен reflow docато push-ът реално е ирелевантен визуално.
+      if (state.currentScreen === 'private-rooms') {
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'private_game_score_updated') {
+      // Targeted score-only DOM patch — БЕЗ render(), за да не прекъсва
+      // scroll/popup/tab state докато "Играещи" таб е отворен (§7 брифа).
+      // Обновяваме и state (за консистентност при следващ пълен render), и
+      // directно DOM текстовите nodes, ако вече са рендерирани.
+      const idx = state.privateGamesPlaying.findIndex((g) => g.roomId === message.roomId)
+      if (idx !== -1) {
+        state.privateGamesPlaying = state.privateGamesPlaying.map((g, i) =>
+          i === idx ? { ...g, teamAScore: message.teamAScore, teamBScore: message.teamBScore } : g,
+        )
+      }
+      if (state.currentScreen === 'private-rooms' && state.privateRoomsLifecycleTab === 'playing') {
+        // querySelectorAll + manual match (не CSS attribute-selector string
+        // interpolation) — избягва нужда от CSS.escape за roomId стойността.
+        // Двата отбора имат ОТДЕЛНИ score редове (под съответния отбор,
+        // виж matchTeamScoreRowHtml в renderLobbyScreen.ts) — обновяваме
+        // всеки поотделно по data-private-game-score-team ('a'/'b').
+        const scoreEls = options.root.querySelectorAll<HTMLElement>('[data-private-game-score]')
+        for (const el of scoreEls) {
+          if (el.dataset.privateGameScore !== message.roomId) continue
+          if (el.dataset.privateGameScoreTeam === 'a') {
+            el.textContent = String(message.teamAScore)
+          } else if (el.dataset.privateGameScoreTeam === 'b') {
+            el.textContent = String(message.teamBScore)
+          }
+        }
+      }
+      return true
+    }
+
     if (message.type === 'private_room_updated') {
       const isNewRoom = state.myPrivateRoom?.id !== message.room.id
       // Force-navigate to the waiting screen only for an EXPLICIT
@@ -13670,6 +13741,10 @@ export function createLobbyFlowController(
     state.currentScreen = 'private-rooms'
     state.privateRoomInfoText = null
     state.privateRoomsTab = 'all'
+    // Изискване: при отваряне на страницата по подразбиране ВИНАГИ "Чакащи",
+    // независимо от кой tab е бил избран при предишно посещение.
+    state.privateRoomsLifecycleTab = 'waiting'
+    state.privateGamesLoaded = false
     options.onPrivateRoomsOpen?.()
     render()
   }

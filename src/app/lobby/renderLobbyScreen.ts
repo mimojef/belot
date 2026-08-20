@@ -21,6 +21,7 @@ import type {
   PlayerMissionProgressSnapshot,
   PlayerPublicProfileSnapshot,
   PrivateRoomSnapshot,
+  PrivateRoomMatchSnapshot,
   Team,
   GuestContactMessageListItem,
   SupportMessageSnapshot,
@@ -674,6 +675,9 @@ export type LobbyScreenState = {
   privateRoomsTab: 'all' | 'mine'
   privateRooms: PrivateRoomSnapshot[]
   myPrivateRoom: PrivateRoomSnapshot | null
+  privateRoomsLifecycleTab: 'waiting' | 'playing' | 'finished'
+  privateGamesPlaying: PrivateRoomMatchSnapshot[]
+  privateGamesFinished: PrivateRoomMatchSnapshot[]
   privateRoomInvite: {
     inviteId: string
     fromProfileId: string
@@ -1068,6 +1072,7 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsOpen: () => void
   onPrivateRoomsClose: () => void
   onPrivateRoomsTabChange: (tab: 'all' | 'mine') => void
+  onPrivateRoomsLifecycleTabChange: (tab: 'waiting' | 'playing' | 'finished') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
   onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
@@ -9137,7 +9142,151 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
 
   const allTabContent = allRooms.length > 0
     ? `<div style="display:flex;flex-direction:column;gap:8px;">${allRoomsHtml}</div>`
-    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">Няма активни маси в момента.</div>`
+    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">В момента няма чакащи частни маси.</div>`
+
+  // ─── "Играещи"/"Приключили" — СЪЩАТА карта структура/размери/styling като
+  // "Чакащи" (header + .prl-teams grid), reuse-вайки идентичните CSS класове
+  // и occupant-slot markup 1:1. Единственото добавено съдържание: резултат
+  // ред под всеки отбор (вътре в .prl-team-slots, след двата occupant slot-а)
+  // и — за "Приключили" — дата/час ред най-долу в картата. Никаква отделна
+  // визуална структура, статус панели или score блокове извън тази схема.
+  const matchOccupantSlotHtml = (occupant: PrivateRoomMatchSnapshot['teamA'][number]): string => {
+    const avatarInner = occupant.avatarUrl
+      ? `<img src="${occupant.avatarUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:9px;" />`
+      : `<div style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;font-size:16px;color:rgba(255,255,255,0.5);">${occupant.isBot ? '🤖' : '👤'}</div>`
+    const slotInnerHtml = `
+        <div class="prl-slot-avatar-wrap">
+          <div style="width:100%;height:100%;border-radius:9px;overflow:hidden;">${avatarInner}</div>
+        </div>
+        <div class="prl-slot-name">${escapeHtml(occupant.displayName)}</div>`
+
+    // Profile popup за реален играч (не бот) — reuse на съществуващия
+    // безопасен profile-popup flow, mirror на data-private-room-member по-горе.
+    // НЕ отваря/наблюдава самата игра — само профила на играча.
+    if (!occupant.isBot && occupant.profileId) {
+      return `
+      <button
+        type="button"
+        data-private-room-member="${escapeHtml(occupant.profileId)}"
+        data-private-room-member-name="${escapeHtml(occupant.displayName)}"
+        aria-label="Профил на ${escapeHtml(occupant.displayName)}"
+        class="prl-slot-occupant"
+        style="border:0;background:transparent;padding:0;cursor:pointer;"
+      >${slotInnerHtml}
+      </button>`
+    }
+    return `<div class="prl-slot-occupant">${slotInnerHtml}</div>`
+  }
+
+  // Резултат ред — визуално mirror на "+"/occupant slot реда (същата височина/
+  // border-radius семейство като .prl-slot-plus), но некликаем текстов display.
+  // data-private-game-score-team е "a"/"b" — targeted score push (виж
+  // createLobbyFlowController.ts private_game_score_updated handler) обновява
+  // двата реда поотделно, не един комбиниран "X : Y" текст.
+  const matchTeamScoreRowHtml = (score: number, roomId: string, team: 'a' | 'b', isPlaying: boolean): string => `
+    <div ${isPlaying ? `data-private-game-score="${escapeHtml(roomId)}" data-private-game-score-team="${team}"` : ''} style="
+      box-sizing:border-box;width:100%;height:clamp(28px, 7vw, 34px);min-height:28px;
+      border-radius:9px;display:flex;align-items:center;justify-content:center;
+      font-size:15px;font-weight:900;color:#fff;
+      border:1px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.04);
+    ">${score}</div>
+  `
+
+  const matchTeamsHtml = (game: PrivateRoomMatchSnapshot): string => `
+    <div class="prl-teams">
+      <div>
+        <div class="prl-team-label">ОТБОР А</div>
+        <div class="prl-team-slots">${matchOccupantSlotHtml(game.teamA[0])}${matchOccupantSlotHtml(game.teamA[1])}${matchTeamScoreRowHtml(game.teamAScore, game.roomId, 'a', game.status === 'playing')}</div>
+      </div>
+      <div class="prl-divider"></div>
+      <div>
+        <div class="prl-team-label">ОТБОР Б</div>
+        <div class="prl-team-slots">${matchOccupantSlotHtml(game.teamB[0])}${matchOccupantSlotHtml(game.teamB[1])}${matchTeamScoreRowHtml(game.teamBScore, game.roomId, 'b', game.status === 'playing')}</div>
+      </div>
+    </div>
+  `
+
+  const formatMatchDateTime = (epochMs: number): string => {
+    try {
+      return new Date(epochMs).toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+    } catch {
+      return ''
+    }
+  }
+
+  const playingGameCardHtml = (game: PrivateRoomMatchSnapshot): string => `
+    <div style="box-sizing:border-box;width:100%;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
+            Вход ${formatStake(game.stake)} жълт.
+          </div>
+        </div>
+      </div>
+      ${matchTeamsHtml(game)}
+    </div>
+  `
+
+  const finishedGameCardHtml = (game: PrivateRoomMatchSnapshot): string => `
+    <div style="box-sizing:border-box;width:100%;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+      <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
+        <div style="flex:1;min-width:0;">
+          <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
+            Вход ${formatStake(game.stake)} жълт.
+          </div>
+        </div>
+      </div>
+      ${matchTeamsHtml(game)}
+      ${game.finishedAt !== null
+        ? `<div style="font-size:11px;color:rgba(255,255,255,0.35);margin-top:10px;text-align:center;">Приключила: ${escapeHtml(formatMatchDateTime(game.finishedAt))}</div>`
+        : ''}
+    </div>
+  `
+
+  const playingTabContent = state.privateGamesPlaying.length > 0
+    ? `<div style="display:flex;flex-direction:column;gap:8px;">${state.privateGamesPlaying.map(playingGameCardHtml).join('')}</div>`
+    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">В момента няма играещи частни маси.</div>`
+
+  // "Приключили" — най-скоро приключилите най-отгоре. Сървърът вече връща
+  // сортирано по finished_at DESC (privateRoomMatchStore.listFinishedMatches),
+  // но пазим explicit sort и тук като defensive UI-layer гаранция.
+  const sortedFinishedGames = [...state.privateGamesFinished].sort((a, b) => (b.finishedAt ?? 0) - (a.finishedAt ?? 0))
+  const finishedTabContent = sortedFinishedGames.length > 0
+    ? `<div style="display:flex;flex-direction:column;gap:8px;">${sortedFinishedGames.map(finishedGameCardHtml).join('')}</div>`
+    : `<div style="text-align:center;color:rgba(255,255,255,0.3);font-size:14px;padding:40px 0;">Няма приключили частни игри през последните 2 часа.</div>`
+
+  const lifecycleTab = state.privateRoomsLifecycleTab
+  const lifecycleTabButton = (tab: 'waiting' | 'playing' | 'finished', label: string, count: number): string => {
+    const isActive = lifecycleTab === tab
+    return `
+      <button type="button" data-private-rooms-lifecycle-tab="${tab}" data-active="${isActive ? 'true' : 'false'}" aria-selected="${isActive ? 'true' : 'false'}" style="
+        display:flex;align-items:center;gap:6px;padding:7px 14px;
+        background:${isActive ? 'rgba(167,139,250,0.18)' : 'rgba(255,255,255,0.05)'};
+        border:1px solid ${isActive ? 'rgba(167,139,250,0.55)' : 'rgba(255,255,255,0.1)'};
+        border-radius:9px;color:${isActive ? '#a78bfa' : 'rgba(255,255,255,0.6)'};
+        font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;
+      ">${label}
+        <span style="
+          display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 4px;
+          background:${isActive ? 'rgba(167,139,250,0.35)' : 'rgba(255,255,255,0.1)'};
+          border-radius:999px;font-size:11px;font-weight:800;
+        ">${count}</span>
+      </button>`
+  }
+
+  const lifecycleTabsHtml = `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px;" role="tablist">
+      ${lifecycleTabButton('waiting', 'Чакащи', allRooms.length)}
+      ${lifecycleTabButton('playing', 'Играещи', state.privateGamesPlaying.length)}
+      ${lifecycleTabButton('finished', 'Приключили', sortedFinishedGames.length)}
+    </div>
+  `
+
+  const activeTabContent = lifecycleTab === 'waiting'
+    ? allTabContent
+    : lifecycleTab === 'playing'
+      ? playingTabContent
+      : finishedTabContent
 
   return `
     <style>
@@ -9145,6 +9294,9 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
       [data-private-room-member]:hover { filter: brightness(1.18); transform: translateY(-1px); }
       ${TEAM_SLOT_CSS}
       ${PRIVATE_ROOM_POPUP_STYLES}
+      @media (max-width: 480px) {
+        [data-private-rooms-lifecycle-tab] { flex:1 1 auto; justify-content:center; padding:7px 8px; font-size:12px; }
+      }
     </style>
     <div style="max-width:760px;margin:0 auto;padding:24px 0 40px;">
       <!-- Хедър -->
@@ -9155,11 +9307,13 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
           border-radius:9px;color:rgba(255,255,255,0.7);font-size:13px;font-weight:600;cursor:pointer;flex-shrink:0;
         ">← Назад</button>
         <div style="font-size:22px;font-weight:900;color:#a78bfa;flex-shrink:0;">Частни маси</div>
-        ${createBtnHtml}
+        ${lifecycleTab === 'waiting' ? createBtnHtml : ''}
       </div>
 
+      ${lifecycleTabsHtml}
+
       <!-- Съдържание -->
-      ${allTabContent}
+      ${activeTabContent}
     </div>
 
     ${renderPrivateRoomsCreatePopup(state)}
@@ -13747,6 +13901,13 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const tab = btn.dataset.privateRoomsTab as 'all' | 'mine'
       if (tab === 'all' || tab === 'mine') options.onPrivateRoomsTabChange(tab)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-private-rooms-lifecycle-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tab = btn.dataset.privateRoomsLifecycleTab as 'waiting' | 'playing' | 'finished'
+      if (tab === 'waiting' || tab === 'playing' || tab === 'finished') options.onPrivateRoomsLifecycleTabChange(tab)
     })
   })
 

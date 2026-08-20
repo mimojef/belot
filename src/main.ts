@@ -5030,6 +5030,7 @@ lobby = createLobbyFlowController({
   onAdminMatchRoomDelete: (stakeAmount) => deleteAdminMatchRoom(stakeAmount),
   onPrivateRoomsOpen: () => { client.requestPrivateRoomsList() },
   onPrivateRoomsClose: () => {},
+  onPrivateGamesOpen: () => { client.requestPrivateGamesList() },
   onPrivateRoomCreate: (stake, isLocked, waitMinutes) => { client.createPrivateRoom(stake, isLocked, waitMinutes) },
   onPrivateRoomJoinSlot: (privateRoomId, team, slotIndex) => { client.joinPrivateRoomSlot(privateRoomId, team, slotIndex) },
   onPrivateRoomLeave: () => { client.leavePrivateRoom() },

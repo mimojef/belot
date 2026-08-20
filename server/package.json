@@ -103,6 +103,7 @@
     "check:vip-dm-backend-foundation": "tsx scripts/checkVipDmBackendFoundation.ts",
     "check:topics-store": "tsx scripts/checkTopicsStore.ts",
     "check:topic-replies-likes-store": "tsx scripts/checkTopicRepliesLikesStore.ts",
+    "check:private-room-match-store": "tsx scripts/checkPrivateRoomMatchStore.ts",
     "check:topic-replies-likes-realtime": "tsx scripts/checkTopicRepliesLikesRealtime.ts",
     "check:topic-messages-realtime": "tsx scripts/checkTopicMessagesRealtime.ts",
     "check:topic-attachments": "tsx scripts/checkTopicAttachments.ts",

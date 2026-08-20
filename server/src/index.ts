@@ -17,6 +17,8 @@ sharp.block({
 import Stripe from 'stripe'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
+import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type PrivateRoomMatchRecord } from './db/privateRoomMatchStore.js'
+import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import {
   createAuthStore,
@@ -264,11 +266,12 @@ import type {
   TopicCreateErrorCode,
 } from './protocol/messageTypes.js'
 import { validateTopicTitle, TOPIC_TITLE_MAX_CODE_POINTS } from './protocol/topicTitleValidation.js'
-import { createPrivateRoomsStore, getHumanCount } from './game/privateRoomsStore.js'
+import { createPrivateRoomsStore, getHumanCount, getTeamSlots } from './game/privateRoomsStore.js'
 import type {
   PrivateRoom,
   PrivateRoomHumanOccupant,
   PrivateRoomBotOccupant,
+  PrivateRoomSlot,
   RoomReadiness,
 } from './game/privateRoomsStore.js'
 import { mapPrivateRoomSlotToSeat } from './game/mapPrivateRoomSlotToSeat.js'
@@ -279,7 +282,13 @@ import { createHumanParticipant } from './core/createHumanParticipant.js'
 import { createBotParticipant } from './core/createBotParticipant.js'
 import { seatParticipantInRoom } from './core/seatParticipantInRoom.js'
 import { updateRoomHostPlayerId } from './core/updateRoomHostPlayerId.js'
-import type { ClientMessage, PrivateRoomSnapshot } from './protocol/messageTypes.js'
+import type {
+  ClientMessage,
+  PrivateRoomSnapshot,
+  PrivateGamesListMessage,
+  PrivateGameScoreUpdatedMessage,
+  PrivateRoomMatchSnapshot,
+} from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
 import { createPasswordResetStore, type PasswordResetStore } from './db/passwordResetStore.js'
@@ -516,6 +525,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'cancel_private_room_invite':
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
+    case 'request_private_games_list':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
     case 'subscribe_private_room_chat':
@@ -549,6 +559,9 @@ const botCatalogImport = await importBotProfilesCatalog(
   databaseBootstrap.databaseFilePath,
 )
 const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
+  databaseBootstrap.databaseFilePath,
+)
+const privateRoomMatchStore = await createPrivateRoomMatchStore(
   databaseBootstrap.databaseFilePath,
 )
 const playerProgressStore = await createPlayerProgressStore(
@@ -2822,6 +2835,154 @@ function broadcastPrivateRoomsListToLobbyConnections(): void {
   }
 }
 
+// ─── "Играещи"/"Приключили" lobby listing (виж privateRoomMatchStore.ts) ───
+// Тесен, lobby-safe DTO — НИКОГА hands/deck/bidding internals/trick state.
+
+const PRIVATE_ROOM_FINISHED_VISIBILITY_HOURS = 2
+
+function buildPrivateRoomMatchOccupant(occupant: {
+  profileId: string | null
+  displayName: string
+  avatarUrl: string | null
+  isBot: boolean
+}): PrivateRoomMatchOccupant {
+  return {
+    profileId: occupant.profileId,
+    displayName: occupant.displayName,
+    avatarUrl: occupant.avatarUrl,
+    isBot: occupant.isBot,
+  }
+}
+
+// Извиква се СЛЕД commitServerRoomWithSnapshot в handlePrivateRoomReady, т.е.
+// точно в момента, в който waiting private room-ът е потвърдено станал жива
+// игра — privateRoom.slots все още носи оригиналния team/bot occupant състав
+// (ServerRoom seats носят различна, по-широка форма, затова четем от
+// privateRoom, не от initializedRoom).
+function recordPrivateRoomMatchStarted(privateRoom: PrivateRoom, roomId: string): void {
+  const teamASlots = getTeamSlots(privateRoom, 'A')
+  const teamBSlots = getTeamSlots(privateRoom, 'B')
+
+  function toOccupant(slot: PrivateRoomSlot): PrivateRoomMatchOccupant {
+    const occupant = slot.occupant
+    if (occupant === null) {
+      // Не би трябвало да е възможно тук (readiness gate изисква 4/4 заети
+      // слотове преди onRoomReady), но пазим safe fallback вместо throw.
+      return { profileId: null, displayName: '—', avatarUrl: null, isBot: false }
+    }
+    return occupant.kind === 'human'
+      ? buildPrivateRoomMatchOccupant({
+          profileId: occupant.profileId,
+          displayName: occupant.displayName,
+          avatarUrl: occupant.avatarUrl,
+          isBot: false,
+        })
+      : buildPrivateRoomMatchOccupant({
+          profileId: occupant.botProfileId ?? null,
+          displayName: occupant.identity.displayName,
+          avatarUrl: occupant.identity.avatarUrl,
+          isBot: true,
+        })
+  }
+
+  privateRoomMatchStore.recordMatchStarted({
+    roomId,
+    privateRoomId: privateRoom.id,
+    stake: privateRoom.stake,
+    teamA: [toOccupant(teamASlots[0]), toOccupant(teamASlots[1])],
+    teamB: [toOccupant(teamBSlots[0]), toOccupant(teamBSlots[1])],
+  })
+}
+
+function privateRoomMatchRecordToSnapshot(record: PrivateRoomMatchRecord): PrivateRoomMatchSnapshot {
+  return {
+    roomId: record.roomId,
+    status: record.status,
+    stake: record.stake,
+    teamA: record.teamA,
+    teamB: record.teamB,
+    teamAScore: record.teamAScore ?? 0,
+    teamBScore: record.teamBScore ?? 0,
+    startedAt: Date.parse(dbDateToUtc(record.startedAt)),
+    finishedAt: record.finishedAt !== null ? Date.parse(dbDateToUtc(record.finishedAt)) : null,
+  }
+}
+
+function buildPrivateGamesListMessage(): PrivateGamesListMessage {
+  return {
+    type: 'private_games_list',
+    playing: privateRoomMatchStore.listPlayingMatches().map(privateRoomMatchRecordToSnapshot),
+    finished: privateRoomMatchStore
+      .listFinishedMatches(PRIVATE_ROOM_FINISHED_VISIBILITY_HOURS)
+      .map(privateRoomMatchRecordToSnapshot),
+  }
+}
+
+// Mirror на broadcastPrivateRoomsListToLobbyConnections — само connections
+// извън активна игра (currentRoomId === null) виждат lobby listing-а.
+function broadcastPrivateGamesListToLobbyConnections(): void {
+  const message = buildPrivateGamesListMessage()
+
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status !== 'connected' || conn.currentRoomId !== null) {
+      continue
+    }
+    safeSendToConnection(conn.id, message)
+  }
+}
+
+// Targeted score-only push (виж §7 брифа — без пълен playing/finished списък
+// при всяка score промяна). Dedup чрез signature Map — mirror на established
+// tournamentCoordinator.notifyFeederScoreProgress lastNotifiedFeederScoreByMatchId
+// pattern-а, за да не спами SQL UPDATE + WS broadcast при всеки game tick,
+// само при реална score промяна.
+const lastNotifiedPrivateGameScoreByRoomId = new Map<string, string>()
+
+function notifyPrivateGameScoreProgress(room: ServerRoom): void {
+  if (room.config.isPrivateTableOrigin !== true) return
+  const authState = room.game.authoritativeState
+  if (authState === null || 'kind' in authState) return
+  if (authState.matchEnded !== null) return
+
+  const teamAScore = authState.score.match.teamA
+  const teamBScore = authState.score.match.teamB
+  const signature = `${teamAScore}:${teamBScore}`
+  if (lastNotifiedPrivateGameScoreByRoomId.get(room.id) === signature) return
+  lastNotifiedPrivateGameScoreByRoomId.set(room.id, signature)
+
+  privateRoomMatchStore.recordMatchScoreUpdate(room.id, teamAScore, teamBScore)
+
+  const message: PrivateGameScoreUpdatedMessage = {
+    type: 'private_game_score_updated',
+    roomId: room.id,
+    teamAScore,
+    teamBScore,
+  }
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status !== 'connected' || conn.currentRoomId !== null) {
+      continue
+    }
+    safeSendToConnection(conn.id, message)
+  }
+}
+
+// Извиква се точно веднъж, при match-ended прехода (същия
+// shouldRunMatchCompletionSideEffects idempotency guard като recordCompletedMatch/
+// payoutMatchWinners по-долу) — записва final score, маха room-а от
+// "Играещи" push dedup Map-а (memory cleanup, стаята никога повече няма да
+// tick-не score update), и известява lobby-то с обновения playing/finished
+// списък (targeted refresh, не всеки tick).
+function recordPrivateGameFinishedIfApplicable(room: ServerRoom): void {
+  if (room.config.isPrivateTableOrigin !== true) return
+  const authState = room.game.authoritativeState
+  const teamAScore = authState !== null && !('kind' in authState) ? authState.score.match.teamA : 0
+  const teamBScore = authState !== null && !('kind' in authState) ? authState.score.match.teamB : 0
+
+  lastNotifiedPrivateGameScoreByRoomId.delete(room.id)
+  privateRoomMatchStore.recordMatchFinished(room.id, teamAScore, teamBScore)
+  broadcastPrivateGamesListToLobbyConnections()
+}
+
 type PrivateRoomStakeEligibilityResult =
   | { ok: true }
   | {
@@ -3086,6 +3247,9 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
 
   nextServerState = commitServerRoomWithSnapshot(initializedRoom, nextServerState)
   serverState = nextServerState
+
+  recordPrivateRoomMatchStarted(privateRoom, initializedRoom.id)
+  broadcastPrivateGamesListToLobbyConnections()
 
   for (const { connectionId, seat } of seatAssignments) {
     safeSendToConnection(connectionId, {
@@ -3448,6 +3612,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
           // покрие bot auto-play/timer-expiry advances, не само direct
           // submit_play_card handler-и.
           tournamentCoordinator?.notifyFeederScoreProgress(room)
+          notifyPrivateGameScoreProgress(room)
 
           const roundCapot = getRoundCapotTransition(previousRoom, room)
           if (roundCapot !== null) {
@@ -3506,6 +3671,13 @@ async function tickRoomGameRuntimes(): Promise<void> {
               },
             )
           }
+          runMatchCompletionSideEffect(
+            'record-private-game-finished',
+            room.id,
+            () => {
+              recordPrivateGameFinishedIfApplicable(room)
+            },
+          )
           const hadAwardedPrizeBeforePayout = room.awardedPrizePerSeat !== undefined
           if (!room.config.isGuestTrial && !isTournamentMatchRoom(room)) {
             runMatchCompletionSideEffect(
@@ -14417,6 +14589,19 @@ wsServer.on('connection', (socket, request) => {
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
+        // Direct human submit_play_card commit минава покрай
+        // applyAcceptedGameWorkerCandidate/onApplied (виж коментара при
+        // shouldRunMatchCompletionSideEffects) — затова "Играещи" score push
+        // и match-ended detection трябва да се закачат и тук отделно, за да
+        // не пропуснем случая, при който ИМЕННО тази ръчна карта е последната
+        // на мача (worker-tick следващия път вече ще вижда и previousRoom, и
+        // nextRoom като match-ended, значи idempotency guard-ът никога не би
+        // хванал прехода само от worker-tick страна).
+        if (shouldRunMatchCompletionSideEffects(room, result.room)) {
+          recordPrivateGameFinishedIfApplicable(result.room)
+        } else {
+          notifyPrivateGameScoreProgress(result.room)
+        }
         return
       }
 
@@ -15411,6 +15596,11 @@ wsServer.on('connection', (socket, request) => {
         }
         const snapshots = privateRoomsStore.listRooms().map(buildPrivateRoomSnapshot)
         safeSendToConnection(connection.id, { type: 'private_rooms_list', rooms: snapshots })
+        return
+      }
+
+      if (message.type === 'request_private_games_list') {
+        safeSendToConnection(connection.id, buildPrivateGamesListMessage())
         return
       }
 
