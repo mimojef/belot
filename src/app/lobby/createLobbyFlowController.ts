@@ -13744,8 +13744,15 @@ export function createLobbyFlowController(
     // Изискване: при отваряне на страницата по подразбиране ВИНАГИ "Чакащи",
     // независимо от кой tab е бил избран при предишно посещение.
     state.privateRoomsLifecycleTab = 'waiting'
-    state.privateGamesLoaded = false
+    // Играещи/Приключили count-овете трябва да са коректни ВЕДНАГА при
+    // отваряне на екрана (включително след browser refresh), не чак при
+    // първи клик на съответния таб — затова fetch-ваме тук, не lazy при
+    // onPrivateRoomsLifecycleTabChange. privateGamesLoaded=true СЕГА (не
+    // false) предотвратява дублирано request при последващ клик на
+    // "Играещи"/"Приключили" (виж onPrivateRoomsLifecycleTabChange guard-а).
+    state.privateGamesLoaded = true
     options.onPrivateRoomsOpen?.()
+    options.onPrivateGamesOpen?.()
     render()
   }
 
