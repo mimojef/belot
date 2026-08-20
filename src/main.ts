@@ -4019,7 +4019,7 @@ async function loadTopicReplies(
   rootMessageId: string,
   afterSeq: number | null,
 ): Promise<
-  | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null }
+  | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null; deletedMessageIds: string[] }
   | { ok: false; message: string }
 > {
   try {
@@ -4035,6 +4035,7 @@ async function loadTopicReplies(
       replies?: TopicReplySnapshot[]
       hasMore?: boolean
       oldestSeq?: number | null
+      deletedMessageIds?: string[]
     }
     if (!response.ok || !data.ok || !Array.isArray(data.replies)) {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на отговорите.' }
@@ -4044,6 +4045,7 @@ async function loadTopicReplies(
       replies: data.replies,
       hasMore: data.hasMore ?? false,
       oldestSeq: data.oldestSeq ?? null,
+      deletedMessageIds: Array.isArray(data.deletedMessageIds) ? data.deletedMessageIds : [],
     }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }

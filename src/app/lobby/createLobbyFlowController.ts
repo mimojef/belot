@@ -681,7 +681,7 @@ export type CreateLobbyFlowControllerOptions = {
   onTopicMessageSend?: (topicId: string, body: string, requestId: string, imageDataUrl?: string) => void
   /** afterSeq=null → първите N replies; иначе → следващи от afterSeq (forward cursor, "Покажи още"). Етап 3. */
   onTopicRepliesLoad?: (topicId: string, rootMessageId: string, afterSeq: number | null) => Promise<
-    | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null }
+    | { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null; deletedMessageIds?: string[] }
     | { ok: false; message: string }
   >
   onTopicReplySend?: (topicId: string, parentMessageId: string, body: string, requestId: string, imageDataUrl?: string) => void
@@ -6574,21 +6574,31 @@ export function createLobbyFlowController(
 
   async function expandReplyThread(rootMessageId: string): Promise<void> {
     state.topicExpandedReplyRootIds = [...state.topicExpandedReplyRootIds, rootMessageId]
-    render()
 
-    // Вече заредено (напр. потребителят е collapse-нал и после отваря пак) —
-    // не правим повторна REST заявка, разчитаме на вече кешираните replies.
-    if (state.topicRepliesByRootId[rootMessageId] !== undefined && state.topicRepliesByRootId[rootMessageId] !== null) {
-      return
-    }
+    // Кешираните replies (ако има) се показват веднага — но кеш presence
+    // само по себе си НЕ означава свежест (виж bug report: потребител не е
+    // бил subscribed за темата докато е стоял extra replies, badge-only WS
+    // push никога не пипа topicRepliesByRootId). Затова reconcile-ваме с
+    // REST при ВСЯКО отваряне/reopen, а не само при cold load.
+    const cachedReplies = state.topicRepliesByRootId[rootMessageId]
+    const hasCachedReplies = cachedReplies !== undefined && cachedReplies !== null
+    render()
 
     const topicId = state.activeTopicId
     if (topicId === null || !options.onTopicRepliesLoad) return
 
+    // Gap-closing fetch: ако вече има кеш, искаме само replies СЛЕД най-новия
+    // познат seq (forward cursor, mirror на loadMoreReplies) — не пълен
+    // re-fetch от началото, за да не разваляме вече заредена по-стара
+    // история/hasMore pagination state. Без кеш → cold-load (afterSeq=null).
+    const afterSeq = hasCachedReplies && cachedReplies.length > 0
+      ? cachedReplies[cachedReplies.length - 1]!.seq
+      : null
+
     state.topicRepliesLoadingByRootId[rootMessageId] = true
     render()
 
-    const result = await options.onTopicRepliesLoad(topicId, rootMessageId, null)
+    const result = await options.onTopicRepliesLoad(topicId, rootMessageId, afterSeq)
 
     // Stale-response guard — потребителят може вече да е превключил тема
     // или collapse-нал thread-а, докато заявката е висяла.
@@ -6605,16 +6615,36 @@ export function createLobbyFlowController(
       return
     }
 
-    state.topicRepliesByRootId[rootMessageId] = result.replies
-    state.topicRepliesHasMoreByRootId[rootMessageId] = result.hasMore
-    // Seed-ва like state за replies от initial load-а (виж т.13 — likeCount/
+    // Merge по messageId (dedup) — server response е authoritative за
+    // съдържанието на всеки reply, но не изхвърляме вече заредени по-стари
+    // replies (напр. от предишен loadMoreReplies) извън тази страница.
+    const existing = state.topicRepliesByRootId[rootMessageId] ?? []
+    const byId = new Map<string, TopicReplySnapshot>()
+    for (const r of existing) byId.set(r.messageId, r)
+    for (const r of result.replies) byId.set(r.messageId, r)
+    // Tombstone reconciliation — getRepliesAfter само добавя НОВИ seq-ове,
+    // никога не "маха" вече кеширани replies, изтрити СЛЕД като клиентът ги
+    // е кеширал (виж deletedMessageIds коментара в handleTopicRepliesRequest).
+    // Само gap-closing reconcile носи tombstone списък (cold load го праща
+    // празен, защото няма съществуващ кеш за reconcile).
+    for (const deletedId of result.deletedMessageIds ?? []) {
+      byId.delete(deletedId)
+    }
+    state.topicRepliesByRootId[rootMessageId] = [...byId.values()].sort((a, b) => a.seq - b.seq)
+    // hasMore/oldestSeq отразяват само "load more назад" пагинацията — при
+    // gap-closing (afterSeq !== null) не презаписваме вече установен hasMore
+    // с резултат от различна (forward) заявка.
+    if (afterSeq === null) {
+      state.topicRepliesHasMoreByRootId[rootMessageId] = result.hasMore
+    }
+    // Seed-ва like state за replies от load-а (виж т.13 — likeCount/
     // viewerHasLiked overrides идват от WS/REST, отделно от самия snapshot).
     for (const reply of result.replies) {
       state.topicMessageLikeCountById[reply.messageId] = reply.likeCount
       state.topicMessageViewerHasLikedById[reply.messageId] = reply.viewerHasLiked
     }
     if (isCurrentThread) {
-      state.topicThreadRenderReason = 'initial'
+      state.topicThreadRenderReason = hasCachedReplies ? (state.topicThreadRenderReason ?? 'live-append') : 'initial'
     }
     render()
   }

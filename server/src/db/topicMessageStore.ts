@@ -170,6 +170,13 @@ export type TopicMessageStore = {
     limit: number,
     excludedSenderProfileIds: readonly string[],
   ) => TopicMessageHistoryPage
+  /**
+   * messageId-та на replies с `seq <= maxSeq`, които са били soft-deleted —
+   * gap-closing reconciliation companion за getRepliesAfter (виж коментара
+   * при имплементацията: getRepliesAfter никога не връща изтрити редове,
+   * дори такива, изтрити СЛЕД като клиент вече ги е кеширал).
+   */
+  getDeletedReplyIdsUpTo: (parentMessageId: string, maxSeq: number) => string[]
   /** По message_id за единичен lookup (parent-is-root проверка при reply insert, message-exists проверка при like toggle). */
   getMessageById: (messageId: string) => TopicMessageSnapshot | null
   /**
@@ -773,6 +780,23 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     excludedSenderProfileIds: readonly string[],
   ): TopicMessageHistoryPage {
     return runRepliesPage(parentMessageId, limit, excludedSenderProfileIds, afterSeq)
+  }
+
+  // Gap-closing reconciliation companion за getRepliesAfter — soft-delete
+  // (deleted_at UPDATE) не пипа seq, затова изтрит reply с seq <= afterSeq
+  // никога не се връща от getRepliesAfter (WHERE seq > afterSeq филтрира
+  // назад-във-времето позиции по дизайн). Клиент, който е кеширал replies
+  // ПРЕДИ да напусне темата, няма друг начин да научи, че някой от тях е
+  // бил изтрит междувременно (delete broadcast стига само до message-channel
+  // subscribers, виж broadcastTopicMessageDeletedToLocalSubscribers) — затова
+  // reopen reconciliation го пита изрично.
+  const selectDeletedReplyIdsUpToStatement = database.prepare(`
+    SELECT message_id FROM topic_messages
+    WHERE parent_message_id = ? AND seq <= ? AND deleted_at IS NOT NULL;
+  `)
+  function getDeletedReplyIdsUpTo(parentMessageId: string, maxSeq: number): string[] {
+    const rows = selectDeletedReplyIdsUpToStatement.all(parentMessageId, maxSeq) as Array<{ message_id: string }>
+    return rows.map((row) => row.message_id)
   }
 
   function getMessageById(messageId: string): TopicMessageSnapshot | null {
@@ -1537,6 +1561,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     insertReply,
     getReplies,
     getRepliesAfter,
+    getDeletedReplyIdsUpTo,
     getMessageById,
     deleteMessage,
     deleteOwnMessage,

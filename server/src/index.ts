@@ -8374,9 +8374,20 @@ async function handleTopicRepliesRequest(
   const afterRaw = requestUrl.searchParams.get('after')
   const afterSeq = afterRaw !== null ? Number.parseInt(afterRaw, 10) : null
 
-  const page = afterSeq !== null && Number.isInteger(afterSeq)
-    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq, limit, excludedSenderProfileIds)
+  const isGapClosingReconcile = afterSeq !== null && Number.isInteger(afterSeq)
+  const page = isGapClosingReconcile
+    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, excludedSenderProfileIds)
     : topicMessageStore.getReplies(rootMessageId, limit, excludedSenderProfileIds)
+
+  // Reopen reconciliation (виж createLobbyFlowController.ts expandReplyThread):
+  // getRepliesAfter само добавя НОВИ redове (seq > afterSeq) — soft-delete
+  // не пипа seq, затова reply, изтрит СЛЕД като клиентът вече го е кеширал
+  // (seq <= afterSeq), никога няма да се появи/изчезне през самия page fetch.
+  // Връщаме tombstone id-та само в gap-closing режим — cold load (afterSeq
+  // null) няма никакъв кеш за reconcile, затова не му е нужен tombstone списък.
+  const deletedMessageIds = isGapClosingReconcile
+    ? topicMessageStore.getDeletedReplyIdsUpTo(rootMessageId, afterSeq!)
+    : []
 
   const uniqueSenderProfileIds = [...new Set(page.messages.map((m) => m.senderProfileId))]
   const senderProfiles = playerProgressStore.getProfileSnapshotsByIds(uniqueSenderProfileIds)
@@ -8413,6 +8424,7 @@ async function handleTopicRepliesRequest(
     replies: enrichedReplies,
     hasMore: page.hasMore,
     oldestSeq: page.oldestSeq,
+    deletedMessageIds,
   })
   return true
 }

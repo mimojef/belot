@@ -69,11 +69,12 @@ let nextMessagesResult: { ok: true; messages: TopicMessageSnapshot[]; hasMore: b
   hasMore: false,
   oldestSeq: null,
 }
-let nextRepliesResult: { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null } = {
+let nextRepliesResult: { ok: true; replies: TopicReplySnapshot[]; hasMore: boolean; oldestSeq: number | null; deletedMessageIds: string[] } = {
   ok: true,
   replies: [],
   hasMore: false,
   oldestSeq: null,
+  deletedMessageIds: [],
 }
 
 const subscribeLog: Array<{ topicId: string; afterSeq: number }> = []
@@ -203,12 +204,13 @@ function q<T extends Element>(selector: string): T | null {
       oldestSeq: messages.length > 0 ? messages[messages.length - 1]!.seq : null,
     }
   },
-  setNextRepliesResult: (replies: TopicReplySnapshot[], hasMore = false) => {
+  setNextRepliesResult: (replies: TopicReplySnapshot[], hasMore = false, deletedMessageIds: string[] = []) => {
     nextRepliesResult = {
       ok: true,
       replies,
       hasMore,
       oldestSeq: replies.length > 0 ? replies[replies.length - 1]!.seq : null,
+      deletedMessageIds,
     }
   },
   setChatConversations: (conversations: ChatConversationSnapshot[]) => {

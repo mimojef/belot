@@ -82,7 +82,7 @@ type H = {
   clickTopicsBackToGeneral: () => void
   setVipGate: (isActive: boolean, hasClaimedLaunchGift: boolean) => void
   setNextMessagesResult: (messages: unknown[], hasMore?: boolean) => void
-  setNextRepliesResult: (replies: unknown[], hasMore?: boolean) => void
+  setNextRepliesResult: (replies: unknown[], hasMore?: boolean, deletedMessageIds?: string[]) => void
   makeMessage: (topicId: string, seq: number, body: string, senderProfileId?: string, senderDisplayName?: string) => any
   makeReply: (topicId: string, seq: number, parentMessageId: string, body: string, senderProfileId?: string, senderDisplayName?: string) => any
   getReplySendLog: () => Array<{ topicId: string; parentMessageId: string; body: string; requestId: string }>
@@ -504,6 +504,158 @@ try {
     await page.waitForTimeout(100)
     assertEqual(await call(page, (h: H) => h.isThreadVisible()), false, 'връщане към Общ от Personal НЕ трябва да възстановява стар thread id')
     assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), false, 'General stream НЕ трябва да възстановява thread composer')
+  })
+
+  await check('[16] Reopen на thread БЕЗ нови replies -> втори onTopicRepliesLoad е gap-closing (afterSeq = last known seq), няма duplicates', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    const reply1 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 900, id, 'reopen no-op reply 1'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    const idsAfterFirstOpen = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(idsAfterFirstOpen.join('|'), reply1.messageId, 'cold open трябва да покаже reply1')
+
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+
+    // Reopen: сървърът "няма" нищо ново след последния познат seq.
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    const loadLog = await call(page, (h: H) => h.getRepliesLoadLog())
+    const loadsForRootA = loadLog.filter((l) => l.rootMessageId === rootA)
+    assertEqual(loadsForRootA.length, 2, 'reopen трябва да задейства втора REST заявка (не early-return от кеша)')
+    assertEqual(loadsForRootA[0]!.afterSeq, null, 'първото зареждане трябва да е cold load (afterSeq=null)')
+    assertEqual(loadsForRootA[1]!.afterSeq, 900, 'reopen заявката трябва да е gap-closing от последния познат seq')
+
+    const idsAfterReopen = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(idsAfterReopen.join('|'), reply1.messageId, 'reopen без нови replies не трябва да произведе duplicates')
+  })
+
+  await check('[17] Reopen на thread С 2 нови replies (badge-only path, без live WS push) -> detail view ги показва без refresh', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    const reply1 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 910, id, 'seen before leaving'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    // Потребителят напуска thread-а (Back) — точно като report сценария,
+    // новите replies идват само като badge/unread push (тук: НЕ симулираме
+    // topic_reply push изобщо, тъй като real bug е "user not subscribed to
+    // topic message channel" -> replies никога не идват по WS).
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+
+    const reply2 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 911, id, 'new reply while away 1'), rootA)
+    const reply3 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 912, id, 'new reply while away 2'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply2, reply3])
+
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    const ids = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(
+      ids.join('|'),
+      `${reply1.messageId}|${reply2.messageId}|${reply3.messageId}`,
+      'reopen трябва да покаже cached reply1 + двата нови reply-я, без нужда от browser refresh',
+    )
+  })
+
+  await check('[18] Reopen с 1 нов reply merge-ва по messageId (dedup) при overlap със сървърния отговор', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    const reply1 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 920, id, 'first'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+
+    const reply2 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 921, id, 'second'), rootA)
+    // Server response overlaps: връща reply1 отново (напр. race с afterSeq
+    // граница) + новия reply2 — merge-ът по messageId не трябва да дублира reply1.
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1, reply2])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    const ids = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(ids.join('|'), `${reply1.messageId}|${reply2.messageId}`, 'overlap в server response не трябва да произведе duplicate reply1')
+  })
+
+  await check('[19] Reopen все още работи коректно заедно с live topic_reply push докато thread е отворен (не чупи [13])', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    await call(
+      page,
+      (h: H, msg: unknown) => h.simulateServerMessage(msg as Record<string, unknown>),
+      { type: 'topic_reply', seq: 930, messageId: 'reply-push-after-reopen', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'author-z', senderDisplayName: 'Author Z', senderAvatarUrl: null, senderRole: 'player', body: 'live after reopen', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
+    )
+    await page.waitForTimeout(100)
+
+    const ids = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assert(ids.includes('reply-push-after-reopen'), 'live push след reopen трябва да продължи да append-ва нормално')
+  })
+
+  await check('[20] Reopen след moderator delete на кеширан reply (без live push) -> изтритият reply изчезва без browser refresh', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    const reply1 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 940, id, 'will be deleted'), rootA)
+    const reply2 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 941, id, 'stays'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1, reply2])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    const idsBeforeLeaving = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(idsBeforeLeaving.join('|'), `${reply1.messageId}|${reply2.messageId}`, 'начален кеш трябва да съдържа и двата replies')
+
+    // Потребителят напуска thread-а — точно като [17], моделираме "unsubscribed
+    // while away" сценария: НЕ симулираме topic_message_deleted push (real bug
+    // е, че delete push никога не стига, ако не си message-channel subscriber
+    // за темата в момента на delete-а).
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+
+    // Reopen reconciliation: сървърът вече не връща нови replies, но докладва
+    // reply1 като deleted (seq <= gap-closing afterSeq).
+    await call(
+      page,
+      (h: H, [replies, deletedIds]: [unknown[], string[]]) => h.setNextRepliesResult(replies as any[], false, deletedIds),
+      [[], [reply1.messageId]],
+    )
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    const idsAfterReopen = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(idsAfterReopen.join('|'), reply2.messageId, 'reopen трябва да махне изтрития reply1 от кеша и да запази reply2, без browser refresh')
+  })
+
+  await check('[21] Reopen едновременно с нови И изтрити replies (combined reconciliation)', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    const reply1 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 950, id, 'old, will be deleted'), rootA)
+    await call(page, (h: H, replies: unknown) => h.setNextRepliesResult(replies as any[], false), [reply1])
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+    await call(page, (h: H) => h.clickThreadBack())
+    await page.waitForTimeout(100)
+
+    const reply2 = await call(page, (h: H, id: string) => h.makeReply('topic-general', 951, id, 'new while away'), rootA)
+    await call(
+      page,
+      (h: H, [replies, deletedIds]: [unknown[], string[]]) => h.setNextRepliesResult(replies as any[], false, deletedIds),
+      [[reply2], [reply1.messageId]],
+    )
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    const ids = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assertEqual(ids.join('|'), reply2.messageId, 'combined reconciliation трябва едновременно да добави reply2 и да махне изтрития reply1')
   })
 
   await check('Няма JS грешки в конзолата по време на сценариите', () => {
