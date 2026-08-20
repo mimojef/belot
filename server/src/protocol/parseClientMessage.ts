@@ -425,6 +425,10 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'request_private_rooms_list' }
     }
 
+    if (parsed.type === 'request_private_games_list') {
+      return { type: 'request_private_games_list' }
+    }
+
     if (parsed.type === 'create_private_room') {
       if (!isPositiveIntegerStake(parsed.stake)) {
         return null
