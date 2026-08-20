@@ -34,6 +34,14 @@ CURRENT_LINK="$PROJECT_ROOT/current"
 PUBLIC_BASE_URL="https://www.pika.bg"
 # Извън Git working tree — single-writer lock, не е repo артефакт.
 LOCK_FILE="/var/lock/belot-v2-frontend-production.lock"
+# Persistent deployment state за бъдещия smart controller
+# (scripts/deploy-production.sh — все още несъздаден). Извън Git working
+# tree и извън /var/www/belot-v2 изцяло — не е repo артефакт, не се пипа
+# от build/release/switch логиката по-горе. Marker-ът се пише САМО след
+# успешен switch + всички post-switch checks (виж края на файла) — никога
+# предварително, никога при частичен/неуспешен deploy.
+DEPLOY_STATE_DIR="/var/lib/belot-v2/deploy-state"
+FRONTEND_STATE_FILE="$DEPLOY_STATE_DIR/frontend.json"
 
 log() { printf '[deploy-frontend] %s\n' "$1"; }
 fail() { printf '[deploy-frontend] STOP: %s\n' "$1" >&2; exit 1; }
@@ -157,6 +165,28 @@ if [ -L "$CURRENT_LINK" ]; then
 else
   log "ПРЕДУПРЕЖДЕНИЕ: current symlink не съществува все още (изглежда като първи deploy)."
 fi
+
+# ─── Deployment state directory preflight ───────────────────────────────────
+# Проверява ПРЕДИ build/release/switch, че DEPLOY_STATE_DIR реално позволява
+# create + atomic rename + delete на temp файл — точно операциите, нужни за
+# marker write-а накрая (виж "Persistent deployment state" по-долу). Никога
+# не създава frontend.json тук — само собствен preflight-специфичен temp
+# файл, изтрит веднага след теста. Ако тук се провали, спираме ПРЕДИ deploy
+# да е започнал, вместо да открием проблема чак след успешен switch.
+mkdir -p "$DEPLOY_STATE_DIR" || fail "Не успях да създам deployment state директорията: $DEPLOY_STATE_DIR"
+DEPLOY_STATE_PREFLIGHT_TMP="$DEPLOY_STATE_DIR/.preflight-write-test.$$.$RANDOM"
+if ! printf 'preflight-write-test\n' > "$DEPLOY_STATE_PREFLIGHT_TMP" 2>/dev/null; then
+  fail "Deployment state директорията ($DEPLOY_STATE_DIR) не позволява create на файл — провери permissions преди deploy."
+fi
+DEPLOY_STATE_PREFLIGHT_RENAMED="$DEPLOY_STATE_DIR/.preflight-write-test-renamed.$$.$RANDOM"
+if ! mv -f "$DEPLOY_STATE_PREFLIGHT_TMP" "$DEPLOY_STATE_PREFLIGHT_RENAMED" 2>/dev/null; then
+  rm -f "$DEPLOY_STATE_PREFLIGHT_TMP"
+  fail "Deployment state директорията ($DEPLOY_STATE_DIR) не позволява atomic rename — провери filesystem/permissions преди deploy."
+fi
+if ! rm -f "$DEPLOY_STATE_PREFLIGHT_RENAMED" 2>/dev/null; then
+  fail "Deployment state директорията ($DEPLOY_STATE_DIR) не позволява delete на файл — провери permissions преди deploy."
+fi
+log "Deployment state директория ($DEPLOY_STATE_DIR): create + rename + delete OK (frontend.json НЕ е пипнат)."
 
 # ─── 1. Build ────────────────────────────────────────────────────────────────
 section "Build"
@@ -378,7 +408,66 @@ log "/health (post-switch, HTTP status само): OK"
 
 log "Post-deploy checks: ВСИЧКИ минаха (/, entry JS/CSS, /health)."
 
-# ─── 9. Summary ──────────────────────────────────────────────────────────────
+# ─── 9. Persistent deployment state (само след успешен deploy) ─────────────
+# Точката тук е ДОСТИГНАТА само след: успешен build, successful atomic
+# switch (readlink -f потвърден), И всички post-switch HTTP checks (/,
+# entry JS/CSS, /health) успешни по-горе. Marker-ът НЕ се пише по-рано —
+# не гадаем/предполагаме успех, записваме факт.
+section "Persistent deployment state"
+
+DEPLOYED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+mkdir -p "$DEPLOY_STATE_DIR"
+
+state_write_failed() {
+  # Deploy-ът вече Е успешен (switch + post-checks минаха) — това е чисто
+  # state-tracking failure, не deploy failure. Отчитаме го ясно като
+  # отделен STOP клас (STATE ERROR), без да твърдим, че current/switch-ът
+  # някак е невалиден. Best-effort премахваме съществуващ (стар/частичен)
+  # marker — по-добре липсващ файл (smart controller-ът STOP-ва при липса),
+  # отколкото стар marker, погрешно приет за актуален.
+  printf '[deploy-frontend] STATE ERROR: %s\n' "$1" >&2
+  printf '[deploy-frontend] deploy-ът самият е УСПЕШЕН — current вече сочи към %s.\n' "$RELEASE_ID" >&2
+  if [ -e "$FRONTEND_STATE_FILE" ]; then
+    if rm -f "$FRONTEND_STATE_FILE" 2>/dev/null; then
+      printf '[deploy-frontend] Стар/частичен %s премахнат (best-effort) — няма да бъде погрешно приет за актуален.\n' "$FRONTEND_STATE_FILE" >&2
+    else
+      printf '[deploy-frontend] ПРЕДУПРЕЖДЕНИЕ: не успях да премахна стар/частичен %s — ръчно провери го преди да разчиташ на deployment state.\n' "$FRONTEND_STATE_FILE" >&2
+    fi
+  fi
+  printf '[deploy-frontend] Ръчно провери/поправи %s преди следващия deploy, за да остане deployment state достоверен за бъдещия smart controller.\n' "$FRONTEND_STATE_FILE" >&2
+  fail "Persistent deployment state запис се провали — виж STATE ERROR по-горе. Frontend deploy-ът остава успешен, но state marker-ът не е актуален."
+}
+
+FRONTEND_STATE_TMP="$FRONTEND_STATE_FILE.tmp.$$.$RANDOM"
+ACTIVE_TMP_ASSET="$FRONTEND_STATE_TMP"
+if ! cat > "$FRONTEND_STATE_TMP" <<EOF_STATE
+{
+  "gitSha": "$GIT_SHA",
+  "deployedAtUtc": "$DEPLOYED_AT_UTC",
+  "releasePath": "$NEW_RELEASE"
+}
+EOF_STATE
+then
+  ACTIVE_TMP_ASSET=""
+  rm -f "$FRONTEND_STATE_TMP"
+  state_write_failed "temp файл write се провали ($FRONTEND_STATE_TMP)."
+fi
+
+if [ ! -s "$FRONTEND_STATE_TMP" ]; then
+  ACTIVE_TMP_ASSET=""
+  rm -f "$FRONTEND_STATE_TMP"
+  state_write_failed "temp файлът е празен след write ($FRONTEND_STATE_TMP) — вероятен диск/quota проблем."
+fi
+
+if ! mv -f "$FRONTEND_STATE_TMP" "$FRONTEND_STATE_FILE"; then
+  ACTIVE_TMP_ASSET=""
+  rm -f "$FRONTEND_STATE_TMP"
+  state_write_failed "atomic rename се провали ($FRONTEND_STATE_TMP -> $FRONTEND_STATE_FILE)."
+fi
+ACTIVE_TMP_ASSET=""
+log "Deployment state: OK — $FRONTEND_STATE_FILE (gitSha=$GIT_SHA, releasePath=$NEW_RELEASE)"
+
+# ─── 10. Summary ─────────────────────────────────────────────────────────────
 section "Summary"
 
 log "OLD_RELEASE:            ${OLD_RELEASE:-'(none — first deploy)'}"
