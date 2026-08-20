@@ -160,6 +160,50 @@ cache_bust_query() {
   printf '_cb=%s-%s' "$(date +%s%N 2>/dev/null || date +%s)" "$RANDOM"
 }
 
+# ─── Post-restart health warm-up retry loop ─────────────────────────────────
+# PM2 "online" НЕ гарантира, че nginx/upstream веднага сервира трафик —
+# доказан production инцидент: PM2 online, но първата /health заявка веднага
+# след restart получи временен 502 (nginx/upstream все още установяват
+# връзка), докато локален + public /health бяха 200 ~2 минути по-късно.
+# Единичен fail-fast check тук би STOP-нал деплой, който реално е успешен.
+# Bounded retry с cache-busted заявки на всеки опит (никакъв shared HTTP/DNS
+# кеш между опитите) — първи HTTP 200 е успех, НИКАКЪВ blind sleep преди
+# първия опит (retry loop-ът сам осигурява warm-up прозореца).
+POST_RESTART_HEALTH_RETRY_MAX_SECONDS="${POST_RESTART_HEALTH_RETRY_MAX_SECONDS:-30}"
+POST_RESTART_HEALTH_RETRY_INTERVAL_SECONDS="${POST_RESTART_HEALTH_RETRY_INTERVAL_SECONDS:-2}"
+
+# Извежда финалния HTTP статус код на stdout (последният наблюдаван опит).
+# Вика http_status_for() с ПРЕСЕН cache-busted URL при ВСЕКИ опит (не
+# преизползва URL между опити) — echo-va прогреса на stderr, за да не се
+# смеси с captured stdout резултата от caller-а.
+wait_for_public_health_200() {
+  local base_url="$1"
+  local deadline elapsed status url attempt
+  deadline=$SECONDS
+  deadline=$((deadline + POST_RESTART_HEALTH_RETRY_MAX_SECONDS))
+  attempt=0
+  status='000'
+
+  while :; do
+    attempt=$((attempt + 1))
+    url="${base_url%/}/health?$(cache_bust_query)"
+    status="$(http_status_for "$url")"
+    printf '[deploy-backend] Post-restart /health опит #%s: GET %s -> %s\n' "$attempt" "$url" "$status" >&2
+
+    if [ "$status" = "200" ]; then
+      break
+    fi
+
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      break
+    fi
+
+    sleep "$POST_RESTART_HEALTH_RETRY_INTERVAL_SECONDS"
+  done
+
+  printf '%s' "$status"
+}
+
 # ─── 0. Pre-flight ───────────────────────────────────────────────────────────
 section "Pre-flight checks"
 
@@ -581,14 +625,13 @@ log "PM2 process status: online"
 # ─── 8. Post-restart verification ───────────────────────────────────────────
 section "Post-restart verification"
 
-POST_HEALTH_URL="${PUBLIC_BASE_URL%/}/health?$(cache_bust_query)"
-POST_HEALTH_CODE="$(http_status_for "$POST_HEALTH_URL")"
-log "GET $POST_HEALTH_URL -> $POST_HEALTH_CODE"
+log "Post-restart /health warm-up: до ${POST_RESTART_HEALTH_RETRY_MAX_SECONDS}s bounded retry (интервал ${POST_RESTART_HEALTH_RETRY_INTERVAL_SECONDS}s, cache-busted всеки опит, успех при първия HTTP 200)..."
 # Забележка: /health може да съдържа известния tournament ledger_mismatch
 # advisory в тялото си — това НЕ е deploy failure, докато HTTP статус кодът
 # е 200. Тук проверяваме САМО статус кода, не тялото.
-[ "$POST_HEALTH_CODE" = "200" ] || post_restart_fail "/health след restart връща HTTP $POST_HEALTH_CODE вместо 200."
-log "/health (post-restart, HTTP status само): OK"
+POST_HEALTH_CODE="$(wait_for_public_health_200 "$PUBLIC_BASE_URL")"
+[ "$POST_HEALTH_CODE" = "200" ] || post_restart_fail "/health след restart не върна HTTP 200 в рамките на ${POST_RESTART_HEALTH_RETRY_MAX_SECONDS}s (последен наблюдаван статус: $POST_HEALTH_CODE)."
+log "/health (post-restart, HTTP status само): OK (HTTP $POST_HEALTH_CODE)"
 
 log "Post-restart checks: PID валиден, PM2 status online, /health 200."
 
