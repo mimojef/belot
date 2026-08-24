@@ -12,11 +12,18 @@
  *     manualStart, must be full, readiness must pass), and race-safety
  *     (recomputes against the CURRENT store state at call time, not a
  *     cached snapshot).
- *  C) kickMember() — host-only removal of a real (non-bot) occupant from a
- *     WAITING room: authorization, target validity (must be human, must not
- *     be the host themselves), orphan-bot partner cleanup (mirrors
- *     leaveRoom's), and the dedicated onMemberKicked callback (distinct
- *     from onMemberLeft).
+ *  C) kickMember() — host-only removal of ANY occupied slot from a WAITING
+ *     room. Two distinct outcomes, both authoritative server-side (the kind
+ *     is read from the slot state, never trusted from the client):
+ *       - human target: authorization, target validity (must not be the
+ *         host themselves), orphan-bot partner cleanup (mirrors
+ *         leaveRoom's), and the dedicated onMemberKicked callback (distinct
+ *         from onMemberLeft) — unchanged from before.
+ *       - bot target: same host-only authorization, but a pure slot-clear
+ *         with NO onMemberKicked/onMemberLeft callback (bots have no
+ *         session to notify), no orphan-partner cleanup (removing the bot
+ *         itself never orphans anything), and canManualStart drops
+ *         immediately since the room is no longer full.
  *
  * Mirrors the harness style of checkPrivateRoomBlockValidationAtJoinAndStart.ts
  * (store-level, in-process, no WS/HTTP server).
@@ -78,6 +85,16 @@ function createRoom(
 }
 
 const neverBlocked = () => false
+
+function makeBot(id: string) {
+  return {
+    kind: 'bot' as const,
+    botProfileId: `bot-${id}`,
+    botCode: `easy-${id}`,
+    difficulty: 'easy' as const,
+    identity: { profileId: `bot-${id}`, displayName: `Bot ${id}`, avatarUrl: null, level: 1, rankTitle: null },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // [1]-[3] manualStart:false — byte-identical auto-start behavior (regression
@@ -279,6 +296,82 @@ const neverBlocked = () => false
   const kickResult = store.kickMember({ connectionId: 'conn-host', team: 'B', slotIndex: 1 })
   check('[37] host kicks the bot\'s human partner', kickResult.ok)
   check('[38] the orphaned bot slot is also freed', kickResult.ok && kickResult.room.slots.find((s) => s.team === 'B' && s.slotIndex === 0)?.occupant === null)
+}
+
+// ---------------------------------------------------------------------------
+// [39]-[42] Scenario A: creator removes a bot via kickMember (same
+// team/slotIndex endpoint as human kick) — the bot slot is freed, the
+// result carries removedBot (not kickedOccupant), and no
+// onMemberKicked/onMemberLeft callback fires (bots have no session).
+// ---------------------------------------------------------------------------
+{
+  const { store, events } = createTrackedStore()
+  const room = createRoom(store, 'host', false)
+  store.addBotToTeam({ connectionId: 'conn-host', team: 'A', botOccupant: makeBot('1'), isBlockedWith: neverBlocked })
+
+  const removeResult = store.kickMember({ connectionId: 'conn-host', team: 'A', slotIndex: 1 })
+  check('[39] creator can remove a bot through kickMember', removeResult.ok)
+  check('[40] the result carries removedBot, not kickedOccupant', removeResult.ok && 'removedBot' in removeResult && removeResult.removedBot.botProfileId === 'bot-1')
+  check('[41] the bot slot is now free (realtime-visible via the returned room)', removeResult.ok && removeResult.room.slots.find((s) => s.team === 'A' && s.slotIndex === 1)?.occupant === null)
+  check('[42] no onMemberKicked/onMemberLeft fired for a bot removal (no session to notify)', !events.includes('memberKicked') && !events.includes('memberLeft'))
+}
+
+// ---------------------------------------------------------------------------
+// [43]-[45] Scenario B: manual-start 4/4 room with a bot — canManualStart-
+// style readiness (getOccupiedCount) drops the instant the bot is removed,
+// and a fresh join brings it back to 4/4 (no lingering state from the
+// removed bot, no double-seating).
+// ---------------------------------------------------------------------------
+{
+  const { store } = createTrackedStore()
+  const room = createRoom(store, 'host', true)
+  store.joinTeam({ ...makeHuman('a1'), privateRoomId: room.id, team: 'A', slotIndex: 1, isBlockedWith: neverBlocked })
+  store.joinTeam({ ...makeHuman('b0'), privateRoomId: room.id, team: 'B', slotIndex: 0, isBlockedWith: neverBlocked })
+  // addBotToTeam requires a same-team human caller — host (A0) cannot add a
+  // bot to Team B, only a Team B member (b0) can (established ownership
+  // rule, unrelated to this fix — see checkPrivateRoomBotOwnership.ts).
+  store.addBotToTeam({ connectionId: 'conn-b0', team: 'B', botOccupant: makeBot('1'), isBlockedWith: neverBlocked })
+
+  check('[43] room is 4/4 with a bot seated (manual-start ready to start)', store.listRooms()[0]!.slots.every((s) => s.occupant !== null))
+
+  const removeResult = store.kickMember({ connectionId: 'conn-host', team: 'B', slotIndex: 1 })
+  check('[44] removing the bot drops occupancy to 3/4 immediately (canManualStart-equivalent goes false)', removeResult.ok && removeResult.room.slots.filter((s) => s.occupant !== null).length === 3)
+
+  const rejoin = store.joinTeam({ ...makeHuman('b1'), privateRoomId: room.id, team: 'B', slotIndex: 1, isBlockedWith: neverBlocked })
+  check('[45] refilling the freed slot brings the room back to 4/4 and ready', rejoin.ok && rejoin.readyToStart === false && rejoin.readiness?.ready === true)
+}
+
+// ---------------------------------------------------------------------------
+// [46]-[47] Scenario C: authorization — non-creator cannot remove a bot
+// either (same host-only gate as human kick, no separate/weaker check).
+// ---------------------------------------------------------------------------
+{
+  const { store, events } = createTrackedStore()
+  const room = createRoom(store, 'host', false)
+  // b0 joins Team B so it can legitimately add a bot to ITS OWN team via
+  // addBotToTeam (established same-team ownership rule) — the point of this
+  // test is kickMember's host-only gate, not addBotToTeam's.
+  store.joinTeam({ ...makeHuman('b0'), privateRoomId: room.id, team: 'B', slotIndex: 0, isBlockedWith: neverBlocked })
+  store.addBotToTeam({ connectionId: 'conn-b0', team: 'B', botOccupant: makeBot('1'), isBlockedWith: neverBlocked })
+
+  const nonHostRemove = store.kickMember({ connectionId: 'conn-b0', team: 'B', slotIndex: 1 })
+  check('[46] non-creator cannot remove a bot', !nonHostRemove.ok)
+  check('[47] error code is private_room_not_creator (same gate as human kick)', !nonHostRemove.ok && nonHostRemove.code === 'private_room_not_creator')
+  check('[47b] the bot is still seated after the rejected attempt', store.listRooms()[0]!.slots.find((s) => s.team === 'B' && s.slotIndex === 1)?.occupant?.kind === 'bot')
+}
+
+// ---------------------------------------------------------------------------
+// [48] Scenario E: removing a bot never produces a permanent ban/block —
+// the vacated slot can be immediately re-filled by a human join.
+// ---------------------------------------------------------------------------
+{
+  const { store } = createTrackedStore()
+  const room = createRoom(store, 'host', false)
+  store.addBotToTeam({ connectionId: 'conn-host', team: 'A', botOccupant: makeBot('1'), isBlockedWith: neverBlocked })
+  store.kickMember({ connectionId: 'conn-host', team: 'A', slotIndex: 1 })
+
+  const refillResult = store.joinTeam({ ...makeHuman('a1'), privateRoomId: room.id, team: 'A', slotIndex: 1, isBlockedWith: neverBlocked })
+  check('[48] the freed bot slot can be immediately claimed by a human (no lingering restriction)', refillResult.ok)
 }
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

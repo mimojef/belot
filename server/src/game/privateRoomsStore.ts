@@ -257,6 +257,7 @@ export type KickMemberInput = {
 
 export type KickMemberResult =
   | { ok: true; room: PrivateRoom; kickedOccupant: PrivateRoomHumanOccupant }
+  | { ok: true; room: PrivateRoom; removedBot: PrivateRoomBotOccupant }
   | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
 
 export type AddBotToTeamInput = {
@@ -669,15 +670,27 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     return { ok: true, room }
   }
 
-  // Host-only removal на реален (не бот) занял слот играч, докато стаята е
-  // WAITING (все още в rooms Map-а — веднъж detach-ната/playing, connectionId-
-  // ите вече не са в connectionToRoom, значи getRoomByConnectionId-базираният
-  // lookup тук естествено отказва). Огледално на removeBotFromTeam-ия slot-
-  // clear pattern, но: (1) authorization е host-only, не same-team-member;
-  // (2) target-ът е explicit team+slotIndex, не "първия бот в отбора" — за да
-  // не позволи spoof на произволен profileId (§2 в task spec-а); (3) orphan-
-  // bot partner cleanup mirror-нато от leaveRoom (593-600 по-горе), защото
-  // kick-натият напуска отбора точно както при voluntary leave.
+  // Host-only removal на зает слот (човек ИЛИ бот), докато стаята е WAITING
+  // (все още в rooms Map-а — веднъж detach-ната/playing, connectionId-ите
+  // вече не са в connectionToRoom, значи getRoomByConnectionId-базираният
+  // lookup тук естествено отказва). Target-ът е explicit team+slotIndex, не
+  // profileId — не позволява spoof на произволен участник (§3 в task
+  // spec-а). Occupant kind-ът се determinира ИЗЦЯЛО от authoritative slot
+  // state тук — сървърът не приема/не се доверява на никакъв client-подаден
+  // "kind" hint.
+  //
+  // Двата branch-а имат различна семантика надолу по веригата (виж
+  // KickMemberResult): human -> kickedOccupant (index.ts праща targeted
+  // private_room_kicked + onMemberKicked audit callback, точно established
+  // flow-а). bot -> removedBot (само slot clear + onRoomsChanged, НИКАКВО
+  // notification — бот няма session за известяване, и няма kicked-player
+  // popup смисъл за него, виж §При "−" върху BOT в task spec-а).
+  //
+  // Bot-removal тук умишлено НЕ прави orphan-partner cleanup (за разлика от
+  // human-kick клона по-долу и leaveRoom) — orphan-bot invariant-ът пази
+  // "бот никога не остава без собствен човек в отбора"; премахването на
+  // бота самия не създава такъв осиротял бот (партньорският слот, ако е
+  // човек, си остава напълно валиден сам по себе си).
   function kickMember(input: KickMemberInput): KickMemberResult {
     const roomId = connectionToRoom.get(input.connectionId)
     if (roomId === undefined) {
@@ -699,12 +712,25 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     }
 
     const targetSlot = findSlot(room, input.team, input.slotIndex)
-    if (targetSlot === undefined || targetSlot.occupant === null || targetSlot.occupant.kind !== 'human') {
+    if (targetSlot === undefined || targetSlot.occupant === null) {
       return {
         ok: false,
-        message: 'Няма играч на това място.',
+        message: 'Няма никого на това място.',
         code: 'private_room_kick_target_invalid',
       }
+    }
+
+    if (targetSlot.occupant.kind === 'bot') {
+      const removedBot = targetSlot.occupant
+      const nextSlots = room.slots.map((s) =>
+        s.team === targetSlot.team && s.slotIndex === targetSlot.slotIndex ? { ...s, occupant: null } : s,
+      ) as PrivateRoomSlots
+
+      const nextRoom: PrivateRoom = { ...room, slots: nextSlots }
+      rooms.set(roomId, nextRoom)
+      callbacks.onRoomsChanged()
+
+      return { ok: true, room: nextRoom, removedBot }
     }
 
     if (targetSlot.occupant.connectionId === room.hostConnectionId) {

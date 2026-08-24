@@ -206,11 +206,12 @@ function renderSlotCard(
 
   const isLocal = viewerRole === 'member' && !occupant.isBot && occupant.profileId !== null && occupant.profileId === localProfileId
   const isClickableProfile = !occupant.isBot && !isLocal && occupant.profileId !== null
-  // Host вижда "−" premahvane control само върху ЧУЖД, реален (не бот) зает
-  // слот — never на собствения си (isLocal), never за бот (съществуващият
-  // bot-remove бутон покрива тях, виж renderTeamColumn). Non-host играчи
-  // никога не виждат тази контрола (§2 в task spec-а).
-  const showKickControl = isLocalHost && !occupant.isBot && !isLocal
+  // Host вижда "−" premahvane control върху всеки ЧУЖД зает слот — реален
+  // играч ИЛИ бот (никога на собствения си isLocal слот). Non-host играчи
+  // никога не виждат тази контрола. Same control/endpoint (kick_from_private_room)
+  // за двата occupant типа — сървърът determinира human-kick vs bot-remove
+  // семантика от authoritative slot state, не клиента.
+  const showKickControl = isLocalHost && !isLocal
 
   const subLine = occupant.isBot
     ? '<span class="prw-bot-badge">БОТ</span>'
@@ -265,6 +266,19 @@ function renderSlotCard(
           data-private-room-member-name="${escapeHtml(occupant.displayName)}"
           class="prw-slot${isLocal ? ' prw-slot-local' : ''}"
         >${avatarHtml}${copyHtml}</button>
+        ${kickBadgeHtml}
+      </div>
+    `
+  }
+
+  // Bot occupants (и local occupant, за когото showKickControl винаги е
+  // false) минават оттук — не са isClickableProfile (нямат profile-click
+  // flow), но бот-ите все пак могат да имат видим kick badge, затова wrap-ът
+  // е условен на showKickControl, а не на isClickableProfile.
+  if (showKickControl) {
+    return `
+      <div class="prw-slot-wrap">
+        <div class="prw-slot">${avatarHtml}${copyHtml}</div>
         ${kickBadgeHtml}
       </div>
     `
