@@ -534,6 +534,53 @@ check('[L2] loadOlderTopicMessages explicit отказва Lafche В НАЧАЛ�
   assert(returnIdx >= 0 && returnIdx - lafcheGuardIdx < 300, 'a return statement must follow shortly after the LAFCHE_TOPIC_ID guard (same early-exit block, not a separate later branch)')
 })
 
+// ─── M. Reply composer DOM sync fix (mirror на A7/A8, но за topic_reply) ──
+// Production bug fix — appendTopicReplyNode (targeted patch за own/foreign
+// reply push) пипа само replies секцията в отворения thread, НИКОГА reply
+// composer формата. Own-reply ack path-ът по-рано не викаше render() след
+// успешен targeted append, значи thread reply textarea-та/Send бутонът
+// оставаха "залепнали" (workaround: Thread Back + повторно отваряне).
+// resetTopicsReplyComposerAfterOwnSendDom затваря същата дупка като root
+// composer fix-а (A7/A8), гейтнато зад isOwnReplyAck.
+
+const topicReplyBlock = extractHandlerBlock(controllerSrc, "message.type === 'topic_reply'")
+
+check('[M1] topic_reply handler block found', () => {
+  assert(topicReplyBlock.length > 0, 'topic_reply handler not found in createLobbyFlowController.ts')
+})
+
+check('[M2] appendTopicReplyNode (own-reply targeted append) изрично вика resetTopicsReplyComposerAfterOwnSendDom, гейтнато зад isOwnReplyAck', () => {
+  const appendIdx = topicReplyBlock.indexOf('appendTopicReplyNode(')
+  assert(appendIdx >= 0, 'appendTopicReplyNode call missing — targeted patch not wired')
+  const appendedIfIdx = topicReplyBlock.indexOf('if (appended)', appendIdx)
+  assert(appendedIfIdx >= 0, 'if (appended) block not found after appendTopicReplyNode call')
+  const braceStart = topicReplyBlock.indexOf('{', appendedIfIdx)
+  let depth = 0
+  let appendedBlockEnd = -1
+  for (let i = braceStart; i < topicReplyBlock.length; i++) {
+    if (topicReplyBlock[i] === '{') depth++
+    else if (topicReplyBlock[i] === '}') {
+      depth--
+      if (depth === 0) { appendedBlockEnd = i + 1; break }
+    }
+  }
+  assert(appendedBlockEnd > braceStart, 'could not find matching closing brace for if (appended) block')
+  const appendedBlock = topicReplyBlock.slice(appendedIfIdx, appendedBlockEnd)
+
+  assert(appendedBlock.includes('resetTopicsReplyComposerAfterOwnSendDom('), 'if(appended) block must call resetTopicsReplyComposerAfterOwnSendDom — targeted reply append never touches the reply composer form on its own')
+  assert(/if\s*\(\s*isOwnReplyAck\s*\)\s*\{[^}]*resetTopicsReplyComposerAfterOwnSendDom\(/.test(appendedBlock), 'resetTopicsReplyComposerAfterOwnSendDom must be gated by isOwnReplyAck — a foreign reply append must never touch the local reply composer draft')
+  assert(appendedBlock.includes('return true'), 'the reply composer-sync call must still be followed by the early return true (no fallback render() after a successful targeted patch)')
+})
+
+check('[M3] resetTopicsReplyComposerAfterOwnSendDom (renderLobbyScreen.ts) никога не пипа root.innerHTML (targeted patch, не full remount)', () => {
+  const start = renderSrc.indexOf('export function resetTopicsReplyComposerAfterOwnSendDom(')
+  assert(start >= 0, 'resetTopicsReplyComposerAfterOwnSendDom export not found in renderLobbyScreen.ts')
+  const nextExportIdx = renderSrc.indexOf('\nexport function ', start + 1)
+  const body = stripComments(nextExportIdx > 0 ? renderSrc.slice(start, nextExportIdx) : renderSrc.slice(start))
+  assert(!body.includes('root.innerHTML'), 'resetTopicsReplyComposerAfterOwnSendDom must never write root.innerHTML (full remount) — that defeats the targeted-patch purpose')
+  assert(body.includes('querySelector'), 'must locate the reply composer form via querySelector, mirroring the established targeted-patch pattern')
+})
+
 // ─── Финален резултат ─────────────────────────────────────────────────────
 
 console.log(`\n  Passed: ${passed}  Failed: ${failed}\n`)

@@ -614,7 +614,7 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           "
         ><span class="topics-reply-composer-btn-label">Изпрати</span><span class="topics-reply-composer-btn-icon" aria-hidden="true">&#10148;</span></button>
       </form>
-      ${errorText ? `<div style="padding:4px 0 0;font-size:11px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
+      ${errorText ? `<div data-topics-reply-composer-error="${escapeHtml(rootMessageId)}" style="padding:4px 0 0;font-size:11px;color:#f87171;">${escapeHtml(errorText)}</div>` : ''}
     </div>
   `
 }

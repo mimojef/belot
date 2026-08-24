@@ -102,6 +102,7 @@ type H = {
   submitReplyComposer: (rootMessageId: string) => void
   pressEnterInReplyComposer: (rootMessageId: string, shiftKey: boolean) => void
   isReplyComposerOpen: (rootMessageId: string) => boolean
+  isReplyComposerSendButtonDisabled: (rootMessageId: string) => boolean | null
   getLikeButtonState: (messageId: string) => { pressed: string | null; liked: boolean; count: number; disabled: boolean } | null
   getReplyButtonCount: (rootMessageId: string) => number
   getVisibleReplyIds: (rootMessageId: string) => Array<string | null>
@@ -376,6 +377,125 @@ try {
 
     const draftAfter = await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA)
     assertEqual(draftAfter, '', 'draft трябва да е изчистен след успешен ack')
+  })
+
+  await check('[8a] Production stuck-reply-composer bug regression: Send бутонът се re-enable-ва след own-ack targeted append, второ reply веднага изпращаемо, thread/"Откажи" остава непокътнат', async () => {
+    // appendTopicReplyNode (targeted DOM append за own-reply ack, виж [13])
+    // пипа само replies секцията, НИКОГА reply composer формата. Преди fix-а
+    // textarea-та/Send бутонът оставаха "залепнали" в submit-render-а-то DOM
+    // състояние — единствен workaround е бил Thread Back + повторно отваряне
+    // на thread-а. Reply composer-ът остава ОТВОРЕН за същия root след
+    // успешен send (established UX — готов за следващ reply, "Откажи" винаги
+    // е част от формата, не отделен reply-target state за reset-ване).
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootA, 'Първи reply'])
+    await call(page, (h: H, id: string) => h.submitReplyComposer(id), rootA)
+    await page.waitForTimeout(50)
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerSendButtonDisabled(id), rootA), true, 'бутонът трябва да е disabled докато чакаме ack')
+
+    const logBeforeAck = await call(page, (h: H) => h.getReplySendLog())
+    const requestId = logBeforeAck[logBeforeAck.length - 1]!.requestId
+    await call(
+      page,
+      (h: H, reply: unknown) => h.simulateServerMessage(reply as Record<string, unknown>),
+      { type: 'topic_reply', requestId, seq: 1001, messageId: 'reply-8a-first', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'me', senderDisplayName: 'Me', senderAvatarUrl: null, senderRole: 'player', body: 'Първи reply', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
+    )
+    await page.waitForTimeout(100)
+
+    assertEqual(await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA), '', 'composer трябва да е празен веднага след own-ack targeted append')
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerSendButtonDisabled(id), rootA), false, 'Send бутонът НЕ трябва да остане disabled след own-ack targeted append')
+    assert(await call(page, (h: H) => h.isThreadVisible()), 'thread трябва да остане отворен (не се затваря след успешен reply)')
+    assert(await call(page, (h: H, id: string) => h.isReplyComposerOpen(id), rootA), 'reply composer-ът трябва да остане отворен, готов за следващ reply')
+    const idsAfterFirst = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assert(idsAfterFirst.includes('reply-8a-first'), 'първият reply трябва да е append-нат в DOM-а')
+
+    await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootA, 'Втори reply'])
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerSendButtonDisabled(id), rootA), false, 'бутонът трябва да остане usable, докато потребителят пише втория reply')
+    await call(page, (h: H, id: string) => h.submitReplyComposer(id), rootA)
+    await page.waitForTimeout(50)
+
+    const logAfter = await call(page, (h: H) => h.getReplySendLog())
+    assertEqual(logAfter.length, logBeforeAck.length + 1, 'вторият reply трябва да може да се изпрати веднага, БЕЗ Thread Back/reopen')
+    assertEqual(logAfter[logAfter.length - 1]!.body, 'Втори reply', 'вторият reply трябва да носи правилния текст')
+    assertEqual(logAfter[logAfter.length - 1]!.requestId === requestId, false, 'вторият reply трябва да носи НОВ requestId')
+  })
+
+  await check('[8b] Race: чужд live reply push пристига ПРЕДИ own-ack reconciliation — composer/бутон остават pending, без преждевременен clear', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootA, 'моят pending reply'])
+    await call(page, (h: H, id: string) => h.submitReplyComposer(id), rootA)
+    await page.waitForTimeout(50)
+    const log = await call(page, (h: H) => h.getReplySendLog())
+    const requestId = log[log.length - 1]!.requestId
+
+    // Чужд push (различен sender, requestId=undefined) за СЪЩИЯ root, ПРЕДИ
+    // нашия own-ack да пристигне — не трябва да пипа нашия pending state.
+    await call(
+      page,
+      (h: H, reply: unknown) => h.simulateServerMessage(reply as Record<string, unknown>),
+      { type: 'topic_reply', seq: 1002, messageId: 'reply-8b-foreign', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'author-z', senderDisplayName: 'Author Z', senderAvatarUrl: null, senderRole: 'player', body: 'чужд отговор междувременно', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
+    )
+    await page.waitForTimeout(80)
+
+    assertEqual(await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA), 'моят pending reply', 'чужд push НЕ трябва да пипа нашия still-pending draft')
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerSendButtonDisabled(id), rootA), true, 'бутонът трябва да остане disabled — все още чакаме СОБСТВЕНИЯ ack')
+    const idsAfterForeign = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assert(idsAfterForeign.includes('reply-8b-foreign'), 'чуждият push трябва все пак да се append-не в DOM-а')
+
+    // Сега пристига НАШИЯТ own-ack.
+    await call(
+      page,
+      (h: H, reply: unknown) => h.simulateServerMessage(reply as Record<string, unknown>),
+      { type: 'topic_reply', requestId, seq: 1003, messageId: 'reply-8b-own', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'me', senderDisplayName: 'Me', senderAvatarUrl: null, senderRole: 'player', body: 'моят pending reply', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null },
+    )
+    await page.waitForTimeout(80)
+
+    assertEqual(await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA), '', 'own-ack трябва да изчисти composer-а веднага след reconciliation')
+    assertEqual(await call(page, (h: H, id: string) => h.isReplyComposerSendButtonDisabled(id), rootA), false, 'Send бутонът трябва да е usable след own-ack')
+    const idsAfterOwn = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    assert(idsAfterOwn.includes('reply-8b-foreign') && idsAfterOwn.includes('reply-8b-own'), 'и двата reply-я трябва да са видими, без duplicate/загуба')
+    assertEqual(new Set(idsAfterOwn).size, idsAfterOwn.length, 'няма duplicate reply nodes')
+  })
+
+  await check('[8c] Race: stale redelivery на ВЕЧЕ потвърден own-ack пристига, докато потребителят пише СЛЕДВАЩИЯ reply — не трябва да изтрие in-progress draft-а', async () => {
+    const { rootA } = await openGeneralWithRoots(true)
+    await call(page, (h: H) => h.setNextRepliesResult([], false))
+    await call(page, (h: H, id: string) => h.clickReplyButton(id), rootA)
+    await page.waitForTimeout(100)
+
+    await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootA, 'reply едно'])
+    await call(page, (h: H, id: string) => h.submitReplyComposer(id), rootA)
+    await page.waitForTimeout(50)
+    const log = await call(page, (h: H) => h.getReplySendLog())
+    const requestId = log[log.length - 1]!.requestId
+    const originalAck = { type: 'topic_reply', requestId, seq: 1004, messageId: 'reply-8c-first', topicId: 'topic-general', parentMessageId: rootA, senderProfileId: 'me', senderDisplayName: 'Me', senderAvatarUrl: null, senderRole: 'player', body: 'reply едно', createdAt: new Date().toISOString(), editedAt: null, likeCount: 0, viewerHasLiked: false, attachment: null }
+
+    await call(page, (h: H, reply: unknown) => h.simulateServerMessage(reply as Record<string, unknown>), originalAck)
+    await page.waitForTimeout(80)
+    assertEqual(await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA), '', 'composer трябва да е празен след първия ack')
+
+    // Потребителят вече пише СЛЕДВАЩИЯ reply, преди stale redelivery-то.
+    await call(page, (h: H, [id, v]: [string, string]) => h.setReplyComposerValue(id, v), [rootA, 'reply две в процес на писане'])
+
+    // Cross-instance poll/network redelivery на СЪЩОТО (вече обработено) own
+    // съобщение — requestId вече НЕ съвпада с текущия pendingRequestId (той е
+    // null след първия ack), значи isOwnReplyAck=false тук: dedupe-ът по
+    // messageId трябва да третира push-а идемпотентно, БЕЗ да пипа draft-а.
+    await call(page, (h: H, reply: unknown) => h.simulateServerMessage(reply as Record<string, unknown>), originalAck)
+    await page.waitForTimeout(80)
+
+    assertEqual(await call(page, (h: H, id: string) => h.getReplyComposerValue(id), rootA), 'reply две в процес на писане', 'stale redelivery НЕ трябва да изтрие in-progress draft-а за следващия reply')
+    const idsAfterRedelivery = await call(page, (h: H, id: string) => h.getVisibleReplyIds(id), rootA)
+    const firstCount = idsAfterRedelivery.filter((id) => id === 'reply-8c-first').length
+    assertEqual(firstCount, 1, 'stale redelivery НЕ трябва да дублира reply node-а')
   })
 
   await check('[9] topic_reply_error пази draft-а, показва error текст', async () => {

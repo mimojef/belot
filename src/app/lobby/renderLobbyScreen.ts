@@ -10804,6 +10804,59 @@ export function appendTopicReplyNode(
 }
 
 /**
+ * Production bug fix (mirror на resetTopicsComposerAfterOwnSendDom за root
+ * composer-а по-горе) — appendTopicReplyNode пипа само replies секцията в
+ * thread-а, НИКОГА reply composer формата. Преди тази промяна own-reply ack
+ * (targeted append успешен) връщаше true без render(), значи thread reply
+ * textarea-та/Send бутонът оставаха "залепнали" в submit-render-а-то DOM
+ * състояние (изпратеният текст остава видим, Send-ът trайно disabled) — само
+ * напускане/повторно отваряне на thread-а е минавало по пълен render(),
+ * единственият workaround. Вика се само когато state-ът вече е изчистен
+ * (draft/pending/error/pending image, виж topic_reply handler-а) И
+ * appendTopicReplyNode е върнал true — patch-ва textarea/бутон/image picker
+ * в СЪЩИЯ [data-topics-reply-composer-form] node (само property/attribute
+ * мутации, без replaceWith/re-wire — event listeners остават непокътнати).
+ */
+export function resetTopicsReplyComposerAfterOwnSendDom(root: HTMLElement, rootMessageId: string): boolean {
+  const form = root.querySelector<HTMLFormElement>(`[data-topics-reply-composer-form="1"][data-topics-reply-composer-root-id="${cssEscape(rootMessageId)}"]`)
+  if (!form) return false
+
+  const textarea = form.querySelector<HTMLTextAreaElement>('[data-topics-reply-composer-text="1"]')
+  if (textarea) {
+    textarea.value = ''
+    autoGrowTextarea(textarea)
+  }
+
+  const sendBtn = form.querySelector<HTMLButtonElement>('[data-topics-reply-composer-send="1"]')
+  if (sendBtn) {
+    sendBtn.disabled = false
+    sendBtn.style.cursor = 'pointer'
+    sendBtn.style.opacity = '1'
+  }
+
+  const imageInput = form.querySelector<HTMLInputElement>(`[data-topics-reply-image-input="${cssEscape(rootMessageId)}"]`)
+  if (imageInput) imageInput.disabled = false
+
+  const imagePickBtn = form.querySelector<HTMLButtonElement>(`[data-topics-reply-image-pick="${cssEscape(rootMessageId)}"]`)
+  if (imagePickBtn) {
+    imagePickBtn.disabled = false
+    imagePickBtn.style.cursor = 'pointer'
+    imagePickBtn.style.opacity = '1'
+  }
+
+  // Успешен send чисти pending image state-а (clearTopicReplyComposerPendingImage)
+  // — премахваме stale preview thumbnail-а (revoked object URL/счупена картинка).
+  form.querySelector<HTMLElement>(`[data-topics-reply-image-preview="${cssEscape(rootMessageId)}"]`)?.remove()
+
+  // Error text div-ът е SIBLING на формата (виж renderInlineReplyComposer),
+  // и двете деца на общия wrapper div — успешен send означава
+  // state.topicReplyComposerErrorTextByRootId вече е null.
+  form.parentElement?.querySelector<HTMLElement>(`[data-topics-reply-composer-error="${cssEscape(rootMessageId)}"]`)?.remove()
+
+  return true
+}
+
+/**
  * Perf audit fix — targeted patch за root card-ния reply-count badge (иконата
  * с числото до Like бутона), когато нов reply пристигне за root, чийто
  * thread НЕ е в момента отворен/expanded (само counter-ът се обновява, виж

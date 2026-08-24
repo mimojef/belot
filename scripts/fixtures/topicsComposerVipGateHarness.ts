@@ -459,6 +459,8 @@ function q<T extends Element>(selector: string): T | null {
   },
   isReplyComposerOpen: (rootMessageId: string) =>
     q(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"]`) !== null,
+  isReplyComposerSendButtonDisabled: (rootMessageId: string) =>
+    q<HTMLButtonElement>(`[data-topics-reply-composer-form][data-topics-reply-composer-root-id="${rootMessageId}"] [data-topics-reply-composer-send="1"]`)?.disabled ?? null,
   getLikeButtonState: (messageId: string) => {
     const btn = q<HTMLButtonElement>(`[data-topic-message-like="${messageId}"]`)
     if (!btn) return null

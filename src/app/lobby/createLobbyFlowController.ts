@@ -29,6 +29,7 @@ import {
   appendTopicMessageNode,
   resetTopicsComposerAfterOwnSendDom,
   appendTopicReplyNode,
+  resetTopicsReplyComposerAfterOwnSendDom,
   refreshTopicReplyCountDom,
   refreshTopicsUnreadDom,
   refreshTopicMessageLikeDom,
@@ -13293,6 +13294,14 @@ export function createLobbyFlowController(
             if (isOwnReplyAck || wasNearBottom) {
               threadScrollEl.scrollTop = threadScrollEl.scrollHeight
             }
+          }
+          // appendTopicReplyNode пипа само replies секцията — reply composer
+          // формата (textarea/Send бутон/attachment preview) трябва изрично
+          // да се sync-не тук, инак остава stuck със изпратения текст и
+          // disabled бутон (production bug, огледално на root composer-a,
+          // виж resetTopicsReplyComposerAfterOwnSendDom).
+          if (isOwnReplyAck) {
+            resetTopicsReplyComposerAfterOwnSendDom(options.root, rootMessageId)
           }
           state.topicThreadRenderReason = null
           return true
