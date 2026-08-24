@@ -59,6 +59,9 @@ export type YellowCoinGiftStore = {
   createGiftNotification: (giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number) => void
   getPendingGiftNotifications: (profileId: ProfileId) => PendingGiftNotification[]
   markGiftNotificationRead: (giftId: string, profileId: ProfileId) => void
+  /** Виж isPikaTeamGiftBypassProfileId дефиницията по-долу за пълния rationale. */
+  isPikaTeamGiftBypassProfileId: (profileId: ProfileId) => boolean
+  getPikaTeamGiftMaxAmount: () => number
   close: () => void
 }
 
@@ -95,6 +98,11 @@ type RecipientWindowRow = {
 
 const MIN_GIFT_AMOUNT = 1_000
 const MAX_GIFT_AMOUNT = 30_000
+// Единствен-операция таван за "Екип Pika.bg" (pikaTeamGiftBypassProfileId) —
+// същият profile, който вече bypass-ва recipient's 60-дневен window лимит
+// (§5 в sendGift). Не роля-базирано (accounts.role='pika_team') — умишлено
+// reuse на СЪЩИЯ конкретен bypass profile механизъм, не нов lookup.
+const MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER = 100_000
 const GIFT_AMOUNT_STEP = 1_000
 const DAILY_GIFT_LIMIT = 200_000
 const RECIPIENT_GIFT_WINDOW_LIMIT = 30_000
@@ -106,11 +114,11 @@ function normalizeOptionalProfileUuid(value: string | null | undefined): Profile
   return UUID_PATTERN.test(trimmed) ? trimmed as ProfileId : null
 }
 
-function normalizeGiftAmount(value: number): number | null {
+function normalizeGiftAmount(value: number, maxAmount: number): number | null {
   if (
     !Number.isInteger(value) ||
     value < MIN_GIFT_AMOUNT ||
-    value > MAX_GIFT_AMOUNT ||
+    value > maxAmount ||
     value % GIFT_AMOUNT_STEP !== 0
   ) {
     return null
@@ -335,13 +343,24 @@ export async function createYellowCoinGiftStore(
       }
     | GiftLimitError
     | { ok: false; message: string } {
-    // Чиста TypeScript валидация преди базата
-    const amount = normalizeGiftAmount(amountRaw)
+    // Чиста TypeScript валидация преди базата. Authoritative sender-specific
+    // max — pikaTeamGiftBypassProfileId (същия profile, който bypass-ва
+    // recipient's window лимит по-долу) получава по-висок single-операция
+    // таван; всички останали sender-и остават на MAX_GIFT_AMOUNT.
+    const isPikaTeamSender = pikaTeamGiftBypassProfileId !== null
+      && senderProfileId === pikaTeamGiftBypassProfileId
+    const maxAmountForSender = isPikaTeamSender ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER : MAX_GIFT_AMOUNT
+    const amount = normalizeGiftAmount(amountRaw, maxAmountForSender)
 
     if (amount === null) {
+      // Hardcoded literals (не formatBgNumber) — Intl.NumberFormat('bg-BG')
+      // групира с U+00A0 (non-breaking space), различно byte-wise от
+      // established regular-space текста, ползван навсякъде другаде в
+      // кода/тестовете ("1 000", "30 000" с обикновен интервал).
+      const maxAmountText = isPikaTeamSender ? '100 000' : '30 000'
       return {
         ok: false,
-        message: 'Сумата трябва да е между 1 000 и 30 000 жълтици.',
+        message: `Сумата трябва да е между 1 000 и ${maxAmountText} жълтици.`,
       }
     }
 
@@ -393,8 +412,7 @@ export async function createYellowCoinGiftStore(
       }
 
       // 5. Recipient 60-дневен лимит
-      const isRecipientLimitExemptGift = pikaTeamGiftBypassProfileId !== null
-        && senderProfileId === pikaTeamGiftBypassProfileId
+      const isRecipientLimitExemptGift = isPikaTeamSender
 
       if (!isRecipientLimitExemptGift) {
         const windowRow = selectRecipientWindowStatement.get(recipientProfileId) as
@@ -525,6 +543,19 @@ export async function createYellowCoinGiftStore(
     markGiftNotificationReadStatement.run(giftId, profileId)
   }
 
+  // Derived UI signal — reuse на СЪЩИЯ authoritative bypass profile ID, ползван
+  // от sendGift за recipient-window bypass и по-високия single-операция
+  // таван (MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER). Клиентският gift modal го
+  // ползва само за да реши какъв max/text да покаже — authoritative проверка
+  // остава изцяло вътре в sendGift, независимо какво покаже UI-то.
+  function isPikaTeamGiftBypassProfileId(profileId: ProfileId): boolean {
+    return pikaTeamGiftBypassProfileId !== null && profileId === pikaTeamGiftBypassProfileId
+  }
+
+  function getPikaTeamGiftMaxAmount(): number {
+    return MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
+  }
+
   function close(): void {
     database.close()
   }
@@ -534,6 +565,8 @@ export async function createYellowCoinGiftStore(
     createGiftNotification,
     getPendingGiftNotifications,
     markGiftNotificationRead,
+    isPikaTeamGiftBypassProfileId,
+    getPikaTeamGiftMaxAmount,
     close,
   }
 }

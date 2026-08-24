@@ -591,6 +591,8 @@ export type LobbyScreenState = {
   showPikaSupportChatButton: boolean
   giftModalFriendshipId: string | null
   giftModalFriendName: string
+  /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 само за pika_team gift bypass profile-а. Authoritative проверката е сървърна (index.ts sendGift handler). */
+  giftModalMaxAmount: number
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
   giftReceivedModal: { amount: number; fromDisplayName: string } | null
@@ -2167,11 +2169,11 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
         <form data-lobby-gift-form="${escapeHtml(state.giftModalFriendshipId)}" style="display:grid;gap:14px;">
           <div>
             <div style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Подари жълтици</div>
-            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. Сумата трябва да е между 1 000 и 30 000 жълтици.</div>
+            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. Сумата трябва да е между 1 000 и ${state.giftModalMaxAmount.toLocaleString('bg-BG')} жълтици.</div>
           </div>
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Сума
-            <input name="amount" type="number" min="1000" max="30000" step="1000" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            <input name="amount" type="number" min="1000" max="${state.giftModalMaxAmount}" step="1000" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
           </label>
           ${state.giftModalErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.giftModalErrorText)}</div>` : ''}
           <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">

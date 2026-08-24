@@ -135,11 +135,16 @@ export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 export type ProfileAccessBlockCode = 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
 type ProfilePopupContext = 'topics' | 'other'
 
+/** Стандартен gift modal max за всички обичайни profiles (mirror на server MAX_GIFT_AMOUNT). Само UX default — реалният таван идва от authSession.pikaTeamGiftMaxAmount, ако е зададен от сървъра. */
+const DEFAULT_GIFT_MAX_AMOUNT = 30_000
+
 export type LobbyAuthSession = {
   account: {
     role: string
   }
   profile: PlayerPublicProfileSnapshot
+  /** Server-derived, non-null само за pika_team gift bypass profile-а (виж AuthSession в main.ts). */
+  pikaTeamGiftMaxAmount?: number | null
 }
 
 /** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
@@ -1233,6 +1238,8 @@ type InternalLobbyFlowState = {
   friendActionMessage: string | null
   giftModalFriendshipId: string | null
   giftModalFriendName: string
+  /** Server-derived UI signal (currentAuthSession.pikaTeamGiftMaxAmount) — 30000 за всички обичайни profiles, 100000 само за pika_team gift bypass profile-а. Authoritative проверката е сървърна (index.ts sendGift handler); това поле само казва какъв max/text да покаже gift modal-ът. */
+  giftModalMaxAmount: number
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
   giftReceivedModal: { amount: number; fromDisplayName: string } | null
@@ -1771,6 +1778,7 @@ function createInitialState(): InternalLobbyFlowState {
     friendActionMessage: null,
     giftModalFriendshipId: null,
     giftModalFriendName: '',
+    giftModalMaxAmount: DEFAULT_GIFT_MAX_AMOUNT,
     giftModalErrorText: null,
     giftSuccessModal: null,
     giftReceivedModal: null,
@@ -3323,6 +3331,7 @@ export function createLobbyFlowController(
       showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
       giftModalFriendshipId: state.giftModalFriendshipId,
       giftModalFriendName: state.giftModalFriendName,
+      giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT,
       giftModalErrorText: state.giftModalErrorText,
       giftSuccessModal: state.giftSuccessModal,
       giftReceivedModal: state.giftReceivedModal,

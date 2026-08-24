@@ -25,6 +25,9 @@
  * [18] amount = 30 000 → приема се (максималната допустима сума)
  * [19] amount = 30 001 → отказ (над максимума)
  * [20] amount = 1 500 → отказ (некратно на 1 000)
+ * [35] Pika sender: amount = 100 000 → приема се (нов single-операция максимум)
+ * [36] Pika sender: amount = 100 001 → отказ (над новия максимум)
+ * [37] Pika sender: нормален подарък (30 000) веднага след предходна операция
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -1379,6 +1382,84 @@ await withTempDir(async (dir) => {
 
     assertEqual(oldRow.recipient_limit_exempt, 0, 'старият ред получава default 0')
     assert(result.ok === true, `Gift flow трябва да работи след migration, но: ${JSON.stringify(result)}`)
+  })
+
+  // ── [35]–[37] Pika sender единична-операция таван 100 000 (perf/limit follow-up) ──
+
+  await check('[35] Pika sender: amount = 100 000 → приема се (нов single-операция максимум)', async () => {
+    const dbPath = join(dir, 'test35.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 200_000)
+    seedProfile(db, 'recipient-35', 0)
+    seedFriendship(db, 'fs-35', PIKA_BYPASS_PROFILE_ID, 'recipient-35')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-35', 100_000)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true за Pika sender 100 000, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[36] Pika sender: amount = 100 001 → отказ (над новия максимум)', async () => {
+    const dbPath = join(dir, 'test36.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 200_000)
+    seedProfile(db, 'recipient-36', 0)
+    seedFriendship(db, 'fs-36', PIKA_BYPASS_PROFILE_ID, 'recipient-36')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-36', 100_001)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за Pika sender 100 001')
+    assert(!('code' in result), 'Невалидна сума не трябва да дава limit code')
+    assertEqual(
+      (result as { message: string }).message,
+      'Сумата трябва да е между 1 000 и 100 000 жълтици.',
+      'message [36]',
+    )
+  })
+
+  await check('[37] Pika sender: нормален подарък (30 000, над стария лимит) веднага след предходна операция', async () => {
+    const dbPath = join(dir, 'test37.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, PIKA_BYPASS_PROFILE_ID, 200_000)
+    seedProfile(db, 'recipient-37a', 0)
+    seedProfile(db, 'recipient-37b', 0)
+    seedFriendship(db, 'fs-37a', PIKA_BYPASS_PROFILE_ID, 'recipient-37a')
+    seedFriendship(db, 'fs-37b', PIKA_BYPASS_PROFILE_ID, 'recipient-37b')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+      pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
+    })
+    // Първа операция: 100 000 (новия максимум) към recipient-37a.
+    const first = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-37a', 100_000)
+    // Веднага след това — второ, нормално подаряване (30 000, над СТАРИЯ
+    // single-операция лимит) към ДРУГ получател — трябва да е разрешено
+    // веднага, без изчакване (изискване: "да остане възможно след това да
+    // се направи ново подаряване", без нов daily/hourly/aggregate лимит
+    // отвъд вече съществуващия recipient-window bypass).
+    const second = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-37b', 30_000)
+    store.close()
+
+    assert(first.ok === true, `Първата операция (100 000) трябва да мине, но: ${JSON.stringify(first)}`)
+    assert(second.ok === true, `Веднага следващата операция (30 000, нов получател) трябва да мине, но: ${JSON.stringify(second)}`)
   })
 })
 

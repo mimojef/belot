@@ -381,6 +381,8 @@ type AuthSession = {
     status: string
   }
   profile: PlayerPublicProfileSnapshot
+  /** Derived UI-only сигнал от сървъра — non-null само за pika_team gift bypass profile-а (server: withPikaTeamGiftBypassFlag). Authoritative проверката остава сървърна (yellowCoinGiftStore.sendGift); това поле само казва на gift modal-а какъв max/text да покаже. */
+  pikaTeamGiftMaxAmount?: number | null
 }
 
 type AuthResponse = {

@@ -6273,6 +6273,21 @@ async function handlePasswordResetRequest(
   return true
 }
 
+// Derived UI-only сигнал за gift modal max amount — authoritative проверката
+// остава изцяло в yellowCoinGiftStore.sendGift; тук само wrap-ваме сесийния
+// response с ДВЕ безопасни derived полета, computed от СЪЩИЯ bypass profile
+// ID сравнение, използван authoritative-но. null session минава непроменена.
+function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | null } } | null>(
+  session: T,
+): (T extends null ? null : T & { pikaTeamGiftMaxAmount: number | null }) | null {
+  if (session === null || session.profile.profileId === null) return session as null
+  const isBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
+  return {
+    ...session,
+    pikaTeamGiftMaxAmount: isBypass ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount() : null,
+  } as T extends null ? null : T & { pikaTeamGiftMaxAmount: number | null }
+}
+
 async function handleAuthRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -6284,7 +6299,7 @@ async function handleAuthRequest(
 
     sendJsonResponse(res, 200, {
       ok: true,
-      session,
+      session: withPikaTeamGiftBypassFlag(session),
     })
     return true
   }
@@ -6341,7 +6356,7 @@ async function handleAuthRequest(
       200,
       {
         ok: true,
-        session: result.session,
+        session: withPikaTeamGiftBypassFlag(result.session),
       },
       { 'Set-Cookie': createSessionCookieHeader(result.sessionToken) },
     )
@@ -6503,10 +6518,10 @@ async function handleProfileRequest(
 
     sendJsonResponse(res, 200, {
       ok: true,
-      session: {
+      session: withPikaTeamGiftBypassFlag({
         ...session,
         profile: result.profile,
-      },
+      }),
     })
     return true
   }
@@ -6626,10 +6641,10 @@ async function handleProfileRequest(
 
     sendJsonResponse(res, 200, {
       ok: true,
-      session: {
+      session: withPikaTeamGiftBypassFlag({
         ...session,
         profile: result.profile,
-      },
+      }),
     })
     return true
   }
@@ -6649,10 +6664,10 @@ async function handleProfileRequest(
 
     sendJsonResponse(res, 200, {
       ok: true,
-      session: {
+      session: withPikaTeamGiftBypassFlag({
         ...session,
         profile: result.profile,
-      },
+      }),
     })
     return true
   }
@@ -6734,10 +6749,10 @@ async function handleProfileRequest(
 
     sendJsonResponse(res, 200, {
       ok: true,
-      session: {
+      session: withPikaTeamGiftBypassFlag({
         ...session,
         profile: result.profile,
-      },
+      }),
     })
     return true
   }
@@ -6765,10 +6780,10 @@ async function handleProfileRequest(
 
   sendJsonResponse(res, 200, {
     ok: true,
-    session: {
+    session: withPikaTeamGiftBypassFlag({
       ...session,
       profile: result.profile,
-    },
+    }),
   })
   return true
 }

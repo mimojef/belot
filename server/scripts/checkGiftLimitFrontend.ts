@@ -14,8 +14,8 @@
  * [8]  FULL при invalid nextReleaseAt → точен fallback, без дата
  * [9]  Fallback не съдържа "Invalid Date", "NaN", "undefined", "null"
  * [10] Controller flow: непозната грешка (без code) → message се показва директно (source check)
- * [11] renderLobbyScreen.ts: input съдържа min="100", max="30000", step="100"
- * [12] renderLobbyScreen.ts: текст "между 100 и 30 000 жълтици"
+ * [11] renderLobbyScreen.ts: input съдържа min="1000", server-derived max (state.giftModalMaxAmount), step="1000"
+ * [12] renderLobbyScreen.ts/controller: MIN hardcoded "1 000", MAX е server-derived giftModalMaxAmount (exact bypass profile ID, не role)
  * [13] main.ts: API обработка запазва code, receivedInWindow, remainingAllowance, attemptedAmount, nextReleaseAt, nextReleaseAmount
  */
 
@@ -162,14 +162,31 @@ const renderSrc = readFileSync(
 const giftModalMatch = renderSrc.match(/data-lobby-gift-form[\s\S]*?<\/form>/)
 const giftModalSrc = giftModalMatch ? giftModalMatch[0] : ''
 check('[11] renderLobbyScreen gift modal: min="1000"', giftModalSrc.includes('min="1000"'))
-check('[11] renderLobbyScreen gift modal: max="30000"', giftModalSrc.includes('max="30000"'))
+// max е server-derived (giftModalMaxAmount) — 30000 за обикновени profiles,
+// 100000 само за pika_team gift bypass profile-а (виж index.ts
+// withPikaTeamGiftBypassFlag). Source-ът вече не hardcode-ва "30000" тук.
+check('[11] renderLobbyScreen gift modal: max е server-derived (state.giftModalMaxAmount)', giftModalSrc.includes('max="${state.giftModalMaxAmount}"'))
 check('[11] renderLobbyScreen gift modal: step="1000"', giftModalSrc.includes('step="1000"'))
 check('[11] renderLobbyScreen gift modal: value="1000"', giftModalSrc.includes('value="1000"'))
 check('[11] renderLobbyScreen gift modal: не съдържа min="100"', !giftModalSrc.includes('min="100"'))
 check('[11] renderLobbyScreen gift modal: не съдържа step="100"', !giftModalSrc.includes('step="100"'))
 
-// [12] renderLobbyScreen.ts: видим текст
-check('[12] renderLobbyScreen: "между 1 000 и 30 000 жълтици"', renderSrc.includes('между 1 000 и 30 000 жълтици'))
+// [12] renderLobbyScreen.ts: видим текст — MIN частта остава hardcoded
+// ("1 000" regular space), MAX частта е server-derived (state.giftModalMaxAmount).
+check('[12] renderLobbyScreen: текстът съдържа "между 1 000 и" (MIN hardcoded)', giftModalSrc.includes('между 1 000 и'))
+check('[12] renderLobbyScreen: текстът показва state.giftModalMaxAmount', giftModalSrc.includes('${state.giftModalMaxAmount.toLocaleString'))
+// LobbyScreenState/InternalLobbyFlowState носят полето, а InternalLobbyFlowState
+// го computира от authSession?.pikaTeamGiftMaxAmount (server-derived, exact
+// bypass profile ID match — НЕ role==='pika_team', виж index.ts).
+check('[12] LobbyScreenState декларира giftModalMaxAmount: number', renderSrc.includes('giftModalMaxAmount: number'))
+const controllerSrcForGift = readFileSync(
+  resolve(PROJECT_ROOT, 'src/app/lobby/createLobbyFlowController.ts'),
+  'utf8',
+)
+check(
+  '[12] Controller: giftModalMaxAmount = authSession?.pikaTeamGiftMaxAmount ?? default',
+  controllerSrcForGift.includes('giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT'),
+)
 
 // [13] main.ts: API обработка запазва всички limit error полета
 const mainSrc = readFileSync(resolve(PROJECT_ROOT, 'src/main.ts'), 'utf8')
