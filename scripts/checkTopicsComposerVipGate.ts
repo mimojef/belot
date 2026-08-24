@@ -171,6 +171,9 @@ async function simulateServerMessage(page: Page, message: Record<string, unknown
 async function getComposerValue(page: Page): Promise<string | null> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.getComposerValue())
 }
+async function isSendButtonDisabled(page: Page): Promise<boolean | null> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isComposerSendButtonDisabled())
+}
 async function isComposerReadonly(page: Page): Promise<boolean | null> {
   return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isComposerReadonly())
 }
@@ -368,6 +371,47 @@ try {
     await simulateServerMessage(page, { ...echo, type: 'topic_message', requestId: capturedRequestId })
     await page.waitForTimeout(30)
     assertEqual(await getComposerValue(page), '', 'draft трябва да се изчисти след успешен echo')
+  })
+
+  await check('[8a] Production stuck-composer bug regression: след own-ack targeted append Send бутонът се re-enable-ва и второ съобщение може веднага да се изпрати', async () => {
+    // appendTopicMessageNode (targeted DOM append за own-message ack) пипа
+    // само message list-а, НИКОГА композер формата — преди fix-а textarea-та/
+    // Send бутонът оставаха в "разгара на изпращане" DOM състоянието (baked
+    // при submit-render-а), защото пълният render() (единственото място,
+    // което по-рано clear-ваше/re-enable-ваше ги) вече не се извикваше по
+    // targeted append пътя. Единственият workaround е бил напускане/повторно
+    // влизане в темата. Composer/ack кодът е ИДЕНТИЧЕН за Lafche и General
+    // (isLafche branch-ва само append позицията/scroll посоката вътре в
+    // appendTopicMessageNode, не composer-sync логиката) — topic-general
+    // harness-ът покрива и двата пътя.
+    const urlBefore = page.url()
+    await openTopicsAndWaitComposer(page, true, true)
+    await setComposerValue(page, 'Първо')
+    await submitComposerForm(page)
+    await page.waitForTimeout(30)
+    assertEqual(await isSendButtonDisabled(page), true, 'бутонът трябва да е disabled докато чакаме ack')
+
+    const sendLogBeforeAck = await getSendLog(page)
+    const requestId = sendLogBeforeAck[sendLogBeforeAck.length - 1]!.requestId
+    const echo = await makeMessage(page, 'topic-general', 101, 'Първо', 'me', 'Me')
+    await simulateServerMessage(page, { ...echo, type: 'topic_message', requestId })
+    await page.waitForTimeout(30)
+
+    assertEqual(await getComposerValue(page), '', 'composer трябва да е празен веднага след own-ack targeted append')
+    assertEqual(await isSendButtonDisabled(page), false, 'Send бутонът НЕ трябва да остане disabled след own-ack targeted append')
+    const bodiesAfterFirst = await getVisibleMessageBodies(page)
+    assert(bodiesAfterFirst.some((b) => b.includes('Първо')), 'първото съобщение трябва да е append-нато в DOM-а')
+
+    await setComposerValue(page, 'Второ')
+    assertEqual(await isSendButtonDisabled(page), false, 'бутонът трябва да остане usable, докато потребителят пише второто съобщение')
+    await submitComposerForm(page)
+    await page.waitForTimeout(30)
+
+    const sendLogAfter = await getSendLog(page)
+    assertEqual(sendLogAfter.length, sendLogBeforeAck.length + 1, 'второто съобщение трябва да може да се изпрати веднага, БЕЗ navigation/reopen')
+    assertEqual(sendLogAfter[sendLogAfter.length - 1]!.body, 'Второ', 'второто съобщение трябва да носи правилния текст')
+    assertEqual(sendLogAfter[sendLogAfter.length - 1]!.requestId === requestId, false, 'второто съобщение трябва да носи НОВ requestId, не преизползван')
+    assertEqual(page.url(), urlBefore, 'без каквато и да е навигация/reload')
   })
 
   await check('[9] Неуспешен send (error с matching requestId) ЗАПАЗВА draft-а + показва грешка', async () => {

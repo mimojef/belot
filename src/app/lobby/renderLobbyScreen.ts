@@ -10686,6 +10686,65 @@ export function appendTopicMessageNode(
 }
 
 /**
+ * Production bug fix — след own-message ack, appendTopicMessageNode по-горе
+ * пипа САМО message list-а, никога композер формата. Пълният render() по-рано
+ * винаги е бил отговорен за clear на textarea-та/re-enable на Send бутона
+ * (baked в HTML-а от draft/isSending при всеки rebuild) — targeted append
+ * path-ът трябва изрично да приложи същите DOM side effects, инак textarea-та
+ * остава със "залепнал" изпратен текст, а Send бутонът — trайно disabled
+ * (единствен workaround е било напускане/повторно влизане в темата, защото
+ * само това е минавало по пълен render()).
+ *
+ * Вика се само когато state-ът вече е изчистен (draft/pending/error/pending
+ * image, виж topic_message handler-а) И appendTopicMessageNode е върнал
+ * true — patch-ва textarea/бутон/image picker в СЪЩИЯ [data-topics-composer-
+ * form] node (без replaceWith/re-wire — само property/attribute мутации,
+ * затова съществуващите event listeners остават непокътнати).
+ */
+export function resetTopicsComposerAfterOwnSendDom(root: HTMLElement, topicId: string): boolean {
+  const form = root.querySelector<HTMLFormElement>(`[data-topics-composer-form="1"][data-topics-composer-topic-id="${cssEscape(topicId)}"]`)
+  if (!form) return false
+
+  const textarea = form.querySelector<HTMLTextAreaElement>('[data-topics-composer-text="1"]')
+  if (textarea) {
+    textarea.value = ''
+    autoGrowTextarea(textarea)
+  }
+
+  const sendBtn = form.querySelector<HTMLButtonElement>('[data-topics-composer-send="1"]')
+  if (sendBtn) {
+    sendBtn.disabled = false
+    sendBtn.style.cursor = 'pointer'
+    sendBtn.style.opacity = '1'
+  }
+
+  const imageInput = form.querySelector<HTMLInputElement>(`[data-topics-image-input="${cssEscape(topicId)}"]`)
+  if (imageInput) imageInput.disabled = false
+
+  const imagePickBtn = form.querySelector<HTMLButtonElement>(`[data-topics-image-pick="${cssEscape(topicId)}"]`)
+  if (imagePickBtn) {
+    imagePickBtn.disabled = false
+    imagePickBtn.style.cursor = 'pointer'
+    imagePickBtn.style.opacity = '1'
+  }
+
+  // Успешен send чисти pending image state-а (clearTopicComposerPendingImage)
+  // — премахваме stale preview thumbnail-а (иначе остава да виси revoked
+  // object URL, счупена картинка, докато потребителят не напусне темата).
+  form.querySelector<HTMLElement>(`[data-topics-image-preview="${cssEscape(topicId)}"]`)?.remove()
+
+  // Error text div-ът е SIBLING на формата (виж renderTopicsComposer), не
+  // дете — успешен send означава state.topicComposerErrorTextByTopicId вече
+  // е null, значи remove-ваме stale error node-а, ако е бил visible.
+  const errorEl = form.nextElementSibling
+  if (errorEl?.getAttribute('data-topics-composer-error') === '1') {
+    errorEl.remove()
+  }
+
+  return true
+}
+
+/**
  * Perf audit fix — targeted DOM append за нов live reply (topic_reply push),
  * mirror на appendTopicMessageNode по-горе за root постове. Append-ва САМО
  * новия [data-topic-reply] node в края на [data-topic-replies-section] на

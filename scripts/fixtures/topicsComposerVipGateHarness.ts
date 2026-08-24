@@ -480,6 +480,7 @@ function q<T extends Element>(selector: string): T | null {
   simulateServerMessage: (message: ServerMessage) => controller.handleServerMessage(message),
   getComposerValue: () => q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')?.value ?? null,
   isComposerReadonly: () => q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')?.readOnly ?? null,
+  isComposerSendButtonDisabled: () => q<HTMLButtonElement>('[data-topics-composer-send="1"]')?.disabled ?? null,
   isComposerVipLocked: () => q<HTMLFormElement>('[data-topics-composer-form="1"]')?.dataset.topicsComposerVipLocked === '1',
   setComposerValue: (value: string) => {
     const el = q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')

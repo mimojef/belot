@@ -27,6 +27,7 @@ import {
   syncProfilePopup,
   clearProfileEditorPendingState,
   appendTopicMessageNode,
+  resetTopicsComposerAfterOwnSendDom,
   appendTopicReplyNode,
   refreshTopicReplyCountDom,
   refreshTopicsUnreadDom,
@@ -13155,6 +13156,13 @@ export function createLobbyFlowController(
       // render() със established scroll-preservation логика.
       const patched = appendTopicMessageNode(options.root, buildLobbyScreenState(), topicMessageNodeCallbacks(), incomingMessage, isOwnRootMessageAck)
       if (patched) {
+        // appendTopicMessageNode пипа само message list-а — composer формата
+        // (textarea/Send бутон/attachment preview) трябва изрично да се
+        // sync-не тук, инак остава stuck със изпратения текст и disabled
+        // бутон (production bug, виж resetTopicsComposerAfterOwnSendDom).
+        if (isOwnRootMessageAck) {
+          resetTopicsComposerAfterOwnSendDom(options.root, message.topicId)
+        }
         return true
       }
 

@@ -509,6 +509,7 @@ function renderTopicsImagePickerControls(options: {
   const inputAttr = kind === 'root' ? `data-topics-image-input="${escapeHtml(key)}"` : `data-topics-reply-image-input="${escapeHtml(key)}"`
   const pickAttr = kind === 'root' ? `data-topics-image-pick="${escapeHtml(key)}"` : `data-topics-reply-image-pick="${escapeHtml(key)}"`
   const removeAttr = kind === 'root' ? `data-topics-image-remove="${escapeHtml(key)}"` : `data-topics-reply-image-remove="${escapeHtml(key)}"`
+  const previewAttr = kind === 'root' ? `data-topics-image-preview="${escapeHtml(key)}"` : `data-topics-reply-image-preview="${escapeHtml(key)}"`
   const vipLockedAttr = isVip ? '' : 'data-topics-image-vip-locked="1"'
   const size = kind === 'root' ? 40 : 36
 
@@ -532,7 +533,7 @@ function renderTopicsImagePickerControls(options: {
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5L5 21"/></svg>
     </button>
     ${pending ? `
-      <div style="position:relative;flex:0 0 auto;">
+      <div ${previewAttr} style="position:relative;flex:0 0 auto;">
         <img src="${escapeHtml(pending.previewUrl)}" alt="" style="width:${size}px;height:${size}px;object-fit:cover;border-radius:8px;border:1px solid rgba(212,165,32,0.48);display:block;">
         <button
           type="button"

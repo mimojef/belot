@@ -113,8 +113,11 @@ check('[A3] appendTopicMessageNode се извиква (targeted patch опит)
 
 check('[A4] appendTopicMessageNode резултатът гейтва връщането — patched=true пропуска render()', () => {
   const appendIdx = topicMessageBlock.indexOf('appendTopicMessageNode(')
-  const afterAppend = topicMessageBlock.slice(appendIdx, appendIdx + 500)
-  assert(/if\s*\(\s*patched\s*\)\s*\{\s*return true/.test(afterAppend), 'patched result must gate early return, skipping fallback render()')
+  const afterAppend = topicMessageBlock.slice(appendIdx, appendIdx + 900)
+  // "return true" трябва да е ВЪТРЕ в if(patched) блока, но не непременно
+  // НЕПОСРЕДСТВЕНО след отварящата скоба — composer DOM sync fix-ът (A7)
+  // добавя legitimate код (коментар + isOwnRootMessageAck reset) между тях.
+  assert(/if\s*\(\s*patched\s*\)\s*\{[\s\S]{0,600}?return true/.test(afterAppend), 'patched result must gate early return, skipping fallback render()')
 })
 
 check('[A5] fallback render() съществува СЛЕД targeted опита (не unconditional в началото)', () => {
@@ -136,6 +139,46 @@ check('[A6] own-message ack вече reuse-ва targeted append (не е explici
   const appendIdx = topicMessageBlock.indexOf('appendTopicMessageNode(')
   const appendCallLine = topicMessageBlock.slice(appendIdx, appendIdx + 200)
   assert(appendCallLine.includes('isOwnRootMessageAck'), 'appendTopicMessageNode call must pass isOwnRootMessageAck as forceScrollToNewNode')
+})
+
+// Production bug fix — appendTopicMessageNode (targeted patch) пипа само
+// message list-а, НИКОГА композер формата. Пълният render() по-рано винаги е
+// бил отговорен за clear на textarea-та/re-enable на Send бутона — след
+// targeted-append промяната own-ack path-ът вече не викаше render(), значи
+// textarea-та/Send бутонът оставаха "залепнали" в submit-render-а-то DOM
+// състояние (workaround: напускане/повторно влизане в темата). Fix-ът вика
+// resetTopicsComposerAfterOwnSendDom(root, topicId) ВЪТРЕ в if(patched),
+// гейтнато зад isOwnRootMessageAck (чужд post append не трябва да пипа
+// МОЯ composer draft).
+check('[A7] Composer DOM sync fix: own-ack targeted append изрично вика resetTopicsComposerAfterOwnSendDom (production stuck-composer bug)', () => {
+  const appendIdx = topicMessageBlock.indexOf('appendTopicMessageNode(')
+  const patchedIfIdx = topicMessageBlock.indexOf('if (patched)', appendIdx)
+  assert(patchedIfIdx >= 0, 'if (patched) block not found after appendTopicMessageNode call')
+  const braceStart = topicMessageBlock.indexOf('{', patchedIfIdx)
+  let depth = 0
+  let patchedBlockEnd = -1
+  for (let i = braceStart; i < topicMessageBlock.length; i++) {
+    if (topicMessageBlock[i] === '{') depth++
+    else if (topicMessageBlock[i] === '}') {
+      depth--
+      if (depth === 0) { patchedBlockEnd = i + 1; break }
+    }
+  }
+  assert(patchedBlockEnd > braceStart, 'could not find matching closing brace for if (patched) block')
+  const patchedBlock = topicMessageBlock.slice(patchedIfIdx, patchedBlockEnd)
+
+  assert(patchedBlock.includes('resetTopicsComposerAfterOwnSendDom('), 'if(patched) block must call resetTopicsComposerAfterOwnSendDom — targeted append never touches the composer form on its own')
+  assert(/if\s*\(\s*isOwnRootMessageAck\s*\)\s*\{[^}]*resetTopicsComposerAfterOwnSendDom\(/.test(patchedBlock), 'resetTopicsComposerAfterOwnSendDom must be gated by isOwnRootMessageAck — a foreign post append must never touch the local composer draft')
+  assert(patchedBlock.includes('return true'), 'the composer-sync call must still be followed by the early return true (no fallback render() after a successful targeted patch)')
+})
+
+check('[A8] resetTopicsComposerAfterOwnSendDom (renderLobbyScreen.ts) никога не пипа root.innerHTML (targeted patch, не full remount)', () => {
+  const start = renderSrc.indexOf('export function resetTopicsComposerAfterOwnSendDom(')
+  assert(start >= 0, 'resetTopicsComposerAfterOwnSendDom export not found in renderLobbyScreen.ts')
+  const nextExportIdx = renderSrc.indexOf('\nexport function ', start + 1)
+  const body = stripComments(nextExportIdx > 0 ? renderSrc.slice(start, nextExportIdx) : renderSrc.slice(start))
+  assert(!body.includes('root.innerHTML'), 'resetTopicsComposerAfterOwnSendDom must never write root.innerHTML (full remount) — that defeats the targeted-patch purpose')
+  assert(body.includes("querySelector"), 'must locate the composer form via querySelector, mirroring the established targeted-patch pattern')
 })
 
 // ─── B. unread/seen (4 варианта) ────────────────────────────────────────
