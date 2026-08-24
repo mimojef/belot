@@ -20,6 +20,7 @@
     "check:private-room-slot-race-guard": "tsx scripts/checkPrivateRoomSlotRaceGuard.ts",
     "check:private-room-block-validation-at-join-and-start": "tsx scripts/checkPrivateRoomBlockValidationAtJoinAndStart.ts",
     "check:private-room-manual-start-and-kick": "tsx scripts/checkPrivateRoomManualStartAndKick.ts",
+    "check:private-room-manual-start-label": "tsx scripts/checkPrivateRoomManualStartLabel.ts",
     "check:private-room-invite-authorization": "tsx scripts/checkPrivateRoomInviteAuthorization.ts",
     "check:private-room-bot-identity-uniqueness": "tsx scripts/checkPrivateRoomBotIdentityUniqueness.ts",
     "check:private-room-reconnect-slot-rebinding": "tsx scripts/checkPrivateRoomReconnectSlotRebinding.ts",

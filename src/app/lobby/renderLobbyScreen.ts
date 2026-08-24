@@ -9139,8 +9139,9 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
         <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
           <div style="flex:1;min-width:0;">
             ${isMine ? `<div style="font-size:10px;font-weight:800;letter-spacing:0.04em;color:#f4c95b;margin-bottom:2px;">ТВОЯТА МАСА</div>` : ''}
-            <div style="font-size:14px;font-weight:700;color:#fff;">
-              ${hostOccupant?.displayName ?? 'Неизвестен'}
+            <div style="font-size:14px;font-weight:700;color:#fff;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+              <span>${hostOccupant?.displayName ?? 'Неизвестен'}</span>
+              ${room.manualStart ? `<span style="font-size:10px;font-weight:800;letter-spacing:0.03em;color:#a78bfa;background:rgba(167,139,250,0.14);border:1px solid rgba(167,139,250,0.35);border-radius:5px;padding:2px 6px;white-space:nowrap;">Ръчен старт</span>` : ''}
             </div>
             <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
               Вход ${formatStake(room.stake)} жълт. · ${occupiedCount}/4 места · ~${minutesLeft} мин.

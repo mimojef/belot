@@ -1054,7 +1054,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           <div>
             <h1 class="prw-title">Чакалня — частна маса</h1>
             <div class="prw-subtitle">
-              ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${occupiedCount}/4 заети места
+              ${params.isLocked ? 'Заключена' : 'Отворена'} · Залог ${formatStake(params.stake)} · ${occupiedCount}/4 заети места${params.manualStart ? ' · <span style="color:#a78bfa;font-weight:800;">Ръчен старт</span>' : ''}
             </div>
           </div>
           <div class="prw-header-actions">
