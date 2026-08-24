@@ -218,6 +218,19 @@ function isLafcheModeratorAuthSession(session: LobbyAuthSession | null): boolean
 }
 
 /**
+ * "Лафче" individual-post delete UI достъп — само UX, сървърът презаверява
+ * през isLafcheMessageDeleteModeratorSession (authStore.ts) на HTTP delete
+ * действието. isLafcheModeratorAuthSession (mute+report, 3 роли) + chat_admin,
+ * за delete parity с normal Topics individual-message moderation
+ * (isTopicMessageModeratorAuthSession, вкл. chat_admin). Умишлено разделен
+ * predicate — НЕ разширява isLafcheModeratorAuthSession самата, за да не
+ * покаже mute/report контроли на chat_admin в Лафче.
+ */
+function isLafcheMessageDeleteModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return isLafcheModeratorAuthSession(session) || session?.account.role === 'chat_admin'
+}
+
+/**
  * Whole-topic destructive/control UI достъп (Lock/Unlock/Delete бутони) —
  * само UX, сървърът презаверява през isTopicWholeTopicModeratorSession
  * (authStore.ts). По-тесен от isTopicModeratorAuthSession — pika_team и
@@ -3586,6 +3599,7 @@ export function createLobbyFlowController(
       isWholeTopicModerator: isTopicWholeTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
       isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
       isLafcheModerator: isLafcheModeratorAuthSession(options.getAuthSession?.() ?? null),
+      isLafcheMessageDeleteModerator: isLafcheMessageDeleteModeratorAuthSession(options.getAuthSession?.() ?? null),
     }
 
     return lobbyState

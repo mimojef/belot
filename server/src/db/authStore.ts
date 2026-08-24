@@ -131,6 +131,34 @@ export function isLafcheModeratorSession(
 }
 
 /**
+ * "Лафче" individual-message delete достъп — isLafcheModeratorSession
+ * (admin/pika_team/top_chat_admin) + chat_admin, за paritет с normal Topics
+ * individual-message moderation (isTopicMessageModeratorSession по-долу,
+ * който вече включва chat_admin). Умишлено НЕ разширява
+ * isLafcheModeratorSession самата — тя остава непроменена и продължава да
+ * важи за mute/unmute/report/audit в Лафче (§6 продуктовото решение "не
+ * давай тези права автоматично на subadmin/chat_admin" остава в сила ЗА
+ * онези actions). Тази функция е scoped само към delete parity fix-а (виж
+ * handleTopicMessageDeleteRequest branch по topicId === LAFCHE_TOPIC_ID) —
+ * subadmin остава изрично изключен и тук, продуктовото решение го изключва
+ * само за chat_admin, не за subadmin.
+ */
+export function isLafcheMessageDeleteModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  // Explicit role comparison вместо isLafcheModeratorSession(session) ||
+  // ... — predicate reuse тук narrow-ва session до `never` в false branch-а
+  // (established TS control-flow особеност, mirror на коментара в
+  // handleTopicMessageDeleteRequest/index.ts).
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+    || session.account.role === 'top_chat_admin'
+    || session.account.role === 'chat_admin'
+  )
+}
+
+/**
  * Whole-topic destructive/control действия (lock/unlock/delete тема) — по-тесен
  * permission set от isTopicModeratorSession. Продуктово решение: pika_team
  * (и chat_admin) имат достъп до mute/unmute/reports/audit (isTopicModeratorSession

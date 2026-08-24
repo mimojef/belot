@@ -27,6 +27,7 @@ import {
   getSessionTokenFromCookieHeader,
   isAdminOrSubadminSession,
   isFullAdminSession,
+  isLafcheMessageDeleteModeratorSession,
   isLafcheModeratorSession,
   isPikaAnnouncementAuthorSession,
   isTopicMessageModeratorSession,
@@ -9360,12 +9361,14 @@ async function handleTopicMessageDeleteRequest(
   // Explicit role-set сравнение вместо reuse на predicate-a избягва тази
   // TS control-flow особеност, без промяна в семантиката.
   //
-  // "Лафче" (topic-lafche) е изключение — САМО admin/pika_team/top_chat_admin
-  // (isLafcheModeratorSession, БЕЗ subadmin/chat_admin), за разлика от
-  // normal Topics 5-role set-а по-долу (Лафче брифа §6). Branch-ът е строго
+  // "Лафче" (topic-lafche) е изключение — admin/pika_team/top_chat_admin +
+  // chat_admin (isLafcheMessageDeleteModeratorSession, БЕЗ subadmin), за
+  // delete parity с normal Topics 5-role set-а по-долу (chat_admin delete
+  // parity fix — mute/unmute/report/audit в Лафче продължават да ползват
+  // isLafcheModeratorSession непроменено, БЕЗ chat_admin). Branch-ът е строго
   // по topicId, за да не пипа moderation правата за General/user-created теми.
   const isModerator = topicId === LAFCHE_TOPIC_ID
-    ? isLafcheModeratorSession(session)
+    ? isLafcheMessageDeleteModeratorSession(session)
     : (
       session.account.role === 'admin'
       || session.account.role === 'subadmin'

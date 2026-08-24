@@ -457,8 +457,10 @@ export type LobbyScreenState = {
   isWholeTopicModerator: boolean
   /** Client-side UX gate за individual root съобщение/reply moderation delete (5 роли, вкл. chat_admin) — виж isTopicMessageModeratorAuthSession в createLobbyFlowController.ts. Различен role set от isTopicModerator. */
   isTopicMessageModerator: boolean
-  /** Client-side UX gate за "Лафче" (topic-lafche) delete+mute — admin/pika_team/top_chat_admin, БЕЗ subadmin/chat_admin. Виж isLafcheModeratorAuthSession в createLobbyFlowController.ts. Server е authoritative (isLafcheModeratorSession в authStore.ts, branch по topicId==='topic-lafche'). */
+  /** Client-side UX gate за "Лафче" (topic-lafche) mute+report — admin/pika_team/top_chat_admin, БЕЗ subadmin/chat_admin. Виж isLafcheModeratorAuthSession в createLobbyFlowController.ts. Server е authoritative (isLafcheModeratorSession в authStore.ts, branch по topicId==='topic-lafche'). */
   isLafcheModerator: boolean
+  /** Client-side UX gate само за "Лафче" individual-post delete — isLafcheModerator + chat_admin, за paritет с normal Topics individual-message delete (isTopicMessageModerator). Умишлено разделено от isLafcheModerator, за да не разшири mute/report UI-то. Виж isLafcheMessageDeleteModeratorAuthSession в createLobbyFlowController.ts. Server е authoritative (isLafcheMessageDeleteModeratorSession в authStore.ts). */
+  isLafcheMessageDeleteModerator: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean

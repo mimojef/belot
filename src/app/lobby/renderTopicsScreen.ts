@@ -772,13 +772,16 @@ function renderLafcheMuteButton(state: LobbyScreenState, senderProfileId: string
   `
 }
 
-// "Лафче" delete бутон — САМО moderator (isLafcheModerator, 3 роли:
-// admin/pika_team/top_chat_admin). За разлика от normal Topics own-delete,
-// авторството НЕ дава delete право тук — обикновен потребител никога не
-// вижда кошче върху собствен Lafche пост (server-side guard-нато огледално
-// в handleTopicMessageDeleteRequest/index.ts).
+// "Лафче" delete бутон — isLafcheMessageDeleteModerator (4 роли:
+// admin/pika_team/top_chat_admin/chat_admin, БЕЗ subadmin) — delete parity
+// с normal Topics individual-message moderation. Умишлено ОТДЕЛНО от
+// state.isLafcheModerator (mute+report gate, 3 роли, БЕЗ chat_admin) — виж
+// renderLafcheMuteButton по-горе, който остава непроменен. За разлика от
+// normal Topics own-delete, авторството НЕ дава delete право тук —
+// обикновен потребител никога не вижда кошче върху собствен Lafche пост
+// (server-side guard-нато огледално в handleTopicMessageDeleteRequest/index.ts).
 function renderLafcheDeleteButton(state: LobbyScreenState, messageId: string): string {
-  const isModerator = state.isLafcheModerator
+  const isModerator = state.isLafcheMessageDeleteModerator
   if (!isModerator) return ''
   return `
     <button
