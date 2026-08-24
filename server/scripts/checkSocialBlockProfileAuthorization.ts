@@ -283,17 +283,47 @@ async function main(): Promise<void> {
     assert(source.includes('handleProfileByIdRequest') && source.includes('sendJsonResponse(res, 403, accessDenial)'), 'HTTP guard not found')
   })
 
+  // Обновено (архитектурен rename): partner-block проверката при join вече
+  // не живее inline в index.ts (старите futurePartnerProfileId/joinRoom
+  // имена никога не са съществували в текущата архитектура — тестът
+  // проверяваше stale код-shape). Реалната проверка е в
+  // privateRoomsStore.ts:joinTeam — вика input.isBlockedWith() в двете
+  // посоки (viewer->partner ПРЕДИ partner->viewer, за да различи кой е
+  // блокирал кого и върне правилния message/code — виж
+  // 'private_room_partner_blocked_by_viewer' vs 'private_room_partner_blocked'),
+  // а index.ts подава конкретния blockStore.isBlocked callback към store-а
+  // чрез joinTeam({ ..., isBlockedWith: ... }).
   await check('[3] private-room partner joins still fail closed on either block direction', () => {
-    const source = readFileSync(resolve(serverRoot, 'src/index.ts'), 'utf8')
-    const futurePartnerIndex = source.indexOf('const futurePartnerProfileId =')
-    const firstDirectionIndex = source.indexOf('blockStore.isBlocked(joiningId, futurePartnerProfileId)', futurePartnerIndex)
-    const secondDirectionIndex = source.indexOf('blockStore.isBlocked(futurePartnerProfileId, joiningId)', futurePartnerIndex)
-    const joinIndex = source.indexOf('const joinResult = privateRoomsStore.joinRoom', futurePartnerIndex)
+    const storeSource = readFileSync(resolve(serverRoot, 'src/game/privateRoomsStore.ts'), 'utf8')
+    const partnerSlotIndex = storeSource.indexOf('const partnerSlot =')
+    const viewerBlocksPartnerIndex = storeSource.indexOf(
+      'input.isBlockedWith(input.profileId, partnerProfileId)',
+      partnerSlotIndex,
+    )
+    const partnerBlocksViewerIndex = storeSource.indexOf(
+      'input.isBlockedWith(partnerProfileId, input.profileId)',
+      partnerSlotIndex,
+    )
 
-    assert(futurePartnerIndex >= 0, 'private-room future partner detection not found')
-    assert(firstDirectionIndex > futurePartnerIndex, 'private-room join does not check joining -> partner block')
-    assert(secondDirectionIndex > firstDirectionIndex, 'private-room join does not check partner -> joining block')
-    assert(joinIndex > secondDirectionIndex, 'private-room block guard is not before joinRoom')
+    assert(partnerSlotIndex >= 0, 'private-room future partner detection not found')
+    assert(viewerBlocksPartnerIndex > partnerSlotIndex, 'private-room join does not check joining -> partner block')
+    assert(partnerBlocksViewerIndex > viewerBlocksPartnerIndex, 'private-room join does not check partner -> joining block')
+    assert(
+      storeSource.includes("code: 'private_room_partner_blocked_by_viewer'"),
+      'private-room join does not distinguish the viewer-blocked-partner direction',
+    )
+    assert(
+      storeSource.includes("code: 'private_room_partner_blocked'"),
+      'private-room join does not report the partner-blocked-viewer direction',
+    )
+
+    const wiringSource = readFileSync(resolve(serverRoot, 'src/index.ts'), 'utf8')
+    assert(
+      /privateRoomsStore\.joinTeam\(\{[\s\S]{0,600}isBlockedWith:\s*\(a,\s*b\)\s*=>\s*blockStore\.isBlocked\(a,\s*b\)/.test(
+        wiringSource,
+      ),
+      'index.ts does not wire isBlockedWith into privateRoomsStore.joinTeam',
+    )
   })
 
   // Забележка (ghost-row prevention fix): POST /api/chat/vip-dm/start вече

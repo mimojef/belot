@@ -1053,6 +1053,7 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_slot_taken'
   | 'private_room_team_full'
   | 'private_room_partner_blocked'
+  | 'private_room_partner_blocked_by_viewer'
   | 'private_room_bot_owner_missing'
 
 export type ErrorMessage = {
@@ -1191,6 +1192,9 @@ export type PlayerProfileMessage = {
   roomId: string
   seat: Seat
   profile: PlayerPublicProfileSnapshot | null
+  ok?: boolean
+  code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
+  message?: string
 }
 
 export type ChatMessageReceivedMessage = {

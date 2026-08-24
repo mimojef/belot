@@ -7329,7 +7329,7 @@ function getProfileAccessDenial(
     return {
       ok: false,
       code: 'profile_blocked_by_viewer',
-      message: 'Вие сте блокирали този потребител.',
+      message: 'Този потребител е блокиран от Вас.',
     }
   }
 

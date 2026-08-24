@@ -49,6 +49,12 @@ export type RenderPlayerProfilePopupOptions = {
   vipGrantOpen?: boolean
   vipGrantSubmitting?: boolean
   vipGrantErrorText?: string | null
+  /**
+   * Заменя generic "Няма наличен профил" текста, когато profile е null и
+   * !isLoading — ползва се за server-side access denial (напр. block),
+   * при което искаме конкретна причина вместо generic fallback.
+   */
+  emptyMessage?: string | null
 }
 
 export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
@@ -435,7 +441,35 @@ function renderLoadingContent(seat: Seat | null): string {
   `
 }
 
-function renderEmptyContent(seat: Seat | null): string {
+function renderEmptyContent(seat: Seat | null, emptyMessage: string | null): string {
+  if (emptyMessage !== null) {
+    return `
+      <div
+        style="
+          display:flex;
+          flex-direction:column;
+          align-items:center;
+          justify-content:center;
+          gap:14px;
+          min-height:260px;
+          text-align:center;
+          color:#f8fafc;
+        "
+      >
+        <div
+          style="
+            font-size:15px;
+            line-height:1.5;
+            color:rgba(226,232,240,0.92);
+            max-width:360px;
+          "
+        >
+          ${escapeHtml(emptyMessage)}
+        </div>
+      </div>
+    `
+  }
+
   return `
     <div
       style="
@@ -1487,7 +1521,7 @@ export function renderPlayerProfilePopup(
           options.vipGrantSubmitting ?? false,
           options.vipGrantErrorText ?? null,
         )
-      : renderEmptyContent(options.seat)
+      : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 
   return `
     <style>

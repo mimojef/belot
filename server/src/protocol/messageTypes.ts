@@ -497,6 +497,7 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_slot_taken'
   | 'private_room_team_full'
   | 'private_room_partner_blocked'
+  | 'private_room_partner_blocked_by_viewer'
   | 'private_room_bot_owner_missing'
 
 export type ErrorMessage = {

@@ -420,14 +420,22 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     if (
       partnerSlot.occupant?.kind === 'human' &&
       partnerSlot.occupant.profileId !== null &&
-      input.profileId !== null &&
-      (input.isBlockedWith(input.profileId, partnerSlot.occupant.profileId) ||
-        input.isBlockedWith(partnerSlot.occupant.profileId, input.profileId))
+      input.profileId !== null
     ) {
-      return {
-        ok: false,
-        message: 'В този отбор има играч, който ви е блокирал и не иска да сте негов партньор.',
-        code: 'private_room_partner_blocked',
+      const partnerProfileId = partnerSlot.occupant.profileId
+      if (input.isBlockedWith(input.profileId, partnerProfileId)) {
+        return {
+          ok: false,
+          message: 'Този потребител е блокиран от Вас и не може да Ви бъде партньор.',
+          code: 'private_room_partner_blocked_by_viewer',
+        }
+      }
+      if (input.isBlockedWith(partnerProfileId, input.profileId)) {
+        return {
+          ok: false,
+          message: 'В този отбор има играч, който ви е блокирал и не иска да сте негов партньор.',
+          code: 'private_room_partner_blocked',
+        }
       }
     }
 

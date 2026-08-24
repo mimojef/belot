@@ -10161,7 +10161,7 @@ function renderProfileAccessBlockPopup(state: LobbyScreenState): string {
 
   const viewerIsBlocker = popup.code === 'profile_blocked_by_viewer'
   const message = viewerIsBlocker
-    ? 'Вие сте блокирали този потребител.'
+    ? 'Този потребител е блокиран от Вас.'
     : 'Този потребител ви е блокирал.'
 
   return `

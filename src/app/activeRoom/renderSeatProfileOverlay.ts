@@ -105,6 +105,7 @@ function renderIntoHost(
   isLoading: boolean,
   isOwnProfile: boolean,
   onClose: () => void,
+  emptyMessage?: string | null,
 ): void {
   _currentProfile = profile
   _currentSeat = seat
@@ -118,6 +119,7 @@ function renderIntoHost(
     isOwnProfile,
     friendshipAction,
     skipAnimation: !isLoading,
+    emptyMessage,
   })
   attachListeners(host, onClose)
 }
@@ -150,13 +152,14 @@ export function showSeatProfileOverlay(
 export function updateSeatProfileOverlay(
   seatSnapshot: RoomSeatSnapshot,
   profile: PlayerPublicProfileSnapshot | null,
+  emptyMessage?: string | null,
 ): void {
   const host = getHost()
   if (!host) return
 
   _actionMessage = null
   const onClose = (): void => removeSeatProfileOverlay()
-  renderIntoHost(host, seatSnapshot.seat, profile, false, _overlayIsOwnProfile, onClose)
+  renderIntoHost(host, seatSnapshot.seat, profile, false, _overlayIsOwnProfile, onClose, emptyMessage)
 }
 
 export function removeSeatProfileOverlay(): void {

@@ -4408,7 +4408,7 @@ export function createActiveRoomFlowController(
     if (message.type === 'player_profile' && message.roomId === activeRoomState.roomId) {
       const seatSnapshot = activeRoomState.seats.find((s) => s.seat === message.seat) ?? null
       if (seatSnapshot) {
-        updateSeatProfileOverlay(seatSnapshot, message.profile)
+        updateSeatProfileOverlay(seatSnapshot, message.profile, message.message ?? null)
       }
       return true
     }

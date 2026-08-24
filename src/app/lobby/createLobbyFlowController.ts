@@ -4254,7 +4254,15 @@ export function createLobbyFlowController(
         render()
       },
       onProfileAccessBlockUnblock: (profileId) => {
-        void unblockPlayer(profileId)
+        void (async () => {
+          const unblocked = await unblockPlayer(profileId)
+          if (!unblocked) return
+          // Не отваряме профила optimistically — само след потвърден успешен
+          // unblock. Reuse-ва стандартния authoritative profile-open flow
+          // (fresh onProfileByIdLoad заявка), за да не дублираме profile
+          // rendering логика и да не показваме stale/cached denial state.
+          await openProtectedProfileById(profileId)
+        })()
       },
       onNoPlayersModalClose: () => {
         state.noPlayersModalOpen = false
@@ -9630,11 +9638,11 @@ export function createLobbyFlowController(
     render()
   }
 
-  async function unblockPlayer(profileId: string): Promise<void> {
-    if (!options.onBlockProfile) return
+  async function unblockPlayer(profileId: string): Promise<boolean> {
+    if (!options.onBlockProfile) return false
 
     const result = await options.onBlockProfile(profileId)
-    if ('ok' in result && !result.ok) return
+    if ('ok' in result && !result.ok) return false
 
     state.blockedPlayers = (state.blockedPlayers ?? []).filter((p) => p.profileId !== profileId)
 
@@ -9646,6 +9654,7 @@ export function createLobbyFlowController(
       state.profilePopupProfile = { ...state.profilePopupProfile, isBlockedByMe: false }
     }
     render()
+    return true
   }
 
   function openGiftModal(friendshipId: string): void {
@@ -12608,7 +12617,10 @@ export function createLobbyFlowController(
           state.privateRoomBotActionLoadingTeam = null
         }
         state.privateRoomJoinSlotPopup = null
-        if (message.code === 'private_room_partner_blocked') {
+        if (
+          message.code === 'private_room_partner_blocked' ||
+          message.code === 'private_room_partner_blocked_by_viewer'
+        ) {
           // Отделен X-only popup вместо generic info banner — виж
           // спецификацията за "Не можете да влезете в този отбор".
           state.privateRoomBlockedPopupText = message.message
