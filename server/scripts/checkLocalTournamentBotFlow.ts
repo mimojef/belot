@@ -417,6 +417,10 @@ function countRows(db: DatabaseSync, sql: string, ...params: unknown[]): number 
 function getRow(db: DatabaseSync, sql: string, ...params: unknown[]): any {
   return db.prepare(sql).get(...params)
 }
+function walletBalance(db: DatabaseSync, profileId: string): number {
+  const row = getRow(db, `SELECT yellow_coins_balance AS balance FROM profile_wallets WHERE profile_id = ?;`, profileId)
+  return row?.balance ?? 0
+}
 
 /** Диагностика при зависване (виж §13 в task spec-а: "При зависване да
  * отпечата: tournament status; match status; room status/phase; worker
@@ -723,6 +727,36 @@ try {
     }
   })
 
+  // DELTA walkover acknowledgement fix (createActiveRoomFlowController.ts:
+  // completeTournamentWalkoverTransition/ensureTournamentWalkoverAutoTransitionTimer) —
+  // реалният browser клиент вече изпраща tournament_semifinal_result_acknowledge
+  // автоматично при walkover WIN (ръчен click ИЛИ auto-transition таймер).
+  // Този Node/WS-протоколен тест не движи реален браузър/DOM, затова
+  // симулира точно това клиентско поведение тук — изрично изпраща acks за
+  // ВСЕКИ присъстващ играч от печелившия отбор (сървърът изисква acks от
+  // ВСИЧКИ human finalist-и в двата финалистки отбора, виж
+  // countMissingHumanFinalistAcknowledgementsStatement в
+  // tournamentCoordinator.ts), докато клиентите все още са свързани (преди
+  // [17b] да ги затвори).
+  await check('[17a] semifinal walkover winners изпращат tournament_semifinal_result_acknowledge (real client behavior)', async () => {
+    for (const [matchId, clients] of deltaPresentClientsByMatch.entries()) {
+      for (const client of clients) {
+        sendWs(client, { type: 'tournament_semifinal_result_acknowledge', tournamentId: delta.tournamentId, semifinalMatchId: matchId })
+      }
+    }
+    const winnerProfileIds = deltaSemifinalWinners.flat().map(({ p }) => p.profileId)
+    await waitFor('delta: acknowledgement redовете се записват за всички печеливши финалисти', () => {
+      return winnerProfileIds.every((profileId) =>
+        getRow(
+          mainDb,
+          `SELECT 1 AS found FROM tournament_semifinal_result_acknowledgements WHERE tournament_id = ? AND profile_id = ?;`,
+          delta.tournamentId,
+          profileId,
+        ) !== undefined,
+      )
+    }, 10_000)
+  })
+
   // Regression за "Към лобито" след semifinal loss/win показваше плашещ toast
   // "You are not attached to this room." — коренната причина: играчът
   // изпраща leave_active_room ЗА СЪЩАТА turnament стая, от която
@@ -789,6 +823,13 @@ try {
   const deltaFinalPresentTeam = deltaSemifinalWinners[0]!
   const deltaFinalAbsentTeam = deltaSemifinalWinners[1]!
 
+  // Снимка на wallet баланса ПРЕДИ финалът изобщо да се реши — финалният
+  // мач тепърва предстои тук, затова settlement гарантирано още не е минал
+  // за никого от тези профили. Нужно за exactly-once/wallet-delta
+  // доказателството в [20] по-долу.
+  const championWalletBefore = walletBalance(mainDb, deltaFinalPresentTeam[0]!.p.profileId)
+  const runnerUpWalletBefore = walletBalance(mainDb, deltaFinalAbsentTeam[0]!.p.profileId)
+
   await check('[19] Final walkover — само единият финалист се явява (реален ускорен round_transition таймер)', async () => {
     for (const { p } of deltaFinalPresentTeam) {
       const detail = await getTournamentDetailHttp(mainPort, p.cookie, delta.tournamentId)
@@ -802,7 +843,7 @@ try {
     }, 15_000)
   })
 
-  await check('[20] Champion/runner-up и settlement exactly once за DELTA', async () => {
+  await check('[20] Champion/runner-up и settlement exactly once за DELTA (ledger + REAL wallet balance delta)', async () => {
     await waitFor('delta tournament settles', async () => {
       const detail = await getTournamentDetailHttp(mainPort, deltaFinalPresentTeam[0]!.p.cookie, delta.tournamentId)
       return detail.status === 'finished' && detail.settlementState === 'settled'
@@ -813,9 +854,36 @@ try {
     assert(runnerUpDetail.viewer.myPlacement === 'runner_up', `expected runner_up, got ${runnerUpDetail.viewer.myPlacement}`)
     const payoutCountFirst = countRows(mainDb, `SELECT COUNT(*) AS count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout';`, delta.tournamentId)
     assert(payoutCountFirst === 4, `expected 4 prize_payout rows, got ${payoutCountFirst}`)
+
+    // Реално wallet-delta доказателство (не само ledger row presence) —
+    // championDetail.viewer.myPrizeAmount е точно authoritative-ната сума,
+    // която final popup-ът вече показва (createActiveRoomFlowController.ts
+    // loadTournamentFinalResultPrizeInfo); тук доказваме, че тя реално
+    // отговаря на действителната промяна на wallet баланса.
+    const championProfileId = deltaFinalPresentTeam[0]!.p.profileId
+    const runnerUpProfileId = deltaFinalAbsentTeam[0]!.p.profileId
+    assert(typeof championDetail.viewer.myPrizeAmount === 'number' && championDetail.viewer.myPrizeAmount > 0, `champion myPrizeAmount missing/invalid: ${championDetail.viewer.myPrizeAmount}`)
+    assert(typeof runnerUpDetail.viewer.myPrizeAmount === 'number' && runnerUpDetail.viewer.myPrizeAmount > 0, `runner-up myPrizeAmount missing/invalid: ${runnerUpDetail.viewer.myPrizeAmount}`)
+    const championWalletAfter = walletBalance(mainDb, championProfileId)
+    const runnerUpWalletAfter = walletBalance(mainDb, runnerUpProfileId)
+    assert(
+      championWalletAfter - championWalletBefore === championDetail.viewer.myPrizeAmount,
+      `champion wallet delta (${championWalletAfter} - ${championWalletBefore} = ${championWalletAfter - championWalletBefore}) != myPrizeAmount (${championDetail.viewer.myPrizeAmount})`,
+    )
+    assert(
+      runnerUpWalletAfter - runnerUpWalletBefore === runnerUpDetail.viewer.myPrizeAmount,
+      `runner-up wallet delta (${runnerUpWalletAfter} - ${runnerUpWalletBefore} = ${runnerUpWalletAfter - runnerUpWalletBefore}) != myPrizeAmount (${runnerUpDetail.viewer.myPrizeAmount})`,
+    )
+
     await sleep(5_000)
     const payoutCountAfter = countRows(mainDb, `SELECT COUNT(*) AS count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout';`, delta.tournamentId)
     assert(payoutCountAfter === payoutCountFirst, `payout count changed after additional ticks: ${payoutCountFirst} -> ${payoutCountAfter}`)
+    // Exactly-once на wallet ниво, не само ledger row count — повторен
+    // coordinator/settlement tick НЕ трябва да кредитира wallet-а отново.
+    const championWalletAfterRetryTicks = walletBalance(mainDb, championProfileId)
+    const runnerUpWalletAfterRetryTicks = walletBalance(mainDb, runnerUpProfileId)
+    assert(championWalletAfterRetryTicks === championWalletAfter, `champion wallet changed after additional ticks: ${championWalletAfter} -> ${championWalletAfterRetryTicks}`)
+    assert(runnerUpWalletAfterRetryTicks === runnerUpWalletAfter, `runner-up wallet changed after additional ticks: ${runnerUpWalletAfter} -> ${runnerUpWalletAfterRetryTicks}`)
   })
 
   // ── E. RESET ───────────────────────────────────────────────────────────

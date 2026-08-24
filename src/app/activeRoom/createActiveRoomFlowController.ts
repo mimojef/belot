@@ -223,6 +223,18 @@ export function createActiveRoomFlowController(
   let tournamentRoundResultAutoTransitionTimerId: number | null = null
   let tournamentRoundResultAutoTransitionKey: string | null = null
   let tournamentRoundResultCompletedTransitionKey: string | null = null
+  // Final-резултат prize сума (§ "Champion/Runner-up prize popup" в task
+  // spec-а) — matchEnded.awardedPrizeAmount е structurally null за турнирни
+  // стаи (виж payoutMatchWinners exclusion в server/src/index.ts), затова
+  // единственият authoritative източник е viewer.myPrizeAmount от
+  // tournament detail fetch-а, огледално на tournamentRoundResultFeeder*
+  // pattern-а по-горе.
+  let tournamentFinalResultMatchId: string | null = null
+  let tournamentFinalResultPrizeAmount: number | null = null
+  let tournamentFinalResultFetchInFlight = false
+  let tournamentFinalResultPendingRetryTimerId: number | null = null
+  let tournamentFinalResultFastRetryCount = 0
+  let tournamentFinalResultSlowRetryCount = 0
 
   function getSeatGender(seat: Seat): RoomSeatSnapshot['gender'] {
     return activeRoomState?.seats.find((entry) => entry.seat === seat)?.gender ?? null
@@ -351,7 +363,17 @@ export function createActiveRoomFlowController(
       activeRoomState.tournamentRoundType === null ||
       activeRoomState.tournamentRoundType === 'final' ||
       activeRoomState.tournamentMatchId === null ||
-      activeRoomState.game?.matchEnded == null
+      activeRoomState.game?.matchEnded == null ||
+      // game.matchEnded вече е populated по време на самата 'scoring' фаза на
+      // печелившата ръка (сървърът изчислява winner/matchEnded в момента на
+      // влизане в scoring, преди authoritative-ния 5s summaryVisibleMs delay
+      // — виж startServerScoringPhase.ts). Без тази проверка, произволно
+      // tournament_match_assigned съобщение (coordinator-ът ги преизпраща на
+      // всеки tick за ВСЕКИ runnable мач, включително вече in_progress —
+      // виж main.ts:completePendingTournamentRoundResultTransition()) би
+      // приело контекста за валиден и би прекъснало scoring панела преди
+      // сървърът реално да е преминал в 'match-ended'.
+      activeRoomState.game.authoritativePhase !== 'match-ended'
     ) {
       return null
     }
@@ -431,6 +453,82 @@ export function createActiveRoomFlowController(
     }, TOURNAMENT_ROUND_RESULT_AUTO_TRANSITION_MS)
   }
 
+  // Walkover-специфичен аналог на completeTournamentRoundResultTransition/
+  // ensureTournamentRoundResultAutoTransitionTimer по-горе. Не може да се
+  // преизползва directly getTournamentRoundResultTransitionContext(), защото
+  // тя изисква реален activeRoomState.game?.matchEnded snapshot — а при
+  // walkover room.game.phase остава 'bootstrap' завинаги (виж коментара при
+  // walkover клона по-долу), т.е. контекстът винаги би бил null. Затова
+  // walkover-ът има собствен, паралелен "complete" helper — споделен между
+  // ръчния "Към турнира" бутон И auto-transition таймера, за да не се
+  // дублира acknowledgement логиката на две места.
+  //
+  // acknowledgeTournamentSemifinalResult е idempotent на сървъра (UNIQUE
+  // constraint + ON CONFLICT DO NOTHING в
+  // tournament_semifinal_result_acknowledgements, виж миграция
+  // 20260801_003) — затова е безопасно да бъде извикан и от manual click,
+  // и от auto-timer при race, без клиентски dedup guard за самия ack.
+  function acknowledgeTournamentSemifinalWalkoverIfNeeded(
+    tournamentId: string,
+    semifinalMatchId: string,
+    wonByWalkover: boolean,
+    isFinalRound: boolean,
+  ): void {
+    if (wonByWalkover && !isFinalRound) {
+      options.acknowledgeTournamentSemifinalResult(tournamentId, semifinalMatchId)
+    }
+  }
+
+  function completeTournamentWalkoverTransition(
+    key: string,
+    tournamentId: string,
+    semifinalMatchId: string,
+    wonByWalkover: boolean,
+    isFinalRound: boolean,
+    currentRoundType: TournamentRoundType,
+    feeder: { tournamentId: string; label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null,
+  ): void {
+    if (tournamentRoundResultCompletedTransitionKey === key) return
+    tournamentRoundResultCompletedTransitionKey = key
+    clearTournamentRoundResultAutoTransitionTimer()
+    acknowledgeTournamentSemifinalWalkoverIfNeeded(tournamentId, semifinalMatchId, wonByWalkover, isFinalRound)
+    returnToLobbyFromMatchEnded()
+    if (wonByWalkover && !isFinalRound) {
+      options.onEnterWaitingForNextTournamentRound(feeder, tournamentId, {
+        currentRoundType,
+        semifinalScoreA: null,
+        semifinalScoreB: null,
+      })
+    }
+  }
+
+  function ensureTournamentWalkoverAutoTransitionTimer(
+    key: string,
+    tournamentId: string,
+    semifinalMatchId: string,
+    wonByWalkover: boolean,
+    isFinalRound: boolean,
+    currentRoundType: TournamentRoundType,
+    feeder: { tournamentId: string; label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null,
+  ): void {
+    if (!wonByWalkover || isFinalRound) {
+      clearTournamentRoundResultAutoTransitionTimer()
+      return
+    }
+    if (
+      tournamentRoundResultAutoTransitionTimerId !== null &&
+      tournamentRoundResultAutoTransitionKey === key
+    ) {
+      return
+    }
+
+    clearTournamentRoundResultAutoTransitionTimer()
+    tournamentRoundResultAutoTransitionKey = key
+    tournamentRoundResultAutoTransitionTimerId = window.setTimeout(() => {
+      completeTournamentWalkoverTransition(key, tournamentId, semifinalMatchId, wonByWalkover, isFinalRound, currentRoundType, feeder)
+    }, TOURNAMENT_ROUND_RESULT_AUTO_TRANSITION_MS)
+  }
+
   function shouldEnterTournamentInterRoundWaitingImmediately(): boolean {
     const context = getTournamentRoundResultTransitionContext()
     return context !== null && context.wonRound
@@ -462,11 +560,25 @@ export function createActiveRoomFlowController(
     const finalScore = matchEnded.finalScore ?? activeRoomState.game.score.match
     const myScore = localTeam === 'A' ? finalScore.teamA : finalScore.teamB
     const opponentScore = localTeam === 'A' ? finalScore.teamB : finalScore.teamA
-    const prizeAmount = matchEnded.awardedPrizeAmount
-    const prizeText = prizeAmount !== null && prizeAmount > 0
-      ? `Лична награда: ${prizeAmount.toLocaleString('bg-BG')} жълтици.`
-      : 'Наградата се обработва.'
     const tournamentId = activeRoomState.tournamentId
+
+    if (
+      activeRoomState.tournamentMatchId !== null &&
+      tournamentFinalResultMatchId !== activeRoomState.tournamentMatchId
+    ) {
+      tournamentFinalResultMatchId = activeRoomState.tournamentMatchId
+      tournamentFinalResultPrizeAmount = null
+      clearTournamentFinalResultPendingRetry()
+      void loadTournamentFinalResultPrizeInfo(tournamentId, activeRoomState.tournamentMatchId)
+    }
+
+    // viewer.myPrizeAmount (authoritative, settlement-backed) — НЕ
+    // matchEnded.awardedPrizeAmount, което е structurally null за турнирни
+    // стаи (виж коментара при loadTournamentFinalResultPrizeInfo).
+    const prizeAmount = tournamentFinalResultPrizeAmount
+    const prizeText = prizeAmount !== null && prizeAmount > 0
+      ? `Награда: +${prizeAmount.toLocaleString('bg-BG')} жълтици`
+      : 'Наградата се обработва.'
 
     cuttingVisualCountdown.resetCuttingVisualCountdownState()
     clearMatchEndedCountdown()
@@ -490,9 +602,9 @@ export function createActiveRoomFlowController(
           box-shadow:0 24px 70px rgba(2,6,23,0.45);text-align:center;
         ">
           <div style="font-size:13px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:#93c5fd;">Финал</div>
-          <div style="margin-top:10px;font-size:28px;font-weight:900;color:${wonFinal ? '#22c55e' : '#facc15'};">${wonFinal ? 'Спечелихте турнира!' : 'Завършихте на второ място'}</div>
+          <div data-tournament-final-result-title="1" style="margin-top:10px;font-size:28px;font-weight:900;color:${wonFinal ? '#22c55e' : '#facc15'};">${wonFinal ? 'Вие спечелихте турнира!' : 'Класирахте се на второ място!'}</div>
           <div style="margin-top:12px;font-size:20px;font-weight:900;">${myScore} : ${opponentScore}</div>
-          <div style="margin-top:12px;font-size:14px;font-weight:800;color:${prizeAmount !== null && prizeAmount > 0 ? '#dcfce7' : '#fde68a'};">${escapeHtml(prizeText)}</div>
+          <div data-tournament-final-result-prize="1" style="margin-top:12px;font-size:14px;font-weight:800;color:${prizeAmount !== null && prizeAmount > 0 ? '#dcfce7' : '#fde68a'};">${escapeHtml(prizeText)}</div>
           <div style="margin-top:20px;">
             <button type="button" data-tournament-final-result-detail="1" style="height:44px;padding:0 20px;border:1px solid rgba(255,255,255,0.22);border-radius:8px;background:rgba(255,255,255,0.06);color:#f8fafc;font-size:14px;font-weight:900;cursor:pointer;">Към турнира</button>
           </div>
@@ -521,6 +633,69 @@ export function createActiveRoomFlowController(
       renderActiveRoomScreen()
     } finally {
       tournamentRoundResultFetchInFlight = false
+    }
+  }
+
+  // FAST фазата покрива happy-path случая (settlement обикновено вече е
+  // приключил синхронно преди този fetch, виж коментара по-долу). SLOW
+  // фазата покрива доказан production gap: ако първият settlement опит
+  // fail-не, tournamentCoordinator.reconcileSettlementDueTournament го
+  // retry-ва едва на СЛЕДВАЩИЯ coordinator tick (DEFAULT_INTERVAL_MS = 5s
+  // production, 1s local-test) — над FAST бюджета (1.75s). SLOW бюджетът
+  // (~12s допълнително, общо ~13.75s) покрива поне два такива tick-а, докато
+  // остава строго bounded (не unbounded polling).
+  const TOURNAMENT_FINAL_RESULT_FAST_RETRY_MS = 350
+  const TOURNAMENT_FINAL_RESULT_FAST_RETRY_MAX_ATTEMPTS = 5
+  const TOURNAMENT_FINAL_RESULT_SLOW_RETRY_MS = 2000
+  const TOURNAMENT_FINAL_RESULT_SLOW_RETRY_MAX_ATTEMPTS = 6
+
+  function clearTournamentFinalResultPendingRetry(): void {
+    if (tournamentFinalResultPendingRetryTimerId !== null) {
+      window.clearTimeout(tournamentFinalResultPendingRetryTimerId)
+      tournamentFinalResultPendingRetryTimerId = null
+    }
+    tournamentFinalResultFastRetryCount = 0
+    tournamentFinalResultSlowRetryCount = 0
+  }
+
+  // matchEnded.awardedPrizeAmount е structurally null за турнирни стаи (виж
+  // payoutMatchWinners exclusion в server/src/index.ts) — единственият
+  // authoritative източник за реално начислената награда е
+  // viewer.myPrizeAmount от tournament detail.
+  async function loadTournamentFinalResultPrizeInfo(tournamentId: string, finalMatchId: string): Promise<void> {
+    if (tournamentFinalResultFetchInFlight) return
+    tournamentFinalResultFetchInFlight = true
+    try {
+      const detail = await options.fetchTournamentDetail(tournamentId)
+      if (detail === null || tournamentFinalResultMatchId !== finalMatchId) return
+      if (detail.viewer.myPrizeAmount !== null) {
+        tournamentFinalResultPrizeAmount = detail.viewer.myPrizeAmount
+        clearTournamentFinalResultPendingRetry()
+        renderActiveRoomScreen()
+        return
+      }
+      const scheduleRetry = (delayMs: number): void => {
+        tournamentFinalResultPendingRetryTimerId = window.setTimeout(() => {
+          tournamentFinalResultPendingRetryTimerId = null
+          if (tournamentFinalResultMatchId === finalMatchId) {
+            void loadTournamentFinalResultPrizeInfo(tournamentId, finalMatchId)
+          }
+        }, delayMs)
+      }
+      if (tournamentFinalResultFastRetryCount < TOURNAMENT_FINAL_RESULT_FAST_RETRY_MAX_ATTEMPTS) {
+        tournamentFinalResultFastRetryCount += 1
+        scheduleRetry(TOURNAMENT_FINAL_RESULT_FAST_RETRY_MS)
+        return
+      }
+      if (tournamentFinalResultSlowRetryCount < TOURNAMENT_FINAL_RESULT_SLOW_RETRY_MAX_ATTEMPTS) {
+        tournamentFinalResultSlowRetryCount += 1
+        scheduleRetry(TOURNAMENT_FINAL_RESULT_SLOW_RETRY_MS)
+        return
+      }
+      // И двете bounded фази са изчерпани — спри окончателно, без повече
+      // fetch-ове. Popup-ът остава на "Наградата се обработва.".
+    } finally {
+      tournamentFinalResultFetchInFlight = false
     }
   }
 
@@ -2899,6 +3074,37 @@ export function createActiveRoomFlowController(
       const showFeederBox = wonByWalkover && !isFinalRound && tournamentRoundResultFeederLabel !== null
       const feederStatusText = computeFeederStatusText()
 
+      const buildWalkoverFeeder = (): { tournamentId: string; label: string; scoreA: number | null; scoreB: number | null; status: 'in_progress' | 'completed' } | null => {
+        const tid = activeRoomState?.tournamentId ?? null
+        return wonByWalkover && !isFinalRound && tid !== null && tournamentRoundResultFeederLabel !== null
+          ? {
+              tournamentId: tid,
+              label: tournamentRoundResultFeederLabel,
+              scoreA: tournamentRoundResultFeederScoreA,
+              scoreB: tournamentRoundResultFeederScoreB,
+              status: tournamentRoundResultFeederStatus ?? 'in_progress' as const,
+            }
+          : null
+      }
+
+      // Победителят чрез walkover трябва да изпрати semifinal acknowledgement
+      // независимо дали ще натисне ръчно "Към турнира", или ще излезе през
+      // auto-transition таймера по-долу — финалният мач не трябва да зависи
+      // от ръчен click (виж completeTournamentWalkoverTransition/
+      // ensureTournamentWalkoverAutoTransitionTimer по-горе).
+      if (activeRoomState.tournamentId !== null && activeRoomState.tournamentMatchId !== null && activeRoomState.tournamentRoundType !== null) {
+        const walkoverKey = `${activeRoomState.roomId}:${activeRoomState.tournamentMatchId}:walkover:${wonByWalkover}`
+        ensureTournamentWalkoverAutoTransitionTimer(
+          walkoverKey,
+          activeRoomState.tournamentId,
+          activeRoomState.tournamentMatchId,
+          wonByWalkover,
+          isFinalRound,
+          activeRoomState.tournamentRoundType,
+          buildWalkoverFeeder(),
+        )
+      }
+
       options.root.innerHTML = `
         <div
           ${mobileLayoutAttribute}
@@ -2947,24 +3153,23 @@ export function createActiveRoomFlowController(
       `
       options.root.querySelector('[data-tournament-walkover-continue]')?.addEventListener('click', () => {
         const tournamentId = activeRoomState?.tournamentId ?? null
+        const tournamentMatchId = activeRoomState?.tournamentMatchId ?? null
         const currentRoundType = activeRoomState?.tournamentRoundType ?? null
-        const feeder = wonByWalkover && !isFinalRound && tournamentId !== null && tournamentRoundResultFeederLabel !== null
-          ? {
-              tournamentId,
-              label: tournamentRoundResultFeederLabel,
-              scoreA: tournamentRoundResultFeederScoreA,
-              scoreB: tournamentRoundResultFeederScoreB,
-              status: tournamentRoundResultFeederStatus ?? 'in_progress' as const,
-            }
-          : null
-        returnToLobbyFromMatchEnded()
-        if (tournamentId !== null && currentRoundType !== null && wonByWalkover && !isFinalRound) {
-          options.onEnterWaitingForNextTournamentRound(feeder, tournamentId, {
-            currentRoundType,
-            semifinalScoreA: null,
-            semifinalScoreB: null,
-          })
+        const roomId = activeRoomState?.roomId ?? null
+        if (tournamentId === null || tournamentMatchId === null || currentRoundType === null || roomId === null) {
+          returnToLobbyFromMatchEnded()
+          return
         }
+        const walkoverKey = `${roomId}:${tournamentMatchId}:walkover:${wonByWalkover}`
+        completeTournamentWalkoverTransition(
+          walkoverKey,
+          tournamentId,
+          tournamentMatchId,
+          wonByWalkover,
+          isFinalRound,
+          currentRoundType,
+          buildWalkoverFeeder(),
+        )
       })
       return
     }
@@ -4860,6 +5065,9 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     clearEmojiReactionUiState()
     clearPhraseReactionUiState()
+    clearTournamentFinalResultPendingRetry()
+    tournamentFinalResultMatchId = null
+    tournamentFinalResultPrizeAmount = null
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()

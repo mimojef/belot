@@ -1706,7 +1706,8 @@ export function createLobbyFlowController(
   let tournamentInterRoundRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
   let tournamentInterRoundAckRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
   let tournamentInterRoundAckRefetchKey: string | null = null
-  let tournamentInterRoundWinnerMinimumTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundPendingRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundPendingRefetchTournamentId: string | null = null
 
   // Единичен споделен interval за ВСИЧКИ fill-expiry countdown badge-ове в
   // списъчния изглед "Турнири" (§13 в task spec-а) — обхожда всички
@@ -2099,47 +2100,6 @@ export function createLobbyFlowController(
     tournamentInterRoundCountdownFinalStartAt = null
   }
 
-  function clearTournamentInterRoundWinnerMinimumTimer(): void {
-    if (tournamentInterRoundWinnerMinimumTimeoutId !== null) {
-      window.clearTimeout(tournamentInterRoundWinnerMinimumTimeoutId)
-      tournamentInterRoundWinnerMinimumTimeoutId = null
-    }
-  }
-
-  function scheduleTournamentInterRoundWinnerMinimumTimer(): void {
-    const pending = state.tournamentInterRoundPendingResult
-    if (
-      pending === null ||
-      state.currentScreen !== 'tournament-detail' ||
-      state.tournamentDetailId !== pending.tournamentId
-    ) {
-      clearTournamentInterRoundWinnerMinimumTimer()
-      return
-    }
-    const remainingMs = Math.max(0, 3000 - (Date.now() - pending.shownAt))
-    if (remainingMs === 0) {
-      clearTournamentInterRoundWinnerMinimumTimer()
-      return
-    }
-    if (tournamentInterRoundWinnerMinimumTimeoutId !== null) return
-    tournamentInterRoundWinnerMinimumTimeoutId = window.setTimeout(() => {
-      tournamentInterRoundWinnerMinimumTimeoutId = null
-      if (
-        state.currentScreen === 'tournament-detail' &&
-        state.tournamentDetailId === pending.tournamentId &&
-        state.tournamentInterRoundPendingResult !== null
-      ) {
-        const assignment = state.tournamentDetail?.myActiveMatch ?? null
-        if (assignment !== null && assignment.roundType === 'final') {
-          state.tournamentInterRoundPendingResult = null
-          options.onTournamentAutoEnterMatch?.(assignment)
-          return
-        }
-        render()
-      }
-    }, remainingMs)
-  }
-
   function scheduleTournamentInterRoundAckRefetch(tournamentId: string, semifinalMatchId: string): void {
     const key = `${tournamentId}:${semifinalMatchId}`
     if (tournamentInterRoundAckRefetchTimeoutId !== null && tournamentInterRoundAckRefetchKey === key) {
@@ -2153,6 +2113,45 @@ export function createLobbyFlowController(
       tournamentInterRoundAckRefetchTimeoutId = null
       tournamentInterRoundAckRefetchKey = null
       if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+        void fetchTournamentDetail(tournamentId)
+      }
+    }, 350)
+  }
+
+  function clearTournamentInterRoundPendingRefetch(): void {
+    if (tournamentInterRoundPendingRefetchTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundPendingRefetchTimeoutId)
+      tournamentInterRoundPendingRefetchTimeoutId = null
+    }
+    tournamentInterRoundPendingRefetchTournamentId = null
+  }
+
+  // Огледало на scheduleTournamentInterRoundAckRefetch по-горе — покрива
+  // краткия authoritative propagation прозорец между
+  // acknowledgeTournamentSemifinalResult (WS, fire-and-forget) и
+  // коордиnaторския tick, който прави myInterRoundWaiting authoritative на
+  // сървъра (виж tournamentCoordinator.ts tickNow() след успешен ack).
+  // Единичен, ограничен retry — НЕ wall-clock UX delay: ако след него
+  // pending все още не е разрешен (нито myInterRoundWaiting, нито terminal
+  // state), оставяме следващия WS push (feeder score/match assigned/etc.)
+  // да поеме re-fetch-а вместо да chain-ваме таймера безкрайно.
+  function scheduleTournamentInterRoundPendingRefetch(tournamentId: string): void {
+    if (
+      tournamentInterRoundPendingRefetchTimeoutId !== null &&
+      tournamentInterRoundPendingRefetchTournamentId === tournamentId
+    ) {
+      return
+    }
+    clearTournamentInterRoundPendingRefetch()
+    tournamentInterRoundPendingRefetchTournamentId = tournamentId
+    tournamentInterRoundPendingRefetchTimeoutId = window.setTimeout(() => {
+      tournamentInterRoundPendingRefetchTimeoutId = null
+      tournamentInterRoundPendingRefetchTournamentId = null
+      if (
+        state.currentScreen === 'tournament-detail' &&
+        state.tournamentDetailId === tournamentId &&
+        state.tournamentInterRoundPendingResult !== null
+      ) {
         void fetchTournamentDetail(tournamentId)
       }
     }, 350)
@@ -4312,8 +4311,6 @@ export function createLobbyFlowController(
       clearTournamentInterRoundCountdownLoop()
     }
 
-    scheduleTournamentInterRoundWinnerMinimumTimer()
-
     if (state.currentScreen === 'tournaments') {
       startTournamentListFillExpiryLoop()
     } else {
@@ -4689,6 +4686,7 @@ export function createLobbyFlowController(
     state.tournamentDetailId = tournamentId
     state.tournamentDetail = null
     state.tournamentInterRoundPendingResult = null
+    clearTournamentInterRoundPendingRefetch()
     state.tournamentDetailLoading = true
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
@@ -4720,6 +4718,7 @@ export function createLobbyFlowController(
       semifinalScoreB: result.semifinalScoreB,
       shownAt: Date.now(),
     }
+    clearTournamentInterRoundPendingRefetch()
     state.tournamentDetailLoading = true
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
@@ -4734,15 +4733,22 @@ export function createLobbyFlowController(
     void fetchTournamentDetail(tournamentId)
   }
 
+  // Задържа transition/pending presentation-а, докато не се потвърди
+  // authoritative successor state за ТОЗИ турнир: A. myInterRoundWaiting
+  // (waiting screen) или C. terminal статус/viewer състояние (нормалният
+  // detail/error/eliminated flow поема оттук нататък). НЕ проверява
+  // detail.myActiveMatch тук нарочно — myActiveMatch идва от
+  // tournamentCoordinator.getAssignmentForProfile(), който обхваща ВСИЧКИ
+  // активни турнири на профила и може временно да сочи towards финала на
+  // ТОЗИ турнир (B) или дори towards съвсем друг турнир, докато
+  // myInterRoundWaiting все още не е готов на сървъра — third-ирането му
+  // като "терминал" тук причиняваше преждевременно изчистване на pending
+  // state-а и generic bracket fallthrough (виж fetchTournamentDetail за B).
   function shouldKeepTournamentInterRoundPendingResult(
     detail: TournamentDetailSnapshot,
   ): boolean {
     return state.tournamentInterRoundPendingResult !== null &&
       state.tournamentInterRoundPendingResult.tournamentId === detail.tournamentId &&
-      (
-        detail.myActiveMatch === null ||
-        Date.now() - state.tournamentInterRoundPendingResult.shownAt < 3000
-      ) &&
       detail.status !== 'finished' &&
       detail.status !== 'cancelled' &&
       detail.status !== 'admin_cancelled' &&
@@ -4752,10 +4758,7 @@ export function createLobbyFlowController(
       detail.viewer.entryStatus !== 'eliminated' &&
       detail.viewer.entryStatus !== 'withdrawn' &&
       detail.viewer.entryStatus !== 'refunded' &&
-      (
-        Date.now() - state.tournamentInterRoundPendingResult.shownAt < 3000 ||
-        detail.myInterRoundWaiting === null
-      )
+      detail.myInterRoundWaiting === null
   }
 
   async function fetchTournamentDetail(tournamentId: string): Promise<void> {
@@ -4789,13 +4792,34 @@ export function createLobbyFlowController(
     if (!shouldKeepTournamentInterRoundPendingResult(result.tournament)) {
       state.tournamentInterRoundPendingResult = null
     }
+
+    // B — финалният мач вече е готов/assigned: auto-enter-ва по
+    // СЪЩЕСТВУВАЩИЯ path независимо дали pending все още се държи (виж
+    // коментара при shouldKeepTournamentInterRoundPendingResult) — иначе
+    // pending би останал "заклещен", докато myInterRoundWaiting никога не
+    // се задейства между semifinal completion и final readiness.
+    // client.resumeRoom е idempotent при повторни извиквания със същия
+    // roomId/token, затова е безопасно да достигне до тук и на следващи
+    // re-fetch-ове, докато room_snapshot реално пристигне.
+    if (
+      result.tournament.myActiveMatch !== null &&
+      result.tournament.myActiveMatch.roundType === 'final'
+    ) {
+      options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)
+    }
+
     if (state.tournamentInterRoundPendingResult !== null) {
       options.onTournamentActiveMatchRecovered?.(null)
       state.tournamentDetailRequiresPassword = false
       state.tournamentDetailErrorText = null
+      // Все още нито A (myInterRoundWaiting), нито C (terminal) — единичен
+      // ограничен authoritative refetch (виж коментара при функцията) вместо
+      // да разчитаме единствено на случаен бъдещ WS push.
+      scheduleTournamentInterRoundPendingRefetch(tournamentId)
       render()
       return
     }
+    clearTournamentInterRoundPendingRefetch()
     if (
       result.tournament.myInterRoundWaiting !== null &&
       result.tournament.myInterRoundWaiting.ownResultAcknowledged === false
@@ -4811,9 +4835,7 @@ export function createLobbyFlowController(
     }
     if (result.tournament.myInterRoundWaiting !== null) {
       options.onTournamentActiveMatchRecovered?.(null)
-    } else if (result.tournament.myActiveMatch !== null && result.tournament.myActiveMatch.roundType === 'final') {
-      options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)
-    } else {
+    } else if (result.tournament.myActiveMatch === null || result.tournament.myActiveMatch.roundType !== 'final') {
       options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
     }
     state.tournamentDetailRequiresPassword = false
@@ -9753,7 +9775,7 @@ export function createLobbyFlowController(
       stopWaitingRoomActivity()
       clearPrivateRoomCountdownLoop()
       clearServerRoomSnapshot()
-      clearTournamentInterRoundWinnerMinimumTimer()
+      clearTournamentInterRoundPendingRefetch()
       resetFinalFillSequence()
       doHideInitialOverlay()
     },

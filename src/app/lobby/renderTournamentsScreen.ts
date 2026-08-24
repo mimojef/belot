@@ -826,7 +826,8 @@ function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): s
       <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
         <div>
           <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
-          <div style="margin-top:8px;font-size:22px;font-weight:900;color:#ffffff;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}.</div>
+          <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Спечелихте ${escapeHtml(currentRound.lowerDefinite)}!</div>
+          <div style="margin-top:4px;font-size:16px;font-weight:900;color:#dbeafe;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}.</div>
         </div>
         ${body}
         ${sibling.status !== 'completed' ? `
@@ -873,10 +874,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
   if (
     state.tournamentInterRoundPendingResult != null &&
-    (
-      state.tournamentDetail?.myInterRoundWaiting == null ||
-      Date.now() - state.tournamentInterRoundPendingResult.shownAt < 3000
-    )
+    state.tournamentDetail?.myInterRoundWaiting == null
   ) {
     return renderTournamentInterRoundPendingScreen(state)
   }

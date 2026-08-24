@@ -398,7 +398,7 @@ await check('countdown renderer uses server finalStartAt/serverNow and keeps pop
   assert(!html.includes('Продължи играта'), 'popup/CTA leaked into countdown')
 })
 
-await check('real browser race keeps pending winner screen while detail/assignment arrive out of order', async () => {
+await check('immediately after semifinal win: pending/transition screen shows before any detail response', () => {
   const pendingState = {
     tournamentId: 'tournament-render',
     currentRoundType: 'semifinal' as const,
@@ -417,41 +417,123 @@ await check('real browser race keeps pending winner screen while detail/assignme
   assert(!pendingHtml.includes('РќР°РіСЂР°РґРµРЅ С„РѕРЅРґ'), 'generic finance rendered during pending load')
   assert(!pendingHtml.includes('Р¤РѕСЂРјР°С‚'), 'generic format rendered during pending load')
   assert(!pendingHtml.includes('РћС‚Р±РѕСЂРё</div>'), 'generic roster rendered during pending load')
+})
 
-  const nullWaitingDetail = detailFixture({
+await check('hydrated detail with myActiveMatch !== null AND myInterRoundWaiting === null does NOT fall through to the generic bracket screen', () => {
+  const pendingState = {
+    tournamentId: 'tournament-render',
+    currentRoundType: 'semifinal' as const,
+    semifinalScoreA: 94,
+    semifinalScoreB: 152,
+    shownAt: Date.now(),
+  }
+  // Точно race-ът от production report-а: authoritative detail response
+  // пристига с myActiveMatch (сочи например към финала, все още не due,
+  // или към друг активен турнир на профила — виж коментара при
+  // shouldKeepTournamentInterRoundPendingResult), докато myInterRoundWaiting
+  // все още не е готов на сървъра. tournamentInterRoundPendingResult
+  // умишлено остава non-null тук (симулира shouldKeepTournamentInterRoundPendingResult
+  // все още връщащ true, защото повече не проверява myActiveMatch).
+  const raceDetail = detailFixture({
     status: 'semifinal_in_progress',
-    statusLabel: 'РџРѕР»СѓС„РёРЅР°Р»',
+    statusLabel: 'Полуфинал',
     viewer: { ...detailFixture().viewer, entryStatus: 'confirmed' },
     myInterRoundWaiting: null,
-    myActiveMatch: null,
+    myActiveMatch: {
+      tournamentId: 'tournament-render',
+      tournamentName: 'Render Test',
+      matchId: 'final',
+      roomId: 'final-room',
+      roundType: 'final',
+      seat: 'bottom',
+      teamId: 'team-a',
+      partnerProfileId: 'team-a-2',
+      opponentTeamId: 'team-b',
+      reconnectToken: null,
+      deadlineKind: null,
+      attendanceDeadlineAt: null,
+      gameStartAt: null,
+    },
   })
-  const pendingAfterNullDetailHtml = renderDetailState({
+  const raceHtml = renderDetailState({
     tournamentDetailLoading: false,
-    tournamentDetail: nullWaitingDetail,
+    tournamentDetail: raceDetail,
     tournamentInterRoundPendingResult: pendingState,
   })
-  assert(pendingAfterNullDetailHtml.includes('data-tournament-inter-round-pending="1"'), 'pending screen lost after null waiting detail')
-  assert(!pendingAfterNullDetailHtml.includes('РќР°РіСЂР°РґРµРЅ С„РѕРЅРґ'), 'generic finance rendered after null waiting detail')
+  assert(raceHtml.includes('data-tournament-inter-round-pending="1"'), 'transition/pending presentation lost while myActiveMatch !== null but myInterRoundWaiting === null')
+  assert(!raceHtml.includes('data-tournament-inter-round-waiting="1"'), 'waiting marker rendered before myInterRoundWaiting is authoritative')
+  assert(!raceHtml.includes('РќР°РіСЂР°РґРµРЅ С„РѕРЅРґ'), 'generic finance (bracket screen) leaked during the myActiveMatch/myInterRoundWaiting race')
+  assert(!raceHtml.includes('Р¤РѕСЂРјР°С‚'), 'generic format (bracket screen) leaked during the myActiveMatch/myInterRoundWaiting race')
+  assert(!raceHtml.includes('РћС‚Р±РѕСЂРё</div>'), 'generic roster (bracket screen) leaked during the myActiveMatch/myInterRoundWaiting race')
 
+  // Terminal states (C) трябва да продължат нормално да прекъсват pending —
+  // само myActiveMatch сам по себе си вече не го прекъсва.
+  const terminalDetail = detailFixture({ status: 'finished', myInterRoundWaiting: null, myActiveMatch: null })
+  const terminalHtml = renderDetailState({
+    tournamentDetailLoading: false,
+    tournamentDetail: terminalDetail,
+    tournamentInterRoundPendingResult: null,
+  })
+  assert(!terminalHtml.includes('data-tournament-inter-round-pending="1"'), 'terminal tournament status still shows pending screen')
+})
+
+await check('when a later detail response carries myInterRoundWaiting: waiting screen appears immediately (no artificial delay)', () => {
   const hydratedHtml = renderDetailState({
     tournamentDetailLoading: false,
     tournamentDetail: detailFixture({
       status: 'semifinal_in_progress',
-      statusLabel: 'РџРѕР»СѓС„РёРЅР°Р»',
+      statusLabel: 'Полуфинал',
       viewer: { ...detailFixture().viewer, entryStatus: 'confirmed' },
     }),
     tournamentInterRoundPendingResult: null,
   })
   assert(hydratedHtml.includes('data-tournament-inter-round-waiting="1"'), 'hydrated waiting marker missing')
+  assert(hydratedHtml.includes('Спечелихте полуфинала!'), 'winner context missing from merged waiting screen')
+  assert(hydratedHtml.includes('Класирахте се за финала.'), 'qualification copy missing from merged waiting screen')
+  assert(hydratedHtml.includes('Изчаква се другият полуфинал'), 'sibling waiting copy missing from merged waiting screen')
   assert(hydratedHtml.includes('96 : 74'), 'hydrated sibling live score missing')
   assert(!hydratedHtml.includes('РќР°РіСЂР°РґРµРЅ С„РѕРЅРґ'), 'generic finance rendered after hydrated waiting')
+})
 
+await check('transition/state-machine wiring: no artificial wall-clock delay, bounded authoritative refetch, final auto-enter unconditional, generic bracket unreachable mid-transition', async () => {
   const projectRoot = resolve(join(serverRootPath, '..'))
   const lobbyController = await readFile(join(projectRoot, 'src', 'app', 'lobby', 'createLobbyFlowController.ts'), 'utf8')
   const mainTs = await readFile(join(projectRoot, 'src', 'main.ts'), 'utf8')
+
   assert(lobbyController.includes('function shouldKeepTournamentInterRoundPendingResult'), 'pending retention helper missing')
-  assert(lobbyController.includes('3000 - (Date.now() - pending.shownAt)'), 'winner minimum 3000ms latch missing')
-  assert(lobbyController.includes('detail.myInterRoundWaiting === null'), 'pending retention does not cover null waiting detail')
+  assert(lobbyController.includes('detail.myInterRoundWaiting === null'), 'pending retention does not cover null waiting detail (A)')
+  // 4/5 — никакъв artificial wall-clock minimum-display gate. Старата
+  // 3000ms grace period е премахната изцяло, не заменена с друга стойност.
+  assert(!lobbyController.includes('detail.myActiveMatch === null'), 'shouldKeepTournamentInterRoundPendingResult still terminates pending purely on myActiveMatch !== null')
+  assert(!/pending\.shownAt|shownAt.*<\s*\d+|Date\.now\(\)\s*-\s*.*shownAt/.test(lobbyController), 'a wall-clock minimum-display comparison against shownAt still exists')
+  assert(!lobbyController.includes('WinnerMinimumTimer'), 'old wall-clock winner-minimum timer scaffolding still present')
+
+  // B — final auto-enter трябва да е достижим независимо дали pending все
+  // още се държи (преди早е gate-нат зад "if pending return" early-return,
+  // затова никога не се достигаше, докато pending се пазеше).
+  const autoEnterIndex = lobbyController.indexOf("result.tournament.myActiveMatch.roundType === 'final'")
+  const pendingEarlyReturnIndex = lobbyController.indexOf('if (state.tournamentInterRoundPendingResult !== null) {', lobbyController.indexOf('async function fetchTournamentDetail'))
+  assert(autoEnterIndex !== -1, 'final auto-enter check missing from fetchTournamentDetail')
+  assert(pendingEarlyReturnIndex !== -1, 'pending early-return branch missing from fetchTournamentDetail')
+  assert(autoEnterIndex < pendingEarlyReturnIndex, 'final auto-enter check is still gated behind the pending early-return (B unreachable while transitioning)')
+  assert(lobbyController.includes('options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)'), 'auto-enter-final call missing')
+
+  // Bounded authoritative refetch (не безкраен tight polling loop) — огледало
+  // на съществуващия scheduleTournamentInterRoundAckRefetch pattern.
+  assert(lobbyController.includes('function scheduleTournamentInterRoundPendingRefetch'), 'bounded pending refetch mechanism missing')
+  assert(lobbyController.includes('scheduleTournamentInterRoundPendingRefetch(tournamentId)'), 'pending refetch not scheduled from fetchTournamentDetail')
+  const pendingRefetchBody = lobbyController.slice(
+    lobbyController.indexOf('function scheduleTournamentInterRoundPendingRefetch'),
+    lobbyController.indexOf('function scheduleTournamentInterRoundPendingRefetch') + 900,
+  )
+  assert(/},\s*350\)/.test(pendingRefetchBody), 'pending refetch is not a single bounded timeout (expected 350ms one-shot matching the existing ack-refetch pattern)')
+  assert(!pendingRefetchBody.includes('setInterval'), 'pending refetch uses setInterval (unbounded tight polling) instead of a single bounded retry')
+
+  // 8 — единственият renderer-gate за generic bracket, потвърден непроменен:
+  // pending клонът предхожда loading/generic клона.
+  const renderer = await readFile(join(projectRoot, 'src', 'app', 'lobby', 'renderTournamentsScreen.ts'), 'utf8')
+  assert(renderer.indexOf('state.tournamentInterRoundPendingResult != null') < renderer.indexOf('state.tournamentDetailLoading'), 'pending branch is not before loading/generic branch')
+
   assert(mainTs.includes("if (message.assignment.roundType === 'final' && lobby?.getCurrentScreen() === 'tournament-detail') {"), 'final assignment detail guard missing')
   assert(!mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'), 'final assignment still direct-resumes before countdown')
 })
@@ -498,7 +580,7 @@ await check('loser/final/normal source wiring remains isolated', async () => {
   const projectRoot = resolve(join(serverRootPath, '..'))
   const activeRoom = await readFile(join(projectRoot, 'src', 'app', 'activeRoom', 'createActiveRoomFlowController.ts'), 'utf8')
   assert(activeRoom.includes("${wonRound ? 'Към турнира' : 'Към лобито'}"), 'loss flow button branch changed')
-  assert(activeRoom.includes('Спечелихте турнира!'), 'final result champion copy missing')
+  assert(activeRoom.includes('Вие спечелихте турнира!'), 'final result champion copy missing')
   assert(activeRoom.includes('renderMatchEndedScreen('), 'normal match-ended renderer missing')
 })
 
