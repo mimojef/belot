@@ -43,6 +43,8 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 const SMART_MIGRATION_HANDLERS: Record<string, (database: SqliteDatabase) => void> = {
   '20260801_002_add_tournament_match_deadline_kind_and_score.sql':
     applyTournamentMatchDeadlineKindAndScoreMigration,
+  '20260818_008_add_vip_purchase_audit_fields.sql':
+    applyVipPurchaseAuditFieldsMigration,
 }
 
 function getTableColumnTypes(
@@ -86,6 +88,56 @@ function applyTournamentMatchDeadlineKindAndScoreMigration(database: SqliteDatab
     deadline_kind: 'TEXT',
     final_score_team_a: 'INTEGER',
     final_score_team_b: 'INTEGER',
+  }
+
+  for (const [columnName, expectedType] of Object.entries(expectedColumnTypes)) {
+    const actualType = columnsAfter.get(columnName)
+    if (actualType === undefined || actualType.toUpperCase() !== expectedType) {
+      throw new Error(
+        `Postcondition failed for ${tableName}.${columnName}: expected type ${expectedType}, got ${
+          actualType ?? 'MISSING COLUMN'
+        }.`,
+      )
+    }
+  }
+}
+
+// 20260818_008_add_vip_purchase_audit_fields.sql — добавя purchase_id
+// (FK -> vip_purchase_ledger(purchase_id) ON DELETE SET NULL) /
+// amount_paid_cents / currency към vip_grants. Byte-identical по SQL
+// съдържание с по-старото (renumbered/replaced) 20260818_003, чиито
+// ALTER TABLE-ове вече бяха приложени на локални бази ПРЕДИ 003->008
+// renumbering-а — non-idempotent ADD COLUMN гърми с "duplicate column
+// name" при повторен опит. Handler-ът прави всяка ADD COLUMN условна
+// (restart-safe за частично приложена миграция) и после потвърждава и
+// трите postcondition-и (колона присъства + очакван тип) преди runner-ът
+// да запише ledger реда — виж §4/§5 в task spec-а. FK-ът на purchase_id
+// не се проверява тук отделно: SQLite го записва като част от column
+// definition-а в CREATE TABLE текста (виждан през sqlite_master.sql), а
+// PRAGMA table_info() вече потвърждава колоната+типа; foreign_key_list()
+// проверка би дублирала същата гаранция без допълнителна стойност.
+function applyVipPurchaseAuditFieldsMigration(database: SqliteDatabase): void {
+  const tableName = 'vip_grants'
+  const columnsBefore = getTableColumnTypes(database, tableName)
+
+  if (!columnsBefore.has('purchase_id')) {
+    database.exec(`
+      ALTER TABLE ${tableName} ADD COLUMN purchase_id TEXT NULL
+        REFERENCES vip_purchase_ledger(purchase_id) ON DELETE SET NULL;
+    `)
+  }
+  if (!columnsBefore.has('amount_paid_cents')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN amount_paid_cents INTEGER NULL;`)
+  }
+  if (!columnsBefore.has('currency')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN currency TEXT NULL;`)
+  }
+
+  const columnsAfter = getTableColumnTypes(database, tableName)
+  const expectedColumnTypes: Record<string, string> = {
+    purchase_id: 'TEXT',
+    amount_paid_cents: 'INTEGER',
+    currency: 'TEXT',
   }
 
   for (const [columnName, expectedType] of Object.entries(expectedColumnTypes)) {
