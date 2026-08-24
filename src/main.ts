@@ -153,6 +153,28 @@ function setPrivateRoomInGameNotificationsEnabled(enabled: boolean): void {
   privateRoomCreatedNotification?.syncPreferences()
 }
 
+const PRIVATE_ROOM_CREATED_SOUND_KEY = 'pika.privateRoomCreatedSoundEnabled'
+
+function loadPrivateRoomCreatedSoundEnabled(): boolean {
+  try {
+    return localStorage.getItem(PRIVATE_ROOM_CREATED_SOUND_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+let privateRoomCreatedSoundEnabled = loadPrivateRoomCreatedSoundEnabled()
+
+function setPrivateRoomCreatedSoundEnabled(enabled: boolean): void {
+  privateRoomCreatedSoundEnabled = enabled
+  try {
+    localStorage.setItem(PRIVATE_ROOM_CREATED_SOUND_KEY, enabled ? 'true' : 'false')
+  } catch {
+    // Ignore storage failures; the in-memory setting still applies for this tab.
+  }
+  lobby?.setPrivateRoomCreatedSoundEnabled(enabled)
+}
+
 const likeNotifContainer = document.createElement('div')
 likeNotifContainer.id = 'global-like-notifications'
 document.body.appendChild(likeNotifContainer)
@@ -214,6 +236,7 @@ const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
   container: privateRoomCreatedNotifContainer,
   isInActiveGame: () => activeRoom.hasActiveRoom(),
   areInGameNotificationsEnabled: () => privateRoomInGameNotificationsEnabled,
+  isSoundEnabled: () => privateRoomCreatedSoundEnabled,
   onDisableInGameNotifications: () => {
     setPrivateRoomInGameNotificationsEnabled(false)
   },
@@ -223,11 +246,18 @@ const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
 })
 
 window.addEventListener('storage', (event) => {
-  if (event.key !== PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY) return
-  const enabled = event.newValue !== 'false'
-  privateRoomInGameNotificationsEnabled = enabled
-  lobby?.setPrivateRoomInGameNotificationsEnabled(enabled)
-  privateRoomCreatedNotification.syncPreferences()
+  if (event.key === PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY) {
+    const enabled = event.newValue !== 'false'
+    privateRoomInGameNotificationsEnabled = enabled
+    lobby?.setPrivateRoomInGameNotificationsEnabled(enabled)
+    privateRoomCreatedNotification.syncPreferences()
+    return
+  }
+  if (event.key === PRIVATE_ROOM_CREATED_SOUND_KEY) {
+    const enabled = event.newValue !== 'false'
+    privateRoomCreatedSoundEnabled = enabled
+    lobby?.setPrivateRoomCreatedSoundEnabled(enabled)
+  }
 })
 
 const tournamentEconomyNotifContainer = document.createElement('div')
@@ -5094,6 +5124,10 @@ lobby = createLobbyFlowController({
   initialPrivateRoomInGameNotificationsEnabled: privateRoomInGameNotificationsEnabled,
   onPrivateRoomInGameNotificationsChange: (enabled) => {
     setPrivateRoomInGameNotificationsEnabled(enabled)
+  },
+  initialPrivateRoomCreatedSoundEnabled: privateRoomCreatedSoundEnabled,
+  onPrivateRoomCreatedSoundChange: (enabled) => {
+    setPrivateRoomCreatedSoundEnabled(enabled)
   },
   onAdminServerScreenEnter: () => {
     startMonitoringPolling()

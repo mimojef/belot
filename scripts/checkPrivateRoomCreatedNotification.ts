@@ -52,6 +52,7 @@ const CONTROLLER_PATH = join(REPO_ROOT, 'src', 'app', 'lobby', 'createLobbyFlowC
 const CLIENT_PATH = join(REPO_ROOT, 'src', 'app', 'network', 'createGameServerClient.ts')
 const SERVER_INDEX_PATH = join(REPO_ROOT, 'server', 'src', 'index.ts')
 const SERVER_MESSAGE_TYPES_PATH = join(REPO_ROOT, 'server', 'src', 'protocol', 'messageTypes.ts')
+const RENDER_LOBBY_SCREEN_PATH = join(REPO_ROOT, 'src', 'app', 'lobby', 'renderLobbyScreen.ts')
 
 let passed = 0
 let failed = 0
@@ -112,6 +113,7 @@ const controllerSrc = normalizeLineEndings(await readFile(CONTROLLER_PATH, 'utf8
 const clientSrc = normalizeLineEndings(await readFile(CLIENT_PATH, 'utf8'))
 const serverSrc = normalizeLineEndings(await readFile(SERVER_INDEX_PATH, 'utf8'))
 const serverMessageTypesSrc = normalizeLineEndings(await readFile(SERVER_MESSAGE_TYPES_PATH, 'utf8'))
+const renderScreenSrc = normalizeLineEndings(await readFile(RENDER_LOBBY_SCREEN_PATH, 'utf8'))
 
 console.log('\n=== Private Room Created Notification Checks ===\n')
 
@@ -460,6 +462,56 @@ await check('[29] Известието не блокира игровото уп
 
 await check('[30] Позиционирането отчита mobile safe-area (notch)', () => {
   assert(notifSrc.includes('env(safe-area-inset-top, 0px)'), 'top позиционирането трябва да добавя safe-area отстъп')
+})
+
+// ─── D) Sound-only toggle ("Звук при нова частна маса") ─────────────────────
+
+await check('[31] playSound() е gated от нова isSoundEnabled() настройка, popup-ът остава безусловен', () => {
+  const presentFn = extractFunctionBody(notifSrc, 'function presentAndSchedule(notice: PrivateRoomCreatedNotice): void {', 'presentAndSchedule')
+  assert(presentFn.includes('render()'), 'render() трябва да остане безусловен (popup-ът винаги се показва)')
+  assert(presentFn.includes('if (options.isSoundEnabled()) {'), 'playSound() трябва да е условен на isSoundEnabled()')
+  assert(presentFn.includes('dismissTimer = setTimeout(dismiss, AUTO_DISMISS_MS)'), 'auto-dismiss таймерът трябва да остане безусловен')
+  const renderIdx = presentFn.indexOf('render()')
+  const soundIdx = presentFn.indexOf('if (options.isSoundEnabled())')
+  const timerIdx = presentFn.indexOf('dismissTimer = setTimeout')
+  assert(renderIdx !== -1 && soundIdx !== -1 && timerIdx !== -1 && renderIdx < soundIdx && soundIdx < timerIdx, 'редът трябва да е render → sound gate → timer')
+})
+
+await check('[32] Local sound preference persists, defaults enabled, and syncs across tabs through storage event', () => {
+  assert(mainSrc.includes("const PRIVATE_ROOM_CREATED_SOUND_KEY = 'pika.privateRoomCreatedSoundEnabled'"), 'localStorage key missing')
+  assert(mainSrc.includes("localStorage.getItem(PRIVATE_ROOM_CREATED_SOUND_KEY) !== 'false'"), 'default must be enabled unless explicitly false')
+  assert(mainSrc.includes("localStorage.setItem(PRIVATE_ROOM_CREATED_SOUND_KEY, enabled ? 'true' : 'false')"), 'setter must persist the same setting')
+  assert(mainSrc.includes("event.key === PRIVATE_ROOM_CREATED_SOUND_KEY"), 'multi-tab storage sync missing for the sound key')
+  assert(mainSrc.includes('lobby?.setPrivateRoomCreatedSoundEnabled(enabled)'), 'storage sync must push into the lobby controller')
+})
+
+await check('[33] Toggle-ът е в съществуващото notifications dropdown, отделен ред от in-game notifications toggle-а', () => {
+  assert(renderScreenSrc.includes('data-private-room-created-sound-toggle="1"'), 'trябва да съществува checkbox за новия toggle в bell dropdown-а')
+  assert(renderScreenSrc.includes('Звук при нова частна маса'), 'label текстът трябва да съвпада с изискването')
+  assert(renderScreenSrc.includes('${state.privateRoomCreatedSoundEnabled ? \'checked\' : \'\'}'), 'checkbox-ът трябва да отразява state.privateRoomCreatedSoundEnabled')
+  const dropdownFn = extractFunctionBody(renderScreenSrc, 'function renderNotificationsDropdown(state: LobbyScreenState): string {', 'renderNotificationsDropdown')
+  const soundToggleIdx = dropdownFn.indexOf('data-private-room-created-sound-toggle')
+  const inGameToggleIdx = dropdownFn.indexOf('data-private-room-in-game-notifications-toggle')
+  assert(soundToggleIdx !== -1 && inGameToggleIdx !== -1 && inGameToggleIdx < soundToggleIdx, 'новият sound toggle трябва да е отделен ред, след съществуващия in-game toggle')
+})
+
+await check('[34] Sound toggle-ът wire-ва собствен callback, не reuse-ва in-game notifications callback-а', () => {
+  const syncFn = extractBlock(renderScreenSrc, 'function syncNotificationsDropdown(', 'syncNotificationsDropdown', '\n}')
+  assert(syncFn.includes('data-private-room-created-sound-toggle="1"'), 'change listener-ът трябва да е закачен за новия checkbox')
+  assert(syncFn.includes('callbacks.onPrivateRoomCreatedSoundChange'), 'трябва да вика собствен callback, не onPrivateRoomInGameNotificationsChange')
+  assert(controllerSrc.includes('initialPrivateRoomCreatedSoundEnabled'), 'controller-ът трябва да приема initial стойност')
+  assert(controllerSrc.includes('onPrivateRoomCreatedSoundChange?.(enabled)'), 'toggle-ът трябва да вика shared setting callback-а')
+  assert(controllerSrc.includes('setPrivateRoomCreatedSoundEnabled'), 'controller-ът трябва да излага setter за storage sync')
+  const wiring = extractBlock(mainSrc, 'const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({', 'privateRoomCreatedNotification wiring', '\n})')
+  assert(wiring.includes('isSoundEnabled: () => privateRoomCreatedSoundEnabled'), 'notification controller-ът трябва да чете новата настройка')
+})
+
+await check('[35] Sound toggle-ът не пипа in-game notifications preference или другите известия/звуци', () => {
+  assert(mainSrc.includes('PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY'), 'старият in-game notifications key трябва да остане непокътнат')
+  assert(mainSrc.includes("localStorage.getItem(PRIVATE_ROOM_IN_GAME_NOTIFICATIONS_KEY) !== 'false'"), 'старата default логика трябва да остане same')
+  const handleIncomingFn = extractFunctionBody(notifSrc, 'function handleIncoming(notice: PrivateRoomCreatedNotice): void {', 'handleIncoming')
+  assert(handleIncomingFn.includes('normalizedNotice.recipientInActiveGame && !options.areInGameNotificationsEnabled()'), 'in-game suppression логиката трябва да остане непроменена')
+  assert(!handleIncomingFn.includes('isSoundEnabled'), 'in-game gate-ът не трябва да reuse-ва sound preference-a (различни concerns)')
 })
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

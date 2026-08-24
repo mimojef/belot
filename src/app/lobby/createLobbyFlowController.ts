@@ -582,6 +582,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminServerScreenLeave?: () => void
   initialPrivateRoomInGameNotificationsEnabled?: boolean
   onPrivateRoomInGameNotificationsChange?: (enabled: boolean) => void
+  initialPrivateRoomCreatedSoundEnabled?: boolean
+  onPrivateRoomCreatedSoundChange?: (enabled: boolean) => void
   /** GET текуща роля на профил (само за пълен admin viewer) — за "Субадмин"/"Чат админ" бадж в профилния попъп. */
   onAdminGetTargetRole?: (
     profileId: string,
@@ -860,6 +862,7 @@ export type LobbyFlowController = {
   setErrorText: (value: string | null) => void
   setLocalAvatarUrl: (value: string | null) => void
   setPrivateRoomInGameNotificationsEnabled: (value: boolean) => void
+  setPrivateRoomCreatedSoundEnabled: (value: boolean) => void
   setFriendships: (value: FriendshipsSnapshot | null) => void
   setChatConversations: (value: ChatConversationSnapshot[]) => void
   refreshTopicsDirectoryMetadata: () => Promise<boolean>
@@ -1276,6 +1279,7 @@ type InternalLobbyFlowState = {
   lobbyChatWriteLockedPopupOpen: boolean
   notificationsOpen: boolean
   privateRoomInGameNotificationsEnabled: boolean
+  privateRoomCreatedSoundEnabled: boolean
   pendingFriendRequests: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   missionsPopupOpen: boolean
   dailyMissions: PlayerMissionProgressSnapshot[]
@@ -1786,6 +1790,7 @@ function createInitialState(): InternalLobbyFlowState {
     lobbyChatWriteLockedPopupOpen: false,
     notificationsOpen: false,
     privateRoomInGameNotificationsEnabled: true,
+    privateRoomCreatedSoundEnabled: true,
     pendingFriendRequests: [],
     missionsPopupOpen: false,
     dailyMissions: [],
@@ -2171,6 +2176,7 @@ export function createLobbyFlowController(
 ): LobbyFlowController {
   const state = createInitialState()
   state.privateRoomInGameNotificationsEnabled = options.initialPrivateRoomInGameNotificationsEnabled ?? true
+  state.privateRoomCreatedSoundEnabled = options.initialPrivateRoomCreatedSoundEnabled ?? true
   const _initialScreen = LOBBY_PATH_TO_SCREEN[window.location.pathname]
   if (_initialScreen) {
     state.currentScreen = _initialScreen
@@ -3351,6 +3357,7 @@ export function createLobbyFlowController(
       changePasswordErrorText: state.changePasswordErrorText,
       notificationsOpen: state.notificationsOpen,
       privateRoomInGameNotificationsEnabled: state.privateRoomInGameNotificationsEnabled,
+      privateRoomCreatedSoundEnabled: state.privateRoomCreatedSoundEnabled,
       pendingFriendRequests: state.pendingFriendRequests,
       missionsPopupOpen: state.missionsPopupOpen,
       dailyMissions: state.dailyMissions,
@@ -4527,6 +4534,11 @@ export function createLobbyFlowController(
       onPrivateRoomInGameNotificationsChange: (enabled) => {
         state.privateRoomInGameNotificationsEnabled = enabled
         options.onPrivateRoomInGameNotificationsChange?.(enabled)
+        render()
+      },
+      onPrivateRoomCreatedSoundChange: (enabled) => {
+        state.privateRoomCreatedSoundEnabled = enabled
+        options.onPrivateRoomCreatedSoundChange?.(enabled)
         render()
       },
       onNotificationMissionsClick: () => {
@@ -14187,6 +14199,12 @@ export function createLobbyFlowController(
     },
     setPrivateRoomInGameNotificationsEnabled: (value) => {
       state.privateRoomInGameNotificationsEnabled = value
+      if (state.notificationsOpen) {
+        render()
+      }
+    },
+    setPrivateRoomCreatedSoundEnabled: (value) => {
+      state.privateRoomCreatedSoundEnabled = value
       if (state.notificationsOpen) {
         render()
       }

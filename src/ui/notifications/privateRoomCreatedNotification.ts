@@ -26,6 +26,7 @@ export function createPrivateRoomCreatedNotification(options: {
   container: HTMLElement
   isInActiveGame: () => boolean
   areInGameNotificationsEnabled: () => boolean
+  isSoundEnabled: () => boolean
   onDisableInGameNotifications: () => void
   onEnterPrivateRooms: () => void
 }): NotificationController {
@@ -68,7 +69,9 @@ export function createPrivateRoomCreatedNotification(options: {
     current = notice
     clearDismissTimer()
     render()
-    playSound()
+    if (options.isSoundEnabled()) {
+      playSound()
+    }
     dismissTimer = setTimeout(dismiss, AUTO_DISMISS_MS)
   }
 
