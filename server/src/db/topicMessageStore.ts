@@ -277,6 +277,27 @@ export type TopicMessageStore = {
     excludedSenderProfileIds?: readonly string[],
   ) => Map<string, TopicMessageAggregates>
   /**
+   * Broadcast fan-out batch — виждерски-aware replyCount+viewerHasLiked за
+   * ЕДНО messageId, спрямо N различни viewer profiles наведнъж (perf audit
+   * fix: broadcastTopicMessageToLocalSubscribers/broadcastTopicReplyToLocalSubscribers
+   * викаха getMessageAggregatesByIds ОТДЕЛНО per subscriber connection — N+1
+   * spрямо connected count). Прави точно 2 заявки ОБЩО (не per-profile):
+   * (1) likers сред batch-а (за viewerHasLiked), (2) distinct sender_profile_id
+   * на live replies (за block-aware replyCount adjustment, computed in-memory
+   * срещу вече кеширания per-viewer blocked set — getLobbyChatBlockedSet в
+   * index.ts е in-memory LRU cached, затова block lookup-ът тук е free).
+   * globalReplyCount е viewer-agnostic (никой excluded) — caller-ът изважда
+   * броя replies от блокирани sender-и за ВСЕКИ отделен viewer, без допълнителна
+   * SQL заявка. Профили извън batch-а (или дублирани connectionId-та на
+   * същия profile) не създават повторна DB работа — dedupe-ва се от caller-а
+   * (уникален Set от viewerProfileId, не connectionId).
+   */
+  getBroadcastViewerDataForProfiles: (
+    messageId: string,
+    viewerProfileIds: readonly string[],
+    excludedSenderProfileIdsByViewer: ReadonlyMap<string, ReadonlySet<string>>,
+  ) => Map<string, { replyCount: number; viewerHasLiked: boolean }>
+  /**
    * Batch attachment lookup за набор от messageId-та — ЕДНА заявка за целия
    * batch (root list page / reply page / poll batch), не N+1. Съобщения без
    * attachment просто липсват от Map-а (не null-стойност) — caller-ът прави
@@ -573,6 +594,36 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     ) VALUES (?, ?, NULL, ?, ?, ?, ?);
   `)
 
+  // topic_root_latest_seq maintenance — O(1) per write, never per subscriber.
+  // Kept in sync for ALL topics (this store has no isGeneral concept of its
+  // own); only the General unread read path actually consumes it.
+  const insertRootLatestSeqStatement = database.prepare(`
+    INSERT INTO topic_root_latest_seq (root_message_id, topic_id, latest_seq)
+    VALUES (?, ?, ?);
+  `)
+  const bumpRootLatestSeqStatement = database.prepare(`
+    UPDATE topic_root_latest_seq
+    SET latest_seq = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+    WHERE root_message_id = ? AND latest_seq < ?;
+  `)
+  const deleteRootLatestSeqStatement = database.prepare(`
+    DELETE FROM topic_root_latest_seq WHERE root_message_id = ?;
+  `)
+  const recomputeRootLatestSeqStatement = database.prepare(`
+    SELECT MAX(m.seq) as latestSeq
+    FROM topic_messages m
+    WHERE (m.message_id = ? OR m.parent_message_id = ?) AND m.deleted_at IS NULL;
+  `)
+  // Unconditional set (unlike bumpRootLatestSeqStatement's "only if greater")
+  // — used after a reply delete, where the recomputed max can legitimately
+  // be LOWER than the stale stored value (the deleted reply may have been
+  // the current latest_seq holder).
+  const bumpOrSetRootLatestSeqStatement = database.prepare(`
+    UPDATE topic_root_latest_seq
+    SET latest_seq = ?, updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+    WHERE root_message_id = ?;
+  `)
+
   const selectByMessageIdStatement = database.prepare(`
     SELECT seq, message_id, topic_id, parent_message_id, sender_profile_id, sender_display_name, sender_role, body, created_at, edited_at, deleted_at
     FROM topic_messages
@@ -597,7 +648,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     const messageId = randomUUID()
     database.exec('BEGIN IMMEDIATE;')
     try {
-      insertMessageStatement.run(
+      const insertResult = insertMessageStatement.run(
         messageId,
         input.topicId,
         input.senderProfileId,
@@ -615,6 +666,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
           input.attachment.contentType,
         )
       }
+      insertRootLatestSeqStatement.run(messageId, input.topicId, insertResult.lastInsertRowid as number)
       database.exec('COMMIT;')
     } catch (error) {
       database.exec('ROLLBACK;')
@@ -693,7 +745,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
         return { ok: false, code: 'parent_not_found' }
       }
 
-      insertReplyStatement.run(
+      const insertResult = insertReplyStatement.run(
         messageId,
         input.topicId,
         input.parentMessageId,
@@ -712,6 +764,8 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
           input.attachment.contentType,
         )
       }
+      const replySeq = insertResult.lastInsertRowid as number
+      bumpRootLatestSeqStatement.run(replySeq, input.parentMessageId, replySeq)
       database.exec('COMMIT;')
     } catch (error) {
       database.exec('ROLLBACK;')
@@ -925,6 +979,23 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
         return { ok: false, code: 'already_deleted' }
       }
 
+      if (isRoot) {
+        // Root (+ cascaded replies) just went dead — thread has zero live
+        // messages left, drop its topic_root_latest_seq row entirely.
+        deleteRootLatestSeqStatement.run(target.message_id)
+      } else {
+        // A reply died; root may still be live with other replies —
+        // recompute latest_seq from remaining live messages (falls back to
+        // the root's own seq if no live replies remain).
+        const recomputed = recomputeRootLatestSeqStatement.get(
+          target.parent_message_id,
+          target.parent_message_id,
+        ) as { latestSeq: number | null } | undefined
+        if (recomputed?.latestSeq != null) {
+          bumpOrSetRootLatestSeqStatement.run(recomputed.latestSeq, target.parent_message_id)
+        }
+      }
+
       insertMessageDeletionEventStatement.run(input.topicId, target.message_id, target.parent_message_id)
       insertMessageDeletionAuditStatement.run(
         randomUUID(),
@@ -1051,6 +1122,22 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       if ((changes.changes as number) === 0) {
         database.exec('ROLLBACK;')
         return { ok: false, code: 'already_deleted' }
+      }
+
+      if (isRoot) {
+        // Self-delete root requires zero live replies (checked above) —
+        // thread has zero live messages left, drop the row entirely.
+        deleteRootLatestSeqStatement.run(target.message_id)
+      } else {
+        // A reply died; root may still be live with other replies —
+        // recompute latest_seq from remaining live messages.
+        const recomputed = recomputeRootLatestSeqStatement.get(
+          target.parent_message_id,
+          target.parent_message_id,
+        ) as { latestSeq: number | null } | undefined
+        if (recomputed?.latestSeq != null) {
+          bumpOrSetRootLatestSeqStatement.run(recomputed.latestSeq, target.parent_message_id)
+        }
       }
 
       insertMessageDeletionEventStatement.run(input.topicId, target.message_id, target.parent_message_id)
@@ -1396,6 +1483,59 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     return result
   }
 
+  function getBroadcastViewerDataForProfiles(
+    messageId: string,
+    viewerProfileIds: readonly string[],
+    excludedSenderProfileIdsByViewer: ReadonlyMap<string, ReadonlySet<string>>,
+  ): Map<string, { replyCount: number; viewerHasLiked: boolean }> {
+    const uniqueViewerProfileIds = [...new Set(viewerProfileIds)]
+    const result = new Map<string, { replyCount: number; viewerHasLiked: boolean }>(
+      uniqueViewerProfileIds.map((id) => [id, { replyCount: 0, viewerHasLiked: false }]),
+    )
+    if (uniqueViewerProfileIds.length === 0) return result
+
+    // (1) Global (unfiltered) reply count + кои sender-и всъщност са
+    // допринесли live replies — с тази малка допълнителна информация можем
+    // да computираме block-aware replyCount per viewer БЕЗ отделна SQL
+    // заявка per viewer: globalCount - (брой replies от sender-и, които ТОЗИ
+    // viewer е блокирал). excludedSenderProfileIdsByViewer идва вече
+    // computed от caller-а (index.ts, in-memory LRU-cached getLobbyChatBlockedSet
+    // per viewer) — store слоят не пипа block cache директно.
+    const replySenderRows = database
+      .prepare(`SELECT sender_profile_id, COUNT(*) as cnt FROM topic_messages WHERE parent_message_id = ? AND deleted_at IS NULL GROUP BY sender_profile_id;`)
+      .all(messageId) as Array<{ sender_profile_id: string; cnt: number }>
+    const globalReplyCount = replySenderRows.reduce((sum, row) => sum + row.cnt, 0)
+
+    for (const viewerProfileId of uniqueViewerProfileIds) {
+      const entry = result.get(viewerProfileId)
+      if (!entry) continue
+      const blocked = excludedSenderProfileIdsByViewer.get(viewerProfileId)
+      if (blocked === undefined || blocked.size === 0 || replySenderRows.length === 0) {
+        entry.replyCount = globalReplyCount
+        continue
+      }
+      let blockedReplyCount = 0
+      for (const row of replySenderRows) {
+        if (blocked.has(row.sender_profile_id)) blockedReplyCount += row.cnt
+      }
+      entry.replyCount = globalReplyCount - blockedReplyCount
+    }
+
+    // (2) Кои от batch viewer-ите харесаха точно това съобщение — една
+    // заявка, IN-филтрирана по batch-а, вместо по един liker_profile_id
+    // lookup per viewer.
+    const placeholders = uniqueViewerProfileIds.map(() => '?').join(',')
+    const likedRows = database
+      .prepare(`SELECT liker_profile_id FROM topic_message_likes WHERE message_id = ? AND liker_profile_id IN (${placeholders});`)
+      .all(messageId, ...uniqueViewerProfileIds) as Array<{ liker_profile_id: string }>
+    for (const row of likedRows) {
+      const entry = result.get(row.liker_profile_id)
+      if (entry) entry.viewerHasLiked = true
+    }
+
+    return result
+  }
+
   const selectLikeExistsStatement = database.prepare(`
     SELECT 1 FROM topic_message_likes WHERE message_id = ? AND liker_profile_id = ? LIMIT 1;
   `)
@@ -1575,6 +1715,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     countLiveRootMessages,
     hardDeleteRetentionVictims,
     getMessageAggregatesByIds,
+    getBroadcastViewerDataForProfiles,
     getAttachmentsByMessageIds,
     getAttachmentForDownload,
     attachmentExistsForFilename,

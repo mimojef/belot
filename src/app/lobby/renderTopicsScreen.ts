@@ -226,7 +226,7 @@ export function renderTopicLikeButton(state: LobbyScreenState, messageId: string
   `
 }
 
-function renderTopicReplyButton(rootMessageId: string, replyCount: number): string {
+export function renderTopicReplyButton(rootMessageId: string, replyCount: number): string {
   return `
     <button
       type="button"
@@ -649,7 +649,7 @@ function renderRepliesSection(state: LobbyScreenState, rootMessageId: string): s
   const listHtml = replies === null || replies === undefined
     ? (isLoading ? `<div style="padding:8px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.42);font-size:12px;">Зареждане на отговори...</div>` : '')
     : replies.length === 0
-      ? `<div style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
+      ? `<div data-topic-replies-empty="1" style="padding:4px 0 8px ${REPLY_INDENT_PX}px;color:rgba(248,250,252,0.36);font-size:12px;">Все още няма отговори.</div>`
       : replies.map((r) => renderTopicReplyRow(state, r)).join('')
 
   const loadMoreHtml = hasMore && replies !== null && replies !== undefined

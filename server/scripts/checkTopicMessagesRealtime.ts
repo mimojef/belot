@@ -816,6 +816,89 @@ console.log('\n=== Topic Messages Realtime — Section E (N+1 avatar lookup sour
     const subscribeBlock = serverSrc.match(/if \(message\.type === 'subscribe_topic_messages'\)[\s\S]{0,3200}/)?.[0] ?? ''
     assert(subscribeBlock.includes('hydrateTopicMessagesWithCurrentAvatars(page.messages)'), 'catch-up трябва да подаде целия page.messages масив накуп, не по едно съобщение в цикъл')
   })
+
+  // Perf audit fix — broadcast fan-out N+1 elimination (два кръга). Първи
+  // кръг: viewerAwareReplyCount/getTopicThreadUnreadCountForProfile/
+  // viewerHasLikedMessage бяха вътре в for цикъла по subscriber connections —
+  // O(S×3)/O(S) заявки, S=connected subscribers. Втори кръг (follow-up):
+  // дори след dedupe по connection, getTopicThreadUnreadCountForProfile
+  // остана в LOOP по уникален profileId — O(uniqueProfiles) заявки. Финално:
+  // getTopicThreadUnreadCountsForProfiles batch-ва целия profile set в
+  // ФИКСИРАН малък брой SQL statements (независим от profile count),
+  // извикан ИЗВЪН всички for-цикли. Тестовете по-долу доказват СТРУКТУРНО
+  // (source-level), не само поведенчески, че per-recipient/per-profile-loop
+  // SQL заявки вече не съществуват в тези loop-ове изобщо.
+  await check('[E4] broadcastTopicMessageToLocalSubscribers прави batch unread lookup ИЗВЪН всички for-цикли (нула SQL в loop-овете)', () => {
+    const fnBody = serverSrc.match(/function broadcastTopicMessageToLocalSubscribers\(([\s\S]*?)\n\}/)?.[0] ?? ''
+    assert(fnBody.length > 0, 'broadcastTopicMessageToLocalSubscribers не е намерена')
+    // Точно ДВА for-цикъла остават в тялото: (1) collect live recipients —
+    // само connection/socket/block lookups (in-memory); (2) финалният send
+    // loop — само map lookup + safeSendToConnection. Няма трети "loop по
+    // уникален profileId" вече — batch call-ът замества го изцяло.
+    assert(!/for\s*\(const profileId of uniqueViewerProfileIds\)/.test(fnBody), 'не трябва да има loop по uniqueViewerProfileIds — batch call-ът замества го')
+    const connectionIteratingLoops = [...fnBody.matchAll(/for\s*\(const (?:subscriberConnectionId|recipient) of [^)]*\)\s*\{([\s\S]*?)\n    \}/g)].map((m) => m[1] ?? '')
+    assert(connectionIteratingLoops.length >= 2, `очакват се точно 2 connection-iterating for-цикъла (collect + send), намерени ${connectionIteratingLoops.length}`)
+    for (const body of connectionIteratingLoops) {
+      assert(!body.includes('topicMessageStore.getBroadcastViewerDataForProfiles('), 'batch viewer-data lookup не трябва да е вътре в connection-iterating for-цикъла (би било N+1 отново)')
+      assert(!body.includes('getTopicThreadUnreadCountForProfile('), 'единичният unread SQL lookup не трябва да е никъде в тази функция')
+      assert(!body.includes('getTopicThreadUnreadCountsForProfiles('), 'batch unread lookup не трябва да е вътре в for-цикъл (трябва да е извън, ЕДИН път за целия batch)')
+    }
+    // Batch извикването трябва да е ИЗВЪН всички for-цикли, върху dedupe-нат
+    // uniqueViewerProfileIds set (не connection list).
+    assert(
+      fnBody.includes('getTopicThreadUnreadCountsForProfiles(') && fnBody.includes('snapshot.messageId,') && fnBody.includes('uniqueViewerProfileIds,'),
+      'batch unread call трябва да мине snapshot.messageId + uniqueViewerProfileIds (dedupe-нат set) извън for-циклите',
+    )
+    assert(fnBody.includes('new Set('), 'трябва да dedupe-ва profileId-та чрез Set преди batch lookup-а')
+  })
+
+  await check('[E5] broadcastTopicReplyToLocalSubscribers не вика SQL-backed helper вътре в for-цикъла по subscribers', () => {
+    const fnBody = serverSrc.match(/function broadcastTopicReplyToLocalSubscribers\(([\s\S]*?)\n\}/)?.[0] ?? ''
+    assert(fnBody.length > 0, 'broadcastTopicReplyToLocalSubscribers не е намерена')
+    const forLoopBodies = [...fnBody.matchAll(/for\s*\([^)]*\)\s*\{([\s\S]*?)\n    \}/g)].map((m) => m[1] ?? '')
+    assert(forLoopBodies.length >= 2, `очакват се поне 2 for-цикъла (collect + send), намерени ${forLoopBodies.length}`)
+    for (const body of forLoopBodies) {
+      assert(!body.includes('topicMessageStore.getBroadcastViewerDataForProfiles('), 'batch viewer-data lookup не трябва да е вътре в per-subscriber for-цикъла (би било N+1 отново)')
+      assert(!body.includes('viewerHasLikedMessage('), 'per-connection viewerHasLikedMessage SQL call не трябва да е в for-цикъла')
+    }
+    assert(fnBody.includes('new Set('), 'трябва да dedupe-ва profileId-та чрез Set преди batch lookup-а')
+  })
+
+  await check('[E6] reconcileTopicUnreadForDirectorySubscribers прави batch unread lookup ИЗВЪН всички for-цикли (фиксиран брой SQL, не loop по profileId)', () => {
+    const fnBody = serverSrc.match(/function reconcileTopicUnreadForDirectorySubscribers\(([\s\S]*?)\n\}/)?.[0] ?? ''
+    assert(fnBody.length > 0, 'reconcileTopicUnreadForDirectorySubscribers не е намерена')
+    // Два прохода: (1) collect-ващият for-цикъл по topicsDirectorySubscriberConnectionIds
+    // — прави connection-specific WRITE (markTopicSeenForActiveProfile) и
+    // collect-ва readRecipients, но НЕ прави unread READ SQL заявка; (2)
+    // финалният send loop по readRecipients — само map lookup + send, нула SQL.
+    assert(!/for\s*\(const profileId of uniqueProfileIds\)/.test(fnBody), 'не трябва да има loop по уникален profileId, викащ единичен unread lookup — batch call-ът замества го')
+    const collectLoopBody = fnBody.match(/for\s*\(const subscriberConnectionId of \[\.\.\.topicsDirectorySubscriberConnectionIds\]\)\s*\{([\s\S]*?)\n  \}/)?.[1] ?? ''
+    assert(collectLoopBody.length > 0, 'collect for-цикълът по topicsDirectorySubscriberConnectionIds не е намерен')
+    assert(!collectLoopBody.includes('getTopicUnreadCountForProfile('), 'единичен topic-level unread SQL call не трябва да е в collect loop-а')
+    assert(!collectLoopBody.includes('getTopicThreadUnreadCountForProfile('), 'единичен thread-level unread SQL call не трябва да е в collect loop-а')
+    assert(collectLoopBody.includes('markTopicSeenForActiveProfile('), 'connection-specific WRITE-ът трябва да остане в collect loop-а (per-connection, различни connections могат легитимно да имат различен activeTopicId)')
+
+    const sendLoopBody = fnBody.match(/for\s*\(const recipient of readRecipients\)\s*\{([\s\S]*?)\n  \}/)?.[1] ?? ''
+    assert(sendLoopBody.length > 0, 'send for-цикълът по readRecipients не е намерен')
+    assert(!sendLoopBody.includes('getTopicUnreadCountsForProfiles('), 'batch call не трябва да е вътре в send loop-а (трябва да е извън, ЕДИН път за целия batch)')
+    assert(!sendLoopBody.includes('getTopicThreadUnreadCountsForProfiles('), 'batch call не трябва да е вътре в send loop-а')
+    assert(/topicUnreadCountByProfileId\.get\(recipient\.profileId\)/.test(sendLoopBody), 'send loop-ът трябва да чете от вече изчисления batch resultat чрез map lookup')
+
+    // Batch извикванията трябва да са ИЗВЪН двата for-цикъла, върху
+    // dedupe-нат uniqueProfileIds set.
+    assert(fnBody.includes('getTopicUnreadCountsForProfiles(topicId, uniqueProfileIds,'), 'batch topic-level unread call липсва извън for-циклите')
+    assert(fnBody.includes('getTopicThreadUnreadCountsForProfiles(rootMessageId, uniqueProfileIds,'), 'batch thread-level unread call липсва извън for-циклите')
+    assert(fnBody.includes('new Set('), 'трябва да dedupe-ва profileId-та чрез Set преди batch lookup-а')
+  })
+
+  await check('[E7] getGeneralThreadUnreadTotal (General unread hot path) вече не прави GROUP BY / temp B-tree заявка', () => {
+    const readStateSrc = readFileSync(join(serverRoot, 'src', 'db', 'topicReadStateStore.ts'), 'utf8')
+    const fnBody = readStateSrc.match(/function getGeneralThreadUnreadTotal\(([\s\S]*?)\n  \}/)?.[0] ?? ''
+    assert(fnBody.length > 0, 'getGeneralThreadUnreadTotal не е намерена')
+    assert(!fnBody.includes('GROUP BY'), 'заявката вече не трябва да прави GROUP BY (елиминиран temp B-tree hot path за unbounded "Общи" история)')
+    assert(!fnBody.includes('SUM(unread_count)'), 'заявката вече не трябва да е nested SUM върху per-thread breakdown subquery')
+    assert(fnBody.includes('COUNT(*)'), 'заявката трябва да е директен COUNT(*) без per-thread GROUP BY')
+  })
 }
 
 // ─── Резюме ──────────────────────────────────────────────────────────────

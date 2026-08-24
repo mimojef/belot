@@ -27,6 +27,8 @@ import {
   syncProfilePopup,
   clearProfileEditorPendingState,
   appendTopicMessageNode,
+  appendTopicReplyNode,
+  refreshTopicReplyCountDom,
   refreshTopicsUnreadDom,
   refreshTopicMessageLikeDom,
   refreshTopicMessageContentDom,
@@ -13130,18 +13132,21 @@ export function createLobbyFlowController(
       void markActiveTopicSeen(message.topicId)
 
       // Production flicker fix — high-frequency Lafche/Topics push (§2 от
-      // брифа): чужда own-message live-append при активна stream view опитва
-      // targeted single-node DOM insert (appendTopicMessageNode) вместо
-      // unconditional пълен render() (root.innerHTML remount). Own-message
-      // ack path (composer draft clear) и всеки edge case, който targeted
-      // append не покрива (thread view, различна тема, липсващи containers),
-      // fallback-ва безопасно към пълен render() със established scroll-
-      // preservation логика (topicMessagesScrollAnchor/RenderReason).
-      if (!isOwnRootMessageAck) {
-        const patched = appendTopicMessageNode(options.root, buildLobbyScreenState(), topicMessageNodeCallbacks(), incomingMessage)
-        if (patched) {
-          return true
-        }
+      // брифа), разширено с perf audit fix (§5): и чужд, И own-message
+      // live-append при активна stream view опитват targeted single-node
+      // DOM insert (appendTopicMessageNode) вместо unconditional пълен
+      // render() (root.innerHTML remount) — own ack по-рано БЕЗУСЛОВНО
+      // вземаше скъпия full-render път, докато чужд пост вече ползваше
+      // евтиния targeted append. appendTopicMessageNode вече прави dedupe
+      // по messageId (own-message race/redelivery third connection push
+      // третира се идемпотентно), а forceScrollToNewNode=isOwnRootMessageAck
+      // пази установеното "винаги scroll до собствения нов пост" поведение.
+      // Всеки edge case, който targeted append не покрива (thread view,
+      // различна тема, липсващи containers), fallback-ва безопасно към пълен
+      // render() със established scroll-preservation логика.
+      const patched = appendTopicMessageNode(options.root, buildLobbyScreenState(), topicMessageNodeCallbacks(), incomingMessage, isOwnRootMessageAck)
+      if (patched) {
+        return true
       }
 
       state.topicMessagesScrollAnchor = scrollAnchor
@@ -13207,7 +13212,6 @@ export function createLobbyFlowController(
       // Root replyCount винаги се увеличава, независимо от expanded state
       // (Етап 3 брифа: "ако collapsed → само counter се обновява").
       const rootMessage = (state.topicMessages ?? []).find((m) => m.messageId === rootMessageId)
-      const scrollAnchor = captureTopicMessagesScrollAnchor()
       if (rootMessage) {
         rootMessage.replyCount += 1
         if (Date.parse(incomingReply.createdAt) >= getTopicMessageActivityMs(rootMessage)) {
@@ -13229,7 +13233,8 @@ export function createLobbyFlowController(
 
       // Ack по requestId — reply composer draft/pending clearing (keyed по
       // rootMessageId, не topicId — виж т.13).
-      if (requestId !== undefined && requestId === state.topicReplyComposerPendingRequestIdByRootId[rootMessageId]) {
+      const isOwnReplyAck = requestId !== undefined && requestId === state.topicReplyComposerPendingRequestIdByRootId[rootMessageId]
+      if (isOwnReplyAck) {
         state.topicReplyComposerDraftByRootId[rootMessageId] = ''
         state.topicReplyComposerPendingRequestIdByRootId[rootMessageId] = null
         state.topicReplyComposerErrorTextByRootId[rootMessageId] = null
@@ -13239,12 +13244,6 @@ export function createLobbyFlowController(
 
       if (rootMessage) {
         state.topicMessages = sortTopicMessagesByActivity(state.topicMessages ?? [])
-        if (isCurrentThread) {
-          state.topicThreadRenderReason = state.topicThreadRenderReason ?? 'live-append'
-        } else {
-          state.topicMessagesScrollAnchor = scrollAnchor
-          state.topicMessagesRenderReason = 'reorder'
-        }
       } else {
         void refreshTopicMessagesAfterActivityChange(message.topicId)
       }
@@ -13254,6 +13253,50 @@ export function createLobbyFlowController(
       } else {
         void markActiveTopicSeen(message.topicId)
       }
+
+      // Perf audit fix: по-рано ВСЯКА reply (навсякъде в отворената тема,
+      // независимо дали за expanded thread) минаваше по пълен render() —
+      // цялостен lobby innerHTML remount. Сега: (1) ако потребителят реално
+      // гледа този thread → targeted single-node append в DOM-а вместо
+      // rebuild на целия lobby; (2) ако root е loaded, но thread-ът не е
+      // текущо отворен → само reply-count badge-ът на root card-a се patch-ва
+      // (както при collapsed thread-ове изобщо — task spec: "ако thread не е
+      // expanded, не rebuild-вай feed-а" — root card-ът не се мести визуално
+      // в DOM-а въпреки activity-reorder-а в state, но badge-ът остава верен);
+      // (3) ако root не е loaded, съществуващият refreshTopicMessagesAfterActivityChange
+      // fallback (вече извикан по-горе) си остава единствения path. И двата
+      // targeted patch-а fallback-ват към render() при структурно
+      // несъответствие (thread view не mounted / root card не mounted).
+      if (rootMessage && isCurrentThread) {
+        const appended = appendTopicReplyNode(options.root, buildLobbyScreenState(), topicMessageNodeCallbacks(), rootMessageId, incomingReply)
+        if (appended) {
+          const threadScrollEl = options.root.querySelector<HTMLElement>('[data-topic-thread-scroll="1"]')
+          if (threadScrollEl) {
+            const wasNearBottom = threadScrollEl.scrollHeight - threadScrollEl.scrollTop - threadScrollEl.clientHeight <= 96
+            if (isOwnReplyAck || wasNearBottom) {
+              threadScrollEl.scrollTop = threadScrollEl.scrollHeight
+            }
+          }
+          state.topicThreadRenderReason = null
+          return true
+        }
+        // Structural fallback (thread view не е mounted въпреки isCurrentThread
+        // флага — race/edge case) — пълен render() пази established поведение.
+        render()
+        return true
+      }
+
+      if (rootMessage) {
+        const patched = refreshTopicReplyCountDom(options.root, rootMessageId, rootMessage.replyCount, topicMessageNodeCallbacks().onTopicReplyClick)
+        if (patched) {
+          return true
+        }
+        // Structural fallback — root card-ът не е в момента mounted (напр.
+        // виждаме друг screen/thread), reorder-ът в state вече е приложен
+        // по-горе, следващият естествен render (навигация обратно към
+        // списъка) ще покаже коректната позиция/стойност.
+      }
+
       render()
       return true
     }

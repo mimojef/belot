@@ -1212,18 +1212,24 @@ function viewerHasLikedMessage(messageId: string, viewerProfileId: string | null
   return aggregates.get(messageId)?.viewerHasLiked ?? false
 }
 
-// replyCount е viewer-aware (blocked sender-и не се броят, виж коментара в
-// topicMessageStore.getMessageAggregatesByIds) — точно като viewerHasLiked,
-// не може да е част от shared broadcast base-а (различни subscribers имат
-// различни blocked sets). Единичен per-subscriber lookup тук, извикан само
-// за ROOT съобщения (реплики нямат собствен replyCount).
-function viewerAwareReplyCount(messageId: string, viewerProfileId: string | null): number {
-  if (viewerProfileId === null) return 0
-  const excludedSenderProfileIds = [...getLobbyChatBlockedSet(viewerProfileId)]
-  const aggregates = topicMessageStore.getMessageAggregatesByIds([messageId], viewerProfileId, excludedSenderProfileIds)
-  return aggregates.get(messageId)?.replyCount ?? 0
-}
-
+// Perf audit fix (N+1 fan-out): по-рано тук викахме viewerAwareReplyCount/
+// getTopicThreadUnreadCountForProfile/viewerHasLikedMessage ВЪТРЕ в for
+// цикъла — по 2-3 sync SQLite заявки НА ВСЕКИ subscriber connection. При 62
+// online users с ~35 topic subscribers, това бяха ~100+ последователни
+// заявки на event loop-а за един-единствен пост.
+//
+// Двупроходен подход вместо това: (1) събираме живите connections + set от
+// УНИКАЛНИ viewer profileId-та (dedupe — 2+ connections на един профил, напр.
+// desktop+mobile таб, вече не тригват повторна DB работа); (2) правим batch
+// fetch ЕДИН път на уникален профил (не на connection) за replyCount+
+// viewerHasLiked (topicMessageStore.getBroadcastViewerDataForProfiles — 2
+// заявки ОБЩО, не 2×N) и unreadCount (getTopicThreadUnreadCountForProfile,
+// извикан веднъж на уникален profileId чрез dedupe cache, не premahната
+// заявка сама по себе си — виж коментара долу защо тя остава per-profile);
+// (3) вторият loop прави само map lookup + socket send, БЕЗ SQL заявки.
+// Точната семантика (block-aware replyCount, per-viewer unreadCount/like
+// state, anonymous/guest 0-defaults) остава непроменена — виж performance
+// audit-а и getBroadcastViewerDataForProfiles коментара в topicMessageStore.ts.
 function broadcastTopicMessageToLocalSubscribers(
   topicId: string,
   snapshot: TopicMessageBroadcastBase,
@@ -1240,6 +1246,8 @@ function broadcastTopicMessageToLocalSubscribers(
   // push цикълът остава условен на реални subscribers, но directory
   // reconciliation-ът ТРЯБВА да се извиква безусловно.
   if (subscribers !== undefined && subscribers.size > 0) {
+    const liveRecipients: Array<{ connectionId: ConnectionId; profileId: string | null }> = []
+
     for (const subscriberConnectionId of [...subscribers]) {
       const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
       const socket = socketRegistry.get(subscriberConnectionId)
@@ -1260,19 +1268,45 @@ function broadcastTopicMessageToLocalSubscribers(
         continue
       }
 
-      const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
+      liveRecipients.push({ connectionId: subscriberConnectionId, profileId: subscriberConnection.profileId })
+    }
 
-      safeSendToConnection(subscriberConnectionId, {
+    const uniqueViewerProfileIds = [...new Set(
+      liveRecipients.map((r) => r.profileId).filter((id): id is string => id !== null),
+    )]
+
+    const excludedSendersByViewer = new Map<string, ReadonlySet<string>>(
+      uniqueViewerProfileIds.map((id) => [id, getLobbyChatBlockedSet(id)]),
+    )
+    const viewerDataByProfileId = topicMessageStore.getBroadcastViewerDataForProfiles(
+      snapshot.messageId,
+      uniqueViewerProfileIds,
+      excludedSendersByViewer,
+    )
+    // Perf audit follow-up: по-рано тук имаше loop, викащ
+    // getTopicThreadUnreadCountForProfile (единичен SQL statement) ВЕДНЪЖ на
+    // уникален profileId — O(uniqueProfiles) statements per broadcast.
+    // getTopicThreadUnreadCountsForProfiles прави фиксиран малък брой SQL
+    // statements (независим от profile count) за целия batch наведнъж.
+    const unreadCountByProfileId = getTopicThreadUnreadCountsForProfiles(
+      snapshot.messageId,
+      uniqueViewerProfileIds,
+      excludedSendersByViewer,
+    )
+
+    for (const recipient of liveRecipients) {
+      const isOriginator = opts?.originatingConnectionId === recipient.connectionId
+      const viewerData = recipient.profileId !== null ? viewerDataByProfileId.get(recipient.profileId) : undefined
+
+      safeSendToConnection(recipient.connectionId, {
         type: 'topic_message',
         ...snapshot,
         // replyCount override-ва shared base стойността (viewer-agnostic global
         // count от hydrateTopicMessagesWithCurrentAvatars) с viewer-aware брой —
-        // blocked sender-и на ТОЗИ subscriber не се броят (виж viewerAwareReplyCount).
-        replyCount: viewerAwareReplyCount(snapshot.messageId, subscriberConnection.profileId),
-        unreadCount: subscriberConnection.profileId === null
-          ? 0
-          : getTopicThreadUnreadCountForProfile(subscriberConnection.profileId, snapshot.messageId),
-        viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
+        // blocked sender-и на ТОЗИ subscriber не се броят.
+        replyCount: viewerData?.replyCount ?? 0,
+        unreadCount: recipient.profileId === null ? 0 : (unreadCountByProfileId.get(recipient.profileId) ?? 0),
+        viewerHasLiked: viewerData?.viewerHasLiked ?? false,
         ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
       })
     }
@@ -1288,6 +1322,9 @@ function broadcastTopicMessageToLocalSubscribers(
 // append-не в DOM-а или само да инкрементира replyCount локално, виж Етап 3
 // брифа: "ако collapsed → само counter се обновява"). Blocking filter е
 // идентичен на root.
+// Perf audit fix — mirror на broadcastTopicMessageToLocalSubscribers по-горе:
+// batch-нат viewerHasLiked lookup веднъж на уникален profileId (dedupe по
+// connection), не отделна SQL заявка на всеки subscriber connection.
 function broadcastTopicReplyToLocalSubscribers(
   topicId: string,
   snapshot: TopicReplyBroadcastBase,
@@ -1297,6 +1334,8 @@ function broadcastTopicReplyToLocalSubscribers(
   if (subscribers === undefined || subscribers.size === 0) {
     return
   }
+
+  const liveRecipients: Array<{ connectionId: ConnectionId; profileId: string | null }> = []
 
   for (const subscriberConnectionId of [...subscribers]) {
     const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
@@ -1315,12 +1354,33 @@ function broadcastTopicReplyToLocalSubscribers(
       continue
     }
 
-    const isOriginator = opts?.originatingConnectionId === subscriberConnectionId
+    liveRecipients.push({ connectionId: subscriberConnectionId, profileId: subscriberConnection.profileId })
+  }
 
-    safeSendToConnection(subscriberConnectionId, {
+  const uniqueViewerProfileIds = [...new Set(
+    liveRecipients.map((r) => r.profileId).filter((id): id is string => id !== null),
+  )]
+  // excludedSenderProfileIdsByViewer не влияе на viewerHasLiked (единственото
+  // поле, което ползваме тук) — подаваме празни sets, replyCount резултатното
+  // поле остава неизползвано за reply broadcast-и (replies нямат собствен
+  // replyCount override).
+  const emptyExclusions = new Map<string, ReadonlySet<string>>()
+  const viewerDataByProfileId = topicMessageStore.getBroadcastViewerDataForProfiles(
+    snapshot.messageId,
+    uniqueViewerProfileIds,
+    emptyExclusions,
+  )
+
+  for (const recipient of liveRecipients) {
+    const isOriginator = opts?.originatingConnectionId === recipient.connectionId
+    const viewerHasLiked = recipient.profileId !== null
+      ? (viewerDataByProfileId.get(recipient.profileId)?.viewerHasLiked ?? false)
+      : false
+
+    safeSendToConnection(recipient.connectionId, {
       type: 'topic_reply',
       ...snapshot,
-      viewerHasLiked: viewerHasLikedMessage(snapshot.messageId, subscriberConnection.profileId),
+      viewerHasLiked,
       ...(isOriginator && opts?.requestId ? { requestId: opts.requestId } : {}),
     })
   }
@@ -1372,6 +1432,23 @@ function getTopicUnreadCountForProfile(profileId: string, topicId: string): numb
   return topicReadStateStore.getUnreadCountsByTopicIds(profileId, [topicId], blocked).get(topicId) ?? 0
 }
 
+// Batch вариант — за N профила наведнъж, с фиксиран малък брой SQL
+// statements (не loop, викащ getTopicUnreadCountForProfile N пъти). Reuse-ва
+// batch store функциите (getGeneralThreadUnreadTotalsForProfiles /
+// getUnreadCountForTopicForProfiles), branch-нато по isGeneral точно както
+// единичната версия по-горе.
+function getTopicUnreadCountsForProfiles(
+  topicId: string,
+  profileIds: readonly string[],
+  excludedSenderProfileIdsByViewer: ReadonlyMap<string, ReadonlySet<string>>,
+): Map<string, number> {
+  const topic = topicStore.getTopicById(topicId)
+  if (topic?.isGeneral) {
+    return topicReadStateStore.getGeneralThreadUnreadTotalsForProfiles(topicId, profileIds, excludedSenderProfileIdsByViewer)
+  }
+  return topicReadStateStore.getUnreadCountForTopicForProfiles(topicId, profileIds, excludedSenderProfileIdsByViewer)
+}
+
 function topicsWithUnreadCountsForProfile(profileId: string, topics: TopicSnapshot[]): TopicSnapshot[] {
   const topicIds = topics.map((topic) => topic.topicId)
   topicReadStateStore.ensureReadStateForTopics(profileId, topicIds)
@@ -1397,6 +1474,16 @@ function broadcastTopicSeenUpdatedToProfile(profileId: string, topicId: string, 
 function getTopicThreadUnreadCountForProfile(profileId: string, rootMessageId: string): number {
   const blocked = [...getLobbyChatBlockedSet(profileId)]
   return topicReadStateStore.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], blocked).get(rootMessageId) ?? 0
+}
+
+// Batch вариант — за N профила наведнъж, ЕДИН thread (rootMessageId),
+// фиксиран малък брой SQL statements (не loop по profileId).
+function getTopicThreadUnreadCountsForProfiles(
+  rootMessageId: string,
+  profileIds: readonly string[],
+  excludedSenderProfileIdsByViewer: ReadonlyMap<string, ReadonlySet<string>>,
+): Map<string, number> {
+  return topicReadStateStore.getThreadUnreadCountsForProfiles(rootMessageId, profileIds, excludedSenderProfileIdsByViewer)
 }
 
 function broadcastTopicThreadSeenUpdatedToProfile(profileId: string, topicId: string, rootMessageId: string, lastSeenSeq: number): void {
@@ -1429,8 +1516,39 @@ function broadcastTopicUnreadCountsToProfile(profileId: string): void {
   }
 }
 
+// Perf audit follow-up: по-рано (дори след първия N+1 fix) тук имаше loop,
+// викащ getTopicUnreadCountForProfile/getTopicThreadUnreadCountForProfile
+// ВЕДНЪЖ на уникален profileId — O(uniqueProfiles) SQL statements per
+// broadcast event (dedupe-нато спрямо connections, но не спрямо профили).
+// При 60-100 едновременни различни directory-subscribers, това пак e
+// десетки/стотици последователни sync SQLite execution-а.
+//
+// Двупроходен подход вместо това: (1) първи проход итерира connections само
+// за да (a) изпълни per-connection WRITE side-effect-а
+// (markTopicSeenForActiveProfile — остава явно per-connection, различни
+// connections на same profile могат легитимно да имат различен
+// activeTopicId), и (b) collect-не кои connections/profiles реално се
+// нуждаят от READ+SEND (block/self-exclusion филтъра е приложен тук, преди
+// batch call-а — изключените профили никога не влизат в batch заявката);
+// (2) batch fetch на topic-level (getTopicUnreadCountsForProfiles) и
+// thread-level (getTopicThreadUnreadCountsForProfiles) unread counts за
+// ЦЕЛИЯ collected profile set наведнъж — фиксиран малък брой SQL statements,
+// независим от profile count; (3) втори проход прави само map lookup +
+// safeSendToConnection, нула SQL заявки.
 function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProfileId?: string, rootMessageId?: string): void {
   const topic = topicStore.getTopicById(topicId)
+
+  type ReadRecipient = { connectionId: ConnectionId; profileId: string; needsThreadUnread: boolean }
+  const readRecipients: ReadRecipient[] = []
+  // Perf review follow-up: markTopicSeenForActiveProfile е идемпотентно —
+  // upsert-ва до latestSeq и broadcast-ва до ВСИЧКИ connections на профила
+  // (broadcastToProfileConnections), не само до тригериращата connection.
+  // Ако same profile има >1 активна connection на този topic, второто
+  // извикване би било byte-identical no-op work + duplicate broadcast към
+  // същите sockets. Dedupe по profileId в рамките на този call премахва
+  // тази излишна работа без да променя seen semantics.
+  const markedSeenProfileIds = new Set<string>()
+
   for (const subscriberConnectionId of [...topicsDirectorySubscriberConnectionIds]) {
     const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
     const socket = socketRegistry.get(subscriberConnectionId)
@@ -1443,7 +1561,12 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
 
     const activeTopicId = topicMessageSubscriberTopicIdByConnectionId.get(subscriberConnectionId)
     if (activeTopicId === topicId && !topic?.isGeneral) {
-      markTopicSeenForActiveProfile(profileId, topicId)
+      // Connection-specific WRITE — остава per-connection trigger, но
+      // deduped по profileId (виж коментара по-горе).
+      if (!markedSeenProfileIds.has(profileId)) {
+        markedSeenProfileIds.add(profileId)
+        markTopicSeenForActiveProfile(profileId, topicId)
+      }
       continue
     }
 
@@ -1454,18 +1577,39 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
       continue
     }
 
-    safeSendToConnection(subscriberConnectionId, {
+    readRecipients.push({
+      connectionId: subscriberConnectionId,
+      profileId,
+      needsThreadUnread: Boolean(topic?.isGeneral && rootMessageId !== undefined),
+    })
+  }
+
+  if (readRecipients.length === 0) return
+
+  const uniqueProfileIds = [...new Set(readRecipients.map((r) => r.profileId))]
+  const excludedSendersByViewer = new Map<string, ReadonlySet<string>>(
+    uniqueProfileIds.map((id) => [id, getLobbyChatBlockedSet(id)]),
+  )
+
+  const topicUnreadCountByProfileId = getTopicUnreadCountsForProfiles(topicId, uniqueProfileIds, excludedSendersByViewer)
+  const threadUnreadCountByProfileId = (topic?.isGeneral && rootMessageId !== undefined)
+    ? getTopicThreadUnreadCountsForProfiles(rootMessageId, uniqueProfileIds, excludedSendersByViewer)
+    : null
+
+  for (const recipient of readRecipients) {
+    const topicUnreadCount = topicUnreadCountByProfileId.get(recipient.profileId) ?? 0
+    safeSendToConnection(recipient.connectionId, {
       type: 'topic_unread_count_changed',
       topicId,
-      unreadCount: getTopicUnreadCountForProfile(profileId, topicId),
+      unreadCount: topicUnreadCount,
     })
-    if (topic?.isGeneral && rootMessageId !== undefined) {
-      safeSendToConnection(subscriberConnectionId, {
+    if (recipient.needsThreadUnread && threadUnreadCountByProfileId !== null && rootMessageId !== undefined) {
+      safeSendToConnection(recipient.connectionId, {
         type: 'topic_thread_unread_count_changed',
         topicId,
         rootMessageId,
-        unreadCount: getTopicThreadUnreadCountForProfile(profileId, rootMessageId),
-        topicUnreadCount: getTopicUnreadCountForProfile(profileId, topicId),
+        unreadCount: threadUnreadCountByProfileId.get(recipient.profileId) ?? 0,
+        topicUnreadCount,
       })
     }
   }

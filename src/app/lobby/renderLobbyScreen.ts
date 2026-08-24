@@ -93,7 +93,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
@@ -10591,6 +10591,7 @@ export function appendTopicMessageNode(
   state: LobbyScreenState,
   options: TopicMessageNodeCallbacks,
   message: TopicMessageSnapshot,
+  forceScrollToNewNode = false,
 ): boolean {
   if (state.view !== 'topics' || state.topicsMode !== 'topics') return false
   if (state.activeTopicId === null || state.activeTopicId !== message.topicId) return false
@@ -10628,13 +10629,22 @@ export function appendTopicMessageNode(
   // (General) thresholds, огледално на renderLobbyScreen-овата
   // wasLafcheNearBottom/wasTopicMessagesNearTop логика: местим scroll САМО
   // ако потребителят вече е бил close до "новото съдържание" края, никога
-  // насила при четене другаде.
+  // насила при четене другаде. Изключение: forceScrollToNewNode=true
+  // (own-message ack — потребителят сам изпрати съобщението, очаква
+  // безусловно да го види, независимо от предишната scroll позиция) —
+  // mirror на 'own-message' render-reason force-scroll семантиката, която
+  // пълният render() път вече прилагаше преди тази targeted-append промяна.
   const topicMessagesNearBottomThresholdPx = 96
   if (isLafche) {
     const distanceFromBottomBeforeAppend = scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight - newNode.offsetHeight
-    if (distanceFromBottomBeforeAppend <= topicMessagesNearBottomThresholdPx) {
+    if (forceScrollToNewNode || distanceFromBottomBeforeAppend <= topicMessagesNearBottomThresholdPx) {
       scrollEl.scrollTop = scrollEl.scrollHeight
     }
+  } else if (forceScrollToNewNode) {
+    // General card-feed — own root post се prepend-ва горе (newest-at-top);
+    // force scroll до самия връх, за да види потребителят веднага
+    // собствения си нов пост.
+    scrollEl.scrollTop = 0
   }
   // General card-feed prepend не мести scroll позицията изобщо (established
   // семантика — нов root card се появява горе, без auto-scroll).
@@ -10668,6 +10678,103 @@ export function appendTopicMessageNode(
       }
     }
   }
+
+  return true
+}
+
+/**
+ * Perf audit fix — targeted DOM append за нов live reply (topic_reply push),
+ * mirror на appendTopicMessageNode по-горе за root постове. Append-ва САМО
+ * новия [data-topic-reply] node в края на [data-topic-replies-section] на
+ * expanded/currently-open thread-а, вместо пълен lobby innerHTML remount.
+ *
+ * Приложимо само когато потребителят реално гледа thread view-а на ТОЗИ
+ * конкретен root (state.topicsMode==='thread' &&
+ * state.topicThreadRootMessageId===rootMessageId) — за collapsed/not-open
+ * threads caller-ът вече не вика тази функция изобщо (само reply count
+ * badge-ът се patch-ва, виж refreshTopicReplyCountDom по-долу), точно
+ * каквото изисква task spec-а: "ако thread не е expanded, не rebuild-вай
+ * feed-а".
+ *
+ * Връща true при успешен append (вкл. no-op ако node-ът вече присъства —
+ * dedupe по messageId, mirror на appendTopicMessageNode-овия dup guard за
+ * own-reply ack race/redelivery); false ако структурата не съвпада
+ * (thread view не е mounted, "Все още няма отговори"/loading placeholder
+ * вместо реален list, и т.н.) — caller-ът fallback-ва към render().
+ */
+export function appendTopicReplyNode(
+  root: HTMLElement,
+  state: LobbyScreenState,
+  options: TopicMessageNodeCallbacks,
+  rootMessageId: string,
+  reply: TopicReplySnapshot,
+): boolean {
+  if (state.topicsMode !== 'thread' || state.topicThreadRootMessageId !== rootMessageId) return false
+
+  const sectionEl = root.querySelector<HTMLElement>(`[data-topic-replies-section="${cssEscape(rootMessageId)}"]`)
+  if (!sectionEl) return false
+
+  if (sectionEl.querySelector(`[data-topic-reply="${cssEscape(reply.messageId)}"]`)) {
+    return true
+  }
+
+  const html = renderTopicReplyRow(state, reply)
+  const template = document.createElement('template')
+  template.innerHTML = html.trim()
+  const newNode = template.content.firstElementChild as HTMLElement | null
+  if (!newNode) return false
+
+  // Секцията може в момента да показва "Все още няма отговори." placeholder
+  // (текстов, не [data-topic-reply] node) — прибираме го, преди да добавим
+  // реалния reply, за да не остане "0 replies" текст над реалния списък.
+  const emptyPlaceholder = sectionEl.querySelector<HTMLElement>('[data-topic-replies-empty="1"]')
+  emptyPlaceholder?.remove()
+
+  const loadMoreBtn = sectionEl.querySelector<HTMLElement>('[data-topic-replies-load-more]')
+  if (loadMoreBtn) {
+    sectionEl.insertBefore(newNode, loadMoreBtn)
+  } else {
+    sectionEl.appendChild(newNode)
+  }
+
+  wireTopicMessageNode(root, state, options, newNode)
+  return true
+}
+
+/**
+ * Perf audit fix — targeted patch за root card-ния reply-count badge (иконата
+ * с числото до Like бутона), когато нов reply пристигне за root, чийто
+ * thread НЕ е в момента отворен/expanded (само counter-ът се обновява, виж
+ * task spec-а "ако collapsed → само counter се обновява"). Reuse-ва
+ * renderTopicReplyButton (СЪЩИЯТ markup builder като пълния render),
+ * outerHTML replace САМО на бутона, после re-wire на click listener-а.
+ *
+ * Връща true при успешен patch; false ако бутонът не е mounted (root card-ът
+ * не е в момента visible/rendered) — caller-ът fallback-ва към render().
+ */
+export function refreshTopicReplyCountDom(
+  root: HTMLElement,
+  rootMessageId: string,
+  replyCount: number,
+  onTopicReplyClick: TopicMessageNodeCallbacks['onTopicReplyClick'],
+): boolean {
+  const existingBtn = root.querySelector<HTMLButtonElement>(`[data-topic-message-reply="${cssEscape(rootMessageId)}"]`)
+  if (!existingBtn) return false
+
+  const html = renderTopicReplyButton(rootMessageId, replyCount)
+  const template = document.createElement('template')
+  template.innerHTML = html.trim()
+  const newBtn = template.content.firstElementChild as HTMLButtonElement | null
+  if (!newBtn) return false
+
+  existingBtn.replaceWith(newBtn)
+  newBtn.addEventListener('click', () => {
+    const anchorEl = root.querySelector<HTMLElement>(`[data-topic-message="${cssEscape(rootMessageId)}"]`)
+    const scrollAnchor = anchorEl
+      ? { messageId: rootMessageId, top: anchorEl.getBoundingClientRect().top }
+      : null
+    onTopicReplyClick(rootMessageId, scrollAnchor)
+  })
 
   return true
 }

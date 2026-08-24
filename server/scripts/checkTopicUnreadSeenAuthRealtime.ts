@@ -19,14 +19,24 @@ async function check(label: string, fn: () => void | Promise<void>): Promise<voi
   }
 }
 
+// CRLF fix: server/src е git-checked-out с CRLF line endings на тази
+// платформа — regex-ите по-долу (/\n\}\n/ и т.н.) никога не match-ваха
+// срещу суров CRLF текст (\r\n}\r\n съдържа \n}\n само за trailing частта,
+// не при exact anchor match без \r толеранс). Тестовият parser логика, не
+// production поведение — нормализираме веднъж тук при четене, source
+// файловете остават непипнати.
+function normalizeLineEndings(text: string): string {
+  return text.replace(/\r\n/g, '\n')
+}
+
 const serverRoot = resolve(process.cwd())
-const indexSrc = await readFile(resolve(serverRoot, 'src/index.ts'), 'utf8')
-const protocolSrc = await readFile(resolve(serverRoot, 'src/protocol/messageTypes.ts'), 'utf8')
-const migrationSrc = await readFile(resolve(serverRoot, 'database/migrations/20260812_004_create_topic_read_state.sql'), 'utf8')
-const threadMigrationSrc = await readFile(
+const indexSrc = normalizeLineEndings(await readFile(resolve(serverRoot, 'src/index.ts'), 'utf8'))
+const protocolSrc = normalizeLineEndings(await readFile(resolve(serverRoot, 'src/protocol/messageTypes.ts'), 'utf8'))
+const migrationSrc = normalizeLineEndings(await readFile(resolve(serverRoot, 'database/migrations/20260812_004_create_topic_read_state.sql'), 'utf8'))
+const threadMigrationSrc = normalizeLineEndings(await readFile(
   resolve(serverRoot, 'database/migrations/20260813_001_create_topic_thread_read_state.sql'),
   'utf8',
-)
+))
 
 console.log('\n=== Topic Unread / Seen (auth + realtime contract) ===\n')
 
@@ -68,6 +78,14 @@ await check('[4] realtime messages are in the shared protocol union', () => {
   assert(protocolSrc.includes('TopicThreadSeenUpdatedMessage'), 'TopicThreadSeenUpdatedMessage union member missing')
 })
 
+// Обновено (perf audit batch follow-up): per-thread unread lookup-ът вече
+// не е единичен getTopicThreadUnreadCountForProfile(profileId, rootMessageId)
+// call — заменен с batch getTopicThreadUnreadCountsForProfiles(rootMessageId,
+// uniqueProfileIds, ...), извикан ЕДИН път извън for-циклите за целия
+// directory-subscriber profile set (фиксиран малък брой SQL statements,
+// не loop по profileId). Виж checkTopicMessagesRealtime.ts [E6] за
+// дълбочинна structural проверка на batch-ването; тук проверяваме само
+// продуктовия contract (кои message types/branch-ове съществуват).
 await check('[5] active legacy topics mark seen while General threads keep per-thread unread', () => {
   const reconcile = indexSrc.match(/function reconcileTopicUnreadForDirectorySubscribers[\s\S]*?\n}\n/)?.[0] ?? ''
   assert(reconcile.includes('topicsDirectorySubscriberConnectionIds'), 'directory subscriber loop missing')
@@ -76,7 +94,7 @@ await check('[5] active legacy topics mark seen while General threads keep per-t
   assert(reconcile.includes('markTopicSeenForActiveProfile'), 'active topic must mark seen')
   assert(reconcile.includes("type: 'topic_unread_count_changed'"), 'inactive subscribers must receive unread count')
   assert(reconcile.includes("type: 'topic_thread_unread_count_changed'"), 'General thread unread event missing')
-  assert(reconcile.includes('getTopicThreadUnreadCountForProfile(profileId, rootMessageId)'), 'per-thread unread lookup missing')
+  assert(reconcile.includes('getTopicThreadUnreadCountsForProfiles(rootMessageId, uniqueProfileIds'), 'batch per-thread unread lookup missing')
 })
 
 await check('[6] root/reply create, delete, subscribe, and unblock flows reconcile unread state', () => {

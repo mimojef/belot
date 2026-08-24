@@ -123,8 +123,19 @@ check('[A5] fallback render() съществува СЛЕД targeted опита 
   assert(renderIdx > appendIdx, 'render() fallback must appear after the appendTopicMessageNode attempt, not before it')
 })
 
-check('[A6] own-message ack path е explicit изключен от targeted patch (composer clear изисква пълен render)', () => {
-  assert(topicMessageBlock.includes('if (!isOwnRootMessageAck)'), 'own-ack exclusion guard missing before appendTopicMessageNode call')
+// Обновено (perf audit fix §5): own-message ack по-рано БЕЗУСЛОВНО вземаше
+// скъпия full-render път (`if (!isOwnRootMessageAck) { appendTopicMessageNode... }`),
+// докато чужд пост вече ползваше targeted append. Сега и двата пътя
+// reuse-ват appendTopicMessageNode безусловно — appendTopicMessageNode вече
+// прави dedupe по messageId (own-message race/redelivery третира се
+// идемпотентно), а forceScrollToNewNode=isOwnRootMessageAck пази established
+// "винаги scroll до собствения нов пост" поведение вместо composer-clear
+// exclusion guard-а.
+check('[A6] own-message ack вече reuse-ва targeted append (не е explicit изключен)', () => {
+  assert(!topicMessageBlock.includes('if (!isOwnRootMessageAck)'), 'own-ack exclusion guard should no longer gate appendTopicMessageNode call')
+  const appendIdx = topicMessageBlock.indexOf('appendTopicMessageNode(')
+  const appendCallLine = topicMessageBlock.slice(appendIdx, appendIdx + 200)
+  assert(appendCallLine.includes('isOwnRootMessageAck'), 'appendTopicMessageNode call must pass isOwnRootMessageAck as forceScrollToNewNode')
 })
 
 // ─── B. unread/seen (4 варианта) ────────────────────────────────────────
