@@ -167,6 +167,7 @@ export type ClientMessage =
       stake: MatchStake
       isLocked: boolean
       waitMinutes: PrivateRoomWaitMinutes
+      manualStart?: boolean
       displayName?: string
     }
   | {
@@ -206,6 +207,22 @@ export type ClientMessage =
   | {
       type: 'remove_bot_from_private_room_team'
       team: Team
+    }
+  | {
+      // Host-only — вика се само когато room.manualStart===true И стаята вече
+      // е 4/4 waiting (виж PrivateRoomSnapshot.manualStart/canManualStart).
+      // Server е authoritative за creator/waiting/ready проверките — виж
+      // handleStartPrivateRoomRequest в index.ts.
+      type: 'start_private_room'
+    }
+  | {
+      // Host-only — маха реален (не бот) занял слот играч от WAITING стаята.
+      // Server проверява creator/waiting/target-occupancy authoritative —
+      // виж handleKickFromPrivateRoomRequest в index.ts. Няма permanent
+      // ban/block ефект — kicked играчът може да опита да влезе отново.
+      type: 'kick_from_private_room'
+      team: Team
+      slotIndex: 0 | 1
     }
   | {
       type: 'subscribe_private_room_chat'
@@ -499,6 +516,9 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_blocked'
   | 'private_room_partner_blocked_by_viewer'
   | 'private_room_bot_owner_missing'
+  | 'private_room_not_creator'
+  | 'private_room_not_ready_to_start'
+  | 'private_room_kick_target_invalid'
 
 export type ErrorMessage = {
   type: 'error'
@@ -684,6 +704,15 @@ export type PrivateRoomSnapshot = {
   slots: PrivateRoomSlotSnapshot[]
   createdAt: number
   expiresAt: number
+  // "Ръчен старт от създателя" — при true, 4/4 НЕ стартира match-а
+  // автоматично; само creator-ът (occupant.isHost===true) може да изпрати
+  // start_private_room, и то само когато canManualStart===true.
+  manualStart: boolean
+  // Server-derived: manualStart===true И всичките 4 слота са заети (readiness
+  // все още не е гарантирана тук — block-partnership отказът стига до
+  // клиента чрез съществуващия private_room_partner_blocked error path при
+  // реален start опит, не преизчислен предварително в snapshot-а).
+  canManualStart: boolean
 }
 
 export type PrivateRoomsListMessage = {
@@ -759,6 +788,16 @@ export type PrivateRoomMemberLeftMessage = {
 
 export type PrivateRoomClosedMessage = {
   type: 'private_room_closed'
+  privateRoomId: string
+}
+
+// Изпраща се САМО на изритания играч (не на оставащите — те получават
+// свежия snapshot през private_room_updated, mirror на handlePrivateRoomLeft
+// pattern-а). Клиентът показва dedicated modal ("Бяхте изключен от
+// създателя на масата."), не generic error/toast — виж
+// handleKickFromPrivateRoomRequest в index.ts.
+export type PrivateRoomKickedMessage = {
+  type: 'private_room_kicked'
   privateRoomId: string
 }
 
@@ -918,6 +957,7 @@ export type ServerMessage =
   | PrivateRoomFriendBusyMessage
   | PrivateRoomMemberLeftMessage
   | PrivateRoomClosedMessage
+  | PrivateRoomKickedMessage
   | PrivateRoomFullMessage
   | PrivateRoomCreatedNoticeMessage
   | PrivateGamesListMessage

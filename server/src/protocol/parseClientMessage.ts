@@ -444,6 +444,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         stake: parsed.stake,
         isLocked: parsed.isLocked === true,
         waitMinutes,
+        manualStart: parsed.manualStart === true,
         displayName: normalizeOptionalDisplayName(parsed.displayName),
       }
     }
@@ -499,6 +500,17 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       const team = parsePrivateRoomTeam(parsed.team)
       if (team === null) return null
       return { type: 'remove_bot_from_private_room_team', team }
+    }
+
+    if (parsed.type === 'start_private_room') {
+      return { type: 'start_private_room' }
+    }
+
+    if (parsed.type === 'kick_from_private_room') {
+      const team = parsePrivateRoomTeam(parsed.team)
+      const slotIndex = parsePrivateRoomSlotIndex(parsed.slotIndex)
+      if (team === null || slotIndex === null) return null
+      return { type: 'kick_from_private_room', team, slotIndex }
     }
 
     if (parsed.type === 'subscribe_private_room_chat') {

@@ -70,6 +70,12 @@ export type PrivateRoom = {
   authorizedProfileIds: Set<string>
   createdAt: number
   expiresAt: number
+  /**
+   * "Ръчен старт от създателя" — при true, стаята НЕ auto-start-ва при 4/4;
+   * остава waiting и пълна докато creator-ът explicit не изпрати startRoom().
+   * Default false (сегашното auto-start поведение).
+   */
+  manualStart: boolean
 }
 
 export function getTeamSlots(room: PrivateRoom, team: Team): [PrivateRoomSlot, PrivateRoomSlot] {
@@ -191,6 +197,8 @@ export type PrivateRoomsStore = {
   respondToInvite: (input: RespondToInviteInput) => RespondToInviteResult
   addBotToTeam: (input: AddBotToTeamInput) => AddBotToTeamResult
   removeBotFromTeam: (input: RemoveBotFromTeamInput) => RemoveBotFromTeamResult
+  startRoom: (input: StartRoomInput) => StartRoomResult
+  kickMember: (input: KickMemberInput) => KickMemberResult
   listRooms: () => PrivateRoom[]
   getRoomByConnectionId: (connectionId: string) => PrivateRoom | null
   getRoomByProfileId: (profileId: string) => PrivateRoom | null
@@ -208,6 +216,7 @@ export type CreateRoomInput = {
   stake: MatchStake
   isLocked: boolean
   waitMinutes: PrivateRoomWaitMinutes
+  manualStart: boolean
 }
 
 export type CreateRoomResult =
@@ -229,6 +238,25 @@ export type JoinTeamInput = {
 
 export type JoinTeamResult =
   | { ok: true; room: PrivateRoom; readyToStart: boolean; readiness?: RoomReadiness }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
+
+export type StartRoomInput = {
+  connectionId: string
+  isBlockedWith: IsBlockedWith
+}
+
+export type StartRoomResult =
+  | { ok: true; room: PrivateRoom }
+  | { ok: false; message: string; code?: PrivateRoomActionErrorCode; readiness?: RoomReadiness }
+
+export type KickMemberInput = {
+  connectionId: string
+  team: Team
+  slotIndex: 0 | 1
+}
+
+export type KickMemberResult =
+  | { ok: true; room: PrivateRoom; kickedOccupant: PrivateRoomHumanOccupant }
   | { ok: false; message: string; code?: PrivateRoomActionErrorCode }
 
 export type AddBotToTeamInput = {
@@ -280,6 +308,11 @@ type StoreCallbacks = {
   onRoomExpired: (room: PrivateRoom) => void
   onRoomClosed: (room: PrivateRoom) => void
   onMemberLeft: (room: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
+  // Различен от onMemberLeft — kicked играчът трябва dedicated targeted
+  // съобщение (private_room_kicked), не generic member-left нотификация
+  // към host-а (тя вече знае, тя самата kick-на). Вика се само от
+  // kickMember(), никога от leaveRoom().
+  onMemberKicked: (room: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
 }
 
 export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRoomsStore {
@@ -330,6 +363,39 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     }
   }
 
+  // Споделена 4/4 auto-start проверка, извиквана от joinTeam/addBotToTeam
+  // веднага след slot-ът е попълнен. При room.manualStart===true, 4/4 НЕ
+  // auto-detach-ва/onRoomReady-ва — стаята остава waiting и пълна, чакайки
+  // explicit startRoom() от creator-а (виж §1 в task spec-а: "manualStart ON
+  // -> при 4/4 НЕ стартирай автоматично"). readyToStart в резултата отразява
+  // само реалния auto-start изход — manual-start пълна стая връща
+  // readyToStart:false с readiness:{ready:true}, за да различи caller-ът
+  // "пълна и readiness мина, но чака ръчен старт" от "пълна, но readiness
+  // отказа" (виж broadcastPrivateRoomNotReadyInfo в index.ts — не бива да
+  // получи фалшив "readiness failed" при manual-start room).
+  function tryAutoStartIfFull(
+    room: PrivateRoom,
+    isBlockedWith: IsBlockedWith,
+  ): { room: PrivateRoom; readyToStart: boolean; readiness?: RoomReadiness } {
+    if (getOccupiedCount(room) < TOTAL_SLOTS) {
+      callbacks.onRoomsChanged()
+      return { room, readyToStart: false }
+    }
+
+    const readiness = evaluateRoomReadiness(room, isBlockedWith)
+    if (readiness.ready && !room.manualStart) {
+      detachReadyRoom(room)
+      callbacks.onRoomReady(room)
+      callbacks.onRoomsChanged()
+      return { room, readyToStart: true, readiness }
+    }
+
+    // Стаята остава жива в store-а — не auto-kick, не auto-start (или защото
+    // readiness отказа, или защото manualStart чака explicit START).
+    callbacks.onRoomsChanged()
+    return { room, readyToStart: false, readiness }
+  }
+
   function createRoom(input: CreateRoomInput): CreateRoomResult {
     if (connectionToRoom.has(input.connectionId)) {
       return { ok: false, message: 'Вече си влязъл в тази маса.' }
@@ -374,6 +440,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       authorizedProfileIds: new Set(input.profileId !== null ? [input.profileId] : []),
       createdAt: now,
       expiresAt: now + timeoutMs,
+      manualStart: input.manualStart,
     }
 
     rooms.set(room.id, room)
@@ -457,22 +524,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     rooms.set(nextRoom.id, nextRoom)
     connectionToRoom.set(input.connectionId, nextRoom.id)
 
-    if (getOccupiedCount(nextRoom) >= TOTAL_SLOTS) {
-      const readiness = evaluateRoomReadiness(nextRoom, input.isBlockedWith)
-      if (readiness.ready) {
-        detachReadyRoom(nextRoom)
-        callbacks.onRoomReady(nextRoom)
-        callbacks.onRoomsChanged()
-        return { ok: true, room: nextRoom, readyToStart: true, readiness }
-      }
-
-      // Стаята остава жива в store-а — не auto-kick, не auto-start.
-      callbacks.onRoomsChanged()
-      return { ok: true, room: nextRoom, readyToStart: false, readiness }
-    }
-
-    callbacks.onRoomsChanged()
-    return { ok: true, room: nextRoom, readyToStart: false }
+    const outcome = tryAutoStartIfFull(nextRoom, input.isBlockedWith)
+    return { ok: true, room: outcome.room, readyToStart: outcome.readyToStart, readiness: outcome.readiness }
   }
 
   function addBotToTeam(input: AddBotToTeamInput): AddBotToTeamResult {
@@ -510,21 +563,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     const nextRoom: PrivateRoom = { ...room, slots: nextSlots }
     rooms.set(nextRoom.id, nextRoom)
 
-    if (getOccupiedCount(nextRoom) >= TOTAL_SLOTS) {
-      const readiness = evaluateRoomReadiness(nextRoom, input.isBlockedWith)
-      if (readiness.ready) {
-        detachReadyRoom(nextRoom)
-        callbacks.onRoomReady(nextRoom)
-        callbacks.onRoomsChanged()
-        return { ok: true, room: nextRoom, readyToStart: true, readiness }
-      }
-
-      callbacks.onRoomsChanged()
-      return { ok: true, room: nextRoom, readyToStart: false, readiness }
-    }
-
-    callbacks.onRoomsChanged()
-    return { ok: true, room: nextRoom, readyToStart: false }
+    const outcome = tryAutoStartIfFull(nextRoom, input.isBlockedWith)
+    return { ok: true, room: outcome.room, readyToStart: outcome.readyToStart, readiness: outcome.readiness }
   }
 
   function removeBotFromTeam(input: RemoveBotFromTeamInput): RemoveBotFromTeamResult {
@@ -564,6 +604,138 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     callbacks.onRoomsChanged()
 
     return { ok: true, room: nextRoom }
+  }
+
+  // Host-only explicit старт за manualStart===true стаи — единственият друг
+  // caller на detachReadyRoom+onRoomReady извън tryAutoStartIfFull. Race-safe
+  // (§ Race в task spec-а): преизчислява getOccupiedCount/evaluateRoomReadiness
+  // на ТЕКУЩИЯ store state в момента на извикване, не на кеширан snapshot от
+  // момента, в който клиентът е получил "4/4" — ако някой е напуснал/бил
+  // kick-нат между click и това извикване, occupiedCount вече е <4 тук и
+  // request-ът се отказва, стаята остава waiting непроменена.
+  function startRoom(input: StartRoomInput): StartRoomResult {
+    const roomId = connectionToRoom.get(input.connectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      connectionToRoom.delete(input.connectionId)
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    if (room.hostConnectionId !== input.connectionId) {
+      return {
+        ok: false,
+        message: 'Само домакинът може да стартира масата.',
+        code: 'private_room_not_creator',
+      }
+    }
+
+    if (!room.manualStart) {
+      // Defensive — клиентският бутон никога не би трябвало да е visible/
+      // usable тук (виж canManualStart в snapshot-а), но сървърът остава
+      // authoritative дори при spoofed WS съобщение.
+      return {
+        ok: false,
+        message: 'Масата не изисква ръчен старт.',
+        code: 'private_room_not_ready_to_start',
+      }
+    }
+
+    if (getOccupiedCount(room) < TOTAL_SLOTS) {
+      return {
+        ok: false,
+        message: 'Масата все още не е пълна.',
+        code: 'private_room_not_ready_to_start',
+      }
+    }
+
+    const readiness = evaluateRoomReadiness(room, input.isBlockedWith)
+    if (!readiness.ready) {
+      return {
+        ok: false,
+        message: 'Масата не може да стартира в момента.',
+        code: 'private_room_not_ready_to_start',
+        readiness,
+      }
+    }
+
+    detachReadyRoom(room)
+    callbacks.onRoomReady(room)
+    callbacks.onRoomsChanged()
+
+    return { ok: true, room }
+  }
+
+  // Host-only removal на реален (не бот) занял слот играч, докато стаята е
+  // WAITING (все още в rooms Map-а — веднъж detach-ната/playing, connectionId-
+  // ите вече не са в connectionToRoom, значи getRoomByConnectionId-базираният
+  // lookup тук естествено отказва). Огледално на removeBotFromTeam-ия slot-
+  // clear pattern, но: (1) authorization е host-only, не same-team-member;
+  // (2) target-ът е explicit team+slotIndex, не "първия бот в отбора" — за да
+  // не позволи spoof на произволен profileId (§2 в task spec-а); (3) orphan-
+  // bot partner cleanup mirror-нато от leaveRoom (593-600 по-горе), защото
+  // kick-натият напуска отбора точно както при voluntary leave.
+  function kickMember(input: KickMemberInput): KickMemberResult {
+    const roomId = connectionToRoom.get(input.connectionId)
+    if (roomId === undefined) {
+      return { ok: false, message: 'Не си в частна маса.' }
+    }
+
+    const room = rooms.get(roomId)
+    if (room === undefined) {
+      connectionToRoom.delete(input.connectionId)
+      return { ok: false, message: 'Масата не съществува.' }
+    }
+
+    if (room.hostConnectionId !== input.connectionId) {
+      return {
+        ok: false,
+        message: 'Само домакинът може да премахва играчи от масата.',
+        code: 'private_room_not_creator',
+      }
+    }
+
+    const targetSlot = findSlot(room, input.team, input.slotIndex)
+    if (targetSlot === undefined || targetSlot.occupant === null || targetSlot.occupant.kind !== 'human') {
+      return {
+        ok: false,
+        message: 'Няма играч на това място.',
+        code: 'private_room_kick_target_invalid',
+      }
+    }
+
+    if (targetSlot.occupant.connectionId === room.hostConnectionId) {
+      return {
+        ok: false,
+        message: 'Не можеш да премахнеш себе си.',
+        code: 'private_room_kick_target_invalid',
+      }
+    }
+
+    const kickedOccupant = targetSlot.occupant
+
+    let nextSlots: PrivateRoomSlot[] = room.slots.map((s) =>
+      s.team === targetSlot.team && s.slotIndex === targetSlot.slotIndex ? { ...s, occupant: null } : s,
+    )
+
+    const partnerSlotIndex = nextSlots.findIndex(
+      (s) => s.team === targetSlot.team && s.slotIndex !== targetSlot.slotIndex,
+    )
+    if (partnerSlotIndex !== -1 && nextSlots[partnerSlotIndex]!.occupant?.kind === 'bot') {
+      nextSlots = nextSlots.map((s, i) => (i === partnerSlotIndex ? { ...s, occupant: null } : s))
+    }
+
+    const nextRoom: PrivateRoom = { ...room, slots: nextSlots as PrivateRoomSlots }
+    rooms.set(roomId, nextRoom)
+    connectionToRoom.delete(kickedOccupant.connectionId)
+
+    callbacks.onMemberKicked(nextRoom, kickedOccupant)
+    callbacks.onRoomsChanged()
+
+    return { ok: true, room: nextRoom, kickedOccupant }
   }
 
   // Връща стаята след leave-а (за да могат remaining members да получат
@@ -871,6 +1043,8 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     respondToInvite,
     addBotToTeam,
     removeBotFromTeam,
+    startRoom,
+    kickMember,
     listRooms,
     getRoomByConnectionId,
     getRoomByProfileId,

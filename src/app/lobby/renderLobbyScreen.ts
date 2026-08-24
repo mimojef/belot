@@ -1079,7 +1079,7 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsLifecycleTabChange: (tab: 'waiting' | 'playing' | 'finished') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
-  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
+  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
   /** Клик върху ред в списъка — само preview navigation, не изпраща join_private_room; реалният seat claim минава през конкретния "+" на waiting-room екрана. */
   onPrivateRoomJoin: (privateRoomId: string) => void
   /** Клик върху зает seat/avatar в списъка "Частни маси" — отваря съществуващия profile popup flow (не влиза в масата). */
@@ -9429,8 +9429,12 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
             </select>
           </div>
           <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
-            <input type="checkbox" name="isLocked" style="width:17px;height:17px;cursor:pointer;accent-color:#a78bfa;">
+            <input type="checkbox" name="isLocked" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
             <span style="font-size:13px;color:rgba(255,255,255,0.7);">Заключена маса <span style="color:rgba(255,255,255,0.4);">(само с покана)</span></span>
+          </label>
+          <label style="display:flex;align-items:center;gap:10px;cursor:pointer;user-select:none;">
+            <input type="checkbox" name="manualStart" style="width:17px;height:17px;flex-shrink:0;cursor:pointer;accent-color:#a78bfa;">
+            <span style="font-size:13px;color:rgba(255,255,255,0.7);">Ръчен старт от създателя <span style="color:rgba(255,255,255,0.4);">(маса 4/4 чака бутон „СТАРТ“)</span></span>
           </label>
           <div>
             <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за изчакване на играчи</div>
@@ -13949,11 +13953,12 @@ export function renderLobbyScreen(
       const stake = Number(data.get('stake')) as MatchStake
       if (!Number.isInteger(stake) || stake < 1) return
       const isLocked = (data.get('isLocked') ?? null) !== null
+      const manualStart = (data.get('manualStart') ?? null) !== null
       const rawWaitMinutes = Number(data.get('waitMinutes'))
       const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
         ? (rawWaitMinutes as 5 | 10 | 15 | 30)
         : 15
-      options.onPrivateRoomCreate(stake, isLocked, waitMinutes)
+      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart)
     })
 
   // Отделен бутон от "+"-ите по-долу (различно DOM поддърво в roomRowHtml) —

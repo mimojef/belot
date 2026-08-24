@@ -727,6 +727,7 @@ export type ClientMessage =
       stake: MatchStake
       isLocked: boolean
       waitMinutes: 5 | 10 | 15 | 30
+      manualStart?: boolean
       displayName?: string
     }
   | {
@@ -766,6 +767,14 @@ export type ClientMessage =
   | {
       type: 'remove_bot_from_private_room_team'
       team: Team
+    }
+  | {
+      type: 'start_private_room'
+    }
+  | {
+      type: 'kick_from_private_room'
+      team: Team
+      slotIndex: 0 | 1
     }
   | {
       type: 'subscribe_private_room_chat'
@@ -860,6 +869,8 @@ export type PrivateRoomSnapshot = {
   slots: PrivateRoomSlotSnapshot[]
   createdAt: number
   expiresAt: number
+  manualStart: boolean
+  canManualStart: boolean
 }
 
 export type RoomSeatSnapshot = {
@@ -1055,6 +1066,9 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_partner_blocked'
   | 'private_room_partner_blocked_by_viewer'
   | 'private_room_bot_owner_missing'
+  | 'private_room_not_creator'
+  | 'private_room_not_ready_to_start'
+  | 'private_room_kick_target_invalid'
 
 export type ErrorMessage = {
   type: 'error'
@@ -1351,6 +1365,11 @@ export type PrivateRoomMemberLeftMessage = {
 
 export type PrivateRoomClosedMessage = {
   type: 'private_room_closed'
+  privateRoomId: string
+}
+
+export type PrivateRoomKickedMessage = {
+  type: 'private_room_kicked'
   privateRoomId: string
 }
 
@@ -2032,6 +2051,7 @@ export type ServerMessage =
   | PrivateRoomFriendBusyMessage
   | PrivateRoomMemberLeftMessage
   | PrivateRoomClosedMessage
+  | PrivateRoomKickedMessage
   | PrivateRoomFullMessage
   | PrivateRoomCreatedNoticeMessage
   | PrivateGamesListMessage
@@ -2113,7 +2133,7 @@ export type GameServerClient = {
   sendPhraseReaction: (roomId: string, phraseId: string) => void
   requestPrivateRoomsList: () => void
   requestPrivateGamesList: () => void
-  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30) => void
+  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   leavePrivateRoom: () => void
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -2121,6 +2141,8 @@ export type GameServerClient = {
   respondPrivateRoomInvite: (inviteId: string, accept: boolean) => void
   addBotToPrivateRoomTeam: (team: Team) => void
   removeBotFromPrivateRoomTeam: (team: Team) => void
+  startPrivateRoom: () => void
+  kickFromPrivateRoom: (team: Team, slotIndex: 0 | 1) => void
   subscribePrivateRoomChat: (privateRoomId: string) => void
   unsubscribePrivateRoomChat: (privateRoomId: string) => void
   sendPrivateRoomChatMessage: (privateRoomId: string, body: string, requestId?: string) => void
@@ -2374,8 +2396,8 @@ export function createGameServerClient(
     send({ type: 'request_private_games_list' })
   }
 
-  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30): void {
-    send({ type: 'create_private_room', stake, isLocked, waitMinutes })
+  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean): void {
+    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart })
   }
 
   function joinPrivateRoomSlot(privateRoomId: string, team: Team, slotIndex: 0 | 1): void {
@@ -2404,6 +2426,14 @@ export function createGameServerClient(
 
   function removeBotFromPrivateRoomTeam(team: Team): void {
     send({ type: 'remove_bot_from_private_room_team', team })
+  }
+
+  function startPrivateRoom(): void {
+    send({ type: 'start_private_room' })
+  }
+
+  function kickFromPrivateRoom(team: Team, slotIndex: 0 | 1): void {
+    send({ type: 'kick_from_private_room', team, slotIndex })
   }
 
   function subscribePrivateRoomChat(privateRoomId: string): void {
@@ -2494,6 +2524,8 @@ export function createGameServerClient(
     respondPrivateRoomInvite,
     addBotToPrivateRoomTeam,
     removeBotFromPrivateRoomTeam,
+    startPrivateRoom,
+    kickFromPrivateRoom,
     subscribePrivateRoomChat,
     unsubscribePrivateRoomChat,
     sendPrivateRoomChatMessage,

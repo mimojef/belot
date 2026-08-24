@@ -4,6 +4,7 @@ import {
   renderPrivateRoomBlockedPopup,
   renderPrivateRoomInviteFriendsPopup,
   renderPrivateRoomJoinConfirmPopup,
+  renderPrivateRoomKickConfirmPopup,
   type PrivateRoomInviteEligibleFriend,
 } from './privateRoomPopupMarkup'
 
@@ -45,6 +46,7 @@ export type RenderPrivateRoomWaitingScreenParams = {
   viewerRole: PrivateRoomWaitingViewerRole
   joinSlotPopup: { team: Team; slotIndex: 0 | 1 } | null
   leaveConfirmOpen: boolean
+  kickConfirmPopup: { team: Team; slotIndex: 0 | 1; displayName: string } | null
   blockedPopupText: string | null
   botActionLoadingTeam: Team | null
   inviteFriendsPopupOpen: boolean
@@ -55,6 +57,20 @@ export type RenderPrivateRoomWaitingScreenParams = {
   chatErrorText: string | null
   infoText: string | null
   expiresAt: number
+  /** "Бяхте изключен от създателя на масата." — X-only modal (§3 в task
+   * spec-а). Затварянето (не самото получаване на съобщението) тригва
+   * client cleanup+навигация към lobby — виж onPrivateRoomKickedPopupClose. */
+  kickedPopupOpen: boolean
+  /** "Ръчен старт от създателя" — при true, room-ът НЕ auto-start-ва при 4/4. */
+  manualStart: boolean
+  /** Server-derived: manualStart===true И всичките 4 слота са заети. */
+  canManualStart: boolean
+  /** Локалният viewer е host-ът (creator-ът) на тази стая — гейтва START
+   * бутона и kick control-ите. Server е authoritative за реалната
+   * autorization (виж handleStartPrivateRoomRequest/handleKickFromPrivateRoomRequest
+   * в index.ts) — тук е само UX visibility. */
+  isLocalHost: boolean
+  startInFlight: boolean
 }
 
 // Pure formatter — exported so it can be unit-tested and reused by the
@@ -168,6 +184,7 @@ function renderSlotCard(
   slot: PrivateRoomWaitingSlotSnapshot,
   localProfileId: string | null,
   viewerRole: PrivateRoomWaitingViewerRole,
+  isLocalHost: boolean,
 ): string {
   const occupant = slot.occupant
   const slotKey = `${slot.team}:${slot.slotIndex}`
@@ -189,6 +206,11 @@ function renderSlotCard(
 
   const isLocal = viewerRole === 'member' && !occupant.isBot && occupant.profileId !== null && occupant.profileId === localProfileId
   const isClickableProfile = !occupant.isBot && !isLocal && occupant.profileId !== null
+  // Host вижда "−" premahvane control само върху ЧУЖД, реален (не бот) зает
+  // слот — never на собствения си (isLocal), never за бот (съществуващият
+  // bot-remove бутон покрива тях, виж renderTeamColumn). Non-host играчи
+  // никога не виждат тази контрола (§2 в task spec-а).
+  const showKickControl = isLocalHost && !occupant.isBot && !isLocal
 
   const subLine = occupant.isBot
     ? '<span class="prw-bot-badge">БОТ</span>'
@@ -196,7 +218,7 @@ function renderSlotCard(
       ? '<span class="prw-host-badge">ДОМАКИН</span>'
       : (occupant.rankTitle ? escapeHtml(occupant.rankTitle) : 'Играч')
 
-  const innerHtml = `
+  const avatarHtml = `
     <div class="prw-slot-avatar${occupant.isBot ? ' prw-slot-avatar-bot' : ''}">
       ${occupant.avatarUrl ? `<img src="${escapeHtml(occupant.avatarUrl)}" alt="" draggable="false">` : escapeHtml(occupant.isBot ? '🤖' : getInitialLetter(occupant.displayName))}
       ${isLocal ? `
@@ -205,6 +227,8 @@ function renderSlotCard(
         </button>
       ` : ''}
     </div>
+  `
+  const copyHtml = `
     <div class="prw-slot-copy">
       <div class="prw-slot-name">
         ${escapeHtml(occupant.displayName)}${isLocal ? ' <span class="prw-you-tag">ТИ</span>' : ''}
@@ -213,18 +237,40 @@ function renderSlotCard(
     </div>
   `
 
-  if (isClickableProfile) {
-    return `
+  // Kick badge не може да живее вътре в profile-click button-а (nested
+  // <button> е невалиден HTML) — затова profile-click е отделен вътрешен
+  // елемент, а kick badge е sibling в outer div-а, mirror на
+  // .prw-leave-badge pattern-а по-горе (тя работи, защото local occupant
+  // никога не е isClickableProfile, значи outer wrapper там винаги е div).
+  const kickBadgeHtml = showKickControl
+    ? `
       <button
         type="button"
-        data-private-room-member="${escapeHtml(occupant.profileId ?? '')}"
-        data-private-room-member-name="${escapeHtml(occupant.displayName)}"
-        class="prw-slot${isLocal ? ' prw-slot-local' : ''}"
-      >${innerHtml}</button>
+        data-private-room-kick-slot="${slotKey}"
+        data-private-room-kick-name="${escapeHtml(occupant.displayName)}"
+        class="prw-kick-badge"
+        aria-label="Премахни ${escapeHtml(occupant.displayName)} от масата"
+      >
+        <span aria-hidden="true">−</span>
+      </button>
+    `
+    : ''
+
+  if (isClickableProfile) {
+    return `
+      <div class="prw-slot-wrap">
+        <button
+          type="button"
+          data-private-room-member="${escapeHtml(occupant.profileId ?? '')}"
+          data-private-room-member-name="${escapeHtml(occupant.displayName)}"
+          class="prw-slot${isLocal ? ' prw-slot-local' : ''}"
+        >${avatarHtml}${copyHtml}</button>
+        ${kickBadgeHtml}
+      </div>
     `
   }
 
-  return `<div class="prw-slot${isLocal ? ' prw-slot-local' : ''}">${innerHtml}</div>`
+  return `<div class="prw-slot${isLocal ? ' prw-slot-local' : ''}">${avatarHtml}${copyHtml}</div>`
 }
 
 function renderTeamColumn(
@@ -234,6 +280,7 @@ function renderTeamColumn(
   viewerRole: PrivateRoomWaitingViewerRole,
   localTeam: Team | null,
   botActionLoadingTeam: Team | null,
+  isLocalHost: boolean,
 ): string {
   const [slotA, slotB] = getTeamSlots(slots, team)
   const control = computeTeamBotControlState(slots, team, localTeam)
@@ -244,8 +291,8 @@ function renderTeamColumn(
     <div class="prw-team">
       <div class="prw-team-header">${teamLabel}</div>
       <div class="prw-team-slots">
-        ${renderSlotCard(slotA, localProfileId, viewerRole)}
-        ${renderSlotCard(slotB, localProfileId, viewerRole)}
+        ${renderSlotCard(slotA, localProfileId, viewerRole, isLocalHost)}
+        ${renderSlotCard(slotB, localProfileId, viewerRole, isLocalHost)}
       </div>
       <div class="prw-bot-row">
         <button
@@ -343,6 +390,26 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           font-size:13px;
           font-weight:800;
           cursor:pointer;
+        }
+
+        .prw-manual-start-button {
+          height:38px;
+          padding:0 20px;
+          border-radius:8px;
+          border:0;
+          background:linear-gradient(180deg, #f4c95b 0%, #c98f13 100%);
+          color:#101010;
+          font-size:13px;
+          font-weight:900;
+          letter-spacing:0.03em;
+          cursor:pointer;
+        }
+
+        .prw-manual-start-button:disabled {
+          opacity:0.5;
+          cursor:not-allowed;
+          background:rgba(255,255,255,0.10);
+          color:rgba(255,255,255,0.5);
         }
 
         .prw-header-actions {
@@ -566,6 +633,31 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           justify-content:center;
           cursor:pointer;
           padding:0;
+        }
+
+        .prw-slot-wrap {
+          position:relative;
+        }
+
+        .prw-kick-badge {
+          position:absolute;
+          top:-6px;
+          right:-6px;
+          width:24px;
+          height:24px;
+          border-radius:50%;
+          background:#ef4444;
+          border:2px solid #000;
+          color:#fff;
+          font-size:15px;
+          font-weight:900;
+          line-height:1;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          cursor:pointer;
+          padding:0;
+          z-index:1;
         }
 
         .prw-slot-copy {
@@ -810,7 +902,8 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             flex-wrap:nowrap;
           }
 
-          .prw-waiting-actions .prw-wait-in-lobby-button {
+          .prw-waiting-actions .prw-wait-in-lobby-button,
+          .prw-waiting-actions .prw-manual-start-button {
             flex:1 1 0;
             min-width:0;
             height:36px;
@@ -860,7 +953,8 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
             font-size:13px;
           }
 
-          .prw-leave-badge {
+          .prw-leave-badge,
+          .prw-kick-badge {
             width:22px;
             height:22px;
             font-size:13px;
@@ -959,14 +1053,22 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
           ${params.isLocked && isMember && occupiedCount < 4
             ? `<button type="button" data-private-room-invite-open="1" class="prw-wait-in-lobby-button">+ Покани приятели</button>`
             : ''}
+          ${params.isLocalHost && params.manualStart
+            ? `<button
+                type="button"
+                data-private-room-manual-start="1"
+                class="prw-manual-start-button"
+                ${params.canManualStart && !params.startInFlight ? '' : 'disabled'}
+              >${params.startInFlight ? '...' : 'СТАРТ'}</button>`
+            : ''}
         </div>
 
         ${params.infoText ? `<div class="prw-info-banner">${escapeHtml(params.infoText)}</div>` : ''}
 
         <div class="prw-teams">
-          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam)}
+          ${renderTeamColumn(params.slots, 'A', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost)}
           <div class="prw-team-divider" aria-hidden="true"></div>
-          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam)}
+          ${renderTeamColumn(params.slots, 'B', params.localProfileId, params.viewerRole, localTeam, params.botActionLoadingTeam, params.isLocalHost)}
         </div>
 
         <div class="prw-chat-panel">
@@ -1012,6 +1114,18 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
               <button type="button" data-private-room-leave-popup-confirm="1" class="prw-confirm-yes prw-confirm-danger">Напусни</button>
               <button type="button" data-private-room-leave-popup-cancel="1" class="prw-confirm-cancel">Отказ</button>
             </div>
+          </div>
+        </div>
+      ` : ''}
+
+      ${renderPrivateRoomKickConfirmPopup(params.kickConfirmPopup)}
+
+      ${params.kickedPopupOpen ? `
+        <div class="prw-popup-backdrop" data-private-room-kicked-popup-backdrop="1">
+          <div class="prw-popup-box">
+            <button type="button" data-private-room-kicked-popup-close="1" class="prw-popup-close-x" aria-label="Затвори">✕</button>
+            <div class="prw-popup-title">Бяхте изключен от масата</div>
+            <div class="prw-popup-text">Бяхте изключен от създателя на масата.</div>
           </div>
         </div>
       ` : ''}

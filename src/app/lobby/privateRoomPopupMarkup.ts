@@ -217,6 +217,22 @@ export function renderPrivateRoomJoinConfirmPopup(popup: { team: Team } | null):
   `
 }
 
+export function renderPrivateRoomKickConfirmPopup(popup: { displayName: string } | null): string {
+  if (!popup) return ''
+  return `
+    <div class="prw-popup-backdrop" data-private-room-kick-popup-backdrop="1">
+      <div class="prw-popup-box">
+        <div class="prw-popup-title">Премахване на играч</div>
+        <div class="prw-popup-text">Сигурни ли сте, че искате да премахнете ${escapeHtml(popup.displayName)} от масата?</div>
+        <div class="prw-popup-actions">
+          <button type="button" data-private-room-kick-popup-confirm="1" class="prw-confirm-yes prw-confirm-danger">Премахни</button>
+          <button type="button" data-private-room-kick-popup-cancel="1" class="prw-confirm-cancel">Отказ</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 export function renderPrivateRoomBlockedPopup(blockedPopupText: string | null): string {
   if (!blockedPopupText) return ''
   return `

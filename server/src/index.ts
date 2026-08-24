@@ -529,6 +529,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'request_private_games_list':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
+    case 'start_private_room':
+    case 'kick_from_private_room':
     case 'subscribe_private_room_chat':
     case 'unsubscribe_private_room_chat':
     case 'send_private_room_chat_message':
@@ -2822,6 +2824,8 @@ function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
     })),
     createdAt: room.createdAt,
     expiresAt: room.expiresAt,
+    manualStart: room.manualStart,
+    canManualStart: room.manualStart && room.slots.every((s) => s.occupant !== null),
   }
 }
 
@@ -3378,6 +3382,18 @@ function handlePrivateRoomMemberLeft(room: PrivateRoom, occupant: PrivateRoomHum
   })
 }
 
+// Targeted съобщение само към изритания играч — оставащите members (вкл.
+// host-а, който сам инициира kick-а) получават актуалния snapshot чрез
+// sendPrivateRoomUpdateToMembers, извикан от самия kick_from_private_room
+// handler-а (mirror на handlePrivateRoomClosed, който също explicit
+// изключва host-а от получателите на targeted нотификацията).
+function handlePrivateRoomMemberKicked(room: PrivateRoom, occupant: PrivateRoomHumanOccupant): void {
+  safeSendToConnection(occupant.connectionId, {
+    type: 'private_room_kicked',
+    privateRoomId: room.id,
+  })
+}
+
 const privateRoomChatStore = createPrivateRoomChatStore()
 
 const privateRoomsStore = createPrivateRoomsStore({
@@ -3386,6 +3402,7 @@ const privateRoomsStore = createPrivateRoomsStore({
   onRoomExpired: (room) => handlePrivateRoomExpired(room),
   onRoomClosed: (room) => handlePrivateRoomClosed(room),
   onMemberLeft: (room, occupant) => handlePrivateRoomMemberLeft(room, occupant),
+  onMemberKicked: (room, occupant) => handlePrivateRoomMemberKicked(room, occupant),
 })
 
 for (const room of Object.values(serverState.rooms)) {
@@ -15650,6 +15667,7 @@ wsServer.on('connection', (socket, request) => {
           stake: message.stake,
           isLocked: message.isLocked,
           waitMinutes: message.waitMinutes,
+          manualStart: message.manualStart ?? false,
         })
 
         if (!createResult.ok) {
@@ -15874,6 +15892,59 @@ wsServer.on('connection', (socket, request) => {
         }
 
         sendPrivateRoomUpdateToMembers(removeResult.room)
+        return
+      }
+
+      if (message.type === 'start_private_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const startResult = privateRoomsStore.startRoom({
+          connectionId: connection.id,
+          isBlockedWith: (a, b) => blockStore.isBlocked(a, b),
+        })
+
+        if (!startResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: startResult.message, code: startResult.code })
+          if (startResult.readiness && !startResult.readiness.ready) {
+            const room = privateRoomsStore.getRoomByConnectionId(connection.id)
+            if (room !== null) {
+              broadcastPrivateRoomNotReadyInfo(room, startResult.readiness)
+            }
+          }
+          return
+        }
+
+        // Успешен старт делегира изцяло на onRoomReady callback-а
+        // (handlePrivateRoomReady), точно както auto-start пътя през
+        // joinTeam/addBotToTeam — не дублира match-start логика тук.
+        return
+      }
+
+      if (message.type === 'kick_from_private_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection?.profileId == null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+
+        const kickResult = privateRoomsStore.kickMember({
+          connectionId: connection.id,
+          team: message.team,
+          slotIndex: message.slotIndex,
+        })
+
+        if (!kickResult.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: kickResult.message, code: kickResult.code })
+          return
+        }
+
+        sendPrivateRoomUpdateToMembers(kickResult.room)
         return
       }
 
