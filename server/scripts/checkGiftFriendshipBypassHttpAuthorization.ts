@@ -9,17 +9,23 @@
  * gate-а (isPikaTeamGiftFriendshipBypassSession) и store path-а
  * (yellowCoinGiftStore.sendGiftToProfile), не само source-string assertions.
  *
- * Покрива (production hotfix брифа §2):
+ * Покрива (production hotfix брифа §2 + mobile+gift-max hotfix брифа §3/§5):
  *  [A] pika_team + non-friend → direct gift succeeds (200, balances/ledger коректни)
  *  [B] normal player + non-friend → 403 на СЪЩИЯ endpoint
  *  [C] pika_team → себе си → rejected (400), без промяна на баланса
  *  [D] pika_team + insufficient balance → rejected, balances/ledger непроменени
  *  [E] successful direct gift → sender -amount, recipient +amount,
  *      точно 1 нов ledger ред, friendship_id = NULL
+ *  [F] pika_team direct gift 100000 → allowed (role-based max amount)
+ *  [G] pika_team friendship gift (accepted friend) 100000 → allowed
+ *  [H] pika_team 100001 → rejected на direct И friendship пътя
+ *  [I] normal player: 30000 allowed / 30001 rejected (старият max, непроменен
+ *      за player дори на direct endpoint-а, който все още връща 403)
  *  [extra] guest (без cookie) → 401 (не 403 — сесията изобщо липсва)
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
@@ -202,6 +208,26 @@ function setWalletBalance(databaseFile: string, profileId: string, balance: numb
   db.close()
 }
 
+// Директен SQL insert на accepted friendship (реалната production схема —
+// виж database/migrations/20260510_005_create_profile_friendships.sql +
+// 20260804_002_add_pika_support_conversation_kind.sql за kind колоната) —
+// нужен за max-amount friendship-path тестовете ([F]/[H] по-долу), които не
+// минават през bypass endpoint-а, а през стария /api/friends/:id/gift-coins.
+function createAcceptedFriendship(databaseFile: string, profileIdA: string, profileIdB: string): string {
+  const db = new DatabaseSync(databaseFile)
+  db.exec('PRAGMA journal_mode = WAL;')
+  const friendshipId = randomUUID()
+  const lower = profileIdA < profileIdB ? profileIdA : profileIdB
+  const higher = profileIdA < profileIdB ? profileIdB : profileIdA
+  db.prepare(`
+    INSERT INTO profile_friendships
+      (friendship_id, requester_profile_id, addressee_profile_id, lower_profile_id, higher_profile_id, status, kind)
+    VALUES (?, ?, ?, ?, ?, 'accepted', 'friend');
+  `).run(friendshipId, profileIdA, profileIdB, lower, higher)
+  db.close()
+  return friendshipId
+}
+
 function getWalletBalance(databaseFile: string, profileId: string): number {
   const db = new DatabaseSync(databaseFile)
   const row = db.prepare(`SELECT yellow_coins_balance FROM profile_wallets WHERE profile_id = ?`).get(profileId) as
@@ -310,19 +336,37 @@ try {
 
   console.log('\n[setup] Регистрация на pika_team + normal player + non-friend recipients...')
   const pikaCandidate = await register(port, runId, 'pikateam')
+  // Отделен pika_team sender за [G] — [F] вече изпраща 100 000 с pikaCandidate,
+  // а [G] също иска 100 000; двете заедно (200 000) биха ударили sender's
+  // 24-часов DAILY_GIFT_LIMIT (200 000), несвързан с max-amount/window
+  // exemption-а, който [G] реално тества. Отделен sender изолира сценария.
+  const pikaCandidateG = await register(port, runId, 'pikateamg')
   const playerCandidate = await register(port, runId, 'player')
   const recipientA = await register(port, runId, 'recipienta')
   const recipientB = await register(port, runId, 'recipientb')
   const recipientD = await register(port, runId, 'recipientd')
   const recipientE = await register(port, runId, 'recipiente')
+  const recipientF = await register(port, runId, 'recipientf')
+  const recipientH = await register(port, runId, 'recipienth')
+  const pikaFriend = await register(port, runId, 'pikafriend')
+  const playerFriend = await register(port, runId, 'playerfriend')
 
   promoteRole(isolated.databaseFile, pikaCandidate.email, 'pika_team')
+  promoteRole(isolated.databaseFile, pikaCandidateG.email, 'pika_team')
 
   const pikaCookie = await login(port, pikaCandidate.email)
+  const pikaCookieG = await login(port, pikaCandidateG.email)
   const playerCookie = await login(port, playerCandidate.email)
 
-  console.log('  Регистрирани: pika_team sender, normal player sender, 4 non-friend получатели.')
+  console.log('  Регистрирани: pika_team sender, normal player sender, 4 non-friend получатели, 2 friend получатели.')
   console.log('  Никой от recipientA/B/D/E НЕ е приятел с изпращачите (accepted friendship никъде не е създадена).')
+
+  // Реални accepted friendships (за max-amount friendship-path тестовете
+  // [G]/[H]/[I] по-долу — минават през стария /api/friends/:id/gift-coins,
+  // не през /direct bypass endpoint-а). pikaFriendshipId е с pikaCandidateG
+  // (не pikaCandidate) — виж коментара при pikaCandidateG по-горе.
+  const pikaFriendshipId = createAcceptedFriendship(isolated.databaseFile, pikaCandidateG.profileId, pikaFriend.profileId)
+  const playerFriendshipId = createAcceptedFriendship(isolated.databaseFile, playerCandidate.profileId, playerFriend.profileId)
 
   // ── [A] pika_team + non-friend → succeeds ────────────────────────────────
   console.log('\n[A] pika_team + non-friend получател → direct gift succeeds')
@@ -442,6 +486,84 @@ try {
     if (row.amount !== 3_000) throw new Error(`amount=${row.amount}, очаквах 3000`)
     if (row.sender_balance_after !== senderBalanceBeforeE - 3_000) throw new Error(`sender_balance_after=${row.sender_balance_after}`)
     if (row.recipient_balance_after !== recipientBalanceBeforeE + 3_000) throw new Error(`recipient_balance_after=${row.recipient_balance_after}`)
+  })
+
+  // ── [F] pika_team direct gift 100000 → allowed при достатъчен balance ────
+  // recipientF е "свеж" получател (никога преди не е получавал подарък в
+  // теста) — recipientA вече е получил 5 000 в [A] и би ударил в
+  // recipient-window guard-а, а не в max-amount validation-а, който тук
+  // тестваме.
+  console.log('\n[F] pika_team direct gift 100000 → allowed (role-based max amount + window exemption)')
+  setWalletBalance(isolated.databaseFile, pikaCandidate.profileId, 200_000)
+  await check('[F] pika_team -> POST gift-coins/direct amount=100000 (fresh recipient) => 200 ok:true', async () => {
+    const r = await httpRequest(port, '/api/friends/gift-coins/direct', 'POST', pikaCookie, {
+      recipientProfileId: recipientF.profileId,
+      amount: 100_000,
+    })
+    const b = r.body as { ok?: boolean }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+  })
+
+  // ── [G] pika_team friendship gift 100000 → allowed ────────────────────────
+  // pikaFriend е свеж recipient (само за pikaFriendshipId, никога преди не е
+  // получавал подарък) — window exemption-ът (role-based, виж sendGiftCore
+  // §5) позволява точно 100 000 да мине наведнъж.
+  console.log('\n[G] pika_team friendship gift (accepted friend) 100000 → allowed (window exemption)')
+  setWalletBalance(isolated.databaseFile, pikaCandidateG.profileId, 200_000)
+  await check('[G] pika_team -> POST /friends/:id/gift-coins amount=100000 (accepted friend, fresh recipient) => 200 ok:true', async () => {
+    const r = await httpRequest(port, `/api/friends/${encodeURIComponent(pikaFriendshipId)}/gift-coins`, 'POST', pikaCookieG, {
+      amount: 100_000,
+    })
+    const b = r.body as { ok?: boolean }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+  })
+
+  // ── [H] pika_team 100001 → rejected (и двата пътя) ────────────────────────
+  // amount validation (normalizeGiftAmount) отказва 100001 ПРЕДИ каквато и
+  // да е recipient-window проверка, затова recipientH/pikaFriend не се
+  // нуждаят от специфично "свежо" състояние тук — очакваме отказ по amount,
+  // не по window.
+  console.log('\n[H] pika_team amount=100001 → rejected на direct И friendship пътя (над новия max)')
+  setWalletBalance(isolated.databaseFile, pikaCandidate.profileId, 500_000)
+  await check('[H.1] pika_team -> POST gift-coins/direct amount=100001 => ok:false', async () => {
+    const r = await httpRequest(port, '/api/friends/gift-coins/direct', 'POST', pikaCookie, {
+      recipientProfileId: recipientH.profileId,
+      amount: 100_001,
+    })
+    const b = r.body as { ok?: boolean; message?: string }
+    if (b.ok !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(b)} — очаквах ok:false`)
+  })
+  await check('[H.2] pika_team -> POST /friends/:id/gift-coins amount=100001 (accepted friend) => ok:false', async () => {
+    const r = await httpRequest(port, `/api/friends/${encodeURIComponent(pikaFriendshipId)}/gift-coins`, 'POST', pikaCookieG, {
+      amount: 100_001,
+    })
+    const b = r.body as { ok?: boolean }
+    if (b.ok !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(b)} — очаквах ok:false`)
+  })
+
+  // ── [I] normal player 30000 → allowed; 30001 → rejected (старите правила) ─
+  console.log('\n[I] normal player: 30000 allowed, 30001 rejected (старият max, непроменен)')
+  setWalletBalance(isolated.databaseFile, playerCandidate.profileId, 200_000)
+  await check('[I.1] player -> POST /friends/:id/gift-coins amount=30000 (accepted friend) => 200 ok:true', async () => {
+    const r = await httpRequest(port, `/api/friends/${encodeURIComponent(playerFriendshipId)}/gift-coins`, 'POST', playerCookie, {
+      amount: 30_000,
+    })
+    const b = r.body as { ok?: boolean }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+  })
+  await check('[I.2] player -> POST /friends/:id/gift-coins amount=30001 (accepted friend) => ok:false (над стария max)', async () => {
+    const r = await httpRequest(port, `/api/friends/${encodeURIComponent(playerFriendshipId)}/gift-coins`, 'POST', playerCookie, {
+      amount: 30_001,
+    })
+    const b = r.body as { ok?: boolean }
+    if (b.ok !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(b)} — очаквах ok:false`)
+  })
+  await check('[I.3] player -> POST gift-coins/direct отказан (403, все още не е pika_team) — max amount fix не разширява ролята', async () => {
+    const r = await httpRequest(port, '/api/friends/gift-coins/direct', 'POST', playerCookie, {
+      recipientProfileId: recipientD.profileId,
+      amount: 30_000,
+    })
+    if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
   })
 
 } catch (err) {

@@ -78,13 +78,17 @@ export type ChatStore = {
     includeArchived?: boolean,
   ) => ChatConversationSnapshot[]
   // Единствен начин служебен pika_support разговор да бъде СЪЗДАДЕН — вика
-  // се само от POST /api/chat/pika-support/start, който вече е guard-нал
-  // initiatorProfileId === configuredOfficialPikaProfileId на HTTP ниво.
-  // Тук проверката се повтаря authoritative (defense-in-depth, не разчита
-  // само на handler-а) — виж коментара на функцията по-долу.
+  // се само от POST /api/chat/pika-support/start. Authoritative проверката
+  // живее ИЗЦЯЛО тук (виж коментара на функцията по-долу) — store-ът не
+  // вижда session-и, затова isRoleBasedPikaTeamSender се подава explicit от
+  // route handler-а, вече изчислен от isPikaTeamSupportChatSession(session)
+  // (authStore.ts, role==='pika_team' единствено, server-authoritative, НЕ
+  // от client payload). initiatorProfileId === configured officialPikaProfileId
+  // (legacy единичен profileId) остава паралелно валиден път.
   getOrCreatePikaSupportConversation: (
     initiatorProfileId: ProfileId,
     recipientProfileId: ProfileId,
+    isRoleBasedPikaTeamSender?: boolean,
   ) =>
     | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
     | { ok: false; message: string; code?: ChatStoreErrorCode }
@@ -740,22 +744,41 @@ export async function createChatStore(
   }
 
   // Единственият път служебен pika_support разговор да бъде създаден.
-  // Authoritative правила (виж §2/§7 в task spec-а):
-  //  1) initiatorProfileId ТРЯБВА да е точно configured official Pika.bg
-  //     profileId — fail-closed, ако env var-ът липсва/е невалиден.
+  // Authoritative правила:
+  //  1) initiatorProfileId ТРЯБВА да е ИЛИ точно configured official Pika.bg
+  //     profileId (legacy единичен profileId, fail-closed ако env var-ът
+  //     липсва/е невалиден) ИЛИ isRoleBasedPikaTeamSender===true (route
+  //     handler-ът вече е проверил session.account.role==='pika_team' през
+  //     isPikaTeamSupportChatSession — виж authStore.ts; store-ът тук не
+  //     презаверява role-а, защото не вижда сесии, само получава готовия
+  //     server-authoritative флаг). Двата пътя са РАВНОПРАВНИ — не се
+  //     изисква role-based sender-ът да съвпада с official profileId.
   //  2) initiator != recipient (без self-chat).
   //  3) recipient трябва да е реален регистриран човешки профил (не guest,
   //     не бот, не изтрит/деактивиран).
   //  4) find-or-create по (lower,higher) двойка + kind='pika_support' —
   //     повторно повикване връща СЪЩИЯ friendship_id (idempotent), никога
   //     дубликат, защитено допълнително от partial unique index-а.
+  //     createChatProfilePair(initiatorProfileId, recipientProfileId) е
+  //     функция на РЕАЛНИТЕ двата profileId — различни pika_team sender-и
+  //     към същия recipient пораждат различни (lower,higher) двойки, значи
+  //     отделни conversation redове; НЯМА conversation identity collision
+  //     между различни pika_team profileId-та (виж chat authorization
+  //     hotfix брифа §4).
+  //  5) НЯМА block проверка тук — съществуващо поведение, непроменено
+  //     нарочно (виж chat authorization hotfix брифа §3: "запази ги такива,
+  //     каквито са в момента" — pika_support исторически bypass-ва и
+  //     friendship, и block).
   function getOrCreatePikaSupportConversation(
     initiatorProfileId: ProfileId,
     recipientProfileId: ProfileId,
+    isRoleBasedPikaTeamSender: boolean = false,
   ):
     | { ok: true; friendshipId: string; conversation: ChatConversationSnapshot }
     | { ok: false; message: string; code?: ChatStoreErrorCode } {
-    if (officialPikaProfileId === null || initiatorProfileId !== officialPikaProfileId) {
+    const isOfficialPikaProfile = officialPikaProfileId !== null && initiatorProfileId === officialPikaProfileId
+
+    if (!isOfficialPikaProfile && !isRoleBasedPikaTeamSender) {
       return {
         ok: false,
         message: 'Само официалният профил на Pika.bg може да започне този разговор.',

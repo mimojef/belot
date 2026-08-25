@@ -1674,15 +1674,25 @@ export function renderPlayerProfilePopup(
 
         [data-player-profile-actions="1"] > div:first-child {
           width:100%;
-          flex-wrap:nowrap !important;
+          display:grid !important;
+          grid-template-columns:repeat(3, 1fr);
+          gap:6px;
         }
 
         [data-player-profile-actions="1"] button {
-          flex:1 !important;
+          width:100% !important;
           min-width:0 !important;
-          padding:0 8px !important;
-          font-size:12px !important;
+          min-height:34px !important;
+          padding:0 6px !important;
+          font-size:11px !important;
+          gap:4px !important;
           justify-content:center;
+        }
+
+        [data-player-profile-actions="1"] button svg {
+          width:13px !important;
+          height:13px !important;
+          flex-shrink:0;
         }
 
         [data-player-profile-stat="1"] {

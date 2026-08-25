@@ -593,7 +593,7 @@ export type LobbyScreenState = {
   /** pika_team friendship-gate bypass — виж createLobbyFlowController.ts коментара. */
   giftModalBypassRecipientProfileId: string | null
   giftModalFriendName: string
-  /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 само за pika_team gift bypass profile-а. Authoritative проверката е сървърна (index.ts sendGift handler). */
+  /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 за legacy pika_team bypass profileId ИЛИ role==='pika_team'. Authoritative проверката е сървърна (index.ts sendGiftCore). */
   giftModalMaxAmount: number
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null

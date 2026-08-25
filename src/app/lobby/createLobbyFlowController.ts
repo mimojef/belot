@@ -1273,7 +1273,7 @@ type InternalLobbyFlowState = {
    */
   giftModalBypassRecipientProfileId: string | null
   giftModalFriendName: string
-  /** Server-derived UI signal (currentAuthSession.pikaTeamGiftMaxAmount) — 30000 за всички обичайни profiles, 100000 само за pika_team gift bypass profile-а. Authoritative проверката е сървърна (index.ts sendGift handler); това поле само казва какъв max/text да покаже gift modal-ът. */
+  /** Server-derived UI signal (currentAuthSession.pikaTeamGiftMaxAmount) — 30000 за всички обичайни profiles, 100000 за legacy pika_team bypass profileId ИЛИ role==='pika_team' (mobile+gift-max hotfix). Authoritative проверката е сървърна (index.ts sendGiftCore); това поле само казва какъв max/text да покаже gift modal-ът — важи еднакво за friendship и direct bypass gift пътищата. */
   giftModalMaxAmount: number
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
@@ -2394,6 +2394,11 @@ export function createLobbyFlowController(
   let finalFillAnimatedQueuedPlayers: number | null = null
   let pendingMatchFoundMessage: MatchFoundMessage | null = null
   let pendingMatchFoundTimeoutId: number | null = null
+  // Auto-hide за gift success inline съобщението (state.friendActionMessage,
+  // виж submitGiftCoinsCore/clearGiftSuccessInlineMessage по-долу) — bounded
+  // 3s timeout, не global polling. Reuse-ва established closure-scoped timer
+  // ID pattern (mirror на pendingMatchFoundTimeoutId).
+  let giftSuccessMessageTimeoutId: number | null = null
   let stakeEffectStartedAt: number | null = null
   let pendingStakeEffect = false
 
@@ -3090,11 +3095,20 @@ export function createLobbyFlowController(
 
   // UI-само видимост на бутона "Чат" в profile popup-а — истинската защита
   // е server-side (chatStore.getOrCreatePikaSupportConversation отказва
-  // всеки profileId, различен от configured official Pika.bg profileId).
-  // Тук показваме бутона само когато ТЕКУЩИЯТ логнат профил е точно
-  // OFFICIAL_PIKA_PROFILE_ID, popup-ът разглежда ЧУЖД регистриран профил
+  // всеки profileId, различен от configured official Pika.bg profileId,
+  // ВСЕ ОЩЕ единствено server env PIKA_OFFICIAL_PROFILE_ID — НЕ role-based,
+  // виж bug report "chat button gone" §2: "Не разширявай backend chat
+  // authorization"). Тук показваме бутона когато ТЕКУЩИЯТ логнат профил е
+  // ИЛИ точно OFFICIAL_PIKA_PROFILE_ID (legacy единичен profileId), ИЛИ
+  // role==='pika_team' (mirror на isPikaTeamGiftFriendshipBypassAuthSession
+  // pattern-а — production очакваше "Чат" за всеки pika_team viewer, не само
+  // за конкретния profileId). popup-ът разглежда ЧУЖД регистриран профил
   // (не own, не guest — targetProfileId===null означава гост), и не сме в
-  // "canEdit" (own-profile edit) режим.
+  // "canEdit" (own-profile edit) режим. ВНИМАНИЕ: за pika_team account,
+  // различен от OFFICIAL_PIKA_PROFILE_ID, бутонът вече ще се вижда, но
+  // server-side заявката пак ще отказва (fail-closed) — само UI видимост е
+  // разширена тук, authoritative chat authorization остава непроменена по
+  // explicit brief решение.
   function shouldShowPikaSupportChatButton(authSession: LobbyAuthSession | null): boolean {
     const targetProfileId = state.profilePopupProfile?.profileId ?? null
 
@@ -3102,7 +3116,7 @@ export function createLobbyFlowController(
       state.profilePopupOpen &&
       !state.profilePopupCanEdit &&
       authSession !== null &&
-      authSession.profile.profileId === OFFICIAL_PIKA_PROFILE_ID &&
+      (authSession.profile.profileId === OFFICIAL_PIKA_PROFILE_ID || authSession.account.role === 'pika_team') &&
       targetProfileId !== null &&
       targetProfileId !== authSession.profile.profileId
     )
@@ -3782,6 +3796,7 @@ export function createLobbyFlowController(
         state.vipGrantOpen = false
         state.vipGrantSubmitting = false
         state.vipGrantErrorText = null
+        clearGiftSuccessInlineMessage()
         renderPopupOnly()
       },
       // ВАЖНО: трябва да приема profileId и да делегира към същия
@@ -10074,6 +10089,28 @@ export function createLobbyFlowController(
     await showTopicsPersonalChat(result.conversation.friendshipId)
   }
 
+  // Изчиства stale gift success inline съобщението (state.friendActionMessage/
+  // friendActionMessageProfileId, показвано в profile popup-а под action
+  // бутоните) — вика се от auto-hide timeout-а по-долу И explicit при
+  // popup close / profile target change / logout-login (resetToLobby) / нов
+  // gift submit. НЕ пипа friendActionMessage за друг активен non-gift flow
+  // (напр. "Поканата е изпратена.") — guard-нато е с targetProfileId, за да
+  // не изтрие съобщение, зададено СЛЕД gift-а от друго действие върху СЪЩИЯ
+  // профил (напр. block веднага след gift).
+  function clearGiftSuccessInlineMessage(targetProfileId?: string): void {
+    if (giftSuccessMessageTimeoutId !== null) {
+      window.clearTimeout(giftSuccessMessageTimeoutId)
+      giftSuccessMessageTimeoutId = null
+    }
+    if (
+      state.friendActionMessage !== null &&
+      (targetProfileId === undefined || state.friendActionMessageProfileId === targetProfileId)
+    ) {
+      state.friendActionMessage = null
+      state.friendActionMessageProfileId = null
+    }
+  }
+
   // Общо ядро за submitGiftCoins/submitGiftCoinsBypass по-долу — идентична
   // error/success обработка и за двата network пътя (нормален friend gift и
   // pika_team direct bypass), различава се само кой network call се прави и
@@ -10084,6 +10121,10 @@ export function createLobbyFlowController(
     clearModalTargetState: () => void,
     callNetwork: (() => Promise<GiftCoinsSubmitResult>) | undefined,
   ): Promise<void> {
+    // Изчиства stale success съобщение от ПРЕДИШЕН gift (или предишна
+    // сесия), преди новия опит — виж AUDIT §"нов gift attempt" в брифа.
+    clearGiftSuccessInlineMessage()
+
     if (!callNetwork) {
       state.giftModalErrorText = 'Подаряването временно не е налично.'
       render()
@@ -10108,9 +10149,19 @@ export function createLobbyFlowController(
     state.giftModalErrorText = null
     state.giftSuccessModal = { amount, friendName }
     state.profilePopupProfile = result.recipientProfile
-    state.friendActionMessageProfileId = result.recipientProfile.profileId
+    const recipientProfileId = result.recipientProfile.profileId
+    state.friendActionMessageProfileId = recipientProfileId
     state.friendActionMessage = `Подаръкът от ${amount} жълтици е изпратен.`
     render()
+
+    // Bounded 3s auto-hide — не global polling, единичен self-clearing timer.
+    // Guard-нато с targetProfileId в clearGiftSuccessInlineMessage, за да не
+    // изтрие по-ново съобщение, зададено междувременно за същия профил.
+    giftSuccessMessageTimeoutId = window.setTimeout(() => {
+      giftSuccessMessageTimeoutId = null
+      clearGiftSuccessInlineMessage(recipientProfileId ?? undefined)
+      render()
+    }, 3000)
   }
 
   async function submitGiftCoins(
@@ -12150,6 +12201,7 @@ export function createLobbyFlowController(
         state.vipGrantOpen = false
         state.vipGrantSubmitting = false
         state.vipGrantErrorText = null
+        clearGiftSuccessInlineMessage()
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
       },
       onEditClick: (profileId) => {
@@ -12553,6 +12605,11 @@ export function createLobbyFlowController(
     state.profilePopupProfile = null
     state.profilePopupCanEdit = isOwn
     state.profilePopupContext = context
+    // Всяко отваряне на profile popup (вкл. повторно отваряне на СЪЩИЯ
+    // профил след затваряне) не трябва да наследи stale gift success
+    // съобщение от предишен gift/сесия — виж bug report §"затваряне и
+    // повторно отваряне".
+    clearGiftSuccessInlineMessage()
 
     if (isOwn) {
       state.profilePopupOpen = true
@@ -12624,6 +12681,11 @@ export function createLobbyFlowController(
 
   function resetToLobby(): void {
     switchToLobby()
+    // resetToLobby() се вика и на logout, и на login/register success (виж
+    // main.ts) — единствената обща точка за двете. Изчиства stale gift
+    // success inline съобщение, което иначе би оцеляло между сесии (bug
+    // report §"дори след logout и login отново").
+    clearGiftSuccessInlineMessage()
     render()
     void loadPlayerUnclaimedCount()
   }

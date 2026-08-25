@@ -43,10 +43,19 @@ export type GiftLimitError = {
 }
 
 export type YellowCoinGiftStore = {
+  /**
+   * isRoleBasedPikaTeamSender — вика се от index.ts route с
+   * isPikaTeamGiftMaxAmountSession(session) (authStore.ts, role==='pika_team'
+   * единствено). Store-ът не вижда session-и, затова caller-ът е authoritative
+   * gate; флагът вдига single-операция max amount на 100 000 И recipient
+   * window exemption-а (виж sendGiftCore §5) — без window exemption 100 000
+   * подарък никога не би могъл да мине покрай 30 000/60-дни recipient cap-а.
+   */
   sendGift: (
     senderProfileId: ProfileId,
     friendshipId: string,
     amount: number,
+    isRoleBasedPikaTeamSender?: boolean,
   ) =>
     | {
         ok: true
@@ -63,11 +72,16 @@ export type YellowCoinGiftStore = {
    * извика тази функция единствено когато изпращачът е role='pika_team'
    * session (виж isPikaTeamGiftFriendshipBypassSession в authStore.ts) —
    * тук няма собствена role проверка, защото store-ът не вижда session-и.
+   * isRoleBasedPikaTeamSender — виж коментара на sendGift по-горе (тук
+   * винаги ще е true в production, тъй като route-ът вече изисква
+   * role==='pika_team' за самия достъп до /direct, но параметърът остава
+   * explicit за симетрия и directly-testable поведение).
    */
   sendGiftToProfile: (
     senderProfileId: ProfileId,
     recipientProfileId: ProfileId,
     amount: number,
+    isRoleBasedPikaTeamSender?: boolean,
   ) =>
     | {
         ok: true
@@ -366,6 +380,7 @@ export async function createYellowCoinGiftStore(
     resolveRecipient: () =>
       | { ok: true; recipientProfileId: ProfileId }
       | { ok: false; message: string },
+    isRoleBasedPikaTeamSender: boolean,
   ):
     | {
         ok: true
@@ -376,12 +391,20 @@ export async function createYellowCoinGiftStore(
     | GiftLimitError
     | { ok: false; message: string } {
     // Чиста TypeScript валидация преди базата. Authoritative sender-specific
-    // max — pikaTeamGiftBypassProfileId (същия profile, който bypass-ва
-    // recipient's window лимит по-долу) получава по-висок single-операция
-    // таван; всички останали sender-и остават на MAX_GIFT_AMOUNT.
+    // max — pikaTeamGiftBypassProfileId (legacy ЕДИН конкретен profile) ИЛИ
+    // role==='pika_team' (isRoleBasedPikaTeamSender, caller-gated през
+    // isPikaTeamGiftMaxAmountSession в authStore.ts) получават по-висок
+    // single-операция таван (100 000 вместо 30 000); всички останали
+    // sender-и остават на MAX_GIFT_AMOUNT. hasHigherMaxAmount участва и в §5
+    // recipient-window bypass-а по-долу — 100 000 single подарък не може да
+    // мине покрай 30 000 window cap за non-exempt recipient, затова
+    // max-amount и window-exemption permission-ите вървят заедно за двата
+    // случая (legacy profileId и role-based), макар да остават концептуално
+    // различни permission-и (виж isPikaTeamGiftMaxAmountSession коментара).
     const isPikaTeamSender = pikaTeamGiftBypassProfileId !== null
       && senderProfileId === pikaTeamGiftBypassProfileId
-    const maxAmountForSender = isPikaTeamSender ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER : MAX_GIFT_AMOUNT
+    const hasHigherMaxAmount = isPikaTeamSender || isRoleBasedPikaTeamSender
+    const maxAmountForSender = hasHigherMaxAmount ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER : MAX_GIFT_AMOUNT
     const amount = normalizeGiftAmount(amountRaw, maxAmountForSender)
 
     if (amount === null) {
@@ -389,7 +412,7 @@ export async function createYellowCoinGiftStore(
       // групира с U+00A0 (non-breaking space), различно byte-wise от
       // established regular-space текста, ползван навсякъде другаде в
       // кода/тестовете ("1 000", "30 000" с обикновен интервал).
-      const maxAmountText = isPikaTeamSender ? '100 000' : '30 000'
+      const maxAmountText = hasHigherMaxAmount ? '100 000' : '30 000'
       return {
         ok: false,
         message: `Сумата трябва да е между 1 000 и ${maxAmountText} жълтици.`,
@@ -439,8 +462,15 @@ export async function createYellowCoinGiftStore(
         }
       }
 
-      // 5. Recipient 60-дневен лимит
-      const isRecipientLimitExemptGift = isPikaTeamSender
+      // 5. Recipient 60-дневен лимит — hasHigherMaxAmount (legacy profileId
+      // ИЛИ role-based pika_team) bypass-ва и двете: единствен-операция max
+      // (§ по-горе) И recipient window лимита. Решение по продуктов брифа:
+      // без window exemption 100 000 single подарък никога не би могъл да
+      // мине към recipient, който не е вече window-exempt (30 000 window cap
+      // < 100 000 amount за всеки свеж/non-exempt получател) — role-based
+      // pika_team трябва реално да може да изпрати 100 000, не само да му
+      // бъде разрешено по amount validation.
+      const isRecipientLimitExemptGift = hasHigherMaxAmount
 
       if (!isRecipientLimitExemptGift) {
         const windowRow = selectRecipientWindowStatement.get(recipientProfileId) as
@@ -558,6 +588,7 @@ export async function createYellowCoinGiftStore(
     senderProfileId: ProfileId,
     friendshipId: string,
     amountRaw: number,
+    isRoleBasedPikaTeamSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, friendshipId, amountRaw, () => {
       // 1. Проверка за прието приятелство
@@ -573,7 +604,7 @@ export async function createYellowCoinGiftStore(
 
       // 2. Определяне на получателя
       return { ok: true, recipientProfileId: getRecipientProfileId(friendship, senderProfileId) }
-    })
+    }, isRoleBasedPikaTeamSender)
   }
 
   // pika_team friendship-gate bypass (виж isPikaTeamGiftFriendshipBypassSession
@@ -587,6 +618,7 @@ export async function createYellowCoinGiftStore(
     senderProfileId: ProfileId,
     recipientProfileId: ProfileId,
     amountRaw: number,
+    isRoleBasedPikaTeamSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, null, amountRaw, () => {
       if (playerProgressStore.getPublicProfile(recipientProfileId) === null) {
@@ -594,7 +626,7 @@ export async function createYellowCoinGiftStore(
       }
 
       return { ok: true, recipientProfileId }
-    })
+    }, isRoleBasedPikaTeamSender)
   }
 
   function createGiftNotification(giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number): void {

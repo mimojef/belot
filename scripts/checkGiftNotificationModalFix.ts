@@ -21,6 +21,9 @@
  *      на onGiftSuccessClose.
  *   7. submitGiftCoins (реалният "изпратих подарък" success path) остава
  *      непроменен — все още сетва giftSuccessModal.
+ *   8. submitGiftCoinsCore (общото success/error ядро за submitGiftCoins И
+ *      submitGiftCoinsBypass — извлечено в по-късен pika_team direct-gift
+ *      рефакторинг) никога не пипа giftReceivedModal.
  *
  * Изпълнява се в Node.js чрез tsx, без build/dev server.
  */
@@ -78,6 +81,19 @@ function extractFunctionBody(src: string, signature: string, label: string): str
   assert(startIdx !== -1, `${label}: сигнатура "${signature}" не е намерена`)
   const afterStart = src.slice(startIdx)
   const endIdx = afterStart.indexOf('\n}')
+  assert(endIdx !== -1, `${label}: край на функция не е намерен след "${signature}"`)
+  return afterStart.slice(0, endIdx)
+}
+
+// Вариант на extractFunctionBody за nested функции ВЪТРЕ в
+// createLobbyFlowController() (2-space indent затваряща скоба "\n  }",
+// не top-level "\n}") — submitGiftCoinsCore и други helper-и, дефинирани
+// вътре в controller closure-а, не на module top-level.
+function extractNestedFunctionBody(src: string, signature: string, label: string): string {
+  const startIdx = src.indexOf(signature)
+  assert(startIdx !== -1, `${label}: сигнатура "${signature}" не е намерена`)
+  const afterStart = src.slice(startIdx)
+  const endIdx = afterStart.indexOf('\n  }')
   assert(endIdx !== -1, `${label}: край на функция не е намерен след "${signature}"`)
   return afterStart.slice(0, endIdx)
 }
@@ -150,14 +166,27 @@ await check('[7] Реалният sender success path (submitGiftCoins) оста
 })
 
 // [8] giftSuccessModal и giftReceivedModal никога не се сетват в един и същ handler (взаимно изключващи се)
+//
+// Assertion history: оригинално търсеше буквалния низ
+// "const result = await options.onGiftCoinsSubmit(friendshipId, amount)"
+// вътре в submitGiftCoins. По-късен pika_team direct-gift рефакторинг
+// извлече ОБЩОТО success/error ядро (submitGiftCoinsCore) — вика се и от
+// submitGiftCoins (friendship gift), и от submitGiftCoinsBypass (pika_team
+// direct gift), приемайки network извикването като callNetwork() параметър
+// вместо директно options.onGiftCoinsSubmit(...). Старият литерал вече не
+// съществува никъде в source-а — implementation поведението (giftReceivedModal
+// никога не се пипа от sender success path-а) остава непроменено и коректно
+// (проверено ръчно: submitGiftCoinsCore не реферира giftReceivedModal никъде
+// в тялото си), затова тук се актуализира само anchor-ът на assertion-а към
+// новата еквивалентна структура — submitGiftCoinsCore вместо literal-string
+// търсене на стария директен call.
 await check('[8] giftSuccessModal и giftReceivedModal не се смесват в един handler', () => {
   const notifBlock = extractBlock(controllerSrc, 'onNotifGiftClick: (giftId, amount, fromDisplayName) => {', 'onNotifGiftClick')
   assert(!notifBlock.includes('giftSuccessModal'), 'onNotifGiftClick не трябва да пипа giftSuccessModal')
 
-  const submitIdx = controllerSrc.indexOf('const result = await options.onGiftCoinsSubmit(friendshipId, amount)')
-  assert(submitIdx !== -1, 'submitGiftCoins функцията не е намерена')
-  const submitTail = controllerSrc.slice(submitIdx, submitIdx + 2000)
-  assert(!submitTail.includes('giftReceivedModal'), 'submitGiftCoins не трябва да пипа giftReceivedModal')
+  const coreBody = extractNestedFunctionBody(controllerSrc, 'async function submitGiftCoinsCore(', 'submitGiftCoinsCore')
+  assert(coreBody.includes('state.giftSuccessModal ='), 'submitGiftCoinsCore трябва да продължи да сетва state.giftSuccessModal при успех')
+  assert(!coreBody.includes('giftReceivedModal'), 'submitGiftCoinsCore (общото ядро за submitGiftCoins/submitGiftCoinsBypass) не трябва да пипа giftReceivedModal')
 })
 
 // ─── Резултат ─────────────────────────────────────────────────────────────────

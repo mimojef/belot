@@ -217,6 +217,50 @@ export function isPikaTeamGiftFriendshipBypassSession(
   return session !== null && session.account.role === 'pika_team'
 }
 
+/**
+ * Gift-yellow-coins single-операция max amount bypass (1 000 – 100 000
+ * вместо 1 000 – 30 000), заедно с recipient 60-дневен window exemption-а
+ * (без него 100 000 подарък не би могъл да мине покрай 30 000/60-дни
+ * recipient cap-а за никой non-exempt получател) — САМО role='pika_team',
+ * изрично БЕЗ admin/subadmin/top_chat_admin/chat_admin/player (mobile+gift-max
+ * hotfix брифа §2: "Не разширявай лимита... само заради този fix"). Отделно
+ * право от isPikaTeamGiftFriendshipBypassSession по-горе (брифа: "Friendship
+ * bypass и max-amount permission са различни права, но и двете се разрешават
+ * на pika_team") — двете предикати happen-стват да имат идентично тяло точно
+ * сега, но представляват различни permission-и и НЕ трябва да се обединяват
+ * в един predicate (утрешна промяна на едното право не бива да променя
+ * другото). Reuse-ва СЪЩИЯ recipient-window-exemption механизъм като legacy
+ * isPikaTeamGiftBypassProfileId (yellowCoinGiftStore.ts) — role-based
+ * pika_team получава идентичен ефект (по-висок max + window exemption), но
+ * през отделен, role-based gate вместо hardcoded profileId сравнение.
+ */
+export function isPikaTeamGiftMaxAmountSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'pika_team'
+}
+
+/**
+ * Pika support/direct chat bypass — САМО role='pika_team', изрично БЕЗ
+ * admin/subadmin/top_chat_admin/chat_admin/player (chat authorization hotfix
+ * брифа: "Не разширявай това към други роли"). Разрешава да СЕ ЗАПОЧНЕ
+ * chatStore.getOrCreatePikaSupportConversation с произволен регистриран
+ * получател, БЕЗ friendship изискване — legacy единичен
+ * OFFICIAL_PIKA_PROFILE_ID/PIKA_OFFICIAL_PROFILE_ID (chatStore.ts
+ * officialPikaProfileId) остава ПАРАЛЕЛНО валиден за backward compatibility,
+ * тази функция НЕ го заменя, само добавя алтернативен role-based път.
+ * Отделен predicate от isPikaTeamGiftFriendshipBypassSession/
+ * isPikaTeamGiftMaxAmountSession по-горе — различно permission (chat
+ * bypass, не gift), дори тялото да е идентично сега; НЕ reuse-вай gift
+ * predicate-ите за chat authorization (брифа §2: "Не използвай gift-specific
+ * permission функция, ако това ще смеси две различни права").
+ */
+export function isPikaTeamSupportChatSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'pika_team'
+}
+
 export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
 
 export type SubadminRoleChangeErrorCode =

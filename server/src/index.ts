@@ -31,6 +31,8 @@ import {
   isLafcheModeratorSession,
   isPikaAnnouncementAuthorSession,
   isPikaTeamGiftFriendshipBypassSession,
+  isPikaTeamGiftMaxAmountSession,
+  isPikaTeamSupportChatSession,
   isTopicMessageModeratorSession,
   isTopicModeratorSession,
   isTopicWholeTopicModeratorSession,
@@ -6275,17 +6277,27 @@ async function handlePasswordResetRequest(
 }
 
 // Derived UI-only сигнал за gift modal max amount — authoritative проверката
-// остава изцяло в yellowCoinGiftStore.sendGift; тук само wrap-ваме сесийния
-// response с ДВЕ безопасни derived полета, computed от СЪЩИЯ bypass profile
-// ID сравнение, използван authoritative-но. null session минава непроменена.
-function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | null } } | null>(
+// остава изцяло в yellowCoinGiftStore.sendGiftCore (isPikaTeamGiftMaxAmountSession
+// caller-gate в route handler-ите); тук само wrap-ваме сесийния response с
+// derived поле, computed от ДВЕ независими условия — legacy bypass profileId
+// (isPikaTeamGiftBypassProfileId) ИЛИ role==='pika_team' (isPikaTeamGiftMaxAmountSession,
+// mobile+gift-max hotfix брифа §3/§4). И двете дават еднакъв 100 000 таван —
+// UI-то не различава кой от двата механизма приложи bypass-а, но authoritative
+// server-side проверката (sendGiftCore) прилага съответната логика поотделно.
+// null session минава непроменена.
+function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | null }; account: { role: string } } | null>(
   session: T,
 ): (T extends null ? null : T & { pikaTeamGiftMaxAmount: number | null }) | null {
   if (session === null || session.profile.profileId === null) return session as null
-  const isBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
+  const isLegacyProfileBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
+  // Директен role сравнение (не isPikaTeamGiftMaxAmountSession predicate) —
+  // тук session-ът е generic T, не AuthSessionSnapshot; role стойността и
+  // проверката ('pika_team') остават identical на предиката в authStore.ts.
+  const isRoleBasedPikaTeam = session.account.role === 'pika_team'
+  const hasHigherMaxAmount = isLegacyProfileBypass || isRoleBasedPikaTeam
   return {
     ...session,
-    pikaTeamGiftMaxAmount: isBypass ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount() : null,
+    pikaTeamGiftMaxAmount: hasHigherMaxAmount ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount() : null,
   } as T extends null ? null : T & { pikaTeamGiftMaxAmount: number | null }
 }
 
@@ -12006,7 +12018,7 @@ async function handleFriendsRequest(
       return true
     }
 
-    const result = yellowCoinGiftStore.sendGift(profileId, friendshipId, amount)
+    const result = yellowCoinGiftStore.sendGift(profileId, friendshipId, amount, isPikaTeamGiftMaxAmountSession(session))
 
     if (!result.ok) {
       if ('code' in result) {
@@ -12076,7 +12088,7 @@ async function handleFriendsRequest(
       return true
     }
 
-    const result = yellowCoinGiftStore.sendGiftToProfile(profileId, recipientProfileId, amount)
+    const result = yellowCoinGiftStore.sendGiftToProfile(profileId, recipientProfileId, amount, isPikaTeamGiftMaxAmountSession(session))
 
     if (!result.ok) {
       if ('code' in result) {
@@ -12293,9 +12305,11 @@ async function handleChatRequest(
 
   // Единствен entry point за СЪЗДАВАНЕ на служебен pika_support разговор —
   // authoritative проверката (initiator === configured official Pika.bg
-  // profileId) живее в chatStore.getOrCreatePikaSupportConversation, не
-  // тук — този handler само подава сесийния profileId, без да го приема от
-  // client payload (session е единственият източник, виж §7 в task spec-а).
+  // profileId, ИЛИ role==='pika_team') живее в
+  // chatStore.getOrCreatePikaSupportConversation, не тук — този handler само
+  // подава сесийния profileId И role-derived флаг (isPikaTeamSupportChatSession,
+  // authStore.ts), никога от client payload (session е единственият
+  // източник за и двете).
   if (isPikaSupportStart && req.method === 'POST') {
     const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
 
@@ -12311,7 +12325,7 @@ async function handleChatRequest(
       return true
     }
 
-    const result = chatStore.getOrCreatePikaSupportConversation(profileId, recipientProfileId)
+    const result = chatStore.getOrCreatePikaSupportConversation(profileId, recipientProfileId, isPikaTeamSupportChatSession(session))
 
     if (!result.ok) {
       sendJsonResponse(res, 403, result)
