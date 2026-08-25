@@ -65,6 +65,15 @@ export type PlayerProfileFriendshipAction = {
   disabled: boolean
   message: string | null
   giftFriendshipId?: string | null
+  /**
+   * Само за viewer с role='pika_team' — показва бутона "Подари жълтици"
+   * дори когато giftFriendshipId е null (получателят НЕ е приятел).
+   * Съдържа target profileId-то, подадено директно към
+   * /api/friends/gift-coins/direct (виж isPikaTeamGiftFriendshipBypassAuthSession
+   * в createLobbyFlowController.ts). Server-side authoritative gate:
+   * isPikaTeamGiftFriendshipBypassSession в authStore.ts.
+   */
+  giftBypassProfileId?: string | null
 }
 
 function escapeHtml(value: string): string {
@@ -1313,6 +1322,25 @@ function renderProfileContent(
                       Подари жълтици
                     </button>
                   ` : ''}
+                ${!friendshipAction?.giftFriendshipId && friendshipAction?.giftBypassProfileId ? `
+                    <button
+                      type="button"
+                      data-player-profile-gift-coins-bypass="${escapeHtml(friendshipAction.giftBypassProfileId)}"
+                      style="
+                        min-height:38px;
+                        padding:0 12px;
+                        border:1px solid rgba(212,165,32,0.62);
+                        border-radius:8px;
+                        background:rgba(212,165,32,0.14);
+                        color:#fde68a;
+                        font-size:13px;
+                        font-weight:900;
+                        cursor:pointer;
+                      "
+                    >
+                      Подари жълтици
+                    </button>
+                  ` : ''}
                 ${profile.profileId && profile.isBlockedByMe !== null ? `
                   <button
                     type="button"
@@ -1537,7 +1565,8 @@ export function renderPlayerProfilePopup(
         filter: brightness(1.12);
         transform: translateY(-1px);
       }
-      [data-player-profile-gift-coins]:hover {
+      [data-player-profile-gift-coins]:hover,
+      [data-player-profile-gift-coins-bypass]:hover {
         background: rgba(212,165,32,0.28) !important;
         filter: brightness(1.1);
         transform: translateY(-1px);
@@ -1555,6 +1584,7 @@ export function renderPlayerProfilePopup(
       [data-player-profile-friend-request],
       [data-player-profile-block],
       [data-player-profile-gift-coins],
+      [data-player-profile-gift-coins-bypass],
       [data-player-profile-pika-support-chat],
       [data-player-profile-topics-personal-message] {
         transition: filter 120ms ease, transform 120ms ease, background 120ms ease, border-color 120ms ease;

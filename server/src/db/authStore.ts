@@ -200,6 +200,23 @@ export function isTopicMessageModeratorSession(
   )
 }
 
+/**
+ * Gift-yellow-coins friendship-gate bypass — САМО role='pika_team' (Екип
+ * Pika.bg), изрично БЕЗ admin/subadmin/top_chat_admin/chat_admin (production
+ * hotfix брифа §6: "Не давай това право на други роли, освен ако вече го
+ * имат по текущата логика"). Различно от isPikaTeamGiftBypassProfileId
+ * (yellowCoinGiftStore.ts) — онова е ЕДИН конкретен profileId, който бивша
+ * функционалност ползва за recipient-window limit bypass + по-висок single-
+ * операция таван; ТУК e role-based bypass само на "трябва да сте приятели"
+ * проверката преди изпращане на подарък. Двата механизма са независими и
+ * не се обединяват.
+ */
+export function isPikaTeamGiftFriendshipBypassSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'pika_team'
+}
+
 export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
 
 export type SubadminRoleChangeErrorCode =

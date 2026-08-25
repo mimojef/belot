@@ -96,6 +96,7 @@
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
     "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",
+    "check:gift-friendship-bypass-http-authorization": "tsx scripts/checkGiftFriendshipBypassHttpAuthorization.ts --server-root=.",
     "check:vip-store": "tsx scripts/checkVipStore.ts",
     "check:vip-purchase-store": "tsx scripts/checkVipPurchaseStore.ts",
     "check:admin-vip-price-settings": "tsx scripts/checkAdminVipPriceSettings.ts",

@@ -590,6 +590,8 @@ export type LobbyScreenState = {
   friendshipAction: PlayerProfileFriendshipAction | null
   showPikaSupportChatButton: boolean
   giftModalFriendshipId: string | null
+  /** pika_team friendship-gate bypass — виж createLobbyFlowController.ts коментара. */
+  giftModalBypassRecipientProfileId: string | null
   giftModalFriendName: string
   /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 само за pika_team gift bypass profile-а. Authoritative проверката е сървърна (index.ts sendGift handler). */
   giftModalMaxAmount: number
@@ -1024,10 +1026,12 @@ export type RenderLobbyScreenOptions = {
   onFriendCancelClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
+  onGiftCoinsBypassClick: (recipientProfileId: string) => void
   onPikaSupportChatClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
   onGiftCoinsClose: () => void
   onGiftCoinsSubmit: (friendshipId: string, amount: number) => void
+  onGiftCoinsBypassSubmit: (recipientProfileId: string, amount: number) => void
   onGiftSuccessClose: () => void
   onGiftReceivedClose: () => void
   onLowCoinsModalClose: () => void
@@ -1235,6 +1239,7 @@ export type ProfilePopupCallbacks = {
   onFriendCancelClick: (friendshipId: string) => void
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
+  onGiftCoinsBypassClick: (recipientProfileId: string) => void
   onPikaSupportChatClick: (profileId: string) => void
   onTopicsPersonalMessageClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
@@ -1365,6 +1370,11 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     ?.addEventListener('click', (e) => {
       const friendshipId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftCoins?.trim() ?? ''
       if (friendshipId) cb.onGiftCoinsClick(friendshipId)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-gift-coins-bypass]')
+    ?.addEventListener('click', (e) => {
+      const recipientProfileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftCoinsBypass?.trim() ?? ''
+      if (recipientProfileId) cb.onGiftCoinsBypassClick(recipientProfileId)
     })
   el.querySelector<HTMLButtonElement>('[data-player-profile-pika-support-chat]')
     ?.addEventListener('click', (e) => {
@@ -2157,16 +2167,26 @@ function renderLowCoinsModal(state: LobbyScreenState): string {
 }
 
 function renderGiftCoinsModal(state: LobbyScreenState): string {
-  if (state.giftModalFriendshipId === null) {
+  if (state.giftModalFriendshipId === null && state.giftModalBypassRecipientProfileId === null) {
     return ''
   }
+
+  // "friendship:<id>" | "bypass:<profileId>" — една форма, decode-ва се в
+  // wireLobbyScreenEvents() и се routе-ва към onGiftCoinsSubmit (normal
+  // friend gift) или onGiftCoinsBypassSubmit (pika_team non-friend gift,
+  // /api/friends/gift-coins/direct). Reuse на СЪЩАТА форма/modal вместо
+  // втори UI компонент (production hotfix брифа: "не създавай втори gift
+  // механизъм").
+  const formTarget = state.giftModalFriendshipId !== null
+    ? `friendship:${state.giftModalFriendshipId}`
+    : `bypass:${state.giftModalBypassRecipientProfileId}`
 
   return `
     <div data-lobby-gift-modal-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
       <div data-lobby-gift-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
       <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,430px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
         <button type="button" data-lobby-gift-modal-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
-        <form data-lobby-gift-form="${escapeHtml(state.giftModalFriendshipId)}" style="display:grid;gap:14px;">
+        <form data-lobby-gift-form="${escapeHtml(formTarget)}" style="display:grid;gap:14px;">
           <div>
             <div style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Подари жълтици</div>
             <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. Сумата трябва да е между 1 000 и ${state.giftModalMaxAmount.toLocaleString('bg-BG')} жълтици.</div>
@@ -13284,6 +13304,7 @@ export function renderLobbyScreen(
       onFriendCancelClick: options.onFriendCancelClick,
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
+      onGiftCoinsBypassClick: options.onGiftCoinsBypassClick,
       onPikaSupportChatClick: options.onPikaSupportChatClick,
       onTopicsPersonalMessageClick: () => {},
       onLikeClick: options.onLikeClick,
@@ -13328,9 +13349,19 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLFormElement>('[data-lobby-gift-form]').forEach((form) => {
     form.addEventListener('submit', (event) => {
       event.preventDefault()
-      const friendshipId = form.dataset.lobbyGiftForm?.trim() ?? ''
+      const target = form.dataset.lobbyGiftForm?.trim() ?? ''
       const data = new FormData(form)
       const amount = Number(data.get('amount') ?? 0)
+
+      if (target.startsWith('bypass:')) {
+        const recipientProfileId = target.slice('bypass:'.length)
+        if (recipientProfileId.length > 0) {
+          options.onGiftCoinsBypassSubmit(recipientProfileId, amount)
+        }
+        return
+      }
+
+      const friendshipId = target.startsWith('friendship:') ? target.slice('friendship:'.length) : target
 
       if (friendshipId.length > 0) {
         options.onGiftCoinsSubmit(friendshipId, amount)

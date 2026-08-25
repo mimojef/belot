@@ -3233,27 +3233,24 @@ async function submitProfileLike(
   }
 }
 
-async function submitGiftCoins(friendshipId: string, amount: number): Promise<
-  | {
-      ok: true
-      senderProfile: PlayerPublicProfileSnapshot
-      recipientProfile: PlayerPublicProfileSnapshot
-    }
+type GiftCoinsSubmitResult =
+  | { ok: true; senderProfile: PlayerPublicProfileSnapshot; recipientProfile: PlayerPublicProfileSnapshot }
   | ({ ok: false; message: string } & GiftLimitErrorPayload)
   | { ok: false; message: string }
-> {
+
+// Общо ядро за submitGiftCoins/submitGiftCoinsBypass по-долу — идентична
+// fetch/response обработка и за двата gift endpoint-а (нормален friend gift
+// и pika_team direct bypass), различава се само URL-ът и request body-то.
+async function submitGiftCoinsToUrl(url: string, requestBody: Record<string, unknown>, amount: number): Promise<GiftCoinsSubmitResult> {
   try {
-    const response = await fetch(
-      `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/gift-coins`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ amount }),
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
       },
-    )
+      credentials: 'include',
+      body: JSON.stringify(requestBody),
+    })
     const data = (await response.json()) as GiftCoinsResponse
 
     if (!response.ok || !data.ok || !data.senderProfile || !data.recipientProfile) {
@@ -3297,6 +3294,28 @@ async function submitGiftCoins(friendshipId: string, amount: number): Promise<
       message: 'Няма връзка със сървъра за подарък.',
     }
   }
+}
+
+async function submitGiftCoins(friendshipId: string, amount: number): Promise<GiftCoinsSubmitResult> {
+  return submitGiftCoinsToUrl(
+    `${getApiBaseUrl()}/api/friends/${encodeURIComponent(friendshipId)}/gift-coins`,
+    { amount },
+    amount,
+  )
+}
+
+// pika_team friendship-gate bypass — mirror на submitGiftCoins по-горе,
+// единствената разлика е endpoint-ът (/direct, адресиран по profileId
+// вместо friendshipId) и че getSession auth-ва вместо friendship row.
+// Server-side authoritative gate: isPikaTeamGiftFriendshipBypassSession
+// (server/src/db/authStore.ts) — 403 за всеки session, който не е
+// role='pika_team'.
+async function submitGiftCoinsBypass(recipientProfileId: string, amount: number): Promise<GiftCoinsSubmitResult> {
+  return submitGiftCoinsToUrl(
+    `${getApiBaseUrl()}/api/friends/gift-coins/direct`,
+    { recipientProfileId, amount },
+    amount,
+  )
 }
 
 async function fileToDataUrl(file: File): Promise<string> {
@@ -5042,6 +5061,7 @@ lobby = createLobbyFlowController({
   },
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
+  onGiftCoinsBypassSubmit: (recipientProfileId, amount) => submitGiftCoinsBypass(recipientProfileId, amount),
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
   onVipDmFirstMessageSend: (recipientProfileId, body, imageDataUrl) => startVipDmFirstMessage(recipientProfileId, body, imageDataUrl),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),

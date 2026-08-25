@@ -56,6 +56,27 @@ export type YellowCoinGiftStore = {
       }
     | GiftLimitError
     | { ok: false; message: string }
+  /**
+   * Same сделка/ledger/лимити като sendGift, но получателят се адресира
+   * директно по profileId вместо чрез accepted-friendship row — стъпка 1
+   * (friendship gate) отпада изцяло. Caller (index.ts route) e отговорен да
+   * извика тази функция единствено когато изпращачът е role='pika_team'
+   * session (виж isPikaTeamGiftFriendshipBypassSession в authStore.ts) —
+   * тук няма собствена role проверка, защото store-ът не вижда session-и.
+   */
+  sendGiftToProfile: (
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+    amount: number,
+  ) =>
+    | {
+        ok: true
+        gift: YellowCoinGiftSnapshot
+        senderProfile: PlayerPublicProfileSnapshot
+        recipientProfile: PlayerPublicProfileSnapshot
+      }
+    | GiftLimitError
+    | { ok: false; message: string }
   createGiftNotification: (giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number) => void
   getPendingGiftNotifications: (profileId: ProfileId) => PendingGiftNotification[]
   markGiftNotificationRead: (giftId: string, profileId: ProfileId) => void
@@ -330,10 +351,21 @@ export async function createYellowCoinGiftStore(
     return row?.yellow_coins_balance ?? 0
   }
 
-  function sendGift(
+  /**
+   * Общо ядро за sendGift/sendGiftToProfile — всичко идентично (amount
+   * валидация, sender daily лимит, recipient window лимит, wallet debit/
+   * credit, ledger insert), различава се само §1-2 (как се определя
+   * recipientProfileId — виж resolveRecipient параметъра). ledgerFriendshipId
+   * се пише в yellow_coin_gift_ledger.friendship_id и е null за bypass
+   * подаръци (директен profile route, без friendship row).
+   */
+  function sendGiftCore(
     senderProfileId: ProfileId,
-    friendshipId: string,
+    ledgerFriendshipId: string | null,
     amountRaw: number,
+    resolveRecipient: () =>
+      | { ok: true; recipientProfileId: ProfileId }
+      | { ok: false; message: string },
   ):
     | {
         ok: true
@@ -370,23 +402,19 @@ export async function createYellowCoinGiftStore(
     try {
       database.exec('BEGIN IMMEDIATE;')
 
-      // 1. Проверка за прието приятелство
-      const friendship = selectAcceptedFriendshipStatement.get(
-        friendshipId,
-        senderProfileId,
-        senderProfileId,
-      ) as FriendshipRow | undefined
+      // 1-2. Определяне на получателя (friendship lookup или директен
+      // profileId — виж resolveRecipient callback-а по-горе)
+      const resolved = resolveRecipient()
 
-      if (!friendship) {
+      if (!resolved.ok) {
         database.exec('ROLLBACK;')
         return {
           ok: false,
-          message: 'Можеш да подаряваш жълтици само на приятели.',
+          message: resolved.message,
         }
       }
 
-      // 2. Определяне на получателя
-      recipientProfileId = getRecipientProfileId(friendship, senderProfileId)
+      recipientProfileId = resolved.recipientProfileId
 
       // 3. Защита срещу подарък към себе си
       if (recipientProfileId === senderProfileId) {
@@ -483,7 +511,7 @@ export async function createYellowCoinGiftStore(
       // 10. Insert в yellow_coin_gift_ledger
       insertGiftStatement.run(
         giftId,
-        friendshipId,
+        ledgerFriendshipId,
         senderProfileId,
         recipientProfileId,
         amount,
@@ -526,6 +554,49 @@ export async function createYellowCoinGiftStore(
     }
   }
 
+  function sendGift(
+    senderProfileId: ProfileId,
+    friendshipId: string,
+    amountRaw: number,
+  ) {
+    return sendGiftCore(senderProfileId, friendshipId, amountRaw, () => {
+      // 1. Проверка за прието приятелство
+      const friendship = selectAcceptedFriendshipStatement.get(
+        friendshipId,
+        senderProfileId,
+        senderProfileId,
+      ) as FriendshipRow | undefined
+
+      if (!friendship) {
+        return { ok: false, message: 'Можеш да подаряваш жълтици само на приятели.' }
+      }
+
+      // 2. Определяне на получателя
+      return { ok: true, recipientProfileId: getRecipientProfileId(friendship, senderProfileId) }
+    })
+  }
+
+  // pika_team friendship-gate bypass (виж isPikaTeamGiftFriendshipBypassSession
+  // в authStore.ts, единствения authoritative caller-gate — тук няма собствена
+  // role проверка). Получателят се адресира директно по profileId, без
+  // friendship row да съществува. Всички останали проверки (баланс, сума,
+  // self-gift, daily/window лимити, ledger) минават през СЪЩОТО ядро
+  // (sendGiftCore) като нормалния friend-to-friend поток — единствената
+  // разлика е §1-2 (recipient resolution).
+  function sendGiftToProfile(
+    senderProfileId: ProfileId,
+    recipientProfileId: ProfileId,
+    amountRaw: number,
+  ) {
+    return sendGiftCore(senderProfileId, null, amountRaw, () => {
+      if (playerProgressStore.getPublicProfile(recipientProfileId) === null) {
+        return { ok: false, message: 'Играчът не е намерен.' }
+      }
+
+      return { ok: true, recipientProfileId }
+    })
+  }
+
   function createGiftNotification(giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number): void {
     insertGiftNotificationStatement.run(giftId, recipientProfileId, fromDisplayName, amount)
   }
@@ -562,6 +633,7 @@ export async function createYellowCoinGiftStore(
 
   return {
     sendGift,
+    sendGiftToProfile,
     createGiftNotification,
     getPendingGiftNotifications,
     markGiftNotificationRead,

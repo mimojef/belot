@@ -140,6 +140,19 @@ type ProfilePopupContext = 'topics' | 'other'
 /** Стандартен gift modal max за всички обичайни profiles (mirror на server MAX_GIFT_AMOUNT). Само UX default — реалният таван идва от authSession.pikaTeamGiftMaxAmount, ако е зададен от сървъра. */
 const DEFAULT_GIFT_MAX_AMOUNT = 30_000
 
+/**
+ * Общ resolve тип за onGiftCoinsSubmit/onGiftCoinsBypassSubmit (виж
+ * CreateLobbyFlowControllerOptions по-долу) и submitGiftCoinsCore. Именуван
+ * type alias, не inline literal — двата options полета трябва да reference-ват
+ * ТОЧНО същия тип, за да може submitGiftCoinsCore да приема callback от
+ * който и да е от двата без TS structural-inference несъответствие между
+ * отделните call sites.
+ */
+type GiftCoinsSubmitResult =
+  | { ok: true; senderProfile: PlayerPublicProfileSnapshot; recipientProfile: PlayerPublicProfileSnapshot }
+  | ({ ok: false; message: string } & GiftLimitErrorPayload)
+  | { ok: false; message: string }
+
 export type LobbyAuthSession = {
   account: {
     role: string
@@ -251,6 +264,19 @@ function isTopicWholeTopicModeratorAuthSession(session: LobbyAuthSession | null)
     || session.account.role === 'subadmin'
     || session.account.role === 'top_chat_admin'
   )
+}
+
+/**
+ * Gift-yellow-coins friendship-gate bypass UI сигнал — само UX, сървърът
+ * презаверява през isPikaTeamGiftFriendshipBypassSession (authStore.ts) на
+ * /api/friends/gift-coins/direct. САМО role='pika_team', изрично БЕЗ admin/
+ * subadmin/top_chat_admin/chat_admin (production hotfix брифа §6). Различно
+ * от authSession.pikaTeamGiftMaxAmount (единичен bypass profileId за
+ * recipient-window лимит + по-висок таван) — тук е role-based bypass само
+ * на "трябва да сте приятели" проверката.
+ */
+function isPikaTeamGiftFriendshipBypassAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && session.account.role === 'pika_team'
 }
 
 export type CreateLobbyFlowControllerOptions = {
@@ -465,15 +491,14 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; liked: boolean; likesCount: number }
     | { ok: false }
   >
-  onGiftCoinsSubmit?: (friendshipId: string, amount: number) => Promise<
-    | {
-        ok: true
-        senderProfile: PlayerPublicProfileSnapshot
-        recipientProfile: PlayerPublicProfileSnapshot
-      }
-    | ({ ok: false; message: string } & GiftLimitErrorPayload)
-    | { ok: false; message: string }
-  >
+  onGiftCoinsSubmit?: (friendshipId: string, amount: number) => Promise<GiftCoinsSubmitResult>
+  /**
+   * pika_team friendship-gate bypass — вика /api/friends/gift-coins/direct
+   * вместо /api/friends/:friendshipId/gift-coins (виж submitGiftCoinsBypass
+   * в main.ts). Server-side authoritative gate: isPikaTeamGiftFriendshipBypassSession
+   * (authStore.ts) — тук няма собствена role проверка, само UI wiring.
+   */
+  onGiftCoinsBypassSubmit?: (recipientProfileId: string, amount: number) => Promise<GiftCoinsSubmitResult>
   onPikaSupportChatStart?: (recipientProfileId: string) => Promise<
     | { ok: true; friendshipId: string }
     | { ok: false; message: string }
@@ -1239,6 +1264,14 @@ type InternalLobbyFlowState = {
   friendActionMessageProfileId: string | null
   friendActionMessage: string | null
   giftModalFriendshipId: string | null
+  /**
+   * pika_team friendship-gate bypass — non-null само когато gift modal-ът е
+   * отворен за НЕ-приятел (виж isPikaTeamGiftFriendshipBypassAuthSession).
+   * Взаимно изключващо се с giftModalFriendshipId — само едно от двете е
+   * non-null в даден момент (виж openGiftModal/openGiftModalBypass/
+   * closeGiftModal).
+   */
+  giftModalBypassRecipientProfileId: string | null
   giftModalFriendName: string
   /** Server-derived UI signal (currentAuthSession.pikaTeamGiftMaxAmount) — 30000 за всички обичайни profiles, 100000 само за pika_team gift bypass profile-а. Authoritative проверката е сървърна (index.ts sendGift handler); това поле само казва какъв max/text да покаже gift modal-ът. */
   giftModalMaxAmount: number
@@ -1779,6 +1812,7 @@ function createInitialState(): InternalLobbyFlowState {
     friendActionMessageProfileId: null,
     friendActionMessage: null,
     giftModalFriendshipId: null,
+    giftModalBypassRecipientProfileId: null,
     giftModalFriendName: '',
     giftModalMaxAmount: DEFAULT_GIFT_MAX_AMOUNT,
     giftModalErrorText: null,
@@ -3116,12 +3150,21 @@ export function createLobbyFlowController(
       targetProfileId,
     )
 
+    // pika_team friendship-gate bypass — виж isPikaTeamGiftFriendshipBypassAuthSession
+    // коментара по-горе. Само UX сигнал за gift бутона; изчислен веднъж тук и
+    // приложен само към клоновете, в които приятелството НЕ е прието
+    // (accepted клонът по-долу вече показва gift бутон през giftFriendshipId).
+    const giftBypassProfileId = isPikaTeamGiftFriendshipBypassAuthSession(authSession)
+      ? targetProfileId
+      : null
+
     if (relationship === null) {
       return {
         profileId: targetProfileId,
         label: 'Покани за приятел',
         disabled: false,
         message,
+        giftBypassProfileId,
       }
     }
 
@@ -3142,6 +3185,7 @@ export function createLobbyFlowController(
           : 'Поканата е изпратена',
       disabled: true,
       message,
+      giftBypassProfileId,
     }
   }
 
@@ -3332,6 +3376,7 @@ export function createLobbyFlowController(
       friendshipAction,
       showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
       giftModalFriendshipId: state.giftModalFriendshipId,
+      giftModalBypassRecipientProfileId: state.giftModalBypassRecipientProfileId,
       giftModalFriendName: state.giftModalFriendName,
       giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT,
       giftModalErrorText: state.giftModalErrorText,
@@ -4410,6 +4455,9 @@ export function createLobbyFlowController(
       onGiftCoinsClick: (friendshipId) => {
         openGiftModal(friendshipId)
       },
+      onGiftCoinsBypassClick: (recipientProfileId) => {
+        openGiftModalBypass(recipientProfileId)
+      },
       onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
       onLikeClick: (profileId) => { void likeProfile(profileId) },
       onGiftCoinsClose: () => {
@@ -4417,6 +4465,9 @@ export function createLobbyFlowController(
       },
       onGiftCoinsSubmit: (friendshipId, amount) => {
         void submitGiftCoins(friendshipId, amount)
+      },
+      onGiftCoinsBypassSubmit: (recipientProfileId, amount) => {
+        void submitGiftCoinsBypass(recipientProfileId, amount)
       },
       onGiftSuccessClose: () => {
         state.giftSuccessModal = null
@@ -9722,13 +9773,29 @@ export function createLobbyFlowController(
     })
 
     state.giftModalFriendshipId = friendshipId
+    state.giftModalBypassRecipientProfileId = null
     state.giftModalFriendName = relationship?.profile.displayName ?? 'приятел'
+    state.giftModalErrorText = null
+    render()
+  }
+
+  // pika_team friendship-gate bypass — виж isPikaTeamGiftFriendshipBypassAuthSession
+  // коментара по-горе. Получателят не е приятел, затова displayName идва от
+  // отворения profile popup (единственото място, откъдето бутонът е видим),
+  // не от state.friendships.
+  function openGiftModalBypass(recipientProfileId: string): void {
+    state.giftModalFriendshipId = null
+    state.giftModalBypassRecipientProfileId = recipientProfileId
+    state.giftModalFriendName = state.profilePopupProfile?.profileId === recipientProfileId
+      ? state.profilePopupProfile.displayName
+      : 'играч'
     state.giftModalErrorText = null
     render()
   }
 
   function closeGiftModal(): void {
     state.giftModalFriendshipId = null
+    state.giftModalBypassRecipientProfileId = null
     state.giftModalFriendName = ''
     state.giftModalErrorText = null
     render()
@@ -10007,17 +10074,23 @@ export function createLobbyFlowController(
     await showTopicsPersonalChat(result.conversation.friendshipId)
   }
 
-  async function submitGiftCoins(
-    friendshipId: string,
+  // Общо ядро за submitGiftCoins/submitGiftCoinsBypass по-долу — идентична
+  // error/success обработка и за двата network пътя (нормален friend gift и
+  // pika_team direct bypass), различава се само кой network call се прави и
+  // кое modal state поле (giftModalFriendshipId vs
+  // giftModalBypassRecipientProfileId) се нулира при успех.
+  async function submitGiftCoinsCore(
     amount: number,
+    clearModalTargetState: () => void,
+    callNetwork: (() => Promise<GiftCoinsSubmitResult>) | undefined,
   ): Promise<void> {
-    if (!options.onGiftCoinsSubmit) {
+    if (!callNetwork) {
       state.giftModalErrorText = 'Подаряването временно не е налично.'
       render()
       return
     }
 
-    const result = await options.onGiftCoinsSubmit(friendshipId, amount)
+    const result = await callNetwork()
 
     if (!result.ok) {
       if ('code' in result) {
@@ -10030,7 +10103,7 @@ export function createLobbyFlowController(
     }
 
     const friendName = state.giftModalFriendName
-    state.giftModalFriendshipId = null
+    clearModalTargetState()
     state.giftModalFriendName = ''
     state.giftModalErrorText = null
     state.giftSuccessModal = { amount, friendName }
@@ -10038,6 +10111,35 @@ export function createLobbyFlowController(
     state.friendActionMessageProfileId = result.recipientProfile.profileId
     state.friendActionMessage = `Подаръкът от ${amount} жълтици е изпратен.`
     render()
+  }
+
+  async function submitGiftCoins(
+    friendshipId: string,
+    amount: number,
+  ): Promise<void> {
+    const onGiftCoinsSubmit = options.onGiftCoinsSubmit
+    await submitGiftCoinsCore(
+      amount,
+      () => { state.giftModalFriendshipId = null },
+      onGiftCoinsSubmit ? () => onGiftCoinsSubmit(friendshipId, amount) : undefined,
+    )
+  }
+
+  // pika_team friendship-gate bypass — mirror на submitGiftCoins по-горе през
+  // общото ядро (submitGiftCoinsCore), единствената разлика е кой network
+  // endpoint се вика (onGiftCoinsBypassSubmit → /api/friends/gift-coins/direct).
+  // Server-side authoritative gate: isPikaTeamGiftFriendshipBypassSession
+  // (authStore.ts).
+  async function submitGiftCoinsBypass(
+    recipientProfileId: string,
+    amount: number,
+  ): Promise<void> {
+    const onGiftCoinsBypassSubmit = options.onGiftCoinsBypassSubmit
+    await submitGiftCoinsCore(
+      amount,
+      () => { state.giftModalBypassRecipientProfileId = null },
+      onGiftCoinsBypassSubmit ? () => onGiftCoinsBypassSubmit(recipientProfileId, amount) : undefined,
+    )
   }
 
   async function loadChatConversations(): Promise<boolean> {
@@ -12063,6 +12165,7 @@ export function createLobbyFlowController(
       onFriendCancelClick: (friendshipId) => { void cancelFriendRequest(friendshipId) },
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
+      onGiftCoinsBypassClick: (recipientProfileId) => { openGiftModalBypass(recipientProfileId) },
       onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
       onTopicsPersonalMessageClick: () => {},
       onLikeClick: (profileId) => { void likeProfile(profileId) },

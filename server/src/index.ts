@@ -30,6 +30,7 @@ import {
   isLafcheMessageDeleteModeratorSession,
   isLafcheModeratorSession,
   isPikaAnnouncementAuthorSession,
+  isPikaTeamGiftFriendshipBypassSession,
   isTopicMessageModeratorSession,
   isTopicModeratorSession,
   isTopicWholeTopicModeratorSession,
@@ -164,7 +165,7 @@ import {
 import { createPlayersPageSnapshotStore } from './db/playersPageSnapshotStore.js'
 import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
-import { createYellowCoinGiftStore } from './db/yellowCoinGiftStore.js'
+import { createYellowCoinGiftStore, type YellowCoinGiftSnapshot } from './db/yellowCoinGiftStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
@@ -11834,6 +11835,51 @@ async function handleAdminCoinPackagesRequest(
   return false
 }
 
+// Общ tail за gift routes (нормален friend-to-friend gift-coins и pika_team
+// direct bypass по-долу) — идентична WS notify / gift-notification-log /
+// JSON response логика и за двата route-а, единствената разлика между тях е
+// как се resolve-ва получателят (виж yellowCoinGiftStore.ts sendGift vs.
+// sendGiftToProfile). Извлечено тук, за да не се дублира ~30 реда код 1:1.
+function notifyGiftRecipientAndRespond(
+  res: ServerResponse,
+  result: {
+    ok: true
+    gift: YellowCoinGiftSnapshot
+    senderProfile: PlayerPublicProfileSnapshot
+    recipientProfile: PlayerPublicProfileSnapshot
+  },
+): void {
+  const recipientProfileId = result.recipientProfile.profileId
+  if (recipientProfileId) {
+    const recipientConn = Object.values(serverState.connections).find(
+      (c) => c.profileId === recipientProfileId && c.status === 'connected' && c.currentRoomId == null,
+    )
+    const senderName = result.senderProfile.displayName ?? 'Играч'
+    if (recipientConn) {
+      safeSendToConnection(recipientConn.id, {
+        type: 'coins_gifted',
+        amount: result.gift.amount,
+        fromDisplayName: senderName,
+        recipientNewBalance: result.recipientProfile.yellowCoinsBalance ?? 0,
+      })
+    } else {
+      yellowCoinGiftStore.createGiftNotification(
+        result.gift.giftId,
+        recipientProfileId,
+        senderName,
+        result.gift.amount,
+      )
+    }
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    gift: result.gift,
+    senderProfile: result.senderProfile,
+    recipientProfile: result.recipientProfile,
+  })
+}
+
 async function handleFriendsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -11848,6 +11894,7 @@ async function handleFriendsRequest(
   if (
     pathname !== '/api/friends' &&
     pathname !== '/api/friends/request' &&
+    pathname !== '/api/friends/gift-coins/direct' &&
     friendGiftMatch === null &&
     friendActionMatch === null &&
     giftNotifReadMatch === null &&
@@ -11979,35 +12026,77 @@ async function handleFriendsRequest(
       return true
     }
 
-    const recipientProfileId = result.recipientProfile.profileId
-    if (recipientProfileId) {
-      const recipientConn = Object.values(serverState.connections).find(
-        (c) => c.profileId === recipientProfileId && c.status === 'connected' && c.currentRoomId == null,
-      )
-      const senderName = result.senderProfile.displayName ?? 'Играч'
-      if (recipientConn) {
-        safeSendToConnection(recipientConn.id, {
-          type: 'coins_gifted',
-          amount: result.gift.amount,
-          fromDisplayName: senderName,
-          recipientNewBalance: result.recipientProfile.yellowCoinsBalance ?? 0,
-        })
-      } else {
-        yellowCoinGiftStore.createGiftNotification(
-          result.gift.giftId,
-          recipientProfileId,
-          senderName,
-          result.gift.amount,
-        )
-      }
+    notifyGiftRecipientAndRespond(res, result)
+    return true
+  }
+
+  // pika_team friendship-gate bypass — production hotfix брифа: "Екип
+  // Pika.bg" трябва да може да подари жълтици на всеки регистриран играч,
+  // без accepted friendship. Reuse-ва СЪЩИЯ yellowCoinGiftStore ledger/
+  // лимити/validation (sendGiftToProfile дели цялото ядро с sendGift по-
+  // горе, виж yellowCoinGiftStore.ts) — единствената разлика е адресиране
+  // по recipientProfileId вместо friendshipId. Authoritative gate тук е
+  // isPikaTeamGiftFriendshipBypassSession (role==='pika_team' единствено) —
+  // никоя друга роля не може да достигне до този route.
+  if (pathname === '/api/friends/gift-coins/direct' && req.method === 'POST') {
+    if (!isPikaTeamGiftFriendshipBypassSession(session)) {
+      sendJsonResponse(res, 403, {
+        ok: false,
+        message: 'Нямаш право да подаряваш жълтици без приятелство.',
+      })
+      return true
     }
 
-    sendJsonResponse(res, 200, {
-      ok: true,
-      gift: result.gift,
-      senderProfile: result.senderProfile,
-      recipientProfile: result.recipientProfile,
-    })
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const recipientProfileId = getStringField(body, 'recipientProfileId').trim()
+    const amount = getNumberField(body, 'amount')
+
+    if (recipientProfileId.length === 0) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Невалиден получател.',
+      })
+      return true
+    }
+
+    if (amount === null) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Невалидна сума за подарък.',
+      })
+      return true
+    }
+
+    const result = yellowCoinGiftStore.sendGiftToProfile(profileId, recipientProfileId, amount)
+
+    if (!result.ok) {
+      if ('code' in result) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          code: result.code,
+          message: result.message,
+          receivedInWindow: result.receivedInWindow,
+          remainingAllowance: result.remainingAllowance,
+          attemptedAmount: result.attemptedAmount,
+          nextReleaseAt: result.nextReleaseAt,
+          nextReleaseAmount: result.nextReleaseAmount,
+        })
+      } else {
+        sendJsonResponse(res, 400, { ok: false, message: result.message })
+      }
+      return true
+    }
+
+    notifyGiftRecipientAndRespond(res, result)
     return true
   }
 
