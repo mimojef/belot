@@ -207,6 +207,7 @@ type MatchRow = {
   final_score_team_a: number | null
   final_score_team_b: number | null
   final_start_at: string | null
+  next_match_start_at: string | null
   tournament_name: string
   tournament_status: string
   tournament_player_capacity: number
@@ -351,7 +352,7 @@ export async function createTournamentCoordinator(
     tm.status, tm.no_show_deadline_at, tm.attendance_started_at, tm.attendance_deadline_at,
     tm.attendance_resolved_at, tm.attendance_resolution_kind, tm.deadline_kind, tm.game_start_at,
     tm.winner_team_id, tm.result_kind, tm.completed_at,
-    tm.final_score_team_a, tm.final_score_team_b, tm.final_start_at,
+    tm.final_score_team_a, tm.final_score_team_b, tm.final_start_at, tm.next_match_start_at,
     t.name as tournament_name, t.status as tournament_status, t.player_capacity as tournament_player_capacity,
     tr.round_type, tr.round_index
   `
@@ -457,6 +458,18 @@ export async function createTournamentCoordinator(
     SET final_start_at = COALESCE(final_start_at, ?)
     WHERE match_id = ?
       AND final_start_at IS NULL;
+  `)
+
+  // Generic version of updateFinalStartAtStatement above — used for EVERY
+  // round transition (round_of_16->quarterfinal, quarterfinal->semifinal,
+  // semifinal->final), not just the final. COALESCE(...) + "IS NULL" WHERE
+  // guard makes this exactly-once and idempotent under repeated coordinator
+  // ticks/restarts, same pattern as the legacy final-only statement.
+  const updateNextMatchStartAtStatement = database.prepare(`
+    UPDATE tournament_matches
+    SET next_match_start_at = COALESCE(next_match_start_at, ?)
+    WHERE match_id = ?
+      AND next_match_start_at IS NULL;
   `)
 
   const insertSemifinalAcknowledgementStatement = database.prepare(`
@@ -1124,8 +1137,19 @@ export async function createTournamentCoordinator(
 
     const startIso = utcNow()
     const deadlineKind = getMatchDeadlineKind(match)
-    const waitMs = deadlineKind === 'first_match' ? ATTENDANCE_WAIT_MS_FIRST_MATCH : ATTENDANCE_WAIT_MS_ROUND_TRANSITION
-    const deadlineIso = addMsIso(startIso, waitMs)
+    // For round-transition matches, next_match_start_at (T0, set by
+    // ensureNextMatchStartAtIfReady the moment the match first became
+    // runnable) is the ONE authoritative deadline — attendance_deadline_at
+    // must equal it exactly, not a freshly-computed "now + 20s" here. Any
+    // divergence would create the "two different 20s clocks" the task spec
+    // explicitly forbids (§2): the humans' presence window would end at a
+    // different moment than the UI countdown they're shown. first_match
+    // matches have no next_match_start_at gate (see
+    // shouldDelayMatchForTransitionStart) and keep computing their own
+    // deadline here, unchanged from before.
+    const deadlineIso = deadlineKind === 'round_transition' && match.next_match_start_at !== null
+      ? match.next_match_start_at
+      : addMsIso(startIso, deadlineKind === 'first_match' ? ATTENDANCE_WAIT_MS_FIRST_MATCH : ATTENDANCE_WAIT_MS_ROUND_TRANSITION)
     if (match.attendance_started_at === null) {
       const result = ensureAttendanceStartedStatement.run(
         startIso,
@@ -1184,41 +1208,55 @@ export async function createTournamentCoordinator(
     return current
   }
 
-  function isFinalStartDue(match: MatchRow): boolean {
-    return match.round_type === 'final' &&
-      match.final_start_at !== null &&
-      Date.parse(match.final_start_at) <= Date.now()
+  // Generic replacement for the old final-only isFinalStartDue/
+  // ensureFinalStartAtIfReady/shouldDelayFinalMatch trio (Phase 1 of the
+  // unified inter-round flow — see task spec §1-4). Applies to EVERY
+  // round-transition match (round_of_16->quarterfinal, quarterfinal->
+  // semifinal, semifinal->final) uniformly — no round_type literal check
+  // beyond excluding 'first_match' matches, which keep their own longer
+  // attendance-collection window (ATTENDANCE_WAIT_MS_FIRST_MATCH) and never
+  // go through this gate.
+  //
+  // Deliberately NOT gated on human-finalist acknowledgement (§4 in the task
+  // spec: "ack остава запис, но НЕ blocking condition"). The old ack-gate
+  // could stall an entire final indefinitely if a winning human finalist
+  // went offline before acknowledging — no timeout existed for that wait.
+  // The single safety condition that actually matters (siblings settled
+  // before advancing) is already enforced structurally by
+  // ensureNextRound()'s "winners.length !== currentMatches.length" guard
+  // upstream — by the time a match reaches 'awaiting_players' with
+  // deadline_kind='round_transition', the round it belongs to could only
+  // have been created because every feeder match was already complete.
+  function isNextMatchStartDue(match: MatchRow): boolean {
+    return match.next_match_start_at !== null &&
+      Date.parse(match.next_match_start_at) <= Date.now()
   }
 
-  function ensureFinalStartAtIfReady(match: MatchRow): MatchRow {
-    if (match.round_type !== 'final' || match.status !== 'awaiting_players') return match
-    let final = ensureMatchRoomId(match)
-    if (final.final_start_at !== null) return final
-
-    const missingCount = (countMissingHumanFinalistAcknowledgementsStatement.get(
-      final.tournament_id,
-      final.team_a_id,
-      final.team_b_id,
-    ) as { count: number }).count
-    if (missingCount > 0) return final
+  // Writes next_match_start_at = now + ATTENDANCE_WAIT_MS_ROUND_TRANSITION
+  // exactly once (COALESCE + "IS NULL" WHERE guard, see
+  // updateNextMatchStartAtStatement) the first time a round-transition match
+  // is observed in 'awaiting_players' with no next_match_start_at yet. T0 in
+  // the task spec's T0->T4 lifecycle. Restart-safe: a coordinator restart
+  // simply re-reads the already-persisted timestamp on the next tick instead
+  // of re-computing it, so the countdown never resets.
+  function ensureNextMatchStartAtIfReady(match: MatchRow): MatchRow {
+    if (match.status !== 'awaiting_players') return match
+    if (getMatchDeadlineKind(match) !== 'round_transition') return match
+    let next = ensureMatchRoomId(match)
+    if (next.next_match_start_at !== null) return next
 
     const conditionSatisfiedAt = utcNow()
-    const finalStartAt = addMsIso(conditionSatisfiedAt, START_COUNTDOWN_MS)
-    if (dbChanges(updateFinalStartAtStatement.run(finalStartAt, final.match_id)) > 0) {
-      appendEvent(final.tournament_id, 'tournament_final_start_scheduled', {
-        matchId: final.match_id,
-        roomId: final.room_id,
-        finalStartAt,
+    const nextMatchStartAt = addMsIso(conditionSatisfiedAt, ATTENDANCE_WAIT_MS_ROUND_TRANSITION)
+    if (dbChanges(updateNextMatchStartAtStatement.run(nextMatchStartAt, next.match_id)) > 0) {
+      appendEvent(next.tournament_id, 'tournament_next_match_start_scheduled', {
+        matchId: next.match_id,
+        roundType: next.round_type,
+        roomId: next.room_id,
+        nextMatchStartAt,
       })
     }
-    final = selectMatchByIdStatement.get(final.match_id) as MatchRow
-    return final
-  }
-
-  function shouldDelayFinalMatch(match: MatchRow): boolean {
-    if (match.round_type !== 'final' || match.status !== 'awaiting_players') return false
-    const gated = ensureFinalStartAtIfReady(match)
-    return !isFinalStartDue(gated)
+    next = selectMatchByIdStatement.get(next.match_id) as MatchRow
+    return next
   }
 
   function createNoShowBot(assignment: SeatAssignment): BotRoomParticipant {
@@ -1291,6 +1329,22 @@ export async function createTournamentCoordinator(
     return refreshTournamentRoomSnapshot(match, nextRoom)
   }
 
+  // For round_transition matches, game_start_at must equal the same
+  // authoritative deadline the UI counts down to (next_match_start_at /
+  // attendance_deadline_at) — no additional START_COUNTDOWN_MS on top (task
+  // spec §2: "НЕ започвай втори видим 5-секунден countdown", scoped to
+  // round-transition lifecycle only). first_match matches are unaffected —
+  // they keep the original "+5s from resolution moment" behavior, since that
+  // window exists to let a freshly-collected table settle in visually before
+  // cards start dealing, which round-transition matches don't need (the
+  // players already sat through the full 20s countdown).
+  function computeGameStartAt(match: MatchRow, resolvedAtIso: string): string {
+    if (getMatchDeadlineKind(match) === 'round_transition') {
+      return match.next_match_start_at ?? match.attendance_deadline_at ?? resolvedAtIso
+    }
+    return addMsIso(resolvedAtIso, START_COUNTDOWN_MS)
+  }
+
   function resolveAttendance(match: MatchRow): MatchRow {
     if (match.room_id === null || match.status !== 'awaiting_players') return match
     const room = deps.getRoom(match.room_id)
@@ -1298,7 +1352,7 @@ export async function createTournamentCoordinator(
     const missing = getMissingAssignments(match, room)
     if (missing.length === 0) {
       const nowIso = utcNow()
-      const gameStartAt = addMsIso(nowIso, START_COUNTDOWN_MS)
+      const gameStartAt = computeGameStartAt(match, nowIso)
       if (dbChanges(resolveAllPresentStatement.run(nowIso, gameStartAt, match.match_id)) > 0) {
         attendanceResolvedLastTick += 1
         appendEvent(match.tournament_id, 'tournament_attendance_all_present', {
@@ -1373,7 +1427,7 @@ export async function createTournamentCoordinator(
         )
       }
       const nowIso = utcNow()
-      const gameStartAt = addMsIso(nowIso, START_COUNTDOWN_MS)
+      const gameStartAt = computeGameStartAt(match, nowIso)
       resolveBotsStatement.run(nowIso, gameStartAt, match.match_id)
       database.exec('COMMIT;')
       attendanceResolvedLastTick += 1
@@ -1450,7 +1504,7 @@ export async function createTournamentCoordinator(
     tournamentId: TournamentId,
     currentRoundType: TournamentRoundType,
     nextRoundType: TournamentRoundType,
-  ): MatchRow[] | null {
+  ): { matches: MatchRow[]; createdMatchIds: string[] } | null {
     const currentMatches = selectMatchesForRoundTypeStatement.all(tournamentId, currentRoundType) as MatchRow[]
     if (currentMatches.length === 0) return null
     const winners = selectRoundWinnersStatement.all(tournamentId, currentRoundType) as RoundWinnerRow[]
@@ -1464,17 +1518,17 @@ export async function createTournamentCoordinator(
     const nextMatchCount = winners.length / 2
     const existingNextMatches = selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
     if (existingNextMatches.length >= nextMatchCount) {
-      return existingNextMatches
+      return { matches: existingNextMatches, createdMatchIds: [] }
     }
 
     const loserTeamIds = currentMatches
       .filter((match) => match.winner_team_id !== null)
       .map((match) => (match.winner_team_id === match.team_a_id ? match.team_b_id : match.team_a_id))
 
+    const createdMatchIds: string[] = []
     database.exec('BEGIN IMMEDIATE;')
     try {
       const isFinal = nextRoundType === 'final'
-      const createdMatchIds: string[] = []
       for (let i = 0; i < nextMatchCount; i += 1) {
         const roundIndex = i + 1
         const teamAId = winners[i * 2]!.winner_team_id
@@ -1523,21 +1577,36 @@ export async function createTournamentCoordinator(
       throw error
     }
 
-    return selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
+    const matches = selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
+    return { matches, createdMatchIds }
   }
 
   // Обхожда ladder-а от текущия round_type (или от началото, ако все още
   // никой мач не е завършен) до финала, генерирайки всеки следващ кръг,
   // веднага щом предишният е напълно завършен. Връща финалния мач (ако вече
-  // съществува), за да поддържа съществуващия "ensureMatchRoom(final)" caller.
-  function advanceBracketLadder(tournamentId: TournamentId, teamCapacity: number): MatchRow | null {
+  // съществува), за да поддържа съществуващия "ensureMatchRoom(final)" caller,
+  // както и всеки match, реално създаден от тази конкретна извикване (за
+  // всички round types, не само финала) — за да може reconcileTournament да
+  // им извика ensureNextMatchStartAtIfReady/ensureMatchRoom В СЪЩИЯ tick,
+  // вместо да чака следващия tick цикъл (виж task spec §3: "Не допускай
+  // ситуация, при която room се създава няколко секунди след началото на
+  // 20s countdown").
+  function advanceBracketLadder(
+    tournamentId: TournamentId,
+    teamCapacity: number,
+  ): { final: MatchRow | null; newlyCreated: MatchRow[] } {
     const ladder = getTournamentRoundLadder(teamCapacity)
+    const newlyCreated: MatchRow[] = []
     for (let i = 0; i < ladder.length - 1; i += 1) {
       const currentRoundType = ladder[i] as TournamentRoundType
       const nextRoundType = ladder[i + 1] as TournamentRoundType
-      ensureNextRound(tournamentId, currentRoundType, nextRoundType)
+      const result = ensureNextRound(tournamentId, currentRoundType, nextRoundType)
+      if (result !== null && result.createdMatchIds.length > 0) {
+        newlyCreated.push(...result.matches.filter((match) => result.createdMatchIds.includes(match.match_id)))
+      }
     }
-    return (selectFinalMatchStatement.get(tournamentId) as MatchRow | undefined) ?? null
+    const final = (selectFinalMatchStatement.get(tournamentId) as MatchRow | undefined) ?? null
+    return { final, newlyCreated }
   }
 
   function completeFinalSideEffects(match: MatchRow, winnerTeamId: TournamentTeamId): void {
@@ -1576,9 +1645,22 @@ export async function createTournamentCoordinator(
       return
     }
     // Всеки не-final round type (round_of_16/quarterfinal/semifinal) следва
-    // общата ladder логика — не само 'semifinal' както преди.
-    const final = advanceBracketLadder(match.tournament_id, match.tournament_player_capacity / 2)
-    if (final !== null && final.status !== 'completed') ensureFinalStartAtIfReady(final)
+    // общата ladder логика — не само 'semifinal' както преди. Всеки
+    // новосъздаден match (включително финала, ако е точно той) получава
+    // ensureMatchRoom + ensureNextMatchStartAtIfReady В СЪЩИЯ tick — room-ът
+    // трябва да съществува от самото начало на 20s presence прозореца
+    // (task spec §3), не с 1-tick закъснение.
+    const { newlyCreated } = advanceBracketLadder(match.tournament_id, match.tournament_player_capacity / 2)
+    for (const created of newlyCreated) {
+      // ensureMatchRoomId() (called inside ensureNextMatchStartAtIfReady)
+      // claims room_id and persists next_match_start_at FIRST, so that
+      // ensureMatchRoom's attendance_deadline_at computation right after can
+      // read the already-persisted next_match_start_at and align to it
+      // exactly — see the "ONE authoritative deadline" comment in
+      // ensureMatchRoom above.
+      const scheduled = ensureNextMatchStartAtIfReady(created)
+      ensureMatchRoom(scheduled)
+    }
 
     const profileIds = (selectConfirmedProfileIdsForTournamentStatement.all(match.tournament_id) as Array<{ profile_id: ProfileId }>)
       .map((row) => row.profile_id)
@@ -1595,11 +1677,16 @@ export async function createTournamentCoordinator(
   function reconcileTournament(tournament: TournamentRow): void {
     const matches = selectRunnableMatchesStatement.all(tournament.tournament_id) as MatchRow[]
     for (const initialMatch of matches) {
-      if (shouldDelayFinalMatch(initialMatch)) {
-        processedLastTick += 1
-        continue
-      }
-      const result = ensureMatchRoom(initialMatch)
+      // No delay/skip here: ensureMatchRoom must run unconditionally for
+      // every runnable match, including fresh round-transition matches,
+      // because it's what opens the presence window from T0. The old
+      // final-only "shouldDelayFinalMatch" gate used to skip room creation
+      // entirely until an ack-gated timestamp was ready — that's exactly
+      // the "room created several seconds late" bug the task spec forbids
+      // (§3). resolveAttendance below already has its own independent
+      // deadline check, so missing/no-show resolution still correctly waits
+      // for next_match_start_at to pass.
+      const result = ensureMatchRoom(ensureNextMatchStartAtIfReady(initialMatch))
       if (result === 'created') createdRoomsLastTick += 1
       if (result === 'recovered') recoveredRoomsLastTick += 1
       let match = selectMatchByIdStatement.get(initialMatch.match_id) as MatchRow
@@ -1625,11 +1712,28 @@ export async function createTournamentCoordinator(
       }
     }
 
-    const final = advanceBracketLadder(tournament.tournament_id, tournament.player_capacity / 2)
-    if (final !== null && final.status !== 'completed') {
-      const gatedFinal = ensureFinalStartAtIfReady(final)
-      if (!isFinalStartDue(gatedFinal)) return
-      const result = ensureMatchRoom(final)
+    // Safety-net pass: matches created by advanceBracketLadder just now (in
+    // THIS tick, for any round type including the final) were not part of
+    // the "matches" snapshot fetched at the top of this function, so the
+    // main loop above never saw them. Without this, a freshly-created
+    // round-transition match would sit roomless for a full extra tick
+    // interval before ensureMatchRoom ever ran for it — exactly the
+    // "several seconds after 20s countdown starts" gap the task spec
+    // prohibits (§3). Idempotent: ensureNextMatchStartAtIfReady/
+    // ensureMatchRoom are both no-ops on a match that's already been fully
+    // set up (e.g. by advanceCompletedMatch in the same tick, or by a prior
+    // tick after a restart).
+    const { newlyCreated } = advanceBracketLadder(tournament.tournament_id, tournament.player_capacity / 2)
+    for (const created of newlyCreated) {
+      if (created.status !== 'awaiting_players') continue
+      // ensureMatchRoom (unconditional here — NOT gated on
+      // isNextMatchStartDue) is exactly what opens the T0 presence window:
+      // next_match_start_at is scheduled for +20s in the future the moment
+      // a round-transition match first appears, and the room must exist
+      // from that same instant so humans can attach for the FULL 20 seconds,
+      // not wait for the deadline to already have passed.
+      const scheduled = ensureNextMatchStartAtIfReady(created)
+      const result = ensureMatchRoom(scheduled)
       if (result === 'created') createdRoomsLastTick += 1
       if (result === 'recovered') recoveredRoomsLastTick += 1
     }
@@ -1911,14 +2015,17 @@ export async function createTournamentCoordinator(
       return { ok: false, reason: 'not_finalist' }
     }
 
+    // Persisted purely as idempotent evidence/debug record going forward
+    // (task spec §4) — no longer read as a blocking condition anywhere in
+    // the coordinator. next_match_start_at is scheduled independently by
+    // ensureNextMatchStartAtIfReady the moment the match becomes runnable,
+    // regardless of whether/when any human finalist acknowledges.
     const existing = selectSemifinalAcknowledgementStatement.get(
       input.tournamentId,
       input.semifinalMatchId,
       input.profileId,
     ) as { acknowledgement_id: string } | undefined
     if (existing !== undefined) {
-      const final = selectFinalMatchStatement.get(input.tournamentId) as MatchRow | undefined
-      if (final !== undefined) ensureFinalStartAtIfReady(final)
       return { ok: true, alreadyAcknowledged: true }
     }
 
@@ -1932,8 +2039,6 @@ export async function createTournamentCoordinator(
       semifinalMatchId: input.semifinalMatchId,
       profileId: input.profileId,
     })
-    const final = selectFinalMatchStatement.get(input.tournamentId) as MatchRow | undefined
-    if (final !== undefined) ensureFinalStartAtIfReady(final)
     return { ok: true, alreadyAcknowledged: false }
   }
 
@@ -1942,15 +2047,16 @@ export async function createTournamentCoordinator(
       const matches = selectRunnableMatchesStatement.all(tournament.tournament_id) as MatchRow[]
       for (let match of matches) {
         if (match.status === 'completed') continue
-        if (match.round_type === 'final') {
-          const gated = ensureFinalStartAtIfReady(match)
-          if (!isFinalStartDue(gated)) continue
-          if (gated.room_id === null || deps.getRoom(gated.room_id) === null) {
-            ensureMatchRoom(gated)
-            match = selectMatchByIdStatement.get(gated.match_id) as MatchRow
-          } else {
-            match = gated
-          }
+        // Recovery fallback for every round type (not just the final):
+        // normally reconcileTournament's tick already created the room the
+        // instant this match became runnable (task spec §3 — room must
+        // exist from T0, not gated on anything). This only does real work
+        // if a coordinator restart landed between match creation and the
+        // next tick.
+        if (match.room_id === null || deps.getRoom(match.room_id) === null) {
+          const scheduled = ensureNextMatchStartAtIfReady(match)
+          ensureMatchRoom(scheduled)
+          match = selectMatchByIdStatement.get(scheduled.match_id) as MatchRow
         }
         if (match.room_id === null) continue
         const room = deps.getRoom(match.room_id)

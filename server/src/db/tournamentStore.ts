@@ -246,6 +246,7 @@ type TournamentMatchRow = {
   final_score_team_a: number | null
   final_score_team_b: number | null
   final_start_at: string | null
+  next_match_start_at: string | null
   created_at: string
   started_at: string | null
   completed_at: string | null
@@ -379,6 +380,7 @@ function toTournamentMatchRecord(row: TournamentMatchRow): TournamentMatchRecord
     finalScoreTeamA: row.final_score_team_a,
     finalScoreTeamB: row.final_score_team_b,
     finalStartAt: row.final_start_at !== null ? dbDateToUtc(row.final_start_at) : null,
+    nextMatchStartAt: row.next_match_start_at !== null ? dbDateToUtc(row.next_match_start_at) : null,
     createdAt: dbDateToUtc(row.created_at),
     startedAt: row.started_at !== null ? dbDateToUtc(row.started_at) : null,
     completedAt: row.completed_at !== null ? dbDateToUtc(row.completed_at) : null,
@@ -546,7 +548,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
       attendance_resolved_at, attendance_resolution_kind, deadline_kind, game_start_at,
       attendance_revision, winner_team_id, result_kind, walkover_reason,
       missing_profile_ids, final_score_team_a, final_score_team_b, final_start_at,
-      created_at, started_at, completed_at
+      next_match_start_at, created_at, started_at, completed_at
     FROM tournament_matches
     WHERE tournament_id = ?
     ORDER BY created_at ASC;
@@ -814,7 +816,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
              attendance_resolved_at, attendance_resolution_kind, game_start_at,
              attendance_revision, winner_team_id, result_kind, walkover_reason,
              missing_profile_ids, final_score_team_a, final_score_team_b, final_start_at,
-             created_at, started_at, completed_at
+             next_match_start_at, created_at, started_at, completed_at
            FROM tournament_matches WHERE match_id = ? LIMIT 1;`,
         )
         .get(matchId) as TournamentMatchRow

@@ -111,6 +111,14 @@ export type ClientMessage =
       type: 'resume_room'
       roomId: RoomId
       reconnectToken: string
+      // Phase 1 protocol foundation for the unified inter-round popup (task
+      // spec §7) — when true, the server performs the exact same seat
+      // attachment as a normal resume_room (tryResumeRoomForConnection/
+      // attachConnectionToRoomSeat, unchanged), but responds with
+      // room_attached_silent instead of room_resumed, so the client is not
+      // instructed to navigate to the active-room screen. No lobby UI uses
+      // this yet in Phase 1 — this is protocol foundation only.
+      silent?: boolean
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
@@ -483,6 +491,21 @@ export type RoomResumedMessage = {
   seat: Seat
 }
 
+// Response to resume_room { silent: true } — confirms the exact same server-
+// side seat attachment as room_resumed (same tryResumeRoomForConnection/
+// attachConnectionToRoomSeat path, see index.ts), but is a distinct message
+// type so the client can tell "attach succeeded" apart from "attach
+// succeeded AND you should navigate to the active-room screen" without
+// relying on a boolean flag that existing room_resumed handlers might
+// overlook. Phase 1 protocol foundation only — see ClientMessage's
+// resume_room.silent comment; no client code sends silent:true yet.
+export type RoomAttachedSilentMessage = {
+  type: 'room_attached_silent'
+  roomId: RoomId
+  seat: Seat
+  profileId: string | null
+}
+
 export type RoomResumeFailedMessage = {
   type: 'room_resume_failed'
   roomId: RoomId
@@ -762,6 +785,7 @@ export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomResumedMessage
+  | RoomAttachedSilentMessage
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage

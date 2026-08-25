@@ -58,6 +58,7 @@
     "check:local-tournament-bot-flow": "tsx scripts/checkLocalTournamentBotFlow.ts --server-root=.",
     "check:tournament-stale-popup-fix": "tsx scripts/checkTournamentStalePopupFix.ts --project-root=..",
     "check:tournament-inter-round-waiting": "tsx scripts/checkTournamentInterRoundWaiting.ts --project-root=..",
+    "check:tournament-unified-transition-timing": "tsx scripts/checkTournamentUnifiedTransitionTiming.ts --project-root=..",
     "check:server-migration-restart-safety": "tsx scripts/checkServerMigrationRestartSafety.ts --server-root=.",
     "check:subadmin-http-authorization": "tsx scripts/checkSubadminHttpAuthorization.ts --server-root=.",
     "check:subadmin-profile-popup-rendering": "tsx scripts/checkSubadminProfilePopupRendering.ts",

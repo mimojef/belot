@@ -217,6 +217,13 @@ export type TournamentMatchRecord = {
   finalScoreTeamA: number | null
   finalScoreTeamB: number | null
   finalStartAt: string | null
+  // Generic "next match gameplay start" deadline — reused for every round
+  // transition (round_of_16->quarterfinal, quarterfinal->semifinal,
+  // semifinal->final), not just the final. finalStartAt above is retained
+  // as an unused legacy column; this is the field the coordinator/DTO layer
+  // read/write going forward. See tournamentCoordinator.ts's
+  // ensureNextMatchStartAtIfReady for write semantics.
+  nextMatchStartAt: string | null
   createdAt: string
   startedAt: string | null
   completedAt: string | null

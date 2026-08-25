@@ -9,6 +9,7 @@ import type {
 } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
 import { getNextTournamentRoundLabel, getTournamentRoundLabel } from '../tournaments/tournamentRoundLabels'
+import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
 // Временен публичен maintenance guard (виж fix(tournaments): show development
 // notice) — НЕ трие/променя реалната turnament UI логика по-долу в този файл,
@@ -808,11 +809,11 @@ function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): s
   const body = sibling.status !== 'completed'
     ? `
       <div style="font-size:20px;font-weight:900;color:#ffffff;">Изчаква се другият ${escapeHtml(currentRound.lower)}</div>
-      <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Победителят ще бъде вашият противник в ${escapeHtml(nextRound.lowerDefinite)}.</div>
+      <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Победителят ще бъде вашият противник на ${escapeHtml(nextRound.lowerDefinite)}.</div>
     `
     : waiting.finalStartAt !== null
       ? `
-        <div style="font-size:18px;font-weight:900;color:#ffffff;">В ${escapeHtml(nextRound.lowerDefinite)} ще играете срещу:</div>
+        <div style="font-size:18px;font-weight:900;color:#ffffff;">На ${escapeHtml(nextRound.lowerDefinite)} ще играете срещу:</div>
         ${opponentTeam !== null ? `<div style="margin-top:10px;">${renderTournamentInterRoundTeam(opponentTeam, siblingWinner ?? 'Противник')}</div>` : ''}
         <div style="margin-top:12px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.68);">Резултат от техния ${escapeHtml(currentRound.lower)}: ${escapeHtml(score)}</div>
         <div style="margin-top:16px;font-size:18px;font-weight:900;color:#ffffff;">Мачът започва след</div>
@@ -822,6 +823,25 @@ function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): s
         <div style="font-size:18px;font-weight:900;color:#ffffff;">Изчаква се другият финалист</div>
         <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Другият финалист още разглежда резултата.</div>
       `
+  const isPhone = isPhoneLayoutViewport()
+  const rosterBlock = sibling.status !== 'completed'
+    ? `
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;${isPhone ? 'border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;' : ''}">
+        ${renderTournamentInterRoundTeam(sibling.teamA, labelMap.get(sibling.teamA.teamId) ?? 'Отбор A')}
+        ${renderTournamentInterRoundTeam(sibling.teamB, labelMap.get(sibling.teamB.teamId) ?? 'Отбор B')}
+      </div>
+    `
+    : ''
+  const scoreBlock = `
+    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;${isPhone ? '' : 'border-top:1px solid rgba(255,255,255,0.08);'}padding-top:12px;">
+      <div>
+        <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Друг ${escapeHtml(currentRound.lower)}</div>
+        <div data-tournament-inter-round-status="1" data-match-id="${escapeHtml(sibling.matchId)}" style="margin-top:4px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.76);">${escapeHtml(sibling.progressLabel || (sibling.status === 'completed' ? 'Завършен' : 'Играе се'))}</div>
+      </div>
+      <div data-tournament-inter-round-score="1" data-match-id="${escapeHtml(sibling.matchId)}" style="font-size:24px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
+    </div>
+  `
+  const middleSection = isPhone ? `${scoreBlock}${rosterBlock}` : `${rosterBlock}${scoreBlock}`
   return renderTournamentInterRoundOverlay(`
       <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
         <div>
@@ -830,19 +850,7 @@ function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): s
           <div style="margin-top:4px;font-size:16px;font-weight:900;color:#dbeafe;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}.</div>
         </div>
         ${body}
-        ${sibling.status !== 'completed' ? `
-          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
-            ${renderTournamentInterRoundTeam(sibling.teamA, labelMap.get(sibling.teamA.teamId) ?? 'Отбор A')}
-            ${renderTournamentInterRoundTeam(sibling.teamB, labelMap.get(sibling.teamB.teamId) ?? 'Отбор B')}
-          </div>
-        ` : ''}
-        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
-          <div>
-            <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Друг ${escapeHtml(currentRound.lower)}</div>
-            <div data-tournament-inter-round-status="1" data-match-id="${escapeHtml(sibling.matchId)}" style="margin-top:4px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.76);">${escapeHtml(sibling.progressLabel || (sibling.status === 'completed' ? 'Завършен' : 'Играе се'))}</div>
-          </div>
-          <div data-tournament-inter-round-score="1" data-match-id="${escapeHtml(sibling.matchId)}" style="font-size:24px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
-        </div>
+        ${middleSection}
         ${siblingWinner !== null ? `<div style="font-size:13px;font-weight:900;color:#86efac;">Класиран отбор: ${escapeHtml(siblingWinner)}</div>` : ''}
       </div>
     `)

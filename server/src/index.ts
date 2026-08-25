@@ -86,9 +86,11 @@ import { createLocalTournamentTestService } from './localTournamentTest/localTou
 import { handleLocalTournamentTestRequest } from './localTournamentTest/handleLocalTournamentTestRequest.js'
 import {
   TOURNAMENT_STATUSES,
+  getTournamentRoundLadder,
   type TournamentEntryStatus,
   type TournamentPartnerInviteRecord,
   type TournamentRecord,
+  type TournamentRoundType,
 } from './tournament/tournamentTypes.js'
 import {
   ALLOWED_TOURNAMENT_ENTRY_FEES,
@@ -6289,6 +6291,17 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
   const myActiveMatch = viewerProfileId !== null
     ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
     : null
+  // Generic across every round transition (round_of_16->quarterfinal,
+  // quarterfinal->semifinal, semifinal->final) — task spec §5. Walks the
+  // team-capacity ladder instead of hardcoding 'semifinal'/'final', finding
+  // whichever round the viewer's team most recently won and hasn't yet
+  // advanced past. hasSemifinalResultAcknowledgement is still read/written
+  // for the semifinal->final transition specifically (idempotent evidence
+  // only, per task spec §4 — never gates anything here); for any other
+  // transition ownResultAcknowledged/otherFinalistReady are simply reported
+  // as true/not-applicable since no ack step exists for those transitions
+  // and none is being added (task spec: "НЕ generalize-вай manual ack към
+  // R16/QF").
   const buildMyInterRoundWaiting = () => {
     if (viewerProfileId === null || viewerEntry?.teamId === null || viewerEntry?.teamId === undefined) return null
     if (tournament.status === 'finished' || myActiveMatch !== null) return null
@@ -6300,62 +6313,75 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
       return null
     }
 
-    const semifinalMatches = roundDtos
-      .filter((round) => round.roundType === 'semifinal')
-      .flatMap((round) => round.matches.map((match) => ({ roundIndex: round.roundIndex, match })))
-      .sort((a, b) => a.roundIndex - b.roundIndex)
-    const completedSemifinal = semifinalMatches.find(({ match }) => {
-      return match.status === 'completed' &&
-        match.winnerTeamId === viewerEntry.teamId &&
-        (match.teamAId === viewerEntry.teamId || match.teamBId === viewerEntry.teamId)
-    })?.match
-    if (completedSemifinal === undefined) return null
+    const teamCapacity = tournament.playerCapacity / 2
+    const ladder = getTournamentRoundLadder(teamCapacity)
 
-    const completedIndex = semifinalMatches.findIndex(({ match }) => match.matchId === completedSemifinal.matchId)
-    const sibling = completedIndex >= 0
-      ? semifinalMatches[completedIndex % 2 === 0 ? completedIndex + 1 : completedIndex - 1]?.match
-      : undefined
-    if (sibling === undefined) return null
-    const siblingTeamA = teamDtos.find((team) => team.teamId === sibling.teamAId) ?? null
-    const siblingTeamB = teamDtos.find((team) => team.teamId === sibling.teamBId) ?? null
-    if (siblingTeamA === null || siblingTeamB === null) return null
+    for (let ladderIndex = 0; ladderIndex < ladder.length - 1; ladderIndex += 1) {
+      const currentRoundType = ladder[ladderIndex] as TournamentRoundType
+      const nextRoundType = ladder[ladderIndex + 1] as TournamentRoundType
 
-    const finalMatch = roundDtos
-      .find((round) => round.roundType === 'final')
-      ?.matches[0] ?? null
-    if (finalMatch !== null && (finalMatch.status === 'countdown' || finalMatch.status === 'in_progress' || finalMatch.status === 'completed')) {
-      return null
-    }
-
-    const ownResultAcknowledged = tournamentStore.hasSemifinalResultAcknowledgement(
-      tournament.tournamentId,
-      completedSemifinal.matchId,
-      viewerProfileId,
-    )
-    const otherFinalistTeamId = finalMatch !== null
-      ? finalMatch.teamAId === viewerEntry.teamId ? finalMatch.teamBId : finalMatch.teamAId
-      : sibling.winnerTeamId
-    const otherFinalistEntries = otherFinalistTeamId !== null
-      ? entries.filter((entry) => entry.teamId === otherFinalistTeamId && entry.status === 'finalist')
-      : []
-    const otherHumanFinalistEntries = otherFinalistEntries.filter((entry) => !isBotProfile(entry.profileId))
-    const otherFinalistReady = sibling.status === 'completed' &&
-      otherFinalistTeamId !== null &&
-      otherHumanFinalistEntries.every((entry) => {
-        const wonSemifinal = semifinalMatches.find(({ match }) => {
-          return match.status === 'completed' && match.winnerTeamId === entry.teamId
-        })?.match
-        return wonSemifinal !== undefined &&
-          tournamentStore.hasSemifinalResultAcknowledgement(tournament.tournamentId, wonSemifinal.matchId, entry.profileId)
+      const currentRoundMatches = roundDtos
+        .filter((round) => round.roundType === currentRoundType)
+        .flatMap((round) => round.matches.map((match) => ({ roundIndex: round.roundIndex, match })))
+        .sort((a, b) => a.roundIndex - b.roundIndex)
+      const completedEntry = currentRoundMatches.find(({ match }) => {
+        return match.status === 'completed' &&
+          match.winnerTeamId === viewerEntry.teamId &&
+          (match.teamAId === viewerEntry.teamId || match.teamBId === viewerEntry.teamId)
       })
+      if (completedEntry === undefined) continue
+      const completedMatch = completedEntry.match
 
-    return {
-      tournamentId: tournament.tournamentId,
-      completedSemifinalMatchId: completedSemifinal.matchId,
-      currentRoundType: 'semifinal',
-      nextRoundType: 'final',
-      siblingSemifinal: {
+      const completedIndex = currentRoundMatches.findIndex(({ match }) => match.matchId === completedMatch.matchId)
+      const siblingEntry = completedIndex >= 0
+        ? currentRoundMatches[completedIndex % 2 === 0 ? completedIndex + 1 : completedIndex - 1]
+        : undefined
+      if (siblingEntry === undefined) continue
+      const sibling = siblingEntry.match
+      const siblingTeamA = teamDtos.find((team) => team.teamId === sibling.teamAId) ?? null
+      const siblingTeamB = teamDtos.find((team) => team.teamId === sibling.teamBId) ?? null
+      if (siblingTeamA === null || siblingTeamB === null) continue
+
+      const nextMatch = roundDtos
+        .find((round) => round.roundType === nextRoundType)
+        ?.matches.find((match) => match.teamAId === viewerEntry.teamId || match.teamBId === viewerEntry.teamId)
+        ?? null
+      // The next round's match for this team already exists AND has moved
+      // past pure waiting (players seated/playing/done) — this team has
+      // already progressed beyond the unified waiting popup for this
+      // transition, so keep walking the ladder in case they've since won
+      // ANOTHER round past this one (shouldn't normally happen given
+      // myActiveMatch is checked above, but keeps the loop well-defined).
+      if (nextMatch !== null && (nextMatch.status === 'countdown' || nextMatch.status === 'in_progress' || nextMatch.status === 'completed')) {
+        continue
+      }
+
+      const isSemifinalToFinal = currentRoundType === 'semifinal' && nextRoundType === 'final'
+      const ownResultAcknowledged = isSemifinalToFinal
+        ? tournamentStore.hasSemifinalResultAcknowledgement(tournament.tournamentId, completedMatch.matchId, viewerProfileId)
+        : true
+      const otherTeamId = nextMatch !== null
+        ? nextMatch.teamAId === viewerEntry.teamId ? nextMatch.teamBId : nextMatch.teamAId
+        : sibling.winnerTeamId
+      const otherTeamEntries = otherTeamId !== null
+        ? entries.filter((entry) => entry.teamId === otherTeamId && (entry.status === 'confirmed' || entry.status === 'finalist'))
+        : []
+      const otherHumanTeamEntries = otherTeamEntries.filter((entry) => !isBotProfile(entry.profileId))
+      const otherFinalistReady = !isSemifinalToFinal
+        ? sibling.status === 'completed'
+        : sibling.status === 'completed' &&
+          otherTeamId !== null &&
+          otherHumanTeamEntries.every((entry) => {
+            const wonRound = currentRoundMatches.find(({ match }) => {
+              return match.status === 'completed' && match.winnerTeamId === entry.teamId
+            })?.match
+            return wonRound !== undefined &&
+              tournamentStore.hasSemifinalResultAcknowledgement(tournament.tournamentId, wonRound.matchId, entry.profileId)
+          })
+
+      const siblingDto = {
         matchId: sibling.matchId,
+        roundIndex: siblingEntry.roundIndex,
         teamA: siblingTeamA,
         teamB: siblingTeamB,
         scoreA: sibling.finalScoreTeamA ?? sibling.liveScoreTeamA ?? null,
@@ -6363,14 +6389,31 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
         status: sibling.status,
         winnerTeamId: sibling.winnerTeamId,
         progressLabel: sibling.progressLabel ?? '',
-      },
-      ownResultAcknowledged,
-      otherFinalistReady,
-      finalMatchId: finalMatch?.matchId ?? null,
-      finalRoomId: finalMatch?.roomId ?? null,
-      finalStartAt: finalMatch?.finalStartAt ?? null,
-      serverNow: new Date().toISOString(),
+      }
+
+      return {
+        tournamentId: tournament.tournamentId,
+        currentRoundType,
+        nextRoundType,
+        completedMatchId: completedMatch.matchId,
+        sibling: siblingDto,
+        ownResultAcknowledged,
+        otherFinalistReady,
+        nextMatchId: nextMatch?.matchId ?? null,
+        nextRoomId: nextMatch?.roomId ?? null,
+        nextMatchStartAt: nextMatch?.nextMatchStartAt ?? null,
+        serverNow: new Date().toISOString(),
+        // legacy aliases (Phase 1 backward compat, see
+        // TournamentInterRoundWaitingDto comment) — same values as above.
+        completedSemifinalMatchId: completedMatch.matchId,
+        siblingSemifinal: siblingDto,
+        finalMatchId: nextMatch?.matchId ?? null,
+        finalRoomId: nextMatch?.roomId ?? null,
+        finalStartAt: nextMatch?.nextMatchStartAt ?? null,
+      }
     }
+
+    return null
   }
   return {
     ...base,
@@ -10871,11 +10914,26 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        safeSendToConnection(connection.id, {
-          type: 'room_resumed',
-          roomId: result.room.id,
-          seat: result.seat,
-        })
+        // Seat attachment above is IDENTICAL for silent and normal resume —
+        // tryResumeRoomForConnection/attachConnectionToRoomSeat ran exactly
+        // the same way regardless of message.silent. Only the response type
+        // differs, so the client can tell whether it's expected to navigate
+        // to the active-room screen. broadcastRoomSnapshots still fires
+        // either way — other seated participants (and any bot-replacement
+        // UI) need the fresh snapshot regardless of whether THIS connection
+        // navigates visually.
+        safeSendToConnection(connection.id, message.silent === true
+          ? {
+              type: 'room_attached_silent',
+              roomId: result.room.id,
+              seat: result.seat,
+              profileId: connection.profileId,
+            }
+          : {
+              type: 'room_resumed',
+              roomId: result.room.id,
+              seat: result.seat,
+            })
 
         broadcastRoomSnapshots(result.room, socketRegistry)
         return

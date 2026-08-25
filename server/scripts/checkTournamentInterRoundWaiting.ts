@@ -219,8 +219,11 @@ async function cleanupSeeded(seeded: Seeded): Promise<void> {
   await rm(seeded.tempRoot, { recursive: true, force: true })
 }
 
+// Reads next_match_start_at (Phase 1 generic replacement for final_start_at
+// — see task spec §1/§4) rather than the legacy column, which the
+// coordinator no longer writes.
 function finalStartAt(database: DatabaseSync, finalMatchId: string): string | null {
-  return (database.prepare(`SELECT final_start_at FROM tournament_matches WHERE match_id = ?;`).get(finalMatchId) as { final_start_at: string | null }).final_start_at
+  return (database.prepare(`SELECT next_match_start_at FROM tournament_matches WHERE match_id = ?;`).get(finalMatchId) as { next_match_start_at: string | null }).next_match_start_at
 }
 
 function detailFixture(overrides: Partial<TournamentDetailSnapshot> = {}): TournamentDetailSnapshot {
@@ -321,6 +324,38 @@ function renderDetailState(state: Partial<LobbyScreenState>): string {
   } as LobbyScreenState)
 }
 
+function withPhoneViewport<T>(fn: () => T): T {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  ;(globalThis as { window?: unknown }).window = {
+    innerWidth: 390,
+    innerHeight: 844,
+    matchMedia: (_query: string) => ({ matches: true }),
+  }
+  try {
+    return fn()
+  } finally {
+    if (previousWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window
+    } else {
+      ;(globalThis as { window?: unknown }).window = previousWindow
+    }
+  }
+}
+
+function withDesktopViewport<T>(fn: () => T): T {
+  const previousWindow = (globalThis as { window?: unknown }).window
+  if (previousWindow !== undefined) {
+    delete (globalThis as { window?: unknown }).window
+  }
+  try {
+    return fn()
+  } finally {
+    if (previousWindow !== undefined) {
+      ;(globalThis as { window?: unknown }).window = previousWindow
+    }
+  }
+}
+
 console.log('\n═══ checkTournamentInterRoundWaiting ═══')
 
 await check('winner ack valid, loser/foreign rejected and duplicate idempotent', async () => {
@@ -345,28 +380,77 @@ await check('winner ack valid, loser/foreign rejected and duplicate idempotent',
   }
 })
 
-await check('other human finalist blocks finalStartAt until acknowledged, then sets it exactly once', async () => {
+// Phase 1 (task spec §4): next_match_start_at is scheduled by the
+// coordinator's tick loop the moment the final becomes runnable
+// (awaiting_players + room claimed), regardless of human-finalist
+// acknowledgement — an offline winner can no longer stall the final
+// indefinitely. Acknowledgement is still recorded (idempotent evidence) but
+// is not read anywhere in the timing path anymore. This replaces the old
+// "other human finalist blocks finalStartAt until acknowledged" test, which
+// asserted exactly the ack-blocking behavior Phase 1 removed.
+await check('next_match_start_at is scheduled on tick regardless of acknowledgement, exactly once', async () => {
   const seeded = await seedTournament(true)
   try {
-    seeded.coordinator.acknowledgeSemifinalResult({ tournamentId: seeded.tournamentId, semifinalMatchId: seeded.semifinalA, profileId: seeded.humanA })
-    assert(finalStartAt(seeded.database, seeded.finalMatchId) === null, 'finalStartAt set before other human ack')
-    seeded.coordinator.acknowledgeSemifinalResult({ tournamentId: seeded.tournamentId, semifinalMatchId: seeded.semifinalB, profileId: seeded.humanB! })
+    assert(finalStartAt(seeded.database, seeded.finalMatchId) === null, 'next_match_start_at set before any tick')
+    seeded.coordinator.tickNow()
     const firstStartAt = finalStartAt(seeded.database, seeded.finalMatchId)
-    assert(firstStartAt !== null, 'finalStartAt missing after all human acks')
+    assert(firstStartAt !== null, 'next_match_start_at missing after tick with zero acknowledgements')
+    // Acknowledging afterward (by either finalist, in either order) must not
+    // move the already-scheduled timestamp — COALESCE + "IS NULL" guard in
+    // updateNextMatchStartAtStatement is exactly-once regardless of ack
+    // activity happening around it.
+    seeded.coordinator.acknowledgeSemifinalResult({ tournamentId: seeded.tournamentId, semifinalMatchId: seeded.semifinalA, profileId: seeded.humanA })
     seeded.coordinator.acknowledgeSemifinalResult({ tournamentId: seeded.tournamentId, semifinalMatchId: seeded.semifinalB, profileId: seeded.humanB! })
-    assert(finalStartAt(seeded.database, seeded.finalMatchId) === firstStartAt, 'duplicate ack changed finalStartAt')
+    seeded.coordinator.tickNow()
+    assert(finalStartAt(seeded.database, seeded.finalMatchId) === firstStartAt, 'ack activity after scheduling changed next_match_start_at')
     const deltaMs = Date.parse(firstStartAt!) - Date.now()
-    assert(deltaMs > 0 && deltaMs <= 5_500, `finalStartAt is not about +5s: ${deltaMs}`)
+    assert(deltaMs > 0 && deltaMs <= 20_500, `next_match_start_at is not about +20s (round_transition window): ${deltaMs}`)
   } finally {
     await cleanupSeeded(seeded)
   }
 })
 
-await check('bot finalist is auto-ready after the human winner ack', async () => {
+// Replaces the old "bot finalist is auto-ready after the human winner ack"
+// test — bot-only finalist teams have no acknowledgement to give at all, and
+// under Phase 1's non-blocking model the final's countdown starts on the
+// very first tick with no dependency on acknowledgement from anyone.
+await check('final start is scheduled on tick even with an all-bot finalist team (no ack possible)', async () => {
   const seeded = await seedTournament(false)
   try {
-    seeded.coordinator.acknowledgeSemifinalResult({ tournamentId: seeded.tournamentId, semifinalMatchId: seeded.semifinalA, profileId: seeded.humanA })
-    assert(finalStartAt(seeded.database, seeded.finalMatchId) !== null, 'bot finalist did not auto-ready')
+    seeded.coordinator.tickNow()
+    assert(finalStartAt(seeded.database, seeded.finalMatchId) !== null, 'next_match_start_at not scheduled for an all-bot finalist team')
+  } finally {
+    await cleanupSeeded(seeded)
+  }
+})
+
+// Offline human finalist must not be able to stall the final indefinitely
+// (task spec §4: "Offline human finalist НЕ трябва да може да блокира
+// финала безкрайно"). Neither human ever acknowledges here — the old
+// ack-gate would have left next_match_start_at null forever.
+await check('final start is scheduled even when neither human finalist ever acknowledges', async () => {
+  const seeded = await seedTournament(true)
+  try {
+    seeded.coordinator.tickNow()
+    assert(finalStartAt(seeded.database, seeded.finalMatchId) !== null, 'next_match_start_at blocked indefinitely by missing acknowledgement')
+  } finally {
+    await cleanupSeeded(seeded)
+  }
+})
+
+// Exactly-once under repeated ticks (task spec §9.D / §10 regression list):
+// simulates the coordinator restarting and re-reconciling the same
+// tournament state multiple times — the persisted timestamp must never move.
+await check('next_match_start_at exactly-once across repeated coordinator ticks (restart/reconcile safe)', async () => {
+  const seeded = await seedTournament(true)
+  try {
+    seeded.coordinator.tickNow()
+    const firstStartAt = finalStartAt(seeded.database, seeded.finalMatchId)
+    assert(firstStartAt !== null, 'next_match_start_at missing after first tick')
+    for (let i = 0; i < 5; i += 1) {
+      seeded.coordinator.tickNow()
+      assert(finalStartAt(seeded.database, seeded.finalMatchId) === firstStartAt, `next_match_start_at moved on repeated tick #${i + 1}`)
+    }
   } finally {
     await cleanupSeeded(seeded)
   }
@@ -381,6 +465,43 @@ await check('dedicated renderer hides generic finance/roster/CTA and shows live 
   assert(!html.includes('Награден фонд'), 'generic finance rendered')
   assert(!html.includes('data-tournament-enter-active-match="1"'), 'resume CTA rendered')
   assert(!html.includes('Продължи играта'), 'resume copy rendered')
+})
+
+await check('phone viewport: live score block appears before roster block, roster after; grammar uses "на"', () => {
+  const html = withPhoneViewport(() => renderDetail(detailFixture()))
+  const scoreIndex = html.indexOf('data-tournament-inter-round-score="1"')
+  const rosterIndex = html.indexOf('Отбор A')
+  assert(scoreIndex !== -1, 'live score block missing on phone viewport')
+  assert(rosterIndex !== -1, 'roster block missing on phone viewport')
+  assert(scoreIndex < rosterIndex, 'phone viewport: live score block is not before roster block')
+  assert(html.includes('96 : 74'), 'live sibling score missing on phone viewport')
+  assert(html.includes('противник на финала.'), 'phone viewport missing corrected "противник на" grammar')
+  assert(!html.includes('противник в финала.'), 'phone viewport still has old "противник в" grammar')
+})
+
+await check('desktop viewport: roster block remains before live score block', () => {
+  const html = withDesktopViewport(() => renderDetail(detailFixture()))
+  const scoreIndex = html.indexOf('data-tournament-inter-round-score="1"')
+  const rosterIndex = html.indexOf('Отбор A')
+  assert(scoreIndex !== -1, 'live score block missing on desktop viewport')
+  assert(rosterIndex !== -1, 'roster block missing on desktop viewport')
+  assert(rosterIndex < scoreIndex, 'desktop viewport: roster block is not before live score block')
+  assert(html.includes('96 : 74'), 'live sibling score missing on desktop viewport')
+})
+
+await check('grammar: opponent-confirmed copy uses "На ... ще играете срещу:" and drops old "В ..." phrasing', () => {
+  const html = renderDetail(detailFixture({
+    myInterRoundWaiting: {
+      ...detailFixture().myInterRoundWaiting!,
+      siblingSemifinal: { ...detailFixture().myInterRoundWaiting!.siblingSemifinal, status: 'completed', winnerTeamId: 'team-b', scoreA: 151, scoreB: 130, progressLabel: 'Завършен' },
+      otherFinalistReady: true,
+      finalStartAt: '2026-08-01T10:00:05.000Z',
+      serverNow: '2026-08-01T10:00:00.000Z',
+    },
+  }))
+  assert(html.includes('На финала ще играете срещу:'), 'corrected "На ... ще играете срещу:" grammar missing')
+  assert(!html.includes('В финала ще играете срещу:'), 'old "В ... ще играете срещу:" grammar still present')
+  assert(html.includes('Класирахте се за финала.'), 'unrelated "Класирахте се за" copy must remain unchanged')
 })
 
 await check('countdown renderer uses server finalStartAt/serverNow and keeps popup suppressed', () => {
@@ -564,12 +685,22 @@ await check('authenticated detail DTO wiring exposes inter-round waiting and sup
   assert(dto.includes('currentRoundType: TournamentRoundType') && dto.includes('nextRoundType: TournamentRoundType'), 'round metadata fields missing')
   assert(serverIndex.includes("if (tournament.status === 'finished' || myActiveMatch !== null) return null"), 'finished/active guard missing')
   assert(serverIndex.includes("viewerEntry.status !== 'confirmed'") && serverIndex.includes("viewerEntry.status !== 'finalist'"), 'confirmed/finalist inter-round guard missing')
-  assert(serverIndex.includes(".filter((round) => round.roundType === 'semifinal')"), 'split semifinal round lookup missing')
-  assert(serverIndex.includes(".flatMap((round) => round.matches.map((match) => ({ roundIndex: round.roundIndex, match })))"), 'split semifinal match flatten missing')
+  // Phase 1 generalized buildMyInterRoundWaiting to walk the full team-
+  // capacity ladder (round_of_16->quarterfinal->semifinal->final) instead of
+  // hardcoding 'semifinal'/'final' literals — see task spec §5 ("не
+  // hardcode-вай semifinal/final literals в архитектурата"). Assert the
+  // generic ladder-walking shape instead of the old semifinal-only literals.
+  assert(serverIndex.includes('getTournamentRoundLadder(teamCapacity)'), 'generic ladder walk missing')
+  assert(serverIndex.includes('.filter((round) => round.roundType === currentRoundType)'), 'generic current-round lookup missing')
+  assert(serverIndex.includes('.flatMap((round) => round.matches.map((match) => ({ roundIndex: round.roundIndex, match })))'), 'round match flatten missing')
   assert(serverIndex.includes('ownResultAcknowledged'), 'own acknowledgement field missing')
   assert(serverIndex.includes('otherFinalistReady'), 'other finalist readiness missing')
-  assert(serverIndex.includes('finalStartAt: finalMatch?.finalStartAt ?? null'), 'finalStartAt not exposed')
-  assert(serverIndex.includes("currentRoundType: 'semifinal'") && serverIndex.includes("nextRoundType: 'final'"), 'inter-round round metadata not exposed')
+  // Phase 1 replaced the final-only finalStartAt write with the generic
+  // nextMatchStartAt field (task spec §1/§5) — legacy finalStartAt alias is
+  // still populated from the same generic value for backward compat.
+  assert(serverIndex.includes('nextMatchStartAt: nextMatch?.nextMatchStartAt ?? null'), 'nextMatchStartAt not exposed')
+  assert(serverIndex.includes('finalStartAt: nextMatch?.nextMatchStartAt ?? null'), 'legacy finalStartAt alias not exposed')
+  assert(!serverIndex.includes("currentRoundType: 'semifinal'"), 'currentRoundType is still hardcoded to the semifinal literal instead of the generic ladder variable')
   assert(lobbyController.includes('onTournamentSemifinalResultAckNeeded'), 'detail ack recovery option missing')
   assert(lobbyController.includes('ownResultAcknowledged === false'), 'detail ack recovery guard missing')
   assert(lobbyController.includes('scheduleTournamentInterRoundAckRefetch'), 'detail ack recovery refetch missing')

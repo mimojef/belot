@@ -49,6 +49,8 @@ const SMART_MIGRATION_HANDLERS: Record<string, (database: SqliteDatabase) => voi
     applyTournamentMatchDeadlineKindAndScoreMigration,
   '20260801_003_add_tournament_inter_round_waiting.sql':
     applyTournamentInterRoundWaitingMigration,
+  '20260806_001_add_tournament_next_match_start_at.sql':
+    applyTournamentNextMatchStartAtMigration,
 }
 
 function getTableColumnTypes(
@@ -140,6 +142,30 @@ function applyTournamentInterRoundWaitingMigration(database: SqliteDatabase): vo
     throw new Error(
       `Postcondition failed for ${tableName}.final_start_at: expected type TEXT, got ${
         finalStartAtType ?? 'MISSING COLUMN'
+      }.`,
+    )
+  }
+}
+
+// 20260806_001_add_tournament_next_match_start_at.sql — generic "next match
+// gameplay start" deadline column, reused across every round transition
+// (round_of_16->quarterfinal, quarterfinal->semifinal, semifinal->final),
+// not just the final. Same idempotent ADD-COLUMN-if-missing pattern as the
+// other smart migrations above.
+function applyTournamentNextMatchStartAtMigration(database: SqliteDatabase): void {
+  const tableName = 'tournament_matches'
+  const columnsBefore = getTableColumnTypes(database, tableName)
+
+  if (!columnsBefore.has('next_match_start_at')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN next_match_start_at TEXT NULL;`)
+  }
+
+  const columnsAfter = getTableColumnTypes(database, tableName)
+  const nextMatchStartAtType = columnsAfter.get('next_match_start_at')
+  if (nextMatchStartAtType === undefined || nextMatchStartAtType.toUpperCase() !== 'TEXT') {
+    throw new Error(
+      `Postcondition failed for ${tableName}.next_match_start_at: expected type TEXT, got ${
+        nextMatchStartAtType ?? 'MISSING COLUMN'
       }.`,
     )
   }

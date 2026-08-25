@@ -1584,7 +1584,7 @@ export type GameServerClient = {
   joinGuestTrial: (stake: MatchStake) => void
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
-  resumeRoom: (roomId: string, reconnectToken: string) => void
+  resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean) => void
   acknowledgeTournamentSemifinalResult: (tournamentId: string, semifinalMatchId: string) => void
   leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
@@ -1751,11 +1751,17 @@ export function createGameServerClient(
     })
   }
 
-  function resumeRoom(roomId: string, reconnectToken: string): void {
+  // silent (Phase 1 protocol foundation, see messageTypes.ts's resume_room
+  // comment) requests the server perform the exact same seat attachment but
+  // respond with room_attached_silent instead of room_resumed, so a future
+  // caller can attach without the existing main.ts room_resumed handler
+  // navigating to the active-room screen. No caller passes silent yet.
+  function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean): void {
     send({
       type: 'resume_room',
       roomId,
       reconnectToken,
+      ...(silent === true ? { silent: true } : {}),
     })
   }
 
