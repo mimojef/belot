@@ -153,8 +153,12 @@ check(
 )
 
 check(
-  'final assignment on tournament detail is owned by inter-round countdown, not popup/direct resume',
-  mainTs.includes("if (message.assignment.roundType === 'final' && lobby?.getCurrentScreen() === 'tournament-detail') {")
+  // Phase 2: generalized from the old final-only special case to every
+  // round-transition assignment (R16->QF/QF->SF/SF->Final) — the unified
+  // lobby STATE A/B overlay owns this UX for ANY round while the player is
+  // looking at the tournament-detail screen, not just the final.
+  'round-transition assignment on tournament detail is owned by inter-round STATE B, not popup/direct resume',
+  mainTs.includes("if (message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail') {")
     && mainTs.includes('tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)')
     && !mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'),
 )

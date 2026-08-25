@@ -366,6 +366,199 @@ await check('G: resume_room silent:true field is a recognized ClientMessage vari
   assert(clientSource.includes('resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean) => void'), 'client resumeRoom silent parameter missing from interface')
 })
 
+// ─── ROOT CAUSE: parseClientMessage silently dropped resume_room's silent
+// field, so the server ALWAYS replied room_resumed (navigation) regardless
+// of what the client sent — a real browser reproduction caught this: STATE A
+// correctly transitioned, but instead of STATE B the raw activeRoom
+// attendance screen ("Изчакват се играчите", "Готови: 1 от 4") became
+// visible before the authoritative start. Scenario G above only proved the
+// TYPE declares silent?: boolean and that the message HANDLER branches on
+// message.silent — neither caught that the PARSER, which runs first and
+// rebuilds the validated ClientMessage from the raw untrusted payload, threw
+// the field away before the handler ever saw it. This is a genuine runtime
+// test (calls the real parser), not a source-fragment check — exactly the
+// class of bug source-fragment assertions cannot catch.
+await check('ROOT CAUSE: parseClientMessage actually preserves resume_room.silent through to the parsed ClientMessage (not just declared in types/handler)', async () => {
+  const { parseClientMessage } = await import('../src/protocol/parseClientMessage.js')
+
+  const silentParsed = parseClientMessage(JSON.stringify({
+    type: 'resume_room',
+    roomId: 'room-1',
+    reconnectToken: 'token-1',
+    silent: true,
+  }))
+  assert(silentParsed !== null, 'resume_room with silent:true failed to parse at all')
+  assert(silentParsed?.type === 'resume_room', 'parsed message has wrong type')
+  assert((silentParsed as any).silent === true, `parseClientMessage dropped silent:true — got ${JSON.stringify(silentParsed)}`)
+
+  const normalParsed = parseClientMessage(JSON.stringify({
+    type: 'resume_room',
+    roomId: 'room-1',
+    reconnectToken: 'token-1',
+  }))
+  assert(normalParsed !== null, 'resume_room without silent failed to parse')
+  assert((normalParsed as any).silent !== true, `parseClientMessage invented a silent:true that was never sent — got ${JSON.stringify(normalParsed)}`)
+
+  const explicitFalseParsed = parseClientMessage(JSON.stringify({
+    type: 'resume_room',
+    roomId: 'room-1',
+    reconnectToken: 'token-1',
+    silent: false,
+  }))
+  assert((explicitFalseParsed as any).silent !== true, 'explicit silent:false was coerced to true')
+})
+
+// ─── H/I/N: Phase 2 client-side silent-attach consumer wiring ───
+// Phase 1 above proves the protocol foundation exists; these prove the
+// client actually USES it for STATE B (§ "SILENT ATTACH"/"GAMEPLAY ENTRY")
+// — silent resume call site, no navigation from room_attached_silent, and
+// gameplay entry gated on the room's own tournamentAttendance signal (no
+// client-only wall-clock timeout) instead of leaking the raw attendance
+// screen while still lobby-side.
+await check('H/I/N: STATE B silently seat-attaches, never navigates from room_attached_silent, and enters gameplay only once the room snapshot signals attendance resolved', async () => {
+  const projectRoot = join(serverRootPath, '..')
+  const mainTs = await readFile(join(projectRoot, 'src', 'main.ts'), 'utf8')
+  const activeRoomController = await readFile(join(projectRoot, 'src', 'app', 'activeRoom', 'createActiveRoomFlowController.ts'), 'utf8')
+
+  // H — silent attach call site: resume_room{silent:true} sent from the
+  // shared silent-attach helper (armed alongside it — not a bare resumeRoom
+  // call that would rely on the OLD room_resumed->enterActiveRoomFromResume
+  // navigation path), and invoked from the round-transition assignment
+  // handler.
+  const attachFnStart = mainTs.indexOf('function attemptTournamentRoundTransitionSilentAttach(')
+  assert(attachFnStart !== -1, 'attemptTournamentRoundTransitionSilentAttach helper missing from main.ts')
+  const attachFnEnd = mainTs.indexOf('\n}', attachFnStart)
+  assert(attachFnEnd !== -1, 'attemptTournamentRoundTransitionSilentAttach helper block not closed as expected')
+  const attachFnBody = mainTs.slice(attachFnStart, attachFnEnd)
+  assert(attachFnBody.includes('activeRoom.armPendingTournamentSilentEntry('), 'silent-entry watch not armed before/with the silent resume')
+  assert(attachFnBody.includes('client.resumeRoom(assignment.roomId, assignment.reconnectToken, true)'), 'silent attach helper does not silently resume (silent:true)')
+
+  const assignmentHandlerStart = mainTs.indexOf('onTournamentRoundTransitionAssignment:')
+  assert(assignmentHandlerStart !== -1, 'onTournamentRoundTransitionAssignment handler missing from main.ts')
+  const assignmentHandlerEnd = mainTs.indexOf('\n  },', assignmentHandlerStart)
+  const assignmentHandlerBody = mainTs.slice(assignmentHandlerStart, assignmentHandlerEnd)
+  assert(assignmentHandlerBody.includes('attemptTournamentRoundTransitionSilentAttach(assignment)'), 'round-transition assignment handler does not trigger the silent attach helper')
+
+  // H — room_attached_silent must not trigger navigation (no
+  // enterActiveRoomFromResume call anywhere in its handler block).
+  const silentAttachedStart = mainTs.indexOf("message.type === 'room_attached_silent'")
+  assert(silentAttachedStart !== -1, 'room_attached_silent handler missing from main.ts')
+  const silentAttachedEnd = mainTs.indexOf('\n    }', silentAttachedStart)
+  assert(silentAttachedEnd !== -1, 'room_attached_silent handler block not closed as expected')
+  const silentAttachedBody = mainTs.slice(silentAttachedStart, silentAttachedEnd)
+  assert(!silentAttachedBody.includes('enterActiveRoomFromResume'), 'room_attached_silent handler navigates to the active-room screen (should stay lobby-visible)')
+
+  // I/N — gameplay entry is driven by activeRoom's own room_snapshot handling
+  // (armPendingTournamentSilentEntry watch), gated on the SAME
+  // started/completed condition already used to hide the raw attendance
+  // screen for an already-entered player — not a client-side setTimeout.
+  assert(activeRoomController.includes('armPendingTournamentSilentEntry'), 'armPendingTournamentSilentEntry not implemented in activeRoom controller')
+  const roomSnapshotHandlerStart = activeRoomController.indexOf("message.type === 'room_snapshot'")
+  assert(roomSnapshotHandlerStart !== -1, 'room_snapshot handler missing from activeRoom controller')
+  // File uses CRLF line endings — search for a return-false marker without
+  // assuming \n vs \r\n, and fall back to a generous fixed window (covers
+  // the block with margin; verified against source at write time) if the
+  // marker text ever shifts.
+  const roomSnapshotHandlerReturnFalse = activeRoomController.indexOf('return false', roomSnapshotHandlerStart)
+  const roomSnapshotHandlerEnd = roomSnapshotHandlerReturnFalse !== -1
+    ? roomSnapshotHandlerReturnFalse + 40
+    : roomSnapshotHandlerStart + 1750
+  const roomSnapshotHandlerBody = activeRoomController.slice(roomSnapshotHandlerStart, roomSnapshotHandlerEnd)
+  assert(roomSnapshotHandlerBody.includes('pendingTournamentSilentEntry'), 'room_snapshot handler does not consult the armed silent-entry watch')
+  assert(roomSnapshotHandlerBody.includes('isTournamentAttendanceReadyForSilentEntry('), 'gameplay entry from silent attach is not gated through the authoritative readiness check')
+  assert(!/setTimeout\([^)]*enterActiveRoomFromResume/.test(roomSnapshotHandlerBody), 'gameplay entry from silent attach uses a client-side setTimeout instead of the authoritative room_snapshot signal')
+
+  // A/E — isTournamentAttendanceReadyForSilentEntry itself: entry is allowed
+  // for 'started' (normal gameplay start) AND 'completed' (walkover/already-
+  // resolved terminal state — existing terminal flow must remain reachable),
+  // driven purely by an actual populated attendance snapshot.
+  const readyFnStart = activeRoomController.indexOf('function isTournamentAttendanceReadyForSilentEntry(')
+  assert(readyFnStart !== -1, 'isTournamentAttendanceReadyForSilentEntry helper missing')
+  const readyFnEnd = activeRoomController.indexOf('\n  }', readyFnStart)
+  const readyFnBody = activeRoomController.slice(readyFnStart, readyFnEnd)
+  assert(readyFnBody.includes("attendance.state === 'started'"), 'A: started state not accepted as ready')
+  assert(readyFnBody.includes("attendance.state === 'completed'"), 'E: completed/walkover terminal state not accepted as ready')
+
+  // C — the null-tolerant branch ("no attendance data = safe to enter") from
+  // the first implementation is gone: a tournament room's very first commit
+  // (ensureMatchRoom's brand-new-room path server-side) can broadcast BEFORE
+  // resolveAttendance's follow-up commitSnapshot populates
+  // config.tournamentAttendance, so treating a null snapshot as "ready" on
+  // this freshly-armed watch risked a premature enter on that first commit.
+  assert(!readyFnBody.includes('attendance == null ||'), 'C: null attendance snapshot is still treated as unconditionally ready (pre-hydration race)')
+  assert(readyFnBody.includes('attendance != null'), 'C: readiness check does not require an actual populated attendance snapshot')
+})
+
+// ─── B: silent attach failure clears the guards so a retry can happen ───
+await check('B: room_resume_failed and WS reconnect (onOpen) both clear the silent-attach guards so a later authoritative assignment/snapshot can retry', async () => {
+  const projectRoot = join(serverRootPath, '..')
+  const mainTs = await readFile(join(projectRoot, 'src', 'main.ts'), 'utf8')
+
+  // Without this, silentAttachedRoundTransitionRoomId is set once (in
+  // attemptTournamentRoundTransitionSilentAttach) and NEVER cleared on the
+  // happy path — a failed resume_room{silent:true} would permanently block
+  // every future retry attempt for that roomId, leaving the player stuck on
+  // STATE B with no real seat attachment while the server counts them absent
+  // at the deadline.
+  const resumeFailedStart = mainTs.indexOf("if (message.type === 'room_resume_failed') {")
+  assert(resumeFailedStart !== -1, 'room_resume_failed handler missing')
+  const resumeFailedEnd = mainTs.indexOf('\n    }', resumeFailedStart)
+  assert(resumeFailedEnd !== -1, 'room_resume_failed handler block not closed as expected')
+  const resumeFailedBody = mainTs.slice(resumeFailedStart, resumeFailedEnd)
+  assert(resumeFailedBody.includes('silentAttachedRoundTransitionRoomId === message.roomId'), 'room_resume_failed does not check the silent-attach guard for this room')
+  assert(resumeFailedBody.includes('silentAttachedRoundTransitionRoomId = null'), 'room_resume_failed does not clear the main.ts retry guard')
+  assert(resumeFailedBody.includes('activeRoom.clearPendingTournamentSilentEntry(message.roomId)'), 'room_resume_failed does not clear the armed activeRoom watch (its own idempotency guard would still block a re-arm)')
+
+  // A full WS drop between sending resume_room{silent:true} and receiving any
+  // response never fires room_resume_failed at all — onOpen (successful
+  // reconnect) must also reset the guard, since the old connection.id the
+  // attempt was tied to is now dead server-side regardless.
+  const onOpenStart = mainTs.indexOf('onOpen: () => {')
+  assert(onOpenStart !== -1, 'onOpen handler missing')
+  const onOpenEnd = mainTs.indexOf('\n  },', onOpenStart)
+  const onOpenBody = mainTs.slice(onOpenStart, onOpenEnd)
+  assert(onOpenBody.includes('silentAttachedRoundTransitionRoomId = null'), 'onOpen does not reset the silent-attach retry guard on reconnect')
+  assert(onOpenBody.includes('activeRoom.clearPendingTournamentSilentEntry('), 'onOpen does not clear the armed activeRoom watch on reconnect')
+
+  // Retry vehicle: the coordinator re-sends tournament_match_assigned on
+  // every tick for every runnable match, and that handler now also drives
+  // the silent attach — so once the guards are clear, the very next tick
+  // retries without any new client-side poll/timer being introduced.
+  const assignedHandlerStart = mainTs.indexOf("if (message.type === 'tournament_match_assigned') {")
+  const assignedHandlerEnd = mainTs.indexOf('\n    }', assignedHandlerStart)
+  const assignedHandlerBody = mainTs.slice(assignedHandlerStart, assignedHandlerEnd)
+  assert(assignedHandlerBody.includes('attemptTournamentRoundTransitionSilentAttach(message.assignment)'), 'tournament_match_assigned does not re-attempt the silent attach (no retry vehicle for a cleared guard)')
+})
+
+// ─── D: entry is consumed exactly once ───
+await check('D: the armed silent-entry watch is nulled out before entering, so a started snapshot cannot trigger a second navigation', async () => {
+  const projectRoot = join(serverRootPath, '..')
+  const activeRoomController = await readFile(join(projectRoot, 'src', 'app', 'activeRoom', 'createActiveRoomFlowController.ts'), 'utf8')
+
+  const roomSnapshotHandlerStart = activeRoomController.indexOf("message.type === 'room_snapshot'")
+  // File uses CRLF line endings — search for a return-false marker without
+  // assuming \n vs \r\n, and fall back to a generous fixed window (covers
+  // the block with margin; verified against source at write time) if the
+  // marker text ever shifts.
+  const roomSnapshotHandlerReturnFalse = activeRoomController.indexOf('return false', roomSnapshotHandlerStart)
+  const roomSnapshotHandlerEnd = roomSnapshotHandlerReturnFalse !== -1
+    ? roomSnapshotHandlerReturnFalse + 40
+    : roomSnapshotHandlerStart + 1750
+  const roomSnapshotHandlerBody = activeRoomController.slice(roomSnapshotHandlerStart, roomSnapshotHandlerEnd)
+  const nullIndex = roomSnapshotHandlerBody.indexOf('pendingTournamentSilentEntry = null')
+  const enterIndex = roomSnapshotHandlerBody.indexOf('enterActiveRoomFromResume(entry.roomId, entry.seat, entry.stake)')
+  assert(nullIndex !== -1, 'watch is never cleared before entering (room_snapshot path)')
+  assert(enterIndex !== -1, 'entry point missing from room_snapshot path')
+  assert(nullIndex < enterIndex, 'watch is cleared AFTER entering instead of before, in the room_snapshot path (re-entrancy risk if enterActiveRoomFromResume synchronously triggers another room_snapshot)')
+
+  const armFnStart = activeRoomController.indexOf('function armPendingTournamentSilentEntry(')
+  const armFnBody = activeRoomController.slice(armFnStart, activeRoomController.indexOf('\n  }', armFnStart))
+  const cachedNullIndex = armFnBody.indexOf('pendingTournamentSilentEntry = null')
+  const cachedEnterIndex = armFnBody.indexOf('enterActiveRoomFromResume(input.roomId, input.seat, input.stake)')
+  assert(cachedNullIndex !== -1 && cachedEnterIndex !== -1, 'cached-snapshot recheck path missing clear-before-enter')
+  assert(cachedNullIndex < cachedEnterIndex, 'cached-snapshot recheck path clears the watch AFTER entering instead of before')
+})
+
 console.log('\n' + '═'.repeat(64))
 console.log(`Passed: ${passed}  Failed: ${failed}`)
 if (failed > 0) process.exit(1)

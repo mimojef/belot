@@ -102,6 +102,18 @@ export type ActiveRoomFlowController = {
   hasActiveRoom: () => boolean
   getActiveNonTournamentRoomInfo: () => { roomId: string; stakeAmount: number } | null
   getCurrentRoomId: () => string | null
+  // STATE B silent attach (§ "SILENT ATTACH") — arms a watch for roomId's
+  // room_snapshot stream (already flowing on the shared WS connection after
+  // resume_room {silent:true} → room_attached_silent) so the controller can
+  // call enterActiveRoomFromResume itself the instant
+  // tournamentAttendance.state reaches 'started'/'completed' (or is absent),
+  // WITHOUT the lobby ever calling enterActiveRoomFromResume directly and
+  // WITHOUT any client-side wall-clock timeout. Idempotent per roomId.
+  armPendingTournamentSilentEntry: (input: { roomId: string; seat: Seat; stake: MatchStake }) => void
+  // Counterpart used when a silent resume_room is known to have failed (e.g.
+  // room_resume_failed) so a retry for the same roomId isn't blocked by the
+  // stale watch from the failed attempt.
+  clearPendingTournamentSilentEntry: (roomId: string) => void
 }
 
 export type CuttingAnimationCache = {

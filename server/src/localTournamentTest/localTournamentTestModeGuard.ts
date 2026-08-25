@@ -97,6 +97,39 @@ export function pickLocalTournamentTestBotActionDelayMs(
   return botActionMinMs + Math.floor(Math.random() * (botActionMaxMs - botActionMinMs + 1))
 }
 
+// Per-room bot delay for one_human local tournament test runs — lets the
+// human's own semifinal move quickly while the sibling all-bot semifinal
+// stays observably in_progress for longer, so the STATE A/STATE B unified
+// inter-round screen (winner-in-transition flow) can actually be watched
+// end-to-end instead of racing to completion. Deliberately separate from
+// LocalTournamentTestTimingOverrides/botActionMinMs/MaxMs above — those stay
+// a single global random-at-startup knob for every other local-test scenario
+// (all_bots, two_humans, etc.); this is only consulted by
+// serverTimerStateHelpers.ts, and only once it has already determined
+// whether the room being timed contains a human seat (see
+// resolveServerBotActionDelayMs there) — no room/tournament UUID is read
+// here or anywhere in the resolution path.
+export type LocalTournamentTestRoomBotDelayOverrides = {
+  humanRoomBotDelayMs: number
+  siblingBotOnlyRoomBotDelayMs: number
+}
+
+const DEFAULT_HUMAN_ROOM_BOT_DELAY_MS = 500
+const DEFAULT_SIBLING_BOT_ONLY_ROOM_BOT_DELAY_MS = 1500
+
+export function getLocalTournamentTestRoomBotDelayOverrides(): LocalTournamentTestRoomBotDelayOverrides {
+  return {
+    humanRoomBotDelayMs: parsePositiveIntEnv(
+      'BELOT_LOCAL_TOURNAMENT_HUMAN_ROOM_BOT_MS',
+      DEFAULT_HUMAN_ROOM_BOT_DELAY_MS,
+    ),
+    siblingBotOnlyRoomBotDelayMs: parsePositiveIntEnv(
+      'BELOT_LOCAL_TOURNAMENT_SIBLING_BOT_MS',
+      DEFAULT_SIBLING_BOT_ONLY_ROOM_BOT_DELAY_MS,
+    ),
+  }
+}
+
 // ─── Тестова DB пътека ──────────────────────────────────────────────────────
 
 const DEFAULT_TEST_DATABASE_FILENAME = 'belot-v2-tournament-test.sqlite'

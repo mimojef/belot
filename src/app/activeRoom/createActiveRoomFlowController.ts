@@ -7,6 +7,7 @@ import {
   type RoomGameSnapshot,
   type RoomSeatSnapshot,
   type RoomSnapshotMessage,
+  type TournamentAttendanceSnapshot,
   type TournamentRoundType,
   type RoomWinningBidSnapshot,
   type Seat,
@@ -159,6 +160,9 @@ export function createActiveRoomFlowController(
   options: CreateActiveRoomFlowControllerOptions,
 ): ActiveRoomFlowController {
   const pendingRoomSnapshots = new Map<string, RoomSnapshotMessage>()
+  // STATE B silent attach watch (armPendingTournamentSilentEntry) — see the
+  // room_snapshot branch of handleServerMessage below.
+  let pendingTournamentSilentEntry: { roomId: string; seat: Seat; stake: MatchStake } | null = null
   let activeRoomState: ActiveRoomState | null = null
   const cuttingVisualCountdown = createCuttingVisualCountdownTracker()
   const cuttingAnimation: CuttingAnimationCache = createCuttingAnimationCache()
@@ -4861,6 +4865,31 @@ export function createActiveRoomFlowController(
     if (message.type === 'room_snapshot') {
       pendingRoomSnapshots.set(message.roomId, message)
 
+      // STATE B gameplay entry (§ "GAMEPLAY ENTRY") — while silently attached
+      // and still lobby-visible (activeRoomState === null), watch this room's
+      // snapshot stream for the authoritative signal that attendance has
+      // resolved (bot replacement/walkover included — existing resolution
+      // paths, unchanged) or the match has actually started. No client-side
+      // wall-clock timeout — this is driven purely by the server-pushed
+      // snapshot. See isTournamentAttendanceReadyForSilentEntry for why this
+      // requires an actual populated attendance snapshot (unlike the
+      // pre-existing in-room "should the raw attendance card show" check,
+      // which also treats a null attendance as "ready" — safe there because
+      // it only ever runs for an already-seated player past room creation,
+      // not for a freshly-armed watch that could observe the very first,
+      // not-yet-attendance-hydrated commit of a brand-new tournament room).
+      if (
+        activeRoomState === null &&
+        pendingTournamentSilentEntry !== null &&
+        pendingTournamentSilentEntry.roomId === message.roomId &&
+        isTournamentAttendanceReadyForSilentEntry(message.tournamentAttendance)
+      ) {
+        const entry = pendingTournamentSilentEntry
+        pendingTournamentSilentEntry = null
+        enterActiveRoomFromResume(entry.roomId, entry.seat, entry.stake)
+        return true
+      }
+
       if (applyRoomSnapshotToActiveRoom(message)) {
         return true
       }
@@ -5126,6 +5155,54 @@ export function createActiveRoomFlowController(
     return activeRoomState?.roomId ?? null
   }
 
+  // A tournament room's very first commit (ensureMatchRoom's brand-new-room
+  // branch in tournamentCoordinator.ts) writes the bare room BEFORE
+  // resolveAttendance's follow-up commitSnapshot populates
+  // config.tournamentAttendance — so tournamentAttendance === null on a
+  // tournament-origin room can genuinely mean "not hydrated yet", not just
+  // "attendance lifecycle doesn't apply". This watch is only ever armed for a
+  // known tournament round-transition room (armPendingTournamentSilentEntry
+  // callers), so unlike the null-tolerant check the in-room attendance-card
+  // gate uses for an already-seated player, treating null here as "ready"
+  // would risk a premature enter on that first snapshot. Require an actual
+  // populated attendance snapshot confirming started/completed instead.
+  function isTournamentAttendanceReadyForSilentEntry(
+    attendance: TournamentAttendanceSnapshot | null | undefined,
+  ): boolean {
+    return attendance != null && (attendance.state === 'started' || attendance.state === 'completed')
+  }
+
+  // Counterpart to armPendingTournamentSilentEntry's idempotency guard — must
+  // be called when a silent resume_room is known to have failed (e.g.
+  // room_resume_failed) so a later retry for the SAME roomId isn't blocked by
+  // the stale watch left over from the failed attempt.
+  function clearPendingTournamentSilentEntry(roomId: string): void {
+    if (pendingTournamentSilentEntry !== null && pendingTournamentSilentEntry.roomId === roomId) {
+      pendingTournamentSilentEntry = null
+    }
+  }
+
+  function armPendingTournamentSilentEntry(input: { roomId: string; seat: Seat; stake: MatchStake }): void {
+    if (pendingTournamentSilentEntry !== null && pendingTournamentSilentEntry.roomId === input.roomId) {
+      return
+    }
+    pendingTournamentSilentEntry = input
+    // A room_snapshot for this room may already be cached (e.g. it arrived
+    // before this arm call, or a previous arm for the same room already
+    // primed pendingRoomSnapshots) — re-check it immediately instead of only
+    // reacting to the NEXT push, so a match that's already attendance-resolved
+    // by the time the lobby calls this doesn't wait for another snapshot.
+    const cached = pendingRoomSnapshots.get(input.roomId)
+    if (
+      cached !== undefined &&
+      activeRoomState === null &&
+      isTournamentAttendanceReadyForSilentEntry(cached.tournamentAttendance)
+    ) {
+      pendingTournamentSilentEntry = null
+      enterActiveRoomFromResume(input.roomId, input.seat, input.stake)
+    }
+  }
+
   document.body.addEventListener('click', (e) => {
     const target = e.target
     if (!(target instanceof Element)) return
@@ -5165,5 +5242,7 @@ export function createActiveRoomFlowController(
     hasActiveRoom,
     getActiveNonTournamentRoomInfo,
     getCurrentRoomId,
+    armPendingTournamentSilentEntry,
+    clearPendingTournamentSilentEntry,
   }
 }

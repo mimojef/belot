@@ -15,7 +15,7 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
-import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown } from './renderTournamentsScreen'
+import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -537,7 +537,16 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string; requiresPassword?: boolean }
   >
   onTournamentActiveMatchRecovered?: (assignment: TournamentDetailSnapshot['myActiveMatch']) => void
-  onTournamentAutoEnterMatch?: (assignment: NonNullable<TournamentDetailSnapshot['myActiveMatch']>) => void
+  // STATE B (§ "SILENT ATTACH") — извиква се веднъж за всяко ново
+  // round-transition myActiveMatch (deadlineKind === 'round_transition'),
+  // независимо от roundType (generic за R16/QF/SF->финал). Callback-ът
+  // трябва да silent-attach-не (resume_room {silent:true}) и да arm-не
+  // gameplay-entry watch-а — НЕ да навигира визуално, за разлика от старото
+  // onTournamentAutoEnterMatch поведение (само за финала, директен non-silent
+  // resume). Обикновен myActiveMatch assignment с deadlineKind ===
+  // 'first_match' (реален нов мач, не round continuation) продължава да минава през
+  // onTournamentActiveMatchRecovered/tournamentMatchStartPopup, непроменено.
+  onTournamentRoundTransitionAssignment?: (assignment: NonNullable<TournamentDetailSnapshot['myActiveMatch']>) => void
   onTournamentSemifinalResultAckNeeded?: (tournamentId: string, semifinalMatchId: string) => void
   onTournamentUnlock?: (tournamentId: string, password: string) => Promise<
     | { ok: true; tournament: TournamentDetailSnapshot }
@@ -2157,34 +2166,43 @@ export function createLobbyFlowController(
     }, 350)
   }
 
-  function startTournamentInterRoundCountdownLoop(tournamentId: string, finalStartAt: string): void {
+  // isStillValid discriminates which source is driving the countdown — STATE
+  // A/defensive-completed-branch (myInterRoundWaiting.nextMatchStartAt/
+  // finalStartAt) vs STATE B (myActiveMatch.attendanceDeadlineAt) — so both
+  // can share one DOM-patch ticker/refetch mechanism instead of duplicating
+  // it (see call sites in the post-render side-effect block below).
+  function startTournamentInterRoundCountdownLoop(
+    tournamentId: string,
+    deadlineAt: string,
+    isStillValid: () => boolean,
+  ): void {
     if (
       tournamentInterRoundCountdownIntervalId !== null &&
       tournamentInterRoundCountdownTournamentId === tournamentId &&
-      tournamentInterRoundCountdownFinalStartAt === finalStartAt
+      tournamentInterRoundCountdownFinalStartAt === deadlineAt
     ) {
-      updateTournamentInterRoundCountdownDom(finalStartAt)
+      updateTournamentInterRoundCountdownDom(deadlineAt)
       return
     }
 
     clearTournamentInterRoundCountdownLoop()
     tournamentInterRoundCountdownTournamentId = tournamentId
-    tournamentInterRoundCountdownFinalStartAt = finalStartAt
-    updateTournamentInterRoundCountdownDom(finalStartAt)
+    tournamentInterRoundCountdownFinalStartAt = deadlineAt
+    updateTournamentInterRoundCountdownDom(deadlineAt)
 
     tournamentInterRoundCountdownIntervalId = window.setInterval(() => {
       if (
         state.currentScreen !== 'tournament-detail' ||
         state.tournamentDetailId !== tournamentId ||
-        state.tournamentDetail?.myInterRoundWaiting?.finalStartAt !== finalStartAt
+        !isStillValid()
       ) {
         clearTournamentInterRoundCountdownLoop()
         return
       }
-      updateTournamentInterRoundCountdownDom(finalStartAt)
+      updateTournamentInterRoundCountdownDom(deadlineAt)
     }, 250)
 
-    const refetchDelayMs = Math.max(0, Date.parse(finalStartAt) - Date.now()) + 150
+    const refetchDelayMs = Math.max(0, Date.parse(deadlineAt) - Date.now()) + 150
     tournamentInterRoundRefetchTimeoutId = window.setTimeout(() => {
       if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
         void fetchTournamentDetail(tournamentId)
@@ -2221,22 +2239,25 @@ export function createLobbyFlowController(
       state.currentScreen !== 'tournament-detail' ||
       state.tournamentDetailId !== input.tournamentId ||
       waiting === null ||
-      waiting.siblingSemifinal.matchId !== input.matchId
+      waiting.sibling.matchId !== input.matchId
     ) {
       return false
+    }
+    const patchedSibling = {
+      ...waiting.sibling,
+      scoreA: input.scoreA,
+      scoreB: input.scoreB,
+      status: input.status,
+      winnerTeamId: input.winnerTeamId ?? waiting.sibling.winnerTeamId,
+      progressLabel: input.progressLabel,
     }
     state.tournamentDetail = {
       ...state.tournamentDetail!,
       myInterRoundWaiting: {
         ...waiting,
-        siblingSemifinal: {
-          ...waiting.siblingSemifinal,
-          scoreA: input.scoreA,
-          scoreB: input.scoreB,
-          status: input.status,
-          winnerTeamId: input.winnerTeamId ?? waiting.siblingSemifinal.winnerTeamId,
-          progressLabel: input.progressLabel,
-        },
+        sibling: patchedSibling,
+        // legacy alias kept mirrored for consistency, same as the server DTO.
+        siblingSemifinal: patchedSibling,
       },
     }
     if (input.status === 'in_progress') {
@@ -4300,12 +4321,37 @@ export function createLobbyFlowController(
     if (
       state.currentScreen === 'tournament-detail' &&
       state.tournamentDetail !== null &&
-      state.tournamentDetail.myInterRoundWaiting?.finalStartAt !== null &&
-      state.tournamentDetail.myInterRoundWaiting?.finalStartAt !== undefined
+      state.tournamentDetail.myInterRoundWaiting?.nextMatchStartAt !== null &&
+      state.tournamentDetail.myInterRoundWaiting?.nextMatchStartAt !== undefined
     ) {
+      // Defensive-completed branch inside renderTournamentInterRoundWaitingScreen
+      // (myActiveMatch race, see its comment) — kept alongside STATE B below.
+      const nextMatchStartAt = state.tournamentDetail.myInterRoundWaiting.nextMatchStartAt
       startTournamentInterRoundCountdownLoop(
         state.tournamentDetail.tournamentId,
-        state.tournamentDetail.myInterRoundWaiting.finalStartAt,
+        nextMatchStartAt,
+        () => state.tournamentDetail?.myInterRoundWaiting?.nextMatchStartAt === nextMatchStartAt,
+      )
+    } else if (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentDetail !== null &&
+      hasTournamentRoundTransitionAssignment(state.tournamentDetail.myActiveMatch) &&
+      state.tournamentDetail.myActiveMatch?.attendanceDeadlineAt !== null &&
+      state.tournamentDetail.myActiveMatch?.attendanceDeadlineAt !== undefined
+    ) {
+      // STATE B — countdown source of truth is myActiveMatch.attendanceDeadlineAt,
+      // which the coordinator aligns exactly to the persisted
+      // next_match_start_at for round-transition matches (see
+      // ensureMatchRoom's "ONE authoritative deadline" comment server-side).
+      const matchId = state.tournamentDetail.myActiveMatch.matchId
+      const attendanceDeadlineAt = state.tournamentDetail.myActiveMatch.attendanceDeadlineAt
+      startTournamentInterRoundCountdownLoop(
+        state.tournamentDetail.tournamentId,
+        attendanceDeadlineAt,
+        () => (
+          state.tournamentDetail?.myActiveMatch?.matchId === matchId &&
+          state.tournamentDetail?.myActiveMatch?.attendanceDeadlineAt === attendanceDeadlineAt
+        ),
       )
     } else {
       clearTournamentInterRoundCountdownLoop()
@@ -4758,7 +4804,12 @@ export function createLobbyFlowController(
       detail.viewer.entryStatus !== 'eliminated' &&
       detail.viewer.entryStatus !== 'withdrawn' &&
       detail.viewer.entryStatus !== 'refunded' &&
-      detail.myInterRoundWaiting === null
+      detail.myInterRoundWaiting === null &&
+      // STATE B готово (myActiveMatch с deadlineKind === 'round_transition')
+      // също прекратява pending-а — иначе играч, чийто sibling е бил вече
+      // completed преди неговия match, остава на pending screen-а вместо
+      // директно STATE B (§ "INITIAL STATE — SIBLING ALREADY COMPLETED").
+      !hasTournamentRoundTransitionAssignment(detail.myActiveMatch)
   }
 
   async function fetchTournamentDetail(tournamentId: string): Promise<void> {
@@ -4793,19 +4844,16 @@ export function createLobbyFlowController(
       state.tournamentInterRoundPendingResult = null
     }
 
-    // B — финалният мач вече е готов/assigned: auto-enter-ва по
-    // СЪЩЕСТВУВАЩИЯ path независимо дали pending все още се държи (виж
-    // коментара при shouldKeepTournamentInterRoundPendingResult) — иначе
-    // pending би останал "заклещен", докато myInterRoundWaiting никога не
-    // се задейства между semifinal completion и final readiness.
-    // client.resumeRoom е idempotent при повторни извиквания със същия
-    // roomId/token, затова е безопасно да достигне до тук и на следващи
-    // re-fetch-ове, докато room_snapshot реално пристигне.
-    if (
-      result.tournament.myActiveMatch !== null &&
-      result.tournament.myActiveMatch.roundType === 'final'
-    ) {
-      options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)
+    // STATE B (generic за всеки round transition, не само финала) — trigger-ва
+    // silent attach независимо дали pending все още се държи (виж коментара
+    // при shouldKeepTournamentInterRoundPendingResult) — иначе pending би
+    // останал "заклещен", докато myInterRoundWaiting никога не се задейства
+    // между sibling completion и round readiness. resume_room е idempotent
+    // при повторни извиквания със същия roomId/token (виж
+    // armPendingTournamentSilentEntry guard-а в main.ts), затова е безопасно
+    // да достигне до тук и на следващи re-fetch-ове.
+    if (hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)) {
+      options.onTournamentRoundTransitionAssignment?.(result.tournament.myActiveMatch!)
     }
 
     if (state.tournamentInterRoundPendingResult !== null) {
@@ -4833,9 +4881,16 @@ export function createLobbyFlowController(
         result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
       )
     }
-    if (result.tournament.myInterRoundWaiting !== null) {
+    // STATE A и STATE B имат ЕДИН owner (unified inter-round overlay-а) —
+    // потискат global tournamentMatchStartPopup/assignment callout-а по
+    // същия начин. Обикновено 'first_match' assignment (реален нов мач)
+    // продължава да минава през onTournamentActiveMatchRecovered непроменено.
+    if (
+      result.tournament.myInterRoundWaiting !== null ||
+      hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)
+    ) {
       options.onTournamentActiveMatchRecovered?.(null)
-    } else if (result.tournament.myActiveMatch === null || result.tournament.myActiveMatch.roundType !== 'final') {
+    } else {
       options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
     }
     state.tournamentDetailRequiresPassword = false
@@ -4876,6 +4931,9 @@ export function createLobbyFlowController(
     if (!shouldKeepTournamentInterRoundPendingResult(result.tournament)) {
       state.tournamentInterRoundPendingResult = null
     }
+    if (hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)) {
+      options.onTournamentRoundTransitionAssignment?.(result.tournament.myActiveMatch!)
+    }
     if (state.tournamentInterRoundPendingResult !== null) {
       options.onTournamentActiveMatchRecovered?.(null)
       state.tournamentDetailRequiresPassword = false
@@ -4897,10 +4955,11 @@ export function createLobbyFlowController(
         result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
       )
     }
-    if (result.tournament.myInterRoundWaiting !== null) {
+    if (
+      result.tournament.myInterRoundWaiting !== null ||
+      hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)
+    ) {
       options.onTournamentActiveMatchRecovered?.(null)
-    } else if (result.tournament.myActiveMatch !== null && result.tournament.myActiveMatch.roundType === 'final') {
-      options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)
     } else {
       options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
     }

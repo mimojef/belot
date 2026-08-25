@@ -181,27 +181,38 @@ export type TournamentMatchAssignmentSnapshot = {
   gameStartAt: string | null
 }
 
+export type TournamentInterRoundWaitingSiblingSnapshot = {
+  matchId: string
+  roundIndex: number
+  teamA: TournamentTeamSnapshot
+  teamB: TournamentTeamSnapshot
+  scoreA: number | null
+  scoreB: number | null
+  status: TournamentMatchStatus
+  winnerTeamId: string | null
+  progressLabel: string
+}
+
 export type TournamentInterRoundWaitingSnapshot = {
   tournamentId: string
-  completedSemifinalMatchId: string
   currentRoundType: TournamentRoundType
   nextRoundType: TournamentRoundType
-  siblingSemifinal: {
-    matchId: string
-    teamA: TournamentTeamSnapshot
-    teamB: TournamentTeamSnapshot
-    scoreA: number | null
-    scoreB: number | null
-    status: TournamentMatchStatus
-    winnerTeamId: string | null
-    progressLabel: string
-  }
+  completedMatchId: string
+  sibling: TournamentInterRoundWaitingSiblingSnapshot
   ownResultAcknowledged: boolean
   otherFinalistReady: boolean
+  nextMatchId: string | null
+  nextRoomId: string | null
+  nextMatchStartAt: string | null
+  serverNow: string
+  // legacy aliases (Phase 1 backward compat) — mirror the generic fields
+  // above 1:1. See server/src/tournament/tournamentDto.ts's
+  // TournamentInterRoundWaitingDto comment.
+  completedSemifinalMatchId: string
+  siblingSemifinal: TournamentInterRoundWaitingSiblingSnapshot
   finalMatchId: string | null
   finalRoomId: string | null
   finalStartAt: string | null
-  serverNow: string
 }
 
 export type TournamentPartnerInviteSnapshot = {
@@ -665,6 +676,7 @@ export type ClientMessage =
       type: 'resume_room'
       roomId: string
       reconnectToken: string
+      silent?: boolean
     }
   | {
       type: 'tournament_semifinal_result_acknowledge'
@@ -1028,6 +1040,17 @@ export type RoomResumeFailedMessage = {
   type: 'room_resume_failed'
   roomId: string
   message: string
+}
+
+// Response to resume_room { silent: true } — confirms the exact same seat
+// attachment as RoomResumedMessage, but is a distinct type so a handler can
+// tell "attached" apart from "attached AND navigate to the active-room
+// screen" (see main.ts's room_resumed handler vs this one).
+export type RoomAttachedSilentMessage = {
+  type: 'room_attached_silent'
+  roomId: string
+  seat: Seat
+  profileId: string | null
 }
 
 export type ActiveRoomLeftMessage = {
@@ -1511,6 +1534,7 @@ export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomResumedMessage
+  | RoomAttachedSilentMessage
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage
@@ -1751,11 +1775,11 @@ export function createGameServerClient(
     })
   }
 
-  // silent (Phase 1 protocol foundation, see messageTypes.ts's resume_room
-  // comment) requests the server perform the exact same seat attachment but
-  // respond with room_attached_silent instead of room_resumed, so a future
-  // caller can attach without the existing main.ts room_resumed handler
-  // navigating to the active-room screen. No caller passes silent yet.
+  // silent requests the server perform the exact same seat attachment but
+  // respond with room_attached_silent instead of room_resumed, so the caller
+  // can attach a tournament round-transition room in the background without
+  // navigating to the active-room screen (see activeRoom's
+  // armPendingTournamentSilentEntry / the lobby's STATE B silent attach).
   function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean): void {
     send({
       type: 'resume_room',

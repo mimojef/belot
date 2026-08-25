@@ -253,10 +253,19 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         return null
       }
 
+      // silent (§ "SILENT ATTACH") was previously dropped here — the client
+      // sent it, the resume_room handler in index.ts and the ClientMessage
+      // type both already branched on message.silent === true, but this
+      // parser rebuilt the validated message WITHOUT copying the field
+      // through, so the handler always saw undefined and replied
+      // room_resumed (navigating) instead of room_attached_silent regardless
+      // of what the client actually sent — a STATE B silent attach would
+      // always fall through to the raw active-room attendance screen.
       return {
         type: 'resume_room',
         roomId,
         reconnectToken,
+        silent: parsed.silent === true,
       }
     }
 

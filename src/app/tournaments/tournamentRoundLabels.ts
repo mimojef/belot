@@ -45,6 +45,18 @@ export function getNextTournamentRoundType(roundType: TournamentRoundType): Tour
   return null
 }
 
+// Inverse of getNextTournamentRoundType — used by the inter-round STATE B
+// screen to find which round type the just-created next-round assignment's
+// opponent match belongs to (so it can look up "Маса X"/roster/score from
+// TournamentDetailSnapshot.rounds once myInterRoundWaiting has already gone
+// null in favor of myActiveMatch, see renderTournamentsScreen.ts).
+export function getPreviousTournamentRoundType(roundType: TournamentRoundType): TournamentRoundType | null {
+  if (roundType === 'final') return 'semifinal'
+  if (roundType === 'semifinal') return 'quarterfinal'
+  if (roundType === 'quarterfinal') return 'round_of_16'
+  return null
+}
+
 export function getNextTournamentRoundLabel(roundType: TournamentRoundType): TournamentRoundLabel | null {
   const nextRoundType = getNextTournamentRoundType(roundType)
   return nextRoundType === null ? null : getTournamentRoundLabel(nextRoundType)

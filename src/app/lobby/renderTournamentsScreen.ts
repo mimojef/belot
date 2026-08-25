@@ -8,8 +8,7 @@ import type {
   TournamentStartMode,
 } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
-import { getNextTournamentRoundLabel, getTournamentRoundLabel } from '../tournaments/tournamentRoundLabels'
-import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { getNextTournamentRoundLabel, getPreviousTournamentRoundType, getTournamentRoundLabel } from '../tournaments/tournamentRoundLabels'
 
 // Временен публичен maintenance guard (виж fix(tournaments): show development
 // notice) — НЕ трие/променя реалната turnament UI логика по-долу в този файл,
@@ -738,6 +737,11 @@ function formatTournamentInterRoundScore(scoreA: number | null, scoreB: number |
   return scoreA !== null && scoreB !== null ? `${scoreA} : ${scoreB}` : '0 : 0'
 }
 
+function formatTournamentTeamMemberNames(team: TournamentDetailSnapshot['teams'][number]): string {
+  if (team.members.length === 0) return 'противника'
+  return team.members.map((member) => member.displayName).join(' и ')
+}
+
 function renderTournamentInterRoundTeam(team: TournamentDetailSnapshot['teams'][number], label: string): string {
   return `
     <div style="border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:10px;min-width:0;background:rgba(13,13,13,0.92);">
@@ -786,72 +790,138 @@ function renderTournamentInterRoundOverlay(content: string, marker = ''): string
   `
 }
 
+// Общ countdown блок (STATE B) — ползван и от dedicated STATE B renderer-а
+// (driven by t.myActiveMatch), и от defensive completed-sibling клона тук
+// долу (driven by myInterRoundWaiting, за race-а, при който myActiveMatch
+// все още не е hydration-нал, виж коментара при resolveTournamentActiveMatchOpponentContext).
+function renderTournamentInterRoundCountdownBlock(deadlineAt: string | null, remainingSeconds: number | null): string {
+  return `
+    <div>
+      <div style="font-size:15px;font-weight:900;color:#ffffff;">Следващият мач започва след</div>
+      <div data-tournament-inter-round-countdown="1" data-attendance-deadline-at="${escapeHtml(deadlineAt ?? '')}" style="margin-top:4px;font-size:44px;line-height:1;font-weight:900;color:#f4c95b;letter-spacing:0;">00:${String(remainingSeconds ?? 0).padStart(2, '0')}</div>
+    </div>
+  `
+}
+
 function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): string {
   const waiting = t.myInterRoundWaiting
   if (waiting === null || waiting === undefined) return ''
   const labelMap = buildTournamentTeamLabelMap(t.teams)
-  const sibling = waiting.siblingSemifinal
+  const sibling = waiting.sibling
   const score = formatTournamentInterRoundScore(sibling.scoreA, sibling.scoreB)
-  const siblingWinner = sibling.winnerTeamId !== null
-    ? (labelMap.get(sibling.winnerTeamId) ?? 'Финалист')
-    : null
-  const currentRound = getTournamentRoundLabel(waiting.currentRoundType)
   const nextRound = getTournamentRoundLabel(waiting.nextRoundType)
   const opponentTeam = sibling.winnerTeamId !== null
     ? sibling.winnerTeamId === sibling.teamA.teamId ? sibling.teamA : sibling.teamB
     : null
-  const countdownOffsetMs = waiting.finalStartAt !== null
-    ? Date.parse(waiting.finalStartAt) - Date.parse(waiting.serverNow)
+
+  // STATE A: другата feeder маса (sibling) все още не е приключила — покажи
+  // roster-а на двата отбора там (§ "roster → score" — една и съща подредба
+  // на mobile и desktop) плюс live резултат, targeted DOM-patch-ван от
+  // patchTournamentInterRoundSiblingDom при tournament_feeder_score_progress.
+  if (sibling.status !== 'completed') {
+    return renderTournamentInterRoundOverlay(`
+      <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
+        <div>
+          <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
+          <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}!</div>
+          <div style="margin-top:6px;font-size:16px;font-weight:800;color:#dbeafe;">Изчаквате победителя от маса ${sibling.roundIndex}</div>
+        </div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
+          ${renderTournamentInterRoundTeam(sibling.teamA, labelMap.get(sibling.teamA.teamId) ?? 'Отбор A')}
+          ${renderTournamentInterRoundTeam(sibling.teamB, labelMap.get(sibling.teamB.teamId) ?? 'Отбор B')}
+        </div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+          <div>
+            <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Резултат</div>
+            <div data-tournament-inter-round-status="1" data-match-id="${escapeHtml(sibling.matchId)}" style="margin-top:4px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.76);">${escapeHtml(sibling.progressLabel || 'Играе се')}</div>
+          </div>
+          <div data-tournament-inter-round-score="1" data-match-id="${escapeHtml(sibling.matchId)}" style="font-size:24px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
+        </div>
+      </div>
+    `)
+  }
+
+  // Defensive fallback: sibling вече е completed (нашият match е готов), но
+  // t.myActiveMatch все още не е hydration-нал в тази конкретна detail
+  // response (кратък сървърен race — виж buildMyInterRoundWaiting/
+  // getAssignmentForProfile). Нормалният production път за "opponent known"
+  // е renderTournamentInterRoundOpponentKnownScreen (driven by myActiveMatch,
+  // виж renderTournamentDetailScreen) — тук просто ползваме генеричните
+  // nextMatchStartAt/nextRoomId полета на myInterRoundWaiting самите, ако вече
+  // са populate-нати, за да не увисне екранът на "pending" без нужда.
+  if (waiting.nextMatchStartAt !== null) {
+    const opponentLabel = opponentTeam !== null ? (labelMap.get(opponentTeam.teamId) ?? 'Противник') : 'Противник'
+    const opponentNames = opponentTeam !== null ? formatTournamentTeamMemberNames(opponentTeam) : 'противника'
+    const countdownOffsetMs = Date.parse(waiting.nextMatchStartAt) - Date.parse(waiting.serverNow)
+    const countdownSeconds = Number.isFinite(countdownOffsetMs) ? Math.max(0, Math.ceil(countdownOffsetMs / 1000)) : null
+    return renderTournamentInterRoundOverlay(`
+      <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
+        <div>
+          <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
+          <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}!</div>
+          <div style="margin-top:6px;font-size:16px;font-weight:800;color:#dbeafe;">Ще играете срещу ${escapeHtml(opponentNames)} от маса ${sibling.roundIndex}</div>
+        </div>
+        ${opponentTeam !== null ? `<div>${renderTournamentInterRoundTeam(opponentTeam, opponentLabel)}</div>` : ''}
+        ${renderTournamentInterRoundCountdownBlock(waiting.nextMatchStartAt, countdownSeconds)}
+      </div>
+    `)
+  }
+
+  return renderTournamentInterRoundOverlay(`
+      <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
+        <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
+        <div style="margin-top:8px;font-size:18px;font-weight:900;color:#ffffff;">Изчаква се другият финалист</div>
+        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Другият финалист още разглежда резултата.</div>
+      </div>
+    `)
+}
+
+// STATE B опира на t.myActiveMatch (не на myInterRoundWaiting, което вече е
+// null на сървъра веднага щом myActiveMatch се появи — виж
+// buildMyInterRoundWaiting-ния guard "if (... || myActiveMatch !== null)
+// return null" в server/src/index.ts). Затова роster-ът/таблицата на
+// противника се извличат от t.rounds+t.teams (винаги налични в detail DTO-то),
+// не от sibling полето на waiting DTO-то.
+function resolveTournamentActiveMatchOpponentContext(t: TournamentDetailSnapshot): {
+  opponentTeam: TournamentDetailSnapshot['teams'][number] | null
+  tableIndex: number | null
+} {
+  const assignment = t.myActiveMatch
+  if (assignment === null) return { opponentTeam: null, tableIndex: null }
+  const opponentTeam = t.teams.find((team) => team.teamId === assignment.opponentTeamId) ?? null
+  const previousRoundType = getPreviousTournamentRoundType(assignment.roundType)
+  const tableIndex = previousRoundType !== null
+    ? t.rounds.find((round) => (
+        round.roundType === previousRoundType &&
+        round.matches.some((match) => match.teamAId === assignment.opponentTeamId || match.teamBId === assignment.opponentTeamId)
+      ))?.roundIndex ?? null
+    : null
+  return { opponentTeam, tableIndex }
+}
+
+function renderTournamentInterRoundOpponentKnownScreen(t: TournamentDetailSnapshot): string {
+  const assignment = t.myActiveMatch
+  if (assignment === null) return ''
+  const nextRound = getTournamentRoundLabel(assignment.roundType)
+  const { opponentTeam, tableIndex } = resolveTournamentActiveMatchOpponentContext(t)
+  const labelMap = buildTournamentTeamLabelMap(t.teams)
+  const opponentLabel = opponentTeam !== null ? (labelMap.get(opponentTeam.teamId) ?? 'Противник') : 'Противник'
+  const opponentNames = opponentTeam !== null ? formatTournamentTeamMemberNames(opponentTeam) : 'противника'
+  const countdownOffsetMs = assignment.attendanceDeadlineAt !== null
+    ? Date.parse(assignment.attendanceDeadlineAt) - Date.now()
     : null
   const countdownSeconds = countdownOffsetMs !== null && Number.isFinite(countdownOffsetMs)
     ? Math.max(0, Math.ceil(countdownOffsetMs / 1000))
     : null
-  const body = sibling.status !== 'completed'
-    ? `
-      <div style="font-size:20px;font-weight:900;color:#ffffff;">Изчаква се другият ${escapeHtml(currentRound.lower)}</div>
-      <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Победителят ще бъде вашият противник на ${escapeHtml(nextRound.lowerDefinite)}.</div>
-    `
-    : waiting.finalStartAt !== null
-      ? `
-        <div style="font-size:18px;font-weight:900;color:#ffffff;">На ${escapeHtml(nextRound.lowerDefinite)} ще играете срещу:</div>
-        ${opponentTeam !== null ? `<div style="margin-top:10px;">${renderTournamentInterRoundTeam(opponentTeam, siblingWinner ?? 'Противник')}</div>` : ''}
-        <div style="margin-top:12px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.68);">Резултат от техния ${escapeHtml(currentRound.lower)}: ${escapeHtml(score)}</div>
-        <div style="margin-top:16px;font-size:18px;font-weight:900;color:#ffffff;">Мачът започва след</div>
-        <div data-tournament-inter-round-countdown="1" data-final-start-at="${escapeHtml(waiting.finalStartAt)}" data-server-now="${escapeHtml(waiting.serverNow)}" style="font-size:44px;line-height:1;font-weight:900;color:#f4c95b;letter-spacing:0;">00:${String(countdownSeconds ?? 0).padStart(2, '0')}</div>
-      `
-      : `
-        <div style="font-size:18px;font-weight:900;color:#ffffff;">Изчаква се другият финалист</div>
-        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Другият финалист още разглежда резултата.</div>
-      `
-  const isPhone = isPhoneLayoutViewport()
-  const rosterBlock = sibling.status !== 'completed'
-    ? `
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;${isPhone ? 'border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;' : ''}">
-        ${renderTournamentInterRoundTeam(sibling.teamA, labelMap.get(sibling.teamA.teamId) ?? 'Отбор A')}
-        ${renderTournamentInterRoundTeam(sibling.teamB, labelMap.get(sibling.teamB.teamId) ?? 'Отбор B')}
-      </div>
-    `
-    : ''
-  const scoreBlock = `
-    <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;${isPhone ? '' : 'border-top:1px solid rgba(255,255,255,0.08);'}padding-top:12px;">
-      <div>
-        <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Друг ${escapeHtml(currentRound.lower)}</div>
-        <div data-tournament-inter-round-status="1" data-match-id="${escapeHtml(sibling.matchId)}" style="margin-top:4px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.76);">${escapeHtml(sibling.progressLabel || (sibling.status === 'completed' ? 'Завършен' : 'Играе се'))}</div>
-      </div>
-      <div data-tournament-inter-round-score="1" data-match-id="${escapeHtml(sibling.matchId)}" style="font-size:24px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
-    </div>
-  `
-  const middleSection = isPhone ? `${scoreBlock}${rosterBlock}` : `${rosterBlock}${scoreBlock}`
   return renderTournamentInterRoundOverlay(`
-      <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
+      <div data-tournament-inter-round-opponent-known="1" style="display:grid;gap:14px;">
         <div>
           <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
-          <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Спечелихте ${escapeHtml(currentRound.lowerDefinite)}!</div>
-          <div style="margin-top:4px;font-size:16px;font-weight:900;color:#dbeafe;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}.</div>
+          <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}!</div>
+          <div style="margin-top:6px;font-size:16px;font-weight:800;color:#dbeafe;">Ще играете срещу ${escapeHtml(opponentNames)}${tableIndex !== null ? ` от маса ${tableIndex}` : ''}</div>
         </div>
-        ${body}
-        ${middleSection}
-        ${siblingWinner !== null ? `<div style="font-size:13px;font-weight:900;color:#86efac;">Класиран отбор: ${escapeHtml(siblingWinner)}</div>` : ''}
+        ${opponentTeam !== null ? `<div>${renderTournamentInterRoundTeam(opponentTeam, opponentLabel)}</div>` : ''}
+        ${renderTournamentInterRoundCountdownBlock(assignment.attendanceDeadlineAt, countdownSeconds)}
       </div>
     `)
 }
@@ -875,14 +945,30 @@ function renderTournamentInterRoundPendingScreen(state: LobbyScreenState): strin
     `, 'data-tournament-inter-round-result="1"')
 }
 
+// Отделено от renderTournamentDetailScreen, за да го reuse-ва
+// createLobbyFlowController.ts (shouldKeepTournamentInterRoundPendingResult,
+// silent-attach arming и countdown loop-а) — единен critereon за "STATE B е
+// authoritative готово" навсякъде, вместо да се дублира inline проверката.
+export function hasTournamentRoundTransitionAssignment(
+  myActiveMatch: TournamentDetailSnapshot['myActiveMatch'],
+): boolean {
+  return myActiveMatch !== null && myActiveMatch.deadlineKind === 'round_transition'
+}
+
 export function renderTournamentDetailScreen(state: LobbyScreenState): string {
   if (TOURNAMENTS_PUBLIC_MAINTENANCE_MODE) {
     return renderTournamentsMaintenanceNotice()
   }
 
+  // Pending/hydration екранът отстъпва веднага щом или STATE A
+  // (myInterRoundWaiting), или STATE B (authoritative round-transition
+  // myActiveMatch) станат готови — иначе играч, чийто sibling вече е бил
+  // completed преди неговия собствен мач (§ "INITIAL STATE — SIBLING ALREADY
+  // COMPLETED"), би останал заклещен на pending-а до края на countdown-а.
   if (
     state.tournamentInterRoundPendingResult != null &&
-    state.tournamentDetail?.myInterRoundWaiting == null
+    state.tournamentDetail?.myInterRoundWaiting == null &&
+    !hasTournamentRoundTransitionAssignment(state.tournamentDetail?.myActiveMatch ?? null)
   ) {
     return renderTournamentInterRoundPendingScreen(state)
   }
@@ -928,6 +1014,17 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
   if (t.myInterRoundWaiting !== null && t.myInterRoundWaiting !== undefined) {
     return renderTournamentInterRoundWaitingScreen(t)
+  }
+
+  // STATE B — sibling-ът вече е completed и сървърът е създал следващия
+  // round match/room (myActiveMatch, § "STATE A → STATE B"). Рендира се
+  // ПРЕДИ generic bracket екрана по-долу, за да не се показва bracket/detail
+  // между STATE A и gameplay-а. deadlineKind === 'round_transition' го
+  // различава от нормално първо myActiveMatch assignment (deadlineKind ===
+  // 'first_match'), за което renderTournamentMatchAssignmentCallout по-долу
+  // си остава валиден.
+  if (hasTournamentRoundTransitionAssignment(t.myActiveMatch)) {
+    return renderTournamentInterRoundOpponentKnownScreen(t)
   }
 
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()

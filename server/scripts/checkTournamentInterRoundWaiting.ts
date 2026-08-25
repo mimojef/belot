@@ -226,6 +226,39 @@ function finalStartAt(database: DatabaseSync, finalMatchId: string): string | nu
   return (database.prepare(`SELECT next_match_start_at FROM tournament_matches WHERE match_id = ?;`).get(finalMatchId) as { next_match_start_at: string | null }).next_match_start_at
 }
 
+function matchFixture(input: {
+  matchId: string
+  roundId: string
+  teamAId: string
+  teamBId: string
+  status: 'awaiting_players' | 'countdown' | 'in_progress' | 'completed' | 'walkover' | 'cancelled'
+  winnerTeamId?: string | null
+  finalScoreTeamA?: number | null
+  finalScoreTeamB?: number | null
+  liveScoreTeamA?: number | null
+  liveScoreTeamB?: number | null
+  progressLabel?: string
+}): TournamentDetailSnapshot['rounds'][number]['matches'][number] {
+  return {
+    matchId: input.matchId,
+    roundId: input.roundId,
+    roomId: null,
+    teamAId: input.teamAId,
+    teamBId: input.teamBId,
+    status: input.status,
+    winnerTeamId: input.winnerTeamId ?? null,
+    resultKind: null,
+    roomReady: false,
+    finalScoreTeamA: input.finalScoreTeamA ?? null,
+    finalScoreTeamB: input.finalScoreTeamB ?? null,
+    liveScoreTeamA: input.liveScoreTeamA ?? null,
+    liveScoreTeamB: input.liveScoreTeamB ?? null,
+    progressLabel: input.progressLabel ?? '',
+    startedAt: null,
+    completedAt: null,
+  }
+}
+
 function detailFixture(overrides: Partial<TournamentDetailSnapshot> = {}): TournamentDetailSnapshot {
   const baseTeam = (teamId: string, a: string, b: string) => ({
     teamId,
@@ -237,6 +270,7 @@ function detailFixture(overrides: Partial<TournamentDetailSnapshot> = {}): Tourn
   })
   const teamA = baseTeam('team-a', 'A1', 'A2')
   const teamB = baseTeam('team-b', 'B1', 'B2')
+  const siblingSnapshot = { matchId: 'semi-b', roundIndex: 2, teamA, teamB, scoreA: 96, scoreB: 74, status: 'in_progress' as const, winnerTeamId: null, progressLabel: 'Играе се' }
   return {
     tournamentId: 'tournament-render',
     name: 'Render Test',
@@ -270,25 +304,86 @@ function detailFixture(overrides: Partial<TournamentDetailSnapshot> = {}): Tourn
     finishedAt: null,
     myTeam: teamA,
     teams: [teamA, teamB],
-    rounds: [],
+    rounds: [
+      {
+        roundId: 'semi-a-round',
+        roundType: 'semifinal',
+        roundIndex: 1,
+        matches: [matchFixture({ matchId: 'semi-a', roundId: 'semi-a-round', teamAId: 'team-a', teamBId: 'team-c', status: 'completed', winnerTeamId: 'team-a', finalScoreTeamA: 151, finalScoreTeamB: 90, progressLabel: 'Завършен' })],
+      },
+      {
+        roundId: 'semi-b-round',
+        roundType: 'semifinal',
+        roundIndex: 2,
+        matches: [matchFixture({ matchId: 'semi-b', roundId: 'semi-b-round', teamAId: 'team-b', teamBId: 'team-d', status: 'in_progress', liveScoreTeamA: 96, liveScoreTeamB: 74, progressLabel: 'Играе се' })],
+      },
+      {
+        roundId: 'final-round',
+        roundType: 'final',
+        roundIndex: 1,
+        matches: [matchFixture({ matchId: 'final', roundId: 'final-round', teamAId: 'team-a', teamBId: 'team-b', status: 'awaiting_players' })],
+      },
+    ],
     myActiveMatch: null,
     myInterRoundWaiting: {
       tournamentId: 'tournament-render',
-      completedSemifinalMatchId: 'semi-a',
       currentRoundType: 'semifinal',
       nextRoundType: 'final',
-      siblingSemifinal: { matchId: 'semi-b', teamA, teamB, scoreA: 96, scoreB: 74, status: 'in_progress', winnerTeamId: null, progressLabel: 'Мачът е в ход' },
+      completedMatchId: 'semi-a',
+      sibling: siblingSnapshot,
       ownResultAcknowledged: true,
       otherFinalistReady: false,
-      finalMatchId: 'final',
-      finalRoomId: 'final-room',
-      finalStartAt: null,
+      nextMatchId: null,
+      nextRoomId: null,
+      nextMatchStartAt: null,
       serverNow: '2026-08-01T10:00:00.000Z',
+      // legacy aliases mirrored, matching the real server DTO shape
+      completedSemifinalMatchId: 'semi-a',
+      siblingSemifinal: siblingSnapshot,
+      finalMatchId: null,
+      finalRoomId: null,
+      finalStartAt: null,
     },
     incomingPartnerInvite: null,
     outgoingPartnerInvite: null,
     ...overrides,
   }
+}
+
+// STATE B fixture — myActiveMatch already assigned for the round-transition
+// (deadlineKind: 'round_transition'), myInterRoundWaiting gone null (server
+// guard, see buildMyInterRoundWaiting in server/src/index.ts). Opponent
+// roster/table number are derived from t.rounds/t.teams by
+// resolveTournamentActiveMatchOpponentContext (renderTournamentsScreen.ts),
+// NOT from myInterRoundWaiting, since that's null in this state.
+function opponentKnownDetailFixture(overrides: Partial<TournamentDetailSnapshot> = {}): TournamentDetailSnapshot {
+  return detailFixture({
+    myInterRoundWaiting: null,
+    myActiveMatch: {
+      tournamentId: 'tournament-render',
+      tournamentName: 'Render Test',
+      matchId: 'final',
+      roomId: 'final-room',
+      roundType: 'final',
+      seat: 'bottom',
+      teamId: 'team-a',
+      partnerProfileId: 'team-a-2',
+      opponentTeamId: 'team-b',
+      reconnectToken: 'reconnect-token',
+      deadlineKind: 'round_transition',
+      attendanceDeadlineAt: '2026-08-01T10:00:20.000Z',
+      gameStartAt: null,
+    },
+    rounds: [
+      ...detailFixture().rounds.slice(0, 2).map((round) => (
+        round.roundId === 'semi-b-round'
+          ? { ...round, matches: [matchFixture({ matchId: 'semi-b', roundId: 'semi-b-round', teamAId: 'team-b', teamBId: 'team-d', status: 'completed', winnerTeamId: 'team-b', finalScoreTeamA: 151, finalScoreTeamB: 120, progressLabel: 'Завършен' })] }
+          : round
+      )),
+      detailFixture().rounds[2],
+    ],
+    ...overrides,
+  })
 }
 
 function renderDetail(tournament: TournamentDetailSnapshot): string {
@@ -353,6 +448,20 @@ function withDesktopViewport<T>(fn: () => T): T {
     if (previousWindow !== undefined) {
       ;(globalThis as { window?: unknown }).window = previousWindow
     }
+  }
+}
+
+// renderTournamentInterRoundOpponentKnownScreen (STATE B) intentionally uses
+// Date.now() directly (myActiveMatch carries no serverNow field, unlike
+// myInterRoundWaiting) — mock it for deterministic countdown-seconds
+// assertions, exactly like withPhoneViewport/withDesktopViewport mock window.
+function withMockedNow<T>(nowMs: number, fn: () => T): T {
+  const originalNow = Date.now
+  Date.now = () => nowMs
+  try {
+    return fn()
+  } finally {
+    Date.now = originalNow
   }
 }
 
@@ -456,27 +565,25 @@ await check('next_match_start_at exactly-once across repeated coordinator ticks 
   }
 })
 
-await check('dedicated renderer hides generic finance/roster/CTA and shows live waiting score', () => {
+await check('dedicated renderer hides generic finance/roster/CTA and shows live waiting score with table number', () => {
   const html = renderDetail(detailFixture())
   assert(html.includes('data-tournament-inter-round-waiting="1"'), 'dedicated waiting marker missing')
-  assert(html.includes('Класирахте се за финала'), 'title missing')
-  assert(html.includes('Изчаква се другият полуфинал'), 'sibling waiting copy missing')
+  assert(html.includes('Класирахте се за финала!'), 'title missing')
+  assert(html.includes('Изчаквате победителя от маса 2'), 'sibling waiting copy (table number, Q) missing')
   assert(html.includes('96 : 74'), 'live sibling score missing')
   assert(!html.includes('Награден фонд'), 'generic finance rendered')
   assert(!html.includes('data-tournament-enter-active-match="1"'), 'resume CTA rendered')
   assert(!html.includes('Продължи играта'), 'resume copy rendered')
 })
 
-await check('phone viewport: live score block appears before roster block, roster after; grammar uses "на"', () => {
+await check('phone viewport: roster block appears before live score block (R — final spec: roster -> score on every viewport)', () => {
   const html = withPhoneViewport(() => renderDetail(detailFixture()))
   const scoreIndex = html.indexOf('data-tournament-inter-round-score="1"')
   const rosterIndex = html.indexOf('Отбор A')
   assert(scoreIndex !== -1, 'live score block missing on phone viewport')
   assert(rosterIndex !== -1, 'roster block missing on phone viewport')
-  assert(scoreIndex < rosterIndex, 'phone viewport: live score block is not before roster block')
+  assert(rosterIndex < scoreIndex, 'phone viewport: roster block is not before live score block')
   assert(html.includes('96 : 74'), 'live sibling score missing on phone viewport')
-  assert(html.includes('противник на финала.'), 'phone viewport missing corrected "противник на" grammar')
-  assert(!html.includes('противник в финала.'), 'phone viewport still has old "противник в" grammar')
 })
 
 await check('desktop viewport: roster block remains before live score block', () => {
@@ -489,34 +596,75 @@ await check('desktop viewport: roster block remains before live score block', ()
   assert(html.includes('96 : 74'), 'live sibling score missing on desktop viewport')
 })
 
-await check('grammar: opponent-confirmed copy uses "На ... ще играете срещу:" and drops old "В ..." phrasing', () => {
+await check('defensive fallback: sibling completed but myActiveMatch not yet hydrated shows opponent + table + countdown from myInterRoundWaiting.nextMatchStartAt', () => {
+  const base = detailFixture()
+  const completedSibling = { ...base.myInterRoundWaiting!.sibling, status: 'completed' as const, winnerTeamId: 'team-b', scoreA: 151, scoreB: 130, progressLabel: 'Завършен' }
   const html = renderDetail(detailFixture({
     myInterRoundWaiting: {
-      ...detailFixture().myInterRoundWaiting!,
-      siblingSemifinal: { ...detailFixture().myInterRoundWaiting!.siblingSemifinal, status: 'completed', winnerTeamId: 'team-b', scoreA: 151, scoreB: 130, progressLabel: 'Завършен' },
+      ...base.myInterRoundWaiting!,
+      sibling: completedSibling,
+      siblingSemifinal: completedSibling,
       otherFinalistReady: true,
-      finalStartAt: '2026-08-01T10:00:05.000Z',
+      nextMatchStartAt: '2026-08-01T10:00:20.000Z',
+      finalStartAt: '2026-08-01T10:00:20.000Z',
       serverNow: '2026-08-01T10:00:00.000Z',
     },
   }))
-  assert(html.includes('На финала ще играете срещу:'), 'corrected "На ... ще играете срещу:" grammar missing')
-  assert(!html.includes('В финала ще играете срещу:'), 'old "В ... ще играете срещу:" grammar still present')
-  assert(html.includes('Класирахте се за финала.'), 'unrelated "Класирахте се за" copy must remain unchanged')
+  assert(html.includes('Класирахте се за финала!'), 'headline missing')
+  assert(html.includes('Ще играете срещу B1 и B2 от маса 2'), 'opponent names + table (Q) copy missing')
+  assert(html.includes('Следващият мач започва след'), 'countdown copy missing')
+  assert(html.includes('data-attendance-deadline-at="2026-08-01T10:00:20.000Z"'), 'countdown deadline (nextMatchStartAt, G) missing')
+  assert(html.includes('00:20'), 'countdown seconds computed from nextMatchStartAt/serverNow missing')
+  assert(!html.includes('Продължи играта'), 'popup/CTA leaked into countdown')
 })
 
-await check('countdown renderer uses server finalStartAt/serverNow and keeps popup suppressed', () => {
+await check('STATE B (myActiveMatch, deadlineKind round_transition): opponent + table + countdown, popup/callout suppressed', () => {
+  const html = withMockedNow(Date.parse('2026-08-01T10:00:00.000Z'), () => renderDetail(opponentKnownDetailFixture()))
+  assert(html.includes('data-tournament-inter-round-opponent-known="1"'), 'dedicated STATE B marker missing')
+  assert(html.includes('Класирахте се за финала!'), 'headline missing')
+  assert(html.includes('Ще играете срещу B1 и B2 от маса 2'), 'opponent names + table (Q) copy missing')
+  assert(html.includes('Следващият мач започва след'), 'countdown copy missing')
+  assert(html.includes('data-attendance-deadline-at="2026-08-01T10:00:20.000Z"'), 'countdown deadline missing')
+  assert(html.includes('00:20'), 'countdown seconds missing')
+  assert(!html.includes('Продължи играта'), 'assignment callout leaked into STATE B (L/M)')
+  assert(!html.includes('Награден фонд'), 'generic bracket screen leaked into STATE B')
+})
+
+await check('B: quarterfinal winner + sibling in_progress uses generic STATE A copy (не hardcode-нат "полуфинал")', () => {
+  const base = detailFixture()
   const html = renderDetail(detailFixture({
-    myInterRoundWaiting: {
-      ...detailFixture().myInterRoundWaiting!,
-      siblingSemifinal: { ...detailFixture().myInterRoundWaiting!.siblingSemifinal, status: 'completed', winnerTeamId: 'team-b', scoreA: 151, scoreB: 130, progressLabel: 'Завършен' },
-      otherFinalistReady: true,
-      finalStartAt: '2026-08-01T10:00:05.000Z',
-      serverNow: '2026-08-01T10:00:00.000Z',
-    },
+    myInterRoundWaiting: { ...base.myInterRoundWaiting!, currentRoundType: 'quarterfinal', nextRoundType: 'semifinal' },
   }))
-  assert(html.includes('Мачът започва след'), 'countdown copy missing')
-  assert(html.includes('data-final-start-at="2026-08-01T10:00:05.000Z"'), 'server finalStartAt missing')
-  assert(!html.includes('Продължи играта'), 'popup/CTA leaked into countdown')
+  assert(html.includes('data-tournament-inter-round-waiting="1"'), 'STATE A marker missing for QF->SF')
+  assert(html.includes('Класирахте се за полуфинала!'), 'QF->SF generic headline missing')
+  assert(html.includes('Изчаквате победителя от маса 2'), 'QF->SF table copy missing')
+})
+
+await check('C: round_of_16 winner + sibling in_progress uses generic STATE A copy (не hardcode-нат "четвъртфинал")', () => {
+  const base = detailFixture()
+  const html = renderDetail(detailFixture({
+    myInterRoundWaiting: { ...base.myInterRoundWaiting!, currentRoundType: 'round_of_16', nextRoundType: 'quarterfinal' },
+  }))
+  assert(html.includes('data-tournament-inter-round-waiting="1"'), 'STATE A marker missing for R16->QF')
+  assert(html.includes('Класирахте се за четвъртфинала!'), 'R16->QF generic headline missing')
+  assert(html.includes('Изчаквате победителя от маса 2'), 'R16->QF table copy missing')
+})
+
+await check('STATE B: roster block appears before countdown on both phone and desktop (R)', () => {
+  for (const withViewport of [withPhoneViewport, withDesktopViewport]) {
+    const html = withMockedNow(Date.parse('2026-08-01T10:00:00.000Z'), () => withViewport(() => renderDetail(opponentKnownDetailFixture())))
+    const rosterIndex = html.indexOf('Отбор')
+    const countdownIndex = html.indexOf('data-tournament-inter-round-countdown="1"')
+    assert(rosterIndex !== -1, 'opponent roster missing')
+    assert(countdownIndex !== -1, 'countdown missing')
+    assert(rosterIndex < countdownIndex, 'STATE B: roster is not before countdown')
+  }
+})
+
+await check('sibling already completed before own match ends: STATE B renders directly, no STATE A markers (F)', () => {
+  const html = withMockedNow(Date.parse('2026-08-01T10:00:00.000Z'), () => renderDetail(opponentKnownDetailFixture()))
+  assert(!html.includes('data-tournament-inter-round-waiting="1"'), 'STATE A marker leaked into direct STATE B render')
+  assert(!html.includes('Изчаквате победителя'), 'STATE A waiting copy leaked into direct STATE B render')
 })
 
 await check('immediately after semifinal win: pending/transition screen shows before any detail response', () => {
@@ -596,6 +744,22 @@ await check('hydrated detail with myActiveMatch !== null AND myInterRoundWaiting
     tournamentInterRoundPendingResult: null,
   })
   assert(!terminalHtml.includes('data-tournament-inter-round-pending="1"'), 'terminal tournament status still shows pending screen')
+
+  // Unlike the deadlineKind:null race above, a READY round-transition
+  // myActiveMatch (deadlineKind: 'round_transition') DOES bypass pending —
+  // straight to STATE B, no bracket/pending flash in between (F/§ "INITIAL
+  // STATE — SIBLING ALREADY COMPLETED").
+  const readyHtml = renderDetailState({
+    tournamentDetailLoading: false,
+    tournamentDetail: opponentKnownDetailFixture({
+      status: 'semifinal_in_progress',
+      statusLabel: 'Полуфинал',
+      viewer: { ...detailFixture().viewer, entryStatus: 'confirmed' },
+    }),
+    tournamentInterRoundPendingResult: pendingState,
+  })
+  assert(!readyHtml.includes('data-tournament-inter-round-pending="1"'), 'pending screen not bypassed once STATE B (round_transition) is ready')
+  assert(readyHtml.includes('data-tournament-inter-round-opponent-known="1"'), 'STATE B not shown once ready, despite pending still being set')
 })
 
 await check('when a later detail response carries myInterRoundWaiting: waiting screen appears immediately (no artificial delay)', () => {
@@ -609,9 +773,8 @@ await check('when a later detail response carries myInterRoundWaiting: waiting s
     tournamentInterRoundPendingResult: null,
   })
   assert(hydratedHtml.includes('data-tournament-inter-round-waiting="1"'), 'hydrated waiting marker missing')
-  assert(hydratedHtml.includes('Спечелихте полуфинала!'), 'winner context missing from merged waiting screen')
-  assert(hydratedHtml.includes('Класирахте се за финала.'), 'qualification copy missing from merged waiting screen')
-  assert(hydratedHtml.includes('Изчаква се другият полуфинал'), 'sibling waiting copy missing from merged waiting screen')
+  assert(hydratedHtml.includes('Класирахте се за финала!'), 'qualification headline missing from merged waiting screen')
+  assert(hydratedHtml.includes('Изчаквате победителя от маса 2'), 'sibling waiting copy (table number) missing from merged waiting screen')
   assert(hydratedHtml.includes('96 : 74'), 'hydrated sibling live score missing')
   assert(!hydratedHtml.includes('РќР°РіСЂР°РґРµРЅ С„РѕРЅРґ'), 'generic finance rendered after hydrated waiting')
 })
@@ -629,15 +792,17 @@ await check('transition/state-machine wiring: no artificial wall-clock delay, bo
   assert(!/pending\.shownAt|shownAt.*<\s*\d+|Date\.now\(\)\s*-\s*.*shownAt/.test(lobbyController), 'a wall-clock minimum-display comparison against shownAt still exists')
   assert(!lobbyController.includes('WinnerMinimumTimer'), 'old wall-clock winner-minimum timer scaffolding still present')
 
-  // B — final auto-enter трябва да е достижим независимо дали pending все
-  // още се държи (преди早е gate-нат зад "if pending return" early-return,
-  // затова никога не се достигаше, докато pending се пазеше).
-  const autoEnterIndex = lobbyController.indexOf("result.tournament.myActiveMatch.roundType === 'final'")
+  // B — STATE B silent-attach trigger (generic across every round transition,
+  // не само финала) трябва да е достижим независимо дали pending все още се
+  // държи (преди беше gate-нат зад "if pending return" early-return, затова
+  // никога не се достигаше, докато pending се пазеше).
+  const roundTransitionIndex = lobbyController.indexOf('hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)')
   const pendingEarlyReturnIndex = lobbyController.indexOf('if (state.tournamentInterRoundPendingResult !== null) {', lobbyController.indexOf('async function fetchTournamentDetail'))
-  assert(autoEnterIndex !== -1, 'final auto-enter check missing from fetchTournamentDetail')
+  assert(roundTransitionIndex !== -1, 'round-transition (STATE B) check missing from fetchTournamentDetail')
   assert(pendingEarlyReturnIndex !== -1, 'pending early-return branch missing from fetchTournamentDetail')
-  assert(autoEnterIndex < pendingEarlyReturnIndex, 'final auto-enter check is still gated behind the pending early-return (B unreachable while transitioning)')
-  assert(lobbyController.includes('options.onTournamentAutoEnterMatch?.(result.tournament.myActiveMatch)'), 'auto-enter-final call missing')
+  assert(roundTransitionIndex < pendingEarlyReturnIndex, 'STATE B check is still gated behind the pending early-return (B unreachable while transitioning)')
+  assert(lobbyController.includes('options.onTournamentRoundTransitionAssignment?.(result.tournament.myActiveMatch!)'), 'STATE B silent-attach trigger call missing')
+  assert(!lobbyController.includes("myActiveMatch.roundType === 'final'"), 'STATE B trigger still special-cased to the final round only (should be generic, Q/generic round support)')
 
   // Bounded authoritative refetch (не безкраен tight polling loop) — огледало
   // на съществуващия scheduleTournamentInterRoundAckRefetch pattern.
@@ -655,8 +820,8 @@ await check('transition/state-machine wiring: no artificial wall-clock delay, bo
   const renderer = await readFile(join(projectRoot, 'src', 'app', 'lobby', 'renderTournamentsScreen.ts'), 'utf8')
   assert(renderer.indexOf('state.tournamentInterRoundPendingResult != null') < renderer.indexOf('state.tournamentDetailLoading'), 'pending branch is not before loading/generic branch')
 
-  assert(mainTs.includes("if (message.assignment.roundType === 'final' && lobby?.getCurrentScreen() === 'tournament-detail') {"), 'final assignment detail guard missing')
-  assert(!mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'), 'final assignment still direct-resumes before countdown')
+  assert(mainTs.includes("if (message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail') {"), 'round-transition assignment detail guard missing (generic, not final-only)')
+  assert(!mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'), 'assignment still direct (non-silent) resumes before countdown')
 })
 
 await check('inter-round presentation uses one overlay and dynamic round labels', async () => {
@@ -670,7 +835,8 @@ await check('inter-round presentation uses one overlay and dynamic round labels'
   assert(labels.includes("final") && labels.includes("финал"), 'final label missing')
   assert(renderer.includes('renderTournamentInterRoundOverlay'), 'single overlay renderer missing')
   assert(renderer.indexOf('state.tournamentInterRoundPendingResult !== null') < renderer.indexOf('state.tournamentDetailLoading'), 'pending branch is not before loading/generic branch')
-  assert(renderer.includes('getTournamentRoundLabel(waiting.currentRoundType)'), 'authoritative waiting does not use dynamic current round label')
+  assert(renderer.includes('getTournamentRoundLabel(waiting.nextRoundType)'), 'authoritative waiting does not use dynamic next round label')
+  assert(renderer.includes('getTournamentRoundLabel(assignment.roundType)'), 'STATE B does not use dynamic round label')
   assert(renderer.includes('getNextTournamentRoundLabel(pending.currentRoundType)'), 'pending winner does not use dynamic next round label')
   assert(controller.includes('patchTournamentInterRoundSiblingDom'), 'DOM-only live score patch missing')
 })

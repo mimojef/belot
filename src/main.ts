@@ -268,6 +268,11 @@ let reconnectTimerId: number | null = null
 let connectionErrorTimerId: number | null = null
 let reconnectAttempt = 0
 let pendingTournamentEntryAfterLeave: TournamentMatchAssignmentSnapshot | null = null
+// STATE B silent attach idempotency guard (§ "SILENT ATTACH") — resume_room
+// itself is idempotent server-side, but this avoids re-sending it (and
+// re-arming activeRoom's watch) on every fetchTournamentDetail refresh while
+// the same round-transition room is already attached.
+let silentAttachedRoundTransitionRoomId: string | null = null
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
@@ -4093,11 +4098,15 @@ lobby = createLobbyFlowController({
       tournamentMatchStartPopup.setAssignment(null)
     }
   },
-  onTournamentAutoEnterMatch: (assignment) => {
+  onTournamentRoundTransitionAssignment: (assignment) => {
+    // STATE B (generic across R16->QF/QF->SF/SF->Final) — silently seat-attach
+    // via the Phase 1 resume_room {silent:true} protocol so the round starts
+    // on time even while the lobby keeps showing the unified inter-round
+    // screen, and arm activeRoom's watch so it can enter gameplay itself the
+    // instant the room's tournamentAttendance resolves — no visible
+    // navigation here, unlike the old direct (non-silent) resumeRoom call.
     tournamentMatchStartPopup.clearAssignmentForRoom(assignment.roomId)
-    if (assignment.reconnectToken !== null) {
-      client.resumeRoom(assignment.roomId, assignment.reconnectToken)
-    }
+    attemptTournamentRoundTransitionSilentAttach(assignment)
   },
   onTournamentSemifinalResultAckNeeded: (tournamentId, semifinalMatchId) => {
     client.acknowledgeTournamentSemifinalResult(tournamentId, semifinalMatchId)
@@ -4331,6 +4340,27 @@ function scheduleServerReconnect(): void {
   }, delayMs)
 }
 
+// STATE B silent attach (§ "SILENT ATTACH") — shared by the lobby's
+// onTournamentRoundTransitionAssignment (first attempt, fired once
+// myActiveMatch is round_transition) and the tournament_match_assigned
+// handler below (retry vehicle: the coordinator re-sends this message on
+// every tick for every runnable match, so a failed first attempt gets
+// naturally retried on the next tick once silentAttachedRoundTransitionRoomId
+// is cleared — see the room_resume_failed handler — without a new client
+// timer/poll). Guarded by silentAttachedRoundTransitionRoomId so a
+// successful attach is never re-sent.
+function attemptTournamentRoundTransitionSilentAttach(assignment: TournamentMatchAssignmentSnapshot): void {
+  if (assignment.reconnectToken === null) return
+  if (silentAttachedRoundTransitionRoomId === assignment.roomId) return
+  silentAttachedRoundTransitionRoomId = assignment.roomId
+  activeRoom.armPendingTournamentSilentEntry({
+    roomId: assignment.roomId,
+    seat: assignment.seat,
+    stake: 5000,
+  })
+  client.resumeRoom(assignment.roomId, assignment.reconnectToken, true)
+}
+
 function requestActiveRoomResume(): boolean {
   const resumeInfo = activeRoom.getResumeInfo()
 
@@ -4450,6 +4480,22 @@ client = createGameServerClient({
     // по време на самата игра/resume; този флаг само не бива да остава
     // "заклещен" true завинаги след като играта приключи.
     pwaIsReconnectingActiveRoom = false
+
+    // Silent attach failure/retry (§ "SILENT ATTACH FAILURE / RETRY") — a WS
+    // drop between sending resume_room{silent:true} and receiving a response
+    // never fires room_resume_failed, so without this the guard would stay
+    // permanently stuck (same failure mode as an explicit rejection, just
+    // silent). The new connection.id makes any prior silent attach stale
+    // server-side anyway (tryResumeRoomForConnection is keyed to
+    // connection.id) — resetting here lets the next tournament_match_assigned
+    // tick or tournament-detail fetch retry; resume_room is idempotent, so a
+    // harmless duplicate if the original attempt actually did succeed. Mirrors
+    // the existing lobby.resyncPrivateRoomMembership() precedent below for
+    // the same class of "silently-held state might be stale after reconnect".
+    if (silentAttachedRoundTransitionRoomId !== null) {
+      activeRoom.clearPendingTournamentSilentEntry(silentAttachedRoundTransitionRoomId)
+      silentAttachedRoundTransitionRoomId = null
+    }
 
     // Explicit bid-recovery reconnect (forceReconnectForZombieConnection) —
     // винаги тих resume в СЪЩАТА активна стая, никога forceOfflineLobbyReload
@@ -4700,7 +4746,20 @@ client = createGameServerClient({
       lobby.handleServerMessage(message)
       currentFeederWaitingState = null
       tournamentFeederWaitingStrip.setState(null)
-      if (message.assignment.roundType === 'final' && lobby?.getCurrentScreen() === 'tournament-detail') {
+      if (message.assignment.deadlineKind === 'round_transition') {
+        // The coordinator re-sends tournament_match_assigned on every tick for
+        // every runnable match — this doubles as the retry vehicle for a
+        // silent attach that previously failed (guard cleared by
+        // room_resume_failed below), independent of which screen is showing,
+        // without adding a new client-side poll/timer.
+        attemptTournamentRoundTransitionSilentAttach(message.assignment)
+      }
+      // Generic across every round transition (R16->QF/QF->SF/SF->Final, not
+      // just the final) — the unified lobby STATE A/B overlay is the single
+      // owner of this UX while the player is looking at the tournament-detail
+      // screen for it (§ "ЕДИН UI OWNER"). If they've navigated away, the
+      // global popup remains as a fallback so a match still isn't missed.
+      if (message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail') {
         tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
         return
       }
@@ -4806,6 +4865,29 @@ client = createGameServerClient({
     // съобщение). Идемпотентно — no-op ако popup-ът не сочи към тази стая.
     if (message.type === 'room_resume_failed') {
       tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
+      // Silent attach failure (§ "SILENT ATTACH FAILURE / RETRY") — without
+      // this, silentAttachedRoundTransitionRoomId would stay set forever for
+      // this roomId (it's only ever set, never cleared, on the happy path),
+      // permanently blocking attemptTournamentRoundTransitionSilentAttach's
+      // guard from retrying — leaving the player stuck looking at STATE B
+      // with no actual seat attachment while the server counts them absent.
+      // Clearing both guards here lets the next tournament_match_assigned
+      // tick (or the next tournament-detail fetch) retry cleanly.
+      if (silentAttachedRoundTransitionRoomId === message.roomId) {
+        silentAttachedRoundTransitionRoomId = null
+        activeRoom.clearPendingTournamentSilentEntry(message.roomId)
+      }
+    }
+
+    // Response to resume_room {silent:true} (STATE B, § "SILENT ATTACH") —
+    // seat attachment already happened server-side, identically to
+    // room_resumed, but this is intentionally NOT navigation: activeRoom's
+    // armPendingTournamentSilentEntry watch (armed alongside the resumeRoom
+    // call in onTournamentRoundTransitionAssignment above) picks up the
+    // resulting room_snapshot stream and decides when to actually enter.
+    if (message.type === 'room_attached_silent') {
+      tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
+      return
     }
 
     if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {
