@@ -869,6 +869,13 @@ const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let popupRootEl: HTMLElement | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
+// Skip-if-unchanged guard за root.innerHTML rebuild-а по-долу (виж коментара
+// при lastRenderedRootHtml/root.innerHTML assignment-а) — пази последния root
+// element И последния HTML string, за да не съвпадне грешно с кеш, оставен
+// от ПРЕДИШЕН/различен root (напр. тестов harness, който създава нов root на
+// всеки run в същия module instance).
+let lastRenderedRootElement: HTMLElement | null = null
+let lastRenderedRootHtml: string | null = null
 let mobileMenuOpen = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
 let stakesFirstCardIndex = -1
@@ -9012,7 +9019,7 @@ export function renderLobbyScreen(
     : prevAdminSupportMessagesScrollEl.scrollHeight - prevAdminSupportMessagesScrollEl.scrollTop - prevAdminSupportMessagesScrollEl.clientHeight < 48
   const savedAdminSupportMessagesScrollTop = prevAdminSupportMessagesScrollEl?.scrollTop ?? 0
 
-  root.innerHTML = isPhoneLayout ? `
+  const nextRootHtml = isPhoneLayout ? `
     <div
       ${mobileLayoutAttribute}
       data-lobby-screen-root="1"
@@ -9347,11 +9354,62 @@ export function renderLobbyScreen(
     ${renderGiftReceivedModal(state)}
   `
 
+  // Skip-if-unchanged guard — render() в createLobbyFlowController.ts се
+  // вика unconditionally от много WS handler-и, несвързани с текущия екран
+  // (напр. lobby_chat_message, pending_gift_notifications,
+  // pending_friend_requests и т.н. обновяват само badge броячи, но нямат
+  // screen guard). Без този check, ВСЕКИ такъв event пресъздаваше ЦЕЛИЯ
+  // root.innerHTML — включително navbar-а и мобилното "Меню" — дори когато
+  // изчисленият HTML е байт-идентичен с вече показания. mobileMenuOpen
+  // module state-ът оставаше логически true, но самият <details> DOM node (и
+  // inline animation:...-in стила му) биваше пресъздаден всеки път, което
+  // визуално изглеждаше като мигащо затваряне/отваряне на менюто; на desktop
+  // старият nav бутон node понякога изчезваше по средата на click
+  // interaction-а (между pointerdown/pointerup), губейки клика. Проверката
+  // за data-lobby-screen-root="1" гарантира, че не пропускаме legitimate
+  // rebuild, ако МЕЖДУВРЕМЕННО друг renderer (matchmaking-room/private-room-
+  // waiting/active-room) е презаписал root-а с съвсем различен screen.
+  const currentScreenRootEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
+  if (
+    root === lastRenderedRootElement &&
+    currentScreenRootEl !== null &&
+    nextRootHtml === lastRenderedRootHtml
+  ) {
+    return
+  }
+  lastRenderedRootElement = root
+  lastRenderedRootHtml = nextRootHtml
+  root.innerHTML = nextRootHtml
+
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
   const clearMobileMenuCloseTimer = () => {
     if (mobileMenuCloseTimer === null) return
     clearTimeout(mobileMenuCloseTimer)
     mobileMenuCloseTimer = null
+  }
+
+  // openMobileMenu/closeMobileMenuAnimated below mutate the live <details>
+  // DOM directly (no render()) — correct, that's what keeps opening/closing
+  // instant with no rebuild. But that leaves lastRenderedRootHtml (the
+  // skip-if-unchanged cache) pointing at a string baked with the OLD
+  // mobileMenuOpen value. The next unrelated blind render() would then see a
+  // real string diff (this one attribute) and do one unnecessary full
+  // rebuild — a one-shot flicker even though the DOM already shows the
+  // correct open/closed state. Patching the cache in place, mirroring
+  // EXACTLY the one template spot mobileMenuOpen affects
+  // (renderMobileMenu's `<details data-lobby-mobile-menu="1" ...>` tag),
+  // keeps the cache truthful without forcing a rebuild. Fails safe: on the
+  // desktop layout (no such markup) or if the template text ever changes,
+  // the markers simply aren't found and .replace() is a no-op — the normal
+  // mismatch path then does one real rebuild instead, same as before this
+  // fix, never a wrong skip.
+  const syncCachedMobileMenuOpenState = (isOpen: boolean): void => {
+    if (lastRenderedRootHtml === null) return
+    const closedMarker = 'data-lobby-mobile-menu="1"  style='
+    const openMarker = 'data-lobby-mobile-menu="1" open style='
+    lastRenderedRootHtml = isOpen
+      ? lastRenderedRootHtml.replace(closedMarker, openMarker)
+      : lastRenderedRootHtml.replace(openMarker, closedMarker)
   }
 
   const closeMobileMenuAnimated = () => {
@@ -9360,6 +9418,7 @@ export function renderLobbyScreen(
     const panel = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-panel="1"]')
     const backdrop = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-backdrop="1"]')
     mobileMenuOpen = false
+    syncCachedMobileMenuOpenState(false)
     if (panel) panel.style.animation = 'mobile-menu-shade-out 120ms ease both'
     if (backdrop) backdrop.style.animation = 'mobile-menu-backdrop-out 120ms ease both'
     mobileMenuCloseTimer = window.setTimeout(() => {
@@ -9372,6 +9431,7 @@ export function renderLobbyScreen(
     if (!mobileMenuEl) return
     clearMobileMenuCloseTimer()
     mobileMenuOpen = true
+    syncCachedMobileMenuOpenState(true)
     mobileMenuEl.open = true
     const panel = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-panel="1"]')
     const backdrop = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-backdrop="1"]')
