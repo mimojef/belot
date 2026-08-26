@@ -96,6 +96,7 @@
     "check:db-backup-verify": "tsx scripts/checkDbBackupVerify.ts",
     "check:backup-logic": "tsx scripts/checkBackupLogic.ts",
     "check:gift-limit": "tsx scripts/checkYellowCoinGiftLimit.ts",
+    "check:sofia-day-boundary": "tsx scripts/checkSofiaDayBoundary.ts",
     "check:gift-friendship-bypass-http-authorization": "tsx scripts/checkGiftFriendshipBypassHttpAuthorization.ts --server-root=.",
     "check:pika-team-support-chat-http-authorization": "tsx scripts/checkPikaTeamSupportChatHttpAuthorization.ts --server-root=.",
     "check:vip-store": "tsx scripts/checkVipStore.ts",

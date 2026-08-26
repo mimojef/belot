@@ -37,7 +37,34 @@ import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { Worker, isMainThread, parentPort, workerData } from 'node:worker_threads'
 import type { PlayerProgressStore } from '../src/db/playerProgressStore.js'
+import type { AdminSettingsStore } from '../src/db/adminSettingsStore.js'
+import { createAdminSettingsStore } from '../src/db/adminSettingsStore.js'
 import { createYellowCoinGiftStore } from '../src/db/yellowCoinGiftStore.js'
+
+// Съвпада с production DEFAULT_SETTINGS.pikaTeamDailyGiftLimit / migration
+// seed (adminSettingsStore.ts, 200 000) — единствен консистентен default,
+// не независима тестова стойност. Повечето тестове тук explicit подават
+// собствен лимит; този default важи само за тестове, за които pika_team
+// daily лимитът е ирелевантен (recipient window, legacy sender rolling-24h
+// и т.н.).
+const DEFAULT_MOCK_PIKA_TEAM_DAILY_GIFT_LIMIT = 200_000
+
+// Минимален stub за AdminSettingsStore — само getSettings().pikaTeamDailyGiftLimit
+// се ползва от sendGiftCore §4.5 (виж yellowCoinGiftStore.ts).
+function makeMockAdminSettingsStore(
+  pikaTeamDailyGiftLimit: number = DEFAULT_MOCK_PIKA_TEAM_DAILY_GIFT_LIMIT,
+): AdminSettingsStore {
+  return {
+    getSettings: () => ({
+      signupBonusYellowCoins: 100_000,
+      profileNameChangePrice: 50_000,
+      vipPrice30DaysCents: 789,
+      vipPrice180DaysCents: 3_989,
+      vipPrice365DaysCents: 6_989,
+      pikaTeamDailyGiftLimit,
+    }),
+  } as unknown as AdminSettingsStore
+}
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -56,20 +83,33 @@ const PIKA_BYPASS_PROFILE_ID = '4c146064-85af-4e6e-b08f-08faa39b167e'
 type WorkerResult = { ok: boolean; code?: string; message?: string; error?: string }
 
 if (!isMainThread) {
-  const { dbPath, friendshipId, senderProfileId, amount, pikaTeamGiftBypassProfileId } = workerData as {
+  const {
+    dbPath,
+    friendshipId,
+    senderProfileId,
+    amount,
+    pikaTeamGiftBypassProfileId,
+    isRoleBasedPikaTeamSender,
+    pikaTeamDailyGiftLimit,
+  } = workerData as {
     dbPath: string
     friendshipId: string
     senderProfileId: string
     amount: number
     pikaTeamGiftBypassProfileId?: string | null
+    isRoleBasedPikaTeamSender?: boolean
+    pikaTeamDailyGiftLimit?: number
   }
 
   let store: Awaited<ReturnType<typeof createYellowCoinGiftStore>> | null = null
   try {
-    store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
-      pikaTeamGiftBypassProfileId,
-    })
-    const result = store.sendGift(senderProfileId, friendshipId, amount)
+    store = await createYellowCoinGiftStore(
+      dbPath,
+      makeMockProgressStore(),
+      makeMockAdminSettingsStore(pikaTeamDailyGiftLimit),
+      { pikaTeamGiftBypassProfileId },
+    )
+    const result = store.sendGift(senderProfileId, friendshipId, amount, isRoleBasedPikaTeamSender ?? false)
     const msg: WorkerResult = {
       ok: result.ok,
       code: 'code' in result ? result.code : undefined,
@@ -331,6 +371,39 @@ function toExpectedIso(sqliteTs: string): string {
   return sqliteTs.replace(' ', 'T') + '.000Z'
 }
 
+// Пуска sendGift в отделен worker thread (за истински concurrency race теста
+// [51]) — mirror на inline worker извикванията при [14]/[33] по-горе, но
+// параметризиран за pika_team role-based теста (isRoleBasedPikaTeamSender +
+// pikaTeamDailyGiftLimit подадени explicit през workerData).
+function runGiftInWorker(
+  dbPath: string,
+  friendshipId: string,
+  senderProfileId: string,
+  amount: number,
+  pikaTeamGiftBypassProfileId: string | null,
+  isRoleBasedPikaTeamSender: boolean,
+  pikaTeamDailyGiftLimit: number = 100_000,
+): Promise<WorkerResult> {
+  const workerScript = fileURLToPath(import.meta.url)
+  return new Promise<WorkerResult>((resolve) => {
+    const w = new Worker(workerScript, {
+      workerData: {
+        dbPath,
+        friendshipId,
+        senderProfileId,
+        amount,
+        pikaTeamGiftBypassProfileId,
+        isRoleBasedPikaTeamSender,
+        pikaTeamDailyGiftLimit,
+      },
+    })
+    let msg: WorkerResult | null = null
+    w.on('message', (m: WorkerResult) => { msg = m })
+    w.on('error', (err) => resolve({ ok: false, error: String(err) }))
+    w.on('exit', () => resolve(msg ?? { ok: false, error: 'Worker exited without message' }))
+  })
+}
+
 async function withPikaBypassEnv(value: string | null, fn: () => Promise<void>): Promise<void> {
   const previous = process.env.PIKA_TEAM_GIFT_BYPASS_PROFILE_ID
   try {
@@ -437,7 +510,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-2', 'sender-2', 'recipient-2')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-2', 'fs-2', 30_000)
     store.close()
 
@@ -459,7 +532,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'gift-3-old', 'fs-3b', 'other-3', 'recipient-3', 25_000, utcDaysAgo(10))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-3', 'fs-3a', 5_000)
     store.close()
 
@@ -485,7 +558,7 @@ await withTempDir(async (dir) => {
     const ledgerCountBefore = (db2.prepare('SELECT COUNT(*) as c FROM yellow_coin_gift_ledger').get() as { c: number }).c
     db2.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-4', 'fs-4', 6_000)
     store.close()
 
@@ -522,7 +595,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g5c', 'fs-5c', 'sender-5c', 'recipient-5', 7_000, utcDaysAgo(5))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     // 27 000 + 5 000 = 32 000 > 30 000
     const result = store.sendGift('sender-5a', 'fs-5a', 5_000)
     store.close()
@@ -545,7 +618,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g6-old', 'fs-6', 'sender-6', 'recipient-6', 30_000, utcDaysAgo(61))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-6', 'fs-6', 30_000)
     store.close()
 
@@ -566,7 +639,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g7', 'fs-7', 'sender-7', 'recipient-7', 30_000, utcDaysAgo(59))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-7', 'fs-7', 1_000)
     store.close()
 
@@ -595,7 +668,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g8b', 'fs-8', 'sender-8', 'recipient-8', 10_000, newerSqlite)
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-8', 'fs-8', 1_000)
     store.close()
 
@@ -633,7 +706,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g9c', 'fs-9a', 'sender-9a', 'recipient-9', 15_000, newerTs)
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-9a', 'fs-9a', 1_000)
     store.close()
 
@@ -656,7 +729,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g10', 'fs-10', 'sender-10', 'recipient-10', 30_000, utcDaysAgo(5))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-10', 'fs-10', 1_000)
     store.close()
 
@@ -679,7 +752,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g11', 'fs-11', 'sender-11', 'recipient-11', 20_000, utcDaysAgo(3))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-11', 'fs-11', 15_000)
     store.close()
 
@@ -706,7 +779,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g12-sent', 'fs-12', 'sender-12', 'recipient-12', 195_000, oneHourAgo)
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     // 195 000 + 10 000 = 205 000 > 200 000 → дневен лимит
     const result = store.sendGift('sender-12', 'fs-12', 10_000)
     store.close()
@@ -731,7 +804,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-13', 'sender-13', 'recipient-13')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-13', 'fs-13', 1_000)
     store.close()
 
@@ -850,7 +923,7 @@ await withTempDir(async (dir) => {
 
     // SQL условието е created_at > datetime('now', '-60 days') (строго >)
     // Подарък точно на границата НЕ трябва да участва → лимитът не е достигнат
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-15', 'fs-15', 30_000)
     store.close()
 
@@ -877,7 +950,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-16', 'sender-16', 'recipient-16')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-16', 'fs-16', 999)
     store.close()
 
@@ -897,7 +970,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-17', 'sender-17', 'recipient-17')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-17', 'fs-17', 1_000)
     store.close()
 
@@ -915,7 +988,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-18', 'sender-18', 'recipient-18')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-18', 'fs-18', 30_000)
     store.close()
 
@@ -933,7 +1006,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-19', 'sender-19', 'recipient-19')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-19', 'fs-19', 30_001)
     store.close()
 
@@ -953,7 +1026,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-20', 'sender-20', 'recipient-20')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-20', 'fs-20', 1_500)
     store.close()
 
@@ -976,7 +1049,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g21-ordinary', 'fs-21a', 'ordinary-21', 'recipient-21', 30_000, utcDaysAgo(2))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-21b', 30_000)
@@ -1020,7 +1093,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g22-pika', 'fs-22p', PIKA_BYPASS_PROFILE_ID, 'recipient-22', 30_000, utcDaysAgo(1), 1)
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift('ordinary-22b', 'fs-22b', 1_000)
@@ -1046,7 +1119,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g23-exempt', 'fs-23a', PIKA_BYPASS_PROFILE_ID, 'recipient-23', 50_000, utcDaysAgo(2), 1)
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const first = store.sendGift('ordinary-23b', 'fs-23b', 10_000)
     const second = store.sendGift('ordinary-23b', 'fs-23b', 1_000)
     store.close()
@@ -1071,7 +1144,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g24-ordinary', 'fs-24a', 'ordinary-24', 'recipient-24', 30_000, utcDaysAgo(1))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(otherPikaProfileId, 'fs-24p', 1_000)
@@ -1103,7 +1176,7 @@ await withTempDir(async (dir) => {
     }
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     for (const [index, sender] of senders.entries()) {
@@ -1129,7 +1202,7 @@ await withTempDir(async (dir) => {
       seedGiftLedger(db, 'g26-ordinary', 'fs-26a', 'ordinary-26', 'recipient-26', 30_000, utcDaysAgo(1))
       db.close()
 
-      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
       const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-26p', 1_000)
       store.close()
 
@@ -1153,7 +1226,7 @@ await withTempDir(async (dir) => {
       seedGiftLedger(db, 'g27-ordinary', 'fs-27a', 'ordinary-27', 'recipient-27', 30_000, utcDaysAgo(1))
       db.close()
 
-      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
       const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-27p', 1_000)
       store.close()
 
@@ -1177,7 +1250,7 @@ await withTempDir(async (dir) => {
       seedGiftLedger(db, 'g28-ordinary', 'fs-28a', 'ordinary-28', 'recipient-28', 30_000, utcDaysAgo(1))
       db.close()
 
-      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
       const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-28p', 1_000)
       store.close()
 
@@ -1201,7 +1274,7 @@ await withTempDir(async (dir) => {
       seedGiftLedger(db, 'g29-ordinary', 'fs-29a', 'ordinary-29', 'recipient-29', 30_000, utcDaysAgo(1))
       db.close()
 
-      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+      const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
       const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-29p', 1_000)
       store.close()
 
@@ -1223,7 +1296,7 @@ await withTempDir(async (dir) => {
     seedGiftLedger(db, 'g30-ordinary', 'fs-30a', 'ordinary-30', 'recipient-30', 30_000, utcDaysAgo(1))
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-30p', 1_000)
@@ -1249,7 +1322,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-31', PIKA_BYPASS_PROFILE_ID, 'recipient-31')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-31', 1_500)
@@ -1274,7 +1347,7 @@ await withTempDir(async (dir) => {
     seedProfile(db, 'recipient-32', 0)
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'missing-friendship', 1_000)
@@ -1376,7 +1449,7 @@ await withTempDir(async (dir) => {
     const oldRow = db.prepare(`SELECT recipient_limit_exempt FROM yellow_coin_gift_ledger WHERE gift_id = ?`).get('g34-old') as { recipient_limit_exempt: number }
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore())
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
     const result = store.sendGift('sender-34', 'fs-34', 1_000)
     store.close()
 
@@ -1397,7 +1470,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-35', PIKA_BYPASS_PROFILE_ID, 'recipient-35')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-35', 100_000)
@@ -1417,7 +1490,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-36', PIKA_BYPASS_PROFILE_ID, 'recipient-36')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     const result = store.sendGift(PIKA_BYPASS_PROFILE_ID, 'fs-36', 100_001)
@@ -1445,7 +1518,7 @@ await withTempDir(async (dir) => {
     seedFriendship(db, 'fs-37b', PIKA_BYPASS_PROFILE_ID, 'recipient-37b')
     db.close()
 
-    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), {
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(), {
       pikaTeamGiftBypassProfileId: PIKA_BYPASS_PROFILE_ID,
     })
     // Първа операция: 100 000 (новия максимум) към recipient-37a.
@@ -1460,6 +1533,758 @@ await withTempDir(async (dir) => {
 
     assert(first.ok === true, `Първата операция (100 000) трябва да мине, но: ${JSON.stringify(first)}`)
     assert(second.ok === true, `Веднага следващата операция (30 000, нов получател) трябва да мине, но: ${JSON.stringify(second)}`)
+  })
+
+  // ── pika_team календарен-ден (Europe/Sofia) дневен лимит ────────────────
+  // Отделни тестове от §12/§35-37 по-горе — тук isRoleBasedPikaTeamSender се
+  // подава explicit true (4-ти позиционен аргумент на sendGift), симулирайки
+  // route caller-а с isPikaTeamGiftMaxAmountSession(session)===true. Легacy
+  // pikaTeamGiftBypassProfileId (§35-37) НЕ участва тук — role-based пътят е
+  // независим механизъм (виж yellowCoinGiftStore.ts §4.5 коментара).
+
+  await check('[38] pika_team sender: сума под дневния лимит се приема', async () => {
+    const dbPath = join(dir, 'test38.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-38', 1_000_000)
+    seedProfile(db, 'recipient-38', 0)
+    seedFriendship(db, 'fs-38', 'pika-38', 'recipient-38')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const result = store.sendGift('pika-38', 'fs-38', 30_000, true)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[39] pika_team sender: точно достигане на лимита е позволено', async () => {
+    const dbPath = join(dir, 'test39.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-39', 1_000_000)
+    seedProfile(db, 'recipient-39a', 0)
+    seedProfile(db, 'recipient-39b', 0)
+    seedFriendship(db, 'fs-39a', 'pika-39', 'recipient-39a')
+    seedFriendship(db, 'fs-39b', 'pika-39', 'recipient-39b')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const first = store.sendGift('pika-39', 'fs-39a', 80_000, true)
+    const second = store.sendGift('pika-39', 'fs-39b', 20_000, true)
+    store.close()
+
+    assert(first.ok === true, `80 000 трябва да мине, но: ${JSON.stringify(first)}`)
+    assert(second.ok === true, `Точно 20 000 (limit-used) трябва да мине, но: ${JSON.stringify(second)}`)
+  })
+
+  await check('[40] pika_team sender: следващият gift след достигане на лимита е отказан', async () => {
+    const dbPath = join(dir, 'test40.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-40', 1_000_000)
+    seedProfile(db, 'recipient-40a', 0)
+    seedProfile(db, 'recipient-40b', 0)
+    seedFriendship(db, 'fs-40a', 'pika-40', 'recipient-40a')
+    seedFriendship(db, 'fs-40b', 'pika-40', 'recipient-40b')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const first = store.sendGift('pika-40', 'fs-40a', 100_000, true)
+    const second = store.sendGift('pika-40', 'fs-40b', 1_000, true)
+    store.close()
+
+    assert(first.ok === true, `Първите 100 000 трябва да минат, но: ${JSON.stringify(first)}`)
+    assert(second.ok === false, 'Следващият gift след достигане на лимита трябва да е отказан')
+    assertEqual(
+      (second as { code: string }).code,
+      'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED',
+      'code [40]',
+    )
+    assertEqual((second as { remaining: number }).remaining, 0, 'remaining [40]')
+  })
+
+  await check('[41] pika_team sender: gift, който би надвишил remaining частично, се отказва изцяло', async () => {
+    const dbPath = join(dir, 'test41.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-41', 1_000_000)
+    seedProfile(db, 'recipient-41a', 0)
+    seedProfile(db, 'recipient-41b', 0)
+    seedFriendship(db, 'fs-41a', 'pika-41', 'recipient-41a')
+    seedFriendship(db, 'fs-41b', 'pika-41', 'recipient-41b')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const first = store.sendGift('pika-41', 'fs-41a', 80_000, true)
+    // remaining = 20 000, опит за 21 000 → пълен отказ, не partial 20 000.
+    const second = store.sendGift('pika-41', 'fs-41b', 21_000, true)
+    store.close()
+
+    assert(first.ok === true, `80 000 трябва да мине, но: ${JSON.stringify(first)}`)
+    assert(second.ok === false, '21 000 (над remaining 20 000) трябва да се отказва изцяло')
+    assertEqual((second as { code: string }).code, 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED', 'code [41]')
+    assertEqual((second as { remaining: number }).remaining, 20_000, 'remaining [41]')
+
+    const balanceDb = new DatabaseSync(dbPath, { open: true })
+    const balanceRow = (balanceDb.prepare(
+      'SELECT yellow_coins_balance FROM profile_wallets WHERE profile_id = ?',
+    ).get('pika-41') as { yellow_coins_balance: number } | undefined)?.yellow_coins_balance
+    balanceDb.close()
+    assertEqual(balanceRow, 920_000, 'sender balance не трябва да намалее при отказан gift [41]')
+  })
+
+  await check('[42] Два различни pika_team profiles имат независими дневни лимити', async () => {
+    const dbPath = join(dir, 'test42.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-42a', 1_000_000)
+    seedProfile(db, 'pika-42b', 1_000_000)
+    seedProfile(db, 'recipient-42a', 0)
+    seedProfile(db, 'recipient-42b', 0)
+    seedFriendship(db, 'fs-42a', 'pika-42a', 'recipient-42a')
+    seedFriendship(db, 'fs-42b', 'pika-42b', 'recipient-42b')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const firstA = store.sendGift('pika-42a', 'fs-42a', 100_000, true)
+    // pika-42a изчерпа лимита си — pika-42b трябва да остане с пълен 100 000.
+    const firstB = store.sendGift('pika-42b', 'fs-42b', 100_000, true)
+    store.close()
+
+    assert(firstA.ok === true, `pika-42a 100 000 трябва да мине, но: ${JSON.stringify(firstA)}`)
+    assert(firstB.ok === true, `pika-42b 100 000 (независим лимит) трябва да мине, но: ${JSON.stringify(firstB)}`)
+  })
+
+  await check('[43] Gift от предишния календарен ден (Europe/Sofia) НЕ участва в днешния used', async () => {
+    const dbPath = join(dir, 'test43.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-43', 1_000_000)
+    seedProfile(db, 'recipient-43a', 0)
+    seedProfile(db, 'recipient-43b', 0)
+    seedFriendship(db, 'fs-43a', 'pika-43', 'recipient-43a')
+    seedFriendship(db, 'fs-43b', 'pika-43', 'recipient-43b')
+    // Ledger ред от преди 48 часа (гарантирано преди днешната Sofia полунощ,
+    // независимо от текущия момент/timezone на теста — 24ч назад НЕ е
+    // достатъчно, защото Sofia day boundary може да падне произволно спрямо
+    // "сега") — не трябва да участва в днешния used.
+    seedGiftLedger(db, 'gift-43-old', 'fs-43a', 'pika-43', 'recipient-43a', 100_000, utcDaysAgo(2))
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    // Ако вчерашният gift грешно се броеше, remaining би бил 0 и това би
+    // отказало — очакваме ok:true, значи used=0 за днешния Sofia ден.
+    const result = store.sendGift('pika-43', 'fs-43b', 100_000, true)
+    store.close()
+
+    assert(result.ok === true, `Вчерашен gift не трябва да намалява днешния лимит, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[44] Failed/rejected gift не се брои в дневния used', async () => {
+    const dbPath = join(dir, 'test44.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-44', 1_000)
+    seedProfile(db, 'recipient-44a', 0)
+    seedProfile(db, 'recipient-44b', 0)
+    seedFriendship(db, 'fs-44a', 'pika-44', 'recipient-44a')
+    seedFriendship(db, 'fs-44b', 'pika-44', 'recipient-44b')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    // Опит за 100 000 с баланс само 1 000 → insufficient balance, failed
+    // (не достига до ledger insert), не трябва да участва в used.
+    const failedAttempt = store.sendGift('pika-44', 'fs-44a', 100_000, true)
+    const status = store.getPikaTeamDailyGiftLimitStatus('pika-44')
+    store.close()
+
+    assert(failedAttempt.ok === false, 'Insufficient balance трябва да откаже gift-а')
+    assertEqual(status.used, 0, 'Failed gift не трябва да е добавен към used [44]')
+    assertEqual(status.remaining, 100_000, 'remaining трябва да остане пълен [44]')
+  })
+
+  await check('[45] Друг economy transaction type (не gift) не се брои в pika_team дневния лимит', async () => {
+    const dbPath = join(dir, 'test45.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-45', 1_000_000)
+    seedProfile(db, 'recipient-45', 0)
+    seedFriendship(db, 'fs-45', 'pika-45', 'recipient-45')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const status = store.getPikaTeamDailyGiftLimitStatus('pika-45')
+    store.close()
+
+    // yellow_coin_gift_ledger съдържа само gift операции по конструкция
+    // (различните economy типове имат собствени ledger таблици — виж
+    // match_economy_ledger, coin_purchase_ledger и т.н., виж CLAUDE.md
+    // инспекцията) — used трябва да е 0 без seed-нат gift ред.
+    assertEqual(status.used, 0, 'used трябва да е 0 без gift ledger редове [45]')
+  })
+
+  await check('[46] Gift от друг pika_team sender не се брои към текущия', async () => {
+    const dbPath = join(dir, 'test46.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-46a', 1_000_000)
+    seedProfile(db, 'pika-46b', 1_000_000)
+    seedProfile(db, 'recipient-46', 0)
+    seedFriendship(db, 'fs-46a', 'pika-46a', 'recipient-46')
+    seedFriendship(db, 'fs-46b', 'pika-46b', 'recipient-46')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    store.sendGift('pika-46a', 'fs-46a', 100_000, true)
+    const statusB = store.getPikaTeamDailyGiftLimitStatus('pika-46b')
+    store.close()
+
+    assertEqual(statusB.used, 0, 'pika-46a-ият gift не трябва да участва в pika-46b used [46]')
+    assertEqual(statusB.remaining, 100_000, 'pika-46b remaining трябва да остане пълен [46]')
+  })
+
+  await check('[47] admin (role=admin) не е ограничен от pika_team дневния лимит', async () => {
+    const dbPath = join(dir, 'test47.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-47', 100_000)
+    seedProfile(db, 'recipient-47', 0)
+    seedFriendship(db, 'fs-47', 'admin-47', 'recipient-47')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(0))
+    // isRoleBasedPikaTeamSender=false (route би подал false за role='admin')
+    // — лимит 0 не важи, обикновеният MAX_GIFT_AMOUNT (30 000) важи.
+    const result = store.sendGift('admin-47', 'fs-47', 30_000, false)
+    store.close()
+
+    assert(result.ok === true, `admin не трябва да е ограничен от pika_team лимита, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[48] limit = 0 блокира gift от pika_team', async () => {
+    const dbPath = join(dir, 'test48.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-48', 1_000_000)
+    seedProfile(db, 'recipient-48', 0)
+    seedFriendship(db, 'fs-48', 'pika-48', 'recipient-48')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(0))
+    const result = store.sendGift('pika-48', 'fs-48', 1_000, true)
+    store.close()
+
+    assert(result.ok === false, 'limit=0 трябва да блокира всеки pika_team gift')
+    assertEqual((result as { code: string }).code, 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED', 'code [48]')
+    assertEqual((result as { limit: number }).limit, 0, 'limit [48]')
+  })
+
+  await check('[49] Намаляване на лимита влиза в сила веднага (нов store instance = fresh admin settings read)', async () => {
+    const dbPath = join(dir, 'test49.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-49', 1_000_000)
+    seedProfile(db, 'recipient-49a', 0)
+    seedProfile(db, 'recipient-49b', 0)
+    seedFriendship(db, 'fs-49a', 'pika-49', 'recipient-49a')
+    seedFriendship(db, 'fs-49b', 'pika-49', 'recipient-49b')
+    db.close()
+
+    const storeHigh = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const first = storeHigh.sendGift('pika-49', 'fs-49a', 80_000, true)
+    storeHigh.close()
+
+    // Admin намалява лимита на 80 000 — used вече е 80 000, remaining=0.
+    const storeLow = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(80_000))
+    const second = storeLow.sendGift('pika-49', 'fs-49b', 1_000, true)
+    storeLow.close()
+
+    assert(first.ok === true, `Първите 80 000 трябва да минат, но: ${JSON.stringify(first)}`)
+    assert(second.ok === false, 'Намаленият лимит трябва да важи веднага')
+    assertEqual((second as { remaining: number }).remaining, 0, 'remaining [49]')
+  })
+
+  await check('[50] Увеличаване на лимита влиза в сила веднага', async () => {
+    const dbPath = join(dir, 'test50.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-50', 1_000_000)
+    seedProfile(db, 'recipient-50a', 0)
+    seedProfile(db, 'recipient-50b', 0)
+    seedFriendship(db, 'fs-50a', 'pika-50', 'recipient-50a')
+    seedFriendship(db, 'fs-50b', 'pika-50', 'recipient-50b')
+    db.close()
+
+    const storeLow = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(80_000))
+    const first = storeLow.sendGift('pika-50', 'fs-50a', 80_000, true)
+    storeLow.close()
+
+    // Admin увеличава лимита на 100 000 — remaining веднага става 20 000.
+    const storeHigh = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const second = storeHigh.sendGift('pika-50', 'fs-50b', 20_000, true)
+    storeHigh.close()
+
+    assert(first.ok === true, `Първите 80 000 трябва да минат, но: ${JSON.stringify(first)}`)
+    assert(second.ok === true, `Увеличеният лимит трябва да важи веднага, но: ${JSON.stringify(second)}`)
+  })
+
+  await check('[51] Concurrent requests не могат заедно да надвишат дневния лимит', async () => {
+    const dbPath = join(dir, 'test51.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-51', 1_000_000)
+    seedProfile(db, 'recipient-51a', 0)
+    seedProfile(db, 'recipient-51b', 0)
+    seedFriendship(db, 'fs-51a', 'pika-51', 'recipient-51a')
+    seedFriendship(db, 'fs-51b', 'pika-51', 'recipient-51b')
+    db.close()
+
+    const results = await Promise.all([
+      runGiftInWorker(dbPath, 'fs-51a', 'pika-51', 80_000, null, true),
+      runGiftInWorker(dbPath, 'fs-51b', 'pika-51', 80_000, null, true),
+    ])
+
+    const successCount = results.filter((r) => r.ok).length
+    const totalSuccessAmount = results
+      .filter((r) => r.ok)
+      .reduce((sum) => sum + 80_000, 0)
+
+    assert(successCount === 1, `Очаква се точно 1 успешен от 2те 80 000 заявки (limit=100 000), но: ${JSON.stringify(results)}`)
+    assert(totalSuccessAmount <= 100_000, 'Общата успешна сума не трябва да надвишава лимита')
+  })
+
+  await check('[52] Server restart не влияе на дневния used (persistent ledger source of truth)', async () => {
+    const dbPath = join(dir, 'test52.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-52', 1_000_000)
+    seedProfile(db, 'recipient-52', 0)
+    seedFriendship(db, 'fs-52', 'pika-52', 'recipient-52')
+    db.close()
+
+    const store1 = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    store1.sendGift('pika-52', 'fs-52', 60_000, true)
+    store1.close()
+
+    // Симулира server restart — нов store instance върху СЪЩИЯ dbPath.
+    const store2 = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(100_000))
+    const status = store2.getPikaTeamDailyGiftLimitStatus('pika-52')
+    store2.close()
+
+    assert(status.used === 60_000, `used трябва да остане 60 000 след 'restart', но: ${JSON.stringify(status)}`)
+  })
+
+  // ── Взаимодействие между стария rolling-24h DAILY_GIFT_LIMIT (200 000, за
+  // всички sender-и) и новия pika_team calendar-day лимит — регресионни
+  // тестове за конкретния конфликт: §4 (стар) преди корекцията се
+  // изпълняваше безусловно и спираше pika_team при 200 000 rolling-24h,
+  // независимо от configured pikaTeamDailyGiftLimit. §4 сега explicit
+  // skip-ва isRoleBasedPikaTeamSender (виж yellowCoinGiftStore.ts коментара).
+
+  await check('[53] normal player все още се блокира от стария 200 000 rolling-24h sender limit', async () => {
+    const dbPath = join(dir, 'test53.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'player-53', 1_000_000)
+    seedProfile(db, 'recipient-53a', 0)
+    seedProfile(db, 'recipient-53b', 0)
+    seedProfile(db, 'recipient-53c', 0)
+    seedProfile(db, 'recipient-53d', 0)
+    seedProfile(db, 'recipient-53e', 0)
+    seedProfile(db, 'recipient-53f', 0)
+    seedProfile(db, 'recipient-53g', 0)
+    seedFriendship(db, 'fs-53a', 'player-53', 'recipient-53a')
+    seedFriendship(db, 'fs-53b', 'player-53', 'recipient-53b')
+    seedFriendship(db, 'fs-53c', 'player-53', 'recipient-53c')
+    seedFriendship(db, 'fs-53d', 'player-53', 'recipient-53d')
+    seedFriendship(db, 'fs-53e', 'player-53', 'recipient-53e')
+    seedFriendship(db, 'fs-53f', 'player-53', 'recipient-53f')
+    seedFriendship(db, 'fs-53g', 'player-53', 'recipient-53g')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(1_000_000))
+    // Нормален player (isRoleBasedPikaTeamSender=false, default): 6× 30 000
+    // = 180 000, после опит за 30 000 → общо 210 000 > 200 000, отказ.
+    const gifts = [
+      store.sendGift('player-53', 'fs-53a', 30_000),
+      store.sendGift('player-53', 'fs-53b', 30_000),
+      store.sendGift('player-53', 'fs-53c', 30_000),
+      store.sendGift('player-53', 'fs-53d', 30_000),
+      store.sendGift('player-53', 'fs-53e', 30_000),
+      store.sendGift('player-53', 'fs-53f', 30_000),
+    ]
+    const overflow = store.sendGift('player-53', 'fs-53g', 30_000)
+    store.close()
+
+    assert(gifts.every((g) => g.ok === true), `Първите 6× 30 000 (180 000) трябва да минат, но: ${JSON.stringify(gifts)}`)
+    assert(overflow.ok === false, 'normal player трябва да се блокира от стария 200 000 rolling-24h limit')
+    assert(!('code' in overflow), 'Стария DAILY_GIFT_LIMIT отказ няма code поле')
+    assertEqual(
+      (overflow as { message: string }).message,
+      `Дневният лимит за подаръци е ${200_000} жълтици.`,
+      'message [53]',
+    )
+  })
+
+  await check('[54] pika_team с daily limit 1 000 000 подарява успешно над 200 000 в същия календарен ден', async () => {
+    const dbPath = join(dir, 'test54.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-54', 2_000_000)
+    for (let i = 0; i < 8; i++) {
+      seedProfile(db, `recipient-54-${i}`, 0)
+      seedFriendship(db, `fs-54-${i}`, 'pika-54', `recipient-54-${i}`)
+    }
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(1_000_000))
+    // 8× 100 000 (max single-операция за pika_team) = 800 000, явно над
+    // старите 200 000 rolling-24h, но под новия 1 000 000 calendar-day лимит.
+    const results: Array<ReturnType<typeof store.sendGift>> = []
+    for (let i = 0; i < 8; i++) {
+      results.push(store.sendGift('pika-54', `fs-54-${i}`, 100_000, true))
+    }
+    store.close()
+
+    assert(
+      results.every((r) => r.ok === true),
+      `Всичките 8× 100 000 (800 000 общо, над старите 200 000) трябва да минат за pika_team, но: ${JSON.stringify(results)}`,
+    )
+  })
+
+  await check('[55] pika_team се блокира точно при новия configurable daily limit, не при старите 200 000', async () => {
+    const dbPath = join(dir, 'test55.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-55', 2_000_000)
+    for (let i = 0; i < 11; i++) {
+      seedProfile(db, `recipient-55-${i}`, 0)
+      seedFriendship(db, `fs-55-${i}`, 'pika-55', `recipient-55-${i}`)
+    }
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(1_000_000))
+    // 10× 100 000 = 1 000 000 (точно на новия лимит) — всички трябва да минат
+    // (280 000ти надолу вече е над старите 200 000, доказвайки, че старият
+    // rolling-24h не спира pika_team). После 11-ти опит за 1 000 → отказ с
+    // PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED, не с стария generic съобщение.
+    const results: Array<ReturnType<typeof store.sendGift>> = []
+    for (let i = 0; i < 10; i++) {
+      results.push(store.sendGift('pika-55', `fs-55-${i}`, 100_000, true))
+    }
+    const overflow = store.sendGift('pika-55', 'fs-55-10', 1_000, true)
+    store.close()
+
+    assert(
+      results.every((r) => r.ok === true),
+      `10× 100 000 = 1 000 000 (точно на новия лимит) трябва да мине, но: ${JSON.stringify(results)}`,
+    )
+    assert(overflow.ok === false, 'Опит след достигане на новия лимит трябва да се отказва')
+    assertEqual(
+      (overflow as { code: string }).code,
+      'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED',
+      'code [55] — трябва да е новия pika_team код, не стария generic DAILY_GIFT_LIMIT отказ',
+    )
+    assertEqual((overflow as { remaining: number }).remaining, 0, 'remaining [55]')
+  })
+
+  await check('[56] Промяна на pika_team daily limit не променя лимита на normal player (200 000 непроменен)', async () => {
+    const dbPath = join(dir, 'test56.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'player-56', 1_000_000)
+    for (let i = 0; i < 7; i++) {
+      seedProfile(db, `recipient-56-${i}`, 0)
+      seedFriendship(db, `fs-56-${i}`, 'player-56', `recipient-56-${i}`)
+    }
+    db.close()
+
+    // Admin вдига pikaTeamDailyGiftLimit драстично на 5 000 000 — normal
+    // player (isRoleBasedPikaTeamSender=false) не трябва да усети разлика,
+    // все още спрян на стария 200 000.
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(5_000_000))
+    const gifts = [
+      store.sendGift('player-56', 'fs-56-0', 30_000),
+      store.sendGift('player-56', 'fs-56-1', 30_000),
+      store.sendGift('player-56', 'fs-56-2', 30_000),
+      store.sendGift('player-56', 'fs-56-3', 30_000),
+      store.sendGift('player-56', 'fs-56-4', 30_000),
+      store.sendGift('player-56', 'fs-56-5', 30_000),
+    ]
+    const overflow = store.sendGift('player-56', 'fs-56-6', 30_000)
+    store.close()
+
+    assert(gifts.every((g) => g.ok === true), `Първите 180 000 трябва да минат, но: ${JSON.stringify(gifts)}`)
+    assert(overflow.ok === false, 'normal player все още трябва да е спрян на стария 200 000, независимо от pikaTeamDailyGiftLimit=5 000 000')
+    assert(!('code' in overflow), 'Все още стария generic DAILY_GIFT_LIMIT отказ (без code)')
+  })
+
+  await check('[57] pika_team calendar-day reset в 00:00 Europe/Sofia работи и след §4 skip-корекцията', async () => {
+    const dbPath = join(dir, 'test57.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'pika-57', 1_000_000)
+    seedProfile(db, 'recipient-57a', 0)
+    seedProfile(db, 'recipient-57b', 0)
+    seedProfile(db, 'recipient-57c', 0)
+    seedFriendship(db, 'fs-57a', 'pika-57', 'recipient-57a')
+    seedFriendship(db, 'fs-57b', 'pika-57', 'recipient-57b')
+    seedFriendship(db, 'fs-57c', 'pika-57', 'recipient-57c')
+    // "Вчерашен" gift (48ч назад, гарантирано преди днешната Sofia полунощ)
+    // от 100 000 — под стария rolling-24h WOULD-BE прозорец (24ч), но и без
+    // значение вече, тъй като §4 изцяло се skip-ва за pika_team. Проверява,
+    // че calendar-day reset-ът остава коректен и не се бърка с §4 24h logic.
+    seedGiftLedger(db, 'gift-57-old', 'fs-57a', 'pika-57', 'recipient-57a', 100_000, utcDaysAgo(2))
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore(150_000))
+    // Ако вчерашният gift грешно участваше (независимо дали през §4 или
+    // §4.5), сборът 100 000 (вчера) + 100 000 (днес) + 50 000 (днес) би
+    // надвишил limit=150 000 при третия опит. Две операции (не една 150 000
+    // — над MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER=100 000 single-операция таван)
+    // сумиращи точно до 150 000 днес. Очакваме и двете ok:true — used за
+    // днешния Sofia ден стартира от 0, вчерашният gift не участва.
+    const first = store.sendGift('pika-57', 'fs-57b', 100_000, true)
+    const second = store.sendGift('pika-57', 'fs-57c', 50_000, true)
+    const status = store.getPikaTeamDailyGiftLimitStatus('pika-57')
+    store.close()
+
+    assert(first.ok === true, `Днешен gift 100 000 трябва да мине, вчерашния 100 000 не участва: ${JSON.stringify(first)}`)
+    assert(second.ok === true, `Днешен gift 50 000 (общо 150 000 = limit) трябва да мине: ${JSON.stringify(second)}`)
+    assertEqual(status.used, 150_000, 'used след двата today gift-а трябва да е точно 150 000 [57]')
+    assertEqual(status.remaining, 0, 'remaining [57]')
+  })
+
+  await check('[58] End-to-end (реален adminSettingsStore, не mock): fresh DB effective limit = 200 000, admin update веднага ефективен', async () => {
+    const dbPath = join(dir, 'test58.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS admin_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
+    seedProfile(db, 'pika-58', 2_000_000)
+    // fs-58-0..2 се ползват за fresh-DB default проверката, fs-58-3..8 за
+    // update-веднага-ефективен проверката по-долу — 9 recipients общо.
+    for (let i = 0; i < 9; i++) {
+      seedProfile(db, `recipient-58-${i}`, 0)
+      seedFriendship(db, `fs-58-${i}`, 'pika-58', `recipient-58-${i}`)
+    }
+    db.close()
+
+    // Реален adminSettingsStore (не makeMockAdminSettingsStore) — без нито
+    // едно updateSettings извикване, значи fresh/default стойност. Conservative
+    // rollout изискване: fresh DB не трябва автоматично да разреши повече от
+    // legacy 200 000 sender rolling-24h лимита само защото функционалността е
+    // deploy-ната.
+    const adminSettingsStore = await createAdminSettingsStore(dbPath)
+    const giftStore1 = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), adminSettingsStore)
+
+    // 2× 100 000 = 200 000 (точно на default лимита) трябва да мине.
+    const withinDefault = [
+      giftStore1.sendGift('pika-58', 'fs-58-0', 100_000, true),
+      giftStore1.sendGift('pika-58', 'fs-58-1', 100_000, true),
+    ]
+    // 3-ти опит за 1 000 (над default 200 000) трябва да се отказва.
+    const overDefault = giftStore1.sendGift('pika-58', 'fs-58-2', 1_000, true)
+    giftStore1.close()
+
+    assert(
+      withinDefault.every((r) => r.ok === true),
+      `2× 100 000 (общо 200 000, default limit) трябва да мине: ${JSON.stringify(withinDefault)}`,
+    )
+    assert(overDefault.ok === false, 'Опит над default 200 000 (fresh DB, без admin update) трябва да се отказва')
+    assertEqual(
+      (overDefault as { code: string }).code,
+      'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED',
+      'code [58] fresh DB отказ',
+    )
+    assertEqual((overDefault as { limit: number }).limit, 200_000, 'limit [58] трябва да е точно default-a 200 000')
+
+    // Admin увеличава лимита на 1 000 000 — веднага ефективен, без restart
+    // (нов store instance върху СЪЩИЯ adminSettingsStore/dbPath, mirror на
+    // "промяна влиза в сила веднага" изискването).
+    const updateResult = adminSettingsStore.updateSettings({ pikaTeamDailyGiftLimit: 1_000_000 })
+    assert(updateResult.ok === true, `Admin update трябва да успее: ${JSON.stringify(updateResult)}`)
+
+    const giftStore2 = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), adminSettingsStore)
+    // used вече е 200 000 (от преди) — remaining спрямо новия 1 000 000
+    // лимит е 800 000. Изпращаме допълнителни 6× 100 000 = 600 000, всички
+    // трябва да минат (общо used става 800 000, все още под 1 000 000).
+    const results: Array<ReturnType<typeof giftStore2.sendGift>> = []
+    for (let i = 3; i < 9; i++) {
+      results.push(giftStore2.sendGift('pika-58', `fs-58-${i}`, 100_000, true))
+    }
+    const status = giftStore2.getPikaTeamDailyGiftLimitStatus('pika-58')
+    giftStore2.close()
+    adminSettingsStore.close()
+
+    assert(
+      results.every((r) => r.ok === true),
+      `Допълнителни 600 000 (общо 800 000, под новия 1 000 000 лимит) трябва да минат веднага след admin update: ${JSON.stringify(results)}`,
+    )
+    assertEqual(status.limit, 1_000_000, 'limit [58] след update трябва да е 1 000 000')
+    assertEqual(status.used, 800_000, 'used [58] след update трябва да е 800 000 (200 000 преди + 600 000 след)')
+  })
+
+  await check('[59] SAME store instance (без recreate/restart): admin update влиза в сила веднага в рамките на same calendar day', async () => {
+    const dbPath = join(dir, 'test59.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS admin_settings (
+        setting_key TEXT PRIMARY KEY,
+        setting_value TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
+    seedProfile(db, 'pika-59', 3_000_000)
+    for (let i = 0; i < 12; i++) {
+      seedProfile(db, `recipient-59-${i}`, 0)
+      seedFriendship(db, `fs-59-${i}`, 'pika-59', `recipient-59-${i}`)
+    }
+    db.close()
+
+    // Lifecycle точно по заявката: create adminSettingsStore ВЕДНЪЖ, create
+    // yellowCoinGiftStore ВЕДНЪЖ — НИКОГА не се пресъздава/restart-ва по-
+    // долу. Единствената променлива между стъпките е adminSettingsStore.
+    // updateSettings(...) (реален store, не mock) върху СЪЩИЯ dbPath/process.
+    const adminSettingsStore = await createAdminSettingsStore(dbPath)
+    adminSettingsStore.updateSettings({ pikaTeamDailyGiftLimit: 10_000 })
+    const giftStore = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), adminSettingsStore)
+
+    // A. limit=10 000, gift 10 000 → ALLOWED (used става точно 10 000, remaining 0)
+    const giftA = giftStore.sendGift('pika-59', 'fs-59-0', 10_000, true)
+    assert(giftA.ok === true, `[A] gift 10 000 при limit=10 000 (used=0) трябва да мине: ${JSON.stringify(giftA)}`)
+
+    // A.1 Следващ gift (used=10 000=limit, remaining=0) → BLOCKED, БЕЗ да
+    // пипаме store/adminSettingsStore instance-ите.
+    const blockedA = giftStore.sendGift('pika-59', 'fs-59-1', 1_000, true)
+    assert(blockedA.ok === false, '[A] Следващ gift при remaining=0 трябва да е BLOCKED')
+    assertEqual((blockedA as { code: string }).code, 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED', 'code [A]')
+    assertEqual((blockedA as { limit: number }).limit, 10_000, 'limit [A]')
+    assertEqual((blockedA as { used: number }).used, 10_000, 'used [A]')
+    assertEqual((blockedA as { remaining: number }).remaining, 0, 'remaining [A]')
+
+    // B. Admin update → 25 000, БЕЗ restart/нов store/смяна на деня. Gift
+    // 15 000 (over СТАРИЯ 10 000 лимит, но under новия remaining=15 000)
+    // → ALLOWED веднага, ползвайки СЪЩИЯ giftStore instance.
+    const updateB = adminSettingsStore.updateSettings({ pikaTeamDailyGiftLimit: 25_000 })
+    assert(updateB.ok === true, `[B] Admin update до 25 000 трябва да успее: ${JSON.stringify(updateB)}`)
+
+    const giftB = giftStore.sendGift('pika-59', 'fs-59-2', 15_000, true)
+    assert(
+      giftB.ok === true,
+      `[B] Gift 15 000 веднага след admin update (limit=25 000, used=10 000, remaining=15 000) трябва да е ALLOWED, СЪЩИЯ store instance, без restart: ${JSON.stringify(giftB)}`,
+    )
+
+    // C. След B: used=25 000, remaining=0.
+    const statusC = giftStore.getPikaTeamDailyGiftLimitStatus('pika-59')
+    assertEqual(statusC.limit, 25_000, 'limit [C]')
+    assertEqual(statusC.used, 25_000, 'used [C] трябва да е точно 25 000 (10 000 + 15 000)')
+    assertEqual(statusC.remaining, 0, 'remaining [C]')
+
+    // D. Admin update → 20 000 (decrease под вече used=25 000). used
+    // ОСТАВА 25 000 (не rollback, не се пипат стари gifts), remaining=0,
+    // следващ gift → BLOCKED. Пак СЪЩИЯ giftStore instance.
+    const updateD = adminSettingsStore.updateSettings({ pikaTeamDailyGiftLimit: 20_000 })
+    assert(updateD.ok === true, `[D] Admin update до 20 000 трябва да успее: ${JSON.stringify(updateD)}`)
+
+    const statusD = giftStore.getPikaTeamDailyGiftLimitStatus('pika-59')
+    assertEqual(statusD.limit, 20_000, 'limit [D] веднага след decrease')
+    assertEqual(statusD.used, 25_000, 'used [D] НЕ трябва да намалее (стари gifts не се rollback-ват)')
+    assertEqual(statusD.remaining, 0, 'remaining [D] трябва да е 0 (used > нов по-нисък limit)')
+
+    const blockedD = giftStore.sendGift('pika-59', 'fs-59-3', 1_000, true)
+    assert(blockedD.ok === false, '[D] Gift веднага след decrease под used трябва да е BLOCKED')
+    assertEqual((blockedD as { code: string }).code, 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED', 'code [D]')
+    assertEqual((blockedD as { used: number }).used, 25_000, 'used [D.1] в самия blocked отговор')
+    assertEqual((blockedD as { remaining: number }).remaining, 0, 'remaining [D.1] в самия blocked отговор')
+
+    // E. Admin update → 35 000 (повторно increase). remaining веднага
+    // става 10 000 (35 000 - 25 000). Gift 10 000 → ALLOWED веднага.
+    const updateE = adminSettingsStore.updateSettings({ pikaTeamDailyGiftLimit: 35_000 })
+    assert(updateE.ok === true, `[E] Admin update до 35 000 трябва да успее: ${JSON.stringify(updateE)}`)
+
+    const statusEBefore = giftStore.getPikaTeamDailyGiftLimitStatus('pika-59')
+    assertEqual(statusEBefore.remaining, 10_000, '[E] remaining веднага след increase, преди новия gift')
+
+    const giftE = giftStore.sendGift('pika-59', 'fs-59-4', 10_000, true)
+    assert(
+      giftE.ok === true,
+      `[E] Gift 10 000 веднага след повторен admin increase (remaining=10 000) трябва да е ALLOWED: ${JSON.stringify(giftE)}`,
+    )
+
+    // Gift над remaining (тук вече 0) трябва да се отказва изцяло.
+    const blockedE = giftStore.sendGift('pika-59', 'fs-59-5', 1_000, true)
+    assert(blockedE.ok === false, '[E] Gift над remaining=0 (след E gift-а) трябва да е BLOCKED')
+
+    // F. used=35 000, remaining=0.
+    const statusF = giftStore.getPikaTeamDailyGiftLimitStatus('pika-59')
+    assertEqual(statusF.limit, 35_000, 'limit [F]')
+    assertEqual(statusF.used, 35_000, 'used [F] трябва да е точно 35 000 (25 000 + 10 000)')
+    assertEqual(statusF.remaining, 0, 'remaining [F]')
+
+    giftStore.close()
+    adminSettingsStore.close()
+
+    // G/H: Целият сценарий по-горе се изпълни без нито едно от: нов
+    // yellowCoinGiftStore instance, нов adminSettingsStore instance, restart
+    // на process, смяна на calendar ден (всички gifts са в рамките на
+    // текущия момент на теста — getSofiaDayStartUtcSqliteString() е
+    // детерминиран спрямо реалния "сега", без manipulation на created_at/
+    // system clock тук) — доказва, че midnight reset логиката НЕ участва в
+    // Admin setting activation-a (§4.5 винаги чете adminSettingsStore.
+    // getSettings() fresh, а calendar-day boundary-то е ортогонално на
+    // limit стойността, виж yellowCoinGiftStore.ts §4.5 коментара).
   })
 })
 

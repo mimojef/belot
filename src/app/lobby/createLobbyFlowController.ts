@@ -1,11 +1,11 @@
-import { formatGiftLimitError } from './formatGiftLimitError'
+import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError } from './formatGiftLimitError'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
 import { decideOpenImageViewer, decideRequestImageViewerClose, decideHandlePopstate, type ImageViewerAction, type ImageViewerHistoryState } from './imageViewerHistoryState'
 import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
-import type { GiftLimitErrorPayload } from './formatGiftLimitError'
+import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import {
   renderMatchmakingRoomScreen,
@@ -149,8 +149,14 @@ const DEFAULT_GIFT_MAX_AMOUNT = 30_000
  * отделните call sites.
  */
 type GiftCoinsSubmitResult =
-  | { ok: true; senderProfile: PlayerPublicProfileSnapshot; recipientProfile: PlayerPublicProfileSnapshot }
+  | {
+      ok: true
+      senderProfile: PlayerPublicProfileSnapshot
+      recipientProfile: PlayerPublicProfileSnapshot
+      pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
+    }
   | ({ ok: false; message: string } & GiftLimitErrorPayload)
+  | ({ ok: false; message: string } & PikaTeamDailyGiftLimitErrorPayload)
   | { ok: false; message: string }
 
 export type LobbyAuthSession = {
@@ -160,6 +166,8 @@ export type LobbyAuthSession = {
   profile: PlayerPublicProfileSnapshot
   /** Server-derived, non-null само за pika_team gift bypass profile-а (виж AuthSession в main.ts). */
   pikaTeamGiftMaxAmount?: number | null
+  /** Server-derived, non-null само за role==='pika_team' (виж AuthSession в main.ts). Обновява се и след всеки успешен gift, виж submitGiftCoinsCore. */
+  pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
 }
 
 /** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
@@ -3393,6 +3401,7 @@ export function createLobbyFlowController(
       giftModalBypassRecipientProfileId: state.giftModalBypassRecipientProfileId,
       giftModalFriendName: state.giftModalFriendName,
       giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT,
+      giftModalPikaTeamDailyLimitStatus: authSession?.pikaTeamDailyGiftLimitStatus ?? null,
       giftModalErrorText: state.giftModalErrorText,
       giftSuccessModal: state.giftSuccessModal,
       giftReceivedModal: state.giftReceivedModal,
@@ -10134,7 +10143,9 @@ export function createLobbyFlowController(
     const result = await callNetwork()
 
     if (!result.ok) {
-      if ('code' in result) {
+      if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
+        state.giftModalErrorText = formatPikaTeamDailyGiftLimitError(result)
+      } else if ('code' in result) {
         state.giftModalErrorText = formatGiftLimitError(result)
       } else {
         state.giftModalErrorText = result.message
@@ -10151,7 +10162,13 @@ export function createLobbyFlowController(
     state.profilePopupProfile = result.recipientProfile
     const recipientProfileId = result.recipientProfile.profileId
     state.friendActionMessageProfileId = recipientProfileId
-    state.friendActionMessage = `Подаръкът от ${amount} жълтици е изпратен.`
+    // Server-returned remaining (result.pikaTeamDailyGiftLimitStatus, виж
+    // notifyGiftRecipientAndRespond в index.ts) — НЕ клиентско изчисление.
+    // Reuse на съществуващия inline friendActionMessage механизъм (profile
+    // popup action area), не нов notification/toast subsystem.
+    state.friendActionMessage = result.pikaTeamDailyGiftLimitStatus?.remaining === 0
+      ? 'Достигна дневния си лимит за подаряване. Новият лимит ще бъде наличен след 00:00 ч.'
+      : `Подаръкът от ${amount} жълтици е изпратен.`
     render()
 
     // Bounded 3s auto-hide — не global polling, единичен self-clearing timer.

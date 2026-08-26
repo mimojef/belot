@@ -379,6 +379,8 @@ export type AdminSettingsSnapshot = {
   vipPrice30DaysCents: number
   vipPrice180DaysCents: number
   vipPrice365DaysCents: number
+  /** Дневен лимит (календарен ден, Europe/Sofia) за подаряване от pika_team, виж server/src/db/adminSettingsStore.ts. */
+  pikaTeamDailyGiftLimit: number
 }
 
 export type AdminPaymentPeriodStats = {

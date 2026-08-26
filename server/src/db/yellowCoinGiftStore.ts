@@ -4,7 +4,9 @@ import type {
   ProfileId,
 } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
+import type { AdminSettingsStore } from './adminSettingsStore.js'
 import { dbDateToUtc } from './dbDate.js'
+import { getSofiaDayStartUtcSqliteString } from './sofiaDayBoundary.js'
 
 // Преобразува SQLite "YYYY-MM-DD HH:MM:SS" в строг ISO 8601 UTC "YYYY-MM-DDTHH:MM:SS.000Z"
 // Използва се само за nextReleaseAt — не засяга глобалното dbDateToUtc поведение.
@@ -42,6 +44,23 @@ export type GiftLimitError = {
   nextReleaseAmount: number
 }
 
+/**
+ * Дневен лимит (календарен ден, Europe/Sofia) за подаряване от pika_team
+ * sender — отделен, независим механизъм от GiftLimitError (recipient
+ * 60-дневен window) и от sender rolling-24h DAILY_GIFT_LIMIT константата
+ * по-долу. limit/used/remaining позволяват на клиента да покаже точно
+ * съобщение (виж formatGiftLimitError.ts) без да гадае от текст.
+ */
+export type PikaTeamDailyGiftLimitError = {
+  ok: false
+  code: 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED'
+  message: string
+  limit: number
+  used: number
+  remaining: number
+  attemptedAmount: number
+}
+
 export type YellowCoinGiftStore = {
   /**
    * isRoleBasedPikaTeamSender — вика се от index.ts route с
@@ -64,6 +83,7 @@ export type YellowCoinGiftStore = {
         recipientProfile: PlayerPublicProfileSnapshot
       }
     | GiftLimitError
+    | PikaTeamDailyGiftLimitError
     | { ok: false; message: string }
   /**
    * Same сделка/ledger/лимити като sendGift, но получателят се адресира
@@ -90,6 +110,7 @@ export type YellowCoinGiftStore = {
         recipientProfile: PlayerPublicProfileSnapshot
       }
     | GiftLimitError
+    | PikaTeamDailyGiftLimitError
     | { ok: false; message: string }
   createGiftNotification: (giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number) => void
   getPendingGiftNotifications: (profileId: ProfileId) => PendingGiftNotification[]
@@ -97,6 +118,18 @@ export type YellowCoinGiftStore = {
   /** Виж isPikaTeamGiftBypassProfileId дефиницията по-долу за пълния rationale. */
   isPikaTeamGiftBypassProfileId: (profileId: ProfileId) => boolean
   getPikaTeamGiftMaxAmount: () => number
+  /**
+   * Informational read-only snapshot за profile popup gift UI (limit/used/
+   * remaining, виж CLAUDE.md изискването "Profile gift UI") — sender трябва
+   * да е role='pika_team' (caller-gated, виж isPikaTeamGiftMaxAmountSession).
+   * Server остава authoritative за самата enforcement (sendGift/
+   * sendGiftToProfile) — тази функция е ЧИСТО за показване, не за validation.
+   */
+  getPikaTeamDailyGiftLimitStatus: (senderProfileId: ProfileId) => {
+    limit: number
+    used: number
+    remaining: number
+  }
   close: () => void
 }
 
@@ -191,6 +224,7 @@ function formatBgNumber(value: number): string {
 export async function createYellowCoinGiftStore(
   databaseFilePath: string,
   playerProgressStore: PlayerProgressStore,
+  adminSettingsStore: AdminSettingsStore,
   options: YellowCoinGiftStoreOptions = {},
 ): Promise<YellowCoinGiftStore> {
   const pikaTeamGiftBypassProfileId = normalizeOptionalProfileUuid(
@@ -275,6 +309,23 @@ export async function createYellowCoinGiftStore(
     FROM yellow_coin_gift_ledger
     WHERE sender_profile_id = ?
       AND created_at >= datetime('now', '-24 hours');
+  `)
+
+  // Дневен лимит (календарен ден, Europe/Sofia) за pika_team sender — виж
+  // sofiaDayBoundary.ts. Отделен от selectSentTodayStatement по-горе (онзи е
+  // rolling-24h за ВСИЧКИ sender-и). Параметризиран start-of-day timestamp
+  // (не SQLite datetime('now', ...)) — граничният момент зависи от Sofia
+  // timezone/DST, не е fixed UTC offset, значи трябва да се изчисли в
+  // JavaScript (sofiaDayBoundary.ts) и да се подаде като bind параметър.
+  // Само успешни gifts се броят — failed/rejected опити никога не достигат
+  // INSERT в yellow_coin_gift_ledger (виж sendGiftCore: всяка ранна откaз
+  // причина прави ROLLBACK преди insertGiftStatement), затова простото
+  // SUM тук вече изключва failed/rejected по конструкция.
+  const selectPikaTeamSentTodaySofiaStatement = database.prepare(`
+    SELECT COALESCE(SUM(amount), 0) AS sent_amount
+    FROM yellow_coin_gift_ledger
+    WHERE sender_profile_id = ?
+      AND created_at >= ?;
   `)
 
   // Единична заявка за съгласуван snapshot на 60-дневния прозорец по получател
@@ -389,6 +440,7 @@ export async function createYellowCoinGiftStore(
         recipientProfile: PlayerPublicProfileSnapshot
       }
     | GiftLimitError
+    | PikaTeamDailyGiftLimitError
     | { ok: false; message: string } {
     // Чиста TypeScript валидация преди базата. Authoritative sender-specific
     // max — pikaTeamGiftBypassProfileId (legacy ЕДИН конкретен profile) ИЛИ
@@ -448,17 +500,68 @@ export async function createYellowCoinGiftStore(
         }
       }
 
-      // 4. Sender 24-часов лимит
-      const sentTodayRow = selectSentTodayStatement.get(senderProfileId) as
-        | { sent_amount: number }
-        | undefined
-      const sentToday = sentTodayRow?.sent_amount ?? 0
+      // 4. Sender 24-часов лимит — НЕ важи за isRoleBasedPikaTeamSender.
+      // За role='pika_team' единственият source of truth за максимално
+      // подаряваната сума е §4.5 по-долу (configurable calendar-day Europe/
+      // Sofia лимит от Admin Settings) — ако §4 се изпълнеше и за pika_team,
+      // старият фиксиран rolling-24h DAILY_GIFT_LIMIT (200 000) би останал
+      // ефективният (по-рестриктивен) таван и admin-нато зададен по-висок
+      // pikaTeamDailyGiftLimit никога не би могъл реално да се използва
+      // (открит и коригиран конфликт — виж git history коментара на тази
+      // промяна). Legacy pikaTeamGiftBypassProfileId (hasHigherMaxAmount по-
+      // горе) умишлено НЕ bypass-ва §4 — само role-based pika_team го прави,
+      // тъй като задачата изисква новия лимит да е source of truth именно за
+      // истинска accounts.role='pika_team', не за legacy hardcoded profile.
+      if (!isRoleBasedPikaTeamSender) {
+        const sentTodayRow = selectSentTodayStatement.get(senderProfileId) as
+          | { sent_amount: number }
+          | undefined
+        const sentToday = sentTodayRow?.sent_amount ?? 0
 
-      if (sentToday + amount > DAILY_GIFT_LIMIT) {
-        database.exec('ROLLBACK;')
-        return {
-          ok: false,
-          message: `Дневният лимит за подаръци е ${DAILY_GIFT_LIMIT} жълтици.`,
+        if (sentToday + amount > DAILY_GIFT_LIMIT) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: false,
+            message: `Дневният лимит за подаръци е ${DAILY_GIFT_LIMIT} жълтици.`,
+          }
+        }
+      }
+
+      // 4.5. pika_team календарен-ден (Europe/Sofia) дневен лимит —
+      // isRoleBasedPikaTeamSender (caller-gated, role==='pika_team' само;
+      // виж isPikaTeamGiftMaxAmountSession в authStore.ts) заменя §4 за тези
+      // sender-и (виж §4 коментара — §4 сега explicit skip-ва role-based
+      // pika_team). Приложен ОТДЕЛНО за всеки pika_team профил (изчислен per
+      // senderProfileId, не глобален агрегат) — виж admin брифа
+      // "използването от един pika_team профил НЕ трябва да намалява лимита
+      // на друг". Legacy pikaTeamGiftBypassProfileId (§ по-горе) НЕ е
+      // включен тук умишлено — задачата изисква лимитът да се прилага само
+      // за profile с истинска accounts.role='pika_team', не за legacy
+      // hardcoded bypass profile ID (различен, по-стар механизъм, все още
+      // subject на §4 rolling-24h).
+      if (isRoleBasedPikaTeamSender) {
+        const pikaTeamDailyGiftLimit = adminSettingsStore.getSettings().pikaTeamDailyGiftLimit
+        const sofiaDayStartUtc = getSofiaDayStartUtcSqliteString()
+        const sentTodaySofiaRow = selectPikaTeamSentTodaySofiaStatement.get(
+          senderProfileId,
+          sofiaDayStartUtc,
+        ) as { sent_amount: number } | undefined
+        const usedToday = sentTodaySofiaRow?.sent_amount ?? 0
+        const remaining = Math.max(0, pikaTeamDailyGiftLimit - usedToday)
+
+        if (amount > remaining) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: false,
+            code: 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED',
+            message: remaining > 0
+              ? `Можеш да подариш още максимум ${formatBgNumber(remaining)} жълтици днес.`
+              : 'Достигнат е дневният лимит за подаряване на жълтици. Лимитът се занулява в 00:00 ч.',
+            limit: pikaTeamDailyGiftLimit,
+            used: usedToday,
+            remaining,
+            attemptedAmount: amount,
+          }
         }
       }
 
@@ -659,6 +762,25 @@ export async function createYellowCoinGiftStore(
     return MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
   }
 
+  // Read-only, извън BEGIN IMMEDIATE транзакция умишлено — само за UI
+  // display (виж type коментара по-горе), не за enforcement. Reuse-ва
+  // същия statement/day-boundary helper като authoritative проверката в
+  // sendGiftCore, за да не се разминат двете изчисления.
+  function getPikaTeamDailyGiftLimitStatus(senderProfileId: ProfileId): {
+    limit: number
+    used: number
+    remaining: number
+  } {
+    const limit = adminSettingsStore.getSettings().pikaTeamDailyGiftLimit
+    const sofiaDayStartUtc = getSofiaDayStartUtcSqliteString()
+    const row = selectPikaTeamSentTodaySofiaStatement.get(
+      senderProfileId,
+      sofiaDayStartUtc,
+    ) as { sent_amount: number } | undefined
+    const used = row?.sent_amount ?? 0
+    return { limit, used, remaining: Math.max(0, limit - used) }
+  }
+
   function close(): void {
     database.close()
   }
@@ -671,6 +793,7 @@ export async function createYellowCoinGiftStore(
     markGiftNotificationRead,
     isPikaTeamGiftBypassProfileId,
     getPikaTeamGiftMaxAmount,
+    getPikaTeamDailyGiftLimitStatus,
     close,
   }
 }

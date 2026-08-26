@@ -595,6 +595,8 @@ export type LobbyScreenState = {
   giftModalFriendName: string
   /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 за legacy pika_team bypass profileId ИЛИ role==='pika_team'. Authoritative проверката е сървърна (index.ts sendGiftCore). */
   giftModalMaxAmount: number
+  /** Informational UI (limit/used/remaining) — non-null само за role==='pika_team'. Authoritative проверката е сървърна (yellowCoinGiftStore.sendGiftCore §4.5). */
+  giftModalPikaTeamDailyLimitStatus: { limit: number; used: number; remaining: number } | null
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
   giftReceivedModal: { amount: number; fromDisplayName: string } | null
@@ -2191,6 +2193,13 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
             <div style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Подари жълтици</div>
             <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. Сумата трябва да е между 1 000 и ${state.giftModalMaxAmount.toLocaleString('bg-BG')} жълтици.</div>
           </div>
+          ${state.giftModalPikaTeamDailyLimitStatus ? `
+            <div style="border-radius:8px;border:1px solid rgba(212,165,32,0.30);background:rgba(212,165,32,0.08);padding:10px 12px;font-size:12.5px;line-height:1.6;color:rgba(255,255,255,0.78);font-weight:700;">
+              Дневен лимит: ${state.giftModalPikaTeamDailyLimitStatus.limit.toLocaleString('bg-BG')}<br>
+              Подарени днес: ${state.giftModalPikaTeamDailyLimitStatus.used.toLocaleString('bg-BG')}<br>
+              Остават днес: ${state.giftModalPikaTeamDailyLimitStatus.remaining.toLocaleString('bg-BG')}
+            </div>
+          ` : ''}
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Сума
             <input name="amount" type="number" min="1000" max="${state.giftModalMaxAmount}" step="1000" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
@@ -7799,6 +7808,10 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     vipPrice30DaysCents: 789,
     vipPrice180DaysCents: 3_989,
     vipPrice365DaysCents: 6_989,
+    // Само fallback докато state.adminSettings се зарежда — трябва да
+    // остане консистентен с server DEFAULT_SETTINGS/migration seed
+    // (adminSettingsStore.ts, 200 000), не независима стойност.
+    pikaTeamDailyGiftLimit: 200_000,
   }
   const adminPackages = state.adminCoinPackages
   const settingsGridStyle = isMobile
@@ -7895,6 +7908,17 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Цената е в евроцентове (напр. 789 = 7,89 €), минимум 1 цент. Дните на пакетите са фиксирани и не подлежат на промяна.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Екип Pika.bg</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Дневен лимит за подаряване от Екип Pika.bg
+              <input name="pikaTeamDailyGiftLimit" type="number" min="0" max="100000000" step="1000" value="${settings.pikaTeamDailyGiftLimit}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Максимален общ брой жълтици, които един профил от Екип Pika.bg може да подари за календарен ден. Лимитът се занулява в 00:00 ч.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -12938,6 +12962,7 @@ export function renderLobbyScreen(
       const vipPrice30DaysCents = Number(data.get('vipPrice30DaysCents'))
       const vipPrice180DaysCents = Number(data.get('vipPrice180DaysCents'))
       const vipPrice365DaysCents = Number(data.get('vipPrice365DaysCents'))
+      const pikaTeamDailyGiftLimit = Number(data.get('pikaTeamDailyGiftLimit'))
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -12945,6 +12970,7 @@ export function renderLobbyScreen(
         vipPrice30DaysCents,
         vipPrice180DaysCents,
         vipPrice365DaysCents,
+        pikaTeamDailyGiftLimit,
       })
     })
 

@@ -2248,6 +2248,7 @@ let chatAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = se
 const yellowCoinGiftStore = await createYellowCoinGiftStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
+  adminSettingsStore,
 )
 const tableExitPenaltyStore = await createTableExitPenaltyStore(
   databaseBootstrap.databaseFilePath,
@@ -6287,7 +6288,10 @@ async function handlePasswordResetRequest(
 // null session минава непроменена.
 function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | null }; account: { role: string } } | null>(
   session: T,
-): (T extends null ? null : T & { pikaTeamGiftMaxAmount: number | null }) | null {
+): (T extends null ? null : T & {
+  pikaTeamGiftMaxAmount: number | null
+  pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
+}) | null {
   if (session === null || session.profile.profileId === null) return session as null
   const isLegacyProfileBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
   // Директен role сравнение (не isPikaTeamGiftMaxAmountSession predicate) —
@@ -6298,7 +6302,18 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
   return {
     ...session,
     pikaTeamGiftMaxAmount: hasHigherMaxAmount ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount() : null,
-  } as T extends null ? null : T & { pikaTeamGiftMaxAmount: number | null }
+    // Initial informational snapshot за profile popup gift UI (limit/used/
+    // remaining) — само за role='pika_team' (изискването не покрива legacy
+    // hardcoded bypass profile, който не е задължително role='pika_team').
+    // Свежи се допълнително след всеки успешен gift (viж
+    // notifyGiftRecipientAndRespond), не се разчита само на session load.
+    pikaTeamDailyGiftLimitStatus: isRoleBasedPikaTeam
+      ? yellowCoinGiftStore.getPikaTeamDailyGiftLimitStatus(session.profile.profileId)
+      : null,
+  } as T extends null ? null : T & {
+    pikaTeamGiftMaxAmount: number | null
+    pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
+  }
 }
 
 async function handleAuthRequest(
@@ -11636,6 +11651,7 @@ async function handleAdminSettingsRequest(
       'vipPrice30DaysCents',
       'vipPrice180DaysCents',
       'vipPrice365DaysCents',
+      'pikaTeamDailyGiftLimit',
     ] as const
     for (const key of numericFieldKeys) {
       if (key in body && getNumberField(body, key) === null) {
@@ -11653,6 +11669,7 @@ async function handleAdminSettingsRequest(
       vipPrice30DaysCents: getNumberField(body, 'vipPrice30DaysCents') ?? undefined,
       vipPrice180DaysCents: getNumberField(body, 'vipPrice180DaysCents') ?? undefined,
       vipPrice365DaysCents: getNumberField(body, 'vipPrice365DaysCents') ?? undefined,
+      pikaTeamDailyGiftLimit: getNumberField(body, 'pikaTeamDailyGiftLimit') ?? undefined,
     })
 
     if (!result.ok) {
@@ -11860,6 +11877,7 @@ function notifyGiftRecipientAndRespond(
     senderProfile: PlayerPublicProfileSnapshot
     recipientProfile: PlayerPublicProfileSnapshot
   },
+  isRoleBasedPikaTeamSender: boolean = false,
 ): void {
   const recipientProfileId = result.recipientProfile.profileId
   if (recipientProfileId) {
@@ -11884,11 +11902,20 @@ function notifyGiftRecipientAndRespond(
     }
   }
 
+  // Informational UI update без пълен page/session rerender (CLAUDE.md
+  // изискването "Profile gift UI" — след успешен gift обнови used/remaining
+  // без да затвориш profile popup-а). Само за pika_team sender-и — за
+  // всички останали полето е undefined, клиентът не показва лимит блока.
+  const pikaTeamDailyGiftLimitStatus = isRoleBasedPikaTeamSender && result.senderProfile.profileId !== null
+    ? yellowCoinGiftStore.getPikaTeamDailyGiftLimitStatus(result.senderProfile.profileId)
+    : undefined
+
   sendJsonResponse(res, 200, {
     ok: true,
     gift: result.gift,
     senderProfile: result.senderProfile,
     recipientProfile: result.recipientProfile,
+    pikaTeamDailyGiftLimitStatus,
   })
 }
 
@@ -12021,7 +12048,17 @@ async function handleFriendsRequest(
     const result = yellowCoinGiftStore.sendGift(profileId, friendshipId, amount, isPikaTeamGiftMaxAmountSession(session))
 
     if (!result.ok) {
-      if ('code' in result) {
+      if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          code: result.code,
+          message: result.message,
+          limit: result.limit,
+          used: result.used,
+          remaining: result.remaining,
+          attemptedAmount: result.attemptedAmount,
+        })
+      } else if ('code' in result) {
         sendJsonResponse(res, 400, {
           ok: false,
           code: result.code,
@@ -12038,7 +12075,7 @@ async function handleFriendsRequest(
       return true
     }
 
-    notifyGiftRecipientAndRespond(res, result)
+    notifyGiftRecipientAndRespond(res, result, isPikaTeamGiftMaxAmountSession(session))
     return true
   }
 
@@ -12091,7 +12128,17 @@ async function handleFriendsRequest(
     const result = yellowCoinGiftStore.sendGiftToProfile(profileId, recipientProfileId, amount, isPikaTeamGiftMaxAmountSession(session))
 
     if (!result.ok) {
-      if ('code' in result) {
+      if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          code: result.code,
+          message: result.message,
+          limit: result.limit,
+          used: result.used,
+          remaining: result.remaining,
+          attemptedAmount: result.attemptedAmount,
+        })
+      } else if ('code' in result) {
         sendJsonResponse(res, 400, {
           ok: false,
           code: result.code,
@@ -12108,7 +12155,7 @@ async function handleFriendsRequest(
       return true
     }
 
-    notifyGiftRecipientAndRespond(res, result)
+    notifyGiftRecipientAndRespond(res, result, isPikaTeamGiftMaxAmountSession(session))
     return true
   }
 

@@ -383,6 +383,8 @@ type AuthSession = {
   profile: PlayerPublicProfileSnapshot
   /** Derived UI-only сигнал от сървъра — non-null само за pika_team gift bypass profile-а (server: withPikaTeamGiftBypassFlag). Authoritative проверката остава сървърна (yellowCoinGiftStore.sendGift); това поле само казва на gift modal-а какъв max/text да покаже. */
   pikaTeamGiftMaxAmount?: number | null
+  /** Informational UI сигнал — non-null само за role==='pika_team' (server: withPikaTeamGiftBypassFlag). Authoritative проверката остава сървърна (yellowCoinGiftStore.sendGiftCore §4.5). */
+  pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
 }
 
 type AuthResponse = {
@@ -524,12 +526,19 @@ type GiftCoinsResponse = {
   senderProfile?: PlayerPublicProfileSnapshot
   recipientProfile?: PlayerPublicProfileSnapshot
   message?: string
-  code?: 'RECIPIENT_WINDOW_LIMIT_PARTIAL' | 'RECIPIENT_WINDOW_LIMIT_FULL'
+  code?: 'RECIPIENT_WINDOW_LIMIT_PARTIAL' | 'RECIPIENT_WINDOW_LIMIT_FULL' | 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED'
   receivedInWindow?: number
   remainingAllowance?: number
   attemptedAmount?: number
   nextReleaseAt?: string | null
   nextReleaseAmount?: number
+  limit?: number
+  used?: number
+  remaining?: number
+  // Informational UI refresh след успешен pika_team gift (виж
+  // notifyGiftRecipientAndRespond в index.ts) — undefined за нормални
+  // sender-и, не се показва нищо в UI.
+  pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
 }
 
 type DailyMissionsApiResponse = {
@@ -3234,8 +3243,21 @@ async function submitProfileLike(
 }
 
 type GiftCoinsSubmitResult =
-  | { ok: true; senderProfile: PlayerPublicProfileSnapshot; recipientProfile: PlayerPublicProfileSnapshot }
+  | {
+      ok: true
+      senderProfile: PlayerPublicProfileSnapshot
+      recipientProfile: PlayerPublicProfileSnapshot
+      pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
+    }
   | ({ ok: false; message: string } & GiftLimitErrorPayload)
+  | {
+      ok: false
+      message: string
+      code: 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED'
+      limit: number
+      used: number
+      remaining: number
+    }
   | { ok: false; message: string }
 
 // Общо ядро за submitGiftCoins/submitGiftCoinsBypass по-долу — идентична
@@ -3269,6 +3291,41 @@ async function submitGiftCoinsToUrl(url: string, requestBody: Record<string, unk
           nextReleaseAmount: data.nextReleaseAmount ?? 0,
         }
       }
+      if (data.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
+        // Синхронизира stale modal informational status (limit/used/
+        // remaining) от fresh server error payload — server е authoritative
+        // gate за самия enforcement, а cached remaining в client state никога
+        // не е блокирал request-а (виж gift form submit handler-а,
+        // renderLobbyScreen.ts); тук само обновяваме показаните на
+        // потребителя стойности след отказ, за да не остане stale след
+        // Admin decrease. saveSessionCache directly (не syncLobbyWithAuthSession)
+        // — избягва двоен render() в рамките на един gift attempt:
+        // syncLobbyWithAuthSession() вика setDisplayName/setLocalAvatarUrl,
+        // които ВИНАГИ render-ват вътрешно (createLobbyFlowController.ts),
+        // а submitGiftCoinsCore вече ще извика render() веднага след като
+        // получи този резултат обратно — displayName/avatarUrl не се
+        // променят от gift response-а, значи няма нужда от техния sync тук.
+        if (currentAuthSession !== null) {
+          currentAuthSession = {
+            ...currentAuthSession,
+            pikaTeamDailyGiftLimitStatus: {
+              limit: data.limit ?? 0,
+              used: data.used ?? 0,
+              remaining: data.remaining ?? 0,
+            },
+          }
+          saveSessionCache(currentAuthSession)
+        }
+
+        return {
+          ok: false,
+          message: data.message ?? 'Достигнат е дневният лимит за подаряване на жълтици.',
+          code: data.code,
+          limit: data.limit ?? 0,
+          used: data.used ?? 0,
+          remaining: data.remaining ?? 0,
+        }
+      }
       return {
         ok: false,
         message: data.message ?? 'Подаръкът не беше изпратен.',
@@ -3279,14 +3336,27 @@ async function submitGiftCoinsToUrl(url: string, requestBody: Record<string, unk
       currentAuthSession = {
         ...currentAuthSession,
         profile: data.senderProfile,
+        // Informational refresh (limit/used/remaining) без глобален
+        // rerender/session reload — виж CLAUDE.md "Profile gift UI".
+        // undefined (не pika_team sender) оставя предишната стойност
+        // непроменена, вместо да я изтрие.
+        ...(data.pikaTeamDailyGiftLimitStatus !== undefined
+          ? { pikaTeamDailyGiftLimitStatus: data.pikaTeamDailyGiftLimitStatus }
+          : {}),
       }
-      syncLobbyWithAuthSession()
+      // saveSessionCache directly (не syncLobbyWithAuthSession) — избягва
+      // двоен render() в рамките на един gift attempt (виж коментара на
+      // PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED error branch-а по-горе за
+      // пълния rationale). submitGiftCoinsCore вика render() веднага след
+      // като получи този резултат обратно.
+      saveSessionCache(currentAuthSession)
     }
 
     return {
       ok: true,
       senderProfile: data.senderProfile,
       recipientProfile: data.recipientProfile,
+      pikaTeamDailyGiftLimitStatus: data.pikaTeamDailyGiftLimitStatus,
     }
   } catch {
     return {

@@ -6,6 +6,14 @@ export type AdminSettingsSnapshot = {
   vipPrice30DaysCents: number
   vipPrice180DaysCents: number
   vipPrice365DaysCents: number
+  /**
+   * Дневен лимит (календарен ден, Europe/Sofia) за подаряване на жълтици от
+   * профили с роля pika_team — прилага се ОТДЕЛНО за всеки такъв профил
+   * (виж yellowCoinGiftStore.ts). 0 = подаряването е забранено за pika_team
+   * (НЕ "unlimited"). Различен, независим механизъм от единствения-sender
+   * rolling-24h DAILY_GIFT_LIMIT константа в yellowCoinGiftStore.ts.
+   */
+  pikaTeamDailyGiftLimit: number
 }
 
 export type AdminSettingsStore = {
@@ -38,6 +46,14 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   vipPrice30DaysCents: 789,
   vipPrice180DaysCents: 3_989,
   vipPrice365DaysCents: 6_989,
+  // Само fallback за база без seed-натата migration (20260825_001) — реалната
+  // production стойност идва от admin_settings реда, seed-нат веднъж. Трябва
+  // да остане РАВЕН на migration seed-натата стойност (200 000, умишлено
+  // равна на legacy sender rolling-24h DAILY_GIFT_LIMIT в
+  // yellowCoinGiftStore.ts — pika_team вече bypass-ва оня лимит изцяло и
+  // разчита само на тази стойност, значи deploy-ът не трябва сам по себе си
+  // да вдига ефективния economy лимит). Admin може да го промени от панела.
+  pikaTeamDailyGiftLimit: 200_000,
 }
 
 const SETTING_KEYS = {
@@ -46,6 +62,7 @@ const SETTING_KEYS = {
   vipPrice30DaysCents: 'vip_price_30_days_cents',
   vipPrice180DaysCents: 'vip_price_180_days_cents',
   vipPrice365DaysCents: 'vip_price_365_days_cents',
+  pikaTeamDailyGiftLimit: 'pika_team_daily_gift_limit',
 } as const
 
 // VIP е платен пакет — 0 € не е валидна цена (би направило пакета безплатен
@@ -104,7 +121,8 @@ export async function createAdminSettingsStore(
       'profile_name_change_price',
       'vip_price_30_days_cents',
       'vip_price_180_days_cents',
-      'vip_price_365_days_cents'
+      'vip_price_365_days_cents',
+      'pika_team_daily_gift_limit'
     );
   `)
 
@@ -153,6 +171,10 @@ export async function createAdminSettingsStore(
         values.get(SETTING_KEYS.vipPrice365DaysCents) ?? '',
         DEFAULT_SETTINGS.vipPrice365DaysCents,
       ),
+      pikaTeamDailyGiftLimit: parseStoredInteger(
+        values.get(SETTING_KEYS.pikaTeamDailyGiftLimit) ?? '',
+        DEFAULT_SETTINGS.pikaTeamDailyGiftLimit,
+      ),
     }
   }
 
@@ -179,6 +201,10 @@ export async function createAdminSettingsStore(
       input.vipPrice365DaysCents === undefined
         ? undefined
         : normalizeSettingNumber(input.vipPrice365DaysCents, VIP_PRICE_MIN_CENTS, VIP_PRICE_MAX_CENTS)
+    const nextPikaTeamDailyGiftLimit =
+      input.pikaTeamDailyGiftLimit === undefined
+        ? undefined
+        : normalizeSettingNumber(input.pikaTeamDailyGiftLimit, 0, 100_000_000)
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -215,6 +241,13 @@ export async function createAdminSettingsStore(
       }
     }
 
+    if (input.pikaTeamDailyGiftLimit !== undefined && nextPikaTeamDailyGiftLimit === null) {
+      return {
+        ok: false,
+        message: 'Дневният лимит за подаряване от Екип Pika.bg трябва да е цяло число между 0 и 100 000 000.',
+      }
+    }
+
     if (nextSignupBonus !== undefined) {
       upsertSettingStatement.run(
         SETTING_KEYS.signupBonusYellowCoins,
@@ -239,6 +272,10 @@ export async function createAdminSettingsStore(
 
     if (nextVipPrice365 !== undefined) {
       upsertSettingStatement.run(SETTING_KEYS.vipPrice365DaysCents, String(nextVipPrice365))
+    }
+
+    if (nextPikaTeamDailyGiftLimit !== undefined) {
+      upsertSettingStatement.run(SETTING_KEYS.pikaTeamDailyGiftLimit, String(nextPikaTeamDailyGiftLimit))
     }
 
     return {

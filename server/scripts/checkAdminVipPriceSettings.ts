@@ -176,6 +176,33 @@ await withTempDir(async (dir) => {
     assertEqual(store.getSettings().vipPrice365DaysCents, 100_000, 'VIP 365 трябва да е точно 100000 цента')
   })
 
+  // ── pikaTeamDailyGiftLimit default/production-safety проверки ───────────
+  // Conservative rollout изискване: fresh DB (без custom admin update) НЕ
+  // трябва да прескача автоматично от legacy sender rolling-24h лимита
+  // (200 000, DAILY_GIFT_LIMIT в yellowCoinGiftStore.ts) на по-висока
+  // стойност само защото тази функционалност е deploy-ната — default трябва
+  // да е точно 200 000, не 1 000 000. Admin update-ва после веднага влиза в
+  // сила (getSettings echo без restart).
+
+  await check('[10] getSettings без seed/custom update → default pikaTeamDailyGiftLimit = 200 000 (conservative rollout)', () => {
+    const settings = store.getSettings()
+    assertEqual(
+      settings.pikaTeamDailyGiftLimit,
+      200_000,
+      'default трябва да е 200 000 (равен на legacy sender rolling-24h лимита), не по-висок',
+    )
+  })
+
+  await check('[11] Admin update на pikaTeamDailyGiftLimit до 1 000 000 → веднага ефективен (echo без restart)', () => {
+    const result = store.updateSettings({ pikaTeamDailyGiftLimit: 1_000_000 })
+    assert(result.ok === true, `Очаквах ok=true: ${JSON.stringify(result)}`)
+    if (result.ok) {
+      assertEqual(result.settings.pikaTeamDailyGiftLimit, 1_000_000, 'updateSettings трябва да върне новата стойност веднага')
+    }
+    const echoed = store.getSettings()
+    assertEqual(echoed.pikaTeamDailyGiftLimit, 1_000_000, 'getSettings след update трябва да echo-ва новата стойност веднага')
+  })
+
   store.close()
   db.close()
 })
