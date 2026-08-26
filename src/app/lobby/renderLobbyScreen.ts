@@ -3459,7 +3459,17 @@ function sumConversationUnreadByKind(state: LobbyScreenState, kind: ChatConversa
 }
 
 export function getFriendChatUnreadRaw(state: LobbyScreenState): number {
-  return sumConversationUnreadByKind(state, 'friend')
+  // 'pika_support' разговори (chatStore, direct chat с "Екип Pika.bg" —
+  // role-based pika_team ИЛИ истински official профил) вече route-ват към
+  // нормалния Chat panel (routeByConversation, createLobbyFlowController.ts
+  // — production routing fix) и се показват в chat списъка наравно с
+  // 'friend' (виж renderChatPanel filter-ите по-долу, kind==='friend' ||
+  // kind==='pika_support') — badge aggregation-ът трябва да следва СЪЩАТА
+  // семантика, иначе recipient вижда непрочетено съобщение в списъка, но
+  // Chat badge никога не се увеличава (production bug). 'vip_dm' остава
+  // отделен (getTopicsPersonalUnreadRaw) — различен продукт (Topics лична
+  // кутия), не част от Chat badge-а.
+  return sumConversationUnreadByKind(state, 'friend') + sumConversationUnreadByKind(state, 'pika_support')
 }
 
 export function getTopicsPersonalUnreadRaw(state: LobbyScreenState): number {

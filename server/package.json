@@ -99,6 +99,8 @@
     "check:sofia-day-boundary": "tsx scripts/checkSofiaDayBoundary.ts",
     "check:gift-friendship-bypass-http-authorization": "tsx scripts/checkGiftFriendshipBypassHttpAuthorization.ts --server-root=.",
     "check:pika-team-support-chat-http-authorization": "tsx scripts/checkPikaTeamSupportChatHttpAuthorization.ts --server-root=.",
+    "check:pika-team-direct-chat-notification-routing": "tsx scripts/checkPikaTeamDirectChatNotificationRouting.ts",
+    "check:pika-support-chat-unread-badge": "tsx scripts/checkPikaSupportChatUnreadBadge.ts",
     "check:vip-store": "tsx scripts/checkVipStore.ts",
     "check:vip-purchase-store": "tsx scripts/checkVipPurchaseStore.ts",
     "check:admin-vip-price-settings": "tsx scripts/checkAdminVipPriceSettings.ts",

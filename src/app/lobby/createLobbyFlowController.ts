@@ -14692,32 +14692,49 @@ export function createLobbyFlowController(
       // към кой продукт принадлежи ТОЗИ конкретен разговор, и една и съща
       // двойка профили може да има едновременно 'friend' И 'vip_dm'
       // разговор с различна история (production regression fix).
+      // Общ "отвори нормалния Chat panel и избери разговора" flow — reuse-ван
+      // за kind==='friend' И за kind==='pika_support' (последното вкл.
+      // истински officialPikaProfileId разговори — production bug fix, виж
+      // routeByConversation коментара по-долу защо 'pika_support' никога не
+      // трябва да отваря openSupportInbox()). Race guard срещу друг по-нов
+      // chat-open flow, който сработва, докато showChatPanel() зарежда
+      // (напр. нов PIKABG start), виж activeChatRequestGeneration.
+      const openAsNormalChat = (): void => {
+        const requestGeneration = state.activeChatRequestGeneration
+        void showChatPanel(true).then(() => {
+          if (state.activeChatRequestGeneration !== requestGeneration) return
+          void openChatConversation(friendshipId)
+          markChatConversationReadLocally(friendshipId)
+          render()
+          void options.onChatMarkRead?.(friendshipId)
+        })
+      }
+
       const routeByConversation = (conversation: ChatConversationSnapshot | undefined): void => {
         if (conversation?.kind === 'vip_dm') {
           void showTopicsPersonalChat(friendshipId)
           return
         }
-        if (conversation?.kind === 'pika_support') {
-          // Legacy Chat филтрира списъка си само до kind='friend'
-          // (renderChatPanel) — pika_support разговор там би показал
-          // грешна/празна активна беседа. Каноничното място е СЪЩОТО,
-          // което бутонът "Поддръжка" отваря (admin inbox за пълен admin,
-          // иначе support попъп-а за всеки друг, вкл. subadmin).
-          openSupportInbox()
-          return
-        }
-        if (conversation?.kind === 'friend') {
-          // Race guard срещу друг по-нов chat-open flow, който сработва,
-          // докато showChatPanel() зарежда (напр. PIKABG start), виж
-          // activeChatRequestGeneration.
-          const requestGeneration = state.activeChatRequestGeneration
-          void showChatPanel(true).then(() => {
-            if (state.activeChatRequestGeneration !== requestGeneration) return
-            void openChatConversation(friendshipId)
-            markChatConversationReadLocally(friendshipId)
-            render()
-            void options.onChatMarkRead?.(friendshipId)
-          })
+        if (conversation?.kind === 'pika_support' || conversation?.kind === 'friend') {
+          // 'pika_support' → ВИНАГИ нормален Chat panel, независимо кой е
+          // initiator-ът (истински officialPikaProfileId ИЛИ role-based
+          // pika_team staff — production bug fix, deep-dive корекция).
+          // openSupportInbox() ("Връзка с екипа") зарежда съдържание от
+          // напълно ОТДЕЛЕН backend store (supportStore, /api/support/
+          // messages) — глобален per-потребител support thread, несвързан
+          // с friendshipId/chatStore по никакъв начин (chatStore.ts никога
+          // не reference-ва supportStore и обратно) и никога не праща
+          // chat_message_received WS notification (support unread е
+          // polling-базиран, виж refreshSupportUnread). Значи "Виж" от chat
+          // notification popup-а никога не сочи towards supportStore
+          // съдържание, независимо кой е sender-ят — kind='pika_support' в
+          // chatStore е директен разговор с "Екип Pika.bg" (renderChatPanel
+          // го показва в обикновения chat списък с badge), не "support
+          // заявка" в смисъла на supportStore продукта. "Връзка с екипа"
+          // остава достъпна изключително през собствения си бутон
+          // "Поддръжка" (onSupportClick → openSupportInbox()), напълно
+          // независим от chat notification routing-а тук.
+          openAsNormalChat()
           return
         }
 

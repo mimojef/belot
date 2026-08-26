@@ -411,6 +411,92 @@ try {
     if (count !== 1) throw new Error(`pika_support rows за pikaCandidate=${count}, очаквах 1 (непроменено)`)
   })
 
+  // ── [F] kind='pika_support' contract — еднакъв за role-based И official ───
+  // Deep-dive корекция (production bug fix, второ minavane): "Връзка с
+  // екипа" (openSupportInbox/supportPopupOpen) зарежда съдържание от
+  // напълно ОТДЕЛЕН backend store (supportStore, /api/support/messages) —
+  // несвързан с chatStore/friendshipId по никакъв начин и никога не праща
+  // chat_message_received WS notification. Значи "Виж" routing-ът НЕ
+  // трябва да различава role-based pika_team direct chat от истински
+  // official-profile pika_support разговор (ЕДИН и същ conversation
+  // "product" за целите на chat notification routing-а — виж
+  // routeByConversation в createLobbyFlowController.ts) — вместо
+  // conversation-level discriminator поле (отхвърлен подход от предишен
+  // fix опит), клиентът винаги маршрутизира kind='pika_support' към
+  // нормалния Chat panel. Тук потвърждаваме server contract-а: и двата
+  // случая (role-based pika_team sender И legacy official profile) връщат
+  // еднакъв kind='pika_support', БЕЗ допълнителен discriminator field —
+  // потвърждава, че server-ът не носи ambiguous/misleading semantic поле.
+  console.log('\n[F] kind=\'pika_support\' contract еднакъв за pika_team direct chat и official profile, БЕЗ discriminator field')
+  await check('[F.1] pika_team (non-official) POST response: conversation.kind === \'pika_support\', без isOfficialSupportConversation поле', async () => {
+    const r = await httpRequest(port, '/api/chat/pika-support/start', 'POST', pikaCookie, {
+      recipientProfileId: recipientA.profileId,
+    })
+    const b = r.body as { ok?: boolean; conversation?: { kind?: string; isOfficialSupportConversation?: unknown } }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+    if (b.conversation?.kind !== 'pika_support') throw new Error(`kind=${b.conversation?.kind}, очаквах 'pika_support'`)
+    if ('isOfficialSupportConversation' in (b.conversation ?? {})) {
+      throw new Error('conversation payload все още съдържа isOfficialSupportConversation — discriminator полето трябваше да е премахнато')
+    }
+  })
+  await check('[F.2] legacy official profile POST response: conversation.kind === \'pika_support\' (СЪЩИЯ kind, без distinction)', async () => {
+    const r = await httpRequest(port, '/api/chat/pika-support/start', 'POST', officialCookie, {
+      recipientProfileId: recipientD.profileId,
+    })
+    const b = r.body as { ok?: boolean; conversation?: { kind?: string } }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+    if (b.conversation?.kind !== 'pika_support') throw new Error(`kind=${b.conversation?.kind}, очаквах 'pika_support'`)
+  })
+  await check('[F.3] recipientA GET /api/chat/conversations: pika_team разговорът се вижда с kind=\'pika_support\' от RECIPIENT страна', async () => {
+    const recipientCookie = await login(port, recipientA.email)
+    const r = await httpRequest(port, '/api/chat/conversations', 'GET', recipientCookie)
+    const b = r.body as { ok?: boolean; conversations?: Array<{ friendshipId?: string; kind?: string }> }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+    const found = b.conversations?.find((c) => c.friendshipId === pikaFriendshipIdA)
+    if (found === undefined) throw new Error(`Разговор ${pikaFriendshipIdA} липсва в recipientA conversations списъка`)
+    if (found.kind !== 'pika_support') throw new Error(`kind=${found.kind} от recipient страна, очаквах 'pika_support'`)
+  })
+
+  // ── [G] Single-row reuse между двойка, независимо от реда/посоката на initiator ──
+  // getOrCreatePikaSupportConversation find-or-create е по (lower,higher)
+  // profileId двойка (createChatProfilePair), НЕЗАВИСИМО от кой е requester
+  // (selectPikaSupportByPairStatement WHERE lower_profile_id=? AND
+  // higher_profile_id=?, без requester/addressee условие) — за ЕДНА двойка
+  // профили може да съществува само ЕДИН pika_support row, независимо кой
+  // страна е инициирала първо. Проверяваме explicit: recipientD (вече има
+  // pika_support разговор с official profile от case [D]/[F.2]) — official
+  // profile-ът стартира ОТНОВО СЪЩИЯ разговор → трябва да получи СЪЩИЯ
+  // friendshipId (idempotent reuse), не нов row.
+  console.log('\n[G] Single conversation row се reuse-ва независимо от посоката/реда на initiate-ване')
+  let officialFriendshipIdD = ''
+  await check('[G.1] официалният profile record-ва friendshipId-я от случай [D]/[F.2] за сравнение', async () => {
+    const r = await httpRequest(port, '/api/chat/pika-support/start', 'POST', officialCookie, {
+      recipientProfileId: recipientD.profileId,
+    })
+    const b = r.body as { ok?: boolean; friendshipId?: string }
+    if (r.status !== 200 || b.ok !== true || typeof b.friendshipId !== 'string') {
+      throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+    }
+    officialFriendshipIdD = b.friendshipId
+  })
+  await check('[G.2] точно 1 pika_support ред за recipientD след повторни official start повиквания (F.2 + G.1) — single row reuse', () => {
+    const count = countPikaSupportRows(isolated.databaseFile, recipientD.profileId)
+    if (count !== 1) throw new Error(`pika_support rows за recipientD=${count}, очаквах 1 (F.2 и G.1 трябва да са reuse на СЪЩИЯ row, не 2 отделни)`)
+  })
+  await check('[G.3] recipientD GET /api/chat/conversations вижда СЪЩИЯ friendshipId (single row, независимо кой е requester в DB)', async () => {
+    const recipientDCookie = await login(port, recipientD.email)
+    const r = await httpRequest(port, '/api/chat/conversations', 'GET', recipientDCookie)
+    const b = r.body as { ok?: boolean; conversations?: Array<{ friendshipId?: string; kind?: string }> }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
+    const pikaSupportConversations = (b.conversations ?? []).filter((c) => c.kind === 'pika_support')
+    if (pikaSupportConversations.length !== 1) {
+      throw new Error(`recipientD вижда ${pikaSupportConversations.length} pika_support разговора, очаквах точно 1`)
+    }
+    if (pikaSupportConversations[0]!.friendshipId !== officialFriendshipIdD) {
+      throw new Error(`friendshipId=${pikaSupportConversations[0]!.friendshipId}, очаквах СЪЩИЯ ${officialFriendshipIdD}`)
+    }
+  })
+
 } catch (err) {
   fail('Непредвидена грешка в E2E теста', err)
   if (server !== null) {
