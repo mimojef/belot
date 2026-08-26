@@ -616,6 +616,12 @@ export type LobbyFlowController = {
   render: () => void
   destroy: () => void
   getCurrentScreen: () => LobbySocialScreen
+  // Auto-return STATE A/B (§ "A → B AUTO NAVIGATION") — за да не rest-не
+  // излишно STATE A в STATE A (loading flash), caller-ът (main.ts's
+  // tournament_match_assigned handler) трябва да провери "показвам ли ВЕЧЕ
+  // точно този турнир" преди да извика navigateToTournamentDetail.
+  // getCurrentScreen() сам не стига — казва само екрана, не КОЙ турнир.
+  getCurrentTournamentDetailId: () => string | null
   setConnected: (value: boolean) => void
   setDisplayName: (value: string) => void
   setErrorText: (value: string | null) => void
@@ -9169,6 +9175,30 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'room_snapshot') {
+      // A tournament room's own awaiting_players/attendance window looks
+      // IDENTICAL to a normal quick-match room at this shape's granularity —
+      // roomStatus:'waiting' + game:null — but this branch was written only
+      // for the generic matchmaking queue, with no awareness of tournament
+      // context. For a round-transition silent attach (STATE B, § "SILENT
+      // ATTACH"), this room_snapshot arrives for a connection that is
+      // attached server-side but must NOT navigate anywhere client-side —
+      // the lobby's own STATE B renderer (renderTournamentInterRoundOpponentKnownScreen)
+      // owns the visible UI for that entire window. Without this guard, this
+      // handler still fired (isTournamentMatchOrigin was never checked),
+      // hijacked state.currentScreen to 'matchmaking-room', and called
+      // render(), overwriting the shared root's STATE B DOM with the
+      // matchmaking waiting-room screen — a THIRD, independent competing
+      // path from the resume_room.silent parser fix and the global popup
+      // fix (neither of those touches this handler at all). Bailing out here
+      // for ANY tournament-origin room (not just round_transition — a
+      // first_match tournament room's own awaiting_players snapshot has the
+      // exact same waiting+no-game shape and would hijack the screen the
+      // same way) leaves createActiveRoomFlowController's silent-entry watch
+      // (armed by armPendingTournamentSilentEntry) as the sole owner of what
+      // happens with this snapshot while not yet gameplay-ready.
+      if (message.isTournamentMatchOrigin) {
+        return false
+      }
       if (message.roomStatus !== 'waiting' || message.game != null) {
         return false
       }
@@ -9839,6 +9869,7 @@ export function createLobbyFlowController(
       doHideInitialOverlay()
     },
     getCurrentScreen: () => state.currentScreen,
+    getCurrentTournamentDetailId: () => (state.currentScreen === 'tournament-detail' ? state.tournamentDetailId : null),
     setConnected: (value) => {
       state.isConnected = value
       if (value) {

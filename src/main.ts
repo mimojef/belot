@@ -4753,13 +4753,42 @@ client = createGameServerClient({
         // room_resume_failed below), independent of which screen is showing,
         // without adding a new client-side poll/timer.
         attemptTournamentRoundTransitionSilentAttach(message.assignment)
+        // A → B AUTO NAVIGATION (§ "КЛЮЧОВО: A → B AUTO NAVIGATION") —
+        // event-driven auto-return: this push is the authoritative signal
+        // that STATE B is ready for this player, regardless of where they
+        // currently are in the SPA (lobby home, tournaments list, players,
+        // chat, ...). If they're already looking at this exact tournament's
+        // detail screen, navigateToTournamentDetail would just re-fetch and
+        // flash the loading state for no reason — getCurrentTournamentDetailId()
+        // lets us skip that and leave the in-place STATE A→B transition
+        // (already working, driven by fetchTournamentDetail re-renders)
+        // alone. lobby.navigateToTournamentDetail is the SAME function the
+        // tournaments list "Отвори" click uses — no second renderer, no
+        // polling: this fires exactly once per assignment, straight from the
+        // WS push.
+        if (lobby.getCurrentTournamentDetailId() !== message.assignment.tournamentId) {
+          lobby.navigateToTournamentDetail(message.assignment.tournamentId)
+        }
       }
       // Generic across every round transition (R16->QF/QF->SF/SF->Final, not
-      // just the final) — the unified lobby STATE A/B overlay is the single
-      // owner of this UX while the player is looking at the tournament-detail
-      // screen for it (§ "ЕДИН UI OWNER"). If they've navigated away, the
-      // global popup remains as a fallback so a match still isn't missed.
-      if (message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail') {
+      // just the final) — the unified lobby STATE A/B overlay is the single,
+      // UNCONDITIONAL owner of this UX for round_transition assignments,
+      // regardless of which lobby screen is currently showing. Gating this on
+      // lobby?.getCurrentScreen() === 'tournament-detail' used to let the
+      // global popup (and its non-silent onEnterTournamentMatch ->
+      // client.resumeRoom without silent:true -> room_resumed -> unconditional
+      // enterActiveRoomFromResume in the room_resumed handler below) race the
+      // silent attach armed above: any WS push landing while the player is on
+      // a different lobby screen — e.g. still on the tournaments list, or
+      // between screens during fetchTournamentDetail — set the popup's
+      // assignment, and tournamentMatchStartPopup's own render() only hides
+      // itself once activeRoom.getCurrentRoomId() matches, which stays null
+      // during the whole STATE B silent-attach window. Clicking the popup
+      // then bypassed isTournamentAttendanceReadyForSilentEntry entirely,
+      // producing the raw activeRoom attendance screen alongside STATE B.
+      // Only 'first_match' assignments (a real new tournament entry) still use
+      // the global popup as a fallback for "navigated away".
+      if (message.assignment.deadlineKind === 'round_transition') {
         tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
         return
       }

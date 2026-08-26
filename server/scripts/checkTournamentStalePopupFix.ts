@@ -50,6 +50,7 @@ const activeRoomTypes = await readProjectFile('src/app/activeRoom/activeRoomType
 const activeRoomController = await readProjectFile('src/app/activeRoom/createActiveRoomFlowController.ts')
 const mainTs = await readProjectFile('src/main.ts')
 const serverIndex = await readProjectFile('server/src/index.ts')
+const lobbyController = await readProjectFile('src/app/lobby/createLobbyFlowController.ts')
 
 console.log('\n═══ checkTournamentStalePopupFix ═══')
 
@@ -153,14 +154,49 @@ check(
 )
 
 check(
-  // Phase 2: generalized from the old final-only special case to every
-  // round-transition assignment (R16->QF/QF->SF/SF->Final) — the unified
-  // lobby STATE A/B overlay owns this UX for ANY round while the player is
-  // looking at the tournament-detail screen, not just the final.
-  'round-transition assignment on tournament detail is owned by inter-round STATE B, not popup/direct resume',
-  mainTs.includes("if (message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail') {")
+  // Phase 2 follow-up regression: a real browser reproduction showed the raw
+  // activeRoom attendance screen ("ИЗЧАКВАНЕ НА ИГРАЧИ") appearing together
+  // with the global "Продължи играта" popup during STATE B. Root cause was
+  // this handler suppressing the global popup ONLY while
+  // lobby?.getCurrentScreen() === 'tournament-detail' — any
+  // tournament_match_assigned push landing while the player was on a
+  // different lobby screen (or between screens) left the popup assignment
+  // set. tournamentMatchStartPopup's own render() only hides itself once
+  // activeRoom.getCurrentRoomId() equals the assignment's roomId, which stays
+  // null for the whole STATE B silent-attach window (activeRoomState is not
+  // set until the watch armed by armPendingTournamentSilentEntry actually
+  // fires) — so the popup rendered, and clicking it called plain
+  // client.resumeRoom(...) (no silent:true), producing room_resumed and an
+  // unconditional activeRoom.enterActiveRoomFromResume in the room_resumed
+  // handler below, bypassing isTournamentAttendanceReadyForSilentEntry
+  // entirely. Fix: round_transition assignments unconditionally clear the
+  // popup for that room, regardless of which lobby screen is showing — STATE
+  // A/B is the sole owner of this UX for every round transition, not just
+  // while the tournament-detail screen happens to be open.
+  'round-transition assignment unconditionally clears the global popup (not gated on getCurrentScreen), and never calls plain resumeRoom for it',
+  mainTs.includes("if (message.assignment.deadlineKind === 'round_transition') {")
     && mainTs.includes('tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)')
+    && !mainTs.includes("message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail'")
     && !mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'),
+)
+
+check(
+  'onTournamentActiveMatchRecovered global-popup callback wiring is unaware of deadlineKind (round_transition suppression must happen before this callback fires, not inside it)',
+  mainTs.includes('onTournamentActiveMatchRecovered: (assignment) => {')
+    && mainTs.includes('if (assignment !== null && assignment.reconnectToken !== null) {')
+    && mainTs.includes('tournamentMatchStartPopup.setAssignment(assignment)'),
+)
+
+check(
+  // The HTTP-fetch recovery path (createLobbyFlowController.fetchTournamentDetail)
+  // was already correct BEFORE this fix — it passes null instead of the
+  // assignment for round_transition, unlike the WS tournament_match_assigned
+  // handler that leaked. Kept here so a future regression in either path is
+  // caught regardless of which one regresses.
+  'fetchTournamentDetail suppresses onTournamentActiveMatchRecovered for round-transition assignments (HTTP path, unaffected by this bug)',
+  lobbyController.includes('hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)')
+    && lobbyController.includes('options.onTournamentActiveMatchRecovered?.(null)')
+    && lobbyController.includes('options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)'),
 )
 
 check(

@@ -820,7 +820,14 @@ await check('transition/state-machine wiring: no artificial wall-clock delay, bo
   const renderer = await readFile(join(projectRoot, 'src', 'app', 'lobby', 'renderTournamentsScreen.ts'), 'utf8')
   assert(renderer.indexOf('state.tournamentInterRoundPendingResult != null') < renderer.indexOf('state.tournamentDetailLoading'), 'pending branch is not before loading/generic branch')
 
-  assert(mainTs.includes("if (message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail') {"), 'round-transition assignment detail guard missing (generic, not final-only)')
+  // Regression: this guard used to be gated on lobby?.getCurrentScreen() ===
+  // 'tournament-detail', which left the global popup's assignment set (and
+  // clickable into a non-silent resumeRoom) whenever the push landed while
+  // the player was on any other lobby screen — producing the raw activeRoom
+  // attendance screen alongside STATE B. It is now unconditional for every
+  // round_transition assignment, regardless of the current lobby screen.
+  assert(mainTs.includes("if (message.assignment.deadlineKind === 'round_transition') {"), 'round-transition assignment detail guard missing (generic, not final-only)')
+  assert(!mainTs.includes("message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail'"), 'round-transition popup suppression is still gated on the current lobby screen instead of being unconditional')
   assert(!mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'), 'assignment still direct (non-silent) resumes before countdown')
 })
 
