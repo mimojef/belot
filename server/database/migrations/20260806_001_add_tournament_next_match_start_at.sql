@@ -1,0 +1,16 @@
+-- Generic persisted "next match gameplay start" deadline for ANY round
+-- transition (round_of_16->quarterfinal, quarterfinal->semifinal,
+-- semifinal->final) — not just the final. Semantics: the moment NEXT MATCH
+-- GAMEPLAY must begin, not the moment a client-side popup becomes visible.
+--
+-- Set exactly once, when all sibling/feeder matches required for the next
+-- round have completed (T0). Read by both the coordinator (to know when the
+-- presence/attendance window for the next match closes) and by the detail
+-- DTO (so refresh/reconnect reconstructs the same authoritative countdown).
+--
+-- Deliberately a NEW column rather than renaming final_start_at — renaming
+-- risks SQLite version-dependent ALTER TABLE ... RENAME COLUMN behavior and
+-- offers no restart-recovery benefit. final_start_at is left in place
+-- (unused going forward) rather than dropped, since SQLite DROP COLUMN also
+-- has version-dependent caveats and dropping is not required for Phase 1.
+ALTER TABLE tournament_matches ADD COLUMN next_match_start_at TEXT NULL;

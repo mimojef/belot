@@ -17,7 +17,7 @@ import {
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
 import type { PrivateRoomInviteEligibleFriend } from './privateRoomPopupMarkup'
-import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown } from './renderTournamentsScreen'
+import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment, renderTournamentPartnerSearchSection } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -833,6 +833,18 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; tournament: TournamentDetailSnapshot }
     | { ok: false; message: string; requiresPassword?: boolean }
   >
+  onTournamentActiveMatchRecovered?: (assignment: TournamentDetailSnapshot['myActiveMatch']) => void
+  // STATE B (§ "SILENT ATTACH") — извиква се веднъж за всяко ново
+  // round-transition myActiveMatch (deadlineKind === 'round_transition'),
+  // независимо от roundType (generic за R16/QF/SF->финал). Callback-ът
+  // трябва да silent-attach-не (resume_room {silent:true}) и да arm-не
+  // gameplay-entry watch-а — НЕ да навигира визуално, за разлика от старото
+  // onTournamentAutoEnterMatch поведение (само за финала, директен non-silent
+  // resume). Обикновен myActiveMatch assignment с deadlineKind ===
+  // 'first_match' (реален нов мач, не round continuation) продължава да минава през
+  // onTournamentActiveMatchRecovered/tournamentMatchStartPopup, непроменено.
+  onTournamentRoundTransitionAssignment?: (assignment: NonNullable<TournamentDetailSnapshot['myActiveMatch']>) => void
+  onTournamentSemifinalResultAckNeeded?: (tournamentId: string, semifinalMatchId: string) => void
   onTournamentUnlock?: (tournamentId: string, password: string) => Promise<
     | { ok: true; tournament: TournamentDetailSnapshot }
     | { ok: false; message: string; requiresPassword?: boolean }
@@ -863,6 +875,18 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onTournamentPartnerCandidatesLoad?: (tournamentId: string) => Promise<
+    | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
+    | { ok: false; message: string }
+  >
+  // Global partner search (§ "GLOBAL SEARCH AREA") — независим source от
+  // onTournamentPartnerCandidatesLoad (friends list): server-side query-based
+  // search сред ВСИЧКИ допустими registered players, не филтрира
+  // friends list-а. signal позволява AbortController cancel при нов query.
+  onTournamentPartnerCandidatesSearch?: (
+    tournamentId: string,
+    query: string,
+    signal: AbortSignal,
+  ) => Promise<
     | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
     | { ok: false; message: string }
   >
@@ -901,6 +925,12 @@ export type LobbyFlowController = {
   render: () => void
   destroy: () => void
   getCurrentScreen: () => LobbySocialScreen
+  // Auto-return STATE A/B (§ "A → B AUTO NAVIGATION") — за да не rest-не
+  // излишно STATE A в STATE A (loading flash), caller-ът (main.ts's
+  // tournament_match_assigned handler) трябва да провери "показвам ли ВЕЧЕ
+  // точно този турнир" преди да извика navigateToTournamentDetail.
+  // getCurrentScreen() сам не стига — казва само екрана, не КОЙ турнир.
+  getCurrentTournamentDetailId: () => string | null
   setConnected: (value: boolean) => void
   setDisplayName: (value: string) => void
   setErrorText: (value: string | null) => void
@@ -913,6 +943,11 @@ export type LobbyFlowController = {
   clearTopicsDirectoryMetadata: () => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
+  showTournamentDetail: (tournamentId: string) => void
+  showTournamentInterRoundPendingResult: (
+    tournamentId: string,
+    result: { currentRoundType: import('../network/createGameServerClient').TournamentRoundType; semifinalScoreA: number | null; semifinalScoreB: number | null },
+  ) => void
   openAuthModal: (mode: Exclude<import('./renderLobbyScreen').LobbyAuthModalMode, 'closed'>) => void
   suspendLobbyChatForActiveRoom: () => void
   forceLobbyChatResubscribeIfOnLobbyScreen: () => void
@@ -1525,6 +1560,13 @@ type InternalLobbyFlowState = {
   tournamentDetailLoading: boolean
   tournamentDetailErrorText: string | null
   tournamentDetail: TournamentDetailSnapshot | null
+  tournamentInterRoundPendingResult: {
+    tournamentId: string
+    currentRoundType: import('../network/createGameServerClient').TournamentRoundType
+    semifinalScoreA: number | null
+    semifinalScoreB: number | null
+    shownAt: number
+  } | null
   tournamentDetailRequiresPassword: boolean
   tournamentDetailPasswordDraft: string
   /**
@@ -1548,7 +1590,16 @@ type InternalLobbyFlowState = {
   tournamentPartnerPickerErrorText: string | null
   tournamentPartnerInviteBusy: boolean
   tournamentPartnerInviteErrorText: string | null
+  // Global partner search (§ "GLOBAL SEARCH AREA") — tournamentPartnerInviteQuery
+  // е самият текст в "Търси във всички играчи" полето (вече НЕ филтрира
+  // tournamentPartnerCandidates/friends list-а locally, а е самостоятелен
+  // server-side query). tournamentPartnerSearchResults е null, докато полето е
+  // празно (секцията е скрита), [] при "няма резултати", и масив с намерени
+  // кандидати иначе. tournamentPartnerSearchLoading управлява "Търсене..."
+  // текста, независимо от tournamentPartnerPickerLoading (friends list-a).
   tournamentPartnerInviteQuery: string
+  tournamentPartnerSearchResults: TournamentPartnerCandidateSnapshot[] | null
+  tournamentPartnerSearchLoading: boolean
   tournamentLeaveConfirmOpen: boolean
   tournamentLeaveBusy: boolean
   tournamentLeaveErrorText: string | null
@@ -2012,6 +2063,7 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentDetailLoading: false,
     tournamentDetailErrorText: null,
     tournamentDetail: null,
+    tournamentInterRoundPendingResult: null,
     tournamentDetailRequiresPassword: false,
     tournamentDetailPasswordDraft: '',
     tournamentDetailVerifiedPassword: null,
@@ -2028,6 +2080,8 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentPartnerInviteBusy: false,
     tournamentPartnerInviteErrorText: null,
     tournamentPartnerInviteQuery: '',
+    tournamentPartnerSearchResults: null,
+    tournamentPartnerSearchLoading: false,
     tournamentLeaveConfirmOpen: false,
     tournamentLeaveBusy: false,
     tournamentLeaveErrorText: null,
@@ -2390,6 +2444,14 @@ export function createLobbyFlowController(
   let tournamentStartCountdownIntervalId: ReturnType<typeof setInterval> | null = null
   let tournamentStartCountdownTournamentId: string | null = null
   let tournamentStartCountdownDeadline: string | null = null
+  let tournamentInterRoundCountdownIntervalId: ReturnType<typeof setInterval> | null = null
+  let tournamentInterRoundCountdownTournamentId: string | null = null
+  let tournamentInterRoundCountdownFinalStartAt: string | null = null
+  let tournamentInterRoundRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundAckRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundAckRefetchKey: string | null = null
+  let tournamentInterRoundPendingRefetchTimeoutId: ReturnType<typeof setTimeout> | null = null
+  let tournamentInterRoundPendingRefetchTournamentId: string | null = null
 
   // Единичен споделен interval за ВСИЧКИ fill-expiry countdown badge-ове в
   // списъчния изглед "Турнири" (§13 в task spec-а) — обхожда всички
@@ -2764,6 +2826,185 @@ export function createLobbyFlowController(
       }
       updateTournamentStartCountdownDom(mode, deadline)
     }, 1000)
+  }
+
+  function updateTournamentInterRoundCountdownDom(finalStartAt: string): void {
+    const target = options.root.querySelector<HTMLElement>('[data-tournament-inter-round-countdown="1"]')
+    if (target === null) return
+    const remainingMs = Date.parse(finalStartAt) - Date.now()
+    const seconds = Number.isFinite(remainingMs) ? Math.max(0, Math.ceil(remainingMs / 1000)) : 0
+    target.textContent = `00:${String(seconds).padStart(2, '0')}`
+  }
+
+  function clearTournamentInterRoundCountdownLoop(): void {
+    if (tournamentInterRoundCountdownIntervalId !== null) {
+      window.clearInterval(tournamentInterRoundCountdownIntervalId)
+      tournamentInterRoundCountdownIntervalId = null
+    }
+    if (tournamentInterRoundRefetchTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundRefetchTimeoutId)
+      tournamentInterRoundRefetchTimeoutId = null
+    }
+    tournamentInterRoundCountdownTournamentId = null
+    tournamentInterRoundCountdownFinalStartAt = null
+  }
+
+  function scheduleTournamentInterRoundAckRefetch(tournamentId: string, semifinalMatchId: string): void {
+    const key = `${tournamentId}:${semifinalMatchId}`
+    if (tournamentInterRoundAckRefetchTimeoutId !== null && tournamentInterRoundAckRefetchKey === key) {
+      return
+    }
+    if (tournamentInterRoundAckRefetchTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundAckRefetchTimeoutId)
+    }
+    tournamentInterRoundAckRefetchKey = key
+    tournamentInterRoundAckRefetchTimeoutId = window.setTimeout(() => {
+      tournamentInterRoundAckRefetchTimeoutId = null
+      tournamentInterRoundAckRefetchKey = null
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+        void fetchTournamentDetail(tournamentId)
+      }
+    }, 350)
+  }
+
+  function clearTournamentInterRoundPendingRefetch(): void {
+    if (tournamentInterRoundPendingRefetchTimeoutId !== null) {
+      window.clearTimeout(tournamentInterRoundPendingRefetchTimeoutId)
+      tournamentInterRoundPendingRefetchTimeoutId = null
+    }
+    tournamentInterRoundPendingRefetchTournamentId = null
+  }
+
+  // Огледало на scheduleTournamentInterRoundAckRefetch по-горе — покрива
+  // краткия authoritative propagation прозорец между
+  // acknowledgeTournamentSemifinalResult (WS, fire-and-forget) и
+  // коордиnaторския tick, който прави myInterRoundWaiting authoritative на
+  // сървъра (виж tournamentCoordinator.ts tickNow() след успешен ack).
+  // Единичен, ограничен retry — НЕ wall-clock UX delay: ако след него
+  // pending все още не е разрешен (нито myInterRoundWaiting, нито terminal
+  // state), оставяме следващия WS push (feeder score/match assigned/etc.)
+  // да поеме re-fetch-а вместо да chain-ваме таймера безкрайно.
+  function scheduleTournamentInterRoundPendingRefetch(tournamentId: string): void {
+    if (
+      tournamentInterRoundPendingRefetchTimeoutId !== null &&
+      tournamentInterRoundPendingRefetchTournamentId === tournamentId
+    ) {
+      return
+    }
+    clearTournamentInterRoundPendingRefetch()
+    tournamentInterRoundPendingRefetchTournamentId = tournamentId
+    tournamentInterRoundPendingRefetchTimeoutId = window.setTimeout(() => {
+      tournamentInterRoundPendingRefetchTimeoutId = null
+      tournamentInterRoundPendingRefetchTournamentId = null
+      if (
+        state.currentScreen === 'tournament-detail' &&
+        state.tournamentDetailId === tournamentId &&
+        state.tournamentInterRoundPendingResult !== null
+      ) {
+        void fetchTournamentDetail(tournamentId)
+      }
+    }, 350)
+  }
+
+  // isStillValid discriminates which source is driving the countdown — STATE
+  // A/defensive-completed-branch (myInterRoundWaiting.nextMatchStartAt/
+  // finalStartAt) vs STATE B (myActiveMatch.attendanceDeadlineAt) — so both
+  // can share one DOM-patch ticker/refetch mechanism instead of duplicating
+  // it (see call sites in the post-render side-effect block below).
+  function startTournamentInterRoundCountdownLoop(
+    tournamentId: string,
+    deadlineAt: string,
+    isStillValid: () => boolean,
+  ): void {
+    if (
+      tournamentInterRoundCountdownIntervalId !== null &&
+      tournamentInterRoundCountdownTournamentId === tournamentId &&
+      tournamentInterRoundCountdownFinalStartAt === deadlineAt
+    ) {
+      updateTournamentInterRoundCountdownDom(deadlineAt)
+      return
+    }
+
+    clearTournamentInterRoundCountdownLoop()
+    tournamentInterRoundCountdownTournamentId = tournamentId
+    tournamentInterRoundCountdownFinalStartAt = deadlineAt
+    updateTournamentInterRoundCountdownDom(deadlineAt)
+
+    tournamentInterRoundCountdownIntervalId = window.setInterval(() => {
+      if (
+        state.currentScreen !== 'tournament-detail' ||
+        state.tournamentDetailId !== tournamentId ||
+        !isStillValid()
+      ) {
+        clearTournamentInterRoundCountdownLoop()
+        return
+      }
+      updateTournamentInterRoundCountdownDom(deadlineAt)
+    }, 250)
+
+    const refetchDelayMs = Math.max(0, Date.parse(deadlineAt) - Date.now()) + 150
+    tournamentInterRoundRefetchTimeoutId = window.setTimeout(() => {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+        void fetchTournamentDetail(tournamentId)
+      }
+    }, refetchDelayMs)
+  }
+
+  function patchTournamentInterRoundSiblingDom(matchId: string, scoreA: number | null, scoreB: number | null, statusText: string): void {
+    const scoreNode = options.root.querySelector<HTMLElement>(
+      `[data-tournament-inter-round-score="1"][data-match-id="${CSS.escape(matchId)}"]`,
+    )
+    if (scoreNode !== null) {
+      scoreNode.textContent = scoreA !== null && scoreB !== null ? `${scoreA} : ${scoreB}` : '0 : 0'
+    }
+    const statusNode = options.root.querySelector<HTMLElement>(
+      `[data-tournament-inter-round-status="1"][data-match-id="${CSS.escape(matchId)}"]`,
+    )
+    if (statusNode !== null) {
+      statusNode.textContent = statusText
+    }
+  }
+
+  function patchTournamentInterRoundSiblingProgress(input: {
+    tournamentId: string
+    matchId: string
+    scoreA: number | null
+    scoreB: number | null
+    status: 'in_progress' | 'completed'
+    progressLabel: string
+    winnerTeamId?: string | null
+  }): boolean {
+    const waiting = state.tournamentDetail?.myInterRoundWaiting ?? null
+    if (
+      state.currentScreen !== 'tournament-detail' ||
+      state.tournamentDetailId !== input.tournamentId ||
+      waiting === null ||
+      waiting.sibling.matchId !== input.matchId
+    ) {
+      return false
+    }
+    const patchedSibling = {
+      ...waiting.sibling,
+      scoreA: input.scoreA,
+      scoreB: input.scoreB,
+      status: input.status,
+      winnerTeamId: input.winnerTeamId ?? waiting.sibling.winnerTeamId,
+      progressLabel: input.progressLabel,
+    }
+    state.tournamentDetail = {
+      ...state.tournamentDetail!,
+      myInterRoundWaiting: {
+        ...waiting,
+        sibling: patchedSibling,
+        // legacy alias kept mirrored for consistency, same as the server DTO.
+        siblingSemifinal: patchedSibling,
+      },
+    }
+    if (input.status === 'in_progress') {
+      patchTournamentInterRoundSiblingDom(input.matchId, input.scoreA, input.scoreB, input.progressLabel)
+      return true
+    }
+    return false
   }
 
   function updateTournamentListFillExpiryBadges(): void {
@@ -3585,6 +3826,7 @@ export function createLobbyFlowController(
       tournamentDetailLoading: state.tournamentDetailLoading,
       tournamentDetailErrorText: state.tournamentDetailErrorText,
       tournamentDetail: state.tournamentDetail,
+      tournamentInterRoundPendingResult: state.tournamentInterRoundPendingResult,
       tournamentDetailRequiresPassword: state.tournamentDetailRequiresPassword,
       tournamentDetailPasswordDraft: state.tournamentDetailPasswordDraft,
       tournamentDetailUnlockBusy: state.tournamentDetailUnlockBusy,
@@ -3600,6 +3842,8 @@ export function createLobbyFlowController(
       tournamentPartnerInviteBusy: state.tournamentPartnerInviteBusy,
       tournamentPartnerInviteErrorText: state.tournamentPartnerInviteErrorText,
       tournamentPartnerInviteQuery: state.tournamentPartnerInviteQuery,
+      tournamentPartnerSearchResults: state.tournamentPartnerSearchResults,
+      tournamentPartnerSearchLoading: state.tournamentPartnerSearchLoading,
       tournamentLeaveConfirmOpen: state.tournamentLeaveConfirmOpen,
       tournamentLeaveBusy: state.tournamentLeaveBusy,
       tournamentLeaveErrorText: state.tournamentLeaveErrorText,
@@ -4257,8 +4501,13 @@ export function createLobbyFlowController(
         void submitTournamentPartnerInvite(profileId)
       },
       onTournamentPartnerInviteQueryChange: (value) => {
+        // НЕ вика render() тук нарочно (§ "TARGETED SEARCH RESULT" в
+        // patchTournamentPartnerSearchSection-ния коментар) — <input>-ът вече
+        // отразява typed value-то directly от browser-а (native поведение,
+        // не се нуждае от re-render), а triggerTournamentPartnerSearch по-долу
+        // патчва само search-резултатната секция, без да пипа root-а.
         state.tournamentPartnerInviteQuery = value
-        render()
+        triggerTournamentPartnerSearch(value)
       },
       onTournamentPartnerInviteAccept: (tournamentId, inviteId) => {
         void respondTournamentPartnerInvite(tournamentId, inviteId, 'accept')
@@ -5306,6 +5555,45 @@ export function createLobbyFlowController(
       startTournamentStartCountdownLoop(state.tournamentDetail.tournamentId, 'fill', state.tournamentDetail.fillExpiresAt)
     } else {
       clearTournamentStartCountdownLoop()
+    }
+
+    if (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentDetail !== null &&
+      state.tournamentDetail.myInterRoundWaiting?.nextMatchStartAt !== null &&
+      state.tournamentDetail.myInterRoundWaiting?.nextMatchStartAt !== undefined
+    ) {
+      // Defensive-completed branch inside renderTournamentInterRoundWaitingScreen
+      // (myActiveMatch race, see its comment) — kept alongside STATE B below.
+      const nextMatchStartAt = state.tournamentDetail.myInterRoundWaiting.nextMatchStartAt
+      startTournamentInterRoundCountdownLoop(
+        state.tournamentDetail.tournamentId,
+        nextMatchStartAt,
+        () => state.tournamentDetail?.myInterRoundWaiting?.nextMatchStartAt === nextMatchStartAt,
+      )
+    } else if (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentDetail !== null &&
+      hasTournamentRoundTransitionAssignment(state.tournamentDetail.myActiveMatch) &&
+      state.tournamentDetail.myActiveMatch?.attendanceDeadlineAt !== null &&
+      state.tournamentDetail.myActiveMatch?.attendanceDeadlineAt !== undefined
+    ) {
+      // STATE B — countdown source of truth is myActiveMatch.attendanceDeadlineAt,
+      // which the coordinator aligns exactly to the persisted
+      // next_match_start_at for round-transition matches (see
+      // ensureMatchRoom's "ONE authoritative deadline" comment server-side).
+      const matchId = state.tournamentDetail.myActiveMatch.matchId
+      const attendanceDeadlineAt = state.tournamentDetail.myActiveMatch.attendanceDeadlineAt
+      startTournamentInterRoundCountdownLoop(
+        state.tournamentDetail.tournamentId,
+        attendanceDeadlineAt,
+        () => (
+          state.tournamentDetail?.myActiveMatch?.matchId === matchId &&
+          state.tournamentDetail?.myActiveMatch?.attendanceDeadlineAt === attendanceDeadlineAt
+        ),
+      )
+    } else {
+      clearTournamentInterRoundCountdownLoop()
     }
 
     if (state.currentScreen === 'tournaments') {
@@ -7677,6 +7965,8 @@ export function createLobbyFlowController(
     state.currentScreen = 'tournament-detail'
     state.tournamentDetailId = tournamentId
     state.tournamentDetail = null
+    state.tournamentInterRoundPendingResult = null
+    clearTournamentInterRoundPendingRefetch()
     state.tournamentDetailLoading = true
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
@@ -7689,6 +7979,71 @@ export function createLobbyFlowController(
     }
     render()
     void fetchTournamentDetail(tournamentId)
+  }
+
+  function showTournamentInterRoundPendingResult(
+    tournamentId: string,
+    result: { currentRoundType: import('../network/createGameServerClient').TournamentRoundType; semifinalScoreA: number | null; semifinalScoreB: number | null },
+  ): void {
+    leaveAdminServerIfActive()
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    state.currentScreen = 'tournament-detail'
+    state.tournamentDetailId = tournamentId
+    state.tournamentDetail = null
+    state.tournamentInterRoundPendingResult = {
+      tournamentId,
+      currentRoundType: result.currentRoundType,
+      semifinalScoreA: result.semifinalScoreA,
+      semifinalScoreB: result.semifinalScoreB,
+      shownAt: Date.now(),
+    }
+    clearTournamentInterRoundPendingRefetch()
+    state.tournamentDetailLoading = true
+    state.tournamentDetailErrorText = null
+    state.tournamentDetailRequiresPassword = false
+    state.tournamentDetailPasswordDraft = ''
+    state.tournamentDetailVerifiedPassword = null
+    state.tournamentDetailUnlockErrorText = null
+    const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    void fetchTournamentDetail(tournamentId)
+  }
+
+  // Задържа transition/pending presentation-а, докато не се потвърди
+  // authoritative successor state за ТОЗИ турнир: A. myInterRoundWaiting
+  // (waiting screen) или C. terminal статус/viewer състояние (нормалният
+  // detail/error/eliminated flow поема оттук нататък). НЕ проверява
+  // detail.myActiveMatch тук нарочно — myActiveMatch идва от
+  // tournamentCoordinator.getAssignmentForProfile(), който обхваща ВСИЧКИ
+  // активни турнири на профила и може временно да сочи towards финала на
+  // ТОЗИ турнир (B) или дори towards съвсем друг турнир, докато
+  // myInterRoundWaiting все още не е готов на сървъра — third-ирането му
+  // като "терминал" тук причиняваше преждевременно изчистване на pending
+  // state-а и generic bracket fallthrough (виж fetchTournamentDetail за B).
+  function shouldKeepTournamentInterRoundPendingResult(
+    detail: TournamentDetailSnapshot,
+  ): boolean {
+    return state.tournamentInterRoundPendingResult !== null &&
+      state.tournamentInterRoundPendingResult.tournamentId === detail.tournamentId &&
+      detail.status !== 'finished' &&
+      detail.status !== 'cancelled' &&
+      detail.status !== 'admin_cancelled' &&
+      detail.status !== 'auto_cancelled' &&
+      detail.status !== 'failed' &&
+      detail.viewer.isParticipant &&
+      detail.viewer.entryStatus !== 'eliminated' &&
+      detail.viewer.entryStatus !== 'withdrawn' &&
+      detail.viewer.entryStatus !== 'refunded' &&
+      detail.myInterRoundWaiting === null &&
+      // STATE B готово (myActiveMatch с deadlineKind === 'round_transition')
+      // също прекратява pending-а — иначе играч, чийто sibling е бил вече
+      // completed преди неговия match, остава на pending screen-а вместо
+      // директно STATE B (§ "INITIAL STATE — SIBLING ALREADY COMPLETED").
+      !hasTournamentRoundTransitionAssignment(detail.myActiveMatch)
   }
 
   async function fetchTournamentDetail(tournamentId: string): Promise<void> {
@@ -7719,6 +8074,59 @@ export function createLobbyFlowController(
     }
 
     state.tournamentDetail = result.tournament
+    if (!shouldKeepTournamentInterRoundPendingResult(result.tournament)) {
+      state.tournamentInterRoundPendingResult = null
+    }
+
+    // STATE B (generic за всеки round transition, не само финала) — trigger-ва
+    // silent attach независимо дали pending все още се държи (виж коментара
+    // при shouldKeepTournamentInterRoundPendingResult) — иначе pending би
+    // останал "заклещен", докато myInterRoundWaiting никога не се задейства
+    // между sibling completion и round readiness. resume_room е idempotent
+    // при повторни извиквания със същия roomId/token (виж
+    // armPendingTournamentSilentEntry guard-а в main.ts), затова е безопасно
+    // да достигне до тук и на следващи re-fetch-ове.
+    if (hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)) {
+      options.onTournamentRoundTransitionAssignment?.(result.tournament.myActiveMatch!)
+    }
+
+    if (state.tournamentInterRoundPendingResult !== null) {
+      options.onTournamentActiveMatchRecovered?.(null)
+      state.tournamentDetailRequiresPassword = false
+      state.tournamentDetailErrorText = null
+      // Все още нито A (myInterRoundWaiting), нито C (terminal) — единичен
+      // ограничен authoritative refetch (виж коментара при функцията) вместо
+      // да разчитаме единствено на случаен бъдещ WS push.
+      scheduleTournamentInterRoundPendingRefetch(tournamentId)
+      render()
+      return
+    }
+    clearTournamentInterRoundPendingRefetch()
+    if (
+      result.tournament.myInterRoundWaiting !== null &&
+      result.tournament.myInterRoundWaiting.ownResultAcknowledged === false
+    ) {
+      options.onTournamentSemifinalResultAckNeeded?.(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+      scheduleTournamentInterRoundAckRefetch(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+    }
+    // STATE A и STATE B имат ЕДИН owner (unified inter-round overlay-а) —
+    // потискат global tournamentMatchStartPopup/assignment callout-а по
+    // същия начин. Обикновено 'first_match' assignment (реален нов мач)
+    // продължава да минава през onTournamentActiveMatchRecovered непроменено.
+    if (
+      result.tournament.myInterRoundWaiting !== null ||
+      hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)
+    ) {
+      options.onTournamentActiveMatchRecovered?.(null)
+    } else {
+      options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
+    }
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailErrorText = null
     render()
@@ -7754,6 +8162,41 @@ export function createLobbyFlowController(
     }
 
     state.tournamentDetail = result.tournament
+    if (!shouldKeepTournamentInterRoundPendingResult(result.tournament)) {
+      state.tournamentInterRoundPendingResult = null
+    }
+    if (hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)) {
+      options.onTournamentRoundTransitionAssignment?.(result.tournament.myActiveMatch!)
+    }
+    if (state.tournamentInterRoundPendingResult !== null) {
+      options.onTournamentActiveMatchRecovered?.(null)
+      state.tournamentDetailRequiresPassword = false
+      state.tournamentDetailUnlockErrorText = null
+      state.tournamentDetailPasswordDraft = ''
+      render()
+      return
+    }
+    if (
+      result.tournament.myInterRoundWaiting !== null &&
+      result.tournament.myInterRoundWaiting.ownResultAcknowledged === false
+    ) {
+      options.onTournamentSemifinalResultAckNeeded?.(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+      scheduleTournamentInterRoundAckRefetch(
+        result.tournament.myInterRoundWaiting.tournamentId,
+        result.tournament.myInterRoundWaiting.completedSemifinalMatchId,
+      )
+    }
+    if (
+      result.tournament.myInterRoundWaiting !== null ||
+      hasTournamentRoundTransitionAssignment(result.tournament.myActiveMatch)
+    ) {
+      options.onTournamentActiveMatchRecovered?.(null)
+    } else {
+      options.onTournamentActiveMatchRecovered?.(result.tournament.myActiveMatch)
+    }
     state.tournamentDetailRequiresPassword = false
     state.tournamentDetailUnlockErrorText = null
     state.tournamentDetailPasswordDraft = ''
@@ -7826,6 +8269,78 @@ export function createLobbyFlowController(
     render()
   }
 
+  // Global partner search (§ "GLOBAL SEARCH AREA") — независим debounced
+  // runner от playersSearchRunner (различен endpoint/query scope), но
+  // огледален pattern (latest-request-wins, AbortController stale-response
+  // защита). НЕ филтрира state.tournamentPartnerCandidates (friends list-а) —
+  // резултатите отиват в отделно поле, tournamentPartnerSearchResults.
+  const TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH = 2
+
+  const tournamentPartnerSearchRunner = createDebouncedPlayerSearch<TournamentPartnerCandidateSnapshot[]>({
+    run: (query, signal) => {
+      if (!options.onTournamentPartnerCandidatesSearch || state.tournamentDetailId === null) {
+        return Promise.reject(new Error('Търсенето временно не е налично.'))
+      }
+      return options.onTournamentPartnerCandidatesSearch(state.tournamentDetailId, query, signal).then((result) => {
+        if (!result.ok) {
+          throw new Error(result.message)
+        }
+        return result.candidates
+      })
+    },
+    onResult: (result) => {
+      // Защита срещу stale response — ако popup-ът вече е затворен, или
+      // input-ът вече не съдържа точно този query (потребителят е продължил
+      // да пише/изчистил е междувременно), игнорирай резултата (виж §
+      // "ASYNC SEARCH / STALE RESPONSES").
+      if (!state.tournamentPartnerPickerOpen) return
+      if (state.tournamentPartnerInviteQuery.trim() !== result.query) return
+      state.tournamentPartnerSearchLoading = false
+      if (result.ok) {
+        state.tournamentPartnerSearchResults = result.value
+      }
+      patchTournamentPartnerSearchSection()
+    },
+    delayMs: 300,
+  })
+
+  function triggerTournamentPartnerSearch(query: string): void {
+    const trimmed = query.trim()
+    if (trimmed.length < TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH) {
+      tournamentPartnerSearchRunner.cancel()
+      state.tournamentPartnerSearchResults = null
+      state.tournamentPartnerSearchLoading = false
+    } else {
+      state.tournamentPartnerSearchLoading = true
+      tournamentPartnerSearchRunner.schedule(trimmed)
+    }
+    patchTournamentPartnerSearchSection()
+  }
+
+  // Targeted patch (§ "АРХИТЕКТУРНО ЖЕЛАН FIX") — root cause на "search
+  // input губи focus след всяка буква" беше, че onTournamentPartnerInviteQueryChange
+  // и tournamentPartnerSearchRunner.onResult викаха пълния render(), който
+  // прави options.root.innerHTML = ... (renderLobbyScreen.ts) на ВСЯКА буква/
+  // async resolve — унищожавайки и пресъздавайки <input
+  // data-tournament-partner-query="1">, който няма save/restore focus логика
+  // (за разлика от data-lobby-players-search/data-lobby-chat-message-input,
+  // единствените други input-и, оцеляващи през този rebuild). Тук вместо
+  // това пипаме САМО [data-tournament-partner-search-results="1"] — <input>-ът
+  // никога не се докосва, значи browser-ът естествено запазва
+  // focus/caret/value без нужда от explicit save/restore.
+  function patchTournamentPartnerSearchSection(): void {
+    if (!state.tournamentPartnerPickerOpen) return
+    const container = options.root.querySelector<HTMLElement>('[data-tournament-partner-search-results="1"]')
+    if (container === null) return
+    container.innerHTML = renderTournamentPartnerSearchSection(state)
+    container.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-invite]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const profileId = btn.dataset.tournamentPartnerInvite ?? ''
+        if (profileId) void submitTournamentPartnerInvite(profileId)
+      })
+    })
+  }
+
   async function openTournamentPartnerPicker(): Promise<void> {
     if (!options.onTournamentPartnerCandidatesLoad || state.tournamentDetailId === null) return
     const tournamentId = state.tournamentDetailId
@@ -7834,6 +8349,8 @@ export function createLobbyFlowController(
     state.tournamentPartnerPickerErrorText = null
     state.tournamentPartnerInviteErrorText = null
     state.tournamentPartnerInviteQuery = ''
+    state.tournamentPartnerSearchResults = null
+    state.tournamentPartnerSearchLoading = false
     render()
     const result = await options.onTournamentPartnerCandidatesLoad(tournamentId)
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
@@ -7849,9 +8366,12 @@ export function createLobbyFlowController(
 
   function closeTournamentPartnerPicker(): void {
     if (state.tournamentPartnerInviteBusy) return
+    tournamentPartnerSearchRunner.cancel()
     state.tournamentPartnerPickerOpen = false
     state.tournamentPartnerPickerErrorText = null
     state.tournamentPartnerInviteErrorText = null
+    state.tournamentPartnerSearchResults = null
+    state.tournamentPartnerSearchLoading = false
     render()
   }
 
@@ -7953,7 +8473,19 @@ export function createLobbyFlowController(
 
     state.tournamentLeaveConfirmOpen = false
     state.tournamentLeaveErrorText = null
-    mergeTournamentSummaryIntoDetail(result.tournament)
+    // Own-leave success path (§ "КРИТИЧНО: ПРОВЕРИ OWN-LEAVE SUCCESS PATH") —
+    // leave-ът връща само TournamentSummarySnapshot (counters/status/viewer),
+    // НЕ пълния TournamentDetailSnapshot. mergeTournamentSummaryIntoDetail
+    // (shallow spread) update-ва коректно тези summary полета, но
+    // detail-only полета като teams/myTeam НЕ съществуват в summary-то,
+    // затова оцеляват непроменени от стария state — точно затова "ГОТОВ
+    // ОТБОР" card-ът оставаше видим въпреки че counters/action бутоните вече
+    // бяха fresh. Auto-released partner-ът разчита на отделен WS push
+    // (tournament_economy_notice/partner_left) за същия refetch — leaving
+    // player-ът никога не получава този push за себе си (той е причината за
+    // dissolution-а, не recipient), затова се нуждае от собствен authoritative
+    // refetch тук, symmetric на partner_left обработката.
+    void fetchTournamentDetail(tournamentId)
     void refetchTournamentsList()
     render()
   }
@@ -12890,6 +13422,47 @@ export function createLobbyFlowController(
       return false
     }
 
+    if (message.type === 'tournament_feeder_score_progress' || message.type === 'tournament_feeder_match_completed') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        if (message.type === 'tournament_feeder_score_progress') {
+          const patched = patchTournamentInterRoundSiblingProgress({
+            tournamentId: message.tournamentId,
+            matchId: message.matchId,
+            scoreA: message.scoreTeamA,
+            scoreB: message.scoreTeamB,
+            status: 'in_progress',
+            progressLabel: 'Играе се',
+          })
+          if (patched) return false
+        }
+        if (message.type === 'tournament_feeder_match_completed') {
+          patchTournamentInterRoundSiblingProgress({
+            tournamentId: message.tournamentId,
+            matchId: message.matchId,
+            scoreA: message.finalScoreTeamA,
+            scoreB: message.finalScoreTeamB,
+            status: 'completed',
+            winnerTeamId: message.winnerTeamId,
+            progressLabel: 'Завършен',
+          })
+        }
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      return false
+    }
+
+    // Auto-release realtime update (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
+    // само 'partner_left' носи tournamentId (creator_cancelled/fill_expired
+    // засягат играч, който вече не гледа detail-a на затворения турнир, така
+    // че не се нуждаят от този refresh). Огледален pattern на
+    // tournament_match_assigned/tournament_feeder_match_completed по-горе.
+    if (message.type === 'tournament_economy_notice' && message.reason === 'partner_left') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      return false
+    }
+
     if (message.type === 'guest_trial_error') {
       // guest_trial_limit_reached е нормален state (лимитът е изчерпан), не unexpected
       // грешка — popup-ът трябва directно да превключи на exhausted state (heading +
@@ -13016,6 +13589,30 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'room_snapshot') {
+      // A tournament room's own awaiting_players/attendance window looks
+      // IDENTICAL to a normal quick-match room at this shape's granularity —
+      // roomStatus:'waiting' + game:null — but this branch was written only
+      // for the generic matchmaking queue, with no awareness of tournament
+      // context. For a round-transition silent attach (STATE B, § "SILENT
+      // ATTACH"), this room_snapshot arrives for a connection that is
+      // attached server-side but must NOT navigate anywhere client-side —
+      // the lobby's own STATE B renderer (renderTournamentInterRoundOpponentKnownScreen)
+      // owns the visible UI for that entire window. Without this guard, this
+      // handler still fired (isTournamentMatchOrigin was never checked),
+      // hijacked state.currentScreen to 'matchmaking-room', and called
+      // render(), overwriting the shared root's STATE B DOM with the
+      // matchmaking waiting-room screen — a THIRD, independent competing
+      // path from the resume_room.silent parser fix and the global popup
+      // fix (neither of those touches this handler at all). Bailing out here
+      // for ANY tournament-origin room (not just round_transition — a
+      // first_match tournament room's own awaiting_players snapshot has the
+      // exact same waiting+no-game shape and would hijack the screen the
+      // same way) leaves createActiveRoomFlowController's silent-entry watch
+      // (armed by armPendingTournamentSilentEntry) as the sole owner of what
+      // happens with this snapshot while not yet gameplay-ready.
+      if (message.isTournamentMatchOrigin) {
+        return false
+      }
       if (message.roomStatus !== 'waiting' || message.game != null) {
         return false
       }
@@ -14523,10 +15120,12 @@ export function createLobbyFlowController(
       stopWaitingRoomActivity()
       clearPrivateRoomCountdownLoop()
       clearServerRoomSnapshot()
+      clearTournamentInterRoundPendingRefetch()
       resetFinalFillSequence()
       doHideInitialOverlay()
     },
     getCurrentScreen: () => state.currentScreen,
+    getCurrentTournamentDetailId: () => (state.currentScreen === 'tournament-detail' ? state.tournamentDetailId : null),
     setConnected: (value) => {
       state.isConnected = value
       if (value) {
@@ -14603,6 +15202,8 @@ export function createLobbyFlowController(
     clearTopicsDirectoryMetadata,
     startMatchmaking,
     resetToLobby,
+    showTournamentDetail,
+    showTournamentInterRoundPendingResult,
     openAuthModal,
     suspendLobbyChatForActiveRoom,
     forceLobbyChatResubscribeIfOnLobbyScreen,

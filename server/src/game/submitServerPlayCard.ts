@@ -24,6 +24,7 @@ import {
   getServerTimerNow,
   createServerPlayingTimerState,
   isServerSeatControlledByBot,
+  resolveServerBotActionDelayMs,
 } from './serverTimerStateHelpers.js'
 import { SERVER_TIMING_CONFIG } from './serverTimingConfig.js'
 
@@ -244,7 +245,7 @@ function applyTrickCompletion(
   const timerStartsAt =
     getServerTimerNow() + SERVER_TIMING_CONFIG.playAfterTrickCollectionDelayMs
   const winnerTimerStartedAt = isServerSeatControlledByBot(nextState, winnerSeat)
-    ? timerStartsAt - SERVER_TIMING_CONFIG.playBotDelayMs
+    ? timerStartsAt - resolveServerBotActionDelayMs(nextState, SERVER_TIMING_CONFIG.playBotDelayMs)
     : timerStartsAt
 
   return {

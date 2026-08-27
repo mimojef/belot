@@ -145,6 +145,14 @@ export type TournamentAttendancePlayerSummary = {
   avatarUrl: string | null
 }
 
+// Presence на точно този играч в момента на snapshot-а (§"КАКВО СЕ ВИЖДА НА
+// 3-MINUTE SCREEN" в task spec-а) — project-wide online семантика (виж
+// isProfileOnline dep в tournamentCoordinator.ts), не room-scoped
+// attachment. isOnline е computed at snapshot-time, не persisted.
+export type TournamentAttendanceRosterEntry = TournamentAttendancePlayerSummary & {
+  isOnline: boolean
+}
+
 export type TournamentAttendanceSnapshot = {
   state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
   serverNow: string
@@ -152,6 +160,11 @@ export type TournamentAttendanceSnapshot = {
   secondsRemaining: number
   missingPlayers: TournamentAttendancePlayerSummary[]
   missingByTeam: Record<Team, TournamentAttendancePlayerSummary[]>
+  // Пълен 4-играчен roster с per-seat presence — нужен на новия dedicated
+  // 3-минутен waiting екран (§"КАКВО СЕ ВИЖДА НА 3-MINUTE SCREEN"), за
+  // разлика от missingPlayers/missingByTeam (само липсващите). Подредена
+  // по seat assignment, не по presence.
+  roster: TournamentAttendanceRosterEntry[]
   resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
   gameStartAt: string | null
   startSecondsRemaining: number

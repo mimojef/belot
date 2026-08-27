@@ -156,6 +156,7 @@ export type TournamentMatchSnapshot = {
   liveScoreTeamA?: number | null
   liveScoreTeamB?: number | null
   progressLabel?: string
+  finalStartAt?: string | null
   startedAt: string | null
   completedAt: string | null
 }
@@ -181,6 +182,41 @@ export type TournamentMatchAssignmentSnapshot = {
   deadlineKind: 'first_match' | 'round_transition' | null
   attendanceDeadlineAt: string | null
   gameStartAt: string | null
+  matchStatus: 'awaiting_players' | 'countdown' | 'in_progress'
+}
+
+export type TournamentInterRoundWaitingSiblingSnapshot = {
+  matchId: string
+  roundIndex: number
+  teamA: TournamentTeamSnapshot
+  teamB: TournamentTeamSnapshot
+  scoreA: number | null
+  scoreB: number | null
+  status: TournamentMatchStatus
+  winnerTeamId: string | null
+  progressLabel: string
+}
+
+export type TournamentInterRoundWaitingSnapshot = {
+  tournamentId: string
+  currentRoundType: TournamentRoundType
+  nextRoundType: TournamentRoundType
+  completedMatchId: string
+  sibling: TournamentInterRoundWaitingSiblingSnapshot
+  ownResultAcknowledged: boolean
+  otherFinalistReady: boolean
+  nextMatchId: string | null
+  nextRoomId: string | null
+  nextMatchStartAt: string | null
+  serverNow: string
+  // legacy aliases (Phase 1 backward compat) — mirror the generic fields
+  // above 1:1. See server/src/tournament/tournamentDto.ts's
+  // TournamentInterRoundWaitingDto comment.
+  completedSemifinalMatchId: string
+  siblingSemifinal: TournamentInterRoundWaitingSiblingSnapshot
+  finalMatchId: string | null
+  finalRoomId: string | null
+  finalStartAt: string | null
 }
 
 export type TournamentPartnerInviteSnapshot = {
@@ -250,8 +286,13 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
   teams: TournamentTeamSnapshot[]
   rounds: TournamentRoundSnapshot[]
   myActiveMatch: TournamentMatchAssignmentSnapshot | null
+  myInterRoundWaiting: TournamentInterRoundWaitingSnapshot | null
   incomingPartnerInvite: TournamentPartnerInviteSnapshot | null
   outgoingPartnerInvite: TournamentPartnerInviteSnapshot | null
+  // Authoritative "виewer-ът реално е бил bot-replaced и не е reclaim-нал"
+  // доказателство (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението) — НЕ derivable
+  // от myActiveMatch/myInterRoundWaiting самостоятелно.
+  viewerHasUnresolvedBotReplacement: boolean
 }
 
 export type TournamentCreateInput = {
@@ -675,6 +716,12 @@ export type ClientMessage =
       type: 'resume_room'
       roomId: string
       reconnectToken: string
+      silent?: boolean
+    }
+  | {
+      type: 'tournament_semifinal_result_acknowledge'
+      tournamentId: string
+      semifinalMatchId: string
     }
   | {
       type: 'leave_active_room'
@@ -1123,6 +1170,17 @@ export type RoomResumeFailedMessage = {
   message: string
 }
 
+// Response to resume_room { silent: true } — confirms the exact same seat
+// attachment as RoomResumedMessage, but is a distinct type so a handler can
+// tell "attached" apart from "attached AND navigate to the active-room
+// screen" (see main.ts's room_resumed handler vs this one).
+export type RoomAttachedSilentMessage = {
+  type: 'room_attached_silent'
+  roomId: string
+  seat: Seat
+  profileId: string | null
+}
+
 export type ActiveRoomLeftMessage = {
   type: 'left_active_room'
   roomId: string
@@ -1168,6 +1226,10 @@ export type TournamentAttendancePlayerSummary = {
   avatarUrl: string | null
 }
 
+export type TournamentAttendanceRosterEntry = TournamentAttendancePlayerSummary & {
+  isOnline: boolean
+}
+
 export type TournamentAttendanceSnapshot = {
   state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
   serverNow: string
@@ -1175,6 +1237,7 @@ export type TournamentAttendanceSnapshot = {
   secondsRemaining: number
   missingPlayers: TournamentAttendancePlayerSummary[]
   missingByTeam: Record<'A' | 'B', TournamentAttendancePlayerSummary[]>
+  roster: TournamentAttendanceRosterEntry[]
   resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
   gameStartAt: string | null
   startSecondsRemaining: number
@@ -1560,6 +1623,11 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignmentSnapshot
 }
 
+export type TournamentActiveParticipationMessage = {
+  type: 'tournament_active_participation'
+  tournamentId: string
+}
+
 export type TournamentFeederMatchCompletedMessage = {
   type: 'tournament_feeder_match_completed'
   tournamentId: string
@@ -1589,7 +1657,7 @@ export type TournamentEconomyNoticeMessage = {
   type: 'tournament_economy_notice'
   eventId: string
   tournamentId: string
-  reason: 'creator_cancelled' | 'fill_expired'
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'
   amount: number
   occurredAt: string
 }
@@ -2025,6 +2093,7 @@ export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomResumedMessage
+  | RoomAttachedSilentMessage
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage
@@ -2075,6 +2144,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
+  | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
   | TournamentEconomyNoticeMessage
@@ -2122,7 +2192,8 @@ export type GameServerClient = {
   joinGuestTrial: (stake: MatchStake) => void
   leaveMatchmaking: () => void
   requestPlayerProfile: (roomId: string, seat: Seat) => void
-  resumeRoom: (roomId: string, reconnectToken: string) => void
+  resumeRoom: (roomId: string, reconnectToken: string, silent?: boolean) => void
+  acknowledgeTournamentSemifinalResult: (tournamentId: string, semifinalMatchId: string) => void
   leaveActiveRoom: (roomId: string, acceptPenalty?: boolean) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
@@ -2300,11 +2371,25 @@ export function createGameServerClient(
     })
   }
 
-  function resumeRoom(roomId: string, reconnectToken: string): void {
+  // silent requests the server perform the exact same seat attachment but
+  // respond with room_attached_silent instead of room_resumed, so the caller
+  // can attach a tournament round-transition room in the background without
+  // navigating to the active-room screen (see activeRoom's
+  // armPendingTournamentSilentEntry / the lobby's STATE B silent attach).
+  function resumeRoom(roomId: string, reconnectToken: string, silent?: boolean): void {
     send({
       type: 'resume_room',
       roomId,
       reconnectToken,
+      ...(silent === true ? { silent: true } : {}),
+    })
+  }
+
+  function acknowledgeTournamentSemifinalResult(tournamentId: string, semifinalMatchId: string): void {
+    send({
+      type: 'tournament_semifinal_result_acknowledge',
+      tournamentId,
+      semifinalMatchId,
     })
   }
 
@@ -2506,6 +2591,7 @@ export function createGameServerClient(
     leaveMatchmaking,
     requestPlayerProfile,
     resumeRoom,
+    acknowledgeTournamentSemifinalResult,
     leaveActiveRoom,
     submitBidAction,
     submitCutIndex,

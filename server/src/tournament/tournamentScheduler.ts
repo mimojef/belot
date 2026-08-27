@@ -33,10 +33,15 @@ type TournamentSchedulerDeps = {
   /** Server-authoritative refund известие (§4/§5 в task spec-а) — извиква се
    * само след реално committed auto-cancel refund, с per-profile сумите от
    * autoCancelScheduledTournamentAtomically. Няма достъп до WS слоя тук —
-   * index.ts инжектира действителния push механизъм. */
+   * index.ts инжектира действителния push механизъм. reason различава
+   * fill-mode timeout от scheduled-start underfilled (§"CANCELLATION
+   * REASON" в допълнението — user-facing текстът е еднакъв, но internal
+   * reason-ите остават различни); noticeId сочи към committed durable ред,
+   * ползван за mark-delivered след успешен online push. */
   notifyEconomyRefunds?: (
     tournamentId: TournamentId,
-    refundedProfiles: Array<{ profileId: string; amount: number }>,
+    reason: 'fill_expired' | 'scheduled_underfilled',
+    refundedProfiles: Array<{ profileId: string; amount: number; noticeId: string }>,
   ) => void
 }
 
@@ -147,7 +152,7 @@ export async function createTournamentScheduler(
               SCHEDULED_START_NOT_READY,
             )
             if (cancelResult.ok && !cancelResult.alreadyCancelled && cancelResult.refundedProfiles.length > 0) {
-              deps.notifyEconomyRefunds?.(tournamentId, cancelResult.refundedProfiles)
+              deps.notifyEconomyRefunds?.(tournamentId, 'scheduled_underfilled', cancelResult.refundedProfiles)
             }
           }
           processedLastTick += 1
@@ -189,7 +194,7 @@ export async function createTournamentScheduler(
             FILL_MODE_EXPIRED,
           )
           if (cancelResult.ok && !cancelResult.alreadyCancelled && cancelResult.refundedProfiles.length > 0) {
-            deps.notifyEconomyRefunds?.(tournamentId, cancelResult.refundedProfiles)
+            deps.notifyEconomyRefunds?.(tournamentId, 'fill_expired', cancelResult.refundedProfiles)
           }
           processedLastTick += 1
         } catch (error) {

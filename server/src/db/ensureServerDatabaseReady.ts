@@ -1,6 +1,10 @@
 import { mkdir, readdir, readFile } from 'node:fs/promises'
 import { dirname, extname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import {
+  getLocalTournamentTestDatabaseFilePath,
+  isLocalTournamentTestModeEnabled,
+} from '../localTournamentTest/localTournamentTestModeGuard.js'
 
 export type AppliedServerMigration = {
   filename: string
@@ -43,6 +47,10 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 const SMART_MIGRATION_HANDLERS: Record<string, (database: SqliteDatabase) => void> = {
   '20260801_002_add_tournament_match_deadline_kind_and_score.sql':
     applyTournamentMatchDeadlineKindAndScoreMigration,
+  '20260801_003_add_tournament_inter_round_waiting.sql':
+    applyTournamentInterRoundWaitingMigration,
+  '20260806_001_add_tournament_next_match_start_at.sql':
+    applyTournamentNextMatchStartAtMigration,
   '20260818_008_add_vip_purchase_audit_fields.sql':
     applyVipPurchaseAuditFieldsMigration,
 }
@@ -99,6 +107,69 @@ function applyTournamentMatchDeadlineKindAndScoreMigration(database: SqliteDatab
         }.`,
       )
     }
+  }
+}
+
+function applyTournamentInterRoundWaitingMigration(database: SqliteDatabase): void {
+  const tableName = 'tournament_matches'
+  const columnsBefore = getTableColumnTypes(database, tableName)
+
+  if (!columnsBefore.has('final_start_at')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN final_start_at TEXT NULL;`)
+  }
+
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS tournament_semifinal_result_acknowledgements (
+      acknowledgement_id TEXT PRIMARY KEY,
+      tournament_id TEXT NOT NULL,
+      semifinal_match_id TEXT NOT NULL,
+      profile_id TEXT NOT NULL,
+      acknowledged_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (tournament_id) REFERENCES tournaments(tournament_id) ON DELETE CASCADE,
+      FOREIGN KEY (semifinal_match_id) REFERENCES tournament_matches(match_id) ON DELETE CASCADE,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE,
+      UNIQUE (tournament_id, semifinal_match_id, profile_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_tournament_semifinal_ack_match
+      ON tournament_semifinal_result_acknowledgements(tournament_id, semifinal_match_id);
+
+    CREATE INDEX IF NOT EXISTS idx_tournament_semifinal_ack_profile
+      ON tournament_semifinal_result_acknowledgements(profile_id);
+  `)
+
+  const columnsAfter = getTableColumnTypes(database, tableName)
+  const finalStartAtType = columnsAfter.get('final_start_at')
+  if (finalStartAtType === undefined || finalStartAtType.toUpperCase() !== 'TEXT') {
+    throw new Error(
+      `Postcondition failed for ${tableName}.final_start_at: expected type TEXT, got ${
+        finalStartAtType ?? 'MISSING COLUMN'
+      }.`,
+    )
+  }
+}
+
+// 20260806_001_add_tournament_next_match_start_at.sql — generic "next match
+// gameplay start" deadline column, reused across every round transition
+// (round_of_16->quarterfinal, quarterfinal->semifinal, semifinal->final),
+// not just the final. Same idempotent ADD-COLUMN-if-missing pattern as the
+// other smart migrations above.
+function applyTournamentNextMatchStartAtMigration(database: SqliteDatabase): void {
+  const tableName = 'tournament_matches'
+  const columnsBefore = getTableColumnTypes(database, tableName)
+
+  if (!columnsBefore.has('next_match_start_at')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN next_match_start_at TEXT NULL;`)
+  }
+
+  const columnsAfter = getTableColumnTypes(database, tableName)
+  const nextMatchStartAtType = columnsAfter.get('next_match_start_at')
+  if (nextMatchStartAtType === undefined || nextMatchStartAtType.toUpperCase() !== 'TEXT') {
+    throw new Error(
+      `Postcondition failed for ${tableName}.next_match_start_at: expected type TEXT, got ${
+        nextMatchStartAtType ?? 'MISSING COLUMN'
+      }.`,
+    )
   }
 }
 
@@ -173,11 +244,22 @@ function getDatabaseFilePath(databaseStorageDirectoryPath: string): string {
   return join(databaseStorageDirectoryPath, DATABASE_FILENAME)
 }
 
+// Само когато serverRootOverride НЕ е подаден изрично (т.е. истинският
+// production/dev call site, вкл. независими call sites като
+// pickEligibleBotProfileFromDb.ts) — ако local tournament test mode е
+// активен, пренасочва към отделната тестова база (виж
+// localTournamentTestModeGuard.ts). Explicit serverRootOverride (ползван от
+// restart-safety/isolated check скриптове) винаги печели и НЕ се пренасочва —
+// тези извиквания вече сочат към собствено изолирано дърво.
 export function getServerDatabaseFilePath(serverRootOverride?: string): string {
   const serverRootPath = serverRootOverride ?? getServerRootPath()
   const databaseDirectoryPath = getDatabaseDirectoryPath(serverRootPath)
   const databaseStorageDirectoryPath =
     getDatabaseStorageDirectoryPath(databaseDirectoryPath)
+
+  if (serverRootOverride === undefined && isLocalTournamentTestModeEnabled()) {
+    return getLocalTournamentTestDatabaseFilePath()
+  }
 
   return getDatabaseFilePath(databaseStorageDirectoryPath)
 }
@@ -212,6 +294,14 @@ export type EnsureServerDatabaseReadyOptions = {
    * call site-ът (index.ts) не подава нищо и запазва точно текущото
    * поведение. */
   serverRootOverride?: string
+  /** Точен override за самия .sqlite файл (различен от миграциите, които
+   * винаги идват от database/migrations под serverRootOverride/production
+   * root-а) — ползва се единствено от local-tournament-test режима (виж
+   * server/src/localTournamentTest/localTournamentTestModeGuard.ts), за да
+   * пише в отделен database/data/belot-v2-tournament-test.sqlite вместо
+   * споделената belot-v2.sqlite. Production call site-ът (index.ts) не
+   * подава нищо и запазва точно текущото поведение. */
+  databaseFilePathOverride?: string
 }
 
 export async function ensureServerDatabaseReady(
@@ -222,10 +312,14 @@ export async function ensureServerDatabaseReady(
   const migrationsDirectoryPath = getMigrationsDirectoryPath(databaseDirectoryPath)
   const databaseStorageDirectoryPath =
     getDatabaseStorageDirectoryPath(databaseDirectoryPath)
-  const databaseFilePath = getDatabaseFilePath(databaseStorageDirectoryPath)
+  const databaseFilePath =
+    options.databaseFilePathOverride ??
+    (options.serverRootOverride === undefined && isLocalTournamentTestModeEnabled()
+      ? getLocalTournamentTestDatabaseFilePath()
+      : getDatabaseFilePath(databaseStorageDirectoryPath))
 
   await mkdir(migrationsDirectoryPath, { recursive: true })
-  await mkdir(databaseStorageDirectoryPath, { recursive: true })
+  await mkdir(dirname(databaseFilePath), { recursive: true })
 
   const migrationFileNames = await loadMigrationFileNames(migrationsDirectoryPath)
 

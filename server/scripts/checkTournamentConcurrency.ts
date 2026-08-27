@@ -280,6 +280,12 @@ try {
     notifyFeederMatchCompleted: () => {},
     notifyFeederScoreProgress: () => {},
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
+    isProfileOnline: (profileId) => {
+      for (const key of attachedConnections) {
+        if (key.startsWith(`${profileId}:`)) return true
+      }
+      return false
+    },
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},
   })

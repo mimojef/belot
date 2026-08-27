@@ -286,6 +286,15 @@ async function createCoordinator(input: {
     notifyFeederMatchCompleted: (profileIds, update) => { input.onFeederCompleted?.(profileIds, update) },
     notifyFeederScoreProgress: (profileIds, update) => { input.onFeederProgress?.(profileIds, update) },
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => input.attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
+    // Project-wide presence mock (§"PRESENCE SEMANTICS") — derived from the
+    // SAME attachedConnections Set the tests already populate/clear, just
+    // profile-scoped instead of the full connection/room/seat tuple.
+    isProfileOnline: (profileId) => {
+      for (const key of input.attachedConnections) {
+        if (key.startsWith(`${profileId}:`)) return true
+      }
+      return false
+    },
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},
   })

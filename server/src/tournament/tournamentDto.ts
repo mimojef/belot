@@ -115,6 +115,13 @@ export type TournamentMatchDto = {
   liveScoreTeamA: number | null
   liveScoreTeamB: number | null
   progressLabel: string
+  finalStartAt: string | null
+  // Generic "next match gameplay start" deadline — populated for every
+  // round transition (round_of_16->quarterfinal, quarterfinal->semifinal,
+  // semifinal->final), not just the final. finalStartAt above is kept for
+  // backward compat but is no longer written by the coordinator; consumers
+  // should read this field going forward.
+  nextMatchStartAt: string | null
   startedAt: string | null
   completedAt: string | null
 }
@@ -193,8 +200,68 @@ export type TournamentDetailDto = TournamentSummaryDto & {
   teams: TournamentTeamDto[]
   rounds: TournamentRoundDto[]
   myActiveMatch: TournamentMatchAssignment | null
+  myInterRoundWaiting: TournamentInterRoundWaitingDto | null
   incomingPartnerInvite: TournamentPartnerInviteDto | null
   outgoingPartnerInvite: TournamentPartnerInviteDto | null
+  // Authoritative "виewer-ът реално е бил bot-replaced и не е reclaim-нал"
+  // доказателство (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението) — computed от
+  // tournamentCoordinator.hasUnresolvedBotReplacement, НЕ derivable от
+  // myActiveMatch/myInterRoundWaiting самостоятелно (тяхното наличие показва
+  // само КЪДЕ е участникът в турнира, не дали изобщо е бил заместван).
+  // false за viewer без сесия.
+  viewerHasUnresolvedBotReplacement: boolean
+}
+
+// Generic across every round transition (round_of_16->quarterfinal,
+// quarterfinal->semifinal, semifinal->final) — see task spec §5 ("не
+// hardcode-вай semifinal/final literals в архитектурата"). Field names below
+// are intentionally generic (completedMatchId/sibling/nextMatchStartAt, not
+// completedSemifinalMatchId/siblingSemifinal/finalStartAt) to avoid baking
+// the old semifinal-only assumption into the shape itself.
+//
+// The legacy completedSemifinalMatchId/siblingSemifinal/finalMatchId/
+// finalRoomId/finalStartAt fields are kept alongside the new generic ones
+// (populated with the same values) purely for backward compatibility with
+// the existing uncommitted client code in renderTournamentsScreen.ts, which
+// reads those specific names — Phase 2 will migrate the client to the
+// generic fields and these legacy aliases can be dropped then.
+export type TournamentInterRoundWaitingDto = {
+  tournamentId: string
+  currentRoundType: TournamentRoundType
+  nextRoundType: TournamentRoundType
+  completedMatchId: string
+  sibling: {
+    matchId: string
+    roundIndex: number
+    teamA: TournamentTeamDto
+    teamB: TournamentTeamDto
+    scoreA: number | null
+    scoreB: number | null
+    status: TournamentMatchStatus
+    winnerTeamId: string | null
+    progressLabel: string
+  }
+  ownResultAcknowledged: boolean
+  otherFinalistReady: boolean
+  nextMatchId: string | null
+  nextRoomId: string | null
+  nextMatchStartAt: string | null
+  serverNow: string
+  // --- legacy aliases (Phase 1 backward compat only, see comment above) ---
+  completedSemifinalMatchId: string
+  siblingSemifinal: {
+    matchId: string
+    teamA: TournamentTeamDto
+    teamB: TournamentTeamDto
+    scoreA: number | null
+    scoreB: number | null
+    status: TournamentMatchStatus
+    winnerTeamId: string | null
+    progressLabel: string
+  }
+  finalMatchId: string | null
+  finalRoomId: string | null
+  finalStartAt: string | null
 }
 
 export function computeTournamentPrizePreview(
@@ -357,8 +424,10 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
     teams: [],
     rounds: [],
     myActiveMatch: null,
+    myInterRoundWaiting: null,
     incomingPartnerInvite: null,
     outgoingPartnerInvite: null,
+    viewerHasUnresolvedBotReplacement: false,
   }
 }
 
@@ -427,6 +496,8 @@ export function buildTournamentRoundDtos(input: {
           liveScoreTeamA: liveScore?.teamA ?? null,
           liveScoreTeamB: liveScore?.teamB ?? null,
           progressLabel,
+          finalStartAt: match.finalStartAt,
+          nextMatchStartAt: match.nextMatchStartAt,
           startedAt: match.startedAt,
           completedAt: match.completedAt,
         }
@@ -481,7 +552,7 @@ export function buildTeamDtos(input: {
     const members = input.entries
       .filter((entry) => (
         entry.teamId === team.teamId &&
-        (entry.status === 'confirmed' || entry.status === 'finalist' || entry.status === 'champion')
+        (entry.status === 'confirmed' || entry.status === 'finalist' || entry.status === 'champion' || entry.status === 'eliminated')
       ))
       .map((entry) => {
         const profile = input.getPublicProfile(entry.profileId)

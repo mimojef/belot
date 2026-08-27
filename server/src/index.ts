@@ -109,10 +109,16 @@ import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { createTournamentStore } from './db/tournamentStore.js'
 import { createTournamentEconomyStore } from './db/tournamentEconomyStore.js'
+import { isLocalTournamentTestModeEnabled } from './localTournamentTest/localTournamentTestModeGuard.js'
+import { createLocalTournamentTestService } from './localTournamentTest/localTournamentTestService.js'
+import { handleLocalTournamentTestRequest } from './localTournamentTest/handleLocalTournamentTestRequest.js'
 import {
   TOURNAMENT_STATUSES,
+  getTournamentRoundLadder,
+  type TournamentEntryStatus,
   type TournamentPartnerInviteRecord,
   type TournamentRecord,
+  type TournamentRoundType,
 } from './tournament/tournamentTypes.js'
 import {
   ALLOWED_TOURNAMENT_ENTRY_FEES,
@@ -534,6 +540,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'remove_bot_from_private_room_team':
     case 'start_private_room':
     case 'kick_from_private_room':
+    case 'tournament_semifinal_result_acknowledge':
     case 'subscribe_private_room_chat':
     case 'unsubscribe_private_room_chat':
     case 'send_private_room_chat_message':
@@ -560,7 +567,14 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
   return exhaustiveCheck
 }
 
+if (isLocalTournamentTestModeEnabled()) {
+  console.log('[local-tournament-test] enabled')
+}
+
 const databaseBootstrap = await ensureServerDatabaseReady()
+if (isLocalTournamentTestModeEnabled()) {
+  console.log(`[local-tournament-test] database file: ${databaseBootstrap.databaseFilePath}`)
+}
 const botCatalogImport = await importBotProfilesCatalog(
   databaseBootstrap.databaseFilePath,
 )
@@ -615,6 +629,18 @@ const friendshipStore = await createFriendshipStore(
 )
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
 const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
+// Конструираме я безусловно (евтино — само затваря deps), но всеки заявка
+// към нея минава първо през isLocalTournamentTestRequestAllowed (виж
+// handleLocalTournamentTestRequest.ts) — извън strictly-local режима е
+// напълно неактивна.
+const localTournamentTestService = createLocalTournamentTestService({
+  databaseFilePath: databaseBootstrap.databaseFilePath,
+  tournamentStore,
+  tournamentEconomyStore,
+  authStore,
+  refillCatalogBotWallets: () => playerProgressStore.refillCatalogBotWallets(),
+  removeTournamentRoomIfPresent: (roomId) => forceRemoveTournamentRoomById(roomId),
+})
 let tournamentScheduler: TournamentScheduler | null = null
 let tournamentCoordinator: TournamentCoordinator | null = null
 const tournamentAdminStore = await createTournamentAdminStore({
@@ -3620,7 +3646,7 @@ function sendTournamentMatchAssignment(
 // нищо ретроактивно. eventId е уникален per push (client-side dedup).
 function sendTournamentEconomyRefundNotices(
   tournamentId: string,
-  reason: 'creator_cancelled' | 'fill_expired',
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left',
   refundedProfiles: Array<{ profileId: string; amount: number }>,
 ): void {
   const occurredAt = new Date().toISOString()
@@ -3669,6 +3695,22 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
   console.log(`[room-cleanup] removed inactive room=${roomId}`)
 
   return true
+}
+
+// За разлика от cleanupInactiveRoomIfNeeded, тук НЕ минаваме през
+// shouldKeepRoomAlive (за турнирна стая тя винаги връща true, докато
+// status !== 'finished' — виж serverGameRuntimeHelpers.ts) — ползва се
+// единствено от local-tournament-test "Нулирай теста" (§12 в task spec-а),
+// където трябва форсирано да затворим турнирна стая независимо от фазата ѝ.
+// Огледално на closeCompletedRoom callback-а, подаден на
+// createTournamentCoordinator по-долу. No-op ако стаята вече не съществува.
+function forceRemoveTournamentRoomById(roomId: string): void {
+  const room = serverState.rooms[roomId]
+  if (room === undefined) return
+  serverState = removeCommittedServerRoom(roomId)
+  cleanupTempBotsFromRoom(room)
+  markRoomSnapshotRemoved(roomId)
+  activeRoomRuntime.removeRoom(roomId)
 }
 
 async function tickRoomGameRuntimes(): Promise<void> {
@@ -3974,7 +4016,7 @@ function tryResumeRoomForConnection(
       if (takeoverResult.reason === 'match_completed') {
         return {
           ok: false,
-          message: 'Отборът ви загуби служебно поради неявяване. Мачът вече е приключил.',
+          message: 'Мачът вече е приключил.',
         }
       }
     }
@@ -10041,7 +10083,7 @@ function buildTournamentSummaryDto(
   return toTournamentSummaryDto({
     tournament,
     creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
-    confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    confirmedEntriesCount: entries.filter((e) => isTournamentRosterEntryStatus(e.status)).length,
     reservedPlacesCount,
     completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
     formingTeamsCount: teams.filter((t) => t.status === 'forming').length,
@@ -10051,10 +10093,18 @@ function buildTournamentSummaryDto(
   })
 }
 
+function isTournamentRosterEntryStatus(status: TournamentEntryStatus): boolean {
+  return status === 'confirmed' || status === 'finalist' || status === 'champion' || status === 'eliminated'
+}
+
 function getSafePublicProfile(profileId: string): { profileId: string | null; displayName: string; avatarUrl: string | null } | null {
   const profile = playerProgressStore.getPublicProfile(profileId)
   if (profile === null) return null
   return { profileId: profile.profileId, displayName: profile.displayName, avatarUrl: profile.avatarUrl }
+}
+
+function isBotProfile(profileId: string): boolean {
+  return playerProgressStore.getPublicProfile(profileId)?.isBot === true
 }
 
 function buildTournamentPartnerInviteDto(invite: TournamentPartnerInviteRecord) {
@@ -10122,7 +10172,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
   const base = toTournamentDetailDto({
     tournament,
     creatorPublicProfile: getTournamentCreatorPublicProfile(tournament.creatorProfileId),
-    confirmedEntriesCount: entries.filter((e) => e.status === 'confirmed').length,
+    confirmedEntriesCount: entries.filter((e) => isTournamentRosterEntryStatus(e.status)).length,
     reservedPlacesCount,
     completedTeamsCount: teams.filter((t) => t.status !== 'forming').length,
     formingTeamsCount: teams.filter((t) => t.status === 'forming').length,
@@ -10136,16 +10186,151 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     inviteePublicProfile: getSafePublicProfile(invite.inviteeProfileId),
     tournament,
   })
+  const myActiveMatch = viewerProfileId !== null
+    ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
+    : null
+  // §"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението — myActiveMatch/myInterRoundWaiting
+  // показват КЪДЕ е viewer-ът в турнира, НЕ дали изобщо е бил bot-replaced.
+  // Тази отделна проверка е единственото authoritative "force-return
+  // requirement" доказателство, което клиентският blocking modal трябва да
+  // ползва — виж hasUnresolvedBotReplacement в tournamentCoordinator.ts.
+  const viewerHasUnresolvedBotReplacement = viewerProfileId !== null
+    ? tournamentCoordinator?.hasUnresolvedBotReplacement(tournament.tournamentId, viewerProfileId) ?? false
+    : false
+  // Generic across every round transition (round_of_16->quarterfinal,
+  // quarterfinal->semifinal, semifinal->final) — task spec §5. Walks the
+  // team-capacity ladder instead of hardcoding 'semifinal'/'final', finding
+  // whichever round the viewer's team most recently won and hasn't yet
+  // advanced past. hasSemifinalResultAcknowledgement is still read/written
+  // for the semifinal->final transition specifically (idempotent evidence
+  // only, per task spec §4 — never gates anything here); for any other
+  // transition ownResultAcknowledged/otherFinalistReady are simply reported
+  // as true/not-applicable since no ack step exists for those transitions
+  // and none is being added (task spec: "НЕ generalize-вай manual ack към
+  // R16/QF").
+  const buildMyInterRoundWaiting = () => {
+    if (viewerProfileId === null || viewerEntry?.teamId === null || viewerEntry?.teamId === undefined) return null
+    if (tournament.status === 'finished' || myActiveMatch !== null) return null
+    if (
+      viewerEntry.status !== 'confirmed' &&
+      viewerEntry.status !== 'finalist' &&
+      viewerEntry.status !== 'champion'
+    ) {
+      return null
+    }
+
+    const teamCapacity = tournament.playerCapacity / 2
+    const ladder = getTournamentRoundLadder(teamCapacity)
+
+    for (let ladderIndex = 0; ladderIndex < ladder.length - 1; ladderIndex += 1) {
+      const currentRoundType = ladder[ladderIndex] as TournamentRoundType
+      const nextRoundType = ladder[ladderIndex + 1] as TournamentRoundType
+
+      const currentRoundMatches = roundDtos
+        .filter((round) => round.roundType === currentRoundType)
+        .flatMap((round) => round.matches.map((match) => ({ roundIndex: round.roundIndex, match })))
+        .sort((a, b) => a.roundIndex - b.roundIndex)
+      const completedEntry = currentRoundMatches.find(({ match }) => {
+        return match.status === 'completed' &&
+          match.winnerTeamId === viewerEntry.teamId &&
+          (match.teamAId === viewerEntry.teamId || match.teamBId === viewerEntry.teamId)
+      })
+      if (completedEntry === undefined) continue
+      const completedMatch = completedEntry.match
+
+      const completedIndex = currentRoundMatches.findIndex(({ match }) => match.matchId === completedMatch.matchId)
+      const siblingEntry = completedIndex >= 0
+        ? currentRoundMatches[completedIndex % 2 === 0 ? completedIndex + 1 : completedIndex - 1]
+        : undefined
+      if (siblingEntry === undefined) continue
+      const sibling = siblingEntry.match
+      const siblingTeamA = teamDtos.find((team) => team.teamId === sibling.teamAId) ?? null
+      const siblingTeamB = teamDtos.find((team) => team.teamId === sibling.teamBId) ?? null
+      if (siblingTeamA === null || siblingTeamB === null) continue
+
+      const nextMatch = roundDtos
+        .find((round) => round.roundType === nextRoundType)
+        ?.matches.find((match) => match.teamAId === viewerEntry.teamId || match.teamBId === viewerEntry.teamId)
+        ?? null
+      // The next round's match for this team already exists AND has moved
+      // past pure waiting (players seated/playing/done) — this team has
+      // already progressed beyond the unified waiting popup for this
+      // transition, so keep walking the ladder in case they've since won
+      // ANOTHER round past this one (shouldn't normally happen given
+      // myActiveMatch is checked above, but keeps the loop well-defined).
+      if (nextMatch !== null && (nextMatch.status === 'countdown' || nextMatch.status === 'in_progress' || nextMatch.status === 'completed')) {
+        continue
+      }
+
+      const isSemifinalToFinal = currentRoundType === 'semifinal' && nextRoundType === 'final'
+      const ownResultAcknowledged = isSemifinalToFinal
+        ? tournamentStore.hasSemifinalResultAcknowledgement(tournament.tournamentId, completedMatch.matchId, viewerProfileId)
+        : true
+      const otherTeamId = nextMatch !== null
+        ? nextMatch.teamAId === viewerEntry.teamId ? nextMatch.teamBId : nextMatch.teamAId
+        : sibling.winnerTeamId
+      const otherTeamEntries = otherTeamId !== null
+        ? entries.filter((entry) => entry.teamId === otherTeamId && (entry.status === 'confirmed' || entry.status === 'finalist'))
+        : []
+      const otherHumanTeamEntries = otherTeamEntries.filter((entry) => !isBotProfile(entry.profileId))
+      const otherFinalistReady = !isSemifinalToFinal
+        ? sibling.status === 'completed'
+        : sibling.status === 'completed' &&
+          otherTeamId !== null &&
+          otherHumanTeamEntries.every((entry) => {
+            const wonRound = currentRoundMatches.find(({ match }) => {
+              return match.status === 'completed' && match.winnerTeamId === entry.teamId
+            })?.match
+            return wonRound !== undefined &&
+              tournamentStore.hasSemifinalResultAcknowledgement(tournament.tournamentId, wonRound.matchId, entry.profileId)
+          })
+
+      const siblingDto = {
+        matchId: sibling.matchId,
+        roundIndex: siblingEntry.roundIndex,
+        teamA: siblingTeamA,
+        teamB: siblingTeamB,
+        scoreA: sibling.finalScoreTeamA ?? sibling.liveScoreTeamA ?? null,
+        scoreB: sibling.finalScoreTeamB ?? sibling.liveScoreTeamB ?? null,
+        status: sibling.status,
+        winnerTeamId: sibling.winnerTeamId,
+        progressLabel: sibling.progressLabel ?? '',
+      }
+
+      return {
+        tournamentId: tournament.tournamentId,
+        currentRoundType,
+        nextRoundType,
+        completedMatchId: completedMatch.matchId,
+        sibling: siblingDto,
+        ownResultAcknowledged,
+        otherFinalistReady,
+        nextMatchId: nextMatch?.matchId ?? null,
+        nextRoomId: nextMatch?.roomId ?? null,
+        nextMatchStartAt: nextMatch?.nextMatchStartAt ?? null,
+        serverNow: new Date().toISOString(),
+        // legacy aliases (Phase 1 backward compat, see
+        // TournamentInterRoundWaitingDto comment) — same values as above.
+        completedSemifinalMatchId: completedMatch.matchId,
+        siblingSemifinal: siblingDto,
+        finalMatchId: nextMatch?.matchId ?? null,
+        finalRoomId: nextMatch?.roomId ?? null,
+        finalStartAt: nextMatch?.nextMatchStartAt ?? null,
+      }
+    }
+
+    return null
+  }
   return {
     ...base,
     teams: teamDtos,
     myTeam: viewerEntry?.teamId ? teamDtos.find((team) => team.teamId === viewerEntry.teamId) ?? null : null,
     rounds: roundDtos,
-    myActiveMatch: viewerProfileId !== null
-      ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
-      : null,
+    myActiveMatch,
+    myInterRoundWaiting: buildMyInterRoundWaiting(),
     incomingPartnerInvite: incomingPartnerInvite ? inviteToDto(incomingPartnerInvite) : null,
     outgoingPartnerInvite: outgoingPartnerInvite ? inviteToDto(outgoingPartnerInvite) : null,
+    viewerHasUnresolvedBotReplacement,
   }
 }
 
@@ -10554,6 +10739,68 @@ async function handleTournamentPartnerCandidatesRequest(
   return true
 }
 
+const TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH = 2
+const TOURNAMENT_PARTNER_SEARCH_MAX_RAW_QUERY_LENGTH = 64
+const TOURNAMENT_PARTNER_SEARCH_TOO_SHORT_MESSAGE = 'Въведи поне 2 символа за търсене.'
+
+// Global partner search (§ "GLOBAL SEARCH AREA") — отделен endpoint от
+// handleTournamentPartnerCandidatesRequest (friends list) по същия query-based
+// pattern като handlePlayersSearchRequest (GET /api/players/search): НЕ връща
+// цялата user база, min-length guard-ва празни/твърде кратки заявки, reuse-ва
+// normalizeProfileSearchTerm за bg-BG case-insensitive/Cyrillic normalization.
+// Response DTO shape-ът е ИДЕНТИЧЕН на handleTournamentPartnerCandidatesRequest
+// (TournamentPartnerCandidateDto[]), за да може клиентът да reuse-ва точно
+// същия render/click/invite код за резултатите от двата source-а.
+async function handleTournamentPartnerCandidatesSearchRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/partner-candidates\/search$/.exec(pathname)
+  if (!match) return false
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const rawQuery = (requestUrl.searchParams.get('q') ?? '').trim()
+
+  if (rawQuery.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: TOURNAMENT_PARTNER_SEARCH_TOO_SHORT_MESSAGE })
+    return true
+  }
+  if (rawQuery.length > TOURNAMENT_PARTNER_SEARCH_MAX_RAW_QUERY_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Търсенето е твърде дълго.' })
+    return true
+  }
+
+  const normalizedTerm = normalizeProfileSearchTerm(rawQuery)
+  if (normalizedTerm.length < TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: TOURNAMENT_PARTNER_SEARCH_TOO_SHORT_MESSAGE })
+    return true
+  }
+
+  const tournamentId = decodeURIComponent(match[1] ?? '')
+  const candidates: TournamentPartnerCandidateDto[] = tournamentEconomyStore
+    .getGlobalPartnerCandidatesForTournament(tournamentId, authResult.profileId, normalizedTerm)
+    .map((candidate) => ({
+      profileId: candidate.profileId,
+      displayName: candidate.displayName,
+      avatarUrl: candidate.avatarUrl,
+      online: isProfileOnline(candidate.profileId),
+      eligible: candidate.eligible,
+      unavailableReason: candidate.unavailableReason,
+    }))
+  sendJsonResponse(res, 200, { ok: true, candidates })
+  return true
+}
+
 async function handlePendingTournamentPartnerInvitesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -10928,6 +11175,108 @@ async function handleTournamentLeaveRequest(
     walletBalance: result.walletBalance,
     tournament: buildTournamentSummaryDto(result.tournament, profileId),
   })
+
+  // Auto-release известие (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") — само след
+  // committed refund (result.ok вече потвърден по-горе), само ако partner-ът
+  // реално е бил auto-released в ТОЗИ call (null за нормален solo leave и за
+  // alreadyRefunded===true повторен/race call — виж коментара в
+  // LeaveTournamentResult). Durable notice row-ът вече е committed вътре в
+  // leaveTournamentAndRefundAtomically (виж tournament_partner_left_notice_log) —
+  // тук само доставяме: online connections получават push веднага И се
+  // маркират delivered (за да не се доставят повторно при следващ login);
+  // offline recipients остават delivered_at=NULL до следващия им
+  // login/reconnect (виж flush блока при connection setup, огледален на
+  // pending_gift_notifications).
+  if (result.autoReleasedPartner !== null) {
+    const sentCount = sendToOpenProfileConnections(result.autoReleasedPartner.profileId, {
+      type: 'tournament_economy_notice',
+      eventId: randomUUID(),
+      tournamentId,
+      reason: 'partner_left' as const,
+      amount: result.autoReleasedPartner.refundedAmount,
+      occurredAt: new Date().toISOString(),
+    })
+    if (sentCount > 0) {
+      tournamentEconomyStore.markPartnerLeftNoticeDelivered(
+        result.autoReleasedPartner.noticeId,
+        result.autoReleasedPartner.profileId,
+      )
+    }
+  }
+  return true
+}
+
+const ACKNOWLEDGE_BOT_RETURN_FAILURE_MESSAGES: Record<string, string> = {
+  not_active_participant: 'Не участваш активно в този турнир в момента.',
+}
+
+// Server-authoritative "Поеми играта" action ИЗВЪН gameplay (§"AUTHORITATIVE
+// RETURN ACTION"/"STATE A"/"STATE B" във второто допълнение) — за разлика от
+// resume_room+tryTakeoverNoShowBot (реален seat swap в активна стая), тук
+// няма room/seat да се пипа: STATE A/B нямат runnable match за профила в
+// момента. Единственото нужно действие е authoritative marking на
+// СЪЩЕСТВУВАЩИЯ unresolved replacement ред 'completed' — виж
+// acknowledgeTournamentBotReplacementReturn в tournamentCoordinator.ts.
+// Idempotent (двоен click/repeat заявка връща alreadyResolved:true, не
+// грешка); не пипа wallet/economy/team/match state.
+async function handleTournamentAcknowledgeBotReturnRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/acknowledge-bot-return$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  if (tournamentCoordinator === null) {
+    sendJsonResponse(res, 503, { ok: false, message: 'Услугата временно не е налична.' })
+    return true
+  }
+
+  const result = tournamentCoordinator.acknowledgeTournamentBotReplacementReturn(tournamentId, profileId)
+  if (!result.ok) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      reason: result.reason,
+      message: ACKNOWLEDGE_BOT_RETURN_FAILURE_MESSAGES[result.reason] ?? 'Връщането не бе успешно.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, alreadyResolved: result.alreadyResolved })
   return true
 }
 
@@ -14057,6 +14406,13 @@ async function handleHttpRequest(
 
   const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
 
+  // Guard-нат вътрешно (флаг + loopback, виж localTournamentTestModeGuard.ts) —
+  // извън strictly-local режима pathname проверката е единственият разход и
+  // отговорът е 404, идентично на непознат route.
+  if (await handleLocalTournamentTestRequest(req, res, requestUrl.pathname, localTournamentTestService)) {
+    return
+  }
+
   if (await handleUploadsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -14363,6 +14719,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTournamentPartnerCandidatesSearchRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
   if (await handleTournamentPartnerCandidatesRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -14384,6 +14744,10 @@ async function handleHttpRequest(
   }
 
   if (await handleTournamentLeaveRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentAcknowledgeBotReturnRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -14584,6 +14948,44 @@ wsServer.on('connection', (socket, request) => {
       })
     }
 
+    // Durable "партньорът ти се отписа" flush (§ "PARTNER-LEFT NOTIFICATION
+    // ТРЯБВА Е DURABLE") — огледално на pendingGifts по-горе: ако recipient-ът
+    // е бил offline в момента на committed auto-release, известието чака тук
+    // с delivered_at=NULL до точно този login/reconnect. Маркираме delivered
+    // веднага след push-а, за да не се доставя повторно при следващ
+    // login/multi-tab reconnect (същия idempotency контракт като gift log-а).
+    const pendingPartnerLeftNotices = tournamentEconomyStore.getPendingPartnerLeftNotices(connection.profileId)
+    for (const notice of pendingPartnerLeftNotices) {
+      sendJsonMessage(socket, {
+        type: 'tournament_economy_notice',
+        eventId: randomUUID(),
+        tournamentId: notice.tournamentId,
+        reason: 'partner_left',
+        amount: notice.refundedAmount,
+        occurredAt: new Date().toISOString(),
+      })
+      tournamentEconomyStore.markPartnerLeftNoticeDelivered(notice.noticeId, connection.profileId)
+    }
+
+    // Durable auto-cancel refund flush (§"OFFLINE USER"/"EXACTLY ONCE" в
+    // допълнението за "Турнирът е анулиран..." известието) — огледално на
+    // pendingPartnerLeftNotices по-горе: ако recipient-ът е бил offline в
+    // момента на committed fill-timeout/scheduled-underfilled auto-cancel,
+    // известието чака тук до точно този login/reconnect. Маркираме delivered
+    // веднага след push-а — same idempotency контракт.
+    const pendingTournamentEconomyNotices = tournamentEconomyStore.getPendingTournamentEconomyNotices(connection.profileId)
+    for (const notice of pendingTournamentEconomyNotices) {
+      sendJsonMessage(socket, {
+        type: 'tournament_economy_notice',
+        eventId: randomUUID(),
+        tournamentId: notice.tournamentId,
+        reason: notice.reason,
+        amount: notice.refundedAmount,
+        occurredAt: new Date().toISOString(),
+      })
+      tournamentEconomyStore.markTournamentEconomyNoticeDelivered(notice.noticeId, connection.profileId)
+    }
+
     const undismissedPartnerInvites = tournamentEconomyStore
       .listUndismissedPendingPartnerInvitesForProfile(connection.profileId)
     for (const invite of undismissedPartnerInvites) {
@@ -14599,6 +15001,23 @@ wsServer.on('connection', (socket, request) => {
         type: 'tournament_match_assigned',
         assignment: tournamentAssignment,
       })
+    } else {
+      // Login/reconnect докато профилът е между кръгове (STATE A/B —
+      // §"НЕ ВРЪЗВАЙ BLOCKING MODAL САМО С ACTIVE ROOM" в допълнението):
+      // tournament_match_assigned по-горе покрива само gameplay/attendance/
+      // countdown (реален runnable match). Тук покриваме случая, когато
+      // профилът все още е 'confirmed'/'finalist' в активен турнир, но
+      // няма runnable match в момента (sibling още играе, ИЛИ next round
+      // room вече е готов) — клиентът получава само tournamentId и сам
+      // resolve-ва точния destination (STATE A/STATE B) чрез
+      // authoritative GET /api/tournaments/:id (myInterRoundWaiting).
+      const activeTournamentId = tournamentCoordinator?.getActiveTournamentIdForProfile(connection.profileId)
+      if (activeTournamentId !== undefined && activeTournamentId !== null) {
+        sendJsonMessage(socket, {
+          type: 'tournament_active_participation',
+          tournamentId: activeTournamentId,
+        })
+      }
     }
   }
 
@@ -15298,13 +15717,43 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
-        safeSendToConnection(connection.id, {
-          type: 'room_resumed',
-          roomId: result.room.id,
-          seat: result.seat,
-        })
+        // Seat attachment above is IDENTICAL for silent and normal resume —
+        // tryResumeRoomForConnection/attachConnectionToRoomSeat ran exactly
+        // the same way regardless of message.silent. Only the response type
+        // differs, so the client can tell whether it's expected to navigate
+        // to the active-room screen. broadcastRoomSnapshots still fires
+        // either way — other seated participants (and any bot-replacement
+        // UI) need the fresh snapshot regardless of whether THIS connection
+        // navigates visually.
+        safeSendToConnection(connection.id, message.silent === true
+          ? {
+              type: 'room_attached_silent',
+              roomId: result.room.id,
+              seat: result.seat,
+              profileId: connection.profileId,
+            }
+          : {
+              type: 'room_resumed',
+              roomId: result.room.id,
+              seat: result.seat,
+            })
 
         broadcastRoomSnapshots(result.room, socketRegistry)
+        return
+      }
+
+      if (message.type === 'tournament_semifinal_result_acknowledge') {
+        if (connection.profileId === null || tournamentCoordinator === null) {
+          return
+        }
+        const result = tournamentCoordinator.acknowledgeSemifinalResult({
+          tournamentId: message.tournamentId,
+          semifinalMatchId: message.semifinalMatchId,
+          profileId: connection.profileId,
+        })
+        if (result.ok) {
+          tournamentCoordinator.tickNow()
+        }
         return
       }
 
@@ -15652,6 +16101,24 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (latestConnection.currentRoomId !== message.roomId) {
+          // Идемпотентност: ако connection-ът вече изобщо не е закачен за
+          // никоя стая, или конкретно тази стая вече не съществува (напр.
+          // турнирна стая, force-затворена от tournamentCoordinator веднага
+          // след завършек на мача — виж closeCompletedTournamentRoom — ПРЕДИ
+          // клиентският "Към лобито" leave_active_room да пристигне),
+          // намерението на извикващия ("не искам да съм в тази стая") вече
+          // е изпълнено. Връщаме benign left_active_room вместо подвеждащ
+          // "You are not attached to this room." toast — клиентът вече е
+          // напуснал/показал лобито fire-and-forget. Ако connection-ът реално
+          // е закачен за ДРУГА валидна стая, това си остава грешка.
+          if (latestConnection.currentRoomId === null || serverState.rooms[message.roomId] === undefined) {
+            safeSendToConnection(connection.id, {
+              type: 'left_active_room',
+              roomId: message.roomId,
+              removed: false,
+            })
+            return
+          }
           safeSendToConnection(connection.id, {
             type: 'error',
             message: 'You are not attached to this room.',
@@ -17504,13 +17971,39 @@ const gameRuntimeTickInterval = setInterval(() => {
   })
 }, GAME_RUNTIME_TICK_MS)
 
+// Само в strictly local tournament test mode (виж localTournamentTestModeGuard.ts) —
+// по-чест poll tick, за да не удвои изчакването наложено от вече ускорените
+// attendance/transition таймери (tournamentCoordinator.ts). Без флага е
+// undefined и двата store-а падат обратно на production DEFAULT_INTERVAL_MS.
+const localTournamentTestPollIntervalMs = isLocalTournamentTestModeEnabled() ? 1_000 : undefined
+
 try {
   tournamentScheduler = await createTournamentScheduler({
     databaseFilePath: databaseBootstrap.databaseFilePath,
     economyStore: tournamentEconomyStore,
+    intervalMs: localTournamentTestPollIntervalMs,
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
-    notifyEconomyRefunds: (tournamentId, refundedProfiles) => {
-      sendTournamentEconomyRefundNotices(tournamentId, 'fill_expired', refundedProfiles)
+    // §"ONLINE USER"/"OFFLINE USER"/"EXACTLY ONCE" в task spec-а за
+    // auto-cancel известието — durable ред-ът вече е committed вътре в
+    // autoCancelScheduledTournamentAtomically (виж tournament_economy_notice_log).
+    // Тук само доставяме: online connections получават push веднага И се
+    // маркират delivered (за да не се доставят повторно при следващ login);
+    // offline recipients остават delivered_at=NULL до следващия им
+    // login/reconnect (виж flush блока при connection setup).
+    notifyEconomyRefunds: (tournamentId, reason, refundedProfiles) => {
+      for (const { profileId, amount, noticeId } of refundedProfiles) {
+        const sentCount = sendToOpenProfileConnections(profileId, {
+          type: 'tournament_economy_notice',
+          eventId: randomUUID(),
+          tournamentId,
+          reason,
+          amount,
+          occurredAt: new Date().toISOString(),
+        })
+        if (sentCount > 0) {
+          tournamentEconomyStore.markTournamentEconomyNoticeDelivered(noticeId, profileId)
+        }
+      }
     },
   })
   tournamentScheduler.start()
@@ -17522,6 +18015,7 @@ try {
 try {
   tournamentCoordinator = await createTournamentCoordinator({
     databaseFilePath: databaseBootstrap.databaseFilePath,
+    intervalMs: localTournamentTestPollIntervalMs,
     getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
     getRoom: (roomId) => serverState.rooms[roomId] ?? null,
     commitRoom: (room) => {
@@ -17533,12 +18027,10 @@ try {
     // ДЕТЕРМИНИРАНО и НЕЗАБАВНО, вместо да разчита на обичайния
     // shouldKeepRoomAlive/TTL reap loop (виж tickRoomGameRuntimes), който би
     // задържал стаята жива, докато печелившият отбор е все още свързан.
-    // Огледало на cleanupInactiveRoomIfNeeded-ото force-remove разклонение.
+    // Огледало на cleanupInactiveRoomIfNeeded-ото force-remove разклонение;
+    // споделя точно същото тяло с forceRemoveTournamentRoomById по-горе.
     closeCompletedRoom: (room) => {
-      serverState = removeCommittedServerRoom(room.id)
-      cleanupTempBotsFromRoom(room)
-      markRoomSnapshotRemoved(room.id)
-      activeRoomRuntime.removeRoom(room.id)
+      forceRemoveTournamentRoomById(room.id)
     },
     ensureRoomRuntime: (room) => activeRoomRuntime.ensureRoom(room),
     settleTournamentPrizes: (tournamentId) => {
@@ -17553,6 +18045,22 @@ try {
         connection.currentRoomId === roomId &&
         connection.currentSeat === seat
       )
+    },
+    // Project-wide "профилът има поне една отворена автентикирана WS връзка"
+    // (§"PRESENCE SEMANTICS" в task spec-а) — reuse на същия socket-readiness
+    // pattern като /api/players листинга по-долу (Set-building за online
+    // статус), НЕ room/seat-scoped isConnectionAttached по-горе. Multi-tab:
+    // достатъчна е поне ЕДНА отворена връзка за профила.
+    isProfileOnline: (profileId) => {
+      for (const connection of Object.values(serverState.connections)) {
+        if (
+          connection.profileId === profileId &&
+          socketRegistry.get(connection.id)?.readyState === WebSocket.OPEN
+        ) {
+          return true
+        }
+      }
+      return false
     },
     notifyAssignment: (profileId, assignment) => {
       sendTournamentMatchAssignment(profileId, assignment)

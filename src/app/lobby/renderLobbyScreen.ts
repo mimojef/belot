@@ -27,6 +27,7 @@ import type {
   SupportMessageSnapshot,
   SupportConversationSnapshot,
   TournamentDetailSnapshot,
+  TournamentRoundType,
   TournamentPartnerCandidateSnapshot,
   TournamentPartnerInviteSnapshot,
   TournamentSummarySnapshot,
@@ -794,6 +795,13 @@ export type LobbyScreenState = {
   tournamentDetailLoading: boolean
   tournamentDetailErrorText: string | null
   tournamentDetail: TournamentDetailSnapshot | null
+  tournamentInterRoundPendingResult: {
+    tournamentId: string
+    currentRoundType: TournamentRoundType
+    semifinalScoreA: number | null
+    semifinalScoreB: number | null
+    shownAt: number
+  } | null
   tournamentDetailRequiresPassword: boolean
   tournamentDetailPasswordDraft: string
   tournamentDetailUnlockBusy: boolean
@@ -809,6 +817,8 @@ export type LobbyScreenState = {
   tournamentPartnerInviteBusy: boolean
   tournamentPartnerInviteErrorText: string | null
   tournamentPartnerInviteQuery: string
+  tournamentPartnerSearchResults: TournamentPartnerCandidateSnapshot[] | null
+  tournamentPartnerSearchLoading: boolean
   tournamentLeaveConfirmOpen: boolean
   tournamentLeaveBusy: boolean
   tournamentLeaveErrorText: string | null
@@ -1179,17 +1189,14 @@ let latestImageViewerCloseHandler: (() => void) | null = null
 let topicCreateEscListenerAttached = false
 let latestTopicCreateCloseHandler: (() => void) | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
+// Skip-if-unchanged guard за root.innerHTML rebuild-а по-долу (виж коментара
+// при lastRenderedRootHtml/root.innerHTML assignment-а) — пази последния root
+// element И последния HTML string, за да не съвпадне грешно с кеш, оставен
+// от ПРЕДИШЕН/различен root (напр. тестов harness, който създава нов root на
+// всеки run в същия module instance).
+let lastRenderedRootElement: HTMLElement | null = null
+let lastRenderedRootHtml: string | null = null
 let mobileMenuOpen = false
-// One-shot entrance-animation flag (mobile menu flicker fix) — true САМО
-// веднага след реално closed->open user action (виж openMobileMenu()).
-// Consume-ва се от renderMobileMenu() при следващия mount (изиграва
-// mobile-menu-shade-in/mobile-menu-backdrop-in точно веднъж), после остава
-// false през следващите background renders, докато менюто остава логически
-// отворено — без това, всеки несвързан render() (напр.
-// topic_unread_count_changed) би replay-нал entrance анимацията при пълния
-// innerHTML remount (mobileMenuOpen сам по себе си стои true през целия
-// период, затова не може да служи за този check).
-let mobileMenuEntranceAnimationPending = false
 let mobileMenuCloseTimer: ReturnType<typeof setTimeout> | null = null
 let stakesFirstCardIndex = -1
 let stakesAnimFrame = 0
@@ -4176,15 +4183,9 @@ function renderMobileMenu(state: LobbyScreenState): string {
   const mobileMenuBadgeCount = getMobileMenuNotificationRaw(state)
   const mobileMenuBadge = formatNotificationBadgeCount(mobileMenuBadgeCount)
 
-  // Consume-ва one-shot flag-а ТУК (виж декларацията му по-горе) — играе
-  // entrance анимацията само за mount-а веднага след реално closed->open
-  // (openMobileMenu()); всеки следващ mount, докато менюто остава логически
-  // отворено (background render/innerHTML remount), вижда pending=false и
-  // рендира panel/backdrop БЕЗ animation декларация → без replay/flicker.
-  const shouldPlayMobileMenuEntranceAnimation = mobileMenuOpen && mobileMenuEntranceAnimationPending
-  if (shouldPlayMobileMenuEntranceAnimation) {
-    mobileMenuEntranceAnimationPending = false
-  }
+  // Entrance animations are applied imperatively in openMobileMenu(); the
+  // template stays stable so unrelated renders can still hit the HTML cache.
+  const shouldPlayMobileMenuEntranceAnimation = false
   const mobileMenuBackdropAnimationStyle = shouldPlayMobileMenuEntranceAnimation
     ? 'animation:mobile-menu-backdrop-in 120ms ease both;'
     : ''
@@ -11223,7 +11224,7 @@ export function renderLobbyScreen(
     : prevAdminSupportMessagesScrollEl.scrollHeight - prevAdminSupportMessagesScrollEl.scrollTop - prevAdminSupportMessagesScrollEl.clientHeight < 48
   const savedAdminSupportMessagesScrollTop = prevAdminSupportMessagesScrollEl?.scrollTop ?? 0
 
-  root.innerHTML = isPhoneLayout ? `
+  const nextRootHtml = isPhoneLayout ? `
     <div
       ${mobileLayoutAttribute}
       data-lobby-screen-root="1"
@@ -11587,11 +11588,62 @@ export function renderLobbyScreen(
     ${renderImageViewerOverlay(state)}
   `
 
+  // Skip-if-unchanged guard — render() в createLobbyFlowController.ts се
+  // вика unconditionally от много WS handler-и, несвързани с текущия екран
+  // (напр. lobby_chat_message, pending_gift_notifications,
+  // pending_friend_requests и т.н. обновяват само badge броячи, но нямат
+  // screen guard). Без този check, ВСЕКИ такъв event пресъздаваше ЦЕЛИЯ
+  // root.innerHTML — включително navbar-а и мобилното "Меню" — дори когато
+  // изчисленият HTML е байт-идентичен с вече показания. mobileMenuOpen
+  // module state-ът оставаше логически true, но самият <details> DOM node (и
+  // inline animation:...-in стила му) биваше пресъздаден всеки път, което
+  // визуално изглеждаше като мигащо затваряне/отваряне на менюто; на desktop
+  // старият nav бутон node понякога изчезваше по средата на click
+  // interaction-а (между pointerdown/pointerup), губейки клика. Проверката
+  // за data-lobby-screen-root="1" гарантира, че не пропускаме legitimate
+  // rebuild, ако МЕЖДУВРЕМЕННО друг renderer (matchmaking-room/private-room-
+  // waiting/active-room) е презаписал root-а с съвсем различен screen.
+  const currentScreenRootEl = root.querySelector<HTMLElement>('[data-lobby-screen-root="1"]')
+  if (
+    root === lastRenderedRootElement &&
+    currentScreenRootEl !== null &&
+    nextRootHtml === lastRenderedRootHtml
+  ) {
+    return
+  }
+  lastRenderedRootElement = root
+  lastRenderedRootHtml = nextRootHtml
+  root.innerHTML = nextRootHtml
+
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
   const clearMobileMenuCloseTimer = () => {
     if (mobileMenuCloseTimer === null) return
     clearTimeout(mobileMenuCloseTimer)
     mobileMenuCloseTimer = null
+  }
+
+  // openMobileMenu/closeMobileMenuAnimated below mutate the live <details>
+  // DOM directly (no render()) — correct, that's what keeps opening/closing
+  // instant with no rebuild. But that leaves lastRenderedRootHtml (the
+  // skip-if-unchanged cache) pointing at a string baked with the OLD
+  // mobileMenuOpen value. The next unrelated blind render() would then see a
+  // real string diff (this one attribute) and do one unnecessary full
+  // rebuild — a one-shot flicker even though the DOM already shows the
+  // correct open/closed state. Patching the cache in place, mirroring
+  // EXACTLY the one template spot mobileMenuOpen affects
+  // (renderMobileMenu's `<details data-lobby-mobile-menu="1" ...>` tag),
+  // keeps the cache truthful without forcing a rebuild. Fails safe: on the
+  // desktop layout (no such markup) or if the template text ever changes,
+  // the markers simply aren't found and .replace() is a no-op — the normal
+  // mismatch path then does one real rebuild instead, same as before this
+  // fix, never a wrong skip.
+  const syncCachedMobileMenuOpenState = (isOpen: boolean): void => {
+    if (lastRenderedRootHtml === null) return
+    const closedMarker = 'data-lobby-mobile-menu="1"  style='
+    const openMarker = 'data-lobby-mobile-menu="1" open style='
+    lastRenderedRootHtml = isOpen
+      ? lastRenderedRootHtml.replace(closedMarker, openMarker)
+      : lastRenderedRootHtml.replace(openMarker, closedMarker)
   }
 
   const closeMobileMenuAnimated = () => {
@@ -11600,7 +11652,7 @@ export function renderLobbyScreen(
     const panel = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-panel="1"]')
     const backdrop = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-backdrop="1"]')
     mobileMenuOpen = false
-    mobileMenuEntranceAnimationPending = false
+    syncCachedMobileMenuOpenState(false)
     if (panel) panel.style.animation = 'mobile-menu-shade-out 120ms ease both'
     if (backdrop) backdrop.style.animation = 'mobile-menu-backdrop-out 120ms ease both'
     mobileMenuCloseTimer = window.setTimeout(() => {
@@ -11613,11 +11665,7 @@ export function renderLobbyScreen(
     if (!mobileMenuEl) return
     clearMobileMenuCloseTimer()
     mobileMenuOpen = true
-    // Реално closed->open user action — маркира entrance анимацията за
-    // изиграване на следващия mount/remount (виж renderMobileMenu()
-    // consume-а по-горе), точно веднъж, дори remount-ът да дойде от
-    // несвързан background render малко след клика.
-    mobileMenuEntranceAnimationPending = true
+    syncCachedMobileMenuOpenState(true)
     mobileMenuEl.open = true
     const panel = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-panel="1"]')
     const backdrop = mobileMenuEl.querySelector<HTMLElement>('[data-lobby-mobile-menu-backdrop="1"]')
@@ -11646,7 +11694,6 @@ export function renderLobbyScreen(
     button.addEventListener('click', () => {
       clearMobileMenuCloseTimer()
       mobileMenuOpen = false
-      mobileMenuEntranceAnimationPending = false
       if (mobileMenuEl) mobileMenuEl.open = false
     })
   })

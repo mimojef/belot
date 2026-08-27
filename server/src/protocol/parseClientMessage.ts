@@ -261,10 +261,19 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         return null
       }
 
+      // silent (§ "SILENT ATTACH") was previously dropped here — the client
+      // sent it, the resume_room handler in index.ts and the ClientMessage
+      // type both already branched on message.silent === true, but this
+      // parser rebuilt the validated message WITHOUT copying the field
+      // through, so the handler always saw undefined and replied
+      // room_resumed (navigating) instead of room_attached_silent regardless
+      // of what the client actually sent — a STATE B silent attach would
+      // always fall through to the raw active-room attendance screen.
       return {
         type: 'resume_room',
         roomId,
         reconnectToken,
+        silent: parsed.silent === true,
       }
     }
 
@@ -511,6 +520,13 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       const slotIndex = parsePrivateRoomSlotIndex(parsed.slotIndex)
       if (team === null || slotIndex === null) return null
       return { type: 'kick_from_private_room', team, slotIndex }
+    }
+
+    if (parsed.type === 'tournament_semifinal_result_acknowledge') {
+      const tournamentId = normalizeRequiredText(parsed.tournamentId)
+      const semifinalMatchId = normalizeRequiredText(parsed.semifinalMatchId)
+      if (tournamentId === null || semifinalMatchId === null) return null
+      return { type: 'tournament_semifinal_result_acknowledge', tournamentId, semifinalMatchId }
     }
 
     if (parsed.type === 'subscribe_private_room_chat') {

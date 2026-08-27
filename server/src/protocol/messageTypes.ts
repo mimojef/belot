@@ -21,6 +21,16 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignment
 }
 
+// Login/reconnect докато профилът е между кръгове (STATE A/B), без runnable
+// match в момента — виж коментара на connection-setup push-а в index.ts.
+// Клиентът само знае, че трябва да fetch-не authoritative tournament detail
+// за tournamentId и сам да resolve-не destination-а (myInterRoundWaiting) —
+// не носи самия destination, за да няма duplicate state изчисление.
+export type TournamentActiveParticipationMessage = {
+  type: 'tournament_active_participation'
+  tournamentId: string
+}
+
 export type TournamentFeederMatchCompletedMessage = {
   type: 'tournament_feeder_match_completed'
   tournamentId: string
@@ -53,7 +63,7 @@ export type TournamentEconomyNoticeMessage = {
   type: 'tournament_economy_notice'
   eventId: string
   tournamentId: string
-  reason: 'creator_cancelled' | 'fill_expired'
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'
   amount: number
   occurredAt: string
 }
@@ -113,6 +123,19 @@ export type ClientMessage =
       type: 'resume_room'
       roomId: RoomId
       reconnectToken: string
+      // Phase 1 protocol foundation for the unified inter-round popup (task
+      // spec §7) — when true, the server performs the exact same seat
+      // attachment as a normal resume_room (tryResumeRoomForConnection/
+      // attachConnectionToRoomSeat, unchanged), but responds with
+      // room_attached_silent instead of room_resumed, so the client is not
+      // instructed to navigate to the active-room screen. No lobby UI uses
+      // this yet in Phase 1 — this is protocol foundation only.
+      silent?: boolean
+    }
+  | {
+      type: 'tournament_semifinal_result_acknowledge'
+      tournamentId: string
+      semifinalMatchId: string
     }
   | {
       type: 'leave_active_room'
@@ -575,6 +598,21 @@ export type RoomResumedMessage = {
   seat: Seat
 }
 
+// Response to resume_room { silent: true } — confirms the exact same server-
+// side seat attachment as room_resumed (same tryResumeRoomForConnection/
+// attachConnectionToRoomSeat path, see index.ts), but is a distinct message
+// type so the client can tell "attach succeeded" apart from "attach
+// succeeded AND you should navigate to the active-room screen" without
+// relying on a boolean flag that existing room_resumed handlers might
+// overlook. Phase 1 protocol foundation only — see ClientMessage's
+// resume_room.silent comment; no client code sends silent:true yet.
+export type RoomAttachedSilentMessage = {
+  type: 'room_attached_silent'
+  roomId: RoomId
+  seat: Seat
+  profileId: string | null
+}
+
 export type RoomResumeFailedMessage = {
   type: 'room_resume_failed'
   roomId: RoomId
@@ -933,6 +971,7 @@ export type ServerMessage =
   | RoomCreatedMessage
   | RoomJoinedMessage
   | RoomResumedMessage
+  | RoomAttachedSilentMessage
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage
@@ -977,6 +1016,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
+  | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
   | TournamentEconomyNoticeMessage

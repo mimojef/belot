@@ -22,6 +22,10 @@ type NoticeContent = {
   amountText: string
   isPositive: boolean
   icon: string
+  /** Второ изречение СЛЕД сумата (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
+   * опционално, само partner_left го ползва към момента. Останалите reason-и
+   * остават с непроменения prefix+amount+"." формат. */
+  suffix?: string
 }
 
 // Готовите текстове идват директно от task spec-а (§4), разделени на
@@ -36,7 +40,21 @@ function buildNoticeContent(notice: TournamentEconomyNotice): NoticeContent {
     case 'creator_cancelled':
       return { prefix: 'Турнирът, в който участвахте, беше затворен. Възстановени: ', amountText: `+${formatted} жълтици`, isPositive: true, icon: '↩️' }
     case 'fill_expired':
-      return { prefix: 'Турнирът не се запълни навреме. Възстановени: ', amountText: `+${formatted} жълтици`, isPositive: true, icon: '↩️' }
+    case 'scheduled_underfilled':
+      return {
+        prefix: 'Турнирът е анулиран, защото не се събра необходимият брой участници. Входът ви е възстановен: ',
+        amountText: `+${formatted} жълтици`,
+        isPositive: true,
+        icon: '↩️',
+      }
+    case 'partner_left':
+      return {
+        prefix: 'Партньорът ти се отписа от отбора. Входът ти от ',
+        amountText: `+${formatted} жълтици`,
+        isPositive: true,
+        icon: '↩️',
+        suffix: ' е възстановен. Покани го отново или намери друг партньор.',
+      }
   }
 }
 
@@ -82,7 +100,7 @@ export function createTournamentEconomyNotification(options: {
     }
 
     const notice = current
-    const { prefix, amountText, isPositive, icon } = buildNoticeContent(notice)
+    const { prefix, amountText, isPositive, icon, suffix } = buildNoticeContent(notice)
     const accentColor = isPositive ? '#4ade80' : '#f87171'
     const accentBorder = isPositive ? 'rgba(74,222,128,0.4)' : 'rgba(248,113,113,0.4)'
     const accentGlow = isPositive ? 'rgba(74,222,128,0.10)' : 'rgba(248,113,113,0.10)'
@@ -126,7 +144,7 @@ export function createTournamentEconomyNotification(options: {
       >
         <span aria-hidden="true" style="font-size:18px;line-height:1;flex-shrink:0;margin-top:1px;">${icon}</span>
         <div style="flex:1;min-width:0;font-size:13.5px;line-height:1.45;color:rgba(255,255,255,0.88);">
-          ${prefix}<strong style="color:${accentColor};font-weight:900;">${amountText}</strong>.
+          ${prefix}<strong style="color:${accentColor};font-weight:900;">${amountText}</strong>${suffix ?? '.'}
         </div>
         <button id="tournament-economy-notif-close-btn" type="button" aria-label="Затвори известието" style="
           width:32px;height:32px;min-width:32px;border-radius:50%;border:1px solid rgba(255,255,255,0.15);

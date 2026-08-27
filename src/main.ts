@@ -91,6 +91,8 @@ import { createTournamentEconomyNotification } from './ui/notifications/tourname
 import type { TournamentEconomyNoticeReason } from './ui/notifications/tournamentEconomyNotificationQueue'
 import { createTournamentPartnerInvitePopup } from './ui/notifications/tournamentPartnerInvitePopup'
 import { createTournamentMatchStartPopup } from './ui/notifications/tournamentMatchStartPopup'
+import { createTournamentReclaimModal } from './ui/notifications/tournamentReclaimModal'
+import { isTournamentForceReturnRequired, resolveTournamentReturnDestination } from './app/lobby/resolveTournamentReturnDestination'
 import { createTournamentFeederWaitingStrip, type TournamentFeederWaitingState } from './ui/notifications/tournamentFeederWaitingStrip'
 import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
 import { mountConsentUi } from './app/consent/consentUi'
@@ -304,6 +306,11 @@ let reconnectTimerId: number | null = null
 let connectionErrorTimerId: number | null = null
 let reconnectAttempt = 0
 let pendingTournamentEntryAfterLeave: TournamentMatchAssignmentSnapshot | null = null
+// STATE B silent attach idempotency guard (§ "SILENT ATTACH") — resume_room
+// itself is idempotent server-side, but this avoids re-sending it (and
+// re-arming activeRoom's watch) on every fetchTournamentDetail refresh while
+// the same round-transition room is already attached.
+let silentAttachedRoundTransitionRoomId: string | null = null
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
@@ -4888,6 +4895,36 @@ async function loadTournamentPartnerCandidates(
   }
 }
 
+async function searchTournamentPartnerCandidates(
+  tournamentId: string,
+  query: string,
+  signal: AbortSignal,
+): Promise<
+  | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/partner-candidates/search?q=${encodeURIComponent(query)}`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        signal,
+      },
+    )
+    const data = (await response.json()) as { ok: boolean; message?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
+    if (!response.ok || !data.ok || !Array.isArray(data.candidates)) {
+      return { ok: false, message: data.message ?? 'Търсенето не беше успешно.' }
+    }
+    return { ok: true, candidates: data.candidates }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error
+    }
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadPendingTournamentPartnerInvites(): Promise<
   | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
   | { ok: false; message: string }
@@ -5296,11 +5333,32 @@ lobby = createLobbyFlowController({
   onClaimTopicsLaunchGift: () => claimTopicsLaunchGiftRequest(),
   onTournamentCreate: (input) => createTournamentRequest(input),
   onTournamentDetailLoad: (tournamentId) => loadTournamentDetail(tournamentId),
+  onTournamentActiveMatchRecovered: (assignment) => {
+    if (assignment !== null && assignment.reconnectToken !== null) {
+      tournamentMatchStartPopup.setAssignment(assignment)
+    } else if (assignment === null) {
+      tournamentMatchStartPopup.setAssignment(null)
+    }
+  },
+  onTournamentRoundTransitionAssignment: (assignment) => {
+    // STATE B (generic across R16->QF/QF->SF/SF->Final) — silently seat-attach
+    // via the Phase 1 resume_room {silent:true} protocol so the round starts
+    // on time even while the lobby keeps showing the unified inter-round
+    // screen, and arm activeRoom's watch so it can enter gameplay itself the
+    // instant the room's tournamentAttendance resolves — no visible
+    // navigation here, unlike the old direct (non-silent) resumeRoom call.
+    tournamentMatchStartPopup.clearAssignmentForRoom(assignment.roomId)
+    attemptTournamentRoundTransitionSilentAttach(assignment)
+  },
+  onTournamentSemifinalResultAckNeeded: (tournamentId, semifinalMatchId) => {
+    client.acknowledgeTournamentSemifinalResult(tournamentId, semifinalMatchId)
+  },
   onTournamentUnlock: (tournamentId, password) => unlockTournamentDetail(tournamentId, password),
   onTournamentJoin: (tournamentId, password) => joinTournamentRequest(tournamentId, password),
   onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
   onTournamentCancel: (tournamentId) => cancelTournamentRequest(tournamentId),
   onTournamentPartnerCandidatesLoad: (tournamentId) => loadTournamentPartnerCandidates(tournamentId),
+  onTournamentPartnerCandidatesSearch: (tournamentId, query, signal) => searchTournamentPartnerCandidates(tournamentId, query, signal),
   onPendingTournamentPartnerInvitesLoad: () => loadPendingTournamentPartnerInvites(),
   onTournamentPartnerInviteCreate: (tournamentId, inviteeProfileId, password) => createTournamentPartnerInviteRequest(tournamentId, inviteeProfileId, password),
   onTournamentPartnerInviteRespond: (tournamentId, inviteId, action) => respondTournamentPartnerInviteRequest(tournamentId, inviteId, action),
@@ -5406,7 +5464,14 @@ const activeRoom = createActiveRoomFlowController({
     if ('ok' in result && !result.ok) return { message: result.message }
     return { message: 'blocked' in result && result.blocked ? 'Играчът е блокиран.' : 'Операцията не успя.' }
   },
-  showLobby: (errorText = null) => {
+  showLobby: (errorText = null, leftRoomId = null) => {
+    // Ако tournamentMatchStartPopup в момента сочи точно към стаята, която
+    // играчът напуска (мач приключил — win/loss/walkover), изчистваме stale
+    // assignment-а тук, вместо да оставим countdown-а да замръзне на 00:00
+    // и бутонът "Влез в турнира" да сочи към вече затворена/чужда стая.
+    if (leftRoomId !== null) {
+      tournamentMatchStartPopup.clearAssignmentForRoom(leftRoomId)
+    }
     lobby.setConnected(client.isConnected())
     lobby.resetToLobby()
     lobby.setErrorText(errorText)
@@ -5427,9 +5492,19 @@ const activeRoom = createActiveRoomFlowController({
     const result = await loadTournamentDetail(tournamentId)
     return result.ok ? result.tournament : null
   },
-  onEnterWaitingForNextTournamentRound: (feeder) => {
-    currentFeederWaitingState = feeder
-    tournamentFeederWaitingStrip.setState(feeder)
+  acknowledgeTournamentSemifinalResult: (tournamentId, semifinalMatchId) => {
+    client.acknowledgeTournamentSemifinalResult(tournamentId, semifinalMatchId)
+  },
+  onEnterWaitingForNextTournamentRound: (_feeder, tournamentId, result) => {
+    currentFeederWaitingState = null
+    tournamentFeederWaitingStrip.setState(null)
+    lobby?.showTournamentInterRoundPendingResult(tournamentId, result)
+  },
+  onTournamentFinalResultContinue: (tournamentId) => {
+    currentFeederWaitingState = null
+    tournamentFeederWaitingStrip.setState(null)
+    tournamentMatchStartPopup.setAssignment(null)
+    lobby?.showTournamentDetail(tournamentId)
   },
   requestBidResync: () => {
     // Съществуващият resume_room round-trip е безопасен/идемпотентен дори
@@ -5482,6 +5557,130 @@ const tournamentMatchStartPopup = createTournamentMatchStartPopup({
 
 window.setInterval(() => tournamentMatchStartPopup.tick(), 1000)
 
+const tournamentReclaimModalContainer = document.createElement('div')
+tournamentReclaimModalContainer.id = 'global-tournament-reclaim-modal'
+document.body.appendChild(tournamentReclaimModalContainer)
+
+// Blocking "Поеми играта" modal (§"BLOCKING MODAL" / "ОСНОВЕН ПРИНЦИП" в
+// допълнението) — vezan е към ACTIVE TOURNAMENT PARTICIPATION lifecycle-а
+// на профила, НЕ към lifecycle-а на един конкретен match/room. Затова не
+// пази assignment/destination state тук — currentTournamentReclaimTournamentId
+// пази само КОЙ турнир в момента изисква връщане; конкретният destination
+// (attendance/countdown/gameplay/STATE A/STATE B) се re-resolve-ва ИЗЦЯЛО
+// наново при всеки re-check (login/reconnect push, match completion push,
+// и особено при самия button click — виж resolveAndRouteTournamentReturn
+// по-долу), никога от кеширан snapshot.
+const tournamentReclaimModal = createTournamentReclaimModal({
+  container: tournamentReclaimModalContainer,
+  onReclaimClick: () => {
+    void resolveAndRouteTournamentReturn(currentTournamentReclaimTournamentId, { fromButtonClick: true })
+  },
+})
+let currentTournamentReclaimTournamentId: string | null = null
+
+// Единствената authoritative проверка "трябва ли да блокирам сайта за този
+// турнир" + "къде да route-на при click" (§"НЕ ВРЪЗВАЙ BLOCKING MODAL САМО
+// С ACTIVE ROOM" в допълнението) — fetch-va СЪЩИЯ tournament detail endpoint,
+// който вече храни tournament-detail екрана, и минава през
+// resolveTournamentReturnDestination (myActiveMatch/myInterRoundWaiting).
+// null резултат = authoritative "no active participation" (elimination/
+// finished/terminal) — единственото легитимно основание да СЕ затвори modal-ът
+// автоматично; всякакво друго non-null поддържа/route-ва modal-а нататък.
+async function resolveAndRouteTournamentReturn(
+  tournamentId: string | null,
+  options: { fromButtonClick: boolean } = { fromButtonClick: false },
+): Promise<void> {
+  if (tournamentId === null) return
+  const result = await loadTournamentDetail(tournamentId)
+  if (!result.ok) {
+    // Detail fetch неуспешен (напр. временна мрежова грешка) — не затваряй
+    // modal-а спекулативно на base на нищо, задръж текущото видимо
+    // състояние до следващия authoritative re-check.
+    return
+  }
+  // КЛЮЧОВА ПОПРАВКА (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението): "активно
+  // tournament participation" (destination !== null) НЕ е доказателство за
+  // force-return — нормален participant, който лично е играл, също се
+  // вижда в STATE A/B. Единственото authoritative "трябва да покажа
+  // blocking modal" условие е isTournamentForceReturnRequired
+  // (viewerHasUnresolvedBotReplacement, computed server-side от реални
+  // tournament_match_no_show_replacements редове), проверено ПЪРВО.
+  if (!isTournamentForceReturnRequired(result.tournament)) {
+    if (currentTournamentReclaimTournamentId === tournamentId) {
+      currentTournamentReclaimTournamentId = null
+      tournamentReclaimModal.hide()
+    }
+    return
+  }
+  const destination = resolveTournamentReturnDestination(result.tournament)
+  if (destination === null) {
+    // Force-return е бил TRUE, но вече няма active destination — team-ът е
+    // елиминиран/турнирът е приключил за профила. Authoritative "no active
+    // participation" сигнал, единственото друго легитимно основание за
+    // auto-close, редом до successful reclaim (виж room_resumed handler-а).
+    currentTournamentReclaimTournamentId = null
+    tournamentReclaimModal.hide()
+    return
+  }
+  currentTournamentReclaimTournamentId = tournamentId
+  tournamentReclaimModal.show(result.tournament.name)
+  if (!options.fromButtonClick) return
+  // Само реален click route-ва някъде — самото show()/re-resolve при push
+  // не трябва да "скача" автоматично никъде, само да update-не modal-а.
+  switch (destination.kind) {
+    case 'state-a':
+    case 'state-b': {
+      // §"AUTHORITATIVE RETURN ACTION" във второто допълнение — STATE A/B
+      // нямат runnable match/room да swap-нат (за разлика от gameplay по-
+      // долу), затова тук е единственото място, където трябва explicit
+      // server-side "human се върна" action, за да не остане persisted
+      // replacement ред 'active' завинаги само защото играчът е navigate-нал
+      // към detail екрана. Ако acknowledge fail-не, НЕ навигираме — modal-ът
+      // остава видим и requirement-ът legitimately остава true (виж
+      // ACKNOWLEDGE_BOT_RETURN_FAILURE_MESSAGES в index.ts).
+      const ack = await acknowledgeTournamentBotReturn(tournamentId)
+      if (!ack.ok) return
+      currentTournamentReclaimTournamentId = null
+      tournamentReclaimModal.hide()
+      lobby.navigateToTournamentDetail(destination.tournamentId)
+      return
+    }
+    case 'attendance':
+    case 'countdown':
+    case 'gameplay': {
+      // reuse съществуващия resume_room flow. tryTakeoverNoShowBot на
+      // сървъра вече покрива И countdown (бот е седнал на мястото от
+      // момента на bot-fill resolution-а, доста преди gameplay да
+      // стартира), не само истински in_progress gameplay — виж
+      // ensureTournamentBotsInRuntime в tournamentCoordinator.ts.
+      const { assignment } = destination
+      if (assignment.reconnectToken === null) return
+      client.resumeRoom(assignment.roomId, assignment.reconnectToken)
+      return
+    }
+  }
+}
+
+// Server-authoritative "human се върна" action ИЗВЪН gameplay (§"AUTHORITATIVE
+// RETURN ACTION" във второто допълнение) — reuse на съществуващия
+// tournament_match_no_show_replacements lifecycle (markReplacementCompletedStatement),
+// идентично на gameplay reclaim пътя, само без room/seat swap. Idempotent
+// (двоен click връща alreadyResolved:true, не грешка).
+async function acknowledgeTournamentBotReturn(
+  tournamentId: string,
+): Promise<{ ok: true } | { ok: false }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/acknowledge-bot-return`, {
+      method: 'POST',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean }
+    return response.ok && data.ok ? { ok: true } : { ok: false }
+  } catch {
+    return { ok: false }
+  }
+}
+
 function clearReconnectTimer(): void {
   if (reconnectTimerId === null) {
     return
@@ -5506,6 +5705,27 @@ function scheduleServerReconnect(): void {
     reconnectTimerId = null
     client.connect()
   }, delayMs)
+}
+
+// STATE B silent attach (§ "SILENT ATTACH") — shared by the lobby's
+// onTournamentRoundTransitionAssignment (first attempt, fired once
+// myActiveMatch is round_transition) and the tournament_match_assigned
+// handler below (retry vehicle: the coordinator re-sends this message on
+// every tick for every runnable match, so a failed first attempt gets
+// naturally retried on the next tick once silentAttachedRoundTransitionRoomId
+// is cleared — see the room_resume_failed handler — without a new client
+// timer/poll). Guarded by silentAttachedRoundTransitionRoomId so a
+// successful attach is never re-sent.
+function attemptTournamentRoundTransitionSilentAttach(assignment: TournamentMatchAssignmentSnapshot): void {
+  if (assignment.reconnectToken === null) return
+  if (silentAttachedRoundTransitionRoomId === assignment.roomId) return
+  silentAttachedRoundTransitionRoomId = assignment.roomId
+  activeRoom.armPendingTournamentSilentEntry({
+    roomId: assignment.roomId,
+    seat: assignment.seat,
+    stake: 5000,
+  })
+  client.resumeRoom(assignment.roomId, assignment.reconnectToken, true)
 }
 
 function requestActiveRoomResume(): boolean {
@@ -5627,6 +5847,22 @@ client = createGameServerClient({
     // по време на самата игра/resume; този флаг само не бива да остава
     // "заклещен" true завинаги след като играта приключи.
     pwaIsReconnectingActiveRoom = false
+
+    // Silent attach failure/retry (§ "SILENT ATTACH FAILURE / RETRY") — a WS
+    // drop between sending resume_room{silent:true} and receiving a response
+    // never fires room_resume_failed, so without this the guard would stay
+    // permanently stuck (same failure mode as an explicit rejection, just
+    // silent). The new connection.id makes any prior silent attach stale
+    // server-side anyway (tryResumeRoomForConnection is keyed to
+    // connection.id) — resetting here lets the next tournament_match_assigned
+    // tick or tournament-detail fetch retry; resume_room is idempotent, so a
+    // harmless duplicate if the original attempt actually did succeed. Mirrors
+    // the existing lobby private-room resync hook below for the same class of
+    // "silently-held state might be stale after reconnect".
+    if (silentAttachedRoundTransitionRoomId !== null) {
+      activeRoom.clearPendingTournamentSilentEntry(silentAttachedRoundTransitionRoomId)
+      silentAttachedRoundTransitionRoomId = null
+    }
 
     // Explicit bid-recovery reconnect (forceReconnectForZombieConnection) —
     // винаги тих resume в СЪЩАТА активна стая, никога forceOfflineLobbyReload
@@ -5880,14 +6116,121 @@ client = createGameServerClient({
     }
 
     if (message.type === 'tournament_match_assigned') {
+      activeRoom.completePendingTournamentRoundResultTransition()
       lobby.handleServerMessage(message)
       currentFeederWaitingState = null
       tournamentFeederWaitingStrip.setState(null)
-      tournamentMatchStartPopup.setAssignment(message.assignment)
+      if (message.assignment.deadlineKind === 'round_transition') {
+        // The coordinator re-sends tournament_match_assigned on every tick for
+        // every runnable match — this doubles as the retry vehicle for a
+        // silent attach that previously failed (guard cleared by
+        // room_resume_failed below), independent of which screen is showing,
+        // without adding a new client-side poll/timer.
+        attemptTournamentRoundTransitionSilentAttach(message.assignment)
+        // A → B AUTO NAVIGATION (§ "КЛЮЧОВО: A → B AUTO NAVIGATION") —
+        // event-driven auto-return: this push is the authoritative signal
+        // that STATE B is ready for this player, regardless of where they
+        // currently are in the SPA (lobby home, tournaments list, players,
+        // chat, ...). If they're already looking at this exact tournament's
+        // detail screen, navigateToTournamentDetail would just re-fetch and
+        // flash the loading state for no reason — getCurrentTournamentDetailId()
+        // lets us skip that and leave the in-place STATE A→B transition
+        // (already working, driven by fetchTournamentDetail re-renders)
+        // alone. lobby.navigateToTournamentDetail is the SAME function the
+        // tournaments list "Отвори" click uses — no second renderer, no
+        // polling: this fires exactly once per assignment, straight from the
+        // WS push.
+        if (lobby.getCurrentTournamentDetailId() !== message.assignment.tournamentId) {
+          lobby.navigateToTournamentDetail(message.assignment.tournamentId)
+        }
+      }
+      // Generic across every round transition (R16->QF/QF->SF/SF->Final, not
+      // just the final) — the unified lobby STATE A/B overlay is the single,
+      // UNCONDITIONAL owner of this UX for round_transition assignments,
+      // regardless of which lobby screen is currently showing. Gating this on
+      // lobby?.getCurrentScreen() === 'tournament-detail' used to let the
+      // global popup (and its non-silent onEnterTournamentMatch ->
+      // client.resumeRoom without silent:true -> room_resumed -> unconditional
+      // enterActiveRoomFromResume in the room_resumed handler below) race the
+      // silent attach armed above: any WS push landing while the player is on
+      // a different lobby screen — e.g. still on the tournaments list, or
+      // between screens during fetchTournamentDetail — set the popup's
+      // assignment, and tournamentMatchStartPopup's own render() only hides
+      // itself once activeRoom.getCurrentRoomId() matches, which stays null
+      // during the whole STATE B silent-attach window. Clicking the popup
+      // then bypassed isTournamentAttendanceReadyForSilentEntry entirely,
+      // producing the raw activeRoom attendance screen alongside STATE B.
+      // Only 'first_match' assignments (a real new tournament entry) still use
+      // the global popup as a fallback for "navigated away".
+      if (message.assignment.deadlineKind === 'round_transition') {
+        tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
+        return
+      }
+      // §"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението — самото "не съм attach-нат
+      // към собствената си стая" НЕ доказва bot-replacement (нормален
+      // late-но-still-within-attendance играч е точно в това състояние преди
+      // да е дошъл replacement). Затова тук НЕ решаваме директно дали да
+      // покажем blocking modal-а от самия assignment push — винаги
+      // делегираме на resolveAndRouteTournamentReturn, който прави fresh
+      // authoritative detail fetch и проверява viewerHasUnresolvedBotReplacement
+      // ПЪРВО. Ако force-return не е TRUE (attendance/countdown преди bot
+      // insertion — §"ATTENDANCE LOGIN ПРЕДИ DEADLINE"/"COUNTDOWN LOGIN"),
+      // функцията просто не показва modal-а — авто-влизането в правилния
+      // (attendance/countdown) екран става чрез същия silent resume по-долу,
+      // а не чрез blocking UI.
+      if (activeRoom.getCurrentRoomId() !== message.assignment.roomId) {
+        tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
+        void resolveAndRouteTournamentReturn(message.assignment.tournamentId).then(() => {
+          // Ако force-return НЕ е бил TRUE (нормален участник, все още преди
+          // bot insertion — §"ATTENDANCE LOGIN ПРЕДИ DEADLINE"/"COUNTDOWN
+          // LOGIN"), resolveAndRouteTournamentReturn само скри евентуален
+          // stale modal и не route-ва (fromButtonClick е false по default) —
+          // трябва отделен, безусловен normal resume тук, за да влезе играчът
+          // автоматично в attendance/countdown екрана си БЕЗ бутон.
+          // tournamentReclaimModal.isVisible() различава двата пътя без
+          // повторно пресмятане на force-return тук. Нормален (не-silent)
+          // resume — за разлика от STATE B silent attach, тук няма нужда от
+          // armPendingTournamentSilentEntry watch, room_resumed вече рендира
+          // правилния attendance/countdown екран directno.
+          if (!tournamentReclaimModal.isVisible() && message.assignment.reconnectToken !== null) {
+            client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)
+          }
+        })
+        return
+      }
+      if (currentTournamentReclaimTournamentId === message.assignment.tournamentId) {
+        currentTournamentReclaimTournamentId = null
+        tournamentReclaimModal.hide()
+      }
+      if (message.assignment.reconnectToken !== null) {
+        tournamentMatchStartPopup.setAssignment(message.assignment)
+      } else {
+        tournamentMatchStartPopup.clearAssignmentForRoom(message.assignment.roomId)
+      }
+      return
+    }
+
+    // Login/reconnect докато профилът е между кръгове, без runnable match в
+    // момента (STATE A/B — виж коментара на server-side push-а в index.ts).
+    if (message.type === 'tournament_active_participation') {
+      void resolveAndRouteTournamentReturn(message.tournamentId)
       return
     }
 
     if (message.type === 'tournament_feeder_match_completed') {
+      lobby.handleServerMessage(message)
+      // §"CORRECT MATCH-COMPLETION HANDLING" в допълнението — КРИТИЧНА
+      // поправка: match completion сам по себе си НЕ доказва elimination
+      // (ако bot-controlled team-ът е спечелил, участието продължава към
+      // STATE A/STATE B). Затова НИКОГА не затваряме modal-а директно тук —
+      // винаги re-resolve-ваме authoritative state (fresh detail fetch);
+      // resolveAndRouteTournamentReturn само тогава решава дали да затвори
+      // (destination === null, т.е. team наистина елиминиран/tournament
+      // приключил за профила) или да update-не modal-а към новия destination
+      // (STATE A/STATE B/следващ match), без auto-route (fromButtonClick: false).
+      if (currentTournamentReclaimTournamentId === message.tournamentId) {
+        void resolveAndRouteTournamentReturn(message.tournamentId)
+      }
       if (currentFeederWaitingState !== null) {
         currentFeederWaitingState = {
           ...currentFeederWaitingState,
@@ -5908,6 +6251,7 @@ client = createGameServerClient({
     // но там няма активна стая, в която да го рендира (играчът вече е напуснал
     // active-room flow-а), затова лентата никога не се обновяваше на живо.
     if (message.type === 'tournament_feeder_score_progress') {
+      lobby.handleServerMessage(message)
       if (currentFeederWaitingState !== null) {
         currentFeederWaitingState = {
           ...currentFeederWaitingState,
@@ -5952,6 +6296,15 @@ client = createGameServerClient({
         reason: message.reason,
         amount: message.amount,
       })
+      // Auto-release realtime update (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
+      // ако играчът в момента гледа точно този турнир, освежи detail-а веднага
+      // (roster/team state), за да не остане phantom teammate/stale "Чакаме
+      // отговор от ..." UI видим след committed auto-release. Не polling —
+      // еднократен refetch, задействан от точно този authoritative push,
+      // огледално на tournament_feeder_match_completed/tournament_match_assigned.
+      if (message.reason === 'partner_left') {
+        lobby.handleServerMessage(message)
+      }
       return
     }
 
@@ -5970,10 +6323,59 @@ client = createGameServerClient({
       return
     }
 
+    // Defense-in-depth (§3 в task spec-а: "Не изпращай resume_room към
+    // приключила или чужда стая") — покрива и рядкия случай, в който
+    // tournamentMatchStartPopup вече е показал stale assignment, ПРЕДИ
+    // showLobby(..., leftRoomId) да е успял да го изчисти (напр. играчът
+    // никога не е влизал в activeRoomState за тази стая — activeRoom.handleServerMessage
+    // guard-ва с "if (!activeRoomState) return false" и никога не вижда това
+    // съобщение). Идемпотентно — no-op ако popup-ът не сочи към тази стая.
+    if (message.type === 'room_resume_failed') {
+      tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
+      // Silent attach failure (§ "SILENT ATTACH FAILURE / RETRY") — without
+      // this, silentAttachedRoundTransitionRoomId would stay set forever for
+      // this roomId (it's only ever set, never cleared, on the happy path),
+      // permanently blocking attemptTournamentRoundTransitionSilentAttach's
+      // guard from retrying — leaving the player stuck looking at STATE B
+      // with no actual seat attachment while the server counts them absent.
+      // Clearing both guards here lets the next tournament_match_assigned
+      // tick (or the next tournament-detail fetch) retry cleanly.
+      if (silentAttachedRoundTransitionRoomId === message.roomId) {
+        silentAttachedRoundTransitionRoomId = null
+        activeRoom.clearPendingTournamentSilentEntry(message.roomId)
+      }
+    }
+
+    // Response to resume_room {silent:true} (STATE B, § "SILENT ATTACH") —
+    // seat attachment already happened server-side, identically to
+    // room_resumed, but this is intentionally NOT navigation: activeRoom's
+    // armPendingTournamentSilentEntry watch (armed alongside the resumeRoom
+    // call in onTournamentRoundTransitionAssignment above) picks up the
+    // resulting room_snapshot stream and decides when to actually enter.
+    if (message.type === 'room_attached_silent') {
+      tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
+      // Same as room_resumed below — silent attach also means the profile is
+      // now seated in its own STATE B match, so the blocking requirement no
+      // longer applies to it (see the show-condition in
+      // tournament_match_assigned above).
+      currentTournamentReclaimTournamentId = null
+      tournamentReclaimModal.hide()
+      return
+    }
+
     if (message.type === 'room_resumed' && !activeRoom.hasActiveRoom()) {
       removeLandingOverlay()
       lobby.suspendLobbyChatForActiveRoom()
       activeRoom.enterActiveRoomFromResume(message.roomId, message.seat, 5000)
+      // Reclaim/attach успешен (§"BOT SEAT RECLAIM") — играчът вече Е
+      // attach-нат към собствената си стая (attendance/countdown/gameplay),
+      // затова "не съм attach-нат" show-условието вече не важи; скрий
+      // modal-а веднага вместо да чакаме следващия tournament_match_assigned
+      // tick. currentTournamentReclaimTournamentId се nulls тук safe,
+      // независимо дали изобщо е бил активен за тази стая.
+      currentTournamentReclaimTournamentId = null
+      tournamentReclaimModal.hide()
+      tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
       return
     }
 
