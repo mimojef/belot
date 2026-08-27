@@ -14,6 +14,7 @@ import { randomInt, randomUUID } from 'node:crypto'
 import type { ProfileId } from '../core/serverTypes.js'
 import { dbDateToUtc } from './dbDate.js'
 import { verifyPassword as verifyTournamentPassword } from './authHelpers.js'
+import { normalizeProfileSearchTerm, escapeSqlLikePattern } from './normalizeProfileIdentityText.js'
 import type {
   TournamentEntryJoinedAs,
   TournamentEntryRecord,
@@ -80,6 +81,15 @@ export type LeaveTournamentResult =
       refundedAmount: number
       walletBalance: number
       tournament: TournamentRecord
+      // Auto-release (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") — non-null ТОЧНО
+      // когато напускащият е бил в двучленен partner team: partner-ът НЕ
+      // остава едночленен team, а е автоматично освободен + refund-нат в
+      // СЪЩАТА транзакция (виж leaveTournamentAndRefundAtomically). null за
+      // нормален solo leave (никога не е бил в team) И за
+      // alreadyRefunded===true (idempotent повторен call — release/refund-ът
+      // на partner-а вече е бил committed от оригиналния call, не се
+      // преизчислява/дублира тук).
+      autoReleasedPartner: { profileId: ProfileId; refundedAmount: number; noticeId: string } | null
     }
   | {
       ok: false
@@ -217,12 +227,21 @@ export type TournamentEconomyStore = {
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
   ) => PartnerCandidateRecord[]
+  getGlobalPartnerCandidatesForTournament: (
+    tournamentId: TournamentId,
+    inviterProfileId: ProfileId,
+    normalizedTerm: string,
+  ) => PartnerCandidateRecord[]
   listPendingPartnerInvitesForProfile: (
     inviteeProfileId: ProfileId,
   ) => TournamentPartnerInviteRecord[]
   listUndismissedPendingPartnerInvitesForProfile: (
     inviteeProfileId: ProfileId,
   ) => TournamentPartnerInviteRecord[]
+  getPendingPartnerLeftNotices: (
+    recipientProfileId: ProfileId,
+  ) => Array<{ noticeId: string; tournamentId: string; refundedAmount: number }>
+  markPartnerLeftNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
   dismissPartnerInvitePopup: (
     inviteId: TournamentPartnerInviteId,
     inviteeProfileId: ProfileId,
@@ -779,6 +798,31 @@ export async function createTournamentEconomyStore(
     ORDER BY expires_at ASC;
   `)
 
+  // Durable "партньорът ти се отписа" известие (§ "PARTNER-LEFT NOTIFICATION
+  // ТРЯБВА Е DURABLE") — огледално на gift_notification_log
+  // (yellowCoinGiftStore.ts): insert вътре в leave transaction-а веднага след
+  // committed auto-release refund, delivered_at маркира реалната доставка
+  // (online push ИЛИ login flush), не insert момента. INSERT OR IGNORE прави
+  // insert-а idempotent при notice_id, детерминиран от освободения entry_id.
+  const insertPartnerLeftNoticeStatement = database.prepare(`
+    INSERT OR IGNORE INTO tournament_partner_left_notice_log
+      (notice_id, tournament_id, recipient_profile_id, refunded_amount)
+    VALUES (?, ?, ?, ?);
+  `)
+
+  const selectPendingPartnerLeftNoticesStatement = database.prepare(`
+    SELECT notice_id, tournament_id, refunded_amount
+    FROM tournament_partner_left_notice_log
+    WHERE recipient_profile_id = ? AND delivered_at IS NULL
+    ORDER BY created_at ASC;
+  `)
+
+  const markPartnerLeftNoticeDeliveredStatement = database.prepare(`
+    UPDATE tournament_partner_left_notice_log
+    SET delivered_at = CURRENT_TIMESTAMP
+    WHERE notice_id = ? AND recipient_profile_id = ? AND delivered_at IS NULL;
+  `)
+
   const insertTeamStatement = database.prepare(`
     INSERT INTO tournament_teams (team_id, tournament_id, status, seed_slot)
     VALUES (?, ?, 'forming', NULL);
@@ -910,6 +954,38 @@ export async function createTournamentEconomyStore(
     WHERE f.status = 'accepted'
       AND (f.requester_profile_id = ? OR f.addressee_profile_id = ?)
     ORDER BY lower(p.display_name) ASC;
+  `)
+
+  // Global partner search (§ "GLOBAL SEARCH AREA") — reuse-ва точно същия
+  // normalized_display_name + LIKE ESCAPE '\\' pattern и exact/prefix/substring
+  // ranking като searchPublicProfilesStatement в playerProgressStore.ts (GET
+  // /api/players/search), но САМО за profile_kind='human' профили (ботовете
+  // не са валидни tournament partner-и — getCandidateUnavailableReason би ги
+  // отхвърлил и без това с 'not_registered_human') и изключва directly
+  // inviterProfileId в SQL-а (self не трябва дори да се появи в резултатите,
+  // не само да бъде markнат unavailable). Разчита на СЪЩИТЕ profiles колони
+  // като selectProfileEligibilityStatement/selectAcceptedFriendsStatement, за
+  // да може getCandidateUnavailableReason по-долу да остане единствения
+  // eligibility chokepoint за и трите candidate sources (friends/global
+  // search/direct invite).
+  const searchGlobalPartnerCandidatesStatement = database.prepare(`
+    SELECT p.profile_id, p.account_id, p.display_name, p.avatar_url, p.profile_kind, p.status, p.is_temporary
+    FROM profiles p
+    WHERE p.status = 'active'
+      AND p.is_temporary = 0
+      AND p.profile_kind = 'human'
+      AND p.account_id IS NOT NULL
+      AND p.profile_id != ?
+      AND p.normalized_display_name LIKE ? ESCAPE '\\'
+    ORDER BY
+      CASE
+        WHEN p.normalized_display_name = ? THEN 0
+        WHEN p.normalized_display_name LIKE ? ESCAPE '\\' THEN 1
+        ELSE 2
+      END,
+      p.normalized_display_name ASC,
+      p.profile_id ASC
+    LIMIT 20;
   `)
 
   const selectBlockStatement = database.prepare(`
@@ -1223,7 +1299,15 @@ export async function createTournamentEconomyStore(
       return 'not_registered_human'
     }
     if (candidate.is_temporary === 1) return 'temporary'
-    if (!isConfirmedFriend(inviterProfileId, candidate.profile_id)) return 'not_friend'
+    // Friends-only prerequisite-ът е премахнат тук (беше: isConfirmedFriend
+    // gate, връщащ not-friend reason) — вече ВСЕКИ eligible
+    // registered human profile може да бъде поканен, не само confirmed
+    // friends. Discovery продължава да предлага два независими source-а
+    // (friends list чрез getPartnerCandidatesForTournament, global search
+    // чрез getGlobalPartnerCandidatesForTournament), но и двата — както и
+    // директно forged invite request — минават през ТОЗИ единствен
+    // eligibility chokepoint, така че server-ът остава authoritative
+    // независимо кой source е "предложил" кандидата на клиента.
     if (hasBlockBetween(inviterProfileId, candidate.profile_id)) return 'blocked'
     const existingEntry = selectEntryByTournamentAndProfileStatement.get(
       tournamentId,
@@ -1254,7 +1338,6 @@ export async function createTournamentEconomyStore(
     if (invitee === undefined) return { ok: false, reason: 'invalid_invitee' }
     const reason = getCandidateUnavailableReason(tournamentId, inviterProfileId, invitee)
     if (reason === null) return null
-    if (reason === 'not_friend') return { ok: false, reason: 'not_friend' }
     if (reason === 'blocked') return { ok: false, reason: 'blocked' }
     if (reason === 'already_in_tournament') return { ok: false, reason: 'already_participant' }
     if (reason === 'active_tournament') return { ok: false, reason: 'already_participating_elsewhere' }
@@ -1831,6 +1914,43 @@ export async function createTournamentEconomyStore(
       })
     },
 
+    // Global partner search (§ "GLOBAL SEARCH AREA") — независим source от
+    // getPartnerCandidatesForTournament (friends list), query-based, НЕ
+    // връща цялата user база (searchGlobalPartnerCandidatesStatement има
+    // hardcoded LIMIT 20, normalizedTerm е задължителен non-empty, min-length
+    // guard-ът е на HTTP layer-а). Reuse-ва СЪЩИЯ getCandidateUnavailableReason
+    // chokepoint като friends list-а и direct invite validation-а — единствената
+    // разлика е source-ът на кандидатите (global search вместо
+    // profile_friendships), не eligibility правилата.
+    getGlobalPartnerCandidatesForTournament(
+      tournamentId: TournamentId,
+      inviterProfileId: ProfileId,
+      normalizedTerm: string,
+    ): PartnerCandidateRecord[] {
+      if (normalizedTerm.length === 0) return []
+      const tournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournament === undefined || tournament.status !== 'open') return []
+      const escapedTerm = escapeSqlLikePattern(normalizedTerm)
+      const containsPattern = `%${escapedTerm}%`
+      const prefixPattern = `${escapedTerm}%`
+      const rows = searchGlobalPartnerCandidatesStatement.all(
+        inviterProfileId,
+        containsPattern,
+        normalizedTerm,
+        prefixPattern,
+      ) as ProfileEligibilityRow[]
+      return rows.map((row) => {
+        const unavailableReason = getCandidateUnavailableReason(tournamentId, inviterProfileId, row)
+        return {
+          profileId: row.profile_id,
+          displayName: row.display_name,
+          avatarUrl: row.avatar_url,
+          eligible: unavailableReason === null,
+          unavailableReason,
+        }
+      })
+    },
+
     listPendingPartnerInvitesForProfile(
       inviteeProfileId: ProfileId,
     ): TournamentPartnerInviteRecord[] {
@@ -1849,6 +1969,31 @@ export async function createTournamentEconomyStore(
         inviteeProfileId,
       ) as TournamentPartnerInviteRow[]
       return rows.map(toTournamentPartnerInviteRecord)
+    },
+
+    // Durable "партньорът ти се отписа" известия (§ "PARTNER-LEFT
+    // NOTIFICATION ТРЯБВА Е DURABLE") — reused от login/reconnect flush
+    // (index.ts, огледално на pending_gift_notifications) за offline
+    // recipients. delivered_at се маркира едва след като известието реално
+    // е изпратено (online push веднага след commit, ИЛИ login flush), не
+    // при самия insert — виж markPartnerLeftNoticeDelivered.
+    getPendingPartnerLeftNotices(
+      recipientProfileId: ProfileId,
+    ): Array<{ noticeId: string; tournamentId: string; refundedAmount: number }> {
+      const rows = selectPendingPartnerLeftNoticesStatement.all(recipientProfileId) as Array<{
+        notice_id: string
+        tournament_id: string
+        refunded_amount: number
+      }>
+      return rows.map((row) => ({
+        noticeId: row.notice_id,
+        tournamentId: row.tournament_id,
+        refundedAmount: row.refunded_amount,
+      }))
+    },
+
+    markPartnerLeftNoticeDelivered(noticeId: string, recipientProfileId: ProfileId): void {
+      markPartnerLeftNoticeDeliveredStatement.run(noticeId, recipientProfileId)
     },
 
     dismissPartnerInvitePopup(
@@ -2595,6 +2740,7 @@ export async function createTournamentEconomyStore(
             refundedAmount: ledger.amount,
             walletBalance: getWalletBalance(profileId),
             tournament: toTournamentRecord(tournamentRow),
+            autoReleasedPartner: null,
           }
         }
       }
@@ -2630,6 +2776,7 @@ export async function createTournamentEconomyStore(
             refundedAmount: ledger?.amount ?? 0,
             walletBalance: getWalletBalance(profileId),
             tournament: toTournamentRecord(freshTournament),
+            autoReleasedPartner: null,
           }
         }
         if (freshEntry.status !== 'confirmed') {
@@ -2655,9 +2802,25 @@ export async function createTournamentEconomyStore(
           getWalletBalance(profileId),
         )
 
+        // Auto-release на partner-а (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
+        // ако напускащият е бил в двучленен team, partner-ът вече НЕ остава
+        // едночленен team (старото поведение — updateEntryToSoloStatement —
+        // би оставило именно malformed "team row + one active member"
+        // steady state, който task spec-ът изрично забранява). Вместо това
+        // partner-ът е автоматично освободен + refund-нат в СЪЩАТА
+        // транзакция, огледално на самия напускащ участник по-долу —
+        // симетрично е независимо кой от двамата напусне пръв.
+        let autoReleasedPartner: { profileId: ProfileId; refundedAmount: number; noticeId: string } | null = null
         if (freshEntry.team_id !== null) {
           const teamMembers = selectConfirmedEntriesForTeamStatement.all(freshEntry.team_id) as TournamentEntryRow[]
           const remainingMembers = teamMembers.filter((entry) => entry.entry_id !== freshEntry.entry_id)
+          // Всеки pending outgoing invite от НАПУСКАЩИЯ (ако все още е
+          // inviter на нерешена покана) се cancel-ва — непроменено спрямо
+          // преди. Самата accepted покана, формирала team-а, се trie-ва
+          // автоматично чрез ON DELETE CASCADE на tournament_partner_invites.team_id
+          // при deleteTeamStatement по-долу (виж migration
+          // 20260730_001_create_tournament_core_tables.sql:165) — не се
+          // нуждае от отделен resolve тук.
           const pendingInvite = selectPendingOutgoingInviteStatement.get(
             tournamentId,
             profileId,
@@ -2666,7 +2829,53 @@ export async function createTournamentEconomyStore(
             resolvePartnerInviteStatement.run('cancelled', pendingInvite.invite_id, tournamentId)
           }
           for (const member of remainingMembers) {
-            updateEntryToSoloStatement.run(member.entry_id)
+            const memberRefundKey = entryFeeRefundKeyForAttempt(
+              tournamentId,
+              member.profile_id,
+              currentEntryFeeAttempt(tournamentId, member.profile_id),
+            )
+            const memberDebitLedger = getCurrentEntryFeeDebitLedger(tournamentId, member.profile_id)
+            const memberRefundAmount = memberDebitLedger?.amount ?? freshTournament.entry_fee
+            ensureWalletStatement.run(member.profile_id)
+            creditWalletStatement.run(memberRefundAmount, member.profile_id)
+            insertLedgerStatement.run(
+              randomUUID(),
+              memberRefundKey,
+              tournamentId,
+              member.profile_id,
+              'entry_fee_refund' satisfies TournamentLedgerEntryType,
+              memberRefundAmount,
+              getWalletBalance(member.profile_id),
+            )
+            const memberUpdateResult = updateEntryToRefundedStatement.run(member.entry_id) as { changes?: number }
+            if ((memberUpdateResult.changes ?? 0) > 0) {
+              insertEvent(tournamentId, 'entry_auto_released_after_partner_left', member.profile_id, 'system', {
+                leavingProfileId: profileId,
+                refundedAmount: memberRefundAmount,
+              })
+              // Durable notice row (§ "PARTNER-LEFT NOTIFICATION ТРЯБВА Е
+              // DURABLE") — notice_id детерминиран от member.entry_id-то,
+              // затова е безопасно idempotent дори при теоретичен retry на
+              // целия leave call (updateEntryToRefundedStatement's WHERE
+              // status='confirmed' guard вече прави changes>0 клона
+              // недостижим повторно за същия entry, но deterministic id
+              // премахва и всякаква зависимост от този guard за самото
+              // известие).
+              const partnerLeftNoticeId = `partner-left:${member.entry_id}`
+              insertPartnerLeftNoticeStatement.run(
+                partnerLeftNoticeId,
+                tournamentId,
+                member.profile_id,
+                memberRefundAmount,
+              )
+              // Само ЕДИН partner е възможен в двучленен team модел — ако
+              // някога capacity/model се разшири, тук трябва да стане масив.
+              autoReleasedPartner = {
+                profileId: member.profile_id,
+                refundedAmount: memberRefundAmount,
+                noticeId: partnerLeftNoticeId,
+              }
+            }
           }
           deleteTeamStatement.run(freshEntry.team_id, tournamentId)
         }
@@ -2691,6 +2900,7 @@ export async function createTournamentEconomyStore(
           refundedAmount: refundAmount,
           walletBalance: getWalletBalance(profileId),
           tournament: toTournamentRecord(freshTournament),
+          autoReleasedPartner,
         }
       } catch (error) {
         try {

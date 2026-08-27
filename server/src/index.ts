@@ -2090,7 +2090,7 @@ function sendTournamentMatchAssignment(
 // нищо ретроактивно. eventId е уникален per push (client-side dedup).
 function sendTournamentEconomyRefundNotices(
   tournamentId: string,
-  reason: 'creator_cancelled' | 'fill_expired',
+  reason: 'creator_cancelled' | 'fill_expired' | 'partner_left',
   refundedProfiles: Array<{ profileId: string; amount: number }>,
 ): void {
   const occurredAt = new Date().toISOString()
@@ -6832,6 +6832,68 @@ async function handleTournamentPartnerCandidatesRequest(
   return true
 }
 
+const TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH = 2
+const TOURNAMENT_PARTNER_SEARCH_MAX_RAW_QUERY_LENGTH = 64
+const TOURNAMENT_PARTNER_SEARCH_TOO_SHORT_MESSAGE = 'Въведи поне 2 символа за търсене.'
+
+// Global partner search (§ "GLOBAL SEARCH AREA") — отделен endpoint от
+// handleTournamentPartnerCandidatesRequest (friends list) по същия query-based
+// pattern като handlePlayersSearchRequest (GET /api/players/search): НЕ връща
+// цялата user база, min-length guard-ва празни/твърде кратки заявки, reuse-ва
+// normalizeProfileSearchTerm за bg-BG case-insensitive/Cyrillic normalization.
+// Response DTO shape-ът е ИДЕНТИЧЕН на handleTournamentPartnerCandidatesRequest
+// (TournamentPartnerCandidateDto[]), за да може клиентът да reuse-ва точно
+// същия render/click/invite код за резултатите от двата source-а.
+async function handleTournamentPartnerCandidatesSearchRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/partner-candidates\/search$/.exec(pathname)
+  if (!match) return false
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const rawQuery = (requestUrl.searchParams.get('q') ?? '').trim()
+
+  if (rawQuery.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: TOURNAMENT_PARTNER_SEARCH_TOO_SHORT_MESSAGE })
+    return true
+  }
+  if (rawQuery.length > TOURNAMENT_PARTNER_SEARCH_MAX_RAW_QUERY_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Търсенето е твърде дълго.' })
+    return true
+  }
+
+  const normalizedTerm = normalizeProfileSearchTerm(rawQuery)
+  if (normalizedTerm.length < TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH) {
+    sendJsonResponse(res, 400, { ok: false, message: TOURNAMENT_PARTNER_SEARCH_TOO_SHORT_MESSAGE })
+    return true
+  }
+
+  const tournamentId = decodeURIComponent(match[1] ?? '')
+  const candidates: TournamentPartnerCandidateDto[] = tournamentEconomyStore
+    .getGlobalPartnerCandidatesForTournament(tournamentId, authResult.profileId, normalizedTerm)
+    .map((candidate) => ({
+      profileId: candidate.profileId,
+      displayName: candidate.displayName,
+      avatarUrl: candidate.avatarUrl,
+      online: isProfileOnline(candidate.profileId),
+      eligible: candidate.eligible,
+      unavailableReason: candidate.unavailableReason,
+    }))
+  sendJsonResponse(res, 200, { ok: true, candidates })
+  return true
+}
+
 async function handlePendingTournamentPartnerInvitesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -7206,6 +7268,34 @@ async function handleTournamentLeaveRequest(
     walletBalance: result.walletBalance,
     tournament: buildTournamentSummaryDto(result.tournament, profileId),
   })
+
+  // Auto-release известие (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") — само след
+  // committed refund (result.ok вече потвърден по-горе), само ако partner-ът
+  // реално е бил auto-released в ТОЗИ call (null за нормален solo leave и за
+  // alreadyRefunded===true повторен/race call — виж коментара в
+  // LeaveTournamentResult). Durable notice row-ът вече е committed вътре в
+  // leaveTournamentAndRefundAtomically (виж tournament_partner_left_notice_log) —
+  // тук само доставяме: online connections получават push веднага И се
+  // маркират delivered (за да не се доставят повторно при следващ login);
+  // offline recipients остават delivered_at=NULL до следващия им
+  // login/reconnect (виж flush блока при connection setup, огледален на
+  // pending_gift_notifications).
+  if (result.autoReleasedPartner !== null) {
+    const sentCount = sendToOpenProfileConnections(result.autoReleasedPartner.profileId, {
+      type: 'tournament_economy_notice',
+      eventId: randomUUID(),
+      tournamentId,
+      reason: 'partner_left' as const,
+      amount: result.autoReleasedPartner.refundedAmount,
+      occurredAt: new Date().toISOString(),
+    })
+    if (sentCount > 0) {
+      tournamentEconomyStore.markPartnerLeftNoticeDelivered(
+        result.autoReleasedPartner.noticeId,
+        result.autoReleasedPartner.profileId,
+      )
+    }
+  }
   return true
 }
 
@@ -9992,6 +10082,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTournamentPartnerCandidatesSearchRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
   if (await handleTournamentPartnerCandidatesRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -10211,6 +10305,25 @@ wsServer.on('connection', (socket, request) => {
         type: 'pending_gift_notifications',
         gifts: pendingGifts,
       })
+    }
+
+    // Durable "партньорът ти се отписа" flush (§ "PARTNER-LEFT NOTIFICATION
+    // ТРЯБВА Е DURABLE") — огледално на pendingGifts по-горе: ако recipient-ът
+    // е бил offline в момента на committed auto-release, известието чака тук
+    // с delivered_at=NULL до точно този login/reconnect. Маркираме delivered
+    // веднага след push-а, за да не се доставя повторно при следващ
+    // login/multi-tab reconnect (същия idempotency контракт като gift log-а).
+    const pendingPartnerLeftNotices = tournamentEconomyStore.getPendingPartnerLeftNotices(connection.profileId)
+    for (const notice of pendingPartnerLeftNotices) {
+      sendJsonMessage(socket, {
+        type: 'tournament_economy_notice',
+        eventId: randomUUID(),
+        tournamentId: notice.tournamentId,
+        reason: 'partner_left',
+        amount: notice.refundedAmount,
+        occurredAt: new Date().toISOString(),
+      })
+      tournamentEconomyStore.markPartnerLeftNoticeDelivered(notice.noticeId, connection.profileId)
     }
 
     const undismissedPartnerInvites = tournamentEconomyStore

@@ -3743,6 +3743,36 @@ async function loadTournamentPartnerCandidates(
   }
 }
 
+async function searchTournamentPartnerCandidates(
+  tournamentId: string,
+  query: string,
+  signal: AbortSignal,
+): Promise<
+  | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/partner-candidates/search?q=${encodeURIComponent(query)}`,
+      {
+        method: 'GET',
+        credentials: 'include',
+        signal,
+      },
+    )
+    const data = (await response.json()) as { ok: boolean; message?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
+    if (!response.ok || !data.ok || !Array.isArray(data.candidates)) {
+      return { ok: false, message: data.message ?? 'Търсенето не беше успешно.' }
+    }
+    return { ok: true, candidates: data.candidates }
+  } catch (error) {
+    if (error instanceof DOMException && error.name === 'AbortError') {
+      throw error
+    }
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadPendingTournamentPartnerInvites(): Promise<
   | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
   | { ok: false; message: string }
@@ -4116,6 +4146,7 @@ lobby = createLobbyFlowController({
   onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
   onTournamentCancel: (tournamentId) => cancelTournamentRequest(tournamentId),
   onTournamentPartnerCandidatesLoad: (tournamentId) => loadTournamentPartnerCandidates(tournamentId),
+  onTournamentPartnerCandidatesSearch: (tournamentId, query, signal) => searchTournamentPartnerCandidates(tournamentId, query, signal),
   onPendingTournamentPartnerInvitesLoad: () => loadPendingTournamentPartnerInvites(),
   onTournamentPartnerInviteCreate: (tournamentId, inviteeProfileId, password) => createTournamentPartnerInviteRequest(tournamentId, inviteeProfileId, password),
   onTournamentPartnerInviteRespond: (tournamentId, inviteId, action) => respondTournamentPartnerInviteRequest(tournamentId, inviteId, action),
@@ -4867,6 +4898,15 @@ client = createGameServerClient({
         reason: message.reason,
         amount: message.amount,
       })
+      // Auto-release realtime update (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
+      // ако играчът в момента гледа точно този турнир, освежи detail-а веднага
+      // (roster/team state), за да не остане phantom teammate/stale "Чакаме
+      // отговор от ..." UI видим след committed auto-release. Не polling —
+      // еднократен refetch, задействан от точно този authoritative push,
+      // огледално на tournament_feeder_match_completed/tournament_match_assigned.
+      if (message.reason === 'partner_left') {
+        lobby.handleServerMessage(message)
+      }
       return
     }
 

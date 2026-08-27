@@ -15,7 +15,7 @@ import {
   formatPrivateRoomCountdown,
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
-import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment } from './renderTournamentsScreen'
+import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment, renderTournamentPartnerSearchSection } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -581,6 +581,18 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
     | { ok: false; message: string }
   >
+  // Global partner search (§ "GLOBAL SEARCH AREA") — независим source от
+  // onTournamentPartnerCandidatesLoad (friends list): server-side query-based
+  // search сред ВСИЧКИ допустими registered players, не филтрира
+  // friends list-а. signal позволява AbortController cancel при нов query.
+  onTournamentPartnerCandidatesSearch?: (
+    tournamentId: string,
+    query: string,
+    signal: AbortSignal,
+  ) => Promise<
+    | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
+    | { ok: false; message: string }
+  >
   onPendingTournamentPartnerInvitesLoad?: () => Promise<
     | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
     | { ok: false; message: string }
@@ -1015,7 +1027,16 @@ type InternalLobbyFlowState = {
   tournamentPartnerPickerErrorText: string | null
   tournamentPartnerInviteBusy: boolean
   tournamentPartnerInviteErrorText: string | null
+  // Global partner search (§ "GLOBAL SEARCH AREA") — tournamentPartnerInviteQuery
+  // е самият текст в "Търси във всички играчи" полето (вече НЕ филтрира
+  // tournamentPartnerCandidates/friends list-а locally, а е самостоятелен
+  // server-side query). tournamentPartnerSearchResults е null, докато полето е
+  // празно (секцията е скрита), [] при "няма резултати", и масив с намерени
+  // кандидати иначе. tournamentPartnerSearchLoading управлява "Търсене..."
+  // текста, независимо от tournamentPartnerPickerLoading (friends list-a).
   tournamentPartnerInviteQuery: string
+  tournamentPartnerSearchResults: TournamentPartnerCandidateSnapshot[] | null
+  tournamentPartnerSearchLoading: boolean
   tournamentLeaveConfirmOpen: boolean
   tournamentLeaveBusy: boolean
   tournamentLeaveErrorText: string | null
@@ -1356,6 +1377,8 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentPartnerInviteBusy: false,
     tournamentPartnerInviteErrorText: null,
     tournamentPartnerInviteQuery: '',
+    tournamentPartnerSearchResults: null,
+    tournamentPartnerSearchLoading: false,
     tournamentLeaveConfirmOpen: false,
     tournamentLeaveBusy: false,
     tournamentLeaveErrorText: null,
@@ -3050,6 +3073,8 @@ export function createLobbyFlowController(
       tournamentPartnerInviteBusy: state.tournamentPartnerInviteBusy,
       tournamentPartnerInviteErrorText: state.tournamentPartnerInviteErrorText,
       tournamentPartnerInviteQuery: state.tournamentPartnerInviteQuery,
+      tournamentPartnerSearchResults: state.tournamentPartnerSearchResults,
+      tournamentPartnerSearchLoading: state.tournamentPartnerSearchLoading,
       tournamentLeaveConfirmOpen: state.tournamentLeaveConfirmOpen,
       tournamentLeaveBusy: state.tournamentLeaveBusy,
       tournamentLeaveErrorText: state.tournamentLeaveErrorText,
@@ -3301,8 +3326,13 @@ export function createLobbyFlowController(
         void submitTournamentPartnerInvite(profileId)
       },
       onTournamentPartnerInviteQueryChange: (value) => {
+        // НЕ вика render() тук нарочно (§ "TARGETED SEARCH RESULT" в
+        // patchTournamentPartnerSearchSection-ния коментар) — <input>-ът вече
+        // отразява typed value-то directly от browser-а (native поведение,
+        // не се нуждае от re-render), а triggerTournamentPartnerSearch по-долу
+        // патчва само search-резултатната секция, без да пипа root-а.
         state.tournamentPartnerInviteQuery = value
-        render()
+        triggerTournamentPartnerSearch(value)
       },
       onTournamentPartnerInviteAccept: (tournamentId, inviteId) => {
         void respondTournamentPartnerInvite(tournamentId, inviteId, 'accept')
@@ -5041,6 +5071,78 @@ export function createLobbyFlowController(
     render()
   }
 
+  // Global partner search (§ "GLOBAL SEARCH AREA") — независим debounced
+  // runner от playersSearchRunner (различен endpoint/query scope), но
+  // огледален pattern (latest-request-wins, AbortController stale-response
+  // защита). НЕ филтрира state.tournamentPartnerCandidates (friends list-а) —
+  // резултатите отиват в отделно поле, tournamentPartnerSearchResults.
+  const TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH = 2
+
+  const tournamentPartnerSearchRunner = createDebouncedPlayerSearch<TournamentPartnerCandidateSnapshot[]>({
+    run: (query, signal) => {
+      if (!options.onTournamentPartnerCandidatesSearch || state.tournamentDetailId === null) {
+        return Promise.reject(new Error('Търсенето временно не е налично.'))
+      }
+      return options.onTournamentPartnerCandidatesSearch(state.tournamentDetailId, query, signal).then((result) => {
+        if (!result.ok) {
+          throw new Error(result.message)
+        }
+        return result.candidates
+      })
+    },
+    onResult: (result) => {
+      // Защита срещу stale response — ако popup-ът вече е затворен, или
+      // input-ът вече не съдържа точно този query (потребителят е продължил
+      // да пише/изчистил е междувременно), игнорирай резултата (виж §
+      // "ASYNC SEARCH / STALE RESPONSES").
+      if (!state.tournamentPartnerPickerOpen) return
+      if (state.tournamentPartnerInviteQuery.trim() !== result.query) return
+      state.tournamentPartnerSearchLoading = false
+      if (result.ok) {
+        state.tournamentPartnerSearchResults = result.value
+      }
+      patchTournamentPartnerSearchSection()
+    },
+    delayMs: 300,
+  })
+
+  function triggerTournamentPartnerSearch(query: string): void {
+    const trimmed = query.trim()
+    if (trimmed.length < TOURNAMENT_PARTNER_SEARCH_MIN_QUERY_LENGTH) {
+      tournamentPartnerSearchRunner.cancel()
+      state.tournamentPartnerSearchResults = null
+      state.tournamentPartnerSearchLoading = false
+    } else {
+      state.tournamentPartnerSearchLoading = true
+      tournamentPartnerSearchRunner.schedule(trimmed)
+    }
+    patchTournamentPartnerSearchSection()
+  }
+
+  // Targeted patch (§ "АРХИТЕКТУРНО ЖЕЛАН FIX") — root cause на "search
+  // input губи focus след всяка буква" беше, че onTournamentPartnerInviteQueryChange
+  // и tournamentPartnerSearchRunner.onResult викаха пълния render(), който
+  // прави options.root.innerHTML = ... (renderLobbyScreen.ts) на ВСЯКА буква/
+  // async resolve — унищожавайки и пресъздавайки <input
+  // data-tournament-partner-query="1">, който няма save/restore focus логика
+  // (за разлика от data-lobby-players-search/data-lobby-chat-message-input,
+  // единствените други input-и, оцеляващи през този rebuild). Тук вместо
+  // това пипаме САМО [data-tournament-partner-search-results="1"] — <input>-ът
+  // никога не се докосва, значи browser-ът естествено запазва
+  // focus/caret/value без нужда от explicit save/restore.
+  function patchTournamentPartnerSearchSection(): void {
+    if (!state.tournamentPartnerPickerOpen) return
+    const container = options.root.querySelector<HTMLElement>('[data-tournament-partner-search-results="1"]')
+    if (container === null) return
+    container.innerHTML = renderTournamentPartnerSearchSection(state)
+    container.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-invite]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const profileId = btn.dataset.tournamentPartnerInvite ?? ''
+        if (profileId) void submitTournamentPartnerInvite(profileId)
+      })
+    })
+  }
+
   async function openTournamentPartnerPicker(): Promise<void> {
     if (!options.onTournamentPartnerCandidatesLoad || state.tournamentDetailId === null) return
     const tournamentId = state.tournamentDetailId
@@ -5049,6 +5151,8 @@ export function createLobbyFlowController(
     state.tournamentPartnerPickerErrorText = null
     state.tournamentPartnerInviteErrorText = null
     state.tournamentPartnerInviteQuery = ''
+    state.tournamentPartnerSearchResults = null
+    state.tournamentPartnerSearchLoading = false
     render()
     const result = await options.onTournamentPartnerCandidatesLoad(tournamentId)
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
@@ -5064,9 +5168,12 @@ export function createLobbyFlowController(
 
   function closeTournamentPartnerPicker(): void {
     if (state.tournamentPartnerInviteBusy) return
+    tournamentPartnerSearchRunner.cancel()
     state.tournamentPartnerPickerOpen = false
     state.tournamentPartnerPickerErrorText = null
     state.tournamentPartnerInviteErrorText = null
+    state.tournamentPartnerSearchResults = null
+    state.tournamentPartnerSearchLoading = false
     render()
   }
 
@@ -5168,7 +5275,19 @@ export function createLobbyFlowController(
 
     state.tournamentLeaveConfirmOpen = false
     state.tournamentLeaveErrorText = null
-    mergeTournamentSummaryIntoDetail(result.tournament)
+    // Own-leave success path (§ "КРИТИЧНО: ПРОВЕРИ OWN-LEAVE SUCCESS PATH") —
+    // leave-ът връща само TournamentSummarySnapshot (counters/status/viewer),
+    // НЕ пълния TournamentDetailSnapshot. mergeTournamentSummaryIntoDetail
+    // (shallow spread) update-ва коректно тези summary полета, но
+    // detail-only полета като teams/myTeam НЕ съществуват в summary-то,
+    // затова оцеляват непроменени от стария state — точно затова "ГОТОВ
+    // ОТБОР" card-ът оставаше видим въпреки че counters/action бутоните вече
+    // бяха fresh. Auto-released partner-ът разчита на отделен WS push
+    // (tournament_economy_notice/partner_left) за същия refetch — leaving
+    // player-ът никога не получава този push за себе си (той е причината за
+    // dissolution-а, не recipient), затова се нуждае от собствен authoritative
+    // refetch тук, symmetric на partner_left обработката.
+    void fetchTournamentDetail(tournamentId)
     void refetchTournamentsList()
     render()
   }
@@ -9058,6 +9177,18 @@ export function createLobbyFlowController(
             progressLabel: 'Завършен',
           })
         }
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      return false
+    }
+
+    // Auto-release realtime update (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
+    // само 'partner_left' носи tournamentId (creator_cancelled/fill_expired
+    // засягат играч, който вече не гледа detail-a на затворения турнир, така
+    // че не се нуждаят от този refresh). Огледален pattern на
+    // tournament_match_assigned/tournament_feeder_match_completed по-горе.
+    if (message.type === 'tournament_economy_notice' && message.reason === 'partner_left') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
         void fetchTournamentDetail(message.tournamentId)
       }
       return false

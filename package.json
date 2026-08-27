@@ -31,6 +31,7 @@
     "check:tournament-state-b-silent-entry": "npx tsx scripts/checkTournamentStateBSilentEntry.ts",
     "check:tournament-round-transition-room-snapshot-hijack": "npx tsx scripts/checkTournamentRoundTransitionRoomSnapshotHijack.ts",
     "check:tournament-inter-round-auto-return": "npx tsx scripts/checkTournamentInterRoundAutoReturn.ts",
+    "check:tournament-partner-search-typing": "npx tsx scripts/checkTournamentPartnerSearchTyping.ts",
     "check:tournament-state-a-navbar-stability": "npx tsx scripts/checkTournamentStateANavbarStability.ts",
     "check:tournament-final-prize-popup": "npx tsx scripts/checkTournamentFinalPrizePopup.ts",
     "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",

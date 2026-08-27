@@ -618,6 +618,8 @@ export type LobbyScreenState = {
   tournamentPartnerInviteBusy: boolean
   tournamentPartnerInviteErrorText: string | null
   tournamentPartnerInviteQuery: string
+  tournamentPartnerSearchResults: TournamentPartnerCandidateSnapshot[] | null
+  tournamentPartnerSearchLoading: boolean
   tournamentLeaveConfirmOpen: boolean
   tournamentLeaveBusy: boolean
   tournamentLeaveErrorText: string | null

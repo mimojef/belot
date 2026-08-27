@@ -1293,18 +1293,60 @@ function renderTournamentJoinConfirmPopup(state: LobbyScreenState, t: Tournament
   `
 }
 
+// Извадено от renderTournamentPartnerPickerPopup (§ "GLOBAL SEARCH AREA"),
+// за да може createLobbyFlowController.ts да го reuse-ва и за targeted patch
+// на САМО тази секция (виж patchTournamentPartnerSearchSection в контролера)
+// — typing/async search resolution НЕ трябва да минава през пълен
+// root.innerHTML rebuild (виж коментара при renderTournamentPartnerPickerPopup
+// по-долу за пълния root cause анализ), затова тази функция трябва да остане
+// pure/self-contained (чете само state, без DOM странични ефекти) и да
+// произвежда ТОЧНО същия HTML както вътрешния render, за да не се разминава
+// пълния render с targeted patch-а.
+export type TournamentPartnerSearchSectionState = Pick<
+  LobbyScreenState,
+  'tournamentPartnerInviteQuery' | 'tournamentPartnerSearchLoading' | 'tournamentPartnerSearchResults' | 'tournamentPartnerInviteBusy'
+>
+
+export function renderTournamentPartnerSearchSection(state: TournamentPartnerSearchSectionState): string {
+  const hasQuery = state.tournamentPartnerInviteQuery.trim().length > 0
+  // Скрит изцяло докато query-то е празно (§ "GLOBAL SEARCH AREA": "не
+  // показвай безсмислено empty-state съобщение") — все пак container
+  // node-ът (data-tournament-partner-search-results) остава в DOM-a
+  // винаги, само вътрешният HTML му е празен, за да има стабилна цел за
+  // targeted patch-а независимо от hasQuery.
+  if (!hasQuery) return ''
+  return `
+    <div style="margin-bottom:12px;">
+      <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:rgba(255,255,255,0.45);margin-bottom:6px;">Резултати от търсенето</div>
+      ${
+        state.tournamentPartnerSearchLoading
+          ? `<div style="padding:14px;text-align:center;color:#d4a520;font-weight:800;font-size:13px;">Търсене...</div>`
+          : state.tournamentPartnerSearchResults === null
+            ? ''
+            : state.tournamentPartnerSearchResults.length === 0
+              ? `<div style="padding:14px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">Няма намерени играчи.</div>`
+              : `<div style="display:grid;gap:8px;">${state.tournamentPartnerSearchResults.map((candidate) => renderPartnerCandidateRow(candidate, state)).join('')}</div>`
+      }
+    </div>
+  `
+}
+
 function renderTournamentPartnerPickerPopup(state: LobbyScreenState, t: TournamentDetailSnapshot): string {
-  const query = state.tournamentPartnerInviteQuery.trim().toLowerCase()
-  const candidates = state.tournamentPartnerCandidates
-    .filter((candidate) => query.length === 0 || candidate.displayName.toLowerCase().includes(query))
+  // Приятели (§ "FRIENDS LIST") — НЕЗАВИСИМ от search-a по-горе: винаги
+  // видим, никога не се филтрира от tournamentPartnerInviteQuery, само
+  // scrollable ако станат много (max-height + overflow-y:auto, popup-ът не
+  // расте безкрайно).
+  const friendsCandidates = state.tournamentPartnerCandidates
+    .slice()
     .sort((a, b) => Number(b.online) - Number(a.online) || a.displayName.localeCompare(b.displayName, 'bg'))
-  const body = state.tournamentPartnerPickerLoading
+  const friendsBody = state.tournamentPartnerPickerLoading
     ? `<div style="padding:26px;text-align:center;color:#d4a520;font-weight:800;">Зареждане...</div>`
     : state.tournamentPartnerPickerErrorText
       ? `<div style="padding:14px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:13px;font-weight:700;">${escapeHtml(state.tournamentPartnerPickerErrorText)}</div>`
-      : candidates.length === 0
-        ? `<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">Няма приятели за показване.</div>`
-        : candidates.map((candidate) => renderPartnerCandidateRow(candidate, state)).join('')
+      : friendsCandidates.length === 0
+        ? `<div style="padding:20px;text-align:center;color:rgba(255,255,255,0.55);font-size:13px;">Нямате приятели за показване.</div>`
+        : friendsCandidates.map((candidate) => renderPartnerCandidateRow(candidate, state)).join('')
+
   return `
     <div data-tournament-partner-picker-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.72);display:flex;align-items:center;justify-content:center;padding:14px;">
       <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:14px;width:100%;max-width:460px;padding:18px;box-sizing:border-box;max-height:92vh;overflow:auto;">
@@ -1312,18 +1354,43 @@ function renderTournamentPartnerPickerPopup(state: LobbyScreenState, t: Tourname
           <div style="font-size:16px;font-weight:900;color:#d4a520;">Избери партньор</div>
           <button type="button" data-tournament-partner-picker-close="1" ${state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="width:32px;height:32px;border:none;background:rgba(255,255,255,0.08);border-radius:7px;color:rgba(255,255,255,0.65);font-size:18px;font-weight:800;cursor:pointer;">x</button>
         </div>
-        <div style="font-size:12px;color:rgba(255,255,255,0.62);line-height:1.45;margin-bottom:12px;">Ще платиш вход от ${formatAmount(t.entryFee)} жълтици. Поканеният приятел ще плати своя вход само ако приеме.</div>
+        <div style="font-size:12px;color:rgba(255,255,255,0.62);line-height:1.45;margin-bottom:12px;">Ще платиш вход от ${formatAmount(t.entryFee)} жълтици. Поканеният потребител ще плати своя вход само ако приеме.</div>
         ${state.tournamentPartnerInviteErrorText ? `<div style="margin-bottom:10px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentPartnerInviteErrorText)}</div>` : ''}
-        <input type="search" data-tournament-partner-query="1" value="${escapeHtml(state.tournamentPartnerInviteQuery)}" placeholder="Търси в приятелите" style="width:100%;height:38px;box-sizing:border-box;margin-bottom:10px;padding:0 11px;background:#1a1a24;border:1px solid rgba(255,255,255,0.16);border-radius:8px;color:#fff;font-size:13px;">
-        <div style="display:grid;gap:8px;">${body}</div>
+        <input type="search" data-tournament-partner-query="1" value="${escapeHtml(state.tournamentPartnerInviteQuery)}" placeholder="Търси във всички играчи" style="width:100%;height:38px;box-sizing:border-box;margin-bottom:12px;padding:0 11px;background:#1a1a24;border:1px solid rgba(255,255,255,0.16);border-radius:8px;color:#fff;font-size:13px;">
+        <div data-tournament-partner-search-results="1">${renderTournamentPartnerSearchSection(state)}</div>
+        <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:rgba(255,255,255,0.45);margin-bottom:6px;">Приятели</div>
+        <div style="display:grid;gap:8px;max-height:280px;overflow-y:auto;">${friendsBody}</div>
       </div>
     </div>
   `
 }
 
-function renderPartnerCandidateRow(candidate: TournamentPartnerCandidateSnapshot, state: LobbyScreenState): string {
+// Единствен централизиран mapping raw unavailableReason код (§ "BUG #2 —
+// БЪЛГАРСКИ ERROR MAPPING") → кратък, user-facing български текст. Кодовете
+// идват от getCandidateUnavailableReason (server/src/db/tournamentEconomyStore.ts)
+// — общ chokepoint и за friends list-a, и за global search резултатите
+// (виж getPartnerCandidatesForTournament/getGlobalPartnerCandidatesForTournament),
+// затова един mapping тук покрива и двата source-а, без дублиране.
+// НЕ покрива create-invite error reason-ите (already_participant,
+// invite_window_closed и т.н.) — тези вече идват готово преведени от
+// PARTNER_INVITE_FAILURE_MESSAGES на сървъра (виж result.message в
+// submitTournamentPartnerInvite), не се нуждаят от втори mapping тук.
+const PARTNER_CANDIDATE_UNAVAILABLE_REASON_LABELS: Record<string, string> = {
+  self: 'Това си ти',
+  not_registered_human: 'Не може да бъде поканен',
+  temporary: 'Не може да бъде поканен',
+  blocked: 'Блокиран',
+  already_in_tournament: 'Вече участва в турнира',
+  active_tournament: 'Участва в друг активен турнир',
+}
+
+function formatPartnerCandidateUnavailableReason(reason: string): string {
+  return PARTNER_CANDIDATE_UNAVAILABLE_REASON_LABELS[reason] ?? 'Не може да бъде поканен в момента'
+}
+
+function renderPartnerCandidateRow(candidate: TournamentPartnerCandidateSnapshot, state: TournamentPartnerSearchSectionState): string {
   const status = candidate.online ? 'Онлайн' : 'Офлайн'
-  const disabledReason = candidate.unavailableReason ? ` (${candidate.unavailableReason})` : ''
+  const disabledReason = candidate.unavailableReason ? ` (${formatPartnerCandidateUnavailableReason(candidate.unavailableReason)})` : ''
   return `
     <button type="button" data-tournament-partner-invite="${escapeHtml(candidate.profileId)}" ${!candidate.eligible || state.tournamentPartnerInviteBusy ? 'disabled' : ''} style="width:100%;min-height:48px;border-radius:8px;border:1px solid ${candidate.eligible ? 'rgba(212,165,32,0.28)' : 'rgba(255,255,255,0.10)'};background:${candidate.eligible ? 'rgba(212,165,32,0.07)' : 'rgba(255,255,255,0.03)'};display:flex;align-items:center;gap:9px;padding:8px 10px;cursor:${candidate.eligible && !state.tournamentPartnerInviteBusy ? 'pointer' : 'not-allowed'};text-align:left;">
       <span style="width:30px;height:30px;border-radius:999px;background:#171717;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:12px;font-weight:900;flex-shrink:0;">${candidate.avatarUrl ? `<img src="${escapeHtml(candidate.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : escapeHtml(candidate.displayName.slice(0, 1).toUpperCase())}</span>
