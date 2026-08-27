@@ -253,6 +253,12 @@ async function createCoordinator(input: {
     notifyFeederMatchCompleted: () => {},
     notifyFeederScoreProgress: () => {},
     isConnectionAttached: ({ profileId, connectionId, roomId, seat }) => input.attachedConnections.has(`${profileId}:${connectionId}:${roomId}:${seat}`),
+    isProfileOnline: (profileId) => {
+      for (const key of input.attachedConnections) {
+        if (key.startsWith(`${profileId}:`)) return true
+      }
+      return false
+    },
     setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
     clearInterval: () => {},
   })

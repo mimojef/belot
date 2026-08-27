@@ -19,6 +19,16 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignment
 }
 
+// Login/reconnect докато профилът е между кръгове (STATE A/B), без runnable
+// match в момента — виж коментара на connection-setup push-а в index.ts.
+// Клиентът само знае, че трябва да fetch-не authoritative tournament detail
+// за tournamentId и сам да resolve-не destination-а (myInterRoundWaiting) —
+// не носи самия destination, за да няма duplicate state изчисление.
+export type TournamentActiveParticipationMessage = {
+  type: 'tournament_active_participation'
+  tournamentId: string
+}
+
 export type TournamentFeederMatchCompletedMessage = {
   type: 'tournament_feeder_match_completed'
   tournamentId: string
@@ -51,7 +61,7 @@ export type TournamentEconomyNoticeMessage = {
   type: 'tournament_economy_notice'
   eventId: string
   tournamentId: string
-  reason: 'creator_cancelled' | 'fill_expired' | 'partner_left'
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'
   amount: number
   occurredAt: string
 }
@@ -826,6 +836,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
+  | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
   | TournamentEconomyNoticeMessage

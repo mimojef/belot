@@ -40,7 +40,13 @@ function buildNoticeContent(notice: TournamentEconomyNotice): NoticeContent {
     case 'creator_cancelled':
       return { prefix: 'Турнирът, в който участвахте, беше затворен. Възстановени: ', amountText: `+${formatted} жълтици`, isPositive: true, icon: '↩️' }
     case 'fill_expired':
-      return { prefix: 'Турнирът не се запълни навреме. Възстановени: ', amountText: `+${formatted} жълтици`, isPositive: true, icon: '↩️' }
+    case 'scheduled_underfilled':
+      return {
+        prefix: 'Турнирът е анулиран, защото не се събра необходимият брой участници. Входът ви е възстановен: ',
+        amountText: `+${formatted} жълтици`,
+        isPositive: true,
+        icon: '↩️',
+      }
     case 'partner_left':
       return {
         prefix: 'Партньорът ти се отписа от отбора. Входът ти от ',

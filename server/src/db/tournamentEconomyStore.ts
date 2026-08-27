@@ -139,8 +139,12 @@ export type AutoCancelScheduledTournamentResult =
       refundedEntries: number
       totalRefunded: number
       /** Per-profile breakdown на refund-натите в ТОЗИ извикване (празно при
-       * alreadyCancelled) — ползва се за персонализирани WS известия. */
-      refundedProfiles: Array<{ profileId: ProfileId; amount: number }>
+       * alreadyCancelled) — ползва се за персонализирани WS известия.
+       * noticeId сочи към committed durable ред в tournament_economy_notice_log
+       * (§"OFFLINE USER"/"EXACTLY ONCE" в task spec-а) — index.ts го ползва,
+       * за да маркира delivered веднага след успешен online push, без
+       * втори DB lookup. */
+      refundedProfiles: Array<{ profileId: ProfileId; amount: number; noticeId: string }>
       tournament: TournamentRecord
     }
   | { ok: false; reason: 'tournament_not_found' | 'tournament_not_open' }
@@ -242,6 +246,10 @@ export type TournamentEconomyStore = {
     recipientProfileId: ProfileId,
   ) => Array<{ noticeId: string; tournamentId: string; refundedAmount: number }>
   markPartnerLeftNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
+  getPendingTournamentEconomyNotices: (
+    recipientProfileId: ProfileId,
+  ) => Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled'; refundedAmount: number }>
+  markTournamentEconomyNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
   dismissPartnerInvitePopup: (
     inviteId: TournamentPartnerInviteId,
     inviteeProfileId: ProfileId,
@@ -819,6 +827,34 @@ export async function createTournamentEconomyStore(
 
   const markPartnerLeftNoticeDeliveredStatement = database.prepare(`
     UPDATE tournament_partner_left_notice_log
+    SET delivered_at = CURRENT_TIMESTAMP
+    WHERE notice_id = ? AND recipient_profile_id = ? AND delivered_at IS NULL;
+  `)
+
+  // Durable auto-cancel refund известие (§"OFFLINE USER"/"EXACTLY ONCE" в
+  // task spec-а за "Турнирът е анулиран..." известието) — огледален pattern
+  // на insertPartnerLeftNoticeStatement по-горе, но generic по reason
+  // (fill_expired/scheduled_underfilled), не dedicated таблица per reason.
+  // notice_id е детерминиран от (tournamentId, profileId) — ЕДИН auto-cancel
+  // event per турнир може да засегне профила само веднъж (auto-cancel
+  // самото то е idempotent by tournament.status, виж
+  // autoCancelScheduledTournamentAtomicallyLocal), затова composite ключът е
+  // достатъчен за exactly-once persistence дори при повторен scheduler tick.
+  const insertTournamentEconomyNoticeStatement = database.prepare(`
+    INSERT OR IGNORE INTO tournament_economy_notice_log
+      (notice_id, tournament_id, recipient_profile_id, reason, refunded_amount)
+    VALUES (?, ?, ?, ?, ?);
+  `)
+
+  const selectPendingTournamentEconomyNoticesStatement = database.prepare(`
+    SELECT notice_id, tournament_id, reason, refunded_amount
+    FROM tournament_economy_notice_log
+    WHERE recipient_profile_id = ? AND delivered_at IS NULL
+    ORDER BY created_at ASC;
+  `)
+
+  const markTournamentEconomyNoticeDeliveredStatement = database.prepare(`
+    UPDATE tournament_economy_notice_log
     SET delivered_at = CURRENT_TIMESTAMP
     WHERE notice_id = ? AND recipient_profile_id = ? AND delivered_at IS NULL;
   `)
@@ -1774,6 +1810,16 @@ export async function createTournamentEconomyStore(
     }
   }
 
+  // Мапва вътрешния free-text auto-cancel reason (viж SCHEDULED_START_NOT_READY/
+  // FILL_MODE_EXPIRED в tournamentScheduler.ts, пазени непроменени за
+  // tournament_events audit log-а) към user-facing economy-notice reason-а
+  // (§"CANCELLATION REASON" в task spec-а — един и същ user-facing текст и за
+  // двата случая, но различни internal codes). 'scheduled_start_not_ready' е
+  // единственият сега съществуващ non-fill-timeout auto-cancel reason.
+  function toTournamentEconomyNoticeReason(internalReason: string): 'fill_expired' | 'scheduled_underfilled' {
+    return internalReason === 'scheduled_start_not_ready' ? 'scheduled_underfilled' : 'fill_expired'
+  }
+
   function autoCancelScheduledTournamentAtomicallyLocal(
     tournamentId: TournamentId,
     now: Date,
@@ -1842,7 +1888,8 @@ export async function createTournamentEconomyStore(
       const confirmedEntries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
       let refundedEntries = 0
       let totalRefunded = 0
-      const refundedProfiles: Array<{ profileId: ProfileId; amount: number }> = []
+      const refundedProfiles: Array<{ profileId: ProfileId; amount: number; noticeId: string }> = []
+      const economyNoticeReason = toTournamentEconomyNoticeReason(reason)
       for (const entry of confirmedEntries) {
         const refundKey = entryFeeRefundKeyForAttempt(
           tournamentId,
@@ -1866,7 +1913,15 @@ export async function createTournamentEconomyStore(
         updateEntryToRefundedByCancelStatement.run(entry.entry_id)
         refundedEntries += 1
         totalRefunded += refundAmount
-        refundedProfiles.push({ profileId: entry.profile_id, amount: refundAmount })
+        // Durable notice (§"OFFLINE USER"/"MULTI-USER CANCELLATION" в task
+        // spec-а) — committed В СЪЩАТА транзакция като refund-а, ЕДИН ред
+        // per (tournamentId, profileId) auto-cancel event (deterministic
+        // notice_id, INSERT OR IGNORE идемпотентен при race/retry).
+        // Delivery (online push ИЛИ login flush) е отделна стъпка СЛЕД
+        // COMMIT — виж index.ts.
+        const noticeId = `tournament-auto-cancel:${tournamentId}:${entry.profile_id}`
+        insertTournamentEconomyNoticeStatement.run(noticeId, tournamentId, entry.profile_id, economyNoticeReason, refundAmount)
+        refundedProfiles.push({ profileId: entry.profile_id, amount: refundAmount, noticeId })
       }
       deleteTeamsForTournamentStatement.run(tournamentId)
       insertEvent(tournamentId, 'tournament_auto_cancelled', null, 'system', {
@@ -1994,6 +2049,32 @@ export async function createTournamentEconomyStore(
 
     markPartnerLeftNoticeDelivered(noticeId: string, recipientProfileId: ProfileId): void {
       markPartnerLeftNoticeDeliveredStatement.run(noticeId, recipientProfileId)
+    },
+
+    // Durable auto-cancel refund известие (§"OFFLINE USER"/"EXACTLY ONCE" в
+    // task spec-а) — reused от login/reconnect flush в index.ts, огледално
+    // на getPendingPartnerLeftNotices по-горе. delivered_at се маркира едва
+    // след реална доставка (online push веднага след commit, ИЛИ login
+    // flush), не при самия insert.
+    getPendingTournamentEconomyNotices(
+      recipientProfileId: ProfileId,
+    ): Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled'; refundedAmount: number }> {
+      const rows = selectPendingTournamentEconomyNoticesStatement.all(recipientProfileId) as Array<{
+        notice_id: string
+        tournament_id: string
+        reason: 'fill_expired' | 'scheduled_underfilled'
+        refunded_amount: number
+      }>
+      return rows.map((row) => ({
+        noticeId: row.notice_id,
+        tournamentId: row.tournament_id,
+        reason: row.reason,
+        refundedAmount: row.refunded_amount,
+      }))
+    },
+
+    markTournamentEconomyNoticeDelivered(noticeId: string, recipientProfileId: ProfileId): void {
+      markTournamentEconomyNoticeDeliveredStatement.run(noticeId, recipientProfileId)
     },
 
     dismissPartnerInvitePopup(

@@ -52,6 +52,12 @@ export type TournamentMatchAssignment = {
   deadlineKind: 'first_match' | 'round_transition' | null
   attendanceDeadlineAt: string | null
   gameStartAt: string | null
+  // Позволява на "Поеми играта" destination resolver-а (виж §"НЕ САМО
+  // GAMEPLAY — ROUTE СПОРЕД CURRENT TOURNAMENT STATE" в task spec-а) да
+  // реши без допълнителна заявка дали да отвори attendance екрана,
+  // countdown екрана или директно gameplay — директно огледало на
+  // match.status (виж MatchRow по-долу).
+  matchStatus: 'awaiting_players' | 'countdown' | 'in_progress'
 }
 
 export type TournamentCoordinatorHealth = {
@@ -133,6 +139,12 @@ export type TournamentCoordinator = {
     profileId: ProfileId
   }) => TournamentSemifinalResultAcknowledgeResult
   getAssignmentForProfile: (profileId: ProfileId) => TournamentMatchAssignment | null
+  getActiveTournamentIdForProfile: (profileId: ProfileId) => TournamentId | null
+  hasUnresolvedBotReplacement: (tournamentId: TournamentId, profileId: ProfileId) => boolean
+  acknowledgeTournamentBotReplacementReturn: (
+    tournamentId: TournamentId,
+    profileId: ProfileId,
+  ) => { ok: true; alreadyResolved: boolean } | { ok: false; reason: 'not_active_participant' }
   getHealth: () => TournamentCoordinatorHealth
   close: () => void
 }
@@ -172,6 +184,15 @@ type TournamentCoordinatorDeps = {
     roomId: string
     seat: Seat
   }) => boolean
+  // Project-wide "профилът има поне една отворена автентикирана WS връзка"
+  // семантика (§"PRESENCE SEMANTICS" в task spec-а) — НЕ room/seat-scoped
+  // като isConnectionAttached по-горе. Reuse-ва същия socket-readiness
+  // pattern, който вече определя online статус другаде в проекта (напр.
+  // /api/players листинга в index.ts), вместо отделна tournament-специфична
+  // "online" дефиниция. Ползва се за attendance presence (getPresentSeats)
+  // — играч се брои "явил се", ако е логнат някъде, независимо дали в
+  // момента гледа точно tournament detail/waiting екрана.
+  isProfileOnline: (profileId: ProfileId) => boolean
   intervalMs?: number
   batchSize?: number
   setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
@@ -265,7 +286,11 @@ const DEFAULT_BATCH_SIZE = 25
 const localTournamentTestTimingOverrides = getLocalTournamentTestTimingOverrides()
 const ATTENDANCE_WAIT_MS_FIRST_MATCH = localTournamentTestTimingOverrides.attendanceFirstMatchMs
 const ATTENDANCE_WAIT_MS_ROUND_TRANSITION = localTournamentTestTimingOverrides.attendanceTransitionMs
-const START_COUNTDOWN_MS = 5_000
+// Pre-game countdown след attendance resolution (§"PRE-GAME COUNTDOWN: 5 SEC
+// → 20 SEC" в task spec-а) — server-authoritative, persisted в game_start_at
+// в момента на resolve (виж resolveAttendance/computeGameStartAt), не
+// in-memory timer, затова restart-safe by construction.
+const START_COUNTDOWN_MS = 20_000
 const BANNER_TTL_MS = 20_000
 
 function sanitizeError(error: unknown): string {
@@ -388,6 +413,65 @@ export async function createTournamentCoordinator(
     FROM tournament_entries
     WHERE tournament_id = ?
       AND status IN ('confirmed', 'finalist', 'champion', 'eliminated');
+  `)
+
+  // Само 'confirmed'/'finalist' — НЕ 'eliminated'/'champion' (§"АКО TEAM
+  // ОТПАДНЕ" в допълнението: elimination/finish е точно сигналът, който
+  // трябва да СПРЕ blocking изискването, не да го поддържа). Reuse-ва
+  // същите статуси като selectActiveEntryForAccountStatement в
+  // tournamentEconomyStore.ts ("one active tournament per account" guard-а).
+  const selectActiveEntryTournamentIdStatement = database.prepare(`
+    SELECT tournament_id
+    FROM tournament_entries
+    WHERE profile_id = ?
+      AND status IN ('confirmed', 'finalist')
+    LIMIT 1;
+  `)
+
+  // Authoritative "unresolved bot-replacement" evidence (§"КРИТИЧНО
+  // РАЗГРАНИЧЕНИЕ" в допълнението) — `status IN ('active','takeover_pending')`
+  // на КОЯТО И ДА Е replacement row за профила в целия турнир (не само
+  // текущия runnable match_id) е единственото authoritative доказателство,
+  // че конкретен human участник реално е бил заместен от бот и още не е
+  // reclaim-нал. closeAllUnresolvedReplacementsForProfileStatement (по-долу
+  // — единственото място, където status минава на 'completed') се вика
+  // ИЗКЛЮЧИТЕЛНО при успешен tryTakeoverNoShowBot/acknowledgeTournamentBotReplacementReturn
+  // — НИКОГА автоматично при match completion (виж
+  // countActiveReplacementsForMatchStatement по-долу, което броди редове,
+  // не ги затваря). Затова ако X никога не reclaim-не, редът за завършения
+  // match остава 'active' завинаги — точно сигналът, който трябва да
+  // persist-не през STATE A/B/следващ match/restart, без нов notification
+  // table (reuse на вече съществуващата replacement persistence).
+  const selectUnresolvedReplacementForProfileStatement = database.prepare(`
+    SELECT replacement_id
+    FROM tournament_match_no_show_replacements
+    WHERE tournament_id = ?
+      AND assigned_profile_id = ?
+      AND status IN ('active', 'takeover_pending')
+    LIMIT 1;
+  `)
+
+  // §"MODEL A — close all unresolved rows on successful human return" (3rd
+  // допълнение) — force-return е ЕДНА tournament-level obligation за
+  // профила, не независима история per match. Ако X пропусне И semifinal-а,
+  // И final-а, ще има ДВЕ отделни replacement rows (различни match_id-та,
+  // виж §75-98 в 20260730_008 migration-ата — UNIQUE(match_id,
+  // assigned_profile_id), не UNIQUE(tournament_id, assigned_profile_id)).
+  // Затова ЕДИН explicit reclaim/acknowledge трябва да затвори ВСИЧКИ
+  // unresolved rows за профила в турнира наведнъж — иначе стар semifinal
+  // row остава 'active' завинаги след успешен final reclaim (доказано
+  // емпирично). Историята "бот е играл semifinal-а" остава напълно четлива
+  // (result_kind='played_with_bots' на match ниво, takeover_completed_at
+  // timestamp тук) — 'completed' статус НЕ трие историята, само маркира
+  // "вече не е pending obligation". Scoped стриктно по (tournament_id,
+  // assigned_profile_id) — никога не пипа други играчи.
+  const closeAllUnresolvedReplacementsForProfileStatement = database.prepare(`
+    UPDATE tournament_match_no_show_replacements
+    SET status = 'completed',
+        takeover_completed_at = COALESCE(takeover_completed_at, CURRENT_TIMESTAMP)
+    WHERE tournament_id = ?
+      AND assigned_profile_id = ?
+      AND status IN ('active', 'takeover_pending');
   `)
 
   const selectRunnableMatchesStatement = database.prepare(`
@@ -652,14 +736,6 @@ export async function createTournamentCoordinator(
         takeover_requested_at = COALESCE(takeover_requested_at, CURRENT_TIMESTAMP)
     WHERE replacement_id = ?
       AND status = 'active';
-  `)
-
-  const markReplacementCompletedStatement = database.prepare(`
-    UPDATE tournament_match_no_show_replacements
-    SET status = 'completed',
-        takeover_completed_at = COALESCE(takeover_completed_at, CURRENT_TIMESTAMP)
-    WHERE replacement_id = ?
-      AND status IN ('active', 'takeover_pending');
   `)
 
   const countActiveReplacementsForMatchStatement = database.prepare(`
@@ -940,7 +1016,19 @@ export async function createTournamentCoordinator(
       deadlineKind: match.deadline_kind,
       attendanceDeadlineAt: match.attendance_deadline_at,
       gameStartAt: match.game_start_at,
+      matchStatus: toAssignmentMatchStatus(match.status),
     }))
+  }
+
+  // createAssignments се вика само за runnable (не completed) мачове (виж
+  // selectRunnableMatchesStatement/getAssignmentForProfile), затова тесният
+  // union по-долу покрива всичко реално достижимо тук; 'awaiting_players' е
+  // fallback за легаси/неочакван статус вместо throw, за да не счупи
+  // destination resolver-а на клиента при неочакван edge case.
+  function toAssignmentMatchStatus(status: string): 'awaiting_players' | 'countdown' | 'in_progress' {
+    if (status === 'countdown') return 'countdown'
+    if (status === 'in_progress') return 'in_progress'
+    return 'awaiting_players'
   }
 
   function notifyAssignments(match: MatchRow, room: ServerRoom): void {
@@ -953,21 +1041,30 @@ export async function createTournamentCoordinator(
     }
   }
 
+  // Presence за attendance-resolution целите (§"PRESENCE SEMANTICS" в task
+  // spec-а) — project-wide "профилът е логнат някъде", НЕ room/seat-scoped
+  // isConnectionAttached. Играч се брои "явил се" веднага щом има активна
+  // сесия някъде (multi-tab включително), независимо дали в момента гледа
+  // точно този room/tab — сървърът/клиентът-а автоматично route-ват
+  // presence-way-farer-а към attendance екрана (виж §"OFFLINE USER ВЛИЗА
+  // ПО ВРЕМЕ НА 3-MINUTE WINDOW"), не обратното.
+  //
+  // КРИТИЧНО (§"ONLINE !== RECLAIMED" във второто допълнение): online
+  // connection САМО ПО СЕБЕ СИ не е доказателство, че играч, който вече е
+  // бил bot-replaced в ПРЕДИШЕН match на СЪЩИЯ турнир, лично се е върнал.
+  // Ако X login-не (isProfileOnline=true), но никога не е натиснал "Поеми
+  // играта" (hasUnresolvedBotReplacement все още true), той НЕ бива да се
+  // брои за present в следващия match — бот трябва да продължи да пази
+  // мястото му (§"BOT CONTINUITY ACROSS ROUNDS"). Само СЛЕД authoritative
+  // resolve (gameplay reclaim ЧРЕЗ tryTakeoverNoShowBot, ИЛИ STATE A/B
+  // acknowledge ЧРЕЗ acknowledgeTournamentBotReplacementReturn) редът се
+  // маркира 'completed' и presence отново разчита само на isProfileOnline.
   function getPresentSeats(match: MatchRow, room: ServerRoom): Set<Seat> {
     const present = new Set<Seat>()
     for (const assignment of getSeatAssignments(match)) {
-      const participant = room.seats[assignment.seat].participant
       if (
-        participant?.kind === 'human' &&
-        participant.isConnected &&
-        participant.connectionId !== null &&
-        participant.identity.profileId === assignment.profileId &&
-        deps.isConnectionAttached({
-          profileId: assignment.profileId,
-          connectionId: participant.connectionId,
-          roomId: room.id,
-          seat: assignment.seat,
-        })
+        deps.isProfileOnline(assignment.profileId) &&
+        !hasUnresolvedBotReplacement(match.tournament_id as TournamentId, assignment.profileId)
       ) {
         present.add(assignment.seat)
       }
@@ -980,9 +1077,42 @@ export async function createTournamentCoordinator(
     return getSeatAssignments(match).filter((assignment) => !present.has(assignment.seat))
   }
 
+  // Чист network presence (§"ONLINE != PERSONALLY PRESENT / RECLAIMED" в
+  // третото допълнение) — за разлика от getPresentSeats (personallyPresent,
+  // ползван ИЗКЛЮЧИТЕЛНО за attendance resolution decision-и — дали да
+  // resolve-нем all_present/early transition), този reflect-ва само реалната
+  // WS connection presence, БЕЗ да се пресича с hasUnresolvedBotReplacement.
+  // Играч, който е login-нат, но все още не е натиснал "Поеми играта",
+  // трябва визуално да остане "Онлайн" (истината за connection-а му), докато
+  // bot continuity-то (personallyPresent=false) продължава да важи отделно
+  // за самата attendance логика. Reuse на СЪЩИЯ deps.isProfileOnline — не
+  // дублира project-wide connection logic, само не го смесва с replacement
+  // lifecycle-а.
+  function getOnlineSeats(match: MatchRow): Set<Seat> {
+    const online = new Set<Seat>()
+    for (const assignment of getSeatAssignments(match)) {
+      if (deps.isProfileOnline(assignment.profileId)) {
+        online.add(assignment.seat)
+      }
+    }
+    return online
+  }
+
   function createAttendanceSnapshot(match: MatchRow, room: ServerRoom): TournamentAttendanceSnapshot {
     const nowIso = utcNow()
     const missing = getMissingAssignments(match, room).map(createPlayerSummary)
+    // §"ONLINE != PERSONALLY PRESENT / RECLAIMED" в третото допълнение —
+    // roster-ният "Онлайн/Офлайн" UI индикатор трябва да reflect-ва чиста
+    // network presence (getOnlineSeats), НЕ attendance-resolution
+    // personallyPresent (getPresentSeats, който изключва unresolved-replacement
+    // профили). Иначе играч, който реално е login-нат, но още не е
+    // reclaim-нал bot mястото си от предишен round, би се показал грешно
+    // като "Офлайн" на другите играчи.
+    const online = getOnlineSeats(match)
+    const roster = getSeatAssignments(match).map((assignment) => ({
+      ...createPlayerSummary(assignment),
+      isOnline: online.has(assignment.seat),
+    }))
     const state =
       match.status === 'completed'
         ? 'completed'
@@ -1013,6 +1143,7 @@ export async function createTournamentCoordinator(
         A: missing.filter((player) => player.team === 'A'),
         B: missing.filter((player) => player.team === 'B'),
       },
+      roster,
       resolutionKind: match.attendance_resolution_kind,
       gameStartAt,
       startSecondsRemaining: gameStartAt === null ? 0 : Math.max(0, Math.ceil((Date.parse(gameStartAt) - Date.parse(nowIso)) / 1000)),
@@ -1369,46 +1500,15 @@ export async function createTournamentCoordinator(
       return match
     }
 
-    const missingTeamA = missing.filter((item) => item.team === 'A')
-    const missingTeamB = missing.filter((item) => item.team === 'B')
-    const oneSidedWalkover = missingTeamA.length === 0 || missingTeamB.length === 0
-
-    if (oneSidedWalkover) {
-      const winnerTeamId = missingTeamA.length === 0 ? match.team_a_id : match.team_b_id
-      const loserTeamId = winnerTeamId === match.team_a_id ? match.team_b_id : match.team_a_id
-      const nowIso = utcNow()
-      const reason = {
-        kind: 'one_team_missing_players',
-        missingTeam: missingTeamA.length > 0 ? 'A' : 'B',
-        winnerTeamId,
-        loserTeamId,
-      }
-      const missingProfileIds = missing.map((item) => item.profileId)
-      if (dbChanges(resolveWalkoverStatement.run(
-        winnerTeamId,
-        JSON.stringify(reason),
-        JSON.stringify(missingProfileIds),
-        nowIso,
-        nowIso,
-        match.match_id,
-        winnerTeamId,
-      )) > 0) {
-        attendanceResolvedLastTick += 1
-        walkoversLastTick += 1
-        appendEvent(match.tournament_id, 'tournament_match_walkover', {
-          matchId: match.match_id,
-          roundType: match.round_type,
-          winnerTeamId,
-          loserTeamId,
-          missingCount: missing.length,
-        })
-      }
-      const resolved = selectMatchByIdStatement.get(match.match_id) as MatchRow
-      closeCompletedTournamentRoom(resolved, room)
-      advanceCompletedMatch(resolved)
-      return resolved
-    }
-
+    // Премахнато: служебна загуба (walkover) при неявяване. Продуктовото
+    // изискване (§"ПРЕМАХНИ WALKOVER ПОРАДИ NO-SHOW" в task spec-а) е
+    // всеки валидно записан участник да запази мястото си — липсващите
+    // seats (едностранно ИЛИ двустранно) винаги се запълват с ботове по-
+    // долу, никога не завършват мача служебно. resolveWalkoverStatement/
+    // result_kind='walkover' schema-та остават заради historic data и
+    // bracket-advancement логиката (advanceCompletedMatch е result-kind-
+    // агностична — чете само winner_team_id/result_kind, не presence), но
+    // вече не се извикват от no-show резолюцията.
     database.exec('BEGIN IMMEDIATE;')
     try {
       for (const assignment of missing) {
@@ -1444,14 +1544,12 @@ export async function createTournamentCoordinator(
     }
 
     const resolved = selectMatchByIdStatement.get(match.match_id) as MatchRow
-    let botRoom = ensureTournamentBotsInRuntime(resolved, room)
-    const names = missing.map((item) => item.publicProfile.displayName).join(', ')
-    botRoom = addBanner(botRoom, {
-      id: `bots:${match.match_id}`,
-      kind: 'bots_inserted',
-      message: `${names} се заместват временно от ботове. Те могат да поемат местата си, когато се присъединят.`,
-      createdAt: utcNow(),
-    })
+    // Старият "X се заместват временно от ботове..." banner е премахнат
+    // (§"ПРЕМАХНИ СЕГАШНИТЕ BOT-TAKEOVER POPUPS ПО ВРЕМЕ НА GAMEPLAY" в task
+    // spec-а) — информацията вече се показва постоянно през "БОТ" badge-а
+    // върху истинския avatar (renderTournamentBotBadge в
+    // renderCuttingSeatPanels.ts), не еднократен popup.
+    const botRoom = ensureTournamentBotsInRuntime(resolved, room)
     commitSnapshot(resolved, botRoom)
     return resolved
   }
@@ -1942,13 +2040,12 @@ export async function createTournamentCoordinator(
       return { ok: false, reason: 'seat_not_replaceable' }
     }
 
+    // Takeover-pending/takeover-completed banner-ите са премахнати (§"ПРЕМАХНИ
+    // СЕГАШНИТЕ BOT-TAKEOVER POPUPS ПО ВРЕМЕ НА GAMEPLAY" в task spec-а) —
+    // "БОТ" badge-ът върху avatar-а вече комуникира статуса постоянно, а
+    // изчезването му при reclaim (виж по-долу) е самото визуално потвърждение.
     markReplacementPendingStatement.run(replacement.replacement_id)
-    let pendingRoom = addBanner(input.room, {
-      id: `takeover-pending:${replacement.replacement_id}`,
-      kind: 'takeover_pending',
-      message: `${assignment.publicProfile.displayName} се присъедини. Ще поеме мястото си след текущото игрово действие.`,
-      createdAt: utcNow(),
-    })
+    let pendingRoom = input.room
     const human = createHumanParticipant({
       connectionId: input.connectionId,
       reconnectToken: input.reconnectToken,
@@ -1972,20 +2069,19 @@ export async function createTournamentCoordinator(
         controlledByBot: false,
       }
     }
-    markReplacementCompletedStatement.run(replacement.replacement_id)
+    // §"MODEL A" (3то допълнение) — затваря ЦЯЛАТА tournament-level
+    // force-return obligation за профила наведнъж (не само тази стая), за
+    // да не остане stale по-стар replacement row 'active', ако X е бил
+    // bot-replaced в повече от един match на същия турнир (напр. пропуснал
+    // и semifinal, и final) — виж closeAllUnresolvedReplacementsForProfileStatement.
+    closeAllUnresolvedReplacementsForProfileStatement.run(match.tournament_id, input.profileId)
     takeoversLastTick += 1
     appendEvent(match.tournament_id, 'tournament_no_show_bot_takeover_completed', {
       matchId: match.match_id,
       seat: assignment.seat,
       roundType: match.round_type,
     })
-    const completedRoom = addBanner(pendingRoom, {
-      id: `takeover-completed:${replacement.replacement_id}`,
-      kind: 'takeover_completed',
-      message: `${assignment.publicProfile.displayName} пое управлението от бота.`,
-      createdAt: utcNow(),
-    })
-    const refreshed = commitSnapshot(match, completedRoom)
+    const refreshed = commitSnapshot(match, pendingRoom)
     deps.ensureRoomRuntime(refreshed)
     return { ok: true, room: refreshed, seat: assignment.seat }
   }
@@ -2073,6 +2169,80 @@ export async function createTournamentCoordinator(
     return null
   }
 
+  // Reuse target за "does this profile still owe a return to an active
+  // tournament" resolvers на клиента (§"НЕ ВРЪЗВАЙ BLOCKING MODAL САМО С
+  // ACTIVE ROOM" в допълнението) — покрива и STATE A/B случая (myActiveMatch
+  // е null там, тъй като няма runnable match за профила в момента, но
+  // entry-то остава 'confirmed'/'finalist'), не само gameplay/attendance
+  // (вече покрит от getAssignmentForProfile). Връща само tournamentId —
+  // самият destination (attendance/countdown/gameplay/STATE A/STATE B) се
+  // resolve-ва от authoritative tournament detail DTO-то (myActiveMatch/
+  // myInterRoundWaiting), не тук — избягва duplicate state machine.
+  function getActiveTournamentIdForProfile(profileId: ProfileId): TournamentId | null {
+    const row = selectActiveEntryTournamentIdStatement.get(profileId) as { tournament_id: string } | undefined
+    return row === undefined ? null : (row.tournament_id as TournamentId)
+  }
+
+  // Единствената authoritative проверка "has this human an unresolved
+  // bot-replacement in this tournament" (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в
+  // допълнението) — вижда КОЯТО И ДА Е replacement row за профила в целия
+  // турнир, не само за текущия runnable match, затова survive-ва през
+  // bot-win → STATE A/B → следващ match (виж коментара при
+  // selectUnresolvedReplacementForProfileStatement). Server/client НЕ трябва
+  // да показват blocking modal без тази проверка да е TRUE, независимо
+  // дали профилът има active tournament participation.
+  function hasUnresolvedBotReplacement(tournamentId: TournamentId, profileId: ProfileId): boolean {
+    return selectUnresolvedReplacementForProfileStatement.get(tournamentId, profileId) !== undefined
+  }
+
+  // Server-authoritative "human изрично се е върнал" action ИЗВЪН gameplay
+  // (§"AUTHORITATIVE RETURN ACTION"/"STATE A"/"STATE B" във второто
+  // допълнение) — за разлика от tryTakeoverNoShowBot (който swap-ва runtime
+  // seat operator в АКТИВНА стая), тук няма room/seat да се swap-ва: STATE
+  // A/B нямат runnable match за профила в момента (сам по себе си доказва,
+  // че той не седи на нищо, което бот да заема в реално време точно сега).
+  // Единственото нужно действие е да маркираме ВСИЧКИ unresolved replacement
+  // редове на профила в турнира 'completed' (§"MODEL A" в 3то допълнение —
+  // reuse на closeAllUnresolvedReplacementsForProfileStatement, idempotent
+  // by WHERE clause: втори call намира вече 'completed' редове, changes=0,
+  // безопасен no-op). НЕ пипа wallet/economy, team, match state — единствената
+  // колона, която се пипа, е самия replacement lifecycle.
+  // Guard-нато с getActiveTournamentIdForProfile, за да не "reclaim-не" ред
+  // за профил, чийто team вече е елиминиран/турнирът е приключил за него.
+  function acknowledgeTournamentBotReplacementReturn(
+    tournamentId: TournamentId,
+    profileId: ProfileId,
+  ): { ok: true; alreadyResolved: boolean } | { ok: false; reason: 'not_active_participant' } {
+    if (getActiveTournamentIdForProfile(profileId) !== tournamentId) {
+      return { ok: false, reason: 'not_active_participant' }
+    }
+    // Липсващ unresolved ред е ИДЕМПОТЕНТЕН "вече е resolved" случай (§"IDEMPOTENCY"
+    // във второто допълнение: double-click/repeat заявка трябва да е safe,
+    // не грешка) — не 'not_active_participant'-style hard failure. Само
+    // липсата на active participation (elimination/finished) е реален
+    // failure тук; "нямаше какво да acknowledge-на" е success no-op.
+    const row = selectUnresolvedReplacementForProfileStatement.get(tournamentId, profileId) as
+      | { replacement_id: string }
+      | undefined
+    if (row === undefined) {
+      return { ok: true, alreadyResolved: true }
+    }
+    // §"MODEL A" (3то допълнение) — затваря ЦЯЛАТА tournament-level
+    // obligation наведнъж (не само единия row, намерен от SELECT-а по-горе),
+    // за да не остане stale по-стар unresolved row от предишен round (напр.
+    // semifinal), ако X е бил bot-replaced в повече от един match.
+    const result = closeAllUnresolvedReplacementsForProfileStatement.run(tournamentId, profileId) as { changes?: number }
+    const changed = (result.changes ?? 0) > 0
+    if (changed) {
+      appendEvent(tournamentId, 'tournament_no_show_bot_takeover_completed', {
+        replacementId: row.replacement_id,
+        profileId,
+        via: 'state_a_b_acknowledge',
+      })
+    }
+    return { ok: true, alreadyResolved: !changed }
+  }
+
   return {
     start(): void {
       if (intervalId !== null) return
@@ -2098,6 +2268,9 @@ export async function createTournamentCoordinator(
     tryTakeoverNoShowBot,
     acknowledgeSemifinalResult,
     getAssignmentForProfile,
+    getActiveTournamentIdForProfile,
+    hasUnresolvedBotReplacement,
+    acknowledgeTournamentBotReplacementReturn,
     getHealth(): TournamentCoordinatorHealth {
       return {
         state: stopped ? 'stopped' : intervalId === null ? 'idle' : 'running',

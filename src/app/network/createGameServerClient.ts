@@ -179,6 +179,7 @@ export type TournamentMatchAssignmentSnapshot = {
   deadlineKind: 'first_match' | 'round_transition' | null
   attendanceDeadlineAt: string | null
   gameStartAt: string | null
+  matchStatus: 'awaiting_players' | 'countdown' | 'in_progress'
 }
 
 export type TournamentInterRoundWaitingSiblingSnapshot = {
@@ -285,6 +286,10 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
   myInterRoundWaiting: TournamentInterRoundWaitingSnapshot | null
   incomingPartnerInvite: TournamentPartnerInviteSnapshot | null
   outgoingPartnerInvite: TournamentPartnerInviteSnapshot | null
+  // Authoritative "виewer-ът реално е бил bot-replaced и не е reclaim-нал"
+  // доказателство (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението) — НЕ derivable
+  // от myActiveMatch/myInterRoundWaiting самостоятелно.
+  viewerHasUnresolvedBotReplacement: boolean
 }
 
 export type TournamentCreateInput = {
@@ -1098,6 +1103,10 @@ export type TournamentAttendancePlayerSummary = {
   avatarUrl: string | null
 }
 
+export type TournamentAttendanceRosterEntry = TournamentAttendancePlayerSummary & {
+  isOnline: boolean
+}
+
 export type TournamentAttendanceSnapshot = {
   state: 'waiting' | 'resolved' | 'countdown' | 'started' | 'completed'
   serverNow: string
@@ -1105,6 +1114,7 @@ export type TournamentAttendanceSnapshot = {
   secondsRemaining: number
   missingPlayers: TournamentAttendancePlayerSummary[]
   missingByTeam: Record<'A' | 'B', TournamentAttendancePlayerSummary[]>
+  roster: TournamentAttendanceRosterEntry[]
   resolutionKind: 'all_present' | 'walkover' | 'bots_inserted' | null
   gameStartAt: string | null
   startSecondsRemaining: number
@@ -1442,6 +1452,11 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignmentSnapshot
 }
 
+export type TournamentActiveParticipationMessage = {
+  type: 'tournament_active_participation'
+  tournamentId: string
+}
+
 export type TournamentFeederMatchCompletedMessage = {
   type: 'tournament_feeder_match_completed'
   tournamentId: string
@@ -1471,7 +1486,7 @@ export type TournamentEconomyNoticeMessage = {
   type: 'tournament_economy_notice'
   eventId: string
   tournamentId: string
-  reason: 'creator_cancelled' | 'fill_expired' | 'partner_left'
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'
   amount: number
   occurredAt: string
 }
@@ -1581,6 +1596,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentMatchAssignedMessage
+  | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
   | TournamentEconomyNoticeMessage

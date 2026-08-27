@@ -45,6 +45,8 @@
     "check:tournament-partner-global-search": "tsx scripts/checkTournamentPartnerGlobalSearch.ts",
     "check:tournament-partner-lifecycle": "tsx scripts/checkTournamentPartnerLifecycle.ts",
     "check:tournament-partner-error-localization": "tsx scripts/checkTournamentPartnerErrorLocalization.ts --project-root=..",
+    "check:tournament-noshow-attendance": "tsx scripts/checkTournamentNoShowAttendance.ts",
+    "check:tournament-autocancel-economy-notice": "tsx scripts/checkTournamentAutoCancelEconomyNotice.ts",
     "check:tournaments-frontend-source": "tsx scripts/checkTournamentsFrontendSource.ts --project-root=..",
     "check:tournament-card-navigation": "tsx scripts/checkTournamentCardNavigation.ts --project-root=..",
     "check:tournament-detail-entry-actions": "tsx scripts/checkTournamentDetailEntryActions.ts --project-root=..",

@@ -245,6 +245,13 @@ export function createActiveRoomFlowController(
   }
   let matchEndedCountdownSeconds = 120
   let matchEndedCountdownIntervalId: number | null = null
+  // Targeted ticker за tournament attendance екрана (§"3-MINUTE SCREEN
+  // REALTIME BEHAVIOR" в task spec-а) — patch-ва само timer текста между
+  // реалните room_snapshot push-ове (сървърът вече push-ва цял snapshot при
+  // всеки coordinator tick/presence промяна), вместо да прави пълен
+  // renderActiveRoomScreen() rebuild всяка секунда (старото поведение).
+  let tournamentAttendanceTickerIntervalId: number | null = null
+  let tournamentAttendanceTickerRenderKey: string | null = null
 
   function getMatchEndedCountdownSeconds(): number {
     if (matchEndedCountdownDeadlineAt === null) {
@@ -1492,6 +1499,133 @@ export function createActiveRoomFlowController(
         </div>
       </div>
     `
+  }
+
+  // Нов dedicated 3-минутен/pre-game tournament attendance екран (§"НОВ
+  // 3-MINUTE WAITING SCREEN" в task spec-а) — заменя старата generic room
+  // waiting card. Пълен rebuild само когато roster/state/resolutionKind
+  // реално се промени (см. renderKey guard-а в главния render клон по-долу);
+  // самият timer текст се patch-ва targeted от syncTournamentAttendanceCountdownDisplay,
+  // без нов renderActiveRoomScreen() call всяка секунда.
+  function renderTournamentAttendanceScreenHtml(
+    tournamentAttendance: NonNullable<typeof activeRoomState>['tournamentAttendance'] & object,
+    scoreHudHtml: string,
+    mobileLayoutAttribute: string,
+    tableBackground: string,
+  ): string {
+    const isCountdown = tournamentAttendance.state === 'countdown'
+    const title = isCountdown
+      ? tournamentAttendance.resolutionKind === 'bots_inserted'
+        ? 'Липсващите места са запълнени с ботове'
+        : 'Всички играчи са на масата'
+      : 'Изчакване на играчите'
+    const roundLabel = tournamentWaitingRoundLabel(activeRoomState!.tournamentRoundType)
+    const botReplacementBySeat = new Map(
+      activeRoomState!.tournamentBotReplacements.filter((item) => item.replacementActive).map((item) => [item.seat, item]),
+    )
+    const teamASeats: Seat[] = ['bottom', 'top']
+    const teamBSeats: Seat[] = ['left', 'right']
+    const renderTeamRosterHtml = (teamSeats: Seat[], teamLabel: string): string => {
+      const rows = teamSeats.map((seat) => {
+        const rosterEntry = tournamentAttendance.roster.find((item) => item.seat === seat)
+        const isBotReplaced = botReplacementBySeat.has(seat)
+        const displayName = rosterEntry?.displayName ?? 'Играч'
+        const isOnline = isBotReplaced || (rosterEntry?.isOnline ?? false)
+        const statusText = isBotReplaced ? 'БОТ' : isOnline ? 'Онлайн' : 'Офлайн'
+        const statusColor = isBotReplaced ? '#facc15' : isOnline ? '#22c55e' : 'rgba(248,250,252,0.45)'
+        return `
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;padding:5px 0;">
+            <span style="font-size:13px;font-weight:700;color:#f1f5f9;overflow-wrap:anywhere;">${escapeHtml(displayName)}</span>
+            <span style="font-size:11px;font-weight:900;letter-spacing:0.03em;color:${statusColor};flex:0 0 auto;">${statusText}</span>
+          </div>
+        `
+      }).join('')
+      return `
+        <div style="flex:1;min-width:0;text-align:left;">
+          <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.05em;color:#93c5fd;margin-bottom:4px;">${escapeHtml(teamLabel)}</div>
+          ${rows}
+        </div>
+      `
+    }
+    const botRuleText = 'Ако играч не се яви до края на времето, мястото му временно ще бъде поето от бот. Играчът може да си поеме мястото, когато се появи.'
+
+    return `
+      <div
+        ${mobileLayoutAttribute}
+        style="
+          min-height:100vh;
+          width:100%;
+          box-sizing:border-box;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          overflow:hidden;
+          background:${tableBackground};
+          font-family:Inter, system-ui, sans-serif;
+        "
+      >
+        <div
+          style="
+            width:min(92vw, 540px);
+            max-height:calc(100dvh - 32px);
+            overflow:auto;
+            box-sizing:border-box;
+            border:1px solid rgba(255,255,255,0.18);
+            border-radius:8px;
+            padding:24px;
+            background:rgba(15,23,42,0.92);
+            color:#f8fafc;
+            box-shadow:0 24px 70px rgba(2,6,23,0.45);
+            text-align:center;
+          "
+        >
+          <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(roundLabel)}</div>
+          <div style="margin-top:10px;font-size:20px;font-weight:900;line-height:1.3;">${escapeHtml(title)}</div>
+          <div style="margin-top:6px;font-size:13px;line-height:1.5;color:rgba(248,250,252,0.65);">Мачът ще започне, когато всички се явят или след изтичане на времето.</div>
+          <div data-tournament-attendance-timer="1" style="margin-top:16px;font-size:40px;font-weight:900;color:#facc15;font-variant-numeric:tabular-nums;"></div>
+          <div style="margin-top:18px;display:flex;gap:18px;align-items:flex-start;justify-content:center;">
+            ${renderTeamRosterHtml(teamASeats, 'Отбор A')}
+            <div style="align-self:center;font-size:12px;font-weight:900;color:rgba(248,250,252,0.4);">VS</div>
+            ${renderTeamRosterHtml(teamBSeats, 'Отбор Б')}
+          </div>
+          <div style="margin-top:16px;font-size:13px;line-height:1.5;color:#cbd5e1;">${escapeHtml(botRuleText)}</div>
+        </div>
+        ${scoreHudHtml}
+      </div>
+    `
+  }
+
+  function getTournamentAttendanceCountdownSeconds(): number {
+    const tournamentAttendance = activeRoomState?.tournamentAttendance ?? null
+    if (tournamentAttendance === null) return 0
+    return tournamentAttendance.state === 'countdown'
+      ? tournamentAttendance.startSecondsRemaining
+      : tournamentAttendance.secondsRemaining
+  }
+
+  function syncTournamentAttendanceCountdownDisplay(): void {
+    const el = options.root.querySelector<HTMLElement>('[data-tournament-attendance-timer="1"]')
+    if (!el) return
+    const seconds = Math.max(0, getTournamentAttendanceCountdownSeconds())
+    el.textContent = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
+  }
+
+  function clearTournamentAttendanceTicker(): void {
+    if (tournamentAttendanceTickerIntervalId !== null) {
+      window.clearInterval(tournamentAttendanceTickerIntervalId)
+      tournamentAttendanceTickerIntervalId = null
+    }
+    tournamentAttendanceTickerRenderKey = null
+  }
+
+  function startTournamentAttendanceTicker(): void {
+    if (tournamentAttendanceTickerIntervalId !== null) {
+      window.clearInterval(tournamentAttendanceTickerIntervalId)
+    }
+    syncTournamentAttendanceCountdownDisplay()
+    tournamentAttendanceTickerIntervalId = window.setInterval(() => {
+      syncTournamentAttendanceCountdownDisplay()
+    }, 1000)
   }
 
   function clearScoringCountdownTicker(): void {
@@ -2932,110 +3066,27 @@ export function createActiveRoomFlowController(
       tournamentAttendance.state !== 'started' &&
       tournamentAttendance.state !== 'completed'
     ) {
-      const title =
-        tournamentAttendance.state === 'countdown'
-          ? tournamentAttendance.resolutionKind === 'bots_inserted'
-            ? 'Липсващите места са запълнени с ботове'
-            : 'Всички играчи са на масата'
-          : tournamentAttendance.missingPlayers.length > 0
-            ? 'Изчакват се играчите'
-            : 'Всички играчи са на масата'
-      const seconds =
-        tournamentAttendance.state === 'countdown'
-          ? tournamentAttendance.startSecondsRemaining
-          : tournamentAttendance.secondsRemaining
-      const minutesText = `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
-      const consequence =
-        tournamentAttendance.state === 'countdown'
-          ? `Играта започва след ${Math.max(1, seconds)} секунди.`
-          : tournamentAttendance.missingByTeam.A.length > 0 && tournamentAttendance.missingByTeam.B.length > 0
-            ? 'Ако не се присъединят навреме, играта ще започне с ботове на техните места.'
-            : tournamentAttendance.missingPlayers.length > 0
-              ? 'Ако не се присъединят навреме, пълният отбор ще спечели служебно.'
-              : 'Играта ще започне след кратко отброяване.'
-      const roundLabel = tournamentWaitingRoundLabel(activeRoomState.tournamentRoundType)
-      const missingProfileIds = new Set(tournamentAttendance.missingPlayers.map((player) => `${player.seat}`))
-      const teamASeats: Seat[] = ['bottom', 'top']
-      const teamBSeats: Seat[] = ['left', 'right']
-      const renderTeamRosterHtml = (teamSeats: Seat[], teamLabel: string): string => {
-        const rows = teamSeats.map((seat) => {
-          const seatSnapshot = activeRoomState!.seats.find((item) => item.seat === seat)
-          const replacement = activeRoomState!.tournamentBotReplacements.find((item) => item.seat === seat && item.replacementActive)
-          const displayName = replacement !== undefined
-            ? replacement.replacedPlayer.displayName
-            : seatSnapshot?.displayName ?? 'Играч'
-          const isMissing = missingProfileIds.has(seat) && replacement === undefined
-          const dotColor = replacement !== undefined ? '#facc15' : isMissing ? '#64748b' : '#22c55e'
-          const badge = replacement !== undefined
-            ? '<span style="margin-left:6px;font-size:9px;font-weight:900;letter-spacing:0.04em;color:#78350f;background:#facc15;border-radius:4px;padding:2px 5px;">БОТ</span>'
-            : ''
-          return `
-            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;">
-              <span style="width:9px;height:9px;border-radius:50%;background:${dotColor};flex:0 0 auto;"></span>
-              <span style="font-size:13px;font-weight:700;color:#f1f5f9;overflow-wrap:anywhere;">${escapeHtml(displayName)}</span>
-              ${badge}
-            </div>
-          `
-        }).join('')
-        return `
-          <div style="flex:1;min-width:0;text-align:left;">
-            <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.05em;color:#93c5fd;margin-bottom:4px;">${escapeHtml(teamLabel)}</div>
-            ${rows}
-          </div>
-        `
+      const renderKey = JSON.stringify({
+        roomId: activeRoomState.roomId,
+        state: tournamentAttendance.state,
+        resolutionKind: tournamentAttendance.resolutionKind,
+        roster: tournamentAttendance.roster,
+      })
+      if (renderKey !== tournamentAttendanceTickerRenderKey) {
+        options.root.innerHTML = renderTournamentAttendanceScreenHtml(
+          tournamentAttendance,
+          scoreHudHtml,
+          mobileLayoutAttribute,
+          tableBackground,
+        )
+        tournamentAttendanceTickerRenderKey = renderKey
+        startTournamentAttendanceTicker()
+      } else {
+        syncTournamentAttendanceCountdownDisplay()
       }
-      const readyCount = 4 - tournamentAttendance.missingPlayers.filter((player) =>
-        !activeRoomState!.tournamentBotReplacements.some((item) => item.seat === player.seat && item.replacementActive),
-      ).length
-
-      options.root.innerHTML = `
-        <div
-          ${mobileLayoutAttribute}
-          style="
-            min-height:100vh;
-            width:100%;
-            box-sizing:border-box;
-            display:flex;
-            align-items:center;
-            justify-content:center;
-            overflow:hidden;
-            background:${tableBackground};
-            font-family:Inter, system-ui, sans-serif;
-          "
-        >
-          <div
-            style="
-              width:min(92vw, 540px);
-              max-height:calc(100dvh - 32px);
-              overflow:auto;
-              box-sizing:border-box;
-              border:1px solid rgba(255,255,255,0.18);
-              border-radius:8px;
-              padding:24px;
-              background:rgba(15,23,42,0.92);
-              color:#f8fafc;
-              box-shadow:0 24px 70px rgba(2,6,23,0.45);
-              text-align:center;
-            "
-          >
-            <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(roundLabel)}</div>
-            <div style="margin-top:10px;font-size:22px;font-weight:900;line-height:1.15;">${escapeHtml(title)}</div>
-            <div style="margin-top:16px;font-size:40px;font-weight:900;color:#facc15;">${minutesText}</div>
-            <div style="margin-top:4px;font-size:12px;font-weight:700;color:rgba(248,250,252,0.6);">Мачът започва след ${minutesText}</div>
-            <div style="margin-top:18px;display:flex;gap:18px;align-items:flex-start;justify-content:center;">
-              ${renderTeamRosterHtml(teamASeats, 'Отбор A')}
-              <div style="align-self:center;font-size:12px;font-weight:900;color:rgba(248,250,252,0.4);">VS</div>
-              ${renderTeamRosterHtml(teamBSeats, 'Отбор Б')}
-            </div>
-            <div style="margin-top:16px;font-size:13px;font-weight:800;color:#dbeafe;">Готови: ${readyCount} от 4</div>
-            <div style="margin-top:10px;font-size:14px;line-height:1.5;color:#cbd5e1;">${escapeHtml(consequence)}</div>
-          </div>
-          ${scoreHudHtml}
-        </div>
-      `
-      window.setTimeout(() => renderActiveRoomScreen(), 1000)
       return
     }
+    clearTournamentAttendanceTicker()
 
     // Walkover резултат (виж fix(tournaments): route both teams after
     // walkover) — мачът е приключил СЛУЖЕБНО, преди реален game state изобщо
@@ -4748,6 +4799,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearTournamentAttendanceTicker()
     clearRenderStabilityGuards()
     clearTournamentRoundResultAutoTransitionTimer()
     clearReactionCountdownAudioTicker()
@@ -4808,6 +4860,7 @@ export function createActiveRoomFlowController(
     clearDealNextTwoAnimationState()
     clearDealLastThreeAnimationState()
     clearScoringCountdownTicker()
+    clearTournamentAttendanceTicker()
     clearRenderStabilityGuards()
     clearReactionCountdownAudioTicker()
     clearBiddingUiState()

@@ -22,6 +22,7 @@ export type TournamentEconomyNoticeReason =
   | 'participant_withdrawal'
   | 'creator_cancelled'
   | 'fill_expired'
+  | 'scheduled_underfilled'
   | 'partner_left'
 
 export type TournamentEconomyNotice = {

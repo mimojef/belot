@@ -207,6 +207,7 @@ async function seedTournament(hasOtherHumanFinalist: boolean): Promise<Seeded> {
     notifyFeederMatchCompleted: () => {},
     notifyFeederScoreProgress: () => {},
     isConnectionAttached: () => false,
+    isProfileOnline: () => false,
     intervalMs: 60_000,
   })
 
@@ -828,7 +829,18 @@ await check('transition/state-machine wiring: no artificial wall-clock delay, bo
   // round_transition assignment, regardless of the current lobby screen.
   assert(mainTs.includes("if (message.assignment.deadlineKind === 'round_transition') {"), 'round-transition assignment detail guard missing (generic, not final-only)')
   assert(!mainTs.includes("message.assignment.deadlineKind === 'round_transition' && lobby?.getCurrentScreen() === 'tournament-detail'"), 'round-transition popup suppression is still gated on the current lobby screen instead of being unconditional')
-  assert(!mainTs.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'), 'assignment still direct (non-silent) resumes before countdown')
+  // Изолираме само round_transition клона (до следващия 'return' на същото
+  // ниво) — first_match assignment-ите легитимно ползват точно този
+  // resumeRoom(...) literal по-надолу във файла (Task A: normal, non-bot-
+  // replaced participant auto-enters attendance/countdown без бутон, зад
+  // resolveAndRouteTournamentReturn+isVisible() guard). Старата broad
+  // file-wide проверка вече дава false positive върху този нов, различен от
+  // бъга код path.
+  const roundTransitionBlockStart = mainTs.indexOf("if (message.assignment.deadlineKind === 'round_transition') {")
+  const roundTransitionBlockEnd = mainTs.indexOf('\n      }', roundTransitionBlockStart)
+  assert(roundTransitionBlockStart !== -1 && roundTransitionBlockEnd !== -1, 'round-transition assignment block not found for isolation')
+  const roundTransitionBlock = mainTs.slice(roundTransitionBlockStart, roundTransitionBlockEnd)
+  assert(!roundTransitionBlock.includes('client.resumeRoom(message.assignment.roomId, message.assignment.reconnectToken)'), 'round-transition assignment still direct (non-silent) resumes before countdown')
 })
 
 await check('inter-round presentation uses one overlay and dynamic round labels', async () => {

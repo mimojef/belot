@@ -194,6 +194,10 @@ async function seedCompletedRound(input: {
     notifyFeederMatchCompleted: () => {},
     notifyFeederScoreProgress: () => {},
     isConnectionAttached: () => false,
+    // Nobody is ever present (§"PRESENCE SEMANTICS") — every seat here is a
+    // seeded bot profile, mirroring the always-false isConnectionAttached
+    // mock above exactly (deadline always bot-fills, nothing resolves early).
+    isProfileOnline: () => false,
     intervalMs: 60_000,
   })
 

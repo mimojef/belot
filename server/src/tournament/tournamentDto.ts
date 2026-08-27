@@ -203,6 +203,13 @@ export type TournamentDetailDto = TournamentSummaryDto & {
   myInterRoundWaiting: TournamentInterRoundWaitingDto | null
   incomingPartnerInvite: TournamentPartnerInviteDto | null
   outgoingPartnerInvite: TournamentPartnerInviteDto | null
+  // Authoritative "виewer-ът реално е бил bot-replaced и не е reclaim-нал"
+  // доказателство (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението) — computed от
+  // tournamentCoordinator.hasUnresolvedBotReplacement, НЕ derivable от
+  // myActiveMatch/myInterRoundWaiting самостоятелно (тяхното наличие показва
+  // само КЪДЕ е участникът в турнира, не дали изобщо е бил заместван).
+  // false за viewer без сесия.
+  viewerHasUnresolvedBotReplacement: boolean
 }
 
 // Generic across every round transition (round_of_16->quarterfinal,
@@ -420,6 +427,7 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
     myInterRoundWaiting: null,
     incomingPartnerInvite: null,
     outgoingPartnerInvite: null,
+    viewerHasUnresolvedBotReplacement: false,
   }
 }
 

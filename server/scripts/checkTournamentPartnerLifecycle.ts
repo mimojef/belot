@@ -282,12 +282,12 @@ check(
   indexSrc.includes('sendToOpenProfileConnections(result.autoReleasedPartner.profileId, {'),
 )
 check(
-  'creator_cancelled/fill_expired still reuse sendTournamentEconomyRefundNotices unchanged',
-  indexSrc.includes("reason: 'creator_cancelled' | 'fill_expired' | 'partner_left'"),
+  'creator_cancelled/fill_expired still reuse sendTournamentEconomyRefundNotices unchanged (union widened with scheduled_underfilled by a later, unrelated auto-cancel-notice task, but the reused primitive itself is untouched)',
+  indexSrc.includes("reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'"),
 )
 check(
   'the WS message type union includes partner_left',
-  messageTypesSrc.includes("reason: 'creator_cancelled' | 'fill_expired' | 'partner_left'"),
+  messageTypesSrc.includes("reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'"),
 )
 check(
   'the client reuses the existing tournamentEconomyNotification popup pipeline for partner_left (no new toast/animation system)',

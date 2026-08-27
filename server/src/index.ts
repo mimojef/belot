@@ -2090,7 +2090,7 @@ function sendTournamentMatchAssignment(
 // нищо ретроактивно. eventId е уникален per push (client-side dedup).
 function sendTournamentEconomyRefundNotices(
   tournamentId: string,
-  reason: 'creator_cancelled' | 'fill_expired' | 'partner_left',
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left',
   refundedProfiles: Array<{ profileId: string; amount: number }>,
 ): void {
   const occurredAt = new Date().toISOString()
@@ -2452,7 +2452,7 @@ function tryResumeRoomForConnection(
       if (takeoverResult.reason === 'match_completed') {
         return {
           ok: false,
-          message: 'Отборът ви загуби служебно поради неявяване. Мачът вече е приключил.',
+          message: 'Мачът вече е приключил.',
         }
       }
     }
@@ -6291,6 +6291,14 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
   const myActiveMatch = viewerProfileId !== null
     ? tournamentCoordinator?.getAssignmentForProfile(viewerProfileId) ?? null
     : null
+  // §"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението — myActiveMatch/myInterRoundWaiting
+  // показват КЪДЕ е viewer-ът в турнира, НЕ дали изобщо е бил bot-replaced.
+  // Тази отделна проверка е единственото authoritative "force-return
+  // requirement" доказателство, което клиентският blocking modal трябва да
+  // ползва — виж hasUnresolvedBotReplacement в tournamentCoordinator.ts.
+  const viewerHasUnresolvedBotReplacement = viewerProfileId !== null
+    ? tournamentCoordinator?.hasUnresolvedBotReplacement(tournament.tournamentId, viewerProfileId) ?? false
+    : false
   // Generic across every round transition (round_of_16->quarterfinal,
   // quarterfinal->semifinal, semifinal->final) — task spec §5. Walks the
   // team-capacity ladder instead of hardcoding 'semifinal'/'final', finding
@@ -6424,6 +6432,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     myInterRoundWaiting: buildMyInterRoundWaiting(),
     incomingPartnerInvite: incomingPartnerInvite ? inviteToDto(incomingPartnerInvite) : null,
     outgoingPartnerInvite: outgoingPartnerInvite ? inviteToDto(outgoingPartnerInvite) : null,
+    viewerHasUnresolvedBotReplacement,
   }
 }
 
@@ -7296,6 +7305,80 @@ async function handleTournamentLeaveRequest(
       )
     }
   }
+  return true
+}
+
+const ACKNOWLEDGE_BOT_RETURN_FAILURE_MESSAGES: Record<string, string> = {
+  not_active_participant: 'Не участваш активно в този турнир в момента.',
+}
+
+// Server-authoritative "Поеми играта" action ИЗВЪН gameplay (§"AUTHORITATIVE
+// RETURN ACTION"/"STATE A"/"STATE B" във второто допълнение) — за разлика от
+// resume_room+tryTakeoverNoShowBot (реален seat swap в активна стая), тук
+// няма room/seat да се пипа: STATE A/B нямат runnable match за профила в
+// момента. Единственото нужно действие е authoritative marking на
+// СЪЩЕСТВУВАЩИЯ unresolved replacement ред 'completed' — виж
+// acknowledgeTournamentBotReplacementReturn в tournamentCoordinator.ts.
+// Idempotent (двоен click/repeat заявка връща alreadyResolved:true, не
+// грешка); не пипа wallet/economy/team/match state.
+async function handleTournamentAcknowledgeBotReturnRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/acknowledge-bot-return$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  if (tournamentCoordinator === null) {
+    sendJsonResponse(res, 503, { ok: false, message: 'Услугата временно не е налична.' })
+    return true
+  }
+
+  const result = tournamentCoordinator.acknowledgeTournamentBotReplacementReturn(tournamentId, profileId)
+  if (!result.ok) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      reason: result.reason,
+      message: ACKNOWLEDGE_BOT_RETURN_FAILURE_MESSAGES[result.reason] ?? 'Връщането не бе успешно.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, alreadyResolved: result.alreadyResolved })
   return true
 }
 
@@ -10110,6 +10193,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleTournamentAcknowledgeBotReturnRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleTournamentCancelRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -10326,6 +10413,25 @@ wsServer.on('connection', (socket, request) => {
       tournamentEconomyStore.markPartnerLeftNoticeDelivered(notice.noticeId, connection.profileId)
     }
 
+    // Durable auto-cancel refund flush (§"OFFLINE USER"/"EXACTLY ONCE" в
+    // допълнението за "Турнирът е анулиран..." известието) — огледално на
+    // pendingPartnerLeftNotices по-горе: ако recipient-ът е бил offline в
+    // момента на committed fill-timeout/scheduled-underfilled auto-cancel,
+    // известието чака тук до точно този login/reconnect. Маркираме delivered
+    // веднага след push-а — same idempotency контракт.
+    const pendingTournamentEconomyNotices = tournamentEconomyStore.getPendingTournamentEconomyNotices(connection.profileId)
+    for (const notice of pendingTournamentEconomyNotices) {
+      sendJsonMessage(socket, {
+        type: 'tournament_economy_notice',
+        eventId: randomUUID(),
+        tournamentId: notice.tournamentId,
+        reason: notice.reason,
+        amount: notice.refundedAmount,
+        occurredAt: new Date().toISOString(),
+      })
+      tournamentEconomyStore.markTournamentEconomyNoticeDelivered(notice.noticeId, connection.profileId)
+    }
+
     const undismissedPartnerInvites = tournamentEconomyStore
       .listUndismissedPendingPartnerInvitesForProfile(connection.profileId)
     for (const invite of undismissedPartnerInvites) {
@@ -10341,6 +10447,23 @@ wsServer.on('connection', (socket, request) => {
         type: 'tournament_match_assigned',
         assignment: tournamentAssignment,
       })
+    } else {
+      // Login/reconnect докато профилът е между кръгове (STATE A/B —
+      // §"НЕ ВРЪЗВАЙ BLOCKING MODAL САМО С ACTIVE ROOM" в допълнението):
+      // tournament_match_assigned по-горе покрива само gameplay/attendance/
+      // countdown (реален runnable match). Тук покриваме случая, когато
+      // профилът все още е 'confirmed'/'finalist' в активен турнир, но
+      // няма runnable match в момента (sibling още играе, ИЛИ next round
+      // room вече е готов) — клиентът получава само tournamentId и сам
+      // resolve-ва точния destination (STATE A/STATE B) чрез
+      // authoritative GET /api/tournaments/:id (myInterRoundWaiting).
+      const activeTournamentId = tournamentCoordinator?.getActiveTournamentIdForProfile(connection.profileId)
+      if (activeTournamentId !== undefined && activeTournamentId !== null) {
+        sendJsonMessage(socket, {
+          type: 'tournament_active_participation',
+          tournamentId: activeTournamentId,
+        })
+      }
     }
   }
 
@@ -12473,8 +12596,27 @@ try {
     economyStore: tournamentEconomyStore,
     intervalMs: localTournamentTestPollIntervalMs,
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
-    notifyEconomyRefunds: (tournamentId, refundedProfiles) => {
-      sendTournamentEconomyRefundNotices(tournamentId, 'fill_expired', refundedProfiles)
+    // §"ONLINE USER"/"OFFLINE USER"/"EXACTLY ONCE" в task spec-а за
+    // auto-cancel известието — durable ред-ът вече е committed вътре в
+    // autoCancelScheduledTournamentAtomically (виж tournament_economy_notice_log).
+    // Тук само доставяме: online connections получават push веднага И се
+    // маркират delivered (за да не се доставят повторно при следващ login);
+    // offline recipients остават delivered_at=NULL до следващия им
+    // login/reconnect (виж flush блока при connection setup).
+    notifyEconomyRefunds: (tournamentId, reason, refundedProfiles) => {
+      for (const { profileId, amount, noticeId } of refundedProfiles) {
+        const sentCount = sendToOpenProfileConnections(profileId, {
+          type: 'tournament_economy_notice',
+          eventId: randomUUID(),
+          tournamentId,
+          reason,
+          amount,
+          occurredAt: new Date().toISOString(),
+        })
+        if (sentCount > 0) {
+          tournamentEconomyStore.markTournamentEconomyNoticeDelivered(noticeId, profileId)
+        }
+      }
     },
   })
   tournamentScheduler.start()
@@ -12516,6 +12658,22 @@ try {
         connection.currentRoomId === roomId &&
         connection.currentSeat === seat
       )
+    },
+    // Project-wide "профилът има поне една отворена автентикирана WS връзка"
+    // (§"PRESENCE SEMANTICS" в task spec-а) — reuse на същия socket-readiness
+    // pattern като /api/players листинга по-долу (Set-building за online
+    // статус), НЕ room/seat-scoped isConnectionAttached по-горе. Multi-tab:
+    // достатъчна е поне ЕДНА отворена връзка за профила.
+    isProfileOnline: (profileId) => {
+      for (const connection of Object.values(serverState.connections)) {
+        if (
+          connection.profileId === profileId &&
+          socketRegistry.get(connection.id)?.readyState === WebSocket.OPEN
+        ) {
+          return true
+        }
+      }
+      return false
     },
     notifyAssignment: (profileId, assignment) => {
       sendTournamentMatchAssignment(profileId, assignment)
