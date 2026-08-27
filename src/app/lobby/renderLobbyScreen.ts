@@ -99,6 +99,7 @@ import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestT
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
+import { renderTournamentBetaAccessModal, attachTournamentBetaAccessModalEventListeners, type TournamentBetaAccessModalState } from './renderTournamentBetaAccessModal'
 
 // Каноничната desktop content ширина за целия сайт — вече ползвана от
 // renderNav() (виж по-долу) и non-topics content wrapper-а (desktop клона на
@@ -647,6 +648,7 @@ export type LobbyScreenState = {
   vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
   levelLockedStakePopup: LevelLockedStakePopupState
+  tournamentBetaAccessModal: TournamentBetaAccessModalState
   lowCoinsModalOpen: boolean
   onlinePlayersCount: number
   signupBonusYellowCoins: number
@@ -1069,6 +1071,8 @@ export type RenderLobbyScreenOptions = {
   onGuestLockedStakeClose: () => void
   onLevelLockedStakeViewProfileClick: () => void
   onLevelLockedStakeClose: () => void
+  onTournamentBetaAccessModalClose: () => void
+  onTournamentBetaAccessModalSubmit: (password: string) => void
   onLoginSubmit: (email: string, password: string) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
   onForgotPasswordSubmit?: (email: string) => void
@@ -11273,6 +11277,7 @@ export function renderLobbyScreen(
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
+      ${renderTournamentBetaAccessModal(state.tournamentBetaAccessModal)}
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -11556,6 +11561,7 @@ export function renderLobbyScreen(
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
+      ${renderTournamentBetaAccessModal(state.tournamentBetaAccessModal)}
       ${renderShopPurchaseConfirmModal(state)}
       ${renderDailyRewardsPopup(state)}
       ${renderPrivateRoomInvitePopup(state)}
@@ -14094,6 +14100,11 @@ export function renderLobbyScreen(
   attachLevelLockedStakePopupEventListeners(root, {
     onViewProfileClick: options.onLevelLockedStakeViewProfileClick,
     onClose: options.onLevelLockedStakeClose,
+  })
+
+  attachTournamentBetaAccessModalEventListeners(root, {
+    onClose: options.onTournamentBetaAccessModalClose,
+    onSubmit: options.onTournamentBetaAccessModalSubmit,
   })
 
   root

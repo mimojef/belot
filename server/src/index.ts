@@ -109,6 +109,7 @@ import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { createTournamentStore } from './db/tournamentStore.js'
 import { createTournamentEconomyStore } from './db/tournamentEconomyStore.js'
+import { createTournamentBetaAccessStore } from './db/tournamentBetaAccessStore.js'
 import { isLocalTournamentTestModeEnabled } from './localTournamentTest/localTournamentTestModeGuard.js'
 import { createLocalTournamentTestService } from './localTournamentTest/localTournamentTestService.js'
 import { handleLocalTournamentTestRequest } from './localTournamentTest/handleLocalTournamentTestRequest.js'
@@ -629,6 +630,7 @@ const friendshipStore = await createFriendshipStore(
 )
 const tournamentStore = await createTournamentStore(databaseBootstrap.databaseFilePath)
 const tournamentEconomyStore = await createTournamentEconomyStore(databaseBootstrap.databaseFilePath)
+const tournamentBetaAccessStore = await createTournamentBetaAccessStore(databaseBootstrap.databaseFilePath)
 // Конструираме я безусловно (евтино — само затваря deps), но всеки заявка
 // към нея минава първо през isLocalTournamentTestRequestAllowed (виж
 // handleLocalTournamentTestRequest.ts) — извън strictly-local режима е
@@ -10055,6 +10057,156 @@ function requireRegisteredHumanSession(
   return { ok: true, profileId: session.profile.profileId }
 }
 
+// ─── Tournaments: beta access gate ─────────────────────────────────────────
+// Server-authoritative password gate за секцията "Турнири" по време на
+// beta период (виж tournamentBetaAccessStore.ts за DB design). Защитава
+// само HUMAN-facing HTTP/WS entry points — вика се explicit от всеки такъв
+// route/handler по-долу (requireTournamentBetaAccessOrRespond за HTTP,
+// hasTournamentBetaAccessForWsCommand за WS). Умишлено НЕ се вика от
+// tournamentCoordinator/tournamentScheduler/settlement/auto-transition
+// пътищата — те работят чисто на DB ниво без profile-authenticated request
+// context, затова automatically са изолирани от този gate без нужда от
+// отделен bypass флаг.
+
+function isTournamentBetaAdminBypassProfile(profileId: string | null): boolean {
+  if (profileId === null) return false
+  return authStore.getAccountRoleForProfile(profileId) === 'admin'
+}
+
+function hasTournamentBetaAccessForProfile(profileId: string | null): boolean {
+  if (isTournamentBetaAdminBypassProfile(profileId)) return true
+  return tournamentBetaAccessStore.hasAccess(profileId)
+}
+
+// За GET-style/optional-auth routes (списък/детайли), извиквани и от
+// anonymous visitors — anonymous виждане на public tournament данни не е
+// blocked от beta gate-а (само действия, изискващи regisтrиран профил, го
+// прилагат чрез requireTournamentBetaAccessOrRespond по-долу). Тук просто
+// връщаме дали ТОЗИ конкретен профил (ако има) в момента има достъп, за
+// клиентска UI логика (viewer state), без сама по себе си да отказва GET.
+
+// Централен reusable helper за всички REQUIRE-auth tournament action routes
+// (join/leave/cancel/create/partner-*/acknowledge/и т.н.) — праща 403 с
+// machine-readable reason='beta_access_required', за да може клиентът да
+// отвори password modal-а вместо generic error text (виж task spec API
+// "Когато API върне beta-access denial, client трябва да може да отвори
+// password modal"). Извиква се СЛЕД auth session resolution (нужен е
+// profileId), но ПРЕДИ каквато и да е tournament action логика.
+function requireTournamentBetaAccessOrRespond(
+  res: ServerResponse,
+  profileId: string | null,
+): boolean {
+  if (hasTournamentBetaAccessForProfile(profileId)) return true
+  sendJsonResponse(res, 403, {
+    ok: false,
+    reason: 'beta_access_required',
+    message: 'Секцията „Турнири" е в тестов период.',
+  })
+  return false
+}
+
+// Rate limit за password submit опити — отделен от
+// TOURNAMENT_ENTRY_ACTION_RATE_LIMIT (join/leave/cancel), по-строг прозорец
+// заради brute-force риска специфично за password guessing.
+const TOURNAMENT_BETA_PASSWORD_RATE_LIMIT_WINDOW_MS = 60_000
+const TOURNAMENT_BETA_PASSWORD_RATE_LIMIT_MAX_PER_WINDOW = 5
+const tournamentBetaPasswordRateLimitByProfileId = new Map<string, { count: number; windowStartedAt: number }>()
+
+function isTournamentBetaPasswordRateLimited(profileId: string, now: number): boolean {
+  const existing = tournamentBetaPasswordRateLimitByProfileId.get(profileId)
+  if (
+    existing === undefined ||
+    now - existing.windowStartedAt >= TOURNAMENT_BETA_PASSWORD_RATE_LIMIT_WINDOW_MS
+  ) {
+    tournamentBetaPasswordRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return false
+  }
+  if (existing.count >= TOURNAMENT_BETA_PASSWORD_RATE_LIMIT_MAX_PER_WINDOW) {
+    return true
+  }
+  existing.count += 1
+  return false
+}
+
+// GET /api/tournaments/beta-access — public safe info (никога hash/version/
+// grants count, виж task spec "НИКОГА не връщай password hash"). enabled=
+// false означава gate-ът изобщо не е активен (hasAccess винаги true в тоя
+// случай); anonymous viewer (без session) получава hasAccess:false, ако
+// gate-ът е enabled.
+//
+// POST /api/tournaments/beta-access — submit парола, изисква registered
+// human session (grant е profile-specific, виж task spec "grant е profile-
+// specific"). При правилна парола записва/обновява grant за profileId.
+async function handleTournamentBetaAccessRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/tournaments/beta-access') return false
+
+  if (req.method === 'GET') {
+    const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+    const session = authStore.getSession(sessionToken)
+    const viewerProfileId = session?.profile.profileId ?? null
+    if (isTournamentBetaAdminBypassProfile(viewerProfileId)) {
+      sendJsonResponse(res, 200, { ok: true, enabled: tournamentBetaAccessStore.getStatus().enabled, hasAccess: true })
+      return true
+    }
+    const info = tournamentBetaAccessStore.getPublicInfo(viewerProfileId)
+    sendJsonResponse(res, 200, { ok: true, enabled: info.enabled, hasAccess: info.hasAccess })
+    return true
+  }
+
+  if (req.method === 'POST') {
+    if (!isAllowedVisitorRequestOrigin(req)) {
+      sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+      return true
+    }
+
+    const authResult = requireRegisteredHumanSession(req)
+    if (!authResult.ok) {
+      sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+      return true
+    }
+    const { profileId } = authResult
+
+    if (isTournamentBetaPasswordRateLimited(profileId, Date.now())) {
+      sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+      return true
+    }
+
+    let body: unknown
+    try {
+      body = await readJsonRequestBody(req)
+    } catch {
+      sendJsonResponse(res, 400, { ok: false, reason: 'invalid_password', message: 'Невалидна заявка.' })
+      return true
+    }
+    if (!isRecord(body) || typeof body.password !== 'string') {
+      sendJsonResponse(res, 400, { ok: false, reason: 'invalid_password', message: 'Невалидна парола за достъп.' })
+      return true
+    }
+
+    const result = tournamentBetaAccessStore.submitPassword(profileId, body.password)
+    if (!result.ok) {
+      const status = result.reason === 'not_enabled' || result.reason === 'no_password_configured' ? 409 : 401
+      const message = result.reason === 'not_enabled'
+        ? 'Секцията вече не изисква парола.'
+        : result.reason === 'no_password_configured'
+          ? 'Достъпът все още не е конфигуриран.'
+          : 'Невалидна парола за достъп.'
+      sendJsonResponse(res, status, { ok: false, reason: result.reason, message })
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
 function getTournamentCreatorPublicProfile(
   creatorProfileId: string,
 ): { profileId: string | null; displayName: string; avatarUrl: string | null } | null {
@@ -10363,6 +10515,10 @@ async function handleTournamentsListRequest(
       viewerProfileId = session?.profile.profileId ?? null
     }
 
+    if (!requireTournamentBetaAccessOrRespond(res, viewerProfileId)) {
+      return true
+    }
+
     const tournaments = mineParam
       ? tournamentStore.listTournaments({ creatorProfileId: viewerProfileId ?? undefined, limit, offset })
       : [
@@ -10401,6 +10557,10 @@ async function handleTournamentsListRequest(
       return true
     }
     const { profileId } = authResult
+
+    if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+      return true
+    }
 
     if (isTournamentCreateRateLimited(profileId, Date.now())) {
       sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
@@ -10577,15 +10737,20 @@ async function handleTournamentDetailRequest(
     return true
   }
 
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const viewerProfileId = session?.profile.profileId ?? null
+
+  if (!requireTournamentBetaAccessOrRespond(res, viewerProfileId)) {
+    return true
+  }
+
   const tournament = tournamentStore.getTournamentById(tournamentId)
   if (tournament === null) {
     sendJsonResponse(res, 404, { ok: false, message: 'Турнирът не е намерен.' })
     return true
   }
 
-  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
-  const session = authStore.getSession(sessionToken)
-  const viewerProfileId = session?.profile.profileId ?? null
   const isCreator = viewerProfileId !== null && viewerProfileId === tournament.creatorProfileId
   const hasPendingInviteAccess = viewerProfileId !== null &&
     tournamentEconomyStore
@@ -10723,6 +10888,9 @@ async function handleTournamentPartnerCandidatesRequest(
     sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
     return true
   }
+  if (!requireTournamentBetaAccessOrRespond(res, authResult.profileId)) {
+    return true
+  }
   const tournamentId = decodeURIComponent(match[1] ?? '')
   const candidates: TournamentPartnerCandidateDto[] = tournamentEconomyStore
     .getPartnerCandidatesForTournament(tournamentId, authResult.profileId)
@@ -10766,6 +10934,9 @@ async function handleTournamentPartnerCandidatesSearchRequest(
   const authResult = requireRegisteredHumanSession(req)
   if (!authResult.ok) {
     sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  if (!requireTournamentBetaAccessOrRespond(res, authResult.profileId)) {
     return true
   }
 
@@ -10816,6 +10987,9 @@ async function handlePendingTournamentPartnerInvitesRequest(
     sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
     return true
   }
+  if (!requireTournamentBetaAccessOrRespond(res, authResult.profileId)) {
+    return true
+  }
   const invites = tournamentEconomyStore
     .listPendingPartnerInvitesForProfile(authResult.profileId)
     .map(buildTournamentPartnerInviteDto)
@@ -10841,6 +11015,9 @@ async function handleTournamentPartnerInviteNotificationRequest(
   const authResult = requireRegisteredHumanSession(req)
   if (!authResult.ok) {
     sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  if (!requireTournamentBetaAccessOrRespond(res, authResult.profileId)) {
     return true
   }
   if (isTournamentEntryActionRateLimited(authResult.profileId, Date.now())) {
@@ -10910,6 +11087,9 @@ async function handleTournamentPartnerInviteCreateRequest(
     sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
     return true
   }
+  if (!requireTournamentBetaAccessOrRespond(res, authResult.profileId)) {
+    return true
+  }
   if (isTournamentEntryActionRateLimited(authResult.profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
     return true
@@ -10975,6 +11155,9 @@ async function handleTournamentPartnerInviteActionRequest(
     sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
     return true
   }
+  if (!requireTournamentBetaAccessOrRespond(res, authResult.profileId)) {
+    return true
+  }
   if (isTournamentEntryActionRateLimited(authResult.profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
     return true
@@ -11031,6 +11214,10 @@ async function handleTournamentJoinRequest(
     return true
   }
   const { profileId } = authResult
+
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
 
   if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
@@ -11135,6 +11322,10 @@ async function handleTournamentLeaveRequest(
     return true
   }
   const { profileId } = authResult
+
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
 
   if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
@@ -11244,6 +11435,10 @@ async function handleTournamentAcknowledgeBotReturnRequest(
   }
   const { profileId } = authResult
 
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
+
   if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
     return true
@@ -11310,6 +11505,10 @@ async function handleTournamentCancelRequest(
     return true
   }
   const { profileId } = authResult
+
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
 
   if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
@@ -14707,6 +14906,14 @@ async function handleHttpRequest(
     return
   }
 
+  // handleTournamentBetaAccessRequest ПРЕДИ handleTournamentsListRequest —
+  // /api/tournaments/beta-access не съвпада с handleTournamentsListRequest-
+  // овия точен '/api/tournaments' pathname check, но explicit подредба тук
+  // пази инварианта stable дори при бъдещ regex refactor надолу по веригата.
+  if (await handleTournamentBetaAccessRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleTournamentsListRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
@@ -15744,6 +15951,9 @@ wsServer.on('connection', (socket, request) => {
 
       if (message.type === 'tournament_semifinal_result_acknowledge') {
         if (connection.profileId === null || tournamentCoordinator === null) {
+          return
+        }
+        if (!hasTournamentBetaAccessForProfile(connection.profileId)) {
           return
         }
         const result = tournamentCoordinator.acknowledgeSemifinalResult({

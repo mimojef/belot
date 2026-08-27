@@ -16,20 +16,13 @@ import { getNextTournamentRoundLabel, getPreviousTournamentRoundType, getTournam
 // (src/app/adminTournaments/) е напълно отделен renderer/route и не се
 // засяга от този флаг.
 //
-// import.meta.env?.PROD === true вместо hardcoded true: production build
-// (`vite build`) е ЕДИНСТВЕНИЯТ контекст, в който import.meta.env.PROD е
-// литерално true (Vite build-time constant, dead-code-eliminate-ва
-// обратния клон) — никой runtime/client-controlled сигнал (query param,
-// browser persistent storage, header) не може да го отключи. Default-ът е "false"
-// (реален UI), не "true" (maintenance), при липсващ/непознат сигнал —
-// нарочно, за да работят коректно и Vite dev server-ът (`npm run dev`,
-// import.meta.env.PROD=false), И server/scripts/check*.ts, изпълнявани
-// directly през tsx/Node, където import.meta.env изобщо не съществува
-// (`?.` предпазва от TypeError; `undefined === true` е false, т.е. safe
-// default към реалния UI, не към maintenance). Ако някога потрябва РЪЧНО
-// да се форсира maintenance notice-ът локално — смени експлицитно на
-// `true` тук.
-const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = import.meta.env?.PROD === true
+// Заменен от tournament beta password gate-а (виж
+// createLobbyFlowController.ts's ensureTournamentBetaAccessOrPromptModal) —
+// той вече е authoritative production access control за секцията, затова
+// този по-стар unconditional PROD placeholder е hardcoded false тук (не
+// изтрит — guard/notice кодът остава за лесно ръчно връщане, ако някога
+// потрябва отделен public maintenance notice независимо от beta gate-а).
+const TOURNAMENTS_PUBLIC_MAINTENANCE_MODE = false
 
 function renderTournamentsMaintenanceNotice(): string {
   return `

@@ -47,6 +47,7 @@ import type { GuestTrialPopupState } from './renderGuestTrialPopup'
 import type { VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import type { LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
+import type { TournamentBetaAccessModalState } from './renderTournamentBetaAccessModal'
 import {
   computeShopResumeConfirmOpen,
   computeShopPurchaseConfirmDispatch,
@@ -710,6 +711,12 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; tournaments: TournamentSummarySnapshot[]; page: number; limit: number; totalCount: number }
     | { ok: false; message: string }
   >
+  onTournamentBetaAccessInfoLoad?: () => Promise<
+    { enabled: boolean; hasAccess: boolean } | null
+  >
+  onTournamentBetaAccessSubmit?: (password: string) => Promise<
+    { ok: true } | { ok: false; message: string }
+  >
   onTopicsLoad?: () => Promise<
     | { ok: true; topics: TopicSnapshot[]; viewerSectionMute: { isMuted: boolean; mutedUntil: string | null; reason: string | null } | null }
     | { ok: false; message: string }
@@ -827,7 +834,7 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onTournamentCreate?: (input: TournamentCreateInput) => Promise<
     | { ok: true; tournament: TournamentSummarySnapshot }
-    | { ok: false; message: string }
+    | { ok: false; message: string; reason?: string }
   >
   onTournamentDetailLoad?: (tournamentId: string) => Promise<
     | { ok: true; tournament: TournamentDetailSnapshot }
@@ -861,7 +868,7 @@ export type CreateLobbyFlowControllerOptions = {
         walletBalance: number
         tournament: TournamentSummarySnapshot
       }
-    | { ok: false; message: string }
+    | { ok: false; message: string; reason?: string }
   >
   onTournamentCancel?: (tournamentId: string) => Promise<
     | {
@@ -872,11 +879,11 @@ export type CreateLobbyFlowControllerOptions = {
         walletBalance: number
         tournament: TournamentSummarySnapshot
       }
-    | { ok: false; message: string }
+    | { ok: false; message: string; reason?: string }
   >
   onTournamentPartnerCandidatesLoad?: (tournamentId: string) => Promise<
     | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
-    | { ok: false; message: string }
+    | { ok: false; message: string; reason?: string }
   >
   // Global partner search (§ "GLOBAL SEARCH AREA") — независим source от
   // onTournamentPartnerCandidatesLoad (friends list): server-side query-based
@@ -888,7 +895,7 @@ export type CreateLobbyFlowControllerOptions = {
     signal: AbortSignal,
   ) => Promise<
     | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
-    | { ok: false; message: string }
+    | { ok: false; message: string; reason?: string }
   >
   onPendingTournamentPartnerInvitesLoad?: () => Promise<
     | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
@@ -943,6 +950,7 @@ export type LobbyFlowController = {
   clearTopicsDirectoryMetadata: () => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
   resetToLobby: () => void
+  openTournamentBetaAccessModal: () => void
   showTournamentDetail: (tournamentId: string) => void
   showTournamentInterRoundPendingResult: (
     tournamentId: string,
@@ -1237,6 +1245,7 @@ type InternalLobbyFlowState = {
   vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
   levelLockedStakePopup: LevelLockedStakePopupState
+  tournamentBetaAccessModal: TournamentBetaAccessModalState
   lowCoinsModalOpen: boolean
   serverRoomSeats: RoomSeatSnapshot[] | null
   serverYourSeat: RoomSeatSnapshot['seat'] | null
@@ -1801,6 +1810,11 @@ function createInitialState(): InternalLobbyFlowState {
       requiredLevel: 1,
       currentLevel: 1,
     },
+    tournamentBetaAccessModal: {
+      isOpen: false,
+      isSubmitting: false,
+      errorText: null,
+    },
     lowCoinsModalOpen: false,
     serverRoomSeats: null,
     serverYourSeat: null,
@@ -2290,6 +2304,18 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/faq': 'faq',
   '/about': 'about',
   '/fair-play': 'fair-play',
+}
+
+// Пренася server-side beta-access reason през createDebouncedPlayerSearch-ови
+// exception-based error path (виж tournamentPartnerSearchRunner) — единствен
+// начин reason да оцелее throw/onResult прехода без да се променя
+// generic-purpose debounce helper-а.
+class TournamentBetaAccessAwareError extends Error {
+  reason: string | undefined
+  constructor(message: string, reason: string | undefined) {
+    super(message)
+    this.reason = reason
+  }
 }
 
 export function createLobbyFlowController(
@@ -3674,6 +3700,7 @@ export function createLobbyFlowController(
       vipPurchaseSuccessPopup: state.vipPurchaseSuccessPopup,
       guestLockedStakePopup: state.guestLockedStakePopup,
       levelLockedStakePopup: state.levelLockedStakePopup,
+      tournamentBetaAccessModal: state.tournamentBetaAccessModal,
       lowCoinsModalOpen: state.lowCoinsModalOpen,
       onlinePlayersCount: options.getOnlinePlayersCount?.() ?? 0,
       signupBonusYellowCoins: options.getSignupBonusYellowCoins?.() ?? 100000,
@@ -4864,6 +4891,12 @@ export function createLobbyFlowController(
       },
       onLevelLockedStakeClose: () => {
         closeLevelLockedStakePopup()
+      },
+      onTournamentBetaAccessModalClose: () => {
+        closeTournamentBetaAccessModal()
+      },
+      onTournamentBetaAccessModalSubmit: (password) => {
+        void submitTournamentBetaAccessPassword(password)
       },
       onLoginSubmit: (email, password) => {
         void submitLogin(email, password)
@@ -7833,6 +7866,17 @@ export function createLobbyFlowController(
   }
 
   async function showTournamentsList(): Promise<void> {
+    // Server-authoritative beta gate check ПРЕДИ каквото и да е зареждане
+    // на tournament content (виж task spec DIRECT NAVIGATION) — важи и за
+    // navbar click, и за direct-URL/refresh route dispatch, тъй като и
+    // двата пътя минават през тази единствена функция (виж case
+    // 'tournaments' в navigateFromPath). При липса на достъп само отваря
+    // password modal-а — currentScreen НЕ се сменя на 'tournaments', за да
+    // не остане locked content зад modal-а.
+    if (!(await ensureTournamentBetaAccessOrPromptModal())) {
+      return
+    }
+
     leaveAdminServerIfActive()
     state.currentScreen = 'tournaments'
     state.tournamentCreatePopupOpen = false
@@ -7930,6 +7974,7 @@ export function createLobbyFlowController(
     state.tournamentCreateBusy = false
 
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentCreateErrorText = result.message
       render()
       return
@@ -8257,6 +8302,7 @@ export function createLobbyFlowController(
     state.tournamentJoinBusy = false
 
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentJoinErrorText = result.message
       render()
       return
@@ -8283,7 +8329,7 @@ export function createLobbyFlowController(
       }
       return options.onTournamentPartnerCandidatesSearch(state.tournamentDetailId, query, signal).then((result) => {
         if (!result.ok) {
-          throw new Error(result.message)
+          throw new TournamentBetaAccessAwareError(result.message, result.reason)
         }
         return result.candidates
       })
@@ -8298,6 +8344,11 @@ export function createLobbyFlowController(
       state.tournamentPartnerSearchLoading = false
       if (result.ok) {
         state.tournamentPartnerSearchResults = result.value
+      } else if (
+        result.error instanceof TournamentBetaAccessAwareError &&
+        handleTournamentBetaAccessDenial(result.error.reason)
+      ) {
+        return
       }
       patchTournamentPartnerSearchSection()
     },
@@ -8356,6 +8407,7 @@ export function createLobbyFlowController(
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
     state.tournamentPartnerPickerLoading = false
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentPartnerPickerErrorText = result.message
       render()
       return
@@ -8390,6 +8442,7 @@ export function createLobbyFlowController(
     if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) return
     state.tournamentPartnerInviteBusy = false
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -8414,6 +8467,7 @@ export function createLobbyFlowController(
     const result = await options.onTournamentPartnerInviteRespond(tournamentId, inviteId, action)
     state.tournamentPartnerInviteBusy = false
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -8466,6 +8520,7 @@ export function createLobbyFlowController(
     state.tournamentLeaveBusy = false
 
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentLeaveErrorText = result.message
       render()
       return
@@ -8522,6 +8577,7 @@ export function createLobbyFlowController(
     state.tournamentCancelBusy = false
 
     if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
       state.tournamentCancelErrorText = result.message
       render()
       return
@@ -11732,6 +11788,78 @@ export function createLobbyFlowController(
   function closeLevelLockedStakePopup(): void {
     state.levelLockedStakePopup = { ...state.levelLockedStakePopup, isOpen: false }
     render()
+  }
+
+  function openTournamentBetaAccessModal(): void {
+    state.tournamentBetaAccessModal = { isOpen: true, isSubmitting: false, errorText: null }
+    render()
+  }
+
+  function closeTournamentBetaAccessModal(): void {
+    state.tournamentBetaAccessModal = { ...state.tournamentBetaAccessModal, isOpen: false }
+    render()
+    // Cancel/X връща потребителя към нормалната lobby/home секция (виж task
+    // spec DIRECT NAVIGATION) — не оставяме currentScreen='tournaments' без
+    // достъп, за да не се показва празен/заключен tournament content зад
+    // затворения modal.
+    if (state.currentScreen === 'tournaments') {
+      switchToLobby()
+      render()
+    }
+  }
+
+  async function submitTournamentBetaAccessPassword(password: string): Promise<void> {
+    if (!options.onTournamentBetaAccessSubmit || state.tournamentBetaAccessModal.isSubmitting) return
+    state.tournamentBetaAccessModal = { ...state.tournamentBetaAccessModal, isSubmitting: true, errorText: null }
+    render()
+    const result = await options.onTournamentBetaAccessSubmit(password)
+    if (!result.ok) {
+      state.tournamentBetaAccessModal = { isOpen: true, isSubmitting: false, errorText: result.message }
+      render()
+      return
+    }
+    state.tournamentBetaAccessModal = { isOpen: false, isSubmitting: false, errorText: null }
+    render()
+    void showTournamentsList()
+  }
+
+  // Reusable detection за server-side beta-access denial (§ TOURNAMENT
+  // BETA GATE task spec "Когато API върне beta-access denial, client
+  // трябва да може да отвори password modal") — извиква се от ВСЯКА
+  // tournament action submit функция (join/leave/cancel/create/partner-*)
+  // при !result.ok, преди generic error text да бъде показан. Отваря
+  // modal-а и връща true, ако caller-ът трябва да third спре по-нататъшна
+  // generic-error обработка на резултата; false за нормален (non-beta)
+  // error path.
+  function handleTournamentBetaAccessDenial(reason: string | undefined): boolean {
+    if (reason !== 'beta_access_required') return false
+    openTournamentBetaAccessModal()
+    return true
+  }
+
+  // Единствена authoritative проверка преди каквото и да е зареждане на
+  // tournament content — вика се от showTournamentsList() (nav click И
+  // direct-URL/refresh route dispatch минават през нея, виж task spec
+  // DIRECT NAVIGATION "първо провери beta access; ако няма достъп → modal;
+  // не показвай tournament content преди server authorization"). Връща
+  // true само ако секцията реално може да се зареди.
+  async function ensureTournamentBetaAccessOrPromptModal(): Promise<boolean> {
+    if (!options.onTournamentBetaAccessInfoLoad) return true
+    const info = await options.onTournamentBetaAccessInfoLoad()
+    if (info === null) {
+      // Network/server грешка при самата beta-access проверка — fail-safe
+      // към "покажи modal" вместо тихо да пропуснем gate-а (client-only
+      // fail-open би бил точно "не е server-authoritative" пропускът,
+      // предупреден в task spec SECURITY "enabled gate + DB/security
+      // failure → fail closed").
+      openTournamentBetaAccessModal()
+      return false
+    }
+    if (!info.enabled || info.hasAccess) {
+      return true
+    }
+    openTournamentBetaAccessModal()
+    return false
   }
 
   function handleGuestTrialPlayClick(): void {
@@ -15202,6 +15330,7 @@ export function createLobbyFlowController(
     clearTopicsDirectoryMetadata,
     startMatchmaking,
     resetToLobby,
+    openTournamentBetaAccessModal,
     showTournamentDetail,
     showTournamentInterRoundPendingResult,
     openAuthModal,

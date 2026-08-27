@@ -4641,11 +4641,49 @@ async function loadTournaments(
   }
 }
 
+async function loadTournamentBetaAccessInfo(): Promise<
+  { enabled: boolean; hasAccess: boolean } | null
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/beta-access`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; enabled?: boolean; hasAccess?: boolean }
+    if (!response.ok || !data.ok || typeof data.enabled !== 'boolean' || typeof data.hasAccess !== 'boolean') {
+      return null
+    }
+    return { enabled: data.enabled, hasAccess: data.hasAccess }
+  } catch {
+    return null
+  }
+}
+
+async function submitTournamentBetaAccessPasswordRequest(
+  password: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/beta-access`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Невалидна парола за достъп.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function createTournamentRequest(
   input: TournamentCreateInput,
 ): Promise<
   | { ok: true; tournament: TournamentSummarySnapshot }
-  | { ok: false; message: string }
+  | { ok: false; message: string; reason?: string }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments`, {
@@ -4654,9 +4692,9 @@ async function createTournamentRequest(
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input),
     })
-    const data = (await response.json()) as { ok: boolean; message?: string; tournament?: TournamentSummarySnapshot }
+    const data = (await response.json()) as { ok: boolean; message?: string; reason?: string; tournament?: TournamentSummarySnapshot }
     if (!response.ok || !data.ok || !data.tournament) {
-      return { ok: false, message: data.message ?? 'Турнирът не беше създаден.' }
+      return { ok: false, message: data.message ?? 'Турнирът не беше създаден.', reason: data.reason }
     }
     return { ok: true, tournament: data.tournament }
   } catch {
@@ -4774,7 +4812,7 @@ async function leaveTournamentRequest(
   tournamentId: string,
 ): Promise<
   | { ok: true; alreadyRefunded: boolean; refundedAmount: number; walletBalance: number; tournament: TournamentSummarySnapshot }
-  | { ok: false; message: string }
+  | { ok: false; message: string; reason?: string }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/leave`, {
@@ -4791,7 +4829,11 @@ async function leaveTournamentRequest(
         }
       | TournamentEntryActionErrorResponse
     if (!response.ok || !data.ok) {
-      return { ok: false, message: (data as TournamentEntryActionErrorResponse).message ?? 'Отказването не бе успешно.' }
+      return {
+        ok: false,
+        message: (data as TournamentEntryActionErrorResponse).message ?? 'Отказването не бе успешно.',
+        reason: (data as TournamentEntryActionErrorResponse).reason,
+      }
     }
     if (currentAuthSession !== null) {
       currentAuthSession = {
@@ -4823,7 +4865,7 @@ async function cancelTournamentRequest(
       walletBalance: number
       tournament: TournamentSummarySnapshot
     }
-  | { ok: false; message: string }
+  | { ok: false; message: string; reason?: string }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/cancel`, {
@@ -4841,7 +4883,11 @@ async function cancelTournamentRequest(
         }
       | TournamentEntryActionErrorResponse
     if (!response.ok || !data.ok) {
-      return { ok: false, message: (data as TournamentEntryActionErrorResponse).message ?? 'Отмяната не бе успешна.' }
+      return {
+        ok: false,
+        message: (data as TournamentEntryActionErrorResponse).message ?? 'Отмяната не бе успешна.',
+        reason: (data as TournamentEntryActionErrorResponse).reason,
+      }
     }
     if (currentAuthSession !== null) {
       currentAuthSession = {
@@ -4878,16 +4924,16 @@ async function loadTournamentPartnerCandidates(
   tournamentId: string,
 ): Promise<
   | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
-  | { ok: false; message: string }
+  | { ok: false; message: string; reason?: string }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/partner-candidates`, {
       method: 'GET',
       credentials: 'include',
     })
-    const data = (await response.json()) as { ok: boolean; message?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
+    const data = (await response.json()) as { ok: boolean; message?: string; reason?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
     if (!response.ok || !data.ok || !Array.isArray(data.candidates)) {
-      return { ok: false, message: data.message ?? 'Приятелите не бяха заредени.' }
+      return { ok: false, message: data.message ?? 'Приятелите не бяха заредени.', reason: data.reason }
     }
     return { ok: true, candidates: data.candidates }
   } catch {
@@ -4901,7 +4947,7 @@ async function searchTournamentPartnerCandidates(
   signal: AbortSignal,
 ): Promise<
   | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
-  | { ok: false; message: string }
+  | { ok: false; message: string; reason?: string }
 > {
   try {
     const response = await fetch(
@@ -4912,9 +4958,9 @@ async function searchTournamentPartnerCandidates(
         signal,
       },
     )
-    const data = (await response.json()) as { ok: boolean; message?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
+    const data = (await response.json()) as { ok: boolean; message?: string; reason?: string; candidates?: TournamentPartnerCandidateSnapshot[] }
     if (!response.ok || !data.ok || !Array.isArray(data.candidates)) {
-      return { ok: false, message: data.message ?? 'Търсенето не беше успешно.' }
+      return { ok: false, message: data.message ?? 'Търсенето не беше успешно.', reason: data.reason }
     }
     return { ok: true, candidates: data.candidates }
   } catch (error) {
@@ -4927,16 +4973,16 @@ async function searchTournamentPartnerCandidates(
 
 async function loadPendingTournamentPartnerInvites(): Promise<
   | { ok: true; invites: TournamentPartnerInviteSnapshot[] }
-  | { ok: false; message: string }
+  | { ok: false; message: string; reason?: string }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments/partner-invites/pending`, {
       method: 'GET',
       credentials: 'include',
     })
-    const data = (await response.json()) as { ok: boolean; message?: string; invites?: TournamentPartnerInviteSnapshot[] }
+    const data = (await response.json()) as { ok: boolean; message?: string; reason?: string; invites?: TournamentPartnerInviteSnapshot[] }
     if (!response.ok || !data.ok || !Array.isArray(data.invites)) {
-      return { ok: false, message: data.message ?? 'Поканите не бяха заредени.' }
+      return { ok: false, message: data.message ?? 'Поканите не бяха заредени.', reason: data.reason }
     }
     return { ok: true, invites: data.invites }
   } catch {
@@ -5309,6 +5355,8 @@ lobby = createLobbyFlowController({
     | { ok: false; message: string; forbidden?: boolean }
   >,
   onTournamentsLoad: (params) => loadTournaments(params),
+  onTournamentBetaAccessInfoLoad: () => loadTournamentBetaAccessInfo(),
+  onTournamentBetaAccessSubmit: (password) => submitTournamentBetaAccessPasswordRequest(password),
   onTopicsLoad: () => loadTopics(),
   onTopicMarkSeen: (topicId) => markTopicSeen(topicId),
   onTopicThreadMarkSeen: (topicId, rootMessageId) => markTopicThreadSeen(topicId, rootMessageId),
@@ -5639,7 +5687,14 @@ async function resolveAndRouteTournamentReturn(
       // остава видим и requirement-ът legitimately остава true (виж
       // ACKNOWLEDGE_BOT_RETURN_FAILURE_MESSAGES в index.ts).
       const ack = await acknowledgeTournamentBotReturn(tournamentId)
-      if (!ack.ok) return
+      if (!ack.ok) {
+        if (ack.reason === 'beta_access_required') {
+          currentTournamentReclaimTournamentId = null
+          tournamentReclaimModal.hide()
+          lobby.openTournamentBetaAccessModal()
+        }
+        return
+      }
       currentTournamentReclaimTournamentId = null
       tournamentReclaimModal.hide()
       lobby.navigateToTournamentDetail(destination.tournamentId)
@@ -5668,14 +5723,14 @@ async function resolveAndRouteTournamentReturn(
 // (двоен click връща alreadyResolved:true, не грешка).
 async function acknowledgeTournamentBotReturn(
   tournamentId: string,
-): Promise<{ ok: true } | { ok: false }> {
+): Promise<{ ok: true } | { ok: false; reason?: string }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/acknowledge-bot-return`, {
       method: 'POST',
       credentials: 'include',
     })
-    const data = (await response.json()) as { ok: boolean }
-    return response.ok && data.ok ? { ok: true } : { ok: false }
+    const data = (await response.json()) as { ok: boolean; reason?: string }
+    return response.ok && data.ok ? { ok: true } : { ok: false, reason: data.reason }
   } catch {
     return { ok: false }
   }
