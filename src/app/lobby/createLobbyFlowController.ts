@@ -4067,7 +4067,15 @@ export function createLobbyFlowController(
         state.profilePopupProfile = null
         state.profilePopupCanEdit = true
         state.profilePopupOpen = true
-        render()
+        // Profile popup живее на document.body (извън root.innerHTML, виж
+        // syncProfilePopup/renderPopupOnly) — общ render() минава през
+        // renderLobbyScreen()'s skip-if-unchanged guard, а profilePopupOpen/
+        // profilePopupProfile не участват в nextRootHtml string-а, значи
+        // guard-ът рано връщаше преди да стигне до syncProfilePopup() —
+        // Lobby avatar/"ПРОФИЛ" click изглеждаше все едно "не прави нищо".
+        // Огледално на openProtectedProfileById's isOwn клон (Players card
+        // click на собствения профил, единственият работещ path досега).
+        renderPopupOnly()
         void fetchOwnLikesCount()
       },
       onProfileClose: () => {
