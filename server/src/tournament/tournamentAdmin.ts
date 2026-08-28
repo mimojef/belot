@@ -319,6 +319,40 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
     WHERE tournament_id = ? AND entry_type = ?;
   `)
 
+  // Net-per-profile entry economy за integrity анализ — огледално на
+  // selectActiveEntriesWithLatestDebitLedgerStatement в tournamentEconomyStore.ts
+  // (settlement fix за debit→refund→re-entry, commit 8d537cf). Global
+  // ledgerCountSumStatement('entry_fee_debit') брои ВСИЧКИ исторически debit
+  // редове — след валиден debit→refund→re-entry, gross count/sum естествено
+  // надвишава current paid participation, което invalid_entry_debit_count/
+  // invalid_entry_debit_sum по-долу погрешно flag-ваше като integrity грешка.
+  // Тук вместо това join-ваме directly paid tournament_entries (confirmed/
+  // finalist/champion/eliminated) към ПОСЛЕДНИЯ entry_fee_debit ред per
+  // profile — refund-нат-без-re-entry профил вече не е paid entry (изключен
+  // от JOIN-а чрез самия WHERE te.status IN (...) филтър), а re-entered
+  // профил коректно взима най-новия си debit, не по-стария refund-нат.
+  // COUNT(tel.ledger_id) — НЕ COUNT(*) — е задължително тук: с LEFT JOIN,
+  // COUNT(*) би броил всеки te ред дори когато tel е NULL (профил без нито
+  // един entry_fee_debit ledger запис изобщо), скривайки реална missing-debit
+  // корупция зад привидно вярна бройка. COUNT(tel.ledger_id) брои само
+  // редовете, за които действително е намерен debit ledger запис.
+  const netPaidEntryDebitsStatement = database.prepare(`
+    SELECT COUNT(tel.ledger_id) AS count, COALESCE(SUM(tel.amount), 0) AS sum
+    FROM tournament_entries te
+    LEFT JOIN tournament_economy_ledger tel
+      ON tel.ledger_id = (
+        SELECT latest_tel.ledger_id
+        FROM tournament_economy_ledger latest_tel
+        WHERE latest_tel.tournament_id = te.tournament_id
+          AND latest_tel.profile_id = te.profile_id
+          AND latest_tel.entry_type = 'entry_fee_debit'
+        ORDER BY latest_tel.created_at DESC, latest_tel.ledger_id DESC
+        LIMIT 1
+      )
+    WHERE te.tournament_id = ?
+      AND te.status IN ('confirmed', 'finalist', 'champion', 'eliminated');
+  `)
+
   const countEventsStatement = database.prepare(`
     SELECT COUNT(*) AS count
     FROM tournament_events
@@ -457,11 +491,11 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       }
     }
 
-    const entryDebits = ledgerCountSumStatement.get(tournamentId, 'entry_fee_debit') as { count: number; sum: number }
-    if (paidParticipantEntries.length > 0 && entryDebits.count !== paidParticipantEntries.length) {
+    const netEntryDebits = netPaidEntryDebitsStatement.get(tournamentId) as { count: number; sum: number }
+    if (paidParticipantEntries.length > 0 && netEntryDebits.count !== paidParticipantEntries.length) {
       addIssue(issues, 'invalid_entry_debit_count', 'error', 'Entry debit ledger count does not match participant entries.', false)
     }
-    if (entryDebits.count > 0 && tournament.status !== 'open' && tournament.total_entry_amount !== null && entryDebits.sum !== tournament.total_entry_amount) {
+    if (netEntryDebits.count > 0 && tournament.status !== 'open' && tournament.total_entry_amount !== null && netEntryDebits.sum !== tournament.total_entry_amount) {
       addIssue(issues, 'invalid_entry_debit_sum', 'error', 'Entry debit ledger sum does not match financial snapshot.', false)
     }
 
@@ -619,11 +653,17 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
         addIssue(issues, 'invalid_fill_expiry', 'error', 'fill_expires_at is not after created_at.', false)
       }
       if (tournament.status === 'auto_cancelled' && tournament.cancel_reason === 'fill_mode_expired') {
+        // Историческа пълнота на refund-ите при cancel (различна семантика от
+        // netEntryDebits по-горе, който е за CURRENT paid participation на
+        // finished/active турнири) — тук нарочно е GROSS всички исторически
+        // debit/refund редове, защото auto_cancel трябва да refund-не буквално
+        // всеки debit, който някога е бил направен за този турнир.
+        const fillTimeoutDebit = ledgerCountSumStatement.get(tournamentId, 'entry_fee_debit') as { count: number; sum: number }
         const fillTimeoutRefund = ledgerCountSumStatement.get(tournamentId, 'entry_fee_refund') as { count: number; sum: number }
         if (paidParticipantEntries.some((entry) => entry.status === 'confirmed')) {
           addIssue(issues, 'incomplete_fill_timeout_refunds', 'error', 'Fill-timeout cancelled tournament still has confirmed (unrefunded) entries.', false)
         }
-        if (entryDebits.count > 0 && entryDebits.count !== fillTimeoutRefund.count) {
+        if (fillTimeoutDebit.count > 0 && fillTimeoutDebit.count !== fillTimeoutRefund.count) {
           addIssue(issues, 'incomplete_fill_timeout_refunds', 'error', 'Fill-timeout cancelled tournament has fewer refunds than debits.', false)
         }
         if (systemFee.count > 0) {
