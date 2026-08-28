@@ -2968,7 +2968,13 @@ async function loadAdminCpuIncidentDetail(incidentId: number): Promise<
     if (response.status === 404) {
       return { ok: false, message: 'Инцидентът не беше намерен.' }
     }
-    const data = (await response.json()) as { ok?: boolean; message?: string; summary?: unknown; timeline?: unknown }
+    const data = (await response.json()) as {
+      ok?: boolean
+      message?: string
+      summary?: unknown
+      timeline?: unknown
+      spikeSamples?: unknown
+    }
     if (!response.ok || data.ok !== true || !data.summary || !Array.isArray(data.timeline)) {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на детайлите.' }
     }
@@ -2977,6 +2983,7 @@ async function loadAdminCpuIncidentDetail(incidentId: number): Promise<
       detail: {
         summary: data.summary as CpuIncidentDetail['summary'],
         timeline: data.timeline as CpuIncidentDetail['timeline'],
+        spikeSamples: Array.isArray(data.spikeSamples) ? (data.spikeSamples as CpuIncidentDetail['spikeSamples']) : [],
       },
     }
   } catch {

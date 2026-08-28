@@ -54,6 +54,12 @@ export function createMonitoringSampler(
   let prevWorkerCpuUsageByWorkerId: Map<string, NodeJS.CpuUsage> | null = null
   let prevWorkerCpuSampleAtMs: number | null = null
   let lastGameWorkerCpuNowPercent: number | null = null
+  // Timestamp на момента, в който lastGameWorkerCpuNowPercent беше реално
+  // ПРЕИЗЧИСЛЕН (не просто на последния cpuUsage() poll — първият poll след
+  // warm-up/unavailable-reset не произвежда нов percent, само seed-ва delta
+  // baseline-а). Consumers ползват това за age/freshness (виж final fix pass
+  // брифа §9).
+  let lastGameWorkerCpuNowPercentAtMs: number | null = null
   let workerCpuIntervalId: ReturnType<typeof globalThis.setInterval> | null = null
   let isSamplingWorkerCpu = false
 
@@ -105,6 +111,7 @@ export function createMonitoringSampler(
         prevWorkerCpuUsageByWorkerId = null
         prevWorkerCpuSampleAtMs = null
         lastGameWorkerCpuNowPercent = null
+        lastGameWorkerCpuNowPercentAtMs = null
         return
       }
 
@@ -121,6 +128,7 @@ export function createMonitoringSampler(
             totalDeltaUs += Math.max(0, userDelta) + Math.max(0, sysDelta)
           }
           lastGameWorkerCpuNowPercent = Math.max(0, (totalDeltaUs / (elapsedMs * 1000)) * 100)
+          lastGameWorkerCpuNowPercentAtMs = nowMs
         }
       }
 
@@ -133,6 +141,7 @@ export function createMonitoringSampler(
     } catch {
       // Best-effort — never let worker CPU sampling affect sampler health.
       lastGameWorkerCpuNowPercent = null
+      lastGameWorkerCpuNowPercentAtMs = null
     } finally {
       isSamplingWorkerCpu = false
     }
@@ -197,6 +206,7 @@ export function createMonitoringSampler(
 
         processCpuNowPercent: nodeCpuNowPercent,
         gameWorkerCpuNowPercent,
+        gameWorkerCpuSampledAtMs: lastGameWorkerCpuNowPercentAtMs,
         nonGameWorkerProcessCpuNowPercent,
 
         eventLoopUtilization: eventLoopHealth.utilization,
@@ -280,6 +290,7 @@ function buildWarmingSnapshot(
     nodeCpuNowPercent: null,
     processCpuNowPercent: null,
     gameWorkerCpuNowPercent: null,
+    gameWorkerCpuSampledAtMs: null,
     nonGameWorkerProcessCpuNowPercent: null,
     eventLoopUtilization: null,
     eventLoopDelayP50Ms: null,
@@ -320,6 +331,7 @@ function buildWarmingSnapshotSafe(
       nodeCpuNowPercent: null,
       processCpuNowPercent: null,
       gameWorkerCpuNowPercent: null,
+      gameWorkerCpuSampledAtMs: null,
       nonGameWorkerProcessCpuNowPercent: null,
       eventLoopUtilization: null,
       eventLoopDelayP50Ms: null,

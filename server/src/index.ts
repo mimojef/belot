@@ -326,13 +326,15 @@ import {
   type BucketAccumulator,
   type CpuIncidentDetector,
 } from './monitoring/cpuIncidentDetector.js'
-import { CPU_INCIDENT_SAMPLING } from './monitoring/cpuIncidentTypes.js'
+import { CPU_INCIDENT_SAMPLING, CPU_INCIDENT_THRESHOLDS, type SpikeContext } from './monitoring/cpuIncidentTypes.js'
 import {
   createCpuIncidentStore,
   getDefaultSummaryRetentionCutoffMs,
   getDefaultTimelineRetentionCutoffMs,
   type CpuIncidentStore,
 } from './monitoring/cpuIncidentStore.js'
+import { createBackgroundJobMetrics, type BackgroundJobMetrics } from './monitoring/backgroundJobMetrics.js'
+import { createGcMetrics, type GcMetrics } from './monitoring/gcMetrics.js'
 import { setSendJsonMessageMonitoringHook } from './core/sendJsonMessage.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
@@ -495,6 +497,10 @@ const eventLoopMonitor = createEventLoopMonitor()
 const cpuForensicRingBuffer: ForensicRingBuffer = createForensicRingBuffer()
 const cpuBucketAccumulator: BucketAccumulator = createBucketAccumulator()
 const cpuIncidentDetector: CpuIncidentDetector = createCpuIncidentDetector()
+// Diagnostic fix (виж forensic audit) — bounded background job timing и GC
+// forensic metrics, четени само в extreme-spike snapshot-а по-долу.
+const backgroundJobMetrics: BackgroundJobMetrics = createBackgroundJobMetrics()
+const gcMetrics: GcMetrics = createGcMetrics()
 let cpuIncidentStore: CpuIncidentStore | null = null
 let cpuForensicBucketIntervalId: ReturnType<typeof setInterval> | null = null
 let cpuForensicSampleIntervalId: ReturnType<typeof setInterval> | null = null
@@ -907,6 +913,15 @@ function runLobbyChatCrossInstancePoll(): void {
     return
   }
 
+  const tickStartedAtMs = performance.now()
+  try {
+    runLobbyChatCrossInstancePollUnsafe()
+  } finally {
+    backgroundJobMetrics.record('lobbyChatPoll', performance.now() - tickStartedAtMs)
+  }
+}
+
+function runLobbyChatCrossInstancePollUnsafe(): void {
   const now = Date.now()
   cleanupLobbyChatRateLimitState(now)
 
@@ -1950,6 +1965,15 @@ function runTopicMessagesCrossInstancePoll(): void {
     return
   }
 
+  const tickStartedAtMs = performance.now()
+  try {
+    runTopicMessagesCrossInstancePollUnsafe()
+  } finally {
+    backgroundJobMetrics.record('topicPoll', performance.now() - tickStartedAtMs)
+  }
+}
+
+function runTopicMessagesCrossInstancePollUnsafe(): void {
   const now = Date.now()
   cleanupTopicMessageRateLimitState(now)
 
@@ -18392,7 +18416,7 @@ const matchmakingTickInterval = setInterval(() => {
     return
   }
 
-  processMatchmaking()
+  backgroundJobMetrics.recordSync('matchmakingTick', processMatchmaking)
 }, MATCHMAKING_TICK_MS)
 
 const gameRuntimeTickInterval = setInterval(() => {
@@ -18400,11 +18424,13 @@ const gameRuntimeTickInterval = setInterval(() => {
     return
   }
 
-  void tickRoomGameRuntimes().catch((error) => {
-    const safeErrorMessage =
-      error instanceof Error ? error.message : String(error)
-    console.error('[game-worker-tick] Tick loop failed.', safeErrorMessage)
-  })
+  void backgroundJobMetrics
+    .recordAsync('gameRuntimeTick', tickRoomGameRuntimes)
+    .catch((error) => {
+      const safeErrorMessage =
+        error instanceof Error ? error.message : String(error)
+      console.error('[game-worker-tick] Tick loop failed.', safeErrorMessage)
+    })
 }, GAME_RUNTIME_TICK_MS)
 
 // Само в strictly local tournament test mode (виж localTournamentTestModeGuard.ts) —
@@ -18441,6 +18467,7 @@ try {
         }
       }
     },
+    onTickTiming: (durationMs) => backgroundJobMetrics.record('tournamentSchedulerTick', durationMs),
   })
   tournamentScheduler.start()
   console.log('[tournament-scheduler] Scheduler started')
@@ -18524,6 +18551,7 @@ try {
     onMatchResult: () => {
       activityCounters.incrementTournament('tournamentMatchResult')
     },
+    onTickTiming: (durationMs) => backgroundJobMetrics.record('tournamentCoordinatorTick', durationMs),
   })
   tournamentCoordinator.start()
   console.log('[tournament-coordinator] Coordinator started')
@@ -18564,11 +18592,15 @@ try {
 
   monitoringHistoryIntervalId = setInterval(() => {
     if (monitoringSampler === null || monitoringHistoryStore === null) return
-    monitoringHistoryStore.record(monitoringSampler.getSnapshot())
+    backgroundJobMetrics.recordSync('monitoringHistoryPersist', () => {
+      monitoringHistoryStore?.record(monitoringSampler!.getSnapshot())
+    })
   }, 60_000)
 
   monitoringHistoryPurgeIntervalId = setInterval(() => {
-    monitoringHistoryStore?.purgeOlderThan(getDefaultRetentionCutoffMs())
+    backgroundJobMetrics.recordSync('monitoringHistoryPurge', () => {
+      monitoringHistoryStore?.purgeOlderThan(getDefaultRetentionCutoffMs())
+    })
   }, 60 * 60 * 1000)
 
   console.log('[monitoring] History recording started (60s interval, 30d retention)')
@@ -18593,10 +18625,64 @@ try {
   cpuForensicSampleIntervalId = setInterval(() => {
     if (monitoringSampler === null) return
     const snap = monitoringSampler.getSnapshot()
+
+    // TEMPORAL ALIGNMENT (виж final fix pass брифа §5) — completed
+    // one-second forensic snapshot-и се вземат ВИНАГИ, на всеки 1s tick,
+    // независимо дали текущият CPU sample е spike или не. Това е
+    // единственият начин двата dual-window accumulator-а (activity,
+    // backgroundJobMetrics, gcMetrics) да останат coherent — ако вземахме
+    // snapshotOneSecondAndReset() само when CPU>=threshold, събитията от
+    // "тихите" секунди между два spike-а щяха да се натрупат в
+    // oneSecond прозореца и погрешно да се припишат на следващия spike.
+    // Извикват се непосредствено СЛЕД четенето на CPU snapshot-а — най-
+    // близкото практически достижимо подравняване в рамките на Node
+    // event-loop timer ordering (виж SpikeContext коментара в
+    // cpuIncidentTypes.ts за пълната temporal alignment семантика и
+    // документираната максимална skew).
+    const oneSecondActivity = activityCounters.snapshotOneSecondAndReset()
+    const oneSecondBackgroundJobs = backgroundJobMetrics.snapshotOneSecondAndReset()
+    const oneSecondGc = gcMetrics.snapshotOneSecondAndReset()
+
     if (snap.processCpuNowPercent === null) return
 
+    // Diagnostic fix (виж forensic audit §1) — само при EXTREME SPIKE прага
+    // снемаме пълния forensic context (online/active matches/ws са O(n) —
+    // затова НЕ се смятат на всяка секунда, само когато spike-ът реално е
+    // детектиран). activity/backgroundJobs/gc обаче ВИНАГИ се вземат от
+    // completed one-second snapshot-а по-горе — reset-ват се на всеки tick,
+    // независимо дали spike има или не, за да пазим dual-window инварианта.
+    const context: SpikeContext | null =
+      snap.processCpuNowPercent >= CPU_INCIDENT_THRESHOLDS.extremeSpikePercent
+        ? {
+            serverCpuPercent: snap.serverCpuNowPercent,
+            gameWorkerCpuPercent: snap.gameWorkerCpuNowPercent,
+            nonGameWorkerProcessCpuPercent: snap.nonGameWorkerProcessCpuNowPercent,
+            // Worker CPU staleness (виж final fix pass брифа §9) — age спрямо
+            // ТОЗИ spike sample-ов timestamp, не спрямо wall-clock "сега".
+            gameWorkerCpuSampleAgeMs:
+              snap.gameWorkerCpuSampledAtMs !== null
+                ? Math.max(0, snap.sampledAtMs - snap.gameWorkerCpuSampledAtMs)
+                : null,
+            nonGameWorkerProcessCpuSampleAgeMs:
+              snap.gameWorkerCpuSampledAtMs !== null
+                ? Math.max(0, snap.sampledAtMs - snap.gameWorkerCpuSampledAtMs)
+                : null,
+            eventLoopUtilization: snap.eventLoopUtilization,
+            eventLoopDelayP99Ms: snap.eventLoopDelayP99Ms,
+            rssMb: snap.processRssMb,
+            heapUsedMb: snap.processHeapUsedMb,
+            onlinePlayers: countUniqueOnlineRealPlayers(serverState.connections),
+            activeMatches: Object.keys(serverState.rooms).length,
+            wsConnections: countOpenWebSockets(socketRegistry),
+            matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
+            activity: oneSecondActivity,
+            backgroundJobs: oneSecondBackgroundJobs,
+            gc: oneSecondGc,
+          }
+        : null
+
     cpuIncidentDetector.observeCpuSample(
-      { sampledAtMs: snap.sampledAtMs, processCpuPercent: snap.processCpuNowPercent },
+      { sampledAtMs: snap.sampledAtMs, processCpuPercent: snap.processCpuNowPercent, context },
       cpuForensicRingBuffer.toArray(),
     )
 
@@ -18621,7 +18707,9 @@ try {
       activeMatches: Object.keys(serverState.rooms).length,
       wsConnections: countOpenWebSockets(socketRegistry),
       matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
-      activity: activityCounters.snapshotAndReset(),
+      activity: activityCounters.snapshotTenSecondAndReset(),
+      backgroundJobs: backgroundJobMetrics.snapshotTenSecondAndReset(),
+      gc: gcMetrics.snapshotTenSecondAndReset(),
     })
 
     cpuForensicRingBuffer.push(bucket)
@@ -18807,6 +18895,7 @@ function clearMutationTimersForShutdown(): void {
   }
 
   eventLoopMonitor.stop()
+  gcMetrics.stop()
 }
 
 function closeActiveRoomSnapshotStore(): boolean {

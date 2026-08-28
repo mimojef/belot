@@ -186,6 +186,65 @@ export type CpuIncidentActivityRates = {
   httpPerMin: number
 }
 
+// Diagnostic fix — bounded, fixed-cardinality background job/GC forensic
+// metrics (огледални на server/src/monitoring/backgroundJobMetrics.ts и
+// gcMetrics.ts). null поле означава "не е измерено", НЕ "нула събития" —
+// UI трябва да показва "—" за null, "0" само за реално измерена нула.
+export type BackgroundJobName =
+  | 'matchmakingTick'
+  | 'gameRuntimeTick'
+  | 'tournamentCoordinatorTick'
+  | 'tournamentSchedulerTick'
+  | 'topicPoll'
+  | 'lobbyChatPoll'
+  | 'monitoringHistoryPersist'
+  | 'monitoringHistoryPurge'
+
+export type BackgroundJobStat = {
+  count: number
+  totalDurationMs: number
+  maxDurationMs: number
+}
+
+export type BackgroundJobStatsSnapshot = Record<BackgroundJobName, BackgroundJobStat>
+
+export type GcStatsSnapshot = {
+  available: boolean
+  count: number
+  totalDurationMs: number
+  maxDurationMs: number
+}
+
+// Пълен forensic snapshot от точния 1-second прозорец на един extreme spike
+// семпъл (огледален на server SpikeContext).
+export type CpuIncidentSpikeContext = {
+  serverCpuPercent: number | null
+  gameWorkerCpuPercent: number | null
+  nonGameWorkerProcessCpuPercent: number | null
+  // Worker CPU freshness — до колко ms е "стара" gameWorkerCpuPercent
+  // стойността спрямо sampledAtMs на този spike sample (worker CPU се
+  // семплира само на 10s интервал, независимо от 1s spike sample-а). null
+  // когато worker CPU е недостъпно.
+  gameWorkerCpuSampleAgeMs: number | null
+  nonGameWorkerProcessCpuSampleAgeMs: number | null
+  eventLoopUtilization: number | null
+  eventLoopDelayP99Ms: number | null
+  rssMb: number | null
+  heapUsedMb: number | null
+  onlinePlayers: number | null
+  activeMatches: number | null
+  wsConnections: number | null
+  matchmakingWaiters: number | null
+  backgroundJobs: BackgroundJobStatsSnapshot
+  gc: GcStatsSnapshot
+}
+
+export type CpuIncidentSpikeSampleDetail = {
+  sampledAtMs: number
+  processCpuPercent: number
+  context: CpuIncidentSpikeContext | null
+}
+
 export type CpuIncidentSummary = {
   id: number
   detectionType: CpuIncidentDetectionType
@@ -208,6 +267,8 @@ export type CpuIncidentSummary = {
   topHttpCategoriesJson: string | null
   topWsInboundTypesJson: string | null
   topWsOutboundTypesJson: string | null
+  backgroundJobs: BackgroundJobStatsSnapshot | null
+  gc: GcStatsSnapshot | null
 }
 
 export type CpuIncidentTimelineSample = {
@@ -228,4 +289,5 @@ export type CpuIncidentTimelineSample = {
 export type CpuIncidentDetail = {
   summary: CpuIncidentSummary
   timeline: CpuIncidentTimelineSample[]
+  spikeSamples: CpuIncidentSpikeSampleDetail[]
 }

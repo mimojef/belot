@@ -43,6 +43,11 @@ type TournamentSchedulerDeps = {
     reason: 'fill_expired' | 'scheduled_underfilled',
     refundedProfiles: Array<{ profileId: string; amount: number; noticeId: string }>,
   ) => void
+  // Monitoring-only, best-effort — извиква се веднъж на всеки runTick() с
+  // измерената му продължителност (performance.now() около целия tick body,
+  // виж diagnostic fix брифа §2). Никога не хвърля, никога не влияе на
+  // scheduler логиката.
+  onTickTiming?: (durationMs: number) => void
 }
 
 const DEFAULT_INTERVAL_MS = 5_000
@@ -131,6 +136,7 @@ export async function createTournamentScheduler(
   function runTick(): void {
     if (stopped || inFlight) return
     inFlight = true
+    const tickStartedAtMs = performance.now()
     const tickNow = now()
     lastTickAt = tickNow.toISOString()
     processedLastTick = 0
@@ -210,6 +216,11 @@ export async function createTournamentScheduler(
       logError('[tournament-scheduler] tick failed', error)
     } finally {
       inFlight = false
+      try {
+        deps.onTickTiming?.(performance.now() - tickStartedAtMs)
+      } catch {
+        // monitoring hook — никога не влияе на scheduler логиката
+      }
     }
   }
 

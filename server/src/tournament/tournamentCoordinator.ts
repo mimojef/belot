@@ -203,6 +203,11 @@ type TournamentCoordinatorDeps = {
   // потвърден победител. Никога не хвърля, никога не влияе на tournament логиката.
   onRoundStarted?: () => void
   onMatchResult?: () => void
+  // Monitoring-only, best-effort — извиква се веднъж на всеки runTick() с
+  // измерената му продължителност (performance.now() около целия tick body,
+  // виж diagnostic fix брифа §2). Никога не хвърля, никога не влияе на
+  // tournament логиката.
+  onTickTiming?: (durationMs: number) => void
 }
 
 type TournamentRow = {
@@ -1871,6 +1876,7 @@ export async function createTournamentCoordinator(
   function runTick(): void {
     if (stopped || inFlight) return
     inFlight = true
+    const tickStartedAtMs = performance.now()
     lastTickAt = utcNow()
     processedLastTick = 0
     createdRoomsLastTick = 0
@@ -1902,6 +1908,12 @@ export async function createTournamentCoordinator(
       logError('[tournament-coordinator] tick failed', error)
     } finally {
       inFlight = false
+      try {
+        deps.onTickTiming?.(performance.now() - tickStartedAtMs)
+      } catch {
+        // monitoring hook — никога не влияе на tournament логиката (виж
+        // onRoundStarted/onMatchResult pattern-а по-горе)
+      }
     }
   }
 

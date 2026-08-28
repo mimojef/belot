@@ -2,6 +2,21 @@
 // отделен от WS/HTTP transport fan-out. Bounded по конструкция: всеки
 // counter е фиксирано поле в Record, никога Map с произволни ключове.
 // Не пази съдържание (текст/username/profileId/IP/URL) — само числа.
+//
+// DUAL-WINDOW ARCHITECTURE (виж final fix pass брифа §1/§2) — всеки
+// increment пише едновременно в ДВА напълно независими accumulator-а:
+//   - oneSecond: reset-ва се точно веднъж на всеки 1s forensic sample tick
+//     (index.ts cpuForensicSampleIntervalId) — представлява activity,
+//     станала в completed-ия 1-секунден forensic прозорец.
+//   - tenSecond: reset-ва се точно веднъж на всеки 10s bucket tick
+//     (index.ts cpuForensicBucketIntervalId) — same семантика както преди,
+//     ползва се за ForensicBucket.activity.
+// Reset на едното НИКОГА не пипа другото — separate closure state.
+// Старият peek() (non-destructive cumulative read) е премахнат от
+// production spike-context пътя, защото представяше up-to-10s cumulative
+// данни като "activity during the 1-second spike" (FALSE ATTRIBUTION RISK,
+// виж review findings). snapshotOneSecondAndReset() е единственият коректен
+// начин да получиш "какво стана в тази секунда".
 
 export type ChatActivityCounters = {
   lobbyChatMessages: number
@@ -106,22 +121,45 @@ const TOURNAMENT_KEYS: Array<keyof TournamentActivityCounters> = [
   'tournamentMatchResult',
 ]
 
-function zeroScalarCounters(): ChatActivityCounters &
+type ScalarCounters = ChatActivityCounters &
   TopicsActivityCounters &
   GameActivityCounters &
   RoomsActivityCounters &
-  TournamentActivityCounters {
-  const result = {} as ChatActivityCounters &
-    TopicsActivityCounters &
-    GameActivityCounters &
-    RoomsActivityCounters &
-    TournamentActivityCounters
+  TournamentActivityCounters
+
+function zeroScalarCounters(): ScalarCounters {
+  const result = {} as ScalarCounters
   for (const key of CHAT_KEYS) result[key] = 0
   for (const key of TOPICS_KEYS) result[key] = 0
   for (const key of GAME_KEYS) result[key] = 0
   for (const key of ROOMS_KEYS) result[key] = 0
   for (const key of TOURNAMENT_KEYS) result[key] = 0
   return result
+}
+
+type WindowState = {
+  scalars: ScalarCounters
+  wsInboundByType: Record<string, number>
+  wsOutboundByType: Record<string, number>
+  httpRequestsByCategory: Record<string, number>
+}
+
+function zeroWindowState(): WindowState {
+  return {
+    scalars: zeroScalarCounters(),
+    wsInboundByType: {},
+    wsOutboundByType: {},
+    httpRequestsByCategory: {},
+  }
+}
+
+function snapshotWindow(w: WindowState): ActivityCountersSnapshot {
+  return {
+    ...w.scalars,
+    wsInboundByType: { ...w.wsInboundByType },
+    wsOutboundByType: { ...w.wsOutboundByType },
+    httpRequestsByCategory: { ...w.httpRequestsByCategory },
+  }
 }
 
 export type ActivityCounters = {
@@ -133,64 +171,88 @@ export type ActivityCounters = {
   incrementWsInbound(messageType: string): void
   incrementWsOutbound(messageType: string): void
   incrementHttpCategory(category: string): void
+  // Completed one-second forensic window — извиква се точно веднъж на всеки
+  // 1s forensic sample tick. Reset-ва САМО oneSecond state.
+  snapshotOneSecondAndReset(): ActivityCountersSnapshot
+  // Completed ten-second forensic window (= стария snapshotAndReset()) —
+  // извиква се точно веднъж на всеки 10s bucket tick. Reset-ва САМО
+  // tenSecond state.
+  snapshotTenSecondAndReset(): ActivityCountersSnapshot
+  /** Alias за snapshotTenSecondAndReset(), запазен за source-compat. */
   snapshotAndReset(): ActivityCountersSnapshot
+  // Non-destructive read на tenSecond window (не пипа нито едно от двете
+  // състояния) — НЕ използвай за spike forensic context (връща cumulative
+  // "since last 10s reset", не "during this exact 1-second sample" — виж
+  // review findings за FALSE ATTRIBUTION RISK). Ползвай само за
+  // debug/inspection, не за incident evidence.
   peek(): ActivityCountersSnapshot
 }
 
 export function createActivityCounters(): ActivityCounters {
-  let scalars = zeroScalarCounters()
-  let wsInboundByType: Record<string, number> = {}
-  let wsOutboundByType: Record<string, number> = {}
-  let httpRequestsByCategory: Record<string, number> = {}
+  let oneSecond = zeroWindowState()
+  let tenSecond = zeroWindowState()
 
   function bump(record: Record<string, number>, key: string): void {
     record[key] = (record[key] ?? 0) + 1
   }
 
-  function snapshot(): ActivityCountersSnapshot {
-    return {
-      ...scalars,
-      wsInboundByType: { ...wsInboundByType },
-      wsOutboundByType: { ...wsOutboundByType },
-      httpRequestsByCategory: { ...httpRequestsByCategory },
-    }
+  function incrementBoth(pick: (w: WindowState) => void): void {
+    pick(oneSecond)
+    pick(tenSecond)
   }
 
   return {
     incrementChat(key) {
-      scalars[key] += 1
+      incrementBoth((w) => {
+        w.scalars[key] += 1
+      })
     },
     incrementTopics(key) {
-      scalars[key] += 1
+      incrementBoth((w) => {
+        w.scalars[key] += 1
+      })
     },
     incrementGame(key) {
-      scalars[key] += 1
+      incrementBoth((w) => {
+        w.scalars[key] += 1
+      })
     },
     incrementRooms(key) {
-      scalars[key] += 1
+      incrementBoth((w) => {
+        w.scalars[key] += 1
+      })
     },
     incrementTournament(key) {
-      scalars[key] += 1
+      incrementBoth((w) => {
+        w.scalars[key] += 1
+      })
     },
     incrementWsInbound(messageType) {
-      bump(wsInboundByType, messageType)
+      incrementBoth((w) => bump(w.wsInboundByType, messageType))
     },
     incrementWsOutbound(messageType) {
-      bump(wsOutboundByType, messageType)
+      incrementBoth((w) => bump(w.wsOutboundByType, messageType))
     },
     incrementHttpCategory(category) {
-      bump(httpRequestsByCategory, category)
+      incrementBoth((w) => bump(w.httpRequestsByCategory, category))
+    },
+    snapshotOneSecondAndReset() {
+      const result = snapshotWindow(oneSecond)
+      oneSecond = zeroWindowState()
+      return result
+    },
+    snapshotTenSecondAndReset() {
+      const result = snapshotWindow(tenSecond)
+      tenSecond = zeroWindowState()
+      return result
     },
     snapshotAndReset() {
-      const result = snapshot()
-      scalars = zeroScalarCounters()
-      wsInboundByType = {}
-      wsOutboundByType = {}
-      httpRequestsByCategory = {}
+      const result = snapshotWindow(tenSecond)
+      tenSecond = zeroWindowState()
       return result
     },
     peek() {
-      return snapshot()
+      return snapshotWindow(tenSecond)
     },
   }
 }

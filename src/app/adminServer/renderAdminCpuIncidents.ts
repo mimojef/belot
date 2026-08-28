@@ -1,4 +1,11 @@
-import type { CpuIncidentSummary, CpuIncidentDetail, CpuIncidentDetectionType } from './adminServerTypes.js'
+import type {
+  CpuIncidentSummary,
+  CpuIncidentDetail,
+  CpuIncidentDetectionType,
+  BackgroundJobStatsSnapshot,
+  BackgroundJobName,
+  GcStatsSnapshot,
+} from './adminServerTypes.js'
 
 function fmtPercent(v: number | null): string {
   if (v === null || !isFinite(v)) return '—'
@@ -34,6 +41,17 @@ function fmtRatePerMin(v: number): string {
   return `${Math.round(v)}/мин`
 }
 
+// Worker CPU staleness (виж final fix pass брифа §9/§13) — показва
+// стойността С age, никога като "точно сега измерена". Формат: "3.2% (преди
+// 6.4 сек.)". Ако age е null (worker CPU недостъпно), самата стойност вече
+// е null и fmtPercent показва "—", затова тук просто пропускаме age suffix-а.
+function fmtPercentWithAge(v: number | null, ageMs: number | null): string {
+  const base = fmtPercent(v)
+  if (v === null || ageMs === null) return base
+  const ageSec = ageMs / 1000
+  return `${base} (преди ${ageSec.toFixed(1)} сек.)`
+}
+
 const DETECTION_TYPE_LABELS: Record<CpuIncidentDetectionType, string> = {
   extreme_spike: 'Кратък пик',
   sustained_high: 'Продължителен',
@@ -44,6 +62,65 @@ const DETECTION_TYPE_COLORS: Record<CpuIncidentDetectionType, string> = {
   extreme_spike: '#f59e0b',
   sustained_high: '#ef4444',
   sustained_with_spike: '#ef4444',
+}
+
+const BACKGROUND_JOB_LABELS: Record<BackgroundJobName, string> = {
+  matchmakingTick: 'Matchmaking',
+  gameRuntimeTick: 'Game runtime',
+  tournamentCoordinatorTick: 'Tournament coordinator',
+  tournamentSchedulerTick: 'Tournament scheduler',
+  topicPoll: 'Topic poll',
+  lobbyChatPoll: 'Lobby chat poll',
+  monitoringHistoryPersist: 'Monitoring history запис',
+  monitoringHistoryPurge: 'Monitoring history purge',
+}
+
+const BACKGROUND_JOB_ORDER: BackgroundJobName[] = [
+  'matchmakingTick',
+  'gameRuntimeTick',
+  'tournamentCoordinatorTick',
+  'tournamentSchedulerTick',
+  'topicPoll',
+  'lobbyChatPoll',
+  'monitoringHistoryPersist',
+  'monitoringHistoryPurge',
+]
+
+// Evidence-only рендер — НЕ добавя интерпретация/причинност (напр. "Matchmaking
+// причини пика"). Показва само измерените count/total/max за всеки job (виж
+// diagnostic fix брифа §7 — "Then WE will decide causality"). Данните идват
+// от duringBuckets tenSecond-window агрегати (sustained family) или raw
+// spike context-и (чист extreme_spike) — НЕ process-uptime cumulative (виж
+// final fix pass брифа §1, dual-window architecture).
+function renderBackgroundJobsEvidence(
+  backgroundJobs: BackgroundJobStatsSnapshot | null,
+  gc: GcStatsSnapshot | null,
+  esc: (s: string) => string,
+): string {
+  if (backgroundJobs === null && gc === null) return ''
+
+  const jobSpans = backgroundJobs === null
+    ? `<span style="color:rgba(255,255,255,0.35);">—</span>`
+    : BACKGROUND_JOB_ORDER.map((name) => {
+        const stat = backgroundJobs[name]
+        const label = BACKGROUND_JOB_LABELS[name]
+        if (stat.count === 0) {
+          return `<span>${esc(label)}: <strong style="color:rgba(255,255,255,0.5);">0x</strong></span>`
+        }
+        return `<span>${esc(label)}: <strong style="color:rgba(255,255,255,0.65);">${stat.count}x</strong> / total ${stat.totalDurationMs.toFixed(0)} ms / max ${stat.maxDurationMs.toFixed(0)} ms</span>`
+      }).join('')
+
+  const gcSpan =
+    gc === null || !gc.available
+      ? `<span>GC: <strong style="color:rgba(255,255,255,0.35);">—</strong></span>`
+      : `<span>GC: <strong style="color:rgba(255,255,255,0.65);">${gc.count}x</strong> / общо ${gc.totalDurationMs.toFixed(0)} мс / макс. ${gc.maxDurationMs.toFixed(0)} мс</span>`
+
+  return `
+    <div style="display:flex;gap:10px 16px;flex-wrap:wrap;font-size:11px;color:rgba(255,255,255,0.4);margin-bottom:12px;padding-top:10px;border-top:1px solid rgba(255,255,255,0.08);">
+      ${jobSpans}
+      ${gcSpan}
+    </div>
+  `
 }
 
 export function renderCpuIncidentsEmptyState(): string {
@@ -128,6 +205,8 @@ export function renderCpuIncidentsList(
           <span>HTTP: <strong style="color:rgba(255,255,255,0.6);">${esc(fmtRatePerMin(incident.activityRates.httpPerMin))}</strong></span>
         </div>
 
+        ${renderBackgroundJobsEvidence(incident.backgroundJobs, incident.gc, esc)}
+
         <button type="button" data-cpu-incident-detail-toggle="${incident.id}" style="height:28px;padding:0 12px;border:1px solid rgba(212,165,32,0.4);border-radius:6px;background:transparent;color:#d4a520;font-size:11px;font-weight:800;cursor:pointer;">${isExpanded ? 'Скрий детайли' : 'Детайли'}</button>
 
         ${detailHtml}
@@ -153,10 +232,79 @@ function sparklinePoints(values: Array<number | null>, width: number, height: nu
   return points.join(' ')
 }
 
+// Точните 1s raw spike семпли, показани с милисекундов timestamp — за чист
+// extreme_spike incident, 10s bucket timeline-ът НЕ съдържа реалния прозорец
+// (виж diagnostic fix брифа §5 — "не е достатъчно тези данни да съществуват
+// само в 10-second pre-context row"). Evidence-only, без интерпретация.
+function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) => string): string {
+  const { spikeSamples } = detail
+  if (spikeSamples.length === 0) return ''
+
+  const rows = spikeSamples.map((s) => {
+    const c = s.context
+    const timeStr = new Date(s.sampledAtMs).toLocaleTimeString('bg-BG', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    const msStr = String(s.sampledAtMs % 1000).padStart(3, '0')
+    if (c === null) {
+      return `
+        <tr>
+          <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${esc(timeStr)}.${msStr}</td>
+          <td style="padding:4px 8px;font-size:11px;color:#e2c75a;font-weight:700;white-space:nowrap;">${esc(fmtPercent(s.processCpuPercent))}</td>
+          <td colspan="5" style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.35);">— (context не е снет)</td>
+        </tr>
+      `
+    }
+    const bgSummary = BACKGROUND_JOB_ORDER
+      .map((name) => ({ name, stat: c.backgroundJobs[name] }))
+      .filter(({ stat }) => stat.count > 0)
+      .map(({ name, stat }) => `${BACKGROUND_JOB_LABELS[name]} ${stat.count}x/общо ${stat.totalDurationMs.toFixed(0)}мс/макс.${stat.maxDurationMs.toFixed(0)}мс`)
+      .join(', ') || '0x'
+    const gcSummary = c.gc.available
+      ? `${c.gc.count}x / общо ${c.gc.totalDurationMs.toFixed(0)} мс / макс. ${c.gc.maxDurationMs.toFixed(0)} мс`
+      : '—'
+    // Worker CPU staleness (виж final fix pass брифа §9) — НИКОГА не се
+    // представя като "измерена точно в тази секунда", age е винаги видим до
+    // самата стойност.
+    const workerCpuWithAge = fmtPercentWithAge(c.gameWorkerCpuPercent, c.gameWorkerCpuSampleAgeMs)
+    return `
+      <tr>
+        <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${esc(timeStr)}.${msStr}</td>
+        <td style="padding:4px 8px;font-size:11px;color:#e2c75a;font-weight:700;white-space:nowrap;">${esc(fmtPercent(s.processCpuPercent))}</td>
+        <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${esc(workerCpuWithAge)}</td>
+        <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${c.eventLoopDelayP99Ms !== null ? esc(c.eventLoopDelayP99Ms.toFixed(0)) + ' мс' : '—'}</td>
+        <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${c.onlinePlayers ?? '—'}</td>
+        <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.55);">${esc(bgSummary)}</td>
+        <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.55);white-space:nowrap;">GC: ${esc(gcSummary)}</td>
+      </tr>
+    `
+  }).join('')
+
+  return `
+    <div style="margin-top:10px;">
+      <div style="font-size:10px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:6px;">Точен 1s spike прозорец (raw samples, evidence — activity/background/GC за ТОЧНИЯ 1s forensic прозорец, не cumulative)</div>
+      <div style="overflow-x:auto;max-height:220px;overflow-y:auto;border:1px solid rgba(255,255,255,0.08);border-radius:6px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr style="position:sticky;top:0;background:#141414;">
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">Час (мс)</th>
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">CPU Node</th>
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">CPU workers (age)</th>
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">Event loop P99</th>
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">Онлайн</th>
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">Background jobs (1s)</th>
+              <th style="padding:4px 8px;font-size:10px;text-align:left;color:rgba(255,255,255,0.4);text-transform:uppercase;">GC (1s)</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+    </div>
+  `
+}
+
 export function renderCpuIncidentDetailTimeline(detail: CpuIncidentDetail, esc: (s: string) => string): string {
   const { timeline } = detail
   if (timeline.length === 0) {
-    return `<p style="color:rgba(255,255,255,0.35);font-size:12px;font-style:italic;margin:8px 0 0;">Няма запазена времева линия.</p>`
+    return `<p style="color:rgba(255,255,255,0.35);font-size:12px;font-style:italic;margin:8px 0 0;">Няма запазена времева линия.</p>` + renderSpikeSamplesEvidence(detail, esc)
   }
 
   const width = 560
@@ -198,6 +346,7 @@ export function renderCpuIncidentDetailTimeline(detail: CpuIncidentDetail, esc: 
           <tbody>${tableRows}</tbody>
         </table>
       </div>
+      ${renderSpikeSamplesEvidence(detail, esc)}
     </div>
   `
 }

@@ -150,6 +150,81 @@ console.log('\n[10] No unbounded memory growth — repeated increments of the SA
   assertEqual(snap.wsInboundByType['submit_bid_action'], 10_000, 'count is accurate')
 }
 
+console.log('\n[11] DUAL-WINDOW: a single increment lands in BOTH the 1s and the 10s window simultaneously')
+{
+  const counters = createActivityCounters()
+  counters.incrementChat('lobbyChatMessages')
+  counters.incrementChat('lobbyChatMessages')
+
+  const oneSecond = counters.snapshotOneSecondAndReset()
+  assertEqual(oneSecond.lobbyChatMessages, 2, 'oneSecond window sees both increments')
+
+  const tenSecond = counters.peek()
+  assertEqual(tenSecond.lobbyChatMessages, 2, 'tenSecond window ALSO sees both increments (independent accumulator, not shared state)')
+}
+
+console.log('\n[12] DUAL-WINDOW: resetting the 1s window does NOT reset the 10s window')
+{
+  const counters = createActivityCounters()
+  counters.incrementGame('gameplayBidAccepted')
+  counters.incrementGame('gameplayBidAccepted')
+  counters.incrementGame('gameplayBidAccepted')
+
+  const oneSecond1 = counters.snapshotOneSecondAndReset()
+  assertEqual(oneSecond1.gameplayBidAccepted, 3, 'first 1s snapshot sees all 3 increments')
+
+  const oneSecond2 = counters.snapshotOneSecondAndReset()
+  assertEqual(oneSecond2.gameplayBidAccepted, 0, '1s window is reset after its own snapshotOneSecondAndReset()')
+
+  const tenSecond = counters.peek()
+  assertEqual(tenSecond.gameplayBidAccepted, 3, '10s window STILL has all 3 — untouched by the 1s reset')
+}
+
+console.log('\n[13] DUAL-WINDOW: resetting the 10s window does NOT reset the 1s window')
+{
+  const counters = createActivityCounters()
+  counters.incrementRooms('matchmakingJoin')
+  counters.incrementRooms('matchmakingJoin')
+
+  const tenSecond1 = counters.snapshotTenSecondAndReset()
+  assertEqual(tenSecond1.matchmakingJoin, 2, 'first 10s snapshot sees both increments')
+
+  const tenSecond2 = counters.snapshotTenSecondAndReset()
+  assertEqual(tenSecond2.matchmakingJoin, 0, '10s window is reset after its own snapshotTenSecondAndReset()')
+
+  // Increment happened BEFORE either reset — 1s window should still carry it,
+  // since 1s reset was never called.
+  const oneSecond = counters.snapshotOneSecondAndReset()
+  assertEqual(oneSecond.matchmakingJoin, 2, '1s window STILL has both — untouched by the 10s reset')
+}
+
+console.log('\n[14] DUAL-WINDOW: exact spike context regression — activity BEFORE the current 1s window is NOT attributed to a later spike sample')
+{
+  const counters = createActivityCounters()
+  // Simulate activity that happened in a PRIOR completed 1s tick.
+  counters.incrementChat('lobbyChatMessages')
+  counters.incrementChat('lobbyChatMessages')
+  counters.incrementChat('lobbyChatMessages')
+  const priorWindow = counters.snapshotOneSecondAndReset()
+  assertEqual(priorWindow.lobbyChatMessages, 3, 'prior window correctly captured its own 3 messages')
+
+  // Nothing happens in the NEXT 1s tick (the "spike" tick) — this simulates
+  // a CPU spike sample where NO activity occurred during that exact second.
+  const spikeWindow = counters.snapshotOneSecondAndReset()
+  assertEqual(spikeWindow.lobbyChatMessages, 0, 'spike-tick window is genuinely empty — the 3 prior messages are NOT re-attributed to it (no false attribution)')
+}
+
+console.log('\n[15] DUAL-WINDOW: activity that happens WITHIN the exact 1s window IS correctly attributed to it')
+{
+  const counters = createActivityCounters()
+  counters.snapshotOneSecondAndReset() // clear any residual state from a prior window
+
+  counters.incrementGame('gameplayPlayAccepted')
+  counters.incrementGame('gameplayPlayAccepted')
+  const spikeWindow = counters.snapshotOneSecondAndReset()
+  assertEqual(spikeWindow.gameplayPlayAccepted, 2, 'activity that occurred inside this exact window is correctly captured')
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(60)}`)

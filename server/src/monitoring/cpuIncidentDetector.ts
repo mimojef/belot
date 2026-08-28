@@ -1,5 +1,9 @@
 import type { ActivityCountersSnapshot } from './activityCounters.js'
 import { emptyActivityCountersSnapshot } from './activityCounters.js'
+import type { BackgroundJobStatsSnapshot } from './backgroundJobMetrics.js'
+import { emptyBackgroundJobStatsSnapshot } from './backgroundJobMetrics.js'
+import type { GcStatsSnapshot } from './gcMetrics.js'
+import { emptyGcStatsSnapshot } from './gcMetrics.js'
 import {
   CPU_INCIDENT_THRESHOLDS,
   CPU_INCIDENT_SAMPLING,
@@ -72,6 +76,11 @@ export type BucketAccumulator = {
       wsConnections: number
       matchmakingWaiters: number
       activity: ActivityCountersSnapshot
+      // Диагностичен fix pass §6/§7 — tenSecond-window background/GC
+      // агрегати (snapshotTenSecondAndReset()), за да не бъде sustained
+      // incident summary принудително null.
+      backgroundJobs: BackgroundJobStatsSnapshot
+      gc: GcStatsSnapshot
     },
   ): ForensicBucket
 }
@@ -132,6 +141,8 @@ export function createBucketAccumulator(): BucketAccumulator {
         wsConnections: context.wsConnections,
         matchmakingWaiters: context.matchmakingWaiters,
         activity: context.activity,
+        backgroundJobs: context.backgroundJobs,
+        gc: context.gc,
       }
       reset()
       return bucket
@@ -160,6 +171,8 @@ export function emptyForensicBucket(bucketStartMs: number): ForensicBucket {
     wsConnections: 0,
     matchmakingWaiters: 0,
     activity: emptyActivityCountersSnapshot(),
+    backgroundJobs: emptyBackgroundJobStatsSnapshot(),
+    gc: emptyGcStatsSnapshot(),
   }
 }
 

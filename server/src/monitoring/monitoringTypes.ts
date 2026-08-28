@@ -50,6 +50,16 @@ export type MonitoringSnapshot = {
   // предишен семпъл за delta (warm-up).
   gameWorkerCpuNowPercent: number | null
 
+  // Timestamp (ms epoch) на последния УСПЕШЕН worker CPU семпъл — worker CPU
+  // се семплира на по-рядък WORKER_CPU_SAMPLE_INTERVAL_MS (10s) интервал,
+  // независимо от 1s основния sample loop (виж final fix pass брифа §9,
+  // createMonitoringSampler.ts collectWorkerCpuSample). Consumers трябва да
+  // изчисляват freshness/age спрямо своя собствен sample timestamp, вместо
+  // да третират gameWorkerCpuNowPercent като измерен "точно сега". null ако
+  // все още няма нито един успешен worker CPU семпъл (warm-up или
+  // unavailable).
+  gameWorkerCpuSampledAtMs: number | null
+
   // nonGameWorkerProcessCpuNowPercent = processCpuNowPercent −
   // gameWorkerCpuNowPercent. ВАЖНО: това НЕ Е "main thread CPU" — remainder-ът
   // все още включва libuv threadpool, GC/V8 background threads и native

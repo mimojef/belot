@@ -1,4 +1,6 @@
 import type { ActivityCountersSnapshot } from './activityCounters.js'
+import type { BackgroundJobStatsSnapshot } from './backgroundJobMetrics.js'
+import type { GcStatsSnapshot } from './gcMetrics.js'
 
 // ─── Централизирани прагове (не magic numbers из файловете) ───────────────────
 
@@ -67,13 +69,72 @@ export type ForensicBucket = {
   matchmakingWaiters: number
 
   activity: ActivityCountersSnapshot
+
+  // Диагностичен fix pass §6 — 10s bucket-ът вече носи background job/GC
+  // tenSecond-window агрегати (snapshotTenSecondAndReset()), за да не бъде
+  // sustained_high/sustained_with_spike summary принудително null (виж
+  // review findings).
+  backgroundJobs: BackgroundJobStatsSnapshot
+  gc: GcStatsSnapshot
+}
+
+// Пълен forensic snapshot от точния 1-second прозорец, в който CPU семпълът
+// е достигнал extreme spike прага — НЕ 10s bucket агрегация.
+//
+// TEMPORAL ALIGNMENT (виж final fix pass брифа §5): activity/backgroundJobs/gc
+// идват от snapshotOneSecondAndReset() на съответните dual-window
+// accumulator-и, извикан В СЪЩИЯ 1s forensic sample tick, непосредствено
+// след четенето на CPU snapshot-а — това е най-близкото практически
+// достижимо подравняване между CPU семпъла и activity/background/gc
+// прозореца в рамките на Node event-loop timer ordering. НЕ е гарантирано
+// perfect millisecond-alignment (двата interval-а — monitoringSampler-ът и
+// forensic sample tick-ът — не са phase-locked), но представлява completed
+// 1-секунден прозорец, приключил максимум малко преди/по време на четенето
+// на CPU snapshot-а, а НЕ up-to-10s cumulative данни (виж review findings,
+// FALSE ATTRIBUTION RISK).
+export type SpikeContext = {
+  serverCpuPercent: number | null
+  gameWorkerCpuPercent: number | null
+  nonGameWorkerProcessCpuPercent: number | null
+
+  // Worker CPU freshness (виж final fix pass брифа §9): gameWorkerCpuPercent
+  // идва от createMonitoringSampler.ts, който семплира worker.cpuUsage()
+  // само на всеки 10s (async round-trip, WORKER_CPU_SAMPLE_INTERVAL_MS) —
+  // до ~10s по-стара от spike момента. Age полетата правят тази staleness
+  // изрична вместо мълчаливо да представят стойността като "измерена точно
+  // сега". null когато worker CPU е недостъпно (feature-detect fail).
+  gameWorkerCpuSampleAgeMs: number | null
+  // nonGameWorkerProcessCpuPercent се извежда от gameWorkerCpuPercent
+  // (nodeCpu - gameWorkerCpu), затова наследява СЪЩАТА staleness incertitude.
+  nonGameWorkerProcessCpuSampleAgeMs: number | null
+
+  eventLoopUtilization: number | null
+  eventLoopDelayP99Ms: number | null
+
+  rssMb: number | null
+  heapUsedMb: number | null
+
+  onlinePlayers: number | null
+  activeMatches: number | null
+  wsConnections: number | null
+  matchmakingWaiters: number | null
+
+  // Completed one-second forensic window (виж TEMPORAL ALIGNMENT по-горе) —
+  // НЕ cumulative peek.
+  activity: ActivityCountersSnapshot
+  backgroundJobs: BackgroundJobStatsSnapshot
+  gc: GcStatsSnapshot
 }
 
 // Суров 1s CPU семпъл — пазен само около EXTREME SPIKE прозорци, за да
 // покажем истинската кратка продължителност (виж final audit §3).
+// `context` е null за семпли под extreme прага (никога снеман за тях, за
+// да не удвоим O(n) online/connections/rooms работа на всяка секунда —
+// виж diagnostic fix брифа т.3, снема се само when spike detected).
 export type RawCpuSample = {
   sampledAtMs: number
   processCpuPercent: number
+  context: SpikeContext | null
 }
 
 export type CpuIncidentSummary = {
@@ -116,6 +177,25 @@ export type CpuIncidentSummary = {
   topHttpCategoriesJson: string | null
   topWsInboundTypesJson: string | null
   topWsOutboundTypesJson: string | null
+
+  // Background job / GC агрегати за incident прозореца (pre+during+post
+  // buckets за sustained family; raw spike context-и за чист extreme_spike
+  // — виж cpuIncidentStore buildSummaryFields). null поле означава "не е
+  // измерено" (напр. GC observation недостъпна на runtime-а), НЕ "нула
+  // събития" — UI трябва да разграничи двата случая (виж diagnostic fix
+  // брифа т.6, "—" vs "0").
+  backgroundJobs: BackgroundJobStatsSnapshot | null
+  gc: GcStatsSnapshot | null
+}
+
+// Точен 1-секунден raw spike sample с пълен forensic context — за extreme
+// spike incidents, това е ЕДИНСТВЕНИЯТ начин да видим какво реално е
+// станало ВЪТРЕ в 1-2 сек прозореца (не 10s bucket агрегация, виж
+// diagnostic fix брифа т.5).
+export type CpuIncidentSpikeSampleDetail = {
+  sampledAtMs: number
+  processCpuPercent: number
+  context: SpikeContext | null
 }
 
 export type CpuIncidentTimelineSample = {
@@ -136,4 +216,9 @@ export type CpuIncidentTimelineSample = {
 export type CpuIncidentDetail = {
   summary: CpuIncidentSummary
   timeline: CpuIncidentTimelineSample[]
+  // Raw 1s spike samples с пълен context — само за incidents, чиито
+  // detectionType включва extreme spike (extreme_spike/sustained_with_spike)
+  // И имат реално снет context. Празен масив за чист sustained_high (няма
+  // extreme spike компонент).
+  spikeSamples: CpuIncidentSpikeSampleDetail[]
 }
