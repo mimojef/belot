@@ -13037,7 +13037,18 @@ export function createLobbyFlowController(
       }
       if (result.ok) {
         state.profilePopupTargetRole = result.role
-        render()
+        // Profile popup живее на document.body (извън root.innerHTML, виж
+        // syncProfilePopup/renderPopupOnly) — общ render() минава през
+        // renderLobbyScreen()'s skip-if-unchanged guard, а
+        // profilePopupTargetRole не участва в nextRootHtml string-а, значи
+        // guard-ът рано връщаше преди да стигне до syncProfilePopup() тук.
+        // Admin subadmin/chat_admin/top_chat_admin/pika_team действията
+        // оставаха скрити (само VIP, който не зависи от target role) до
+        // следващ несвързан render (напр. "Дай VIP" клик -> renderPopupOnly()
+        // directly, catch-up-вайки вече обновения, но never-patched state) —
+        // същия клас бъг като notification bell dropdown-а. Targeted
+        // renderPopupOnly() тук го заобикаля изцяло.
+        renderPopupOnly()
       }
     })()
   }
