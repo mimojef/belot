@@ -40,6 +40,7 @@ import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
 import {
   createGameServerClient,
+  type ConnectedMessage,
   type AdminSettingsSnapshot,
   type AdminStatsSnapshot,
   type DailyRewardTierSnapshot,
@@ -114,6 +115,35 @@ const rootElement: HTMLDivElement = rootElementCandidate
 
 // Определя се веднага — преди lobby/client bootstrap — за да guard-ва всички async callbacks.
 const _isResetPasswordPath = window.location.pathname === '/reset-password'
+
+// Extract-нато (не само inline в onMessage) конкретно за да е тествано
+// изолирано — виж checkInitialNavUrlSync.ts. lobby.handleServerMessage(message)
+// е ЕДИНСТВЕНОТО място, което reset-ва вътрешния _pendingInitialNav флаг и
+// извиква navigateFromPath(_loadPath) (createLobbyFlowController.ts) — ако
+// navigateInitialPath() е стартирал преди state.isConnected===true (нормален
+// race при WS handshake на fresh load), _pendingInitialNav остава true, и
+// syncUrlPath() (URL sync при всяка нормална navigation, викана накрая на
+// всеки render()) вечно early-return-ва, докато флагът не бъде reset-нат тук.
+// Без forward-а: DOM се сменя коректно при клик по nav бутоните (render()
+// работи независимо), но window.location.pathname никога не се обновява —
+// URL остава "залепен" за route-а от последния page load/refresh, докато
+// refresh накрая не прочете stale-ия pathname (production regression,
+// потвърден чрез live browser инструментация — виж bug report).
+export function handleConnectedServerMessage(
+  lobby: LobbyFlowController,
+  message: ConnectedMessage,
+  onServerStateResolved: () => void,
+): void {
+  lobby.handleServerMessage(message)
+  // Сървърът праща 'connected' синхронно ПЪРВО в connection handler-а си, а
+  // евентуално 'session_in_game' (ако профилът има активна игра) веднага
+  // след него в СЪЩИЯ handler — двете пристигат в тази подредба през WS
+  // message опашката. Изчакваме един tick, за да може 'session_in_game' (ако
+  // предстои) да бъде обработено първо, преди да маркираме bootstrap-а за
+  // завършен — сурово onOpen не е достатъчен сигнал, защото не гарантира, че
+  // сървърът вече е казал дали има resume-able сесия.
+  window.setTimeout(onServerStateResolved, 0)
+}
 
 if (isMatchEndedPreviewRequest()) {
   const renderPreview = (): void => {
@@ -6023,18 +6053,10 @@ client = createGameServerClient({
   },
   onMessage: (message) => {
     if (message.type === 'connected') {
-      // Сървърът праща 'connected' синхронно ПЪРВО в connection handler-а
-      // си, а евентуално 'session_in_game' (ако профилът има активна игра)
-      // веднага след него в СЪЩИЯ handler — двете пристигат в тази подредба
-      // през WS message опашката. Изчакваме един tick, за да може
-      // 'session_in_game' (ако предстои) да бъде обработено първо, преди
-      // да маркираме bootstrap-а за завършен — сурово onOpen не е достатъчен
-      // сигнал, защото не гарантира, че сървърът вече е казал дали има
-      // resume-able сесия.
-      window.setTimeout(() => {
+      handleConnectedServerMessage(lobby, message, () => {
         pwaBootstrapServerStateResolved = true
         requestPwaUpdateApplyAttempt()
-      }, 0)
+      })
       return
     }
 
