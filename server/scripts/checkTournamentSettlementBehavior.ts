@@ -113,6 +113,35 @@ function insertReadyTournament(database: DatabaseSync, input: {
   }
 }
 
+// Симулира debit -> refund -> re-entry debit history за профил, ЗАПАЗВАЙКИ
+// само entries.status='confirmed' в края (реалистичен leave+rejoin) — за
+// production incident-а § "LEDGER EVIDENCE" сценария: 10 gross debit rows,
+// 2 refunds, net = 8 x entry fee. Explicit created_at timestamps гарантират
+// детерминистичен "latest debit" ordering (CURRENT_TIMESTAMP резолюция е
+// само секунда, недостатъчна за трите бързи insert-а тук).
+function insertReentryLedgerHistory(
+  database: DatabaseSync,
+  tournamentId: string,
+  profileId: string,
+  entryFee: number,
+): void {
+  database.prepare(`
+    INSERT INTO tournament_economy_ledger (
+      ledger_id, idempotency_key, tournament_id, profile_id, entry_type, amount, balance_after, created_at
+    ) VALUES (?, ?, ?, ?, 'entry_fee_debit', ?, ?, '2026-07-30T09:00:00.000Z');
+  `).run(randomUUID(), `tournament:${tournamentId}:profile:${profileId}:entry-fee-debit`, tournamentId, profileId, entryFee, 100_000 - entryFee)
+  database.prepare(`
+    INSERT INTO tournament_economy_ledger (
+      ledger_id, idempotency_key, tournament_id, profile_id, entry_type, amount, balance_after, created_at
+    ) VALUES (?, ?, ?, ?, 'entry_fee_refund', ?, ?, '2026-07-30T09:05:00.000Z');
+  `).run(randomUUID(), `tournament:${tournamentId}:profile:${profileId}:entry-fee-refund`, tournamentId, profileId, entryFee, 100_000)
+  database.prepare(`
+    INSERT INTO tournament_economy_ledger (
+      ledger_id, idempotency_key, tournament_id, profile_id, entry_type, amount, balance_after, created_at
+    ) VALUES (?, ?, ?, ?, 'entry_fee_debit', ?, ?, '2026-07-30T09:10:00.000Z');
+  `).run(randomUUID(), `tournament:${tournamentId}:profile:${profileId}:entry-fee-debit:attempt-2`, tournamentId, profileId, entryFee, 100_000 - entryFee)
+}
+
 function countRows(database: DatabaseSync, sql: string, ...params: unknown[]): number {
   return (database.prepare(sql).get(...params) as { count: number }).count
 }
@@ -259,6 +288,141 @@ try {
   check('failed settlement leaves wallets unchanged', profiles.slice(8, 16).every((profileId) => walletBalance(db!, profileId) === badBalancesBefore.get(profileId)))
   const badRow = db.prepare(`SELECT status, settlement_state as settlementState FROM tournaments WHERE tournament_id = ?;`).get(badTournamentId) as { status: string; settlementState: string }
   check('failed settlement does not finish tournament', badRow.status === 'final_in_progress' && badRow.settlementState === 'pending')
+
+  // Production incident regression (2026-08-27, tournament 1b238da8-...):
+  // двама участника debit -> refund -> re-entry debit преди финала. Global
+  // ledger count/sum по-рано броеше ВСИЧКИ исторически debit rows (10 вместо
+  // 8, gross 50000 вместо net 40000) и постоянно връщаше ledger_mismatch въпреки
+  // че финалът реално е приключил. Fix-ът валидира net (последен debit per
+  // profile), не суров исторически count/sum.
+  const reentryProfiles = Array.from({ length: 8 }, () => randomUUID())
+  reentryProfiles.forEach((profileId, index) => insertProfile(db!, profileId, `Reentry Player ${index + 1}`, 100_000))
+  const reentryTournamentId = randomUUID()
+  const reentryEntryFee = 5_000
+  insertReadyTournament(db, {
+    tournamentId: reentryTournamentId,
+    creatorProfileId: reentryProfiles[0]!,
+    entryFee: reentryEntryFee,
+    profiles: reentryProfiles.slice(2, 8),
+  })
+  // Първите два профила НЕ минават през insertReadyTournament-ния прост debit
+  // (щеше да създаде трети конфликтен idempotency_key ред) — вместо това
+  // добавяме confirmed entry + пълната debit->refund->re-debit ledger история.
+  for (const profileId of reentryProfiles.slice(0, 2)) {
+    db.prepare(`
+      INSERT INTO tournament_entries (entry_id, tournament_id, profile_id, team_id, joined_as, status)
+      VALUES (?, ?, ?, NULL, 'solo', 'confirmed');
+    `).run(randomUUID(), reentryTournamentId, profileId)
+    insertReentryLedgerHistory(db, reentryTournamentId, profileId, reentryEntryFee)
+    db.prepare(`
+      UPDATE profile_wallets SET yellow_coins_balance = ? WHERE profile_id = ?;
+    `).run(100_000 - reentryEntryFee, profileId)
+  }
+  check(
+    'reentry fixture has 10 gross debit rows and 2 refunds',
+    countRows(db, `SELECT COUNT(*) as count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'entry_fee_debit';`, reentryTournamentId) === 10
+      && countRows(db, `SELECT COUNT(*) as count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'entry_fee_refund';`, reentryTournamentId) === 2,
+  )
+  const reentryStart = economyStore.startTournamentAtomically(reentryTournamentId, new Date('2026-07-30T10:00:00.000Z'))
+  check('reentry tournament starts despite historical debit/refund rows', reentryStart.ok)
+  const { championTeamId: reentryChampionTeamId, runnerUpTeamId: reentryRunnerUpTeamId } = finishFinalForSettlement(db, reentryTournamentId)
+  const reentryPreview = calculateTournamentPrizePreview(reentryEntryFee, 8)
+  const reentryChampionProfiles = db.prepare(`SELECT profile_id as profileId FROM tournament_entries WHERE team_id = ? ORDER BY created_at ASC;`).all(reentryChampionTeamId) as Array<{ profileId: string }>
+  const reentryRunnerUpProfiles = db.prepare(`SELECT profile_id as profileId FROM tournament_entries WHERE team_id = ? ORDER BY created_at ASC;`).all(reentryRunnerUpTeamId) as Array<{ profileId: string }>
+  const reentryBalancesBefore = new Map(reentryProfiles.map((profileId) => [profileId, walletBalance(db!, profileId)]))
+
+  const reentrySettlement = economyStore.settleTournamentPrizesAtomically(reentryTournamentId, new Date('2026-07-30T12:01:00.000Z'))
+  check('settlement passes with net entry economy despite gross debit history', reentrySettlement.ok && reentrySettlement.payoutRows === 4)
+  check(
+    'reentry settlement creates exactly four prize payout rows',
+    countRows(db, `SELECT COUNT(*) as count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout';`, reentryTournamentId) === 4,
+  )
+  check('reentry champion wallets receive correct player prize', reentryChampionProfiles.every((row) => walletBalance(db!, row.profileId) === reentryBalancesBefore.get(row.profileId)! + reentryPreview.firstPlayerPrize))
+  check('reentry runner-up wallets receive correct player prize', reentryRunnerUpProfiles.every((row) => walletBalance(db!, row.profileId) === reentryBalancesBefore.get(row.profileId)! + reentryPreview.secondPlayerPrize))
+  const reentryPrizeSum = (db.prepare(`
+    SELECT COALESCE(SUM(amount), 0) as total
+    FROM tournament_economy_ledger
+    WHERE tournament_id = ? AND entry_type = 'prize_payout';
+  `).get(reentryTournamentId) as { total: number }).total
+  check('reentry settlement pays exactly the net prize pool', reentryPrizeSum === reentryPreview.prizePool)
+
+  const reentryRetryBalances = new Map(reentryProfiles.map((profileId) => [profileId, walletBalance(db!, profileId)]))
+  const reentryRetry = economyStore.settleTournamentPrizesAtomically(reentryTournamentId, new Date('2026-07-30T12:02:00.000Z'))
+  check('reentry settlement retry is idempotent', reentryRetry.ok && reentryRetry.alreadySettled === true)
+  check(
+    'reentry settlement retry does not duplicate prize payouts or pay twice',
+    countRows(db, `SELECT COUNT(*) as count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout';`, reentryTournamentId) === 4
+      && reentryProfiles.every((profileId) => walletBalance(db!, profileId) === reentryRetryBalances.get(profileId)),
+  )
+
+  // Сценарий C (eliminated participants): finishFinalForSettlement маркира
+  // non-finalist/champion entries като 'eliminated' — settlement debit
+  // валидацията трябва да ги брои като реални платени участници, не само
+  // финалистите. reentryTournamentId вече е точно 4 eliminated + 2 finalist +
+  // 2 champion = 8 paid entries — потвърждаваме explicit тук.
+  check(
+    'reentry tournament settles with exactly 4 eliminated + 2 finalist + 2 champion paid entries',
+    countRows(db, `SELECT COUNT(*) as count FROM tournament_entries WHERE tournament_id = ? AND status = 'eliminated';`, reentryTournamentId) === 4
+      && countRows(db, `SELECT COUNT(*) as count FROM tournament_entries WHERE tournament_id = ? AND status = 'finalist';`, reentryTournamentId) === 2
+      && countRows(db, `SELECT COUNT(*) as count FROM tournament_entries WHERE tournament_id = ? AND status = 'champion';`, reentryTournamentId) === 2,
+  )
+
+  // Сценарий B (refund БЕЗ re-entry): Profile A прави debit -> refund и НЕ се
+  // връща; Profile B заема мястото му и плаща нормално. Historical ledger
+  // съдържа debit rows за 9 различни профила (8 активни + Profile A), но
+  // settlement debit set-ът трябва да е точно 8 — Profile A е excluded чрез
+  // te.refunded_at IS NULL в JOIN-а (виж коментара на
+  // selectActiveEntriesWithLatestDebitLedgerStatement), не чрез count/sum
+  // coincidence.
+  const noReentryProfiles = Array.from({ length: 8 }, () => randomUUID())
+  noReentryProfiles.forEach((profileId, index) => insertProfile(db!, profileId, `NoReentry Player ${index + 1}`, 100_000))
+  const refundedProfileA = randomUUID()
+  insertProfile(db!, refundedProfileA, 'NoReentry Refunded ProfileA', 100_000)
+  const noReentryTournamentId = randomUUID()
+  const noReentryEntryFee = 5_000
+  insertReadyTournament(db, {
+    tournamentId: noReentryTournamentId,
+    creatorProfileId: noReentryProfiles[0]!,
+    entryFee: noReentryEntryFee,
+    profiles: noReentryProfiles,
+  })
+  // Profile A: debit -> refund, БЕЗ re-entry, entry остава 'refunded'.
+  db.prepare(`
+    INSERT INTO tournament_entries (entry_id, tournament_id, profile_id, team_id, joined_as, status, refunded_at, withdrawn_at)
+    VALUES (?, ?, ?, NULL, 'solo', 'refunded', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+  `).run(randomUUID(), noReentryTournamentId, refundedProfileA)
+  db.prepare(`
+    INSERT INTO tournament_economy_ledger (
+      ledger_id, idempotency_key, tournament_id, profile_id, entry_type, amount, balance_after
+    ) VALUES (?, ?, ?, ?, 'entry_fee_debit', ?, ?);
+  `).run(randomUUID(), `tournament:${noReentryTournamentId}:profile:${refundedProfileA}:entry-fee-debit`, noReentryTournamentId, refundedProfileA, noReentryEntryFee, 100_000 - noReentryEntryFee)
+  db.prepare(`
+    INSERT INTO tournament_economy_ledger (
+      ledger_id, idempotency_key, tournament_id, profile_id, entry_type, amount, balance_after
+    ) VALUES (?, ?, ?, ?, 'entry_fee_refund', ?, ?);
+  `).run(randomUUID(), `tournament:${noReentryTournamentId}:profile:${refundedProfileA}:entry-fee-refund`, noReentryTournamentId, refundedProfileA, noReentryEntryFee, 100_000)
+  check(
+    'no-reentry fixture has 9 historical debit profiles but only 8 active entries',
+    countRows(db, `SELECT COUNT(DISTINCT profile_id) as count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'entry_fee_debit';`, noReentryTournamentId) === 9
+      && countRows(db, `SELECT COUNT(*) as count FROM tournament_entries WHERE tournament_id = ? AND refunded_at IS NULL;`, noReentryTournamentId) === 8,
+  )
+  const noReentryStart = economyStore.startTournamentAtomically(noReentryTournamentId, new Date('2026-07-30T10:00:00.000Z'))
+  check('no-reentry tournament starts (Profile A excluded, 8 active entries)', noReentryStart.ok)
+  const { championTeamId: noReentryChampionTeamId, runnerUpTeamId: noReentryRunnerUpTeamId } = finishFinalForSettlement(db, noReentryTournamentId)
+  const noReentryPreview = calculateTournamentPrizePreview(noReentryEntryFee, 8)
+  const noReentryBalancesBefore = new Map(noReentryProfiles.map((profileId) => [profileId, walletBalance(db!, profileId)]))
+
+  const noReentrySettlement = economyStore.settleTournamentPrizesAtomically(noReentryTournamentId, new Date('2026-07-30T12:01:00.000Z'))
+  check('settlement passes when a refunded-without-reentry profile is excluded', noReentrySettlement.ok && noReentrySettlement.payoutRows === 4)
+  check(
+    'refunded-without-reentry Profile A receives no prize payout',
+    countRows(db, `SELECT COUNT(*) as count FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout' AND profile_id = ?;`, noReentryTournamentId, refundedProfileA) === 0,
+  )
+  check(
+    'no-reentry settlement pays exactly the net prize pool',
+    (db.prepare(`SELECT COALESCE(SUM(amount), 0) as total FROM tournament_economy_ledger WHERE tournament_id = ? AND entry_type = 'prize_payout';`).get(noReentryTournamentId) as { total: number }).total === noReentryPreview.prizePool,
+  )
+  check('refunded-without-reentry Profile A wallet is unaffected by settlement (already refunded to full balance)', walletBalance(db!, refundedProfileA) === 100_000)
 } finally {
   try { economyStore?.close() } catch {}
   try { db?.close() } catch {}

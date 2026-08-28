@@ -677,11 +677,38 @@ export async function createTournamentEconomyStore(
     ORDER BY te.created_at ASC;
   `)
 
-  const selectEntryDebitLedgerRowsStatement = database.prepare(`
-    SELECT profile_id, amount
-    FROM tournament_economy_ledger
-    WHERE tournament_id = ? AND entry_type = 'entry_fee_debit'
-    ORDER BY profile_id ASC;
+  // Settlement-специфична вариация: за net-economy валидация не бива да
+  // броим ВСИЧКИ исторически entry_fee_debit редове (debit→refund→re-entry
+  // сценарий, виж § "LEDGER EVIDENCE" в production incident-а, дублира
+  // debit rows за re-entered профили и чупи debitTotal===total_entry_amount).
+  // Вместо това join-ваме от tournament_entries (authority за "реално платено
+  // и все още невърнато участие" е refunded_at IS NULL — status колоната
+  // покрива confirmed/eliminated/finalist/champion едновременно, вкл. bracket
+  // elimination, виж allowed statuses в 20260730_001_create_tournament_core_tables.sql;
+  // 'withdrawn'/'refunded' винаги имат refunded_at set от
+  // updateEntryToRefundedStatement/updateEntryToRefundedByCancelStatement) към
+  // ПОСЛЕДНИЯ (net-valid) entry_fee_debit ред per profile — огледално на
+  // selectConfirmedEntriesWithDebitLedgerStatement по-горе, ползван от
+  // startTournamentAtomicallyLocal за същата цел, но без status='confirmed'
+  // ограничението (следфинални участници вече са eliminated/finalist/champion).
+  // Профил, refund-нат без re-entry, е excluded тук чрез самия JOIN
+  // (te.refunded_at IS NULL филтрира реда преди подquery-то изобщо да го
+  // разгледа) — не разчитаме на count/sum coincidence за да го изключим.
+  const selectActiveEntriesWithLatestDebitLedgerStatement = database.prepare(`
+    SELECT te.profile_id, tel.amount
+    FROM tournament_entries te
+    LEFT JOIN tournament_economy_ledger tel
+      ON tel.ledger_id = (
+        SELECT latest_tel.ledger_id
+        FROM tournament_economy_ledger latest_tel
+        WHERE latest_tel.tournament_id = te.tournament_id
+          AND latest_tel.profile_id = te.profile_id
+          AND latest_tel.entry_type = 'entry_fee_debit'
+        ORDER BY latest_tel.created_at DESC, latest_tel.ledger_id DESC
+        LIMIT 1
+      )
+    WHERE te.tournament_id = ? AND te.refunded_at IS NULL
+    ORDER BY te.profile_id ASC;
   `)
 
   const selectSystemFeeLedgerRowsStatement = database.prepare(`
@@ -1719,9 +1746,17 @@ export async function createTournamentEconomyStore(
         return { ok: false, reason: 'invalid_recipients' }
       }
 
-      const debitRows = selectEntryDebitLedgerRowsStatement.all(tournamentId) as Array<{ profile_id: string; amount: number }>
+      // Net-per-profile валидация (виж коментара на
+      // selectActiveEntriesWithLatestDebitLedgerStatement) — исторически
+      // debit→refund→re-entry редове НЕ трябва да правят валиден турнир
+      // unsettleable, И профил, refund-нат без re-entry, НЕ трябва да влиза
+      // в debit set-а. Взимаме последния (net-valid) debit per profile САМО
+      // за entries с refunded_at IS NULL (реално платено, все още невърнато
+      // участие — confirmed/eliminated/finalist/champion), не суров
+      // count/sum на всички исторически ledger редове.
+      const debitRows = selectActiveEntriesWithLatestDebitLedgerStatement.all(tournamentId) as Array<{ profile_id: string; amount: number | null }>
       const debitProfiles = new Set(debitRows.map((row) => row.profile_id))
-      const debitTotal = debitRows.reduce((sum, row) => sum + row.amount, 0)
+      const debitTotal = debitRows.reduce((sum, row) => sum + (row.amount ?? 0), 0)
       if (
         debitRows.length !== tournament.player_capacity ||
         debitProfiles.size !== tournament.player_capacity ||
