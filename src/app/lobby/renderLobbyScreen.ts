@@ -3715,7 +3715,7 @@ function renderNotificationsDropdown(state: LobbyScreenState): string {
   `
 }
 
-function syncNotificationsDropdown(
+export function syncNotificationsDropdown(
   state: LobbyScreenState,
   callbacks: {
     onClose: () => void

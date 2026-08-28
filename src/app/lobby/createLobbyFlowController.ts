@@ -25,6 +25,7 @@ import {
   releaseLobbyChatBodyScrollLock,
   resolveLobbyChatSenderRole,
   syncProfilePopup,
+  syncNotificationsDropdown,
   clearProfileEditorPendingState,
   appendTopicMessageNode,
   resetTopicsComposerAfterOwnSendDom,
@@ -4912,7 +4913,7 @@ export function createLobbyFlowController(
       },
       onBellClick: () => {
         state.notificationsOpen = !state.notificationsOpen
-        render()
+        renderNotificationsDropdownOnly()
       },
       onPrivateRoomInGameNotificationsChange: (enabled) => {
         state.privateRoomInGameNotificationsEnabled = enabled
@@ -13323,6 +13324,60 @@ export function createLobbyFlowController(
     state.profilePopupContext = context
     state.profilePopupOpen = true
     renderPopupOnly()
+  }
+
+  // Notification bell dropdown живее на document.body (извън root.innerHTML,
+  // виж syncNotificationsDropdown в renderLobbyScreen.ts) — точно като
+  // profile popup-а по-долу (renderPopupOnly). Обикновен render() минава през
+  // renderLobbyScreen()'s skip-if-unchanged guard: notificationsOpen не участва
+  // в nextRootHtml string-а, значи HTML остава byte-identical и guard-ът
+  // връща рано, ПРЕДИ да стигне до вика на syncNotificationsDropdown() в края
+  // на функцията — bell click сменяше state, но dropdown-ът се появяваше
+  // едва при следващ render с различен HTML (напр. навигация), и последващи
+  // bell/backdrop кликове (затваряне) страдаха от същия скип, оставяйки
+  // fullscreen backdrop-а (position:fixed;inset:0;z-index:11000) залепен и
+  // блокиращ целия сайт. Targeted render тук заобикаля root.innerHTML guard-а
+  // изцяло — dropdown open/close винаги е синхронен с bell click-а.
+  function renderNotificationsDropdownOnly(): void {
+    const lobbyState = buildLobbyScreenState()
+    syncNotificationsDropdown(lobbyState, {
+      onClose: () => {
+        state.notificationsOpen = false
+        renderNotificationsDropdownOnly()
+      },
+      onPrivateRoomInGameNotificationsChange: (enabled) => {
+        state.privateRoomInGameNotificationsEnabled = enabled
+        options.onPrivateRoomInGameNotificationsChange?.(enabled)
+        renderNotificationsDropdownOnly()
+      },
+      onPrivateRoomCreatedSoundChange: (enabled) => {
+        state.privateRoomCreatedSoundEnabled = enabled
+        options.onPrivateRoomCreatedSoundChange?.(enabled)
+        renderNotificationsDropdownOnly()
+      },
+      onMissionsClick: () => {
+        state.notificationsOpen = false
+        renderNotificationsDropdownOnly()
+        void openMissionsPopup()
+      },
+      onDailyRewardsClick: () => {
+        state.notificationsOpen = false
+        renderNotificationsDropdownOnly()
+        void openDailyRewardsPopup()
+      },
+      onFriendRequestClick: (friendshipId) => {
+        options.onNotifFriendRequestClick?.(friendshipId)
+      },
+      onGiftNotificationClick: (giftId, amount, fromDisplayName) => {
+        state.pendingGiftNotifications = state.pendingGiftNotifications.filter((g) => g.giftId !== giftId)
+        state.giftReceivedModal = { amount, fromDisplayName }
+        void options.onMarkGiftNotificationRead?.(giftId)
+        render()
+      },
+      onAcceptanceNotificationClick: (friendshipId) => {
+        void handleAcceptanceNotificationClick(friendshipId)
+      },
+    })
   }
 
   function renderPopupOnly(renderOptions?: { skipAnimation?: boolean }): void {
