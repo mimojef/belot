@@ -223,6 +223,7 @@ function makeContext(overrides: Partial<MonitoringContext> = {}): MonitoringCont
     getMatchmakingWaitersByStake: () => ({ '100': 2, '200': 1 }),
     getActiveRoomCount: () => 7,
     getRoomsByPhase: () => ({ bidding: 3, playing: 4 }),
+    getActiveRooms: () => [],
     getWorkerPoolHealth: () => null,
     ...overrides,
   }

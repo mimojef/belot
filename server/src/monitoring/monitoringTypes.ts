@@ -1,5 +1,6 @@
-import type { GameWorkerPoolHealth } from '../game/createGameWorkerPool.js'
+import type { GameWorkerPoolHealth, GameWorkerCpuUsageEntry } from '../game/createGameWorkerPool.js'
 import type { ActiveRoomSnapshot } from '../core/computeActiveRoomsSnapshot.js'
+import type { EventLoopHealthSnapshot } from './eventLoopHealth.js'
 
 export type SamplerStatus = 'warming_up' | 'running' | 'stopped'
 
@@ -37,11 +38,34 @@ export type MonitoringSnapshot = {
   serverCpuNowPercent: number | null
   nodeCpuNowPercent: number | null
 
+  // processCpu = nodeCpuNowPercent (process.cpuUsage(), целия Node process —
+  // main thread + libuv threadpool + всички worker_threads + GC/V8).
+  // Дублирано под forensic-специфично име за яснота в incident detector-а;
+  // не разчитай на второ независимо измерване.
+  processCpuNowPercent: number | null
+
+  // gameWorkerCpuNowPercent: агрегирано CPU% на gameplay worker_threads,
+  // изчислено от delta на worker.cpuUsage() между два семпъла. null ако
+  // worker.cpuUsage() липсва на текущия Node runtime, или ако все още няма
+  // предишен семпъл за delta (warm-up).
+  gameWorkerCpuNowPercent: number | null
+
+  // nonGameWorkerProcessCpuNowPercent = processCpuNowPercent −
+  // gameWorkerCpuNowPercent. ВАЖНО: това НЕ Е "main thread CPU" — remainder-ът
+  // все още включва libuv threadpool, GC/V8 background threads и native
+  // addon threads. null ако gameWorkerCpuNowPercent е null.
+  nonGameWorkerProcessCpuNowPercent: number | null
+
+  eventLoopUtilization: number | null
+  eventLoopDelayP50Ms: number | null
+  eventLoopDelayP99Ms: number | null
+
   ramUsedMb: number
   ramTotalMb: number
   ramPercent: number
 
   processRssMb: number
+  processHeapUsedMb: number
   processUptimeSec: number
   backendStartedAtIso: string
 
@@ -84,4 +108,10 @@ export type MonitoringContext = {
   getRoomsByPhase: () => Record<string, number>
   getActiveRooms: () => ActiveRoomSnapshot[]
   getWorkerPoolHealth: () => GameWorkerPoolHealth | null
+  // Monitoring-only, best-effort, may be omitted (worker pool absent in
+  // some deployment modes) — sampler feature-detects via presence.
+  getWorkerCpuUsages?: () => Promise<GameWorkerCpuUsageEntry[]>
+  // Инжектиран event-loop sampler, за да остане createMonitoringSampler
+  // тестваем чрез dependency injection (аналог на останалите MonitoringDeps).
+  sampleEventLoopHealth?: () => EventLoopHealthSnapshot
 }

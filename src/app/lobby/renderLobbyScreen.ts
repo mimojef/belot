@@ -41,9 +41,10 @@ import type {
   TopicMuteEvidenceSelfEntry,
   TopicMuteEvidenceModeratorEntry,
 } from '../network/createGameServerClient'
-import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot } from '../adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot, CpuIncidentSummary, CpuIncidentDetail } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
 import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabel } from '../adminServer/renderAdminHistory'
+import { renderCpuIncidentsList } from '../adminServer/renderAdminCpuIncidents'
 import type { PlayerAccountRole, PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
@@ -745,6 +746,13 @@ export type LobbyScreenState = {
   adminHistoryLoading: boolean
   adminHistoryErrorText: string | null
   adminWsConnections: WsConnectionsResult | null
+  adminCpuIncidents: CpuIncidentSummary[] | null
+  adminCpuIncidentsLoading: boolean
+  adminCpuIncidentsErrorText: string | null
+  adminCpuIncidentExpandedId: number | null
+  adminCpuIncidentDetailLoading: boolean
+  adminCpuIncidentDetail: CpuIncidentDetail | null
+  adminCpuIncidentDetailErrorText: string | null
   adminVisitorsLoading: boolean
   adminVisitorsRows: import('../network/createGameServerClient').AdminVisitorRow[]
   adminVisitorsTotal: number
@@ -1149,6 +1157,7 @@ export type RenderLobbyScreenOptions = {
   onSupportDeleteCancel: () => void
   onSupportDeleteConfirm: () => void
   onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
+  onAdminCpuIncidentDetailToggle?: (incidentId: number) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
@@ -7600,6 +7609,29 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
     `
   }
 
+  // ── CPU инциденти section ──
+  let cpuIncidentsHtml = ''
+  if (state.adminCpuIncidentsLoading) {
+    cpuIncidentsHtml = `<div style="height:60px;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:13px;font-weight:800;">Зареждане...</div>`
+  } else if (state.adminCpuIncidentsErrorText) {
+    cpuIncidentsHtml = `<div style="background:rgba(127,29,29,0.3);border:1px solid rgba(248,113,113,0.3);border-radius:8px;padding:10px 14px;color:#fca5a5;font-size:12px;font-weight:700;">${escapeHtml(state.adminCpuIncidentsErrorText)}</div>`
+  } else if (state.adminCpuIncidents !== null && state.adminCpuIncidents !== undefined) {
+    cpuIncidentsHtml = renderCpuIncidentsList(
+      state.adminCpuIncidents,
+      state.adminCpuIncidentExpandedId,
+      state.adminCpuIncidentExpandedId !== null
+        ? {
+            loading: state.adminCpuIncidentDetailLoading,
+            detail: state.adminCpuIncidentDetail,
+            errorText: state.adminCpuIncidentDetailErrorText,
+          }
+        : null,
+      escapeHtml,
+    )
+  } else {
+    cpuIncidentsHtml = `<div style="height:40px;display:flex;align-items:center;color:rgba(255,255,255,0.35);font-size:12px;font-style:italic;">Зареждане...</div>`
+  }
+
   // ── WS Connections section ──
   const wsConns = state.adminWsConnections
   let wsConnectionsHtml = ''
@@ -7794,6 +7826,11 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
           </div>
         </div>
         ${historyHtml}
+      </div>
+
+      <div style="margin-top:28px;">
+        ${sectionLabel('CPU ИНЦИДЕНТИ')}
+        ${cpuIncidentsHtml}
       </div>
 
     </section>
@@ -15032,6 +15069,16 @@ export function renderLobbyScreen(
       const w = btn.dataset.historyWindow
       if (w === '1h' || w === '24h' || w === '7d') {
         options.onAdminHistoryWindowChange(w)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-cpu-incident-detail-toggle]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const idStr = btn.dataset.cpuIncidentDetailToggle ?? ''
+      const id = Number.parseInt(idStr, 10)
+      if (Number.isFinite(id)) {
+        options.onAdminCpuIncidentDetailToggle?.(id)
       }
     })
   })

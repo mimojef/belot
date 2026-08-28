@@ -41,6 +41,11 @@ export type GameWorkerLifecycleClient = {
   shutdown(): Promise<void>
   getState(): GameWorkerLifecycleState
   getMessageEndpoint(): GameWorkerTickMessageEndpoint
+  // Monitoring-only, best-effort: worker-scoped CPU usage (node:worker_threads
+  // Worker#cpuUsage()). Feature-detected — връща null ако API-то липсва на
+  // текущия Node runtime, ако worker-ът не е ready, или при каквато и да е
+  // грешка. НИКОГА не хвърля и никога не влияе на gameplay/protocol пътя.
+  getWorkerCpuUsage(): Promise<NodeJS.CpuUsage | null>
 }
 
 // ─── Internal types ───────────────────────────────────────────────────────────
@@ -744,6 +749,23 @@ export function createGameWorkerLifecycleClient(
     return worker
   }
 
+  // ─── getWorkerCpuUsage() (monitoring-only, best-effort) ────────────────────────
+
+  async function getWorkerCpuUsage(): Promise<NodeJS.CpuUsage | null> {
+    if (state !== 'ready' || worker === null) return null
+    // Feature-detect: worker.cpuUsage() е добавена в по-нови Node версии.
+    // Repo-то не гарантира production Node версия — никога не приемаме, че
+    // методът съществува.
+    const cpuUsageFn = (worker as unknown as { cpuUsage?: unknown }).cpuUsage
+    if (typeof cpuUsageFn !== 'function') return null
+    try {
+      const usage = await (worker.cpuUsage as () => Promise<NodeJS.CpuUsage>)()
+      return usage
+    } catch {
+      return null
+    }
+  }
+
   // ─── Public interface ─────────────────────────────────────────────────────────
 
   return {
@@ -757,5 +779,6 @@ export function createGameWorkerLifecycleClient(
       return state
     },
     getMessageEndpoint,
+    getWorkerCpuUsage,
   }
 }

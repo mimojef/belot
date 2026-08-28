@@ -645,6 +645,14 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminGrantTopChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminRevokeTopChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
+  onAdminCpuIncidentsLoad?: () => Promise<
+    | { ok: true; incidents: import('../adminServer/adminServerTypes.js').CpuIncidentSummary[] }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCpuIncidentDetailLoad?: (incidentId: number) => Promise<
+    | { ok: true; detail: import('../adminServer/adminServerTypes.js').CpuIncidentDetail }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient.js').VisitorListType) => void
@@ -1517,6 +1525,13 @@ type InternalLobbyFlowState = {
   adminHistoryLoading: boolean
   adminHistoryErrorText: string | null
   adminWsConnections: import('../adminServer/adminServerTypes.js').WsConnectionsResult | null
+  adminCpuIncidents: import('../adminServer/adminServerTypes.js').CpuIncidentSummary[] | null
+  adminCpuIncidentsLoading: boolean
+  adminCpuIncidentsErrorText: string | null
+  adminCpuIncidentExpandedId: number | null
+  adminCpuIncidentDetailLoading: boolean
+  adminCpuIncidentDetail: import('../adminServer/adminServerTypes.js').CpuIncidentDetail | null
+  adminCpuIncidentDetailErrorText: string | null
   adminVisitorsLoading: boolean
   adminVisitorsRows: import('../network/createGameServerClient.js').AdminVisitorRow[]
   adminVisitorsTotal: number
@@ -2016,6 +2031,13 @@ function createInitialState(): InternalLobbyFlowState {
     adminHistoryLoading: false,
     adminHistoryErrorText: null,
     adminWsConnections: null,
+    adminCpuIncidents: null,
+    adminCpuIncidentsLoading: false,
+    adminCpuIncidentsErrorText: null,
+    adminCpuIncidentExpandedId: null,
+    adminCpuIncidentDetailLoading: false,
+    adminCpuIncidentDetail: null,
+    adminCpuIncidentDetailErrorText: null,
     adminVisitorsLoading: false,
     adminVisitorsRows: [],
     adminVisitorsTotal: 0,
@@ -3802,6 +3824,13 @@ export function createLobbyFlowController(
       adminHistoryLoading: state.adminHistoryLoading,
       adminHistoryErrorText: state.adminHistoryErrorText,
       adminWsConnections: state.adminWsConnections,
+      adminCpuIncidents: state.adminCpuIncidents,
+      adminCpuIncidentsLoading: state.adminCpuIncidentsLoading,
+      adminCpuIncidentsErrorText: state.adminCpuIncidentsErrorText,
+      adminCpuIncidentExpandedId: state.adminCpuIncidentExpandedId,
+      adminCpuIncidentDetailLoading: state.adminCpuIncidentDetailLoading,
+      adminCpuIncidentDetail: state.adminCpuIncidentDetail,
+      adminCpuIncidentDetailErrorText: state.adminCpuIncidentDetailErrorText,
       adminVisitorsLoading: state.adminVisitorsLoading,
       adminVisitorsRows: state.adminVisitorsRows,
       adminVisitorsTotal: state.adminVisitorsTotal,
@@ -5417,6 +5446,37 @@ export function createLobbyFlowController(
         state.adminHistoryErrorText = null
         render()
         options.onAdminHistoryWindowChange?.(window)
+      },
+      onAdminCpuIncidentDetailToggle: (incidentId) => {
+        if (state.adminCpuIncidentExpandedId === incidentId) {
+          state.adminCpuIncidentExpandedId = null
+          state.adminCpuIncidentDetail = null
+          state.adminCpuIncidentDetailErrorText = null
+          state.adminCpuIncidentDetailLoading = false
+          render()
+          return
+        }
+        state.adminCpuIncidentExpandedId = incidentId
+        state.adminCpuIncidentDetail = null
+        state.adminCpuIncidentDetailErrorText = null
+        state.adminCpuIncidentDetailLoading = true
+        render()
+        void (async () => {
+          const result = await options.onAdminCpuIncidentDetailLoad?.(incidentId)
+          if (state.adminCpuIncidentExpandedId !== incidentId) return
+          if (result === undefined) {
+            state.adminCpuIncidentDetailLoading = false
+            return
+          }
+          if (result.ok) {
+            state.adminCpuIncidentDetail = result.detail
+            state.adminCpuIncidentDetailLoading = false
+          } else {
+            state.adminCpuIncidentDetailErrorText = result.message
+            state.adminCpuIncidentDetailLoading = false
+          }
+          render()
+        })()
       },
       onAdminVisitorsPeriodClick: (period) => {
         if (period === 'today' || period === 'yesterday' || period === '7d' || period === '30d') {
@@ -9635,10 +9695,33 @@ export function createLobbyFlowController(
     state.adminHistoryResult = null
     state.adminHistoryLoading = false
     state.adminHistoryErrorText = null
+    state.adminCpuIncidents = null
+    state.adminCpuIncidentsLoading = true
+    state.adminCpuIncidentsErrorText = null
+    state.adminCpuIncidentExpandedId = null
+    state.adminCpuIncidentDetailLoading = false
+    state.adminCpuIncidentDetail = null
+    state.adminCpuIncidentDetailErrorText = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     render()
     options.onAdminServerScreenEnter?.()
+    void (async () => {
+      const result = await options.onAdminCpuIncidentsLoad?.()
+      if (state.currentScreen !== 'admin-server') return
+      if (result === undefined) {
+        state.adminCpuIncidentsLoading = false
+        return
+      }
+      if (result.ok) {
+        state.adminCpuIncidents = result.incidents
+        state.adminCpuIncidentsLoading = false
+      } else {
+        state.adminCpuIncidentsErrorText = result.message
+        state.adminCpuIncidentsLoading = false
+      }
+      render()
+    })()
   }
 
   async function showAdminPanel(): Promise<void> {

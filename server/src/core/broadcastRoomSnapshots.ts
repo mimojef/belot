@@ -7,10 +7,20 @@ import {
   type ServerRoom,
 } from './serverTypes.js'
 
+// Monitoring-only, best-effort hook — вика се веднъж на всяко broadcast
+// събитие (не по получател, виж monitoring audit §4/§7 "room broadcast
+// trigger"). Дефолтва към no-op.
+let onBroadcastHook: (() => void) | null = null
+
+export function setBroadcastRoomSnapshotsMonitoringHook(hook: (() => void) | null): void {
+  onBroadcastHook = hook
+}
+
 export function broadcastRoomSnapshots(
   room: ServerRoom,
   socketRegistry: Map<ConnectionId, WebSocket>,
 ): void {
+  onBroadcastHook?.()
   for (const seat of SERVER_SEAT_ORDER) {
     const participant = room.seats[seat].participant
 

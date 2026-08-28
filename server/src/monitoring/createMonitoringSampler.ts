@@ -18,6 +18,12 @@ import type {
 
 const SAMPLE_INTERVAL_MS = 1000
 
+// Worker CPU е async (worker.cpuUsage() е Promise-базирана message round-trip
+// към всеки worker) — не го семплираме на всяка 1s секунда за да избегнем
+// излишен message traffic; 10s е достатъчно за forensic bucket резолюцията
+// надолу по веригата (виж final audit §C, §16 performance).
+const WORKER_CPU_SAMPLE_INTERVAL_MS = 10_000
+
 const defaultDeps: MonitoringDeps = {
   nowMs: () => Date.now(),
   processCpuUsage: () => process.cpuUsage(),
@@ -41,6 +47,15 @@ export function createMonitoringSampler(
   let prevCpuTimes: OsCpuSnapshot | null = null
   let prevCpuUsage: NodeJS.CpuUsage | null = null
   let prevSampleAtMs: number | null = null
+
+  // Side-channel state за gameWorkerCpu — обновявана асинхронно на по-рядък
+  // интервал (виж WORKER_CPU_SAMPLE_INTERVAL_MS), четена синхронно от
+  // collectSample(). Никога не блокира 1s основния loop.
+  let prevWorkerCpuUsageByWorkerId: Map<string, NodeJS.CpuUsage> | null = null
+  let prevWorkerCpuSampleAtMs: number | null = null
+  let lastGameWorkerCpuNowPercent: number | null = null
+  let workerCpuIntervalId: ReturnType<typeof globalThis.setInterval> | null = null
+  let isSamplingWorkerCpu = false
 
   let lastSnapshot: MonitoringSnapshot = buildWarmingSnapshotSafe(context, deps)
   let lastError: string | null = null
@@ -71,6 +86,55 @@ export function createMonitoringSampler(
         },
         lastError: w.lastError !== null ? sanitizeErrorMessage(w.lastError) : null,
       })),
+    }
+  }
+
+  async function collectWorkerCpuSample(): Promise<void> {
+    if (isSamplingWorkerCpu || status === 'stopped') return
+    if (context.getWorkerCpuUsages === undefined) return
+    isSamplingWorkerCpu = true
+
+    try {
+      const entries = await context.getWorkerCpuUsages()
+      const nowMs = deps.nowMs()
+
+      // Ако нито един worker не поддържа cpuUsage() (feature-detect fail,
+      // напр. по-стар Node), не претендираме за 0% — оставяме null.
+      const anyUsageAvailable = entries.some((e) => e.cpuUsage !== null)
+      if (!anyUsageAvailable) {
+        prevWorkerCpuUsageByWorkerId = null
+        prevWorkerCpuSampleAtMs = null
+        lastGameWorkerCpuNowPercent = null
+        return
+      }
+
+      if (prevWorkerCpuUsageByWorkerId !== null && prevWorkerCpuSampleAtMs !== null) {
+        const elapsedMs = nowMs - prevWorkerCpuSampleAtMs
+        if (elapsedMs > 0) {
+          let totalDeltaUs = 0
+          for (const entry of entries) {
+            if (entry.cpuUsage === null) continue
+            const prev = prevWorkerCpuUsageByWorkerId.get(entry.workerId)
+            if (prev === undefined) continue
+            const userDelta = entry.cpuUsage.user - prev.user
+            const sysDelta = entry.cpuUsage.system - prev.system
+            totalDeltaUs += Math.max(0, userDelta) + Math.max(0, sysDelta)
+          }
+          lastGameWorkerCpuNowPercent = Math.max(0, (totalDeltaUs / (elapsedMs * 1000)) * 100)
+        }
+      }
+
+      const nextMap = new Map<string, NodeJS.CpuUsage>()
+      for (const entry of entries) {
+        if (entry.cpuUsage !== null) nextMap.set(entry.workerId, entry.cpuUsage)
+      }
+      prevWorkerCpuUsageByWorkerId = nextMap
+      prevWorkerCpuSampleAtMs = nowMs
+    } catch {
+      // Best-effort — never let worker CPU sampling affect sampler health.
+      lastGameWorkerCpuNowPercent = null
+    } finally {
+      isSamplingWorkerCpu = false
     }
   }
 
@@ -109,6 +173,18 @@ export function createMonitoringSampler(
       const waitersByStake = context.getMatchmakingWaitersByStake()
       const totalWaiters = Object.values(waitersByStake).reduce((s, n) => s + n, 0)
 
+      const gameWorkerCpuNowPercent = lastGameWorkerCpuNowPercent
+      const nonGameWorkerProcessCpuNowPercent =
+        nodeCpuNowPercent !== null && gameWorkerCpuNowPercent !== null
+          ? Math.max(0, nodeCpuNowPercent - gameWorkerCpuNowPercent)
+          : null
+
+      const eventLoopHealth = context.sampleEventLoopHealth?.() ?? {
+        utilization: null,
+        delayP50Ms: null,
+        delayP99Ms: null,
+      }
+
       lastError = null
       lastSnapshot = {
         samplerStatus: status,
@@ -119,10 +195,19 @@ export function createMonitoringSampler(
         serverCpuNowPercent,
         nodeCpuNowPercent,
 
+        processCpuNowPercent: nodeCpuNowPercent,
+        gameWorkerCpuNowPercent,
+        nonGameWorkerProcessCpuNowPercent,
+
+        eventLoopUtilization: eventLoopHealth.utilization,
+        eventLoopDelayP50Ms: eventLoopHealth.delayP50Ms,
+        eventLoopDelayP99Ms: eventLoopHealth.delayP99Ms,
+
         ramUsedMb: ram.ramUsedMb,
         ramTotalMb: ram.ramTotalMb,
         ramPercent: ram.ramPercent,
         processRssMb: ram.processRssMb,
+        processHeapUsedMb: deps.processMemUsage().heapUsed / (1024 * 1024),
         processUptimeSec: deps.processUptime(),
         backendStartedAtIso: new Date(context.backendStartedAtMs).toISOString(),
 
@@ -153,6 +238,13 @@ export function createMonitoringSampler(
   intervalId = deps.setInterval(collectSample, SAMPLE_INTERVAL_MS)
   collectSample()
 
+  if (context.getWorkerCpuUsages !== undefined) {
+    workerCpuIntervalId = deps.setInterval(() => {
+      void collectWorkerCpuSample()
+    }, WORKER_CPU_SAMPLE_INTERVAL_MS)
+    void collectWorkerCpuSample()
+  }
+
   return {
     getSnapshot(): MonitoringSnapshot {
       return lastSnapshot
@@ -163,6 +255,10 @@ export function createMonitoringSampler(
       if (intervalId !== null) {
         deps.clearInterval(intervalId)
         intervalId = null
+      }
+      if (workerCpuIntervalId !== null) {
+        deps.clearInterval(workerCpuIntervalId)
+        workerCpuIntervalId = null
       }
       lastSnapshot = { ...lastSnapshot, samplerStatus: 'stopped' }
     },
@@ -182,10 +278,17 @@ function buildWarmingSnapshot(
     sampleWindowMs: 0,
     serverCpuNowPercent: null,
     nodeCpuNowPercent: null,
+    processCpuNowPercent: null,
+    gameWorkerCpuNowPercent: null,
+    nonGameWorkerProcessCpuNowPercent: null,
+    eventLoopUtilization: null,
+    eventLoopDelayP50Ms: null,
+    eventLoopDelayP99Ms: null,
     ramUsedMb: ram.ramUsedMb,
     ramTotalMb: ram.ramTotalMb,
     ramPercent: ram.ramPercent,
     processRssMb: ram.processRssMb,
+    processHeapUsedMb: deps.processMemUsage().heapUsed / (1024 * 1024),
     processUptimeSec: deps.processUptime(),
     backendStartedAtIso: new Date(context.backendStartedAtMs).toISOString(),
     activeWsConnections: 0,
@@ -215,10 +318,17 @@ function buildWarmingSnapshotSafe(
       sampleWindowMs: 0,
       serverCpuNowPercent: null,
       nodeCpuNowPercent: null,
+      processCpuNowPercent: null,
+      gameWorkerCpuNowPercent: null,
+      nonGameWorkerProcessCpuNowPercent: null,
+      eventLoopUtilization: null,
+      eventLoopDelayP50Ms: null,
+      eventLoopDelayP99Ms: null,
       ramUsedMb: 0,
       ramTotalMb: 0,
       ramPercent: 0,
       processRssMb: 0,
+      processHeapUsedMb: 0,
       processUptimeSec: 0,
       backendStartedAtIso: new Date(context.backendStartedAtMs).toISOString(),
       activeWsConnections: 0,

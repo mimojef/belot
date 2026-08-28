@@ -35,7 +35,7 @@ import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import { formatTopicsSectionMuteErrorText } from './app/lobby/renderTopicsScreen'
 import type { PlayerAccountRole } from './ui/overlays/renderPlayerProfilePopup'
-import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult } from './app/adminServer/adminServerTypes'
+import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, CpuIncidentSummary, CpuIncidentDetail } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
 import {
@@ -2905,6 +2905,62 @@ async function loadAdminConnections(): Promise<
   }
 }
 
+async function loadAdminCpuIncidents(): Promise<
+  | { ok: true; incidents: CpuIncidentSummary[] }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/monitoring/cpu-incidents`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.', forbidden: true }
+    }
+    if (response.status === 503) {
+      return { ok: false, message: 'CPU инцидентите временно не са налични.' }
+    }
+    const data = (await response.json()) as { ok?: boolean; message?: string; incidents?: unknown }
+    if (!response.ok || data.ok !== true || !Array.isArray(data.incidents)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на CPU инцидентите.' }
+    }
+    return { ok: true, incidents: data.incidents as CpuIncidentSummary[] }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminCpuIncidentDetail(incidentId: number): Promise<
+  | { ok: true; detail: CpuIncidentDetail }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/monitoring/cpu-incidents/${encodeURIComponent(String(incidentId))}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.', forbidden: true }
+    }
+    if (response.status === 404) {
+      return { ok: false, message: 'Инцидентът не беше намерен.' }
+    }
+    const data = (await response.json()) as { ok?: boolean; message?: string; summary?: unknown; timeline?: unknown }
+    if (!response.ok || data.ok !== true || !data.summary || !Array.isArray(data.timeline)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на детайлите.' }
+    }
+    return {
+      ok: true,
+      detail: {
+        summary: data.summary as CpuIncidentDetail['summary'],
+        timeline: data.timeline as CpuIncidentDetail['timeline'],
+      },
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 let monitoringIntervalId: ReturnType<typeof setInterval> | null = null
 let monitoringGeneration = 0
 let monitoringFetchInFlightGeneration: number | null = null
@@ -5340,6 +5396,8 @@ lobby = createLobbyFlowController({
     startMonitoringPolling()
     fetchAdminHistory('1h')
   },
+  onAdminCpuIncidentsLoad: () => loadAdminCpuIncidents(),
+  onAdminCpuIncidentDetailLoad: (incidentId) => loadAdminCpuIncidentDetail(incidentId),
   onAdminServerScreenLeave: () => {
     stopMonitoringPolling()
     invalidateHistoryGeneration()

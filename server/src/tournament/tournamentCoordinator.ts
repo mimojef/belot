@@ -198,6 +198,11 @@ type TournamentCoordinatorDeps = {
   setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
   clearInterval?: (id: ReturnType<typeof globalThis.setInterval>) => void
   logError?: (message: string, error: unknown) => void
+  // Monitoring-only, best-effort — извиква се веднъж при реално създаден
+  // следващ кръг (createdMatchIds.length > 0) и веднъж при завършен мач с
+  // потвърден победител. Никога не хвърля, никога не влияе на tournament логиката.
+  onRoundStarted?: () => void
+  onMatchResult?: () => void
 }
 
 type TournamentRow = {
@@ -1676,6 +1681,13 @@ export async function createTournamentCoordinator(
     }
 
     const matches = selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
+    if (createdMatchIds.length > 0) {
+      try {
+        deps.onRoundStarted?.()
+      } catch {
+        // monitoring hook — никога не влияе на tournament логиката
+      }
+    }
     return { matches, createdMatchIds }
   }
 
@@ -1738,6 +1750,11 @@ export async function createTournamentCoordinator(
 
   function advanceCompletedMatch(match: MatchRow): void {
     if (match.winner_team_id === null) return
+    try {
+      deps.onMatchResult?.()
+    } catch {
+      // monitoring hook — никога не влияе на tournament логиката
+    }
     if (match.round_type === 'final') {
       completeFinalSideEffects(match, match.winner_team_id)
       return

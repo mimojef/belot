@@ -62,6 +62,11 @@ export type GameWorkerPoolHealth = {
   workers: GameWorkerPoolWorkerHealth[]
 }
 
+export type GameWorkerCpuUsageEntry = {
+  workerId: string
+  cpuUsage: NodeJS.CpuUsage | null
+}
+
 export type GameWorkerPool = {
   start(): Promise<void>
   ensureRoom(roomId: string): EnsurePoolRoomResult
@@ -72,6 +77,10 @@ export type GameWorkerPool = {
     now: number,
   ): Promise<GameWorkerTickRoomResult[]>
   getHealth(): GameWorkerPoolHealth
+  // Monitoring-only, best-effort: per-worker CPU usage. Всеки entry е null
+  // ако worker.cpuUsage() не е налична на текущия Node runtime или worker-ът
+  // не е ready — никога не хвърля.
+  getWorkerCpuUsages(): Promise<GameWorkerCpuUsageEntry[]>
   shutdown(): Promise<void>
 }
 
@@ -714,6 +723,15 @@ export function createGameWorkerPool(
     return shutdownPromise
   }
 
+  async function getWorkerCpuUsages(): Promise<GameWorkerCpuUsageEntry[]> {
+    return Promise.all(
+      bundles.map(async (bundle) => ({
+        workerId: bundle.workerId,
+        cpuUsage: await bundle.lifecycleClient.getWorkerCpuUsage(),
+      })),
+    )
+  }
+
   return {
     start,
     ensureRoom,
@@ -721,6 +739,7 @@ export function createGameWorkerPool(
     getWorkerIdForRoom,
     computeTickRooms,
     getHealth,
+    getWorkerCpuUsages,
     shutdown,
   }
 }

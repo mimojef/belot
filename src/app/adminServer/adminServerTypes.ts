@@ -146,10 +146,17 @@ export type MonitoringSnapshot = {
   sampleWindowMs: number
   serverCpuNowPercent: number | null
   nodeCpuNowPercent: number | null
+  processCpuNowPercent: number | null
+  gameWorkerCpuNowPercent: number | null
+  nonGameWorkerProcessCpuNowPercent: number | null
+  eventLoopUtilization: number | null
+  eventLoopDelayP50Ms: number | null
+  eventLoopDelayP99Ms: number | null
   ramUsedMb: number
   ramTotalMb: number
   ramPercent: number
   processRssMb: number
+  processHeapUsedMb: number
   processUptimeSec: number
   backendStartedAtIso: string
   activeWsConnections: number
@@ -161,4 +168,64 @@ export type MonitoringSnapshot = {
   rooms: ActiveRoomSnapshot[]
   workerPool: MonitoringWorkerPoolSnapshot | null
   lastError: string | null
+}
+
+// ─── CPU incident forensics (отделен слой, огледален на server/src/monitoring/cpuIncidentTypes.ts) ───
+
+export type CpuIncidentDetectionType = 'extreme_spike' | 'sustained_high' | 'sustained_with_spike'
+
+export type CpuIncidentActivityRates = {
+  gameplayPerMin: number
+  lobbyChatPerMin: number
+  directChatPerMin: number
+  pikaTeamChatPerMin: number
+  officialSupportPerMin: number
+  privateRoomChatPerMin: number
+  topicsPerMin: number
+  lafchePerMin: number
+  httpPerMin: number
+}
+
+export type CpuIncidentSummary = {
+  id: number
+  detectionType: CpuIncidentDetectionType
+  startedAtMs: number
+  endedAtMs: number | null
+  durationMs: number | null
+  processCpuMax: number | null
+  processCpuAvg: number | null
+  processCpuP95: number | null
+  serverCpuMax: number | null
+  gameWorkerCpuMax: number | null
+  nonGameWorkerProcessCpuMax: number | null
+  eventLoopUtilizationMax: number | null
+  eventLoopDelayP99MaxMs: number | null
+  rssMaxMb: number | null
+  onlinePlayersAvg: number | null
+  activeMatchesAvg: number | null
+  wsConnectionsAvg: number | null
+  activityRates: CpuIncidentActivityRates
+  topHttpCategoriesJson: string | null
+  topWsInboundTypesJson: string | null
+  topWsOutboundTypesJson: string | null
+}
+
+export type CpuIncidentTimelineSample = {
+  t: number
+  sampleResolutionMs: number
+  processCpu: number | null
+  serverCpu: number | null
+  gameWorkerCpu: number | null
+  nonGameWorkerProcessCpu: number | null
+  eventLoopUtilization: number | null
+  eventLoopDelayP99Ms: number | null
+  rssMb: number | null
+  onlinePlayers: number | null
+  activeMatches: number | null
+  wsConnections: number | null
+}
+
+export type CpuIncidentDetail = {
+  summary: CpuIncidentSummary
+  timeline: CpuIncidentTimelineSample[]
 }

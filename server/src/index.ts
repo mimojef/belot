@@ -176,7 +176,7 @@ import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore, type YellowCoinGiftSnapshot } from './db/yellowCoinGiftStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
-import { broadcastRoomSnapshots } from './core/broadcastRoomSnapshots.js'
+import { broadcastRoomSnapshots, setBroadcastRoomSnapshotsMonitoringHook } from './core/broadcastRoomSnapshots.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
 import { computeActiveRoomsSnapshot } from './core/computeActiveRoomsSnapshot.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
@@ -315,6 +315,25 @@ import {
   isValidHistoryWindow,
   type MonitoringHistoryStore,
 } from './monitoring/monitoringHistoryStore.js'
+import { createActivityCounters, type ActivityCounters } from './monitoring/activityCounters.js'
+import { classifyHttpRequestPath } from './monitoring/httpCategoryClassifier.js'
+import { createEventLoopMonitor } from './monitoring/eventLoopHealth.js'
+import {
+  createForensicRingBuffer,
+  createBucketAccumulator,
+  createCpuIncidentDetector,
+  type ForensicRingBuffer,
+  type BucketAccumulator,
+  type CpuIncidentDetector,
+} from './monitoring/cpuIncidentDetector.js'
+import { CPU_INCIDENT_SAMPLING } from './monitoring/cpuIncidentTypes.js'
+import {
+  createCpuIncidentStore,
+  getDefaultSummaryRetentionCutoffMs,
+  getDefaultTimelineRetentionCutoffMs,
+  type CpuIncidentStore,
+} from './monitoring/cpuIncidentStore.js'
+import { setSendJsonMessageMonitoringHook } from './core/sendJsonMessage.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
 import { createTrainingRecorder } from './trainingRecorder/trainingRecorder.js'
@@ -469,6 +488,18 @@ let monitoringSampler: MonitoringSampler | null = null
 let monitoringHistoryStore: MonitoringHistoryStore | null = null
 let monitoringHistoryIntervalId: ReturnType<typeof setInterval> | null = null
 let monitoringHistoryPurgeIntervalId: ReturnType<typeof setInterval> | null = null
+
+// ─── CPU incident forensics (отделен слой, не пипа monitoring_history) ────────
+const activityCounters: ActivityCounters = createActivityCounters()
+const eventLoopMonitor = createEventLoopMonitor()
+const cpuForensicRingBuffer: ForensicRingBuffer = createForensicRingBuffer()
+const cpuBucketAccumulator: BucketAccumulator = createBucketAccumulator()
+const cpuIncidentDetector: CpuIncidentDetector = createCpuIncidentDetector()
+let cpuIncidentStore: CpuIncidentStore | null = null
+let cpuForensicBucketIntervalId: ReturnType<typeof setInterval> | null = null
+let cpuForensicSampleIntervalId: ReturnType<typeof setInterval> | null = null
+let cpuIncidentPurgeIntervalId: ReturnType<typeof setInterval> | null = null
+
 let isServerShuttingDown = false
 let lastGameWorkerTickFailureLogAt = 0
 let catalogBotRefillInterval: ReturnType<typeof setInterval> | null = null
@@ -4519,6 +4550,7 @@ function removeConnectionFromMatchmaking(connectionId: ConnectionId): boolean {
     ),
   }
 
+  activityCounters.incrementRooms('matchmakingLeave')
   broadcastMatchmakingStatusForStake(existingEntry.stake)
   return true
 }
@@ -4706,6 +4738,8 @@ function processMatchmakingUnsafe(): void {
     if (result.room === null || result.group === null) {
       return
     }
+
+    activityCounters.incrementRooms('matchmakingMatchFound')
 
     const initializedRoom = initializeRoomAuthoritativeGameState(result.room)
 
@@ -5961,6 +5995,7 @@ async function handleGuestContactRequest(
     ipAddress: requestIp === 'unknown' ? null : requestIp,
     userAgent: getFirstHeaderValue(req.headers['user-agent']),
   })
+  activityCounters.incrementChat('guestContactMessages')
 
   try {
     const result = await sendGuestContactEmail(validation.value)
@@ -6182,6 +6217,90 @@ function handleAdminMonitoringConnectionsRequest(
   )
 
   sendJsonResponse(res, 200, { ok: true, ...diagnostic })
+  return true
+}
+
+const CPU_INCIDENTS_LIST_DEFAULT_LIMIT = 50
+
+function handleAdminCpuIncidentsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): boolean {
+  if (pathname !== '/api/admin/monitoring/cpu-incidents') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  // "Сървър" — read-only diagnostics, достъпно за admin И subadmin (същия
+  // pattern като останалите /api/admin/monitoring/* endpoints).
+  if (!isAdminOrSubadminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (cpuIncidentStore === null) {
+    sendJsonResponse(res, 503, { ok: false, message: 'CPU incident monitoring не е наличен.' })
+    return true
+  }
+
+  const limitParam = new URLSearchParams(req.url?.split('?')[1] ?? '').get('limit')
+  const parsedLimit = limitParam !== null ? Number.parseInt(limitParam, 10) : CPU_INCIDENTS_LIST_DEFAULT_LIMIT
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0 ? parsedLimit : CPU_INCIDENTS_LIST_DEFAULT_LIMIT
+
+  const incidents = cpuIncidentStore.listIncidents(limit)
+  sendJsonResponse(res, 200, { ok: true, incidents })
+  return true
+}
+
+function handleAdminCpuIncidentDetailRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): boolean {
+  const match = /^\/api\/admin\/monitoring\/cpu-incidents\/([^/]+)$/.exec(pathname)
+  if (match === null) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isAdminOrSubadminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (cpuIncidentStore === null) {
+    sendJsonResponse(res, 503, { ok: false, message: 'CPU incident monitoring не е наличен.' })
+    return true
+  }
+
+  const incidentId = Number.parseInt(match[1] ?? '', 10)
+  if (!Number.isFinite(incidentId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден incident id.' })
+    return true
+  }
+
+  const detail = cpuIncidentStore.getIncidentDetail(incidentId)
+  if (detail === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Инцидентът не беше намерен.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, ...detail })
   return true
 }
 
@@ -8476,6 +8595,8 @@ async function handleTopicsListRequest(
     return false
   }
 
+  activityCounters.incrementTopics('topicListRequests')
+
   const auth = requireRegisteredProfileSession(req)
   if (!auth.ok) {
     sendJsonResponse(res, 401, {
@@ -8640,6 +8761,8 @@ async function handleTopicMessagesRequest(
     return false
   }
 
+  activityCounters.incrementTopics('topicMessagesRequests')
+
   const auth = requireRegisteredProfileSession(req)
   if (!auth.ok) {
     sendJsonResponse(res, 401, {
@@ -8765,6 +8888,8 @@ async function handleTopicRepliesRequest(
   if (!match || req.method !== 'GET') {
     return false
   }
+
+  activityCounters.incrementTopics('topicRepliesRequests')
 
   const auth = requireRegisteredProfileSession(req)
   if (!auth.ok) {
@@ -11275,6 +11400,8 @@ async function handleTournamentJoinRequest(
   // tournament_events записът за 'entry_confirmed' вече е вписан атомарно
   // вътре в joinTournamentSoloAtomically (същата транзакция като debit-а).
 
+  activityCounters.incrementTournament('tournamentRegistration')
+
   sendJsonResponse(res, 200, {
     ok: true,
     alreadyJoined: result.alreadyJoined,
@@ -11358,6 +11485,8 @@ async function handleTournamentLeaveRequest(
 
   // tournament_events записът за 'entry_withdrawn_and_refunded' вече е
   // вписан атомарно вътре в leaveTournamentAndRefundAtomically.
+
+  activityCounters.incrementTournament('tournamentLeave')
 
   sendJsonResponse(res, 200, {
     ok: true,
@@ -13089,6 +13218,7 @@ async function handleChatRequest(
 
     const recipientProfileIdForNotification = result.conversation.friend.profileId
     const newMessageId = result.newMessage.messageId
+    activityCounters.incrementChat('directChatVipDmMessages')
 
     if (recipientProfileIdForNotification !== null) {
       // friendshipId не е известен ПРЕДИ атомарната транзакция (get-or-create
@@ -13282,6 +13412,12 @@ async function handleChatRequest(
 
     const recipientProfileId = result.conversation.friend.profileId
     const newMessageId = result.newMessage.messageId
+
+    // Pika Team direct chat (kind='pika_support') е РАЗЛИЧЕН subsystem от
+    // official support (supportStore) — виж monitoring audit §A.
+    activityCounters.incrementChat(
+      result.conversation.kind === 'pika_support' ? 'directChatPikaTeamMessages' : 'directChatFriendMessages',
+    )
 
     if (recipientProfileId !== null) {
       sendChatNotificationToProfile({
@@ -14371,6 +14507,7 @@ async function handleSupportRequest(
       }
       throw error
     }
+    activityCounters.incrementChat('officialSupportMessages')
     const messages = supportStore.getMessages(profileId)
     sendJsonResponse(res, 200, { ok: true, message, messages })
     return true
@@ -14475,6 +14612,7 @@ async function handleSupportRequest(
       sendJsonResponse(res, 404, { ok: false, message: 'Потребителят няма съобщения.' })
       return true
     }
+    activityCounters.incrementChat('officialSupportMessages')
     const messages = supportStore.getMessages(profileId)
     sendJsonResponse(res, 200, { ok: true, message, messages })
     return true
@@ -14604,6 +14742,10 @@ async function handleHttpRequest(
   }
 
   const requestUrl = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`)
+
+  // Monitoring-only: fixed, finite pathname-prefix категория, изчислена ВЕДНЪЖ
+  // тук — не пипа dispatch веригата надолу (виж monitoring audit §6/§14).
+  activityCounters.incrementHttpCategory(classifyHttpRequestPath(requestUrl.pathname))
 
   // Guard-нат вътрешно (флаг + loopback, виж localTournamentTestModeGuard.ts) —
   // извън strictly-local режима pathname проверката е единственият разход и
@@ -15038,6 +15180,14 @@ async function handleHttpRequest(
     return
   }
 
+  if (handleAdminCpuIncidentsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (handleAdminCpuIncidentDetailRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleAdminGuestContactMessagesRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -15055,6 +15205,16 @@ async function handleHttpRequest(
     message: 'Not found',
   })
 }
+
+// Monitoring-only: закачи WS outbound брояча за единствения sendJsonMessage
+// choke point (виж monitoring audit §4/§6) — bounded label по message.type.
+setSendJsonMessageMonitoringHook((messageType) => {
+  activityCounters.incrementWsOutbound(messageType)
+})
+
+setBroadcastRoomSnapshotsMonitoringHook(() => {
+  activityCounters.incrementGame('roomSnapshotBroadcasts')
+})
 
 const httpServer = createServer((req, res) => {
   void handleHttpRequest(req, res).catch((error) => {
@@ -15256,6 +15416,8 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      activityCounters.incrementWsInbound(message.type)
+
       if (isServerShuttingDown && isShutdownGuardedClientMessage(message)) {
         // submit_bid_action е fire-and-forget за клиента (виж
         // markBiddingPopupPending() в createActiveRoomFlowController.ts) —
@@ -15362,6 +15524,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        activityCounters.incrementGame('gameplayBidAccepted')
         handleTrainingRecorderHumanBid(trainingRecorder, room, result.room)
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
@@ -15444,6 +15607,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        activityCounters.incrementGame('gameplayCutAccepted')
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
@@ -15534,6 +15698,7 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        activityCounters.incrementGame('gameplayPlayAccepted')
         logAcceptedCardPlayAudit({
           previousRoom: room,
           nextRoom: result.room,
@@ -16108,6 +16273,7 @@ wsServer.on('connection', (socket, request) => {
           queueEntries: addQueueEntry(matchmakingState.queueEntries, nextEntry),
         }
 
+        activityCounters.incrementRooms('matchmakingJoin')
         collectReadyMatchmakingStakes(nextEntry.stake)
 
         const queuedEntryAfterStakeCollection = getQueueEntryByConnectionId(
@@ -16661,6 +16827,8 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        activityCounters.incrementRooms('privateRoomCreate')
+
         safeSendToConnection(connection.id, {
           type: 'private_room_updated',
           room: buildPrivateRoomSnapshot(createResult.room),
@@ -16732,6 +16900,8 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        activityCounters.incrementRooms('privateRoomJoin')
+
         if (!joinResult.readyToStart) {
           sendPrivateRoomUpdateToMembers(joinResult.room)
           if (joinResult.readiness && !joinResult.readiness.ready) {
@@ -16746,6 +16916,9 @@ wsServer.on('connection', (socket, request) => {
         const isLastHuman = privateRoom !== null && getHumanCount(privateRoom) <= 1
 
         const remainingRoom = privateRoomsStore.leaveRoom(connection.id)
+        if (privateRoom !== null) {
+          activityCounters.incrementRooms('privateRoomLeave')
+        }
         if (isLastHuman && privateRoom !== null) {
           // Room was silently deleted (last human left) — no
           // onRoomClosed/onRoomExpired callback fires for this path, so
@@ -17028,6 +17201,8 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        activityCounters.incrementChat('privateRoomChatMessages')
+
         for (const slot of room.slots) {
           if (slot.occupant?.kind === 'human') {
             safeSendToConnection(slot.occupant.connectionId, {
@@ -17283,6 +17458,7 @@ wsServer.on('connection', (socket, request) => {
 
         lobbyChatLastAnnouncedSeq = Math.max(lobbyChatLastAnnouncedSeq, snapshot.seq)
         recordLobbyChatSentMessage(latestConnection.profileId, validation.body)
+        activityCounters.incrementChat('lobbyChatMessages')
 
         broadcastLobbyChatMessageToLocalSubscribers(snapshot, {
           originatingConnectionId: connection.id,
@@ -17555,6 +17731,10 @@ wsServer.on('connection', (socket, request) => {
             recordTopicMessageSent(senderProfileId, message.topicId, null, validation.body)
           }
 
+          activityCounters.incrementTopics(
+            message.topicId === LAFCHE_TOPIC_ID ? 'lafcheRootsCreated' : 'topicRootsCreated',
+          )
+
           // Local instant broadcast — маркира seq-а като locally-announced ПРЕДИ
           // broadcast (за да го хване следващият poll tick дори ако той изпревари
           // synchronous-ния return тук, което не би могло да стане в единствената
@@ -17750,6 +17930,10 @@ wsServer.on('connection', (socket, request) => {
           if (validation.body.length > 0) {
             recordTopicMessageSent(senderProfileId, message.topicId, message.parentMessageId, validation.body)
           }
+
+          activityCounters.incrementTopics(
+            message.topicId === LAFCHE_TOPIC_ID ? 'lafcheRepliesCreated' : 'topicRepliesCreated',
+          )
 
           // Същия locally-announced+poll-cursor инвариант като root (Етап 3
           // разширение — виж коментара при pollNewMessagesStatement/
@@ -18292,6 +18476,12 @@ try {
       }
     },
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
+    onRoundStarted: () => {
+      activityCounters.incrementTournament('tournamentRoundStart')
+    },
+    onMatchResult: () => {
+      activityCounters.incrementTournament('tournamentMatchResult')
+    },
   })
   tournamentCoordinator.start()
   console.log('[tournament-coordinator] Coordinator started')
@@ -18314,6 +18504,8 @@ try {
         gameWorkerPool?.getWorkerIdForRoom(roomId) ?? null,
       ),
     getWorkerPoolHealth: () => gameWorkerPool?.getHealth() ?? null,
+    getWorkerCpuUsages: () => gameWorkerPool?.getWorkerCpuUsages() ?? Promise.resolve([]),
+    sampleEventLoopHealth: () => eventLoopMonitor.sample(),
   })
   console.log('[monitoring] Sampler started')
 } catch (error) {
@@ -18340,6 +18532,76 @@ try {
   console.log('[monitoring] History recording started (60s interval, 30d retention)')
 } catch (error) {
   console.error('[monitoring] Failed to start history store:', sanitizeErrorMessage(error))
+}
+
+// ─── CPU incident forensics ─────────────────────────────────────────────────
+//
+// Отделен слой от monitoring_history — не пипа 1h/24h/7d dashboard-а.
+// 1s CPU семпли (reuse на вече-семплирания monitoringSampler snapshot, не нов
+// os/process syscall loop) → EXTREME SPIKE detector (веднага) + 10s bucket
+// accumulator → SUSTAINED HIGH state machine + ring buffer (5 мин) → persist
+// само при реален затворен incident.
+
+try {
+  cpuIncidentStore = await createCpuIncidentStore(databaseBootstrap.databaseFilePath)
+  console.log('[monitoring] CPU incident store ready')
+
+  cpuIncidentStore.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs())
+
+  cpuForensicSampleIntervalId = setInterval(() => {
+    if (monitoringSampler === null) return
+    const snap = monitoringSampler.getSnapshot()
+    if (snap.processCpuNowPercent === null) return
+
+    cpuIncidentDetector.observeCpuSample(
+      { sampledAtMs: snap.sampledAtMs, processCpuPercent: snap.processCpuNowPercent },
+      cpuForensicRingBuffer.toArray(),
+    )
+
+    cpuBucketAccumulator.addSample({
+      atMs: snap.sampledAtMs,
+      processCpu: snap.processCpuNowPercent,
+      serverCpu: snap.serverCpuNowPercent,
+      gameWorkerCpu: snap.gameWorkerCpuNowPercent,
+      nonGameWorkerProcessCpu: snap.nonGameWorkerProcessCpuNowPercent,
+      eventLoopUtilization: snap.eventLoopUtilization,
+      eventLoopDelayP50Ms: snap.eventLoopDelayP50Ms,
+      eventLoopDelayP99Ms: snap.eventLoopDelayP99Ms,
+      rssMb: snap.processRssMb,
+      heapUsedMb: snap.processHeapUsedMb,
+    })
+  }, 1_000)
+
+  cpuForensicBucketIntervalId = setInterval(() => {
+    const bucketStartMs = Date.now()
+    const bucket = cpuBucketAccumulator.flush(bucketStartMs, {
+      onlinePlayers: countUniqueOnlineRealPlayers(serverState.connections),
+      activeMatches: Object.keys(serverState.rooms).length,
+      wsConnections: countOpenWebSockets(socketRegistry),
+      matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
+      activity: activityCounters.snapshotAndReset(),
+    })
+
+    cpuForensicRingBuffer.push(bucket)
+    cpuIncidentDetector.observeBucket(bucket, cpuForensicRingBuffer.toArray())
+
+    const closedIncidents = cpuIncidentDetector.drainClosedIncidents()
+    for (const incident of closedIncidents) {
+      try {
+        cpuIncidentStore?.persistIncident(incident)
+      } catch (error) {
+        console.error('[monitoring] Failed to persist CPU incident:', sanitizeErrorMessage(error))
+      }
+    }
+  }, CPU_INCIDENT_SAMPLING.bucketMs)
+
+  cpuIncidentPurgeIntervalId = setInterval(() => {
+    cpuIncidentStore?.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs())
+  }, 60 * 60 * 1000)
+
+  console.log('[monitoring] CPU incident forensics started (1s sample, 10s bucket, 90d/14d retention)')
+} catch (error) {
+  console.error('[monitoring] Failed to start CPU incident forensics:', sanitizeErrorMessage(error))
 }
 
 function clearMutationTimersForShutdown(): void {
@@ -18486,6 +18748,23 @@ function clearMutationTimersForShutdown(): void {
     clearInterval(monitoringHistoryPurgeIntervalId)
     monitoringHistoryPurgeIntervalId = null
   }
+
+  if (cpuForensicSampleIntervalId !== null) {
+    clearInterval(cpuForensicSampleIntervalId)
+    cpuForensicSampleIntervalId = null
+  }
+
+  if (cpuForensicBucketIntervalId !== null) {
+    clearInterval(cpuForensicBucketIntervalId)
+    cpuForensicBucketIntervalId = null
+  }
+
+  if (cpuIncidentPurgeIntervalId !== null) {
+    clearInterval(cpuIncidentPurgeIntervalId)
+    cpuIncidentPurgeIntervalId = null
+  }
+
+  eventLoopMonitor.stop()
 }
 
 function closeActiveRoomSnapshotStore(): boolean {
