@@ -42,6 +42,14 @@ export type HumanProfileCountStats = {
   yesterday: number
 }
 
+export type RegisteredProfileListRow = {
+  profileId: ProfileId
+  username: string | null
+  displayName: string
+  createdAt: string
+  email: string | null
+}
+
 export type PlayerProgressStore = {
   createTemporaryHumanProfile: (
     displayName: string,
@@ -99,6 +107,7 @@ export type PlayerProgressStore = {
     | { ok: false; message: string }
   isDisplayNameAvailable: (displayName: string, excludedProfileId?: ProfileId | null) => boolean
   countHumanProfiles: (now?: Date) => HumanProfileCountStats
+  listRegisteredProfilesForPeriod: (period: 'today' | 'yesterday', now?: Date) => RegisteredProfileListRow[]
   getUserGamesPlayedStats: (now?: Date) => { today: number; yesterday: number }
   seedCatalogBotsIfNeeded: () => void
   refillCatalogBotWallets: () => void
@@ -1635,6 +1644,37 @@ export async function createPlayerProgressStore(
     }
   }
 
+  // Drill-down списък зад "днес"/"вчера" броячите на countHumanProfiles() —
+  // ползва СЪЩИЯТ getSofiaDayBoundsUtc, за да не се разминава броят на
+  // редовете тук с показания counter. LIMIT е defensive горна граница
+  // (не UI pagination) — картата никога не показва хиляди редове наведнъж.
+  function listRegisteredProfilesForPeriod(
+    period: 'today' | 'yesterday',
+    now: Date = new Date(),
+  ): RegisteredProfileListRow[] {
+    const bounds = getSofiaDayBoundsUtc(now)
+    const [start, end] = period === 'today'
+      ? [bounds.todayStart, bounds.tomorrowStart]
+      : [bounds.yesterdayStart, bounds.todayStart]
+
+    const rows = database.prepare(`
+      SELECT
+        p.profile_id AS profileId,
+        p.username AS username,
+        p.display_name AS displayName,
+        p.created_at AS createdAt,
+        a.email AS email
+      FROM profiles p
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE p.profile_kind = 'human'
+        AND p.created_at >= ? AND p.created_at < ?
+      ORDER BY p.created_at DESC
+      LIMIT 500
+    `).all(start, end) as RegisteredProfileListRow[]
+
+    return rows
+  }
+
   function getUserGamesPlayedStats(now: Date = new Date()): { today: number; yesterday: number } {
     const bounds = getSofiaDayBoundsUtc(now)
     const countCompletedInRange = (start: string, end: string): number => {
@@ -1765,6 +1805,7 @@ export async function createPlayerProgressStore(
     adminRenameProfileDisplayName,
     isDisplayNameAvailable,
     countHumanProfiles,
+    listRegisteredProfilesForPeriod,
     getUserGamesPlayedStats,
     updateProfileAvatar,
     addProfileGalleryImage,

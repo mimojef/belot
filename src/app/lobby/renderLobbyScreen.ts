@@ -47,6 +47,8 @@ import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabe
 import { renderCpuIncidentsList } from '../adminServer/renderAdminCpuIncidents'
 import type { PlayerAccountRole, PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
+import type { AdminRegisteredProfilesModalState } from '../adminInfo/renderAdminRegisteredProfilesModal'
+import { renderAdminRegisteredProfilesModal } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import {
@@ -566,6 +568,7 @@ export type LobbyScreenState = {
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
+  adminRegisteredProfilesModal: AdminRegisteredProfilesModalState | null
   adminActiveDailyRewardTiers: DailyRewardTierSnapshot[]
   adminStagedDailyRewardTiers: DailyRewardTierSnapshot[]
   adminDailyRewardsLoading: boolean
@@ -1158,6 +1161,8 @@ export type RenderLobbyScreenOptions = {
   onSupportDeleteConfirm: () => void
   onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminCpuIncidentDetailToggle?: (incidentId: number) => void
+  onAdminRegisteredProfilesOpen?: (period: 'today' | 'yesterday') => void
+  onAdminRegisteredProfilesClose?: () => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
@@ -6850,15 +6855,25 @@ export function renderAdminInfoPanel(state: LobbyScreenState): string {
               <span style="font-size:32px;font-weight:900;color:#ffffff;">${(stats.registeredProfiles?.total ?? 0).toLocaleString('bg-BG')}</span>
             </div>
             <span style="font-size:16px;color:rgba(255,255,255,0.25);">|</span>
-            <div>
-              <span style="font-size:11px;color:rgba(212,165,32,0.6);margin-right:3px;">днес</span>
-              <span style="font-size:16px;font-weight:800;color:#d4a520;">${(stats.registeredProfiles?.today ?? 0).toLocaleString('bg-BG')}</span>
-            </div>
+            <button
+              type="button"
+              data-admin-registered-profiles-open="today"
+              aria-label="Виж регистрирани профили: днес"
+              style="background:none;border:none;padding:0;margin:0;cursor:pointer;font:inherit;display:flex;align-items:baseline;gap:0;"
+            >
+              <span style="font-size:11px;color:rgba(212,165,32,0.6);margin-right:3px;text-decoration:underline;text-underline-offset:2px;">днес</span>
+              <span style="font-size:16px;font-weight:800;color:#d4a520;text-decoration:underline;text-underline-offset:2px;">${(stats.registeredProfiles?.today ?? 0).toLocaleString('bg-BG')}</span>
+            </button>
             <span style="font-size:16px;color:rgba(255,255,255,0.25);">|</span>
-            <div>
-              <span style="font-size:11px;color:rgba(212,165,32,0.6);margin-right:3px;">вчера</span>
-              <span style="font-size:16px;font-weight:800;color:#d4a520;">${(stats.registeredProfiles?.yesterday ?? 0).toLocaleString('bg-BG')}</span>
-            </div>
+            <button
+              type="button"
+              data-admin-registered-profiles-open="yesterday"
+              aria-label="Виж регистрирани профили: вчера"
+              style="background:none;border:none;padding:0;margin:0;cursor:pointer;font:inherit;display:flex;align-items:baseline;gap:0;"
+            >
+              <span style="font-size:11px;color:rgba(212,165,32,0.6);margin-right:3px;text-decoration:underline;text-underline-offset:2px;">вчера</span>
+              <span style="font-size:16px;font-weight:800;color:#d4a520;text-decoration:underline;text-underline-offset:2px;">${(stats.registeredProfiles?.yesterday ?? 0).toLocaleString('bg-BG')}</span>
+            </button>
           </div>
         </div>
       </div>
@@ -6957,6 +6972,7 @@ export function renderAdminInfoPanel(state: LobbyScreenState): string {
         ${statCard('Общо (всички времена)', stats.payments.allTime.count, stats.payments.allTime.totalCents, 'allTime')}
       </div>
     </section>
+    ${state.adminRegisteredProfilesModal ? renderAdminRegisteredProfilesModal(state.adminRegisteredProfilesModal, escapeHtml) : ''}
   `
 }
 
@@ -15082,6 +15098,20 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-registered-profiles-open]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const period = btn.dataset.adminRegisteredProfilesOpen
+      if (period === 'today' || period === 'yesterday') {
+        options.onAdminRegisteredProfilesOpen?.(period)
+      }
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-admin-registered-profiles-close="1"]')
+    ?.addEventListener('click', () => options.onAdminRegisteredProfilesClose?.())
+  root.querySelector<HTMLElement>('[data-admin-registered-profiles-backdrop="1"]')
+    ?.addEventListener('click', () => options.onAdminRegisteredProfilesClose?.())
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-period]').forEach((btn) => {
     btn.addEventListener('click', () => {

@@ -653,6 +653,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; detail: import('../adminServer/adminServerTypes.js').CpuIncidentDetail }
     | { ok: false; message: string; forbidden?: boolean }
   >
+  onAdminRegisteredProfilesLoad?: (period: 'today' | 'yesterday') => Promise<
+    | { ok: true; rows: import('../network/createGameServerClient.js').AdminRegisteredProfileRow[] }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient.js').VisitorListType) => void
@@ -1297,6 +1301,7 @@ type InternalLobbyFlowState = {
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
+  adminRegisteredProfilesModal: import('../adminInfo/renderAdminRegisteredProfilesModal.js').AdminRegisteredProfilesModalState | null
   adminActiveDailyRewardTiers: DailyRewardTierSnapshot[]
   adminStagedDailyRewardTiers: DailyRewardTierSnapshot[]
   adminDailyRewardsLoading: boolean
@@ -1873,6 +1878,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
+    adminRegisteredProfilesModal: null,
     adminActiveDailyRewardTiers: [],
     adminStagedDailyRewardTiers: [],
     adminDailyRewardsLoading: false,
@@ -3661,6 +3667,7 @@ export function createLobbyFlowController(
       adminStats: state.adminStats,
       adminStatsLoading: state.adminStatsLoading,
       adminStatsErrorText: state.adminStatsErrorText,
+      adminRegisteredProfilesModal: state.adminRegisteredProfilesModal,
       adminActiveDailyRewardTiers: state.adminActiveDailyRewardTiers,
       adminStagedDailyRewardTiers: state.adminStagedDailyRewardTiers,
       adminDailyRewardsLoading: state.adminDailyRewardsLoading,
@@ -5477,6 +5484,51 @@ export function createLobbyFlowController(
           }
           render()
         })()
+      },
+      onAdminRegisteredProfilesOpen: (period) => {
+        state.adminRegisteredProfilesModal = {
+          isOpen: true,
+          period,
+          loading: true,
+          errorText: null,
+          rows: null,
+        }
+        render()
+        void (async () => {
+          const result = await options.onAdminRegisteredProfilesLoad?.(period)
+          // Модалът може вече да е затворен, или отворен за друг период,
+          // докато заявката е висяла — не презаписвай по-новото состояние.
+          if (state.adminRegisteredProfilesModal?.period !== period || !state.adminRegisteredProfilesModal.isOpen) {
+            return
+          }
+          if (result === undefined) {
+            state.adminRegisteredProfilesModal = {
+              ...state.adminRegisteredProfilesModal,
+              loading: false,
+              errorText: 'Функцията временно не е налична.',
+            }
+            render()
+            return
+          }
+          if (result.ok) {
+            state.adminRegisteredProfilesModal = {
+              ...state.adminRegisteredProfilesModal,
+              loading: false,
+              rows: result.rows,
+            }
+          } else {
+            state.adminRegisteredProfilesModal = {
+              ...state.adminRegisteredProfilesModal,
+              loading: false,
+              errorText: result.message,
+            }
+          }
+          render()
+        })()
+      },
+      onAdminRegisteredProfilesClose: () => {
+        state.adminRegisteredProfilesModal = null
+        render()
       },
       onAdminVisitorsPeriodClick: (period) => {
         if (period === 'today' || period === 'yesterday' || period === '7d' || period === '30d') {

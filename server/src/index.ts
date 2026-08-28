@@ -13803,6 +13803,44 @@ async function handleAdminStatsRequest(
   return true
 }
 
+// Drill-down зад "днес"/"вчера" broяча в картата "Регистрирани профили"
+// (Admin -> Информация) — reuse-ва СЪЩАТА auth политика и СЪЩИЯ
+// getSofiaDayBoundsUtc-базиран period като handleAdminStatsRequest/
+// countHumanProfiles, за да не се разминава броят на редовете с counter-а.
+async function handleAdminRegisteredProfilesListRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/admin/registered-profiles') {
+    return false
+  }
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  // Същия read-only "Информация" gate като handleAdminStatsRequest — admin И subadmin.
+  if (!isAdminOrSubadminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const periodParam = new URLSearchParams(req.url?.split('?')[1] ?? '').get('period') ?? ''
+  if (periodParam !== 'today' && periodParam !== 'yesterday') {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден параметър period. Използвай: today, yesterday.' })
+    return true
+  }
+
+  const rows = playerProgressStore.listRegisteredProfilesForPeriod(periodParam)
+  sendJsonResponse(res, 200, { ok: true, period: periodParam, rows })
+  return true
+}
+
 // Parses a query param as a strict non-negative integer (decimal digits only, no
 // leading sign, no decimal point, no trailing garbage). Returns the parsed number
 // or null if the value is absent/empty (caller supplies the default), or 'invalid'
@@ -15133,6 +15171,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminStatsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminRegisteredProfilesListRequest(req, res, requestUrl.pathname)) {
     return
   }
 

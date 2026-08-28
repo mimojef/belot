@@ -456,6 +456,16 @@ export type AdminRegisteredProfilesStats = {
   yesterday: number
 }
 
+export type AdminRegisteredProfilesPeriod = 'today' | 'yesterday'
+
+export type AdminRegisteredProfileRow = {
+  profileId: string
+  username: string | null
+  displayName: string
+  createdAt: string
+  email: string | null
+}
+
 export type AdminGamesPlayedStats = {
   userGamesToday: number
   userGamesYesterday: number

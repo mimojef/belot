@@ -81,6 +81,7 @@ import {
   type TournamentPartnerCandidateSnapshot,
   type TournamentPartnerInviteSnapshot,
   type TournamentMatchAssignmentSnapshot,
+  type AdminRegisteredProfileRow,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -2905,6 +2906,28 @@ async function loadAdminConnections(): Promise<
   }
 }
 
+async function loadAdminRegisteredProfiles(period: 'today' | 'yesterday'): Promise<
+  | { ok: true; rows: AdminRegisteredProfileRow[] }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/registered-profiles?period=${encodeURIComponent(period)}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.', forbidden: true }
+    }
+    const data = (await response.json()) as { ok?: boolean; message?: string; rows?: unknown }
+    if (!response.ok || data.ok !== true || !Array.isArray(data.rows)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на регистрираните профили.' }
+    }
+    return { ok: true, rows: data.rows as AdminRegisteredProfileRow[] }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadAdminCpuIncidents(): Promise<
   | { ok: true; incidents: CpuIncidentSummary[] }
   | { ok: false; message: string; forbidden?: boolean }
@@ -5398,6 +5421,7 @@ lobby = createLobbyFlowController({
   },
   onAdminCpuIncidentsLoad: () => loadAdminCpuIncidents(),
   onAdminCpuIncidentDetailLoad: (incidentId) => loadAdminCpuIncidentDetail(incidentId),
+  onAdminRegisteredProfilesLoad: (period) => loadAdminRegisteredProfiles(period),
   onAdminServerScreenLeave: () => {
     stopMonitoringPolling()
     invalidateHistoryGeneration()
