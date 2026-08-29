@@ -17,7 +17,7 @@ import {
   getPrivateRoomCountdownState,
 } from './renderPrivateRoomWaitingScreen'
 import type { PrivateRoomInviteEligibleFriend } from './privateRoomPopupMarkup'
-import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment, renderTournamentPartnerSearchSection } from './renderTournamentsScreen'
+import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment, renderTournamentPartnerSearchSection, isoToDatetimeLocalValue } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
@@ -894,6 +894,12 @@ export type CreateLobbyFlowControllerOptions = {
       }
     | { ok: false; message: string; reason?: string }
   >
+  // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task
+  // spec-а) — тесен PATCH, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at.
+  onTournamentScheduleUpdate?: (tournamentId: string, scheduledStartAt: string) => Promise<
+    | { ok: true; tournament: TournamentSummarySnapshot }
+    | { ok: false; message: string; reason?: string }
+  >
   onTournamentPartnerCandidatesLoad?: (tournamentId: string) => Promise<
     | { ok: true; candidates: TournamentPartnerCandidateSnapshot[] }
     | { ok: false; message: string; reason?: string }
@@ -1643,6 +1649,16 @@ type InternalLobbyFlowState = {
   tournamentCancelConfirmOpen: boolean
   tournamentCancelBusy: boolean
   tournamentCancelErrorText: string | null
+  // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task
+  // spec-а) — тесен popup, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at. Draft-овете
+  // са отделни date/time strings (не combined datetime-local), защото
+  // popup-ът показва две отделни полета "Дата на старта"/"Час на старта".
+  tournamentScheduleEditOpen: boolean
+  tournamentScheduleEditDateDraft: string
+  tournamentScheduleEditTimeDraft: string
+  tournamentScheduleEditBusy: boolean
+  tournamentScheduleEditErrorText: string | null
+  tournamentScheduleEditSuccessText: string | null
 }
 
 const DEFAULT_REQUIRED_PLAYERS = 4
@@ -2139,6 +2155,12 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentCancelConfirmOpen: false,
     tournamentCancelBusy: false,
     tournamentCancelErrorText: null,
+    tournamentScheduleEditOpen: false,
+    tournamentScheduleEditDateDraft: '',
+    tournamentScheduleEditTimeDraft: '',
+    tournamentScheduleEditBusy: false,
+    tournamentScheduleEditErrorText: null,
+    tournamentScheduleEditSuccessText: null,
   }
 }
 
@@ -3923,6 +3945,12 @@ export function createLobbyFlowController(
       tournamentCancelConfirmOpen: state.tournamentCancelConfirmOpen,
       tournamentCancelBusy: state.tournamentCancelBusy,
       tournamentCancelErrorText: state.tournamentCancelErrorText,
+      tournamentScheduleEditOpen: state.tournamentScheduleEditOpen,
+      tournamentScheduleEditDateDraft: state.tournamentScheduleEditDateDraft,
+      tournamentScheduleEditTimeDraft: state.tournamentScheduleEditTimeDraft,
+      tournamentScheduleEditBusy: state.tournamentScheduleEditBusy,
+      tournamentScheduleEditErrorText: state.tournamentScheduleEditErrorText,
+      tournamentScheduleEditSuccessText: state.tournamentScheduleEditSuccessText,
       shopPurchaseResumeId: state.shopPurchaseResumeId,
       shopPurchaseHideConfirmId: state.shopPurchaseHideConfirmId,
       shopPurchaseActionPurchaseId: state.shopPurchaseActionPurchaseId,
@@ -4625,6 +4653,21 @@ export function createLobbyFlowController(
       },
       onTournamentCancelSubmit: () => {
         void submitTournamentCancel()
+      },
+      onTournamentScheduleEditOpen: () => {
+        openTournamentScheduleEdit()
+      },
+      onTournamentScheduleEditClose: () => {
+        closeTournamentScheduleEdit()
+      },
+      onTournamentScheduleEditDateChange: (value) => {
+        state.tournamentScheduleEditDateDraft = value
+      },
+      onTournamentScheduleEditTimeChange: (value) => {
+        state.tournamentScheduleEditTimeDraft = value
+      },
+      onTournamentScheduleEditSubmit: () => {
+        void submitTournamentScheduleEdit()
       },
       onLeaderboardCategoryClick: (category) => {
         state.activeLeaderboardCategory = category
@@ -8130,6 +8173,7 @@ export function createLobbyFlowController(
     state.tournamentDetailPasswordDraft = ''
     state.tournamentDetailVerifiedPassword = null
     state.tournamentDetailUnlockErrorText = null
+    state.tournamentScheduleEditSuccessText = null
     void refetchTournamentsList()
     const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
     if (window.location.pathname !== targetUrl) {
@@ -8154,6 +8198,16 @@ export function createLobbyFlowController(
     state.tournamentDetailPasswordDraft = ''
     state.tournamentDetailVerifiedPassword = null
     state.tournamentDetailUnlockErrorText = null
+    // Transient "Редактирай старт" success notice (§ "EDIT SCHEDULED START")
+    // трябва да преживее own canonical detail refetch-а след Save (виж
+    // submitTournamentScheduleEdit — не се clear-ва там), но НЕ трябва да
+    // преживее напускане на detail екрана: за разлика от sibling error
+    // текстовете (tournamentJoinErrorText и т.н., скрити зад затворен popup
+    // до следващо отваряне), тази банер-нотификация се рендира
+    // unconditionally directly в detail body-то — затова изисква explicit
+    // clear тук, на СЪЩОТО място, където вече се reset-ва всеки друг
+    // per-visit detail state field при (ре)влизане в екрана.
+    state.tournamentScheduleEditSuccessText = null
     const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
     if (window.location.pathname !== targetUrl) {
       history.pushState(null, '', targetUrl)
@@ -8186,6 +8240,7 @@ export function createLobbyFlowController(
     state.tournamentDetailPasswordDraft = ''
     state.tournamentDetailVerifiedPassword = null
     state.tournamentDetailUnlockErrorText = null
+    state.tournamentScheduleEditSuccessText = null
     const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
     if (window.location.pathname !== targetUrl) {
       history.pushState(null, '', targetUrl)
@@ -8758,6 +8813,86 @@ export function createLobbyFlowController(
     state.tournamentCancelConfirmOpen = false
     state.tournamentCancelErrorText = null
     mergeTournamentSummaryIntoDetail(result.tournament)
+    void refetchTournamentsList()
+    render()
+  }
+
+  // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task
+  // spec-а) — тесен popup, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at. Не е
+  // generic "Edit Tournament" форма — само дата+час, нищо друго.
+  function openTournamentScheduleEdit(): void {
+    const scheduledStartAt = state.tournamentDetail?.scheduledStartAt ?? null
+    if (scheduledStartAt === null) return
+    const [datePart, timePart] = isoToDatetimeLocalValue(scheduledStartAt).split('T')
+    state.tournamentScheduleEditDateDraft = datePart ?? ''
+    state.tournamentScheduleEditTimeDraft = timePart ?? ''
+    state.tournamentScheduleEditOpen = true
+    state.tournamentScheduleEditErrorText = null
+    state.tournamentScheduleEditSuccessText = null
+    render()
+  }
+
+  function closeTournamentScheduleEdit(): void {
+    if (state.tournamentScheduleEditBusy) return
+    state.tournamentScheduleEditOpen = false
+    state.tournamentScheduleEditErrorText = null
+    render()
+  }
+
+  async function submitTournamentScheduleEdit(): Promise<void> {
+    if (!options.onTournamentScheduleUpdate || state.tournamentDetailId === null || state.tournamentScheduleEditBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+
+    const dateDraft = state.tournamentScheduleEditDateDraft.trim()
+    const timeDraft = state.tournamentScheduleEditTimeDraft.trim()
+    if (!dateDraft || !timeDraft) {
+      state.tournamentScheduleEditErrorText = 'Моля, попълни дата и час.'
+      render()
+      return
+    }
+    // Same combine+parse pattern as tournament creation
+    // (extractTournamentCreateInputFromForm в renderTournamentsScreen.ts) —
+    // датата/часа се третират като local wall-clock time, конвертирани към
+    // UTC ISO чрез Date/.toISOString() — идентична timezone семантика.
+    const parsed = new Date(`${dateDraft}T${timeDraft}`)
+    if (Number.isNaN(parsed.getTime())) {
+      state.tournamentScheduleEditErrorText = 'Невалидна дата и час за стартиране.'
+      render()
+      return
+    }
+
+    state.tournamentScheduleEditBusy = true
+    state.tournamentScheduleEditErrorText = null
+    render()
+
+    const result = await options.onTournamentScheduleUpdate(tournamentId, parsed.toISOString())
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentScheduleEditBusy = false
+
+    if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
+      state.tournamentScheduleEditErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentScheduleEditOpen = false
+    state.tournamentScheduleEditErrorText = null
+    // scheduledStartAt живее на summary DTO-то (не detail-only поле като
+    // teams/myTeam), затова shallow merge-ът вече показва коректната
+    // стойност веднага — но § "CLIENT RECONCILE" изисква canonical detail
+    // refetch тук за пълна консистентност със същия pattern като join/leave/
+    // invite (defense-in-depth срещу бъдещи detail-only полета, зависими от
+    // start time).
+    mergeTournamentSummaryIntoDetail(result.tournament)
+    state.tournamentScheduleEditSuccessText = 'Началният час на турнира е променен.'
+    void fetchTournamentDetail(tournamentId)
     void refetchTournamentsList()
     render()
   }
@@ -13805,6 +13940,22 @@ export function createLobbyFlowController(
     // tournament_partner_invite_resolved/tournament_match_assigned — no new
     // state model, no polling.
     if (message.type === 'tournament_team_updated') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      if (state.currentScreen === 'tournaments') {
+        void refetchTournamentsList()
+      }
+      return false
+    }
+
+    // Realtime "Редактирай старт" notice (§ "EDIT SCHEDULED START" в task
+    // spec-а) — creator-ът, направил промяната, вече reconcile-ва през
+    // собствения си HTTP response (виж submitTournamentScheduleEdit);
+    // всеки ДРУГ отворен viewer на този турнир (участник или самия creator
+    // от друга сесия) няма такъв response, затова push-ът е единственият им
+    // сигнал. Same lek-payload/authoritative-refetch pattern.
+    if (message.type === 'tournament_schedule_updated') {
       if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
         void fetchTournamentDetail(message.tournamentId)
       }

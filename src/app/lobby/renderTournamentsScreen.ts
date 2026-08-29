@@ -87,7 +87,10 @@ export const TOURNAMENT_ENTRY_FEE_OPTIONS = [5000, 10000, 20000, 50000, 100000] 
 export const TOURNAMENT_TEAM_CAPACITY_OPTIONS = [4, 8, 16] as const
 
 // UTC ISO → стойност за <input type="datetime-local"> (local timezone, без 'Z').
-function isoToDatetimeLocalValue(iso: string): string {
+// Exported за reuse от "Редактирай старт" popup-а (createLobbyFlowController.ts)
+// — split-ва се на 'T' за отделните date/time draft-ове, вместо да се
+// дублира local-date формат логиката.
+export function isoToDatetimeLocalValue(iso: string): string {
   const d = new Date(iso)
   const pad = (n: number): string => String(n).padStart(2, '0')
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
@@ -175,6 +178,16 @@ function tournamentStartStateLabel(t: TournamentDetailSnapshot): string | null {
   if (START_ACTIVE_STATUSES.has(t.status)) return 'Турнирът е в ход'
   if (START_CANCELLED_STATUSES.has(t.status)) return 'Турнирът е отменен'
   return null
+}
+
+// "Редактирай старт" бутонът (§ "EDIT SCHEDULED START" в task spec-а) е
+// видим само за creator-а, само докато турнирът е 'open' (единственият
+// pre-start статус, виж TOURNAMENT_STATUSES) И е 'scheduled' режим —
+// fill-mode турнирите нямат scheduled_start_at изобщо (виж CHECK constraint
+// в migration 20260730_001). Server-ът е authoritative пак — виж
+// updateScheduledStartAt в tournamentStore.ts — това е само UI convenience.
+function canEditTournamentSchedule(t: TournamentDetailSnapshot): boolean {
+  return t.isMine && t.status === 'open' && t.startMode === 'scheduled'
 }
 
 // Изчислява primary/secondary/tertiary текст за "Старт" картата. secondary/
@@ -1043,12 +1056,25 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         ${t.requiresPassword ? '<span title="С парола" style="font-size:15px;">🔒</span>' : ''}
       </div>
 
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:18px;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">
         <div style="width:28px;height:28px;border-radius:999px;background:#101010;border:1px solid rgba(212,165,32,0.4);overflow:hidden;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:13px;font-weight:900;flex-shrink:0;">
           ${t.creator.avatarUrl ? `<img src="${escapeHtml(t.creator.avatarUrl)}" alt="" style="width:100%;height:100%;object-fit:cover;">` : avatarLetter}
         </div>
         <span style="font-size:13px;color:rgba(255,255,255,0.65);">Създател: ${escapeHtml(t.creator.displayName)}${t.isMine ? ' (ти)' : ''}</span>
+        ${canEditTournamentSchedule(t) ? `
+          <button type="button" data-tournament-schedule-edit-open="1" style="
+            height:26px;padding:0 10px;border-radius:6px;border:1px solid rgba(212,165,32,0.42);
+            background:rgba(212,165,32,0.10);color:#d4a520;font-size:11px;font-weight:800;
+            cursor:pointer;white-space:nowrap;flex-shrink:0;
+          ">Редактирай старт</button>
+        ` : ''}
       </div>
+
+      ${state.tournamentScheduleEditSuccessText ? `
+        <div style="margin-bottom:14px;padding:8px 10px;border-radius:8px;border:1px solid rgba(52,211,153,0.30);background:rgba(6,60,40,0.42);color:#86efac;font-size:13px;font-weight:800;">
+          ${escapeHtml(state.tournamentScheduleEditSuccessText)}
+        </div>
+      ` : ''}
 
       ${renderTournamentMatchAssignmentCallout(t)}
       ${renderTournamentWalkoverEliminationCallout(t)}
@@ -1118,6 +1144,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
     ${state.tournamentPartnerCapacityPopupOpen ? renderTournamentPartnerCapacityPopup(state) : ''}
     ${state.tournamentLeaveConfirmOpen ? renderTournamentLeaveConfirmPopup(state, t) : ''}
     ${state.tournamentCancelConfirmOpen ? renderTournamentCancelConfirmPopup(state) : ''}
+    ${state.tournamentScheduleEditOpen ? renderTournamentScheduleEditPopup(state) : ''}
   `
 }
 
@@ -1476,6 +1503,45 @@ function renderTournamentCancelConfirmPopup(state: LobbyScreenState): string {
             background:${state.tournamentCancelBusy ? 'rgba(248,113,113,0.35)' : 'linear-gradient(180deg,#f87171 0%,#dc2626 100%)'};
             color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentCancelBusy ? 'default' : 'pointer'};
           ">${state.tournamentCancelBusy ? 'Отменяне...' : 'Отмени турнира'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+// §"EDIT SCHEDULED START" в task spec-а — намерен, non-generic popup: само
+// дата+час, нищо друго (не име/вход/капацитет/формат/etc.). Двете отделни
+// <input type="date">/<input type="time"> полета (не combined
+// datetime-local) са explicit изискване от task spec-а.
+function renderTournamentScheduleEditPopup(state: LobbyScreenState): string {
+  return `
+    <div data-tournament-schedule-edit-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:16px;width:100%;max-width:360px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:16px;font-weight:900;color:#d4a520;margin-bottom:16px;">Редактирай старт</div>
+        <div style="display:grid;gap:12px;margin-bottom:16px;">
+          <label style="display:grid;gap:6px;">
+            <span style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.6);">Дата на старта</span>
+            <input type="date" data-tournament-schedule-edit-date="1" value="${escapeHtml(state.tournamentScheduleEditDateDraft)}" ${state.tournamentScheduleEditBusy ? 'disabled' : ''} style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
+          </label>
+          <label style="display:grid;gap:6px;">
+            <span style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.6);">Час на старта</span>
+            <input type="time" data-tournament-schedule-edit-time="1" value="${escapeHtml(state.tournamentScheduleEditTimeDraft)}" ${state.tournamentScheduleEditBusy ? 'disabled' : ''} style="width:100%;box-sizing:border-box;padding:10px 12px;background:#1a1a24;border:1px solid rgba(255,255,255,0.18);border-radius:8px;color:#fff;font-size:14px;color-scheme:dark;">
+          </label>
+        </div>
+        ${state.tournamentScheduleEditErrorText ? `
+          <div style="margin-bottom:14px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentScheduleEditErrorText)}</div>
+        ` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-tournament-schedule-edit-close="1" ${state.tournamentScheduleEditBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);
+            background:transparent;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;
+            cursor:${state.tournamentScheduleEditBusy ? 'default' : 'pointer'};
+          ">Отказ</button>
+          <button type="button" data-tournament-schedule-edit-submit="1" ${state.tournamentScheduleEditBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentScheduleEditBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
+            color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentScheduleEditBusy ? 'default' : 'pointer'};
+          ">${state.tournamentScheduleEditBusy ? 'Запазване...' : 'Запази'}</button>
         </div>
       </div>
     </div>

@@ -52,6 +52,18 @@ export type CreateTournamentResult =
   | { ok: true; tournament: TournamentRecord }
   | { ok: false; reason: 'active_tournament_limit' }
 
+// Единствената допустима мутация извън join/team/economy flow-овете —
+// creator-ът редактира САМО scheduled_start_at на 'scheduled' турнир, докато
+// е още 'open' (§ "EDIT SCHEDULED START" в task spec-а). Никакви entries/
+// teams/economy редове не се пипат тук — затова живее в tournamentStore.ts
+// (plain CRUD), не в tournamentEconomyStore.ts.
+export type UpdateScheduledStartAtResult =
+  | { ok: true; tournament: TournamentRecord }
+  | {
+      ok: false
+      reason: 'tournament_not_found' | 'not_creator' | 'tournament_not_open' | 'not_scheduled_mode'
+    }
+
 export type CreateTournamentTeamInput = {
   tournamentId: TournamentId
   status?: TournamentTeamStatus
@@ -107,6 +119,11 @@ export type TournamentStore = {
     expectedStatus: TournamentStatus,
     nextStatus: TournamentStatus,
   ) => boolean
+  updateScheduledStartAt: (
+    tournamentId: TournamentId,
+    requesterProfileId: ProfileId,
+    newScheduledStartAtIso: string,
+  ) => UpdateScheduledStartAtResult
 
   createTeam: (input: CreateTournamentTeamInput) => TournamentTeamRecord
   getTeamsForTournament: (tournamentId: TournamentId) => TournamentTeamRecord[]
@@ -454,6 +471,19 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     WHERE tournament_id = ? AND status = ?;
   `)
 
+  // Единственият field, който тази операция някога пипа. WHERE клаузата
+  // преповтаря ЦЯЛАТА authorization/state guard (creator + scheduled mode +
+  // still open) directly в самия UPDATE — TOCTOU-safe: дори ако състоянието
+  // се е сменило между pre-check четенето в updateScheduledStartAt по-долу и
+  // тук, guard-ът пак важи. Единично UPDATE stmt в SQLite вече е atomic —
+  // няма нужда от explicit BEGIN/COMMIT за single-table single-field промяна
+  // без economy/team/entry странични ефекти.
+  const updateScheduledStartAtStatement = database.prepare(`
+    UPDATE tournaments
+    SET scheduled_start_at = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE tournament_id = ? AND creator_profile_id = ? AND start_mode = 'scheduled' AND status = 'open';
+  `)
+
   const insertTeamStatement = database.prepare(`
     INSERT INTO tournament_teams (
       team_id, tournament_id, status, seed_slot
@@ -693,6 +723,38 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     ): boolean {
       const result = updateTournamentStatusStatement.run(nextStatus, tournamentId, expectedStatus)
       return result.changes > 0
+    },
+
+    updateScheduledStartAt(
+      tournamentId: TournamentId,
+      requesterProfileId: ProfileId,
+      newScheduledStartAtIso: string,
+    ): UpdateScheduledStartAtResult {
+      const row = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+      if (row === undefined) return { ok: false, reason: 'tournament_not_found' }
+      if (row.creator_profile_id !== requesterProfileId) return { ok: false, reason: 'not_creator' }
+      if (row.start_mode !== 'scheduled') return { ok: false, reason: 'not_scheduled_mode' }
+      if (row.status !== 'open') return { ok: false, reason: 'tournament_not_open' }
+
+      const result = updateScheduledStartAtStatement.run(
+        newScheduledStartAtIso,
+        tournamentId,
+        requesterProfileId,
+      ) as { changes?: number }
+
+      if ((result.changes ?? 0) === 0) {
+        // Race between the pre-check above and the guarded UPDATE (e.g. the
+        // tournament started or was cancelled in between) — re-read for an
+        // accurate reason instead of a generic failure.
+        const fresh = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+        if (fresh === undefined) return { ok: false, reason: 'tournament_not_found' }
+        if (fresh.creator_profile_id !== requesterProfileId) return { ok: false, reason: 'not_creator' }
+        if (fresh.start_mode !== 'scheduled') return { ok: false, reason: 'not_scheduled_mode' }
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      const updated = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+      return { ok: true, tournament: toTournamentRecord(updated) }
     },
 
     createTeam(input: CreateTournamentTeamInput): TournamentTeamRecord {

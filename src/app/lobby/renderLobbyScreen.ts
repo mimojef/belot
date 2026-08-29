@@ -839,6 +839,12 @@ export type LobbyScreenState = {
   tournamentCancelConfirmOpen: boolean
   tournamentCancelBusy: boolean
   tournamentCancelErrorText: string | null
+  tournamentScheduleEditOpen: boolean
+  tournamentScheduleEditDateDraft: string
+  tournamentScheduleEditTimeDraft: string
+  tournamentScheduleEditBusy: boolean
+  tournamentScheduleEditErrorText: string | null
+  tournamentScheduleEditSuccessText: string | null
 }
 
 export type RenderLobbyScreenOptions = {
@@ -1003,6 +1009,11 @@ export type RenderLobbyScreenOptions = {
   onTournamentCancelConfirmOpen: () => void
   onTournamentCancelConfirmClose: () => void
   onTournamentCancelSubmit: () => void
+  onTournamentScheduleEditOpen: () => void
+  onTournamentScheduleEditClose: () => void
+  onTournamentScheduleEditDateChange: (value: string) => void
+  onTournamentScheduleEditTimeChange: (value: string) => void
+  onTournamentScheduleEditSubmit: () => void
   onAdminClick: () => void
   onAdminInfoClick: () => void
   onAdminServerClick: () => void
@@ -14609,6 +14620,25 @@ export function renderLobbyScreen(
   root.querySelector<HTMLElement>('[data-tournament-cancel-backdrop="1"]')
     ?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) options.onTournamentCancelConfirmClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-schedule-edit-open="1"]')
+    ?.addEventListener('click', options.onTournamentScheduleEditOpen)
+  root.querySelector<HTMLButtonElement>('[data-tournament-schedule-edit-close="1"]')
+    ?.addEventListener('click', options.onTournamentScheduleEditClose)
+  root.querySelector<HTMLButtonElement>('[data-tournament-schedule-edit-submit="1"]')
+    ?.addEventListener('click', options.onTournamentScheduleEditSubmit)
+  root.querySelector<HTMLElement>('[data-tournament-schedule-edit-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentScheduleEditClose()
+    })
+  root.querySelector<HTMLInputElement>('[data-tournament-schedule-edit-date="1"]')
+    ?.addEventListener('input', (e) => {
+      options.onTournamentScheduleEditDateChange((e.currentTarget as HTMLInputElement).value)
+    })
+  root.querySelector<HTMLInputElement>('[data-tournament-schedule-edit-time="1"]')
+    ?.addEventListener('input', (e) => {
+      options.onTournamentScheduleEditTimeChange((e.currentTarget as HTMLInputElement).value)
     })
 
   root.querySelectorAll<HTMLButtonElement>('[data-private-room-invite-open="1"]').forEach((btn) => {

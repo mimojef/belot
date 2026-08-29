@@ -1645,6 +1645,16 @@ export type TournamentTeamUpdatedMessage = {
   teamId: string
 }
 
+// Realtime notice за промяна на scheduled_start_at от creator-а (§ "EDIT
+// SCHEDULED START" в task spec-а) — same lek-payload/authoritative-refetch
+// pattern като tournament_team_updated. Отделен тип нарочно: reuse-ване на
+// tournament_team_updated тук би било подвеждащо (никаква team composition
+// промяна не участва в тази мутация).
+export type TournamentScheduleUpdatedMessage = {
+  type: 'tournament_schedule_updated'
+  tournamentId: string
+}
+
 export type TournamentActiveParticipationMessage = {
   type: 'tournament_active_participation'
   tournamentId: string
@@ -2166,6 +2176,7 @@ export type ServerMessage =
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
   | TournamentTeamUpdatedMessage
+  | TournamentScheduleUpdatedMessage
   | TournamentMatchAssignedMessage
   | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage

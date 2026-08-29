@@ -5025,6 +5025,39 @@ async function cancelTournamentRequest(
   }
 }
 
+// Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task spec-а) —
+// тесен PATCH, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at. Не generic tournament
+// update endpoint.
+async function updateTournamentScheduledStartRequest(
+  tournamentId: string,
+  scheduledStartAt: string,
+): Promise<
+  | { ok: true; tournament: TournamentSummarySnapshot }
+  | { ok: false; message: string; reason?: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/scheduled-start`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scheduledStartAt }),
+    })
+    const data = (await response.json()) as
+      | { ok: true; tournament: TournamentSummarySnapshot }
+      | TournamentEntryActionErrorResponse
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: (data as TournamentEntryActionErrorResponse).message ?? 'Промяната не бе успешна.',
+        reason: (data as TournamentEntryActionErrorResponse).reason,
+      }
+    }
+    return { ok: true, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 type TournamentPartnerInviteActionResponse =
   | {
       ok: true
@@ -5524,6 +5557,7 @@ lobby = createLobbyFlowController({
   onTournamentJoin: (tournamentId, password) => joinTournamentRequest(tournamentId, password),
   onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
   onTournamentCancel: (tournamentId) => cancelTournamentRequest(tournamentId),
+  onTournamentScheduleUpdate: (tournamentId, scheduledStartAt) => updateTournamentScheduledStartRequest(tournamentId, scheduledStartAt),
   onTournamentPartnerCandidatesLoad: (tournamentId) => loadTournamentPartnerCandidates(tournamentId),
   onTournamentPartnerCandidatesSearch: (tournamentId, query, signal) => searchTournamentPartnerCandidates(tournamentId, query, signal),
   onPendingTournamentPartnerInvitesLoad: () => loadPendingTournamentPartnerInvites(),

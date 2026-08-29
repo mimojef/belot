@@ -11733,6 +11733,151 @@ async function handleTournamentCancelRequest(
   return true
 }
 
+const SCHEDULE_EDIT_FAILURE_MESSAGES: Record<string, string> = {
+  tournament_not_found: 'Турнирът не е намерен.',
+  not_creator: 'Само създателят на турнира може да променя началния час.',
+  tournament_not_open: 'Турнирът вече е започнал и не може да бъде редактиран.',
+  not_scheduled_mode: 'Този турнир няма планиран начален час за редактиране.',
+  invalid_timestamp: 'Невалидна дата и час за стартиране.',
+  too_soon: 'Стартът трябва да е поне 30 минути напред.',
+  too_late: 'Стартът трябва да е най-много 7 дни напред.',
+}
+
+// Realtime notice за промяна на scheduled start (§ "REALTIME КЪМ ДРУГИТЕ
+// УЧАСТНИЦИ" в task spec-а) — LEK payload, само тригер за authoritative
+// refetch (виж tournament_team_updated за identичния pattern). Няма
+// съществуващ "всички текущи viewers на турнир X" registry (виж
+// sendToOpenProfileConnections — винаги targeted по known profileId), затова
+// broadcast-ваме към ВСИЧКИ profileId-та с entry в турнира плюс creator-а
+// (dedup-нато) — най-близкото до "всеки, който правдоподобно гледа този
+// турнир" с naличните primitives, без нов viewer-registry.
+function broadcastTournamentScheduleUpdated(tournamentId: string, creatorProfileId: string): void {
+  const notifiedProfileIds = new Set<string>()
+  for (const entry of tournamentStore.getEntriesForTournament(tournamentId)) {
+    if (notifiedProfileIds.has(entry.profileId)) continue
+    notifiedProfileIds.add(entry.profileId)
+    sendToOpenProfileConnections(entry.profileId, {
+      type: 'tournament_schedule_updated',
+      tournamentId,
+    })
+  }
+  if (!notifiedProfileIds.has(creatorProfileId)) {
+    sendToOpenProfileConnections(creatorProfileId, {
+      type: 'tournament_schedule_updated',
+      tournamentId,
+    })
+  }
+}
+
+// PATCH /api/tournaments/:id/scheduled-start — тесен endpoint, пипа
+// ИЗКЛЮЧИТЕЛНО scheduled_start_at (виж tournamentStore.updateScheduledStartAt).
+// Никакви entries/teams/economy мутации тук — умишлено НЕ е generic
+// "PATCH /api/tournaments/:id" (§ "SERVER API" в task spec-а).
+async function handleTournamentScheduledStartUpdateRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/scheduled-start$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'PATCH') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
+
+  if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+  if (!tournamentId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор на турнир.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидно JSON тяло.' })
+    return true
+  }
+  if (!isRecord(body) || typeof body.scheduledStartAt !== 'string') {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва нов начален час.' })
+    return true
+  }
+
+  // Reuse-ва СЪЩИЯ validator/timezone semantics като tournament creation
+  // (§ "VALIDATION НА НОВИЯ START" — не нова parser/timezone логика).
+  const scheduledValidation = validateTournamentScheduledStartAt(body.scheduledStartAt)
+  if (!scheduledValidation.ok) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      reason: scheduledValidation.code,
+      message: SCHEDULE_EDIT_FAILURE_MESSAGES[scheduledValidation.code] ?? 'Невалидна дата и час за стартиране.',
+    })
+    return true
+  }
+
+  const result = tournamentStore.updateScheduledStartAt(
+    tournamentId,
+    profileId,
+    scheduledValidation.scheduledStartAt,
+  )
+
+  if (!result.ok) {
+    const status = result.reason === 'tournament_not_found' ? 404
+      : result.reason === 'not_creator' ? 403
+      : 409
+    sendJsonResponse(res, status, {
+      ok: false,
+      reason: result.reason,
+      message: SCHEDULE_EDIT_FAILURE_MESSAGES[result.reason] ?? 'Промяната не бе успешна.',
+    })
+    return true
+  }
+
+  tournamentStore.appendTournamentEvent({
+    tournamentId,
+    eventType: 'scheduled_start_updated',
+    actorProfileId: profileId,
+    actorRole: 'player',
+    payload: { newScheduledStartAt: scheduledValidation.scheduledStartAt },
+  })
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    tournament: buildTournamentSummaryDto(result.tournament, profileId),
+  })
+
+  broadcastTournamentScheduleUpdated(tournamentId, result.tournament.creatorProfileId)
+  return true
+}
+
 const adminTournamentActionRateLimitByProfileId = new Map<string, { count: number; windowStartedAt: number }>()
 const ADMIN_TOURNAMENT_ACTION_RATE_LIMIT_WINDOW_MS = 60_000
 const ADMIN_TOURNAMENT_ACTION_RATE_LIMIT_MAX_PER_WINDOW = 12
@@ -15181,6 +15326,10 @@ async function handleHttpRequest(
   }
 
   if (await handleTournamentCancelRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentScheduledStartUpdateRequest(req, res, requestUrl.pathname)) {
     return
   }
 
