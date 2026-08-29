@@ -26,6 +26,7 @@ import {
   resolveLobbyChatSenderRole,
   syncProfilePopup,
   syncNotificationsDropdown,
+  syncMissionsPopup,
   clearProfileEditorPendingState,
   appendTopicMessageNode,
   resetTopicsComposerAfterOwnSendDom,
@@ -5047,9 +5048,7 @@ export function createLobbyFlowController(
         void openMissionsPopup()
       },
       onMissionsPopupClose: () => {
-        state.missionsPopupOpen = false
-        state.missionClaimErrorText = null
-        render()
+        closeMissionsPopup()
       },
       onMissionClaimClick: (missionId) => {
         void claimMission(missionId)
@@ -15442,6 +15441,64 @@ export function createLobbyFlowController(
     returnToPrivateRoomWaiting()
   }
 
+  // Дневни мисии modal-ът живее в собствен document.body host
+  // (missionsPopupRootEl в renderLobbyScreen.ts), извън root-ния
+  // nextRootHtml string — огледално на profile popup-а/renderPopupOnly().
+  // Затова целият negotiate-open/loading/close/claim lifecycle тук минава
+  // ДИРЕКТНО през syncMissionsPopup(), НИКОГА през общия render() (виж
+  // renderLobby()'s skip-if-unchanged guard в renderLobbyScreen.ts —
+  // missionsPopupOpen/dailyMissions не влияят на root-ния string, значи
+  // затваряне без друга съпътстваща root промяна произвежда байт-идентичен
+  // nextRootHtml и guard-ът рано връща, ПРЕДИ да стигне до sync-ването на
+  // модала: X/backdrop click вика onClose, state се обновява коректно, но
+  // самият popup DOM никога не се премахва — точно production симптома
+  // "X/backdrop не затварят, единствен изход е refresh"). render() остава
+  // общата пътека за родения rest на lobby-то (badge броячи и т.н.),
+  // renderMissionsPopupOnly() е единствената гарантирана пътека за самия
+  // modal — идентичен принцип като renderPopupOnly().
+  function closeMissionsPopup(): void {
+    state.missionsPopupOpen = false
+    state.missionClaimErrorText = null
+    renderMissionsPopupOnly()
+  }
+
+  function renderMissionsPopupOnly(): void {
+    syncMissionsPopup(
+      {
+        missionsPopupOpen: state.missionsPopupOpen,
+        dailyMissions: state.dailyMissions,
+        dailyMissionsLoading: state.dailyMissionsLoading,
+        dailyMissionsErrorText: state.dailyMissionsErrorText,
+        missionClaimingId: state.missionClaimingId,
+        missionClaimErrorText: state.missionClaimErrorText,
+        isLoggedIn: (options.getAuthSession?.() ?? null) !== null,
+      },
+      {
+        onClose: closeMissionsPopup,
+        onMissionClaim: (missionId) => { void claimMission(missionId) },
+      },
+    )
+  }
+
+  // Ползва се САМО когато мисиите-свързаната промяна реално засяга и
+  // root-ния lobby HTML — dailyMissionsUnclaimedCount participва в
+  // "Дневни мисии" quick-action card badge-a (renderQuickActionBadge), а
+  // successful claim ДОПЪЛНИТЕЛНО вдига currentAuthSession.profile.yellowCoinsBalance
+  // (main.ts's claimMissionReward, ИЗВЪН тоя controller state — виж
+  // options.getAuthSession()), който се показва в hero секцията/navbar-а —
+  // ако само renderMissionsPopupOnly() се извика тук, показаният баланс
+  // остава STALE до следващ несвързан render. render() ПЪРВО (best-effort
+  // root refresh — самата skip-if-unchanged guard логика в
+  // renderLobbyScreen.ts продължава да важи непроменена, тук не я
+  // заобикаляме), renderMissionsPopupOnly() СЛЕД него ГАРАНТИРА, че самият
+  // modal е синхронизиран независимо дали render()-ът е бил skip-нат —
+  // затова тази комбинация никога не връща open/close замръзването,
+  // поправено по-горе.
+  function renderMissionsPopupAndRoot(): void {
+    render()
+    renderMissionsPopupOnly()
+  }
+
   async function openMissionsPopup(): Promise<void> {
     const authSession = options.getAuthSession?.() ?? null
     state.missionsPopupOpen = true
@@ -15451,13 +15508,13 @@ export function createLobbyFlowController(
       state.dailyMissions = []
       state.dailyMissionsLoading = false
       state.dailyMissionsErrorText = null
-      render()
+      renderMissionsPopupOnly()
       return
     }
 
     state.dailyMissionsLoading = true
     state.dailyMissionsErrorText = null
-    render()
+    renderMissionsPopupOnly()
 
     const result = await options.onDailyMissionsLoad()
 
@@ -15465,26 +15522,29 @@ export function createLobbyFlowController(
 
     if (!result.ok) {
       state.dailyMissionsErrorText = result.message
-      render()
+      renderMissionsPopupOnly()
       return
     }
 
     state.dailyMissions = result.missions
     state.dailyMissionsUnclaimedCount = result.unclaimedCount
     state.dailyMissionsErrorText = null
-    render()
+    // unclaimedCount тук може да се различава от преди (нов completed
+    // mission, засечен само от този fetch) — участва в root-ния quick-action
+    // badge, затова минава по-широкия sync.
+    renderMissionsPopupAndRoot()
   }
 
   async function claimMission(missionId: string): Promise<void> {
     if (!options.onMissionClaim) {
       state.missionClaimErrorText = 'Вземането на награди временно не е налично.'
-      render()
+      renderMissionsPopupOnly()
       return
     }
 
     state.missionClaimingId = missionId
     state.missionClaimErrorText = null
-    render()
+    renderMissionsPopupOnly()
 
     const result = await options.onMissionClaim(missionId)
 
@@ -15492,14 +15552,18 @@ export function createLobbyFlowController(
 
     if (!result.ok) {
       state.missionClaimErrorText = result.message
-      render()
+      renderMissionsPopupOnly()
       return
     }
 
     state.dailyMissions = result.missions
     state.dailyMissionsUnclaimedCount = result.unclaimedCount
     state.missionClaimErrorText = null
-    render()
+    // Successful claim увеличава и currentAuthSession.profile.yellowCoinsBalance
+    // (main.ts's claimMissionReward, извън тоя state) И unclaimedCount —
+    // и двете root-visible (hero balance / quick-action badge) — виж
+    // renderMissionsPopupAndRoot.
+    renderMissionsPopupAndRoot()
   }
 
   async function loadAdminMissions(): Promise<void> {

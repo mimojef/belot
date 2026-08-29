@@ -3364,11 +3364,25 @@ function renderStakeSection(
   `
 }
 
-function renderMissionsPopup(state: LobbyScreenState): string {
+// Тесен, dedicated тип (огледално на syncProfilePopup's popupState по-долу)
+// вместо целия LobbyScreenState — позволява на createLobbyFlowController.ts
+// да извиква syncMissionsPopup() ДИРЕКТНО, с малък литерал, без да минава
+// през buildLobbyScreenState()/renderLobby()'s skip-if-unchanged guard.
+type MissionsPopupState = {
+  missionsPopupOpen: boolean
+  dailyMissions: PlayerMissionProgressSnapshot[]
+  dailyMissionsLoading: boolean
+  dailyMissionsErrorText: string | null
+  missionClaimingId: string | null
+  missionClaimErrorText: string | null
+  isLoggedIn: boolean
+}
+
+function renderMissionsPopup(state: MissionsPopupState): string {
   if (!state.missionsPopupOpen) return ''
 
   const missions = state.dailyMissions
-  const isLoggedIn = state.profile.profileId !== null
+  const isLoggedIn = state.isLoggedIn
 
   const missionsHtml = state.dailyMissionsLoading
     ? `<div style="color:rgba(255,255,255,0.55);font-size:14px;padding:20px 0;text-align:center;">Зареждане...</div>`
@@ -3819,8 +3833,20 @@ export function syncNotificationsDropdown(
 
 let missionsPopupRootEl: HTMLElement | null = null
 
-function syncMissionsPopup(
-  state: LobbyScreenState,
+// Export-нат (огледално на syncProfilePopup/syncNotificationsDropdown) — за
+// да може createLobbyFlowController.ts да го извиква ДИРЕКТНО, заобикаляйки
+// renderLobby()'s skip-if-unchanged guard (виж коментара при
+// lastRenderedRootHtml по-долу в тоя файл). missionsPopupOpen/dailyMissions/
+// etc. НЕ участват в root-ния nextRootHtml string — модалът живее в
+// собствен document.body host (missionsPopupRootEl), синхронизиран само
+// оттук. Ако единственото, което се е променило между два render()-а, е
+// missionsPopupOpen (напр. затваряне на модала без друга съпътстваща
+// промяна в останалия lobby state), nextRootHtml излиза байт-идентичен с
+// предишния и guard-ът връща рано, ПРЕДИ изобщо да стигне до този sync —
+// затова X/backdrop close, а понякога и самото отваряне, изглеждат "замръзнали"
+// (виж renderMissionsPopupOnly в createLobbyFlowController.ts).
+export function syncMissionsPopup(
+  state: MissionsPopupState,
   callbacks: {
     onClose: () => void
     onMissionClaim: (missionId: string) => void
@@ -13418,7 +13444,15 @@ export function renderLobbyScreen(
     onAcceptanceNotificationClick: options.onNotifAcceptanceClick,
   })
 
-  syncMissionsPopup(state, {
+  syncMissionsPopup({
+    missionsPopupOpen: state.missionsPopupOpen,
+    dailyMissions: state.dailyMissions,
+    dailyMissionsLoading: state.dailyMissionsLoading,
+    dailyMissionsErrorText: state.dailyMissionsErrorText,
+    missionClaimingId: state.missionClaimingId,
+    missionClaimErrorText: state.missionClaimErrorText,
+    isLoggedIn: state.profile.profileId !== null,
+  }, {
     onClose: options.onMissionsPopupClose,
     onMissionClaim: options.onMissionClaimClick,
   })
