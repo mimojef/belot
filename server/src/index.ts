@@ -2864,6 +2864,35 @@ function loadPersistedServerState(): ServerState {
   return nextServerState
 }
 
+// §"LEGACY SOLO NORMALIZATION" — restart-safe startup reconciliation (same
+// convention as deactivateStaleCompletedTournamentRoomSnapshots above): pairs
+// up pre-existing team_id=NULL confirmed solo entries in every currently
+// 'open' tournament into the canonical forming/complete team model. Runs
+// unconditionally on every boot — reconcileLegacySoloEntriesForTournamentAtomically
+// is idempotent (see its own comment in tournamentEconomyStore.ts for the
+// full safety argument: DB-state-driven idempotency, TOCTOU-safe re-check
+// inside its own BEGIN IMMEDIATE transaction, economy-free), so a clean
+// tournament costs one cheap COUNT query and nothing else. Called BEFORE
+// tournamentScheduler.start() and httpServer.listen() below — no scheduled
+// tick or client request can observe a not-yet-reconciled tournament.
+function reconcileLegacySoloTournamentEntriesOnBoot(): void {
+  const openTournamentIds = tournamentStore
+    .listTournaments({ statuses: ['open'] })
+    .map((tournament) => tournament.tournamentId)
+  let reconciledCount = 0
+  let pairedTeamsTotal = 0
+  for (const tournamentId of openTournamentIds) {
+    const result = tournamentEconomyStore.reconcileLegacySoloEntriesForTournamentAtomically(tournamentId)
+    if (!result.alreadyClean) {
+      reconciledCount += 1
+      pairedTeamsTotal += result.pairedTeams
+    }
+  }
+  console.log(
+    `[tournament-legacy-solo] scanned open tournaments=${openTournamentIds.length} reconciled=${reconciledCount} pairedTeams=${pairedTeamsTotal}`,
+  )
+}
+
 function persistRoomSnapshot(room: ServerRoom): void {
   try {
     activeRoomSnapshotStore.upsertRoom(room)
@@ -2924,6 +2953,8 @@ function removeCommittedServerRoom(
   // detachConnectionsBoundToRoom.ts за пълния root-cause коментар.
   return detachConnectionsBoundToRoom(nextState, roomId)
 }
+
+reconcileLegacySoloTournamentEntriesOnBoot()
 
 let serverState: ServerState = loadPersistedServerState()
 const roomRevisionRegistry = createRoomRevisionRegistry()
@@ -11563,6 +11594,25 @@ async function handleTournamentLeaveRequest(
         result.autoReleasedPartner.noticeId,
         result.autoReleasedPartner.profileId,
       )
+    }
+  }
+
+  // §"PART 2 — SOLO TEAM MEMBER LEAVE" / §"REALTIME" — non-null exactly when
+  // the leaver was part of a solo-origin team (never together with
+  // autoReleasedPartner, which is exclusively the explicit-partner path —
+  // see leaveTournamentAndRefundAtomically). Neither affected profile has an
+  // HTTP response of their own to reconcile from (the leaver's response
+  // already went out above), so this is their only signal. Reuses
+  // tournament_team_updated (§ "auto-pair solo players") — a genuine team
+  // composition change, exactly what that event already means; a new event
+  // name here would be a distinction without a difference.
+  if (result.soloTeamCompositionChanged !== null) {
+    for (const affectedProfileId of result.soloTeamCompositionChanged.affectedProfileIds) {
+      sendToOpenProfileConnections(affectedProfileId, {
+        type: 'tournament_team_updated',
+        tournamentId,
+        teamId: result.soloTeamCompositionChanged.teamId,
+      })
     }
   }
   return true

@@ -50,6 +50,7 @@
     "check:tournament-partner-search-typing": "npx tsx scripts/checkTournamentPartnerSearchTyping.ts",
     "check:tournament-solo-auto-pair-detail-refresh": "npx tsx scripts/checkTournamentSoloAutoPairDetailRefresh.ts",
     "check:tournament-scheduled-start-edit-client": "npx tsx scripts/checkTournamentScheduledStartEditClient.ts",
+    "check:tournament-solo-leave-realtime-client": "npx tsx scripts/checkTournamentSoloLeaveRealtimeClient.ts",
     "check:tournament-state-a-navbar-stability": "npx tsx scripts/checkTournamentStateANavbarStability.ts",
     "check:tournament-return-destination-resolver": "npx tsx scripts/checkTournamentReturnDestinationResolver.ts",
     "check:tournament-final-prize-popup": "npx tsx scripts/checkTournamentFinalPrizePopup.ts",

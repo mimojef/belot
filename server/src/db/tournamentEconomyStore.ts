@@ -99,6 +99,22 @@ export type LeaveTournamentResult =
       // на partner-а вече е бил committed от оригиналния call, не се
       // преизчислява/дублира тук).
       autoReleasedPartner: { profileId: ProfileId; refundedAmount: number; noticeId: string } | null
+      /** Non-null exactly when the leaving entry was part of a SOLO-ORIGIN
+       * team (both members joined_as='solo' — never partner_inviter/invitee,
+       * see §"TEAM ORIGIN / SOLO SEMANTICS") that had exactly one remaining
+       * confirmed member. Unlike autoReleasedPartner (explicit-partner
+       * teams: refund+remove the other member), a solo-origin remaining
+       * member is never refunded/removed — either an existing waiting solo
+       * immediately replaces the leaver on the SAME team (still 'complete',
+       * teamId unchanged), or the team demotes to 'forming' and the
+       * remaining member becomes the new canonical waiting solo. Both
+       * profileIds always need a realtime nudge (their own already-open
+       * client has no HTTP response to reconcile from) — see
+       * broadcastSoloTeamCompositionChanged in index.ts, reusing
+       * tournament_team_updated (§"REALTIME"). affectedProfileIds is
+       * [remainingMember] for the demote-to-forming case, or
+       * [remainingMember, replacementProfileId] for the replacement case. */
+      soloTeamCompositionChanged: { teamId: TournamentTeamId; affectedProfileIds: ProfileId[] } | null
     }
   | {
       ok: false
@@ -227,6 +243,21 @@ export type PartnerInviteNotificationStateResult =
   | { ok: true; invite: TournamentPartnerInviteRecord }
   | { ok: false; reason: 'invite_not_found' | 'not_invitee' | 'invite_not_pending' }
 
+// §"LEGACY SOLO NORMALIZATION" — startup reconciliation (called once per
+// 'open' tournament at server boot, see loadPersistedServerState in
+// index.ts) that pairs up pre-existing team_id=NULL confirmed solo entries
+// (the shape every solo join left behind before auto-pair existed) into the
+// SAME 'forming'/'complete' team model the live join/leave flow already
+// produces. Idempotent: once an entry has a team_id it is no longer selected
+// by the underlying query, so a second run against the same tournament is a
+// guaranteed no-op (alreadyClean:true) — safe to call unconditionally on
+// every boot, forever, with no separate "have I already migrated this" flag.
+export type ReconcileLegacySoloEntriesResult = {
+  alreadyClean: boolean
+  pairedTeams: number
+  waitingTeamCreated: boolean
+}
+
 export type TournamentEconomyStore = {
   joinTournamentSoloAtomically: (
     tournamentId: TournamentId,
@@ -237,6 +268,9 @@ export type TournamentEconomyStore = {
     tournamentId: TournamentId,
     profileId: ProfileId,
   ) => LeaveTournamentResult
+  reconcileLegacySoloEntriesForTournamentAtomically: (
+    tournamentId: TournamentId,
+  ) => ReconcileLegacySoloEntriesResult
   cancelOpenTournamentAndRefundAtomically: (
     tournamentId: TournamentId,
     creatorProfileId: ProfileId,
@@ -811,6 +845,30 @@ export async function createTournamentEconomyStore(
       ) = 1
     ORDER BY te.created_at ASC, te.entry_id ASC
     LIMIT 1;
+  `)
+
+  // §"LEGACY SOLO NORMALIZATION" — pre-existing team_id=NULL confirmed solo
+  // entries (the shape solo joins left behind before auto-pair existed).
+  // team_id IS NULL is exhaustively exclusive to this legacy shape: every
+  // join/leave/invite-lifecycle path written after auto-pair (§A/§B) always
+  // assigns a team_id to a confirmed solo entry (own forming-of-1 team, or a
+  // shared complete team) — see joinTournamentSoloAtomically and
+  // resetFormingTeamToSolo. joined_as='solo' already excludes
+  // partner_inviter/partner_invitee, which never have team_id=NULL while
+  // confirmed. FIFO ORDER BY matches selectOldestWaitingSoloEntryStatement
+  // above (authoritative DB ordering, not in-memory JS sort).
+  const countLegacyOrphanSoloEntriesStatement = database.prepare(`
+    SELECT COUNT(*) as count
+    FROM tournament_entries
+    WHERE tournament_id = ? AND status = 'confirmed' AND joined_as = 'solo' AND team_id IS NULL;
+  `)
+
+  const selectLegacyOrphanSoloEntriesStatement = database.prepare(`
+    SELECT entry_id, tournament_id, profile_id, team_id, joined_as, status,
+           created_at, updated_at, withdrawn_at, refunded_at
+    FROM tournament_entries
+    WHERE tournament_id = ? AND status = 'confirmed' AND joined_as = 'solo' AND team_id IS NULL
+    ORDER BY created_at ASC, entry_id ASC;
   `)
 
   const selectPendingInviteByIdStatement = database.prepare(`
@@ -2967,6 +3025,108 @@ export async function createTournamentEconomyStore(
       return result
     },
 
+    // §"LEGACY SOLO NORMALIZATION" в task spec-а. SAFETY (защо е избран
+    // startup-reconciliation, извикван веднъж per 'open' турнир при boot —
+    // виж loadPersistedServerState в index.ts, СЪЩИЯТ established convention
+    // като deactivateStaleCompletedTournamentRoomSnapshots):
+    //
+    //  - Idempotent by construction, не by флаг: заявката-източник филтрира
+    //    по team_id IS NULL — веднъж assign-нат team_id, редът никога повече
+    //    не се избира. Повторно извикване (втори boot, ре-стартиран процес)
+    //    е гарантиран no-op (alreadyClean:true), без нужда от отделен
+    //    "already migrated" marker в схемата.
+    //  - Restart-safe: няма in-memory state — цялото решение идва от текущия
+    //    DB read във всеки нов извикване.
+    //  - Concurrency-safe между евентуални паралелни server процеси/replicas,
+    //    бутащи СЪЩИЯ DB файл по време на rolling deploy: pre-check-ът извън
+    //    транзакцията е само fast-path oптимизация; истинската гаранция е
+    //    re-check-ът ВЪТРЕ в BEGIN IMMEDIATE транзакцията — ако друг процес
+    //    вече е commit-нал reconciliation-а за този турнир, докато текущият
+    //    чакаше write lock-а, повторният SELECT вътре в транзакцията връща 0
+    //    реда и функцията прави чист no-op COMMIT, без да пипа нищо повторно
+    //    (огледално на TOCTOU pattern-а в joinTournamentSoloAtomically).
+    //  - Economy-free: никога не extends debitWalletStatement/creditWalletStatement/
+    //    insertLedgerStatement — пипа изключително tournament_teams (INSERT)
+    //    и tournament_entries.team_id (UPDATE, само за entries, вече
+    //    confirmed и платени в миналото — participant/entry count не се
+    //    променя, само team_id полето).
+    //  - НЕ пипа partner_inviter/partner_invitee entries (WHERE joined_as =
+    //    'solo' AND team_id IS NULL изключва ги structурно — тези никога
+    //    нямат team_id=NULL докато са confirmed).
+    reconcileLegacySoloEntriesForTournamentAtomically(
+      tournamentId: TournamentId,
+    ): ReconcileLegacySoloEntriesResult {
+      // Fast-path извън транзакцията — избягва да отваря write транзакция за
+      // общия случай (турнир вече нормализиран, или никога не е имал legacy
+      // solo entries). Коректността не зависи от този pre-check — виж
+      // re-check-а вътре в транзакцията по-долу.
+      const preCheckCount = (countLegacyOrphanSoloEntriesStatement.get(tournamentId) as { count: number }).count
+      if (preCheckCount === 0) {
+        return { alreadyClean: true, pairedTeams: 0, waitingTeamCreated: false }
+      }
+
+      let result: ReconcileLegacySoloEntriesResult
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+
+        const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+        if (freshTournament === undefined || freshTournament.status !== 'open') {
+          // Defensive — само 'open' турнири трябва някога да имат legacy
+          // orphans в normal flow; ако статусът вече е different (settled/
+          // cancelled между pre-check-а и тук), просто не пипаме нищо.
+          database.exec('ROLLBACK;')
+          return { alreadyClean: true, pairedTeams: 0, waitingTeamCreated: false }
+        }
+
+        // Re-check ВЪТРЕ в транзакцията — TOCTOU/multi-process safe (виж
+        // коментара над функцията). FIFO ORDER BY created_at ASC, entry_id
+        // ASC е authoritative DB ordering, не in-memory JS сортиране.
+        const legacyEntries = selectLegacyOrphanSoloEntriesStatement.all(tournamentId) as TournamentEntryRow[]
+        if (legacyEntries.length === 0) {
+          database.exec('COMMIT;')
+          return { alreadyClean: true, pairedTeams: 0, waitingTeamCreated: false }
+        }
+
+        let pairedTeams = 0
+        let waitingTeamCreated = false
+        for (let i = 0; i < legacyEntries.length; i += 2) {
+          const first = legacyEntries[i] as TournamentEntryRow
+          const second = legacyEntries[i + 1]
+          const teamId = randomUUID()
+          insertTeamStatement.run(teamId, tournamentId)
+          assignEntryToTeamStatement.run(teamId, first.entry_id, tournamentId)
+          if (second !== undefined) {
+            assignEntryToTeamStatement.run(teamId, second.entry_id, tournamentId)
+            updateTeamStatusStatement.run('complete', teamId, tournamentId)
+            pairedTeams += 1
+          } else {
+            // Odd one out — stays on the freshly-created 'forming' team
+            // (default status from insertTeamStatement), exactly the
+            // canonical "single waiting solo" shape.
+            waitingTeamCreated = true
+          }
+        }
+
+        insertEvent(tournamentId, 'legacy_solo_entries_reconciled', null, 'system', {
+          legacyCount: legacyEntries.length,
+          pairedTeams,
+          waitingTeamCreated,
+        })
+
+        database.exec('COMMIT;')
+        result = { alreadyClean: false, pairedTeams, waitingTeamCreated }
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // surface original failure
+        }
+        throw error
+      }
+
+      return result
+    },
+
     leaveTournamentAndRefundAtomically(
       tournamentId: TournamentId,
       profileId: ProfileId,
@@ -2997,6 +3157,7 @@ export async function createTournamentEconomyStore(
             walletBalance: getWalletBalance(profileId),
             tournament: toTournamentRecord(tournamentRow),
             autoReleasedPartner: null,
+            soloTeamCompositionChanged: null,
           }
         }
       }
@@ -3033,6 +3194,7 @@ export async function createTournamentEconomyStore(
             walletBalance: getWalletBalance(profileId),
             tournament: toTournamentRecord(freshTournament),
             autoReleasedPartner: null,
+            soloTeamCompositionChanged: null,
           }
         }
         if (freshEntry.status !== 'confirmed') {
@@ -3070,73 +3232,133 @@ export async function createTournamentEconomyStore(
         // транзакция, огледално на самия напускащ участник по-долу —
         // симетрично е независимо кой от двамата напусне пръв.
         let autoReleasedPartner: { profileId: ProfileId; refundedAmount: number; noticeId: string } | null = null
+        let soloTeamCompositionChanged: { teamId: TournamentTeamId; affectedProfileIds: ProfileId[] } | null = null
         if (freshEntry.team_id !== null) {
           const teamMembers = selectConfirmedEntriesForTeamStatement.all(freshEntry.team_id) as TournamentEntryRow[]
           const remainingMembers = teamMembers.filter((entry) => entry.entry_id !== freshEntry.entry_id)
-          // Всеки pending outgoing invite от НАПУСКАЩИЯ (ако все още е
-          // inviter на нерешена покана) се cancel-ва — непроменено спрямо
-          // преди. Самата accepted покана, формирала team-а, се trie-ва
-          // автоматично чрез ON DELETE CASCADE на tournament_partner_invites.team_id
-          // при deleteTeamStatement по-долу (виж migration
-          // 20260730_001_create_tournament_core_tables.sql:165) — не се
-          // нуждае от отделен resolve тук.
-          const pendingInvite = selectPendingOutgoingInviteStatement.get(
-            tournamentId,
-            profileId,
-          ) as TournamentPartnerInviteRow | undefined
-          if (pendingInvite !== undefined) {
-            resolvePartnerInviteStatement.run('cancelled', pendingInvite.invite_id, tournamentId)
-          }
-          for (const member of remainingMembers) {
-            const memberRefundKey = entryFeeRefundKeyForAttempt(
-              tournamentId,
-              member.profile_id,
-              currentEntryFeeAttempt(tournamentId, member.profile_id),
-            )
-            const memberDebitLedger = getCurrentEntryFeeDebitLedger(tournamentId, member.profile_id)
-            const memberRefundAmount = memberDebitLedger?.amount ?? freshTournament.entry_fee
-            ensureWalletStatement.run(member.profile_id)
-            creditWalletStatement.run(memberRefundAmount, member.profile_id)
-            insertLedgerStatement.run(
-              randomUUID(),
-              memberRefundKey,
-              tournamentId,
-              member.profile_id,
-              'entry_fee_refund' satisfies TournamentLedgerEntryType,
-              memberRefundAmount,
-              getWalletBalance(member.profile_id),
-            )
-            const memberUpdateResult = updateEntryToRefundedStatement.run(member.entry_id) as { changes?: number }
-            if ((memberUpdateResult.changes ?? 0) > 0) {
-              insertEvent(tournamentId, 'entry_auto_released_after_partner_left', member.profile_id, 'system', {
+
+          // §"TEAM ORIGIN / SOLO SEMANTICS" — authoritative joined_as check,
+          // никога display-state inference. Solo-origin: и напускащият, И
+          // останалият член (ако има такъв) са joined_as='solo' — никога
+          // partner_inviter/partner_invitee. Забележка: remainingMembers.every(...)
+          // е vacuously true за празен масив (lone waiting solo, no
+          // teammate) — безопасно, защото branch-ът по-долу изисква И
+          // remainingMembers.length===1, така че лоното-solo случаят винаги
+          // пада в else клона (unchanged: for-loop-ът по remainingMembers е
+          // no-op, само deleteTeamStatement чисти празния team — точно
+          // старото коректно поведение).
+          const isSoloOriginTeam =
+            freshEntry.joined_as === 'solo' && remainingMembers.every((member) => member.joined_as === 'solo')
+
+          if (isSoloOriginTeam && remainingMembers.length === 1) {
+            // §"PART 2 — SOLO TEAM MEMBER LEAVE". Остатъчният член (A)
+            // НИКОГА не се refund-ва/премахва тук — за разлика от explicit
+            // partner teams по-долу. Ако вече има чакащ solo (C, намерен
+            // чрез СЪЩИЯ FIFO query като auto-pair join-а), C веднага заема
+            // мястото на напускащия на СЪЩИЯ team_id (A never moves — само C
+            // се премества), без нов debit/refund за C. Иначе A's team
+            // demote-ва 'complete' → 'forming' и A става новият canonical
+            // waiting solo.
+            const remainingMember = remainingMembers[0] as TournamentEntryRow
+            const waitingSoloEntry = selectOldestWaitingSoloEntryStatement.get(tournamentId) as
+              | TournamentEntryRow
+              | undefined
+
+            if (waitingSoloEntry !== undefined) {
+              assignEntryToTeamStatement.run(freshEntry.team_id, waitingSoloEntry.entry_id, tournamentId)
+              // C's стар forming team вече е празен — почистваме го веднага
+              // (огледално на 0-member forming cleanup в
+              // validateAndLockTeamsForStart), за да не остане orphan card.
+              deleteTeamStatement.run(waitingSoloEntry.team_id, tournamentId)
+              insertEvent(tournamentId, 'solo_waiting_replaced_leaver', waitingSoloEntry.profile_id, 'system', {
                 leavingProfileId: profileId,
-                refundedAmount: memberRefundAmount,
+                remainingProfileId: remainingMember.profile_id,
+                teamId: freshEntry.team_id,
               })
-              // Durable notice row (§ "PARTNER-LEFT NOTIFICATION ТРЯБВА Е
-              // DURABLE") — notice_id детерминиран от member.entry_id-то,
-              // затова е безопасно idempotent дори при теоретичен retry на
-              // целия leave call (updateEntryToRefundedStatement's WHERE
-              // status='confirmed' guard вече прави changes>0 клона
-              // недостижим повторно за същия entry, но deterministic id
-              // премахва и всякаква зависимост от този guard за самото
-              // известие).
-              const partnerLeftNoticeId = `partner-left:${member.entry_id}`
-              insertPartnerLeftNoticeStatement.run(
-                partnerLeftNoticeId,
-                tournamentId,
-                member.profile_id,
-                memberRefundAmount,
-              )
-              // Само ЕДИН partner е възможен в двучленен team модел — ако
-              // някога capacity/model се разшири, тук трябва да стане масив.
-              autoReleasedPartner = {
-                profileId: member.profile_id,
-                refundedAmount: memberRefundAmount,
-                noticeId: partnerLeftNoticeId,
+              soloTeamCompositionChanged = {
+                teamId: freshEntry.team_id,
+                affectedProfileIds: [remainingMember.profile_id, waitingSoloEntry.profile_id],
+              }
+            } else {
+              updateTeamStatusStatement.run('forming', freshEntry.team_id, tournamentId)
+              insertEvent(tournamentId, 'solo_team_demoted_to_waiting', remainingMember.profile_id, 'system', {
+                leavingProfileId: profileId,
+                teamId: freshEntry.team_id,
+              })
+              soloTeamCompositionChanged = {
+                teamId: freshEntry.team_id,
+                affectedProfileIds: [remainingMember.profile_id],
               }
             }
+          } else {
+            // Explicit-partner-origin team (or a lone forming team with no
+            // teammate at all, remainingMembers.length===0) — EXISTING,
+            // UNCHANGED behavior. Всеки pending outgoing invite от
+            // НАПУСКАЩИЯ (ако все още е inviter на нерешена покана) се
+            // cancel-ва. Самата accepted покана, формирала team-а, се
+            // trie-ва автоматично чрез ON DELETE CASCADE на
+            // tournament_partner_invites.team_id при deleteTeamStatement
+            // по-долу (виж migration
+            // 20260730_001_create_tournament_core_tables.sql:165) — не се
+            // нуждае от отделен resolve тук.
+            const pendingInvite = selectPendingOutgoingInviteStatement.get(
+              tournamentId,
+              profileId,
+            ) as TournamentPartnerInviteRow | undefined
+            if (pendingInvite !== undefined) {
+              resolvePartnerInviteStatement.run('cancelled', pendingInvite.invite_id, tournamentId)
+            }
+            for (const member of remainingMembers) {
+              const memberRefundKey = entryFeeRefundKeyForAttempt(
+                tournamentId,
+                member.profile_id,
+                currentEntryFeeAttempt(tournamentId, member.profile_id),
+              )
+              const memberDebitLedger = getCurrentEntryFeeDebitLedger(tournamentId, member.profile_id)
+              const memberRefundAmount = memberDebitLedger?.amount ?? freshTournament.entry_fee
+              ensureWalletStatement.run(member.profile_id)
+              creditWalletStatement.run(memberRefundAmount, member.profile_id)
+              insertLedgerStatement.run(
+                randomUUID(),
+                memberRefundKey,
+                tournamentId,
+                member.profile_id,
+                'entry_fee_refund' satisfies TournamentLedgerEntryType,
+                memberRefundAmount,
+                getWalletBalance(member.profile_id),
+              )
+              const memberUpdateResult = updateEntryToRefundedStatement.run(member.entry_id) as { changes?: number }
+              if ((memberUpdateResult.changes ?? 0) > 0) {
+                insertEvent(tournamentId, 'entry_auto_released_after_partner_left', member.profile_id, 'system', {
+                  leavingProfileId: profileId,
+                  refundedAmount: memberRefundAmount,
+                })
+                // Durable notice row (§ "PARTNER-LEFT NOTIFICATION ТРЯБВА Е
+                // DURABLE") — notice_id детерминиран от member.entry_id-то,
+                // затова е безопасно idempotent дори при теоретичен retry на
+                // целия leave call (updateEntryToRefundedStatement's WHERE
+                // status='confirmed' guard вече прави changes>0 клона
+                // недостижим повторно за същия entry, но deterministic id
+                // премахва и всякаква зависимост от този guard за самото
+                // известие).
+                const partnerLeftNoticeId = `partner-left:${member.entry_id}`
+                insertPartnerLeftNoticeStatement.run(
+                  partnerLeftNoticeId,
+                  tournamentId,
+                  member.profile_id,
+                  memberRefundAmount,
+                )
+                // Само ЕДИН partner е възможен в двучленен team модел — ако
+                // някога capacity/model се разшири, тук трябва да стане масив.
+                autoReleasedPartner = {
+                  profileId: member.profile_id,
+                  refundedAmount: memberRefundAmount,
+                  noticeId: partnerLeftNoticeId,
+                }
+              }
+            }
+            deleteTeamStatement.run(freshEntry.team_id, tournamentId)
           }
-          deleteTeamStatement.run(freshEntry.team_id, tournamentId)
         }
 
         const updateResult = updateEntryToRefundedStatement.run(freshEntry.entry_id) as {
@@ -3160,6 +3382,7 @@ export async function createTournamentEconomyStore(
           walletBalance: getWalletBalance(profileId),
           tournament: toTournamentRecord(freshTournament),
           autoReleasedPartner,
+          soloTeamCompositionChanged,
         }
       } catch (error) {
         try {
