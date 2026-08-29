@@ -1633,6 +1633,18 @@ export type TournamentMatchAssignedMessage = {
   assignment: TournamentMatchAssignmentSnapshot
 }
 
+// Realtime notice за team composition промяна извън partner-invite lifecycle
+// (в момента: solo auto-pair, §A/§B "auto-pair solo players") — LEK payload,
+// самото известие е само тригер за authoritative refetch (виж
+// handleServerMessage), не носи готови данни за merge. Отделен от
+// tournament_partner_invite_resolved нарочно — там ВИНАГИ участва invite,
+// тук никога няма такъв, reuse на онова име би било подвеждащо.
+export type TournamentTeamUpdatedMessage = {
+  type: 'tournament_team_updated'
+  tournamentId: string
+  teamId: string
+}
+
 export type TournamentActiveParticipationMessage = {
   type: 'tournament_active_participation'
   tournamentId: string
@@ -2153,6 +2165,7 @@ export type ServerMessage =
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage
+  | TournamentTeamUpdatedMessage
   | TournamentMatchAssignedMessage
   | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage

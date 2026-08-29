@@ -829,6 +829,7 @@ export type LobbyScreenState = {
   tournamentPartnerPickerErrorText: string | null
   tournamentPartnerInviteBusy: boolean
   tournamentPartnerInviteErrorText: string | null
+  tournamentPartnerCapacityPopupOpen: boolean
   tournamentPartnerInviteQuery: string
   tournamentPartnerSearchResults: TournamentPartnerCandidateSnapshot[] | null
   tournamentPartnerSearchLoading: boolean
@@ -989,6 +990,8 @@ export type RenderLobbyScreenOptions = {
   onTournamentPartnerPickerOpen: () => void
   onTournamentPartnerPickerClose: () => void
   onTournamentPartnerInviteSubmit: (profileId: string) => void
+  onTournamentPartnerCapacityPopupClose: () => void
+  onTournamentPartnerCapacityJoinSolo: () => void
   onTournamentPartnerInviteQueryChange: (value: string) => void
   onTournamentPartnerInviteAccept: (tournamentId: string, inviteId: string) => void
   onTournamentPartnerInviteDecline: (tournamentId: string, inviteId: string) => void
@@ -14539,6 +14542,14 @@ export function renderLobbyScreen(
   root.querySelector<HTMLInputElement>('[data-tournament-partner-query="1"]')
     ?.addEventListener('input', (e) => {
       options.onTournamentPartnerInviteQueryChange((e.currentTarget as HTMLInputElement).value)
+    })
+  root.querySelector<HTMLButtonElement>('[data-tournament-partner-capacity-close="1"]')
+    ?.addEventListener('click', options.onTournamentPartnerCapacityPopupClose)
+  root.querySelector<HTMLButtonElement>('[data-tournament-partner-capacity-join-solo="1"]')
+    ?.addEventListener('click', options.onTournamentPartnerCapacityJoinSolo)
+  root.querySelector<HTMLElement>('[data-tournament-partner-capacity-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentPartnerCapacityPopupClose()
     })
   root.querySelectorAll<HTMLButtonElement>('[data-tournament-partner-invite]').forEach((btn) => {
     btn.addEventListener('click', () => {

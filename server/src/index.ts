@@ -10989,6 +10989,7 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   tournament_not_open: 'Турнирът вече не приема записвания.',
   tournament_fill_expired: 'Турнирът вече е отменен, защото не се запълни навреме.',
   tournament_full: 'Няма достатъчно свободни места.',
+  partner_requires_two_slots: 'Не можете да се запишете с партньор, защото в турнира има само едно свободно място.',
   invite_window_closed: 'Прозорецът за покани е затворен.',
   requires_password: 'Този турнир е защитен с парола.',
   not_friend: 'Можеш да поканиш само потвърден приятел.',
@@ -11439,6 +11440,23 @@ async function handleTournamentJoinRequest(
     walletBalance: result.walletBalance,
     tournament: buildTournamentSummaryDto(result.tournament, profileId),
   })
+
+  // Realtime auto-pair notice (§A/§B "auto-pair solo players") — emitted
+  // ONLY after a successful COMMITTED auto-pair (result.autoPairedWithProfileId
+  // is non-null exclusively in that case — see joinTournamentSoloAtomically):
+  // never for a fresh solo join that just started its own new waiting team,
+  // never for an alreadyJoined idempotent retry, and never for a
+  // failed/rolled-back attempt (those already returned above via !result.ok).
+  // Targets ONLY the waiting player (A) — the joiner (B) already reconciles
+  // via their own HTTP response + client-side fetchTournamentDetail, so
+  // pushing to B too would just be a redundant duplicate fetch.
+  if (result.autoPairedWithProfileId !== null && result.entry.teamId !== null) {
+    sendToOpenProfileConnections(result.autoPairedWithProfileId, {
+      type: 'tournament_team_updated',
+      tournamentId,
+      teamId: result.entry.teamId,
+    })
+  }
   return true
 }
 

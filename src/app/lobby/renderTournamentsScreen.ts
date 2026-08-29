@@ -1115,6 +1115,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
     ${state.tournamentJoinConfirmOpen ? renderTournamentJoinConfirmPopup(state, t) : ''}
     ${state.tournamentPartnerPickerOpen ? renderTournamentPartnerPickerPopup(state, t) : ''}
+    ${state.tournamentPartnerCapacityPopupOpen ? renderTournamentPartnerCapacityPopup(state) : ''}
     ${state.tournamentLeaveConfirmOpen ? renderTournamentLeaveConfirmPopup(state, t) : ''}
     ${state.tournamentCancelConfirmOpen ? renderTournamentCancelConfirmPopup(state) : ''}
   `
@@ -1353,6 +1354,36 @@ function renderTournamentPartnerPickerPopup(state: LobbyScreenState, t: Tourname
         <div data-tournament-partner-search-results="1">${renderTournamentPartnerSearchSection(state)}</div>
         <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:rgba(255,255,255,0.45);margin-bottom:6px;">Приятели</div>
         <div style="display:grid;gap:8px;max-height:280px;overflow-y:auto;">${friendsBody}</div>
+      </div>
+    </div>
+  `
+}
+
+// §D/§E "auto-pair solo players + partner capacity" в task spec-а —
+// server-authoritative popup (reason='partner_requires_two_slots' от
+// createPartnerInviteAtomically), показва се вместо inline грешка в
+// picker-a, когато explicit "Участвай с партньор" изисква 2 места, а е
+// останало точно 1. "Влез сам" вика canonical solo join path (виж
+// joinSoloFromPartnerCapacityPopup в контролера) — не отделна join логика.
+function renderTournamentPartnerCapacityPopup(state: LobbyScreenState): string {
+  return `
+    <div data-tournament-partner-capacity-backdrop="1" style="position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,0.72);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:16px;width:100%;max-width:380px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:16px;font-weight:900;color:#d4a520;margin-bottom:12px;">Няма достатъчно места</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.75);line-height:1.5;margin-bottom:18px;">
+          Не можете да се запишете с партньор, защото в турнира има само едно свободно място.
+        </div>
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-tournament-partner-capacity-close="1" style="
+            flex:1;height:40px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);
+            background:transparent;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;cursor:pointer;
+          ">Отказ</button>
+          <button type="button" data-tournament-partner-capacity-join-solo="1" ${state.tournamentJoinBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentJoinBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
+            color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentJoinBusy ? 'default' : 'pointer'};
+          ">${state.tournamentJoinBusy ? 'Записване...' : 'Влез сам'}</button>
+        </div>
       </div>
     </div>
   `

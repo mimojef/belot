@@ -1620,6 +1620,13 @@ type InternalLobbyFlowState = {
   tournamentPartnerPickerErrorText: string | null
   tournamentPartnerInviteBusy: boolean
   tournamentPartnerInviteErrorText: string | null
+  // §D/§E "auto-pair solo players + partner capacity" в task spec-а — отделен
+  // popup от tournamentPartnerInviteErrorText (инлайн текст вътре в
+  // picker-a): показва се, когато createPartnerInviteAtomically върне
+  // reason='partner_requires_two_slots' (останало е точно 1 свободно място,
+  // explicit invite flow-ът винаги изисква 2). "Влез сам" бутонът реюзва
+  // canonical solo join path (submitTournamentJoin) — не дублира логика.
+  tournamentPartnerCapacityPopupOpen: boolean
   // Global partner search (§ "GLOBAL SEARCH AREA") — tournamentPartnerInviteQuery
   // е самият текст в "Търси във всички играчи" полето (вече НЕ филтрира
   // tournamentPartnerCandidates/friends list-а locally, а е самостоятелен
@@ -2122,6 +2129,7 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentPartnerPickerErrorText: null,
     tournamentPartnerInviteBusy: false,
     tournamentPartnerInviteErrorText: null,
+    tournamentPartnerCapacityPopupOpen: false,
     tournamentPartnerInviteQuery: '',
     tournamentPartnerSearchResults: null,
     tournamentPartnerSearchLoading: false,
@@ -3905,6 +3913,7 @@ export function createLobbyFlowController(
       tournamentPartnerPickerErrorText: state.tournamentPartnerPickerErrorText,
       tournamentPartnerInviteBusy: state.tournamentPartnerInviteBusy,
       tournamentPartnerInviteErrorText: state.tournamentPartnerInviteErrorText,
+      tournamentPartnerCapacityPopupOpen: state.tournamentPartnerCapacityPopupOpen,
       tournamentPartnerInviteQuery: state.tournamentPartnerInviteQuery,
       tournamentPartnerSearchResults: state.tournamentPartnerSearchResults,
       tournamentPartnerSearchLoading: state.tournamentPartnerSearchLoading,
@@ -4571,6 +4580,12 @@ export function createLobbyFlowController(
       },
       onTournamentPartnerInviteSubmit: (profileId) => {
         void submitTournamentPartnerInvite(profileId)
+      },
+      onTournamentPartnerCapacityPopupClose: () => {
+        closeTournamentPartnerCapacityPopup()
+      },
+      onTournamentPartnerCapacityJoinSolo: () => {
+        joinSoloFromPartnerCapacityPopup()
       },
       onTournamentPartnerInviteQueryChange: (value) => {
         // НЕ вика render() тук нарочно (§ "TARGETED SEARCH RESULT" в
@@ -8431,7 +8446,18 @@ export function createLobbyFlowController(
 
     state.tournamentJoinConfirmOpen = false
     state.tournamentJoinErrorText = null
-    mergeTournamentSummaryIntoDetail(result.tournament)
+    // Solo-join success path — join-ът връща само TournamentSummarySnapshot
+    // (counters/status/viewer), НЕ пълния TournamentDetailSnapshot.
+    // mergeTournamentSummaryIntoDetail (shallow spread) update-ва коректно
+    // тези summary полета, но detail-only полета като teams/myTeam НЕ
+    // съществуват в summary-то, затова оцеляват непроменени от стария state —
+    // при auto-pair (§"AUTO-PAIR SOLO PLAYERS") точно затова изчакващият
+    // "Отбор A / ИЗЧАКВА ПАРТНЬОР" card оставаше видим и "Записан си
+    // самостоятелно" не се обновяваше до готов отбор, въпреки че сървърът
+    // вече е сдвоил двамата. Огледално на същия fix в submitTournamentLeave
+    // (§ "КРИТИЧНО: ПРОВЕРИ OWN-LEAVE SUCCESS PATH") — authoritative refetch
+    // веднага след успешен join, не workaround/navigation.
+    void fetchTournamentDetail(tournamentId)
     void refetchTournamentsList()
     render()
   }
@@ -8564,6 +8590,17 @@ export function createLobbyFlowController(
     state.tournamentPartnerInviteBusy = false
     if (!result.ok) {
       if (handleTournamentBetaAccessDenial(result.reason)) return
+      // §D/§E "auto-pair solo players + partner capacity" — server-authoritative
+      // reason code (не локален participantsCount), закрива picker-а и
+      // показва dedicated popup с "Отказ"/"Влез сам", вместо generic inline
+      // грешка (виж renderTournamentPartnerCapacityPopup).
+      if (result.reason === 'partner_requires_two_slots') {
+        state.tournamentPartnerPickerOpen = false
+        state.tournamentPartnerInviteErrorText = null
+        state.tournamentPartnerCapacityPopupOpen = true
+        render()
+        return
+      }
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -8574,6 +8611,20 @@ export function createLobbyFlowController(
     void fetchTournamentDetail(tournamentId)
     void refetchTournamentsList()
     render()
+  }
+
+  function closeTournamentPartnerCapacityPopup(): void {
+    state.tournamentPartnerCapacityPopupOpen = false
+    render()
+  }
+
+  // "Влез сам" в §D/§E popup-а — reuse-ва ТОЧНО същия canonical solo join
+  // path като нормалния бутон "Запиши се сам" (submitTournamentJoin), не
+  // дублира join логика във frontend-а. Ако вече има чакащ solo player,
+  // сървърът auto-pair-ва двамата (виж joinTournamentSoloAtomically).
+  function joinSoloFromPartnerCapacityPopup(): void {
+    state.tournamentPartnerCapacityPopupOpen = false
+    void submitTournamentJoin()
   }
 
   async function respondTournamentPartnerInvite(
@@ -13743,6 +13794,23 @@ export function createLobbyFlowController(
         void refetchTournamentsList()
       }
       render()
+      return false
+    }
+
+    // Realtime auto-pair notice (§A/§B "auto-pair solo players") — the
+    // waiting player (already looking at this tournament's detail screen)
+    // has no HTTP response of their own to reconcile from (they didn't just
+    // join anything), so this push is their ONLY signal that their team just
+    // became ready. Same authoritative-refetch pattern as
+    // tournament_partner_invite_resolved/tournament_match_assigned — no new
+    // state model, no polling.
+    if (message.type === 'tournament_team_updated') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      if (state.currentScreen === 'tournaments') {
+        void refetchTournamentsList()
+      }
       return false
     }
 

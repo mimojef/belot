@@ -60,6 +60,15 @@ export type JoinTournamentSoloResult =
       entry: TournamentEntryRecord
       walletBalance: number
       tournament: TournamentRecord
+      /** Non-null exactly when THIS call auto-paired the joiner with an
+       * already-existing waiting solo player (§A/§B "auto-pair solo
+       * players") — the OTHER (waiting) player's profileId. Null for: a
+       * fresh join that started its own new waiting team (no match found),
+       * and for alreadyJoined idempotent retries (no new pairing happened in
+       * THIS call). Lets the caller push a realtime team-update notice to
+       * the waiting player, who otherwise has no way to know their team just
+       * became ready without refreshing/reopening the tournament. */
+      autoPairedWithProfileId: ProfileId | null
     }
   | {
       ok: false
@@ -190,6 +199,12 @@ export type PartnerInviteMutationResult =
         | 'tournament_not_open'
         | 'tournament_fill_expired'
         | 'tournament_full'
+        /** Requester (все още не е участник) избра "Участвай с партньор", но
+         * в турнира е останало точно 1 свободно място — explicit invite flow
+         * винаги изисква 2 (виж §D/§F в task spec-а за "auto-pair solo
+         * players"). Различен от 'tournament_full', за да може клиентът да
+         * покаже специфичния "Влез сам" popup вместо generic съобщение. */
+        | 'partner_requires_two_slots'
         | 'invite_window_closed'
         | 'requires_password'
         | 'not_friend'
@@ -774,6 +789,30 @@ export async function createTournamentEconomyStore(
     ORDER BY created_at ASC;
   `)
 
+  // Auto-pair (§A/§B в task spec-а за "auto-pair solo players + partner
+  // capacity"): най-рано записаният валиден чакащ solo player в турнира —
+  // 'forming' отбор с точно 1 confirmed член, joined_as='solo'. Изключва
+  // partner_inviter forming отбори (explicit invite flow, §C — тези никога
+  // не трябва да се auto-pair-ват с нов solo entrant). ORDER BY created_at
+  // ASC + entry_id ASC е authoritative DB ordering (deterministic FIFO
+  // tie-breaker при еднакъв timestamp), не in-memory JS сортиране.
+  const selectOldestWaitingSoloEntryStatement = database.prepare(`
+    SELECT te.entry_id, te.tournament_id, te.profile_id, te.team_id, te.joined_as, te.status,
+           te.created_at, te.updated_at, te.withdrawn_at, te.refunded_at
+    FROM tournament_entries te
+    JOIN tournament_teams tt ON tt.team_id = te.team_id
+    WHERE tt.tournament_id = ?
+      AND tt.status = 'forming'
+      AND te.joined_as = 'solo'
+      AND te.status = 'confirmed'
+      AND (
+        SELECT COUNT(*) FROM tournament_entries te2
+        WHERE te2.team_id = te.team_id AND te2.status = 'confirmed'
+      ) = 1
+    ORDER BY te.created_at ASC, te.entry_id ASC
+    LIMIT 1;
+  `)
+
   const selectPendingInviteByIdStatement = database.prepare(`
     SELECT invite_id, tournament_id, team_id, inviter_profile_id, invitee_profile_id,
            status, expires_at, popup_dismissed_at, notification_read_at, created_at,
@@ -963,12 +1002,6 @@ export async function createTournamentEconomyStore(
     WHERE entry_id = ? AND status IN ('refunded', 'withdrawn');
   `)
 
-  const updateEntryToSoloStatement = database.prepare(`
-    UPDATE tournament_entries
-    SET team_id = NULL, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
-    WHERE entry_id = ? AND status = 'confirmed';
-  `)
-
   const assignEntryToTeamStatement = database.prepare(`
     UPDATE tournament_entries
     SET team_id = ?, joined_as = 'solo', updated_at = CURRENT_TIMESTAMP
@@ -1061,15 +1094,20 @@ export async function createTournamentEconomyStore(
     LIMIT 1;
   `)
 
+  // team_id вече е задължителен параметър (не хардкоднат NULL) — auto-pair
+  // join-time логиката (§A/§B) винаги слага solo entrant-а в 'forming' отбор
+  // (нов, ако няма чакащ, или чужд съществуващ, ако има) вместо orphan
+  // team_id=NULL, за да може ОТБОРИ секцията да го покаже веднага като
+  // "Изчаква партньор"/"Готов отбор" team card.
   const insertEntryStatement = database.prepare(`
     INSERT INTO tournament_entries (
       entry_id, tournament_id, profile_id, team_id, joined_as, status
-    ) VALUES (?, ?, ?, NULL, 'solo', 'confirmed');
+    ) VALUES (?, ?, ?, ?, 'solo', 'confirmed');
   `)
 
   const reactivateEntryAsSoloStatement = database.prepare(`
     UPDATE tournament_entries
-    SET team_id = NULL, joined_as = 'solo', status = 'confirmed',
+    SET team_id = ?, joined_as = 'solo', status = 'confirmed',
         withdrawn_at = NULL, refunded_at = NULL, updated_at = CURRENT_TIMESTAMP
     WHERE entry_id = ? AND status IN ('refunded', 'withdrawn');
   `)
@@ -1315,9 +1353,23 @@ export async function createTournamentEconomyStore(
       inviterProfileId,
     ) as TournamentEntryRow | undefined
     if (inviterEntry !== undefined && inviterEntry.status === 'confirmed') {
-      updateEntryToSoloStatement.run(inviterEntry.entry_id)
+      // Keep the SAME still-'forming' team (§A/§B "auto-pair solo players")
+      // instead of nulling team_id/deleting it — the team's status was never
+      // touched while the invite was pending (only a successful accept ever
+      // flips it to 'complete'), so flipping joined_as back to 'solo' here
+      // is enough to make the inviter immediately rediscoverable by the
+      // FIFO auto-pair query (selectOldestWaitingSoloEntryStatement:
+      // joined_as='solo', 1 confirmed member, team status='forming') for the
+      // NEXT solo joiner — instead of sitting invisible as a team_id=NULL
+      // orphan until the tournament-start fallback shuffle picks it up.
+      assignEntryToTeamStatement.run(teamId, inviterEntry.entry_id, tournamentId)
+    } else {
+      // No confirmed entry left to keep waiting (inviter's entry already
+      // moved on through some other path) — the now-empty forming team has
+      // nothing left to represent, so clean it up rather than leave a
+      // 0-member ghost card in the ОТБОРИ list.
+      deleteTeamStatement.run(teamId, tournamentId)
     }
-    deleteTeamStatement.run(teamId, tournamentId)
   }
 
   function expireDuePartnerInvitesInCurrentTransaction(tournamentId?: TournamentId): number {
@@ -1453,6 +1505,15 @@ export async function createTournamentEconomyStore(
     const teams = selectTeamsForTournamentStatement.all(tournamentId) as TournamentTeamRow[]
     const completeTeams: TournamentTeamRow[] = []
     const assignedEntryIds = new Set<string>()
+    // Still-waiting auto-paired solo teams (§A/§B) — a 'forming' team with
+    // exactly 1 confirmed member is now the normal steady state for a solo
+    // entrant who hasn't been paired yet (see joinTournamentSoloAtomically),
+    // not a data integrity problem. Its lone member falls through into the
+    // soloEntries reshuffle below (same fallback path as a legacy team_id=NULL
+    // orphan); the now-empty 'forming' row itself is swept here once every
+    // such member has been reassigned to a brand new team, so no orphaned
+    // 0-member team card is left behind in the ОТБОРИ list.
+    const lonelyWaitingSoloTeamIds: string[] = []
 
     for (const team of teams) {
       const members = (selectEntriesForTeamStatement.all(team.team_id) as TournamentEntryRow[])
@@ -1464,6 +1525,21 @@ export async function createTournamentEconomyStore(
       if (members.length === 2 && (team.status === 'complete' || team.status === 'locked')) {
         completeTeams.push(team)
         for (const member of members) assignedEntryIds.add(member.entry_id)
+        continue
+      }
+      // joined_as==='solo' guard is deliberate defense-in-depth, not
+      // decoration: the caller (startTournamentAtomicallyLocal) already
+      // refuses to reach this function at all while
+      // getReservedPendingPlaces(tournamentId) !== 0 (any 'pending' partner
+      // invite), so a 1-member 'forming' team can only ever be a genuine
+      // still-waiting solo here — never a live partner_inviter mid-invite.
+      // Requiring joined_as==='solo' explicitly means that if this invariant
+      // is ever violated (future change, bug), such a team falls through to
+      // the integrity bail-out below instead of being silently reshuffled
+      // into a random new pairing (which would corrupt a live invite's
+      // team/invitee relationship).
+      if (members.length === 1 && team.status === 'forming' && members[0]?.joined_as === 'solo') {
+        lonelyWaitingSoloTeamIds.push(team.team_id)
         continue
       }
       if (members.length > 0) return { ok: false }
@@ -1483,6 +1559,10 @@ export async function createTournamentEconomyStore(
       assignEntryToTeamStatement.run(teamId, second.entry_id, tournamentId)
       const row = selectTeamByIdStatement.get(teamId) as TournamentTeamRow
       completeTeams.push(row)
+    }
+
+    for (const staleTeamId of lonelyWaitingSoloTeamIds) {
+      deleteTeamStatement.run(staleTeamId, tournamentId)
     }
 
     if (completeTeams.length !== teamCapacity) return { ok: false }
@@ -2282,10 +2362,27 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_participant' }
         }
+        // Ако inviter-ът вече е confirmed solo participant, чийто team_id
+        // сочи към собствен 'forming' отбор от точно 1 член (auto-pair
+        // waiting-solo state, §A) — той все още чака partner, не е реално
+        // "вече в отбор". §C изисква explicit invite flow-ът ("Покани
+        // приятел за партньор") да продължи да работи и за такъв играч.
+        // Реюзваме СЪЩИЯ team_id по-долу (вместо нов), за да не остане
+        // orphan 0-член forming отбор след joined_as 'solo' → 'partner_inviter'.
+        const inviterOwnTeam = inviterEntry?.team_id
+          ? (selectTeamByIdStatement.get(inviterEntry.team_id) as TournamentTeamRow | undefined)
+          : undefined
+        const inviterHasOwnWaitingSoloTeam =
+          inviterEntry !== undefined &&
+          inviterEntry.status === 'confirmed' &&
+          inviterEntry.joined_as === 'solo' &&
+          inviterOwnTeam !== undefined &&
+          inviterOwnTeam.status === 'forming'
         if (
           inviterEntry !== undefined &&
           inviterEntry.status === 'confirmed' &&
-          inviterEntry.team_id !== null
+          inviterEntry.team_id !== null &&
+          !inviterHasOwnWaitingSoloTeam
         ) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_teamed' }
@@ -2295,8 +2392,16 @@ export async function createTournamentEconomyStore(
           inviterEntry !== undefined && inviterEntry.status === 'confirmed'
         const neededPlaces = hasConfirmedInviterEntry ? 1 : 2
         const capacity = freshTournament.player_capacity
-        if (getOccupiedPlaces(tournamentId) + neededPlaces > capacity) {
+        const occupiedPlaces = getOccupiedPlaces(tournamentId)
+        if (occupiedPlaces + neededPlaces > capacity) {
           database.exec('ROLLBACK;')
+          // §D/§F: различава "нужни са 2 места, останало е точно 1" (нов
+          // участник цъка "Участвай с партньор") от истинско "няма никакво
+          // място" — клиентът показва специфичния "Влез сам" popup само за
+          // първия случай (виж §E — auto-pair-ва с чакащия solo).
+          if (neededPlaces === 2 && occupiedPlaces + 1 <= capacity) {
+            return { ok: false, reason: 'partner_requires_two_slots' }
+          }
           return { ok: false, reason: 'tournament_full' }
         }
 
@@ -2321,8 +2426,11 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'already_participating_elsewhere' }
         }
 
-        const teamId = randomUUID()
-        insertTeamStatement.run(teamId, tournamentId)
+        const reusableTeamId = inviterHasOwnWaitingSoloTeam ? inviterEntry?.team_id ?? null : null
+        const teamId = reusableTeamId ?? randomUUID()
+        if (reusableTeamId === null) {
+          insertTeamStatement.run(teamId, tournamentId)
+        }
 
         const entryId = inviterEntry?.entry_id ?? randomUUID()
         if (!hasConfirmedInviterEntry) {
@@ -2669,6 +2777,7 @@ export async function createTournamentEconomyStore(
               entry: toTournamentEntryRecord(existingEntryRow),
               walletBalance: getWalletBalance(profileId),
               tournament: toTournamentRecord(tournamentRow),
+              autoPairedWithProfileId: null,
             }
           }
         }
@@ -2735,6 +2844,7 @@ export async function createTournamentEconomyStore(
                 entry: toTournamentEntryRecord(existingInTx),
                 walletBalance: getWalletBalance(profileId),
                 tournament: toTournamentRecord(tournamentRow),
+                autoPairedWithProfileId: null,
               }
             }
           }
@@ -2771,23 +2881,48 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'insufficient_funds' }
         }
 
+        // Auto-pair (§A/§B): FIFO deterministic match с най-рано записания
+        // валиден чакащ solo player в турнира. existingInTx (ако съществува
+        // тук) е гарантирано различен профил от waitingSoloEntry — той е
+        // винаги refunded/withdrawn на тази точка (status='confirmed'
+        // случаят вече върна idempotent success по-горе), а
+        // selectOldestWaitingSoloEntryStatement изисква status='confirmed'.
+        const waitingSoloEntry = selectOldestWaitingSoloEntryStatement.get(tournamentId) as
+          | TournamentEntryRow
+          | undefined
+
+        let targetTeamId: string
+        if (waitingSoloEntry !== undefined) {
+          targetTeamId = waitingSoloEntry.team_id as string
+        } else {
+          targetTeamId = randomUUID()
+          insertTeamStatement.run(targetTeamId, tournamentId)
+        }
+
         const entryId = existingInTx?.entry_id ?? randomUUID()
         if (existingInTx === undefined) {
           try {
-            insertEntryStatement.run(entryId, tournamentId, profileId)
+            insertEntryStatement.run(entryId, tournamentId, profileId, targetTeamId)
           } catch {
             // UNIQUE(tournament_id, profile_id) or active-profile partial index.
             database.exec('ROLLBACK;')
             return { ok: false, reason: 'already_participating_elsewhere' }
           }
         } else {
-          const updateResult = reactivateEntryAsSoloStatement.run(existingInTx.entry_id) as {
+          const updateResult = reactivateEntryAsSoloStatement.run(targetTeamId, existingInTx.entry_id) as {
             changes?: number
           }
           if ((updateResult.changes ?? 0) === 0) {
             database.exec('ROLLBACK;')
             return { ok: false, reason: 'rejoin_not_allowed' }
           }
+        }
+
+        if (waitingSoloEntry !== undefined) {
+          // Двамата вече формират готов отбор — не чакат tournament start,
+          // за да се сдвоят (виж buildTeamDtos/renderTournamentTeamCard:
+          // status !== 'forming' показва "Готов отбор" веднага).
+          updateTeamStatusStatement.run('complete', targetTeamId, tournamentId)
         }
 
         insertLedgerStatement.run(
@@ -2803,6 +2938,8 @@ export async function createTournamentEconomyStore(
         insertEvent(tournamentId, 'entry_confirmed', profileId, 'player', {
           entryFee,
           joinedAs: 'solo',
+          teamId: targetTeamId,
+          autoPaired: waitingSoloEntry !== undefined,
         })
 
         database.exec('COMMIT;')
@@ -2816,6 +2953,7 @@ export async function createTournamentEconomyStore(
           entry: toTournamentEntryRecord(entryRow),
           walletBalance: getWalletBalance(profileId),
           tournament: toTournamentRecord(freshTournament),
+          autoPairedWithProfileId: waitingSoloEntry !== undefined ? waitingSoloEntry.profile_id : null,
         }
       } catch (error) {
         try {
@@ -2921,10 +3059,13 @@ export async function createTournamentEconomyStore(
         )
 
         // Auto-release на partner-а (§ "КОГАТО ЕДИНИЯТ PARTNER СЕ ОТПИШЕ") —
-        // ако напускащият е бил в двучленен team, partner-ът вече НЕ остава
-        // едночленен team (старото поведение — updateEntryToSoloStatement —
-        // би оставило именно malformed "team row + one active member"
-        // steady state, който task spec-ът изрично забранява). Вместо това
+        // ако напускащият е бил в двучленен (complete/locked) team, partner-ът
+        // НЕ остава просто demote-нат обратно към едночленен "forming"
+        // waiting-solo team (за разлика от resetFormingTeamToSolo, който
+        // прави точно това за pending-invite-forming отбори, §A/§B) — тук
+        // team-ът вече е бил СЪЩЕСТВУВАЩ отбор с двама реални участници, не
+        // pending покана, затова distinction-ът остава: пълен refund, не
+        // revert-to-waiting. Вместо това
         // partner-ът е автоматично освободен + refund-нат в СЪЩАТА
         // транзакция, огледално на самия напускащ участник по-долу —
         // симетрично е независимо кой от двамата напусне пръв.

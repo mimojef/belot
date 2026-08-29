@@ -132,6 +132,7 @@ const createInviteDirectReasons = [
   'invite_window_closed',
   'already_teamed',
   'tournament_full',
+  'partner_requires_two_slots',
   'requires_password',
   'insufficient_funds',
 ]
