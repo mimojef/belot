@@ -6491,6 +6491,18 @@ client = createGameServerClient({
     }
 
     if (message.type === 'tournament_economy_notice') {
+      // Defense-in-depth (§"REFUND POPUP СЕ ПОКАЗВА СЛЕД LOGOUT") — ако тази
+      // сесия вече няма authenticated profile (напр. logout е приключил, но
+      // push-ът е бил in-flight, или е stale по каквато и да е бъдеща причина),
+      // popup-ът не трябва да се показва. Известието не се губи — то си остава
+      // persistent server-side (tournament_partner_left_notice_log /
+      // tournament_economy_notice_log) и се доставя наново при следващия
+      // login/reconnect (виж flush блока при connection setup в index.ts).
+      // Authoritative fix-ът е server-side (disconnectConnectionsForSession
+      // затваря stale socket-а при logout), този guard е само подсигуряване.
+      if (currentAuthSession === null) {
+        return
+      }
       tournamentEconomyNotification.handleIncoming({
         eventId: message.eventId,
         reason: message.reason,

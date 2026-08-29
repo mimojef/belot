@@ -3713,6 +3713,33 @@ function sendToOpenProfileConnections(profileId: string, payload: unknown): numb
   return sentCount
 }
 
+// Auth lifecycle fix (§"REFUND POPUP СЕ ПОКАЗВА СЛЕД LOGOUT") — logout
+// invalidates exactly ONE session row (account_sessions), never every
+// session for the profile: concurrent multi-tab/multi-browser sessions for
+// the same profile are an intentional, supported model (authStore.ts inserts
+// a fresh session per login/register, and logout() revokes only the token it
+// was called with). Closing by profileId alone would incorrectly disconnect
+// an UNRELATED still-valid session for the same profile in another tab —
+// violating the explicit "Tab 2 stays logged in, keeps getting realtime
+// popups" requirement. Closing the socket (rather than just clearing
+// connection.profileId in place) is deliberate: it drives the EXISTING
+// socket 'close' handler, which already marks the connection
+// status='disconnected' — already excluded from sendToOpenProfileConnections's
+// target set — and lets the client's own reconnect logic re-establish a
+// fresh, correctly-unauthenticated connection, with no separate cleanup path
+// to keep in sync.
+function disconnectConnectionsForSession(sessionId: string): void {
+  for (const connection of Object.values(serverState.connections)) {
+    if (connection.sessionId !== sessionId || connection.status !== 'connected') {
+      continue
+    }
+    const socket = getSocketByConnectionId(connection.id)
+    if (socket !== null) {
+      socket.close()
+    }
+  }
+}
+
 function isTournamentMatchRoom(room: ServerRoom): boolean {
   return room.config.isTournamentMatchOrigin === true && !!room.config.tournamentMatchId
 }
@@ -3729,17 +3756,23 @@ function sendTournamentMatchAssignment(
 
 // Server-authoritative refund push (§4/§5 в task spec-а) — само след реално
 // committed refund (per-profile сумите идват directly от economy store
-// резултата, никога преизчислени тук). Изпраща се само до online
-// connections за всеки реално refund-нат профил; офлайн профили не получават
-// нищо ретроактивно. eventId е уникален per push (client-side dedup).
+// резултата, никога преизчислени тук). Изпраща се до online connections за
+// всеки реално refund-нат профил; офлайн (или наскоро logout-нати — вече
+// нямат activна connection след disconnectConnectionsForSession) recipients
+// не получават нищо тук — durable-ят ред в tournament_economy_notice_log
+// (виж noticeId) остава delivered_at=NULL и се flush-ва при следващия им
+// login/reconnect (§"REFUND POPUP СЕ ПОКАЗВА СЛЕД LOGOUT"), огледално на
+// tournamentScheduler.ts's notifyEconomyRefunds callback. eventId е уникален
+// per push (client-side dedup); markTournamentEconomyNoticeDelivered се вика
+// само ако push-ът реално стигна до поне една online connection.
 function sendTournamentEconomyRefundNotices(
   tournamentId: string,
   reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left',
-  refundedProfiles: Array<{ profileId: string; amount: number }>,
+  refundedProfiles: Array<{ profileId: string; amount: number; noticeId: string }>,
 ): void {
   const occurredAt = new Date().toISOString()
-  for (const { profileId, amount } of refundedProfiles) {
-    sendToOpenProfileConnections(profileId, {
+  for (const { profileId, amount, noticeId } of refundedProfiles) {
+    const sentCount = sendToOpenProfileConnections(profileId, {
       type: 'tournament_economy_notice',
       eventId: randomUUID(),
       tournamentId,
@@ -3747,6 +3780,9 @@ function sendTournamentEconomyRefundNotices(
       amount,
       occurredAt,
     })
+    if (sentCount > 0) {
+      tournamentEconomyStore.markTournamentEconomyNoticeDelivered(noticeId, profileId)
+    }
   }
 }
 
@@ -6552,7 +6588,14 @@ async function handleAuthRequest(
 
   if (pathname === '/api/auth/logout' && req.method === 'POST') {
     const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+    // Прочитаме сесията ПРЕДИ да я инвалидираме — трябва ни sessionId-то, за
+    // да прекратим ТОЧНО тази WS connection (виж disconnectConnectionsForSession
+    // за защо е по sessionId, не по profileId).
+    const sessionBeingLoggedOut = authStore.getSession(sessionToken)
     authStore.logout(sessionToken)
+    if (sessionBeingLoggedOut !== null) {
+      disconnectConnectionsForSession(sessionBeingLoggedOut.sessionId)
+    }
     sendJsonResponse(
       res,
       200,
@@ -15537,6 +15580,7 @@ wsServer.on('connection', (socket, request) => {
         : null,
     playerId: authSession?.profile.profileId ?? null,
     profileId: authSession?.profile.profileId ?? null,
+    sessionId: authSession?.sessionId ?? null,
   })
 
   serverState = upsertServerConnection(serverState, connection)

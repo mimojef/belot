@@ -278,6 +278,14 @@ export type ServerConnection = {
   currentSeat: Seat | null
   playerId: PlayerId | null
   profileId: ProfileId | null
+  /** account_sessions.session_id за сесията, под която е authenticate-нат
+   * connection-ът при handshake (null за guest/unauthenticated). Отделно от
+   * profileId, защото един profile може да има НЯКОЛКО едновременни валидни
+   * сесии (различни табове/browser-и — виж authStore.ts's per-login session
+   * ред) — logout инвалидира ТОЧНО ЕДНА сесия, затова unbind/disconnect при
+   * logout трябва да таргетира по sessionId, не по profileId (виж
+   * disconnectConnectionsForSession в index.ts). */
+  sessionId: string | null
 }
 
 export type ServerState = {

@@ -129,8 +129,13 @@ export type CancelOpenTournamentResult =
       totalRefunded: number
       /** Per-profile breakdown на refund-натите в ТОЗИ извикване (празно при
        * alreadyCancelled) — ползва се за персонализирани WS известия до
-       * всеки реално refund-нат участник, вкл. създателя ако е бил записан. */
-      refundedProfiles: Array<{ profileId: ProfileId; amount: number }>
+       * всеки реално refund-нат участник, вкл. създателя ако е бил записан.
+       * noticeId сочи към committed durable ред в tournament_economy_notice_log
+       * (§"REFUND POPUP СЕ ПОКАЗВА СЛЕД LOGOUT" — offline/stale-connection
+       * recipients вече не губят известието безвъзвратно) — index.ts го
+       * ползва, за да маркира delivered веднага след успешен online push, без
+       * втори DB lookup (огледално на AutoCancelScheduledTournamentResult). */
+      refundedProfiles: Array<{ profileId: ProfileId; amount: number; noticeId: string }>
       walletBalance: number
       tournament: TournamentRecord
     }
@@ -297,7 +302,7 @@ export type TournamentEconomyStore = {
   markPartnerLeftNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
   getPendingTournamentEconomyNotices: (
     recipientProfileId: ProfileId,
-  ) => Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled'; refundedAmount: number }>
+  ) => Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled'; refundedAmount: number }>
   markTournamentEconomyNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
   dismissPartnerInvitePopup: (
     inviteId: TournamentPartnerInviteId,
@@ -2233,11 +2238,11 @@ export async function createTournamentEconomyStore(
     // flush), не при самия insert.
     getPendingTournamentEconomyNotices(
       recipientProfileId: ProfileId,
-    ): Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled'; refundedAmount: number }> {
+    ): Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled'; refundedAmount: number }> {
       const rows = selectPendingTournamentEconomyNoticesStatement.all(recipientProfileId) as Array<{
         notice_id: string
         tournament_id: string
-        reason: 'fill_expired' | 'scheduled_underfilled'
+        reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled'
         refunded_amount: number
       }>
       return rows.map((row) => ({
@@ -3472,7 +3477,7 @@ export async function createTournamentEconomyStore(
 
         let refundedEntries = 0
         let totalRefunded = 0
-        const refundedProfiles: Array<{ profileId: ProfileId; amount: number }> = []
+        const refundedProfiles: Array<{ profileId: ProfileId; amount: number; noticeId: string }> = []
 
         for (const entry of confirmedEntries) {
           const refundKey = entryFeeRefundKeyForAttempt(
@@ -3503,9 +3508,28 @@ export async function createTournamentEconomyStore(
 
           updateEntryToRefundedByCancelStatement.run(entry.entry_id)
 
+          // Durable notice row (§"REFUND POPUP СЕ ПОКАЗВА СЛЕД LOGOUT") —
+          // notice_id детерминиран от (tournamentId, profileId), огледално на
+          // insertTournamentEconomyNoticeStatement's auto-cancel usage: ЕДИН
+          // creator-cancel event per турнир може да засегне профила само
+          // веднъж (cancel-ът е one-way tournament.status transition, а
+          // refundKey guard-ът по-горе прави този блок недостижим повторно за
+          // същия профил), затова composite ключът е достатъчен за
+          // exactly-once persistence. delivered_at маркира реалната доставка
+          // (online push ИЛИ login flush), не insert момента — виж
+          // markTournamentEconomyNoticeDelivered в index.ts.
+          const noticeId = `cancel:${tournamentId}:${entry.profile_id}`
+          insertTournamentEconomyNoticeStatement.run(
+            noticeId,
+            tournamentId,
+            entry.profile_id,
+            'creator_cancelled',
+            refundAmount,
+          )
+
           refundedEntries += 1
           totalRefunded += refundAmount
-          refundedProfiles.push({ profileId: entry.profile_id, amount: refundAmount })
+          refundedProfiles.push({ profileId: entry.profile_id, amount: refundAmount, noticeId })
         }
 
         insertEvent(tournamentId, 'tournament_cancelled_by_creator', creatorProfileId, 'player', {

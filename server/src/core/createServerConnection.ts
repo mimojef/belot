@@ -15,6 +15,7 @@ type CreateServerConnectionOptions = {
   currentSeat?: Seat | null
   playerId?: PlayerId | null
   profileId?: ProfileId | null
+  sessionId?: string | null
 }
 
 export function createServerConnection(
@@ -33,5 +34,6 @@ export function createServerConnection(
     currentSeat: options.currentSeat ?? null,
     playerId: options.playerId ?? null,
     profileId: options.profileId ?? null,
+    sessionId: options.sessionId ?? null,
   }
 }
