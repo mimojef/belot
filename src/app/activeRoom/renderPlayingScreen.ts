@@ -91,6 +91,12 @@ const MOBILE_TRICK_LAYER_Z_INDEX = 3
 const MOBILE_BUBBLE_LAYER_Z_INDEX = 4
 const ACTIVE_HAND_CARD_LIFT = ' translateY(-5px)'
 const ACTIVE_HAND_CARD_FILTER = 'brightness(1.03) drop-shadow(0 8px 12px rgba(0,0,0,0.18))'
+// Дискретно затъмняване САМО за карти, които в момента не могат да се
+// изиграят, докато Е ред на локалния играч (isMyTurn && !isValid) — виж
+// forensic report §B/§2. Не се ползва, когато изобщо не е ред на играча
+// (тогава isValid винаги true и целта е друга — "чия игра е", не "кое мога
+// да играя").
+const INVALID_HAND_CARD_OPACITY = '0.55'
 
 const SEAT_TRICK_OFFSET: Record<Seat, { left: number; top: number; rotate: number }> = {
   top: { left: 0, top: -54, rotate: 0 },
@@ -1119,6 +1125,9 @@ function renderBottomHandOverlay(options: {
     const canClick = isMyTurn && isValid
     const isHovered = canClick && card.id === hoveredHandCardId
     const cardTransform = isHovered ? `${baseTransform}${ACTIVE_HAND_CARD_LIFT}` : baseTransform
+    // Само за визуално затъмняване — НЕ управлява click/submit eligibility
+    // (това продължава да е canClick/disabled/canSubmitHandCard).
+    const isDimmedIneligible = isMyTurn && !isValid
 
     return `
       <button
@@ -1141,10 +1150,10 @@ function renderBottomHandOverlay(options: {
           box-shadow:0 8px 18px rgba(0,0,0,0.22);
           transform:${cardTransform};
           cursor:${canClick ? 'pointer' : 'default'};
-          pointer-events:${canClick ? 'auto' : 'none'};
-          opacity:1;
+          pointer-events:auto;
+          opacity:${isDimmedIneligible ? INVALID_HAND_CARD_OPACITY : '1'};
           filter:${isHovered ? ACTIVE_HAND_CARD_FILTER : 'none'};
-          transition:transform 0.12s ease,filter 0.12s ease;
+          transition:transform 0.12s ease,filter 0.12s ease,opacity 0.12s ease;
           z-index:${60 + index};
         "
       >
