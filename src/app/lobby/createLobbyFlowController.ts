@@ -1657,6 +1657,7 @@ type InternalLobbyFlowState = {
   adCampaignCreateErrorText: string | null
   adCampaignActionBusy: boolean
   adCampaignDeleteConfirmCampaignId: string | null
+  adCampaignThumbnailPreviewImageUrl: string | null
   pendingAdCampaignQueue: AdCampaignDispatchClientDto[]
   activeAdCampaignPopup: AdCampaignDispatchClientDto | null
   tournaments: TournamentSummarySnapshot[]
@@ -2213,6 +2214,7 @@ function createInitialState(): InternalLobbyFlowState {
     adCampaignCreateErrorText: null as string | null,
     adCampaignActionBusy: false,
     adCampaignDeleteConfirmCampaignId: null as string | null,
+    adCampaignThumbnailPreviewImageUrl: null as string | null,
     pendingAdCampaignQueue: [] as AdCampaignDispatchClientDto[],
     activeAdCampaignPopup: null as AdCampaignDispatchClientDto | null,
     tournaments: [],
@@ -4032,6 +4034,7 @@ export function createLobbyFlowController(
       adCampaignCreateErrorText: state.adCampaignCreateErrorText,
       adCampaignActionBusy: state.adCampaignActionBusy,
       adCampaignDeleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
+      adCampaignThumbnailPreviewImageUrl: state.adCampaignThumbnailPreviewImageUrl,
       pendingAdCampaignQueue: state.pendingAdCampaignQueue,
       activeAdCampaignPopup: state.activeAdCampaignPopup,
       tournaments: state.tournaments,
@@ -5913,6 +5916,12 @@ export function createLobbyFlowController(
         if (state.adCampaignDeleteConfirmCampaignId === null) return
         state.adCampaignDeleteConfirmCampaignId = null
         render()
+      },
+      onAdCampaignThumbnailPreviewOpen: (imageUrl) => {
+        openAdCampaignThumbnailPreview(imageUrl)
+      },
+      onAdCampaignThumbnailPreviewClose: () => {
+        closeAdCampaignThumbnailPreview()
       },
       onAdCampaignPopupDismiss: () => {
         dismissActiveAdCampaignPopup()
@@ -10174,6 +10183,21 @@ export function createLobbyFlowController(
     const next = [...rows]
     next[idx] = campaign
     return next
+  }
+
+  // Management-only thumbnail preview (renderAdCampaignThumbnailPreview.ts) —
+  // чист локален visual toggle, напълно отделен от production delivery
+  // popup-а (activeAdCampaignPopup) — не пипа pending queue, не праща
+  // ad_campaign_mark_shown/dismiss/click, не навигира.
+  function openAdCampaignThumbnailPreview(imageUrl: string): void {
+    state.adCampaignThumbnailPreviewImageUrl = imageUrl
+    render()
+  }
+
+  function closeAdCampaignThumbnailPreview(): void {
+    if (state.adCampaignThumbnailPreviewImageUrl === null) return
+    state.adCampaignThumbnailPreviewImageUrl = null
+    render()
   }
 
   function showAdCampaignManagementPanel(historyMode: 'push' | 'replace' = 'push'): void {

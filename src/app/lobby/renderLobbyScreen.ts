@@ -815,6 +815,8 @@ export type LobbyScreenState = {
   adCampaignCreateErrorText: string | null
   adCampaignActionBusy: boolean
   adCampaignDeleteConfirmCampaignId: string | null
+  /** Management-only thumbnail preview (виж renderAdCampaignThumbnailPreview.ts) — само visual toggle, никаква receipt/delivery семантика. */
+  adCampaignThumbnailPreviewImageUrl: string | null
   /** Опашка от pending dispatch-и, получени от сървъра (Checkpoint A/B/C) — показва се по един, в реда на пристигане. */
   pendingAdCampaignQueue: AdCampaignDispatchClientDto[]
   /** Текущо отвореният popup (взет от опашката) — null означава че нищо не се показва в момента. */
@@ -1237,6 +1239,8 @@ export type RenderLobbyScreenOptions = {
   onAdCampaignDeleteRequest?: (campaignId: string) => void
   onAdCampaignDeleteConfirm?: () => void
   onAdCampaignDeleteDismiss?: () => void
+  onAdCampaignThumbnailPreviewOpen?: (imageUrl: string) => void
+  onAdCampaignThumbnailPreviewClose?: () => void
   onAdCampaignPopupDismiss?: () => void
   onAdCampaignPopupClick?: () => void
   onRulesOpen: () => void
@@ -5363,6 +5367,7 @@ function renderMobileLobbyScreenContent(
                 createErrorText: state.adCampaignCreateErrorText,
                 actionBusy: state.adCampaignActionBusy,
                 deleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
+                previewImageUrl: state.adCampaignThumbnailPreviewImageUrl,
               })
           : state.view === 'tournaments'
             ? renderTournamentsScreen(state)
@@ -11623,6 +11628,7 @@ export function renderLobbyScreen(
                     createErrorText: state.adCampaignCreateErrorText,
                     actionBusy: state.adCampaignActionBusy,
                     deleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
+                    previewImageUrl: state.adCampaignThumbnailPreviewImageUrl,
                   })
             : state.view === 'tournaments'
               ? renderTournamentsScreen(state)
@@ -15389,6 +15395,8 @@ export function renderLobbyScreen(
     onDeleteRequest: (campaignId) => { options.onAdCampaignDeleteRequest?.(campaignId) },
     onDeleteConfirm: () => { options.onAdCampaignDeleteConfirm?.() },
     onDeleteDismiss: () => { options.onAdCampaignDeleteDismiss?.() },
+    onThumbnailPreviewOpen: (imageUrl) => { options.onAdCampaignThumbnailPreviewOpen?.(imageUrl) },
+    onThumbnailPreviewClose: () => { options.onAdCampaignThumbnailPreviewClose?.() },
   })
 
   attachAdCampaignPopupHandlers(root, {
