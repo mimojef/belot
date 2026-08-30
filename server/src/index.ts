@@ -25,6 +25,7 @@ import {
   createClearSessionCookieHeader,
   createSessionCookieHeader,
   getSessionTokenFromCookieHeader,
+  isAdCampaignManagerSession,
   isAdminOrSubadminSession,
   isFullAdminSession,
   isLafcheMessageDeleteModeratorSession,
@@ -95,6 +96,8 @@ import {
   type AdminPaymentListRow,
 } from './db/coinPurchaseStore.js'
 import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
+import { createAdCampaignsStore } from './db/adCampaignsStore.js'
+import { isSafeAdCampaignTargetUrl } from './adCampaigns/validateAdCampaignTargetUrl.js'
 import {
   createSiteVisitStore,
   type SiteVisitNavigationType,
@@ -105,6 +108,7 @@ import {
 } from './db/siteVisitStore.js'
 import { detectDeviceType } from './utils/detectDeviceType.js'
 import { detectOsType } from './utils/detectOsType.js'
+import { isPikaHostname } from './utils/isPikaHostname.js'
 import { ensureServerDatabaseReady } from './db/ensureServerDatabaseReady.js'
 import { createFriendshipStore } from './db/friendshipStore.js'
 import { createTournamentStore } from './db/tournamentStore.js'
@@ -370,6 +374,9 @@ const SERVER_ROOT_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const UPLOADS_ROOT_PATH = join(SERVER_ROOT_PATH, 'uploads')
 const AVATAR_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'avatars')
 const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
+// Рекламни кампании — банерите са публично видими за всички играчи
+// (аналогично на avatars/gallery), виж PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.
+const AD_CAMPAIGN_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'ad-campaigns')
 
 // Личен чат — снимки. Отделна upload директория, НЕ сервирана от публичния
 // handleUploadsRequest (виж handleChatAttachmentRequest) — снимките в
@@ -598,6 +605,12 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'request_player_profile':
     case 'send_emoji_reaction':
     case 'send_phrase_reaction':
+    case 'subscribe_ad_campaign_management':
+    case 'unsubscribe_ad_campaign_management':
+    case 'request_pending_ad_campaigns':
+    case 'ad_campaign_mark_shown':
+    case 'ad_campaign_dismiss':
+    case 'ad_campaign_click':
       return false
   }
 
@@ -651,6 +664,9 @@ const coinPurchaseStore = await createCoinPurchaseStore(
   databaseBootstrap.databaseFilePath,
 )
 const dailyRewardsStore = await createDailyRewardsStore(
+  databaseBootstrap.databaseFilePath,
+)
+const adCampaignsStore = await createAdCampaignsStore(
   databaseBootstrap.databaseFilePath,
 )
 const authStore = await createAuthStore(
@@ -719,6 +735,12 @@ const topicModerationStore = await createTopicModerationStore(databaseBootstrap.
 // напреднали cursor-а синхронно, така че poll-ът естествено announce-ва само
 // съобщения/изтривания от ДРУГИ инстанции — виж runLobbyChatCrossInstancePoll).
 const lobbyChatSubscriberConnectionIds = new Set<ConnectionId>()
+
+// "Реклами" admin/pika_team management view — realtime sync между отворени
+// management табове (create/send/delete), mirror на lobbyChatSubscriberConnectionIds
+// pattern-а по-горе. Отделен от delivery push-а към обикновените играчи
+// (ad_campaign_pending_ads) — тук само за management list refresh.
+const adCampaignManagementSubscriberConnectionIds = new Set<ConnectionId>()
 
 const LOBBY_CHAT_HISTORY_LIMIT = 50
 // "Публикации от Pika.bg" cutover marker — прочетен ЕДНАГА при startup от
@@ -796,6 +818,7 @@ function invalidateLobbyChatBlockCache(profileId: string): void {
 
 let lobbyChatLastAnnouncedSeq = lobbyChatStore.getMaxSeq()
 let lobbyChatLastAnnouncedDeletionEventSeq = lobbyChatStore.getMaxDeletionEventSeq()
+let adCampaignEventsLastAnnouncedSeq = adCampaignsStore.getMaxEventSeq()
 
 function checkLobbyChatRateLimit(profileId: string, now: number = Date.now()): boolean {
   const existing = lobbyChatRateLimitByProfileId.get(profileId)
@@ -5205,10 +5228,6 @@ function isLocalDevelopmentHostname(hostname: string | null): boolean {
   return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1'
 }
 
-function isPikaHostname(hostname: string | null): boolean {
-  return hostname === 'pika.bg' || hostname?.endsWith('.pika.bg') === true
-}
-
 function getRequestHostname(req: IncomingMessage): string | null {
   return normalizeRequestHostname(getFirstHeaderValue(req.headers.host))
 }
@@ -5969,6 +5988,7 @@ async function createChatAttachmentWebp(
 const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
   resolve(AVATAR_UPLOADS_PATH),
   resolve(GALLERY_UPLOADS_PATH),
+  resolve(AD_CAMPAIGN_UPLOADS_PATH),
 ]
 
 function resolveUploadRequestPath(pathname: string): string | null {
@@ -14788,6 +14808,282 @@ async function handleAdminDailyRewardsRequest(
   return true
 }
 
+// ─── "Рекламни кампании" (ad campaigns) ─────────────────────────────────────
+//
+// Campaign ≠ dispatch (ad_campaigns/ad_campaign_dispatches/ad_campaign_receipts,
+// migration 20260830_003) — всяко "Изпрати" създава нов независим dispatch;
+// receipt (shown/dismissed/clicked) е на ниво dispatch, не campaign. Delivery
+// state machine: (A) connect/bootstrap checkpoint в wsServer.on('connection')
+// по-горе, (B) request_pending_ad_campaigns при реален Lobby entry, (C)
+// fan-out веднага след успешен "Изпрати" по-долу. Cross-instance realtime
+// (PM2 споделя SQLite, но не in-memory connection registry) минава през
+// ad_campaign_events poll, mirror на runLobbyChatCrossInstancePoll.
+
+function broadcastAdCampaignManagementEventToLocalSubscribers(payload: unknown): void {
+  for (const subscriberConnectionId of [...adCampaignManagementSubscriberConnectionIds]) {
+    const subscriberConnection = getConnectionById(serverState, subscriberConnectionId)
+    const socket = socketRegistry.get(subscriberConnectionId)
+
+    if (subscriberConnection === null || !socket || socket.readyState !== WebSocket.OPEN) {
+      adCampaignManagementSubscriberConnectionIds.delete(subscriberConnectionId)
+      continue
+    }
+
+    sendJsonMessage(socket, payload)
+  }
+}
+
+function broadcastAdCampaignDeletedToAllLocalConnections(campaignId: string): void {
+  for (const conn of Object.values(serverState.connections)) {
+    safeSendToConnection(conn.id, { type: 'ad_campaign_deleted', campaignId })
+  }
+}
+
+function deliverAdCampaignDispatchToEligibleLocalConnections(dispatch: {
+  dispatchId: string
+  campaignId: string
+  imageUrl: string
+  targetUrl: string
+  sentAt: string
+}): void {
+  const seenProfileIds = new Set<string>()
+
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId === null || seenProfileIds.has(conn.profileId)) {
+      continue
+    }
+    seenProfileIds.add(conn.profileId)
+
+    // In-game профилите се прескачат — ще получат dispatch-а на Checkpoint B
+    // (реален Lobby entry), не автоматично при game-finished.
+    if (isProfileInActiveGame(conn.profileId)) {
+      continue
+    }
+
+    sendToOpenProfileConnections(conn.profileId, {
+      type: 'ad_campaign_pending_ads',
+      dispatches: [dispatch],
+    })
+  }
+}
+
+async function handleAdminAdCampaignsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const sendMatch = /^\/api\/admin\/ad-campaigns\/([^/]+)\/send$/.exec(pathname)
+  const deleteMatch = /^\/api\/admin\/ad-campaigns\/([^/]+)$/.exec(pathname)
+
+  if (pathname !== '/api/admin/ad-campaigns' && sendMatch === null && deleteMatch === null) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  // Admin И pika_team имат ЕДНАКВИ права тук — виж isAdCampaignManagerSession
+  // (authStore.ts). Няма значение кой е създал кампанията — всеки от двамата
+  // може да send/delete всяка кампания.
+  if (!isAdCampaignManagerSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
+    return true
+  }
+
+  const actorProfileId = session.profile.profileId ?? ''
+  const actorRole = session.account.role === 'pika_team' ? 'pika_team' as const : 'admin' as const
+  const actor = { profileId: actorProfileId, role: actorRole }
+
+  if (pathname === '/api/admin/ad-campaigns' && req.method === 'GET') {
+    sendJsonResponse(res, 200, { ok: true, campaigns: adCampaignsStore.listForManagement() })
+    return true
+  }
+
+  if (pathname === '/api/admin/ad-campaigns' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+      return true
+    }
+
+    const imageDataUrl = getStringField(body, 'imageDataUrl')
+    const targetUrl = getStringField(body, 'targetUrl').trim()
+
+    if (!isSafeAdCampaignTargetUrl(targetUrl)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден адрес. Разрешени са само вътрешни адреси или https://pika.bg линкове.' })
+      return true
+    }
+
+    const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrl)
+    if (imageBuffer === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' })
+      return true
+    }
+
+    const processed = await processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true })
+    if (processed === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Снимката не може да бъде обработена.' })
+      return true
+    }
+
+    const filename = `${randomUUID()}.webp`
+
+    try {
+      await writeWebpAttachmentFile(AD_CAMPAIGN_UPLOADS_PATH, filename, processed.buffer)
+    } catch {
+      sendJsonResponse(res, 500, { ok: false, message: 'Снимката не можа да бъде записана.' })
+      return true
+    }
+
+    const imageUrl = createUploadUrl('ad-campaigns', filename)
+    const result = adCampaignsStore.createCampaign({ imageUrl, imageFilename: filename, targetUrl, actor })
+
+    if (!result.ok) {
+      await deleteAttachmentFileByFilename(AD_CAMPAIGN_UPLOADS_PATH, filename)
+      sendJsonResponse(res, 400, { ok: false, message: result.message })
+      return true
+    }
+
+    adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, result.eventSeq)
+    broadcastAdCampaignManagementEventToLocalSubscribers({
+      type: 'ad_campaign_management_created',
+      campaign: result.campaign,
+    })
+
+    sendJsonResponse(res, 200, { ok: true, campaign: result.campaign })
+    return true
+  }
+
+  if (sendMatch !== null && req.method === 'POST') {
+    const campaignId = decodeURIComponent(sendMatch[1] ?? '')
+    const result = adCampaignsStore.sendCampaign(campaignId, actor)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 404, { ok: false, message: result.message })
+      return true
+    }
+
+    adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, result.eventSeq)
+
+    deliverAdCampaignDispatchToEligibleLocalConnections({
+      dispatchId: result.dispatchId,
+      campaignId,
+      imageUrl: result.campaign.imageUrl,
+      targetUrl: result.campaign.targetUrl,
+      sentAt: result.sentAt,
+    })
+    broadcastAdCampaignManagementEventToLocalSubscribers({
+      type: 'ad_campaign_management_dispatched',
+      campaign: result.campaign,
+    })
+
+    sendJsonResponse(res, 200, { ok: true, campaign: result.campaign })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const campaignId = decodeURIComponent(deleteMatch[1] ?? '')
+    const result = adCampaignsStore.softDeleteCampaign(campaignId, actor)
+
+    if (!result.ok) {
+      sendJsonResponse(res, 404, { ok: false, message: result.message })
+      return true
+    }
+
+    adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, result.eventSeq)
+
+    // Database state (deleted_at) вече е source of truth за offline/in-game
+    // deferred профилите (следващата им pending-заявка просто няма да я
+    // върне повече) — тези два broadcast-а са само UX-удобство за момента:
+    // затваря вече отворен/queued popup realtime + обновява management view.
+    broadcastAdCampaignDeletedToAllLocalConnections(campaignId)
+    broadcastAdCampaignManagementEventToLocalSubscribers({
+      type: 'ad_campaign_management_deleted',
+      campaignId,
+    })
+
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+  return true
+}
+
+function runAdCampaignEventsCrossInstancePoll(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const events = adCampaignsStore.pollEvents(adCampaignEventsLastAnnouncedSeq, 50)
+
+    for (const event of events) {
+      adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, event.eventSeq)
+
+      if (event.eventType === 'campaign_created' && event.campaignId !== null) {
+        const campaign = adCampaignsStore.getManagementRowById(event.campaignId)
+        if (campaign !== null) {
+          broadcastAdCampaignManagementEventToLocalSubscribers({
+            type: 'ad_campaign_management_created',
+            campaign,
+          })
+        }
+        continue
+      }
+
+      if (event.eventType === 'dispatch_created' && event.campaignId !== null && event.dispatchId !== null) {
+        const activeCampaign = adCampaignsStore.getActiveCampaignById(event.campaignId)
+        if (activeCampaign !== null) {
+          deliverAdCampaignDispatchToEligibleLocalConnections({
+            dispatchId: event.dispatchId,
+            campaignId: activeCampaign.campaignId,
+            imageUrl: activeCampaign.imageUrl,
+            targetUrl: activeCampaign.targetUrl,
+            sentAt: event.createdAt,
+          })
+        }
+        const managementRow = adCampaignsStore.getManagementRowById(event.campaignId)
+        if (managementRow !== null) {
+          broadcastAdCampaignManagementEventToLocalSubscribers({
+            type: 'ad_campaign_management_dispatched',
+            campaign: managementRow,
+          })
+        }
+        continue
+      }
+
+      if (event.eventType === 'campaign_deleted' && event.campaignId !== null) {
+        broadcastAdCampaignDeletedToAllLocalConnections(event.campaignId)
+        broadcastAdCampaignManagementEventToLocalSubscribers({
+          type: 'ad_campaign_management_deleted',
+          campaignId: event.campaignId,
+        })
+        continue
+      }
+
+      if (
+        (event.eventType === 'receipt_dismissed' || event.eventType === 'receipt_clicked') &&
+        event.dispatchId !== null &&
+        event.profileId !== null
+      ) {
+        broadcastToProfileConnections(event.profileId, {
+          type: 'ad_campaign_dispatch_invalidated',
+          dispatchId: event.dispatchId,
+        })
+      }
+    }
+  } catch (error) {
+    console.error('[ad-campaigns] cross-instance events poll failed:', error)
+  }
+}
+
+const AD_CAMPAIGN_EVENTS_POLL_INTERVAL_MS = 700
+let adCampaignEventsPollInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runAdCampaignEventsCrossInstancePoll,
+  AD_CAMPAIGN_EVENTS_POLL_INTERVAL_MS,
+)
+
 async function handlePublicRoomsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -15767,6 +16063,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleAdminAdCampaignsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handlePublicRoomsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -15995,6 +16295,22 @@ wsServer.on('connection', (socket, request) => {
         sendJsonMessage(socket, {
           type: 'tournament_active_participation',
           tournamentId: activeTournamentId,
+        })
+      }
+    }
+
+    // "Рекламни кампании" delivery Checkpoint A (connect/bootstrap/reconnect)
+    // — виж delivery state machine брифа. Ако профилът в момента е в активна
+    // игра, НЕ push-ваме тук — ще го хване Checkpoint B при реален Lobby
+    // entry (switchToLobby hook, request_pending_ad_campaigns). DB е source
+    // of truth — listPendingDispatchesForProfile вече филтрира изтрити
+    // campaigns и dismissed/clicked dispatches за този profile.
+    if (!isProfileInActiveGame(connection.profileId)) {
+      const pendingAdCampaigns = adCampaignsStore.listPendingDispatchesForProfile(connection.profileId)
+      if (pendingAdCampaigns.length > 0) {
+        sendJsonMessage(socket, {
+          type: 'ad_campaign_pending_ads',
+          dispatches: pendingAdCampaigns,
         })
       }
     }
@@ -18002,6 +18318,78 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'subscribe_ad_campaign_management') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        const role = latestConnection?.profileId != null
+          ? authStore.getAccountRoleForProfile(latestConnection.profileId)
+          : null
+        if (role === 'admin' || role === 'pika_team') {
+          adCampaignManagementSubscriberConnectionIds.add(connection.id)
+        }
+        return
+      }
+
+      if (message.type === 'unsubscribe_ad_campaign_management') {
+        adCampaignManagementSubscriberConnectionIds.delete(connection.id)
+        return
+      }
+
+      if (message.type === 'request_pending_ad_campaigns') {
+        // Реален Lobby entry (Checkpoint B) — ре-заявяваме DB fresh (не
+        // кеш), за да хванем delete/dismiss, случили се докато профилът е
+        // бил в игра. Ако все пак е в игра (defensive — не би трябвало),
+        // не push-ваме нищо, ще се опита пак при следващ реален lobby entry.
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId == null) return
+        if (isProfileInActiveGame(latestConnection.profileId)) return
+
+        const pendingAdCampaigns = adCampaignsStore.listPendingDispatchesForProfile(latestConnection.profileId)
+        if (pendingAdCampaigns.length > 0) {
+          safeSendToConnection(connection.id, {
+            type: 'ad_campaign_pending_ads',
+            dispatches: pendingAdCampaigns,
+          })
+        }
+        return
+      }
+
+      if (message.type === 'ad_campaign_mark_shown') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId == null) return
+        adCampaignsStore.markDispatchShown(message.dispatchId, latestConnection.profileId)
+        return
+      }
+
+      if (message.type === 'ad_campaign_dismiss') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId == null) return
+
+        const result = adCampaignsStore.markDispatchDismissed(message.dispatchId, latestConnection.profileId)
+        if (result.ok) {
+          adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, result.eventSeq)
+          broadcastToProfileConnections(latestConnection.profileId, {
+            type: 'ad_campaign_dispatch_invalidated',
+            dispatchId: message.dispatchId,
+          })
+        }
+        return
+      }
+
+      if (message.type === 'ad_campaign_click') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId == null) return
+
+        const result = adCampaignsStore.markDispatchClicked(message.dispatchId, latestConnection.profileId)
+        if (result.ok) {
+          adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, result.eventSeq)
+          broadcastToProfileConnections(latestConnection.profileId, {
+            type: 'ad_campaign_dispatch_invalidated',
+            dispatchId: message.dispatchId,
+          })
+        }
+        return
+      }
+
       if (message.type === 'send_lobby_chat_message') {
         const requestId = message.requestId
         const latestConnection = getConnectionById(serverState, connection.id)
@@ -18766,6 +19154,7 @@ wsServer.on('connection', (socket, request) => {
   socket.on('close', () => {
     guestIdByConnection.delete(connection.id)
     lobbyChatSubscriberConnectionIds.delete(connection.id)
+    adCampaignManagementSubscriberConnectionIds.delete(connection.id)
     topicsDirectorySubscriberConnectionIds.delete(connection.id)
 
     const disconnectedTopicId = topicMessageSubscriberTopicIdByConnectionId.get(connection.id)
@@ -19314,6 +19703,11 @@ function clearMutationTimersForShutdown(): void {
     lobbyChatPollInterval = null
   }
 
+  if (adCampaignEventsPollInterval !== null) {
+    clearInterval(adCampaignEventsPollInterval)
+    adCampaignEventsPollInterval = null
+  }
+
   if (topicMessagePollInterval !== null) {
     clearInterval(topicMessagePollInterval)
     topicMessagePollInterval = null
@@ -19469,6 +19863,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('coinPackageStore', () => coinPackageStore.close())
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
+  closeStore('adCampaignsStore', () => adCampaignsStore.close())
   closeStore('siteVisitStore', () => siteVisitStore.close())
   closeStore('tournamentAdminStore', () => tournamentAdminStore.close())
   closeStore('tournamentScheduler', () => tournamentScheduler?.close())

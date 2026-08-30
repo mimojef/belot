@@ -715,6 +715,36 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'subscribe_ad_campaign_management') {
+      return { type: 'subscribe_ad_campaign_management' }
+    }
+
+    if (parsed.type === 'unsubscribe_ad_campaign_management') {
+      return { type: 'unsubscribe_ad_campaign_management' }
+    }
+
+    if (parsed.type === 'request_pending_ad_campaigns') {
+      return { type: 'request_pending_ad_campaigns' }
+    }
+
+    if (parsed.type === 'ad_campaign_mark_shown') {
+      const dispatchId = normalizeRequiredText(parsed.dispatchId)
+      if (dispatchId === null) return null
+      return { type: 'ad_campaign_mark_shown', dispatchId }
+    }
+
+    if (parsed.type === 'ad_campaign_dismiss') {
+      const dispatchId = normalizeRequiredText(parsed.dispatchId)
+      if (dispatchId === null) return null
+      return { type: 'ad_campaign_dismiss', dispatchId }
+    }
+
+    if (parsed.type === 'ad_campaign_click') {
+      const dispatchId = normalizeRequiredText(parsed.dispatchId)
+      if (dispatchId === null) return null
+      return { type: 'ad_campaign_click', dispatchId }
+    }
+
     return null
   } catch {
     return null

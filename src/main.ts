@@ -82,6 +82,7 @@ import {
   type TournamentPartnerInviteSnapshot,
   type TournamentMatchAssignmentSnapshot,
   type AdminRegisteredProfileRow,
+  type AdCampaignManagementDto,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -1946,6 +1947,101 @@ async function postAdminTournamentAction(
       refundedEntries: data.refundedEntries,
       totalRefunded: data.totalRefunded,
     }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdCampaignManagement(): Promise<
+  | { ok: true; campaigns: AdCampaignManagementDto[] }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/ad-campaigns`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп до рекламните кампании.', forbidden: true }
+    }
+    const data = (await response.json()) as {
+      ok: boolean
+      campaigns?: AdCampaignManagementDto[]
+      message?: string
+    }
+    if (!response.ok || !data.ok || !Array.isArray(data.campaigns)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на рекламите.' }
+    }
+    return { ok: true, campaigns: data.campaigns }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function createAdCampaignSubmit(input: { imageDataUrl: string; targetUrl: string }): Promise<
+  | { ok: true; campaign: AdCampaignManagementDto }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/ad-campaigns`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as {
+      ok: boolean
+      campaign?: AdCampaignManagementDto
+      message?: string
+    }
+    if (!response.ok || !data.ok || !data.campaign) {
+      return { ok: false, message: data.message ?? 'Кампанията не можа да бъде създадена.' }
+    }
+    return { ok: true, campaign: data.campaign }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function sendAdCampaignSubmit(campaignId: string): Promise<
+  | { ok: true; campaign: AdCampaignManagementDto }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/ad-campaigns/${encodeURIComponent(campaignId)}/send`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    const data = (await response.json()) as {
+      ok: boolean
+      campaign?: AdCampaignManagementDto
+      message?: string
+    }
+    if (!response.ok || !data.ok || !data.campaign) {
+      return { ok: false, message: data.message ?? 'Кампанията не можа да бъде изпратена.' }
+    }
+    return { ok: true, campaign: data.campaign }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function deleteAdCampaignSubmit(campaignId: string): Promise<
+  | { ok: true }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/ad-campaigns/${encodeURIComponent(campaignId)}`, {
+      method: 'DELETE',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Кампанията не можа да бъде изтрита.' }
+    }
+    return { ok: true }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -5566,6 +5662,28 @@ lobby = createLobbyFlowController({
     | { ok: true; alreadyCancelled: boolean; refundedEntries: number; totalRefunded: number }
     | { ok: false; message: string; forbidden?: boolean }
   >,
+  onAdCampaignsLoad: () => loadAdCampaignManagement(),
+  onAdCampaignCreateSubmit: (input) => createAdCampaignSubmit(input),
+  onAdCampaignSendSubmit: (campaignId) => sendAdCampaignSubmit(campaignId),
+  onAdCampaignDeleteSubmit: (campaignId) => deleteAdCampaignSubmit(campaignId),
+  onAdCampaignManagementScreenEnter: () => {
+    client.subscribeAdCampaignManagement()
+  },
+  onAdCampaignManagementScreenLeave: () => {
+    client.unsubscribeAdCampaignManagement()
+  },
+  requestPendingAdCampaigns: () => {
+    client.requestPendingAdCampaigns()
+  },
+  onAdCampaignMarkShown: (dispatchId) => {
+    client.markAdCampaignDispatchShown(dispatchId)
+  },
+  onAdCampaignDismissDispatch: (dispatchId) => {
+    client.dismissAdCampaignDispatch(dispatchId)
+  },
+  onAdCampaignClickDispatch: (dispatchId) => {
+    client.clickAdCampaignDispatch(dispatchId)
+  },
   onTournamentsLoad: (params) => loadTournaments(params),
   onTournamentBetaAccessInfoLoad: () => loadTournamentBetaAccessInfo(),
   onTournamentBetaAccessSubmit: (password) => submitTournamentBetaAccessPasswordRequest(password),

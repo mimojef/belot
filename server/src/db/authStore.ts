@@ -91,6 +91,23 @@ export function isPikaAnnouncementAuthorSession(
 }
 
 /**
+ * "Рекламни кампании" (ad campaigns) management достъп — admin И pika_team
+ * имат ЕДНАКВИ права (виждат/create/send/delete всяка кампания, независимо
+ * кой я е създал). Умишлено нов, тесен predicate, а не reuse на
+ * isPikaAnnouncementAuthorSession, въпреки идентичното тяло — established
+ * конвенция в проекта е всяко permission да си има собствен predicate, за
+ * да не се разширят случайно правата на едната фича заради промяна в другата.
+ */
+export function isAdCampaignManagerSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+  )
+}
+
+/**
  * Topics moderation достъп (lock/unlock/mute/unmute/delete тема) —
  * admin/subadmin/pika_team/top_chat_admin. Изрично БЕЗ chat_admin (за
  * разлика от isLobbyChatModeratorSession) — chat_admin правото е тясно

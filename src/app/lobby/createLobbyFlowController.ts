@@ -1,4 +1,5 @@
 import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError } from './formatGiftLimitError'
+import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
 import { decideOpenImageViewer, decideRequestImageViewerClose, decideHandlePopstate, type ImageViewerAction, type ImageViewerHistoryState } from './imageViewerHistoryState'
 import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tournamentEconomyNotificationQueue.js'
@@ -102,6 +103,8 @@ import type {
   TopicReportStatus,
   TopicMuteEvidenceSelfEntry,
   TopicMuteEvidenceModeratorEntry,
+  AdCampaignManagementDto,
+  AdCampaignDispatchClientDto,
 } from '../network/createGameServerClient'
 
 export type LobbyFlowScreen =
@@ -117,6 +120,7 @@ export type LobbyFlowScreen =
   | 'admin-payment-detail'
   | 'admin-tournaments'
   | 'admin-tournament-detail'
+  | 'admin-ad-campaigns'
   | 'tournaments'
   | 'tournament-detail'
   | 'tournament-how-it-works'
@@ -191,6 +195,20 @@ function isAdminOrSubadminAuthSession(session: LobbyAuthSession | null): boolean
  * виж §3 в "Публикации от Pika.bg" брифа.
  */
 function isPikaAnnouncementAuthorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+  )
+}
+
+/**
+ * "Рекламни кампании" management достъп — admin И pika_team имат ЕДНАКВИ
+ * права. Само UX — сървърът презаверява това право на всеки HTTP/WS
+ * management action през isAdCampaignManagerSession (authStore.ts). Нов
+ * тесен predicate, не reuse на isPikaAnnouncementAuthorAuthSession, по
+ * установената конвенция в проекта (виж коментара там).
+ */
+function isAdCampaignManagerAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && (
     session.account.role === 'admin'
     || session.account.role === 'pika_team'
@@ -721,6 +739,30 @@ export type CreateLobbyFlowControllerOptions = {
   /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
   onAdminInfoFamilyScreenEnter?: () => void
   onAdminInfoFamilyScreenLeave?: () => void
+  onAdCampaignsLoad?: () => Promise<
+    | { ok: true; campaigns: AdCampaignManagementDto[] }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdCampaignCreateSubmit?: (input: { imageDataUrl: string; targetUrl: string }) => Promise<
+    | { ok: true; campaign: AdCampaignManagementDto }
+    | { ok: false; message: string }
+  >
+  onAdCampaignSendSubmit?: (campaignId: string) => Promise<
+    | { ok: true; campaign: AdCampaignManagementDto }
+    | { ok: false; message: string }
+  >
+  onAdCampaignDeleteSubmit?: (campaignId: string) => Promise<
+    | { ok: true }
+    | { ok: false; message: string }
+  >
+  /** WS subscribe/unsubscribe за realtime management sync — виж adCampaignManagementSubscriberConnectionIds (сървър). */
+  onAdCampaignManagementScreenEnter?: () => void
+  onAdCampaignManagementScreenLeave?: () => void
+  /** Checkpoint B (реален Lobby entry) — виж delivery state machine брифа в implementation плана. */
+  requestPendingAdCampaigns?: () => void
+  onAdCampaignMarkShown?: (dispatchId: string) => void
+  onAdCampaignDismissDispatch?: (dispatchId: string) => void
+  onAdCampaignClickDispatch?: (dispatchId: string) => void
   onTournamentsLoad?: (params: { mine: boolean; page: number }) => Promise<
     | { ok: true; tournaments: TournamentSummarySnapshot[]; page: number; limit: number; totalCount: number }
     | { ok: false; message: string }
@@ -1608,6 +1650,15 @@ type InternalLobbyFlowState = {
   adminTournamentActionErrorText: string | null
   adminTournamentActionInfoText: string | null
   adminTournamentCancelConfirmOpen: boolean
+  adCampaignManagementLoading: boolean
+  adCampaignManagementRows: AdCampaignManagementDto[]
+  adCampaignManagementErrorText: string | null
+  adCampaignCreateBusy: boolean
+  adCampaignCreateErrorText: string | null
+  adCampaignActionBusy: boolean
+  adCampaignDeleteConfirmCampaignId: string | null
+  pendingAdCampaignQueue: AdCampaignDispatchClientDto[]
+  activeAdCampaignPopup: AdCampaignDispatchClientDto | null
   tournaments: TournamentSummarySnapshot[]
   tournamentsLoading: boolean
   tournamentsErrorText: string | null
@@ -2155,6 +2206,15 @@ function createInitialState(): InternalLobbyFlowState {
     adminTournamentActionErrorText: null,
     adminTournamentActionInfoText: null,
     adminTournamentCancelConfirmOpen: false,
+    adCampaignManagementLoading: false,
+    adCampaignManagementRows: [] as AdCampaignManagementDto[],
+    adCampaignManagementErrorText: null as string | null,
+    adCampaignCreateBusy: false,
+    adCampaignCreateErrorText: null as string | null,
+    adCampaignActionBusy: false,
+    adCampaignDeleteConfirmCampaignId: null as string | null,
+    pendingAdCampaignQueue: [] as AdCampaignDispatchClientDto[],
+    activeAdCampaignPopup: null as AdCampaignDispatchClientDto | null,
     tournaments: [],
     tournamentsLoading: false,
     tournamentsErrorText: null,
@@ -2394,6 +2454,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/admin/visitors': 'admin-visitors',
   '/admin/payments': 'admin-payments',
   '/admin/tournaments': 'admin-tournaments',
+  '/admin/ad-campaigns': 'admin-ad-campaigns',
   '/friends': 'friends',
   '/chat': 'chat',
   '/terms': 'terms',
@@ -3195,6 +3256,9 @@ export function createLobbyFlowController(
     if (isAdminInfoFamilyScreen(state.currentScreen)) {
       options.onAdminInfoFamilyScreenLeave?.()
     }
+    if (state.currentScreen === 'admin-ad-campaigns') {
+      options.onAdCampaignManagementScreenLeave?.()
+    }
   }
 
   /**
@@ -3210,7 +3274,8 @@ export function createLobbyFlowController(
     if (state.currentScreen !== 'admin' && state.currentScreen !== 'admin-info' &&
       state.currentScreen !== 'admin-server' && state.currentScreen !== 'admin-visitors' &&
       state.currentScreen !== 'admin-payments' && state.currentScreen !== 'admin-payment-detail' &&
-      state.currentScreen !== 'admin-tournaments' && state.currentScreen !== 'admin-tournament-detail') {
+      state.currentScreen !== 'admin-tournaments' && state.currentScreen !== 'admin-tournament-detail' &&
+      state.currentScreen !== 'admin-ad-campaigns') {
       return
     }
     switchToLobby()
@@ -3238,6 +3303,12 @@ export function createLobbyFlowController(
       state.matchRoomsLoaded = false
       state.matchRoomsLoading = true
       void loadMatchRooms()
+    }
+    // "Рекламни кампании" delivery Checkpoint B — реален Lobby entry (не
+    // timeout, не game-finished). Сървърът ре-валидира campaign/dispatch
+    // fresh срещу DB преди да push-не каквото и да е.
+    if (wasOnDifferentScreen) {
+      options.requestPendingAdCampaigns?.()
     }
   }
 
@@ -3634,6 +3705,8 @@ export function createLobbyFlowController(
               ? 'admin-tournaments'
             : state.currentScreen === 'admin-tournament-detail'
               ? 'admin-tournament-detail'
+            : state.currentScreen === 'admin-ad-campaigns'
+              ? 'admin-ad-campaigns'
             : state.currentScreen === 'tournaments'
               ? 'tournaments'
             : state.currentScreen === 'tournament-detail'
@@ -3735,6 +3808,7 @@ export function createLobbyFlowController(
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
+      isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
       adminStats: state.adminStats,
       adminStatsLoading: state.adminStatsLoading,
@@ -3951,6 +4025,15 @@ export function createLobbyFlowController(
       adminTournamentActionErrorText: state.adminTournamentActionErrorText,
       adminTournamentActionInfoText: state.adminTournamentActionInfoText,
       adminTournamentCancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
+      adCampaignManagementLoading: state.adCampaignManagementLoading,
+      adCampaignManagementRows: state.adCampaignManagementRows,
+      adCampaignManagementErrorText: state.adCampaignManagementErrorText,
+      adCampaignCreateBusy: state.adCampaignCreateBusy,
+      adCampaignCreateErrorText: state.adCampaignCreateErrorText,
+      adCampaignActionBusy: state.adCampaignActionBusy,
+      adCampaignDeleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
+      pendingAdCampaignQueue: state.pendingAdCampaignQueue,
+      activeAdCampaignPopup: state.activeAdCampaignPopup,
       tournaments: state.tournaments,
       tournamentsLoading: state.tournamentsLoading,
       tournamentsErrorText: state.tournamentsErrorText,
@@ -5805,6 +5888,37 @@ export function createLobbyFlowController(
         if (!state.adminTournamentCancelConfirmOpen) return
         state.adminTournamentCancelConfirmOpen = false
         render()
+      },
+      onAdCampaignsOpen: () => {
+        showAdCampaignManagementPanel()
+      },
+      onAdCampaignsBack: () => {
+        switchToLobby()
+      },
+      onAdCampaignCreate: (input) => {
+        void submitAdCampaignCreate(input)
+      },
+      onAdCampaignSend: (campaignId) => {
+        if (campaignId) void submitAdCampaignSend(campaignId)
+      },
+      onAdCampaignDeleteRequest: (campaignId) => {
+        if (!campaignId) return
+        state.adCampaignDeleteConfirmCampaignId = campaignId
+        render()
+      },
+      onAdCampaignDeleteConfirm: () => {
+        void submitAdCampaignDelete()
+      },
+      onAdCampaignDeleteDismiss: () => {
+        if (state.adCampaignDeleteConfirmCampaignId === null) return
+        state.adCampaignDeleteConfirmCampaignId = null
+        render()
+      },
+      onAdCampaignPopupDismiss: () => {
+        dismissActiveAdCampaignPopup()
+      },
+      onAdCampaignPopupClick: () => {
+        clickActiveAdCampaignPopup()
       },
     })
     if (
@@ -10051,6 +10165,183 @@ export function createLobbyFlowController(
     await fetchAdminTournamentDetail(tournamentId)
   }
 
+  function upsertAdCampaignManagementRow(
+    rows: AdCampaignManagementDto[],
+    campaign: AdCampaignManagementDto,
+  ): AdCampaignManagementDto[] {
+    const idx = rows.findIndex((row) => row.campaignId === campaign.campaignId)
+    if (idx === -1) return [campaign, ...rows]
+    const next = [...rows]
+    next[idx] = campaign
+    return next
+  }
+
+  function showAdCampaignManagementPanel(historyMode: 'push' | 'replace' = 'push'): void {
+    const authSession = options.getAuthSession?.() ?? null
+    // Admin И pika_team имат ЕДНАКВИ права тук — за разлика от повечето
+    // admin-info family екрани, guard-ът НЕ е isAdminOrSubadminAuthSession.
+    if (!isAdCampaignManagerAuthSession(authSession)) {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до рекламните кампании.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-ad-campaigns'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    options.onAdCampaignManagementScreenEnter?.()
+    state.adCampaignManagementLoading = true
+    state.adCampaignManagementErrorText = null
+    state.adCampaignManagementRows = []
+    state.adCampaignDeleteConfirmCampaignId = null
+    const target = '/admin/ad-campaigns'
+    if (window.location.pathname !== target) {
+      if (historyMode === 'replace') history.replaceState(null, '', target)
+      else history.pushState(null, '', target)
+    }
+    render()
+    void fetchAdCampaignManagement()
+  }
+
+  let _adCampaignManagementGen = 0
+
+  async function fetchAdCampaignManagement(): Promise<void> {
+    const gen = ++_adCampaignManagementGen
+    if (!options.onAdCampaignsLoad) {
+      state.adCampaignManagementLoading = false
+      state.adCampaignManagementErrorText = 'Зареждането не е конфигурирано.'
+      if (state.currentScreen === 'admin-ad-campaigns') render()
+      return
+    }
+    const result = await options.onAdCampaignsLoad()
+    if (gen !== _adCampaignManagementGen || state.currentScreen !== 'admin-ad-campaigns') return
+    state.adCampaignManagementLoading = false
+    if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
+      state.adCampaignManagementErrorText = result.message
+      render()
+      return
+    }
+    state.adCampaignManagementRows = result.campaigns
+    state.adCampaignManagementErrorText = null
+    render()
+  }
+
+  async function submitAdCampaignCreate(input: { imageDataUrl: string; targetUrl: string }): Promise<void> {
+    if (!options.onAdCampaignCreateSubmit || state.adCampaignCreateBusy) return
+    state.adCampaignCreateBusy = true
+    state.adCampaignCreateErrorText = null
+    render()
+    const result = await options.onAdCampaignCreateSubmit(input)
+    state.adCampaignCreateBusy = false
+    if (!result.ok) {
+      state.adCampaignCreateErrorText = result.message
+      render()
+      return
+    }
+    state.adCampaignManagementRows = upsertAdCampaignManagementRow(state.adCampaignManagementRows, result.campaign)
+    state.adCampaignCreateErrorText = null
+    render()
+  }
+
+  async function submitAdCampaignSend(campaignId: string): Promise<void> {
+    if (!options.onAdCampaignSendSubmit || state.adCampaignActionBusy) return
+    state.adCampaignActionBusy = true
+    render()
+    const result = await options.onAdCampaignSendSubmit(campaignId)
+    state.adCampaignActionBusy = false
+    if (!result.ok) {
+      state.adCampaignManagementErrorText = result.message
+      render()
+      return
+    }
+    state.adCampaignManagementRows = upsertAdCampaignManagementRow(state.adCampaignManagementRows, result.campaign)
+    render()
+  }
+
+  async function submitAdCampaignDelete(): Promise<void> {
+    const campaignId = state.adCampaignDeleteConfirmCampaignId
+    if (!campaignId || !options.onAdCampaignDeleteSubmit || state.adCampaignActionBusy) return
+    state.adCampaignActionBusy = true
+    render()
+    const result = await options.onAdCampaignDeleteSubmit(campaignId)
+    state.adCampaignActionBusy = false
+    state.adCampaignDeleteConfirmCampaignId = null
+    if (!result.ok) {
+      state.adCampaignManagementErrorText = result.message
+      render()
+      return
+    }
+    state.adCampaignManagementRows = state.adCampaignManagementRows.filter((row) => row.campaignId !== campaignId)
+    render()
+  }
+
+  // "Виж" навигация — relative path ИЛИ абсолютен URL на СЪЩИЯ origin като
+  // текущия frontend → SPA (pathname+search+hash); абсолютен URL на друг
+  // *.pika.bg subdomain (различен origin) → пълен URL, same-tab
+  // (window.location.assign), за да НЕ се загуби hostname-а чрез pathname
+  // conversion. window.open/нов таб не се ползва в нито един branch.
+  function resolveAdCampaignNavigation(targetUrl: string):
+    | { kind: 'spa'; path: string }
+    | { kind: 'same-tab-external'; url: string } {
+    if (targetUrl.startsWith('/')) {
+      return { kind: 'spa', path: targetUrl }
+    }
+    try {
+      const url = new URL(targetUrl)
+      if (url.origin === window.location.origin) {
+        return { kind: 'spa', path: url.pathname + url.search + url.hash }
+      }
+      return { kind: 'same-tab-external', url: targetUrl }
+    } catch {
+      return { kind: 'spa', path: '/' }
+    }
+  }
+
+  function showNextPendingAdCampaignIfAny(): void {
+    const wasActive = state.activeAdCampaignPopup
+    const result = dequeueNextAdCampaignPopup(state.activeAdCampaignPopup, state.pendingAdCampaignQueue)
+    state.activeAdCampaignPopup = result.activePopup
+    state.pendingAdCampaignQueue = result.queue
+    if (wasActive === null && state.activeAdCampaignPopup !== null) {
+      options.onAdCampaignMarkShown?.(state.activeAdCampaignPopup.dispatchId)
+    }
+    render()
+  }
+
+  function dismissActiveAdCampaignPopup(): void {
+    const active = state.activeAdCampaignPopup
+    if (active === null) return
+    state.activeAdCampaignPopup = null
+    options.onAdCampaignDismissDispatch?.(active.dispatchId)
+    showNextPendingAdCampaignIfAny()
+  }
+
+  function clickActiveAdCampaignPopup(): void {
+    const active = state.activeAdCampaignPopup
+    if (active === null) return
+    state.activeAdCampaignPopup = null
+    options.onAdCampaignClickDispatch?.(active.dispatchId)
+    const nav = resolveAdCampaignNavigation(active.targetUrl)
+    if (nav.kind === 'spa') {
+      if (window.location.pathname !== nav.path) {
+        history.pushState(null, '', nav.path)
+      }
+      navigateFromPath(nav.path)
+    } else {
+      window.location.assign(nav.url)
+    }
+    showNextPendingAdCampaignIfAny()
+  }
+
   function showAdminServerPanel(): void {
     const authSession = options.getAuthSession?.() ?? null
 
@@ -12522,6 +12813,7 @@ export function createLobbyFlowController(
     'admin-visitors': '/admin/visitors',
     'admin-payments': '/admin/payments',
     'admin-tournaments': '/admin/tournaments',
+    'admin-ad-campaigns': '/admin/ad-campaigns',
     tournaments: '/tournaments',
     topics: '/topics',
     friends: '/friends',
@@ -12548,6 +12840,7 @@ export function createLobbyFlowController(
     '/admin/visitors': 'admin-visitors',
     '/admin/payments': 'admin-payments',
     '/admin/tournaments': 'admin-tournaments',
+    '/admin/ad-campaigns': 'admin-ad-campaigns',
     '/tournaments': 'tournaments',
     '/topics': 'topics',
     '/friends': 'friends',
@@ -12668,6 +12961,7 @@ export function createLobbyFlowController(
         showAdminTournamentsPanel()
         break
       }
+      case 'admin-ad-campaigns': showAdCampaignManagementPanel('replace'); break
       case 'tournaments': void showTournamentsList(); break
       case 'topics': void showTopicsDirectory(); break
       case 'friends': void showFriendsDirectory(); break
@@ -13988,6 +14282,51 @@ export function createLobbyFlowController(
       } else {
         render()
       }
+      return true
+    }
+
+    if (message.type === 'ad_campaign_pending_ads') {
+      state.pendingAdCampaignQueue = mergeIncomingAdCampaignDispatches(
+        state.pendingAdCampaignQueue,
+        state.activeAdCampaignPopup,
+        message.dispatches,
+      )
+      showNextPendingAdCampaignIfAny()
+      return true
+    }
+
+    if (message.type === 'ad_campaign_dispatch_invalidated') {
+      state.pendingAdCampaignQueue = state.pendingAdCampaignQueue.filter((d) => d.dispatchId !== message.dispatchId)
+      if (state.activeAdCampaignPopup?.dispatchId === message.dispatchId) {
+        state.activeAdCampaignPopup = null
+        showNextPendingAdCampaignIfAny()
+      } else {
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'ad_campaign_deleted') {
+      state.pendingAdCampaignQueue = state.pendingAdCampaignQueue.filter((d) => d.campaignId !== message.campaignId)
+      state.adCampaignManagementRows = state.adCampaignManagementRows.filter((row) => row.campaignId !== message.campaignId)
+      if (state.activeAdCampaignPopup?.campaignId === message.campaignId) {
+        state.activeAdCampaignPopup = null
+        showNextPendingAdCampaignIfAny()
+      } else {
+        render()
+      }
+      return true
+    }
+
+    if (message.type === 'ad_campaign_management_created' || message.type === 'ad_campaign_management_dispatched') {
+      state.adCampaignManagementRows = upsertAdCampaignManagementRow(state.adCampaignManagementRows, message.campaign)
+      render()
+      return true
+    }
+
+    if (message.type === 'ad_campaign_management_deleted') {
+      state.adCampaignManagementRows = state.adCampaignManagementRows.filter((row) => row.campaignId !== message.campaignId)
+      render()
       return true
     }
 

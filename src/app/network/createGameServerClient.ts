@@ -907,6 +907,27 @@ export type ClientMessage =
   | {
       type: 'unsubscribe_topics_directory'
     }
+  | {
+      type: 'subscribe_ad_campaign_management'
+    }
+  | {
+      type: 'unsubscribe_ad_campaign_management'
+    }
+  | {
+      type: 'request_pending_ad_campaigns'
+    }
+  | {
+      type: 'ad_campaign_mark_shown'
+      dispatchId: string
+    }
+  | {
+      type: 'ad_campaign_dismiss'
+      dispatchId: string
+    }
+  | {
+      type: 'ad_campaign_click'
+      dispatchId: string
+    }
 
 export type PrivateRoomOccupantSnapshot = {
   profileId: string | null
@@ -2210,6 +2231,64 @@ export type ServerMessage =
   | TopicSeenUpdatedMessage
   | TopicThreadUnreadCountChangedMessage
   | TopicThreadSeenUpdatedMessage
+  | AdCampaignPendingAdsMessage
+  | AdCampaignDispatchInvalidatedMessage
+  | AdCampaignDeletedMessage
+  | AdCampaignManagementCreatedMessage
+  | AdCampaignManagementDispatchedMessage
+  | AdCampaignManagementDeletedMessage
+
+// --- "Рекламни кампании" (ad campaigns) — delivery push + management realtime sync ---
+
+export type AdCampaignDispatchClientDto = {
+  dispatchId: string
+  campaignId: string
+  imageUrl: string
+  targetUrl: string
+  sentAt: string
+}
+
+export type AdCampaignManagementDto = {
+  campaignId: string
+  imageUrl: string
+  targetUrl: string
+  createdAt: string
+  createdByProfileId: string | null
+  createdByDisplayName: string | null
+  createdByRole: 'admin' | 'pika_team'
+  dispatchCount: number
+  lastDispatchAt: string | null
+}
+
+export type AdCampaignPendingAdsMessage = {
+  type: 'ad_campaign_pending_ads'
+  dispatches: AdCampaignDispatchClientDto[]
+}
+
+export type AdCampaignDispatchInvalidatedMessage = {
+  type: 'ad_campaign_dispatch_invalidated'
+  dispatchId: string
+}
+
+export type AdCampaignDeletedMessage = {
+  type: 'ad_campaign_deleted'
+  campaignId: string
+}
+
+export type AdCampaignManagementCreatedMessage = {
+  type: 'ad_campaign_management_created'
+  campaign: AdCampaignManagementDto
+}
+
+export type AdCampaignManagementDispatchedMessage = {
+  type: 'ad_campaign_management_dispatched'
+  campaign: AdCampaignManagementDto
+}
+
+export type AdCampaignManagementDeletedMessage = {
+  type: 'ad_campaign_management_deleted'
+  campaignId: string
+}
 
 type CreateGameServerClientOptions = {
   url?: string
@@ -2268,6 +2347,12 @@ export type GameServerClient = {
   createTopic: (title: string, requestId: string) => void
   subscribeTopicsDirectory: () => void
   unsubscribeTopicsDirectory: () => void
+  subscribeAdCampaignManagement: () => void
+  unsubscribeAdCampaignManagement: () => void
+  requestPendingAdCampaigns: () => void
+  markAdCampaignDispatchShown: (dispatchId: string) => void
+  dismissAdCampaignDispatch: (dispatchId: string) => void
+  clickAdCampaignDispatch: (dispatchId: string) => void
 }
 
 function getDefaultServerUrl(): string {
@@ -2617,6 +2702,30 @@ export function createGameServerClient(
     send({ type: 'unsubscribe_topics_directory' })
   }
 
+  function subscribeAdCampaignManagement(): void {
+    send({ type: 'subscribe_ad_campaign_management' })
+  }
+
+  function unsubscribeAdCampaignManagement(): void {
+    send({ type: 'unsubscribe_ad_campaign_management' })
+  }
+
+  function requestPendingAdCampaigns(): void {
+    send({ type: 'request_pending_ad_campaigns' })
+  }
+
+  function markAdCampaignDispatchShown(dispatchId: string): void {
+    send({ type: 'ad_campaign_mark_shown', dispatchId })
+  }
+
+  function dismissAdCampaignDispatch(dispatchId: string): void {
+    send({ type: 'ad_campaign_dismiss', dispatchId })
+  }
+
+  function clickAdCampaignDispatch(dispatchId: string): void {
+    send({ type: 'ad_campaign_click', dispatchId })
+  }
+
   return {
     connect,
     disconnect,
@@ -2666,5 +2775,11 @@ export function createGameServerClient(
     createTopic,
     subscribeTopicsDirectory,
     unsubscribeTopicsDirectory,
+    subscribeAdCampaignManagement,
+    unsubscribeAdCampaignManagement,
+    requestPendingAdCampaigns,
+    markAdCampaignDispatchShown,
+    dismissAdCampaignDispatch,
+    clickAdCampaignDispatch,
   }
 }

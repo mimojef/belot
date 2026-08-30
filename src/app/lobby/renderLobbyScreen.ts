@@ -40,6 +40,8 @@ import type {
   TopicReportStatus,
   TopicMuteEvidenceSelfEntry,
   TopicMuteEvidenceModeratorEntry,
+  AdCampaignManagementDto,
+  AdCampaignDispatchClientDto,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot, CpuIncidentSummary, CpuIncidentDetail } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -91,6 +93,8 @@ import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../a
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes'
 import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
+import { renderAdCampaignManagementPanel, attachAdCampaignManagementPanelHandlers } from '../adCampaigns/renderAdCampaignManagementPanel'
+import { renderAdCampaignPopup, attachAdCampaignPopupHandlers } from '../adCampaigns/renderAdCampaignPopup'
 import {
   renderTournamentsScreen,
   renderTournamentDetailScreen,
@@ -353,7 +357,7 @@ export type GuestContactFormInput = {
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-ad-campaigns' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -803,6 +807,18 @@ export type LobbyScreenState = {
   adminTournamentActionErrorText: string | null
   adminTournamentActionInfoText: string | null
   adminTournamentCancelConfirmOpen: boolean
+  isAdCampaignManager: boolean
+  adCampaignManagementLoading: boolean
+  adCampaignManagementRows: AdCampaignManagementDto[]
+  adCampaignManagementErrorText: string | null
+  adCampaignCreateBusy: boolean
+  adCampaignCreateErrorText: string | null
+  adCampaignActionBusy: boolean
+  adCampaignDeleteConfirmCampaignId: string | null
+  /** Опашка от pending dispatch-и, получени от сървъра (Checkpoint A/B/C) — показва се по един, в реда на пристигане. */
+  pendingAdCampaignQueue: AdCampaignDispatchClientDto[]
+  /** Текущо отвореният popup (взет от опашката) — null означава че нищо не се показва в момента. */
+  activeAdCampaignPopup: AdCampaignDispatchClientDto | null
   tournaments: TournamentSummarySnapshot[]
   tournamentsLoading: boolean
   tournamentsErrorText: string | null
@@ -1214,6 +1230,15 @@ export type RenderLobbyScreenOptions = {
   onAdminTournamentCancelOpen?: () => void
   onAdminTournamentCancelConfirm?: () => void
   onAdminTournamentCancelDismiss?: () => void
+  onAdCampaignsOpen?: () => void
+  onAdCampaignsBack?: () => void
+  onAdCampaignCreate?: (input: { imageDataUrl: string; targetUrl: string }) => void
+  onAdCampaignSend?: (campaignId: string) => void
+  onAdCampaignDeleteRequest?: (campaignId: string) => void
+  onAdCampaignDeleteConfirm?: () => void
+  onAdCampaignDeleteDismiss?: () => void
+  onAdCampaignPopupDismiss?: () => void
+  onAdCampaignPopupClick?: () => void
   onRulesOpen: () => void
   onStrategyOpen: () => void
 }
@@ -2662,6 +2687,21 @@ function renderNav(state: LobbyScreenState): string {
                 </button>
               </div>
             </div>
+          ` : ''}
+          ${state.isAdCampaignManager ? `
+            <button type="button" data-lobby-nav-ad-campaigns="1" class="lobby-nav-btn" style="
+              display:flex; align-items:center; gap:8px;
+              background:none;
+              border:0;
+              padding:0 14px;
+              cursor:pointer;
+              font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+              color:rgba(255,255,255,0.70);
+              height:100%;
+            ">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 11l18-5v12L3 14v-3z"/><path d="M11.6 16.8a2 2 0 1 1-3.2 2.4"/></svg>
+              Реклами
+            </button>
           ` : ''}
           <div style="position:relative;display:flex;align-items:center;" data-admin-mail-wrap="1">
             <button data-lobby-nav-support="1" title="Връзка с екипа на Pika.bg" style="
@@ -4353,6 +4393,9 @@ function renderMobileMenu(state: LobbyScreenState): string {
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
                 <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
               ` : ''}
+              ${state.isAdCampaignManager ? `
+                <button type="button" data-lobby-nav-ad-campaigns="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Реклами')}</button>
+              ` : ''}
               <button type="button" data-lobby-nav-logout="1" style="${mobileMenuButtonStyle('rgba(248,113,113,0.16)', '#fecaca')}">${mobileMenuSvgItemContent('logout', 'Изход')}</button>
             ` : `
               <button type="button" data-lobby-nav-guest-contact="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('support', 'Контакти')}</button>
@@ -5309,6 +5352,17 @@ function renderMobileLobbyScreenContent(
                 actionErrorText: state.adminTournamentActionErrorText,
                 actionInfoText: state.adminTournamentActionInfoText,
                 cancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
+              })
+          : state.view === 'admin-ad-campaigns'
+            ? renderAdCampaignManagementPanel({
+                isAdCampaignManager: state.isAdCampaignManager,
+                loading: state.adCampaignManagementLoading,
+                errorText: state.adCampaignManagementErrorText,
+                rows: state.adCampaignManagementRows,
+                createBusy: state.adCampaignCreateBusy,
+                createErrorText: state.adCampaignCreateErrorText,
+                actionBusy: state.adCampaignActionBusy,
+                deleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
               })
           : state.view === 'tournaments'
             ? renderTournamentsScreen(state)
@@ -11414,6 +11468,7 @@ export function renderLobbyScreen(
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
       ${renderGuestContactPopup(state)}
+      ${renderAdCampaignPopup(state.activeAdCampaignPopup)}
     </div>
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
@@ -11558,6 +11613,17 @@ export function renderLobbyScreen(
                     actionInfoText: state.adminTournamentActionInfoText,
                     cancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
                   })
+              : state.view === 'admin-ad-campaigns'
+                ? renderAdCampaignManagementPanel({
+                    isAdCampaignManager: state.isAdCampaignManager,
+                    loading: state.adCampaignManagementLoading,
+                    errorText: state.adCampaignManagementErrorText,
+                    rows: state.adCampaignManagementRows,
+                    createBusy: state.adCampaignCreateBusy,
+                    createErrorText: state.adCampaignCreateErrorText,
+                    actionBusy: state.adCampaignActionBusy,
+                    deleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
+                  })
             : state.view === 'tournaments'
               ? renderTournamentsScreen(state)
             : state.view === 'tournament-detail'
@@ -11698,6 +11764,7 @@ export function renderLobbyScreen(
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
       ${renderGuestContactPopup(state)}
+      ${renderAdCampaignPopup(state.activeAdCampaignPopup)}
     </div>
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
@@ -12790,6 +12857,13 @@ export function renderLobbyScreen(
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminTournamentsOpen?.()
     })
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-ad-campaigns="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdCampaignsOpen?.()
+    }))
 
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-admin-guest-contact="1"]')
@@ -15306,6 +15380,20 @@ export function renderLobbyScreen(
     onCancelOpen: () => { options.onAdminTournamentCancelOpen?.() },
     onCancelConfirm: () => { options.onAdminTournamentCancelConfirm?.() },
     onCancelDismiss: () => { options.onAdminTournamentCancelDismiss?.() },
+  })
+
+  attachAdCampaignManagementPanelHandlers(root, {
+    onBack: () => { options.onAdCampaignsBack?.() },
+    onCreate: (input) => { options.onAdCampaignCreate?.(input) },
+    onSend: (campaignId) => { options.onAdCampaignSend?.(campaignId) },
+    onDeleteRequest: (campaignId) => { options.onAdCampaignDeleteRequest?.(campaignId) },
+    onDeleteConfirm: () => { options.onAdCampaignDeleteConfirm?.() },
+    onDeleteDismiss: () => { options.onAdCampaignDeleteDismiss?.() },
+  })
+
+  attachAdCampaignPopupHandlers(root, {
+    onDismiss: () => { options.onAdCampaignPopupDismiss?.() },
+    onView: () => { options.onAdCampaignPopupClick?.() },
   })
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-payments-open]').forEach((btn) => {

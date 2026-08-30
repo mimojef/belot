@@ -325,6 +325,30 @@ export type ClientMessage =
   | {
       type: 'unsubscribe_topics_directory'
     }
+  | {
+      /** Admin/pika_team management view realtime sync — виж adCampaignManagementSubscriberConnectionIds в index.ts. */
+      type: 'subscribe_ad_campaign_management'
+    }
+  | {
+      type: 'unsubscribe_ad_campaign_management'
+    }
+  | {
+      /** Изпраща се от клиента при реален Lobby entry (switchToLobby hook) — виж delivery state machine брифа. */
+      type: 'request_pending_ad_campaigns'
+    }
+  | {
+      /** Best-effort analytics timestamp — НЕ гейтва pending статуса (виж shown_at семантика брифа). */
+      type: 'ad_campaign_mark_shown'
+      dispatchId: string
+    }
+  | {
+      type: 'ad_campaign_dismiss'
+      dispatchId: string
+    }
+  | {
+      type: 'ad_campaign_click'
+      dispatchId: string
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -1045,6 +1069,12 @@ export type ServerMessage =
   | TopicSeenUpdatedMessage
   | TopicThreadUnreadCountChangedMessage
   | TopicThreadSeenUpdatedMessage
+  | AdCampaignPendingAdsMessage
+  | AdCampaignDispatchInvalidatedMessage
+  | AdCampaignDeletedMessage
+  | AdCampaignManagementCreatedMessage
+  | AdCampaignManagementDispatchedMessage
+  | AdCampaignManagementDeletedMessage
 
 export type ProfileLikedMessage = {
   type: 'profile_liked'
@@ -1536,6 +1566,68 @@ export type TopicThreadSeenUpdatedMessage = {
   lastSeenSeq: number
   unreadCount: number
   topicUnreadCount: number
+}
+
+// --- "Рекламни кампании" (ad campaigns) — delivery push + management realtime sync ---
+
+export type AdCampaignDispatchClientDto = {
+  dispatchId: string
+  campaignId: string
+  imageUrl: string
+  targetUrl: string
+  sentAt: string
+}
+
+export type AdCampaignManagementDto = {
+  campaignId: string
+  imageUrl: string
+  targetUrl: string
+  createdAt: string
+  createdByProfileId: string | null
+  createdByDisplayName: string | null
+  createdByRole: 'admin' | 'pika_team'
+  dispatchCount: number
+  lastDispatchAt: string | null
+}
+
+// Push-ва се при 3-те delivery checkpoint-а (connect/bootstrap, реален Lobby
+// entry, "Изпрати" fan-out) — виж delivery state machine брифа. Клиентът
+// добавя dispatches в локална опашка и показва popup-а за първия, ако в
+// момента няма отворен.
+export type AdCampaignPendingAdsMessage = {
+  type: 'ad_campaign_pending_ads'
+  dispatches: AdCampaignDispatchClientDto[]
+}
+
+// Multi-tab sync — праща се до ВСИЧКИ connections на profile-а веднага след
+// dismiss/click в който и да е таб, за да не се покаже същият dispatch
+// повторно другаде.
+export type AdCampaignDispatchInvalidatedMessage = {
+  type: 'ad_campaign_dispatch_invalidated'
+  dispatchId: string
+}
+
+// Global popup invalidation при delete на campaign — праща се до ВСИЧКИ
+// connections (не само на конкретен profile), за да затвори/премахне от
+// опашката всеки клиент с отворен/queued popup за тази campaign.
+export type AdCampaignDeletedMessage = {
+  type: 'ad_campaign_deleted'
+  campaignId: string
+}
+
+export type AdCampaignManagementCreatedMessage = {
+  type: 'ad_campaign_management_created'
+  campaign: AdCampaignManagementDto
+}
+
+export type AdCampaignManagementDispatchedMessage = {
+  type: 'ad_campaign_management_dispatched'
+  campaign: AdCampaignManagementDto
+}
+
+export type AdCampaignManagementDeletedMessage = {
+  type: 'ad_campaign_management_deleted'
+  campaignId: string
 }
 
 export function getDisplayNameFromIdentity(
