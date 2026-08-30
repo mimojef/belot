@@ -13361,7 +13361,18 @@ export function createLobbyFlowController(
         state.vipGrantSubmitting = false
         state.vipGrantErrorText = null
         clearGiftSuccessInlineMessage()
-        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        // renderPopupOnly() (не directen syncProfilePopup()) — за да мине
+        // през ensureOwnVipStatusLoaded()'s early-return клон, който нулира
+        // ownVipActiveUntilLoadedForProfileId/ownVipActiveUntilResolvedForProfileId
+        // при затворен popup (виж коментара там). Този "X" бутон е ОТДЕЛЕН
+        // close path от onProfileClose (renderLobby()'s options) — преди
+        // фикса директният syncProfilePopup() call тук КОРЕКТНО скриваше
+        // popup-а (isOpen:false вече го guard-ва), но НИКОГА не нулираше
+        // VIP tracking guard-овете, затова следващо отваряне на собствения
+        // профил show-ваше stale кеширана стойност от предишен lifecycle
+        // (или дори пропускаше нов fetch изцяло) вместо fresh "VIP · …" —
+        // виж checkOwnVipStatusAsyncPopupSync.ts [D]/[E].
+        renderPopupOnly()
       },
       onEditClick: (profileId) => {
         openProfileEditorForTarget(profileId)
@@ -13590,7 +13601,24 @@ export function createLobbyFlowController(
       if (result.ok) {
         state.ownVipActiveUntil = result.activeUntil
         state.ownVipActiveUntilResolvedForProfileId = ownProfileId
-        render()
+        // Profile popup живее на document.body (извън root.innerHTML, виж
+        // syncProfilePopup/renderPopupOnly) — generic render() минава през
+        // renderLobbyScreen()'s skip-if-unchanged guard на root HTML string-а,
+        // който НЕ включва VIP данни, значи guard-ът early-return-ва ПРЕДИ да
+        // стигне до syncProfilePopup() тук. Popup-ът оставаше stale ("VIP · …")
+        // до следващ НЕСВЪРЗАН render, чийто root HTML реално се различава
+        // (напр. нова частна маса) — идентичен клас production data-flow bug
+        // като profilePopupTargetRole (виж 899e1af "Fix Lobby own profile
+        // popup" и renderPopupOnly() коментара при ensureProfilePopupTargetRoleLoaded-я
+        // успешен callback по-долу). renderPopupOnly() targeted sync-ва
+        // popup-а directly, заобикаляйки guard-а изцяло. skipAnimation:true е
+        // defensive-explicit тук (syncProfilePopup вече skip-ва entrance
+        // анимацията за всеки re-sync на вече отворен popup чрез isFirstOpen),
+        // за да е сигурно, че async VIP resolution никога не тригерва
+        // fade-in/flicker. Реентрантен ensureOwnVipStatusLoaded() извикан
+        // оттук early-return-ва веднага през ownVipActiveUntilLoadedForProfileId
+        // guard-а по-горе (все още сочи ownProfileId) — без recursion/refetch.
+        renderPopupOnly({ skipAnimation: true })
       }
     })()
   }

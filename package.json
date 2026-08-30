@@ -38,6 +38,7 @@
     "check:private-room-created-notification": "node server/node_modules/tsx/dist/cli.mjs scripts/checkPrivateRoomCreatedNotification.ts",
     "check:notification-sound-assignments": "npx tsx scripts/checkNotificationSoundAssignments.ts",
     "check:active-room-render-stability": "node server/node_modules/tsx/dist/cli.mjs scripts/checkActiveRoomRenderStability.ts",
+    "check:own-vip-status-async-popup-sync": "node server/node_modules/tsx/dist/cli.mjs scripts/checkOwnVipStatusAsyncPopupSync.ts",
     "check:gameplay-sfx-latency": "npx tsx scripts/checkGameplaySfxLatency.ts",
     "check:bidding-board-lifecycle": "npx tsx scripts/checkBiddingBoardLifecycle.ts",
     "check:bidding-board-overlay-invariant": "npx tsx scripts/checkBiddingBoardOverlayInvariant.ts",
