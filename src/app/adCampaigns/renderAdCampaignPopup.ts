@@ -30,7 +30,7 @@ export function renderAdCampaignPopup(dispatch: AdCampaignDispatchClientDto | nu
   return `
     <div data-ad-campaign-popup-backdrop="1" style="position:fixed;inset:0;z-index:2000;background:rgba(0,0,0,.72);display:flex;align-items:center;justify-content:center;padding:16px;">
       <div data-ad-campaign-popup-frame="1" style="position:relative;width:min(calc(100vw - 20px), 650px);max-height:90dvh;background:#111;border-radius:14px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 20px 60px rgba(0,0,0,.5);">
-        <button type="button" data-ad-campaign-popup-close="1" aria-label="Затвори" style="position:absolute;top:10px;right:10px;z-index:1;width:34px;height:34px;border-radius:50%;border:0;background:rgba(0,0,0,.55);color:#fff;font-size:18px;line-height:1;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;">×</button>
+        <button type="button" data-ad-campaign-popup-close="1" aria-label="Затвори" style="position:absolute;top:10px;right:10px;z-index:1;width:38px;height:38px;aspect-ratio:1/1;border-radius:50%;border:2px solid #ef4444;background:rgba(0,0,0,.55);color:#ef4444;font-size:20px;line-height:1;font-weight:900;cursor:pointer;display:flex;align-items:center;justify-content:center;">×</button>
         <img src="${escapeHtml(dispatch.imageUrl)}" alt="" style="flex:1 1 auto;min-height:0;width:100%;height:auto;object-fit:contain;display:block;">
         ${viewButton}
       </div>
