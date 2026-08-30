@@ -47,7 +47,7 @@ function renderCampaignRow(row: AdCampaignManagementDto, state: AdCampaignManage
     <div style="display:flex;gap:14px;background:#0d0d0d;border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:12px;flex-wrap:wrap;">
       <img src="${escapeHtml(row.imageUrl)}" alt="" style="width:120px;height:80px;object-fit:cover;border-radius:6px;background:#000;flex-shrink:0;">
       <div style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:4px;">
-        <span style="font-size:13px;color:#d4d4d8;overflow-wrap:anywhere;">${escapeHtml(row.targetUrl)}</span>
+        <span style="font-size:13px;color:${row.targetUrl === null ? '#71717a' : '#d4d4d8'};overflow-wrap:anywhere;">${row.targetUrl === null ? 'Без линк' : escapeHtml(row.targetUrl)}</span>
         <span style="font-size:12px;color:#a3a3a3;">Създадена: ${fmtDate(row.createdAt)} · ${escapeHtml(creatorLabel)} (${escapeHtml(row.createdByRole)})</span>
         <span style="font-size:12px;color:#a3a3a3;">Изпращания: ${row.dispatchCount}${row.lastDispatchAt ? ` · последно: ${fmtDate(row.lastDispatchAt)}` : ''}</span>
       </div>
@@ -76,7 +76,10 @@ export function renderAdCampaignManagementPanel(state: AdCampaignManagementState
     <form data-ad-campaign-create-form="1" style="display:flex;flex-direction:column;gap:10px;background:#0d0d0d;border:1px solid rgba(255,255,255,0.10);border-radius:8px;padding:14px;margin-bottom:18px;">
       <strong style="font-size:15px;">+ Създай реклама</strong>
       <input type="file" accept="image/png,image/jpeg,image/webp" data-ad-campaign-create-image="1" style="color:#d4d4d8;">
-      <input type="text" name="targetUrl" placeholder="/tournaments или https://pika.bg/tournaments" maxlength="2048" required style="min-height:38px;background:#090909;border:1px solid rgba(255,255,255,0.14);border-radius:6px;color:#fff;padding:0 10px;">
+      <label style="display:flex;flex-direction:column;gap:4px;">
+        <span style="font-size:12px;color:#a3a3a3;">Линк (по желание)</span>
+        <input type="text" name="targetUrl" placeholder="/tournaments или https://pika.bg/tournaments" maxlength="2048" style="min-height:38px;background:#090909;border:1px solid rgba(255,255,255,0.14);border-radius:6px;color:#fff;padding:0 10px;">
+      </label>
       ${state.createErrorText ? `<div style="color:#fecaca;font-weight:700;font-size:13px;">${escapeHtml(state.createErrorText)}</div>` : ''}
       <button type="submit" ${state.createBusy ? 'disabled' : ''} style="min-height:38px;border:0;background:#d4a520;color:#080808;border-radius:6px;font-weight:900;cursor:pointer;align-self:flex-start;padding:0 16px;">${state.createBusy ? 'Качване...' : 'Създай'}</button>
     </form>
@@ -103,7 +106,10 @@ export function attachAdCampaignManagementPanelHandlers(root: HTMLElement, handl
     const targetUrl = String(new FormData(form).get('targetUrl') ?? '').trim()
     const file = fileInput?.files?.[0] ?? null
 
-    if (!file || targetUrl.length === 0) {
+    // targetUrl е optional — само изображението е задължително. Празен string
+    // се праща както си е; сървърът (normalizeAdCampaignTargetUrl) го третира
+    // като "без target", не като грешка.
+    if (!file) {
       return
     }
 

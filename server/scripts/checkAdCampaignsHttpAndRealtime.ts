@@ -63,6 +63,14 @@
  *
  * === Section I: WS management subscribe authorization ===
  * [I1-2] admin/pika_team -> allowed;  [I3-5] player/subadmin/chat_admin -> denied/ignored
+ *
+ * === Section J: Optional target URL (кампания без линк) ===
+ * [J1]   create без target -> 200, DB target_url IS NULL, management връща null
+ * [J2]   explicit targetUrl:null -> третира се като "без target"
+ * [J3]   empty/whitespace target string се нормализира до null
+ * [J4]   unsafe non-empty target продължава да връща 400 (regression)
+ * [J5]   send campaign без target -> 200, dispatchCount нараства нормално
+ * [J6]   pending dispatch без target се доставя нормално, targetUrl:null в payload-а
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -320,7 +328,7 @@ const VALID_IMAGE_DATA_URL = toDataUrl('png', pngBuffer)
 type CampaignDto = {
   campaignId: string
   imageUrl: string
-  targetUrl: string
+  targetUrl: string | null
   createdAt: string
   createdByProfileId: string | null
   createdByDisplayName: string | null
@@ -1165,6 +1173,87 @@ try {
   await checkManagementSubscribeDenied('[I3] player subscribe_ad_campaign_management -> denied/ignored (никакъв management broadcast)', player.cookie)
   await checkManagementSubscribeDenied('[I4] subadmin subscribe_ad_campaign_management -> denied/ignored', subadmin.cookie)
   await checkManagementSubscribeDenied('[I5] chat_admin subscribe_ad_campaign_management -> denied/ignored', chatAdmin.cookie)
+
+  console.log('\n=== Section J: Optional target URL (кампания без линк) ===\n')
+
+  await check('[J1] create campaign БЕЗ target (targetUrl липсва) -> 200, DB target_url IS NULL, management връща null', async () => {
+    const r = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, {
+      imageDataUrl: VALID_IMAGE_DATA_URL,
+    })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}: ${JSON.stringify(r.body)}`)
+    const campaign = (r.body as { campaign: CampaignDto }).campaign
+    assertEqual(campaign.targetUrl, null, 'response targetUrl трябва да е null')
+
+    const db = new DatabaseSync(iso.dbFile, { open: true, enableForeignKeyConstraints: true })
+    const row = db.prepare(`SELECT target_url FROM ad_campaigns WHERE campaign_id = ?;`).get(campaign.campaignId) as { target_url: string | null }
+    db.close()
+    assertEqual(row.target_url, null, 'DB target_url трябва да е NULL')
+
+    const listRes = await httpGetJson(port, '/api/admin/ad-campaigns', admin.cookie)
+    const listed = (listRes.body as { campaigns: CampaignDto[] }).campaigns.find((c) => c.campaignId === campaign.campaignId)
+    assert(listed !== undefined, 'кампанията трябва да е в списъка')
+    assertEqual(listed!.targetUrl, null, 'management GET трябва да връща targetUrl:null')
+
+    await httpDeleteJson(port, `/api/admin/ad-campaigns/${campaign.campaignId}`, admin.cookie)
+  })
+
+  await check('[J2] create campaign с targetUrl:null (explicit) -> третира се като "без target"', async () => {
+    const r = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, {
+      imageDataUrl: VALID_IMAGE_DATA_URL,
+      targetUrl: null,
+    })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+    const campaign = (r.body as { campaign: CampaignDto }).campaign
+    assertEqual(campaign.targetUrl, null, 'targetUrl:null explicit трябва да се третира като без target')
+    await httpDeleteJson(port, `/api/admin/ad-campaigns/${campaign.campaignId}`, admin.cookie)
+  })
+
+  await check('[J3] empty/whitespace target string се нормализира до null', async () => {
+    const r = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, {
+      imageDataUrl: VALID_IMAGE_DATA_URL,
+      targetUrl: '   ',
+    })
+    assert(r.status === 200, `очаквано 200, получено ${r.status}`)
+    const campaign = (r.body as { campaign: CampaignDto }).campaign
+    assertEqual(campaign.targetUrl, null, 'empty/whitespace target трябва да нормализира до null')
+    await httpDeleteJson(port, `/api/admin/ad-campaigns/${campaign.campaignId}`, admin.cookie)
+  })
+
+  await check('[J4] unsafe non-empty target продължава да връща 400 (regression след optional-target промяната)', async () => {
+    const r = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, {
+      imageDataUrl: VALID_IMAGE_DATA_URL,
+      targetUrl: 'javascript:alert(1)',
+    })
+    assert(r.status === 400, `очаквано 400, получено ${r.status}`)
+  })
+
+  await check('[J5] send campaign без target -> 200, dispatchCount нараства нормално', async () => {
+    const createRes = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, { imageDataUrl: VALID_IMAGE_DATA_URL })
+    const cId = (createRes.body as { campaign: CampaignDto }).campaign.campaignId
+    const sendRes = await httpPostJson(port, `/api/admin/ad-campaigns/${cId}/send`, admin.cookie, {})
+    assert(sendRes.status === 200, `очаквано 200, получено ${sendRes.status}: ${JSON.stringify(sendRes.body)}`)
+    assertEqual((sendRes.body as { campaign: CampaignDto }).campaign.dispatchCount, 1, 'dispatchCount след send')
+    await httpDeleteJson(port, `/api/admin/ad-campaigns/${cId}`, admin.cookie)
+  })
+
+  await check('[J6] pending dispatch без target се доставя нормално (WS), с targetUrl:null в payload-а', async () => {
+    const createRes = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, { imageDataUrl: VALID_IMAGE_DATA_URL })
+    const cId = (createRes.body as { campaign: CampaignDto }).campaign.campaignId
+    await httpPostJson(port, `/api/admin/ad-campaigns/${cId}/send`, admin.cookie, {})
+
+    const ws = await openWs(port, viewer.cookie)
+    try {
+      const msg = await waitForWsMessage(ws, (m) =>
+        m.type === 'ad_campaign_pending_ads' &&
+        (m as { dispatches: { campaignId: string }[] }).dispatches.some((d) => d.campaignId === cId),
+      )
+      const found = (msg as { dispatches: { campaignId: string; targetUrl: string | null }[] }).dispatches.find((d) => d.campaignId === cId)!
+      assertEqual(found.targetUrl, null, 'доставеният dispatch трябва да носи targetUrl:null')
+    } finally {
+      ws.close()
+      await httpDeleteJson(port, `/api/admin/ad-campaigns/${cId}`, admin.cookie)
+    }
+  })
 } finally {
   if (srv) await stopSrv(srv)
   await iso.cleanup()

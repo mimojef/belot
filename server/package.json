@@ -17,6 +17,8 @@
     "check:ad-campaigns-client-queue": "tsx scripts/checkAdCampaignClientQueue.ts",
     "check:ad-campaigns-http-and-realtime": "tsx scripts/checkAdCampaignsHttpAndRealtime.ts",
     "check:ad-campaigns-frontend": "tsx scripts/checkAdCampaignsFrontend.ts --project-root=..",
+    "check:ad-campaigns-popup-optional-target": "tsx scripts/checkAdCampaignPopupOptionalTarget.ts",
+    "check:ad-campaigns-target-url-nullable-migration": "tsx scripts/checkAdCampaignTargetUrlNullableMigration.ts",
     "check:worker-candidate-apply": "tsx scripts/checkGameWorkerCandidateApply.ts && tsx scripts/checkGameWorkerCandidateApplyIntegration.ts",
     "check:matchmaking-blocked-partnership": "tsx scripts/checkMatchmakingBlockedPartnership.ts",
     "check:matchmaking-preview-bot-fallback": "tsx scripts/checkMatchmakingPreviewBotFallback.ts",

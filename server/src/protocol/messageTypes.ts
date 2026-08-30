@@ -1574,14 +1574,15 @@ export type AdCampaignDispatchClientDto = {
   dispatchId: string
   campaignId: string
   imageUrl: string
-  targetUrl: string
+  /** null = кампания без target link/path — клиентът НЕ показва бутон "Виж". */
+  targetUrl: string | null
   sentAt: string
 }
 
 export type AdCampaignManagementDto = {
   campaignId: string
   imageUrl: string
-  targetUrl: string
+  targetUrl: string | null
   createdAt: string
   createdByProfileId: string | null
   createdByDisplayName: string | null

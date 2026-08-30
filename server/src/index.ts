@@ -97,7 +97,7 @@ import {
 } from './db/coinPurchaseStore.js'
 import { createDailyRewardsStore } from './db/dailyRewardsStore.js'
 import { createAdCampaignsStore } from './db/adCampaignsStore.js'
-import { isSafeAdCampaignTargetUrl } from './adCampaigns/validateAdCampaignTargetUrl.js'
+import { normalizeAdCampaignTargetUrl } from './adCampaigns/validateAdCampaignTargetUrl.js'
 import {
   createSiteVisitStore,
   type SiteVisitNavigationType,
@@ -14843,7 +14843,7 @@ function deliverAdCampaignDispatchToEligibleLocalConnections(dispatch: {
   dispatchId: string
   campaignId: string
   imageUrl: string
-  targetUrl: string
+  targetUrl: string | null
   sentAt: string
 }): void {
   const seenProfileIds = new Set<string>()
@@ -14907,12 +14907,16 @@ async function handleAdminAdCampaignsRequest(
     }
 
     const imageDataUrl = getStringField(body, 'imageDataUrl')
-    const targetUrl = getStringField(body, 'targetUrl').trim()
+    // target е optional — липсващ/null/празен string (след trim) означава
+    // "кампания без линк" (валидно, не грешка); само непразен string се
+    // валидира срещу safe URL allowlist-а.
+    const targetUrlNormalization = normalizeAdCampaignTargetUrl(body.targetUrl)
 
-    if (!isSafeAdCampaignTargetUrl(targetUrl)) {
-      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден адрес. Разрешени са само вътрешни адреси или https://pika.bg линкове.' })
+    if (!targetUrlNormalization.ok) {
+      sendJsonResponse(res, 400, { ok: false, message: targetUrlNormalization.message })
       return true
     }
+    const targetUrl = targetUrlNormalization.targetUrl
 
     const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrl)
     if (imageBuffer === null) {

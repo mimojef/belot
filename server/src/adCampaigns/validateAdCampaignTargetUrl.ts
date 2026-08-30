@@ -24,3 +24,33 @@ export function isSafeAdCampaignTargetUrl(value: string): boolean {
     return false
   }
 }
+
+export type AdCampaignTargetUrlNormalizationResult =
+  | { ok: true; targetUrl: string | null }
+  | { ok: false; message: string }
+
+// target е optional — кампания може да съществува само с изображение, без
+// "Виж" бутон (виж §"Кампания без target" в брифа). missing/null/празен
+// string (след trim) НЕ е грешка — нормализира се до null ("без target").
+// Само НЕПразен string минава през isSafeAdCampaignTargetUrl.
+export function normalizeAdCampaignTargetUrl(value: unknown): AdCampaignTargetUrlNormalizationResult {
+  if (value === undefined || value === null) {
+    return { ok: true, targetUrl: null }
+  }
+
+  if (typeof value !== 'string') {
+    return { ok: false, message: 'Невалиден адрес.' }
+  }
+
+  const trimmed = value.trim()
+
+  if (trimmed.length === 0) {
+    return { ok: true, targetUrl: null }
+  }
+
+  if (!isSafeAdCampaignTargetUrl(trimmed)) {
+    return { ok: false, message: 'Невалиден адрес. Разрешени са само вътрешни адреси или https://pika.bg линкове.' }
+  }
+
+  return { ok: true, targetUrl: trimmed }
+}

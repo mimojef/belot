@@ -10329,6 +10329,17 @@ export function createLobbyFlowController(
     const active = state.activeAdCampaignPopup
     if (active === null) return
     state.activeAdCampaignPopup = null
+
+    // Кампания без target никога не рендва бутон "Виж" — тази функция е
+    // достижима само от него, значи normal UI никога не я вика с
+    // targetUrl===null. Defensive guard за malicious/manual click съобщение
+    // за такъв dispatch: НЕ маркираме clicked (click/navigation семантиката
+    // не важи за campaign без target), НЕ навигираме, само затваряме безопасно.
+    if (active.targetUrl === null) {
+      showNextPendingAdCampaignIfAny()
+      return
+    }
+
     options.onAdCampaignClickDispatch?.(active.dispatchId)
     const nav = resolveAdCampaignNavigation(active.targetUrl)
     if (nav.kind === 'spa') {

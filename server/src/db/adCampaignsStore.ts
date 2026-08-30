@@ -12,7 +12,7 @@ export type AdCampaignActor = {
 export type AdCampaignManagementRow = {
   campaignId: string
   imageUrl: string
-  targetUrl: string
+  targetUrl: string | null
   createdAt: string
   createdByProfileId: string | null
   createdByRole: AdCampaignActorRole
@@ -25,7 +25,7 @@ export type AdCampaignPendingDispatch = {
   dispatchId: string
   campaignId: string
   imageUrl: string
-  targetUrl: string
+  targetUrl: string | null
   sentAt: string
 }
 
@@ -50,10 +50,10 @@ export type AdCampaignsStore = {
   createCampaign: (input: {
     imageUrl: string
     imageFilename: string
-    targetUrl: string
+    targetUrl: string | null
     actor: AdCampaignActor
   }) => { ok: true; campaign: AdCampaignManagementRow; eventSeq: number } | { ok: false; message: string }
-  getActiveCampaignById: (campaignId: string) => { campaignId: string; imageUrl: string; targetUrl: string } | null
+  getActiveCampaignById: (campaignId: string) => { campaignId: string; imageUrl: string; targetUrl: string | null } | null
   getManagementRowById: (campaignId: string) => AdCampaignManagementRow | null
   sendCampaign: (
     campaignId: string,
@@ -83,7 +83,7 @@ export type AdCampaignsStore = {
 type ManagementRowRaw = {
   campaign_id: string
   image_url: string
-  target_url: string
+  target_url: string | null
   created_at: string
   created_by_profile_id: string | null
   created_by_role: AdCampaignActorRole
@@ -242,7 +242,7 @@ export async function createAdCampaignsStore(
   function createCampaign(input: {
     imageUrl: string
     imageFilename: string
-    targetUrl: string
+    targetUrl: string | null
     actor: AdCampaignActor
   }): { ok: true; campaign: AdCampaignManagementRow; eventSeq: number } | { ok: false; message: string } {
     const campaignId = randomUUID()
@@ -274,9 +274,9 @@ export async function createAdCampaignsStore(
     return { ok: true, campaign, eventSeq }
   }
 
-  function getActiveCampaignById(campaignId: string): { campaignId: string; imageUrl: string; targetUrl: string } | null {
+  function getActiveCampaignById(campaignId: string): { campaignId: string; imageUrl: string; targetUrl: string | null } | null {
     const row = selectActiveCampaignByIdStatement.get(campaignId) as
-      | { campaign_id: string; image_url: string; target_url: string }
+      | { campaign_id: string; image_url: string; target_url: string | null }
       | undefined
 
     if (!row) return null
@@ -359,7 +359,7 @@ export async function createAdCampaignsStore(
       dispatch_id: string
       campaign_id: string
       image_url: string
-      target_url: string
+      target_url: string | null
       sent_at: string
     }>
 
