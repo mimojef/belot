@@ -59,6 +59,8 @@ export type TournamentActivityCounters = {
   tournamentLeave: number
   tournamentRoundStart: number
   tournamentMatchResult: number
+  tournamentForceRemoveTeam: number
+  tournamentForceRemoveEntry: number
 }
 
 // WS message.type / HTTP category — bounded enums от протокола/класификатора.
@@ -119,6 +121,8 @@ const TOURNAMENT_KEYS: Array<keyof TournamentActivityCounters> = [
   'tournamentLeave',
   'tournamentRoundStart',
   'tournamentMatchResult',
+  'tournamentForceRemoveTeam',
+  'tournamentForceRemoveEntry',
 ]
 
 type ScalarCounters = ChatActivityCounters &

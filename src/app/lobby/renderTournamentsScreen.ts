@@ -714,15 +714,47 @@ function renderTournamentTeamMemberChip(member: TournamentDetailSnapshot['teams'
   `
 }
 
-function renderTournamentTeamCard(team: TournamentDetailSnapshot['teams'][number], label: string): string {
+// Компактен moderation бутон в team card status row-а (§"UI — БУТОНИ В TEAM
+// CARD" в task spec-а: "[ГОТОВ ОТБОР] [Отпиши отбор]" / "[ИЗЧАКВА ПАРТНЬОР]
+// [Отпиши играч]") — render-ва се само когато t.viewer.canModerateTeams е
+// true (creator/admin, docato турнирът е 'open'; frontend visibility не е
+// security boundary, реалната проверка е server-side). flex-wrap + min-width:0
+// пази компактността на 320px mobile width.
+function renderTournamentTeamModerateButton(kind: 'team' | 'entry', targetId: string): string {
+  const label = kind === 'team' ? 'Отпиши отбор' : 'Отпиши играч'
+  const attr = kind === 'team' ? 'data-tournament-force-remove-team-open' : 'data-tournament-force-remove-entry-open'
+  return `
+    <button type="button" ${attr}="${escapeHtml(targetId)}" style="
+      flex-shrink:0;height:22px;padding:0 8px;border-radius:999px;border:1px solid rgba(248,113,113,0.4);
+      background:rgba(127,29,29,0.2);color:#fca5a5;font-size:10px;font-weight:900;cursor:pointer;
+      white-space:nowrap;
+    ">${label}</button>
+  `
+}
+
+function renderTournamentTeamCard(
+  team: TournamentDetailSnapshot['teams'][number],
+  label: string,
+  canModerateTeams: boolean,
+): string {
   const isComplete = team.status !== 'forming'
+  const moderateButton = !canModerateTeams
+    ? ''
+    : isComplete
+      ? renderTournamentTeamModerateButton('team', team.teamId)
+      : team.members.length === 1
+        ? renderTournamentTeamModerateButton('entry', team.members[0]!.entryId)
+        : ''
   return `
     <div style="border:1px solid ${isComplete ? 'rgba(34,197,94,0.32)' : 'rgba(255,255,255,0.12)'};border-radius:8px;padding:10px;display:flex;flex-direction:column;gap:8px;min-width:0;">
       <span style="font-size:12px;font-weight:900;color:#d4a520;overflow-wrap:anywhere;">${escapeHtml(label)}</span>
       <div style="display:flex;flex-wrap:wrap;gap:8px;">
         ${team.members.map(renderTournamentTeamMemberChip).join('')}
       </div>
-      <span style="align-self:flex-start;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${isComplete ? '#22c55e' : 'rgba(255,255,255,0.5)'};border:1px solid ${isComplete ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.18)'};border-radius:999px;padding:2px 8px;">${isComplete ? 'Готов отбор' : 'Изчаква партньор'}</span>
+      <div style="display:flex;align-items:center;flex-wrap:wrap;gap:6px;">
+        <span style="font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${isComplete ? '#22c55e' : 'rgba(255,255,255,0.5)'};border:1px solid ${isComplete ? 'rgba(34,197,94,0.4)' : 'rgba(255,255,255,0.18)'};border-radius:999px;padding:2px 8px;">${isComplete ? 'Готов отбор' : 'Изчаква партньор'}</span>
+        ${moderateButton}
+      </div>
     </div>
   `
 }
@@ -734,7 +766,7 @@ function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
   const labelMap = buildTournamentTeamLabelMap(t.teams)
   return `
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
-      ${t.teams.map((team) => renderTournamentTeamCard(team, labelMap.get(team.teamId) ?? '')).join('')}
+      ${t.teams.map((team) => renderTournamentTeamCard(team, labelMap.get(team.teamId) ?? '', t.viewer.canModerateTeams)).join('')}
     </div>
   `
 }
@@ -1144,6 +1176,8 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
     ${state.tournamentPartnerCapacityPopupOpen ? renderTournamentPartnerCapacityPopup(state) : ''}
     ${state.tournamentLeaveConfirmOpen ? renderTournamentLeaveConfirmPopup(state, t) : ''}
     ${state.tournamentCancelConfirmOpen ? renderTournamentCancelConfirmPopup(state) : ''}
+    ${state.tournamentForceRemoveConfirmOpen ? renderTournamentForceRemoveConfirmPopup(state) : ''}
+    ${state.tournamentParticipationBlockedPopupOpen ? renderTournamentParticipationBlockedPopup() : ''}
     ${state.tournamentScheduleEditOpen ? renderTournamentScheduleEditPopup(state) : ''}
   `
 }
@@ -1504,6 +1538,68 @@ function renderTournamentCancelConfirmPopup(state: LobbyScreenState): string {
             color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentCancelBusy ? 'default' : 'pointer'};
           ">${state.tournamentCancelBusy ? 'Отменяне...' : 'Отмени турнира'}</button>
         </div>
+      </div>
+    </div>
+  `
+}
+
+// Creator/admin moderation confirm (§"CONFIRMATION" в task spec-а) — reuse-ва
+// точно същия backdrop/card/Отказ+действие shape като
+// renderTournamentCancelConfirmPopup по-горе, semantic текст различен за
+// team vs entry target (state.tournamentForceRemoveTarget.kind).
+function renderTournamentForceRemoveConfirmPopup(state: LobbyScreenState): string {
+  const target = state.tournamentForceRemoveTarget
+  if (target === null) return ''
+  const isTeam = target.kind === 'team'
+  const title = isTeam ? 'Отпиши отбор' : 'Отпиши играч'
+  const description = isTeam
+    ? 'Ще отпишете този отбор от турнира. Входът на двамата играчи ще бъде възстановен и те няма да могат да се запишат отново в този турнир.'
+    : 'Ще отпишете този играч от турнира. Входът му ще бъде възстановен и той няма да може да се запише отново.'
+  const submitLabel = isTeam ? 'Отпиши отбор' : 'Отпиши играч'
+  const busyLabel = 'Отписване...'
+  return `
+    <div data-tournament-force-remove-backdrop="1" style="position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(248,113,113,0.4);border-radius:16px;width:100%;max-width:400px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:16px;font-weight:900;color:#fca5a5;margin-bottom:12px;">${escapeHtml(title)}</div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.75);line-height:1.5;margin-bottom:16px;">
+          ${escapeHtml(description)}
+        </div>
+        ${state.tournamentForceRemoveErrorText ? `
+          <div style="margin-bottom:14px;padding:8px 10px;border:1px solid rgba(248,113,113,0.4);background:rgba(127,29,29,0.25);border-radius:8px;color:#fecaca;font-size:12px;font-weight:700;">${escapeHtml(state.tournamentForceRemoveErrorText)}</div>
+        ` : ''}
+        <div style="display:flex;gap:10px;">
+          <button type="button" data-tournament-force-remove-close="1" ${state.tournamentForceRemoveBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border-radius:8px;border:1px solid rgba(255,255,255,0.18);
+            background:transparent;color:rgba(255,255,255,0.75);font-size:13px;font-weight:800;
+            cursor:${state.tournamentForceRemoveBusy ? 'default' : 'pointer'};
+          ">Отказ</button>
+          <button type="button" data-tournament-force-remove-submit="1" ${state.tournamentForceRemoveBusy ? 'disabled' : ''} style="
+            flex:1;height:40px;border:0;border-radius:8px;
+            background:${state.tournamentForceRemoveBusy ? 'rgba(248,113,113,0.35)' : 'linear-gradient(180deg,#f87171 0%,#dc2626 100%)'};
+            color:#080808;font-size:13px;font-weight:900;cursor:${state.tournamentForceRemoveBusy ? 'default' : 'pointer'};
+          ">${state.tournamentForceRemoveBusy ? busyLabel : escapeHtml(submitLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+// Rejoin-denial popup (§"REJOIN UX — ТОЧЕН POPUP" в task spec-а) — dedicated
+// single-button ("ОК") popup, НЕ browser confirm(), НЕ inline error box в
+// join/invite popup-а (тези запазват Отказ/Потвърди за нормални грешки).
+// Точният текст идва directно от task spec-а — не се преформулира.
+function renderTournamentParticipationBlockedPopup(): string {
+  return `
+    <div data-tournament-participation-blocked-backdrop="1" style="position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(248,113,113,0.4);border-radius:16px;width:100%;max-width:380px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:13px;color:rgba(255,255,255,0.85);line-height:1.5;margin-bottom:18px;">
+          Създателят не желае вие да участвате в неговия турнир
+        </div>
+        <button type="button" data-tournament-participation-blocked-close="1" style="
+          width:100%;height:40px;border:0;border-radius:8px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;font-size:13px;font-weight:900;cursor:pointer;
+        ">ОК</button>
       </div>
     </div>
   `

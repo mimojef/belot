@@ -105,11 +105,15 @@ export type TournamentViewerParticipation = {
   canInvitePartner: boolean
   canLeave: boolean
   canCancel: boolean
+  /** Creator ИЛИ role:admin, докато турнирът е 'open' — управлява render-а
+   * на "Отпиши отбор"/"Отпиши играч" бутоните в ОТБОРИ секцията. */
+  canModerateTeams: boolean
   myPlacement: 'champion' | 'runner_up' | 'eliminated' | null
   myPrizeAmount: number | null
 }
 
 export type TournamentTeamMemberSnapshot = {
+  entryId: string
   profileId: string
   displayName: string
   avatarUrl: string | null
@@ -1689,7 +1693,7 @@ export type TournamentEconomyNoticeMessage = {
   type: 'tournament_economy_notice'
   eventId: string
   tournamentId: string
-  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left' | 'force_removed_by_creator' | 'force_removed_by_admin'
   amount: number
   occurredAt: string
 }

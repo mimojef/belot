@@ -55,6 +55,10 @@ function buildNoticeContent(notice: TournamentEconomyNotice): NoticeContent {
         icon: '↩️',
         suffix: ' е възстановен. Покани го отново или намери друг партньор.',
       }
+    case 'force_removed_by_creator':
+      return { prefix: 'Създателят ви отписа от турнира. Възстановен вход: ', amountText: `+${formatted} жълтици`, isPositive: true, icon: '↩️' }
+    case 'force_removed_by_admin':
+      return { prefix: 'Администратор ви отписа от турнира. Възстановен вход: ', amountText: `+${formatted} жълтици`, isPositive: true, icon: '↩️' }
   }
 }
 

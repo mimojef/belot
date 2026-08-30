@@ -67,11 +67,19 @@ export type TournamentViewerParticipationDto = {
   canInvitePartner: boolean
   canLeave: boolean
   canCancel: boolean
+  // Creator ИЛИ role:admin, докато турнирът е 'open' (§"КОГА Е ПОЗВОЛЕНО" —
+  // subadmin/pika_team/chat_admin/top_chat_admin изрично НЕ получават това
+  // право). Управлява render-а на "Отпиши отбор"/"Отпиши играч" бутоните в
+  // ОТБОРИ секцията — виж §"UI — БУТОНИ В TEAM CARD" в task spec-а.
+  // Frontend visibility не е security boundary: реалната authorization
+  // проверка е server-side в handleTournamentForceRemove*Request.
+  canModerateTeams: boolean
   myPlacement: 'champion' | 'runner_up' | 'eliminated' | null
   myPrizeAmount: number | null
 }
 
 export type TournamentTeamMemberDto = {
+  entryId: string
   profileId: string
   displayName: string
   avatarUrl: string | null
@@ -330,6 +338,11 @@ export type ToTournamentSummaryDtoInput = {
   viewerProfileId: ProfileId | null
   viewerEntryStatus: TournamentEntryStatus | null
   viewerEntryJoinedAs?: TournamentEntryJoinedAs | null
+  // Server-authoritative role check (accounts.role === 'admin'), извършен
+  // от caller-а (index.ts, чрез authStore.getAccountRoleForProfile) — този
+  // DTO слой умишлено няма достъп до accounts таблицата, само получава
+  // резултата. Виж §"КОГА Е ПОЗВОЛЕНО" в task spec-а.
+  viewerIsAdmin?: boolean
 }
 
 function computeViewerParticipation(input: ToTournamentSummaryDtoInput): TournamentViewerParticipationDto {
@@ -360,6 +373,7 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
       (isParticipant || canRejoin),
     canLeave: isParticipant && tournament.status === 'open',
     canCancel: isMine && tournament.status === 'open',
+    canModerateTeams: (isMine || input.viewerIsAdmin === true) && tournament.status === 'open',
     myPlacement:
       input.viewerEntryStatus === 'champion'
         ? 'champion'
@@ -557,6 +571,7 @@ export function buildTeamDtos(input: {
       .map((entry) => {
         const profile = input.getPublicProfile(entry.profileId)
         return {
+          entryId: entry.entryId,
           profileId: entry.profileId,
           displayName: profile?.displayName ?? 'Играч',
           avatarUrl: profile?.avatarUrl ?? null,

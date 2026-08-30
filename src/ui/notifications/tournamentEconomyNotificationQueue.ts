@@ -24,6 +24,8 @@ export type TournamentEconomyNoticeReason =
   | 'fill_expired'
   | 'scheduled_underfilled'
   | 'partner_left'
+  | 'force_removed_by_creator'
+  | 'force_removed_by_admin'
 
 export type TournamentEconomyNotice = {
   eventId: string

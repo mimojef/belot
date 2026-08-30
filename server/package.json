@@ -94,6 +94,7 @@
     "check:tournament-production-readiness": "tsx scripts/checkTournamentProductionReadiness.ts --server-root=.",
     "check:tournament-room-start-and-cleanup": "tsx scripts/checkTournamentRoomStartAndCleanup.ts --server-root=.",
     "check:tournament-active-participation-guard": "tsx scripts/checkTournamentActiveParticipationGuard.ts",
+    "check:tournament-force-remove": "tsx scripts/checkTournamentForceRemove.ts",
     "check:local-tournament-bot-flow": "tsx scripts/checkLocalTournamentBotFlow.ts --server-root=.",
     "check:tournament-stale-popup-fix": "tsx scripts/checkTournamentStalePopupFix.ts --project-root=..",
     "check:tournament-inter-round-waiting": "tsx scripts/checkTournamentInterRoundWaiting.ts --project-root=..",

@@ -81,6 +81,7 @@ export type JoinTournamentSoloResult =
         | 'already_participating_elsewhere'
         | 'insufficient_funds'
         | 'requires_password'
+        | 'participation_blocked'
     }
 
 export type LeaveTournamentResult =
@@ -142,6 +143,48 @@ export type CancelOpenTournamentResult =
   | {
       ok: false
       reason: 'tournament_not_found' | 'not_creator' | 'tournament_not_open'
+    }
+
+// Creator/admin moderation removal (§ "КРИТИЧНО — ТОВА НЕ Е NORMAL LEAVE" в
+// task spec-а) — dedicated atomic operation, НЕ две последователни
+// leaveTournamentAndRefundAtomically извиквания (виж коментара там за защо:
+// няма atomicity между двата team members между отделни транзакции, и
+// event/notice semantics-ът трябва да е moderation-specific, не
+// 'entry_withdrawn_and_refunded'/player). Извиква се само за team.status
+// === 'complete' (виж §"НЕ ПИПАЙ ДРУГИТЕ SOLO ОТБОРИ" — единичен member на
+// complete team никога не се премахва през този path, само през
+// forceRemoveEntryAtomically за forming teams).
+export type ForceRemoveTeamResult =
+  | {
+      ok: true
+      removedProfiles: Array<{ profileId: ProfileId; refundedAmount: number; noticeId: string }>
+      actorIsCreator: boolean
+      tournament: TournamentRecord
+    }
+  | {
+      ok: false
+      reason: 'tournament_not_found' | 'tournament_not_open' | 'team_not_found' | 'team_not_complete'
+    }
+
+// Creator/admin moderation removal на единичен forming-team participant
+// (waiting solo ИЛИ partner_inviter с pending explicit invite — виж
+// §"PENDING EXPLICIT PARTNER INVITE" в task spec-а). cancelledInvite е
+// non-null точно когато премахнатият е бил partner_inviter с все още
+// pending покана — index.ts push-ва tournament_partner_invite_resolved до
+// поканения от нея, за да затвори stale popup/badge.
+export type ForceRemoveEntryResult =
+  | {
+      ok: true
+      removedProfileId: ProfileId
+      refundedAmount: number
+      noticeId: string
+      actorIsCreator: boolean
+      cancelledInvite: { inviteId: TournamentPartnerInviteId; inviteeProfileId: ProfileId; inviterProfileId: ProfileId } | null
+      tournament: TournamentRecord
+    }
+  | {
+      ok: false
+      reason: 'tournament_not_found' | 'tournament_not_open' | 'entry_not_found' | 'entry_not_confirmed' | 'team_not_forming'
     }
 
 export type StartTournamentResult =
@@ -242,6 +285,7 @@ export type PartnerInviteMutationResult =
         | 'invite_not_pending'
         | 'insufficient_funds'
         | 'team_invalid'
+        | 'participation_blocked'
     }
 
 export type PartnerInviteNotificationStateResult =
@@ -281,6 +325,16 @@ export type TournamentEconomyStore = {
     creatorProfileId: ProfileId,
     cancelReason: string,
   ) => CancelOpenTournamentResult
+  forceRemoveTeamAtomically: (
+    tournamentId: TournamentId,
+    teamId: TournamentTeamId,
+    actorProfileId: ProfileId,
+  ) => ForceRemoveTeamResult
+  forceRemoveEntryAtomically: (
+    tournamentId: TournamentId,
+    entryId: string,
+    actorProfileId: ProfileId,
+  ) => ForceRemoveEntryResult
   getPartnerCandidatesForTournament: (
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
@@ -302,7 +356,17 @@ export type TournamentEconomyStore = {
   markPartnerLeftNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
   getPendingTournamentEconomyNotices: (
     recipientProfileId: ProfileId,
-  ) => Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled'; refundedAmount: number }>
+  ) => Array<{
+    noticeId: string
+    tournamentId: string
+    reason:
+      | 'fill_expired'
+      | 'scheduled_underfilled'
+      | 'creator_cancelled'
+      | 'force_removed_by_creator'
+      | 'force_removed_by_admin'
+    refundedAmount: number
+  }>
   markTournamentEconomyNoticeDelivered: (noticeId: string, recipientProfileId: ProfileId) => void
   dismissPartnerInvitePopup: (
     inviteId: TournamentPartnerInviteId,
@@ -988,6 +1052,31 @@ export async function createTournamentEconomyStore(
     WHERE notice_id = ? AND recipient_profile_id = ? AND delivered_at IS NULL;
   `)
 
+  // Moderation rejoin-block check (§"PROFILE VS ACCOUNT IDENTITY" в task
+  // spec-а) — profile-scoped storage (blocked_profile_id), но
+  // account-aware enforcement: join-ва live към profiles.account_id на
+  // blocked_profile_id, огледално на selectActiveEntryForAccountStatement,
+  // за да не може блокираният играч да заобиколи забраната чрез друг
+  // профил на СЪЩИЯ акаунт. Params: (actingProfileId, tournamentId, actingProfileId).
+  const selectParticipationBlockStatement = database.prepare(`
+    SELECT b.block_id
+    FROM tournament_participation_blocks b
+    JOIN profiles blocked_p ON blocked_p.profile_id = b.blocked_profile_id
+    JOIN profiles acting_p ON acting_p.profile_id = ?
+    WHERE b.tournament_id = ?
+      AND (
+        b.blocked_profile_id = ?
+        OR (blocked_p.account_id IS NOT NULL AND blocked_p.account_id = acting_p.account_id)
+      )
+    LIMIT 1;
+  `)
+
+  const insertParticipationBlockStatement = database.prepare(`
+    INSERT OR IGNORE INTO tournament_participation_blocks (
+      block_id, tournament_id, blocked_profile_id, actor_profile_id, actor_role, reason
+    ) VALUES (?, ?, ?, ?, ?, ?);
+  `)
+
   const insertTeamStatement = database.prepare(`
     INSERT INTO tournament_teams (team_id, tournament_id, status, seed_slot)
     VALUES (?, ?, 'forming', NULL);
@@ -1366,7 +1455,7 @@ export async function createTournamentEconomyStore(
     tournamentId: TournamentId,
     eventType: string,
     actorProfileId: ProfileId | null,
-    actorRole: 'player' | 'system',
+    actorRole: 'player' | 'admin' | 'system',
     payload: Record<string, unknown> | null,
   ): void {
     insertEventStatement.run(
@@ -1395,6 +1484,10 @@ export async function createTournamentEconomyStore(
       rightProfileId,
       leftProfileId,
     ) !== undefined
+  }
+
+  function isParticipationBlocked(tournamentId: TournamentId, profileId: ProfileId): boolean {
+    return selectParticipationBlockStatement.get(profileId, tournamentId, profileId) !== undefined
   }
 
   function getReservedPendingPlaces(tournamentId: TournamentId): number {
@@ -1479,6 +1572,14 @@ export async function createTournamentEconomyStore(
       return 'not_registered_human'
     }
     if (candidate.is_temporary === 1) return 'temporary'
+    // Moderation rejoin block (§"REJOIN UX" в task spec-а) — покрива и двата
+    // засегнати actor perspectives през ЕДИН chokepoint: инвайтъра поканва
+    // блокиран candidate (create flow, candidate=invitee) И блокиран играч
+    // приема покана (accept flow, candidate=приемащия invitee сам по себе
+    // си, виж acceptPartnerInviteAtomically -> validateInvitee). Проверено
+    // ПРЕДИ hasBlockBetween нарочно — 'participation_blocked' е различна
+    // семантика от social block-а по-долу и не бива да се маскира от него.
+    if (isParticipationBlocked(tournamentId, candidate.profile_id)) return 'participation_blocked'
     // Friends-only prerequisite-ът е премахнат тук (беше: isConfirmedFriend
     // gate, връщащ not-friend reason) — вече ВСЕКИ eligible
     // registered human profile може да бъде поканен, не само confirmed
@@ -1521,6 +1622,7 @@ export async function createTournamentEconomyStore(
     if (reason === 'blocked') return { ok: false, reason: 'blocked' }
     if (reason === 'already_in_tournament') return { ok: false, reason: 'already_participant' }
     if (reason === 'active_tournament') return { ok: false, reason: 'already_participating_elsewhere' }
+    if (reason === 'participation_blocked') return { ok: false, reason: 'participation_blocked' }
     return { ok: false, reason: 'invalid_invitee' }
   }
 
@@ -2238,11 +2340,16 @@ export async function createTournamentEconomyStore(
     // flush), не при самия insert.
     getPendingTournamentEconomyNotices(
       recipientProfileId: ProfileId,
-    ): Array<{ noticeId: string; tournamentId: string; reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled'; refundedAmount: number }> {
+    ): Array<{
+      noticeId: string
+      tournamentId: string
+      reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled' | 'force_removed_by_creator' | 'force_removed_by_admin'
+      refundedAmount: number
+    }> {
       const rows = selectPendingTournamentEconomyNoticesStatement.all(recipientProfileId) as Array<{
         notice_id: string
         tournament_id: string
-        reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled'
+        reason: 'fill_expired' | 'scheduled_underfilled' | 'creator_cancelled' | 'force_removed_by_creator' | 'force_removed_by_admin'
         refunded_amount: number
       }>
       return rows.map((row) => ({
@@ -2487,6 +2594,16 @@ export async function createTournamentEconomyStore(
         if (activeAccountEntry !== undefined) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_participating_elsewhere' }
+        }
+
+        // Item 3 "partner invite creation as inviter" (§"ВСИЧКИ ENTRY PATHS
+        // ТРЯБВА ДА СА ЗАЩИТЕНИ" в task spec-а) — блокира блокирания играч
+        // от САМОТО СЪЗДАВАНЕ на покана, независимо от invitee-то. Item 4
+        // "acceptance as invitee" е отделно покрит от getCandidateUnavailableReason
+        // (viz validateInvitee по-горе) — invitee-то е candidate в accept flow.
+        if (isParticipationBlocked(tournamentId, inviterProfileId)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'participation_blocked' }
         }
 
         const reusableTeamId = inviterHasOwnWaitingSoloTeam ? inviterEntry?.team_id ?? null : null
@@ -2923,6 +3040,11 @@ export async function createTournamentEconomyStore(
         if (activeAccountEntry !== undefined) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'already_participating_elsewhere' }
+        }
+
+        if (isParticipationBlocked(tournamentId, profileId)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'participation_blocked' }
         }
 
         const playerCapacity = freshTournament.player_capacity
@@ -3548,6 +3670,280 @@ export async function createTournamentEconomyStore(
           totalRefunded,
           refundedProfiles,
           walletBalance: getWalletBalance(creatorProfileId),
+          tournament: toTournamentRecord(finalTournament),
+        }
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // surface original failure
+        }
+        throw error
+      }
+
+      return result
+    },
+
+    // Creator/admin moderation removal на цял 'complete' team (§"КРИТИЧНО —
+    // ТОВА НЕ Е NORMAL LEAVE" в task spec-а) — dedicated atomic operation,
+    // НЕ две последователни leaveTournamentAndRefundAtomically извиквания.
+    // Единствената транзакция гарантира, че никой waiting solo не може да
+    // заеме мястото на нито един от двамата по средата на операцията (за
+    // разлика от leaveTournamentAndRefundAtomically's solo-origin-team клон
+    // — тук ВИНАГИ пълен refund+block за всеки member, никога replacement).
+    // actorIsCreator (tournament.creator_profile_id === actorProfileId,
+    // прочетено FRESH вътре в транзакцията, не подадено от caller-а)
+    // избира точния notice reason/wording ("Създателят..."/"Администратор...")
+    // — HTTP route handler-ът вече е established authorization (creator ИЛИ
+    // admin session) преди да стигне дотук, затова тук не се преповтаря
+    // role check, само derive-ва wording-а.
+    forceRemoveTeamAtomically(
+      tournamentId: TournamentId,
+      teamId: TournamentTeamId,
+      actorProfileId: ProfileId,
+    ): ForceRemoveTeamResult {
+      const tournamentRow = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournamentRow === undefined) {
+        return { ok: false, reason: 'tournament_not_found' }
+      }
+      if (tournamentRow.status !== 'open') {
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      let result: ForceRemoveTeamResult
+
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+
+        const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+        if (freshTournament === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_found' }
+        }
+        if (freshTournament.status !== 'open') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
+        }
+
+        const teamRow = selectTeamByIdStatement.get(teamId) as TournamentTeamRow | undefined
+        if (teamRow === undefined || teamRow.tournament_id !== tournamentId) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'team_not_found' }
+        }
+        if (teamRow.status !== 'complete') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'team_not_complete' }
+        }
+
+        const members = selectConfirmedEntriesForTeamStatement.all(teamId) as TournamentEntryRow[]
+        const actorIsCreator = freshTournament.creator_profile_id === actorProfileId
+        const noticeReason = actorIsCreator ? 'force_removed_by_creator' : 'force_removed_by_admin'
+        const actorRole: 'player' | 'admin' = actorIsCreator ? 'player' : 'admin'
+        const removedProfiles: Array<{ profileId: ProfileId; refundedAmount: number; noticeId: string }> = []
+
+        for (const member of members) {
+          const refundKey = entryFeeRefundKeyForAttempt(
+            tournamentId,
+            member.profile_id,
+            currentEntryFeeAttempt(tournamentId, member.profile_id),
+          )
+          if (getLedgerByKey(refundKey) !== null) {
+            continue // вече refund-нат (idempotent skip — retry-safe)
+          }
+
+          const debitLedger = getCurrentEntryFeeDebitLedger(tournamentId, member.profile_id)
+          const refundAmount = debitLedger?.amount ?? freshTournament.entry_fee
+
+          ensureWalletStatement.run(member.profile_id)
+          creditWalletStatement.run(refundAmount, member.profile_id)
+          insertLedgerStatement.run(
+            randomUUID(),
+            refundKey,
+            tournamentId,
+            member.profile_id,
+            'entry_fee_refund' satisfies TournamentLedgerEntryType,
+            refundAmount,
+            getWalletBalance(member.profile_id),
+          )
+
+          updateEntryToRefundedByCancelStatement.run(member.entry_id)
+
+          const noticeId = `force-remove:${tournamentId}:${member.profile_id}`
+          insertTournamentEconomyNoticeStatement.run(noticeId, tournamentId, member.profile_id, noticeReason, refundAmount)
+          insertParticipationBlockStatement.run(
+            randomUUID(),
+            tournamentId,
+            member.profile_id,
+            actorProfileId,
+            actorRole,
+            'force_removed',
+          )
+
+          removedProfiles.push({ profileId: member.profile_id, refundedAmount: refundAmount, noticeId })
+        }
+
+        deleteTeamStatement.run(teamId, tournamentId)
+
+        insertEvent(tournamentId, 'team_force_removed', actorProfileId, actorRole, {
+          teamId,
+          removedProfileIds: members.map((member) => member.profile_id),
+        })
+
+        database.exec('COMMIT;')
+
+        const finalTournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+        result = {
+          ok: true,
+          removedProfiles,
+          actorIsCreator,
+          tournament: toTournamentRecord(finalTournament),
+        }
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // surface original failure
+        }
+        throw error
+      }
+
+      return result
+    },
+
+    // Creator/admin moderation removal на единичен forming-team member
+    // (waiting solo ИЛИ partner_inviter с pending explicit invite — виж
+    // §"PENDING EXPLICIT PARTNER INVITE" в task spec-а). Ако премахнатият е
+    // бил partner_inviter, pending outgoing поканата му се cancel-ва в
+    // СЪЩАТА транзакция (invitee никога не е бил confirmed participant,
+    // затова НЕ получава refund/block — само cancelledInvite резултата, за
+    // да push-не index.ts tournament_partner_invite_resolved до него).
+    forceRemoveEntryAtomically(
+      tournamentId: TournamentId,
+      entryId: string,
+      actorProfileId: ProfileId,
+    ): ForceRemoveEntryResult {
+      const tournamentRow = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournamentRow === undefined) {
+        return { ok: false, reason: 'tournament_not_found' }
+      }
+      if (tournamentRow.status !== 'open') {
+        return { ok: false, reason: 'tournament_not_open' }
+      }
+
+      let result: ForceRemoveEntryResult
+
+      try {
+        database.exec('BEGIN IMMEDIATE;')
+        expireDuePartnerInvitesInCurrentTransaction(tournamentId)
+
+        const freshTournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+        if (freshTournament === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_found' }
+        }
+        if (freshTournament.status !== 'open') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'tournament_not_open' }
+        }
+
+        const entryRow = selectEntryByIdStatement.get(entryId) as TournamentEntryRow | undefined
+        if (entryRow === undefined || entryRow.tournament_id !== tournamentId) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'entry_not_found' }
+        }
+        if (entryRow.status !== 'confirmed') {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'entry_not_confirmed' }
+        }
+
+        const teamId = entryRow.team_id
+        if (teamId !== null) {
+          const teamRow = selectTeamByIdStatement.get(teamId) as TournamentTeamRow | undefined
+          if (teamRow === undefined || teamRow.status !== 'forming') {
+            database.exec('ROLLBACK;')
+            return { ok: false, reason: 'team_not_forming' }
+          }
+        }
+
+        const refundKey = entryFeeRefundKeyForAttempt(
+          tournamentId,
+          entryRow.profile_id,
+          currentEntryFeeAttempt(tournamentId, entryRow.profile_id),
+        )
+        const existingRefundLedger = getLedgerByKey(refundKey)
+        let refundAmount: number
+        if (existingRefundLedger !== null) {
+          refundAmount = existingRefundLedger.amount // idempotent retry — no second credit
+        } else {
+          const debitLedger = getCurrentEntryFeeDebitLedger(tournamentId, entryRow.profile_id)
+          refundAmount = debitLedger?.amount ?? freshTournament.entry_fee
+          ensureWalletStatement.run(entryRow.profile_id)
+          creditWalletStatement.run(refundAmount, entryRow.profile_id)
+          insertLedgerStatement.run(
+            randomUUID(),
+            refundKey,
+            tournamentId,
+            entryRow.profile_id,
+            'entry_fee_refund' satisfies TournamentLedgerEntryType,
+            refundAmount,
+            getWalletBalance(entryRow.profile_id),
+          )
+        }
+
+        updateEntryToRefundedByCancelStatement.run(entryRow.entry_id)
+
+        const actorIsCreator = freshTournament.creator_profile_id === actorProfileId
+        const noticeReason = actorIsCreator ? 'force_removed_by_creator' : 'force_removed_by_admin'
+        const actorRole: 'player' | 'admin' = actorIsCreator ? 'player' : 'admin'
+        const noticeId = `force-remove:${tournamentId}:${entryRow.profile_id}`
+        insertTournamentEconomyNoticeStatement.run(noticeId, tournamentId, entryRow.profile_id, noticeReason, refundAmount)
+        insertParticipationBlockStatement.run(
+          randomUUID(),
+          tournamentId,
+          entryRow.profile_id,
+          actorProfileId,
+          actorRole,
+          'force_removed',
+        )
+
+        let cancelledInvite: { inviteId: TournamentPartnerInviteId; inviteeProfileId: ProfileId; inviterProfileId: ProfileId } | null = null
+        if (entryRow.joined_as === 'partner_inviter') {
+          const pendingInvite = selectPendingOutgoingInviteStatement.get(
+            tournamentId,
+            entryRow.profile_id,
+          ) as TournamentPartnerInviteRow | undefined
+          if (pendingInvite !== undefined) {
+            resolvePartnerInviteStatement.run('cancelled', pendingInvite.invite_id, tournamentId)
+            cancelledInvite = {
+              inviteId: pendingInvite.invite_id,
+              inviteeProfileId: pendingInvite.invitee_profile_id,
+              inviterProfileId: pendingInvite.inviter_profile_id,
+            }
+          }
+        }
+
+        if (teamId !== null) {
+          deleteTeamStatement.run(teamId, tournamentId)
+        }
+
+        insertEvent(tournamentId, 'entry_force_removed', actorProfileId, actorRole, {
+          entryId,
+          removedProfileId: entryRow.profile_id,
+          refundedAmount: refundAmount,
+          cancelledInviteId: cancelledInvite?.inviteId ?? null,
+        })
+
+        database.exec('COMMIT;')
+
+        const finalTournament = selectTournamentByIdStatement.get(tournamentId) as TournamentRow
+        result = {
+          ok: true,
+          removedProfileId: entryRow.profile_id,
+          refundedAmount: refundAmount,
+          noticeId,
+          actorIsCreator,
+          cancelledInvite,
           tournament: toTournamentRecord(finalTournament),
         }
       } catch (error) {

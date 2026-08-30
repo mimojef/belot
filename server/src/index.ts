@@ -3767,7 +3767,7 @@ function sendTournamentMatchAssignment(
 // само ако push-ът реално стигна до поне една online connection.
 function sendTournamentEconomyRefundNotices(
   tournamentId: string,
-  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left',
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left' | 'force_removed_by_creator' | 'force_removed_by_admin',
   refundedProfiles: Array<{ profileId: string; amount: number; noticeId: string }>,
 ): void {
   const occurredAt = new Date().toISOString()
@@ -10442,6 +10442,14 @@ function getTournamentCreatorPublicProfile(
   }
 }
 
+// Server-authoritative admin check за tournament moderation (force-remove
+// team/entry) — role живее на accounts, не на profile (виж authStore.ts),
+// огледален pattern на isTournamentBetaAdminBypassProfile по-долу.
+function isTournamentModerationAdminProfile(profileId: string | null): boolean {
+  if (profileId === null) return false
+  return authStore.getAccountRoleForProfile(profileId) === 'admin'
+}
+
 function buildTournamentSummaryDto(
   tournament: TournamentRecord,
   viewerProfileId: string | null,
@@ -10465,6 +10473,7 @@ function buildTournamentSummaryDto(
     viewerProfileId,
     viewerEntryStatus: viewerEntry?.status ?? null,
     viewerEntryJoinedAs: viewerEntry?.joinedAs ?? null,
+    viewerIsAdmin: isTournamentModerationAdminProfile(viewerProfileId),
   })
 }
 
@@ -10554,6 +10563,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     viewerProfileId,
     viewerEntryStatus: viewerEntry?.status ?? null,
     viewerEntryJoinedAs: viewerEntry?.joinedAs ?? null,
+    viewerIsAdmin: isTournamentModerationAdminProfile(viewerProfileId),
   })
   const inviteToDto = (invite: NonNullable<typeof incomingPartnerInvite>) => toTournamentPartnerInviteDto({
     invite,
@@ -11056,6 +11066,7 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   already_participating_elsewhere: 'Вече участваш в друг активен турнир.',
   insufficient_funds: 'Нямаш достатъчно жълтици за този вход.',
   requires_password: 'Този турнир е защитен с парола.',
+  participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
 }
 
 const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
@@ -11080,11 +11091,15 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   invite_not_pending: 'Поканата вече е обработена.',
   insufficient_funds: 'Нямаш достатъчно жълтици за входа.',
   team_invalid: 'Отборът вече не е валиден.',
+  participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
 }
 
 function getPartnerInviteFailureStatus(reason: string): number {
   if (reason === 'tournament_not_found' || reason === 'invite_not_found') return 404
-  if (reason === 'requires_password' || reason === 'not_invitee' || reason === 'not_inviter') return 403
+  if (
+    reason === 'requires_password' || reason === 'not_invitee' || reason === 'not_inviter'
+    || reason === 'participation_blocked'
+  ) return 403
   if (reason === 'insufficient_funds') return 402
   return 409
 }
@@ -11481,7 +11496,7 @@ async function handleTournamentJoinRequest(
 
   if (!result.ok) {
     const status = result.reason === 'tournament_not_found' ? 404
-      : result.reason === 'requires_password' ? 403
+      : result.reason === 'requires_password' || result.reason === 'participation_blocked' ? 403
       : result.reason === 'insufficient_funds' ? 402
       : result.reason === 'tournament_full' || result.reason === 'already_participating_elsewhere'
         || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed'
@@ -11823,6 +11838,268 @@ async function handleTournamentCancelRequest(
   if (!result.alreadyCancelled && result.refundedProfiles.length > 0) {
     sendTournamentEconomyRefundNotices(tournamentId, 'creator_cancelled', result.refundedProfiles)
   }
+  return true
+}
+
+// ─── Tournaments: creator/admin moderation (force-remove team/entry) ──────
+// Тесни, dedicated moderation endpoints (§"SERVER API" в task spec-а — НЕ
+// generic arbitrary tournament mutation endpoint). Authorization: creator
+// НА ТОЗИ турнир ИЛИ role:admin — изрично НЕ subadmin/pika_team/chat_admin/
+// top_chat_admin/обикновен participant (§"КОГА Е ПОЗВОЛЕНО"). Reuse-ва
+// isTournamentModerationAdminProfile (buildTournamentSummaryDto по-горе) за
+// самата role проверка.
+
+const tournamentModerationActionRateLimitByProfileId = new Map<string, { count: number; windowStartedAt: number }>()
+const TOURNAMENT_MODERATION_ACTION_RATE_LIMIT_WINDOW_MS = 60_000
+const TOURNAMENT_MODERATION_ACTION_RATE_LIMIT_MAX_PER_WINDOW = 10
+
+function isTournamentModerationActionRateLimited(profileId: string, now: number): boolean {
+  const existing = tournamentModerationActionRateLimitByProfileId.get(profileId)
+  if (
+    existing === undefined ||
+    now - existing.windowStartedAt >= TOURNAMENT_MODERATION_ACTION_RATE_LIMIT_WINDOW_MS
+  ) {
+    tournamentModerationActionRateLimitByProfileId.set(profileId, { count: 1, windowStartedAt: now })
+    return false
+  }
+  if (existing.count >= TOURNAMENT_MODERATION_ACTION_RATE_LIMIT_MAX_PER_WINDOW) {
+    return true
+  }
+  existing.count += 1
+  return false
+}
+
+// §"REALTIME ROSTER UPDATE" в task spec-а — reuse-ва tournament_team_updated
+// (никаква нова WS message type), broadcast-нато към ВСЕКИ profileId с
+// entry в турнира плюс creator-а (dedup-нато), огледално на
+// broadcastTournamentScheduleUpdated по-горе (няма съществуващ "всички
+// текущи viewers на турнир X" registry). excludeProfileIds пропуска
+// премахнатите играчи — те получават собствено dedicated known известие
+// (tournament_economy_notice) вместо generic "refetch" тригер.
+function broadcastTournamentTeamUpdated(
+  tournamentId: string,
+  teamId: string,
+  creatorProfileId: string,
+  excludeProfileIds: readonly string[],
+): void {
+  const excluded = new Set(excludeProfileIds)
+  const notifiedProfileIds = new Set<string>()
+  const pushTeamUpdated = (profileId: string) => {
+    if (excluded.has(profileId) || notifiedProfileIds.has(profileId)) return
+    notifiedProfileIds.add(profileId)
+    sendToOpenProfileConnections(profileId, { type: 'tournament_team_updated', tournamentId, teamId })
+  }
+  for (const entry of tournamentStore.getEntriesForTournament(tournamentId)) {
+    pushTeamUpdated(entry.profileId)
+  }
+  pushTeamUpdated(creatorProfileId)
+}
+
+const FORCE_REMOVE_TEAM_FAILURE_MESSAGES: Record<string, string> = {
+  tournament_not_found: 'Турнирът не е намерен.',
+  tournament_not_open: 'Турнирът вече не може да бъде модерирана — не е в статус „Записване".',
+  team_not_found: 'Отборът не е намерен.',
+  team_not_complete: 'Отборът не е готов и не може да бъде отписан по този начин.',
+}
+
+async function handleTournamentForceRemoveTeamRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/teams\/([^/]+)\/remove$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
+
+  if (isTournamentModerationActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  let teamId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+    teamId = decodeURIComponent(match[2] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор.' })
+    return true
+  }
+  if (!tournamentId || !teamId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор.' })
+    return true
+  }
+
+  // Server-side authorization (§"AUTHORIZATION" — frontend visibility НЕ е
+  // security boundary): fresh read на tournament.creatorProfileId, никога
+  // client-provided. isTournamentModerationAdminProfile чете
+  // accounts.role directно от session-authenticated profileId.
+  const tournament = tournamentStore.getTournamentById(tournamentId)
+  if (tournament === null) {
+    sendJsonResponse(res, 404, { ok: false, message: FORCE_REMOVE_TEAM_FAILURE_MESSAGES.tournament_not_found })
+    return true
+  }
+  const isCreator = tournament.creatorProfileId === profileId
+  if (!isCreator && !isTournamentModerationAdminProfile(profileId)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само създателят на турнира или администратор могат да отписват отбори.' })
+    return true
+  }
+
+  const result = tournamentEconomyStore.forceRemoveTeamAtomically(tournamentId, teamId, profileId)
+
+  if (!result.ok) {
+    const status = result.reason === 'tournament_not_found' || result.reason === 'team_not_found' ? 404 : 409
+    sendJsonResponse(res, status, {
+      ok: false,
+      reason: result.reason,
+      message: FORCE_REMOVE_TEAM_FAILURE_MESSAGES[result.reason] ?? 'Действието не бе успешно.',
+    })
+    return true
+  }
+
+  activityCounters.incrementTournament('tournamentForceRemoveTeam')
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    tournament: buildTournamentDetailDto(result.tournament, profileId),
+  })
+
+  const removedProfileIds = result.removedProfiles.map((entry) => entry.profileId)
+  if (result.removedProfiles.length > 0) {
+    sendTournamentEconomyRefundNotices(
+      tournamentId,
+      result.actorIsCreator ? 'force_removed_by_creator' : 'force_removed_by_admin',
+      result.removedProfiles.map((entry) => ({ profileId: entry.profileId, amount: entry.refundedAmount, noticeId: entry.noticeId })),
+    )
+  }
+  broadcastTournamentTeamUpdated(tournamentId, teamId, tournament.creatorProfileId, removedProfileIds)
+  return true
+}
+
+const FORCE_REMOVE_ENTRY_FAILURE_MESSAGES: Record<string, string> = {
+  tournament_not_found: 'Турнирът не е намерен.',
+  tournament_not_open: 'Турнирът вече не може да бъде модерирана — не е в статус „Записване".',
+  entry_not_found: 'Играчът не е намерен.',
+  entry_not_confirmed: 'Играчът вече не участва активно в турнира.',
+  team_not_forming: 'Играчът вече е в готов отбор и не може да бъде отписан по този начин.',
+}
+
+async function handleTournamentForceRemoveEntryRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/tournaments\/([^/]+)\/entries\/([^/]+)\/remove$/.exec(pathname)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const authResult = requireRegisteredHumanSession(req)
+  if (!authResult.ok) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+  const { profileId } = authResult
+
+  if (!requireTournamentBetaAccessOrRespond(res, profileId)) {
+    return true
+  }
+
+  if (isTournamentModerationActionRateLimited(profileId, Date.now())) {
+    sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  let tournamentId: string
+  let entryId: string
+  try {
+    tournamentId = decodeURIComponent(match[1] ?? '')
+    entryId = decodeURIComponent(match[2] ?? '')
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор.' })
+    return true
+  }
+  if (!tournamentId || !entryId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден идентификатор.' })
+    return true
+  }
+
+  const tournament = tournamentStore.getTournamentById(tournamentId)
+  if (tournament === null) {
+    sendJsonResponse(res, 404, { ok: false, message: FORCE_REMOVE_ENTRY_FAILURE_MESSAGES.tournament_not_found })
+    return true
+  }
+  const isCreator = tournament.creatorProfileId === profileId
+  if (!isCreator && !isTournamentModerationAdminProfile(profileId)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само създателят на турнира или администратор могат да отписват играчи.' })
+    return true
+  }
+
+  const result = tournamentEconomyStore.forceRemoveEntryAtomically(tournamentId, entryId, profileId)
+
+  if (!result.ok) {
+    const status = result.reason === 'tournament_not_found' || result.reason === 'entry_not_found' ? 404 : 409
+    sendJsonResponse(res, status, {
+      ok: false,
+      reason: result.reason,
+      message: FORCE_REMOVE_ENTRY_FAILURE_MESSAGES[result.reason] ?? 'Действието не бе успешно.',
+    })
+    return true
+  }
+
+  activityCounters.incrementTournament('tournamentForceRemoveEntry')
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    tournament: buildTournamentDetailDto(result.tournament, profileId),
+  })
+
+  sendTournamentEconomyRefundNotices(
+    tournamentId,
+    result.actorIsCreator ? 'force_removed_by_creator' : 'force_removed_by_admin',
+    [{ profileId: result.removedProfileId, amount: result.refundedAmount, noticeId: result.noticeId }],
+  )
+  if (result.cancelledInvite !== null) {
+    sendTournamentPartnerInviteResolved({
+      inviteId: result.cancelledInvite.inviteId,
+      tournamentId,
+      inviteeProfileId: result.cancelledInvite.inviteeProfileId,
+      inviterProfileId: result.cancelledInvite.inviterProfileId,
+      status: 'cancelled',
+    })
+  }
+  // teamId е само LEK trigger-ово поле (viz TournamentTeamUpdatedMessage) —
+  // тук няма оцелял team за forming-single-member removal, но клиентският
+  // handler игнорира стойността, освен за refetch guard-а по tournamentId.
+  broadcastTournamentTeamUpdated(tournamentId, entryId, tournament.creatorProfileId, [result.removedProfileId])
   return true
 }
 
@@ -15419,6 +15696,14 @@ async function handleHttpRequest(
   }
 
   if (await handleTournamentCancelRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentForceRemoveTeamRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleTournamentForceRemoveEntryRequest(req, res, requestUrl.pathname)) {
     return
   }
 

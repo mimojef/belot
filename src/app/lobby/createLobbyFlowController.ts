@@ -895,6 +895,18 @@ export type CreateLobbyFlowControllerOptions = {
       }
     | { ok: false; message: string; reason?: string }
   >
+  // Creator/admin moderation (§"UI — БУТОНИ В TEAM CARD" в task spec-а) —
+  // връщат пълния TournamentDetailSnapshot directно (не само summary),
+  // защото teams[] реално се промени и актьорът гледа detail екрана в
+  // момента на клика — спестява отделен fetchTournamentDetail round-trip.
+  onTournamentForceRemoveTeam?: (tournamentId: string, teamId: string) => Promise<
+    | { ok: true; tournament: TournamentDetailSnapshot }
+    | { ok: false; message: string; reason?: string }
+  >
+  onTournamentForceRemoveEntry?: (tournamentId: string, entryId: string) => Promise<
+    | { ok: true; tournament: TournamentDetailSnapshot }
+    | { ok: false; message: string; reason?: string }
+  >
   // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task
   // spec-а) — тесен PATCH, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at.
   onTournamentScheduleUpdate?: (tournamentId: string, scheduledStartAt: string) => Promise<
@@ -1650,6 +1662,19 @@ type InternalLobbyFlowState = {
   tournamentCancelConfirmOpen: boolean
   tournamentCancelBusy: boolean
   tournamentCancelErrorText: string | null
+  // Creator/admin moderation force-remove (§"UI — БУТОНИ В TEAM CARD" в task
+  // spec-а) — target е null докато popup-ът е затворен; kind различава
+  // complete-team removal (POST .../teams/:teamId/remove) от forming-entry
+  // removal (POST .../entries/:entryId/remove), reused от render layer-а
+  // (renderTournamentForceRemoveConfirmPopup) за точния confirmation текст.
+  tournamentForceRemoveTarget: { kind: 'team'; teamId: string } | { kind: 'entry'; entryId: string } | null
+  tournamentForceRemoveConfirmOpen: boolean
+  tournamentForceRemoveBusy: boolean
+  tournamentForceRemoveErrorText: string | null
+  // Rejoin-denial dedicated popup (§"REJOIN UX — ТОЧЕН POPUP" в task
+  // spec-а) — показва се вместо inline error text, когато server-ът върне
+  // reason='participation_blocked' от join/invite-create/invite-accept.
+  tournamentParticipationBlockedPopupOpen: boolean
   // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task
   // spec-а) — тесен popup, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at. Draft-овете
   // са отделни date/time strings (не combined datetime-local), защото
@@ -2156,6 +2181,11 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentCancelConfirmOpen: false,
     tournamentCancelBusy: false,
     tournamentCancelErrorText: null,
+    tournamentForceRemoveTarget: null,
+    tournamentForceRemoveConfirmOpen: false,
+    tournamentForceRemoveBusy: false,
+    tournamentForceRemoveErrorText: null,
+    tournamentParticipationBlockedPopupOpen: false,
     tournamentScheduleEditOpen: false,
     tournamentScheduleEditDateDraft: '',
     tournamentScheduleEditTimeDraft: '',
@@ -3946,6 +3976,11 @@ export function createLobbyFlowController(
       tournamentCancelConfirmOpen: state.tournamentCancelConfirmOpen,
       tournamentCancelBusy: state.tournamentCancelBusy,
       tournamentCancelErrorText: state.tournamentCancelErrorText,
+      tournamentForceRemoveTarget: state.tournamentForceRemoveTarget,
+      tournamentForceRemoveConfirmOpen: state.tournamentForceRemoveConfirmOpen,
+      tournamentForceRemoveBusy: state.tournamentForceRemoveBusy,
+      tournamentForceRemoveErrorText: state.tournamentForceRemoveErrorText,
+      tournamentParticipationBlockedPopupOpen: state.tournamentParticipationBlockedPopupOpen,
       tournamentScheduleEditOpen: state.tournamentScheduleEditOpen,
       tournamentScheduleEditDateDraft: state.tournamentScheduleEditDateDraft,
       tournamentScheduleEditTimeDraft: state.tournamentScheduleEditTimeDraft,
@@ -4654,6 +4689,19 @@ export function createLobbyFlowController(
       },
       onTournamentCancelSubmit: () => {
         void submitTournamentCancel()
+      },
+      onTournamentForceRemoveOpen: (kind, targetId) => {
+        openTournamentForceRemoveConfirm(kind, targetId)
+      },
+      onTournamentForceRemoveClose: () => {
+        closeTournamentForceRemoveConfirm()
+      },
+      onTournamentForceRemoveSubmit: () => {
+        void submitTournamentForceRemove()
+      },
+      onTournamentParticipationBlockedClose: () => {
+        state.tournamentParticipationBlockedPopupOpen = false
+        render()
       },
       onTournamentScheduleEditOpen: () => {
         openTournamentScheduleEdit()
@@ -8493,6 +8541,11 @@ export function createLobbyFlowController(
 
     if (!result.ok) {
       if (handleTournamentBetaAccessDenial(result.reason)) return
+      // Blocked-popup-ът stack-ва отгоре (z-index 9600 > 9500) вместо да
+      // затваря join confirm popup-а под него — намерен избор, за да не
+      // счупи установения инвариант "error response не поврежда/затваря
+      // popup state-a" (§J67 в checkTournamentsFrontendSource.ts).
+      if (handleTournamentParticipationBlockedDenial(result.reason)) return
       state.tournamentJoinErrorText = result.message
       render()
       return
@@ -8655,6 +8708,9 @@ export function createLobbyFlowController(
         render()
         return
       }
+      // Blocked-popup-ът stack-ва отгоре (z-index 9600 > 9500) вместо да
+      // затваря picker-а под него — виж submitTournamentJoin по-горе.
+      if (handleTournamentParticipationBlockedDenial(result.reason)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -8694,6 +8750,7 @@ export function createLobbyFlowController(
     state.tournamentPartnerInviteBusy = false
     if (!result.ok) {
       if (handleTournamentBetaAccessDenial(result.reason)) return
+      if (handleTournamentParticipationBlockedDenial(result.reason)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -8812,6 +8869,74 @@ export function createLobbyFlowController(
     state.tournamentCancelConfirmOpen = false
     state.tournamentCancelErrorText = null
     mergeTournamentSummaryIntoDetail(result.tournament)
+    void refetchTournamentsList()
+    render()
+  }
+
+  // Creator/admin moderation force-remove (§"UI — БУТОНИ В TEAM CARD" в
+  // task spec-а) — kind различава complete-team removal от
+  // forming-entry removal, reused от renderTournamentForceRemoveConfirmPopup
+  // за точния confirmation текст.
+  function openTournamentForceRemoveConfirm(kind: 'team' | 'entry', targetId: string): void {
+    state.tournamentForceRemoveTarget = kind === 'team'
+      ? { kind: 'team', teamId: targetId }
+      : { kind: 'entry', entryId: targetId }
+    state.tournamentForceRemoveConfirmOpen = true
+    state.tournamentForceRemoveErrorText = null
+    render()
+  }
+
+  function closeTournamentForceRemoveConfirm(): void {
+    if (state.tournamentForceRemoveBusy) return
+    state.tournamentForceRemoveTarget = null
+    state.tournamentForceRemoveConfirmOpen = false
+    state.tournamentForceRemoveErrorText = null
+    render()
+  }
+
+  async function submitTournamentForceRemove(): Promise<void> {
+    const target = state.tournamentForceRemoveTarget
+    if (target === null || state.tournamentDetailId === null || state.tournamentForceRemoveBusy) {
+      return
+    }
+    const tournamentId = state.tournamentDetailId
+
+    state.tournamentForceRemoveBusy = true
+    state.tournamentForceRemoveErrorText = null
+    render()
+
+    const result = target.kind === 'team'
+      ? await options.onTournamentForceRemoveTeam?.(tournamentId, target.teamId)
+      : await options.onTournamentForceRemoveEntry?.(tournamentId, target.entryId)
+
+    if (result === undefined) {
+      state.tournamentForceRemoveBusy = false
+      render()
+      return
+    }
+
+    if (state.currentScreen !== 'tournament-detail' || state.tournamentDetailId !== tournamentId) {
+      return
+    }
+
+    state.tournamentForceRemoveBusy = false
+
+    if (!result.ok) {
+      if (handleTournamentBetaAccessDenial(result.reason)) return
+      state.tournamentForceRemoveErrorText = result.message
+      render()
+      return
+    }
+
+    state.tournamentForceRemoveConfirmOpen = false
+    state.tournamentForceRemoveTarget = null
+    state.tournamentForceRemoveErrorText = null
+    // Server-ът вече връща пълния detail directно (не само summary) —
+    // teams[] реално се промени, а актьорът гледа detail екрана в момента
+    // на клика (§"REALTIME ROSTER UPDATE" в task spec-а: "creator/admin
+    // client трябва веднага да refetch-не" — тук е още по-directно,
+    // response-ът вече Е свежото състояние).
+    state.tournamentDetail = result.tournament
     void refetchTournamentsList()
     render()
   }
@@ -12166,6 +12291,17 @@ export function createLobbyFlowController(
     return true
   }
 
+  // §"REJOIN UX — ТОЧЕН POPUP" в task spec-а — dedicated single-button
+  // ("ОК") popup вместо inline error box, wired във всеки protected entry
+  // path (join solo, invite create като inviter, invite accept като
+  // invitee) огледално на handleTournamentBetaAccessDenial по-горе.
+  function handleTournamentParticipationBlockedDenial(reason: string | undefined): boolean {
+    if (reason !== 'participation_blocked') return false
+    state.tournamentParticipationBlockedPopupOpen = true
+    render()
+    return true
+  }
+
   // Единствена authoritative проверка преди каквото и да е зареждане на
   // tournament content — вика се от showTournamentsList() (nav click И
   // direct-URL/refresh route dispatch минават през нея, виж task spec
@@ -14012,6 +14148,22 @@ export function createLobbyFlowController(
     // че не се нуждаят от този refresh). Огледален pattern на
     // tournament_match_assigned/tournament_feeder_match_completed по-горе.
     if (message.type === 'tournament_economy_notice' && message.reason === 'partner_left') {
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
+        void fetchTournamentDetail(message.tournamentId)
+      }
+      return false
+    }
+
+    // Creator/admin moderation force-remove realtime update (§"UI — БУТОНИ В
+    // TEAM CARD" в task spec-а) — огледален pattern на partner_left по-горе:
+    // турнирът остава 'open', и премахнатият играч няма собствен HTTP
+    // response за тази промяна (removal-ът е инициатор от друг профил),
+    // затова push-ът е единственият му сигнал да презареди (вече
+    // не-участник) detail изгледа.
+    if (
+      message.type === 'tournament_economy_notice' &&
+      (message.reason === 'force_removed_by_creator' || message.reason === 'force_removed_by_admin')
+    ) {
       if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === message.tournamentId) {
         void fetchTournamentDetail(message.tournamentId)
       }

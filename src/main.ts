@@ -5025,6 +5025,66 @@ async function cancelTournamentRequest(
   }
 }
 
+// Creator/admin moderation (§"SERVER API" в task spec-а — тесни dedicated
+// endpoints, не generic arbitrary tournament mutation). Връщат пълния
+// TournamentDetailSnapshot directно (server-ът вече го build-ва в отговора),
+// не само summary — teams[] реално се промени.
+async function forceRemoveTournamentTeamRequest(
+  tournamentId: string,
+  teamId: string,
+): Promise<
+  | { ok: true; tournament: TournamentDetailSnapshot }
+  | { ok: false; message: string; reason?: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/teams/${encodeURIComponent(teamId)}/remove`,
+      { method: 'POST', credentials: 'include' },
+    )
+    const data = (await response.json()) as
+      | { ok: true; tournament: TournamentDetailSnapshot }
+      | TournamentEntryActionErrorResponse
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: (data as TournamentEntryActionErrorResponse).message ?? 'Отписването не бе успешно.',
+        reason: (data as TournamentEntryActionErrorResponse).reason,
+      }
+    }
+    return { ok: true, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function forceRemoveTournamentEntryRequest(
+  tournamentId: string,
+  entryId: string,
+): Promise<
+  | { ok: true; tournament: TournamentDetailSnapshot }
+  | { ok: false; message: string; reason?: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/entries/${encodeURIComponent(entryId)}/remove`,
+      { method: 'POST', credentials: 'include' },
+    )
+    const data = (await response.json()) as
+      | { ok: true; tournament: TournamentDetailSnapshot }
+      | TournamentEntryActionErrorResponse
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: (data as TournamentEntryActionErrorResponse).message ?? 'Отписването не бе успешно.',
+        reason: (data as TournamentEntryActionErrorResponse).reason,
+      }
+    }
+    return { ok: true, tournament: data.tournament }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task spec-а) —
 // тесен PATCH, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at. Не generic tournament
 // update endpoint.
@@ -5557,6 +5617,8 @@ lobby = createLobbyFlowController({
   onTournamentJoin: (tournamentId, password) => joinTournamentRequest(tournamentId, password),
   onTournamentLeave: (tournamentId) => leaveTournamentRequest(tournamentId),
   onTournamentCancel: (tournamentId) => cancelTournamentRequest(tournamentId),
+  onTournamentForceRemoveTeam: (tournamentId, teamId) => forceRemoveTournamentTeamRequest(tournamentId, teamId),
+  onTournamentForceRemoveEntry: (tournamentId, entryId) => forceRemoveTournamentEntryRequest(tournamentId, entryId),
   onTournamentScheduleUpdate: (tournamentId, scheduledStartAt) => updateTournamentScheduledStartRequest(tournamentId, scheduledStartAt),
   onTournamentPartnerCandidatesLoad: (tournamentId) => loadTournamentPartnerCandidates(tournamentId),
   onTournamentPartnerCandidatesSearch: (tournamentId, query, signal) => searchTournamentPartnerCandidates(tournamentId, query, signal),

@@ -63,7 +63,7 @@ export type TournamentEconomyNoticeMessage = {
   type: 'tournament_economy_notice'
   eventId: string
   tournamentId: string
-  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left'
+  reason: 'creator_cancelled' | 'fill_expired' | 'scheduled_underfilled' | 'partner_left' | 'force_removed_by_creator' | 'force_removed_by_admin'
   amount: number
   occurredAt: string
 }

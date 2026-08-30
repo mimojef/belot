@@ -839,6 +839,11 @@ export type LobbyScreenState = {
   tournamentCancelConfirmOpen: boolean
   tournamentCancelBusy: boolean
   tournamentCancelErrorText: string | null
+  tournamentForceRemoveTarget: { kind: 'team'; teamId: string } | { kind: 'entry'; entryId: string } | null
+  tournamentForceRemoveConfirmOpen: boolean
+  tournamentForceRemoveBusy: boolean
+  tournamentForceRemoveErrorText: string | null
+  tournamentParticipationBlockedPopupOpen: boolean
   tournamentScheduleEditOpen: boolean
   tournamentScheduleEditDateDraft: string
   tournamentScheduleEditTimeDraft: string
@@ -1009,6 +1014,10 @@ export type RenderLobbyScreenOptions = {
   onTournamentCancelConfirmOpen: () => void
   onTournamentCancelConfirmClose: () => void
   onTournamentCancelSubmit: () => void
+  onTournamentForceRemoveOpen: (kind: 'team' | 'entry', targetId: string) => void
+  onTournamentForceRemoveClose: () => void
+  onTournamentForceRemoveSubmit: () => void
+  onTournamentParticipationBlockedClose: () => void
   onTournamentScheduleEditOpen: () => void
   onTournamentScheduleEditClose: () => void
   onTournamentScheduleEditDateChange: (value: string) => void
@@ -14654,6 +14663,34 @@ export function renderLobbyScreen(
   root.querySelector<HTMLElement>('[data-tournament-cancel-backdrop="1"]')
     ?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) options.onTournamentCancelConfirmClose()
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-force-remove-team-open]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const teamId = btn.getAttribute('data-tournament-force-remove-team-open') ?? ''
+      if (teamId) options.onTournamentForceRemoveOpen('team', teamId)
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-force-remove-entry-open]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const entryId = btn.getAttribute('data-tournament-force-remove-entry-open') ?? ''
+      if (entryId) options.onTournamentForceRemoveOpen('entry', entryId)
+    })
+  })
+  root.querySelector<HTMLButtonElement>('[data-tournament-force-remove-close="1"]')
+    ?.addEventListener('click', options.onTournamentForceRemoveClose)
+  root.querySelector<HTMLButtonElement>('[data-tournament-force-remove-submit="1"]')
+    ?.addEventListener('click', options.onTournamentForceRemoveSubmit)
+  root.querySelector<HTMLElement>('[data-tournament-force-remove-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentForceRemoveClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-participation-blocked-close="1"]')
+    ?.addEventListener('click', options.onTournamentParticipationBlockedClose)
+  root.querySelector<HTMLElement>('[data-tournament-participation-blocked-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentParticipationBlockedClose()
     })
 
   root.querySelector<HTMLButtonElement>('[data-tournament-schedule-edit-open="1"]')
