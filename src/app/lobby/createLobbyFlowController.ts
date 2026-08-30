@@ -1053,10 +1053,20 @@ type InternalLobbyFlowState = {
   profilePopupProfile: PlayerPublicProfileSnapshot | null
   profilePopupCanEdit: boolean
   profilePopupContext: ProfilePopupContext
-  /** VIP изтичане на СОБСТВЕНИЯ профил на viewer-а — lazy-load само когато popup-ът показва own profile. null = все още не е зареден. */
+  /** VIP изтичане на СОБСТВЕНИЯ профил на viewer-а — lazy-load само когато popup-ът показва own profile. null = зареден статус, БЕЗ активен VIP (не "не е зареден" — виж ownVipActiveUntilResolvedForProfileId за discriminator-а "loaded vs not loaded"). */
   ownVipActiveUntil: string | null
-  /** profileId, за който ownVipActiveUntil вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
+  /** profileId, за който fetch-ът вече е (или се) стартирал — memoization/dedup guard, аналогично на profilePopupTargetRoleProfileId. Сетва се СИНХРОННО преди await-а, затова НЕ доказва, че отговорът реално е пристигнал — виж ownVipActiveUntilResolvedForProfileId за render-time discriminator-а. */
   ownVipActiveUntilLoadedForProfileId: string | null
+  /**
+   * profileId, за който ownVipActiveUntil реално носи authoritative server
+   * стойност (успешен response вече е приложен) — null означава "все още
+   * няма resolved стойност за текущия профил", независимо дали заявка вече
+   * тече. Render слоят (resolveOwnVipActiveUntilForRender) използва ТОЧНО
+   * това поле, за да различи "not loaded yet" (покажи "VIP · …") от "loaded,
+   * no active VIP" (покажи "VIP · 0 дни") — root cause на бъга беше, че
+   * ownVipActiveUntil===null означаваше и двете едновременно.
+   */
+  ownVipActiveUntilResolvedForProfileId: string | null
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -1729,6 +1739,7 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupContext: 'other',
     ownVipActiveUntil: null,
     ownVipActiveUntilLoadedForProfileId: null,
+    ownVipActiveUntilResolvedForProfileId: null,
     topicsLoading: false,
     topicsErrorText: null,
     topics: null,
@@ -3673,7 +3684,7 @@ export function createLobbyFlowController(
       profile: createLocalProfilePreview(state, authSession),
       profilePopupProfile: state.profilePopupProfile,
       profilePopupCanEdit: state.profilePopupCanEdit,
-      ownVipActiveUntil: state.ownVipActiveUntil,
+      ownVipActiveUntil: resolveOwnVipActiveUntilForRender(authSession),
       profilePopupTargetRole: state.profilePopupTargetRole,
       vipGrantOpen: state.vipGrantOpen,
       vipGrantSubmitting: state.vipGrantSubmitting,
@@ -7839,7 +7850,13 @@ export function createLobbyFlowController(
       state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: true }
       if (result.activeUntil !== undefined) {
         state.ownVipActiveUntil = result.activeUntil
-        state.ownVipActiveUntilLoadedForProfileId = options.getAuthSession?.()?.profile.profileId ?? state.ownVipActiveUntilLoadedForProfileId
+        const ownProfileIdAfterGift = options.getAuthSession?.()?.profile.profileId ?? null
+        state.ownVipActiveUntilLoadedForProfileId = ownProfileIdAfterGift ?? state.ownVipActiveUntilLoadedForProfileId
+        // Launch gift claim-ът е authoritative server response, симетрично
+        // на ensureOwnVipStatusLoaded-я успешен отговор — маркира се resolved,
+        // за да не показва render слоят "VIP · …" placeholder въпреки че вече
+        // имаме свежа стойност.
+        state.ownVipActiveUntilResolvedForProfileId = ownProfileIdAfterGift ?? state.ownVipActiveUntilResolvedForProfileId
       }
       state.topicsVipPopupOpen = false
       render()
@@ -13517,6 +13534,22 @@ export function createLobbyFlowController(
     })()
   }
 
+  // Единствен source of truth за render-time tri-state discriminator-а
+  // (§ бъг "VIP · 0 дни" flash преди истинския отговор) — извикван И от
+  // buildLobbyScreenState(), И от renderPopupOnly(), за да не се разминат
+  // отново двете независими projection places (същия клас production
+  // data-flow bug, документиран в syncProfilePopup call site-а по-долу).
+  // undefined = own VIP статус все още не е resolved за ТЕКУЩИЯ логнат
+  // профил (покажи "VIP · …"); null = resolved, без активен VIP (покажи
+  // "VIP · 0 дни"); string = resolved, активен до тази дата.
+  function resolveOwnVipActiveUntilForRender(authSession: LobbyAuthSession | null): string | null | undefined {
+    const ownProfileId = authSession?.profile.profileId ?? null
+    if (ownProfileId === null || state.ownVipActiveUntilResolvedForProfileId !== ownProfileId) {
+      return undefined
+    }
+    return state.ownVipActiveUntil
+  }
+
   function ensureOwnVipStatusLoaded(): void {
     const authSession = options.getAuthSession?.() ?? null
     // За own profile state.profilePopupProfile си остава null (виж
@@ -13529,10 +13562,13 @@ export function createLobbyFlowController(
     const ownProfileId = authSession?.profile.profileId ?? null
 
     if (!state.profilePopupOpen || profile === null || profile.profileId === null || ownProfileId === null) {
-      // Popup затворен (или все още няма профил) — нулираме guard-а, за да
-      // може следващото отваряне на own profile да refetch-не свеж статус
-      // (напр. ако потребителят междувременно е взел launch gift).
+      // Popup затворен (или все още няма профил) — нулираме и двата guard-а,
+      // за да може следващото отваряне на own profile да refetch-не свеж
+      // статус (напр. ако потребителят междувременно е взел launch gift) И
+      // да покаже "VIP · …" placeholder, докато свежият отговор пристигне
+      // (вместо моментна stale стойност от предишното отваряне).
       state.ownVipActiveUntilLoadedForProfileId = null
+      state.ownVipActiveUntilResolvedForProfileId = null
       return
     }
     if (profile.profileId !== ownProfileId) {
@@ -13553,6 +13589,7 @@ export function createLobbyFlowController(
       }
       if (result.ok) {
         state.ownVipActiveUntil = result.activeUntil
+        state.ownVipActiveUntilResolvedForProfileId = ownProfileId
         render()
       }
     })()
@@ -13876,7 +13913,7 @@ export function createLobbyFlowController(
         targetAccountRole: state.profilePopupTargetRole,
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
-        ownVipActiveUntil: isOwnProfile ? state.ownVipActiveUntil : null,
+        ownVipActiveUntil: isOwnProfile ? resolveOwnVipActiveUntilForRender(authSession) : null,
         vipGrantOpen: state.vipGrantOpen,
         vipGrantSubmitting: state.vipGrantSubmitting,
         vipGrantErrorText: state.vipGrantErrorText,
@@ -13893,6 +13930,17 @@ export function createLobbyFlowController(
     // success inline съобщение, което иначе би оцеляло между сесии (bug
     // report §"дори след logout и login отново").
     clearGiftSuccessInlineMessage()
+    // Atomic reset на own VIP state (§ бъг "old VIP timestamp не трябва
+    // никога да може да се покаже за новата session/profile") — controller-ът
+    // се reuse-ва между logout/login (main.ts не създава нов
+    // createLobbyFlowController instance), затова без този reset тук
+    // stale ownVipActiveUntil от предишния профил би останал в state-a през
+    // async-a прозорец, докато ensureOwnVipStatusLoaded refetch-не свеж
+    // статус за новия профил. И трите полета се нулират заедно, за да няма
+    // момент, в който едното сочи към новия профил, а другото — към стария.
+    state.ownVipActiveUntil = null
+    state.ownVipActiveUntilLoadedForProfileId = null
+    state.ownVipActiveUntilResolvedForProfileId = null
     render()
     void loadPlayerUnclaimedCount()
   }
@@ -15993,7 +16041,12 @@ export function createLobbyFlowController(
       // нулира memoization guard-а на ensureOwnVipStatusLoaded, за да
       // следващото отваряне на own profile popup-а refetch-не свеж
       // active_until, вместо да покаже stale стойност от преди покупката.
+      // ownVipActiveUntilResolvedForProfileId се нулира заедно с него —
+      // иначе render слоят все още би третирал старата (pre-покупка)
+      // ownVipActiveUntil стойност като "resolved" до refetch-а, показвайки
+      // stale дни вместо "VIP · …" placeholder.
       state.ownVipActiveUntilLoadedForProfileId = null
+      state.ownVipActiveUntilResolvedForProfileId = null
       state.vipPackages = []
     },
     showVipPurchaseProcessingPopup: () => {

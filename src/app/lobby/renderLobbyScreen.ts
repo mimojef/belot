@@ -492,8 +492,14 @@ export type LobbyScreenState = {
    * ISO дата на изтичане на собствения VIP (authoritative active_until) —
    * пропагира се към renderPlayerProfilePopup САМО когато popup-ът реално
    * показва собствения профил (виж syncProfilePopup wiring-а по-долу).
+   * Tri-state: undefined = все още не е resolved за текущия логнат профил
+   * (render-ва "VIP · …" placeholder); null = resolved, без активен VIP
+   * ("VIP · 0 дни"); string = resolved, активен до тази дата. Изчислява се
+   * от resolveOwnVipActiveUntilForRender() в createLobbyFlowController.ts —
+   * НЕ presume undefined тук като "omitted prop", а като explicit
+   * loading-state сигнал.
    */
-  ownVipActiveUntil: string | null
+  ownVipActiveUntil: string | null | undefined
   /** Роля на разглеждания акаунт — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
   profilePopupTargetRole: PlayerAccountRole | null
   /** "Дай VIP" inline grant форма в чужд profile popup — само за пълен admin. */
@@ -1489,7 +1495,8 @@ export function syncProfilePopup(
     targetAccountRole?: PlayerAccountRole | null
     showPikaSupportChatButton?: boolean
     showTopicsPersonalMessageButton?: boolean
-    ownVipActiveUntil?: string | null
+    /** Tri-state — виж LobbyScreenState.ownVipActiveUntil за discriminator semantics-а. Подава се explicit undefined за "not loaded yet", НЕ се пропуска/coerce-ва към null тук (виж renderPlayerProfilePopup.ts). */
+    ownVipActiveUntil?: string | null | undefined
     vipGrantOpen?: boolean
     vipGrantSubmitting?: boolean
     vipGrantErrorText?: string | null
@@ -1525,7 +1532,9 @@ export function syncProfilePopup(
     skipAnimation: !isFirstOpen || (popupState.skipAnimation ?? false),
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
     targetAccountRole: popupState.targetAccountRole ?? null,
-    ownVipActiveUntil: popupState.ownVipActiveUntil ?? null,
+    // НЕ "?? null" тук — undefined е explicit "not loaded yet" сигнал
+    // (виж LobbyScreenState.ownVipActiveUntil), не omitted-prop default.
+    ownVipActiveUntil: popupState.ownVipActiveUntil,
     showPikaSupportChatButton: popupState.showPikaSupportChatButton ?? false,
     showTopicsPersonalMessageButton: popupState.showTopicsPersonalMessageButton ?? false,
     vipGrantOpen: popupState.vipGrantOpen ?? false,
@@ -13472,7 +13481,12 @@ export function renderLobbyScreen(
   // createLobbyFlowController.ts). isOwnProfile/ownVipActiveUntil ТРЯБВА да
   // се преизчисляват тук по същия начин, иначе следващ несвързан re-render
   // ги презаписва обратно към false/null (production data-flow bug,
-  // фиксиран тук — виж renderOwnProfileSummary/renderVipBadge).
+  // фиксиран тук — виж renderOwnProfileSummary/renderVipBadge). state.ownVipActiveUntil
+  // тук вече е tri-state (undefined/null/string) — идва directly от
+  // resolveOwnVipActiveUntilForRender() в buildLobbyScreenState(), затова
+  // просто се пропагира, без повторна null-coalescing логика тук; иначе
+  // несвързан re-render би маскирал "still loading" (undefined) обратно
+  // към "no active VIP" (null), връщайки точно бъга, който този fix цели.
   const profilePopupResolvedProfile = state.profilePopupProfile ?? state.profile
   const profilePopupIsOwnProfile = profilePopupResolvedProfile.profileId !== null
     && profilePopupResolvedProfile.profileId === state.profile.profileId

@@ -38,8 +38,15 @@ export type RenderPlayerProfilePopupOptions = {
    * ISO дата на изтичане на VIP — попълва се само когато profile е
    * собственият профил на viewer-а (isOwnProfile). За чужди профили
    * оставаме само с публичния "VIP" бадж, без дата (виж т.13 от брифа).
+   *
+   * Tri-state, explicit (НЕ omitted-prop default): undefined = own VIP
+   * статусът все още не е resolved от сървъра (render-ва "VIP · …" loading
+   * placeholder — виж renderOwnProfileSummary); null = resolved, без активен
+   * VIP ("VIP · 0 дни"); string = resolved, активен до тази дата. Root cause
+   * на "VIP · 0 дни" flash бъга беше, че null означаваше и двете "not
+   * loaded" и "loaded, inactive" едновременно.
    */
-  ownVipActiveUntil?: string | null
+  ownVipActiveUntil?: string | null | undefined
   /**
    * "Дай VIP" inline grant форма — само за viewerIsFullAdmin, само за чужд
    * профил. vipGrantOpen превключва между trigger линка и разгънатото поле;
@@ -606,10 +613,17 @@ function renderForeignVipRow(profile: PlayerPublicProfileSnapshot, viewerIsFullA
  * виж CLAUDE.md/task brief-а). VIP редът е ВИНАГИ видим за собствения
  * профил (дори без активен VIP → "VIP · 0 дни"), за да не мести layout-а
  * според VIP статус.
+ *
+ * ownVipActiveUntil е tri-state: undefined означава "все още не е resolved
+ * от /api/vip/status" — показваме "VIP · …" placeholder (СЪЩИЯТ DOM ред/
+ * data-attribute/стил, само текстът е различен, за да няма layout shift),
+ * вместо computeVipRemainingDays(undefined), който би върнал невярно "0
+ * дни" (root cause на flash бъга: null/undefined бяха неразличими).
  */
-function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null): string {
+function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null | undefined): string {
   const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
-  const vipDays = computeVipRemainingDays(ownVipActiveUntil)
+  const isVipStatusLoading = ownVipActiveUntil === undefined
+  const vipDaysText = isVipStatusLoading ? '…' : formatVipDaysWords(computeVipRemainingDays(ownVipActiveUntil))
 
   return `
     <div data-player-profile-own-summary="1" style="display:flex;flex-direction:column;gap:5px;min-width:0;">
@@ -633,8 +647,9 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
       ` : ''}
       <div
         data-player-profile-own-vip-days="1"
+        data-vip-status-loading="${isVipStatusLoading ? '1' : '0'}"
         style="font-size:13px;letter-spacing:0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-      ><span style="color:#d4a520;font-weight:800;">VIP · </span><span style="color:#f8fafc;font-weight:400;">${escapeHtml(formatVipDaysWords(vipDays))}</span></div>
+      ><span style="color:#d4a520;font-weight:800;">VIP · </span><span style="color:#f8fafc;font-weight:400;">${escapeHtml(vipDaysText)}</span></div>
       <span
         data-player-profile-edit="1"
         style="
@@ -1094,7 +1109,7 @@ function renderProfileContent(
   targetAccountRole: PlayerAccountRole | null,
   showPikaSupportChatButton: boolean,
   showTopicsPersonalMessageButton: boolean,
-  ownVipActiveUntil: string | null,
+  ownVipActiveUntil: string | null | undefined,
   vipGrantOpen: boolean,
   vipGrantSubmitting: boolean,
   vipGrantErrorText: string | null,
@@ -1544,7 +1559,9 @@ export function renderPlayerProfilePopup(
           options.targetAccountRole ?? null,
           options.showPikaSupportChatButton ?? false,
           options.showTopicsPersonalMessageButton ?? false,
-          options.ownVipActiveUntil ?? null,
+          // НЕ "?? null" тук — undefined е explicit "not loaded yet" сигнал
+          // (виж RenderPlayerProfilePopupOptions.ownVipActiveUntil doc-а).
+          options.ownVipActiveUntil,
           options.vipGrantOpen ?? false,
           options.vipGrantSubmitting ?? false,
           options.vipGrantErrorText ?? null,

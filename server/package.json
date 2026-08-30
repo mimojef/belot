@@ -103,6 +103,7 @@
     "check:server-migration-restart-safety": "tsx scripts/checkServerMigrationRestartSafety.ts --server-root=.",
     "check:subadmin-http-authorization": "tsx scripts/checkSubadminHttpAuthorization.ts --server-root=.",
     "check:subadmin-profile-popup-rendering": "tsx scripts/checkSubadminProfilePopupRendering.ts",
+    "check:own-vip-status-loading-state": "tsx scripts/checkOwnVipStatusLoadingState.ts --project-root=..",
     "check:subadmin-admin-info-access-polling": "tsx scripts/checkSubadminAdminInfoAccessPolling.ts",
     "check:subadmin-profile-status-eligibility": "tsx scripts/checkSubadminProfileStatusEligibility.ts --server-root=.",
     "check:chat-admin-role": "tsx scripts/checkChatAdminRole.ts --server-root=.",
