@@ -1309,6 +1309,7 @@ export type PlayerProfileMessage = {
   ok?: boolean
   code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
   message?: string
+  deniedProfileId?: string | null
 }
 
 export type ChatMessageReceivedMessage = {

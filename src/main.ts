@@ -5845,6 +5845,7 @@ const activeRoom = createActiveRoomFlowController({
     if ('ok' in result && !result.ok) return { message: result.message }
     return { message: 'blocked' in result && result.blocked ? 'Играчът е блокиран.' : 'Операцията не успя.' }
   },
+  onBlockProfileFull: (profileId) => submitProfileBlock(profileId),
   showLobby: (errorText = null, leftRoomId = null) => {
     // Ако tournamentMatchStartPopup в момента сочи точно към стаята, която
     // играчът напуска (мач приключил — win/loss/walkover), изчистваме stale

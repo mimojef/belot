@@ -477,6 +477,47 @@ try {
   })
 
   // ───────────────────────────────────────────────────────────────────────
+  // In-game seat profile access denial (real WS, real block endpoint) —
+  // §UX gap fix production repro: opening a blocked opponent's in-game seat
+  // profile must come back with enough info (deniedProfileId) for the
+  // client's denial popup to offer a "Блокирай" action, exactly like the
+  // lobby/private-room path — same protocol field, same underlying
+  // sendPlayerProfileToConnection() server function.
+  // ───────────────────────────────────────────────────────────────────────
+  await check('[A20] in-game player_profile denial carries deniedProfileId when the target has blocked the viewer', async () => {
+    // guestA1 blocks hostA via the real HTTP block endpoint (mid-game — this
+    // is allowed; block relationships are independent of active room state).
+    const guestBlocksHost = await httpJson(port, 'POST', `/api/profiles/${encodeURIComponent(hostA.profileId)}/block`, guestA1.cookie)
+    if (guestBlocksHost.status !== 200 || guestBlocksHost.body?.blocked !== true) {
+      throw new Error(`guestA1 -> hostA block failed: status=${guestBlocksHost.status} body=${JSON.stringify(guestBlocksHost.body)}`)
+    }
+
+    try {
+      // hostA requests guestA1's in-game seat profile. hostA has NOT blocked
+      // guestA1 (only the reverse), so the denial must be 'profile_blocked_viewer'.
+      const guestSeat = (hostSnapshotA.seats as any[]).find((s: any) => s.isOccupied && !s.isBot && s.seat !== hostFullA.seat)
+      if (guestSeat === undefined) throw new Error('could not find guestA1 seat in hostA snapshot')
+
+      hostA.frames.length = 0
+      send(hostA, { type: 'request_player_profile', roomId: gameRoomIdA, seat: guestSeat.seat })
+      const denial = await waitForFrame(
+        hostA,
+        (f) => f.type === 'player_profile' && f.roomId === gameRoomIdA && f.seat === guestSeat.seat,
+        5_000,
+        'in-game player_profile denial',
+      )
+      if (denial.profile !== null) throw new Error('expected profile:null on denial')
+      if (denial.code !== 'profile_blocked_viewer') throw new Error(`expected code=profile_blocked_viewer, got ${denial.code}`)
+      if (denial.deniedProfileId !== guestA1.profileId) {
+        throw new Error(`expected deniedProfileId=${guestA1.profileId}, got ${denial.deniedProfileId}`)
+      }
+    } finally {
+      // Restore state for the rest of the suite.
+      await httpJson(port, 'POST', `/api/profiles/${encodeURIComponent(hostA.profileId)}/block`, guestA1.cookie)
+    }
+  })
+
+  // ───────────────────────────────────────────────────────────────────────
   // Scenario B: 3 humans + 1 bot
   // ───────────────────────────────────────────────────────────────────────
   console.log('\n--- Scenario B: 3 humans + 1 bot ---')
@@ -659,8 +700,57 @@ try {
     await waitForFrame(hostD, (f) => f.type === 'private_room_chat_message' && f.body === 'back online', 5_000, 'host receives reconnected member\'s message')
   })
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Scenario E: real WS, real HTTP block-relationship — the production
+  // repro reported for bidirectional private-room partner blocking. Uses
+  // the actual POST /api/profiles/:id/block endpoint (not a test predicate)
+  // and the actual join_private_room WS message, so this exercises the full
+  // authoritative path end-to-end, not just the store unit.
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('\n--- Scenario E: real block relationship denies partner seating (production repro) ---')
+
+  const hostE = await connectClient(port, 'hostE')
+  const joinerE = await connectClient(port, 'joinerE')
+
+  await check('[E1] joinerE blocks hostE via the real HTTP block endpoint', async () => {
+    const res = await httpJson(port, 'POST', `/api/profiles/${hostE.profileId}/block`, joinerE.cookie)
+    if (res.status !== 200 || res.body?.blocked !== true) throw new Error(`block call failed: status=${res.status} body=${JSON.stringify(res.body)}`)
+  })
+
+  send(hostE, { type: 'create_private_room', stake: 5000, isLocked: false })
+  const createdE = await waitForFrame(hostE, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room E')
+  const roomIdE: string = createdE.room.id
+
+  await check('[E2 / Scenario B repro] joiner (who blocked the creator) tries the partner seat next to the creator over real WS -> DENY, no state mutation', async () => {
+    joinerE.frames.length = 0
+    send(joinerE, { type: 'join_private_room', privateRoomId: roomIdE, team: 'A', slotIndex: 1 })
+    const errorFrame = await waitForFrame(joinerE, (f) => f.type === 'error', 5_000, 'partner-block rejection over real WS')
+    if (errorFrame.code !== 'private_room_partner_blocked' && errorFrame.code !== 'private_room_partner_blocked_by_viewer') {
+      throw new Error(`unexpected error code: ${errorFrame.code}`)
+    }
+  })
+
+  await check('[E3] the room was NOT mutated by the denied join — still 1 occupied slot, A,1 still empty', async () => {
+    hostE.frames.length = 0
+    send(hostE, { type: 'request_private_rooms_list' })
+    const listFrame = await waitForFrame(hostE, (f) => f.type === 'private_rooms_list', 5_000, 'rooms list after denied join')
+    const roomE = listFrame.rooms.find((r: any) => r.id === roomIdE)
+    if (roomE === undefined) throw new Error('room disappeared after a denied join')
+    if (occupiedCount(roomE) !== 1) throw new Error(`expected 1 occupied slot after denied join, got ${occupiedCount(roomE)}`)
+    const a1 = slotOccupant(roomE, 'A', 1)
+    if (a1 !== null) throw new Error('A,1 was seated despite the denial — join mutated room state')
+  })
+
+  await check('[E4] the blocked joiner CAN still seat on the OPPOSING team (opponent-block behavior unaffected)', async () => {
+    joinerE.frames.length = 0
+    send(joinerE, { type: 'join_private_room', privateRoomId: roomIdE, team: 'B', slotIndex: 0 })
+    const updated = await waitForFrame(joinerE, (f) => f.type === 'private_room_updated', 5_000, 'opponent-team join succeeds')
+    const b0 = slotOccupant(updated.room, 'B', 0)
+    if (b0 === null || b0.isBot === true) throw new Error('expected the real joiner seated at B,0')
+  })
+
   // ─── Cleanup: close every remaining socket ───────────────────────────────
-  for (const c of [hostA, guestA1, outsider, hostB, guestB1, guestB2, hostC, guestC1, guestC2, guestC3, hostD, guestD1]) {
+  for (const c of [hostA, guestA1, outsider, hostB, guestB1, guestB2, hostC, guestC1, guestC2, guestC3, hostD, guestD1, hostE, joinerE]) {
     try { c.ws.close() } catch { /* ignore */ }
   }
 } finally {

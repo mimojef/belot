@@ -420,6 +420,186 @@ async function main(): Promise<void> {
     }
   })
 
+  // §UX gap fix: "target has blocked viewer" denial popup now offers a
+  // "Блокирай" action so the viewer can block back without ever needing
+  // profile read access to the target. Exercises the SAME authoritative
+  // POST /api/profiles/:id/block endpoint the normal profile-popup block
+  // button uses — this is not a separate/local UI-only action.
+  await check('[5] viewer can block back from the access-denial state (target blocked viewer), producing a mutual block, without ever gaining profile read access', async () => {
+    const isolated = await createIsolatedServerRoot()
+    const port = await getFreePort()
+    let server: RunningServer | null = null
+
+    try {
+      server = startServer(isolated.serverDir, port)
+      await waitForServer(port, server)
+
+      const a = await register(port, `denial-block-a-${Date.now()}@example.test`, 'DenialBlockA')
+      const b = await register(port, `denial-block-b-${Date.now()}@example.test`, 'DenialBlockB')
+
+      // B blocks A first.
+      const bBlocksA = await requestJson(port, 'POST', `/api/profiles/${encodeURIComponent(a.profileId)}/block`, b.cookie)
+      assert(bBlocksA.status === 200 && bBlocksA.body.ok === true && bBlocksA.body.blocked === true, 'B->A block failed')
+
+      // A opens B's profile -> denied specifically as "target blocked viewer".
+      const aViewsB = await requestJson(port, 'GET', `/api/profiles/${encodeURIComponent(b.profileId)}`, a.cookie)
+      assert(aViewsB.status === 403, `A->B view expected 403, got ${aViewsB.status}`)
+      assert(aViewsB.body.code === 'profile_blocked_viewer', `A->B view code=${aViewsB.body.code ?? '(missing)'}`)
+      assert(aViewsB.body.profile === undefined, 'A->B denial leaked profile DTO before block-back')
+
+      // A blocks back through the exact same authoritative endpoint the
+      // popup's new "Блокирай" button calls — no profile read happened, and
+      // none is required for this call to succeed.
+      const aBlocksB = await requestJson(port, 'POST', `/api/profiles/${encodeURIComponent(b.profileId)}/block`, a.cookie)
+      assert(aBlocksB.status === 200, `A->B block-back expected 200, got ${aBlocksB.status} body=${JSON.stringify(aBlocksB.body)}`)
+      assert(aBlocksB.body.ok === true && aBlocksB.body.blocked === true, 'A->B block-back did not report blocked=true')
+
+      // Mutual block now exists — confirmed via GET /api/blocks for each side.
+      const aBlockedList = await requestJson(port, 'GET', '/api/blocks', a.cookie)
+      assert(aBlockedList.status === 200, `A blocks list status=${aBlockedList.status}`)
+      const aBlockedIds = (aBlockedList.body.profiles as { profileId: string }[] | undefined)?.map((p) => p.profileId) ?? []
+      assert(aBlockedIds.includes(b.profileId), 'A -> B block relation was not recorded')
+
+      const bBlockedList = await requestJson(port, 'GET', '/api/blocks', b.cookie)
+      assert(bBlockedList.status === 200, `B blocks list status=${bBlockedList.status}`)
+      const bBlockedIds = (bBlockedList.body.profiles as { profileId: string }[] | undefined)?.map((p) => p.profileId) ?? []
+      assert(bBlockedIds.includes(a.profileId), 'B -> A block relation (the original one) was lost by the block-back call')
+
+      // Blocking back does NOT unlock access — A still cannot view B's profile.
+      const aViewsBAfter = await requestJson(port, 'GET', `/api/profiles/${encodeURIComponent(b.profileId)}`, a.cookie)
+      assert(aViewsBAfter.status === 403, `A->B view after block-back expected 403, got ${aViewsBAfter.status}`)
+      assert(aViewsBAfter.body.profile === undefined, 'A->B view after block-back leaked profile DTO')
+
+      // And B, symmetrically, still cannot view A's profile either (both
+      // directions of the now-mutual block independently deny access).
+      const bViewsA = await requestJson(port, 'GET', `/api/profiles/${encodeURIComponent(a.profileId)}`, b.cookie)
+      assert(bViewsA.status === 403, `B->A view expected 403, got ${bViewsA.status}`)
+      assert(bViewsA.body.profile === undefined, 'B->A view leaked profile DTO')
+
+      // A repeated block-back call while already mutual must not error or
+      // flip state unexpectedly — it is the same toggle endpoint, so a
+      // second call from A now UNBLOCKS (toggle semantics), which the UI
+      // must not expose as an active "Блокирай" action once mutual (client
+      // gate, verified separately in the source-shape check below) — but the
+      // server itself must still behave predictably, not error.
+      const aTogglesAgain = await requestJson(port, 'POST', `/api/profiles/${encodeURIComponent(b.profileId)}/block`, a.cookie)
+      assert(aTogglesAgain.status === 200, `A repeated toggle expected 200, got ${aTogglesAgain.status}`)
+      assert(aTogglesAgain.body.blocked === false, 'A repeated toggle did not unblock (toggle semantics broken)')
+
+      // Restore the mutual state for cleanliness of the assertions above (not required, but avoids surprising future readers of a shared fixture).
+      const aReblocks = await requestJson(port, 'POST', `/api/profiles/${encodeURIComponent(b.profileId)}/block`, a.cookie)
+      assert(aReblocks.status === 200 && aReblocks.body.blocked === true, 'A re-block failed')
+
+      // Mutual-block edge case: once BOTH directions exist, the denial the
+      // viewer (A) sees when opening B again must come back as
+      // 'profile_blocked_by_viewer' (the "Отблокирай" branch), NEVER
+      // 'profile_blocked_viewer' — this is what keeps the client from ever
+      // rendering an active duplicate "Блокирай" button once mutual (see
+      // getProfileAccessDenial in index.ts: it checks viewer->target BEFORE
+      // target->viewer, so an existing viewer->target block always wins).
+      const aViewsBMutual = await requestJson(port, 'GET', `/api/profiles/${encodeURIComponent(b.profileId)}`, a.cookie)
+      assert(aViewsBMutual.status === 403, `A->B view under mutual block expected 403, got ${aViewsBMutual.status}`)
+      assert(
+        aViewsBMutual.body.code === 'profile_blocked_by_viewer',
+        `under mutual block, A's denial code must be profile_blocked_by_viewer (never profile_blocked_viewer, which would re-show an active Блокирай), got ${aViewsBMutual.body.code ?? '(missing)'}`,
+      )
+    } finally {
+      await stopServer(server)
+      await isolated.cleanup()
+    }
+  })
+
+  // The block endpoint must not require the target profile to actually be
+  // readable/loadable by the viewer — only that it exists. A nonexistent
+  // profileId must be rejected (not silently inserted into player_blocks).
+  await check('[6] block endpoint requires the target profile to exist, but not that a profile read/access succeeded first', async () => {
+    const isolated = await createIsolatedServerRoot()
+    const port = await getFreePort()
+    let server: RunningServer | null = null
+
+    try {
+      server = startServer(isolated.serverDir, port)
+      await waitForServer(port, server)
+
+      const a = await register(port, `block-exist-a-${Date.now()}@example.test`, 'BlockExistA')
+      const b = await register(port, `block-exist-b-${Date.now()}@example.test`, 'BlockExistB')
+
+      // B blocks A -> A has zero profile-read access to B, yet blocking B
+      // back must still succeed (already covered end-to-end in [5]; here we
+      // isolate the "no prior successful read" property with a completely
+      // unrelated, never-viewed profile to rule out any hidden caching).
+      const neverViewedBlock = await requestJson(port, 'POST', `/api/profiles/${encodeURIComponent(b.profileId)}/block`, a.cookie)
+      assert(neverViewedBlock.status === 200 && neverViewedBlock.body.blocked === true, 'blocking a never-viewed-but-real profile failed')
+
+      // A nonexistent profileId must be rejected with 404, not silently accepted.
+      const fakeProfileId = 'profile_does_not_exist_ffffffffffffffffffffffffffffffff'
+      const blockNonexistent = await requestJson(port, 'POST', `/api/profiles/${encodeURIComponent(fakeProfileId)}/block`, a.cookie)
+      assert(blockNonexistent.status === 404, `blocking a nonexistent profile expected 404, got ${blockNonexistent.status}`)
+      assert(blockNonexistent.body.ok === false, 'blocking a nonexistent profile must report ok=false')
+
+      const aBlockedList = await requestJson(port, 'GET', '/api/blocks', a.cookie)
+      const aBlockedIds = (aBlockedList.body.profiles as { profileId: string }[] | undefined)?.map((p) => p.profileId) ?? []
+      assert(!aBlockedIds.includes(fakeProfileId), 'a nonexistent profileId was inserted into the block store')
+    } finally {
+      await stopServer(server)
+      await isolated.cleanup()
+    }
+  })
+
+  // Client source-shape checks for the new denial-popup "Блокирай" action —
+  // proves it reuses the shared authoritative flow (not a parallel/local-only
+  // UI action) and that mutual-block never re-exposes an active duplicate
+  // "Блокирай" that would race a duplicate request.
+  await check('[7] the denial popup "Блокирай" action reuses the shared authoritative onBlockProfile flow (client source shape)', () => {
+    const controllerSource = readFileSync(resolve(serverRoot, '..', 'src', 'app', 'lobby', 'createLobbyFlowController.ts'), 'utf8')
+    const sharedPopupSource = readFileSync(resolve(serverRoot, '..', 'src', 'ui', 'overlays', 'renderProfileAccessBlockPopup.ts'), 'utf8')
+    const activeRoomControllerSource = readFileSync(resolve(serverRoot, '..', 'src', 'app', 'activeRoom', 'createActiveRoomFlowController.ts'), 'utf8')
+
+    assert(controllerSource.includes('async function blockFromAccessDenialPopup'), 'blockFromAccessDenialPopup not found')
+    const fnBody = controllerSource.slice(
+      controllerSource.indexOf('async function blockFromAccessDenialPopup'),
+      controllerSource.indexOf('function openGiftModal'),
+    )
+    assert(fnBody.includes('options.onBlockProfile(profileId)'), 'block-from-denial action does not call the shared options.onBlockProfile endpoint')
+    assert(!fnBody.includes('isBlockedByMe: true') || fnBody.includes('updateProfile'), 'block-from-denial action must derive isBlockedByMe from the server result, not set it directly')
+
+    // The render/gating logic lives in ONE shared module
+    // (src/ui/overlays/renderProfileAccessBlockPopup.ts) — not
+    // re-implemented per screen. Both lobby (renderLobbyScreen.ts) and
+    // in-game/private-room seat popup (createActiveRoomFlowController.ts)
+    // import and call it, rather than each rendering their own denial UI.
+    assert(sharedPopupSource.includes('data-profile-access-block-block='), 'shared renderProfileAccessBlockPopup does not render the new Блокирай action')
+    assert(sharedPopupSource.includes('showBlockAction = !viewerIsBlocker'), 'Блокирай action is not gated to the target-blocked-viewer direction only')
+
+    // "Затвори" must remain a pure close with no block side effect: its
+    // wiring calls callbacks.onClose directly (no inline handler body that
+    // could also fire a block call).
+    const closeWiringIndex = sharedPopupSource.indexOf('[data-profile-access-block-close="1"]\').forEach((btn) => {')
+    assert(closeWiringIndex >= 0, 'Затвори wiring block not found in shared module')
+    const closeWiringBody = sharedPopupSource.slice(closeWiringIndex, closeWiringIndex + 200)
+    assert(
+      closeWiringBody.includes("btn.addEventListener('click', callbacks.onClose)"),
+      'Затвори wiring must call callbacks.onClose directly, with no additional block side effect',
+    )
+
+    // In-game/private-room seat popup entry point reuses the SAME shared
+    // module (mountStandaloneProfileAccessBlockPopup) instead of a parallel
+    // implementation — covers the task brief's "at least one in-game/
+    // private-room protected-profile entry path" requirement.
+    assert(
+      activeRoomControllerSource.includes("from '../../ui/overlays/renderProfileAccessBlockPopup'"),
+      'in-game active room controller does not import the shared denial popup module',
+    )
+    assert(
+      activeRoomControllerSource.includes('mountStandaloneProfileAccessBlockPopup'),
+      'in-game active room controller does not mount the shared denial popup',
+    )
+    assert(
+      activeRoomControllerSource.includes('deniedProfileId'),
+      'in-game active room controller does not read deniedProfileId from the player_profile denial message',
+    )
+  })
+
   console.log(`\nSocial block profile authorization checks: ${passed} passed, ${failed} failed`)
   if (failed > 0) process.exit(1)
 }

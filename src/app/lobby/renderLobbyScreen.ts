@@ -49,6 +49,7 @@ import { renderPeakCards, renderPeakMoments, renderHistoryInfoRow, getWindowLabe
 import { renderCpuIncidentsList } from '../adminServer/renderAdminCpuIncidents'
 import type { PlayerAccountRole, PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
+import { renderProfileAccessBlockPopup, attachProfileAccessBlockPopupListeners, type ProfileAccessBlockPopupState } from '../../ui/overlays/renderProfileAccessBlockPopup'
 import type { AdminRegisteredProfilesModalState } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { renderAdminRegisteredProfilesModal } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
@@ -477,7 +478,7 @@ export type LobbyScreenState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
-  profileAccessBlockPopup: { profileId: string; code: 'profile_blocked_by_viewer' | 'profile_blocked_viewer' } | null
+  profileAccessBlockPopup: ProfileAccessBlockPopupState
   noPlayersModalOpen: boolean
   isInGame: boolean
   displayName: string
@@ -1076,6 +1077,7 @@ export type RenderLobbyScreenOptions = {
   onBlockLimitPopupClose: () => void
   onProfileAccessBlockClose: () => void
   onProfileAccessBlockUnblock: (profileId: string) => void
+  onProfileAccessBlockBlock: (profileId: string) => void
   onNoPlayersModalClose: () => void
   onChatClick: () => void
   onChatConversationClick: (friendshipId: string) => void
@@ -10421,29 +10423,6 @@ function renderBlockLimitPopup(state: LobbyScreenState): string {
   `
 }
 
-function renderProfileAccessBlockPopup(state: LobbyScreenState): string {
-  const popup = state.profileAccessBlockPopup
-  if (popup === null) return ''
-
-  const viewerIsBlocker = popup.code === 'profile_blocked_by_viewer'
-  const message = viewerIsBlocker
-    ? 'Този потребител е блокиран от Вас.'
-    : 'Този потребител ви е блокирал.'
-
-  return `
-    <div data-profile-access-block-popup-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <button type="button" data-profile-access-block-close="1" aria-label="Затвори" style="position:absolute;inset:0;border:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);cursor:pointer;"></button>
-      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,430px);border-radius:8px;background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);border:1px solid rgba(212,165,32,0.50);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:26px 22px;text-align:center;display:grid;gap:18px;">
-        <div style="font-size:17px;font-weight:900;color:#f8fafc;line-height:1.45;">${escapeHtml(message)}</div>
-        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;">
-          ${viewerIsBlocker ? `<button type="button" data-profile-access-block-unblock="${escapeHtml(popup.profileId)}" style="min-height:40px;padding:0 18px;border:1px solid rgba(212,165,32,0.55);border-radius:8px;background:linear-gradient(180deg,rgba(244,201,91,0.96) 0%,rgba(201,143,19,0.96) 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">Отблокирай</button>` : ''}
-          <button type="button" data-profile-access-block-close="1" style="min-height:40px;padding:0 18px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:rgba(255,255,255,0.07);color:rgba(255,255,255,0.86);font-size:13px;font-weight:900;cursor:pointer;">Затвори</button>
-        </div>
-      </div>
-    </div>
-  `
-}
-
 function renderNoPlayersModal(state: LobbyScreenState): string {
   if (!state.noPlayersModalOpen) return ''
 
@@ -11470,7 +11449,7 @@ export function renderLobbyScreen(
       ${renderTopChatAdminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
-      ${renderProfileAccessBlockPopup(state)}
+      ${renderProfileAccessBlockPopup(state.profileAccessBlockPopup)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
       ${renderGuestContactPopup(state)}
@@ -11767,7 +11746,7 @@ export function renderLobbyScreen(
       ${renderTopChatAdminActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
-      ${renderProfileAccessBlockPopup(state)}
+      ${renderProfileAccessBlockPopup(state.profileAccessBlockPopup)}
       ${renderNoPlayersModal(state)}
       ${renderSupportPopup(state)}
       ${renderGuestContactPopup(state)}
@@ -12088,15 +12067,10 @@ export function renderLobbyScreen(
     })
   })
 
-  root.querySelectorAll<HTMLButtonElement>('[data-profile-access-block-close="1"]').forEach((btn) => {
-    btn.addEventListener('click', options.onProfileAccessBlockClose)
-  })
-
-  root.querySelectorAll<HTMLButtonElement>('[data-profile-access-block-unblock]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const profileId = btn.dataset.profileAccessBlockUnblock?.trim() ?? ''
-      if (profileId) options.onProfileAccessBlockUnblock(profileId)
-    })
+  attachProfileAccessBlockPopupListeners(root, {
+    onClose: options.onProfileAccessBlockClose,
+    onUnblock: options.onProfileAccessBlockUnblock,
+    onBlock: options.onProfileAccessBlockBlock,
   })
 
   root

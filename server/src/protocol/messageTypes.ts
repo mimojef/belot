@@ -600,6 +600,14 @@ export type PlayerProfileMessage = {
   ok?: boolean
   code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
   message?: string
+  /**
+   * Target profileId при access denial (profile е null в тези случаи).
+   * Нужен на клиента, за да предложи "Блокирай"/"Отблокирай" от denial
+   * popup-а без profile read достъп до target-а — виж
+   * renderProfileAccessBlockPopup.ts. Отсъства когато profile !== null
+   * (тогава profile.profileId вече е наличен).
+   */
+  deniedProfileId?: string | null
 }
 
 export type RoomCreatedMessage = {

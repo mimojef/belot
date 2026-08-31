@@ -4303,6 +4303,7 @@ function sendPlayerProfileToConnection(
       roomId,
       seat,
       profile: null,
+      deniedProfileId: profileId,
       ...accessDenial,
     })
     return
@@ -7601,6 +7602,18 @@ async function handleProfileBlockRequest(
 
     if (myProfileId === targetProfileId) {
       sendJsonResponse(res, 400, { ok: false, message: 'Не можеш да блокираш себе си.' })
+      return true
+    }
+
+    // Authoritative existence check — НЕ profile-read/access check. Viewer-ът
+    // трябва да може да блокира target, който вече го е блокирал (§UX gap
+    // fix: "Блокирай" в profile-access-denial popup-a), затова тук нарочно
+    // НЕ викаме playerProgressStore.getPublicProfile() (то би приложило
+    // денайъл логиката, която точно това action трябва да заобиколи).
+    // Lightweight profileExists() е единственото разширено изискване — target
+    // да съществува — без да добавя друг authorization permission.
+    if (!playerProgressStore.profileExists(targetProfileId)) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Потребителят не беше намерен.' })
       return true
     }
 

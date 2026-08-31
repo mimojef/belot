@@ -46,6 +46,7 @@ import {
   type ProfilePopupCallbacks,
 } from './renderLobbyScreen'
 import type { PlayerAccountRole } from '../../ui/overlays/renderPlayerProfilePopup'
+import type { ProfileAccessBlockCode, ProfileAccessBlockPopupState } from '../../ui/overlays/renderProfileAccessBlockPopup'
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
 import type { VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
@@ -141,7 +142,7 @@ export type LobbyFlowScreen =
   | 'fair-play'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
-export type ProfileAccessBlockCode = 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
+export type { ProfileAccessBlockCode }
 type ProfilePopupContext = 'topics' | 'other'
 
 /** Стандартен gift modal max за всички обичайни profiles (mirror на server MAX_GIFT_AMOUNT). Само UX default — реалният таван идва от authSession.pikaTeamGiftMaxAmount, ако е зададен от сървъра. */
@@ -1561,7 +1562,16 @@ type InternalLobbyFlowState = {
   blockedPlayersErrorText: string | null
   blockedPlayersLimit: number
   blockLimitPopupOpen: boolean
-  profileAccessBlockPopup: { profileId: string; code: ProfileAccessBlockCode } | null
+  /**
+   * Общ denied-profile popup state — типът и render/wiring логиката живеят
+   * в src/ui/overlays/renderProfileAccessBlockPopup.ts (споделено между
+   * lobby и in-game/private-room seat popup, виж blockFromAccessDenialPopup
+   * по-долу за "Блокирай" flow-а: pending докато заявката лети; error при
+   * failure (popup остава отворен); success показва кратко inline
+   * потвърждение, после popup-ът се затваря автоматично — няма отделен
+   * глобален toast в тази codebase).
+   */
+  profileAccessBlockPopup: ProfileAccessBlockPopupState
   noPlayersModalOpen: boolean
   supportPopupOpen: boolean
   supportMessages: SupportMessageSnapshot[]
@@ -2659,6 +2669,10 @@ export function createLobbyFlowController(
   // 3s timeout, не global polling. Reuse-ва established closure-scoped timer
   // ID pattern (mirror на pendingMatchFoundTimeoutId).
   let giftSuccessMessageTimeoutId: number | null = null
+  // Auto-close за profileAccessBlockPopup.blockSuccess (виж
+  // blockFromAccessDenialPopup) — bounded, single self-clearing timer,
+  // огледално на giftSuccessMessageTimeoutId по-горе.
+  let profileAccessBlockSuccessTimeoutId: number | null = null
   let stakeEffectStartedAt: number | null = null
   let pendingStakeEffect = false
 
@@ -4891,6 +4905,10 @@ export function createLobbyFlowController(
         render()
       },
       onProfileAccessBlockClose: () => {
+        if (profileAccessBlockSuccessTimeoutId !== null) {
+          window.clearTimeout(profileAccessBlockSuccessTimeoutId)
+          profileAccessBlockSuccessTimeoutId = null
+        }
         state.profileAccessBlockPopup = null
         render()
       },
@@ -4904,6 +4922,9 @@ export function createLobbyFlowController(
           // rendering логика и да не показваме stale/cached denial state.
           await openProtectedProfileById(profileId)
         })()
+      },
+      onProfileAccessBlockBlock: (profileId) => {
+        void blockFromAccessDenialPopup(profileId)
       },
       onNoPlayersModalClose: () => {
         state.noPlayersModalOpen = false
@@ -11167,6 +11188,106 @@ export function createLobbyFlowController(
     }
     render()
     return true
+  }
+
+  /**
+   * "Блокирай" от access-denial popup-a (target вече е блокирал viewer-а —
+   * profile_blocked_viewer, виж renderProfileAccessBlockPopup). Reuse-ва
+   * СЪЩИЯ authoritative options.onBlockProfile endpoint като нормалния
+   * "Блокирай" бутон в profile popup-a (blockProfile по-горе) — не local UI
+   * state, не отделен client-side flag. Профилът на target-а не се отваря
+   * (нито optimistically, нито след success) — само viewer -> target block
+   * relation-ът реално се записва server-side, резултирайки в mutual block.
+   * Success затваря popup-a изцяло; failure оставя popup-a отворен с
+   * inline server error, без да симулира успешен block.
+   */
+  async function blockFromAccessDenialPopup(profileId: string): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    if (!options.onBlockProfile) return
+    if (state.profileAccessBlockPopup?.profileId !== profileId) return
+
+    state.profileAccessBlockPopup = { ...state.profileAccessBlockPopup, blockSubmitting: true, blockErrorText: null }
+    render()
+
+    const result = await options.onBlockProfile(profileId)
+
+    // Popup-ът може да е бил затворен/сменен, докато заявката е летяла —
+    // не пипаме stale state за друг profileId.
+    if (state.profileAccessBlockPopup?.profileId !== profileId) return
+
+    if ('ok' in result && !result.ok) {
+      if (result.limitReached) {
+        // Огледално на blockProfile() — dedicated limit popup вместо inline
+        // текст. Denial popup-ът се затваря (заявката е приключила с ясен
+        // друг popup), не остава двоен overlay.
+        state.profileAccessBlockPopup = null
+        state.blockLimitPopupOpen = true
+        render()
+        return
+      }
+      state.profileAccessBlockPopup = {
+        ...state.profileAccessBlockPopup,
+        blockSubmitting: false,
+        blockErrorText: result.message,
+      }
+      render()
+      return
+    }
+
+    // Success: same authoritative side-effects като blockProfile() — синхронизира
+    // players/leaderboards/profilePopupProfile isBlockedByMe, за да няма stale
+    // "Блокирай" state другаде след затварянето на този popup.
+    const { blocked } = result as { blocked: boolean }
+    const updateProfile = (p: PlayerPublicProfileSnapshot) =>
+      p.profileId === profileId ? { ...p, isBlockedByMe: blocked } : p
+    state.players = state.players.map(updateProfile)
+    state.playersSearchResults = state.playersSearchResults?.map(updateProfile) ?? null
+    state.leaderboards = state.leaderboards
+      ? {
+          balance: state.leaderboards.balance.map(updateProfile),
+          rank: state.leaderboards.rank.map(updateProfile),
+          wins: state.leaderboards.wins.map(updateProfile),
+          rating: state.leaderboards.rating.map(updateProfile),
+        }
+      : state.leaderboards
+    if (state.profilePopupProfile?.profileId === profileId) {
+      state.profilePopupProfile = { ...state.profilePopupProfile, isBlockedByMe: blocked }
+    }
+    // За разлика от blockProfile() тук няма зареден пълен PlayerPublicProfileSnapshot
+    // за target-а (denial popup-ът никога не е получил profile данните — точно
+    // затова е denial popup), значи не можем да построим коректен entry за
+    // state.blockedPlayers без fake/празни полета. "Блокирани играчи" списъкът
+    // прави fresh onLoadBlockedPlayers() при следващото си отваряне (виж
+    // openBlockedPlayersPopup) — оставяме него да го синхронизира коректно.
+    //
+    // Няма отделен глобален toast в тази codebase (виж established gift-
+    // success inline pattern по-долу) — вместо да затворим popup-a веднага
+    // и success текстът никога да не се появи никъде, показваме кратко
+    // inline потвърждение (заменя бутоните, виж renderProfileAccessBlockPopup)
+    // и auto-close-ваме след bounded timeout. Bidirectional block state-ът
+    // вече Е записан server-side по-горе — този timeout е чисто UX display
+    // timing, не част от authoritative flow-а.
+    if (profileAccessBlockSuccessTimeoutId !== null) {
+      window.clearTimeout(profileAccessBlockSuccessTimeoutId)
+      profileAccessBlockSuccessTimeoutId = null
+    }
+    state.profileAccessBlockPopup = { profileId, code: state.profileAccessBlockPopup.code, blockSuccess: true }
+    render()
+
+    profileAccessBlockSuccessTimeoutId = window.setTimeout(() => {
+      profileAccessBlockSuccessTimeoutId = null
+      if (state.profileAccessBlockPopup?.profileId === profileId && state.profileAccessBlockPopup.blockSuccess) {
+        state.profileAccessBlockPopup = null
+        render()
+      }
+    }, 900)
   }
 
   function openGiftModal(friendshipId: string): void {

@@ -123,6 +123,10 @@ import {
   showSeatProfileOverlay,
   updateSeatProfileOverlay,
 } from './renderSeatProfileOverlay'
+import {
+  mountStandaloneProfileAccessBlockPopup,
+  type ProfileAccessBlockPopupState,
+} from '../../ui/overlays/renderProfileAccessBlockPopup'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -165,6 +169,12 @@ export function createActiveRoomFlowController(
   // room_snapshot branch of handleServerMessage below.
   let pendingTournamentSilentEntry: { roomId: string; seat: Seat; stake: MatchStake } | null = null
   let activeRoomState: ActiveRoomState | null = null
+  // In-game/private-room seat popup denial state — mount-натo self-contained
+  // на document.body (виж renderProfileAccessBlockPopup.ts), тъй като active
+  // room-ът няма lobby root DOM да вгради inline HTML в него. Общ path с
+  // lobby-я — не копирано UI/block logic, виж task brief-а.
+  let profileAccessBlockPopup: ProfileAccessBlockPopupState = null
+  let profileAccessBlockSuccessTimeoutId: number | null = null
   const cuttingVisualCountdown = createCuttingVisualCountdownTracker()
   const cuttingAnimation: CuttingAnimationCache = createCuttingAnimationCache()
   const dealingAnimation: DealingAnimationCache = createDealingAnimationCache()
@@ -4819,6 +4829,7 @@ export function createActiveRoomFlowController(
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
+    closeProfileAccessBlockPopup()
     removeSeatPanels()
     removeLeaveButton()
     activeRoomState = {
@@ -4878,6 +4889,7 @@ export function createActiveRoomFlowController(
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
+    closeProfileAccessBlockPopup()
     removeSeatPanels()
     removeLeaveButton()
     activeRoomState = {
@@ -4913,6 +4925,86 @@ export function createActiveRoomFlowController(
     }
 
     renderActiveRoomScreen()
+  }
+
+  function renderProfileAccessBlockPopupState(): void {
+    mountStandaloneProfileAccessBlockPopup(profileAccessBlockPopup, {
+      onClose: closeProfileAccessBlockPopup,
+      onUnblock: unblockFromProfileAccessBlockPopup,
+      onBlock: blockFromProfileAccessBlockPopup,
+    })
+  }
+
+  function closeProfileAccessBlockPopup(): void {
+    if (profileAccessBlockSuccessTimeoutId !== null) {
+      window.clearTimeout(profileAccessBlockSuccessTimeoutId)
+      profileAccessBlockSuccessTimeoutId = null
+    }
+    profileAccessBlockPopup = null
+    renderProfileAccessBlockPopupState()
+  }
+
+  function unblockFromProfileAccessBlockPopup(profileId: string): void {
+    void (async () => {
+      const result = await options.onBlockProfileFull(profileId)
+      if (profileAccessBlockPopup?.profileId !== profileId) return
+      if ('ok' in result && !result.ok) return
+      // За разлика от lobby-я, RoomSeatSnapshot не носи profileId (клиентът
+      // никога не получава opponent profileId-та напред), затова не можем
+      // да resolve-нем кой seat съответства на profileId, за да
+      // auto-reopen-нем профила тук. Затваряме popup-a — потребителят може
+      // да кликне seat-а отново, ако иска да види профила, точно както при
+      // всеки друг клик върху зает seat.
+      profileAccessBlockPopup = null
+      renderProfileAccessBlockPopupState()
+    })()
+  }
+
+  // "Блокирай" от access-denial popup-a (target вече е блокирал viewer-а).
+  // Reuse-ва СЪЩИЯ authoritative onBlockProfileFull endpoint като нормалния
+  // "Блокирай" бутон в profile popup-a (renderSeatProfileOverlay.ts's
+  // _onBlockProfile) — не local UI state. Профилът на target-а не се отваря
+  // — само viewer -> target block се записва server-side, резултирайки в
+  // mutual block. Success показва кратко inline потвърждение, после
+  // popup-ът се затваря автоматично; failure оставя popup-a отворен с
+  // inline server error.
+  function blockFromProfileAccessBlockPopup(profileId: string): void {
+    if (profileAccessBlockPopup?.profileId !== profileId) return
+
+    profileAccessBlockPopup = { ...profileAccessBlockPopup, blockSubmitting: true, blockErrorText: null }
+    renderProfileAccessBlockPopupState()
+
+    void (async () => {
+      const result = await options.onBlockProfileFull(profileId)
+      if (profileAccessBlockPopup?.profileId !== profileId) return
+
+      if ('ok' in result && !result.ok) {
+        profileAccessBlockPopup = {
+          ...profileAccessBlockPopup,
+          blockSubmitting: false,
+          blockErrorText: result.limitReached
+            ? 'Достигнахте лимита блокирани играчи.'
+            : result.message,
+        }
+        renderProfileAccessBlockPopupState()
+        return
+      }
+
+      if (profileAccessBlockSuccessTimeoutId !== null) {
+        window.clearTimeout(profileAccessBlockSuccessTimeoutId)
+        profileAccessBlockSuccessTimeoutId = null
+      }
+      profileAccessBlockPopup = { profileId, code: profileAccessBlockPopup.code, blockSuccess: true }
+      renderProfileAccessBlockPopupState()
+
+      profileAccessBlockSuccessTimeoutId = window.setTimeout(() => {
+        profileAccessBlockSuccessTimeoutId = null
+        if (profileAccessBlockPopup?.profileId === profileId && profileAccessBlockPopup.blockSuccess) {
+          profileAccessBlockPopup = null
+          renderProfileAccessBlockPopupState()
+        }
+      }, 900)
+    })()
   }
 
   function handleServerMessage(message: ServerMessage): boolean {
@@ -4992,6 +5084,7 @@ export function createActiveRoomFlowController(
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
       removeSeatProfileOverlay()
+      closeProfileAccessBlockPopup()
       removeSeatPanels()
       removeLeaveButton()
       activeRoomState = null
@@ -5028,6 +5121,7 @@ export function createActiveRoomFlowController(
       resetPlayingUiCache(playingCache)
       removePersistentBotTakeoverPopup()
       removeSeatProfileOverlay()
+      closeProfileAccessBlockPopup()
       removeSeatPanels()
       removeLeaveButton()
       activeRoomState = null
@@ -5036,6 +5130,20 @@ export function createActiveRoomFlowController(
     }
 
     if (message.type === 'player_profile' && message.roomId === activeRoomState.roomId) {
+      if (
+        (message.code === 'profile_blocked_by_viewer' || message.code === 'profile_blocked_viewer') &&
+        message.deniedProfileId != null
+      ) {
+        // Server-side profile access denial (block в която и да е посока) —
+        // общ denied-profile popup, не generic empty-content текст. Затваря
+        // seat loading overlay-a (той никога не е получил profile данните),
+        // и mount-ва standalone denial popup-a вместо него.
+        removeSeatProfileOverlay()
+        profileAccessBlockPopup = { profileId: message.deniedProfileId, code: message.code }
+        renderProfileAccessBlockPopupState()
+        return true
+      }
+
       const seatSnapshot = activeRoomState.seats.find((s) => s.seat === message.seat) ?? null
       if (seatSnapshot) {
         updateSeatProfileOverlay(seatSnapshot, message.profile, message.message ?? null)
@@ -5155,6 +5263,7 @@ export function createActiveRoomFlowController(
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
+    closeProfileAccessBlockPopup()
     removeSeatPanels()
     removeLeaveButton()
     options.leaveActiveRoom(roomId)
@@ -5187,6 +5296,7 @@ export function createActiveRoomFlowController(
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
+    closeProfileAccessBlockPopup()
     removeSeatPanels()
     removeLeaveButton()
     options.leaveActiveRoom(roomId)

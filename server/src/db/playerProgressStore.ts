@@ -64,6 +64,7 @@ export type PlayerProgressStore = {
   deleteTemporaryBotProfile: (profileId: string) => void
   cleanupAllTemporaryBotProfiles: () => number
   isTemporaryProfile: (profileId: string) => boolean
+  profileExists: (profileId: string) => boolean
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
   listPublicHumanProfiles: (onlineProfileIds?: Set<string>) => PlayerPublicProfileSnapshot[]
   searchPublicProfiles: (
@@ -934,6 +935,17 @@ export async function createPlayerProgressStore(
     return (row?.is_temporary ?? 0) === 1
   }
 
+  // Lightweight existence check — reuse-ва СЪЩИЯ prepared statement/row shape
+  // като isTemporaryProfile (единствен SELECT ... WHERE profile_id = ?), само
+  // различна интерпретация на резултата (row !== undefined). Нарочно НЕ прави
+  // пълен profile read/enrichment (getPublicProfile) — block authorization
+  // трябва да работи независимо дали profile access/read би бил разрешен
+  // (виж handleProfileBlockRequest в index.ts: target да съществува, без да
+  // изисква successful profile read преди block).
+  function profileExists(profileId: string): boolean {
+    return isTemporaryProfileStatement.get(profileId) !== undefined
+  }
+
   function getPublicProfile(profileId: ProfileId): PlayerPublicProfileSnapshot | null {
     const row = selectPublicProfileStatement.get(profileId) as
       | Parameters<typeof toPublicProfileSnapshot>[0]
@@ -1795,6 +1807,7 @@ export async function createPlayerProgressStore(
     deleteTemporaryBotProfile,
     cleanupAllTemporaryBotProfiles,
     isTemporaryProfile,
+    profileExists,
     getPublicProfile,
     listPublicHumanProfiles,
     searchPublicProfiles,

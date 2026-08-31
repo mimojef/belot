@@ -62,6 +62,15 @@ export type CreateActiveRoomFlowControllerOptions = {
   onSendFriendRequest: (profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>
   onLikeProfile: (profileId: string) => Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }>
   onBlockProfile: (profileId: string) => Promise<{ message: string }>
+  /**
+   * Пълен authoritative block резултат (не truncated {message}) — само за
+   * "Блокирай" от access-denial popup-а (target has blocked viewer), където
+   * трябва да различим success/failure/limitReached, за да управляваме
+   * pending/error/success inline state коректно. Reuse-ва СЪЩИЯ endpoint
+   * като onBlockProfile по-горе (виж main.ts wiring-а — и двата викат
+   * submitProfileBlock), не втори мрежов път.
+   */
+  onBlockProfileFull: (profileId: string) => Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true }>
   /** leftRoomId — стаята, от която играчът реално/логически излиза точно в
    * този момент (ако има такава) — позволява на извикващия (main.ts) да
    * изчисти всякакъв global "stale" state, обвързан конкретно с тази стая
