@@ -1,5 +1,6 @@
 import type { RoomCardSnapshot, RoomSeatSnapshot, Seat, TournamentBotReplacementSnapshot } from '../../network/createGameServerClient'
 import { CARD_BACK_IMAGE_PATH, getCardFaceImagePath } from '../cardImageAssets'
+import { getAnimatedEmojiUrl } from '../../animatedEmoji/animatedEmojiAssets'
 import {
   CUTTING_VISUAL_SEAT_INITIALS,
   CUTTING_VISUAL_SEAT_LABELS,
@@ -946,7 +947,7 @@ function renderEmojiBubble(
         "
       >
         <img
-          src="/assets/animated-emoji/emoji-${bubble.emojiId}.webp"
+          src="${getAnimatedEmojiUrl(bubble.emojiId)}"
           alt=""
           style="width:85px;height:85px;object-fit:contain;"
         >

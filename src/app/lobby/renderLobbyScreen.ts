@@ -52,6 +52,7 @@ import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfileP
 import type { AdminRegisteredProfilesModalState } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { renderAdminRegisteredProfilesModal } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { getAnimatedEmojiUrl, getAnimatedEmojiPreviewUrl } from '../animatedEmoji/animatedEmojiAssets'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import {
   PRIVATE_ROOM_POPUP_STYLES,
@@ -5892,8 +5893,8 @@ const CHAT_EMOJIS = Array.from({ length: 24 }, (_, i) => {
   const n = String(i + 1).padStart(2, '0')
   return {
     code: `[e:${n}]`,
-    preview: `/assets/animated-emoji/preview/preview-emoji-${n}.png`,
-    animated: `/assets/animated-emoji/emoji-${n}.webp`,
+    preview: getAnimatedEmojiPreviewUrl(n),
+    animated: getAnimatedEmojiUrl(n),
   }
 })
 
@@ -5954,7 +5955,7 @@ export function renderLinkifiedChatMessageBody(body: string): string {
 
     const emojiMatch = /^\[e:(\d{2})\]$/.exec(rawToken)
     if (emojiMatch) {
-      html += `<img src="/assets/animated-emoji/emoji-${emojiMatch[1]}.webp" alt="" style="width:28px;height:28px;vertical-align:middle;display:inline-block;">`
+      html += `<img src="${getAnimatedEmojiUrl(emojiMatch[1])}" alt="" style="width:28px;height:28px;vertical-align:middle;display:inline-block;">`
     } else {
       const { linkText, trailingText } = splitTrailingLinkPunctuation(rawToken)
       const renderedLink = linkText.length > 0 ? renderLinkifiedChatLink(linkText) : null
@@ -6078,7 +6079,7 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
                 ? 'padding:2px;line-height:1;'
                 : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
                 ${isEmojiOnly
-                  ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
+                  ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
                   : renderPersonalChatMessageBody(message.body)}
               </div>
             `}
@@ -6320,7 +6321,7 @@ function renderChatPanel(state: LobbyScreenState): string {
                     ? 'padding:2px;line-height:1;'
                     : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
                     ${isEmojiOnly
-                      ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="/assets/animated-emoji/emoji-${n}.webp" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
+                      ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
                       : renderPersonalChatMessageBody(message.body)}
                   </div>
                 `}

@@ -19,6 +19,7 @@ import {
   type SeatEmojiBubble,
   type SeatPhraseBubble,
 } from './cutting/renderCuttingSeatPanels'
+import { getAnimatedEmojiPreviewUrl } from '../animatedEmoji/animatedEmojiAssets'
 import {
   removeMobilePhraseBubbleFromOverlay,
   removeMobilePhraseOverlay,
@@ -2214,7 +2215,7 @@ export function createActiveRoomFlowController(
           onmouseenter="this.style.background='rgba(255,255,255,0.15)'"
           onmouseleave="this.style.background='transparent'"
         >
-          <img src="/assets/animated-emoji/preview/preview-emoji-${id}.png" alt="" style="width:44px;height:44px;object-fit:contain;">
+          <img src="${getAnimatedEmojiPreviewUrl(id)}" alt="" style="width:44px;height:44px;object-fit:contain;">
         </button>
       `)
     }
@@ -2358,7 +2359,7 @@ export function createActiveRoomFlowController(
             -webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px);
           "
         >
-          <img src="/assets/animated-emoji/preview/preview-emoji-08.png" alt="" style="width:${isPhoneLayout ? '30px' : '56px'};height:${isPhoneLayout ? '30px' : '56px'};object-fit:contain;">
+          <img src="${getAnimatedEmojiPreviewUrl('08')}" alt="" style="width:${isPhoneLayout ? '30px' : '56px'};height:${isPhoneLayout ? '30px' : '56px'};object-fit:contain;">
         </button>
       `)
       document.body.querySelector('[data-emoji-toggle="1"]')?.addEventListener('click', () => {

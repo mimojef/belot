@@ -1,8 +1,7 @@
 import { registerSW } from 'virtual:pwa-register'
+import { CURRENT_BUILD_ID } from './buildId'
 
-declare const __PWA_BUILD_ID__: string
-
-export const CURRENT_BUILD_ID: string = __PWA_BUILD_ID__
+export { CURRENT_BUILD_ID }
 
 export type PwaUpdateCallback = () => void | Promise<void>
 

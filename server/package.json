@@ -241,6 +241,7 @@
     "check:production-shadow-trace-readiness": "tsx scripts/checkProductionShadowTraceReadiness.ts",
     "check:local-ai-card-beta-runbook": "tsx scripts/checkLocalAiCardBetaRunbook.ts",
     "check:orphan-room-binding-cleanup": "tsx scripts/checkOrphanRoomBindingCleanup.ts",
+    "check:animated-emoji-cache-busting": "tsx scripts/checkAnimatedEmojiCacheBusting.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",
     "backup:db:prod": "node dist-scripts/scripts/backupDatabase.js",
     "verify:db:prod": "node dist-scripts/scripts/checkDbBackupVerify.js",
