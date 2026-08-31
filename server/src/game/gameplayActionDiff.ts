@@ -2,8 +2,9 @@ import type {
   ServerAuthoritativeGameState,
   ServerBidAction,
   ServerBidEntry,
-} from '../game/serverGameTypes.js'
-import type { TrainingCompactPlayedCard } from './trainingRecorderTypes.js'
+  ServerCard,
+} from './serverGameTypes.js'
+import type { Seat } from '../core/serverTypes.js'
 
 // ─── Bid entry diff ────────────────────────────────────────────────────────
 
@@ -56,17 +57,25 @@ export function findAddedBidEntry(
 
 // ─── Played card diff ──────────────────────────────────────────────────────
 
+export type PlayedCardReference = {
+  sequence: number
+  trickIndex: number
+  positionInTrick: number
+  seat: Seat
+  card: ServerCard
+}
+
 // Chronological history of every card played so far: completed tricks in
 // order, followed by the plays of the trick currently in progress. This is
 // the single source of truth for "what has been played" — no assumptions
 // about which index holds the Nth card.
 export function flattenPlayedCards(
   state: ServerAuthoritativeGameState,
-): TrainingCompactPlayedCard[] {
+): PlayedCardReference[] {
   const playing = state.playing
   if (!playing) return []
 
-  const result: TrainingCompactPlayedCard[] = []
+  const result: PlayedCardReference[] = []
   let sequence = 0
 
   for (const trick of playing.completedTricks) {
@@ -99,7 +108,7 @@ export function flattenPlayedCards(
 }
 
 export type CardDiffResult =
-  | { kind: 'added'; play: TrainingCompactPlayedCard }
+  | { kind: 'added'; play: PlayedCardReference }
   | { kind: 'unchanged' }
   | { kind: 'mismatch' }
 

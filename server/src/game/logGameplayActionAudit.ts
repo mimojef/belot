@@ -1,13 +1,12 @@
 import type { Seat, ServerRoom } from '../core/serverTypes.js'
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
-import { findAddedPlayedCard } from '../trainingRecorder/trainingRecorderStateDiff.js'
+import { findAddedPlayedCard } from './gameplayActionDiff.js'
 
-// Always-on, lightweight structured logging for card-play provenance —
-// independent of TRAINING_RECORDER_ENABLED (which defaults to off in
-// production, per TRAINING_RECORDER.md). Written to stdout with a stable
-// `[gameplay-audit]` prefix so it flows into the existing PM2 log capture
-// used for every other server log line, without introducing a new storage
-// system or retention mechanism. Never throws into gameplay.
+// Always-on, lightweight structured logging for card-play provenance.
+// Written to stdout with a stable `[gameplay-audit]` prefix so it flows into
+// the existing PM2 log capture used for every other server log line, without
+// introducing a new storage system or retention mechanism. Never throws into
+// gameplay.
 
 function getAuthState(room: ServerRoom): ServerAuthoritativeGameState | null {
   const state = room.game.authoritativeState

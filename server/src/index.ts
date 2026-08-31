@@ -342,19 +342,10 @@ import { createGcMetrics, type GcMetrics } from './monitoring/gcMetrics.js'
 import { setSendJsonMessageMonitoringHook } from './core/sendJsonMessage.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
-import { createTrainingRecorder } from './trainingRecorder/trainingRecorder.js'
-import {
-  handleTrainingRecorderOnApplied,
-  handleTrainingRecorderHumanBid,
-  handleTrainingRecorderHumanCard,
-} from './trainingRecorder/trainingRecorderHooks.js'
-import type { TrainingRecorderMetrics } from './trainingRecorder/trainingRecorderMetrics.js'
 import {
   logAcceptedCardPlayAudit,
   logRejectedGameplayAction,
 } from './game/logGameplayActionAudit.js'
-
-const trainingRecorder = createTrainingRecorder('0')
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -3954,7 +3945,6 @@ async function tickRoomGameRuntimes(): Promise<void> {
           broadcastRoomSnapshots(room, socketRegistry)
         },
         onApplied: (previousRoom, room) => {
-          handleTrainingRecorderOnApplied(trainingRecorder, previousRoom, room)
           logAcceptedCardPlayAudit({
             previousRoom,
             nextRoom: room,
@@ -15680,8 +15670,6 @@ async function handleHttpRequest(
         ? lifecycleState === 'ready'
         : poolHealth?.state === 'ready'
 
-    const trainingRecorderMetrics = trainingRecorder.getMetrics()
-
     sendJsonResponse(res, 200, {
       ok: true,
       service: 'belot-v2-server',
@@ -15709,20 +15697,6 @@ async function handleHttpRequest(
       tournamentOperations: tournamentAdminStore.getHealthSnapshot(),
       roomShadowSync: roomShadowSynchronizer?.getHealth() ?? null,
       gameWorkerPool: poolHealth,
-      trainingRecorder: {
-        enabled: trainingRecorderMetrics.enabled,
-        healthy: trainingRecorderMetrics.healthy,
-        queuedRecords: trainingRecorderMetrics.queuedRecords,
-        writtenRecords: trainingRecorderMetrics.writtenRecords,
-        droppedRecords: trainingRecorderMetrics.droppedRecords,
-        failedRecords: trainingRecorderMetrics.failedRecords,
-        duplicateDeals: trainingRecorderMetrics.duplicateDeals,
-        duplicateActions: trainingRecorderMetrics.duplicateActions,
-        noActiveDeal: trainingRecorderMetrics.noActiveDeal,
-        invalidTransition: trainingRecorderMetrics.invalidTransition,
-        lastWriteAt: trainingRecorderMetrics.lastWriteAt,
-        lastErrorAt: trainingRecorderMetrics.lastErrorAt,
-      },
     })
     return
   }
@@ -16470,7 +16444,6 @@ wsServer.on('connection', (socket, request) => {
         }
 
         activityCounters.incrementGame('gameplayBidAccepted')
-        handleTrainingRecorderHumanBid(trainingRecorder, room, result.room)
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
@@ -16650,7 +16623,6 @@ wsServer.on('connection', (socket, request) => {
           isHumanManualSubmission: true,
           connectionId: connection.id,
         })
-        handleTrainingRecorderHumanCard(trainingRecorder, room, result.room)
         serverState = commitServerRoomWithSnapshot(result.room)
         activeRoomRuntime.ensureRoom(result.room)
         broadcastRoomSnapshots(result.room, socketRegistry)
@@ -19987,12 +19959,6 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
 
     if (!storesClosedSuccessfully) {
       exitCode = 1
-    }
-
-    try {
-      await trainingRecorder.shutdown(3_000)
-    } catch (error) {
-      console.error('[shutdown] Training recorder shutdown error:', error)
     }
 
     process.exit(exitCode)

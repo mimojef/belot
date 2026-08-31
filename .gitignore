@@ -57,9 +57,3 @@ server/uploads/profile-gallery/**
 !server/uploads/chat-attachments/
 server/uploads/chat-attachments/**
 !server/uploads/chat-attachments/.gitkeep
-
-# AI training dataset builder — generated local output, никога не се commit-ва
-training-output/
-
-# Training recorder audit архиви, свалени локално за dataset export
-training-recorder-audit-*.tar.gz
