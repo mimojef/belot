@@ -38,9 +38,13 @@
 #     срещу server/database/data/belot-v2.sqlite и се записват в таблица
 #     server_migrations (filename PRIMARY KEY, лексикографски ред).
 #     Затова backup + explicit confirmation ТРЯБВА да станат ПРЕДИ
-#     restart, не след него.
+#     restart, не след него. Ред при pending migrations: confirmation
+#     ПЪРВО, после `pm2 stop` (quiesce — migration DB backup изисква
+#     DB без active writer, доказана production причина за backup, зависнал
+#     >24min/~99% CPU при online writer), после bounded DB backup, чак
+#     тогава dist activation + финалният `pm2 restart` (apply-ва migrations).
 #
-# Изисква: git, npm, node, pm2, flock, curl, sha256sum/shasum (за
+# Изисква: git, npm, node, pm2, flock, curl, timeout, sha256sum/shasum (за
 # backup verification consistency с останалите production scripts).
 # Изпълнява се от /var/www/belot-v2 (production repo checkout).
 
@@ -94,6 +98,13 @@ section() {
 # чисти САМО собствен temp файл, никога валиден краен backup, dist/,
 # release-и или PM2 състояние.
 ACTIVE_TMP_FILE=""
+# Per-run DB backup директория (server/database/backups/backend-deploy-
+# migration/<id>/) — предварително декларирана "" тук (не само вътре в
+# pending-migrations клона по-долу), за да е safe reference под `set -u` в
+# cleanup() дори когато няма чакащи migrations (клонът, който я присвоява,
+# никога не изпълнява). cleanup() премахва тази директория САМО ако е
+# останала празна (rmdir, никога rm -rf) — виж cleanup() по-долу.
+DB_BACKUP_DIR=""
 
 # ─── Dist activation auto-restore guard (виж стъпка 6 "Dist activation") ───
 # ACTIVATION_ARMED е "true" само в тесния прозорец между "старият dist е
@@ -119,9 +130,43 @@ ACTIVATION_ARMED="false"
 RESTART_STARTED="false"
 ACTIVATION_DIST_BACKUP_DIR=""
 
+# ─── PM2 quiesce-for-backup auto-recovery guard (виж "Backend quiesce" /
+# "DB backup" стъпките по-долу) ───────────────────────────────────────────
+# PM2_QUIESCED_FOR_BACKUP е "true" само в прозореца между потвърден "pm2
+# stop $PM2_APP_NAME" (нужен, защото migration DB backup изисква quiescent
+# DB — online writer по време на node:sqlite backup() е доказаната
+# production причина за >24min/~99% CPU зависване) и момента, в който
+# RESTART_STARTED става "true" (непосредствено преди РЕАЛНИЯ финален "pm2
+# restart" с новия dist, стъпка 7). Ако скриптът бъде прекъснат ИЛИ провали
+# се по каквато и да е причина (backup error, timeout, integrity failure,
+# Ctrl+C/SIGINT, SIGTERM, dist activation failure) докато е "true" —
+# cleanup() автоматично връща backend-а online (pm2 restart, best-effort)
+# ПРЕДИ да излезе, точно както ACTIVATION_ARMED автоматично връща стария
+# dist. Двата guard-а работят заедно (dist restore ПЪРВО, после PM2 online),
+# не като отделни/конкуриращи се trap механизми. RESTART_STARTED="false"
+# гарантира, че веднъж РЕАЛНИЯТ restart (с потенциално вече мигрирана DB)
+# е стартирал, тази recovery логика никога повече не се задейства —
+# идентична забрана като established "никакъв auto-rollback след PM2
+# restart/migrations" политиката.
+PM2_QUIESCED_FOR_BACKUP="false"
+
 cleanup() {
-  if [ -n "$ACTIVE_TMP_FILE" ] && [ -f "$ACTIVE_TMP_FILE" ]; then
-    rm -f -- "$ACTIVE_TMP_FILE"
+  if [ -n "$ACTIVE_TMP_FILE" ]; then
+    # Собствени DB backup temp artifacts — base .tmp файл + SQLite-ните
+    # rollback-journal/WAL/SHM sidecar-и, които backup() дестинацията може
+    # да остави, ако бъде прекъсната по средата (доказан production
+    # артефакт: belot-v2.sqlite.tmp-journal, останал след прекъснат run).
+    # rm -f е no-op за несъществуващ файл — безопасно да "опитаме" и 4-те,
+    # дори само базовият да реално съществува.
+    rm -f -- "$ACTIVE_TMP_FILE" "${ACTIVE_TMP_FILE}-journal" "${ACTIVE_TMP_FILE}-wal" "${ACTIVE_TMP_FILE}-shm"
+  fi
+  if [ -n "$DB_BACKUP_DIR" ] && [ -d "$DB_BACKUP_DIR" ]; then
+    # Безопасно само защото rmdir отказва да изтрие НЕпразна директория —
+    # никога rm -rf, никога wildcard. При успешен backup тази директория
+    # съдържа готовия belot-v2.sqlite файл (непразна, rmdir е no-op). При
+    # failure/interrupt (tmp+sidecars вече премахнати по-горе) директорията
+    # е празна и safe да се премахне, вместо да остава като празен stub.
+    rmdir "$DB_BACKUP_DIR" 2>/dev/null || true
   fi
   if [ "$ACTIVATION_ARMED" = "true" ] && [ "$RESTART_STARTED" = "false" ]; then
     if [ -n "$ACTIVATION_DIST_BACKUP_DIR" ] && [ -d "$ACTIVATION_DIST_BACKUP_DIR" ]; then
@@ -138,6 +183,21 @@ cleanup() {
         mv "$ACTIVATION_DIST_BACKUP_DIR" "$DIST_DIR" 2>/dev/null \
           && printf '[deploy-backend] cleanup: автоматично възстановен стария server/dist (прекъснато преди PM2 restart).\n' >&2
       fi
+    fi
+  fi
+  # Backend е бил спрян (quiesced) за migration DB backup, но РЕАЛНИЯТ
+  # финален restart (стъпка 7, с новия dist) никога не е стартирал — dist/
+  # вече е възстановен (клонът точно над този, ако е било армирано) или
+  # изобщо не е бил пипнат (backup стъпката е ПРЕДИ dist activation), значи
+  # връщането на backend-а online тук е безопасно "activation/migration
+  # никога не са се случили", НЕ "rollback след restart/migrations" —
+  # последното си остава изрично забранено (виж ROLLBACK_HINT по-долу).
+  if [ "$PM2_QUIESCED_FOR_BACKUP" = "true" ] && [ "$RESTART_STARTED" = "false" ]; then
+    printf '[deploy-backend] cleanup: backend беше спрян за migration DB backup, но финалният restart никога не стартира (прекъсване/failure ПРЕДИ migrations) — връщам стария backend online.\n' >&2
+    if pm2 restart "$PM2_APP_NAME" >/dev/null 2>&1; then
+      printf '[deploy-backend] cleanup: pm2 restart %s -> OK, backend е върнат online (стар dist, DB немигрирана).\n' "$PM2_APP_NAME" >&2
+    else
+      printf '[deploy-backend] cleanup: ВНИМАНИЕ — pm2 restart %s се провали при recovery опит. РЪЧНА намеса нужна НЕЗАБАВНО (pm2 status/restart %s ръчно).\n' "$PM2_APP_NAME" "$PM2_APP_NAME" >&2
     fi
   fi
 }
@@ -204,6 +264,62 @@ wait_for_public_health_200() {
   printf '%s' "$status"
 }
 
+# ─── Bounded migration DB backup config ─────────────────────────────────────
+# Root cause на доказания production инцидент: node:sqlite backup() е
+# извикван, докато старият PM2 процес ОЩЕ пишеше активно в SQLite (WAL
+# постоянно се променяше по време на копирането) — на ~369MB DB това доведе
+# до ~99% CPU, >24min без завършване, temp файл близо до пълния DB размер,
+# ~1TB logical read I/O. Ръчен "pm2 stop" ПРЕДИ backup-а реши проблема
+# моментално. Затова: backend вече се спира (виж "Backend quiesce" стъпката)
+# ПРЕДИ backup-а по конструкция — DB е quiescent, backup-ът би трябвало да
+# приключи бързо независимо от размера. DB_BACKUP_TIMEOUT_SECONDS остава
+# defensive upper bound (НЕ очакван normal-case timing) — "не допускай вечен
+# backup loop" дори ако нещо неочаквано държи writer lock.
+DB_BACKUP_TIMEOUT_SECONDS="${DB_BACKUP_TIMEOUT_SECONDS:-300}"
+
+# ─── PM2 stop verification (bounded) ────────────────────────────────────────
+# След "pm2 stop $PM2_APP_NAME" потвърждаваме И PM2-регистрирания статус, И
+# че старият OS процес (OLD_PID) реално вече не тече — pm2 stop обичайно е
+# синхронен, но bounded retry е defensive срещу бавно spindown (graceful
+# shutdown handlers и т.н.), вместо fail-fast единичен check.
+PM2_STOP_VERIFY_MAX_SECONDS="${PM2_STOP_VERIFY_MAX_SECONDS:-15}"
+PM2_STOP_VERIFY_INTERVAL_SECONDS="${PM2_STOP_VERIFY_INTERVAL_SECONDS:-1}"
+
+# Връща 0 (success) веднага щом pm2 status="stopped" И kill -0 на стария PID
+# се провали (процесът вече не съществува); 1 при timeout. Echo-va прогреса
+# на stderr, mirror на wait_for_public_health_200 по-горе.
+wait_for_pm2_stopped() {
+  local app_name="$1" old_pid="$2"
+  local deadline status pid_alive attempt
+  deadline=$SECONDS
+  deadline=$((deadline + PM2_STOP_VERIFY_MAX_SECONDS))
+  attempt=0
+
+  while :; do
+    attempt=$((attempt + 1))
+    status="$(pm2 jlist | node -e "
+      const apps = JSON.parse(require('fs').readFileSync(0, 'utf8'));
+      const app = apps.find(a => a.name === '$app_name');
+      process.stdout.write(app && app.pm2_env && app.pm2_env.status ? app.pm2_env.status : '');
+    ")"
+    pid_alive="false"
+    if kill -0 "$old_pid" 2>/dev/null; then
+      pid_alive="true"
+    fi
+    printf '[deploy-backend] PM2 stop verify опит #%s: status=%s pid_alive=%s\n' "$attempt" "$status" "$pid_alive" >&2
+
+    if [ "$status" = "stopped" ] && [ "$pid_alive" = "false" ]; then
+      return 0
+    fi
+
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      return 1
+    fi
+
+    sleep "$PM2_STOP_VERIFY_INTERVAL_SECONDS"
+  done
+}
+
 # ─── 0. Pre-flight ───────────────────────────────────────────────────────────
 section "Pre-flight checks"
 
@@ -220,6 +336,7 @@ command -v node >/dev/null 2>&1 || fail "node не е намерен в PATH."
 command -v pm2 >/dev/null 2>&1 || fail "pm2 не е намерен в PATH."
 command -v curl >/dev/null 2>&1 || fail "curl не е намерен в PATH (нужен за /health verification)."
 command -v flock >/dev/null 2>&1 || fail "flock не е намерен в PATH (нужен за single-writer concurrency lock)."
+command -v timeout >/dev/null 2>&1 || fail "timeout не е намерен в PATH (нужен за bounded migration DB backup — виж DB_BACKUP_TIMEOUT_SECONDS)."
 
 if command -v sha256sum >/dev/null 2>&1; then
   CHECKSUM_TOOL="sha256sum"
@@ -228,7 +345,7 @@ elif command -v shasum >/dev/null 2>&1; then
 else
   fail "нито sha256sum, нито shasum е наличен в PATH — не мога да verify-на backup checksum-и."
 fi
-log "Prerequisites (git, npm, node, pm2, curl, flock, $CHECKSUM_TOOL): OK"
+log "Prerequisites (git, npm, node, pm2, curl, flock, timeout, $CHECKSUM_TOOL): OK"
 
 # ─── Concurrency lock ───────────────────────────────────────────────────────
 exec 200>"$LOCK_FILE"
@@ -398,9 +515,69 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
   printf '%s\n' "$PENDING_MIGRATIONS" | while IFS= read -r m; do
     log "  - $m"
   done
+else
+  log "Няма чакащи migrations. Обикновен backend code deploy — без DB backup, без quiesce, без допълнителен downtime."
+fi
 
-  # ─── 4b. SQLite backup ПРЕДИ restart (защото restart == migration apply) ──
-  section "DB backup (pending migrations present — required before restart)"
+# ─── 4. Explicit restart confirmation (ПРЕДИ каквато и да е PM2/DB операция) ─
+# Confirmation-ът е ПРЕДИ backend quiesce/DB backup по конструкция (corrective
+# pass — по-рано backup-ът минаваше ПРЕДИ confirmation-а, докато старият PM2
+# процес ОЩЕ пишеше активно, което е доказаната production root cause за
+# >24min/~99% CPU зависване, виж бележката при DB_BACKUP_TIMEOUT_SECONDS
+# по-горе). Ако операторът НЕ потвърди — backend остава online, DB backup
+# НИКОГА не започва, dist НЕ се активира, migrations НЕ се прилагат.
+section "Restart confirmation"
+
+printf '\n'
+printf 'BACKEND RESTART REQUIRED\n'
+printf 'Active WebSocket/game sessions may disconnect.\n'
+if [ -n "$PENDING_MIGRATIONS" ]; then
+  printf '\n'
+  printf 'PENDING MIGRATIONS will be applied automatically at startup:\n'
+  printf '%s\n' "$PENDING_MIGRATIONS" | while IFS= read -r m; do
+    printf '  - %s\n' "$m"
+  done
+  printf 'Backend will be STOPPED, a bounded DB backup will be taken (quiescent DB), THEN restarted with the new build.\n'
+fi
+printf '\n'
+printf 'Type exactly RESTART to proceed, anything else (or empty) STOPs without restart.\n'
+printf '> '
+read -r CONFIRMATION || CONFIRMATION=""
+
+if [ "$CONFIRMATION" != "RESTART" ]; then
+  rm -rf "$STAGING_DIST_DIR"
+  fail "Restart confirmation не е получено (получих: \"$CONFIRMATION\"). Backend НЕ е спрян, DB backup НЕ е направен, dist НЕ е активиран, migrations НЕ са приложени. Live server/dist е непипнат (staging build изчистен)."
+fi
+log "Restart потвърден от оператор."
+
+# ─── 5. Backend quiesce + bounded DB backup (САМО ако има pending migrations) ─
+# Ред: pm2 stop -> bounded verify че старият процес реално е спрян -> bounded
+# node:sqlite backup() (DB вече quiescent, не online writer) -> integrity_check
+# -> едва тогава mv -f към финалния backup път. Ако КАКВОТО И ДА Е стъпка тук
+# се провали/timeout-не/бъде прекъсната (Ctrl+C, SIGTERM, shell error) —
+# PM2_QUIESCED_FOR_BACKUP="true" && RESTART_STARTED="false" кара cleanup()
+# (виж дефиницията горе) автоматично да върне backend-а online, БЕЗ
+# migrations да са приложени, БЕЗ marker промяна.
+if [ -n "$PENDING_MIGRATIONS" ]; then
+  section "Backend quiesce (stop before migration DB backup)"
+
+  log "pm2 stop $PM2_APP_NAME (controlled — migration DB backup изисква quiescent DB, не active writer)..."
+  if ! pm2 stop "$PM2_APP_NAME"; then
+    rm -rf "$STAGING_DIST_DIR"
+    fail "pm2 stop $PM2_APP_NAME се провали — backend може да е в неопределено състояние. РЪЧНА проверка нужна НЕЗАБАВНО (pm2 status $PM2_APP_NAME)."
+  fi
+  # Въоръжаваме recovery guard-а ВЕДНАГА след успешния stop команда — дори
+  # ако последващия bounded verify по-долу timeout-не (неясно дали реално е
+  # спрян), recovery действието (pm2 restart) е идемпотентно безопасно и в
+  # двата случая.
+  PM2_QUIESCED_FOR_BACKUP="true"
+
+  if ! wait_for_pm2_stopped "$PM2_APP_NAME" "$OLD_PID"; then
+    fail "Не успях да потвърдя, че $PM2_APP_NAME е спрян (status=stopped И старият PID $OLD_PID вече не работи) в рамките на ${PM2_STOP_VERIFY_MAX_SECONDS}s. cleanup ще опита да върне backend-а online."
+  fi
+  log "PM2 stop потвърден: status=stopped, старият PID ($OLD_PID) вече не работи."
+
+  section "DB backup (backend quiesced, bounded timeout ${DB_BACKUP_TIMEOUT_SECONDS}s)"
 
   mkdir -p "$DB_BACKUP_ROOT"
   DB_BACKUP_ID="$(date -u +%Y%m%d%H%M%S)-${GIT_SHORT_SHA}"
@@ -412,8 +589,12 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
   ACTIVE_TMP_FILE="$DB_BACKUP_TMP"
   # node:sqlite `backup()` — същият online-backup механизъм, ползван от
   # server/src/db/backupHelpers.ts (runDatabaseBackup) за production daily
-  # backups. Пише в .tmp, verify-ва, чак тогава атомарен rename.
-  node --input-type=module -e "
+  # backups. Пише в .tmp, verify-ва, чак тогава атомарен rename. `timeout`
+  # налага bounded upper bound (виж DB_BACKUP_TIMEOUT_SECONDS бележката горе)
+  # — defensive, DB вече е quiescent (backend спрян стъпката над), значи
+  # normal-case завършва бързо независимо от DB размера.
+  BACKUP_EXIT_CODE=0
+  timeout "${DB_BACKUP_TIMEOUT_SECONDS}s" node --input-type=module -e "
     import { DatabaseSync, backup } from 'node:sqlite'
     const src = new DatabaseSync(process.argv[1], { open: true, readOnly: true })
     try {
@@ -421,7 +602,19 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
     } finally {
       src.close()
     }
-  " "$DB_FILE" "$DB_BACKUP_TMP"
+  " "$DB_FILE" "$DB_BACKUP_TMP" || BACKUP_EXIT_CODE=$?
+
+  if [ "$BACKUP_EXIT_CODE" -ne 0 ]; then
+    rm -f -- "$DB_BACKUP_TMP" "${DB_BACKUP_TMP}-journal" "${DB_BACKUP_TMP}-wal" "${DB_BACKUP_TMP}-shm"
+    ACTIVE_TMP_FILE=""
+    rmdir "$DB_BACKUP_DIR" 2>/dev/null || true
+    rm -rf "$STAGING_DIST_DIR"
+    if [ "$BACKUP_EXIT_CODE" -eq 124 ]; then
+      fail "DB backup TIMEOUT след ${DB_BACKUP_TIMEOUT_SECONDS}s (DB_BACKUP_TIMEOUT_SECONDS) — backup процесът е прекратен, temp файлове изчистени. cleanup ще върне backend-а online (migration НЕ е приложена)."
+    else
+      fail "DB backup се провали (node exit code $BACKUP_EXIT_CODE) — temp файлове изчистени. cleanup ще върне backend-а online (migration НЕ е приложена)."
+    fi
+  fi
 
   INTEGRITY_RESULT="$(node --input-type=module -e "
     import { DatabaseSync } from 'node:sqlite'
@@ -435,49 +628,26 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
   " "$DB_BACKUP_TMP")"
 
   if [ "$INTEGRITY_RESULT" != "ok" ]; then
-    rm -f "$DB_BACKUP_TMP"
+    rm -f -- "$DB_BACKUP_TMP" "${DB_BACKUP_TMP}-journal" "${DB_BACKUP_TMP}-wal" "${DB_BACKUP_TMP}-shm"
     ACTIVE_TMP_FILE=""
+    rmdir "$DB_BACKUP_DIR" 2>/dev/null || true
     rm -rf "$STAGING_DIST_DIR"
-    fail "DB backup integrity_check върна \"$INTEGRITY_RESULT\" вместо \"ok\" — backup-ът е изтрит, restart НЕ продължава. Staging build изчистен, live dist непипнат."
+    fail "DB backup integrity_check върна \"$INTEGRITY_RESULT\" вместо \"ok\" — backup-ът е изтрит. cleanup ще върне backend-а online (migration НЕ е приложена)."
   fi
 
   mv -f "$DB_BACKUP_TMP" "$DB_BACKUP_PATH"
   ACTIVE_TMP_FILE=""
   log "DB backup: $DB_BACKUP_PATH (integrity_check: ok)"
-else
-  log "Няма чакащи migrations. Обикновен backend code deploy — DB backup не се прави (не е нужен за нормален deploy без schema промени)."
 fi
-
-# ─── 5. Explicit restart confirmation ───────────────────────────────────────
-section "Restart confirmation"
-
-printf '\n'
-printf 'BACKEND RESTART REQUIRED\n'
-printf 'Active WebSocket/game sessions may disconnect.\n'
-if [ -n "$PENDING_MIGRATIONS" ]; then
-  printf '\n'
-  printf 'PENDING MIGRATIONS will be applied automatically at startup:\n'
-  printf '%s\n' "$PENDING_MIGRATIONS" | while IFS= read -r m; do
-    printf '  - %s\n' "$m"
-  done
-  printf 'DB backup already taken: %s\n' "$DB_BACKUP_PATH"
-fi
-printf '\n'
-printf 'Type exactly RESTART to proceed, anything else (or empty) STOPs without restart.\n'
-printf '> '
-read -r CONFIRMATION || CONFIRMATION=""
-
-if [ "$CONFIRMATION" != "RESTART" ]; then
-  rm -rf "$STAGING_DIST_DIR"
-  fail "Restart confirmation не е получено (получих: \"$CONFIRMATION\"). Backend НЕ е рестартиран. Live server/dist е непипнат (staging build изчистен)."
-fi
-log "Restart потвърден от оператор."
 
 # ─── 6. Dist activation — staging -> live, НЕПОСРЕДСТВЕНО преди restart ────
 # Единствената точка, в която live DIST_DIR реално се променя. До тук
-# build-ът е седял изолирано в STAGING_DIST_DIR — старият PM2 процес е
-# обслужвал живия dist/ непрекъснато и непроменено през целия build/verify/
-# confirmation прозорец.
+# build-ът е седял изолирано в STAGING_DIST_DIR. При обикновен code deploy
+# (без pending migrations) старият PM2 процес е обслужвал живия dist/
+# непрекъснато и непроменено през целия build/verify/confirmation прозорец.
+# При pending migrations backend-ът вече Е спрян (стъпка 5, "Backend
+# quiesce") — dist активацията тук се случва, докато PM2 е stopped, ПРЕДИ
+# финалния restart по-долу, който го връща online с новия код.
 #
 # Безопасна activation (НЕ rm -rf преди успешен mv на staging):
 #   1) mv DIST_DIR -> DIST_BACKUP_DIR (rename, старият dist е физически

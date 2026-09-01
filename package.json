@@ -16,6 +16,7 @@
     "check:pwa-auto-update": "npx tsx scripts/checkPwaAutoUpdate.ts",
     "check:frontend-deploy-atomic": "npx tsx scripts/checkFrontendDeployAtomic.ts",
     "check:backend-deploy-health-retry": "npx tsx scripts/checkBackendDeployHealthRetry.ts",
+    "check:backend-deploy-migration-backup-flow": "npx tsx scripts/checkBackendDeployMigrationBackupFlow.ts",
     "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts",
     "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts",
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
