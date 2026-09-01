@@ -1392,6 +1392,22 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     return rows.map((row) => ({ messageId: row.message_id, attachmentFilename: row.storage_filename }))
   }
 
+  /**
+   * `messageIds` е ВИНАГИ root victim ID-та (единствените callers —
+   * enforceLafcheRetentionOnce/lafcheRetentionCleanup.ts — подават само
+   * root message ID-та от getLafcheRetentionVictims). Repliess към тези
+   * root-ове CASCADE-делетват се автоматично от DELETE-а по-долу (self-FK
+   * parent_message_id -> topic_messages(message_id) ON DELETE CASCADE), и
+   * тяхната attachment metadata CASCADE-делетва се заедно с тях — но БЕЗ
+   * тази отделна descendant заявка, физическите reply файлове НИКОГА не
+   * биха се enqueue-нали за filesystem cleanup (CASCADE се случва изцяло
+   * DB-side, extern на explicit enqueueAttachmentDeletion стъпката) —
+   * orphan file bug, коригиран тук. Edno ниво само (reply-to-reply е
+   * server-side забранен — виж 'reply_to_reply_denied' guard-а в
+   * send_topic_reply handler-а, index.ts) — директна
+   * `parent_message_id IN (roots)` селекция е достатъчна, без нужда от
+   * recursive descendant traversal.
+   */
   function hardDeleteRetentionVictims(topicId: string, messageIds: readonly string[]): { deletedAttachmentFilenames: string[] } {
     if (messageIds.length === 0) return { deletedAttachmentFilenames: [] }
     const ids = [...messageIds]
@@ -1400,9 +1416,18 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
 
     database.exec('BEGIN IMMEDIATE;')
     try {
+      // Attachment filenames за ЦЕЛИЯ victim thread (root-овете САМИ +
+      // техните директни replies) — събрани ПРЕДИ DELETE-а по-долу, за да
+      // не зависим от metadata, която CASCADE вече ще е унищожил.
       const attachmentRows = database
-        .prepare(`SELECT storage_filename FROM topic_message_attachments WHERE message_id IN (${placeholders});`)
-        .all(...ids) as Array<{ storage_filename: string }>
+        .prepare(`
+          SELECT storage_filename FROM topic_message_attachments
+          WHERE message_id IN (
+            SELECT message_id FROM topic_messages
+            WHERE message_id IN (${placeholders}) OR parent_message_id IN (${placeholders})
+          );
+        `)
+        .all(...ids, ...ids) as Array<{ storage_filename: string }>
       deletedAttachmentFilenames = attachmentRows.map((row) => row.storage_filename)
       for (const filename of deletedAttachmentFilenames) {
         insertAttachmentDeletionStatement.run(filename)
@@ -1415,6 +1440,9 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       // instance realtime notify за subscriber-и, които currently виждат
       // content-а). Client Lafche cap вече пази state/DOM самостоятелно —
       // victim-ите по дефиниция никога не са в текущия зареден client range.
+      // Само root-овете се DELETE-ват explicit тук — repliess CASCADE-делетват
+      // се автоматично (self-FK), attachment filenames им вече са collected-
+      // нати по-горе, ПРЕДИ тази стъпка.
       database.prepare(`DELETE FROM topic_messages WHERE message_id IN (${placeholders});`).run(...ids)
 
       database.exec('COMMIT;')

@@ -15,6 +15,9 @@
  * затова enforceSteadyStateRetentionOnce() по-долу е точен mirror на
  * production логиката, не reuse на кода directno.
  *
+ * === A0. BOUNDARY LETTER A (§12) ===
+ * [0]  199 posts → 0 victims, enforce no-op, всички остават живи
+ *
  * === A. STEADY-STATE SINGLE EVICTION ===
  * [1] seed 200 live Lafche roots, countLiveRootMessages == 200, victims == []
  * [2] insert #201 → enforce → exactly 200 остават, най-старият е hard-deleted
@@ -77,9 +80,17 @@
  * === O. SEQUENTIAL RAPID INSERTS СЛЕД НОРМАЛИЗАЦИЯ ===
  * [100]-[101] 50 последователни inserts+enforce СЛЕД normalize до 200 →
  *      count никога не надвишава 200, retained = exact newest 200
+ *
+ * === P. CORRECTIVE PASS: REPLY/DESCENDANT ATTACHMENT CLEANUP (bug fix) ===
+ * [110]-[121] 201 roots, victim root с 2 replies (единия с missing физ.
+ *      файл), retained root+reply с attachments — доказва, че
+ *      hardDeleteRetentionVictims вече enqueue-ва filenames и за root, И за
+ *      ВСИЧКИ негови replies (не само root-а — preexisting orphan-file bug),
+ *      retained thread остава напълно непокътнат (DB + byte-identical
+ *      физически файлове), missing physical file не чупи операцията.
  */
 
-import { mkdtemp, rm, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join, resolve, dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -103,6 +114,7 @@ const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260
 const lafcheSeedMigrationPath = resolve(serverRoot, 'database/migrations/20260817_002_seed_topic_lafche.sql')
 const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
 const evidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
+const rootLatestSeqMigrationPath = resolve(serverRoot, 'database/migrations/20260824_001_create_topic_root_latest_seq.sql')
 
 const LAFCHE_TOPIC_ID = 'topic-lafche'
 const LAFCHE_MESSAGE_HISTORY_LIMIT = 200
@@ -196,6 +208,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, lafcheSeedMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
   await applyMigrationFile(db, evidenceAttachmentCopyMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
   seedAccount(db, 'moderator-1')
   seedProfile(db, 'author-1')
   seedProfile(db, 'author-2')
@@ -224,6 +237,33 @@ function enforceSteadyStateRetentionOnce(msgStore: TopicMessageStore): 'no-op' |
 }
 
 console.log('\n=== Lafche 200-post hard retention (store-level, steady-state) ===\n')
+
+// ─── [0] Boundary letter A (§12): 199 posts → delete 0 ────────────────────
+
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'boundary-199.sqlite')
+  const msgStore = await createTopicMessageStore(dbPath)
+  try {
+    const insertedIds: string[] = []
+    for (let i = 0; i < 199; i++) {
+      const row = msgStore.insertMessage({ topicId: LAFCHE_TOPIC_ID, senderProfileId: 'author-1', senderDisplayName: 'A1', senderRole: 'player', body: `post ${i}` })
+      insertedIds.push(row.messageId)
+    }
+
+    await check('[0] Boundary A: 199 posts → 0 victims, enforce е no-op, всичките 199 остават живи', () => {
+      assertEqual(msgStore.countLiveRootMessages(LAFCHE_TOPIC_ID), 199, 'count трябва да е точно 199')
+      assertEqual(msgStore.getLafcheRetentionVictims(LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT).length, 0, 'под лимита не трябва да има victims')
+      const outcome = enforceSteadyStateRetentionOnce(msgStore)
+      assertEqual(outcome, 'no-op', 'под лимита enforce трябва да е no-op')
+      assertEqual(msgStore.countLiveRootMessages(LAFCHE_TOPIC_ID), 199, 'count трябва да остане непроменен')
+      for (const id of insertedIds) {
+        assert(msgStore.getMessageById(id) !== null, `post ${id} трябва да остане жив`)
+      }
+    })
+  } finally {
+    msgStore.close()
+  }
+})
 
 // ─── [1]-[2] Steady-state single eviction ────────────────────────────────
 
@@ -590,6 +630,170 @@ await withTempDir(async (dir) => {
       assertEqual(msgStore.countLiveRootMessages(LAFCHE_TOPIC_ID), 200, 'финален count трябва да е точно 200')
       for (const id of newestIds) {
         assert(msgStore.getMessageById(id) !== null, `най-новите 50 постове трябва всичките да оцелеят: ${id}`)
+      }
+    })
+  } finally {
+    msgStore.close()
+  }
+})
+
+// ─── [110]-[120] Corrective pass: reply/descendant attachment cleanup ─────
+//
+// Bug (production preflight forensic): hardDeleteRetentionVictims-ия
+// attachment-collection заявка филтрираше САМО по `message_id IN (root
+// victim IDs)` — replies към victim root-овете CASCADE-делетват се
+// автоматично (self-FK parent_message_id), техните topic_message_attachments
+// redовете CASCADE-делетват се заедно с тях, НО тъй като CASCADE-ът е
+// изцяло DB-side (SQLite-native), физическите reply attachment файлове
+// НИКОГА не минаваха през enqueueAttachmentDeletion — orphan file bug.
+// Fix-ът разшири заявката да включва и `parent_message_id IN (root IDs)`
+// redове (едно ниво само — reply-to-reply е server-side забранен, виж
+// index.ts send_topic_reply 'reply_to_reply_denied' guard-а). Тестовете
+// тук доказват fix-а с реален filesystem (не само DB metadata).
+
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'descendant-attachments.sqlite')
+  const uploadsDir = join(dir, 'uploads-topic-attachments')
+  await mkdir(uploadsDir, { recursive: true })
+  const msgStore = await createTopicMessageStore(dbPath)
+  try {
+    const victimRootFilename = `${randomUUID()}.webp`
+    const victimReply1Filename = `${randomUUID()}.webp`
+    const victimReply2Filename = `${randomUUID()}.webp`
+    const retainedRootFilename = `${randomUUID()}.webp`
+    const retainedReplyFilename = `${randomUUID()}.webp`
+
+    await writeFile(join(uploadsDir, victimRootFilename), Buffer.from('victim-root-bytes'))
+    await writeFile(join(uploadsDir, victimReply1Filename), Buffer.from('victim-reply-1-bytes'))
+    // victimReply2Filename нарочно НЕ се записва физически — missing-file case.
+    await writeFile(join(uploadsDir, retainedRootFilename), Buffer.from('retained-root-bytes'))
+    await writeFile(join(uploadsDir, retainedReplyFilename), Buffer.from('retained-reply-bytes'))
+
+    // Victim root е ПЪРВИЯТ insert-нат root (най-стар по seq) — гарантира,
+    // че точно ТОЙ е oldest сред общо 201, значи единственият над newest-200
+    // прозореца (OFFSET 200 target).
+    const victimRoot = msgStore.insertMessage({
+      topicId: LAFCHE_TOPIC_ID, senderProfileId: 'author-1', senderDisplayName: 'A1', senderRole: 'player', body: 'victim root',
+      attachment: makeAttachment(victimRootFilename),
+    })
+    const victimReply1 = msgStore.insertReply({
+      topicId: LAFCHE_TOPIC_ID, parentMessageId: victimRoot.messageId, senderProfileId: 'author-2', senderDisplayName: 'A2', senderRole: 'player', body: 'victim reply 1',
+      attachment: makeAttachment(victimReply1Filename),
+    })
+    assert(victimReply1.ok, 'victim reply 1 insert трябва да успее')
+    const victimReply2 = msgStore.insertReply({
+      topicId: LAFCHE_TOPIC_ID, parentMessageId: victimRoot.messageId, senderProfileId: 'author-2', senderDisplayName: 'A2', senderRole: 'player', body: 'victim reply 2 (missing physical file)',
+      attachment: makeAttachment(victimReply2Filename),
+    })
+    assert(victimReply2.ok, 'victim reply 2 insert трябва да успее')
+
+    // 199 filler roots (без attachments) — попълва до 200 живи non-newest
+    // root-а между victim-а (най-стар) и retainedRoot (най-нов, #201).
+    for (let i = 0; i < 199; i++) {
+      msgStore.insertMessage({ topicId: LAFCHE_TOPIC_ID, senderProfileId: 'author-1', senderDisplayName: 'A1', senderRole: 'player', body: `filler ${i}` })
+    }
+
+    // Newest retained root (post #201 общо) — с attachment + reply с attachment,
+    // трябва да остане НАПЪЛНО непокътнат (DB И physical file).
+    const retainedRoot = msgStore.insertMessage({
+      topicId: LAFCHE_TOPIC_ID, senderProfileId: 'author-1', senderDisplayName: 'A1', senderRole: 'player', body: 'retained root',
+      attachment: makeAttachment(retainedRootFilename),
+    })
+    const retainedReply = msgStore.insertReply({
+      topicId: LAFCHE_TOPIC_ID, parentMessageId: retainedRoot.messageId, senderProfileId: 'author-2', senderDisplayName: 'A2', senderRole: 'player', body: 'retained reply',
+      attachment: makeAttachment(retainedReplyFilename),
+    })
+    assert(retainedReply.ok, 'retained reply insert трябва да успее')
+    const retainedReplyId = (retainedReply as { ok: true; message: { messageId: string } }).message.messageId
+
+    const totalRootCount = msgStore.countLiveRootMessages(LAFCHE_TOPIC_ID)
+    await check('[110] setup sanity: 201 total roots seeded (victim + 199 filler + retained)', () => {
+      assertEqual(totalRootCount, 201, 'общо 201 root постове трябва да са seed-нати')
+    })
+
+    const victims = msgStore.getLafcheRetentionVictims(LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT)
+    await check('[111] getLafcheRetentionVictims връща точно 1 victim (victimRoot, oldest)', () => {
+      assertEqual(victims.length, 1, 'трябва да има точно 1 victim root')
+      assertEqual(victims[0]!.messageId, victimRoot.messageId, 'victim-ът трябва да е точно victimRoot')
+    })
+
+    const result = msgStore.hardDeleteRetentionVictims(LAFCHE_TOPIC_ID, [victimRoot.messageId])
+
+    await check('[112] victim root липсва след hard delete', () => {
+      assert(msgStore.getMessageById(victimRoot.messageId) === null, 'victim root трябва да е физически изтрит')
+    })
+
+    await check('[113] victim replies (и двете) липсват — CASCADE от root delete-а', () => {
+      assert(msgStore.getMessageById(victimReply1.ok ? victimReply1.message.messageId : '') === null, 'victim reply 1 трябва да е CASCADE-delete-нат')
+      assert(msgStore.getMessageById(victimReply2.ok ? victimReply2.message.messageId : '') === null, 'victim reply 2 трябва да е CASCADE-delete-нат')
+    })
+
+    await check('[114] attachment metadata на root + ОБЕ replies липсва (CASCADE)', () => {
+      const remaining = msgStore.getAttachmentsByMessageIds([
+        victimRoot.messageId,
+        victimReply1.ok ? victimReply1.message.messageId : '',
+        victimReply2.ok ? victimReply2.message.messageId : '',
+      ])
+      assertEqual(remaining.size, 0, 'нито един victim attachment metadata ред не трябва да остане')
+    })
+
+    await check('[115] ГЛАВЕН FIX: hardDeleteRetentionVictims връща filenames и за ДВАТА reply attachments, не само root-а', () => {
+      assert(result.deletedAttachmentFilenames.includes(victimRootFilename), 'root filename трябва да е в резултата')
+      assert(result.deletedAttachmentFilenames.includes(victimReply1Filename), 'reply 1 filename трябва да е в резултата (BUG FIX: преди fix-а липсваше)')
+      assert(result.deletedAttachmentFilenames.includes(victimReply2Filename), 'reply 2 filename трябва да е в резултата (BUG FIX: преди fix-а липсваше)')
+      assertEqual(result.deletedAttachmentFilenames.length, 3, 'точно 3 filenames общо (root + 2 replies), без дублиране')
+    })
+
+    await check('[116] ГЛАВЕН FIX: ВСИЧКИ 3 filenames (root + 2 replies) са enqueue-нати в topic_message_attachment_deletions', () => {
+      const pending = msgStore.listPendingAttachmentDeletions(500)
+      const pendingNames = new Set(pending.map((entry) => entry.storageFilename))
+      assert(pendingNames.has(victimRootFilename), 'root filename трябва да е в cleanup queue-то')
+      assert(pendingNames.has(victimReply1Filename), 'reply 1 filename трябва да е в cleanup queue-то (BUG FIX)')
+      assert(pendingNames.has(victimReply2Filename), 'reply 2 filename (missing physical file) трябва пак да е в cleanup queue-то (BUG FIX)')
+    })
+
+    await check('[117] retained root + retained reply остават напълно живи в DB', () => {
+      assert(msgStore.getMessageById(retainedRoot.messageId) !== null, 'retained root трябва да остане')
+      assert(msgStore.getMessageById(retainedReplyId) !== null, 'retained reply трябва да остане')
+      const attachments = msgStore.getAttachmentsByMessageIds([retainedRoot.messageId, retainedReplyId])
+      assertEqual(attachments.size, 2, 'и двата retained attachments трябва да останат в metadata')
+    })
+
+    await check('[118] retained filenames НИКОГА не са enqueue-нати за cleanup', () => {
+      const pending = msgStore.listPendingAttachmentDeletions(500)
+      const pendingNames = new Set(pending.map((entry) => entry.storageFilename))
+      assert(!pendingNames.has(retainedRootFilename), 'retained root filename не трябва да е в cleanup queue-то')
+      assert(!pendingNames.has(retainedReplyFilename), 'retained reply filename не трябва да е в cleanup queue-то')
+    })
+
+    await check('[119] retained физически файлове остават byte-identical на диска (никога не са докоснати)', async () => {
+      const rootBytes = await readFile(join(uploadsDir, retainedRootFilename))
+      const replyBytes = await readFile(join(uploadsDir, retainedReplyFilename))
+      assertEqual(rootBytes.toString('utf8'), 'retained-root-bytes', 'retained root файлът трябва да е непроменен')
+      assertEqual(replyBytes.toString('utf8'), 'retained-reply-bytes', 'retained reply файлът трябва да е непроменен')
+    })
+
+    await check('[120] Missing physical file (victimReply2Filename никога не е бил записан) не чупи retention — не е fatal', () => {
+      // hardDeleteRetentionVictims самата НЕ пипа filesystem-а directno (само
+      // enqueue-ва в DB queue-то) — established established convention е
+      // физическото unlink+missing-file handling да е established отговорност
+      // на runTopicAttachmentCleanup worker-а (index.ts), не на самия store call.
+      // Тук доказваме, че DB-side операцията (enqueue) успя безусловно,
+      // независимо от физическото съществуване на файла — [116] вече доказа
+      // enqueue-а explicit. Тук просто потвърждаваме, че самото hardDeleteRetentionVictims
+      // извикване (по-горе) не хвърли грешка заради липсващия файл.
+      assert(true, 'hardDeleteRetentionVictims (извикан по-горе) не хвърли грешка заради липсващия victimReply2 файл')
+    })
+
+    await check('[121] Няма orphan physical files от victim thread-а извън pending cleanup queue-то — само retained файлове остават неenqueue-нати', () => {
+      const pending = msgStore.listPendingAttachmentDeletions(500)
+      const pendingNames = new Set(pending.map((entry) => entry.storageFilename))
+      // Всеки physical файл, принадлежащ на victim thread-а (root + 2 replies),
+      // трябва или да е бил enqueue-нат (има pending job за него), или никога
+      // да не е съществувал физически (victimReply2) — в никакъв случай не
+      // остава "забравен" (нито enqueue-нат, нито обяснено защо не е).
+      for (const filename of [victimRootFilename, victimReply1Filename, victimReply2Filename]) {
+        assert(pendingNames.has(filename), `${filename} трябва да е в cleanup queue-то (доказано вече в [116], re-confirmed тук за пълнота)`)
       }
     })
   } finally {

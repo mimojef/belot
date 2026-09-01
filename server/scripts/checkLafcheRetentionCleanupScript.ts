@@ -30,6 +30,9 @@
  *      pending attachment deletions queue
  * [15] PRAGMA integrity_check минава (integrityOk: true) след apply
  * [16] нормален (под лимита) DB → apply outcome='no-op', нулева мутация
+ * [17]-[18] §12 letter H: retained (newest, вътре в 200) post attachment —
+ *      DB metadata И реалният physical файл на диска остават НАПЪЛНО
+ *      непокътнати след apply (никога не enqueue-нат, никога не unlink-нат)
  */
 
 import { mkdtemp, rm, readFile, writeFile, mkdir, readdir } from 'node:fs/promises'
@@ -57,6 +60,7 @@ const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260
 const lafcheSeedMigrationPath = resolve(serverRoot, 'database/migrations/20260817_002_seed_topic_lafche.sql')
 const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
 const evidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
+const rootLatestSeqMigrationPath = resolve(serverRoot, 'database/migrations/20260824_001_create_topic_root_latest_seq.sql')
 
 const LAFCHE_TOPIC_ID = 'topic-lafche'
 const LAFCHE_MESSAGE_HISTORY_LIMIT = 200
@@ -143,6 +147,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, lafcheSeedMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
   await applyMigrationFile(db, evidenceAttachmentCopyMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
   db.prepare(`INSERT INTO accounts (account_id) VALUES (?)`).run('moderator-1')
   db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('author-1', 'author-1')
   db.close()
@@ -167,6 +172,7 @@ async function setupDbLegacyPreMigration005(dir: string, filename: string): Prom
   await applyMigrationFile(db, muteEvidenceMigrationPath)
   // ЛИПСВА evidenceAttachmentCopyMigrationPath — нарочно, симулира текущата
   // production схема ПРЕДИ 20260818_005 да е приложена.
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
   db.prepare(`INSERT INTO accounts (account_id) VALUES (?)`).run('moderator-1')
   db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('author-1', 'author-1')
   db.close()
@@ -434,8 +440,20 @@ await withTempDir(async (dir) => {
   assert(replyResult.ok, 'setup: reply insert трябва да успее')
   msgStore.toggleLike(successCopyVictim.messageId, 'author-1')
 
+  // Последният filler пост (index 301, newest по seq — гарантирано вътре в
+  // retained newest-200) получава реален attachment файл на диска — §12
+  // letter H: "Newest-200 image files never touched" трябва да е доказано
+  // от РЕАЛЕН filesystem check след apply, не само DB metadata survival.
+  const retainedAttachmentFilename = `${randomUUID()}.webp`
+  await writeFile(join(topicAttachmentUploadsDir, retainedAttachmentFilename), Buffer.from('real-bytes-for-retained-newest-post'))
+  let retainedMessageId = ''
   for (let i = 0; i < 302; i++) {
-    msgStore.insertMessage({ topicId: LAFCHE_TOPIC_ID, senderProfileId: 'author-1', senderDisplayName: 'A1', senderRole: 'player', body: `post ${i}` })
+    const isLast = i === 301
+    const row = msgStore.insertMessage({
+      topicId: LAFCHE_TOPIC_ID, senderProfileId: 'author-1', senderDisplayName: 'A1', senderRole: 'player', body: `post ${i}`,
+      attachment: isLast ? makeAttachment(retainedAttachmentFilename) : undefined,
+    })
+    if (isLast) retainedMessageId = row.messageId
   }
   msgStore.close()
   modStore.close()
@@ -484,6 +502,21 @@ await withTempDir(async (dir) => {
     assert(verifyStore.getMessageById(plainVictim.messageId) === null, 'plain victim трябва да е изтрит')
     const pending = verifyStore.listPendingAttachmentDeletions(500)
     assert(pending.some((entry) => entry.storageFilename === plainFilename), 'plainFilename трябва да е в pending cleanup queue-то')
+  })
+
+  await check('[17] §12 letter H: retained newest-post attachment — DB metadata И физическият файл на диска остават НАПЪЛНО непокътнати след apply', () => {
+    assert(verifyStore.getMessageById(retainedMessageId) !== null, 'retained newest пост трябва да остане жив в DB')
+    const attachments = verifyStore.getAttachmentsByMessageIds([retainedMessageId])
+    const attachment = attachments.get(retainedMessageId)
+    assert(attachment !== undefined, 'attachment metadata за retained поста трябва да остане')
+    assertEqual(attachment!.storageFilename, retainedAttachmentFilename, 'storage_filename трябва да съвпада')
+    const pending = verifyStore.listPendingAttachmentDeletions(500)
+    assert(!pending.some((entry) => entry.storageFilename === retainedAttachmentFilename), 'retained filename НИКОГА не трябва да е enqueue-нат за физически cleanup')
+  })
+
+  await check('[18] §12 letter H: физическият файл на retained поста реално съществува на диска непроменен след apply', async () => {
+    const bytes = await readFile(join(topicAttachmentUploadsDir, retainedAttachmentFilename))
+    assertEqual(bytes.toString('utf8'), 'real-bytes-for-retained-newest-post', 'физическото съдържание трябва да е непроменено — файлът никога не е бил докосван от apply-а')
   })
 
   verifyStore.close()
