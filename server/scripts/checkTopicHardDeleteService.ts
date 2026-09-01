@@ -87,6 +87,7 @@ const migrationFiles = [
   '20260817_003_create_topic_mute_evidence.sql',
   '20260818_005_add_topic_mute_evidence_attachment_copy.sql',
   '20260824_001_create_topic_root_latest_seq.sql',
+  '20260901_001_add_created_by_role_to_topics.sql',
 ].map((name) => resolve(serverRoot, 'database/migrations', name))
 
 let passed = 0
@@ -316,9 +317,11 @@ await withTempDir(async (dir) => {
 
     const untouchedRoot = messageStore.insertMessage({ topicId: 'topic-untouched', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'untouched root' })
 
-    const preAuditCount = (new DatabaseSync(dbPath, { open: true }).prepare(
+    const preAuditCheckDb = new DatabaseSync(dbPath, { open: true })
+    const preAuditCount = (preAuditCheckDb.prepare(
       `SELECT COUNT(*) as c FROM topic_moderation_audit_log WHERE topic_id = 'topic-victim'`,
     ).get() as { c: number }).c
+    preAuditCheckDb.close()
     assert(preAuditCount >= 2, 'audit log трябва да има поне 2 реда (lock+mute) преди delete')
 
     const result = hardDeleteService.hardDeleteTopic({ topicId: 'topic-victim', reason: 'manual_moderation_delete' })

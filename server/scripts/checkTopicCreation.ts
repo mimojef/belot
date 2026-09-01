@@ -84,6 +84,9 @@ const topicsMigrationPath = resolve(serverRoot, 'database/migrations/20260810_00
 // безусловно (SELECT ги включва винаги) — трябва в схемата на ВСЕКИ тест DB
 // тук, иначе "no such column".
 const topicModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260811_003_create_topic_moderation.sql')
+// created_by_role snapshot колона (auto-delete exemption по автор роля) —
+// insertTopicStatement вече винаги я пише, трябва в схемата на ВСЕКИ тест DB тук.
+const topicCreatedByRoleMigrationPath = resolve(serverRoot, 'database/migrations/20260901_001_add_created_by_role_to_topics.sql')
 
 // ─── Брояч ────────────────────────────────────────────────────────────────
 
@@ -230,13 +233,14 @@ await withTempDir(async (dir) => {
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, topicModerationMigrationPath)
+  await applyMigrationFile(db, topicCreatedByRoleMigrationPath)
   seedProfile(db, 'creator-1')
   db.close()
 
   const store = await createTopicStore(dbPath)
 
   await check('[S1] Valid create -> persisted с правилния creator, status=active', () => {
-    const result = store.createTopic({ title: 'Белот', createdByProfileId: 'creator-1' })
+    const result = store.createTopic({ title: 'Белот', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(result.ok, `очаквах success, получих ${JSON.stringify(result)}`)
     if (result.ok) {
       assertEqual(result.topic.title, 'Белот', 'title трябва да съвпада')
@@ -254,25 +258,25 @@ await withTempDir(async (dir) => {
   await check('[S3] Duplicate exact title (active) -> title_exists, само 1 ред в DB', () => {
     const before = store.listActiveTopics().filter((t) => t.title === 'Белот').length
     assertEqual(before, 1, 'предусловие: точно 1 съществуваща "Белот"')
-    const result = store.createTopic({ title: 'Белот', createdByProfileId: 'creator-1' })
+    const result = store.createTopic({ title: 'Белот', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(!result.ok && result.code === 'title_exists', `очаквах title_exists, получих ${JSON.stringify(result)}`)
     const after = store.listActiveTopics().filter((t) => t.title === 'Белот').length
     assertEqual(after, 1, 'все още трябва да има само 1 ред — duplicate insert не е минал')
   })
 
   await check('[S4] Duplicate case-insensitive ("БЕЛОТ" срещу "Белот") -> title_exists', () => {
-    const result = store.createTopic({ title: 'БЕЛОТ', createdByProfileId: 'creator-1' })
+    const result = store.createTopic({ title: 'БЕЛОТ', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(!result.ok && result.code === 'title_exists', `очаквах title_exists, получих ${JSON.stringify(result)}`)
   })
 
   await check('[S5] Duplicate trim-insensitive ("  белот  " срещу "Белот") -> title_exists', () => {
-    const result = store.createTopic({ title: '  белот  ', createdByProfileId: 'creator-1' })
+    const result = store.createTopic({ title: '  белот  ', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(!result.ok && result.code === 'title_exists', `очаквах title_exists, получих ${JSON.stringify(result)}`)
   })
 
   let removedTopicId: string
   await check('[S6] Removed topic title reuse -> позволено (нов create успява)', () => {
-    const created = store.createTopic({ title: 'Временна тема', createdByProfileId: 'creator-1' })
+    const created = store.createTopic({ title: 'Временна тема', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(created.ok, 'предусловие: create успешен')
     if (!created.ok) return
     removedTopicId = created.topic.topicId
@@ -280,13 +284,13 @@ await withTempDir(async (dir) => {
     dbDirect.prepare(`UPDATE topics SET status = 'removed' WHERE topic_id = ?`).run(removedTopicId)
     dbDirect.close()
 
-    const result = store.createTopic({ title: 'Временна тема', createdByProfileId: 'creator-1' })
+    const result = store.createTopic({ title: 'Временна тема', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(result.ok, `removed тема трябва да освободи title-а за reuse, получих ${JSON.stringify(result)}`)
   })
 
   await check('[S7] topic_id е UUID, различен от slug на друга тема, НЕ базиран на title', () => {
-    const a = store.createTopic({ title: 'Уникално име А', createdByProfileId: 'creator-1' })
-    const b = store.createTopic({ title: 'Уникално име Б', createdByProfileId: 'creator-1' })
+    const a = store.createTopic({ title: 'Уникално име А', createdByProfileId: 'creator-1', createdByRole: 'player' })
+    const b = store.createTopic({ title: 'Уникално име Б', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(a.ok && b.ok, 'предусловие: и двата create успешни')
     if (!a.ok || !b.ok) return
     assert(a.topic.topicId !== b.topic.topicId, 'topicId-тата трябва да са различни')
@@ -297,7 +301,7 @@ await withTempDir(async (dir) => {
   })
 
   await check('[S8] Празна нова тема (0 съобщения) — getTopicById я връща коректно, без грешка', () => {
-    const created = store.createTopic({ title: 'Съвсем празна тема', createdByProfileId: 'creator-1' })
+    const created = store.createTopic({ title: 'Съвсем празна тема', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(created.ok, 'предусловие: create успешен')
     if (!created.ok) return
     const fetched = store.getTopicById(created.topic.topicId)
@@ -307,7 +311,7 @@ await withTempDir(async (dir) => {
 
   await check('[S9] Deterministic ordering: нова тема се появява last (created_at ASC)', () => {
     const beforeCount = store.listActiveTopics().length
-    const created = store.createTopic({ title: 'Абсолютно последна тема', createdByProfileId: 'creator-1' })
+    const created = store.createTopic({ title: 'Абсолютно последна тема', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(created.ok, 'предусловие: create успешен')
     const topics = store.listActiveTopics()
     assertEqual(topics.length, beforeCount + 1, 'трябва да има точно 1 нова тема повече')
@@ -316,7 +320,7 @@ await withTempDir(async (dir) => {
 
   await check('[S10] pollNewActiveTopicsCreatedAfter връща само теми СЛЕД cursor-а (rowid-based, insertion-order монотонен)', () => {
     const cursorBefore = store.getLatestActiveTopicCursor()
-    const created = store.createTopic({ title: 'Тема след cursor-а', createdByProfileId: 'creator-1' })
+    const created = store.createTopic({ title: 'Тема след cursor-а', createdByProfileId: 'creator-1', createdByRole: 'player' })
     assert(created.ok, 'предусловие: create успешен')
     if (!created.ok) return
     const { topics: polled, nextCursor } = store.pollNewActiveTopicsCreatedAfter(cursorBefore, 50)
@@ -340,6 +344,7 @@ await withTempDir(async (dir) => {
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, topicModerationMigrationPath)
+  await applyMigrationFile(db, topicCreatedByRoleMigrationPath)
   seedProfile(db, 'racer-1')
   db.close()
 
@@ -348,7 +353,7 @@ await withTempDir(async (dir) => {
   await check('[C1] 5 едновременни createTopic() със СЪЩИЯ normalized title -> точно 1 success, 4 title_exists', async () => {
     const variants = ['Дуплирана тема', '  ДУПЛИРАНА ТЕМА  ', 'дуплирана тема', 'Дуплирана Тема', '  дуплирана тема']
     const results = await Promise.all(
-      variants.map((title) => Promise.resolve().then(() => store.createTopic({ title, createdByProfileId: 'racer-1' }))),
+      variants.map((title) => Promise.resolve().then(() => store.createTopic({ title, createdByProfileId: 'racer-1', createdByRole: 'player' }))),
     )
     const successes = results.filter((r) => r.ok)
     const conflicts = results.filter((r) => !r.ok)
@@ -363,7 +368,7 @@ await withTempDir(async (dir) => {
   await check('[C2] Едновременни create с различни титли -> всички успяват независимо', async () => {
     const titles = ['Паралелна А', 'Паралелна Б', 'Паралелна В', 'Паралелна Г']
     const results = await Promise.all(
-      titles.map((title) => Promise.resolve().then(() => store.createTopic({ title, createdByProfileId: 'racer-1' }))),
+      titles.map((title) => Promise.resolve().then(() => store.createTopic({ title, createdByProfileId: 'racer-1', createdByRole: 'player' }))),
     )
     assert(results.every((r) => r.ok), `очаквах всички да успеят, получих ${JSON.stringify(results)}`)
     const uniqueIds = new Set(results.map((r) => (r.ok ? r.topic.topicId : null)))

@@ -44,6 +44,18 @@ const moderationMigrationPath = resolve(serverRoot, 'database/migrations/2026081
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
 const editMigrationPath = resolve(serverRoot, 'database/migrations/20260812_003_add_topic_message_editing.sql')
+// createTopicMessageStore() винаги prepare-ва statements срещу
+// topic_root_latest_seq (materialized "latest live seq per thread" индекс,
+// въведен след Custom Topic Creation) — трябва в схемата на ВСЯКА тест DB,
+// която извиква createTopicMessageStore(), дори ако samия тест не борави
+// пряко с тази таблица (database.prepare() е eager, изпълнява се при store
+// construction, не lazily при първо извикване).
+const rootLatestSeqMigrationPath = resolve(serverRoot, 'database/migrations/20260824_001_create_topic_root_latest_seq.sql')
+// createTopicStore() винаги prepare-ва insertTopicStatement с created_by_role
+// колоната (auto-delete exemption по автор роля) — трябва в схемата на ВСЯКА
+// тест DB, която извиква createTopicStore(), дори ако конкретният тест никога
+// не вика .createTopic() (database.prepare() се изпълнява при store creation).
+const createdByRoleMigrationPath = resolve(serverRoot, 'database/migrations/20260901_001_add_created_by_role_to_topics.sql')
 
 // ─── Брояч ───────────────────────────────────────────────────────────────
 
@@ -251,6 +263,7 @@ await withTempDir(async (dir) => {
   buildBaseSchema(db)
   await applyMigrationFile(db, topicsMigrationPath)
   await applyMigrationFile(db, moderationMigrationPath)
+  await applyMigrationFile(db, createdByRoleMigrationPath)
 
   insertTopic(db, { topicId: 'topic-a', slug: 'belot', title: 'Белот', sortOrder: 10 })
   insertTopic(db, { topicId: 'topic-b', slug: 'tournaments', title: 'Турнири', sortOrder: 20 })
@@ -321,6 +334,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   await applyMigrationFile(db, editMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -538,6 +552,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   await applyMigrationFile(db, editMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
 
   seedProfile(db, 'profile-with-avatar')
   seedProfile(db, 'profile-without-avatar')
@@ -632,6 +647,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   await applyMigrationFile(db, editMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
 
   const authorIds = ['author-1', 'author-2', 'author-3']
   for (const id of authorIds) seedProfile(db, id)

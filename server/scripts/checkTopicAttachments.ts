@@ -66,6 +66,21 @@ const moderationMigrationPath = resolve(serverRoot, 'database/migrations/2026081
 const messageModerationMigrationPath = resolve(serverRoot, 'database/migrations/20260812_001_create_topic_message_moderation.sql')
 const selfDeletionAuditMigrationPath = resolve(serverRoot, 'database/migrations/20260812_002_create_topic_message_self_deletion_audit.sql')
 const editMigrationPath = resolve(serverRoot, 'database/migrations/20260812_003_add_topic_message_editing.sql')
+// createTopicMessageStore() винаги prepare-ва statements срещу
+// topic_root_latest_seq (materialized "latest live seq per thread" индекс,
+// въведен след Custom Topic Creation) — трябва в схемата на ВСЯКА тест DB,
+// която извиква createTopicMessageStore() (database.prepare() е eager, при
+// store construction, не lazily при първо извикване).
+const rootLatestSeqMigrationPath = resolve(serverRoot, 'database/migrations/20260824_001_create_topic_root_latest_seq.sql')
+// createTopicModerationStore() (използван за attachment-reference-existence
+// block-а по-долу) винаги prepare-ва statements срещу topic_section_mutes и
+// topic_mute_evidence — трябва в схемата, иначе store construction хвърля
+// "no such table".
+const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260814_001_create_topic_section_mutes.sql')
+const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
+// topicModerationStore.ts чете/пише source_attachment_is_evidence_copy —
+// добавена от тази последваща миграция, не от базовата topic_mute_evidence CREATE.
+const muteEvidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
 
 let passed = 0
 let failed = 0
@@ -218,6 +233,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   await applyMigrationFile(db, editMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
 
   seedProfile(db, 'sender-1')
   seedProfile(db, 'sender-2')
@@ -477,6 +493,10 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, messageModerationMigrationPath)
   await applyMigrationFile(db, selfDeletionAuditMigrationPath)
   await applyMigrationFile(db, editMigrationPath)
+  await applyMigrationFile(db, sectionMutesMigrationPath)
+  await applyMigrationFile(db, muteEvidenceMigrationPath)
+  await applyMigrationFile(db, muteEvidenceAttachmentCopyMigrationPath)
+  await applyMigrationFile(db, rootLatestSeqMigrationPath)
   db.prepare(`INSERT INTO accounts (account_id) VALUES ('moderator-1')`).run()
   seedProfile(db, 'sender-1')
   insertTopic(db, { topicId: 'topic-live', slug: 'topic-live', title: 'Жива тема' })

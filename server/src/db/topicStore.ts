@@ -5,6 +5,9 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export type TopicStatus = 'active' | 'locked' | 'removed'
 
+/** Mirror на authStore.AccountRoleValue — дублирано локално (не import-нато), за да не въвежда нова cross-module зависимост в topicStore.ts заради едно поле; виж CHECK constraint-а в 20260901_001_add_created_by_role_to_topics.sql за authoritative списъка. */
+export type TopicAuthorRoleSnapshot = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+
 export type TopicSnapshot = {
   topicId: string
   slug: string
@@ -40,7 +43,7 @@ export type TopicStore = {
    * уникален по конструкция) НЕ е duplicate defense тук — единствената
    * защита е тази транзакция.
    */
-  createTopic: (input: { title: string; createdByProfileId: string }) => CreateTopicResult
+  createTopic: (input: { title: string; createdByProfileId: string; createdByRole: TopicAuthorRoleSnapshot }) => CreateTopicResult
   /**
    * Cross-instance realtime cursor (mirror на lobbyChatStore.pollNewMessages
    * / topicMessageStore.pollNewMessages) — multiple PM2 процеса споделят
@@ -148,8 +151,8 @@ export async function createTopicStore(databaseFilePath: string): Promise<TopicS
   `)
 
   const insertTopicStatement = database.prepare(`
-    INSERT INTO topics (topic_id, slug, title, description, is_general, created_by_profile_id, status, sort_order)
-    VALUES (?, ?, ?, NULL, 0, ?, 'active', 0);
+    INSERT INTO topics (topic_id, slug, title, description, is_general, created_by_profile_id, status, sort_order, created_by_role)
+    VALUES (?, ?, ?, NULL, 0, ?, 'active', 0, ?);
   `)
 
   // rowid-based cursor — гарантирано insertion-order монотонен (за разлика
@@ -198,7 +201,7 @@ export async function createTopicStore(databaseFilePath: string): Promise<TopicS
     return String(row.maxRowid)
   }
 
-  function createTopic(input: { title: string; createdByProfileId: string }): CreateTopicResult {
+  function createTopic(input: { title: string; createdByProfileId: string; createdByRole: TopicAuthorRoleSnapshot }): CreateTopicResult {
     const normalizedTitle = input.title.trim().toLowerCase()
     const topicId = randomUUID()
 
@@ -217,7 +220,7 @@ export async function createTopicStore(databaseFilePath: string): Promise<TopicS
       }
       // slug = topic_id (UUID) — уникален по конструкция, чисто вътрешен
       // uniqueness key, никога показван в UI (виж TopicSnapshot.slug usage).
-      insertTopicStatement.run(topicId, topicId, input.title, input.createdByProfileId)
+      insertTopicStatement.run(topicId, topicId, input.title, input.createdByProfileId, input.createdByRole)
       database.exec('COMMIT;')
     } catch (error) {
       database.exec('ROLLBACK;')

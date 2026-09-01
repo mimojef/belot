@@ -5,6 +5,36 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export const LAFCHE_TOPIC_ID = 'topic-lafche'
 
+/**
+ * Единственият authoritative списък с роли, чиито теми НИКОГА не влизат в
+ * 72h inactivity victim set-а (само ръчен "кошче" hard delete може да ги
+ * премахне) — реферира се и от SQL exclusion-а в findInactivityCandidates,
+ * и от isTopicAutoDeleteExemptByAuthorRole по-долу, за да няма дублиран
+ * role list на две места. Стойността се сравнява срещу
+ * `topics.created_by_role` — immutable snapshot, captured ЕДИНСТВЕНО в
+ * момента на създаване (topicStore.createTopic), никога derived от текущата
+ * роля на автора при cleanup run-а.
+ */
+export const TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES = [
+  'admin',
+  'subadmin',
+  'chat_admin',
+  'top_chat_admin',
+  'pika_team',
+] as const
+
+/**
+ * Race/promotion-immune по конструкция — вход е persisted snapshot
+ * стойността (`topics.created_by_role`), НЕ live lookup към текущата роля
+ * на профила. `null` (legacy теми, създадени преди тази колона да
+ * съществува, или системни topic-general/topic-lafche редове) се третира
+ * като "не е доказано privileged" ⇒ НЕ exempt — най-консервативният избор,
+ * виж migration коментара в 20260901_001_add_created_by_role_to_topics.sql.
+ */
+export function isTopicAutoDeleteExemptByAuthorRole(createdByRole: string | null): boolean {
+  return createdByRole !== null && (TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES as readonly string[]).includes(createdByRole)
+}
+
 export type HardDeleteTopicReason = 'inactivity_expired' | 'manual_moderation_delete'
 
 export type HardDeleteTopicActorRole = 'admin' | 'subadmin' | 'pika_team' | 'top_chat_admin'
@@ -121,7 +151,16 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
   //   - is_general=1 (Общ чат) и LAFCHE_TOPIC_ID literal (Лафче) — scope §1;
   //   - status != 'active' И != 'locked' (removed теми вече са извън normal
   //     lifecycle, покрити от съществуващия 180-дневен purge) — locked теми
-  //     СА eligible (lock блокира само писане, не е lifecycle state).
+  //     СА eligible (lock блокира само писане, не е lifecycle state);
+  //   - created_by_role IN TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES — теми,
+  //     създадени от privileged автор (snapshot В МОМЕНТА НА СЪЗДАВАНЕ, виж
+  //     isTopicAutoDeleteExemptByAuthorRole по-горе) — изключени ДИРЕКТНО в
+  //     candidate query-то (не select-then-skip извън транзакцията), за да
+  //     никога не влизат в victim set-а изобщо. NULL (legacy/системни редове)
+  //     НЕ се третира като exempt — само explicit-persisted privileged роля
+  //     protect-ва.
+  const TOPIC_AUTO_DELETE_EXEMPT_ROLE_PLACEHOLDERS = TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES.map(() => '?').join(', ')
+
   const selectInactivityCandidatesStatement = database.prepare(`
     SELECT t.topic_id as topicId, m.created_at as lastActivityAt
     FROM topics t
@@ -131,13 +170,19 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
       AND t.topic_id != ?
       AND t.status IN ('active', 'locked')
       AND m.created_at <= ?
+      AND (t.created_by_role IS NULL OR t.created_by_role NOT IN (${TOPIC_AUTO_DELETE_EXEMPT_ROLE_PLACEHOLDERS}))
     ORDER BY t.topic_id ASC
     LIMIT ?;
   `)
 
   function findInactivityCandidates(cutoff: Date, limit: number): InactivityCandidate[] {
     const cutoffStr = toSqliteDateTimeString(cutoff)
-    const rows = selectInactivityCandidatesStatement.all(LAFCHE_TOPIC_ID, cutoffStr, limit) as Array<{
+    const rows = selectInactivityCandidatesStatement.all(
+      LAFCHE_TOPIC_ID,
+      cutoffStr,
+      ...TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES,
+      limit,
+    ) as Array<{
       topicId: string
       lastActivityAt: string
     }>

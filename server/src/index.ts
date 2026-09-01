@@ -19236,12 +19236,24 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        // Immutable role-at-creation snapshot (mirror на sender_role
+        // конвенцията за topic_messages) — captured ТУК, веднъж, никога
+        // re-derived от текуща роля по-късно. Единствената консумация е
+        // 72h auto-delete exemption guard-а (findInactivityCandidates в
+        // topicHardDeleteService.ts) — по-късна промотиране/демотиране на
+        // автора НЕ променя вече записаната стойност.
+        const creatorRole = authStore.getAccountRoleForProfile(creatorProfileId) ?? 'player'
+
         // Duplicate-check + insert е ЕДНА атомична BEGIN IMMEDIATE транзакция
         // вътре в topicStore.createTopic — виж коментара там за пълния
         // concurrency rationale. Две едновременни create заявки със same
         // normalized title НЕ могат и двете да минат — SQLite writer lock-ът
         // сериализира ги.
-        const result = topicStore.createTopic({ title: validation.title, createdByProfileId: creatorProfileId })
+        const result = topicStore.createTopic({
+          title: validation.title,
+          createdByProfileId: creatorProfileId,
+          createdByRole: creatorRole,
+        })
 
         if (!result.ok) {
           sendTopicCreateError('topic_title_exists', 'Вече има тема с такова име.')
