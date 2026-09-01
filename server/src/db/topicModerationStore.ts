@@ -219,13 +219,22 @@ export type TopicModerationStore = {
   /** Връща storage filenames-ите на ВСИЧКИ attachments в темата — reusable helper (тестове/diagnostics), НЕ нужен за normal delete flow (deleteTopic вече го извиква вътрешно). */
   getAttachmentFilenamesForTopic: (topicId: string) => string[]
   /**
-   * Atomic whole-topic delete — В ЕДНА BEGIN IMMEDIATE транзакция: hard-delete
+   * Atomic whole-topic SOFT delete — В ЕДНА BEGIN IMMEDIATE транзакция: hard-delete
    * на всички topic_message_attachments redovete + insert на съответните
    * cleanup queue jobs (topic_message_attachment_deletions), после topic/
    * messages soft-delete + audit ред. `deletedAttachmentFilenames` връща
    * точно кои filenames са били hard-deleted (за caller-ово logging/broadcast,
    * queue insertion-ът вече е станал вътре в транзакцията, caller-ът НЕ
    * трябва да enqueue-ва повторно).
+   *
+   * ЗАБЕЛЕЖКА (corrective pass): manual "кошче" root-topic delete в index.ts
+   * (handleTopicDeleteRequest) вече НЕ вика тази функция — вика директно
+   * topicHardDeleteService.hardDeleteTopic() (единна транзакция, без
+   * persisted status='removed' intermediate state, виж коментара там).
+   * Тази функция остава валиден primitive за: (а) съществуващите store-level
+   * тестове, (б) евентуален бъдещ soft-delete-first caller, ако продуктово
+   * потрябва такъв. purgeRemovedTopicsBefore() по-долу остава authoritative
+   * fallback purge за legacy/друг legitimate 'removed' redове.
    */
   deleteTopic: (input: {
     topicId: string

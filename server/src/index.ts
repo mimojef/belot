@@ -51,6 +51,7 @@ import {
   type TopicMuteEvidenceSourceKind,
   type TopicMuteEvidenceReasonCategory,
 } from './db/topicModerationStore.js'
+import { createTopicHardDeleteService } from './db/topicHardDeleteService.js'
 import {
   validateLobbyChatBody,
   countUnicodeCodePoints,
@@ -712,6 +713,7 @@ const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
 const topicMessageStore = await createTopicMessageStore(databaseBootstrap.databaseFilePath)
 const topicReadStateStore = await createTopicReadStateStore(databaseBootstrap.databaseFilePath)
 const topicModerationStore = await createTopicModerationStore(databaseBootstrap.databaseFilePath)
+const topicHardDeleteService = await createTopicHardDeleteService(databaseBootstrap.databaseFilePath)
 
 // ─── Общ лайв чат в лобито (broadcast към абонирани connection-и) ───────────
 //
@@ -2722,6 +2724,124 @@ let topicRetentionPurgeStartupTimeout: ReturnType<typeof setTimeout> | null = se
 let topicRetentionPurgeInterval: ReturnType<typeof setInterval> | null = setInterval(
   runTopicRetentionPurge,
   TOPIC_RETENTION_PURGE_INTERVAL_MS,
+)
+
+// ─── 72-часов inactivity hard-delete cleanup за "Теми" ──────────────────────
+//
+// Различен lifecycle от runTopicRetentionPurge по-горе (180-дневен purge на
+// ВЕЧЕ soft-deleted/removed теми) — този job hard-delete-ва теми, които
+// НИКОГА не са били moderator-removed, само защото нямат жива активност >72ч
+// (spec: "lastActivityAt = timestamp на последната публикация/reply в темата,
+// или created_at на root-а ако няма replies"). Използва СЪЩИЯ canonical
+// topicHardDeleteService.hardDeleteTopic() primitive като manual "кошче"
+// flow-а (handleTopicDeleteRequest) — reason='inactivity_expired' вместо
+// 'manual_moderation_delete', и подава `inactivityCutoff` за race-safe final
+// re-validation ВЪТРЕ в самата delete транзакция (spec §8).
+const TOPIC_INACTIVITY_HOURS = 72
+const TOPIC_INACTIVITY_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
+const TOPIC_INACTIVITY_CLEANUP_STARTUP_DELAY_MS = 90 * 1000
+const TOPIC_INACTIVITY_CLEANUP_BATCH_SIZE = 200
+
+// Overlap guard — spec §6 explicit изисква "да не стартира второ изпълнение,
+// ако първото още върви" (за разлика от runTopicRetentionPurge по-горе,
+// който няма такъв guard — established convention там разчита на бързото
+// typично изпълнение; тук spec-ът explicit го изисква, затова го добавяме).
+let isTopicInactivityCleanupRunning = false
+
+async function runTopicInactivityCleanup(): Promise<void> {
+  if (isServerShuttingDown || isTopicInactivityCleanupRunning) {
+    return
+  }
+
+  isTopicInactivityCleanupRunning = true
+
+  const summary = {
+    scannedCandidates: 0,
+    deletedTopics: 0,
+    deletedRoots: 0,
+    deletedReplies: 0,
+    deletedAttachmentFiles: 0,
+    skippedNoLongerEligible: 0,
+    skippedProtected: 0,
+    errors: 0,
+  }
+
+  try {
+    const cutoff = new Date(Date.now() - TOPIC_INACTIVITY_HOURS * 60 * 60 * 1000)
+
+    // Bounded batch loop (mirror на purgeRemovedTopicsBefore established
+    // convention) — SELECT candidates (bulk, materialized-index-backed) →
+    // per-candidate hardDeleteTopic() (own re-validated transaction) → next
+    // batch, докато batch-ът е пълен. Единична грешна тема (throw вътре в
+    // hardDeleteTopic) НЕ прекъсва обработката на останалите (spec §6) —
+    // catch е ПО ТЕМА, не around целия loop.
+    for (;;) {
+      const candidates = topicHardDeleteService.findInactivityCandidates(cutoff, TOPIC_INACTIVITY_CLEANUP_BATCH_SIZE)
+      if (candidates.length === 0) {
+        break
+      }
+      summary.scannedCandidates += candidates.length
+
+      for (const candidate of candidates) {
+        if (isServerShuttingDown) {
+          break
+        }
+        try {
+          const result = topicHardDeleteService.hardDeleteTopic({
+            topicId: candidate.topicId,
+            reason: 'inactivity_expired',
+            inactivityCutoff: cutoff,
+          })
+
+          if (result.ok) {
+            summary.deletedTopics += 1
+            summary.deletedRoots += result.deletedRootCount
+            summary.deletedReplies += result.deletedReplyCount
+            summary.deletedAttachmentFiles += result.deletedAttachmentFilenames.length
+            // Same reconciliation path като manual delete (spec §11) — ако
+            // клиент на ТОЗИ instance в момента гледа/subscribed е за темата,
+            // трябва да получи 'topic_deleted', не да остане с ghost topic.
+            broadcastTopicDeletedToLocalSubscribers(candidate.topicId)
+          } else if (result.code === 'no_longer_eligible') {
+            summary.skippedNoLongerEligible += 1
+          } else if (result.code === 'protected_topic') {
+            summary.skippedProtected += 1
+          }
+          // 'not_found' — вече изтрита (напр. паралелен manual delete между
+          // candidate scan и това извикване) — idempotent no-op, не грешка.
+        } catch (error) {
+          summary.errors += 1
+          console.error(`[topics] Inactivity cleanup: грешка при hard-delete на ${candidate.topicId}:`, error)
+        }
+      }
+
+      if (candidates.length < TOPIC_INACTIVITY_CLEANUP_BATCH_SIZE) {
+        break
+      }
+    }
+  } catch (error) {
+    summary.errors += 1
+    console.error('[topics] Inactivity cleanup failed:', error)
+  } finally {
+    isTopicInactivityCleanupRunning = false
+  }
+
+  if (summary.scannedCandidates > 0 || summary.errors > 0) {
+    console.log(
+      `[topics] Inactivity cleanup run: scanned=${summary.scannedCandidates} deleted=${summary.deletedTopics} ` +
+      `roots=${summary.deletedRoots} replies=${summary.deletedReplies} attachmentFiles=${summary.deletedAttachmentFiles} ` +
+      `skippedNoLongerEligible=${summary.skippedNoLongerEligible} skippedProtected=${summary.skippedProtected} errors=${summary.errors}`,
+    )
+  }
+}
+
+let topicInactivityCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runTopicInactivityCleanup() },
+  TOPIC_INACTIVITY_CLEANUP_STARTUP_DELAY_MS,
+)
+let topicInactivityCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => { void runTopicInactivityCleanup() },
+  TOPIC_INACTIVITY_CLEANUP_INTERVAL_MS,
 )
 
 function msUntilNextSofiaMidnight(): number {
@@ -9785,28 +9905,57 @@ async function handleTopicDeleteRequest(
     return true
   }
 
-  // topicModerationStore.deleteTopic е canonical transaction owner — hard-
-  // delete на attachment redovete + queue insertion за физически cleanup
-  // стават В ЕДНА BEGIN IMMEDIATE транзакция ВЪТРЕ в store-а (виж коментара
-  // там), не отделни enqueue извиквания тук след commit. Никакъв прозорец
-  // между "DB reference изтрит" и "queue job insert-нат".
-  const result = topicModerationStore.deleteTopic({
+  // Единствен canonical delete primitive — НЯМА повече persisted
+  // status='removed' intermediate стъпка (corrective pass: старата
+  // two-step soft-delete-then-hard-delete имаше crash window, в който
+  // темата можеше да остане 'removed' до 180-дневния fallback purge, ако
+  // процесът умре между двете отделни connections/транзакции — вижте
+  // предишната версия на този коментар в git history за пълния rationale
+  // на защо това вече не е приемливо). topicHardDeleteService.hardDeleteTopic()
+  // прави ВСИЧКО в ЕДНА BEGIN IMMEDIATE транзакция: final existence/protected
+  // re-check, hard-delete на topics/topic_messages (CASCADE towards всичко
+  // dependent), hard-delete+enqueue на attachment redovete за физически
+  // cleanup, И persisted moderation audit ред (actor подаден, виж
+  // insertModerationAuditRowStatement коментара в topicHardDeleteService.ts
+  // — audit_log.topic_id няма FK, затова физически преживява DELETE FROM
+  // topics непокътнат — единственият persisted "кой/кога/защо" trail сега,
+  // откакто вече няма soft-deleted topics ред да го носи като context).
+  const hardDeleteResult = topicHardDeleteService.hardDeleteTopic({
     topicId,
-    actorAccountId: session.account.accountId,
-    actorRole: toTopicModeratorRole(session),
-    reason,
+    reason: 'manual_moderation_delete',
+    actor: { accountId: session.account.accountId, role: toTopicModeratorRole(session) },
+    auditReason: reason,
   })
 
-  if (!result.ok && result.code === 'not_found') {
-    sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
+  if (!hardDeleteResult.ok && hardDeleteResult.code === 'not_found') {
+    // Established idempotency convention (checkTopicModerationAuthRealtime.ts
+    // [G4]): повторен delete на ВЕЧЕ hard-deleted тема е 200, не 404 (desired
+    // end-state "темата я няма" вече е постигнат от предходен request) —
+    // но truly-invalid/никога-съществувал topicId продължава да е 404,
+    // разграничени тук САМО от протектираните теми (guard-нати по-горе
+    // separately). Нямаме tombstone state (explicit забранено), затова не
+    // можем перфектно да различим "никога не е съществувала" от "вече
+    // изтрита" — приемаме, че clients викат DELETE само за topicId, който
+    // реално са видели в directory listing-а си, значи not_found тук на
+    // практика means "вече изтрита" в established UX flow-а.
+    sendJsonResponse(res, 200, { ok: true, topicId })
     return true
   }
 
-  // already_removed третираме идентично на success навън — идемпотентно
-  // (брифа т.12), темата вече гарантирано е премахната при връщане 200.
-  if (result.ok) {
-    broadcastTopicDeletedToLocalSubscribers(topicId)
+  if (!hardDeleteResult.ok && hardDeleteResult.code === 'protected_topic') {
+    // Не би трябвало да е достижимо (LAFCHE_TOPIC_ID вече е guard-нат по-горе,
+    // is_general теми никога не минават през този endpoint), но ако все пак
+    // се случи — 403, темата остава напълно непокътната (hardDeleteTopic
+    // guard-ва ПРЕДИ каквато и да е мутация).
+    sendJsonResponse(res, 403, { ok: false, message: 'Тази тема не може да бъде изтрита.' })
+    return true
   }
+
+  if (hardDeleteResult.ok) {
+    console.log(`[topics] Manual hard delete: topic=${topicId} roots=${hardDeleteResult.deletedRootCount} replies=${hardDeleteResult.deletedReplyCount} attachments=${hardDeleteResult.deletedAttachmentFilenames.length}`)
+  }
+
+  broadcastTopicDeletedToLocalSubscribers(topicId)
 
   sendJsonResponse(res, 200, { ok: true, topicId })
   return true
@@ -19780,6 +19929,16 @@ function clearMutationTimersForShutdown(): void {
   if (topicRetentionPurgeStartupTimeout !== null) {
     clearTimeout(topicRetentionPurgeStartupTimeout)
     topicRetentionPurgeStartupTimeout = null
+  }
+
+  if (topicInactivityCleanupInterval !== null) {
+    clearInterval(topicInactivityCleanupInterval)
+    topicInactivityCleanupInterval = null
+  }
+
+  if (topicInactivityCleanupStartupTimeout !== null) {
+    clearTimeout(topicInactivityCleanupStartupTimeout)
+    topicInactivityCleanupStartupTimeout = null
   }
 
   if (topicAttachmentOrphanScanInterval !== null) {
