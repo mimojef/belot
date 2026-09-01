@@ -91,7 +91,7 @@ classify_path() {
       echo "backend" ;;
     public/*)
       echo "frontend" ;;
-    docs/*|deploy/*|legacy/*|scripts/*|server/scripts/*|*.md|CLAUDE.md|.gitignore|.env.example)
+    docs/*|deploy/*|legacy/*|scripts/*|server/scripts/*|*.md|CLAUDE.md|.gitignore|.env.example|server/.env.example)
       echo "non-runtime" ;;
     *)
       echo "unclassified" ;;
