@@ -1243,6 +1243,7 @@ export type RenderLobbyScreenOptions = {
   onAdminRegisteredProfilesOpen?: (period: 'today' | 'yesterday' | 'all') => void
   onAdminRegisteredProfilesClose?: () => void
   onAdminRegisteredProfilesPageChange?: (direction: 'prev' | 'next') => void
+  onAdminRegisteredProfilesProfileClick?: (profileId: string) => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
@@ -15450,6 +15451,12 @@ export function renderLobbyScreen(
       if (direction === 'prev' || direction === 'next') {
         options.onAdminRegisteredProfilesPageChange?.(direction)
       }
+    })
+  })
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-registered-profiles-open-profile]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminRegisteredProfilesOpenProfile?.trim() ?? ''
+      if (profileId) options.onAdminRegisteredProfilesProfileClick?.(profileId)
     })
   })
 

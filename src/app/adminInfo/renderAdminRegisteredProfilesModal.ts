@@ -88,7 +88,13 @@ export function renderAdminRegisteredProfilesModal(
         <tr>
           <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.65);white-space:nowrap;border-bottom:1px solid rgba(255,255,255,0.06);">${esc(fmtDate(r.createdAt))}</td>
           <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.65);white-space:nowrap;border-bottom:1px solid rgba(255,255,255,0.06);">${esc(fmtTime(r.createdAt))}</td>
-          <td style="padding:8px 10px;font-size:12px;color:${nameColor};font-weight:700;border-bottom:1px solid rgba(255,255,255,0.06);word-break:break-word;">${esc(username)}${riskBadge}</td>
+          <td style="padding:8px 10px;font-size:12px;border-bottom:1px solid rgba(255,255,255,0.06);word-break:break-word;">
+            <button
+              type="button"
+              data-admin-registered-profiles-open-profile="${esc(r.profileId)}"
+              style="background:none;border:none;padding:0;margin:0;cursor:pointer;font:inherit;font-size:12px;color:${nameColor};font-weight:700;text-decoration:underline;text-underline-offset:2px;text-align:left;"
+            >${esc(username)}</button>${riskBadge}
+          </td>
           <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.55);border-bottom:1px solid rgba(255,255,255,0.06);word-break:break-word;">${esc(email)}</td>
         </tr>
       `

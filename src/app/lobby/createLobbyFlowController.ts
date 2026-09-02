@@ -5880,6 +5880,16 @@ export function createLobbyFlowController(
         state.adminRegisteredProfilesModal = null
         render()
       },
+      onAdminRegisteredProfilesProfileClick: (profileId) => {
+        // Затваря "Регистрирани профили" модала и отваря съществуващия
+        // normal profile popup за profileId-то на реда — reuse-ва СЪЩАТА
+        // "отвори чужд профил по id" функция като onRiskLinkedProfileClick
+        // по-долу (canonical fetch, same access-block/friendship gate; ако
+        // profile-ът е risk_detected, "Свързани профили" секцията в попъпа
+        // се зарежда automatically чрез съществуващия ensure-lazy-load flow).
+        state.adminRegisteredProfilesModal = null
+        void openProtectedProfileById(profileId)
+      },
       onAdminVisitorsPeriodClick: (period) => {
         if (period === 'today' || period === 'yesterday' || period === '7d' || period === '30d') {
           state.adminVisitorsPeriod = period
