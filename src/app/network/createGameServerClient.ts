@@ -471,6 +471,12 @@ export type AdminRegisteredProfileRow = {
   /** Само когато viewer-ът е пълен admin — виж handleAdminRegisteredProfilesListRequest в server/src/index.ts. */
   riskDetected?: boolean
   linkedProfilesCount?: number
+  /**
+   * false = linkedProfilesCount е груб/частичен (профилът е бил намерен
+   * само indirectly, като linked partner на друг target) — UI НЕ трябва да
+   * показва числото като точно. true/undefined = точен резултат.
+   */
+  riskCheckComplete?: boolean
 }
 
 /** Detailed "Свързани профили" ред — on-demand fetch при profile popup click (само пълен admin). */

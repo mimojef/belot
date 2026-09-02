@@ -6,6 +6,15 @@ export type CachedProfileRiskCheck = {
   checkedAt: string
   riskDetected: boolean
   linkedProfilesCount: number
+  /**
+   * true = резултат от директен/пълен анализ на ТОЗИ профил като target —
+   * linkedProfilesCount е точен. false = профилът е бил upsert-нат само
+   * indirectly, като linked partner на друг target (spec §6 логиката по-
+   * долу) — risk_detected е сигурен, но linkedProfilesCount е частичен/груб
+   * и НЕ трябва да се показва като точен, нито редът да се третира като
+   * "вече проверен" при следващ list fetch.
+   */
+  checkComplete: boolean
 }
 
 export type DetailedLinkedProfileRow = {
@@ -25,12 +34,20 @@ export type AdminProfileRiskStore = {
    */
   getCachedChecks: (profileIds: ProfileId[]) => Map<ProfileId, CachedProfileRiskCheck>
   /**
-   * За всеки target profile id БЕЗ вече съществуващ cache ред: намира дали
-   * споделя anonymous_visitor_id с друг профил (site_visit_events), и ако
-   * да — маркира И target-а, И всеки намерен "linked partner" като
-   * risk_detected=1 (spec §6 — старият профил light-ва се червено веднага
-   * щом нов свързан профил бъде открит, без explicit recheck на стария).
-   * Bounded batch заявки (не 1 SELECT per profile).
+   * За всеки target profile id БЕЗ вече завършен (check_complete=1) cache
+   * ред: намира дали споделя anonymous_visitor_id с друг профил
+   * (site_visit_events), и ако да — маркира И target-а (check_complete=1,
+   * точен count), И всеки намерен "linked partner" (check_complete=0, груб
+   * count) като risk_detected=1 (spec §6 — старият профил light-ва се
+   * червено веднага щом нов свързан профил бъде открит, без explicit
+   * recheck на стария). Ред с check_complete=0 се третира като "unchecked"
+   * тук — получава собствен full analysis следващия път, когато самият той
+   * е в target batch-а. Това важи и за ред, който преди е бил
+   * check_complete=1 — ако по-късно нов профил бъде открит indirectly
+   * свързан с него, старият (евентуално точен) resultat вече е stale и
+   * indirect upsert-ът explicit го връща обратно към check_complete=0 (виж
+   * upsertIndirectPartnerStatement) — self-heal-ва се при следващ list
+   * fetch. Bounded batch заявки (не 1 SELECT per profile).
    */
   computeAndCacheRiskForProfiles: (targetProfileIds: ProfileId[]) => void
   /** Forced recheck за един профил — презаписва cache реда му, после same upsert логика за linked partners. Ползва се от "Провери отново". */
@@ -55,24 +72,47 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec('PRAGMA busy_timeout = 5000;')
 
-  const upsertCheckStatement = database.prepare(`
-    INSERT INTO admin_profile_risk_checks (profile_id, checked_at, risk_detected, linked_profiles_count)
-    VALUES (?, CURRENT_TIMESTAMP, ?, ?)
+  // check_complete=1 — директен/пълен анализ (target на computeAndUpsert).
+  const upsertCompleteCheckStatement = database.prepare(`
+    INSERT INTO admin_profile_risk_checks (profile_id, checked_at, risk_detected, linked_profiles_count, check_complete)
+    VALUES (?, CURRENT_TIMESTAMP, ?, ?, 1)
     ON CONFLICT (profile_id) DO UPDATE SET
       checked_at = CURRENT_TIMESTAMP,
       risk_detected = excluded.risk_detected,
-      linked_profiles_count = excluded.linked_profiles_count;
+      linked_profiles_count = excluded.linked_profiles_count,
+      check_complete = 1;
+  `)
+
+  // check_complete=0 — indirect partner upsert (spec §6): risk_detected е
+  // сигурен, linked_profiles_count е частичен/груб, редът трябва да остане
+  // (или СТАНЕ) "unchecked" за следващия list fetch (виж
+  // computeAndCacheRiskForProfiles). Извикваме тази statement-а САМО когато
+  // computeAndUpsert вече е решил (виж shouldInvalidateExistingCompletePartner),
+  // че конкретният partner трябва да бъде invalidated — за partner БЕЗ
+  // съществуващ ред, или с check_complete=0 вече, или с check_complete=1 но
+  // shared evidence-ът е по-нов от последния му successful check (round 3
+  // fix — предотвратява безкраен ping-pong между два fully-checked
+  // профила, чиято evidence вече е била включена в двата им checks).
+  const upsertIndirectPartnerStatement = database.prepare(`
+    INSERT INTO admin_profile_risk_checks (profile_id, checked_at, risk_detected, linked_profiles_count, check_complete)
+    VALUES (?, CURRENT_TIMESTAMP, 1, ?, 0)
+    ON CONFLICT (profile_id) DO UPDATE SET
+      checked_at = CURRENT_TIMESTAMP,
+      risk_detected = 1,
+      linked_profiles_count = excluded.linked_profiles_count,
+      check_complete = 0;
   `)
 
   const deleteCheckStatement = database.prepare(`
     DELETE FROM admin_profile_risk_checks WHERE profile_id = ?;
   `)
 
-  function toCachedCheck(row: { checked_at: string; risk_detected: number; linked_profiles_count: number }): CachedProfileRiskCheck {
+  function toCachedCheck(row: { checked_at: string; risk_detected: number; linked_profiles_count: number; check_complete: number }): CachedProfileRiskCheck {
     return {
       checkedAt: row.checked_at,
       riskDetected: row.risk_detected === 1,
       linkedProfilesCount: row.linked_profiles_count,
+      checkComplete: row.check_complete === 1,
     }
   }
 
@@ -86,7 +126,7 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
 
     const placeholders = uniqueIds.map(() => '?').join(', ')
     const rows = database.prepare(`
-      SELECT profile_id, checked_at, risk_detected, linked_profiles_count
+      SELECT profile_id, checked_at, risk_detected, linked_profiles_count, check_complete
       FROM admin_profile_risk_checks
       WHERE profile_id IN (${placeholders})
     `).all(...uniqueIds) as Array<{
@@ -94,6 +134,7 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
       checked_at: string
       risk_detected: number
       linked_profiles_count: number
+      check_complete: number
     }>
 
     for (const row of rows) {
@@ -155,6 +196,37 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
     return result
   }
 
+  // Batch намира latest_shared_evidence_at = MAX(occurred_at) ЗА ВСЕКИ
+  // visitor_id (round 3 fix — "по-ново от последния full check" критерий).
+  // Важно: MAX-ът е per VISITOR ID, не per profile_id — "shared evidence"
+  // за (target, partner) двойката е доказано от самото съществуване на
+  // visitor id-то, независимо кой от двата профила го е генерирал най-
+  // скоро (напр. target посещава СЕГА със същия browser identity, който
+  // partner-ът е ползвал преди — това Е ново evidence за връзката, дори
+  // partner-ът самият да няма нов ред). Ако считахме MAX per-profile тук,
+  // ново посещение само от target-а никога не би "освежило" връзката към
+  // partner-а, и последният remain stuck incomplete forever. Scoped само
+  // към visitorIds, подадени от вика (обичайно малка bounded група), не
+  // global scan. Ползва СЪЩИЯ idx_site_visit_events_visitor_time индекс
+  // като findProfilesForVisitorIds.
+  function findLatestEvidenceAtForVisitorIds(visitorIds: string[]): Map<string, string> {
+    const result = new Map<string, string>()
+    if (visitorIds.length === 0) return result
+
+    const placeholders = visitorIds.map(() => '?').join(', ')
+    const rows = database.prepare(`
+      SELECT anonymous_visitor_id, MAX(occurred_at) AS latestEvidenceAt
+      FROM site_visit_events
+      WHERE anonymous_visitor_id IN (${placeholders})
+      GROUP BY anonymous_visitor_id
+    `).all(...visitorIds) as Array<{ anonymous_visitor_id: string; latestEvidenceAt: string }>
+
+    for (const row of rows) {
+      result.set(row.anonymous_visitor_id, row.latestEvidenceAt)
+    }
+    return result
+  }
+
   /**
    * Централна изчислителна логика, споделена от computeAndCacheRiskForProfiles
    * и recheckSingleProfile — за дадени target profile ids (вече знаем, че
@@ -185,11 +257,17 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
     // explicit позволява груба стойност, детайлният breakdown идва от
     // getDetailedLinkedProfiles при popup click).
     const linkedPartnerIds = new Set<ProfileId>()
+    // partnerId -> Set от visitor ids, които реално го свързват с explicit
+    // target(и) от batch-а (round 3 fix — нужно за latest-evidence
+    // сравнението по-долу: искаме MAX(occurred_at) само измежду visitor
+    // ids-ата, доказващи ИМЕННО тази partner връзка, не произволен друг
+    // visitor id на target-а без връзка към partner-а).
+    const sharedVisitorIdsByPartner = new Map<ProfileId, Set<string>>()
 
     for (const targetProfileId of targetProfileIds) {
       const visitorIds = visitorIdsByTarget.get(targetProfileId)
       if (!visitorIds || visitorIds.size === 0) {
-        upsertCheckStatement.run(targetProfileId, 0, 0)
+        upsertCompleteCheckStatement.run(targetProfileId, 0, 0)
         continue
       }
 
@@ -200,30 +278,78 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
         for (const otherProfileId of profilesForVisitor) {
           if (otherProfileId !== targetProfileId) {
             linkedForTarget.add(otherProfileId)
+            let sharedSet = sharedVisitorIdsByPartner.get(otherProfileId)
+            if (!sharedSet) {
+              sharedSet = new Set<string>()
+              sharedVisitorIdsByPartner.set(otherProfileId, sharedSet)
+            }
+            sharedSet.add(visitorId)
           }
         }
       }
 
       if (linkedForTarget.size === 0) {
-        upsertCheckStatement.run(targetProfileId, 0, 0)
+        upsertCompleteCheckStatement.run(targetProfileId, 0, 0)
         continue
       }
 
-      upsertCheckStatement.run(targetProfileId, 1, linkedForTarget.size)
+      // Директен анализ на targetProfileId самия — check_complete=1, точен count.
+      upsertCompleteCheckStatement.run(targetProfileId, 1, linkedForTarget.size)
       for (const partnerId of linkedForTarget) {
         linkedPartnerIds.add(partnerId)
       }
     }
 
     // Upsert-ни linked partner-ите, които НЕ бяха самите те в target batch-а
-    // (тези вече бяха upsert-нати по-горе с точен linkedForTarget count).
-    // linked_profiles_count тук е грубо "поне 1" — точното число не е
-    // критично на този етап (виж doc-коментара по-горе), само risk_detected
-    // трябва да светне надеждно.
+    // (тези вече бяха upsert-нати по-горе с точен linkedForTarget count —
+    // targetSet.has(partnerId) guard-ът по-долу гарантира, че explicit
+    // target от ТОЗИ batch никога не се downgrade-ва обратно към
+    // check_complete=0 от indirect upsert-а, дори ако е и нечий linked
+    // partner). check_complete=0 — linked_profiles_count тук е грубо
+    // "поне 1", НЕ точен.
+    //
+    // Round 3 fix: partner, който вече е check_complete=1 (fully checked
+    // по-рано), се invalidate-ва САМО ако latest_shared_evidence_at (MAX
+    // occurred_at измежду visitor ids-ата, реално свързващи partner-а с
+    // target-а — виж sharedVisitorIdsByPartner) е СТРОГО по-нов от
+    // последния му successful check (checked_at). Ако evidence-ът е
+    // same-or-older, неговият предишен full check вече е "видял" тази
+    // връзка — invalidate-ването тук би създало безкраен ping-pong между
+    // два fully-checked профила, чийто shared evidence не се променя (виж
+    // производствения инцидент: A и X се гонеха между отделни list
+    // fetch-ове/дни без никаква нова връзка). Partner БЕЗ cache ред или
+    // вече check_complete=0 продължава да се upsert-ва безусловно (случаи
+    // 1/2 от spec-а).
     const targetSet = new Set(targetProfileIds)
-    for (const partnerId of linkedPartnerIds) {
-      if (targetSet.has(partnerId)) continue
-      upsertCheckStatement.run(partnerId, 1, 1)
+    const partnerIdsToConsider = [...linkedPartnerIds].filter((id) => !targetSet.has(id))
+    const existingPartnerChecks = getCachedChecks(partnerIdsToConsider)
+    const latestEvidenceAtByVisitorId = allVisitorIds.size > 0
+      ? findLatestEvidenceAtForVisitorIds([...allVisitorIds])
+      : new Map<string, string>()
+
+    for (const partnerId of partnerIdsToConsider) {
+      const existing = existingPartnerChecks.get(partnerId)
+      if (existing !== undefined && existing.checkComplete) {
+        const sharedVisitorIds = sharedVisitorIdsByPartner.get(partnerId)
+        let latestSharedEvidenceAt: string | null = null
+        if (sharedVisitorIds) {
+          for (const visitorId of sharedVisitorIds) {
+            const at = latestEvidenceAtByVisitorId.get(visitorId)
+            if (at !== undefined && (latestSharedEvidenceAt === null || at > latestSharedEvidenceAt)) {
+              latestSharedEvidenceAt = at
+            }
+          }
+        }
+        // latestSharedEvidenceAt отсъства само ако по някаква причина
+        // sharedVisitorIdsByPartner е празен за partner-а — не би трябвало
+        // да се случи тук (той е в linkedPartnerIds точно защото имаше поне
+        // един shared visitor id), но defensive: без evidence timestamp не
+        // можем да докажем "по-ново", затова НЕ invalidate-ваме.
+        if (latestSharedEvidenceAt === null || latestSharedEvidenceAt <= existing.checkedAt) {
+          continue
+        }
+      }
+      upsertIndirectPartnerStatement.run(partnerId, 1)
     }
   }
 
@@ -232,10 +358,18 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
     if (uniqueIds.length === 0) return
 
     const alreadyCached = getCachedChecks(uniqueIds)
-    const uncachedIds = uniqueIds.filter((id) => !alreadyCached.has(id))
-    if (uncachedIds.length === 0) return
+    // "Вече проверен" = има cache ред И check_complete=1 (директен/пълен
+    // анализ). Ред с check_complete=0 (само indirect partner upsert от чужд
+    // target — виж computeAndUpsert) НЕ се брои за проверен тук, за да
+    // получи собствен full analysis следващия път, когато самият той стане
+    // target в list fetch — точно root cause fix-ът за production bug-а.
+    const uncheckedIds = uniqueIds.filter((id) => {
+      const cached = alreadyCached.get(id)
+      return cached === undefined || !cached.checkComplete
+    })
+    if (uncheckedIds.length === 0) return
 
-    computeAndUpsert(uncachedIds)
+    computeAndUpsert(uncheckedIds)
   }
 
   function recheckSingleProfile(targetProfileId: ProfileId): CachedProfileRiskCheck {
@@ -245,12 +379,12 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
     computeAndUpsert([targetProfileId])
 
     const row = database.prepare(`
-      SELECT checked_at, risk_detected, linked_profiles_count
+      SELECT checked_at, risk_detected, linked_profiles_count, check_complete
       FROM admin_profile_risk_checks
       WHERE profile_id = ?
-    `).get(targetProfileId) as { checked_at: string; risk_detected: number; linked_profiles_count: number } | undefined
+    `).get(targetProfileId) as { checked_at: string; risk_detected: number; linked_profiles_count: number; check_complete: number } | undefined
 
-    return row ? toCachedCheck(row) : { checkedAt: new Date().toISOString(), riskDetected: false, linkedProfilesCount: 0 }
+    return row ? toCachedCheck(row) : { checkedAt: new Date().toISOString(), riskDetected: false, linkedProfilesCount: 0, checkComplete: true }
   }
 
   function getDetailedLinkedProfiles(targetProfileId: ProfileId): DetailedLinkedProfileRow[] {

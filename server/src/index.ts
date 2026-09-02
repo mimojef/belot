@@ -15050,6 +15050,10 @@ async function handleAdminRegisteredProfilesListRequest(
         ...row,
         riskDetected: check?.riskDetected ?? false,
         linkedProfilesCount: check?.linkedProfilesCount ?? 0,
+        // false, ако cache редът е само indirect partner upsert (виж
+        // adminProfileRiskStore.computeAndUpsert) — UI не трябва да показва
+        // linkedProfilesCount като точен в този случай.
+        riskCheckComplete: check?.checkComplete ?? true,
       }
     })
     sendJsonResponse(res, 200, { ok: true, period: periodParam, rows: annotatedRows, totalCount, page })

@@ -81,8 +81,16 @@ export function renderAdminRegisteredProfilesModal(
       // отсъстват, редът рендерира нормално без risk индикация.
       const isRisky = r.riskDetected === true
       const nameColor = isRisky ? '#ef4444' : '#ffffff'
+      // riskCheckComplete===false = профилът е бил намерен само indirectly
+      // (linked partner на друг target) — linkedProfilesCount е груб/частичен,
+      // НЕ показвай го като точен (production QA fix). Показваме кратък
+      // badge без число вместо това; след като профилът получи собствен full
+      // analysis (следващ list fetch, докато самият той е в target batch-а),
+      // riskCheckComplete става true и точното "Свързани: N" се показва.
       const riskBadge = isRisky
-        ? `<span style="margin-left:8px;font-size:10px;font-weight:800;color:#ef4444;background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.45);border-radius:999px;padding:2px 8px;white-space:nowrap;">Свързани: ${r.linkedProfilesCount ?? 0}</span>`
+        ? (r.riskCheckComplete === false
+          ? `<span style="margin-left:8px;font-size:10px;font-weight:800;color:#ef4444;background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.45);border-radius:999px;padding:2px 8px;white-space:nowrap;">Свързан профил</span>`
+          : `<span style="margin-left:8px;font-size:10px;font-weight:800;color:#ef4444;background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.45);border-radius:999px;padding:2px 8px;white-space:nowrap;">Свързани: ${r.linkedProfilesCount ?? 0}</span>`)
         : ''
       return `
         <tr>

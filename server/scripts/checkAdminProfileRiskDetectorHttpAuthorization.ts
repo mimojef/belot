@@ -279,7 +279,24 @@ try {
   const adminCookie = await login(port, adminCandidate.email)
   const subadminCookie = await login(port, subadminCandidate.email)
 
-  console.log('  Регистрирани: player, linkedA, linkedB (споделят visitor id), clean (без risk), admin, subadmin.')
+  const linkedC = await register(port, runId, 'linkedc')
+  // За cache-invalidation сценариите (А/Б/В по-долу): staleCleanA беше
+  // fully-checked и clean, staleRiskyA беше fully-checked с точен стар count,
+  // batchA/batchX са explicit targets в ЕДИН batch (проверка на sequencing-а).
+  const staleCleanA = await register(port, runId, 'stalecleana')
+  const staleCleanX = await register(port, runId, 'stalecleanx')
+  const staleRiskyA = await register(port, runId, 'staleriskya')
+  const staleRiskyOld = await register(port, runId, 'staleriskyold')
+  const staleRiskyX = await register(port, runId, 'staleriskyx')
+  const batchA = await register(port, runId, 'batcha')
+  const batchX = await register(port, runId, 'batchx')
+  // Round 3 fix (no-ping-pong): noPingA/noPingX ще бъдат fully checked
+  // ПОСЛЕ evidence-ът им е seed-нат — двата fetch-ва трябва да останат
+  // стабилни, докато няма НОВО evidence след последния им checked_at.
+  const noPingA = await register(port, runId, 'nopinga')
+  const noPingX = await register(port, runId, 'nopingx')
+
+  console.log('  Регистрирани: player, linkedA, linkedB (споделят visitor id), linkedC (свързан само с linkedB), clean (без risk), admin, subadmin.')
 
   // ── seed: linkedA и linkedB споделят anonymous_visitor_id ───────────────
   console.log('\n[seed] site_visitors/site_visit_events за linkedA/linkedB (споделен visitor id)')
@@ -312,6 +329,94 @@ try {
     INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
     VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.99')
   `).run(randomUUID(), soloVisitorId, cleanTarget.profileId)
+  // linkedB И linkedC споделят ВТОРИ, отделен visitor id (linkedA НЕ участва
+  // в него) — точно scenario-то от production bug-а: когато linkedA бъде
+  // fetched като target, linkedB се upsert-ва само indirectly (check_complete
+  // =0, груб count=1), но реалната пълна linked група на linkedB е 2
+  // (linkedA + linkedC), не 1. Fix-ът трябва да гарантира, че linkedB
+  // получава собствен full analysis следващия път, когато е в target batch-а.
+  const secondSharedVisitorId = `visitor-bc-${runId}`
+  seedDb.prepare(`
+    INSERT INTO site_visitors (
+      anonymous_visitor_id, first_seen_at, last_seen_at,
+      first_profile_id, last_profile_id, first_ip_address, last_ip_address
+    ) VALUES (?, '2026-01-01 10:00:00', '2026-01-01 11:00:00', ?, ?, '203.0.113.40', '203.0.113.40')
+  `).run(secondSharedVisitorId, linkedB.profileId, linkedC.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 10:00:00', '203.0.113.40')
+  `).run(randomUUID(), secondSharedVisitorId, linkedB.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 11:00:00', '203.0.113.40')
+  `).run(randomUUID(), secondSharedVisitorId, linkedC.profileId)
+
+  // staleRiskyA/staleRiskyOld споделят visitor id ОТ САМОТО НАЧАЛО (за
+  // сценарий Б — staleRiskyA ще бъде fully-checked с точен стар count=1,
+  // ПРЕДИ staleRiskyX да добави нова връзка).
+  const staleRiskyVisitorId = `visitor-stale-risky-${runId}`
+  seedDb.prepare(`
+    INSERT INTO site_visitors (
+      anonymous_visitor_id, first_seen_at, last_seen_at,
+      first_profile_id, last_profile_id, first_ip_address, last_ip_address
+    ) VALUES (?, '2026-01-01 08:00:00', '2026-01-01 08:00:00', ?, ?, '203.0.113.50', '203.0.113.50')
+  `).run(staleRiskyVisitorId, staleRiskyA.profileId, staleRiskyOld.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.50')
+  `).run(randomUUID(), staleRiskyVisitorId, staleRiskyA.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.50')
+  `).run(randomUUID(), staleRiskyVisitorId, staleRiskyOld.profileId)
+
+  // batchA/batchX споделят visitor id — ще бъдат fetched КАТО ДВАТА explicit
+  // targets в ЕДИН list batch (сценарий В: batch-ordering не трябва да
+  // downgrade-не единия explicit target с indirect upsert-а на другия).
+  const batchVisitorId = `visitor-batch-${runId}`
+  seedDb.prepare(`
+    INSERT INTO site_visitors (
+      anonymous_visitor_id, first_seen_at, last_seen_at,
+      first_profile_id, last_profile_id, first_ip_address, last_ip_address
+    ) VALUES (?, '2026-01-01 08:00:00', '2026-01-01 08:00:00', ?, ?, '203.0.113.60', '203.0.113.60')
+  `).run(batchVisitorId, batchA.profileId, batchX.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.60')
+  `).run(randomUUID(), batchVisitorId, batchA.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.60')
+  `).run(randomUUID(), batchVisitorId, batchX.profileId)
+
+  // noPingA/noPingX споделят visitor id ОТ САМОТО НАЧАЛО (исторически
+  // timestamp, преди двата да бъдат fully checked) — за no-ping-pong
+  // сценария (round 3): щом веднъж и двата минат explicit full analysis
+  // СЛЕД това evidence, повторни fetch-ове на единия не трябва да
+  // invalidate-ват другия, тъй като evidence-ът не се е променил.
+  const noPingVisitorId = `visitor-no-pingpong-${runId}`
+  seedDb.prepare(`
+    INSERT INTO site_visitors (
+      anonymous_visitor_id, first_seen_at, last_seen_at,
+      first_profile_id, last_profile_id, first_ip_address, last_ip_address
+    ) VALUES (?, '2026-01-01 08:00:00', '2026-01-01 08:00:00', ?, ?, '203.0.113.90', '203.0.113.90')
+  `).run(noPingVisitorId, noPingA.profileId, noPingX.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.90')
+  `).run(randomUUID(), noPingVisitorId, noPingA.profileId)
+  seedDb.prepare(`
+    INSERT INTO site_visit_events (
+      page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
+    ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.90')
+  `).run(randomUUID(), noPingVisitorId, noPingX.profileId)
   seedDb.close()
 
   // ── (а) authorization: subadmin/player => 403 на risk-detail/risk-recheck ──
@@ -345,30 +450,350 @@ try {
     if (row && row.riskDetected !== undefined) throw new Error(`subadmin получи riskDetected поле: ${JSON.stringify(row)}`)
   })
 
-  // ── (б) admin отваря list view -> risk_detected=1 за ДВАТА linked профила ──
-  console.log('\n[risk-flow] admin -> GET registered-profiles?period=all => batch compute -> linkedA И linkedB стават risk_detected=1')
+  // ── (б) admin анализира САМО linkedA (изолирано, чрез risk-recheck — не
+  //    list fetch, защото period=all винаги batch-ва ВСИЧКИ регистрирани
+  //    профили накуп, включително linkedB, което би направило linkedB
+  //    директен target от самото начало и няма да пресъздаде production
+  //    bug сценария) -> risk_detected=1 за linkedA И linkedB (indirect) ──
+  console.log('\n[risk-flow] admin -> POST risk-recheck(linkedA) изолирано => linkedA директен target, linkedB indirect partner')
   let firstCheckedAtA: string | null = null
-  await check('[risk-flow] admin -> registered-profiles?period=all => 200, linkedA.riskDetected=true, linkedProfilesCount>=1', async () => {
-    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
-    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number }> }
-    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
-    const rowA = b.rows.find((x) => x.profileId === linkedA.profileId)
-    if (!rowA || rowA.riskDetected !== true) throw new Error(`linkedA row: ${JSON.stringify(rowA)}`)
-    if (!rowA.linkedProfilesCount || rowA.linkedProfilesCount < 1) throw new Error(`linkedA.linkedProfilesCount=${rowA.linkedProfilesCount}`)
-    const rowClean = b.rows.find((x) => x.profileId === cleanTarget.profileId)
-    if (!rowClean || rowClean.riskDetected !== false) throw new Error(`cleanTarget row (очаквах riskDetected:false): ${JSON.stringify(rowClean)}`)
+  await check('[risk-flow] admin -> POST risk-recheck(linkedA) => 200, riskDetected=true, linkedProfilesCount>=1', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${linkedA.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== true) throw new Error(`riskDetected=${b.riskDetected}`)
+    if (!b.linkedProfilesCount || b.linkedProfilesCount < 1) throw new Error(`linkedProfilesCount=${b.linkedProfilesCount}`)
+  })
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedA.profileId) as { checked_at: string } | undefined
+    db.close()
+    firstCheckedAtA = row?.checked_at ?? null
+  }
+  await check('[risk-flow] firstCheckedAtA е записан', () => {
+    if (!firstCheckedAtA) throw new Error('Липсва checked_at след risk-recheck(linkedA).')
   })
 
-  await check('[risk-flow] linkedB (НЕ директно fetched от list view-а, но е linked partner) също е risk_detected=1 (spec §6 upsert логика)', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${linkedB.profileId}/risk-detail`, 'GET', adminCookie)
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
-    // Ако linkedB не беше upsert-нат като risk_detected=1 автоматично, той
-    // пак ще си има detail данни (risk-detail работи fresh за всеки target),
-    // затова проверяваме директно cache таблицата за linkedB risk_detected.
+  await check('[risk-flow] linkedB (НЕ директно checked, но е linked partner) също е risk_detected=1 (spec §6 upsert логика)', async () => {
     const db = new DatabaseSync(isolated.databaseFile, { open: true })
     const row = db.prepare(`SELECT risk_detected FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedB.profileId) as { risk_detected: number } | undefined
     db.close()
     if (!row || row.risk_detected !== 1) throw new Error(`linkedB admin_profile_risk_checks row: ${JSON.stringify(row)}`)
+  })
+
+  // ── production QA bug fix: indirect partner upsert => check_complete=0,
+  //    частичен count, list UI не показва точно число; после B попада в
+  //    target batch (list fetch) -> full analysis -> check_complete=1,
+  //    точен count (linkedA + linkedC = 2) -> следващ fetch НЕ recompute-ва ──
+  console.log('\n[check-complete] linkedB indirect upsert => check_complete=0, груб/частичен count; после full analysis => check_complete=1, точен count=2')
+  await check('[check-complete] след risk-recheck(linkedA): linkedB е check_complete=0 в DB (indirect upsert, НЕ fully checked)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, linked_profiles_count FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedB.profileId) as { check_complete: number; linked_profiles_count: number } | undefined
+    db.close()
+    if (!row || row.check_complete !== 0) throw new Error(`linkedB row: ${JSON.stringify(row)}`)
+  })
+
+  let linkedBCheckedAtAfterFullAnalysis: string | null = null
+  await check('[check-complete] linkedB попада в list fetch batch (симулира "Регистрирани" отваряне, докато B е сред резултатите) -> получава собствен full analysis, riskCheckComplete:true, точен count=2', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowClean = b.rows.find((x) => x.profileId === cleanTarget.profileId)
+    if (!rowClean || rowClean.riskDetected !== false) throw new Error(`cleanTarget row (очаквах riskDetected:false): ${JSON.stringify(rowClean)}`)
+    const rowB = b.rows.find((x) => x.profileId === linkedB.profileId)
+    if (!rowB) throw new Error('linkedB липсва от list резултатите.')
+    if (rowB.riskCheckComplete !== true) throw new Error(`linkedB.riskCheckComplete=${rowB.riskCheckComplete}, очаквах true след full analysis`)
+    if (rowB.linkedProfilesCount !== 2) throw new Error(`linkedB.linkedProfilesCount=${rowB.linkedProfilesCount}, очаквах точно 2 (linkedA + linkedC)`)
+  })
+  await check('[check-complete] admin_profile_risk_checks: linkedB вече check_complete=1 с точен count=2 в DB', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, linked_profiles_count, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedB.profileId) as { check_complete: number; linked_profiles_count: number; checked_at: string } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1 || row.linked_profiles_count !== 2) throw new Error(`linkedB row: ${JSON.stringify(row)}`)
+    linkedBCheckedAtAfterFullAnalysis = row.checked_at
+  })
+  // Забележка за chain-reaction поведението (round 2 fix, т.2): linkedA-
+  // linkedB-linkedC е ВЕРИГА от директни връзки (A<->B, B<->C), не просто
+  // двойка — щом кой да е от тях стане explicit target и намери съсед като
+  // partner, съседът (ако не Е explicit target в СЪЩИЯ batch) се
+  // invalidate-ва отново, дори ако преди малко е бил fully-checked. Затова
+  // цялата верига се стабилизира трайно само когато ВСИЧКИТЕ трима станат
+  // explicit targets В ЕДИН И СЪЩ batch (т.3 sequencing защитата) — точно
+  // това проверяваме тук: forced-delete на трите cache reda (симулира "и
+  // трите едновременно unchecked"), после ЕДИН list fetch ги compute-
+  // computва заедно и от този момент нататък остават стабилни.
+  await check('[check-complete] forced delete на linkedA/linkedB/linkedC от cache -> симулира "и трите едновременно unchecked" (верига A<->B<->C)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.prepare(`DELETE FROM admin_profile_risk_checks WHERE profile_id IN (?, ?, ?)`).run(linkedA.profileId, linkedB.profileId, linkedC.profileId)
+    db.close()
+  })
+  let linkedBCheckedAtAfterJointFullAnalysis: string | null = null
+  await check('[check-complete] list fetch с linkedA/linkedB/linkedC едновременно unchecked (ЕДИН batch) -> и трите стават check_complete=1, exact counts', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowA = b.rows.find((x) => x.profileId === linkedA.profileId)
+    const rowB = b.rows.find((x) => x.profileId === linkedB.profileId)
+    const rowC = b.rows.find((x) => x.profileId === linkedC.profileId)
+    if (!rowA || rowA.riskCheckComplete !== true || rowA.linkedProfilesCount !== 1) throw new Error(`linkedA row: ${JSON.stringify(rowA)}`)
+    if (!rowB || rowB.riskCheckComplete !== true || rowB.linkedProfilesCount !== 2) throw new Error(`linkedB row: ${JSON.stringify(rowB)}`)
+    if (!rowC || rowC.riskCheckComplete !== true || rowC.linkedProfilesCount !== 1) throw new Error(`linkedC row: ${JSON.stringify(rowC)}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedB.profileId) as { checked_at: string } | undefined
+    db.close()
+    linkedBCheckedAtAfterJointFullAnalysis = row?.checked_at ?? null
+  })
+  await sleep(1100)
+  await check('[check-complete] следващ list fetch (цялата верига вече complete от joint batch-а) НЕ recompute-ва linkedB (checked_at непроменен)', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedB.profileId) as { checked_at: string } | undefined
+    db.close()
+    if (row?.checked_at !== linkedBCheckedAtAfterJointFullAnalysis) {
+      throw new Error(`checked_at се промени: преди=${linkedBCheckedAtAfterJointFullAnalysis}, сега=${row?.checked_at}`)
+    }
+  })
+
+  // ── cache-consistency fix (round 2): indirect discovery трябва да
+  //    invalidate-ва И вече fully-checked редове (не само нови), но НЕ
+  //    трябва да downgrade-не explicit targets в СЪЩИЯ batch ──────────────
+
+  // Сценарий А: staleCleanA е fully checked и clean (0 linked). После нов
+  // X (staleCleanX) се свързва с него -> A трябва да стане risk=true,
+  // check_complete=false -> след list fetch на A: check_complete=true,
+  // exact count.
+  console.log('\n[invalidate-A] Existing fully-checked CLEAN A -> нов X linked -> A става risk=true + check_complete=false -> full analysis при следващ fetch')
+  await check('[invalidate-A] admin -> POST risk-recheck(staleCleanA) => fully checked, clean (riskDetected:false)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${staleCleanA.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== false) throw new Error(`riskDetected=${b.riskDetected}, очаквах false (все още няма linked profiles)`)
+  })
+  await check('[invalidate-A] admin_profile_risk_checks: staleCleanA е check_complete=1, risk_detected=0 в DB', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, risk_detected FROM admin_profile_risk_checks WHERE profile_id = ?`).get(staleCleanA.profileId) as { check_complete: number; risk_detected: number } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1 || row.risk_detected !== 0) throw new Error(`staleCleanA row: ${JSON.stringify(row)}`)
+  })
+  // Round 3 fix: indirect discovery invalidate-ва fully-checked partner
+  // САМО ако shared evidence-ът е СТРОГО по-нов от partner.checked_at —
+  // затова тук seed-ваме evidence-а с CURRENT_TIMESTAMP (реално "сега",
+  // след staleCleanA-то recheck по-горе), не хардкоднат минал timestamp,
+  // за да гарантираме че evidence-ът реално е по-нов.
+  await sleep(1100)
+  {
+    // Нов X се появява и се свързва с A (споделен visitor id) — симулира
+    // "нов регистриран профил ползва browser identity-то на стар профил".
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.exec('PRAGMA journal_mode = WAL;')
+    const visitorId = `visitor-invalidate-a-${runId}`
+    db.prepare(`
+      INSERT INTO site_visitors (
+        anonymous_visitor_id, first_seen_at, last_seen_at,
+        first_profile_id, last_profile_id, first_ip_address, last_ip_address
+      ) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, '203.0.113.70', '203.0.113.70')
+    `).run(visitorId, staleCleanA.profileId, staleCleanX.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.70')
+    `).run(randomUUID(), visitorId, staleCleanA.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.70')
+    `).run(randomUUID(), visitorId, staleCleanX.profileId)
+    db.close()
+  }
+  await check('[invalidate-A] admin -> POST risk-recheck(staleCleanX) => открива A indirectly -> A става risk=true, check_complete=false', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${staleCleanX.profileId}/risk-recheck`, 'POST', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, risk_detected FROM admin_profile_risk_checks WHERE profile_id = ?`).get(staleCleanA.profileId) as { check_complete: number; risk_detected: number } | undefined
+    db.close()
+    if (!row || row.risk_detected !== 1 || row.check_complete !== 0) throw new Error(`staleCleanA row след X discovery: ${JSON.stringify(row)}`)
+  })
+  await check('[invalidate-A] list fetch докато A е в резултатите -> A получава full analysis -> check_complete=true, exact count', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowA = b.rows.find((x) => x.profileId === staleCleanA.profileId)
+    if (!rowA) throw new Error('staleCleanA липсва от list резултатите.')
+    if (rowA.riskDetected !== true || rowA.riskCheckComplete !== true) throw new Error(`staleCleanA row: ${JSON.stringify(rowA)}`)
+    if (rowA.linkedProfilesCount !== 1) throw new Error(`staleCleanA.linkedProfilesCount=${rowA.linkedProfilesCount}, очаквах 1 (staleCleanX)`)
+  })
+
+  // Сценарий Б: staleRiskyA е fully checked, risky, с точен стар count=1
+  // (staleRiskyOld). Нов X (staleRiskyX) добавя нова връзка -> A се
+  // invalidate-ва до check_complete=false -> следващ list fetch дава новия
+  // exact count=2.
+  console.log('\n[invalidate-B] Existing fully-checked RISKY A (стар count=1) -> нов X добавя връзка -> invalidate -> next fetch дава новия exact count=2')
+  await check('[invalidate-B] admin -> POST risk-recheck(staleRiskyA) => fully checked, risky, count=1 (staleRiskyOld)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${staleRiskyA.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== true || b.linkedProfilesCount !== 1) throw new Error(`riskDetected=${b.riskDetected}, linkedProfilesCount=${b.linkedProfilesCount}, очаквах true/1`)
+  })
+  // Round 3 fix: same причина като [invalidate-A] по-горе — evidence-ът
+  // трябва да е СТРОГО по-нов от staleRiskyA.checked_at, за да invalidate-не
+  // fully-checked partner-а.
+  await sleep(1100)
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.exec('PRAGMA journal_mode = WAL;')
+    const visitorId = `visitor-invalidate-b-${runId}`
+    db.prepare(`
+      INSERT INTO site_visitors (
+        anonymous_visitor_id, first_seen_at, last_seen_at,
+        first_profile_id, last_profile_id, first_ip_address, last_ip_address
+      ) VALUES (?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, ?, ?, '203.0.113.80', '203.0.113.80')
+    `).run(visitorId, staleRiskyA.profileId, staleRiskyX.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.80')
+    `).run(randomUUID(), visitorId, staleRiskyA.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.80')
+    `).run(randomUUID(), visitorId, staleRiskyX.profileId)
+    db.close()
+  }
+  await check('[invalidate-B] admin -> POST risk-recheck(staleRiskyX) => открива A indirectly -> A invalidate-ва (check_complete=false), стар count=1 остава непроменен до full analysis', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${staleRiskyX.profileId}/risk-recheck`, 'POST', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, risk_detected FROM admin_profile_risk_checks WHERE profile_id = ?`).get(staleRiskyA.profileId) as { check_complete: number; risk_detected: number } | undefined
+    db.close()
+    if (!row || row.risk_detected !== 1 || row.check_complete !== 0) throw new Error(`staleRiskyA row след X discovery: ${JSON.stringify(row)}`)
+  })
+  await check('[invalidate-B] list fetch докато A е в резултатите -> A получава full analysis -> exact count=2 (staleRiskyOld + staleRiskyX)', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowA = b.rows.find((x) => x.profileId === staleRiskyA.profileId)
+    if (!rowA) throw new Error('staleRiskyA липсва от list резултатите.')
+    if (rowA.riskCheckComplete !== true) throw new Error(`staleRiskyA.riskCheckComplete=${rowA.riskCheckComplete}, очаквах true`)
+    if (rowA.linkedProfilesCount !== 2) throw new Error(`staleRiskyA.linkedProfilesCount=${rowA.linkedProfilesCount}, очаквах точно 2 (стар count=1 беше STALE)`)
+  })
+
+  // Сценарий В: batchA и batchX са explicit targets в ЕДИН list batch ->
+  // след batch-а и двата трябва да останат check_complete=true с exact
+  // counts (indirect marking не трябва да downgrade-не explicit target).
+  console.log('\n[invalidate-C] batchA и batchX са explicit targets в ЕДИН batch -> и двата остават check_complete=true с exact counts')
+  await check('[invalidate-C] admin -> list fetch (batchA и batchX и двата unchecked, в СЪЩИЯ batch) => и двата check_complete=true, exact count=1', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowBatchA = b.rows.find((x) => x.profileId === batchA.profileId)
+    const rowBatchX = b.rows.find((x) => x.profileId === batchX.profileId)
+    if (!rowBatchA || !rowBatchX) throw new Error(`batchA/batchX липсват от list резултатите: ${JSON.stringify({ rowBatchA, rowBatchX })}`)
+    if (rowBatchA.riskCheckComplete !== true || rowBatchA.linkedProfilesCount !== 1) throw new Error(`batchA row: ${JSON.stringify(rowBatchA)}`)
+    if (rowBatchX.riskCheckComplete !== true || rowBatchX.linkedProfilesCount !== 1) throw new Error(`batchX row: ${JSON.stringify(rowBatchX)}`)
+  })
+  await check('[invalidate-C] admin_profile_risk_checks: и двата check_complete=1 в DB (indirect marking не downgrade-на explicit target-ите)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const rowA = db.prepare(`SELECT check_complete, linked_profiles_count FROM admin_profile_risk_checks WHERE profile_id = ?`).get(batchA.profileId) as { check_complete: number; linked_profiles_count: number } | undefined
+    const rowX = db.prepare(`SELECT check_complete, linked_profiles_count FROM admin_profile_risk_checks WHERE profile_id = ?`).get(batchX.profileId) as { check_complete: number; linked_profiles_count: number } | undefined
+    db.close()
+    if (!rowA || rowA.check_complete !== 1 || rowA.linked_profiles_count !== 1) throw new Error(`batchA row: ${JSON.stringify(rowA)}`)
+    if (!rowX || rowX.check_complete !== 1 || rowX.linked_profiles_count !== 1) throw new Error(`batchX row: ${JSON.stringify(rowX)}`)
+  })
+
+  // ── round 3 fix: indirect discovery invalidate-ва fully-checked partner
+  //    САМО когато shared evidence-ът е по-нов от partner.checked_at — не
+  //    безусловно (production инцидент: A и X се гонеха между отделни list
+  //    fetch-ове/дни без никаква нова връзка, безкраен ping-pong) ─────────
+  console.log('\n[no-pingpong] А) noPingA/noPingX вече fully checked СЛЕД съществуващото evidence -> отделни fetch-ове не се invalidate-ват взаимно')
+  let noPingACheckedAtStable: string | null = null
+  let noPingXCheckedAtStable: string | null = null
+  await check('[no-pingpong-A] admin -> POST risk-recheck(noPingA) => fully checked, риск (noPingX)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${noPingA.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== true || b.linkedProfilesCount !== 1) throw new Error(`riskDetected=${b.riskDetected}, linkedProfilesCount=${b.linkedProfilesCount}, очаквах true/1`)
+  })
+  await sleep(1100)
+  await check('[no-pingpong-A] admin -> POST risk-recheck(noPingX) => fully checked, риск (noPingA) — evidence-ът е ОТПРЕДИ и двата checks, НЕ по-нов', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${noPingX.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== true || b.linkedProfilesCount !== 1) throw new Error(`riskDetected=${b.riskDetected}, linkedProfilesCount=${b.linkedProfilesCount}, очаквах true/1`)
+  })
+  await check('[no-pingpong-A] noPingA остава check_complete=1 СЛЕД noPingX-то recheck (старото evidence не е по-ново от noPingA.checked_at)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingA.profileId) as { check_complete: number; checked_at: string } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1) throw new Error(`noPingA row: ${JSON.stringify(row)}`)
+    noPingACheckedAtStable = row.checked_at
+  })
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingX.profileId) as { checked_at: string } | undefined
+    db.close()
+    noPingXCheckedAtStable = row?.checked_at ?? null
+  }
+  await sleep(1100)
+  await check('[no-pingpong-A] fetch A отделно (risk-detail) -> X остава check_complete=1, checked_at непроменен', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${noPingA.profileId}/risk-detail`, 'GET', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingX.profileId) as { check_complete: number; checked_at: string } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1) throw new Error(`noPingX row: ${JSON.stringify(row)}`)
+    if (row.checked_at !== noPingXCheckedAtStable) throw new Error(`noPingX.checked_at се промени: преди=${noPingXCheckedAtStable}, сега=${row.checked_at}`)
+  })
+  await check('[no-pingpong-A] list fetch (batch съдържа и двата) -> И двата остават check_complete=1, checked_at непроменени (без ping-pong)', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const rowA = db.prepare(`SELECT check_complete, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingA.profileId) as { check_complete: number; checked_at: string } | undefined
+    const rowX = db.prepare(`SELECT check_complete, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingX.profileId) as { check_complete: number; checked_at: string } | undefined
+    db.close()
+    if (!rowA || rowA.check_complete !== 1 || rowA.checked_at !== noPingACheckedAtStable) throw new Error(`noPingA row: ${JSON.stringify(rowA)}, очаквах checked_at=${noPingACheckedAtStable}`)
+    if (!rowX || rowX.check_complete !== 1 || rowX.checked_at !== noPingXCheckedAtStable) throw new Error(`noPingX row: ${JSON.stringify(rowX)}, очаквах checked_at=${noPingXCheckedAtStable}`)
+  })
+
+  console.log('\n[no-pingpong] Б) ново shared evidence СЛЕД noPingA.checked_at -> анализ на X invalidates A')
+  await sleep(1100)
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.exec('PRAGMA journal_mode = WAL;')
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.90')
+    `).run(randomUUID(), `visitor-no-pingpong-${runId}`, noPingX.profileId)
+    db.close()
+  }
+  await check('[no-pingpong-B] admin -> POST risk-recheck(noPingX) => ново evidence СЛЕД noPingA.checked_at -> noPingA става check_complete=0', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${noPingX.profileId}/risk-recheck`, 'POST', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, risk_detected FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingA.profileId) as { check_complete: number; risk_detected: number } | undefined
+    db.close()
+    if (!row || row.check_complete !== 0 || row.risk_detected !== 1) throw new Error(`noPingA row след новото evidence: ${JSON.stringify(row)}`)
+  })
+
+  console.log('\n[no-pingpong] В) fetch A -> A получава нов full analysis (check_complete=1); след това A/X поотделно остават стабилни (без ping-pong)')
+  let noPingACheckedAtAfterNewEvidence: string | null = null
+  await check('[no-pingpong-C] list fetch (A е в резултатите) -> A получава full analysis, check_complete=1', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowA = b.rows.find((x) => x.profileId === noPingA.profileId)
+    if (!rowA || rowA.riskCheckComplete !== true) throw new Error(`noPingA row: ${JSON.stringify(rowA)}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingA.profileId) as { checked_at: string } | undefined
+    db.close()
+    noPingACheckedAtAfterNewEvidence = row?.checked_at ?? null
+  })
+  await sleep(1100)
+  await check('[no-pingpong-C] fetch X отделно (risk-detail) -> A остава стабилен (checked_at непроменен, БЕЗ нов ping-pong)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${noPingX.profileId}/risk-detail`, 'GET', adminCookie)
+    if (r.status !== 200) throw new Error(`status=${r.status}`)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(noPingA.profileId) as { check_complete: number; checked_at: string } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1) throw new Error(`noPingA row: ${JSON.stringify(row)}`)
+    if (row.checked_at !== noPingACheckedAtAfterNewEvidence) throw new Error(`noPingA.checked_at се промени: преди=${noPingACheckedAtAfterNewEvidence}, сега=${row.checked_at}`)
   })
 
   // ── (в) bounded storage: точно N redове в admin_profile_risk_checks ─────
@@ -383,15 +808,22 @@ try {
   })
 
   // ── (г) втори fetch на СЪЩИЯ период НЕ предизвиква recompute ────────────
+  // Ползваме cleanTarget тук (не linkedA) — cleanTarget е напълно изолиран
+  // (единствен, несподелен visitor id), затова гарантирано НЕ може да бъде
+  // indirect-invalidated от верижна reaction на друг сценарий по-горе
+  // (напр. linkedA може легитимно да бъде re-invalidated, ако linkedC по-
+  // късно открие linkedB, което пък намира linkedA — коректно cache-
+  // consistency поведение по round 2 fix-а, не бъг).
   console.log('\n[memoization] повторен admin fetch на същия период -> checked_at НЕ се променя (skip recompute)')
+  let firstCheckedAtClean: string | null = null
   {
     const db = new DatabaseSync(isolated.databaseFile, { open: true })
-    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedA.profileId) as { checked_at: string } | undefined
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(cleanTarget.profileId) as { checked_at: string } | undefined
     db.close()
-    firstCheckedAtA = row?.checked_at ?? null
+    firstCheckedAtClean = row?.checked_at ?? null
   }
-  await check('[memoization] firstCheckedAtA е записан', () => {
-    if (!firstCheckedAtA) throw new Error('Липсва checked_at след първия fetch.')
+  await check('[memoization] firstCheckedAtClean е записан', () => {
+    if (!firstCheckedAtClean) throw new Error('Липсва checked_at след първия fetch.')
   })
   // Малко изчакване, за да е различим timestamp-ът, ако (грешно) се презапише.
   await sleep(1100)
@@ -399,12 +831,12 @@ try {
     const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
     if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
   })
-  await check('[memoization] checked_at за linkedA остава непроменен след втория fetch', () => {
+  await check('[memoization] checked_at за cleanTarget остава непроменен след втория fetch', () => {
     const db = new DatabaseSync(isolated.databaseFile, { open: true })
-    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(linkedA.profileId) as { checked_at: string } | undefined
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(cleanTarget.profileId) as { checked_at: string } | undefined
     db.close()
-    if (row?.checked_at !== firstCheckedAtA) {
-      throw new Error(`checked_at се промени: преди=${firstCheckedAtA}, сега=${row?.checked_at} (recompute се случи за вече кеширан профил)`)
+    if (row?.checked_at !== firstCheckedAtClean) {
+      throw new Error(`checked_at се промени: преди=${firstCheckedAtClean}, сега=${row?.checked_at} (recompute се случи за вече кеширан профил)`)
     }
   })
 
