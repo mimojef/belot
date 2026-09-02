@@ -512,6 +512,19 @@ export type LobbyScreenState = {
   vipGrantOpen: boolean
   vipGrantSubmitting: boolean
   vipGrantErrorText: string | null
+  /** Активен бан на разглеждания в попъпа профил — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
+  profilePopupActiveBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
+  banPopupOpen: boolean
+  banPopupDaysDraft: string
+  banPopupReasonDraft: string
+  banPopupSubmitting: boolean
+  banPopupErrorText: string | null
+  unbanConfirmOpen: boolean
+  unbanSubmitting: boolean
+  deletePopupOpen: boolean
+  deletePopupReasonDraft: string
+  deletePopupSubmitting: boolean
+  deletePopupErrorText: string | null
   /**
    * previousRole: ако назначаваме субадмин, докато акаунтът реално е
    * chat_admin (или обратно за chatAdminActionConfirm по-долу) — само за
@@ -907,6 +920,15 @@ export type RenderLobbyScreenOptions = {
   onProfileVipGrantOpen: (profileId: string | null) => void
   onProfileVipGrantCancel: () => void
   onProfileVipGrantSubmit: (profileId: string | null, rawDays: string) => void
+  onProfileBanOpen: (profileId: string | null) => void
+  onProfileBanCancel: () => void
+  onProfileBanSubmit: (profileId: string | null, rawDays: string, reason: string) => void
+  onProfileUnbanOpen: (profileId: string | null) => void
+  onProfileUnbanCancel: () => void
+  onProfileUnbanConfirm: (profileId: string | null) => void
+  onProfileDeleteOpen: (profileId: string | null) => void
+  onProfileDeleteCancel: () => void
+  onProfileDeleteSubmit: (profileId: string | null, reason: string) => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -1342,6 +1364,15 @@ export type ProfilePopupCallbacks = {
   onVipGrantOpen: (profileId: string | null) => void
   onVipGrantCancel: () => void
   onVipGrantSubmit: (profileId: string | null, rawDays: string) => void
+  onBanOpen: (profileId: string | null) => void
+  onBanCancel: () => void
+  onBanSubmit: (profileId: string | null, rawDays: string, reason: string) => void
+  onUnbanOpen: (profileId: string | null) => void
+  onUnbanCancel: () => void
+  onUnbanConfirm: (profileId: string | null) => void
+  onDeleteOpen: (profileId: string | null) => void
+  onDeleteCancel: () => void
+  onDeleteSubmit: (profileId: string | null, reason: string) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -1439,6 +1470,42 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const rawDays = el.querySelector<HTMLInputElement>('[data-player-profile-vip-grant-input="1"]')?.value ?? ''
       cb.onVipGrantSubmit(profileId, rawDays)
     })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-ban-open]')
+    ?.addEventListener('click', (e) => {
+      const id = (e.currentTarget as HTMLButtonElement).dataset.playerProfileBanOpen?.trim() ?? ''
+      if (id) cb.onBanOpen(id)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-ban-cancel="1"]')
+    ?.addEventListener('click', () => { cb.onBanCancel() })
+  el.querySelector<HTMLFormElement>('[data-player-profile-ban-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const rawDays = el.querySelector<HTMLInputElement>('[data-player-profile-ban-days-input="1"]')?.value ?? ''
+      const reason = el.querySelector<HTMLTextAreaElement>('[data-player-profile-ban-reason-input="1"]')?.value ?? ''
+      cb.onBanSubmit(profileId, rawDays, reason)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-unban-open]')
+    ?.addEventListener('click', (e) => {
+      const id = (e.currentTarget as HTMLButtonElement).dataset.playerProfileUnbanOpen?.trim() ?? ''
+      if (id) cb.onUnbanOpen(id)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-unban-cancel="1"]')
+    ?.addEventListener('click', () => { cb.onUnbanCancel() })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-unban-confirm="1"]')
+    ?.addEventListener('click', () => { cb.onUnbanConfirm(profileId) })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-delete-open]')
+    ?.addEventListener('click', (e) => {
+      const id = (e.currentTarget as HTMLButtonElement).dataset.playerProfileDeleteOpen?.trim() ?? ''
+      if (id) cb.onDeleteOpen(id)
+    })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-delete-cancel="1"]')
+    ?.addEventListener('click', () => { cb.onDeleteCancel() })
+  el.querySelector<HTMLFormElement>('[data-player-profile-delete-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const reason = el.querySelector<HTMLTextAreaElement>('[data-player-profile-delete-reason-input="1"]')?.value ?? ''
+      cb.onDeleteSubmit(profileId, reason)
+    })
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileLike?.trim() ?? ''
@@ -1532,6 +1599,18 @@ export function syncProfilePopup(
     vipGrantOpen?: boolean
     vipGrantSubmitting?: boolean
     vipGrantErrorText?: string | null
+    activeBan?: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
+    banPopupOpen?: boolean
+    banPopupDaysDraft?: string
+    banPopupReasonDraft?: string
+    banPopupSubmitting?: boolean
+    banPopupErrorText?: string | null
+    unbanConfirmOpen?: boolean
+    unbanSubmitting?: boolean
+    deletePopupOpen?: boolean
+    deletePopupReasonDraft?: string
+    deletePopupSubmitting?: boolean
+    deletePopupErrorText?: string | null
     // Форсира skipAnimation дори при "first open" (нов popupRootEl) — нужно
     // при връщане Edit→Profile: popup DOM възелът е бил унищожен, докато
     // edit overlay-ят е бил отворен отгоре му, но КОНЦЕПТУАЛНО потребителят
@@ -1572,6 +1651,18 @@ export function syncProfilePopup(
     vipGrantOpen: popupState.vipGrantOpen ?? false,
     vipGrantSubmitting: popupState.vipGrantSubmitting ?? false,
     vipGrantErrorText: popupState.vipGrantErrorText ?? null,
+    activeBan: popupState.activeBan ?? null,
+    banPopupOpen: popupState.banPopupOpen ?? false,
+    banPopupDaysDraft: popupState.banPopupDaysDraft ?? '',
+    banPopupReasonDraft: popupState.banPopupReasonDraft ?? '',
+    banPopupSubmitting: popupState.banPopupSubmitting ?? false,
+    banPopupErrorText: popupState.banPopupErrorText ?? null,
+    unbanConfirmOpen: popupState.unbanConfirmOpen ?? false,
+    unbanSubmitting: popupState.unbanSubmitting ?? false,
+    deletePopupOpen: popupState.deletePopupOpen ?? false,
+    deletePopupReasonDraft: popupState.deletePopupReasonDraft ?? '',
+    deletePopupSubmitting: popupState.deletePopupSubmitting ?? false,
+    deletePopupErrorText: popupState.deletePopupErrorText ?? null,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -13561,6 +13652,18 @@ export function renderLobbyScreen(
       vipGrantOpen: state.vipGrantOpen,
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
+      activeBan: state.profilePopupActiveBan,
+      banPopupOpen: state.banPopupOpen,
+      banPopupDaysDraft: state.banPopupDaysDraft,
+      banPopupReasonDraft: state.banPopupReasonDraft,
+      banPopupSubmitting: state.banPopupSubmitting,
+      banPopupErrorText: state.banPopupErrorText,
+      unbanConfirmOpen: state.unbanConfirmOpen,
+      unbanSubmitting: state.unbanSubmitting,
+      deletePopupOpen: state.deletePopupOpen,
+      deletePopupReasonDraft: state.deletePopupReasonDraft,
+      deletePopupSubmitting: state.deletePopupSubmitting,
+      deletePopupErrorText: state.deletePopupErrorText,
     },
     {
       onClose: options.onProfileClose,
@@ -13587,6 +13690,15 @@ export function renderLobbyScreen(
       onVipGrantOpen: options.onProfileVipGrantOpen,
       onVipGrantCancel: options.onProfileVipGrantCancel,
       onVipGrantSubmit: options.onProfileVipGrantSubmit,
+      onBanOpen: options.onProfileBanOpen,
+      onBanCancel: options.onProfileBanCancel,
+      onBanSubmit: options.onProfileBanSubmit,
+      onUnbanOpen: options.onProfileUnbanOpen,
+      onUnbanCancel: options.onProfileUnbanCancel,
+      onUnbanConfirm: options.onProfileUnbanConfirm,
+      onDeleteOpen: options.onProfileDeleteOpen,
+      onDeleteCancel: options.onProfileDeleteCancel,
+      onDeleteSubmit: options.onProfileDeleteSubmit,
     },
   )
 

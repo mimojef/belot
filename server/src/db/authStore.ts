@@ -322,7 +322,17 @@ export type AuthStore = {
   login: (input: {
     email: string
     password: string
-  }) => { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string }
+  }) =>
+    | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
+    | { ok: false; message: string }
+    | {
+        ok: false
+        code: 'PROFILE_BANNED'
+        message: string
+        bannedUntil: string
+        reason: string
+        remainingDays: number
+      }
   changePassword: (input: {
     accountId: string
     currentPassword: string
@@ -330,6 +340,18 @@ export type AuthStore = {
   }) => { ok: true } | { ok: false; message: string }
   getSession: (sessionToken: string | null) => AuthSessionSnapshot | null
   logout: (sessionToken: string | null) => void
+  /**
+   * Bulk session revocation по profile_id (spec §1, BAN/HARD-DELETE
+   * enforcement) — mirror на logout()'s revokeSessionStatement, но за
+   * ВСИЧКИ живи (revoked_at IS NULL) сесии на профила наведнъж, не само
+   * една конкретна по token. Ползва СЪЩИЯ account_sessions.revoked_at модел
+   * (getSession() вече филтрира revoked_at IS NULL) — никаква паралелна
+   * auth система. account_sessions.profile_id е индексиран (виж
+   * idx_account_sessions_profile_id в 20260510_003 migration-а), затова
+   * това е евтин indexed UPDATE, не table scan. Връща броя реално
+   * ревокирани сесии (за diagnostics/тестове).
+   */
+  revokeAllSessionsForProfile: (profileId: string) => number
   /**
    * Назначава/премахва субадмин роля за профила зад `targetProfileId`.
    * Ролята принадлежи на АКАУНТА (не профила) — виж AccountRow.role.
@@ -369,6 +391,17 @@ export type AuthStore = {
 
 type CreateAuthStoreOptions = {
   getSignupBonusYellowCoins?: () => number
+  /**
+   * Инжектирана зависимост към profileBanStore (spec §5A) — authStore.ts
+   * умишлено не отваря собствена връзка към profile_bans/не import-ва
+   * profileBanStore директно, mirror на getSignupBonusYellowCoins injection
+   * pattern-а по-горе. Връща null, ако профилът няма активен бан.
+   */
+  getActiveBanForProfile?: (profileId: string) => {
+    bannedUntil: string
+    reason: string
+    remainingDays: number
+  } | null
 }
 
 type AccountRow = {
@@ -633,6 +666,13 @@ export async function createAuthStore(
       AND revoked_at IS NULL;
   `)
 
+  const revokeAllSessionsForProfileStatement = database.prepare(`
+    UPDATE account_sessions
+    SET revoked_at = CURRENT_TIMESTAMP
+    WHERE profile_id = ?
+      AND revoked_at IS NULL;
+  `)
+
   const updateLastLoginStatement = database.prepare(`
     UPDATE accounts
     SET last_login_at = CURRENT_TIMESTAMP,
@@ -778,7 +818,17 @@ export async function createAuthStore(
   function login(input: {
     email: string
     password: string
-  }): { ok: true; sessionToken: string; session: AuthSessionSnapshot } | { ok: false; message: string } {
+  }):
+    | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
+    | { ok: false; message: string }
+    | {
+        ok: false
+        code: 'PROFILE_BANNED'
+        message: string
+        bannedUntil: string
+        reason: string
+        remainingDays: number
+      } {
     const email = normalizeEmail(input.email)
 
     if (email === null) {
@@ -806,6 +856,22 @@ export async function createAuthStore(
 
     if (!profileIdRow) {
       return { ok: false, message: 'Профилът не беше намерен.' }
+    }
+
+    // Ban gate — ПРЕДИ нормалното допускане в authenticated app/session
+    // (spec §5A), но СЛЕД валидиране на credentials (не изтичаме информация
+    // за ban статус на грешна парола/несъществуващ email). Активен бан
+    // напълно спира login-а — не се създава сесия.
+    const activeBan = options.getActiveBanForProfile?.(profileIdRow.profile_id) ?? null
+    if (activeBan !== null) {
+      return {
+        ok: false,
+        code: 'PROFILE_BANNED',
+        message: 'Профилът е баннат.',
+        bannedUntil: activeBan.bannedUntil,
+        reason: activeBan.reason,
+        remainingDays: activeBan.remainingDays,
+      }
     }
 
     return {
@@ -869,6 +935,11 @@ export async function createAuthStore(
     }
 
     revokeSessionStatement.run(hashSessionToken(sessionToken))
+  }
+
+  function revokeAllSessionsForProfile(profileId: string): number {
+    const result = revokeAllSessionsForProfileStatement.run(profileId)
+    return result.changes as number
   }
 
   function getAccountRoleForProfile(profileId: string): AccountRoleValue | null {
@@ -1108,6 +1179,7 @@ export async function createAuthStore(
     changePassword,
     getSession,
     logout,
+    revokeAllSessionsForProfile,
     setSubadminRole,
     setChatAdminRole,
     setPikaTeamRole,

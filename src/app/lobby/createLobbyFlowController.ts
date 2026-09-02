@@ -22,6 +22,7 @@ import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, ha
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
   renderLobbyScreen,
+  escapeHtml,
   formatNotificationBadgeCount,
   releaseLobbyChatBodyScrollLock,
   resolveLobbyChatSenderRole,
@@ -333,7 +334,24 @@ export type CreateLobbyFlowControllerOptions = {
   onLobbyChatSend?: (body: string, requestId: string) => void
   onLobbyChatDeleteMessage?: (messageId: string) => void
   suppressRendering?: boolean
-  onLoginSubmit?: (email: string, password: string) => Promise<string | null>
+  /**
+   * Споделеният 20-сек countdown moderation popup (round 4 брифа §8) —
+   * ЕДИНСТВЕНАТА имплементация, ползвана И тук (login-time PROFILE_BANNED),
+   * И от session_banned/session_deleted WS handler-ите в main.ts
+   * (showModerationForcedExitPopup). Login-time случаят няма жива сесия за
+   * logout, затова onForcedLogout тук е no-op-подобен (просто затваря
+   * popup-а) — вика се все пак за консистентност на API-то.
+   */
+  onShowModerationForcedExitPopup?: (input: {
+    title: string
+    bodyHtml: string
+    onForcedLogout: () => void
+  }) => void
+  onLoginSubmit?: (email: string, password: string) => Promise<{
+    errorText: string | null
+    /** Структуриран PROFILE_BANNED резултат (spec §5A) — попълнен само когато errorText идва от активен бан, за dedicated ban popup вместо generic inline error text. */
+    bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
+  }>
   onRegisterSubmit?: (
     displayName: string,
     email: string,
@@ -359,6 +377,27 @@ export type CreateLobbyFlowControllerOptions = {
     targetProfileId: string,
     days: number,
   ) => Promise<{ ok: true; profile: PlayerPublicProfileSnapshot } | { ok: false; message: string }>
+  /** GET активен бан за профил (само за пълен admin viewer) — за "БАН"/"Баннат до…" в profile popup-а. */
+  onAdminGetActiveBan?: (
+    profileId: string,
+  ) => Promise<{ ok: true; activeBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null } | { ok: false; message: string }>
+  /** Само за пълен admin, никога за собствения профил — server-side authoritative проверка в handleAdminProfileBanRequest. */
+  onAdminBanProfile?: (
+    targetProfileId: string,
+    days: number,
+    reason: string,
+  ) => Promise<
+    | { ok: true; ban: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot }
+    | { ok: false; message: string }
+  >
+  onAdminUnbanProfile?: (
+    targetProfileId: string,
+  ) => Promise<{ ok: true } | { ok: false; message: string }>
+  /** Необратимо — server-side authoritative проверка (self/role) в handleAdminProfileHardDeleteRequest. */
+  onAdminHardDeleteProfile?: (
+    targetProfileId: string,
+    reason: string,
+  ) => Promise<{ ok: true } | { ok: false; message: string }>
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: (
     page: number,
@@ -1297,6 +1336,21 @@ type InternalLobbyFlowState = {
   profilePopupTargetRole: PlayerAccountRole | null
   /** profileId, за който profilePopupTargetRole вече е (или се) зарежда — memoization guard. */
   profilePopupTargetRoleProfileId: string | null
+  /** Активен бан на разглеждания в попъпа профил (само за пълен admin viewer) — виж ensureProfilePopupActiveBanLoaded. */
+  profilePopupActiveBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
+  /** profileId, за който profilePopupActiveBan вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
+  profilePopupActiveBanProfileId: string | null
+  banPopupOpen: boolean
+  banPopupDaysDraft: string
+  banPopupReasonDraft: string
+  banPopupSubmitting: boolean
+  banPopupErrorText: string | null
+  unbanConfirmOpen: boolean
+  unbanSubmitting: boolean
+  deletePopupOpen: boolean
+  deletePopupReasonDraft: string
+  deletePopupSubmitting: boolean
+  deletePopupErrorText: string | null
   subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | 'pika_team' | 'top_chat_admin' | null } | null
   subadminActionBusy: boolean
   subadminActionToast: { text: string; ok: boolean } | null
@@ -1902,6 +1956,19 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupRequestToken: 0,
     profilePopupTargetRole: null,
     profilePopupTargetRoleProfileId: null,
+    profilePopupActiveBan: null,
+    profilePopupActiveBanProfileId: null,
+    banPopupOpen: false,
+    banPopupDaysDraft: '',
+    banPopupReasonDraft: '',
+    banPopupSubmitting: false,
+    banPopupErrorText: null,
+    unbanConfirmOpen: false,
+    unbanSubmitting: false,
+    deletePopupOpen: false,
+    deletePopupReasonDraft: '',
+    deletePopupSubmitting: false,
+    deletePopupErrorText: null,
     subadminActionConfirm: null,
     subadminActionBusy: false,
     subadminActionToast: null,
@@ -3778,6 +3845,18 @@ export function createLobbyFlowController(
       vipGrantOpen: state.vipGrantOpen,
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
+      profilePopupActiveBan: state.profilePopupActiveBan,
+      banPopupOpen: state.banPopupOpen,
+      banPopupDaysDraft: state.banPopupDaysDraft,
+      banPopupReasonDraft: state.banPopupReasonDraft,
+      banPopupSubmitting: state.banPopupSubmitting,
+      banPopupErrorText: state.banPopupErrorText,
+      unbanConfirmOpen: state.unbanConfirmOpen,
+      unbanSubmitting: state.unbanSubmitting,
+      deletePopupOpen: state.deletePopupOpen,
+      deletePopupReasonDraft: state.deletePopupReasonDraft,
+      deletePopupSubmitting: state.deletePopupSubmitting,
+      deletePopupErrorText: state.deletePopupErrorText,
       subadminActionConfirm: state.subadminActionConfirm,
       subadminActionBusy: state.subadminActionBusy,
       subadminActionToast: state.subadminActionToast,
@@ -4250,6 +4329,7 @@ export function createLobbyFlowController(
     clearServerRoomSnapshot()
 
     ensureProfilePopupTargetRoleLoaded()
+    ensureProfilePopupActiveBanLoaded()
     // Покрива входни точки, които отварят own profile popup-а само чрез
     // plain render() (напр. onProfileClick), не renderPopupOnly() — иначе
     // VIP статусът никога не се зарежда за own profile при тях (същия
@@ -4377,6 +4457,33 @@ export function createLobbyFlowController(
       },
       onProfileVipGrantSubmit: (profileId, rawDays) => {
         getPopupCallbacks().onVipGrantSubmit(profileId, rawDays)
+      },
+      onProfileBanOpen: (profileId) => {
+        getPopupCallbacks().onBanOpen(profileId)
+      },
+      onProfileBanCancel: () => {
+        getPopupCallbacks().onBanCancel()
+      },
+      onProfileBanSubmit: (profileId, rawDays, reason) => {
+        getPopupCallbacks().onBanSubmit(profileId, rawDays, reason)
+      },
+      onProfileUnbanOpen: (profileId) => {
+        getPopupCallbacks().onUnbanOpen(profileId)
+      },
+      onProfileUnbanCancel: () => {
+        getPopupCallbacks().onUnbanCancel()
+      },
+      onProfileUnbanConfirm: (profileId) => {
+        getPopupCallbacks().onUnbanConfirm(profileId)
+      },
+      onProfileDeleteOpen: (profileId) => {
+        getPopupCallbacks().onDeleteOpen(profileId)
+      },
+      onProfileDeleteCancel: () => {
+        getPopupCallbacks().onDeleteCancel()
+      },
+      onProfileDeleteSubmit: (profileId, reason) => {
+        getPopupCallbacks().onDeleteSubmit(profileId, reason)
       },
       onProfileEditClose: () => {
         if (state.profileEditorSubmitting) return
@@ -6163,6 +6270,137 @@ export function createLobbyFlowController(
     state.vipGrantOpen = false
     state.vipGrantSubmitting = false
     state.vipGrantErrorText = null
+    renderPopupOnly()
+  }
+
+  /**
+   * БАН — само админско действие върху ЧУЖД profile popup (spec §3/§10).
+   * Клиентската валидация тук е за instant feedback, server-side
+   * (handleAdminProfileBanRequest) е authoritative и се прави независимо.
+   * Успешен ban презаписва profilePopupActiveBan веднага + renderPopupOnly(),
+   * без reload/затваряне на popup-а (spec §3 "profile popup да отрази
+   * активния ban без full page reload") — mirror на submitAdminVipGrant.
+   */
+  async function submitAdminBan(profileId: string | null, rawDays: string, rawReason: string): Promise<void> {
+    if (state.banPopupSubmitting) return
+    if (!profileId) return
+
+    const trimmed = rawDays.trim()
+    const days = Number(trimmed)
+    const reason = rawReason.trim()
+
+    if (trimmed === '' || !Number.isInteger(days) || days <= 0) {
+      state.banPopupErrorText = 'Въведи цяло положително число дни.'
+      renderPopupOnly()
+      return
+    }
+    if (reason.length === 0) {
+      state.banPopupErrorText = 'Причината е задължителна.'
+      renderPopupOnly()
+      return
+    }
+
+    state.banPopupSubmitting = true
+    state.banPopupErrorText = null
+    renderPopupOnly()
+
+    const result = options.onAdminBanProfile
+      ? await options.onAdminBanProfile(profileId, days, reason).catch(
+          () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
+        )
+      : { ok: false as const, message: 'Функцията временно не е налична.' }
+
+    if (!result.ok) {
+      state.banPopupSubmitting = false
+      state.banPopupErrorText = result.message
+      renderPopupOnly()
+      return
+    }
+
+    state.profilePopupActiveBan = result.ban
+    state.profilePopupActiveBanProfileId = profileId
+    state.banPopupOpen = false
+    state.banPopupSubmitting = false
+    state.banPopupErrorText = null
+    state.banPopupDaysDraft = ''
+    state.banPopupReasonDraft = ''
+    renderPopupOnly()
+  }
+
+  /** Огледално на submitAdminBan — spec §6. */
+  async function submitAdminUnban(profileId: string | null): Promise<void> {
+    if (state.unbanSubmitting) return
+    if (!profileId) return
+
+    state.unbanSubmitting = true
+    renderPopupOnly()
+
+    const result = options.onAdminUnbanProfile
+      ? await options.onAdminUnbanProfile(profileId).catch(
+          () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
+        )
+      : { ok: false as const, message: 'Функцията временно не е налична.' }
+
+    if (!result.ok) {
+      state.unbanSubmitting = false
+      // Popup-ът с confirm бутона вече е затворен визуално чрез error toast
+      // pattern-а не съществува тук — просто затваряме confirm-а и оставяме
+      // "Баннат до…" индикатора видим (state.profilePopupActiveBan непроменен),
+      // grешката се губи мълчаливо тук, но serverError е рядък edge case
+      // (already unbanned race) — UI просто остава консистентно с реалността
+      // при следващ ensureProfilePopupActiveBanLoaded refresh.
+      state.unbanConfirmOpen = false
+      renderPopupOnly()
+      return
+    }
+
+    state.profilePopupActiveBan = null
+    state.unbanConfirmOpen = false
+    state.unbanSubmitting = false
+    renderPopupOnly()
+  }
+
+  /**
+   * Изтрий окончателно — необратимо (spec §7-9). Server-side authoritative
+   * self/role проверка в handleAdminProfileHardDeleteRequest. Успешен delete
+   * затваря popup-а изцяло (профилът вече не съществува) — targeted
+   * renderPopupOnly() с isOpen:false, без пълен Lobby render().
+   */
+  async function submitAdminHardDelete(profileId: string | null, rawReason: string): Promise<void> {
+    if (state.deletePopupSubmitting) return
+    if (!profileId) return
+
+    const reason = rawReason.trim()
+    if (reason.length === 0) {
+      state.deletePopupErrorText = 'Причината е задължителна.'
+      renderPopupOnly()
+      return
+    }
+
+    state.deletePopupSubmitting = true
+    state.deletePopupErrorText = null
+    renderPopupOnly()
+
+    const result = options.onAdminHardDeleteProfile
+      ? await options.onAdminHardDeleteProfile(profileId, reason).catch(
+          () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
+        )
+      : { ok: false as const, message: 'Функцията временно не е налична.' }
+
+    if (!result.ok) {
+      state.deletePopupSubmitting = false
+      state.deletePopupErrorText = result.message
+      renderPopupOnly()
+      return
+    }
+
+    state.deletePopupOpen = false
+    state.deletePopupSubmitting = false
+    state.deletePopupErrorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupActiveBan = null
+    state.profilePopupActiveBanProfileId = null
     renderPopupOnly()
   }
 
@@ -12521,14 +12759,46 @@ export function createLobbyFlowController(
     }
 
     state.authSubmitInFlight = true
-    const errorText = options.onLoginSubmit
+    const loginResult = options.onLoginSubmit
       ? await options.onLoginSubmit(email.trim(), password)
-      : 'Входът временно не е наличен.'
+      : { errorText: 'Входът временно не е наличен.' }
 
-    if (errorText !== null) {
+    if (loginResult.bannedInfo) {
+      state.authSubmitInFlight = false
+      state.authModalMode = 'closed'
+      render()
+      const ban = loginResult.bannedInfo
+      const untilDate = new Date(ban.bannedUntil)
+      const untilText = Number.isFinite(untilDate.getTime())
+        ? untilDate.toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+        : '—'
+      const daysWord = ban.remainingDays === 1 ? 'ден' : 'дни'
+      options.onShowModerationForcedExitPopup?.({
+        title: 'Профилът е баннат',
+        bodyHtml: `
+          <div style="font-size:15px;line-height:1.55;color:rgba(226,232,240,0.88);margin-bottom:10px;">
+            Този профил е баннат за ${ban.remainingDays} ${daysWord}.
+          </div>
+          <div style="font-size:14px;line-height:1.5;color:rgba(226,232,240,0.78);margin-bottom:10px;">
+            Причина: ${escapeHtml(ban.reason)}
+          </div>
+          <div style="font-size:13px;color:rgba(148,163,184,0.85);">
+            Банът изтича на: ${escapeHtml(untilText)}
+          </div>
+        `,
+        onForcedLogout: () => {
+          // Login-time случай — потребителят никога не е бил authenticated
+          // (session никога не е създадена), затова "forced logout" тук е
+          // просто затваряне на popup-а; няма локална сесия за изчистване.
+        },
+      })
+      return
+    }
+
+    if (loginResult.errorText !== null) {
       state.authSubmitInFlight = false
       const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
-      if (el) { el.textContent = errorText; el.style.display = '' }
+      if (el) { el.textContent = loginResult.errorText; el.style.display = '' }
       return
     }
 
@@ -13937,6 +14207,52 @@ export function createLobbyFlowController(
       onVipGrantSubmit: (profileId, rawDays) => {
         void submitAdminVipGrant(profileId, rawDays)
       },
+      onBanOpen: (profileId) => {
+        if (!profileId) return
+        state.banPopupOpen = true
+        state.banPopupDaysDraft = ''
+        state.banPopupReasonDraft = ''
+        state.banPopupErrorText = null
+        renderPopupOnly()
+      },
+      onBanCancel: () => {
+        state.banPopupOpen = false
+        state.banPopupSubmitting = false
+        state.banPopupErrorText = null
+        renderPopupOnly()
+      },
+      onBanSubmit: (profileId, rawDays, reason) => {
+        void submitAdminBan(profileId, rawDays, reason)
+      },
+      onUnbanOpen: (profileId) => {
+        if (!profileId) return
+        state.unbanConfirmOpen = true
+        renderPopupOnly()
+      },
+      onUnbanCancel: () => {
+        state.unbanConfirmOpen = false
+        state.unbanSubmitting = false
+        renderPopupOnly()
+      },
+      onUnbanConfirm: (profileId) => {
+        void submitAdminUnban(profileId)
+      },
+      onDeleteOpen: (profileId) => {
+        if (!profileId) return
+        state.deletePopupOpen = true
+        state.deletePopupReasonDraft = ''
+        state.deletePopupErrorText = null
+        renderPopupOnly()
+      },
+      onDeleteCancel: () => {
+        state.deletePopupOpen = false
+        state.deletePopupSubmitting = false
+        state.deletePopupErrorText = null
+        renderPopupOnly()
+      },
+      onDeleteSubmit: (profileId, reason) => {
+        void submitAdminHardDelete(profileId, reason)
+      },
     }
   }
 
@@ -13990,6 +14306,47 @@ export function createLobbyFlowController(
         // directly, catch-up-вайки вече обновения, но never-patched state) —
         // същия клас бъг като notification bell dropdown-а. Targeted
         // renderPopupOnly() тук го заобикаля изцяло.
+        renderPopupOnly()
+      }
+    })()
+  }
+
+  /**
+   * Огледално на ensureProfilePopupTargetRoleLoaded, за активен бан статус —
+   * захранва "БАН" vs "Баннат до…" бутоните в profile popup-а (spec §6).
+   * Memoization guard чрез profilePopupActiveBanProfileId. Вика се от
+   * renderLobby() и renderPopupOnly(), СЪЩИЯ "покрий всички входни точки"
+   * pattern като target role loader-а.
+   */
+  function ensureProfilePopupActiveBanLoaded(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    const profile = state.profilePopupProfile
+
+    if (!state.profilePopupOpen || profile === null || profile.profileId === null) {
+      return
+    }
+    if (!isFullAdminAuthSession(authSession)) {
+      return
+    }
+    const ownProfileId = authSession?.profile.profileId ?? null
+    if (profile.profileId === ownProfileId) {
+      return
+    }
+    if (state.profilePopupActiveBanProfileId === profile.profileId) {
+      return
+    }
+
+    const targetProfileId = profile.profileId
+    state.profilePopupActiveBanProfileId = targetProfileId
+    state.profilePopupActiveBan = null
+
+    void (async () => {
+      const result = await options.onAdminGetActiveBan?.(targetProfileId)
+      if (!result || state.profilePopupActiveBanProfileId !== targetProfileId) {
+        return
+      }
+      if (result.ok) {
+        state.profilePopupActiveBan = result.activeBan
         renderPopupOnly()
       }
     })()
@@ -14373,6 +14730,7 @@ export function createLobbyFlowController(
   function renderPopupOnly(renderOptions?: { skipAnimation?: boolean }): void {
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
+    ensureProfilePopupActiveBanLoaded()
     ensureOwnVipStatusLoaded()
     const popupProfile = state.profilePopupProfile ?? createLocalProfilePreview(state, authSession)
     const isOwnProfile = authSession !== null
@@ -14395,6 +14753,18 @@ export function createLobbyFlowController(
         vipGrantOpen: state.vipGrantOpen,
         vipGrantSubmitting: state.vipGrantSubmitting,
         vipGrantErrorText: state.vipGrantErrorText,
+        activeBan: state.profilePopupActiveBan,
+        banPopupOpen: state.banPopupOpen,
+        banPopupDaysDraft: state.banPopupDaysDraft,
+        banPopupReasonDraft: state.banPopupReasonDraft,
+        banPopupSubmitting: state.banPopupSubmitting,
+        banPopupErrorText: state.banPopupErrorText,
+        unbanConfirmOpen: state.unbanConfirmOpen,
+        unbanSubmitting: state.unbanSubmitting,
+        deletePopupOpen: state.deletePopupOpen,
+        deletePopupReasonDraft: state.deletePopupReasonDraft,
+        deletePopupSubmitting: state.deletePopupSubmitting,
+        deletePopupErrorText: state.deletePopupErrorText,
         skipAnimation: renderOptions?.skipAnimation,
       },
       getPopupCallbacks(),

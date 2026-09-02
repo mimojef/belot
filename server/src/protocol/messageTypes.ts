@@ -725,6 +725,32 @@ export type SessionDisplacedMessage = {
   type: 'session_displaced'
 }
 
+/**
+ * Изпраща се на всички живи socket-и на профил, който тъкмо е бил banned от
+ * admin (spec §5B) — веднага след insertBanStatement/COMMIT, ПРЕДИ socket.close(),
+ * за да client-ът успее да покаже ban popup-а (mirror на 'session_displaced'
+ * pattern-а, виж displaceProfileConnections/banProfileConnections в index.ts).
+ */
+export type SessionBannedMessage = {
+  type: 'session_banned'
+  bannedUntil: string
+  reason: string
+  remainingDays: number
+}
+
+/**
+ * Изпраща се на всички живи socket-и на профил, който тъкмо е бил hard-deleted
+ * от admin (spec §8/§11 "delete на online profile прекратява active access") —
+ * отделен от SessionBannedMessage, за да client-ът не показва подвеждащ "баннат
+ * за ощеX дни" текст за необратимо изтрит профил. reason е server-validated/
+ * trimmed текстът от admin DELETE заявката (immediate или pending-след-игра) —
+ * НЕ носи admin identity, само причината.
+ */
+export type SessionDeletedMessage = {
+  type: 'session_deleted'
+  reason: string
+}
+
 export type SessionInGameMessage = {
   type: 'session_in_game'
   roomId: RoomId
@@ -998,6 +1024,8 @@ export type ServerMessage =
   | GuestTrialErrorMessage
   | GuestTrialStatusMessage
   | SessionDisplacedMessage
+  | SessionBannedMessage
+  | SessionDeletedMessage
   | SessionInGameMessage
   | PlayerProfileMessage
   | RoomCreatedMessage

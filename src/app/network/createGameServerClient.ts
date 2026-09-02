@@ -1368,6 +1368,18 @@ export type SessionDisplacedMessage = {
   type: 'session_displaced'
 }
 
+export type SessionBannedMessage = {
+  type: 'session_banned'
+  bannedUntil: string
+  reason: string
+  remainingDays: number
+}
+
+export type SessionDeletedMessage = {
+  type: 'session_deleted'
+  reason: string
+}
+
 export type SessionInGameMessage = {
   type: 'session_in_game'
   roomId: string
@@ -2164,6 +2176,8 @@ export type ServerMessage =
   | MatchmakingExpiredMessage
   | MatchFoundMessage
   | SessionDisplacedMessage
+  | SessionBannedMessage
+  | SessionDeletedMessage
   | SessionInGameMessage
   | EmojiReactionMessage
   | PhraseReactionMessage

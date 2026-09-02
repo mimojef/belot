@@ -34,7 +34,7 @@ import { readProfileImageFileAsDataUrl } from './app/profileImages/profileImageU
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import { formatTopicsSectionMuteErrorText } from './app/lobby/renderTopicsScreen'
-import type { PlayerAccountRole } from './ui/overlays/renderPlayerProfilePopup'
+import type { PlayerAccountRole, ActiveProfileBanSnapshot } from './ui/overlays/renderPlayerProfilePopup'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, CpuIncidentSummary, CpuIncidentDetail } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
@@ -346,6 +346,21 @@ let silentAttachedRoundTransitionRoomId: string | null = null
 let isPageUnloading = false
 let isRefreshingAuthConnection = false
 let isSessionDisplaced = false
+/**
+ * True докато showModerationForcedExitPopup (BAN/DELETE forced-exit, round 4
+ * §8) стои на екрана — сетва се веднага при session_banned/session_deleted,
+ * нулира се ЕДИНСТВЕНО вътре в onForcedLogout callback-а (OK или 20-сек
+ * countdown expiry), огледално на isSessionDisplaced/isPageUnloading guard-а
+ * на onClose по-долу. Без този флаг: сървърът затваря socket-а веднага след
+ * session_banned/session_deleted, onClose() задейства нормалния reconnect
+ * flow, клиентът се reconnect-ва след няколко секунди, onOpen() вижда
+ * shouldReloadLobbyOnReconnect===true и вика forceOfflineLobbyReload() ->
+ * window.location.replace(...) — пълна page navigation, която маха popup-а
+ * (и неговия interval) много преди 20-те секунди да изтекат. НЕ добавя нов
+ * timer/forced-logout път — само пропуска reload/reconnect side effects-ите
+ * в onClose, докато popup-ът реално стои.
+ */
+let isModerationForcedExitPending = false
 let shouldReloadLobbyOnReconnect = false
 let offlineLobbyReloadScheduled = false
 let pwaBootstrapAuthSessionLoaded = false
@@ -431,6 +446,9 @@ type AuthResponse = {
   session?: AuthSession | null
   message?: string
   code?: string
+  bannedUntil?: string
+  reason?: string
+  remainingDays?: number
 }
 
 type AdminProfileResponse = {
@@ -765,7 +783,7 @@ async function loadAuthSession(): Promise<void> {
 async function submitAuthRequest(
   endpoint: 'login' | 'register',
   body: Record<string, string>,
-): Promise<string | null> {
+): Promise<{ errorText: string | null; bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/auth/${endpoint}`, {
       method: 'POST',
@@ -778,7 +796,17 @@ async function submitAuthRequest(
     const data = await readAuthResponse(response)
 
     if (!response.ok || !data.ok || !data.session) {
-      return data.message ?? 'Заявката не беше успешна.'
+      // Структуриран PROFILE_BANNED отговор (spec §5A) — само login endpoint-ът
+      // може реално да го върне (authStore.login ban gate), но проверката е
+      // тук (не в отделна login-only функция), за да няма дублиран fetch/
+      // error-handling код между login и register.
+      if (data.code === 'PROFILE_BANNED' && data.bannedUntil && data.reason && typeof data.remainingDays === 'number') {
+        return {
+          errorText: data.message ?? 'Профилът е баннат.',
+          bannedInfo: { bannedUntil: data.bannedUntil, reason: data.reason, remainingDays: data.remainingDays },
+        }
+      }
+      return { errorText: data.message ?? 'Заявката не беше успешна.' }
     }
 
     currentAuthSession = data.session
@@ -803,9 +831,9 @@ async function submitAuthRequest(
     if (endpoint === 'register') {
       trackCompleteRegistration(`complete-registration-${currentAuthSession.account.accountId}`)
     }
-    return null
+    return { errorText: null }
   } catch {
-    return 'Няма връзка със сървъра за профили.'
+    return { errorText: 'Няма връзка със сървъра за профили.' }
   }
 }
 
@@ -818,6 +846,25 @@ async function submitLogout(): Promise<void> {
   } catch {
     // ignore network errors — proceed with local logout
   }
+  currentAuthSession = null
+  clearSessionCache()
+  clearPendingChatRefresh()
+  stopSupportUnreadPolling()
+  stopMonitoringPolling()
+  stopAdminInfoAccessPolling()
+  syncLobbyWithAuthSession()
+  lobby.resetToLobby()
+  lobby.refreshDailyRewardsStatus()
+}
+
+/**
+ * Локален logout БЕЗ /api/auth/logout round-trip (spec §5B) — сървърът вече
+ * знае за bana/delete-а (той самият е причината socket-ът да получи
+ * 'session_banned'/'session_deleted'), затова допълнителна logout заявка би
+ * била просто излишен network round-trip. Reuse-ва СЪЩОТО local cleanup като
+ * submitLogout, само без fetch-а.
+ */
+function performLocalLogoutAfterBanOrDelete(): void {
   currentAuthSession = null
   clearSessionCache()
   clearPendingChatRefresh()
@@ -3828,6 +3875,91 @@ async function adminGrantVip(
   }
 }
 
+async function adminGetActiveBan(
+  targetProfileId: string,
+): Promise<{ ok: true; activeBan: ActiveProfileBanSnapshot | null } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}/ban`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; activeBan?: ActiveProfileBanSnapshot | null; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Не успяхме да заредим бан статуса.' }
+    }
+    return { ok: true, activeBan: data.activeBan ?? null }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function adminBanProfile(
+  targetProfileId: string,
+  days: number,
+  reason: string,
+): Promise<{ ok: true; ban: ActiveProfileBanSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}/ban`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ days, reason }),
+      },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; ban?: ActiveProfileBanSnapshot; message?: string }
+    if (!response.ok || !data.ok || !data.ban) {
+      return { ok: false, message: data.message ?? 'Банът не беше приложен.' }
+    }
+    return { ok: true, ban: data.ban }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function adminUnbanProfile(
+  targetProfileId: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}/ban`,
+      { method: 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Банът не беше премахнат.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function adminHardDeleteProfile(
+  targetProfileId: string,
+  reason: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}`,
+      {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ reason }),
+      },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Профилът не беше изтрит.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadOwnVipStatus(): Promise<{ ok: true; activeUntil: string | null } | { ok: false }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/vip/status`, {
@@ -5445,6 +5577,9 @@ lobby = createLobbyFlowController({
   },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
+  onShowModerationForcedExitPopup: (input) => {
+    showModerationForcedExitPopup(input)
+  },
   onLoginSubmit: (email, password) =>
     submitAuthRequest('login', {
       email,
@@ -5459,7 +5594,7 @@ lobby = createLobbyFlowController({
         email,
         password,
         ...(gender !== null ? { gender } : {}),
-      })
+      }).then((result) => result.errorText)
     },
   onProfileEditSubmit: (targetProfileId, avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(targetProfileId, avatarFile, avatarCrop, galleryFiles),
@@ -5471,6 +5606,10 @@ lobby = createLobbyFlowController({
   onProfileGalleryDelete: (targetProfileId, imageId) => deleteProfileGalleryImage(targetProfileId, imageId),
   onProfileNameChangeSubmit: (targetProfileId, displayName) => submitProfileNameChange(targetProfileId, displayName),
   onAdminGrantVip: (targetProfileId, days) => adminGrantVip(targetProfileId, days),
+  onAdminGetActiveBan: (targetProfileId) => adminGetActiveBan(targetProfileId),
+  onAdminBanProfile: (targetProfileId, days, reason) => adminBanProfile(targetProfileId, days, reason),
+  onAdminUnbanProfile: (targetProfileId) => adminUnbanProfile(targetProfileId),
+  onAdminHardDeleteProfile: (targetProfileId, reason) => adminHardDeleteProfile(targetProfileId, reason),
   onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
   onPlayersLoad: (page, snapshotToken) => loadPlayersDirectory(page, snapshotToken),
   onPlayersSearch: (query, signal) => searchPlayersDirectory(query, signal),
@@ -6148,6 +6287,73 @@ function showSessionDisplacedOverlay(): void {
   document.body.appendChild(overlay)
 }
 
+/**
+ * Споделен forced-exit moderation popup (round 4 брифа §8) — ЕДИНСТВЕНАТА
+ * имплементация на 20-секундния countdown modal, ползвана И от BAN, И от
+ * DELETE enforcement (session_banned/session_deleted WS съобщения), вместо
+ * два дублирани countdown механизма. Blocking — няма X/Escape/click-outside
+ * close, единствено OK бутон или countdown expiry (00:00) водят до
+ * onForcedLogout(), и двата пътя idempotent (guard-нати чрез closed флаг,
+ * timer винаги clearInterval-нат преди да extractnе, за да няма multiple
+ * intervals дори при (теоретично) повторно извикване).
+ */
+function showModerationForcedExitPopup(input: {
+  title: string
+  bodyHtml: string
+  onForcedLogout: () => void
+}): void {
+  const existing = document.getElementById('moderation-forced-exit-popup')
+  existing?.remove()
+
+  const COUNTDOWN_START_SECONDS = 20
+  let remainingSeconds = COUNTDOWN_START_SECONDS
+  let intervalId: ReturnType<typeof setInterval> | null = null
+  let closed = false
+
+  const host = document.createElement('div')
+  host.id = 'moderation-forced-exit-popup'
+  host.style.cssText = 'position:fixed;inset:0;z-index:210000;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,0.82);font-family:Arial,Helvetica,sans-serif;'
+  host.innerHTML = `
+    <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,440px);border-radius:8px;border:2px solid rgba(248,113,113,0.55);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+      <div style="font-size:22px;font-weight:900;color:#f8fafc;margin-bottom:14px;">${escapeHtmlMain(input.title)}</div>
+      ${input.bodyHtml}
+      <div id="moderation-forced-exit-countdown" style="font-size:13px;color:rgba(148,163,184,0.85);margin:14px 0 18px;">
+        Автоматичен изход след: ${COUNTDOWN_START_SECONDS} сек.
+      </div>
+      <button id="moderation-forced-exit-ok" type="button" style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit;">
+        OK
+      </button>
+    </div>
+  `
+  document.body.appendChild(host)
+
+  const countdownEl = host.querySelector<HTMLElement>('#moderation-forced-exit-countdown')
+
+  const finish = () => {
+    if (closed) return
+    closed = true
+    if (intervalId !== null) {
+      clearInterval(intervalId)
+      intervalId = null
+    }
+    host.remove()
+    input.onForcedLogout()
+  }
+
+  intervalId = setInterval(() => {
+    remainingSeconds -= 1
+    if (remainingSeconds <= 0) {
+      finish()
+      return
+    }
+    if (countdownEl) {
+      countdownEl.textContent = `Автоматичен изход след: ${remainingSeconds} сек.`
+    }
+  }, 1000)
+
+  host.querySelector<HTMLButtonElement>('#moderation-forced-exit-ok')?.addEventListener('click', finish)
+}
+
 function removeLandingOverlay(): void {
   document.getElementById('pwa-landing-overlay')?.remove()
   document.body.style.overflow = ''
@@ -6313,7 +6519,7 @@ client = createGameServerClient({
     requestPwaUpdateApplyAttempt()
   },
   onClose: () => {
-    if (isSessionDisplaced || isPageUnloading) {
+    if (isSessionDisplaced || isPageUnloading || isModerationForcedExitPending) {
       return
     }
 
@@ -6367,6 +6573,72 @@ client = createGameServerClient({
     if (message.type === 'session_displaced') {
       isSessionDisplaced = true
       showSessionDisplacedOverlay()
+      return
+    }
+
+    if (message.type === 'session_banned') {
+      // Immediate/deferred-then-fired ban enforcement за online профил
+      // (round 4 брифа §3/§5) — споделеният 20-сек countdown popup
+      // (showModerationForcedExitPopup), НЕ старото login-time PROFILE_BANNED
+      // popup (това е за unauthenticated login опит, различен сценарий).
+      // Local logout се извършва ЕДИНСТВЕНО при OK/countdown expiry
+      // (onForcedLogout), не веднага при получаване на съобщението —
+      // потребителят трябва да прочете причината/срока преди да бъде изваден.
+      //
+      // isModerationForcedExitPending=true ПРЕДИ showModerationForcedExitPopup
+      // (round 5 fix) — сървърът затваря socket-а веднага след това съобщение;
+      // без флага onClose() би стартирал нормалния reconnect flow, който при
+      // успешен reconnect навигира ЦЯЛАТА страница (forceOfflineLobbyReload)
+      // и маха popup-а много преди 20-те секунди да изтекат (виж
+      // isModerationForcedExitPending декларацията за пълния lifecycle).
+      isModerationForcedExitPending = true
+      const untilDate = new Date(message.bannedUntil)
+      const untilText = Number.isFinite(untilDate.getTime())
+        ? untilDate.toLocaleString('bg-BG', { day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' })
+        : '—'
+      const daysWord = message.remainingDays === 1 ? 'ден' : 'дни'
+      showModerationForcedExitPopup({
+        title: 'Профилът е баннат',
+        bodyHtml: `
+          <div style="font-size:15px;line-height:1.55;color:rgba(226,232,240,0.88);margin-bottom:10px;">
+            Този профил е баннат за ${message.remainingDays} ${daysWord}.
+          </div>
+          <div style="font-size:14px;line-height:1.5;color:rgba(226,232,240,0.78);margin-bottom:10px;">
+            Причина: ${escapeHtmlMain(message.reason)}
+          </div>
+          <div style="font-size:13px;color:rgba(148,163,184,0.85);">
+            Банът изтича на: ${escapeHtmlMain(untilText)}
+          </div>
+        `,
+        onForcedLogout: () => {
+          isModerationForcedExitPending = false
+          performLocalLogoutAfterBanOrDelete()
+        },
+      })
+      return
+    }
+
+    if (message.type === 'session_deleted') {
+      // Immediate/deferred-then-fired access cutoff за online профил, тъкмо
+      // hard-deleted от admin (round 4 брифа §4/§6) — същият споделен
+      // 20-сек countdown popup mechanism. Виж коментара при session_banned
+      // по-горе за isModerationForcedExitPending.
+      isModerationForcedExitPending = true
+      showModerationForcedExitPopup({
+        title: 'Профилът е изтрит',
+        bodyHtml: `
+          <div style="font-size:15px;line-height:1.55;color:rgba(226,232,240,0.88);margin-bottom:10px;">
+            Този профил беше изтрит от администратор.
+          </div>
+          <div style="font-size:14px;line-height:1.5;color:rgba(226,232,240,0.78);margin-bottom:10px;">
+            Причина: ${escapeHtmlMain(message.reason)}
+          </div>
+        `,
+        onForcedLogout: () => {
+          isModerationForcedExitPending = false
+          performLocalLogoutAfterBanOrDelete()
+        },
+      })
       return
     }
 

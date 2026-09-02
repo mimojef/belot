@@ -18,6 +18,9 @@ import Stripe from 'stripe'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
 import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type PrivateRoomMatchRecord } from './db/privateRoomMatchStore.js'
+import { createProfileBanStore } from './db/profileBanStore.js'
+import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
+import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import {
@@ -661,12 +664,24 @@ const dailyRewardsStore = await createDailyRewardsStore(
 const adCampaignsStore = await createAdCampaignsStore(
   databaseBootstrap.databaseFilePath,
 )
+const profileBanStore = await createProfileBanStore(databaseBootstrap.databaseFilePath)
+const profileHardDeleteService = await createProfileHardDeleteService(databaseBootstrap.databaseFilePath)
+const pendingProfileModerationStore = await createPendingProfileModerationStore(databaseBootstrap.databaseFilePath)
 const authStore = await createAuthStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
   {
     getSignupBonusYellowCoins: () =>
       adminSettingsStore.getSettings().signupBonusYellowCoins,
+    getActiveBanForProfile: (profileId) => {
+      const activeBan = profileBanStore.getActiveBan(profileId)
+      if (activeBan === null) return null
+      return {
+        bannedUntil: activeBan.bannedUntil,
+        reason: activeBan.reason,
+        remainingDays: activeBan.remainingDays,
+      }
+    },
   },
 )
 const friendshipStore = await createFriendshipStore(
@@ -4181,6 +4196,20 @@ async function tickRoomGameRuntimes(): Promise<void> {
               },
             )
           }
+          // Round 4 брифа — прилага pending BAN/DELETE enforcement, отложен
+          // докато играч довърши текущата активна игра (виж
+          // applyPendingModerationForRoomParticipants коментара). Умишлено
+          // ПОСЛЕДНО в completion side-effect списъка — трябва да е СЛЕД
+          // payout/mission/tournament side effects-ите по-горе, за да не
+          // прекъсне (чрез socket close/DELETE FROM profiles) обработката
+          // им за същия участник по средата.
+          runMatchCompletionSideEffect(
+            'apply-pending-profile-moderation',
+            room.id,
+            () => {
+              applyPendingModerationForRoomParticipants(room)
+            },
+          )
         },
       })
 
@@ -4533,6 +4562,129 @@ function displaceProfileConnections(
 
     if (result.room !== null) {
       broadcastRoomSnapshots(result.room, socketRegistry)
+    }
+  }
+}
+
+/**
+ * Immediate enforcement за online профил, тъкмо получил активен бан (spec
+ * §5B) — mirror на displaceProfileConnections по-горе, но затваря ВСИЧКИ
+ * живи connection-и на профила (без "except", банваният няма легитимна
+ * connection да остане отворена) и изпраща 'session_banned' с
+ * причина/срок вместо 'session_displaced', за да client-ът покаже
+ * dedicated ban popup вместо generic "друг таб пое сесията" overlay.
+ * Не пипа account_sessions тук — банът не revoke-ва самия session token
+ * (unban веднага връща достъпа, без нужда потребителят да влиза наново);
+ * enforcement-ът е изцяло in-memory socket layer + authStore.login()'s
+ * ban gate за бъдещи login опити, докато банът е активен.
+ */
+function banProfileConnections(
+  profileId: string,
+  ban: { bannedUntil: string; reason: string; remainingDays: number },
+): void {
+  closeAllProfileConnections(profileId, {
+    type: 'session_banned',
+    bannedUntil: ban.bannedUntil,
+    reason: ban.reason,
+    remainingDays: ban.remainingDays,
+  })
+}
+
+/**
+ * Immediate access cutoff за online профил, тъкмо hard-deleted от admin
+ * (spec §8/§11) — mirror на banProfileConnections, но изпраща
+ * 'session_deleted' (виж SessionDeletedMessage за защо е отделен от
+ * 'session_banned'). reason е server-validated/trimmed текстът от admin
+ * DELETE заявката (immediate или pending.reason при deferred-след-игра
+ * enforcement) — единствената user-facing причина, без admin identity.
+ */
+function deleteProfileConnections(profileId: string, reason: string): void {
+  closeAllProfileConnections(profileId, { type: 'session_deleted', reason })
+}
+
+function closeAllProfileConnections(
+  profileId: string,
+  message:
+    | { type: 'session_banned'; bannedUntil: string; reason: string; remainingDays: number }
+    | { type: 'session_deleted'; reason: string },
+): void {
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId !== profileId || conn.status !== 'connected') {
+      continue
+    }
+
+    const socket = socketRegistry.get(conn.id)
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      sendJsonMessage(socket, message)
+      socket.close()
+    }
+
+    removeConnectionFromMatchmaking(conn.id)
+    const result = handleDisconnect(serverState, conn.id)
+    serverState = result.room === null
+      ? result.serverState
+      : commitServerRoomWithSnapshot(result.room, result.serverState)
+
+    if (result.room !== null) {
+      broadcastRoomSnapshots(result.room, socketRegistry)
+    }
+  }
+}
+
+/**
+ * Прилага pending BAN/DELETE enforcement (round 4 брифа) за всеки жив
+ * human участник на СЕГА-приключилата стая — вика се ЕДИНСТВЕНО от
+ * shouldRunMatchCompletionSideEffects hook-а (виж call site-а в
+ * tickRoomGameRuntimes), точно на "match-ended" edge-а, за да не прекъсва
+ * играч, който тъкмо е бил banned/deleted, докато довършва текущата игра.
+ * Idempotent по дизайн — pending редът се трие (clearPending) веднага след
+ * успешно приложение, затова повторно извикване за същата стая (напр. ако
+ * hook-ът по някаква причина се задейства пак) не прави нищо втори път.
+ */
+function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'human') continue
+    const participantProfileId =
+      participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+    if (participantProfileId === null) continue
+
+    const pending = pendingProfileModerationStore.getPending(participantProfileId)
+    if (pending === null) continue
+
+    if (pending.action === 'ban') {
+      const activeBan = profileBanStore.getActiveBan(participantProfileId)
+      pendingProfileModerationStore.clearPending(participantProfileId)
+      // Банът може вече да е бил вдигнат (UNBAN), докато играчът е довършвал
+      // мача — в такъв случай няма какво да enforce-ваме, просто chистим
+      // pending маркера мълчаливо (spec-ът не изисква late enforcement за
+      // вече невалиден ban).
+      if (activeBan === null) continue
+      banProfileConnections(participantProfileId, {
+        bannedUntil: activeBan.bannedUntil,
+        reason: activeBan.reason,
+        remainingDays: activeBan.remainingDays,
+      })
+      continue
+    }
+
+    // action === 'delete' — физическото DELETE FROM profiles се изпълнява
+    // ЕДИНСТВЕНО тук, при terminal game end, не в HTTP handler-а (виж
+    // handleAdminProfileHardDeleteRequest — за active-game target той само
+    // записва pending реда и връща веднага).
+    const result = profileHardDeleteService.hardDeleteProfile({
+      targetProfileId: pending.targetProfileId,
+      actorProfileId: pending.requestedByProfileId,
+      actorAccountId: pending.requestedByAccountId ?? '',
+      reason: pending.reason,
+    })
+    pendingProfileModerationStore.clearPending(participantProfileId)
+    if (result.ok) {
+      deleteProfileConnections(participantProfileId, pending.reason)
+    } else {
+      console.error(
+        `[pending-moderation] deferred hard delete failed profileId=${participantProfileId} code=${result.code}`,
+      )
     }
   }
 }
@@ -6767,6 +6919,14 @@ async function handleAuthRequest(
           })
 
     if (!result.ok) {
+      // Структуриран PROFILE_BANNED branch (spec §5A) — отделен статус код
+      // (403, не generic 400) за да client-ът може да разграничи "баннат
+      // профил" от обикновена "грешен email/парола" грешка и да покаже
+      // dedicated ban popup вместо raw inline error text.
+      if ('code' in result && result.code === 'PROFILE_BANNED') {
+        sendJsonResponse(res, 403, result)
+        return true
+      }
       sendJsonResponse(res, 400, result)
       return true
     }
@@ -7669,6 +7829,282 @@ async function handleAdminVipGrantRequest(
   const [enrichedProfile] = enrichPlayerProfilesForViewer([updatedProfile], session.profile.profileId)
 
   sendJsonResponse(res, 200, { ok: true, profile: enrichedProfile })
+  return true
+}
+
+/**
+ * Admin moderation controls (BAN/UNBAN/HARD DELETE) — spec §2/§10. Само
+ * пълен admin (isFullAdminSession), никога subadmin/etc — mirror на
+ * handleAdminSubadminRoleRequest/handleAdminVipGrantRequest gate pattern-а.
+ *
+ * GET   /api/admin/profiles/:id/ban  — активен бан за popup UI (null ако няма).
+ * POST  /api/admin/profiles/:id/ban  — banProfile (days, reason задължителни).
+ * DELETE /api/admin/profiles/:id/ban — unbanProfile (без body).
+ */
+async function handleAdminProfileBanRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/ban$/)
+  if (!match) return false
+
+  if (req.method !== 'GET' && req.method !== 'POST' && req.method !== 'DELETE') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да банва профили.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  if (req.method === 'GET') {
+    const activeBan = profileBanStore.getActiveBan(targetProfileId)
+    sendJsonResponse(res, 200, { ok: true, activeBan })
+    return true
+  }
+
+  if (playerProgressStore.getPublicProfile(targetProfileId) === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+    return true
+  }
+
+  if (req.method === 'DELETE') {
+    const result = profileBanStore.unbanProfile({
+      targetProfileId,
+      actorProfileId: session.profile.profileId ?? '',
+    })
+    if (!result.ok) {
+      const statusByCode: Record<typeof result.code, number> = {
+        not_found: 404,
+        no_active_ban: 409,
+      }
+      sendJsonResponse(res, statusByCode[result.code], { ok: false, message: result.message })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  // POST — banProfile
+  const body = await readJsonRequestBody(req)
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['days', 'reason']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволени са само полетата days и reason.' })
+    return true
+  }
+
+  const days = getNumberField(body, 'days')
+  const reason = getStringField(body, 'reason')
+
+  if (days === null || !Number.isInteger(days) || days < 1) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Срокът трябва да е цяло положително число дни.' })
+    return true
+  }
+  if (reason.trim().length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Причината е задължителна.' })
+    return true
+  }
+
+  const result = profileBanStore.banProfile({
+    targetProfileId,
+    actorProfileId: session.profile.profileId ?? '',
+    days,
+    reason,
+  })
+
+  if (!result.ok) {
+    const statusByCode: Record<typeof result.code, number> = {
+      not_found: 404,
+      self: 400,
+      already_banned: 409,
+      invalid_days: 400,
+      invalid_reason: 400,
+    }
+    sendJsonResponse(res, statusByCode[result.code], { ok: false, message: result.message })
+    return true
+  }
+
+  // Session revocation (blocker fix, spec §1) — ревокира ВСИЧКИ живи
+  // account_sessions редове на target профила през СЪЩИЯ revoked_at модел,
+  // който getSession() вече филтрира (виж authStore.ts
+  // revokeAllSessionsForProfile). Без това стар session cookie/token,
+  // издаден ПРЕДИ бана, би продължил да минава getSession() успешно за
+  // всяка следваща authenticated HTTP заявка (не само WS) — WS socket
+  // close-ването само по себе си не пипа persisted session редовете. Тази
+  // стъпка е БЕЗУСЛОВНА (дори при active-game defer по-долу) — spec round 4
+  // §9: "ban трябва да блокира new login/reconnect/new game" независимо от
+  // това дали текущата игра продължава.
+  authStore.revokeAllSessionsForProfile(targetProfileId)
+
+  // Round 4 брифа — ако target е РЕАЛЕН human участник в момента играеща се
+  // стая, НЕ прекъсваме текущата игра (нито socket close, нито bot
+  // takeover само заради admin BAN). Записваме pending маркер вместо
+  // banProfileConnections — приложен по-късно от
+  // applyPendingModerationForRoomParticipants на match-ended edge-а.
+  if (isProfileInActiveGame(targetProfileId)) {
+    pendingProfileModerationStore.recordPendingBan({
+      targetProfileId,
+      banId: result.ban.banId,
+      requestedByProfileId: session.profile.profileId ?? '',
+    })
+    sendJsonResponse(res, 200, { ok: true, ban: result.ban, pending: true })
+    return true
+  }
+
+  // Immediate enforcement (spec §5B) — target профилът може да е online В
+  // МОМЕНТА на ban-а (но НЕ в активна игра, виж guard-а по-горе),
+  // banProfileConnections затваря живите му connection-и веднага, преди
+  // HTTP отговорът дори да достигне admin клиента.
+  banProfileConnections(targetProfileId, {
+    bannedUntil: result.ban.bannedUntil,
+    reason: result.ban.reason,
+    remainingDays: result.ban.remainingDays,
+  })
+
+  sendJsonResponse(res, 200, { ok: true, ban: result.ban, pending: false })
+  return true
+}
+
+/**
+ * HARD DELETE — необратимо изтриване на чужд профил (spec §7-9). Единствен
+ * DELETE verb на /api/admin/profiles/:id (без /ban суфикс) — умишлено
+ * различен route от display-name/avatar/gallery admin edit endpoints
+ * (handleAdminProfileModerationRequest), за да няма случайно съвпадение с
+ * бъдещ under-:id DELETE за друга под-ресурс операция.
+ */
+async function handleAdminProfileHardDeleteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)$/)
+  if (!match) return false
+  if (req.method !== 'DELETE') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да трие профили.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req)
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['reason']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволено е само поле reason.' })
+    return true
+  }
+
+  const reason = getStringField(body, 'reason')
+  if (reason.trim().length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Причината е задължителна.' })
+    return true
+  }
+
+  const actorProfileId = session.profile.profileId
+  if (actorProfileId === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна admin сесия.' })
+    return true
+  }
+
+  // Round 4 брифа — ако target е РЕАЛЕН human участник в момента играеща се
+  // стая, отлагаме ЦЯЛОТО физическо DELETE FROM profiles (не само socket
+  // disconnect-а, за разлика от BAN — тук профилът трябва да продължи да
+  // съществува, докато играе). Не викаме profileHardDeleteService изобщо —
+  // само записваме pending маркер, приложен по-късно от
+  // applyPendingModerationForRoomParticipants на match-ended edge-а.
+  if (isProfileInActiveGame(targetProfileId)) {
+    // Blocker fix (round 4 §1) — БЕЗ тази проверка pending DELETE би могъл
+    // да заседне неизпълним завинаги: ако target играе tournament semifinal/
+    // final, completion hook-ът по-късно ще извика hardDeleteProfile(), но
+    // турнирът може все още да е non-terminal (semifinal завършва, final
+    // тепърва предстои) — hardDeleteProfile() би върнал
+    // 'active_tournament_dependency' и pending реда никога не би се
+    // изпълнил. Затова проверяваме СЪЩАТА authoritative зависимост
+    // (hasActiveTournamentDependency — reuse-ва точно тези SQL statements,
+    // не дублирана логика) ПРЕДИ изобщо да запишем pending маркер. Ако има
+    // зависимост, отказваме веднага (409), профилът остава непроменен,
+    // admin-ът може да BAN-не вместо това (spec: "Admin може първо да
+    // BAN-не профила").
+    if (profileHardDeleteService.hasActiveTournamentDependency(targetProfileId)) {
+      sendJsonResponse(res, 409, {
+        ok: false,
+        code: 'active_tournament_dependency',
+        message: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
+      })
+      return true
+    }
+
+    pendingProfileModerationStore.recordPendingDelete({
+      targetProfileId,
+      requestedByProfileId: actorProfileId,
+      requestedByAccountId: session.account.accountId,
+      reason,
+    })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      pending: true,
+      message: 'Профилът ще бъде изтрит след края на текущата игра.',
+    })
+    return true
+  }
+
+  const result = profileHardDeleteService.hardDeleteProfile({
+    targetProfileId,
+    actorProfileId,
+    actorAccountId: session.account.accountId,
+    reason,
+  })
+
+  if (!result.ok) {
+    const statusByCode: Record<typeof result.code, number> = {
+      not_found: 404,
+      self: 400,
+      invalid_reason: 400,
+      active_tournament_dependency: 409,
+    }
+    const messageByCode: Record<typeof result.code, string> = {
+      not_found: 'Профилът не беше намерен.',
+      self: 'Не можеш да изтриеш себе си.',
+      invalid_reason: 'Причината е задължителна.',
+      active_tournament_dependency: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
+    }
+    sendJsonResponse(res, statusByCode[result.code], { ok: false, code: result.code, message: messageByCode[result.code] })
+    return true
+  }
+
+  // Session revocation — за разлика от BAN (профилът/акаунтът продължават да
+  // съществуват, затова трябва explicit revokeAllSessionsForProfile), тук
+  // account_sessions редовете на профила вече физически НЕ съществуват:
+  // account_sessions.profile_id е ON DELETE CASCADE към profiles.profile_id
+  // (20260510_003 migration-а) и profileHardDeleteService.hardDeleteProfile()
+  // изпълнява DELETE FROM profiles в СЪЩАТА транзакция по-горе — cascade-ът
+  // вече е изчистил всички сесии на профила преди COMMIT-а. Всеки стар
+  // session cookie/token за този профил вече проваля getSession()'s JOIN
+  // (редът просто липсва), без нужда от отделен revoke извикване тук.
+  //
+  // Immediate access cutoff (spec §11 "delete на online profile прекратява
+  // active access") — профилът вече не съществува в DB, но живите му
+  // socket-и трябва да бъдат прекратени веднага, не само при следваща
+  // getSession() проверка.
+  deleteProfileConnections(targetProfileId, reason)
+
+  sendJsonResponse(res, 200, { ok: true, pending: false })
   return true
 }
 
@@ -11632,6 +12068,15 @@ async function handleTournamentJoinRequest(
 
   if (isTournamentEntryActionRateLimited(profileId, Date.now())) {
     sendJsonResponse(res, 429, { ok: false, message: 'Твърде много опити. Опитай отново след малко.' })
+    return true
+  }
+
+  // Round 4 брифа §9 — виж идентичния guard в join_matchmaking/
+  // join_private_room в WS handler-а. Target с pending BAN/DELETE не може
+  // да влезе в нова турнирна game session, докато чака края на текущата
+  // активна игра.
+  if (pendingProfileModerationStore.getPending(profileId) !== null) {
+    sendJsonResponse(res, 409, { ok: false, message: 'Профилът временно не може да се запише за турнир.' })
     return true
   }
 
@@ -15902,6 +16347,14 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleAdminProfileBanRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminProfileHardDeleteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleFriendsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -16294,9 +16747,57 @@ wsServer.on('connection', (socket, request) => {
     return
   }
 
-  const authSession = authStore.getSession(
+  let authSession = authStore.getSession(
     getSessionTokenFromCookieHeader(request.headers.cookie),
   )
+
+  // Ban gate за WS connect (spec §5B edge case) — authStore.getSession()
+  // само проверява account_sessions.revoked_at/accounts.status, НЕ знае за
+  // profile_bans (отделен модел, виж authStore.ts getActiveBanForProfile
+  // injection коментара). Активен бан, докато session token-ът все още е
+  // валиден (не revoke-нат, не изтекъл), трябва пак да отхвърли connect-а —
+  // иначе баннат потребител би могъл да заобиколи бана само с browser
+  // refresh (нова WS connection, БЕЗ нов login/credentials round-trip).
+  if (authSession !== null && authSession.profile.profileId !== null) {
+    const activeBan = profileBanStore.getActiveBan(authSession.profile.profileId)
+    if (activeBan !== null) {
+      sendJsonMessage(socket, {
+        type: 'session_banned',
+        bannedUntil: activeBan.bannedUntil,
+        reason: activeBan.reason,
+        remainingDays: activeBan.remainingDays,
+      })
+      socket.close()
+      authSession = null
+    }
+  }
+
+  // Pending-moderation gate за WS connect (round 4 §2 reconnect policy
+  // clarification) — target с pending DELETE няма нито активен ban ред,
+  // нито revoked sessions (профилът все още съществува нормално), затова
+  // горният ban gate НЕ би го спрял. Ако target-ният играч изгуби текущата
+  // си жива connection (browser refresh/crash/нов таб) ПРЕДИ pending
+  // enforcement да се приложи на match-ended, тази нова WS connection не
+  // бива да му позволи да се върне в стаята като human (resume_room чете
+  // reconnectToken директно, без нов authStore.getSession() re-check —
+  // затова guard-ът трябва да е тук, на connect-time, не там). Живата
+  // connection, която ВЕЧЕ съществува в момента на admin-DELETE-заявката,
+  // не е засегната — тя просто продължава непроменена, тъй като е
+  // established ПРЕДИ тази проверка изобщо да се изпълни за нея.
+  if (authSession !== null && authSession.profile.profileId !== null) {
+    if (pendingProfileModerationStore.getPending(authSession.profile.profileId) !== null) {
+      // Нарочно БЕЗ 'session_banned'/'session_deleted' съобщение тук —
+      // enforcement-ът все още не е приложен (играта, довършвана от ДРУГА,
+      // вече established connection, продължава нормално), затова "баннат"/
+      // "изтрит" popup тук би бил преждевременен/подвеждащ. Клиентът просто
+      // вижда затворена connection и минава по нормалния си
+      // disconnect/reconnect-retry път; server-side блокирането е
+      // authoritative независимо какво показва UI-то в момента.
+      socket.close()
+      authSession = null
+    }
+  }
+
   const connection = createServerConnection({
     remoteAddress: request.socket.remoteAddress ?? null,
     userAgent:
@@ -17136,6 +17637,37 @@ wsServer.on('connection', (socket, request) => {
       }
 
       if (message.type === 'resume_room') {
+        // Round 4 §2 reconnect policy — tryResumeRoomForConnection matches
+        // purely по reconnectToken (никога не проверява дали ТАЗИ connection
+        // е authenticated като профила, на когото принадлежи token-ът — това
+        // е established, intentional поведение за нормален
+        // disconnect→reconnect). Затова WS-connect-time gate-ът по-горе (viж
+        // wsServer.on('connection', ...)) НЕ стига сам — connection-и, които
+        // никога не са минали през него authenticated (напр. guest connection,
+        // задържал token client-side), пак биха стигнали дотук. Explicit
+        // re-check тук: намери КОЙ профил притежава този reconnectToken в
+        // тази стая и провери pending moderation/active ban за НЕГО, преди
+        // да позволим attach — независимо от auth статуса на connecting
+        // socket-а.
+        const targetRoomForResume = serverState.rooms[message.roomId] ?? null
+        if (targetRoomForResume !== null) {
+          const tokenMatch = findHumanParticipantByReconnectToken(targetRoomForResume, message.reconnectToken)
+          const tokenOwnerProfileId =
+            tokenMatch?.participant.identity.profileId ?? tokenMatch?.participant.publicProfile?.profileId ?? null
+          if (
+            tokenOwnerProfileId !== null &&
+            (pendingProfileModerationStore.getPending(tokenOwnerProfileId) !== null ||
+              profileBanStore.getActiveBan(tokenOwnerProfileId) !== null)
+          ) {
+            safeSendToConnection(connection.id, {
+              type: 'room_resume_failed',
+              roomId: message.roomId,
+              message: 'Невалиден код за връщане в играта.',
+            })
+            return
+          }
+        }
+
         if (connection.profileId !== null) {
           displaceProfileConnections(connection.profileId, connection.id)
         }
@@ -17235,6 +17767,18 @@ wsServer.on('connection', (socket, request) => {
 
         const profileId = publicProfile.profileId ?? latestConnection.profileId
         if (sendSessionInGameIfNeeded(connection.id, profileId)) {
+          return
+        }
+
+        // Round 4 брифа §9 — target с pending BAN/DELETE (отложен, докато е
+        // довършвал предишна активна игра) не трябва да може да влезе в
+        // НОВА игра, дори socket connection-ът му все още технически да е
+        // жив (ban все още не е disconnect-нал живата игрова connection).
+        if (pendingProfileModerationStore.getPending(profileId) !== null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Профилът временно не може да влезе в нова игра.',
+          })
           return
         }
 
@@ -17918,6 +18462,12 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) {
+          return
+        }
+
+        // Round 4 брифа §9 — виж идентичния guard в join_matchmaking по-горе.
+        if (pendingProfileModerationStore.getPending(latestConnection.profileId) !== null) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Профилът временно не може да влезе в нова игра.' })
           return
         }
 

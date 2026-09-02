@@ -62,9 +62,36 @@ export type RenderPlayerProfilePopupOptions = {
    * при което искаме конкретна причина вместо generic fallback.
    */
   emptyMessage?: string | null
+  /**
+   * Admin moderation (BAN/УНИЩОЖИ) — само viewerIsFullAdmin, никога за
+   * собствения профил (isOwnProfile). activeBan е null докато lazy-fetch-ът
+   * (ensureProfilePopupActiveBanLoaded) не е resolved или профилът реално
+   * няма активен бан — виж "Баннат до" бутона вместо "БАН" в
+   * renderModerationControls по-долу.
+   */
+  activeBan?: ActiveProfileBanSnapshot | null
+  banPopupOpen?: boolean
+  banPopupDaysDraft?: string
+  banPopupReasonDraft?: string
+  banPopupSubmitting?: boolean
+  banPopupErrorText?: string | null
+  unbanConfirmOpen?: boolean
+  unbanSubmitting?: boolean
+  deletePopupOpen?: boolean
+  deletePopupReasonDraft?: string
+  deletePopupSubmitting?: boolean
+  deletePopupErrorText?: string | null
 }
 
 export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+
+/** Активен бан на разглеждания профил (само за viewerIsFullAdmin) — виж handleAdminProfileBanRequest GET в server/src/index.ts. */
+export type ActiveProfileBanSnapshot = {
+  banId: string
+  bannedUntil: string
+  reason: string
+  remainingDays: number
+}
 
 export type PlayerProfileFriendshipAction = {
   profileId: string
@@ -1098,6 +1125,373 @@ function renderVipGrantForm(
   `
 }
 
+function formatModerationDateTime(iso: string): string {
+  const date = new Date(iso)
+  if (!Number.isFinite(date.getTime())) return '—'
+  return date.toLocaleString('bg-BG', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+/**
+ * "БАН" / "Баннат до …" + "Изтрий профил" — само viewerIsFullAdmin, само
+ * чужд профил (isOwnProfile===false, никога себе си — spec §2/§11). Когато
+ * activeBan е null тригерите отварят banPopupOpen/deletePopupOpen формите
+ * (renderBanPopup/renderDeletePopup по-долу); когато има активен бан,
+ * "БАН" се заменя с read-only "Баннат до …" индикатор + "Премахни бан"
+ * (renderUnbanControls) вместо да позволи duplicate active ban (spec §11).
+ */
+function renderModerationControls(
+  profileId: string | null,
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  activeBan: ActiveProfileBanSnapshot | null | undefined,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || !profileId) {
+    return ''
+  }
+
+  if (activeBan) {
+    return `
+      <div
+        data-player-profile-active-ban="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:8px;
+          min-height:38px;
+          padding:0 12px;
+          border:1px solid rgba(248,113,113,0.55);
+          border-radius:8px;
+          background:rgba(248,113,113,0.12);
+          color:#fca5a5;
+          font-size:13px;
+          font-weight:800;
+          white-space:nowrap;
+        "
+      >Баннат до: ${escapeHtml(formatModerationDateTime(activeBan.bannedUntil))}</div>
+      <button
+        type="button"
+        data-player-profile-unban-open="${escapeHtml(profileId)}"
+        style="
+          min-height:38px;
+          padding:0 12px;
+          border:1px solid rgba(255,255,255,0.16);
+          border-radius:8px;
+          background:#080808;
+          color:#f8fafc;
+          font-size:13px;
+          font-weight:900;
+          cursor:pointer;
+        "
+      >Премахни бан</button>
+    `
+  }
+
+  return `
+    <button
+      type="button"
+      data-player-profile-ban-open="${escapeHtml(profileId)}"
+      style="
+        min-height:38px;
+        padding:0 12px;
+        border:1px solid rgba(248,113,113,0.60);
+        border-radius:8px;
+        background:linear-gradient(180deg, rgba(220,38,38,0.88) 0%, rgba(185,28,28,0.92) 100%);
+        color:#fff1f2;
+        font-size:13px;
+        font-weight:900;
+        cursor:pointer;
+      "
+    >БАН</button>
+    <button
+      type="button"
+      data-player-profile-delete-open="${escapeHtml(profileId)}"
+      style="
+        min-height:38px;
+        padding:0 12px;
+        border:1px solid rgba(255,255,255,0.16);
+        border-radius:8px;
+        background:#080808;
+        color:#fca5a5;
+        font-size:13px;
+        font-weight:900;
+        cursor:pointer;
+      "
+    >Изтрий профил</button>
+  `
+}
+
+function renderModerationPopupShell(bodyHtml: string): string {
+  return `
+    <div
+      data-player-profile-moderation-popup-backdrop="1"
+      style="
+        position:fixed;
+        inset:0;
+        z-index:12100;
+        background:rgba(0,0,0,0.72);
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        padding:24px;
+      "
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        style="
+          width:min(92vw, 440px);
+          border-radius:12px;
+          background:linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%);
+          border:2px solid rgba(212,165,32,0.55);
+          box-shadow:0 30px 70px rgba(0,0,0,0.5);
+          padding:22px;
+        "
+      >
+        ${bodyHtml}
+      </div>
+    </div>
+  `
+}
+
+function renderBanPopup(
+  profileId: string | null,
+  displayName: string,
+  banPopupOpen: boolean,
+  daysDraft: string,
+  reasonDraft: string,
+  submitting: boolean,
+  errorText: string | null,
+): string {
+  if (!banPopupOpen || !profileId) return ''
+
+  return renderModerationPopupShell(`
+    <div style="font-size:18px;font-weight:900;color:#f8fafc;margin-bottom:14px;">
+      Бан на: ${escapeHtml(displayName)}
+    </div>
+    <form data-player-profile-ban-form="1" style="display:flex;flex-direction:column;gap:14px;">
+      <label style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:13px;font-weight:800;color:rgba(226,232,240,0.85);">Срок на бана (дни)</span>
+        <input
+          type="number"
+          inputmode="numeric"
+          min="1"
+          max="3650"
+          step="1"
+          data-player-profile-ban-days-input="1"
+          value="${escapeHtml(daysDraft)}"
+          ${submitting ? 'disabled' : ''}
+          style="
+            height:40px;
+            border-radius:8px;
+            border:1px solid rgba(212,165,32,0.45);
+            background:#050505;
+            color:#f8fafc;
+            padding:0 12px;
+            font-size:14px;
+            font-weight:700;
+            outline:none;
+          "
+        />
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:13px;font-weight:800;color:rgba(226,232,240,0.85);">Причина</span>
+        <textarea
+          data-player-profile-ban-reason-input="1"
+          rows="3"
+          maxlength="2000"
+          ${submitting ? 'disabled' : ''}
+          style="
+            resize:vertical;
+            min-height:72px;
+            border-radius:8px;
+            border:1px solid rgba(212,165,32,0.45);
+            background:#050505;
+            color:#f8fafc;
+            padding:10px 12px;
+            font-size:14px;
+            font-weight:500;
+            outline:none;
+            font-family:inherit;
+          "
+        >${escapeHtml(reasonDraft)}</textarea>
+      </label>
+      ${errorText ? `<div data-player-profile-ban-error="1" style="font-size:12px;font-weight:800;color:#fca5a5;">${escapeHtml(errorText)}</div>` : ''}
+      <div style="display:flex;gap:10px;margin-top:4px;">
+        <button
+          type="button"
+          data-player-profile-ban-cancel="1"
+          ${submitting ? 'disabled' : ''}
+          style="
+            flex:1;
+            height:42px;
+            border:1px solid rgba(255,255,255,0.16);
+            border-radius:8px;
+            background:#080808;
+            color:#f8fafc;
+            font-size:14px;
+            font-weight:800;
+            cursor:pointer;
+          "
+        >Отказ</button>
+        <button
+          type="submit"
+          data-player-profile-ban-submit="1"
+          ${submitting ? 'disabled' : ''}
+          style="
+            flex:1;
+            height:42px;
+            border:0;
+            border-radius:8px;
+            background:linear-gradient(180deg, rgba(220,38,38,0.92) 0%, rgba(185,28,28,0.95) 100%);
+            color:#fff1f2;
+            font-size:14px;
+            font-weight:900;
+            cursor:${submitting ? 'default' : 'pointer'};
+            opacity:${submitting ? '0.65' : '1'};
+          "
+        >${submitting ? 'Изчакай…' : 'БАН'}</button>
+      </div>
+    </form>
+  `)
+}
+
+function renderUnbanConfirmPopup(
+  profileId: string | null,
+  displayName: string,
+  unbanConfirmOpen: boolean,
+  submitting: boolean,
+): string {
+  if (!unbanConfirmOpen || !profileId) return ''
+
+  return renderModerationPopupShell(`
+    <div style="font-size:18px;font-weight:900;color:#f8fafc;margin-bottom:14px;">Премахни бан?</div>
+    <div style="font-size:14px;color:rgba(226,232,240,0.80);line-height:1.5;margin-bottom:22px;">
+      ${escapeHtml(displayName)} ще може отново да влиза в профила си.
+    </div>
+    <div style="display:flex;gap:10px;">
+      <button
+        type="button"
+        data-player-profile-unban-cancel="1"
+        ${submitting ? 'disabled' : ''}
+        style="
+          flex:1;
+          height:42px;
+          border:1px solid rgba(255,255,255,0.16);
+          border-radius:8px;
+          background:#080808;
+          color:#f8fafc;
+          font-size:14px;
+          font-weight:800;
+          cursor:pointer;
+        "
+      >Отказ</button>
+      <button
+        type="button"
+        data-player-profile-unban-confirm="1"
+        ${submitting ? 'disabled' : ''}
+        style="
+          flex:1;
+          height:42px;
+          border:0;
+          border-radius:8px;
+          background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+          color:#080808;
+          font-size:14px;
+          font-weight:900;
+          cursor:${submitting ? 'default' : 'pointer'};
+          opacity:${submitting ? '0.7' : '1'};
+        "
+      >${submitting ? 'Изчакай…' : 'Премахни бан'}</button>
+    </div>
+  `)
+}
+
+function renderDeletePopup(
+  profileId: string | null,
+  displayName: string,
+  deletePopupOpen: boolean,
+  reasonDraft: string,
+  submitting: boolean,
+  errorText: string | null,
+): string {
+  if (!deletePopupOpen || !profileId) return ''
+
+  return renderModerationPopupShell(`
+    <div style="font-size:18px;font-weight:900;color:#f8fafc;margin-bottom:14px;">Изтриване на профил</div>
+    <div style="font-size:14px;color:rgba(226,232,240,0.85);line-height:1.55;margin-bottom:18px;">
+      Сигурни ли сте, че искате да изтриете профил ${escapeHtml(displayName)}?<br/><br/>
+      Профилът ще бъде изтрит окончателно, а потребителското име и имейл адресът ще бъдат освободени за нова регистрация.<br/><br/>
+      <strong style="color:#fca5a5;">Това действие не може да бъде отменено.</strong>
+    </div>
+    <form data-player-profile-delete-form="1" style="display:flex;flex-direction:column;gap:14px;">
+      <label style="display:flex;flex-direction:column;gap:6px;">
+        <span style="font-size:13px;font-weight:800;color:rgba(226,232,240,0.85);">Причина за изтриване</span>
+        <textarea
+          data-player-profile-delete-reason-input="1"
+          rows="3"
+          maxlength="2000"
+          ${submitting ? 'disabled' : ''}
+          style="
+            resize:vertical;
+            min-height:72px;
+            border-radius:8px;
+            border:1px solid rgba(212,165,32,0.45);
+            background:#050505;
+            color:#f8fafc;
+            padding:10px 12px;
+            font-size:14px;
+            font-weight:500;
+            outline:none;
+            font-family:inherit;
+          "
+        >${escapeHtml(reasonDraft)}</textarea>
+      </label>
+      ${errorText ? `<div data-player-profile-delete-error="1" style="font-size:12px;font-weight:800;color:#fca5a5;">${escapeHtml(errorText)}</div>` : ''}
+      <div style="display:flex;gap:10px;margin-top:4px;">
+        <button
+          type="button"
+          data-player-profile-delete-cancel="1"
+          ${submitting ? 'disabled' : ''}
+          style="
+            flex:1;
+            height:42px;
+            border:1px solid rgba(255,255,255,0.16);
+            border-radius:8px;
+            background:#080808;
+            color:#f8fafc;
+            font-size:14px;
+            font-weight:800;
+            cursor:pointer;
+          "
+        >Отказ</button>
+        <button
+          type="submit"
+          data-player-profile-delete-submit="1"
+          ${submitting ? 'disabled' : ''}
+          style="
+            flex:1;
+            height:42px;
+            border:0;
+            border-radius:8px;
+            background:linear-gradient(180deg, rgba(220,38,38,0.92) 0%, rgba(185,28,28,0.95) 100%);
+            color:#fff1f2;
+            font-size:14px;
+            font-weight:900;
+            cursor:${submitting ? 'default' : 'pointer'};
+            opacity:${submitting ? '0.65' : '1'};
+          "
+        >${submitting ? 'Изчакай…' : 'Изтрий окончателно'}</button>
+      </div>
+    </form>
+  `)
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -1113,6 +1507,18 @@ function renderProfileContent(
   vipGrantOpen: boolean,
   vipGrantSubmitting: boolean,
   vipGrantErrorText: string | null,
+  activeBan: ActiveProfileBanSnapshot | null | undefined,
+  banPopupOpen: boolean,
+  banPopupDaysDraft: string,
+  banPopupReasonDraft: string,
+  banPopupSubmitting: boolean,
+  banPopupErrorText: string | null,
+  unbanConfirmOpen: boolean,
+  unbanSubmitting: boolean,
+  deletePopupOpen: boolean,
+  deletePopupReasonDraft: string,
+  deletePopupSubmitting: boolean,
+  deletePopupErrorText: string | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -1377,6 +1783,7 @@ function renderProfileContent(
                     ${profile.isBlockedByMe ? 'Деблокирай' : 'Блокирай'}
                   </button>
                 ` : ''}
+                ${renderModerationControls(profile.profileId, isOwnProfile, viewerIsFullAdmin, activeBan)}
               </div>
               ${friendshipAction?.message ? `
                 <div style="font-size:12px;font-weight:800;color:#fde68a;line-height:1.35;">
@@ -1535,6 +1942,9 @@ function renderProfileContent(
         ${renderGallery(profile)}
       </div>
     </div>
+    ${renderBanPopup(profile.profileId, displayName, banPopupOpen, banPopupDaysDraft, banPopupReasonDraft, banPopupSubmitting, banPopupErrorText)}
+    ${renderUnbanConfirmPopup(profile.profileId, displayName, unbanConfirmOpen, unbanSubmitting)}
+    ${renderDeletePopup(profile.profileId, displayName, deletePopupOpen, deletePopupReasonDraft, deletePopupSubmitting, deletePopupErrorText)}
   `
 }
 
@@ -1565,6 +1975,18 @@ export function renderPlayerProfilePopup(
           options.vipGrantOpen ?? false,
           options.vipGrantSubmitting ?? false,
           options.vipGrantErrorText ?? null,
+          options.activeBan ?? null,
+          options.banPopupOpen ?? false,
+          options.banPopupDaysDraft ?? '',
+          options.banPopupReasonDraft ?? '',
+          options.banPopupSubmitting ?? false,
+          options.banPopupErrorText ?? null,
+          options.unbanConfirmOpen ?? false,
+          options.unbanSubmitting ?? false,
+          options.deletePopupOpen ?? false,
+          options.deletePopupReasonDraft ?? '',
+          options.deletePopupSubmitting ?? false,
+          options.deletePopupErrorText ?? null,
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 
@@ -1579,6 +2001,12 @@ export function renderPlayerProfilePopup(
         transform: translateY(-1px);
       }
       [data-player-profile-block]:hover {
+        filter: brightness(1.12);
+        transform: translateY(-1px);
+      }
+      [data-player-profile-ban-open]:hover,
+      [data-player-profile-delete-open]:hover,
+      [data-player-profile-unban-open]:hover {
         filter: brightness(1.12);
         transform: translateY(-1px);
       }
@@ -1600,6 +2028,9 @@ export function renderPlayerProfilePopup(
       [data-player-profile-like],
       [data-player-profile-friend-request],
       [data-player-profile-block],
+      [data-player-profile-ban-open],
+      [data-player-profile-delete-open],
+      [data-player-profile-unban-open],
       [data-player-profile-gift-coins],
       [data-player-profile-gift-coins-bypass],
       [data-player-profile-pika-support-chat],
@@ -1696,7 +2127,8 @@ export function renderPlayerProfilePopup(
           gap:6px;
         }
 
-        [data-player-profile-actions="1"] button {
+        [data-player-profile-actions="1"] button,
+        [data-player-profile-active-ban="1"] {
           width:100% !important;
           min-width:0 !important;
           min-height:34px !important;
