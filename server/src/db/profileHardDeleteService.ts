@@ -306,6 +306,20 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
       event_count = excluded.event_count;
   `)
 
+  // Targeted risk-cache invalidation (production bug fix — hard delete
+  // променя topology-то на linked group-ата, но cache редовете на
+  // останалите linked profiles не бяха invalidated). Стъпка 1: target-ovите
+  // distinct non-empty visitor ids, ПРЕДИ да ги изгубим (site_visit_events.
+  // profile_id е ON DELETE SET NULL cascade — виж primitive doc коментара).
+  // Reuse-ва idx_site_visit_events_profile_time, никакъв нов индекс.
+  const selectDistinctVisitorIdsForProfileStatement = database.prepare(`
+    SELECT DISTINCT anonymous_visitor_id
+    FROM site_visit_events
+    WHERE profile_id = ?
+      AND anonymous_visitor_id IS NOT NULL
+      AND anonymous_visitor_id != '';
+  `)
+
   const deleteProfileStatement = database.prepare(`
     DELETE FROM profiles WHERE profile_id = ?;
   `)
@@ -334,6 +348,54 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
         row.event_count,
       )
     }
+  }
+
+  /**
+   * Targeted invalidation (spec: НЕ global scan) на risk cache редове за
+   * останалите CURRENT profiles, споделящи поне един от target-овите
+   * visitor ids — извиква се ПРЕДИ deleteProfileStatement.run() по-долу,
+   * докато target-овата site_visit_events attribution все още е налична
+   * (виж selectDistinctVisitorIdsForProfileStatement коментара). Стъпка 2
+   * reuse-ва idx_site_visit_events_visitor_time (същия index/pattern като
+   * adminProfileRiskStore.findProfilesForVisitorIds) — bounded само към
+   * target-овите visitor ids, не whole-table scan. JOIN към profiles
+   * гарантира "CURRENT profiles" (hard-deleted профили вече нямат ред там).
+   *
+   * Само маркира check_complete=0 — НЕ пипа linked_profiles_count тук.
+   * Existing lazy list flow (computeAndCacheRiskForProfiles) прави пълен
+   * recompute самò когато affected профилът реално попадне в admin list
+   * (Днес/Вчера/Всички), точно както при обикновен "нов linked partner"
+   * discovery. Профил без съществуващ cache ред просто не се засяга от
+   * UPDATE-а — няма какво да се invalidate-ва.
+   */
+  function invalidateAffectedRiskCache(targetProfileId: string): void {
+    const visitorIdRows = selectDistinctVisitorIdsForProfileStatement.all(targetProfileId) as Array<{
+      anonymous_visitor_id: string
+    }>
+    if (visitorIdRows.length === 0) return
+
+    const visitorIds = visitorIdRows.map((row) => row.anonymous_visitor_id)
+    const visitorPlaceholders = visitorIds.map(() => '?').join(', ')
+
+    const affectedProfileRows = database.prepare(`
+      SELECT DISTINCT sve.profile_id AS profileId
+      FROM site_visit_events sve
+      JOIN profiles p ON p.profile_id = sve.profile_id
+      WHERE sve.anonymous_visitor_id IN (${visitorPlaceholders})
+        AND sve.profile_id IS NOT NULL
+        AND sve.profile_id != ?
+    `).all(...visitorIds, targetProfileId) as Array<{ profileId: string }>
+
+    if (affectedProfileRows.length === 0) return
+
+    const affectedProfileIds = affectedProfileRows.map((row) => row.profileId)
+    const affectedPlaceholders = affectedProfileIds.map(() => '?').join(', ')
+
+    database.prepare(`
+      UPDATE admin_profile_risk_checks
+      SET check_complete = 0
+      WHERE profile_id IN (${affectedPlaceholders});
+    `).run(...affectedProfileIds)
   }
 
   function hasActiveTournamentDependency(profileId: ProfileId): boolean {
@@ -430,6 +492,11 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
       snapshotTableExitPenaltiesStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotProfileMatchResultsStatement.run(profileRow.profile_id, profileRow.profile_id)
       captureVisitorForensicSnapshot(profileRow.profile_id)
+
+      // Виж invalidateAffectedRiskCache doc коментара — трябва да се
+      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (target-овата
+      // site_visit_events attribution още е налична в тази точка).
+      invalidateAffectedRiskCache(profileRow.profile_id)
 
       // Таблици без FK към profiles — cascade НЯМА да ги пипне, чистим ръчно
       // за да няма orphan rows (spec §8/§11).

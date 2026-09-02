@@ -881,6 +881,147 @@ try {
     if (r.status !== 404) throw new Error(`status=${r.status}`)
   })
 
+  // ── HARD DELETE targeted risk-cache invalidation (production bug fix) ───
+  // invA е linked с invB (visitor-inv-ab) и invC (visitor-inv-ac). Fully
+  // compute invA -> exact count=2. Hard delete invB през реалния admin
+  // hard-delete endpoint (СЪЩИЯ profileHardDeleteService.hardDeleteProfile
+  // primitive/транзакция, ползван и от deferred pending-delete flow-а в
+  // applyPendingModerationForRoomParticipants). Очакваме: invA cache row ->
+  // check_complete=0 веднага след delete-а (targeted invalidation, ПРЕДИ
+  // какъвто и да е нов list fetch), следващ list fetch за invA ->
+  // check_complete=1, exact linked_profiles_count=1 (само invC), detail
+  // view съдържа invC, не съдържа invB. invD е напълно несвързан control
+  // профил — трябва да остане недокоснат (check_complete=1, checked_at
+  // непроменен) — доказва, че invalidation-ът е targeted, не global scan.
+  console.log('\n[hard-delete-invalidate] HARD DELETE на linked partner B -> targeted risk cache invalidation за A (НЕ global scan)')
+  const invA = await register(port, runId, 'invdela')
+  const invB = await register(port, runId, 'invdelb')
+  const invC = await register(port, runId, 'invdelc')
+  const invD = await register(port, runId, 'invdeld')
+
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.exec('PRAGMA journal_mode = WAL;')
+    const visitorAB = `visitor-inv-ab-${runId}`
+    const visitorAC = `visitor-inv-ac-${runId}`
+    const visitorDSolo = `visitor-inv-d-solo-${runId}`
+    db.prepare(`
+      INSERT INTO site_visitors (
+        anonymous_visitor_id, first_seen_at, last_seen_at,
+        first_profile_id, last_profile_id, first_ip_address, last_ip_address
+      ) VALUES (?, '2026-01-02 08:00:00', '2026-01-02 08:00:00', ?, ?, '203.0.113.101', '203.0.113.101')
+    `).run(visitorAB, invA.profileId, invB.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-02 08:00:00', '203.0.113.101')
+    `).run(randomUUID(), visitorAB, invA.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-02 08:00:00', '203.0.113.101')
+    `).run(randomUUID(), visitorAB, invB.profileId)
+
+    db.prepare(`
+      INSERT INTO site_visitors (
+        anonymous_visitor_id, first_seen_at, last_seen_at,
+        first_profile_id, last_profile_id, first_ip_address, last_ip_address
+      ) VALUES (?, '2026-01-02 09:00:00', '2026-01-02 09:00:00', ?, ?, '203.0.113.102', '203.0.113.102')
+    `).run(visitorAC, invA.profileId, invC.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-02 09:00:00', '203.0.113.102')
+    `).run(randomUUID(), visitorAC, invA.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-02 09:00:00', '203.0.113.102')
+    `).run(randomUUID(), visitorAC, invC.profileId)
+
+    db.prepare(`
+      INSERT INTO site_visitors (anonymous_visitor_id, first_seen_at, last_seen_at, first_profile_id, last_profile_id)
+      VALUES (?, '2026-01-02 10:00:00', '2026-01-02 10:00:00', ?, ?)
+    `).run(visitorDSolo, invD.profileId, invD.profileId)
+    db.prepare(`
+      INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
+      VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-02 10:00:00', '203.0.113.103')
+    `).run(randomUUID(), visitorDSolo, invD.profileId)
+    db.close()
+  }
+
+  await check('[hard-delete-invalidate] admin -> POST risk-recheck(invA) => fully checked, exact linkedProfilesCount=2 (B+C)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${invA.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== true || b.linkedProfilesCount !== 2) throw new Error(`riskDetected=${b.riskDetected}, linkedProfilesCount=${b.linkedProfilesCount}, очаквах true/2`)
+  })
+  await check('[hard-delete-invalidate] admin_profile_risk_checks: invA check_complete=1, linked_profiles_count=2 в DB', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, linked_profiles_count FROM admin_profile_risk_checks WHERE profile_id = ?`).get(invA.profileId) as { check_complete: number; linked_profiles_count: number } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1 || row.linked_profiles_count !== 2) throw new Error(`invA row: ${JSON.stringify(row)}`)
+  })
+
+  await check('[hard-delete-invalidate] admin -> POST risk-recheck(invD) => fully checked, clean control (несвързан с A/B/C)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${invD.profileId}/risk-recheck`, 'POST', adminCookie)
+    const b = r.body as { ok?: boolean; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (r.status !== 200 || b.ok !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (b.riskDetected !== false || b.linkedProfilesCount !== 0) throw new Error(`riskDetected=${b.riskDetected}, linkedProfilesCount=${b.linkedProfilesCount}, очаквах false/0`)
+  })
+
+  let invDCheckedAtBeforeDelete: string | null = null
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(invD.profileId) as { checked_at: string } | undefined
+    db.close()
+    invDCheckedAtBeforeDelete = row?.checked_at ?? null
+  }
+
+  await sleep(1100)
+  await check('[hard-delete-invalidate] admin -> DELETE /api/admin/profiles/:invB (реален hard-delete endpoint) => 200, pending:false', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${invB.profileId}`, 'DELETE', adminCookie, { reason: 'risk cache invalidation regression' })
+    const b = r.body as { ok?: boolean; pending?: boolean }
+    if (r.status !== 200 || b.ok !== true || b.pending !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+
+  await check('[hard-delete-invalidate] СЛЕД delete: invA cache row -> check_complete=0 (targeted invalidation, преди какъвто и да е нов list fetch)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete FROM admin_profile_risk_checks WHERE profile_id = ?`).get(invA.profileId) as { check_complete: number } | undefined
+    db.close()
+    if (!row || row.check_complete !== 0) throw new Error(`invA row след delete: ${JSON.stringify(row)}`)
+  })
+
+  await check('[hard-delete-invalidate] СЛЕД delete: invD (несвързан control) остава check_complete=1, checked_at непроменен (НЕ global scan)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, checked_at FROM admin_profile_risk_checks WHERE profile_id = ?`).get(invD.profileId) as { check_complete: number; checked_at: string } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1) throw new Error(`invD row след delete: ${JSON.stringify(row)}`)
+    if (row.checked_at !== invDCheckedAtBeforeDelete) throw new Error(`invD.checked_at се промени: преди=${invDCheckedAtBeforeDelete}, сега=${row.checked_at}`)
+  })
+
+  await check('[hard-delete-invalidate] normal list fetch (invA е сред резултатите) -> full recompute -> check_complete=1, exact linkedProfilesCount=1 (само C)', async () => {
+    const r = await httpRequest(port, '/api/admin/registered-profiles?period=all&page=1', 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; rows?: Array<{ profileId: string; riskDetected?: boolean; linkedProfilesCount?: number; riskCheckComplete?: boolean }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.rows)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const rowA = b.rows.find((x) => x.profileId === invA.profileId)
+    if (!rowA) throw new Error('invA липсва от list резултатите.')
+    if (rowA.riskCheckComplete !== true) throw new Error(`invA.riskCheckComplete=${rowA.riskCheckComplete}, очаквах true`)
+    if (rowA.linkedProfilesCount !== 1) throw new Error(`invA.linkedProfilesCount=${rowA.linkedProfilesCount}, очаквах точно 1 (само invC, invB е изтрит)`)
+  })
+  await check('[hard-delete-invalidate] admin_profile_risk_checks: invA вече check_complete=1, linked_profiles_count=1 в DB', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT check_complete, linked_profiles_count FROM admin_profile_risk_checks WHERE profile_id = ?`).get(invA.profileId) as { check_complete: number; linked_profiles_count: number } | undefined
+    db.close()
+    if (!row || row.check_complete !== 1 || row.linked_profiles_count !== 1) throw new Error(`invA row: ${JSON.stringify(row)}`)
+  })
+
+  await check('[hard-delete-invalidate] GET risk-detail(invA) => linkedProfiles съдържа invC, НЕ съдържа invB (вече hard-deleted)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${invA.profileId}/risk-detail`, 'GET', adminCookie)
+    const b = r.body as { ok?: boolean; linkedProfiles?: Array<{ profileId: string }> }
+    if (r.status !== 200 || b.ok !== true || !Array.isArray(b.linkedProfiles)) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const hasC = b.linkedProfiles.some((x) => x.profileId === invC.profileId)
+    const hasB = b.linkedProfiles.some((x) => x.profileId === invB.profileId)
+    if (!hasC) throw new Error(`invC отсъства от linkedProfiles: ${JSON.stringify(b.linkedProfiles)}`)
+    if (hasB) throw new Error(`invB (hard-deleted) все още присъства в linkedProfiles: ${JSON.stringify(b.linkedProfiles)}`)
+  })
+
   console.log(`\n═══ Резултат: ${passed} passed, ${failed} failed ═══\n`)
 } finally {
   if (server) await stopServer(server)
