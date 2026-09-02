@@ -1914,8 +1914,6 @@ function renderProfileContent(
 
       ${renderGameStats(profile)}
 
-      ${renderRiskSection(profile.profileId, isOwnProfile, viewerIsFullAdmin, riskDetailLoading, riskDetailRows, riskDetailErrorText, riskRecheckSubmitting)}
-
       <div
         data-player-profile-metric-grid="1"
         style="
@@ -2042,6 +2040,8 @@ function renderProfileContent(
 
         ${renderGallery(profile)}
       </div>
+
+      ${renderRiskSection(profile.profileId, isOwnProfile, viewerIsFullAdmin, riskDetailLoading, riskDetailRows, riskDetailErrorText, riskRecheckSubmitting)}
     </div>
     ${renderBanPopup(profile.profileId, displayName, banPopupOpen, banPopupDaysDraft, banPopupReasonDraft, banPopupSubmitting, banPopupErrorText)}
     ${renderUnbanConfirmPopup(profile.profileId, displayName, unbanConfirmOpen, unbanSubmitting)}
