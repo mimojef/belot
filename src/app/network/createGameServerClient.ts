@@ -460,7 +460,7 @@ export type AdminRegisteredProfilesStats = {
   yesterday: number
 }
 
-export type AdminRegisteredProfilesPeriod = 'today' | 'yesterday'
+export type AdminRegisteredProfilesPeriod = 'today' | 'yesterday' | 'all'
 
 export type AdminRegisteredProfileRow = {
   profileId: string
@@ -468,6 +468,18 @@ export type AdminRegisteredProfileRow = {
   displayName: string
   createdAt: string
   email: string | null
+  /** Само когато viewer-ът е пълен admin — виж handleAdminRegisteredProfilesListRequest в server/src/index.ts. */
+  riskDetected?: boolean
+  linkedProfilesCount?: number
+}
+
+/** Detailed "Свързани профили" ред — on-demand fetch при profile popup click (само пълен admin). */
+export type AdminProfileLinkedProfileRow = {
+  profileId: string
+  username: string | null
+  displayName: string
+  sharedVisitorIdsCount: number
+  sharedIpCount: number
 }
 
 export type AdminGamesPlayedStats = {

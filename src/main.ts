@@ -82,6 +82,7 @@ import {
   type TournamentPartnerInviteSnapshot,
   type TournamentMatchAssignmentSnapshot,
   type AdminRegisteredProfileRow,
+  type AdminProfileLinkedProfileRow,
   type AdCampaignManagementDto,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
@@ -3049,23 +3050,70 @@ async function loadAdminConnections(): Promise<
   }
 }
 
-async function loadAdminRegisteredProfiles(period: 'today' | 'yesterday'): Promise<
-  | { ok: true; rows: AdminRegisteredProfileRow[] }
+async function loadAdminRegisteredProfiles(period: 'today' | 'yesterday' | 'all', page?: number): Promise<
+  | { ok: true; rows: AdminRegisteredProfileRow[]; totalCount?: number; page?: number }
   | { ok: false; message: string; forbidden?: boolean }
 > {
   try {
+    const pageQuery = period === 'all' ? `&page=${encodeURIComponent(String(page ?? 1))}` : ''
     const response = await fetch(
-      `${getApiBaseUrl()}/api/admin/registered-profiles?period=${encodeURIComponent(period)}`,
+      `${getApiBaseUrl()}/api/admin/registered-profiles?period=${encodeURIComponent(period)}${pageQuery}`,
       { method: 'GET', credentials: 'include' },
     )
     if (response.status === 403) {
       return { ok: false, message: 'Нямаш достъп.', forbidden: true }
     }
-    const data = (await response.json()) as { ok?: boolean; message?: string; rows?: unknown }
+    const data = (await response.json()) as { ok?: boolean; message?: string; rows?: unknown; totalCount?: number; page?: number }
     if (!response.ok || data.ok !== true || !Array.isArray(data.rows)) {
       return { ok: false, message: data.message ?? 'Грешка при зареждане на регистрираните профили.' }
     }
-    return { ok: true, rows: data.rows as AdminRegisteredProfileRow[] }
+    return { ok: true, rows: data.rows as AdminRegisteredProfileRow[], totalCount: data.totalCount, page: data.page }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+/** Detailed "Свързани профили" за profile popup risk секцията (само пълен admin). */
+async function loadAdminProfileRiskDetail(profileId: string): Promise<
+  | { ok: true; linkedProfiles: AdminProfileLinkedProfileRow[] }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/risk-detail`,
+      { method: 'GET', credentials: 'include' },
+    )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.', forbidden: true }
+    }
+    const data = (await response.json()) as { ok?: boolean; message?: string; linkedProfiles?: unknown }
+    if (!response.ok || data.ok !== true || !Array.isArray(data.linkedProfiles)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на свързаните профили.' }
+    }
+    return { ok: true, linkedProfiles: data.linkedProfiles as AdminProfileLinkedProfileRow[] }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+/** "Провери отново" — forced recheck (само пълен admin). */
+async function submitAdminProfileRiskRecheck(profileId: string): Promise<
+  | { ok: true; riskDetected: boolean; linkedProfilesCount: number }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/risk-recheck`,
+      { method: 'POST', credentials: 'include' },
+    )
+    if (response.status === 403) {
+      return { ok: false, message: 'Нямаш достъп.', forbidden: true }
+    }
+    const data = (await response.json()) as { ok?: boolean; message?: string; riskDetected?: boolean; linkedProfilesCount?: number }
+    if (!response.ok || data.ok !== true) {
+      return { ok: false, message: data.message ?? 'Грешка при повторната проверка.' }
+    }
+    return { ok: true, riskDetected: data.riskDetected ?? false, linkedProfilesCount: data.linkedProfilesCount ?? 0 }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -5756,7 +5804,9 @@ lobby = createLobbyFlowController({
   },
   onAdminCpuIncidentsLoad: () => loadAdminCpuIncidents(),
   onAdminCpuIncidentDetailLoad: (incidentId) => loadAdminCpuIncidentDetail(incidentId),
-  onAdminRegisteredProfilesLoad: (period) => loadAdminRegisteredProfiles(period),
+  onAdminRegisteredProfilesLoad: (period, page) => loadAdminRegisteredProfiles(period, page),
+  onAdminProfileRiskDetailLoad: (profileId) => loadAdminProfileRiskDetail(profileId),
+  onAdminProfileRiskRecheck: (profileId) => submitAdminProfileRiskRecheck(profileId),
   onAdminServerScreenLeave: () => {
     stopMonitoringPolling()
     invalidateHistoryGeneration()

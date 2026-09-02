@@ -9,12 +9,19 @@ export type AdminRegisteredProfilesModalState = {
   loading: boolean
   errorText: string | null
   rows: AdminRegisteredProfileRow[] | null
+  /** Само за period==='all' — 1-based текуща страница (100 реда на страница). */
+  page: number
+  /** Само за period==='all' — общ брой регистрирани human профили (за "Страница X от Y"). */
+  totalCount: number | null
 }
 
 const PERIOD_TITLES: Record<AdminRegisteredProfilesPeriod, string> = {
   today: 'Регистрирани профили — Днес',
   yesterday: 'Регистрирани профили — Вчера',
+  all: 'Регистрирани профили — Всички',
 }
+
+const REGISTERED_PROFILES_PAGE_SIZE = 100
 
 function fmtDate(iso: string): string {
   try {
@@ -69,15 +76,60 @@ export function renderAdminRegisteredProfilesModal(
     const rows = state.rows.map((r) => {
       const username = r.username?.trim() || r.displayName
       const email = r.email ?? '—'
+      // riskDetected/linkedProfilesCount идват само за пълен admin viewer
+      // (виж handleAdminRegisteredProfilesListRequest) — за subadmin просто
+      // отсъстват, редът рендерира нормално без risk индикация.
+      const isRisky = r.riskDetected === true
+      const nameColor = isRisky ? '#ef4444' : '#ffffff'
+      const riskBadge = isRisky
+        ? `<span style="margin-left:8px;font-size:10px;font-weight:800;color:#ef4444;background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.45);border-radius:999px;padding:2px 8px;white-space:nowrap;">Свързани: ${r.linkedProfilesCount ?? 0}</span>`
+        : ''
       return `
         <tr>
           <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.65);white-space:nowrap;border-bottom:1px solid rgba(255,255,255,0.06);">${esc(fmtDate(r.createdAt))}</td>
           <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.65);white-space:nowrap;border-bottom:1px solid rgba(255,255,255,0.06);">${esc(fmtTime(r.createdAt))}</td>
-          <td style="padding:8px 10px;font-size:12px;color:#ffffff;font-weight:700;border-bottom:1px solid rgba(255,255,255,0.06);word-break:break-word;">${esc(username)}</td>
+          <td style="padding:8px 10px;font-size:12px;color:${nameColor};font-weight:700;border-bottom:1px solid rgba(255,255,255,0.06);word-break:break-word;">${esc(username)}${riskBadge}</td>
           <td style="padding:8px 10px;font-size:12px;color:rgba(255,255,255,0.55);border-bottom:1px solid rgba(255,255,255,0.06);word-break:break-word;">${esc(email)}</td>
         </tr>
       `
     }).join('')
+
+    const paginationHtml = state.period === 'all' && state.totalCount !== null
+      ? (() => {
+          const totalPages = Math.max(1, Math.ceil(state.totalCount! / REGISTERED_PROFILES_PAGE_SIZE))
+          const canPrev = state.page > 1
+          const canNext = state.page < totalPages
+          return `
+            <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:14px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.08);">
+              <button
+                type="button"
+                data-admin-registered-profiles-page="prev"
+                ${canPrev ? '' : 'disabled'}
+                style="
+                  min-height:34px;padding:0 14px;border:1px solid rgba(212,165,32,0.4);
+                  border-radius:6px;background:${canPrev ? '#111' : 'rgba(255,255,255,0.04)'};
+                  color:${canPrev ? '#d4a520' : 'rgba(255,255,255,0.3)'};font-size:12px;font-weight:800;
+                  cursor:${canPrev ? 'pointer' : 'default'};
+                "
+              >← Предишна</button>
+              <div style="font-size:12px;color:rgba(255,255,255,0.55);white-space:nowrap;">
+                Страница ${state.page} от ${totalPages} · общо ${state.totalCount!.toLocaleString('bg-BG')}
+              </div>
+              <button
+                type="button"
+                data-admin-registered-profiles-page="next"
+                ${canNext ? '' : 'disabled'}
+                style="
+                  min-height:34px;padding:0 14px;border:1px solid rgba(212,165,32,0.4);
+                  border-radius:6px;background:${canNext ? '#111' : 'rgba(255,255,255,0.04)'};
+                  color:${canNext ? '#d4a520' : 'rgba(255,255,255,0.3)'};font-size:12px;font-weight:800;
+                  cursor:${canNext ? 'pointer' : 'default'};
+                "
+              >Следваща →</button>
+            </div>
+          `
+        })()
+      : ''
 
     bodyHtml = `
       <div style="overflow-x:auto;">
@@ -93,6 +145,7 @@ export function renderAdminRegisteredProfilesModal(
           <tbody>${rows}</tbody>
         </table>
       </div>
+      ${paginationHtml}
     `
   }
 

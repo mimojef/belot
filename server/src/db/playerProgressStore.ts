@@ -109,6 +109,13 @@ export type PlayerProgressStore = {
   isDisplayNameAvailable: (displayName: string, excludedProfileId?: ProfileId | null) => boolean
   countHumanProfiles: (now?: Date) => HumanProfileCountStats
   listRegisteredProfilesForPeriod: (period: 'today' | 'yesterday', now?: Date) => RegisteredProfileListRow[]
+  /**
+   * "Всички" вариант на drill-down списъка — 100 на страница, newest first,
+   * плюс общ totalCount за pagination UI. reuse-ва СЪЩИЯ idx_profiles_profile_kind_status
+   * индекс за profile_kind филтъра (вече потвърдено евтин чрез EXPLAIN
+   * QUERY PLAN) — не е добавен нов индекс.
+   */
+  listAllRegisteredProfilesPaginated: (page: number) => { rows: RegisteredProfileListRow[]; totalCount: number }
   getUserGamesPlayedStats: (now?: Date) => { today: number; yesterday: number }
   seedCatalogBotsIfNeeded: () => void
   refillCatalogBotWallets: () => void
@@ -1687,6 +1694,36 @@ export async function createPlayerProgressStore(
     return rows
   }
 
+  const REGISTERED_PROFILES_PAGE_SIZE = 100
+
+  // "Всички" вариант — без date range filter, LIMIT/OFFSET pagination,
+  // ORDER BY created_at DESC, profile_id DESC (tie-break за стабилна
+  // подредба при еднакъв created_at timestamp между страници).
+  function listAllRegisteredProfilesPaginated(page: number): { rows: RegisteredProfileListRow[]; totalCount: number } {
+    const safePage = Number.isInteger(page) && page >= 1 ? page : 1
+    const offset = (safePage - 1) * REGISTERED_PROFILES_PAGE_SIZE
+
+    const totalCountRow = database.prepare(
+      `SELECT COUNT(*) AS count FROM profiles WHERE profile_kind = 'human'`,
+    ).get() as { count: number }
+
+    const rows = database.prepare(`
+      SELECT
+        p.profile_id AS profileId,
+        p.username AS username,
+        p.display_name AS displayName,
+        p.created_at AS createdAt,
+        a.email AS email
+      FROM profiles p
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE p.profile_kind = 'human'
+      ORDER BY p.created_at DESC, p.profile_id DESC
+      LIMIT ? OFFSET ?
+    `).all(REGISTERED_PROFILES_PAGE_SIZE, offset) as RegisteredProfileListRow[]
+
+    return { rows, totalCount: totalCountRow.count }
+  }
+
   function getUserGamesPlayedStats(now: Date = new Date()): { today: number; yesterday: number } {
     const bounds = getSofiaDayBoundsUtc(now)
     const countCompletedInRange = (start: string, end: string): number => {
@@ -1819,6 +1856,7 @@ export async function createPlayerProgressStore(
     isDisplayNameAvailable,
     countHumanProfiles,
     listRegisteredProfilesForPeriod,
+    listAllRegisteredProfilesPaginated,
     getUserGamesPlayedStats,
     updateProfileAvatar,
     addProfileGalleryImage,

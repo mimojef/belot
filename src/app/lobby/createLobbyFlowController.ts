@@ -712,8 +712,18 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; detail: import('../adminServer/adminServerTypes.js').CpuIncidentDetail }
     | { ok: false; message: string; forbidden?: boolean }
   >
-  onAdminRegisteredProfilesLoad?: (period: 'today' | 'yesterday') => Promise<
-    | { ok: true; rows: import('../network/createGameServerClient.js').AdminRegisteredProfileRow[] }
+  onAdminRegisteredProfilesLoad?: (period: 'today' | 'yesterday' | 'all', page?: number) => Promise<
+    | { ok: true; rows: import('../network/createGameServerClient.js').AdminRegisteredProfileRow[]; totalCount?: number; page?: number }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  /** GET detailed "Свързани профили" за profile popup risk секцията — само пълен admin. */
+  onAdminProfileRiskDetailLoad?: (profileId: string) => Promise<
+    | { ok: true; linkedProfiles: import('../network/createGameServerClient.js').AdminProfileLinkedProfileRow[] }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  /** "Провери отново" forced recheck — само пълен admin. */
+  onAdminProfileRiskRecheck?: (profileId: string) => Promise<
+    | { ok: true; riskDetected: boolean; linkedProfilesCount: number }
     | { ok: false; message: string; forbidden?: boolean }
   >
   onAdminVisitorsPeriodClick?: (period: string) => void
@@ -1351,6 +1361,14 @@ type InternalLobbyFlowState = {
   deletePopupReasonDraft: string
   deletePopupSubmitting: boolean
   deletePopupErrorText: string | null
+  /** "Свързани профили" секция в profile popup-а — само за viewerIsFullAdmin. Виж ensureProfilePopupRiskDetailLoaded. */
+  riskDetailOpen: boolean
+  riskDetailLoading: boolean
+  riskDetailRows: import('../network/createGameServerClient.js').AdminProfileLinkedProfileRow[] | null
+  riskDetailErrorText: string | null
+  riskDetailProfileId: string | null
+  /** "Провери отново" бутон — memoization guard е profileId-специфичен чрез riskDetailProfileId/profilePopupActiveBanProfileId pattern-а. */
+  riskRecheckSubmitting: boolean
   subadminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'chat_admin' | 'pika_team' | 'top_chat_admin' | null } | null
   subadminActionBusy: boolean
   subadminActionToast: { text: string; ok: boolean } | null
@@ -1969,6 +1987,12 @@ function createInitialState(): InternalLobbyFlowState {
     deletePopupReasonDraft: '',
     deletePopupSubmitting: false,
     deletePopupErrorText: null,
+    riskDetailOpen: false,
+    riskDetailLoading: false,
+    riskDetailRows: null,
+    riskDetailErrorText: null,
+    riskDetailProfileId: null,
+    riskRecheckSubmitting: false,
     subadminActionConfirm: null,
     subadminActionBusy: false,
     subadminActionToast: null,
@@ -3857,6 +3881,10 @@ export function createLobbyFlowController(
       deletePopupReasonDraft: state.deletePopupReasonDraft,
       deletePopupSubmitting: state.deletePopupSubmitting,
       deletePopupErrorText: state.deletePopupErrorText,
+      riskDetailLoading: state.riskDetailLoading,
+      riskDetailRows: state.riskDetailRows,
+      riskDetailErrorText: state.riskDetailErrorText,
+      riskRecheckSubmitting: state.riskRecheckSubmitting,
       subadminActionConfirm: state.subadminActionConfirm,
       subadminActionBusy: state.subadminActionBusy,
       subadminActionToast: state.subadminActionToast,
@@ -4484,6 +4512,12 @@ export function createLobbyFlowController(
       },
       onProfileDeleteSubmit: (profileId, reason) => {
         getPopupCallbacks().onDeleteSubmit(profileId, reason)
+      },
+      onProfileRiskRecheckClick: (profileId) => {
+        getPopupCallbacks().onRiskRecheckClick(profileId)
+      },
+      onProfileRiskLinkedProfileClick: (profileId) => {
+        getPopupCallbacks().onRiskLinkedProfileClick(profileId)
       },
       onProfileEditClose: () => {
         if (state.profileEditorSubmitting) return
@@ -5822,39 +5856,25 @@ export function createLobbyFlowController(
           loading: true,
           errorText: null,
           rows: null,
+          page: 1,
+          totalCount: null,
         }
         render()
-        void (async () => {
-          const result = await options.onAdminRegisteredProfilesLoad?.(period)
-          // Модалът може вече да е затворен, или отворен за друг период,
-          // докато заявката е висяла — не презаписвай по-новото состояние.
-          if (state.adminRegisteredProfilesModal?.period !== period || !state.adminRegisteredProfilesModal.isOpen) {
-            return
-          }
-          if (result === undefined) {
-            state.adminRegisteredProfilesModal = {
-              ...state.adminRegisteredProfilesModal,
-              loading: false,
-              errorText: 'Функцията временно не е налична.',
-            }
-            render()
-            return
-          }
-          if (result.ok) {
-            state.adminRegisteredProfilesModal = {
-              ...state.adminRegisteredProfilesModal,
-              loading: false,
-              rows: result.rows,
-            }
-          } else {
-            state.adminRegisteredProfilesModal = {
-              ...state.adminRegisteredProfilesModal,
-              loading: false,
-              errorText: result.message,
-            }
-          }
-          render()
-        })()
+        void loadAdminRegisteredProfilesPage(period, 1)
+      },
+      onAdminRegisteredProfilesPageChange: (direction) => {
+        const modal = state.adminRegisteredProfilesModal
+        if (!modal || modal.period !== 'all' || modal.loading) return
+        const nextPage = direction === 'next' ? modal.page + 1 : modal.page - 1
+        if (nextPage < 1) return
+        state.adminRegisteredProfilesModal = {
+          ...modal,
+          loading: true,
+          errorText: null,
+          page: nextPage,
+        }
+        render()
+        void loadAdminRegisteredProfilesPage('all', nextPage)
       },
       onAdminRegisteredProfilesClose: () => {
         state.adminRegisteredProfilesModal = null
@@ -6402,6 +6422,49 @@ export function createLobbyFlowController(
     state.profilePopupActiveBan = null
     state.profilePopupActiveBanProfileId = null
     renderPopupOnly()
+  }
+
+  /**
+   * Общ loader за "Регистрирани профили" модала — покрива и трите периода
+   * (today/yesterday/all), reuse-ван от onAdminRegisteredProfilesOpen и
+   * onAdminRegisteredProfilesPageChange. Same stale-response guard pattern
+   * като другите async popup loaders в контролера — не презаписва по-ново
+   * state (затворен модал, друг период, или вече друга страница), докато
+   * заявката е висяла.
+   */
+  async function loadAdminRegisteredProfilesPage(
+    period: 'today' | 'yesterday' | 'all',
+    page: number,
+  ): Promise<void> {
+    const result = await options.onAdminRegisteredProfilesLoad?.(period, page)
+    const modal = state.adminRegisteredProfilesModal
+    if (!modal || !modal.isOpen || modal.period !== period || (period === 'all' && modal.page !== page)) {
+      return
+    }
+    if (result === undefined) {
+      state.adminRegisteredProfilesModal = {
+        ...modal,
+        loading: false,
+        errorText: 'Функцията временно не е налична.',
+      }
+      render()
+      return
+    }
+    if (result.ok) {
+      state.adminRegisteredProfilesModal = {
+        ...modal,
+        loading: false,
+        rows: result.rows,
+        totalCount: result.totalCount ?? modal.totalCount,
+      }
+    } else {
+      state.adminRegisteredProfilesModal = {
+        ...modal,
+        loading: false,
+        errorText: result.message,
+      }
+    }
+    render()
   }
 
   async function fetchOwnLikesCount(): Promise<void> {
@@ -14253,6 +14316,16 @@ export function createLobbyFlowController(
       onDeleteSubmit: (profileId, reason) => {
         void submitAdminHardDelete(profileId, reason)
       },
+      onRiskRecheckClick: (profileId) => {
+        void submitProfilePopupRiskRecheck(profileId)
+      },
+      onRiskLinkedProfileClick: (linkedProfileId) => {
+        // Reuse-ва СЪЩАТА "отвори чужд профил по id" функция като другите
+        // profile-click входни точки в контролера (напр. admin players-
+        // search флоу-а) — затваря текущия popup и зарежда linked profile-а
+        // canonical (не local preview), same access-block/friendship gate.
+        void openProtectedProfileById(linkedProfileId)
+      },
     }
   }
 
@@ -14350,6 +14423,86 @@ export function createLobbyFlowController(
         renderPopupOnly()
       }
     })()
+  }
+
+  /**
+   * Огледално на ensureProfilePopupActiveBanLoaded, за "Свързани профили"
+   * секцията (spec §7-8 от risk detector брифа) — on-demand detailed fetch,
+   * само за viewerIsFullAdmin, никога за собствения профил. Memoization
+   * guard чрез riskDetailProfileId, СЪЩИЯ pattern. Вика се от
+   * renderPopupOnly(), покрива всички входни точки за отваряне на попъпа.
+   */
+  function ensureProfilePopupRiskDetailLoaded(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    const profile = state.profilePopupProfile
+
+    if (!state.profilePopupOpen || profile === null || profile.profileId === null) {
+      return
+    }
+    if (!isFullAdminAuthSession(authSession)) {
+      return
+    }
+    const ownProfileId = authSession?.profile.profileId ?? null
+    if (profile.profileId === ownProfileId) {
+      return
+    }
+    if (state.riskDetailProfileId === profile.profileId) {
+      return
+    }
+
+    const targetProfileId = profile.profileId
+    state.riskDetailProfileId = targetProfileId
+    state.riskDetailRows = null
+    state.riskDetailErrorText = null
+    state.riskDetailLoading = true
+
+    void (async () => {
+      const result = await options.onAdminProfileRiskDetailLoad?.(targetProfileId)
+      if (state.riskDetailProfileId !== targetProfileId) return
+      if (!result) {
+        state.riskDetailLoading = false
+        renderPopupOnly()
+        return
+      }
+      if (result.ok) {
+        state.riskDetailRows = result.linkedProfiles
+        state.riskDetailLoading = false
+      } else {
+        state.riskDetailErrorText = result.message
+        state.riskDetailLoading = false
+      }
+      renderPopupOnly()
+    })()
+  }
+
+  /** "Провери отново" — forced recheck (spec §8). Reset-ва memoization guard-а, за да reflect-не свежия резултат веднага. */
+  async function submitProfilePopupRiskRecheck(profileId: string | null): Promise<void> {
+    if (state.riskRecheckSubmitting) return
+    if (!profileId) return
+
+    state.riskRecheckSubmitting = true
+    renderPopupOnly()
+
+    const result = options.onAdminProfileRiskRecheck
+      ? await options.onAdminProfileRiskRecheck(profileId).catch(
+          () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
+        )
+      : { ok: false as const, message: 'Функцията временно не е налична.' }
+
+    state.riskRecheckSubmitting = false
+
+    if (!result.ok) {
+      state.riskDetailErrorText = result.message
+      renderPopupOnly()
+      return
+    }
+
+    // Recheck-ът вече е презаписал server-side cache реда — force refresh
+    // на detailed breakdown-а тук (reset на memoization guard-а), за да
+    // видим веднага актуалния linked-profiles списък, вместо да чакаме
+    // следващо отваряне на popup-а.
+    state.riskDetailProfileId = null
+    ensureProfilePopupRiskDetailLoaded()
   }
 
   // Единствен source of truth за render-time tri-state discriminator-а
@@ -14731,6 +14884,7 @@ export function createLobbyFlowController(
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
+    ensureProfilePopupRiskDetailLoaded()
     ensureOwnVipStatusLoaded()
     const popupProfile = state.profilePopupProfile ?? createLocalProfilePreview(state, authSession)
     const isOwnProfile = authSession !== null
@@ -14765,6 +14919,10 @@ export function createLobbyFlowController(
         deletePopupReasonDraft: state.deletePopupReasonDraft,
         deletePopupSubmitting: state.deletePopupSubmitting,
         deletePopupErrorText: state.deletePopupErrorText,
+        riskDetailLoading: state.riskDetailLoading,
+        riskDetailRows: state.riskDetailRows,
+        riskDetailErrorText: state.riskDetailErrorText,
+        riskRecheckSubmitting: state.riskRecheckSubmitting,
         skipAnimation: renderOptions?.skipAnimation,
       },
       getPopupCallbacks(),

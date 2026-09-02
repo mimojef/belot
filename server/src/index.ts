@@ -21,6 +21,7 @@ import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type Privat
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
+import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import {
@@ -667,6 +668,7 @@ const adCampaignsStore = await createAdCampaignsStore(
 const profileBanStore = await createProfileBanStore(databaseBootstrap.databaseFilePath)
 const profileHardDeleteService = await createProfileHardDeleteService(databaseBootstrap.databaseFilePath)
 const pendingProfileModerationStore = await createPendingProfileModerationStore(databaseBootstrap.databaseFilePath)
+const adminProfileRiskStore = await createAdminProfileRiskStore(databaseBootstrap.databaseFilePath)
 const authStore = await createAuthStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -14977,10 +14979,15 @@ async function handleAdminStatsRequest(
   return true
 }
 
-// Drill-down зад "днес"/"вчера" broяча в картата "Регистрирани профили"
-// (Admin -> Информация) — reuse-ва СЪЩАТА auth политика и СЪЩИЯ
+// Drill-down зад "днес"/"вчера"/"всички" broяча в картата "Регистрирани
+// профили" (Admin -> Информация) — reuse-ва СЪЩАТА auth политика и СЪЩИЯ
 // getSofiaDayBoundsUtc-базиран period като handleAdminStatsRequest/
 // countHumanProfiles, за да не се разминава броят на редовете с counter-а.
+//
+// Risk detection анотация (riskDetected/linkedProfilesCount на всеки ред) —
+// само когато viewer-ът е ПЪЛЕН admin (isFullAdminSession). Subadmin вижда
+// СЪЩИЯ списък (запазено съществуващо поведение), но БЕЗ risk полетата, за
+// да не изтече risk информация към subadmin през този споделен endpoint.
 async function handleAdminRegisteredProfilesListRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -15004,14 +15011,141 @@ async function handleAdminRegisteredProfilesListRequest(
     return true
   }
 
-  const periodParam = new URLSearchParams(req.url?.split('?')[1] ?? '').get('period') ?? ''
-  if (periodParam !== 'today' && periodParam !== 'yesterday') {
-    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден параметър period. Използвай: today, yesterday.' })
+  const queryParams = new URLSearchParams(req.url?.split('?')[1] ?? '')
+  const periodParam = queryParams.get('period') ?? ''
+  if (periodParam !== 'today' && periodParam !== 'yesterday' && periodParam !== 'all') {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден параметър period. Използвай: today, yesterday, all.' })
     return true
   }
 
-  const rows = playerProgressStore.listRegisteredProfilesForPeriod(periodParam)
-  sendJsonResponse(res, 200, { ok: true, period: periodParam, rows })
+  let rows: import('./db/playerProgressStore.js').RegisteredProfileListRow[]
+  let totalCount: number | undefined
+  let page: number | undefined
+
+  if (periodParam === 'all') {
+    const pageParam = parseStrictQueryInt(queryParams.get('page'))
+    if (pageParam === 'invalid') {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден параметър page.' })
+      return true
+    }
+    page = pageParam === null ? 1 : Math.max(1, pageParam)
+    const result = playerProgressStore.listAllRegisteredProfilesPaginated(page)
+    rows = result.rows
+    totalCount = result.totalCount
+  } else {
+    rows = playerProgressStore.listRegisteredProfilesForPeriod(periodParam)
+  }
+
+  // Risk анотация — само за пълен admin. computeAndCacheRiskForProfiles
+  // сам по себе си е no-op (връща веднага) за profile ids, които вече имат
+  // cache ред — така повторно зареждане на СЪЩАТА страница/период не води
+  // до recompute.
+  if (isFullAdminSession(session) && rows.length > 0) {
+    const profileIds = rows.map((row) => row.profileId)
+    adminProfileRiskStore.computeAndCacheRiskForProfiles(profileIds)
+    const cached = adminProfileRiskStore.getCachedChecks(profileIds)
+    const annotatedRows = rows.map((row) => {
+      const check = cached.get(row.profileId)
+      return {
+        ...row,
+        riskDetected: check?.riskDetected ?? false,
+        linkedProfilesCount: check?.linkedProfilesCount ?? 0,
+      }
+    })
+    sendJsonResponse(res, 200, { ok: true, period: periodParam, rows: annotatedRows, totalCount, page })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, period: periodParam, rows, totalCount, page })
+  return true
+}
+
+/**
+ * GET /api/admin/profiles/:id/risk-detail — detailed linked-profiles
+ * breakdown за "Свързани профили" секцията в profile popup-а. Само пълен
+ * admin (isFullAdminSession) — subadmin/player получават 403. On-demand,
+ * bounded към малката linked група на target-а (виж
+ * adminProfileRiskStore.getDetailedLinkedProfiles).
+ */
+async function handleAdminProfileRiskDetailRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/risk-detail$/)
+  if (!match) return false
+
+  if (req.method !== 'GET') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да вижда свързани профили.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  if (playerProgressStore.getPublicProfile(targetProfileId) === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+    return true
+  }
+
+  const linkedProfiles = adminProfileRiskStore.getDetailedLinkedProfiles(targetProfileId)
+  sendJsonResponse(res, 200, { ok: true, linkedProfiles })
+  return true
+}
+
+/**
+ * POST /api/admin/profiles/:id/risk-recheck — forced recheck на "Провери
+ * отново" бутона в profile popup-а. Само пълен admin.
+ */
+async function handleAdminProfileRiskRecheckRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/risk-recheck$/)
+  if (!match) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да прави повторна проверка.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  if (playerProgressStore.getPublicProfile(targetProfileId) === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+    return true
+  }
+
+  const result = adminProfileRiskStore.recheckSingleProfile(targetProfileId)
+  sendJsonResponse(res, 200, {
+    ok: true,
+    riskDetected: result.riskDetected,
+    linkedProfilesCount: result.linkedProfilesCount,
+  })
   return true
 }
 
@@ -16633,6 +16767,14 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminRegisteredProfilesListRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminProfileRiskDetailRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminProfileRiskRecheckRequest(req, res, requestUrl.pathname)) {
     return
   }
 

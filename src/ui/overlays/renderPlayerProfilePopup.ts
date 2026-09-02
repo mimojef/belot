@@ -1,4 +1,5 @@
 import type {
+  AdminProfileLinkedProfileRow,
   PlayerPublicProfileSnapshot,
   Seat,
 } from '../../app/network/createGameServerClient'
@@ -81,6 +82,19 @@ export type RenderPlayerProfilePopupOptions = {
   deletePopupReasonDraft?: string
   deletePopupSubmitting?: boolean
   deletePopupErrorText?: string | null
+  /**
+   * "Свързани профили" admin секция — само viewerIsFullAdmin && !isOwnProfile.
+   * riskDetailRows е null докато не е fetched (виж
+   * ensureProfilePopupRiskDetailLoaded в createLobbyFlowController.ts) —
+   * секцията се показва само когато profile.riskDetected===true, но
+   * "Провери отново" бутонът е винаги видим за всеки non-own profile (spec:
+   * "profile може да е бил clean при първата проверка").
+   */
+  riskDetailOpen?: boolean
+  riskDetailLoading?: boolean
+  riskDetailRows?: AdminProfileLinkedProfileRow[] | null
+  riskDetailErrorText?: string | null
+  riskRecheckSubmitting?: boolean
 }
 
 export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
@@ -1226,6 +1240,87 @@ function renderModerationControls(
   `
 }
 
+/**
+ * "Свързани профили" admin секция — само viewerIsFullAdmin, само чужд
+ * профил (isOwnProfile===false). Показва detailed linked-profiles списък
+ * (fetched on-demand при отваряне на popup-а — виж
+ * ensureProfilePopupRiskDetailLoaded в createLobbyFlowController.ts), плюс
+ * "Провери отново" бутон, винаги наличен за всеки non-own profile (профил
+ * може да е бил "чист" при първата проверка — spec explicit изисква
+ * бутонът да не е ограничен само до вече рискови профили).
+ */
+function renderRiskSection(
+  profileId: string | null,
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  riskDetailLoading: boolean,
+  riskDetailRows: AdminProfileLinkedProfileRow[] | null | undefined,
+  riskDetailErrorText: string | null,
+  riskRecheckSubmitting: boolean,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || !profileId) {
+    return ''
+  }
+
+  const linkedRows = riskDetailRows ?? []
+
+  let bodyHtml = ''
+  if (riskDetailLoading) {
+    bodyHtml = `<div style="font-size:12px;color:rgba(226,232,240,0.6);padding:6px 0;">Зареждане...</div>`
+  } else if (riskDetailErrorText) {
+    bodyHtml = `<div style="font-size:12px;color:#fca5a5;padding:6px 0;">${escapeHtml(riskDetailErrorText)}</div>`
+  } else if (linkedRows.length > 0) {
+    bodyHtml = linkedRows.map((row) => {
+      const name = row.username?.trim() || row.displayName
+      return `
+        <div
+          data-player-profile-risk-linked-profile="${escapeHtml(row.profileId)}"
+          style="
+            display:flex;align-items:center;justify-content:space-between;gap:10px;
+            padding:8px 10px;border-radius:6px;background:rgba(239,68,68,0.08);
+            border:1px solid rgba(239,68,68,0.22);cursor:pointer;
+          "
+        >
+          <span style="font-size:13px;font-weight:800;color:#fca5a5;word-break:break-word;">${escapeHtml(name)}</span>
+          <span style="font-size:11px;color:rgba(226,232,240,0.65);white-space:nowrap;">
+            Общи посещения: ${row.sharedVisitorIdsCount}${row.sharedIpCount > 0 ? ` · Общи IP: ${row.sharedIpCount}` : ''}
+          </span>
+        </div>
+      `
+    }).join('')
+  }
+
+  return `
+    <div
+      data-player-profile-risk-section="1"
+      style="
+        display:flex;flex-direction:column;gap:8px;
+        border-radius:10px;border:1px solid rgba(239,68,68,0.3);
+        background:rgba(239,68,68,0.05);padding:12px 14px;
+      "
+    >
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
+        <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#ef4444;">
+          Свързани профили
+        </div>
+        <button
+          type="button"
+          data-player-profile-risk-recheck="1"
+          ${riskRecheckSubmitting ? 'disabled' : ''}
+          style="
+            min-height:28px;padding:0 10px;border:1px solid rgba(212,165,32,0.5);
+            border-radius:6px;background:#111;color:#d4a520;font-size:11px;font-weight:800;
+            cursor:${riskRecheckSubmitting ? 'default' : 'pointer'};opacity:${riskRecheckSubmitting ? '0.6' : '1'};
+          "
+        >${riskRecheckSubmitting ? 'Изчакай…' : 'Провери отново'}</button>
+      </div>
+      ${linkedRows.length === 0 && !riskDetailLoading && !riskDetailErrorText
+        ? `<div style="font-size:12px;color:rgba(226,232,240,0.55);">Няма открити свързани профили.</div>`
+        : bodyHtml}
+    </div>
+  `
+}
+
 function renderModerationPopupShell(bodyHtml: string): string {
   return `
     <div
@@ -1519,6 +1614,10 @@ function renderProfileContent(
   deletePopupReasonDraft: string,
   deletePopupSubmitting: boolean,
   deletePopupErrorText: string | null,
+  riskDetailLoading: boolean,
+  riskDetailRows: AdminProfileLinkedProfileRow[] | null | undefined,
+  riskDetailErrorText: string | null,
+  riskRecheckSubmitting: boolean,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -1815,6 +1914,8 @@ function renderProfileContent(
 
       ${renderGameStats(profile)}
 
+      ${renderRiskSection(profile.profileId, isOwnProfile, viewerIsFullAdmin, riskDetailLoading, riskDetailRows, riskDetailErrorText, riskRecheckSubmitting)}
+
       <div
         data-player-profile-metric-grid="1"
         style="
@@ -1987,6 +2088,10 @@ export function renderPlayerProfilePopup(
           options.deletePopupReasonDraft ?? '',
           options.deletePopupSubmitting ?? false,
           options.deletePopupErrorText ?? null,
+          options.riskDetailLoading ?? false,
+          options.riskDetailRows ?? null,
+          options.riskDetailErrorText ?? null,
+          options.riskRecheckSubmitting ?? false,
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 

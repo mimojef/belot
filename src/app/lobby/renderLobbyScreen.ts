@@ -525,6 +525,11 @@ export type LobbyScreenState = {
   deletePopupReasonDraft: string
   deletePopupSubmitting: boolean
   deletePopupErrorText: string | null
+  /** "Свързани профили" секция в profile popup-а — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
+  riskDetailLoading: boolean
+  riskDetailRows: import('../network/createGameServerClient').AdminProfileLinkedProfileRow[] | null
+  riskDetailErrorText: string | null
+  riskRecheckSubmitting: boolean
   /**
    * previousRole: ако назначаваме субадмин, докато акаунтът реално е
    * chat_admin (или обратно за chatAdminActionConfirm по-долу) — само за
@@ -929,6 +934,8 @@ export type RenderLobbyScreenOptions = {
   onProfileDeleteOpen: (profileId: string | null) => void
   onProfileDeleteCancel: () => void
   onProfileDeleteSubmit: (profileId: string | null, reason: string) => void
+  onProfileRiskRecheckClick: (profileId: string | null) => void
+  onProfileRiskLinkedProfileClick: (profileId: string) => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -1233,8 +1240,9 @@ export type RenderLobbyScreenOptions = {
   onSupportDeleteConfirm: () => void
   onAdminHistoryWindowChange: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminCpuIncidentDetailToggle?: (incidentId: number) => void
-  onAdminRegisteredProfilesOpen?: (period: 'today' | 'yesterday') => void
+  onAdminRegisteredProfilesOpen?: (period: 'today' | 'yesterday' | 'all') => void
   onAdminRegisteredProfilesClose?: () => void
+  onAdminRegisteredProfilesPageChange?: (direction: 'prev' | 'next') => void
   onAdminVisitorsPeriodClick?: (period: string) => void
   onAdminVisitorsBackClick?: () => void
   onAdminVisitorsTypeChange?: (type: import('../network/createGameServerClient').VisitorListType) => void
@@ -1373,6 +1381,8 @@ export type ProfilePopupCallbacks = {
   onDeleteOpen: (profileId: string | null) => void
   onDeleteCancel: () => void
   onDeleteSubmit: (profileId: string | null, reason: string) => void
+  onRiskRecheckClick: (profileId: string | null) => void
+  onRiskLinkedProfileClick: (profileId: string) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -1506,6 +1516,14 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const reason = el.querySelector<HTMLTextAreaElement>('[data-player-profile-delete-reason-input="1"]')?.value ?? ''
       cb.onDeleteSubmit(profileId, reason)
     })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-risk-recheck="1"]')
+    ?.addEventListener('click', () => { cb.onRiskRecheckClick(profileId) })
+  el.querySelectorAll<HTMLElement>('[data-player-profile-risk-linked-profile]').forEach((linkEl) => {
+    linkEl.addEventListener('click', () => {
+      const linkedProfileId = linkEl.dataset.playerProfileRiskLinkedProfile?.trim() ?? ''
+      if (linkedProfileId) cb.onRiskLinkedProfileClick(linkedProfileId)
+    })
+  })
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileLike?.trim() ?? ''
@@ -1611,6 +1629,11 @@ export function syncProfilePopup(
     deletePopupReasonDraft?: string
     deletePopupSubmitting?: boolean
     deletePopupErrorText?: string | null
+    riskDetailOpen?: boolean
+    riskDetailLoading?: boolean
+    riskDetailRows?: import('../../app/network/createGameServerClient').AdminProfileLinkedProfileRow[] | null
+    riskDetailErrorText?: string | null
+    riskRecheckSubmitting?: boolean
     // Форсира skipAnimation дори при "first open" (нов popupRootEl) — нужно
     // при връщане Edit→Profile: popup DOM възелът е бил унищожен, докато
     // edit overlay-ят е бил отворен отгоре му, но КОНЦЕПТУАЛНО потребителят
@@ -1663,6 +1686,11 @@ export function syncProfilePopup(
     deletePopupReasonDraft: popupState.deletePopupReasonDraft ?? '',
     deletePopupSubmitting: popupState.deletePopupSubmitting ?? false,
     deletePopupErrorText: popupState.deletePopupErrorText ?? null,
+    riskDetailOpen: popupState.riskDetailOpen ?? false,
+    riskDetailLoading: popupState.riskDetailLoading ?? false,
+    riskDetailRows: popupState.riskDetailRows ?? null,
+    riskDetailErrorText: popupState.riskDetailErrorText ?? null,
+    riskRecheckSubmitting: popupState.riskRecheckSubmitting ?? false,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -7061,10 +7089,15 @@ export function renderAdminInfoPanel(state: LobbyScreenState): string {
         <div style="background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:12px;padding:18px 22px;">
           <div style="font-size:11px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.5);margin-bottom:10px;">Регистрирани профили</div>
           <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;row-gap:4px;">
-            <div>
-              <span style="font-size:13px;color:rgba(255,255,255,0.45);margin-right:4px;">общо</span>
-              <span style="font-size:32px;font-weight:900;color:#ffffff;">${(stats.registeredProfiles?.total ?? 0).toLocaleString('bg-BG')}</span>
-            </div>
+            <button
+              type="button"
+              data-admin-registered-profiles-open="all"
+              aria-label="Виж регистрирани профили: всички"
+              style="background:none;border:none;padding:0;margin:0;cursor:pointer;font:inherit;display:flex;align-items:baseline;gap:0;"
+            >
+              <span style="font-size:13px;color:rgba(212,165,32,0.6);margin-right:4px;text-decoration:underline;text-underline-offset:2px;">общо</span>
+              <span style="font-size:32px;font-weight:900;color:#ffffff;text-decoration:underline;text-underline-offset:2px;">${(stats.registeredProfiles?.total ?? 0).toLocaleString('bg-BG')}</span>
+            </button>
             <span style="font-size:16px;color:rgba(255,255,255,0.25);">|</span>
             <button
               type="button"
@@ -13664,6 +13697,10 @@ export function renderLobbyScreen(
       deletePopupReasonDraft: state.deletePopupReasonDraft,
       deletePopupSubmitting: state.deletePopupSubmitting,
       deletePopupErrorText: state.deletePopupErrorText,
+      riskDetailLoading: state.riskDetailLoading,
+      riskDetailRows: state.riskDetailRows,
+      riskDetailErrorText: state.riskDetailErrorText,
+      riskRecheckSubmitting: state.riskRecheckSubmitting,
     },
     {
       onClose: options.onProfileClose,
@@ -13699,6 +13736,8 @@ export function renderLobbyScreen(
       onDeleteOpen: options.onProfileDeleteOpen,
       onDeleteCancel: options.onProfileDeleteCancel,
       onDeleteSubmit: options.onProfileDeleteSubmit,
+      onRiskRecheckClick: options.onProfileRiskRecheckClick,
+      onRiskLinkedProfileClick: options.onProfileRiskLinkedProfileClick,
     },
   )
 
@@ -15395,7 +15434,7 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLButtonElement>('[data-admin-registered-profiles-open]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const period = btn.dataset.adminRegisteredProfilesOpen
-      if (period === 'today' || period === 'yesterday') {
+      if (period === 'today' || period === 'yesterday' || period === 'all') {
         options.onAdminRegisteredProfilesOpen?.(period)
       }
     })
@@ -15405,6 +15444,14 @@ export function renderLobbyScreen(
     ?.addEventListener('click', () => options.onAdminRegisteredProfilesClose?.())
   root.querySelector<HTMLElement>('[data-admin-registered-profiles-backdrop="1"]')
     ?.addEventListener('click', () => options.onAdminRegisteredProfilesClose?.())
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-registered-profiles-page]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const direction = btn.dataset.adminRegisteredProfilesPage
+      if (direction === 'prev' || direction === 'next') {
+        options.onAdminRegisteredProfilesPageChange?.(direction)
+      }
+    })
+  })
 
   root.querySelectorAll<HTMLButtonElement>('[data-admin-visitors-period]').forEach((btn) => {
     btn.addEventListener('click', () => {
