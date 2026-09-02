@@ -57,7 +57,7 @@
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
-import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
@@ -147,6 +147,15 @@ function httpRequest(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function waitFor(label: string, predicate: () => Promise<boolean>, timeoutMs: number): Promise<void> {
@@ -1190,6 +1199,144 @@ try {
     guestSocket.send(JSON.stringify({ type: 'resume_room', roomId: 'nonexistent-room', reconnectToken: 'fake-token' }))
     await waitFor('room_resume_failed frame', async () => messages.some((m) => m.type === 'room_resume_failed'), 5000)
     if (guestSocket.readyState === WebSocket.OPEN || guestSocket.readyState === WebSocket.CONNECTING) guestSocket.close()
+  })
+
+  // ── HARD DELETE physical avatar/gallery file cleanup (production gap fix) ──
+  // fileCleanupTarget получава реален avatar upload + 2 gallery снимки на
+  // диска, в ТОЧНИТЕ upload директории, които реалният сървър използва
+  // (AVATAR_UPLOADS_PATH/GALLERY_UPLOADS_PATH под isolated.serverDir) —
+  // seed-нати директно през DB+filesystem (mirror на site_visit_events seed
+  // pattern-а в checkAdminProfileRiskDetectorHttpAuthorization.ts), не през
+  // пълния image-crop upload HTTP flow. fileCleanupControl има собствен
+  // avatar upload в СЪЩАТА (flat, споделена между всички профили) avatars
+  // директория — доказва, че cleanup-ът е targeted само към target-а, дори
+  // когато друг профил споделя родителската директория. Hard delete на
+  // fileCleanupTarget през реалния admin endpoint (СЪЩИЯ
+  // profileHardDeleteService.hardDeleteProfile primitive, ползван и от
+  // deferred pending-delete flow-а) -> и трите target файла трябва да
+  // изчезнат физически, control файлът остава, profile_gallery_images
+  // редовете на target-а изчезват (cascade). fileCleanupDefaultAvatarTarget
+  // никога не е качвал avatar/gallery (avatar_url остава NULL, каквото е по
+  // подразбиране при регистрация) — доказва, че default/липсващ avatar не
+  // чупи delete-а.
+  console.log('\n[file-cleanup] HARD DELETE трие физически avatar + gallery файлове на target, НЕ пипа unrelated profile файлове')
+  const fileCleanupTarget = await register(port, runId, 'filecleanup')
+  const fileCleanupControl = await register(port, runId, 'filecleanupctrl')
+  const fileCleanupDefaultAvatarTarget = await register(port, runId, 'filecleanupdefault')
+
+  const avatarUploadsPath = join(isolated.serverDir, 'uploads', 'avatars')
+  const galleryUploadsPath = join(isolated.serverDir, 'uploads', 'profile-gallery')
+  await mkdir(avatarUploadsPath, { recursive: true })
+
+  const targetAvatarFilename = `${randomUUID()}.webp`
+  const targetAvatarFilePath = join(avatarUploadsPath, targetAvatarFilename)
+  await writeFile(targetAvatarFilePath, Buffer.from('fake-avatar-bytes'))
+  const targetAvatarUrl = `/uploads/avatars/${targetAvatarFilename}`
+
+  const controlAvatarFilename = `${randomUUID()}.webp`
+  const controlAvatarFilePath = join(avatarUploadsPath, controlAvatarFilename)
+  await writeFile(controlAvatarFilePath, Buffer.from('fake-control-avatar-bytes'))
+  const controlAvatarUrl = `/uploads/avatars/${controlAvatarFilename}`
+
+  const targetGalleryDir = join(galleryUploadsPath, fileCleanupTarget.profileId)
+  await mkdir(targetGalleryDir, { recursive: true })
+  const galleryImageId1 = randomUUID()
+  const galleryImageId2 = randomUUID()
+  const galleryFilePath1 = join(targetGalleryDir, `${galleryImageId1}.webp`)
+  const galleryFilePath2 = join(targetGalleryDir, `${galleryImageId2}.webp`)
+  await writeFile(galleryFilePath1, Buffer.from('fake-gallery-bytes-1'))
+  await writeFile(galleryFilePath2, Buffer.from('fake-gallery-bytes-2'))
+  const galleryImageUrl1 = `/uploads/profile-gallery/${fileCleanupTarget.profileId}/${galleryImageId1}.webp`
+  const galleryImageUrl2 = `/uploads/profile-gallery/${fileCleanupTarget.profileId}/${galleryImageId2}.webp`
+
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.exec('PRAGMA journal_mode = WAL;')
+    db.prepare(`UPDATE profiles SET avatar_url = ? WHERE profile_id = ?`).run(targetAvatarUrl, fileCleanupTarget.profileId)
+    db.prepare(`UPDATE profiles SET avatar_url = ? WHERE profile_id = ?`).run(controlAvatarUrl, fileCleanupControl.profileId)
+    db.prepare(`
+      INSERT INTO profile_gallery_images (image_id, profile_id, image_url, thumbnail_url, sort_order)
+      VALUES (?, ?, ?, ?, 0)
+    `).run(galleryImageId1, fileCleanupTarget.profileId, galleryImageUrl1, galleryImageUrl1)
+    db.prepare(`
+      INSERT INTO profile_gallery_images (image_id, profile_id, image_url, thumbnail_url, sort_order)
+      VALUES (?, ?, ?, ?, 1)
+    `).run(galleryImageId2, fileCleanupTarget.profileId, galleryImageUrl2, galleryImageUrl2)
+    db.close()
+  }
+
+  await check('[file-cleanup] setup: avatar/gallery файловете физически съществуват ПРЕДИ delete-а', async () => {
+    for (const p of [targetAvatarFilePath, controlAvatarFilePath, galleryFilePath1, galleryFilePath2]) {
+      if (!(await pathExists(p))) throw new Error(`Setup файлът липсва: ${p}`)
+    }
+  })
+
+  await check('[file-cleanup] admin -> DELETE profile (fileCleanupTarget) => 200', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${fileCleanupTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing physical file cleanup' })
+    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+
+  // hardDeleteProfile() вече await-ва физическия cleanup ПРЕДИ да resolve-не
+  // (не fire-and-forget — виж deleteUploadedFilesBestEffort коментара в
+  // profileHardDeleteService.ts), а HTTP handler-ът await-ва hardDeleteProfile()
+  // ПРЕДИ да прати 200 отговора — затова unlink-ите гарантирано вече са
+  // изпълнени в тази точка, immediate check, без polling wait.
+  await check('[file-cleanup] target avatar файлът вече не съществува на диска', async () => {
+    if (await pathExists(targetAvatarFilePath)) throw new Error(`Файлът все още съществува: ${targetAvatarFilePath}`)
+  })
+  await check('[file-cleanup] target gallery файл #1 вече не съществува на диска', async () => {
+    if (await pathExists(galleryFilePath1)) throw new Error(`Файлът все още съществува: ${galleryFilePath1}`)
+  })
+  await check('[file-cleanup] target gallery файл #2 вече не съществува на диска', async () => {
+    if (await pathExists(galleryFilePath2)) throw new Error(`Файлът все още съществува: ${galleryFilePath2}`)
+  })
+  await check('[file-cleanup] profile_gallery_images redовете на target вече не съществуват (cascade)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const rows = db.prepare(`SELECT image_id FROM profile_gallery_images WHERE profile_id = ?`).all(fileCleanupTarget.profileId)
+    db.close()
+    if (rows.length !== 0) throw new Error(`Останали redове: ${JSON.stringify(rows)}`)
+  })
+  await check('[file-cleanup] unrelated control avatar файлът остава недокоснат (targeted cleanup, не global)', async () => {
+    if (!(await pathExists(controlAvatarFilePath))) throw new Error(`Control файлът неочаквано изчезна: ${controlAvatarFilePath}`)
+  })
+  await check('[file-cleanup] admin -> DELETE profile (fileCleanupDefaultAvatarTarget, никога не е качвал avatar/gallery) => 200, без грешка (NULL avatar_url се игнорира безопасно)', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${fileCleanupDefaultAvatarTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing default avatar skip' })
+    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+
+  // ── SHARED AVATAR SAFETY: двама профила сочат към ЕДИН И СЪЩ uploaded
+  // avatar URL (flat, споделена директория — за разлика от gallery)
+  // — hard delete на единия НЕ трябва да унищожи файла, докато другият
+  // профил все още го реферира.
+  console.log('\n[file-cleanup-shared] Двама профила споделят СЪЩИЯ uploaded avatar URL -> hard delete на единия НЕ трие физическия файл')
+  const sharedAvatarProfileA = await register(port, runId, 'sharedavatara')
+  const sharedAvatarProfileB = await register(port, runId, 'sharedavatarb')
+
+  const sharedAvatarFilename = `${randomUUID()}.webp`
+  const sharedAvatarFilePath = join(avatarUploadsPath, sharedAvatarFilename)
+  await writeFile(sharedAvatarFilePath, Buffer.from('fake-shared-avatar-bytes'))
+  const sharedAvatarUrl = `/uploads/avatars/${sharedAvatarFilename}`
+
+  {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    db.exec('PRAGMA journal_mode = WAL;')
+    db.prepare(`UPDATE profiles SET avatar_url = ? WHERE profile_id = ?`).run(sharedAvatarUrl, sharedAvatarProfileA.profileId)
+    db.prepare(`UPDATE profiles SET avatar_url = ? WHERE profile_id = ?`).run(sharedAvatarUrl, sharedAvatarProfileB.profileId)
+    db.close()
+  }
+
+  await check('[file-cleanup-shared] admin -> DELETE profile (sharedAvatarProfileA) => 200', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${sharedAvatarProfileA.profileId}`, 'DELETE', adminCookie, { reason: 'testing shared avatar safety' })
+    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+  await check('[file-cleanup-shared] споделеният avatar файл остава на диска (все още реферира от sharedAvatarProfileB)', async () => {
+    if (!(await pathExists(sharedAvatarFilePath))) throw new Error(`Споделеният файл неочаквано изчезна: ${sharedAvatarFilePath}`)
+  })
+  await check('[file-cleanup-shared] sharedAvatarProfileB остава с валиден avatar_url в DB (профилът не е пипнат)', () => {
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const row = db.prepare(`SELECT avatar_url FROM profiles WHERE profile_id = ?`).get(sharedAvatarProfileB.profileId) as { avatar_url: string | null } | undefined
+    db.close()
+    if (!row || row.avatar_url !== sharedAvatarUrl) throw new Error(`sharedAvatarProfileB.avatar_url=${row?.avatar_url}, очаквах ${sharedAvatarUrl}`)
   })
 
 } catch (err) {

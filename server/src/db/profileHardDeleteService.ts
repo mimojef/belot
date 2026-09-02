@@ -94,13 +94,32 @@ export type ProfileHardDeleteService = {
    * JSON snapshot колони (team_a_json/team_b_json), е документирана
    * permanent-history таблица без cleanup job (виж migration коментара) —
    * исторически завършени мачове НЕ се пипат тук.
+   *
+   * Avatar/gallery physical file cleanup (production gap fix): DELETE FROM
+   * profiles каскадно чисти profile_gallery_images DB редовете (ON DELETE
+   * CASCADE), но НЕ пипа физическите файлове на диска — нито тях, нито
+   * target-овия качен avatar. Виж collectUploadedFileUrlsForProfile/
+   * deleteUploadedFilesBestEffort по-долу: canonical URL списъкът се събира
+   * ПРЕДИ DELETE FROM profiles (докато DB attribution още е налична),
+   * физическият unlink се await-ва СЛЕД успешен COMMIT (затова функцията е
+   * async — виж call site-а: НАРОЧНО извън transaction try/catch-а, за да
+   * не се опита ROLLBACK след вече успешен COMMIT и за да не превърне fs
+   * грешка в подвеждащ "delete failed" за профил, вече физически изтрит от
+   * DB), reuse-вайки СЪЩИЯ upload-path safety helper като normal
+   * avatar-swap/gallery-delete flow-овете (index.ts's deleteUploadFileByUrl,
+   * инжектиран през ProfileHardDeleteFileCleanupDeps) — default preset
+   * avatars (`/assets/avatars/...`) и path traversal са защитени там, не
+   * тук. Shared-avatar safety: avatar uploads живеят в ЕДНА flat директория
+   * (за разлика от gallery, per-profile subdirectory) — ако друг CURRENT
+   * profile реферира СЪЩИЯ avatar_url, физическият файл НЕ се unlink-ва
+   * (виж isAvatarUrlSharedWithAnotherProfile).
    */
   hardDeleteProfile: (input: {
     targetProfileId: ProfileId
     actorProfileId: ProfileId
     actorAccountId: string
     reason: string
-  }) => HardDeleteProfileResult
+  }) => Promise<HardDeleteProfileResult>
   /**
    * Reuse-ва СЪЩИТЕ prepared statements/SQL като active tournament dependency
    * guard-а вътре в hardDeleteProfile (виж коментара там) — extracted като
@@ -120,7 +139,27 @@ export type ProfileHardDeleteService = {
 
 const MAX_REASON_LENGTH = 2000
 
-export async function createProfileHardDeleteService(databaseFilePath: string): Promise<ProfileHardDeleteService> {
+export type ProfileHardDeleteFileCleanupDeps = {
+  /**
+   * Reuse-ва СЪЩИЯ helper като avatar-swap/gallery-delete flow-овете в
+   * index.ts (index.ts's deleteUploadFileByUrl) — единствен source на
+   * upload-path safety тук: no-op за всичко извън UPLOADS_ROUTE_PREFIX
+   * (защитава default `/assets/avatars/...` presets от случайно unlink),
+   * resolve()+whitelist-check срещу PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS (защита
+   * от path traversal дори при повреден/подправен DB URL), ENOENT
+   * third-party-safe (missing file = вече чисто). Инжектирана като функция
+   * (не import на index.ts константи/helper-и) — profileHardDeleteService.ts
+   * е db-слой модул, index.ts вече го import-ва обратно (createProfileHardDeleteService),
+   * затова директен import в обратната посока би бил circular; DI по същия
+   * начин като databaseFilePath избягва това изцяло.
+   */
+  deleteUploadFileByUrl: (uploadUrl: string) => Promise<void>
+}
+
+export async function createProfileHardDeleteService(
+  databaseFilePath: string,
+  fileCleanup: ProfileHardDeleteFileCleanupDeps,
+): Promise<ProfileHardDeleteService> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,
@@ -132,7 +171,7 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
   database.exec('PRAGMA busy_timeout = 5000;')
 
   const selectProfileForDeleteStatement = database.prepare(`
-    SELECT profile_id, account_id, display_name, username
+    SELECT profile_id, account_id, display_name, username, avatar_url
     FROM profiles
     WHERE profile_id = ?
     LIMIT 1;
@@ -320,6 +359,36 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
       AND anonymous_visitor_id != '';
   `)
 
+  // Avatar/gallery physical file cleanup (production gap fix) — profiles.
+  // avatar_url вече е прочетен през selectProfileForDeleteStatement.
+  // profile_gallery_images.image_url/thumbnail_url трябва да се прочетат
+  // ТУК, ПРЕДИ DELETE FROM profiles по-долу — редовете са ON DELETE CASCADE
+  // (виж 20260510_004 migration-а), затова физически изчезват от DB веднага
+  // след delete-а (правилно за DB attribution), но ако не сме прочели
+  // image_url стойностите преди това, губим единствения source за кои
+  // физически файлове да unlink-нем.
+  const selectGalleryImageUrlsForProfileStatement = database.prepare(`
+    SELECT image_url, thumbnail_url
+    FROM profile_gallery_images
+    WHERE profile_id = ?;
+  `)
+
+  // Shared-avatar safety — avatar uploads живеят в ЕДНА flat директория
+  // (AVATAR_UPLOADS_PATH), споделена между ВСИЧКИ профили (за разлика от
+  // gallery, което е per-profile subdirectory и структурно не може да
+  // колизира между профили). Няма UNIQUE constraint върху profiles.avatar_url
+  // — ако друг CURRENT профил случайно/бъдещо реферира СЪЩИЯ URL, unlink на
+  // target-овия avatar би счупил чужд, все още жив avatar. profile_id != ?
+  // изключва target-а самия (по дизайн винаги "споделя" URL-а със себе си).
+  // Няма индекс върху avatar_url — рядка admin операция, table scan е ОК.
+  const selectOtherProfileUsingAvatarUrlStatement = database.prepare(`
+    SELECT profile_id
+    FROM profiles
+    WHERE avatar_url = ?
+      AND profile_id != ?
+    LIMIT 1;
+  `)
+
   const deleteProfileStatement = database.prepare(`
     DELETE FROM profiles WHERE profile_id = ?;
   `)
@@ -398,6 +467,75 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
     `).run(...affectedProfileIds)
   }
 
+  /**
+   * true, ако СЪЩИЯТ avatarUrl все още е реферира от друг (различен от
+   * excludeProfileId) CURRENT профил — извиква се ПРЕДИ delete-а, докато
+   * target-овият собствен ред все още съществува (изключен explicit по
+   * profile_id, не разчита на реда вече да е трит).
+   */
+  function isAvatarUrlSharedWithAnotherProfile(avatarUrl: string, excludeProfileId: string): boolean {
+    return selectOtherProfileUsingAvatarUrlStatement.get(avatarUrl, excludeProfileId) !== undefined
+  }
+
+  /**
+   * Canonical list на target-овите upload-ed (НЕ default preset) файлове —
+   * извикано ПРЕДИ deleteProfileStatement.run(), докато profile_gallery_images
+   * редовете още не са cascade-delete-нати. avatar_url може да е default
+   * preset (`/assets/avatars/...`, client-side static asset — НЕ живее под
+   * server upload директориите) или реален upload (`/uploads/avatars/...`)
+   * — не филтрираме тук explicit по префикс, защото fileCleanup.deleteUploadFileByUrl
+   * вече прави точно тази проверка (no-op за всичко извън `/uploads/`).
+   * Avatar-ът допълнително се пропуска, ако друг CURRENT профил го споделя
+   * (виж isAvatarUrlSharedWithAnotherProfile) — gallery images НЯМАТ такава
+   * проверка, защото живеят в per-profile subdirectory (структурно
+   * unshareable между профили). Set дедупликира в случай
+   * image_url===thumbnail_url (винаги е така в текущия upload flow, но
+   * schema-та технически позволява различни стойности).
+   */
+  function collectUploadedFileUrlsForProfile(profileId: string, avatarUrl: string | null): string[] {
+    const urls = new Set<string>()
+
+    if (
+      avatarUrl !== null &&
+      avatarUrl.trim().length > 0 &&
+      !isAvatarUrlSharedWithAnotherProfile(avatarUrl, profileId)
+    ) {
+      urls.add(avatarUrl)
+    }
+
+    const galleryRows = selectGalleryImageUrlsForProfileStatement.all(profileId) as Array<{
+      image_url: string
+      thumbnail_url: string
+    }>
+    for (const row of galleryRows) {
+      urls.add(row.image_url)
+      urls.add(row.thumbnail_url)
+    }
+
+    return [...urls]
+  }
+
+  /**
+   * Физическият unlink се await-ва ТУК, best-effort, СЛЕД успешен COMMIT
+   * (виж call site-а в hardDeleteProfile, НАРОЧНО извън transaction
+   * try/catch-а) — SQLite транзакция не може да rollback-не filesystem
+   * unlink, а commit-ът вече е необратим success в тази точка, затова целта
+   * е "когато hardDeleteProfile() приключи, всички възможни filesystem
+   * delete attempts вече да са изпълнени", НЕ fire-and-forget. Best-effort
+   * остава best-effort на per-file ниво (не общо): missing file (ENOENT) и
+   * реална fs грешка се обработват вътре в deleteUploadFileByUrl самия
+   * (ENOENT тихо success, реална грешка логната веднъж, никога не се крие);
+   * fileCleanup.deleteUploadFileByUrl по договор никога не reject-ва,
+   * затова Promise.all тук не може да хвърли — call site-ът все пак пази
+   * defensive try/catch (виж коментара там), за да не превърне евентуална
+   * бъдеща промяна в contract-а в подвеждащ "delete failed" за профил, вече
+   * физически изтрит от DB.
+   */
+  async function deleteUploadedFilesBestEffort(urls: string[]): Promise<void> {
+    if (urls.length === 0) return
+    await Promise.all(urls.map((url) => fileCleanup.deleteUploadFileByUrl(url)))
+  }
+
   function hasActiveTournamentDependency(profileId: ProfileId): boolean {
     const tournamentDependency = selectActiveTournamentDependencyStatement.get(
       profileId,
@@ -415,12 +553,12 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
     return entryDependency !== undefined
   }
 
-  function hardDeleteProfile(input: {
+  async function hardDeleteProfile(input: {
     targetProfileId: ProfileId
     actorProfileId: ProfileId
     actorAccountId: string
     reason: string
-  }): HardDeleteProfileResult {
+  }): Promise<HardDeleteProfileResult> {
     if (input.targetProfileId === input.actorProfileId) {
       return { ok: false, code: 'self' }
     }
@@ -430,10 +568,17 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
       return { ok: false, code: 'invalid_reason' }
     }
 
+    // Попълва се само по success-пътя вътре в try-а по-долу, ПРЕДИ COMMIT —
+    // всеки друг път (not_found/self/active_tournament_dependency) връща
+    // директно ОТВЪТРЕ try-а, затова кодът СЛЕД try/catch-а долу се
+    // изпълнява само когато committedResult реално е зададен.
+    let committedResult: { deletedProfileId: string; deletedAccountId: string | null } | null = null
+    let uploadedFileUrlsToDelete: string[] = []
+
     database.exec('BEGIN IMMEDIATE;')
     try {
       const profileRow = selectProfileForDeleteStatement.get(input.targetProfileId) as
-        | { profile_id: string; account_id: string | null; display_name: string; username: string | null }
+        | { profile_id: string; account_id: string | null; display_name: string; username: string | null; avatar_url: string | null }
         | undefined
 
       if (profileRow === undefined) {
@@ -498,6 +643,14 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
       // site_visit_events attribution още е налична в тази точка).
       invalidateAffectedRiskCache(profileRow.profile_id)
 
+      // Виж collectUploadedFileUrlsForProfile doc коментара — трябва да се
+      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (profile_gallery_images
+      // редовете още не са cascade-delete-нати в тази точка).
+      uploadedFileUrlsToDelete = collectUploadedFileUrlsForProfile(
+        profileRow.profile_id,
+        profileRow.avatar_url,
+      )
+
       // Таблици без FK към profiles — cascade НЯМА да ги пипне, чистим ръчно
       // за да няма orphan rows (spec §8/§11).
       deletePlayerBlocksStatement.run(input.targetProfileId, input.targetProfileId)
@@ -522,7 +675,7 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
 
       database.exec('COMMIT;')
 
-      return { ok: true, deletedProfileId: profileRow.profile_id, deletedAccountId }
+      committedResult = { deletedProfileId: profileRow.profile_id, deletedAccountId }
     } catch (error) {
       try {
         database.exec('ROLLBACK;')
@@ -531,6 +684,27 @@ export async function createProfileHardDeleteService(databaseFilePath: string): 
       }
       throw error
     }
+
+    // Физическият cleanup стои НАРОЧНО извън transaction try/catch-а по-горе
+    // (виж deleteUploadedFilesBestEffort doc коментара) — DB commit-ът вече
+    // е необратим success в тази точка (committedResult е зададен само по
+    // success-пътя, всеки друг път вече е return-нал отвътре try-а по-горе).
+    // Defensive try/catch тук (не разчитаме единствено на
+    // deleteUploadFileByUrl's "никога не reject-ва" договор) — реална fs
+    // грешка се логва, но НИКОГА не прави hardDeleteProfile да throw-не/
+    // върне "not ok" за профил, вече физически изтрит от DB; НЕ опитваме
+    // ROLLBACK тук — commit-ът вече е committed, rollback след COMMIT е
+    // невалидна операция.
+    try {
+      await deleteUploadedFilesBestEffort(uploadedFileUrlsToDelete)
+    } catch (error) {
+      console.error(
+        `[profile-hard-delete] Physical file cleanup неуспешен profileId=${committedResult.deletedProfileId}:`,
+        error,
+      )
+    }
+
+    return { ok: true, deletedProfileId: committedResult.deletedProfileId, deletedAccountId: committedResult.deletedAccountId }
   }
 
   function close(): void {

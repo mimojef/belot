@@ -666,7 +666,14 @@ const adCampaignsStore = await createAdCampaignsStore(
   databaseBootstrap.databaseFilePath,
 )
 const profileBanStore = await createProfileBanStore(databaseBootstrap.databaseFilePath)
-const profileHardDeleteService = await createProfileHardDeleteService(databaseBootstrap.databaseFilePath)
+const profileHardDeleteService = await createProfileHardDeleteService(databaseBootstrap.databaseFilePath, {
+  // deleteUploadFileByUrl е function declaration по-долу в този модул (hoisted,
+  // затова е ползваем тук въпреки textual реда) — единствен canonical
+  // upload-path safety helper за avatar/gallery physical cleanup при hard
+  // delete (виж ProfileHardDeleteFileCleanupDeps коментара в
+  // profileHardDeleteService.ts).
+  deleteUploadFileByUrl,
+})
 const pendingProfileModerationStore = await createPendingProfileModerationStore(databaseBootstrap.databaseFilePath)
 const adminProfileRiskStore = await createAdminProfileRiskStore(databaseBootstrap.databaseFilePath)
 const authStore = await createAuthStore(
@@ -4674,20 +4681,41 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
     // ЕДИНСТВЕНО тук, при terminal game end, не в HTTP handler-а (виж
     // handleAdminProfileHardDeleteRequest — за active-game target той само
     // записва pending реда и връща веднага).
-    const result = profileHardDeleteService.hardDeleteProfile({
+    //
+    // hardDeleteProfile() вече е async — await-ва физическия avatar/gallery
+    // file cleanup ПРЕДИ да resolve-не (виж profileHardDeleteService.ts).
+    // Тази функция остава НАРОЧНО синхронна (runMatchCompletionSideEffect/
+    // tickRoomGameRuntimes hot-path convention — не пропагираме async през
+    // целия game tick заради това), затова .then() вместо await:
+    // clearPending + connection cleanup се изпълняват веднага щом промисът
+    // resolve-не, без да блокират текущия tick за останалите seats/стаи.
+    void profileHardDeleteService.hardDeleteProfile({
       targetProfileId: pending.targetProfileId,
       actorProfileId: pending.requestedByProfileId,
       actorAccountId: pending.requestedByAccountId ?? '',
       reason: pending.reason,
-    })
-    pendingProfileModerationStore.clearPending(participantProfileId)
-    if (result.ok) {
-      deleteProfileConnections(participantProfileId, pending.reason)
-    } else {
+    }).then((result) => {
+      pendingProfileModerationStore.clearPending(participantProfileId)
+      if (result.ok) {
+        deleteProfileConnections(participantProfileId, pending.reason)
+      } else {
+        console.error(
+          `[pending-moderation] deferred hard delete failed profileId=${participantProfileId} code=${result.code}`,
+        )
+      }
+    }).catch((error) => {
+      // hardDeleteProfile() reject-на (DB/transaction грешка — ROLLBACK вече
+      // се е случил вътре в самата функция, ПРЕДИ throw-а). НАРОЧНО не
+      // clear-ваме pending реда и не disconnect-ваме тук (за разлика от
+      // success/logical-failure клона по-горе) — pending реда остава
+      // непроменен, следващият match-end hook за същия target ще опита
+      // delete-а отново safely. Само log, за да не остане unhandled
+      // promise rejection в game-tick процеса.
       console.error(
-        `[pending-moderation] deferred hard delete failed profileId=${participantProfileId} code=${result.code}`,
+        `[pending-moderation] deferred hard delete rejected profileId=${participantProfileId}:`,
+        error,
       )
-    }
+    })
   }
 }
 
@@ -5894,8 +5922,14 @@ async function deleteUploadFileByUrl(uploadUrl: string): Promise<void> {
 
   try {
     await unlink(filePath)
-  } catch {
-    // The DB row is the source of truth; a missing upload file is already clean.
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // The DB row is the source of truth; a missing upload file is already clean.
+      return
+    }
+    // Реална fs грешка (permissions, disk-и т.н.) — не се крие тихо, но и
+    // не chупи caller-а (best-effort cleanup, mirror на deleteAttachmentFileByFilename).
+    console.error(`[uploads] Неуспешно изтриване на ${filePath}:`, error)
   }
 }
 
@@ -8066,7 +8100,7 @@ async function handleAdminProfileHardDeleteRequest(
     return true
   }
 
-  const result = profileHardDeleteService.hardDeleteProfile({
+  const result = await profileHardDeleteService.hardDeleteProfile({
     targetProfileId,
     actorProfileId,
     actorAccountId: session.account.accountId,
