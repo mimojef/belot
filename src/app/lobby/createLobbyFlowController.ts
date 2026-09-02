@@ -10972,7 +10972,7 @@ export function createLobbyFlowController(
     if (!options.onFriendRequestSubmit) {
       state.friendActionMessageProfileId = profileId
       state.friendActionMessage = 'Поканите временно не са налични.'
-      render()
+      renderPopupOnly()
       return
     }
 
@@ -10981,7 +10981,7 @@ export function createLobbyFlowController(
     state.friendActionLoadingProfileId = profileId
     state.friendActionMessageProfileId = profileId
     state.friendActionMessage = targetIsBot ? 'Чака се отговор за покана за приятелство...' : null
-    render()
+    renderPopupOnly()
 
     const [result] = await Promise.all([
       options.onFriendRequestSubmit(profileId),
@@ -10995,14 +10995,14 @@ export function createLobbyFlowController(
       state.friendActionMessage = targetIsBot
         ? 'Поканата беше отхвърлена от играча.'
         : result.message
-      render()
+      renderPopupOnly()
       return
     }
 
     state.friendships = result.friendships
     state.friendActionMessageProfileId = profileId
     state.friendActionMessage = 'Поканата е изпратена.'
-    render()
+    renderPopupOnly()
   }
 
   async function acceptFriendRequest(friendshipId: string): Promise<void> {
