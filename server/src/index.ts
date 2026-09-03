@@ -730,6 +730,9 @@ const chatStore = await createChatStore(
     vipStatusChecker: {
       isActiveVip: (profileId) => vipStore.getStatus(profileId).isActive,
     },
+    roleChecker: {
+      isPikaTeamProfile: (profileId) => authStore.getAccountRoleForProfile(profileId) === 'pika_team',
+    },
   },
 )
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)

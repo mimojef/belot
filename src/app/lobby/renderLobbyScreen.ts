@@ -6411,7 +6411,12 @@ function renderChatPanel(state: LobbyScreenState): string {
               const avatarUrl = conversation.friend.avatarUrl?.trim() ?? ''
               const preview = conversation.lastMessage?.body ?? 'Няма съобщения'
               const isOnline = conversation.friend.isOnline
-              const isPikaSupport = conversation.kind === 'pika_support'
+              // Badge-ът показва самоличността на КОНКРЕТНИЯ participant
+              // (conversation.friend), НЕ conversation.kind — kind='pika_support'
+              // важи символично за двете страни на разговора, затова НЕ бива
+              // да служи за "този показан човек е Team" (cross-over fix, виж
+              // friendIsPikaTeam коментара в createGameServerClient.ts).
+              const isPikaSupport = conversation.friendIsPikaTeam === true
               const unreadBadge = formatNotificationBadgeCount(conversation.unreadCount)
 
               return `
@@ -6445,7 +6450,7 @@ function renderChatPanel(state: LobbyScreenState): string {
         ` : `
           <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);">
             <div style="font-size:19px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
-            ${activeConversation.kind === 'pika_support' ? pikaSupportBadge : ''}
+            ${activeConversation.friendIsPikaTeam === true ? pikaSupportBadge : ''}
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
           </div>
           <div data-chat-messages-scroll="1" style="height:350px;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">

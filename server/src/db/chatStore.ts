@@ -52,6 +52,15 @@ export type ChatMessageSnapshot = {
 export type ChatConversationSnapshot = {
   friendshipId: string
   friend: PlayerPublicProfileSnapshot
+  // Per-participant факт за КОНКРЕТНИЯ `friend` по-горе — official Pika.bg
+  // profileId ИЛИ account role==='pika_team'. Умишлено ОТДЕЛНО от `kind`
+  // (виж ChatConversationKind коментара): kind е symmetric property на
+  // целия разговор (важи еднакво за двете страни), затова НЕ бива да се
+  // ползва като proxy за "този показан участник е Team" — точно това
+  // объркване причиняваше "Екип Pika.bg" badge върху normal player, когато
+  // pika_team служителят гледа собствения си inbox. Client renderer-ите
+  // (renderLobbyScreen.ts) трябва да четат ТОВА поле за badge, не kind.
+  friendIsPikaTeam: boolean
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
@@ -282,9 +291,21 @@ export type ChatStoreVipStatusChecker = {
   isActiveVip: (profileId: ProfileId) => boolean
 }
 
+// Минимален inject-нат interface от authStore — избягва circular dependency
+// (authStore зависи транзитивно от други store-ове, chatStore не бива да го
+// import-ва directly). Единствената нужда тук е "тоя конкретен profileId
+// account role==='pika_team' ли е" — за derive-ване на friendIsPikaTeam в
+// createConversationSnapshot (виж direct chat "Екип Pika.bg" badge
+// cross-over fix-а — badge-ът трябва да следва КОНКРЕТНИЯ показан
+// participant, не conversation.kind).
+export type ChatStoreRoleChecker = {
+  isPikaTeamProfile: (profileId: ProfileId) => boolean
+}
+
 export type ChatStoreOptions = {
   officialPikaProfileId?: string | null
   vipStatusChecker?: ChatStoreVipStatusChecker
+  roleChecker?: ChatStoreRoleChecker
 }
 
 export async function createChatStore(
@@ -303,6 +324,24 @@ export async function createChatStore(
   const officialPikaProfileId =
     options.officialPikaProfileId ?? getConfiguredOfficialPikaProfileId()
   const vipStatusChecker = options.vipStatusChecker ?? null
+  const roleChecker = options.roleChecker ?? null
+
+  // Истинска самоличност на "Екип Pika.bg" за КОНКРЕТЕН profileId — legacy
+  // единичен official profile ID ИЛИ role==='pika_team' (role-based staff).
+  // Умишлено НЕ зависи от conversation.kind: kind='pika_support' е symmetric
+  // property на целия friendship ред (важи еднакво за двете страни), докато
+  // това тук е per-participant факт. Виж direct chat "Екип Pika.bg" badge
+  // cross-over fix-а — badge-ът в renderChatPanel трябва да пита точно тази
+  // функция за conversation.friend, не conversation.kind.
+  function isPikaTeamProfile(profileId: ProfileId | null): boolean {
+    if (profileId === null) {
+      return false
+    }
+    if (officialPikaProfileId !== null && profileId === officialPikaProfileId) {
+      return true
+    }
+    return roleChecker?.isPikaTeamProfile(profileId) ?? false
+  }
 
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -701,6 +740,7 @@ export async function createChatStore(
     return {
       friendshipId: friendship.friendship_id,
       friend: friendProfile,
+      friendIsPikaTeam: isPikaTeamProfile(friendProfile.profileId),
       lastMessage: lastMessageRow
         ? toMessageSnapshot(lastMessageRow, ownProfileId)
         : null,

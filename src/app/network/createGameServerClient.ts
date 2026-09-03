@@ -360,6 +360,11 @@ export type ChatConversationKind = 'friend' | 'vip_dm' | 'pika_support'
 export type ChatConversationSnapshot = {
   friendshipId: string
   friend: PlayerPublicProfileSnapshot
+  // Server-derived, per-participant: точно `friend` по-горе е official
+  // Pika.bg profile ИЛИ role==='pika_team'. НЕ deriv-вай "Екип Pika.bg" badge
+  // от `kind` — kind е symmetric свойство на целия разговор (важи еднакво и
+  // за двете страни), докато това поле е за КОНКРЕТНИЯ показан participant.
+  friendIsPikaTeam: boolean
   lastMessage: ChatMessageSnapshot | null
   updatedAt: string
   unreadCount: number
