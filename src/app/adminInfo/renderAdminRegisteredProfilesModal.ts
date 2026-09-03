@@ -206,6 +206,7 @@ export function renderAdminRegisteredProfilesModal(
       <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:24px;">
         <div
           data-admin-registered-profiles-card="1"
+          data-admin-registered-profiles-content-key="${esc(state.period)}:${state.page}:${state.loading ? 'loading' : 'loaded'}"
           role="dialog"
           aria-modal="true"
           aria-label="${esc(PERIOD_TITLES[state.period])}"

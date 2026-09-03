@@ -11906,9 +11906,43 @@ export function renderLobbyScreen(
   ) {
     return
   }
+  // Admin registered profiles модалът живее inline в root.innerHTML (не
+  // отделен document.body host като profile/missions popup-ите), затова
+  // всяка unrelated WS-driven promяна, която реално различава nextRootHtml
+  // (виж skip-if-unchanged коментара по-горе — напр. badge брояч другаде на
+  // страницата), пресъздава ЦЕЛИЯ subtree и заедно с него нулира scrollTop
+  // на модала — видимо "скача най-горе" премигване по време на нормално
+  // скролиране, докато модалът стои отворен. Пазим scrollTop преди replace-а
+  // и го възстановяваме веднага след — САМО ако period/page/loading (виж
+  // data-admin-registered-profiles-content-key) са идентични преди/след,
+  // т.е. рендерът е бил unrelated към самия модал. При explicit page change
+  // (onAdminRegisteredProfilesPageChange) content key-ят реално се променя
+  // (нов page/loading), затова restore-ът се пропуска и новата страница
+  // legitimately стартира от top — очакваното поведение.
+  const adminRegisteredProfilesCardElBefore = root.querySelector<HTMLElement>(
+    '[data-admin-registered-profiles-card="1"]',
+  )
+  const adminRegisteredProfilesScrollTop = adminRegisteredProfilesCardElBefore?.scrollTop ?? null
+  const adminRegisteredProfilesContentKeyBefore =
+    adminRegisteredProfilesCardElBefore?.getAttribute('data-admin-registered-profiles-content-key') ?? null
+
   lastRenderedRootElement = root
   lastRenderedRootHtml = nextRootHtml
   root.innerHTML = nextRootHtml
+
+  if (adminRegisteredProfilesScrollTop !== null) {
+    const adminRegisteredProfilesCardElAfter = root.querySelector<HTMLElement>(
+      '[data-admin-registered-profiles-card="1"]',
+    )
+    const adminRegisteredProfilesContentKeyAfter =
+      adminRegisteredProfilesCardElAfter?.getAttribute('data-admin-registered-profiles-content-key') ?? null
+    if (
+      adminRegisteredProfilesCardElAfter &&
+      adminRegisteredProfilesContentKeyAfter === adminRegisteredProfilesContentKeyBefore
+    ) {
+      adminRegisteredProfilesCardElAfter.scrollTop = adminRegisteredProfilesScrollTop
+    }
+  }
 
   const mobileMenuEl = root.querySelector<HTMLDetailsElement>('[data-lobby-mobile-menu="1"]')
   const clearMobileMenuCloseTimer = () => {
