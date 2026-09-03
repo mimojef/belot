@@ -503,6 +503,14 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
    * разговор" — трябва да е reachable ЕДИНСТВЕНО през Archived, визуално
    * разграничен от normal archive чрез deletionArchive полето/UI banner-а
    * (spec §2 "не смесвай... без ясно визуално разграничение").
+   *
+   * ВТОРО ниво на филтриране (round 6 корекция — "Неизвестен" bug):
+   * archivedCondition-ът горе решава САМО active/archived bucket-а по
+   * marker присъствие. Отделно, ВЪТРЕ в цикъла по-долу, всеки ред се
+   * проверява дали profiles реда му все още съществува ИЛИ има
+   * deletion-evidence — orphaned редове (нито едното) се skip-ват изцяло,
+   * независимо в кой bucket биха попаднали по markers. Виж коментара
+   * непосредствено преди push-а в цикъла за пълната three-way логика.
    */
   function getAllConversations(
     getProfile: (profileId: string) => { displayName: string; avatarUrl: string | null } | null,
@@ -532,13 +540,35 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
 
       const deletionArchive = getDeletionArchive(row.profile_id)
       const profile = getProfile(row.profile_id)
+
+      // Round 6 корекция (production bug — "Неизвестен" разговори в
+      // Archived): преди тази проверка support_messages/support_archived
+      // orphan редове (profiles вече не съществува, hard-deleted през
+      // normal flow БЕЗ supportRequestMessageId — hardDeleteProfile никога
+      // не е пипал тези таблици, виж doc коментара там) изтичаха в UI-я с
+      // displayName='Неизвестен', защото getAllConversations никога не
+      // проверяваше дали profiles редът реално съществува. Точна семантика:
+      //   - deletionArchive !== null → легитимен evidence случай, ПОКАЖИ
+      //     винаги (target профилът е ОЧАКВАНО изтрит — това Е точката),
+      //     display name от snapshot-а, не от live profile lookup.
+      //   - profile !== null → живо/normal-archived, но профилът все още
+      //     съществува — ПОКАЖИ с живото име.
+      //   - profile === null И deletionArchive === null → orphaned стар
+      //     разговор от профил, изтрит ПРЕДИ evidence feature-а (или през
+      //     normal hard-delete flow без user-request атрибуция) — SKIP
+      //     изцяло, нито Active, нито Archived. Не се трие нищо тук
+      //     (spec §3 "не destructive cleanup в този round").
+      if (deletionArchive === null && profile === null) continue
+
       const lastMessageText = lastRow.body.trim()
       result.push({
         profileId: row.profile_id,
         // spec §C/§F: за архивиран разговор (hard-deleted профил) profiles
-        // редът вече не съществува — getProfile() винаги връща null тук,
-        // затова показваме snapshot-натото име вместо generic "Неизвестен"
-        // (mirror на renderAdCampaignManagementPanel.ts's "(изтрит профил)" convention).
+        // редът вече не съществува — показваме snapshot-натото име вместо
+        // generic "Неизвестен" (mirror на renderAdCampaignManagementPanel.ts's
+        // "(изтрит профил)" convention). "Неизвестен" вече не бива да се
+        // достига тук изобщо (guard-ът по-горе skip-ва точно този случай),
+        // остава само като defensive fallback.
         displayName: deletionArchive?.displayNameSnapshot ?? profile?.displayName ?? 'Неизвестен',
         avatarUrl: profile?.avatarUrl ?? null,
         lastMessageBody: lastMessageText.length > 0 ? lastMessageText : '[Снимка]',
