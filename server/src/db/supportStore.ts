@@ -37,11 +37,43 @@ export type SupportConversationSnapshot = {
   lastMessageIsFromAdmin: boolean
   unreadByAdmin: number
   updatedAt: string
+  /** Ненулево само за архивирани разговори на hard-deleted профили — виж SupportDeletionArchiveSnapshot. */
+  deletionArchive: SupportDeletionArchiveSnapshot | null
+}
+
+/**
+ * Immutable marker+snapshot ред за support разговор на hard-deleted профил
+ * (виж 20260903_003_create_support_deletion_archive.sql и
+ * profileHardDeleteService.ts's insertSupportDeletionArchiveStatement).
+ * Самото съществуване на такъв ред за даден profileId сигнализира на
+ * admin/Pika Team UI-я, че разговорът е read-only архив, НЕ жива conversation
+ * — profiles редът за този profileId вече не съществува.
+ * EXPLICIT ATTRIBUTION ONLY — редът се пише единствено когато
+ * profileHardDeleteService е validate-нал конкретно user-authored support
+ * съобщение вътре в hard-delete транзакцията, затова request_message_id/
+ * requested_at са NOT NULL в schema-та.
+ */
+export type SupportDeletionArchiveSnapshot = {
+  profileId: string
+  usernameSnapshot: string
+  displayNameSnapshot: string
+  requestMessageId: string
+  requestedAt: string
+  deletedAt: string
+  deletedByProfileId: string | null
+  reason: string
 }
 
 export type SupportStore = {
   getMessages: (profileId: string) => SupportMessageSnapshot[]
   sendUserMessage: (profileId: string, body: string, attachment?: NewSupportAttachmentInput | null) => SupportMessageSnapshot
+  /**
+   * Връща null и при "профилът няма support съобщения" (стар поведение), И
+   * при "разговорът е архивиран заради hard-deleted профил" (spec §C — "не
+   * позволявай изпращане на нови съобщения") — извикващата страна (index.ts)
+   * не различава двата случая по връщаната стойност, вика getDeletionArchive
+   * отделно, ако иска specific "профилът е изтрит" съобщение вместо generic 404.
+   */
   sendAdminReply: (profileId: string, body: string, attachment?: NewSupportAttachmentInput | null) => SupportMessageSnapshot | null
   markReadByUser: (profileId: string) => void
   markReadByAdmin: (profileId: string) => void
@@ -50,6 +82,22 @@ export type SupportStore = {
   getAllConversations: (
     getProfile: (profileId: string) => { displayName: string; avatarUrl: string | null } | null
   ) => SupportConversationSnapshot[]
+  /** Виж SupportDeletionArchiveSnapshot doc коментара — null = не е архивиран (нормален жив/непознат разговор). */
+  getDeletionArchive: (profileId: string) => SupportDeletionArchiveSnapshot | null
+  /**
+   * Pre-check за "Изтрий профила по тази заявка" ПРИ SCHEDULING (round 3
+   * корекция — deferred hard-delete на target в active game): валидира, че
+   * messageId съществува, принадлежи на profileId, и е is_from_admin=0 —
+   * СЪЩИТЕ три условия като profileHardDeleteService.hardDeleteProfile's
+   * вътрешна transaction validation (mirror-нати тук нарочно, не reuse-вани
+   * директно — разделени DB connections/модули, виж index.ts's handler).
+   * Това е defense-in-depth pre-check при scheduling (по-добър UX — веднага
+   * controlled 400, не 200 "pending", който по-късно тихо губи archive-а);
+   * НЕ замества authoritative re-validation вътре в hardDeleteProfile при
+   * terminal completion — съобщението теоретично може да стане невалидно
+   * между scheduling и terminal completion (напр. race с друг admin action).
+   */
+  isValidUserRequestMessage: (profileId: string, messageId: string) => boolean
   getAttachmentForDownload: (
     viewerProfileId: string,
     isFullAdmin: boolean,
@@ -98,7 +146,26 @@ function normalizeBody(value: string): string | null {
   return normalized
 }
 
-export async function createSupportStore(databaseFilePath: string): Promise<SupportStore> {
+export type SupportStoreDeps = {
+  /**
+   * Round 3 корекция — "запазване на evidence до terminal state": докато
+   * target профилът има pending deferred hard delete (active game) С
+   * explicit support-request атрибуция (pending_profile_moderation.
+   * support_request_message_id НЕ е null), разговорът/съобщенията НЕ трябва
+   * да могат да бъдат премахнати от cleanupInactiveConversations/
+   * archiveConversation/deleteConversation — иначе evidence-ът може да
+   * изчезне между scheduling момента и terminal completion, ПРЕДИ
+   * canonical hardDeleteProfile да го е validate-нал и archive-нал.
+   * Инжектирана функция (не direct import на pendingProfileModerationStore)
+   * — DI mirror на ProfileHardDeleteFileCleanupDeps pattern-а, избягва
+   * cross-store coupling между два отделни DatabaseSync connections.
+   * НЕ блокира sendAdminReply — target профилът все още съществува/играе
+   * по време на pending прозореца, нормален admin reply трябва да работи.
+   */
+  hasPendingSupportRequestDelete: (profileId: string) => boolean
+}
+
+export async function createSupportStore(databaseFilePath: string, deps: SupportStoreDeps): Promise<SupportStore> {
   const sqliteModule = await import('node:sqlite')
   const db: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,
@@ -167,6 +234,21 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
     VALUES (?)
   `)
 
+  const selectDeletionArchiveStatement = db.prepare(`
+    SELECT
+      profile_id, username_snapshot, display_name_snapshot,
+      request_message_id, requested_at, deleted_at, deleted_by_profile_id, reason
+    FROM support_deletion_archives
+    WHERE profile_id = ?
+    LIMIT 1
+  `)
+
+  const selectMessageForRequestValidationStatement = db.prepare(`
+    SELECT profile_id, is_from_admin FROM support_messages
+    WHERE message_id = ?
+    LIMIT 1
+  `)
+
   const selectAttachmentForDownloadStatement = db.prepare(`
     SELECT a.storage_filename, a.content_type
     FROM support_message_attachments a
@@ -207,6 +289,40 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
       db.exec('ROLLBACK;')
       throw error
     }
+  }
+
+  type SupportDeletionArchiveRow = {
+    profile_id: string
+    username_snapshot: string
+    display_name_snapshot: string
+    request_message_id: string
+    requested_at: string
+    deleted_at: string
+    deleted_by_profile_id: string | null
+    reason: string
+  }
+
+  function getDeletionArchive(profileId: string): SupportDeletionArchiveSnapshot | null {
+    const row = selectDeletionArchiveStatement.get(profileId) as SupportDeletionArchiveRow | undefined
+    if (!row) return null
+
+    return {
+      profileId: row.profile_id,
+      usernameSnapshot: row.username_snapshot,
+      displayNameSnapshot: row.display_name_snapshot,
+      requestMessageId: row.request_message_id,
+      requestedAt: dbDateToUtc(row.requested_at),
+      deletedAt: dbDateToUtc(row.deleted_at),
+      deletedByProfileId: row.deleted_by_profile_id,
+      reason: row.reason,
+    }
+  }
+
+  function isValidUserRequestMessage(profileId: string, messageId: string): boolean {
+    const row = selectMessageForRequestValidationStatement.get(messageId) as
+      | { profile_id: string; is_from_admin: number }
+      | undefined
+    return row !== undefined && row.profile_id === profileId && row.is_from_admin === 0
   }
 
   function rowToSnapshot(row: SupportMessageRow): SupportMessageSnapshot {
@@ -334,6 +450,10 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
     ).get(profileId)
     if (!exists) return null
 
+    // spec §C: архивиран разговор (hard-deleted профил) е read-only — не
+    // позволявай нови admin съобщения в мъртъв разговор.
+    if (getDeletionArchive(profileId) !== null) return null
+
     return runInTransaction(() => insertMessage(profileId, normalized, true, attachment))
   }
 
@@ -388,16 +508,22 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
       const lastRow = selectLatestMessageStatement.get(row.profile_id) as SupportMessageRow | undefined
       if (!lastRow) continue
 
+      const deletionArchive = getDeletionArchive(row.profile_id)
       const profile = getProfile(row.profile_id)
       const lastMessageText = lastRow.body.trim()
       result.push({
         profileId: row.profile_id,
-        displayName: profile?.displayName ?? 'Неизвестен',
+        // spec §C/§F: за архивиран разговор (hard-deleted профил) profiles
+        // редът вече не съществува — getProfile() винаги връща null тук,
+        // затова показваме snapshot-натото име вместо generic "Неизвестен"
+        // (mirror на renderAdCampaignManagementPanel.ts's "(изтрит профил)" convention).
+        displayName: deletionArchive?.displayNameSnapshot ?? profile?.displayName ?? 'Неизвестен',
         avatarUrl: profile?.avatarUrl ?? null,
         lastMessageBody: lastMessageText.length > 0 ? lastMessageText : '[Снимка]',
         lastMessageIsFromAdmin: lastRow.is_from_admin === 1,
         unreadByAdmin: row.unread_by_admin,
         updatedAt: dbDateToUtc(row.updated_at),
+        deletionArchive,
       })
     }
 
@@ -469,6 +595,17 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
   }
 
   function deleteConversation(profileId: string): void {
+    // spec §C: архивиран разговор (hard-deleted профил) е immutable evidence
+    // — нито обикновеният "user/admin трие разговора си" path бива да го
+    // изтрие тук (no-op, вместо тихо да провали архивирането).
+    if (getDeletionArchive(profileId) !== null) return
+    // Round 3 корекция — pending support-request delete (target в active
+    // game, delete отложен до terminal completion): evidence-ът трябва да
+    // преживее и ТОЗИ прозорец, не само след като archive редът вече
+    // съществува (виж SupportStoreDeps.hasPendingSupportRequestDelete doc
+    // коментара).
+    if (deps.hasPendingSupportRequestDelete(profileId)) return
+
     runInTransaction(() => {
       enqueueAttachmentsForProfile(profileId)
       db.prepare(`DELETE FROM support_messages WHERE profile_id = ?`).run(profileId)
@@ -477,6 +614,13 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
   }
 
   function archiveConversation(profileId: string): void {
+    // spec §C: same guard — "Архивирай" (support_archived, hides from
+    // inbox + wipes messages) е РАЗЛИЧНО от deletion archive-а тук и не
+    // бива да го замести/изчисти.
+    if (getDeletionArchive(profileId) !== null) return
+    // Round 3 корекция — виж deleteConversation-ия same коментар по-горе.
+    if (deps.hasPendingSupportRequestDelete(profileId)) return
+
     runInTransaction(() => {
       enqueueAttachmentsForProfile(profileId)
       db.prepare(`DELETE FROM support_messages WHERE profile_id = ?`).run(profileId)
@@ -502,6 +646,11 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
 
   function cleanupInactiveConversations(): number {
     return runInTransaction(() => {
+      // spec §A/§C: архивиран разговор (hard-deleted профил, виж
+      // support_deletion_archives) НЕ трябва да бъде изчистван от този
+      // background job — evidence-ът за заявеното/изпълненото изтриване
+      // трябва да остане четим за admin/Pika Team за постоянно, не само до
+      // следващия 5-дневен inactivity cleanup цикъл.
       const rows = db.prepare(`
         SELECT m.profile_id
         FROM support_messages m
@@ -510,11 +659,18 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
           FROM support_messages
           GROUP BY profile_id
         ) latest ON latest.profile_id = m.profile_id AND latest.last_at = m.created_at
+        LEFT JOIN support_deletion_archives sda ON sda.profile_id = m.profile_id
         WHERE m.is_from_admin = 1
           AND m.created_at < datetime('now', '-5 days')
+          AND sda.profile_id IS NULL
       `).all() as { profile_id: string }[]
 
+      // Round 3 корекция — виж SupportStoreDeps.hasPendingSupportRequestDelete
+      // doc коментара: target профил с pending deferred hard delete (active
+      // game) И explicit support-request атрибуция не бива да загуби
+      // evidence-а тук, преди terminal completion да го archive-не.
       const profileIds = [...new Set(rows.map((row) => row.profile_id))]
+        .filter((profileId) => !deps.hasPendingSupportRequestDelete(profileId))
 
       if (profileIds.length === 0) {
         return 0
@@ -547,6 +703,8 @@ export async function createSupportStore(databaseFilePath: string): Promise<Supp
     getUnreadCountForUser,
     getTotalUnreadForAdmin,
     getAllConversations,
+    getDeletionArchive,
+    isValidUserRequestMessage,
     getAttachmentForDownload,
     listPendingAttachmentDeletions,
     markAttachmentDeletionDone,

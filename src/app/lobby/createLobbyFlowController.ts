@@ -393,11 +393,20 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminUnbanProfile?: (
     targetProfileId: string,
   ) => Promise<{ ok: true } | { ok: false; message: string }>
-  /** Необратимо — server-side authoritative проверка (self/role) в handleAdminProfileHardDeleteRequest. */
+  /**
+   * Необратимо — server-side authoritative проверка (self/role) в
+   * handleAdminProfileHardDeleteRequest. supportRequestMessageId (optional) —
+   * explicit attribution, подадена САМО когато delete popup-ът е отворен от
+   * support chat-а ("Изтрий профила по тази заявка"); сървърът е
+   * authoritative и re-validate-ва вътре в hard-delete транзакцията, виж
+   * profileHardDeleteService.ts. Ако провалено — код
+   * 'invalid_support_request_message', delete-ът НЕ се изпълнява.
+   */
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
-  ) => Promise<{ ok: true } | { ok: false; message: string }>
+    supportRequestMessageId?: string | null,
+  ) => Promise<{ ok: true } | { ok: false; message: string; code?: string }>
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: (
     page: number,
@@ -1361,6 +1370,16 @@ type InternalLobbyFlowState = {
   deletePopupReasonDraft: string
   deletePopupSubmitting: boolean
   deletePopupErrorText: string | null
+  /**
+   * Ненулево ЕДИНСТВЕНО когато delete popup-ът е отворен от support chat-а
+   * ("Изтрий профила по тази заявка" бутон до конкретно user съобщение,
+   * виж onAdminSupportDeleteProfileClick) — explicit attribution context,
+   * подава се към hardDeleteProfile за server-side validated
+   * support_deletion_archives запис (виж profileHardDeleteService.ts).
+   * Нормалният profile-popup delete flow (Players/admin search/registered
+   * profiles) НИКОГА не го задава — остава null, archive не се създава.
+   */
+  deletePopupSupportRequestMessageId: string | null
   /** "Свързани профили" секция в profile popup-а — само за viewerIsFullAdmin. Виж ensureProfilePopupRiskDetailLoaded. */
   riskDetailOpen: boolean
   riskDetailLoading: boolean
@@ -1987,6 +2006,7 @@ function createInitialState(): InternalLobbyFlowState {
     deletePopupReasonDraft: '',
     deletePopupSubmitting: false,
     deletePopupErrorText: null,
+    deletePopupSupportRequestMessageId: null,
     riskDetailOpen: false,
     riskDetailLoading: false,
     riskDetailRows: null,
@@ -5699,6 +5719,24 @@ export function createLobbyFlowController(
           render()
         })()
       },
+      onAdminSupportDeleteProfileClick: (profileId, messageId) => {
+        // "Изтрий профила по тази заявка" — reuse-ва СЪЩИЯ profile-popup
+        // delete confirmation dialog като нормалния admin flow (НЕ втори
+        // dialog система), само предава explicit support-request context
+        // (deletePopupSupportRequestMessageId), който submitAdminHardDelete
+        // после подава към hardDeleteProfile за server-side validated
+        // support_deletion_archives запис.
+        void (async () => {
+          await openProtectedProfileById(profileId)
+          if (state.profilePopupOpen && state.profilePopupProfile?.profileId === profileId) {
+            state.deletePopupOpen = true
+            state.deletePopupReasonDraft = ''
+            state.deletePopupErrorText = null
+            state.deletePopupSupportRequestMessageId = messageId
+            renderPopupOnly()
+          }
+        })()
+      },
       onAdminSupportReplyDraftChange: (profileId, draft) => {
         state.adminSupportReplyDraftByProfileId = {
           ...state.adminSupportReplyDraftByProfileId,
@@ -6417,8 +6455,14 @@ export function createLobbyFlowController(
     state.deletePopupErrorText = null
     renderPopupOnly()
 
+    // Explicit attribution context (виж onAdminSupportDeleteProfileClick) —
+    // подава се само ако delete popup-ът реално е бил отворен от support
+    // chat-а за ТОЗИ profileId; сървърът re-validate-ва authoritative
+    // вътре в hard-delete транзакцията, тук само пренасяме client intent-а.
+    const supportRequestMessageId = state.deletePopupSupportRequestMessageId
+
     const result = options.onAdminHardDeleteProfile
-      ? await options.onAdminHardDeleteProfile(profileId, reason).catch(
+      ? await options.onAdminHardDeleteProfile(profileId, reason, supportRequestMessageId).catch(
           () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
         )
       : { ok: false as const, message: 'Функцията временно не е налична.' }
@@ -6433,10 +6477,32 @@ export function createLobbyFlowController(
     state.deletePopupOpen = false
     state.deletePopupSubmitting = false
     state.deletePopupErrorText = null
+    state.deletePopupSupportRequestMessageId = null
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupActiveBan = null
     state.profilePopupActiveBanProfileId = null
+
+    // Ако delete-ът е бил support-request-driven, разговорът в admin
+    // support inbox-а вече трябва да показва deletion-archive banner-а
+    // (profiles редът вече не съществува) — reuse-ва СЪЩИЯ loader като
+    // onAdminSupportConversationClick, за да презареди single-source конв.
+    // snapshot-а с новия deletionArchive marker, вместо ръчно да го patch-ваме
+    // локално (сървърът е authoritative за archive съдържанието).
+    if (supportRequestMessageId !== null && state.adminSupportSelectedProfileId === profileId) {
+      void (async () => {
+        const messagesResult = await options.onAdminSupportMessagesLoad?.(profileId)
+        if (messagesResult?.ok) {
+          state.adminSupportMessages = messagesResult.messages
+        }
+        const conversationsResult = await options.onAdminSupportConversationsLoad?.()
+        if (conversationsResult?.ok) {
+          state.adminSupportConversations = conversationsResult.conversations
+        }
+        render()
+      })()
+    }
+
     renderPopupOnly()
   }
 
@@ -14321,12 +14387,20 @@ export function createLobbyFlowController(
         state.deletePopupOpen = true
         state.deletePopupReasonDraft = ''
         state.deletePopupErrorText = null
+        // Нормален profile-popup delete flow (Players/admin search/
+        // registered profiles бутон) — НЕ носи support-request атрибуция.
+        // onAdminSupportDeleteProfileClick е ЕДИНСТВЕНОТО място, което
+        // задава deletePopupSupportRequestMessageId, ПРЕДИ да отвори
+        // попъпа — тук изрично се нулира, за да не изтече stale context от
+        // предишно отваряне.
+        state.deletePopupSupportRequestMessageId = null
         renderPopupOnly()
       },
       onDeleteCancel: () => {
         state.deletePopupOpen = false
         state.deletePopupSubmitting = false
         state.deletePopupErrorText = null
+        state.deletePopupSupportRequestMessageId = null
         renderPopupOnly()
       },
       onDeleteSubmit: (profileId, reason) => {

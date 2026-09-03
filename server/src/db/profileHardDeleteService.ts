@@ -5,7 +5,15 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export type HardDeleteProfileResult =
   | { ok: true; deletedProfileId: ProfileId; deletedAccountId: string | null }
-  | { ok: false; code: 'not_found' | 'self' | 'invalid_reason' | 'active_tournament_dependency' }
+  | {
+      ok: false
+      code:
+        | 'not_found'
+        | 'self'
+        | 'invalid_reason'
+        | 'active_tournament_dependency'
+        | 'invalid_support_request_message'
+    }
 
 /**
  * Non-terminal турнирни статуси (mirror на selectActiveEntryForAccountStatement
@@ -88,12 +96,27 @@ export type ProfileHardDeleteService = {
    * полета/topics.created_by_profile_id/tournament_economy_ledger/
    * tournament_events, които вече бяха SET NULL от самото начало. Всички
    * тези redове ПРЕЖИВЯВАТ delete-а непокътнати, СЪС запазена snapshot
-   * атрибуция (умишлено, spec §9). Двете таблици БЕЗ FK въобще —
+   * атрибуция (умишлено, spec §9). Таблиците БЕЗ FK въобще —
    * player_blocks (blocker/blocked по profile_id) — се чистят ръчно тук, за
    * да няма orphan rows; private_room_matches пази profileId само вътре в
    * JSON snapshot колони (team_a_json/team_b_json), е документирана
    * permanent-history таблица без cleanup job (виж migration коментара) —
-   * исторически завършени мачове НЕ се пипат тук.
+   * исторически завършени мачове НЕ се пипат тук. support_messages/
+   * support_archived/support_message_attachments също нямат FK ("Връзка с
+   * екипа" support chat) — умишлено НЕ се трият/пипат тук.
+   *
+   * Support deletion archive (EXPLICIT ATTRIBUTION ONLY, round 2 корекция):
+   * support_deletion_archives ред се записва ПРЕДИ DELETE FROM profiles
+   * ЕДИНСТВЕНО когато input.supportRequestMessageId е подаден И валидиран
+   * вътре в тази транзакция (виж selectSupportRequestMessageForValidationStatement
+   * по-долу — съобщението трябва да съществува, да принадлежи на target
+   * profile_id, и да е is_from_admin=0). Provенансът е "admin изрично избра
+   * ТОВА user съобщение като deletion request" (support chat UI-я "Изтрий
+   * профила по тази заявка" бутон) — НЕ automatic "последно съобщение в
+   * разговора". Ако supportRequestMessageId липсва (нормален profile-popup
+   * delete flow) ИЛИ валидацията се провали, НЕ се създава archive ред —
+   * при провалена валидация ЦЕЛИЯТ delete се отказва (ROLLBACK, код
+   * 'invalid_support_request_message'), не просто се пропуска archive-а.
    *
    * Avatar/gallery physical file cleanup (production gap fix): DELETE FROM
    * profiles каскадно чисти profile_gallery_images DB редовете (ON DELETE
@@ -119,6 +142,13 @@ export type ProfileHardDeleteService = {
     actorProfileId: ProfileId
     actorAccountId: string
     reason: string
+    /**
+     * Optional — само когато admin е натиснал "Изтрий профила по тази
+     * заявка" от вътре в конкретен support разговор (виж doc коментара
+     * по-горе). Validate-ва се authoritative вътре в транзакцията, НЕ се
+     * приема на доверие от клиента.
+     */
+    supportRequestMessageId?: string | null
   }) => Promise<HardDeleteProfileResult>
   /**
    * Reuse-ва СЪЩИТЕ prepared statements/SQL като active tournament dependency
@@ -210,6 +240,40 @@ export async function createProfileHardDeleteService(
       log_id, deleted_profile_id, deleted_account_id, username_snapshot,
       deleted_by_profile_id, reason
     ) VALUES (?, ?, ?, ?, ?, ?);
+  `)
+
+  // support_messages/support_archived нямат FK към profiles (виж
+  // 20260903_003 migration коментара) — DELETE FROM profiles не ги пипа
+  // изобщо, разговорът просто остава orphaned БЕЗ маркер, че профилът е
+  // изтрит.
+  //
+  // EXPLICIT ATTRIBUTION ONLY (round 2 корекция) — support_deletion_archives
+  // ред се създава ЕДИНСТВЕНО когато admin изрично е избрал конкретно
+  // user-authored съобщение ("Изтрий профила по тази заявка" бутон в
+  // support chat UI-я), НЕ automatic "последно съобщение в разговора"
+  // (предишен design, отхвърлен — несвързан стар support разговор би могъл
+  // подвеждащо да изглежда като доказателство за user-initiated delete,
+  // дори когато admin-ът трие профила по съвсем друга причина). Клиентът
+  // подава supportRequestMessageId като arbitrary string — hard-delete
+  // service-ът е authoritative и ГО validate-ва тук, ВЪТРЕ в транзакцията,
+  // срещу самата profiles/support_messages истина (не приема client claim
+  // на доверие):
+  //   1. съобщението съществува;
+  //   2. message.profile_id === target profile_id (не чуждо съобщение);
+  //   3. is_from_admin = 0 (user-authored, не admin reply);
+  // Ако валидацията се провали, целият hard delete се отказва (ROLLBACK,
+  // без partial archive, без profile deletion) — виж hardDeleteProfile.
+  const selectSupportRequestMessageForValidationStatement = database.prepare(`
+    SELECT message_id, profile_id, is_from_admin, created_at FROM support_messages
+    WHERE message_id = ?
+    LIMIT 1;
+  `)
+
+  const insertSupportDeletionArchiveStatement = database.prepare(`
+    INSERT INTO support_deletion_archives (
+      archive_id, profile_id, username_snapshot, display_name_snapshot,
+      request_message_id, requested_at, deleted_by_profile_id, reason
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
   `)
 
   // Immutable identity snapshot — попълва се ПРЕДИ DELETE FROM profiles, за
@@ -558,6 +622,7 @@ export async function createProfileHardDeleteService(
     actorProfileId: ProfileId
     actorAccountId: string
     reason: string
+    supportRequestMessageId?: string | null
   }): Promise<HardDeleteProfileResult> {
     if (input.targetProfileId === input.actorProfileId) {
       return { ok: false, code: 'self' }
@@ -605,6 +670,34 @@ export async function createProfileHardDeleteService(
         return { ok: false, code: 'active_tournament_dependency' }
       }
 
+      // Support deletion archive — EXPLICIT ATTRIBUTION ONLY (виж primitive-ия
+      // doc коментар по-горе). supportRequestMessageId идва от клиента като
+      // arbitrary string — authoritative validation ТУК, вътре в транзакцията,
+      // срещу самата support_messages истина, преди какъвто и да е destructive
+      // ред по-долу. Провал на КОЯТО и да е проверка отказва ЦЕЛИЯ delete
+      // (ROLLBACK, без partial archive, без profile deletion) — не деградира
+      // тихо до "просто без archive".
+      let validatedSupportRequestMessage: { message_id: string; created_at: string } | null = null
+      if (input.supportRequestMessageId != null && input.supportRequestMessageId !== '') {
+        const messageRow = selectSupportRequestMessageForValidationStatement.get(
+          input.supportRequestMessageId,
+        ) as
+          | { message_id: string; profile_id: string; is_from_admin: number; created_at: string }
+          | undefined
+
+        const isValid =
+          messageRow !== undefined &&
+          messageRow.profile_id === profileRow.profile_id && // (2) принадлежи на target profile
+          messageRow.is_from_admin === 0 // (3) user-authored, не admin reply
+
+        if (!isValid) {
+          database.exec('ROLLBACK;')
+          return { ok: false, code: 'invalid_support_request_message' }
+        }
+
+        validatedSupportRequestMessage = { message_id: messageRow.message_id, created_at: messageRow.created_at }
+      }
+
       const usernameSnapshot = profileRow.username?.trim() || profileRow.display_name
 
       // Audit редът се пише ПРЕДИ destructive delete-а, в СЪЩАТА транзакция
@@ -620,6 +713,31 @@ export async function createProfileHardDeleteService(
         input.actorProfileId,
         reason,
       )
+
+      // Support chat evidence preservation (spec §A/§B) — archive редът се
+      // пише ЕДИНСТВЕНО когато supportRequestMessageId е бил подаден И
+      // валидиран по-горе (validatedSupportRequestMessage !== null).
+      // support_messages няма FK към profiles (виж 20260903_003 migration
+      // коментара), затова редовете физически преживяват DELETE FROM
+      // profiles по-долу без никаква промяна — archive редът тук е
+      // ЕДИНСТВЕНО marker+snapshot (кой профил е бил, кое КОНКРЕТНО user
+      // съобщение е поискало изтриването, кога е изпълнено), НЕ copy на
+      // самите съобщения (spec §E "минимален архив"). Нормален admin
+      // hard-delete БЕЗ supportRequestMessageId НЕ създава archive ред тук
+      // изобщо, дори ако профилът има support история — избягва подвеждащо
+      // representation на несвързан разговор като "user request" evidence.
+      if (validatedSupportRequestMessage !== null) {
+        insertSupportDeletionArchiveStatement.run(
+          randomUUID(),
+          profileRow.profile_id,
+          usernameSnapshot,
+          profileRow.display_name,
+          validatedSupportRequestMessage.message_id,
+          validatedSupportRequestMessage.created_at,
+          input.actorProfileId,
+          reason,
+        )
+      }
 
       // Immutable identity snapshot — ПРЕДИ DELETE FROM profiles (виж
       // primitive-ия doc коментар по-горе).

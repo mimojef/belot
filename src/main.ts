@@ -3987,7 +3987,8 @@ async function adminUnbanProfile(
 async function adminHardDeleteProfile(
   targetProfileId: string,
   reason: string,
-): Promise<{ ok: true } | { ok: false; message: string }> {
+  supportRequestMessageId?: string | null,
+): Promise<{ ok: true } | { ok: false; message: string; code?: string }> {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}`,
@@ -3995,12 +3996,14 @@ async function adminHardDeleteProfile(
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
-        body: JSON.stringify({ reason }),
+        body: JSON.stringify(
+          supportRequestMessageId ? { reason, supportRequestMessageId } : { reason },
+        ),
       },
     )
-    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; code?: string }
     if (!response.ok || !data.ok) {
-      return { ok: false, message: data.message ?? 'Профилът не беше изтрит.' }
+      return { ok: false, message: data.message ?? 'Профилът не беше изтрит.', code: data.code }
     }
     return { ok: true }
   } catch {
@@ -5657,7 +5660,8 @@ lobby = createLobbyFlowController({
   onAdminGetActiveBan: (targetProfileId) => adminGetActiveBan(targetProfileId),
   onAdminBanProfile: (targetProfileId, days, reason) => adminBanProfile(targetProfileId, days, reason),
   onAdminUnbanProfile: (targetProfileId) => adminUnbanProfile(targetProfileId),
-  onAdminHardDeleteProfile: (targetProfileId, reason) => adminHardDeleteProfile(targetProfileId, reason),
+  onAdminHardDeleteProfile: (targetProfileId, reason, supportRequestMessageId) =>
+    adminHardDeleteProfile(targetProfileId, reason, supportRequestMessageId),
   onChangePasswordSubmit: (currentPassword, newPassword) => submitChangePassword(currentPassword, newPassword),
   onPlayersLoad: (page, snapshotToken) => loadPlayersDirectory(page, snapshotToken),
   onPlayersSearch: (query, signal) => searchPlayersDirectory(query, signal),

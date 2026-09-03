@@ -26,6 +26,7 @@ import type {
   GuestContactMessageListItem,
   SupportMessageSnapshot,
   SupportConversationSnapshot,
+  SupportDeletionArchiveSnapshot,
   TournamentDetailSnapshot,
   TournamentRoundType,
   TournamentPartnerCandidateSnapshot,
@@ -1233,6 +1234,8 @@ export type RenderLobbyScreenOptions = {
   onAdminSupportDeleteClick: (profileId: string) => void
   onAdminSupportDeleteCancel: () => void
   onAdminSupportDeleteConfirm: (profileId: string) => void
+  /** "Изтрий профила по тази заявка" — hard-delete profile атрибуиран към конкретно user support съобщение (виж createLobbyFlowController.ts's onAdminSupportDeleteProfileClick). */
+  onAdminSupportDeleteProfileClick: (profileId: string, messageId: string) => void
   onAdminSupportMobileBack: () => void
   onAdminGuestContactMessageRead: (messageId: string) => void
   onSupportDeleteClick: () => void
@@ -8707,7 +8710,23 @@ function formatSupportTime(isoString: string): string {
   }
 }
 
-export function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[], loading: boolean, apiBaseUrl: string): string {
+/**
+ * adminDeleteContext — само за admin support екрана (никога за user-facing
+ * support попъпа, viж call site-овете): показва "Изтрий профила по тази
+ * заявка" бутон под user-authored съобщения, ако профилът все още
+ * съществува и разговорът още не е deletion-archived; ако съобщението
+ * съвпада с deletionArchive.requestMessageId, показва "Заявка за изтриване"
+ * tag вместо action бутона (архивиран разговор е read-only).
+ */
+export function renderSupportMessagesBubbles(
+  messages: SupportMessageSnapshot[],
+  loading: boolean,
+  apiBaseUrl: string,
+  adminDeleteContext?: {
+    profileId: string
+    deletionArchive: SupportDeletionArchiveSnapshot | null
+  },
+): string {
   if (loading) {
     return `<div style="flex:1;display:flex;align-items:center;justify-content:center;color:#d4a520;font-size:14px;font-weight:800;">Зареждане...</div>`
   }
@@ -8716,21 +8735,38 @@ export function renderSupportMessagesBubbles(messages: SupportMessageSnapshot[],
   }
   return messages.map((msg) => {
     const hasBody = msg.body.trim().length > 0
+    const isRequestMessage = adminDeleteContext?.deletionArchive?.requestMessageId === msg.messageId
+    const canDeleteByThisMessage =
+      adminDeleteContext !== undefined &&
+      adminDeleteContext.deletionArchive === null && // разговорът още не е archived
+      !msg.isFromAdmin // само user-authored съобщения
     return `
     <div style="display:flex;flex-direction:column;align-items:${msg.isFromAdmin ? 'flex-start' : 'flex-end'};gap:3px;">
       <div style="
         max-width:75%;padding:${hasBody ? '10px 14px' : '8px'};
         border-radius:${msg.isFromAdmin ? '4px 14px 14px 14px' : '14px 4px 14px 14px'};
         background:${msg.isFromAdmin ? 'rgba(212,165,32,0.14)' : '#1e1e1e'};
-        border:1px solid ${msg.isFromAdmin ? 'rgba(212,165,32,0.30)' : 'rgba(255,255,255,0.10)'};
+        border:1px solid ${isRequestMessage ? 'rgba(239,68,68,0.55)' : msg.isFromAdmin ? 'rgba(212,165,32,0.30)' : 'rgba(255,255,255,0.10)'};
         color:#f8fafc;font-size:14px;font-weight:600;line-height:1.55;word-break:break-word;
       ">
         ${msg.attachment ? renderChatAttachmentBubble(msg.attachment, apiBaseUrl) : ''}
         ${hasBody ? `<div style="${msg.attachment ? 'margin-top:8px;' : ''}">${renderLinkifiedChatMessageBody(msg.body)}</div>` : ''}
       </div>
-      <div style="font-size:11px;color:rgba(255,255,255,0.35);font-weight:600;padding:0 4px;">
+      <div style="font-size:11px;color:rgba(255,255,255,0.35);font-weight:600;padding:0 4px;display:flex;align-items:center;gap:6px;">
         ${msg.isFromAdmin ? '<span style="color:rgba(212,165,32,0.7);">Екип Pika.bg</span> · ' : ''}${formatSupportTime(msg.createdAt)}
+        ${isRequestMessage ? `<span style="font-size:9px;font-weight:900;color:#ef4444;background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.40);border-radius:999px;padding:1px 6px;white-space:nowrap;">Заявка за изтриване</span>` : ''}
       </div>
+      ${canDeleteByThisMessage ? `
+      <button
+        type="button"
+        data-admin-support-delete-profile="${escapeHtml(adminDeleteContext.profileId)}"
+        data-admin-support-delete-profile-message="${escapeHtml(msg.messageId)}"
+        style="
+          margin-top:2px;background:none;border:none;cursor:pointer;padding:2px 4px;
+          color:rgba(239,68,68,0.65);font-size:10px;font-weight:800;text-decoration:underline;text-underline-offset:2px;
+        "
+      >Изтрий профила по тази заявка</button>
+      ` : ''}
     </div>
   `
   }).join('')
@@ -8962,6 +8998,46 @@ function renderGuestContactPopup(state: LobbyScreenState): string {
   `
 }
 
+function formatSupportArchiveDateTime(isoString: string): string {
+  try {
+    return new Date(isoString).toLocaleString('bg-BG', {
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    })
+  } catch {
+    return isoString
+  }
+}
+
+// spec §F: "Изтрит профил — архивиран разговор" banner + kога е заявено/
+// извършено изтриването — mirror на renderAdCampaignManagementPanel.ts's
+// "(изтрит профил)" convention (единственото друго място в кодовата база,
+// което вече обозначава hard-deleted профил в admin UI).
+function renderSupportDeletionArchiveBanner(archive: SupportDeletionArchiveSnapshot): string {
+  // requestedAt е NOT NULL в schema-та (explicit attribution — archive
+  // редът съществува само когато сървърът е validate-нал конкретно user
+  // съобщение, виж profileHardDeleteService.ts), затова тук винаги има
+  // реална стойност, без null fallback.
+  return `
+    <div style="
+      flex-shrink:0;padding:12px 16px;
+      background:rgba(239,68,68,0.10);border-bottom:1px solid rgba(239,68,68,0.30);
+      display:flex;align-items:center;gap:10px;
+    ">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div style="min-width:0;">
+        <div style="font-size:13px;font-weight:900;color:#ef4444;">Изтрит профил — архивиран разговор</div>
+        <div style="font-size:11px;color:rgba(255,255,255,0.55);font-weight:700;margin-top:2px;">
+          Заявка за изтриване: ${escapeHtml(formatSupportArchiveDateTime(archive.requestedAt))} · Изтрито: ${escapeHtml(formatSupportArchiveDateTime(archive.deletedAt))}
+        </div>
+      </div>
+    </div>
+  `
+}
+
 export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false): string {
   const sorted = [...state.adminSupportConversations].sort((a, b) => {
     if (a.unreadByAdmin > 0 && b.unreadByAdmin === 0) return -1
@@ -9004,11 +9080,18 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
           ">${conv.unreadByAdmin}</span>` : ''}
         </div>
         <div style="flex:1;min-width:0;">
-          <div style="
-            font-size:16px;font-weight:${conv.unreadByAdmin > 0 ? '900' : '700'};
-            color:${conv.unreadByAdmin > 0 ? '#ffffff' : 'rgba(255,255,255,0.72)'};
-            overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-          ">${escapeHtml(conv.displayName)}</div>
+          <div style="display:flex;align-items:center;gap:6px;">
+            <div style="
+              font-size:16px;font-weight:${conv.unreadByAdmin > 0 ? '900' : '700'};
+              color:${conv.unreadByAdmin > 0 ? '#ffffff' : 'rgba(255,255,255,0.72)'};
+              overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+            ">${escapeHtml(conv.displayName)}</div>
+            ${conv.deletionArchive ? `<span style="
+              flex-shrink:0;font-size:9px;font-weight:900;color:#ef4444;
+              background:rgba(239,68,68,0.14);border:1px solid rgba(239,68,68,0.40);
+              border-radius:999px;padding:1px 6px;white-space:nowrap;
+            ">Изтрит</span>` : ''}
+          </div>
           <div style="
             font-size:11px;color:rgba(255,255,255,0.38);
             overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
@@ -9064,7 +9147,18 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
   const selectedProfileId = state.adminSupportSelectedProfileId ?? ''
   const adminReplyDraft = selectedProfileId ? (state.adminSupportReplyDraftByProfileId[selectedProfileId] ?? '') : ''
   const adminPendingImage = selectedProfileId ? state.adminSupportPendingImageByProfileId[selectedProfileId] : null
-  const replyFormHtml = `
+  // spec §C: архивиран разговор (hard-deleted профил) е read-only — нито ново
+  // съобщение, нито редакция. Composer-ът се заменя изцяло с informational
+  // текст, вместо просто disabled форма (последното все още изглежда все
+  // едно "временно" недостъпно; тук е permanent).
+  const selectedConvDeletionArchive = selectedConv?.deletionArchive ?? null
+  const replyFormHtml = selectedConvDeletionArchive ? `
+    <div style="
+      padding:14px 16px;border-top:1px solid rgba(255,255,255,0.10);
+      background:#080808;flex-shrink:0;
+      color:rgba(255,255,255,0.42);font-size:12px;font-weight:700;text-align:center;
+    ">Профилът е изтрит — не могат да се изпращат нови съобщения.</div>
+  ` : `
     ${renderSupportComposerStyles()}
     ${state.adminSupportReplyErrorText ? `
       <div style="padding:8px 16px;background:rgba(127,29,29,0.42);border-top:1px solid rgba(248,113,113,0.22);color:#fecaca;font-size:12px;font-weight:800;flex-shrink:0;">
@@ -9110,6 +9204,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
       <div style="font-size:14px;font-weight:800;color:#f8fafc;">
         ${escapeHtml(selectedConv?.displayName ?? '')}
       </div>
+      ${selectedConvDeletionArchive ? '' : `
       <button data-admin-support-delete="${escapeHtml(state.adminSupportSelectedProfileId ?? '')}" style="
         display:flex;align-items:center;gap:6px;
         background:rgba(212,165,32,0.10);border:1px solid rgba(212,165,32,0.30);
@@ -9119,15 +9214,19 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
         <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
         Архивирай
       </button>
+      `}
     </div>
 
-    ${deleteConfirmBlockHtml}
+    ${selectedConvDeletionArchive ? renderSupportDeletionArchiveBanner(selectedConvDeletionArchive) : deleteConfirmBlockHtml}
 
     <div id="support-admin-messages-scroll" style="
       flex:1;min-height:0;overflow-y:auto;padding:20px;
       display:flex;flex-direction:column;gap:10px;
     ">
-      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading, state.apiBaseUrl)}
+      ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading, state.apiBaseUrl, {
+        profileId: selectedProfileId,
+        deletionArchive: selectedConvDeletionArchive,
+      })}
     </div>
     ${replyFormHtml}
   `
@@ -9186,6 +9285,7 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
                 ${escapeHtml(selectedConv?.displayName ?? '')}
               </div>
             </div>
+            ${selectedConvDeletionArchive ? '' : `
             <button data-admin-support-delete="${escapeHtml(selectedProfileId)}" style="
               display:flex;align-items:center;gap:6px;flex-shrink:0;
               background:rgba(212,165,32,0.10);border:1px solid rgba(212,165,32,0.30);
@@ -9195,15 +9295,19 @@ export function renderAdminSupportPage(state: LobbyScreenState, isMobile = false
               <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 8v13H3V8"/><path d="M1 3h22v5H1z"/><path d="M10 12h4"/></svg>
               Архивирай
             </button>
+            `}
           </div>
 
-          ${deleteConfirmBlockHtml}
+          ${selectedConvDeletionArchive ? renderSupportDeletionArchiveBanner(selectedConvDeletionArchive) : deleteConfirmBlockHtml}
 
           <div id="support-admin-messages-scroll" style="
             max-height:52vh;overflow-y:auto;padding:16px;
             display:flex;flex-direction:column;gap:10px;
           ">
-            ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading, state.apiBaseUrl)}
+            ${renderSupportMessagesBubbles(state.adminSupportMessages, state.adminSupportMessagesLoading, state.apiBaseUrl, {
+              profileId: selectedProfileId,
+              deletionArchive: selectedConvDeletionArchive,
+            })}
           </div>
           ${replyFormHtml}
         </section>
@@ -15422,6 +15526,14 @@ export function renderLobbyScreen(
     btn.addEventListener('click', () => {
       const profileId = btn.dataset.adminSupportDeleteConfirm?.trim() ?? ''
       if (profileId) options.onAdminSupportDeleteConfirm(profileId)
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-support-delete-profile]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const profileId = btn.dataset.adminSupportDeleteProfile?.trim() ?? ''
+      const messageId = btn.dataset.adminSupportDeleteProfileMessage?.trim() ?? ''
+      if (profileId && messageId) options.onAdminSupportDeleteProfileClick(profileId, messageId)
     })
   })
 

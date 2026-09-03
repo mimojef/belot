@@ -2385,7 +2385,15 @@ const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databa
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
-const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath)
+const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath, {
+  // Round 3 корекция — "запазване на evidence до terminal state" (виж
+  // SupportStoreDeps doc коментара в supportStore.ts). pendingProfileModerationStore
+  // вече е инициализиран по-горе (line ~677), затова е safe тук.
+  hasPendingSupportRequestDelete: (profileId) => {
+    const pending = pendingProfileModerationStore.getPending(profileId)
+    return pending !== null && pending.action === 'delete' && pending.supportRequestMessageId !== null
+  },
+})
 const guestContactStore = await createGuestContactStore(databaseBootstrap.databaseFilePath)
 const guestTrialStore = await createGuestTrialStore(databaseBootstrap.databaseFilePath)
 const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFilePath)
@@ -4689,11 +4697,19 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
     // целия game tick заради това), затова .then() вместо await:
     // clearPending + connection cleanup се изпълняват веднага щом промисът
     // resolve-не, без да блокират текущия tick за останалите seats/стаи.
+    // Round 3 корекция — pending.supportRequestMessageId (persisted и вече
+    // validate-нат при scheduling момента, виж handleAdminProfileHardDeleteRequest)
+    // се пренася до СЪЩИЯ canonical hardDeleteProfile извикване, точно
+    // както immediate (non-deferred) delete-ите по-долу в
+    // handleAdminProfileHardDeleteRequest. Service-ът пак re-validate-ва
+    // authoritative вътре в своята BEGIN IMMEDIATE транзакция — никаква
+    // archive-insert логика не се дублира тук.
     void profileHardDeleteService.hardDeleteProfile({
       targetProfileId: pending.targetProfileId,
       actorProfileId: pending.requestedByProfileId,
       actorAccountId: pending.requestedByAccountId ?? '',
       reason: pending.reason,
+      supportRequestMessageId: pending.supportRequestMessageId,
     }).then((result) => {
       pendingProfileModerationStore.clearPending(participantProfileId)
       if (result.ok) {
@@ -8041,14 +8057,30 @@ async function handleAdminProfileHardDeleteRequest(
   }
 
   const body = await readJsonRequestBody(req)
-  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['reason']))) {
-    sendJsonResponse(res, 400, { ok: false, message: 'Позволено е само поле reason.' })
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['reason', 'supportRequestMessageId']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволени са само полета reason и supportRequestMessageId.' })
     return true
   }
 
   const reason = getStringField(body, 'reason')
   if (reason.trim().length === 0) {
     sendJsonResponse(res, 400, { ok: false, message: 'Причината е задължителна.' })
+    return true
+  }
+
+  // Optional — само когато admin е натиснал "Изтрий профила по тази заявка"
+  // от support chat UI-я (виж profileHardDeleteService.ts doc коментара за
+  // EXPLICIT ATTRIBUTION ONLY design-а). Тук само normalize-ваме типа —
+  // истинската authoritative validation (съобщението съществува, принадлежи
+  // на target, is_from_admin=0) се случва вътре в hardDeleteProfile-овата
+  // транзакция, не приемаме client claim на доверие тук.
+  const supportRequestMessageIdRaw = body.supportRequestMessageId
+  const supportRequestMessageId =
+    typeof supportRequestMessageIdRaw === 'string' && supportRequestMessageIdRaw.trim().length > 0
+      ? supportRequestMessageIdRaw.trim()
+      : null
+  if (supportRequestMessageIdRaw !== undefined && supportRequestMessageId === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден supportRequestMessageId.' })
     return true
   }
 
@@ -8064,6 +8096,11 @@ async function handleAdminProfileHardDeleteRequest(
   // съществува, докато играе). Не викаме profileHardDeleteService изобщо —
   // само записваме pending маркер, приложен по-късно от
   // applyPendingModerationForRoomParticipants на match-ended edge-а.
+  //
+  // Round 3 корекция (deferred hard-delete вече НЕ губи supportRequestMessageId
+  // — pending_profile_moderation.support_request_message_id пренася explicit
+  // attribution context до terminal completion, виж recordPendingDelete
+  // по-долу и applyPendingModerationForRoom's hardDeleteProfile извикване).
   if (isProfileInActiveGame(targetProfileId)) {
     // Blocker fix (round 4 §1) — БЕЗ тази проверка pending DELETE би могъл
     // да заседне неизпълним завинаги: ако target играе tournament semifinal/
@@ -8086,11 +8123,32 @@ async function handleAdminProfileHardDeleteRequest(
       return true
     }
 
+    // Round 3 корекция — pre-check ПРЕДИ да запишем pending маркера (не
+    // само при terminal completion): ако supportRequestMessageId е подаден,
+    // но не е валиден user-authored съобщение на ТОЗИ target, ЦЯЛОТО pending
+    // delete се отказва тук — target профилът остава напълно непроменен
+    // (не се създава pending ред, не се изпълнява delete). Без този
+    // pre-check, manipulated/невалиден message id би записал pending delete
+    // с невалидна атрибуция, чиято грешка admin-ът би видял едва при terminal
+    // completion (минути/часове по-късно), вместо веднага. Terminal
+    // completion (applyPendingModerationForRoom) пак re-validate-ва
+    // authoritative вътре в hardDeleteProfile-овата транзакция — тук е само
+    // defense-in-depth/по-добър UX, не единствената защита.
+    if (supportRequestMessageId !== null && !supportStore.isValidUserRequestMessage(targetProfileId, supportRequestMessageId)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        code: 'invalid_support_request_message',
+        message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
+      })
+      return true
+    }
+
     pendingProfileModerationStore.recordPendingDelete({
       targetProfileId,
       requestedByProfileId: actorProfileId,
       requestedByAccountId: session.account.accountId,
       reason,
+      supportRequestMessageId,
     })
     sendJsonResponse(res, 200, {
       ok: true,
@@ -8105,6 +8163,7 @@ async function handleAdminProfileHardDeleteRequest(
     actorProfileId,
     actorAccountId: session.account.accountId,
     reason,
+    supportRequestMessageId,
   })
 
   if (!result.ok) {
@@ -8113,12 +8172,14 @@ async function handleAdminProfileHardDeleteRequest(
       self: 400,
       invalid_reason: 400,
       active_tournament_dependency: 409,
+      invalid_support_request_message: 400,
     }
     const messageByCode: Record<typeof result.code, string> = {
       not_found: 'Профилът не беше намерен.',
       self: 'Не можеш да изтриеш себе си.',
       invalid_reason: 'Причината е задължителна.',
       active_tournament_dependency: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
+      invalid_support_request_message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
     }
     sendJsonResponse(res, statusByCode[result.code], { ok: false, code: result.code, message: messageByCode[result.code] })
     return true
@@ -16273,7 +16334,16 @@ async function handleSupportRequest(
       if (upload.writtenAttachmentFilename !== null) {
         await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
       }
-      sendJsonResponse(res, 404, { ok: false, message: 'Потребителят няма съобщения.' })
+      // spec §C: архивиран разговор (hard-deleted профил) отхвърля нови
+      // съобщения със same null return като "потребителят няма съобщения"
+      // (supportStore.sendAdminReply) — различаваме тук за по-ясен message.
+      const isDeletedProfileArchive = supportStore.getDeletionArchive(profileId) !== null
+      sendJsonResponse(res, isDeletedProfileArchive ? 409 : 404, {
+        ok: false,
+        message: isDeletedProfileArchive
+          ? 'Профилът е изтрит — разговорът е архивиран и е само за четене.'
+          : 'Потребителят няма съобщения.',
+      })
       return true
     }
     activityCounters.incrementChat('officialSupportMessages')

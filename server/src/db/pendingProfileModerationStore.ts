@@ -14,6 +14,18 @@ export type PendingProfileModeration = {
   requestedByAccountId: string | null
   reason: string
   requestedAt: string
+  /**
+   * Само за action='delete' — explicit support-request attribution (виж
+   * "Изтрий профила по тази заявка" в support chat UI-я), пренесена от
+   * scheduling момента до terminal completion hardDeleteProfile() извикването.
+   * NULL за normal admin delete без support context. Вече validate-нат ПРЕДИ
+   * записване тук (виж recordPendingDelete doc коментара) — терминалният
+   * completion hook пак re-validate-ва authoritative вътре в
+   * hardDeleteProfile-овата транзакция (defense-in-depth, не приема доверие
+   * само защото вече е бил валиден при scheduling — message може теоретично
+   * да е станал невалиден междувременно).
+   */
+  supportRequestMessageId: string | null
 }
 
 export type PendingProfileModerationStore = {
@@ -37,12 +49,20 @@ export type PendingProfileModerationStore = {
    * participant (spec round 4 §6/§9). Физическото DELETE FROM profiles се
    * отлага изцяло до game-end hook-а (виж applyPendingModerationForRoom в
    * index.ts). Idempotent по target.
+   *
+   * supportRequestMessageId (round 3 корекция) — вече ВАЛИДИРАН от caller-а
+   * (index.ts's handleAdminProfileHardDeleteRequest) ПРЕДИ да се извика тук
+   * — този store слой не прави authoritative проверка (не има достъп до
+   * support_messages в тази DB connection), само persist-ва каквото вече е
+   * доверено. Terminal completion hook-ът пак re-validate-ва authoritative
+   * вътре в hardDeleteProfile-овата транзакция.
    */
   recordPendingDelete: (input: {
     targetProfileId: ProfileId
     requestedByProfileId: ProfileId
     requestedByAccountId: string
     reason: string
+    supportRequestMessageId?: string | null
   }) => void
   /** Pending enforcement за конкретен профил, ако има такъв — null иначе. */
   getPending: (targetProfileId: ProfileId) => PendingProfileModeration | null
@@ -66,7 +86,8 @@ export async function createPendingProfileModerationStore(
 
   const selectPendingStatement = database.prepare(`
     SELECT pending_id, target_profile_id, action, ban_id,
-           requested_by_profile_id, requested_by_account_id, reason, requested_at
+           requested_by_profile_id, requested_by_account_id, reason, requested_at,
+           support_request_message_id
     FROM pending_profile_moderation
     WHERE target_profile_id = ?
     LIMIT 1;
@@ -75,14 +96,15 @@ export async function createPendingProfileModerationStore(
   const upsertPendingStatement = database.prepare(`
     INSERT INTO pending_profile_moderation (
       pending_id, target_profile_id, action, ban_id,
-      requested_by_profile_id, requested_by_account_id, reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+      requested_by_profile_id, requested_by_account_id, reason, support_request_message_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (target_profile_id) DO UPDATE SET
       action = excluded.action,
       ban_id = excluded.ban_id,
       requested_by_profile_id = excluded.requested_by_profile_id,
       requested_by_account_id = excluded.requested_by_account_id,
       reason = excluded.reason,
+      support_request_message_id = excluded.support_request_message_id,
       requested_at = CURRENT_TIMESTAMP;
   `)
 
@@ -99,6 +121,7 @@ export async function createPendingProfileModerationStore(
     requested_by_account_id: string | null
     reason: string
     requested_at: string
+    support_request_message_id: string | null
   }): PendingProfileModeration {
     return {
       pendingId: row.pending_id,
@@ -109,6 +132,7 @@ export async function createPendingProfileModerationStore(
       requestedByAccountId: row.requested_by_account_id,
       reason: row.reason,
       requestedAt: row.requested_at,
+      supportRequestMessageId: row.support_request_message_id,
     }
   }
 
@@ -123,6 +147,7 @@ export async function createPendingProfileModerationStore(
           requested_by_account_id: string | null
           reason: string
           requested_at: string
+          support_request_message_id: string | null
         }
       | undefined
     return row === undefined ? null : toPending(row)
@@ -144,6 +169,7 @@ export async function createPendingProfileModerationStore(
       // (referenced през ban_id) остава единственият source of truth,
       // показван на клиента. trim(reason)<>'' CHECK изисква non-blank.
       'pending ban enforcement',
+      null, // support_request_message_id — не се прилага за action='ban'
     )
   }
 
@@ -152,6 +178,7 @@ export async function createPendingProfileModerationStore(
     requestedByProfileId: ProfileId
     requestedByAccountId: string
     reason: string
+    supportRequestMessageId?: string | null
   }): void {
     upsertPendingStatement.run(
       randomUUID(),
@@ -161,6 +188,7 @@ export async function createPendingProfileModerationStore(
       input.requestedByProfileId,
       input.requestedByAccountId,
       input.reason,
+      input.supportRequestMessageId ?? null,
     )
   }
 

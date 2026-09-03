@@ -397,6 +397,27 @@ export type SupportMessageSnapshot = {
   } | null
 }
 
+/**
+ * Ненулево само за архивирани разговори на hard-deleted профили (виж
+ * support_deletion_archives, server/src/db/supportStore.ts) — самото му
+ * присъствие сигнализира на admin/Pika Team UI-я, че разговорът е read-only
+ * архив, НЕ жива conversation (profiles редът за profileId вече не съществува).
+ * EXPLICIT ATTRIBUTION ONLY — редът съществува единствено когато сървърът е
+ * validate-нал конкретно user-authored support съобщение като deletion
+ * request (виж profileHardDeleteService.ts), затова requestMessageId/
+ * requestedAt са гарантирано non-null тук.
+ */
+export type SupportDeletionArchiveSnapshot = {
+  profileId: string
+  usernameSnapshot: string
+  displayNameSnapshot: string
+  requestMessageId: string
+  requestedAt: string
+  deletedAt: string
+  deletedByProfileId: string | null
+  reason: string
+}
+
 export type SupportConversationSnapshot = {
   profileId: string
   displayName: string
@@ -405,6 +426,7 @@ export type SupportConversationSnapshot = {
   lastMessageIsFromAdmin: boolean
   unreadByAdmin: number
   updatedAt: string
+  deletionArchive: SupportDeletionArchiveSnapshot | null
 }
 
 export type GuestContactMessageListItem = {
