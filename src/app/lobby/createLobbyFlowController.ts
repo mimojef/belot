@@ -673,7 +673,7 @@ export type CreateLobbyFlowControllerOptions = {
     supportUnreadCount?: number
     guestUnreadCount?: number
   } | { ok: false }>
-  onAdminSupportConversationsLoad?: () => Promise<
+  onAdminSupportConversationsLoad?: (filter?: 'active' | 'archived') => Promise<
     | { ok: true; conversations: SupportConversationSnapshot[] }
     | { ok: false; message: string }
   >
@@ -691,6 +691,8 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onAdminSupportDeleteConversation?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  /** "Върни в активни" — маха normal archive marker-а (support_archived), не пипа съобщения. */
+  onAdminSupportUnarchiveConversation?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onSupportDeleteConversation?: () => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminServerScreenEnter?: () => void
   onAdminServerScreenLeave?: () => void
@@ -1678,6 +1680,12 @@ type InternalLobbyFlowState = {
   guestContactSuccessText: string | null
   adminSupportConversations: SupportConversationSnapshot[]
   adminSupportConversationsLoading: boolean
+  /** "Активни" (default) / "Архивирани" tab избор в admin support екрана — виж loadAdminSupportConversations. */
+  adminSupportListFilter: 'active' | 'archived'
+  adminSupportArchivedConversations: SupportConversationSnapshot[]
+  adminSupportArchivedConversationsLoading: boolean
+  /** Ненулево = "Върни в активни" заявка в прогрес за точно този profileId. */
+  adminSupportUnarchiveLoadingProfileId: string | null
   adminSupportSelectedProfileId: string | null
   adminSupportMessages: SupportMessageSnapshot[]
   adminSupportMessagesLoading: boolean
@@ -1687,6 +1695,14 @@ type InternalLobbyFlowState = {
   adminSupportPendingImageByProfileId: Record<string, { file: File; previewUrl: string } | undefined>
   adminSupportDeleteConfirmProfileId: string | null
   adminSupportDeleteLoading: boolean
+  /**
+   * "Маркирай като заявка за изтриване" flow-ът — отваря dedicated
+   * confirmation modal (renderSupportDeleteProfileConfirmModal), НЕ
+   * generic profile-popup delete dialog. Виж onAdminSupportDeleteProfileClick.
+   */
+  adminSupportDeleteProfileConfirm: { profileId: string; messageId: string } | null
+  adminSupportDeleteProfileSubmitting: boolean
+  adminSupportDeleteProfileErrorText: string | null
   adminSupportMobileConversationOpen: boolean
   adminGuestContactMessages: GuestContactMessageListItem[]
   adminGuestContactMessagesLoading: boolean
@@ -2246,6 +2262,10 @@ function createInitialState(): InternalLobbyFlowState {
     guestContactSuccessText: null,
     adminSupportConversations: [],
     adminSupportConversationsLoading: false,
+    adminSupportListFilter: 'active',
+    adminSupportArchivedConversations: [],
+    adminSupportArchivedConversationsLoading: false,
+    adminSupportUnarchiveLoadingProfileId: null,
     adminSupportSelectedProfileId: null,
     adminSupportMessages: [],
     adminSupportMessagesLoading: false,
@@ -2255,6 +2275,9 @@ function createInitialState(): InternalLobbyFlowState {
     adminSupportPendingImageByProfileId: {},
     adminSupportDeleteConfirmProfileId: null,
     adminSupportDeleteLoading: false,
+    adminSupportDeleteProfileConfirm: null,
+    adminSupportDeleteProfileSubmitting: false,
+    adminSupportDeleteProfileErrorText: null,
     adminSupportMobileConversationOpen: false,
     adminGuestContactMessages: [],
     adminGuestContactMessagesLoading: false,
@@ -4096,6 +4119,10 @@ export function createLobbyFlowController(
       guestContactSuccessText: state.guestContactSuccessText,
       adminSupportConversations: state.adminSupportConversations,
       adminSupportConversationsLoading: state.adminSupportConversationsLoading,
+      adminSupportListFilter: state.adminSupportListFilter,
+      adminSupportArchivedConversations: state.adminSupportArchivedConversations,
+      adminSupportArchivedConversationsLoading: state.adminSupportArchivedConversationsLoading,
+      adminSupportUnarchiveLoadingProfileId: state.adminSupportUnarchiveLoadingProfileId,
       adminSupportSelectedProfileId: state.adminSupportSelectedProfileId,
       adminSupportMessages: state.adminSupportMessages,
       adminSupportMessagesLoading: state.adminSupportMessagesLoading,
@@ -4105,6 +4132,9 @@ export function createLobbyFlowController(
       adminSupportPendingImageByProfileId: state.adminSupportPendingImageByProfileId,
       adminSupportDeleteConfirmProfileId: state.adminSupportDeleteConfirmProfileId,
       adminSupportDeleteLoading: state.adminSupportDeleteLoading,
+      adminSupportDeleteProfileConfirm: state.adminSupportDeleteProfileConfirm,
+      adminSupportDeleteProfileSubmitting: state.adminSupportDeleteProfileSubmitting,
+      adminSupportDeleteProfileErrorText: state.adminSupportDeleteProfileErrorText,
       adminSupportMobileConversationOpen: state.adminSupportMobileConversationOpen,
       adminGuestContactMessages: state.adminGuestContactMessages,
       adminGuestContactMessagesLoading: state.adminGuestContactMessagesLoading,
@@ -5710,7 +5740,12 @@ export function createLobbyFlowController(
           state.adminSupportReplyErrorText = null
           if (result?.ok) {
             state.adminSupportMessages = result.messages
+            // Разговорът може да е бил кликнат от активния ИЛИ архивирания
+            // списък (round 4 корекция — "Архивирани" tab) — проверяваме и
+            // двата, за да не пропуснем unread decrement, ако е избран от
+            // Архивирани.
             const conv = state.adminSupportConversations.find(c => c.profileId === profileId)
+              ?? state.adminSupportArchivedConversations.find(c => c.profileId === profileId)
             if (conv) {
               state.supportUnreadCount = Math.max(0, state.supportUnreadCount - conv.unreadByAdmin)
               conv.unreadByAdmin = 0
@@ -5720,22 +5755,24 @@ export function createLobbyFlowController(
         })()
       },
       onAdminSupportDeleteProfileClick: (profileId, messageId) => {
-        // "Изтрий профила по тази заявка" — reuse-ва СЪЩИЯ profile-popup
-        // delete confirmation dialog като нормалния admin flow (НЕ втори
-        // dialog система), само предава explicit support-request context
-        // (deletePopupSupportRequestMessageId), който submitAdminHardDelete
-        // после подава към hardDeleteProfile за server-side validated
-        // support_deletion_archives запис.
-        void (async () => {
-          await openProtectedProfileById(profileId)
-          if (state.profilePopupOpen && state.profilePopupProfile?.profileId === profileId) {
-            state.deletePopupOpen = true
-            state.deletePopupReasonDraft = ''
-            state.deletePopupErrorText = null
-            state.deletePopupSupportRequestMessageId = messageId
-            renderPopupOnly()
-          }
-        })()
+        // "Маркирай като заявка за изтриване" — отваря dedicated
+        // confirmation modal (renderSupportDeleteProfileConfirmModal) вместо
+        // да стартира delete веднага. НЕ отваря profile popup-а/generic
+        // delete dialog (различен, по-лек flow — само confirm/cancel, без
+        // отделно поле за причина).
+        state.adminSupportDeleteProfileConfirm = { profileId, messageId }
+        state.adminSupportDeleteProfileSubmitting = false
+        state.adminSupportDeleteProfileErrorText = null
+        render()
+      },
+      onAdminSupportDeleteProfileCancel: () => {
+        state.adminSupportDeleteProfileConfirm = null
+        state.adminSupportDeleteProfileSubmitting = false
+        state.adminSupportDeleteProfileErrorText = null
+        render()
+      },
+      onAdminSupportDeleteProfileConfirm: () => {
+        void submitAdminSupportDeleteProfile()
       },
       onAdminSupportReplyDraftChange: (profileId, draft) => {
         state.adminSupportReplyDraftByProfileId = {
@@ -5844,6 +5881,45 @@ export function createLobbyFlowController(
             delete nextDrafts[profileId]
             state.adminSupportReplyDraftByProfileId = nextDrafts
             state.adminSupportDeleteConfirmProfileId = null
+          }
+          render()
+        })()
+      },
+      onAdminSupportListFilterChange: (filter) => {
+        if (state.adminSupportListFilter === filter) return
+        state.adminSupportListFilter = filter
+        state.adminSupportSelectedProfileId = null
+        state.adminSupportMessages = []
+        state.adminSupportMobileConversationOpen = false
+        render()
+        if (filter === 'archived') {
+          void loadAdminSupportArchivedConversations()
+        }
+      },
+      onAdminSupportUnarchiveClick: (profileId) => {
+        if (state.adminSupportUnarchiveLoadingProfileId !== null) return
+        state.adminSupportUnarchiveLoadingProfileId = profileId
+        render()
+        void (async () => {
+          const result = await options.onAdminSupportUnarchiveConversation?.(profileId)
+          state.adminSupportUnarchiveLoadingProfileId = null
+          if (result?.ok) {
+            // "Върни в активни" — mirror на deleteConversation-ия локален
+            // list update: маха от archived списъка тук веднага (server-side
+            // вече е authoritative), избягва extra round-trip само за да
+            // презаредим archived tab-а.
+            state.adminSupportArchivedConversations = state.adminSupportArchivedConversations.filter(
+              (c) => c.profileId !== profileId,
+            )
+            if (state.adminSupportSelectedProfileId === profileId) {
+              state.adminSupportSelectedProfileId = null
+              state.adminSupportMessages = []
+              state.adminSupportMobileConversationOpen = false
+            }
+            // Активният списък сега трябва да съдържа разговора отново —
+            // reuse-ва СЪЩИЯ loader (server-side authoritative), вместо
+            // ръчно да patch-ваме snapshot-а локално.
+            void loadAdminSupportConversations()
           }
           render()
         })()
@@ -6504,6 +6580,77 @@ export function createLobbyFlowController(
     }
 
     renderPopupOnly()
+  }
+
+  /**
+   * "Изтрий профила и архивирай разговора" — единственият бутон в
+   * renderSupportDeleteProfileConfirmModal-а, който реално стартира delete.
+   * НЕ пита admin-а за отделна причина (за разлика от submitAdminHardDelete/
+   * generic delete popup-а) — reason тук е fixed, четим string, тъй като
+   * атрибуцията вече е explicit чрез самия messageId (spec §6: "admin
+   * умишлено избира кое съобщение представлява заявката" — reason текстът
+   * не носи допълнителна semantic информация). Reuse-ва СЪЩИЯ
+   * options.onAdminHardDeleteProfile API/server-side validation flow като
+   * submitAdminHardDelete — само UI/confirmation слоят е различен.
+   */
+  async function submitAdminSupportDeleteProfile(): Promise<void> {
+    const pending = state.adminSupportDeleteProfileConfirm
+    if (!pending || state.adminSupportDeleteProfileSubmitting) return
+
+    state.adminSupportDeleteProfileSubmitting = true
+    state.adminSupportDeleteProfileErrorText = null
+    render()
+
+    const reason = 'Изтриване по искане на потребителя (Връзка с екипа)'
+
+    const result = options.onAdminHardDeleteProfile
+      ? await options.onAdminHardDeleteProfile(pending.profileId, reason, pending.messageId).catch(
+          () => ({ ok: false as const, message: 'Няма връзка със сървъра.' }),
+        )
+      : { ok: false as const, message: 'Функцията временно не е налична.' }
+
+    if (!result.ok) {
+      state.adminSupportDeleteProfileSubmitting = false
+      state.adminSupportDeleteProfileErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminSupportDeleteProfileConfirm = null
+    state.adminSupportDeleteProfileSubmitting = false
+    state.adminSupportDeleteProfileErrorText = null
+
+    // Разговорът в admin support inbox-а вече трябва да показва
+    // deletion-archive banner-а (profiles редът вече не съществува) —
+    // reuse-ва СЪЩИЯ loader pattern като submitAdminHardDelete, сървърът е
+    // authoritative за archive съдържанието, не patch-ваме локално.
+    if (state.adminSupportSelectedProfileId === pending.profileId) {
+      const messagesResult = await options.onAdminSupportMessagesLoad?.(pending.profileId)
+      if (messagesResult?.ok) {
+        state.adminSupportMessages = messagesResult.messages
+      }
+    }
+    // Round 5 корекция: deletion evidence archive-и ВИНАГИ се показват в
+    // 'archived' списъка (виж getAllConversations doc коментара в
+    // supportStore.ts), независимо дали разговорът е бил Active или
+    // normal-archived преди hard delete-а — UX семантика: изтрит профил не
+    // е "текущ активен разговор". Презареждаме и двата списъка (target-ът
+    // изчезва от active, ако е бил там; появява се/остава в archived) и —
+    // ако admin гледаше "Активни" точно когато разговорът изчезна оттам —
+    // превключваме на "Архивирани", за да види резултата веднага, вместо
+    // празен detail панел за profileId, който вече не е в текущия tab.
+    const conversationsResult = await options.onAdminSupportConversationsLoad?.('active')
+    if (conversationsResult?.ok) {
+      state.adminSupportConversations = conversationsResult.conversations
+    }
+    const archivedResult = await options.onAdminSupportConversationsLoad?.('archived')
+    if (archivedResult?.ok) {
+      state.adminSupportArchivedConversations = archivedResult.conversations
+    }
+    if (state.adminSupportListFilter === 'active') {
+      state.adminSupportListFilter = 'archived'
+    }
+    render()
   }
 
   /**
@@ -10900,11 +11047,26 @@ export function createLobbyFlowController(
     if (!options.onAdminSupportConversationsLoad) return
     state.adminSupportConversationsLoading = true
     render()
-    const result = await options.onAdminSupportConversationsLoad()
+    const result = await options.onAdminSupportConversationsLoad('active')
     if (state.currentScreen !== 'admin' && state.currentScreen !== 'support') return
     state.adminSupportConversationsLoading = false
     if (result.ok) {
       state.adminSupportConversations = result.conversations
+    }
+    render()
+  }
+
+  /** "Архивирани" tab (round 4 корекция — non-destructive archive). */
+  async function loadAdminSupportArchivedConversations(): Promise<void> {
+    if (state.currentScreen !== 'support') return
+    if (!options.onAdminSupportConversationsLoad) return
+    state.adminSupportArchivedConversationsLoading = true
+    render()
+    const result = await options.onAdminSupportConversationsLoad('archived')
+    if (state.currentScreen !== 'support') return
+    state.adminSupportArchivedConversationsLoading = false
+    if (result.ok) {
+      state.adminSupportArchivedConversations = result.conversations
     }
     render()
   }
@@ -14389,10 +14551,11 @@ export function createLobbyFlowController(
         state.deletePopupErrorText = null
         // Нормален profile-popup delete flow (Players/admin search/
         // registered profiles бутон) — НЕ носи support-request атрибуция.
-        // onAdminSupportDeleteProfileClick е ЕДИНСТВЕНОТО място, което
-        // задава deletePopupSupportRequestMessageId, ПРЕДИ да отвори
-        // попъпа — тук изрично се нулира, за да не изтече stale context от
-        // предишно отваряне.
+        // "Маркирай като заявка за изтриване" в support чата вече минава
+        // през собствен dedicated flow (onAdminSupportDeleteProfileClick →
+        // adminSupportDeleteProfileConfirm → submitAdminSupportDeleteProfile),
+        // не пипа deletePopupSupportRequestMessageId изобщо — полето тук
+        // остава explicit нулирано за safety, ако бъде reuse-нато занапред.
         state.deletePopupSupportRequestMessageId = null
         renderPopupOnly()
       },

@@ -80,7 +80,8 @@ export type SupportStore = {
   getUnreadCountForUser: (profileId: string) => number
   getTotalUnreadForAdmin: () => number
   getAllConversations: (
-    getProfile: (profileId: string) => { displayName: string; avatarUrl: string | null } | null
+    getProfile: (profileId: string) => { displayName: string; avatarUrl: string | null } | null,
+    filter?: 'active' | 'archived',
   ) => SupportConversationSnapshot[]
   /** Виж SupportDeletionArchiveSnapshot doc коментара — null = не е архивиран (нормален жив/непознат разговор). */
   getDeletionArchive: (profileId: string) => SupportDeletionArchiveSnapshot | null
@@ -110,6 +111,7 @@ export type SupportStore = {
   purgeDoneAttachmentDeletions: (olderThanDays: number, batchSize: number) => number
   deleteConversation: (profileId: string) => void
   archiveConversation: (profileId: string) => void
+  unarchiveConversation: (profileId: string) => void
   cleanupInactiveConversations: () => number
   countRecentMessages: (profileId: string, windowMinutes: number) => number
   hasAdminReply: (profileId: string) => boolean
@@ -487,9 +489,28 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     return row?.cnt ?? 0
   }
 
+  /**
+   * filter='active' (default) — нормалният inbox: РЕАЛНИ, текущи, non-archived
+   * И non-deletion-evidence разговори. filter='archived' — "Архивирани" tab:
+   * ИЛИ normal support_archived marker, ИЛИ deletion evidence
+   * (support_deletion_archives) — второто ВИНАГИ, независимо дали leftover
+   * support_archived marker технически съществува от преди hard delete-а
+   * (напр. "Маркирай като заявка за изтриване", изпълнено от вътре в вече
+   * normal-archived разговор — hardDeleteProfile не чисти support_archived,
+   * различен marker; и обратно — target е бил Active в момента на delete-а,
+   * никога не е имал support_archived ред). UX семантика (round 5
+   * корекция): deletion evidence на вече изтрит профил НЕ Е "текущ активен
+   * разговор" — трябва да е reachable ЕДИНСТВЕНО през Archived, визуално
+   * разграничен от normal archive чрез deletionArchive полето/UI banner-а
+   * (spec §2 "не смесвай... без ясно визуално разграничение").
+   */
   function getAllConversations(
     getProfile: (profileId: string) => { displayName: string; avatarUrl: string | null } | null,
+    filter: 'active' | 'archived' = 'active',
   ): SupportConversationSnapshot[] {
+    const archivedCondition = filter === 'archived'
+      ? 'a.profile_id IS NOT NULL OR sda.profile_id IS NOT NULL'
+      : 'a.profile_id IS NULL AND sda.profile_id IS NULL'
     const rows = db.prepare(
       `SELECT
          m.profile_id,
@@ -497,7 +518,8 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
          SUM(CASE WHEN m.is_from_admin = 0 AND m.read_by_admin = 0 THEN 1 ELSE 0 END) as unread_by_admin
        FROM support_messages m
        LEFT JOIN support_archived a ON a.profile_id = m.profile_id
-       WHERE a.profile_id IS NULL
+       LEFT JOIN support_deletion_archives sda ON sda.profile_id = m.profile_id
+       WHERE ${archivedCondition}
        GROUP BY m.profile_id
        ORDER BY updated_at DESC`,
     ).all() as { profile_id: string; updated_at: string; unread_by_admin: number }[]
@@ -613,19 +635,38 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     })
   }
 
+  /**
+   * "Архивирай" — NON-DESTRUCTIVE от round 4 корекцията насам (root cause
+   * fix: разговорът беше физически изтрит тук — DELETE FROM support_messages
+   * — веднага щом admin натиснеше "Архивирай", което правеше "виж
+   * архивирани разговори" невъзможно на практика). Вече само маркира
+   * profile_id в support_archived — support_messages/attachments остават
+   * непокътнати, четими през getMessages()/getAllConversations(filter:
+   * 'archived'). sendUserMessage() автоматично маха marker-а при ново user
+   * съобщение (виж doc коментара там) — "Архивирай" е "скрий от Active,
+   * докато потребителят пак не пише", НЕ "изтрий".
+   *
+   * Deletion evidence archive (support_deletion_archives) е РАЗЛИЧЕН marker
+   * — "Архивирай" не бива да го замества/пипа (guard-ът остава).
+   */
   function archiveConversation(profileId: string): void {
-    // spec §C: same guard — "Архивирай" (support_archived, hides from
-    // inbox + wipes messages) е РАЗЛИЧНО от deletion archive-а тук и не
-    // бива да го замести/изчисти.
     if (getDeletionArchive(profileId) !== null) return
     // Round 3 корекция — виж deleteConversation-ия same коментар по-горе.
     if (deps.hasPendingSupportRequestDelete(profileId)) return
 
-    runInTransaction(() => {
-      enqueueAttachmentsForProfile(profileId)
-      db.prepare(`DELETE FROM support_messages WHERE profile_id = ?`).run(profileId)
-      db.prepare(`INSERT OR IGNORE INTO support_archived (profile_id) VALUES (?)`).run(profileId)
-    })
+    db.prepare(`INSERT OR IGNORE INTO support_archived (profile_id) VALUES (?)`).run(profileId)
+  }
+
+  /**
+   * "Върни в активни" — маха ЕДИНСТВЕНО normal archive marker-а
+   * (support_archived), не пипа съобщения. НИКОГА не работи върху deletion
+   * evidence archive (target профилът вече не съществува физически — "върни
+   * в активни" няма смисъл и не бива да е достъпно за такъв разговор; guard-ът
+   * тук е defense-in-depth — UI вече не показва копчето за такива разговори).
+   */
+  function unarchiveConversation(profileId: string): void {
+    if (getDeletionArchive(profileId) !== null) return
+    db.prepare(`DELETE FROM support_archived WHERE profile_id = ?`).run(profileId)
   }
 
   function hasAdminReply(profileId: string): boolean {
@@ -651,6 +692,13 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
       // background job — evidence-ът за заявеното/изпълненото изтриване
       // трябва да остане четим за admin/Pika Team за постоянно, не само до
       // следващия 5-дневен inactivity cleanup цикъл.
+      //
+      // Root cause corollary (round 4 корекция): "Архивирай" вече НЕ трие
+      // съобщенията веднага (виж archiveConversation-ия doc коментар) —
+      // ако този background job не изключеше support_archived разговори
+      // тук, същите съобщения пак биха се изтрили автоматично до 5 дни
+      // по-късно (последното съобщение в архивиран разговор е почти винаги
+      // от admin), тихо анулирайки non-destructive archive гаранцията.
       const rows = db.prepare(`
         SELECT m.profile_id
         FROM support_messages m
@@ -660,9 +708,11 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
           GROUP BY profile_id
         ) latest ON latest.profile_id = m.profile_id AND latest.last_at = m.created_at
         LEFT JOIN support_deletion_archives sda ON sda.profile_id = m.profile_id
+        LEFT JOIN support_archived sa ON sa.profile_id = m.profile_id
         WHERE m.is_from_admin = 1
           AND m.created_at < datetime('now', '-5 days')
           AND sda.profile_id IS NULL
+          AND sa.profile_id IS NULL
       `).all() as { profile_id: string }[]
 
       // Round 3 корекция — виж SupportStoreDeps.hasPendingSupportRequestDelete
@@ -713,6 +763,7 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     purgeDoneAttachmentDeletions,
     deleteConversation,
     archiveConversation,
+    unarchiveConversation,
     cleanupInactiveConversations,
     hasAdminReply,
     countRecentMessages,

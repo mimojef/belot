@@ -2938,12 +2938,12 @@ async function sendGuestContactMessage(input: GuestContactFormInput): Promise<
   }
 }
 
-async function loadAdminSupportConversations(): Promise<
+async function loadAdminSupportConversations(filter: 'active' | 'archived' = 'active'): Promise<
   | { ok: true; conversations: SupportConversationSnapshot[] }
   | { ok: false; message: string }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/support/admin/conversations`, {
+    const response = await fetch(`${getApiBaseUrl()}/api/support/admin/conversations?filter=${filter}`, {
       method: 'GET',
       credentials: 'include',
     })
@@ -3531,6 +3531,22 @@ async function archiveAdminSupportConversation(profileId: string): Promise<{ ok:
     const data = (await response.json()) as { ok: boolean; message?: string }
     if (!response.ok || !data.ok) {
       return { ok: false, message: data.message ?? 'Грешка при архивиране.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function unarchiveAdminSupportConversation(profileId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/support/admin/conversations/${encodeURIComponent(profileId)}/unarchive`,
+      { method: 'POST', credentials: 'include' },
+    )
+    const data = (await response.json()) as { ok: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при връщане в активни.' }
     }
     return { ok: true }
   } catch {
@@ -5787,12 +5803,13 @@ lobby = createLobbyFlowController({
       return { ok: false }
     }
   },
-  onAdminSupportConversationsLoad: () => loadAdminSupportConversations(),
+  onAdminSupportConversationsLoad: (filter) => loadAdminSupportConversations(filter),
   onAdminGuestContactMessagesLoad: () => loadAdminGuestContactMessages(),
   onAdminGuestContactMessageRead: (messageId) => markAdminGuestContactMessageRead(messageId),
   onAdminSupportMessagesLoad: (profileId) => loadAdminSupportMessages(profileId),
   onAdminSupportReply: (profileId, body, imageDataUrl) => sendAdminSupportReply(profileId, body, imageDataUrl),
   onAdminSupportDeleteConversation: (profileId) => archiveAdminSupportConversation(profileId),
+  onAdminSupportUnarchiveConversation: (profileId) => unarchiveAdminSupportConversation(profileId),
   onSupportDeleteConversation: () => deleteUserSupportConversation(),
   initialPrivateRoomInGameNotificationsEnabled: privateRoomInGameNotificationsEnabled,
   onPrivateRoomInGameNotificationsChange: (enabled) => {

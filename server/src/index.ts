@@ -16124,6 +16124,7 @@ async function handleSupportRequest(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
+  searchParams: URLSearchParams,
 ): Promise<boolean> {
   if (!pathname.startsWith('/api/support')) return false
 
@@ -16254,17 +16255,23 @@ async function handleSupportRequest(
     return true
   }
 
-  // GET /api/support/admin/conversations — admin sees all (чат с поддръжката — само пълен admin)
+  // GET /api/support/admin/conversations?filter=active|archived — admin sees
+  // all (чат с поддръжката — само пълен admin). filter=archived връща
+  // ЕДИНСТВЕНО normal-archived (support_archived) разговори — round 4
+  // корекция за "Архивирани" tab-а, mirror на supportStore.getAllConversations's
+  // filter param.
   if (pathname === '/api/support/admin/conversations' && req.method === 'GET') {
     if (!isFullAdminSession(session)) {
       sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
       return true
     }
+    const filterParam = searchParams.get('filter')
+    const filter = filterParam === 'archived' ? 'archived' : 'active'
     const conversations = supportStore.getAllConversations((profileId) => {
       const p = playerProgressStore.getPublicProfile(profileId)
       if (!p) return null
       return { displayName: p.displayName, avatarUrl: p.avatarUrl }
-    })
+    }, filter)
     const totalUnread = supportStore.getTotalUnreadForAdmin()
     sendJsonResponse(res, 200, { ok: true, conversations, totalUnread })
     return true
@@ -16364,6 +16371,24 @@ async function handleSupportRequest(
       return true
     }
     supportStore.archiveConversation(profileId)
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  // POST /api/support/admin/conversations/:profileId/unarchive — "Върни в
+  // активни" (само пълен admin) — маха ЕДИНСТВЕНО normal archive marker-а,
+  // no-op за deletion evidence archive (виж supportStore.unarchiveConversation).
+  if (pathname.match(/^\/api\/support\/admin\/conversations\/[^/]+\/unarchive$/) && req.method === 'POST') {
+    if (!isFullAdminSession(session)) {
+      sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+      return true
+    }
+    const profileId = pathname.replace('/api/support/admin/conversations/', '').replace('/unarchive', '')
+    if (!profileId) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+      return true
+    }
+    supportStore.unarchiveConversation(profileId)
     sendJsonResponse(res, 200, { ok: true })
     return true
   }
@@ -16950,7 +16975,7 @@ async function handleHttpRequest(
     return
   }
 
-  if (await handleSupportRequest(req, res, requestUrl.pathname)) {
+  if (await handleSupportRequest(req, res, requestUrl.pathname, requestUrl.searchParams)) {
     return
   }
 
