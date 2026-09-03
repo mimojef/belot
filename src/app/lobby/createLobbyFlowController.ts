@@ -5881,13 +5881,19 @@ export function createLobbyFlowController(
         render()
       },
       onAdminRegisteredProfilesProfileClick: (profileId) => {
-        // Затваря "Регистрирани профили" модала и отваря съществуващия
-        // normal profile popup за profileId-то на реда — reuse-ва СЪЩАТА
+        // Отваря съществуващия normal profile popup за profileId-то на реда
+        // КАТО overlay върху "Регистрирани профили" модала — reuse-ва СЪЩАТА
         // "отвори чужд профил по id" функция като onRiskLinkedProfileClick
         // по-долу (canonical fetch, same access-block/friendship gate; ако
         // profile-ът е risk_detected, "Свързани профили" секцията в попъпа
         // се зарежда automatically чрез съществуващия ensure-lazy-load flow).
-        state.adminRegisteredProfilesModal = null
+        // adminRegisteredProfilesModal НЕ се затваря/нулира тук нарочно —
+        // profile popup живее в отделен document.body host (syncProfilePopup),
+        // затова двата могат coexist-ват безопасно (виж по-нисък z-index на
+        // admin модала спрямо popup-а в renderAdminRegisteredProfilesModal.ts).
+        // Admin модалът остава mount-нат със same mode/page/scroll — при
+        // затваряне на popup-а (onProfileClose) потребителят се връща точно
+        // където е бил, вместо да предефилира страниците отначало.
         void openProtectedProfileById(profileId)
       },
       onAdminVisitorsPeriodClick: (period) => {

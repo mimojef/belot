@@ -190,8 +190,11 @@ export function renderAdminRegisteredProfilesModal(
     </style>
     <div
       data-admin-registered-profiles-root="1"
-      style="position:fixed;inset:0;z-index:12000;pointer-events:auto;"
+      style="position:fixed;inset:0;z-index:11900;pointer-events:auto;"
     >
+      <!-- z-index 11900, под player profile popup-а (z-index:12000, renderPlayerProfilePopup.ts) —
+           profile popup се отваря КАТО overlay върху този модал (не го затваря), затова трябва
+           гарантирано да стои отгоре независимо от DOM order между двата document.body/root host-а. -->
       <div
         data-admin-registered-profiles-backdrop="1"
         style="
