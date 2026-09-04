@@ -649,6 +649,8 @@ export type LobbyScreenState = {
   chatMessagesFriendshipId: string | null
   chatLoading: boolean
   chatMessagesLoading: boolean
+  chatMessagesHasMore: boolean
+  chatOlderMessagesLoading: boolean
   chatErrorText: string | null
   // Незапратен текст, писан от потребителя за всеки разговор поотделно (keyed по friendshipId).
   // Пази се отделно от chatMessages, за да не се губи при re-render, предизвикан от входящо
@@ -1128,6 +1130,7 @@ export type RenderLobbyScreenOptions = {
   onChatConversationClick: (friendshipId: string) => void
   onChatMarkRead: (friendshipId: string) => void
   onChatToggleArchived: () => void
+  onChatLoadOlderClick: () => void
   onChatSubmit: (friendshipId: string, body: string) => void
   onChatDraftChange: (friendshipId: string, draft: string) => void
   onChatImageSelect: (friendshipId: string, file: File) => void
@@ -6458,28 +6461,37 @@ function renderChatPanel(state: LobbyScreenState): string {
               <div style="margin:auto;color:#d4a520;font-size:15px;font-weight:900;">Зареждане...</div>
             ` : state.chatMessages.length === 0 ? `
               <div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения. Започни разговора.</div>
-            ` : state.chatMessages.map((message) => {
-              const isEmojiOnly = /^(\[e:\d{2}\])+$/.test(message.body.trim())
-              const hasText = message.body.trim().length > 0
-              return `
-              <div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;">
-                ${message.attachment ? `
-                  <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
-                    ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
-                    ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
-                  </div>
-                ` : `
-                  <div style="${isEmojiOnly
-                    ? 'padding:2px;line-height:1;'
-                    : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
-                    ${isEmojiOnly
-                      ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
-                      : renderPersonalChatMessageBody(message.body)}
-                  </div>
-                `}
-                <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
-              </div>
-            `}).join('')}
+            ` : `
+              ${state.chatMessagesHasMore ? `
+                <div style="text-align:center;padding:2px 0 8px;">
+                  <button type="button" data-lobby-chat-load-older="1" ${state.chatOlderMessagesLoading ? 'disabled' : ''} style="border:1px solid rgba(212,165,32,0.34);background:transparent;color:${state.chatOlderMessagesLoading ? 'rgba(212,165,32,0.5)' : '#d4a520'};font-size:12px;font-weight:800;padding:6px 14px;border-radius:999px;cursor:${state.chatOlderMessagesLoading ? 'default' : 'pointer'};">
+                    ${state.chatOlderMessagesLoading ? 'Зареждане…' : 'Зареди по-стари'}
+                  </button>
+                </div>
+              ` : ''}
+              ${state.chatMessages.map((message) => {
+                const isEmojiOnly = /^(\[e:\d{2}\])+$/.test(message.body.trim())
+                const hasText = message.body.trim().length > 0
+                return `
+                <div data-chat-message="${escapeHtml(message.messageId)}" style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;">
+                  ${message.attachment ? `
+                    <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
+                      ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
+                      ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
+                    </div>
+                  ` : `
+                    <div style="${isEmojiOnly
+                      ? 'padding:2px;line-height:1;'
+                      : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                      ${isEmojiOnly
+                        ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
+                        : renderPersonalChatMessageBody(message.body)}
+                    </div>
+                  `}
+                  <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
+                </div>
+              `}).join('')}
+            `}
           </div>
           <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
             <div style="display:flex;gap:10px;align-items:center;">
@@ -13335,6 +13347,10 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLButtonElement>('[data-lobby-chat-toggle-archived="1"]')
     ?.addEventListener('click', options.onChatToggleArchived)
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-chat-load-older="1"]')
+    ?.addEventListener('click', options.onChatLoadOlderClick)
 
   root.querySelectorAll<HTMLFormElement>('[data-lobby-chat-form]').forEach((form) => {
     keepComposerFocusOnPointerSubmit(form.querySelector<HTMLButtonElement>('button[type="submit"]'))

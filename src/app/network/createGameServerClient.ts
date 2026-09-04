@@ -353,6 +353,10 @@ export type ChatMessageSnapshot = {
   createdAt: string
   isOwnMessage: boolean
   attachment: ChatAttachmentSnapshot | null
+  // Opaque server pagination cursor (виж server's chatStore.ts ChatMessageSnapshot
+  // doc коментара) — клиентът само го подава обратно като `before` при "load
+  // older", никога не го интерпретира/парсва.
+  cursor: string
 }
 
 export type ChatConversationKind = 'friend' | 'vip_dm' | 'pika_support'

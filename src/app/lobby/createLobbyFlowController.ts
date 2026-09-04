@@ -592,8 +592,8 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; conversations: ChatConversationSnapshot[] }
     | { ok: false; message: string }
   >
-  onChatMessagesLoad?: (friendshipId: string) => Promise<
-    | { ok: true; messages: ChatMessageSnapshot[] }
+  onChatMessagesLoad?: (friendshipId: string, beforeCursor?: string | null) => Promise<
+    | { ok: true; messages: ChatMessageSnapshot[]; hasMore: boolean }
     | { ok: false; message: string }
   >
   onChatMarkRead?: (friendshipId: string) => Promise<void>
@@ -602,6 +602,7 @@ export type CreateLobbyFlowControllerOptions = {
         ok: true
         conversation: ChatConversationSnapshot
         messages: ChatMessageSnapshot[]
+        hasMore: boolean
         newMessage?: ChatMessageSnapshot
       }
     | { ok: false; message: string }
@@ -1535,6 +1536,12 @@ type InternalLobbyFlowState = {
   chatMessagesFriendshipId: string | null
   chatLoading: boolean
   chatMessagesLoading: boolean
+  // "Зареди по-стари" pagination за текущия отворен личен разговор — mirror
+  // на topicMessagesHasMore/topicMessagesOldestSeq/topicOlderMessagesLoading
+  // (виж loadOlderTopicMessages за established pattern-а, reuse-нат тук).
+  chatMessagesHasMore: boolean
+  chatOldestMessageCursor: string | null
+  chatOlderMessagesLoading: boolean
   chatErrorText: string | null
   chatDraftByFriendshipId: Record<string, string>
   // Избрана-но-неизпратена снимка per разговор (за да оцелее при
@@ -2176,6 +2183,9 @@ function createInitialState(): InternalLobbyFlowState {
     chatMessagesFriendshipId: null,
     chatLoading: false,
     chatMessagesLoading: false,
+    chatMessagesHasMore: false,
+    chatOldestMessageCursor: null,
+    chatOlderMessagesLoading: false,
     chatErrorText: null,
     chatDraftByFriendshipId: {},
     chatPendingImageByFriendshipId: {},
@@ -4026,6 +4036,8 @@ export function createLobbyFlowController(
       chatMessagesFriendshipId: state.chatMessagesFriendshipId,
       chatLoading: state.chatLoading,
       chatMessagesLoading: state.chatMessagesLoading,
+      chatMessagesHasMore: state.chatMessagesHasMore,
+      chatOlderMessagesLoading: state.chatOlderMessagesLoading,
       chatErrorText: state.chatErrorText,
       chatDraftByFriendshipId: state.chatDraftByFriendshipId,
       chatPendingImageByFriendshipId: state.chatPendingImageByFriendshipId,
@@ -5146,6 +5158,9 @@ export function createLobbyFlowController(
       },
       onChatToggleArchived: () => {
         void toggleChatArchivedView()
+      },
+      onChatLoadOlderClick: () => {
+        void loadOlderChatMessages()
       },
       onChatSubmit: (friendshipId, body) => {
         void sendChatMessage(friendshipId, body)
@@ -12657,6 +12672,9 @@ export function createLobbyFlowController(
     state.chatMessagesLoading = true
     state.chatMessages = []
     state.chatMessagesFriendshipId = null
+    state.chatMessagesHasMore = false
+    state.chatOldestMessageCursor = null
+    state.chatOlderMessagesLoading = false
     state.chatErrorText = null
 
     if (shouldRenderLoading) {
@@ -12679,8 +12697,106 @@ export function createLobbyFlowController(
 
     state.chatMessages = result.messages
     state.chatMessagesFriendshipId = friendshipId
+    state.chatMessagesHasMore = result.hasMore
+    state.chatOldestMessageCursor = result.messages[0]?.cursor ?? null
     state.chatErrorText = null
     render()
+  }
+
+  // Dedup merge по messageId (mirror на mergeTopicMessages) — критично за
+  // realtime safety (§F в task brief-а): sendMessage response и
+  // refreshChatAfterNotification и двете презаписват state.chatMessages
+  // директно с последните PERSONAL_CHAT_HISTORY_LIMIT от сървъра — БЕЗ merge
+  // тук, "load older" prepend-натите по-стари страници биха изчезнали при
+  // всяко следващо realtime събитие. Chronological sort по createdAt (не
+  // cursor value) — cursor е opaque server field, само за pagination request-и,
+  // НЕ display ordering key.
+  function mergeChatMessages(
+    existing: readonly ChatMessageSnapshot[],
+    incoming: readonly ChatMessageSnapshot[],
+  ): ChatMessageSnapshot[] {
+    if (incoming.length === 0) return [...existing]
+    const byId = new Map<string, ChatMessageSnapshot>()
+    for (const m of existing) byId.set(m.messageId, m)
+    for (const m of incoming) byId.set(m.messageId, m)
+    // Sort само по createdAt — cursor е opaque server string тук (server-side
+    // keyset ordering key, base64-кодиран (created_at,rowid) chunk), клиентът
+    // НЕ го decode-ва/интерпретира. Array.prototype.sort е stable (ES2019+),
+    // затова еднакви created_at timestamps запазват relative reда, в който
+    // вече пристигат от сървъра (самият той ORDER BY created_at ASC, rowid
+    // ASC) — tie-break-ът реално се пази без клиентът да пипа cursor bytes.
+    return [...byId.values()].sort(
+      (a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime(),
+    )
+  }
+
+  function captureChatMessagesScrollAnchor(): { messageId: string; top: number } | null {
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-chat-messages-scroll="1"]')
+    if (scrollEl === null) return null
+    const scrollRect = scrollEl.getBoundingClientRect()
+    const anchorEl = Array.from(scrollEl.querySelectorAll<HTMLElement>('[data-chat-message]'))
+      .find((el) => el.getBoundingClientRect().bottom >= scrollRect.top)
+    return anchorEl
+      ? { messageId: anchorEl.dataset.chatMessage ?? '', top: anchorEl.getBoundingClientRect().top }
+      : null
+  }
+
+  function restoreChatMessagesScrollAnchor(anchor: { messageId: string; top: number } | null): void {
+    if (anchor === null || anchor.messageId.length === 0) return
+    const scrollEl = options.root.querySelector<HTMLElement>('[data-chat-messages-scroll="1"]')
+    if (scrollEl === null) return
+    const anchorEl = Array.from(scrollEl.querySelectorAll<HTMLElement>('[data-chat-message]'))
+      .find((el) => el.dataset.chatMessage === anchor.messageId) ?? null
+    if (anchorEl === null) return
+    scrollEl.scrollTop += anchorEl.getBoundingClientRect().top - anchor.top
+  }
+
+  // "Зареди по-стари" — mirror на loadOlderTopicMessages (виж doc коментара
+  // там за пълния race/scroll rationale, reuse-нат тук 1:1). НЕ инкрементира
+  // generation token-а (продължение на текущия разговор, не switch) — само
+  // капсулира текущата стойност при старт, за да засече дали потребителят е
+  // превключил разговор междувременно (openChatConversation инкрементира при
+  // switch).
+  async function loadOlderChatMessages(): Promise<void> {
+    const friendshipId = state.activeChatFriendshipId
+    const requestGeneration = state.activeChatRequestGeneration
+    if (
+      friendshipId === null ||
+      state.chatOlderMessagesLoading ||
+      !state.chatMessagesHasMore ||
+      state.chatOldestMessageCursor === null ||
+      !options.onChatMessagesLoad
+    ) {
+      return
+    }
+
+    const scrollAnchor = captureChatMessagesScrollAnchor()
+    state.chatOlderMessagesLoading = true
+    render()
+
+    const result = await options.onChatMessagesLoad(friendshipId, state.chatOldestMessageCursor)
+
+    // Ако потребителят е превключил разговор междувременно, изхвърляме
+    // резултата — принадлежи на вече напуснат разговор.
+    if (state.activeChatRequestGeneration !== requestGeneration) {
+      return
+    }
+
+    state.chatOlderMessagesLoading = false
+
+    if (!result.ok) {
+      state.chatErrorText = result.message
+      render()
+      return
+    }
+
+    const merged = mergeChatMessages(state.chatMessages, result.messages)
+    state.chatMessages = merged
+    state.chatMessagesHasMore = result.hasMore
+    state.chatOldestMessageCursor = merged[0]?.cursor ?? state.chatOldestMessageCursor
+    state.chatErrorText = null
+    render()
+    restoreChatMessagesScrollAnchor(scrollAnchor)
   }
 
   const CHAT_IMAGE_ALLOWED_MIME_TYPES = new Set(['image/jpeg', 'image/jpg', 'image/png', 'image/webp'])
@@ -13012,8 +13128,16 @@ export function createLobbyFlowController(
     clearChatPendingImage(friendshipId)
     const isStillActiveChatConversation = isActivePersonalChatConversation(friendshipId)
     if (isStillActiveChatConversation) {
-      state.chatMessages = result.messages
+      // Merge, НЕ overwrite (§F в task brief-а) — result.messages е само
+      // последните PERSONAL_CHAT_HISTORY_LIMIT от сървъра; ако потребителят
+      // вече е load-нал по-стари страници чрез "Зареди по-стари", директен
+      // overwrite би ги изтрил от state-а (виж mergeChatMessages doc коментара).
+      state.chatMessages = mergeChatMessages(state.chatMessages, result.messages)
       state.chatMessagesFriendshipId = friendshipId
+      state.chatMessagesHasMore = result.hasMore
+      if (state.chatOldestMessageCursor === null) {
+        state.chatOldestMessageCursor = state.chatMessages[0]?.cursor ?? null
+      }
       state.chatErrorText = null
     }
     const existingConversation = state.chatConversations.find(
@@ -13049,8 +13173,15 @@ export function createLobbyFlowController(
       }
 
       if (result.ok) {
-        state.chatMessages = result.messages
+        // Merge, НЕ overwrite — виж mergeChatMessages doc коментара
+        // (§F в task brief-а: realtime incoming не бива да изтрие вече
+        // load-нати по-стари страници).
+        state.chatMessages = mergeChatMessages(state.chatMessages, result.messages)
         state.chatMessagesFriendshipId = friendshipId
+        state.chatMessagesHasMore = result.hasMore
+        if (state.chatOldestMessageCursor === null) {
+          state.chatOldestMessageCursor = state.chatMessages[0]?.cursor ?? null
+        }
         state.chatErrorText = null
       } else {
         state.chatErrorText = result.message

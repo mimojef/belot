@@ -445,6 +445,19 @@ const TOPIC_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = CHAT_ATTACHMENT_DELETION_
 const FRIENDSHIP_RETENTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
 const FRIENDSHIP_RETENTION_CLEANUP_STARTUP_DELAY_MS = 75_000
 const FRIENDSHIP_RETENTION_CLEANUP_BATCH_SIZE = 200
+// Bounded convergence за conversations, чийто message count вече надвишава
+// PERSONAL_CHAT_STORAGE_LIMIT (виж chatStore.ts's pruneOversizedConversations
+// doc коментара) — покрива legacy данни от преди 500->300 намалението на
+// лимита, специфично НЕАКТИВНИ разговори, които никога повече няма да получат
+// нов sendMessage (единственият reactive prune trigger). Дневен interval
+// (не часови като friendship retention-а) — това е bounded backlog
+// convergence, не time-sensitive product deadline, безопасно е да отнеме дни
+// batch-ове да сведе цялата legacy опашка. Изместен startup delay (105s), за
+// да не се засича с chat/support/topic attachment cleanup-ите (30s/45s/60s)
+// нито с friendship retention cleanup-а (75s).
+const OVERSIZED_CHAT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
+const OVERSIZED_CHAT_PRUNE_STARTUP_DELAY_MS = 105_000
+const OVERSIZED_CHAT_PRUNE_BATCH_SIZE = 50
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
 type GameWorkerTickMode = 'in-process' | 'worker-candidate'
@@ -2418,6 +2431,39 @@ let friendshipRetentionCleanupStartupTimeout: ReturnType<typeof setTimeout> | nu
 let friendshipRetentionCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
   runFriendshipRetentionCleanup,
   FRIENDSHIP_RETENTION_CLEANUP_INTERVAL_MS,
+)
+
+// Bounded convergence за conversations, чийто message count вече надвишава
+// PERSONAL_CHAT_STORAGE_LIMIT (виж chatStore.ts's pruneOversizedConversations
+// doc коментара) — покрива legacy данни от преди 500->300 намалението,
+// специфично НЕАКТИВНИ разговори без нов sendMessage trigger. Enqueue-ва
+// attachment filenames преди destructive delete-а, reuse-ва existing
+// friend_chat_attachment_deletions опашка/worker — НЕ втори cleanup mechanism.
+function runOversizedChatPruneJob(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const result = chatStore.pruneOversizedConversations(OVERSIZED_CHAT_PRUNE_BATCH_SIZE)
+    if (result.conversationsPruned > 0) {
+      console.log(
+        `[chat-history] Oversized prune: pruned ${result.conversationsPruned} conversation(s), ` +
+          `deleted ${result.messagesDeleted} message(s)`,
+      )
+    }
+  } catch (error) {
+    console.error('[chat-history] Oversized prune failed:', error)
+  }
+}
+
+let oversizedChatPruneStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  runOversizedChatPruneJob,
+  OVERSIZED_CHAT_PRUNE_STARTUP_DELAY_MS,
+)
+let oversizedChatPruneInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runOversizedChatPruneJob,
+  OVERSIZED_CHAT_PRUNE_INTERVAL_MS,
 )
 
 const yellowCoinGiftStore = await createYellowCoinGiftStore(
@@ -14580,7 +14626,13 @@ async function handleChatRequest(
 
   if (messagesMatch !== null && req.method === 'GET') {
     const friendshipId = decodeURIComponent(messagesMatch[1]).trim()
-    const result = chatStore.listMessages(profileId, friendshipId)
+    // ?before=<opaque cursor> — "load older" pagination (виж
+    // chatStore.listMessages/decodeChatMessageCursor doc коментарите).
+    // Route-ът само pass-through-ва raw string-а — decode+format validation
+    // (malformed -> code:'invalid_cursor' -> HTTP 400 по-долу) живее изцяло
+    // в chatStore.ts, не тук.
+    const beforeCursor = new URL(req.url ?? '', 'http://localhost').searchParams.get('before')
+    const result = chatStore.listMessages(profileId, friendshipId, beforeCursor)
 
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
@@ -14590,6 +14642,7 @@ async function handleChatRequest(
     sendJsonResponse(res, 200, {
       ok: true,
       messages: result.messages,
+      hasMore: result.hasMore,
     })
     return true
   }
@@ -14756,6 +14809,7 @@ async function handleChatRequest(
       ok: true,
       conversation: result.conversation,
       messages: result.messages,
+      hasMore: result.hasMore,
       newMessage: result.newMessage,
     })
     return true
@@ -20768,6 +20822,16 @@ function clearMutationTimersForShutdown(): void {
   if (friendshipRetentionCleanupStartupTimeout !== null) {
     clearTimeout(friendshipRetentionCleanupStartupTimeout)
     friendshipRetentionCleanupStartupTimeout = null
+  }
+
+  if (oversizedChatPruneInterval !== null) {
+    clearInterval(oversizedChatPruneInterval)
+    oversizedChatPruneInterval = null
+  }
+
+  if (oversizedChatPruneStartupTimeout !== null) {
+    clearTimeout(oversizedChatPruneStartupTimeout)
+    oversizedChatPruneStartupTimeout = null
   }
 
   if (chatAttachmentCleanupInterval !== null) {

@@ -10,7 +10,7 @@ import { getConfiguredOfficialPikaProfileId } from './normalizeProfileIdentityTe
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export const PERSONAL_CHAT_HISTORY_LIMIT = 100
-export const PERSONAL_CHAT_STORAGE_LIMIT = 500
+export const PERSONAL_CHAT_STORAGE_LIMIT = 300
 
 // Разговор без нови съобщения за повече от 12 календарни месеца се смята
 // за архивиран (виж createConversationSnapshot/isArchived по-долу) — чисто
@@ -24,6 +24,7 @@ export type ChatStoreErrorCode =
   | 'blocked'
   | 'conversation_not_found'
   | 'invalid_conversation_kind'
+  | 'invalid_cursor'
   | 'message_required'
   | 'recipient_not_found'
   | 'self'
@@ -47,6 +48,58 @@ export type ChatMessageSnapshot = {
   createdAt: string
   isOwnMessage: boolean
   attachment: ChatAttachmentSnapshot | null
+  // Opaque keyset pagination cursor — кодира ЦЕЛИЯ ORDER BY key
+  // (created_at, rowid), НЕ само rowid (виж decodeChatMessageCursor doc
+  // коментара по-долу за rationale: WHERE predicate-ът трябва да следва
+  // точно същия ordering key като ORDER BY, иначе е възможен
+  // skip/duplicate ако created_at и insert-ordered rowid някога не са
+  // напълно монотонни едно спрямо друго — clock skew, backfill и т.н.).
+  // Клиентът НИКОГА не парсва съдържанието, само го подава обратно като
+  // `before` query param — изцяло opaque string token.
+  cursor: string
+}
+
+// Opaque cursor encoding за keyset chat message pagination — base64 на
+// "<created_at>|<rowid>". Кодира ЦЕЛИЯ (created_at, rowid) ordering key, не
+// само rowid, за да може WHERE predicate-ът в selectOlderMessagesStatement
+// да replicate-не точно ORDER BY created_at DESC, rowid DESC семантиката
+// (composite keyset predicate: created_at < ? OR (created_at = ? AND
+// rowid < ?)) — единственият начин да се гарантира "точно веднъж, никога
+// skip, никога duplicate" pagination дори ако created_at (secondary-resolution
+// SQLite TEXT timestamp) и rowid (insert-order integer) не са строго
+// монотонни едно спрямо друго във всеки възможен edge case.
+const CHAT_CURSOR_SEPARATOR = '|'
+
+function encodeChatMessageCursor(createdAt: string, rowid: number): string {
+  return Buffer.from(`${createdAt}${CHAT_CURSOR_SEPARATOR}${rowid}`, 'utf8').toString('base64')
+}
+
+// Връща null при malformed вход (route handler-ът превръща null -> HTTP 400,
+// виж index.ts) — НИКОГА не хвърля, НИКОГА не third-party-doverява на
+// произволен client string да стигне до SQL параметър без explicit формат
+// validation (created_at regex + rowid Number.isInteger).
+const CHAT_CURSOR_CREATED_AT_PATTERN = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(\.\d+)?$/
+
+function decodeChatMessageCursor(cursor: string): { createdAt: string; rowid: number } | null {
+  let decoded: string
+  try {
+    decoded = Buffer.from(cursor, 'base64').toString('utf8')
+  } catch {
+    return null
+  }
+
+  const separatorIndex = decoded.lastIndexOf(CHAT_CURSOR_SEPARATOR)
+  if (separatorIndex === -1) return null
+
+  const createdAt = decoded.slice(0, separatorIndex)
+  const rowidRaw = decoded.slice(separatorIndex + 1)
+
+  if (!CHAT_CURSOR_CREATED_AT_PATTERN.test(createdAt)) return null
+
+  const rowid = Number(rowidRaw)
+  if (!Number.isInteger(rowid) || rowid <= 0) return null
+
+  return { createdAt, rowid }
 }
 
 export type ChatConversationSnapshot = {
@@ -131,8 +184,9 @@ export type ChatStore = {
   listMessages: (
     profileId: ProfileId,
     friendshipId: string,
+    beforeCursor?: string | null,
   ) =>
-    | { ok: true; messages: ChatMessageSnapshot[] }
+    | { ok: true; messages: ChatMessageSnapshot[]; hasMore: boolean }
     | { ok: false; message: string; code?: ChatStoreErrorCode }
   sendMessage: (
     profileId: ProfileId,
@@ -144,6 +198,7 @@ export type ChatStore = {
         ok: true
         conversation: ChatConversationSnapshot
         messages: ChatMessageSnapshot[]
+        hasMore: boolean
         newMessage: ChatMessageSnapshot
       }
     | { ok: false; message: string; code?: ChatStoreErrorCode }
@@ -162,6 +217,16 @@ export type ChatStore = {
   markAttachmentDeletionFailed: (eventSeq: number) => void
   attachmentExistsForFilename: (storageFilename: string) => boolean
   purgeDoneAttachmentDeletions: (olderThanDays: number, batchSize: number) => number
+  /**
+   * Bounded background convergence за conversations, чийто message count вече
+   * надвишава PERSONAL_CHAT_STORAGE_LIMIT (legacy данни от преди 500->300
+   * намалението, viж index.ts's runOversizedChatPruneJob) — виж
+   * implementation-ната doc коментара по-долу за пълния rationale.
+   */
+  pruneOversizedConversations: (conversationBatchSize: number) => {
+    conversationsPruned: number
+    messagesDeleted: number
+  }
   close: () => void
 }
 
@@ -267,6 +332,10 @@ function toMessageSnapshot(
     createdAt: dbDateToUtc(row.created_at),
     isOwnMessage: row.sender_profile_id === ownProfileId,
     attachment,
+    // Raw (без dbDateToUtc-добавения 'Z') — cursor-ът трябва да мачва точно
+    // storage format-а в DB, защото decodeChatMessageCursor-ната стойност се
+    // подава directly обратно в SQL WHERE predicate-а (виж selectOlderMessagesStatement).
+    cursor: encodeChatMessageCursor(row.created_at, row.rowid),
   }
 }
 
@@ -490,8 +559,17 @@ export async function createChatStore(
     LIMIT 1;
   `)
 
+  // Initial page (без cursor) — newest LIMIT+1 съобщения (peek-ahead pattern,
+  // mirror на topicMessageStore.ts's runPage/buildAfterStatement: LIMIT+1 ->
+  // JS проверява дали rows.length > requestedLimit -> slice(0, requestedLimit)
+  // -> hasMore без отделна COUNT(*) заявка). Sub-SELECT-ът взима newest N по
+  // (created_at DESC, rowid DESC) — established tie-breaker навсякъде другаде
+  // в тоя файл (prune-а по-долу, selectLastMessageStatement) — после outer
+  // SELECT re-sort-ва в ASC ред за директен viewport render (старо горе,
+  // ново долу).
   const selectMessagesStatement = database.prepare(`
     SELECT
+      rowid,
       message_id,
       friendship_id,
       sender_profile_id,
@@ -519,6 +597,57 @@ export async function createChatStore(
       LEFT JOIN friend_chat_attachments a ON a.message_id = m.message_id
       WHERE m.friendship_id = ?
         AND m.deleted_at IS NULL
+      ORDER BY m.created_at DESC, m.rowid DESC
+      LIMIT ?
+    )
+    ORDER BY created_at ASC, rowid ASC;
+  `)
+
+  // Older page (с composite keyset cursor) — strictly-older-than-oldest-loaded
+  // pagination. Cursor-ът кодира ЦЕЛИЯ (created_at, rowid) ordering key (виж
+  // encodeChatMessageCursor/decodeChatMessageCursor doc коментарите) —
+  // WHERE predicate-ът ТУК следва точно същия ordering key като ORDER BY-а
+  // (correctness fix: "WHERE rowid < ?" самостоятелно НЕ е коректен keyset
+  // cursor spрямо ORDER BY created_at DESC, rowid DESC, ако created_at и
+  // insert-ordered rowid някога не са напълно монотонни едно спрямо друго —
+  // clock skew, backfill и т.н. — би могло да skip-не или duplicate-не редове
+  // между pages). Каноничният keyset predicate за "строго преди (createdAt,
+  // rowid) в DESC ordering":
+  //   created_at < ? OR (created_at = ? AND rowid < ?)
+  const selectOlderMessagesStatement = database.prepare(`
+    SELECT
+      rowid,
+      message_id,
+      friendship_id,
+      sender_profile_id,
+      body,
+      created_at,
+      attachment_filename,
+      attachment_width,
+      attachment_height,
+      attachment_byte_size,
+      attachment_content_type
+    FROM (
+      SELECT
+        m.rowid AS rowid,
+        m.message_id,
+        m.friendship_id,
+        m.sender_profile_id,
+        m.body,
+        m.created_at,
+        a.storage_filename AS attachment_filename,
+        a.width AS attachment_width,
+        a.height AS attachment_height,
+        a.byte_size AS attachment_byte_size,
+        a.content_type AS attachment_content_type
+      FROM friend_chat_messages m
+      LEFT JOIN friend_chat_attachments a ON a.message_id = m.message_id
+      WHERE m.friendship_id = ?
+        AND m.deleted_at IS NULL
+        AND (
+          m.created_at < ?
+          OR (m.created_at = ? AND m.rowid < ?)
+        )
       ORDER BY m.created_at DESC, m.rowid DESC
       LIMIT ?
     )
@@ -684,6 +813,23 @@ export async function createChatStore(
         ORDER BY created_at DESC, rowid DESC
         LIMIT -1 OFFSET ?
       );
+  `)
+
+  // Bounded background convergence за conversations, чийто message count вече
+  // надвишава PERSONAL_CHAT_STORAGE_LIMIT (напр. legacy данни от преди
+  // 500->300 намалението на лимита, viж index.ts's runOversizedChatPruneJob) —
+  // reactive prune-ът в sendMessage по-долу срязва до лимита само при НОВО
+  // съобщение в СЪЩИЯ разговор; НЕАКТИВЕН разговор (никой вече не пише) би
+  // останал >300 безкрайно без този explicit batch job. GROUP BY + HAVING
+  // намира кандидатите евтино чрез idx_friend_chat_messages_friendship
+  // (friendship_id, created_at) индекса — table scan само върху малката
+  // friend_chat_messages колонна комбинация, не върху цели редове.
+  const selectOversizedConversationCandidatesStatement = database.prepare(`
+    SELECT friendship_id, COUNT(*) as message_count
+    FROM friend_chat_messages
+    GROUP BY friendship_id
+    HAVING COUNT(*) > ?
+    LIMIT ?;
   `)
 
   function getUnreadCount(profileId: ProfileId, friendshipId: string): number {
@@ -1228,8 +1374,9 @@ export async function createChatStore(
   function listMessages(
     profileId: ProfileId,
     friendshipId: string,
+    beforeCursor: string | null = null,
   ):
-    | { ok: true; messages: ChatMessageSnapshot[] }
+    | { ok: true; messages: ChatMessageSnapshot[]; hasMore: boolean }
     | { ok: false; message: string; code?: ChatStoreErrorCode } {
     const friendship = getAcceptedFriendship(profileId, friendshipId)
 
@@ -1248,14 +1395,50 @@ export async function createChatStore(
       }
     }
 
-    const rows = selectMessagesStatement.all(
-      friendshipId,
-      PERSONAL_CHAT_HISTORY_LIMIT,
+    // Decode+validate ПРЕДИ каквато и да е SQL заявка — malformed/tampered
+    // cursor от клиента никога не стига до параметрите на statement-а (виж
+    // decodeChatMessageCursor doc коментара). Route handler-ът (index.ts)
+    // map-ва code:'invalid_cursor' -> HTTP 400, controlled, без server error.
+    let cursor: { createdAt: string; rowid: number } | null = null
+    if (beforeCursor !== null) {
+      cursor = decodeChatMessageCursor(beforeCursor)
+      if (cursor === null) {
+        return {
+          ok: false,
+          code: 'invalid_cursor',
+          message: 'Невалиден cursor за пагинация.',
+        }
+      }
+    }
+
+    // Peek-ahead: искаме LIMIT+1 от DB-то, за да разберем hasMore без отделна
+    // COUNT(*) заявка (mirror на topicMessageStore.ts's runPage pattern) —
+    // outer sub-SELECT-ите вече са ORDER BY created_at DESC, rowid DESC LIMIT ?
+    // (най-новите/съответно най-старите-в-cursor-прозореца first), затова
+    // "extra" редът, ако съществува, е винаги най-старият в batch-а — trim-ваме
+    // точно него преди re-sort в ASC display ред.
+    const requestedLimit = PERSONAL_CHAT_HISTORY_LIMIT
+    const rows = (
+      cursor === null
+        ? selectMessagesStatement.all(friendshipId, requestedLimit + 1)
+        : selectOlderMessagesStatement.all(
+            friendshipId,
+            cursor.createdAt,
+            cursor.createdAt,
+            cursor.rowid,
+            requestedLimit + 1,
+          )
     ) as ChatMessageRow[]
+
+    const hasMore = rows.length > requestedLimit
+    // rows е ASC (старо->ново) — "extra"-ят (най-стар) ред за trim е на
+    // индекс 0, не на края.
+    const pageRows = hasMore ? rows.slice(1) : rows
 
     return {
       ok: true,
-      messages: rows.map((row) => toMessageSnapshot(row, profileId)),
+      messages: pageRows.map((row) => toMessageSnapshot(row, profileId)),
+      hasMore,
     }
   }
 
@@ -1269,6 +1452,7 @@ export async function createChatStore(
         ok: true
         conversation: ChatConversationSnapshot
         messages: ChatMessageSnapshot[]
+        hasMore: boolean
         newMessage: ChatMessageSnapshot
       }
     | { ok: false; message: string; code?: ChatStoreErrorCode } {
@@ -1393,6 +1577,7 @@ export async function createChatStore(
       ok: true,
       conversation,
       messages: messagesResult.messages,
+      hasMore: messagesResult.hasMore,
       newMessage: toMessageSnapshot(insertedRow, profileId),
     }
   }
@@ -1486,6 +1671,69 @@ export async function createChatStore(
     return totalDeleted
   }
 
+  /**
+   * Bounded background convergence job primitive (виж index.ts's
+   * runOversizedChatPruneJob) — обработва до `conversationBatchSize`
+   * conversations на цикъл, всеки в собствена BEGIN IMMEDIATE/COMMIT
+   * транзакция (mirror на friendshipStore.ts's runRetentionCleanup
+   * per-candidate транзакция pattern), точно СЪЩАТА enqueue-then-delete
+   * логика като sendMessage's inline reactive prune по-долу (SELECT
+   * pruned filenames -> INSERT deletion-intent -> DELETE messages, всичко в
+   * ЕДНА транзакция, за да не изостане queue intent-ът от cascade delete-а).
+   * НЕ въвежда втори attachment cleanup mechanism — reuse-ва
+   * friend_chat_attachment_deletions опашката и existing worker-а изцяло.
+   */
+  function pruneOversizedConversations(conversationBatchSize: number): {
+    conversationsPruned: number
+    messagesDeleted: number
+  } {
+    const candidates = selectOversizedConversationCandidatesStatement.all(
+      PERSONAL_CHAT_STORAGE_LIMIT,
+      conversationBatchSize,
+    ) as { friendship_id: string; message_count: number }[]
+
+    let conversationsPruned = 0
+    let messagesDeleted = 0
+
+    for (const candidate of candidates) {
+      database.exec('BEGIN IMMEDIATE;')
+
+      try {
+        const prunedAttachmentRows = selectPrunedAttachmentFilenamesStatement.all(
+          candidate.friendship_id,
+          PERSONAL_CHAT_STORAGE_LIMIT,
+        ) as { storage_filename: string }[]
+
+        for (const prunedRow of prunedAttachmentRows) {
+          insertAttachmentDeletionStatement.run(prunedRow.storage_filename)
+        }
+
+        const result = pruneOldMessagesStatement.run(
+          candidate.friendship_id,
+          candidate.friendship_id,
+          PERSONAL_CHAT_STORAGE_LIMIT,
+        ) as { changes?: number }
+
+        const changes = result.changes ?? 0
+        messagesDeleted += changes
+        if (changes > 0) {
+          conversationsPruned += 1
+        }
+
+        database.exec('COMMIT;')
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // Keep the original write failure visible to the caller.
+        }
+        throw error
+      }
+    }
+
+    return { conversationsPruned, messagesDeleted }
+  }
+
   function close(): void {
     database.close()
   }
@@ -1507,6 +1755,7 @@ export async function createChatStore(
     markAttachmentDeletionFailed,
     attachmentExistsForFilename,
     purgeDoneAttachmentDeletions,
+    pruneOversizedConversations,
     close,
   }
 }

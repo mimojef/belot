@@ -541,6 +541,7 @@ type ChatConversationsResponse = {
 type ChatMessagesResponse = {
   ok: boolean
   messages?: ChatMessageSnapshot[]
+  hasMore?: boolean
   conversation?: ChatConversationSnapshot
   newMessage?: ChatMessageSnapshot
   message?: string
@@ -2705,13 +2706,17 @@ async function startVipDmFirstMessage(
   }
 }
 
-async function loadChatMessages(friendshipId: string): Promise<
-  | { ok: true; messages: ChatMessageSnapshot[] }
+async function loadChatMessages(
+  friendshipId: string,
+  beforeCursor: string | null = null,
+): Promise<
+  | { ok: true; messages: ChatMessageSnapshot[]; hasMore: boolean }
   | { ok: false; message: string }
 > {
   try {
+    const qs = beforeCursor !== null ? `?before=${encodeURIComponent(beforeCursor)}` : ''
     const response = await fetch(
-      `${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/messages`,
+      `${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/messages${qs}`,
       {
         method: 'GET',
         credentials: 'include',
@@ -2729,6 +2734,7 @@ async function loadChatMessages(friendshipId: string): Promise<
     return {
       ok: true,
       messages: data.messages,
+      hasMore: data.hasMore ?? false,
     }
   } catch {
     return {
@@ -2797,6 +2803,7 @@ async function sendChatMessage(
       ok: true
       conversation: ChatConversationSnapshot
       messages: ChatMessageSnapshot[]
+      hasMore: boolean
       newMessage?: ChatMessageSnapshot
     }
   | { ok: false; message: string }
@@ -2839,6 +2846,7 @@ async function sendChatMessage(
       ok: true,
       conversation: data.conversation,
       messages: data.messages,
+      hasMore: data.hasMore ?? false,
       newMessage: data.newMessage,
     }
   } catch {
@@ -5730,7 +5738,7 @@ lobby = createLobbyFlowController({
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
   onVipDmFirstMessageSend: (recipientProfileId, body, imageDataUrl) => startVipDmFirstMessage(recipientProfileId, body, imageDataUrl),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),
-  onChatMessagesLoad: (friendshipId) => loadChatMessages(friendshipId),
+  onChatMessagesLoad: (friendshipId, beforeCursor) => loadChatMessages(friendshipId, beforeCursor),
   onChatMarkRead: async (friendshipId) => {
     await markChatConversationRead(friendshipId)
   },
