@@ -277,6 +277,26 @@ export async function createFriendshipStore(
       );
   `)
 
+  // Deletion-intent за attachment файловете на разговора, ПРЕДИ
+  // deleteAcceptedFriendshipStatement по-долу — profile_friendships ->
+  // friend_chat_messages -> friend_chat_attachments е ON DELETE CASCADE
+  // (виж migrations), затова DB редовете иначе биха изчезнали БЕЗ да
+  // enqueue-нат storage_filename за физическо изтриване (същия проблем и
+  // fix pattern като chatStore.ts's selectPrunedAttachmentFilenamesStatement
+  // при >500-message prune). Изпълнява се в СЪЩАТА транзакция като delete-а,
+  // за да не изостане queue intent-ът от реалното cascade изтриване.
+  const selectFriendshipAttachmentFilenamesStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM friend_chat_attachments a
+    JOIN friend_chat_messages m ON m.message_id = a.message_id
+    WHERE m.friendship_id = ?;
+  `)
+
+  const insertAttachmentDeletionStatement = database.prepare(`
+    INSERT INTO friend_chat_attachment_deletions (storage_filename)
+    VALUES (?);
+  `)
+
   const selectUnreadAcceptancesStatement = database.prepare(`
     SELECT
       friendship_id,
@@ -620,13 +640,47 @@ export async function createFriendshipStore(
   ):
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string } {
-    const result = deleteAcceptedFriendshipStatement.run(
-      friendshipId,
-      profileId,
-      profileId,
-    ) as { changes?: number }
+    database.exec('BEGIN IMMEDIATE;')
 
-    if ((result.changes ?? 0) === 0) {
+    let changes = 0
+
+    try {
+      // Attachment filenames трябва да се прочетат ПРЕДИ delete-а по-долу —
+      // profile_friendships -> friend_chat_messages -> friend_chat_attachments
+      // е ON DELETE CASCADE, затова редовете изчезват от DB веднага след
+      // deleteAcceptedFriendshipStatement.run() (същата транзакция).
+      const attachmentRows = selectFriendshipAttachmentFilenamesStatement.all(
+        friendshipId,
+      ) as { storage_filename: string }[]
+
+      const result = deleteAcceptedFriendshipStatement.run(
+        friendshipId,
+        profileId,
+        profileId,
+      ) as { changes?: number }
+
+      changes = result.changes ?? 0
+
+      // Enqueue-ваме САМО ако delete-ът реално е засегнал ред — иначе
+      // (невалиден/чужд friendshipId) бихме записали queue intent за
+      // attachment-и, чийто разговор въобще не е бил изтрит тук.
+      if (changes > 0) {
+        for (const attachmentRow of attachmentRows) {
+          insertAttachmentDeletionStatement.run(attachmentRow.storage_filename)
+        }
+      }
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original write failure visible to the caller.
+      }
+      throw error
+    }
+
+    if (changes === 0) {
       return {
         ok: false,
         message: 'Приятелството не беше намерено.',

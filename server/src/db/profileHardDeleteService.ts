@@ -235,6 +235,27 @@ export async function createProfileHardDeleteService(
     DELETE FROM player_blocks WHERE blocker_profile_id = ? OR blocked_profile_id = ?;
   `)
 
+  // Deletion-intent за attachment файловете на ВСИЧКИ лични разговори на
+  // target профила, ПРЕДИ deleteProfileStatement по-долу — profiles ->
+  // profile_friendships -> friend_chat_messages -> friend_chat_attachments
+  // е ON DELETE CASCADE (виж migrations), затова DB редовете иначе биха
+  // изчезнали БЕЗ да enqueue-нат storage_filename за физическо изтриване
+  // (същия проблем и fix pattern като chatStore.ts's
+  // selectPrunedAttachmentFilenamesStatement / friendshipStore.ts's
+  // selectFriendshipAttachmentFilenamesStatement при unfriend).
+  const selectProfileAttachmentFilenamesStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM friend_chat_attachments a
+    JOIN friend_chat_messages m ON m.message_id = a.message_id
+    JOIN profile_friendships f ON f.friendship_id = m.friendship_id
+    WHERE f.requester_profile_id = ? OR f.addressee_profile_id = ?;
+  `)
+
+  const insertAttachmentDeletionStatement = database.prepare(`
+    INSERT INTO friend_chat_attachment_deletions (storage_filename)
+    VALUES (?);
+  `)
+
   const insertDeletionAuditStatement = database.prepare(`
     INSERT INTO admin_profile_deletions (
       log_id, deleted_profile_id, deleted_account_id, username_snapshot,
@@ -772,6 +793,19 @@ export async function createProfileHardDeleteService(
       // Таблици без FK към profiles — cascade НЯМА да ги пипне, чистим ръчно
       // за да няма orphan rows (spec §8/§11).
       deletePlayerBlocksStatement.run(input.targetProfileId, input.targetProfileId)
+
+      // Виж selectProfileAttachmentFilenamesStatement doc коментара — трябва
+      // да се изпълни ПРЕДИ deleteProfileStatement.run() по-долу
+      // (friend_chat_attachments редовете още не са cascade-delete-нати в
+      // тази точка).
+      const profileAttachmentRows = selectProfileAttachmentFilenamesStatement.all(
+        input.targetProfileId,
+        input.targetProfileId,
+      ) as { storage_filename: string }[]
+
+      for (const attachmentRow of profileAttachmentRows) {
+        insertAttachmentDeletionStatement.run(attachmentRow.storage_filename)
+      }
 
       deleteProfileStatement.run(input.targetProfileId)
 
