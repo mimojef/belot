@@ -243,6 +243,12 @@ export async function createProfileHardDeleteService(
   // (същия проблем и fix pattern като chatStore.ts's
   // selectPrunedAttachmentFilenamesStatement / friendshipStore.ts's
   // selectFriendshipAttachmentFilenamesStatement при unfriend).
+  //
+  // Нарочно БЕЗ status филтър тук — обхваща еднакво 'accepted' (active) И
+  // 'removed' (unfriended, still-in-90-day-retention) redовете (виж 90-дневния
+  // retention модел в friendshipStore.ts). Profile hard delete е immediate
+  // destructive cleanup, който НЕ чака retention deadline-а — DELETE FROM
+  // profiles по-долу каскадно трие profile_friendships независимо от status.
   const selectProfileAttachmentFilenamesStatement = database.prepare(`
     SELECT a.storage_filename
     FROM friend_chat_attachments a

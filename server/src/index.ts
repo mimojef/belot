@@ -430,6 +430,21 @@ const TOPIC_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS = CHAT_ATTACHMENT_ORPHAN_SCAN_INT
 const TOPIC_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS = 150_000
 const TOPIC_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS = CHAT_ATTACHMENT_ORPHAN_GRACE_PERIOD_MS
 const TOPIC_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS = CHAT_ATTACHMENT_DELETION_EVENT_RETENTION_DAYS
+// Friendship 90-дневен retention cleanup (виж friendshipStore.ts's
+// runRetentionCleanup/FRIENDSHIP_RETENTION_DAYS) — hard-delete-ва unfriended
+// relationships, чийто removed_at е изтекъл. Часови (не дневен) interval —
+// продуктовото правило е точно 90 дни retention; при дневен job реалният
+// hard delete можеше да се забави почти до 91 дни (worst-case latency = един
+// interval период). idx_profile_friendships_removed_at partial index-ът прави
+// discovery заявката (selectExpiredRetainedFriendshipCandidatesStatement)
+// евтина дори на всеки час, а batch-ът е no-op (0 candidates -> 0 destructive
+// операции) в overwhelming мнозинството от тези часови tick-ове, докато
+// действителен expired ред не се появи. Изместен startup delay (75s), за да
+// не се засича с chat (30s)/support (45s)/topic (60s) attachment cleanup-ите
+// при server startup.
+const FRIENDSHIP_RETENTION_CLEANUP_INTERVAL_MS = 60 * 60 * 1000
+const FRIENDSHIP_RETENTION_CLEANUP_STARTUP_DELAY_MS = 75_000
+const FRIENDSHIP_RETENTION_CLEANUP_BATCH_SIZE = 200
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
 type GameWorkerTickMode = 'in-process' | 'worker-candidate'
@@ -2371,6 +2386,40 @@ let chatAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = se
   () => { void runChatAttachmentOrphanScan() },
   CHAT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
 )
+
+// ─── Friendship 90-дневен retention cleanup ─────────────────────────────────
+// Hard-delete-ва unfriended (status='removed') relationships, чийто
+// removed_at е поне FRIENDSHIP_RETENTION_DAYS дни в миналото — виж
+// friendshipStore.ts's runRetentionCleanup за race-safe re-check/transaction
+// логиката (всеки candidate се re-check-ва ВЪТРЕ в собствена транзакция
+// непосредствено преди delete-а, за да не изтрие reactivated relationship).
+function runFriendshipRetentionCleanup(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  try {
+    const result = friendshipStore.runRetentionCleanup(FRIENDSHIP_RETENTION_CLEANUP_BATCH_SIZE)
+    if (result.deletedFriendships > 0 || result.clearedPendingHistories > 0) {
+      console.log(
+        `[friendships] Retention cleanup: deleted ${result.deletedFriendships} expired relationship(s), ` +
+          `cleared history on ${result.clearedPendingHistories} pending re-friend request(s)`,
+      )
+    }
+  } catch (error) {
+    console.error('[friendships] Retention cleanup failed:', error)
+  }
+}
+
+let friendshipRetentionCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  runFriendshipRetentionCleanup,
+  FRIENDSHIP_RETENTION_CLEANUP_STARTUP_DELAY_MS,
+)
+let friendshipRetentionCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
+  runFriendshipRetentionCleanup,
+  FRIENDSHIP_RETENTION_CLEANUP_INTERVAL_MS,
+)
+
 const yellowCoinGiftStore = await createYellowCoinGiftStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -20709,6 +20758,16 @@ function clearMutationTimersForShutdown(): void {
   if (lobbyChatRetentionStartupTimeout !== null) {
     clearTimeout(lobbyChatRetentionStartupTimeout)
     lobbyChatRetentionStartupTimeout = null
+  }
+
+  if (friendshipRetentionCleanupInterval !== null) {
+    clearInterval(friendshipRetentionCleanupInterval)
+    friendshipRetentionCleanupInterval = null
+  }
+
+  if (friendshipRetentionCleanupStartupTimeout !== null) {
+    clearTimeout(friendshipRetentionCleanupStartupTimeout)
+    friendshipRetentionCleanupStartupTimeout = null
   }
 
   if (chatAttachmentCleanupInterval !== null) {
