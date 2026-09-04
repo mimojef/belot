@@ -235,6 +235,29 @@ export async function createProfileHardDeleteService(
     DELETE FROM player_blocks WHERE blocker_profile_id = ? OR blocked_profile_id = ?;
   `)
 
+  // chat_conversation_reads (profile_id, friendship_id) НЯМА FOREIGN KEY изобщо
+  // (виж 20260520_001 migration-а) — за разлика от friend_chat_messages/
+  // friend_chat_attachments (ON DELETE CASCADE през profile_friendships),
+  // read-marker редовете преживяват DELETE FROM profiles/profile_friendships
+  // непокътнати, orphaned. Два отделни случая тук:
+  //  1) profile_id = target — собствените read-marker редове на target профила
+  //     (за ВСЕКИ негов friendship_id, независимо дали target е requester или
+  //     addressee там).
+  //  2) friendship_id IN (target-овите friendships) — read-marker редовете на
+  //     ДРУГАТА страна от разговора, за друг profile_id, но за friendship_id,
+  //     който тъкмо изчезва cascade-но заедно с target профила.
+  // Нарочно БЕЗ status филтър — обхваща еднакво 'accepted' и 'removed'
+  // (retained) redовете, като selectProfileAttachmentFilenamesStatement
+  // по-горе — hard delete е immediate, не чака retention deadline-а.
+  const deleteProfileChatReadsStatement = database.prepare(`
+    DELETE FROM chat_conversation_reads
+    WHERE profile_id = ?
+      OR friendship_id IN (
+        SELECT friendship_id FROM profile_friendships
+        WHERE requester_profile_id = ? OR addressee_profile_id = ?
+      );
+  `)
+
   // Deletion-intent за attachment файловете на ВСИЧКИ лични разговори на
   // target профила, ПРЕДИ deleteProfileStatement по-долу — profiles ->
   // profile_friendships -> friend_chat_messages -> friend_chat_attachments
@@ -812,6 +835,16 @@ export async function createProfileHardDeleteService(
       for (const attachmentRow of profileAttachmentRows) {
         insertAttachmentDeletionStatement.run(attachmentRow.storage_filename)
       }
+
+      // Виж deleteProfileChatReadsStatement doc коментара — трябва да се
+      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (profile_friendships
+      // редовете на target профила още не са cascade-delete-нати в тази точка,
+      // subquery-то разчита на тяхното присъствие).
+      deleteProfileChatReadsStatement.run(
+        input.targetProfileId,
+        input.targetProfileId,
+        input.targetProfileId,
+      )
 
       deleteProfileStatement.run(input.targetProfileId)
 

@@ -451,6 +451,22 @@ export async function createFriendshipStore(
     VALUES (?);
   `)
 
+  // chat_conversation_reads (profile_id, friendship_id) НЯМА FOREIGN KEY изобщо
+  // (виж 20260520_001 migration-а — единствената CREATE TABLE за нея) —
+  // read-marker редовете НЕ изчезват автоматично при никакъв cascade. Ползвана
+  // САМО от destructive hard-delete пътя на runRetentionCleanup по-долу
+  // (status='removed' branch, където profile_friendships реда самия СЕ трие) —
+  // НЕ от normal unfriend (softRemoveAcceptedFriendshipStatement по-горе е
+  // non-destructive soft-state UPDATE; read-state трябва да оцелее за
+  // потенциален re-friend в рамките на 90-дневния прозорец) и НЕ от pending-branch
+  // history wipe-а (clearExpiredPendingRetentionStatement/deleteFriendshipMessagesStatement
+  // по-долу трият само messages/attachments, но самият friendship_id остава
+  // жив pending request — read timestamp-ът пак важи за бъдещи съобщения по
+  // същия friendship_id, не е orphan).
+  const deleteFriendshipReadsStatement = database.prepare(`
+    DELETE FROM chat_conversation_reads WHERE friendship_id = ?;
+  `)
+
   // Chat-history-only destructive cleanup — НЕ трие profile_friendships реда
   // (за разлика от deleteExpiredRetainedFriendshipStatement по-долу). Ползвана
   // от два пътя, и двата "expired retention, но relationship row-ът трябва да
@@ -1045,6 +1061,12 @@ export async function createFriendshipStore(
             for (const attachmentRow of attachmentRows) {
               insertAttachmentDeletionStatement.run(attachmentRow.storage_filename)
             }
+            // chat_conversation_reads няма FK — profile_friendships row-ът
+            // тъкмо изчезна завинаги (DELETE по-горе), затова read-marker
+            // редовете за този friendship_id са orphaned от този момент
+            // нататък, ако не ги изтрием explicit тук (виж statement doc
+            // коментара по-горе).
+            deleteFriendshipReadsStatement.run(candidate.friendship_id)
             deletedFriendships += 1
           }
         } else {
