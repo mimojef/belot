@@ -5181,6 +5181,14 @@ type TournamentEntryActionErrorResponse = {
   message?: string
   reason?: string
   requiresPassword?: boolean
+  /** Само за join, reason==='registered_tournament_starts_soon'/
+   * 'scheduled_tournament_time_conflict' (§"BLOCK CASE A"/"BLOCK CASE B" в
+   * multi-tournament registration task spec-а) — undefined за всички
+   * останали tournament action responses. */
+  blockingTournamentId?: string
+  scheduledStartAt?: string
+  blockingScheduledStartAt?: string
+  requestedTournamentScheduledStartAt?: string
 }
 
 async function joinTournamentRequest(
@@ -5188,7 +5196,16 @@ async function joinTournamentRequest(
   password: string | null,
 ): Promise<
   | { ok: true; alreadyJoined: boolean; debitedAmount?: number; walletBalance: number; tournament: TournamentSummarySnapshot }
-  | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+  | {
+      ok: false
+      message: string
+      reason?: string
+      requiresPassword?: boolean
+      blockingTournamentId?: string
+      scheduledStartAt?: string
+      blockingScheduledStartAt?: string
+      requestedTournamentScheduledStartAt?: string
+    }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/tournaments/${encodeURIComponent(tournamentId)}/join`, {
@@ -5206,6 +5223,10 @@ async function joinTournamentRequest(
         message: (data as TournamentEntryActionErrorResponse).message ?? 'Записването не бе успешно.',
         reason: (data as TournamentEntryActionErrorResponse).reason,
         requiresPassword: (data as TournamentEntryActionErrorResponse).requiresPassword,
+        blockingTournamentId: (data as TournamentEntryActionErrorResponse).blockingTournamentId,
+        scheduledStartAt: (data as TournamentEntryActionErrorResponse).scheduledStartAt,
+        blockingScheduledStartAt: (data as TournamentEntryActionErrorResponse).blockingScheduledStartAt,
+        requestedTournamentScheduledStartAt: (data as TournamentEntryActionErrorResponse).requestedTournamentScheduledStartAt,
       }
     }
     if (currentAuthSession !== null) {
@@ -5430,7 +5451,20 @@ type TournamentPartnerInviteActionResponse =
       walletBalance: number
       tournament: TournamentSummarySnapshot
     }
-  | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+  | {
+      ok: false
+      message: string
+      reason?: string
+      requiresPassword?: boolean
+      /** Само за reason==='registered_tournament_starts_soon'/
+       * 'scheduled_tournament_time_conflict' (§"SOLO + PARTNER FLOW
+       * CONSISTENCY" в multi-tournament registration task spec-а) —
+       * undefined за всички други reasons. */
+      blockingTournamentId?: string
+      scheduledStartAt?: string
+      blockingScheduledStartAt?: string
+      requestedTournamentScheduledStartAt?: string
+    }
 
 async function loadTournamentPartnerCandidates(
   tournamentId: string,
@@ -5554,7 +5588,16 @@ async function createTournamentPartnerInviteRequest(
     const data = (await response.json()) as TournamentPartnerInviteActionResponse
     if (!response.ok || !data.ok) {
       const errorData = data as Extract<TournamentPartnerInviteActionResponse, { ok: false }>
-      return { ok: false, message: errorData.message ?? 'Поканата не бе изпратена.', reason: errorData.reason, requiresPassword: errorData.requiresPassword }
+      return {
+        ok: false,
+        message: errorData.message ?? 'Поканата не бе изпратена.',
+        reason: errorData.reason,
+        requiresPassword: errorData.requiresPassword,
+        blockingTournamentId: errorData.blockingTournamentId,
+        scheduledStartAt: errorData.scheduledStartAt,
+        blockingScheduledStartAt: errorData.blockingScheduledStartAt,
+        requestedTournamentScheduledStartAt: errorData.requestedTournamentScheduledStartAt,
+      }
     }
     if (currentAuthSession !== null) {
       currentAuthSession = {
@@ -5582,7 +5625,15 @@ async function respondTournamentPartnerInviteRequest(
     const data = (await response.json()) as TournamentPartnerInviteActionResponse
     if (!response.ok || !data.ok) {
       const errorData = data as Extract<TournamentPartnerInviteActionResponse, { ok: false }>
-      return { ok: false, message: errorData.message ?? 'Поканата не бе обработена.', reason: errorData.reason }
+      return {
+        ok: false,
+        message: errorData.message ?? 'Поканата не бе обработена.',
+        reason: errorData.reason,
+        blockingTournamentId: errorData.blockingTournamentId,
+        scheduledStartAt: errorData.scheduledStartAt,
+        blockingScheduledStartAt: errorData.blockingScheduledStartAt,
+        requestedTournamentScheduledStartAt: errorData.requestedTournamentScheduledStartAt,
+      }
     }
     if (currentAuthSession !== null) {
       currentAuthSession = {

@@ -161,7 +161,11 @@ for (const code of candidateUnavailableReasonCodes) {
   if (code === 'self' || code === 'not_registered_human') continue // literal-string returns are exact
   check(
     `economy store still actually returns "${code}" from getCandidateUnavailableReason`,
-    economy.includes(`return '${code}'`),
+    // getCandidateUnavailableReason връща { code, activeEntryBlock? } обект
+    // (не plain string) от multi-tournament registration Case A/B fix-а
+    // (виж resolveActiveEntryBlock/CandidateUnavailableResult в
+    // tournamentEconomyStore.ts) — pattern-ът следва точния source shape.
+    economy.includes(`return { code: '${code}'`),
   )
 }
 

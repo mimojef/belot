@@ -79,10 +79,31 @@ export type JoinTournamentSoloResult =
         | 'tournament_full'
         | 'rejoin_not_allowed'
         | 'already_participating_elsewhere'
+        /** Case A — профилът има друга 'open' scheduled регистрация, чийто
+         * scheduled_start_at е под 60 минути ОТ СЕГА (виж
+         * resolveActiveEntryBlock) — различно от 'already_participating_elsewhere'
+         * (started tournament ИЛИ start-when-full), за да може клиентът да
+         * покаже dedicated "Виж турнира" banner вместо generic грешка. */
+        | 'registered_tournament_starts_soon'
+        /** Case B — профилът има друга 'open' scheduled регистрация, чийто
+         * scheduled_start_at е под 60 минути ABS разлика от ТОЗИ турнир
+         * (независимо от "сега" и независимо колко далеч в бъдещето е всеки
+         * от двата) — виж resolveActiveEntryBlock. */
+        | 'scheduled_tournament_time_conflict'
         | 'insufficient_funds'
         | 'requires_password'
         | 'participation_blocked'
         | 'shuffle_already_completed'
+      /** Общ за Case A и Case B — турнирът, заради чиято близка регистрация
+       * join-ът е блокиран (виж resolveActiveEntryBlock), за да отвори
+       * клиентът точно него. */
+      blockingTournamentId?: TournamentId
+      /** Само за reason==='registered_tournament_starts_soon' — UTC ISO
+       * timestamp на scheduled_start_at на блокиращия турнир. */
+      scheduledStartAt?: string
+      /** Само за reason==='scheduled_tournament_time_conflict'. */
+      blockingScheduledStartAt?: string
+      requestedTournamentScheduledStartAt?: string
     }
 
 export type LeaveTournamentResult =
@@ -279,6 +300,16 @@ export type PartnerInviteMutationResult =
         | 'self_invite'
         | 'already_participant'
         | 'already_participating_elsewhere'
+        /** Виж JoinTournamentSoloResult-а по-горе за пълния коментар —
+         * идентична семантика тук: засегнатият профил (inviter при create
+         * flow, invitee при accept flow) има друга 'open' scheduled
+         * регистрация под 60 мин от сега (Case A). */
+        | 'registered_tournament_starts_soon'
+        /** Case B — засегнатият профил има друга 'open' scheduled
+         * регистрация, чийто scheduled_start_at е под 60 мин ABS разлика от
+         * ТОЗИ турнир (независимо колко далеч в бъдещето е всеки от двата).
+         * Виж resolveActiveEntryBlock. */
+        | 'scheduled_tournament_time_conflict'
         | 'already_has_pending_invite'
         | 'already_teamed'
         | 'invite_not_found'
@@ -288,6 +319,14 @@ export type PartnerInviteMutationResult =
         | 'insufficient_funds'
         | 'team_invalid'
         | 'participation_blocked'
+      /** Общ за двата case-а (A и B) — турнирът, заради чиято близка
+       * регистрация опитът е блокиран. */
+      blockingTournamentId?: TournamentId
+      /** Само за reason==='registered_tournament_starts_soon' (Case A). */
+      scheduledStartAt?: string
+      /** Само за reason==='scheduled_tournament_time_conflict' (Case B). */
+      blockingScheduledStartAt?: string
+      requestedTournamentScheduledStartAt?: string
     }
 
 export type PartnerInviteNotificationStateResult =
@@ -509,6 +548,10 @@ type WalletRow = {
 
 type ActiveAccountEntryRow = {
   entry_id: string
+  tournament_id: string
+  tournament_status: string
+  start_mode: string
+  scheduled_start_at: string | null
 }
 
 type ProfileEligibilityRow = {
@@ -687,6 +730,176 @@ function isFillExpired(tournament: TournamentRow, nowMs: number): boolean {
   return new Date(dbDateToUtc(tournament.fill_expires_at)).getTime() <= nowMs
 }
 
+// §"НОВО ОСНОВНО ПРАВИЛО" в multi-tournament registration task spec-а —
+// прозорецът, под който профилът вече не може да се запише в НОВ турнир,
+// докато е записан в друг 'open' SCHEDULED турнир. Точно 60:00 минути НЕ
+// блокира (стриктно "под" прозореца, виж §"D) Точно 60:00 минути").
+const TOURNAMENT_ACTIVE_ENTRY_START_BLOCK_WINDOW_MS = 60 * 60 * 1000
+
+type ActiveEntryBlock =
+  | { blocked: false }
+  | { blocked: true; reason: 'already_participating_elsewhere' }
+  | {
+      blocked: true
+      reason: 'registered_tournament_starts_soon'
+      blockingTournamentId: TournamentId
+      scheduledStartAt: string
+    }
+  | {
+      blocked: true
+      reason: 'scheduled_tournament_time_conflict'
+      blockingTournamentId: TournamentId
+      blockingScheduledStartAt: string
+      requestedTournamentScheduledStartAt: string
+    }
+
+// Минималната форма на "турнира, в който се прави опит за join/invite",
+// нужна само за Case B (виж по-долу) — приема се explicit от caller-а
+// (винаги вече има TournamentRow в scope на chokepoint-а), НЕ се фетчва тук,
+// за да остане resolveActiveEntryBlock чиста функция без database достъп.
+type JoiningTournamentInfo = {
+  start_mode: string
+  scheduled_start_at: string | null
+}
+
+// Единствен chokepoint, решаващ дали профилът (акаунтът) вече има активна
+// регистрация, която трябва да блокира НОВ join/invite опит — reuse-ван от
+// joinTournamentSoloAtomically, createPartnerInviteAtomically (inviter
+// собствения check), getCandidateUnavailableReason (invitee eligibility/
+// partner candidate list display) и validateInvitee, за да не зависи
+// резултатът от пътя, по който е направен опитът (§"НЕ ДОПУСКАЙ
+// ORDER-BASED BYPASS" в task spec-а) — при всеки нов опит всички активни
+// registrations на профила (акаунта) се преизчисляват наново тук, никога не
+// се кешират по entry ред.
+//
+// Правила по ред (виж §"BLOCK CASE A"/"BLOCK CASE B"/§6 в task spec-а за
+// consistency fix-а):
+//  1) активна регистрация в турнир, който вече Е СТАРТИРАЛ (starting/
+//     semifinal_in_progress/final_in_progress) — блокира безусловно, старото
+//     поведение е непроменено (случай L — "вече играя started tournament").
+//  2) активна регистрация в 'open' start_mode='fill' турнир ("При
+//     запълване") — блокира безусловно, БЕЗ 60-мин прозорец: няма надежден
+//     scheduled_start_at, върху който да приложим сравнение (случай K —
+//     старата по-строга защита остава непроменена).
+//  3) Case A — активни регистрации в 'open' start_mode='scheduled' турнири:
+//     намира НАЙ-БЛИЗКИЯ до "сега" (минимален scheduled_start_at) и блокира
+//     само ако remaining < 60 минути СПРЯМО NOW. По-далечни регистрации
+//     никога не блокират сами по себе си (случаи A/B), точно 60:00 минути
+//     не блокира (случай D). Проверява се ПРЕДИ Case B — ако вече блокира
+//     тук, Case B изобщо не се изчислява (виж §5 в task spec-а).
+//  4) Case B — само ако ТОЗИ join опит е за 'scheduled' турнир с валиден
+//     scheduled_start_at: сред активните 'open' scheduled регистрации
+//     намира тази с МИНИМАЛНА абсолютна разлика спрямо requested турнира и
+//     блокира, ако |delta| < 60 минути — НЕЗАВИСИМО колко далеч в бъдещето
+//     са двата турнира (случаи E/F/I). Симетрично (ABS), точно 60 минути
+//     разлика не блокира (случаи G/H).
+function resolveActiveEntryBlock(
+  rows: ActiveAccountEntryRow[],
+  nowMs: number,
+  joiningTournament: JoiningTournamentInfo,
+): ActiveEntryBlock {
+  const hasStartedElsewhere = rows.some(
+    (row) =>
+      row.tournament_status === 'starting' ||
+      row.tournament_status === 'semifinal_in_progress' ||
+      row.tournament_status === 'final_in_progress',
+  )
+  if (hasStartedElsewhere) {
+    return { blocked: true, reason: 'already_participating_elsewhere' }
+  }
+
+  const hasActiveFillEntry = rows.some(
+    (row) => row.tournament_status === 'open' && row.start_mode === 'fill',
+  )
+  if (hasActiveFillEntry) {
+    return { blocked: true, reason: 'already_participating_elsewhere' }
+  }
+
+  const activeScheduledEntries: { tournamentId: string; scheduledStartMs: number; scheduledStartAt: string }[] = []
+  for (const row of rows) {
+    if (row.tournament_status !== 'open' || row.start_mode !== 'scheduled' || row.scheduled_start_at === null) {
+      continue
+    }
+    const scheduledStartAt = dbDateToUtc(row.scheduled_start_at)
+    const scheduledStartMs = new Date(scheduledStartAt).getTime()
+    if (!Number.isFinite(scheduledStartMs)) continue
+    activeScheduledEntries.push({ tournamentId: row.tournament_id, scheduledStartMs, scheduledStartAt })
+  }
+
+  // Case A: най-близката до "сега" активна регистрация.
+  let nearestToNow: (typeof activeScheduledEntries)[number] | null = null
+  for (const entry of activeScheduledEntries) {
+    if (nearestToNow === null || entry.scheduledStartMs < nearestToNow.scheduledStartMs) {
+      nearestToNow = entry
+    }
+  }
+  if (nearestToNow !== null && nearestToNow.scheduledStartMs - nowMs < TOURNAMENT_ACTIVE_ENTRY_START_BLOCK_WINDOW_MS) {
+    return {
+      blocked: true,
+      reason: 'registered_tournament_starts_soon',
+      blockingTournamentId: nearestToNow.tournamentId,
+      scheduledStartAt: nearestToNow.scheduledStartAt,
+    }
+  }
+
+  // Case B: pairwise близост спрямо ИМЕННО ТОЗИ join опит, независимо от "сега".
+  if (joiningTournament.start_mode === 'scheduled' && joiningTournament.scheduled_start_at !== null) {
+    const requestedScheduledStartAt = dbDateToUtc(joiningTournament.scheduled_start_at)
+    const requestedScheduledStartMs = new Date(requestedScheduledStartAt).getTime()
+    if (Number.isFinite(requestedScheduledStartMs)) {
+      let nearestConflict: { tournamentId: string; scheduledStartAt: string; deltaMs: number } | null = null
+      for (const entry of activeScheduledEntries) {
+        const deltaMs = Math.abs(entry.scheduledStartMs - requestedScheduledStartMs)
+        if (deltaMs >= TOURNAMENT_ACTIVE_ENTRY_START_BLOCK_WINDOW_MS) continue
+        if (nearestConflict === null || deltaMs < nearestConflict.deltaMs) {
+          nearestConflict = { tournamentId: entry.tournamentId, scheduledStartAt: entry.scheduledStartAt, deltaMs }
+        }
+      }
+      if (nearestConflict !== null) {
+        return {
+          blocked: true,
+          reason: 'scheduled_tournament_time_conflict',
+          blockingTournamentId: nearestConflict.tournamentId,
+          blockingScheduledStartAt: nearestConflict.scheduledStartAt,
+          requestedTournamentScheduledStartAt: requestedScheduledStartAt,
+        }
+      }
+    }
+  }
+
+  return { blocked: false }
+}
+
+// Превръща resolveActiveEntryBlock резултата в PartnerInviteMutationResult
+// failure — reuse-ван от inviter собствения active-entry check в
+// createPartnerInviteAtomically И от validateInvitee (invitee eligibility
+// за create+accept flow), за да не се дублира mapping-а на Case A/Case B
+// полетата на две отделни места (§"SOLO + PARTNER FLOW CONSISTENCY" в task
+// spec-а).
+function mapActiveEntryBlockToPartnerInviteFailure(
+  block: ActiveEntryBlock,
+): Extract<PartnerInviteMutationResult, { ok: false }> | null {
+  if (!block.blocked) return null
+  if (block.reason === 'registered_tournament_starts_soon') {
+    return {
+      ok: false,
+      reason: 'registered_tournament_starts_soon',
+      blockingTournamentId: block.blockingTournamentId,
+      scheduledStartAt: block.scheduledStartAt,
+    }
+  }
+  if (block.reason === 'scheduled_tournament_time_conflict') {
+    return {
+      ok: false,
+      reason: 'scheduled_tournament_time_conflict',
+      blockingTournamentId: block.blockingTournamentId,
+      blockingScheduledStartAt: block.blockingScheduledStartAt,
+      requestedTournamentScheduledStartAt: block.requestedTournamentScheduledStartAt,
+    }
+  }
+  return { ok: false, reason: 'already_participating_elsewhere' }
+}
+
 export async function createTournamentEconomyStore(
   databaseFilePath: string,
 ): Promise<TournamentEconomyStore> {
@@ -765,8 +978,16 @@ export async function createTournamentEconomyStore(
     LIMIT 1;
   `)
 
-  const selectActiveEntryForAccountStatement = database.prepare(`
-    SELECT te.entry_id
+  // Връща ВСИЧКИ активни (confirmed/finalist) регистрации на акаунта, не
+  // само първата (виж §"НОВО ОСНОВНО ПРАВИЛО" — профилът вече може да има
+  // регистрации в няколко бъдещи турнира, затова gate-ът трябва да прецени
+  // всяка от тях през resolveActiveEntryBlock, не просто да провери
+  // съществуване). Преди тази промяна имаше LIMIT 1 — достатъчно за старото
+  // "блокирай ако има КАКВОТО и да е активно участие" правило, недостатъчно
+  // за новото "намери НАЙ-БЛИЗКИЯ upcoming турнир" правило.
+  const selectActiveEntriesForAccountStatement = database.prepare(`
+    SELECT te.entry_id, t.tournament_id AS tournament_id, t.status AS tournament_status,
+           t.start_mode AS start_mode, t.scheduled_start_at AS scheduled_start_at
     FROM tournament_entries te
     JOIN tournaments t
       ON t.tournament_id = te.tournament_id
@@ -778,8 +999,7 @@ export async function createTournamentEconomyStore(
       AND t.status IN ('open', 'starting', 'semifinal_in_progress', 'final_in_progress')
       AND entry_profile.account_id IS NOT NULL
       AND joining_profile.account_id IS NOT NULL
-      AND entry_profile.account_id = joining_profile.account_id
-    LIMIT 1;
+      AND entry_profile.account_id = joining_profile.account_id;
   `)
 
   const selectConfirmedEntriesStatement = database.prepare(`
@@ -1078,7 +1298,7 @@ export async function createTournamentEconomyStore(
   // Moderation rejoin-block check (§"PROFILE VS ACCOUNT IDENTITY" в task
   // spec-а) — profile-scoped storage (blocked_profile_id), но
   // account-aware enforcement: join-ва live към profiles.account_id на
-  // blocked_profile_id, огледално на selectActiveEntryForAccountStatement,
+  // blocked_profile_id, огледално на selectActiveEntriesForAccountStatement,
   // за да не може блокираният играч да заобиколи забраната чрез друг
   // профил на СЪЩИЯ акаунт. Params: (actingProfileId, tournamentId, actingProfileId).
   const selectParticipationBlockStatement = database.prepare(`
@@ -1595,16 +1815,29 @@ export async function createTournamentEconomyStore(
     return row ? toTournamentPartnerInviteRecord(row) : null
   }
 
+  // 'code' е стабилният, display-friendly reason (unchanged shape за
+  // candidate list consumers, виж PartnerCandidateRecord.unavailableReason).
+  // 'activeEntryBlock' е non-null ИЗКЛЮЧИТЕЛНО при code==='active_tournament'
+  // и носи пълния structured resolveActiveEntryBlock резултат (Case A/B
+  // reason + blockingTournamentId/timestamps), за да може validateInvitee да
+  // го препрати 1:1 в PartnerInviteMutationResult — candidate list display
+  // (getPartnerCandidatesForTournament/getGlobalPartnerCandidatesForTournament)
+  // продължава да чете само 'code' и остава generic (§"Candidate list
+  // display може да остане само unavailable state" в task spec-а).
+  type CandidateUnavailableResult = { code: string; activeEntryBlock?: ActiveEntryBlock }
+
   function getCandidateUnavailableReason(
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
     candidate: ProfileEligibilityRow,
-  ): string | null {
-    if (candidate.profile_id === inviterProfileId) return 'self'
+    nowMs: number,
+    joiningTournament: JoiningTournamentInfo,
+  ): CandidateUnavailableResult | null {
+    if (candidate.profile_id === inviterProfileId) return { code: 'self' }
     if (candidate.profile_kind !== 'human' || candidate.status !== 'active' || candidate.account_id === null) {
-      return 'not_registered_human'
+      return { code: 'not_registered_human' }
     }
-    if (candidate.is_temporary === 1) return 'temporary'
+    if (candidate.is_temporary === 1) return { code: 'temporary' }
     // Moderation rejoin block (§"REJOIN UX" в task spec-а) — покрива и двата
     // засегнати actor perspectives през ЕДИН chokepoint: инвайтъра поканва
     // блокиран candidate (create flow, candidate=invitee) И блокиран играч
@@ -1612,7 +1845,7 @@ export async function createTournamentEconomyStore(
     // си, виж acceptPartnerInviteAtomically -> validateInvitee). Проверено
     // ПРЕДИ hasBlockBetween нарочно — 'participation_blocked' е различна
     // семантика от social block-а по-долу и не бива да се маскира от него.
-    if (isParticipationBlocked(tournamentId, candidate.profile_id)) return 'participation_blocked'
+    if (isParticipationBlocked(tournamentId, candidate.profile_id)) return { code: 'participation_blocked' }
     // Friends-only prerequisite-ът е премахнат тук (беше: isConfirmedFriend
     // gate, връщащ not-friend reason) — вече ВСЕКИ eligible
     // registered human profile може да бъде поканен, не само confirmed
@@ -1622,7 +1855,7 @@ export async function createTournamentEconomyStore(
     // директно forged invite request — минават през ТОЗИ единствен
     // eligibility chokepoint, така че server-ът остава authoritative
     // независимо кой source е "предложил" кандидата на клиента.
-    if (hasBlockBetween(inviterProfileId, candidate.profile_id)) return 'blocked'
+    if (hasBlockBetween(inviterProfileId, candidate.profile_id)) return { code: 'blocked' }
     const existingEntry = selectEntryByTournamentAndProfileStatement.get(
       tournamentId,
       candidate.profile_id,
@@ -1631,12 +1864,16 @@ export async function createTournamentEconomyStore(
       existingEntry !== undefined &&
       (existingEntry.status === 'confirmed' || !isRejoinableEntryStatus(existingEntry.status))
     ) {
-      return 'already_in_tournament'
+      return { code: 'already_in_tournament' }
     }
-    const activeAccountEntry = selectActiveEntryForAccountStatement.get(
+    // Reuse-ва СЪЩИЯ resolveActiveEntryBlock chokepoint като solo join-а
+    // (§"НЕ ДОПУСКАЙ ORDER-BASED BYPASS" в task spec-а) — candidate list/
+    // invite validation вижда точно същото Case A/Case B правило.
+    const activeAccountEntries = selectActiveEntriesForAccountStatement.all(
       candidate.profile_id,
-    ) as ActiveAccountEntryRow | undefined
-    if (activeAccountEntry !== undefined) return 'active_tournament'
+    ) as ActiveAccountEntryRow[]
+    const activeEntryBlock = resolveActiveEntryBlock(activeAccountEntries, nowMs, joiningTournament)
+    if (activeEntryBlock.blocked) return { code: 'active_tournament', activeEntryBlock }
     return null
   }
 
@@ -1644,18 +1881,26 @@ export async function createTournamentEconomyStore(
     tournamentId: TournamentId,
     inviterProfileId: ProfileId,
     inviteeProfileId: ProfileId,
+    nowMs: number,
+    joiningTournament: JoiningTournamentInfo,
   ): PartnerInviteMutationResult | null {
     if (inviterProfileId === inviteeProfileId) return { ok: false, reason: 'self_invite' }
     const invitee = selectProfileEligibilityStatement.get(inviteeProfileId) as
       | ProfileEligibilityRow
       | undefined
     if (invitee === undefined) return { ok: false, reason: 'invalid_invitee' }
-    const reason = getCandidateUnavailableReason(tournamentId, inviterProfileId, invitee)
-    if (reason === null) return null
-    if (reason === 'blocked') return { ok: false, reason: 'blocked' }
-    if (reason === 'already_in_tournament') return { ok: false, reason: 'already_participant' }
-    if (reason === 'active_tournament') return { ok: false, reason: 'already_participating_elsewhere' }
-    if (reason === 'participation_blocked') return { ok: false, reason: 'participation_blocked' }
+    const unavailable = getCandidateUnavailableReason(tournamentId, inviterProfileId, invitee, nowMs, joiningTournament)
+    if (unavailable === null) return null
+    if (unavailable.code === 'blocked') return { ok: false, reason: 'blocked' }
+    if (unavailable.code === 'already_in_tournament') return { ok: false, reason: 'already_participant' }
+    if (unavailable.code === 'active_tournament') {
+      return (
+        mapActiveEntryBlockToPartnerInviteFailure(
+          unavailable.activeEntryBlock ?? { blocked: true, reason: 'already_participating_elsewhere' },
+        ) ?? { ok: false, reason: 'already_participating_elsewhere' }
+      )
+    }
+    if (unavailable.code === 'participation_blocked') return { ok: false, reason: 'participation_blocked' }
     return { ok: false, reason: 'invalid_invitee' }
   }
 
@@ -2480,13 +2725,13 @@ export async function createTournamentEconomyStore(
         inviterProfileId,
       ) as ProfileEligibilityRow[]
       return rows.map((row) => {
-        const unavailableReason = getCandidateUnavailableReason(tournamentId, inviterProfileId, row)
+        const unavailable = getCandidateUnavailableReason(tournamentId, inviterProfileId, row, Date.now(), tournament)
         return {
           profileId: row.profile_id,
           displayName: row.display_name,
           avatarUrl: row.avatar_url,
-          eligible: unavailableReason === null,
-          unavailableReason,
+          eligible: unavailable === null,
+          unavailableReason: unavailable?.code ?? null,
         }
       })
     },
@@ -2517,13 +2762,13 @@ export async function createTournamentEconomyStore(
         prefixPattern,
       ) as ProfileEligibilityRow[]
       return rows.map((row) => {
-        const unavailableReason = getCandidateUnavailableReason(tournamentId, inviterProfileId, row)
+        const unavailable = getCandidateUnavailableReason(tournamentId, inviterProfileId, row, Date.now(), tournament)
         return {
           profileId: row.profile_id,
           displayName: row.display_name,
           avatarUrl: row.avatar_url,
-          eligible: unavailableReason === null,
-          unavailableReason,
+          eligible: unavailable === null,
+          unavailableReason: unavailable?.code ?? null,
         }
       })
     },
@@ -2751,7 +2996,7 @@ export async function createTournamentEconomyStore(
           return { ok: false, reason: 'invite_window_closed' }
         }
 
-        const inviteeValidation = validateInvitee(tournamentId, inviterProfileId, inviteeProfileId)
+        const inviteeValidation = validateInvitee(tournamentId, inviterProfileId, inviteeProfileId, nowMs, freshTournament)
         if (inviteeValidation !== null) {
           database.exec('ROLLBACK;')
           return inviteeValidation
@@ -2839,12 +3084,15 @@ export async function createTournamentEconomyStore(
           }
         }
 
-        const activeAccountEntry = hasConfirmedInviterEntry
-          ? undefined
-          : selectActiveEntryForAccountStatement.get(inviterProfileId) as ActiveAccountEntryRow | undefined
-        if (activeAccountEntry !== undefined) {
+        const inviterActiveEntries = hasConfirmedInviterEntry
+          ? []
+          : (selectActiveEntriesForAccountStatement.all(inviterProfileId) as ActiveAccountEntryRow[])
+        const inviterBlockFailure = mapActiveEntryBlockToPartnerInviteFailure(
+          resolveActiveEntryBlock(inviterActiveEntries, nowMs, freshTournament),
+        )
+        if (inviterBlockFailure !== null) {
           database.exec('ROLLBACK;')
-          return { ok: false, reason: 'already_participating_elsewhere' }
+          return inviterBlockFailure
         }
 
         // Item 3 "partner invite creation as inviter" (§"ВСИЧКИ ENTRY PATHS
@@ -3009,6 +3257,8 @@ export async function createTournamentEconomyStore(
           tournamentId,
           inviteRow.inviter_profile_id,
           inviteeProfileId,
+          nowMs,
+          freshTournament,
         )
         if (inviteeValidation !== null) {
           database.exec('ROLLBACK;')
@@ -3298,11 +3548,29 @@ export async function createTournamentEconomyStore(
           }
         }
 
-        const activeAccountEntry = selectActiveEntryForAccountStatement.get(
+        const activeAccountEntries = selectActiveEntriesForAccountStatement.all(
           profileId,
-        ) as ActiveAccountEntryRow | undefined
-        if (activeAccountEntry !== undefined) {
+        ) as ActiveAccountEntryRow[]
+        const activeEntryBlock = resolveActiveEntryBlock(activeAccountEntries, nowMs, freshTournament)
+        if (activeEntryBlock.blocked) {
           database.exec('ROLLBACK;')
+          if (activeEntryBlock.reason === 'registered_tournament_starts_soon') {
+            return {
+              ok: false,
+              reason: 'registered_tournament_starts_soon',
+              blockingTournamentId: activeEntryBlock.blockingTournamentId,
+              scheduledStartAt: activeEntryBlock.scheduledStartAt,
+            }
+          }
+          if (activeEntryBlock.reason === 'scheduled_tournament_time_conflict') {
+            return {
+              ok: false,
+              reason: 'scheduled_tournament_time_conflict',
+              blockingTournamentId: activeEntryBlock.blockingTournamentId,
+              blockingScheduledStartAt: activeEntryBlock.blockingScheduledStartAt,
+              requestedTournamentScheduledStartAt: activeEntryBlock.requestedTournamentScheduledStartAt,
+            }
+          }
           return { ok: false, reason: 'already_participating_elsewhere' }
         }
 

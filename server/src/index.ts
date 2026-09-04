@@ -11873,6 +11873,8 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   tournament_full: 'Турнирът е запълнен.',
   rejoin_not_allowed: 'Вече си напускал този турнир и не можеш да се запишеш повторно.',
   already_participating_elsewhere: 'Вече участваш в друг активен турнир.',
+  registered_tournament_starts_soon: 'Остава по-малко от час до старта на турнир, в който сте записан.',
+  scheduled_tournament_time_conflict: 'Не можете да се запишете. Имате друг турнир, който започва на по-малко от 60 минути от този.',
   insufficient_funds: 'Нямаш достатъчно жълтици за този вход.',
   requires_password: 'Този турнир е защитен с парола.',
   participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
@@ -11894,6 +11896,8 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   self_invite: 'Не можеш да поканиш себе си.',
   already_participant: 'Този играч вече участва в турнира.',
   already_participating_elsewhere: 'Играчът вече има активно турнирно участие.',
+  registered_tournament_starts_soon: 'Остава по-малко от час до старта на турнир, в който сте записан.',
+  scheduled_tournament_time_conflict: 'Не можете да се запишете. Имате друг турнир, който започва на по-малко от 60 минути от този.',
   already_has_pending_invite: 'Вече има активна покана.',
   already_teamed: 'Вече участваш в отбор.',
   invite_not_found: 'Поканата не е намерена.',
@@ -12168,6 +12172,13 @@ async function handleTournamentPartnerInviteCreateRequest(
       reason: result.reason,
       message: PARTNER_INVITE_FAILURE_MESSAGES[result.reason] ?? 'Поканата не бе изпратена.',
       requiresPassword: result.reason === 'requires_password' ? true : undefined,
+      // Виж §"BLOCK CASE A"/"BLOCK CASE B" в multi-tournament registration
+      // task spec-а (§"SOLO + PARTNER FLOW CONSISTENCY") — позволяват на
+      // клиента да покаже същия "Виж турнира" popup при реален rejection.
+      blockingTournamentId: result.blockingTournamentId,
+      scheduledStartAt: result.scheduledStartAt,
+      blockingScheduledStartAt: result.blockingScheduledStartAt,
+      requestedTournamentScheduledStartAt: result.requestedTournamentScheduledStartAt,
     })
     return true
   }
@@ -12225,6 +12236,15 @@ async function handleTournamentPartnerInviteActionRequest(
       ok: false,
       reason: result.reason,
       message: PARTNER_INVITE_FAILURE_MESSAGES[result.reason] ?? 'Поканата не бе обработена.',
+      // Виж §"BLOCK CASE A"/"BLOCK CASE B" в multi-tournament registration
+      // task spec-а (§"SOLO + PARTNER FLOW CONSISTENCY") — позволяват на
+      // клиента да покаже същия "Виж турнира" popup при реален rejection
+      // (само accept може реално да върне тия reasons — decline/cancel не
+      // пипат eligibility, но полетата остават undefined за тях, безвредно).
+      blockingTournamentId: result.blockingTournamentId,
+      scheduledStartAt: result.scheduledStartAt,
+      blockingScheduledStartAt: result.blockingScheduledStartAt,
+      requestedTournamentScheduledStartAt: result.requestedTournamentScheduledStartAt,
     })
     return true
   }
@@ -12320,13 +12340,23 @@ async function handleTournamentJoinRequest(
       : result.reason === 'insufficient_funds' ? 402
       : result.reason === 'tournament_full' || result.reason === 'already_participating_elsewhere'
         || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed'
-        || result.reason === 'tournament_fill_expired' ? 409
+        || result.reason === 'tournament_fill_expired' || result.reason === 'registered_tournament_starts_soon'
+        || result.reason === 'scheduled_tournament_time_conflict' ? 409
       : 400
     sendJsonResponse(res, status, {
       ok: false,
       reason: result.reason,
       message: JOIN_FAILURE_MESSAGES[result.reason] ?? 'Записването не бе успешно.',
       requiresPassword: result.reason === 'requires_password' ? true : undefined,
+      // Виж §"BLOCK CASE A"/"BLOCK CASE B" в multi-tournament registration
+      // task spec-а — позволяват на клиента да отвори точно блокиращия
+      // турнир от "Виж турнира" banner-а. blockingTournamentId е общ за
+      // двата case-а; останалите полета са reason-specific (undefined за
+      // всички други reasons).
+      blockingTournamentId: result.blockingTournamentId,
+      scheduledStartAt: result.scheduledStartAt,
+      blockingScheduledStartAt: result.blockingScheduledStartAt,
+      requestedTournamentScheduledStartAt: result.requestedTournamentScheduledStartAt,
     })
     return true
   }

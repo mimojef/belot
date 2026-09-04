@@ -906,6 +906,8 @@ export type LobbyScreenState = {
   tournamentForceRemoveBusy: boolean
   tournamentForceRemoveErrorText: string | null
   tournamentParticipationBlockedPopupOpen: boolean
+  tournamentRegisteredStartsSoonPopupOpen: boolean
+  tournamentRegisteredStartsSoonMessage: string | null
   tournamentScheduleEditOpen: boolean
   tournamentScheduleEditDateDraft: string
   tournamentScheduleEditTimeDraft: string
@@ -1091,6 +1093,8 @@ export type RenderLobbyScreenOptions = {
   onTournamentForceRemoveClose: () => void
   onTournamentForceRemoveSubmit: () => void
   onTournamentParticipationBlockedClose: () => void
+  onTournamentRegisteredStartsSoonClose: () => void
+  onTournamentRegisteredStartsSoonView: () => void
   onTournamentScheduleEditOpen: () => void
   onTournamentScheduleEditClose: () => void
   onTournamentScheduleEditDateChange: (value: string) => void
@@ -15210,6 +15214,13 @@ export function renderLobbyScreen(
   root.querySelector<HTMLElement>('[data-tournament-participation-blocked-backdrop="1"]')
     ?.addEventListener('click', (e) => {
       if (e.target === e.currentTarget) options.onTournamentParticipationBlockedClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-tournament-registered-starts-soon-view="1"]')
+    ?.addEventListener('click', options.onTournamentRegisteredStartsSoonView)
+  root.querySelector<HTMLElement>('[data-tournament-registered-starts-soon-backdrop="1"]')
+    ?.addEventListener('click', (e) => {
+      if (e.target === e.currentTarget) options.onTournamentRegisteredStartsSoonClose()
     })
 
   root.querySelector<HTMLButtonElement>('[data-tournament-schedule-edit-open="1"]')

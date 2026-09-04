@@ -1238,6 +1238,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
     ${state.tournamentCancelConfirmOpen ? renderTournamentCancelConfirmPopup(state) : ''}
     ${state.tournamentForceRemoveConfirmOpen ? renderTournamentForceRemoveConfirmPopup(state) : ''}
     ${state.tournamentParticipationBlockedPopupOpen ? renderTournamentParticipationBlockedPopup() : ''}
+    ${state.tournamentRegisteredStartsSoonPopupOpen ? renderTournamentRegisteredStartsSoonPopup(state) : ''}
     ${state.tournamentScheduleEditOpen ? renderTournamentScheduleEditPopup(state) : ''}
   `
 }
@@ -1660,6 +1661,36 @@ function renderTournamentParticipationBlockedPopup(): string {
           background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
           color:#080808;font-size:13px;font-weight:900;cursor:pointer;
         ">ОК</button>
+      </div>
+    </div>
+  `
+}
+
+// Multi-tournament registration banner — dedicated single-button ("Виж
+// турнира") popup, огледално на renderTournamentParticipationBlockedPopup
+// по-горе. Споделен popup за ДВАТА blocking case-а (Case A —
+// 'registered_tournament_starts_soon', Case B —
+// 'scheduled_tournament_time_conflict') от ВСЕКИ реален entry path (solo
+// join, partner invite create/accept) — виж §"Не дублирай ненужно popup
+// framework-а" в multi-tournament registration task spec-а. Текстът идва
+// directno от server-authoritative state.tournamentRegisteredStartsSoonMessage
+// (същия message, който вече е в JOIN_FAILURE_MESSAGES/
+// PARTNER_INVITE_FAILURE_MESSAGES на сървъра — не се дублира тук). "Виж
+// турнира" отваря КОНКРЕТНО блокиращия турнир
+// (onTournamentRegisteredStartsSoonView reuse-ва showTournamentDetail с
+// blockingTournamentId от отговора), не generic tournaments list.
+function renderTournamentRegisteredStartsSoonPopup(state: LobbyScreenState): string {
+  return `
+    <div data-tournament-registered-starts-soon-backdrop="1" style="position:fixed;inset:0;z-index:9600;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;padding:16px;">
+      <div style="background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:16px;width:100%;max-width:380px;padding:24px;box-sizing:border-box;">
+        <div style="font-size:13px;color:rgba(255,255,255,0.85);line-height:1.5;margin-bottom:18px;">
+          ${escapeHtml(state.tournamentRegisteredStartsSoonMessage ?? 'Не можете да се запишете точно сега.')}
+        </div>
+        <button type="button" data-tournament-registered-starts-soon-view="1" style="
+          width:100%;height:40px;border:0;border-radius:8px;
+          background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
+          color:#080808;font-size:13px;font-weight:900;cursor:pointer;
+        ">Виж турнира</button>
       </div>
     </div>
   `

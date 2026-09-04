@@ -976,7 +976,16 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onTournamentJoin?: (tournamentId: string, password: string | null) => Promise<
     | { ok: true; alreadyJoined: boolean; debitedAmount?: number; walletBalance: number; tournament: TournamentSummarySnapshot }
-    | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+    | {
+        ok: false
+        message: string
+        reason?: string
+        requiresPassword?: boolean
+        blockingTournamentId?: string
+        scheduledStartAt?: string
+        blockingScheduledStartAt?: string
+        requestedTournamentScheduledStartAt?: string
+      }
   >
   onTournamentLeave?: (tournamentId: string) => Promise<
     | {
@@ -1043,7 +1052,16 @@ export type CreateLobbyFlowControllerOptions = {
     password: string | null,
   ) => Promise<
     | { ok: true; debitedAmount?: number; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
-    | { ok: false; message: string; reason?: string; requiresPassword?: boolean }
+    | {
+        ok: false
+        message: string
+        reason?: string
+        requiresPassword?: boolean
+        blockingTournamentId?: string
+        scheduledStartAt?: string
+        blockingScheduledStartAt?: string
+        requestedTournamentScheduledStartAt?: string
+      }
   >
   onTournamentPartnerInviteRespond?: (
     tournamentId: string,
@@ -1051,7 +1069,15 @@ export type CreateLobbyFlowControllerOptions = {
     action: 'accept' | 'decline' | 'cancel',
   ) => Promise<
     | { ok: true; alreadyResolved?: boolean; debitedAmount?: number; invite: TournamentPartnerInviteSnapshot; walletBalance: number; tournament: TournamentSummarySnapshot }
-    | { ok: false; message: string; reason?: string }
+    | {
+        ok: false
+        message: string
+        reason?: string
+        blockingTournamentId?: string
+        scheduledStartAt?: string
+        blockingScheduledStartAt?: string
+        requestedTournamentScheduledStartAt?: string
+      }
   >
   onTournamentEnterActiveMatch?: (roomId: string, reconnectToken: string) => void
   /** Server-authoritative debit/refund toast (§3-§7 в task spec-а) — извиква
@@ -1861,6 +1887,21 @@ type InternalLobbyFlowState = {
   // spec-а) — показва се вместо inline error text, когато server-ът върне
   // reason='participation_blocked' от join/invite-create/invite-accept.
   tournamentParticipationBlockedPopupOpen: boolean
+  // Multi-tournament registration banner — показва се вместо inline error
+  // text, когато solo join ИЛИ partner invite (create/accept) бъде отказан
+  // с reason='registered_tournament_starts_soon' (Case A — записан си в
+  // scheduled турнир под 60 мин от СЕГА) ИЛИ 'scheduled_tournament_time_conflict'
+  // (Case B — двата турнира са под 60 мин един от друг, независимо от
+  // "сега"). Един споделен popup за двата case-а (§"Не дублирай ненужно
+  // popup framework-а" в task spec-а) — Message идва directno от
+  // server-authoritative result.message (същия текст, който вече е в
+  // JOIN_FAILURE_MESSAGES/PARTNER_INVITE_FAILURE_MESSAGES на сървъра, за да
+  // няма втори copy на текста тук). tournamentId сочи КЪМ блокиращия турнир
+  // (result.blockingTournamentId), за да отвори "Виж турнира" бутонът точно
+  // него, не generic tournaments list.
+  tournamentRegisteredStartsSoonPopupOpen: boolean
+  tournamentRegisteredStartsSoonTournamentId: string | null
+  tournamentRegisteredStartsSoonMessage: string | null
   // Creator-only "Редактирай старт" (§ "EDIT SCHEDULED START" в task
   // spec-а) — тесен popup, пипа ИЗКЛЮЧИТЕЛНО scheduled_start_at. Draft-овете
   // са отделни date/time strings (не combined datetime-local), защото
@@ -2413,6 +2454,9 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentForceRemoveBusy: false,
     tournamentForceRemoveErrorText: null,
     tournamentParticipationBlockedPopupOpen: false,
+    tournamentRegisteredStartsSoonPopupOpen: false,
+    tournamentRegisteredStartsSoonTournamentId: null,
+    tournamentRegisteredStartsSoonMessage: null,
     tournamentScheduleEditOpen: false,
     tournamentScheduleEditDateDraft: '',
     tournamentScheduleEditTimeDraft: '',
@@ -4261,6 +4305,8 @@ export function createLobbyFlowController(
       tournamentForceRemoveBusy: state.tournamentForceRemoveBusy,
       tournamentForceRemoveErrorText: state.tournamentForceRemoveErrorText,
       tournamentParticipationBlockedPopupOpen: state.tournamentParticipationBlockedPopupOpen,
+      tournamentRegisteredStartsSoonPopupOpen: state.tournamentRegisteredStartsSoonPopupOpen,
+      tournamentRegisteredStartsSoonMessage: state.tournamentRegisteredStartsSoonMessage,
       tournamentScheduleEditOpen: state.tournamentScheduleEditOpen,
       tournamentScheduleEditDateDraft: state.tournamentScheduleEditDateDraft,
       tournamentScheduleEditTimeDraft: state.tournamentScheduleEditTimeDraft,
@@ -5016,6 +5062,33 @@ export function createLobbyFlowController(
       onTournamentParticipationBlockedClose: () => {
         state.tournamentParticipationBlockedPopupOpen = false
         render()
+      },
+      onTournamentRegisteredStartsSoonClose: () => {
+        state.tournamentRegisteredStartsSoonPopupOpen = false
+        state.tournamentRegisteredStartsSoonTournamentId = null
+        state.tournamentRegisteredStartsSoonMessage = null
+        render()
+      },
+      onTournamentRegisteredStartsSoonView: () => {
+        const blockingTournamentId = state.tournamentRegisteredStartsSoonTournamentId
+        state.tournamentRegisteredStartsSoonPopupOpen = false
+        state.tournamentRegisteredStartsSoonTournamentId = null
+        state.tournamentRegisteredStartsSoonMessage = null
+        // Затваря join confirm popup-а И partner picker-а под banner-а
+        // (огледално на rejoin-denial-а тук над него) — "Виж турнира"
+        // навигира ДАЛЕЧ от текущия tournament-detail екран (solo join
+        // ИЛИ partner invite create/accept flow), нито едно от тях не бива
+        // да остане отворено над новия detail (§"SOLO + PARTNER FLOW
+        // CONSISTENCY" в task spec-а).
+        state.tournamentJoinConfirmOpen = false
+        state.tournamentJoinErrorText = null
+        state.tournamentPartnerPickerOpen = false
+        state.tournamentPartnerInviteErrorText = null
+        if (blockingTournamentId !== null) {
+          showTournamentDetail(blockingTournamentId)
+        } else {
+          render()
+        }
       },
       onTournamentScheduleEditOpen: () => {
         openTournamentScheduleEdit()
@@ -9326,6 +9399,7 @@ export function createLobbyFlowController(
       // счупи установения инвариант "error response не поврежда/затваря
       // popup state-a" (§J67 в checkTournamentsFrontendSource.ts).
       if (handleTournamentParticipationBlockedDenial(result.reason)) return
+      if (handleTournamentRegisteredStartsSoonDenial(result.reason, result.blockingTournamentId, result.message)) return
       state.tournamentJoinErrorText = result.message
       render()
       return
@@ -9491,6 +9565,7 @@ export function createLobbyFlowController(
       // Blocked-popup-ът stack-ва отгоре (z-index 9600 > 9500) вместо да
       // затваря picker-а под него — виж submitTournamentJoin по-горе.
       if (handleTournamentParticipationBlockedDenial(result.reason)) return
+      if (handleTournamentRegisteredStartsSoonDenial(result.reason, result.blockingTournamentId, result.message)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -9531,6 +9606,7 @@ export function createLobbyFlowController(
     if (!result.ok) {
       if (handleTournamentBetaAccessDenial(result.reason)) return
       if (handleTournamentParticipationBlockedDenial(result.reason)) return
+      if (handleTournamentRegisteredStartsSoonDenial(result.reason, result.blockingTournamentId, result.message)) return
       state.tournamentPartnerInviteErrorText = result.message
       render()
       return
@@ -13544,6 +13620,36 @@ export function createLobbyFlowController(
   function handleTournamentParticipationBlockedDenial(reason: string | undefined): boolean {
     if (reason !== 'participation_blocked') return false
     state.tournamentParticipationBlockedPopupOpen = true
+    render()
+    return true
+  }
+
+  // Multi-tournament registration banner — dedicated popup с "Виж турнира"
+  // бутон, wired във всеки реален entry path, който сървърът може да
+  // отхвърли с Case A ('registered_tournament_starts_soon') ИЛИ Case B
+  // ('scheduled_tournament_time_conflict') — solo join, partner invite
+  // create (inviter/invitee eligibility), partner invite accept (§"SOLO +
+  // PARTNER FLOW CONSISTENCY" в task spec-а). Message идва directno от
+  // server-authoritative result.message (единен source на текста за двата
+  // case-а, виж JOIN_FAILURE_MESSAGES/PARTNER_INVITE_FAILURE_MESSAGES в
+  // index.ts) — попада тук вместо hardcoded literal, за да не се разминат
+  // client/server текстовете. Огледално на
+  // handleTournamentParticipationBlockedDenial по-горе, но с dynamic
+  // target+текст вместо статичен текст.
+  function handleTournamentRegisteredStartsSoonDenial(
+    reason: string | undefined,
+    blockingTournamentId: string | undefined,
+    message: string | undefined,
+  ): boolean {
+    if (
+      (reason !== 'registered_tournament_starts_soon' && reason !== 'scheduled_tournament_time_conflict') ||
+      !blockingTournamentId
+    ) {
+      return false
+    }
+    state.tournamentRegisteredStartsSoonTournamentId = blockingTournamentId
+    state.tournamentRegisteredStartsSoonMessage = message ?? null
+    state.tournamentRegisteredStartsSoonPopupOpen = true
     render()
     return true
   }
