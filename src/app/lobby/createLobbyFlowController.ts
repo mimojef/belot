@@ -6525,6 +6525,67 @@ export function createLobbyFlowController(
     renderPopupOnly()
   }
 
+  // Извлечена от refreshSupportUnread public method-а (виж него по-долу) —
+  // reuse-вана и от hard-delete success handler-ите (submitAdminHardDelete/
+  // submitAdminSupportDeleteProfile), за да не чакат следващия 30s polling
+  // tick (production ghost-badge fix: getTotalUnreadForAdmin вече е коригирана
+  // server-side да не брои orphaned/archived/evidence redовете, но badge-ът
+  // пак трябва explicit refresh веднага след delete-а, не само на следващия
+  // polling цикъл). Targeted DOM patch (без пълен render()), mirror на
+  // established polling-tick поведение.
+  async function refreshSupportUnreadNow(): Promise<void> {
+    const result = await options.onSupportUnreadLoad?.()
+    if (!result?.ok) return
+
+    state.supportUnreadCount = result.supportUnreadCount ?? result.unreadCount
+    state.adminGuestContactUnreadCount = result.guestUnreadCount ?? 0
+    const totalUnread = state.supportUnreadCount + state.adminGuestContactUnreadCount
+    const displayUnread = formatNotificationBadgeCount(totalUnread)
+
+    // Production flicker fix — background support-unread poll (30s
+    // interval, виж startSupportUnreadPolling в main.ts) не трябва да
+    // предизвика unconditional пълен render(), особено докато mobile
+    // menu е отворено (root.innerHTML remount унищожава/пресъздава
+    // <details> subtree-a → visible flicker). Desktop badge
+    // ([data-support-unread-badge]) съществува само в desktop
+    // renderNav() template — mobile menu total badge
+    // ([data-mobile-menu-total-badge]) е СЕПАРАТЕН persistent node
+    // (виж renderMobileMenu), патч-нат отделно чрез refreshTopicsUnreadDom
+    // (reuse на established Lafche-fix helper — тя вече агрегира
+    // support+topics+friendChat+friends в getMobileMenuNotificationRaw).
+    const desktopBadge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
+    let desktopPatched = false
+    if (desktopBadge) {
+      desktopBadge.style.display = displayUnread !== null ? 'flex' : 'none'
+      desktopBadge.textContent = displayUnread ?? ''
+      desktopPatched = true
+    }
+
+    // ВАЖНО: НЕ разчитаме на aggregate return value-то на
+    // refreshTopicsUnreadDom() тук — тя patch-ва и Topics-specific
+    // badges (general/lafche), чиито success/failure е НЕСВЪРЗАН с
+    // support unread targets. Ако utre Topics badge-ове structural
+    // fail-нат (напр. потребителят не е на Topics screen — layout-aware
+    // ok, но все пак различен branch), aggregate-ът не трябва да
+    // потиска support-specific success detection. Проверяваме
+    // mobile targets directно, СЛЕД като refreshTopicsUnreadDom вече
+    // ги е patch-нала (side effect), вместо да gate-ваме на нейния
+    // общ boolean.
+    refreshTopicsUnreadDom(options.root, buildLobbyScreenState())
+    const mobileTotalBadgeFound = options.root.querySelector('[data-mobile-menu-total-badge="1"]') !== null
+    const mobileItemBadgeFound = options.root.querySelector('[data-mobile-menu-item-badge="support"]') !== null
+    const mobilePatched = mobileTotalBadgeFound && mobileItemBadgeFound
+
+    // Layout-aware success (брифа §4): desktop badge липсва на mobile
+    // viewport по design (renderNav е desktop-only template) — това
+    // НЕ е failure. Fallback render() само ако буквално НИТО ЕДИН
+    // target (desktop ИЛИ mobile) не е бил намерен — истинска
+    // structural inconsistency (напр. lobby DOM изобщо не е mounted).
+    if (!desktopPatched && !mobilePatched) {
+      render()
+    }
+  }
+
   /**
    * Изтрий окончателно — необратимо (spec §7-9). Server-side authoritative
    * self/role проверка в handleAdminProfileHardDeleteRequest. Успешен delete
@@ -6593,6 +6654,14 @@ export function createLobbyFlowController(
         render()
       })()
     }
+
+    // Ghost-badge production fix: hard delete (И standard, И
+    // supportRequestMessageId-driven — двата пътя могат да оставят/породят
+    // support_messages redovete, които getTotalUnreadForAdmin вече правилно
+    // изключва server-side) трябва да refresh-не badge-а веднага, а не да
+    // чака следващия 30s polling tick (виж refreshSupportUnreadNow doc
+    // коментара).
+    void refreshSupportUnreadNow()
 
     renderPopupOnly()
   }
@@ -6665,6 +6734,11 @@ export function createLobbyFlowController(
     if (state.adminSupportListFilter === 'active') {
       state.adminSupportListFilter = 'archived'
     }
+
+    // Ghost-badge production fix — виж refreshSupportUnreadNow doc коментара
+    // (submitAdminHardDelete-ото симетрично извикване по-горе).
+    void refreshSupportUnreadNow()
+
     render()
   }
 
@@ -17639,58 +17713,7 @@ export function createLobbyFlowController(
       }
     },
     refreshSupportUnread: () => {
-      void (async () => {
-        const result = await options.onSupportUnreadLoad?.()
-        if (result?.ok) {
-          state.supportUnreadCount = result.supportUnreadCount ?? result.unreadCount
-          state.adminGuestContactUnreadCount = result.guestUnreadCount ?? 0
-          const totalUnread = state.supportUnreadCount + state.adminGuestContactUnreadCount
-          const displayUnread = formatNotificationBadgeCount(totalUnread)
-
-          // Production flicker fix — background support-unread poll (30s
-          // interval, viж startSupportUnreadPolling в main.ts) не трябва да
-          // предизвика unconditional пълен render(), особено докато mobile
-          // menu е отворено (root.innerHTML remount унищожава/пресъздава
-          // <details> subtree-a → visible flicker). Desktop badge
-          // ([data-support-unread-badge]) съществува само в desktop
-          // renderNav() template — mobile menu total badge
-          // ([data-mobile-menu-total-badge]) е СЕПАРАТЕН persistent node
-          // (виж renderMobileMenu), патч-нат отделно чрез refreshTopicsUnreadDom
-          // (reuse на established Lafche-fix helper — тя вече агрегира
-          // support+topics+friendChat+friends в getMobileMenuNotificationRaw).
-          const desktopBadge = options.root.querySelector<HTMLElement>('[data-support-unread-badge="1"]')
-          let desktopPatched = false
-          if (desktopBadge) {
-            desktopBadge.style.display = displayUnread !== null ? 'flex' : 'none'
-            desktopBadge.textContent = displayUnread ?? ''
-            desktopPatched = true
-          }
-
-          // ВАЖНО: НЕ разчитаме на aggregate return value-то на
-          // refreshTopicsUnreadDom() тук — тя patch-ва и Topics-specific
-          // badges (general/lafche), чиито success/failure е НЕСВЪРЗАН с
-          // support unread targets. Ако utre Topics badge-ове structural
-          // fail-нат (напр. потребителят не е на Topics screen — layout-aware
-          // ok, но все пак различен branch), aggregate-ът не трябва да
-          // потиска support-specific success detection. Проверяваме
-          // mobile targets directно, СЛЕД като refreshTopicsUnreadDom вече
-          // ги е patch-нала (side effect), вместо да gate-ваме на нейния
-          // общ boolean.
-          refreshTopicsUnreadDom(options.root, buildLobbyScreenState())
-          const mobileTotalBadgeFound = options.root.querySelector('[data-mobile-menu-total-badge="1"]') !== null
-          const mobileItemBadgeFound = options.root.querySelector('[data-mobile-menu-item-badge="support"]') !== null
-          const mobilePatched = mobileTotalBadgeFound && mobileItemBadgeFound
-
-          // Layout-aware success (брифа §4): desktop badge липсва на mobile
-          // viewport по design (renderNav е desktop-only template) — това
-          // НЕ е failure. Fallback render() само ако буквално НИТО ЕДИН
-          // target (desktop ИЛИ mobile) не е бил намерен — истинска
-          // structural inconsistency (напр. lobby DOM изобщо не е mounted).
-          if (!desktopPatched && !mobilePatched) {
-            render()
-          }
-        }
-      })()
+      void refreshSupportUnreadNow()
     },
     handleServerMessage,
     getPwaUpdateSafetySnapshot: () => ({

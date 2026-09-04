@@ -481,10 +481,41 @@ export async function createSupportStore(databaseFilePath: string, deps: Support
     return row?.cnt ?? 0
   }
 
+  // Global badge (support/mail icon) — трябва да брои ЕДИНСТВЕНО actionable
+  // ACTIVE разговори, mirror на getAllConversations(filter:'active')-ата
+  // three-way класификация по-долу (round 6 "Неизвестен" fix-а), НЕ просто
+  // сурово COUNT(*) от support_messages. Преди този fix (production ghost
+  // badge bug): заявката не проверяваше profiles съществуване нито
+  // support_archived/support_deletion_archives markers — standard hard
+  // delete (БЕЗ supportRequestMessageId) никога не пипа support_messages
+  // (виж profileHardDeleteService.ts doc коментара), затова unread ред на
+  // изтрит профил оставаше orphaned И продължаваше да се брои завинаги,
+  // въпреки че getAllConversations вече правилно го skip-ва изцяло (нито
+  // Active, нито Archived) — conversation-ът изчезва от UI-я, badge-ът не.
+  //
+  // Три категории се ИЗКЛЮЧВАТ тук, идентично с filter='active' bucket-а:
+  //  - normal archived (support_archived marker) — потребителят/admin-ът
+  //    съзнателно го е скрил от inbox-а, не е actionable.
+  //  - deletion evidence (support_deletion_archives marker) — read-only
+  //    история на вече изтрит профил, живее ЕДИНСТВЕНО в Archived tab-а,
+  //    никога не е "текущ активен разговор" (spec §B.4).
+  //  - orphaned (нито profiles ред, нито deletion evidence) — hard-deleted
+  //    през standard flow, невидим навсякъде в UI, следователно не може да
+  //    бъде "actionable" по дефиниция (spec §B.3).
+  // INNER JOIN profiles p елиминира последната категория директно (LEFT JOIN
+  // + IS NULL филтър би работил еднакво добре, INNER е по-директен тук
+  // защото не ни трябва нито едно поле от p — само existence check).
   function getTotalUnreadForAdmin(): number {
     const row = db.prepare(
-      `SELECT COUNT(*) as cnt FROM support_messages
-       WHERE is_from_admin = 0 AND read_by_admin = 0`,
+      `SELECT COUNT(*) as cnt
+       FROM support_messages m
+       INNER JOIN profiles p ON p.profile_id = m.profile_id
+       LEFT JOIN support_archived a ON a.profile_id = m.profile_id
+       LEFT JOIN support_deletion_archives sda ON sda.profile_id = m.profile_id
+       WHERE m.is_from_admin = 0
+         AND m.read_by_admin = 0
+         AND a.profile_id IS NULL
+         AND sda.profile_id IS NULL`,
     ).get() as { cnt: number }
     return row?.cnt ?? 0
   }

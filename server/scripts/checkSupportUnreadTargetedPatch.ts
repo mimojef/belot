@@ -139,11 +139,23 @@ check('[5] refreshTopicsUnreadDom patch-ва mobile per-item support badge БЕ�
 })
 
 // ─── 3. refreshSupportUnread — controller wiring ────────────────────────────
+//
+// Extracted (ghost-unread-badge production fix) — refreshSupportUnread
+// public method-ът вече е thin wrapper (`refreshSupportUnread: () => { void
+// refreshSupportUnreadNow() }`), reuse-ван и от hard-delete success handler-ите
+// (submitAdminHardDelete/submitAdminSupportDeleteProfile), за да refresh-нат
+// badge-а веднага след delete, вместо да чакат следващия 30s polling tick.
+// Targeted-patch логиката, проверявана от checks 7-9, живее сега в
+// refreshSupportUnreadNow(), не в самия public method wrapper.
+const refreshSupportUnreadBlock = extractFunctionBlock(controllerSrc, 'async function refreshSupportUnreadNow(): Promise<void> {')
 
-const refreshSupportUnreadBlock = extractFunctionBlock(controllerSrc, "refreshSupportUnread: () => {")
+check('[6] refreshSupportUnreadNow implementation block found', () => {
+  assert(refreshSupportUnreadBlock.length > 0, 'refreshSupportUnreadNow implementation not found in createLobbyFlowController.ts')
+})
 
-check('[6] refreshSupportUnread handler block found', () => {
-  assert(refreshSupportUnreadBlock.length > 0, 'refreshSupportUnread implementation not found in createLobbyFlowController.ts')
+check('[6b] refreshSupportUnread public method reuses refreshSupportUnreadNow (no duplicated logic)', () => {
+  const publicMethodBlock = extractFunctionBlock(controllerSrc, 'refreshSupportUnread: () => {')
+  assert(publicMethodBlock.includes('refreshSupportUnreadNow()'), 'refreshSupportUnread must delegate to refreshSupportUnreadNow, not duplicate the patch logic inline')
 })
 
 check('[7] refreshSupportUnread patch-ва desktop badge targeted (display+textContent, без render() веднага)', () => {
