@@ -11710,6 +11710,11 @@ async function handleTournamentsListRequest(
       return true
     }
 
+    // "С разбъркване" (shuffle mode, §2 в task spec-а) — server-authoritative
+    // флаг, задаван само тук при create. Default false, за да остане старото
+    // поведение напълно непроменено за всеки клиент, който не подава полето.
+    const shuffleEnabled = body.shuffleEnabled === true
+
     const createResult = tournamentStore.createTournament({
       kind: 'community',
       name: nameValidation.name,
@@ -11720,6 +11725,7 @@ async function handleTournamentsListRequest(
       playerCapacity: rawTeamCapacity * 2,
       startMode: rawStartMode,
       scheduledStartAt,
+      shuffleEnabled,
     })
 
     if (!createResult.ok) {
@@ -11870,6 +11876,7 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   insufficient_funds: 'Нямаш достатъчно жълтици за този вход.',
   requires_password: 'Този турнир е защитен с парола.',
   participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
+  shuffle_already_completed: 'Този турнир вече е разбъркан и не приема нови участници.',
 }
 
 const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
@@ -11878,6 +11885,7 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   tournament_fill_expired: 'Турнирът вече е отменен, защото не се запълни навреме.',
   tournament_full: 'Няма достатъчно свободни места.',
   partner_requires_two_slots: 'Не можете да се запишете с партньор, защото в турнира има само едно свободно място.',
+  shuffle_mode_no_partner_invites: 'Този турнир е с разбъркване — не можеш да поканиш партньор, отборите се формират автоматично.',
   invite_window_closed: 'Прозорецът за покани е затворен.',
   requires_password: 'Този турнир е защитен с парола.',
   not_friend: 'Можеш да поканиш само потвърден приятел.',

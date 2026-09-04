@@ -529,6 +529,14 @@ function renderTournamentCreatePopup(state: LobbyScreenState): string {
             <div style="margin-top:4px;font-size:11px;color:rgba(255,255,255,0.4);">Между 30 минути и 7 дни от сега.</div>
           </div>
 
+          <div>
+            <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:rgba(255,255,255,0.8);cursor:pointer;">
+              <input type="checkbox" name="shuffleEnabled" value="1" style="accent-color:#d4a520;width:16px;height:16px;">
+              С разбъркване
+            </label>
+            <div style="margin-top:4px;font-size:11px;color:rgba(255,255,255,0.4);">Участниците се записват поотделно и се разпределят на случаен принцип в отбори точно преди старта.</div>
+          </div>
+
           <button type="submit" ${state.tournamentCreateBusy ? 'disabled' : ''} style="
             margin-top:4px;height:42px;border:0;border-radius:8px;
             background:${state.tournamentCreateBusy ? 'rgba(212,165,32,0.35)' : 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)'};
@@ -628,9 +636,18 @@ function renderTournamentFinalSummary(t: TournamentDetailSnapshot): string {
   const runnerUpTeam = t.runnerUpTeamId !== null
     ? t.teams.find((team) => team.teamId === t.runnerUpTeamId) ?? null
     : null
+  // "Победител: Отбор <X> — <Играч 1> и <Играч 2>" (§10 в "scheduled shuffle
+  // timing" task spec-а) — reuse-ва СЪЩИЯ label map, ползван за ОТБОРИ
+  // секцията (buildTournamentTeamLabelMap, positional по t.teams[], което е
+  // стабилният persisted ред, виж коментара там). Работи еднакво за normal
+  // и shuffle турнири — и в двата случая championTeamId/t.teams идват от
+  // persisted DB данни, никога от entrant/registration order.
+  const labelMap = buildTournamentTeamLabelMap(t.teams)
   const teamNames = (team: typeof championTeam): string => {
     if (team === null || team.members.length === 0) return 'Отбор'
-    return team.members.map((member) => member.displayName).join(' и ')
+    const label = labelMap.get(team.teamId)
+    const members = team.members.map((member) => member.displayName).join(' и ')
+    return label ? `${label} — ${members}` : members
   }
   // Финалът, решен служебно (§4/§5 в task spec-а), използва различен личен
   // текст ("Шампиони! Спечелихте финала служебно." / "Финалисти. Загубихте
@@ -654,7 +671,7 @@ function renderTournamentFinalSummary(t: TournamentDetailSnapshot): string {
       <div style="font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;margin-bottom:10px;">Финал</div>
       ${t.settlementState === 'settled' ? `
         <div style="display:grid;gap:8px;font-size:13px;color:rgba(255,255,255,0.78);">
-          <div style="display:flex;justify-content:space-between;gap:12px;"><span>Шампион: ${escapeHtml(teamNames(championTeam))}</span><span style="font-weight:900;color:#86efac;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
+          <div style="display:flex;justify-content:space-between;gap:12px;"><span>Победител: ${escapeHtml(teamNames(championTeam))}</span><span style="font-weight:900;color:#86efac;">${formatAmount(t.prizePreview.firstTeamPrize)}</span></div>
           <div style="display:flex;justify-content:space-between;gap:12px;"><span>Второ място: ${escapeHtml(teamNames(runnerUpTeam))}</span><span style="font-weight:900;color:#fde68a;">${formatAmount(t.prizePreview.secondTeamPrize)}</span></div>
           <div style="display:flex;justify-content:space-between;gap:12px;"><span>На играч в шампионския отбор</span><span style="font-weight:800;">${formatAmount(t.prizePreview.firstPlayerPrize)}</span></div>
           <div style="display:flex;justify-content:space-between;gap:12px;"><span>На играч във втория отбор</span><span style="font-weight:800;">${formatAmount(t.prizePreview.secondPlayerPrize)}</span></div>
@@ -690,12 +707,28 @@ function renderTournamentFillTimeoutCancelledCallout(t: TournamentDetailSnapshot
 const TOURNAMENT_TEAM_SLOT_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P'] as const
 
 // Стабилна идентификация "Отбор A/B/C/D" — еднаква за двамата партньори, за
-// refresh и за външен viewer, защото се извлича от t.teams[], което сървърът
-// вече връща в стабилен, authoritative ред (ORDER BY created_at ASC, виж
-// selectTeamsForTournamentStatement в tournamentStore.ts) и никога не се
-// пренарежда по пътя (buildTeamDtos/buildTournamentDetailDto подават масива
-// directly). teamId се ползва само като Map key, не участва в подредбата —
-// няма зависимост от непредвидим JS object iteration ред.
+// refresh, reconnect, server restart и finished-tournament преглед. Чисто
+// позиционен mapping (index в t.teams) — никакво пресортиране или seed_slot
+// четене на клиента; цялата гаранция идва от сървъра.
+//
+// Server-side guarantee (виж selectTeamsForTournamentStatement в
+// tournamentStore.ts, ползвана от buildTournamentDetailDto): за вече
+// заключени/финализирани отбори (seed_slot NOT NULL) редът е ЗАДЪЛЖИТЕЛНО
+// seed_slot ASC — единственият persisted, стабилен през restart/reconnect/
+// refresh ordering, който реално отразява bracket позицията (seed_slot 1 ->
+// Отбор A, seed_slot 2 -> Отбор Б, ...). created_at НЕ е достатъчен сам по
+// себе си: SQLite CURRENT_TIMESTAMP е second-precision, а shuffle mode
+// INSERT-ва всички нови locked отбори в рамките на една транзакция (често
+// идентичен timestamp) — без explicit seed_slot ordering подредбата би
+// паднала върху case-random team_id UUID tie-break. За все още-formirащи
+// отбори (seed_slot IS NULL — normal-mode "Изчаква партньор" карти, или
+// pre-shuffle individual entrants) редът остава старият created_at ASC,
+// team_id ASC — непроменено, backward compatible поведение.
+//
+// buildTeamDtos/buildTournamentDetailDto подават t.teams[] directly, без
+// собствено пресортиране — затова тази функция може безопасно да разчита
+// изцяло на входния ред.
+
 function buildTournamentTeamLabelMap(teams: TournamentDetailSnapshot['teams']): Map<string, string> {
   const map = new Map<string, string>()
   teams.forEach((team, index) => {
@@ -759,7 +792,34 @@ function renderTournamentTeamCard(
   `
 }
 
+// Shuffle mode (§3/§11 в shuffle mode task spec-а): преди окончателното
+// разбъркване (shuffleEnabled && !teamsShuffledAt) участниците се показват
+// като индивидуални "Играч N — име" записи, не "Отбор" карти — предварителни
+// двойки не съществуват сървърно (виж joinTournamentSoloAtomically
+// isPendingShuffle клона), а всеки 1-member 'forming' team тук е точно един
+// такъв individual entrant. Номерацията е само display-ред (t.teams[] идва
+// ORDER BY created_at ASC от сървъра) — не влияе на бъдещото random pairing.
+function renderTournamentPendingShuffleEntrantsList(t: TournamentDetailSnapshot): string {
+  const entrants = t.teams.flatMap((team) => team.members)
+  if (entrants.length === 0) {
+    return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Все още няма записани участници.</div>'
+  }
+  return `
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
+      ${entrants.map((member, index) => `
+        <div style="border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:10px;display:flex;align-items:center;gap:8px;min-width:0;">
+          <span style="font-size:12px;font-weight:900;color:#d4a520;flex-shrink:0;">Играч ${index + 1}</span>
+          <span style="font-size:12px;color:#fff;font-weight:800;overflow-wrap:anywhere;">— ${escapeHtml(member.displayName)}</span>
+        </div>
+      `).join('')}
+    </div>
+  `
+}
+
 function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
+  if (t.shuffleEnabled && t.teamsShuffledAt === null) {
+    return renderTournamentPendingShuffleEntrantsList(t)
+  }
   if (t.teams.length === 0) {
     return '<div style="font-size:13px;color:rgba(255,255,255,0.4);font-style:italic;">Все още няма сформирани отбори.</div>'
   }
@@ -1161,7 +1221,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
       </div>
 
       <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
-        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">Отбори</div>
+        <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">${t.shuffleEnabled && t.teamsShuffledAt === null ? 'Участници' : 'Отбори'}</div>
         ${renderTournamentTeamsList(t)}
       </div>
 
@@ -1764,12 +1824,16 @@ export function extractTournamentCreateInputFromForm(form: HTMLFormElement): Tou
   const startMode = String(data.get('startMode') ?? 'fill') as TournamentStartMode
   const password = String(data.get('password') ?? '')
   const scheduledStartAtLocal = String(data.get('scheduledStartAt') ?? '')
+  const shuffleEnabled = data.get('shuffleEnabled') === '1'
 
   if (name.length === 0) return null
   if (!Number.isFinite(entryFee)) return null
   if (!Number.isFinite(teamCapacity)) return null
 
   const input: TournamentCreateInput = { name, entryFee, teamCapacity, visibility, startMode }
+  if (shuffleEnabled) {
+    input.shuffleEnabled = true
+  }
   if (visibility === 'password') {
     input.password = password
   }

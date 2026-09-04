@@ -89,6 +89,21 @@ export async function createTournamentScheduler(
     LIMIT ?;
   `)
 
+  // ПРЕМАХНАТО (§1/§13 в "scheduled shuffle timing" task spec-а): T-15
+  // shuffle due-queue-то за scheduled shuffle турнири. Окончателното
+  // разбъркване вече не се случва предварително — то е inline вътре в
+  // startTournamentAtomicallyLocal, извикано от due-scheduled loop-а по-долу
+  // ТОЧНО на scheduled_start_at (T-0), не 15 минути преди него. Виж
+  // performShuffleTeamsInCurrentTransaction в tournamentEconomyStore.ts.
+  //
+  // migration 20260904_002_add_tournament_shuffle_mode.sql остава непроменена
+  // (миграционният runner следи applied migrations по filename, не
+  // checksum/re-diff — редактиране на вече приложен .sql файл не презаписва
+  // локалната DB) — партиалният ѝ idx_tournaments_shuffle_due индекс остава
+  // в схемата като безвреден leftover (тесен partial index, вече неизползван
+  // от никакъв query тук), вместо да рискуваме DROP INDEX миграция само за
+  // почистване.
+
   const selectReadyFillTournamentIdsStatement = database.prepare(`
     SELECT t.tournament_id
     FROM tournaments t
@@ -143,6 +158,11 @@ export async function createTournamentScheduler(
     try {
       deps.economyStore.expireDuePartnerInvitesAtomically()
 
+      // Shuffle mode scheduled tournaments (§2/§13 в "scheduled shuffle
+      // timing" task spec-а): вече НЯМА отделен T-15 pre-shuffle стъпка тук —
+      // shuffle-ът (за shuffle_enabled=1 турнири) става inline вътре в
+      // startTournamentAtomically по-долу, ТОЧНО на scheduled_start_at, като
+      // част от същата атомарна start транзакция.
       const dueScheduledIds = (
         selectDueScheduledTournamentIdsStatement.all(tickNow.toISOString(), batchSize) as {
           tournament_id: string

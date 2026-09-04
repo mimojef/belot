@@ -194,6 +194,13 @@ export type TournamentSummaryDto = {
   startMode: 'fill' | 'scheduled'
   scheduledStartAt: string | null
   fillExpiresAt: string | null
+  // "С разбъркване" (shuffle mode) — server-authoritative. Докато
+  // shuffleEnabled=true и teamsShuffledAt=null, клиентът показва
+  // индивидуални "Играч N — име" записи вместо "Отбор" карти (виж §3/§11 в
+  // shuffle mode task spec-а). false/null за всеки съществуващ pre-feature
+  // турнир — старото UI поведение остава непроменено.
+  shuffleEnabled: boolean
+  teamsShuffledAt: string | null
   createdAt: string
   prizePreview: TournamentPrizePreviewDto
   isMine: boolean
@@ -366,11 +373,15 @@ function computeViewerParticipation(input: ToTournamentSummaryDtoInput): Tournam
       !isParticipant &&
       !isFull &&
       canRejoin,
+    // Shuffle mode (§3/§4 в shuffle mode task spec-а): предварителни двойки
+    // не са позволени, докато окончателният shuffle не е извършен — огледално
+    // на server-side guard-а в createPartnerInviteAtomically.
     canInvitePartner:
       viewerProfileId !== null &&
       tournament.status === 'open' &&
       occupiedPlacesCount < tournament.playerCapacity &&
-      (isParticipant || canRejoin),
+      (isParticipant || canRejoin) &&
+      !(tournament.shuffleEnabled && tournament.teamsShuffledAt === null),
     canLeave: isParticipant && tournament.status === 'open',
     canCancel: isMine && tournament.status === 'open',
     canModerateTeams: (isMine || input.viewerIsAdmin === true) && tournament.status === 'open',
@@ -420,6 +431,8 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     startMode: tournament.startMode,
     scheduledStartAt: tournament.scheduledStartAt,
     fillExpiresAt: tournament.fillExpiresAt,
+    shuffleEnabled: tournament.shuffleEnabled,
+    teamsShuffledAt: tournament.teamsShuffledAt,
     createdAt: tournament.createdAt,
     prizePreview: getTournamentPrizePreview(tournament),
     isMine: input.viewerProfileId !== null && input.viewerProfileId === tournament.creatorProfileId,

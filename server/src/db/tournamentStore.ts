@@ -38,6 +38,7 @@ export type CreateTournamentInput = {
   playerCapacity?: number
   startMode: TournamentStartMode
   scheduledStartAt?: string | null
+  shuffleEnabled?: boolean
 }
 
 export type ListTournamentsFilter = {
@@ -173,6 +174,8 @@ type TournamentRow = {
   start_mode: string
   scheduled_start_at: string | null
   fill_expires_at: string | null
+  shuffle_enabled: number
+  teams_shuffled_at: string | null
   status: string
   cancel_reason: string | null
   created_at: string
@@ -292,6 +295,8 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     startMode: row.start_mode as TournamentStartMode,
     scheduledStartAt: row.scheduled_start_at !== null ? dbDateToUtc(row.scheduled_start_at) : null,
     fillExpiresAt: row.fill_expires_at !== null ? dbDateToUtc(row.fill_expires_at) : null,
+    shuffleEnabled: row.shuffle_enabled === 1,
+    teamsShuffledAt: row.teams_shuffled_at !== null ? dbDateToUtc(row.teams_shuffled_at) : null,
     status: row.status as TournamentStatus,
     cancelReason: row.cancel_reason,
     createdAt: dbDateToUtc(row.created_at),
@@ -443,17 +448,20 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
       player_capacity,
       start_mode,
       scheduled_start_at,
-      fill_expires_at
+      fill_expires_at,
+      shuffle_enabled
     ) VALUES (
       ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-      CASE WHEN ? = 'fill' THEN datetime(CURRENT_TIMESTAMP, '+1 hours') ELSE NULL END
+      CASE WHEN ? = 'fill' THEN datetime(CURRENT_TIMESTAMP, '+1 hours') ELSE NULL END,
+      ?
     );
   `)
 
   const selectTournamentByIdStatement = database.prepare(`
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at,
+      shuffle_enabled, teams_shuffled_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
       champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
@@ -490,11 +498,30 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
     ) VALUES (?, ?, ?, ?);
   `)
 
+  // Подредба на клиентски-видимия t.teams[] масив (виж buildTournamentTeamLabelMap
+  // в renderTournamentsScreen.ts — positional "Отбор A/Б/В.." label, index в
+  // ТОЗИ масив). За вече заключени/финализирани отбори (seed_slot NOT NULL —
+  // всеки locked отбор след shuffle или normal tournament start) редът е
+  // ЗАДЪЛЖИТЕЛНО seed_slot ASC — единственият persisted, stable-across-
+  // restart/reconnect/refresh ordering, който наистина отразява bracket
+  // позицията. created_at НЕ е достатъчен tie-breaker сам по себе си: SQLite
+  // CURRENT_TIMESTAMP е second-precision, а всички нови locked team редове
+  // при shuffle mode се INSERT-ват в рамките на една транзакция (често
+  // идентичен timestamp), значи без този CASE подредбата би паднала върху
+  // team_id (random UUID) tie-break — стабилно, но не корелиращо със seed_slot.
+  // За все още-formirащи (seed_slot IS NULL — normal-mode "Изчаква партньор"
+  // карти, или pre-shuffle individual shuffle-mode entrants) редът остава
+  // непроменен: created_at ASC, team_id ASC — точно старото поведение,
+  // backward compatible за normal турнири и стари DB редове.
   const selectTeamsForTournamentStatement = database.prepare(`
     SELECT team_id, tournament_id, status, seed_slot, created_at, updated_at
     FROM tournament_teams
     WHERE tournament_id = ?
-    ORDER BY created_at ASC, team_id ASC;
+    ORDER BY
+      CASE WHEN seed_slot IS NOT NULL THEN 0 ELSE 1 END ASC,
+      seed_slot ASC,
+      created_at ASC,
+      team_id ASC;
   `)
 
   const insertEntryStatement = database.prepare(`
@@ -639,6 +666,7 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
           input.startMode,
           input.scheduledStartAt ?? null,
           input.startMode,
+          input.shuffleEnabled === true ? 1 : 0,
         )
       } catch {
         // Единственият UNIQUE constraint, който INSERT в tournaments може да
@@ -680,7 +708,8 @@ export async function createTournamentStore(databaseFilePath: string): Promise<T
         .prepare(
           `SELECT
              tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-             entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
+             entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at,
+             shuffle_enabled, teams_shuffled_at, status,
              cancel_reason, created_at, updated_at, started_at, finished_at,
              champion_team_id, runner_up_team_id, settlement_state, settled_at,
              total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,

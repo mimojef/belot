@@ -125,6 +125,14 @@ export type TournamentRecord = {
   startMode: TournamentStartMode
   scheduledStartAt: string | null
   fillExpiresAt: string | null
+  // "С разбъркване" (shuffle mode) — задава се само при create, никога не се
+  // променя после. false за всички съществуващи (pre-feature) турнири.
+  shuffleEnabled: boolean
+  // Кога е извършено окончателното shuffle+pairing — inline вътре в
+  // tournament start транзакцията (T-0 за scheduled / момента на запълване
+  // за fill), никога предварително. null = още не е извършено. Идемпотентност
+  // guard — виж performShuffleTeamsInCurrentTransaction в tournamentEconomyStore.ts.
+  teamsShuffledAt: string | null
   status: TournamentStatus
   cancelReason: string | null
   createdAt: string

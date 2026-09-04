@@ -276,6 +276,8 @@ export type TournamentSummarySnapshot = {
   startMode: TournamentStartMode
   scheduledStartAt: string | null
   fillExpiresAt: string | null
+  shuffleEnabled: boolean
+  teamsShuffledAt: string | null
   createdAt: string
   prizePreview: TournamentPrizePreview
   isMine: boolean
@@ -307,6 +309,7 @@ export type TournamentCreateInput = {
   password?: string
   startMode: TournamentStartMode
   scheduledStartAt?: string
+  shuffleEnabled?: boolean
 }
 
 export type TournamentJoinEntrySnapshot = {

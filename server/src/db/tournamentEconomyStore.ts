@@ -82,6 +82,7 @@ export type JoinTournamentSoloResult =
         | 'insufficient_funds'
         | 'requires_password'
         | 'participation_blocked'
+        | 'shuffle_already_completed'
     }
 
 export type LeaveTournamentResult =
@@ -269,6 +270,7 @@ export type PartnerInviteMutationResult =
          * players"). Различен от 'tournament_full', за да може клиентът да
          * покаже специфичния "Влез сам" popup вместо generic съобщение. */
         | 'partner_requires_two_slots'
+        | 'shuffle_mode_no_partner_invites'
         | 'invite_window_closed'
         | 'requires_password'
         | 'not_friend'
@@ -412,6 +414,10 @@ export type TournamentEconomyStore = {
     tournamentId: TournamentId,
     now: Date,
   ) => StartTournamentResult
+  shuffleTournamentEntrantsAtomically: (
+    tournamentId: TournamentId,
+    now: Date,
+  ) => { ok: true; alreadyShuffled: boolean } | { ok: false; reason: 'not_eligible' | 'entrant_count_mismatch' }
   autoCancelScheduledTournamentAtomically: (
     tournamentId: TournamentId,
     now: Date,
@@ -436,6 +442,8 @@ type TournamentRow = {
   start_mode: string
   scheduled_start_at: string | null
   fill_expires_at: string | null
+  shuffle_enabled: number
+  teams_shuffled_at: string | null
   status: string
   cancel_reason: string | null
   created_at: string
@@ -535,6 +543,8 @@ function toTournamentRecord(row: TournamentRow): TournamentRecord {
     startMode: row.start_mode as TournamentRecord['startMode'],
     scheduledStartAt: row.scheduled_start_at !== null ? dbDateToUtc(row.scheduled_start_at) : null,
     fillExpiresAt: row.fill_expires_at !== null ? dbDateToUtc(row.fill_expires_at) : null,
+    shuffleEnabled: row.shuffle_enabled === 1,
+    teamsShuffledAt: row.teams_shuffled_at !== null ? dbDateToUtc(row.teams_shuffled_at) : null,
     status: row.status as TournamentStatus,
     cancelReason: row.cancel_reason,
     createdAt: dbDateToUtc(row.created_at),
@@ -692,7 +702,8 @@ export async function createTournamentEconomyStore(
   const selectTournamentByIdStatement = database.prepare(`
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at,
+      shuffle_enabled, teams_shuffled_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
       champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
@@ -707,7 +718,8 @@ export async function createTournamentEconomyStore(
   const selectTournamentForUpdateStatement = database.prepare(`
     SELECT
       tournament_id, kind, name, creator_profile_id, visibility, password_hash,
-      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at, status,
+      entry_fee, player_capacity, start_mode, scheduled_start_at, fill_expires_at,
+      shuffle_enabled, teams_shuffled_at, status,
       cancel_reason, created_at, updated_at, started_at, finished_at,
       champion_team_id, runner_up_team_id, settlement_state, settled_at,
       total_entry_amount, system_fee_percent, system_fee_amount, prize_pool_amount,
@@ -859,11 +871,22 @@ export async function createTournamentEconomyStore(
     LIMIT 1;
   `)
 
+  // Same ordering rationale as tournamentStore.ts's selectTeamsForTournamentStatement:
+  // finalized/locked teams (seed_slot NOT NULL) sort by seed_slot ASC —
+  // the only persisted, restart/reconnect-stable ordering that reflects the
+  // real bracket position — while still-forming teams (seed_slot IS NULL)
+  // keep the old created_at ordering. Kept in sync for consistency, though
+  // this statement's callers (getStartedTournamentResult's startedTeams,
+  // validateAndLockTeamsForStart's internal pairing) don't currently feed
+  // the client-facing label directly.
   const selectTeamsForTournamentStatement = database.prepare(`
     SELECT team_id, tournament_id, status, seed_slot, created_at, updated_at
     FROM tournament_teams
     WHERE tournament_id = ?
-    ORDER BY created_at ASC;
+    ORDER BY
+      CASE WHEN seed_slot IS NOT NULL THEN 0 ELSE 1 END ASC,
+      seed_slot ASC,
+      created_at ASC;
   `)
 
   const selectEntriesForTeamStatement = database.prepare(`
@@ -1354,6 +1377,16 @@ export async function createTournamentEconomyStore(
     WHERE tournament_id = ? AND status = 'open';
   `)
 
+  // Idempotency guard за shuffleTournamentEntrantsAtomically: атомарният
+  // WHERE teams_shuffled_at IS NULL е самата защита срещу двоен shuffle —
+  // втори конкурентен извикващ процес, стигнал дотук СЛЕД commit-а на
+  // първия, вижда changes=0 и разпознава "вече разбъркано" (виж функцията).
+  const updateTeamsShuffledAtStatement = database.prepare(`
+    UPDATE tournaments
+    SET teams_shuffled_at = ?, updated_at = ?
+    WHERE tournament_id = ? AND shuffle_enabled = 1 AND teams_shuffled_at IS NULL AND status = 'open';
+  `)
+
   const updateTournamentAutoCancelledStatement = database.prepare(`
     UPDATE tournaments
     SET status = 'auto_cancelled',
@@ -1658,6 +1691,160 @@ export async function createTournamentEconomyStore(
     }
   }
 
+  // Shuffle mode (§2/§3/§4 в "scheduled shuffle timing" task spec-а):
+  // окончателното random разбъркване + сдвояване на individual entrants в
+  // Team A/B/C/..., изпълнявано ВЪТРЕ В ВЕЧЕ ОТВОРЕНА BEGIN IMMEDIATE
+  // транзакция (caller-ът управлява BEGIN/COMMIT/ROLLBACK) — това е
+  // единственото място, което действително мести entries между teams; и
+  // startTournamentAtomicallyLocal (scheduled T-0 + start-when-full, вижте
+  // и двата call site-а по-долу), и standalone shuffleTournamentEntrantsAtomically
+  // (idempotency-check API / тестове) минават през него, за да няма
+  // дублирана pairing логика.
+  //
+  // Caller-ът е ЗАДЪЛЖИТЕЛЕН да е проверил ПРЕДИ да извика тази функция:
+  // tournament.status==='open', tournament.shuffle_enabled===1,
+  // tournament.teams_shuffled_at===null — функцията не прави собствен
+  // BEGIN/ROLLBACK/COMMIT и разчита изцяло на caller-а за idempotency
+  // guard-а (updateTeamsShuffledAtStatement's `WHERE teams_shuffled_at IS
+  // NULL`, изпълнен тук вътре, СЛЕД като team assignment-ите вече са
+  // презаписани — ако друг паралелен writer вече е commit-нал shuffle-а
+  // междувременно за същия tournamentId, changes=0 тук сигнализира на
+  // caller-а да third rollback-не целия си pending work, не само shuffle-а).
+  //
+  // Team assignment логиката е нарочно огледална на fallback pairing блока
+  // в validateAndLockTeamsForStart (shuffleInPlace + sequential pairing +
+  // insertLockedTeamStatement/assignEntryToTeamStatement/
+  // lockTeamWithSeedStatement) — единствената разлика е, ЧЕ тук ВСИЧКИ
+  // confirmed entries идват от собствени 1-member 'forming' teams (никога
+  // partner-invited 2-member teams, защото createPartnerInviteAtomically
+  // отказва покани, докато shuffle-ът не е извършен, виж guard-а там), затова
+  // няма нужда от completeTeams/lonelyWaitingSoloTeamIds distinction.
+  function performShuffleTeamsInCurrentTransaction(
+    tournamentId: TournamentId,
+    tournament: TournamentRow,
+    now: Date,
+  ): { ok: true } | { ok: false; reason: 'entrant_count_mismatch' | 'already_shuffled' } {
+    const entries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
+    const teamCapacity = tournament.player_capacity / 2
+    if (entries.length !== tournament.player_capacity || entries.length % 2 !== 0) {
+      return { ok: false, reason: 'entrant_count_mismatch' }
+    }
+
+    const previousTeamIds = new Set<string>()
+    for (const entry of entries) {
+      if (entry.team_id !== null) previousTeamIds.add(entry.team_id)
+    }
+
+    // Cryptographically secure unbiased shuffle (node:crypto randomInt-based
+    // Fisher-Yates, виж shuffleInPlace) — pairing по-долу е positional само
+    // СЛЕД пълния random reorder, не по original entrant/registration/
+    // created_at order (виж §5 randomness проверката в task spec-а).
+    //
+    // seed_slot се присвоява ТУК, в СЪЩИЯ pairing loop (i=0 -> slot 1, i=1
+    // -> slot 2, ...) — вместо отделен втори shuffleInPlace(newTeams) reorder
+    // след insert-ването (какъвто имаше преди). Причината: shuffledEntries
+    // вече е равномерно случаен резултат от Fisher-Yates — pairing индексът
+    // (0,1 -> team #1; 2,3 -> team #2; ...) вече е crypto-random позиция,
+    // затова допълнителен reorder на newTeams не добавя ентропия, само
+    // разкачва insertion/created_at реда (=клиентския "Отбор A/B/C.."
+    // label ред, виж buildTournamentTeamLabelMap в renderTournamentsScreen.ts)
+    // от seed_slot-а. С тази промяна insertion order === seed_slot order,
+    // затова "Отбор A" стабилно и предвидимо съответства на seed 1 (не на
+    // случаен UUID tie-break при second-precision created_at collision).
+    const shuffledEntries = [...entries]
+    shuffleInPlace(shuffledEntries)
+
+    const newTeams: TournamentTeamRow[] = []
+    for (let i = 0; i < shuffledEntries.length; i += 2) {
+      const first = shuffledEntries[i] as TournamentEntryRow
+      const second = shuffledEntries[i + 1] as TournamentEntryRow
+      const teamId = randomUUID()
+      const seedSlot = newTeams.length + 1
+      insertLockedTeamStatement.run(teamId, tournamentId, seedSlot)
+      assignEntryToTeamStatement.run(teamId, first.entry_id, tournamentId)
+      assignEntryToTeamStatement.run(teamId, second.entry_id, tournamentId)
+      newTeams.push(selectTeamByIdStatement.get(teamId) as TournamentTeamRow)
+    }
+
+    if (newTeams.length !== teamCapacity) {
+      return { ok: false, reason: 'entrant_count_mismatch' }
+    }
+
+    // Изпразнените предишни 1-member 'forming' teams (всеки individual
+    // entrant е имал собствен, виж joinTournamentSoloAtomically isPendingShuffle
+    // клона) вече нямат никакви confirmed entries — почистваме ги, за да
+    // не останат orphan carts в ОТБОРИ списъка.
+    for (const oldTeamId of previousTeamIds) {
+      deleteTeamStatement.run(oldTeamId, tournamentId)
+    }
+
+    const nowIso = now.toISOString()
+    const shuffleResult = updateTeamsShuffledAtStatement.run(nowIso, nowIso, tournamentId) as {
+      changes?: number
+    }
+    if ((shuffleResult.changes ?? 0) === 0) {
+      // Друг процес е commit-нал shuffle-а паралелно между caller-ъвия
+      // pre-check и тук — сигнализираме на caller-а да rollback-не целия
+      // pending work (нашия различен random pairing никога не трябва да се
+      // commit-не).
+      return { ok: false, reason: 'already_shuffled' }
+    }
+
+    insertEvent(tournamentId, 'tournament_teams_shuffled', null, 'system', {
+      entrantCount: entries.length,
+      teamCount: newTeams.length,
+    })
+
+    return { ok: true }
+  }
+
+  // Standalone idempotency-check entry point (ползван само за тестове/
+  // ad-hoc проверки на idempotency-guard-а извън start flow-а — реалните
+  // production shuffle+start пътища минават directly през
+  // performShuffleTeamsInCurrentTransaction вътре в startTournamentAtomicallyLocal,
+  // виж коментара там). Отваря собствена BEGIN IMMEDIATE/COMMIT транзакция.
+  function shuffleTournamentEntrantsAtomically(
+    tournamentId: TournamentId,
+    now: Date,
+  ): { ok: true; alreadyShuffled: boolean } | { ok: false; reason: 'not_eligible' | 'entrant_count_mismatch' } {
+    const preCheck = selectTournamentByIdStatement.get(tournamentId) as TournamentRow | undefined
+    if (preCheck === undefined || preCheck.shuffle_enabled !== 1) {
+      return { ok: false, reason: 'not_eligible' }
+    }
+    if (preCheck.teams_shuffled_at !== null) {
+      return { ok: true, alreadyShuffled: true }
+    }
+
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+
+      const tournament = selectTournamentForUpdateStatement.get(tournamentId) as TournamentRow | undefined
+      if (tournament === undefined || tournament.shuffle_enabled !== 1 || tournament.status !== 'open') {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_eligible' }
+      }
+      if (tournament.teams_shuffled_at !== null) {
+        database.exec('ROLLBACK;')
+        return { ok: true, alreadyShuffled: true }
+      }
+
+      const shuffleResult = performShuffleTeamsInCurrentTransaction(tournamentId, tournament, now)
+      if (!shuffleResult.ok) {
+        database.exec('ROLLBACK;')
+        if (shuffleResult.reason === 'already_shuffled') {
+          return { ok: true, alreadyShuffled: true }
+        }
+        return { ok: false, reason: shuffleResult.reason }
+      }
+
+      database.exec('COMMIT;')
+      return { ok: true, alreadyShuffled: false }
+    } catch (error) {
+      try { database.exec('ROLLBACK;') } catch {}
+      throw error
+    }
+  }
+
   // teamCapacity = tournament.player_capacity / 2 (4/8/16 отбора, виж §5 в
   // task spec-а). Пълният брой отбори е единственото, което се проверява
   // тук — самото bracket pairing (кой отбор играе с кого) се решава в
@@ -1665,6 +1852,7 @@ export async function createTournamentEconomyStore(
   function validateAndLockTeamsForStart(
     tournamentId: TournamentId,
     teamCapacity: number,
+    teamsAlreadyShuffled: boolean,
   ): { ok: true; teams: TournamentTeamRow[]; seedSnapshot: Record<string, string[]> } | { ok: false } {
     const entries = selectConfirmedEntriesStatement.all(tournamentId) as TournamentEntryRow[]
     const teams = selectTeamsForTournamentStatement.all(tournamentId) as TournamentTeamRow[]
@@ -1731,9 +1919,31 @@ export async function createTournamentEconomyStore(
     }
 
     if (completeTeams.length !== teamCapacity) return { ok: false }
-    shuffleInPlace(completeTeams)
-
+    // Shuffle mode (§8 в shuffle mode task spec-а): ако tournament.
+    // teams_shuffled_at вече е сетнат (подадено от caller-а — виж
+    // startTournamentAtomicallyLocal), окончателните двойки И seed slot-овете
+    // вече са заключени от shuffleTournamentEntrantsAtomically — всички
+    // completeTeams тук идват directly от 'locked' branch-а по-горе, всеки
+    // вече носи свой различен seed_slot. Презаписването им отново (същите
+    // стойности, различен ред) би минало през same-tournament UNIQUE(seed_slot)
+    // constraint-a транзитивно (напр. team currently at slot 2 -> slot 1,
+    // докато друг team все още държи slot 1) — затова просто пропускаме
+    // целия re-lock блок и построяваме seedSnapshot direct от вече
+    // персистираните seed_slot стойности. За normal (non-shuffle) турнири
+    // поведението остава напълно same-as-before.
     const seedSnapshot: Record<string, string[]> = {}
+    if (teamsAlreadyShuffled) {
+      for (const team of completeTeams) {
+        const seedSlot = team.seed_slot
+        if (seedSlot === null) return { ok: false }
+        seedSnapshot[String(seedSlot)] = (selectEntriesForTeamStatement.all(team.team_id) as TournamentEntryRow[])
+          .filter((entry) => entry.status === 'confirmed')
+          .map((entry) => entry.profile_id)
+      }
+      return { ok: true, teams: completeTeams, seedSnapshot }
+    }
+
+    shuffleInPlace(completeTeams)
     for (let i = 0; i < completeTeams.length; i += 1) {
       const seedSlot = i + 1
       const team = completeTeams[i] as TournamentTeamRow
@@ -1828,7 +2038,37 @@ export async function createTournamentEconomyStore(
         return { ok: false, reason: 'ledger_mismatch' }
       }
 
-      const teamResult = validateAndLockTeamsForStart(tournamentId, tournament.player_capacity / 2)
+      // Shuffle mode atomic start (§2/§3/§13 в "scheduled shuffle timing" task
+      // spec-а): за scheduled shuffle турнири вече НЯМА отделен T-15 shuffle
+      // момент (виж премахнатия tournamentScheduler due-queue) — окончателното
+      // random разбъркване се случва ТУК, В СЪЩАТА BEGIN IMMEDIATE транзакция
+      // като самия start, единствено след като горните guard-ове вече са
+      // потвърдили confirmedEntries.length === player_capacity И
+      // getReservedPendingPlaces===0 (т.е. турнирът е ДЕЙСТВИТЕЛНО пълен —
+      // ако не е, кодът никога не стига дотук, tournament остава 'open' и
+      // scheduler-ният auto-cancel/refund flow поема нормално, виж runTick).
+      // Start-when-full минава през СЪЩИЯ path (joinTournamentSoloAtomically
+      // вика директно startTournamentAtomically вместо отделна shuffle
+      // стъпка) — така shuffle+persist+lock+start са една неделима атомарна
+      // операция И за двата start режима, без прозорец между "определяне на
+      // двойките" и "реален старт" (§3 "ATOMIC START + SHUFFLE").
+      if (tournament.shuffle_enabled === 1 && tournament.teams_shuffled_at === null) {
+        const shuffleResult = performShuffleTeamsInCurrentTransaction(tournamentId, tournament, now)
+        if (!shuffleResult.ok) {
+          database.exec('ROLLBACK;')
+          // 'already_shuffled' тук значи паралелен writer (напр. друг tick)
+          // вече е shuffle-нал ТОЗИ турнир между re-select-а по-горе и тук —
+          // третираме като 'not_ready' (caller-ът/scheduler-ът просто ще
+          // опита пак на следващия tick/request, вместо invalid_team_state).
+          return { ok: false, reason: 'not_ready' }
+        }
+      }
+
+      const teamResult = validateAndLockTeamsForStart(
+        tournamentId,
+        tournament.player_capacity / 2,
+        tournament.shuffle_enabled === 1,
+      )
       if (!teamResult.ok) {
         database.exec('ROLLBACK;')
         return { ok: false, reason: 'invalid_team_state' }
@@ -2435,6 +2675,10 @@ export async function createTournamentEconomyStore(
       return startTournamentAtomicallyLocal(tournamentId, now)
     },
 
+    shuffleTournamentEntrantsAtomically(tournamentId: TournamentId, now: Date) {
+      return shuffleTournamentEntrantsAtomically(tournamentId, now)
+    },
+
     autoCancelScheduledTournamentAtomically(
       tournamentId: TournamentId,
       now: Date,
@@ -2492,6 +2736,13 @@ export async function createTournamentEconomyStore(
         if (isFillExpired(freshTournament, nowMs)) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_fill_expired' }
+        }
+        if (freshTournament.shuffle_enabled === 1 && freshTournament.teams_shuffled_at === null) {
+          // Shuffle mode (§3/§4 в shuffle mode task spec-а): предварителни
+          // двойки не са позволени преди окончателното разбъркване —
+          // участниците остават individual entrants до shuffle-а.
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'shuffle_mode_no_partner_invites' }
         }
 
         const expiresAt = computePartnerInviteExpiresAt(freshTournament)
@@ -2989,6 +3240,19 @@ export async function createTournamentEconomyStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'tournament_fill_expired' }
         }
+        if (freshTournament.shuffle_enabled === 1 && freshTournament.teams_shuffled_at !== null) {
+          // Shuffle mode (§9 в shuffle mode task spec-а): roster-ът е финален
+          // веднага след teams_shuffled_at — никакъв нов участник не трябва
+          // да може да влезе повече, дори ако междувременно се е освободило
+          // място (напр. напуснал играч, виж leaveTournamentAndRefundAtomically's
+          // isPostShuffleTeam клона, който dissolve-ва цялата двойка вместо
+          // да demote-не единия обратно към waiting-solo). Без този guard нов
+          // join би създал собствен fresh 1-member forming team, който
+          // shuffle-ът никога повече няма да разбърка — точно нарушение на
+          // "roster-ът е финален след shuffle" инварианта.
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'shuffle_already_completed' }
+        }
 
         const isCreator = freshTournament.creator_profile_id === profileId
         if (freshTournament.visibility === 'password' && !isCreator) {
@@ -3072,9 +3336,17 @@ export async function createTournamentEconomyStore(
         // винаги refunded/withdrawn на тази точка (status='confirmed'
         // случаят вече върна idempotent success по-горе), а
         // selectOldestWaitingSoloEntryStatement изисква status='confirmed'.
-        const waitingSoloEntry = selectOldestWaitingSoloEntryStatement.get(tournamentId) as
-          | TournamentEntryRow
-          | undefined
+        //
+        // Shuffle mode (§3 в shuffle mode task spec-а): преди окончателното
+        // разбъркване участниците трябва да останат индивидуални tournament
+        // entrants, не предварително сдвоени "Отбор" карти — затова тук
+        // изрично пропускаме auto-pair-а, докато teams_shuffled_at е NULL.
+        // Всеки такъв join получава собствен нов 1-member 'forming' team
+        // (else клона по-долу), точно каквото individual entrant представлява.
+        const isPendingShuffle = freshTournament.shuffle_enabled === 1 && freshTournament.teams_shuffled_at === null
+        const waitingSoloEntry = isPendingShuffle
+          ? undefined
+          : (selectOldestWaitingSoloEntryStatement.get(tournamentId) as TournamentEntryRow | undefined)
 
         let targetTeamId: string
         if (waitingSoloEntry !== undefined) {
@@ -3147,6 +3419,28 @@ export async function createTournamentEconomyStore(
           // surface original failure
         }
         throw error
+      }
+
+      // Shuffle mode + "При запълване" (§4/§13 в "scheduled shuffle timing"
+      // task spec-а): щом влезе последният необходим участник, стартираме
+      // турнира веднага тук — СЛЕД commit-а на самия join (join-ът остава
+      // валиден дори start опитът да fail-не по някаква причина; следващият
+      // scheduler tick's readyFillIds loop ще опита пак нормално). Директно
+      // startTournamentAtomicallyLocal, НЕ отделна shuffle стъпка — той вече
+      // прави shuffle+persist+lock+start в ЕДНА атомарна транзакция (виж
+      // коментара там), точно каквото unified-ият scheduled T-0 path прави
+      // за scheduled режима — един и същ atomic entry point за двата start
+      // режима, без прозорец между "определяне на двойките" и реалния старт.
+      if (
+        result.ok &&
+        result.tournament.shuffleEnabled &&
+        result.tournament.teamsShuffledAt === null &&
+        result.tournament.startMode === 'fill'
+      ) {
+        const confirmedCount = (countConfirmedEntriesStatement.get(tournamentId) as { count: number }).count
+        if (confirmedCount >= result.tournament.playerCapacity) {
+          startTournamentAtomicallyLocal(tournamentId, options.now ?? new Date())
+        }
       }
 
       return result
@@ -3374,8 +3668,26 @@ export async function createTournamentEconomyStore(
           // пада в else клона (unchanged: for-loop-ът по remainingMembers е
           // no-op, само deleteTeamStatement чисти празния team — точно
           // старото коректно поведение).
+          //
+          // Shuffle mode edge case (§8/§9 в shuffle mode task spec-а): ако
+          // tournament.teams_shuffled_at вече е сетнат, "solo-origin, demote
+          // remaining member back to a waiting-solo forming team" clона по-долу
+          // би нарушил инварианта "roster-ът е финален след shuffle" по два
+          // начина — (1) би оставил останалия партньор в 1-member forming team
+          // (изисква auto-pair, а shuffle mode никога не auto-pair-ва пак), и
+          // (2) понеже joinTournamentSoloAtomically чете teams_shuffled_at
+          // !== null и вече НЕ пропуска FIFO auto-pair-а, нов solo joiner би
+          // могъл да auto-pair-не именно с този останал играч, тихо
+          // добавяйки нов участник в турнир, който вече е окончателно
+          // разбъркан. Затова пост-shuffle леещ team винаги пада в explicit-
+          // partner-origin else клона (пълен refund на останалия член +
+          // team изтрит) — reuse на СЪЩАТА, вече съществуваща refund логика,
+          // не нова.
+          const isPostShuffleTeam = freshTournament.shuffle_enabled === 1 && freshTournament.teams_shuffled_at !== null
           const isSoloOriginTeam =
-            freshEntry.joined_as === 'solo' && remainingMembers.every((member) => member.joined_as === 'solo')
+            !isPostShuffleTeam &&
+            freshEntry.joined_as === 'solo' &&
+            remainingMembers.every((member) => member.joined_as === 'solo')
 
           if (isSoloOriginTeam && remainingMembers.length === 1) {
             // §"PART 2 — SOLO TEAM MEMBER LEAVE". Остатъчният член (A)
