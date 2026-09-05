@@ -4064,6 +4064,13 @@ export function createLobbyFlowController(
       giftModalBypassRecipientProfileId: state.giftModalBypassRecipientProfileId,
       giftModalFriendName: state.giftModalFriendName,
       giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT,
+      // role==='admin' sender — UI-only relax на min/max/step (задачата: "не
+      // разчитай само на frontend, но UI и backend трябва да са
+      // синхронизирани"). Derived директно от authSession.account.role (вече
+      // наличен клиентски), без нужда от нов session payload field.
+      // Authoritative проверката е изцяло сървърна (sendGiftCore §admin
+      // bypass, yellowCoinGiftStore.ts) — тук само какво показва modal-ът.
+      giftModalUnlimitedForAdmin: isFullAdminAuthSession(authSession),
       giftModalPikaTeamDailyLimitStatus: authSession?.pikaTeamDailyGiftLimitStatus ?? null,
       giftModalErrorText: state.giftModalErrorText,
       giftSuccessModal: state.giftSuccessModal,

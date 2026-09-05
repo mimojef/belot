@@ -30,6 +30,7 @@ import {
   createSessionCookieHeader,
   getSessionTokenFromCookieHeader,
   isAdCampaignManagerSession,
+  isAdminGiftUnlimitedSession,
   isAdminOrSubadminSession,
   isFullAdminSession,
   isLafcheMessageDeleteModeratorSession,
@@ -14129,7 +14130,13 @@ async function handleFriendsRequest(
       return true
     }
 
-    const result = yellowCoinGiftStore.sendGift(profileId, friendshipId, amount, isPikaTeamGiftMaxAmountSession(session))
+    const result = yellowCoinGiftStore.sendGift(
+      profileId,
+      friendshipId,
+      amount,
+      isPikaTeamGiftMaxAmountSession(session),
+      isAdminGiftUnlimitedSession(session),
+    )
 
     if (!result.ok) {
       if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {

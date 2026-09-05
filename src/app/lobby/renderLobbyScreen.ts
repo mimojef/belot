@@ -630,8 +630,10 @@ export type LobbyScreenState = {
   /** pika_team friendship-gate bypass — виж createLobbyFlowController.ts коментара. */
   giftModalBypassRecipientProfileId: string | null
   giftModalFriendName: string
-  /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 за legacy pika_team bypass profileId ИЛИ role==='pika_team'. Authoritative проверката е сървърна (index.ts sendGiftCore). */
+  /** Server-derived UI signal — 30000 за всички обичайни profiles, 100000 за legacy pika_team bypass profileId ИЛИ role==='pika_team'. Authoritative проверката е сървърна (index.ts sendGiftCore). Игнорира се, когато giftModalUnlimitedForAdmin е true. */
   giftModalMaxAmount: number
+  /** role==='admin' sender (viewer) — премахва min/max/step ограниченията на gift input-а в UI-то. Authoritative проверката е изцяло сървърна (yellowCoinGiftStore.ts sendGiftCore §admin bypass). */
+  giftModalUnlimitedForAdmin: boolean
   /** Informational UI (limit/used/remaining) — non-null само за role==='pika_team'. Authoritative проверката е сървърна (yellowCoinGiftStore.sendGiftCore §4.5). */
   giftModalPikaTeamDailyLimitStatus: { limit: number; used: number; remaining: number } | null
   giftModalErrorText: string | null
@@ -2432,7 +2434,7 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
         <form data-lobby-gift-form="${escapeHtml(formTarget)}" style="display:grid;gap:14px;">
           <div>
             <div style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Подари жълтици</div>
-            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. Сумата трябва да е между 1 000 и ${state.giftModalMaxAmount.toLocaleString('bg-BG')} жълтици.</div>
+            <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftModalFriendName || 'приятел')}. ${state.giftModalUnlimitedForAdmin ? 'Сумата трябва да е положително цяло число, до наличния ти баланс.' : `Сумата трябва да е между 1 000 и ${state.giftModalMaxAmount.toLocaleString('bg-BG')} жълтици.`}</div>
           </div>
           ${state.giftModalPikaTeamDailyLimitStatus ? `
             <div style="border-radius:8px;border:1px solid rgba(212,165,32,0.30);background:rgba(212,165,32,0.08);padding:10px 12px;font-size:12.5px;line-height:1.6;color:rgba(255,255,255,0.78);font-weight:700;">
@@ -2443,7 +2445,9 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
           ` : ''}
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Сума
-            <input name="amount" type="number" min="1000" max="${state.giftModalMaxAmount}" step="1000" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            ${state.giftModalUnlimitedForAdmin
+              ? '<input name="amount" type="number" min="1" step="1" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">'
+              : `<input name="amount" type="number" min="1000" max="${state.giftModalMaxAmount}" step="1000" value="1000" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">`}
           </label>
           ${state.giftModalErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.giftModalErrorText)}</div>` : ''}
           <div style="display:flex;justify-content:flex-end;gap:10px;flex-wrap:wrap;">

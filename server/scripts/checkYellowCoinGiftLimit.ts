@@ -1535,6 +1535,193 @@ await withTempDir(async (dir) => {
     assert(second.ok === true, `Веднага следващата операция (30 000, нов получател) трябва да мине, но: ${JSON.stringify(second)}`)
   })
 
+  // ── [60]-[68] role='admin' unlimited gifting bypass ─────────────────────
+  // isRoleBasedAdminSender се подава explicit true (5-ти позиционен аргумент
+  // на sendGift), симулирайки route caller-а с
+  // isAdminGiftUnlimitedSession(session)===true (index.ts). Проверява
+  // задачата: admin bypass-ва max amount/step/min, sender daily лимит и
+  // recipient 60-дневен window лимит, но НЕ баланс/positive-integer/recipient
+  // проверките.
+
+  await check('[60] admin sender: amount = 30 001 (над стандартния 30 000 max) → приема се', async () => {
+    const dbPath = join(dir, 'test60.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-60', 1_000_000)
+    seedProfile(db, 'recipient-60', 0)
+    seedFriendship(db, 'fs-60', 'admin-60', 'recipient-60')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-60', 'fs-60', 30_001, false, true)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[61] admin sender: amount = 100 001 (над pika_team-овия 100 000 max) → приема се при достатъчен баланс', async () => {
+    const dbPath = join(dir, 'test61.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-61', 1_000_000)
+    seedProfile(db, 'recipient-61', 0)
+    seedFriendship(db, 'fs-61', 'admin-61', 'recipient-61')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-61', 'fs-61', 100_001, false, true)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true, но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[62] admin sender: recipient вече достигнал стандартния 60-дневен 30 000 cap → приема се', async () => {
+    const dbPath = join(dir, 'test62.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-62', 1_000_000)
+    seedProfile(db, 'recipient-62', 0)
+    seedFriendship(db, 'fs-62', 'admin-62', 'recipient-62')
+    // recipient-62 вече е на максимума от друг sender
+    seedGiftLedger(db, 'g62-pre', 'fs-62', 'admin-62', 'recipient-62', 30_000, utcDaysAgo(5))
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-62', 'fs-62', 5_000, false, true)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true (admin bypass-ва recipient window), но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[63] admin sender: няма daily gifting cap (над стандартния 200 000 rolling-24h)', async () => {
+    const dbPath = join(dir, 'test63.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-63', 10_000_000)
+    seedProfile(db, 'recipient-63', 0)
+    seedFriendship(db, 'fs-63', 'admin-63', 'recipient-63')
+    // 195 000 вече изпратени преди 1 час — над обикновения sender rolling лимит
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
+      .toISOString().replace('T', ' ').replace(/\.\d{3}Z$/, '')
+    seedGiftLedger(db, 'g63-sent', 'fs-63', 'admin-63', 'recipient-63', 195_000, oneHourAgo, 1)
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    // 195 000 + 50 000 = 245 000 > 200 000 — за normal/pika_team sender това би отказало
+    const result = store.sendGift('admin-63', 'fs-63', 50_000, false, true)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true (admin няма daily cap), но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[64] admin sender: insufficient balance → отказ', async () => {
+    const dbPath = join(dir, 'test64.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-64', 500)
+    seedProfile(db, 'recipient-64', 0)
+    seedFriendship(db, 'fs-64', 'admin-64', 'recipient-64')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-64', 'fs-64', 1_000, false, true)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ поради недостатъчен баланс')
+    assert(
+      'message' in result && (result as { message: string }).message.includes('достатъчно жълтици'),
+      `Съобщение: ${JSON.stringify(result)}`,
+    )
+  })
+
+  await check('[65] admin sender: amount = 0 → отказ', async () => {
+    const dbPath = join(dir, 'test65.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-65', 1_000_000)
+    seedProfile(db, 'recipient-65', 0)
+    seedFriendship(db, 'fs-65', 'admin-65', 'recipient-65')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-65', 'fs-65', 0, false, true)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за amount = 0')
+    assert(!('code' in result), 'Невалидна сума не трябва да дава limit code')
+  })
+
+  await check('[66] admin sender: amount = -5 (отрицателна) → отказ', async () => {
+    const dbPath = join(dir, 'test66.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-66', 1_000_000)
+    seedProfile(db, 'recipient-66', 0)
+    seedFriendship(db, 'fs-66', 'admin-66', 'recipient-66')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-66', 'fs-66', -5, false, true)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за отрицателна сума')
+  })
+
+  await check('[67] admin sender: amount = 1 (некратно на 1 000, под старите MIN 1 000) → приема се', async () => {
+    const dbPath = join(dir, 'test67.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'admin-67', 1_000_000)
+    seedProfile(db, 'recipient-67', 0)
+    seedFriendship(db, 'fs-67', 'admin-67', 'recipient-67')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('admin-67', 'fs-67', 1, false, true)
+    store.close()
+
+    assert(result.ok === true, `Очаква се ok:true (всяко положително цяло число), но: ${JSON.stringify(result)}`)
+  })
+
+  await check('[68] normal player sender: amount = 30 001 остава BLOCK (admin bypass-ът не разширява други роли)', async () => {
+    const dbPath = join(dir, 'test68.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    db.exec('PRAGMA foreign_keys = ON;')
+    buildBaseSchema(db)
+    applyNewGiftLedgerSchema(db)
+    seedProfile(db, 'player-68', 1_000_000)
+    seedProfile(db, 'recipient-68', 0)
+    seedFriendship(db, 'fs-68', 'player-68', 'recipient-68')
+    db.close()
+
+    const store = await createYellowCoinGiftStore(dbPath, makeMockProgressStore(), makeMockAdminSettingsStore())
+    const result = store.sendGift('player-68', 'fs-68', 30_001)
+    store.close()
+
+    assert(result.ok === false, 'Очаква се отказ за обикновен player над 30 000')
+    assertEqual(
+      (result as { message: string }).message,
+      'Сумата трябва да е между 1 000 и 30 000 жълтици.',
+      'message [68]',
+    )
+  })
+
   // ── pika_team календарен-ден (Europe/Sofia) дневен лимит ────────────────
   // Отделни тестове от §12/§35-37 по-горе — тук isRoleBasedPikaTeamSender се
   // подава explicit true (4-ти позиционен аргумент на sendGift), симулирайки

@@ -75,6 +75,7 @@ export type YellowCoinGiftStore = {
     friendshipId: string,
     amount: number,
     isRoleBasedPikaTeamSender?: boolean,
+    isRoleBasedAdminSender?: boolean,
   ) =>
     | {
         ok: true
@@ -102,6 +103,7 @@ export type YellowCoinGiftStore = {
     recipientProfileId: ProfileId,
     amount: number,
     isRoleBasedPikaTeamSender?: boolean,
+    isRoleBasedAdminSender?: boolean,
   ) =>
     | {
         ok: true
@@ -193,6 +195,18 @@ function normalizeGiftAmount(value: number, maxAmount: number): number | null {
   }
 
   return value
+}
+
+/**
+ * Admin sender amount validation — задачата: "разреши всяка положителна
+ * integer сума до наличния баланс". Без MIN_GIFT_AMOUNT/GIFT_AMOUNT_STEP/
+ * MAX_GIFT_AMOUNT ограничения (за разлика от normalizeGiftAmount по-горе) —
+ * единствената горна граница е самият wallet баланс, проверен отделно от
+ * debitSenderStatement (§7 по-долу). Само role==='admin' sender-и минават
+ * през тази проверка (isRoleBasedAdminSender, виж sendGiftCore).
+ */
+function normalizeGiftAmountForAdmin(value: number): number | null {
+  return Number.isInteger(value) && value > 0 ? value : null
 }
 
 function getRecipientProfileId(
@@ -432,6 +446,7 @@ export async function createYellowCoinGiftStore(
       | { ok: true; recipientProfileId: ProfileId }
       | { ok: false; message: string },
     isRoleBasedPikaTeamSender: boolean,
+    isRoleBasedAdminSender: boolean,
   ):
     | {
         ok: true
@@ -457,9 +472,18 @@ export async function createYellowCoinGiftStore(
       && senderProfileId === pikaTeamGiftBypassProfileId
     const hasHigherMaxAmount = isPikaTeamSender || isRoleBasedPikaTeamSender
     const maxAmountForSender = hasHigherMaxAmount ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER : MAX_GIFT_AMOUNT
-    const amount = normalizeGiftAmount(amountRaw, maxAmountForSender)
+    const amount = isRoleBasedAdminSender
+      ? normalizeGiftAmountForAdmin(amountRaw)
+      : normalizeGiftAmount(amountRaw, maxAmountForSender)
 
     if (amount === null) {
+      if (isRoleBasedAdminSender) {
+        return {
+          ok: false,
+          message: 'Сумата трябва да е положително цяло число.',
+        }
+      }
+
       // Hardcoded literals (не formatBgNumber) — Intl.NumberFormat('bg-BG')
       // групира с U+00A0 (non-breaking space), различно byte-wise от
       // established regular-space текста, ползван навсякъде другаде в
@@ -500,7 +524,8 @@ export async function createYellowCoinGiftStore(
         }
       }
 
-      // 4. Sender 24-часов лимит — НЕ важи за isRoleBasedPikaTeamSender.
+      // 4. Sender 24-часов лимит — НЕ важи за isRoleBasedPikaTeamSender, НИТО
+      // за isRoleBasedAdminSender (задачата: admin няма daily gifting cap).
       // За role='pika_team' единственият source of truth за максимално
       // подаряваната сума е §4.5 по-долу (configurable calendar-day Europe/
       // Sofia лимит от Admin Settings) — ако §4 се изпълнеше и за pika_team,
@@ -512,7 +537,7 @@ export async function createYellowCoinGiftStore(
       // горе) умишлено НЕ bypass-ва §4 — само role-based pika_team го прави,
       // тъй като задачата изисква новия лимит да е source of truth именно за
       // истинска accounts.role='pika_team', не за legacy hardcoded profile.
-      if (!isRoleBasedPikaTeamSender) {
+      if (!isRoleBasedPikaTeamSender && !isRoleBasedAdminSender) {
         const sentTodayRow = selectSentTodayStatement.get(senderProfileId) as
           | { sent_amount: number }
           | undefined
@@ -572,8 +597,10 @@ export async function createYellowCoinGiftStore(
       // мине към recipient, който не е вече window-exempt (30 000 window cap
       // < 100 000 amount за всеки свеж/non-exempt получател) — role-based
       // pika_team трябва реално да може да изпрати 100 000, не само да му
-      // бъде разрешено по amount validation.
-      const isRecipientLimitExemptGift = hasHigherMaxAmount
+      // бъде разрешено по amount validation. isRoleBasedAdminSender минава
+      // по същата логика (задачата: recipient 60-day cap не важи за admin
+      // sender), независимо от hasHigherMaxAmount.
+      const isRecipientLimitExemptGift = hasHigherMaxAmount || isRoleBasedAdminSender
 
       if (!isRecipientLimitExemptGift) {
         const windowRow = selectRecipientWindowStatement.get(recipientProfileId) as
@@ -692,6 +719,7 @@ export async function createYellowCoinGiftStore(
     friendshipId: string,
     amountRaw: number,
     isRoleBasedPikaTeamSender: boolean = false,
+    isRoleBasedAdminSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, friendshipId, amountRaw, () => {
       // 1. Проверка за прието приятелство
@@ -707,7 +735,7 @@ export async function createYellowCoinGiftStore(
 
       // 2. Определяне на получателя
       return { ok: true, recipientProfileId: getRecipientProfileId(friendship, senderProfileId) }
-    }, isRoleBasedPikaTeamSender)
+    }, isRoleBasedPikaTeamSender, isRoleBasedAdminSender)
   }
 
   // pika_team friendship-gate bypass (виж isPikaTeamGiftFriendshipBypassSession
@@ -722,6 +750,7 @@ export async function createYellowCoinGiftStore(
     recipientProfileId: ProfileId,
     amountRaw: number,
     isRoleBasedPikaTeamSender: boolean = false,
+    isRoleBasedAdminSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, null, amountRaw, () => {
       if (playerProgressStore.getPublicProfile(recipientProfileId) === null) {
@@ -729,7 +758,7 @@ export async function createYellowCoinGiftStore(
       }
 
       return { ok: true, recipientProfileId }
-    }, isRoleBasedPikaTeamSender)
+    }, isRoleBasedPikaTeamSender, isRoleBasedAdminSender)
   }
 
   function createGiftNotification(giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number): void {

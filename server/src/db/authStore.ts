@@ -258,6 +258,24 @@ export function isPikaTeamGiftMaxAmountSession(
 }
 
 /**
+ * Gift-yellow-coins unlimited bypass — role==='admin' (пълен администратор)
+ * единствено, изрично БЕЗ subadmin/pika_team/chat_admin/top_chat_admin/player
+ * (задачата: "не разширявай други permissions"). Бypass-ва sender single-
+ * операция max amount (30 000), sender rolling-24h daily лимит (200 000) И
+ * recipient 60-дневен window лимит (30 000) — виж sendGiftCore §admin bypass
+ * в yellowCoinGiftStore.ts. Единствените проверки, които ОСТАВАТ за admin
+ * sender: recipient съществува, amount е положително цяло число, sender има
+ * достатъчно жълтици. Отделен predicate от isFullAdminSession по-горе (same
+ * role check, но различно permission — виж isPikaTeamGiftMaxAmountSession
+ * коментара защо не се обединяват).
+ */
+export function isAdminGiftUnlimitedSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'admin'
+}
+
+/**
  * Pika support/direct chat bypass — САМО role='pika_team', изрично БЕЗ
  * admin/subadmin/top_chat_admin/chat_admin/player (chat authorization hotfix
  * брифа: "Не разширявай това към други роли"). Разрешава да СЕ ЗАПОЧНЕ
