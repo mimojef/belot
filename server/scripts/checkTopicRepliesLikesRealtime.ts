@@ -35,7 +35,7 @@
  * [R7]  Validation (empty/too-long) споделя validateTopicMessageBody с root
  * [R8]  Споделен Topics-writing rate limit: root + reply редуване брои към СЪЩИЯ прозорец
  * [R9]  Duplicate guard е scoped по parentMessageId (различен root parent -> позволено, същия текст)
- * [R10] Blocked reply sender се филтрира от realtime push (viewer-side hard-exclude)
+ * [R10] Block relationship НЕ филтрира reply realtime push (VISIBILITY fix — block != hide public Topics content)
  * [R11] Cross-instance: reply от instance #1 стига до subscriber на instance #2
  *
  * === REST ===
@@ -489,28 +489,19 @@ try {
     assert(sawRateLimited, 'редуване на root/reply трябва да consume-ва СЪЩИЯ 5/10s прозорец и да удари rate_limited заедно')
   })
 
-  await check('[R10] Blocked reply sender се филтрира от realtime push', async () => {
-    // userB блокира userA (viewer-side hard-exclude) — reuse на СЪЩИЯ blocking
-    // модел като root messages (getLobbyChatBlockedSet), тестван вече detайлно
-    // в checkTopicMessagesRealtime.ts [A17] за root; тук само потвърждаваме,
-    // че replies го наследяват през broadcastTopicReplyToLocalSubscribers.
+  await check('[R10] Block relationship НЕ филтрира reply realtime push', async () => {
+    // userB блокира userA — VISIBILITY policy fix: block вече НЕ филтрира
+    // public Topics realtime (нито root, нито reply — виж
+    // checkTopicMessagesRealtime.ts [A17] за root; тук потвърждаваме, че
+    // replies го наследяват идентично през broadcastTopicReplyToLocalSubscribers).
     const blockRes = await httpPostJson(port, `/api/profiles/${userA.profileId}/block`, userB.cookie, {})
     assert(blockRes.status === 200, `block заявката трябва да успее, получих ${blockRes.status} ${JSON.stringify(blockRes.body)}`)
 
     sendWs(wsA, { type: 'send_topic_reply', topicId: 'topic-rl-active', parentMessageId: replyRootId, body: `blocked-sender-reply-${runId}`, requestId: 'reply-blocked-check' })
     await waitForWsMessage(wsA, (m) => m.type === 'topic_reply' && m.requestId === 'reply-blocked-check')
 
-    let sawBlockedReply = false
-    const deadline = Date.now() + 1500
-    const buffer = wsMessageBuffers.get(wsB)!
-    while (Date.now() < deadline) {
-      if (buffer.some((m) => m.type === 'topic_reply' && m.body === `blocked-sender-reply-${runId}`)) {
-        sawBlockedReply = true
-        break
-      }
-      await sleep(50)
-    }
-    assert(!sawBlockedReply, 'userB е блокирал userA — replied от userA НЕ трябва да достигне до userB чрез realtime push')
+    const seenByB = await waitForWsMessage(wsB, (m) => m.type === 'topic_reply' && m.body === `blocked-sender-reply-${runId}`, 3000)
+    assert(seenByB.body === `blocked-sender-reply-${runId}`, 'userB е блокирал userA, но публичният reply на userA трябва все пак да стигне до userB чрез realtime push (block != hide public Topics content)')
 
     await httpPostJson(port, `/api/profiles/${userA.profileId}/block`, userB.cookie, {}) // toggle обратно (unblock)
   })

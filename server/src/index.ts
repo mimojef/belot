@@ -1257,6 +1257,44 @@ function cleanupTopicMessageRateLimitState(now: number): void {
   }
 }
 
+/**
+ * Централен write-authorization gate за "Теми" — ЕДИНСТВЕНОТО място, което
+ * решава дали writerProfileId смее да пише (root съобщение ИЛИ reply) в
+ * дадена тема. И двата WS handler-а (send_topic_message, send_topic_reply)
+ * го викат веднага след topic-existence проверката, преди moderation
+ * (lock/mute) checks-овете — виж употребите по-долу.
+ *
+ * ТЕКУЩА продуктова политика (диагностичен брифа: "block != deny posting in
+ * public Topics"): винаги връща ok:true. Block relationship между writer-а
+ * и topic owner-а (topic.createdByProfileId) НЕ ограничава писането — нито
+ * в едната, нито в другата посока. System topics (topic-general/
+ * topic-lafche — createdByProfileId===null, виж topicStore.ts) никога нямат
+ * user owner, значи няма какво да се сравнява дори принципно.
+ *
+ * ВАЖНО — умишлено разделено от read/visibility (excludedSenderProfileIds в
+ * topicMessageStore.ts/topicReadStateStore.ts): тази функция НЕ засяга и
+ * НЕ трябва да засяга history/pagination/unread/realtime delivery/
+ * replyCount/activity sorting. Ако бъдещ продуктов бриф въведе "blocked
+ * users не могат да пишат във взаимните си теми", промяната влиза САМО тук —
+ * сравнение на writerProfileId <-> topic.createdByProfileId в две посоки
+ * чрез blockStore.isBlocked (mirror на isBlockedWith pattern-а в
+ * privateRoomsStore.ts), после връщане на `{ ok: false, code: ..., message:
+ * ... }`. Return type-ът reuse-ва TopicMessageErrorCode (established
+ * generic-result pattern в този файл, виж createTopicAttachmentUpload по-долу)
+ * вместо нов dedicated wire code — не резервираме speculative protocol
+ * surface за deny rule, който още не съществува. И двата caller-а по-долу
+ * вече consume-ват резултата чрез
+ * `if (!result.ok) { sendXError(result.code, result.message); return }` —
+ * НЕ се налага промяна в send_topic_message/send_topic_reply, когато
+ * бъдещото правило влезе в сила.
+ */
+function assertCanWriteToTopic(
+  writerProfileId: string,
+  topic: TopicSnapshot,
+): { ok: true } | { ok: false; code: TopicMessageErrorCode; message: string } {
+  return { ok: true }
+}
+
 // viewer-agnostic частта на broadcast snapshot-а — likeCount/replyCount/
 // avatar са едни и същи за всички subscribers, но viewerHasLiked е
 // per-subscriber (виж appendViewerHasLiked по-долу) и НЕ може да е тук.
@@ -1407,16 +1445,10 @@ function broadcastTopicMessageToLocalSubscribers(
         continue
       }
 
-      // Viewer-side hard-exclude — СЪЩИЯТ getLobbyChatBlockedSet helper, ползван
-      // от Topics REST history (Етап 1) — realtime push НЕ трябва да заобикаля
-      // block semantics-а, който REST-ът вече налага (Етап 2 брифа т.9).
-      if (
-        subscriberConnection.profileId !== null &&
-        getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
-      ) {
-        continue
-      }
-
+      // Block relationship НЕ филтрира realtime push (продуктова политика:
+      // "block != hide public Topics content" — виж handleTopicMessagesRequest
+      // коментара; REST history вече не филтрира, realtime трябва да остане
+      // консистентен с него).
       liveRecipients.push({ connectionId: subscriberConnectionId, profileId: subscriberConnection.profileId })
     }
 
@@ -1424,9 +1456,11 @@ function broadcastTopicMessageToLocalSubscribers(
       liveRecipients.map((r) => r.profileId).filter((id): id is string => id !== null),
     )]
 
-    const excludedSendersByViewer = new Map<string, ReadonlySet<string>>(
-      uniqueViewerProfileIds.map((id) => [id, getLobbyChatBlockedSet(id)]),
-    )
+    // Празни exclusions за всички viewers (mirror на emptyExclusions в
+    // broadcastTopicReplyToLocalSubscribers по-долу) — excludedSenderProfileIdsByViewer
+    // остава generic/reusable параметър на store функциите, просто вече не
+    // го захранваме с viewer block-list тук.
+    const excludedSendersByViewer = new Map<string, ReadonlySet<string>>()
     const viewerDataByProfileId = topicMessageStore.getBroadcastViewerDataForProfiles(
       snapshot.messageId,
       uniqueViewerProfileIds,
@@ -1450,9 +1484,8 @@ function broadcastTopicMessageToLocalSubscribers(
       safeSendToConnection(recipient.connectionId, {
         type: 'topic_message',
         ...snapshot,
-        // replyCount override-ва shared base стойността (viewer-agnostic global
-        // count от hydrateTopicMessagesWithCurrentAvatars) с viewer-aware брой —
-        // blocked sender-и на ТОЗИ subscriber не се броят.
+        // replyCount вече е viewer-agnostic (block вече не изважда сендъри) —
+        // override-ва shared base стойността само за симетрия с viewerData shape-а.
         replyCount: viewerData?.replyCount ?? 0,
         unreadCount: recipient.profileId === null ? 0 : (unreadCountByProfileId.get(recipient.profileId) ?? 0),
         viewerHasLiked: viewerData?.viewerHasLiked ?? false,
@@ -1496,13 +1529,8 @@ function broadcastTopicReplyToLocalSubscribers(
       continue
     }
 
-    if (
-      subscriberConnection.profileId !== null &&
-      getLobbyChatBlockedSet(subscriberConnection.profileId).has(snapshot.senderProfileId)
-    ) {
-      continue
-    }
-
+    // Block relationship НЕ филтрира realtime push (виж коментара в
+    // broadcastTopicMessageToLocalSubscribers по-горе — идентична политика).
     liveRecipients.push({ connectionId: subscriberConnectionId, profileId: subscriberConnection.profileId })
   }
 
@@ -1572,13 +1600,16 @@ function broadcastToProfileConnections(profileId: string, payload: unknown): voi
   }
 }
 
+// Block relationship НЕ филтрира Topics unread (виж
+// broadcastTopicMessageToLocalSubscribers коментара за политиката) —
+// excludedSenderProfileIds параметърът на topicReadStateStore остава
+// generic/reusable, тук просто не го захранваме с block-list.
 function getTopicUnreadCountForProfile(profileId: string, topicId: string): number {
-  const blocked = [...getLobbyChatBlockedSet(profileId)]
   const topic = topicStore.getTopicById(topicId)
   if (topic?.isGeneral) {
-    return topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topicId, blocked)
+    return topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topicId, [])
   }
-  return topicReadStateStore.getUnreadCountsByTopicIds(profileId, [topicId], blocked).get(topicId) ?? 0
+  return topicReadStateStore.getUnreadCountsByTopicIds(profileId, [topicId], []).get(topicId) ?? 0
 }
 
 // Batch вариант — за N профила наведнъж, с фиксиран малък брой SQL
@@ -1601,12 +1632,11 @@ function getTopicUnreadCountsForProfiles(
 function topicsWithUnreadCountsForProfile(profileId: string, topics: TopicSnapshot[]): TopicSnapshot[] {
   const topicIds = topics.map((topic) => topic.topicId)
   topicReadStateStore.ensureReadStateForTopics(profileId, topicIds)
-  const blocked = [...getLobbyChatBlockedSet(profileId)]
-  const counts = topicReadStateStore.getUnreadCountsByTopicIds(profileId, topicIds, blocked)
+  const counts = topicReadStateStore.getUnreadCountsByTopicIds(profileId, topicIds, [])
   return topics.map((topic) => ({
     ...topic,
     unreadCount: topic.isGeneral
-      ? topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topic.topicId, blocked)
+      ? topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topic.topicId, [])
       : counts.get(topic.topicId) ?? 0,
   }))
 }
@@ -1621,8 +1651,7 @@ function broadcastTopicSeenUpdatedToProfile(profileId: string, topicId: string, 
 }
 
 function getTopicThreadUnreadCountForProfile(profileId: string, rootMessageId: string): number {
-  const blocked = [...getLobbyChatBlockedSet(profileId)]
-  return topicReadStateStore.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], blocked).get(rootMessageId) ?? 0
+  return topicReadStateStore.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], []).get(rootMessageId) ?? 0
 }
 
 // Batch вариант — за N профила наведнъж, ЕДИН thread (rootMessageId),
@@ -1677,8 +1706,10 @@ function broadcastTopicUnreadCountsToProfile(profileId: string): void {
 // (markTopicSeenForActiveProfile — остава явно per-connection, различни
 // connections на same profile могат легитимно да имат различен
 // activeTopicId), и (b) collect-не кои connections/profiles реално се
-// нуждаят от READ+SEND (block/self-exclusion филтъра е приложен тук, преди
-// batch call-а — изключените профили никога не влизат в batch заявката);
+// нуждаят от READ+SEND (self-exclusion филтъра е приложен тук, преди
+// batch call-а — самият sender не получава "нов unread" push за собствения
+// си пост; block НЕ филтрира тук — виж broadcastTopicMessageToLocalSubscribers
+// коментара за политиката);
 // (2) batch fetch на topic-level (getTopicUnreadCountsForProfiles) и
 // thread-level (getTopicThreadUnreadCountsForProfiles) unread counts за
 // ЦЕЛИЯ collected profile set наведнъж — фиксиран малък брой SQL statements,
@@ -1719,10 +1750,10 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
       continue
     }
 
-    if (
-      senderProfileId !== undefined &&
-      (senderProfileId === profileId || getLobbyChatBlockedSet(profileId).has(senderProfileId))
-    ) {
+    // Self-exclusion само — виждаш собствения си пост, не ти трябва "нов
+    // unread" push за него. Block relationship НЕ филтрира (виж коментара
+    // над функцията).
+    if (senderProfileId !== undefined && senderProfileId === profileId) {
       continue
     }
 
@@ -1736,9 +1767,10 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
   if (readRecipients.length === 0) return
 
   const uniqueProfileIds = [...new Set(readRecipients.map((r) => r.profileId))]
-  const excludedSendersByViewer = new Map<string, ReadonlySet<string>>(
-    uniqueProfileIds.map((id) => [id, getLobbyChatBlockedSet(id)]),
-  )
+  // Празни exclusions — виж broadcastTopicMessageToLocalSubscribers
+  // коментара (excludedSenderProfileIdsByViewer остава generic параметър,
+  // просто вече не се захранва с block-list за Topics unread).
+  const excludedSendersByViewer = new Map<string, ReadonlySet<string>>()
 
   const topicUnreadCountByProfileId = getTopicUnreadCountsForProfiles(topicId, uniqueProfileIds, excludedSendersByViewer)
   const threadUnreadCountByProfileId = (topic?.isGeneral && rootMessageId !== undefined)
@@ -1874,13 +1906,10 @@ function broadcastTopicMessageEditedToLocalSubscribers(topicId: string, message:
       continue
     }
 
-    if (
-      subscriberConnection.profileId !== null
-      && getLobbyChatBlockedSet(subscriberConnection.profileId).has(message.senderProfileId)
-    ) {
-      continue
-    }
-
+    // Block relationship НЕ филтрира realtime push — виж коментара в
+    // broadcastTopicMessageToLocalSubscribers по-горе (консистентност: ако
+    // оригиналният пост е видим за blocker-а, редакцията му трябва да е
+    // видима по същия начин).
     safeSendToConnection(subscriberConnectionId, {
       type: 'topic_message_edited',
       topicId,
@@ -8376,10 +8405,16 @@ async function handleProfileBlockRequest(
       return true
     }
 
-    if (!result.blocked) {
-      topicReadStateStore.markSenderSeenThroughCurrent(myProfileId, targetProfileId)
-      broadcastTopicUnreadCountsToProfile(myProfileId)
-    }
+    // По-рано тук, при unblock, се маркираше "seen through current" за target
+    // sender-а в Topics unread state-а — компенсация за стария exclusion
+    // модел (докато B е бил блокиран, съобщенията му са били изключени от
+    // unread на A, значи unblock би причинил внезапен "unread flood").
+    // VISIBILITY fix: block вече изобщо не изключва Topics unread (виж
+    // topicsWithUnreadCountsForProfile/getTopicUnreadCountForProfile и т.н.
+    // в index.ts) — B-ините съобщения винаги са се броили нормално, дори
+    // докато е бил блокиран, значи "seen through current" тук би прикрил
+    // реално непрочетени съобщения точно в момента на unblock (нов бъг).
+    // Премахнато нарочно — не reset-ваме unread state при block toggle.
 
     sendJsonResponse(res, 200, { ok: true, blocked: result.blocked })
     return true
@@ -9656,8 +9691,11 @@ async function handleTopicMessagesRequest(
     return true
   }
 
-  const excludedSenderProfileIds = [...getLobbyChatBlockedSet(auth.profileId)]
-
+  // Block relationship НЕ филтрира public Topics history (продуктова
+  // политика: "block != hide public Topics content" — виж диагностичния
+  // брифа). excludedSenderProfileIds параметърът на topicMessageStore
+  // остава generic/reusable (виж store-а) — тук просто не го захранваме с
+  // viewer-ово block-list.
   const beforeRaw = requestUrl.searchParams.get('before')
   const beforeSeq = beforeRaw !== null ? Number.parseInt(beforeRaw, 10) : null
 
@@ -9671,8 +9709,8 @@ async function handleTopicMessagesRequest(
     : clampTopicMessagesLimit(requestUrl.searchParams.get('limit'))
 
   const page = beforeSeq !== null && Number.isInteger(beforeSeq)
-    ? topicMessageStore.getMessagesBefore(topicId, beforeSeq, limit, excludedSenderProfileIds)
-    : topicMessageStore.getRecentMessages(topicId, limit, excludedSenderProfileIds)
+    ? topicMessageStore.getMessagesBefore(topicId, beforeSeq, limit, [])
+    : topicMessageStore.getRecentMessages(topicId, limit, [])
 
   // Avatar е derived от canonical profile data (виж коментара в
   // TopicMessageSnapshot.senderAvatarUrl) — не се пази в topic_messages,
@@ -9691,15 +9729,16 @@ async function handleTopicMessagesRequest(
 
   // Батово likeCount/replyCount/viewerHasLiked за цялата страница (Етап 3,
   // виж topicMessageStore.getMessageAggregatesByIds) — до 4 агрегатни заявки
-  // ОБЩО, не N+1 per message. excludedSenderProfileIds прави replyCount
-  // viewer-aware (blocked-и replies не се броят — виж коментара в store-а).
+  // ОБЩО, не N+1 per message. Block НЕ филтрира replyCount/unread (виж
+  // handleTopicMessagesRequest коментара по-горе за политиката) — generic
+  // exclusion параметърът остава, просто не се захранва с block-list.
   const messageIds = page.messages.map((m) => m.messageId)
-  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, excludedSenderProfileIds)
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, [])
   const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
   const unreadCountsByMessageId = topicReadStateStore.getUnreadCountsByRootMessageIds(
     auth.profileId,
     messageIds,
-    excludedSenderProfileIds,
+    [],
   )
 
   const enrichedMessages = page.messages.map((message) => {
@@ -9788,15 +9827,16 @@ async function handleTopicRepliesRequest(
     return true
   }
 
-  const excludedSenderProfileIds = [...getLobbyChatBlockedSet(auth.profileId)]
+  // Block relationship НЕ филтрира public Topics replies — виж коментара в
+  // handleTopicMessagesRequest по-горе (идентична политика).
   const limit = clampTopicRepliesLimit(requestUrl.searchParams.get('limit'))
   const afterRaw = requestUrl.searchParams.get('after')
   const afterSeq = afterRaw !== null ? Number.parseInt(afterRaw, 10) : null
 
   const isGapClosingReconcile = afterSeq !== null && Number.isInteger(afterSeq)
   const page = isGapClosingReconcile
-    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, excludedSenderProfileIds)
-    : topicMessageStore.getReplies(rootMessageId, limit, excludedSenderProfileIds)
+    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, [])
+    : topicMessageStore.getReplies(rootMessageId, limit, [])
 
   // Reopen reconciliation (виж createLobbyFlowController.ts expandReplyThread):
   // getRepliesAfter само добавя НОВИ redове (seq > afterSeq) — soft-delete
@@ -19630,13 +19670,14 @@ wsServer.on('connection', (socket, request) => {
 
         // Gap-closing catch-up (Етап 2 брифа т.1/т.8) — afterSeq=0 е валиден
         // baseline за тема без позната клиентска история; getMessagesAfter
-        // просто връща всичко от началото до cap-а в този случай.
-        const excludedSenderProfileIds = [...getLobbyChatBlockedSet(profileId)]
+        // просто връща всичко от началото до cap-а в този случай. Block
+        // relationship НЕ филтрира тук — виж handleTopicMessagesRequest
+        // коментара (идентична политика за целия Topics read path).
         const page = topicMessageStore.getMessagesAfter(
           message.topicId,
           message.afterSeq,
           TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT,
-          excludedSenderProfileIds,
+          [],
         )
 
         const hydratedCatchup = hydrateTopicMessagesWithCurrentAvatars(page.messages).map((m) => ({
@@ -19725,6 +19766,17 @@ wsServer.on('connection', (socket, request) => {
         // topic_locked за premahnata тема.
         if (topic === null || topic.status === 'removed') {
           sendTopicMessageError('topic_not_found', 'Темата не беше намерена.')
+          return
+        }
+
+        // Централен write-authorization gate (виж assertCanWriteToTopic
+        // коментара) — ЕДИНСТВЕНОТО място, което решава block-based write
+        // permission. Текущата политика винаги allow-ва (block != deny
+        // posting in public Topics), но всеки бъдещ deny rule минава оттук,
+        // без промяна в този handler.
+        const writeAuthorization = assertCanWriteToTopic(senderProfileId, topic)
+        if (!writeAuthorization.ok) {
+          sendTopicMessageError(writeAuthorization.code, writeAuthorization.message)
           return
         }
 
@@ -19920,6 +19972,14 @@ wsServer.on('connection', (socket, request) => {
         const topic = topicStore.getTopicById(message.topicId)
         if (topic === null || topic.status === 'removed') {
           sendTopicReplyError('topic_not_found', 'Темата не беше намерена.')
+          return
+        }
+
+        // Централен write-authorization gate — виж assertCanWriteToTopic
+        // коментара / идентичната употреба в send_topic_message по-горе.
+        const writeAuthorization = assertCanWriteToTopic(senderProfileId, topic)
+        if (!writeAuthorization.ok) {
+          sendTopicReplyError(writeAuthorization.code, writeAuthorization.message)
           return
         }
 

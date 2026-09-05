@@ -60,11 +60,13 @@ await check('[2] seen HTTP route uses registered session auth and rejects tempor
   assert(indexSrc.includes('handleTopicSeenRequest(req, res, requestUrl.pathname)'), 'POST /api/topics/:topicId/seen dispatch missing')
 })
 
-await check('[3] topic list initializes read state and returns unread counts', () => {
+await check('[3] topic list initializes read state, returns unread counts, and does NOT filter by block relationship', () => {
   const helper = indexSrc.match(/function topicsWithUnreadCountsForProfile[\s\S]*?\n}\n/)?.[0] ?? ''
   assert(helper.includes('ensureReadStateForTopics'), 'topic list must initialize read state')
   assert(helper.includes('getUnreadCountsByTopicIds'), 'topic list must fetch unread counts')
-  assert(helper.includes('getLobbyChatBlockedSet'), 'topic list must respect blocked senders')
+  // VISIBILITY fix (диагностичен брифа: "block != hide public Topics content") —
+  // Topics unread вече не изключва блокирани sender-и.
+  assert(!helper.includes('getLobbyChatBlockedSet'), 'topic list unread must NOT filter by block relationship')
 })
 
 await check('[4] realtime messages are in the shared protocol union', () => {
@@ -97,7 +99,7 @@ await check('[5] active legacy topics mark seen while General threads keep per-t
   assert(reconcile.includes('getTopicThreadUnreadCountsForProfiles(rootMessageId, uniqueProfileIds'), 'batch per-thread unread lookup missing')
 })
 
-await check('[6] root/reply create, delete, subscribe, and unblock flows reconcile unread state', () => {
+await check('[6] root/reply create, delete, and subscribe flows reconcile unread state; unblock no longer resets sender-seen boundary', () => {
   assert(
     indexSrc.includes('reconcileTopicUnreadForDirectorySubscribers(topicId, snapshot.senderProfileId, snapshot.messageId)'),
     'root message unread reconcile missing',
@@ -112,8 +114,14 @@ await check('[6] root/reply create, delete, subscribe, and unblock flows reconci
   )
   assert(indexSrc.includes('if (!topic.isGeneral)'), 'subscribe_topic_messages must guard topic-level seen for General')
   assert(indexSrc.includes('markTopicSeenForActiveProfile(profileId, message.topicId)'), 'subscribe_topic_messages mark-seen missing')
-  assert(indexSrc.includes('markSenderSeenThroughCurrent(myProfileId, targetProfileId)'), 'unblock sender boundary missing')
-  assert(indexSrc.includes('broadcastTopicUnreadCountsToProfile(myProfileId)'), 'unblock unread rebroadcast missing')
+  // VISIBILITY fix: markSenderSeenThroughCurrent беше unblock-time компенсация
+  // за стария exclusion модел (за да не "наводни" unread-а при unblock).
+  // Block вече изобщо не изключва Topics unread, значи компенсацията вече
+  // би прикривала реално непрочетени съобщения — премахната нарочно.
+  const blockToggleHandler = indexSrc.match(/const result = blockStore\.toggleBlock\(myProfileId, targetProfileId\)[\s\S]{0,400}/)?.[0] ?? ''
+  assert(blockToggleHandler.length > 0, 'block toggle handler не е намерен')
+  assert(!blockToggleHandler.includes('markSenderSeenThroughCurrent'), 'block toggle handler-ът вече НЕ трябва да reset-ва sender-seen boundary при unblock')
+  assert(!blockToggleHandler.includes('broadcastTopicUnreadCountsToProfile'), 'block toggle handler-ът вече НЕ трябва да force-ва unread rebroadcast при unblock')
 })
 
 if (failed > 0) {

@@ -3,7 +3,8 @@
  *
  * Етап 2 — realtime root съобщения в "Теми": WS send/subscribe/catch-up,
  * server-side VIP authorization, cross-instance poll cursor invariant,
- * avatar batch-hydration, viewer-side blocked filtering.
+ * avatar batch-hydration. [A17] потвърждава VISIBILITY policy-то: block
+ * НЕ филтрира public Topics realtime (поправено — виж диагностичния брифа).
  *
  * Real spawn-нат сървър (или два — за cross-instance теста), изолирана
  * SQLite база, реални HTTP + WS заявки — същия established harness pattern
@@ -37,7 +38,16 @@
  * [A15] Batch avatar hydration: senderAvatarUrl в live broadcast отразява ТЕКУЩИЯ avatar (derived, не snapshot)
  * [A16] Subscribe gap-closing catch-up (Етап 2 корекция т.1): съобщение, изпратено между REST snapshot
  *       и subscribe, се доставя чрез topic_message_catchup, НЕ се губи
- * [A17] Blocked viewer filtering: A блокира B -> A не вижда live съобщенията на B; B продължава да вижда тези на A
+ * [A17] Block relationship НЕ филтрира realtime: A блокира B -> A ВСЕ ОЩЕ получава live съобщенията на B; B продължава да вижда тези на A
+ *
+ * === Section A (продължение): write-policy архитектура — block НЕ ограничава писането ===
+ * (диагностичен брифа "PUBLIC TOPIC VISIBILITY vs PUBLIC TOPIC WRITE PERMISSION")
+ * [J]  A блокира B. B е owner на custom public topic. A може да публикува ROOT в темата на B.
+ * [K]  A блокира B. B е owner на custom public topic. A може да публикува REPLY в темата на B.
+ * [L]  B е блокирал A (owner блокира писателя — обратна посока от J/K). A може да публикува ROOT/REPLY в темата на B.
+ * [M]  Mutual block A<->B: писането в custom public topic остава разрешено (J/K/L комбинирани в едно DB състояние).
+ * [N]  System topics (topic-general/topic-lafche) нямат user owner (created_by_profile_id IS NULL) — няма върху какво да приложи owner-block restriction дори принципно.
+ * [O]  Source check: и send_topic_message, и send_topic_reply викат assertCanWriteToTopic() — единствен централен write-policy layer, без bypass path.
  *
  * === Section B: cross-instance (два процеса, обща SQLite база) ===
  * [B1] Съобщение от instance #1 стига до абонат на instance #2 (poll tick)
@@ -590,7 +600,7 @@ try {
     assert(catchupMessages.some((m) => m.body === gapMarker), 'gap-съобщението трябва да е в catch-up batch-а, не изгубено')
   })
 
-  await check('[A17] Blocked viewer filtering: A блокира B -> A не вижда live съобщенията на B; B вижда тези на A', async () => {
+  await check('[A17] Block relationship НЕ филтрира realtime: A блокира B -> A ВСЕ ОЩЕ получава live съобщенията на B (block != hide public Topics content)', async () => {
     const blockRes = await httpPostJson(portA, `/api/profiles/${encodeURIComponent(userB.profileId)}/block`, userA.cookie, {})
     assert(blockRes.status === 200, `block заявката трябва да успее, получен статус ${blockRes.status}`)
 
@@ -601,21 +611,107 @@ try {
 
     // wsB е изчерпала per-profile rate limit-а (A13/A15/A16 кумулативно, без
     // sleep между тях, за разлика от A12) — изчакваме прозореца ПРЕДИ първия
-    // send тук, иначе получаваме rate_limited вместо истинско потвърждение
-    // на blocking филтъра.
+    // send тук.
     await sleep(10_200)
 
     const marker = `blocked-sender-${Date.now()}`
-    const collectedOnA = collectWsMessages(wsA, 1500)
     sendWs(wsB, { type: 'send_topic_message', topicId: 'topic-a-active', body: marker, requestId: 'req-blocked' })
     await waitForWsMessage(wsB, (m) => m.type === 'topic_message' && m.requestId === 'req-blocked')
-    const aMessages = await collectedOnA
-    assert(!aMessages.some((m) => m.type === 'topic_message' && m.body === marker), 'A е блокирал B — не трябва да получи live съобщението му')
+    const seenByA = await waitForWsMessage(wsA, (m) => m.type === 'topic_message' && m.body === marker, 3000)
+    assert(seenByA.body === marker, 'A е блокирал B, но публичното live съобщение на B трябва все пак да стигне до A (VISIBILITY fix: block != hide public Topics content)')
 
-    const reverseMarker = `unblocked-direction-${Date.now()}`
+    const reverseMarker = `reverse-direction-${Date.now()}`
     sendWs(wsA, { type: 'send_topic_message', topicId: 'topic-a-active', body: reverseMarker, requestId: 'req-reverse' })
     const seenByB = await waitForWsMessage(wsB, (m) => m.type === 'topic_message' && m.body === reverseMarker, 3000)
-    assert(seenByB.body === reverseMarker, 'B НЕ е блокирал A — трябва да продължи да вижда съобщенията му (едностранно блокиране)')
+    assert(seenByB.body === reverseMarker, 'B (не е блокирал A) продължава да вижда съобщенията на A')
+  })
+
+  // ── Write-policy архитектура: block НЕ ограничава писането ───────────────
+  // [A17] по-горе доказа VISIBILITY policy-то (A вече е блокирал B преди
+  // тази точка в теста — A->B block relationship е активен, и потвърдихме,
+  // че той НЕ филтрира realtime). Тук доказваме, че СЪЩОТО block relationship
+  // НЕ пипа WRITE permission-а — архитектурно отделен gate
+  // (assertCanWriteToTopic, index.ts) — виж диагностичния брифа "DO NOT
+  // COUPLE VISIBILITY TO WRITE POLICY".
+
+  let topicOwnedByBId = ''
+  let caseJRootMessageId = ''
+
+  await check('[J] A блокира B (активно от A17). B е owner на custom тема. A публикува ROOT в темата на B -> позволено', async () => {
+    // Реален create_topic през wsB (не raw SQL insert) — topicStore.createTopic
+    // задава createdByProfileId = самия creator, значи темата е ДЕЙСТВИТЕЛНО
+    // owned от B през нормалния продуктов път (userB вече е VIP, виж A4).
+    const createMarker = `case-jkl-topic-${Date.now()}`
+    sendWs(wsB, { type: 'create_topic', title: createMarker, requestId: 'req-case-create' })
+    const created = await waitForWsMessage(wsB, (m) => m.type === 'topic_created' && m.requestId === 'req-case-create')
+    const createdTopic = created.topic as { topicId: string; createdByProfileId: string | null }
+    assert(createdTopic.createdByProfileId === userB.profileId, 'новосъздадената тема трябва да има createdByProfileId = userB.profileId')
+    topicOwnedByBId = createdTopic.topicId
+
+    // Fresh rate-limit прозорец преди новата серия sends — established idiom
+    // от A17 по-горе (checkTopicMessageRateLimit е per-profile, не per-topic).
+    await sleep(10_200)
+
+    sendWs(wsA, { type: 'subscribe_topic_messages', topicId: topicOwnedByBId, afterSeq: 0 })
+    await waitForWsMessage(wsA, (m) => m.type === 'topic_message_catchup' && m.topicId === topicOwnedByBId)
+
+    const marker = `case-j-root-${Date.now()}`
+    sendWs(wsA, { type: 'send_topic_message', topicId: topicOwnedByBId, body: marker, requestId: 'req-case-j' })
+    const sent = await waitForWsMessage(wsA, (m) => m.type === 'topic_message' && m.requestId === 'req-case-j')
+    assert(sent.body === marker, 'A (блокирал B) трябва да може да публикува ROOT в темата на B (owner) — block != deny posting in public Topics')
+    caseJRootMessageId = sent.messageId as string
+  })
+
+  await check('[K] A блокира B. B е owner. A публикува REPLY в темата на B -> позволено', async () => {
+    assert(caseJRootMessageId.length > 0, '[J] трябва да мине успешно преди [K] (нужен е root messageId за parentMessageId)')
+    const marker = `case-k-reply-${Date.now()}`
+    sendWs(wsA, { type: 'send_topic_reply', topicId: topicOwnedByBId, parentMessageId: caseJRootMessageId, body: marker, requestId: 'req-case-k' })
+    const sent = await waitForWsMessage(wsA, (m) => m.type === 'topic_reply' && m.requestId === 'req-case-k')
+    assert(sent.body === marker, 'A трябва да може да публикува REPLY в темата на B (owner, блокиран от A) — block != deny posting in public Topics')
+  })
+
+  let caseLRootMessageId = ''
+
+  await check('[L] B блокира A (обратна посока — owner блокира писателя; сега mutual с A17). A публикува ROOT в темата на B -> позволено', async () => {
+    const blockBtoARes = await httpPostJson(portA, `/api/profiles/${encodeURIComponent(userA.profileId)}/block`, userB.cookie, {})
+    assert(blockBtoARes.status === 200, `B->A block заявката трябва да успее, получен статус ${blockBtoARes.status}`)
+
+    const marker = `case-l-root-${Date.now()}`
+    sendWs(wsA, { type: 'send_topic_message', topicId: topicOwnedByBId, body: marker, requestId: 'req-case-l-root' })
+    const sent = await waitForWsMessage(wsA, (m) => m.type === 'topic_message' && m.requestId === 'req-case-l-root')
+    assert(sent.body === marker, 'A трябва да може да публикува ROOT в темата на B дори B да е блокирал A (owner->writer посока) — block != deny posting')
+    caseLRootMessageId = sent.messageId as string
+  })
+
+  await check('[L] B блокира A. A публикува REPLY в темата на B -> позволено', async () => {
+    assert(caseLRootMessageId.length > 0, 'предходният [L] check трябва да мине успешно преди този')
+    const marker = `case-l-reply-${Date.now()}`
+    sendWs(wsA, { type: 'send_topic_reply', topicId: topicOwnedByBId, parentMessageId: caseLRootMessageId, body: marker, requestId: 'req-case-l-reply' })
+    const sent = await waitForWsMessage(wsA, (m) => m.type === 'topic_reply' && m.requestId === 'req-case-l-reply')
+    assert(sent.body === marker, 'A трябва да може да публикува REPLY в темата на B дори B да е блокирал A — block != deny posting')
+  })
+
+  await check('[M] Mutual block A<->B (player_blocks и в двете посоки) — public custom Topics write остава разрешен (виж [L] по-горе)', () => {
+    const dbCaseM = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
+    const aToB = dbCaseM.prepare('SELECT 1 FROM player_blocks WHERE blocker_profile_id = ? AND blocked_profile_id = ?').get(userA.profileId, userB.profileId)
+    const bToA = dbCaseM.prepare('SELECT 1 FROM player_blocks WHERE blocker_profile_id = ? AND blocked_profile_id = ?').get(userB.profileId, userA.profileId)
+    dbCaseM.close()
+    assert(aToB !== undefined, 'A->B block трябва да е активен (установен в [A17])')
+    assert(bToA !== undefined, 'B->A block трябва да е активен (установен в [L]) -> mutual block A<->B')
+    // [L] по-горе вече доказа поведенчески, че при ТОЧНО това mutual
+    // състояние A продължава да публикува ROOT+REPLY в темата на B — current
+    // policy (mutual block НЕ ограничава public custom Topics писане).
+  })
+
+  await check('[N] System topics (topic-general/topic-lafche) нямат user owner -> created_by_profile_id IS NULL', () => {
+    const dbCaseN = new DatabaseSync(isoA.dbFile, { open: true, enableForeignKeyConstraints: true })
+    const general = dbCaseN.prepare('SELECT created_by_profile_id FROM topics WHERE topic_id = ?').get('topic-general') as { created_by_profile_id: string | null } | undefined
+    const lafche = dbCaseN.prepare('SELECT created_by_profile_id FROM topics WHERE topic_id = ?').get('topic-lafche') as { created_by_profile_id: string | null } | undefined
+    dbCaseN.close()
+    assert(general !== undefined, 'topic-general трябва да съществува (seed migration 20260810_002)')
+    assert(general!.created_by_profile_id === null, 'topic-general.created_by_profile_id трябва да е NULL — системна тема, без user owner, значи няма върху какво да важи owner-block restriction')
+    assert(lafche !== undefined, 'topic-lafche трябва да съществува (seed migration 20260817_002)')
+    assert(lafche!.created_by_profile_id === null, 'topic-lafche.created_by_profile_id трябва да е NULL — системна тема, без user owner')
   })
 
   wsAnon.terminate()
@@ -898,6 +994,39 @@ console.log('\n=== Topic Messages Realtime — Section E (N+1 avatar lookup sour
     assert(!fnBody.includes('GROUP BY'), 'заявката вече не трябва да прави GROUP BY (елиминиран temp B-tree hot path за unbounded "Общи" история)')
     assert(!fnBody.includes('SUM(unread_count)'), 'заявката вече не трябва да е nested SUM върху per-thread breakdown subquery')
     assert(fnBody.includes('COUNT(*)'), 'заявката трябва да е директен COUNT(*) без per-thread GROUP BY')
+  })
+
+  await check('[O] send_topic_message И send_topic_reply викат assertCanWriteToTopic() ПРЕДИ insert — единствен централен write-policy layer, без bypass path', () => {
+    const sendMessageBlock = serverSrc.match(/if \(message\.type === 'send_topic_message'\)[\s\S]*?(?=\n\s*if \(message\.type === 'send_topic_reply'\))/)?.[0] ?? ''
+    const sendReplyBlock = serverSrc.match(/if \(message\.type === 'send_topic_reply'\)[\s\S]*?(?=\n\s*if \(message\.type === 'toggle_topic_message_like'\))/)?.[0] ?? ''
+    assert(sendMessageBlock.length > 0, 'send_topic_message handler-ът не е намерен')
+    assert(sendReplyBlock.length > 0, 'send_topic_reply handler-ът не е намерен')
+
+    assert(sendMessageBlock.includes('assertCanWriteToTopic('), 'send_topic_message трябва да вика централния write-policy helper')
+    assert(sendReplyBlock.includes('assertCanWriteToTopic('), 'send_topic_reply трябва да вика централния write-policy helper')
+
+    // Ordering: write-policy проверката трябва да е ПРЕДИ реалния insert —
+    // никой insert path не бива да заобикаля helper-а.
+    const insertMessageIdx = sendMessageBlock.indexOf('topicMessageStore.insertMessage(')
+    const writeCheckIdxInMessage = sendMessageBlock.indexOf('assertCanWriteToTopic(')
+    assert(
+      insertMessageIdx >= 0 && writeCheckIdxInMessage >= 0 && writeCheckIdxInMessage < insertMessageIdx,
+      'assertCanWriteToTopic трябва да се извиква ПРЕДИ topicMessageStore.insertMessage',
+    )
+
+    const insertReplyIdx = sendReplyBlock.indexOf('topicMessageStore.insertReply(')
+    const writeCheckIdxInReply = sendReplyBlock.indexOf('assertCanWriteToTopic(')
+    assert(
+      insertReplyIdx >= 0 && writeCheckIdxInReply >= 0 && writeCheckIdxInReply < insertReplyIdx,
+      'assertCanWriteToTopic трябва да се извиква ПРЕДИ topicMessageStore.insertReply',
+    )
+
+    // Единствени insert call sites в целия сървър (потвърждава, че няма
+    // alternate/трети write path около централния gate).
+    const totalInsertMessageCalls = (serverSrc.match(/topicMessageStore\.insertMessage\(/g) ?? []).length
+    const totalInsertReplyCalls = (serverSrc.match(/topicMessageStore\.insertReply\(/g) ?? []).length
+    assert(totalInsertMessageCalls === 1, `очаква се точно 1 call site за topicMessageStore.insertMessage в целия сървър, намерени ${totalInsertMessageCalls}`)
+    assert(totalInsertReplyCalls === 1, `очаква се точно 1 call site за topicMessageStore.insertReply в целия сървър, намерени ${totalInsertReplyCalls}`)
   })
 }
 
