@@ -14,6 +14,17 @@ declare global {
       animatedCountersDuplicate: number
       animatedCountersNewKey: number
       audioPlays: number
+      bannerArrivedAtEarlyReturn: boolean
+      bannerShowsCorrectId: boolean
+      bannerHostStableAcrossNoopSync: boolean
+      bannerHostShowsSecondQueued: boolean
+      queuedBannerShowsCorrectIdAfterDismiss: boolean
+      bannerHostRemovedAfterLastDismiss: boolean
+      leaveWarningShownAtEarlyReturn: boolean
+      leaveWarningHostStableAcrossNoopSync: boolean
+      leaveWarningRemovedAfterCancel: boolean
+      botTakeoverPopupShownAtEarlyReturn: boolean
+      biddingEarlyReturnShowsBanner: boolean
     }
   }
 }
@@ -88,6 +99,17 @@ async function main(): Promise<void> {
       check('duplicate scoring key does not reanimate counters', result.animatedCountersDuplicate === 0)
       check('new scoring key animates counters again', result.animatedCountersNewKey === 2)
       check('scoring sound plays exactly for the two unique scoring keys', result.audioPlays === 2)
+      check('Fix №3: tournament banner arrives during cutting same-stable-key early-return', result.bannerArrivedAtEarlyReturn)
+      check('Fix №3: banner host carries the correct top banner id', result.bannerShowsCorrectId)
+      check('Fix №3: repeated ancillary sync does not recreate the banner host (no-op path)', result.bannerHostStableAcrossNoopSync)
+      check('Fix №3: second queued banner becomes top with its own id', result.bannerHostShowsSecondQueued)
+      check('Fix №3: after dismissing the top banner, queued banner shows with correct id', result.queuedBannerShowsCorrectIdAfterDismiss)
+      check('Fix №3: dismissing the last banner removes the host from the DOM', result.bannerHostRemovedAfterLastDismiss)
+      check('Fix №3: leave warning shows during cutting same-stable-key early-return', result.leaveWarningShownAtEarlyReturn)
+      check('Fix №3: repeated ancillary sync does not recreate the leave warning host (no-op path)', result.leaveWarningHostStableAcrossNoopSync)
+      check('Fix №3: cancel removes the leave warning', result.leaveWarningRemovedAfterCancel)
+      check('Fix №3: persistent bot takeover popup materializes on an early-return snapshot', result.botTakeoverPopupShownAtEarlyReturn)
+      check('Fix №3: bidding same-stable-key early-return does not block banner sync', result.biddingEarlyReturnShowsBanner)
     } finally {
       await browser.close()
     }

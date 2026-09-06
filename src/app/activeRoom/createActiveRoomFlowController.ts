@@ -214,6 +214,7 @@ export function createActiveRoomFlowController(
   let scoringVisualCountdownKey: string | null = null
   let scoringVisualCountdownStartedAt = 0
   let stablePhaseRenderKey: string | null = null
+  let lastLeaveWarningHtml: string | null = null
   const playedScoringPresentationKeys = new Set<string>()
   let reactionCountdownAudioIntervalId: number | null = null
   let matchEndedSoundPlayed = false
@@ -959,9 +960,16 @@ export function createActiveRoomFlowController(
   function removeLeaveButton(): void {
     document.body.querySelector('[data-active-room-leave-button="1"]')?.remove()
     document.body.querySelector('[data-active-room-mobile-action-bar="1"]')?.remove()
+    // Warning-ът живее в options.root (не document.body), но трябва да умре
+    // заедно с останалия leave UI на всяко от местата, откъдето тази функция
+    // вече се вика (match-ended, room exit/reset) — иначе би останал stale
+    // DOM node И stale lastLeaveWarningHtml кеш, разчитайки единствено на
+    // бъдещ options.root.innerHTML wipe, който не е гарантиран тук.
+    options.root.querySelector('[data-active-room-leave-warning="1"]')?.remove()
+    lastLeaveWarningHtml = null
   }
 
-  function appendLeaveControls(): void {
+  function syncLeaveControls(): void {
     if (!activeRoomState || isMatchEndedState()) {
       removeLeaveButton()
       return
@@ -986,9 +994,71 @@ export function createActiveRoomFlowController(
         })
     }
 
-    if (activeRoomState.leavePenaltyWarningOpen) {
-      options.root.insertAdjacentHTML('beforeend', renderLeavePenaltyWarning())
+    const existingWarningHost = options.root.querySelector<HTMLElement>(
+      '[data-active-room-leave-warning="1"]',
+    )
+
+    if (!activeRoomState.leavePenaltyWarningOpen) {
+      existingWarningHost?.remove()
+      lastLeaveWarningHtml = null
+      return
     }
+
+    const html = renderLeavePenaltyWarning()
+
+    if (existingWarningHost && html === lastLeaveWarningHtml) {
+      return
+    }
+
+    if (existingWarningHost) {
+      existingWarningHost.outerHTML = html
+    } else {
+      options.root.insertAdjacentHTML('beforeend', html)
+    }
+
+    // outerHTML/insertAdjacentHTML създават НОВ node — старата referenced
+    // node (ако имаше) е вече detached, затова re-query-ваме fresh преди да
+    // cache-нем и bind-нем. Cache-ваме HTML-а само СЛЕД потвърдено успешен
+    // DOM materialization — ако fresh host по някаква причина липсва, НЕ
+    // cache-ваме нищо, за да не заклещим DOM/cache в перманентно
+    // разминаване (следващият sync ще опита пак от нулата).
+    const freshWarningHost = options.root.querySelector<HTMLElement>(
+      '[data-active-room-leave-warning="1"]',
+    )
+
+    if (!freshWarningHost) {
+      return
+    }
+
+    lastLeaveWarningHtml = html
+    freshWarningHost.addEventListener('click', (event) => {
+      const target = event.target as HTMLElement
+      if (target.closest('[data-active-room-leave-cancel="1"]')) {
+        if (!activeRoomState) {
+          return
+        }
+
+        activeRoomState.leavePenaltyWarningOpen = false
+        scheduleActiveRoomRender()
+        return
+      }
+
+      if (target.closest('[data-active-room-leave-confirm="1"]')) {
+        if (!activeRoomState) {
+          return
+        }
+
+        if (!options.isConnected()) {
+          activeRoomState.errorText = 'Няма връзка със сървъра.'
+          activeRoomState.leavePenaltyWarningOpen = false
+          scheduleActiveRoomRender()
+          return
+        }
+
+        activeRoomState.leavePenaltyWarningOpen = false
+        options.leaveActiveRoom(activeRoomState.roomId, true)
+      }
+    })
   }
 
   function requestActiveRoomLeave(): void {
@@ -3404,6 +3474,7 @@ export function createActiveRoomFlowController(
           phraseBubbles: getPhraseBubblesForRender(),
           panelScale: stageScale,
         })
+        syncActiveRoomOverlayEffects()
         return
       }
 
@@ -3423,12 +3494,14 @@ export function createActiveRoomFlowController(
             cuttingAnimation.renderedSelectionKey === cuttingRenderSelectionKey
           ) {
             patchEmojiOnlyInPanels(cuttingPanelsHtml)
+            syncActiveRoomOverlayEffects()
             return
           }
 
           cuttingVisualRoot.innerHTML = cuttingScreenHtml
           cuttingAnimation.renderedSelectionKey = cuttingRenderSelectionKey
           syncSeatPanels(cuttingPanelsHtml)
+          syncActiveRoomOverlayEffects()
           return
         }
       }
@@ -3999,6 +4072,7 @@ export function createActiveRoomFlowController(
           phraseBubbles: getPhraseBubblesForRender(),
           panelScale: stageScale,
         })
+        syncActiveRoomOverlayEffects()
         return
       }
 
@@ -4687,38 +4761,7 @@ export function createActiveRoomFlowController(
     ensureEmojiButton(Boolean(isShowingScoringPhase || isShowingMatchEndedPhase), stageScale)
     syncEmojiPickerPanel(stageScale)
     syncPhrasePickerPanel(stageScale)
-    appendTournamentBanners()
-    appendLeaveControls()
-    syncPersistentBotTakeoverPopup()
-
-    options.root
-      .querySelector<HTMLButtonElement>('[data-active-room-leave-cancel="1"]')
-      ?.addEventListener('click', () => {
-        if (!activeRoomState) {
-          return
-        }
-
-        activeRoomState.leavePenaltyWarningOpen = false
-        scheduleActiveRoomRender()
-      })
-
-    options.root
-      .querySelector<HTMLButtonElement>('[data-active-room-leave-confirm="1"]')
-      ?.addEventListener('click', () => {
-        if (!activeRoomState) {
-          return
-        }
-
-        if (!options.isConnected()) {
-          activeRoomState.errorText = 'Няма връзка със сървъра.'
-          activeRoomState.leavePenaltyWarningOpen = false
-          scheduleActiveRoomRender()
-          return
-        }
-
-        activeRoomState.leavePenaltyWarningOpen = false
-        options.leaveActiveRoom(activeRoomState.roomId, true)
-      })
+    syncActiveRoomOverlayEffects()
 
     options.root
       .querySelectorAll<HTMLButtonElement>('[data-active-room-cut-index]')
@@ -4761,16 +4804,53 @@ export function createActiveRoomFlowController(
       })
   }
 
-  function appendTournamentBanners(): void {
-    if (!activeRoomState || activeRoomState.tournamentBanners.length === 0) {
+  function renderTournamentBannerInnerHtml(banner: { message: string }): string {
+    return `
+      <div style="display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(250,204,21,0.35);border-radius:8px;background:rgba(15,23,42,0.94);box-shadow:0 16px 44px rgba(2,6,23,0.35);color:#f8fafc;padding:12px 14px;font-size:14px;line-height:1.4;">
+        <div style="flex:1;min-width:0;">${escapeHtml(banner.message)}</div>
+        <button type="button" data-tournament-banner-dismiss="1" aria-label="Затвори" style="width:28px;height:28px;border:0;border-radius:999px;background:rgba(255,255,255,0.12);color:#fff;font-weight:900;cursor:pointer;">×</button>
+      </div>
+    `
+  }
+
+  // Идемпотентен sync (замества append-only appendTournamentBanners()).
+  // Server-side контракт (tournamentCoordinator.ts addBanner(): existing id
+  // → връща room-а непроменен) гарантира render-relevant полетата на даден
+  // banner.id са immutable за живота му — затова dataset.bannerId-only
+  // сравнение е достатъчно, не е нужен content-aware key.
+  function syncTournamentBanners(): void {
+    if (!activeRoomState) {
+      options.root.querySelector('[data-tournament-banner-host="1"]')?.remove()
       return
     }
-    const activeBanners = activeRoomState.tournamentBanners.filter((banner) => Date.parse(banner.expiresAt) > Date.now())
+
+    const activeBanners = activeRoomState.tournamentBanners.filter(
+      (banner) => Date.parse(banner.expiresAt) > Date.now(),
+    )
     activeRoomState.tournamentBanners = activeBanners
-    if (activeBanners.length === 0) return
-    const banner = activeBanners[activeBanners.length - 1]!
+
+    const existing = options.root.querySelector<HTMLElement>('[data-tournament-banner-host="1"]')
+
+    if (activeBanners.length === 0) {
+      existing?.remove()
+      return
+    }
+
+    const topBanner = activeBanners[activeBanners.length - 1]!
+
+    if (existing) {
+      if (existing.dataset.bannerId === topBanner.id) {
+        return
+      }
+
+      existing.dataset.bannerId = topBanner.id
+      existing.innerHTML = renderTournamentBannerInnerHtml(topBanner)
+      return
+    }
+
     const host = document.createElement('div')
     host.setAttribute('data-tournament-banner-host', '1')
+    host.dataset.bannerId = topBanner.id
     host.style.cssText = [
       'position:fixed',
       'left:50%',
@@ -4780,18 +4860,29 @@ export function createActiveRoomFlowController(
       'width:min(92vw, 560px)',
       'pointer-events:auto',
     ].join(';')
-    host.innerHTML = `
-      <div style="display:flex;gap:12px;align-items:flex-start;border:1px solid rgba(250,204,21,0.35);border-radius:8px;background:rgba(15,23,42,0.94);box-shadow:0 16px 44px rgba(2,6,23,0.35);color:#f8fafc;padding:12px 14px;font-size:14px;line-height:1.4;">
-        <div style="flex:1;min-width:0;">${escapeHtml(banner.message)}</div>
-        <button type="button" data-tournament-banner-dismiss="1" aria-label="Затвори" style="width:28px;height:28px;border:0;border-radius:999px;background:rgba(255,255,255,0.12);color:#fff;font-weight:900;cursor:pointer;">×</button>
-      </div>
-    `
-    options.root.appendChild(host)
-    host.querySelector<HTMLButtonElement>('[data-tournament-banner-dismiss="1"]')?.addEventListener('click', () => {
+    host.innerHTML = renderTournamentBannerInnerHtml(topBanner)
+    // Делегиран listener върху persistent host-а (bind-нат само тук, при
+    // създаване) — НЕ closure към конкретния banner.id. Четем
+    // host.dataset.bannerId fresh при click, така че dismiss винаги уцелва
+    // текущо показания banner, включително след content-update без rebind.
+    host.addEventListener('click', (event) => {
+      if (!(event.target as HTMLElement).closest('[data-tournament-banner-dismiss="1"]')) {
+        return
+      }
       if (!activeRoomState) return
-      activeRoomState.tournamentBanners = activeRoomState.tournamentBanners.filter((item) => item.id !== banner.id)
+      const dismissedId = host.dataset.bannerId
+      activeRoomState.tournamentBanners = activeRoomState.tournamentBanners.filter(
+        (item) => item.id !== dismissedId,
+      )
       scheduleActiveRoomRender()
     })
+    options.root.appendChild(host)
+  }
+
+  function syncActiveRoomOverlayEffects(): void {
+    syncTournamentBanners()
+    syncLeaveControls()
+    syncPersistentBotTakeoverPopup()
   }
 
   function applyRoomSnapshotToActiveRoom(message: RoomSnapshotMessage): boolean {

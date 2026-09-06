@@ -3,6 +3,15 @@ import { createActiveRoomFlowController } from '../src/app/activeRoom/createActi
 const root = document.createElement('div')
 document.body.appendChild(root)
 
+// scheduleActiveRoomRender() е RAF-deferred (Fix №1) — всяко assertion, което
+// чете DOM СЛЕД state мутация, трябва да изчака реален flush, иначе вижда
+// pre-render DOM. Established pattern, виж scripts/fixtures/biddingBoardLifecycleHarness.ts.
+function waitForRenderedFrame() {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
+
 let cutCommands = 0
 let bidCommands = 0
 let audioPlays = 0
@@ -74,7 +83,7 @@ const controller = createActiveRoomFlowController({
   onTournamentFinalResultContinue: () => {},
 })
 
-function enter(roomId) {
+async function enter(roomId) {
   controller.enterActiveRoom({
     roomId,
     seat: 'bottom',
@@ -83,16 +92,17 @@ function enter(roomId) {
     botPlayers: 3,
     shouldStartImmediately: false,
   }, true)
+  await waitForRenderedFrame()
 }
 
-function snapshot(roomId, game) {
+async function snapshot(roomId, game, overrides = {}) {
   controller.handleServerMessage({
     type: 'room_snapshot',
     roomId,
     roomStatus: 'playing',
     yourSeat: 'bottom',
     reconnectToken: 'token',
-    seats,
+    seats: overrides.seats ?? seats,
     game,
     isGuestTrial: false,
     isPrivateTableOrigin: false,
@@ -102,9 +112,10 @@ function snapshot(roomId, game) {
     tournamentRoundType: null,
     tournamentAttendance: null,
     tournamentBotReplacements: [],
-    tournamentBanners: [],
+    tournamentBanners: overrides.tournamentBanners ?? [],
     stakeAmount: 5000,
   })
+  await waitForRenderedFrame()
 }
 
 const cuttingGame = {
@@ -124,17 +135,19 @@ const cuttingGame = {
   ownHand: [],
 }
 
-enter('cut-room')
-snapshot('cut-room', cuttingGame)
+await enter('cut-room')
+await snapshot('cut-room', cuttingGame)
 const cutButtonBefore = root.querySelector('[data-active-room-cut-index]')
 cutButtonBefore?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-snapshot('cut-room', { ...cuttingGame, timerDeadlineAt: cuttingGame.timerDeadlineAt })
+await snapshot('cut-room', { ...cuttingGame, timerDeadlineAt: cuttingGame.timerDeadlineAt })
 const cutButtonAfterTick = root.querySelector('[data-active-room-cut-index]')
 cutButtonAfterTick?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
 cutButtonAfterTick?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
 const cutCommandsAfterDoubleClick = cutCommands
 controller.handleServerMessage({ type: 'error', message: 'rejected' })
+await waitForRenderedFrame()
 root.querySelector('[data-active-room-cut-index]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+await waitForRenderedFrame()
 
 const biddingGame = {
   phase: 'bidding',
@@ -166,8 +179,8 @@ const biddingGame = {
   ownHand: [],
 }
 
-enter('bid-room')
-snapshot('bid-room', biddingGame)
+await enter('bid-room')
+await snapshot('bid-room', biddingGame)
 // Bid popup-ът живее в собствен document.body host (syncBiddingPopupOverlay),
 // не вътре в root — виж BIDDING_POPUP_HOST_ATTR в createActiveRoomFlowController.ts.
 const bidButtonBefore = document.querySelector('[data-bid-action="pass"]')
@@ -175,10 +188,11 @@ const bidRootHtml = root.innerHTML.slice(0, 240)
 const bidPhaseAttr = root.querySelector('[data-active-room-phase]')?.getAttribute('data-active-room-phase') ?? null
 const bidHasPopup = document.querySelector('[data-bidding-popup="1"]') !== null
 bidButtonBefore?.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
-snapshot('bid-room', { ...biddingGame, timerDeadlineAt: biddingGame.timerDeadlineAt })
+await snapshot('bid-room', { ...biddingGame, timerDeadlineAt: biddingGame.timerDeadlineAt })
 const bidButtonAfterTick = document.querySelector('[data-bid-action="pass"]')
 bidButtonAfterTick?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
 bidButtonAfterTick?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+await waitForRenderedFrame()
 
 function scoringGame(sumA, sumB) {
   return {
@@ -214,15 +228,135 @@ function scoringGame(sumA, sumB) {
   }
 }
 
-enter('score-room')
-snapshot('score-room', scoringGame(82, 80))
+await enter('score-room')
+await snapshot('score-room', scoringGame(82, 80))
 const animatedCountersFirst = root.querySelectorAll('[data-scoring-sum-counter="1"]').length
 const scoringRootHtml = root.innerHTML.slice(0, 240)
 const scoringText = root.textContent?.slice(0, 200) ?? ''
-snapshot('score-room', scoringGame(82, 80))
+await snapshot('score-room', scoringGame(82, 80))
 const animatedCountersDuplicate = root.querySelectorAll('[data-scoring-sum-counter="1"]').length
-snapshot('score-room', scoringGame(92, 70))
+await snapshot('score-room', scoringGame(92, 70))
 const animatedCountersNewKey = root.querySelectorAll('[data-scoring-sum-counter="1"]').length
+
+// ─────────────────────────────────────────────────────────────────────────
+// Fix №3: ancillary UI (tournament banners / leave warning / persistent bot
+// takeover) трябва да се materialize-ва дори когато renderActiveRoomScreen()
+// удря cutting/bidding "same stable key" early-return-и, които преди Fix №3
+// пропускаха целия ancillary tail. Отделна стая (без cut-index interaction
+// noise), cutterSeat='right' (локалният играч НЕ е cutter) — за да не влияе
+// isCutSubmissionPending/isInteractive върху stable key-я между snapshot-ите.
+// ─────────────────────────────────────────────────────────────────────────
+
+const ancillaryCuttingGame = {
+  phase: 'cutting',
+  authoritativePhase: 'cutting',
+  timerDeadlineAt: Date.now() + 20_000,
+  dealerSeat: 'left',
+  firstDealSeat: null,
+  cutting: { cutterSeat: 'right', deckCount: 32, selectedCutIndex: null, canSubmitCut: false },
+  bidding: null,
+  playing: null,
+  scoring: null,
+  matchEnded: null,
+  declarations: [],
+  score,
+  handCounts: { bottom: 0, right: 0, top: 0, left: 0 },
+  ownHand: [],
+}
+
+await enter('ancillary-room')
+await snapshot('ancillary-room', ancillaryCuttingGame)
+
+const banner1 = { id: 'banner-1', kind: 'bots_inserted', message: 'Banner one', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }
+const banner2 = { id: 'banner-2', kind: 'takeover_pending', message: 'Banner two', createdAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }
+
+// [1] banner arrival докато cutting е в "same stable key" early-return (нищо
+// cutting-relevant не се променя между двата snapshot-а — само banners).
+await snapshot('ancillary-room', ancillaryCuttingGame, { tournamentBanners: [banner1] })
+const bannerHostAfterArrival = root.querySelector('[data-tournament-banner-host="1"]')
+const bannerArrivedAtEarlyReturn = bannerHostAfterArrival !== null
+const bannerShowsCorrectId = bannerHostAfterArrival?.dataset.bannerId === banner1.id
+
+// [6] repeated ancillary sync (несвързан no-op snapshot) не пресъздава host-а
+// (доказва идемпотентния no-op път, не duplicate-listener risk).
+await snapshot('ancillary-room', ancillaryCuttingGame, { tournamentBanners: [banner1] })
+const bannerHostAfterNoopSync = root.querySelector('[data-tournament-banner-host="1"]')
+const bannerHostStableAcrossNoopSync = bannerHostAfterArrival === bannerHostAfterNoopSync
+
+// [3] втори queued banner: добавяме banner2 (топ = последният в масива) —
+// проверяваме коректния нов dataset.bannerId, после dismiss-ваме топа и
+// проверяваме, че опашката коректно показва banner1 със собствен коректен id.
+await snapshot('ancillary-room', ancillaryCuttingGame, { tournamentBanners: [banner1, banner2] })
+const bannerHostShowsSecondQueued = root.querySelector('[data-tournament-banner-host="1"]')?.dataset.bannerId === banner2.id
+
+root.querySelector('[data-tournament-banner-dismiss="1"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+await waitForRenderedFrame()
+const bannerHostAfterFirstDismiss = root.querySelector('[data-tournament-banner-host="1"]')
+const queuedBannerShowsCorrectIdAfterDismiss = bannerHostAfterFirstDismiss?.dataset.bannerId === banner1.id
+
+// [2] dismiss на последния banner премахва DOM-а изцяло.
+root.querySelector('[data-tournament-banner-dismiss="1"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+await waitForRenderedFrame()
+const bannerHostRemovedAfterLastDismiss = root.querySelector('[data-tournament-banner-host="1"]') === null
+
+// [4] leave warning се показва при cutting same-stable-key early-return.
+document.body.querySelector('[data-active-room-leave-button="1"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+await waitForRenderedFrame()
+const leaveWarningHostAfterOpen = root.querySelector('[data-active-room-leave-warning="1"]')
+const leaveWarningShownAtEarlyReturn = leaveWarningHostAfterOpen !== null
+
+// [6] repeated sync — warning host не се пресъздава при несвързан no-op snapshot.
+await snapshot('ancillary-room', ancillaryCuttingGame)
+const leaveWarningHostAfterNoopSync = root.querySelector('[data-active-room-leave-warning="1"]')
+const leaveWarningHostStableAcrossNoopSync = leaveWarningHostAfterOpen === leaveWarningHostAfterNoopSync
+
+// [5] cancel премахва warning-а.
+root.querySelector('[data-active-room-leave-cancel="1"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+await waitForRenderedFrame()
+const leaveWarningRemovedAfterCancel = root.querySelector('[data-active-room-leave-warning="1"]') === null
+
+// [7] persistent bot takeover materialize-ва при early-return snapshot —
+// само seats се променя (локалният seat 'bottom' минава isControlledByBot),
+// нито едно cutting-relevant поле не се променя.
+const seatsWithLocalBotTakeover = seats.map((seatSnapshot) =>
+  seatSnapshot.seat === 'bottom' ? { ...seatSnapshot, isControlledByBot: true } : seatSnapshot,
+)
+await snapshot('ancillary-room', ancillaryCuttingGame, { seats: seatsWithLocalBotTakeover })
+const botTakeoverPopupShownAtEarlyReturn = document.body.querySelector('[data-bot-takeover-overlay="1"]') !== null
+
+// Връщаме seats фикстурата в нормално състояние за евентуални бъдещи scenario-та.
+await snapshot('ancillary-room', ancillaryCuttingGame, { seats })
+
+// [8] bidding early-return не блокира banner sync — идентичен принцип,
+// отделна bidding стая с непроменени bidding-stable-key полета между двата
+// snapshot-а, само banners се различават.
+const ancillaryBiddingGame = {
+  phase: 'bidding',
+  authoritativePhase: 'bidding',
+  timerDeadlineAt: Date.now() + 20_000,
+  dealerSeat: 'left',
+  firstDealSeat: 'bottom',
+  cutting: null,
+  bidding: {
+    winningBid: null,
+    currentBidderSeat: 'right',
+    entries: [],
+    canSubmitBid: false,
+    validActions: null,
+  },
+  playing: null,
+  scoring: null,
+  matchEnded: null,
+  declarations: [],
+  score,
+  handCounts: noVisibleHands,
+  ownHand: [],
+}
+
+await enter('ancillary-bid-room')
+await snapshot('ancillary-bid-room', ancillaryBiddingGame)
+await snapshot('ancillary-bid-room', ancillaryBiddingGame, { tournamentBanners: [banner1] })
+const biddingEarlyReturnShowsBanner = root.querySelector('[data-tournament-banner-host="1"]')?.dataset.bannerId === banner1.id
 
 window.__activeRoomRenderStabilityResult = {
   cutNodeStable: cutButtonBefore === cutButtonAfterTick,
@@ -239,4 +373,15 @@ window.__activeRoomRenderStabilityResult = {
   animatedCountersDuplicate,
   animatedCountersNewKey,
   audioPlays,
+  bannerArrivedAtEarlyReturn,
+  bannerShowsCorrectId,
+  bannerHostStableAcrossNoopSync,
+  bannerHostShowsSecondQueued,
+  queuedBannerShowsCorrectIdAfterDismiss,
+  bannerHostRemovedAfterLastDismiss,
+  leaveWarningShownAtEarlyReturn,
+  leaveWarningHostStableAcrossNoopSync,
+  leaveWarningRemovedAfterCancel,
+  botTakeoverPopupShownAtEarlyReturn,
+  biddingEarlyReturnShowsBanner,
 }
