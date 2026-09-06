@@ -25,6 +25,11 @@ declare global {
       leaveWarningRemovedAfterCancel: boolean
       botTakeoverPopupShownAtEarlyReturn: boolean
       biddingEarlyReturnShowsBanner: boolean
+      cuttingAnimationActiveBeforeReactions: boolean
+      cuttingShellStableAfterEmoji: boolean
+      emojiBubbleAppearedDuringCutAnimation: boolean
+      cuttingShellStableAfterPhrase: boolean
+      phraseBubbleAppearedDuringCutAnimation: boolean
     }
   }
 }
@@ -110,6 +115,11 @@ async function main(): Promise<void> {
       check('Fix №3: cancel removes the leave warning', result.leaveWarningRemovedAfterCancel)
       check('Fix №3: persistent bot takeover popup materializes on an early-return snapshot', result.botTakeoverPopupShownAtEarlyReturn)
       check('Fix №3: bidding same-stable-key early-return does not block banner sync', result.biddingEarlyReturnShowsBanner)
+      check('Fix №4: cutting animation is actually active before dispatching reactions (test premise)', result.cuttingAnimationActiveBeforeReactions)
+      check('Fix №4: emoji_reaction during active cutting animation does not rebuild the cutting shell (PATCH_ALLOWED hits patchEmojiOnlyInPanels)', result.cuttingShellStableAfterEmoji)
+      check('Fix №4: emoji bubble still appears in the seat panel during active cutting animation', result.emojiBubbleAppearedDuringCutAnimation)
+      check('Fix №4: phrase_reaction during active cutting animation does not rebuild the cutting shell', result.cuttingShellStableAfterPhrase)
+      check('Fix №4: phrase bubble still appears in the seat panel during active cutting animation', result.phraseBubbleAppearedDuringCutAnimation)
     } finally {
       await browser.close()
     }

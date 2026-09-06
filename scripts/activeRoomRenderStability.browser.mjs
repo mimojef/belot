@@ -358,6 +358,72 @@ await snapshot('ancillary-bid-room', ancillaryBiddingGame)
 await snapshot('ancillary-bid-room', ancillaryBiddingGame, { tournamentBanners: [banner1] })
 const biddingEarlyReturnShowsBanner = root.querySelector('[data-tournament-banner-host="1"]')?.dataset.bannerId === banner1.id
 
+// ─────────────────────────────────────────────────────────────────────────
+// Fix №4: emoji/phrase reactions вече минават scheduleActiveRoomRender(true)
+// (PATCH_ALLOWED). По време на активна cutting анимация това трябва да hit-не
+// patchEmojiOnlyInPanels (document.body target) — options.root cutting shell-ът
+// не бива да се пресъздава изобщо. Доказваме чрез DOM identity stability на
+// [data-active-room-phase="cutting"] node-а (не само на cuttingVisualRoot,
+// за да хванем и евентуален options.root.innerHTML= regression, не само
+// cuttingVisualRoot.innerHTML= regression).
+// ─────────────────────────────────────────────────────────────────────────
+
+const emojiCuttingGameArmed = {
+  phase: 'cutting',
+  authoritativePhase: 'cutting',
+  timerDeadlineAt: Date.now() + 20_000,
+  dealerSeat: 'left',
+  firstDealSeat: null,
+  cutting: { cutterSeat: 'top', deckCount: 32, selectedCutIndex: null, canSubmitCut: false },
+  bidding: null,
+  playing: null,
+  scoring: null,
+  matchEnded: null,
+  declarations: [],
+  score,
+  handCounts: { bottom: 0, right: 0, top: 0, left: 0 },
+  ownHand: [],
+}
+
+await enter('emoji-cutting-room')
+await snapshot('emoji-cutting-room', emojiCuttingGameArmed)
+// selectedCutIndex: null -> конкретна стойност стартира pile-split cutting
+// анимацията (startCuttingAnimation), FULL rebuild-ва shell-а веднъж и
+// установява cuttingAnimation.renderedSelectionKey.
+await snapshot('emoji-cutting-room', {
+  ...emojiCuttingGameArmed,
+  cutting: { ...emojiCuttingGameArmed.cutting, selectedCutIndex: 5 },
+})
+
+const cuttingShellBeforeReactions = root.querySelector('[data-active-room-phase="cutting"]')
+const cuttingAnimationActiveBeforeReactions = cuttingShellBeforeReactions !== null
+
+controller.handleServerMessage({
+  type: 'emoji_reaction',
+  roomId: 'emoji-cutting-room',
+  seat: 'top',
+  emojiId: '01',
+})
+await waitForRenderedFrame()
+
+const cuttingShellAfterEmoji = root.querySelector('[data-active-room-phase="cutting"]')
+const cuttingShellStableAfterEmoji = cuttingShellBeforeReactions === cuttingShellAfterEmoji
+const emojiBubbleAppearedDuringCutAnimation =
+  (document.body.querySelector('[data-seat-emoji-bubble="top"]')?.innerHTML.length ?? 0) > 0
+
+controller.handleServerMessage({
+  type: 'phrase_reaction',
+  roomId: 'emoji-cutting-room',
+  seat: 'top',
+  phraseId: 'phrase_01',
+})
+await waitForRenderedFrame()
+
+const cuttingShellAfterPhrase = root.querySelector('[data-active-room-phase="cutting"]')
+const cuttingShellStableAfterPhrase = cuttingShellBeforeReactions === cuttingShellAfterPhrase
+const phraseBubbleAppearedDuringCutAnimation =
+  (document.body.querySelector('[data-seat-phrase-bubble="top"]')?.innerHTML.length ?? 0) > 0
+
 window.__activeRoomRenderStabilityResult = {
   cutNodeStable: cutButtonBefore === cutButtonAfterTick,
   cutCommandsAfterDoubleClick,
@@ -384,4 +450,9 @@ window.__activeRoomRenderStabilityResult = {
   leaveWarningRemovedAfterCancel,
   botTakeoverPopupShownAtEarlyReturn,
   biddingEarlyReturnShowsBanner,
+  cuttingAnimationActiveBeforeReactions,
+  cuttingShellStableAfterEmoji,
+  emojiBubbleAppearedDuringCutAnimation,
+  cuttingShellStableAfterPhrase,
+  phraseBubbleAppearedDuringCutAnimation,
 }

@@ -5324,13 +5324,18 @@ export function createActiveRoomFlowController(
 
     if (message.type === 'emoji_reaction' && message.roomId === activeRoomState.roomId) {
       addEmojiBubble(message.seat as Seat, message.emojiId)
-      scheduleActiveRoomRender()
+      // Fix №4: emoji state не участва в cuttingStableRenderKey/biddingStableRenderKey
+      // и не се консултира от renderPlayingScreen — PATCH_ALLOWED е безопасно тук.
+      // Ако конкурентен FULL_REQUIRED snapshot пристигне в същия RAF batch,
+      // монотонният merge (pendingFullRenderRequired) продължава да доминира.
+      scheduleActiveRoomRender(true)
       return true
     }
 
     if (message.type === 'phrase_reaction' && message.roomId === activeRoomState.roomId) {
       addPhraseBubble(message.seat as Seat, message.phraseId)
-      scheduleActiveRoomRender()
+      // Fix №4: същата обосновка като emoji_reaction по-горе.
+      scheduleActiveRoomRender(true)
       return true
     }
 
