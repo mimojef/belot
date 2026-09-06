@@ -83,7 +83,21 @@ const controller = createActiveRoomFlowController({
   forceReconnectForZombieConnection: () => { reconnectFallbackCount += 1 },
 })
 
-function enter(roomId: string): void {
+// createActiveRoomFlowController.ts coalesce-ва renderActiveRoomScreen() през
+// requestAnimationFrame (render scheduling fix — виж scheduleActiveRoomRender
+// коментара там): контролерните методи по-долу вече само SCHEDULE-ват render,
+// не го изпълняват синхронно. Тестовете тук асертват върху реалния DOM веднага
+// след тези извиквания, затова изчакваме поне един рендернат кадър, преди да
+// resolve-нем — двоен requestAnimationFrame (established "wait for paint"
+// идиом), не единичен, за да сме защитени дори ако бъдещ caller добави own
+// rAF hop преди действителния render.
+function waitForRenderedFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+  })
+}
+
+async function enter(roomId: string): Promise<void> {
   controller.enterActiveRoom({
     roomId,
     seat: 'bottom',
@@ -92,13 +106,15 @@ function enter(roomId: string): void {
     botPlayers: 3,
     shouldStartImmediately: false,
   } as any, true)
+  await waitForRenderedFrame()
 }
 
-function enterFromResume(roomId: string): void {
+async function enterFromResume(roomId: string): Promise<void> {
   controller.enterActiveRoomFromResume(roomId, 'bottom', 5000 as any)
+  await waitForRenderedFrame()
 }
 
-function snapshot(roomId: string, game: RoomGameSnapshot | null): void {
+async function snapshot(roomId: string, game: RoomGameSnapshot | null): Promise<void> {
   const message: RoomSnapshotMessage = {
     type: 'room_snapshot',
     roomId,
@@ -113,14 +129,17 @@ function snapshot(roomId: string, game: RoomGameSnapshot | null): void {
     stakeAmount: 5000,
   }
   controller.handleServerMessage(message)
+  await waitForRenderedFrame()
 }
 
-function resumed(roomId: string): void {
+async function resumed(roomId: string): Promise<void> {
   controller.handleServerMessage({ type: 'room_resumed', roomId, seat: 'bottom' } as any)
+  await waitForRenderedFrame()
 }
 
-function serverError(message: string): void {
+async function serverError(message: string): Promise<void> {
   controller.handleServerMessage({ type: 'error', message } as any)
+  await waitForRenderedFrame()
 }
 
 function biddingGame(overrides: Partial<RoomGameSnapshot> = {}): RoomGameSnapshot {

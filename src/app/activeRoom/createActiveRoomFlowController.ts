@@ -652,7 +652,7 @@ export function createActiveRoomFlowController(
       tournamentRoundResultFeederStatus = feeder.status
       tournamentRoundResultFeederScoreA = feeder.scoreA
       tournamentRoundResultFeederScoreB = feeder.scoreB
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
     } finally {
       tournamentRoundResultFetchInFlight = false
     }
@@ -693,7 +693,7 @@ export function createActiveRoomFlowController(
       if (detail.viewer.myPrizeAmount !== null) {
         tournamentFinalResultPrizeAmount = detail.viewer.myPrizeAmount
         clearTournamentFinalResultPendingRetry()
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
         return
       }
       const scheduleRetry = (delayMs: number): void => {
@@ -978,7 +978,7 @@ export function createActiveRoomFlowController(
 
           if (!options.isConnected()) {
             activeRoomState.errorText = 'Няма връзка със сървъра.'
-            renderActiveRoomScreen()
+            scheduleActiveRoomRender()
             return
           }
 
@@ -999,13 +999,13 @@ export function createActiveRoomFlowController(
     if (!options.isConnected()) {
       activeRoomState.errorText = 'Няма връзка със сървъра.'
       activeRoomState.leavePenaltyWarningOpen = false
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return
     }
 
     if (shouldWarnBeforeLeavingActiveRoom()) {
       activeRoomState.leavePenaltyWarningOpen = true
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return
     }
 
@@ -1365,7 +1365,7 @@ export function createActiveRoomFlowController(
 
       if (!options.isConnected()) {
         activeRoomState.errorText = 'Няма връзка със сървъра.'
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
         return
       }
 
@@ -1969,7 +1969,7 @@ export function createActiveRoomFlowController(
       dealingAnimation.isAnimating = false
       dealingAnimation.hasCompleted = true
       unmountDealPacketOverlay(firstThreeOverlay)
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
     }, remainingMs)
   }
 
@@ -2016,7 +2016,7 @@ export function createActiveRoomFlowController(
       // If the server has already moved past deal-next-2, trigger a re-render now.
       const postAnimPhase = activeRoomState.game?.authoritativePhase ?? null
       if (postAnimPhase !== null && postAnimPhase !== 'deal-next-2') {
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
       }
     }, remainingMs)
   }
@@ -2063,7 +2063,7 @@ export function createActiveRoomFlowController(
       unmountDealPacketOverlay(lastThreeOverlay)
       const postAnimPhase = activeRoomState.game?.authoritativePhase ?? null
       if (postAnimPhase !== null && postAnimPhase !== 'deal-last-3') {
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
       }
     }, remainingMs)
   }
@@ -2128,7 +2128,7 @@ export function createActiveRoomFlowController(
   }
 
   function addBidBubble(seat: Seat, label: string): void {
-    addBidBubbleToState(biddingUiState, seat, label, () => renderActiveRoomScreen())
+    addBidBubbleToState(biddingUiState, seat, label, () => scheduleActiveRoomRender())
   }
 
   function getBidBubblesForRender() {
@@ -2611,7 +2611,7 @@ export function createActiveRoomFlowController(
     if (!options.isConnected()) {
       clearPendingBidSubmission()
       activeRoomState.errorText = 'Няма връзка със сървъра.'
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return
     }
 
@@ -2751,7 +2751,7 @@ export function createActiveRoomFlowController(
 
       cuttingAnimation.isAnimating = false
       cuttingAnimation.hasCompleted = true
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
     }, remainingMs)
   }
 
@@ -2848,6 +2848,77 @@ export function createActiveRoomFlowController(
     if (!cuttingSnapshot && !cuttingAnimation.isAnimating) {
       resetCuttingAnimationState()
     }
+  }
+
+  // Coalescing scheduler за renderActiveRoomScreen() — render fix №1 (виж
+  // read-only audit-а: ~30 synchronous call sites, включително WebSocket
+  // snapshot handling, timer callbacks и animation-completion callbacks,
+  // могат да се струпат в кратък burst — reconnect catch-up, няколко
+  // съобщения близо едно до друго, deal/cut completion timers).
+  //
+  // Най-много ЕДНА pending render заявка наведнъж — втора/трета заявка,
+  // пристигнала преди flush-а, само marks pending отново, без допълнителна
+  // DOM работа. renderActiveRoomScreen() чете activeRoomState (и
+  // cutting/dealing animation state closures) FRESH в момента, в който
+  // реално се изпълни — значи coalesced render винаги вижда най-актуалния
+  // authoritative state, никога междинен/stale snapshot.
+  //
+  // requestAnimationFrame, НЕ queueMicrotask: отделните WebSocket съобщения
+  // пристигат като отделни macrotasks (не синхронни извиквания в рамките на
+  // един tick) — queueMicrotask би flush-нал СЛЕД всяко съобщение
+  // поотделно (микротаск опашката вече е drain-ната преди следващата WS
+  // message task да започне), т.е. нулев coalescing ефект точно за burst
+  // сценария, който адресираме. rAF е единственият механизъм, който реално
+  // събира N отделни tasks в рамките на един browser frame в ЕДИН render
+  // pass, точно преди paint-а — идентичен established pattern вече се
+  // ползва в createViewportResizeHandler (viewportStage.ts).
+  //
+  // preferAnimationPatch merge: НЕ last-write-wins. Съществуващата семантика
+  // на самия параметър (виж renderActiveRoomScreen/§cutting branch по-долу)
+  // е бинарна: true = "PATCH_ALLOWED" (caller-ът позволява patch, АКО
+  // callee-то реши, че има какво да се preserve-не), false = "FULL_REQUIRED"
+  // (caller-ът изисква нормален/пълен render — leave/tournament banner/
+  // ancillary UI страни ефекти, които в момента живеят само в trailing блока
+  // на FULL пътя, виж read-only audit-а). FULL_REQUIRED е STRICT superset на
+  // PATCH_ALLOWED-ефектите (FULL прави и cutting rebuild, ако е нужен, ПЛЮС
+  // всичко, до което PATCH early-return никога не достига) — затова FULL
+  // трябва да доминира монотонно в рамките на един pending batch, независимо
+  // от реда, в който заявките пристигат:
+  //
+  //   PATCH + PATCH = PATCH
+  //   PATCH + FULL  = FULL
+  //   FULL  + PATCH = FULL
+  //   FULL  + FULL  = FULL
+  //
+  // pendingFullRenderRequired е monotonic within всеки pending frame — веднъж
+  // вдигнат на true от коя да е FULL_REQUIRED заявка, никоя следваща
+  // PATCH_ALLOWED заявка не може да го свали обратно на false преди flush-а.
+  // Нулира се безопасно веднага след flush-а, за да не "изтече" в следващия
+  // pending прозорец.
+  //
+  // Fresh safety net непроменен: дори batch-ът да е чист PATCH_ALLOWED
+  // (pendingFullRenderRequired остава false), renderActiveRoomScreen пак
+  // проверява cutAnimationForRender fresh при самото изпълнение — ако
+  // анимацията вече е приключила до момента на flush-а, пада обратно на
+  // FULL там, независимо от подадения флаг.
+  let pendingActiveRoomRenderHandle: number | null = null
+  let pendingFullRenderRequired = false
+
+  function scheduleActiveRoomRender(preferAnimationPatch = false): void {
+    if (!preferAnimationPatch) {
+      pendingFullRenderRequired = true
+    }
+
+    if (pendingActiveRoomRenderHandle !== null) {
+      return
+    }
+
+    pendingActiveRoomRenderHandle = window.requestAnimationFrame(() => {
+      pendingActiveRoomRenderHandle = null
+      const shouldPreferAnimationPatch = !pendingFullRenderRequired
+      pendingFullRenderRequired = false
+      renderActiveRoomScreen(shouldPreferAnimationPatch)
+    })
   }
 
   function renderActiveRoomScreen(preferAnimationPatch = false): void {
@@ -4027,7 +4098,7 @@ export function createActiveRoomFlowController(
       const dismissBtn = options.root.querySelector<HTMLButtonElement>('[data-bot-takeover-dismiss="1"]')
       dismissBtn?.addEventListener('click', () => {
         biddingUiState.showBotTakeover = false
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
       })
     } else if (
       isShowingMatchEndedPhase &&
@@ -4628,7 +4699,7 @@ export function createActiveRoomFlowController(
         }
 
         activeRoomState.leavePenaltyWarningOpen = false
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
       })
 
     options.root
@@ -4641,7 +4712,7 @@ export function createActiveRoomFlowController(
         if (!options.isConnected()) {
           activeRoomState.errorText = 'Няма връзка със сървъра.'
           activeRoomState.leavePenaltyWarningOpen = false
-          renderActiveRoomScreen()
+          scheduleActiveRoomRender()
           return
         }
 
@@ -4667,7 +4738,7 @@ export function createActiveRoomFlowController(
 
           if (!options.isConnected()) {
             activeRoomState.errorText = 'Няма връзка със сървъра.'
-            renderActiveRoomScreen()
+            scheduleActiveRoomRender()
             return
           }
 
@@ -4683,7 +4754,7 @@ export function createActiveRoomFlowController(
 
           cuttingAnimation.pendingCycleKey = currentCycleKey
           if (!isPhoneLayoutViewport()) {
-            renderActiveRoomScreen()
+            scheduleActiveRoomRender()
           }
           options.submitCutIndex(activeRoomState.roomId, cutIndex)
         })
@@ -4719,7 +4790,7 @@ export function createActiveRoomFlowController(
     host.querySelector<HTMLButtonElement>('[data-tournament-banner-dismiss="1"]')?.addEventListener('click', () => {
       if (!activeRoomState) return
       activeRoomState.tournamentBanners = activeRoomState.tournamentBanners.filter((item) => item.id !== banner.id)
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
     })
   }
 
@@ -4795,7 +4866,7 @@ export function createActiveRoomFlowController(
       activeRoomState.errorText = 'Обявата не беше потвърдена. Опитайте отново.'
     }
 
-    renderActiveRoomScreen(
+    scheduleActiveRoomRender(
       cuttingAnimation.isAnimating ||
         dealingAnimation.isAnimating ||
         dealNextTwoAnimation.isAnimating ||
@@ -4863,7 +4934,7 @@ export function createActiveRoomFlowController(
       return
     }
 
-    renderActiveRoomScreen()
+    scheduleActiveRoomRender()
   }
 
   function enterActiveRoom(message: MatchFoundMessage, stakeAlreadyShown = false): void {
@@ -4924,7 +4995,7 @@ export function createActiveRoomFlowController(
       return
     }
 
-    renderActiveRoomScreen()
+    scheduleActiveRoomRender()
   }
 
   function renderProfileAccessBlockPopupState(): void {
@@ -5048,7 +5119,7 @@ export function createActiveRoomFlowController(
         tournamentRoundResultFeederStatus = 'completed'
         tournamentRoundResultFeederScoreA = message.finalScoreTeamA
         tournamentRoundResultFeederScoreB = message.finalScoreTeamB
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
       }
       return false
     }
@@ -5058,7 +5129,7 @@ export function createActiveRoomFlowController(
         tournamentRoundResultFeederStatus = 'in_progress'
         tournamentRoundResultFeederScoreA = message.scoreTeamA
         tournamentRoundResultFeederScoreB = message.scoreTeamB
-        renderActiveRoomScreen()
+        scheduleActiveRoomRender()
       }
       return false
     }
@@ -5100,7 +5171,7 @@ export function createActiveRoomFlowController(
     if (message.type === 'room_resumed' && message.roomId === activeRoomState.roomId) {
       activeRoomState.isConnected = true
       activeRoomState.errorText = null
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return true
     }
 
@@ -5156,19 +5227,19 @@ export function createActiveRoomFlowController(
       clearPendingBidSubmission()
       playingCache.pendingPlayCardSent = false
       activeRoomState.errorText = message.message
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return true
     }
 
     if (message.type === 'emoji_reaction' && message.roomId === activeRoomState.roomId) {
       addEmojiBubble(message.seat as Seat, message.emojiId)
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return true
     }
 
     if (message.type === 'phrase_reaction' && message.roomId === activeRoomState.roomId) {
       addPhraseBubble(message.seat as Seat, message.phraseId)
-      renderActiveRoomScreen()
+      scheduleActiveRoomRender()
       return true
     }
 
@@ -5198,7 +5269,7 @@ export function createActiveRoomFlowController(
     }
 
     activeRoomState.isConnected = value
-    renderActiveRoomScreen()
+    scheduleActiveRoomRender()
   }
 
   function setConnectionError(message: string | null): void {
@@ -5213,7 +5284,7 @@ export function createActiveRoomFlowController(
     }
 
     activeRoomState.errorText = message
-    renderActiveRoomScreen()
+    scheduleActiveRoomRender()
   }
 
   function setConnectionState(isConnected: boolean, message: string | null): void {
@@ -5228,7 +5299,7 @@ export function createActiveRoomFlowController(
 
     activeRoomState.isConnected = isConnected
     activeRoomState.errorText = message
-    renderActiveRoomScreen()
+    scheduleActiveRoomRender()
   }
 
   function leaveActiveRoom(): void {
