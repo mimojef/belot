@@ -178,6 +178,9 @@ export function createPlayingUiCache(): PlayingUiCache {
     submittedDeclarationKeys: [],
     flyingCardPlayKey: null,
     lastSeatPanelKey: null,
+    lastPlayingShellKey: null,
+    lastTrickStableKey: null,
+    lastScoreHudRenderedHtml: null,
   }
 }
 
@@ -224,6 +227,16 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.submittedDeclarationKeys = []
   cache.flyingCardPlayKey = null
   cache.lastSeatPanelKey = null
+  // Nulling тук (не само в resetCacheForFreshSnapshot) е задължително: това е
+  // extract-from-playing пътят — root.innerHTML ще бъде презаписан от други
+  // фазови renderer-и (scoring/cutting/bidding/dealing) преди евентуално
+  // връщане в playing. Ако lastPlayingShellKey оцелее stale през това,
+  // следващият renderPlayingScreen() би заключил "same shell" и би опитал
+  // targeted patch върху [data-trick-patch-host]/[data-active-room-score-hud]
+  // nodes, които вече не съществуват в DOM-а.
+  cache.lastPlayingShellKey = null
+  cache.lastTrickStableKey = null
+  cache.lastScoreHudRenderedHtml = null
 }
 
 export function createBiddingUiState(): BiddingUiState {

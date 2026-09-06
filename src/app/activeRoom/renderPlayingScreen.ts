@@ -1278,6 +1278,7 @@ function renderPlayingStage(options: {
       "
     >
       <div
+        data-trick-patch-host="1"
         style="
           position:absolute;
           left:50%;
@@ -1408,6 +1409,9 @@ function resetCacheForFreshSnapshot(
   cache.flyingCardPlayKey = null
   playedCardFlySourceByCache.delete(cache)
   clearDeclarationBubbleUiState(cache)
+  cache.lastPlayingShellKey = null
+  cache.lastTrickStableKey = null
+  cache.lastScoreHudRenderedHtml = null
 }
 
 function scheduleCompletedTrickCollection(
@@ -1948,82 +1952,152 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     ? `left:0;right:0;top:0;bottom:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;`
     : 'inset:0;'
 
-  root.innerHTML = `
-    <div
-      ${mobileLayoutAttribute}
-      style="
-        position:relative;
-        ${screenHeightStyle}
-        width:100%;
-        box-sizing:border-box;
-        display:flex;
-        align-items:center;
-        justify-content:center;
-        overflow:hidden;
-        background:${tableBackground};
-        font-family:Inter, system-ui, sans-serif;
-      "
-    >
+  // Fix №2: targeted trick/HUD patch вместо безусловен full rebuild.
+  // playingShellKey се строи от точно тези 7 променливи — всичко, което
+  // реално интерполира в outer shell markup-а по-долу (проверено чрез
+  // директен code audit, виж разговора). trickStableKey умишлено НЕ включва
+  // animateNewest/newestEntryElapsedMs/completedTrickEntryElapsedMs — те са
+  // transient animation-progress стойности; включването им би причинило
+  // DOM rewrite по време на CSS entry анимацията, която разчита на
+  // непрекъснат браузърен timeline (negative animation-delay техника).
+  const trickAnimateNewest = shouldAnimateNewestViaOverlay ? false : animateNewest
+  const trickNewestEntryElapsedMs = shouldAnimateCompletedTrickNewest
+    ? completedTrickEntryElapsedMs
+    : 0
+  const playingShellKey = [
+    mobileLayoutAttribute,
+    screenHeightStyle,
+    tableBackground,
+    String(scaledStageWidth),
+    String(scaledStageHeight),
+    String(stageScale),
+    fixedLayerInsetStyle,
+  ].join('|')
+  const trickStableKey =
+    getTrickKey(displayedPlays) + '|seat:' + localSeat + '|fly:' + (cache.flyingCardPlayKey ?? '')
+  const scoreHudHtml = renderScoreHud({
+    game,
+    seats,
+    localSeat,
+    winningBid,
+    stageScale,
+  })
+  const needsFullPlayingShellRebuild =
+    cache.lastPlayingShellKey === null || playingShellKey !== cache.lastPlayingShellKey
+
+  function performFullPlayingShellRebuild(): void {
+    root.innerHTML = `
       <div
+        ${mobileLayoutAttribute}
         style="
           position:relative;
-          width:${scaledStageWidth}px;
-          height:${scaledStageHeight}px;
-          flex:0 0 auto;
+          ${screenHeightStyle}
+          width:100%;
+          box-sizing:border-box;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          overflow:hidden;
+          background:${tableBackground};
+          font-family:Inter, system-ui, sans-serif;
         "
       >
         <div
           style="
-            position:absolute;
-            left:50%;
-            top:50%;
-            width:${ACTIVE_ROOM_STAGE_WIDTH}px;
-            height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
-            transform:translate(-50%, -50%) scale(${stageScale});
-            transform-origin:center center;
+            position:relative;
+            width:${scaledStageWidth}px;
+            height:${scaledStageHeight}px;
+            flex:0 0 auto;
           "
         >
           <div
-            data-active-room-playing-visual="1"
             style="
-              position:relative;
-              width:100%;
-              height:100%;
-              overflow:visible;
+              position:absolute;
+              left:50%;
+              top:50%;
+              width:${ACTIVE_ROOM_STAGE_WIDTH}px;
+              height:${ACTIVE_ROOM_STAGE_HEIGHT}px;
+              transform:translate(-50%, -50%) scale(${stageScale});
+              transform-origin:center center;
             "
           >
-            ${renderPlayingStage({
-              plays: displayedPlays,
-              localSeat,
-              animateNewest: shouldAnimateNewestViaOverlay ? false : animateNewest,
-              newestEntryElapsedMs: shouldAnimateCompletedTrickNewest
-                ? completedTrickEntryElapsedMs
-                : 0,
-              flyingCardPlayKey: cache.flyingCardPlayKey,
-              skipTrickArea: isPhoneLayout,
-            })}
+            <div
+              data-active-room-playing-visual="1"
+              style="
+                position:relative;
+                width:100%;
+                height:100%;
+                overflow:visible;
+              "
+            >
+              ${renderPlayingStage({
+                plays: displayedPlays,
+                localSeat,
+                animateNewest: trickAnimateNewest,
+                newestEntryElapsedMs: trickNewestEntryElapsedMs,
+                flyingCardPlayKey: cache.flyingCardPlayKey,
+                skipTrickArea: isPhoneLayout,
+              })}
+            </div>
           </div>
         </div>
+        <div
+          data-playing-collect-layer-host="1"
+          style="
+            position:fixed;
+            ${fixedLayerInsetStyle}
+            z-index:2;
+            pointer-events:none;
+            overflow:visible;
+          "
+        ></div>
+        ${scoreHudHtml}
       </div>
-      <div
-        data-playing-collect-layer-host="1"
-        style="
-          position:fixed;
-          ${fixedLayerInsetStyle}
-          z-index:2;
-          pointer-events:none;
-          overflow:visible;
-        "
-      ></div>
-      ${renderScoreHud({
-        game,
-        seats,
-        localSeat,
-        winningBid,
-        stageScale,
-      })}
-    </div>
-  `
+    `
+    cache.lastPlayingShellKey = playingShellKey
+    cache.lastTrickStableKey = trickStableKey
+    cache.lastScoreHudRenderedHtml = scoreHudHtml
+  }
+
+  if (needsFullPlayingShellRebuild) {
+    performFullPlayingShellRebuild()
+  } else {
+    const needsTrickWrite = !isPhoneLayout && trickStableKey !== cache.lastTrickStableKey
+    const needsHudWrite = scoreHudHtml !== cache.lastScoreHudRenderedHtml
+    const trickHost = needsTrickWrite
+      ? root.querySelector<HTMLElement>('[data-trick-patch-host="1"]')
+      : null
+    const scoreHudNode = needsHudWrite
+      ? root.querySelector<HTMLElement>('[data-active-room-score-hud="1"]')
+      : null
+
+    if ((needsTrickWrite && !trickHost) || (needsHudWrite && !scoreHudNode)) {
+      // Invariant violation: same-shell пътят очаква тези nodes да съществуват
+      // (гарантирани от предходен FULL rebuild със същия playingShellKey).
+      // Ако липсват — cache/DOM вече са разсинхронизирани по причина извън
+      // тази функция. Correctness fallback е FULL rebuild със същия фреш
+      // state, НЕ silent no-op (който би замразил cache да "мисли", че DOM
+      // е актуален, докато реално не е пипнат — перманентна десинхронизация
+      // до следваща случайна промяна на съответния key/HTML).
+      performFullPlayingShellRebuild()
+    } else {
+      if (needsTrickWrite && trickHost) {
+        cache.lastTrickStableKey = trickStableKey
+        trickHost.innerHTML = renderTrickArea(
+          displayedPlays,
+          localSeat,
+          trickAnimateNewest,
+          trickNewestEntryElapsedMs,
+          cache.flyingCardPlayKey,
+        )
+      }
+
+      if (needsHudWrite && scoreHudNode) {
+        cache.lastScoreHudRenderedHtml = scoreHudHtml
+        scoreHudNode.outerHTML = scoreHudHtml
+      }
+    }
+  }
 
   const bottomHandHost = syncBottomHandOverlay(renderBottomHandOverlay({
     cards: sortedHand,
@@ -2041,10 +2115,8 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       stageScale,
       plays: displayedPlays,
       localSeat,
-      animateNewest: shouldAnimateNewestViaOverlay ? false : animateNewest,
-      newestEntryElapsedMs: shouldAnimateCompletedTrickNewest
-        ? completedTrickEntryElapsedMs
-        : 0,
+      animateNewest: trickAnimateNewest,
+      newestEntryElapsedMs: trickNewestEntryElapsedMs,
       flyingCardPlayKey: cache.flyingCardPlayKey,
     }))
   } else {

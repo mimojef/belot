@@ -172,6 +172,9 @@ export type PlayingUiCache = {
   submittedDeclarationKeys: string[]
   flyingCardPlayKey: string | null
   lastSeatPanelKey: string | null
+  lastPlayingShellKey: string | null
+  lastTrickStableKey: string | null
+  lastScoreHudRenderedHtml: string | null
 }
 
 export type BiddingUiState = {
