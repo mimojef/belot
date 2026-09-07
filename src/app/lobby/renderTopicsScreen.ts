@@ -142,7 +142,7 @@ const TOPIC_MODERATION_REASON_CATEGORY_OPTIONS: Array<{ value: string; label: st
 // Пастелно зелено за имената на авторите в Теми/Общи и Лафче — единен цвят
 // за ВСИЧКИ роли (player/admin/subadmin/pika_team/top_chat_admin/chat_admin),
 // без role-based разграничение.
-const TOPIC_AUTHOR_NAME_COLOR = '#86C995'
+const TOPIC_AUTHOR_NAME_COLOR = '#C9A84C'
 
 function escapeHtml(value: string): string {
   return value
