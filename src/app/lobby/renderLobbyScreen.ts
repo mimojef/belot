@@ -5584,10 +5584,10 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
               return `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;">${message.attachment ? `
                 <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                   ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
-                  ${hasText ? `<div style="padding:0 4px 2px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
+                  ${hasText ? `<div style="padding:0 4px 2px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                 </div>
               ` : `
-                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:13px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>
+                <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 9px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>
               `}<div style="margin-top:2px;font-size:10px;font-weight:800;color:rgba(255,255,255,0.38);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div></div>`
             }).join('')}
           </div>
@@ -6406,14 +6406,18 @@ export function renderLinkifiedChatMessageBody(body: string, options: { emphasiz
   return html
 }
 
+// След Topics/Лични миграцията към renderPersonalChatMessageBodyEmphasized
+// (виж по-долу) единственият останал caller на тази функция е старият "Чат"
+// таб (приятели, renderChatPanel/renderMobileChatPanel) — затова +3px Unicode
+// emoji emphasis-ът е включен и тук по подразбиране (reuse на СЪЩИЯ
+// { emphasizeEmoji: true } opt-in от renderLinkifiedChatMessageBody, никакъв
+// нов regex/rendering path).
 export function renderPersonalChatMessageBody(body: string): string {
-  return renderLinkifiedChatMessageBody(body)
+  return renderLinkifiedChatMessageBody(body, { emphasizeEmoji: true })
 }
 
-// Лични/VIP DM-specific wrapper (Task 2 брифа) — renderPersonalChatMessageBody
-// по-горе остава НЕПРОМЕНЕН по подразбиране (все още ползван и от стария
-// "Чат" таб, извън обхвата на тази задача); този wrapper explicit-но включва
-// emphasizeEmoji само за Лични call site-овете (виж renderTopicsPersonalMessages).
+// Лични/VIP DM-specific wrapper (Task 2 брифа) — извикващите го call site-ове
+// (renderTopicsPersonalMessages) не са пипани от friend-chat промените.
 export function renderPersonalChatMessageBodyEmphasized(body: string): string {
   return renderLinkifiedChatMessageBody(body, { emphasizeEmoji: true })
 }
@@ -6770,12 +6774,12 @@ function renderChatPanel(state: LobbyScreenState): string {
                   ${message.attachment ? `
                     <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                       ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
-                      ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
+                      ${hasText ? `<div style="padding:0 4px 2px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
                     </div>
                   ` : `
                     <div style="${isEmojiOnly
                       ? 'padding:2px;line-height:1;'
-                      : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                      : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;`}">
                       ${isEmojiOnly
                         ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
                         : renderPersonalChatMessageBody(message.body)}
@@ -6789,6 +6793,7 @@ function renderChatPanel(state: LobbyScreenState): string {
           <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
             <div style="display:flex;gap:10px;align-items:center;">
               ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
+              ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_PERSONAL, 42)}
               <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;">
               <button type="submit" ${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'disabled' : ''} style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;opacity:${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? '0.6' : '1'};">${state.chatUploadingFriendshipIds.has(activeConversation.friendshipId) ? 'Качване…' : 'Изпрати'}</button>
             </div>
