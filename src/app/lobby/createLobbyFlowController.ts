@@ -1247,6 +1247,8 @@ type InternalLobbyFlowState = {
   topicComposerErrorTextByTopicId: Record<string, string | null>
   /** Избрана (все още неизпратена) снимка за root composer-а, keyed по topicId — Attachment feature, reuse на СЪЩИЯ { file, previewUrl } shape като chatPendingImageByFriendshipId. */
   topicComposerPendingImageByTopicId: Record<string, { file: File; previewUrl: string } | undefined>
+  topicsEmojiPickerOpenForKey: string | null
+  topicsEmojiPickerCategoryId: string
 
   // ─── Replies (Етап 3) ───────────────────────────────────────────────────
   /** Кои root съобщения имат отворен ("expanded") reply thread в момента. */
@@ -1986,6 +1988,8 @@ function createInitialState(): InternalLobbyFlowState {
     topicComposerPendingRequestIdByTopicId: {},
     topicComposerErrorTextByTopicId: {},
     topicComposerPendingImageByTopicId: {},
+    topicsEmojiPickerOpenForKey: null,
+    topicsEmojiPickerCategoryId: 'smileys',
     topicExpandedReplyRootIds: [],
     topicRepliesByRootId: {},
     topicRepliesHasMoreByRootId: {},
@@ -4344,6 +4348,8 @@ export function createLobbyFlowController(
       topicComposerPendingRequestIdByTopicId: state.topicComposerPendingRequestIdByTopicId,
       topicComposerErrorTextByTopicId: state.topicComposerErrorTextByTopicId,
       topicComposerPendingImageByTopicId: state.topicComposerPendingImageByTopicId,
+      topicsEmojiPickerOpenForKey: state.topicsEmojiPickerOpenForKey,
+      topicsEmojiPickerCategoryId: state.topicsEmojiPickerCategoryId,
       topicExpandedReplyRootIds: state.topicExpandedReplyRootIds,
       topicRepliesByRootId: state.topicRepliesByRootId,
       topicRepliesHasMoreByRootId: state.topicRepliesHasMoreByRootId,
@@ -4833,6 +4839,16 @@ export function createLobbyFlowController(
       },
       onTopicReplyComposerImageRemove: (rootMessageId) => {
         clearTopicReplyComposerPendingImage(rootMessageId)
+        render()
+      },
+      onComposerEmojiPickerToggle: (key) => {
+        toggleComposerEmojiPicker(key)
+      },
+      onComposerEmojiPickerClose: () => {
+        closeComposerEmojiPicker()
+      },
+      onComposerEmojiPickerCategorySelect: (categoryId) => {
+        state.topicsEmojiPickerCategoryId = categoryId
         render()
       },
       onImageViewerOpen: (attachment) => {
@@ -13097,6 +13113,22 @@ export function createLobbyFlowController(
     const next = { ...state.topicReplyComposerPendingImageByRootId }
     delete next[rootMessageId]
     state.topicReplyComposerPendingImageByRootId = next
+  }
+
+  // ─── Composer emoji picker (Лафче/Теми/Общи/Лични, desktop-only) ────────
+  // Само ЕДИН отворен наведнъж, глобален ключ (виж COMPOSER_EMOJI_KEY_ROOT/
+  // REPLY/PERSONAL в renderLobbyScreen.ts) — не keyed по topicId/rootMessageId,
+  // защото само по един composer от всеки вид се render-ва наведнъж.
+  function toggleComposerEmojiPicker(key: string): void {
+    state.topicsEmojiPickerOpenForKey = state.topicsEmojiPickerOpenForKey === key ? null : key
+    state.topicsEmojiPickerCategoryId = 'smileys'
+    render()
+  }
+
+  function closeComposerEmojiPicker(): void {
+    if (state.topicsEmojiPickerOpenForKey === null) return
+    state.topicsEmojiPickerOpenForKey = null
+    render()
   }
 
   function selectTopicReplyComposerImage(rootMessageId: string, file: File): void {

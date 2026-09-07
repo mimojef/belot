@@ -7,6 +7,9 @@ import {
   renderTopicsPersonalChatPanel,
   resolveAttachmentUrl,
   renderLinkifiedChatMessageBody,
+  renderComposerEmojiPicker,
+  COMPOSER_EMOJI_KEY_ROOT,
+  COMPOSER_EMOJI_KEY_REPLY,
 } from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 
@@ -135,6 +138,11 @@ const TOPIC_MODERATION_REASON_CATEGORY_OPTIONS: Array<{ value: string; label: st
   { value: 'inappropriate_content', label: 'Неподходящо съдържание' },
   { value: 'other', label: 'Друго' },
 ]
+
+// Пастелно зелено за имената на авторите в Теми/Общи и Лафче — единен цвят
+// за ВСИЧКИ роли (player/admin/subadmin/pika_team/top_chat_admin/chat_admin),
+// без role-based разграничение.
+const TOPIC_AUTHOR_NAME_COLOR = '#86C995'
 
 function escapeHtml(value: string): string {
   return value
@@ -443,7 +451,7 @@ function renderTopicAuthorBlock(
             type="button"
             data-topic-message-author="${escapeHtml(senderProfileId)}"
             data-topic-message-author-name="${escapeHtml(senderDisplayName)}"
-            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+            style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:900;color:${TOPIC_AUTHOR_NAME_COLOR};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
           >${escapeHtml(senderDisplayName)}</button>
           ${muteIndicator}
           <span style="font-size:12px;color:rgba(248,250,252,0.42);white-space:nowrap;">${formatTopicMessageTime(createdAt)}${editedAt !== null ? ' · редактирано' : ''}</span>
@@ -580,6 +588,7 @@ function renderInlineReplyComposer(state: LobbyScreenState, rootMessageId: strin
           isSending,
           isVip,
         })}
+        ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_REPLY, 36)}
         <textarea
           data-topics-reply-composer-text="1"
           name="body"
@@ -629,7 +638,7 @@ export function renderTopicReplyRow(state: LobbyScreenState, reply: TopicReplySn
       <div style="margin:-6px 0 6px 58px;">
         ${isEditing
           ? renderTopicMessageEditForm(state, reply.messageId)
-          : (reply.body.length > 0 ? `<div style="font-size:14px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body)}</div>` : '')
+          : (reply.body.length > 0 ? `<div style="font-size:16px;line-height:1.4;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(reply.body, { emphasizeEmoji: true })}</div>` : '')
         }
         ${reply.attachment ? renderTopicAttachment(reply.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:2px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
@@ -732,7 +741,7 @@ export function renderTopicMessageRow(state: LobbyScreenState, message: TopicMes
       <div style="padding:0 12px 12px 58px;">
         ${isEditing
           ? renderTopicMessageEditForm(state, message.messageId)
-          : (message.body.length > 0 ? `<div style="margin-top:4px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
+          : (message.body.length > 0 ? `<div style="margin-top:4px;font-size:17px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
         }
         ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
         <div style="margin-top:6px;margin-left:-8px;display:flex;align-items:center;gap:10px;">
@@ -847,7 +856,7 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
               type="button"
               data-topic-message-author="${escapeHtml(message.senderProfileId)}"
               data-topic-message-author-name="${escapeHtml(message.senderDisplayName)}"
-              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:14px;font-weight:900;color:#f8fafc;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
+              style="border:0;background:transparent;padding:0;cursor:pointer;font-size:16px;font-weight:900;color:${TOPIC_AUTHOR_NAME_COLOR};min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"
             >${escapeHtml(message.senderDisplayName)}</button>
             ${renderTopicAuthorMuteIndicator({
               isMuted: message.isTopicsSectionMuted,
@@ -863,7 +872,7 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
           </div>
           ${isEditing
             ? renderTopicMessageEditForm(state, message.messageId)
-            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:15px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body)}</div>` : '')
+            : (message.body.length > 0 ? `<div style="margin-top:2px;font-size:17px;line-height:1.45;color:#e2e8f0;word-break:break-word;overflow-wrap:anywhere;">${renderLinkifiedChatMessageBody(message.body, { emphasizeEmoji: true })}</div>` : '')
           }
           ${message.attachment ? renderTopicAttachment(message.attachment, state.apiBaseUrl) : ''}
         </div>
@@ -1292,6 +1301,7 @@ function renderTopicsComposer(state: LobbyScreenState, topicId: string): string 
         isSending,
         isVip,
       })}
+      ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_ROOT, 40)}
       <textarea
         data-topics-composer-text="1"
         name="body"

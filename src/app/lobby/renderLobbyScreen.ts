@@ -382,6 +382,12 @@ export type LobbyScreenState = {
   topicComposerPendingRequestIdByTopicId: Record<string, string | null>
   topicComposerErrorTextByTopicId: Record<string, string | null>
   topicComposerPendingImageByTopicId: Record<string, { file: File; previewUrl: string } | undefined>
+  // Desktop-only Unicode emoji picker (Лафче/Теми/Общи/Лични composer-и) —
+  // единствен global "кой picker е отворен" ключ ('root' | 'reply' |
+  // 'personal', виж COMPOSER_EMOJI_KEYS), не keyed по topicId/rootMessageId,
+  // защото само ЕДИН composer от всеки вид се render-ва наведнъж. null = затворен.
+  topicsEmojiPickerOpenForKey: string | null
+  topicsEmojiPickerCategoryId: string
   topicExpandedReplyRootIds: string[]
   topicRepliesByRootId: Record<string, TopicReplySnapshot[] | null>
   topicRepliesHasMoreByRootId: Record<string, boolean>
@@ -1016,6 +1022,9 @@ export type RenderLobbyScreenOptions = {
   onTopicReplyComposerSubmit: (rootMessageId: string) => void
   onTopicReplyComposerImageSelect: (rootMessageId: string, file: File) => void
   onTopicReplyComposerImageRemove: (rootMessageId: string) => void
+  onComposerEmojiPickerToggle: (key: string) => void
+  onComposerEmojiPickerClose: () => void
+  onComposerEmojiPickerCategorySelect: (categoryId: string) => void
   onImageViewerOpen: (attachment: { viewUrl: string; downloadUrl: string }) => void
   onImageViewerClose: () => void
   onTopicsVipPopupClose: () => void
@@ -1332,6 +1341,13 @@ let latestImageViewerCloseHandler: (() => void) | null = null
 // viewer Esc pattern-а по-горе.
 let topicCreateEscListenerAttached = false
 let latestTopicCreateCloseHandler: (() => void) | null = null
+// Composer emoji picker singleton-и (Лафче/Теми/Общи/Лични) — mirror на
+// image viewer Esc/outside-click pattern-а: root/document listener-ите се
+// attach-ват ЕДИНИЧНО, само handler референцията се обновява на всеки render.
+let composerEmojiPickerOutsideClickListenerAttachedFor: HTMLElement | null = null
+let composerEmojiPickerEscListenerAttached = false
+let composerEmojiPickerResizeListenerAttached = false
+let latestComposerEmojiPickerCloseHandler: (() => void) | null = null
 let privateRoomInfoDismissTimer: ReturnType<typeof setTimeout> | null = null
 // Skip-if-unchanged guard за root.innerHTML rebuild-а по-долу (виж коментара
 // при lastRenderedRootHtml/root.innerHTML assignment-а) — пази последния root
@@ -1767,6 +1783,223 @@ function autoGrowTextarea(textarea: HTMLTextAreaElement | null): void {
   if (!textarea) return
   textarea.style.height = 'auto'
   textarea.style.height = `${textarea.scrollHeight}px`
+}
+
+// ─── Desktop-only Unicode emoji picker (Лафче/Теми/Общи/Лични composer-и) ──
+//
+// Само 3 composer "вида" се render-ват някога едновременно (никога 2 от
+// СЪЩИЯ вид наведнъж — root Topics composer, inline reply composer, Лични
+// composer са всеки по един на екран) — затова "кой picker е отворен" се
+// проследява с прост фиксиран ключ, НЕ keyed по topicId/rootMessageId/
+// friendshipId. COMPOSER_EMOJI_TEXTAREA_SELECTOR_BY_KEY по-долу е единствената
+// точка, която знае кой data-* selector отговаря на кой composer.
+export const COMPOSER_EMOJI_KEY_ROOT = 'root'
+export const COMPOSER_EMOJI_KEY_REPLY = 'reply'
+export const COMPOSER_EMOJI_KEY_PERSONAL = 'personal'
+
+const COMPOSER_EMOJI_TEXTAREA_SELECTOR_BY_KEY: Record<string, string> = {
+  [COMPOSER_EMOJI_KEY_ROOT]: '[data-topics-composer-text="1"]',
+  [COMPOSER_EMOJI_KEY_REPLY]: '[data-topics-reply-composer-text="1"]',
+  [COMPOSER_EMOJI_KEY_PERSONAL]: '[data-lobby-chat-message-input="1"]',
+}
+
+type EmojiPickerCategory = { id: string; label: string; tabIcon: string; emojis: string[] }
+
+// Стандартни Unicode emoji (системен/browser font, БЕЗ картинки/CDN/library) —
+// нарочно отделени от съществуващия CHAT_EMOJIS/[e:NN] анимиран emoji sticker
+// picker (стария "Чат" таб) — двете системи не се смесват.
+const COMPOSER_EMOJI_CATEGORIES: EmojiPickerCategory[] = [
+  {
+    id: 'smileys', label: 'Усмивки', tabIcon: '😀',
+    emojis: ['😀', '😃', '😄', '😁', '😆', '😅', '😂', '🤣', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '😘', '😋', '😛', '😝', '😜', '🤪', '🤩', '😎', '🥳', '😏', '😴', '🥺', '😢', '😭', '😡', '🤬', '🤯', '😳', '🥵', '🥶', '😱', '🤗', '🤔', '🙄', '😷'],
+  },
+  {
+    id: 'hearts', label: 'Сърца / жестове', tabIcon: '❤️',
+    // 🩷 (розово сърце, Unicode 15.0/2023) премахнато — твърде ново, рисково
+    // за tofu/□ на Windows Segoe UI Emoji (виж Windows compatibility review).
+    emojis: ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '💔', '💕', '💖', '💗', '💘', '💝', '👍', '👎', '👏', '🙌', '👌', '✌️', '🤞', '🤟', '🤘', '👊', '✊', '🙏', '💪', '👋', '🤝'],
+  },
+  {
+    id: 'animals', label: 'Животни / природа', tabIcon: '🐶',
+    // 🦧 (орангутан, Unicode 12.0/2019), 🪻/🪷 (зюмбюл/лотос, Unicode 14.0/2021)
+    // и 🪴 (саксийно растение, Unicode 13.0/2020) са премахнати — твърде нови,
+    // рисково за tofu/□ на Windows Segoe UI Emoji (виж Windows compatibility
+    // review). 🦍 (Unicode 9.0/2016) е достатъчно стар и е запазен.
+    emojis: [
+      '🐶', '🐱', '🐭', '🐹', '🐰', '🦊', '🐻', '🐼', '🐨', '🐯', '🦁', '🐮', '🐷', '🐸', '🐔', '🐧', '🦋', '🐝',
+      '🐵', '🐒', '🙈', '🙉', '🙊', '🦍',
+      '🌹', '🥀', '🌷', '🌺', '🌸', '🌼', '🌻', '💐',
+      '🌱', '🌿', '☘️', '🍀', '🌵', '🌴', '🌲', '🌳', '🌞', '🌙', '⭐', '🌈', '🔥', '☀️', '❄️',
+    ],
+  },
+  {
+    id: 'food', label: 'Храна / напитки', tabIcon: '🍕',
+    emojis: ['☕', '🍵', '🥤', '🍺', '🍻', '🥂', '🍷', '🍸', '🍕', '🍔', '🍟', '🌭', '🍿', '🍰', '🎂', '🍩', '🍪', '🍫', '🍎', '🍌', '🍉', '🍓', '🍒', '🍦'],
+  },
+  {
+    id: 'sports', label: 'Спорт / забавления', tabIcon: '⚽',
+    emojis: ['⚽', '🏀', '🏈', '⚾', '🎾', '🏐', '🎱', '🎯', '🎳', '🎮', '🎲', '🎵', '🎤', '🎧', '🎸', '🏆', '🥇'],
+  },
+  {
+    id: 'objects', label: 'Предмети / пътуване', tabIcon: '🚗',
+    emojis: ['🚗', '🚕', '🚌', '✈️', '🚀', '🚲', '⛵', '🏠', '🏡', '🎁', '💡', '📱', '💻', '⌚', '📷', '🔑', '💰', '📚'],
+  },
+  {
+    id: 'symbols', label: 'Символи', tabIcon: '⭐',
+    emojis: ['✅', '❌', '❗', '❓', '‼️', '⁉️', '💯', '✨', '🎉', '🎊', '🔔', '⚠️', '✔️', '➕', '➖', '💤', '🆗'],
+  },
+]
+
+// Trigger бутон — стилово огледален на съседния снимков бутон (border/
+// radius/размер), само desktop (виж isPhoneLayoutViewport() guard-а на call
+// site-а). `size` съвпада с picker-а до него във всеки конкретен composer.
+function renderComposerEmojiPickerTrigger(key: string, size: number, disabled: boolean): string {
+  return `
+    <button
+      type="button"
+      data-composer-emoji-trigger="${escapeHtml(key)}"
+      title="Емоджита"
+      aria-label="Емоджита"
+      aria-haspopup="true"
+      ${disabled ? 'disabled' : ''}
+      style="height:${size}px;width:${size}px;flex:0 0 auto;border:1px solid rgba(212,165,32,0.34);border-radius:8px;background:#050505;color:#d4a520;display:flex;align-items:center;justify-content:center;cursor:${disabled ? 'default' : 'pointer'};opacity:${disabled ? '0.5' : '1'};font-size:${Math.round(size * 0.5)}px;line-height:1;"
+    >🙂</button>
+  `
+}
+
+// Popup-ът е render-нат само когато state.topicsEmojiPickerOpenForKey===key —
+// "не рендирай ненужно, ако архитектурата позволява да се създава само при
+// отваряне" (§11 в task spec-а). Позициониран е position:fixed (viewport-
+// relative) — всички host контейнери (Topics message stream, Лични detail
+// панел) имат overflow:hidden ancestor-и, position:absolute би клипнал
+// popup-а. Точните top/left координати се изчисляват в wiring-а (виж
+// positionComposerEmojiPickerPopup) спрямо реалния trigger бутон, след mount.
+function renderComposerEmojiPickerPopup(state: LobbyScreenState, key: string): string {
+  if (state.topicsEmojiPickerOpenForKey !== key) return ''
+  const activeCategoryId = COMPOSER_EMOJI_CATEGORIES.some((c) => c.id === state.topicsEmojiPickerCategoryId)
+    ? state.topicsEmojiPickerCategoryId
+    : COMPOSER_EMOJI_CATEGORIES[0].id
+
+  const tabsHtml = COMPOSER_EMOJI_CATEGORIES.map((category) => {
+    const isActive = category.id === activeCategoryId
+    return `
+      <button
+        type="button"
+        data-composer-emoji-category="${escapeHtml(category.id)}"
+        title="${escapeHtml(category.label)}"
+        aria-label="${escapeHtml(category.label)}"
+        aria-pressed="${isActive ? 'true' : 'false'}"
+        style="flex:0 0 auto;width:32px;height:32px;border-radius:7px;border:1px solid ${isActive ? 'rgba(212,165,32,0.6)' : 'transparent'};background:${isActive ? 'rgba(212,165,32,0.14)' : 'transparent'};font-size:16px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;"
+      >${category.tabIcon}</button>
+    `
+  }).join('')
+
+  const gridsHtml = COMPOSER_EMOJI_CATEGORIES.map((category) => `
+    <div data-composer-emoji-grid="${escapeHtml(category.id)}" style="${category.id === activeCategoryId ? 'display:grid;' : 'display:none;'}grid-template-columns:repeat(6,1fr);gap:2px;">
+      ${category.emojis.map((emoji) => `
+        <button
+          type="button"
+          data-composer-emoji-char="${escapeHtml(emoji)}"
+          title="${escapeHtml(emoji)}"
+          aria-label="${escapeHtml(emoji)}"
+          style="height:34px;border:0;border-radius:6px;background:transparent;font-size:20px;line-height:1;display:flex;align-items:center;justify-content:center;cursor:pointer;"
+          onmouseenter="this.style.background='rgba(212,165,32,0.16)'"
+          onmouseleave="this.style.background='transparent'"
+        >${emoji}</button>
+      `).join('')}
+    </div>
+  `).join('')
+
+  return `
+    <div
+      data-composer-emoji-popup="${escapeHtml(key)}"
+      role="dialog"
+      aria-label="Емоджита"
+      style="position:fixed;z-index:9550;width:296px;max-height:320px;display:flex;flex-direction:column;background:#111118;border:1px solid rgba(212,165,32,0.4);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.6);overflow:hidden;"
+    >
+      <div style="flex:0 0 auto;display:flex;align-items:center;gap:4px;padding:8px 8px 6px;border-bottom:1px solid rgba(255,255,255,0.10);">
+        <div style="flex:1;min-width:0;display:flex;gap:2px;overflow-x:auto;">${tabsHtml}</div>
+        <button
+          type="button"
+          data-composer-emoji-close="1"
+          title="Затвори емоджитата"
+          aria-label="Затвори емоджитата"
+          style="flex:0 0 auto;width:26px;height:26px;border:0;border-radius:6px;background:transparent;color:rgba(255,255,255,0.55);font-size:15px;line-height:1;cursor:pointer;"
+        >✕</button>
+      </div>
+      <div style="flex:1;min-height:0;overflow-y:auto;padding:8px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+        ${gridsHtml}
+      </div>
+    </div>
+  `
+}
+
+// Единна вмъкваща точка за трите composer-а — desktop-only guard-нат чрез
+// isPhoneLayoutViewport() (проектовия established mobile/desktop check,
+// виж renderLobbyScreen() top-level isPhoneLayout usage), не нов breakpoint.
+export function renderComposerEmojiPicker(state: LobbyScreenState, key: string, size: number, disabled = false): string {
+  if (isPhoneLayoutViewport()) return ''
+  return renderComposerEmojiPickerTrigger(key, size, disabled) + renderComposerEmojiPickerPopup(state, key)
+}
+
+// Вмъква emoji на текущата caret позиция (или замества маркирания диапазон)
+// в composer-а, идентифициран от `key` — DOM-primary, mirror на как
+// typing вече работи тук (viж onTopicComposerInput/onChatDraftChange
+// wiring-а: draft state-ът се синхронизира от textarea.value НА input
+// event, не обратно). Затова insert-ването директно пипа textarea.value +
+// dispatch-ва реален native 'input' event, вместо да дублира state-sync
+// логиката — съществуващият input listener на всеки composer я поема
+// автоматично (draft mirror + autoGrow), нула нов callback route нужен.
+//
+// Caret позиция: ако полето Е фокусирано в момента (текстовото поле никога
+// реално не губи focus, докато се кликат picker бутоните — виж
+// pointerdown preventDefault в wiring-а по-долу), ползваме реалния
+// selectionStart/End; иначе (никога фокусирано преди) — добавяме накрая.
+function insertComposerEmojiAtCaret(root: HTMLElement, key: string, emoji: string): void {
+  const selector = COMPOSER_EMOJI_TEXTAREA_SELECTOR_BY_KEY[key]
+  if (!selector) return
+  const field = root.querySelector<HTMLTextAreaElement | HTMLInputElement>(selector)
+  if (!field) return
+
+  const hasLiveCaret = document.activeElement === field
+    && typeof field.selectionStart === 'number'
+    && typeof field.selectionEnd === 'number'
+  const start = hasLiveCaret ? (field.selectionStart as number) : field.value.length
+  const end = hasLiveCaret ? (field.selectionEnd as number) : field.value.length
+
+  const nextValue = field.value.slice(0, start) + emoji + field.value.slice(end)
+  if (field.maxLength > 0 && nextValue.length > field.maxLength) return
+
+  field.value = nextValue
+  const caretPos = start + emoji.length
+  field.focus()
+  field.setSelectionRange(caretPos, caretPos)
+  field.dispatchEvent(new Event('input', { bubbles: true }))
+}
+
+// Root/reply Topics composer-ите interceptват click-а на снимковия бутон
+// със СЪЩАТА VIP/mute проверка (виж съществуващия imagePickBtn wiring по-
+// долу) — emoji trigger-ът трябва да се държи идентично, вместо да отваря
+// picker-а над readonly textarea. Лични composer-ът няма тази концепция
+// (disabled се предава директно като HTML атрибут на trigger бутона).
+function getComposerEmojiLockState(trigger: HTMLElement): { muted: boolean; nonVip: boolean; kind: 'root' | 'reply' | 'none' } {
+  const rootForm = trigger.closest<HTMLFormElement>('[data-topics-composer-form="1"]')
+  if (rootForm) {
+    return {
+      muted: rootForm.dataset.topicsComposerMuteLocked === '1',
+      nonVip: rootForm.dataset.topicsComposerVipLocked === '1',
+      kind: 'root',
+    }
+  }
+  const replyForm = trigger.closest<HTMLFormElement>('[data-topics-reply-composer-form="1"]')
+  if (replyForm) {
+    return {
+      muted: false,
+      nonVip: replyForm.dataset.topicsReplyComposerVipLocked === '1',
+      kind: 'reply',
+    }
+  }
+  return { muted: false, nonVip: false, kind: 'none' }
 }
 
 function formatAmount(value: number): string {
@@ -6059,8 +6292,49 @@ const CHAT_EMOJIS = Array.from({ length: 24 }, (_, i) => {
 const LINKIFIED_CHAT_TOKEN_PATTERN = /(\[e:\d{2}\])|(https?:\/\/[^\s<>"']+|www\.[^\s<>"']+)/gi
 const LINKIFIED_CHAT_TRAILING_LINK_PUNCTUATION = '.,!?;:)]}'
 
-function renderPlainLinkifiedChatText(value: string): string {
-  return escapeHtml(value).replace(/\r\n|\r|\n/g, '<br>')
+// Разпознава ЦЕЛИ Unicode emoji sequences (не отделни UTF-16 code units) — за
+// публикувано-съобщение +2px emphasis (виж renderPlainLinkifiedChatText).
+// Regex вместо Intl.Segmenter нарочно: по-широка browser поддръжка (Firefox
+// добави Intl.Segmenter едва през 2024, а показването на съобщения — за
+// разлика от desktop-only picker-а — не е ограничено само до desktop).
+// Три алтернативи, в приоритетен ред:
+//  1. Regional_Indicator двойка — флагове на държави (🇧🇬 = 2 codepoint-а).
+//  2. Keycap sequence — цифра/#/* + опционален VS16 + U+20E3 (1️⃣). Изисква
+//     задължителен U+20E3 след цифрата — обикновено "3" в текст НЕ се хваща
+//     погрешно като emoji (честа грешка при наивно \p{Emoji} без тази проверка).
+//  3. Extended_Pictographic база + опционален skin-tone modifier ИЛИ VS16,
+//     последвано от 0+ ZWJ-свързани допълнителни pictographic части (за
+//     family/couple ZWJ sequences) — покрива ❤️/☕/✌️ (VS16), 👍🏽 (modifier),
+//     👨‍👩‍👧‍👦 (ZWJ chain).
+const MESSAGE_EMOJI_SEQUENCE_PATTERN = /\p{Regional_Indicator}\p{Regional_Indicator}|[0-9#*]\uFE0F?\u20E3|\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|\uFE0F)?(?:\u200D\p{Extended_Pictographic}(?:\p{Emoji_Modifier}|\uFE0F)?)*/gu
+
+// `emphasizeEmoji` е explicit opt-in (Task 2 брифа §2.5) — НЕ променя
+// поведението на съществуващите извиквания без флага (стария "Чат" таб и
+// други бъдещи caller-и продължават да получават чист escaped текст).
+// Escaping-ът минава СЪЩО и през emoji sequence-a (defense-in-depth, макар
+// emoji codepoint-ите никога да не съдържат HTML-special символи) — само
+// добавя <span> wrapper около него, НЕ засяга escaping/newline логиката за
+// останалия текст.
+function renderPlainLinkifiedChatText(value: string, emphasizeEmoji = false): string {
+  if (!emphasizeEmoji) {
+    return escapeHtml(value).replace(/\r\n|\r|\n/g, '<br>')
+  }
+
+  let html = ''
+  let cursor = 0
+  for (const match of value.matchAll(MESSAGE_EMOJI_SEQUENCE_PATTERN)) {
+    const emoji = match[0]
+    const index = match.index ?? 0
+    if (index > cursor) {
+      html += escapeHtml(value.slice(cursor, index)).replace(/\r\n|\r|\n/g, '<br>')
+    }
+    html += `<span style="font-size:calc(1em + 3px);">${escapeHtml(emoji)}</span>`
+    cursor = index + emoji.length
+  }
+  if (cursor < value.length) {
+    html += escapeHtml(value.slice(cursor)).replace(/\r\n|\r|\n/g, '<br>')
+  }
+  return html
 }
 
 function splitTrailingLinkPunctuation(value: string): { linkText: string; trailingText: string } {
@@ -6099,7 +6373,8 @@ function renderLinkifiedChatLink(linkText: string): string | null {
   return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer" data-chat-link="1" style="color:inherit;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:2px;text-decoration-color:rgba(59,130,246,0.88);overflow-wrap:anywhere;word-break:break-word;">${escapeHtml(linkText)}</a>`
 }
 
-export function renderLinkifiedChatMessageBody(body: string): string {
+export function renderLinkifiedChatMessageBody(body: string, options: { emphasizeEmoji?: boolean } = {}): string {
+  const emphasizeEmoji = options.emphasizeEmoji === true
   let html = ''
   let cursor = 0
 
@@ -6108,7 +6383,7 @@ export function renderLinkifiedChatMessageBody(body: string): string {
     const index = match.index ?? 0
 
     if (index > cursor) {
-      html += renderPlainLinkifiedChatText(body.slice(cursor, index))
+      html += renderPlainLinkifiedChatText(body.slice(cursor, index), emphasizeEmoji)
     }
 
     const emojiMatch = /^\[e:(\d{2})\]$/.exec(rawToken)
@@ -6117,15 +6392,15 @@ export function renderLinkifiedChatMessageBody(body: string): string {
     } else {
       const { linkText, trailingText } = splitTrailingLinkPunctuation(rawToken)
       const renderedLink = linkText.length > 0 ? renderLinkifiedChatLink(linkText) : null
-      html += renderedLink ?? renderPlainLinkifiedChatText(linkText)
-      html += renderPlainLinkifiedChatText(trailingText)
+      html += renderedLink ?? renderPlainLinkifiedChatText(linkText, emphasizeEmoji)
+      html += renderPlainLinkifiedChatText(trailingText, emphasizeEmoji)
     }
 
     cursor = index + rawToken.length
   }
 
   if (cursor < body.length) {
-    html += renderPlainLinkifiedChatText(body.slice(cursor))
+    html += renderPlainLinkifiedChatText(body.slice(cursor), emphasizeEmoji)
   }
 
   return html
@@ -6133,6 +6408,14 @@ export function renderLinkifiedChatMessageBody(body: string): string {
 
 export function renderPersonalChatMessageBody(body: string): string {
   return renderLinkifiedChatMessageBody(body)
+}
+
+// Лични/VIP DM-specific wrapper (Task 2 брифа) — renderPersonalChatMessageBody
+// по-горе остава НЕПРОМЕНЕН по подразбиране (все още ползван и от стария
+// "Чат" таб, извън обхвата на тази задача); този wrapper explicit-но включва
+// emphasizeEmoji само за Лични call site-овете (виж renderTopicsPersonalMessages).
+export function renderPersonalChatMessageBodyEmphasized(body: string): string {
+  return renderLinkifiedChatMessageBody(body, { emphasizeEmoji: true })
 }
 
 function formatChatTime(value: string): string {
@@ -6230,15 +6513,15 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
             ${message.attachment ? `
               <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                 ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
-                ${hasText ? `<div style="padding:0 4px 2px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
+                ${hasText ? `<div style="padding:0 4px 2px;font-size:16px;font-weight:800;line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBodyEmphasized(message.body)}</div>` : ''}
               </div>
             ` : `
               <div style="${isEmojiOnly
                 ? 'padding:2px;line-height:1;'
-                : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:14px;font-weight:800;line-height:1.35;word-break:break-word;`}">
+                : `border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:7px 10px;font-size:16px;font-weight:800;line-height:1.35;word-break:break-word;`}">
                 ${isEmojiOnly
                   ? message.body.trim().replace(/\[e:(\d{2})\]/g, (_, n) => `<img src="${getAnimatedEmojiUrl(n)}" alt="" style="width:52px;height:52px;object-fit:contain;display:inline-block;">`)
-                  : renderPersonalChatMessageBody(message.body)}
+                  : renderPersonalChatMessageBodyEmphasized(message.body)}
               </div>
             `}
             <div style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.42);text-align:${message.isOwnMessage ? 'right' : 'left'};">${escapeHtml(formatChatTime(message.createdAt))}</div>
@@ -6250,6 +6533,7 @@ function renderTopicsPersonalMessages(state: LobbyScreenState, activeConversatio
       ${vipDmDisabledReason !== null ? `<div data-chat-composer-disabled-reason="1" style="font-size:12px;font-weight:800;color:#fbbf24;line-height:1.35;">${escapeHtml(vipDmDisabledReason)}</div>` : ''}
       <div style="display:flex;gap:10px;align-items:center;">
         ${renderChatImagePickerControls(state, activeConversation.friendshipId, vipDmDisabledReason !== null)}
+        ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_PERSONAL, 42, isComposerDisabled)}
         <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[activeConversation.friendshipId] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${isComposerDisabled ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;opacity:${isComposerDisabled ? '0.62' : '1'};">
         <button type="submit" data-topics-personal-send="1" aria-label="Изпрати" title="Изпрати" ${isComposerDisabled ? 'disabled' : ''} style="height:42px;width:42px;flex:0 0 42px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:16px;font-weight:900;line-height:1;cursor:${isComposerDisabled ? 'default' : 'pointer'};opacity:${isComposerDisabled ? '0.6' : '1'};"><span aria-hidden="true">&#10148;</span></button>
       </div>
@@ -6285,6 +6569,7 @@ function renderTopicsPersonalPendingComposer(state: LobbyScreenState, recipientD
     <form data-lobby-chat-form="${escapeHtml(PENDING_VIP_DM_UPLOAD_KEY)}" data-chat-composer-disabled="${isComposerDisabled ? '1' : '0'}" style="display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-top:1px solid rgba(212,165,32,0.20);flex:0 0 auto;">
       <div style="display:flex;gap:10px;align-items:center;">
         ${renderChatImagePickerControls(state, PENDING_VIP_DM_UPLOAD_KEY, isComposerDisabled)}
+        ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_PERSONAL, 42, isComposerDisabled)}
         <input name="message" data-lobby-chat-message-input="1" value="${escapeHtml(state.chatDraftByFriendshipId[PENDING_VIP_DM_UPLOAD_KEY] ?? '')}" maxlength="1000" autocomplete="off" placeholder="Напиши съобщение..." ${isComposerDisabled ? 'disabled' : ''} style="height:42px;flex:1;min-width:0;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:700;outline:none;opacity:${isComposerDisabled ? '0.62' : '1'};">
         <button type="submit" data-topics-personal-send="1" aria-label="Изпрати" title="Изпрати" ${isComposerDisabled ? 'disabled' : ''} style="height:42px;width:42px;flex:0 0 42px;display:inline-flex;align-items:center;justify-content:center;padding:0;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:16px;font-weight:900;line-height:1;cursor:${isComposerDisabled ? 'default' : 'pointer'};opacity:${isComposerDisabled ? '0.6' : '1'};"><span aria-hidden="true">&#10148;</span></button>
       </div>
@@ -12701,6 +12986,109 @@ export function renderLobbyScreen(
       })
       imageRemoveBtn?.addEventListener('click', () => {
         if (topicId) options.onTopicComposerImageRemove(topicId)
+      })
+    }
+  }
+
+  // ─── Composer emoji picker (desktop-only, Лафче/Теми/Общи/Лични) ─────────
+  // Един generic pass покрива и трите composer-и наведнъж (виж
+  // COMPOSER_EMOJI_KEY_ROOT/REPLY/PERSONAL) — само реално render-натите
+  // trigger/popup елементи се намират тук, нула дублиране на wiring per
+  // composer. Freshly wire-нато на всеки render (root.innerHTML е нов), затова
+  // click/pointerdown listener-ите тук НЕ се трупат — само document/window
+  // singleton-ите по-долу пазят module-level guard.
+  {
+    root.querySelectorAll<HTMLButtonElement>('[data-composer-emoji-trigger]').forEach((trigger) => {
+      const key = trigger.dataset.composerEmojiTrigger ?? ''
+      // pointerdown preventDefault пази focus-а на textarea/input-а — по
+      // тази причина selectionStart/End остава валиден за insertComposerEmojiAtCaret
+      // между последователни emoji click-ове, без нужда от отделно caret bookkeeping.
+      trigger.addEventListener('pointerdown', (event) => event.preventDefault())
+      trigger.addEventListener('click', () => {
+        const lock = getComposerEmojiLockState(trigger)
+        if (lock.muted) {
+          options.onTopicComposerMutedTap()
+          return
+        }
+        if (lock.nonVip) {
+          if (lock.kind === 'reply') options.onTopicReplyComposerNonVipTap()
+          else options.onTopicComposerNonVipTap()
+          return
+        }
+        options.onComposerEmojiPickerToggle(key)
+      })
+    })
+
+    const popup = root.querySelector<HTMLElement>('[data-composer-emoji-popup]')
+    if (popup) {
+      const key = popup.dataset.composerEmojiPopup ?? ''
+      popup.addEventListener('pointerdown', (event) => event.preventDefault())
+
+      popup.querySelector<HTMLButtonElement>('[data-composer-emoji-close="1"]')?.addEventListener('click', () => {
+        options.onComposerEmojiPickerClose()
+      })
+
+      popup.querySelectorAll<HTMLButtonElement>('[data-composer-emoji-category]').forEach((tab) => {
+        tab.addEventListener('click', () => {
+          const categoryId = tab.dataset.composerEmojiCategory ?? ''
+          if (categoryId) options.onComposerEmojiPickerCategorySelect(categoryId)
+        })
+      })
+
+      popup.querySelectorAll<HTMLButtonElement>('[data-composer-emoji-char]').forEach((emojiBtn) => {
+        emojiBtn.addEventListener('click', () => {
+          const emoji = emojiBtn.dataset.composerEmojiChar ?? ''
+          if (emoji) insertComposerEmojiAtCaret(root, key, emoji)
+        })
+      })
+
+      // position:fixed спрямо реалния trigger бутон (viewport-relative,
+      // избягва overflow:hidden clipping от host контейнерите — Topics
+      // message stream и Лични detail панелът и двата имат такъв ancestor).
+      // Anchor-нато непосредствено НАД бутона, clamped хоризонтално в
+      // viewport границите.
+      const trigger = root.querySelector<HTMLElement>(`[data-composer-emoji-trigger="${cssEscape(key)}"]`)
+      if (trigger) {
+        const triggerRect = trigger.getBoundingClientRect()
+        const popupWidth = 296
+        let left = triggerRect.left
+        if (left + popupWidth > window.innerWidth - 8) left = window.innerWidth - 8 - popupWidth
+        if (left < 8) left = 8
+        popup.style.left = `${left}px`
+        popup.style.bottom = `${window.innerHeight - triggerRect.top + 8}px`
+      }
+    }
+
+    latestComposerEmojiPickerCloseHandler = state.topicsEmojiPickerOpenForKey !== null
+      ? () => options.onComposerEmojiPickerClose()
+      : null
+
+    // Module-level singleton-и (mirror на imageViewerEscListenerAttached/
+    // imageViewerRootListenerAttachedFor по-горе) — root/document listener-ите
+    // се attach-ват ЕДИНИЧНО, не при всеки render, за да не се трупат.
+    if (composerEmojiPickerOutsideClickListenerAttachedFor !== root) {
+      composerEmojiPickerOutsideClickListenerAttachedFor = root
+      root.addEventListener('click', (event) => {
+        if (!latestComposerEmojiPickerCloseHandler) return
+        const target = event.target as HTMLElement | null
+        if (target?.closest('[data-composer-emoji-popup]') || target?.closest('[data-composer-emoji-trigger]')) return
+        latestComposerEmojiPickerCloseHandler()
+      })
+    }
+
+    if (!composerEmojiPickerEscListenerAttached) {
+      composerEmojiPickerEscListenerAttached = true
+      document.addEventListener('keydown', (event) => {
+        if (event.key !== 'Escape') return
+        latestComposerEmojiPickerCloseHandler?.()
+      })
+    }
+
+    if (!composerEmojiPickerResizeListenerAttached) {
+      composerEmojiPickerResizeListenerAttached = true
+      window.addEventListener('resize', () => {
+        if (!latestComposerEmojiPickerCloseHandler) return
+        if (isPhoneLayoutViewport()) latestComposerEmojiPickerCloseHandler()
       })
     }
   }
