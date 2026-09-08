@@ -33,6 +33,7 @@ export type AdCampaignEventType =
   | 'campaign_created'
   | 'campaign_deleted'
   | 'dispatch_created'
+  | 'dispatch_superseded'
   | 'receipt_dismissed'
   | 'receipt_clicked'
 
@@ -59,7 +60,14 @@ export type AdCampaignsStore = {
     campaignId: string,
     actor: AdCampaignActor,
   ) =>
-    | { ok: true; dispatchId: string; sentAt: string; campaign: AdCampaignManagementRow; eventSeq: number }
+    | {
+        ok: true
+        dispatchId: string
+        sentAt: string
+        campaign: AdCampaignManagementRow
+        eventSeq: number
+        supersededDispatchIds: string[]
+      }
     | { ok: false; message: string }
   softDeleteCampaign: (
     campaignId: string,
@@ -169,6 +177,17 @@ export async function createAdCampaignsStore(
     VALUES (?, ?, ?, ?);
   `)
 
+  const selectSupersedableDispatchIdsStatement = database.prepare(`
+    SELECT dispatch_id FROM ad_campaign_dispatches
+    WHERE campaign_id = ? AND superseded_at IS NULL;
+  `)
+
+  const supersedeDispatchStatement = database.prepare(`
+    UPDATE ad_campaign_dispatches
+    SET superseded_at = CURRENT_TIMESTAMP
+    WHERE dispatch_id = ? AND superseded_at IS NULL;
+  `)
+
   const selectDispatchSentAtStatement = database.prepare(`
     SELECT sent_at FROM ad_campaign_dispatches WHERE dispatch_id = ?;
   `)
@@ -184,7 +203,8 @@ export async function createAdCampaignsStore(
     FROM ad_campaign_dispatches d
     JOIN ad_campaigns c ON c.campaign_id = d.campaign_id
     LEFT JOIN ad_campaign_receipts r ON r.dispatch_id = d.dispatch_id AND r.profile_id = ?
-    WHERE c.deleted_at IS NULL AND r.dismissed_at IS NULL AND r.clicked_at IS NULL
+    WHERE c.deleted_at IS NULL AND d.superseded_at IS NULL
+      AND r.dismissed_at IS NULL AND r.clicked_at IS NULL
     ORDER BY d.sent_at ASC;
   `)
 
@@ -288,7 +308,14 @@ export async function createAdCampaignsStore(
     campaignId: string,
     actor: AdCampaignActor,
   ):
-    | { ok: true; dispatchId: string; sentAt: string; campaign: AdCampaignManagementRow; eventSeq: number }
+    | {
+        ok: true
+        dispatchId: string
+        sentAt: string
+        campaign: AdCampaignManagementRow
+        eventSeq: number
+        supersededDispatchIds: string[]
+      }
     | { ok: false; message: string } {
     const activeCampaign = getActiveCampaignById(campaignId)
     if (!activeCampaign) {
@@ -297,9 +324,28 @@ export async function createAdCampaignsStore(
 
     const dispatchId = randomUUID()
     let eventSeq: number
+    let supersededDispatchIds: string[]
 
     try {
       database.exec('BEGIN;')
+
+      // Dedup/supersede: за същата campaign_id може да има най-много ЕДИН
+      // активен (still-pending) dispatch. Преди да вмъкнем новия, маркираме
+      // всички съществуващи pending dispatches на тази кампания като
+      // superseded — listPendingDispatchesForProfile ги филтрира оттук
+      // нататък, така че офлайн потребител, получил Send#1/#2/#3 докато е
+      // бил offline, ще види само последния (Send#3) при login. Историята
+      // (dispatch_count за admin UI) не се пипа — редовете остават, само
+      // получават superseded_at timestamp.
+      const supersedableRows = selectSupersedableDispatchIdsStatement.all(campaignId) as Array<{
+        dispatch_id: string
+      }>
+      supersededDispatchIds = supersedableRows.map((row) => row.dispatch_id)
+      for (const oldDispatchId of supersededDispatchIds) {
+        supersedeDispatchStatement.run(oldDispatchId)
+        insertEventStatement.run('dispatch_superseded', campaignId, oldDispatchId, null)
+      }
+
       insertDispatchStatement.run(dispatchId, campaignId, actor.profileId, actor.role)
       const eventResult = insertEventStatement.run('dispatch_created', campaignId, dispatchId, null)
       eventSeq = Number(eventResult.lastInsertRowid)
@@ -316,7 +362,7 @@ export async function createAdCampaignsStore(
       return { ok: false, message: 'Изпращането не беше записано.' }
     }
 
-    return { ok: true, dispatchId, sentAt: sentAtRow.sent_at, campaign, eventSeq }
+    return { ok: true, dispatchId, sentAt: sentAtRow.sent_at, campaign, eventSeq, supersededDispatchIds }
   }
 
   function softDeleteCampaign(

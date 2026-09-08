@@ -47,8 +47,10 @@
  * [D5] campaign, изтрита ПРЕДИ реален Lobby entry, никога не се доставя
  * [D6] реалният Lobby-entry hook доставя валидния dispatch, но не изтрития
  *
- * === Section F: Multiple offline dispatches (Send#1/#2/#3 докато е offline) ===
- * [F1] 3 sends -> ЕДИН push с всичките 3, sent_at ASC, различни dispatch_id
+ * === Section F: Multiple offline dispatches на СЪЩАТА кампания (dedup/supersede) ===
+ * [F1] 3 sends на СЪЩАТА кампания -> само последният (Send#3) е pending при
+ *      login; Send#1/#2 са superseded и никога не се доставят (fix за
+ *      "натрупване на banner-и" — виж adCampaignsStore.sendCampaign)
  * [F2] delete след serия sends, преди login -> нищо не оцелява
  *
  * === Section G: Same-instance cross-poll duplicate delivery guard ===
@@ -920,14 +922,40 @@ try {
 
   console.log('\n=== Section F: Multiple offline dispatches (Send#1/#2/#3 докато профилът е offline) ===\n')
 
-  await check('[F1] 3 sends към offline профил -> ЕДИН push с всичките 3, sent_at ASC ред, различни dispatch_id', async () => {
+  await check('[F1] 3 sends на СЪЩАТА кампания към offline профил -> само последният (Send#3) е pending при login (supersede dedup)', async () => {
     const createRes = await httpPostJson(port, '/api/admin/ad-campaigns', admin.cookie, { imageDataUrl: VALID_IMAGE_DATA_URL, targetUrl: '/tournaments' })
     const cId = (createRes.body as { campaign: CampaignDto }).campaign.campaignId
 
-    // "offline" симулация — viewer НЕ е свързан през целите 3 send-а.
+    // "offline" симулация — viewer НЕ е свързан през целите 3 send-а. Всеки
+    // send се засича realtime през admin management subscription (fan-out
+    // до ad_campaign_management_dispatched), но dispatch_id-тата за Send#1/#2
+    // не са наблюдаеми през HTTP response-а (само {ok, campaign}) — затова
+    // хващаме ги индиректно през временна "online" WS сесия за viewer-а
+    // ПРЕДИ следващото изпращане, за да потвърдим supersede-а end-to-end.
     await httpPostJson(port, `/api/admin/ad-campaigns/${cId}/send`, admin.cookie, {})
+    const wsAfterSend1 = await openWs(port, viewer.cookie)
+    const msgAfterSend1 = await waitForWsMessage(wsAfterSend1, (m) =>
+      m.type === 'ad_campaign_pending_ads' &&
+      (m as { dispatches: { campaignId: string }[] }).dispatches.some((d) => d.campaignId === cId),
+    )
+    const dispatch1Id = (msgAfterSend1 as { dispatches: { campaignId: string; dispatchId: string }[] })
+      .dispatches.find((d) => d.campaignId === cId)!.dispatchId
+    wsAfterSend1.close()
+
     await sleep(50)
     await httpPostJson(port, `/api/admin/ad-campaigns/${cId}/send`, admin.cookie, {})
+    const wsAfterSend2 = await openWs(port, viewer.cookie)
+    const msgAfterSend2 = await waitForWsMessage(wsAfterSend2, (m) =>
+      m.type === 'ad_campaign_pending_ads' &&
+      (m as { dispatches: { campaignId: string }[] }).dispatches.some((d) => d.campaignId === cId),
+    )
+    const afterSend2Dispatches = (msgAfterSend2 as { dispatches: { campaignId: string; dispatchId: string }[] })
+      .dispatches.filter((d) => d.campaignId === cId)
+    assertEqual(afterSend2Dispatches.length, 1, 'след Send#2, Checkpoint A трябва да върне само 1 pending dispatch за кампанията (Send#1 supersede-нат)')
+    const dispatch2Id = afterSend2Dispatches[0]!.dispatchId
+    assert(dispatch2Id !== dispatch1Id, 'Send#2 трябва да е нов dispatch_id, различен от Send#1')
+    wsAfterSend2.close()
+
     await sleep(50)
     await httpPostJson(port, `/api/admin/ad-campaigns/${cId}/send`, admin.cookie, {})
 
@@ -935,14 +963,24 @@ try {
     try {
       const msg = await waitForWsMessage(ws, (m) =>
         m.type === 'ad_campaign_pending_ads' &&
-        (m as { dispatches: { campaignId: string }[] }).dispatches.filter((d) => d.campaignId === cId).length === 3,
+        (m as { dispatches: { campaignId: string }[] }).dispatches.some((d) => d.campaignId === cId),
       )
       const dispatches = (msg as { dispatches: { campaignId: string; dispatchId: string; sentAt: string }[] })
         .dispatches.filter((d) => d.campaignId === cId)
-      assertEqual(dispatches.length, 3, 'трите send-а трябва да пристигнат в ЕДИН push (не 3 отделни съобщения)')
-      const sentAtTimes = dispatches.map((d) => new Date(d.sentAt).getTime())
-      assert(sentAtTimes[0]! <= sentAtTimes[1]! && sentAtTimes[1]! <= sentAtTimes[2]!, 'dispatch-ите трябва да са в sent_at ASC ред')
-      assertEqual(new Set(dispatches.map((d) => d.dispatchId)).size, 3, 'трите dispatch_id трябва да са различни')
+      assertEqual(dispatches.length, 1, 'само 1 dispatch за тази кампания трябва да е pending при login — Send#1/#2 са superseded')
+      const dispatch3Id = dispatches[0]!.dispatchId
+      assert(dispatch3Id !== dispatch1Id && dispatch3Id !== dispatch2Id, 'pending dispatch-ът трябва да е последният (Send#3), различен от Send#1/#2')
+
+      // Изчакваме евентуален допълнителен push от cross-instance poll-а (700ms)
+      // и потвърждаваме, че старите Send#1/#2 не се промъкват отделно.
+      await sleep(1500)
+      const staleCount = countWsMessages(ws, (m) =>
+        m.type === 'ad_campaign_pending_ads' &&
+        (m as { dispatches: { campaignId: string; dispatchId: string }[] }).dispatches.some(
+          (d) => d.campaignId === cId && (d.dispatchId === dispatch1Id || d.dispatchId === dispatch2Id),
+        ),
+      )
+      assertEqual(staleCount, 0, 'supersede-натите Send#1/#2 никога не бива да бъдат доставени')
     } finally {
       ws.close()
       await httpDeleteJson(port, `/api/admin/ad-campaigns/${cId}`, admin.cookie)

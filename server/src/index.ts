@@ -15860,6 +15860,19 @@ function broadcastAdCampaignDeletedToAllLocalConnections(campaignId: string): vo
   }
 }
 
+// Supersede-ван dispatch (виж sendCampaign в adCampaignsStore.ts) засяга
+// потенциално ВСЕКИ профил с локална connection (не знаем предварително кои
+// имаха popup/queue entry за него) — затова broadcast към всички локални
+// connections, огледално на broadcastAdCampaignDeletedToAllLocalConnections,
+// не само до подателя. Клиентският `ad_campaign_dispatch_invalidated`
+// handler вече маха dispatch-а от queue-то и затваря активния popup ако
+// съвпада (реюзван от receipt_dismissed/receipt_clicked пътя).
+function broadcastAdCampaignDispatchInvalidatedToAllLocalConnections(dispatchId: string): void {
+  for (const conn of Object.values(serverState.connections)) {
+    safeSendToConnection(conn.id, { type: 'ad_campaign_dispatch_invalidated', dispatchId })
+  }
+}
+
 function deliverAdCampaignDispatchToEligibleLocalConnections(dispatch: {
   dispatchId: string
   campaignId: string
@@ -15990,6 +16003,15 @@ async function handleAdminAdCampaignsRequest(
 
     adCampaignEventsLastAnnouncedSeq = Math.max(adCampaignEventsLastAnnouncedSeq, result.eventSeq)
 
+    // Dedup/supersede (виж adCampaignsStore.sendCampaign): предишните
+    // still-pending dispatches на СЪЩАТА кампания вече са маркирани
+    // superseded в DB — тук само нотифицираме online клиентите на тази
+    // инстанция веднага (без да чакат 700ms cross-instance poll), за да не
+    // остане стар popup/queue entry в паралел с новия.
+    for (const supersededDispatchId of result.supersededDispatchIds) {
+      broadcastAdCampaignDispatchInvalidatedToAllLocalConnections(supersededDispatchId)
+    }
+
     deliverAdCampaignDispatchToEligibleLocalConnections({
       dispatchId: result.dispatchId,
       campaignId,
@@ -16084,6 +16106,16 @@ function runAdCampaignEventsCrossInstancePoll(): void {
           type: 'ad_campaign_management_deleted',
           campaignId: event.campaignId,
         })
+        continue
+      }
+
+      if (event.eventType === 'dispatch_superseded' && event.dispatchId !== null) {
+        // Изпратено от друга PM2 инстанция (виж sendCampaign supersede
+        // блока) — тази инстанция може да има локални connections с
+        // popup/queue entry за стария dispatch, затова broadcast към
+        // всички локални, не само до подателя (същия pattern като
+        // campaign_deleted по-горе).
+        broadcastAdCampaignDispatchInvalidatedToAllLocalConnections(event.dispatchId)
         continue
       }
 
