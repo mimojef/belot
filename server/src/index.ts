@@ -56,7 +56,7 @@ import {
   type TopicMuteEvidenceSourceKind,
   type TopicMuteEvidenceReasonCategory,
 } from './db/topicModerationStore.js'
-import { createTopicHardDeleteService } from './db/topicHardDeleteService.js'
+import { createTopicHardDeleteService, GENERAL_TOPIC_ID } from './db/topicHardDeleteService.js'
 import {
   validateLobbyChatBody,
   countUnicodeCodePoints,
@@ -2924,6 +2924,17 @@ async function runTopicInactivityCleanup(): Promise<void> {
     skippedNoLongerEligible: 0,
     skippedProtected: 0,
     errors: 0,
+    // Root-level pass (topic-general container — виж блока след whole-topic
+    // loop-а по-долу) — отделни броячи, за да не се бъркат с whole-topic
+    // deletedTopics/deletedRoots (там deletedRoots е "root_count вътре в
+    // ЦЯЛОСТНО изтрита тема", тук е "самостоятелни root threads, изтрити
+    // ВЪТРЕ в контейнер, който самият остава").
+    scannedRootCandidates: 0,
+    deletedContainerRoots: 0,
+    deletedContainerReplies: 0,
+    deletedContainerAttachmentFiles: 0,
+    skippedRootNoLongerEligible: 0,
+    rootErrors: 0,
   }
 
   try {
@@ -2979,6 +2990,73 @@ async function runTopicInactivityCleanup(): Promise<void> {
         break
       }
     }
+
+    // Root-level pass за "Общи" (topic-general) — container-темата САМАТА
+    // никога не hard-delete-ва се (findInactivityCandidates по-горе explicit
+    // изключва is_general=1), но user-visible "темите" в "Общи" СА
+    // отделните root threads вътре в контейнера (production forensic:
+    // 48 независими root_message_id реда за topic-general). Reuse-ва СЪЩИЯ
+    // cutoff/overlap-guard/batch-loop convention като whole-topic pass-а
+    // по-горе, вътре в СЪЩАТА run (не отделен interval/timer — spec §F "не
+    // въвеждай background job overlap").
+    for (;;) {
+      const rootCandidates = topicHardDeleteService.findInactiveRootCandidates(
+        GENERAL_TOPIC_ID,
+        cutoff,
+        TOPIC_INACTIVITY_CLEANUP_BATCH_SIZE,
+      )
+      if (rootCandidates.length === 0) {
+        break
+      }
+      summary.scannedRootCandidates += rootCandidates.length
+
+      for (const rootCandidate of rootCandidates) {
+        if (isServerShuttingDown) {
+          break
+        }
+        try {
+          const result = topicHardDeleteService.hardDeleteRoot({
+            topicId: rootCandidate.topicId,
+            rootMessageId: rootCandidate.rootMessageId,
+            inactivityCutoff: cutoff,
+          })
+
+          if (result.ok) {
+            summary.deletedContainerRoots += 1
+            summary.deletedContainerReplies += result.deletedReplyCount
+            summary.deletedContainerAttachmentFiles += result.deletedAttachmentFilenames.length
+            // Mirror на individual-message-moderation broadcast-а
+            // (deleteMessage moderator flow) — темата (topic-general) остава
+            // напълно достъпна, само този root+thread изчезва. Клиентският
+            // 'topic_message_deleted' handler вече знае parentMessageId===null
+            // ⇒ "маха root И всички locally-loaded replies към него".
+            broadcastTopicMessageDeletedToLocalSubscribers(
+              rootCandidate.topicId,
+              rootCandidate.rootMessageId,
+              null,
+              new Date().toISOString(),
+            )
+          } else if (result.code === 'no_longer_eligible') {
+            summary.skippedRootNoLongerEligible += 1
+          }
+          // 'not_found' — вече изтрит (паралелен self/moderator delete между
+          // candidate scan и това извикване) — idempotent no-op.
+          // 'protected_topic' — не може да се случи тук (GENERAL_TOPIC_ID
+          // никога не е LAFCHE_TOPIC_ID), но guard-ът в hardDeleteRoot си
+          // остава defense-in-depth.
+        } catch (error) {
+          summary.rootErrors += 1
+          console.error(
+            `[topics] Root inactivity cleanup: грешка при hard-delete на root ${rootCandidate.rootMessageId} (${rootCandidate.topicId}):`,
+            error,
+          )
+        }
+      }
+
+      if (rootCandidates.length < TOPIC_INACTIVITY_CLEANUP_BATCH_SIZE) {
+        break
+      }
+    }
   } catch (error) {
     summary.errors += 1
     console.error('[topics] Inactivity cleanup failed:', error)
@@ -2991,6 +3069,14 @@ async function runTopicInactivityCleanup(): Promise<void> {
       `[topics] Inactivity cleanup run: scanned=${summary.scannedCandidates} deleted=${summary.deletedTopics} ` +
       `roots=${summary.deletedRoots} replies=${summary.deletedReplies} attachmentFiles=${summary.deletedAttachmentFiles} ` +
       `skippedNoLongerEligible=${summary.skippedNoLongerEligible} skippedProtected=${summary.skippedProtected} errors=${summary.errors}`,
+    )
+  }
+  if (summary.scannedRootCandidates > 0 || summary.rootErrors > 0) {
+    console.log(
+      `[topics] Root inactivity cleanup run (${GENERAL_TOPIC_ID}): scanned=${summary.scannedRootCandidates} ` +
+      `deletedRoots=${summary.deletedContainerRoots} deletedReplies=${summary.deletedContainerReplies} ` +
+      `attachmentFiles=${summary.deletedContainerAttachmentFiles} skippedNoLongerEligible=${summary.skippedRootNoLongerEligible} ` +
+      `errors=${summary.rootErrors}`,
     )
   }
 }

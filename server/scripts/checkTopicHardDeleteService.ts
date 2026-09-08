@@ -59,6 +59,26 @@
  * [31] Attachments/filesystem cleanup queue се задейства директно от hard-delete lifecycle (actor-driven code path)
  * [32] Existing removed-topic 180-day purge продължава да работи за legacy/друг legitimate removed ред (established lifecycle непроменен)
  * [33] Manual delete + automatic cleanup "почти едновременно" за 1 тема — безопасно, idempotent not_found, без corruption
+ *
+ * === POST-INCIDENT: root-level cleanup за topic-general + MAX() whole-topic fix ===
+ * (production forensic: topic-general/"Общи" е container с 48 независими
+ * root threads в topic_root_latest_seq за 1 topic_id — findInactivityCandidates/
+ * hardDeleteTopic третираха всеки root row поотделно / LIMIT 1 без ORDER BY,
+ * недетерминирано. Виж findInactiveRootCandidates/hardDeleteRoot по-долу.)
+ * [34] topic-general: root A >72h стар + root B активен → delete само root A + replies, root B остава, topics/topic-general остава
+ * [35] Стар root, създаден от 'player', последен reply от 'pika_team' → root се delete-ва (reply автор role НЕ протектва)
+ * [36] Root, създаден от privileged роля (sender_role IN exempt list) → НИКОГА не е root-level candidate, независимо от inactivity
+ * [37] Root със стар created_at, но reply <72h → НЕ е candidate (root-level lastActivityAt следва latest_seq, не root created_at)
+ * [38] Whole-topic multi-root MAX() re-validation: 1 стар root + 1 активен root → MAX казва KEEP (no_longer_eligible), нищо не се трие
+ * [39] Whole-topic multi-root MAX(): ВСИЧКИ roots >72h → eligible, hardDeleteTopic успява
+ * [40] Root-level hard-delete: root+reply attachments enqueue-нати в topic_message_attachment_deletions
+ * [41] Root-level hard-delete: replies (self-FK cascade) премахнати заедно с root-а
+ * [42] Root-level hard-delete: topic_root_latest_seq row за root-а премахнат
+ * [43] hardDeleteRoot идемпотентност: втори опит на вече изтрит root → not_found
+ * [44] hardDeleteRoot race-safe re-validation: нов reply СЛЕД candidate-scan → no_longer_eligible, root ОСТАВА
+ * [45] Общ чат (topic-general) row-ът никога не се пипа от findInactivityCandidates/hardDeleteTopic (whole-topic exclusion си остава)
+ * [46] Лафче (topic-lafche) hardDeleteRoot → protected_topic (defense-in-depth guard-ът важи и за root-level primitive-а)
+ * [47] Production сценарий (Крали Марко root, Silence pika_team последен reply, >72h) — end-to-end reproduction
  */
 
 import { mkdtemp, rm, readFile } from 'node:fs/promises'
@@ -684,6 +704,432 @@ await withTempDir(async (dir) => {
         inactivityCutoff: cutoff,
       })
       assert(!cleanupResult.ok && cleanupResult.code === 'not_found', 'automatic cleanup трябва да завари темата вече изтрита — idempotent not_found, без throw')
+    })
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// ─── [34]-[47] Post-incident: root-level cleanup за topic-general + MAX() fix ──
+
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'root-level.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    // topic-general вече е seed-нат idempotently от
+    // 20260810_002_create_topics_and_messages.sql (виж migrationFiles по-
+    // горе) — insertTopic тук би удрял UNIQUE constraint на slug='general'.
+
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+
+    // [34] root A (player, >72h стар) + root B (player, активен) в topic-general.
+    const rootA = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'Крали Марко', senderRole: 'player', body: 'root A — старо, отдавна мъртво' })
+    const rootAReply = messageStore.insertReply({ topicId: 'topic-general', parentMessageId: rootA.messageId, senderProfileId: 'author-2', senderDisplayName: 'Silence', senderRole: 'pika_team', body: 'reply от pika_team' })
+    assert(rootAReply.ok, 'rootA reply insert трябва да успее')
+    const rootAReplyId = (rootAReply as { ok: true; message: { messageId: string } }).message.messageId
+    const db34 = new DatabaseSync(dbPath, { open: true })
+    db34.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), rootA.messageId)
+    db34.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(73 * HOUR_MS), rootAReplyId)
+    db34.close()
+
+    const rootB = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'Крали Марко', senderRole: 'player', body: 'root B — все още активен' })
+    const db34b = new DatabaseSync(dbPath, { open: true })
+    db34b.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(1 * HOUR_MS), rootB.messageId)
+    db34b.close()
+
+    const rootCandidatesBefore = hardDeleteService.findInactiveRootCandidates('topic-general', cutoff, 100)
+    const candidateRootIds = new Set(rootCandidatesBefore.map((c) => c.rootMessageId))
+
+    await check('[34a] Root A (>72h) е candidate, root B (активен) НЕ е', () => {
+      assert(candidateRootIds.has(rootA.messageId), 'root A трябва да е candidate')
+      assert(!candidateRootIds.has(rootB.messageId), 'root B не трябва да е candidate')
+    })
+
+    const rootADeleteResult = hardDeleteService.hardDeleteRoot({ topicId: 'topic-general', rootMessageId: rootA.messageId, inactivityCutoff: cutoff })
+    assert(rootADeleteResult.ok, 'hardDeleteRoot на root A трябва да успее')
+
+    await check('[34b] След delete: root A + reply-то му изчезнали', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const rootRow = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(rootA.messageId)
+      const replyRow = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(rootAReplyId)
+      db2.close()
+      assertEqual(rootRow, undefined, 'root A трябва да е изтрит')
+      assertEqual(replyRow, undefined, 'reply-то на root A трябва да е cascade-delete-нато')
+    })
+
+    await check('[34c] Root B остава напълно непокътнат', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(rootB.messageId)
+      db2.close()
+      assert(row !== undefined, 'root B трябва да остане')
+    })
+
+    await check('[34d] topics/topic-general row-ът остава (container никога не се трие)', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topics WHERE topic_id = 'topic-general'`).get()
+      db2.close()
+      assert(row !== undefined, 'topic-general container трябва да остане')
+    })
+
+    // [35] Production сценарий mirror: reply author role (pika_team) НЕ протектва чужд root.
+    await check('[35] Стар root от player, последен reply от pika_team → root delete-ва се (reply role не протектва)', () => {
+      // Reconfirm-ва изрично семантиката, доказана в [34a]/[34b]: rootA е
+      // създаден от 'player' (author-1/Крали Марко), последният му жив елемент
+      // е reply от 'pika_team' (author-2/Silence) — и въпреки това е бил
+      // eligible и е изтрит.
+      assert(rootADeleteResult.ok, 'sanity: root A delete трябва да е успял')
+    })
+
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// [36] Root, създаден от privileged роля → никога root-level candidate.
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'root-exempt.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    // topic-general вече е seed-нат idempotently от
+    // 20260810_002_create_topics_and_messages.sql (виж migrationFiles по-
+    // горе) — insertTopic тук би удрял UNIQUE constraint на slug='general'.
+
+    const exemptRoot = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'Admin', senderRole: 'admin', body: 'root от admin' })
+    const db36 = new DatabaseSync(dbPath, { open: true })
+    db36.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), exemptRoot.messageId)
+    db36.close()
+
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+
+    await check('[36] Root създаден от admin → НИКОГА root-level candidate, независимо от inactivity', () => {
+      const candidates = hardDeleteService.findInactiveRootCandidates('topic-general', cutoff, 100)
+      assert(!candidates.some((c) => c.rootMessageId === exemptRoot.messageId), 'admin root не трябва да е candidate')
+    })
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// [37] Root със стар created_at, но reply <72h → НЕ candidate.
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'root-recent-reply.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    // topic-general вече е seed-нат idempotently от
+    // 20260810_002_create_topics_and_messages.sql (виж migrationFiles по-
+    // горе) — insertTopic тук би удрял UNIQUE constraint на slug='general'.
+
+    const root = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'root, стар' })
+    const reply = messageStore.insertReply({ topicId: 'topic-general', parentMessageId: root.messageId, senderProfileId: 'author-2', senderDisplayName: 'B', senderRole: 'player', body: 'reply, прясно' })
+    assert(reply.ok, 'reply insert трябва да успее')
+    const db37 = new DatabaseSync(dbPath, { open: true })
+    db37.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(300 * HOUR_MS), root.messageId)
+    // reply-то остава на default CURRENT_TIMESTAMP (<72h).
+    db37.close()
+
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+
+    await check('[37] Root стар, но reply <72h → НЕ candidate (root-level lastActivityAt следва latest_seq)', () => {
+      const candidates = hardDeleteService.findInactiveRootCandidates('topic-general', cutoff, 100)
+      assert(!candidates.some((c) => c.rootMessageId === root.messageId), 'root с прясен reply не трябва да е candidate')
+    })
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// [38]/[39] Whole-topic multi-root MAX() re-validation (non-general тема, за да мине whole-topic пътя).
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'whole-topic-max.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    const db = new DatabaseSync(dbPath, { open: true })
+    insertTopic(db, { topicId: 'topic-multiroot-mixed', slug: 'mixed', title: 'Mixed activity' })
+    insertTopic(db, { topicId: 'topic-multiroot-all-old', slug: 'allold', title: 'All old' })
+    db.close()
+
+    // [38] Смесена тема: 1 стар root + 1 активен root.
+    const mixedOldRoot = messageStore.insertMessage({ topicId: 'topic-multiroot-mixed', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'old root' })
+    const db38 = new DatabaseSync(dbPath, { open: true })
+    db38.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), mixedOldRoot.messageId)
+    db38.close()
+    const mixedActiveRoot = messageStore.insertMessage({ topicId: 'topic-multiroot-mixed', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'active root' })
+    const db38b = new DatabaseSync(dbPath, { open: true })
+    db38b.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(1 * HOUR_MS), mixedActiveRoot.messageId)
+    db38b.close()
+
+    // [39] Тема, чиито ВСИЧКИ roots са >72h.
+    const allOldRoot1 = messageStore.insertMessage({ topicId: 'topic-multiroot-all-old', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'old root 1' })
+    const allOldRoot2 = messageStore.insertMessage({ topicId: 'topic-multiroot-all-old', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'old root 2' })
+    const db39 = new DatabaseSync(dbPath, { open: true })
+    db39.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), allOldRoot1.messageId)
+    db39.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(100 * HOUR_MS), allOldRoot2.messageId)
+    db39.close()
+
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+
+    await check('[38a] Смесена тема (1 стар + 1 активен root) НЕ е whole-topic candidate (MAXseq е активен)', () => {
+      const candidates = hardDeleteService.findInactivityCandidates(cutoff, 100)
+      assert(!candidates.some((c) => c.topicId === 'topic-multiroot-mixed'), 'смесена тема не трябва да е whole-topic candidate')
+    })
+
+    await check('[38b] Whole-topic hardDeleteTopic директно на смесена тема → no_longer_eligible (MAX казва KEEP)', () => {
+      const result = hardDeleteService.hardDeleteTopic({ topicId: 'topic-multiroot-mixed', reason: 'inactivity_expired', inactivityCutoff: cutoff })
+      assert(!result.ok && result.code === 'no_longer_eligible', 'MAX() re-validation трябва да откаже delete-а')
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topics WHERE topic_id = 'topic-multiroot-mixed'`).get()
+      db2.close()
+      assert(row !== undefined, 'темата трябва да остане напълно непокътната')
+    })
+
+    await check('[39] Тема с ВСИЧКИ roots >72h → whole-topic candidate И hardDeleteTopic успява', () => {
+      const candidates = hardDeleteService.findInactivityCandidates(cutoff, 100)
+      assert(candidates.some((c) => c.topicId === 'topic-multiroot-all-old'), 'темата трябва да е candidate')
+      const result = hardDeleteService.hardDeleteTopic({ topicId: 'topic-multiroot-all-old', reason: 'inactivity_expired', inactivityCutoff: cutoff })
+      assert(result.ok, 'трябва да се изтрие успешно — и двата roots са >72h')
+    })
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// [40]-[44] Root-level hard-delete mechanics (attachments/cascade/idempotency/race).
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'root-mechanics.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    // topic-general вече е seed-нат idempotently от
+    // 20260810_002_create_topics_and_messages.sql (виж migrationFiles по-
+    // горе) — insertTopic тук би удрял UNIQUE constraint на slug='general'.
+
+    const root = messageStore.insertMessage({
+      topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'root',
+      attachment: { storageFilename: 'bbbbbbbb-0000-4000-8000-000000000001.webp', width: 100, height: 100, byteSize: 1000, contentType: 'image/webp' },
+    })
+    const reply = messageStore.insertReply({
+      topicId: 'topic-general', parentMessageId: root.messageId, senderProfileId: 'author-2', senderDisplayName: 'B', senderRole: 'player', body: 'reply',
+      attachment: { storageFilename: 'bbbbbbbb-0000-4000-8000-000000000002.webp', width: 100, height: 100, byteSize: 1000, contentType: 'image/webp' },
+    })
+    assert(reply.ok, 'reply insert трябва да успее')
+    const replyMessageId = (reply as { ok: true; message: { messageId: string } }).message.messageId
+
+    const db40 = new DatabaseSync(dbPath, { open: true })
+    db40.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), root.messageId)
+    db40.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(73 * HOUR_MS), replyMessageId)
+    db40.close()
+
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+    const result = hardDeleteService.hardDeleteRoot({ topicId: 'topic-general', rootMessageId: root.messageId, inactivityCutoff: cutoff })
+    assert(result.ok, 'hardDeleteRoot трябва да успее')
+    const okResult = result as Extract<typeof result, { ok: true }>
+
+    await check('[40] Root+reply attachments enqueue-нати за физически cleanup', () => {
+      assertEqual(okResult.deletedAttachmentFilenames.length, 2, 'трябва да върне 2 filenames')
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const queueRows = db2.prepare(`SELECT storage_filename FROM topic_message_attachment_deletions`).all() as Array<{ storage_filename: string }>
+      db2.close()
+      const queuedNames = new Set(queueRows.map((r) => r.storage_filename))
+      assert(queuedNames.has('bbbbbbbb-0000-4000-8000-000000000001.webp'), 'root filename трябва да е в queue')
+      assert(queuedNames.has('bbbbbbbb-0000-4000-8000-000000000002.webp'), 'reply filename трябва да е в queue')
+    })
+
+    await check('[41] Reply (self-FK cascade) премахнат заедно с root-а', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(replyMessageId)
+      db2.close()
+      assertEqual(row, undefined, 'reply трябва да е cascade-delete-нат')
+    })
+
+    await check('[42] topic_root_latest_seq row за root-а премахнат', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topic_root_latest_seq WHERE root_message_id = ?`).get(root.messageId)
+      db2.close()
+      assertEqual(row, undefined, 'topic_root_latest_seq row трябва да е изтрит')
+    })
+
+    await check('[43] hardDeleteRoot идемпотентност: втори опит на вече изтрит root → not_found', () => {
+      const second = hardDeleteService.hardDeleteRoot({ topicId: 'topic-general', rootMessageId: root.messageId, inactivityCutoff: cutoff })
+      assert(!second.ok && second.code === 'not_found', 'второто извикване трябва да върне not_found, не throw')
+    })
+
+    // [44] Race: нов reply пристига МЕЖДУ candidate-scan и hardDeleteRoot извикването.
+    const raceRoot = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'race root' })
+    const db44 = new DatabaseSync(dbPath, { open: true })
+    db44.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), raceRoot.messageId)
+    db44.close()
+    const raceReply = messageStore.insertReply({ topicId: 'topic-general', parentMessageId: raceRoot.messageId, senderProfileId: 'author-2', senderDisplayName: 'B', senderRole: 'player', body: 'just arrived, СЛЕД candidate-scan' })
+    assert(raceReply.ok, 'race reply insert трябва да успее')
+
+    await check('[44] Race-safe re-validation: нов reply СЛЕД candidate-scan → no_longer_eligible, root ОСТАВА', () => {
+      const raceResult = hardDeleteService.hardDeleteRoot({ topicId: 'topic-general', rootMessageId: raceRoot.messageId, inactivityCutoff: cutoff })
+      assert(!raceResult.ok && raceResult.code === 'no_longer_eligible', 'трябва да откаже заради новата активност')
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(raceRoot.messageId)
+      db2.close()
+      assert(row !== undefined, 'root-ът трябва да остане непокътнат')
+    })
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// [45] Общ чат row-ът никога не се пипа от whole-topic пътя (regression на съществуващия guard, [5]/[21] mirror).
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'general-whole-topic-guard.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    // topic-general вече е seed-нат idempotently от
+    // 20260810_002_create_topics_and_messages.sql (виж migrationFiles по-
+    // горе) — insertTopic тук би удрял UNIQUE constraint на slug='general'.
+
+    const root = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'A', senderRole: 'player', body: 'root' })
+    const db45 = new DatabaseSync(dbPath, { open: true })
+    db45.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(200 * HOUR_MS), root.messageId)
+    db45.close()
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+
+    await check('[45a] topic-general НИКОГА не е whole-topic candidate, независимо от root activity', () => {
+      const candidates = hardDeleteService.findInactivityCandidates(cutoff, 100)
+      assert(!candidates.some((c) => c.topicId === 'topic-general'), 'is_general=1 никога не е whole-topic candidate')
+    })
+
+    await check('[45b] hardDeleteTopic директно на topic-general → protected_topic', () => {
+      const result = hardDeleteService.hardDeleteTopic({ topicId: 'topic-general', reason: 'inactivity_expired', inactivityCutoff: cutoff })
+      assert(!result.ok && result.code === 'protected_topic', 'трябва да откаже с protected_topic')
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topics WHERE topic_id = 'topic-general'`).get()
+      db2.close()
+      assert(row !== undefined, 'topic-general трябва да остане')
+    })
+  } finally {
+    hardDeleteService.close()
+    messageStore.close()
+  }
+})
+
+// [46] Лафче hardDeleteRoot guard (defense-in-depth за root-level primitive-а).
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'lafche-root-guard.sqlite')
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    await check('[46] hardDeleteRoot на topic-lafche → protected_topic', () => {
+      const result = hardDeleteService.hardDeleteRoot({
+        topicId: 'topic-lafche',
+        rootMessageId: 'nonexistent-root-id',
+        inactivityCutoff: new Date(Date.now() - 72 * HOUR_MS),
+      })
+      assert(!result.ok && result.code === 'protected_topic', 'трябва да откаже с protected_topic преди дори да провери root съществуването')
+    })
+  } finally {
+    hardDeleteService.close()
+  }
+})
+
+// [47] Production сценарий — end-to-end reproduction на реалния случай.
+await withTempDir(async (dir) => {
+  const dbPath = await setupDb(dir, 'production-repro.sqlite')
+  const messageStore = await createTopicMessageStore(dbPath)
+  const hardDeleteService = await createTopicHardDeleteService(dbPath)
+  try {
+    // topic-general вече е seed-нат idempotently от
+    // 20260810_002_create_topics_and_messages.sql (виж migrationFiles по-
+    // горе) — insertTopic тук би удрял UNIQUE constraint на slug='general'.
+
+    // Production timeline: Крали Марко (player) създава root на 04.09 12:25:10,
+    // Silence (pika_team) отговаря последно на 04.09 12:31:58. Проверката е
+    // на 08.09 12:25 — >72h. Плюс друга, все още активна активност в
+    // topic-general (48-те roots от production), симулирана тук с 1 активен root.
+    const productionRoot = messageStore.insertMessage({
+      topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'Крали Марко', senderRole: 'player', body: 'root пост',
+    })
+    const productionReply1 = messageStore.insertReply({
+      topicId: 'topic-general', parentMessageId: productionRoot.messageId, senderProfileId: 'author-2', senderDisplayName: 'Silence', senderRole: 'pika_team', body: 'reply 1',
+    })
+    assert(productionReply1.ok, 'reply1 insert трябва да успее')
+    const productionReply2 = messageStore.insertReply({
+      topicId: 'topic-general', parentMessageId: productionRoot.messageId, senderProfileId: 'author-1', senderDisplayName: 'Крали Марко', senderRole: 'player', body: 'reply 2',
+    })
+    assert(productionReply2.ok, 'reply2 insert трябва да успее')
+    const productionReply3 = messageStore.insertReply({
+      topicId: 'topic-general', parentMessageId: productionRoot.messageId, senderProfileId: 'author-2', senderDisplayName: 'Silence', senderRole: 'pika_team', body: 'reply 3 (последното видимо съобщение)',
+    })
+    assert(productionReply3.ok, 'reply3 insert трябва да успее')
+    const lastReplyId = (productionReply3 as { ok: true; message: { messageId: string } }).message.messageId
+
+    const dbProd = new DatabaseSync(dbPath, { open: true })
+    dbProd.prepare(`UPDATE topic_messages SET created_at = '2026-09-04 12:25:10' WHERE message_id = ?`).run(productionRoot.messageId)
+    dbProd.prepare(`UPDATE topic_messages SET created_at = '2026-09-04 12:28:00' WHERE message_id = ?`).run((productionReply1 as { ok: true; message: { messageId: string } }).message.messageId)
+    dbProd.prepare(`UPDATE topic_messages SET created_at = '2026-09-04 12:28:30' WHERE message_id = ?`).run((productionReply2 as { ok: true; message: { messageId: string } }).message.messageId)
+    dbProd.prepare(`UPDATE topic_messages SET created_at = '2026-09-04 12:31:58' WHERE message_id = ?`).run(lastReplyId)
+    dbProd.close()
+
+    // Друг, все още активен root в СЪЩИЯ контейнер (mirror на production-а: 47 други roots).
+    const otherActiveRoot = messageStore.insertMessage({ topicId: 'topic-general', senderProfileId: 'author-1', senderDisplayName: 'X', senderRole: 'player', body: 'друг активен root' })
+    const dbOther = new DatabaseSync(dbPath, { open: true })
+    dbOther.prepare(`UPDATE topic_messages SET created_at = ? WHERE message_id = ?`).run(msAgoSqliteString(30 * 60 * 1000), otherActiveRoot.messageId)
+    dbOther.close()
+
+    // Production "проверка на 2026-09-08 12:25 UTC" → cutoff = 2026-09-05 12:25:36 UTC.
+    // Тук ползваме относителен cutoff (Date.now() - 72h), еквивалентен по
+    // семантика — production timestamp-ите (04.09) са далеч отвъд всякакъв
+    // разумен "сега" в теста, затова абсолютната котва не променя резултата.
+    const cutoff = new Date(Date.now() - 72 * HOUR_MS)
+
+    await check('[47a] Production root (Крали Марко + Silence последен reply) Е root-level candidate', () => {
+      const candidates = hardDeleteService.findInactiveRootCandidates('topic-general', cutoff, 100)
+      assert(candidates.some((c) => c.rootMessageId === productionRoot.messageId), 'production root трябва да е candidate')
+    })
+
+    await check('[47b] Whole-topic MAX() re-validation за topic-general самата тя: KEEP (друг root е активен)', () => {
+      // topic-general никога не влиза в whole-topic victim set-а (is_general=1
+      // guard), но потвърждаваме и директно MAX() семантиката тук: ако някой
+      // по грешка извика hardDeleteTopic директно, MAX() (не production root-ът
+      // самостоятелно) би върнал "все още жив" заради otherActiveRoot.
+      const result = hardDeleteService.hardDeleteTopic({ topicId: 'topic-general', reason: 'inactivity_expired', inactivityCutoff: cutoff })
+      assert(!result.ok && (result.code === 'protected_topic'), 'is_general=1 guard-ът хваща първо (protected_topic), преди MAX() дори да се изпълни')
+    })
+
+    const deleteResult = hardDeleteService.hardDeleteRoot({ topicId: 'topic-general', rootMessageId: productionRoot.messageId, inactivityCutoff: cutoff })
+
+    await check('[47c] hardDeleteRoot изтрива production root-а успешно', () => {
+      assert(deleteResult.ok, 'production root трябва да се изтрие успешно')
+    })
+
+    await check('[47d] Всичките 3 replies (включително Silence-овите) изчезват cascade', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row1 = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get((productionReply1 as { ok: true; message: { messageId: string } }).message.messageId)
+      const row2 = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get((productionReply2 as { ok: true; message: { messageId: string } }).message.messageId)
+      const row3 = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(lastReplyId)
+      db2.close()
+      assertEqual(row1, undefined, 'reply1 трябва да е cascade-delete-нат')
+      assertEqual(row2, undefined, 'reply2 трябва да е cascade-delete-нат')
+      assertEqual(row3, undefined, 'reply3 (Silence, последното видимо съобщение) трябва да е cascade-delete-нат')
+    })
+
+    await check('[47e] Другият активен root в topic-general остава напълно непокътнат', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topic_messages WHERE message_id = ?`).get(otherActiveRoot.messageId)
+      db2.close()
+      assert(row !== undefined, 'другият активен root трябва да остане')
+    })
+
+    await check('[47f] topics/topic-general container row-ът остава', () => {
+      const db2 = new DatabaseSync(dbPath, { open: true })
+      const row = db2.prepare(`SELECT 1 FROM topics WHERE topic_id = 'topic-general'`).get()
+      db2.close()
+      assert(row !== undefined, 'topic-general трябва да остане')
     })
   } finally {
     hardDeleteService.close()

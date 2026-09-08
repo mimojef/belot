@@ -6,6 +6,15 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 export const LAFCHE_TOPIC_ID = 'topic-lafche'
 
 /**
+ * Фиксиран literal ID на системния "Общи" контейнер (is_general=1, slug='general'),
+ * seed-нат idempotently в 20260810_002_create_topics_and_messages.sql —
+ * mirror на LAFCHE_TOPIC_ID константата по-горе. Използва се от
+ * findInactiveRootCandidates/hardDeleteRoot caller-а в index.ts, за да не
+ * се разпилява magic string литерал.
+ */
+export const GENERAL_TOPIC_ID = 'topic-general'
+
+/**
  * Единственият authoritative списък с роли, чиито теми НИКОГА не влизат в
  * 72h inactivity victim set-а (само ръчен "кошче" hard delete може да ги
  * премахне) — реферира се и от SQL exclusion-а в findInactivityCandidates,
@@ -25,11 +34,18 @@ export const TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES = [
 
 /**
  * Race/promotion-immune по конструкция — вход е persisted snapshot
- * стойността (`topics.created_by_role`), НЕ live lookup към текущата роля
- * на профила. `null` (legacy теми, създадени преди тази колона да
- * съществува, или системни topic-general/topic-lafche редове) се третира
- * като "не е доказано privileged" ⇒ НЕ exempt — най-консервативният избор,
- * виж migration коментара в 20260901_001_add_created_by_role_to_topics.sql.
+ * стойността (`topics.created_by_role` за whole-topic cleanup, ИЛИ
+ * `topic_messages.sender_role` на самия ROOT за root-level cleanup вътре в
+ * topic-general — виж findInactiveRootCandidates по-долу), НЕ live lookup
+ * към текущата роля на профила. `null` (legacy теми/roots, създадени преди
+ * съответната колона да съществува, или системни topic-general/topic-lafche
+ * редове) се третира като "не е доказано privileged" ⇒ НЕ exempt —
+ * най-консервативният избор, виж migration коментара в
+ * 20260901_001_add_created_by_role_to_topics.sql. ВАЖНО: за root-level
+ * exemption входът е ролята на АВТОРА НА САМИЯ ROOT, никога ролята на
+ * последния reply автор — reply от privileged роля в чужд root НЕ протектва
+ * root-а (production incident: root създаден от 'player', последен reply от
+ * 'pika_team' — root-ът остава напълно eligible за 72h cleanup).
  */
 export function isTopicAutoDeleteExemptByAuthorRole(createdByRole: string | null): boolean {
   return createdByRole !== null && (TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES as readonly string[]).includes(createdByRole)
@@ -58,6 +74,22 @@ export type InactivityCandidate = {
   topicId: string
   lastActivityAt: string
 }
+
+export type InactiveRootCandidate = {
+  topicId: string
+  rootMessageId: string
+  lastActivityAt: string
+}
+
+export type HardDeleteRootResult =
+  | {
+      ok: true
+      topicId: string
+      rootMessageId: string
+      deletedReplyCount: number
+      deletedAttachmentFilenames: string[]
+    }
+  | { ok: false; code: 'not_found' | 'protected_topic' | 'no_longer_eligible' }
 
 export type TopicHardDeleteService = {
   /**
@@ -122,6 +154,58 @@ export type TopicHardDeleteService = {
    */
   findInactivityCandidates: (cutoff: Date, limit: number) => InactivityCandidate[]
 
+  /**
+   * Root-level bulk candidate discovery — за container-теми, чиито
+   * `topics` row НИКОГА не hard-delete-ва се цялостно (в момента само
+   * `is_general=1`, т.е. topic-general/"Общи"; Лафче е самостоятелна
+   * LAFCHE_TOPIC_ID тема, извън тази container категория). За такива теми
+   * user-visible "темите" на екрана СА отделните root threads вътре в
+   * контейнера (виж production forensic report — topic-general съдържа
+   * десетки независими root_message_id редове в topic_root_latest_seq, ПО
+   * ЕДИН на всеки видим "пост"), затова 72h expiry трябва да работи на ROOT
+   * ниво, не на topics-row ниво (за разлика от findInactivityCandidates
+   * по-горе, който explicit изключва is_general=1 изцяло от whole-topic
+   * victim set-а). Exemption проверката тук е върху `topic_messages.sender_role`
+   * НА САМИЯ ROOT (snapshot в момента на писане, mirror на
+   * isTopicAutoDeleteExemptByAuthorRole) — НЕ ролята на последния reply
+   * автор: reply от privileged роля в чужд root не protect-ва root-а (виж
+   * production incident: root от 'player', последен reply от 'pika_team' —
+   * root-ът остава eligible). Boundary policy identична на
+   * findInactivityCandidates: `lastActivityAt <= cutoff`. Query план: range
+   * scan на idx_topic_root_latest_seq_topic_seq (topic_id, latest_seq) +
+   * O(1) PK lookup topic_messages.seq — без нов index, без table scan.
+   */
+  findInactiveRootCandidates: (containerTopicId: string, cutoff: Date, limit: number) => InactiveRootCandidate[]
+
+  /**
+   * Root-level hard-delete primitive — премахва ФИЗИЧЕСКИ само един root
+   * thread (root съобщение + всичките му replies + техните attachments +
+   * topic_root_latest_seq реда му) ВЪТРЕ в container-тема, която самата
+   * ОСТАВА напълно непокътната (`topics` row-ът никога не се пипа). Reuse-ва
+   * self-referencing FK cascade-а на topic_messages (parent_message_id →
+   * topic_messages.message_id ON DELETE CASCADE) — DELETE FROM topic_messages
+   * WHERE message_id = rootMessageId автоматично маха и живите, и вече
+   * soft-deleted replies, и topic_root_latest_seq реда (FK ON DELETE
+   * CASCADE), и topic_message_attachments редовете за root+replies (FK ON
+   * DELETE CASCADE) — mirror на hardDeleteTopic-ия "DELETE FROM topics
+   * cascades to topic_messages" pattern, само с root_message_id вместо
+   * topic_id като anchor. Attachment файловете се enqueue-ват за физически
+   * cleanup ПРЕДИ cascade delete-а, в СЪЩАТА транзакция (mirror на
+   * hardDeleteTopic).
+   *
+   * Race-safe final re-validation ВЪТРЕ в BEGIN IMMEDIATE (mirror на
+   * hardDeleteTopic spec §8): re-чете latest_seq→created_at за ТОЗИ root
+   * непосредствено преди delete-а; ако нов reply е пристигнал между
+   * candidate scan-а и това извикване, връща `no_longer_eligible`.
+   *
+   * Idempotent: вече-несъществуващ root → `{ ok:false, code:'not_found' }`.
+   */
+  hardDeleteRoot: (input: {
+    topicId: string
+    rootMessageId: string
+    inactivityCutoff: Date
+  }) => HardDeleteRootResult
+
   close: () => void
 }
 
@@ -140,15 +224,29 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec('PRAGMA busy_timeout = 5000;')
 
-  // ─── Inactivity candidate discovery ────────────────────────────────────
+  // ─── Inactivity candidate discovery (whole-topic) ──────────────────────
   //
-  // topic_root_latest_seq има точно 1 ред за обикновена "Тема" (единствен
-  // root — виж forensic report §A). latest_seq е topic_messages.seq на
-  // последния ЖИВ ред (root или reply) в thread-а — insertMessage/insertReply/
-  // deleteMessage/deleteOwnMessage поддържат го incrementally (topicMessageStore.ts),
-  // затова joint-ът тук е "1 ред на тема" + "1 PK lookup за created_at",
-  // НЕ table scan на topic_messages (spec §7 изискване). Изключваме:
-  //   - is_general=1 (Общ чат) и LAFCHE_TOPIC_ID literal (Лафче) — scope §1;
+  // ВАЖНО (post-incident корекция): за обикновена "Тема" `topic_root_latest_seq`
+  // МОЖЕ да съдържа повече от 1 ред — schema-та е PK=root_message_id,
+  // topic_id НЕ е unique в тази таблица; всяка тема е feed от независими
+  // root threads (`topic_message` vs `topic_reply` protocol типовете,
+  // renderTopicsScreen.ts "root posts" множествено число). Production
+  // forensic доказа topic-general (is_general=1, вече изключен по-долу) с
+  // 48 отделни root_message_id реда за 1 topic_id — същият multi-root модел
+  // важи principally за ВСЯКА тема, дори да е рядкост извън General извън
+  // текущия UI flow. Затова whole-topic eligibility е АГРЕГАТ по всички
+  // roots на темата — `MAX(m.created_at) <= cutoff` ("темата е eligible само
+  // ако ВСИЧКИ ѝ roots са >72h неактивни"), НЕ per-root row филтриране (старата
+  // имплементация грешно третираше всеки root row независимо, което може да
+  // включи тема в victim set-а заради само ЕДИН стар root, докато друг неин
+  // root е напълно жив). GROUP BY + HAVING прави точно тази агрегация в 1
+  // заявка, все още само range scan на idx_topic_root_latest_seq_topic_seq +
+  // O(1) PK lookup за created_at, без table scan на topic_messages.
+  // Изключваме:
+  //   - is_general=1 (Общ чат/"Общи" контейнер) и LAFCHE_TOPIC_ID literal
+  //     (Лафче) — тези container-теми НИКОГА не hard-delete-ват се цялостно;
+  //     за is_general=1 root-level cleanup-ът е findInactiveRootCandidates
+  //     по-долу, за Лафче няма auto-cleanup изобщо (spec §1);
   //   - status != 'active' И != 'locked' (removed теми вече са извън normal
   //     lifecycle, покрити от съществуващия 180-дневен purge) — locked теми
   //     СА eligible (lock блокира само писане, не е lifecycle state);
@@ -162,15 +260,16 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
   const TOPIC_AUTO_DELETE_EXEMPT_ROLE_PLACEHOLDERS = TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES.map(() => '?').join(', ')
 
   const selectInactivityCandidatesStatement = database.prepare(`
-    SELECT t.topic_id as topicId, m.created_at as lastActivityAt
+    SELECT t.topic_id as topicId, MAX(m.created_at) as lastActivityAt
     FROM topics t
     INNER JOIN topic_root_latest_seq trl ON trl.topic_id = t.topic_id
     INNER JOIN topic_messages m ON m.seq = trl.latest_seq
     WHERE t.is_general = 0
       AND t.topic_id != ?
       AND t.status IN ('active', 'locked')
-      AND m.created_at <= ?
       AND (t.created_by_role IS NULL OR t.created_by_role NOT IN (${TOPIC_AUTO_DELETE_EXEMPT_ROLE_PLACEHOLDERS}))
+    GROUP BY t.topic_id
+    HAVING MAX(m.created_at) <= ?
     ORDER BY t.topic_id ASC
     LIMIT ?;
   `)
@@ -179,8 +278,8 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
     const cutoffStr = toSqliteDateTimeString(cutoff)
     const rows = selectInactivityCandidatesStatement.all(
       LAFCHE_TOPIC_ID,
-      cutoffStr,
       ...TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES,
+      cutoffStr,
       limit,
     ) as Array<{
       topicId: string
@@ -202,12 +301,23 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
   // insertMessage() BEGIN IMMEDIATE от друг caller или чака този lock, или
   // вече е commit-нал и е видим ТУК. Няма race прозорец между re-check-а и
   // delete-а по-долу, защото и двете са в СЪЩАТА транзакция.
+  //
+  // ВАЖНО (post-incident корекция): MAX(m.created_at) агрегат по ВСИЧКИ
+  // roots на темата, НЕ `LIMIT 1` без ORDER BY (старата версия) — за тема с
+  // повече от 1 ред в topic_root_latest_seq, `LIMIT 1` без ORDER BY връща
+  // недетерминиран ред (зависи от SQLite-овия вътрешен B-tree storage ред),
+  // което може or да пропусне still-eligible тема с 1 стар root (ако SQLite
+  // случайно избере друг, активен root), or обратно — да позволи delete на
+  // тема, докато друг неин root е напълно жив. Production forensic
+  // потвърди точно първия случай: topic-general (48 roots) винаги връщаше
+  // стойност от активен root, маскирайки конкретния >72h неактивен root от
+  // финалната re-validation. MAX е коректната whole-topic семантика тук —
+  // "темата е eligible само ако ВСИЧКИ ѝ roots са >72h неактивни".
   const selectLatestActivityForTopicStatement = database.prepare(`
-    SELECT m.created_at as lastActivityAt
+    SELECT MAX(m.created_at) as lastActivityAt
     FROM topic_root_latest_seq trl
     INNER JOIN topic_messages m ON m.seq = trl.latest_seq
-    WHERE trl.topic_id = ?
-    LIMIT 1;
+    WHERE trl.topic_id = ?;
   `)
 
   const selectAttachmentFilenamesForTopicStatement = database.prepare(`
@@ -310,14 +420,20 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
       // който "изглеждаше inactive" и "реално изтрито" да разминат снапшота.
       if (input.inactivityCutoff !== undefined) {
         const latestActivityRow = selectLatestActivityForTopicStatement.get(input.topicId) as
-          | { lastActivityAt: string }
+          | { lastActivityAt: string | null }
           | undefined
         const cutoffStr = toSqliteDateTimeString(input.inactivityCutoff)
-        // Ред липсва в topic_root_latest_seq само ако темата няма никакъв жив
-        // root (не би трябвало да се случи за нормална тема, извън scope-а на
-        // тази cleanup — третираме defensively като "не пипай", не като
-        // "eligible по подразбиране").
-        if (latestActivityRow === undefined || latestActivityRow.lastActivityAt > cutoffStr) {
+        // MAX() без GROUP BY винаги връща точно 1 ред, дори при 0 matching
+        // roots — в този случай lastActivityAt е NULL (не отсъствие на ред).
+        // NULL/undefined означава темата няма никакъв жив root (не би
+        // трябвало да се случи за нормална тема, извън scope-а на тази
+        // cleanup) — третираме defensively като "не пипай", не като
+        // "eligible по подразбиране".
+        if (
+          latestActivityRow === undefined ||
+          latestActivityRow.lastActivityAt === null ||
+          latestActivityRow.lastActivityAt > cutoffStr
+        ) {
           database.exec('ROLLBACK;')
           return { ok: false, code: 'no_longer_eligible' }
         }
@@ -372,6 +488,182 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
     }
   }
 
+  // ─── Root-level inactivity cleanup (container-теми, напр. topic-general) ──
+  //
+  // За container-теми (в момента само is_general=1) `topics` row-ът НИКОГА
+  // не hard-delete-ва се (findInactivityCandidates/hardDeleteTopic по-горе
+  // explicit изключват is_general=1) — но user-visible "темите" на екрана
+  // СА отделните root threads вътре в контейнера. Затова 72h expiry за тях
+  // работи на ROOT ниво: всеки root, чиято собствена latest_seq активност е
+  // >72h стара, е independently eligible, независимо от активността на
+  // другите roots в СЪЩИЯ контейнер (за разлика от whole-topic MAX
+  // семантиката по-горе — тук всеки root се оценява САМОСТОЯТЕЛНО, точно
+  // защото всеки root Е "темата" от user perspective).
+  //
+  // Exemption е върху topic_messages.sender_role НА САМИЯ ROOT (snapshot в
+  // момента на писане на root съобщението) — НЕ ролята на topics.created_by_role
+  // (контейнерът е системен, created_by_role е NULL/несвързан с индивидуалния
+  // автор), и НЕ ролята на последния reply автор в root-а (production
+  // incident: root от 'player', последен reply от 'pika_team' — root-ът
+  // остава напълно eligible, reply авторът никога не protect-ва чужд root).
+  const selectInactiveRootCandidatesStatement = database.prepare(`
+    SELECT trl.topic_id as topicId, trl.root_message_id as rootMessageId, m.created_at as lastActivityAt
+    FROM topic_root_latest_seq trl
+    INNER JOIN topic_messages m ON m.seq = trl.latest_seq
+    INNER JOIN topic_messages root ON root.message_id = trl.root_message_id
+    WHERE trl.topic_id = ?
+      AND m.created_at <= ?
+      AND (root.sender_role IS NULL OR root.sender_role NOT IN (${TOPIC_AUTO_DELETE_EXEMPT_ROLE_PLACEHOLDERS}))
+    ORDER BY trl.root_message_id ASC
+    LIMIT ?;
+  `)
+
+  function findInactiveRootCandidates(containerTopicId: string, cutoff: Date, limit: number): InactiveRootCandidate[] {
+    const cutoffStr = toSqliteDateTimeString(cutoff)
+    const rows = selectInactiveRootCandidatesStatement.all(
+      containerTopicId,
+      cutoffStr,
+      ...TOPIC_AUTO_DELETE_EXEMPT_CREATOR_ROLES,
+      limit,
+    ) as Array<{
+      topicId: string
+      rootMessageId: string
+      lastActivityAt: string
+    }>
+    return rows.map((row) => ({
+      topicId: row.topicId,
+      rootMessageId: row.rootMessageId,
+      lastActivityAt: dbDateToUtc(row.lastActivityAt),
+    }))
+  }
+
+  const selectRootForDeleteStatement = database.prepare(`
+    SELECT message_id FROM topic_messages WHERE message_id = ? AND topic_id = ? AND parent_message_id IS NULL LIMIT 1;
+  `)
+
+  // Final eligibility re-check за ЕДИН root, mirror на
+  // selectLatestActivityForTopicStatement по-горе, но scoped към точно този
+  // root_message_id (не MAX по цялата тема — root-level cleanup оценява
+  // всеки root независимо, виж коментара над findInactiveRootCandidates).
+  const selectLatestActivityForRootStatement = database.prepare(`
+    SELECT m.created_at as lastActivityAt
+    FROM topic_root_latest_seq trl
+    INNER JOIN topic_messages m ON m.seq = trl.latest_seq
+    WHERE trl.root_message_id = ?;
+  `)
+
+  const selectAttachmentFilenamesForRootStatement = database.prepare(`
+    SELECT storage_filename FROM topic_message_attachments
+    WHERE message_id IN (
+      SELECT message_id FROM topic_messages WHERE message_id = ? OR parent_message_id = ?
+    );
+  `)
+
+  const deleteAttachmentsForRootStatement = database.prepare(`
+    DELETE FROM topic_message_attachments
+    WHERE message_id IN (
+      SELECT message_id FROM topic_messages WHERE message_id = ? OR parent_message_id = ?
+    );
+  `)
+
+  const countReplyMessagesForRootStatement = database.prepare(`
+    SELECT COUNT(*) as cnt FROM topic_messages WHERE parent_message_id = ?;
+  `)
+
+  const deleteRootMessageStatement = database.prepare(`
+    DELETE FROM topic_messages WHERE message_id = ?;
+  `)
+
+  /**
+   * Root-level hard-delete — премахва физически САМО root_message_id (+
+   * cascaded replies/topic_root_latest_seq/attachments чрез self-referencing
+   * FK, виж interface коментара). `topics` row-ът на контейнера (topic-general)
+   * НЕ се пипа — това е основната разлика от hardDeleteTopic по-горе.
+   *
+   * DELETE FROM topic_messages WHERE message_id = rootMessageId cascade-ва
+   * (ON DELETE CASCADE):
+   *   - topic_messages redovete с parent_message_id = rootMessageId (replies)
+   *   - topic_root_latest_seq реда (root_message_id FK)
+   *   - topic_message_attachments redovete за root+replies (message_id FK)
+   *   - topic_message_likes, topic_message_moderation flags, thread read
+   *     state и т.н. — пълния FK inventory, mirror на hardDeleteTopic-ия
+   *   Explicit enqueue на attachment filenames става ПРЕДИ delete-а (в
+   *   СЪЩАТА транзакция), защото cascade-ът трие DB redовете directно —
+   *   без explicit SELECT+enqueue стъпка физическите файлове биха останали
+   *   orphaned на диска.
+   */
+  function hardDeleteRoot(input: {
+    topicId: string
+    rootMessageId: string
+    inactivityCutoff: Date
+  }): HardDeleteRootResult {
+    if (input.topicId === LAFCHE_TOPIC_ID) {
+      return { ok: false, code: 'protected_topic' }
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const existing = selectRootForDeleteStatement.get(input.rootMessageId, input.topicId) as
+        | { message_id: string }
+        | undefined
+      if (existing === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'not_found' }
+      }
+
+      // Race-safe final re-validation (mirror на hardDeleteTopic spec §8),
+      // scoped към ТОЗИ root — ако нов reply е пристигнал между candidate
+      // scan-а и това извикване, latest_seq вече сочи след cutoff-а.
+      const latestActivityRow = selectLatestActivityForRootStatement.get(input.rootMessageId) as
+        | { lastActivityAt: string | null }
+        | undefined
+      const cutoffStr = toSqliteDateTimeString(input.inactivityCutoff)
+      if (
+        latestActivityRow === undefined ||
+        latestActivityRow.lastActivityAt === null ||
+        latestActivityRow.lastActivityAt > cutoffStr
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'no_longer_eligible' }
+      }
+
+      const replyCount = (countReplyMessagesForRootStatement.get(input.rootMessageId) as { cnt: number }).cnt
+
+      const deletedAttachmentFilenames = (
+        selectAttachmentFilenamesForRootStatement.all(input.rootMessageId, input.rootMessageId) as Array<{
+          storage_filename: string
+        }>
+      ).map((row) => row.storage_filename)
+
+      for (const filename of deletedAttachmentFilenames) {
+        insertAttachmentDeletionStatement.run(filename)
+      }
+      deleteAttachmentsForRootStatement.run(input.rootMessageId, input.rootMessageId)
+
+      // inactivity_expired root cleanup — established purge-style convention
+      // (mirror на hardDeleteTopic/purgeRemovedTopicsBefore): без реален
+      // actor, никакъв нов persisted moderation audit ред. Съществуващ
+      // topic_message_deletion_audit_log/self_deletion_audit_log за този
+      // root (ако има такъв от по-ранен soft-delete опит) няма FK, затова
+      // физически преживява DELETE-а по-долу непокътнат, без нужда от
+      // explicit cleanup тук.
+      deleteRootMessageStatement.run(input.rootMessageId)
+
+      database.exec('COMMIT;')
+
+      return {
+        ok: true,
+        topicId: input.topicId,
+        rootMessageId: input.rootMessageId,
+        deletedReplyCount: replyCount,
+        deletedAttachmentFilenames,
+      }
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -379,6 +671,8 @@ export async function createTopicHardDeleteService(databaseFilePath: string): Pr
   return {
     hardDeleteTopic,
     findInactivityCandidates,
+    findInactiveRootCandidates,
+    hardDeleteRoot,
     close,
   }
 }
