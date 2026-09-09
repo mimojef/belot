@@ -104,7 +104,7 @@ import {
   renderTournamentHowItWorksPage,
   extractTournamentCreateInputFromForm,
 } from './renderTournamentsScreen'
-import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton } from './renderTopicsScreen'
+import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
@@ -430,7 +430,15 @@ export type LobbyScreenState = {
         sourceMessageId: string | null
         sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
       }
-    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null; reason: string | null }
+    | {
+        kind: 'unmute'
+        /** null = отворено от profile popup mute overlay, без "текущ topic" контекст (виж createLobbyFlowController.ts). */
+        topicId: string | null
+        targetProfileId: string
+        targetDisplayName: string
+        mutedUntil: string | null
+        reason: string | null
+      }
     | null
   topicModerationActionDurationMs: number | null
   topicModerationActionReason: string
@@ -521,6 +529,8 @@ export type LobbyScreenState = {
   vipGrantErrorText: string | null
   /** Активен бан на разглеждания в попъпа профил — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
   profilePopupActiveBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
+  /** Активен Topics-section mute на разглеждания в попъпа профил — само за viewer с mute/unmute право; виж ensureProfilePopupMuteStatusLoaded в createLobbyFlowController.ts. */
+  profilePopupTargetMute: TopicMuteSnapshot | null
   banPopupOpen: boolean
   banPopupDaysDraft: string
   banPopupReasonDraft: string
@@ -953,6 +963,7 @@ export type RenderLobbyScreenOptions = {
   onProfileVipGrantOpen: (profileId: string | null) => void
   onProfileVipGrantCancel: () => void
   onProfileVipGrantSubmit: (profileId: string | null, rawDays: string) => void
+  onProfileMuteOverlayClick: (profileId: string, displayName: string) => void
   onProfileBanOpen: (profileId: string | null) => void
   onProfileBanCancel: () => void
   onProfileBanSubmit: (profileId: string | null, rawDays: string, reason: string) => void
@@ -1329,6 +1340,8 @@ export type RenderLobbyScreenOptions = {
 const MAX_PROFILE_GALLERY_IMAGES = 6
 
 let popupRootEl: HTMLElement | null = null
+/** document.body-appended host за profile-popup-origin unmute confirm popup-а — виж syncProfileMuteOverlayUnmutePopup. */
+let profileMuteOverlayUnmutePopupRootEl: HTMLElement | null = null
 // Image viewer delegated listener-и (click + Esc) — attach-ват се ЕДИНИЧНО
 // (module-level guard), не при всеки render, защото `root` е стабилен
 // елемент между render-ите (само innerHTML се презаписва) — повторен
@@ -1423,6 +1436,7 @@ export type ProfilePopupCallbacks = {
   onVipGrantOpen: (profileId: string | null) => void
   onVipGrantCancel: () => void
   onVipGrantSubmit: (profileId: string | null, rawDays: string) => void
+  onMuteOverlayClick: (profileId: string, displayName: string) => void
   onBanOpen: (profileId: string | null) => void
   onBanCancel: () => void
   onBanSubmit: (profileId: string | null, rawDays: string, reason: string) => void
@@ -1530,6 +1544,21 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       event.preventDefault()
       const rawDays = el.querySelector<HTMLInputElement>('[data-player-profile-vip-grant-input="1"]')?.value ?? ''
       cb.onVipGrantSubmit(profileId, rawDays)
+    })
+  // Moderation overlay върху аватара (голяма mute икона) — прихваща
+  // собствения си click и НЕ bubble-ва към avatar-а (avatar div-ът самият
+  // няма click handler в момента, но stopPropagation е defense-in-depth за
+  // бъдещ avatar click feature, spec изисква explicit "не задейства
+  // действието на аватара"). Отваря СЪЩИЯ unmute confirm popup като чат
+  // mute бутона (openProfileMuteOverlayPopup в контролера), без нов HTTP
+  // fetch — данните вече са в state.profilePopupTargetMute.
+  el.querySelector<HTMLButtonElement>('[data-player-profile-mute-overlay]')
+    ?.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const btn = e.currentTarget as HTMLButtonElement
+      const id = btn.dataset.playerProfileMuteOverlay?.trim() ?? ''
+      const name = btn.dataset.playerProfileMuteOverlayName?.trim() ?? ''
+      if (id) cb.onMuteOverlayClick(id, name)
     })
   el.querySelector<HTMLButtonElement>('[data-player-profile-ban-open]')
     ?.addEventListener('click', (e) => {
@@ -1669,6 +1698,7 @@ export function syncProfilePopup(
     vipGrantSubmitting?: boolean
     vipGrantErrorText?: string | null
     activeBan?: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
+    targetMute?: TopicMuteSnapshot | null
     banPopupOpen?: boolean
     banPopupDaysDraft?: string
     banPopupReasonDraft?: string
@@ -1726,6 +1756,7 @@ export function syncProfilePopup(
     vipGrantSubmitting: popupState.vipGrantSubmitting ?? false,
     vipGrantErrorText: popupState.vipGrantErrorText ?? null,
     activeBan: popupState.activeBan ?? null,
+    targetMute: popupState.targetMute ?? null,
     banPopupOpen: popupState.banPopupOpen ?? false,
     banPopupDaysDraft: popupState.banPopupDaysDraft ?? '',
     banPopupReasonDraft: popupState.banPopupReasonDraft ?? '',
@@ -1744,6 +1775,57 @@ export function syncProfilePopup(
     riskRecheckSubmitting: popupState.riskRecheckSubmitting ?? false,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
+}
+
+/**
+ * Profile-popup-origin unmute confirm popup — document.body-appended host,
+ * mirror на syncProfilePopup по-горе. НЕ inline в root.innerHTML (за разлика
+ * от topics-view-scoped lock/mute/unmute), защото mobile layout wrapper-а
+ * (data-lobby-screen-root, z-index:50, position:fixed) създава собствен
+ * stacking context — inline z-index вътре в него НЕ може да надмине
+ * document.body-level profile popup-а (z-index:12000), независимо колко
+ * висока стойност му се зададе (production visual bug, root-caused чрез
+ * live DOM stacking chain inspection). Reuse-ва СЪЩИТЕ data-topic-moderation-*
+ * markers/callback-и като topics-view popup-а (споделен form wiring) —
+ * никаква нова moderation логика, само нов host node за profile-popup entry
+ * point-а. Рендва се безусловно (guard-ът за "profile-popup-origin vs
+ * topics-view-origin" е вътре в renderTopicModerationActionPopup самата,
+ * scope='global') — ако pending е null или topics-view-origin, връща '' и
+ * host-ът се маха.
+ */
+export function syncProfileMuteOverlayUnmutePopup(
+  state: LobbyScreenState,
+  cb: {
+    onCancel: () => void
+    onSubmit: () => void
+    onHistoryOpenForProfile: (profileId: string) => void
+  },
+): void {
+  const html = renderTopicModerationActionPopup(state, 'global')
+  if (html === '') {
+    profileMuteOverlayUnmutePopupRootEl?.remove()
+    profileMuteOverlayUnmutePopupRootEl = null
+    return
+  }
+  if (!profileMuteOverlayUnmutePopupRootEl) {
+    profileMuteOverlayUnmutePopupRootEl = document.createElement('div')
+    document.body.appendChild(profileMuteOverlayUnmutePopupRootEl)
+  }
+  const el = profileMuteOverlayUnmutePopupRootEl
+  el.innerHTML = html
+  el.querySelector<HTMLButtonElement>('[data-topic-moderation-cancel="1"]')?.addEventListener('click', () => {
+    cb.onCancel()
+  })
+  el.querySelector<HTMLButtonElement>('[data-topic-moderation-submit="1"]')?.addEventListener('click', () => {
+    cb.onSubmit()
+  })
+  el.querySelectorAll<HTMLButtonElement>('[data-topic-mute-history-open-for-profile]').forEach((btn) => {
+    const profileId = btn.dataset.topicMuteHistoryOpenForProfile ?? ''
+    if (!profileId) return
+    btn.addEventListener('click', () => {
+      cb.onHistoryOpenForProfile(profileId)
+    })
+  })
 }
 
 export function escapeHtml(value: string): string {
@@ -14386,6 +14468,7 @@ export function renderLobbyScreen(
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
       activeBan: state.profilePopupActiveBan,
+      targetMute: state.profilePopupTargetMute,
       banPopupOpen: state.banPopupOpen,
       banPopupDaysDraft: state.banPopupDaysDraft,
       banPopupReasonDraft: state.banPopupReasonDraft,
@@ -14427,6 +14510,7 @@ export function renderLobbyScreen(
       onVipGrantOpen: options.onProfileVipGrantOpen,
       onVipGrantCancel: options.onProfileVipGrantCancel,
       onVipGrantSubmit: options.onProfileVipGrantSubmit,
+      onMuteOverlayClick: options.onProfileMuteOverlayClick,
       onBanOpen: options.onProfileBanOpen,
       onBanCancel: options.onProfileBanCancel,
       onBanSubmit: options.onProfileBanSubmit,

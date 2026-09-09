@@ -27,6 +27,7 @@ import {
   releaseLobbyChatBodyScrollLock,
   resolveLobbyChatSenderRole,
   syncProfilePopup,
+  syncProfileMuteOverlayUnmutePopup,
   syncNotificationsDropdown,
   syncMissionsPopup,
   clearProfileEditorPendingState,
@@ -891,6 +892,17 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; mute: TopicMuteSnapshot }
     | { ok: false; message: string }
   >
+  /**
+   * Profile-scoped mute lookup за profile popup overlay — БЕЗ topicId (mute
+   * статусът е section-wide, popup-ът може да се отвори от произволен
+   * контекст). Reuse на СЪЩИЯ /api/topics/mute-status endpoint семейство,
+   * mirror на onTopicMuteStatusLoad по-горе. 403 (viewer без mute permission)
+   * се връща като ok:false — profile popup-ът просто не показва overlay-а.
+   */
+  onProfileMuteStatusLoad?: (profileId: string) => Promise<
+    | { ok: true; mute: TopicMuteSnapshot }
+    | { ok: false; message: string }
+  >
   /** Собствената "моята история" на потребителя (mute-evidence брифа §6) — profileId идва от сесията server-side, никога параметър тук. */
   onTopicMuteHistoryLoad?: () => Promise<
     | { ok: true; entries: TopicMuteEvidenceSelfEntry[] }
@@ -914,6 +926,11 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onTopicUnmuteProfile?: (topicId: string, profileId: string) => Promise<
+    | { ok: true }
+    | { ok: false; message: string }
+  >
+  /** Profile-scoped early unmute (profile popup mute overlay) — mirror на onTopicUnmuteProfile, БЕЗ topicId. Виж submitTopicModerationAction's kind==='unmute'&&topicId===null branch. */
+  onProfileUnmuteProfile?: (profileId: string) => Promise<
     | { ok: true }
     | { ok: false; message: string }
   >
@@ -1328,7 +1345,21 @@ type InternalLobbyFlowState = {
         sourceMessageId: string | null
         sourceKind: 'lafche_post' | 'topic_root' | 'topic_reply' | 'unspecified'
       }
-    | { kind: 'unmute'; topicId: string; targetProfileId: string; targetDisplayName: string; mutedUntil: string | null; reason: string | null }
+    | {
+        kind: 'unmute'
+        /**
+         * null = отворено от profile popup mute overlay (без "текущ topic"
+         * контекст, виж openProfileMuteOverlayPopup) — submitTopicModerationAction
+         * вика options.onProfileUnmuteProfile (топик-независим endpoint) вместо
+         * options.onTopicUnmuteProfile за този случай. Не-null = отворено от
+         * mute бутона до автор в чат съобщение (openTopicMuteMenuForAuthor).
+         */
+        topicId: string | null
+        targetProfileId: string
+        targetDisplayName: string
+        mutedUntil: string | null
+        reason: string | null
+      }
     | null
   topicModerationActionDurationMs: number | null
   topicModerationActionReason: string
@@ -1390,6 +1421,15 @@ type InternalLobbyFlowState = {
   profilePopupActiveBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
   /** profileId, за който profilePopupActiveBan вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
   profilePopupActiveBanProfileId: string | null
+  /**
+   * Активен Topics-section mute на разглеждания в попъпа профил — само за
+   * viewer с mute/unmute право (isTopicModeratorAuthSession), никога за
+   * обикновен потребител. Виж ensureProfilePopupMuteStatusLoaded. null =
+   * или все още не е зареден, или reeal резолвнат "не е мютнат".
+   */
+  profilePopupTargetMute: TopicMuteSnapshot | null
+  /** profileId, за който profilePopupTargetMute вече е (или се) зарежда — memoization guard, аналогично на profilePopupActiveBanProfileId. */
+  profilePopupTargetMuteProfileId: string | null
   banPopupOpen: boolean
   banPopupDaysDraft: string
   banPopupReasonDraft: string
@@ -2063,6 +2103,8 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupTargetRoleProfileId: null,
     profilePopupActiveBan: null,
     profilePopupActiveBanProfileId: null,
+    profilePopupTargetMute: null,
+    profilePopupTargetMuteProfileId: null,
     banPopupOpen: false,
     banPopupDaysDraft: '',
     banPopupReasonDraft: '',
@@ -3971,6 +4013,7 @@ export function createLobbyFlowController(
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
       profilePopupActiveBan: state.profilePopupActiveBan,
+      profilePopupTargetMute: state.profilePopupTargetMute,
       banPopupOpen: state.banPopupOpen,
       banPopupDaysDraft: state.banPopupDaysDraft,
       banPopupReasonDraft: state.banPopupReasonDraft,
@@ -4479,6 +4522,7 @@ export function createLobbyFlowController(
 
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
+    ensureProfilePopupMuteStatusLoaded()
     // Покрива входни точки, които отварят own profile popup-а само чрез
     // plain render() (напр. onProfileClick), не renderPopupOnly() — иначе
     // VIP статусът никога не се зарежда за own profile при тях (същия
@@ -4606,6 +4650,9 @@ export function createLobbyFlowController(
       },
       onProfileVipGrantSubmit: (profileId, rawDays) => {
         getPopupCallbacks().onVipGrantSubmit(profileId, rawDays)
+      },
+      onProfileMuteOverlayClick: (profileId, displayName) => {
+        getPopupCallbacks().onMuteOverlayClick(profileId, displayName)
       },
       onProfileBanOpen: (profileId) => {
         getPopupCallbacks().onBanOpen(profileId)
@@ -7348,6 +7395,30 @@ export function createLobbyFlowController(
     render()
   }
 
+  /**
+   * Отваря СЪЩИЯ unmute confirm popup като openTopicMuteMenuForAuthor, но от
+   * profile popup mute overlay иконата (аватар click) — без HTTP fetch,
+   * защото данните вече са налични в state.profilePopupTargetMute (иконата
+   * самата се показва само след успешен ensureProfilePopupMuteStatusLoaded
+   * resolve, виж renderPlayerProfilePopup.ts). topicId: null маркира
+   * "profile-popup origin" за submitTopicModerationAction (виж коментара
+   * там) — при submit ще извика options.onProfileUnmuteProfile (топик-
+   * независим endpoint) вместо options.onTopicUnmuteProfile.
+   */
+  function openProfileMuteOverlayPopup(targetProfileId: string, targetDisplayName: string): void {
+    const mute = state.profilePopupTargetMute
+    if (mute === null || !mute.isMuted) return
+    state.topicModerationActionPopup = {
+      kind: 'unmute',
+      topicId: null,
+      targetProfileId,
+      targetDisplayName,
+      mutedUntil: mute.mutedUntil,
+      reason: mute.reason,
+    }
+    render()
+  }
+
   function closeTopicModerationActionPopup(): void {
     if (state.topicModerationActionBusy) return
     state.topicModerationActionPopup = null
@@ -7376,15 +7447,39 @@ export function createLobbyFlowController(
     if (pending.kind === 'unmute') {
       state.topicModerationActionBusy = true
       render()
-      const result = await options.onTopicUnmuteProfile?.(pending.topicId, pending.targetProfileId)
+      // pending.topicId === null означава "отворено от profile popup mute
+      // overlay" (viz openProfileMuteOverlayPopup) — топик-независим endpoint.
+      const result = pending.topicId === null
+        ? await options.onProfileUnmuteProfile?.(pending.targetProfileId)
+        : await options.onTopicUnmuteProfile?.(pending.topicId, pending.targetProfileId)
       state.topicModerationActionBusy = false
       if (!result || !result.ok) {
         state.topicModerationActionErrorText = result?.message ?? 'Грешка при отглушаване.'
         render()
         return
       }
+      // Ако profile popup-ът е в момента отворен за СЪЩИЯ target (напр.
+      // unmute-нат от новия аватар mute overlay flow) — overlay иконата
+      // трябва да изчезне веднага, без reload/повторно отваряне на popup-а.
+      // Само локалната UI стойност; server-side статусът вече е актуален
+      // (unmute-нат преди тази точка).
+      const shouldRefreshProfilePopup = state.profilePopupTargetMuteProfileId === pending.targetProfileId
+      if (shouldRefreshProfilePopup) {
+        state.profilePopupTargetMute = null
+      }
       state.topicModerationActionPopup = null
-      render()
+      // render() (main path) НЕ sync-ва profile popup-a — той е отделен
+      // document.body node, обновяван ЕДИНСТВЕНО от renderPopupOnly()'s
+      // syncProfilePopup() извикване. Без explicit renderPopupOnly() тук,
+      // overlay иконата остава stale/видима в DOM-a дори след успешен
+      // unmute (state.profilePopupTargetMute вече е null в паметта, но
+      // popup-ният DOM node никога не се пресинхронизира) — production bug,
+      // потвърден чрез live overlay-count проверка 4s след successful unmute.
+      if (shouldRefreshProfilePopup && state.profilePopupOpen) {
+        renderPopupOnly()
+      } else {
+        render()
+      }
       return
     }
 
@@ -14627,7 +14722,28 @@ export function createLobbyFlowController(
     state.topicMessagesRenderReason = null
     state.topicMessagesScrollAnchor = null
     state.topicThreadRenderReason = null
+    syncProfileMuteOverlayUnmutePopupOnly()
     syncUrlPath()
+  }
+
+  /**
+   * Profile-popup-origin unmute confirm popup (mute overlay иконата в
+   * profile popup-а) — document.body-appended node, view/layout-независим
+   * (виж syncProfileMuteOverlayUnmutePopup коментара в renderLobbyScreen.ts
+   * за пълния root cause на stacking context проблема, който този pattern
+   * заобикаля). Извиква се от ВСЯКА входна точка, която променя
+   * state.topicModerationActionPopup ИЛИ profile popup lifecycle-а (mirror
+   * на "покрий всички входни точки" convention-а за ensureProfilePopupXxxLoaded
+   * по-долу) — render() (main path) И renderPopupOnly() (profile popup-specific
+   * targeted render), за да няма stale popup, ако caller-ът е викнал само
+   * едното от двете.
+   */
+  function syncProfileMuteOverlayUnmutePopupOnly(): void {
+    syncProfileMuteOverlayUnmutePopup(buildLobbyScreenState(), {
+      onCancel: () => { closeTopicModerationActionPopup() },
+      onSubmit: () => { void submitTopicModerationAction() },
+      onHistoryOpenForProfile: (profileId) => { void openTopicMuteHistoryModeratorPopup(profileId) },
+    })
   }
 
   function buildPopupFriendshipAction() {
@@ -14864,6 +14980,9 @@ export function createLobbyFlowController(
       onVipGrantSubmit: (profileId, rawDays) => {
         void submitAdminVipGrant(profileId, rawDays)
       },
+      onMuteOverlayClick: (profileId, displayName) => {
+        openProfileMuteOverlayPopup(profileId, displayName)
+      },
       onBanOpen: (profileId) => {
         if (!profileId) return
         state.banPopupOpen = true
@@ -15023,6 +15142,51 @@ export function createLobbyFlowController(
       }
       if (result.ok) {
         state.profilePopupActiveBan = result.activeBan
+        renderPopupOnly()
+      }
+    })()
+  }
+
+  /**
+   * Огледално на ensureProfilePopupActiveBanLoaded, за profile popup mute
+   * overlay (аватар icon, виж renderPlayerProfilePopup.ts). За разлика от
+   * target role/active ban (viewerIsFullAdmin-only), тук gate-ът е
+   * isTopicModeratorAuthSession — широкият "право да mute/unmute потребители"
+   * predicate (admin/subadmin/pika_team/top_chat_admin), СЪЩИЯТ, който вече
+   * управлява mute бутоните в чат съобщенията (renderTopicsScreen.ts). Server
+   * endpoint-ът (handleProfileMuteStatusRequest) презаверява със СЪЩИЯ
+   * predicate independently — тук е чисто UX gating, за да не спамим fetch
+   * за viewer, който така или иначе ще получи 403.
+   */
+  function ensureProfilePopupMuteStatusLoaded(): void {
+    const authSession = options.getAuthSession?.() ?? null
+    const profile = state.profilePopupProfile
+
+    if (!state.profilePopupOpen || profile === null || profile.profileId === null) {
+      return
+    }
+    if (!isTopicModeratorAuthSession(authSession)) {
+      return
+    }
+    const ownProfileId = authSession?.profile.profileId ?? null
+    if (profile.profileId === ownProfileId) {
+      return
+    }
+    if (state.profilePopupTargetMuteProfileId === profile.profileId) {
+      return
+    }
+
+    const targetProfileId = profile.profileId
+    state.profilePopupTargetMuteProfileId = targetProfileId
+    state.profilePopupTargetMute = null
+
+    void (async () => {
+      const result = await options.onProfileMuteStatusLoad?.(targetProfileId)
+      if (!result || state.profilePopupTargetMuteProfileId !== targetProfileId) {
+        return
+      }
+      if (result.ok) {
+        state.profilePopupTargetMute = result.mute
         renderPopupOnly()
       }
     })()
@@ -15487,6 +15651,7 @@ export function createLobbyFlowController(
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
+    ensureProfilePopupMuteStatusLoaded()
     ensureProfilePopupRiskDetailLoaded()
     ensureOwnVipStatusLoaded()
     const popupProfile = state.profilePopupProfile ?? createLocalProfilePreview(state, authSession)
@@ -15511,6 +15676,7 @@ export function createLobbyFlowController(
         vipGrantSubmitting: state.vipGrantSubmitting,
         vipGrantErrorText: state.vipGrantErrorText,
         activeBan: state.profilePopupActiveBan,
+        targetMute: state.profilePopupTargetMute,
         banPopupOpen: state.banPopupOpen,
         banPopupDaysDraft: state.banPopupDaysDraft,
         banPopupReasonDraft: state.banPopupReasonDraft,
@@ -15530,6 +15696,7 @@ export function createLobbyFlowController(
       },
       getPopupCallbacks(),
     )
+    syncProfileMuteOverlayUnmutePopupOnly()
   }
 
   function resetToLobby(): void {

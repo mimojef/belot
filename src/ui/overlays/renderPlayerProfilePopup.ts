@@ -2,6 +2,7 @@ import type {
   AdminProfileLinkedProfileRow,
   PlayerPublicProfileSnapshot,
   Seat,
+  TopicMuteSnapshot,
 } from '../../app/network/createGameServerClient'
 
 export type RenderPlayerProfilePopupOptions = {
@@ -71,6 +72,17 @@ export type RenderPlayerProfilePopupOptions = {
    * renderModerationControls по-долу.
    */
   activeBan?: ActiveProfileBanSnapshot | null
+  /**
+   * Активен Topics-section mute на разглеждания профил — само за viewer с
+   * mute/unmute право (isTopicModeratorAuthSession). null = или все още не е
+   * зареден, или профилът реално не е мютнат — в двата случая overlay-ът НЕ
+   * се показва (виж ensureProfilePopupMuteStatusLoaded в
+   * createLobbyFlowController.ts). Обикновен потребител никога не получава
+   * mute lookup fetch изобщо (client gate), значи това поле остава null за
+   * него независимо от реалния mute статус на target-а — profile popup-ът
+   * изглежда напълно нормален.
+   */
+  targetMute?: TopicMuteSnapshot | null
   banPopupOpen?: boolean
   banPopupDaysDraft?: string
   banPopupReasonDraft?: string
@@ -163,6 +175,64 @@ function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 
   const sz = size === 'sm' ? '16px' : '20px'
   const fs = size === 'sm' ? '9px' : '11px'
   return `<div style="position:absolute;right:4px;bottom:4px;min-width:${sz};height:${sz};border-radius:999px;background:#000000;display:flex;align-items:center;justify-content:center;padding:0 3px;line-height:1;z-index:1;color:#ffffff;font-size:${fs};font-weight:700;">${Math.trunc(level)}</div>`
+}
+
+/**
+ * Голяма, центрирана moderation overlay икона върху аватара — показва се
+ * САМО когато target профилът има активен Topics-section mute И viewer-ът
+ * има mute/unmute право (isTopicModeratorAuthSession, gate-нат от caller-а
+ * в createLobbyFlowController.ts преди дори fetch-ване на targetMute, виж
+ * ensureProfilePopupMuteStatusLoaded). Reuse-ва ТОЧНО СЪЩИЯ SVG "прекъснат
+ * кръг" path и червен цвят (#ef4444) като renderTopicAuthorMuteIndicator в
+ * renderTopicsScreen.ts (visual consistency, не нов иконен стил). Клик
+ * отваря СЪЩИЯ unmute confirm popup (data-player-profile-mute-overlay ->
+ * openProfileMuteOverlayPopup в контролера) — не създава втори moderation
+ * popup. z-index над renderLevelBadge (corner badge, z-index:1) и над самия
+ * avatar div — не променя размера/позицията на аватара самия (absolute,
+ * извън document flow-а на avatar div-а).
+ */
+function renderProfileAvatarMuteOverlay(targetProfileId: string, targetDisplayName: string): string {
+  return `
+    <button
+      type="button"
+      data-player-profile-mute-overlay="${escapeHtml(targetProfileId)}"
+      data-player-profile-mute-overlay-name="${escapeHtml(targetDisplayName)}"
+      title="Активен mute – отвори информация"
+      aria-label="${escapeHtml(targetDisplayName)} е заглушен в „Теми“ — отвори информация за заглушаването"
+      style="
+        position:absolute;
+        inset:0;
+        z-index:2;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        border:0;
+        margin:0;
+        padding:0;
+        border-radius:20px;
+        background:rgba(0,0,0,0.46);
+        cursor:pointer;
+        color:#fef2f2;
+      "
+    >
+      <span
+        style="
+          width:56px;
+          height:56px;
+          border-radius:999px;
+          background:rgba(239,68,68,0.94);
+          box-shadow:0 6px 18px rgba(0,0,0,0.45), 0 0 0 3px rgba(255,255,255,0.16);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+        "
+      >
+        <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+          <circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/>
+        </svg>
+      </span>
+    </button>
+  `
 }
 
 function formatAverageRating(value: number | null | undefined): string {
@@ -1603,6 +1673,7 @@ function renderProfileContent(
   vipGrantSubmitting: boolean,
   vipGrantErrorText: string | null,
   activeBan: ActiveProfileBanSnapshot | null | undefined,
+  targetMute: TopicMuteSnapshot | null | undefined,
   banPopupOpen: boolean,
   banPopupDaysDraft: string,
   banPopupReasonDraft: string,
@@ -1653,6 +1724,7 @@ function renderProfileContent(
             ${renderAvatar(profile, seat)}
           </div>
           ${renderLevelBadge(profile.level)}
+          ${targetMute?.isMuted ? renderProfileAvatarMuteOverlay(profile.profileId ?? '', displayName) : ''}
           ${friendshipAction?.giftFriendshipId ? `
             <div style="
               position:absolute;
@@ -2077,6 +2149,7 @@ export function renderPlayerProfilePopup(
           options.vipGrantSubmitting ?? false,
           options.vipGrantErrorText ?? null,
           options.activeBan ?? null,
+          options.targetMute ?? null,
           options.banPopupOpen ?? false,
           options.banPopupDaysDraft ?? '',
           options.banPopupReasonDraft ?? '',

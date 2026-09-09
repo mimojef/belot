@@ -1398,14 +1398,42 @@ function renderTopicsInfoToast(state: LobbyScreenState): string {
 // "1. избор на duration; 2. поле за причина; 3. потвърждение" — потвърждение
 // е самия Submit бутон тук, single-step е достатъчно за lock/mute, за
 // разлика от delete, който изисква двустъпков confirm).
-function renderTopicModerationActionPopup(state: LobbyScreenState): string {
+/**
+ * Reuse-вана и от два render tree-та (виж export):
+ *  - Вътре в renderTopicsScreen (Topics view) — за lock/mute/unmute action-и,
+ *    инициирани от Topics UI (mute бутон до автор, lock бутон и т.н.).
+ *  - Top-level (renderLobbyScreen.ts, view-независимо, mirror на
+ *    renderSubadminActionConfirmPopup placement-а) — за unmute confirm,
+ *    иницииран от profile popup mute overlay иконата (openProfileMuteOverlayPopup
+ *    в createLobbyFlowController.ts), която маркира pending.topicId===null,
+ *    защото profile popup-ът може да се отвори от произволен view (Лафче,
+ *    друга тема, приятели, класация, турнир, личен чат, списък с профили),
+ *    НЕ само докато state.view==='topics'. Caller-ите филтрират кой branch
+ *    да рендне чрез `scope` параметъра, за да няма двойно рендиран popup
+ *    когато state.view==='topics' И pending е profile-popup-origin unmute.
+ */
+export function renderTopicModerationActionPopup(
+  state: LobbyScreenState,
+  scope: 'topics-view' | 'global' = 'topics-view',
+): string {
   const pending = state.topicModerationActionPopup
   if (!pending) return ''
+  // 'global' rendра САМО profile-popup-origin unmute (topicId===null);
+  // 'topics-view' рендра всичко ОСВЕН него (lock/mute + topic-context unmute) —
+  // взаимно изключващи се, за да няма дублиране при state.view==='topics'.
+  const isProfilePopupOriginUnmute = pending.kind === 'unmute' && pending.topicId === null
+  if (scope === 'global' && !isProfilePopupOriginUnmute) return ''
+  if (scope === 'topics-view' && isProfilePopupOriginUnmute) return ''
 
   if (pending.kind === 'unmute') {
     const busy = state.topicModerationActionBusy
+    // scope==='global' (profile-popup-origin) трябва да е НАД самия profile
+    // popup (renderPlayerProfilePopup.ts, z-index:12000/12100) — иначе е
+    // технически в DOM-a, но визуално скрит зад него. topics-view случаят
+    // остава на established 9600 (никога coexist-ва с profile popup-a).
+    const overlayZIndex = scope === 'global' ? 12200 : 9600
     return `
-      <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+      <div style="position:fixed;inset:0;z-index:${overlayZIndex};display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
         <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
           <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:12px;">Заглушен потребител</div>
           <div style="font-size:14px;color:rgba(255,255,255,0.82);line-height:1.5;margin-bottom:${pending.reason ? '10' : '12'}px;">
@@ -2243,7 +2271,7 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
     })}
     ${renderTopicCreatePopup(state)}
     ${renderTopicsInfoToast(state)}
-    ${renderTopicModerationActionPopup(state)}
+    ${renderTopicModerationActionPopup(state, 'topics-view')}
     ${renderTopicMuteHistoryPopup(state)}
     ${renderTopicsSectionMutePopup(state)}
     ${renderTopicMuteHistoryModeratorPopup(state)}

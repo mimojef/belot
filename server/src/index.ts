@@ -10340,6 +10340,47 @@ async function handleTopicMuteStatusRequest(
   return true
 }
 
+/**
+ * Profile-scoped mute lookup — за profile popup mute overlay (виж
+ * renderPlayerProfilePopup.ts data-player-profile-avatar-mute-overlay).
+ * За разлика от handleTopicMuteStatusRequest по-горе, тук НЯМА :topicId
+ * segment в URL-а — profile popup-ът може да се отвори от произволен
+ * контекст (Лафче, друга тема, приятели, класация, турнир, личен чат,
+ * списък с профили), без "текущ topic" в scope-а. Mute статусът вече е
+ * section-wide (getSectionMuteSnapshot не зависи от topicId — топикId-ът в
+ * handleTopicMuteStatusRequest е бил само permission-routing артефакт, не
+ * enforcement scope), затова тук gate-ваме с широкия isTopicModeratorSession
+ * директно (admin/subadmin/pika_team/top_chat_admin — supernabор на
+ * isLafcheModeratorSession), без изкуствен placeholder topicId.
+ */
+async function handleProfileMuteStatusRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  requestUrl: URL,
+): Promise<boolean> {
+  if (pathname !== '/api/topics/mute-status' || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш права.' })
+    return true
+  }
+
+  const profileId = requestUrl.searchParams.get('profileId')
+  if (!profileId) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, mute: topicModerationStore.getSectionMuteSnapshot(profileId) })
+  return true
+}
+
 async function handleTopicMuteRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -10498,6 +10539,77 @@ async function handleTopicUnmuteRequest(
 
   if (changed) {
     notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, { isMuted: false, mutedUntil: null, reason: null })
+    broadcastTopicsSectionMuteIndicatorChange(targetProfileId, false)
+  }
+
+  sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
+// Audit-log context literal за profile-popup-initiated unmute (виж
+// handleProfileUnmuteRequest по-долу) — topic_moderation_audit_log.topic_id
+// е NOT NULL, но БЕЗ FK constraint към topics(topic_id) (виж migration
+// 20260811_003_create_topic_moderation.sql: другите редове в същия файл
+// имат REFERENCES, този explicit няма) — safe stable literal, не изисква
+// реален topic row, чисто audit-trail context "unmute-нат от профилния
+// popup, не от конкретна тема/съобщение".
+const PROFILE_POPUP_UNMUTE_AUDIT_TOPIC_ID = 'profile-popup'
+
+/**
+ * Profile-scoped early unmute — за mute overlay иконата върху аватара в
+ * profile popup-а (виж handleProfileMuteStatusRequest по-горе и
+ * renderPlayerProfilePopup.ts data-player-profile-avatar-mute-overlay).
+ * Reuse-ва СЪЩИЯ topicModerationStore.unmuteProfileInTopics primitive и
+ * СЪЩИТЕ realtime broadcasts (notifyProfileOfTopicMuteStateChange,
+ * broadcastTopicsSectionMuteIndicatorChange) като handleTopicUnmuteRequest
+ * по-горе — mute-ът е section-wide, действието е идентично, само entry
+ * point-ът е profile popup вместо чат съобщение. БЕЗ :topicId в URL-а (mute
+ * статусът не зависи от topic, popup-ът може да се отвори от произволен
+ * контекст) и БЕЗ topicStore.getTopicById existence guard-а (нямаме реален
+ * "текущ topic" да проверим — unmuteProfileInTopics самата не изисква FK
+ * съществуване, само audit-trail context стойност).
+ */
+async function handleProfileUnmuteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/topics/unmute' || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isTopicModeratorSession(session) || session === null) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да отглушаваш потребители.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const targetProfileId = typeof (body as { profileId?: unknown }).profileId === 'string'
+    ? ((body as { profileId: string }).profileId).trim()
+    : ''
+  if (targetProfileId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
+    return true
+  }
+
+  const { changed } = topicModerationStore.unmuteProfileInTopics({
+    topicId: PROFILE_POPUP_UNMUTE_AUDIT_TOPIC_ID,
+    profileId: targetProfileId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+  })
+
+  if (changed) {
+    notifyProfileOfTopicMuteStateChange(targetProfileId, PROFILE_POPUP_UNMUTE_AUDIT_TOPIC_ID, { isMuted: false, mutedUntil: null, reason: null })
     broadcastTopicsSectionMuteIndicatorChange(targetProfileId, false)
   }
 
@@ -17055,11 +17167,19 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleProfileMuteStatusRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
   if (await handleTopicMuteRequest(req, res, requestUrl.pathname)) {
     return
   }
 
   if (await handleTopicUnmuteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleProfileUnmuteRequest(req, res, requestUrl.pathname)) {
     return
   }
 

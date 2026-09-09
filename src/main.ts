@@ -4696,6 +4696,33 @@ async function loadTopicMuteStatus(
   }
 }
 
+/**
+ * Profile-scoped mute lookup за profile popup mute overlay — reuse на
+ * СЪЩИЯ /api/topics/mute-status endpoint семейство, но БЕЗ :topicId
+ * segment (виж handleProfileMuteStatusRequest в server/src/index.ts:
+ * mute статусът е section-wide, profile popup-ът може да се отвори от
+ * произволен контекст без "текущ topic"). 403 (viewer без mute permission)
+ * се връща като ok:false тук — profile popup-ът не показва mute UI на
+ * обикновен потребител, така и очакваме.
+ */
+async function loadProfileMuteStatus(
+  profileId: string,
+): Promise<{ ok: true; mute: TopicMuteSnapshot } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/topics/mute-status?profileId=${encodeURIComponent(profileId)}`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; mute?: TopicMuteSnapshot }
+    if (!response.ok || !data.ok || !data.mute) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на статуса.' }
+    }
+    return { ok: true, mute: data.mute }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function loadMyTopicMuteEvidence(): Promise<
   { ok: true; entries: TopicMuteEvidenceSelfEntry[] } | { ok: false; message: string }
 > {
@@ -4786,6 +4813,32 @@ async function unmuteProfileInTopic(
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/topics/${encodeURIComponent(topicId)}/unmute`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Грешка при отглушаване.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+/**
+ * Profile-scoped early unmute за mute overlay иконата в profile popup-а —
+ * reuse на СЪЩИЯ topicModerationStore.unmuteProfileInTopics primitive
+ * server-side, но БЕЗ :topicId (виж handleProfileUnmuteRequest в
+ * server/src/index.ts). Mirror на unmuteProfileInTopic по-горе.
+ */
+async function unmuteProfileGlobal(
+  profileId: string,
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/unmute`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -5965,11 +6018,13 @@ lobby = createLobbyFlowController({
   onTopicLock: (topicId, reason, durationMs) => lockTopic(topicId, reason, durationMs),
   onTopicUnlock: (topicId) => unlockTopic(topicId),
   onTopicMuteStatusLoad: (topicId, profileId) => loadTopicMuteStatus(topicId, profileId),
+  onProfileMuteStatusLoad: (profileId) => loadProfileMuteStatus(profileId),
   onTopicMuteHistoryLoad: () => loadMyTopicMuteEvidence(),
   onTopicMuteHistoryLoadForProfile: (profileId) => loadTopicMuteEvidenceForProfile(profileId),
   onTopicMuteProfile: (topicId, profileId, reason, durationMs, sourceMessageId, sourceKind, reasonCategory) =>
     muteProfileInTopic(topicId, profileId, reason, durationMs, sourceMessageId, sourceKind, reasonCategory),
   onTopicUnmuteProfile: (topicId, profileId) => unmuteProfileInTopic(topicId, profileId),
+  onProfileUnmuteProfile: (profileId) => unmuteProfileGlobal(profileId),
   onTopicDelete: (topicId, reason) => deleteTopic(topicId, reason),
   onTopicMessageDelete: (topicId, messageId) => deleteTopicMessage(topicId, messageId),
   onTopicMessageEdit: (topicId, messageId, body) => editTopicMessage(topicId, messageId, body),
