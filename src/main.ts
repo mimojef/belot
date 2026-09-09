@@ -51,6 +51,7 @@ import {
   type CoinHidePurchaseResponse,
   type CoinPackageInput,
   type CoinPackageSnapshot,
+  type GiftItemSnapshot,
   type VipPackageSnapshot,
   type VipPurchaseSnapshot,
   type CoinPackageStatus,
@@ -2302,6 +2303,213 @@ async function deleteAdminCoinPackage(packageId: string): Promise<
       ok: false,
       message: 'Няма връзка със сървъра за изтриване на пакет.',
     }
+  }
+}
+
+// Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от
+// loadAdminCoinPackages/submitAdminCoinPackage/etc по-горе (директен coin
+// transfer каталог). Виж giftItemStore.ts (сървър) и CLAUDE.md брифа "не
+// дублирай, не чупи".
+type GiftItemsAdminResponse = { ok: boolean; items?: GiftItemSnapshot[]; message?: string }
+
+async function loadAdminGiftItems(): Promise<
+  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/gift-items`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as GiftItemsAdminResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.items)) {
+      return { ok: false, message: data.message ?? 'Подаръците не бяха заредени.' }
+    }
+
+    return { ok: true, items: data.items }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за подаръците.' }
+  }
+}
+
+async function submitAdminGiftItem(input: {
+  giftItemId?: string | null
+  name: string
+  imageUrl: string
+  price: number
+  sortOrder: number
+  isActive: boolean
+}): Promise<
+  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/gift-items`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as GiftItemsAdminResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.items)) {
+      return { ok: false, message: data.message ?? 'Подаръкът не беше записан.' }
+    }
+
+    return { ok: true, items: data.items }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за запис на подарък.' }
+  }
+}
+
+async function setAdminGiftItemStatus(
+  giftItemId: string,
+  isActive: boolean,
+): Promise<
+  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/gift-items/${encodeURIComponent(giftItemId)}/status`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ isActive }),
+      },
+    )
+    const data = (await response.json()) as GiftItemsAdminResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.items)) {
+      return { ok: false, message: data.message ?? 'Статусът не беше променен.' }
+    }
+
+    return { ok: true, items: data.items }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за промяна на подарък.' }
+  }
+}
+
+async function deleteAdminGiftItem(giftItemId: string): Promise<
+  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/gift-items/${encodeURIComponent(giftItemId)}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      },
+    )
+    const data = (await response.json()) as GiftItemsAdminResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.items)) {
+      return { ok: false, message: data.message ?? 'Подаръкът не беше изтрит.' }
+    }
+
+    return { ok: true, items: data.items }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за изтриване на подарък.' }
+  }
+}
+
+async function uploadAdminGiftItemImage(imageDataUrl: string): Promise<
+  | { ok: true; imageUrl: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/gift-items/upload-image`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ imageDataUrl }),
+    })
+    const data = (await response.json()) as { ok: boolean; imageUrl?: string; message?: string }
+
+    if (!response.ok || !data.ok || typeof data.imageUrl !== 'string') {
+      return { ok: false, message: data.message ?? 'Снимката не беше качена.' }
+    }
+
+    return { ok: true, imageUrl: data.imageUrl }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за качване на снимка.' }
+  }
+}
+
+async function loadGiftItemCatalog(): Promise<
+  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/gift-items`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as GiftItemsAdminResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.items)) {
+      return { ok: false, message: data.message ?? 'Подаръците не бяха заредени.' }
+    }
+
+    return { ok: true, items: data.items }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за подаръците.' }
+  }
+}
+
+async function sendGiftItem(
+  recipientProfileId: string,
+  giftItemId: string,
+  requestId: string,
+): Promise<
+  | { ok: true; itemName: string; senderBalanceAfter: number }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/profile/${encodeURIComponent(recipientProfileId)}/send-gift-item`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ giftItemId, requestId }),
+      },
+    )
+    const data = (await response.json()) as {
+      ok: boolean
+      giftItem?: GiftItemSnapshot
+      senderBalanceAfter?: number
+      message?: string
+    }
+
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Подаръкът не беше изпратен.' }
+    }
+
+    return {
+      ok: true,
+      itemName: data.giftItem?.name ?? '',
+      senderBalanceAfter: data.senderBalanceAfter ?? 0,
+    }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра за изпращане на подарък.' }
+  }
+}
+
+async function markGiftItemDeliveryShown(transactionId: string): Promise<void> {
+  try {
+    await fetch(
+      `${getApiBaseUrl()}/api/gift-items/deliveries/${encodeURIComponent(transactionId)}/mark-shown`,
+      {
+        method: 'POST',
+        credentials: 'include',
+      },
+    )
+  } catch {
+    // best-effort — следващ WS connect ще донесе pending delivery-то отново, не е критично
   }
 }
 
@@ -5839,6 +6047,15 @@ lobby = createLobbyFlowController({
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
   onGiftCoinsBypassSubmit: (recipientProfileId, amount) => submitGiftCoinsBypass(recipientProfileId, amount),
+  onAdminGiftItemsLoad: () => loadAdminGiftItems(),
+  onAdminGiftItemSubmit: (input) => submitAdminGiftItem(input),
+  onAdminGiftItemStatusChange: (giftItemId, isActive) => setAdminGiftItemStatus(giftItemId, isActive),
+  onAdminGiftItemDelete: (giftItemId) => deleteAdminGiftItem(giftItemId),
+  onAdminGiftItemImageUpload: (imageDataUrl) => uploadAdminGiftItemImage(imageDataUrl),
+  onGiftItemCatalogLoad: () => loadGiftItemCatalog(),
+  onGiftItemSubmit: (recipientProfileId, giftItemId, requestId) =>
+    sendGiftItem(recipientProfileId, giftItemId, requestId),
+  onMarkGiftItemDeliveryShown: (transactionId) => markGiftItemDeliveryShown(transactionId),
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
   onVipDmFirstMessageSend: (recipientProfileId, body, imageDataUrl) => startVipDmFirstMessage(recipientProfileId, body, imageDataUrl),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),
@@ -6574,6 +6791,34 @@ function showCoinsGiftedPopup(amount: number, fromDisplayName: string): void {
   host.querySelector<HTMLButtonElement>('#coins-gifted-ok')?.addEventListener('click', () => host.remove())
 }
 
+// Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от
+// showCoinsGiftedPopup по-горе (директен coin transfer). Огледален
+// standalone document.body-appended popup, но за virtual item подарък
+// (картинка вместо сума). Виж giftItemStore.ts (сървър).
+function showGiftItemReceivedPopup(itemName: string, imageUrl: string, fromDisplayName: string): void {
+  const existing = document.getElementById('gift-item-received-popup')
+  existing?.remove()
+  playPlayerSeatFillSound()
+
+  const host = document.createElement('div')
+  host.id = 'gift-item-received-popup'
+  host.style.cssText = 'position:fixed;inset:0;z-index:99999;display:flex;align-items:center;justify-content:center;padding:24px;background:rgba(0,0,0,0.72);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);font-family:Arial,Helvetica,sans-serif;'
+
+  host.innerHTML = `
+    <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+      <img src="${escapeHtmlMain(imageUrl)}" alt="${escapeHtmlMain(itemName)}" style="max-width:250px;max-height:250px;object-fit:contain;" />
+      <div>
+        <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">${escapeHtmlMain(fromDisplayName)} ви подари</div>
+        <div style="font-size:20px;font-weight:900;color:#f4c95b;margin-top:6px;">${escapeHtmlMain(itemName)}</div>
+      </div>
+      <button id="gift-item-received-ok" type="button" style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit;">OK</button>
+    </div>
+  `
+
+  document.body.appendChild(host)
+  host.querySelector<HTMLButtonElement>('#gift-item-received-ok')?.addEventListener('click', () => host.remove())
+}
+
 function escapeHtmlMain(value: string): string {
   return String(value)
     .replaceAll('&', '&amp;')
@@ -7170,6 +7415,15 @@ client = createGameServerClient({
         syncLobbyWithAuthSession()
       }
       showCoinsGiftedPopup(message.amount, message.fromDisplayName)
+      return
+    }
+
+    // Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от coins_gifted
+    // по-горе (директен coin transfer, вдига баланс). Item подаръкът НЕ
+    // засяга получателя баланс (виж giftItemStore.sendGiftItem — само
+    // sender се дебитва), затова тук няма currentAuthSession balance sync.
+    if (message.type === 'gift_item_received') {
+      showGiftItemReceivedPopup(message.itemName, message.imageUrl, message.fromDisplayName)
       return
     }
 

@@ -43,6 +43,7 @@ import type {
   TopicMuteEvidenceModeratorEntry,
   AdCampaignManagementDto,
   AdCampaignDispatchClientDto,
+  GiftItemSnapshot,
 } from '../network/createGameServerClient'
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, ActiveRoomSnapshot, CpuIncidentSummary, CpuIncidentDetail } from '../adminServer/adminServerTypes'
 import { isBotsOnlyActiveRoom, isStaleActiveRoom } from '../adminServer/adminServerTypes'
@@ -360,7 +361,7 @@ export type GuestContactFormInput = {
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-ad-campaigns' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -656,6 +657,21 @@ export type LobbyScreenState = {
   giftSuccessModal: { amount: number; friendName: string } | null
   giftReceivedModal: { amount: number; fromDisplayName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
+  // Virtual Item Gift System (Етап 1) — ОТДЕЛЕН domain от coins_gifted/
+  // yellowCoinGiftStore по-горе (виж CLAUDE.md брифа "не дублирай, не
+  // чупи"). Каталог с подаръци (картинка+име+цена), платими с жълтици.
+  giftItemCatalog: GiftItemSnapshot[]
+  giftItemCatalogLoading: boolean
+  giftItemModalRecipientProfileId: string | null
+  giftItemModalRecipientName: string
+  giftItemModalErrorText: string | null
+  giftItemModalSubmittingId: string | null
+  giftItemSuccessModal: { itemName: string; recipientName: string } | null
+  giftItemReceivedModal: { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string } | null
+  adminGiftItems: GiftItemSnapshot[]
+  adminGiftItemsLoading: boolean
+  adminGiftItemsErrorText: string | null
+  adminGiftItemEditId: string | null
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
@@ -1183,6 +1199,14 @@ export type RenderLobbyScreenOptions = {
   onGiftCoinsBypassSubmit: (recipientProfileId: string, amount: number) => void
   onGiftSuccessClose: () => void
   onGiftReceivedClose: () => void
+  // Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от onGiftCoins*/
+  // onGiftSuccess*/onGiftReceived* по-горе (директен coin transfer). Виж
+  // giftItemStore.ts.
+  onGiftItemClick: (recipientProfileId: string) => void
+  onGiftItemModalClose: () => void
+  onGiftItemSubmit: (recipientProfileId: string, giftItemId: string) => void
+  onGiftItemSuccessClose: () => void
+  onGiftItemReceivedClose: () => void
   onLowCoinsModalClose: () => void
   onLowCoinsShopClick: () => void
   onAuthModalClose: () => void
@@ -1320,6 +1344,15 @@ export type RenderLobbyScreenOptions = {
   onAdminTournamentCancelOpen?: () => void
   onAdminTournamentCancelConfirm?: () => void
   onAdminTournamentCancelDismiss?: () => void
+  // Virtual Item Gift System (Етап 1) — ОТДЕЛЕН domain от admin coin
+  // packages/ad campaigns по-горе.
+  onAdminGiftItemsOpen?: () => void
+  onAdminGiftItemsBack?: () => void
+  onAdminGiftItemSubmit?: (input: { giftItemId?: string | null; name: string; imageUrl: string; price: number; sortOrder: number; isActive: boolean }) => void
+  onAdminGiftItemEdit?: (giftItemId: string) => void
+  onAdminGiftItemStatusToggle?: (giftItemId: string, isActive: boolean) => void
+  onAdminGiftItemDelete?: (giftItemId: string) => void
+  onAdminGiftItemImageUpload?: (file: File) => void
   onAdCampaignsOpen?: () => void
   onAdCampaignsBack?: () => void
   onAdCampaignCreate?: (input: { imageDataUrl: string; targetUrl: string }) => void
@@ -1422,6 +1455,7 @@ export type ProfilePopupCallbacks = {
   onFriendRemoveClick: (friendshipId: string) => void
   onGiftCoinsClick: (friendshipId: string) => void
   onGiftCoinsBypassClick: (recipientProfileId: string) => void
+  onGiftItemClick: (recipientProfileId: string) => void
   onPikaSupportChatClick: (profileId: string) => void
   onTopicsPersonalMessageClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
@@ -1629,6 +1663,11 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const recipientProfileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftCoinsBypass?.trim() ?? ''
       if (recipientProfileId) cb.onGiftCoinsBypassClick(recipientProfileId)
     })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-gift-item]')
+    ?.addEventListener('click', (e) => {
+      const recipientProfileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftItem?.trim() ?? ''
+      if (recipientProfileId) cb.onGiftItemClick(recipientProfileId)
+    })
   el.querySelector<HTMLButtonElement>('[data-player-profile-pika-support-chat]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfilePikaSupportChat?.trim() ?? ''
@@ -1715,6 +1754,11 @@ export function syncProfilePopup(
     riskDetailRows?: import('../../app/network/createGameServerClient').AdminProfileLinkedProfileRow[] | null
     riskDetailErrorText?: string | null
     riskRecheckSubmitting?: boolean
+    /**
+     * Virtual item gift system (Етап 1) — non-null само когато !isOwnProfile
+     * и profile.profileId съществува. Виж RenderPlayerProfilePopupOptions.
+     */
+    giftItemRecipientProfileId?: string | null
     // Форсира skipAnimation дори при "first open" (нов popupRootEl) — нужно
     // при връщане Edit→Profile: popup DOM възелът е бил унищожен, докато
     // edit overlay-ят е бил отворен отгоре му, но КОНЦЕПТУАЛНО потребителят
@@ -1773,6 +1817,7 @@ export function syncProfilePopup(
     riskDetailRows: popupState.riskDetailRows ?? null,
     riskDetailErrorText: popupState.riskDetailErrorText ?? null,
     riskRecheckSubmitting: popupState.riskRecheckSubmitting ?? false,
+    giftItemRecipientProfileId: popupState.giftItemRecipientProfileId ?? null,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -2839,6 +2884,108 @@ function renderGiftReceivedModal(state: LobbyScreenState): string {
   `
 }
 
+// Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от renderGiftCoinsModal/
+// renderGiftReceivedModal по-горе (директен coin transfer). Send modal —
+// grid от каталог items вместо amount input (виж giftItemStore.ts).
+function renderGiftItemModal(state: LobbyScreenState): string {
+  if (state.giftItemModalRecipientProfileId === null) return ''
+
+  const balance = state.profile.yellowCoinsBalance ?? 0
+  const itemsHtml = state.giftItemCatalogLoading
+    ? '<div style="grid-column:1/-1;padding:20px;text-align:center;color:rgba(255,255,255,0.5);font-weight:700;">Зареждане…</div>'
+    : state.giftItemCatalog.length === 0
+    ? '<div style="grid-column:1/-1;padding:20px;text-align:center;color:rgba(255,255,255,0.5);font-weight:700;">Няма налични подаръци.</div>'
+    : state.giftItemCatalog.map((item) => {
+        const canAfford = balance >= item.price
+        const isSubmitting = state.giftItemModalSubmittingId === item.giftItemId
+        const disabled = !canAfford || isSubmitting || state.giftItemModalSubmittingId !== null
+        return `
+          <button
+            type="button"
+            data-lobby-gift-item-select="${escapeHtml(item.giftItemId)}"
+            ${disabled ? 'disabled' : ''}
+            style="
+              display:flex;flex-direction:column;align-items:center;gap:6px;
+              padding:12px;border-radius:8px;
+              border:1px solid ${canAfford ? 'rgba(212,165,32,0.34)' : 'rgba(255,255,255,0.10)'};
+              background:${canAfford ? '#0a0a0a' : 'rgba(255,255,255,0.04)'};
+              opacity:${canAfford ? '1' : '0.5'};
+              cursor:${disabled ? 'default' : 'pointer'};
+            "
+          >
+            <img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.name)}" style="width:64px;height:64px;object-fit:contain;" />
+            <div style="font-size:12.5px;font-weight:800;color:#f8fafc;text-align:center;">${escapeHtml(item.name)}</div>
+            <div style="font-size:12px;font-weight:900;color:#d4a520;">${isSubmitting ? 'Изпращане…' : `${item.price.toLocaleString('bg-BG')} 🪙`}</div>
+          </button>
+        `
+      }).join('')
+
+  return `
+    <div data-lobby-gift-item-modal-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div data-lobby-gift-item-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,460px);max-height:80vh;overflow-y:auto;border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
+        <button type="button" data-lobby-gift-item-modal-close="1" aria-label="Затвори" style="position:absolute;right:12px;top:10px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
+        <div style="margin-bottom:14px;">
+          <div style="font-size:22px;line-height:1.1;font-weight:900;color:#f8fafc;">🎁 Подарък</div>
+          <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.62);font-weight:700;">Към ${escapeHtml(state.giftItemModalRecipientName || 'играч')}. Твоят баланс: ${balance.toLocaleString('bg-BG')} 🪙</div>
+        </div>
+        ${state.giftItemModalErrorText ? `<div style="margin-bottom:12px;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.giftItemModalErrorText)}</div>` : ''}
+        <div data-lobby-gift-item-recipient="${escapeHtml(state.giftItemModalRecipientProfileId)}" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;">
+          ${itemsHtml}
+        </div>
+      </div>
+    </div>
+  `
+}
+
+function renderGiftItemSuccessModal(state: LobbyScreenState): string {
+  if (!state.giftItemSuccessModal) return ''
+  const { itemName, recipientName } = state.giftItemSuccessModal
+  return `
+    <div data-lobby-gift-item-success-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+        <div style="width:56px;height:56px;border-radius:999px;background:linear-gradient(180deg,rgba(212,165,32,0.18) 0%,rgba(212,165,32,0.08) 100%);border:2px solid rgba(212,165,32,0.50);display:flex;align-items:center;justify-content:center;font-size:28px;">🎁</div>
+        <div>
+          <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">Подарихте ${escapeHtml(itemName)}</div>
+          <div style="margin-top:8px;font-size:14px;font-weight:700;color:rgba(255,255,255,0.62);">на ${escapeHtml(recipientName)}</div>
+        </div>
+        <button
+          type="button"
+          data-lobby-gift-item-success-ok="1"
+          style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"
+        >OK</button>
+      </div>
+    </div>
+  `
+}
+
+// Offline delivery flush received modal — виж createLobbyFlowController.ts
+// pending_gift_item_notifications handler. Live push (докато потребителят е
+// онлайн) минава през ОТДЕЛЕН standalone popup в main.ts
+// (showGiftItemReceivedPopup), не през тази функция.
+function renderGiftItemReceivedModal(state: LobbyScreenState): string {
+  if (!state.giftItemReceivedModal) return ''
+  const { itemName, imageUrl, fromDisplayName } = state.giftItemReceivedModal
+  return `
+    <div data-lobby-gift-item-received-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+        <img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(itemName)}" style="width:200px;height:200px;object-fit:contain;" />
+        <div>
+          <div style="font-size:20px;line-height:1.2;color:#f8fafc;"><span style="font-weight:900;">${escapeHtml(fromDisplayName)}</span><span style="font-weight:400;"> ти подари</span></div>
+          <div style="margin-top:8px;font-size:16px;font-weight:800;color:#f4c95b;">${escapeHtml(itemName)}</div>
+        </div>
+        <button
+          type="button"
+          data-lobby-gift-item-received-ok="1"
+          style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"
+        >OK</button>
+      </div>
+    </div>
+  `
+}
+
 function renderNav(state: LobbyScreenState): string {
   const activeView = state.view
   const playersActive = activeView === 'players'
@@ -2848,7 +2995,7 @@ function renderNav(state: LobbyScreenState): string {
   const tournamentsActive = activeView === 'tournaments' || activeView === 'tournament-detail'
   const topicsActive = activeView === 'topics'
   const shopActive = activeView === 'shop'
-  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'guest-contact-messages'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = getSupportUnreadRaw(state)
   const notificationsBadgeCount = getNotificationsBadgeCount(state)
@@ -3375,6 +3522,17 @@ function renderLobbyChatFullscreenIcon(isFullscreen: boolean): string {
   return isFullscreen
     ? '<path d="M9 3v6H3"/><path d="M15 3v6h6"/><path d="M9 21v-6H3"/><path d="M15 21v-6h6"/>'
     : '<path d="M8 3H3v5"/><path d="M16 3h5v5"/><path d="M8 21H3v-5"/><path d="M16 21h5v-5"/>'
+}
+
+// Outline gift-box SVG — заменя 🎁 emoji-то в "Admin > Подаръци" nav бутона
+// (СЪЩИЯТ icon markup като renderGiftBoxIcon в renderPlayerProfilePopup.ts —
+// локален duplicate, тъй като двата render файла не си споделят helper-и,
+// established convention в проекта, виж renderTopicActionIcon vs.
+// renderLobbyChatFullscreenIcon — всеки render модул си държи собствени
+// малки inline icon функции). stroke="currentColor" наследява #d4a520 от
+// бутона.
+function renderGiftBoxIcon(sizePx: number): string {
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;flex:0 0 auto;" aria-hidden="true" focusable="false"><rect x="3" y="8" width="18" height="4"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>`
 }
 
 function renderLobbyChatPanel(state: LobbyScreenState, opts: { isGuest: boolean; compact: boolean; fullscreen?: boolean }): string {
@@ -5843,6 +6001,8 @@ function renderMobileLobbyScreenContent(
                 deleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
                 previewImageUrl: state.adCampaignThumbnailPreviewImageUrl,
               })
+          : state.view === 'admin-gift-items'
+            ? renderAdminGiftItemsPanel(state, false)
           : state.view === 'tournaments'
             ? renderTournamentsScreen(state)
           : state.view === 'tournament-detail'
@@ -7495,8 +7655,9 @@ export function renderAdminInfoPanel(state: LobbyScreenState): string {
 
   return `
     <section style="padding:0 4px;">
-      <div style="display:flex;justify-content:flex-end;margin-bottom:12px;">
+      <div style="display:flex;justify-content:flex-end;gap:10px;margin-bottom:12px;">
         <button type="button" data-lobby-nav-admin-tournaments="1" style="min-height:38px;border:1px solid rgba(212,165,32,0.35);background:#111;color:#d4a520;border-radius:8px;padding:0 14px;font-weight:900;cursor:pointer;">Admin турнири</button>
+        <button type="button" data-lobby-nav-admin-gift-items="1" style="min-height:38px;border:1px solid rgba(212,165,32,0.35);background:#111;color:#d4a520;border-radius:8px;padding:0 14px;font-weight:900;cursor:pointer;display:inline-flex;align-items:center;gap:6px;">${renderGiftBoxIcon(17)}Подаръци</button>
       </div>
       <h2 style="font-size:18px;font-weight:800;color:#d4a520;margin:0 0 20px;letter-spacing:0.04em;text-transform:uppercase;">Информация</h2>
 
@@ -8516,6 +8677,108 @@ export function renderAdminServerPanel(state: LobbyScreenState): string {
         ${cpuIncidentsHtml}
       </div>
 
+    </section>
+  `
+}
+
+// Admin CRUD панел за virtual item gift каталога (Етап 1) — ОТДЕЛЕН domain
+// от coin-packages/ad-campaigns панелите. Копира структурния подход на
+// coin-packages admin table (виж renderAdminPanel по-долу за styling
+// reference) — table редове + форма за добавяне/редакция.
+export function renderAdminGiftItemsPanel(state: LobbyScreenState, isMobile = false): string {
+  // isAdmin (full admin), НЕ isAdminOrSubadmin — съвпада със server-side
+  // isFullAdminSession guard-а в handleAdminGiftItemsRequest (index.ts) и с
+  // renderAdminPanel (coin packages) client guard-а по-долу.
+  if (!state.isAdmin) {
+    return `
+      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        Нямаш достъп до тази секция.
+      </div>
+    `
+  }
+
+  // state.adminGiftItems идва directno от server listAdminGiftItems()
+  // (ORDER BY sort_order ASC, name ASC — canonical ordering rule, виж
+  // giftItemStore.ts) при load И при всяка mutation (create/edit/toggle/
+  // delete презаписват state.adminGiftItems с fresh server response, виж
+  // loadAdminGiftItems/submitAdminGiftItem/deleteAdminGiftItem/
+  // setAdminGiftItemStatus в createLobbyFlowController.ts) — НЕ resort-ваме
+  // тук client-side, редът вече е authoritative от сървъра.
+  const items = state.adminGiftItems
+  // Responsive grid (root cause на "изглежда неподредено" беше визуален —
+  // sort_order-ът вече беше коректен от сървъра, но layout-ът беше 1 ред =
+  // 1 подарък на пълна ширина, без видим "Подредба: X", затова admin-ът не
+  // можеше визуално да сравни съседни карти). auto-fill + minmax wrap-ва
+  // естествено на по-малки екрани, без hardcoded column count.
+  const listStyle = isMobile
+    ? 'width:100%;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px;box-sizing:border-box;'
+    : 'width:100%;display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:12px;'
+  const rowStyle = 'display:flex;flex-direction:column;gap:6px;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#090909;padding:12px;box-sizing:border-box;'
+  const formStyle = isMobile
+    ? 'width:100%;box-sizing:border-box;display:grid;grid-template-columns:minmax(0,1fr);gap:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:14px;'
+    : 'width:min(100%,900px);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#141414 0%,#050505 100%);padding:18px;'
+
+  const rowsHtml = items.length === 0
+    ? '<div style="grid-column:1/-1;padding:16px;text-align:center;color:rgba(255,255,255,0.5);font-weight:700;">Няма добавени подаръци.</div>'
+    : items.map((item) => `
+        <div style="${rowStyle}">
+          <img src="${escapeHtml(item.imageUrl)}" alt="${escapeHtml(item.name)}" style="width:100%;aspect-ratio:1;object-fit:contain;border-radius:6px;background:#000;" />
+          <div style="color:#f8fafc;font-weight:800;font-size:13px;line-height:1.3;">${escapeHtml(item.name)}</div>
+          <div style="color:#d4a520;font-weight:900;font-size:13px;">${item.price.toLocaleString('bg-BG')} 🪙</div>
+          <div style="color:rgba(255,255,255,0.55);font-weight:700;font-size:12px;">Подредба: ${item.sortOrder}</div>
+          <div style="color:${item.isActive ? '#34d399' : 'rgba(255,255,255,0.4)'};font-weight:800;font-size:12px;">${item.isActive ? 'Активен' : 'Скрит'}</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:2px;">
+            <button type="button" data-admin-gift-item-edit="${escapeHtml(item.giftItemId)}" style="height:30px;padding:0 8px;border:1px solid rgba(212,165,32,0.45);border-radius:6px;background:transparent;color:#d4a520;font-weight:800;font-size:11px;cursor:pointer;">Редактирай</button>
+            <button type="button" data-admin-gift-item-toggle="${escapeHtml(item.giftItemId)}" data-admin-gift-item-toggle-value="${item.isActive ? '0' : '1'}" style="height:30px;padding:0 8px;border:1px solid rgba(255,255,255,0.20);border-radius:6px;background:transparent;color:#f8fafc;font-weight:800;font-size:11px;cursor:pointer;">${item.isActive ? 'Скрий' : 'Активирай'}</button>
+            <button type="button" data-admin-gift-item-delete="${escapeHtml(item.giftItemId)}" style="height:30px;padding:0 8px;border:1px solid rgba(248,113,113,0.45);border-radius:6px;background:transparent;color:#fca5a5;font-weight:800;font-size:11px;cursor:pointer;">Изтрий</button>
+          </div>
+        </div>
+      `).join('')
+
+  const editingItem = state.adminGiftItemEditId
+    ? items.find((i) => i.giftItemId === state.adminGiftItemEditId) ?? null
+    : null
+
+  return `
+    <section style="display:flex;flex-direction:column;gap:20px;">
+      <div>
+        <div style="font-size:22px;font-weight:900;color:#f8fafc;">Подаръци</div>
+        <div style="margin-top:4px;font-size:13px;color:rgba(255,255,255,0.55);font-weight:700;">Каталог с виртуални подаръци, платими с жълтици.</div>
+      </div>
+
+      ${state.adminGiftItemsErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.adminGiftItemsErrorText)}</div>` : ''}
+
+      <form data-admin-gift-item-form="1" style="${formStyle}">
+        <input type="hidden" name="giftItemId" value="${escapeHtml(state.adminGiftItemEditId ?? '')}" />
+        <label style="display:grid;gap:6px;font-size:11px;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">
+          Име
+          <input name="name" type="text" maxlength="80" value="${escapeHtml(editingItem?.name ?? '')}" style="height:40px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#fff;padding:0 10px;font-size:14px;font-weight:700;outline:none;" />
+        </label>
+        <label style="display:grid;gap:6px;font-size:11px;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">
+          Цена (жълтици)
+          <input name="price" type="number" min="1" step="1" value="${editingItem?.price ?? ''}" style="height:40px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#fff;padding:0 10px;font-size:14px;font-weight:700;outline:none;" />
+        </label>
+        <label style="display:grid;gap:6px;font-size:11px;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">
+          Подредба
+          <input name="sortOrder" type="number" min="0" step="1" value="${editingItem?.sortOrder ?? 0}" style="height:40px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#fff;padding:0 10px;font-size:14px;font-weight:700;outline:none;" />
+        </label>
+        <label style="display:grid;gap:6px;font-size:11px;font-weight:900;letter-spacing:0.06em;text-transform:uppercase;color:#d4a520;">
+          Картинка
+          <input data-admin-gift-item-image-input="1" type="file" accept="image/png,image/jpeg,image/webp" style="font-size:12px;color:#fff;" />
+          <input type="hidden" name="imageUrl" data-admin-gift-item-image-url="1" value="${escapeHtml(editingItem?.imageUrl ?? '')}" />
+        </label>
+        <div style="grid-column:1/-1;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#f8fafc;font-weight:700;">
+            <input type="checkbox" name="isActive" ${editingItem ? (editingItem.isActive ? 'checked' : '') : 'checked'} /> Активен
+          </label>
+          <button type="submit" style="height:40px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;">${editingItem ? 'Запази' : 'Добави'}</button>
+          ${editingItem ? '<button type="button" data-admin-gift-item-cancel-edit="1" style="height:40px;padding:0 14px;border:1px solid rgba(255,255,255,0.16);border-radius:8px;background:transparent;color:#f8fafc;font-size:14px;font-weight:800;cursor:pointer;">Откажи</button>' : ''}
+        </div>
+      </form>
+
+      <div style="${listStyle}">
+        ${state.adminGiftItemsLoading ? '<div style="padding:16px;text-align:center;color:#d4a520;font-weight:800;">Зареждане…</div>' : rowsHtml}
+      </div>
     </section>
   `
 }
@@ -12223,6 +12486,9 @@ export function renderLobbyScreen(
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
     ${renderGiftReceivedModal(state)}
+    ${renderGiftItemModal(state)}
+    ${renderGiftItemSuccessModal(state)}
+    ${renderGiftItemReceivedModal(state)}
     ${renderImageViewerOverlay(state)}
   ` : `
     <div
@@ -12375,6 +12641,8 @@ export function renderLobbyScreen(
                     deleteConfirmCampaignId: state.adCampaignDeleteConfirmCampaignId,
                     previewImageUrl: state.adCampaignThumbnailPreviewImageUrl,
                   })
+            : state.view === 'admin-gift-items'
+              ? renderAdminGiftItemsPanel(state, true)
             : state.view === 'tournaments'
               ? renderTournamentsScreen(state)
             : state.view === 'tournament-detail'
@@ -12520,6 +12788,9 @@ export function renderLobbyScreen(
     ${renderGiftCoinsModal(state)}
     ${renderGiftSuccessModal(state)}
     ${renderGiftReceivedModal(state)}
+    ${renderGiftItemModal(state)}
+    ${renderGiftItemSuccessModal(state)}
+    ${renderGiftItemReceivedModal(state)}
     ${renderImageViewerOverlay(state)}
   `
 
@@ -14166,6 +14437,124 @@ export function renderLobbyScreen(
       options.onAdminCoinPackageEdit('')
     })
 
+  // Virtual Item Gift System (Етап 1) — admin CRUD wiring за
+  // renderAdminGiftItemsPanel (data-admin-gift-item-*). Огледално на
+  // data-lobby-admin-package-* wiring-а по-горе.
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-admin-gift-items="1"]')
+    ?.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminGiftItemsOpen?.()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-admin-gift-items-back="1"]')
+    ?.addEventListener('click', () => {
+      options.onAdminGiftItemsBack?.()
+    })
+
+  {
+    const giftItemImageInput = root.querySelector<HTMLInputElement>('[data-admin-gift-item-image-input="1"]')
+    const giftItemImageUrlHidden = root.querySelector<HTMLInputElement>('[data-admin-gift-item-image-url="1"]')
+
+    giftItemImageInput?.addEventListener('change', () => {
+      const file = giftItemImageInput.files?.[0] ?? null
+      if (file) {
+        options.onAdminGiftItemImageUpload?.(file)
+      }
+    })
+
+    root
+      .querySelector<HTMLFormElement>('[data-admin-gift-item-form="1"]')
+      ?.addEventListener('submit', (event) => {
+        event.preventDefault()
+        const form = event.currentTarget as HTMLFormElement
+        const data = new FormData(form)
+
+        options.onAdminGiftItemSubmit?.({
+          giftItemId: String(data.get('giftItemId') ?? '').trim() || null,
+          name: String(data.get('name') ?? '').trim(),
+          imageUrl: giftItemImageUrlHidden?.value.trim() || String(data.get('imageUrl') ?? '').trim(),
+          price: Number(data.get('price')),
+          sortOrder: Number(data.get('sortOrder') || 0),
+          isActive: data.get('isActive') === 'on',
+        })
+      })
+  }
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-gift-item-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const giftItemId = button.dataset.adminGiftItemEdit?.trim() ?? ''
+      if (giftItemId.length > 0) {
+        options.onAdminGiftItemEdit?.(giftItemId)
+      }
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-admin-gift-item-cancel-edit="1"]')
+    ?.addEventListener('click', () => {
+      options.onAdminGiftItemEdit?.('')
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-gift-item-toggle]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const giftItemId = button.dataset.adminGiftItemToggle?.trim() ?? ''
+      const nextValue = button.dataset.adminGiftItemToggleValue === '1'
+      if (giftItemId.length > 0) {
+        options.onAdminGiftItemStatusToggle?.(giftItemId, nextValue)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-admin-gift-item-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const giftItemId = button.dataset.adminGiftItemDelete?.trim() ?? ''
+      if (giftItemId.length > 0) {
+        options.onAdminGiftItemDelete?.(giftItemId)
+      }
+    })
+  })
+
+  // Send-flow: catalog modal (profile popup "🎁 Подарък" бутон отваря го,
+  // виж data-player-profile-gift-item wiring в renderPlayerProfilePopup.ts
+  // → cb.onGiftItemClick), success modal, received modal (offline queue
+  // flush — виж renderGiftItemReceivedModal коментара за live push).
+  root
+    .querySelector<HTMLDivElement>('[data-lobby-gift-item-modal-backdrop="1"]')
+    ?.addEventListener('click', () => {
+      options.onGiftItemModalClose()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-item-modal-close="1"]')
+    ?.addEventListener('click', () => {
+      options.onGiftItemModalClose()
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-gift-item-select]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const giftItemId = button.dataset.lobbyGiftItemSelect?.trim() ?? ''
+      const recipientProfileId = root
+        .querySelector<HTMLDivElement>('[data-lobby-gift-item-recipient]')
+        ?.dataset.lobbyGiftItemRecipient?.trim() ?? ''
+      if (giftItemId.length > 0 && recipientProfileId.length > 0) {
+        options.onGiftItemSubmit(recipientProfileId, giftItemId)
+      }
+    })
+  })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-item-success-ok="1"]')
+    ?.addEventListener('click', () => {
+      options.onGiftItemSuccessClose()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-item-received-ok="1"]')
+    ?.addEventListener('click', () => {
+      options.onGiftItemReceivedClose()
+    })
+
   root.querySelectorAll<HTMLButtonElement>('[data-admin-mission-edit]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const missionId = btn.dataset.adminMissionEdit?.trim() ?? ''
@@ -14463,6 +14852,7 @@ export function renderLobbyScreen(
       targetAccountRole: state.profilePopupTargetRole,
       showPikaSupportChatButton: state.showPikaSupportChatButton,
       showTopicsPersonalMessageButton: false,
+      giftItemRecipientProfileId: !profilePopupIsOwnProfile ? profilePopupResolvedProfile.profileId : null,
       ownVipActiveUntil: profilePopupIsOwnProfile ? state.ownVipActiveUntil : null,
       vipGrantOpen: state.vipGrantOpen,
       vipGrantSubmitting: state.vipGrantSubmitting,
@@ -14496,6 +14886,7 @@ export function renderLobbyScreen(
       onFriendRemoveClick: options.onFriendRemoveClick,
       onGiftCoinsClick: options.onGiftCoinsClick,
       onGiftCoinsBypassClick: options.onGiftCoinsBypassClick,
+      onGiftItemClick: options.onGiftItemClick,
       onPikaSupportChatClick: options.onPikaSupportChatClick,
       onTopicsPersonalMessageClick: () => {},
       onLikeClick: options.onLikeClick,

@@ -14,6 +14,13 @@ export type RenderPlayerProfilePopupOptions = {
   isOwnProfile?: boolean
   isAdmin?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
+  /**
+   * Virtual item gift system (Етап 1) — ОТДЕЛЕН бутон от "Подари жълтици"
+   * (friendshipAction.giftFriendshipId/giftBypassProfileId по-горе, за
+   * директен coin transfer). Non-null само когато !isOwnProfile и
+   * profile.profileId съществува — виж giftItemStore.ts.
+   */
+  giftItemRecipientProfileId?: string | null
   skipAnimation?: boolean
   /**
    * Вижда се само когато ТЕКУЩИЯТ логнат профил е официалният Pika.bg
@@ -168,6 +175,18 @@ function formatNullableText(
 /** Споделена inline heart SVG — заменя ♥ text glyph-а навсякъде в този popup (бутон "Харесай" + "Харесан: N" статистика). currentColor вместо hardcoded fill, за да наследява color от wrapping елемента. */
 function renderHeartIcon(sizePx: number): string {
   return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="currentColor" style="display:inline-block;flex:0 0 auto;vertical-align:-2px;color:#dc2626;"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>`
+}
+
+/**
+ * Outline gift-box SVG — заменя 🎁 emoji-то в action бутоните (профил
+ * "Подарък" бутон, admin nav "Подаръци"). stroke="currentColor" вместо
+ * hardcoded fill (за разлика от renderHeartIcon по-горе, който е умишлено
+ * filled/hardcoded-red) — наследява текущия текстов цвят на бутона (тук
+ * златния #fde68a), консистентно с renderTopicActionIcon outline stroke
+ * pattern-а в renderTopicsScreen.ts.
+ */
+function renderGiftBoxIcon(sizePx: number): string {
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;flex:0 0 auto;vertical-align:-3px;" aria-hidden="true" focusable="false"><rect x="3" y="8" width="18" height="4"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>`
 }
 
 function renderLevelBadge(level: number | null | undefined, size: 'sm' | 'md' = 'md'): string {
@@ -1689,6 +1708,7 @@ function renderProfileContent(
   riskDetailRows: AdminProfileLinkedProfileRow[] | null | undefined,
   riskDetailErrorText: string | null,
   riskRecheckSubmitting: boolean,
+  giftItemRecipientProfileId: string | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -1933,6 +1953,28 @@ function renderProfileContent(
                       Подари жълтици
                     </button>
                   ` : ''}
+                ${giftItemRecipientProfileId ? `
+                    <button
+                      type="button"
+                      data-player-profile-gift-item="${escapeHtml(giftItemRecipientProfileId)}"
+                      style="
+                        min-height:38px;
+                        padding:0 12px;
+                        border:1px solid rgba(212,165,32,0.62);
+                        border-radius:8px;
+                        background:rgba(212,165,32,0.14);
+                        color:#fde68a;
+                        font-size:13px;
+                        font-weight:900;
+                        cursor:pointer;
+                        display:inline-flex;
+                        align-items:center;
+                        gap:6px;
+                      "
+                    >
+                      ${renderGiftBoxIcon(17)}Подарък
+                    </button>
+                  ` : ''}
                 ${profile.profileId && profile.isBlockedByMe !== null ? `
                   <button
                     type="button"
@@ -2165,6 +2207,7 @@ export function renderPlayerProfilePopup(
           options.riskDetailRows ?? null,
           options.riskDetailErrorText ?? null,
           options.riskRecheckSubmitting ?? false,
+          options.giftItemRecipientProfileId ?? null,
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 
@@ -2189,7 +2232,8 @@ export function renderPlayerProfilePopup(
         transform: translateY(-1px);
       }
       [data-player-profile-gift-coins]:hover,
-      [data-player-profile-gift-coins-bypass]:hover {
+      [data-player-profile-gift-coins-bypass]:hover,
+      [data-player-profile-gift-item]:hover {
         background: rgba(212,165,32,0.28) !important;
         filter: brightness(1.1);
         transform: translateY(-1px);
@@ -2211,6 +2255,7 @@ export function renderPlayerProfilePopup(
       [data-player-profile-unban-open],
       [data-player-profile-gift-coins],
       [data-player-profile-gift-coins-bypass],
+      [data-player-profile-gift-item],
       [data-player-profile-pika-support-chat],
       [data-player-profile-topics-personal-message] {
         transition: filter 120ms ease, transform 120ms ease, background 120ms ease, border-color 120ms ease;

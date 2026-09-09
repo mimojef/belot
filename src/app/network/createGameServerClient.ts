@@ -1698,6 +1698,37 @@ export type PendingGiftNotificationsMessage = {
   gifts: Array<{ giftId: string; amount: number; fromDisplayName: string }>
 }
 
+// Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от coins_gifted/
+// pending_gift_notifications по-горе (директен coin transfer). Виж
+// server/src/db/giftItemStore.ts.
+export type GiftItemSnapshot = {
+  giftItemId: string
+  name: string
+  imageUrl: string
+  price: number
+  isActive: boolean
+  sortOrder: number
+}
+
+export type GiftItemReceivedMessage = {
+  type: 'gift_item_received'
+  transactionId: string
+  itemName: string
+  imageUrl: string
+  fromDisplayName: string
+}
+
+export type PendingGiftItemNotificationsMessage = {
+  type: 'pending_gift_item_notifications'
+  deliveries: Array<{
+    transactionId: string
+    giftItemId: string
+    itemName: string
+    imageUrl: string
+    fromDisplayName: string
+  }>
+}
+
 export type TournamentPartnerInviteReceivedMessage = {
   type: 'tournament_partner_invite_received'
   invite: TournamentPartnerInviteSnapshot
@@ -2264,6 +2295,8 @@ export type ServerMessage =
   | FriendAcceptanceNotificationReadMessage
   | CoinsGiftedMessage
   | PendingGiftNotificationsMessage
+  | GiftItemReceivedMessage
+  | PendingGiftItemNotificationsMessage
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage

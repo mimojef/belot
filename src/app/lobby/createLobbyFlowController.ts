@@ -68,6 +68,7 @@ import type {
   ChatMessageSnapshot,
   CoinPackageInput,
   CoinPackageSnapshot,
+  GiftItemSnapshot,
   CoinPackageStatus,
   CoinPurchaseSnapshot,
   VipPackageSnapshot,
@@ -124,6 +125,7 @@ export type LobbyFlowScreen =
   | 'admin-tournaments'
   | 'admin-tournament-detail'
   | 'admin-ad-campaigns'
+  | 'admin-gift-items'
   | 'tournaments'
   | 'tournament-detail'
   | 'tournament-how-it-works'
@@ -537,6 +539,53 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; packages: CoinPackageSnapshot[] }
     | { ok: false; message: string }
   >
+  // Virtual Item Gift System (Етап 1) — ОТДЕЛЕН domain от
+  // onAdminCoinPackage*/onGiftCoinsSubmit по-горе (каталог с подаръци,
+  // картинка+име+цена, платими с жълтици). Виж CLAUDE.md брифа "не
+  // дублирай, не чупи".
+  onAdminGiftItemsLoad?: () => Promise<
+    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminGiftItemSubmit?: (input: {
+    giftItemId?: string | null
+    name: string
+    imageUrl: string
+    price: number
+    sortOrder: number
+    isActive: boolean
+  }) => Promise<
+    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminGiftItemStatusChange?: (
+    giftItemId: string,
+    isActive: boolean,
+  ) => Promise<
+    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminGiftItemDelete?: (giftItemId: string) => Promise<
+    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminGiftItemImageUpload?: (imageDataUrl: string) => Promise<
+    | { ok: true; imageUrl: string }
+    | { ok: false; message: string }
+  >
+  onGiftItemCatalogLoad?: () => Promise<
+    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onGiftItemSubmit?: (
+    recipientProfileId: string,
+    giftItemId: string,
+    requestId: string,
+  ) => Promise<
+    | { ok: true; itemName: string; senderBalanceAfter: number }
+    | { ok: false; message: string }
+  >
+  onMarkGiftItemDeliveryShown?: (transactionId: string) => Promise<void>
   onNotifFriendRequestClick?: (friendshipId: string) => void
   onMarkGiftNotificationRead?: (giftId: string) => Promise<void>
   onMarkAcceptanceNotificationRead?: (friendshipId: string) => Promise<void>
@@ -1579,6 +1628,29 @@ type InternalLobbyFlowState = {
   giftSuccessModal: { amount: number; friendName: string } | null
   giftReceivedModal: { amount: number; fromDisplayName: string } | null
   pendingGiftNotifications: Array<{ giftId: string; amount: number; fromDisplayName: string }>
+  // Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от giftModal*/
+  // giftSuccessModal/giftReceivedModal/pendingGiftNotifications по-горе
+  // (директен coin transfer). Виж server/src/db/giftItemStore.ts.
+  giftItemCatalog: GiftItemSnapshot[]
+  giftItemCatalogLoading: boolean
+  giftItemModalRecipientProfileId: string | null
+  giftItemModalRecipientName: string
+  giftItemModalErrorText: string | null
+  giftItemModalSubmittingId: string | null
+  giftItemSuccessModal: { itemName: string; recipientName: string } | null
+  // giftItemReceivedModal = активно показваният popup (най-много 1 наведнъж).
+  // giftItemNotificationQueue = следващите чакащи (FIFO) — offline pending
+  // batch при WS connect И live "gift_item_received" push-ове се append-ват
+  // към ЕДНА и съща опашка (виж enqueueGiftItemNotifications). Root cause
+  // fix: преди тук се пазеше само последният push-нат масив и никой код не
+  // consume-ваше остатъка след затваряне на popup-а — виж
+  // showNextGiftItemNotification/completeCurrentGiftItemNotification.
+  giftItemReceivedModal: { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string } | null
+  giftItemNotificationQueue: Array<{ transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string }>
+  adminGiftItems: GiftItemSnapshot[]
+  adminGiftItemsLoading: boolean
+  adminGiftItemsErrorText: string | null
+  adminGiftItemEditId: string | null
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceProcessingIds: Set<string>
   acceptanceErrorText: string | null
@@ -2257,6 +2329,19 @@ function createInitialState(): InternalLobbyFlowState {
     giftSuccessModal: null,
     giftReceivedModal: null,
     pendingGiftNotifications: [],
+    giftItemCatalog: [],
+    giftItemCatalogLoading: false,
+    giftItemModalRecipientProfileId: null,
+    giftItemModalRecipientName: '',
+    giftItemModalErrorText: null,
+    giftItemModalSubmittingId: null,
+    giftItemSuccessModal: null,
+    giftItemReceivedModal: null,
+    giftItemNotificationQueue: [],
+    adminGiftItems: [],
+    adminGiftItemsLoading: false,
+    adminGiftItemsErrorText: null,
+    adminGiftItemEditId: null,
     acceptanceNotifications: [],
     acceptanceProcessingIds: new Set<string>(),
     acceptanceErrorText: null,
@@ -2701,6 +2786,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/admin/payments': 'admin-payments',
   '/admin/tournaments': 'admin-tournaments',
   '/admin/ad-campaigns': 'admin-ad-campaigns',
+  '/admin/gift-items': 'admin-gift-items',
   '/friends': 'friends',
   '/chat': 'chat',
   '/terms': 'terms',
@@ -2739,6 +2825,9 @@ export function createLobbyFlowController(
 
   let _renderTimerId: ReturnType<typeof setTimeout> | null = null
   let _privateRoomWaitingViewportListenerAttached = false
+  // Guard срещу late-resolve overwrite при gift item catalog fetch — виж
+  // openGiftItemModal/closeGiftItemModal коментара.
+  let _giftItemCatalogRequestToken = 0
 
   function shouldSuppressLobbyRender(): boolean {
     return (options.suppressRendering === true) || (options.getIsInGame?.() ?? false)
@@ -3957,6 +4046,8 @@ export function createLobbyFlowController(
               ? 'admin-tournament-detail'
             : state.currentScreen === 'admin-ad-campaigns'
               ? 'admin-ad-campaigns'
+            : state.currentScreen === 'admin-gift-items'
+              ? 'admin-gift-items'
             : state.currentScreen === 'tournaments'
               ? 'tournaments'
             : state.currentScreen === 'tournament-detail'
@@ -4123,6 +4214,18 @@ export function createLobbyFlowController(
       giftSuccessModal: state.giftSuccessModal,
       giftReceivedModal: state.giftReceivedModal,
       pendingGiftNotifications: state.pendingGiftNotifications,
+      giftItemCatalog: state.giftItemCatalog,
+      giftItemCatalogLoading: state.giftItemCatalogLoading,
+      giftItemModalRecipientProfileId: state.giftItemModalRecipientProfileId,
+      giftItemModalRecipientName: state.giftItemModalRecipientName,
+      giftItemModalErrorText: state.giftItemModalErrorText,
+      giftItemModalSubmittingId: state.giftItemModalSubmittingId,
+      giftItemSuccessModal: state.giftItemSuccessModal,
+      giftItemReceivedModal: state.giftItemReceivedModal,
+      adminGiftItems: state.adminGiftItems,
+      adminGiftItemsLoading: state.adminGiftItemsLoading,
+      adminGiftItemsErrorText: state.adminGiftItemsErrorText,
+      adminGiftItemEditId: state.adminGiftItemEditId,
       acceptanceNotifications: state.acceptanceNotifications,
       acceptanceErrorText: state.acceptanceErrorText,
       chatConversations: state.chatConversations,
@@ -5396,6 +5499,23 @@ export function createLobbyFlowController(
         state.giftReceivedModal = null
         render()
       },
+      onGiftItemClick: (recipientProfileId) => {
+        openGiftItemModal(recipientProfileId)
+      },
+      onGiftItemModalClose: () => {
+        closeGiftItemModal()
+      },
+      onGiftItemSubmit: (recipientProfileId, giftItemId) => {
+        void submitGiftItem(recipientProfileId, giftItemId)
+      },
+      onGiftItemSuccessClose: () => {
+        state.giftItemSuccessModal = null
+        render()
+      },
+      onGiftItemReceivedClose: () => {
+        completeCurrentGiftItemNotification()
+        render()
+      },
       onLowCoinsModalClose: () => {
         state.lowCoinsModalOpen = false
         render()
@@ -6290,6 +6410,27 @@ export function createLobbyFlowController(
       },
       onAdminTournamentsOpen: () => {
         showAdminTournamentsPanel()
+      },
+      onAdminGiftItemsOpen: () => {
+        showAdminGiftItemsPanel()
+      },
+      onAdminGiftItemsBack: () => {
+        void showAdminInfoPanel()
+      },
+      onAdminGiftItemSubmit: (input) => {
+        void submitAdminGiftItem(input)
+      },
+      onAdminGiftItemEdit: (giftItemId) => {
+        editAdminGiftItem(giftItemId)
+      },
+      onAdminGiftItemStatusToggle: (giftItemId, isActive) => {
+        void setAdminGiftItemStatus(giftItemId, isActive)
+      },
+      onAdminGiftItemDelete: (giftItemId) => {
+        void deleteAdminGiftItem(giftItemId)
+      },
+      onAdminGiftItemImageUpload: (file) => {
+        void uploadAdminGiftItemImageFile(file)
       },
       onAdminTournamentsBack: () => {
         void showAdminInfoPanel()
@@ -10877,6 +11018,38 @@ export function createLobbyFlowController(
     void fetchAdminTournaments()
   }
 
+  // Virtual Item Gift System (Етап 1) — admin каталог, огледално на
+  // showAdminTournamentsPanel по-горе. isFullAdminAuthSession guard (не
+  // isAdminOrSubadminAuthSession) — съвпада с admin coin packages
+  // изискването (showAdminPanel по-долу), а не с tournaments (admin+subadmin).
+  function showAdminGiftItemsPanel(historyMode: 'push' | 'replace' = 'push'): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (!isFullAdminAuthSession(authSession)) {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до админ панела.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-gift-items'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
+    state.adminGiftItemsLoading = true
+    state.adminGiftItemsErrorText = null
+    const target = '/admin/gift-items'
+    if (window.location.pathname !== target) {
+      if (historyMode === 'replace') history.replaceState(null, '', target)
+      else history.pushState(null, '', target)
+    }
+    render()
+    void loadAdminGiftItems()
+  }
+
   async function fetchAdminTournaments(): Promise<void> {
     const gen = ++_adminTournamentsGen
     if (!options.onAdminTournamentsLoad) {
@@ -11500,6 +11673,168 @@ export function createLobbyFlowController(
     state.adminCoinPackages = result.packages
     state.adminCoinPackagesErrorText = null
     render()
+  }
+
+  // Virtual Item Gift System (Етап 1) — ОТДЕЛЕН domain от adminCoinPackages
+  // по-горе. Структурно 1:1 огледало на loadAdminCoinPackages/
+  // submitAdminCoinPackage/deleteAdminCoinPackage/setAdminCoinPackageStatus.
+  async function loadAdminGiftItems(): Promise<void> {
+    if (state.currentScreen !== 'admin-gift-items') {
+      return
+    }
+
+    if (!options.onAdminGiftItemsLoad) {
+      state.adminGiftItemsLoading = false
+      state.adminGiftItemsErrorText = 'Админ подаръците временно не са налични.'
+      render()
+      return
+    }
+
+    state.adminGiftItemsLoading = true
+    state.adminGiftItemsErrorText = null
+    render()
+
+    const result = await options.onAdminGiftItemsLoad()
+
+    if (state.currentScreen !== 'admin-gift-items') {
+      return
+    }
+
+    state.adminGiftItemsLoading = false
+
+    if (!result.ok) {
+      state.adminGiftItemsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminGiftItems = result.items
+    state.adminGiftItemsErrorText = null
+    render()
+  }
+
+  async function submitAdminGiftItem(input: {
+    giftItemId?: string | null
+    name: string
+    imageUrl: string
+    price: number
+    sortOrder: number
+    isActive: boolean
+  }): Promise<void> {
+    if (!options.onAdminGiftItemSubmit) {
+      state.adminGiftItemsErrorText = 'Записът на подаръци временно не е наличен.'
+      render()
+      return
+    }
+
+    state.adminGiftItemsErrorText = null
+    render()
+
+    const result = await options.onAdminGiftItemSubmit(input)
+
+    if (!result.ok) {
+      state.adminGiftItemsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminGiftItems = result.items
+    state.adminGiftItemsErrorText = null
+    state.adminGiftItemEditId = null
+    render()
+  }
+
+  function editAdminGiftItem(giftItemId: string): void {
+    state.adminGiftItemEditId = giftItemId.length > 0 ? giftItemId : null
+    render()
+  }
+
+  async function deleteAdminGiftItem(giftItemId: string): Promise<void> {
+    if (!options.onAdminGiftItemDelete) {
+      state.adminGiftItemsErrorText = 'Изтриването на подаръци временно не е налично.'
+      render()
+      return
+    }
+
+    state.adminGiftItemsErrorText = null
+    render()
+
+    const result = await options.onAdminGiftItemDelete(giftItemId)
+
+    if (!result.ok) {
+      state.adminGiftItemsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminGiftItems = result.items
+    if (state.adminGiftItemEditId === giftItemId) {
+      state.adminGiftItemEditId = null
+    }
+    state.adminGiftItemsErrorText = null
+    render()
+  }
+
+  async function setAdminGiftItemStatus(giftItemId: string, isActive: boolean): Promise<void> {
+    if (!options.onAdminGiftItemStatusChange) {
+      state.adminGiftItemsErrorText = 'Промяната на статус временно не е налична.'
+      render()
+      return
+    }
+
+    state.adminGiftItemsErrorText = null
+    render()
+
+    const result = await options.onAdminGiftItemStatusChange(giftItemId, isActive)
+
+    if (!result.ok) {
+      state.adminGiftItemsErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminGiftItems = result.items
+    state.adminGiftItemsErrorText = null
+    render()
+  }
+
+  // Admin gift-item картинка: File → data URL (readFileAsDataUrl, споделена
+  // с topic reply composer-а) → POST upload → директно записва resulting
+  // imageUrl в hidden input-а на формата (data-admin-gift-item-image-url).
+  // Формата не е state-driven (не re-render-ва при избор на файл), затова
+  // DOM update тук вместо render() cycle — огледално на минималната
+  // admin-form UX на другите admin CRUD панели в този контролер.
+  async function uploadAdminGiftItemImageFile(file: File): Promise<void> {
+    if (!options.onAdminGiftItemImageUpload) {
+      state.adminGiftItemsErrorText = 'Качването на снимки временно не е налично.'
+      render()
+      return
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file)
+      const result = await options.onAdminGiftItemImageUpload(dataUrl)
+
+      if (!result.ok) {
+        state.adminGiftItemsErrorText = result.message
+        render()
+        return
+      }
+
+      // ВАЖНО: НЕ вика render() при успех — renderLobbyScreen() прави пълен
+      // innerHTML replace (не diff), което би заличило hidden input стойността,
+      // зададена директно тук, преди тя да е записана в state (формата не е
+      // state-driven, submit-ва се веднъж накрая). Грешка (catch/!result.ok)
+      // ВСЕ ПАК прави render(), защото трябва да покаже errorText-а.
+      const hiddenInput = options.root.querySelector<HTMLInputElement>('[data-admin-gift-item-image-url="1"]')
+      if (hiddenInput) {
+        hiddenInput.value = result.imageUrl
+      }
+      state.adminGiftItemsErrorText = null
+    } catch {
+      state.adminGiftItemsErrorText = 'Снимката не можа да бъде обработена.'
+      render()
+    }
   }
 
   async function loadLobbyPackages(): Promise<void> {
@@ -12542,6 +12877,149 @@ export function createLobbyFlowController(
       () => { state.giftModalBypassRecipientProfileId = null },
       onGiftCoinsBypassSubmit ? () => onGiftCoinsBypassSubmit(recipientProfileId, amount) : undefined,
     )
+  }
+
+  // Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от openGiftModal/
+  // openGiftModalBypass/submitGiftCoinsCore по-горе (директен coin
+  // transfer). Виж giftItemStore.ts (сървър) за authoritative payment
+  // логиката — тук само UI state + network round trip.
+  function openGiftItemModal(recipientProfileId: string): void {
+    state.giftItemModalRecipientProfileId = recipientProfileId
+    state.giftItemModalRecipientName = state.profilePopupProfile?.profileId === recipientProfileId
+      ? state.profilePopupProfile.displayName
+      : 'играч'
+    state.giftItemModalErrorText = null
+    state.giftItemModalSubmittingId = null
+    // Fresh fetch на ВСЯКО отваряне (не само "ако все още не е зареден веднъж
+    // на сесията") — root cause на "показва се само първият подарък, докато
+    // не refresh-нeш": guard-ът по-рано беше `giftItemCatalog.length === 0`,
+    // значи ако модалът се отвореше преди admin да довърши добавянето на
+    // останалите подаръци, state.giftItemCatalog се "заключваше" върху онзи
+    // непълен snapshot за остатъка от сесията — нов/редактиран/деактивиран
+    // подарък никога не се появяваше повторно без пълен page reload. Тук
+    // catalog винаги се презарежда от сървъра при отваряне (без polling —
+    // само явен, user-driven trigger), а requestToken guard-ва срещу late
+    // resolve, ако потребителят затвори/смени recipient междувременно.
+    state.giftItemCatalogLoading = true
+    render()
+
+    const requestToken = ++_giftItemCatalogRequestToken
+
+    if (options.onGiftItemCatalogLoad) {
+      void (async () => {
+        const result = await options.onGiftItemCatalogLoad!()
+        if (requestToken !== _giftItemCatalogRequestToken) {
+          // Stale response — модалът е затворен/презареден междувременно.
+          return
+        }
+        state.giftItemCatalogLoading = false
+        if (result.ok) {
+          state.giftItemCatalog = result.items
+        }
+        render()
+      })()
+    } else {
+      state.giftItemCatalogLoading = false
+    }
+  }
+
+  function closeGiftItemModal(): void {
+    // Инвалидира pending catalog fetch — ако резултатът дойде след затваряне,
+    // requestToken mismatch-ът в openGiftItemModal го отхвърля (виж коментара там).
+    _giftItemCatalogRequestToken += 1
+    state.giftItemCatalogLoading = false
+    state.giftItemModalRecipientProfileId = null
+    state.giftItemModalRecipientName = ''
+    state.giftItemModalErrorText = null
+    state.giftItemModalSubmittingId = null
+    render()
+  }
+
+  // ── Incoming gift-item notification queue ────────────────────────────────
+  // Root cause fix за "само първият offline подарък се показва, трябва
+  // logout/login за следващия": преди тук нямаше consumer за остатъка от
+  // pending масива след затваряне на popup-а. Сега ЕДНА FIFO опашка приема
+  // items И от offline batch flush (pending_gift_item_notifications), И от
+  // realtime push (gift_item_received) — виж брифа §4 "Realtime + offline
+  // трябва да ползват една queue". Никакъв dedup по sender/gift/recipient —
+  // всеки delivery е отделно събитие (explicit изискване, брифа §5 Scenario C).
+  type GiftItemNotificationEntry = { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string }
+
+  function enqueueGiftItemNotifications(items: GiftItemNotificationEntry[]): void {
+    if (items.length === 0) return
+    state.giftItemNotificationQueue.push(...items)
+    showNextGiftItemNotification()
+  }
+
+  // Взима следващия от опашката САМО ако няма активен popup в момента —
+  // гарантира "не отваряй няколко modal overlay-а едновременно" (брифа §3/6).
+  // Ако вече има активен giftItemReceivedModal, новите items просто чакат в
+  // queue-то (enqueue-нати по-горе) до completeCurrentGiftItemNotification().
+  function showNextGiftItemNotification(): void {
+    if (state.giftItemReceivedModal !== null) return
+    const next = state.giftItemNotificationQueue.shift()
+    if (!next) return
+    state.giftItemReceivedModal = next
+    render()
+  }
+
+  // Извиква се от onGiftItemReceivedClose (auto-dismiss ИЛИ явен X/OK клик —
+  // и двата пътя минават оттук, виж renderLobbyScreen.ts wiring, брифа §6
+  // "затваряне с X също трябва да продължи към следващия"). mark-shown се
+  // праща за ТОЗИ delivery, после веднага се показва следващият от опашката.
+  function completeCurrentGiftItemNotification(): void {
+    const delivery = state.giftItemReceivedModal
+    state.giftItemReceivedModal = null
+    if (delivery) {
+      void options.onMarkGiftItemDeliveryShown?.(delivery.transactionId)
+    }
+    showNextGiftItemNotification()
+  }
+
+  async function submitGiftItem(recipientProfileId: string, giftItemId: string): Promise<void> {
+    if (!options.onGiftItemSubmit) {
+      state.giftItemModalErrorText = 'Подаряването временно не е налично.'
+      render()
+      return
+    }
+
+    const giftItem = state.giftItemCatalog.find((item) => item.giftItemId === giftItemId)
+
+    state.giftItemModalSubmittingId = giftItemId
+    state.giftItemModalErrorText = null
+    render()
+
+    // requestId генериран client-side при submit — idempotency key (виж
+    // giftItemStore.ts sendGiftItem §1, UNIQUE constraint на request_id).
+    // Double-click с бавна мрежа праща СЪЩИЯ requestId (submittingId guard-ва
+    // повторен клик на UI ниво), сървърът replay-ва идентичен успешен
+    // резултат вместо повторно дебитиране.
+    const requestId = crypto.randomUUID()
+    const recipientName = state.giftItemModalRecipientName
+    const result = await options.onGiftItemSubmit(recipientProfileId, giftItemId, requestId)
+
+    state.giftItemModalSubmittingId = null
+
+    if (!result.ok) {
+      state.giftItemModalErrorText = result.message
+      render()
+      return
+    }
+
+    state.giftItemModalRecipientProfileId = null
+    state.giftItemModalRecipientName = ''
+    state.giftItemModalErrorText = null
+    state.giftItemSuccessModal = { itemName: result.itemName || giftItem?.name || '', recipientName }
+
+    // Server-authoritative нов баланс (result.senderBalanceAfter) — reuse на
+    // съществуващото profile.yellowCoinsBalance полето вместо ново state
+    // огледало, за да не се разминат двата balance display-а в UI-то.
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession?.profile) {
+      authSession.profile.yellowCoinsBalance = result.senderBalanceAfter
+    }
+
+    render()
   }
 
   async function loadChatConversations(): Promise<boolean> {
@@ -14019,6 +14497,7 @@ export function createLobbyFlowController(
     '/admin/payments': 'admin-payments',
     '/admin/tournaments': 'admin-tournaments',
     '/admin/ad-campaigns': 'admin-ad-campaigns',
+    '/admin/gift-items': 'admin-gift-items',
     '/tournaments': 'tournaments',
     '/topics': 'topics',
     '/friends': 'friends',
@@ -14140,6 +14619,7 @@ export function createLobbyFlowController(
         break
       }
       case 'admin-ad-campaigns': showAdCampaignManagementPanel('replace'); break
+      case 'admin-gift-items': showAdminGiftItemsPanel('replace'); break
       case 'tournaments': void showTournamentsList(); break
       case 'topics': void showTopicsDirectory(); break
       case 'friends': void showFriendsDirectory(); break
@@ -14881,6 +15361,7 @@ export function createLobbyFlowController(
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onGiftCoinsBypassClick: (recipientProfileId) => { openGiftModalBypass(recipientProfileId) },
+      onGiftItemClick: (recipientProfileId) => { openGiftItemModal(recipientProfileId) },
       onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
       onTopicsPersonalMessageClick: () => {},
       onLikeClick: (profileId) => { void likeProfile(profileId) },
@@ -15671,6 +16152,7 @@ export function createLobbyFlowController(
         targetAccountRole: state.profilePopupTargetRole,
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
+        giftItemRecipientProfileId: !isOwnProfile ? popupProfile.profileId : null,
         ownVipActiveUntil: isOwnProfile ? resolveOwnVipActiveUntilForRender(authSession) : null,
         vipGrantOpen: state.vipGrantOpen,
         vipGrantSubmitting: state.vipGrantSubmitting,
@@ -15793,6 +16275,43 @@ export function createLobbyFlowController(
     if (message.type === 'pending_gift_notifications') {
       state.pendingGiftNotifications = message.gifts
       render()
+      return true
+    }
+
+    // Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от
+    // pending_gift_notifications по-горе (директен coin transfer). Offline
+    // delivery flush при WS connect — виж giftItemStore.getPendingDeliveries.
+    // Целият batch се enqueue-ва в СЪЩАТА FIFO опашка като live push-а по-долу
+    // (виж enqueueGiftItemNotifications) — root cause fix: преди тук се
+    // презаписваше state.pendingGiftItemNotifications и НИКОЙ код не
+    // consume-ваше остатъка след първия popup (трябваше logout/login).
+    if (message.type === 'pending_gift_item_notifications') {
+      enqueueGiftItemNotifications(
+        message.deliveries.map((d) => ({
+          transactionId: d.transactionId,
+          itemName: d.itemName,
+          imageUrl: d.imageUrl,
+          fromDisplayName: d.fromDisplayName,
+        })),
+      )
+      return true
+    }
+
+    // Realtime push — получателят вече е online в момента на изпращане (виж
+    // notifyGiftRecipientAndRespond-подобната логика в index.ts send-gift-item
+    // route-а). ПРЕДИ тази промяна нямаше handler изобщо за този message
+    // type — live подаръци никога не показваха popup. Enqueue в СЪЩАТА
+    // опашка като offline batch-а по-горе (брифа §4: "докато гледа A1 идва
+    // realtime B1 → редът става A1 → A2 → A3 → B1", без overlay collision).
+    if (message.type === 'gift_item_received') {
+      enqueueGiftItemNotifications([
+        {
+          transactionId: message.transactionId,
+          itemName: message.itemName,
+          imageUrl: message.imageUrl,
+          fromDisplayName: message.fromDisplayName,
+        },
+      ])
       return true
     }
 

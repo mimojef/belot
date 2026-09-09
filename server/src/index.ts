@@ -81,6 +81,7 @@ import {
 import {
   decodeImageAttachmentDataUrl,
   deleteAttachmentFileByFilename,
+  GIFT_ITEM_IMAGE_WEBP_QUALITY,
   IMAGE_ATTACHMENT_FILENAME_PATTERN,
   MAX_IMAGE_ATTACHMENT_INPUT_BYTES,
   MAX_IMAGE_ATTACHMENT_JSON_BYTES,
@@ -185,6 +186,7 @@ import { createPlayersPageSnapshotStore } from './db/playersPageSnapshotStore.js
 import { createPlayerProgressStore } from './db/playerProgressStore.js'
 import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore, type YellowCoinGiftSnapshot } from './db/yellowCoinGiftStore.js'
+import { createGiftItemStore } from './db/giftItemStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots, setBroadcastRoomSnapshotsMonitoringHook } from './core/broadcastRoomSnapshots.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
@@ -374,6 +376,9 @@ const GALLERY_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'profile-gallery')
 // Рекламни кампании — банерите са публично видими за всички играчи
 // (аналогично на avatars/gallery), виж PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.
 const AD_CAMPAIGN_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'ad-campaigns')
+// Virtual item gift каталог — иконите са публично видими (аналогично на
+// avatars/gallery/ad-campaigns), виж PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.
+const GIFT_ITEM_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'gift-items')
 
 // Личен чат — снимки. Отделна upload директория, НЕ сервирана от публичния
 // handleUploadsRequest (виж handleChatAttachmentRequest) — снимките в
@@ -458,6 +463,18 @@ const FRIENDSHIP_RETENTION_CLEANUP_BATCH_SIZE = 200
 // нито с friendship retention cleanup-а (75s).
 const OVERSIZED_CHAT_PRUNE_INTERVAL_MS = 24 * 60 * 60 * 1000
 const OVERSIZED_CHAT_PRUNE_STARTUP_DELAY_MS = 105_000
+// Gift item image orphan sweep (Image Cleanup брифа §6) — Admin качва
+// картинка (upload-image endpoint), после затваря формата/validation
+// фейлва/просто не submit-ва — файлът остава на диска без DB reference.
+// Startup-ONLY (нарочно БЕЗ setInterval — брифа изрично забранява нов
+// periodичен timer; ползваме established "startup timeout" pattern-а по-
+// горе, само без interval половината). Изместен delay (135s), за да не се
+// засича с chat/support/topic (30/45/60s), friendship (75s) или oversized
+// chat prune (105s) cleanup-ите. Grace period 24ч предпазва от изтриване на
+// файл, чийто upsert submit е still-in-flight (бавна мрежа/admin все още
+// попълва формата) в момента на server restart.
+const GIFT_ITEM_ORPHAN_SWEEP_STARTUP_DELAY_MS = 135_000
+const GIFT_ITEM_ORPHAN_SWEEP_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
 const OVERSIZED_CHAT_PRUNE_BATCH_SIZE = 50
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
@@ -2463,6 +2480,84 @@ let friendshipRetentionCleanupInterval: ReturnType<typeof setInterval> | null = 
   FRIENDSHIP_RETENTION_CLEANUP_INTERVAL_MS,
 )
 
+// Gift item image orphan sweep (виж GIFT_ITEM_ORPHAN_SWEEP_* коментара по-
+// горе за rationale/timing) — safe-delete guard е ИДЕНТИЧЕН с §2-4 route
+// логиката (giftItemStore.isImageUrlReferenced + deleteUploadFileByUrl), не
+// дублира fs delete infrastructure. Startup-ONLY, БЕЗ periodичен interval.
+async function runGiftItemImageOrphanSweep(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  let filenames: string[]
+  try {
+    filenames = await readdir(GIFT_ITEM_UPLOADS_PATH)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      // Директорията все още не съществува (нито един gift upload досега) —
+      // нищо за sweep-ване.
+      return
+    }
+    console.error('[gift-items] Orphan sweep: неуспешно четене на директорията:', error)
+    return
+  }
+
+  const now = Date.now()
+  let deletedCount = 0
+  let skippedReferencedCount = 0
+  let skippedRecentCount = 0
+
+  for (const filename of filenames) {
+    // Само gift-items .webp файлове с очаквания UUID.webp формат — reuse на
+    // СЪЩИЯ filename pattern като deleteAttachmentFileByFilename (§7 Security/
+    // Path Safety), никакво произволно име не се третира.
+    if (!IMAGE_ATTACHMENT_FILENAME_PATTERN.test(filename)) {
+      continue
+    }
+
+    const filePath = join(GIFT_ITEM_UPLOADS_PATH, filename)
+
+    let mtimeMs: number
+    try {
+      const stats = await stat(filePath)
+      mtimeMs = stats.mtimeMs
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        continue
+      }
+      console.error(`[gift-items] Orphan sweep: неуспешно stat на ${filename}:`, error)
+      continue
+    }
+
+    if (now - mtimeMs < GIFT_ITEM_ORPHAN_SWEEP_GRACE_PERIOD_MS) {
+      skippedRecentCount++
+      continue
+    }
+
+    const imageUrl = createUploadUrl('gift-items', filename)
+
+    if (giftItemStore.isImageUrlReferenced(imageUrl)) {
+      skippedReferencedCount++
+      continue
+    }
+
+    await deleteUploadFileByUrl(imageUrl)
+    deletedCount++
+  }
+
+  if (deletedCount > 0 || skippedReferencedCount > 0) {
+    console.log(
+      `[gift-items] Orphan sweep: изтрити ${deletedCount}, запазени (референцирани) ${skippedReferencedCount}, ` +
+        `пропуснати (< grace period) ${skippedRecentCount}`,
+    )
+  }
+}
+
+let giftItemOrphanSweepStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runGiftItemImageOrphanSweep() },
+  GIFT_ITEM_ORPHAN_SWEEP_STARTUP_DELAY_MS,
+)
+
 // Bounded convergence за conversations, чийто message count вече надвишава
 // PERSONAL_CHAT_STORAGE_LIMIT (виж chatStore.ts's pruneOversizedConversations
 // doc коментара) — покрива legacy данни от преди 500->300 намалението,
@@ -2500,6 +2595,10 @@ const yellowCoinGiftStore = await createYellowCoinGiftStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
   adminSettingsStore,
+)
+const giftItemStore = await createGiftItemStore(
+  databaseBootstrap.databaseFilePath,
+  playerProgressStore,
 )
 const tableExitPenaltyStore = await createTableExitPenaltyStore(
   databaseBootstrap.databaseFilePath,
@@ -6518,6 +6617,7 @@ const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
   resolve(AVATAR_UPLOADS_PATH),
   resolve(GALLERY_UPLOADS_PATH),
   resolve(AD_CAMPAIGN_UPLOADS_PATH),
+  resolve(GIFT_ITEM_UPLOADS_PATH),
 ]
 
 function resolveUploadRequestPath(pathname: string): string | null {
@@ -14187,6 +14287,320 @@ async function handleAdminCoinPackagesRequest(
   return false
 }
 
+// Admin CRUD за virtual item gift каталога (gift_items таблица) — ОТДЕЛЕН
+// domain от yellowCoinGiftStore (директен coin transfer). Виж giftItemStore.ts.
+// Копира 1:1 структурния подход на handleAdminCoinPackagesRequest по-горе.
+async function handleAdminGiftItemsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const statusMatch = /^\/api\/admin\/gift-items\/([^/]+)\/status$/.exec(pathname)
+  const deleteMatch = /^\/api\/admin\/gift-items\/([^/]+)$/.exec(pathname)
+  const isUploadPath = pathname === '/api/admin/gift-items/upload-image'
+
+  if (
+    pathname !== '/api/admin/gift-items' &&
+    statusMatch === null &&
+    deleteMatch === null &&
+    !isUploadPath
+  ) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Нямаш достъп до админ подаръците.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/gift-items' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      items: giftItemStore.listAdminGiftItems(),
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/gift-items' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const newImageUrl = getStringField(body, 'imageUrl')
+
+    const result = giftItemStore.upsertGiftItem({
+      giftItemId: getStringField(body, 'giftItemId') || null,
+      name: getStringField(body, 'name'),
+      imageUrl: newImageUrl,
+      price: getNumberField(body, 'price') ?? -1,
+      sortOrder: getNumberField(body, 'sortOrder') ?? 0,
+      isActive: body['isActive'] === true,
+    })
+
+    if (!result.ok) {
+      // Image Replace §3 "failed update след upload" — новият файл вече е на
+      // диска (отделен upload-image request преди тоя submit), но DB update-ът
+      // тук е отхвърлен, значи никой DB ред не сочи новия URL. Reference-safe
+      // guard (не голо unlink) — ако по някое чудо друг ред вече споделя този
+      // URL, файлът остава недокоснат.
+      if (newImageUrl.length > 0 && !giftItemStore.isImageUrlReferenced(newImageUrl)) {
+        void deleteUploadFileByUrl(newImageUrl)
+      }
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    // Image Replace §3 стъпки 3-6 — DB update вече мина успешно (result.ok).
+    // previousImageUrl е non-null само при реален edit с различен URL (виж
+    // giftItemStore.upsertGiftItem коментара). Проверяваме references СЛЕД
+    // update-а (текущият ред вече сочи новия URL, значи "стар" reference count
+    // тук отразява само ДРУГИ redове/delivery log, не самия този edit).
+    if (result.previousImageUrl !== null && !giftItemStore.isImageUrlReferenced(result.previousImageUrl)) {
+      void deleteUploadFileByUrl(result.previousImageUrl)
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      item: result.item,
+      items: giftItemStore.listAdminGiftItems(),
+    })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const result = giftItemStore.deleteGiftItem(decodeURIComponent(deleteMatch[1] ?? ''))
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    // Hard Delete §4 стъпки 3-4 — DB row вече е изтрит (result.ok). Проверяваме
+    // references СЛЕД delete-а: ако друг активен gift item ръчно споделя
+    // същия URL (audit т.13), или delivery log все още го цитира, файлът
+    // остава недокоснат.
+    if (!giftItemStore.isImageUrlReferenced(result.deletedImageUrl)) {
+      void deleteUploadFileByUrl(result.deletedImageUrl)
+    }
+
+    sendJsonResponse(res, 200, { ok: true, items: result.items })
+    return true
+  }
+
+  if (statusMatch !== null && req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, {
+        ok: false,
+        message: 'Invalid request body.',
+      })
+      return true
+    }
+
+    const result = giftItemStore.setGiftItemActive(
+      decodeURIComponent(statusMatch[1] ?? ''),
+      body['isActive'] === true,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      item: result.item,
+      items: giftItemStore.listAdminGiftItems(),
+    })
+    return true
+  }
+
+  if (isUploadPath && req.method === 'POST') {
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+      return true
+    }
+
+    const imageDataUrl = getStringField(body, 'imageDataUrl')
+    const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrl)
+
+    if (imageBuffer === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' })
+      return true
+    }
+
+    const processed = await processImageAttachmentToWebp(imageBuffer, {
+      enforceSourcePixelLimit: true,
+      quality: GIFT_ITEM_IMAGE_WEBP_QUALITY,
+    })
+
+    if (processed === null) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Снимката не може да бъде обработена.' })
+      return true
+    }
+
+    const filename = `${randomUUID()}.webp`
+
+    try {
+      await writeWebpUploadFile(GIFT_ITEM_UPLOADS_PATH, filename, processed.buffer)
+    } catch {
+      sendJsonResponse(res, 500, { ok: false, message: 'Снимката не можа да бъде записана.' })
+      return true
+    }
+
+    const imageUrl = createUploadUrl('gift-items', filename)
+    sendJsonResponse(res, 200, { ok: true, imageUrl })
+    return true
+  }
+
+  return false
+}
+
+// Публичен/user-facing route за virtual item gift каталога — листване на
+// активни подаръци и изпращане на подарък от профил към профил. Виж
+// giftItemStore.ts за authoritative payment логиката (sendGiftItem).
+async function handleGiftItemsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const sendMatch = /^\/api\/profile\/([^/]+)\/send-gift-item$/.exec(pathname)
+  const markShownMatch = /^\/api\/gift-items\/deliveries\/([^/]+)\/mark-shown$/.exec(pathname)
+
+  if (
+    pathname !== '/api/gift-items' &&
+    sendMatch === null &&
+    markShownMatch === null
+  ) {
+    return false
+  }
+
+  if (pathname === '/api/gift-items' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      items: giftItemStore.listActiveGiftItems(),
+    })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  const senderProfileId = session.profile.profileId
+
+  if (sendMatch !== null && req.method === 'POST') {
+    const recipientProfileId = decodeURIComponent(sendMatch[1] ?? '')
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const giftItemId = getStringField(body, 'giftItemId')
+    const requestId = getStringField(body, 'requestId')
+
+    if (giftItemId.length === 0 || requestId.length === 0) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Липсва подарък или заявка.' })
+      return true
+    }
+
+    // senderProfileId идва изключително от authenticated session (никога от
+    // body); recipientProfileId идва изключително от URL path. price НЕ се
+    // приема от клиента изобщо в тоя body — sendGiftItem чете цената от DB.
+    const result = giftItemStore.sendGiftItem(
+      senderProfileId,
+      recipientProfileId,
+      giftItemId,
+      requestId,
+      'profile',
+      null,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    const recipientProfileIdResolved = result.recipientProfile.profileId
+    const senderName = result.senderProfile.displayName ?? 'Играч'
+    const itemName = result.giftItem?.name ?? ''
+    const imageUrl = result.giftItem?.imageUrl ?? ''
+
+    if (recipientProfileIdResolved) {
+      const recipientConn = Object.values(serverState.connections).find(
+        (c) => c.profileId === recipientProfileIdResolved && c.status === 'connected' && c.currentRoomId == null,
+      )
+
+      if (recipientConn) {
+        // transactionId включен и тук (не само в offline delivery §pending
+        // flush по-долу) — client-side queue (§3 брифа) го ползва като
+        // stable identity за dedup/mark-shown routing дори за live push,
+        // въпреки че НЕ се създава gift_item_delivery_log ред тук (виж else
+        // клона — persisted delivery log е само за offline recipients;
+        // "sent to socket" != "shown to user" важи там, не тук, защото live
+        // push се показва веднага, без persisted pending state за него).
+        safeSendToConnection(recipientConn.id, {
+          type: 'gift_item_received',
+          transactionId: result.transaction.transactionId,
+          itemName,
+          imageUrl,
+          fromDisplayName: senderName,
+        })
+      } else {
+        giftItemStore.createDeliveryNotification(
+          result.transaction.transactionId,
+          recipientProfileIdResolved,
+          result.transaction.giftItemId,
+          itemName,
+          imageUrl,
+          senderName,
+        )
+      }
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      transaction: result.transaction,
+      giftItem: result.giftItem,
+      senderBalanceAfter: result.senderBalanceAfter,
+    })
+    return true
+  }
+
+  if (markShownMatch !== null && req.method === 'POST') {
+    const transactionId = decodeURIComponent(markShownMatch[1] ?? '')
+    giftItemStore.markDeliveryShown(transactionId, senderProfileId)
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  return false
+}
+
 // Общ tail за gift routes (нормален friend-to-friend gift-coins и pika_team
 // direct bypass по-долу) — идентична WS notify / gift-notification-log /
 // JSON response логика и за двата route-а, единствената разлика между тях е
@@ -17316,6 +17730,14 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleAdminGiftItemsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleGiftItemsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleMissionsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -17569,6 +17991,17 @@ wsServer.on('connection', (socket, request) => {
       sendJsonMessage(socket, {
         type: 'pending_gift_notifications',
         gifts: pendingGifts,
+      })
+    }
+
+    // Огледално на pendingGifts по-горе, но за virtual item подаръци
+    // (gift_item_delivery_log, giftItemStore.ts) — ОТДЕЛЕН domain от
+    // yellow-coin gift системата.
+    const pendingGiftItems = giftItemStore.getPendingDeliveries(connection.profileId)
+    if (pendingGiftItems.length > 0) {
+      sendJsonMessage(socket, {
+        type: 'pending_gift_item_notifications',
+        deliveries: pendingGiftItems,
       })
     }
 
@@ -21167,6 +21600,11 @@ function clearMutationTimersForShutdown(): void {
     friendshipRetentionCleanupStartupTimeout = null
   }
 
+  if (giftItemOrphanSweepStartupTimeout !== null) {
+    clearTimeout(giftItemOrphanSweepStartupTimeout)
+    giftItemOrphanSweepStartupTimeout = null
+  }
+
   if (oversizedChatPruneInterval !== null) {
     clearInterval(oversizedChatPruneInterval)
     oversizedChatPruneInterval = null
@@ -21312,6 +21750,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('chatStore', () => chatStore.close())
   closeStore('lobbyChatStore', () => lobbyChatStore.close())
   closeStore('yellowCoinGiftStore', () => yellowCoinGiftStore.close())
+  closeStore('giftItemStore', () => giftItemStore.close())
   closeStore('tableExitPenaltyStore', () => tableExitPenaltyStore.close())
   closeStore('matchEconomyStore', () => matchEconomyStore.close())
   closeStore('coinPackageStore', () => coinPackageStore.close())

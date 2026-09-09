@@ -6,6 +6,11 @@ export const MAX_IMAGE_ATTACHMENT_INPUT_BYTES = 10_000_000
 export const MAX_IMAGE_ATTACHMENT_JSON_BYTES = 15_000_000
 export const IMAGE_ATTACHMENT_MAX_DIMENSION_PX = 1920
 export const IMAGE_ATTACHMENT_WEBP_QUALITY = 82
+// Gift Item каталог override — по-висок quality за малки catalog icon-и (не
+// голям chat/avatar volume), подаден explicit чрез processImageAttachmentToWebp
+// options.quality. Останалите callers (avatars/chat/topics/support) не подават
+// quality изобщо и продължават да ползват IMAGE_ATTACHMENT_WEBP_QUALITY по-горе.
+export const GIFT_ITEM_IMAGE_WEBP_QUALITY = 90
 export const IMAGE_ATTACHMENT_FILENAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.webp$/
 export const IMAGE_ATTACHMENT_MAX_SOURCE_DIMENSION_PX = 12_000
 export const IMAGE_ATTACHMENT_MAX_SOURCE_PIXELS = 50_000_000
@@ -34,7 +39,7 @@ export function decodeImageAttachmentDataUrl(value: string): Buffer | null {
 
 export async function processImageAttachmentToWebp(
   imageBuffer: Buffer,
-  options: { enforceSourcePixelLimit?: boolean } = {},
+  options: { enforceSourcePixelLimit?: boolean; quality?: number } = {},
 ): Promise<ProcessedImageAttachment | null> {
   const metadata = await sharp(imageBuffer).metadata().catch(() => null)
 
@@ -68,7 +73,7 @@ export async function processImageAttachmentToWebp(
       fit: 'inside',
       withoutEnlargement: true,
     })
-    .webp({ quality: IMAGE_ATTACHMENT_WEBP_QUALITY })
+    .webp({ quality: options.quality ?? IMAGE_ATTACHMENT_WEBP_QUALITY })
     .toBuffer()
 
   const outputMetadata = await sharp(buffer).metadata().catch(() => null)
