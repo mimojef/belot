@@ -26,6 +26,7 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
   if (participant === null) {
     return {
       seat,
+      profileId: null,
       displayName: 'Празно място',
       isOccupied: false,
       isBot: false,
@@ -41,6 +42,15 @@ function createSeatSnapshot(room: ServerRoom, seat: Seat): RoomSeatSnapshot {
 
   return {
     seat,
+    // Stage 2.1: ботовете вече СА допустими gift targets, стига да имат
+    // реален DB-backed profileId (regular matchmaking bots имат такъв —
+    // виж selectMatchmakingBotProfiles.ts/pickEligibleBotProfileFromDb.ts).
+    // Затова profileId вече се излага и за bot participants, не само human —
+    // identity.profileId е null за rare fallback bot без DB profile (bot
+    // pool изчерпан), което client-side gift icon guard-а вече покрива.
+    // Server-side resolveTableGiftParticipants.ts остава authoritative
+    // валидация (defense in depth), не само тоя snapshot флаг.
+    profileId: participant.identity.profileId ?? null,
     displayName: getDisplayNameFromIdentity(participant.identity),
     isOccupied: true,
     isBot: participant.kind === 'bot',
@@ -321,6 +331,8 @@ export function createRoomSnapshotMessage(
   room: ServerRoom,
   yourSeat: Seat | null,
 ): RoomSnapshotMessage {
+  const nowMs = Date.now()
+
   return {
     type: 'room_snapshot',
     roomId: room.id,
@@ -339,5 +351,11 @@ export function createRoomSnapshotMessage(
     tournamentAttendance: room.config.tournamentAttendance ?? null,
     tournamentBotReplacements: room.config.tournamentBotReplacements ?? [],
     tournamentBanners: room.config.tournamentBanners ?? [],
+    // Lazy expiry filtering — reconnect-ващ клиент никога не получава вече
+    // изтекъл gift overlay. Няма сървърен timer/polling за почистване.
+    activeTableGifts: Object.values(room.config.activeTableGifts ?? {}).filter(
+      (gift): gift is NonNullable<typeof gift> =>
+        gift !== undefined && Date.parse(gift.expiresAt) > nowMs,
+    ),
   }
 }

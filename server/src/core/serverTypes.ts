@@ -199,6 +199,27 @@ export type RoomSeatSlot = {
   participant: RoomParticipant | null
 }
 
+/**
+ * Активен table gift overlay върху avatar-а на ПОЛУЧАТЕЛЯ (Stage 2).
+ * Ephemeral, self-expiring, reconnect-safe room-scoped state — точно същият
+ * pattern като TournamentRoomBannerSnapshot (ISO timestamps, lazy expiry
+ * filtering в createRoomSnapshotMessage, никакъв polling/timer на сървъра).
+ * НЕ влиза в authoritative game state (serverGameTypes.ts) — това е
+ * ancillary room metadata, не gameplay.
+ */
+export type ActiveTableGiftSnapshot = {
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: ProfileId
+  senderSeat: Seat
+  senderDisplayName: string
+  recipientSeat: Seat
+  sentAt: string
+  expiresAt: string
+}
+
 export type ServerRoomConfig = {
   maxPlayers: 4
   allowBots: boolean
@@ -223,6 +244,12 @@ export type ServerRoomConfig = {
   tournamentAttendance?: TournamentAttendanceSnapshot | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
   tournamentBanners?: TournamentRoomBannerSnapshot[]
+  /**
+   * Keyed по RECIPIENT seat — нов подарък към същия получател ЗАМЕСТВА стария
+   * (по конструкция, чрез overwrite на ключа). Изтеклите записи се филтрират
+   * lazy при snapshot build, не се чистят с таймер.
+   */
+  activeTableGifts?: Partial<Record<Seat, ActiveTableGiftSnapshot>>
 }
 
 export type ServerBootstrapAuthoritativeState = {

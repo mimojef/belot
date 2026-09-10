@@ -11,6 +11,7 @@
     "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts",
     "check:gift-success-message-stale-cleanup": "npx tsx scripts/checkGiftSuccessMessageStaleCleanup.ts",
     "check:gift-item-notification-queue": "npx tsx scripts/checkGiftItemNotificationQueue.ts",
+    "check:table-gift-presentation": "npx tsx scripts/checkTableGiftPresentation.ts",
     "check:pika-team-profile-action-set": "npx tsx scripts/checkPikaTeamProfileActionSet.ts",
     "check:cutting-pile-stack-order-fix": "npx tsx scripts/checkCuttingPileStackOrderFix.ts",
     "check:chat-message-notification": "npx tsx scripts/checkChatMessageNotification.ts",

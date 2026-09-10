@@ -430,6 +430,36 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'send_table_gift') {
+      // Root cause fix: send_table_gift липсваше тук изцяло — TypeScript
+      // ClientMessage union-ът вече го знаеше (index.ts компилираше чисто),
+      // но runtime parser-ът (тоя whitelist) никога не беше обновен при
+      // Stage 2 имплементацията. Резултат: parseClientMessage връщаше null
+      // за ВСЯКО send_table_gift съобщение → index.ts пращаше generic
+      // {type:'error', message:'Invalid message payload.'} → клиентският
+      // table_gift_send_result listener никога не се задейства →
+      // tableGiftModal.submittingGiftItemId остава завинаги non-null (UI
+      // заклещен в disabled/"not-allowed" състояние). Важи еднакво за
+      // human И bot recipient — заявката никога не стигаше до
+      // resolveTableGiftParticipants/sendGiftItem изобщо.
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const recipientProfileId = normalizeRequiredText(parsed.recipientProfileId)
+      const giftItemId = normalizeRequiredText(parsed.giftItemId)
+      const requestId = normalizeRequiredText(parsed.requestId)
+
+      if (roomId === null || recipientProfileId === null || giftItemId === null || requestId === null) {
+        return null
+      }
+
+      return {
+        type: 'send_table_gift',
+        roomId,
+        recipientProfileId,
+        giftItemId,
+        requestId,
+      }
+    }
+
     if (parsed.type === 'request_private_rooms_list') {
       return { type: 'request_private_rooms_list' }
     }

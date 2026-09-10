@@ -12955,12 +12955,87 @@ export function createLobbyFlowController(
   // гарантира "не отваряй няколко modal overlay-а едновременно" (брифа §3/6).
   // Ако вече има активен giftItemReceivedModal, новите items просто чакат в
   // queue-то (enqueue-нати по-горе) до completeCurrentGiftItemNotification().
+  // Stage 2 §17-21: РЕШЕНИЕТО за презентация се взима в момента на
+  // ИЗВАЖДАНЕ от опашката (не при enqueue) — потребителят може да влезе или
+  // излезе от игра, докато delivery-то чака на опашката.
+  //
+  // Ключова архитектурна находка: докато играчът е в стая,
+  // shouldSuppressLobbyRender() е true и render() НЕ пипа DOM-а изобщо —
+  // затова нормалният lobby модал е физически невъзможен там. Затова
+  // in-game презентацията е self-mounted document.body банер (същият подход
+  // като overlay-ите в active-room контролера), а не lobby markup.
   function showNextGiftItemNotification(): void {
     if (state.giftItemReceivedModal !== null) return
     const next = state.giftItemNotificationQueue.shift()
     if (!next) return
     state.giftItemReceivedModal = next
+
+    if (options.getIsInGame?.() ?? false) {
+      showGiftItemReceivedBanner(next)
+      return
+    }
+
     render()
+  }
+
+  // Компактен top banner за получател, който Е в активна игра. Съзнателно
+  // НЕ блокира input и не пипа игрови таймери. Затварянето минава през
+  // СЪЩИЯ completeCurrentGiftItemNotification() като модала, така че
+  // mark-shown семантиката остава непроменена от Stage 1.
+  function showGiftItemReceivedBanner(delivery: {
+    transactionId: string
+    itemName: string
+    imageUrl: string
+    fromDisplayName: string
+  }): void {
+    document.body.querySelector('[data-ingame-gift-banner="1"]')?.remove()
+
+    const host = document.createElement('div')
+    host.setAttribute('data-ingame-gift-banner', '1')
+    host.style.cssText = [
+      'position:fixed',
+      'left:50%',
+      'top:max(12px, env(safe-area-inset-top))',
+      'transform:translateX(-50%)',
+      'z-index:13600',
+      'width:min(92vw, 460px)',
+      'pointer-events:auto',
+    ].join(';')
+    host.innerHTML = `
+      <div style="
+        display:flex;
+        align-items:center;
+        gap:12px;
+        padding:10px 12px;
+        border-radius:14px;
+        border:2px solid rgba(212,165,32,0.72);
+        background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);
+        box-shadow:0 18px 44px rgba(0,0,0,0.5);
+      ">
+        <img
+          src="${escapeHtml(delivery.imageUrl)}"
+          alt="${escapeHtml(delivery.itemName)}"
+          style="width:75px;height:75px;object-fit:contain;flex:0 0 auto;"
+        />
+        <div style="flex:1 1 auto;min-width:0;text-align:left;">
+          <div style="font-size:15px;line-height:1.25;color:#f8fafc;overflow-wrap:anywhere;"><span style="font-weight:900;">${escapeHtml(delivery.fromDisplayName)}</span><span style="font-weight:400;"> ти подари</span></div>
+          <div style="margin-top:4px;font-size:14px;font-weight:800;color:#f4c95b;overflow-wrap:anywhere;">${escapeHtml(delivery.itemName)}</div>
+        </div>
+        <button
+          type="button"
+          data-ingame-gift-banner-ok="1"
+          style="flex:0 0 auto;height:36px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;"
+        >OK</button>
+      </div>
+    `
+    host.addEventListener('click', (event) => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (!target.closest('[data-ingame-gift-banner-ok="1"]')) return
+      host.remove()
+      completeCurrentGiftItemNotification()
+    })
+    document.body.appendChild(host)
   }
 
   // Извиква се от onGiftItemReceivedClose (auto-dismiss ИЛИ явен X/OK клик —
@@ -12970,6 +13045,9 @@ export function createLobbyFlowController(
   function completeCurrentGiftItemNotification(): void {
     const delivery = state.giftItemReceivedModal
     state.giftItemReceivedModal = null
+    // Ако текущото delivery е било показано като in-game banner, махаме го —
+    // no-op, когато е бил показан нормалният модал.
+    document.body.querySelector('[data-ingame-gift-banner="1"]')?.remove()
     if (delivery) {
       void options.onMarkGiftItemDeliveryShown?.(delivery.transactionId)
     }

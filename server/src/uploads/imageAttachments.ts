@@ -11,6 +11,23 @@ export const IMAGE_ATTACHMENT_WEBP_QUALITY = 82
 // options.quality. Останалите callers (avatars/chat/topics/support) не подават
 // quality изобщо и продължават да ползват IMAGE_ATTACHMENT_WEBP_QUALITY по-горе.
 export const GIFT_ITEM_IMAGE_WEBP_QUALITY = 90
+// Gift изображенията се показват 1:1 при 100% fill върху avatar overlay
+// slot-ове (table gift) — малък source (напр. 100x100), обработен през
+// shared withoutEnlargement:true pipeline-а, оставаше на реалния си малък
+// размер и после browser-ът го upscale-ваше визуално → pixelation. Затова
+// gift-items upload route-ът подава explicit dimensionPx/allowEnlargement
+// override-и, водещи до СТАНДАРТИЗИРАН output за ВСЯКО gift изображение
+// (upscale ако source е по-малък, downscale ако е по-голям) — останалите
+// callers (avatars/chat/topics/support) не подават тия опции и продължават
+// с default 1920px/inside/withoutEnlargement поведението.
+// 250 (не 512) — контролиран experiment: live diagnostic (getBoundingClientRect,
+// computed CSS) доказа, че gift overlay <img> вече рендира в 1:1 идентичен
+// box с normal avatar <img> (same rect, same CSS, same parent transforms).
+// Единствената останала неизравнена променлива между двата беше source
+// output dimension-ът (avatar route = createCroppedAvatarWebp() output
+// 250x250, gift route тук = 512x512) — изравнено, за да се изолира дали
+// самият source resolution mismatch допринася за възприетата разлика.
+export const GIFT_ITEM_IMAGE_DIMENSION_PX = 250
 export const IMAGE_ATTACHMENT_FILENAME_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.webp$/
 export const IMAGE_ATTACHMENT_MAX_SOURCE_DIMENSION_PX = 12_000
 export const IMAGE_ATTACHMENT_MAX_SOURCE_PIXELS = 50_000_000
@@ -39,7 +56,14 @@ export function decodeImageAttachmentDataUrl(value: string): Buffer | null {
 
 export async function processImageAttachmentToWebp(
   imageBuffer: Buffer,
-  options: { enforceSourcePixelLimit?: boolean; quality?: number } = {},
+  options: {
+    enforceSourcePixelLimit?: boolean
+    quality?: number
+    /** Override за resize target dimension (квадрат). Default: IMAGE_ATTACHMENT_MAX_DIMENSION_PX. */
+    dimensionPx?: number
+    /** Override за withoutEnlargement. Default: false тук означава "позволи uplscale" — само gift-items route-ът подава true explicit; всички други callers не подават нищо и остават с shared withoutEnlargement:true поведението (виж resize() call-а по-долу). */
+    allowEnlargement?: boolean
+  } = {},
 ): Promise<ProcessedImageAttachment | null> {
   const metadata = await sharp(imageBuffer).metadata().catch(() => null)
 
@@ -67,11 +91,19 @@ export async function processImageAttachmentToWebp(
     }
   }
 
+  const dimensionPx = options.dimensionPx ?? IMAGE_ATTACHMENT_MAX_DIMENSION_PX
+  // fit:'cover' (не 'inside') само когда allowEnlargement===true (gift-items
+  // route-ът) — гарантира ТОЧЕН dimensionPx x dimensionPx output дори ако
+  // source не е перфектен квадрат (defense-in-depth, заданието casus: "gift
+  // images са винаги квадратни", но upload-ът все пак validate-ва каквото
+  // admin-ът реално качи). Останалите callers пазят непроменено 'inside' +
+  // withoutEnlargement:true (default false тук означава "не позволявай
+  // enlargement", т.е. withoutEnlargement:true остава default).
   const buffer = await sharp(imageBuffer)
     .rotate()
-    .resize(IMAGE_ATTACHMENT_MAX_DIMENSION_PX, IMAGE_ATTACHMENT_MAX_DIMENSION_PX, {
-      fit: 'inside',
-      withoutEnlargement: true,
+    .resize(dimensionPx, dimensionPx, {
+      fit: options.allowEnlargement === true ? 'cover' : 'inside',
+      withoutEnlargement: options.allowEnlargement !== true,
     })
     .webp({ quality: options.quality ?? IMAGE_ATTACHMENT_WEBP_QUALITY })
     .toBuffer()

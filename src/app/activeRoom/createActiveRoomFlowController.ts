@@ -1,4 +1,5 @@
 import {
+  type ActiveTableGiftSnapshot,
   type ClientBidAction,
   type MatchFoundMessage,
   type MatchStake,
@@ -28,6 +29,7 @@ import {
 import {
   type ActiveRoomFlowController,
   type ActiveRoomState,
+  type ActiveTableGiftOverlay,
   type BiddingUiState,
   type CreateActiveRoomFlowControllerOptions,
   type CuttingAnimationCache,
@@ -204,6 +206,8 @@ export function createActiveRoomFlowController(
   let emojiPickerOpen = false
   let phrasePickerOpen = false
   const EMOJI_BUBBLE_DURATION_MS = 4000
+  const TABLE_GIFT_FLIGHT_MS = 1600
+  const TABLE_GIFT_FADE_MS = 320
   const PHRASE_BUBBLE_DURATION_MS = 4500
   const EMOJI_COUNT = 24
   const SCORING_VISUAL_COUNTDOWN_MS = 5000
@@ -1366,7 +1370,31 @@ export function createActiveRoomFlowController(
       if (ok) return
     }
 
-    // Full rebuild (first render or structural change)
+    // Full rebuild (first render или structural change — напр. нов card fan
+    // seat set при trick completion, промяна на dealer/highlight и т.н.).
+    // ROOT CAUSE на intermittent table gift flicker: host.innerHTML = html
+    // по-долу пресъздава ЦЯЛОТО seat-panels поддърво, включително
+    // [data-seat-gift-overlay] slot-овете — те се връщат към празния,
+    // display:none template от renderSeatGiftOverlaySlot(). syncTableGiftOverlays()
+    // се извиква СЛЕД целия render pass (от syncActiveRoomOverlayEffects,
+    // синхронно в същия JS tick), но между двете DOM мутации overlay-ът
+    // реално изчезва и се пресъздава наново — достатъчно, за да позволи на
+    // браузъра да paint-не intermediate frame по средата на активен fade
+    // transition/layout batch, особено докато countdown/card-fan анимации
+    // вече текат паралелно. Затова snapshot-ваме съществуващите gift-overlay
+    // nodes ПРЕДИ rebuild-а и ги restore-ваме ВЕДНАГА след него, в СЪЩАТА
+    // синхронна функция — overlay-ът никога не е реално празен между двете
+    // стъпки, вместо да разчитаме overlay sync-ът да дойде "достатъчно бързо"
+    // по-късно в render pass-а.
+    const preservedGiftOverlays = host
+      ? Array.from(host.querySelectorAll<HTMLElement>('[data-seat-gift-overlay]')).map((node) => ({
+          seat: node.getAttribute('data-seat-gift-overlay'),
+          transactionId: node.dataset.giftTransactionId,
+          innerHTML: node.innerHTML,
+          style: node.getAttribute('style'),
+        }))
+      : []
+
     if (!host) {
       const el = document.createElement('div')
       el.setAttribute('data-seat-panels-host', '1')
@@ -1374,6 +1402,15 @@ export function createActiveRoomFlowController(
       host = el
     }
     host.innerHTML = html
+
+    for (const preserved of preservedGiftOverlays) {
+      if (!preserved.seat || !preserved.transactionId) continue
+      const freshNode = host.querySelector<HTMLElement>(`[data-seat-gift-overlay="${preserved.seat}"]`)
+      if (!freshNode) continue
+      freshNode.dataset.giftTransactionId = preserved.transactionId
+      freshNode.innerHTML = preserved.innerHTML
+      if (preserved.style) freshNode.setAttribute('style', preserved.style)
+    }
   }
 
   function patchEmojiOnlyInPanels(html: string): void {
@@ -4879,10 +4916,723 @@ export function createActiveRoomFlowController(
     options.root.appendChild(host)
   }
 
+  // ── Table gift overlays (Stage 2) ───────────────────────────────────────
+  // Dedup СТРОГО по transactionId (никога по sender/recipient/gift — два
+  // еднакви подаръка от същия човек са две отделни събития). Bounded:
+  // пазим само последните TABLE_GIFT_DEDUP_LIMIT id-та.
+  const processedTableGiftTransactionIds = new Set<string>()
+  const TABLE_GIFT_DEDUP_LIMIT = 64
+  const tableGiftOverlayTimerIds: Partial<Record<Seat, number>> = {}
+
+  /**
+   * Presentation-only suppression — НЕ е server/canonical state. Докато
+   * седалка присъства тук, syncTableGiftOverlays() изцяло пропуска тоя
+   * seat: DOM-ът остава такъв, какъвто е бил (стар overlay, ако имаше, или
+   * празен avatar) — новият canonical gift в activeTableGiftOverlays[seat]
+   * НЕ се разкрива визуално, докато полетът не приключи. Стойността е
+   * transactionId-то, чието landing в момента се очаква за тоя seat —
+   * позволява stale-callback защита (§9 от брифа): ако втори live gift
+   * пристигне към същия seat, докато първият още лети, mapping-ът се
+   * презаписва с новия transactionId; late onfinish на СТАРАТА анимация
+   * проверява дали все още е "текущият очакван" преди да revela-не overlay,
+   * иначе е no-op (по-новият полет вече ще си има собствен onfinish).
+   */
+  const pendingLandingTransactionIdBySeat: Partial<Record<Seat, string>> = {}
+
+  function rememberTableGiftTransaction(transactionId: string): void {
+    processedTableGiftTransactionIds.add(transactionId)
+    if (processedTableGiftTransactionIds.size > TABLE_GIFT_DEDUP_LIMIT) {
+      const oldest = processedTableGiftTransactionIds.values().next().value
+      if (oldest !== undefined) {
+        processedTableGiftTransactionIds.delete(oldest)
+      }
+    }
+  }
+
+  /**
+   * Reconnect path. Пълни overlay state-а от room_snapshot — БЕЗ да пуска
+   * летящата анимация (тя тръгва изключително от live table_gift_item_sent
+   * push). Транзакциите се маркират като видени, за да не се анимира
+   * повторно, ако същият broadcast дойде след snapshot-а.
+   */
+  function applyActiveTableGiftsFromSnapshot(gifts: ActiveTableGiftSnapshot[]): void {
+    if (!activeRoomState) return
+
+    const nowMs = Date.now()
+
+    for (const gift of gifts) {
+      if (Date.parse(gift.expiresAt) <= nowMs) continue
+
+      rememberTableGiftTransaction(gift.transactionId)
+      activeRoomState.activeTableGiftOverlays[gift.recipientSeat] = {
+        transactionId: gift.transactionId,
+        giftItemId: gift.giftItemId,
+        giftName: gift.giftName,
+        imageUrl: gift.imageUrl,
+        senderSeat: gift.senderSeat,
+        senderDisplayName: gift.senderDisplayName,
+        expiresAt: gift.expiresAt,
+      }
+      // Reconnect семантика (§6 от брифа): overlay-ът трябва да се покаже
+      // ВЕДНАГА, без flight/pending-landing изчакване. Ако тоя seat случайно
+      // е бил suppressed от полет, прекъснат преди reconnect-а (rare race —
+      // потребителят refresh-ва точно докато gift-ът лети), премахваме
+      // маркера тук explicit — snapshot path никога не вика
+      // playTableGiftFlightAnimation, значи никой onfinish/fallback не би
+      // го освободил сам, и overlay-ът би останал hidden завинаги.
+      delete pendingLandingTransactionIdBySeat[gift.recipientSeat]
+    }
+  }
+
+  function clearTableGiftOverlayTimer(seat: Seat): void {
+    const timerId = tableGiftOverlayTimerIds[seat]
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId)
+      delete tableGiftOverlayTimerIds[seat]
+    }
+  }
+
+  // seat е АБСОЛЮТЕН server seat — DOM slot-овете са keyed по абсолютен
+  // seat (визуалната ротация е в позиционирането на anchor-а).
+  function hideTableGiftOverlayNode(seat: Seat): void {
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    const node = host?.querySelector<HTMLElement>(`[data-seat-gift-overlay="${seat}"]`)
+    if (!node) return
+    // Fade-in transition-ът е изчистен (виж syncTableGiftOverlays) — трябва
+    // да се презададе тук, само за fade-out момента.
+    node.style.transition = `opacity ${TABLE_GIFT_FADE_MS}ms ease`
+    node.style.opacity = '0'
+    window.setTimeout(() => {
+      if (node.dataset.giftTransactionId === undefined) return
+      node.style.display = 'none'
+      node.innerHTML = ''
+      delete node.dataset.giftTransactionId
+    }, TABLE_GIFT_FADE_MS)
+  }
+
+  // ROOT CAUSE на "gift image по-малка от avatar area": image-ът беше
+  // хардкоднат на 82% width/height с padding около него. Slot-ът
+  // (renderSeatGiftOverlaySlot, position:absolute;inset:0 спрямо СЪЩИЯ
+  // data-profile-seat-btn container, в който живее и avatar <img>-ът) вече
+  // е точно avatar-size — тук само трябва image-ът реално да запълни целия
+  // slot (100%/100%), а не 82% от него. Gift изображенията са квадратни,
+  // avatar <img> ползва object-fit:cover — object-fit:cover тук дава
+  // идентичен резултат за квадратен source в квадратен/почти-квадратен
+  // target и гарантира пълно покритие без празни ивици, точно като avatar-а.
+  // Img-ът тук нарочно НЕ носи собствен position:absolute/inset:0 — wrapping
+  // div-ът (renderSeatGiftOverlaySlot) вече е position:absolute;inset:0
+  // спрямо data-profile-seat-btn, така img-ът просто трябва да запълни тоя
+  // wrapper (100%/100%), точно както avatar <img>-ът запълва directно
+  // data-profile-seat-btn-а. Двоен absolute positioning (wrapper + img)
+  // не променя финалните dimensions, но е ненужна layout/compositing
+  // разлика спрямо avatar path-а — премахнат за максимално еквивалентен
+  // render path (виж брифа "gift image да използва максимално същия
+  // DOM/CSS/rendering path като normal avatar image").
+  function renderTableGiftOverlayInnerHtml(overlay: ActiveTableGiftOverlay): string {
+    return `
+      <img
+        src="${escapeHtml(overlay.imageUrl)}"
+        alt="${escapeHtml(overlay.giftName)}"
+        style="
+          width:100%;
+          height:100%;
+          object-fit:cover;
+          display:block;
+        "
+      />
+    `
+  }
+
+  /**
+   * Идемпотентен DOM sync за 60-секундните overlay-и (моделиран по
+   * syncTournamentBanners): филтрира по expiresAt, пише само когато
+   * transactionId се е сменил, и въоръжава self-clear таймер с ОСТАВАЩОТО
+   * време (expiresAt - now), не с фиксирани 60 сек — сървърът е
+   * authoritative за изтичането, така reconnect показва точния остатък.
+   */
+  function syncTableGiftOverlays(): void {
+    if (!activeRoomState) return
+
+    const host = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    if (!host) return
+
+    const nowMs = Date.now()
+
+    for (const [seatKey, overlay] of Object.entries(activeRoomState.activeTableGiftOverlays) as [
+      Seat,
+      ActiveTableGiftOverlay | undefined,
+    ][]) {
+      if (!overlay) continue
+
+      // Presentation timing fix: докато летящата анимация за ТОЗИ конкретен
+      // transaction still тича, DOM-ът за seat-а остава напълно недокоснат —
+      // canonical state (по-горе) вече е новия gift, но визуално не го
+      // разкриваме преди landing (виж playTableGiftFlightAnimation onfinish).
+      // Стар overlay (ако имаше) си остава видим точно както е бил.
+      if (pendingLandingTransactionIdBySeat[seatKey] === overlay.transactionId) {
+        continue
+      }
+
+      const remainingMs = Date.parse(overlay.expiresAt) - nowMs
+
+      if (remainingMs <= 0) {
+        clearTableGiftOverlayTimer(seatKey)
+        delete activeRoomState.activeTableGiftOverlays[seatKey]
+        hideTableGiftOverlayNode(seatKey)
+        continue
+      }
+
+      const node = host.querySelector<HTMLElement>(`[data-seat-gift-overlay="${seatKey}"]`)
+      if (!node) continue
+
+      if (node.dataset.giftTransactionId !== overlay.transactionId) {
+        node.dataset.giftTransactionId = overlay.transactionId
+        node.innerHTML = renderTableGiftOverlayInnerHtml(overlay)
+      }
+
+      // Винаги (re)прилагаме визуалното състояние — пълен rebuild на
+      // seat panels нулира inline стиловете.
+      // ROOT CAUSE на "gift overlay изглежда по-меко от normal avatar
+      // <img>": persistent `transition:opacity` (зададена веднъж тук и
+      // никога не махана) държи node-а в composited-layer state за
+      // ЦЕЛИТЕ 60 секунди показване, не само за 320ms fade-in момента —
+      // nested fractional scale(0.8/0.9) × panelScale transform-ите от
+      // parent-ите после минават през допълнителен raster/resize stage
+      // на тоя composited layer, вместо direct non-layered paint (какъвто
+      // получава avatar <img>, който няма НИКАКЪВ transition). Затова
+      // transition-ът тук се маха веднага след fade-in-а завърши — node-ът
+      // остава статично видим (opacity:1, без active transition) през
+      // останалата част от 60-те секунди, идентично на avatar paint path-а.
+      node.style.display = 'flex'
+      node.style.transition = `opacity ${TABLE_GIFT_FADE_MS}ms ease`
+      node.style.opacity = '1'
+      window.setTimeout(() => {
+        node.style.transition = ''
+      }, TABLE_GIFT_FADE_MS)
+
+      if (tableGiftOverlayTimerIds[seatKey] === undefined) {
+        tableGiftOverlayTimerIds[seatKey] = window.setTimeout(() => {
+          delete tableGiftOverlayTimerIds[seatKey]
+          if (activeRoomState) {
+            delete activeRoomState.activeTableGiftOverlays[seatKey]
+          }
+          hideTableGiftOverlayNode(seatKey)
+        }, remainingMs)
+      }
+    }
+  }
+
+  function clearAllTableGiftOverlays(): void {
+    for (const seat of Object.keys(tableGiftOverlayTimerIds) as Seat[]) {
+      clearTableGiftOverlayTimer(seat)
+    }
+    processedTableGiftTransactionIds.clear()
+    // Изчиства и pending-landing suppression state-а — иначе stale entry
+    // от прекъснат полет (напр. напускане на стаята по средата на
+    // анимацията) би "заключил" overlay-а на тоя seat скрит завинаги в
+    // следваща стая/reconnect, тъй като новите gift-ове там никога няма да
+    // имат СЪЩИЯ transactionId, за да минат release guard-а естествено.
+    for (const seat of Object.keys(pendingLandingTransactionIdBySeat) as Seat[]) {
+      delete pendingLandingTransactionIdBySeat[seat]
+    }
+    if (activeRoomState) {
+      activeRoomState.activeTableGiftOverlays = {}
+    }
+    document.body.querySelector('[data-table-gift-flight-layer="1"]')?.remove()
+  }
+
+  /**
+   * Летяща анимация от avatar-а на изпращача към avatar-а на получателя.
+   *
+   * Techniques (следва CLAUDE.md CSS правилата):
+   *  - Отделен, преизползван position:fixed / pointer-events:none слой,
+   *    закачен веднъж към document.body — не се пресъздава за всеки полет.
+   *  - Web Animations API с translate/scale/opacity — НИКОГА top/left, за
+   *    да няма layout thrashing.
+   *  - Всеки полет е собствен DOM node, затова паралелни подаръци към
+   *    различни получатели просто летят едновременно, без нужда от
+   *    изкуствен single-lane FIFO queue (заданието изрично разрешава
+   *    по-простото решение, ако визуално е чисто).
+   */
+  // Маха тоя seat от pending-landing suppression-а САМО ако transactionId-то
+  // все още съвпада с очакваното (stale-callback защита, §9 от брифа) —
+  // late onfinish/fallback на изпреварен (по-стар) полет никога не бива да
+  // revela-не/скрие overlay-а на по-нов, вече landнал gift. Праща render,
+  // за да може syncTableGiftOverlays() реално да покаже canonical state-а.
+  function releasePendingTableGiftLanding(recipientSeat: Seat, transactionId: string): void {
+    if (pendingLandingTransactionIdBySeat[recipientSeat] !== transactionId) {
+      return
+    }
+    delete pendingLandingTransactionIdBySeat[recipientSeat]
+    syncTableGiftOverlays()
+  }
+
+  function playTableGiftFlightAnimation(
+    senderSeat: Seat,
+    recipientSeat: Seat,
+    imageUrl: string,
+    transactionId: string,
+  ): void {
+    // Fallback (§7 от брифа): ако анимацията не може безопасно да
+    // стартира (без Web Animations API, липсващ seat-panels host, липсващ
+    // sender/recipient DOM anchor, или zero-size rect — все още не е
+    // layout-нато), overlay-ът НЕ бива да остане hidden завинаги — веднага
+    // освобождаваме suppression-а и показваме canonical state-а directно.
+    if (typeof document.createElement('div').animate !== 'function') {
+      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      return
+    }
+
+    const panelsHost = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
+    if (!panelsHost) {
+      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      return
+    }
+
+    // ВАЖНО (потвърдено срещу реалния DOM): data-profile-seat-btn и
+    // data-seat-gift-overlay носят АБСОЛЮТНИЯ server seat, не визуалния —
+    // per-player ротацията се прилага чрез ПОЗИЦИОНИРАНЕТО на anchor-а
+    // (getCuttingSeatPanelAnchorStyle(visualSeat, ...)), не чрез стойността
+    // на атрибута. Затова тук се търси директно по абсолютния seat, а
+    // getBoundingClientRect връща вече правилната визуална позиция.
+    const fromSeatNode = panelsHost.querySelector<HTMLElement>(
+      `[data-profile-seat-btn="${senderSeat}"]`,
+    )
+    const toSeatNode = panelsHost.querySelector<HTMLElement>(
+      `[data-profile-seat-btn="${recipientSeat}"]`,
+    )
+
+    if (!fromSeatNode || !toSeatNode) {
+      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      return
+    }
+
+    const fromRect = fromSeatNode.getBoundingClientRect()
+    const toRect = toSeatNode.getBoundingClientRect()
+
+    if (fromRect.width === 0 || toRect.width === 0) {
+      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      return
+    }
+
+    let layer = document.body.querySelector<HTMLElement>('[data-table-gift-flight-layer="1"]')
+    if (!layer) {
+      layer = document.createElement('div')
+      layer.setAttribute('data-table-gift-flight-layer', '1')
+      layer.style.cssText = [
+        'position:fixed',
+        'inset:0',
+        'pointer-events:none',
+        'z-index:60',
+      ].join(';')
+      document.body.appendChild(layer)
+    }
+
+    const flyer = document.createElement('img')
+    flyer.src = imageUrl
+    flyer.alt = ''
+    // Landing-геометрия (§3 от брифа): базовият flyer размер е ТОЧНО
+    // recipient avatar rect-а (toRect), не fixed константа — при landing
+    // (scale 1, offset 1 в keyframe-овете по-долу) flyer-ът вече съвпада
+    // 1:1 с permanent 60-sec overlay-а (position:absolute;inset:0;
+    // width:100%;height:100% спрямо СЪЩИЯ data-profile-seat-btn container,
+    // виж renderTableGiftOverlayInnerHtml) — нула visual "jump" при
+    // прехвърлянето. minWidthPx guard-ва срещу изроден 0px rect edge case.
+    const minWidthPx = Math.max(toRect.width, 1)
+    const minHeightPx = Math.max(toRect.height, 1)
+    flyer.style.cssText = [
+      'position:absolute',
+      'left:0',
+      'top:0',
+      `width:${minWidthPx}px`,
+      `height:${minHeightPx}px`,
+      'object-fit:cover',
+      'filter:drop-shadow(0 8px 18px rgba(0,0,0,0.5))',
+      'will-change:transform,opacity',
+    ].join(';')
+    layer.appendChild(flyer)
+
+    const fromX = fromRect.left + fromRect.width / 2 - minWidthPx / 2
+    const fromY = fromRect.top + fromRect.height / 2 - minHeightPx / 2
+    const toX = toRect.left + toRect.width / 2 - minWidthPx / 2
+    const toY = toRect.top + toRect.height / 2 - minHeightPx / 2
+
+    const animation = flyer.animate(
+      [
+        // Поява при изпращача.
+        { transform: `translate(${fromX}px, ${fromY}px) scale(0.2)`, opacity: 0, offset: 0 },
+        { transform: `translate(${fromX}px, ${fromY}px) scale(1)`, opacity: 1, offset: 0.13 },
+        // Полет с лека дъга нагоре.
+        {
+          transform: `translate(${(fromX + toX) / 2}px, ${Math.min(fromY, toY) - 60}px) scale(1.08)`,
+          opacity: 1,
+          offset: 0.62,
+        },
+        // Кацане + bounce.
+        { transform: `translate(${toX}px, ${toY}px) scale(1.22)`, opacity: 1, offset: 0.88 },
+        { transform: `translate(${toX}px, ${toY}px) scale(0.92)`, opacity: 0.9, offset: 1 },
+      ],
+      {
+        duration: TABLE_GIFT_FLIGHT_MS,
+        easing: 'cubic-bezier(0.22, 0.61, 0.36, 1)',
+        fill: 'both',
+      },
+    )
+
+    animation.onfinish = () => {
+      flyer.remove()
+      // Landing: освобождава suppression-а САМО ако transactionId-то все
+      // още е "текущо очакваното" за тоя seat (виж releasePendingTableGiftLanding
+      // stale-callback защитата) — после syncTableGiftOverlays() реално
+      // разкрива canonical overlay-а. Ако вече е надминат от по-нов gift
+      // (различен transactionId в pendingLandingTransactionIdBySeat), този
+      // late callback е no-op — по-новият полет ще си свърши работата сам.
+      releasePendingTableGiftLanding(recipientSeat, transactionId)
+    }
+    animation.oncancel = () => {
+      flyer.remove()
+      // Fallback (§7): cancel (напр. room end/cleanup по средата на полета)
+      // не бива да остави overlay-а hidden завинаги.
+      releasePendingTableGiftLanding(recipientSeat, transactionId)
+    }
+  }
+
+  // ── In-game gift selector (Stage 2) ─────────────────────────────────────
+  // Самостоятелен, лек модал в active-room слоя (lobby модалът живее в друг
+  // DOM tree/контролер и не се преизползва). Fresh catalog fetch при всяко
+  // отваряне — същият root-cause fix като в Stage 1 openGiftItemModal.
+  type TableGiftCatalogItem = {
+    giftItemId: string
+    name: string
+    imageUrl: string
+    price: number
+  }
+
+  let tableGiftModal: {
+    recipientSeat: Seat
+    recipientProfileId: string
+    recipientName: string
+    items: TableGiftCatalogItem[]
+    isLoading: boolean
+    errorText: string | null
+    submittingGiftItemId: string | null
+    pendingRequestId: string | null
+  } | null = null
+  let tableGiftCatalogRequestToken = 0
+  let tableGiftToastTimerId: number | null = null
+
+  function getMyYellowCoinsBalance(): number | null {
+    return options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null
+  }
+
+  function openTableGiftModal(recipientSeat: Seat): void {
+    if (!activeRoomState) return
+
+    const seatSnapshot = activeRoomState.seats.find((s) => s.seat === recipientSeat)
+    // Bots вече са допустими gift targets (Stage 2.1), стига да имат реален
+    // profileId (regular matchmaking bots имат стабилен DB-backed profileId
+    // — виж resolveTableGiftParticipants.ts). Празни места и rare bot без
+    // profileId (bot pool изчерпан fallback) остават блокирани тук, и на
+    // сървъра. !seatSnapshot.profileId покрива и null, и undefined (по-стар
+    // snapshot).
+    if (!seatSnapshot || !seatSnapshot.profileId) return
+
+    if (recipientSeat === activeRoomState.seat) return
+
+    tableGiftModal = {
+      recipientSeat,
+      recipientProfileId: seatSnapshot.profileId,
+      recipientName: seatSnapshot.displayName,
+      items: [],
+      isLoading: true,
+      errorText: null,
+      submittingGiftItemId: null,
+      pendingRequestId: null,
+    }
+    syncTableGiftModal()
+
+    const requestToken = ++tableGiftCatalogRequestToken
+
+    if (!options.onGiftItemCatalogLoad) {
+      tableGiftModal.isLoading = false
+      tableGiftModal.errorText = 'Подаряването временно не е налично.'
+      syncTableGiftModal()
+      return
+    }
+
+    void (async () => {
+      const result = await options.onGiftItemCatalogLoad!()
+      // Stale response — модалът е затворен/презареден междувременно.
+      if (requestToken !== tableGiftCatalogRequestToken || tableGiftModal === null) return
+      tableGiftModal.isLoading = false
+      if (result.ok) {
+        tableGiftModal.items = result.items
+      } else {
+        tableGiftModal.errorText = result.message
+      }
+      syncTableGiftModal()
+    })()
+  }
+
+  function closeTableGiftModal(): void {
+    tableGiftCatalogRequestToken += 1
+    tableGiftModal = null
+    syncTableGiftModal()
+  }
+
+  function submitTableGift(giftItemId: string): void {
+    if (!activeRoomState || tableGiftModal === null) return
+    // Guard срещу repeat click — същият pattern като giftItemModalSubmittingId.
+    if (tableGiftModal.submittingGiftItemId !== null) return
+
+    if (!options.isConnected() || !options.sendTableGift) {
+      tableGiftModal.errorText = 'Няма връзка със сървъра.'
+      syncTableGiftModal()
+      return
+    }
+
+    // requestId се генерира client-side — idempotency key за
+    // giftItemStore.sendGiftItem (UNIQUE request_id). Повторен submit със
+    // същия requestId не дебитира повторно и не праща втори broadcast.
+    const requestId = crypto.randomUUID()
+    tableGiftModal.submittingGiftItemId = giftItemId
+    tableGiftModal.pendingRequestId = requestId
+    tableGiftModal.errorText = null
+    syncTableGiftModal()
+
+    options.sendTableGift(
+      activeRoomState.roomId,
+      tableGiftModal.recipientProfileId,
+      giftItemId,
+      requestId,
+    )
+  }
+
+  function handleTableGiftSendResult(message: {
+    requestId: string
+    ok: boolean
+    message?: string
+    chargedPrice?: number
+    senderBalanceAfter?: number
+  }): void {
+    if (tableGiftModal === null || tableGiftModal.pendingRequestId !== message.requestId) {
+      return
+    }
+
+    if (!message.ok) {
+      tableGiftModal.submittingGiftItemId = null
+      tableGiftModal.pendingRequestId = null
+      tableGiftModal.errorText = message.message ?? 'Подаръкът не беше изпратен.'
+      syncTableGiftModal()
+      return
+    }
+
+    // Server-authoritative нов баланс — пише се в СЪЩОТО поле, което чете
+    // цялото останало UI (никакво второ огледало на баланса).
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession?.profile && typeof message.senderBalanceAfter === 'number') {
+      authSession.profile.yellowCoinsBalance = message.senderBalanceAfter
+    }
+
+    // Селекторът се затваря САМО след success отговор от сървъра.
+    closeTableGiftModal()
+    showTableGiftToast(
+      typeof message.chargedPrice === 'number'
+        ? `Подаръкът е изпратен. -${message.chargedPrice} жълтици`
+        : 'Подаръкът е изпратен.',
+    )
+  }
+
+  // Non-blocking toast — НЕ спира игрови таймери и не блокира input.
+  function showTableGiftToast(text: string): void {
+    document.body.querySelector('[data-table-gift-toast="1"]')?.remove()
+    if (tableGiftToastTimerId !== null) {
+      window.clearTimeout(tableGiftToastTimerId)
+      tableGiftToastTimerId = null
+    }
+
+    const toast = document.createElement('div')
+    toast.setAttribute('data-table-gift-toast', '1')
+    toast.style.cssText = [
+      'position:fixed',
+      'left:50%',
+      'bottom:max(96px, env(safe-area-inset-bottom))',
+      'transform:translateX(-50%)',
+      'z-index:70',
+      'padding:10px 18px',
+      'border-radius:999px',
+      'background:linear-gradient(180deg, rgba(34,34,34,0.97) 0%, rgba(12,12,12,0.98) 100%)',
+      'border:1px solid rgba(245,187,55,0.75)',
+      'color:#fde68a',
+      'font-size:14px',
+      'font-weight:800',
+      'box-shadow:0 12px 26px rgba(0,0,0,0.45)',
+      'pointer-events:none',
+    ].join(';')
+    toast.textContent = text
+    document.body.appendChild(toast)
+
+    tableGiftToastTimerId = window.setTimeout(() => {
+      tableGiftToastTimerId = null
+      toast.remove()
+    }, 3200)
+  }
+
+  function renderTableGiftModalInnerHtml(): string {
+    if (tableGiftModal === null) return ''
+
+    const balance = getMyYellowCoinsBalance()
+    const balanceText = balance === null ? '—' : String(balance)
+
+    const bodyHtml = tableGiftModal.isLoading
+      ? `<div style="padding:24px;text-align:center;color:#cbd5f5;font-size:14px;font-weight:700;">Зареждане…</div>`
+      : tableGiftModal.items.length === 0
+        ? `<div style="padding:24px;text-align:center;color:#cbd5f5;font-size:14px;font-weight:700;">Няма налични подаръци.</div>`
+        : `<div style="
+              display:grid;
+              grid-template-columns:repeat(auto-fill, minmax(104px, 1fr));
+              gap:10px;
+              padding:14px;
+              max-height:min(52vh, 380px);
+              overflow-y:auto;
+            ">
+            ${tableGiftModal.items
+              .map((item) => {
+                const isSubmitting = tableGiftModal!.submittingGiftItemId === item.giftItemId
+                const isAnySubmitting = tableGiftModal!.submittingGiftItemId !== null
+                // Недостатъчен баланс — визуално disabled; сървърът пак
+                // валидира авторитетно (client-side е само UX).
+                const cannotAfford = balance !== null && balance < item.price
+                const isDisabled = cannotAfford || isAnySubmitting
+                return `
+                  <div
+                    ${isDisabled ? '' : `data-table-gift-pick="${escapeHtml(item.giftItemId)}"`}
+                    style="
+                      border-radius:14px;
+                      border:1px solid ${isSubmitting ? 'rgba(245,187,55,0.95)' : 'rgba(148,163,184,0.35)'};
+                      background:rgba(15,23,42,0.85);
+                      padding:8px;
+                      text-align:center;
+                      cursor:${isDisabled ? 'not-allowed' : 'pointer'};
+                      opacity:${cannotAfford ? '0.42' : '1'};
+                    "
+                  >
+                    <img
+                      src="${escapeHtml(item.imageUrl)}"
+                      alt="${escapeHtml(item.name)}"
+                      style="width:100%;height:72px;object-fit:contain;display:block;"
+                    />
+                    <div style="margin-top:6px;font-size:12px;font-weight:800;color:#e2e8f0;overflow-wrap:anywhere;">${escapeHtml(item.name)}</div>
+                    <div style="margin-top:2px;font-size:12px;font-weight:900;color:#fde68a;">${item.price} ж.</div>
+                  </div>
+                `
+              })
+              .join('')}
+          </div>`
+
+    const errorHtml = tableGiftModal.errorText
+      ? `<div style="padding:0 14px 12px;color:#fca5a5;font-size:13px;font-weight:800;">${escapeHtml(tableGiftModal.errorText)}</div>`
+      : ''
+
+    return `
+      <div
+        data-table-gift-modal-backdrop="1"
+        style="
+          position:fixed;
+          inset:0;
+          background:rgba(3,7,18,0.72);
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          padding:16px;
+        "
+      >
+        <div style="
+          width:min(94vw, 460px);
+          border-radius:20px;
+          border:1px solid rgba(245,187,55,0.6);
+          background:linear-gradient(180deg, rgba(30,30,30,0.99) 0%, rgba(10,10,10,0.99) 100%);
+          box-shadow:0 24px 60px rgba(0,0,0,0.6);
+          overflow:hidden;
+        ">
+          <div style="
+            display:flex;
+            align-items:center;
+            justify-content:space-between;
+            gap:10px;
+            padding:14px;
+            border-bottom:1px solid rgba(148,163,184,0.22);
+          ">
+            <div style="font-size:15px;font-weight:900;color:#f8fafc;overflow-wrap:anywhere;">
+              Подарък за ${escapeHtml(tableGiftModal.recipientName)}
+            </div>
+            <div
+              data-table-gift-modal-close="1"
+              style="
+                cursor:pointer;
+                color:#cbd5f5;
+                font-size:20px;
+                font-weight:900;
+                line-height:1;
+                padding:2px 6px;
+              "
+            >×</div>
+          </div>
+          <div style="padding:10px 14px 0;font-size:13px;font-weight:800;color:#fde68a;">
+            Твой баланс: ${escapeHtml(balanceText)} жълтици
+          </div>
+          ${bodyHtml}
+          ${errorHtml}
+        </div>
+      </div>
+    `
+  }
+
+  function syncTableGiftModal(): void {
+    const existing = document.body.querySelector<HTMLElement>('[data-table-gift-modal-host="1"]')
+
+    if (tableGiftModal === null) {
+      existing?.remove()
+      return
+    }
+
+    if (existing) {
+      existing.innerHTML = renderTableGiftModalInnerHtml()
+      return
+    }
+
+    const host = document.createElement('div')
+    host.setAttribute('data-table-gift-modal-host', '1')
+    host.style.cssText = 'position:fixed;inset:0;z-index:65;'
+    host.innerHTML = renderTableGiftModalInnerHtml()
+    // Делегиран listener, закачен само веднъж при създаване — четем
+    // текущия target при всеки click (никакъв closure към конкретен item).
+    host.addEventListener('click', (event) => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+
+      if (
+        target.closest('[data-table-gift-modal-close="1"]') ||
+        target.matches('[data-table-gift-modal-backdrop="1"]')
+      ) {
+        closeTableGiftModal()
+        return
+      }
+
+      const pick = target.closest<HTMLElement>('[data-table-gift-pick]')
+      if (pick) {
+        const giftItemId = pick.getAttribute('data-table-gift-pick')
+        if (giftItemId) submitTableGift(giftItemId)
+      }
+    })
+    document.body.appendChild(host)
+  }
+
   function syncActiveRoomOverlayEffects(): void {
     syncTournamentBanners()
     syncLeaveControls()
     syncPersistentBotTakeoverPopup()
+    syncTableGiftOverlays()
   }
 
   function applyRoomSnapshotToActiveRoom(message: RoomSnapshotMessage): boolean {
@@ -4919,6 +5669,7 @@ export function createActiveRoomFlowController(
     activeRoomState.tournamentAttendance = message.tournamentAttendance ?? null
     activeRoomState.tournamentBotReplacements = message.tournamentBotReplacements ?? []
     activeRoomState.tournamentBanners = message.tournamentBanners ?? []
+    applyActiveTableGiftsFromSnapshot(message.activeTableGifts ?? [])
     if (message.stakeAmount !== null && message.stakeAmount > 0) {
       activeRoomState.stake = message.stakeAmount as MatchStake
     }
@@ -4979,6 +5730,8 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     clearEmojiReactionUiState()
     clearPhraseReactionUiState()
+    clearAllTableGiftOverlays()
+    closeTableGiftModal()
     shouldSilenceNextBiddingSnapshot = true
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
@@ -5017,6 +5770,7 @@ export function createActiveRoomFlowController(
       tournamentAttendance: null,
       tournamentBotReplacements: [],
       tournamentBanners: [],
+      activeTableGiftOverlays: {},
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(roomId)
@@ -5040,6 +5794,8 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     clearEmojiReactionUiState()
     clearPhraseReactionUiState()
+    clearAllTableGiftOverlays()
+    closeTableGiftModal()
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
     matchEndedPrizeAnimated = false
@@ -5077,6 +5833,7 @@ export function createActiveRoomFlowController(
       tournamentAttendance: null,
       tournamentBotReplacements: [],
       tournamentBanners: [],
+      activeTableGiftOverlays: {},
     }
 
     const pendingRoomSnapshot = pendingRoomSnapshots.get(message.roomId)
@@ -5241,6 +5998,8 @@ export function createActiveRoomFlowController(
       clearBiddingUiState()
       clearEmojiReactionUiState()
       clearPhraseReactionUiState()
+      clearAllTableGiftOverlays()
+      closeTableGiftModal()
       removeEmojiButton()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -5278,6 +6037,8 @@ export function createActiveRoomFlowController(
       clearBiddingUiState()
       clearEmojiReactionUiState()
       clearPhraseReactionUiState()
+      clearAllTableGiftOverlays()
+      closeTableGiftModal()
       removeEmojiButton()
       lastKnownWinningBid = null
       resetPlayingUiCache(playingCache)
@@ -5317,8 +6078,20 @@ export function createActiveRoomFlowController(
       clearPendingCutSubmission()
       clearPendingBidSubmission()
       playingCache.pendingPlayCardSent = false
+      // Defense-in-depth: ако table gift request-ът получи generic
+      // {type:'error'} response вместо изричен table_gift_send_result
+      // (напр. заради бъдещ подобен parser/routing gap, мрежова грешка на
+      // сървъра, или каквото и да е неочаквано), UI не трябва да остане
+      // permanently disabled — освобождаваме submitting state тук, вместо
+      // да разчитаме единствено на table_gift_send_result handler-а.
+      if (tableGiftModal !== null && tableGiftModal.submittingGiftItemId !== null) {
+        tableGiftModal.submittingGiftItemId = null
+        tableGiftModal.pendingRequestId = null
+        tableGiftModal.errorText = message.message
+      }
       activeRoomState.errorText = message.message
       scheduleActiveRoomRender()
+      syncTableGiftModal()
       return true
     }
 
@@ -5336,6 +6109,54 @@ export function createActiveRoomFlowController(
       addPhraseBubble(message.seat as Seat, message.phraseId)
       // Fix №4: същата обосновка като emoji_reaction по-горе.
       scheduleActiveRoomRender(true)
+      return true
+    }
+
+    if (message.type === 'table_gift_item_sent' && message.roomId === activeRoomState.roomId) {
+      // Dedup СТРОГО по transactionId — мрежов дубликат на СЪЩАТА транзакция
+      // е no-op; два отделни подаръка (различни transactionId) винаги се
+      // показват и двата, дори при еднакви sender/recipient/gift.
+      if (processedTableGiftTransactionIds.has(message.transactionId)) {
+        return true
+      }
+      rememberTableGiftTransaction(message.transactionId)
+
+      // Нов подарък към същия получател ЗАМЕСТВА стария в CANONICAL state-а
+      // веднага (server е authoritative, timer-ът за стария се отменя, за
+      // да не скрие предсрочно новия overlay след landing) — но ВИЗУАЛНО
+      // разкриването е suppressed до landing (виж pendingLandingTransactionIdBySeat
+      // коментара по-горе и §2-4 от presentation timing брифа): докато
+      // новият полет тича, старият overlay (ако имаше) остава на екрана
+      // непроменен, синхронизиран от syncTableGiftOverlays skip-guard-а.
+      clearTableGiftOverlayTimer(message.recipientSeat)
+      activeRoomState.activeTableGiftOverlays[message.recipientSeat] = {
+        transactionId: message.transactionId,
+        giftItemId: message.giftItemId,
+        giftName: message.giftName,
+        imageUrl: message.imageUrl,
+        senderSeat: message.senderSeat,
+        senderDisplayName: message.senderDisplayName,
+        expiresAt: message.expiresAt,
+      }
+      pendingLandingTransactionIdBySeat[message.recipientSeat] = message.transactionId
+
+      // Летящата анимация тръгва САМО оттук (live push). Reconnect минава
+      // през applyActiveTableGiftsFromSnapshot и никога не я пуска.
+      // playTableGiftFlightAnimation е отговорна да махне pending-landing
+      // маркера (onfinish success) ИЛИ да го махне веднага (fallback, ако
+      // sender/recipient DOM anchor липсва — виж §7 от брифа, overlay-ът
+      // никога не бива да остане hidden завинаги).
+      playTableGiftFlightAnimation(message.senderSeat, message.recipientSeat, message.imageUrl, message.transactionId)
+
+      // Gift overlay state не участва в cuttingStableRenderKey/
+      // biddingStableRenderKey и не се чете от renderPlayingScreen — същата
+      // обосновка като emoji_reaction: PATCH_ALLOWED е безопасно.
+      scheduleActiveRoomRender(true)
+      return true
+    }
+
+    if (message.type === 'table_gift_send_result' && message.roomId === activeRoomState.roomId) {
+      handleTableGiftSendResult(message)
       return true
     }
 
@@ -5423,6 +6244,8 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     clearEmojiReactionUiState()
     clearPhraseReactionUiState()
+    clearAllTableGiftOverlays()
+    closeTableGiftModal()
     clearTournamentFinalResultPendingRetry()
     tournamentFinalResultMatchId = null
     tournamentFinalResultPrizeAmount = null
@@ -5459,6 +6282,8 @@ export function createActiveRoomFlowController(
     clearBiddingUiState()
     clearEmojiReactionUiState()
     clearPhraseReactionUiState()
+    clearAllTableGiftOverlays()
+    closeTableGiftModal()
     lastKnownWinningBid = null
     resetPlayingUiCache(playingCache)
     removePersistentBotTakeoverPopup()
@@ -5539,6 +6364,16 @@ export function createActiveRoomFlowController(
     if (!(target instanceof Element)) return
 
     closeReactionPickersOnOutsideClick(target)
+
+    // Gift иконата седи ВЪТРЕ в data-profile-seat-btn — прихващаме я преди
+    // profile popup-а, за да не се отворят и двете от един клик.
+    const giftIcon = target.closest<HTMLElement>('[data-active-room-gift-icon]')
+    if (giftIcon && activeRoomState) {
+      e.stopPropagation()
+      const giftSeat = giftIcon.getAttribute('data-active-room-gift-icon') as Seat | null
+      if (giftSeat) openTableGiftModal(giftSeat)
+      return
+    }
 
     const btn = target.closest<HTMLElement>('[data-profile-seat-btn]')
     if (!btn || !activeRoomState) return

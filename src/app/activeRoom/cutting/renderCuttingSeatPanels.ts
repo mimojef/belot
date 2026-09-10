@@ -411,6 +411,102 @@ export function renderCuttingSeatAvatar(
   return getCuttingSeatAvatarFallback(seat, visualSeat, escapeHtml)
 }
 
+// Дублирано копие (проектът НЕ споделя icon helper-и между render модули —
+// established convention; същата функция живее и в
+// renderPlayerProfilePopup.ts и renderLobbyScreen.ts).
+function renderGiftBoxIcon(sizePx: number): string {
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;flex:0 0 auto;vertical-align:-3px;" aria-hidden="true" focusable="false"><rect x="3" y="8" width="18" height="4"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>`
+}
+
+/**
+ * Празен slot за 60-секундния table gift overlay. Стои ВЪТРЕ в
+ * data-profile-seat-btn (който вече е position:absolute и съдържа avatar
+ * <img>), покривайки точно avatar image area-та — не докосва име, таймери,
+ * bid статус, connectivity индикатори, ранг или резултат. Съдържанието се
+ * попълва императивно от syncTableGiftOverlays() в контролера, затова тук
+ * винаги се рендира празен и скрит (display:none) — така PATCH diffing-ът
+ * по data-seat-avatar-url никога не трие активен overlay.
+ */
+function renderSeatGiftOverlaySlot(seat: Seat, borderRadiusPx: number): string {
+  return `
+    <div
+      data-seat-gift-overlay="${seat}"
+      style="
+        position:absolute;
+        inset:0;
+        display:none;
+        align-items:center;
+        justify-content:center;
+        border-radius:${borderRadiusPx}px;
+        overflow:hidden;
+        pointer-events:none;
+        z-index:6;
+      "
+    ></div>
+  `
+}
+
+/**
+ * Самостоятелен gift action бутон — ИЗВЪН avatar/profile card полето (не
+ * badge върху аватара). Sibling на data-seat-profile-card, absolute spрямо
+ * СЪЩИЯ anchor container (data-active-room-seat-anchor) — established
+ * positioning pattern, същият подход като renderCuttingDealerBadge по-горе
+ * (dealer "D" badge е absolute спрямо anchor-a с негативни offset-и извън
+ * card-a; card-ът е единственото visible block дете в anchor flow, затова
+ * anchor bounding box следва card-a при resize/scale без нужда от отделна
+ * координатна система). Pika.bg стил: dark/black background, gold border,
+ * gold SVG (без emoji, без текст върху масата).
+ */
+function renderSeatGiftActionIcon(
+  seat: RoomSeatSnapshot,
+  canSendGift: boolean,
+  visualSeat: Seat,
+): string {
+  if (!canSendGift) {
+    return ''
+  }
+
+  // Seat-specific placement, извън card-a изцяло (card overflow:hidden би
+  // изрязал бутона, ако беше вътре):
+  //  - left/right: над card-а, центриран хоризонтално спрямо card width-а.
+  //  - top: вдясно от card-а, вертикално центриран.
+  const positionStyle =
+    visualSeat === 'top'
+      ? 'right:-32px; top:50%; transform:translateY(-50%);'
+      : 'left:50%; top:-32px; transform:translateX(-50%);'
+
+  // По-светло жълто (rgba(255,224,128,*)) вместо предишното по-тъмно
+  // gold (rgba(224,168,58,*)/rgba(245,197,102,*)) — старото се сливаше
+  // визуално с картите/фона зад бутона. currentColor споделен между
+  // border и SVG icon (stroke="currentColor" в renderGiftBoxIcon), glow
+  // в същия тон, много лек.
+  return `
+    <div
+      data-active-room-gift-icon="${seat.seat}"
+      title="Изпрати подарък"
+      role="button"
+      style="
+        position:absolute;
+        ${positionStyle}
+        width:36px;
+        height:36px;
+        border-radius:10px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        background:linear-gradient(180deg, rgba(28,28,28,0.97) 0%, rgba(10,10,10,0.98) 100%);
+        border:2px solid rgba(255,224,128,0.96);
+        color:rgba(255,224,128,0.98);
+        box-shadow:0 6px 14px rgba(0,0,0,0.4), 0 0 6px rgba(255,224,128,0.28);
+        cursor:pointer;
+        pointer-events:auto;
+        z-index:9;
+        transition:background 0.15s ease, border-color 0.15s ease;
+      "
+    >${renderGiftBoxIcon(22)}</div>
+  `
+}
+
 const PANEL_CARD_WIDTH = 195
 const PANEL_CARD_HEIGHT = 284
 const PANEL_CARD_REVEAL_MS = 120
@@ -1099,8 +1195,26 @@ export function createCuttingSeatPanelHtml(
   phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null,
   skipBubbleRender = false,
+  localSeat?: Seat | null,
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
+  // Подарък може да се прати към всеки различен от собственото място —
+  // включително bots (Stage 2.1), стига да имат реален profileId (regular
+  // matchmaking bots имат стабилен DB-backed profileId, виж
+  // resolveTableGiftParticipants.ts коментара; rare fallback bot без
+  // profileId просто не показва иконата тук — graceful degradation, не
+  // crash). isBotReplacement (tournament no-show takeover, показва
+  // оригиналния ЧОВЕШКИ replaced player визуално) остава изключен — твърде
+  // много неясна semantics кой реално получава подаръка в тоя edge case.
+  const canSendGiftToSeat =
+    seat.isOccupied &&
+    !isBotReplacement &&
+    // Отбележи: != null (не !== null) — покрива и undefined, който идва от
+    // по-стар сървър/snapshot без profileId поле.
+    seat.profileId != null &&
+    seat.profileId.length > 0 &&
+    localSeat != null &&
+    seat.seat !== localSeat
   const isBottomSeat = visualSeat === 'bottom'
   const isMobileLayout = isPhoneLayoutViewport()
   const isCountdownSeat = seat.seat === countdownSeat
@@ -1233,6 +1347,7 @@ export function createCuttingSeatPanelHtml(
           >
             ${renderCuttingSeatAvatar(seat, visualSeat, 18, escapeHtml)}
             ${renderLevelBadge(seat.level)}
+            ${renderSeatGiftOverlaySlot(seat.seat, 18)}
           </div>
 
           <div
@@ -1355,6 +1470,7 @@ export function createCuttingSeatPanelHtml(
         >
           ${renderCuttingSeatAvatar(seat, visualSeat, 16, escapeHtml)}
           ${renderLevelBadge(seat.level)}
+          ${renderSeatGiftOverlaySlot(seat.seat, 16)}
         </div>
 
         ${renderSideCuttingCountdownFooter(
@@ -1372,6 +1488,7 @@ export function createCuttingSeatPanelHtml(
         ${cutterBadgeHtml}
       </div>
       ${renderCuttingDealerBadge(visualSeat, dealerSeat, seat.seat)}
+      ${renderSeatGiftActionIcon(seat, canSendGiftToSeat, visualSeat)}
     </div>
   `
 }
@@ -1452,6 +1569,7 @@ export function createCuttingSeatPanelsHtml(
         phraseBubbles ?? null,
         tournamentBotReplacements ?? null,
         separateBubbleLayer === true,
+        localSeat,
       )
     })
     .join('')
@@ -1487,6 +1605,10 @@ export function createCuttingSeatPanelsHtml(
       @keyframes belot-panel-card-reposition {
         0% { transform:translate(-50%,-50%) translate(var(--px-from),var(--py-from)) rotate(var(--pr-from)); }
         100% { transform:translate(-50%,-50%) translate(var(--px-to),var(--py-to)) rotate(var(--pr-to)); }
+      }
+      [data-active-room-gift-icon]:hover {
+        background:linear-gradient(180deg, rgba(48,42,20,0.97) 0%, rgba(22,18,6,0.98) 100%) !important;
+        border-color:rgba(255,224,128,1) !important;
       }
     </style>
 

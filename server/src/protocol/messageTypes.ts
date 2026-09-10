@@ -1,4 +1,5 @@
 import type {
+  ActiveTableGiftSnapshot,
   PlayerIdentitySnapshot,
   PlayerGender,
   PlayerPublicProfileSnapshot,
@@ -186,6 +187,13 @@ export type ClientMessage =
       phraseId: string
     }
   | {
+      type: 'send_table_gift'
+      roomId: RoomId
+      recipientProfileId: string
+      giftItemId: string
+      requestId: string
+    }
+  | {
       type: 'create_private_room'
       stake: MatchStake
       isLocked: boolean
@@ -352,6 +360,12 @@ export type ClientMessage =
 
 export type RoomSeatSnapshot = {
   seat: Seat
+  /**
+   * null за празно място или бот без профил. Нужно на клиента, за да реши
+   * кому може да прати table gift (само реални човешки профили) — виж
+   * gift icon условието в renderCuttingSeatPanels.ts.
+   */
+  profileId: string | null
   displayName: string
   isOccupied: boolean
   isBot: boolean
@@ -544,6 +558,13 @@ export type RoomSnapshotMessage = {
   tournamentAttendance?: TournamentAttendanceSnapshot | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
   tournamentBanners?: TournamentRoomBannerSnapshot[]
+  /**
+   * Активни (неизтекли) table gift overlay-и в стаята. Reconnect-safe:
+   * клиентът пресмята remaining time от expiresAt и показва overlay-а без да
+   * пуска повторно летящата анимация (тя тръгва само от live
+   * table_gift_item_sent push).
+   */
+  activeTableGifts?: ActiveTableGiftSnapshot[]
 }
 
 export type ConnectedMessage = {
@@ -769,6 +790,42 @@ export type PhraseReactionMessage = {
   roomId: RoomId
   seat: Seat
   phraseId: string
+}
+
+/**
+ * Room-wide broadcast при УСПЕШЕН НОВ table gift transaction (Stage 2).
+ * Изпраща се точно веднъж на transaction — idempotent replay (същият
+ * requestId) НЕ произвежда втори broadcast (виж isReplay в giftItemStore).
+ * senderSeat/recipientSeat са АБСОЛЮТНИ server seats; клиентът ги
+ * трансформира във visual seat space преди DOM lookup.
+ */
+export type TableGiftItemSentMessage = {
+  type: 'table_gift_item_sent'
+  roomId: RoomId
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderSeat: Seat
+  senderDisplayName: string
+  recipientProfileId: string
+  recipientSeat: Seat
+  chargedPrice: number
+  sentAt: string
+  expiresAt: string
+}
+
+export type TableGiftSendResultMessage = {
+  type: 'table_gift_send_result'
+  roomId: RoomId
+  requestId: string
+  ok: boolean
+  message?: string
+  transactionId?: string
+  chargedPrice?: number
+  senderBalanceAfter?: number
+  isReplay?: boolean
 }
 
 // --- Private rooms ---
@@ -1043,6 +1100,8 @@ export type ServerMessage =
   | MatchFoundMessage
   | EmojiReactionMessage
   | PhraseReactionMessage
+  | TableGiftItemSentMessage
+  | TableGiftSendResultMessage
   | PrivateRoomsListMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage

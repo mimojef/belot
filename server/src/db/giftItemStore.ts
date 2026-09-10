@@ -16,6 +16,15 @@ export type GiftItemSnapshot = {
   sortOrder: number
 }
 
+/**
+ * Причина за deleteGiftItem success резултата — гарантира, че callers
+ * (index.ts route) недвусмислено знаят дали редът реално е изтрит logically
+ * (нов finalize check е уместен) или вече е бил в deleted състояние преди
+ * тоя request (idempotent повторен Delete click — все още success, но
+ * finalize check-ът вече е бил направен от първия request).
+ */
+export type DeleteGiftItemOutcome = 'deleted' | 'already-deleted'
+
 export type GiftItemInput = {
   giftItemId?: string | null
   name: string
@@ -53,11 +62,22 @@ export type SendGiftItemResult =
       senderProfile: PlayerPublicProfileSnapshot
       recipientProfile: PlayerPublicProfileSnapshot
       senderBalanceAfter: number
+      /**
+       * true САМО когато резултатът е реконструиран от вече съществуващ ред
+       * със същия requestId (idempotent replay при double-click/retry), false
+       * при реален нов INSERT. Caller-ите ползват това, за да НЕ произведат
+       * втори side effect (room broadcast, delivery notification) за един и
+       * същ transaction — виж table gift handler-а в index.ts.
+       */
+      isReplay: boolean
     }
   | { ok: false; message: string }
 
 export type GiftItemStore = {
+  /** Изключва И is_active=0, И deleted_at IS NOT NULL redове. */
   listActiveGiftItems: () => GiftItemSnapshot[]
+  /** Admin catalog — изключва logically deleted redове (tombstones са
+   * server-side невидими навсякъде, включително admin UI, виж брифа §9). */
   listAdminGiftItems: () => GiftItemSnapshot[]
   upsertGiftItem: (
     input: GiftItemInput,
@@ -68,21 +88,45 @@ export type GiftItemStore = {
     giftItemId: string,
     isActive: boolean,
   ) => { ok: true; item: GiftItemSnapshot } | { ok: false; message: string }
+  /**
+   * Logical delete (tombstone) — ВИНАГИ позволен, независимо от transaction
+   * history (gift_item_transactions.gift_item_id FK е ON DELETE RESTRICT,
+   * затова реален DELETE тук никога не е опция за ред с история). Задава
+   * само deleted_at; редът остава в DB за FK/historical snapshot цели.
+   * Idempotent — повторен delete на вече-deleted ред е "already-deleted"
+   * success, не грешка (double-click safe).
+   */
   deleteGiftItem: (
     giftItemId: string,
   ) =>
-    | { ok: true; items: GiftItemSnapshot[]; deletedImageUrl: string }
+    | { ok: true; items: GiftItemSnapshot[]; deletedImageUrl: string; outcome: DeleteGiftItemOutcome }
     | { ok: false; message: string }
   /**
-   * Reference-safe delete guard (виж index.ts route за §2/§3/§4 от Image
-   * Cleanup брифа) — true ако imageUrl все още се използва от някой АКТИВЕН
-   * или ИСТОРИЧЕСКИ gift reference (gift_items.image_url ИЛИ
-   * gift_item_delivery_log.image_url). Delete helper-ът (deleteUploadFileByUrl,
-   * index.ts) трябва да се извиква ЕДИНСТВЕНО когато това връща false —
-   * иначе рискуваме да изтрием файл, все още показван в стар offline
-   * delivery notification.
+   * Catalog/reference semantics — true ако imageUrl принадлежи на НЕ-изтрит
+   * (deleted_at IS NULL) gift_items ред. Ползва се за upsert/image-replace
+   * safe-cleanup решения (§10 от брифа, image replace логиката остава
+   * непроменена): не трием "стар" URL, ако друг ЖИВ catalog ред все още го
+   * реферира. НЕ брои delivery log rows — виж isImageUrlRetentionReferenced
+   * за physical-retention semantics (delete finalize).
    */
   isImageUrlReferenced: (imageUrl: string) => boolean
+  /**
+   * Physical-retention semantics (§4 от брифа "PENDING DELIVERY Е SOURCE OF
+   * TRUTH") — true ако файлът все още трябва да остане на диска: (a) ИМА
+   * НЕ-изтрит catalog ред с тоя imageUrl, ИЛИ (b) има поне един
+   * gift_item_delivery_log ред с тоя imageUrl и shown_at IS NULL (все още
+   * непоказан offline notification). Вече ПОКАЗАНИ (shown_at NOT NULL)
+   * historical delivery redове НЕ броят тук — те не пазят файла завинаги.
+   * Table gift runtime references (room.config.activeTableGifts) са
+   * orthogonal, in-memory state — проверяват се отделно в index.ts
+   * (tryFinalizeDeletedGiftImage), не тук (store-ът няма достъп до
+   * serverState.rooms).
+   */
+  isImageUrlRetentionReferenced: (imageUrl: string) => boolean
+  /** Gift item id по image URL, само сред logically deleted redове — за
+   * finalize reconciliation (§7D startup) да намери tombstone-и с
+   * потенциално orphaned файлове. */
+  listDeletedGiftItemImageUrls: () => string[]
   sendGiftItem: (
     senderProfileId: ProfileId,
     recipientProfileId: ProfileId,
@@ -100,7 +144,10 @@ export type GiftItemStore = {
     fromDisplayName: string,
   ) => void
   getPendingDeliveries: (profileId: ProfileId) => PendingGiftItemDelivery[]
-  markDeliveryShown: (transactionId: string, profileId: ProfileId) => void
+  /** Връща imageUrl на markнатия ред (или null ако не е намерен) — за
+   * caller-а (index.ts) да реши дали да опита finalize cleanup СЛЕД
+   * mark-shown (§7B от брифа). */
+  markDeliveryShown: (transactionId: string, profileId: ProfileId) => string | null
   close: () => void
 }
 
@@ -179,18 +226,22 @@ export async function createGiftItemStore(
   const selectActiveItemsStatement = database.prepare(`
     SELECT gift_item_id, name, image_url, price, is_active, sort_order
     FROM gift_items
-    WHERE is_active = 1
+    WHERE is_active = 1 AND deleted_at IS NULL
     ORDER BY sort_order ASC, name ASC;
   `)
 
   const selectAdminItemsStatement = database.prepare(`
     SELECT gift_item_id, name, image_url, price, is_active, sort_order
     FROM gift_items
+    WHERE deleted_at IS NULL
     ORDER BY sort_order ASC, name ASC;
   `)
 
+  // БЕЗ deleted_at филтър умишлено — sendGiftItem трябва да "вижда"
+  // tombstone redове, за да ги отхвърли explicit (giftItem.deletedAt !==
+  // null проверка по-долу), не просто да ги третира като "не съществува".
   const selectItemByIdStatement = database.prepare(`
-    SELECT gift_item_id, name, image_url, price, is_active, sort_order
+    SELECT gift_item_id, name, image_url, price, is_active, sort_order, deleted_at
     FROM gift_items
     WHERE gift_item_id = ?
     LIMIT 1;
@@ -214,12 +265,35 @@ export async function createGiftItemStore(
     WHERE gift_item_id = ?;
   `)
 
-  const deleteItemStatement = database.prepare(`
-    DELETE FROM gift_items WHERE gift_item_id = ?;
+  // Logical delete (tombstone) — заменя стария реален DELETE. Идемпотентен
+  // по конструкция (WHERE deleted_at IS NULL means повторен опит е no-op
+  // UPDATE, changes=0, детектнато explicit в deleteGiftItem по-долу за
+  // "already-deleted" outcome-а).
+  const softDeleteItemStatement = database.prepare(`
+    UPDATE gift_items
+    SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE gift_item_id = ? AND deleted_at IS NULL;
   `)
 
   const countTransactionsForItemStatement = database.prepare(`
     SELECT COUNT(*) AS cnt FROM gift_item_transactions WHERE gift_item_id = ?;
+  `)
+
+  // §4 Physical-retention semantics — само NE-изтрити catalog redове.
+  const countLiveGiftItemsByImageUrlStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM gift_items WHERE image_url = ? AND deleted_at IS NULL;
+  `)
+
+  // §4 — само НЕпоказани (still-pending) delivery redове пазят файла;
+  // shown_at NOT NULL historical redове не броят тук.
+  const countUnseenDeliveryByImageUrlStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM gift_item_delivery_log WHERE image_url = ? AND shown_at IS NULL;
+  `)
+
+  // §7D startup reconciliation — намира tombstone redове (за re-check дали
+  // image-ите им вече могат безопасно да се финализират).
+  const selectDeletedGiftItemImageUrlsStatement = database.prepare(`
+    SELECT DISTINCT image_url FROM gift_items WHERE deleted_at IS NOT NULL;
   `)
 
   const selectTransactionByRequestIdStatement = database.prepare(`
@@ -279,16 +353,10 @@ export async function createGiftItemStore(
     WHERE transaction_id = ? AND recipient_profile_id = ?;
   `)
 
-  // Reference-safe delete guard (виж isImageUrlReferenced по-долу) — двете
-  // места, откъдето имидж URL може все още да е "жив": текущия каталог ред
-  // (включително друг gift item, ако admin ръчно е copy-paste-нал същия URL
-  // — виж audit т.13) и историческия snapshot в delivery log-а (стар/офлайн
-  // notification все още сочи към старата картинка след replace).
-  const countGiftItemsByImageUrlStatement = database.prepare(`
-    SELECT COUNT(*) AS cnt FROM gift_items WHERE image_url = ?;
-  `)
-  const countDeliveryLogByImageUrlStatement = database.prepare(`
-    SELECT COUNT(*) AS cnt FROM gift_item_delivery_log WHERE image_url = ?;
+  const selectDeliveryImageUrlStatement = database.prepare(`
+    SELECT image_url FROM gift_item_delivery_log
+    WHERE transaction_id = ? AND recipient_profile_id = ?
+    LIMIT 1;
   `)
 
   function listActiveGiftItems(): GiftItemSnapshot[] {
@@ -300,8 +368,17 @@ export async function createGiftItemStore(
   }
 
   function getItemById(giftItemId: string): GiftItemSnapshot | null {
-    const row = selectItemByIdStatement.get(giftItemId) as GiftItemRow | undefined
+    const row = selectItemByIdStatement.get(giftItemId) as (GiftItemRow & { deleted_at: string | null }) | undefined
     return row ? rowToSnapshot(row) : null
+  }
+
+  // Вътрешен helper — единственото място, което чете deleted_at directно
+  // (публичният GiftItemSnapshot умишлено не го излага, виж isDeletedGiftItemById
+  // caller-ите: sendGiftItem explicit reject на tombstone target, вместо да
+  // го третира като "не съществува" — по-ясно server-side съобщение).
+  function isDeletedGiftItemById(giftItemId: string): boolean {
+    const row = selectItemByIdStatement.get(giftItemId) as { deleted_at: string | null } | undefined
+    return row?.deleted_at !== null && row?.deleted_at !== undefined
   }
 
   function upsertGiftItem(
@@ -380,7 +457,7 @@ export async function createGiftItemStore(
   function deleteGiftItem(
     giftItemId: string,
   ):
-    | { ok: true; items: GiftItemSnapshot[]; deletedImageUrl: string }
+    | { ok: true; items: GiftItemSnapshot[]; deletedImageUrl: string; outcome: DeleteGiftItemOutcome }
     | { ok: false; message: string } {
     const normalizedId = normalizeText(giftItemId, 96)
 
@@ -388,40 +465,47 @@ export async function createGiftItemStore(
       return { ok: false, message: 'Невалиден ID на подарък.' }
     }
 
-    const existing = getItemById(normalizedId)
+    // getItemById вече НЕ филтрира по deleted_at (виж selectItemByIdStatement
+    // коментара) — тук explicit различаваме "не съществува изобщо" от "вече
+    // logically deleted", за да върнем ясен idempotent outcome, не грешка.
+    const existingRow = selectItemByIdStatement.get(normalizedId) as
+      | (GiftItemRow & { deleted_at: string | null })
+      | undefined
 
-    if (existing === null) {
+    if (existingRow === undefined) {
       return { ok: false, message: 'Подаръкът не беше намерен.' }
     }
 
-    const countRow = countTransactionsForItemStatement.get(normalizedId) as { cnt: number } | undefined
-
-    if ((countRow?.cnt ?? 0) > 0) {
+    if (existingRow.deleted_at !== null) {
+      // Idempotent double-click — вече е tombstone. Success (не грешка),
+      // items списъкът вече не го съдържа (изключен от listAdminGiftItems).
       return {
-        ok: false,
-        message: 'Подаръкът има история и не може да бъде изтрит — деактивирай го вместо това.',
+        ok: true,
+        items: listAdminGiftItems(),
+        deletedImageUrl: existingRow.image_url,
+        outcome: 'already-deleted',
       }
     }
 
-    try {
-      deleteItemStatement.run(normalizedId)
-    } catch (error) {
-      return {
-        ok: false,
-        message: 'Подаръкът има история и не може да бъде изтрит — деактивирай го вместо това.',
-      }
-    }
+    // Logical delete — ВИНАГИ позволен, независимо от transaction history
+    // (заданието: "Admin трябва да може да изтрие подарък независимо дали е
+    // бил изпращан"). Старото "RESTRICT ако >0 transactions" правило е
+    // премахнато изцяло — реален DELETE вече не се опитва тук.
+    softDeleteItemStatement.run(normalizedId)
 
-    // deletedImageUrl се връща за caller-а (index.ts route, §4 Hard Delete) да
-    // прецени file cleanup СЛЕД успешния DELETE — самият DELETE вече мина
-    // (§2 гарантира нула transactions за тоя giftItemId), но delivery log
-    // редове от ПРЕДИШНИ (сега изтрити от history гледна точка невъзможно,
-    // тъй като >0 transactions блокира delete — все пак isImageUrlReferenced
-    // проверява и delivery_log за пълна защита, ако друг активен gift
-    // item ръчно споделя същия image_url, виж audit т.13).
-    return { ok: true, items: listAdminGiftItems(), deletedImageUrl: existing.imageUrl }
+    return {
+      ok: true,
+      items: listAdminGiftItems(),
+      deletedImageUrl: existingRow.image_url,
+      outcome: 'deleted',
+    }
   }
 
+  // Catalog/reference semantics (§10 от брифа, image replace логиката) —
+  // само НЕ-изтрити catalog redове. Виж isImageUrlRetentionReferenced за
+  // physical-retention (delete finalize) semantics — умишлено разделени
+  // concept-и, различен въпрос ("има ли жив catalog ред" vs. "трябва ли
+  // файлът физически да остане").
   function isImageUrlReferenced(imageUrl: string): boolean {
     const normalizedUrl = imageUrl.trim()
 
@@ -429,13 +513,31 @@ export async function createGiftItemStore(
       return false
     }
 
-    const activeCount = (countGiftItemsByImageUrlStatement.get(normalizedUrl) as { cnt: number }).cnt
-    if (activeCount > 0) {
+    return (countLiveGiftItemsByImageUrlStatement.get(normalizedUrl) as { cnt: number }).cnt > 0
+  }
+
+  // Physical-retention semantics (§4 брифа) — файлът остава, докато (a) жив
+  // catalog ред го реферира, ИЛИ (b) поне един pending (shown_at IS NULL)
+  // delivery log ред все още го цитира. Table gift runtime references са
+  // orthogonal in-memory state, проверени отделно в index.ts
+  // (tryFinalizeDeletedGiftImage) — store-ът няма достъп до serverState.rooms.
+  function isImageUrlRetentionReferenced(imageUrl: string): boolean {
+    const normalizedUrl = imageUrl.trim()
+
+    if (normalizedUrl.length === 0) {
+      return false
+    }
+
+    if ((countLiveGiftItemsByImageUrlStatement.get(normalizedUrl) as { cnt: number }).cnt > 0) {
       return true
     }
 
-    const deliveryCount = (countDeliveryLogByImageUrlStatement.get(normalizedUrl) as { cnt: number }).cnt
-    return deliveryCount > 0
+    return (countUnseenDeliveryByImageUrlStatement.get(normalizedUrl) as { cnt: number }).cnt > 0
+  }
+
+  function listDeletedGiftItemImageUrls(): string[] {
+    const rows = selectDeletedGiftItemImageUrlsStatement.all() as Array<{ image_url: string }>
+    return rows.map((r) => r.image_url)
   }
 
   function getWalletBalance(profileId: ProfileId): number {
@@ -484,6 +586,7 @@ export async function createGiftItemStore(
           senderProfile,
           recipientProfile,
           senderBalanceAfter: getWalletBalance(senderProfileId),
+          isReplay: true,
         }
       }
 
@@ -509,10 +612,13 @@ export async function createGiftItemStore(
         return { ok: false, message: 'Не можеш да си изпратиш подарък сам на себе си.' }
       }
 
-      // 5-6. gift item съществува, активен е, цената се чете от DB в реално време
+      // 5-6. gift item съществува, активен е, НЕ е logically deleted, цената
+      // се чете от DB в реално време. isDeletedGiftItemById explicit, защото
+      // getItemById вече "вижда" tombstone redове (не ги филтрира) — deleted
+      // gift никога не може да бъде купен наново, независимо от is_active.
       const giftItem = getItemById(giftItemId)
 
-      if (giftItem === null || !giftItem.isActive) {
+      if (giftItem === null || !giftItem.isActive || isDeletedGiftItemById(giftItemId)) {
         database.exec('ROLLBACK;')
         return { ok: false, message: 'Подаръкът не е наличен.' }
       }
@@ -563,6 +669,7 @@ export async function createGiftItemStore(
         senderProfile,
         recipientProfile,
         senderBalanceAfter,
+        isReplay: false,
       }
     } catch (error) {
       try {
@@ -607,8 +714,15 @@ export async function createGiftItemStore(
     }))
   }
 
-  function markDeliveryShown(transactionId: string, profileId: ProfileId): void {
+  // §7B от брифа — caller-ът (index.ts route) трябва да знае imageUrl-а на
+  // markнатия ред, за да опита finalize cleanup СЛЕД mark-shown (проверява
+  // дали е бил последният pending unseen delivery за тоя URL).
+  function markDeliveryShown(transactionId: string, profileId: ProfileId): string | null {
+    const row = selectDeliveryImageUrlStatement.get(transactionId, profileId) as
+      | { image_url: string }
+      | undefined
     markDeliveryShownStatement.run(transactionId, profileId)
+    return row?.image_url ?? null
   }
 
   function close(): void {
@@ -622,6 +736,8 @@ export async function createGiftItemStore(
     setGiftItemActive,
     deleteGiftItem,
     isImageUrlReferenced,
+    isImageUrlRetentionReferenced,
+    listDeletedGiftItemImageUrls,
     sendGiftItem,
     createDeliveryNotification,
     getPendingDeliveries,

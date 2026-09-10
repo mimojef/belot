@@ -11,6 +11,7 @@ const PREVIEW_QUERY_VALUE = 'match-ended'
 const previewSeats: RoomSeatSnapshot[] = [
   {
     seat: 'bottom',
+    profileId: null,
     displayName: 'Гост',
     isOccupied: true,
     isBot: false,
@@ -24,6 +25,7 @@ const previewSeats: RoomSeatSnapshot[] = [
   },
   {
     seat: 'right',
+    profileId: null,
     displayName: 'Moby65564',
     isOccupied: true,
     isBot: true,
@@ -37,6 +39,7 @@ const previewSeats: RoomSeatSnapshot[] = [
   },
   {
     seat: 'top',
+    profileId: null,
     displayName: 'A6456655',
     isOccupied: true,
     isBot: false,
@@ -50,6 +53,7 @@ const previewSeats: RoomSeatSnapshot[] = [
   },
   {
     seat: 'left',
+    profileId: null,
     displayName: 'B54645656',
     isOccupied: true,
     isBot: true,

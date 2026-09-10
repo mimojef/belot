@@ -62,6 +62,34 @@
  *     giftItemStore.ts — идентичен sort clause, различават се само по
  *     `WHERE is_active = 1` филтъра), затова един тест, проверяващ и двете
  *     функции, покрива и admin, и public контекста без дублиране.
+ *
+ * Stage 2 — table/in-game gifts (виж resolveTableGiftParticipants.ts и
+ * send_table_gift handler-а в index.ts):
+ * [T] context='game' + roomId ползва СЪЩАТА payment/idempotency логика като
+ *     context='profile' (без паралелна платежна система), и НЕ създава
+ *     personal delivery notification — точно това предотвратява дублирана
+ *     презентация за един transaction
+ * [U] isReplay: false при нов insert, true при duplicate requestId — точката,
+ *     от която handler-ът решава дали да произведе room broadcast (replay =
+ *     без втори broadcast, но пак success отговор към sender-а)
+ * [V] resolveTableGiftParticipants (pure, unit-testable): приема само
+ *     получател в СЪЩАТА стая; отхвърля външен играч, бот БЕЗ profileId,
+ *     self-gift, подправен roomId, изпращач извън стая, disconnected
+ *     connection и приключил мач — всичко ПРЕДИ какъвто и да е дебит
+ * [W] Lazy expiry: изтекли overlay-и не попадат в room snapshot-а
+ *
+ * Stage 2.1 — table gifts към BOT participants (виж CLAUDE.md брифа
+ * "ИСКАМ ДА МОЖЕ ДА СЕ ИЗПРАЩАТ ПОДАРЪЦИ И НА БОТОВЕ"): regular matchmaking
+ * bots имат стабилен DB-backed profileId (selectMatchmakingBotProfiles.ts →
+ * pickEligibleBotProfileFromDb.ts), затова recipient_profile_id FK-то в
+ * gift_item_transactions важи непроменено — reuse, не fake profile:
+ * [X] resolveTableGiftParticipants приема bot recipient С реален profileId
+ *     (happy path), продължава да отхвърля fake/cross-room bot targets и
+ *     self-target
+ * [Y] sendGiftItem(context='game') към bot profileId: единичен дебит,
+ *     transaction записан коректно, bot НЕ получава wallet credit, НЕ се
+ *     създава delivery log ред, idempotent replay работи identично на
+ *     human recipient
  */
 
 import { mkdtemp, rm, readFile, mkdir, writeFile, unlink, stat } from 'node:fs/promises'
@@ -72,6 +100,8 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type { PlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createGiftItemStore, type GiftItemStore } from '../src/db/giftItemStore.js'
+import { resolveTableGiftParticipants } from '../src/core/resolveTableGiftParticipants.js'
+import type { Seat, ServerRoom } from '../src/core/serverTypes.js'
 import {
   processImageAttachmentToWebp,
   GIFT_ITEM_IMAGE_WEBP_QUALITY,
@@ -84,6 +114,14 @@ const serverRoot = resolve(__dirname, '..')
 const giftItemMigrationPath = resolve(
   serverRoot,
   'database/migrations/20260909_001_create_gift_item_catalog.sql',
+)
+// Delete semantics change (deleted_at tombstone колона) — отделен, по-нов
+// migration файл. applyGiftItemMigrations по-долу прилага и двата
+// последователно, за да не се редактират 20+ отделни call sites едно по
+// едно всеки път, когато gift_items схемата се разшири.
+const giftItemsDeletedAtMigrationPath = resolve(
+  serverRoot,
+  'database/migrations/20260910_001_add_gift_items_deleted_at.sql',
 )
 
 // ─── Брояч ─────────────────────────────────────────────────────────────────
@@ -199,6 +237,14 @@ async function applyMigrationFile(db: DatabaseSync, migrationPath: string): Prom
   }
 }
 
+// Прилага и двата gift_items migration файла последователно (catalog
+// create + deleted_at ALTER). Единствен helper вместо да се дублира
+// applyMigrationFile(db, giftItemMigrationPath) + втори ред на 20+ места.
+async function applyGiftItemMigrations(db: DatabaseSync): Promise<void> {
+  await applyMigrationFile(db, giftItemMigrationPath)
+  await applyMigrationFile(db, giftItemsDeletedAtMigrationPath)
+}
+
 function seedProfile(db: DatabaseSync, profileId: string, balance: number = 0): void {
   db.exec(`INSERT OR IGNORE INTO profiles (profile_id, display_name) VALUES ('${profileId}', '${profileId}')`)
   db.exec(`INSERT OR IGNORE INTO profile_wallets (profile_id, yellow_coins_balance) VALUES ('${profileId}', ${balance})`)
@@ -296,7 +342,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testA.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-a', 10_000)
     seedProfile(db, 'recipient-a', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -341,7 +387,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testB.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-b', 500)
     seedProfile(db, 'recipient-b', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -369,7 +415,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testC.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-c', 10_000)
     seedProfile(db, 'recipient-c', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -395,7 +441,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testD.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-d', 10_000)
     seedProfile(db, 'recipient-d', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -424,7 +470,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testE.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-e', 10_000)
     seedProfile(db, 'recipient-e', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -458,7 +504,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testF.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-f', 10_000)
     seedProfile(db, 'recipient-f', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -500,48 +546,62 @@ await withTempDir(async (dir) => {
   })
 
   // ── [G] Delete с история блокиран, soft-delete работи ──────────────────
-  await check('[G] Delete на gift item с история е блокиран; setGiftItemActive(false) (soft-delete) работи', async () => {
+  await check('[G] Delete на gift item С transaction история вече УСПЯВА (logical delete/tombstone), history остава недокосната', async () => {
     const dbPath = join(dir, 'testG.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-g', 10_000)
     seedProfile(db, 'recipient-g', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
       VALUES ('item-g', 'Торта', '/uploads/gift-items/cake.webp', 1000, 1, 0)`)
-    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
-      VALUES ('item-g2', 'Балон', '/uploads/gift-items/balloon.webp', 500, 1, 0)`)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set(['sender-g', 'recipient-g']))
     const store = await createGiftItemStore(dbPath, progressStore)
 
-    // item-g получава история (transaction), item-g2 остава без история.
+    // item-g получава реална transaction история.
     const sendResult = store.sendGiftItem('sender-g', 'recipient-g', 'item-g', 'req-g-1')
     assert(sendResult.ok === true, 'sendGiftItem трябва да успее')
+    const balanceAfterSend = sendResult.ok ? sendResult.senderBalanceAfter : null
 
+    // Delete с история вече УСПЯВА (старото RESTRICT-базирано блокиране е
+    // премахнато) — logical delete/tombstone, не reject.
     const deleteWithHistory = store.deleteGiftItem('item-g')
-    assert(deleteWithHistory.ok === false, 'delete на подарък с история трябва да е блокиран')
-    if (deleteWithHistory.ok) return
-    assert(deleteWithHistory.message.includes('история'), 'съобщението трябва да спомене история')
+    assert(deleteWithHistory.ok === true, 'delete на подарък С история вече трябва да успее (logical delete)')
+    if (!deleteWithHistory.ok) return
+    assertEqual(deleteWithHistory.outcome, 'deleted', 'outcome="deleted" за реален (не-idempotent) delete')
+    assertEqual(deleteWithHistory.deletedImageUrl, '/uploads/gift-items/cake.webp', 'връща правилния image URL')
 
-    const stillExists = store.listAdminGiftItems().find((i) => i.giftItemId === 'item-g')
-    assert(stillExists !== undefined, 'item-g все още съществува след блокирания delete')
+    // Веднага изчезва от admin/public listвания (tombstone е server-side
+    // невидим навсякъде, виж брифа §1/§9).
+    const stillInAdminList = store.listAdminGiftItems().find((i) => i.giftItemId === 'item-g')
+    assert(stillInAdminList === undefined, 'item-g изчезва от admin catalog веднага след delete')
+    const stillInActiveList = store.listActiveGiftItems().find((i) => i.giftItemId === 'item-g')
+    assert(stillInActiveList === undefined, 'item-g изчезва от public active catalog веднага след delete')
 
-    const softDelete = store.setGiftItemActive('item-g', false)
-    assert(softDelete.ok === true, 'soft-delete (setGiftItemActive false) трябва да успее')
-    if (softDelete.ok) {
-      assertEqual(softDelete.item.isActive, false, 'item-g вече е неактивен')
-    }
+    // Deleted gift не може да бъде купен наново.
+    const secondSendAttempt = store.sendGiftItem('sender-g', 'recipient-g', 'item-g', 'req-g-2')
+    assert(secondSendAttempt.ok === false, 'изпращане на logically deleted gift трябва да се отхвърли')
 
-    const activeList = store.listActiveGiftItems()
-    assert(activeList.every((i) => i.giftItemId !== 'item-g'), 'item-g изчезва от активния каталог')
+    // §2 от брифа — transaction history остава напълно недокосната: същата
+    // сума, същия sender balance, никакво връщане на жълтици.
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    const txRow = db2.prepare(
+      'SELECT charged_price, sender_profile_id, recipient_profile_id FROM gift_item_transactions WHERE gift_item_id = ?',
+    ).get('item-g') as { charged_price: number; sender_profile_id: string; recipient_profile_id: string } | undefined
+    assert(txRow !== undefined, 'transaction редът остава в DB (FK ON DELETE RESTRICT never triggered — tombstone, не hard delete)')
+    assertEqual(txRow?.charged_price, 1000, 'charged_price непроменен')
+    assertEqual(txRow?.sender_profile_id, 'sender-g', 'sender history непроменена')
+    assertEqual(txRow?.recipient_profile_id, 'recipient-g', 'recipient history непроменена')
+    assertEqual(getWalletBalance(db2, 'sender-g'), balanceAfterSend, 'sender balance непроменен от delete-а — никакво връщане на жълтици')
+    db2.close()
 
-    // item-g2 (без история) трябва да се изтрие успешно.
-    const deleteWithoutHistory = store.deleteGiftItem('item-g2')
-    assert(deleteWithoutHistory.ok === true, 'delete на подарък БЕЗ история трябва да успее')
-    if (deleteWithoutHistory.ok) {
-      assert(deleteWithoutHistory.items.every((i) => i.giftItemId !== 'item-g2'), 'item-g2 изтрит от каталога')
+    // Idempotent повторен delete (double-click) — success, различен outcome.
+    const secondDelete = store.deleteGiftItem('item-g')
+    assert(secondDelete.ok === true, 'повторен delete на вече-изтрит gift остава success (idempotent)')
+    if (secondDelete.ok) {
+      assertEqual(secondDelete.outcome, 'already-deleted', 'outcome="already-deleted" за idempotent повторен опит')
     }
 
     store.close()
@@ -553,7 +613,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testH.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -640,12 +700,12 @@ await withTempDir(async (dir) => {
   })
 
   // ── [J] Hard delete без история — image file изтрит ─────────────────────
-  await check('[J] Hard delete без история: DB row изтрит, unreferenced image file изтрит от диска', async () => {
+  await check('[J] Logical delete без история: unreferenced image file финализира (изтрива) се от диска', async () => {
     const dbPath = join(dir, 'testJ.sqlite')
     const uploadsDir = join(dir, 'uploads-j', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -673,33 +733,63 @@ await withTempDir(async (dir) => {
   })
 
   // ── [K] Gift с история — hard delete blocked, image остава ─────────────
-  await check('[K] Gift с история: hard delete остава blocked, image файлът остава недокоснат', async () => {
+  await check('[K] Logically deleted gift с UNSEEN offline delivery: image файлът остава, докато последният pending recipient не го види', async () => {
+    // Точно сценарият от брифа §3: Роза изпратена на A (видял я), B и C
+    // (offline, още не са я видели). Admin натиска Delete — Роза изчезва от
+    // catalog ВЕДНАГА, но image файлът остава, докато B и C не я видят.
     const dbPath = join(dir, 'testK.sqlite')
     const uploadsDir = join(dir, 'uploads-k', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
-    seedProfile(db, 'sender-k', 10_000)
-    seedProfile(db, 'recipient-k', 0)
+    await applyGiftItemMigrations(db)
+    seedProfile(db, 'sender-k', 30_000)
+    seedProfile(db, 'recipient-a', 0)
+    seedProfile(db, 'recipient-b', 0)
+    seedProfile(db, 'recipient-c', 0)
     db.close()
 
-    const progressStore = makeMockProgressStore(new Set(['sender-k', 'recipient-k']))
+    const progressStore = makeMockProgressStore(new Set(['sender-k', 'recipient-a', 'recipient-b', 'recipient-c']))
     const store = await createGiftItemStore(dbPath, progressStore)
 
     const { item } = await upsertGiftItemWithImage(store, uploadsDir, {
-      name: 'Торта K', price: 1000, sortOrder: 0, isActive: true,
+      name: 'Роза K', price: 1000, sortOrder: 0, isActive: true,
     })
     const filePath = join(uploadsDir, item.imageUrl.replace('/uploads/gift-items/', ''))
 
-    const sendResult = store.sendGiftItem('sender-k', 'recipient-k', item.giftItemId, 'req-k-1')
-    assert(sendResult.ok === true, 'sendGiftItem трябва да успее')
+    // Изпратена на A (вече видяна), B и C (offline, still unseen).
+    const sendA = store.sendGiftItem('sender-k', 'recipient-a', item.giftItemId, 'req-k-a')
+    const sendB = store.sendGiftItem('sender-k', 'recipient-b', item.giftItemId, 'req-k-b')
+    const sendC = store.sendGiftItem('sender-k', 'recipient-c', item.giftItemId, 'req-k-c')
+    assert(sendA.ok && sendB.ok && sendC.ok, 'и трите изпращания трябва да успеят')
+    if (!sendA.ok || !sendB.ok || !sendC.ok) return
 
+    store.createDeliveryNotification(sendA.transaction.transactionId, 'recipient-a', item.giftItemId, 'Роза K', item.imageUrl, 'Sender K')
+    store.createDeliveryNotification(sendB.transaction.transactionId, 'recipient-b', item.giftItemId, 'Роза K', item.imageUrl, 'Sender K')
+    store.createDeliveryNotification(sendC.transaction.transactionId, 'recipient-c', item.giftItemId, 'Роза K', item.imageUrl, 'Sender K')
+    store.markDeliveryShown(sendA.transaction.transactionId, 'recipient-a') // A вече я е видял
+
+    // Admin Delete — logical delete, ВИНАГИ позволен независимо от историята.
     const deleteResult = store.deleteGiftItem(item.giftItemId)
-    assert(deleteResult.ok === false, 'hard delete с история трябва да е blocked')
+    assert(deleteResult.ok === true, 'delete с история вече успява (logical delete)')
+    if (!deleteResult.ok) return
 
-    // index.ts route никога не стига до deleteUploadFileByUrl тук (early
-    // return при !result.ok) — файлът остава недокоснат по конструкция.
-    assert(await fileExists(filePath), 'image файлът остава на диска, delete-ът е blocked')
+    // Веднага изчезва от каталога.
+    assert(store.listAdminGiftItems().every((i) => i.giftItemId !== item.giftItemId), 'изчезва от admin catalog веднага')
+
+    // Физическа retention: B и C все още не са видели — файлът ТРЯБВА да остане.
+    assert(store.isImageUrlRetentionReferenced(item.imageUrl), 'retention semantics: still-pending B/C пазят файла')
+    assert(await fileExists(filePath), 'image файлът остава на диска, докато B и C не са го видели')
+
+    // B вижда notification-а — C все още pending, файлът ОЩЕ остава.
+    store.markDeliveryShown(sendB.transaction.transactionId, 'recipient-b')
+    assert(store.isImageUrlRetentionReferenced(item.imageUrl), 'C все още pending — файлът остава')
+    assert(await fileExists(filePath), 'файлът все още на диска (C не е видял)')
+
+    // C вижда notification-а — последният pending recipient. Вече никой не
+    // го реферира (retention semantics връща false), файлът МОЖЕ да се
+    // финализира (симулираме index.ts tryFinalizeDeletedGiftImage стъпката).
+    store.markDeliveryShown(sendC.transaction.transactionId, 'recipient-c')
+    assert(!store.isImageUrlRetentionReferenced(item.imageUrl), 'след последния pending recipient — вече никой не реферира файла')
 
     store.close()
   })
@@ -710,7 +800,7 @@ await withTempDir(async (dir) => {
     const uploadsDir = join(dir, 'uploads-l', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -747,7 +837,7 @@ await withTempDir(async (dir) => {
     const uploadsDir = join(dir, 'uploads-m', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-m', 10_000)
     seedProfile(db, 'recipient-m', 0)
     db.close()
@@ -777,10 +867,15 @@ await withTempDir(async (dir) => {
     })
     assertEqual(previousImageUrl, created.imageUrl, 'previousImageUrl = старият URL')
 
-    assert(store.isImageUrlReferenced(previousImageUrl!), 'старият URL Е referenced (delivery log)')
-    // index.ts route guard-ва точно тук — isImageUrlReferenced===true спира
-    // deleteUploadFileByUrl-а изобщо да се извика.
-    assert(await fileExists(oldFilePath), 'старият файл остава недокоснат — все още referenced')
+    // isImageUrlReferenced (catalog-only) вече НЕ брои delivery log —
+    // старият URL вече не е в никой ЖИВ catalog ред (upsert-нат е с нов URL).
+    assert(!store.isImageUrlReferenced(previousImageUrl!), 'catalog-only reference вече е false (само pending delivery го пази)')
+    // isImageUrlRetentionReferenced (physical-retention semantics) Е true —
+    // delivery log-ът все още пази снимката. index.ts route-ът вече ползва
+    // ИМЕННО тая функция за image-replace safe-cleanup решението (§10 от
+    // брифа — не регресирай reference-safe image replace).
+    assert(store.isImageUrlRetentionReferenced(previousImageUrl!), 'retention semantics: старият URL Е referenced (pending delivery log)')
+    assert(await fileExists(oldFilePath), 'старият файл остава недокоснат — все още referenced за retention цели')
 
     store.close()
   })
@@ -791,7 +886,7 @@ await withTempDir(async (dir) => {
     const uploadsDir = join(dir, 'uploads-n', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -829,7 +924,7 @@ await withTempDir(async (dir) => {
     const uploadsDir = join(dir, 'uploads-o', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -862,7 +957,7 @@ await withTempDir(async (dir) => {
     const uploadsDir = join(dir, 'uploads-p', 'gift-items')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -920,7 +1015,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testQ.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-q', 10_000)
     seedProfile(db, 'recipient-q', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -969,7 +1064,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testR.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     seedProfile(db, 'sender-r', 10_000)
     seedProfile(db, 'recipient-r', 0)
     db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
@@ -1021,7 +1116,7 @@ await withTempDir(async (dir) => {
     const dbPath = join(dir, 'testS.sqlite')
     const db = new DatabaseSync(dbPath, { open: true })
     buildBaseSchema(db)
-    await applyMigrationFile(db, giftItemMigrationPath)
+    await applyGiftItemMigrations(db)
     db.close()
 
     const progressStore = makeMockProgressStore(new Set())
@@ -1074,6 +1169,497 @@ await withTempDir(async (dir) => {
       JSON.stringify([0, 1, 2, 3]),
       'пълният ред след edit-а е коректен',
     )
+
+    store.close()
+  })
+
+  // ═══ Stage 2 — table/in-game gifts ═══════════════════════════════════════
+
+  // ── [T] context='game' payment parity ───────────────────────────────────
+  await check("[T] context='game' + roomId — идентична payment семантика като 'profile'", async () => {
+    const dbPath = join(dir, 'testT.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    buildBaseSchema(db)
+    await applyGiftItemMigrations(db)
+    seedProfile(db, 'sender-t', 10_000)
+    seedProfile(db, 'recipient-t', 0)
+    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
+      VALUES ('item-t', 'Торта', '/uploads/gift-items/cake.webp', 2500, 1, 0)`)
+    db.close()
+
+    const progressStore = makeMockProgressStore(new Set(['sender-t', 'recipient-t']))
+    const store = await createGiftItemStore(dbPath, progressStore)
+
+    const result = store.sendGiftItem(
+      'sender-t', 'recipient-t', 'item-t', 'req-t-1', 'game', 'room-t-1',
+    )
+    assert(result.ok === true, "sendGiftItem с context='game' трябва да успее")
+    if (!result.ok) return
+
+    assertEqual(result.senderBalanceAfter, 7500, 'дебитът е идентичен на profile контекста')
+    assertEqual(result.transaction.chargedPrice, 2500, 'цената пак се чете от DB')
+    assertEqual(result.transaction.context, 'game', "context persist-нат като 'game'")
+    assertEqual(result.transaction.roomId, 'room-t-1', 'roomId persist-нат')
+
+    // Table gift НЕ създава personal delivery notification — това е точно
+    // механизмът, който предотвратява дублирана презентация (§6/§12).
+    const pending = store.getPendingDeliveries('recipient-t')
+    assertEqual(pending.length, 0, "context='game' НЕ пише в gift_item_delivery_log")
+
+    store.close()
+  })
+
+  // ── [U] isReplay флаг ───────────────────────────────────────────────────
+  await check('[U] isReplay=false при нов insert, true при duplicate requestId (единичен дебит)', async () => {
+    const dbPath = join(dir, 'testU.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    buildBaseSchema(db)
+    await applyGiftItemMigrations(db)
+    seedProfile(db, 'sender-u', 10_000)
+    seedProfile(db, 'recipient-u', 0)
+    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
+      VALUES ('item-u', 'Балон', '/uploads/gift-items/balloon.webp', 1000, 1, 0)`)
+    db.close()
+
+    const progressStore = makeMockProgressStore(new Set(['sender-u', 'recipient-u']))
+    const store = await createGiftItemStore(dbPath, progressStore)
+
+    const first = store.sendGiftItem('sender-u', 'recipient-u', 'item-u', 'req-u-1', 'game', 'room-u')
+    assert(first.ok === true, 'първото изпращане успява')
+    if (!first.ok) return
+    assertEqual(first.isReplay, false, 'нов transaction → isReplay=false (⇒ прави се broadcast)')
+    assertEqual(first.senderBalanceAfter, 9000, 'един дебит')
+
+    const replay = store.sendGiftItem('sender-u', 'recipient-u', 'item-u', 'req-u-1', 'game', 'room-u')
+    assert(replay.ok === true, 'replay-ът връща success (idempotent семантика)')
+    if (!replay.ok) return
+    assertEqual(replay.isReplay, true, 'същият requestId → isReplay=true (⇒ БЕЗ втори broadcast)')
+    assertEqual(replay.senderBalanceAfter, 9000, 'НЯМА втори дебит')
+    assertEqual(
+      replay.transaction.transactionId,
+      first.transaction.transactionId,
+      'replay-ът реконструира СЪЩАТА транзакция',
+    )
+
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    assertEqual(countTransactions(db2, 'item-u'), 1, 'точно 1 transaction ред въпреки 2 повиквания')
+    db2.close()
+
+    store.close()
+  })
+
+  // ── [V] Room membership validation (pure function) ──────────────────────
+  await check('[V] resolveTableGiftParticipants — server-authoritative room membership', async () => {
+    const humanSeat = (seat: Seat, profileId: string, connectionId: string) => ({
+      seat,
+      team: (seat === 'bottom' || seat === 'top' ? 'A' : 'B') as 'A' | 'B',
+      participant: {
+        kind: 'human' as const,
+        playerId: `player-${profileId}`,
+        connectionId,
+        isConnected: true,
+        joinedAt: 0,
+        lastSeenAt: 0,
+        reconnectToken: null,
+        permanentlyLeftAt: null,
+        identity: {
+          accountId: null,
+          profileId,
+          username: null,
+          displayName: `Name ${profileId}`,
+          avatarUrl: null,
+          level: null,
+          rankTitle: null,
+          skillRating: null,
+          gender: null,
+        },
+      },
+    })
+
+    const botSeat = (seat: Seat) => ({
+      seat,
+      team: (seat === 'bottom' || seat === 'top' ? 'A' : 'B') as 'A' | 'B',
+      participant: {
+        kind: 'bot' as const,
+        playerId: `bot-${seat}`,
+        joinedAt: 0,
+        botCode: 'bot',
+        difficulty: 'normal' as const,
+        identity: {
+          accountId: null,
+          profileId: null,
+          username: null,
+          displayName: 'Бот',
+          avatarUrl: null,
+          level: null,
+          rankTitle: null,
+          skillRating: null,
+          gender: null,
+        },
+      },
+    })
+
+    const room = {
+      id: 'room-v',
+      status: 'playing' as const,
+      createdAt: 0,
+      updatedAt: 0,
+      hostPlayerId: null,
+      config: {} as ServerRoom['config'],
+      seats: {
+        bottom: humanSeat('bottom', 'p-sender', 'conn-sender'),
+        right: humanSeat('right', 'p-recipient', 'conn-recipient'),
+        top: botSeat('top'),
+        left: humanSeat('left', 'p-third', 'conn-third'),
+      },
+      game: {} as ServerRoom['game'],
+      replayVotes: [],
+      leaveVotes: [],
+    } as unknown as ServerRoom
+
+    const rooms: Record<string, ServerRoom> = { 'room-v': room }
+
+    const senderConnection = {
+      id: 'conn-sender',
+      status: 'connected' as const,
+      connectedAt: 0,
+      lastSeenAt: 0,
+      remoteAddress: null,
+      userAgent: null,
+      currentRoomId: 'room-v',
+      currentSeat: 'bottom' as Seat,
+      playerId: 'player-p-sender',
+      profileId: 'p-sender',
+      sessionId: null,
+    }
+
+    // Happy path.
+    const ok = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'p-recipient',
+    })
+    assert(ok.ok === true, 'валиден получател на същата маса се приема')
+    if (ok.ok) {
+      assertEqual(ok.senderSeat, 'bottom', 'senderSeat идва от connection state')
+      assertEqual(ok.recipientSeat, 'right', 'recipientSeat е резолвнат от room seats')
+      assertEqual(ok.senderProfileId, 'p-sender', 'senderProfileId идва от connection, не от body')
+    }
+
+    // Получател извън стаята.
+    const outsider = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'p-outsider',
+    })
+    assertEqual(outsider.ok, false, 'играч извън стаята се отхвърля (без дебит)')
+
+    // Бот получател БЕЗ profileId (bot pool изчерпан fallback) — не може да
+    // се резолвне, тъй като recipientProfileId идва празен/null от client-а
+    // (иконата дори не се показва за такъв bot, виж renderCuttingSeatPanels.ts).
+    const botRecipient = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'bot-top',
+    })
+    assertEqual(botRecipient.ok, false, 'бот БЕЗ profileId никога не се намира по profileId')
+
+    // Self-gift.
+    const selfGift = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'p-sender',
+    })
+    assertEqual(selfGift.ok, false, 'подарък към себе си се отхвърля')
+
+    // Подправен/stale roomId в client claim-а.
+    const wrongRoom = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-other',
+      recipientProfileId: 'p-recipient',
+    })
+    assertEqual(wrongRoom.ok, false, 'claimedRoomId, различен от connection.currentRoomId, се отхвърля')
+
+    // Изпращач, който изобщо не е на маса.
+    const notInRoom = resolveTableGiftParticipants({
+      connection: { ...senderConnection, currentRoomId: null, currentSeat: null },
+      rooms,
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'p-recipient',
+    })
+    assertEqual(notInRoom.ok, false, 'изпращач извън стая се отхвърля')
+
+    // Прекъсната връзка.
+    const disconnected = resolveTableGiftParticipants({
+      connection: { ...senderConnection, status: 'disconnected' as const },
+      rooms,
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'p-recipient',
+    })
+    assertEqual(disconnected.ok, false, 'disconnected connection се отхвърля')
+
+    // Приключил мач.
+    const finishedRoom = { ...room, status: 'finished' as const } as ServerRoom
+    const finished = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms: { 'room-v': finishedRoom },
+      claimedRoomId: 'room-v',
+      recipientProfileId: 'p-recipient',
+    })
+    assertEqual(finished.ok, false, 'приключила стая се отхвърля')
+  })
+
+  // ── [W] Lazy expiry filtering на overlay state ──────────────────────────
+  await check('[W] Изтекли table gift overlay-и не попадат в room snapshot-а', async () => {
+    const nowMs = Date.now()
+    const activeTableGifts: Partial<Record<Seat, { expiresAt: string; recipientSeat: Seat }>> = {
+      right: { expiresAt: new Date(nowMs + 30_000).toISOString(), recipientSeat: 'right' },
+      left: { expiresAt: new Date(nowMs - 5_000).toISOString(), recipientSeat: 'left' },
+    }
+
+    // Същият филтър като в createRoomSnapshotMessage.
+    const visible = Object.values(activeTableGifts).filter(
+      (gift) => gift !== undefined && Date.parse(gift.expiresAt) > nowMs,
+    )
+
+    assertEqual(visible.length, 1, 'само неизтеклият overlay се праща към клиента')
+    assertEqual(visible[0]?.recipientSeat, 'right', 'останалият overlay е правилният')
+  })
+
+  // ── [X] Bot recipient с реален profileId (Stage 2.1) ────────────────────
+  // Regular matchmaking bots имат стабилен DB-backed profileId (виж
+  // selectMatchmakingBotProfiles.ts → pickEligibleBotProfileFromDb.ts) —
+  // затова gift_item_transactions.recipient_profile_id FK-то важи
+  // непроменено, БЕЗ fake profile creation и БЕЗ nullable schema промяна.
+  await check('[X] resolveTableGiftParticipants приема bot recipient С реален profileId', async () => {
+    const humanSeat = (seat: Seat, profileId: string, connectionId: string) => ({
+      seat,
+      team: (seat === 'bottom' || seat === 'top' ? 'A' : 'B') as 'A' | 'B',
+      participant: {
+        kind: 'human' as const,
+        playerId: `player-${profileId}`,
+        connectionId,
+        isConnected: true,
+        joinedAt: 0,
+        lastSeenAt: 0,
+        reconnectToken: null,
+        permanentlyLeftAt: null,
+        identity: {
+          accountId: null,
+          profileId,
+          username: null,
+          displayName: `Name ${profileId}`,
+          avatarUrl: null,
+          level: null,
+          rankTitle: null,
+          skillRating: null,
+          gender: null,
+        },
+      },
+    })
+
+    // Bot с реален profileId — mirror на createBotParticipant() резултата,
+    // когато botProfileId е resolve-нат от DB bot roster-а (не празният
+    // legacy BOT_PROFILE_SEED[] в botProfiles.ts).
+    const botSeatWithProfile = (seat: Seat, profileId: string) => ({
+      seat,
+      team: (seat === 'bottom' || seat === 'top' ? 'A' : 'B') as 'A' | 'B',
+      participant: {
+        kind: 'bot' as const,
+        playerId: `bot-${seat}`,
+        joinedAt: 0,
+        botCode: 'bot',
+        difficulty: 'normal' as const,
+        botProfileId: profileId,
+        identity: {
+          accountId: null,
+          profileId,
+          username: null,
+          displayName: 'Бот Иван',
+          avatarUrl: null,
+          level: null,
+          rankTitle: null,
+          skillRating: null,
+          gender: null,
+        },
+      },
+    })
+
+    const room = {
+      id: 'room-x',
+      status: 'playing' as const,
+      createdAt: 0,
+      updatedAt: 0,
+      hostPlayerId: null,
+      config: {} as ServerRoom['config'],
+      seats: {
+        bottom: humanSeat('bottom', 'p-sender-x', 'conn-sender-x'),
+        right: botSeatWithProfile('right', 'bot-profile-1'),
+        top: humanSeat('top', 'p-third-x', 'conn-third-x'),
+        left: botSeatWithProfile('left', 'bot-profile-2'),
+      },
+      game: {} as ServerRoom['game'],
+      replayVotes: [],
+      leaveVotes: [],
+    } as unknown as ServerRoom
+
+    const rooms: Record<string, ServerRoom> = { 'room-x': room }
+
+    const senderConnection = {
+      id: 'conn-sender-x',
+      status: 'connected' as const,
+      connectedAt: 0,
+      lastSeenAt: 0,
+      remoteAddress: null,
+      userAgent: null,
+      currentRoomId: 'room-x',
+      currentSeat: 'bottom' as Seat,
+      playerId: 'player-p-sender-x',
+      profileId: 'p-sender-x',
+      sessionId: null,
+    }
+
+    // [A] Human sender + bot recipient в СЪЩАТА room → валидно.
+    const botGift = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-x',
+      recipientProfileId: 'bot-profile-1',
+    })
+    assert(botGift.ok === true, 'bot С реален profileId е валиден gift target')
+    if (botGift.ok) {
+      assertEqual(botGift.recipientSeat, 'right', 'recipientSeat резолвнат коректно за bot')
+      assertEqual(botGift.recipientProfileId, 'bot-profile-1', 'recipientProfileId е bot-a profileId')
+      assertEqual(botGift.recipientIsBot, true, 'recipientIsBot=true за bot получател')
+      assertEqual(botGift.recipientDisplayName, 'Бот Иван', 'recipientDisplayName е bot display name-a')
+    }
+
+    // Human recipient продължава да работи (не е счупено от bot поддръжката).
+    const humanGift = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-x',
+      recipientProfileId: 'p-third-x',
+    })
+    assert(humanGift.ok === true, 'human recipient продължава да работи')
+    if (humanGift.ok) {
+      assertEqual(humanGift.recipientIsBot, false, 'recipientIsBot=false за human получател')
+    }
+
+    // [J] Fake/невъзможен bot seat target — profileId, който не съществува
+    // на никое място в тази стая → reject.
+    const fakeBotTarget = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-x',
+      recipientProfileId: 'bot-profile-nonexistent',
+    })
+    assertEqual(fakeBotTarget.ok, false, 'несъществуващ bot profileId се отхвърля')
+
+    // [J] Cross-room bot target — bot от ДРУГА стая не може да бъде получател,
+    // дори ако profileId-то съществува някъде другаде в serverState.rooms.
+    const otherRoom = {
+      ...room,
+      id: 'room-x-other',
+      seats: {
+        ...room.seats,
+        right: botSeatWithProfile('right', 'bot-profile-cross-room'),
+      },
+    } as unknown as ServerRoom
+    const crossRoomRooms: Record<string, ServerRoom> = {
+      'room-x': room,
+      'room-x-other': otherRoom,
+    }
+    const crossRoomTarget = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms: crossRoomRooms,
+      claimedRoomId: 'room-x',
+      recipientProfileId: 'bot-profile-cross-room',
+    })
+    assertEqual(crossRoomTarget.ok, false, 'bot от друга стая не е валиден target')
+
+    // [K] Self-target остава reject дори когато е технически bot-shaped заявка
+    // (sender опитва да "подари" сам на себе си, независимо от recipient kind).
+    const selfTarget = resolveTableGiftParticipants({
+      connection: senderConnection,
+      rooms,
+      claimedRoomId: 'room-x',
+      recipientProfileId: 'p-sender-x',
+    })
+    assertEqual(selfTarget.ok, false, 'self-target остава отхвърлен')
+  })
+
+  // ── [Y] Payment/idempotency/broadcast семантика за bot recipient ────────
+  // sendGiftItem/broadcast логиката работи по recipientProfileId, не по
+  // participant.kind — затова payment/idempotency поведението за bot
+  // получател е СТРУКТУРНО идентично на profile/human getting (вече покрито
+  // от [A]-[H] по-горе), само reconstruct-нато тук explicit с bot profileId
+  // за да потвърди, че context='game' flow-ът не прави никакво специално
+  // третиране на bot recipient-и на DB/store ниво.
+  await check('[Y] sendGiftItem(context="game") към bot profileId: единичен дебит, transaction записан, без delivery notification', async () => {
+    const dbPath = join(dir, 'testY.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    buildBaseSchema(db)
+    await applyGiftItemMigrations(db)
+    seedProfile(db, 'sender-y', 10_000)
+    // Bot recipient профилът е реален ред в profiles/bot_metadata в
+    // production (виж production DB: profiles WHERE profile_kind='bot' —
+    // 303 реда). Тук го seed-ваме като обикновен profile ред (същата
+    // profile_wallets/profiles таблична форма, profile_kind не участва в
+    // gift_item_transactions FK-то — само profile_id съществуването значи).
+    seedProfile(db, 'bot-profile-y', 0)
+    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
+      VALUES ('item-y', 'Роза', '/uploads/gift-items/rose.webp', 2000, 1, 0)`)
+    db.close()
+
+    const progressStore = makeMockProgressStore(new Set(['sender-y', 'bot-profile-y']))
+    const store = await createGiftItemStore(dbPath, progressStore)
+
+    // [C] Sender се дебитира точно веднъж, [D] transaction записан коректно.
+    const result = store.sendGiftItem('sender-y', 'bot-profile-y', 'item-y', 'req-y-1', 'game', 'room-y')
+    assert(result.ok === true, 'gift към bot profileId трябва да успее')
+    if (!result.ok) return
+    assertEqual(result.isReplay, false, 'първо изпращане е нов transaction, не replay')
+    assertEqual(result.senderBalanceAfter, 8000, 'sender дебитиран точно с цената (10000 - 2000)')
+    assertEqual(result.transaction.context, 'game', 'context="game" записан коректно')
+    assertEqual(result.transaction.roomId, 'room-y', 'room_id записан коректно')
+    assertEqual(result.transaction.recipientProfileId, 'bot-profile-y', 'recipient_profile_id е bot-a profileId')
+
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    assertEqual(countTransactions(db2, 'item-y'), 1, 'точно 1 transaction ред')
+    // [I] Bot НЕ получава wallet credit — profile_wallets balance-а на бота
+    // остава 0 (само seed стойността), sendGiftItem никога не credit-ва
+    // recipient-а за никой context (виж §3 брифа "Bot НЕ получава yellow coins").
+    assertEqual(getWalletBalance(db2, 'bot-profile-y'), 0, 'bot recipient не получава никакъв credit')
+    // [I] GAME gift не създава delivery log ред за bot (нито за human) —
+    // index.ts route-ът explicit НЕ вика createDeliveryNotification за
+    // context='game', проверено тук directно на DB ниво.
+    const deliveryCount = db2.prepare(
+      'SELECT COUNT(*) AS cnt FROM gift_item_delivery_log WHERE recipient_profile_id = ?',
+    ).get('bot-profile-y') as { cnt: number }
+    assertEqual(deliveryCount.cnt, 0, 'няма delivery log ред за bot recipient (game context)')
+    db2.close()
+
+    // [L] Idempotent replay — един и същ requestId два пъти: един debit,
+    // един transaction ред, isReplay=true при повторния опит (route-ът
+    // guard-ва broadcast-а само с isReplay===false, виж index.ts).
+    const replay = store.sendGiftItem('sender-y', 'bot-profile-y', 'item-y', 'req-y-1', 'game', 'room-y')
+    assert(replay.ok === true, 'replay заявка трябва пак да "успее" (idempotent)')
+    if (replay.ok) {
+      assertEqual(replay.isReplay, true, 'втори опит със СЪЩИЯ requestId е replay')
+      assertEqual(replay.transaction.transactionId, result.transaction.transactionId, 'replay връща СЪЩИЯ transaction')
+      assertEqual(replay.senderBalanceAfter, 8000, 'balance непроменен при replay (без втори дебит)')
+    }
+
+    const db3 = new DatabaseSync(dbPath, { open: true })
+    assertEqual(countTransactions(db3, 'item-y'), 1, '[C]/[L] точно 1 transaction ред дори след replay опит')
+    assertEqual(getWalletBalance(db3, 'sender-y'), 8000, '[C]/[L] точно ЕДИН дебит общо')
+    db3.close()
 
     store.close()
   })

@@ -6368,6 +6368,12 @@ const activeRoom = createActiveRoomFlowController({
   sendPhraseReaction: (roomId, phraseId) => {
     client.sendPhraseReaction(roomId, phraseId)
   },
+  sendTableGift: (roomId, recipientProfileId, giftItemId, requestId) => {
+    client.sendTableGift(roomId, recipientProfileId, giftItemId, requestId)
+  },
+  // Reuse на СЪЩИЯ public catalog endpoint като lobby gift модала.
+  onGiftItemCatalogLoad: () => loadGiftItemCatalog(),
+  getAuthSession: () => currentAuthSession,
   requestPlayerProfile: (roomId, seat) => {
     client.requestPlayerProfile(roomId, seat)
   },

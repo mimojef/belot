@@ -19,6 +19,7 @@ export const CUTTING_VISUAL_SEAT_INITIALS: Record<Seat, string> = {
 export function createEmptySeatSnapshot(seat: Seat): RoomSeatSnapshot {
   return {
     seat,
+    profileId: null,
     displayName: '',
     isOccupied: false,
     isBot: false,

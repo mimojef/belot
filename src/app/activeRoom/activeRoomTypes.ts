@@ -41,6 +41,24 @@ export type ActiveRoomState = {
   tournamentAttendance: TournamentAttendanceSnapshot | null
   tournamentBotReplacements: TournamentBotReplacementSnapshot[]
   tournamentBanners: TournamentRoomBannerSnapshot[]
+  /**
+   * Активни table gift overlay-и, keyed по АБСОЛЮТЕН recipient seat.
+   * Нов подарък към същия получател заменя стария (server-side overwrite).
+   * Reconnect-safe: пълни се и от room_snapshot.activeTableGifts, така че
+   * след reconnect overlay-ът се възстановява с ОСТАВАЩОТО време, без
+   * повторно пускане на летящата анимация.
+   */
+  activeTableGiftOverlays: Partial<Record<Seat, ActiveTableGiftOverlay>>
+}
+
+export type ActiveTableGiftOverlay = {
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderSeat: Seat
+  senderDisplayName: string
+  expiresAt: string
 }
 
 export type CreateActiveRoomFlowControllerOptions = {
@@ -57,6 +75,20 @@ export type CreateActiveRoomFlowControllerOptions = {
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
   sendPhraseReaction: (roomId: string, phraseId: string) => void
+  /** Table gift (Stage 2) — WS action, mirror на останалите gameplay actions. */
+  sendTableGift?: (
+    roomId: string,
+    recipientProfileId: string,
+    giftItemId: string,
+    requestId: string,
+  ) => void
+  /** Fresh catalog fetch при всяко отваряне на in-game селектора. */
+  onGiftItemCatalogLoad?: () => Promise<
+    | { ok: true; items: Array<{ giftItemId: string; name: string; imageUrl: string; price: number }> }
+    | { ok: false; message: string }
+  >
+  /** Reuse на СЪЩОТО authSession balance поле, което ползва и lobby-то. */
+  getAuthSession?: () => { profile: { yellowCoinsBalance: number | null } } | null
   requestPlayerProfile: (roomId: string, seat: Seat) => void
   getFriendshipAction: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   onSendFriendRequest: (profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>

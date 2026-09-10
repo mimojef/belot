@@ -838,6 +838,13 @@ export type ClientMessage =
       phraseId: string
     }
   | {
+      type: 'send_table_gift'
+      roomId: string
+      recipientProfileId: string
+      giftItemId: string
+      requestId: string
+    }
+  | {
       type: 'create_private_room'
       stake: MatchStake
       isLocked: boolean
@@ -1011,6 +1018,8 @@ export type PrivateRoomSnapshot = {
 
 export type RoomSeatSnapshot = {
   seat: Seat
+  /** null за празно място или бот — само реални профили могат да получат подарък. */
+  profileId: string | null
   displayName: string
   isOccupied: boolean
   isBot: boolean
@@ -1304,6 +1313,8 @@ export type RoomSnapshotMessage = {
   tournamentAttendance?: TournamentAttendanceSnapshot | null
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[]
   tournamentBanners?: TournamentRoomBannerSnapshot[]
+  /** Неизтекли table gift overlay-и — reconnect-safe (виж §11 в контролера). */
+  activeTableGifts?: ActiveTableGiftSnapshot[]
 }
 
 export type TournamentAttendancePlayerSummary = {
@@ -1460,6 +1471,55 @@ export type PhraseReactionMessage = {
   roomId: string
   seat: Seat
   phraseId: string
+}
+
+/** Активен table gift overlay (Stage 2), keyed по получател. */
+export type ActiveTableGiftSnapshot = {
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderSeat: Seat
+  senderDisplayName: string
+  recipientSeat: Seat
+  sentAt: string
+  expiresAt: string
+}
+
+/**
+ * Room-wide push при нов table gift. Пристига САМО за реално нови
+ * транзакции — idempotent replay не произвежда второ съобщение.
+ * senderSeat/recipientSeat са АБСОЛЮТНИ server seats.
+ */
+export type TableGiftItemSentMessage = {
+  type: 'table_gift_item_sent'
+  roomId: string
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderSeat: Seat
+  senderDisplayName: string
+  recipientProfileId: string
+  recipientSeat: Seat
+  chargedPrice: number
+  sentAt: string
+  expiresAt: string
+}
+
+/** Личен отговор към изпращача (успех/грешка + нов баланс). */
+export type TableGiftSendResultMessage = {
+  type: 'table_gift_send_result'
+  roomId: string
+  requestId: string
+  ok: boolean
+  message?: string
+  transactionId?: string
+  chargedPrice?: number
+  senderBalanceAfter?: number
+  isReplay?: boolean
 }
 
 export type PrivateRoomsListMessage = {
@@ -2264,6 +2324,8 @@ export type ServerMessage =
   | SessionInGameMessage
   | EmojiReactionMessage
   | PhraseReactionMessage
+  | TableGiftItemSentMessage
+  | TableGiftSendResultMessage
   | PrivateRoomsListMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
@@ -2422,6 +2484,12 @@ export type GameServerClient = {
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
   sendPhraseReaction: (roomId: string, phraseId: string) => void
+  sendTableGift: (
+    roomId: string,
+    recipientProfileId: string,
+    giftItemId: string,
+    requestId: string,
+  ) => void
   requestPrivateRoomsList: () => void
   requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
@@ -2699,6 +2767,21 @@ export function createGameServerClient(
     })
   }
 
+  function sendTableGift(
+    roomId: string,
+    recipientProfileId: string,
+    giftItemId: string,
+    requestId: string,
+  ): void {
+    send({
+      type: 'send_table_gift',
+      roomId,
+      recipientProfileId,
+      giftItemId,
+      requestId,
+    })
+  }
+
   function requestPrivateRoomsList(): void {
     send({ type: 'request_private_rooms_list' })
   }
@@ -2850,6 +2933,7 @@ export function createGameServerClient(
     sendLeaveMatchVote,
     sendEmojiReaction,
     sendPhraseReaction,
+    sendTableGift,
     requestPrivateRoomsList,
     requestPrivateGamesList,
     createPrivateRoom,

@@ -81,6 +81,7 @@ import {
 import {
   decodeImageAttachmentDataUrl,
   deleteAttachmentFileByFilename,
+  GIFT_ITEM_IMAGE_DIMENSION_PX,
   GIFT_ITEM_IMAGE_WEBP_QUALITY,
   IMAGE_ATTACHMENT_FILENAME_PATTERN,
   MAX_IMAGE_ATTACHMENT_INPUT_BYTES,
@@ -189,6 +190,8 @@ import { createYellowCoinGiftStore, type YellowCoinGiftSnapshot } from './db/yel
 import { createGiftItemStore } from './db/giftItemStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
 import { broadcastRoomSnapshots, setBroadcastRoomSnapshotsMonitoringHook } from './core/broadcastRoomSnapshots.js'
+import { broadcastToRoomConnections } from './core/broadcastToRoomConnections.js'
+import { resolveTableGiftParticipants } from './core/resolveTableGiftParticipants.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
 import { computeActiveRoomsSnapshot } from './core/computeActiveRoomsSnapshot.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
@@ -362,6 +365,8 @@ const EARLY_BOT_FILL_DEBIT_MS = 1700
 const MATCHMAKING_NO_CAPACITY_COOLDOWN_MS = 2_000
 const GAME_RUNTIME_TICK_MS = 250
 const GAME_WORKER_TICK_FAILURE_LOG_INTERVAL_MS = 5_000
+/** Колко дълго table gift overlay-ът стои върху avatar-а на получателя. */
+const TABLE_GIFT_OVERLAY_DURATION_MS = 60_000
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 15_000_000
 const GUEST_CONTACT_MAX_JSON_BODY_BYTES = 20_000
@@ -475,6 +480,14 @@ const OVERSIZED_CHAT_PRUNE_STARTUP_DELAY_MS = 105_000
 // попълва формата) в момента на server restart.
 const GIFT_ITEM_ORPHAN_SWEEP_STARTUP_DELAY_MS = 135_000
 const GIFT_ITEM_ORPHAN_SWEEP_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000
+// §7D от Delete semantics брифа — lightweight startup reconciliation за
+// logically deleted gift images. Различен offset (150s) от orphan sweep-а
+// (135s) по-горе, за да не се застъпват. Startup-ONLY, БЕЗ periodичен
+// interval — покрива случая, при който сървърът е бил спрян точно преди
+// tryFinalizeDeletedGiftImage да довърши (напр. mark-shown-triggered
+// finalize по средата на request-а, restart преди fire-and-forget-натото
+// void deleteUploadFileByUrl да приключи).
+const DELETED_GIFT_ITEM_IMAGE_RECONCILE_STARTUP_DELAY_MS = 150_000
 const OVERSIZED_CHAT_PRUNE_BATCH_SIZE = 50
 const guestContactRateLimitByIp = new Map<string, { windowStartedAt: number; count: number }>()
 
@@ -638,6 +651,9 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'unsubscribe_topic_messages':
     case 'send_topic_message':
     case 'send_topic_reply':
+    // Мутира wallet + DB (gift transaction) — принадлежи на shutdown-guarded
+    // групата, за разлика от read-only reaction съобщенията по-долу.
+    case 'send_table_gift':
     case 'toggle_topic_message_like':
     case 'create_topic':
     case 'subscribe_topics_directory':
@@ -2536,7 +2552,13 @@ async function runGiftItemImageOrphanSweep(): Promise<void> {
 
     const imageUrl = createUploadUrl('gift-items', filename)
 
-    if (giftItemStore.isImageUrlReferenced(imageUrl)) {
+    // Retention semantics (не catalog-only isImageUrlReferenced) —
+    // orphan sweep-ът обхожда ВСИЧКИ .webp файлове в директорията, не само
+    // never-submitted uploads. Файл, принадлежащ на logically deleted gift с
+    // все още pending (shown_at IS NULL) delivery, трябва да оцелее тук
+    // също — catalog-only проверка би го пропуснала (deleted gift вече не
+    // participate-ва в catalog reference count) и погрешно би го изтрила.
+    if (giftItemStore.isImageUrlRetentionReferenced(imageUrl)) {
       skippedReferencedCount++
       continue
     }
@@ -2556,6 +2578,28 @@ async function runGiftItemImageOrphanSweep(): Promise<void> {
 let giftItemOrphanSweepStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
   () => { void runGiftItemImageOrphanSweep() },
   GIFT_ITEM_ORPHAN_SWEEP_STARTUP_DELAY_MS,
+)
+
+// §7D — reconciliation за logically deleted gift item images (виж
+// tryFinalizeDeletedGiftImage за пълния safe-delete algorithm, дефинирана
+// по-долу, но function declaration е hoisted). Reuse-ва directно
+// giftItemStore.listDeletedGiftItemImageUrls() — DB вече знае точно кои
+// изображения принадлежат на tombstone redове, не е нужен directory scan.
+async function runDeletedGiftItemImageReconciliation(): Promise<void> {
+  if (isServerShuttingDown) {
+    return
+  }
+
+  const deletedImageUrls = giftItemStore.listDeletedGiftItemImageUrls()
+
+  for (const imageUrl of deletedImageUrls) {
+    await tryFinalizeDeletedGiftImage(imageUrl)
+  }
+}
+
+let deletedGiftItemImageReconcileStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+  () => { void runDeletedGiftItemImageReconciliation() },
+  DELETED_GIFT_ITEM_IMAGE_RECONCILE_STARTUP_DELAY_MS,
 )
 
 // Bounded convergence за conversations, чийто message count вече надвишава
@@ -4292,6 +4336,13 @@ function cleanupInactiveRoomIfNeeded(roomId: string, now: number = Date.now()): 
 
   serverState = removeCommittedServerRoom(roomId)
 
+  // Room teardown hook (§5 от брифа) — извикан СЛЕД removeCommittedServerRoom
+  // нарочно (self-reference guard, виж пълния коментар при дефиницията на
+  // функцията) — опитай finalize за всеки active table gift image в тая
+  // стая (ако е deletion-requested, вече никой друг room reference няма да
+  // го блокира). Best-effort, не влияе на самия room removal.
+  finalizeActiveTableGiftImagesForRoom(room)
+
   cleanupTempBotsFromRoom(room)
   markRoomSnapshotRemoved(roomId)
   activeRoomRuntime.removeRoom(roomId)
@@ -4311,6 +4362,8 @@ function forceRemoveTournamentRoomById(roomId: string): void {
   const room = serverState.rooms[roomId]
   if (room === undefined) return
   serverState = removeCommittedServerRoom(roomId)
+  // Room teardown hook (§5 от брифа) — виж cleanupInactiveRoomIfNeeded коментара.
+  finalizeActiveTableGiftImagesForRoom(room)
   cleanupTempBotsFromRoom(room)
   markRoomSnapshotRemoved(roomId)
   activeRoomRuntime.removeRoom(roomId)
@@ -4341,6 +4394,8 @@ async function tickRoomGameRuntimes(): Promise<void> {
 
     if (!shouldKeepRoomAlive(room, now)) {
       serverState = removeCommittedServerRoom(roomId)
+      // Room teardown hook (§5 от брифа) — виж cleanupInactiveRoomIfNeeded коментара.
+      finalizeActiveTableGiftImagesForRoom(room)
       cleanupTempBotsFromRoom(room)
       markRoomSnapshotRemoved(roomId)
       activeRoomRuntime.removeRoom(roomId)
@@ -14287,6 +14342,154 @@ async function handleAdminCoinPackagesRequest(
   return false
 }
 
+// Delete semantics change (виж CLAUDE.md брифа "Admin трябва да може да
+// изтрие подарък независимо дали е бил изпращан") — централен reference-safe
+// finalize helper за logically deleted gift item images. Викан от 4 места
+// (§7 от брифа): (A) веднага след Admin Delete request, (B) след mark-shown
+// на personal gift delivery, (C) при обхождане на активни table gifts (лениво,
+// не отделен persistent tracking механизъм), (D) при server startup
+// reconciliation. Reuse-ва СЪЩИЯ deleteUploadFileByUrl safe-delete helper,
+// не дублира filesystem логика.
+//
+// Физическо изтриване е позволено САМО когато:
+//   A. gift-ът е logically deleted (deleted_at IS NOT NULL) — недокоснат ред
+//      никога не влиза в тая функция изобщо (виж caller guard-овете);
+//   B. няма pending (shown_at IS NULL) gift_item_delivery_log ред за тоя URL;
+//   C. няма активен table gift runtime (room.config.activeTableGifts) с
+//      тоя imageUrl и expiresAt > now, в НИТО една стая;
+//   D. няма друг НЕ-изтрит catalog ред, споделящ същия URL (audit т.13
+//      сценарий — admin ръчно е copy-paste-нал същия URL за два подаръка).
+//
+// B+D се покриват от giftItemStore.isImageUrlRetentionReferenced (DB-level).
+// C е orthogonal in-memory state, лениво обходено тук (serverState.rooms) —
+// няма нужда от нова persistent таблица само за тая проверка, точно както
+// изисква брифа.
+async function tryFinalizeDeletedGiftImage(imageUrl: string): Promise<void> {
+  const trimmedUrl = imageUrl.trim()
+
+  if (trimmedUrl.length === 0) {
+    return
+  }
+
+  if (giftItemStore.isImageUrlRetentionReferenced(trimmedUrl)) {
+    return
+  }
+
+  const nowMs = Date.now()
+
+  for (const room of Object.values(serverState.rooms)) {
+    const activeGifts = room.config.activeTableGifts
+
+    if (!activeGifts) {
+      continue
+    }
+
+    for (const gift of Object.values(activeGifts)) {
+      if (
+        gift !== undefined &&
+        gift.imageUrl === trimmedUrl &&
+        Date.parse(gift.expiresAt) > nowMs
+      ) {
+        // Все още active table gift overlay някъде на масата — файлът
+        // остава недокоснат; следващ finalize опит (expiry sweep §7C или
+        // следващ mark-shown §7B) ще го провери отново по-късно.
+        return
+      }
+    }
+  }
+
+  void deleteUploadFileByUrl(trimmedUrl)
+}
+
+// Root cause fix — липсваше explicit hook за НОРМАЛНО 60-sec expiry на
+// active table gifts. tryFinalizeDeletedGiftImage/isImageUrlRetentionReferenced
+// вече бяха коректни за Admin Delete/mark-shown/replacement/startup
+// reconciliation, но activeTableGifts entries никога не се "expire-ват"
+// server-side активно — createRoomSnapshotMessage.ts само FILTER-ва
+// изтекли entries при построяване на snapshot-а (presentation-layer), без
+// изобщо да ги маха от room.config.activeTableGifts или да вика finalize.
+// Резултат: ако deletion-requested gift е било active table gift, файлът
+// чакаше server restart (startup reconciliation), не реалното изтичане на
+// 60-те секунди.
+//
+// Решение: per-gift setTimeout, armиран точно в момента на изпращане
+// (TABLE_GIFT_OVERLAY_DURATION_MS delay) — НЕ polling/periodичен interval.
+// transactionId stale-guard: ако entry-то за тоя seat вече е било заменено
+// от по-нов gift (replacement path-ът в send_table_gift handler-а вече
+// финализира стария URL сам, виж previousImageUrl логиката там), тоя
+// timeout е no-op — не бива да трие entry-то на по-новия gift.
+function scheduleTableGiftExpiryFinalization(
+  roomId: string,
+  recipientSeat: Seat,
+  transactionId: string,
+  imageUrl: string,
+  delayMs: number,
+): void {
+  setTimeout(() => {
+    const room = serverState.rooms[roomId]
+
+    if (room === undefined) {
+      // Стаята вече не съществува (room teardown е станал преди expiry-a) —
+      // finalizeActiveTableGiftImagesForRoom вече е поел тая грижа при
+      // самия teardown момент, виж caller-ите ѝ по-долу.
+      return
+    }
+
+    const activeGifts = room.config.activeTableGifts
+
+    if (!activeGifts) {
+      return
+    }
+
+    const currentEntry = activeGifts[recipientSeat]
+
+    if (currentEntry === undefined || currentEntry.transactionId !== transactionId) {
+      // Заменено от по-нов gift (или вече премахнато) междувременно — no-op.
+      return
+    }
+
+    delete activeGifts[recipientSeat]
+
+    void tryFinalizeDeletedGiftImage(imageUrl)
+  }, delayMs)
+}
+
+// Room teardown hook (§5 от брифа "room end/room destruction").
+//
+// КРИТИЧНО ЗА РЕДА НА ИЗВИКВАНЕ: caller-ите (cleanupInactiveRoomIfNeeded/
+// forceRemoveTournamentRoomById/tickRoomGameRuntimes/disconnect handler-а)
+// ВИНАГИ викат тая функция СЛЕД `serverState = removeCommittedServerRoom(...)`,
+// НЕ преди. Причината е self-reference проблем: tryFinalizeDeletedGiftImage
+// синхронно сканира Object.values(serverState.rooms), за да провери дали
+// ДРУГА стая все още active-но използва imageUrl-а. Ако room-ът, който тъкмо
+// приключва, ВСЕ ОЩЕ е в serverState.rooms в момента на тоя scan, той сам ще
+// се преброи като "блокиращ reference" за собствения си image (заради
+// gift.expiresAt > now все още вярно) и finalize-ът никога няма да мине —
+// файлът би чакал следващия mark-shown/startup reconciliation вместо да се
+// изтрие веднага при room end. removeCommittedServerRoom е чиста функция
+// (връща нов ServerState, не мутира); извикването ѝ ПЪРВО гарантира, че
+// serverState вече НЕ съдържа тая стая, когато tryFinalizeDeletedGiftImage
+// (извикана тук, синхронно до тук в тялото ѝ) прочете serverState.rooms.
+//
+// Ако room приключи преди expiresAt на active table gift, самата
+// scheduleTableGiftExpiryFinalization timeout всe пак ще изгасне по-късно
+// (roomId lookup там просто ще намери undefined и ще бъде no-op) — затова
+// тук explicit опитваме finalize веднага, вместо да чакаме оригиналния
+// timeout да изтече без ефект.
+function finalizeActiveTableGiftImagesForRoom(room: ServerRoom): void {
+  const activeGifts = room.config.activeTableGifts
+
+  if (!activeGifts) {
+    return
+  }
+
+  for (const gift of Object.values(activeGifts)) {
+    if (gift !== undefined) {
+      void tryFinalizeDeletedGiftImage(gift.imageUrl)
+    }
+  }
+}
+
 // Admin CRUD за virtual item gift каталога (gift_items таблица) — ОТДЕЛЕН
 // domain от yellowCoinGiftStore (директен coin transfer). Виж giftItemStore.ts.
 // Копира 1:1 структурния подход на handleAdminCoinPackagesRequest по-горе.
@@ -14353,9 +14556,10 @@ async function handleAdminGiftItemsRequest(
       // Image Replace §3 "failed update след upload" — новият файл вече е на
       // диска (отделен upload-image request преди тоя submit), но DB update-ът
       // тук е отхвърлен, значи никой DB ред не сочи новия URL. Reference-safe
-      // guard (не голо unlink) — ако по някое чудо друг ред вече споделя този
-      // URL, файлът остава недокоснат.
-      if (newImageUrl.length > 0 && !giftItemStore.isImageUrlReferenced(newImageUrl)) {
+      // guard (не голо unlink), retention semantics за defense-in-depth
+      // consistency с §3 Image Replace guard-а по-долу — ако по някое чудо
+      // друг ред вече споделя тоя URL, файлът остава недокоснат.
+      if (newImageUrl.length > 0 && !giftItemStore.isImageUrlRetentionReferenced(newImageUrl)) {
         void deleteUploadFileByUrl(newImageUrl)
       }
       sendJsonResponse(res, 400, result)
@@ -14364,10 +14568,12 @@ async function handleAdminGiftItemsRequest(
 
     // Image Replace §3 стъпки 3-6 — DB update вече мина успешно (result.ok).
     // previousImageUrl е non-null само при реален edit с различен URL (виж
-    // giftItemStore.upsertGiftItem коментара). Проверяваме references СЛЕД
-    // update-а (текущият ред вече сочи новия URL, значи "стар" reference count
-    // тук отразява само ДРУГИ redове/delivery log, не самия този edit).
-    if (result.previousImageUrl !== null && !giftItemStore.isImageUrlReferenced(result.previousImageUrl)) {
+    // giftItemStore.upsertGiftItem коментара). isImageUrlRetentionReferenced
+    // (не isImageUrlReferenced!) — старият image URL може вече да е snapshot-нат
+    // в pending gift_item_delivery_log redове (получателят все още не го е
+    // видял), не само в друг живо catalog ред. Проверяваме references СЛЕД
+    // update-а (текущият ред вече сочи новия URL).
+    if (result.previousImageUrl !== null && !giftItemStore.isImageUrlRetentionReferenced(result.previousImageUrl)) {
       void deleteUploadFileByUrl(result.previousImageUrl)
     }
 
@@ -14380,6 +14586,11 @@ async function handleAdminGiftItemsRequest(
   }
 
   if (deleteMatch !== null && req.method === 'DELETE') {
+    // Logical delete (tombstone) — ВИНАГИ позволен, независимо от
+    // transaction history. deleteGiftItem вече никога не връща ok:false
+    // заради "history" (старото RESTRICT правило е премахнато в
+    // giftItemStore.ts) — редът просто получава deleted_at и изчезва от
+    // listAdminGiftItems()/listActiveGiftItems() веднага.
     const result = giftItemStore.deleteGiftItem(decodeURIComponent(deleteMatch[1] ?? ''))
 
     if (!result.ok) {
@@ -14387,13 +14598,12 @@ async function handleAdminGiftItemsRequest(
       return true
     }
 
-    // Hard Delete §4 стъпки 3-4 — DB row вече е изтрит (result.ok). Проверяваме
-    // references СЛЕД delete-а: ако друг активен gift item ръчно споделя
-    // същия URL (audit т.13), или delivery log все още го цитира, файлът
-    // остава недокоснат.
-    if (!giftItemStore.isImageUrlReferenced(result.deletedImageUrl)) {
-      void deleteUploadFileByUrl(result.deletedImageUrl)
-    }
+    // §7A hook — веднага след Admin Delete. tryFinalizeDeletedGiftImage
+    // проверява pending unseen deliveries + активни table gifts + други
+    // живи catalog redове преди физическо изтриване. "already-deleted"
+    // outcome (idempotent повторен delete click) все още минава оттук —
+    // безобидно, finalize check-ът просто ще намери същото състояние.
+    void tryFinalizeDeletedGiftImage(result.deletedImageUrl)
 
     sendJsonResponse(res, 200, { ok: true, items: result.items })
     return true
@@ -14447,6 +14657,8 @@ async function handleAdminGiftItemsRequest(
     const processed = await processImageAttachmentToWebp(imageBuffer, {
       enforceSourcePixelLimit: true,
       quality: GIFT_ITEM_IMAGE_WEBP_QUALITY,
+      dimensionPx: GIFT_ITEM_IMAGE_DIMENSION_PX,
+      allowEnlargement: true,
     })
 
     if (processed === null) {
@@ -14551,8 +14763,13 @@ async function handleGiftItemsRequest(
     const imageUrl = result.giftItem?.imageUrl ?? ''
 
     if (recipientProfileIdResolved) {
+      // Stage 2: получателят се смята за ONLINE и когато е на маса.
+      // Преди тук имаше и `c.currentRoomId == null` — играещ получател
+      // отиваше в persisted offline queue. Сега получава LIVE push, за да
+      // може клиентът сам да реши презентацията (нормален модал, ако не е
+      // в игра; компактен top banner, ако е в активна стая).
       const recipientConn = Object.values(serverState.connections).find(
-        (c) => c.profileId === recipientProfileIdResolved && c.status === 'connected' && c.currentRoomId == null,
+        (c) => c.profileId === recipientProfileIdResolved && c.status === 'connected',
       )
 
       if (recipientConn) {
@@ -14593,7 +14810,16 @@ async function handleGiftItemsRequest(
 
   if (markShownMatch !== null && req.method === 'POST') {
     const transactionId = decodeURIComponent(markShownMatch[1] ?? '')
-    giftItemStore.markDeliveryShown(transactionId, senderProfileId)
+    // §7B hook — markDeliveryShown сега връща imageUrl-а на markнатия ред
+    // (или null ако не е намерен). Best-effort finalize опит: ако това е
+    // бил последният pending unseen delivery за тоя URL (и gift-ът е
+    // logically deleted), файлът вече може безопасно да се изтрие.
+    // tryFinalizeDeletedGiftImage самата проверява retention/table-gift
+    // references — no-op ако все още има друга причина да остане.
+    const imageUrl = giftItemStore.markDeliveryShown(transactionId, senderProfileId)
+    if (imageUrl !== null) {
+      void tryFinalizeDeletedGiftImage(imageUrl)
+    }
     sendJsonResponse(res, 200, { ok: true })
     return true
   }
@@ -18773,6 +18999,134 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'send_table_gift') {
+        // Table gift (Stage 2) — REUSE-ва изцяло Stage 1 payment/idempotency
+        // service (giftItemStore.sendGiftItem), само с context='game' + roomId.
+        // Никаква паралелна платежна логика тук.
+        const giftConn = getConnectionById(serverState, connection.id)
+        const resolution = resolveTableGiftParticipants({
+          connection: giftConn,
+          rooms: serverState.rooms,
+          claimedRoomId: message.roomId,
+          recipientProfileId: message.recipientProfileId,
+        })
+
+        if (!resolution.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'table_gift_send_result',
+            roomId: message.roomId,
+            requestId: message.requestId,
+            ok: false,
+            message: resolution.message,
+          })
+          return
+        }
+
+        const giftResult = giftItemStore.sendGiftItem(
+          resolution.senderProfileId,
+          resolution.recipientProfileId,
+          message.giftItemId,
+          message.requestId,
+          'game',
+          resolution.room.id,
+        )
+
+        if (!giftResult.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'table_gift_send_result',
+            roomId: message.roomId,
+            requestId: message.requestId,
+            ok: false,
+            message: giftResult.message,
+          })
+          return
+        }
+
+        // Idempotent replay (същият requestId) — sender-ът получава success
+        // отговор (HTTP-подобна idempotent семантика), но НЕ произвеждаме
+        // втори room broadcast и не мутираме overlay state повторно.
+        if (!giftResult.isReplay) {
+          const nowMs = Date.now()
+          const sentAt = new Date(nowMs).toISOString()
+          const expiresAt = new Date(nowMs + TABLE_GIFT_OVERLAY_DURATION_MS).toISOString()
+          const giftName = giftResult.giftItem?.name ?? ''
+          const imageUrl = giftResult.giftItem?.imageUrl ?? ''
+
+          const activeGifts = resolution.room.config.activeTableGifts ?? {}
+          // §7C hook — ако тоя нов подарък ЗАМЕСТВА стар active table gift
+          // (различен imageUrl) за тоя recipient seat, старото изображение
+          // вече не е "active table gift reference" за тая стая. Ако старият
+          // gift е бил logically deleted междувременно, финализирай сега
+          // (best-effort, tryFinalizeDeletedGiftImage самата проверява
+          // всички други стаи + pending deliveries + live catalog).
+          const previousImageUrl = activeGifts[resolution.recipientSeat]?.imageUrl ?? null
+          // Нов подарък към СЪЩИЯ получател ЗАМЕСТВА стария (overwrite по
+          // recipient seat ключ) — по конструкция няма струпване.
+          activeGifts[resolution.recipientSeat] = {
+            transactionId: giftResult.transaction.transactionId,
+            giftItemId: giftResult.transaction.giftItemId,
+            giftName,
+            imageUrl,
+            senderProfileId: resolution.senderProfileId,
+            senderSeat: resolution.senderSeat,
+            senderDisplayName: resolution.senderDisplayName,
+            recipientSeat: resolution.recipientSeat,
+            sentAt,
+            expiresAt,
+          }
+          resolution.room.config.activeTableGifts = activeGifts
+
+          // Root cause fix — normal 60-sec expiry hook. Armира се ТОЧНО
+          // сега, за конкретния нов transaction/seat, с delay = остатъка до
+          // expiresAt (TABLE_GIFT_OVERLAY_DURATION_MS). Виж
+          // scheduleTableGiftExpiryFinalization за stale-guard детайлите.
+          scheduleTableGiftExpiryFinalization(
+            resolution.room.id,
+            resolution.recipientSeat,
+            giftResult.transaction.transactionId,
+            imageUrl,
+            TABLE_GIFT_OVERLAY_DURATION_MS,
+          )
+
+          broadcastToRoomConnections(resolution.room, socketRegistry, {
+            type: 'table_gift_item_sent',
+            roomId: resolution.room.id,
+            transactionId: giftResult.transaction.transactionId,
+            giftItemId: giftResult.transaction.giftItemId,
+            giftName,
+            imageUrl,
+            senderProfileId: resolution.senderProfileId,
+            senderSeat: resolution.senderSeat,
+            senderDisplayName: resolution.senderDisplayName,
+            recipientProfileId: resolution.recipientProfileId,
+            recipientSeat: resolution.recipientSeat,
+            chargedPrice: giftResult.transaction.chargedPrice,
+            sentAt,
+            expiresAt,
+          })
+
+          if (previousImageUrl !== null && previousImageUrl !== imageUrl) {
+            void tryFinalizeDeletedGiftImage(previousImageUrl)
+          }
+        }
+
+        // НЕ викаме giftItemStore.createDeliveryNotification за context='game'
+        // — table gift презентацията е изцяло чрез room broadcast + ephemeral
+        // room state. Personal delivery log би дал ВТОРА презентация за един
+        // и същ transaction (забранено от заданието).
+        safeSendToConnection(connection.id, {
+          type: 'table_gift_send_result',
+          roomId: message.roomId,
+          requestId: message.requestId,
+          ok: true,
+          transactionId: giftResult.transaction.transactionId,
+          chargedPrice: giftResult.transaction.chargedPrice,
+          senderBalanceAfter: giftResult.senderBalanceAfter,
+          isReplay: giftResult.isReplay,
+        })
+        return
+      }
+
       if (message.type === 'resume_room') {
         // Round 4 §2 reconnect policy — tryResumeRoomForConnection matches
         // purely по reconnectToken (никога не проверява дали ТАЗИ connection
@@ -21042,6 +21396,8 @@ wsServer.on('connection', (socket, request) => {
 
       if (!shouldKeepRoomAlive(result.room)) {
         serverState = removeCommittedServerRoom(result.room.id, disconnectState)
+        // Room teardown hook (§5 от брифа) — виж cleanupInactiveRoomIfNeeded коментара.
+        finalizeActiveTableGiftImagesForRoom(result.room)
         cleanupTempBotsFromRoom(result.room)
         markRoomSnapshotRemoved(result.room.id)
         activeRoomRuntime.removeRoom(result.room.id)
@@ -21603,6 +21959,11 @@ function clearMutationTimersForShutdown(): void {
   if (giftItemOrphanSweepStartupTimeout !== null) {
     clearTimeout(giftItemOrphanSweepStartupTimeout)
     giftItemOrphanSweepStartupTimeout = null
+  }
+
+  if (deletedGiftItemImageReconcileStartupTimeout !== null) {
+    clearTimeout(deletedGiftItemImageReconcileStartupTimeout)
+    deletedGiftItemImageReconcileStartupTimeout = null
   }
 
   if (oversizedChatPruneInterval !== null) {
