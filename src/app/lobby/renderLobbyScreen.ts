@@ -672,6 +672,7 @@ export type LobbyScreenState = {
   adminGiftItemsLoading: boolean
   adminGiftItemsErrorText: string | null
   adminGiftItemEditId: string | null
+  adminGiftItemsTotalChargedYellowCoins: number
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
@@ -8744,6 +8745,11 @@ export function renderAdminGiftItemsPanel(state: LobbyScreenState, isMobile = fa
       <div>
         <div style="font-size:22px;font-weight:900;color:#f8fafc;">Подаръци</div>
         <div style="margin-top:4px;font-size:13px;color:rgba(255,255,255,0.55);font-weight:700;">Каталог с виртуални подаръци, платими с жълтици.</div>
+      </div>
+
+      <div style="max-width:320px;background:#0d0d0d;border:1px solid rgba(212,165,32,0.28);border-radius:12px;padding:14px 18px;">
+        <div style="font-size:10px;font-weight:800;letter-spacing:0.12em;text-transform:uppercase;color:rgba(255,255,255,0.45);margin-bottom:8px;">Изхарчени жълтици за подаръци</div>
+        <div style="font-size:26px;font-weight:900;color:#d4a520;line-height:1;">${state.adminGiftItemsTotalChargedYellowCoins.toLocaleString('bg-BG')} 🟡</div>
       </div>
 
       ${state.adminGiftItemsErrorText ? `<div style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">${escapeHtml(state.adminGiftItemsErrorText)}</div>` : ''}

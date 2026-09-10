@@ -90,6 +90,13 @@
  *     transaction записан коректно, bot НЕ получава wallet credit, НЕ се
  *     създава delivery log ред, idempotent replay работи identично на
  *     human recipient
+ *
+ * Admin статистика (виж брифа "Общо изхарчени жълтици за виртуални
+ * подаръци"):
+ * [Z] getTotalChargedYellowCoins — 0 transactions -> 0; SUM(charged_price)
+ *     вкл. И 'profile', И 'game'/table gifts; idempotency replay (същия
+ *     requestId) НЕ увеличава сумата повторно; logical delete (tombstone)
+ *     на gift item-а НЕ маха миналите му транзакции от сумата
  */
 
 import { mkdtemp, rm, readFile, mkdir, writeFile, unlink, stat } from 'node:fs/promises'
@@ -1660,6 +1667,52 @@ await withTempDir(async (dir) => {
     assertEqual(countTransactions(db3, 'item-y'), 1, '[C]/[L] точно 1 transaction ред дори след replay опит')
     assertEqual(getWalletBalance(db3, 'sender-y'), 8000, '[C]/[L] точно ЕДИН дебит общо')
     db3.close()
+
+    store.close()
+  })
+
+  // ── [Z] Admin статистика "Изхарчени жълтици за подаръци" ────────────────
+  await check('[Z] getTotalChargedYellowCoins — SUM(charged_price) вкл. profile+game gifts, idempotency-safe, tombstoned gifts остават в сумата', async () => {
+    const dbPath = join(dir, 'testZ.sqlite')
+    const db = new DatabaseSync(dbPath, { open: true })
+    buildBaseSchema(db)
+    await applyGiftItemMigrations(db)
+    seedProfile(db, 'sender-z', 50_000)
+    seedProfile(db, 'recipient-z', 0)
+    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
+      VALUES ('item-z1', 'Роза', '/uploads/gift-items/z1.webp', 3000, 1, 0)`)
+    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
+      VALUES ('item-z2', 'Торта', '/uploads/gift-items/z2.webp', 5000, 1, 1)`)
+    db.close()
+
+    const progressStore = makeMockProgressStore(new Set(['sender-z', 'recipient-z']))
+    const store = await createGiftItemStore(dbPath, progressStore)
+
+    // Празна DB (нула transactions) -> 0, не грешка/NULL.
+    assertEqual(store.getTotalChargedYellowCoins(), 0, 'нула transactions -> COALESCE(SUM,0) = 0')
+
+    // Един 'profile' gift + един 'game' (table) gift — статистиката трябва
+    // да сумира и двата context-а без филтър.
+    const profileGift = store.sendGiftItem('sender-z', 'recipient-z', 'item-z1', 'req-z-profile', 'profile')
+    assert(profileGift.ok === true, 'profile gift трябва да успее')
+    const gameGift = store.sendGiftItem('sender-z', 'recipient-z', 'item-z2', 'req-z-game', 'game', 'room-z')
+    assert(gameGift.ok === true, 'game/table gift трябва да успее')
+    assertEqual(store.getTotalChargedYellowCoins(), 8000, 'сума = 3000 (profile) + 5000 (game) = 8000')
+
+    // Idempotency replay (същия requestId) — реалният ред вече съществува,
+    // sendGiftItem не INSERT-ва втори — сумата НЕ трябва да се качи повторно.
+    const replay = store.sendGiftItem('sender-z', 'recipient-z', 'item-z1', 'req-z-profile', 'profile')
+    assert(replay.ok === true, 'replay заявката пак "успява" (idempotent)')
+    if (replay.ok) {
+      assertEqual(replay.isReplay, true, 'втори опит със същия requestId е replay')
+    }
+    assertEqual(store.getTotalChargedYellowCoins(), 8000, 'replay НЕ увеличава сумата повторно (все още 8000)')
+
+    // Logical delete (tombstone) на item-z1 — историята му (req-z-profile)
+    // трябва да остане в статистиката, защото плащането вече е извършено.
+    const deleteResult = store.deleteGiftItem('item-z1')
+    assert(deleteResult.ok === true, 'logical delete трябва да успее')
+    assertEqual(store.getTotalChargedYellowCoins(), 8000, 'tombstoned gift item-ът НЕ маха миналите си транзакции от сумата')
 
     store.close()
   })

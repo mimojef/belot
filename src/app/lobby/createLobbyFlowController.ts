@@ -544,7 +544,7 @@ export type CreateLobbyFlowControllerOptions = {
   // картинка+име+цена, платими с жълтици). Виж CLAUDE.md брифа "не
   // дублирай, не чупи".
   onAdminGiftItemsLoad?: () => Promise<
-    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
     | { ok: false; message: string }
   >
   onAdminGiftItemSubmit?: (input: {
@@ -555,18 +555,18 @@ export type CreateLobbyFlowControllerOptions = {
     sortOrder: number
     isActive: boolean
   }) => Promise<
-    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
     | { ok: false; message: string }
   >
   onAdminGiftItemStatusChange?: (
     giftItemId: string,
     isActive: boolean,
   ) => Promise<
-    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
     | { ok: false; message: string }
   >
   onAdminGiftItemDelete?: (giftItemId: string) => Promise<
-    | { ok: true; items: GiftItemSnapshot[] }
+    | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
     | { ok: false; message: string }
   >
   onAdminGiftItemImageUpload?: (imageDataUrl: string) => Promise<
@@ -1651,6 +1651,8 @@ type InternalLobbyFlowState = {
   adminGiftItemsLoading: boolean
   adminGiftItemsErrorText: string | null
   adminGiftItemEditId: string | null
+  /** SUM(charged_price) от gift_item_transactions (виж giftItemStore.getTotalChargedYellowCoins) — fresh от сървъра при load И при всяка mutation, виж loadAdminGiftItems/submitAdminGiftItem/deleteAdminGiftItem/setAdminGiftItemStatus. */
+  adminGiftItemsTotalChargedYellowCoins: number
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceProcessingIds: Set<string>
   acceptanceErrorText: string | null
@@ -2342,6 +2344,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminGiftItemsLoading: false,
     adminGiftItemsErrorText: null,
     adminGiftItemEditId: null,
+    adminGiftItemsTotalChargedYellowCoins: 0,
     acceptanceNotifications: [],
     acceptanceProcessingIds: new Set<string>(),
     acceptanceErrorText: null,
@@ -4226,6 +4229,7 @@ export function createLobbyFlowController(
       adminGiftItemsLoading: state.adminGiftItemsLoading,
       adminGiftItemsErrorText: state.adminGiftItemsErrorText,
       adminGiftItemEditId: state.adminGiftItemEditId,
+      adminGiftItemsTotalChargedYellowCoins: state.adminGiftItemsTotalChargedYellowCoins,
       acceptanceNotifications: state.acceptanceNotifications,
       acceptanceErrorText: state.acceptanceErrorText,
       chatConversations: state.chatConversations,
@@ -11710,6 +11714,7 @@ export function createLobbyFlowController(
 
     state.adminGiftItems = result.items
     state.adminGiftItemsErrorText = null
+    state.adminGiftItemsTotalChargedYellowCoins = result.totalChargedYellowCoins
     render()
   }
 
@@ -11741,6 +11746,7 @@ export function createLobbyFlowController(
     state.adminGiftItems = result.items
     state.adminGiftItemsErrorText = null
     state.adminGiftItemEditId = null
+    state.adminGiftItemsTotalChargedYellowCoins = result.totalChargedYellowCoins
     render()
   }
 
@@ -11772,6 +11778,7 @@ export function createLobbyFlowController(
       state.adminGiftItemEditId = null
     }
     state.adminGiftItemsErrorText = null
+    state.adminGiftItemsTotalChargedYellowCoins = result.totalChargedYellowCoins
     render()
   }
 
@@ -11795,6 +11802,7 @@ export function createLobbyFlowController(
 
     state.adminGiftItems = result.items
     state.adminGiftItemsErrorText = null
+    state.adminGiftItemsTotalChargedYellowCoins = result.totalChargedYellowCoins
     render()
   }
 

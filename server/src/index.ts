@@ -14526,6 +14526,7 @@ async function handleAdminGiftItemsRequest(
     sendJsonResponse(res, 200, {
       ok: true,
       items: giftItemStore.listAdminGiftItems(),
+      totalChargedYellowCoins: giftItemStore.getTotalChargedYellowCoins(),
     })
     return true
   }
@@ -14581,6 +14582,7 @@ async function handleAdminGiftItemsRequest(
       ok: true,
       item: result.item,
       items: giftItemStore.listAdminGiftItems(),
+      totalChargedYellowCoins: giftItemStore.getTotalChargedYellowCoins(),
     })
     return true
   }
@@ -14605,7 +14607,11 @@ async function handleAdminGiftItemsRequest(
     // безобидно, finalize check-ът просто ще намери същото състояние.
     void tryFinalizeDeletedGiftImage(result.deletedImageUrl)
 
-    sendJsonResponse(res, 200, { ok: true, items: result.items })
+    sendJsonResponse(res, 200, {
+      ok: true,
+      items: result.items,
+      totalChargedYellowCoins: giftItemStore.getTotalChargedYellowCoins(),
+    })
     return true
   }
 
@@ -14634,6 +14640,7 @@ async function handleAdminGiftItemsRequest(
       ok: true,
       item: result.item,
       items: giftItemStore.listAdminGiftItems(),
+      totalChargedYellowCoins: giftItemStore.getTotalChargedYellowCoins(),
     })
     return true
   }

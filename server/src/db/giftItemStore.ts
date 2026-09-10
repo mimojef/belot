@@ -148,6 +148,20 @@ export type GiftItemStore = {
    * caller-а (index.ts) да реши дали да опита finalize cleanup СЛЕД
    * mark-shown (§7B от брифа). */
   markDeliveryShown: (transactionId: string, profileId: ProfileId) => string | null
+  /**
+   * Admin статистика — SUM(charged_price) върху ВСИЧКИ реално извършени
+   * gift_item_transactions redове (historical snapshot price, не текущата
+   * gift_items.price). Покрива и двата context-а ('profile' и 'game'/table
+   * gifts) — filter по context няма, transaction таблицата не различава
+   * "видове" за тая статистика. Tombstoned (logically deleted) gift_items
+   * НЕ филтрират transaction redовете им навън — SUM-ът чете директно от
+   * gift_item_transactions, който няма deleted_at и никога не се изтрива
+   * заради каталожен delete (FK е ON DELETE RESTRICT към gift_items).
+   * Idempotent replay (виж sendGiftItem) никога не INSERT-ва втори ред за
+   * същия requestId, затова SUM-ът естествено не брои replay опити двойно —
+   * без нужда от отделна dedup логика тук.
+   */
+  getTotalChargedYellowCoins: () => number
   close: () => void
 }
 
@@ -294,6 +308,15 @@ export async function createGiftItemStore(
   // image-ите им вече могат безопасно да се финализират).
   const selectDeletedGiftItemImageUrlsStatement = database.prepare(`
     SELECT DISTINCT image_url FROM gift_items WHERE deleted_at IS NOT NULL;
+  `)
+
+  // Admin статистика (§1 "Общо изхарчени жълтици") — историческият
+  // charged_price snapshot е source of truth, НЕ текущата gift_items.price.
+  // Няма WHERE клауза: покрива и profile, и game/table gifts, и transactions
+  // на logically deleted (tombstoned) gift items — редът в
+  // gift_item_transactions никога не се трие/филтрира заради catalog delete.
+  const selectTotalChargedYellowCoinsStatement = database.prepare(`
+    SELECT COALESCE(SUM(charged_price), 0) AS total FROM gift_item_transactions;
   `)
 
   const selectTransactionByRequestIdStatement = database.prepare(`
@@ -725,6 +748,10 @@ export async function createGiftItemStore(
     return row?.image_url ?? null
   }
 
+  function getTotalChargedYellowCoins(): number {
+    return (selectTotalChargedYellowCoinsStatement.get() as { total: number }).total
+  }
+
   function close(): void {
     database.close()
   }
@@ -742,6 +769,7 @@ export async function createGiftItemStore(
     createDeliveryNotification,
     getPendingDeliveries,
     markDeliveryShown,
+    getTotalChargedYellowCoins,
     close,
   }
 }

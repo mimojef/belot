@@ -2310,10 +2310,10 @@ async function deleteAdminCoinPackage(packageId: string): Promise<
 // loadAdminCoinPackages/submitAdminCoinPackage/etc по-горе (директен coin
 // transfer каталог). Виж giftItemStore.ts (сървър) и CLAUDE.md брифа "не
 // дублирай, не чупи".
-type GiftItemsAdminResponse = { ok: boolean; items?: GiftItemSnapshot[]; message?: string }
+type GiftItemsAdminResponse = { ok: boolean; items?: GiftItemSnapshot[]; totalChargedYellowCoins?: number; message?: string }
 
 async function loadAdminGiftItems(): Promise<
-  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
   | { ok: false; message: string }
 > {
   try {
@@ -2327,7 +2327,7 @@ async function loadAdminGiftItems(): Promise<
       return { ok: false, message: data.message ?? 'Подаръците не бяха заредени.' }
     }
 
-    return { ok: true, items: data.items }
+    return { ok: true, items: data.items, totalChargedYellowCoins: data.totalChargedYellowCoins ?? 0 }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра за подаръците.' }
   }
@@ -2341,7 +2341,7 @@ async function submitAdminGiftItem(input: {
   sortOrder: number
   isActive: boolean
 }): Promise<
-  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
   | { ok: false; message: string }
 > {
   try {
@@ -2357,7 +2357,7 @@ async function submitAdminGiftItem(input: {
       return { ok: false, message: data.message ?? 'Подаръкът не беше записан.' }
     }
 
-    return { ok: true, items: data.items }
+    return { ok: true, items: data.items, totalChargedYellowCoins: data.totalChargedYellowCoins ?? 0 }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра за запис на подарък.' }
   }
@@ -2367,7 +2367,7 @@ async function setAdminGiftItemStatus(
   giftItemId: string,
   isActive: boolean,
 ): Promise<
-  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
   | { ok: false; message: string }
 > {
   try {
@@ -2386,14 +2386,14 @@ async function setAdminGiftItemStatus(
       return { ok: false, message: data.message ?? 'Статусът не беше променен.' }
     }
 
-    return { ok: true, items: data.items }
+    return { ok: true, items: data.items, totalChargedYellowCoins: data.totalChargedYellowCoins ?? 0 }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра за промяна на подарък.' }
   }
 }
 
 async function deleteAdminGiftItem(giftItemId: string): Promise<
-  | { ok: true; items: GiftItemSnapshot[] }
+  | { ok: true; items: GiftItemSnapshot[]; totalChargedYellowCoins: number }
   | { ok: false; message: string }
 > {
   try {
@@ -2410,7 +2410,7 @@ async function deleteAdminGiftItem(giftItemId: string): Promise<
       return { ok: false, message: data.message ?? 'Подаръкът не беше изтрит.' }
     }
 
-    return { ok: true, items: data.items }
+    return { ok: true, items: data.items, totalChargedYellowCoins: data.totalChargedYellowCoins ?? 0 }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра за изтриване на подарък.' }
   }
