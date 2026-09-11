@@ -65,6 +65,8 @@ import {
   type PrivateRoomInviteEligibleFriend,
 } from './privateRoomPopupMarkup'
 import { renderRulesPage } from './renderRulesPage'
+import { renderMoreGamesScreen } from '../games/ludo/renderMoreGamesScreen'
+import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { renderStrategyPage } from './renderStrategyPage'
 import { renderLearnPage } from './renderLearnPage'
 import { renderFaqPage } from './renderFaqPage'
@@ -361,7 +363,7 @@ export type GuestContactFormInput = {
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games'
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -4058,6 +4060,51 @@ function renderStakeSection(
   `
 }
 
+// "Още игри" — вход към новите игри (VITE_FEATURE_LUDO), визуално огледало
+// на divider header стила от renderStakeSection по-горе. Самата карта е
+// линк към /more-games (лобит sub-screen), не директно към играта.
+function renderMoreGamesSection(useMobileLayout = false): string {
+  return `
+    <div style="margin-top:${useMobileLayout ? '14px' : '18px'};margin-bottom:16px;">
+      <div style="
+        display:flex; align-items:center; justify-content:center; gap:12px;
+        margin-bottom:14px;
+      ">
+        <div style="flex:1; height:2px; background:linear-gradient(90deg, #000000 0%, #d4a520 100%);"></div>
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="color:#d4a520; font-size:16px;">&#9670;</span>
+          <span style="font-size:16px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#d4a520;">Още игри</span>
+          <span style="color:#d4a520; font-size:16px;">&#9670;</span>
+        </div>
+        <div style="flex:1; height:2px; background:linear-gradient(90deg, #d4a520 0%, #000000 100%);"></div>
+      </div>
+
+      <a href="/more-games" data-lobby-more-games-card="1" style="
+        display:flex; align-items:center; gap:14px;
+        background:#000000;
+        border:2px solid rgba(212,165,32,0.78);
+        border-radius:12px;
+        padding:16px;
+        text-decoration:none; color:inherit;
+        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
+      "
+      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
+      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
+      >
+        <div style="
+          width:48px; height:48px; border-radius:12px; flex-shrink:0;
+          background:conic-gradient(#e0473e 0deg 90deg, #3b82f6 90deg 180deg, #f2c230 180deg 270deg, #22a559 270deg 360deg);
+          box-shadow:inset 0 0 0 2px rgba(255,255,255,0.2);
+        "></div>
+        <div style="flex:1; min-width:0;">
+          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Не се сърди човече</div>
+          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Нова игра в Pika.bg — визуален прототип.</div>
+        </div>
+      </a>
+    </div>
+  `
+}
+
 // Тесен, dedicated тип (огледално на syncProfilePopup's popupState по-долу)
 // вместо целия LobbyScreenState — позволява на createLobbyFlowController.ts
 // да извиква syncMissionsPopup() ДИРЕКТНО, с малък литерал, без да минава
@@ -6017,6 +6064,8 @@ function renderMobileLobbyScreenContent(
             ? renderMobileChatPanel(state)
           : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
             ? renderPublicLegalPage(state.view, true)
+          : state.view === 'more-games'
+            ? renderMoreGamesScreen(true)
           : state.view === 'rules'
             ? renderRulesPage(true)
           : state.view === 'strategy'
@@ -6042,6 +6091,7 @@ function renderMobileLobbyScreenContent(
       ${renderMobileLobbyChatSection(state)}
       ${renderMobileStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, state.profile.profileId === null)}
       ${renderMobileOffersSection(state.lobbyPackages, state.profile.profileId !== null)}
+      ${isLudoFeatureEnabled() ? renderMoreGamesSection(true) : ''}
       ${renderMobileQuickActions(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0, getPrivateRoomsBadgeCount(state.privateRooms))}
     </main>
   `
@@ -12677,6 +12727,8 @@ export function renderLobbyScreen(
                 ? renderChatPanel(state)
               : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
                 ? renderPublicLegalPage(state.view)
+              : state.view === 'more-games'
+                ? renderMoreGamesScreen(false)
               : state.view === 'rules'
                 ? renderRulesPage()
               : state.view === 'strategy'
@@ -12694,6 +12746,7 @@ export function renderLobbyScreen(
                 ? renderHeroSection(state, profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
                 : renderGuestHeroCard(state, state.signupBonusYellowCoins ?? 0, isPhoneLayout)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout, state.profile.profileId === null)}
+              ${isLudoFeatureEnabled() ? renderMoreGamesSection() : ''}
               ${renderBottomSection(
                 state.lobbyPackages,
                 state.profile.profileId !== null,

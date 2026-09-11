@@ -110,6 +110,7 @@ import type {
   AdCampaignManagementDto,
   AdCampaignDispatchClientDto,
 } from '../network/createGameServerClient'
+import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 
 export type LobbyFlowScreen =
   | 'lobby'
@@ -144,6 +145,7 @@ export type LobbyFlowScreen =
   | 'faq'
   | 'about'
   | 'fair-play'
+  | 'more-games'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type { ProfileAccessBlockCode }
@@ -2829,6 +2831,43 @@ export function createLobbyFlowController(
   // openGiftItemModal/closeGiftItemModal коментара.
   let _giftItemCatalogRequestToken = 0
 
+  // Ludo е изолиран visual prototype overlay (не lobby sub-screen render) —
+  // delegated listener вместо re-wire при всеки render(), защото самата
+  // "Още игри" карта живее в normal render цикъла, но играта се mount-ва
+  // отделно (document.body overlay), за да не бъде пипана от lobby re-render.
+  let _ludoController: { destroy: () => void } | null = null
+  options.root.addEventListener('click', (event) => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (!target.closest('[data-ludo-play-button="1"]')) return
+    if (!isLudoFeatureEnabled()) return
+    void openLudoGameOverlay()
+  })
+
+  async function openLudoGameOverlay(): Promise<void> {
+    if (_ludoController) return
+    const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
+    const overlayRoot = document.createElement('div')
+    overlayRoot.setAttribute('data-ludo-overlay-root', '1')
+    overlayRoot.style.position = 'fixed'
+    overlayRoot.style.inset = '0'
+    overlayRoot.style.zIndex = '500'
+    document.body.appendChild(overlayRoot)
+
+    _ludoController = createLudoFlowController({
+      root: overlayRoot,
+      onExit: () => {
+        closeLudoGameOverlay()
+      },
+    })
+  }
+
+  function closeLudoGameOverlay(): void {
+    _ludoController?.destroy()
+    _ludoController = null
+    document.querySelector('[data-ludo-overlay-root="1"]')?.remove()
+  }
+
   function shouldSuppressLobbyRender(): boolean {
     return (options.suppressRendering === true) || (options.getIsInGame?.() ?? false)
   }
@@ -4076,6 +4115,8 @@ export function createLobbyFlowController(
               ? 'about'
             : state.currentScreen === 'fair-play'
               ? 'fair-play'
+            : state.currentScreen === 'more-games'
+              ? 'more-games'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -13466,6 +13507,28 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
+  // "Още игри" — скрито зад VITE_FEATURE_LUDO. При изключен flag директен
+  // опит за отваряне (URL/navigateFromPath) пада обратно към лобито вместо
+  // да покаже екрана — виж isLudoFeatureEnabled().
+  function showMoreGamesPage(): void {
+    if (!isLudoFeatureEnabled()) {
+      switchToLobby()
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'more-games'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
   // Статична страница, но с nested route /tournaments/how-it-works (не flat
   // top-level path като rules/faq/fair-play) — затова управлява собствен
   // URL през pushState, огледално на showTournamentDetail, вместо да мине
@@ -14576,6 +14639,7 @@ export function createLobbyFlowController(
     faq: '/faq',
     about: '/about',
     'fair-play': '/fair-play',
+    'more-games': '/more-games',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -14604,6 +14668,7 @@ export function createLobbyFlowController(
     '/faq': 'faq',
     '/about': 'about',
     '/fair-play': 'fair-play',
+    '/more-games': 'more-games',
   }
 
   const _loadPath = window.location.pathname
@@ -14726,6 +14791,7 @@ export function createLobbyFlowController(
       case 'faq': showFaqPage(); break
       case 'about': showAboutPage(); break
       case 'fair-play': showFairPlayPage(); break
+      case 'more-games': showMoreGamesPage(); break
     }
   }
 
