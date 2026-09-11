@@ -15,6 +15,7 @@
     "check:pika-team-profile-action-set": "npx tsx scripts/checkPikaTeamProfileActionSet.ts",
     "check:cutting-pile-stack-order-fix": "npx tsx scripts/checkCuttingPileStackOrderFix.ts",
     "check:chat-message-notification": "npx tsx scripts/checkChatMessageNotification.ts",
+    "check:friend-accept-chat-conversation-sync": "npx tsx scripts/checkFriendAcceptChatConversationSync.ts",
     "check:pwa-auto-update": "npx tsx scripts/checkPwaAutoUpdate.ts",
     "check:frontend-deploy-atomic": "npx tsx scripts/checkFrontendDeployAtomic.ts",
     "check:backend-deploy-health-retry": "npx tsx scripts/checkBackendDeployHealthRetry.ts",

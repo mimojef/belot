@@ -16463,6 +16463,17 @@ export function createLobbyFlowController(
         }
       }
       render()
+      // Синхронизира и chat conversation list-а веднага след accept — без
+      // това state.chatConversations остава stale (новото/reactivated-ото
+      // friendship липсва от "Чат" таба) до следващо ръчно отваряне на таба
+      // или до опортюнистичен refresh от следващо incoming съобщение (виж
+      // refreshChatAfterNotification). loadChatConversations() е чист GET
+      // fetch (main.ts loadChatConversations) без WS subscribe/side effects,
+      // safe fire-and-forget тук, established pattern (виж другите
+      // `void loadChatConversations().then(...)` call sites по-долу).
+      void loadChatConversations().then(() => {
+        render()
+      })
       return false // let main.ts also show the 4-second live popup
     }
 
