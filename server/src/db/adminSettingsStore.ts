@@ -14,6 +14,13 @@ export type AdminSettingsSnapshot = {
    * rolling-24h DAILY_GIFT_LIMIT константа в yellowCoinGiftStore.ts.
    */
   pikaTeamDailyGiftLimit: number
+  /**
+   * Брой VIP дни, които профилът получава еднократно при първи опит за
+   * писане в "Теми" (launch gift, виж vipStore.ts claimLaunchGift) — 0
+   * изключва безплатния VIP и насочва потребителя към VIP офертите в
+   * магазина (виж index.ts handleVipClaimLaunchGiftRequest).
+   */
+  freeTopicsVipDays: number
 }
 
 export type AdminSettingsStore = {
@@ -54,6 +61,11 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // разчита само на тази стойност, значи deploy-ът не трябва сам по себе си
   // да вдига ефективния economy лимит). Admin може да го промени от панела.
   pikaTeamDailyGiftLimit: 200_000,
+  // Само fallback за база без seed-натата migration (20260911_001) — реалната
+  // production стойност идва от admin_settings реда, seed-нат веднъж. Трябва
+  // да остане РАВЕН на предишната hardcoded VIP_LAUNCH_GIFT_INTERVAL
+  // константа в index.ts, за да запази статуквото след deploy.
+  freeTopicsVipDays: 30,
 }
 
 const SETTING_KEYS = {
@@ -63,6 +75,7 @@ const SETTING_KEYS = {
   vipPrice180DaysCents: 'vip_price_180_days_cents',
   vipPrice365DaysCents: 'vip_price_365_days_cents',
   pikaTeamDailyGiftLimit: 'pika_team_daily_gift_limit',
+  freeTopicsVipDays: 'free_topics_vip_days',
 } as const
 
 // VIP е платен пакет — 0 € не е валидна цена (би направило пакета безплатен
@@ -122,7 +135,8 @@ export async function createAdminSettingsStore(
       'vip_price_30_days_cents',
       'vip_price_180_days_cents',
       'vip_price_365_days_cents',
-      'pika_team_daily_gift_limit'
+      'pika_team_daily_gift_limit',
+      'free_topics_vip_days'
     );
   `)
 
@@ -175,6 +189,10 @@ export async function createAdminSettingsStore(
         values.get(SETTING_KEYS.pikaTeamDailyGiftLimit) ?? '',
         DEFAULT_SETTINGS.pikaTeamDailyGiftLimit,
       ),
+      freeTopicsVipDays: parseStoredInteger(
+        values.get(SETTING_KEYS.freeTopicsVipDays) ?? '',
+        DEFAULT_SETTINGS.freeTopicsVipDays,
+      ),
     }
   }
 
@@ -205,6 +223,10 @@ export async function createAdminSettingsStore(
       input.pikaTeamDailyGiftLimit === undefined
         ? undefined
         : normalizeSettingNumber(input.pikaTeamDailyGiftLimit, 0, 100_000_000)
+    const nextFreeTopicsVipDays =
+      input.freeTopicsVipDays === undefined
+        ? undefined
+        : normalizeSettingNumber(input.freeTopicsVipDays, 0, 3_650)
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -248,6 +270,13 @@ export async function createAdminSettingsStore(
       }
     }
 
+    if (input.freeTopicsVipDays !== undefined && nextFreeTopicsVipDays === null) {
+      return {
+        ok: false,
+        message: 'Безплатният VIP при писане в „Теми“ трябва да е цяло число между 0 и 3650 дни.',
+      }
+    }
+
     if (nextSignupBonus !== undefined) {
       upsertSettingStatement.run(
         SETTING_KEYS.signupBonusYellowCoins,
@@ -276,6 +305,10 @@ export async function createAdminSettingsStore(
 
     if (nextPikaTeamDailyGiftLimit !== undefined) {
       upsertSettingStatement.run(SETTING_KEYS.pikaTeamDailyGiftLimit, String(nextPikaTeamDailyGiftLimit))
+    }
+
+    if (nextFreeTopicsVipDays !== undefined) {
+      upsertSettingStatement.run(SETTING_KEYS.freeTopicsVipDays, String(nextFreeTopicsVipDays))
     }
 
     return {

@@ -5222,7 +5222,7 @@ async function reviewTopicReport(
 // composer gating в "Теми" се нуждае и от hasClaimedLaunchGift, за да избере
 // правилния VIP popup текст ("Вземи 30 дни безплатно" vs "Виж VIP плановете").
 async function loadTopicsVipGateStatus(): Promise<
-  | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean }
+  | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean; launchGiftDays: number }
   | { ok: false }
 > {
   try {
@@ -5234,6 +5234,7 @@ async function loadTopicsVipGateStatus(): Promise<
       ok?: boolean
       status?: { isActive?: boolean }
       hasClaimedLaunchGift?: boolean
+      launchGiftDays?: number
     }
     if (!response.ok || !data.ok) {
       return { ok: false }
@@ -5242,6 +5243,7 @@ async function loadTopicsVipGateStatus(): Promise<
       ok: true,
       isActive: data.status?.isActive ?? false,
       hasClaimedLaunchGift: data.hasClaimedLaunchGift ?? false,
+      launchGiftDays: data.launchGiftDays ?? 0,
     }
   } catch {
     return { ok: false }
@@ -5250,7 +5252,7 @@ async function loadTopicsVipGateStatus(): Promise<
 
 async function claimTopicsLaunchGiftRequest(): Promise<
   | { ok: true; isActive: boolean; activeUntil: string | null }
-  | { ok: false; alreadyClaimed: boolean }
+  | { ok: false; alreadyClaimed: boolean; giftDisabled: boolean }
 > {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/vip/claim-launch-gift`, {
@@ -5264,7 +5266,11 @@ async function claimTopicsLaunchGiftRequest(): Promise<
       status?: { isActive?: boolean; activeUntil?: string | null }
     }
     if (!response.ok || !data.ok) {
-      return { ok: false, alreadyClaimed: data.code === 'already_claimed' }
+      return {
+        ok: false,
+        alreadyClaimed: data.code === 'already_claimed',
+        giftDisabled: data.code === 'gift_disabled',
+      }
     }
     const isActive = data.status?.isActive ?? true
     const activeUntil = data.status?.activeUntil ?? null
@@ -5280,7 +5286,7 @@ async function claimTopicsLaunchGiftRequest(): Promise<
     }
     return { ok: true, isActive, activeUntil }
   } catch {
-    return { ok: false, alreadyClaimed: false }
+    return { ok: false, alreadyClaimed: false, giftDisabled: false }
   }
 }
 

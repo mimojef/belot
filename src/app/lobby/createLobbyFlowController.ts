@@ -1007,14 +1007,14 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; report: TopicReportSnapshot }
     | { ok: false; message: string }
   >
-  /** GET VIP gate статус (isActive + hasClaimedLaunchGift) за composer gating в "Теми" — отделно от onGetOwnVipStatus (profile popup use case). */
+  /** GET VIP gate статус (isActive + hasClaimedLaunchGift + launchGiftDays) за composer gating в "Теми" — отделно от onGetOwnVipStatus (profile popup use case). */
   onGetTopicsVipGateStatus?: () => Promise<
-    | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean }
+    | { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean; launchGiftDays: number }
     | { ok: false }
   >
   onClaimTopicsLaunchGift?: () => Promise<
     | { ok: true; isActive: boolean; activeUntil?: string | null }
-    | { ok: false; alreadyClaimed: boolean }
+    | { ok: false; alreadyClaimed: boolean; giftDisabled: boolean }
   >
   onTournamentCreate?: (input: TournamentCreateInput) => Promise<
     | { ok: true; tournament: TournamentSummarySnapshot }
@@ -1347,13 +1347,11 @@ type InternalLobbyFlowState = {
   /** pending requestId за optimistic toggle reconciliation — виж т.13 от Етап 3 плана. */
   topicMessageLikePendingRequestIdById: Record<string, string | null>
   /** VIP gate статус за "Теми" composer — null = все още не е зареден. */
-  topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean } | null
+  topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean; launchGiftDays: number } | null
   topicsVipGateLoading: boolean
   topicsVipPopupOpen: boolean
   topicsVipClaimSubmitting: boolean
   topicsVipClaimErrorText: string | null
-  /** "Виж VIP плановете" inert съобщение (Етап 2 корекция т.5) — показва се inline в popup-а, без checkout/навигация. */
-  topicsVipSeePlansMessageVisible: boolean
   /** UI polish pass — кратък "ще бъде налично скоро" toast за create-topic/like/reply (все още неимплементирани), огледално на subadminActionToast моделa. */
   topicsInfoToast: { text: string } | null
   topicsPersonalMessagePendingProfileId: string | null
@@ -2122,7 +2120,6 @@ function createInitialState(): InternalLobbyFlowState {
     topicsVipPopupOpen: false,
     topicsVipClaimSubmitting: false,
     topicsVipClaimErrorText: null,
-    topicsVipSeePlansMessageVisible: false,
     topicsInfoToast: null,
     topicsPersonalMessagePendingProfileId: null,
     topicsPersonalPendingRecipient: null,
@@ -4518,7 +4515,6 @@ export function createLobbyFlowController(
       topicsVipPopupOpen: state.topicsVipPopupOpen,
       topicsVipClaimSubmitting: state.topicsVipClaimSubmitting,
       topicsVipClaimErrorText: state.topicsVipClaimErrorText,
-      topicsVipSeePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
       topicsInfoToast: state.topicsInfoToast,
       topicsPersonalMessagePendingProfileId: state.topicsPersonalMessagePendingProfileId,
       topicsPersonalPendingRecipient: state.topicsPersonalPendingRecipient,
@@ -5017,8 +5013,8 @@ export function createLobbyFlowController(
       onTopicsVipPopupClaimLaunchGift: () => {
         void claimTopicsLaunchGift()
       },
-      onTopicsVipPopupSeePlans: () => {
-        showTopicsVipPlansInertMessage()
+      onTopicsVipPopupGoToShop: () => {
+        void openVipShopFromTopicsPopup()
       },
       // ─── Topics Moderation (Етап 4) ────────────────────────────────────
       onTopicMuteHistoryOpen: () => {
@@ -8761,7 +8757,7 @@ export function createLobbyFlowController(
       return
     }
     if (result.ok) {
-      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift }
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift, launchGiftDays: result.launchGiftDays }
     }
     render()
   }
@@ -8771,7 +8767,7 @@ export function createLobbyFlowController(
     if (!options.onGetTopicsVipGateStatus) return
     const result = await options.onGetTopicsVipGateStatus()
     if (result.ok) {
-      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift }
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift, launchGiftDays: result.launchGiftDays }
     }
     render()
   }
@@ -8779,7 +8775,6 @@ export function createLobbyFlowController(
   function openTopicsVipPopup(): void {
     state.topicsVipPopupOpen = true
     state.topicsVipClaimErrorText = null
-    state.topicsVipSeePlansMessageVisible = false
     void ensureTopicsVipGateLoaded()
     render()
   }
@@ -8804,8 +8799,15 @@ export function createLobbyFlowController(
   function closeTopicsVipPopup(): void {
     state.topicsVipPopupOpen = false
     state.topicsVipClaimErrorText = null
-    state.topicsVipSeePlansMessageVisible = false
     render()
+  }
+
+  /** "Вземи VIP" от Topics VIP popup-а (gift изчерпан/изключен) — затваря popup-а и отваря Shop директно на VIP tab-а, reuse на established showShopPanel/switchShopTab pattern (виж showVipPurchaseSuccessPopup и др. за същия currentScreen+shopActiveTab pattern). */
+  async function openVipShopFromTopicsPopup(): Promise<void> {
+    state.topicsVipPopupOpen = false
+    state.topicsVipClaimErrorText = null
+    state.shopActiveTab = 'vip'
+    await showShopPanel()
   }
 
   // ─── Create Topic popup (Custom Topic Creation) ──────────────────────────
@@ -8930,12 +8932,6 @@ export function createLobbyFlowController(
     openTopicCreatePopup()
   }
 
-  function showTopicsVipPlansInertMessage(): void {
-    // Етап 2 корекция т.5 — НЕ Stripe, НЕ навигация. Само кратко inline съобщение.
-    state.topicsVipSeePlansMessageVisible = true
-    render()
-  }
-
   async function claimTopicsLaunchGift(): Promise<void> {
     if (state.topicsVipClaimSubmitting || !options.onClaimTopicsLaunchGift) return
     state.topicsVipClaimSubmitting = true
@@ -8946,7 +8942,7 @@ export function createLobbyFlowController(
     state.topicsVipClaimSubmitting = false
 
     if (result.ok) {
-      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: true }
+      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: true, launchGiftDays: state.topicsVipGate?.launchGiftDays ?? 0 }
       if (result.activeUntil !== undefined) {
         state.ownVipActiveUntil = result.activeUntil
         const ownProfileIdAfterGift = options.getAuthSession?.()?.profile.profileId ?? null
@@ -8972,6 +8968,17 @@ export function createLobbyFlowController(
       } else {
         state.topicsVipPopupOpen = false
       }
+      render()
+      return
+    }
+
+    // gift_disabled race (admin е свалил freeTopicsVipDays на 0 между
+    // отваряне на popup-а и click-а) — re-fetch-ваме canonical launchGiftDays,
+    // popup-ът автоматично превключва към "Вземи VIP" state (виж
+    // renderVipRequiredPopup.ts giftAvailable условието), без техническа
+    // грешка към потребителя.
+    if (result.giftDisabled) {
+      await refreshTopicsVipGateStatus()
       render()
       return
     }

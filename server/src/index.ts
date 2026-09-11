@@ -171,7 +171,7 @@ import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
-import { createVipStore, type VipInterval } from './db/vipStore.js'
+import { createVipStore } from './db/vipStore.js'
 import {
   createVipPurchaseStore,
   VIP_PACKAGE_CATALOG,
@@ -9576,8 +9576,6 @@ async function handleVipCheckoutRequest(
 
 // ─── VIP: launch gift + status ─────────────────────────────────────────────
 
-const VIP_LAUNCH_GIFT_INTERVAL: VipInterval = { unit: 'days', amount: 30 }
-
 async function handleVipStatusRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -9604,6 +9602,10 @@ async function handleVipStatusRequest(
     ok: true,
     status,
     hasClaimedLaunchGift: vipStore.hasClaimedLaunchGift(session.profile.profileId),
+    // Admin-configurable (Админ панел -> Настройки), винаги четено свежо тук
+    // (adminSettingsStore.getSettings() няма кеш) — popup-ът в "Теми" е
+    // изцяло динамичен по тази стойност, никакъв frontend hardcode.
+    launchGiftDays: adminSettingsStore.getSettings().freeTopicsVipDays,
   })
   return true
 }
@@ -9628,7 +9630,24 @@ async function handleVipClaimLaunchGiftRequest(
     return true
   }
 
-  const result = vipStore.claimLaunchGift(session.profile.profileId, VIP_LAUNCH_GIFT_INTERVAL)
+  // Актуалната стойност се чете ТУК, в момента на POST-а — не кеширана по-
+  // рано и не подадена от клиента (frontend не изпраща days, виж
+  // renderVipRequiredPopup.ts/main.ts). Ако admin е сменил настройката между
+  // отваряне на popup-а и този claim, печели винаги server-side стойността
+  // в момента на заявката.
+  const freeTopicsVipDays = adminSettingsStore.getSettings().freeTopicsVipDays
+
+  if (freeTopicsVipDays <= 0) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: 'gift_disabled',
+      message: 'Безплатният VIP подарък в момента не е активен.',
+      status: vipStore.getStatus(session.profile.profileId),
+    })
+    return true
+  }
+
+  const result = vipStore.claimLaunchGift(session.profile.profileId, { unit: 'days', amount: freeTopicsVipDays })
 
   if (!result.ok) {
     sendJsonResponse(res, 409, {
@@ -14130,6 +14149,7 @@ async function handleAdminSettingsRequest(
       'vipPrice180DaysCents',
       'vipPrice365DaysCents',
       'pikaTeamDailyGiftLimit',
+      'freeTopicsVipDays',
     ] as const
     for (const key of numericFieldKeys) {
       if (key in body && getNumberField(body, key) === null) {
@@ -14148,6 +14168,7 @@ async function handleAdminSettingsRequest(
       vipPrice180DaysCents: getNumberField(body, 'vipPrice180DaysCents') ?? undefined,
       vipPrice365DaysCents: getNumberField(body, 'vipPrice365DaysCents') ?? undefined,
       pikaTeamDailyGiftLimit: getNumberField(body, 'pikaTeamDailyGiftLimit') ?? undefined,
+      freeTopicsVipDays: getNumberField(body, 'freeTopicsVipDays') ?? undefined,
     })
 
     if (!result.ok) {

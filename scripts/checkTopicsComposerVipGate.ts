@@ -14,12 +14,17 @@
  * [2]  Non-VIP tap върху composer-а НЕ focus-ва textarea-та (интерцепция
  *      преди focus/mobile keyboard), отваря VIP popup вместо това
  * [3]  VIP (isActive=true): composer НЕ е readonly/vip-locked, нормално поле
- * [4]  Non-VIP, никога не е claim-вал: popup показва "Вземи 30 дни безплатно"
+ * [4]  Non-VIP, никога не е claim-вал: popup показва "Вземи X дни безплатно"
+ *      (X = server-side admin setting launchGiftDays, default 30)
+ * [4a] launchGiftDays е динамична стойност (admin setting = 15) → "Вземи 15 дни безплатно"
+ * [4b] launchGiftDays=0 (admin изключил gift-а): popup показва само "Вземи VIP"
  * [5]  Успешен launch gift claim → popup затваря, composer веднага usable
  *      (без reload/навигация — чист state update)
- * [6]  Non-VIP, вече claim-нал (VIP изтекъл): popup показва "Виж VIP плановете"
- * [7]  "Виж VIP плановете" клик → inert "ще бъдат налични скоро" съобщение,
- *      БЕЗ навигация/checkout
+ * [5a] gift_disabled race (admin свалил setting-а на 0 между popup и click) →
+ *      re-fetch, popup превключва към "Вземи VIP", без техническа грешка
+ * [6]  Non-VIP, вече claim-нал (VIP изтекъл): popup показва само "Вземи VIP"
+ * [7]  "Вземи VIP" клик → затваря Topics popup-а, отваря Shop на VIP tab
+ *      (reuse на showShopPanel/shopActiveTab pattern)
  * [8]  Успешен send (echo с matching requestId) чисти draft-а
  * [9]  Неуспешен send (error с matching requestId) ЗАПАЗВА draft-а + показва грешка
  * [10] Draft НЕ се чисти по body match — само по requestId (Етап 2 корекция т.4):
@@ -98,13 +103,13 @@ async function openTopicsScreen(page: Page): Promise<void> {
 async function clickTopicChip(page: Page, topicId: string): Promise<void> {
   await page.evaluate((id) => (window as any).__topicsComposerVipGateHarness.clickTopicChip(id), topicId)
 }
-async function setVipGate(page: Page, isActive: boolean, hasClaimedLaunchGift: boolean): Promise<void> {
+async function setVipGate(page: Page, isActive: boolean, hasClaimedLaunchGift: boolean, launchGiftDays = 30): Promise<void> {
   await page.evaluate(
-    ([a, b]) => (window as any).__topicsComposerVipGateHarness.setVipGate(a, b),
-    [isActive, hasClaimedLaunchGift],
+    ([a, b, c]) => (window as any).__topicsComposerVipGateHarness.setVipGate(a, b, c),
+    [isActive, hasClaimedLaunchGift, launchGiftDays],
   )
 }
-async function setClaimResult(page: Page, result: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean }): Promise<void> {
+async function setClaimResult(page: Page, result: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean; giftDisabled: boolean }): Promise<void> {
   await page.evaluate((r) => (window as any).__topicsComposerVipGateHarness.setClaimResult(r), result)
 }
 async function setNextMessagesResult(page: Page, messages: unknown[], hasMore = false): Promise<void> {
@@ -201,8 +206,11 @@ async function getVipPopupText(page: Page): Promise<string | null> {
 async function clickVipPopupClaim(page: Page): Promise<void> {
   await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickVipPopupClaim())
 }
-async function clickVipPopupSeePlans(page: Page): Promise<void> {
-  await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickVipPopupSeePlans())
+async function clickVipPopupGoToShop(page: Page): Promise<void> {
+  await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickVipPopupGoToShop())
+}
+async function isShopVipTabActive(page: Page): Promise<boolean> {
+  return page.evaluate(() => (window as any).__topicsComposerVipGateHarness.isShopVipTabActive())
 }
 async function clickVipPopupClose(page: Page): Promise<void> {
   await page.evaluate(() => (window as any).__topicsComposerVipGateHarness.clickVipPopupClose())
@@ -259,8 +267,8 @@ async function setConnected(page: Page, value: boolean): Promise<void> {
   await page.evaluate((v) => (window as any).__topicsComposerVipGateHarness.controller.setConnected(v), value)
 }
 
-async function openTopicsAndWaitComposer(page: Page, vipActive: boolean, hasClaimedLaunchGift: boolean, messages: unknown[] = []): Promise<void> {
-  await setVipGate(page, vipActive, hasClaimedLaunchGift)
+async function openTopicsAndWaitComposer(page: Page, vipActive: boolean, hasClaimedLaunchGift: boolean, messages: unknown[] = [], launchGiftDays = 30): Promise<void> {
+  await setVipGate(page, vipActive, hasClaimedLaunchGift, launchGiftDays)
   await setNextMessagesResult(page, messages)
   await openTopicsScreen(page)
   await page.waitForSelector('[data-topics-composer-form="1"]', { state: 'attached' })
@@ -311,13 +319,34 @@ try {
     assertEqual(await isComposerVipLocked(page), false, 'form НЕ трябва да е vip-locked')
   })
 
-  await check('[4] Non-VIP, никога не claim-вал: popup показва "Вземи 30 дни безплатно"', async () => {
-    await openTopicsAndWaitComposer(page, false, false)
+  await check('[4] Non-VIP, никога не claim-вал: popup показва "Вземи 30 дни безплатно" (default admin setting)', async () => {
+    await openTopicsAndWaitComposer(page, false, false, [], 30)
     await clickComposerTextarea(page)
     await page.waitForTimeout(30)
     const text = await getVipPopupText(page)
     assert(text !== null && text.includes('Вземи 30 дни безплатно'), `popup текст: ${text}`)
     assert(text !== null && text.includes('Pika.bg ви подарява 30 дни безплатен VIP'), `popup текст: ${text}`)
+    await clickVipPopupClose(page)
+  })
+
+  await check('[4a] launchGiftDays е динамична server-side стойност (admin setting = 15) → бутон "Вземи 15 дни безплатно"', async () => {
+    await openTopicsAndWaitComposer(page, false, false, [], 15)
+    await clickComposerTextarea(page)
+    await page.waitForTimeout(30)
+    const text = await getVipPopupText(page)
+    assert(text !== null && text.includes('Вземи 15 дни безплатно'), `popup текст: ${text}`)
+    assert(text !== null && text.includes('Pika.bg ви подарява 15 дни безплатен VIP'), `popup текст: ${text}`)
+    assert(text !== null && !text.includes('30 дни'), `не трябва да показва hardcoded 30: ${text}`)
+    await clickVipPopupClose(page)
+  })
+
+  await check('[4b] launchGiftDays=0 (admin е изключил gift-а), никога не claim-вал: popup показва само "Вземи VIP", без claim бутон', async () => {
+    await openTopicsAndWaitComposer(page, false, false, [], 0)
+    await clickComposerTextarea(page)
+    await page.waitForTimeout(30)
+    const text = await getVipPopupText(page)
+    assert(text !== null && text.includes('Вземи VIP'), `popup текст: ${text}`)
+    assert(text !== null && !text.includes('дни безплатно'), `не трябва да предлага claim бутон при 0: ${text}`)
     await clickVipPopupClose(page)
   })
 
@@ -332,27 +361,41 @@ try {
     assertEqual(await isComposerReadonly(page), false, 'composer трябва да е веднага usable')
   })
 
-  await check('[6] Non-VIP, вече claim-нал (изтекъл VIP): popup показва "Виж VIP плановете"', async () => {
-    await openTopicsAndWaitComposer(page, false, true)
+  await check('[5a] gift_disabled race (admin свалил setting-а на 0 между popup и click): re-fetch → "Вземи VIP", без техническа грешка', async () => {
+    await openTopicsAndWaitComposer(page, false, false, [], 30)
     await clickComposerTextarea(page)
     await page.waitForTimeout(30)
+    // Backend вече би върнал gift_disabled; симулираме race-а с giftDisabled=true
+    // И актуализираме canonical gate статус (re-fetch-ът, който контролерът тригерва).
+    await setClaimResult(page, { ok: false, alreadyClaimed: false, giftDisabled: true })
+    await setVipGate(page, false, false, 0)
+    await clickVipPopupClaim(page)
+    await page.waitForTimeout(50)
+    assertEqual(await isVipPopupOpen(page), true, 'popup остава отворен, но превключва state')
     const text = await getVipPopupText(page)
-    assert(text !== null && text.includes('Виж VIP плановете'), `popup текст: ${text}`)
-    assert(text !== null && !text.includes('Вземи 30 дни безплатно'), 'НЕ трябва повторно да предлага launch gift')
+    assert(text !== null && text.includes('Вземи VIP'), `popup текст след gift_disabled: ${text}`)
+    assert(text !== null && !text.includes('дни безплатно'), `не трябва да остане claim UI: ${text}`)
     await clickVipPopupClose(page)
   })
 
-  await check('[7] "Виж VIP плановете" → inert "ще бъдат налични скоро", БЕЗ навигация', async () => {
+  await check('[6] Non-VIP, вече claim-нал (изтекъл VIP): popup показва само "Вземи VIP"', async () => {
     await openTopicsAndWaitComposer(page, false, true)
-    const urlBefore = page.url()
     await clickComposerTextarea(page)
     await page.waitForTimeout(30)
-    await clickVipPopupSeePlans(page)
-    await page.waitForTimeout(30)
     const text = await getVipPopupText(page)
-    assert(text !== null && text.includes('VIP плановете ще бъдат налични скоро'), `popup текст: ${text}`)
-    assertEqual(page.url(), urlBefore, 'URL не трябва да се промени')
+    assert(text !== null && text.includes('Вземи VIP'), `popup текст: ${text}`)
+    assert(text !== null && !text.includes('дни безплатно'), 'НЕ трябва повторно да предлага launch gift')
     await clickVipPopupClose(page)
+  })
+
+  await check('[7] "Вземи VIP" → затваря popup-а и отваря Shop директно на VIP tab', async () => {
+    await openTopicsAndWaitComposer(page, false, true)
+    await clickComposerTextarea(page)
+    await page.waitForTimeout(30)
+    await clickVipPopupGoToShop(page)
+    await page.waitForTimeout(30)
+    assertEqual(await isVipPopupOpen(page), false, 'Topics VIP popup трябва да се затвори')
+    assertEqual(await isShopVipTabActive(page), true, 'Shop screen трябва да е отворен на VIP tab-а')
   })
 
   let capturedRequestId = ''

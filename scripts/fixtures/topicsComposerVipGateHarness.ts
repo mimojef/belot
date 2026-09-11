@@ -61,8 +61,8 @@ function makeReply(topicId: string, seq: number, parentMessageId: string, body: 
   }
 }
 
-let vipGate = { isActive: false, hasClaimedLaunchGift: false }
-let claimResult: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean } = { ok: true, isActive: true, activeUntil: null }
+let vipGate = { isActive: false, hasClaimedLaunchGift: false, launchGiftDays: 30 }
+let claimResult: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean; giftDisabled: boolean } = { ok: true, isActive: true, activeUntil: null }
 let nextMessagesResult: { ok: true; messages: TopicMessageSnapshot[]; hasMore: boolean; oldestSeq: number | null } = {
   ok: true,
   messages: [],
@@ -174,7 +174,7 @@ const controller = createLobbyFlowController({
   },
   onGetTopicsVipGateStatus: async () => {
     vipGateCallCount++
-    return { ok: true, isActive: vipGate.isActive, hasClaimedLaunchGift: vipGate.hasClaimedLaunchGift }
+    return { ok: true, isActive: vipGate.isActive, hasClaimedLaunchGift: vipGate.hasClaimedLaunchGift, launchGiftDays: vipGate.launchGiftDays }
   },
   onClaimTopicsLaunchGift: async () => {
     claimCallCount++
@@ -190,8 +190,8 @@ function q<T extends Element>(selector: string): T | null {
   controller,
   openTopicsScreen: () => controller.navigateToTopics(),
   clickTopicChip: (topicId: string) => q<HTMLButtonElement>(`[data-topic-chip="${topicId}"]`)?.click(),
-  setVipGate: (isActive: boolean, hasClaimedLaunchGift: boolean) => {
-    vipGate = { isActive, hasClaimedLaunchGift }
+  setVipGate: (isActive: boolean, hasClaimedLaunchGift: boolean, launchGiftDays = 30) => {
+    vipGate = { isActive, hasClaimedLaunchGift, launchGiftDays }
   },
   setClaimResult: (result: typeof claimResult) => {
     claimResult = result
@@ -506,9 +506,16 @@ function q<T extends Element>(selector: string): T | null {
   focusComposerTextarea: () => q<HTMLTextAreaElement>('[data-topics-composer-text="1"]')?.focus(),
   isComposerTextareaFocused: () => document.activeElement === q<HTMLTextAreaElement>('[data-topics-composer-text="1"]'),
   isVipPopupOpen: () => q('[data-topics-vip-popup-backdrop="1"]') !== null,
+  isShopVipTabActive: () => {
+    const vipTabBtn = q<HTMLButtonElement>('[data-shop-tab="vip"]')
+    if (!vipTabBtn) return false
+    // Активният tab-бутон носи gold gradient background (виж renderShopTabs
+    // tabButtonStyle в renderLobbyScreen.ts); неактивният е плътен #0a0a0a.
+    return vipTabBtn.style.background.includes('gradient')
+  },
   getVipPopupText: () => q('[data-topics-vip-popup-card="1"]')?.textContent ?? null,
   clickVipPopupClaim: () => q<HTMLButtonElement>('[data-topics-vip-popup-claim="1"]')?.click(),
-  clickVipPopupSeePlans: () => q<HTMLButtonElement>('[data-topics-vip-popup-see-plans="1"]')?.click(),
+  clickVipPopupGoToShop: () => q<HTMLButtonElement>('[data-topics-vip-popup-go-to-shop="1"]')?.click(),
   clickVipPopupClose: () => q<HTMLButtonElement>('[data-topics-vip-popup-close="1"]')?.click(),
   getVisibleMessageBodies: () => Array.from(document.querySelectorAll('[data-topic-message]')).map((el) => el.textContent ?? ''),
   getComposerErrorText: () => q('[data-topics-composer-error="1"]')?.textContent ?? null,

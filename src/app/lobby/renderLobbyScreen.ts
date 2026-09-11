@@ -402,12 +402,11 @@ export type LobbyScreenState = {
   topicMessageLikeCountById: Record<string, number>
   topicMessageViewerHasLikedById: Record<string, boolean>
   topicMessageLikePendingRequestIdById: Record<string, string | null>
-  topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean } | null
+  topicsVipGate: { isActive: boolean; hasClaimedLaunchGift: boolean; launchGiftDays: number } | null
   topicsVipGateLoading: boolean
   topicsVipPopupOpen: boolean
   topicsVipClaimSubmitting: boolean
   topicsVipClaimErrorText: string | null
-  topicsVipSeePlansMessageVisible: boolean
   topicsInfoToast: { text: string } | null
   topicsPersonalMessagePendingProfileId: string | null
   // Pending compose context за нов vip_dm БЕЗ persistent friendshipId —
@@ -1057,7 +1056,7 @@ export type RenderLobbyScreenOptions = {
   onImageViewerClose: () => void
   onTopicsVipPopupClose: () => void
   onTopicsVipPopupClaimLaunchGift: () => void
-  onTopicsVipPopupSeePlans: () => void
+  onTopicsVipPopupGoToShop: () => void
   // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
   onTopicMuteHistoryOpen: () => void
   onTopicMuteHistoryClose: () => void
@@ -8816,6 +8815,10 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // остане консистентен с server DEFAULT_SETTINGS/migration seed
     // (adminSettingsStore.ts, 200 000), не независима стойност.
     pikaTeamDailyGiftLimit: 200_000,
+    // Само fallback докато state.adminSettings се зарежда — трябва да
+    // остане консистентен с server DEFAULT_SETTINGS/migration seed
+    // (adminSettingsStore.ts, 30), не независима стойност.
+    freeTopicsVipDays: 30,
   }
   const adminPackages = state.adminCoinPackages
   const settingsGridStyle = isMobile
@@ -8923,6 +8926,17 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Максимален общ брой жълтици, които един профил от Екип Pika.bg може да подари за календарен ден. Лимитът се занулява в 00:00 ч.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Теми</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Безплатен VIP при първо писане в Темите
+              <input name="freeTopicsVipDays" type="number" min="0" max="3650" step="1" value="${settings.freeTopicsVipDays}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Брой VIP дни, които профилът получава еднократно при първи опит за писане в Темите. Стойност 0 изключва безплатния VIP и насочва потребителя към VIP офертите в магазина.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -13468,8 +13482,8 @@ export function renderLobbyScreen(
     root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-claim="1"]')?.addEventListener('click', () => {
       options.onTopicsVipPopupClaimLaunchGift()
     })
-    root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-see-plans="1"]')?.addEventListener('click', () => {
-      options.onTopicsVipPopupSeePlans()
+    root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-go-to-shop="1"]')?.addEventListener('click', () => {
+      options.onTopicsVipPopupGoToShop()
     })
   }
 
@@ -14375,6 +14389,7 @@ export function renderLobbyScreen(
       const vipPrice180DaysCents = Number(data.get('vipPrice180DaysCents'))
       const vipPrice365DaysCents = Number(data.get('vipPrice365DaysCents'))
       const pikaTeamDailyGiftLimit = Number(data.get('pikaTeamDailyGiftLimit'))
+      const freeTopicsVipDays = Number(data.get('freeTopicsVipDays'))
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -14383,6 +14398,7 @@ export function renderLobbyScreen(
         vipPrice180DaysCents,
         vipPrice365DaysCents,
         pikaTeamDailyGiftLimit,
+        freeTopicsVipDays,
       })
     })
 

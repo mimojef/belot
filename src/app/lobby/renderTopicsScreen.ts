@@ -2265,9 +2265,9 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
     ${renderVipRequiredPopup({
       open: state.topicsVipPopupOpen,
       hasClaimedLaunchGift: state.topicsVipGate ? state.topicsVipGate.hasClaimedLaunchGift : null,
+      launchGiftDays: state.topicsVipGate ? state.topicsVipGate.launchGiftDays : null,
       claimSubmitting: state.topicsVipClaimSubmitting,
       claimErrorText: state.topicsVipClaimErrorText,
-      seePlansMessageVisible: state.topicsVipSeePlansMessageVisible,
     })}
     ${renderTopicCreatePopup(state)}
     ${renderTopicsInfoToast(state)}
