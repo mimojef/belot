@@ -461,19 +461,44 @@ function renderSeatGiftActionIcon(
   seat: RoomSeatSnapshot,
   canSendGift: boolean,
   visualSeat: Seat,
+  panelScale: number,
 ): string {
   if (!canSendGift) {
     return ''
   }
 
+  // Mobile-only fixed real-size compensation — desktop остава непроменен.
+  // Бутонът живее ВЪТРЕ в anchor-a, който носи transform:scale(panelScale)
+  // (viewport fit-to-screen) — на тесен mobile viewport panelScale може да
+  // е ~0.45-0.5, значи същия CSS size, който на desktop дава ~36px реално,
+  // на mobile би се свил до ~16-20px реално без компенсация. Затова е нужна
+  // explicit inverse-scale компенсация (scale(1/panelScale)) САМО на
+  // mobile — desktop panelScale е близо до 1 (компенсацията там е
+  // практически no-op), но пак я ограничаваме до isMobileLayout, за да не
+  // рискуваме desktop visual diff. Крайният rendered размер е
+  // sizePx × panelScale × inverseScale = sizePx × panelScale × (1/panelScale)
+  // = sizePx — значи sizePx/iconSizePx ТУК са директно реалните (screen)
+  // px цели, идентични на desktop-овите (36/22), не "по-голям base преди
+  // компенсация". Целта е mobile бутонът да е реално същия физически
+  // размер като desktop-a, фиксиран независимо от panelScale.
+  const isMobileLayout = isPhoneLayoutViewport()
+  const sizePx = 36
+  const iconSizePx = 22
+  const offsetPx = isMobileLayout ? -62 : -32
+  const inverseScale = isMobileLayout && panelScale > 0 ? 1 / panelScale : 1
+
   // Seat-specific placement, извън card-a изцяло (card overflow:hidden би
   // изрязал бутона, ако беше вътре):
   //  - left/right: над card-а, центриран хоризонтално спрямо card width-а.
   //  - top: вдясно от card-а, вертикално центриран.
+  // Inverse-scale-ът е добавен КЪМ съществуващия center-offset transform
+  // (не го замества) — transform-origin остава default (center), затова
+  // scale-ът разширява бутона симетрично около собствения му център, без
+  // да размества позицията, зададена от translateX/Y(-50%).
   const positionStyle =
     visualSeat === 'top'
-      ? 'right:-32px; top:50%; transform:translateY(-50%);'
-      : 'left:50%; top:-32px; transform:translateX(-50%);'
+      ? `right:${offsetPx}px; top:50%; transform:translateY(-50%) scale(${inverseScale});`
+      : `left:50%; top:${offsetPx}px; transform:translateX(-50%) scale(${inverseScale});`
 
   // По-светло жълто (rgba(255,224,128,*)) вместо предишното по-тъмно
   // gold (rgba(224,168,58,*)/rgba(245,197,102,*)) — старото се сливаше
@@ -488,8 +513,8 @@ function renderSeatGiftActionIcon(
       style="
         position:absolute;
         ${positionStyle}
-        width:36px;
-        height:36px;
+        width:${sizePx}px;
+        height:${sizePx}px;
         border-radius:10px;
         display:flex;
         align-items:center;
@@ -503,7 +528,7 @@ function renderSeatGiftActionIcon(
         z-index:9;
         transition:background 0.15s ease, border-color 0.15s ease;
       "
-    >${renderGiftBoxIcon(22)}</div>
+    >${renderGiftBoxIcon(iconSizePx)}</div>
   `
 }
 
@@ -1488,7 +1513,7 @@ export function createCuttingSeatPanelHtml(
         ${cutterBadgeHtml}
       </div>
       ${renderCuttingDealerBadge(visualSeat, dealerSeat, seat.seat)}
-      ${renderSeatGiftActionIcon(seat, canSendGiftToSeat, visualSeat)}
+      ${renderSeatGiftActionIcon(seat, canSendGiftToSeat, visualSeat, panelScale)}
     </div>
   `
 }
