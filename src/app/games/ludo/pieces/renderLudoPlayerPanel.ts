@@ -25,6 +25,7 @@
 
 import { LUDO_COLOR_HEX, LUDO_COLOR_LABEL } from '../ludoTypes'
 import type { LudoPiece, LudoPlayer } from '../ludoTypes'
+import { renderLudoDiceControl } from '../dice/renderLudoDiceControl'
 
 const TURN_COUNTDOWN_MS = 20_000
 
@@ -71,12 +72,19 @@ function buildMobileCountdownRingPath(size: number, inset: number, radius: numbe
   ].join(' ')
 }
 
+export interface LudoPlayerPanelDiceControl {
+  face: number
+  isRollable: boolean
+  isRolling: boolean
+}
+
 export function renderLudoPlayerPanel(
   player: LudoPlayer,
   pieces: LudoPiece[],
   isActive: boolean,
   useCompactLayout = false,
   turnElapsedMs = 0,
+  diceControl: LudoPlayerPanelDiceControl | null = null,
 ): string {
   void pieces
   const hex = LUDO_COLOR_HEX[player.color]
@@ -154,6 +162,17 @@ export function renderLudoPlayerPanel(
         flex-shrink:0;
       "
     >
+      ${isActive && diceControl
+        ? renderLudoDiceControl({
+            color: player.color,
+            hex,
+            avatarSize,
+            insetPx,
+            face: diceControl.face,
+            isRollable: diceControl.isRollable,
+            isRolling: diceControl.isRolling,
+          })
+        : `
       <div style="
         position:absolute;
         top:${insetPx}px; left:${insetPx}px;
@@ -171,6 +190,7 @@ export function renderLudoPlayerPanel(
           ? `<img src="${player.avatarUrl}" alt="" style="width:100%;height:100%;object-fit:cover;">`
           : initials}
       </div>
+      `}
 
       ${isActive && useCompactLayout ? (() => {
         const ringSize = avatarSize + insetPx * 2 // топ area над footer-а (58+6*2=70)
@@ -183,7 +203,7 @@ export function renderLudoPlayerPanel(
             data-ludo-seat-countdown-ring="${player.color}"
             width="${ringSize}" height="${ringSize}"
             viewBox="0 0 ${ringSize} ${ringSize}"
-            style="position:absolute; top:0; left:0; pointer-events:none;"
+            style="position:absolute; top:0; left:0; z-index:4; pointer-events:none;"
           >
             <path
               d="${ringPath}"

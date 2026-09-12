@@ -33,7 +33,11 @@ export function renderLudoAnimationStyles(): string {
         0% { stroke-dashoffset:0; }
         100% { stroke-dashoffset:100; }
       }
-      [data-ludo-dice-roll-button]:not(:disabled):hover {
+      @keyframes ludo-dice-arrows-spin {
+        from { transform:rotate(0deg); }
+        to { transform:rotate(360deg); }
+      }
+      [data-ludo-dice-roll-button]:hover {
         filter:brightness(1.08);
         transform:translateY(-1px);
       }

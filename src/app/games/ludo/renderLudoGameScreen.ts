@@ -5,15 +5,20 @@
 //
 // Чист render модул — приема mock state отвън, не пази собствено state.
 
-import { renderLudoBoard } from './board/renderLudoBoard'
+import {
+  renderLudoBoard,
+  LUDO_BOARD_GRID_SIZE,
+  LUDO_BOARD_FRAME_PADDING_CSS,
+  HOME_QUADRANT_ORIGIN,
+  HOME_QUADRANT_SHIFT,
+  HOME_QUADRANT_SPAN,
+} from './board/renderLudoBoard'
 import { ludoGridPointForCellId } from './board/ludoBoardGeometry'
 import { renderLudoPiecesByCell } from './pieces/renderLudoPieces'
 import { renderLudoPlayerPanel } from './pieces/renderLudoPlayerPanel'
-import { renderLudoRollButton, renderLudoWaitingActionButton } from './dice/renderLudoRollButton'
 import { renderLudoBottomBar } from './renderLudoBottomBar'
 import { renderLudoAnimationStyles } from './ludoAnimationStyles'
 import { planLudoHighlights, renderLudoNormalHighlight, renderLudoCaptureImpactRing } from './pieces/renderLudoHighlights'
-import type { LudoDiceFace } from './dice/ludoDiceState'
 import type { LudoColor, LudoLegalMove, LudoPiece, LudoPlayer } from './ludoTypes'
 
 // Desktop board sizing — измерени (не гадани) pixel constants за
@@ -75,9 +80,59 @@ const LUDO_MOBILE_BOTTOM_BAR_HEIGHT_PX = 67
 const LUDO_MOBILE_ACTION_ROW_HEIGHT_PX = 56
 const LUDO_MOBILE_CONTENT_TOP_PADDING_PX = 10
 const LUDO_MOBILE_CONTENT_BOTTOM_PADDING_PX = 8
-const LUDO_MOBILE_CONTENT_SIDE_PADDING_PX = 12
+// 3px точно отляво/отдясно на дъската (виж task-а) — board wrapper-ът
+// ползва width:100% от тази padded зона, значи board outer edge завършва
+// точно SIDE_PADDING px от viewport ръба, когато width-target-ът "печели"
+// в min()-а долу (виж LUDO_MOBILE_BOARD_SIZE_CSS). Height-safety клонът
+// продължава да пази 360×640/660 от overlap — вертикалният бюджет
+// (TOP/BOTTOM padding, ROW_GAP, cardRow, actionRow, bottomBar) е напълно
+// непроменен, затова гаранцията срещу clipping там остава същата, каквато
+// вече е тествана и одобрена.
+const LUDO_MOBILE_CONTENT_SIDE_PADDING_PX = 3
 const LUDO_MOBILE_ROW_GAP_PX = 8
 const LUDO_MOBILE_CARD_ROW_HEIGHT_PX = 98
+// Compact card ширина от renderLudoPlayerPanel.ts (avatarSize(58) +
+// insetPx(6)*2 + border(2)*2 = 74) — explicit тук по СЪЩАТА конвенция като
+// CARD_ROW_HEIGHT_PX по-горе (renderLudoGameScreen си остава единствен
+// owner на layout аритметиката, не internal import), нужна за
+// center-alignment формулата долу (полу-ширина за центриране спрямо home
+// кръга).
+const LUDO_MOBILE_CARD_WIDTH_PX = 74
+
+// Хоризонтално подравняване на mobile player card-овете спрямо РЕАЛНИЯ
+// център на съответния голям home кръг на дъската (виж task-а — предният
+// fixed-edge-gap подход разместваше картите спрямо кръговете). Формулата
+// извежда фракцията (0..1) от 15x15 board grid-а, в която пада центъра на
+// всеки home кръг, ползвайки СЪЩИТЕ константи, с които renderLudoBoard.ts
+// реално позиционира кръга (HOME_QUADRANT_ORIGIN + HOME_QUADRANT_SPAN за
+// базовата позиция на quadrant-а, HOME_QUADRANT_SHIFT.x за translate()
+// изместването navътре) — не е отделна/предположена стойност, а огледало
+// на реалната geometry, автоматично вярно ако тези константи някога се
+// променят.
+function ludoHomeCircleCenterGridFraction(color: LudoColor): number {
+  const origin = HOME_QUADRANT_ORIGIN[color]
+  const shift = HOME_QUADRANT_SHIFT[color]
+  const quadrantSpanFraction = HOME_QUADRANT_SPAN / LUDO_BOARD_GRID_SIZE
+  const baseFraction = (origin.col - 1 + HOME_QUADRANT_SPAN / 2) / LUDO_BOARD_GRID_SIZE
+  const shiftFraction = (shift.x / 100) * quadrantSpanFraction
+  return baseFraction + shiftFraction
+}
+
+// CSS `left` за card wrapper-а (position:absolute спрямо card row-а), чиято
+// широчина е зададена РАВНА на board frame широчината (виж mobile return-а
+// долу) — затова "100%" тук реферира точно board frame-а, а не целия
+// padded content wrapper, и центърът на картата пада точно върху центъра
+// на home кръга независимо кой клон на LUDO_MOBILE_BOARD_SIZE_CSS min()-а
+// печели на дадения viewport. LUDO_BOARD_FRAME_PADDING_CSS е ТОЧНО
+// стойността, с която renderLudoBoard.ts прави padding на frame-а (внос,
+// не дублиран низ), gridFraction е делът от вътрешната 15x15 grid зона
+// (frame width минус padding от двете страни), а последните -37px
+// (=CARD_WIDTH/2) центрират картата (вместо transform:translateX(-50%),
+// директно в left-а — математически идентично, без допълнителен слой).
+function ludoMobileCardLeftCss(color: LudoColor): string {
+  const gridFraction = ludoHomeCircleCenterGridFraction(color)
+  return `calc(${LUDO_BOARD_FRAME_PADDING_CSS} + (100% - 2 * ${LUDO_BOARD_FRAME_PADDING_CSS}) * ${gridFraction} - ${LUDO_MOBILE_CARD_WIDTH_PX / 2}px)`
+}
 const LUDO_MOBILE_VERTICAL_CHROME_PX =
   LUDO_MOBILE_BOTTOM_BAR_HEIGHT_PX +
   LUDO_MOBILE_CONTENT_TOP_PADDING_PX +
@@ -98,27 +153,20 @@ export interface LudoGameScreenState {
   // само за да се изчисли real elapsed time за countdown fill-а
   // (renderLudoPlayerPanel) — deadline-базирано, не JS tick брояч.
   turnStartedAt: number
-  diceResult: LudoDiceFace | null
-  diceRotation: { x: number; y: number }
   isDiceRolling: boolean
   canRollDice: boolean
   turnSecondsLeft: number
   useMobileLayout: boolean
 }
 
-function renderPlayerPanelSlot(state: LudoGameScreenState, color: LudoColor, compact: boolean): string {
-  const isActive = state.activeColor === color
-  // Изчислено ПРИ ВСЕКИ render() спрямо реалния Date.now() — не натрупва
-  // грешка и остава коректно дори re-render-ът да е закъснял (browser/tab
-  // lag), защото винаги гледа реалния deadline, не брой изминали tick-ове.
-  const turnElapsedMs = isActive ? Math.max(0, Date.now() - state.turnStartedAt) : 0
-  return renderLudoPlayerPanel(state.players[color], state.pieces, isActive, compact, turnElapsedMs)
-}
-
 // "Локален" играч = единственият не-бот в mock състава (Иван/red в
-// createLudoMockPlayers) — разграничението "мой ред" vs "чужд ред" за
-// desktop-овия единствен action бутон (виж renderLudoGameScreen долу).
-// Няма реален auth/сесия в prototype-а, затова isBot е единственият
+// createLudoMockPlayers) — единствения, чийто dice control в player card-а
+// е реално clickable (isRollable долу). За всички останали активни играчи
+// (бот на ход) dice control-ът все пак се показва (визуално "чака да
+// хвърли"), но без click handler — не сменяме поведението, само мястото му
+// (виж task-а: старият отделен бутон/"Х хвърля зара" текст под дъската
+// изразяваше точно това чрез isLocalPlayerTurn branching, сега живее per-
+// card). Няма реален auth/сесия в prototype-а, затова isBot е единственият
 // наличен сигнал; при реален сървър това ще дойде от snapshot-а.
 function resolveLocalPlayerColor(players: Record<LudoColor, LudoPlayer>): LudoColor {
   const localEntry = (Object.entries(players) as Array<[LudoColor, LudoPlayer]>).find(
@@ -127,20 +175,45 @@ function resolveLocalPlayerColor(players: Record<LudoColor, LudoPlayer>): LudoCo
   return localEntry ? localEntry[0] : 'red'
 }
 
+function renderPlayerPanelSlot(
+  state: LudoGameScreenState,
+  color: LudoColor,
+  compact: boolean,
+  localColor: LudoColor,
+): string {
+  const isActive = state.activeColor === color
+  // Изчислено ПРИ ВСЕКИ render() спрямо реалния Date.now() — не натрупва
+  // грешка и остава коректно дори re-render-ът да е закъснял (browser/tab
+  // lag), защото винаги гледа реалния deadline, не брой изминали tick-ове.
+  const turnElapsedMs = isActive ? Math.max(0, Date.now() - state.turnStartedAt) : 0
+  // dice control замества avatar-а само за активния играч (виж
+  // renderLudoPlayerPanel.ts — рендерира се единствено когато isActive е
+  // true, затова е безопасно да подадем обекта безусловно тук). isRollable
+  // е true само за локалния играч, за да остане click тригерът точно там,
+  // където преди беше единственият видим "Хвърли зара" бутон.
+  const diceControl = {
+    // ФИКСИРАНА стойност — НЕ реалният dice резултат. Launcher-ът в
+    // player card-а е чисто UI за задействане (виж task-а), никога не
+    // показва падналото число; истинският резултат се вижда само на
+    // отделното "летящо" зарче в центъра на дъската (виж
+    // playLudoDiceFlightOverlay.ts, извикан от createLudoFlowController.ts
+    // handleRollDice). Затова LudoGameScreenState умишлено няма
+    // diceResult поле — тази стойност няма откъде да "изтече" в картата.
+    face: 1,
+    // Огледално на старото `disabled:!state.canRollDice` на бутона — докато
+    // roll-ът тече (isDiceRolling → canRollDice=false), click target-ът
+    // изчезва (виж renderLudoDiceControl: isRollable=false → без
+    // data-ludo-dice-roll-button атрибут, pointer-events:none), same
+    // guard като старото disabled state.
+    isRollable: isActive && color === localColor && state.canRollDice,
+    isRolling: state.isDiceRolling,
+  }
+  return renderLudoPlayerPanel(state.players[color], state.pieces, isActive, compact, turnElapsedMs, diceControl)
+}
+
 export function renderLudoGameScreen(state: LudoGameScreenState): string {
   const boardHtml = renderLudoBoard()
-  const rollButtonHtml = renderLudoRollButton(!state.canRollDice)
-
-  // Споделено между desktop и mobile: единствен action елемент под/след
-  // дъската вместо отделни зар + "Твой ход" каре — countdown-ът за активния
-  // играч вече живее в неговото player card (renderLudoPlayerPanel,
-  // isActive → gold drain bar), не тук.
   const localColor = resolveLocalPlayerColor(state.players)
-  const isLocalPlayerTurn = state.activeColor === localColor
-  const currentPlayerName = state.players[state.activeColor].name
-  const turnActionHtml = isLocalPlayerTurn
-    ? rollButtonHtml
-    : renderLudoWaitingActionButton(currentPlayerName)
 
   if (state.useMobileLayout) {
     // Header-ът НЕ се рендира на mobile изобщо (виж task-а — заема ценна
@@ -176,9 +249,9 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           box-sizing:border-box;
           overflow:hidden;
         ">
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; justify-items:center; width:100%; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, 'red', true)}
-            ${renderPlayerPanelSlot(state, 'blue', true)}
+          <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('red')};">${renderPlayerPanelSlot(state, 'red', true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('blue')};">${renderPlayerPanelSlot(state, 'blue', true, localColor)}</div>
           </div>
 
           <div style="
@@ -190,13 +263,9 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
             ${boardHtml}
           </div>
 
-          <div style="display:grid; grid-template-columns:1fr 1fr; gap:10px; justify-items:center; width:100%; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, 'green', true)}
-            ${renderPlayerPanelSlot(state, 'yellow', true)}
-          </div>
-
-          <div style="display:flex; align-items:center; justify-content:center; flex-shrink:0;">
-            ${turnActionHtml}
+          <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('green')};">${renderPlayerPanelSlot(state, 'green', true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('yellow')};">${renderPlayerPanelSlot(state, 'yellow', true, localColor)}</div>
           </div>
         </div>
 
@@ -230,8 +299,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
       ">
         <div style="display:flex; align-items:stretch; justify-content:center; gap:22px; flex-shrink:0; height:${LUDO_DESKTOP_BOARD_ROW_SIZE_CSS};">
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, 'red', false)}
-            ${renderPlayerPanelSlot(state, 'green', false)}
+            ${renderPlayerPanelSlot(state, 'red', false, localColor)}
+            ${renderPlayerPanelSlot(state, 'green', false, localColor)}
           </div>
 
           <div style="
@@ -243,13 +312,9 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, 'blue', false)}
-            ${renderPlayerPanelSlot(state, 'yellow', false)}
+            ${renderPlayerPanelSlot(state, 'blue', false, localColor)}
+            ${renderPlayerPanelSlot(state, 'yellow', false, localColor)}
           </div>
-        </div>
-
-        <div style="display:flex; align-items:center; justify-content:center; flex-shrink:0;">
-          ${turnActionHtml}
         </div>
       </div>
 

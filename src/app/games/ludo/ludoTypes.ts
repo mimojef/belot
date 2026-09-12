@@ -5,11 +5,16 @@ export type LudoColor = 'red' | 'blue' | 'green' | 'yellow'
 
 export const LUDO_COLORS: readonly LudoColor[] = ['red', 'blue', 'green', 'yellow']
 
+// yellow: второ фино тониране (виж task-а) — #f7dd6b беше прекалено светло/
+// пастелно; новото е по-тъмно, по-наситено златисто-жълто (hue ~44°, ясно
+// разграничено от backdrop-а BOARD_BACKDROP #eea458, чийто hue е ~30°
+// оранжево), без да се доближава до оранжев тон. red/blue/green и
+// backdrop-ът са НЕДОКОСНАТИ.
 export const LUDO_COLOR_HEX: Record<LudoColor, string> = {
   red: '#e0473e',
   blue: '#3b82f6',
   green: '#22a559',
-  yellow: '#f2c230',
+  yellow: '#e6b91f',
 }
 
 export const LUDO_COLOR_LABEL: Record<LudoColor, string> = {

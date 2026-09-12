@@ -1,13 +1,18 @@
-// Рендерира 16-те пионки като отделни interactive елементи, позиционирани в
+// Рендерира пионките като interactive елементи, позиционирани в
 // data-ludo-cell-pieces контейнера на тяхната текуща клетка (виж
-// renderLudoBoard.ts). Няколко пионки на една клетка се подреждат в мини
-// grid, за да не се застъпват изцяло.
+// renderLudoBoard.ts). Няколко пионки от ЕДИН цвят на една клетка се
+// показват като ЕДИН visual token + count badge (виж task-а — преди
+// showваше отделен token за всяка пионка, наредени fan/wrap, което
+// изглеждаше като "две отделни пионки" дори когато по state са на СЪЩАТА
+// клетка). Пионки от различен цвят на същата клетка (възможно за 1 кадър
+// по време на capture animation-а) остават отделни tokens — count badge-ът
+// е само за СЪЩИЯ цвят.
 //
 // Визуален стил (обемна "пионка" форма с градиент/highlight, не плоска
 // точка) следва desktop/mobile референтите на Pika.bg.
 
 import { LUDO_COLOR_HEX } from '../ludoTypes'
-import type { LudoCellId, LudoLegalMove, LudoPiece, LudoPieceId } from '../ludoTypes'
+import type { LudoCellId, LudoColor, LudoLegalMove, LudoPiece, LudoPieceId } from '../ludoTypes'
 
 function piecesByCell(pieces: LudoPiece[]): Map<LudoCellId, LudoPiece[]> {
   const map = new Map<LudoCellId, LudoPiece[]>()
@@ -19,13 +24,74 @@ function piecesByCell(pieces: LudoPiece[]): Map<LudoCellId, LudoPiece[]> {
   return map
 }
 
-export function renderLudoPieceHtml(piece: LudoPieceId, selectable: boolean): string {
+// Под-групиране ВЪТРЕ в една клетка, по цвят — реалният state пази
+// отделните LudoPiece записи непроменени (виж renderLudoPiecesByCell по-
+// долу); тук САМО решаваме колко visual tokens да покажем.
+function piecesByColor(pieces: LudoPiece[]): Map<LudoColor, LudoPiece[]> {
+  const map = new Map<LudoColor, LudoPiece[]>()
+  for (const piece of pieces) {
+    const list = map.get(piece.color) ?? []
+    list.push(piece)
+    map.set(piece.color, list)
+  }
+  return map
+}
+
+// count>1 → малък кръгъл badge НАД пионката (SVG, viewBox-базиран —
+// скалира се чисто на всякакъв размер на самата пионка, desktop/mobile,
+// без отделна px логика, същия trick като rotating dice arrows-а).
+function renderStackCountBadge(count: number, hex: string): string {
+  return `
+    <svg
+      viewBox="0 0 20 20"
+      style="
+        position:absolute;
+        top:-34%; left:50%;
+        transform:translateX(-50%);
+        width:50%;
+        aspect-ratio:1/1;
+        overflow:visible;
+        filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));
+        z-index:4;
+        pointer-events:none;
+      "
+    >
+      <circle cx="10" cy="10" r="9" fill="#171717" stroke="${hex}" stroke-width="1.6"></circle>
+      <text
+        x="10" y="10.5"
+        text-anchor="middle"
+        dominant-baseline="central"
+        font-size="12"
+        font-weight="900"
+        fill="#ffffff"
+      >${count}</text>
+    </svg>
+  `
+}
+
+// count = колко реални LudoPiece записи представлява ТОЗИ visual token
+// (виж piecesByColor по-горе) — по подразбиране 1 (без badge), за
+// съвместимост с единствения предишен call-site (нямаше count изобщо).
+// groupIds = ВСИЧКИ реални piece id-та от стека (когато count>1) — нужно е
+// САМО за animateCapture в createLudoFlowController.ts: ако "жертвата" на
+// capture-а не е точно representative id-то на token-а (виж
+// renderLudoPieceCluster по-долу), querySelector по голия data-ludo-piece
+// не би я намерил. data-ludo-piece-group прави тази ситуация все пак
+// намираема, без да пипа кое piece РЕАЛНО се маха (game logic-ът е
+// недокоснат) — чисто DOM lookup robustness.
+export function renderLudoPieceHtml(
+  piece: LudoPieceId,
+  selectable: boolean,
+  count = 1,
+  groupIds: LudoPieceId[] = [piece],
+): string {
   const color = piece.split('-')[0] as keyof typeof LUDO_COLOR_HEX
   const hex = LUDO_COLOR_HEX[color]
 
   return `
     <div
       data-ludo-piece="${piece}"
+      ${count > 1 ? `data-ludo-piece-stack-count="${count}" data-ludo-piece-group="${groupIds.join(' ')}"` : ''}
       ${selectable ? 'data-ludo-piece-selectable="1"' : ''}
       style="
         position:relative;
@@ -65,6 +131,7 @@ export function renderLudoPieceHtml(piece: LudoPieceId, selectable: boolean): st
         border-radius:50%;
         box-shadow:inset -1px -1px 2px rgba(0,0,0,0.3), inset 1px 1px 1px rgba(255,255,255,0.3)${selectable ? `, 0 0 0 3px ${hex}55` : ''};
       "></div>
+      ${count > 1 ? renderStackCountBadge(count, hex) : ''}
     </div>
   `
 }
@@ -83,13 +150,33 @@ function clamp255(value: number): number {
   return Math.max(0, Math.min(255, value))
 }
 
-// Групирани пионки на една клетка се подреждат в компактен 2xN wrap вместо
-// пълно застъпване, за да остане всяка видима и кликаема.
+// Групираните-по-цвят пионки на една клетка се подреждат в компактен flex
+// wrap (обичайно само 1 token, освен ако клетката съдържа И 2 различни
+// цвята едновременно — рядък 1-кадърен overlap по време на capture
+// animation-а). ЕДИН visual token на цвят, с count badge при >1 реални
+// пионки от този цвят (виж piecesByColor/renderLudoPieceHtml по-горе).
 export function renderLudoPieceCluster(pieces: LudoPiece[], selectablePieceIds: Set<LudoPieceId>): string {
   if (pieces.length === 0) return ''
+
+  const colorGroups = piecesByColor(pieces)
+  const tokens = Array.from(colorGroups.values())
+    .map((group) => {
+      // Детерминистична подредба (по id) — гарантира стабилен избор на
+      // representative независимо от реда в state.pieces масива.
+      const sorted = [...group].sort((a, b) => a.id.localeCompare(b.id))
+      // Ако ПОНЕ една от пионките в групата има legal move, представящият
+      // token трябва да носи ИМЕННО нейния id — за да click върху
+      // единствения видим token реално задейства валидния ход (виж
+      // task-а: "не изграждай нови правила", само пази click compatibility).
+      const representative = sorted.find((p) => selectablePieceIds.has(p.id)) ?? sorted[0]
+      const groupIds = sorted.map((p) => p.id)
+      return renderLudoPieceHtml(representative.id, selectablePieceIds.has(representative.id), group.length, groupIds)
+    })
+    .join('')
+
   return `
     <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:center;gap:1px;width:100%;height:100%;">
-      ${pieces.map((p) => renderLudoPieceHtml(p.id, selectablePieceIds.has(p.id))).join('')}
+      ${tokens}
     </div>
   `
 }
@@ -101,7 +188,10 @@ export interface LudoPiecesRenderResult {
 
 // Връща per-cell HTML fragments, готови за инжектиране във вече
 // съществуващите data-ludo-cell-pieces контейнери (patch, не full re-render
-// на цялата дъска).
+// на цялата дъска). Групирането тук е САМО presentation — state.pieces
+// (подаден отвън) остава непроменен, всеки реален LudoPiece запис
+// продължава да съществува с отделния си id; renderLudoPieceCluster просто
+// решава колко DOM tokens да покаже за резултата.
 export function renderLudoPiecesByCell(pieces: LudoPiece[], legalMoves: LudoLegalMove[]): LudoPiecesRenderResult[] {
   const grouped = piecesByCell(pieces)
   const selectablePieceIds = new Set(legalMoves.map((m) => m.pieceId))
