@@ -7,8 +7,9 @@
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState } from './renderLudoGameScreen'
 import { renderLudoMockPopup } from './renderLudoBottomBar'
-import { createLudoMockPlayers, createLudoMockPieces, createLudoMockLegalMoves } from './mock/ludoMockState'
+import { createLudoMockPlayers, createLudoMockPieces } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
+import { computeLudoLegalMoves } from './board/computeLudoLegalMoves'
 import { rollLudoMockDiceResult, computeLudoDiceThrowTransform } from './dice/ludoDiceState'
 import type { LudoDiceFace } from './dice/ludoDiceState'
 import type { LudoCellId, LudoColor, LudoLegalMove, LudoPiece, LudoPieceId } from './ludoTypes'
@@ -28,8 +29,22 @@ export interface LudoFlowControllerOptions {
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
   const players = createLudoMockPlayers()
   let pieces: LudoPiece[] = createLudoMockPieces()
-  let legalMoves: LudoLegalMove[] = createLudoMockLegalMoves()
+  // Празни, докато няма хвърлен зар — виж handleRollDice. Преди първо
+  // хвърляне не трябва да има selectable пионки/highlights/capture ring
+  // (виж audit-а: старите hardcoded legalMoves нарушаваха точно това).
+  let legalMoves: LudoLegalMove[] = []
   let activeColor: LudoColor = 'red'
+  // Момент (Date.now()), в който активният играч е получил хода си —
+  // deadline-базирана основа за countdown fill-а в player card-а (виж
+  // renderLudoPlayerPanel), НЕ JS tick брояч. Персистира през render() call-ове,
+  // предизвикани от несвързани причини (resize, dice roll, piece move
+  // animation) — countdown-ът визуално НЕ трябва да рестартира при тях
+  // (виж audit-а: старата реализация не защитаваше срещу точно това — при
+  // всеки re-render countdown-fill div-ът е нов DOM node и CSS animation-ът
+  // му тръгва отначало, освен ако не му се подаде правилен animation-delay).
+  // При бъдещо реално turn-advancement (извън обхвата тук) присвояването на
+  // нов activeColor ТРЯБВА да reset-не и turnStartedAt = Date.now().
+  let turnStartedAt = Date.now()
   let diceResult: LudoDiceFace | null = null
   let diceRotation = { x: 0, y: 0 }
   let isDiceRolling = false
@@ -43,6 +58,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       pieces,
       legalMoves: isAnimatingMove ? [] : legalMoves,
       activeColor,
+      turnStartedAt,
       diceResult,
       diceRotation,
       isDiceRolling,
@@ -132,6 +148,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
 
     await wait(950)
     diceResult = result
+    // Legal moves се пресмятат ЕДИНСТВЕНО тук — само за играча на ход
+    // (activeColor === currentPlayerId в този mock) и само спрямо реално
+    // показания dice резултат. targetTrackIndex = (currentTrackIndex +
+    // diceValue) % LUDO_TRACK_LENGTH, capture само ако противникова пионка
+    // стои точно на target-а — виж computeLudoLegalMoves.
+    legalMoves = computeLudoLegalMoves(pieces, activeColor, result)
     isDiceRolling = false
     canRollDice = true
     render()

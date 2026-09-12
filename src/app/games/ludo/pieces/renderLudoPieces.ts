@@ -32,6 +32,12 @@ export function renderLudoPieceHtml(piece: LudoPieceId, selectable: boolean): st
         width:70%;
         max-width:30px;
         aspect-ratio:0.82/1;
+        margin-bottom:2px;
+        /* +2px въздух до долния ръб на клетката — renderLudoPieceCluster
+           подрежда пионките с align-items:flex-end, а без този margin
+           пионката опира точно в долния ръб. Единственото място, което
+           рендерира piece token, значи важи навсякъде (track/home/finish,
+           desktop/mobile) без отделна логика. */
         pointer-events:${selectable ? 'auto' : 'none'};
         cursor:${selectable ? 'pointer' : 'default'};
         transition:transform 120ms ease, filter 160ms ease;

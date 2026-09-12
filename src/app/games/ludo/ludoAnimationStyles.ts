@@ -7,8 +7,8 @@ export function renderLudoAnimationStyles(): string {
   return `
     <style>
       @keyframes ludo-normal-highlight-pulse {
-        0%, 100% { opacity:0.45; transform:scale(0.92); }
-        50% { opacity:0.9; transform:scale(1.08); }
+        0%, 100% { opacity:0.72; transform:scale(0.94); }
+        50% { opacity:1; transform:scale(1.05); }
       }
       @keyframes ludo-capture-ring-pulse {
         0%, 100% { opacity:0.55; transform:scale(0.94); }
@@ -24,6 +24,14 @@ export function renderLudoAnimationStyles(): string {
         40% { transform:translate(3px, 2px); }
         60% { transform:translate(-2px, 2px); }
         80% { transform:translate(2px, -2px); }
+      }
+      @keyframes ludo-seat-countdown-drain {
+        0% { transform:scaleX(1); }
+        100% { transform:scaleX(0); }
+      }
+      @keyframes ludo-seat-countdown-ring-drain {
+        0% { stroke-dashoffset:0; }
+        100% { stroke-dashoffset:100; }
       }
       [data-ludo-dice-roll-button]:not(:disabled):hover {
         filter:brightness(1.08);

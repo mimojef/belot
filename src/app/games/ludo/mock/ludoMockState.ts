@@ -1,9 +1,12 @@
 // Mock данни за visual prototype — 4 играча, 16 пионки (част в базите, част
-// на трасето), примерни legal moves. Engine-ът по-късно ще замени този модул
-// изцяло; renderer-ът не трябва да прави предположения отвъд типовете тук.
+// на трасето). Legal moves вече НЕ са тук — изчисляват се динамично от
+// board/computeLudoLegalMoves.ts спрямо реалния dice резултат (виж audit-а
+// защо старите hardcoded legalMoves бяха премахнати). Engine-ът по-късно ще
+// замени този модул изцяло; renderer-ът не трябва да прави предположения
+// отвъд типовете тук.
 
 import { ludoCellId } from '../ludoTypes'
-import type { LudoColor, LudoLegalMove, LudoPiece, LudoPlayer } from '../ludoTypes'
+import type { LudoColor, LudoPiece, LudoPlayer } from '../ludoTypes'
 import { LUDO_COLORS } from '../ludoTypes'
 
 export function createLudoMockPlayers(): Record<LudoColor, LudoPlayer> {
@@ -47,17 +50,6 @@ export function createLudoMockPieces(): LudoPiece[] {
     { id: 'yellow-1', color: 'yellow', cell: homeCell('yellow', 1) },
     { id: 'yellow-2', color: 'yellow', cell: homeCell('yellow', 2) },
     { id: 'yellow-3', color: 'yellow', cell: homeCell('yellow', 3) },
-  ]
-}
-
-// Пример legal moves за текущия играч (red): нормален ход напред, ход от
-// базата към собствения старт, и capture ход върху blue-3 (стоящ на
-// track-27 — виж createLudoMockPieces).
-export function createLudoMockLegalMoves(): LudoLegalMove[] {
-  return [
-    { pieceId: 'red-1', targetCell: trackCell(10), type: 'normal' },
-    { pieceId: 'red-2', targetCell: trackCell(27), type: 'capture' },
-    { pieceId: 'red-0', targetCell: trackCell(0), type: 'normal' },
   ]
 }
 

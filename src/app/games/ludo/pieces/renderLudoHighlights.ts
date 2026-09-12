@@ -17,16 +17,43 @@ import type { LudoLegalMove } from '../ludoTypes'
 
 const GRID_SIZE = 15
 
+// Target клетка за normal move — трябва да се разпознава веднага, върху
+// бял (track), червен/син/зелен/жълт (home/finish) фон еднакво добре.
+// Комбинация от 3 layer-а вътре в общ pulsing wrapper (скалира/fade-ва
+// заедно, за да остане "дишащ", не тресящ се ефект):
+//   1. outer glow (box-shadow, изтича извън клетката — вижда се дори на
+//      наситен цветен фон, не само на бял);
+//   2. златист outline ring с бяла вътрешна кант-линия за контраст;
+//   3. вътрешен светъл radial fill — сигнализира "стъпи тук" отблизо.
+// Умишлено ЗЛАТИСТО (gold/amber), не червено — capture ring-ът
+// (renderLudoCaptureImpactRing) остава единствения червен ефект, за да не
+// се бъркат визуално normal move с capture.
 export function renderLudoNormalHighlight(): string {
   return `
     <div style="
       position:absolute;
-      inset:12%;
+      inset:9%;
       border-radius:50%;
-      background:rgba(212,165,32,0.35);
-      animation:ludo-normal-highlight-pulse 1.6s ease-in-out infinite;
       pointer-events:none;
-    "></div>
+      animation:ludo-normal-highlight-pulse 1.8s ease-in-out infinite;
+    ">
+      <div style="
+        position:absolute;
+        inset:0;
+        border-radius:50%;
+        border:3px solid #ffd766;
+        box-shadow:
+          0 0 0 2px rgba(255,255,255,0.65),
+          0 0 12px 3px rgba(255,196,44,0.9),
+          0 0 24px 8px rgba(255,196,44,0.55);
+      "></div>
+      <div style="
+        position:absolute;
+        inset:22%;
+        border-radius:50%;
+        background:radial-gradient(circle, rgba(255,248,220,0.98) 0%, rgba(255,214,74,0.7) 62%, rgba(255,214,74,0) 100%);
+      "></div>
+    </div>
   `
 }
 

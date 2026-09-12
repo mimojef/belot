@@ -1,5 +1,34 @@
 // "Хвърли зара" бутон — зелен, с glow, следва референтния стил.
 
+// Неактивен "чакаме" статус, показван на СЪЩОТО място/размер като
+// renderLudoRollButton, когато е ред на друг играч (не на локалния) —
+// същия padding/border-radius/margin/font-size, за да не мърда layout-а
+// при смяна на активния играч. Умишлено <div>, не <button> — не е
+// interactive елемент (без click handler, без hover ефект).
+export function renderLudoWaitingActionButton(currentPlayerName: string): string {
+  return `
+    <div
+      data-ludo-waiting-turn-status="1"
+      style="
+        display:block;
+        box-sizing:border-box;
+        margin:10px auto 0;
+        padding:12px 40px;
+        border-radius:12px;
+        background:rgba(255,255,255,0.05);
+        border:1px solid rgba(255,255,255,0.12);
+        color:rgba(255,255,255,0.62);
+        font-size:15px;
+        font-weight:800;
+        letter-spacing:0.02em;
+        text-align:center;
+        cursor:default;
+        user-select:none;
+      "
+    >${currentPlayerName} хвърля зара</div>
+  `
+}
+
 export function renderLudoRollButton(disabled = false): string {
   return `
     <button
