@@ -1062,6 +1062,70 @@ try {
   })
   if (onlineNpDelSocket.readyState === WebSocket.OPEN || onlineNpDelSocket.readyState === WebSocket.CONNECTING) onlineNpDelSocket.close()
 
+  // [WS-Invalidation] Admin Information/Registered Profiles aggregate
+  // refresh fix (втори follow-up production report) — реален HTTP+WS
+  // round-trip: immediate hard delete трябва да изпрати
+  // {type:'admin_aggregate_data_changed'} (INVALIDATION-only, без payload
+  // данни — виж broadcastAdminAggregateDataChangedToAdminConnections в
+  // index.ts) към ДРУГИ admin/subadmin WS connections, но НЕ към
+  // собствената WS сесия на admin-а, направил HTTP заявката (dedup чрез
+  // ServerConnection.sessionId exclusion — admin-ският таб вече получава
+  // synchronous local refresh directно от своя HTTP response).
+  console.log('\n[WS-Invalidation] admin_aggregate_data_changed broadcast след успешен immediate hard delete')
+
+  const wsInvalidationTarget = await register(port, runId, 'wsinvalidation')
+
+  const adminSelfSocket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: adminCookie } })
+  const adminSelfMessages: Array<{ type?: string }> = []
+  await new Promise<void>((res, rej) => {
+    const t = setTimeout(() => rej(new Error('WS connect timeout')), 5000)
+    adminSelfSocket.on('open', () => { clearTimeout(t); res() })
+    adminSelfSocket.on('error', (e) => { clearTimeout(t); rej(e) })
+  })
+  adminSelfSocket.on('message', (raw) => { try { adminSelfMessages.push(JSON.parse(raw.toString('utf8'))) } catch { /* ignore */ } })
+
+  const bystanderAdminSocket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: subadminCookie } })
+  const bystanderAdminMessages: Array<{ type?: string }> = []
+  await new Promise<void>((res, rej) => {
+    const t = setTimeout(() => rej(new Error('WS connect timeout')), 5000)
+    bystanderAdminSocket.on('open', () => { clearTimeout(t); res() })
+    bystanderAdminSocket.on('error', (e) => { clearTimeout(t); rej(e) })
+  })
+  bystanderAdminSocket.on('message', (raw) => { try { bystanderAdminMessages.push(JSON.parse(raw.toString('utf8'))) } catch { /* ignore */ } })
+
+  await check('[WS-Invalidation] admin (self) и bystander (subadmin) WS connections => "connected" frame', async () => {
+    await waitFor('admin self connected frame', async () => adminSelfMessages.some((m) => m.type === 'connected'), 5000)
+    await waitFor('bystander admin connected frame', async () => bystanderAdminMessages.some((m) => m.type === 'connected'), 5000)
+  })
+
+  await check('[WS-Invalidation] admin -> DELETE (offline target, immediate) => 200, pending:false', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${wsInvalidationTarget.profileId}`, 'DELETE', adminCookie, { reason: 'ws invalidation broadcast test' })
+    const b = r.body as { ok?: boolean; pending?: boolean }
+    if (r.status !== 200 || b.ok !== true || b.pending !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+
+  await check('[WS-Invalidation] bystander admin (subadmin) socket получава admin_aggregate_data_changed', async () => {
+    await waitFor('admin_aggregate_data_changed frame', async () => bystanderAdminMessages.some((m) => m.type === 'admin_aggregate_data_changed'), 5000)
+  })
+
+  await check('[WS-Invalidation] admin_aggregate_data_changed е чист invalidation сигнал — БЕЗ payload данни (само type полето)', () => {
+    const frame = bystanderAdminMessages.find((m) => m.type === 'admin_aggregate_data_changed') as Record<string, unknown> | undefined
+    if (!frame) throw new Error('frame not found')
+    const extraKeys = Object.keys(frame).filter((k) => k !== 'type')
+    if (extraKeys.length > 0) throw new Error(`admin_aggregate_data_changed носи неочаквани полета: ${JSON.stringify(extraKeys)}`)
+  })
+
+  await check('[WS-Invalidation] initiating admin-ският СОБСТВЕН socket НЕ получава admin_aggregate_data_changed (dedup чрез excludeSessionId)', async () => {
+    // Кратка допълнителна пауза, за да сме сигурни, че broadcast-ът (ако би бил изпратен и към този socket) вече е пристигнал.
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 300))
+    if (adminSelfMessages.some((m) => m.type === 'admin_aggregate_data_changed')) {
+      throw new Error('admin-ският собствен socket получи admin_aggregate_data_changed — dedup-ът (excludeSessionId) не работи')
+    }
+  })
+
+  if (adminSelfSocket.readyState === WebSocket.OPEN || adminSelfSocket.readyState === WebSocket.CONNECTING) adminSelfSocket.close()
+  if (bystanderAdminSocket.readyState === WebSocket.OPEN || bystanderAdminSocket.readyState === WebSocket.CONNECTING) bystanderAdminSocket.close()
+
   // [E/F] Pending-during-active-game — targeted store/lifecycle ниво, БЕЗ
   // пълен 4-играч real-game WS harness (spec §11: "не изграждай огромен
   // gameplay test harness, ако съществуващият test infrastructure няма

@@ -55,6 +55,41 @@
  *     submit бутона, не третира операцията като физически приключила, не
  *     позволява втори delete request; pending:false запазва старото
  *     immediate-success поведение (архивиране на разговора + refresh).
+ * [Stats-A/B/C] Admin Information summary counters refresh (първи follow-up
+ *     production report) — "Общо"/"Днес"/"Вчера" картите (state.adminStats,
+ *     зареждани ЕДИНСТВЕНО от showAdminInfoPanel() при вход в екрана) не
+ *     се презареждаха след successful hard delete, докато admin-ът остане
+ *     на екрана — отделен bug от Registered Profiles drilldown-а по-горе
+ *     ([D1/D2]), различна state/loader двойка. Stats-A: immediate delete +
+ *     Admin Information активен -> onAdminStatsLoad се извиква повторно,
+ *     counters се обновяват от backend response. Stats-B: pending:true ->
+ *     reload СЕ прави (никакъв optimistic decrement), но числата остават
+ *     непроменени, защото backend-ът е authoritative и профилът реално
+ *     още съществува. Stats-C: deferred final delete — fallback safety net
+ *     (re-navigate reload), сега ВТОРИЧЕН механизъм спрямо WS-Invalidation-*
+ *     по-долу.
+ * [WS-Invalidation-A/B/C] Deferred final-delete WS invalidation (ВТОРИ
+ *     follow-up production report) — сървърът вече изпраща минимален
+ *     {type:'admin_aggregate_data_changed'} INVALIDATION сигнал (без
+ *     payload данни) към admin/subadmin WS connections СЛЕД реално успешен
+ *     hard-delete COMMIT (immediate И deferred, виж
+ *     broadcastAdminAggregateDataChangedToAdminConnections в index.ts) —
+ *     клиентският handleServerMessage handler просто reuse-ва
+ *     refreshAdminAggregatesAfterHardDelete() ([Stats-A/B]-ите функции).
+ *     WS-Invalidation-A: admin-info активен -> stats reload. WS-Invalidation-B:
+ *     Registered Profiles модал отворен -> reload, target редът изчезва.
+ *     WS-Invalidation-C: admin-ът НЕ е на нито едното -> НУЛА fetch-ове
+ *     (reuse-натите refresh функции вече си имат own screen/modal guard-ове,
+ *     handler-ът не добавя нов check). Реалният HTTP+WS broadcast (2
+ *     admin connections, dedup на initiator-а чрез excludeSessionId) е
+ *     тестван end-to-end в checkAdminProfileBanAndDeleteHttpAuthorization.ts
+ *     ([WS-Invalidation] секция) — тук се тества само клиентската reaction.
+ *     "pending:true не изпраща invalidation" е потвърдено чрез code review
+ *     (call site-ът физически не е достижим от pending branch-а, виж
+ *     server diff-а), не чрез runtime E2E тест — pending:true изисква
+ *     реален isProfileInActiveGame()===true HTTP round-trip, което
+ *     explicitно е извън scope на съществуващата test infrastructure (виж
+ *     round4-EF коментара в checkAdminProfileBanAndDeleteHttpAuthorization.ts).
  */
 
 import { createLobbyFlowController } from '../../src/app/lobby/createLobbyFlowController.js'
@@ -463,6 +498,41 @@ const ADMIN_STATS_STUB = {
   },
 }
 
+/** Параметризиран вариант на ADMIN_STATS_STUB — за Admin Information summary refresh тестовете (Stats-A/B/C), където total/today/yesterday трябва да се сменят между последователни onAdminStatsLoad извиквания. */
+function makeAdminStatsStub(total: number, today: number, yesterday: number) {
+  return {
+    ok: true as const,
+    stats: {
+      onlineCount: 0,
+      registeredProfiles: { total, today, yesterday },
+      payments: {
+        today: { count: 0, totalCents: 0 }, yesterday: { count: 0, totalCents: 0 },
+        last7days: { count: 0, totalCents: 0 }, thisMonth: { count: 0, totalCents: 0 }, allTime: { count: 0, totalCents: 0 },
+      },
+      visitors: { today: 0, yesterday: 0, last7days: 0, last30days: 0, newToday: 0, newYesterday: 0 },
+      viewLayout: {
+        today: { mobile: 0, desktop: 0 }, yesterday: { mobile: 0, desktop: 0 },
+        last7days: { mobile: 0, desktop: 0 }, last30days: { mobile: 0, desktop: 0 },
+      },
+      gamesPlayed: { userGamesToday: 0, userGamesYesterday: 0, guestTrialGamesToday: 0, guestTrialGamesYesterday: 0 },
+    },
+  }
+}
+
+/** Извлича числото от "общо"/"днес"/"вчера" summary картата (Admin -> Информация) по data-admin-registered-profiles-open="<period>" маркера — вторият <span> в button блока е числото (първият е label текста). */
+function extractAdminStatsCount(html: string, period: 'all' | 'today' | 'yesterday'): number | null {
+  const marker = `data-admin-registered-profiles-open="${period}"`
+  const startIdx = html.indexOf(marker)
+  if (startIdx === -1) return null
+  const endIdx = html.indexOf('</button>', startIdx)
+  const block = endIdx === -1 ? html.slice(startIdx) : html.slice(startIdx, endIdx)
+  const spanMatches = [...block.matchAll(/<span[^>]*>([^<]*)<\/span>/g)]
+  const lastSpanText = spanMatches[spanMatches.length - 1]?.[1] ?? null
+  if (lastSpanText === null) return null
+  const cleaned = lastSpanText.replace(/[^\d]/g, '')
+  return cleaned.length > 0 ? Number(cleaned) : null
+}
+
 const TARGET_PROFILE_ID = 'target-profile-001'
 const TARGET_USERNAME = 'TargetPlayer'
 const TARGET_MESSAGE_ID = 'support-msg-001'
@@ -799,6 +869,231 @@ await asyncCheck(
 
     assert(!root.hasSupportDeletePendingNotice(), 'pending:false не биваше да покаже pending notice')
     assert(!root.isSupportDeleteConfirmOpen(), 'support confirm модалът трябваше да се затвори при pending:false (immediate success, съществуващо поведение)')
+  },
+)
+
+await asyncCheck(
+  '[Stats-A] immediate delete + Admin Information активен -> summary loader се извиква повторно, counters се обновяват от backend',
+  async () => {
+    const root = new FakeRoot()
+    const { createdPopupHosts } = installFakeBrowser('/admin/info')
+    let statsLoadCount = 0
+    const controller = createLobbyFlowController({
+      root: root as unknown as HTMLElement,
+      joinMatchmaking: () => {}, leaveMatchmaking: () => {}, onMatchFound: () => {},
+      getAuthSession: () => makeAdminSession(),
+      onAdminStatsLoad: async () => {
+        statsLoadCount++
+        return statsLoadCount === 1 ? makeAdminStatsStub(4, 1, 0) : makeAdminStatsStub(3, 0, 0)
+      },
+      onAdminRegisteredProfilesLoad: async (period) => ({ ok: true, rows: period === 'today' ? [makeRow(TARGET_PROFILE_ID, TARGET_USERNAME)] : [] }),
+      onProfileByIdLoad: async (profileId) => ({ ok: true, profile: makeTargetProfile(profileId, TARGET_USERNAME) }),
+      onAdminHardDeleteProfile: async () => ({ ok: true, pending: false }),
+    })
+
+    const popupHost = await openDeletePopupViaRegisteredProfilesRow(root, createdPopupHosts, controller)
+    assert(statsLoadCount === 1, `expected exactly 1 initial admin-info stats load, got ${statsLoadCount}`)
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 4, 'initial total трябваше да е 4')
+    assert(extractAdminStatsCount(root.innerHTML, 'today') === 1, 'initial today трябваше да е 1')
+
+    popupHost.setReasonValue('нарушение на правилата')
+    popupHost.submitDeleteForm()
+    await flush()
+
+    assert(
+      statsLoadCount === 2,
+      `очаквах summary loader-ът (onAdminStatsLoad) да се извика повторно след successful immediate delete, но е извикан ${statsLoadCount} пъти`,
+    )
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 3, 'total трябваше да се обнови до 3 след delete (root cause на follow-up report-а)')
+    assert(extractAdminStatsCount(root.innerHTML, 'today') === 0, 'today трябваше да се обнови до 0 след delete')
+  },
+)
+
+await asyncCheck(
+  '[Stats-B] pending:true -> summary counters НЕ се намаляват преждевременно (backend продължава да връща непроменени стойности, профилът все още съществува)',
+  async () => {
+    const root = new FakeRoot()
+    const { createdPopupHosts } = installFakeBrowser('/admin/info')
+    let statsLoadCount = 0
+    const controller = createLobbyFlowController({
+      root: root as unknown as HTMLElement,
+      joinMatchmaking: () => {}, leaveMatchmaking: () => {}, onMatchFound: () => {},
+      getAuthSession: () => makeAdminSession(),
+      onAdminStatsLoad: async () => {
+        statsLoadCount++
+        // Target профилът е в активна игра — DELETE FROM profiles е
+        // отложен, значи backend-ът легитимно продължава да връща СЪЩИТЕ
+        // числа и на втория (post-submit) reload.
+        return makeAdminStatsStub(4, 1, 0)
+      },
+      onAdminRegisteredProfilesLoad: async (period) => ({ ok: true, rows: period === 'today' ? [makeRow(TARGET_PROFILE_ID, TARGET_USERNAME)] : [] }),
+      onProfileByIdLoad: async (profileId) => ({ ok: true, profile: makeTargetProfile(profileId, TARGET_USERNAME) }),
+      onAdminHardDeleteProfile: async () => ({ ok: true, pending: true, message: 'Профилът ще бъде изтрит след края на текущата игра.' }),
+    })
+
+    const popupHost = await openDeletePopupViaRegisteredProfilesRow(root, createdPopupHosts, controller)
+    assert(statsLoadCount === 1, `expected exactly 1 initial admin-info stats load, got ${statsLoadCount}`)
+
+    popupHost.setReasonValue('нарушение на правилата')
+    popupHost.submitDeleteForm()
+    await flush()
+
+    // Reload СЕ извиква (никакъв optimistic local decrement, винаги re-fetch
+    // от authoritative backend) — но самите числа остават непроменени,
+    // защото профилът физически все още съществува.
+    assert(
+      statsLoadCount === 2,
+      `pending:true все пак трябва да re-fetch-не summary-то (backend е authoritative source of truth), получени извиквания: ${statsLoadCount}`,
+    )
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 4, 'pending:true НЕ трябва да намали total — профилът все още съществува')
+    assert(extractAdminStatsCount(root.innerHTML, 'today') === 1, 'pending:true НЕ трябва да намали today — профилът все още съществува')
+  },
+)
+
+await asyncCheck(
+  '[Stats-C] deferred final delete (без live push event до admin сесията) — повторно влизане в Admin Information зарежда пресни counters (fallback safety net)',
+  async () => {
+    const root = new FakeRoot()
+    installFakeBrowser('/admin/info')
+    let statsLoadCount = 0
+    const controller = createLobbyFlowController({
+      root: root as unknown as HTMLElement,
+      joinMatchmaking: () => {}, leaveMatchmaking: () => {}, onMatchFound: () => {},
+      getAuthSession: () => makeAdminSession(),
+      onAdminStatsLoad: async () => {
+        statsLoadCount++
+        // 1-во влизане: target профилът все още играе (pending). 2-ро
+        // влизане: СЛЕД match-end hook-а (applyPendingModerationForRoomParticipants
+        // в index.ts), target вече физически изтрит — точно както
+        // production QA доклада описва ("leave + re-enter коригира
+        // числата").
+        return statsLoadCount === 1 ? makeAdminStatsStub(4, 1, 0) : makeAdminStatsStub(3, 0, 0)
+      },
+    })
+
+    controller.setConnected(true)
+    controller.navigateAdminInfo()
+    await flush(2)
+    assert(statsLoadCount === 1, `expected 1 initial load, got ${statsLoadCount}`)
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 4, 'първото влизане трябваше да покаже total=4')
+
+    // ВТОРИ follow-up round: сега вече ИМА admin_aggregate_data_changed WS
+    // invalidation (виж WS-Invalidation-A/B/C тестовете по-долу) — това е
+    // ПЪРВИЧНИЯТ механизъм за deferred completion refresh. Тестът тук
+    // остава като regression coverage за FALLBACK пътеката (напр. admin-ът
+    // не е бил WS-свързан в момента на broadcast-а, или просто е
+    // навигирал away+back по собствена воля) — showAdminInfoPanel() е
+    // unconditional reload при всеки navigateAdminInfo() извикване,
+    // независимо дали admin-ът реално е напуснал екрана междувременно.
+    // Тук симулираме "повторно влизане" директно.
+    controller.navigateAdminInfo()
+    await flush(2)
+
+    assert(statsLoadCount === 2, `expected reload on re-entering Admin Information, got ${statsLoadCount} total loads`)
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 3, 'повторно влизане трябваше да покаже актуализирания total=3')
+    assert(extractAdminStatsCount(root.innerHTML, 'today') === 0, 'повторно влизане трябваше да покаже актуализирания today=0')
+  },
+)
+
+await asyncCheck(
+  '[WS-Invalidation-A] admin_aggregate_data_changed + Admin Information активен -> stats loader се извиква, counters се обновяват от backend',
+  async () => {
+    const root = new FakeRoot()
+    installFakeBrowser('/admin/info')
+    let statsLoadCount = 0
+    const controller = createLobbyFlowController({
+      root: root as unknown as HTMLElement,
+      joinMatchmaking: () => {}, leaveMatchmaking: () => {}, onMatchFound: () => {},
+      getAuthSession: () => makeAdminSession(),
+      onAdminStatsLoad: async () => {
+        statsLoadCount++
+        return statsLoadCount === 1 ? makeAdminStatsStub(4, 1, 0) : makeAdminStatsStub(3, 0, 0)
+      },
+    })
+
+    controller.setConnected(true)
+    controller.navigateAdminInfo()
+    await flush(2)
+    assert(statsLoadCount === 1, `expected 1 initial load, got ${statsLoadCount}`)
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 4, 'initial total трябваше да е 4')
+
+    // Симулира deferred final-delete invalidation, получена по WS — точно
+    // каквото сървърът изпраща (broadcastAdminAggregateDataChangedToAdminConnections
+    // в index.ts) след успешен applyPendingModerationForRoomParticipants ->
+    // hardDeleteProfile() COMMIT.
+    controller.handleServerMessage({ type: 'admin_aggregate_data_changed' })
+    await flush(2)
+
+    assert(statsLoadCount === 2, `expected reload след admin_aggregate_data_changed, got ${statsLoadCount} total loads`)
+    assert(extractAdminStatsCount(root.innerHTML, 'all') === 3, 'total трябваше да се обнови до 3 след WS invalidation')
+    assert(extractAdminStatsCount(root.innerHTML, 'today') === 0, 'today трябваше да се обнови до 0 след WS invalidation')
+  },
+)
+
+await asyncCheck(
+  '[WS-Invalidation-B] admin_aggregate_data_changed + Registered Profiles модал отворен -> reload, target редът изчезва',
+  async () => {
+    const root = new FakeRoot()
+    installFakeBrowser('/admin/info')
+    let registeredProfilesLoadCount = 0
+    const controller = createLobbyFlowController({
+      root: root as unknown as HTMLElement,
+      joinMatchmaking: () => {}, leaveMatchmaking: () => {}, onMatchFound: () => {},
+      getAuthSession: () => makeAdminSession(),
+      onAdminStatsLoad: async () => ADMIN_STATS_STUB,
+      onAdminRegisteredProfilesLoad: async (period) => {
+        registeredProfilesLoadCount++
+        if (period !== 'today') return { ok: true, rows: [] }
+        // Профилът е бил там при първото зареждане (target-ът все още играеше
+        // — pending); след deferred final delete вече не е.
+        return { ok: true, rows: registeredProfilesLoadCount === 1 ? [makeRow(TARGET_PROFILE_ID, TARGET_USERNAME)] : [] }
+      },
+    })
+
+    controller.setConnected(true)
+    controller.navigateAdminInfo()
+    await flush(2)
+    root.clickOpenPeriod('today')
+    await flush(2)
+    assert(root.innerHTML.includes(TARGET_USERNAME), 'target редът трябваше да се вижда преди invalidation-а')
+    const loadCountBefore = registeredProfilesLoadCount
+
+    controller.handleServerMessage({ type: 'admin_aggregate_data_changed' })
+    await flush(2)
+
+    assert(
+      registeredProfilesLoadCount > loadCountBefore,
+      `очаквах reload на Registered Profiles модала след admin_aggregate_data_changed (преди=${loadCountBefore}, след=${registeredProfilesLoadCount})`,
+    )
+    assert(!root.innerHTML.includes(TARGET_USERNAME), 'target редът трябваше да изчезне след reload (deferred final delete invalidation)')
+  },
+)
+
+await asyncCheck(
+  '[WS-Invalidation-C] admin_aggregate_data_changed, докато admin-ът НЕ е на Admin Information И модалът не е отворен -> без ненужни fetch-ове',
+  async () => {
+    const root = new FakeRoot()
+    installFakeBrowser('/lobby')
+    let statsLoadCount = 0
+    let registeredProfilesLoadCount = 0
+    const controller = createLobbyFlowController({
+      root: root as unknown as HTMLElement,
+      joinMatchmaking: () => {}, leaveMatchmaking: () => {}, onMatchFound: () => {},
+      getAuthSession: () => makeAdminSession(),
+      onAdminStatsLoad: async () => { statsLoadCount++; return ADMIN_STATS_STUB },
+      onAdminRegisteredProfilesLoad: async () => { registeredProfilesLoadCount++; return { ok: true, rows: [] } },
+    })
+
+    controller.setConnected(true)
+    await flush(2)
+    // Admin-ът не е навигирал към admin-info изобщо — currentScreen е
+    // default (lobby), adminRegisteredProfilesModal е null.
+
+    controller.handleServerMessage({ type: 'admin_aggregate_data_changed' })
+    await flush(3)
+
+    assert(statsLoadCount === 0, `не очаквах onAdminStatsLoad извиквания, докато admin-ът не е на екрана, получени: ${statsLoadCount}`)
+    assert(registeredProfilesLoadCount === 0, `не очаквах onAdminRegisteredProfilesLoad извиквания, докато модалът не е отворен, получени: ${registeredProfilesLoadCount}`)
   },
 )
 

@@ -6995,7 +6995,10 @@ export function createLobbyFlowController(
       // Списъкът legitimately може да продължи да показва профила (той
       // все още съществува) — refresh-ваме въпреки това за консистентност
       // (напр. ако друг admin паралелно го е banнал/изтрил междувременно).
-      refreshAdminRegisteredProfilesListIfOpen()
+      // Admin Information summary counters (follow-up production report) —
+      // safe да се refresh-не и за pending: сървърът ще върне непроменени
+      // числа, защото профилът реално още съществува.
+      refreshAdminAggregatesAfterHardDelete()
       renderPopupOnly()
       return
     }
@@ -7041,8 +7044,10 @@ export function createLobbyFlowController(
     // "Регистрирани профили — Днес/Вчера/Всички" модалът, ако е отворен,
     // никога не се презареждаше автоматично след успешен delete — редът
     // оставаше визуално видим до ръчно затваряне/отваряне. За immediate
-    // delete (тук) редът трябва да изчезне след този reload.
-    refreshAdminRegisteredProfilesListIfOpen()
+    // delete (тук) редът трябва да изчезне след този reload. Плюс Admin
+    // Information summary counters (follow-up production report) — виж
+    // refreshAdminStatsIfActive doc коментара.
+    refreshAdminAggregatesAfterHardDelete()
 
     renderPopupOnly()
   }
@@ -7067,6 +7072,66 @@ export function createLobbyFlowController(
     const modal = state.adminRegisteredProfilesModal
     if (!modal || !modal.isOpen) return
     void loadAdminRegisteredProfilesPage(modal.period, modal.page)
+  }
+
+  /**
+   * Admin Information summary counters refresh fix (follow-up production
+   * report) — "Общо"/"Днес"/"Вчера" картите в Admin -> Информация
+   * (state.adminStats) се зареждат ЕДИНСТВЕНО от showAdminInfoPanel() при
+   * ВХОД в екрана (navigateAdminInfo) — до тази функция нищо друго не ги
+   * презареждаше, затова оставаха stale след successful hard delete,
+   * докато admin-ът остане на екрана (потвърдено от production QA:
+   * "Общо: 4, Днес: 1" продължаваше да се показва, въпреки че профилът
+   * вече бе изтрит; leave+re-enter на екрана коригираше числата, защото
+   * showAdminInfoPanel() отново се изпълнява при всеки нов вход).
+   *
+   * Reuse-ва СЪЩИЯ options.onAdminStatsLoad като showAdminInfoPanel —
+   * никаква дублирана API логика. НЕ прави optimistic local decrement —
+   * винаги re-fetch-ва authoritative стойност от сървъра; за pending:true
+   * (target все още в активна игра) сървърът легитимно ще върне
+   * непроменени числа, защото профилът реално още съществува — safe да се
+   * вика безусловно И за pending, И за immediate.
+   *
+   * Guard-нато на state.currentScreen==='admin-info' (не state.adminStats
+   * !== null) — тази функция НЕ прави screen-entry side effects (за
+   * разлика от showAdminInfoPanel-овите leaveAdminServerIfActive/
+   * isSearching reset/onAdminInfoFamilyScreenEnter), затова не бива да се
+   * вика безусловно само защото adminStats е бил зареден по-рано, докато
+   * admin-ът вече е нанякъде другаде — reload-ва само ако summary екранът
+   * реално Е показан В МОМЕНТА. Late-arriving response staleness guard-нат
+   * симетрично (проверка на currentScreen и след await-а).
+   *
+   * Refresh failure тук НАРОЧНО не пипа adminStatsErrorText — за разлика
+   * от Registered Profiles модала (грешка там е scoped само до самия
+   * модал), adminStatsErrorText replace-ва ЦЕЛИЯ card view с error текст
+   * (виж renderLobbyScreen.ts) — background refresh failure тук просто
+   * оставя старите (леко stale) числа видими, вместо да ги замени с
+   * error state, който би бил much по-лош UX от простата staleness.
+   */
+  function refreshAdminStatsIfActive(): void {
+    if (state.currentScreen !== 'admin-info') return
+    const loadStats = options.onAdminStatsLoad
+    if (!loadStats) return
+    void (async () => {
+      const result = await loadStats()
+      if (state.currentScreen !== 'admin-info') return
+      if (result.ok) {
+        state.adminStats = result.stats
+      }
+      render()
+    })()
+  }
+
+  /**
+   * Двата admin hard-delete aggregate refresh-а (Registered Profiles
+   * drilldown + Admin Information summary), извиквани заедно от двата
+   * hard-delete entry point-а (submitAdminHardDelete,
+   * submitAdminSupportDeleteProfile), И в pending, И в immediate клона —
+   * виж individual doc коментарите на двете функции по-горе.
+   */
+  function refreshAdminAggregatesAfterHardDelete(): void {
+    refreshAdminRegisteredProfilesListIfOpen()
+    refreshAdminStatsIfActive()
   }
 
   /**
@@ -7124,7 +7189,7 @@ export function createLobbyFlowController(
       state.adminSupportDeleteProfileErrorText = null
       state.adminSupportDeleteProfilePendingNotice =
         result.message ?? 'Профилът е маркиран за изтриване и ще бъде изтрит автоматично след края на текущата игра.'
-      refreshAdminRegisteredProfilesListIfOpen()
+      refreshAdminAggregatesAfterHardDelete()
       render()
       return
     }
@@ -7170,8 +7235,9 @@ export function createLobbyFlowController(
 
     // Admin hard-delete UX/reliability fix (production report) — mirror на
     // submitAdminHardDelete: ако "Регистрирани профили" модалът е отворен,
-    // редът трябва да изчезне след immediate delete оттук също.
-    refreshAdminRegisteredProfilesListIfOpen()
+    // редът трябва да изчезне след immediate delete оттук също. Плюс Admin
+    // Information summary counters (follow-up production report).
+    refreshAdminAggregatesAfterHardDelete()
 
     render()
   }
@@ -16502,6 +16568,19 @@ export function createLobbyFlowController(
       } else {
         render()
       }
+      return true
+    }
+
+    if (message.type === 'admin_aggregate_data_changed') {
+      // Admin Information/Registered Profiles aggregate refresh fix
+      // (production follow-up report) — reuse-ва СЪЩАТА функция като
+      // admin-initiated hard delete (submitAdminHardDelete/
+      // submitAdminSupportDeleteProfile) — тя вече е no-op, ако admin-ът не
+      // е на Admin Information екрана И Registered Profiles модалът не е
+      // отворен (виж refreshAdminStatsIfActive/
+      // refreshAdminRegisteredProfilesListIfOpen doc коментарите), затова
+      // тук няма нужда от допълнителен screen/modal check.
+      refreshAdminAggregatesAfterHardDelete()
       return true
     }
 

@@ -2401,6 +2401,7 @@ export type ServerMessage =
   | AdCampaignManagementCreatedMessage
   | AdCampaignManagementDispatchedMessage
   | AdCampaignManagementDeletedMessage
+  | AdminAggregateDataChangedMessage
 
 // --- "Рекламни кампании" (ad campaigns) — delivery push + management realtime sync ---
 
@@ -2453,6 +2454,19 @@ export type AdCampaignManagementDispatchedMessage = {
 export type AdCampaignManagementDeletedMessage = {
   type: 'ad_campaign_management_deleted'
   campaignId: string
+}
+
+/**
+ * Admin Information/Registered Profiles aggregate refresh fix (production
+ * follow-up report) — минимален INVALIDATION сигнал, БЕЗ payload данни
+ * (backend остава единствен source of truth), изпратен от сървъра
+ * (broadcastAdminAggregateDataChangedToAdminConnections в index.ts) към
+ * admin/subadmin WS connections ЕДИНСТВЕНО СЛЕД реално успешен hard-delete
+ * COMMIT (immediate ИЛИ deferred match-end completion) — никога при
+ * pending:true. Виж handleServerMessage в createLobbyFlowController.ts.
+ */
+export type AdminAggregateDataChangedMessage = {
+  type: 'admin_aggregate_data_changed'
 }
 
 type CreateGameServerClientOptions = {

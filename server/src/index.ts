@@ -5181,6 +5181,50 @@ function deleteProfileConnections(profileId: string, reason: string): void {
   closeAllProfileConnections(profileId, { type: 'session_deleted', reason })
 }
 
+/**
+ * Admin Information/Registered Profiles aggregate refresh fix (production
+ * follow-up report) — минимален INVALIDATION сигнал (без payload данни,
+ * backend остава единствен source of truth) към admin/subadmin WS
+ * connections, изпратен ЕДИНСТВЕНО СЛЕД реално успешен hard-delete COMMIT
+ * (виж двата call site-а: handleAdminProfileHardDeleteRequest-овия
+ * immediate клон и applyPendingModerationForRoomParticipants-овия deferred
+ * completion клон) — НИКОГА при pending:true (профилът все още съществува
+ * тогава, нищо не е "invalidated"). Клиентският handler (createLobbyFlow
+ * Controller.ts's handleServerMessage) просто reuse-ва вече съществуващия
+ * refreshAdminAggregatesAfterHardDelete() — самият той вече е no-op, ако
+ * admin-ът не е на Admin Information екрана/Registered Profiles модала
+ * (виж неговия doc коментар), затова broadcast-ът тук е безопасно "wide"
+ * (не се опитва server-side да гадае кой точно гледа какво).
+ *
+ * excludeSessionId — само за immediate (HTTP-driven) клона: admin-ът,
+ * който тъкмо е направил DELETE заявката, вече получи synchronous local
+ * refresh directно от своя собствен HTTP response (виж submitAdminHardDelete/
+ * submitAdminSupportDeleteProfile в контролера) — изключваме ТОЧНО тази
+ * WS сесия (ServerConnection.sessionId, не profileId — един admin може да
+ * има НЯКОЛКО едновременни таба/сесии, виж serverTypes.ts коментара; само
+ * табът, който реално е submit-нал заявката, трябва да се excludeне,
+ * другите табове на СЪЩИЯ admin си остават валидни получатели), за да не
+ * получи излишен втори fetch. null за deferred completion-а — там няма
+ * "текуща HTTP сесия" за изключване (admin-ът, поискал delete-а, може вече
+ * да не е свързан, или да се е reconnect-нал с нова сесия), а и няма
+ * едновременен local refresh, с който да се дублира.
+ *
+ * Iteration/role check pattern reuse-нат от subscribe_ad_campaign_management
+ * handler-а (WS onmessage по-долу) — authStore.getAccountRoleForProfile per
+ * connection, без нов dedicated subscriber Set (за разлика от ad campaign
+ * management events, тук няма нужда от explicit subscribe/unsubscribe —
+ * клиентският guard вече върши същата работа locally).
+ */
+function broadcastAdminAggregateDataChangedToAdminConnections(excludeSessionId: string | null): void {
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.profileId === null) continue
+    if (excludeSessionId !== null && conn.sessionId === excludeSessionId) continue
+    const role = authStore.getAccountRoleForProfile(conn.profileId)
+    if (role !== 'admin' && role !== 'subadmin') continue
+    safeSendToConnection(conn.id, { type: 'admin_aggregate_data_changed' })
+  }
+}
+
 function closeAllProfileConnections(
   profileId: string,
   message:
@@ -5286,6 +5330,15 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
         console.log(
           `[admin-profile-delete] mode=deferred-committed targetProfileId=${participantProfileId} at=${new Date().toISOString()}`,
         )
+        // Admin Information/Registered Profiles aggregate refresh fix — тук
+        // е ЕДИНСТВЕНИЯТ hook, който сигнализира завършването на deferred
+        // delete-а: admin-ът, поискал го, е бил на друг HTTP request отдавна
+        // (виж handleAdminProfileHardDeleteRequest-овия pending клон) и
+        // няма никакъв друг client-side начин да научи, че мачът е
+        // приключил и delete-ът реално се е случил. excludeSessionId=null —
+        // няма "текуща заявка" за изключване тук, и няма едновременен local
+        // refresh, с който да се дублира.
+        broadcastAdminAggregateDataChangedToAdminConnections(null)
         deleteProfileConnections(participantProfileId, pending.reason)
       } else {
         console.error(
@@ -8808,6 +8861,14 @@ async function handleAdminProfileHardDeleteRequest(
   console.log(
     `[admin-profile-delete] mode=committed targetProfileId=${targetProfileId} at=${new Date().toISOString()}`,
   )
+
+  // Admin Information/Registered Profiles aggregate refresh fix — WS
+  // invalidation към ДРУГИ admin/subadmin connections (виж
+  // broadcastAdminAggregateDataChangedToAdminConnections doc коментара);
+  // excludeSessionId=session.sessionId, за да не получи ТОЗИ таб излишен
+  // втори fetch (вече получава synchronous local refresh от своя HTTP
+  // response).
+  broadcastAdminAggregateDataChangedToAdminConnections(session.sessionId)
 
   // Session revocation — за разлика от BAN (профилът/акаунтът продължават да
   // съществуват, затова трябва explicit revokeAllSessionsForProfile), тук
