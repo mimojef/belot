@@ -4229,11 +4229,27 @@ async function adminUnbanProfile(
   }
 }
 
+/**
+ * Admin hard-delete UX/reliability fix (production report) — server-ът
+ * връща { ok:true, pending:true|false, message? } (виж
+ * handleAdminProfileHardDeleteRequest в index.ts): pending:true означава, че
+ * target профилът в момента е реален участник в играеща се стая и
+ * физическото DELETE FROM profiles е ОТЛОЖЕНО до края на текущия мач (виж
+ * applyPendingModerationForRoomParticipants) — профилът СЪЩЕСТВУВА все още.
+ * Преди този fix `pending` се четеше от response тялото, но НИКОГА не се
+ * връщаше нагоре — { ok:true } изглеждаше идентично за "изтрит вече" И за
+ * "ще бъде изтрит по-късно", което правеше admin hard-delete flow-а
+ * intermittently подвеждащ (виж production report §HIGH). `pending`/`message`
+ * тук са directно каквото сървърът е върнал — не се "измислят" клиентски.
+ */
 async function adminHardDeleteProfile(
   targetProfileId: string,
   reason: string,
   supportRequestMessageId?: string | null,
-): Promise<{ ok: true } | { ok: false; message: string; code?: string }> {
+): Promise<
+  | { ok: true; pending: boolean; message?: string }
+  | { ok: false; message: string; code?: string }
+> {
   try {
     const response = await fetch(
       `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(targetProfileId)}`,
@@ -4246,11 +4262,16 @@ async function adminHardDeleteProfile(
         ),
       },
     )
-    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; code?: string }
+    const data = (await response.json().catch(() => ({}))) as {
+      ok?: boolean
+      pending?: boolean
+      message?: string
+      code?: string
+    }
     if (!response.ok || !data.ok) {
       return { ok: false, message: data.message ?? 'Профилът не беше изтрит.', code: data.code }
     }
-    return { ok: true }
+    return { ok: true, pending: data.pending === true, message: data.message }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }

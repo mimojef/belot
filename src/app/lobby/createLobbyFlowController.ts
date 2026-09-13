@@ -408,12 +408,24 @@ export type CreateLobbyFlowControllerOptions = {
    * authoritative и re-validate-ва вътре в hard-delete транзакцията, виж
    * profileHardDeleteService.ts. Ако провалено — код
    * 'invalid_support_request_message', delete-ът НЕ се изпълнява.
+   *
+   * pending (admin hard-delete UX/reliability fix, production report) —
+   * true, ако target профилът в момента е реален участник в играеща се
+   * стая: физическото изтриване е ОТЛОЖЕНО до края на мача
+   * (applyPendingModerationForRoomParticipants в index.ts), профилът все
+   * още СЪЩЕСТВУВА. submitAdminHardDelete по-долу трябва explicit да
+   * различава pending от immediate — преди fix-а тази разлика се губеше на
+   * network layer-а (main.ts) и admin-ът виждаше идентично "успешно"
+   * поведение за двата случая.
    */
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
     supportRequestMessageId?: string | null,
-  ) => Promise<{ ok: true } | { ok: false; message: string; code?: string }>
+  ) => Promise<
+    | { ok: true; pending: boolean; message?: string }
+    | { ok: false; message: string; code?: string }
+  >
   onChangePasswordSubmit?: (currentPassword: string, newPassword: string) => Promise<string | null>
   onPlayersLoad?: (
     page: number,
@@ -1502,6 +1514,19 @@ type InternalLobbyFlowState = {
    * profiles) НИКОГА не го задава — остава null, archive не се създава.
    */
   deletePopupSupportRequestMessageId: string | null
+  /**
+   * Admin hard-delete UX/reliability fix (production report) — ненулево
+   * ЕДИНСТВЕНО когато последният hard-delete отговор е бил pending:true
+   * (target профилът е в момента реален участник в играеща се стая,
+   * физическото изтриване е отложено до края на мача, виж
+   * applyPendingModerationForRoomParticipants). Съдържа server-ското
+   * message directно (не hardcoded дублиран текст) — submitAdminHardDelete
+   * НЕ затваря popup-а в този случай, само показва тази бележка и заключва
+   * submit бутона (виж renderDeletePopup), за да не изглежда операцията
+   * като завършена и за да не се спами повторен pending upsert. Reset-ва
+   * се на null при onDeleteOpen/onDeleteCancel (нов confirm cycle).
+   */
+  deletePopupPendingNotice: string | null
   /** "Свързани профили" секция в profile popup-а — само за viewerIsFullAdmin. Виж ensureProfilePopupRiskDetailLoaded. */
   riskDetailOpen: boolean
   riskDetailLoading: boolean
@@ -1856,6 +1881,16 @@ type InternalLobbyFlowState = {
   adminSupportDeleteProfileConfirm: { profileId: string; messageId: string } | null
   adminSupportDeleteProfileSubmitting: boolean
   adminSupportDeleteProfileErrorText: string | null
+  /**
+   * Admin hard-delete UX/reliability fix (production report) — mirror на
+   * deletePopupPendingNotice (generic profile-popup delete flow), но за
+   * support-chat-driven delete flow-а (submitAdminSupportDeleteProfile).
+   * Ненулево ЕДИНСТВЕНО когато последният submit е получил pending:true
+   * (target профилът е бил реален участник в играеща се стая, физическото
+   * изтриване е отложено до края на мача). Reset-ва се при
+   * onAdminSupportDeleteProfileClick/onAdminSupportDeleteProfileCancel.
+   */
+  adminSupportDeleteProfilePendingNotice: string | null
   adminSupportMobileConversationOpen: boolean
   adminGuestContactMessages: GuestContactMessageListItem[]
   adminGuestContactMessagesLoading: boolean
@@ -2194,6 +2229,7 @@ function createInitialState(): InternalLobbyFlowState {
     deletePopupSubmitting: false,
     deletePopupErrorText: null,
     deletePopupSupportRequestMessageId: null,
+    deletePopupPendingNotice: null,
     riskDetailOpen: false,
     riskDetailLoading: false,
     riskDetailRows: null,
@@ -2467,6 +2503,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminSupportDeleteProfileConfirm: null,
     adminSupportDeleteProfileSubmitting: false,
     adminSupportDeleteProfileErrorText: null,
+    adminSupportDeleteProfilePendingNotice: null,
     adminSupportMobileConversationOpen: false,
     adminGuestContactMessages: [],
     adminGuestContactMessagesLoading: false,
@@ -4123,6 +4160,7 @@ export function createLobbyFlowController(
       deletePopupReasonDraft: state.deletePopupReasonDraft,
       deletePopupSubmitting: state.deletePopupSubmitting,
       deletePopupErrorText: state.deletePopupErrorText,
+      deletePopupPendingNotice: state.deletePopupPendingNotice,
       riskDetailLoading: state.riskDetailLoading,
       riskDetailRows: state.riskDetailRows,
       riskDetailErrorText: state.riskDetailErrorText,
@@ -4357,6 +4395,7 @@ export function createLobbyFlowController(
       adminSupportDeleteProfileConfirm: state.adminSupportDeleteProfileConfirm,
       adminSupportDeleteProfileSubmitting: state.adminSupportDeleteProfileSubmitting,
       adminSupportDeleteProfileErrorText: state.adminSupportDeleteProfileErrorText,
+      adminSupportDeleteProfilePendingNotice: state.adminSupportDeleteProfilePendingNotice,
       adminSupportMobileConversationOpen: state.adminSupportMobileConversationOpen,
       adminGuestContactMessages: state.adminGuestContactMessages,
       adminGuestContactMessagesLoading: state.adminGuestContactMessagesLoading,
@@ -6053,12 +6092,14 @@ export function createLobbyFlowController(
         state.adminSupportDeleteProfileConfirm = { profileId, messageId }
         state.adminSupportDeleteProfileSubmitting = false
         state.adminSupportDeleteProfileErrorText = null
+        state.adminSupportDeleteProfilePendingNotice = null
         render()
       },
       onAdminSupportDeleteProfileCancel: () => {
         state.adminSupportDeleteProfileConfirm = null
         state.adminSupportDeleteProfileSubmitting = false
         state.adminSupportDeleteProfileErrorText = null
+        state.adminSupportDeleteProfilePendingNotice = null
         render()
       },
       onAdminSupportDeleteProfileConfirm: () => {
@@ -6891,6 +6932,17 @@ export function createLobbyFlowController(
   async function submitAdminHardDelete(profileId: string | null, rawReason: string): Promise<void> {
     if (state.deletePopupSubmitting) return
     if (!profileId) return
+    // Admin hard-delete UX/reliability fix (production report §HIGH) — ако
+    // вече имаме pending notice от предишен опит В РАМКИТЕ на този отворен
+    // popup, target-ът е бил (към момента на последния опит) реален
+    // участник в играеща се стая и физическото изтриване вече е насрочено
+    // server-side (idempotent upsert в pending_profile_moderation).
+    // Повторен submit тук би само презаписал СЪЩИЯ pending ред без никаква
+    // нова информация за admin-а — блокираме безсмисленото повторение
+    // (renderDeletePopup вече disable-ва submit бутона, докато notice-ът е
+    // активен, това е defense-in-depth). onDeleteOpen (нов confirm cycle)
+    // нулира notice-а, ако admin-ът иска да провери статуса отново.
+    if (state.deletePopupPendingNotice !== null) return
 
     const reason = rawReason.trim()
     if (reason.length === 0) {
@@ -6922,9 +6974,35 @@ export function createLobbyFlowController(
       return
     }
 
-    state.deletePopupOpen = false
     state.deletePopupSubmitting = false
+
+    // Admin hard-delete UX/reliability fix (production report §HIGH) —
+    // pending:true значи target-ът е бил реален участник в играеща се
+    // стая: физическото DELETE FROM profiles е ОТЛОЖЕНО до края на мача
+    // (index.ts's applyPendingModerationForRoomParticipants), профилът
+    // СЪЩЕСТВУВА все още. НЕ затваряме popup-а и НЕ третираме като
+    // завършено изтриване — преди fix-а точно тази разлика се губеше
+    // (main.ts's adminHardDeleteProfile връщаше само {ok:true} за двата
+    // случая) и admin-ът виждаше идентично "успешно" поведение независимо
+    // дали профилът реално е бил изтрит, или само насрочен. result.message
+    // идва directно от сървъра (handleAdminProfileHardDeleteRequest) —
+    // fallback текстът тук се ползва само ако message липсва по някаква
+    // причина.
+    if (result.pending === true) {
+      state.deletePopupErrorText = null
+      state.deletePopupPendingNotice =
+        result.message ?? 'Профилът е маркиран за изтриване и ще бъде изтрит автоматично след края на текущата игра.'
+      // Списъкът legitimately може да продължи да показва профила (той
+      // все още съществува) — refresh-ваме въпреки това за консистентност
+      // (напр. ако друг admin паралелно го е banнал/изтрил междувременно).
+      refreshAdminRegisteredProfilesListIfOpen()
+      renderPopupOnly()
+      return
+    }
+
+    state.deletePopupOpen = false
     state.deletePopupErrorText = null
+    state.deletePopupPendingNotice = null
     state.deletePopupSupportRequestMessageId = null
     state.profilePopupOpen = false
     state.profilePopupProfile = null
@@ -6959,7 +7037,36 @@ export function createLobbyFlowController(
     // коментара).
     void refreshSupportUnreadNow()
 
+    // Admin hard-delete UX/reliability fix (production report §MEDIUM) —
+    // "Регистрирани профили — Днес/Вчера/Всички" модалът, ако е отворен,
+    // никога не се презареждаше автоматично след успешен delete — редът
+    // оставаше визуално видим до ръчно затваряне/отваряне. За immediate
+    // delete (тук) редът трябва да изчезне след този reload.
+    refreshAdminRegisteredProfilesListIfOpen()
+
     renderPopupOnly()
+  }
+
+  /**
+   * Admin hard-delete UX/reliability fix (production report §4/§MEDIUM) —
+   * презарежда текущия период/страница на "Регистрирани профили" модала
+   * (ако е отворен) СЛЕД hard-delete заявка, независимо дали е била
+   * immediate или pending (за pending случая редът legitimately остава —
+   * профилът все още съществува, виж submitAdminHardDelete по-горе).
+   * Reuse-ва СЪЩИЯ loadAdminRegisteredProfilesPage като
+   * onAdminRegisteredProfilesOpen/onAdminRegisteredProfilesPageChange
+   * по-долу — никаква дублирана API логика. Fire-and-forget (void):
+   * loadAdminRegisteredProfilesPage вече си guard-ва own staleness (modal
+   * затворен/период сменен междувременно) и при грешка пише
+   * adminRegisteredProfilesModal.errorText вместо да throw-не — refresh
+   * failure тук НИКОГА не превръща вече успешния delete request в
+   * привиден failure, delete popup-ът/state-ът му вече е resolved
+   * независимо от изхода на този refresh.
+   */
+  function refreshAdminRegisteredProfilesListIfOpen(): void {
+    const modal = state.adminRegisteredProfilesModal
+    if (!modal || !modal.isOpen) return
+    void loadAdminRegisteredProfilesPage(modal.period, modal.page)
   }
 
   /**
@@ -6976,6 +7083,12 @@ export function createLobbyFlowController(
   async function submitAdminSupportDeleteProfile(): Promise<void> {
     const pending = state.adminSupportDeleteProfileConfirm
     if (!pending || state.adminSupportDeleteProfileSubmitting) return
+    // Admin hard-delete UX/reliability fix (production report) — mirror на
+    // СЪЩИЯ guard в submitAdminHardDelete: ако вече показваме pending
+    // notice от предишен опит, target-ът е бил в активна игра и delete-ът
+    // вече е насрочен server-side (idempotent upsert) — повторен submit не
+    // носи нова информация, submit бутонът е и без това disabled в UI.
+    if (state.adminSupportDeleteProfilePendingNotice !== null) return
 
     state.adminSupportDeleteProfileSubmitting = true
     state.adminSupportDeleteProfileErrorText = null
@@ -6996,9 +7109,29 @@ export function createLobbyFlowController(
       return
     }
 
-    state.adminSupportDeleteProfileConfirm = null
     state.adminSupportDeleteProfileSubmitting = false
+
+    // Admin hard-delete UX/reliability fix (production report) — mirror на
+    // СЪЩИЯ branch в submitAdminHardDelete: pending:true значи target-ът е
+    // бил реален участник в играеща се стая, физическото DELETE FROM
+    // profiles е ОТЛОЖЕНО до края на мача (index.ts's
+    // applyPendingModerationForRoomParticipants), профилът СЪЩЕСТВУВА все
+    // още. НЕ затваряме confirm modal-а, НЕ пипаме support conversation
+    // списъците (deletion-archive banner-ът стои само за реално изтрит
+    // профил — да ги refresh-нем тук би било подвеждащо, разговорът все
+    // още е нормален active/archived conversation, не deletion evidence).
+    if (result.pending === true) {
+      state.adminSupportDeleteProfileErrorText = null
+      state.adminSupportDeleteProfilePendingNotice =
+        result.message ?? 'Профилът е маркиран за изтриване и ще бъде изтрит автоматично след края на текущата игра.'
+      refreshAdminRegisteredProfilesListIfOpen()
+      render()
+      return
+    }
+
+    state.adminSupportDeleteProfileConfirm = null
     state.adminSupportDeleteProfileErrorText = null
+    state.adminSupportDeleteProfilePendingNotice = null
 
     // Разговорът в admin support inbox-а вече трябва да показва
     // deletion-archive banner-а (profiles редът вече не съществува) —
@@ -7034,6 +7167,11 @@ export function createLobbyFlowController(
     // Ghost-badge production fix — виж refreshSupportUnreadNow doc коментара
     // (submitAdminHardDelete-ото симетрично извикване по-горе).
     void refreshSupportUnreadNow()
+
+    // Admin hard-delete UX/reliability fix (production report) — mirror на
+    // submitAdminHardDelete: ако "Регистрирани профили" модалът е отворен,
+    // редът трябва да изчезне след immediate delete оттук също.
+    refreshAdminRegisteredProfilesListIfOpen()
 
     render()
   }
@@ -15616,6 +15754,12 @@ export function createLobbyFlowController(
         state.deletePopupOpen = true
         state.deletePopupReasonDraft = ''
         state.deletePopupErrorText = null
+        // Нов confirm cycle — предишен pending notice (друг профил или по-
+        // ранен опит за ТОЗИ профил) не трябва да "изтече" в новоотворения
+        // popup; ако target-ът реално все още е в активна игра, следващият
+        // submit ще получи пресен pending:true отговор и notice-ът ще се
+        // покаже отново (виж submitAdminHardDelete).
+        state.deletePopupPendingNotice = null
         // Нормален profile-popup delete flow (Players/admin search/
         // registered profiles бутон) — НЕ носи support-request атрибуция.
         // "Маркирай като заявка за изтриване" в support чата вече минава
@@ -15630,6 +15774,7 @@ export function createLobbyFlowController(
         state.deletePopupOpen = false
         state.deletePopupSubmitting = false
         state.deletePopupErrorText = null
+        state.deletePopupPendingNotice = null
         state.deletePopupSupportRequestMessageId = null
         renderPopupOnly()
       },
@@ -16287,6 +16432,7 @@ export function createLobbyFlowController(
         deletePopupReasonDraft: state.deletePopupReasonDraft,
         deletePopupSubmitting: state.deletePopupSubmitting,
         deletePopupErrorText: state.deletePopupErrorText,
+        deletePopupPendingNotice: state.deletePopupPendingNotice,
         riskDetailLoading: state.riskDetailLoading,
         riskDetailRows: state.riskDetailRows,
         riskDetailErrorText: state.riskDetailErrorText,

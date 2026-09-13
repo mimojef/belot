@@ -5266,6 +5266,14 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
     // handleAdminProfileHardDeleteRequest. Service-ът пак re-validate-ва
     // authoritative вътре в своята BEGIN IMMEDIATE транзакция — никаква
     // archive-insert логика не се дублира тук.
+    // Diagnostic logging (admin hard-delete UX/reliability fix, production
+    // report §H) — mode=deferred-start/deferred-committed, mirror на
+    // mode=immediate/committed в handleAdminProfileHardDeleteRequest, за да
+    // може реалният "кога match-end hook-ът реално е приложил отложения
+    // delete" да се провери от логовете, не само от manual/QA наблюдение.
+    console.log(
+      `[admin-profile-delete] mode=deferred-start targetProfileId=${pending.targetProfileId} at=${new Date().toISOString()}`,
+    )
     void profileHardDeleteService.hardDeleteProfile({
       targetProfileId: pending.targetProfileId,
       actorProfileId: pending.requestedByProfileId,
@@ -5275,6 +5283,9 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
     }).then((result) => {
       pendingProfileModerationStore.clearPending(participantProfileId)
       if (result.ok) {
+        console.log(
+          `[admin-profile-delete] mode=deferred-committed targetProfileId=${participantProfileId} at=${new Date().toISOString()}`,
+        )
         deleteProfileConnections(participantProfileId, pending.reason)
       } else {
         console.error(
@@ -8744,6 +8755,14 @@ async function handleAdminProfileHardDeleteRequest(
       reason,
       supportRequestMessageId,
     })
+    // Diagnostic logging (admin hard-delete UX/reliability fix, production
+    // report §H) — единствената следа server-side, че delete-ът е бил
+    // ЗАЯВЕН, но отложен; без нея intermittent "pending" случаи (target в
+    // активна игра) са недиагностируеми след факта. Само profileId-та —
+    // без email/IP/visitor_id/reason текст.
+    console.log(
+      `[admin-profile-delete] mode=pending targetProfileId=${targetProfileId} actorProfileId=${actorProfileId} at=${new Date().toISOString()}`,
+    )
     sendJsonResponse(res, 200, {
       ok: true,
       pending: true,
@@ -8751,6 +8770,10 @@ async function handleAdminProfileHardDeleteRequest(
     })
     return true
   }
+
+  console.log(
+    `[admin-profile-delete] mode=immediate targetProfileId=${targetProfileId} actorProfileId=${actorProfileId} at=${new Date().toISOString()}`,
+  )
 
   const result = await profileHardDeleteService.hardDeleteProfile({
     targetProfileId,
@@ -8761,6 +8784,9 @@ async function handleAdminProfileHardDeleteRequest(
   })
 
   if (!result.ok) {
+    console.error(
+      `[admin-profile-delete] mode=failed targetProfileId=${targetProfileId} code=${result.code} at=${new Date().toISOString()}`,
+    )
     const statusByCode: Record<typeof result.code, number> = {
       not_found: 404,
       self: 400,
@@ -8778,6 +8804,10 @@ async function handleAdminProfileHardDeleteRequest(
     sendJsonResponse(res, statusByCode[result.code], { ok: false, code: result.code, message: messageByCode[result.code] })
     return true
   }
+
+  console.log(
+    `[admin-profile-delete] mode=committed targetProfileId=${targetProfileId} at=${new Date().toISOString()}`,
+  )
 
   // Session revocation — за разлика от BAN (профилът/акаунтът продължават да
   // съществуват, затова трябва explicit revokeAllSessionsForProfile), тук

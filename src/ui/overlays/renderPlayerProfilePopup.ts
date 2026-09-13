@@ -102,6 +102,16 @@ export type RenderPlayerProfilePopupOptions = {
   deletePopupSubmitting?: boolean
   deletePopupErrorText?: string | null
   /**
+   * Admin hard-delete UX/reliability fix (production report) — ненулево
+   * ЕДИНСТВЕНО когато последният hard-delete отговор е бил pending:true
+   * (target профилът е бил реален участник в играеща се стая, физическото
+   * изтриване е отложено до края на мача — виж submitAdminHardDelete в
+   * createLobbyFlowController.ts). Показва се вместо/заедно с обичайното
+   * "Изтрий окончателно" поведение, за да не изглежда операцията като
+   * завършена.
+   */
+  deletePopupPendingNotice?: string | null
+  /**
    * "Свързани профили" admin секция — само viewerIsFullAdmin && !isOwnProfile.
    * riskDetailRows е null докато не е fetched (виж
    * ensureProfilePopupRiskDetailLoaded в createLobbyFlowController.ts) —
@@ -1603,8 +1613,24 @@ function renderDeletePopup(
   reasonDraft: string,
   submitting: boolean,
   errorText: string | null,
+  /**
+   * Admin hard-delete UX/reliability fix (production report) — non-null
+   * ЕДИНСТВЕНО когато последният submit е получил pending:true (target
+   * профилът е бил реален участник в играеща се стая, физическото
+   * изтриване е отложено до края на мача). Submit бутонът се заключва
+   * (отделно от submitting, за да "Отказ"/"Затвори" остане достъпен) и
+   * показваме server-ското съобщение directно — НИКАКВО UI тук не бива да
+   * изглежда като "готово, профилът е изтрит".
+   */
+  pendingNotice: string | null,
 ): string {
   if (!deletePopupOpen || !profileId) return ''
+
+  // Заключва само submit бутона (не Cancel/Close) — pending статусът е
+  // персистентен server-side до края на мача, за разлика от submitting
+  // (кратко in-flight състояние); admin-ът трябва винаги да може да
+  // затвори popup-а.
+  const isSubmitLocked = submitting || pendingNotice !== null
 
   return renderModerationPopupShell(`
     <div style="font-size:18px;font-weight:900;color:#f8fafc;margin-bottom:14px;">Изтриване на профил</div>
@@ -1637,6 +1663,7 @@ function renderDeletePopup(
         >${escapeHtml(reasonDraft)}</textarea>
       </label>
       ${errorText ? `<div data-player-profile-delete-error="1" style="font-size:12px;font-weight:800;color:#fca5a5;">${escapeHtml(errorText)}</div>` : ''}
+      ${pendingNotice ? `<div data-player-profile-delete-pending-notice="1" style="font-size:12px;font-weight:800;color:#fbbf24;line-height:1.5;padding:10px 12px;border-radius:8px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.08);">${escapeHtml(pendingNotice)}</div>` : ''}
       <div style="display:flex;gap:10px;margin-top:4px;">
         <button
           type="button"
@@ -1653,11 +1680,11 @@ function renderDeletePopup(
             font-weight:800;
             cursor:pointer;
           "
-        >Отказ</button>
+        >${pendingNotice ? 'Затвори' : 'Отказ'}</button>
         <button
           type="submit"
           data-player-profile-delete-submit="1"
-          ${submitting ? 'disabled' : ''}
+          ${isSubmitLocked ? 'disabled' : ''}
           style="
             flex:1;
             height:42px;
@@ -1667,10 +1694,10 @@ function renderDeletePopup(
             color:#fff1f2;
             font-size:14px;
             font-weight:900;
-            cursor:${submitting ? 'default' : 'pointer'};
-            opacity:${submitting ? '0.65' : '1'};
+            cursor:${isSubmitLocked ? 'default' : 'pointer'};
+            opacity:${isSubmitLocked ? '0.65' : '1'};
           "
-        >${submitting ? 'Изчакай…' : 'Изтрий окончателно'}</button>
+        >${submitting ? 'Изчакай…' : pendingNotice ? 'Насрочено за изтриване' : 'Изтрий окончателно'}</button>
       </div>
     </form>
   `)
@@ -1704,6 +1731,7 @@ function renderProfileContent(
   deletePopupReasonDraft: string,
   deletePopupSubmitting: boolean,
   deletePopupErrorText: string | null,
+  deletePopupPendingNotice: string | null,
   riskDetailLoading: boolean,
   riskDetailRows: AdminProfileLinkedProfileRow[] | null | undefined,
   riskDetailErrorText: string | null,
@@ -2159,7 +2187,7 @@ function renderProfileContent(
     </div>
     ${renderBanPopup(profile.profileId, displayName, banPopupOpen, banPopupDaysDraft, banPopupReasonDraft, banPopupSubmitting, banPopupErrorText)}
     ${renderUnbanConfirmPopup(profile.profileId, displayName, unbanConfirmOpen, unbanSubmitting)}
-    ${renderDeletePopup(profile.profileId, displayName, deletePopupOpen, deletePopupReasonDraft, deletePopupSubmitting, deletePopupErrorText)}
+    ${renderDeletePopup(profile.profileId, displayName, deletePopupOpen, deletePopupReasonDraft, deletePopupSubmitting, deletePopupErrorText, deletePopupPendingNotice)}
   `
 }
 
@@ -2203,6 +2231,7 @@ export function renderPlayerProfilePopup(
           options.deletePopupReasonDraft ?? '',
           options.deletePopupSubmitting ?? false,
           options.deletePopupErrorText ?? null,
+          options.deletePopupPendingNotice ?? null,
           options.riskDetailLoading ?? false,
           options.riskDetailRows ?? null,
           options.riskDetailErrorText ?? null,

@@ -542,6 +542,14 @@ export type LobbyScreenState = {
   deletePopupReasonDraft: string
   deletePopupSubmitting: boolean
   deletePopupErrorText: string | null
+  /**
+   * Admin hard-delete UX/reliability fix (production report) — ненулево
+   * ЕДИНСТВЕНО когато последният hard-delete отговор за отворения popup е
+   * бил pending:true (target профилът е бил реален участник в играеща се
+   * стая към момента на заявката, физическото изтриване е отложено до
+   * края на мача). Виж submitAdminHardDelete в createLobbyFlowController.ts.
+   */
+  deletePopupPendingNotice: string | null
   /** "Свързани профили" секция в profile popup-а — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
   riskDetailLoading: boolean
   riskDetailRows: import('../network/createGameServerClient').AdminProfileLinkedProfileRow[] | null
@@ -819,6 +827,8 @@ export type LobbyScreenState = {
   adminSupportDeleteProfileConfirm: { profileId: string; messageId: string } | null
   adminSupportDeleteProfileSubmitting: boolean
   adminSupportDeleteProfileErrorText: string | null
+  /** Admin hard-delete UX/reliability fix (production report) — mirror на deletePopupPendingNotice за support-chat-driven delete flow-а. Виж submitAdminSupportDeleteProfile в createLobbyFlowController.ts. */
+  adminSupportDeleteProfilePendingNotice: string | null
   adminSupportMobileConversationOpen: boolean
   adminGuestContactMessages: GuestContactMessageListItem[]
   adminGuestContactMessagesLoading: boolean
@@ -1752,6 +1762,7 @@ export function syncProfilePopup(
     deletePopupReasonDraft?: string
     deletePopupSubmitting?: boolean
     deletePopupErrorText?: string | null
+    deletePopupPendingNotice?: string | null
     riskDetailOpen?: boolean
     riskDetailLoading?: boolean
     riskDetailRows?: import('../../app/network/createGameServerClient').AdminProfileLinkedProfileRow[] | null
@@ -1815,6 +1826,7 @@ export function syncProfilePopup(
     deletePopupReasonDraft: popupState.deletePopupReasonDraft ?? '',
     deletePopupSubmitting: popupState.deletePopupSubmitting ?? false,
     deletePopupErrorText: popupState.deletePopupErrorText ?? null,
+    deletePopupPendingNotice: popupState.deletePopupPendingNotice ?? null,
     riskDetailOpen: popupState.riskDetailOpen ?? false,
     riskDetailLoading: popupState.riskDetailLoading ?? false,
     riskDetailRows: popupState.riskDetailRows ?? null,
@@ -9793,6 +9805,14 @@ function renderSupportDeleteProfileConfirmModal(state: LobbyScreenState): string
   if (!state.adminSupportDeleteProfileConfirm) return ''
 
   const submitting = state.adminSupportDeleteProfileSubmitting
+  // Admin hard-delete UX/reliability fix (production report) — mirror на
+  // renderDeletePopup-ия isSubmitLocked pattern: заключва само submit
+  // бутона (не Cancel), докато pending notice-ът е активен — target
+  // профилът е бил реален участник в играеща се стая, физическото
+  // изтриване е отложено до края на мача, admin-ът трябва винаги да може
+  // да затвори модала.
+  const pendingNotice = state.adminSupportDeleteProfilePendingNotice
+  const isSubmitLocked = submitting || pendingNotice !== null
   return `
     <div data-admin-support-delete-profile-confirm-backdrop="1" style="
       position:fixed;inset:0;z-index:12200;
@@ -9813,6 +9833,9 @@ function renderSupportDeleteProfileConfirmModal(state: LobbyScreenState): string
         ${state.adminSupportDeleteProfileErrorText ? `
           <div style="font-size:12px;font-weight:800;color:#fca5a5;margin-bottom:14px;">${escapeHtml(state.adminSupportDeleteProfileErrorText)}</div>
         ` : ''}
+        ${pendingNotice ? `
+          <div data-admin-support-delete-profile-pending-notice="1" style="font-size:12px;font-weight:800;color:#fbbf24;line-height:1.5;padding:10px 12px;margin-bottom:14px;border-radius:8px;border:1px solid rgba(251,191,36,0.35);background:rgba(251,191,36,0.08);">${escapeHtml(pendingNotice)}</div>
+        ` : ''}
         <div style="display:flex;gap:10px;">
           <button
             type="button"
@@ -9822,18 +9845,18 @@ function renderSupportDeleteProfileConfirmModal(state: LobbyScreenState): string
               flex:1;height:42px;border:1px solid rgba(255,255,255,0.16);border-radius:8px;
               background:#080808;color:#f8fafc;font-size:14px;font-weight:800;cursor:pointer;
             "
-          >Отказ</button>
+          >${pendingNotice ? 'Затвори' : 'Отказ'}</button>
           <button
             type="button"
             data-admin-support-delete-profile-confirm-submit="1"
-            ${submitting ? 'disabled' : ''}
+            ${isSubmitLocked ? 'disabled' : ''}
             style="
               flex:1;height:42px;border:0;border-radius:8px;
               background:linear-gradient(180deg, rgba(220,38,38,0.92) 0%, rgba(185,28,28,0.95) 100%);
-              color:#fff1f2;font-size:13px;font-weight:900;cursor:${submitting ? 'default' : 'pointer'};
-              opacity:${submitting ? '0.65' : '1'};
+              color:#fff1f2;font-size:13px;font-weight:900;cursor:${isSubmitLocked ? 'default' : 'pointer'};
+              opacity:${isSubmitLocked ? '0.65' : '1'};
             "
-          >${submitting ? 'Изчакай…' : 'Изтрий профила и архивирай разговора'}</button>
+          >${submitting ? 'Изчакай…' : pendingNotice ? 'Насрочено за изтриване' : 'Изтрий профила и архивирай разговора'}</button>
         </div>
       </div>
     </div>
@@ -14945,6 +14968,7 @@ export function renderLobbyScreen(
       deletePopupReasonDraft: state.deletePopupReasonDraft,
       deletePopupSubmitting: state.deletePopupSubmitting,
       deletePopupErrorText: state.deletePopupErrorText,
+      deletePopupPendingNotice: state.deletePopupPendingNotice,
       riskDetailLoading: state.riskDetailLoading,
       riskDetailRows: state.riskDetailRows,
       riskDetailErrorText: state.riskDetailErrorText,
