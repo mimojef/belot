@@ -68,6 +68,34 @@ import { join, resolve } from 'node:path'
 const PASSWORD = 'BanDeleteSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
 
+/**
+ * Test isolation helper (registration anti-evasion gate follow-up — "IP +
+ * ACTIVE moderation" policy, виж checkRegistrationModerationGuard.ts) —
+ * всеки независим test scenario в този файл трябва да регистрира профилите
+ * си от СОБСТВЕН synthetic IP, иначе "IP linked to an active ban" policy-то
+ * (нарочно, production-approved поведение) би блокирало ВСЯКА следваща
+ * регистрация в останалата част от файла, веднага щом ЕДИН сценарий банне
+ * профил на споделения 127.0.0.1.
+ *
+ * Детерминиран, monotonically-increasing generator — reproducible между
+ * run-ове (същия ред register()/fetch извиквания -> същите IP-та), цикли
+ * през трите reserved TEST-NET range-а (RFC 5737: 192.0.2.0/24,
+ * 198.51.100.0/24, 203.0.113.0/24) вместо произволни public IP адреси.
+ * Всеки от 21-те register() call sites в този файл получава уникален IP по
+ * подразбиране — файлът няма нито един сценарий, който нарочно тества
+ * shared-IP поведение (това е обхватът на checkRegistrationModerationGuard.ts),
+ * затова "always unique" е безопасно тук без изключения.
+ */
+const TEST_NET_RANGES = ['203.0.113', '198.51.100', '192.0.2'] as const
+let syntheticIpCounter = 0
+function nextSyntheticTestIp(): string {
+  syntheticIpCounter += 1
+  const zeroBased = syntheticIpCounter - 1
+  const rangePrefix = TEST_NET_RANGES[Math.floor(zeroBased / 254) % TEST_NET_RANGES.length]!
+  const octet = (zeroBased % 254) + 1
+  return `${rangePrefix}.${octet}`
+}
+
 let passed = 0
 let failed = 0
 
@@ -245,8 +273,16 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
   const displayName = `BanSmoke${runId.replace(/[^0-9]/g, '').slice(-6)}${suffix}`
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male' }),
+    headers: {
+      'Content-Type': 'application/json',
+      // Test isolation — виж nextSyntheticTestIp doc коментара по-горе.
+      'X-Forwarded-For': nextSyntheticTestIp(),
+    },
+    // visitorId: authStore.ts::register() вече изисква valid UUID-формат
+    // visitor identity (registration anti-evasion gate, четвърти follow-up
+    // brief §2) — несвързано с ban/delete логиката, тествана тук, но
+    // задължително за да не хвърля 403 REGISTRATION_RESTRICTED.
+    body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male', visitorId: randomUUID() }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)
   const payload = await res.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
@@ -509,8 +545,8 @@ try {
   await check('[delete-flow] СЪЩИЯТ email може да се регистрира отново (освободен)', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: deleteTarget.email, password: PASSWORD, displayName: `${deleteTarget.displayName}Re`, gender: 'male' }),
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextSyntheticTestIp() },
+      body: JSON.stringify({ email: deleteTarget.email, password: PASSWORD, displayName: `${deleteTarget.displayName}Re`, gender: 'male', visitorId: randomUUID() }),
     })
     const b = await res.json() as { ok?: boolean; message?: string }
     if (res.status !== 200 || b.ok !== true) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
@@ -518,8 +554,8 @@ try {
   await check('[delete-flow] СЪЩОТО displayName/username може да се регистрира отново (освободено)', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: `ban-delete-smoke-${runId}-namereuse@example.test`, password: PASSWORD, displayName: deleteTarget.displayName, gender: 'male' }),
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextSyntheticTestIp() },
+      body: JSON.stringify({ email: `ban-delete-smoke-${runId}-namereuse@example.test`, password: PASSWORD, displayName: deleteTarget.displayName, gender: 'male', visitorId: randomUUID() }),
     })
     const b = await res.json() as { ok?: boolean; message?: string }
     if (res.status !== 200 || b.ok !== true) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
@@ -619,8 +655,8 @@ try {
   await check('[blocker-3] username/email на online-изтрития профил веднага освободени', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: onlineDeleteTarget.email, password: PASSWORD, displayName: `${onlineDeleteTarget.displayName}Re`, gender: 'male' }),
+      headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextSyntheticTestIp() },
+      body: JSON.stringify({ email: onlineDeleteTarget.email, password: PASSWORD, displayName: `${onlineDeleteTarget.displayName}Re`, gender: 'male', visitorId: randomUUID() }),
     })
     const b = await res.json() as { ok?: boolean; message?: string }
     if (res.status !== 200 || b.ok !== true) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
@@ -710,12 +746,22 @@ try {
   })
 
   const forensicDb = new DatabaseSync(isolated.databaseFile, { open: true })
+  // Семантичен filter — ТОЧНО по target профила И по test-а СОБСТВЕНИЯ,
+  // ръчно seed-нат visitorId (не global "всички редове за този profileId").
+  // Registration-guard's immediate visitor/profile binding (production
+  // security fix) вече ЛЕГИТИМНО добавя СВОЙ собствен site_visit_events ред
+  // при самата register() заявка на forensicDeleteTarget (различен,
+  // автоматично генериран visitor_id, синтетичен IP от nextSyntheticTestIp()) —
+  // filter-ът по anonymous_visitor_id = visitorId изолира точно тестовия
+  // сценарий от този допълнителен, коректен ред, вместо да разчита на
+  // "точно N реда общо" за целия profileId.
   const visitorSnapshotRows = forensicDb.prepare(`
     SELECT deleted_profile_id, anonymous_visitor_id, ip_address, first_seen_at, last_seen_at, event_count
     FROM admin_profile_deletion_visitor_snapshots
     WHERE deleted_profile_id = ?
+      AND anonymous_visitor_id = ?
     ORDER BY ip_address
-  `).all(forensicDeleteTarget.profileId) as Array<{
+  `).all(forensicDeleteTarget.profileId, visitorId) as Array<{
     deleted_profile_id: string
     anonymous_visitor_id: string
     ip_address: string | null

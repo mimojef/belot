@@ -33,6 +33,20 @@ export type ProfileBanStore = {
    * в profile_bans непокътната.
    */
   getActiveBan: (profileId: ProfileId) => ActiveProfileBan | null
+  /**
+   * Registration anti-evasion gate (hard-delete evasion fix) — активен бан
+   * за профил, който вече е БИЛ hard-deleted (profileHardDeleteService.ts),
+   * lookup-нат по deleted_profile_id_snapshot (виж 20260902_003 migration-а
+   * — snapshot-нат ПРЕДИ DELETE FROM profiles, живата profile_id колона
+   * вече е NULL за такъв ред). Same "активен" semantics като getActiveBan
+   * (lifted_at IS NULL И banned_until > CURRENT_TIMESTAMP) — reuse-ва
+   * idx_profile_bans_deleted_profile_snapshot индекса. Целта: hard-delete на
+   * АКТИВНО баннат профил не трябва тихо да освобождава device/IP anti-
+   * evasion сигнала за тази санкция — виж checkRegistrationModerationRestriction
+   * в index.ts. Връща null, ако профилът никога не е бил hard-deleted, или
+   * ако е бил, но банът му вече е lifted/expired.
+   */
+  getActiveBanForDeletedProfile: (deletedProfileId: ProfileId) => ActiveProfileBan | null
   banProfile: (input: {
     targetProfileId: ProfileId
     actorProfileId: ProfileId
@@ -108,6 +122,21 @@ export async function createProfileBanStore(databaseFilePath: string): Promise<P
       AND lifted_at IS NULL;
   `)
 
+  // Registration anti-evasion gate (hard-delete evasion fix) — виж
+  // getActiveBanForDeletedProfile doc коментара в ProfileBanStore типа
+  // по-горе. Reuse-ва idx_profile_bans_deleted_profile_snapshot (20260902_003
+  // migration) — profile_id колоната е вече NULL за hard-deleted профили,
+  // затова lookup-ът е по snapshot колоната, не по profile_id.
+  const selectActiveBanForDeletedProfileStatement = database.prepare(`
+    SELECT ban_id, banned_at, banned_until, reason, banned_by_profile_id
+    FROM profile_bans
+    WHERE deleted_profile_id_snapshot = ?
+      AND lifted_at IS NULL
+      AND banned_until > CURRENT_TIMESTAMP
+    ORDER BY banned_at DESC
+    LIMIT 1;
+  `)
+
   function toActiveBan(row: {
     ban_id: string
     profile_id: string
@@ -139,6 +168,30 @@ export async function createProfileBanStore(databaseFilePath: string): Promise<P
         }
       | undefined
     return row === undefined ? null : toActiveBan(row)
+  }
+
+  function getActiveBanForDeletedProfile(deletedProfileId: ProfileId): ActiveProfileBan | null {
+    const row = selectActiveBanForDeletedProfileStatement.get(deletedProfileId) as
+      | {
+          ban_id: string
+          banned_at: string
+          banned_until: string
+          reason: string
+          banned_by_profile_id: string | null
+        }
+      | undefined
+    if (row === undefined) {
+      return null
+    }
+    return {
+      banId: row.ban_id,
+      profileId: deletedProfileId,
+      bannedAt: dbDateToUtc(row.banned_at),
+      bannedUntil: dbDateToUtc(row.banned_until),
+      reason: row.reason,
+      bannedByProfileId: row.banned_by_profile_id,
+      remainingDays: computeRemainingDays(dbDateToUtc(row.banned_until), Date.now()),
+    }
   }
 
   function banProfile(input: {
@@ -245,6 +298,7 @@ export async function createProfileBanStore(databaseFilePath: string): Promise<P
 
   return {
     getActiveBan,
+    getActiveBanForDeletedProfile,
     banProfile,
     unbanProfile,
     close,

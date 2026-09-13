@@ -39,6 +39,27 @@ import { join, resolve } from 'node:path'
 const PASSWORD = 'RiskSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
 
+/**
+ * Test isolation helper (registration anti-evasion gate follow-up — "IP +
+ * ACTIVE moderation" policy) — виж идентичния коментар в
+ * checkAdminProfileBanAndDeleteHttpAuthorization.ts. Всеки register() тук
+ * получава СОБСТВЕН synthetic IP по подразбиране, за да не пише
+ * автоматично споделен 127.0.0.1 в site_visit_events (immediate visitor/
+ * profile binding, production security fix) — това би замърсило this
+ * файла's нарочно ръчно seed-нати "споделен IP" fixtures (linkedA/linkedB
+ * на 203.0.113.30) с допълнителен, неволен shared IP. Детерминиран,
+ * reserved TEST-NET ranges (RFC 5737), не произволни public адреси.
+ */
+const TEST_NET_RANGES = ['203.0.113', '198.51.100', '192.0.2'] as const
+let syntheticIpCounter = 0
+function nextSyntheticTestIp(): string {
+  syntheticIpCounter += 1
+  const zeroBased = syntheticIpCounter - 1
+  const rangePrefix = TEST_NET_RANGES[Math.floor(zeroBased / 254) % TEST_NET_RANGES.length]!
+  const octet = (zeroBased % 254) + 1
+  return `${rangePrefix}.${octet}`
+}
+
 let passed = 0
 let failed = 0
 
@@ -207,8 +228,20 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
   const displayName = `RiskSmoke${runId.replace(/[^0-9]/g, '').slice(-6)}${suffix}`
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male' }),
+    headers: {
+      'Content-Type': 'application/json',
+      // Test isolation — виж nextSyntheticTestIp doc коментара по-горе.
+      'X-Forwarded-For': nextSyntheticTestIp(),
+    },
+    // visitorId: authStore.ts::register() вече изисква valid UUID-формат
+    // visitor identity (registration anti-evasion gate, четвърти follow-up
+    // brief §2) — несвързано с risk-detector логиката, тествана тук, но
+    // задължително за да не хвърля 403 REGISTRATION_RESTRICTED. Тестовете
+    // за "споделен visitor_id/IP между профили" продължават да работят
+    // непроменени — те linkват профилите ПОСЛЕ, чрез директен SQL insert в
+    // site_visit_events за ДОПЪЛНИТЕЛЕН shared visitor_id/IP, не чрез този
+    // registration-time visitorId/IP.
+    body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male', visitorId: randomUUID() }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)
   const payload = await res.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }

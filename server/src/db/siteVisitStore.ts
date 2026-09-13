@@ -97,6 +97,62 @@ export type VisitorSourcesResult = {
 
 export type SiteVisitStore = {
   recordPageView: (input: RecordSitePageViewInput) => RecordSitePageViewResult
+  /**
+   * Registration anti-evasion gate (спешен production security fix) —
+   * всички CURRENT (non-null) profile ids, някога видени с този
+   * anonymous_visitor_id (site_visit_events, същия idx_site_visit_events_
+   * visitor_time индекс като adminProfileRiskStore.findProfilesForVisitorIds
+   * — bounded, indexed lookup, НЕ table scan). Директен single-hop match
+   * (visitor_id -> profiles, видени точно с него) — умишлено НЕ разширява
+   * транзитивно през други visitor ids на намерените профили (за разлика от
+   * adminProfileRiskStore-ия admin-only "linked profiles" 2-hop анализ,
+   * async/cached, предназначен за admin преглед, не за synchronous per-
+   * request gate на hot registration path).
+   */
+  findProfileIdsForVisitorId: (visitorId: string) => string[]
+  /**
+   * Registration anti-evasion gate — евтина, single-profile-scoped проверка
+   * "виждан ли е бил ТОЗИ профил и от този IP" (idx_site_visit_events_
+   * profile_time индекс, филтрирано по profile_id first). Ползва се само за
+   * по-богат audit log (match_type: device_and_ip vs device) СЛЕД като
+   * device match вече е открил блокиран профил — НЕ е основният IP lookup
+   * механизъм (виж findFirstActivelyModeratedProfileIdForIp по-долу за
+   * основния bounded IP + ACTIVE moderation lookup).
+   */
+  hasProfileEventFromIp: (profileId: string, ipAddress: string) => boolean
+  /**
+   * Registration anti-evasion gate (follow-up brief §1/§2 — "IP + ACTIVE
+   * moderation" secondary anti-evasion signal), ПРЕРАБОТЕН за bounded
+   * performance (трети follow-up brief §2) И за 48h recency (пети follow-up
+   * brief §1/§2/§3): ЕДИНСТВЕНА SQL заявка, а не "намери всички profile ids
+   * -> loop в JS". Reuse-ва covering index idx_site_visit_events_ip_profile,
+   * преработен на (ip_address, occurred_at, profile_id) — виж 20260913_002
+   * migration-а (редактирана in-place, все още некомитната в момента на тази
+   * промяна). ПЛЮС EXISTS subqueries directno срещу profile_bans
+   * (idx_profile_bans_profile_active) и topic_section_mutes (PRIMARY
+   * KEY(profile_id)) — SQLite оценява EXISTS lazily/short-circuit и LIMIT 1
+   * спира при ПЪРВИЯ match.
+   *
+   * 48h recency (пети follow-up brief §2/§3) — `occurred_at >=
+   * datetime('now', '-48 hours')` във outer WHERE-а, ПРЕДИ EXISTS
+   * subqueries-ите: IP-only anti-evasion сигналът блокира само ако
+   * КОНКРЕТНИЯТ IP реално е бил използван от actively-sanctioned профил
+   * през последните 48 часа (canonical timestamp — site_visit_events.
+   * occurred_at, НЕ ban/mute/registration дата). По-стар IP-usage от
+   * activно санкциониран профил вече НЕ блокира само по IP (§C политика,
+   * false-positive защита за динамични/споделени IP-та, останала
+   * непроменена за clean/expired случаите).
+   *
+   * Runtime cost зависи от бройката ПРЕСНИ (последни 48ч) редове на този IP
+   * в index-а, НЕ от общата историческа дълбочина на IP-то — indexed range
+   * seek на occurred_at ПРЕФИКСИРАН от ip_address equality match.
+   *
+   * Връща null, ако няма нито един recently-active-moderated профил на
+   * този IP; иначе matched profileId-то на ПЪРВИЯ намерен match (caller-ът
+   * прави ОТДЕЛНА, единична getActiveBan() заявка само за да определи
+   * точната audit причина ban/mute).
+   */
+  findFirstActivelyModeratedProfileIdForIp: (ipAddress: string) => string | null
   getVisitorSummary: (now?: Date) => VisitorSummary
   getViewLayoutSummary: (now?: Date) => ViewLayoutSummary
   getVisitorList: (params: {
@@ -192,6 +248,58 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     );
   `)
 
+  // Registration anti-evasion gate — виж findProfileIdsForVisitorId doc
+  // коментара в SiteVisitStore типа по-горе. Reuse-ва idx_site_visit_events_
+  // visitor_time (същия индекс/pattern като adminProfileRiskStore.
+  // findProfilesForVisitorIds).
+  const selectProfileIdsForVisitorIdStatement = database.prepare(`
+    SELECT DISTINCT profile_id
+    FROM site_visit_events
+    WHERE anonymous_visitor_id = ?
+      AND profile_id IS NOT NULL;
+  `)
+
+  // Registration anti-evasion gate — виж hasProfileEventFromIp doc коментара
+  // в SiteVisitStore типа по-горе. Reuse-ва idx_site_visit_events_profile_time
+  // (profile_id, occurred_at) — филтрирано по profile_id first, bounded към
+  // единичния профил, НЕ global ip_address scan.
+  const selectProfileEventFromIpStatement = database.prepare(`
+    SELECT 1
+    FROM site_visit_events
+    WHERE profile_id = ?
+      AND ip_address = ?
+    LIMIT 1;
+  `)
+
+  // Registration anti-evasion gate — виж findFirstActivelyModeratedProfileIdForIp
+  // doc коментара в SiteVisitStore типа по-горе. Единична bounded заявка
+  // (LIMIT 1) — profile_bans/topic_section_mutes EXISTS subqueries спират
+  // SQL evaluation-а при първия match, не зареждат всички profile ids на
+  // IP-то в JS за последващ loop. occurred_at >= -48h филтърът (пети
+  // follow-up brief) е ПРЕДИ EXISTS-ите в WHERE-а — canonical IP-recency
+  // timestamp, reuse-ва covering index (ip_address, occurred_at, profile_id).
+  const selectFirstActivelyModeratedProfileIdForIpStatement = database.prepare(`
+    SELECT DISTINCT sve.profile_id
+    FROM site_visit_events sve
+    WHERE sve.ip_address = ?
+      AND sve.profile_id IS NOT NULL
+      AND sve.occurred_at >= datetime('now', '-48 hours')
+      AND (
+        EXISTS (
+          SELECT 1 FROM profile_bans pb
+          WHERE pb.profile_id = sve.profile_id
+            AND pb.lifted_at IS NULL
+            AND pb.banned_until > CURRENT_TIMESTAMP
+        )
+        OR EXISTS (
+          SELECT 1 FROM topic_section_mutes tsm
+          WHERE tsm.profile_id = sve.profile_id
+            AND tsm.muted_until > CURRENT_TIMESTAMP
+        )
+      )
+    LIMIT 1;
+  `)
+
   const updateVisitorSeenStatement = database.prepare(`
     UPDATE site_visitors
     SET last_seen_at = CURRENT_TIMESTAMP,
@@ -284,6 +392,20 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     return typeof result === 'object' && result !== null && 'changes' in result && typeof result.changes === 'number'
       ? result.changes
       : 0
+  }
+
+  function findProfileIdsForVisitorId(visitorId: string): string[] {
+    const rows = selectProfileIdsForVisitorIdStatement.all(visitorId) as Array<{ profile_id: string }>
+    return rows.map((row) => row.profile_id)
+  }
+
+  function hasProfileEventFromIp(profileId: string, ipAddress: string): boolean {
+    return selectProfileEventFromIpStatement.get(profileId, ipAddress) !== undefined
+  }
+
+  function findFirstActivelyModeratedProfileIdForIp(ipAddress: string): string | null {
+    const row = selectFirstActivelyModeratedProfileIdForIpStatement.get(ipAddress) as { profile_id: string } | undefined
+    return row === undefined ? null : row.profile_id
   }
 
   function recordPageView(input: RecordSitePageViewInput): RecordSitePageViewResult {
@@ -680,6 +802,9 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
 
   return {
     recordPageView,
+    findProfileIdsForVisitorId,
+    hasProfileEventFromIp,
+    findFirstActivelyModeratedProfileIdForIp,
     getVisitorSummary,
     getViewLayoutSummary,
     getVisitorList,

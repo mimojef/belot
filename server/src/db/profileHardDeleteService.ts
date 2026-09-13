@@ -164,6 +164,42 @@ export type ProfileHardDeleteService = {
    * BEGIN IMMEDIATE при реалното изпълнение, за race-safety.
    */
   hasActiveTournamentDependency: (profileId: ProfileId) => boolean
+  /**
+   * Registration anti-evasion gate (hard-delete evasion fix) — distinct
+   * deleted_profile_id стойности, някога свързани с този anonymous_visitor_id
+   * (admin_profile_deletion_visitor_snapshots — forensic snapshot, populated
+   * ЕДИНСТВЕНО в момента на hard delete, виж captureVisitorForensicSnapshot
+   * doc коментара по-долу). Reuse-ва idx_admin_profile_deletion_visitor_snapshots_visitor.
+   * Целта: свързва visitor_id с профил, който вече НЕ съществува в profiles
+   * (site_visit_events.profile_id вече е SET NULL за такива редове) — тази
+   * таблица е ЕДИНСТВЕНИЯТ оцелял мост visitor_id -> стар profile_id.
+   */
+  findDeletedProfileIdsForVisitorId: (visitorId: string) => ProfileId[]
+  /**
+   * Registration anti-evasion gate (hard-delete evasion fix) — same като
+   * findDeletedProfileIdsForVisitorId, но по ip_address, ПЛЮС 48h recency
+   * филтър (пети follow-up brief §2/§3/§4): само snapshot редове, чийто
+   * last_seen_at (реалният MAX(occurred_at) от site_visit_events, агрегиран
+   * ПРЕДИ hard-delete cascade-а — виж captureVisitorForensicSnapshot) е в
+   * последните 48 часа. Стар IP-usage (>48h) от отдавна hard-deleted профил
+   * вече не блокира само по IP — избягва "стар IP отпреди месеци става
+   * recent само защото профилът е изтрит днес". Таблицата е малка и bounded
+   * (population само при рядкото admin hard-delete действие) — умишлено
+   * БЕЗ нов индекс тук (виж production report-а "Performance" секцията за
+   * пълния rationale защо unindexed scan на ТАЗИ конкретна таблица е приемлив,
+   * за разлика от continuously-growing site_visit_events).
+   */
+  findDeletedProfileIdsForIp: (ipAddress: string) => ProfileId[]
+  /**
+   * Registration anti-evasion gate (hard-delete evasion fix, mute case,
+   * четвърти follow-up brief §1) — true, ако deletedProfileId е имал активен
+   * Topics/Лафче mute В МОМЕНТА на hard delete-а, И оригиналният
+   * muted_until все още не е минал (сравнено срещу CURRENT_TIMESTAMP at
+   * read time — временен restriction, не permanent block). Lookup по
+   * PRIMARY KEY(deleted_profile_id) на admin_profile_deletion_moderation_snapshots
+   * — O(1) индексиран single-row lookup, без scan.
+   */
+  hasActiveMuteSnapshotForDeletedProfile: (deletedProfileId: ProfileId) => boolean
   close: () => void
 }
 
@@ -228,6 +264,44 @@ export async function createProfileHardDeleteService(
     WHERE te.profile_id = ?
       AND te.status IN (${ACTIVE_ENTRY_STATUS_PLACEHOLDERS})
       AND t.status IN (${ACTIVE_STATUS_PLACEHOLDERS})
+    LIMIT 1;
+  `)
+
+  // Registration anti-evasion gate (hard-delete evasion fix) — виж
+  // findDeletedProfileIdsForVisitorId/findDeletedProfileIdsForIp doc
+  // коментарите в ProfileHardDeleteService типа по-горе. Reuse-ва
+  // idx_admin_profile_deletion_visitor_snapshots_visitor индекса (visitor
+  // lookup); IP lookup е нарочно unindexed (виж коментара там).
+  const selectDeletedProfileIdsForVisitorIdStatement = database.prepare(`
+    SELECT DISTINCT deleted_profile_id
+    FROM admin_profile_deletion_visitor_snapshots
+    WHERE anonymous_visitor_id = ?;
+  `)
+
+  // 48h recency (пети follow-up brief §2/§3/§4) — last_seen_at ВЕЧЕ пази
+  // истинския MAX(occurred_at) от site_visit_events, агрегиран ПРЕДИ
+  // cascade-а (captureVisitorForensicSnapshot по-долу) — НЕ deletion/ban/
+  // mute дата. Стар (>48h) реален IP-usage вече не блокира само по IP,
+  // независимо кога е станал hard delete-ът — избягва точно "стар IP
+  // отпреди месеци става 'recent' само защото профилът е изтрит днес".
+  // Никаква schema/snapshot промяна не беше нужна — last_seen_at вече
+  // съществуваше и вече пазеше правилния timestamp (виж 20260902_003
+  // migration-а — captureVisitorForensicSnapshot's MAX(occurred_at) агрегация).
+  const selectDeletedProfileIdsForIpStatement = database.prepare(`
+    SELECT DISTINCT deleted_profile_id
+    FROM admin_profile_deletion_visitor_snapshots
+    WHERE ip_address = ?
+      AND last_seen_at >= datetime('now', '-48 hours');
+  `)
+
+  // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
+  // виж hasActiveMuteSnapshotForDeletedProfile doc коментара по-горе.
+  // PRIMARY KEY(deleted_profile_id) lookup — O(1), не scan.
+  const selectActiveMuteSnapshotForDeletedProfileStatement = database.prepare(`
+    SELECT 1
+    FROM admin_profile_deletion_moderation_snapshots
+    WHERE deleted_profile_id = ?
+      AND active_topics_mute_until > CURRENT_TIMESTAMP
     LIMIT 1;
   `)
 
@@ -503,6 +577,29 @@ export async function createProfileHardDeleteService(
     LIMIT 1;
   `)
 
+  // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
+  // snapshot-ва активен Topics/Лафче mute ПРЕДИ DELETE FROM profiles по-долу
+  // (topic_section_mutes е ON DELETE CASCADE — редът изчезва напълно,
+  // munted_until-ът трябва да се прочете, докато still съществува). "Активен"
+  // тук means muted_until > CURRENT_TIMESTAMP В МОМЕНТА на изтриването —
+  // same read-time semantics като topicModerationStore.ts's
+  // isProfileMutedInTopicsSection, само snapshot-нат еднократно.
+  const selectActiveTopicsMuteForProfileStatement = database.prepare(`
+    SELECT muted_until
+    FROM topic_section_mutes
+    WHERE profile_id = ?
+      AND muted_until > CURRENT_TIMESTAMP
+    LIMIT 1;
+  `)
+
+  const insertModerationSnapshotStatement = database.prepare(`
+    INSERT INTO admin_profile_deletion_moderation_snapshots (
+      deleted_profile_id, active_topics_mute_until
+    ) VALUES (?, ?)
+    ON CONFLICT (deleted_profile_id) DO UPDATE SET
+      active_topics_mute_until = excluded.active_topics_mute_until;
+  `)
+
   const deleteProfileStatement = database.prepare(`
     DELETE FROM profiles WHERE profile_id = ?;
   `)
@@ -510,6 +607,18 @@ export async function createProfileHardDeleteService(
   const deleteAccountStatement = database.prepare(`
     DELETE FROM accounts WHERE account_id = ?;
   `)
+
+  // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
+  // виж selectActiveTopicsMuteForProfileStatement/insertModerationSnapshotStatement
+  // doc коментарите по-горе. No-op, ако профилът няма активен mute в момента
+  // на delete-а (clean-откъм-Topics профил не получава ред тук изобщо).
+  function captureModerationSnapshot(profileId: string): void {
+    const row = selectActiveTopicsMuteForProfileStatement.get(profileId) as { muted_until: string } | undefined
+    if (row === undefined) {
+      return
+    }
+    insertModerationSnapshotStatement.run(profileId, row.muted_until)
+  }
 
   function captureVisitorForensicSnapshot(profileId: string): void {
     const rows = selectVisitorAggregatesForProfileStatement.all(profileId) as Array<{
@@ -667,6 +776,20 @@ export async function createProfileHardDeleteService(
     return entryDependency !== undefined
   }
 
+  function findDeletedProfileIdsForVisitorId(visitorId: string): ProfileId[] {
+    const rows = selectDeletedProfileIdsForVisitorIdStatement.all(visitorId) as Array<{ deleted_profile_id: string }>
+    return rows.map((row) => row.deleted_profile_id)
+  }
+
+  function findDeletedProfileIdsForIp(ipAddress: string): ProfileId[] {
+    const rows = selectDeletedProfileIdsForIpStatement.all(ipAddress) as Array<{ deleted_profile_id: string }>
+    return rows.map((row) => row.deleted_profile_id)
+  }
+
+  function hasActiveMuteSnapshotForDeletedProfile(deletedProfileId: ProfileId): boolean {
+    return selectActiveMuteSnapshotForDeletedProfileStatement.get(deletedProfileId) !== undefined
+  }
+
   async function hardDeleteProfile(input: {
     targetProfileId: ProfileId
     actorProfileId: ProfileId
@@ -805,6 +928,11 @@ export async function createProfileHardDeleteService(
       snapshotTableExitPenaltiesStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotProfileMatchResultsStatement.run(profileRow.profile_id, profileRow.profile_id)
       captureVisitorForensicSnapshot(profileRow.profile_id)
+      // Виж captureModerationSnapshot doc коментара — трябва да се изпълни
+      // ПРЕДИ deleteProfileStatement.run() по-долу (topic_section_mutes
+      // редът все още съществува в тази точка, ще бъде CASCADE-нат заедно
+      // с profiles реда).
+      captureModerationSnapshot(profileRow.profile_id)
 
       // Виж invalidateAffectedRiskCache doc коментара — трябва да се
       // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (target-овата
@@ -905,6 +1033,9 @@ export async function createProfileHardDeleteService(
   return {
     hardDeleteProfile,
     hasActiveTournamentDependency,
+    findDeletedProfileIdsForVisitorId,
+    findDeletedProfileIdsForIp,
+    hasActiveMuteSnapshotForDeletedProfile,
     close,
   }
 }

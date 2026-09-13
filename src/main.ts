@@ -99,7 +99,7 @@ import { createTournamentMatchStartPopup } from './ui/notifications/tournamentMa
 import { createTournamentReclaimModal } from './ui/notifications/tournamentReclaimModal'
 import { isTournamentForceReturnRequired, resolveTournamentReturnDestination } from './app/lobby/resolveTournamentReturnDestination'
 import { createTournamentFeederWaitingStrip, type TournamentFeederWaitingState } from './ui/notifications/tournamentFeederWaitingStrip'
-import { createVisitorPageViewTracker } from './app/visitors/createVisitorPageViewTracker'
+import { createVisitorPageViewTracker, getAnonymousVisitorId } from './app/visitors/createVisitorPageViewTracker'
 import { mountConsentUi } from './app/consent/consentUi'
 import { initializeAnalytics } from './app/analytics/initializeAnalytics'
 import { trackCompleteRegistration } from './app/analytics/metaPixel'
@@ -786,7 +786,12 @@ async function loadAuthSession(): Promise<void> {
 async function submitAuthRequest(
   endpoint: 'login' | 'register',
   body: Record<string, string>,
-): Promise<{ errorText: string | null; bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null }> {
+): Promise<{
+  errorText: string | null
+  bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
+  /** Registration anti-evasion gate (спешен production security fix) — виж REGISTRATION_RESTRICTED branch по-долу. Само register endpoint-ът може реално да го върне. */
+  registrationRestricted?: boolean
+}> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/auth/${endpoint}`, {
       method: 'POST',
@@ -808,6 +813,14 @@ async function submitAuthRequest(
           errorText: data.message ?? 'Профилът е баннат.',
           bannedInfo: { bannedUntil: data.bannedUntil, reason: data.reason, remainingDays: data.remainingDays },
         }
+      }
+      // Registration anti-evasion gate (spec §6/§7) — generic попап вместо
+      // inline error text, БЕЗ да разкрива причината (виж
+      // createLobbyFlowController.ts::submitRegister). data.message идва от
+      // сървъра вече generic ("Нещо се обърка...") — reuse-ва го директно,
+      // не хардкодваме дублиран текст тук.
+      if (data.code === 'REGISTRATION_RESTRICTED') {
+        return { errorText: data.message ?? 'Регистрацията не беше успешна.', registrationRestricted: true }
       }
       return { errorText: data.message ?? 'Заявката не беше успешна.' }
     }
@@ -5981,13 +5994,17 @@ lobby = createLobbyFlowController({
   onRegisterSubmit: (displayName, email, password, gender) =>
     {
       const validation = validateProfileDisplayName(displayName)
-      if (!validation.ok) return Promise.resolve(validation.message)
+      if (!validation.ok) return Promise.resolve({ errorText: validation.message })
       return submitAuthRequest('register', {
         displayName: validation.canonicalDisplayName,
         email,
         password,
+        // Registration anti-evasion gate (спешен production security fix) —
+        // СЪЩИЯТ localStorage-backed anonymous visitor id като site-visit
+        // tracking-а (createVisitorPageViewTracker.ts), не нов fingerprinting.
+        visitorId: getAnonymousVisitorId(),
         ...(gender !== null ? { gender } : {}),
-      }).then((result) => result.errorText)
+      }).then((result) => ({ errorText: result.errorText, restricted: result.registrationRestricted === true }))
     },
   onProfileEditSubmit: (targetProfileId, avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(targetProfileId, avatarFile, avatarCrop, galleryFiles),

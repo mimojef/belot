@@ -38,7 +38,17 @@ function createUuid(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-function getAnonymousVisitorId(): string {
+/**
+ * Exported за reuse от registration anti-evasion gate-а (main.ts's
+ * onRegisterSubmit) — СЪЩИЯТ localStorage-backed device identity, вече
+ * established за site-visit tracking (STORAGE_KEY по-горе), не нов
+ * fingerprinting механизъм. Винаги връща валиден UUID (lazily generates
+ * при липса) — tracker.start() вече е извикан unconditionally при app
+ * bootstrap (виж main.ts), затова стойността реално вече съществува в
+ * localStorage много преди потребителят да отвори register формата, но
+ * функцията остава safe да се вика и по-рано/самостоятелно.
+ */
+export function getAnonymousVisitorId(): string {
   try {
     const existing = localStorage.getItem(STORAGE_KEY)
     if (existing !== null && UUID_RE.test(existing)) {
