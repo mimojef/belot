@@ -7538,13 +7538,28 @@ async function handleAuthRequest(
   pathname: string,
 ): Promise<boolean> {
   if (pathname === '/api/auth/me' && req.method === 'GET') {
+    // Auth session-lifetime fix (rolling/sliding 90-day TTL) — touchSession
+    // (не getSession) е ЕДИНСТВЕНИЯТ touch point за renewal: клиентът вика
+    // GET /api/auth/me при всяко зареждане/посещение на сайта, докато е
+    // логнат (main.ts's loadAuthSession()), затова точно тук е естественото
+    // място да "докоснем" сесията. Throttled вътре в touchSession() (виж
+    // authStore.ts doc коментара) — само когато renewed===true (реално
+    // станал DB UPDATE) изпращаме нов Set-Cookie със същия удължен expires_at,
+    // за да cookie-то и server-side expiry НИКОГА не се разминат. WS
+    // connect/traffic продължава да ползва отделния getSession() (read-only,
+    // виж wsServer.on('connection') по-долу) — не участва в renewal-а.
     const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
-    const session = authStore.getSession(sessionToken)
+    const { session, renewed } = authStore.touchSession(sessionToken)
 
-    sendJsonResponse(res, 200, {
-      ok: true,
-      session: withPikaTeamGiftBypassFlag(session),
-    })
+    sendJsonResponse(
+      res,
+      200,
+      {
+        ok: true,
+        session: withPikaTeamGiftBypassFlag(session),
+      },
+      renewed && sessionToken !== null ? { 'Set-Cookie': createSessionCookieHeader(sessionToken) } : {},
+    )
     return true
   }
 

@@ -370,6 +370,14 @@ export type AuthStore = {
     newPassword: string
   }) => { ok: true } | { ok: false; message: string }
   getSession: (sessionToken: string | null) => AuthSessionSnapshot | null
+  /**
+   * Rolling/sliding session renewal (auth session-lifetime fix) — виж
+   * пълния doc коментар на имплементацията по-долу. Единствен caller:
+   * handleAuthRequest-ово GET /api/auth/me в index.ts (не WS connect, не
+   * никой друг route) — renewed:true сигнализира на HTTP layer-а да
+   * изпрати нов Set-Cookie със същия expires_at.
+   */
+  touchSession: (sessionToken: string | null) => { session: AuthSessionSnapshot | null; renewed: boolean }
   logout: (sessionToken: string | null) => void
   /**
    * Bulk session revocation по profile_id (spec §1, BAN/HARD-DELETE
@@ -479,10 +487,32 @@ type SessionRow = {
   role: AccountRoleValue
   status: 'active' | 'disabled'
   account_created_at: string
+  /** ISO string (createIsoExpiresAt() формат) — ползва се ЕДИНСТВЕНО от touchSession() за renewal-due изчислението; getSession() го игнорира. */
+  expires_at: string
 }
 
 const SESSION_COOKIE_NAME = 'belot_session'
-const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 30
+/**
+ * Rolling/sliding session lifetime (auth session-lifetime fix) — 90 дни от
+ * ПОСЛЕДНАТА реална активност, не absolute от login момента. Reuse-ва се
+ * И за нови сесии (createSession по-долу), И за renewal-а на съществуващи
+ * (touchSession по-долу) — една-единствена константа определя целия
+ * "плъзгащ прозорец". Виж touchSession() doc коментара за точната
+ * renewal семантика/throttling.
+ */
+const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 90
+/**
+ * Throttle за touchSession() renewal-а — UPDATE account_sessions.expires_at
+ * (плюс новия Set-Cookie от caller-а, виж index.ts's /api/auth/me) се
+ * случва максимум веднъж на толкова често за дадена сесия, независимо
+ * колко пъти /api/auth/me бъде удрян междувременно (auth session-lifetime
+ * report: "НЕ искам UPDATE при всяка HTTP/API заявка"). С TTL=90 дни и
+ * throttle=1 ден, максималният брой DB writes е ~1/сесия/ден — гарантирано
+ * атомарно от renewSessionStatement-овата WHERE клауза (compare-and-swap
+ * cutoff), не от JS-side "if due" проверка — виж touchSession() и
+ * renewSessionStatement doc коментарите за пълния concurrency rationale.
+ */
+const SESSION_RENEWAL_THROTTLE_MS = 1000 * 60 * 60 * 24
 
 /**
  * Registration anti-evasion gate (четвърти follow-up brief §2 — "REGISTRATION
@@ -570,6 +600,14 @@ export async function createAuthStore(
 
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
+  // Auth session-lifetime fix — touchSession() добавя нов UPDATE write path
+  // (session renewal) към тази връзка; PM2 споделя СЪЩИЯ SQLite файл между
+  // няколко process instances (виж ad_campaign_events poll коментара в
+  // index.ts за established "PM2 споделя SQLite" facts), затова тази
+  // връзка сега се нуждае от busy_timeout mirror на другите write-heavy
+  // stores (profileHardDeleteService.ts, pendingProfileModerationStore.ts)
+  // — изчаква writer lock-а вместо да хвърли SQLITE_BUSY веднага.
+  database.exec('PRAGMA busy_timeout = 5000;')
 
   const selectAccountByEmailStatement = database.prepare(`
     SELECT account_id, email, password_hash, role, status
@@ -729,6 +767,22 @@ export async function createAuthStore(
     );
   `)
 
+  // Auth session-lifetime fix — открит pre-existing bug (не въведен от тази
+  // промяна, но директно противоречи на "изтекли сесии да НЕ се
+  // възстановяват" изискването, затова се коригира тук): expires_at се
+  // пази като пълен ISO string (createIsoExpiresAt() -> Date.toISOString(),
+  // формат "YYYY-MM-DDTHH:MM:SS.sssZ"), но SQLite-овия литерал
+  // CURRENT_TIMESTAMP връща РАЗЛИЧЕН формат ("YYYY-MM-DD HH:MM:SS" — space,
+  // не 'T', без милисекунди/'Z'). Directна string сравнение (expires_at >
+  // CURRENT_TIMESTAMP) на практика работеше "случайно" правилно само
+  // защото при 30/90-дневна разлика датовата част сама определя реда —
+  // но за сесия, изтекла едва преди секунди/минути (същия календарен
+  // ден), 'T' (0x54) > ' ' (0x20) кара израза погрешно да върне TRUE
+  // (empirically потвърдено), т.е. вече изтекла сесия минаваше като
+  // валидна за кратък прозорец след реалния expiry момент. Фиксът:
+  // сравнение срещу strftime('%Y-%m-%dT%H:%M:%fZ','now') — СЪЩИЯТ ISO
+  // формат като съхранения expires_at, коректно lexicographically
+  // сравним за произволна разлика, не само за дни.
   const selectSessionStatement = database.prepare(`
     SELECT
       s.session_id,
@@ -737,14 +791,47 @@ export async function createAuthStore(
       a.email,
       a.role,
       a.status,
-      a.created_at AS account_created_at
+      a.created_at AS account_created_at,
+      s.expires_at
     FROM account_sessions s
     JOIN accounts a
       ON a.account_id = s.account_id
     WHERE s.token_hash = ?
       AND s.revoked_at IS NULL
-      AND s.expires_at > CURRENT_TIMESTAMP
+      AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     LIMIT 1;
+  `)
+
+  // Auth session-lifetime fix — rolling renewal UPDATE, викан ЕДИНСТВЕНО от
+  // touchSession() по-долу. Атомарен compare-and-swap: WHERE клаузата (не
+  // JS "if renewal due" преди UPDATE-а) е ЕДИНСТВЕНИЯТ authority за дали
+  // renewal-ът реално се случва — elimина TOCTOU race между конкурентни
+  // /api/auth/me заявки (concurrency/security follow-up report — два таба
+  // на един browser споделят ЕДНА и СЪЩА account_sessions.session_id, а
+  // production PM2 споделя СЪЩИЯ SQLite файл между няколко process
+  // instances; "SELECT стар expires_at в JS -> decide -> UPDATE" би
+  // позволило и двата конкурентни request-а да видят "due" и да пишат).
+  // Горна граница (expires_at <= ?, "renewal cutoff") прави throttle-а
+  // атомарен: първият UPDATE, който реално matchне реда, го premества на
+  // now+90d — веднага след това expires_at > cutoff за всеки друг
+  // конкурентен UPDATE (дори ако е прочел стар expires_at в собствен
+  // по-раншен SELECT), затова WHERE клаузата вече не съвпада и changes=0.
+  // SQLite сериализира конкуриращи се writes (един writer lock, дори в WAL
+  // mode) — вторият UPDATE винаги се изпълнява СЛЕД commit-натото
+  // състояние на първия, не срещу stale snapshot, затова correctness-ът
+  // не зависи от JS-level timing/interleaving, само от SQLite-овите
+  // собствени transactional гаранции. Долна граница (expires_at > now)
+  // остава defense-in-depth срещу race с expire/revoke (виж по-долу) —
+  // никога не "съживява" invalid сесия. Обновява ЕДИНСТВЕНО реда по
+  // session_id, не засяга други сесии на същия профил/акаунт
+  // (multi-device isolation).
+  const renewSessionStatement = database.prepare(`
+    UPDATE account_sessions
+    SET expires_at = ?
+    WHERE session_id = ?
+      AND revoked_at IS NULL
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      AND expires_at <= ?;
   `)
 
   const selectAccountByIdStatement = database.prepare(`
@@ -1117,14 +1204,18 @@ export async function createAuthStore(
     }
   }
 
-  function getSession(sessionToken: string | null): AuthSessionSnapshot | null {
+  /** Общ SELECT+валидация за getSession/touchSession по-долу — самото fetch-ване не се променя от auth session-lifetime fix-а, само добавя (вече игнорираното от getSession) expires_at поле. */
+  function fetchValidSessionRow(sessionToken: string | null): SessionRow | null {
     if (sessionToken === null) {
       return null
     }
 
     const row = selectSessionStatement.get(hashSessionToken(sessionToken)) as SessionRow | undefined
+    return row ?? null
+  }
 
-    if (!row || row.status !== 'active') {
+  function toSessionSnapshot(row: SessionRow): AuthSessionSnapshot | null {
+    if (row.status !== 'active') {
       return null
     }
 
@@ -1139,6 +1230,74 @@ export async function createAuthStore(
       account: toAccountSnapshot(row),
       profile,
     }
+  }
+
+  function getSession(sessionToken: string | null): AuthSessionSnapshot | null {
+    const row = fetchValidSessionRow(sessionToken)
+    return row === null ? null : toSessionSnapshot(row)
+  }
+
+  /**
+   * Rolling/sliding session renewal (auth session-lifetime fix) —
+   * ЕДИНСТВЕНИЯТ touch point е GET /api/auth/me (index.ts), викан от
+   * клиента при всяко зареждане/посещение на сайта, докато е логнат
+   * (main.ts's loadAuthSession()) — ТОВА се счита за "реална активност"
+   * тук, съзнателно избрано пред "произволна authenticated API заявка":
+   * (1) гарантирано се случва на всяко истинско посещение, независимо от
+   * gameplay действия; (2) е нормален HTTP request/response цикъл, може
+   * безопасно да носи нов Set-Cookie (за разлика от WS traffic/upgrade);
+   * (3) избягва да се пипат десетки други route handlers. WebSocket
+   * connect/traffic НЕ вика тази функция — той продължава да ползва чист
+   * getSession() (read-only), затова сам по себе си никога не причинява DB
+   * write, дори при интензивен gameplay трафик (spec explicit изискване).
+   *
+   * Идентична validation верига като getSession() (revoked_at IS NULL,
+   * expires_at > strftime('%Y-%m-%dT%H:%M:%fZ','now'), account
+   * status='active', профил съществува) — НИКОГА не renew-ва сесия, която вече не е доказано
+   * валидна по същите критерии; expired/revoked/непознат token просто
+   * връщат {session:null, renewed:false}, идентично на getSession()-овия
+   * null резултат.
+   *
+   * Throttled renewal — атомарен compare-and-swap на SQL ниво (виж
+   * renewSessionStatement doc коментара за пълния concurrency rationale),
+   * НЕ JS "if remaining lifetime < throttle, renew" decision преди UPDATE-а
+   * (старата имплементация имаше TOCTOU race тук: concurrency/security
+   * follow-up report доказа, че два конкурентни /api/auth/me за ЕДНА и
+   * СЪЩА сесия — напр. два таба на един browser, или два PM2 process
+   * instances, четящи стар expires_at ПРЕДИ първият commit-не UPDATE-а си
+   * — биха довели и двата до renewed:true, два реални DB writes вместо
+   * един). Сега JS само подава горната граница (renewalCutoffIso =
+   * now + (TTL - THROTTLE)) като bind параметър — SQL WHERE клаузата сама
+   * решава атомарно: само ПЪРВИЯТ UPDATE, който реално намери ред с
+   * expires_at все още ≤ cutoff, matchва и получава changes=1; всеки друг
+   * конкурентен UPDATE за СЪЩАТА сесия неизбежно вижда вече-обновения (far
+   * in the future) expires_at и получава changes=0 — независимо от reда,
+   * по който заявките са прочели "стария" ред. Максимум ~1 реален DB
+   * write/сесия/throttle прозорец (1 ден), гарантирано от SQLite-овите
+   * собствени transactional/serialization гаранции, не от JS timing.
+   *
+   * Existing 30-дневни сесии (стар TTL, преди тази промяна) се upgrade-ват
+   * автоматично тук БЕЗ никаква специална логика/migration — cutoff
+   * формулата разчита само на реално записания expires_at: за стара сесия
+   * той е поне 59 дни по-кратък от новия 90-дневен прозорец (под cutoff-а),
+   * значи renewal-ът винаги matchва при първия ѝ /api/auth/me след deploy
+   * (ако сесията все още не е изтекла по старите 30 дни — иначе изобщо не
+   * стига дотук, selectSessionStatement вече я е филтрирал).
+   */
+  function touchSession(sessionToken: string | null): { session: AuthSessionSnapshot | null; renewed: boolean } {
+    const row = fetchValidSessionRow(sessionToken)
+    if (row === null) {
+      return { session: null, renewed: false }
+    }
+
+    const session = toSessionSnapshot(row)
+    if (session === null) {
+      return { session: null, renewed: false }
+    }
+
+    const renewalCutoffIso = new Date(Date.now() + (SESSION_TTL_MS - SESSION_RENEWAL_THROTTLE_MS)).toISOString()
+    const result = renewSessionStatement.run(createIsoExpiresAt(), row.session_id, renewalCutoffIso) as { changes?: number }
+    return { session, renewed: (result.changes ?? 0) > 0 }
   }
 
   function changePassword(input: {
@@ -1415,6 +1574,7 @@ export async function createAuthStore(
     login,
     changePassword,
     getSession,
+    touchSession,
     logout,
     revokeAllSessionsForProfile,
     setSubadminRole,
