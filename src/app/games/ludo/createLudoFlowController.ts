@@ -1,19 +1,41 @@
-// Контролер за Ludo visual prototype — държи mock state, mount-ва екрана в
-// root елемента, wire-ва клик събития (piece select, roll dice, bottom bar).
-// Изцяло frontend simulation: няма WebSocket, няма реален engine, няма
-// database. Следва controller pattern-а от lobby/activeRoom (state обект +
-// render() + querySelectorAll wiring), но е напълно изолиран от техния код.
+// Контролер за Ludo visual prototype — mount-ва екрана в root елемента,
+// wire-ва клик събития (piece select, roll dice, bottom bar). Canonical
+// game state/turn logic живее в pure engine слоя (engine/) — контролерът
+// е adapter между dispatch(action) и текущия string-based renderer, плюс
+// presentation-only state (route animation buffer, landed dice overlay,
+// countdown timestamps, interaction locks), което engine-ът съзнателно не
+// познава.
+//
+// Engine flow: ROLL_STARTED -> (external RNG) -> ROLL_RESOLVED(value) ->
+// awaiting_move_selection -> MOVE_REQUESTED(slot) -> canonical result/events.
+// Engine-ът мутира state-а МОМЕНТАЛНО при dispatch — никога не чака
+// анимация. Route stepping animation-ът е ЧИСТО presentation: контролерът
+// изчислява route-а от stateBefore/stateAfter и показва движещата се
+// пионка на междинна визуална позиция чрез presentation override, докато
+// canonical engine state вече е финален (виж movingPieceOverrideCell по-
+// долу) — presentation frame state ≠ canonical state.
+//
+// Все още няма WebSocket/database — engine-ът е готов за server reuse
+// по-късно, но тук се вика directno, синхронно, в браузъра.
 
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState } from './renderLudoGameScreen'
 import { renderLudoMockPopup } from './renderLudoBottomBar'
-import { createLudoMockPlayers, createLudoMockPieces } from './mock/ludoMockState'
+import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
-import { computeLudoLegalMoves } from './board/computeLudoLegalMoves'
-import { findLudoCaptureVictims, applyLudoCaptureToHome } from './board/resolveLudoCapture'
 import { rollLudoMockDiceResult } from './dice/ludoDiceState'
 import { createLudoDiceResultOverlayController } from './dice/playLudoDiceFlightOverlay'
-import type { LudoCellId, LudoColor, LudoLegalMove, LudoPiece, LudoPieceId } from './ludoTypes'
+import { reduceLudoGame } from './engine/ludoEngineReducer'
+import { createLudoEngineInitialState } from './engine/ludoEngineState'
+import {
+  ludoEnginePiecesToUiPieces,
+  ludoEngineLegalMovesToUiMoves,
+  ludoEnginePositionToCellId,
+  ludoUiPieceIdToSlot,
+} from './engine/ludoEngineAdapter'
+import type { LudoGameState } from './engine/ludoEngineTypes'
+import type { LudoEngineAction } from './engine/ludoEngineActions'
+import type { LudoCellId, LudoPiece, LudoPieceId } from './ludoTypes'
 
 const MOCK_TURN_SECONDS = 20
 const STEP_ANIMATION_MS = 220
@@ -29,27 +51,28 @@ export interface LudoFlowControllerOptions {
 
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
   const players = createLudoMockPlayers()
-  let pieces: LudoPiece[] = createLudoMockPieces()
-  // Празни, докато няма хвърлен зар — виж handleRollDice. Преди първо
-  // хвърляне не трябва да има selectable пионки/highlights/capture ring
-  // (виж audit-а: старите hardcoded legalMoves нарушаваха точно това).
-  let legalMoves: LudoLegalMove[] = []
-  let activeColor: LudoColor = 'red'
+
+  // Canonical game state — ЕДИНСТВЕНИЯТ source of truth за pieces/
+  // activeColor/turnPhase/diceValue/legalMoves. Мутира се ИЗКЛЮЧИТЕЛНО
+  // чрез dispatch() -> reduceLudoGame(); контролерът никога не пипа тези
+  // полета directno.
+  let engineState: LudoGameState = createLudoEngineInitialState()
+
+  // ---- PRESENTATION-ONLY state (engine-ът не знае нищо за тях) ----
   // Момент (Date.now()), в който активният играч е получил хода си —
   // deadline-базирана основа за countdown fill-а в player card-а (виж
-  // renderLudoPlayerPanel), НЕ JS tick брояч. Персистира през render() call-ове,
-  // предизвикани от несвързани причини (resize, dice roll, piece move
-  // animation) — countdown-ът визуално НЕ трябва да рестартира при тях
-  // (виж audit-а: старата реализация не защитаваше срещу точно това — при
-  // всеки re-render countdown-fill div-ът е нов DOM node и CSS animation-ът
-  // му тръгва отначало, освен ако не му се подаде правилен animation-delay).
-  // При бъдещо реално turn-advancement (извън обхвата тук) присвояването на
-  // нов activeColor ТРЯБВА да reset-не и turnStartedAt = Date.now().
+  // renderLudoPlayerPanel), НЕ JS tick брояч. Reset-ва се при TURN_ADVANCED.
   let turnStartedAt = Date.now()
   let isDiceRolling = false
-  let canRollDice = true
   let isAnimatingMove = false
   let activePopup: 'emoji' | 'phrase' | null = null
+  // Presentation route buffer: докато движеща се пионка still-steps по
+  // маршрута си, engine-ът ВЕЧЕ показва финалната ѝ позиция (dispatch е
+  // synchronous и моментален). За да не "телепортира" визуално пионката,
+  // за времетраенето на анимацията override-ваме САМО нейната cell в
+  // adapted UI pieces масива — presentation frame, никога записан обратно
+  // в engineState. null означава "няма активна route анимация в момента".
+  let movingPieceOverride: { pieceId: LudoPieceId; cellId: LudoCellId } | null = null
   // "Кацналото" зарче в центъра на дъската (document.body overlay) — живее
   // СПРЯМО ХОДА (roll → избор на пионка → move/capture animation), не
   // спрямо render() цикъла или следващото хвърляне: playFlight/clearLanded
@@ -58,15 +81,44 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // Не е част от LudoGameScreenState.
   const diceResultOverlay = createLudoDiceResultOverlayController()
 
+  // Единствената точка, през която engineState се променя — reject-натите
+  // действия (грешен player, wrong phase, stale turnVersion) връщат СЪЩИЯ
+  // state reference (виж reduceLudoGame contract), затова dispatch просто
+  // презаписва engineState безусловно и връща events-а за евентуална
+  // допълнителна логика (анимации в отговор на event-ите, не engine-ът
+  // чакащ анимация — виж task-а т.7).
+  function dispatch(action: LudoEngineAction) {
+    const result = reduceLudoGame(engineState, action)
+    engineState = result.state
+    return result
+  }
+
+  // Прилага presentation route buffer-а върху canonical adapted pieces —
+  // ЕДИНСТВЕНОТО място, където presentation override докосва piece
+  // позиция за render. Engine pieces масивът остава недокоснат.
+  function currentUiPieces(): LudoPiece[] {
+    const uiPieces = ludoEnginePiecesToUiPieces(engineState.pieces)
+    if (!movingPieceOverride) return uiPieces
+    return uiPieces.map((p) =>
+      p.id === movingPieceOverride!.pieceId ? { ...p, cell: movingPieceOverride!.cellId } : p,
+    )
+  }
+
   function currentScreenState(): LudoGameScreenState {
     return {
       players,
-      pieces,
-      legalMoves: isAnimatingMove ? [] : legalMoves,
-      activeColor,
+      pieces: currentUiPieces(),
+      // По време на анимация не показваме legal-move highlights/capture
+      // ring-ове — вече е избран конкретен ход, engine-ът е в turn_complete
+      // (legalMoves вече е [] там), но пазим explicit guard-а тук за яснота.
+      legalMoves: isAnimatingMove ? [] : ludoEngineLegalMovesToUiMoves(engineState.legalMoves),
+      activeColor: engineState.activeColor,
       turnStartedAt,
       isDiceRolling,
-      canRollDice: canRollDice && !isAnimatingMove,
+      // Interaction lock: DOM disabled state следва engine turnPhase, но
+      // НЕ е authoritative за правилата — engine stale-action защитата
+      // (turnVersion) е вторият защитен слой (виж task-а т.9).
+      canRollDice: engineState.turnPhase === 'waiting_for_roll' && !isAnimatingMove,
       turnSecondsLeft: MOCK_TURN_SECONDS,
       useMobileLayout: isPhoneLayoutViewport(),
     }
@@ -151,7 +203,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   }
 
   async function handleRollDice(): Promise<void> {
-    if (!canRollDice || isAnimatingMove) return
+    // Interaction lock (т.9): дублиращ click по време на flight/move/
+    // capture анимация се игнорира тук, ПРЕДИ да опитаме dispatch. Engine
+    // turnPhase guard-ът е вторият, authoritative защитен слой.
+    if (engineState.turnPhase !== 'waiting_for_roll' || isAnimatingMove) return
+
     // Launcher-ът (data-ludo-dice-roll-button), центърът на дъската
     // (data-ludo-board-center) и самата board grid (data-ludo-board, за
     // responsive dice sizing — виж playLudoDiceFlightOverlay.ts) трябва да
@@ -166,6 +222,17 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     const toRect = centerEl.getBoundingClientRect()
     const boardGridWidthPx = boardGridEl.getBoundingClientRect().width
 
+    const rollingColor = engineState.activeColor
+    const rollStarted = dispatch({
+      type: 'ROLL_STARTED',
+      color: rollingColor,
+      expectedTurnVersion: engineState.turnVersion,
+    })
+    // ROLL_STARTED rejected (грешен player/phase/stale turnVersion) — не би
+    // трябвало да се случи зад вече минатия DOM guard по-горе, но engine-ът
+    // остава authoritative: rejected -> без визуален ефект.
+    if (rollStarted.state.turnPhase !== 'rolling') return
+
     // Само едно "кацнало" зарче видимо в даден момент — премахваме
     // предходния резултат веднага при ново хвърляне. (playFlight също
     // прави собствен clearLanded() отвътре, но правим го и тук изрично, за
@@ -173,10 +240,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // едва когато новият полет приключи.)
     diceResultOverlay.clearLanded()
 
-    canRollDice = false
     isDiceRolling = true
     render()
 
+    // External RNG (Math.random остава ИЗВЪН engine-а) — резултатът е
+    // INPUT към ROLL_RESOLVED, не engine-ът сам хвърля зара (виж task-а т.7).
     const result = rollLudoMockDiceResult()
     // Полет + 3D завъртане до правилната страна, визуализирано изцяло в
     // overlay-а (виж playLudoDiceFlightOverlay.ts) — player card launcher-ът
@@ -186,85 +254,127 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // единственото място, което го маха — след завършен ход).
     await diceResultOverlay.playFlight({ fromRect, toRect, boardGridWidthPx, result })
 
-    // Legal moves се пресмятат ЕДИНСТВЕНО тук, СЛЕД кацването — само за
-    // играча на ход (activeColor === currentPlayerId в този mock) и само
-    // спрямо реално показания dice резултат. targetTrackIndex =
-    // (currentTrackIndex + diceValue) % LUDO_TRACK_LENGTH, capture само ако
-    // противникова пионка стои точно на target-а — виж computeLudoLegalMoves.
-    legalMoves = computeLudoLegalMoves(pieces, activeColor, result)
+    // ROLL_RESOLVED мества engine-а в awaiting_move_selection (или директно
+    // turn_complete, ако няма legal moves) и изчислява legalMoves —
+    // canonical, deterministic, виж ludoEngineLegalMoves.ts.
+    const rollResolved = dispatch({
+      type: 'ROLL_RESOLVED',
+      color: rollingColor,
+      value: result,
+      expectedTurnVersion: engineState.turnVersion,
+    })
+
     isDiceRolling = false
-    canRollDice = true
     render()
+
+    // Ако няма legal moves (rare в текущия начален mock state, но engine-ът
+    // вече го обработва коректно), ходът е автоматично complete — напред.
+    if (rollResolved.state.turnPhase === 'turn_complete') {
+      advanceTurn()
+    }
   }
 
   async function handlePieceSelected(pieceId: LudoPieceId): Promise<void> {
+    // Interaction lock — виж handleRollDice за същия pattern.
     if (isAnimatingMove) return
-    const move = legalMoves.find((m) => m.pieceId === pieceId)
+    if (engineState.turnPhase !== 'awaiting_move_selection') return
+
+    const slot = ludoUiPieceIdToSlot(pieceId)
+    const color = engineState.activeColor
+    const move = engineState.legalMoves.find((m) => m.color === color && m.slot === slot)
     if (!move) return
+
+    // stateBefore — за да изчислим route-а от РЕАЛНАТА текуща позиция
+    // (виж task-а т.5 стъпка 1/4).
+    const movingPieceBefore = engineState.pieces.find((p) => p.color === color && p.slot === slot)
+    if (!movingPieceBefore) return
+    const fromCellId = ludoEnginePositionToCellId(movingPieceBefore.position, color)
 
     isAnimatingMove = true
     render()
 
-    const piece = pieces.find((p) => p.id === pieceId)
-    if (!piece) {
+    // Engine-ът мутира state-а МОМЕНТАЛНО тук (dispatch е synchronous) —
+    // не чака анимацията (виж task-а т.4/т.5 стъпки 2-3). stateAfter вече е
+    // canonical final state; capture (ако има) вече е приложен.
+    const moveResult = dispatch({ type: 'MOVE_REQUESTED', color, slot, expectedTurnVersion: engineState.turnVersion })
+    const capturedEvent = moveResult.events.find((e) => e.type === 'pieces_captured')
+    const capturedPieceIds = capturedEvent && capturedEvent.type === 'pieces_captured' ? capturedEvent.capturedPieceIds : []
+
+    if (move.targetPosition.kind !== 'track') {
       isAnimatingMove = false
       render()
       return
     }
+    const targetCellId = ludoEnginePositionToCellId(move.targetPosition, color)
 
-    const route = buildLudoMoveRoute(piece.cell, move.targetCell)
+    // Route stepping е ЧИСТО presentation (виж task-а т.5 стъпки 5-6):
+    // canonical engine state вече е final, движим само movingPieceOverride
+    // през междинните клетки на route-а, render() при всяка стъпка показва
+    // presentation frame-а (adapted engine pieces + override), НЕ мутация
+    // на engine.pieces.
+    const route = buildLudoMoveRoute(fromCellId, targetCellId)
     for (const stepCellId of route) {
-      piece.cell = stepCellId
+      movingPieceOverride = { pieceId, cellId: stepCellId }
       render()
       await wait(STEP_ANIMATION_MS)
     }
 
-    if (move.type === 'capture') {
-      await animateCapture(move.targetCell, piece.color)
+    if (capturedPieceIds.length > 0) {
+      await animateCapture(capturedPieceIds)
     }
 
     // Ходът е ЗАВЪРШЕН (стъпките + евентуалния capture) — зарчето в
-    // центъра вече няма причина да стои (виж task-а: не чакай следващото
-    // хвърляне, махни го веднага тук, след целия move/capture sequence).
+    // центъра вече няма причина да стои. Presentation override-ът се маха
+    // (т.5 стъпка 8) — renderer-ът показва canonical final state оттук
+    // нататък.
     diceResultOverlay.clearLanded()
 
-    legalMoves = []
+    movingPieceOverride = null
     isAnimatingMove = false
     render()
+
+    advanceTurn()
   }
 
-  // Удря ВСИЧКИ противникови пионки на target клетката, не само първата
-  // намерена (виж task-а — ако target-ът е stack от 2-4 противникови
-  // пионки, всички се прибират, не само visual representative-а). Own-
-  // color пионки на target-а НЕ се пипат — те просто образуват/растат
-  // stack с пристигащата пионка (виж handlePieceSelected — move.type е
-  // 'capture' само ако computeLudoLegalMoves намери поне 1 opponent на
-  // target-а; victims тук филтрира по цвят defensively, независимо колко
-  // различни opponent цвята евентуално се окажат на same cell).
-  async function animateCapture(targetCellId: LudoCellId, capturingColor: LudoColor): Promise<void> {
-    const victims = findLudoCaptureVictims(pieces, targetCellId, capturingColor)
-    if (victims.length === 0) return
-
+  // Удря ВСИЧКИ противникови пионки, чиито id-та идват директно от
+  // pieces_captured.capturedPieceIds (виж task-а т.2 — engine-ът вече знае
+  // точно кои real pieces са captured, никакво color/slot guessing тук).
+  async function animateCapture(capturedPieceIds: readonly LudoPieceId[]): Promise<void> {
     // ЕДИН общ impact момент за цялата target клетка (не N последователни
     // shake-а един след друг) — всички victim DOM елементи получават
     // анимацията едновременно, после ЕДНО общо изчакване. Stacked victims
     // от същия цвят споделят един и същ representative DOM node (виж
     // renderLudoPieces.ts), затова dedupe-ваме елементите, не victim-ите.
-    const victimEls = victims
-      .map((victim) =>
+    const victimEls = capturedPieceIds
+      .map((id) =>
         options.root.querySelector<HTMLElement>(
-          `[data-ludo-piece="${victim.id}"], [data-ludo-piece-group~="${victim.id}"]`,
+          `[data-ludo-piece="${id}"], [data-ludo-piece-group~="${id}"]`,
         ),
       )
       .filter((el): el is HTMLElement => el !== null)
     const uniqueVictimEls = Array.from(new Set(victimEls))
     uniqueVictimEls.forEach((el) => el.style.setProperty('animation', 'ludo-piece-shake 400ms ease-in-out'))
     await wait(IMPACT_ANIMATION_MS)
+    // Canonical victim positions вече са home (engine-ът приложи capture-а
+    // синхронно при dispatch по-горе) — следващият render() (в
+    // handlePieceSelected след тази функция) показва финалния резултат.
+  }
 
-    // Реалната state мутация (кой отива на кой home slot) живее в
-    // resolveLudoCapture.ts — чист, независимо тестваем модул (виж
-    // task-а за deterministic checks).
-    applyLudoCaptureToHome(victims)
+  // Автоматично напредва хода след завършен move (или след roll без legal
+  // moves) — MOCK_TURN_SECONDS countdown UI все още не задейства реално
+  // turn timeout (extra roll on 6, capture extra roll, finish rules — извън
+  // Phase 2 обхвата), но explicit TURN_ADVANCED след всеки завършен ход
+  // прави prototype-а playable за демонстрация на последователни ходове от
+  // всичките 4 цвята (виж task-а т.8).
+  function advanceTurn(): void {
+    const result = dispatch({
+      type: 'TURN_ADVANCED',
+      color: engineState.activeColor,
+      expectedTurnVersion: engineState.turnVersion,
+    })
+    if (result.events.some((e) => e.type === 'turn_advanced')) {
+      turnStartedAt = Date.now()
+    }
     render()
   }
 

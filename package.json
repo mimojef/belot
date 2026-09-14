@@ -10,6 +10,7 @@
     "check:ludo-track-geometry": "npx tsx scripts/checkLudoTrackGeometry.ts",
     "check:ludo-legal-move-math": "npx tsx scripts/checkLudoLegalMoveMath.ts",
     "check:ludo-stack-capture": "npx tsx scripts/checkLudoStackCapture.ts",
+    "check:ludo-engine": "npx tsx scripts/checkLudoEngine.ts",
     "check:password-reset-frontend": "npx tsx scripts/checkPasswordResetFrontend.ts",
     "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts",
     "check:gift-success-message-stale-cleanup": "npx tsx scripts/checkGiftSuccessMessageStaleCleanup.ts",

@@ -6,43 +6,31 @@
 // единственото място, което знае как track-31 се превръща в grid позиция.
 
 import { LUDO_COLORS, ludoCellId, type LudoCell, type LudoCellId, type LudoColor } from '../ludoTypes'
+import {
+  LUDO_TRACK_LENGTH,
+  LUDO_FINISH_LENGTH,
+  LUDO_HOME_SLOTS,
+  LUDO_START_INDEX,
+  ludoAdvanceTrackIndex,
+} from '../ludoGeometryConstants'
 
-export const LUDO_TRACK_LENGTH = 56
-export const LUDO_FINISH_LENGTH = 6
-export const LUDO_HOME_SLOTS = 4
-
-// Всеки цвят влиза на трасето от собствен старт индекс (0-based track index),
-// разположени на равни 14-клетки интервали по часовниковата стрелка (56/4):
-// red -> blue -> yellow -> green (реда на грид обхождането по-долу). 14, не
-// 13 — рамото вече включва и диагоналната ъглова клетка на завоя (виж
-// buildTrackGrid): реорганизирахме track-а да е непрекъсната обиколка без
-// "декоративни" клетки, които engine-ът би прескачал.
-const START_INDEX: Record<LudoColor, number> = {
-  red: 0,
-  blue: 14,
-  yellow: 28,
-  green: 42,
-}
+export { LUDO_TRACK_LENGTH, LUDO_FINISH_LENGTH, LUDO_HOME_SLOTS, ludoAdvanceTrackIndex }
 
 // Клетката непосредствено преди собствения старт (т.е. входа към finish
 // коридора) — последната track клетка, преди пионката да завие навътре.
 const ENTRY_INDEX: Record<LudoColor, number> = {
-  red: (START_INDEX.red + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
-  blue: (START_INDEX.blue + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
-  yellow: (START_INDEX.yellow + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
-  green: (START_INDEX.green + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  red: (LUDO_START_INDEX.red + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  blue: (LUDO_START_INDEX.blue + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  yellow: (LUDO_START_INDEX.yellow + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  green: (LUDO_START_INDEX.green + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
 }
 
 export function ludoStartTrackIndex(color: LudoColor): number {
-  return START_INDEX[color]
+  return LUDO_START_INDEX[color]
 }
 
 export function ludoEntryTrackIndex(color: LudoColor): number {
   return ENTRY_INDEX[color]
-}
-
-export function ludoAdvanceTrackIndex(index: number, steps: number): number {
-  return (index + steps) % LUDO_TRACK_LENGTH
 }
 
 export interface LudoGridPoint {
@@ -184,11 +172,11 @@ export function ludoAllCellIds(): LudoCellId[] {
 }
 
 // Клетките, отбелязващи собствения старт на всеки цвят (за visual star
-// маркер на дъската), извлечени директно от START_INDEX за консистентност.
+// маркер на дъската), извлечени директно от LUDO_START_INDEX за консистентност.
 export function ludoStartCellIds(): Partial<Record<LudoColor, LudoCellId>> {
   const result: Partial<Record<LudoColor, LudoCellId>> = {}
   for (const color of LUDO_COLORS) {
-    result[color] = ludoCellId({ kind: 'track', index: START_INDEX[color] })
+    result[color] = ludoCellId({ kind: 'track', index: LUDO_START_INDEX[color] })
   }
   return result
 }
