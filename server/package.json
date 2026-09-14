@@ -65,6 +65,7 @@
     "check:admin-registered-profiles-frontend": "tsx scripts/checkAdminRegisteredProfilesFrontend.ts",
     "check:admin-registered-profiles-behavior": "tsx scripts/checkAdminRegisteredProfilesBehavior.ts",
     "check:open-registration-policy": "tsx scripts/checkOpenRegistrationPolicy.ts --server-root=.",
+    "check:email-verification-registration": "tsx scripts/checkEmailVerificationRegistration.ts --server-root=.",
     "check:accounts-role-migration": "tsx scripts/checkAccountsRoleMigration.ts",
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",

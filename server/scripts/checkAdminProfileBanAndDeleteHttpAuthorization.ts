@@ -64,9 +64,16 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { WebSocket } from 'ws'
 import { join, resolve } from 'node:path'
+import { verifyVerificationCode } from '../src/db/authHelpers.js'
 
 const PASSWORD = 'BanDeleteSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
+// Email verification pending-first flow (виж authStore.ts's register() doc
+// коментар) — тестова HMAC secret стойност (≥32 символа), подадена на
+// spawned сървъра чрез PASSWORD_RESET_RATE_LIMIT_SECRET fallback — register()
+// по-долу brute-force-ва 6-цифрения код от DB-съхранения code_hash вместо
+// реален Brevo (недостъпен в тестова среда).
+const TEST_REGISTRATION_SECRET = 'ban-delete-http-authorization-test-secret-01'
 
 /**
  * Test isolation helper — исторически (registration anti-evasion gate,
@@ -235,6 +242,7 @@ function startServer(serverDir: string, port: number): RunningServer {
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -264,7 +272,28 @@ function promoteRole(databaseFile: string, email: string, role: string): void {
 
 type RegisteredUser = { cookie: string; profileId: string; accountId: string; email: string; displayName: string }
 
-async function register(port: number, runId: string, suffix: string): Promise<RegisteredUser> {
+/** Brute-force-ва 6-цифрения verification код от pending_registrations.code_hash (mirror на checkOpenRegistrationPolicy.ts's аналогична helper). */
+function bruteForceVerificationCode(databaseFile: string, pendingRegistrationId: string): string {
+  const db = new DatabaseSync(databaseFile)
+  const row = db.prepare(`SELECT code_hash FROM pending_registrations WHERE pending_registration_id = ?`).get(pendingRegistrationId) as
+    | { code_hash: string }
+    | undefined
+  db.close()
+  if (!row) throw new Error(`pending_registrations row not found: ${pendingRegistrationId}`)
+  for (let candidate = 0; candidate < 1_000_000; candidate++) {
+    const code = candidate.toString().padStart(6, '0')
+    if (verifyVerificationCode(code, TEST_REGISTRATION_SECRET, row.code_hash)) return code
+  }
+  throw new Error(`Не успях да brute-force-на verification кода за ${pendingRegistrationId}`)
+}
+
+/**
+ * Email verification pending-first flow (виж authStore.ts's register() doc
+ * коментар) — register() вече само създава pending_registrations ред;
+ * verify-registration-email() материализира реалния account/profile/session.
+ * Тестовата среда няма реален Brevo достъп, затова brute-force-ваме кода.
+ */
+async function register(port: number, databaseFile: string, runId: string, suffix: string): Promise<RegisteredUser> {
   const email = `ban-delete-smoke-${runId}-${suffix}@example.test`
   const displayName = `BanSmoke${runId.replace(/[^0-9]/g, '').slice(-6)}${suffix}`
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
@@ -280,13 +309,39 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
     // задължително за да не се отхвърли заявката с 400.
     body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male', visitorId: randomUUID() }),
   })
-  if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)
-  const payload = await res.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
-  if (!payload.ok || !payload.session) throw new Error(`Регистрацията (${suffix}) не е успешна: ${payload.message ?? '?'}`)
+  const registerPayload = await res.json().catch(() => null) as { pendingRegistrationId?: string; message?: string } | null
+  const pendingRegistrationId = registerPayload?.pendingRegistrationId
+  if (typeof pendingRegistrationId !== 'string' || pendingRegistrationId === '') {
+    throw new Error(`Регистрацията (${suffix}) не създаде pending registration: status=${res.status} ${JSON.stringify(registerPayload)}`)
+  }
 
-  const headersExt = res.headers as Headers & { getSetCookie?: () => string[] }
-  const rawCookie = headersExt.getSetCookie?.()[0] ?? res.headers.get('set-cookie')
-  if (!rawCookie) throw new Error(`Липсва Set-Cookie при регистрация (${suffix}).`)
+  const code = bruteForceVerificationCode(databaseFile, pendingRegistrationId)
+  // bruteForceVerificationCode блокира Node event loop-а синхронно — на
+  // бавни/натоварени machines това понякога кара keep-alive connection-а
+  // към spawned сървъра да стане stale ("fetch failed"/ECONNRESET) — един
+  // бърз retry е достатъчен.
+  let verifyRes: Response
+  try {
+    verifyRes = await fetch(`http://127.0.0.1:${port}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe: true }),
+    })
+  } catch {
+    await new Promise((r) => setTimeout(r, 200))
+    verifyRes = await fetch(`http://127.0.0.1:${port}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe: true }),
+    })
+  }
+  if (verifyRes.status !== 200) throw new Error(`Верификацията (${suffix}) върна status ${verifyRes.status}.`)
+  const payload = await verifyRes.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
+  if (!payload.ok || !payload.session) throw new Error(`Верификацията (${suffix}) не е успешна: ${payload.message ?? '?'}`)
+
+  const headersExt = verifyRes.headers as Headers & { getSetCookie?: () => string[] }
+  const rawCookie = headersExt.getSetCookie?.()[0] ?? verifyRes.headers.get('set-cookie')
+  if (!rawCookie) throw new Error(`Липсва Set-Cookie при верификация (${suffix}).`)
   return {
     cookie: rawCookie.split(';')[0]!,
     profileId: payload.session.profile.profileId,
@@ -360,24 +415,24 @@ try {
   const runId = `${Date.now()}-${process.pid}`
 
   console.log('\n[setup] Регистрация на потребители с различни роли...')
-  const player = await register(port, runId, 'player')
-  const banTarget = await register(port, runId, 'bantarget')
-  const deleteTarget = await register(port, runId, 'deltarget')
-  const onlineDeleteTarget = await register(port, runId, 'onlinedeltarget')
-  const forensicDeleteTarget = await register(port, runId, 'forensicdel')
-  const banHistoryDeleteTarget = await register(port, runId, 'banhistdel')
-  const tournamentActiveTarget = await register(port, runId, 'touractive')
-  const tournamentFinishedCreator = await register(port, runId, 'tourfincreat')
-  const tournamentFinishedParticipant = await register(port, runId, 'tourfinpart')
-  const offlineBanTarget = await register(port, runId, 'offlineban')
-  const offlineDeleteTarget = await register(port, runId, 'offlinedel')
-  const onlineNotPlayingBanTarget = await register(port, runId, 'onlinenpban')
-  const onlineNotPlayingDeleteTarget = await register(port, runId, 'onlinenpdel')
-  const pendingBanTarget = await register(port, runId, 'pendingban')
-  const pendingDeleteTarget = await register(port, runId, 'pendingdel')
-  const tournamentPendingGuardTarget = await register(port, runId, 'tourpendguard')
-  const adminCandidate = await register(port, runId, 'admin')
-  const subadminCandidate = await register(port, runId, 'subadmin')
+  const player = await register(port, isolated.databaseFile, runId, 'player')
+  const banTarget = await register(port, isolated.databaseFile, runId, 'bantarget')
+  const deleteTarget = await register(port, isolated.databaseFile, runId, 'deltarget')
+  const onlineDeleteTarget = await register(port, isolated.databaseFile, runId, 'onlinedeltarget')
+  const forensicDeleteTarget = await register(port, isolated.databaseFile, runId, 'forensicdel')
+  const banHistoryDeleteTarget = await register(port, isolated.databaseFile, runId, 'banhistdel')
+  const tournamentActiveTarget = await register(port, isolated.databaseFile, runId, 'touractive')
+  const tournamentFinishedCreator = await register(port, isolated.databaseFile, runId, 'tourfincreat')
+  const tournamentFinishedParticipant = await register(port, isolated.databaseFile, runId, 'tourfinpart')
+  const offlineBanTarget = await register(port, isolated.databaseFile, runId, 'offlineban')
+  const offlineDeleteTarget = await register(port, isolated.databaseFile, runId, 'offlinedel')
+  const onlineNotPlayingBanTarget = await register(port, isolated.databaseFile, runId, 'onlinenpban')
+  const onlineNotPlayingDeleteTarget = await register(port, isolated.databaseFile, runId, 'onlinenpdel')
+  const pendingBanTarget = await register(port, isolated.databaseFile, runId, 'pendingban')
+  const pendingDeleteTarget = await register(port, isolated.databaseFile, runId, 'pendingdel')
+  const tournamentPendingGuardTarget = await register(port, isolated.databaseFile, runId, 'tourpendguard')
+  const adminCandidate = await register(port, isolated.databaseFile, runId, 'admin')
+  const subadminCandidate = await register(port, isolated.databaseFile, runId, 'subadmin')
 
   promoteRole(isolated.databaseFile, adminCandidate.email, 'admin')
   promoteRole(isolated.databaseFile, subadminCandidate.email, 'subadmin')
@@ -544,8 +599,15 @@ try {
       headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextSyntheticTestIp() },
       body: JSON.stringify({ email: deleteTarget.email, password: PASSWORD, displayName: `${deleteTarget.displayName}Re`, gender: 'male', visitorId: randomUUID() }),
     })
-    const b = await res.json() as { ok?: boolean; message?: string }
-    if (res.status !== 200 || b.ok !== true) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
+    // Email verification pending-first flow — "успешна регистрация" сега
+    // означава pendingRegistrationId присъства (200 ok:true, ИЛИ 503
+    // EMAIL_DELIVERY_FAILED с pendingRegistrationId — тестова среда без
+    // реален Brevo, виж register()'s doc коментар по-горе). Целта на теста
+    // (email-ът е реално освободен, не блокиран от стария изтрит профил)
+    // е доказана от самото присъствие на pendingRegistrationId.
+    const b = await res.json() as { ok?: boolean; message?: string; pendingRegistrationId?: string }
+    const isAllowed = (res.status === 200 && b.ok === true) || (res.status === 503 && typeof b.pendingRegistrationId === 'string' && b.pendingRegistrationId !== '')
+    if (!isAllowed) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
   })
   await check('[delete-flow] СЪЩОТО displayName/username може да се регистрира отново (освободено)', async () => {
     const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
@@ -553,8 +615,9 @@ try {
       headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextSyntheticTestIp() },
       body: JSON.stringify({ email: `ban-delete-smoke-${runId}-namereuse@example.test`, password: PASSWORD, displayName: deleteTarget.displayName, gender: 'male', visitorId: randomUUID() }),
     })
-    const b = await res.json() as { ok?: boolean; message?: string }
-    if (res.status !== 200 || b.ok !== true) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
+    const b = await res.json() as { ok?: boolean; message?: string; pendingRegistrationId?: string }
+    const isAllowed = (res.status === 200 && b.ok === true) || (res.status === 503 && typeof b.pendingRegistrationId === 'string' && b.pendingRegistrationId !== '')
+    if (!isAllowed) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
   })
 
   console.log('\n[audit] admin_profile_deletions + profiles row вече не съществува')
@@ -654,8 +717,12 @@ try {
       headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': nextSyntheticTestIp() },
       body: JSON.stringify({ email: onlineDeleteTarget.email, password: PASSWORD, displayName: `${onlineDeleteTarget.displayName}Re`, gender: 'male', visitorId: randomUUID() }),
     })
-    const b = await res.json() as { ok?: boolean; message?: string }
-    if (res.status !== 200 || b.ok !== true) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
+    // Email verification pending-first flow — виж [delete-flow] тестовете
+    // по-горе за същия tolerance rationale (200 ok:true ИЛИ 503
+    // EMAIL_DELIVERY_FAILED с pendingRegistrationId).
+    const b = await res.json() as { ok?: boolean; message?: string; pendingRegistrationId?: string }
+    const isAllowed = (res.status === 200 && b.ok === true) || (res.status === 503 && typeof b.pendingRegistrationId === 'string' && b.pendingRegistrationId !== '')
+    if (!isAllowed) throw new Error(`status=${res.status}, body=${JSON.stringify(b)}`)
   })
 
   if (onlineSocket.readyState === WebSocket.OPEN || onlineSocket.readyState === WebSocket.CONNECTING) {
@@ -1069,7 +1136,7 @@ try {
   // synchronous local refresh directно от своя HTTP response).
   console.log('\n[WS-Invalidation] admin_aggregate_data_changed broadcast след успешен immediate hard delete')
 
-  const wsInvalidationTarget = await register(port, runId, 'wsinvalidation')
+  const wsInvalidationTarget = await register(port, isolated.databaseFile, runId, 'wsinvalidation')
 
   const adminSelfSocket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: adminCookie } })
   const adminSelfMessages: Array<{ type?: string }> = []
@@ -1326,9 +1393,9 @@ try {
   // подразбиране при регистрация) — доказва, че default/липсващ avatar не
   // чупи delete-а.
   console.log('\n[file-cleanup] HARD DELETE трие физически avatar + gallery файлове на target, НЕ пипа unrelated profile файлове')
-  const fileCleanupTarget = await register(port, runId, 'filecleanup')
-  const fileCleanupControl = await register(port, runId, 'filecleanupctrl')
-  const fileCleanupDefaultAvatarTarget = await register(port, runId, 'filecleanupdefault')
+  const fileCleanupTarget = await register(port, isolated.databaseFile, runId, 'filecleanup')
+  const fileCleanupControl = await register(port, isolated.databaseFile, runId, 'filecleanupctrl')
+  const fileCleanupDefaultAvatarTarget = await register(port, isolated.databaseFile, runId, 'filecleanupdefault')
 
   const avatarUploadsPath = join(isolated.serverDir, 'uploads', 'avatars')
   const galleryUploadsPath = join(isolated.serverDir, 'uploads', 'profile-gallery')
@@ -1415,8 +1482,8 @@ try {
   // — hard delete на единия НЕ трябва да унищожи файла, докато другият
   // профил все още го реферира.
   console.log('\n[file-cleanup-shared] Двама профила споделят СЪЩИЯ uploaded avatar URL -> hard delete на единия НЕ трие физическия файл')
-  const sharedAvatarProfileA = await register(port, runId, 'sharedavatara')
-  const sharedAvatarProfileB = await register(port, runId, 'sharedavatarb')
+  const sharedAvatarProfileA = await register(port, isolated.databaseFile, runId, 'sharedavatara')
+  const sharedAvatarProfileB = await register(port, isolated.databaseFile, runId, 'sharedavatarb')
 
   const sharedAvatarFilename = `${randomUUID()}.webp`
   const sharedAvatarFilePath = join(avatarUploadsPath, sharedAvatarFilename)

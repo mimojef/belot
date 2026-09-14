@@ -44,6 +44,7 @@ import { WebSocket } from 'ws'
 
 import { createAuthStore } from '../src/db/authStore.js'
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
+import { verifyVerificationCode } from '../src/db/authHelpers.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -52,6 +53,11 @@ const migrationsDir = resolve(serverRoot, 'database/migrations')
 const PASSWORD = 'SessionRenewSmoke1!'
 const DAY_MS = 1000 * 60 * 60 * 24
 const NINETY_DAYS_MS = DAY_MS * 90
+// Email verification pending-first flow (виж authStore.ts's register() doc
+// коментар) — registrationVerificationCodeSecret изисква ≥32 символа
+// (validateRateLimitSecret), mirror на password-reset-овия rate-limit
+// secret contract. Тестова стойност, не production secret.
+const TEST_REGISTRATION_SECRET = 'session-renewal-test-secret-0123456789'
 
 let passed = 0
 let failed = 0
@@ -107,7 +113,9 @@ async function runAuthStoreLevelTests(): Promise<void> {
   try {
     await applyMigrations(dbPath)
     progressStore = await createPlayerProgressStore(dbPath)
-    authStore = await createAuthStore(dbPath, progressStore)
+    authStore = await createAuthStore(dbPath, progressStore, {
+      registrationVerificationCodeSecret: TEST_REGISTRATION_SECRET,
+    })
     db = new DatabaseSync(dbPath, { open: true })
     db.exec('PRAGMA journal_mode = WAL;')
 
@@ -125,17 +133,31 @@ async function runAuthStoreLevelTests(): Promise<void> {
     function setRevoked(sessionId: string): void {
       localDb.prepare(`UPDATE account_sessions SET revoked_at = CURRENT_TIMESTAMP WHERE session_id = ?`).run(sessionId)
     }
+    // Email verification pending-first flow — register() вече само създава
+    // pending_registrations ред + rawCode (in-process достъпен директно тук,
+    // никога през email за този тест); verifyRegistrationEmail() материализира
+    // реалния account/profile/session, mirror на production verify flow-а.
     function registerFresh(suffix: string): { sessionToken: string; sessionId: string } {
-      const result = authStore!.register({
+      const pendingResult = authStore!.register({
         email: `renew-${suffix}@example.test`,
         password: PASSWORD,
         displayName: `Renew${suffix}`,
         gender: 'male',
         visitorId: randomUUID(),
       })
-      assert(result.ok, `register(${suffix}) failed: ${!result.ok ? result.message : ''}`)
-      if (!result.ok) throw new Error('unreachable')
-      return { sessionToken: result.sessionToken, sessionId: result.session.sessionId }
+      assert(pendingResult.ok, `register(${suffix}) failed: ${!pendingResult.ok ? pendingResult.message : ''}`)
+      if (!pendingResult.ok) throw new Error('unreachable')
+
+      const verifyResult = authStore!.verifyRegistrationEmail({
+        pendingRegistrationId: pendingResult.pendingRegistrationId,
+        code: pendingResult.rawCode,
+        rememberMe: true,
+        ipAddress: null,
+        userAgent: null,
+      })
+      assert(verifyResult.ok, `verifyRegistrationEmail(${suffix}) failed: ${!verifyResult.ok ? verifyResult.reason : ''}`)
+      if (!verifyResult.ok) throw new Error('unreachable')
+      return { sessionToken: verifyResult.sessionToken, sessionId: verifyResult.session.sessionId }
     }
 
     // ── [A] Нов login/register -> DB expires_at ≈ now + 90 дни ──────────
@@ -224,7 +246,7 @@ async function runAuthStoreLevelTests(): Promise<void> {
     // ── [I] Multiple sessions — renewal на A не пипа B ───────────────────
     await check('[I] renewal на session A НЕ променя expires_at на session B (същия акаунт, различни устройства)', () => {
       const first = registerFresh('i')
-      const loginResult = authStore!.login({ email: `renew-i@example.test`, password: PASSWORD })
+      const loginResult = authStore!.login({ email: `renew-i@example.test`, password: PASSWORD, rememberMe: true })
       assert(loginResult.ok, `втори login (device B) failed: ${!loginResult.ok ? loginResult.message : ''}`)
       if (!loginResult.ok) throw new Error('unreachable')
       const second = { sessionToken: loginResult.sessionToken, sessionId: loginResult.session.sessionId }
@@ -347,6 +369,72 @@ function httpRequest(port: number, pathname: string, method: string, cookie?: st
   })
 }
 
+/**
+ * Email verification pending-first flow (виж authStore.ts's register() doc
+ * коментар) — POST /api/auth/register вече само връща pendingRegistrationId
+ * (rawCode никога не напуска сървъра отвъд email-а). Тестовият spawned
+ * сървър НЯМА реален Brevo достъп, затова brute-force-ваме 6-цифрения код
+ * (1 000 000 HMAC-SHA256 изчисления, <1s) от DB-съхранения code_hash,
+ * използвайки СЪЩИЯ production HMAC helper (verifyVerificationCode) и
+ * СЪЩИЯ secret, който startServer() подава на spawned процеса
+ * (PASSWORD_RESET_RATE_LIMIT_SECRET=TEST_REGISTRATION_SECRET) — легитимна
+ * test-harness техника (тестът контролира и двете страни: secret-а И DB
+ * файла), не production security bypass.
+ */
+function bruteForceVerificationCode(databaseFilePath: string, pendingRegistrationId: string, secret: string): string {
+  const db = new DatabaseSync(databaseFilePath, { open: true })
+  const row = db.prepare(`SELECT code_hash FROM pending_registrations WHERE pending_registration_id = ?`).get(pendingRegistrationId) as
+    | { code_hash: string }
+    | undefined
+  db.close()
+  if (!row) throw new Error(`pending_registrations row not found: ${pendingRegistrationId}`)
+  for (let candidate = 0; candidate < 1_000_000; candidate++) {
+    const code = candidate.toString().padStart(6, '0')
+    if (verifyVerificationCode(code, secret, row.code_hash)) return code
+  }
+  throw new Error(`Не успях да brute-force-на verification кода за ${pendingRegistrationId}`)
+}
+
+/** register() + verify-registration-email() през реален HTTP — резултатната форма mirror-ва старата директна register() HTTP заявка (status/body/headers), за да не се пипат downstream assertions. */
+async function registerAndVerifyHttp(
+  port: number,
+  databaseFilePath: string,
+  secret: string,
+  input: { email: string; password: string; displayName: string; gender: 'male' | 'female'; visitorId: string; rememberMe?: boolean },
+): Promise<HttpResult> {
+  const registerResult = await httpRequest(port, '/api/auth/register', 'POST', undefined, {
+    email: input.email,
+    password: input.password,
+    displayName: input.displayName,
+    gender: input.gender,
+    visitorId: input.visitorId,
+  })
+  // pendingRegistrationId се връща и на 503 EMAIL_DELIVERY_FAILED (Brevo не
+  // е configured в тестовата среда — очаквано, pending редът persists, виж
+  // index.ts's register handler doc коментар) — не само на 200.
+  const pendingRegistrationId = (registerResult.body as { pendingRegistrationId?: string } | null)?.pendingRegistrationId ?? ''
+  if (pendingRegistrationId === '') return registerResult
+  const code = bruteForceVerificationCode(databaseFilePath, pendingRegistrationId, secret)
+  // bruteForceVerificationCode блокира Node event loop-а синхронно — на
+  // бавни/натоварени machines това понякога кара keep-alive connection-а
+  // към spawned сървъра да стане stale ("fetch failed"/ECONNRESET, чисто
+  // network-layer transient) — един бърз retry е достатъчен.
+  try {
+    return await httpRequest(port, '/api/auth/verify-registration-email', 'POST', undefined, {
+      pendingRegistrationId,
+      code,
+      rememberMe: input.rememberMe ?? true,
+    })
+  } catch {
+    await sleep(200)
+    return httpRequest(port, '/api/auth/verify-registration-email', 'POST', undefined, {
+      pendingRegistrationId,
+      code,
+      rememberMe: input.rememberMe ?? true,
+    })
+  }
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms))
 }
@@ -420,6 +508,12 @@ function startServer(serverDir: string, port: number): RunningServer {
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
+        // Email verification pending-first flow (виж authStore.ts's register()
+        // doc коментар) — известна тестова стойност, за да може
+        // registerAndVerifyHttp() по-долу да brute-force-не 6-цифрения код от
+        // DB-съхранения code_hash (същия HMAC helper като production, виж
+        // authHelpers.ts's verifyVerificationCode), без нужда от реален Brevo.
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -473,7 +567,7 @@ async function runHttpLevelTests(): Promise<void> {
 
     // ── [G] Регистрация -> cookie Max-Age = 7 776 000 сек (90 дни) ──────
     await check('[G] регистрация -> Set-Cookie belot_session Max-Age = 7776000 (90 * 24 * 60 * 60 сек)', async () => {
-      const r = await httpRequest(port, '/api/auth/register', 'POST', undefined, {
+      const r = await registerAndVerifyHttp(port, isolated.databaseFile, TEST_REGISTRATION_SECRET, {
         email,
         password: PASSWORD,
         displayName: 'RenewHttp',
@@ -572,7 +666,7 @@ async function runHttpLevelTests(): Promise<void> {
     let concurrentCookie = ''
     let concurrentSessionId = ''
     await check('[Concurrent-setup] нова регистрация за concurrent renewal теста', async () => {
-      const r = await httpRequest(port, '/api/auth/register', 'POST', undefined, {
+      const r = await registerAndVerifyHttp(port, isolated.databaseFile, TEST_REGISTRATION_SECRET, {
         email: 'renewconcurrent@example.test',
         password: PASSWORD,
         displayName: 'RenewConcurrent',
@@ -667,7 +761,7 @@ async function runHttpLevelTests(): Promise<void> {
     let logoutCookie = ''
     let logoutSessionId = ''
     await check('[F-http-setup] нова регистрация за logout теста', async () => {
-      const r = await httpRequest(port, '/api/auth/register', 'POST', undefined, {
+      const r = await registerAndVerifyHttp(port, isolated.databaseFile, TEST_REGISTRATION_SECRET, {
         email: 'renewhttplogout@example.test',
         password: PASSWORD,
         displayName: 'RenewHttpLogout',
@@ -710,7 +804,7 @@ async function runHttpLevelTests(): Promise<void> {
     let restartCookie = ''
     let restartSessionId = ''
     await check('[H-setup] нова регистрация за restart теста', async () => {
-      const r = await httpRequest(port, '/api/auth/register', 'POST', undefined, {
+      const r = await registerAndVerifyHttp(port, isolated.databaseFile, TEST_REGISTRATION_SECRET, {
         email: 'renewhttprestart@example.test',
         password: PASSWORD,
         displayName: 'RenewHttpRestart',

@@ -77,8 +77,16 @@ import { createServer } from 'node:net'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { verifyVerificationCode } from '../src/db/authHelpers.js'
 
 const PASSWORD = 'OpenRegSmoke1!'
+// Email verification pending-first flow (виж authStore.ts's register() doc
+// коментар) — тестова HMAC secret стойност (≥32 символа), подадена на
+// spawned сървъра чрез PASSWORD_RESET_RATE_LIMIT_SECRET (fallback reuse,
+// виж index.ts bootstrap-а) — registerAllowed() по-долу brute-force-ва
+// 6-цифрения код от DB-съхранения code_hash със СЪЩИЯ secret, вместо реален
+// Brevo (недостъпен в тестова среда).
+const TEST_REGISTRATION_SECRET = 'open-registration-policy-test-secret-01'
 
 let passed = 0
 let failed = 0
@@ -180,6 +188,7 @@ function startServer(serverDir: string, port: number): RunningServer {
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -223,19 +232,85 @@ async function attemptRegister(
   return { status: res.status, body }
 }
 
+/**
+ * "Registration allowed" evidence за директни attemptRegister() тестове,
+ * които проверяват policy-то (не пълния verify flow) — 200 (email реално
+ * изпратен) ИЛИ 503 EMAIL_DELIVERY_FAILED С pendingRegistrationId (pending
+ * редът е бил създаден успешно — anti-evasion policy-то НЕ е блокирало,
+ * единствената причина за non-200 е липсата на реален Brevo в тестовата
+ * среда, несвързано с policy-то под тест). НЕ приема 400/403/409 (истинско
+ * blocking) като "allowed".
+ */
+function assertRegistrationAllowed(result: RegisterAttemptResult, label: string): void {
+  const pendingRegistrationId = (result.body as { pendingRegistrationId?: string } | null)?.pendingRegistrationId ?? ''
+  const allowed = result.status === 200 || (result.status === 503 && pendingRegistrationId !== '')
+  assert(allowed, `${label}: очаквах registration allowed (200 или 503 EMAIL_DELIVERY_FAILED с pendingRegistrationId), получих ${result.status} body=${JSON.stringify(result.body)}`)
+}
+
 type RegisteredUser = { profileId: string; accountId: string; email: string }
+
+/**
+ * Email verification pending-first flow — brute-force-ва 6-цифрения код от
+ * pending_registrations.code_hash (1 000 000 HMAC-SHA256 изчисления, <1s),
+ * ползвайки СЪЩИЯ production HMAC helper (verifyVerificationCode) и СЪЩИЯ
+ * secret, който startServer() подава на spawned процеса — легитимна
+ * test-harness техника (тестът контролира и двете страни), не production
+ * bypass. Mirror на checkAuthSessionRollingRenewal.ts's аналогична helper.
+ */
+function bruteForceVerificationCode(databaseFile: string, pendingRegistrationId: string): string {
+  const db = new DatabaseSync(databaseFile)
+  const row = db.prepare(`SELECT code_hash FROM pending_registrations WHERE pending_registration_id = ?`).get(pendingRegistrationId) as
+    | { code_hash: string }
+    | undefined
+  db.close()
+  if (!row) throw new Error(`pending_registrations row not found: ${pendingRegistrationId}`)
+  for (let candidate = 0; candidate < 1_000_000; candidate++) {
+    const code = candidate.toString().padStart(6, '0')
+    if (verifyVerificationCode(code, TEST_REGISTRATION_SECRET, row.code_hash)) return code
+  }
+  throw new Error(`Не успях да brute-force-на verification кода за ${pendingRegistrationId}`)
+}
 
 async function registerAllowed(
   port: number,
+  databaseFile: string,
   input: { email: string; displayName: string; visitorId?: string; forwardedFor?: string },
 ): Promise<RegisteredUser> {
   const result = await attemptRegister(port, input)
-  if (result.status !== 200) {
-    throw new Error(`Очаквах успешна регистрация, получих status=${result.status} body=${JSON.stringify(result.body)}`)
+  // pendingRegistrationId се връща и на 503 EMAIL_DELIVERY_FAILED (Brevo не
+  // е configured в тестовата среда, pending редът persists — виж index.ts's
+  // register handler doc коментар), не само на 200.
+  const pendingRegistrationId = (result.body as { pendingRegistrationId?: string } | null)?.pendingRegistrationId ?? ''
+  if (pendingRegistrationId === '') {
+    throw new Error(`Очаквах pending registration, получих status=${result.status} body=${JSON.stringify(result.body)}`)
   }
-  const payload = result.body as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } } } | null
-  if (!payload?.ok || !payload.session) {
-    throw new Error(`Регистрацията не е успешна: ${JSON.stringify(result.body)}`)
+
+  const code = bruteForceVerificationCode(databaseFile, pendingRegistrationId)
+  // bruteForceVerificationCode блокира Node event loop-а синхронно (до
+  // ~1 000 000 HMAC-SHA256 изчисления) — на бавни/натоварени machines това
+  // понякога кара keep-alive connection-а към spawned сървъра да стане
+  // stale (ECONNRESET/"fetch failed", чисто network-layer transient, не
+  // business-logic провал) — един бърз retry е достатъчен.
+  let verifyRes: Response
+  try {
+    verifyRes = await fetch(`http://127.0.0.1:${port}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe: true }),
+    })
+  } catch {
+    await new Promise((r) => setTimeout(r, 200))
+    verifyRes = await fetch(`http://127.0.0.1:${port}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe: true }),
+    })
+  }
+  const payload = await verifyRes.json().catch(() => null) as
+    | { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } } }
+    | null
+  if (verifyRes.status !== 200 || !payload?.ok || !payload.session) {
+    throw new Error(`Верификацията не е успешна: status=${verifyRes.status} body=${JSON.stringify(payload)}`)
   }
   return { profileId: payload.session.profile.profileId, accountId: payload.session.account.accountId, email: input.email }
 }
@@ -356,7 +431,7 @@ try {
 
   // ── Admin bootstrap (за hard-delete/risk-recheck HTTP flows) ────────────
   const adminEmail = `open-reg-${runId}-admin@example.test`
-  await registerAllowed(port, { email: adminEmail, displayName: `OpenRegAdmin${runId}`, visitorId: randomUUID(), forwardedFor: '198.51.100.200' })
+  await registerAllowed(port, isolated.databaseFile, { email: adminEmail, displayName: `OpenRegAdmin${runId}`, visitorId: randomUUID(), forwardedFor: '198.51.100.200' })
   promoteRole(isolated.databaseFile, adminEmail, 'admin')
   const adminLoginResult = await attemptLogin(port, adminEmail, PASSWORD)
   if (adminLoginResult.cookie === null) {
@@ -367,7 +442,7 @@ try {
   // ── A. Same visitor_id като АКТИВНО баннат профил -> ALLOWED ────────────
   await check('A. same visitor_id като АКТИВНО баннат профил -> registration ALLOWED', async () => {
     const visitorId = randomUUID()
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-a-victim@example.test`,
       displayName: `OpenRegAV${runId}`,
       visitorId,
@@ -381,14 +456,13 @@ try {
       visitorId,
       forwardedFor: '198.51.100.2',
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
-    assert(result.body?.ok === true, `очаквах ok:true, получих ${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'A')
   })
 
   // ── B. Same visitor_id като АКТИВНО заглушен профил -> ALLOWED ──────────
   await check('B. same visitor_id като АКТИВНО заглушен профил -> registration ALLOWED', async () => {
     const visitorId = randomUUID()
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-b-victim@example.test`,
       displayName: `OpenRegBV${runId}`,
       visitorId,
@@ -402,8 +476,7 @@ try {
       visitorId,
       forwardedFor: '198.51.100.4',
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
-    assert(result.body?.ok === true, `очаквах ok:true, получих ${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'B')
   })
 
   // ── C. Same visitor_id като hard-deleted профил, КОЙТО Е ИМАЛ активен
@@ -411,7 +484,7 @@ try {
   //      "hard-delete evasion" блок) ────────────────────────────────────
   await check('C. same visitor_id като hard-deleted (бил активно баннат) профил -> registration ALLOWED', async () => {
     const visitorId = randomUUID()
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-c-victim@example.test`,
       displayName: `OpenRegCV${runId}`,
       visitorId,
@@ -427,15 +500,14 @@ try {
       visitorId,
       forwardedFor: '198.51.100.6',
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
-    assert(result.body?.ok === true, `очаквах ok:true, получих ${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'C')
   })
 
   // ── D. Same exact IP (нов visitor_id) като banned/muted/hard-deleted
   //      профил -> ALLOWED ─────────────────────────────────────────────
   await check('D1. same IP като АКТИВНО баннат профил (нов visitor_id) -> registration ALLOWED', async () => {
     const sharedIp = '198.51.100.7'
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-d1-victim@example.test`,
       displayName: `OpenRegD1V${runId}`,
       visitorId: randomUUID(),
@@ -449,12 +521,12 @@ try {
       visitorId: randomUUID(),
       forwardedFor: sharedIp,
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'D1')
   })
 
   await check('D2. same IP като АКТИВНО заглушен профил (нов visitor_id) -> registration ALLOWED', async () => {
     const sharedIp = '198.51.100.8'
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-d2-victim@example.test`,
       displayName: `OpenRegD2V${runId}`,
       visitorId: randomUUID(),
@@ -468,12 +540,12 @@ try {
       visitorId: randomUUID(),
       forwardedFor: sharedIp,
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'D2')
   })
 
   await check('D3. same IP като hard-deleted (бил активно баннат) профил (нов visitor_id) -> registration ALLOWED', async () => {
     const sharedIp = '198.51.100.9'
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-d3-victim@example.test`,
       displayName: `OpenRegD3V${runId}`,
       visitorId: randomUUID(),
@@ -489,7 +561,7 @@ try {
       visitorId: randomUUID(),
       forwardedFor: sharedIp,
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'D3')
   })
 
   // ── E. Same visitor_id + same exact IP, ВЕДНАГА след hard delete на
@@ -497,7 +569,7 @@ try {
   await check('E. same visitor_id + same exact IP веднага след hard delete -> registration ALLOWED', async () => {
     const visitorId = randomUUID()
     const sharedIp = '198.51.100.10'
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-e-victim@example.test`,
       displayName: `OpenRegEV${runId}`,
       visitorId,
@@ -514,14 +586,13 @@ try {
       visitorId,
       forwardedFor: sharedIp,
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
-    assert(result.body?.ok === true, `очаквах ok:true, получих ${JSON.stringify(result.body)}`)
+    assertRegistrationAllowed(result, 'E')
   })
 
   // ── F. Duplicate email -> REJECTED ───────────────────────────────────
   await check('F. duplicate email -> REJECTED', async () => {
     const email = `open-reg-${runId}-f@example.test`
-    await registerAllowed(port, { email, displayName: `OpenRegF1${runId}`, visitorId: randomUUID(), forwardedFor: '198.51.100.11' })
+    await registerAllowed(port, isolated.databaseFile, { email, displayName: `OpenRegF1${runId}`, visitorId: randomUUID(), forwardedFor: '198.51.100.11' })
     const before = countAccountsByEmail(isolated.databaseFile, email)
     assert(before === 1, `очаквах точно 1 account за email-а след първата регистрация, намерих ${before}`)
 
@@ -574,13 +645,13 @@ try {
   // ── J/K. visitorId/history продължават да се записват; admin
   //      linked-profile detection продължава да работи ────────────────
   const jkVisitorId = randomUUID()
-  const jkUserOne = await registerAllowed(port, {
+  const jkUserOne = await registerAllowed(port, isolated.databaseFile, {
     email: `open-reg-${runId}-jk-1@example.test`,
     displayName: `OpenRegJK1${runId}`,
     visitorId: jkVisitorId,
     forwardedFor: '198.51.100.16',
   })
-  const jkUserTwo = await registerAllowed(port, {
+  const jkUserTwo = await registerAllowed(port, isolated.databaseFile, {
     email: `open-reg-${runId}-jk-2@example.test`,
     displayName: `OpenRegJK2${runId}`,
     visitorId: jkVisitorId,
@@ -614,7 +685,7 @@ try {
   await check('L. active ban enforcement върху съществуващ профил е непроменено (login -> 403 PROFILE_BANNED)', async () => {
     const visitorId = randomUUID()
     const email = `open-reg-${runId}-l@example.test`
-    const victim = await registerAllowed(port, { email, displayName: `OpenRegL${runId}`, visitorId, forwardedFor: '198.51.100.18' })
+    const victim = await registerAllowed(port, isolated.databaseFile, { email, displayName: `OpenRegL${runId}`, visitorId, forwardedFor: '198.51.100.18' })
     insertBan(isolated.databaseFile, victim.profileId, { active: true })
 
     const result = await attemptLogin(port, email, PASSWORD)
@@ -628,7 +699,7 @@ try {
   await check('M. флагман regression: visitor_id + IP едновременно match-ват баннат профил -> 200 normal registration', async () => {
     const visitorId = randomUUID()
     const sharedIp = '198.51.100.19'
-    const victim = await registerAllowed(port, {
+    const victim = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-m-victim@example.test`,
       displayName: `OpenRegMV${runId}`,
       visitorId,
@@ -636,16 +707,17 @@ try {
     })
     insertBan(isolated.databaseFile, victim.profileId, { active: true })
 
-    const result = await attemptRegister(port, {
+    // Пълен flow (register -> verify-registration-email), не само pending
+    // creation — флагманският тест доказва целия real-HTTP round-trip
+    // завършва с нормална, успешна регистрация (реален session), не само
+    // "не е блокирано на register стъпката".
+    const newUser = await registerAllowed(port, isolated.databaseFile, {
       email: `open-reg-${runId}-m-new@example.test`,
       displayName: `OpenRegMNew${runId}`,
       visitorId,
       forwardedFor: sharedIp,
     })
-    assert(result.status === 200, `очаквах 200, получих ${result.status} body=${JSON.stringify(result.body)}`)
-    const payload = result.body as { ok?: boolean; session?: { profile?: { profileId?: string } } } | null
-    assert(payload?.ok === true, `очаквах ok:true, получих ${JSON.stringify(result.body)}`)
-    assert(typeof payload?.session?.profile?.profileId === 'string' && payload.session.profile.profileId.length > 0, 'очаквах валиден session.profile.profileId')
+    assert(typeof newUser.profileId === 'string' && newUser.profileId.length > 0, 'очаквах валиден profileId след verify')
   })
 } finally {
   console.log('\n[cleanup] Спиране на сървъра и изтриване на временните файлове...')

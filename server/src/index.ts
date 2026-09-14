@@ -319,6 +319,14 @@ import { validateGuestContactPayload } from './contact/guestContactValidation.js
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
 import { createPasswordResetStore, type PasswordResetStore } from './db/passwordResetStore.js'
 import { handleForgotPassword, handleResetPassword, type PasswordResetHandlerContext } from './auth/passwordResetHandlers.js'
+import {
+  handleResendRegistrationCode,
+  handleVerifyRegistrationEmail,
+  handleUpdatePendingRegistrationDisplayName,
+  handleCancelPendingRegistration,
+  type RegistrationVerificationHandlerContext,
+} from './auth/registrationVerificationHandlers.js'
+import { sendRegistrationVerificationEmail } from './auth/sendRegistrationVerificationEmail.js'
 import { createMonitoringSampler } from './monitoring/createMonitoringSampler.js'
 import type { MonitoringSampler } from './monitoring/monitoringTypes.js'
 import { countOpenWebSockets, countUniqueOnlineRealPlayers } from './monitoring/monitoringHelpers.js'
@@ -738,6 +746,23 @@ const profileHardDeleteService = await createProfileHardDeleteService(databaseBo
 })
 const pendingProfileModerationStore = await createPendingProfileModerationStore(databaseBootstrap.databaseFilePath)
 const adminProfileRiskStore = await createAdminProfileRiskStore(databaseBootstrap.databaseFilePath)
+// Email verification pending-registration flow — reuse-ва password-reset-овия
+// rate-limit secret contract (≥32 символа) за verification-code HMAC hashing
+// (виж authStore.ts's CreateAuthStoreOptions.registrationVerificationCodeSecret
+// doc коментара). Приоритет: dedicated EMAIL_VERIFICATION_CODE_SECRET, fallback
+// PASSWORD_RESET_RATE_LIMIT_SECRET (zero-new-production-config reuse, ако
+// password-reset вече е конфигуриран) — ако НИТО ЕДИН не е configured,
+// register() връща 503-еквивалентна грешка вместо fallback към insecure default.
+const registrationVerificationCodeSecret =
+  process.env.EMAIL_VERIFICATION_CODE_SECRET?.trim() ||
+  process.env.PASSWORD_RESET_RATE_LIMIT_SECRET?.trim() ||
+  ''
+if (registrationVerificationCodeSecret.length < 32) {
+  console.error(
+    '[registration] EMAIL_VERIFICATION_CODE_SECRET (или PASSWORD_RESET_RATE_LIMIT_SECRET fallback) не е configured/твърде къс (<32 символа) — ' +
+    'POST /api/auth/register ще връща "Регистрацията временно не е налична." докато не се конфигурира.',
+  )
+}
 const authStore = await createAuthStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -753,6 +778,7 @@ const authStore = await createAuthStore(
         remainingDays: activeBan.remainingDays,
       }
     },
+    registrationVerificationCodeSecret,
   },
 )
 const friendshipStore = await createFriendshipStore(
@@ -7371,7 +7397,7 @@ async function handleAuthRequest(
     // connect/traffic продължава да ползва отделния getSession() (read-only,
     // виж wsServer.on('connection') по-долу) — не участва в renewal-а.
     const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
-    const { session, renewed } = authStore.touchSession(sessionToken)
+    const { session, renewed, rememberMe } = authStore.touchSession(sessionToken)
 
     sendJsonResponse(
       res,
@@ -7380,7 +7406,12 @@ async function handleAuthRequest(
         ok: true,
         session: withPikaTeamGiftBypassFlag(session),
       },
-      renewed && sessionToken !== null ? { 'Set-Cookie': createSessionCookieHeader(sessionToken) } : {},
+      // КРИТИЧНО (production report-а "REMEMBER ME — SERVER SEMANTICS"):
+      // rememberMe идва от СЪЩИЯ session ред (touchSession()'s резултат),
+      // НЕ от request body/query — session-only (rememberMe:false) сесия
+      // НИКОГА не трябва да получи Max-Age при renewal, иначе тихо би се
+      // "ъпгрейднала" до persistent при следващото зареждане на сайта.
+      renewed && sessionToken !== null ? { 'Set-Cookie': createSessionCookieHeader(sessionToken, rememberMe) } : {},
     )
     return true
   }
@@ -7404,17 +7435,11 @@ async function handleAuthRequest(
     return true
   }
 
-  if (
-    (pathname === '/api/auth/register' || pathname === '/api/auth/login') &&
-    req.method === 'POST'
-  ) {
+  if (pathname === '/api/auth/register' && req.method === 'POST') {
     const body = await readJsonRequestBody(req)
 
     if (!isRecord(body)) {
-      sendJsonResponse(res, 400, {
-        ok: false,
-        message: 'Invalid request body.',
-      })
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
       return true
     }
 
@@ -7426,34 +7451,93 @@ async function handleAuthRequest(
     // произволен client-подаден IP параметър) + client-подадения visitor_id
     // (localStorage-backed anonymous visitor id, вече established от
     // createVisitorPageViewTracker.ts — validate-нат тук срещу СЪЩИЯ
-    // VISITOR_UUID_RE regex като page-view endpoint-а). И двете се подават
-    // само за REGISTER — LOGIN flow-ът е непроменен. Записват се за site
-    // visit history/visitor_registration_bindings/admin dependency
-    // detection (виж authStore.ts's register() doc коментар) — вече НЕ
-    // участват в решение дали регистрацията да мине.
+    // VISITOR_UUID_RE regex като page-view endpoint-а). Записват се за site
+    // visit history/admin dependency detection едва при успешна email
+    // верификация (виж authStore.ts's verifyRegistrationEmail() doc
+    // коментар) — вече НЕ участват в решение дали регистрацията да мине.
     const rawVisitorId = getStringField(body, 'visitorId')
     const visitorId = VISITOR_UUID_RE.test(rawVisitorId) ? rawVisitorId.toLowerCase() : null
     const resolvedIp = getRequestIp(req)
     const ipAddress = resolvedIp === 'unknown' ? null : resolvedIp
-    // Само за immediate visitor/profile binding-а вътре в authStore.ts's
-    // register() (след успешна регистрация).
     const userAgent = getFirstHeaderValue(req.headers['user-agent'])
 
-    const result =
-      pathname === '/api/auth/register'
-        ? authStore.register({
-            email: getStringField(body, 'email'),
-            password: getStringField(body, 'password'),
-            displayName: getStringField(body, 'displayName'),
-            gender,
-            visitorId,
-            ipAddress,
-            userAgent,
-          })
-        : authStore.login({
-            email: getStringField(body, 'email'),
-            password: getStringField(body, 'password'),
-          })
+    // Email verification pending-first flow (production report-а
+    // "REGISTRATION FLOW") — register() вече НЕ създава account/profile/
+    // session директно, само pending_registrations ред + rawCode (само за
+    // ТОЗИ handler да го изпрати по email — НИКОГА в HTTP response-а).
+    const pendingResult = authStore.register({
+      email: getStringField(body, 'email'),
+      password: getStringField(body, 'password'),
+      displayName: getStringField(body, 'displayName'),
+      gender,
+      visitorId,
+      ipAddress,
+      userAgent,
+    })
+
+    if (!pendingResult.ok) {
+      const status = 'code' in pendingResult && pendingResult.code === 'EMAIL_VERIFICATION_PENDING' ? 409 : 400
+      sendJsonResponse(res, status, pendingResult)
+      return true
+    }
+
+    const emailResult = await sendRegistrationVerificationEmail({
+      toEmail: getStringField(body, 'email').trim(),
+      code: pendingResult.rawCode,
+      expiresAt: pendingResult.expiresAt,
+    })
+
+    if (!emailResult.ok) {
+      // Brevo провали — pending реда УМИШЛЕНО НЕ се discard-ва (транзиентен
+      // network/API проблем не бива да коства целия 24-часов прозорец):
+      // pendingRegistrationId + maskedEmail + expiresAt се връщат и тук
+      // (hardening pass §4 — "достатъчно safe metadata"), за да може
+      // клиентът директно да отвори verification popup-а (с ясно съобщение
+      // + "Изпрати отново" бутон) вместо да остане в "registration никога
+      // не е започнала" визуално състояние. rawCode НИКОГА не се връща.
+      // Одит log, без password/code.
+      console.error('[register] Email delivery failed:', emailResult.message)
+      sendJsonResponse(res, 503, {
+        ok: false,
+        code: 'EMAIL_DELIVERY_FAILED',
+        message: 'Не успяхме да изпратим кода. Опитайте отново след малко.',
+        pendingRegistrationId: pendingResult.pendingRegistrationId,
+        maskedEmail: pendingResult.maskedEmail,
+        expiresAt: pendingResult.expiresAt,
+      })
+      return true
+    }
+
+    // rawCode НИКОГА не напуска сървъра отвъд sendRegistrationVerificationEmail-а
+    // по-горе — HTTP response-ът съдържа само pendingRegistrationId/
+    // maskedEmail/expiresAt.
+    sendJsonResponse(res, 200, {
+      ok: true,
+      pendingRegistrationId: pendingResult.pendingRegistrationId,
+      maskedEmail: pendingResult.maskedEmail,
+      expiresAt: pendingResult.expiresAt,
+    })
+    return true
+  }
+
+  if (pathname === '/api/auth/login' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    // Remember-me (production report-а "REMEMBER ME — LOGIN POPUP") —
+    // DEFAULT = CHECKED на клиента; само explicit `false` изключва
+    // persistent cookie-то, липсващо поле/друг тип се третира като true.
+    const rememberMe = body.rememberMe !== false
+
+    const result = authStore.login({
+      email: getStringField(body, 'email'),
+      password: getStringField(body, 'password'),
+      rememberMe,
+    })
 
     if (!result.ok) {
       // Структуриран PROFILE_BANNED branch (spec §5A) — отделен статус код
@@ -7462,6 +7546,21 @@ async function handleAuthRequest(
       // dedicated ban popup вместо raw inline error text.
       if ('code' in result && result.code === 'PROFILE_BANNED') {
         sendJsonResponse(res, 403, result)
+        return true
+      }
+      // "Затваря сайта преди кода" сценарий — unexpired pending registration
+      // за този email + правилна парола -> клиентът автоматично отваря
+      // verification popup-а вместо generic invalid-credentials грешка
+      // (production report-а "ЗАТВАРЯ САЙТА ПРЕДИ КОДА").
+      if ('code' in result && result.code === 'EMAIL_VERIFICATION_REQUIRED') {
+        sendJsonResponse(res, 403, result)
+        return true
+      }
+      // Pending registration за email-а съществуваше, но е изтекла (>24ч) —
+      // email-ът вече е свободен за нова регистрация (production report-а
+      // "EXPIRED PENDING + LOGIN").
+      if ('code' in result && result.code === 'REGISTRATION_EXPIRED') {
+        sendJsonResponse(res, 410, result)
         return true
       }
       sendJsonResponse(res, 400, result)
@@ -7475,8 +7574,44 @@ async function handleAuthRequest(
         ok: true,
         session: withPikaTeamGiftBypassFlag(result.session),
       },
-      { 'Set-Cookie': createSessionCookieHeader(result.sessionToken) },
+      { 'Set-Cookie': createSessionCookieHeader(result.sessionToken, rememberMe) },
     )
+    return true
+  }
+
+  if (
+    (pathname === '/api/auth/verify-registration-email' ||
+      pathname === '/api/auth/resend-registration-code' ||
+      pathname === '/api/auth/update-pending-registration-display-name' ||
+      pathname === '/api/auth/cancel-pending-registration') &&
+    req.method === 'POST'
+  ) {
+    const ctx: RegistrationVerificationHandlerContext = {
+      store: authStore,
+      getRequestIp: (r) => getRequestIp(r),
+      sendJson: (r, status, body, headers) => sendJsonResponse(r, status, body, headers),
+      readBody: (r) => readJsonRequestBody(r, 4_096),
+      getFirstHeaderValue: (value) => getFirstHeaderValue(value),
+      createSessionCookieHeader: (sessionToken, rememberMe) => createSessionCookieHeader(sessionToken, rememberMe),
+      withPikaTeamGiftBypassFlag: (session) => withPikaTeamGiftBypassFlag(session),
+    }
+
+    if (pathname === '/api/auth/verify-registration-email') {
+      await handleVerifyRegistrationEmail(req, res, ctx)
+      return true
+    }
+
+    if (pathname === '/api/auth/resend-registration-code') {
+      await handleResendRegistrationCode(req, res, ctx)
+      return true
+    }
+
+    if (pathname === '/api/auth/update-pending-registration-display-name') {
+      await handleUpdatePendingRegistrationDisplayName(req, res, ctx)
+      return true
+    }
+
+    await handleCancelPendingRegistration(req, res, ctx)
     return true
   }
 

@@ -13,9 +13,16 @@ import {
   PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE,
   PROFILE_DISPLAY_NAME_RESERVED_PIKA_MESSAGE,
   validateProfileDisplayName as validateBackendProfileDisplayName,
+  type ProfileIdentityValidationCode,
 } from '../src/db/normalizeProfileIdentityText.js'
-import { createAuthStore } from '../src/db/authStore.js'
+import { randomUUID } from 'node:crypto'
+import { createAuthStore, type AuthSessionSnapshot } from '../src/db/authStore.js'
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
+
+// Email verification pending-first flow (виж authStore.ts's register() doc
+// коментар) — тестова HMAC secret стойност (≥32 символа), нужна за да
+// register() изобщо работи (validateRateLimitSecret contract).
+const TEST_REGISTRATION_SECRET = 'profile-display-name-validation-test-secret-01'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const serverRoot = resolve(__dirname, '..')
@@ -381,11 +388,49 @@ async function main(): Promise<void> {
   try {
     await applyMigrations(dbPath)
     progressStore = await createPlayerProgressStore(dbPath)
-    authStore = await createAuthStore(dbPath, progressStore)
+    authStore = await createAuthStore(dbPath, progressStore, {
+      registrationVerificationCodeSecret: TEST_REGISTRATION_SECRET,
+    })
     db = new DatabaseSync(dbPath, { open: true })
 
+    // Email verification pending-first flow — register() вече само създава
+    // pending_registrations ред; verifyRegistrationEmail() материализира
+    // реалния account/profile/session. rawCode е in-process достъпен
+    // директно тук (без email round-trip), mirror на СЪЩИЯ pattern в
+    // checkAuthSessionRollingRenewal.ts. Pass-through-ва register()'s ok:false
+    // резултат непроменен (validation failures стават ПРЕДИ pending
+    // creation-а, идентично на старото поведение) — само ok:true случаят
+    // минава и през verify стъпката.
+    type RegisterAndVerifyResult =
+      | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
+      | { ok: false; message: string; code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' }
+
+    const localAuthStore = authStore
+    function registerAndVerify(input: {
+      email: string
+      password: string
+      displayName: string
+      gender?: 'male' | 'female' | null
+    }): RegisterAndVerifyResult {
+      const pending = localAuthStore.register({ ...input, visitorId: randomUUID() })
+      if (!pending.ok) {
+        return pending
+      }
+      const verify = localAuthStore.verifyRegistrationEmail({
+        pendingRegistrationId: pending.pendingRegistrationId,
+        code: pending.rawCode,
+        rememberMe: true,
+        ipAddress: null,
+        userAgent: null,
+      })
+      if (!verify.ok) {
+        throw new Error(`verifyRegistrationEmail failed unexpectedly: ${verify.reason}`)
+      }
+      return { ok: true, sessionToken: verify.sessionToken, session: verify.session }
+    }
+
     await check('[5] registration stores canonical display and username', () => {
-      const result = authStore?.register({
+      const result = registerAndVerify({
         email: 'diabla@example.test',
         password: 'secret1',
         displayName: '  𝑫𝑰𝑨𝑩𝑳𝑨  ',
@@ -413,7 +458,7 @@ async function main(): Promise<void> {
     })
 
     await check('[6] registration uniqueness is case-insensitive and NFKC-aware', () => {
-      const result = authStore?.register({
+      const result = registerAndVerify({
         email: 'diabla2@example.test',
         password: 'secret1',
         displayName: 'diabla',
@@ -423,7 +468,7 @@ async function main(): Promise<void> {
     })
 
     await check('[6b] registration rejects mixed-script and reserved PIKABG names', () => {
-      const mixed = authStore?.register({
+      const mixed = registerAndVerify({
         email: 'mixed-register@example.test',
         password: 'secret1',
         displayName: MIXED_SCRIPT_CASES[0],
@@ -435,7 +480,7 @@ async function main(): Promise<void> {
         assert(mixed.message === PROFILE_DISPLAY_NAME_MIXED_ALPHABETS_MESSAGE, `mixed message=${mixed.message}`)
       }
 
-      const reserved = authStore?.register({
+      const reserved = registerAndVerify({
         email: 'reserved-pika@example.test',
         password: 'secret1',
         displayName: 'P I K A B G',
@@ -461,7 +506,7 @@ async function main(): Promise<void> {
     })
 
     await check('[8] profile rename stores canonical value', () => {
-      const registered = authStore?.register({
+      const registered = registerAndVerify({
         email: 'rename@example.test',
         password: 'secret1',
         displayName: 'Player One',
@@ -479,7 +524,7 @@ async function main(): Promise<void> {
     })
 
     await check('[8b] self rename rejects mixed-script and reserved names before wallet debit', () => {
-      const registered = authStore?.register({
+      const registered = registerAndVerify({
         email: 'mixed-rename@example.test',
         password: 'secret1',
         displayName: 'Rename Guard',
@@ -507,7 +552,7 @@ async function main(): Promise<void> {
     })
 
     await check('[9] temporary human fallback is unique canonical display', () => {
-      const guestRegistration = authStore?.register({
+      const guestRegistration = registerAndVerify({
         email: 'guest@example.test',
         password: 'secret1',
         displayName: 'Гост',
@@ -570,7 +615,7 @@ async function main(): Promise<void> {
 
       assert(progressStore?.isDisplayNameAvailable('ReservedName') === false, 'username reservation available')
       assert(progressStore?.isDisplayNameAvailable('𝑹𝒆𝒔𝒆𝒓𝒗𝒆𝒅𝑵𝒂𝒎𝒆') === false, 'NFKC username reservation available')
-      const result = authStore?.register({
+      const result = registerAndVerify({
         email: 'reserved@example.test',
         password: 'secret1',
         displayName: 'ReservedName',
@@ -581,7 +626,7 @@ async function main(): Promise<void> {
     })
 
     await check('[10b] admin rename uses the same mixed-script and reserved PIKABG validator', () => {
-      const target = authStore?.register({
+      const target = registerAndVerify({
         email: 'admin-target-name@example.test',
         password: 'secret1',
         displayName: 'Admin Target',
@@ -625,7 +670,7 @@ async function main(): Promise<void> {
         if (official?.ok) assert(official.profile.displayName === 'PIKABG', `official displayName=${official.profile.displayName}`)
       })
 
-      const other = authStore?.register({
+      const other = registerAndVerify({
         email: 'other-pika-team-role@example.test',
         password: 'secret1',
         displayName: 'Other Pika Team',
@@ -649,7 +694,7 @@ async function main(): Promise<void> {
     })
 
     await check('[11] invalid and taken rename do not debit; successful rename debits once', () => {
-      const registered = authStore?.register({
+      const registered = registerAndVerify({
         email: 'economy@example.test',
         password: 'secret1',
         displayName: 'Economy Player',
@@ -703,15 +748,15 @@ async function main(): Promise<void> {
 
     await check('[13] cross-column name reservation race: register blocks on name taken inside transaction', () => {
       // Simulate the race: first registrant gets the name, second must fail
-      const r1 = authStore?.register({ email: 'race1@example.test', password: 'secret1', displayName: 'RaceName', gender: 'male' })
+      const r1 = registerAndVerify({ email: 'race1@example.test', password: 'secret1', displayName: 'RaceName', gender: 'male' })
       assert(r1?.ok === true, 'race1 registration failed')
-      const r2 = authStore?.register({ email: 'race2@example.test', password: 'secret1', displayName: 'RaceName', gender: 'male' })
+      const r2 = registerAndVerify({ email: 'race2@example.test', password: 'secret1', displayName: 'RaceName', gender: 'male' })
       assert(r2?.ok === false, 'race2 registration succeeded (race not protected)')
       if (r2?.ok === false) assert(r2.message.includes('заето') || r2.message.includes('заета'), `message=${r2.message}`)
     })
 
     await check('[14] cross-column rename race: rename blocks on name taken inside transaction, wallet not debited', () => {
-      const rr = authStore?.register({ email: 'raceRename@example.test', password: 'secret1', displayName: 'RaceRenamePlayer', gender: 'female' })
+      const rr = registerAndVerify({ email: 'raceRename@example.test', password: 'secret1', displayName: 'RaceRenamePlayer', gender: 'female' })
       assert(rr?.ok === true, 'raceRename registration failed')
       const pid = rr?.ok ? rr.session.profile.profileId : ''
       db?.prepare(`UPDATE profile_wallets SET yellow_coins_balance = 500 WHERE profile_id = ?`).run(pid)

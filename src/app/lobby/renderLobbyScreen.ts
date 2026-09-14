@@ -107,6 +107,7 @@ import {
 } from './renderTournamentsScreen'
 import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFCHE_MESSAGE_HISTORY_LIMIT, renderTopicMessageRow, renderLafcheMessageRow, renderTopicReplyRow, formatTopicUnreadBadgeCount, renderTopicLikeButton, renderTopicReplyButton, renderTopicModerationActionPopup } from './renderTopicsScreen'
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
+import { renderRegistrationVerificationPopup, attachRegistrationVerificationPopupEventListeners, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -723,6 +724,7 @@ export type LobbyScreenState = {
   lobbyChatWriteLockedPopupOpen: boolean
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
+  registrationVerification: RegistrationVerificationPopupState
   guestTrialPopup: GuestTrialPopupState
   vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
@@ -1242,8 +1244,15 @@ export type RenderLobbyScreenOptions = {
   onLevelLockedStakeClose: () => void
   onTournamentBetaAccessModalClose: () => void
   onTournamentBetaAccessModalSubmit: (password: string) => void
-  onLoginSubmit: (email: string, password: string) => void
+  onLoginSubmit: (email: string, password: string, rememberMe: boolean) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
+  onRegistrationVerificationSubmit: (code: string) => void
+  onRegistrationVerificationResend: () => void
+  onRegistrationVerificationChangeEmail: () => void
+  onRegistrationVerificationRememberMeChange: (checked: boolean) => void
+  onRegistrationVerificationClose: () => void
+  onRegistrationVerificationSubmitDisplayName: (displayName: string) => void
+  onRegistrationVerificationCancelDisplayNameChange: () => void
   onForgotPasswordSubmit?: (email: string) => void
   onLogoutClick: () => void
   onBellClick: () => void
@@ -2473,6 +2482,12 @@ function renderAuthModal(state: LobbyScreenState): string {
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
           </span>
+        </label>
+        ` : ''}
+        ${isLogin ? `
+        <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.78);cursor:pointer;">
+          <input type="checkbox" name="rememberMe" checked style="width:16px;height:16px;cursor:pointer;">
+          Запомни ме на това устройство
         </label>
         ` : ''}
         <button type="submit" style="height:46px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;margin-top:4px;">
@@ -12495,6 +12510,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
+      ${renderRegistrationVerificationPopup(state.registrationVerification)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
@@ -12797,6 +12813,7 @@ export function renderLobbyScreen(
       ${renderAuthModal(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
+      ${renderRegistrationVerificationPopup(state.registrationVerification)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
@@ -15625,6 +15642,16 @@ export function renderLobbyScreen(
     onClose: options.onGuestTrialClose,
   })
 
+  attachRegistrationVerificationPopupEventListeners(root, {
+    onSubmitCode: options.onRegistrationVerificationSubmit,
+    onResend: options.onRegistrationVerificationResend,
+    onChangeEmail: options.onRegistrationVerificationChangeEmail,
+    onRememberMeChange: options.onRegistrationVerificationRememberMeChange,
+    onClose: options.onRegistrationVerificationClose,
+    onSubmitDisplayName: options.onRegistrationVerificationSubmitDisplayName,
+    onCancelDisplayNameChange: options.onRegistrationVerificationCancelDisplayNameChange,
+  })
+
   root
     .querySelector<HTMLElement>('[data-vip-purchase-success-popup-root="1"] [role="dialog"]')
     ?.addEventListener('click', (e) => e.stopPropagation())
@@ -15744,7 +15771,8 @@ export function renderLobbyScreen(
         return
       }
 
-      options.onLoginSubmit(email, password)
+      const rememberMe = data.get('rememberMe') === 'on'
+      options.onLoginSubmit(email, password, rememberMe)
     })
   })
 

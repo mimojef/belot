@@ -35,9 +35,16 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { join, resolve } from 'node:path'
+import { verifyVerificationCode } from '../src/db/authHelpers.js'
 
 const PASSWORD = 'RiskSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
+// Email verification pending-first flow (виж authStore.ts's register() doc
+// коментар) — тестова HMAC secret стойност (≥32 символа), подадена на
+// spawned сървъра чрез PASSWORD_RESET_RATE_LIMIT_SECRET fallback — register()
+// по-долу brute-force-ва 6-цифрения код от DB-съхранения code_hash вместо
+// реален Brevo (недостъпен в тестова среда).
+const TEST_REGISTRATION_SECRET = 'admin-risk-detector-http-authorization-secret-01'
 
 /**
  * Test isolation helper (registration anti-evasion gate follow-up — "IP +
@@ -194,6 +201,7 @@ function startServer(serverDir: string, port: number): RunningServer {
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
+        PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -223,7 +231,28 @@ function promoteRole(databaseFile: string, email: string, role: string): void {
 
 type RegisteredUser = { cookie: string; profileId: string; accountId: string; email: string; displayName: string }
 
-async function register(port: number, runId: string, suffix: string): Promise<RegisteredUser> {
+/** Brute-force-ва 6-цифрения verification код от pending_registrations.code_hash (mirror на checkOpenRegistrationPolicy.ts's аналогична helper). */
+function bruteForceVerificationCode(databaseFile: string, pendingRegistrationId: string): string {
+  const db = new DatabaseSync(databaseFile)
+  const row = db.prepare(`SELECT code_hash FROM pending_registrations WHERE pending_registration_id = ?`).get(pendingRegistrationId) as
+    | { code_hash: string }
+    | undefined
+  db.close()
+  if (!row) throw new Error(`pending_registrations row not found: ${pendingRegistrationId}`)
+  for (let candidate = 0; candidate < 1_000_000; candidate++) {
+    const code = candidate.toString().padStart(6, '0')
+    if (verifyVerificationCode(code, TEST_REGISTRATION_SECRET, row.code_hash)) return code
+  }
+  throw new Error(`Не успях да brute-force-на verification кода за ${pendingRegistrationId}`)
+}
+
+/**
+ * Email verification pending-first flow (виж authStore.ts's register() doc
+ * коментар) — register() вече само създава pending_registrations ред;
+ * verify-registration-email() материализира реалния account/profile/session.
+ * Тестовата среда няма реален Brevo достъп, затова brute-force-ваме кода.
+ */
+async function register(port: number, databaseFile: string, runId: string, suffix: string): Promise<RegisteredUser> {
   const email = `risk-smoke-${runId}-${suffix}@example.test`
   const displayName = `RiskSmoke${runId.replace(/[^0-9]/g, '').slice(-6)}${suffix}`
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
@@ -243,13 +272,40 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
     // registration-time visitorId/IP.
     body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male', visitorId: randomUUID() }),
   })
-  if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)
-  const payload = await res.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
-  if (!payload.ok || !payload.session) throw new Error(`Регистрацията (${suffix}) не е успешна: ${payload.message ?? '?'}`)
+  const registerPayload = await res.json().catch(() => null) as { pendingRegistrationId?: string; message?: string } | null
+  const pendingRegistrationId = registerPayload?.pendingRegistrationId
+  if (typeof pendingRegistrationId !== 'string' || pendingRegistrationId === '') {
+    throw new Error(`Регистрацията (${suffix}) не създаде pending registration: status=${res.status} ${JSON.stringify(registerPayload)}`)
+  }
 
-  const headersExt = res.headers as Headers & { getSetCookie?: () => string[] }
-  const rawCookie = headersExt.getSetCookie?.()[0] ?? res.headers.get('set-cookie')
-  if (!rawCookie) throw new Error(`Липсва Set-Cookie при регистрация (${suffix}).`)
+  const code = bruteForceVerificationCode(databaseFile, pendingRegistrationId)
+  // bruteForceVerificationCode блокира Node event loop-а синхронно (до
+  // ~1 000 000 HMAC-SHA256 изчисления) — на бавни/натоварени machines това
+  // понякога кара keep-alive connection-а към spawned сървъра да стане
+  // stale (ECONNRESET/"fetch failed", чисто network-layer transient, не
+  // business-logic провал) — един бърз retry е достатъчен.
+  let verifyRes: Response
+  try {
+    verifyRes = await fetch(`http://127.0.0.1:${port}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe: true }),
+    })
+  } catch {
+    await new Promise((r) => setTimeout(r, 200))
+    verifyRes = await fetch(`http://127.0.0.1:${port}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe: true }),
+    })
+  }
+  if (verifyRes.status !== 200) throw new Error(`Верификацията (${suffix}) върна status ${verifyRes.status}.`)
+  const payload = await verifyRes.json() as { ok?: boolean; session?: { profile: { profileId: string }; account: { accountId: string } }; message?: string }
+  if (!payload.ok || !payload.session) throw new Error(`Верификацията (${suffix}) не е успешна: ${payload.message ?? '?'}`)
+
+  const headersExt = verifyRes.headers as Headers & { getSetCookie?: () => string[] }
+  const rawCookie = headersExt.getSetCookie?.()[0] ?? verifyRes.headers.get('set-cookie')
+  if (!rawCookie) throw new Error(`Липсва Set-Cookie при верификация (${suffix}).`)
   return {
     cookie: rawCookie.split(';')[0]!,
     profileId: payload.session.profile.profileId,
@@ -299,12 +355,12 @@ try {
   const runId = `${Date.now()}-${process.pid}`
 
   console.log('\n[setup] Регистрация на потребители с различни роли...')
-  const player = await register(port, runId, 'player')
-  const linkedA = await register(port, runId, 'linkeda')
-  const linkedB = await register(port, runId, 'linkedb')
-  const cleanTarget = await register(port, runId, 'clean')
-  const adminCandidate = await register(port, runId, 'admin')
-  const subadminCandidate = await register(port, runId, 'subadmin')
+  const player = await register(port, isolated.databaseFile, runId, 'player')
+  const linkedA = await register(port, isolated.databaseFile, runId, 'linkeda')
+  const linkedB = await register(port, isolated.databaseFile, runId, 'linkedb')
+  const cleanTarget = await register(port, isolated.databaseFile, runId, 'clean')
+  const adminCandidate = await register(port, isolated.databaseFile, runId, 'admin')
+  const subadminCandidate = await register(port, isolated.databaseFile, runId, 'subadmin')
 
   promoteRole(isolated.databaseFile, adminCandidate.email, 'admin')
   promoteRole(isolated.databaseFile, subadminCandidate.email, 'subadmin')
@@ -312,22 +368,22 @@ try {
   const adminCookie = await login(port, adminCandidate.email)
   const subadminCookie = await login(port, subadminCandidate.email)
 
-  const linkedC = await register(port, runId, 'linkedc')
+  const linkedC = await register(port, isolated.databaseFile, runId, 'linkedc')
   // За cache-invalidation сценариите (А/Б/В по-долу): staleCleanA беше
   // fully-checked и clean, staleRiskyA беше fully-checked с точен стар count,
   // batchA/batchX са explicit targets в ЕДИН batch (проверка на sequencing-а).
-  const staleCleanA = await register(port, runId, 'stalecleana')
-  const staleCleanX = await register(port, runId, 'stalecleanx')
-  const staleRiskyA = await register(port, runId, 'staleriskya')
-  const staleRiskyOld = await register(port, runId, 'staleriskyold')
-  const staleRiskyX = await register(port, runId, 'staleriskyx')
-  const batchA = await register(port, runId, 'batcha')
-  const batchX = await register(port, runId, 'batchx')
+  const staleCleanA = await register(port, isolated.databaseFile, runId, 'stalecleana')
+  const staleCleanX = await register(port, isolated.databaseFile, runId, 'stalecleanx')
+  const staleRiskyA = await register(port, isolated.databaseFile, runId, 'staleriskya')
+  const staleRiskyOld = await register(port, isolated.databaseFile, runId, 'staleriskyold')
+  const staleRiskyX = await register(port, isolated.databaseFile, runId, 'staleriskyx')
+  const batchA = await register(port, isolated.databaseFile, runId, 'batcha')
+  const batchX = await register(port, isolated.databaseFile, runId, 'batchx')
   // Round 3 fix (no-ping-pong): noPingA/noPingX ще бъдат fully checked
   // ПОСЛЕ evidence-ът им е seed-нат — двата fetch-ва трябва да останат
   // стабилни, докато няма НОВО evidence след последния им checked_at.
-  const noPingA = await register(port, runId, 'nopinga')
-  const noPingX = await register(port, runId, 'nopingx')
+  const noPingA = await register(port, isolated.databaseFile, runId, 'nopinga')
+  const noPingX = await register(port, isolated.databaseFile, runId, 'nopingx')
 
   console.log('  Регистрирани: player, linkedA, linkedB (споделят visitor id), linkedC (свързан само с linkedB), clean (без risk), admin, subadmin.')
 
@@ -927,10 +983,10 @@ try {
   // профил — трябва да остане недокоснат (check_complete=1, checked_at
   // непроменен) — доказва, че invalidation-ът е targeted, не global scan.
   console.log('\n[hard-delete-invalidate] HARD DELETE на linked partner B -> targeted risk cache invalidation за A (НЕ global scan)')
-  const invA = await register(port, runId, 'invdela')
-  const invB = await register(port, runId, 'invdelb')
-  const invC = await register(port, runId, 'invdelc')
-  const invD = await register(port, runId, 'invdeld')
+  const invA = await register(port, isolated.databaseFile, runId, 'invdela')
+  const invB = await register(port, isolated.databaseFile, runId, 'invdelb')
+  const invC = await register(port, isolated.databaseFile, runId, 'invdelc')
+  const invD = await register(port, isolated.databaseFile, runId, 'invdeld')
 
   {
     const db = new DatabaseSync(isolated.databaseFile, { open: true })

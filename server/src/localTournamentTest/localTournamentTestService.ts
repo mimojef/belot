@@ -19,6 +19,7 @@
 // да играят — тук само ги записваме като участници, никога не connect-ваме
 // фалшив WS за тях.
 
+import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import type { ProfileId } from '../core/serverTypes.js'
 import type { AuthStore } from '../db/authStore.js'
@@ -138,11 +139,25 @@ export function createLocalTournamentTestService(
     // authStore.register) — без тире/interpunkt, затова runId+suffix се
     // слепват в едно "дума" вместо да се разделят с "-".
     const displayName = `Test Human ${runId}${suffix}`.slice(0, 24)
-    const registerResult = deps.authStore.register({ email, password, displayName, gender: 'male' })
-    if (!registerResult.ok) {
-      throw new Error(`Failed to create local test human account "${email}": ${registerResult.message}`)
+    // Email verification pending-first flow (виж authStore.ts's register()
+    // doc коментар) — този harness е strictly-local dev tooling, не реален
+    // production registration, затова verify-ва СЪЩИЯ момент с rawCode-а,
+    // без email round-trip (кодът никога не напуска процеса).
+    const pendingResult = deps.authStore.register({ email, password, displayName, gender: 'male', visitorId: randomUUID() })
+    if (!pendingResult.ok) {
+      throw new Error(`Failed to create local test human account "${email}": ${pendingResult.message}`)
     }
-    const profileId = registerResult.session.profile.profileId
+    const verifyResult = deps.authStore.verifyRegistrationEmail({
+      pendingRegistrationId: pendingResult.pendingRegistrationId,
+      code: pendingResult.rawCode,
+      rememberMe: true,
+      ipAddress: null,
+      userAgent: null,
+    })
+    if (!verifyResult.ok) {
+      throw new Error(`Failed to verify local test human account "${email}": ${verifyResult.reason}`)
+    }
+    const profileId = verifyResult.session.profile.profileId
     if (profileId === null) {
       throw new Error(`Local test human account "${email}" was created without a profile id.`)
     }

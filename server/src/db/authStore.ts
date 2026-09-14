@@ -2,9 +2,15 @@ import { randomBytes, randomUUID, scryptSync } from 'node:crypto'
 import type { AccountId, PlayerPublicProfileSnapshot, ProfileId } from '../core/serverTypes.js'
 import {
   createPasswordHash,
+  generateVerificationCode,
+  hashVerificationCode,
+  hmacRateLimitSubject,
+  maskEmailForDisplay,
   normalizeEmail,
   validatePassword,
+  validateRateLimitSecret,
   verifyPassword,
+  verifyVerificationCode,
 } from './authHelpers.js'
 import {
   validateProfileDisplayName,
@@ -29,6 +35,50 @@ export type AuthSessionSnapshot = {
   account: AuthAccountSnapshot
   profile: PlayerPublicProfileSnapshot
 }
+
+/**
+ * Email verification pending-first registration flow — виж register()'s doc
+ * коментар за пълната policy. rawCode присъства САМО в резултата на
+ * register()/resendRegistrationVerificationCode() (in-memory, връща се на
+ * caller-а за да го изпрати по email) — НИКОГА не се логва, НИКОГА не се
+ * връща в HTTP JSON response-а към клиента (виж registrationVerificationHandlers.ts).
+ */
+export type PendingRegistrationCreatedResult =
+  | {
+      ok: true
+      pendingRegistrationId: string
+      rawCode: string
+      maskedEmail: string
+      expiresAt: string
+    }
+  | { ok: false; message: string; code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' }
+
+export type ResendRegistrationCodeResult =
+  /** email е РЕАЛНИЯТ (normalized) адрес — само за caller-а да го подаде на sendRegistrationVerificationEmail(); HTTP response-ът към клиента трябва да ползва maskedEmail, никога email. */
+  | { ok: true; rawCode: string; email: string; maskedEmail: string; expiresAt: string }
+  | { ok: false; reason: 'not_found' | 'expired' | 'rate_limited' }
+
+export type VerifyRegistrationEmailResult =
+  | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
+  | {
+      ok: false
+      reason: 'not_found' | 'expired' | 'invalid_code' | 'too_many_attempts' | 'email_taken' | 'display_name_taken' | 'rate_limited'
+      attemptsRemaining?: number
+    }
+
+/**
+ * Display-name-taken recovery (hardening pass §1) — позволява да се смени
+ * display_name-а на ВЕЧЕ съществуващ pending registration, БЕЗ да се пипат
+ * password_hash/code_hash/failed_attempts/resend_count/expires_at. Bearer
+ * capability модел, mirror на resendRegistrationVerificationCode() —
+ * pendingRegistrationId САМИЯТ е "authorization" (opaque, unguessable
+ * UUID), same security posture като resend/verify endpoints-ите.
+ */
+export type UpdatePendingRegistrationDisplayNameResult =
+  | { ok: true; maskedEmail: string; expiresAt: string }
+  | { ok: false; reason: 'not_found' | 'expired' | 'rate_limited' }
+  | { ok: false; reason: 'invalid_display_name'; message: string; code?: ProfileIdentityValidationCode }
+  | { ok: false; reason: 'display_name_taken' }
 
 /**
  * Пълен администратор — единствената роля с достъп до "Настройки",
@@ -331,23 +381,76 @@ export type TopChatAdminRoleChangeResult =
   | { ok: false; code: TopChatAdminRoleChangeErrorCode; message: string }
 
 export type AuthStore = {
+  /**
+   * Email verification pending-first registration (виж production report-а
+   * "PENDING REGISTRATION"/"REGISTRATION FLOW" секциите) — вече НЕ създава
+   * account/profile/wallet/progress директно. Създава ред в
+   * pending_registrations + връща rawCode (за caller-а да го изпрати по
+   * email, виж registrationVerificationHandlers.ts — НИКОГА в HTTP
+   * response-а). Реалният акаунт се материализира едва в
+   * verifyRegistrationEmail() по-долу, след успешен код.
+   */
   register: (input: {
     email: string
     password: string
     displayName: string
     gender?: 'male' | 'female' | null
-    /** Device identity (localStorage-backed anonymous visitor id) на текущия registration опит — записва се в site_visit_events (authoritative source за admin linked-profile detection, виж adminProfileRiskStore.ts) и в legacy visitor_registration_bindings marker-а (виж register() по-долу), НЕ участва в решението дали регистрацията да мине. null, ако липсва/невалиден. */
+    /** Device identity (localStorage-backed anonymous visitor id) на текущия registration опит — записва се в site_visit_events (authoritative source за admin linked-profile detection, виж adminProfileRiskStore.ts) едва при verifyRegistrationEmail() успех, НЕ участва в решението дали регистрацията да мине. null, ако липсва/невалиден. */
     visitorId?: string | null
     /** Canonical server-side resolved IP на текущия registration опит (index.ts's getRequestIp) — записва се за audit/tracking, НЕ участва в решението дали регистрацията да мине. null, ако не може да се резолвне. */
     ipAddress?: string | null
-    /** Raw User-Agent header на текущия registration опит — записва се само в immediate visitor/profile binding-а (виж register() по-долу). */
+    /** Raw User-Agent header на текущия registration опит — записва се само в immediate visitor/profile binding-а при verifyRegistrationEmail() успех. */
     userAgent?: string | null
-  }) =>
-    | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
-    | { ok: false; message: string }
+  }) => PendingRegistrationCreatedResult
+  /**
+   * Resend на 6-цифрения код (production report-а "RESEND CODE") — генерира
+   * НОВ код, стария веднага става невалиден (UPDATE презаписва code_hash),
+   * expires_at на pending registration-а НИКОГА не се удължава. 60-секунден
+   * cooldown + registration_rate_limit_events anti-spam cap, виж
+   * имплементацията по-долу.
+   */
+  resendRegistrationVerificationCode: (input: {
+    pendingRegistrationId: string
+    ipAddress: string | null
+  }) => ResendRegistrationCodeResult
+  /**
+   * Финализира pending registration -> реален account/profile/wallet/
+   * progress/visitor-history в ЕДНА атомарна, concurrency-safe транзакция
+   * (production report-а "VERIFY ENDPOINT"). Consume-on-success (pending
+   * редът се трие ВЪТРЕ в СЪЩАТА транзакция) — double-click/два конкурентни
+   * verify request-а могат да произведат максимум 1 акаунт.
+   */
+  verifyRegistrationEmail: (input: {
+    pendingRegistrationId: string
+    code: string
+    rememberMe: boolean
+    ipAddress: string | null
+    userAgent: string | null
+  }) => VerifyRegistrationEmailResult
+  /**
+   * Display-name-taken recovery (hardening pass §1) — виж
+   * UpdatePendingRegistrationDisplayNameResult doc коментара по-горе.
+   * verifyRegistrationEmail()'s displayNameConflict вече не е dead-end —
+   * клиентът може да смени името и да опита verify пак СЪС СЪЩИЯ код/pending.
+   */
+  updatePendingRegistrationDisplayName: (input: {
+    pendingRegistrationId: string
+    displayName: string
+    ipAddress: string | null
+  }) => UpdatePendingRegistrationDisplayNameResult
+  /**
+   * "Смени имейла" recovery (hardening pass §3) — explicit cancel на pending
+   * registration по opaque pendingRegistrationId (bearer capability, mirror
+   * на resend/verify security модела). Идемпотентно — вика се безопасно
+   * дори ако редът вече не съществува (изтекъл/вече consumed/вече cancelled).
+   * НЕ хвърля/разкрива нищо за чужди pending registrations.
+   */
+  cancelPendingRegistration: (pendingRegistrationId: string) => { ok: true }
   login: (input: {
     email: string
     password: string
+    /** Remember-me семантика (production report-а "REMEMBER ME — SERVER SEMANTICS") — подава се към createSession() за да реши cookie shape-а (persistent Max-Age vs browser session-only), НЕ променя server-side expires_at/revocation модела. */
+    rememberMe: boolean
   }) =>
     | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
     | { ok: false; message: string }
@@ -358,6 +461,25 @@ export type AuthStore = {
         bannedUntil: string
         reason: string
         remainingDays: number
+      }
+    | {
+        /**
+         * "Затваря сайта преди кода" сценарий — active account НЯМА за този
+         * email, но unexpired pending registration ИМА и подадената парола
+         * съвпада с pending password_hash-а. Клиентът автоматично отваря
+         * verification popup-а (виж createLobbyFlowController.ts) вместо да
+         * покаже generic invalid-credentials грешка.
+         */
+        ok: false
+        code: 'EMAIL_VERIFICATION_REQUIRED'
+        pendingRegistrationId: string
+        maskedEmail: string
+      }
+    | {
+        /** Pending registration за този email СЪЩЕСТВУВА, но вече е expired (>24ч) — паролата съвпада, значи е легитимният регистрант, не enumeration risk. */
+        ok: false
+        code: 'REGISTRATION_EXPIRED'
+        message: string
       }
   changePassword: (input: {
     accountId: string
@@ -370,9 +492,12 @@ export type AuthStore = {
    * пълния doc коментар на имплементацията по-долу. Единствен caller:
    * handleAuthRequest-ово GET /api/auth/me в index.ts (не WS connect, не
    * никой друг route) — renewed:true сигнализира на HTTP layer-а да
-   * изпрати нов Set-Cookie със същия expires_at.
+   * изпрати нов Set-Cookie със същия expires_at. rememberMe в резултата
+   * казва на HTTP layer-а КАКЪВ cookie header да построи при renewal
+   * (persistent vs session-only) — session-only сесия НИКОГА не трябва да
+   * получи Max-Age при renewal (виж createSessionCookieHeader()).
    */
-  touchSession: (sessionToken: string | null) => { session: AuthSessionSnapshot | null; renewed: boolean }
+  touchSession: (sessionToken: string | null) => { session: AuthSessionSnapshot | null; renewed: boolean; rememberMe: boolean }
   logout: (sessionToken: string | null) => void
   /**
    * Bulk session revocation по profile_id (spec §1, BAN/HARD-DELETE
@@ -436,6 +561,19 @@ type CreateAuthStoreOptions = {
     reason: string
     remainingDays: number
   } | null
+  /**
+   * Email verification pending-registration flow — HMAC secret за
+   * verification-code hashing (hashVerificationCode/verifyVerificationCode
+   * в authHelpers.ts) И registration_rate_limit_events subject hashing
+   * (hmacRateLimitSubject, mirror на passwordResetStore-овия
+   * rateLimitHashSecret contract — ≥32 символа, validateRateLimitSecret()).
+   * Ако липсва/твърде къс: register() връща 'Регистрацията временно не е
+   * налична.' БЕЗ никакъв DB write — authStore.ts НИКОГА не fallback-ва към
+   * insecure default secret. Виж index.ts bootstrap-а за точния env var
+   * resolution (EMAIL_VERIFICATION_CODE_SECRET, fallback
+   * PASSWORD_RESET_RATE_LIMIT_SECRET за zero-new-config reuse).
+   */
+  registrationVerificationCodeSecret?: string
 }
 
 type AccountRow = {
@@ -445,6 +583,23 @@ type AccountRow = {
   role: AccountRoleValue
   status: 'active' | 'disabled'
   created_at: string
+}
+
+type PendingRegistrationRow = {
+  pending_registration_id: string
+  normalized_email: string
+  password_hash: string
+  display_name: string
+  gender: 'male' | 'female' | null
+  visitor_id: string | null
+  ip_address: string | null
+  user_agent: string | null
+  code_hash: string
+  created_at: string
+  expires_at: string
+  last_code_sent_at: string
+  resend_count: number
+  failed_attempts: number
 }
 
 type SessionRow = {
@@ -457,6 +612,8 @@ type SessionRow = {
   account_created_at: string
   /** ISO string (createIsoExpiresAt() формат) — ползва се ЕДИНСТВЕНО от touchSession() за renewal-due изчислението; getSession() го игнорира. */
   expires_at: string
+  /** 0/1 (SQLite INTEGER) — remember-me семантика, виж createSessionCookieHeader() doc коментара. */
+  remember_me: number
 }
 
 const SESSION_COOKIE_NAME = 'belot_session'
@@ -481,6 +638,29 @@ const SESSION_TTL_MS = 1000 * 60 * 60 * 24 * 90
  * renewSessionStatement doc коментарите за пълния concurrency rationale.
  */
 const SESSION_RENEWAL_THROTTLE_MS = 1000 * 60 * 60 * 24
+
+/**
+ * Pending registration lifetime (production report-а "24-ЧАСОВО ПРАВИЛО") —
+ * ФИКСИРАН прозорец от ПЪРВОНАЧАЛНОТО създаване, НИКОГА удължаван (нито от
+ * resend, нито от login опит, нито от нов verification attempt) — виж
+ * pending_registrations.expires_at doc коментара в migration-а.
+ */
+const PENDING_REGISTRATION_TTL_MS = 1000 * 60 * 60 * 24
+/** Минимален interval между resend-и (production report-а "RESEND CODE"). */
+const PENDING_REGISTRATION_RESEND_MIN_INTERVAL_MS = 60 * 1000
+/** Wrong-code cap — след толкова failed attempts, verify спира да приема опити за текущия код (resend нулира брояча, виж updatePendingRegistrationCodeStatement). */
+const PENDING_REGISTRATION_MAX_FAILED_ATTEMPTS = 5
+/** Anti-spam cap отвъд 60s cooldown-а — mirror на password-reset-овите FORGOT_ACCOUNT_MAX_EVENTS pattern-и. */
+const PENDING_REGISTRATION_RESEND_MAX_PER_PENDING = 10
+const PENDING_REGISTRATION_RESEND_WINDOW_SECONDS = 24 * 60 * 60
+const PENDING_REGISTRATION_RESEND_IP_MAX_PER_WINDOW = 20
+const PENDING_REGISTRATION_RESEND_IP_WINDOW_SECONDS = 60 * 60
+/** IP-scoped brute-force defense за verify endpoint-а, отвъд per-pending failed_attempts cap-а. */
+const PENDING_REGISTRATION_VERIFY_IP_MAX_PER_WINDOW = 30
+const PENDING_REGISTRATION_VERIFY_IP_WINDOW_SECONDS = 60 * 60
+/** Display-name-taken recovery (hardening pass §1) — IP-scoped anti-abuse cap (не за brute-force на кода, а за да не се ползва endpoint-ът за display-name enumeration). */
+const PENDING_REGISTRATION_UPDATE_NAME_IP_MAX_PER_WINDOW = 20
+const PENDING_REGISTRATION_UPDATE_NAME_IP_WINDOW_SECONDS = 60 * 60
 
 /**
  * Registration anti-evasion gate (четвърти follow-up brief §2 — "REGISTRATION
@@ -512,14 +692,32 @@ function createIsoExpiresAt(): string {
   return createCookieExpiresAt().toISOString()
 }
 
-export function createSessionCookieHeader(sessionToken: string): string {
-  return [
+/**
+ * Remember-me cookie shape (production report-а "REMEMBER ME — SERVER
+ * SEMANTICS") — rememberMe=true: persistent cookie с Max-Age (90 дни,
+ * survives browser close). rememberMe=false: browser session-only cookie —
+ * БЕЗ Max-Age/Expires атрибут изобщо (не "Max-Age=0", това би изтрило
+ * cookie-то веднага; просто липсва атрибутът), browser-ът я пази само
+ * докато сесията на browser-а трае. Server-side expires_at/renewal/
+ * revocation моделът остава ИДЕНТИЧЕН за двата типа (виж touchSession()) —
+ * единствената разлика е кое cookie shape browser-ът получава. КРИТИЧНО:
+ * caller-ите (index.ts) трябва да подават rememberMe от СЪЩИЯ session ред
+ * (SessionRow.remember_me / touchSession()'s rememberMe резултат), НЕ от
+ * request-body-то на текущата заявка — иначе renewal на session-only сесия
+ * би могъл случайно да я "ъпгрейдне" до persistent (виж index.ts's
+ * /api/auth/me handler).
+ */
+export function createSessionCookieHeader(sessionToken: string, rememberMe: boolean): string {
+  const parts = [
     `${SESSION_COOKIE_NAME}=${sessionToken}`,
     'Path=/',
     'HttpOnly',
     'SameSite=Lax',
-    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
-  ].join('; ')
+  ]
+  if (rememberMe) {
+    parts.push(`Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`)
+  }
+  return parts.join('; ')
 }
 
 export function createClearSessionCookieHeader(): string {
@@ -576,6 +774,12 @@ export async function createAuthStore(
   // stores (profileHardDeleteService.ts, pendingProfileModerationStore.ts)
   // — изчаква writer lock-а вместо да хвърли SQLITE_BUSY веднага.
   database.exec('PRAGMA busy_timeout = 5000;')
+
+  // Email verification code secret — виж CreateAuthStoreOptions.
+  // registrationVerificationCodeSecret doc коментара. validateRateLimitSecret
+  // е generic (≥32 символа), reuse-ван непроменен от authHelpers.ts.
+  const registrationSecret = options.registrationVerificationCodeSecret ?? ''
+  const isRegistrationSecretConfigured = validateRateLimitSecret(registrationSecret)
 
   const selectAccountByEmailStatement = database.prepare(`
     SELECT account_id, email, password_hash, role, status
@@ -733,8 +937,10 @@ export async function createAuthStore(
       account_id,
       profile_id,
       token_hash,
-      expires_at
+      expires_at,
+      remember_me
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -768,7 +974,8 @@ export async function createAuthStore(
       a.role,
       a.status,
       a.created_at AS account_created_at,
-      s.expires_at
+      s.expires_at,
+      s.remember_me
     FROM account_sessions s
     JOIN accounts a
       ON a.account_id = s.account_id
@@ -878,7 +1085,124 @@ export async function createAuthStore(
     WHERE account_id = ?;
   `)
 
-  function createSession(account: AccountRow | SessionRow, profileId: ProfileId): {
+  // ─── Pending registration (email verification, "pending first" flow) ──────
+  // Живее в authStore.ts's СОБСТВЕНА connection/транзакция (не отделен
+  // store с отделна connection) — mirror на visitor_registration_bindings/
+  // site_visitors/site_visit_events immediate-binding pattern-а по-горе:
+  // verifyRegistrationEmail() ТРЯБВА да изтрие pending реда И да създаде
+  // account/profile/wallet/progress В ЕДНА атомарна транзакция (production
+  // report-а "VERIFY ENDPOINT" §concurrency-safe) — само възможно ако всички
+  // statements споделят СЪЩАТА SQLite connection.
+
+  const selectPendingRegistrationByEmailStatement = database.prepare(`
+    SELECT pending_registration_id, normalized_email, password_hash, display_name,
+           gender, visitor_id, ip_address, user_agent, code_hash, created_at,
+           expires_at, last_code_sent_at, resend_count, failed_attempts
+    FROM pending_registrations
+    WHERE normalized_email = ?
+    LIMIT 1;
+  `)
+
+  // Opportunistic cleanup — само за ТОЗИ email, ПРЕДИ uniqueness-проверката
+  // в register()/login(). "По-чистия вариант" (spec §"EMAIL RESERVATION") —
+  // изтрити, не просто flag-нати expired редове; UNIQUE(normalized_email)
+  // индексът прави това самата DB гаранция, не application-level race.
+  const deleteExpiredPendingRegistrationByEmailStatement = database.prepare(`
+    DELETE FROM pending_registrations
+    WHERE normalized_email = ?
+      AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+  `)
+
+  // last_code_sent_at се подава EXPLICIT като JS-generated ISO string
+  // (createIsoNow(), виж по-долу) — НЕ разчита на column DEFAULT
+  // CURRENT_TIMESTAMP/SQLite CURRENT_TIMESTAMP литерал, чийто формат
+  // ("YYYY-MM-DD HH:MM:SS", без 'T'/'Z') не е JS Date-parseable съвместим с
+  // expires_at-овия ISO формат (mirror на same bug class като
+  // selectSessionStatement doc коментара по-горе за account_sessions —
+  // 60s resend cooldown проверката по-долу сравнява точно тази колона чрез
+  // JS `new Date()`, затова форматът трябва да е identical на expires_at).
+  const insertPendingRegistrationStatement = database.prepare(`
+    INSERT INTO pending_registrations (
+      pending_registration_id, normalized_email, password_hash, display_name,
+      gender, visitor_id, ip_address, user_agent, code_hash, expires_at, last_code_sent_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+  `)
+
+  const selectPendingRegistrationByIdStatement = database.prepare(`
+    SELECT pending_registration_id, normalized_email, password_hash, display_name,
+           gender, visitor_id, ip_address, user_agent, code_hash, created_at,
+           expires_at, last_code_sent_at, resend_count, failed_attempts
+    FROM pending_registrations
+    WHERE pending_registration_id = ?
+    LIMIT 1;
+  `)
+
+  const deletePendingRegistrationByIdStatement = database.prepare(`
+    DELETE FROM pending_registrations WHERE pending_registration_id = ?;
+  `)
+
+  // Resend: НОВ code_hash, last_code_sent_at обновен (EXPLICIT ISO param,
+  // виж insertPendingRegistrationStatement doc коментара по-горе за защо —
+  // НЕ SQLite CURRENT_TIMESTAMP литерал), resend_count++, failed_attempts
+  // нулиран (свеж attempt-бюджет за новия код) — expires_at умишлено
+  // ОТСЪСТВА от SET клаузата (spec §"24-ЧАСОВО ПРАВИЛО": resend НИКОГА не
+  // удължава оригиналния 24-часов прозорец).
+  const updatePendingRegistrationCodeStatement = database.prepare(`
+    UPDATE pending_registrations
+    SET code_hash = ?, last_code_sent_at = ?,
+        resend_count = resend_count + 1, failed_attempts = 0
+    WHERE pending_registration_id = ?;
+  `)
+
+  const incrementPendingRegistrationFailedAttemptsStatement = database.prepare(`
+    UPDATE pending_registrations
+    SET failed_attempts = failed_attempts + 1
+    WHERE pending_registration_id = ?;
+  `)
+
+  // Display-name-taken recovery (hardening pass §1) — само display_name
+  // колоната. code_hash/failed_attempts/resend_count/last_code_sent_at/
+  // expires_at НИКОГА не се пипат тук — потребителят не трябва да губи
+  // прогреса си (валиден код, resend бюджет, оригиналния 24-часов
+  // прозорец) само защото избраното от него име се е оказало заето.
+  const updatePendingRegistrationDisplayNameStatement = database.prepare(`
+    UPDATE pending_registrations
+    SET display_name = ?
+    WHERE pending_registration_id = ?;
+  `)
+
+  // Rate-limit events (mirror на passwordResetStore.ts's checkAndRecordRateLimit
+  // — виж production report-а "RESEND CODE"/"SECURITY" секциите за reuse
+  // rationale-а). Raw IP/pendingRegistrationId никога не се записват, само
+  // HMAC subject_hash (hmacRateLimitSubject, СЪЩИЯ helper като password reset).
+  const countRegistrationRateLimitEventsStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt
+    FROM registration_rate_limit_events
+    WHERE scope = ?
+      AND subject_hash = ?
+      AND created_at > datetime('now', ? || ' seconds');
+  `)
+
+  const insertRegistrationRateLimitEventStatement = database.prepare(`
+    INSERT INTO registration_rate_limit_events (event_id, scope, subject_hash)
+    VALUES (?, ?, ?);
+  `)
+
+  // Retention 48h — по-дълъг от всеки реален rate-limit прозорец тук (max 24h),
+  // mirror на passwordResetStore.ts's CLEANUP_RATE_LIMIT_RETENTION_SECONDS.
+  const cleanupRegistrationRateLimitEventsStatement = database.prepare(`
+    DELETE FROM registration_rate_limit_events
+    WHERE created_at <= datetime('now', '-172800 seconds');
+  `)
+
+  const nameConflictStatement = database.prepare(`
+    SELECT profile_id FROM profiles
+    WHERE status = 'active'
+      AND (normalized_display_name = ? OR normalized_username = ?)
+    LIMIT 1;
+  `)
+
+  function createSession(account: AccountRow | SessionRow, profileId: ProfileId, rememberMe: boolean): {
     sessionToken: string
     session: AuthSessionSnapshot
   } {
@@ -891,6 +1215,7 @@ export async function createAuthStore(
       profileId,
       hashSessionToken(sessionToken),
       createIsoExpiresAt(),
+      rememberMe ? 1 : 0,
     )
     updateLastLoginStatement.run(account.account_id)
 
@@ -910,6 +1235,122 @@ export async function createAuthStore(
     }
   }
 
+  /**
+   * Реалната account/profile/wallet/progress/visitor-history материализация
+   * — извлечена от старата (pre-pending-first) register() имплементация
+   * БЕЗ функционална промяна, само преместена, за да може да се извика от
+   * verifyRegistrationEmail() ВЪТРЕ в НЕГОВАТА собствена BEGIN IMMEDIATE
+   * транзакция (caller-ът управлява BEGIN/COMMIT/ROLLBACK — тази функция
+   * само хвърля при конфликт, никога сама не пипа транзакцията). Same
+   * "one choke point" account-creation логика като преди (spec §"ВАЖНО ЗА
+   * EXISTING ACCOUNTS" — никаква паралелна account-creation пътека).
+   */
+  function createVerifiedAccountAndProfileInOpenTransaction(input: {
+    normalizedEmail: string
+    passwordHash: string
+    displayName: string
+    gender: 'male' | 'female' | null
+    visitorId: string
+    ipAddress: string | null
+    userAgent: string | null
+  }): { accountRow: AccountRow; profileId: ProfileId } | { conflict: 'email_taken' | 'display_name_taken' } {
+    const existingAccount = selectAccountByEmailStatement.get(input.normalizedEmail) as AccountRow | undefined
+    if (existingAccount) {
+      return { conflict: 'email_taken' }
+    }
+
+    const displayNameResult = validateProfileDisplayName(input.displayName)
+    // displayName вече е canonicalized/validated при pending creation-а
+    // (register() по-долу) — това е defense-in-depth re-check, не нов
+    // validation path; ако някак не е ok тук, третираме като name conflict
+    // (не би трябвало да се случи на практика).
+    const normalizedDisplayName = displayNameResult.ok ? displayNameResult.normalizedKey : input.displayName
+    const canonicalDisplayName = displayNameResult.ok ? displayNameResult.canonicalDisplayName : input.displayName
+    const normalizedUsername = normalizedDisplayName
+
+    const nameConflict = nameConflictStatement.get(normalizedDisplayName, normalizedUsername) as
+      | { profile_id: string }
+      | undefined
+    if (nameConflict !== undefined) {
+      return { conflict: 'display_name_taken' }
+    }
+
+    const accountId = randomUUID()
+    const profileId = randomUUID()
+
+    insertAccountStatement.run(accountId, input.normalizedEmail, input.passwordHash)
+    insertProfileStatement.run(
+      profileId,
+      accountId,
+      canonicalDisplayName,
+      normalizedUsername,
+      canonicalDisplayName,
+      normalizedDisplayName,
+      input.gender,
+    )
+    insertWalletStatement.run(
+      profileId,
+      Math.max(0, Math.trunc(options.getSignupBonusYellowCoins?.() ?? 0)),
+    )
+    insertProgressStatement.run(profileId)
+
+    // Immediate visitor/profile binding (follow-up brief §2) — ВЪТРЕ в
+    // СЪЩАТА транзакция/connection като account/profile INSERT-ите по-горе.
+    // Виж insertVisitorRegistrationBindingStatement doc коментара по-горе —
+    // "OR IGNORE", не блокира/хвърля при вече съществуващ binding за този
+    // visitor_id. site_visit_events (insertRegistrationVisitorEventStatement)
+    // остава authoritative историческия trail за admin linked-profile
+    // detection (adminProfileRiskStore.ts) — записва по един ред на ВСЯКА
+    // верифицирана регистрация.
+    insertVisitorRegistrationBindingStatement.run(input.visitorId, profileId)
+    insertRegistrationVisitorRecordStatement.run(input.visitorId, profileId, profileId)
+    insertRegistrationVisitorEventStatement.run(
+      randomUUID(),
+      input.visitorId,
+      profileId,
+      input.ipAddress,
+      input.userAgent,
+    )
+
+    const accountRow: AccountRow = {
+      account_id: accountId,
+      email: input.normalizedEmail,
+      password_hash: input.passwordHash,
+      role: 'player',
+      status: 'active',
+      created_at: new Date().toISOString(),
+    }
+
+    return { accountRow, profileId }
+  }
+
+  function checkRegistrationRateLimit(input: {
+    scope: string
+    rawSubject: string
+    windowSeconds: number
+    maxEvents: number
+  }): boolean {
+    // Връща true, ако е limited (caller-ът трябва да откаже). Извиква се
+    // ВИНАГИ ВЪТРЕ в отворена BEGIN IMMEDIATE транзакция от caller-а (mirror
+    // на passwordResetStore.ts's checkAndRecordRateLimit) — cleanup+count+
+    // insert атомарно с останалата операция.
+    const subjectHash = hmacRateLimitSubject(input.scope, input.rawSubject, registrationSecret)
+    cleanupRegistrationRateLimitEventsStatement.run()
+    const countRow = countRegistrationRateLimitEventsStatement.get(
+      input.scope,
+      subjectHash,
+      `-${input.windowSeconds}`,
+    ) as { cnt: number } | undefined
+    if ((countRow?.cnt ?? 0) >= input.maxEvents) {
+      return true
+    }
+    insertRegistrationRateLimitEventStatement.run(randomUUID(), input.scope, subjectHash)
+    return false
+  }
+
+  const PENDING_REGISTRATION_EMAIL_MESSAGE =
+    'Този имейл има незавършена регистрация. Влезте с имейла и паролата си, за да я завършите.'
+
   function register(input: {
     email: string
     password: string
@@ -918,9 +1359,11 @@ export async function createAuthStore(
     visitorId?: string | null
     ipAddress?: string | null
     userAgent?: string | null
-  }):
-    | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
-    | { ok: false; message: string; code?: ProfileIdentityValidationCode } {
+  }): PendingRegistrationCreatedResult {
+    if (!isRegistrationSecretConfigured) {
+      return { ok: false, message: 'Регистрацията временно не е налична.' }
+    }
+
     const email = normalizeEmail(input.email)
     const displayNameResult = validateProfileDisplayName(input.displayName)
 
@@ -938,14 +1381,9 @@ export async function createAuthStore(
 
     // Стандартна input validation (НЕ anti-evasion решение) — visitorId е
     // задължителен prerequisite за регистрация, защото се записва в
-    // site_visit_events (admin dependency detection source) и legacy
-    // visitor_registration_bindings marker-а (виж register()'s doc коментар
-    // за AuthStore.register по-горе), но липсата/форматът му вече НЕ
-    // участва в решение дали регистрацията да мине — само дали заявката е
-    // добре формирана. Нормалният client flow
-    // (createVisitorPageViewTracker.ts, main.ts's onRegisterSubmit) винаги
-    // подава валиден crypto.randomUUID() — тази проверка на практика спира
-    // само ръчни/malformed API извиквания.
+    // site_visit_events (admin dependency detection source) при успешна
+    // верификация, но липсата/форматът му вече НЕ участва в решение дали
+    // регистрацията да мине — само дали заявката е добре формирана.
     if (typeof input.visitorId !== 'string' || !VISITOR_ID_FORMAT_RE.test(input.visitorId)) {
       return {
         ok: false,
@@ -955,104 +1393,73 @@ export async function createAuthStore(
     const visitorId = input.visitorId.toLowerCase()
 
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined
-
     if (existingAccount) {
       return { ok: false, message: 'Вече има регистрация с този email.' }
     }
 
-    const accountId = randomUUID()
-    const profileId = randomUUID()
-    const displayName = displayNameResult.canonicalDisplayName
-    const normalizedDisplayName = displayNameResult.normalizedKey
-    const normalizedUsername = normalizedDisplayName
+    const pendingRegistrationId = randomUUID()
     const passwordHash = createPasswordHash(input.password)
+    const rawCode = generateVerificationCode()
+    const codeHash = hashVerificationCode(rawCode, registrationSecret)
+    const expiresAt = new Date(Date.now() + PENDING_REGISTRATION_TTL_MS).toISOString()
+    const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
 
     try {
       database.exec('BEGIN IMMEDIATE;')
 
-      const nameConflict = database.prepare(`
-        SELECT profile_id FROM profiles
-        WHERE status = 'active'
-          AND (normalized_display_name = ? OR normalized_username = ?)
-        LIMIT 1;
-      `).get(normalizedDisplayName, normalizedUsername) as { profile_id: string } | undefined
+      // Opportunistic cleanup — само за ТОЗИ email (spec §"EMAIL RESERVATION":
+      // "по-чистия вариант" — изтрива, не флагва). Освобождава email-а за
+      // нова регистрация веднага щом старият pending ред е expired.
+      deleteExpiredPendingRegistrationByEmailStatement.run(email)
 
-      if (nameConflict !== undefined) {
+      const existingPending = selectPendingRegistrationByEmailStatement.get(email) as
+        | PendingRegistrationRow
+        | undefined
+      if (existingPending !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'EMAIL_VERIFICATION_PENDING', message: PENDING_REGISTRATION_EMAIL_MESSAGE }
+      }
+
+      // Best-effort (НЕ authoritative) display-name uniqueness проверка тук
+      // — веднага feedback за потребителя при register(), вместо да чака до
+      // след email verification, за да разбере, че името е заето (по-добър
+      // UX от "мълчалив" late failure). Authoritative re-check СЪЩО се
+      // случва в verifyRegistrationEmail() (createVerifiedAccountAndProfileInOpenTransaction's
+      // nameConflictStatement) — истинско rejection на profiles-table race
+      // (двама pending registrants със СЪЩОТО име, единият verify-ва пръв)
+      // може да се случи само там, тъй като profiles редът не съществува
+      // все още на тази точка.
+      const earlyNameConflict = nameConflictStatement.get(
+        displayNameResult.normalizedKey,
+        displayNameResult.normalizedKey,
+      ) as { profile_id: string } | undefined
+      if (earlyNameConflict !== undefined) {
         database.exec('ROLLBACK;')
         return { ok: false, message: 'Това име вече е заето.' }
       }
 
-      insertAccountStatement.run(accountId, email, passwordHash)
-      const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
-      insertProfileStatement.run(
-        profileId,
-        accountId,
-        displayName,
-        normalizedUsername,
-        displayName,
-        normalizedDisplayName,
+      insertPendingRegistrationStatement.run(
+        pendingRegistrationId,
+        email,
+        passwordHash,
+        displayNameResult.canonicalDisplayName,
         gender,
+        visitorId,
+        input.ipAddress ?? null,
+        input.userAgent ?? null,
+        codeHash,
+        expiresAt,
+        new Date().toISOString(),
       )
-      insertWalletStatement.run(
-        profileId,
-        Math.max(0, Math.trunc(options.getSignupBonusYellowCoins?.() ?? 0)),
-      )
-      insertProgressStatement.run(profileId)
-
-      // Immediate visitor/profile binding (follow-up brief §2) — ВЪТРЕ в
-      // СЪЩАТА транзакция/connection като account/profile INSERT-ите по-горе
-      // (НЕ през siteVisitStore-ovата отделна connection/store — виж
-      // production report-а "Immediate visitor/profile binding" секцията за
-      // пълния rationale: cross-connection write веднага след commit на
-      // ДРУГА connection се провали с FK constraint failed при E2E тестване
-      // на Windows/node:sqlite, вероятно WAL-visibility quirk; same-
-      // connection/same-transaction insert е едновременно по-прост И по-
-      // надежден — profiles редът вече е в СЪЩАТА, все още отворена
-      // транзакция, FK-то е тривиално satisfied). Reuse-ва СЪЩИТЕ
-      // site_visitors/site_visit_events таблици като нормалния page-view
-      // tracking flow (siteVisitStore.ts) — само минималните колони,
-      // нужни за findProfileIdsForVisitorId/hasProfileEventFromIp lookup-а;
-      // richer analytics полета (referrer/utm/device/os) остават NULL,
-      // попълвани нормално от следващия реален /api/visits/page-view.
-      //
-      // Умишлено ВЪТРЕ в транзакцията (не best-effort след COMMIT) — ако
-      // тази INSERT се провали, ЦЯЛАТА регистрация се rollback-ва (виж
-      // catch-а по-долу) вместо да остави "registered, но unprotected"
-      // профил, за който one-device-one-account invariant-ът тихо не важи.
-      // visitorId вече е гарантирано валиден non-null string тук (виж
-      // задължителната проверка в началото на функцията) — няма нужда от
-      // null guard.
-      {
-        // Виж insertVisitorRegistrationBindingStatement doc коментара
-        // по-горе — "OR IGNORE", не блокира/хвърля при вече съществуващ
-        // binding за този visitor_id.
-        insertVisitorRegistrationBindingStatement.run(visitorId, profileId)
-
-        insertRegistrationVisitorRecordStatement.run(visitorId, profileId, profileId)
-        insertRegistrationVisitorEventStatement.run(
-          randomUUID(),
-          visitorId,
-          profileId,
-          input.ipAddress ?? null,
-          input.userAgent ?? null,
-        )
-      }
 
       database.exec('COMMIT;')
 
-      const accountRow: AccountRow = {
-        account_id: accountId,
-        email,
-        password_hash: passwordHash,
-        role: 'player',
-        status: 'active',
-        created_at: new Date().toISOString(),
-      }
-      const session = createSession(accountRow, profileId)
-
       return {
         ok: true,
-        ...session,
+        pendingRegistrationId,
+        rawCode,
+        maskedEmail: maskEmailForDisplay(email),
+        expiresAt,
       }
     } catch (error) {
       try {
@@ -1062,21 +1469,300 @@ export async function createAuthStore(
       }
 
       const message = error instanceof Error ? error.message : String(error)
-
-      if (
-        message.includes('normalized_display_name') ||
-        message.includes('normalized_username')
-      ) {
-        return { ok: false, message: 'Това име вече е заето.' }
+      // UNIQUE(normalized_email) race — конкурентна регистрация за СЪЩИЯ
+      // email е committed-нала между opportunistic cleanup-а и INSERT-а.
+      if (message.includes('pending_registrations') || message.includes('normalized_email')) {
+        return { ok: false, code: 'EMAIL_VERIFICATION_PENDING', message: PENDING_REGISTRATION_EMAIL_MESSAGE }
       }
 
       return { ok: false, message: 'Регистрацията не беше успешна.' }
     }
   }
 
+  function resendRegistrationVerificationCode(input: {
+    pendingRegistrationId: string
+    ipAddress: string | null
+  }): ResendRegistrationCodeResult {
+    if (!isRegistrationSecretConfigured) {
+      return { ok: false, reason: 'not_found' }
+    }
+
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+
+      const row = selectPendingRegistrationByIdStatement.get(input.pendingRegistrationId) as
+        | PendingRegistrationRow
+        | undefined
+      if (row === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_found' }
+      }
+
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        // Opportunistic cleanup — mirror на register()'s "по-чистия вариант".
+        deletePendingRegistrationByIdStatement.run(row.pending_registration_id)
+        database.exec('COMMIT;')
+        return { ok: false, reason: 'expired' }
+      }
+
+      const msSinceLastSend = Date.now() - new Date(row.last_code_sent_at).getTime()
+      if (msSinceLastSend < PENDING_REGISTRATION_RESEND_MIN_INTERVAL_MS) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'rate_limited' }
+      }
+
+      const limitedByPending = checkRegistrationRateLimit({
+        scope: 'registration-resend-pending',
+        rawSubject: row.pending_registration_id,
+        windowSeconds: PENDING_REGISTRATION_RESEND_WINDOW_SECONDS,
+        maxEvents: PENDING_REGISTRATION_RESEND_MAX_PER_PENDING,
+      })
+      if (limitedByPending) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'rate_limited' }
+      }
+
+      if (input.ipAddress !== null) {
+        const limitedByIp = checkRegistrationRateLimit({
+          scope: 'registration-resend-ip',
+          rawSubject: input.ipAddress,
+          windowSeconds: PENDING_REGISTRATION_RESEND_IP_WINDOW_SECONDS,
+          maxEvents: PENDING_REGISTRATION_RESEND_IP_MAX_PER_WINDOW,
+        })
+        if (limitedByIp) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'rate_limited' }
+        }
+      }
+
+      const rawCode = generateVerificationCode()
+      const codeHash = hashVerificationCode(rawCode, registrationSecret)
+      // expires_at НЕ се пипа тук — 24-часовият прозорец е фиксиран от
+      // ПЪРВОНАЧАЛНОТО създаване (spec §"24-ЧАСОВО ПРАВИЛО").
+      updatePendingRegistrationCodeStatement.run(codeHash, new Date().toISOString(), row.pending_registration_id)
+
+      database.exec('COMMIT;')
+
+      return {
+        ok: true,
+        rawCode,
+        email: row.normalized_email,
+        maskedEmail: maskEmailForDisplay(row.normalized_email),
+        expiresAt: row.expires_at,
+      }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
+      return { ok: false, reason: 'not_found' }
+    }
+  }
+
+  function verifyRegistrationEmail(input: {
+    pendingRegistrationId: string
+    code: string
+    rememberMe: boolean
+    ipAddress: string | null
+    userAgent: string | null
+  }): VerifyRegistrationEmailResult {
+    if (!isRegistrationSecretConfigured) {
+      return { ok: false, reason: 'not_found' }
+    }
+
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+
+      if (input.ipAddress !== null) {
+        const limitedByIp = checkRegistrationRateLimit({
+          scope: 'registration-verify-ip',
+          rawSubject: input.ipAddress,
+          windowSeconds: PENDING_REGISTRATION_VERIFY_IP_WINDOW_SECONDS,
+          maxEvents: PENDING_REGISTRATION_VERIFY_IP_MAX_PER_WINDOW,
+        })
+        if (limitedByIp) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'rate_limited' }
+        }
+      }
+
+      const row = selectPendingRegistrationByIdStatement.get(input.pendingRegistrationId) as
+        | PendingRegistrationRow
+        | undefined
+      if (row === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_found' }
+      }
+
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        deletePendingRegistrationByIdStatement.run(row.pending_registration_id)
+        database.exec('COMMIT;')
+        return { ok: false, reason: 'expired' }
+      }
+
+      if (row.failed_attempts >= PENDING_REGISTRATION_MAX_FAILED_ATTEMPTS) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'too_many_attempts' }
+      }
+
+      const codeIsValid = /^[0-9]{6}$/.test(input.code) && verifyVerificationCode(input.code, registrationSecret, row.code_hash)
+      if (!codeIsValid) {
+        incrementPendingRegistrationFailedAttemptsStatement.run(row.pending_registration_id)
+        database.exec('COMMIT;')
+        const attemptsRemaining = Math.max(0, PENDING_REGISTRATION_MAX_FAILED_ATTEMPTS - (row.failed_attempts + 1))
+        return { ok: false, reason: 'invalid_code', attemptsRemaining }
+      }
+
+      // Код е верен — материализираме реалния account/profile ВЪТРЕ в
+      // СЪЩАТА транзакция (spec §"VERIFY ENDPOINT": re-check email
+      // uniqueness + create account + profile + wallet/progress +
+      // visitor history + consume pending, всичко атомарно).
+      const creationResult = createVerifiedAccountAndProfileInOpenTransaction({
+        normalizedEmail: row.normalized_email,
+        passwordHash: row.password_hash,
+        displayName: row.display_name,
+        gender: row.gender,
+        visitorId: row.visitor_id ?? randomUUID(),
+        // Registration-time IP/UA (row.*, captured в pending_registrations
+        // при ПЪРВОНАЧАЛНОТО register() извикване) има приоритет пред
+        // verify-time IP/UA (input.*, от самата /verify-registration-email
+        // заявка) — site_visit_events трябва да отразява откъде реално Е
+        // ВЪЗНИКНАЛА регистрацията (spec §"REGISTRATION FLOW": "запиши
+        // visitor/profile history по същия начин, както успешната
+        // registration го прави в момента"), не откъде е бил въведен кодът
+        // (обикновено СЪЩОТО устройство/IP, но не гарантирано — напр. отворен
+        // email клиент на друг device/мрежа). input.* остава fallback само
+        // ако registration-time стойността по някаква причина липсва.
+        ipAddress: row.ip_address ?? input.ipAddress,
+        userAgent: row.user_agent ?? input.userAgent,
+      })
+
+      if ('conflict' in creationResult) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: creationResult.conflict === 'email_taken' ? 'email_taken' : 'display_name_taken' }
+      }
+
+      // Consume-on-success — DELETE ВЪТРЕ в СЪЩАТА транзакция като account
+      // creation-а по-горе. Double-click/два конкурентни verify request-а:
+      // BEGIN IMMEDIATE сериализира ги (SQLite single-writer) — вторият
+      // request вижда реда вече изтрит (row === undefined по-горе) и връща
+      // 'not_found', след като първият commit-не. Кодът вече никога не
+      // може да се използва повторно (редът, в който живееше, вече го няма).
+      deletePendingRegistrationByIdStatement.run(row.pending_registration_id)
+
+      database.exec('COMMIT;')
+
+      const session = createSession(creationResult.accountRow, creationResult.profileId, input.rememberMe)
+
+      return { ok: true, ...session }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
+      return { ok: false, reason: 'not_found' }
+    }
+  }
+
+  function updatePendingRegistrationDisplayName(input: {
+    pendingRegistrationId: string
+    displayName: string
+    ipAddress: string | null
+  }): UpdatePendingRegistrationDisplayNameResult {
+    if (!isRegistrationSecretConfigured) {
+      return { ok: false, reason: 'not_found' }
+    }
+
+    // Формат/reserved-name валидацията е ИДЕНТИЧНА на register()'s
+    // displayNameResult проверка (СЪЩИЯТ validateProfileDisplayName) — не
+    // разхлабваме правилата само защото сме на recovery пътя.
+    const displayNameResult = validateProfileDisplayName(input.displayName)
+    if (!displayNameResult.ok) {
+      return { ok: false, reason: 'invalid_display_name', message: displayNameResult.message, code: displayNameResult.code }
+    }
+
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+
+      if (input.ipAddress !== null) {
+        const limitedByIp = checkRegistrationRateLimit({
+          scope: 'registration-update-name-ip',
+          rawSubject: input.ipAddress,
+          windowSeconds: PENDING_REGISTRATION_UPDATE_NAME_IP_WINDOW_SECONDS,
+          maxEvents: PENDING_REGISTRATION_UPDATE_NAME_IP_MAX_PER_WINDOW,
+        })
+        if (limitedByIp) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'rate_limited' }
+        }
+      }
+
+      const row = selectPendingRegistrationByIdStatement.get(input.pendingRegistrationId) as
+        | PendingRegistrationRow
+        | undefined
+      if (row === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'not_found' }
+      }
+
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        deletePendingRegistrationByIdStatement.run(row.pending_registration_id)
+        database.exec('COMMIT;')
+        return { ok: false, reason: 'expired' }
+      }
+
+      // Best-effort (НЕ authoritative — mirror на register()'s early check
+      // doc коментара) uniqueness срещу ЖИВИ profiles. Authoritative
+      // re-check пак се случва в createVerifiedAccountAndProfileInOpenTransaction
+      // при следващия verify опит.
+      const nameConflict = nameConflictStatement.get(
+        displayNameResult.normalizedKey,
+        displayNameResult.normalizedKey,
+      ) as { profile_id: string } | undefined
+      if (nameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'display_name_taken' }
+      }
+
+      // САМО display_name — password_hash/code_hash/failed_attempts/
+      // resend_count/last_code_sent_at/expires_at НЕ се пипат (hardening
+      // pass §1: потребителят не губи нито кода, нито 24-часовия прозорец).
+      updatePendingRegistrationDisplayNameStatement.run(
+        displayNameResult.canonicalDisplayName,
+        row.pending_registration_id,
+      )
+
+      database.exec('COMMIT;')
+
+      return { ok: true, maskedEmail: maskEmailForDisplay(row.normalized_email), expiresAt: row.expires_at }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
+      return { ok: false, reason: 'not_found' }
+    }
+  }
+
+  function cancelPendingRegistration(pendingRegistrationId: string): { ok: true } {
+    // Идемпотентно, bearer-capability модел (виж AuthStore.cancelPendingRegistration
+    // doc коментара по-горе) — просто DELETE, без транзакция (единична
+    // statement), без да разкрива дали редът реално е съществувал.
+    try {
+      deletePendingRegistrationByIdStatement.run(pendingRegistrationId)
+    } catch {
+      // best-effort — cancel никога не трябва да хвърли към caller-а
+    }
+    return { ok: true }
+  }
+
   function login(input: {
     email: string
     password: string
+    rememberMe: boolean
   }):
     | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
     | { ok: false; message: string }
@@ -1087,7 +1773,9 @@ export async function createAuthStore(
         bannedUntil: string
         reason: string
         remainingDays: number
-      } {
+      }
+    | { ok: false; code: 'EMAIL_VERIFICATION_REQUIRED'; pendingRegistrationId: string; maskedEmail: string }
+    | { ok: false; code: 'REGISTRATION_EXPIRED'; message: string } {
     const email = normalizeEmail(input.email)
 
     if (email === null) {
@@ -1097,6 +1785,37 @@ export async function createAuthStore(
     const account = selectAccountByEmailStatement.get(email) as AccountRow | undefined
 
     if (!account || !verifyPassword(input.password, account.password_hash)) {
+      // "Затваря сайта преди кода" сценарий (production report-а §"ЗАТВАРЯ
+      // САЙТА ПРЕДИ КОДА"/"EXPIRED PENDING + LOGIN") — active account НЯМА
+      // за този email (ако имаше, горният verifyPassword branch вече би
+      // хванал грешна парола independent от pending). Разкриваме pending
+      // registration състояние САМО ако подадената парола реално съвпада с
+      // pending password_hash-а — non-enumeration за трети страни, които не
+      // знаят паролата.
+      if (!account) {
+        const pendingRow = selectPendingRegistrationByEmailStatement.get(email) as
+          | PendingRegistrationRow
+          | undefined
+        if (pendingRow !== undefined && verifyPassword(input.password, pendingRow.password_hash)) {
+          const isExpired = new Date(pendingRow.expires_at).getTime() <= Date.now()
+          if (isExpired) {
+            // Opportunistic cleanup — освобождава email-а за чисто нова
+            // регистрация (spec §"EXPIRED PENDING + LOGIN").
+            deletePendingRegistrationByIdStatement.run(pendingRow.pending_registration_id)
+            return {
+              ok: false,
+              code: 'REGISTRATION_EXPIRED',
+              message: 'Регистрацията ви е изтекла. Моля, регистрирайте се отново.',
+            }
+          }
+          return {
+            ok: false,
+            code: 'EMAIL_VERIFICATION_REQUIRED',
+            pendingRegistrationId: pendingRow.pending_registration_id,
+            maskedEmail: maskEmailForDisplay(pendingRow.normalized_email),
+          }
+        }
+      }
       return { ok: false, message: 'Грешен email или парола.' }
     }
 
@@ -1135,7 +1854,7 @@ export async function createAuthStore(
 
     return {
       ok: true,
-      ...createSession(account, profileIdRow.profile_id),
+      ...createSession(account, profileIdRow.profile_id, input.rememberMe),
     }
   }
 
@@ -1219,20 +1938,20 @@ export async function createAuthStore(
    * (ако сесията все още не е изтекла по старите 30 дни — иначе изобщо не
    * стига дотук, selectSessionStatement вече я е филтрирал).
    */
-  function touchSession(sessionToken: string | null): { session: AuthSessionSnapshot | null; renewed: boolean } {
+  function touchSession(sessionToken: string | null): { session: AuthSessionSnapshot | null; renewed: boolean; rememberMe: boolean } {
     const row = fetchValidSessionRow(sessionToken)
     if (row === null) {
-      return { session: null, renewed: false }
+      return { session: null, renewed: false, rememberMe: true }
     }
 
     const session = toSessionSnapshot(row)
     if (session === null) {
-      return { session: null, renewed: false }
+      return { session: null, renewed: false, rememberMe: true }
     }
 
     const renewalCutoffIso = new Date(Date.now() + (SESSION_TTL_MS - SESSION_RENEWAL_THROTTLE_MS)).toISOString()
     const result = renewSessionStatement.run(createIsoExpiresAt(), row.session_id, renewalCutoffIso) as { changes?: number }
-    return { session, renewed: (result.changes ?? 0) > 0 }
+    return { session, renewed: (result.changes ?? 0) > 0, rememberMe: row.remember_me !== 0 }
   }
 
   function changePassword(input: {
@@ -1506,6 +2225,10 @@ export async function createAuthStore(
 
   return {
     register,
+    resendRegistrationVerificationCode,
+    verifyRegistrationEmail,
+    updatePendingRegistrationDisplayName,
+    cancelPendingRegistration,
     login,
     changePassword,
     getSession,

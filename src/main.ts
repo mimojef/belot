@@ -451,6 +451,11 @@ type AuthResponse = {
   bannedUntil?: string
   reason?: string
   remainingDays?: number
+  /** Email verification pending-first flow (виж server/src/db/authStore.ts's register() doc коментар) — register()/verify-registration-email()/resend-registration-code() response полета. pendingRegistrationId е opaque identifier, НИКОГА самият код. */
+  pendingRegistrationId?: string
+  maskedEmail?: string
+  expiresAt?: string
+  attemptsRemaining?: number
 }
 
 type AdminProfileResponse = {
@@ -783,63 +788,200 @@ async function loadAuthSession(): Promise<void> {
   }
 }
 
-async function submitAuthRequest(
-  endpoint: 'login' | 'register',
-  body: Record<string, string>,
+/**
+ * Общ "нова автентикирана сесия е готова" side-effect chain — извиква се и
+ * от успешен login, и от успешна email-verification (production report-а
+ * "PENDING REGISTRATION"/"VERIFY ENDPOINT") — register() вече НЕ произвежда
+ * сесия директно, само verify-registration-email() го прави.
+ */
+async function applyNewAuthSession(session: AuthSession, isNewRegistration: boolean): Promise<void> {
+  currentAuthSession = session
+  saveSessionCache(currentAuthSession)
+  // Маркерът е module-level state, не е обвързан с конкретен профил — нова
+  // сесия не трябва да наследи "pending" от преди (напр. предишен профил в
+  // същия таб/PWA runtime, или guest сесия).
+  clearPendingChatRefresh()
+  syncLobbyWithAuthSession()
+  lobby.clearTopicsDirectoryMetadata()
+  lobby.resetToLobby()
+  lobby.refreshDailyRewardsStatus()
+  lobby.refreshSupportUnread()
+  startSupportUnreadPolling()
+  await syncLobbyFriendships()
+  await syncLobbyChatConversations()
+  await syncLobbyTopicsDirectoryMetadata()
+  refreshGameServerConnectionForAuth()
+  // Meta CompleteRegistration — само за реално завършена (верифицирана)
+  // регистрация, никога login. eventId е стабилен спрямо accountId (веднъж
+  // заделен от сървъра при успешен verify), не случаен UUID — идемпотентен
+  // дори при бъдещо CAPI.
+  if (isNewRegistration) {
+    trackCompleteRegistration(`complete-registration-${session.account.accountId}`)
+  }
+}
+
+async function submitLoginRequest(
+  email: string,
+  password: string,
+  rememberMe: boolean,
 ): Promise<{
   errorText: string | null
   bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
+  /** Активен account НЯМА за този email, но unexpired pending registration + правилна парола -> клиентът автоматично отваря verification popup-а (spec §"ЗАТВАРЯ САЙТА ПРЕДИ КОДА"). */
+  verificationRequired?: { pendingRegistrationId: string; maskedEmail: string } | null
 }> {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/auth/${endpoint}`, {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/login`, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify(body),
+      body: JSON.stringify({ email, password, rememberMe }),
     })
     const data = await readAuthResponse(response)
 
     if (!response.ok || !data.ok || !data.session) {
-      // Структуриран PROFILE_BANNED отговор (spec §5A) — само login endpoint-ът
-      // може реално да го върне (authStore.login ban gate), но проверката е
-      // тук (не в отделна login-only функция), за да няма дублиран fetch/
-      // error-handling код между login и register.
+      // Структуриран PROFILE_BANNED отговор (spec §5A).
       if (data.code === 'PROFILE_BANNED' && data.bannedUntil && data.reason && typeof data.remainingDays === 'number') {
         return {
           errorText: data.message ?? 'Профилът е баннат.',
           bannedInfo: { bannedUntil: data.bannedUntil, reason: data.reason, remainingDays: data.remainingDays },
         }
       }
+      if (data.code === 'EMAIL_VERIFICATION_REQUIRED' && data.pendingRegistrationId && data.maskedEmail) {
+        return {
+          errorText: null,
+          verificationRequired: { pendingRegistrationId: data.pendingRegistrationId, maskedEmail: data.maskedEmail },
+        }
+      }
       return { errorText: data.message ?? 'Заявката не беше успешна.' }
     }
 
-    currentAuthSession = data.session
-    saveSessionCache(currentAuthSession)
-    // Маркерът е module-level state, не е обвързан с конкретен профил —
-    // нова сесия (login/register) не трябва да наследи "pending" от преди
-    // (напр. предишен профил в същия таб/PWA runtime, или guest сесия).
-    clearPendingChatRefresh()
-    syncLobbyWithAuthSession()
-    lobby.clearTopicsDirectoryMetadata()
-    lobby.resetToLobby()
-    lobby.refreshDailyRewardsStatus()
-    lobby.refreshSupportUnread()
-    startSupportUnreadPolling()
-    await syncLobbyFriendships()
-    await syncLobbyChatConversations()
-    await syncLobbyTopicsDirectoryMetadata()
-    refreshGameServerConnectionForAuth()
-    // Meta CompleteRegistration — само за успешен register, никога login.
-    // eventId е стабилен спрямо accountId (веднъж заделен от сървъра при
-    // успешен INSERT), не случаен UUID — идемпотентен дори при бъдещо CAPI.
-    if (endpoint === 'register') {
-      trackCompleteRegistration(`complete-registration-${currentAuthSession.account.accountId}`)
-    }
+    await applyNewAuthSession(data.session, false)
     return { errorText: null }
   } catch {
     return { errorText: 'Няма връзка със сървъра за профили.' }
+  }
+}
+
+async function submitRegisterRequest(body: Record<string, string>): Promise<{
+  errorText: string | null
+  pending?: { pendingRegistrationId: string; maskedEmail: string; expiresAt: string; deliveryWarning?: string } | null
+}> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(body),
+    })
+    const data = await readAuthResponse(response)
+
+    // pendingRegistrationId/maskedEmail/expiresAt присъстват и на 503
+    // EMAIL_DELIVERY_FAILED (hardening pass §4) — pending редът Е реален
+    // (само доставката е провалила), затова НЕ третираме това като hard
+    // failure: отваряме verification popup-а директно, с ясно
+    // предупреждение + resend опция, вместо клиентът да остане в
+    // "регистрацията никога не е започнала" състояние.
+    if (data.pendingRegistrationId && data.maskedEmail && data.expiresAt) {
+      return {
+        errorText: null,
+        pending: {
+          pendingRegistrationId: data.pendingRegistrationId,
+          maskedEmail: data.maskedEmail,
+          expiresAt: data.expiresAt,
+          deliveryWarning: data.code === 'EMAIL_DELIVERY_FAILED' ? (data.message ?? 'Не успяхме да изпратим кода. Опитайте отново след малко.') : undefined,
+        },
+      }
+    }
+
+    return { errorText: data.message ?? 'Заявката не беше успешна.' }
+  } catch {
+    return { errorText: 'Няма връзка със сървъра за профили.' }
+  }
+}
+
+async function submitVerifyRegistrationEmailRequest(
+  pendingRegistrationId: string,
+  code: string,
+  rememberMe: boolean,
+): Promise<{ errorText: string | null; attemptsRemaining?: number; code?: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/verify-registration-email`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ pendingRegistrationId, code, rememberMe }),
+    })
+    const data = await readAuthResponse(response)
+
+    if (!response.ok || !data.ok || !data.session) {
+      return { errorText: data.message ?? 'Заявката не беше успешна.', attemptsRemaining: data.attemptsRemaining, code: data.code }
+    }
+
+    await applyNewAuthSession(data.session, true)
+    return { errorText: null }
+  } catch {
+    return { errorText: 'Няма връзка със сървъра за профили.' }
+  }
+}
+
+async function submitResendRegistrationCodeRequest(
+  pendingRegistrationId: string,
+): Promise<{ errorText: string | null; maskedEmail?: string; expiresAt?: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/resend-registration-code`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ pendingRegistrationId }),
+    })
+    const data = await readAuthResponse(response)
+
+    if (!response.ok || !data.ok || !data.maskedEmail || !data.expiresAt) {
+      return { errorText: data.message ?? 'Заявката не беше успешна.' }
+    }
+
+    return { errorText: null, maskedEmail: data.maskedEmail, expiresAt: data.expiresAt }
+  } catch {
+    return { errorText: 'Няма връзка със сървъра за профили.' }
+  }
+}
+
+/** Display-name-taken recovery (hardening pass §1) — сменя display_name-а на pending registration-а без нов email/парола/код/24 часа. */
+async function submitUpdatePendingRegistrationDisplayNameRequest(
+  pendingRegistrationId: string,
+  displayName: string,
+): Promise<{ errorText: string | null; maskedEmail?: string; expiresAt?: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/auth/update-pending-registration-display-name`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ pendingRegistrationId, displayName }),
+    })
+    const data = await readAuthResponse(response)
+
+    if (!response.ok || !data.ok) {
+      return { errorText: data.message ?? 'Заявката не беше успешна.' }
+    }
+
+    return { errorText: null, maskedEmail: data.maskedEmail, expiresAt: data.expiresAt }
+  } catch {
+    return { errorText: 'Няма връзка със сървъра за профили.' }
+  }
+}
+
+/** "Смени имейла" recovery (hardening pass §3) — best-effort explicit cancel на стар (вероятно typo-нат) pending registration. Fire-and-forget от UI перспектива — грешки тук никога не бива да пречат на потребителя да продължи. */
+async function submitCancelPendingRegistrationRequest(pendingRegistrationId: string): Promise<void> {
+  try {
+    await fetch(`${getApiBaseUrl()}/api/auth/cancel-pending-registration`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ pendingRegistrationId }),
+    })
+  } catch {
+    // best-effort — мълчаливо игнорираме network грешки тук
   }
 }
 
@@ -5997,16 +6139,12 @@ lobby = createLobbyFlowController({
   onShowModerationForcedExitPopup: (input) => {
     showModerationForcedExitPopup(input)
   },
-  onLoginSubmit: (email, password) =>
-    submitAuthRequest('login', {
-      email,
-      password,
-    }),
+  onLoginSubmit: (email, password, rememberMe) => submitLoginRequest(email, password, rememberMe),
   onRegisterSubmit: (displayName, email, password, gender) =>
     {
       const validation = validateProfileDisplayName(displayName)
       if (!validation.ok) return Promise.resolve({ errorText: validation.message })
-      return submitAuthRequest('register', {
+      return submitRegisterRequest({
         displayName: validation.canonicalDisplayName,
         email,
         password,
@@ -6016,8 +6154,16 @@ lobby = createLobbyFlowController({
         // дали регистрацията да мине (виж authStore.ts's register()).
         visitorId: getAnonymousVisitorId(),
         ...(gender !== null ? { gender } : {}),
-      }).then((result) => ({ errorText: result.errorText }))
+      }).then((result) => ({ errorText: result.errorText, pending: result.pending }))
     },
+  onVerifyRegistrationEmailSubmit: (pendingRegistrationId, code, rememberMe) =>
+    submitVerifyRegistrationEmailRequest(pendingRegistrationId, code, rememberMe),
+  onResendRegistrationCodeSubmit: (pendingRegistrationId) =>
+    submitResendRegistrationCodeRequest(pendingRegistrationId),
+  onUpdatePendingRegistrationDisplayNameSubmit: (pendingRegistrationId, displayName) =>
+    submitUpdatePendingRegistrationDisplayNameRequest(pendingRegistrationId, displayName),
+  onCancelPendingRegistrationSubmit: (pendingRegistrationId) =>
+    submitCancelPendingRegistrationRequest(pendingRegistrationId),
   onProfileEditSubmit: (targetProfileId, avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(targetProfileId, avatarFile, avatarCrop, galleryFiles),
   onPresetAvatarApply: (targetProfileId, avatarUrl) => submitPresetAvatarUrl(targetProfileId, avatarUrl),

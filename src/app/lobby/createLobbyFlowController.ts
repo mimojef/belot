@@ -50,6 +50,7 @@ import {
 import type { PlayerAccountRole } from '../../ui/overlays/renderPlayerProfilePopup'
 import type { ProfileAccessBlockCode, ProfileAccessBlockPopupState } from '../../ui/overlays/renderProfileAccessBlockPopup'
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
+import type { RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import type { VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import type { LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -350,10 +351,12 @@ export type CreateLobbyFlowControllerOptions = {
     bodyHtml: string
     onForcedLogout: () => void
   }) => void
-  onLoginSubmit?: (email: string, password: string) => Promise<{
+  onLoginSubmit?: (email: string, password: string, rememberMe: boolean) => Promise<{
     errorText: string | null
     /** Структуриран PROFILE_BANNED резултат (spec §5A) — попълнен само когато errorText идва от активен бан, за dedicated ban popup вместо generic inline error text. */
     bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
+    /** "Затваря сайта преди кода" сценарий (production report-а) — active account НЯМА, но unexpired pending registration + правилна парола -> автоматично отваря verification popup-а вместо generic error. */
+    verificationRequired?: { pendingRegistrationId: string; maskedEmail: string } | null
   }>
   onRegisterSubmit?: (
     displayName: string,
@@ -362,7 +365,29 @@ export type CreateLobbyFlowControllerOptions = {
     gender: 'male' | 'female' | null,
   ) => Promise<{
     errorText: string | null
+    /** Email verification pending-first flow — успешна регистрация вече връща pending state, не сесия директно. deliveryWarning е popular само когато Brevo провали (hardening pass §4) — pending-ът все пак е реален/валиден, клиентът трябва да отвори popup-а с this предупреждение + resend опция, не hard error. */
+    pending?: { pendingRegistrationId: string; maskedEmail: string; expiresAt: string; deliveryWarning?: string } | null
   }>
+  onVerifyRegistrationEmailSubmit?: (
+    pendingRegistrationId: string,
+    code: string,
+    rememberMe: boolean,
+  ) => Promise<{
+    errorText: string | null
+    attemptsRemaining?: number
+    /** Server-side error code (напр. 'DISPLAY_NAME_TAKEN') — hardening pass §1: контролерът превключва popup-а към display-name-change режим вместо dead-end грешка. */
+    code?: string
+  }>
+  onResendRegistrationCodeSubmit?: (
+    pendingRegistrationId: string,
+  ) => Promise<{ errorText: string | null; maskedEmail?: string; expiresAt?: string }>
+  /** Display-name-taken recovery (hardening pass §1) — сменя display_name-а на pending registration-а БЕЗ нов email/парола/код/24 часа. */
+  onUpdatePendingRegistrationDisplayNameSubmit?: (
+    pendingRegistrationId: string,
+    displayName: string,
+  ) => Promise<{ errorText: string | null; maskedEmail?: string; expiresAt?: string }>
+  /** "Смени имейла" recovery (hardening pass §3) — explicit best-effort cancel на pending registration-а, fire-and-forget от UI перспектива. */
+  onCancelPendingRegistrationSubmit?: (pendingRegistrationId: string) => Promise<void>
   onProfileEditSubmit?: (
     targetProfileId: string | null,
     avatarFile: File | null,
@@ -1562,6 +1587,7 @@ type InternalLobbyFlowState = {
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   authSubmitInFlight: boolean
+  registrationVerification: RegistrationVerificationPopupState
   guestTrialPopup: GuestTrialPopupState
   vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
   guestLockedStakePopup: GuestLockedStakePopupState
@@ -2260,6 +2286,20 @@ function createInitialState(): InternalLobbyFlowState {
     authModalMode: 'closed',
     authErrorText: null,
     authSubmitInFlight: false,
+    registrationVerification: {
+      isOpen: false,
+      pendingRegistrationId: '',
+      maskedEmail: '',
+      expiresAt: '',
+      rememberMe: true,
+      errorText: null,
+      isSubmitting: false,
+      isResending: false,
+      resendAvailableAtMs: 0,
+      nowMs: Date.now(),
+      mode: 'code',
+      isChangingDisplayName: false,
+    },
     guestTrialPopup: {
       isOpen: false,
       gamesUsed: 0,
@@ -4292,6 +4332,7 @@ export function createLobbyFlowController(
       lobbyChatFullscreen: state.lobbyChatFullscreen,
       authModalMode: state.authModalMode,
       authErrorText: state.authErrorText,
+      registrationVerification: { ...state.registrationVerification, nowMs: Date.now() },
       guestTrialPopup: state.guestTrialPopup,
       vipPurchaseSuccessPopup: state.vipPurchaseSuccessPopup,
       guestLockedStakePopup: state.guestLockedStakePopup,
@@ -5678,11 +5719,44 @@ export function createLobbyFlowController(
       onTournamentBetaAccessModalSubmit: (password) => {
         void submitTournamentBetaAccessPassword(password)
       },
-      onLoginSubmit: (email, password) => {
-        void submitLogin(email, password)
+      onLoginSubmit: (email, password, rememberMe) => {
+        void submitLogin(email, password, rememberMe)
       },
       onRegisterSubmit: (displayName, email, password, gender) => {
         void submitRegister(displayName, email, password, gender)
+      },
+      onRegistrationVerificationSubmit: (code) => {
+        void submitRegistrationVerificationCode(code)
+      },
+      onRegistrationVerificationResend: () => {
+        void submitRegistrationVerificationResend()
+      },
+      onRegistrationVerificationChangeEmail: () => {
+        // "Смени имейла" (hardening pass §3) — explicit best-effort cancel
+        // на стария (вероятно typo-нат) pending, за да се освободи
+        // веднага за трети страни — fire-and-forget, НЕ блокира UI-то
+        // (потребителят вижда register формата веднага, независимо дали
+        // cancel заявката вече е приключила server-side).
+        const pendingRegistrationId = state.registrationVerification.pendingRegistrationId
+        if (pendingRegistrationId) {
+          void options.onCancelPendingRegistrationSubmit?.(pendingRegistrationId)
+        }
+        closeRegistrationVerificationPopup()
+        state.authModalMode = 'register'
+        render()
+      },
+      onRegistrationVerificationRememberMeChange: (checked) => {
+        state.registrationVerification.rememberMe = checked
+      },
+      onRegistrationVerificationClose: () => {
+        closeRegistrationVerificationPopup()
+        render()
+      },
+      onRegistrationVerificationSubmitDisplayName: (displayName) => {
+        void submitRegistrationVerificationDisplayNameChange(displayName)
+      },
+      onRegistrationVerificationCancelDisplayNameChange: () => {
+        cancelRegistrationVerificationDisplayNameChange()
       },
       onForgotPasswordSubmit: (email) => {
         void submitForgotPassword(email)
@@ -14252,15 +14326,28 @@ export function createLobbyFlowController(
     render()
   }
 
-  async function submitLogin(email: string, password: string): Promise<void> {
+  async function submitLogin(email: string, password: string, rememberMe: boolean): Promise<void> {
     if (state.authSubmitInFlight) {
       return
     }
 
     state.authSubmitInFlight = true
     const loginResult = options.onLoginSubmit
-      ? await options.onLoginSubmit(email.trim(), password)
+      ? await options.onLoginSubmit(email.trim(), password, rememberMe)
       : { errorText: 'Входът временно не е наличен.' }
+
+    // "Затваря сайта преди кода" сценарий (production report-а) — active
+    // account НЯМА, но unexpired pending registration + правилна парола ->
+    // отваряме verification popup-а вместо generic error, вместо login session.
+    if (loginResult.verificationRequired) {
+      state.authSubmitInFlight = false
+      openRegistrationVerificationPopup({
+        pendingRegistrationId: loginResult.verificationRequired.pendingRegistrationId,
+        maskedEmail: loginResult.verificationRequired.maskedEmail,
+        expiresAt: '',
+      })
+      return
+    }
 
     if (loginResult.bannedInfo) {
       state.authSubmitInFlight = false
@@ -14327,21 +14414,191 @@ export function createLobbyFlowController(
       ? await options.onRegisterSubmit(displayName, email.trim(), password, gender)
       : { errorText: 'Регистрацията временно не е налична.' }
 
-    if (result.errorText !== null) {
-      state.authSubmitInFlight = false
+    state.authSubmitInFlight = false
+
+    if (result.errorText !== null || !result.pending) {
       const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
-      if (el) { el.textContent = result.errorText; el.style.display = '' }
+      if (el) { el.textContent = result.errorText ?? 'Регистрацията не беше успешна.'; el.style.display = '' }
       return
     }
 
-    state.authSubmitInFlight = false
+    // Email verification pending-first flow (production report-а
+    // "REGISTRATION FLOW") — успешна регистрация вече НЕ създава сесия
+    // директно, отваря verification popup-а вместо да затваря auth modal-а
+    // с authenticated state.
+    openRegistrationVerificationPopup(result.pending)
+  }
+
+  let registrationVerificationCountdownIntervalId: ReturnType<typeof setInterval> | null = null
+
+  /** epoch ms — 60s resend cooldown (production report-а "RESEND CODE"). */
+  const REGISTRATION_VERIFICATION_RESEND_COOLDOWN_MS = 60_000
+
+  function startRegistrationVerificationCountdown(): void {
+    stopRegistrationVerificationCountdown()
+    // Периодичен render() tick, докато popup-ът е отворен — единствената
+    // причина е "живия" resend countdown текст (state.registrationVerification.nowMs
+    // се преизчислява при всеки render() от bridge-а в render() по-горе).
+    registrationVerificationCountdownIntervalId = setInterval(() => {
+      if (!state.registrationVerification.isOpen) {
+        stopRegistrationVerificationCountdown()
+        return
+      }
+      render()
+    }, 1000)
+  }
+
+  function stopRegistrationVerificationCountdown(): void {
+    if (registrationVerificationCountdownIntervalId !== null) {
+      clearInterval(registrationVerificationCountdownIntervalId)
+      registrationVerificationCountdownIntervalId = null
+    }
+  }
+
+  function openRegistrationVerificationPopup(pending: {
+    pendingRegistrationId: string
+    maskedEmail: string
+    expiresAt: string
+    /** Email delivery провали, но pending-ът е реален (hardening pass §4) — popup-ът се отваря директно с това съобщение + resend опция, вместо клиентът да остане в "registration never started" състояние. */
+    deliveryWarning?: string
+  }): void {
     state.authModalMode = 'closed'
     state.authErrorText = null
+    state.registrationVerification = {
+      isOpen: true,
+      pendingRegistrationId: pending.pendingRegistrationId,
+      maskedEmail: pending.maskedEmail,
+      expiresAt: pending.expiresAt,
+      rememberMe: true,
+      errorText: pending.deliveryWarning ?? null,
+      isSubmitting: false,
+      isResending: false,
+      resendAvailableAtMs: Date.now() + REGISTRATION_VERIFICATION_RESEND_COOLDOWN_MS,
+      nowMs: Date.now(),
+      mode: 'code',
+      isChangingDisplayName: false,
+    }
+    startRegistrationVerificationCountdown()
+    render()
+  }
+
+  function closeRegistrationVerificationPopup(): void {
+    stopRegistrationVerificationCountdown()
+    state.registrationVerification = {
+      isOpen: false,
+      pendingRegistrationId: '',
+      maskedEmail: '',
+      expiresAt: '',
+      rememberMe: true,
+      errorText: null,
+      isSubmitting: false,
+      isResending: false,
+      resendAvailableAtMs: 0,
+      nowMs: Date.now(),
+      mode: 'code',
+      isChangingDisplayName: false,
+    }
+  }
+
+  async function submitRegistrationVerificationCode(code: string): Promise<void> {
+    if (state.registrationVerification.isSubmitting) return
+    state.registrationVerification.isSubmitting = true
+    state.registrationVerification.errorText = null
+    render()
+
+    const result = options.onVerifyRegistrationEmailSubmit
+      ? await options.onVerifyRegistrationEmailSubmit(
+          state.registrationVerification.pendingRegistrationId,
+          code,
+          state.registrationVerification.rememberMe,
+        )
+      : { errorText: 'Потвърждението временно не е налично.' }
+
+    if (result.errorText !== null) {
+      state.registrationVerification.isSubmitting = false
+      // Display-name-taken recovery (hardening pass §1) — превключваме към
+      // display-name-change режим ВМЕСТО dead-end грешка. pendingRegistrationId/
+      // код/24-часов прозорец остават непроменени — само UI режимът се сменя.
+      if (result.code === 'DISPLAY_NAME_TAKEN') {
+        state.registrationVerification.mode = 'displayName'
+        state.registrationVerification.errorText = result.errorText
+        render()
+        return
+      }
+      state.registrationVerification.errorText = result.errorText
+      render()
+      return
+    }
+
+    closeRegistrationVerificationPopup()
     const authSession = options.getAuthSession?.() ?? null
     if (authSession !== null) {
       state.displayName = authSession.profile.displayName
       state.localAvatarUrl = authSession.profile.avatarUrl
     }
+    render()
+  }
+
+  async function submitRegistrationVerificationResend(): Promise<void> {
+    if (state.registrationVerification.isResending) return
+    state.registrationVerification.isResending = true
+    state.registrationVerification.errorText = null
+    render()
+
+    const result = options.onResendRegistrationCodeSubmit
+      ? await options.onResendRegistrationCodeSubmit(state.registrationVerification.pendingRegistrationId)
+      : { errorText: 'Изпращането временно не е налично.' }
+
+    state.registrationVerification.isResending = false
+
+    if (result.errorText !== null) {
+      state.registrationVerification.errorText = result.errorText
+      render()
+      return
+    }
+
+    state.registrationVerification.resendAvailableAtMs = Date.now() + REGISTRATION_VERIFICATION_RESEND_COOLDOWN_MS
+    if (result.maskedEmail) {
+      state.registrationVerification.maskedEmail = result.maskedEmail
+    }
+    render()
+  }
+
+  /** Display-name-taken recovery (hardening pass §1) — сменя display_name-а без нов email/парола/код/24 часа, после се връща към code режима за да довърши verify-а. */
+  async function submitRegistrationVerificationDisplayNameChange(displayName: string): Promise<void> {
+    if (state.registrationVerification.isChangingDisplayName) return
+    state.registrationVerification.isChangingDisplayName = true
+    state.registrationVerification.errorText = null
+    render()
+
+    const result = options.onUpdatePendingRegistrationDisplayNameSubmit
+      ? await options.onUpdatePendingRegistrationDisplayNameSubmit(
+          state.registrationVerification.pendingRegistrationId,
+          displayName,
+        )
+      : { errorText: 'Смяната на името временно не е налична.' }
+
+    state.registrationVerification.isChangingDisplayName = false
+
+    if (result.errorText !== null) {
+      state.registrationVerification.errorText = result.errorText
+      render()
+      return
+    }
+
+    // Успешна смяна — обратно към code режима, СЪЩИЯТ pending/код все още
+    // важат (само display_name се промени server-side).
+    state.registrationVerification.mode = 'code'
+    state.registrationVerification.errorText = null
+    if (result.maskedEmail) {
+      state.registrationVerification.maskedEmail = result.maskedEmail
+    }
+    render()
+  }
+
+  function cancelRegistrationVerificationDisplayNameChange(): void {
+    state.registrationVerification.mode = 'code'
+    state.registrationVerification.errorText = null
     render()
   }
 
