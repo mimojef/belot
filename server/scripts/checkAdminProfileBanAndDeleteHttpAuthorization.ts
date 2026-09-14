@@ -69,22 +69,18 @@ const PASSWORD = 'BanDeleteSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
 
 /**
- * Test isolation helper (registration anti-evasion gate follow-up — "IP +
- * ACTIVE moderation" policy, виж checkRegistrationModerationGuard.ts) —
- * всеки независим test scenario в този файл трябва да регистрира профилите
- * си от СОБСТВЕН synthetic IP, иначе "IP linked to an active ban" policy-то
- * (нарочно, production-approved поведение) би блокирало ВСЯКА следваща
- * регистрация в останалата част от файла, веднага щом ЕДИН сценарий банне
- * профил на споделения 127.0.0.1.
+ * Test isolation helper — исторически (registration anti-evasion gate,
+ * премахнат, виж authStore.ts's register() doc коментар) споделен IP между
+ * сценарии би блокирал следващи регистрации, докато "IP + ACTIVE
+ * moderation" policy-то съществуваше; вече не е така (виж
+ * checkOpenRegistrationPolicy.ts — registration вече НЕ се отказва заради
+ * IP история). Уникалните synthetic IP-та тук остават просто за общ test
+ * isolation/reproducibility hygiene (детерминиран, monotonically-increasing
+ * generator, reproducible между run-ове), не заради active policy
+ * constraint.
  *
- * Детерминиран, monotonically-increasing generator — reproducible между
- * run-ове (същия ред register()/fetch извиквания -> същите IP-та), цикли
- * през трите reserved TEST-NET range-а (RFC 5737: 192.0.2.0/24,
+ * Цикли през трите reserved TEST-NET range-а (RFC 5737: 192.0.2.0/24,
  * 198.51.100.0/24, 203.0.113.0/24) вместо произволни public IP адреси.
- * Всеки от 21-те register() call sites в този файл получава уникален IP по
- * подразбиране — файлът няма нито един сценарий, който нарочно тества
- * shared-IP поведение (това е обхватът на checkRegistrationModerationGuard.ts),
- * затова "always unique" е безопасно тук без изключения.
  */
 const TEST_NET_RANGES = ['203.0.113', '198.51.100', '192.0.2'] as const
 let syntheticIpCounter = 0
@@ -278,10 +274,10 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
       // Test isolation — виж nextSyntheticTestIp doc коментара по-горе.
       'X-Forwarded-For': nextSyntheticTestIp(),
     },
-    // visitorId: authStore.ts::register() вече изисква valid UUID-формат
-    // visitor identity (registration anti-evasion gate, четвърти follow-up
-    // brief §2) — несвързано с ban/delete логиката, тествана тук, но
-    // задължително за да не хвърля 403 REGISTRATION_RESTRICTED.
+    // visitorId: authStore.ts::register() изисква valid UUID-формат visitor
+    // identity (стандартна tracking validation, виж register()'s doc
+    // коментар) — несвързано с ban/delete логиката, тествана тук, но
+    // задължително за да не се отхвърли заявката с 400.
     body: JSON.stringify({ email, password: PASSWORD, displayName, gender: 'male', visitorId: randomUUID() }),
   })
   if (res.status !== 200) throw new Error(`Регистрацията (${suffix}) върна status ${res.status}.`)

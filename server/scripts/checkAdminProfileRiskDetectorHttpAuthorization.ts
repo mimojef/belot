@@ -233,11 +233,11 @@ async function register(port: number, runId: string, suffix: string): Promise<Re
       // Test isolation — виж nextSyntheticTestIp doc коментара по-горе.
       'X-Forwarded-For': nextSyntheticTestIp(),
     },
-    // visitorId: authStore.ts::register() вече изисква valid UUID-формат
-    // visitor identity (registration anti-evasion gate, четвърти follow-up
-    // brief §2) — несвързано с risk-detector логиката, тествана тук, но
-    // задължително за да не хвърля 403 REGISTRATION_RESTRICTED. Тестовете
-    // за "споделен visitor_id/IP между профили" продължават да работят
+    // visitorId: authStore.ts::register() изисква valid UUID-формат visitor
+    // identity (стандартна tracking validation, виж register()'s doc
+    // коментар) — несвързано с risk-detector логиката, тествана тук, но
+    // задължително за да не се отхвърли заявката с 400. Тестовете за
+    // "споделен visitor_id/IP между профили" продължават да работят
     // непроменени — те linkват профилите ПОСЛЕ, чрез директен SQL insert в
     // site_visit_events за ДОПЪЛНИТЕЛЕН shared visitor_id/IP, не чрез този
     // registration-time visitorId/IP.

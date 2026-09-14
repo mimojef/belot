@@ -753,14 +753,6 @@ const authStore = await createAuthStore(
         remainingDays: activeBan.remainingDays,
       }
     },
-    // checkRegistrationModerationRestriction е function declaration по-долу в
-    // този модул (hoisted, затова е ползваема тук въпреки textual реда — виж
-    // deleteUploadFileByUrl коментара по-горе за same convention). Тялото ѝ
-    // реферира topicModerationStore/siteVisitStore, декларирани по-долу като
-    // const-ове — безопасно, защото функцията се извиква едва при реален
-    // /api/auth/register request, дълго след като целият module-level
-    // bootstrap (включително тези const-ове) вече е завършил.
-    checkRegistrationRestriction: checkRegistrationModerationRestriction,
   },
 )
 const friendshipStore = await createFriendshipStore(
@@ -2677,191 +2669,21 @@ const guestContactStore = await createGuestContactStore(databaseBootstrap.databa
 const guestTrialStore = await createGuestTrialStore(databaseBootstrap.databaseFilePath)
 const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFilePath)
 
-/**
- * Registration anti-evasion gate (спешен production security fix,
- * разширен през четири follow-up briefа: ONE DEVICE -> ONE REGISTERED
- * ACCOUNT; IP + ACTIVE moderation secondary signal + DB-level guarantee;
- * hard-delete evasion fix (ban) + bounded IP lookup; hard-delete evasion
- * fix (mute) + valid visitorId изискване) — инжектирана в authStore чрез
- * checkRegistrationRestriction option-а (виж createAuthStore извикването
- * по-горе).
- *
- * Финална policy:
- *   A) DUPLICATE ACCOUNT PREVENTION — текущото device (visitor_id) вече
- *      свързано (site_visit_events, ЖИВ профил) с КАКЪВТО И ДА Е
- *      съществуващ permanent profile (clean или не) -> HARD BLOCK.
- *   A2) HARD-DELETE EVASION (device) — профилът, свързан с това device, е
- *      БИЛ hard-deleted, но Е ИМАЛ активен BAN ИЛИ активен Topics/Лафче
- *      mute в момента на изтриването -> HARD BLOCK, докато оригиналната
- *      санкция все още не е изтекла:
- *        - BAN: profile_bans.deleted_profile_id_snapshot (20260902_003),
- *          same "активен" semantics (lifted_at IS NULL И banned_until >
- *          CURRENT_TIMESTAMP), преживява hard delete БЕЗ нова snapshot колона.
- *        - MUTE: admin_profile_deletion_moderation_snapshots (20260913_003,
- *          четвърти follow-up brief §1) — dedicated snapshot таблица, ПРЕДИ
- *          topic_section_mutes CASCADE-делит-а. Restriction-ът автоматично
- *          спира да важи СЛЕД оригиналния muted_until (сравнено at read
- *          time) — НЕ permanent block от временен mute.
- *      Clean hard-deleted профили (никога нямали активна санкция) НЕ
- *      блокират тук — hard delete на clean профил легитимно освобождава
- *      device-а (продуктова логика, непроменена).
- *   B) IP + ACTIVE MODERATION (жив профил) — device-то е ново/различно, но
- *      IP-то вече свързано с ЖИВ профил с активен BAN/Topics mute ->
- *      HARD BLOCK. Bounded единична SQL заявка (виж
- *      findFirstActivelyModeratedProfileIdForIp doc коментара) — НЕ loop
- *      върху всички исторически профили на IP-то.
- *   B2) HARD-DELETE EVASION (IP) — same като A2 (ban И mute), но keyed по IP
- *      чрез admin_profile_deletion_visitor_snapshots.ip_address.
- *   C) IP/device + CLEAN/EXPIRED/LIFTED (жив ИЛИ hard-deleted профил) -> НЕ
- *      блокира.
- *
- * Пълният diagnostic detail се логва ТУК, никога не пресича границата към
- * authStore.ts/клиента — функцията връща само boolean. Message text-ът е
- * напълно generic и ЕДНАКЪВ за всички причини — непроменено spec §6/§7.
- */
-function checkRegistrationModerationRestriction(input: {
-  visitorId: string | null
-  ipAddress: string | null
-}): boolean {
-  // A) Duplicate-account prevention — device match, ANY съществуващ ЖИВ профил.
-  if (input.visitorId !== null) {
-    const candidateProfileIds = siteVisitStore.findProfileIdsForVisitorId(input.visitorId)
-
-    if (candidateProfileIds.length > 0) {
-      // За audit richness намираме "най-тежката" причина сред всички
-      // намерени кандидати (обичайно точно 1) — active_ban > active_mute >
-      // duplicate_account (clean) — бройката е bounded (реалният брой
-      // профили, видени с този visitor_id), не global scan.
-      let matchedProfileId = candidateProfileIds[0]!
-      let reason: 'active_ban' | 'active_mute' | 'duplicate_account' = 'duplicate_account'
-
-      for (const profileId of candidateProfileIds) {
-        if (profileBanStore.getActiveBan(profileId) !== null) {
-          matchedProfileId = profileId
-          reason = 'active_ban'
-          break
-        }
-        if (reason !== 'active_mute' && topicModerationStore.isProfileMutedInTopicsSection(profileId)) {
-          matchedProfileId = profileId
-          reason = 'active_mute'
-        }
-      }
-
-      const alsoSeenFromIp =
-        input.ipAddress !== null && siteVisitStore.hasProfileEventFromIp(matchedProfileId, input.ipAddress)
-
-      logBlockedRegistrationAttempt({
-        visitorId: input.visitorId,
-        ipAddress: input.ipAddress,
-        matchedProfileId,
-        matchType: alsoSeenFromIp ? 'device_and_ip' : 'device',
-        reason,
-      })
-
-      return true
-    }
-
-    // A2) Hard-delete evasion (device) — виж doc коментара по-горе. И BAN,
-    // и MUTE snapshot-ите се проверяват (bounded — реалният брой hard-deleted
-    // профили, някога свързани с този visitor_id, обичайно 0 или 1).
-    const deletedProfileIds = profileHardDeleteService.findDeletedProfileIdsForVisitorId(input.visitorId)
-    for (const deletedProfileId of deletedProfileIds) {
-      const activeBan = profileBanStore.getActiveBanForDeletedProfile(deletedProfileId)
-      const hasActiveMuteSnapshot =
-        activeBan === null && profileHardDeleteService.hasActiveMuteSnapshotForDeletedProfile(deletedProfileId)
-
-      if (activeBan === null && !hasActiveMuteSnapshot) {
-        continue
-      }
-
-      logBlockedRegistrationAttempt({
-        visitorId: input.visitorId,
-        ipAddress: input.ipAddress,
-        matchedProfileId: deletedProfileId,
-        matchType: 'device',
-        reason: activeBan !== null ? 'active_ban' : 'active_mute',
-      })
-
-      return true
-    }
-  }
-
-  // B) IP + ACTIVE moderation (жив профил) — device-ът е нов/различен, но
-  // IP-то вече е свързано с ЖИВ профил, който В МОМЕНТА има активен BAN или
-  // активен Topics/Лафче mute. Bounded единична SQL заявка (LIMIT 1,
-  // EXISTS subqueries) — виж findFirstActivelyModeratedProfileIdForIp doc
-  // коментара в siteVisitStore.ts за пълния performance rationale.
-  // Clean/expired/lifted профили на същия IP НЕ блокират (§C).
-  if (input.ipAddress !== null) {
-    const matchedLiveProfileId = siteVisitStore.findFirstActivelyModeratedProfileIdForIp(input.ipAddress)
-
-    if (matchedLiveProfileId !== null) {
-      // Единична допълнителна заявка САМО за точната audit причина
-      // (ban vs mute) — не участва в blocking решението, вече взето от SQL-а.
-      const activeBan = profileBanStore.getActiveBan(matchedLiveProfileId)
-
-      logBlockedRegistrationAttempt({
-        visitorId: input.visitorId,
-        ipAddress: input.ipAddress,
-        matchedProfileId: matchedLiveProfileId,
-        matchType: 'ip',
-        reason: activeBan !== null ? 'active_ban' : 'active_mute',
-      })
-
-      return true
-    }
-
-    // B2) Hard-delete evasion (IP) — same rationale (ban И mute) като A2,
-    // keyed по IP. admin_profile_deletion_visitor_snapshots е малка, bounded
-    // таблица (populated само при рядкото admin hard-delete действие) —
-    // unindexed WHERE ip_address = ? тук е приемлив, за разлика от
-    // site_visit_events (виж production report-а "Performance" секцията).
-    const deletedProfileIdsForIp = profileHardDeleteService.findDeletedProfileIdsForIp(input.ipAddress)
-    for (const deletedProfileId of deletedProfileIdsForIp) {
-      const activeBan = profileBanStore.getActiveBanForDeletedProfile(deletedProfileId)
-      const hasActiveMuteSnapshot =
-        activeBan === null && profileHardDeleteService.hasActiveMuteSnapshotForDeletedProfile(deletedProfileId)
-
-      if (activeBan === null && !hasActiveMuteSnapshot) {
-        continue
-      }
-
-      logBlockedRegistrationAttempt({
-        visitorId: input.visitorId,
-        ipAddress: input.ipAddress,
-        matchedProfileId: deletedProfileId,
-        matchType: 'ip',
-        reason: activeBan !== null ? 'active_ban' : 'active_mute',
-      })
-
-      return true
-    }
-  }
-
-  return false
-}
-
-/** Audit log helper за checkRegistrationModerationRestriction — виж doc коментара там за пълния rationale защо диагностиката живее само тук, никога към клиента. */
-function logBlockedRegistrationAttempt(input: {
-  visitorId: string | null
-  ipAddress: string | null
-  matchedProfileId: string
-  matchType: 'device' | 'device_and_ip' | 'ip'
-  reason: 'active_ban' | 'active_mute' | 'duplicate_account'
-}): void {
-  console.warn(
-    '[registration-guard] blocked registration attempt',
-    JSON.stringify({
-      timestamp: new Date().toISOString(),
-      visitorId: input.visitorId ?? 'none',
-      resolvedIp: input.ipAddress ?? 'unknown',
-      matchedProfileId: input.matchedProfileId,
-      matchType: input.matchType,
-      reason: input.reason,
-      outcome: 'registration_rejected',
-    }),
-  )
-}
+// Registration anti-evasion gate — ПРЕМАХНАТО (продуктово решение: нова
+// регистрация вече не се отказва заради ban/mute/delete history на друг
+// профил, виж register()'s doc коментар в authStore.ts). Предишната
+// checkRegistrationModerationRestriction/logBlockedRegistrationAttempt
+// двойка (function declarations, инжектирани в createAuthStore чрез
+// checkRegistrationRestriction option-а) е премахната изцяло — нямаше друг
+// call site. Underlying forensic query функциите, които ползваше
+// (siteVisitStore.findProfileIdsForVisitorId/hasProfileEventFromIp/
+// findFirstActivelyModeratedProfileIdForIp, profileHardDeleteService.
+// findDeletedProfileIdsForVisitorId/findDeletedProfileIdsForIp/
+// hasActiveMuteSnapshotForDeletedProfile, profileBanStore.
+// getActiveBanForDeletedProfile) остават непроменени в съответните store-ове
+// — forensic/hard-delete-evidence capability, независима от admin
+// linked-profile detection (adminProfileRiskStore.ts ползва собствени SQL
+// заявки над site_visit_events, не тези helper-и).
 
 // Password reset store — optional. Ако env липсва, store-ът е null и само
 // forgot/reset endpoints връщат EMAIL_DELIVERY_FAILED. Останалият server работи.
@@ -7599,21 +7421,22 @@ async function handleAuthRequest(
     const rawGender = getStringField(body, 'gender')
     const gender = rawGender === 'male' || rawGender === 'female' ? rawGender : null
 
-    // Registration anti-evasion gate (спешен production security fix) —
     // canonical server-side resolved IP (СЪЩИЯТ getRequestIp, ползван от
     // handleSiteVisitPageViewRequest за site_visit_events.ip_address, никога
     // произволен client-подаден IP параметър) + client-подадения visitor_id
     // (localStorage-backed anonymous visitor id, вече established от
     // createVisitorPageViewTracker.ts — validate-нат тук срещу СЪЩИЯ
-    // VISITOR_UUID_RE regex като page-view endpoint-а, за да не подадем
-    // arbitrary string към checkRegistrationModerationRestriction). И двете
-    // се подават само за REGISTER — LOGIN flow-ът е непроменен (spec §10).
+    // VISITOR_UUID_RE regex като page-view endpoint-а). И двете се подават
+    // само за REGISTER — LOGIN flow-ът е непроменен. Записват се за site
+    // visit history/visitor_registration_bindings/admin dependency
+    // detection (виж authStore.ts's register() doc коментар) — вече НЕ
+    // участват в решение дали регистрацията да мине.
     const rawVisitorId = getStringField(body, 'visitorId')
     const visitorId = VISITOR_UUID_RE.test(rawVisitorId) ? rawVisitorId.toLowerCase() : null
     const resolvedIp = getRequestIp(req)
     const ipAddress = resolvedIp === 'unknown' ? null : resolvedIp
     // Само за immediate visitor/profile binding-а вътре в authStore.ts's
-    // register() (след успешна регистрация) — не участва в restriction решението.
+    // register() (след успешна регистрация).
     const userAgent = getFirstHeaderValue(req.headers['user-agent'])
 
     const result =
@@ -7638,17 +7461,6 @@ async function handleAuthRequest(
       // профил" от обикновена "грешен email/парола" грешка и да покаже
       // dedicated ban popup вместо raw inline error text.
       if ('code' in result && result.code === 'PROFILE_BANNED') {
-        sendJsonResponse(res, 403, result)
-        return true
-      }
-      // Registration anti-evasion gate (spec §6/§9) — 403, generic
-      // {code, message} само (authStore.ts никога не populate-ва
-      // matchedProfileId/matchType/moderationType в тoзи result — виж
-      // checkRegistrationModerationRestriction doc коментара защо тази
-      // диагностика никога не пресича границата към клиента). Server-side
-      // authoritative: same gate важи независимо дали заявката идва от
-      // нормалния UI flow, ръчен API call, или подправен frontend (spec §9).
-      if ('code' in result && result.code === 'REGISTRATION_RESTRICTED') {
         sendJsonResponse(res, 403, result)
         return true
       }

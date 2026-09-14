@@ -721,8 +721,6 @@ export type LobbyScreenState = {
   canWriteLobbyChat: boolean
   /** Popup: "Публикации от Pika.bg" — показва се при клик/tap на composer-а от потребител без право да пише. */
   lobbyChatWriteLockedPopupOpen: boolean
-  /** Registration anti-evasion gate (спешен production security fix) — dedicated generic popup при отказана регистрация (REGISTRATION_RESTRICTED), никога не разкрива причината. */
-  registrationRestrictedPopupOpen: boolean
   authModalMode: LobbyAuthModalMode
   authErrorText: string | null
   guestTrialPopup: GuestTrialPopupState
@@ -1231,7 +1229,6 @@ export type RenderLobbyScreenOptions = {
   onLobbyChatWriteLockedTap: () => void
   onLobbyChatWriteLockedPopupClose: () => void
   onLobbyChatWriteLockedGotoTopics: () => void
-  onRegistrationRestrictedPopupClose: () => void
   onGuestTrialPlayClick: () => void
   onGuestTrialRegisterClick: () => void
   onGuestTrialLoginClick: () => void
@@ -2534,41 +2531,6 @@ function renderLobbyChatWriteLockedPopup(state: LobbyScreenState): string {
           <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
             <button type="button" data-lobby-livechat-write-locked-goto-topics="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Към Теми</button>
             <button type="button" data-lobby-livechat-write-locked-modal-close="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Затвори</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  `
-}
-
-/**
- * Registration anti-evasion gate (спешен production security fix) — виж
- * createLobbyFlowController.ts::submitRegister за кога се отваря. Съобщението
- * е ИЗЦЯЛО generic (spec §6/§7) — никакво позоваване на ban/mute, device,
- * IP, или matched профил, независимо от реалната причина за отказа.
- */
-function renderRegistrationRestrictedPopup(state: LobbyScreenState): string {
-  if (!state.registrationRestrictedPopupOpen) {
-    return ''
-  }
-
-  return `
-    <div data-registration-restricted-modal-root="1" style="position:fixed;inset:0;z-index:13000;display:flex;align-items:center;justify-content:center;padding:24px;">
-      <div data-registration-restricted-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.45);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
-      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,440px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:24px;">
-        <button type="button" data-registration-restricted-modal-close="1" aria-label="Затвори" style="position:absolute;right:4px;top:4px;width:36px;height:36px;border:0;border-radius:999px;background:rgba(255,255,255,0.08);color:#ffffff;font-size:22px;font-weight:900;cursor:pointer;">×</button>
-        <div style="display:grid;gap:14px;text-align:center;">
-          <div style="font-size:20px;line-height:1.3;font-weight:900;color:#f8fafc;">
-            Нещо се обърка
-          </div>
-          <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);font-weight:600;">
-            Сигурни ли сте, че вече нямате регистрация в платформата?
-          </div>
-          <div style="font-size:13px;line-height:1.5;color:rgba(255,255,255,0.6);font-weight:600;">
-            Ако смятате, че това предупреждение е грешно показано, свържете се с екипа на Pika.bg.
-          </div>
-          <div style="display:flex;justify-content:center;margin-top:6px;">
-            <button type="button" data-registration-restricted-modal-close="1" style="height:46px;min-width:150px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Разбрах</button>
           </div>
         </div>
       </div>
@@ -12531,7 +12493,6 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
-      ${renderRegistrationRestrictedPopup(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
@@ -12834,7 +12795,6 @@ export function renderLobbyScreen(
       ${renderProfileEditModal(state)}
       ${renderChangePasswordModal(state)}
       ${renderAuthModal(state)}
-      ${renderRegistrationRestrictedPopup(state)}
       ${renderLobbyChatWriteLockedPopup(state)}
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
@@ -14339,19 +14299,6 @@ export function renderLobbyScreen(
   root
     .querySelector<HTMLButtonElement>('[data-lobby-livechat-write-locked-goto-topics="1"]')
     ?.addEventListener('click', options.onLobbyChatWriteLockedGotoTopics)
-
-  root
-    .querySelectorAll<HTMLButtonElement>('[data-registration-restricted-modal-close="1"]')
-    .forEach((btn) => btn.addEventListener('click', options.onRegistrationRestrictedPopupClose))
-  root
-    .querySelector<HTMLElement>('[data-registration-restricted-modal-backdrop="1"]')
-    ?.addEventListener('click', options.onRegistrationRestrictedPopupClose)
-  root
-    .querySelector<HTMLElement>('[data-registration-restricted-modal-root="1"]')
-    ?.addEventListener('click', options.onRegistrationRestrictedPopupClose)
-  root
-    .querySelector<HTMLElement>('[data-registration-restricted-modal-root="1"] [role="dialog"]')
-    ?.addEventListener('click', (e) => e.stopPropagation())
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-livechat-delete]').forEach((btn) => {
     btn.addEventListener('click', () => {

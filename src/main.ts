@@ -789,8 +789,6 @@ async function submitAuthRequest(
 ): Promise<{
   errorText: string | null
   bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
-  /** Registration anti-evasion gate (спешен production security fix) — виж REGISTRATION_RESTRICTED branch по-долу. Само register endpoint-ът може реално да го върне. */
-  registrationRestricted?: boolean
 }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/auth/${endpoint}`, {
@@ -813,14 +811,6 @@ async function submitAuthRequest(
           errorText: data.message ?? 'Профилът е баннат.',
           bannedInfo: { bannedUntil: data.bannedUntil, reason: data.reason, remainingDays: data.remainingDays },
         }
-      }
-      // Registration anti-evasion gate (spec §6/§7) — generic попап вместо
-      // inline error text, БЕЗ да разкрива причината (виж
-      // createLobbyFlowController.ts::submitRegister). data.message идва от
-      // сървъра вече generic ("Нещо се обърка...") — reuse-ва го директно,
-      // не хардкодваме дублиран текст тук.
-      if (data.code === 'REGISTRATION_RESTRICTED') {
-        return { errorText: data.message ?? 'Регистрацията не беше успешна.', registrationRestricted: true }
       }
       return { errorText: data.message ?? 'Заявката не беше успешна.' }
     }
@@ -6020,12 +6010,13 @@ lobby = createLobbyFlowController({
         displayName: validation.canonicalDisplayName,
         email,
         password,
-        // Registration anti-evasion gate (спешен production security fix) —
         // СЪЩИЯТ localStorage-backed anonymous visitor id като site-visit
-        // tracking-а (createVisitorPageViewTracker.ts), не нов fingerprinting.
+        // tracking-а (createVisitorPageViewTracker.ts) — записва се за site
+        // visit history/admin dependency detection, не участва в решение
+        // дали регистрацията да мине (виж authStore.ts's register()).
         visitorId: getAnonymousVisitorId(),
         ...(gender !== null ? { gender } : {}),
-      }).then((result) => ({ errorText: result.errorText, restricted: result.registrationRestricted === true }))
+      }).then((result) => ({ errorText: result.errorText }))
     },
   onProfileEditSubmit: (targetProfileId, avatarFile, avatarCrop, galleryFiles) =>
     submitProfileUpdate(targetProfileId, avatarFile, avatarCrop, galleryFiles),

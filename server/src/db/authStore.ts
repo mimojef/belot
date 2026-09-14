@@ -336,20 +336,15 @@ export type AuthStore = {
     password: string
     displayName: string
     gender?: 'male' | 'female' | null
-    /** Device identity (localStorage-backed anonymous visitor id) на текущия registration опит — виж checkRegistrationRestriction по-долу. null, ако липсва/невалиден. */
+    /** Device identity (localStorage-backed anonymous visitor id) на текущия registration опит — записва се в site_visit_events (authoritative source за admin linked-profile detection, виж adminProfileRiskStore.ts) и в legacy visitor_registration_bindings marker-а (виж register() по-долу), НЕ участва в решението дали регистрацията да мине. null, ако липсва/невалиден. */
     visitorId?: string | null
-    /** Canonical server-side resolved IP на текущия registration опит (index.ts's getRequestIp) — виж checkRegistrationRestriction по-долу. null, ако не може да се резолвне. */
+    /** Canonical server-side resolved IP на текущия registration опит (index.ts's getRequestIp) — записва се за audit/tracking, НЕ участва в решението дали регистрацията да мине. null, ако не може да се резолвне. */
     ipAddress?: string | null
-    /** Raw User-Agent header на текущия registration опит — записва се само в immediate visitor/profile binding-а (виж register() по-долу), не участва в restriction решението. */
+    /** Raw User-Agent header на текущия registration опит — записва се само в immediate visitor/profile binding-а (виж register() по-долу). */
     userAgent?: string | null
   }) =>
     | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
     | { ok: false; message: string }
-    | {
-        ok: false
-        code: 'REGISTRATION_RESTRICTED'
-        message: string
-      }
   login: (input: {
     email: string
     password: string
@@ -441,33 +436,6 @@ type CreateAuthStoreOptions = {
     reason: string
     remainingDays: number
   } | null
-  /**
-   * Registration anti-evasion gate (спешен production security fix,
-   * разширен в follow-up brief-а до ONE DEVICE -> ONE REGISTERED ACCOUNT) —
-   * инжектирана зависимост, mirror на getActiveBanForProfile injection
-   * pattern-а по-горе: authStore.ts умишлено не отваря собствена връзка
-   * към site_visit_events/profile_bans/topic_section_mutes, не import-ва
-   * siteVisitStore/profileBanStore/topicModerationStore директно.
-   *
-   * true = текущото device (visitor_id) на регистрацията вече е свързано
-   * (site_visit_events) с КАКЪВТО И ДА Е съществуващ permanent profile —
-   * независимо дали е clean, активно баннат, или активно заглушен (spec:
-   * "Няма значение дали съществуващият profile е clean; без mute; без ban").
-   * Duplicate-account prevention е по-широката проверка и функционално
-   * покрива moderation evasion (баннат/заглушен профил Е "съществуващ
-   * profile") — регистрацията се отказва с generic съобщение (виж
-   * register() по-долу), БЕЗ authStore.ts да знае (или да разкрива) КОЙ
-   * профил/дали причината е duplicate/ban/mute — цялата тази диагностика/
-   * audit logging живее в index.ts's checkRegistrationModerationRestriction,
-   * никога не пресича тази граница. IP се подава за richer audit context
-   * вътре в callback-а, но решението "restricted или не" зависи само от
-   * device match (виж отчета §8 за false-positive анализа защо IP-only не
-   * е hard block).
-   */
-  checkRegistrationRestriction?: (input: {
-    visitorId: string | null
-    ipAddress: string | null
-  }) => boolean
 }
 
 type AccountRow = {
@@ -730,19 +698,27 @@ export async function createAuthStore(
     );
   `)
 
-  // DB-level "ONE DEVICE -> ONE PERMANENT ACCOUNT" guarantee (втори follow-up
-  // brief §3) — обикновен INSERT (НЕ "OR IGNORE", за разлика от статистиките
-  // по-горе) в canonical-ната visitor_registration_bindings таблица
-  // (20260913_001 migration). PRIMARY KEY(anonymous_visitor_id) прави
-  // PK conflict тук единствения authoritative, DB-enforced начин да се
-  // гарантира invariant-ът НЕЗАВИСИМО от process topology (single fork
-  // process днес, но не structural гаранция занапред — виж register()'s
-  // catch handling по-долу и production report-а "DB-level one-device
-  // guarantee" за пълния rationale). Извиква се ВЪТРЕ в СЪЩАТА транзакция
-  // като account/profile INSERT-ите — PK conflict rollback-ва ЦЯЛАТА
-  // регистрация (нищо частично не остава committed).
+  // visitor_registration_bindings (20260913_001 migration) — legacy
+  // "първи регистриран профил на това device" marker, останал от старата
+  // ONE-DEVICE-ONE-ACCOUNT enforcement (премахната, виж register()'s doc
+  // коментар за пълната нова policy). Non-authoritative: НИКОЙ runtime path
+  // (admin risk detection, hard-delete evidence, support tooling) не чете
+  // тази таблица — записва се "best effort", само за архивна следа. "OR
+  // IGNORE" (mirror на insertRegistrationVisitorRecordStatement/
+  // insertRegistrationVisitorEventStatement по-горе): ако visitor_id вече
+  // има binding ред (PRIMARY KEY(anonymous_visitor_id) пази точно 1 ред на
+  // visitor_id — само ПЪРВИЯТ регистрирал профил, НЕ пълна история),
+  // следващи регистрации от същия visitor_id просто не пипат съществуващия
+  // ред — НЕ хвърляме грешка/rollback-ваме регистрацията.
+  //
+  // Реалният, пълен и authoritative source of truth за visitor<->profile
+  // history и admin linked-profile detection е site_visit_events (виж
+  // insertRegistrationVisitorEventStatement по-долу И adminProfileRiskStore.ts,
+  // който заявява директно срещу нея) — записва по един ред на ВСЯКА
+  // регистрация (включително втора/трета от същия visitor_id), независимо
+  // от тази таблица.
   const insertVisitorRegistrationBindingStatement = database.prepare(`
-    INSERT INTO visitor_registration_bindings (
+    INSERT OR IGNORE INTO visitor_registration_bindings (
       anonymous_visitor_id,
       profile_id
     ) VALUES (
@@ -944,8 +920,7 @@ export async function createAuthStore(
     userAgent?: string | null
   }):
     | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
-    | { ok: false; message: string; code?: ProfileIdentityValidationCode }
-    | { ok: false; code: 'REGISTRATION_RESTRICTED'; message: string } {
+    | { ok: false; message: string; code?: ProfileIdentityValidationCode } {
     const email = normalizeEmail(input.email)
     const displayNameResult = validateProfileDisplayName(input.displayName)
 
@@ -961,44 +936,23 @@ export async function createAuthStore(
       return { ok: false, message: displayNameResult.message, code: displayNameResult.code }
     }
 
-    // Registration anti-evasion gate (четвърти follow-up brief §2 —
-    // "REGISTRATION ТРЯБВА ДА ИЗИСКВА VALID VISITOR_ID"). Липсващ ("" /
-    // undefined), malformed, или прекалено дълъг visitorId се отхвърля тук,
-    // ПРЕДИ каквато и да е DB проверка/write по-долу — device identity е
-    // ЗАДЪЛЖИТЕЛЕН prerequisite за регистрация, не optional сигнал. Same
-    // generic REGISTRATION_RESTRICTED резултат/съобщение като нормалния
-    // moderation restriction block по-долу — клиентът не може да разграничи
-    // "липсващ visitorId" от "device/IP restricted" (anti-abuse механизмът
-    // не се разкрива). Нормалният client flow (createVisitorPageViewTracker.ts,
-    // main.ts's onRegisterSubmit) винаги подава валиден crypto.randomUUID() —
-    // тази проверка на практика спира само ръчни/malformed API извиквания.
+    // Стандартна input validation (НЕ anti-evasion решение) — visitorId е
+    // задължителен prerequisite за регистрация, защото се записва в
+    // site_visit_events (admin dependency detection source) и legacy
+    // visitor_registration_bindings marker-а (виж register()'s doc коментар
+    // за AuthStore.register по-горе), но липсата/форматът му вече НЕ
+    // участва в решение дали регистрацията да мине — само дали заявката е
+    // добре формирана. Нормалният client flow
+    // (createVisitorPageViewTracker.ts, main.ts's onRegisterSubmit) винаги
+    // подава валиден crypto.randomUUID() — тази проверка на практика спира
+    // само ръчни/malformed API извиквания.
     if (typeof input.visitorId !== 'string' || !VISITOR_ID_FORMAT_RE.test(input.visitorId)) {
       return {
         ok: false,
-        code: 'REGISTRATION_RESTRICTED',
-        message: 'Нещо се обърка. Сигурни ли сте, че вече нямате регистрация в платформата?',
+        message: 'Невалидна заявка за регистрация. Моля презаредете страницата и опитайте отново.',
       }
     }
     const visitorId = input.visitorId.toLowerCase()
-
-    // Registration anti-evasion gate (спешен production security fix) —
-    // ЗАДЪЛЖИТЕЛНО ПРЕДИ existingAccount lookup-а и всякакви DB writes по-долу
-    // (спецификацията: "Не искам да създаваме account и след това да го
-    // трием"). Generic съобщение, БЕЗ да разкрива дали причината е BAN/MUTE,
-    // кой профил е matched, или дали match-ът е бил по device или IP — виж
-    // checkRegistrationRestriction doc коментара по-горе за пълния rationale.
-    if (
-      options.checkRegistrationRestriction?.({
-        visitorId,
-        ipAddress: input.ipAddress ?? null,
-      })
-    ) {
-      return {
-        ok: false,
-        code: 'REGISTRATION_RESTRICTED',
-        message: 'Нещо се обърка. Сигурни ли сте, че вече нямате регистрация в платформата?',
-      }
-    }
 
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined
 
@@ -1069,12 +1023,9 @@ export async function createAuthStore(
       // задължителната проверка в началото на функцията) — няма нужда от
       // null guard.
       {
-        // DB-level "ONE DEVICE -> ONE PERMANENT ACCOUNT" invariant (виж
-        // insertVisitorRegistrationBindingStatement doc коментара по-горе) —
-        // canonical, PK-enforced. Хвърля при conflict (уловено в catch-а
-        // по-долу) — това е ЕДИНСТВЕНИЯТ ред тук, за който конфликт е
-        // ОЧАКВАН/нормален outcome (race между конкурентни регистрации за
-        // същия visitor_id), не bug.
+        // Виж insertVisitorRegistrationBindingStatement doc коментара
+        // по-горе — "OR IGNORE", не блокира/хвърля при вече съществуващ
+        // binding за този visitor_id.
         insertVisitorRegistrationBindingStatement.run(visitorId, profileId)
 
         insertRegistrationVisitorRecordStatement.run(visitorId, profileId, profileId)
@@ -1117,22 +1068,6 @@ export async function createAuthStore(
         message.includes('normalized_username')
       ) {
         return { ok: false, message: 'Това име вече е заето.' }
-      }
-
-      // DB-level "ONE DEVICE -> ONE PERMANENT ACCOUNT" race guard (втори
-      // follow-up brief §3) — PK conflict на visitor_registration_bindings.
-      // anonymous_visitor_id означава друга регистрация (конкурентна или
-      // такава, която checkRegistrationRestriction pre-check-ът пропусна —
-      // напр. при бъдеща multi-process топология) вече е claim-нала този
-      // visitor_id между pre-check-а и тази транзакция. Same generic
-      // REGISTRATION_RESTRICTED резултат/съобщение като нормалния
-      // pre-check block по-горе — клиентът не може да разграничи двата пътя.
-      if (message.includes('visitor_registration_bindings')) {
-        return {
-          ok: false,
-          code: 'REGISTRATION_RESTRICTED',
-          message: 'Нещо се обърка. Сигурни ли сте, че вече нямате регистрация в платформата?',
-        }
       }
 
       return { ok: false, message: 'Регистрацията не беше успешна.' }

@@ -64,7 +64,7 @@
     "check:admin-registered-profiles-drilldown": "tsx scripts/checkAdminRegisteredProfilesDrilldown.ts --server-root=.",
     "check:admin-registered-profiles-frontend": "tsx scripts/checkAdminRegisteredProfilesFrontend.ts",
     "check:admin-registered-profiles-behavior": "tsx scripts/checkAdminRegisteredProfilesBehavior.ts",
-    "check:registration-moderation-guard": "tsx scripts/checkRegistrationModerationGuard.ts --server-root=.",
+    "check:open-registration-policy": "tsx scripts/checkOpenRegistrationPolicy.ts --server-root=.",
     "check:accounts-role-migration": "tsx scripts/checkAccountsRoleMigration.ts",
     "check:migration-runner-crash-recovery": "tsx scripts/checkMigrationRunnerCrashRecovery.ts",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",

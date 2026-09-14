@@ -165,8 +165,10 @@ export type ProfileHardDeleteService = {
    */
   hasActiveTournamentDependency: (profileId: ProfileId) => boolean
   /**
-   * Registration anti-evasion gate (hard-delete evasion fix) — distinct
-   * deleted_profile_id стойности, някога свързани с този anonymous_visitor_id
+   * Forensic/hard-delete-evidence query (по-рано ползвана от registration
+   * anti-evasion gate-а, премахнат — вече без call site, запазена за
+   * admin/support reference) — distinct deleted_profile_id стойности,
+   * някога свързани с този anonymous_visitor_id
    * (admin_profile_deletion_visitor_snapshots — forensic snapshot, populated
    * ЕДИНСТВЕНО в момента на hard delete, виж captureVisitorForensicSnapshot
    * doc коментара по-долу). Reuse-ва idx_admin_profile_deletion_visitor_snapshots_visitor.
@@ -176,7 +178,9 @@ export type ProfileHardDeleteService = {
    */
   findDeletedProfileIdsForVisitorId: (visitorId: string) => ProfileId[]
   /**
-   * Registration anti-evasion gate (hard-delete evasion fix) — same като
+   * Forensic/hard-delete-evidence query (по-рано ползвана от registration
+   * anti-evasion gate-а, премахнат — вече без call site, запазена за
+   * admin/support reference) — same като
    * findDeletedProfileIdsForVisitorId, но по ip_address, ПЛЮС 48h recency
    * филтър (пети follow-up brief §2/§3/§4): само snapshot редове, чийто
    * last_seen_at (реалният MAX(occurred_at) от site_visit_events, агрегиран
@@ -191,8 +195,9 @@ export type ProfileHardDeleteService = {
    */
   findDeletedProfileIdsForIp: (ipAddress: string) => ProfileId[]
   /**
-   * Registration anti-evasion gate (hard-delete evasion fix, mute case,
-   * четвърти follow-up brief §1) — true, ако deletedProfileId е имал активен
+   * Forensic/hard-delete-evidence query (по-рано ползвана от registration
+   * anti-evasion gate-а, премахнат — вече без call site, запазена за
+   * admin/support reference) — true, ако deletedProfileId е имал активен
    * Topics/Лафче mute В МОМЕНТА на hard delete-а, И оригиналният
    * muted_until все още не е минал (сравнено срещу CURRENT_TIMESTAMP at
    * read time — временен restriction, не permanent block). Lookup по

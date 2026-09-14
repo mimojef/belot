@@ -34,17 +34,18 @@ export type ProfileBanStore = {
    */
   getActiveBan: (profileId: ProfileId) => ActiveProfileBan | null
   /**
-   * Registration anti-evasion gate (hard-delete evasion fix) — активен бан
-   * за профил, който вече е БИЛ hard-deleted (profileHardDeleteService.ts),
-   * lookup-нат по deleted_profile_id_snapshot (виж 20260902_003 migration-а
-   * — snapshot-нат ПРЕДИ DELETE FROM profiles, живата profile_id колона
-   * вече е NULL за такъв ред). Same "активен" semantics като getActiveBan
-   * (lifted_at IS NULL И banned_until > CURRENT_TIMESTAMP) — reuse-ва
-   * idx_profile_bans_deleted_profile_snapshot индекса. Целта: hard-delete на
-   * АКТИВНО баннат профил не трябва тихо да освобождава device/IP anti-
-   * evasion сигнала за тази санкция — виж checkRegistrationModerationRestriction
-   * в index.ts. Връща null, ако профилът никога не е бил hard-deleted, или
-   * ако е бил, но банът му вече е lifted/expired.
+   * Forensic/hard-delete-evidence lookup — активен бан за профил, който
+   * вече е БИЛ hard-deleted (profileHardDeleteService.ts), lookup-нат по
+   * deleted_profile_id_snapshot (виж 20260902_003 migration-а — snapshot-нат
+   * ПРЕДИ DELETE FROM profiles, живата profile_id колона вече е NULL за
+   * такъв ред). Same "активен" semantics като getActiveBan (lifted_at IS
+   * NULL И banned_until > CURRENT_TIMESTAMP) — reuse-ва
+   * idx_profile_bans_deleted_profile_snapshot индекса. Историческо е
+   * ползвана от registration anti-evasion gate-а (премахнат — нова
+   * регистрация вече не се блокира заради история на друг профил, виж
+   * authStore.ts's register() doc коментар); запазена тук за admin/support
+   * forensic reference. Връща null, ако профилът никога не е бил
+   * hard-deleted, или ако е бил, но банът му вече е lifted/expired.
    */
   getActiveBanForDeletedProfile: (deletedProfileId: ProfileId) => ActiveProfileBan | null
   banProfile: (input: {

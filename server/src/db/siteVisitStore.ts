@@ -98,8 +98,10 @@ export type VisitorSourcesResult = {
 export type SiteVisitStore = {
   recordPageView: (input: RecordSitePageViewInput) => RecordSitePageViewResult
   /**
-   * Registration anti-evasion gate (спешен production security fix) —
-   * всички CURRENT (non-null) profile ids, някога видени с този
+   * Forensic query (по-рано основен lookup за registration anti-evasion
+   * gate-а, премахнат — виж authStore.ts's register() doc коментар; вече
+   * без call site, запазена за admin/support reference) — всички CURRENT
+   * (non-null) profile ids, някога видени с този
    * anonymous_visitor_id (site_visit_events, същия idx_site_visit_events_
    * visitor_time индекс като adminProfileRiskStore.findProfilesForVisitorIds
    * — bounded, indexed lookup, НЕ table scan). Директен single-hop match
@@ -111,7 +113,9 @@ export type SiteVisitStore = {
    */
   findProfileIdsForVisitorId: (visitorId: string) => string[]
   /**
-   * Registration anti-evasion gate — евтина, single-profile-scoped проверка
+   * Forensic query (по-рано ползвана от registration anti-evasion gate-а,
+   * премахнат — вече без call site, запазена за admin/support reference) —
+   * евтина, single-profile-scoped проверка
    * "виждан ли е бил ТОЗИ профил и от този IP" (idx_site_visit_events_
    * profile_time индекс, филтрирано по profile_id first). Ползва се само за
    * по-богат audit log (match_type: device_and_ip vs device) СЛЕД като
@@ -121,8 +125,9 @@ export type SiteVisitStore = {
    */
   hasProfileEventFromIp: (profileId: string, ipAddress: string) => boolean
   /**
-   * Registration anti-evasion gate (follow-up brief §1/§2 — "IP + ACTIVE
-   * moderation" secondary anti-evasion signal), ПРЕРАБОТЕН за bounded
+   * Forensic query (по-рано основен IP + ACTIVE moderation lookup за
+   * registration anti-evasion gate-а, премахнат — вече без call site,
+   * запазена за admin/support reference), ПРЕРАБОТЕН за bounded
    * performance (трети follow-up brief §2) И за 48h recency (пети follow-up
    * brief §1/§2/§3): ЕДИНСТВЕНА SQL заявка, а не "намери всички profile ids
    * -> loop в JS". Reuse-ва covering index idx_site_visit_events_ip_profile,

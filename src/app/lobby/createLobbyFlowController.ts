@@ -362,8 +362,6 @@ export type CreateLobbyFlowControllerOptions = {
     gender: 'male' | 'female' | null,
   ) => Promise<{
     errorText: string | null
-    /** Registration anti-evasion gate (спешен production security fix) — true само когато сървърът е отказал регистрацията по REGISTRATION_RESTRICTED (виж submitRegister по-долу) — dedicated generic popup вместо inline error text, НИКОГА не разкрива причината. */
-    restricted?: boolean
   }>
   onProfileEditSubmit?: (
     targetProfileId: string | null,
@@ -1730,8 +1728,6 @@ type InternalLobbyFlowState = {
   lobbyChatErrorText: string | null
   lobbyChatFullscreen: boolean
   lobbyChatWriteLockedPopupOpen: boolean
-  /** Registration anti-evasion gate (спешен production security fix) — dedicated generic popup при REGISTRATION_RESTRICTED (виж submitRegister). */
-  registrationRestrictedPopupOpen: boolean
   notificationsOpen: boolean
   privateRoomInGameNotificationsEnabled: boolean
   privateRoomCreatedSoundEnabled: boolean
@@ -2412,7 +2408,6 @@ function createInitialState(): InternalLobbyFlowState {
     lobbyChatErrorText: null,
     lobbyChatFullscreen: false,
     lobbyChatWriteLockedPopupOpen: false,
-    registrationRestrictedPopupOpen: false,
     notificationsOpen: false,
     privateRoomInGameNotificationsEnabled: true,
     privateRoomCreatedSoundEnabled: true,
@@ -4213,7 +4208,6 @@ export function createLobbyFlowController(
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
-      registrationRestrictedPopupOpen: state.registrationRestrictedPopupOpen,
       adminStats: state.adminStats,
       adminStatsLoading: state.adminStatsLoading,
       adminStatsErrorText: state.adminStatsErrorText,
@@ -5605,10 +5599,6 @@ export function createLobbyFlowController(
       },
       onLobbyChatWriteLockedPopupClose: () => {
         closeLobbyChatWriteLockedPopup()
-      },
-      onRegistrationRestrictedPopupClose: () => {
-        state.registrationRestrictedPopupOpen = false
-        render()
       },
       onLobbyChatWriteLockedGotoTopics: () => {
         closeLobbyChatWriteLockedPopup()
@@ -14336,18 +14326,6 @@ export function createLobbyFlowController(
     const result = options.onRegisterSubmit
       ? await options.onRegisterSubmit(displayName, email.trim(), password, gender)
       : { errorText: 'Регистрацията временно не е налична.' }
-
-    if (result.restricted === true) {
-      // Registration anti-evasion gate (спешен production security fix) —
-      // dedicated generic popup (spec §6/§7), НЕ inline error text под
-      // формата — причината (device/IP свързан с активен ban/mute профил)
-      // НИКОГА не се разкрива на клиента, нито тук, нито в popup текста.
-      state.authSubmitInFlight = false
-      state.authModalMode = 'closed'
-      state.registrationRestrictedPopupOpen = true
-      render()
-      return
-    }
 
     if (result.errorText !== null) {
       state.authSubmitInFlight = false
