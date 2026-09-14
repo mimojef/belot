@@ -43,6 +43,13 @@ export interface LudoDiceFlightOptions {
   toRect: DOMRect // data-ludo-board-center="1" — реалният геометричен център на дъската
   boardGridWidthPx: number // [data-ludo-board="1"] ширина, измерена ПРЕДИ click re-render-а — извежда responsive dice размера (виж DICE_TO_CELL_RATIO по-горе)
   result: LudoDiceFace
+  // Начално visibility състояние на container-а, приложено ВЕДНАГА при
+  // създаването му, ПРЕДИ да бъде appended и flight анимацията да започне
+  // (виж bug fix audit-а в createLudoDiceResultOverlayController по-долу —
+  // предишната версия прилагаше hidden state едва СЛЕД await на целия
+  // 900ms flight, значи летящото зарче оставаше видимо цялото това време
+  // дори ако bot-takeover popup-ът вече беше отворен).
+  initiallyHidden: boolean
 }
 
 // Резолвва се с DOM елемента на "кацналото" зарче — то остава видимо в
@@ -50,7 +57,7 @@ export interface LudoDiceFlightOptions {
 // (виж landedDiceOverlayEl в createLudoFlowController.ts). Overlay-ът е
 // pointer-events:none през цялото време — не пречи на нищо под него.
 export async function playLudoDiceFlightOverlay(options: LudoDiceFlightOptions): Promise<HTMLElement> {
-  const { fromRect, toRect, boardGridWidthPx, result } = options
+  const { fromRect, toRect, boardGridWidthPx, result, initiallyHidden } = options
   const fromX = fromRect.left + fromRect.width / 2
   const fromY = fromRect.top + fromRect.height / 2
   const toX = toRect.left + toRect.width / 2
@@ -76,6 +83,7 @@ export async function playLudoDiceFlightOverlay(options: LudoDiceFlightOptions):
     transform:translate(-50%, -50%) scale(0.8);
     z-index:9999;
     pointer-events:none;
+    visibility:${initiallyHidden ? 'hidden' : 'visible'};
   `
   // isRolling=false тук нарочно — начална поза БЕЗ transition (иначе кубът
   // би "долетял" визуално от произволна предходна rotation стойност).
@@ -131,27 +139,57 @@ export interface LudoDiceResultOverlayController {
   // Спира (ако има) предходно "кацнало" зарче, пуска нов полет, пази
   // резултата като текущия "landed" overlay. Само ЕДИН overlay може да
   // съществува в даден момент — гарантирано тук, не разчита callers-ите
-  // да го спазват сами.
-  playFlight(options: LudoDiceFlightOptions): Promise<void>
+  // да го спазват сами. initiallyHidden НЕ е част от caller-ските опции —
+  // controller-ът никога не мисли за hidden state per-call, той просто
+  // вика playFlight(); текущото isHidden се инжектира вътрешно (виж
+  // setHidden по-долу).
+  playFlight(options: Omit<LudoDiceFlightOptions, 'initiallyHidden'>): Promise<void>
   // Маха текущото "кацнало" зарче (ако има) — вика се explicit СЛЕД
   // завършен ход (normal move: след step анимацията; capture move: след
   // целия animateCapture); ../createLudoFlowController.ts::handlePieceSelected),
   // и defensively при resize/destroy/нов roll.
   clearLanded(): void
+  // Визуално скрива/показва overlay-а (whatever е mount-нат в момента, и
+  // всеки БЪДЕЩ playFlight() докато е скрит) БЕЗ да го маха от DOM-а —
+  // pointer-events вече е none, animation lifecycle-ът остава напълно
+  // недокоснат (flight/rotation продължават да текат зад кулисите, само
+  // visibility:hidden спира визуалния рендер). Използва се, докато
+  // bot-takeover popup-ът е отворен — overlay-ят живее на document.body с
+  // z-index над Ludo overlay root-а (виж коментара по-горе), затова не може
+  // да остане визуално ПОД popup-а само чрез z-index подредба, без да
+  // счупи нормалния "зар лети над дъската" изглед (виж createLudoFlowController.ts
+  // audit-а за root cause).
+  setHidden(hidden: boolean): void
 }
 
 export function createLudoDiceResultOverlayController(): LudoDiceResultOverlayController {
   let landedEl: HTMLElement | null = null
+  let isHidden = false
+
+  function applyHiddenState(el: HTMLElement): void {
+    el.style.visibility = isHidden ? 'hidden' : 'visible'
+  }
 
   function clearLanded(): void {
     landedEl?.remove()
     landedEl = null
   }
 
-  async function playFlight(options: LudoDiceFlightOptions): Promise<void> {
+  async function playFlight(options: Omit<LudoDiceFlightOptions, 'initiallyHidden'>): Promise<void> {
     clearLanded()
-    landedEl = await playLudoDiceFlightOverlay(options)
+    // isHidden се подава ВЕДНАГА, преди container-ът изобщо да бъде
+    // appended — не изчакваме края на 900ms flight анимацията (виж bug fix
+    // audit-а в LudoDiceFlightOptions по-горе), затова летящото зарче
+    // никога не блясва видимо, ако popup-ът вече е отворен в момента, в
+    // който bot-ъТ хвърля.
+    landedEl = await playLudoDiceFlightOverlay({ ...options, initiallyHidden: isHidden })
+    applyHiddenState(landedEl)
   }
 
-  return { playFlight, clearLanded }
+  function setHidden(hidden: boolean): void {
+    isHidden = hidden
+    if (landedEl) applyHiddenState(landedEl)
+  }
+
+  return { playFlight, clearLanded, setHidden }
 }

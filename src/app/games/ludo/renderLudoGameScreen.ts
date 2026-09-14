@@ -9,17 +9,28 @@ import {
   renderLudoBoard,
   LUDO_BOARD_GRID_SIZE,
   LUDO_BOARD_FRAME_PADDING_CSS,
-  HOME_QUADRANT_ORIGIN,
-  HOME_QUADRANT_SHIFT,
+  QUADRANT_ORIGIN,
+  QUADRANT_SHIFT,
   HOME_QUADRANT_SPAN,
 } from './board/renderLudoBoard'
 import { ludoGridPointForCellId } from './board/ludoBoardGeometry'
+import { mapLudoColorToViewerQuadrant, rotateLudoGridPointForViewer, type LudoViewerQuadrant } from './board/ludoPerspective'
 import { renderLudoPiecesByCell } from './pieces/renderLudoPieces'
 import { renderLudoPlayerPanel } from './pieces/renderLudoPlayerPanel'
 import { renderLudoBottomBar } from './renderLudoBottomBar'
 import { renderLudoAnimationStyles } from './ludoAnimationStyles'
 import { planLudoHighlights, renderLudoNormalHighlight, renderLudoCaptureImpactRing } from './pieces/renderLudoHighlights'
+import { LUDO_COLORS } from './ludoTypes'
 import type { LudoColor, LudoLegalMove, LudoPiece, LudoPlayer } from './ludoTypes'
+import type { LudoTurnPhase } from './engine/ludoEngineTypes'
+
+// Кой canonical цвят пада във viewer quadrant-а `quadrant`, за даден
+// localColor — обратна посока на mapLudoColorToViewerQuadrant, нужна за да
+// решим КОЙ цвят рендираме на дадена екранна позиция (player panel slot,
+// mobile card alignment), вместо hardcoded литерали ('red'/'blue'/...).
+function viewerColorAt(quadrant: LudoViewerQuadrant, localColor: LudoColor): LudoColor {
+  return LUDO_COLORS.find((color) => mapLudoColorToViewerQuadrant(color, localColor) === quadrant)!
+}
 
 // Desktop board sizing — измерени (не гадани) pixel constants за
 // header/bottom bar/action-бутон/padding/gap-ове, за да може дъската да
@@ -104,14 +115,16 @@ const LUDO_MOBILE_CARD_WIDTH_PX = 74
 // fixed-edge-gap подход разместваше картите спрямо кръговете). Формулата
 // извежда фракцията (0..1) от 15x15 board grid-а, в която пада центъра на
 // всеки home кръг, ползвайки СЪЩИТЕ константи, с които renderLudoBoard.ts
-// реално позиционира кръга (HOME_QUADRANT_ORIGIN + HOME_QUADRANT_SPAN за
-// базовата позиция на quadrant-а, HOME_QUADRANT_SHIFT.x за translate()
+// реално позиционира кръга (QUADRANT_ORIGIN + HOME_QUADRANT_SPAN за
+// базовата позиция на quadrant-а, QUADRANT_SHIFT.x за translate()
 // изместването navътре) — не е отделна/предположена стойност, а огледало
-// на реалната geometry, автоматично вярно ако тези константи някога се
-// променят.
-function ludoHomeCircleCenterGridFraction(color: LudoColor): number {
-  const origin = HOME_QUADRANT_ORIGIN[color]
-  const shift = HOME_QUADRANT_SHIFT[color]
+// на реалната geometry. Приема VIEWER quadrant (не цвят directno) — виж
+// viewerColorAt по-горе — защото след viewer rotation-а произволен цвят
+// може да седи във всеки от 4-те quadrant-а, а тук трябва РЕАЛНАТА
+// rendered позиция, не canonical.
+function ludoHomeCircleCenterGridFraction(quadrant: LudoViewerQuadrant): number {
+  const origin = QUADRANT_ORIGIN[quadrant]
+  const shift = QUADRANT_SHIFT[quadrant]
   const quadrantSpanFraction = HOME_QUADRANT_SPAN / LUDO_BOARD_GRID_SIZE
   const baseFraction = (origin.col - 1 + HOME_QUADRANT_SPAN / 2) / LUDO_BOARD_GRID_SIZE
   const shiftFraction = (shift.x / 100) * quadrantSpanFraction
@@ -129,8 +142,8 @@ function ludoHomeCircleCenterGridFraction(color: LudoColor): number {
 // (frame width минус padding от двете страни), а последните -37px
 // (=CARD_WIDTH/2) центрират картата (вместо transform:translateX(-50%),
 // директно в left-а — математически идентично, без допълнителен слой).
-function ludoMobileCardLeftCss(color: LudoColor): string {
-  const gridFraction = ludoHomeCircleCenterGridFraction(color)
+function ludoMobileCardLeftCss(quadrant: LudoViewerQuadrant): string {
+  const gridFraction = ludoHomeCircleCenterGridFraction(quadrant)
   return `calc(${LUDO_BOARD_FRAME_PADDING_CSS} + (100% - 2 * ${LUDO_BOARD_FRAME_PADDING_CSS}) * ${gridFraction} - ${LUDO_MOBILE_CARD_WIDTH_PX / 2}px)`
 }
 const LUDO_MOBILE_VERTICAL_CHROME_PX =
@@ -148,11 +161,27 @@ export interface LudoGameScreenState {
   pieces: LudoPiece[]
   legalMoves: LudoLegalMove[]
   activeColor: LudoColor
+  // Authoritative engine turn phase — единственият source на истина за arrow
+  // rotation state (виж task-а: "стрелките се въртят САМО когато конкретният
+  // играч реално трябва да хвърли зар" = activeColor===playerColor &&
+  // turnPhase==='waiting_for_roll'). НЕ извеждай rotation от isDiceRolling
+  // (временен UI флаг, само за "flight overlay в момента тече") — точно това
+  // беше root cause-ът на бъга (isDiceRolling става false веднага след
+  // ROLL_RESOLVED dispatch, но turnPhase вече е awaiting_move_selection, не
+  // waiting_for_roll — стрелките грешно се рестартираха точно в този момент).
+  turnPhase: LudoTurnPhase
   // Date.now() момент, в който активният играч е получил хода си — виж
   // createLudoFlowController.ts коментара при turnStartedAt. Ползва се тук
   // само за да се изчисли real elapsed time за countdown fill-а
   // (renderLudoPlayerPanel) — deadline-базирано, не JS tick брояч.
   turnStartedAt: number
+  // Реалната countdown продължителност за ТЕКУЩАТА фаза на активния играч
+  // (10s roll / 15s move / кратък bot-processing delay) — виж
+  // orchestrator/ludoOrchestratorTypes.ts LUDO_ROLL_TIMEOUT_MS/
+  // LUDO_MOVE_TIMEOUT_MS/LUDO_BOT_THINK_DELAY_MS. Подадена directно от
+  // controller-а, не се преизчислява тук (т.19: "запази текущата
+  // player-card timer визуализация", само параметрите се различават).
+  turnCountdownMs: number
   isDiceRolling: boolean
   canRollDice: boolean
   turnSecondsLeft: number
@@ -206,14 +235,21 @@ function renderPlayerPanelSlot(
     // data-ludo-dice-roll-button атрибут, pointer-events:none), same
     // guard като старото disabled state.
     isRollable: isActive && color === localColor && state.canRollDice,
-    isRolling: state.isDiceRolling,
+    // Единственото правило за rotating arrows (виж task-а): "ТОЗИ PLAYER В
+    // МОМЕНТА ЧАКА ДА ХВЪРЛИ" = activeColor===color && turnPhase===
+    // 'waiting_for_roll'. Важи ЕДНАКВО за local human, bot, timeout auto-
+    // roll — не отделна логика per actor type (turnPhase вече е authoritative
+    // за всички от тях еднакво, engine-ът не различава кой е dispatch-нал
+    // действието). НЕ използва isDiceRolling/isRollable/isActive самостоятелно
+    // — точно тази по-широка връзка беше root cause-ът на бъга.
+    shouldRotateArrows: isActive && state.turnPhase === 'waiting_for_roll',
   }
-  return renderLudoPlayerPanel(state.players[color], state.pieces, isActive, compact, turnElapsedMs, diceControl)
+  return renderLudoPlayerPanel(state.players[color], state.pieces, isActive, compact, turnElapsedMs, diceControl, state.turnCountdownMs)
 }
 
 export function renderLudoGameScreen(state: LudoGameScreenState): string {
-  const boardHtml = renderLudoBoard()
   const localColor = resolveLocalPlayerColor(state.players)
+  const boardHtml = renderLudoBoard(localColor)
 
   if (state.useMobileLayout) {
     // Header-ът НЕ се рендира на mobile изобщо (виж task-а — заема ценна
@@ -250,8 +286,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           overflow:hidden;
         ">
           <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('red')};">${renderPlayerPanelSlot(state, 'red', true, localColor)}</div>
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('blue')};">${renderPlayerPanelSlot(state, 'blue', true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-left')};">${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-right')};">${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), true, localColor)}</div>
           </div>
 
           <div style="
@@ -264,8 +300,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('green')};">${renderPlayerPanelSlot(state, 'green', true, localColor)}</div>
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('yellow')};">${renderPlayerPanelSlot(state, 'yellow', true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-left')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-right')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), true, localColor)}</div>
           </div>
         </div>
 
@@ -299,8 +335,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
       ">
         <div style="display:flex; align-items:stretch; justify-content:center; gap:22px; flex-shrink:0; height:${LUDO_DESKTOP_BOARD_ROW_SIZE_CSS};">
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, 'red', false, localColor)}
-            ${renderPlayerPanelSlot(state, 'green', false, localColor)}
+            ${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), false, localColor)}
+            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), false, localColor)}
           </div>
 
           <div style="
@@ -312,8 +348,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, 'blue', false, localColor)}
-            ${renderPlayerPanelSlot(state, 'yellow', false, localColor)}
+            ${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), false, localColor)}
+            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), false, localColor)}
           </div>
         </div>
       </div>
@@ -345,6 +381,7 @@ function renderLudoHeader(useMobileLayout: boolean): string {
 // createLudoGameScreen mount-не в DOM; засега прост helper за инициален
 // render (следващ patch-driven re-render идва с интерактивност).
 export function applyLudoBoardContent(root: ParentNode, state: LudoGameScreenState): void {
+  const localColor = resolveLocalPlayerColor(state.players)
   const pieceFragments = renderLudoPiecesByCell(state.pieces, state.legalMoves)
   for (const { cellId, html } of pieceFragments) {
     const container = root.querySelector(`[data-ludo-cell-pieces="${cellId}"]`)
@@ -365,12 +402,14 @@ export function applyLudoBoardContent(root: ParentNode, state: LudoGameScreenSta
   // идващи след нея в document order, скриват изтичащата част на ring-а
   // (CSS Grid stacking е по document order при еднакъв z-index). Overlay-ят
   // е absolute-positioned над цялата дъска с висок z-index, затова ring-ът
-  // остава изцяло видим независимо къде е target клетката.
+  // остава изцяло видим независимо къде е target клетката. Grid точката
+  // минава през същия viewer rotation като board render-а (иначе ring-ът
+  // би застанал върху грешна клетка при завъртяна perspective).
   const effectsOverlay = root.querySelector('[data-ludo-effects-overlay="1"]')
   if (effectsOverlay) effectsOverlay.innerHTML = ''
   for (const cellId of highlights.captureCellIds) {
     if (!effectsOverlay) continue
-    const point = ludoGridPointForCellId(cellId)
+    const point = rotateLudoGridPointForViewer(ludoGridPointForCellId(cellId), localColor)
     effectsOverlay.insertAdjacentHTML('beforeend', renderLudoCaptureImpactRing(point))
   }
 }

@@ -9,6 +9,7 @@
 
 import { LUDO_COLOR_HEX, LUDO_COLORS, ludoCellId, type LudoCell, type LudoColor } from '../ludoTypes'
 import { ludoAdvanceTrackIndex, ludoAllCellIds, ludoGridPointForCellId, ludoStartCellIds, ludoStartTrackIndex, parseLudoCellId, LUDO_HOME_SLOTS } from './ludoBoardGeometry'
+import { rotateLudoGridPointForViewer, rotateLudoDirectionForViewer, mapLudoColorToViewerQuadrant } from './ludoPerspective'
 
 const GRID_SIZE = 15
 // Изнесени (export) само за да могат renderLudoGameScreen.ts да изчисли
@@ -86,26 +87,36 @@ function trackCellMarker(
   return ''
 }
 
-export function renderLudoBoard(): string {
+// localColor определя viewer perspective (виж ludoPerspective.ts) — local
+// player-ът винаги визуално долу вляво. Canonical geometry
+// (ludoBoardGeometry.ts, ludoGeometryConstants.ts) остава НАПЪЛНО
+// недокоснат; тук само remap-ваме РЕНДИРАНИТЕ grid координати/посоки/цвят-
+// позиции. Engine state не се пипа никъде в тази функция.
+export function renderLudoBoard(localColor: LudoColor): string {
   const startCells = ludoStartCellIds()
   const cellIds = ludoAllCellIds()
 
   // Входната клетка на всяко рамо (там откъдето пионките тръгват) — за
   // decorative плътна стрела, сочеща по посока на движение. Извлечено
   // директно от ludoStartTrackIndex, не хардкоднато — остава вярно
-  // automatически при промяна на track дължината.
+  // automatически при промяна на track дължината. Посоката се remap-ва за
+  // viewer-а (rotateLudoDirectionForViewer) — стрелката винаги сочи
+  // визуално правилно по посоката на движение, независимо от завъртането.
   const entryArrowTrackIndex: Record<number, LudoColor> = Object.fromEntries(
     LUDO_COLORS.map((color) => [ludoStartTrackIndex(color), color]),
   )
   const entryArrowRotationDeg: Partial<Record<LudoColor, number>> = Object.fromEntries(
-    LUDO_COLORS.map((color) => [color, computeClockwiseArrowRotationDeg(ludoStartTrackIndex(color))]),
+    LUDO_COLORS.map((color) => [
+      color,
+      rotateLudoDirectionForViewer(computeClockwiseArrowRotationDeg(ludoStartTrackIndex(color)), localColor),
+    ]),
   )
 
   const trackAndFinishCells = cellIds
     .filter((id) => !id.startsWith('home-'))
     .map((id) => {
       const cell = parseLudoCellId(id)
-      const point = ludoGridPointForCellId(id)
+      const point = rotateLudoGridPointForViewer(ludoGridPointForCellId(id), localColor)
       const isStart = LUDO_COLORS.some((color) => startCells[color] === id)
       const startColor = isStart ? (LUDO_COLORS.find((color) => startCells[color] === id) ?? null) : null
       const isEntryArrow = cell.kind === 'track' && cell.index in entryArrowTrackIndex
@@ -133,7 +144,24 @@ export function renderLudoBoard(): string {
     })
     .join('')
 
-  const homeQuadrants = LUDO_COLORS.map((color) => renderLudoHomeQuadrant(color)).join('')
+  const homeQuadrants = LUDO_COLORS.map((color) => renderLudoHomeQuadrant(color, localColor)).join('')
+  // Централният 4-триъгълен square: всеки триъгълен edge (top/right/bottom/
+  // left) сочи по посока на finish lane approach-а на своя цвят — тя винаги
+  // "гледа" от -90° спрямо home quadrant-а на цвета (red е top-left, finish
+  // lane-ът му приближава центъра ОТЛЯВО, значи left edge; аналогично
+  // blue=top-right->top edge, yellow=bottom-right->right edge,
+  // green=bottom-left->bottom edge — canonical съответствие, потвърдено от
+  // непроменения clip-path ред по-долу). Square-ът Е symmetric спрямо
+  // центъра (позицията му не се мести при rotation), затова remap-ваме
+  // само КОЙ цвят е във всеки edge, спрямо viewer quadrant-а на цвета.
+  const EDGE_QUADRANT_OFFSET: Record<'top' | 'right' | 'bottom' | 'left', 'top-left' | 'top-right' | 'bottom-right' | 'bottom-left'> = {
+    left: 'top-left',
+    top: 'top-right',
+    right: 'bottom-right',
+    bottom: 'bottom-left',
+  }
+  const centerColorForEdge = (edge: 'top' | 'right' | 'bottom' | 'left'): LudoColor =>
+    LUDO_COLORS.find((color) => mapLudoColorToViewerQuadrant(color, localColor) === EDGE_QUADRANT_OFFSET[edge])!
 
   return `
     <div data-ludo-board-frame="1" style="
@@ -165,10 +193,10 @@ export function renderLudoBoard(): string {
           position:relative;
           overflow:hidden;
         ">
-          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 0, 100% 0);background:${LUDO_COLOR_HEX.blue};"></div>
-          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 100% 0, 100% 100%);background:${LUDO_COLOR_HEX.yellow};"></div>
-          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 100% 100%, 0 100%);background:${LUDO_COLOR_HEX.green};"></div>
-          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 100%, 0 0);background:${LUDO_COLOR_HEX.red};"></div>
+          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 0, 100% 0);background:${LUDO_COLOR_HEX[centerColorForEdge('top')]};"></div>
+          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 100% 0, 100% 100%);background:${LUDO_COLOR_HEX[centerColorForEdge('right')]};"></div>
+          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 100% 100%, 0 100%);background:${LUDO_COLOR_HEX[centerColorForEdge('bottom')]};"></div>
+          <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 100%, 0 0);background:${LUDO_COLOR_HEX[centerColorForEdge('left')]};"></div>
         </div>
         ${homeQuadrants}
       </div>
@@ -182,15 +210,32 @@ export function renderLudoBoard(): string {
   `
 }
 
+// Origin (top-left ъгъл на 5x5 span-a) за всеки VIEWER quadrant — фиксирани
+// grid позиции, независими от цвят. Кой цвят получава кой origin вече се
+// решава от mapLudoColorToViewerQuadrant (виж renderLudoHomeQuadrant по-
+// долу) — самите 4 позиции остават same 4 canonical числа, каквито бяха и
+// преди viewer rotation-а (не rotate-ваме origin точката геометрично, защото
+// 90°/270° завъртане на един ъгъл на 5x5 блок не дава коректно новия
+// top-left ъгъл без допълнителна корекция — по-просто и по-ясно е кой
+// цвят/quadrant получава кой ФИКСИРАН origin).
+export const QUADRANT_ORIGIN: Record<'top-left' | 'top-right' | 'bottom-right' | 'bottom-left', { col: number; row: number }> = {
+  'top-left': { col: 1, row: 1 },
+  'top-right': { col: 11, row: 1 },
+  'bottom-right': { col: 11, row: 11 },
+  'bottom-left': { col: 1, row: 11 },
+}
+
 // Изнесени (export) заедно с HOME_QUADRANT_SHIFT/SPAN по-долу — единствената
 // причина е mobile card-alignment формулата в renderLudoGameScreen.ts (виж
-// task-а), която трябва да смята РЕАЛНИЯ center на всеки home кръг. Нито
-// една от стойностите тук не е променена.
+// task-а), която трябва да смята РЕАЛНИЯ center на всеки home кръг. ВНИМАНИЕ:
+// това е CANONICAL (non-rotated) mapping — renderLudoHomeQuadrant по-долу
+// remap-ва origin-а за viewer perspective чрез QUADRANT_ORIGIN +
+// mapLudoColorToViewerQuadrant, НЕ директно през тази таблица.
 export const HOME_QUADRANT_ORIGIN: Record<LudoColor, { col: number; row: number }> = {
-  red: { col: 1, row: 1 },
-  blue: { col: 11, row: 1 },
-  yellow: { col: 11, row: 11 },
-  green: { col: 1, row: 11 },
+  red: QUADRANT_ORIGIN['top-left'],
+  blue: QUADRANT_ORIGIN['top-right'],
+  yellow: QUADRANT_ORIGIN['bottom-right'],
+  green: QUADRANT_ORIGIN['bottom-left'],
 }
 
 // Span (в grid клетки) на всеки home quadrant — преди беше hardcoded "5" на
@@ -209,11 +254,25 @@ export const HOME_QUADRANT_SPAN = 5
 // отделна mobile логика. 3% ≈ 6.4px на desktop board при 1440×900 (quadrant
 // ~214px) — точно в поискания 4-6px диапазон.
 const HOME_QUADRANT_SHIFT_PERCENT = 3
+// Shift посоката зависи от VISUAL (rendered) quadrant позицията — "навътре
+// към центъра", не от цвета directno. red, ако визуално е в bottom-left
+// (viewer rotation), трябва shift +x -y (надясно и нагоре), same каквото
+// green (canonical bottom-left) вече ползваше — виж renderLudoHomeQuadrant
+// по-долу, което чете тази таблица по VIEWER quadrant, не по цвят.
+export const QUADRANT_SHIFT: Record<'top-left' | 'top-right' | 'bottom-right' | 'bottom-left', { x: number; y: number }> = {
+  'top-left': { x: HOME_QUADRANT_SHIFT_PERCENT, y: HOME_QUADRANT_SHIFT_PERCENT },
+  'top-right': { x: -HOME_QUADRANT_SHIFT_PERCENT, y: HOME_QUADRANT_SHIFT_PERCENT },
+  'bottom-right': { x: -HOME_QUADRANT_SHIFT_PERCENT, y: -HOME_QUADRANT_SHIFT_PERCENT },
+  'bottom-left': { x: HOME_QUADRANT_SHIFT_PERCENT, y: -HOME_QUADRANT_SHIFT_PERCENT },
+}
+
+// CANONICAL (non-rotated) mapping — пазена за обратна съвместимост
+// (renderLudoGameScreen.ts card-alignment формулата, виж коментара там).
 export const HOME_QUADRANT_SHIFT: Record<LudoColor, { x: number; y: number }> = {
-  red: { x: HOME_QUADRANT_SHIFT_PERCENT, y: HOME_QUADRANT_SHIFT_PERCENT }, // горе-ляво → надясно и надолу
-  blue: { x: -HOME_QUADRANT_SHIFT_PERCENT, y: HOME_QUADRANT_SHIFT_PERCENT }, // горе-дясно → наляво и надолу
-  green: { x: HOME_QUADRANT_SHIFT_PERCENT, y: -HOME_QUADRANT_SHIFT_PERCENT }, // долу-ляво → надясно и нагоре
-  yellow: { x: -HOME_QUADRANT_SHIFT_PERCENT, y: -HOME_QUADRANT_SHIFT_PERCENT }, // долу-дясно → наляво и нагоре
+  red: QUADRANT_SHIFT['top-left'],
+  blue: QUADRANT_SHIFT['top-right'],
+  yellow: QUADRANT_SHIFT['bottom-right'],
+  green: QUADRANT_SHIFT['bottom-left'],
 }
 
 // Локални позиции (1-3) на 4-те слота вътре в собствения 3x3 grid на всеки
@@ -230,11 +289,15 @@ const HOME_SLOT_LOCAL_POSITION: Array<{ col: number; row: number }> = [
 
 // Home медальонът е кръгъл (не квадратна кутия) и седи ВЪРХУ оранжевия
 // board backdrop, точно като хартиената референтна дъска — без собствен
-// квадратен фон извън кръга. Слотовете вътре остават бели кръгове.
-function renderLudoHomeQuadrant(color: LudoColor): string {
-  const origin = HOME_QUADRANT_ORIGIN[color]
+// квадратен фон извън кръга. Слотовете вътре остават бели кръгове. origin/
+// shift се определят от VIEWER quadrant-а на цвета (mapLudoColorToViewerQuadrant),
+// не от canonical HOME_QUADRANT_ORIGIN/SHIFT directno — local player-ът
+// винаги вижда собствения си quadrant долу вляво (виж ludoPerspective.ts).
+function renderLudoHomeQuadrant(color: LudoColor, localColor: LudoColor): string {
+  const viewerQuadrant = mapLudoColorToViewerQuadrant(color, localColor)
+  const origin = QUADRANT_ORIGIN[viewerQuadrant]
   const hex = LUDO_COLOR_HEX[color]
-  const shift = HOME_QUADRANT_SHIFT[color]
+  const shift = QUADRANT_SHIFT[viewerQuadrant]
 
   const slots = Array.from({ length: LUDO_HOME_SLOTS }, (_, slot) => {
     const id = ludoCellId({ kind: 'home', color, slot })

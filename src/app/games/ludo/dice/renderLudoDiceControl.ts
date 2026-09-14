@@ -120,11 +120,16 @@ export interface LudoDiceControlOptions {
   // "константата" на 2 места.
   face: number
   isRollable: boolean // true само за локалния играч на ход — добавя data-ludo-dice-roll-button="1" + pointer cursor
-  isRolling: boolean // докато трае целият flight/landing overlay (виж handleRollDice) — спира rotating arrows веднага
+  // Единственото правило за rotating arrows (виж task-а): true само когато
+  // ТОЗИ player е активен И turnPhase==='waiting_for_roll' — вярно за
+  // local human, bot, auto-roll еднакво (виж renderLudoGameScreen.ts::
+  // renderPlayerPanelSlot). НЕ isDiceRolling/isRolling — root cause на
+  // предишния бъг беше точно тази по-широка (и грешна) връзка.
+  shouldRotateArrows: boolean
 }
 
 export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
-  const { color, hex, avatarSize, insetPx, face, isRollable, isRolling } = options
+  const { color, hex, avatarSize, insetPx, face, isRollable, shouldRotateArrows } = options
   const ringSize = avatarSize + insetPx * 2 // same formula като buildMobileCountdownRingPath ringSize — гарантирано се събира в inset gap-а, допира footerTop с 0 overlap (виж коментара в renderLudoPlayerPanel.ts)
   const cx = ringSize / 2
   const cy = ringSize / 2
@@ -145,6 +150,7 @@ export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
 
   return `
     <div
+      data-ludo-dice-anchor="${color}"
       ${isRollable ? 'data-ludo-dice-roll-button="1"' : ''}
       style="
         position:absolute;
@@ -169,7 +175,7 @@ export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
         pointer-events:none;
         transform-origin:50% 50%;
         will-change:transform;
-        ${isRolling ? '' : 'animation:ludo-dice-arrows-spin 2.6s linear infinite;'}
+        ${shouldRotateArrows ? 'animation:ludo-dice-arrows-spin 2.6s linear infinite;' : ''}
       "
     >
       <defs>

@@ -27,7 +27,13 @@ import { LUDO_COLOR_HEX, LUDO_COLOR_LABEL } from '../ludoTypes'
 import type { LudoPiece, LudoPlayer } from '../ludoTypes'
 import { renderLudoDiceControl } from '../dice/renderLudoDiceControl'
 
-const TURN_COUNTDOWN_MS = 20_000
+// Countdown продължителността вече е PARAMETRIZED (turnCountdownMs, виж
+// renderLudoPlayerPanel сигнатурата) вместо fixed 20s — orchestrator-ът
+// (createLudoFlowController.ts) подава реалната продължителност спрямо
+// canonical turnPhase: 10s roll / 15s move / без countdown за bot (виж
+// Phase 3A task-а т.19). Design-ът (SVG ring, footer fill, цветове) остава
+// напълно непроменен — само числото се параметризира.
+const DEFAULT_TURN_COUNTDOWN_MS = 20_000
 
 // turnElapsedMs (подадено от renderLudoGameScreen, изчислено спрямо реален
 // Date.now() deadline в createLudoFlowController.ts) се превръща в
@@ -40,8 +46,12 @@ const TURN_COUNTDOWN_MS = 20_000
 // viewport промени се случват много по-често заради динамичния browser
 // chrome). С -elapsedMs delay, дори чисто нов елемент веднага "скача" на
 // правилната текуща позиция, вместо да рестартира.
-function clampedTurnDelayMs(turnElapsedMs: number): number {
-  return Math.min(Math.max(turnElapsedMs, 0), TURN_COUNTDOWN_MS)
+// Export-нат (не file-local) за directно pure тестване (виж task-а т.10 —
+// checkLudoTimerPresentation.ts T1-T5/T8/T9) — самата формула е
+// unchanged, само видимостта. Explicit параметри (turnElapsedMs,
+// turnCountdownMs), без Date.now() вътре — детерминистично тестваем.
+export function clampedTurnDelayMs(turnElapsedMs: number, turnCountdownMs: number): number {
+  return Math.min(Math.max(turnElapsedMs, 0), turnCountdownMs)
 }
 
 // Mobile-only countdown визуализация (виж audit-а: 70px footer travel
@@ -75,7 +85,13 @@ function buildMobileCountdownRingPath(size: number, inset: number, radius: numbe
 export interface LudoPlayerPanelDiceControl {
   face: number
   isRollable: boolean
-  isRolling: boolean
+  // Единственото правило (виж renderLudoGameScreen.ts::renderPlayerPanelSlot
+  // и task-а): true само когато ТОЗИ player е активен И
+  // turnPhase==='waiting_for_roll' — не isDiceRolling/isRolling (временен UI
+  // флаг, обвързан с "flight overlay в момента тече", а не с authoritative
+  // turn phase — точно това беше root cause-ът на "arrows restart в
+  // awaiting_move_selection" бъга).
+  shouldRotateArrows: boolean
 }
 
 export function renderLudoPlayerPanel(
@@ -85,6 +101,10 @@ export function renderLudoPlayerPanel(
   useCompactLayout = false,
   turnElapsedMs = 0,
   diceControl: LudoPlayerPanelDiceControl | null = null,
+  // Реалната countdown продължителност за ТОЗИ ход (10s roll / 15s move) —
+  // подадена от orchestrator-а спрямо canonical turnPhase. Default пази
+  // обратна съвместимост за евентуални call sites без нов параметър.
+  turnCountdownMs = DEFAULT_TURN_COUNTDOWN_MS,
 ): string {
   void pieces
   const hex = LUDO_COLOR_HEX[player.color]
@@ -170,10 +190,12 @@ export function renderLudoPlayerPanel(
             insetPx,
             face: diceControl.face,
             isRollable: diceControl.isRollable,
-            isRolling: diceControl.isRolling,
+            shouldRotateArrows: diceControl.shouldRotateArrows,
           })
         : `
-      <div style="
+      <div
+        data-ludo-dice-anchor="${player.color}"
+        style="
         position:absolute;
         top:${insetPx}px; left:${insetPx}px;
         width:${avatarSize}px; height:${avatarSize}px;
@@ -215,8 +237,8 @@ export function renderLudoPlayerPanel(
               style="
                 stroke-dasharray:100;
                 will-change:stroke-dashoffset;
-                animation:ludo-seat-countdown-ring-drain ${TURN_COUNTDOWN_MS}ms linear forwards;
-                animation-delay:-${clampedTurnDelayMs(turnElapsedMs)}ms;
+                animation:ludo-seat-countdown-ring-drain ${turnCountdownMs}ms linear forwards;
+                animation-delay:-${clampedTurnDelayMs(turnElapsedMs, turnCountdownMs)}ms;
               "
             ></path>
           </svg>
@@ -238,8 +260,8 @@ export function renderLudoPlayerPanel(
               box-shadow:inset 0 1px 0 rgba(255,255,255,0.22), 0 0 10px rgba(245,187,55,0.26);
               transform-origin:left center;
               will-change:transform;
-              animation:ludo-seat-countdown-drain ${TURN_COUNTDOWN_MS}ms linear forwards;
-              animation-delay:-${clampedTurnDelayMs(turnElapsedMs)}ms;
+              animation:ludo-seat-countdown-drain ${turnCountdownMs}ms linear forwards;
+              animation-delay:-${clampedTurnDelayMs(turnElapsedMs, turnCountdownMs)}ms;
             "
           ></div>
         ` : ''}

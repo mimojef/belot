@@ -1,28 +1,45 @@
 // Контролер за Ludo visual prototype — mount-ва екрана в root елемента,
-// wire-ва клик събития (piece select, roll dice, bottom bar). Canonical
-// game state/turn logic живее в pure engine слоя (engine/) — контролерът
-// е adapter между dispatch(action) и текущия string-based renderer, плюс
-// presentation-only state (route animation buffer, landed dice overlay,
-// countdown timestamps, interaction locks), което engine-ът съзнателно не
-// познава.
+// wire-ва клик събития (piece select, roll dice, bottom bar), оркестрира
+// bot turns и human roll/move timeouts. Canonical game state/turn logic
+// живее в pure engine слоя (engine/); timers/deadlines/bot policy живеят в
+// orchestrator/ (виж Phase 3A task-а т.2) — и двата НЕ познават DOM/
+// Date.now()/setTimeout пряко, контролерът е единственото място, което ги
+// свързва с реалния браузър.
 //
 // Engine flow: ROLL_STARTED -> (external RNG) -> ROLL_RESOLVED(value) ->
 // awaiting_move_selection -> MOVE_REQUESTED(slot) -> canonical result/events.
 // Engine-ът мутира state-а МОМЕНТАЛНО при dispatch — никога не чака
-// анимация. Route stepping animation-ът е ЧИСТО presentation: контролерът
-// изчислява route-а от stateBefore/stateAfter и показва движещата се
-// пионка на междинна визуална позиция чрез presentation override, докато
-// canonical engine state вече е финален (виж movingPieceOverrideCell по-
-// долу) — presentation frame state ≠ canonical state.
+// анимация/timer. Route stepping animation-ът е ЧИСТО presentation:
+// контролерът изчислява route-а от stateBefore/stateAfter и показва
+// движещата се пионка на междинна визуална позиция чрез presentation
+// override, докато canonical engine state вече е финален.
+//
+// Bot turns (т.16): bot НЕ чака 10s/15s human timers — при active color =
+// bot-controlled, controller-ът стартира кратък presentation "think delay"
+// (LUDO_BOT_THINK_DELAY_MS), после сам roll-ва и move-ва през СЪЩИТЕ
+// dispatch пътища като human click (никакво дублиране на game rules).
+//
+// Human timeouts (т.13/14): roll timeout (10s) -> auto-roll вместо human
+// (без bot takeover); move timeout (15s) -> bot takeover (sticky flag) +
+// popup. Deadlines се пазят с asssociated turnVersion — stale timeout от
+// стар ход се игнорира (виж isLudoDeadlineStillValid).
 //
 // Все още няма WebSocket/database — engine-ът е готов за server reuse
-// по-късно, но тук се вика directno, синхронно, в браузъра.
+// по-късно (виж task-а т.22), но тук се вика directno, синхронно, в браузъра.
 
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState } from './renderLudoGameScreen'
 import { renderLudoMockPopup } from './renderLudoBottomBar'
+import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
 import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
+import {
+  applyLudoPresentationOverrides,
+  createLudoCaptureVictimOverrides,
+  clearLudoCaptureVictimOverrides,
+  type LudoCaptureVictimOverrides,
+} from './board/ludoCapturePresentation'
+import { playLudoCaptureFlightOverlay } from './pieces/playLudoCaptureFlightOverlay'
 import { rollLudoMockDiceResult } from './dice/ludoDiceState'
 import { createLudoDiceResultOverlayController } from './dice/playLudoDiceFlightOverlay'
 import { reduceLudoGame } from './engine/ludoEngineReducer'
@@ -33,11 +50,22 @@ import {
   ludoEnginePositionToCellId,
   ludoUiPieceIdToSlot,
 } from './engine/ludoEngineAdapter'
-import type { LudoGameState } from './engine/ludoEngineTypes'
+import type { LudoGameState, LudoPieceSlot } from './engine/ludoEngineTypes'
 import type { LudoEngineAction } from './engine/ludoEngineActions'
-import type { LudoCellId, LudoPiece, LudoPieceId } from './ludoTypes'
+import {
+  createLudoOrchestratorInitialState,
+  computeLudoDeadlineStateForPhase,
+  isLudoDeadlineStillValid,
+  markLudoColorBotControlled,
+  resolveLudoPendingDeadlineKind,
+  pickLudoBotMove,
+  LUDO_ROLL_TIMEOUT_MS,
+  LUDO_MOVE_TIMEOUT_MS,
+  LUDO_BOT_THINK_DELAY_MS,
+  type LudoOrchestratorState,
+} from './orchestrator'
+import type { LudoCellId, LudoColor, LudoPiece, LudoPieceId, LudoPlayer } from './ludoTypes'
 
-const MOCK_TURN_SECONDS = 20
 const STEP_ANIMATION_MS = 220
 const IMPACT_ANIMATION_MS = 450
 
@@ -50,7 +78,10 @@ export interface LudoFlowControllerOptions {
 }
 
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
-  const players = createLudoMockPlayers()
+  const players: Record<LudoColor, LudoPlayer> = createLudoMockPlayers()
+  const botControlledColorsInitial = new Set<LudoColor>(
+    (Object.values(players) as LudoPlayer[]).filter((p) => p.isBot).map((p) => p.color),
+  )
 
   // Canonical game state — ЕДИНСТВЕНИЯТ source of truth за pieces/
   // activeColor/turnPhase/diceValue/legalMoves. Мутира се ИЗКЛЮЧИТЕЛНО
@@ -58,14 +89,25 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // полета directno.
   let engineState: LudoGameState = createLudoEngineInitialState()
 
+  // Orchestrator state (т.2: PRESENTATION/ORCHESTRATION) — bot-controlled
+  // flag-ове + roll/move deadlines. Мутира се ИЗКЛЮЧИТЕЛНО чрез
+  // computeLudoDeadlineStateForPhase/markLudoColorBotControlled (pure
+  // helpers), контролерът само presисва резултата обратно тук.
+  let orchestrator: LudoOrchestratorState = createLudoOrchestratorInitialState(botControlledColorsInitial)
+
   // ---- PRESENTATION-ONLY state (engine-ът не знае нищо за тях) ----
   // Момент (Date.now()), в който активният играч е получил хода си —
   // deadline-базирана основа за countdown fill-а в player card-а (виж
-  // renderLudoPlayerPanel), НЕ JS tick брояч. Reset-ва се при TURN_ADVANCED.
+  // renderLudoPlayerPanel), НЕ JS tick брояч. Reset-ва се при всяка нова
+  // deadline фаза (roll/move/bot-think).
   let turnStartedAt = Date.now()
   let isDiceRolling = false
   let isAnimatingMove = false
   let activePopup: 'emoji' | 'phrase' | null = null
+  // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
+  // до следващия път, когато local player-ът получи хода си (не reset-ва
+  // се автоматично, аналог на Belot persistent popup).
+  let showBotTakeoverPopup = false
   // Presentation route buffer: докато движеща се пионка still-steps по
   // маршрута си, engine-ът ВЕЧЕ показва финалната ѝ позиция (dispatch е
   // synchronous и моментален). За да не "телепортира" визуално пионката,
@@ -73,6 +115,20 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // adapted UI pieces масива — presentation frame, никога записан обратно
   // в engineState. null означава "няма активна route анимация в момента".
   let movingPieceOverride: { pieceId: LudoPieceId; cellId: LudoCellId } | null = null
+  // Capture presentation buffer (виж task-а): dispatch(MOVE_REQUESTED) връща
+  // МОМЕНТАЛНО final canonical state — captured victims вече са в home-а си
+  // в engineState.pieces, ОЩЕ ПРЕДИ attacker-ът визуално да е започнал route
+  // анимацията. Без този override victim-ите биха изчезнали от target
+  // клетката веднага, много преди attacker-ът реално да "пристигне" отгоре
+  // им. Затова, докато presentation route/impact анимацията тече, ВСЕКИ
+  // captured piece id тук се "закача" обратно на target клетката (същата,
+  // където е стоял преди хода — capture винаги значи victim е бил точно на
+  // target-а), независимо от engine-ния home slot. Съдържа >1 запис за stack
+  // capture (2-4 real victim pieces на еднa клетка) — badge-ът/целия stack
+  // остава видим до impact. Изчиства се едва СЛЕД animateCapture() приключи,
+  // точно преди финалния render(), който вече показва canonical home
+  // позициите от engine state.
+  let captureVictimOverrides: LudoCaptureVictimOverrides = new Map()
   // "Кацналото" зарче в центъра на дъската (document.body overlay) — живее
   // СПРЯМО ХОДА (roll → избор на пионка → move/capture animation), не
   // спрямо render() цикъла или следващото хвърляне: playFlight/clearLanded
@@ -93,15 +149,30 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     return result
   }
 
-  // Прилага presentation route buffer-а върху canonical adapted pieces —
-  // ЕДИНСТВЕНОТО място, където presentation override докосва piece
-  // позиция за render. Engine pieces масивът остава недокоснат.
+  const localColor: LudoColor = (
+    (Object.values(players) as LudoPlayer[]).find((p) => !p.isBot)?.color ?? 'red'
+  )
+
+  // Прилага presentation override-ите (route buffer за attacker-а, capture
+  // buffer за victims) върху canonical adapted pieces — ЕДИНСТВЕНОТО място,
+  // където presentation override докосва piece позиция за render. Engine
+  // pieces масивът остава недокоснат.
   function currentUiPieces(): LudoPiece[] {
     const uiPieces = ludoEnginePiecesToUiPieces(engineState.pieces)
-    if (!movingPieceOverride) return uiPieces
-    return uiPieces.map((p) =>
-      p.id === movingPieceOverride!.pieceId ? { ...p, cell: movingPieceOverride!.cellId } : p,
-    )
+    return applyLudoPresentationOverrides(uiPieces, movingPieceOverride, captureVictimOverrides)
+  }
+
+  // Реалната countdown продължителност за текущата фаза на активния играч
+  // — 10s roll / 15s move / кратък bot-processing delay (т.19: НЕ фалшив
+  // human countdown за bot). Огледало на resolveLudoPendingDeadlineKind, но
+  // включва и bot клона (който deadline helper-ът explicit third-states
+  // като 'none', защото bot няма human deadline — тук просто показваме
+  // кратка визуална индикация вместо липсваща countdown лента).
+  function currentTurnCountdownMs(): number {
+    const pending = resolveLudoPendingDeadlineKind(engineState.turnPhase, engineState.activeColor, orchestrator.botControlledColors)
+    if (pending === 'roll') return LUDO_ROLL_TIMEOUT_MS
+    if (pending === 'move') return LUDO_MOVE_TIMEOUT_MS
+    return LUDO_BOT_THINK_DELAY_MS
   }
 
   function currentScreenState(): LudoGameScreenState {
@@ -113,13 +184,21 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // (legalMoves вече е [] там), но пазим explicit guard-а тук за яснота.
       legalMoves: isAnimatingMove ? [] : ludoEngineLegalMovesToUiMoves(engineState.legalMoves),
       activeColor: engineState.activeColor,
+      turnPhase: engineState.turnPhase,
       turnStartedAt,
+      turnCountdownMs: currentTurnCountdownMs(),
       isDiceRolling,
       // Interaction lock: DOM disabled state следва engine turnPhase, но
       // НЕ е authoritative за правилата — engine stale-action защитата
-      // (turnVersion) е вторият защитен слой (виж task-а т.9).
-      canRollDice: engineState.turnPhase === 'waiting_for_roll' && !isAnimatingMove,
-      turnSecondsLeft: MOCK_TURN_SECONDS,
+      // (turnVersion) е вторият защитен слой (виж task-а т.21). local
+      // player-ят може да roll-не само когато е реално негов ред — bot-
+      // controlled цветове (включително sticky-takeover-натия local цвят)
+      // никога не показват clickable launcher за друг клиент да натисне.
+      canRollDice:
+        engineState.turnPhase === 'waiting_for_roll' &&
+        !isAnimatingMove &&
+        !orchestrator.botControlledColors.has(engineState.activeColor),
+      turnSecondsLeft: Math.round(currentTurnCountdownMs() / 1000),
       useMobileLayout: isPhoneLayoutViewport(),
     }
   }
@@ -128,6 +207,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     options.root.innerHTML = renderLudoGameScreen(currentScreenState())
     applyLudoBoardContent(options.root, currentScreenState())
     if (activePopup) mountPopup(activePopup)
+    if (showBotTakeoverPopup) mountBotTakeoverPopup()
     wireEvents()
   }
 
@@ -147,13 +227,40 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     backdrop?.remove()
   }
 
+  // Bot-takeover popup (т.15) — reuse-ва Belot-овия УХ pattern (scrim +
+  // centered card + съобщение + dismiss бутон), но е НОВ, Ludo-local
+  // компонент (renderLudoBotTakeoverPopup.ts), не import от Belot код (виж
+  // audit-а — Belot popup-ите са private closures, тясно обвързани със
+  // Seat/RoomBiddingSnapshot типове, не safe за directen import).
+  function mountBotTakeoverPopup(): void {
+    // Dice flight/landed overlay-ят живее на document.body с по-висок
+    // z-index от Ludo overlay root-а (виж playLudoDiceFlightOverlay.ts —
+    // нарочно, за да лети зарчето над дъската), затова popup-ът (mount-нат
+    // ВЪТРЕ в options.root) не може да го покрие само чрез собствения си
+    // z-index — родителският stacking context на options.root е ограничен
+    // отвън. Скриваме dice overlay-a визуално (не unmount — animation
+    // lifecycle-ът остава недокоснат), докато popup-ът стои отворен.
+    diceResultOverlay.setHidden(true)
+    if (options.root.querySelector('[data-ludo-bot-takeover-backdrop="1"]')) return
+    const container = document.createElement('div')
+    container.innerHTML = renderLudoBotTakeoverPopup()
+    const backdrop = container.firstElementChild
+    if (backdrop) options.root.appendChild(backdrop)
+    options.root.querySelector('[data-ludo-bot-takeover-dismiss="1"]')?.addEventListener('click', () => {
+      showBotTakeoverPopup = false
+      diceResultOverlay.setHidden(false)
+      const el = options.root.querySelector('[data-ludo-bot-takeover-backdrop="1"]')
+      el?.remove()
+    })
+  }
+
   function wireEvents(): void {
     options.root.querySelector('[data-ludo-exit-button="1"]')?.addEventListener('click', () => {
       options.onExit()
     })
 
     options.root.querySelector('[data-ludo-dice-roll-button="1"]')?.addEventListener('click', () => {
-      void handleRollDice()
+      void handleHumanRollClick()
     })
 
     options.root.querySelector('[data-ludo-emoji-button="1"]')?.addEventListener('click', () => {
@@ -171,7 +278,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     options.root.querySelectorAll<HTMLElement>('[data-ludo-piece-selectable="1"]').forEach((el) => {
       el.addEventListener('click', () => {
         const pieceId = el.getAttribute('data-ludo-piece') as LudoPieceId | null
-        if (pieceId) void handlePieceSelected(pieceId)
+        if (pieceId) void handleHumanPieceClick(pieceId)
       })
     })
 
@@ -196,67 +303,182 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // "кацналото" зарче е position:fixed на замразени viewport
       // координати, затова вече не би стояло подравнено с новия board
       // център. По-просто и коректно да изчезне, отколкото да остане
-      // визуално разминато до следващото хвърляне.
+      // визуално разминато до следващото хвърляне. Deadline-ите НЕ се
+      // пипат тук (т.18: rerender/resize не бива да ги ресетва).
       diceResultOverlay.clearLanded()
       render()
     }, 120)
   }
 
-  async function handleRollDice(): Promise<void> {
-    // Interaction lock (т.9): дублиращ click по време на flight/move/
-    // capture анимация се игнорира тук, ПРЕДИ да опитаме dispatch. Engine
-    // turnPhase guard-ът е вторият, authoritative защитен слой.
-    if (engineState.turnPhase !== 'waiting_for_roll' || isAnimatingMove) return
+  // ==================== TIMERS / DEADLINE SCHEDULING ====================
 
-    // Launcher-ът (data-ludo-dice-roll-button), центърът на дъската
-    // (data-ludo-board-center) и самата board grid (data-ludo-board, за
-    // responsive dice sizing — виж playLudoDiceFlightOverlay.ts) трябва да
-    // се измерят ПРЕДИ render()-а долу — render() маха isRollable→false
-    // клона, значи самият launcher елемент (с това ИМЕ на атрибута)
-    // изчезва от DOM-а веднага след него.
-    const triggerEl = options.root.querySelector<HTMLElement>('[data-ludo-dice-roll-button="1"]')
+  let pendingTimeoutHandle: ReturnType<typeof setTimeout> | null = null
+  let pendingBotHandle: ReturnType<typeof setTimeout> | null = null
+
+  function clearScheduledTimers(): void {
+    if (pendingTimeoutHandle) {
+      clearTimeout(pendingTimeoutHandle)
+      pendingTimeoutHandle = null
+    }
+    if (pendingBotHandle) {
+      clearTimeout(pendingBotHandle)
+      pendingBotHandle = null
+    }
+  }
+
+  // Извиква се СЛЕД всяка engine мутация, която потенциално сменя
+  // turnPhase/activeColor — преизчислява orchestrator deadline state-а и
+  // програмира точно ЕДИН нов timeout (roll timeout / move timeout / bot
+  // think delay), guard-нат с turnVersion за stale защита (т.18/TIMER10).
+  // Никога не се извиква посред анимация (isAnimatingMove) — timers пазят
+  // interaction lock-а indirectно, защото UI бутоните вече са disabled там.
+  function scheduleNextDeadline(): void {
+    clearScheduledTimers()
+    const now = Date.now()
+    orchestrator = computeLudoDeadlineStateForPhase(
+      orchestrator,
+      engineState.turnPhase,
+      engineState.activeColor,
+      engineState.turnVersion,
+      now,
+    )
+    turnStartedAt = now
+
+    const isBotTurn = orchestrator.botControlledColors.has(engineState.activeColor)
+    if (isBotTurn) {
+      if (engineState.turnPhase === 'waiting_for_roll' || engineState.turnPhase === 'awaiting_move_selection') {
+        const registeredTurnVersion = engineState.turnVersion
+        pendingBotHandle = setTimeout(() => {
+          if (!isLudoDeadlineStillValid(orchestrator, registeredTurnVersion)) return
+          void performBotTurnStep()
+        }, LUDO_BOT_THINK_DELAY_MS)
+      }
+      return
+    }
+
+    if (orchestrator.rollDeadlineAt !== null) {
+      const registeredTurnVersion = engineState.turnVersion
+      pendingTimeoutHandle = setTimeout(() => {
+        if (!isLudoDeadlineStillValid(orchestrator, registeredTurnVersion)) return
+        void handleRollTimeout()
+      }, LUDO_ROLL_TIMEOUT_MS)
+    } else if (orchestrator.moveDeadlineAt !== null) {
+      const registeredTurnVersion = engineState.turnVersion
+      pendingTimeoutHandle = setTimeout(() => {
+        if (!isLudoDeadlineStillValid(orchestrator, registeredTurnVersion)) return
+        void handleMoveTimeout()
+      }, LUDO_MOVE_TIMEOUT_MS)
+    }
+  }
+
+  // Roll timeout (т.13): системата хвърля зара ВМЕСТО human-а — НЕ bot
+  // takeover, местото просто auto-roll-ва през СЪЩИЯ dispatch път.
+  async function handleRollTimeout(): Promise<void> {
+    if (isAnimatingMove) return
+    await performRollSequence(engineState.activeColor)
+  }
+
+  // Move timeout (т.14): BOT TAKEOVER — местото се маркира bot-controlled
+  // (sticky), после веднага bot избира и изпълнява ход.
+  async function handleMoveTimeout(): Promise<void> {
+    if (isAnimatingMove) return
+    const color = engineState.activeColor
+    orchestrator = markLudoColorBotControlled(orchestrator, color)
+    showBotTakeoverPopup = true
+    render()
+    await performBotMoveForCurrentPhase()
+  }
+
+  // ==================== HUMAN INPUT ====================
+
+  async function handleHumanRollClick(): Promise<void> {
+    if (engineState.turnPhase !== 'waiting_for_roll' || isAnimatingMove) return
+    if (orchestrator.botControlledColors.has(engineState.activeColor)) return
+    clearScheduledTimers()
+    await performRollSequence(engineState.activeColor)
+  }
+
+  async function handleHumanPieceClick(pieceId: LudoPieceId): Promise<void> {
+    if (isAnimatingMove) return
+    if (engineState.turnPhase !== 'awaiting_move_selection') return
+    if (orchestrator.botControlledColors.has(engineState.activeColor)) return
+    clearScheduledTimers()
+    const slot = ludoUiPieceIdToSlot(pieceId)
+    await performMoveSequence(engineState.activeColor, slot)
+  }
+
+  // ==================== BOT TURN ORCHESTRATION (т.16/17) ====================
+
+  // Изпълнява ЕДНА bot стъпка спрямо ТЕКУЩАТА engine фаза — roll ако чакаме
+  // roll, move ако вече има legal moves. Викана от bot think-delay timer-а
+  // (scheduleNextDeadline) при нормален bot ход, и рекурсивно продължава
+  // сама себе си чрез render()->scheduleNextDeadline() цикъла за extra
+  // rolls (Phase 3B, все още engine-ът винаги advance-ва след move в Phase
+  // 3A — виж handleTurnAdvanced в reducer-а).
+  async function performBotTurnStep(): Promise<void> {
+    if (isAnimatingMove) return
+    const color = engineState.activeColor
+    if (!orchestrator.botControlledColors.has(color)) return
+
+    if (engineState.turnPhase === 'waiting_for_roll') {
+      await performRollSequence(color)
+      return
+    }
+    if (engineState.turnPhase === 'awaiting_move_selection') {
+      await performBotMoveForCurrentPhase()
+    }
+  }
+
+  async function performBotMoveForCurrentPhase(): Promise<void> {
+    if (engineState.turnPhase !== 'awaiting_move_selection') return
+    const move = pickLudoBotMove(engineState.legalMoves)
+    if (!move) return
+    await performMoveSequence(move.color, move.slot)
+  }
+
+  // ==================== SHARED ROLL/MOVE SEQUENCES ====================
+  // Извиквани еднакво от human click, roll timeout auto-roll, и bot turn
+  // orchestration — никаква разлика в game-rule пътя (т.16/17: bot и human
+  // dispatch-ват СЪЩИТЕ actions, engine-ът не различава origin-а им).
+
+  async function performRollSequence(rollingColor: LudoColor): Promise<void> {
+    // Origin resolution е ЕДИНЕН за трите roll source-а (manual human click,
+    // roll-timeout auto-roll, bot auto-roll) — всичките минават през тази
+    // функция и всичките резолват origin-а по ЦВЯТ, не по "дали е local
+    // player" (виж task-а — старата версия ползваше data-ludo-dice-roll-
+    // button="1", който съществува САМО за local rollable launcher-а, затова
+    // bot/друг играч roll-ваше видимо "телепортиран" в центъра). data-ludo-
+    // dice-anchor="${color}" (renderLudoPlayerPanel/renderLudoDiceControl)
+    // е стабилен, винаги-налично DOM marker за ВСЕКИ цвят — реалната avatar/
+    // dice зона в player card-а, вече завъртяна спрямо viewer perspective
+    // (renderLudoGameScreen viewerColorAt/renderPlayerPanelSlot), затова
+    // origin автоматично излиза правилен и при различен local color.
+    const triggerEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${rollingColor}"]`)
     const centerEl = options.root.querySelector<HTMLElement>('[data-ludo-board-center="1"]')
     const boardGridEl = options.root.querySelector<HTMLElement>('[data-ludo-board="1"]')
-    if (!triggerEl || !centerEl || !boardGridEl) return
-    const fromRect = triggerEl.getBoundingClientRect()
+    if (!centerEl || !boardGridEl) return
+    // Defensive fallback само ако anchor елементът реално липсва в DOM-а
+    // (не би трябвало да се случи — всеки цвят винаги рендира анкора си) —
+    // пада назад към центъра, за да остане flight анимацията видима дори
+    // в неочакван edge case, вместо throw.
+    const fromRect = (triggerEl ?? centerEl).getBoundingClientRect()
     const toRect = centerEl.getBoundingClientRect()
     const boardGridWidthPx = boardGridEl.getBoundingClientRect().width
 
-    const rollingColor = engineState.activeColor
     const rollStarted = dispatch({
       type: 'ROLL_STARTED',
       color: rollingColor,
       expectedTurnVersion: engineState.turnVersion,
     })
-    // ROLL_STARTED rejected (грешен player/phase/stale turnVersion) — не би
-    // трябвало да се случи зад вече минатия DOM guard по-горе, но engine-ът
-    // остава authoritative: rejected -> без визуален ефект.
     if (rollStarted.state.turnPhase !== 'rolling') return
 
-    // Само едно "кацнало" зарче видимо в даден момент — премахваме
-    // предходния резултат веднага при ново хвърляне. (playFlight също
-    // прави собствен clearLanded() отвътре, но правим го и тук изрично, за
-    // да изчезне старият резултат СРЕЩУ launcher-а веднага при click, не
-    // едва когато новият полет приключи.)
     diceResultOverlay.clearLanded()
-
     isDiceRolling = true
     render()
 
-    // External RNG (Math.random остава ИЗВЪН engine-а) — резултатът е
-    // INPUT към ROLL_RESOLVED, не engine-ът сам хвърля зара (виж task-а т.7).
     const result = rollLudoMockDiceResult()
-    // Полет + 3D завъртане до правилната страна, визуализирано изцяло в
-    // overlay-а (виж playLudoDiceFlightOverlay.ts) — player card launcher-ът
-    // междувременно остава напълно статичен (само стрелките спират, виж
-    // isDiceRolling по-горе). Резолвва се едва след кацването; зарчето
-    // остава видимо в центъра ПОСЛЕ това (виж handlePieceSelected за
-    // единственото място, което го маха — след завършен ход).
     await diceResultOverlay.playFlight({ fromRect, toRect, boardGridWidthPx, result })
 
-    // ROLL_RESOLVED мества engine-а в awaiting_move_selection (или директно
-    // turn_complete, ако няма legal moves) и изчислява legalMoves —
-    // canonical, deterministic, виж ludoEngineLegalMoves.ts.
     const rollResolved = dispatch({
       type: 'ROLL_RESOLVED',
       color: rollingColor,
@@ -265,53 +487,68 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     })
 
     isDiceRolling = false
-    render()
 
-    // Ако няма legal moves (rare в текущия начален mock state, но engine-ът
-    // вече го обработва коректно), ходът е автоматично complete — напред.
     if (rollResolved.state.turnPhase === 'turn_complete') {
       advanceTurn()
+      return
     }
+    // ВАЖНО (виж task-а — timer sync bug fix): scheduleNextDeadline() ТРЯБВА
+    // да се извика ПРЕДИ render() тук, не след. scheduleNextDeadline()
+    // задава turnStartedAt=now за НОВАТА фаза (awaiting_move_selection,
+    // moveDeadlineAt=now+15000) — ако render() се случи първо (старият ред),
+    // countdown fill/ring-ът се render-ва с turnElapsedMs, изчислен спрямо
+    // СТАРИЯ turnStartedAt (все още от waiting_for_roll фазата, отпреди roll
+    // click-а + flight-а), затова CSS animation-delay излиза грешно голям —
+    // visual timer стартира от "средата" и после изтича реално-time рано
+    // спрямо истинския 15s moveDeadlineAt (setTimeout-ът остава коректен,
+    // само presentation-ът е разминат). Няма следващ render() до
+    // move-timeout/piece click, затова тази единствена грешка остава
+    // видима за цялата продължителност на countdown-а.
+    scheduleNextDeadline()
+    render()
   }
 
-  async function handlePieceSelected(pieceId: LudoPieceId): Promise<void> {
-    // Interaction lock — виж handleRollDice за същия pattern.
-    if (isAnimatingMove) return
-    if (engineState.turnPhase !== 'awaiting_move_selection') return
-
-    const slot = ludoUiPieceIdToSlot(pieceId)
-    const color = engineState.activeColor
+  async function performMoveSequence(color: LudoColor, slot: LudoPieceSlot): Promise<void> {
     const move = engineState.legalMoves.find((m) => m.color === color && m.slot === slot)
     if (!move) return
 
-    // stateBefore — за да изчислим route-а от РЕАЛНАТА текуща позиция
-    // (виж task-а т.5 стъпка 1/4).
+    const pieceId = `${color}-${slot}` as LudoPieceId
     const movingPieceBefore = engineState.pieces.find((p) => p.color === color && p.slot === slot)
     if (!movingPieceBefore) return
     const fromCellId = ludoEnginePositionToCellId(movingPieceBefore.position, color)
 
     isAnimatingMove = true
+    clearScheduledTimers()
     render()
 
-    // Engine-ът мутира state-а МОМЕНТАЛНО тук (dispatch е synchronous) —
-    // не чака анимацията (виж task-а т.4/т.5 стъпки 2-3). stateAfter вече е
-    // canonical final state; capture (ако има) вече е приложен.
     const moveResult = dispatch({ type: 'MOVE_REQUESTED', color, slot, expectedTurnVersion: engineState.turnVersion })
     const capturedEvent = moveResult.events.find((e) => e.type === 'pieces_captured')
     const capturedPieceIds = capturedEvent && capturedEvent.type === 'pieces_captured' ? capturedEvent.capturedPieceIds : []
 
     if (move.targetPosition.kind !== 'track') {
       isAnimatingMove = false
+      // scheduleNextDeadline() ПРЕДИ render() — виж timer sync bug fix
+      // коментара в performRollSequence по-горе, същия принцип: engine-ът
+      // вече е в новата фаза (turnPhase вече напреднал от MOVE_REQUESTED
+      // dispatch-а по-горе), turnStartedAt трябва да е коректен ПРЕДИ DOM-ът
+      // да покаже countdown-а за нея.
+      scheduleNextDeadline()
       render()
       return
     }
     const targetCellId = ludoEnginePositionToCellId(move.targetPosition, color)
 
-    // Route stepping е ЧИСТО presentation (виж task-а т.5 стъпки 5-6):
-    // canonical engine state вече е final, движим само movingPieceOverride
-    // през междинните клетки на route-а, render() при всяка стъпка показва
-    // presentation frame-а (adapted engine pieces + override), НЕ мутация
-    // на engine.pieces.
+    // Capture presentation buffer (виж task-а и коментара при
+    // captureVictimOverrides по-горе): engine-ът вече е resolve-нал
+    // captured victims в home-а им (dispatch по-горе е МОМЕНТАЛЕН), но
+    // визуално те трябва да останат на target клетката ЦЯЛОТО време, докато
+    // attacker-ът извървява route-а до нея — попълваме override-а ПРЕДИ
+    // route loop-а изобщо да стартира, за да не изчезнат victims-ите на
+    // самия ПЪРВИ render() кадър от анимацията.
+    if (capturedPieceIds.length > 0) {
+      captureVictimOverrides = createLudoCaptureVictimOverrides(capturedPieceIds, targetCellId, captureVictimOverrides)
+    }
+
     const route = buildLudoMoveRoute(fromCellId, targetCellId)
     for (const stepCellId of route) {
       movingPieceOverride = { pieceId, cellId: stepCellId }
@@ -319,16 +556,22 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       await wait(STEP_ANIMATION_MS)
     }
 
+    // Attacker-ът вече е визуално пристигнал на target клетката (route
+    // loop-ът завърши) — чак СЕГА следва impact/capture анимацията. Victims
+    // все още стоят на target-а (captureVictimOverrides по-горе), точно
+    // както изисква task-а: "attacker reaches target → collision/capture →
+    // victim flies home", не обратно.
     if (capturedPieceIds.length > 0) {
       await animateCapture(capturedPieceIds)
+      // Impact анимацията приключи — маха се presentation override-ът за
+      // ТОЧНО тези victim id-та (не целия map — defensive за евентуален
+      // бъдещ overlapping capture, макар Phase 3A да няма такъв сценарий).
+      // Следващият render() вече показва canonical home позициите directno
+      // от engineState.pieces.
+      captureVictimOverrides = clearLudoCaptureVictimOverrides(capturedPieceIds, captureVictimOverrides)
     }
 
-    // Ходът е ЗАВЪРШЕН (стъпките + евентуалния capture) — зарчето в
-    // центъра вече няма причина да стои. Presentation override-ът се маха
-    // (т.5 стъпка 8) — renderer-ът показва canonical final state оттук
-    // нататък.
     diceResultOverlay.clearLanded()
-
     movingPieceOverride = null
     isAnimatingMove = false
     render()
@@ -336,45 +579,92 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     advanceTurn()
   }
 
-  // Удря ВСИЧКИ противникови пионки, чиито id-та идват директно от
-  // pieces_captured.capturedPieceIds (виж task-а т.2 — engine-ът вече знае
-  // точно кои real pieces са captured, никакво color/slot guessing тук).
+  // Impact момент — извиква се ЕДИНСТВЕНО след attacker-ът вече е визуално
+  // пристигнал на target клетката (виж call site-а в performMoveSequence).
+  // Sequence (виж task-а): shake (impact индикация, reuse на съществуващия
+  // ludo-piece-shake ефект, без redesign) → ВСЕКИ captured piece реално
+  // прелита от target клетката до собствения си permanent home slot
+  // (playLudoCaptureFlightOverlay.ts) → чак СЛЕД flight-ът приключи,
+  // caller-ът (performMoveSequence) чисти presentation override-а.
+  //
+  // Origin rect се измерва от представителния DOM token на target клетката
+  // (querySelector по data-ludo-piece ИЛИ data-ludo-piece-group — stack
+  // capture показва 1 group token с badge за N victims, виж
+  // renderLudoPieceCluster, затова НЕ всеки captured id има собствен DOM
+  // елемент; representative token-ът стои на СЪЩАТА позиция за целия stack,
+  // затова служи като origin за всеки отделен flight). Destination rect е
+  // РЕАЛНАТА home клетка на ТОЧНО тази piece id (data-ludo-cell-pieces="home-
+  // ${color}-${slot}") — тези контейнери СЕ рендират в DOM-а винаги
+  // (renderLudoBoard.ts), независимо дали в момента има пионка вътре,
+  // затова measurement-ът работи без да чака override cleanup. И origin, и
+  // destination минават през стандартния cell-id based board render pipeline
+  // (viewer-rotated при build time), затова flight route-ът е автоматично
+  // perspective-коректен без отделна координатна логика тук.
   async function animateCapture(capturedPieceIds: readonly LudoPieceId[]): Promise<void> {
-    // ЕДИН общ impact момент за цялата target клетка (не N последователни
-    // shake-а един след друг) — всички victim DOM елементи получават
-    // анимацията едновременно, после ЕДНО общо изчакване. Stacked victims
-    // от същия цвят споделят един и същ representative DOM node (виж
-    // renderLudoPieces.ts), затова dedupe-ваме елементите, не victim-ите.
-    const victimEls = capturedPieceIds
-      .map((id) =>
-        options.root.querySelector<HTMLElement>(
-          `[data-ludo-piece="${id}"], [data-ludo-piece-group~="${id}"]`,
-        ),
-      )
-      .filter((el): el is HTMLElement => el !== null)
-    const uniqueVictimEls = Array.from(new Set(victimEls))
-    uniqueVictimEls.forEach((el) => el.style.setProperty('animation', 'ludo-piece-shake 400ms ease-in-out'))
+    const representativeEl = options.root.querySelector<HTMLElement>(
+      `[data-ludo-piece="${capturedPieceIds[0]}"], [data-ludo-piece-group~="${capturedPieceIds[0]}"]`,
+    )
+    if (!representativeEl) return
+    representativeEl.style.setProperty('animation', 'ludo-piece-shake 400ms ease-in-out')
     await wait(IMPACT_ANIMATION_MS)
-    // Canonical victim positions вече са home (engine-ът приложи capture-а
-    // синхронно при dispatch по-горе) — следващият render() (в
-    // handlePieceSelected след тази функция) показва финалния резултат.
+
+    const fromRect = representativeEl.getBoundingClientRect()
+    const pieceSizePx = fromRect.width
+    // Скриваме статичния representative token НА target клетката веднага,
+    // преди flight overlay-ите да стартират — иначе pionkata би изглеждала
+    // ДУБЛИРАНА (едновременно статична на target-а И летяща към home-а, виж
+    // task-а т.5 "не трябва да се дублира едновременно и на target, и в
+    // home"). captureVictimOverrides остава активен през целия flight
+    // (canonical home render still suppressed) — само визуалният DOM token
+    // на target-а се скрива, не самия presentation state.
+    representativeEl.style.visibility = 'hidden'
+
+    // Всички victims летят ПАРАЛЕЛНО (Promise.all) — визуално едновременно,
+    // не последователно stagger (task-ът позволява "може последователно
+    // или с малък stagger" — паралелно е по-четимо/по-бързо за 2-4 pieces,
+    // без нов timing параметър за конфигуриране).
+    await Promise.all(
+      capturedPieceIds.map(async (pieceId) => {
+        const [color] = pieceId.split('-')
+        const slot = pieceId.slice(pieceId.lastIndexOf('-') + 1)
+        const homeCellId = `home-${color}-${slot}`
+        const homeContainer = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${homeCellId}"]`)
+        if (!homeContainer) return
+        const toRect = homeContainer.getBoundingClientRect()
+        await playLudoCaptureFlightOverlay({ pieceId, fromRect, toRect, pieceSizePx })
+      }),
+    )
   }
 
   // Автоматично напредва хода след завършен move (или след roll без legal
-  // moves) — MOCK_TURN_SECONDS countdown UI все още не задейства реално
-  // turn timeout (extra roll on 6, capture extra roll, finish rules — извън
-  // Phase 2 обхвата), но explicit TURN_ADVANCED след всеки завършен ход
-  // прави prototype-а playable за демонстрация на последователни ходове от
-  // всичките 4 цвята (виж task-а т.8).
+  // moves). След TURN_ADVANCED веднага проверява дали новият активен играч
+  // е local (реален popup вече е показан по-рано, ако е нужно) и програмира
+  // следващия roll/move/bot-think deadline (т.16: bot turns не чакат човешки
+  // таймери — scheduleNextDeadline() решава това автоматично спрямо
+  // botControlledColors).
   function advanceTurn(): void {
     const result = dispatch({
       type: 'TURN_ADVANCED',
       color: engineState.activeColor,
       expectedTurnVersion: engineState.turnVersion,
     })
-    if (result.events.some((e) => e.type === 'turn_advanced')) {
-      turnStartedAt = Date.now()
+    // Local player-ът получи ход обратно (напр. следващия кръг стигна пак
+    // до него) — bot-takeover popup-ът вече не е релевантен за новия му ход,
+    // маха се автоматично (аналог на Belot: popup-ът изчезва щом играчът
+    // реално си върне контрола следващия път, когато е негов ред).
+    if (result.state.activeColor === localColor && !orchestrator.botControlledColors.has(localColor)) {
+      showBotTakeoverPopup = false
     }
+    // scheduleNextDeadline() ПРЕДИ render() — виж timer sync bug fix
+    // коментара в performRollSequence по-горе. advanceTurn() е ГЛАВНИЯТ
+    // call site на този проблем: вика се след ВСЕКИ завършен ход
+    // (performMoveSequence) и след turn_complete roll — т.е. точно моментът,
+    // в който следващият играч влиза в waiting_for_roll (или, за extra
+    // rolls, остава в awaiting_move_selection). Стария ред (render() first)
+    // би показал countdown-а на новия активен играч спрямо STARIYA
+    // turnStartedAt на PREDISHNIYA играч — визуален timer, стартиращ от
+    // грешна (обикновено много по-напреднала) позиция.
+    scheduleNextDeadline()
     render()
   }
 
@@ -385,9 +675,15 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   function destroy(): void {
     window.removeEventListener('resize', handleResize)
     if (resizeTimer) clearTimeout(resizeTimer)
+    clearScheduledTimers()
     diceResultOverlay.clearLanded()
   }
 
+  // scheduleNextDeadline() ПРЕДИ render() — same fix принцип за консистентност
+  // (виж advanceTurn/performRollSequence коментарите по-горе), макар тук
+  // ефектът да е незначителен (turnStartedAt вече е Date.now() от module
+  // init, разликата е под 1ms).
+  scheduleNextDeadline()
   render()
 
   return { destroy }
