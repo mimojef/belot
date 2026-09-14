@@ -50,7 +50,7 @@ import {
 import type { PlayerAccountRole } from '../../ui/overlays/renderPlayerProfilePopup'
 import type { ProfileAccessBlockCode, ProfileAccessBlockPopupState } from '../../ui/overlays/renderProfileAccessBlockPopup'
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
-import type { RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
+import { patchRegistrationVerificationCountdown, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import type { VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import type { LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
@@ -2291,6 +2291,7 @@ function createInitialState(): InternalLobbyFlowState {
       pendingRegistrationId: '',
       maskedEmail: '',
       expiresAt: '',
+      code: '',
       rememberMe: true,
       errorText: null,
       isSubmitting: false,
@@ -5727,6 +5728,14 @@ export function createLobbyFlowController(
       },
       onRegistrationVerificationSubmit: (code) => {
         void submitRegistrationVerificationCode(code)
+      },
+      onRegistrationVerificationCodeChange: (code) => {
+        // Само state sync (mirror на onRegistrationVerificationRememberMeChange
+        // по-долу) — НЕ вика render(). DOM input-ът вече отразява каквото
+        // потребителят е написал; тук само echo-ваме в state за защита срещу
+        // евентуален бъдещ full render (виж code doc коментара в
+        // renderRegistrationVerificationPopup.ts).
+        state.registrationVerification.code = code
       },
       onRegistrationVerificationResend: () => {
         void submitRegistrationVerificationResend()
@@ -14436,15 +14445,25 @@ export function createLobbyFlowController(
 
   function startRegistrationVerificationCountdown(): void {
     stopRegistrationVerificationCountdown()
-    // Периодичен render() tick, докато popup-ът е отворен — единствената
-    // причина е "живия" resend countdown текст (state.registrationVerification.nowMs
-    // се преизчислява при всеки render() от bridge-а в render() по-горе).
+    // ПРОИЗВОДСТВЕН BUG FIX: този interval преди викаше пълен render() всяка
+    // секунда, докато popup-ът е отворен — render() → renderLobby() →
+    // renderLobbyScreen() bake-ва renderRegistrationVerificationPopup(state)
+    // директно в root-ния nextRootHtml string (виж renderLobbyScreen.ts's
+    // skip-if-unchanged guard коментара), а countdown текста в него зависи
+    // от nowMs, значи nextRootHtml СЕ РАЗЛИЧАВАШЕ всяка секунда -> guard-ът
+    // никога не спираше rebuild-а -> root.innerHTML се пресъздаваше всяка
+    // секунда -> code input-ът (без value binding по онова време) се
+    // пресъздаваше празен, докато потребителят пишеше кода. Вместо render(),
+    // само patch-ваме resend бутона директно в DOM-а (mirror на
+    // syncLiveCountdownTargets-style targeted update pattern-а другаде в
+    // този файл) — input-ът никога не се докосва от този interval.
     registrationVerificationCountdownIntervalId = setInterval(() => {
       if (!state.registrationVerification.isOpen) {
         stopRegistrationVerificationCountdown()
         return
       }
-      render()
+      state.registrationVerification.nowMs = Date.now()
+      patchRegistrationVerificationCountdown(options.root, state.registrationVerification)
     }, 1000)
   }
 
@@ -14469,6 +14488,10 @@ export function createLobbyFlowController(
       pendingRegistrationId: pending.pendingRegistrationId,
       maskedEmail: pending.maskedEmail,
       expiresAt: pending.expiresAt,
+      // Нов pending registration -> чист code state (§9 self-review:
+      // старият въведен код от евентуален предишен pending НЕ трябва да
+      // "изтече" във visually различен pending registration).
+      code: '',
       rememberMe: true,
       errorText: pending.deliveryWarning ?? null,
       isSubmitting: false,
@@ -14489,6 +14512,7 @@ export function createLobbyFlowController(
       pendingRegistrationId: '',
       maskedEmail: '',
       expiresAt: '',
+      code: '',
       rememberMe: true,
       errorText: null,
       isSubmitting: false,

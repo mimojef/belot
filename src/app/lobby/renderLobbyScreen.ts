@@ -1247,6 +1247,7 @@ export type RenderLobbyScreenOptions = {
   onLoginSubmit: (email: string, password: string, rememberMe: boolean) => void
   onRegisterSubmit: (displayName: string, email: string, password: string, gender: 'male' | 'female' | null) => void
   onRegistrationVerificationSubmit: (code: string) => void
+  onRegistrationVerificationCodeChange: (code: string) => void
   onRegistrationVerificationResend: () => void
   onRegistrationVerificationChangeEmail: () => void
   onRegistrationVerificationRememberMeChange: (checked: boolean) => void
@@ -15644,6 +15645,7 @@ export function renderLobbyScreen(
 
   attachRegistrationVerificationPopupEventListeners(root, {
     onSubmitCode: options.onRegistrationVerificationSubmit,
+    onCodeChange: options.onRegistrationVerificationCodeChange,
     onResend: options.onRegistrationVerificationResend,
     onChangeEmail: options.onRegistrationVerificationChangeEmail,
     onRememberMeChange: options.onRegistrationVerificationRememberMeChange,

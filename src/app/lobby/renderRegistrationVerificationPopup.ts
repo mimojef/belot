@@ -6,6 +6,16 @@ export type RegistrationVerificationPopupState = {
   maskedEmail: string
   /** ISO string — 24-часовият pending registration прозорец, НИКОГА удължаван от resend (виж authStore.ts's register() doc коментар). Само за UI информация тук, самото enforcement е server-side. */
   expiresAt: string
+  /**
+   * Локално ехо на code input-а, синхронизирано от input event-а (виж
+   * attachRegistrationVerificationPopupEventListeners). Държим го в state и
+   * го bind-ваме обратно в template-а (value="...") — защита срещу КОЙТО И
+   * ДА Е full re-render на popup-а (не само countdown tick-а, виж
+   * patchRegistrationVerificationCountdown по-долу): дори ако друг,
+   * несвързан full render презапише root.innerHTML, вече въведените цифри
+   * оцеляват, защото са baked в самия HTML string, не само в DOM-а.
+   */
+  code: string
   rememberMe: boolean
   errorText: string | null
   isSubmitting: boolean
@@ -26,6 +36,7 @@ export type RegistrationVerificationPopupState = {
 
 export type RegistrationVerificationPopupOptions = {
   onSubmitCode: (code: string) => void
+  onCodeChange: (code: string) => void
   onResend: () => void
   onChangeEmail: () => void
   onRememberMeChange: (checked: boolean) => void
@@ -70,9 +81,13 @@ function renderCodeForm(state: RegistrationVerificationPopupState): string {
           pattern="[0-9]*"
           autocomplete="one-time-code"
           maxlength="6"
+          value="${escapeHtml(state.code)}"
           style="width:100%;box-sizing:border-box;height:52px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:28px;font-weight:900;letter-spacing:10px;text-align:center;outline:none;"
         >
       </label>
+      <div style="text-align:center;font-size:12px;font-weight:600;color:rgba(255,255,255,0.5);margin-top:-6px;">
+        Кодът е валиден 24 часа.
+      </div>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;font-weight:700;color:rgba(255,255,255,0.78);cursor:pointer;justify-content:center;">
         <input type="checkbox" name="rememberMe" data-registration-verification-remember-me="1" ${state.rememberMe ? 'checked' : ''} style="width:16px;height:16px;cursor:pointer;">
         Запомни ме на това устройство
@@ -143,6 +158,39 @@ export function renderRegistrationVerificationPopup(state: RegistrationVerificat
   `
 }
 
+/**
+ * Targeted DOM patch за resend countdown-а — НЕ full render() (root cause на
+ * production bug-а "въведените цифри веднага изчезват": countdown-ът тик-ваше
+ * веднъж в секунда чрез пълен render(), което пресъздаваше ЦЕЛИЯ
+ * root.innerHTML, включително code input-а, с празен value). Извиква се от
+ * контролера ВМЕСТО render() при всеки interval tick, докато popup-ът е
+ * отворен в 'code' режим — пипа само resend бутона, input-ът никога не се
+ * докосва (нито се пресъздава, нито губи focus/caret).
+ */
+export function patchRegistrationVerificationCountdown(
+  root: ParentNode,
+  state: RegistrationVerificationPopupState,
+): void {
+  if (!state.isOpen || state.mode !== 'code') return
+
+  const resendButton = root.querySelector<HTMLButtonElement>('[data-registration-verification-resend="1"]')
+  if (!resendButton) return
+
+  const secondsRemaining = formatSecondsRemaining(state.resendAvailableAtMs, state.nowMs)
+  const resendDisabled = state.isResending || secondsRemaining > 0
+  const resendLabel = state.isResending
+    ? 'Изпращане...'
+    : secondsRemaining > 0
+    ? `Изпрати отново (${secondsRemaining}с)`
+    : 'Изпрати отново'
+
+  resendButton.disabled = resendDisabled
+  resendButton.textContent = `Не получихте код? ${resendLabel}`
+  resendButton.style.color = resendDisabled ? 'rgba(255,255,255,0.4)' : 'rgba(212,165,32,0.85)'
+  resendButton.style.cursor = resendDisabled ? 'default' : 'pointer'
+  resendButton.style.textDecoration = resendDisabled ? 'none' : 'underline'
+}
+
 function sanitizeCodeInput(input: HTMLInputElement): void {
   const digitsOnly = input.value.replace(/[^0-9]/g, '').slice(0, 6)
   if (digitsOnly !== input.value) {
@@ -170,9 +218,17 @@ export function attachRegistrationVerificationPopupEventListeners(
   const codeInput = root.querySelector<HTMLInputElement>('[data-registration-verification-code-input="1"]')
   if (codeInput) {
     // Auto-focus — потребителят обикновено идва право от email клиента,
-    // директно готов да въведе кода.
+    // директно готов да въведе кода. Caret отива в края на вече baked-натата
+    // value (виж state.code doc коментара) — ако ТОЗИ rebuild е resume след
+    // друг legitimate full render с вече въведени цифри, потребителят
+    // продължава да пише от там, откъдето е спрял, вместо caret-ът да скочи
+    // в началото.
     codeInput.focus()
-    codeInput.addEventListener('input', () => sanitizeCodeInput(codeInput))
+    codeInput.setSelectionRange(codeInput.value.length, codeInput.value.length)
+    codeInput.addEventListener('input', () => {
+      sanitizeCodeInput(codeInput)
+      options.onCodeChange(codeInput.value)
+    })
     // Paste на 6 digits (spec §"UI / UX DETAILS") — 'input' event вече
     // handle-ва paste-натия текст еднакво с типирания (browser paste
     // тригерва 'input'), sanitizeCodeInput вече го подрязва до 6 цифри.
