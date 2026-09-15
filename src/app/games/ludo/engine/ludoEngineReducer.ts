@@ -81,6 +81,13 @@ function handleRollResolved(
     diceValue: action.value,
     legalMoves,
     turnVersion: state.turnVersion + 1,
+    // dice===6 печели extra roll (task-а т.10) НЕЗАВИСИМО от това дали има
+    // legal moves за него — "6 + zero legal moves" пак дава extra roll на
+    // СЪЩИЯ играч (task-а т.11/M26), не преминава към следващия. Ако вече
+    // имаше pendingExtraRoll=true от преди (не би трябвало да се случи тук —
+    // ROLL_RESOLVED е нов ход, предният TURN_ADVANCED вече consume-на го),
+    // просто презаписваме с текущия dice резултат.
+    pendingExtraRoll: action.value === 6,
   }
 
   const events: LudoEngineEvent[] = [{ type: 'dice_accepted', color: action.color, value: action.value }]
@@ -100,21 +107,17 @@ function handleMoveRequested(
 
   const move = state.legalMoves.find((m) => m.color === action.color && m.slot === action.slot)
   if (!move) return rejected(state)
-  if (move.targetPosition.kind !== 'track') return rejected(state)
 
   const movingPiece = state.pieces.find((p) => p.color === action.color && p.slot === action.slot)
-  if (!movingPiece || movingPiece.position.kind !== 'track') return rejected(state)
-
-  const fromTrackIndex = movingPiece.position.trackIndex
-  const toTrackIndex = move.targetPosition.trackIndex
+  if (!movingPiece) return rejected(state)
 
   const events: LudoEngineEvent[] = [
     {
       type: 'piece_moved',
       color: action.color,
       slot: action.slot,
-      fromTrackIndex,
-      toTrackIndex,
+      fromPosition: movingPiece.position,
+      toPosition: move.targetPosition,
     },
   ]
 
@@ -128,8 +131,12 @@ function handleMoveRequested(
     return piece
   })
 
-  if (move.isCapture) {
-    const victims = findLudoEngineCaptureVictims(nextPieces, toTrackIndex, action.color)
+  // Capture е възможен само при target.kind==='track' (move.isCapture вече
+  // го гарантира — computeLudoEngineLegalMoves никога не маркира finish-lane
+  // landing като capture, finish lane-ът е private, виж task-а т.6/т.8).
+  let capturedSomething = false
+  if (move.isCapture && move.targetPosition.kind === 'track') {
+    const victims = findLudoEngineCaptureVictims(nextPieces, move.targetPosition.trackIndex, action.color)
     if (victims.length > 0) {
       nextPieces = applyLudoEngineCaptureToHome(nextPieces, victims)
       // Директно canonical id-та на ВСИЧКИ victims, независимо от колко
@@ -138,6 +145,7 @@ function handleMoveRequested(
       // (виж Phase 2 task-а т.2).
       const capturedPieceIds = victims.map((v) => ludoGamePieceId(v))
       events.push({ type: 'pieces_captured', capturedPieceIds })
+      capturedSomething = true
     }
   }
 
@@ -147,6 +155,10 @@ function handleMoveRequested(
     turnPhase: 'turn_complete',
     legalMoves: [],
     turnVersion: state.turnVersion + 1,
+    // Successful capture печели extra roll (task-а т.10) — OR-нато с вече
+    // съществуващ pendingExtraRoll от самия dice===6 (handleRollResolved),
+    // НЕ отделно натрупване: "6 + capture" остава точно ЕДИН extra roll.
+    pendingExtraRoll: state.pendingExtraRoll || capturedSomething,
   }
 
   return { state: nextState, events }
@@ -159,6 +171,26 @@ function handleTurnAdvanced(
   if (!isActionAuthorized(state, action)) return rejected(state)
   if (state.turnPhase !== 'turn_complete') return rejected(state)
 
+  // Extra roll (task-а т.10/т.11) — ЕДИНСТВЕНАТА decision точка "same color
+  // отново" vs "next color по canonical ред". pendingExtraRoll вече encode-ва
+  // dice===6 И/ИЛИ successful capture (OR-нато при handleRollResolved/
+  // handleMoveRequested, виж техните коментари) — тук само го consume-ваме
+  // (винаги reset на false в nextState, независимо кой branch).
+  if (state.pendingExtraRoll) {
+    const nextState: LudoGameState = {
+      ...state,
+      turnPhase: 'waiting_for_roll',
+      diceValue: null,
+      legalMoves: [],
+      turnVersion: state.turnVersion + 1,
+      pendingExtraRoll: false,
+    }
+    return {
+      state: nextState,
+      events: [{ type: 'turn_advanced', previousColor: state.activeColor, nextColor: state.activeColor }],
+    }
+  }
+
   const currentIndex = state.turnOrder.indexOf(state.activeColor)
   const nextColor = state.turnOrder[(currentIndex + 1) % state.turnOrder.length]!
 
@@ -169,6 +201,7 @@ function handleTurnAdvanced(
     diceValue: null,
     legalMoves: [],
     turnVersion: state.turnVersion + 1,
+    pendingExtraRoll: false,
   }
 
   return {

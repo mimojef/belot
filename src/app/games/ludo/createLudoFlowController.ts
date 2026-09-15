@@ -77,6 +77,12 @@ const PHRASE_MOCK_ITEMS = ['Браво!', 'Добър ход!', 'Late удар!'
 export interface LudoFlowControllerOptions {
   root: HTMLElement
   onExit: () => void
+  // Test/dev seeding seam (Phase 3B browser verification, виж task-а т.21:
+  // "temporary seeded/dev harness ако е нужно, не променяй permanently
+  // normal initial game state само за теста") — по подразбиране липсва,
+  // controller-ът вика createLudoEngineInitialState() точно както преди.
+  // Production call site (createLobbyFlowController.ts) никога не я подава.
+  initialState?: LudoGameState
 }
 
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
@@ -89,7 +95,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // activeColor/turnPhase/diceValue/legalMoves. Мутира се ИЗКЛЮЧИТЕЛНО
   // чрез dispatch() -> reduceLudoGame(); контролерът никога не пипа тези
   // полета directno.
-  let engineState: LudoGameState = createLudoEngineInitialState()
+  let engineState: LudoGameState = options.initialState ?? createLudoEngineInitialState()
 
   // Orchestrator state (т.2: PRESENTATION/ORCHESTRATION) — bot-controlled
   // flag-ове + roll/move deadlines. Мутира се ИЗКЛЮЧИТЕЛНО чрез
@@ -535,8 +541,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // roll, move ако вече има legal moves. Викана от bot think-delay timer-а
   // (scheduleNextDeadline) при нормален bot ход, и рекурсивно продължава
   // сама себе си чрез render()->scheduleNextDeadline() цикъла за extra
-  // rolls (Phase 3B, все още engine-ът винаги advance-ва след move в Phase
-  // 3A — виж handleTurnAdvanced в reducer-а).
+  // rolls (Phase 3B: handleTurnAdvanced в reducer-а вече МОЖЕ да остави
+  // activeColor същия, ако pendingExtraRoll е true — advanceTurn() пак
+  // вика scheduleNextDeadline(), който за bot-controlled цвят пак
+  // програмира performBotTurnStep() след LUDO_BOT_THINK_DELAY_MS, затова
+  // bot-ът естествено продължава да хвърля/мести без никаква допълнителна
+  // логика тук).
   async function performBotTurnStep(): Promise<void> {
     if (isAnimatingMove) return
     const color = engineState.activeColor
@@ -647,17 +657,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     const capturedEvent = moveResult.events.find((e) => e.type === 'pieces_captured')
     const capturedPieceIds = capturedEvent && capturedEvent.type === 'pieces_captured' ? capturedEvent.capturedPieceIds : []
 
-    if (move.targetPosition.kind !== 'track') {
-      isAnimatingMove = false
-      // scheduleNextDeadline() ПРЕДИ render() — виж timer sync bug fix
-      // коментара в performRollSequence по-горе, същия принцип: engine-ът
-      // вече е в новата фаза (turnPhase вече напреднал от MOVE_REQUESTED
-      // dispatch-а по-горе), turnStartedAt трябва да е коректен ПРЕДИ DOM-ът
-      // да покаже countdown-а за нея.
-      scheduleNextDeadline()
-      render()
-      return
-    }
+    // Phase 3B (виж task-а т.12): buildLudoMoveRoute вече покрива И четирите
+    // canonical прехода (home->track/track->track/track->finish/finish->
+    // finish, виж board/ludoMoveRoute.ts) — вече няма нужда от отделен
+    // early-return за "target.kind !== 'track'" (Phase 3A special case);
+    // route loop-ът по-долу работи еднакво за всички.
     const targetCellId = ludoEnginePositionToCellId(move.targetPosition, color)
 
     // Capture presentation buffer (виж task-а и коментара при

@@ -1,12 +1,54 @@
-// Pure legal-move изчисление за engine-а — логически идентично на
-// board/computeLudoLegalMoves.ts (target = (trackIndex + dice) % LUDO_TRACK_LENGTH,
-// capture само при точно съвпадение на target-а), но работи с
-// LudoGamePiece/LudoPiecePosition вместо string cell id-та. Умишлено
-// МИНИМАЛНО за Phase 1 (виж task-а): само пионки вече на track-а. Изкарване
-// от home, finish lane, exact-finish, extra ход при 6 — НЕ тук.
+// Pure legal-move изчисление за engine-а — Phase 3B "REAL MOVEMENT RULES"
+// (виж task-а). Заменя Phase 1's минимална track-only версия: сега покрива
+// home exit (само при dice===6), пълния 56-cell shared track (canonical
+// progress спрямо СОБСТВЕНИЯ start на пионката, виж ludoEngineStepsFromStart
+// в ludoEngineGeometry.ts), вход и движение във finish lane, exact finish и
+// overshoot-като-illegal.
+//
+// Canonical progress модел (task-а т.2): всяка track пионка държи absolute
+// trackIndex (0-55), но legal-move математиката винаги минава първо през
+// stepsFromStart = ludoEngineStepsFromStart(color, trackIndex) — числото,
+// което ЕДНОЗНАЧНО отговаря "колко напреднала е тази пионка спрямо
+// собствения си старт", независимо от wrap-а на absolute index-а. "Абсолютни
+// стъпки" по-долу означава: 0..55 = все още на shared track-а (56 клетки
+// общо), 56..61 = вече във finish lane-а (finishIndex = totalSteps - 56,
+// 0..5), >61 = overshoot (illegal, пионката просто няма move за този dice).
 
-import { ludoEngineAdvanceTrackIndex } from './ludoEngineGeometry'
-import type { LudoColor, LudoDiceValue, LudoGamePiece, LudoLegalMove } from './ludoEngineTypes'
+import { ludoEngineAdvanceTrackIndex, ludoEngineStepsFromStart, LUDO_ENGINE_START_INDEX, LUDO_ENGINE_TRACK_LENGTH, LUDO_ENGINE_FINISH_LENGTH } from './ludoEngineGeometry'
+import type { LudoColor, LudoDiceValue, LudoGamePiece, LudoLegalMove, LudoPiecePosition } from './ludoEngineTypes'
+
+// Опитва да изчисли target позицията за ЕДНА пионка на track-а — null ако
+// dice-ът overshoot-ва (нито валидна track, нито валидна finish клетка).
+function computeTrackMoveTarget(color: LudoColor, trackIndex: number, diceValue: LudoDiceValue): LudoPiecePosition | null {
+  const stepsFromStart = ludoEngineStepsFromStart(color, trackIndex)
+  const totalSteps = stepsFromStart + diceValue
+
+  if (totalSteps <= LUDO_ENGINE_TRACK_LENGTH - 1) {
+    // Все още на shared track-а — нов absolute index, derive-нат от
+    // СОБСТВЕНИЯ start на цвета (никога directно "trackIndex + dice", за да
+    // остане wrap-ът винаги коректен спрямо canonical progress-а, не спрямо
+    // суровия absolute номер).
+    return { kind: 'track', trackIndex: ludoEngineAdvanceTrackIndex(LUDO_ENGINE_START_INDEX[color], totalSteps) }
+  }
+
+  const finishIndex = totalSteps - LUDO_ENGINE_TRACK_LENGTH
+  if (finishIndex <= LUDO_ENGINE_FINISH_LENGTH - 1) {
+    return { kind: 'finish', finishIndex }
+  }
+
+  // Overshoot — нито target track клетка (вече отвъд пълната обиколка),
+  // нито валиден finish index (отвъд finish-5). Не clamp-ваме, не местим
+  // "доколкото може" — просто НЯМА legal move за тази пионка с този dice.
+  return null
+}
+
+// Опитва target за пионка ВЕЧЕ във finish lane-а — само напред, само до
+// finishIndex 5 (exact finish). Overshoot (finishIndex+dice > 5) -> null.
+function computeFinishMoveTarget(finishIndex: number, diceValue: LudoDiceValue): LudoPiecePosition | null {
+  const nextFinishIndex = finishIndex + diceValue
+  if (nextFinishIndex > LUDO_ENGINE_FINISH_LENGTH - 1) return null
+  return { kind: 'finish', finishIndex: nextFinishIndex }
+}
 
 export function computeLudoEngineLegalMoves(
   pieces: readonly LudoGamePiece[],
@@ -17,23 +59,44 @@ export function computeLudoEngineLegalMoves(
 
   for (const piece of pieces) {
     if (piece.color !== activeColor) continue
-    if (piece.position.kind !== 'track') continue
 
-    const targetIndex = ludoEngineAdvanceTrackIndex(piece.position.trackIndex, diceValue)
+    let targetPosition: LudoPiecePosition | null = null
 
-    // Capture само ако противникова пионка стои точно на изчисления target
-    // (не някъде по маршрута преди него) — виж computeLudoLegalMoves.ts.
-    const isCapture = pieces.some(
-      (other) =>
-        other.color !== activeColor &&
-        other.position.kind === 'track' &&
-        other.position.trackIndex === targetIndex,
-    )
+    if (piece.position.kind === 'home') {
+      // Home exit — САМО при dice===6 (task-а т.3). Не forced: ако друга
+      // legal-move пионка съществува, човекът избира свободно кое да мести
+      // измежду всички legal moves (тук просто добавяме home-exit-a като
+      // ОЩЕ една опция в масива, не единствена/приоритетна).
+      if (diceValue === 6) {
+        targetPosition = { kind: 'track', trackIndex: LUDO_ENGINE_START_INDEX[piece.color] }
+      }
+    } else if (piece.position.kind === 'track') {
+      targetPosition = computeTrackMoveTarget(piece.color, piece.position.trackIndex, diceValue)
+    } else {
+      // piece.position.kind === 'finish' — private lane, движение само напред.
+      targetPosition = computeFinishMoveTarget(piece.position.finishIndex, diceValue)
+    }
+
+    if (targetPosition === null) continue
+
+    // Capture е възможен САМО при landing точно на SHARED TRACK клетка —
+    // finish lane-ът е private (task-а т.6/т.8), там isCapture винаги false.
+    // (Извеждаме trackIndex-а в отделна const ПРЕДИ closure-а по-долу — `let
+    // targetPosition` narrowing не се пази вътре в pieces.some() callback-а.)
+    const captureTargetTrackIndex = targetPosition.kind === 'track' ? targetPosition.trackIndex : null
+    const isCapture =
+      captureTargetTrackIndex !== null &&
+      pieces.some(
+        (other) =>
+          other.color !== activeColor &&
+          other.position.kind === 'track' &&
+          other.position.trackIndex === captureTargetTrackIndex,
+      )
 
     moves.push({
       color: piece.color,
       slot: piece.slot,
-      targetPosition: { kind: 'track', trackIndex: targetIndex },
+      targetPosition,
       isCapture,
     })
   }

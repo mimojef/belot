@@ -57,5 +57,6 @@ export function createLudoEngineInitialState(): LudoGameState {
     pieces: createLudoEngineInitialPieces(),
     status: 'in_progress',
     turnVersion: 0,
+    pendingExtraRoll: false,
   }
 }

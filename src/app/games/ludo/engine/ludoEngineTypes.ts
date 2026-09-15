@@ -81,4 +81,13 @@ export interface LudoGameState {
   // Increment-ва се при всяка успешна мутация — защита срещу stale actions
   // (виж reduceLudoGame). Не е "turn number"; расте и в рамките на един ход.
   turnVersion: number
+  // Phase 3B extra-roll flag — true, ако ТЕКУЩИЯТ завършен roll/move печели
+  // допълнително хвърляне за СЪЩИЯ activeColor (dice===6 и/или successful
+  // capture, виж handleRollResolved/handleMoveRequested в ludoEngineReducer.ts).
+  // Явно boolean OR, не брояч: "6 + capture" дава точно ЕДИН extra roll, не
+  // два (виж task-а т.10). Consumed/reset от handleTurnAdvanced — TURN_ADVANCED
+  // остава ЕДИНСТВЕНАТА decision точка "same color отново" vs "next color",
+  // никаква нова turnPhase стойност не е нужна за това (виж task-а header
+  // коментара "НЕ добавяй нови фази без причина").
+  pendingExtraRoll: boolean
 }

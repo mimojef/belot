@@ -3,17 +3,22 @@
 // анимация. Минимален event foundation, достатъчен за prototype integration,
 // не пълен gameplay event set.
 
-import type { LudoColor, LudoLegalMove, LudoPieceId, LudoPieceSlot } from './ludoEngineTypes'
+import type { LudoColor, LudoLegalMove, LudoPieceId, LudoPiecePosition, LudoPieceSlot } from './ludoEngineTypes'
 
 export type LudoEngineEvent =
   | { type: 'dice_accepted'; color: LudoColor; value: number }
   | { type: 'legal_moves_available'; color: LudoColor; moves: readonly LudoLegalMove[] }
   | {
+      // Phase 3B (виж task-а т.2/т.12): fromPosition/toPosition вместо
+      // fromTrackIndex/toTrackIndex numbers — движение вече покрива home->
+      // track/track->finish/finish->finish преходи, не само track->track,
+      // затова event-ът носи пълната discriminated union позиция, не просто
+      // absolute track числа (които нямат смисъл за home/finish).
       type: 'piece_moved'
       color: LudoColor
       slot: LudoPieceSlot
-      fromTrackIndex: number
-      toTrackIndex: number
+      fromPosition: LudoPiecePosition
+      toPosition: LudoPiecePosition
     }
   // capturedPieceIds носи directно canonical id-та на ВСИЧКИ captured
   // pieces (напр. "blue-1", "blue-2") — UI/controller НЕ трябва да извежда
