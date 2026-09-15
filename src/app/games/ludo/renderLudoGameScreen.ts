@@ -182,6 +182,16 @@ export interface LudoGameScreenState {
   // controller-а, не се преизчислява тук (т.19: "запази текущата
   // player-card timer визуализация", само параметрите се различават).
   turnCountdownMs: number
+  // Разделя HUMAN REACTION DEADLINE (10s roll / 15s move — реален player
+  // countdown, трябва да се вижда като намаляващ timer) от BOT THINK DELAY
+  // presentation-detail (~700ms LUDO_BOT_THINK_DELAY_MS — вътрешна пауза
+  // преди bot action, НЕ player-facing timeout). true само когато активният
+  // играч реално е human, чакащ roll/move decision (виж
+  // createLudoFlowController.ts::currentScreenState() —
+  // resolveLudoPendingDeadlineKind(...) !== 'none'). Когато false, player
+  // панелът показва static (non-animated) countdown presentation — активният
+  // играч индикатор остава, но не "изгаря" визуално за bot-ови 700ms.
+  isHumanCountdownActive: boolean
   isDiceRolling: boolean
   canRollDice: boolean
   turnSecondsLeft: number
@@ -244,7 +254,16 @@ function renderPlayerPanelSlot(
     // — точно тази по-широка връзка беше root cause-ът на бъга.
     shouldRotateArrows: isActive && state.turnPhase === 'waiting_for_roll',
   }
-  return renderLudoPlayerPanel(state.players[color], state.pieces, isActive, compact, turnElapsedMs, diceControl, state.turnCountdownMs)
+  return renderLudoPlayerPanel(
+    state.players[color],
+    state.pieces,
+    isActive,
+    compact,
+    turnElapsedMs,
+    diceControl,
+    state.turnCountdownMs,
+    isActive && state.isHumanCountdownActive,
+  )
 }
 
 export function renderLudoGameScreen(state: LudoGameScreenState): string {

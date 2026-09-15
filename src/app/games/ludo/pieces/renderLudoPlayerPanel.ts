@@ -105,6 +105,15 @@ export function renderLudoPlayerPanel(
   // подадена от orchestrator-а спрямо canonical turnPhase. Default пази
   // обратна съвместимост за евентуални call sites без нов параметър.
   turnCountdownMs = DEFAULT_TURN_COUNTDOWN_MS,
+  // Разделя ДВЕ различни семантики (виж task-а "bot timer presentation" и
+  // createLudoFlowController.ts::currentScreenState() коментара): дали
+  // turnCountdownMs представлява РЕАЛЕН human reaction deadline (10s roll /
+  // 15s move — трябва да се вижда като намаляващ countdown), или bot think
+  // delay presentation-detail (~700ms LUDO_BOT_THINK_DELAY_MS — bot-ът
+  // действа след толкова, но това НЕ е player-facing timeout и не трябва да
+  // изглежда като бързо изтичащ timer). default true запазва старото
+  // поведение за евентуални call sites без новия параметър.
+  isCountdownActive = true,
 ): string {
   void pieces
   const hex = LUDO_COLOR_HEX[player.color]
@@ -236,9 +245,13 @@ export function renderLudoPlayerPanel(
               pathLength="100"
               style="
                 stroke-dasharray:100;
+                ${isCountdownActive ? `
                 will-change:stroke-dashoffset;
                 animation:ludo-seat-countdown-ring-drain ${turnCountdownMs}ms linear forwards;
                 animation-delay:-${clampedTurnDelayMs(turnElapsedMs, turnCountdownMs)}ms;
+                ` : `
+                stroke-dashoffset:0;
+                `}
               "
             ></path>
           </svg>
@@ -259,9 +272,13 @@ export function renderLudoPlayerPanel(
               background:linear-gradient(90deg, rgba(245,187,55,0.98) 0%, rgba(255,166,0,0.98) 100%);
               box-shadow:inset 0 1px 0 rgba(255,255,255,0.22), 0 0 10px rgba(245,187,55,0.26);
               transform-origin:left center;
+              ${isCountdownActive ? `
               will-change:transform;
               animation:ludo-seat-countdown-drain ${turnCountdownMs}ms linear forwards;
               animation-delay:-${clampedTurnDelayMs(turnElapsedMs, turnCountdownMs)}ms;
+              ` : `
+              transform:scaleX(1);
+              `}
             "
           ></div>
         ` : ''}

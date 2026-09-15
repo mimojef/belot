@@ -48,6 +48,26 @@
 //       destination точки за flight route-а, за всеки local цвят (разширява
 //       C7 за explicit origin!=destination и стабилност).
 //
+// Разширено (виж последващия task — "кратък impact/explosion burst преди
+// victim flight", source review на playLudoCaptureImpactOverlay.ts wiring-а
+// в animateCapture; самият overlay е чист DOM/CSS presentation модул без
+// engine достъп, browser-verified manual — виж отчета):
+//   I1. impact overlay call идва СЛЕД shake wait, все в рамките на
+//       animateCapture (доказва "attacker reaches target" вече се е
+//       случило, преди route loop-а идва по-рано в performMoveSequence).
+//   I2. impact overlay call идва ПРЕДИ representativeEl.visibility='hidden'
+//       И преди victim flight overlay call-а — burst-ът се вижда върху
+//       все още видимия victim, преди той да се скрие/полети.
+//   I3. animateCapture вика playLudoCaptureImpactOverlay ТОЧНО ВЕДНЪЖ (не
+//       веднъж на captured piece) — stack capture (>1 victim) не пуска N
+//       overlays.
+//   I4. next turn/bot action (advanceTurn) все още се вика едва СЛЕД
+//       await animateCapture() (разширява C9/F5 — новият await не чупи
+//       съществуващия sequencing guard).
+//   I5. playLudoCaptureImpactOverlay.ts няма никакъв import от engine/
+//       orchestrator/dispatch модули — чист presentation, без game-state
+//       mutation capability дори structурно.
+//
 // Изход: process.exit(0) при успех, process.exit(1) с описание на грешката.
 
 import { readFileSync } from 'node:fs'
@@ -67,6 +87,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 function fail(message: string): never {
   console.error(`[checkLudoCapturePresentation] FAIL: ${message}`)
   process.exit(1)
+}
+
+// Нормализира CRLF -> LF при четене — Windows git checkout (core.autocrlf)
+// може да конвертира source файловете в CRLF в working tree, докато
+// source-review regex-ите по-долу очакват bare \n. Без тази нормализация
+// source-review тестовете стават чупливи спрямо line-ending конвенцията на
+// checkout-а, независимо от реалната коректност на кода.
+function readSourceFile(relativePath: string): string {
+  return readFileSync(join(__dirname, relativePath), 'utf8').replace(/\r\n/g, '\n')
 }
 
 function main(): void {
@@ -194,10 +223,7 @@ function main(): void {
 
   // --- C9: next bot/turn action never starts before capture presentation completion (source review) ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     // advanceTurn() (which calls scheduleNextDeadline(), the ONLY place that
     // arms the next bot-think/roll/move setTimeout) must appear AFTER the
     // `await animateCapture(...)` call in performMoveSequence's source order.
@@ -216,10 +242,7 @@ function main(): void {
 
   // --- F1: victim flight starts only AFTER attacker reaches target (source order in animateCapture) ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const moveSeqMatch = controllerSrc.match(/async function performMoveSequence[\s\S]*?\n  \}\n/)
     if (!moveSeqMatch) fail('F1: could not locate performMoveSequence function body')
     const body = moveSeqMatch[0]
@@ -230,10 +253,7 @@ function main(): void {
     if (!(routeLoopEndIndex < animateCaptureCallIndex)) {
       fail('F1: animateCapture() (which contains the victim flight) must be called AFTER the attacker route loop, i.e. after attacker reaches target')
     }
-    const animateCaptureSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const animateCaptureSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const fnMatch = animateCaptureSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)
     if (!fnMatch) fail('F1: could not locate animateCapture function body')
     const fnBody = fnMatch[0]
@@ -249,10 +269,7 @@ function main(): void {
 
   // --- F2: flight origin = target cell (representative DOM token measured at the target) ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const fnMatch = controllerSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)
     if (!fnMatch) fail('F2: could not locate animateCapture function body')
     const fnBody = fnMatch[0]
@@ -268,10 +285,7 @@ function main(): void {
 
   // --- F3: flight destination = exact permanent home slot for the given piece id ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const fnMatch = controllerSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)
     if (!fnMatch) fail('F3: could not locate animateCapture function body')
     const fnBody = fnMatch[0]
@@ -286,10 +300,7 @@ function main(): void {
 
   // --- F4: presentation override is not cleared before flight completion ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const moveSeqMatch = controllerSrc.match(/async function performMoveSequence[\s\S]*?\n  \}\n/)
     if (!moveSeqMatch) fail('F4: could not locate performMoveSequence function body')
     const body = moveSeqMatch[0]
@@ -305,10 +316,7 @@ function main(): void {
 
   // --- F5: next turn does not start before flight completion (same await chain as F4/C9, now covers the flight too) ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const moveSeqMatch = controllerSrc.match(/async function performMoveSequence[\s\S]*?\n  \}\n/)
     if (!moveSeqMatch) fail('F5: could not locate performMoveSequence function body')
     const body = moveSeqMatch[0]
@@ -357,6 +365,93 @@ function main(): void {
       }
     }
     console.log('[checkLudoCapturePresentation] F7 OK — viewer perspective yields correct, distinct rendered origin/destination for the flight route, for every local color and every stack victim.')
+  }
+
+  // --- I1: impact overlay call comes after the shake wait, still inside animateCapture ---
+  {
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
+    const fnMatch = controllerSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)
+    if (!fnMatch) fail('I1: could not locate animateCapture function body')
+    const fnBody = fnMatch[0]
+    const shakeWaitIndex = fnBody.indexOf('await wait(IMPACT_ANIMATION_MS)')
+    const impactCallIndex = fnBody.indexOf('await playLudoCaptureImpactOverlay(')
+    if (shakeWaitIndex === -1) fail('I1: animateCapture must still await the shake wait (IMPACT_ANIMATION_MS)')
+    if (impactCallIndex === -1) fail('I1: animateCapture must call playLudoCaptureImpactOverlay')
+    if (!(shakeWaitIndex < impactCallIndex)) {
+      fail('I1: impact burst must start AFTER the shake wait completes (i.e. after attacker has reached target and shake has played), never before')
+    }
+    console.log('[checkLudoCapturePresentation] I1 OK — impact burst starts only after the shake wait (attacker already at target) completes.')
+  }
+
+  // --- I2: impact overlay call comes before victim is hidden and before the flight overlay call ---
+  {
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
+    const fnMatch = controllerSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)
+    if (!fnMatch) fail('I2: could not locate animateCapture function body')
+    const fnBody = fnMatch[0]
+    const impactCallIndex = fnBody.indexOf('await playLudoCaptureImpactOverlay(')
+    const hideVictimIndex = fnBody.indexOf("representativeEl.style.visibility = 'hidden'")
+    const flightCallIndex = fnBody.indexOf('playLudoCaptureFlightOverlay(')
+    if (impactCallIndex === -1) fail('I2: expected playLudoCaptureImpactOverlay call')
+    if (hideVictimIndex === -1) fail('I2: expected representativeEl visibility=hidden step')
+    if (flightCallIndex === -1) fail('I2: expected playLudoCaptureFlightOverlay call')
+    if (!(impactCallIndex < hideVictimIndex && hideVictimIndex < flightCallIndex)) {
+      fail('I2: expected order impact burst -> victim hidden -> victim flight, got a different source order')
+    }
+    console.log('[checkLudoCapturePresentation] I2 OK — impact burst plays while victim is still visible, before it is hidden and before it flies home.')
+  }
+
+  // --- I3: animateCapture calls the impact overlay exactly once, regardless of stack size ---
+  {
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
+    const fnMatch = controllerSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)
+    if (!fnMatch) fail('I3: could not locate animateCapture function body')
+    const fnBody = fnMatch[0]
+    const impactCallMatches = fnBody.match(/playLudoCaptureImpactOverlay\(/g) ?? []
+    if (impactCallMatches.length !== 1) {
+      fail(`I3: expected exactly ONE playLudoCaptureImpactOverlay call site in animateCapture (stack capture must not trigger N bursts), found ${impactCallMatches.length}`)
+    }
+    // The single call must sit OUTSIDE the per-victim Promise.all(...map(...))
+    // loop used for flight overlays — i.e. before that loop starts, not once
+    // per captured id.
+    const promiseAllIndex = fnBody.indexOf('Promise.all(')
+    const impactCallIndex = fnBody.indexOf('await playLudoCaptureImpactOverlay(')
+    if (promiseAllIndex === -1) fail('I3: expected the per-victim Promise.all(...) flight loop')
+    if (!(impactCallIndex < promiseAllIndex)) {
+      fail('I3: the single impact burst call must happen BEFORE the per-victim flight loop, not inside/after it')
+    }
+    console.log('[checkLudoCapturePresentation] I3 OK — exactly one impact burst per capture, regardless of stack size (called before the per-victim flight loop).')
+  }
+
+  // --- I4: next turn/bot action still only starts after animateCapture (impact + flight) fully completes ---
+  {
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
+    const moveSeqMatch = controllerSrc.match(/async function performMoveSequence[\s\S]*?\n  \}\n/)
+    if (!moveSeqMatch) fail('I4: could not locate performMoveSequence function body')
+    const body = moveSeqMatch[0]
+    const animateCaptureIndex = body.indexOf('await animateCapture(')
+    const advanceTurnIndex = body.indexOf('advanceTurn()')
+    if (animateCaptureIndex === -1) fail('I4: performMoveSequence must call animateCapture()')
+    if (advanceTurnIndex === -1) fail('I4: performMoveSequence must call advanceTurn()')
+    if (!(animateCaptureIndex < advanceTurnIndex)) {
+      fail('I4: advanceTurn() must still run only AFTER the awaited animateCapture() (which now includes shake + impact burst + flight) completes')
+    }
+    console.log('[checkLudoCapturePresentation] I4 OK — next turn/bot action still starts only after the full impact+flight capture presentation completes.')
+  }
+
+  // --- I5: playLudoCaptureImpactOverlay.ts has no engine/orchestrator/dispatch imports (pure presentation) ---
+  {
+    const overlaySrc = readSourceFile('../src/app/games/ludo/pieces/playLudoCaptureImpactOverlay.ts')
+    const importLines = overlaySrc.match(/^import .*/gm) ?? []
+    for (const line of importLines) {
+      if (/\/engine\/|\/orchestrator\/|ludoEngineReducer|dispatch/i.test(line)) {
+        fail(`I5: playLudoCaptureImpactOverlay.ts must not import engine/orchestrator/dispatch modules, found: ${line}`)
+      }
+    }
+    if (/engineState|dispatch\(|reduceLudoGame/.test(overlaySrc)) {
+      fail('I5: playLudoCaptureImpactOverlay.ts must not reference engine state or dispatch — pure DOM/CSS presentation only')
+    }
+    console.log('[checkLudoCapturePresentation] I5 OK — impact overlay module has no engine/orchestrator imports and no game-state mutation capability.')
   }
 
   console.log('[checkLudoCapturePresentation] ALL OK')

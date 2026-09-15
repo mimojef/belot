@@ -1,11 +1,17 @@
 // Bot-takeover popup — reuse-ва Belot-овия УХ pattern (fixed scrim + centered
-// card + robot съобщение + dismiss бутон), но е НОВ, Ludo-local компонент —
+// card + robot съобщение + бутон), но е НОВ, Ludo-local компонент —
 // НЕ import от src/app/activeRoom/ (виж Phase 3A audit-а: Belot popup-ите са
 // private closures, тясно обвързани със Seat/RoomBiddingSnapshot типове,
 // не safe за directen import в изолиран Ludo модул). Визуален стил е
 // умишлено аналогичен (същия "Поради изтичане на времето..." message тон),
 // но напълно независим markup/CSS, за да остане Ludo модулът изцяло
 // self-contained (виж task-а т.15).
+//
+// Бутонът "Върни се" (виж task-а — reclaim flow) НЕ е чисто dismiss —
+// createLudoFlowController.ts's click handler-ът маркира local player-а за
+// safe "resume human control" (виж pendingHumanReclaimColor doc коментара
+// там). Markup/размер/позиция/икона/цветове са НЕДОКОСНАТИ — само текстът и
+// поведението зад click-а са различни.
 
 export function renderLudoBotTakeoverPopup(): string {
   return `
@@ -39,7 +45,7 @@ export function renderLudoBotTakeoverPopup(): string {
             letter-spacing:0.02em; text-transform:uppercase;
             cursor:pointer;
           "
-        >Разбрах</button>
+        >Върни се</button>
       </div>
     </div>
   `

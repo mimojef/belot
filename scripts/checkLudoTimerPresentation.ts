@@ -36,6 +36,14 @@ function fail(message: string): never {
   process.exit(1)
 }
 
+// Нормализира CRLF -> LF при четене — виж checkLudoCapturePresentation.ts
+// коментара за пълния rationale (Windows git checkout autocrlf може да
+// конвертира source файловете в CRLF, докато source-review regex-ите по-
+// долу очакват bare \n).
+function readSourceFile(relativePath: string): string {
+  return readFileSync(join(__dirname, relativePath), 'utf8').replace(/\r\n/g, '\n')
+}
+
 // remainingRatio computation — огледало на task-а т.2 формулата:
 //   remainingMs = max(0, totalMs - elapsedMs)
 //   remainingRatio = remainingMs / totalMs
@@ -116,10 +124,7 @@ function main(): void {
     if (normalRenderDelay !== resizeTriggeredRenderDelay) {
       fail(`T7: expected resize-triggered render delay to equal normal render delay at the same elapsed time, got ${resizeTriggeredRenderDelay} vs ${normalRenderDelay}`)
     }
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const resizeHandlerMatch = controllerSrc.match(/function handleResize\(\): void \{[\s\S]*?\n  \}\n/)
     if (!resizeHandlerMatch) fail('T7: could not locate handleResize function body')
     if (/scheduleNextDeadline\(\)|turnStartedAt\s*=/.test(resizeHandlerMatch[0])) {
@@ -142,10 +147,7 @@ function main(): void {
 
   // --- T10: popup/takeover trigger stays synchronized with visual 0% (source review of the render()/scheduleNextDeadline() ordering fix) ---
   {
-    const controllerSrc = readFileSync(
-      join(__dirname, '../src/app/games/ludo/createLudoFlowController.ts'),
-      'utf8',
-    )
+    const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     // The root cause fix: every call site that transitions to a new
     // turnPhase must call scheduleNextDeadline() BEFORE render(), so that
     // turnStartedAt is already correct (matching the moveDeadlineAt/

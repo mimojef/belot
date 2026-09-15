@@ -22,6 +22,16 @@ export interface LudoCaptureFlightOptions {
   fromRect: DOMRect // target клетката (victim-ът стои тук в момента на impact-а)
   toRect: DOMRect // permanent home slot клетката на ТОЧНО тази piece
   pieceSizePx: number // реалният измерен размер на "живата" пионка на дъската — overlay-ят изглежда идентично, без отделна size formula
+  // Bot-takeover popup layering fix (виж createLudoFlowController.ts
+  // audit-а и playLudoDiceFlightOverlay.ts LudoDiceFlightOptions doc
+  // коментара за пълния root cause): overlay-ят живее на document.body,
+  // sibling на Ludo overlay root-а (не вложен в него), затова номинален
+  // z-index сравнение с popup-a не е достатъчно — popup-ът е mount-нат
+  // ВЪТРЕ в overlay root-а, чийто ограничен родителски stacking context
+  // прави дори по-нисък-номер z-index sibling на body да застане визуално
+  // над него. initiallyHidden се прилага ВЕДНАГА при DOM element creation
+  // (не след flight-а завърши) — same fix pattern като dice overlay-я.
+  initiallyHidden: boolean
 }
 
 // Резолвва се, когато flight-ът приключи — controller-ът маха overlay-а
@@ -29,7 +39,7 @@ export interface LudoCaptureFlightOptions {
 // ТОГАВА чисти presentation override-а, за да не се задублира визуално
 // пионката (едновременно на target override-а И в canonical home-а).
 export async function playLudoCaptureFlightOverlay(options: LudoCaptureFlightOptions): Promise<void> {
-  const { pieceId, fromRect, toRect, pieceSizePx } = options
+  const { pieceId, fromRect, toRect, pieceSizePx, initiallyHidden } = options
   const fromX = fromRect.left + fromRect.width / 2
   const fromY = fromRect.top + fromRect.height / 2
   const toX = toRect.left + toRect.width / 2
@@ -44,6 +54,7 @@ export async function playLudoCaptureFlightOverlay(options: LudoCaptureFlightOpt
     transform:translate(-50%, -50%);
     z-index:8000;
     pointer-events:none;
+    visibility:${initiallyHidden ? 'hidden' : 'visible'};
   `
   // selectable=false (никога clickable по време на flight), count=1 (винаги
   // единична пионка тук — stack-ът вече се разпада в отделни flight-ове,
