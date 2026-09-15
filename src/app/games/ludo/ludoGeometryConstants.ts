@@ -23,11 +23,21 @@ export const LUDO_HOME_SLOTS = 4
 // включва и диагоналната ъглова клетка на завоя (виж buildTrackGrid в
 // board/ludoBoardGeometry.ts) — track-ът е непрекъсната обиколка без
 // "декоративни" клетки, които engine-ът би прескачал.
+//
+// +1 спрямо ъгловата клетка на всяко рамо (виж task-а — референтна Ludo
+// King дъска: цветният "изходен" квадрат стои една клетка НАПРЕД по
+// посоката на движение от самия ъгъл, не в самия ъгъл). Официална start
+// клетка за всеки цвят (визуален tint/arrow маркер И бъдещата "изкарване
+// от home" логика, когато се имплементира — прототипът все още няма home-
+// exit legal moves, виж ludoEngineLegalMoves.ts) вече е "ъгъл + 1" по
+// часовниковата посока: red 1, blue 15, yellow 29, green 43. TRACK_LENGTH/
+// FINISH_LENGTH/HOME_SLOTS/broя на полетата НЕ са пипнати — само кой track
+// index носи семантиката "тук влиза пионката".
 export const LUDO_START_INDEX: Record<LudoGeometryColor, number> = {
-  red: 0,
-  blue: 14,
-  yellow: 28,
-  green: 42,
+  red: 1,
+  blue: 15,
+  yellow: 29,
+  green: 43,
 }
 
 export function ludoAdvanceTrackIndex(index: number, steps: number): number {

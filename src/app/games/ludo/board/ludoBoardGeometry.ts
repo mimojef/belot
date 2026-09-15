@@ -33,6 +33,28 @@ export function ludoEntryTrackIndex(color: LudoColor): number {
   return ENTRY_INDEX[color]
 }
 
+// Клетката НЕПОСРЕДСТВЕНО ПРЕДИ входа на СОБСТВЕНИЯ finish коридор (виж
+// task-а — референтна снимка с черни X маркери): последната track клетка,
+// от която пионката на дадения цвят завива навътре към собствения си
+// finish lane, СЛЕД пълен оборот на дъската (56 клетки) — геометрично
+// РАЗЛИЧНА клетка от ENTRY_INDEX по-горе (която е просто "start - 1",
+// съседна на СЛЕДВАЩИЯ цвят по ред, не на собствения finish). Формулата
+// (START_INDEX - 2 + LENGTH) % LENGTH е изведена и потвърдена директно
+// спрямо TRACK_GRID/FINISH_GRID координатите в renderLudoBoard.ts (виж git
+// history на task-а): за всеки цвят тази клетка е grid-съседна на
+// FINISH_GRID[color][0] (първата finish клетка), потвърдено симетрично за
+// и четирите рамена.
+const FINISH_ENTRY_INDEX: Record<LudoColor, number> = {
+  red: (LUDO_START_INDEX.red + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
+  blue: (LUDO_START_INDEX.blue + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
+  yellow: (LUDO_START_INDEX.yellow + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
+  green: (LUDO_START_INDEX.green + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
+}
+
+export function ludoFinishEntryTrackIndex(color: LudoColor): number {
+  return FINISH_ENTRY_INDEX[color]
+}
+
 export interface LudoGridPoint {
   col: number
   row: number
@@ -179,4 +201,24 @@ export function ludoStartCellIds(): Partial<Record<LudoColor, LudoCellId>> {
     result[color] = ludoCellId({ kind: 'track', index: LUDO_START_INDEX[color] })
   }
   return result
+}
+
+// Класическите "safe cell" звезди (виж task-а — референтна Ludo King
+// дъска): по една допълнителна маркирана клетка на всяко рамо, разположена
+// точно 8 track-стъпки след СЪСЕДНИЯ (не собствения) start — т.е. клетката
+// по средата на следващия сегмент, непосредствено преди пионките да завият
+// навътре към своя финиш. Offset-ът (+8) е фиксираната класическа Ludo
+// правило-константа (не производна на track дължината/брой цветове — same
+// дистанция важи независимо от layout-а), приложена спрямо ВСЕКИ start
+// index, за да получим точно 4 safe клетки общо (по една на рамо), symmetric
+// разположени. Чисто presentation marker — НЕ engine rule (капчещи пионки
+// тук не получават никаква специална защита от capture, само визуален star
+// indicator, идентично на предишния star-at-start marker преди да бъде
+// заменен с цветния start tint).
+const LUDO_SAFE_CELL_OFFSET = 8
+
+export function ludoSafeCellIds(): LudoCellId[] {
+  return LUDO_COLORS.map((color) =>
+    ludoCellId({ kind: 'track', index: (LUDO_START_INDEX[color] + LUDO_SAFE_CELL_OFFSET) % LUDO_TRACK_LENGTH }),
+  )
 }

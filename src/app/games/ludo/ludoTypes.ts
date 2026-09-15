@@ -10,11 +10,16 @@ export const LUDO_COLORS: readonly LudoColor[] = ['red', 'blue', 'green', 'yello
 // разграничено от backdrop-а BOARD_BACKDROP #eea458, чийто hue е ~30°
 // оранжево), без да се доближава до оранжев тон. red/blue/green и
 // backdrop-ът са НЕДОКОСНАТИ.
+// По-наситена/ярка "game-like" палитра (visual redesign — виж task-а: по-
+// живи цветове, по-близки до типичен модерен mobile board-game вид), вместо
+// предишните по-приглушени тонове. Единствен source на truth за цвета на
+// играч навсякъде (board/pieces/panels/popups) — смяна тук пропагира
+// автоматично, без отделни hex литерали другаде (виж audit-а).
 export const LUDO_COLOR_HEX: Record<LudoColor, string> = {
-  red: '#e0473e',
-  blue: '#3b82f6',
-  green: '#22a559',
-  yellow: '#e6b91f',
+  red: '#ff3b30',
+  blue: '#2196f3',
+  green: '#2ecc59',
+  yellow: '#ffc107',
 }
 
 export const LUDO_COLOR_LABEL: Record<LudoColor, string> = {

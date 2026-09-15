@@ -14,10 +14,6 @@ export function renderLudoAnimationStyles(): string {
         0%, 100% { opacity:0.55; transform:scale(0.94); }
         50% { opacity:1; transform:scale(1.12); }
       }
-      @keyframes ludo-piece-selectable-pulse {
-        0%, 100% { filter:brightness(1); }
-        50% { filter:brightness(1.35); }
-      }
       @keyframes ludo-piece-shake {
         0%, 100% { transform:translate(0, 0); }
         20% { transform:translate(-3px, -2px); }

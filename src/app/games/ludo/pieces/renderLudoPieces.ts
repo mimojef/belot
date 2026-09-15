@@ -79,6 +79,17 @@ function renderStackCountBadge(count: number, hex: string): string {
 // не би я намерил. data-ludo-piece-group прави тази ситуация все пак
 // намираема, без да пипа кое piece РЕАЛНО се маха (game logic-ът е
 // недокоснат) — чисто DOM lookup robustness.
+//
+// Visual redesign (виж task-а — "КАПКООБРАЗНА / СЪЛЗОВИДНА", НЕ bowling-pin,
+// НЕ horseshoe/U-shape): единичен SVG teardrop silhouette (ludo-piece-svg-
+// path константата по-долу) — голяма закръглена горна част, плавно
+// стеснение надолу, малка мека закръглена основа. Един path definition,
+// reuse-нат навсякъде (home/track/finish/capture flight overlay — виж
+// playLudoCaptureFlightOverlay.ts, който вика точно тази функция), затова
+// "единен модел на пионката" изискването е архитектурно гарантирано — няма
+// отделен markup за различните контексти. СЪЩИЯТ DOM contract (data-ludo-
+// piece/-stack-count/-group/-selectable, count badge) — движение/
+// selection/click логиката в createLudoFlowController.ts не е пипната.
 export function renderLudoPieceHtml(
   piece: LudoPieceId,
   selectable: boolean,
@@ -87,6 +98,11 @@ export function renderLudoPieceHtml(
 ): string {
   const color = piece.split('-')[0] as keyof typeof LUDO_COLOR_HEX
   const hex = LUDO_COLOR_HEX[color]
+  // Уникален gradient/filter id per piece instance — SVG <defs> id-та са
+  // глобални в document-а, затова 2+ едновременно рендирани пионки (различни
+  // клетки, различни цветове) не могат да споделят литерален id без да се
+  // "крадат" градиентите визуално. piece id-то вече е уникално per DOM node.
+  const uid = piece.replace(/[^a-zA-Z0-9-]/g, '')
 
   return `
     <div
@@ -95,44 +111,152 @@ export function renderLudoPieceHtml(
       ${selectable ? 'data-ludo-piece-selectable="1"' : ''}
       style="
         position:relative;
-        width:70%;
+        width:80%;
         max-width:30px;
-        aspect-ratio:0.82/1;
-        margin-bottom:2px;
-        /* +2px въздух до долния ръб на клетката — renderLudoPieceCluster
-           подрежда пионките с align-items:flex-end, а без този margin
-           пионката опира точно в долния ръб. Единственото място, което
-           рендерира piece token, значи важи навсякъде (track/home/finish,
-           desktop/mobile) без отделна логика. */
+        aspect-ratio:0.72/1;
+        /* +4px нагоре (виж task-а) — фиксна px стойност, НЕ %-based transform
+           (% translateY върху aspect-ratio-derived auto height предизвика
+           runaway layout bug тук по-рано, виж align-content:flex-end
+           коментара в renderLudoPieceCluster по-долу за пълния root cause
+           на foot-alignment fix-а). px стойността е безопасна и предвидима
+           за всички viewport-и/размери. */
+        transform:translateY(-4px);
         pointer-events:${selectable ? 'auto' : 'none'};
         cursor:${selectable ? 'pointer' : 'default'};
-        transition:transform 120ms ease, filter 160ms ease;
-        ${selectable ? 'animation:ludo-piece-selectable-pulse 1.8s ease-in-out infinite;' : ''}
+        transition:filter 160ms ease;
       "
     >
-      <div style="
-        position:absolute; left:50%; bottom:0; transform:translateX(-50%);
-        width:100%; height:34%;
-        background:radial-gradient(ellipse at center, ${hex} 0%, ${shade(hex, -28)} 75%, ${shade(hex, -40)} 100%);
-        border-radius:50%;
-        box-shadow:0 2px 3px rgba(0,0,0,0.45);
-      "></div>
-      <div style="
-        position:absolute; left:50%; bottom:22%; transform:translateX(-50%);
-        width:70%; height:55%;
-        background:linear-gradient(180deg, ${shade(hex, 22)} 0%, ${hex} 45%, ${shade(hex, -18)} 100%);
-        border-radius:45% 45% 50% 50%;
-        box-shadow:inset -2px -2px 3px rgba(0,0,0,0.25), inset 2px 2px 2px rgba(255,255,255,0.35);
-      "></div>
-      <div style="
-        position:absolute; left:50%; top:0; transform:translateX(-50%);
-        width:46%; height:46%;
-        background:radial-gradient(circle at 35% 30%, ${shade(hex, 18)} 0%, ${hex} 60%, ${shade(hex, -15)} 100%);
-        border-radius:50%;
-        box-shadow:inset -1px -1px 2px rgba(0,0,0,0.3), inset 1px 1px 1px rgba(255,255,255,0.3)${selectable ? `, 0 0 0 3px ${hex}55` : ''};
-      "></div>
+      ${selectable ? renderSelectablePieceRing() : ''}
+      ${renderLudoPieceSvg(hex, uid, selectable)}
       ${count > 1 ? renderStackCountBadge(count, hex) : ''}
     </div>
+  `
+}
+
+// Классическа Ludo-pawn капка (виж task-а — референтна Ludo King снимка:
+// БЯЛО тяло, ЧЕРЕН outline, цветен КРЪГ вътре в горната закръглена част, не
+// цветно тяло/градиент). ЕДИН path, споделен от body fill + outline stroke;
+// цветният медальон е отделен <circle>, центриран в главата на капката.
+// Профилът е по-тесен/по-остър от предишната итерация (по-близо до
+// референтния силует): широка закръглена горна част (~0-40% viewBox
+// височина), плавно монотонно стеснение до остра (не арка) долна точка
+// (~96% височина) — острият край е точно това, което "стъпва" в клетката,
+// докато закръглената горна част overflow-ва нагоре (виж margin-top в
+// wrapper-а по-горе). viewBox 0 0 60 84.
+const LUDO_PIECE_SILHOUETTE_PATH =
+  'M30 2 ' +
+  'C44 2 55 13 55 26 ' +
+  'C55 34 51 41 45 48 ' +
+  'C39 55 33 63 30 82 ' +
+  'C27 63 21 55 15 48 ' +
+  'C9 41 5 34 5 26 ' +
+  'C5 13 16 2 30 2 Z'
+
+// Цветният медальон вътре в главата — виж task-а "света да е вътре като
+// кръг": НЕ цялото тяло на пионката е в цвета на играча, само този вътрешен
+// кръг. Позициониран в горната закръглена зона на силует path-а по-горе.
+const LUDO_PIECE_MEDALLION_CENTER = { cx: 30, cy: 26 }
+const LUDO_PIECE_MEDALLION_RADIUS = 15
+
+function renderLudoPieceSvg(hex: string, uid: string, selectable: boolean): string {
+  const medallionFillId = `ludo-piece-medallion-fill-${uid}`
+  const bodyShadeId = `ludo-piece-body-shade-${uid}`
+  const bodyHighlightId = `ludo-piece-body-highlight-${uid}`
+
+  return `
+    <svg
+      viewBox="0 0 60 84"
+      style="
+        position:absolute;
+        inset:0;
+        width:100%;
+        height:100%;
+        overflow:visible;
+        filter:drop-shadow(0 2px 3px rgba(0,0,0,0.4));
+      "
+    >
+      <defs>
+        <radialGradient id="${medallionFillId}" cx="38%" cy="32%" r="70%">
+          <stop offset="0%" stop-color="${shade(hex, 20)}"></stop>
+          <stop offset="55%" stop-color="${hex}"></stop>
+          <stop offset="100%" stop-color="${shade(hex, -18)}"></stop>
+        </radialGradient>
+        <linearGradient id="${bodyShadeId}" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#ffffff"></stop>
+          <stop offset="60%" stop-color="#f4f4f4"></stop>
+          <stop offset="100%" stop-color="#e2e2e2"></stop>
+        </linearGradient>
+        <radialGradient id="${bodyHighlightId}" cx="32%" cy="14%" r="26%">
+          <stop offset="0%" stop-color="rgba(255,255,255,0.95)"></stop>
+          <stop offset="100%" stop-color="rgba(255,255,255,0)"></stop>
+        </radialGradient>
+      </defs>
+      <!-- Тяло: бяло/leko градиентно, с плътен черен outline (виж task-а
+           "бели с черен кант") — самата капка форма, БЕЗ цвета на играча. -->
+      <path d="${LUDO_PIECE_SILHOUETTE_PATH}" fill="url(#${bodyShadeId})" stroke="#161616" stroke-width="2.4" stroke-linejoin="round"></path>
+      <!-- Цветен медальон (играчовия цвят) — кръг вътре в горната част. -->
+      <circle
+        cx="${LUDO_PIECE_MEDALLION_CENTER.cx}" cy="${LUDO_PIECE_MEDALLION_CENTER.cy}" r="${LUDO_PIECE_MEDALLION_RADIUS}"
+        fill="url(#${medallionFillId})"
+        stroke="#161616"
+        stroke-width="1.6"
+      ></circle>
+      <!-- Мек highlight върху бялото тяло, за лек 3D обем без да размива
+           четимостта на черния outline/цветния медальон. -->
+      <path d="${LUDO_PIECE_SILHOUETTE_PATH}" fill="url(#${bodyHighlightId})"></path>
+      ${selectable ? `<path d="${LUDO_PIECE_SILHOUETTE_PATH}" fill="none" stroke="#ffd766" stroke-width="1.8" opacity="0.9"></path>` : ''}
+    </svg>
+  `
+}
+
+// Selectable marker (виж task-а — референтна Ludo King снимка: плътен
+// тъмен/кафяв кръг directно зад пионката, изпълващ клетката, с
+// черно-бял сегментиран пръстен отвън, който се върти) — заменя
+// предишния тънък едноцветен dashed ring. Два слоя в ЕДИН SVG:
+//   1. Плътен тъмен фонов кръг (static, не се върти) — визуално
+//      "изпълва" клетката зад пионката, точно като референтния дизайн.
+//   2. Външен ring, редуващ черни/бели сегменти (stroke-dasharray с
+//      равни по дължина дъги, различен цвят всяка) — rotating чрез CSS
+//      animation. Двата сегмента (черен+бял) са отделни <circle> с
+//      допълващ се dasharray offset, за да се редуват равномерно.
+// viewBox-базиран SVG, скалира се чисто с piece размера, работи еднакво
+// desktop/mobile. z-index:0 (document order) държи целия marker ЗАД
+// piece SVG-то (рендирано веднага след него в родителския div).
+function renderSelectablePieceRing(): string {
+  return `
+    <svg
+      viewBox="0 0 100 100"
+      style="
+        position:absolute;
+        left:50%; top:50%;
+        transform:translate(-50%, -50%);
+        width:132%;
+        aspect-ratio:1/1;
+        overflow:visible;
+        pointer-events:none;
+        z-index:0;
+      "
+    >
+      <circle cx="50" cy="50" r="36" fill="#4a2f1c"></circle>
+      <g style="transform-origin:50px 50px; animation:ludo-dice-arrows-spin 1.6s linear infinite;">
+        <circle
+          cx="50" cy="50" r="46"
+          fill="none"
+          stroke="#f4f4f4"
+          stroke-width="9"
+          stroke-dasharray="48.2 48.2"
+          stroke-dashoffset="0"
+        ></circle>
+        <circle
+          cx="50" cy="50" r="46"
+          fill="none"
+          stroke="#161616"
+          stroke-width="9"
+          stroke-dasharray="48.2 48.2"
+          stroke-dashoffset="48.2"
+        ></circle>
+      </g>
+    </svg>
   `
 }
 
@@ -174,8 +298,23 @@ export function renderLudoPieceCluster(pieces: LudoPiece[], selectablePieceIds: 
     })
     .join('')
 
+  // ROOT CAUSE (измерено с реален getBoundingClientRect — виж task-а
+  // "острия им долен край да се прибере в полето без да пипаме
+  // големината"): ТОЗИ div самия е точно клетъчния размер (потвърдено —
+  // top/height съвпадат 1:1 с родителя, height:100% и align-self default
+  // работят коректно). Проблемът е ВЪТРЕ в него: flex-wrap:wrap кара
+  // browser-a да computира flex line's cross-size = max item height в реда
+  // (piece token-ите вече са по-високи от клетката, за да overflow-ват
+  // видимо над нея — виж renderLudoPieceHtml), не контейнер height-a. С
+  // единичен ред и height:100% контейнер, line-ът се anchor-ва towards TOP
+  // (не bottom, въпреки align-items:flex-end), значи overflow-ът пада ПОД
+  // клетката вместо над нея. align-content:flex-end explicit контролира
+  // именно multi/single-line placement по cross axis (различно свойство от
+  // align-items, което подравнява items ВЪТРЕ в реда) — anchors line-a
+  // towards контейнер bottom-a, елиминирайки bottom overflow-а: капката
+  // расте нагоре от клетъчната долна граница, никога отвъд нея.
   return `
-    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;justify-content:center;gap:1px;width:100%;height:100%;">
+    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;align-content:flex-end;justify-content:center;gap:1px;width:100%;height:100%;">
       ${tokens}
     </div>
   `

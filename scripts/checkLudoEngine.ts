@@ -23,7 +23,9 @@
 //   N. TURN_ADVANCED: red -> blue -> yellow -> green -> red (canonical
 //      GAMEPLAY turnOrder = LUDO_CANONICAL_TURN_ORDER, derived от ascending
 //      START_INDEX/clockwise track — виж ludoGeometryConstants.ts).
-//   N2. canonical turn order е съгласуван с ascending START_INDEX (0,14,28,42).
+//   N2. canonical turn order е съгласуван с ascending START_INDEX (равни
+//       14-клетъчни интервали, точните литерали се четат от текущия
+//       LUDO_START_INDEX, виж ludoGeometryConstants.ts).
 //   O. TURN_ADVANCED reset: phase waiting_for_roll, dice null, legalMoves empty.
 //   P. turnVersion increment е deterministic.
 //   Q. adapter: home/track/finish conversion към renderer е deterministic.
@@ -318,10 +320,19 @@ function main(): void {
     if (!isAscending) {
       fail(`N2: turnOrder must follow ascending START_INDEX (clockwise track), got ${JSON.stringify(state.turnOrder)} with indices ${JSON.stringify(startIndices)}`)
     }
-    if (JSON.stringify(startIndices) !== JSON.stringify([0, 14, 28, 42])) {
-      fail(`N2: expected start indices [0,14,28,42] for turnOrder, got ${JSON.stringify(startIndices)}`)
+    // Точните литерали (виж task-а — визуална поправка: "изходният" tint/
+    // arrow маркер стои една клетка напред от ъгъла, не в самия ъгъл) вече
+    // са [1,15,29,43] вместо старите [0,14,28,42] — самата ascending/14-
+    // apart инвариант (проверена по-горе) е структурната гаранция, не
+    // конкретните числа. Тук проверяваме, че разликата между съседни
+    // start индекси остава точно 14 (равни интервали, 56/4 рамена).
+    for (let i = 1; i < startIndices.length; i += 1) {
+      const delta = startIndices[i]! - startIndices[i - 1]!
+      if (delta !== 14) {
+        fail(`N2: expected exactly 14 cells between consecutive start indices, got delta=${delta} between ${JSON.stringify(startIndices)}`)
+      }
     }
-    console.log('[checkLudoEngine] N2 OK — canonical turn order is consistent with ascending START_INDEX (0->14->28->42, clockwise track).')
+    console.log(`[checkLudoEngine] N2 OK — canonical turn order is consistent with ascending START_INDEX (equal 14-cell intervals, clockwise track), current values ${JSON.stringify(startIndices)}.`)
   }
 
   // --- O: TURN_ADVANCED resets phase/dice/legalMoves ---
@@ -390,7 +401,12 @@ function main(): void {
       fail(`R: engine track length (${LUDO_ENGINE_TRACK_LENGTH}) must equal shared constant (${LUDO_TRACK_LENGTH})`)
     }
     if (LUDO_ENGINE_TRACK_LENGTH !== 56) fail(`R: expected canonical track length 56, got ${LUDO_ENGINE_TRACK_LENGTH}`)
-    const expectedStarts = { red: 0, blue: 14, yellow: 28, green: 42 } as const
+    // Виж task-а — визуална поправка: "изходният" tint/arrow маркер стои
+    // една клетка напред от ъгъла (не в самия ъгъл), затова стойностите тук
+    // отразяват текущия LUDO_START_INDEX (ludoGeometryConstants.ts), не
+    // legacy [0,14,28,42]. Самата проверка (single source of truth между
+    // engine/shared константите) остава непроменена.
+    const expectedStarts = { red: 1, blue: 15, yellow: 29, green: 43 } as const
     for (const [color, expected] of Object.entries(expectedStarts)) {
       const engineValue = LUDO_ENGINE_START_INDEX[color as keyof typeof expectedStarts]
       const sharedValue = LUDO_START_INDEX[color as keyof typeof expectedStarts]
