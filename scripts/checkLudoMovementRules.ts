@@ -71,7 +71,11 @@ function main(): void {
 
   // --- M3-M6: start index mapping for the four colors ---
   {
-    const expected: Record<LudoColor, number> = { red: 1, blue: 15, yellow: 29, green: 43 }
+    // Derive-нато от LUDO_ENGINE_START_INDEX (single source of truth, виж
+    // ludoGeometryConstants.ts), не hardcode-нато — start съвпада с
+    // геометричния ъгъл на рамото (виж fix за "стъпване в ъгловата клетка
+    // преди finish-entry" бъга).
+    const expected: Record<LudoColor, number> = LUDO_ENGINE_START_INDEX
     for (const color of ['red', 'blue', 'yellow', 'green'] as const) {
       const moves = computeLudoEngineLegalMoves([homePiece(color, 0)], color, 6)
       const move = moves[0]
@@ -106,9 +110,13 @@ function main(): void {
     ok('M8 — absolute 55->0 wrap keeps correct relative progress (not confused with finish entry)')
   }
 
-  // --- M9: full lap -> own finish (red, stepsFromStart=55 -> absolute track-0) ---
+  // --- M9: full lap -> own finish (red start=0, stepsFromStart=55 -> absolute track-55) ---
   {
-    const moves = computeLudoEngineLegalMoves([trackPiece('red', 1, 0)], 'red', 1)
+    // red start=0 (виж LUDO_START_INDEX fix — start съвпада с геометричния
+    // ъгъл на рамото), затова absolute track-0 вече Е самия start
+    // (stepsFromStart=0), не "почти пълна обиколка". Реалният "почти пълна
+    // обиколка" сценарий сега е absolute track-55 (stepsFromStart=55).
+    const moves = computeLudoEngineLegalMoves([trackPiece('red', 1, 55)], 'red', 1)
     const move = moves[0]
     if (!move || move.targetPosition.kind !== 'finish' || move.targetPosition.finishIndex !== 0) {
       fail(`M9: expected finish-0 after a full lap, got ${JSON.stringify(move?.targetPosition)}`)
@@ -118,8 +126,9 @@ function main(): void {
 
   // --- M10: track->finish multi-step (task-а's own example: stepsFromStart=53, dice=4 -> finishIndex=1) ---
   {
-    // red stepsFromStart=53 -> absolute=(1+53)%56=54
-    const moves = computeLudoEngineLegalMoves([trackPiece('red', 1, 54)], 'red', 4)
+    // red start=0 (виж LUDO_START_INDEX fix), затова stepsFromStart=53 ->
+    // absolute=(0+53)%56=53, не 54.
+    const moves = computeLudoEngineLegalMoves([trackPiece('red', 1, 53)], 'red', 4)
     const move = moves[0]
     if (!move || move.targetPosition.kind !== 'finish' || move.targetPosition.finishIndex !== 1) {
       fail(`M10: expected finish-1, got ${JSON.stringify(move?.targetPosition)}`)
@@ -203,8 +212,9 @@ function main(): void {
 
   // --- M18: finish lane has no capture (isCapture always false for finish targets) ---
   {
-    // red stepsFromStart=55 -> absolute=0; dice=1 -> finish-0.
-    const moves = computeLudoEngineLegalMoves([trackPiece('red', 1, 0)], 'red', 1)
+    // red start=0 (виж LUDO_START_INDEX fix); stepsFromStart=55 ->
+    // absolute=55; dice=1 -> finish-0.
+    const moves = computeLudoEngineLegalMoves([trackPiece('red', 1, 55)], 'red', 1)
     const move = moves[0]
     if (!move || move.targetPosition.kind !== 'finish') fail('M18: setup error, expected a finish-kind move')
     if (move.isCapture) fail('M18: finish lane landings must never be marked as capture')
@@ -449,7 +459,9 @@ function main(): void {
 
   // --- M30: engine deterministic/pure for the new Phase 3B paths ---
   {
-    const rolling = stateWith({ turnPhase: 'rolling', turnVersion: 1, pieces: [trackPiece('red', 1, 54)] })
+    // red start=0 (виж LUDO_START_INDEX fix); track-53 + dice=4 -> finish-1
+    // (виж M10 за същото изчисление).
+    const rolling = stateWith({ turnPhase: 'rolling', turnVersion: 1, pieces: [trackPiece('red', 1, 53)] })
     const snapshot = JSON.parse(JSON.stringify(rolling))
     const rolled1 = reduceLudoGame(rolling, { type: 'ROLL_RESOLVED', color: 'red', value: 4, expectedTurnVersion: 1 })
     if (JSON.stringify(rolling) !== JSON.stringify(snapshot)) fail('M30: input state must not be mutated')

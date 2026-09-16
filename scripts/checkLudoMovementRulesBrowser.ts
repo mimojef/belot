@@ -129,7 +129,7 @@ try {
       assert(selectable.includes('red-0'), `expected red-0 (home) selectable on dice=6, got ${JSON.stringify(selectable)}`)
       await h.clickPiece('red-0')
       await h.wait(900)
-      assert(await h.isPieceOrGroupInCell('red-0', 'track-1'), 'red-0 did not land on its own start cell (track-1)')
+      assert(await h.isPieceOrGroupInCell('red-0', 'track-0'), 'red-0 did not land on its own start cell (track-0)')
     })
 
     // --- CASE B: dice=1-5, home pawn not selectable ---
@@ -145,14 +145,15 @@ try {
 
     // --- CASE C: piece near end of lap -> smooth track->finish route ---
     await check(`[${label}] CASE C — a piece near the end of the lap animates smoothly track->finish (no teleport)`, async () => {
-      await h.mountWithState({ 'red-1': { kind: 'track', trackIndex: 54 } }) // stepsFromStart=53
+      // red start=0 (виж LUDO_START_INDEX fix); trackIndex=53 -> stepsFromStart=53.
+      await h.mountWithState({ 'red-1': { kind: 'track', trackIndex: 53 } })
       await h.queueDiceValues([4])
       await h.clickRoll()
       await h.wait(1300)
       const selectable = await h.getSelectablePieceIds()
       assert(selectable.includes('red-1'), `expected red-1 selectable, got ${JSON.stringify(selectable)}`)
       await h.clickPiece('red-1')
-      await h.wait(260) // mid-flight — route has 4 real steps (track-55, track-0, finish-0, finish-1)
+      await h.wait(260) // mid-flight — route has 3 real steps (track-55, finish-0, finish-1)
       const finishedAlready = await h.isPieceOrGroupInCell('red-1', 'finish-red-1')
       assert(!finishedAlready, 'route teleported straight to the final cell instead of animating step by step')
       await h.wait(2600)
@@ -245,7 +246,26 @@ try {
       await h.mountWithState({}, 'blue')
       await h.queueDiceValues([6])
       await h.wait(2600) // bot think-delay (700ms) + dice flight (900ms) + route step + render margin
-      assert(await h.isPieceOrGroupInCell('blue-0', 'track-15'), 'bot did not autonomously move blue-0 onto its own start cell (track-15)')
+      assert(await h.isPieceOrGroupInCell('blue-0', 'track-14'), 'bot did not autonomously move blue-0 onto its own start cell (track-14)')
+    })
+
+    // --- CASE J: landing on an opponent parked on a safe/star cell must NOT capture it (SAFE10) ---
+    await check(`[${label}] CASE J — opponent parked on a safe/star cell survives a landing (no capture, no explosion)`, async () => {
+      // blue safe cell is track-22 (blue start=14, +8 offset). red-1 two
+      // steps behind it, dice=2, lands exactly on it.
+      await h.mountWithState({ 'red-1': { kind: 'track', trackIndex: 20 }, 'blue-0': { kind: 'track', trackIndex: 22 } })
+      await h.queueDiceValues([2])
+      await h.clickRoll()
+      await h.wait(1300)
+      const selectable = await h.getSelectablePieceIds()
+      assert(selectable.includes('red-1'), `expected red-1 selectable, got ${JSON.stringify(selectable)}`)
+      await h.clickPiece('red-1')
+      await h.wait(1200) // full move + would-be capture presentation window
+      assert(await h.isPieceOrGroupInCell('red-1', 'track-22'), 'red-1 did not land on the safe cell track-22')
+      assert(
+        await h.isPieceOrGroupInCell('blue-0', 'track-22'),
+        'blue-0 was bounced off the safe cell — it must stay put, coexisting with the mover',
+      )
     })
 
     await check(`[${label}] no console/page errors across the whole scenario`, () => {

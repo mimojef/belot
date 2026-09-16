@@ -29,9 +29,12 @@ function ok(label: string): void {
 function main(): void {
   // --- R1: home -> start (единичен скок) ---
   {
-    const route = buildLudoMoveRoute('home-red-0', 'track-1')
-    if (JSON.stringify(route) !== JSON.stringify(['track-1'])) {
-      fail(`R1: expected single-hop ['track-1'], got ${JSON.stringify(route)}`)
+    // red start=0 (виж LUDO_START_INDEX fix — start съвпада с геометричния
+    // ъгъл на рамото), затова реалният home-exit target е track-0, не
+    // track-1.
+    const route = buildLudoMoveRoute('home-red-0', 'track-0')
+    if (JSON.stringify(route) !== JSON.stringify(['track-0'])) {
+      fail(`R1: expected single-hop ['track-0'], got ${JSON.stringify(route)}`)
     }
     ok('R1 — home->start is a single visual hop, no intermediate steps')
   }
@@ -57,10 +60,16 @@ function main(): void {
 
   // --- R4: track -> finish, multi-step, crossing the wrap into red's own finish lane ---
   {
-    // red stepsFromStart=53 -> absolute track-54; dice=4 -> finish-1
-    // (task-а's own worked example: progress54, progress55, finish0, finish1).
+    // red start=0 (виж LUDO_START_INDEX fix — start съвпада с геометричния
+    // ъгъл на рамото) -> FINISH_ENTRY_INDEX.red=55 (start-1), не 54. red
+    // stepsFromStart=54 -> absolute track-54; dice=4 -> finish-2. Route-ът
+    // тук е pure cell-to-cell (не dice-driven) до finish-red-1: track-54 ->
+    // track-55 (последната shared-track клетка, finish-entry завоя) ->
+    // finish-0 -> finish-1 — само 3 реални стъпки (track-0 вече НЕ е между
+    // тях, защото finish-entry-то е изтеглено с 1 назад спрямо стария
+    // "start = ъгъл + 1" вариант).
     const route = buildLudoMoveRoute('track-54', 'finish-red-1')
-    const expected = ['track-55', 'track-0', 'finish-red-0', 'finish-red-1']
+    const expected = ['track-55', 'finish-red-0', 'finish-red-1']
     if (JSON.stringify(route) !== JSON.stringify(expected)) {
       fail(`R4: expected track->finish route ${JSON.stringify(expected)}, got ${JSON.stringify(route)}`)
     }

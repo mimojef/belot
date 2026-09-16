@@ -401,12 +401,13 @@ function main(): void {
       fail(`R: engine track length (${LUDO_ENGINE_TRACK_LENGTH}) must equal shared constant (${LUDO_TRACK_LENGTH})`)
     }
     if (LUDO_ENGINE_TRACK_LENGTH !== 56) fail(`R: expected canonical track length 56, got ${LUDO_ENGINE_TRACK_LENGTH}`)
-    // Виж task-а — визуална поправка: "изходният" tint/arrow маркер стои
-    // една клетка напред от ъгъла (не в самия ъгъл), затова стойностите тук
-    // отразяват текущия LUDO_START_INDEX (ludoGeometryConstants.ts), не
-    // legacy [0,14,28,42]. Самата проверка (single source of truth между
-    // engine/shared константите) остава непроменена.
-    const expectedStarts = { red: 1, blue: 15, yellow: 29, green: 43 } as const
+    // Start клетката съвпада с геометричния ъгъл на рамото (виж fix — по-стар
+    // "ъгъл + 1" вариант причиняваше видимо "стъпване" в ъгловата клетка
+    // преди diagоналния finish-entry завой). Стойностите тук отразяват
+    // текущия LUDO_START_INDEX (ludoGeometryConstants.ts). Самата проверка
+    // (single source of truth между engine/shared константите) остава
+    // непроменена.
+    const expectedStarts = { red: 0, blue: 14, yellow: 28, green: 42 } as const
     for (const [color, expected] of Object.entries(expectedStarts)) {
       const engineValue = LUDO_ENGINE_START_INDEX[color as keyof typeof expectedStarts]
       const sharedValue = LUDO_START_INDEX[color as keyof typeof expectedStarts]

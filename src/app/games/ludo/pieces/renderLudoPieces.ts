@@ -95,6 +95,13 @@ export function renderLudoPieceHtml(
   selectable: boolean,
   count = 1,
   groupIds: LudoPieceId[] = [piece],
+  // Multi-piece-cell overlap positioning (виж renderLudoPieceCluster по-долу
+  // за пълния rationale) — допълнителен inline CSS, вмъкнат СЛЕД базовия
+  // transform/pointer-events блок, за да override-ва selectively САМО
+  // transform/z-index, без да дублира целия style string. Default '' пази
+  // playLudoCaptureFlightOverlay.ts-овия call site (единичен piece, летящ
+  // извън всякаква клетка-cluster логика) напълно непроменен.
+  extraStyle = '',
 ): string {
   const color = piece.split('-')[0] as keyof typeof LUDO_COLOR_HEX
   const hex = LUDO_COLOR_HEX[color]
@@ -124,6 +131,7 @@ export function renderLudoPieceHtml(
         pointer-events:${selectable ? 'auto' : 'none'};
         cursor:${selectable ? 'pointer' : 'default'};
         transition:filter 160ms ease;
+        ${extraStyle}
       "
     >
       ${selectable ? renderSelectablePieceRing() : ''}
@@ -274,17 +282,113 @@ function clamp255(value: number): number {
   return Math.max(0, Math.min(255, value))
 }
 
-// Групираните-по-цвят пионки на една клетка се подреждат в компактен flex
-// wrap (обичайно само 1 token, освен ако клетката съдържа И 2 различни
-// цвята едновременно — рядък 1-кадърен overlap по време на capture
-// animation-а). ЕДИН visual token на цвят, с count badge при >1 реални
-// пионки от този цвят (виж piecesByColor/renderLudoPieceHtml по-горе).
-export function renderLudoPieceCluster(pieces: LudoPiece[], selectablePieceIds: Set<LudoPieceId>): string {
+// КОМПАКТЕН "collected in the square" layout (виж task-а — предишният
+// diagonal-cascade offset избутваше всеки следващ token кумулативно
+// надясно/нагоре, което при 3-4 tokens буквално изкарваше острите им
+// върхове извън клетката — "разпилян диагонал"). Вместо bottom-anchored
+// diagonal escalation, всеки token тук:
+//   1. се SCALE-ва надолу (по-малък token = повече tokens се събират без
+//      да излизат от клетката) — степента зависи от ОБЩИЯ брой tokens в
+//      клетката (виж clusterLayoutForCount по-долу), не от index-а.
+//   2. се позиционира спрямо ЦЕНТЪРА на клетката (left:50%;top:50%), НЕ
+//      спрямо долния ръб — quadrant offset-ите по-долу са ФИКСИРАНИ
+//      (не index * step кумулативно), затова никой token не може да
+//      "избяга" все по-надалеч с всеки следващ цвят.
+// Резултат: 2 tokens -> компактен overlap един до друг; 3-4 tokens -> 2x2
+// quadrant подредба, стегнато събрана в квадратчето на клетката.
+type LudoClusterSlot = { dx: number; dy: number; scale: number }
+
+// Единичен token (count===1 логически "1 цвят в клетката", но виж
+// clusterLayoutForCount extra-token overlap case) — непроменено спрямо
+// преди overlap fix-а изобщо: пълен размер, center-anchored (leko над
+// bottom-center, виж -4px overhang коментара в renderLudoPieceHtml).
+const SINGLE_SLOT: LudoClusterSlot = { dx: 0, dy: 0, scale: 1 }
+
+// 2 tokens: 0.92x (виж task-а — "по-големи, доколкото е възможно, без
+// върховете да излизат"; измерено с реален Playwright getBoundingClientRect
+// spike на desktop 1280x850 И mobile 390x844 — dy=0 означава binding
+// constraint-ът е ХОРИЗОНТАЛЕН token spread, не tip-Y, значи tokens могат
+// да останат близо до пълен размер; 0.92 остава с безопасен margin над
+// 1.0-safe границата, потвърдена и на двата viewport-а), плътно един до
+// друг хоризонтално — двата върха остават близо до cell-center по Y,
+// разделени само по X, с overlap в средата (заявката explicit позволява
+// "по-силно застъпване").
+const TWO_SLOTS: readonly LudoClusterSlot[] = [
+  { dx: -7, dy: 0, scale: 0.92 },
+  { dx: 7, dy: 0, scale: 0.92 },
+]
+
+// 3-4 tokens: 2x2 quadrant, 0.80x scale (виж task-а — "прекалено малки",
+// увеличено от предишния 0.56x). Измерено геометрично (tip позиция =
+// cellCenter + (dx, dy-4) + tokenH*(82/84-0.5)*scale спрямо dy/scale offset-
+// а) на desktop 1280x850 И mobile 390x844 (по-малката, по-ограничаваща
+// клетка — ~24.5px): mobile bottom-row tip margin остава положителен до
+// scale≈0.85, затова 0.80 пази безопасен буфер И на двата viewport-а, докато
+// е значително по-голям от предишния 0.56x (43% ръст в linear размер).
+// Offset-ите остават ФИКСИРАНИ (не index-зависими) — именно това елиминира
+// "разпилян диагонал" ефекта, dy=-7/+5 (не симетрично около 0) компенсира
+// -4px overhang базата, за да се получи визуално центриран 2x2 grid.
+const FOUR_SLOTS: readonly LudoClusterSlot[] = [
+  { dx: -8, dy: -7, scale: 0.8 },
+  { dx: 8, dy: -7, scale: 0.8 },
+  { dx: -8, dy: 5, scale: 0.8 },
+  { dx: 8, dy: 5, scale: 0.8 },
+]
+
+function clusterLayoutForCount(totalTokens: number): readonly LudoClusterSlot[] {
+  if (totalTokens <= 1) return [SINGLE_SLOT]
+  if (totalTokens === 2) return TWO_SLOTS
+  return FOUR_SLOTS
+}
+
+function clusterOffsetStyle(index: number, totalTokens: number): string {
+  const slots = clusterLayoutForCount(totalTokens)
+  const slot = slots[Math.min(index, slots.length - 1)]!
+  // left:50%;top:50% center-anchor (вместо bottom:0) + fixed dx/dy quadrant
+  // shift + -4px overhang (established, виж renderLudoPieceHtml doc
+  // коментара) + per-cluster scale. Centered anchor гарантира, че token-ът
+  // никога не "полепва" към долния ръб на клетката преди offset-а — самият
+  // offset е малък и фиксиран, затова острият връх (bottom-center на SVG
+  // силуета) остава близо до клетъчния център, вътре в границите ѝ.
+  return `position:absolute;left:50%;top:50%;transform:translate(calc(-50% + ${slot.dx}px), calc(-50% + ${slot.dy}px - 4px)) scale(${slot.scale});`
+}
+
+// Групираните-по-цвят пионки на една клетка се подреждат с controlled
+// diagonal overlap (виж task-а — "две пионки стоят твърде една върху
+// друга"): вместо flex-wrap (edge-case преди този fix — само рядък
+// 1-кадърен overlap по време на capture animation-а, вече постоянен
+// легитимен coexistence state след safe-cell fix-а), всеки color token се
+// позиционира absolute с нарастващ диагонален offset (clusterOffsetStyle
+// по-горе) — предвидимо, стабилно, никога "случайно" наредено. ЕДИН
+// visual token на цвят, с count badge при >1 реални пионки от този цвят
+// (виж piecesByColor/renderLudoPieceHtml по-горе).
+//
+// Z-ORDER (виж task-а "own pawn on top"): localColor винаги последен в
+// document order (по-късен sibling в СЪЩИЯ stacking context визуално
+// покрива по-ранните при overlap) И носи explicit z-index:100 (defense-
+// in-depth — не разчита само на document order, ако бъдещ рефакторинг
+// добави positioned ancestor между token-ите).
+export function renderLudoPieceCluster(
+  pieces: LudoPiece[],
+  selectablePieceIds: Set<LudoPieceId>,
+  localColor: LudoColor | null = null,
+): string {
   if (pieces.length === 0) return ''
 
   const colorGroups = piecesByColor(pieces)
-  const tokens = Array.from(colorGroups.values())
-    .map((group) => {
+  // Детерминистичен базов ред: по цвят име (стабилен независимо от реда в
+  // state.pieces масива), после local цвят (ако присъства в клетката)
+  // изтеглен в самия край — последен DOM node = най-висок stacking order.
+  const orderedColors = Array.from(colorGroups.keys()).sort((a, b) => {
+    const aIsLocal = a === localColor
+    const bIsLocal = b === localColor
+    if (aIsLocal !== bIsLocal) return aIsLocal ? 1 : -1
+    return a.localeCompare(b)
+  })
+
+  const tokens = orderedColors
+    .map((color, index) => {
+      const group = colorGroups.get(color)!
       // Детерминистична подредба (по id) — гарантира стабилен избор на
       // representative независимо от реда в state.pieces масива.
       const sorted = [...group].sort((a, b) => a.id.localeCompare(b.id))
@@ -294,27 +398,22 @@ export function renderLudoPieceCluster(pieces: LudoPiece[], selectablePieceIds: 
       // task-а: "не изграждай нови правила", само пази click compatibility).
       const representative = sorted.find((p) => selectablePieceIds.has(p.id)) ?? sorted[0]
       const groupIds = sorted.map((p) => p.id)
-      return renderLudoPieceHtml(representative.id, selectablePieceIds.has(representative.id), group.length, groupIds)
+      const isLocal = color === localColor
+      // z-index explicit: local винаги над всичко (100), останалите следват
+      // стабилен нарастващ ред по позиция в orderedColors (1-based, никога
+      // 0, за да не легне под самия контейнер).
+      const zIndex = isLocal ? 100 : index + 1
+      const extraStyle = `${clusterOffsetStyle(index, orderedColors.length)}z-index:${zIndex};`
+      return renderLudoPieceHtml(representative.id, selectablePieceIds.has(representative.id), group.length, groupIds, extraStyle)
     })
     .join('')
 
-  // ROOT CAUSE (измерено с реален getBoundingClientRect — виж task-а
-  // "острия им долен край да се прибере в полето без да пипаме
-  // големината"): ТОЗИ div самия е точно клетъчния размер (потвърдено —
-  // top/height съвпадат 1:1 с родителя, height:100% и align-self default
-  // работят коректно). Проблемът е ВЪТРЕ в него: flex-wrap:wrap кара
-  // browser-a да computира flex line's cross-size = max item height в реда
-  // (piece token-ите вече са по-високи от клетката, за да overflow-ват
-  // видимо над нея — виж renderLudoPieceHtml), не контейнер height-a. С
-  // единичен ред и height:100% контейнер, line-ът се anchor-ва towards TOP
-  // (не bottom, въпреки align-items:flex-end), значи overflow-ът пада ПОД
-  // клетката вместо над нея. align-content:flex-end explicit контролира
-  // именно multi/single-line placement по cross axis (различно свойство от
-  // align-items, което подравнява items ВЪТРЕ в реда) — anchors line-a
-  // towards контейнер bottom-a, елиминирайки bottom overflow-а: капката
-  // расте нагоре от клетъчната долна граница, никога отвъд нея.
+  // position:relative контейнер, точно колкото клетката (замества
+  // предишния flex-wrap) — всеки token се самопозиционира absolute спрямо
+  // него чрез clusterOffsetStyle, вместо да е flex-child subject на wrap/
+  // cross-axis логика.
   return `
-    <div style="display:flex;flex-wrap:wrap;align-items:flex-end;align-content:flex-end;justify-content:center;gap:1px;width:100%;height:100%;">
+    <div style="position:relative;width:100%;height:100%;">
       ${tokens}
     </div>
   `
@@ -331,12 +430,16 @@ export interface LudoPiecesRenderResult {
 // (подаден отвън) остава непроменен, всеки реален LudoPiece запис
 // продължава да съществува с отделния си id; renderLudoPieceCluster просто
 // решава колко DOM tokens да покаже за резултата.
-export function renderLudoPiecesByCell(pieces: LudoPiece[], legalMoves: LudoLegalMove[]): LudoPiecesRenderResult[] {
+export function renderLudoPiecesByCell(
+  pieces: LudoPiece[],
+  legalMoves: LudoLegalMove[],
+  localColor: LudoColor | null = null,
+): LudoPiecesRenderResult[] {
   const grouped = piecesByCell(pieces)
   const selectablePieceIds = new Set(legalMoves.map((m) => m.pieceId))
 
   return Array.from(grouped.entries()).map(([cellId, cellPieces]) => ({
     cellId,
-    html: renderLudoPieceCluster(cellPieces, selectablePieceIds),
+    html: renderLudoPieceCluster(cellPieces, selectablePieceIds, localColor),
   }))
 }

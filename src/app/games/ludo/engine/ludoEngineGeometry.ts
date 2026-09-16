@@ -5,13 +5,25 @@
 // ludoGeometryConstants.ts е нарочно PURE (нулева DOM/browser/ludoTypes.ts
 // зависимост), затова import-ването му тук не нарушава engine изолацията.
 
-import { LUDO_TRACK_LENGTH, LUDO_FINISH_LENGTH, LUDO_START_INDEX, ludoAdvanceTrackIndex } from '../ludoGeometryConstants'
+import {
+  LUDO_TRACK_LENGTH,
+  LUDO_FINISH_LENGTH,
+  LUDO_START_INDEX,
+  LUDO_SAFE_TRACK_INDICES,
+  ludoAdvanceTrackIndex,
+  ludoIsSafeTrackIndex,
+} from '../ludoGeometryConstants'
 import type { LudoColor } from './ludoEngineTypes'
 
 export const LUDO_ENGINE_TRACK_LENGTH = LUDO_TRACK_LENGTH
 export const LUDO_ENGINE_FINISH_LENGTH = LUDO_FINISH_LENGTH
 export const LUDO_ENGINE_START_INDEX: Record<LudoColor, number> = LUDO_START_INDEX
 export const ludoEngineAdvanceTrackIndex = ludoAdvanceTrackIndex
+// Safe/star track indices — виж ludoGeometryConstants.ts doc коментара
+// (fix: opponent piece on a star cell was incorrectly captured). Единствен
+// source of truth, споделен и с board/ludoBoardGeometry.ts (rendering).
+export const LUDO_ENGINE_SAFE_TRACK_INDICES = LUDO_SAFE_TRACK_INDICES
+export const ludoEngineIsSafeTrackIndex = ludoIsSafeTrackIndex
 
 // Canonical progress model (Phase 3B, виж task-а т.2 "CANONICAL PROGRESS
 // MODEL") — колко track-стъпки е изминала дадена пионка СПРЯМО СОБСТВЕНИЯ ѝ

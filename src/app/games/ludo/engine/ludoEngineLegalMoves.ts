@@ -2,8 +2,9 @@
 // (виж task-а). Заменя Phase 1's минимална track-only версия: сега покрива
 // home exit (само при dice===6), пълния 56-cell shared track (canonical
 // progress спрямо СОБСТВЕНИЯ start на пионката, виж ludoEngineStepsFromStart
-// в ludoEngineGeometry.ts), вход и движение във finish lane, exact finish и
-// overshoot-като-illegal.
+// в ludoEngineGeometry.ts), вход и движение във finish lane, exact finish,
+// overshoot-като-illegal, и safe/star cells (landing на safe track index
+// никога не е capture — виж isCapture изчислението по-долу).
 //
 // Canonical progress модел (task-а т.2): всяка track пионка държи absolute
 // trackIndex (0-55), но legal-move математиката винаги минава първо през
@@ -14,7 +15,7 @@
 // общо), 56..61 = вече във finish lane-а (finishIndex = totalSteps - 56,
 // 0..5), >61 = overshoot (illegal, пионката просто няма move за този dice).
 
-import { ludoEngineAdvanceTrackIndex, ludoEngineStepsFromStart, LUDO_ENGINE_START_INDEX, LUDO_ENGINE_TRACK_LENGTH, LUDO_ENGINE_FINISH_LENGTH } from './ludoEngineGeometry'
+import { ludoEngineAdvanceTrackIndex, ludoEngineStepsFromStart, ludoEngineIsSafeTrackIndex, LUDO_ENGINE_START_INDEX, LUDO_ENGINE_TRACK_LENGTH, LUDO_ENGINE_FINISH_LENGTH } from './ludoEngineGeometry'
 import type { LudoColor, LudoDiceValue, LudoGamePiece, LudoLegalMove, LudoPiecePosition } from './ludoEngineTypes'
 
 // Опитва да изчисли target позицията за ЕДНА пионка на track-а — null ако
@@ -83,9 +84,22 @@ export function computeLudoEngineLegalMoves(
     // finish lane-ът е private (task-а т.6/т.8), там isCapture винаги false.
     // (Извеждаме trackIndex-а в отделна const ПРЕДИ closure-а по-долу — `let
     // targetPosition` narrowing не се пази вътре в pieces.some() callback-а.)
+    //
+    // Safe/star клетка (LUDO_ENGINE_SAFE_TRACK_INDICES, виж
+    // ludoEngineGeometry.ts) НИКОГА не е capture target — engine-level
+    // rule, не само presentation (виж fix: opponent piece on a star cell was
+    // incorrectly captured). Движението остава legal (пионките coexist-ват
+    // на клетката, engine-ът вече поддържа мулти-цветен track occupancy
+    // навсякъде другаде — виж findLudoEngineCaptureVictims/
+    // applyLudoEngineCaptureToHome), просто isCapture е винаги false тук,
+    // значи handleMoveRequested никога не извиква capture resolution за
+    // target на safe индекс — нито victim се връща в home, нито
+    // pieces_captured event се emit-ва (→ нито capture animation, нито
+    // extra roll от capture).
     const captureTargetTrackIndex = targetPosition.kind === 'track' ? targetPosition.trackIndex : null
     const isCapture =
       captureTargetTrackIndex !== null &&
+      !ludoEngineIsSafeTrackIndex(captureTargetTrackIndex) &&
       pieces.some(
         (other) =>
           other.color !== activeColor &&

@@ -11,6 +11,7 @@ import {
   LUDO_FINISH_LENGTH,
   LUDO_HOME_SLOTS,
   LUDO_START_INDEX,
+  LUDO_SAFE_TRACK_INDICES,
   ludoAdvanceTrackIndex,
 } from '../ludoGeometryConstants'
 
@@ -38,17 +39,23 @@ export function ludoEntryTrackIndex(color: LudoColor): number {
 // от която пионката на дадения цвят завива навътре към собствения си
 // finish lane, СЛЕД пълен оборот на дъската (56 клетки) — геометрично
 // РАЗЛИЧНА клетка от ENTRY_INDEX по-горе (която е просто "start - 1",
-// съседна на СЛЕДВАЩИЯ цвят по ред, не на собствения finish). Формулата
-// (START_INDEX - 2 + LENGTH) % LENGTH е изведена и потвърдена директно
-// спрямо TRACK_GRID/FINISH_GRID координатите в renderLudoBoard.ts (виж git
-// history на task-а): за всеки цвят тази клетка е grid-съседна на
-// FINISH_GRID[color][0] (първата finish клетка), потвърдено симетрично за
-// и четирите рамена.
+// съседна на СЛЕДВАЩИЯ цвят по ред, не на собствения finish — но е
+// неизползвана извън дефиницията си, виж ludoEntryTrackIndex). Формулата
+// (START_INDEX - 1 + LENGTH) % LENGTH е изведена и потвърдена директно
+// спрямо TRACK_GRID/FINISH_GRID координатите тук: за всеки цвят тази клетка
+// е grid-съседна на FINISH_GRID[color][0] (първата finish клетка),
+// потвърдено симетрично за и четирите рамена (red: track-55=(0,7) до
+// finish[0]=(1,7); blue: track-13=(7,0) до finish[0]=(7,1); yellow:
+// track-27=(14,7) до finish[0]=(13,7); green: track-41=(7,14) до
+// finish[0]=(7,13)). Офсетът е "-1", не "-2" — калибриран спрямо start
+// клетката, съвпадаща с геометричния ъгъл на рамото (виж LUDO_START_INDEX
+// doc коментара в ludoGeometryConstants.ts); при по-стар "start = ъгъл + 1"
+// вариант офсетът беше "-2" спрямо СЪЩАТА физическа клетка.
 const FINISH_ENTRY_INDEX: Record<LudoColor, number> = {
-  red: (LUDO_START_INDEX.red + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
-  blue: (LUDO_START_INDEX.blue + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
-  yellow: (LUDO_START_INDEX.yellow + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
-  green: (LUDO_START_INDEX.green + LUDO_TRACK_LENGTH - 2) % LUDO_TRACK_LENGTH,
+  red: (LUDO_START_INDEX.red + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  blue: (LUDO_START_INDEX.blue + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  yellow: (LUDO_START_INDEX.yellow + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
+  green: (LUDO_START_INDEX.green + LUDO_TRACK_LENGTH - 1) % LUDO_TRACK_LENGTH,
 }
 
 export function ludoFinishEntryTrackIndex(color: LudoColor): number {
@@ -203,22 +210,12 @@ export function ludoStartCellIds(): Partial<Record<LudoColor, LudoCellId>> {
   return result
 }
 
-// Класическите "safe cell" звезди (виж task-а — референтна Ludo King
-// дъска): по една допълнителна маркирана клетка на всяко рамо, разположена
-// точно 8 track-стъпки след СЪСЕДНИЯ (не собствения) start — т.е. клетката
-// по средата на следващия сегмент, непосредствено преди пионките да завият
-// навътре към своя финиш. Offset-ът (+8) е фиксираната класическа Ludo
-// правило-константа (не производна на track дължината/брой цветове — same
-// дистанция важи независимо от layout-а), приложена спрямо ВСЕКИ start
-// index, за да получим точно 4 safe клетки общо (по една на рамо), symmetric
-// разположени. Чисто presentation marker — НЕ engine rule (капчещи пионки
-// тук не получават никаква специална защита от capture, само визуален star
-// indicator, идентично на предишния star-at-start marker преди да бъде
-// заменен с цветния start tint).
-const LUDO_SAFE_CELL_OFFSET = 8
-
+// Presentation wrapper над canonical LUDO_SAFE_TRACK_INDICES
+// (../ludoGeometryConstants.ts — ЕДИНСТВЕНИЯТ source of truth, споделен и с
+// engine/ludoEngineLegalMoves.ts за capture eligibility, виж fix — bug
+// report: opponent piece on a star cell was incorrectly captured). Тук само
+// превръщаме track индексите в cell id-та за рендиране — никакво отделно
+// изчисление/дублиране на offset-а.
 export function ludoSafeCellIds(): LudoCellId[] {
-  return LUDO_COLORS.map((color) =>
-    ludoCellId({ kind: 'track', index: (LUDO_START_INDEX[color] + LUDO_SAFE_CELL_OFFSET) % LUDO_TRACK_LENGTH }),
-  )
+  return LUDO_SAFE_TRACK_INDICES.map((index) => ludoCellId({ kind: 'track', index }))
 }

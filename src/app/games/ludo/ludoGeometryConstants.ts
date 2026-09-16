@@ -24,24 +24,55 @@ export const LUDO_HOME_SLOTS = 4
 // board/ludoBoardGeometry.ts) — track-ът е непрекъсната обиколка без
 // "декоративни" клетки, които engine-ът би прескачал.
 //
-// +1 спрямо ъгловата клетка на всяко рамо (виж task-а — референтна Ludo
-// King дъска: цветният "изходен" квадрат стои една клетка НАПРЕД по
-// посоката на движение от самия ъгъл, не в самия ъгъл). Официална start
-// клетка за всеки цвят (визуален tint/arrow маркер И бъдещата "изкарване
-// от home" логика, когато се имплементира — прототипът все още няма home-
-// exit legal moves, виж ludoEngineLegalMoves.ts) вече е "ъгъл + 1" по
-// часовниковата посока: red 1, blue 15, yellow 29, green 43. TRACK_LENGTH/
-// FINISH_LENGTH/HOME_SLOTS/broя на полетата НЕ са пипнати — само кой track
-// index носи семантиката "тук влиза пионката".
+// Start клетката съвпада с геометричния ъгъл на рамото (arm[0] в
+// buildTrackGrid) — ПОПРАВКА спрямо предишен "+1 спрямо ъгъла" вариант
+// (виж git history): визуалната ъглова бяла клетка е самото място, откъдето
+// пионката излиза от home, и откъдето започва прибирането след пълна
+// обиколка (ENTRY_INDEX/FINISH_ENTRY_INDEX в board/ludoBoardGeometry.ts са
+// derive-нати formулно оттук — start-1/start-2 — значи местят се автоматично
+// заедно с тази константа). "+1" вариантът причиняваше видимо "стъпване" в
+// ъгловата клетка ПРЕДИ diagоналния finish-entry завой, вместо самата тя да
+// Е start/finish-entry позицията. red 0, blue 14, yellow 28, green 42.
+// TRACK_LENGTH/FINISH_LENGTH/HOME_SLOTS/броя на полетата НЕ са пипнати —
+// само кой track index носи семантиката "тук влиза/се прибира пионката".
 export const LUDO_START_INDEX: Record<LudoGeometryColor, number> = {
-  red: 1,
-  blue: 15,
-  yellow: 29,
-  green: 43,
+  red: 0,
+  blue: 14,
+  yellow: 28,
+  green: 42,
 }
 
 export function ludoAdvanceTrackIndex(index: number, steps: number): number {
   return (index + steps) % LUDO_TRACK_LENGTH
+}
+
+// Класическите "safe cell" звезди (виж task-а — референтна Ludo King дъска):
+// по една допълнителна маркирана клетка на всяко рамо, разположена точно 8
+// track-стъпки след СЪСЕДНИЯ (не собствения) start — т.е. клетката по
+// средата на следващия сегмент, непосредствено преди пионките да завият
+// навътре към своя финиш. Offset-ът (+8) е фиксираната класическа Ludo
+// правило-константа (не производна на track дължината/брой цветове — same
+// дистанция важи независимо от layout-а), приложена спрямо ВСЕКИ start
+// index, за да получим точно 4 safe клетки общо (по една на рамо),
+// symmetric разположени.
+//
+// ENGINE RULE, не само presentation marker (виж fix — bug report: opponent
+// piece on a star cell was incorrectly captured) — LUDO_SAFE_TRACK_INDICES е
+// ЕДИНСТВЕНИЯТ source of truth, import-ван И от engine/ludoEngineLegalMoves.ts
+// (capture eligibility) И от board/ludoBoardGeometry.ts (rendering на
+// звездите) — никога дублиран. Пионка на тези track индекси не може да бъде
+// capture-ната от opponent landing — движението пак е legal (пионките
+// coexist-ват на клетката, engine-ът вече поддържа мулти-цветен track
+// occupancy навсякъде другаде), просто isCapture е винаги false за target на
+// safe индекс.
+const LUDO_SAFE_CELL_OFFSET = 8
+
+export const LUDO_SAFE_TRACK_INDICES: readonly number[] = (
+  Object.keys(LUDO_START_INDEX) as LudoGeometryColor[]
+).map((color) => (LUDO_START_INDEX[color] + LUDO_SAFE_CELL_OFFSET) % LUDO_TRACK_LENGTH)
+
+export function ludoIsSafeTrackIndex(trackIndex: number): boolean {
+  return LUDO_SAFE_TRACK_INDICES.includes(trackIndex)
 }
 
 // GAMEPLAY TURN ORDER — семантично РАЗЛИЧНО от LUDO_COLORS (ludoTypes.ts/

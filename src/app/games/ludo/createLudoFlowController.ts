@@ -187,6 +187,22 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     return result
   }
 
+  // ЕДИНСТВЕНОТО място в целия Ludo модул, което пресмята "кой съм АЗ" —
+  // board perspective (renderLudoBoard), piece stacking z-order
+  // (renderLudoPieceCluster) и rollable/reclaim/popup логиката ТУК долу
+  // всички четат СЪЩАТА тази константа (директно, или чрез
+  // currentScreenState().localColor). Преди fix-а renderLudoGameScreen.ts
+  // независимо предефинираше "find first non-bot" отделно — работеше само
+  // защото засега има точно 1 non-bot в createLudoMockPlayers() (Иван/red).
+  // "find first non-bot" остава единственият наличен сигнал, защото Ludo
+  // все още е single-client prototype без реално server/profileId wiring
+  // (createLobbyFlowController.ts::openLudoGameOverlay не подава roomId/
+  // profileId/seat на createLudoFlowController — виж task-а "AUDIT LOCAL
+  // VIEWER IDENTITY": реален multiplayer identity source не съществува
+  // архитектурно още). Когато такъв source се появи (server snapshot със
+  // seat/profileId), само ТУК трябва да се смени resolution логиката —
+  // всичко downstream (render layer, tests) вече чете localColor като
+  // explicit подадена стойност, не я пресмята повторно.
   const localColor: LudoColor = (
     (Object.values(players) as LudoPlayer[]).find((p) => !p.isBot)?.color ?? 'red'
   )
@@ -229,6 +245,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   function currentScreenState(): LudoGameScreenState {
     return {
       players,
+      // Единствен source of truth за "кой съм АЗ" (виж localColor const
+      // по-горе) — подаден explicit, не преизчислен в render layer-a (виж
+      // LudoGameScreenState.localColor doc коментара в
+      // renderLudoGameScreen.ts за пълния rationale).
+      localColor,
       pieces: currentUiPieces(),
       // По време на анимация не показваме legal-move highlights/capture
       // ring-ове — вече е избран конкретен ход, engine-ът е в turn_complete

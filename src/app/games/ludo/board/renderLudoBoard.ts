@@ -160,8 +160,10 @@ function trackCellMarker(
   if (finishEntryColor) return finishEntryArrowMarker(finishEntryColor, finishEntryRotationDeg)
   // Safe-cell звезда (виж task-а — референтна Ludo King дъска: бели звезди
   // на определени безопасни клетки по трасето, симетрично на всяко рамо).
-  // Чисто presentation marker — виж ludoSafeCellIds() doc коментара за
-  // пълния rationale (НЕ engine rule, capture logic-ата не е пипната).
+  // Rendering marker за ENGINE rule (виж ludoGeometryConstants.ts
+  // LUDO_SAFE_TRACK_INDICES doc коментара + engine/ludoEngineLegalMoves.ts
+  // isCapture изчислението) — тези клетки вече реално предпазват opponent
+  // пионка от capture, не само визуален indicator.
   if (isSafeCell) return safeCellStarMarker()
   return ''
 }

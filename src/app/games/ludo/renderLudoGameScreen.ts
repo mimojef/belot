@@ -158,6 +158,17 @@ const LUDO_MOBILE_BOARD_SIZE_CSS = `min(calc(100dvh - ${LUDO_MOBILE_VERTICAL_CHR
 
 export interface LudoGameScreenState {
   players: Record<LudoColor, LudoPlayer>
+  // Explicit viewer identity — ЕДИНСТВЕН source of truth, подаден от
+  // controller-а (createLudoFlowController.ts::localColor), НЕ преизчислен
+  // тук (виж git history на fix-а: старият resolveLocalPlayerColor()
+  // "find first non-bot player" дублираше СЪЩАТА логика в два независими
+  // файла — работи само защото засега има точно 1 non-bot в mock roster-а;
+  // при реален multiplayer wiring с 2+ real players "first non-bot" вече
+  // НЕ би отговорило коректно на "кой съм АЗ" за конкретния client). Board
+  // perspective (renderLudoBoard) И piece stacking z-order
+  // (renderLudoPieceCluster) четат ТОЗИ same поле — никога независимо
+  // пресмятане на localColor извън controller-а.
+  localColor: LudoColor
   pieces: LudoPiece[]
   legalMoves: LudoLegalMove[]
   activeColor: LudoColor
@@ -196,22 +207,6 @@ export interface LudoGameScreenState {
   canRollDice: boolean
   turnSecondsLeft: number
   useMobileLayout: boolean
-}
-
-// "Локален" играч = единственият не-бот в mock състава (Иван/red в
-// createLudoMockPlayers) — единствения, чийто dice control в player card-а
-// е реално clickable (isRollable долу). За всички останали активни играчи
-// (бот на ход) dice control-ът все пак се показва (визуално "чака да
-// хвърли"), но без click handler — не сменяме поведението, само мястото му
-// (виж task-а: старият отделен бутон/"Х хвърля зара" текст под дъската
-// изразяваше точно това чрез isLocalPlayerTurn branching, сега живее per-
-// card). Няма реален auth/сесия в prototype-а, затова isBot е единственият
-// наличен сигнал; при реален сървър това ще дойде от snapshot-а.
-function resolveLocalPlayerColor(players: Record<LudoColor, LudoPlayer>): LudoColor {
-  const localEntry = (Object.entries(players) as Array<[LudoColor, LudoPlayer]>).find(
-    ([, player]) => !player.isBot,
-  )
-  return localEntry ? localEntry[0] : 'red'
 }
 
 function renderPlayerPanelSlot(
@@ -267,7 +262,7 @@ function renderPlayerPanelSlot(
 }
 
 export function renderLudoGameScreen(state: LudoGameScreenState): string {
-  const localColor = resolveLocalPlayerColor(state.players)
+  const localColor = state.localColor
   const boardHtml = renderLudoBoard(localColor)
 
   if (state.useMobileLayout) {
@@ -400,8 +395,8 @@ function renderLudoHeader(useMobileLayout: boolean): string {
 // createLudoGameScreen mount-не в DOM; засега прост helper за инициален
 // render (следващ patch-driven re-render идва с интерактивност).
 export function applyLudoBoardContent(root: ParentNode, state: LudoGameScreenState): void {
-  const localColor = resolveLocalPlayerColor(state.players)
-  const pieceFragments = renderLudoPiecesByCell(state.pieces, state.legalMoves)
+  const localColor = state.localColor
+  const pieceFragments = renderLudoPiecesByCell(state.pieces, state.legalMoves, localColor)
   for (const { cellId, html } of pieceFragments) {
     const container = root.querySelector(`[data-ludo-cell-pieces="${cellId}"]`)
     if (container) container.innerHTML = html
