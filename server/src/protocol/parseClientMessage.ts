@@ -354,8 +354,13 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     if (parsed.type === 'submit_partner_rating') {
       const roomId = normalizeRequiredText(parsed.roomId)
       const ratingValue = normalizePartnerRatingValue(parsed.ratingValue)
+      // Client correlation id — сървърът само echo-ва тази стойност
+      // непроменена обратно в partner_rating_result, не я тълкува. Виж
+      // messageTypes.ts::PartnerRatingResultMessage doc коментара за
+      // пълния stale-result rationale.
+      const requestId = normalizeRequiredText(parsed.requestId)
 
-      if (roomId === null || ratingValue === null) {
+      if (roomId === null || ratingValue === null || requestId === null) {
         return null
       }
 
@@ -363,6 +368,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         type: 'submit_partner_rating',
         roomId,
         ratingValue,
+        requestId,
       }
     }
 

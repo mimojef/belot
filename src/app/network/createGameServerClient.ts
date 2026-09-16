@@ -820,6 +820,7 @@ export type ClientMessage =
       type: 'submit_partner_rating'
       roomId: string
       ratingValue: number
+      requestId: string
     }
   | {
       type: 'request_replay'
@@ -1295,6 +1296,21 @@ export type PartnerRatingSubmittedMessage = {
   roomId: string
   ratingValue: number
   raterDisplayName: string
+}
+
+// Explicit success/failure ack обратно към submitting connection-а (за
+// разлика от PartnerRatingSubmittedMessage, notification към ПАРТНЬОРА) —
+// виж server/src/protocol/messageTypes.ts::PartnerRatingResultMessage doc
+// коментара за пълния root cause/rationale, вкл. requestId correlation-а
+// (roomId сам по себе си не различава delayed резултат от предишен match в
+// СЪЩАТА стая от текущ pending submit).
+export type PartnerRatingResultMessage = {
+  type: 'partner_rating_result'
+  roomId: string
+  requestId: string
+  ok: boolean
+  alreadyRated: boolean
+  message?: string
 }
 
 export type RoomSnapshotMessage = {
@@ -2312,6 +2328,7 @@ export type ServerMessage =
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage
+  | PartnerRatingResultMessage
   | RoomSnapshotMessage
   | PlayerProfileMessage
   | ChatMessageReceivedMessage
@@ -2495,7 +2512,7 @@ export type GameServerClient = {
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
   resumeHumanControl: (roomId: string) => void
-  submitPartnerRating: (roomId: string, ratingValue: number) => void
+  submitPartnerRating: (roomId: string, ratingValue: number, requestId: string) => void
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
@@ -2745,11 +2762,12 @@ export function createGameServerClient(
     })
   }
 
-  function submitPartnerRating(roomId: string, ratingValue: number): void {
+  function submitPartnerRating(roomId: string, ratingValue: number, requestId: string): void {
     send({
       type: 'submit_partner_rating',
       roomId,
       ratingValue,
+      requestId,
     })
   }
 

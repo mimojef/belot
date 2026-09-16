@@ -6534,8 +6534,8 @@ const activeRoom = createActiveRoomFlowController({
   resumeHumanControl: (roomId) => {
     client.resumeHumanControl(roomId)
   },
-  submitPartnerRating: (roomId, ratingValue) => {
-    client.submitPartnerRating(roomId, ratingValue)
+  submitPartnerRating: (roomId, ratingValue, requestId) => {
+    client.submitPartnerRating(roomId, ratingValue, requestId)
   },
   sendReplayVote: (roomId) => {
     client.sendReplayVote(roomId)

@@ -124,7 +124,7 @@ export type PlayerProgressStore = {
     room: ServerRoom,
     raterSeat: Seat,
     ratingValue: number,
-  ) => { ok: true } | { ok: false; message: string }
+  ) => { ok: true } | { ok: false; message: string; alreadyRated: boolean }
   close: () => void
 }
 
@@ -1586,11 +1586,12 @@ export async function createPlayerProgressStore(
     room: ServerRoom,
     raterSeat: Seat,
     ratingValue: number,
-  ): { ok: true } | { ok: false; message: string } {
+  ): { ok: true } | { ok: false; message: string; alreadyRated: boolean } {
     if (getRuntimeMatchEnded(room) === null) {
       return {
         ok: false,
         message: 'Оценка може да се даде само след края на играта.',
+        alreadyRated: false,
       }
     }
 
@@ -1598,6 +1599,7 @@ export async function createPlayerProgressStore(
       return {
         ok: false,
         message: 'Оценката трябва да е между 1 и 6.',
+        alreadyRated: false,
       }
     }
 
@@ -1611,6 +1613,7 @@ export async function createPlayerProgressStore(
       return {
         ok: false,
         message: 'Твоят профил не е намерен.',
+        alreadyRated: false,
       }
     }
 
@@ -1618,6 +1621,7 @@ export async function createPlayerProgressStore(
       return {
         ok: false,
         message: 'Партньорът няма профил за оценяване.',
+        alreadyRated: false,
       }
     }
 
@@ -1632,9 +1636,15 @@ export async function createPlayerProgressStore(
         ratingValue,
       )
     } catch {
+      // UNIQUE (room_id, rated_by_profile_id, rated_profile_id) constraint
+      // violation — единствената причина insertPartnerRatingStatement може
+      // да хвърли тук (валидациите по-горе вече покриха другите error
+      // случаи). alreadyRated=true казва на клиента, че сървърът ВЕЧЕ има
+      // тази оценка — safe да премине в completed state, не retry-able.
       return {
         ok: false,
         message: 'Вече си оценил партньора за тази игра.',
+        alreadyRated: true,
       }
     }
 

@@ -184,6 +184,7 @@
     "check:profile-name-release-and-admin-edit-target": "tsx scripts/checkProfileNameReleaseAndAdminEditTarget.ts",
     "check:avatar-upload-security": "tsx scripts/checkAvatarUploadSecurity.ts",
     "check:players-search": "tsx scripts/checkPlayersSearch.ts",
+    "check:partner-rating-server-idempotency": "tsx scripts/checkPartnerRatingServerIdempotency.ts",
     "check:debounced-player-search": "tsx scripts/checkDebouncedPlayerSearch.ts",
     "check:compute-players-page-order": "tsx scripts/checkComputePlayersPageOrder.ts",
     "check:players-pagination": "tsx scripts/checkPlayersPagination.ts",

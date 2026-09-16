@@ -19061,12 +19061,37 @@ wsServer.on('connection', (socket, request) => {
         )
 
         if (!result.ok) {
+          // Explicit ack обратно към submitting connection-а (за разлика от
+          // partner_rating_submitted push-а по-долу, който отива само до
+          // ПАРТНЬОРА) — client-ът различава SUBMITTING/SUBMITTED, вместо да
+          // приема click-а за success веднага (виж
+          // createActiveRoomFlowController.ts partner rating audit-а).
+          // requestId е чист echo на message.requestId — виж
+          // PartnerRatingResultMessage doc коментара в messageTypes.ts за
+          // stale-result correlation rationale-а (roomId сам по себе си не
+          // различава Match 1 от Match 2 в СЪЩАТА стая).
+          safeSendToConnection(connection.id, {
+            type: 'partner_rating_result',
+            roomId: message.roomId,
+            requestId: message.requestId,
+            ok: false,
+            alreadyRated: result.alreadyRated,
+            message: result.message,
+          })
           safeSendToConnection(connection.id, {
             type: 'error',
             message: result.message,
           })
           return
         }
+
+        safeSendToConnection(connection.id, {
+          type: 'partner_rating_result',
+          roomId: message.roomId,
+          requestId: message.requestId,
+          ok: true,
+          alreadyRated: false,
+        })
 
         const raterSeat = latestConnection.currentSeat
         const partnerSeat = getPartnerSeat(raterSeat)

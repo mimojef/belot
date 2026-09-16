@@ -13,6 +13,15 @@ import {
 } from './activeRoomShared'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 
+// Module-level run counter — гарантира, че при бърз повторен render() (напр.
+// countdown tick, докато numeric prize animation-ът още тече) само
+// НАЙ-НОВИЯТ RAF loop продължава да пише в DOM-а (виж call site-а в
+// renderMatchEndedScreen по-долу). И двата loop-а (стар/нов) computират
+// elapsed спрямо СЪЩИЯ prizeAnimationStartedAt, значи никога няма видима
+// разлика в стойността — това е чисто defense-in-depth срещу дублирано
+// scheduling work, не корекция на грешна стойност.
+let prizeAnimationRunSeq = 0
+
 type RenderMatchEndedScreenOptions = {
   root: HTMLDivElement
   game: RoomGameSnapshot
@@ -22,12 +31,52 @@ type RenderMatchEndedScreenOptions = {
   scaledStageWidth: number
   scaledStageHeight: number
   prizeAmount?: number | null
-  skipPrizeAnimation?: boolean
+  // Absolute Unix-ms timestamp, зададен ЕДНОКРАТНО от повикващия
+  // (createActiveRoomFlowController.ts) при ПЪРВИЯ render на match-ended
+  // екрана с награда — НЕ locally computиран performance.now() тук (виж
+  // "ROOT CAUSE" коментара по-долу до RAF loop-а: match-ended screen-ът се
+  // ПЪЛНО re-render-ва при всеки WebSocket room_snapshot по време на тази
+  // фаза — leave/replay vote, bot-takeover, reconnect catch-up и т.н., НЕ
+  // самия секунден countdown tick — а стар вариант стартираше НОВ 1500ms
+  // цикъл при всеки такъв re-render, което при достатъчно чест/непрекъснат
+  // re-render burst може да остави animation-а stuck на междинна/нулева
+  // стойност).
+  // Deadline-базиран модел (established pattern в проекта — виж Ludo
+  // orchestrator turnStartedAt/rollDeadlineAt) — elapsed се смята СПРЯМО
+  // този единствен timestamp на всеки render/RAF кадър, никога не се
+  // рестартира. null означава "все още няма прогрес" (viewer никога не е
+  // видял тази награда) — render-ът тогава инициализира стойността чрез
+  // onPrizeAnimationStart callback-а по-долу.
+  prizeAnimationStartedAt?: number | null
+  onPrizeAnimationStart?: (startedAt: number) => void
+  // Authoritative/stable флаг, собственост на повикващия
+  // (createActiveRoomFlowController.ts) — виж onPartnerRatingSubmitted
+  // по-долу и doc коментара при click handler-a. Same clas bug като prize
+  // animation-a: предишната версия disable-ваше бутоните само с DOM
+  // mutation след click, без да пази state в controller-а — следващ пълен
+  // re-render (room_snapshot от leave/replay vote, bot-takeover, reconnect)
+  // пресъздаваше root.innerHTML от нула и връщаше активните бутони,
+  // позволявайки повторен submit.
+  //
+  // Tri-state, НЕ boolean — виж post-fix audit-а за "false-success UI"
+  // риска: клик сам по себе си НЕ е server-confirmed success.
+  //   'idle'       — активни бутони, потребителят все още не е оценил.
+  //   'submitting' — temporary optimistic disable (предотвратява
+  //                  double-click докато чакаме server response), показва
+  //                  "Изпращане..." — НЕ permanent completed текст.
+  //   'submitted'  — server-confirmed success (ИЛИ alreadyRated duplicate
+  //                  response) — permanent "Оценката е изпратена".
+  partnerRatingStatus?: 'idle' | 'submitting' | 'submitted'
   countdownSeconds: number
   isPrivateTableOrigin?: boolean
   onReturnToLobby: () => void
   onStartNewGame?: () => void
   onSubmitPartnerRating?: (ratingValue: number) => void
+  // Извиква се веднага след клик върху rating бутон (преди самия
+  // onSubmitPartnerRating fire-and-forget WebSocket send) — повикващият
+  // трябва да закачи 'submitting' state тук (виж partnerRatingStatus
+  // по-горе), НЕ да разчита DOM mutation-а по-долу да оцелее re-render.
+  onPartnerRatingSubmitted?: () => void
   onReplayVote?: () => void
   onLeaveVote?: () => void
 }
@@ -52,6 +101,25 @@ function getTeamScore(
   team: Team,
 ): number {
   return team === 'A' ? score.teamA : score.teamB
+}
+
+// Стабилен, deadline-базиран numeric counting модел (виж
+// RenderMatchEndedScreenOptions.prizeAnimationStartedAt doc коментара за
+// пълния root cause/rationale). ЕДИН source на truth за duration/easing/
+// текстовата формула, споделен между initial HTML render (за да не мигне
+// "+0" дори за 1 кадър, ако render-ът се случи late — CASE G/re-render >
+// duration) и RAF loop-а по-долу — гарантира, че двете НИКОГА не могат да
+// изчислят различна стойност за same elapsed.
+const PRIZE_COUNT_DURATION_MS = 1500
+
+function computePrizeDisplayAmount(target: number, elapsedMs: number): number {
+  const t = Math.min(Math.max(elapsedMs, 0) / PRIZE_COUNT_DURATION_MS, 1)
+  const eased = 1 - Math.pow(1 - t, 3)
+  return t >= 1 ? target : Math.round(eased * target)
+}
+
+function formatPrizeText(amount: number): string {
+  return `+${amount.toLocaleString('bg-BG')}`
 }
 
 function getSeatInitial(displayName: string): string {
@@ -227,7 +295,11 @@ function renderTeamPlayers(
   `
 }
 
-function renderPartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string {
+function renderPartnerRating(
+  localSeat: Seat,
+  seats: RoomSeatSnapshot[],
+  partnerRatingStatus: 'idle' | 'submitting' | 'submitted',
+): string {
   const partnerSeat = getPartnerSeat(localSeat)
   const partner = seats.find((seat) => seat.seat === partnerSeat) ?? null
 
@@ -235,12 +307,22 @@ function renderPartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string
     return ''
   }
 
+  if (partnerRatingStatus === 'submitted') {
+    return `
+      <div data-partner-rating-panel="1" style="margin-top:14px;">
+        <div style="color:#bef264;font-size:13px;font-weight:900;">Оценката е изпратена.</div>
+      </div>
+    `
+  }
+
+  const isSubmitting = partnerRatingStatus === 'submitting'
+
   return `
     <div data-partner-rating-panel="1" style="margin-top:14px;">
       <div style="font-size:12px;font-weight:900;color:rgba(226,232,240,0.60);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:9px;">
-        Оцени партньор
+        ${isSubmitting ? 'Изпращане...' : 'Оцени партньор'}
       </div>
-      <div style="display:flex;gap:8px;">
+      <div style="display:flex;gap:8px;${isSubmitting ? 'opacity:0.5;' : ''}">
         ${[1, 2, 3, 4, 5, 6]
           .map((rating) => `
             <button
@@ -248,6 +330,7 @@ function renderPartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string
               data-partner-rating-value="${rating}"
               aria-label="Оцени с ${rating}"
               title="${rating}/6"
+              ${isSubmitting ? 'disabled' : ''}
               style="
                 width:28px;
                 height:28px;
@@ -257,7 +340,7 @@ function renderPartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string
                 color:#101010;
                 font-size:13px;
                 font-weight:900;
-                cursor:pointer;
+                cursor:${isSubmitting ? 'default' : 'pointer'};
                 display:flex;
                 align-items:center;
                 justify-content:center;
@@ -353,7 +436,11 @@ function renderMobilePlayerTile(
   `
 }
 
-function renderMobilePartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): string {
+function renderMobilePartnerRating(
+  localSeat: Seat,
+  seats: RoomSeatSnapshot[],
+  partnerRatingStatus: 'idle' | 'submitting' | 'submitted',
+): string {
   const partnerSeat = getPartnerSeat(localSeat)
   const partner = seats.find((seat) => seat.seat === partnerSeat) ?? null
 
@@ -361,12 +448,22 @@ function renderMobilePartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): 
     return ''
   }
 
+  if (partnerRatingStatus === 'submitted') {
+    return `
+      <div data-partner-rating-panel="1" style="display:grid;gap:8px;">
+        <div style="color:#bef264;font-size:13px;font-weight:900;text-align:center;">Оценката е изпратена.</div>
+      </div>
+    `
+  }
+
+  const isSubmitting = partnerRatingStatus === 'submitting'
+
   return `
     <div data-partner-rating-panel="1" style="display:grid;gap:8px;">
       <div style="font-size:11px;font-weight:900;color:rgba(226,232,240,0.62);text-transform:uppercase;letter-spacing:0.06em;">
-        Оцени партньор
+        ${isSubmitting ? 'Изпращане...' : 'Оцени партньор'}
       </div>
-      <div style="display:flex;gap:7px;justify-content:center;">
+      <div style="display:flex;gap:7px;justify-content:center;${isSubmitting ? 'opacity:0.5;' : ''}">
         ${[1, 2, 3, 4, 5, 6]
           .map((rating) => `
             <button
@@ -374,6 +471,7 @@ function renderMobilePartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): 
               data-partner-rating-value="${rating}"
               aria-label="Оцени с ${rating}"
               title="${rating}/6"
+              ${isSubmitting ? 'disabled' : ''}
               style="
                 width:30px;
                 height:30px;
@@ -383,7 +481,7 @@ function renderMobilePartnerRating(localSeat: Seat, seats: RoomSeatSnapshot[]): 
                 color:#101010;
                 font-size:13px;
                 font-weight:900;
-                cursor:pointer;
+                cursor:${isSubmitting ? 'default' : 'pointer'};
                 display:flex;
                 align-items:center;
                 justify-content:center;
@@ -403,9 +501,11 @@ function renderMobileMatchEndedPanel(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
   localSeat: Seat,
-  prizeAmount?: number | null,
+  prizeAmount: number | null | undefined,
+  prizeAnimationStartedAt: number | null,
+  renderNow: number,
+  partnerRatingStatus: 'idle' | 'submitting' | 'submitted',
   countdownSeconds = 120,
-  skipPrizeAnimation = false,
   isPrivateTableOrigin = false,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
@@ -459,7 +559,7 @@ function renderMobileMatchEndedPanel(
           >
             ${resultLabel}
           </div>
-          ${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${skipPrizeAnimation ? `+${prizeAmount.toLocaleString('bg-BG')}` : '+0'}</div>` : ''}
+          ${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</div>` : ''}
         </div>
 
         <div
@@ -489,7 +589,7 @@ function renderMobileMatchEndedPanel(
           ${sortedSeats.map((s) => renderMobilePlayerTile(s, replayVotes.includes(s.seat), leaveVotes.includes(s.seat))).join('')}
         </div>
 
-        ${renderMobilePartnerRating(localSeat, seats)}
+        ${renderMobilePartnerRating(localSeat, seats, partnerRatingStatus)}
 
         <div style="display:grid;gap:8px;">
           <button
@@ -577,10 +677,12 @@ function renderMatchEndedPanel(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
   localSeat: Seat,
-  prizeAmount?: number | null,
+  prizeAmount: number | null | undefined,
+  prizeAnimationStartedAt: number | null,
+  renderNow: number,
+  partnerRatingStatus: 'idle' | 'submitting' | 'submitted',
   _onReplayVote?: () => void,
   countdownSeconds = 120,
-  skipPrizeAnimation = false,
   isPrivateTableOrigin = false,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
@@ -637,7 +739,7 @@ function renderMatchEndedPanel(
               letter-spacing:0.04em;
             "
           >
-            ${resultLabel}${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">${skipPrizeAnimation ? `+${prizeAmount.toLocaleString('bg-BG')}` : '+0'}</span>` : ''}
+            ${resultLabel}${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</span>` : ''}
           </div>
         </div>
         <div style="height:2px;background:linear-gradient(90deg, transparent 0%, #facc15 30%, #facc15 70%, transparent 100%);margin-bottom:20px;border-radius:1px;"></div>
@@ -650,7 +752,7 @@ function renderMatchEndedPanel(
             align-items:stretch;
           "
         >
-          ${renderTeamPlayers('Ние', ourSeats, ourScore, replayVotes, leaveVotes, renderPartnerRating(localSeat, seats))}
+          ${renderTeamPlayers('Ние', ourSeats, ourScore, replayVotes, leaveVotes, renderPartnerRating(localSeat, seats, partnerRatingStatus))}
           <div style="background:linear-gradient(180deg,transparent 0%,#facc15 25%,#facc15 75%,transparent 100%);border-radius:1px;"></div>
           ${renderTeamPlayers('Вие', theirSeats, theirScore, replayVotes, leaveVotes)}
         </div>
@@ -762,15 +864,29 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     scaledStageWidth,
     scaledStageHeight,
     prizeAmount,
-    skipPrizeAnimation = false,
+    prizeAnimationStartedAt: prizeAnimationStartedAtOption = null,
+    onPrizeAnimationStart,
+    partnerRatingStatus = 'idle',
     countdownSeconds,
     isPrivateTableOrigin = false,
     onReturnToLobby,
     onStartNewGame,
     onSubmitPartnerRating,
+    onPartnerRatingSubmitted,
     onReplayVote,
     onLeaveVote,
   } = options
+  const renderNow = Date.now()
+  // Инициализира се ЕДНОКРАТНО, при първия render с реална награда — виж
+  // doc коментара на prizeAnimationStartedAt по-горе. Ако повикващият вече
+  // подава timestamp (следващ re-render на СЪЩИЯ match-ended екран), той се
+  // ползва directно — elapsed никога не се пресмята спрямо нов "now",
+  // прекъсвайки/рестартирайки прогреса.
+  let prizeAnimationStartedAt = prizeAnimationStartedAtOption
+  if (prizeAnimationStartedAt === null && prizeAmount && prizeAmount > 0) {
+    prizeAnimationStartedAt = renderNow
+    onPrizeAnimationStart?.(prizeAnimationStartedAt)
+  }
   const isPhoneLayout = isPhoneLayoutViewport()
   const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
   const tableBackground = isPhoneLayout
@@ -796,7 +912,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
           font-family:Inter, system-ui, sans-serif;
         "
       >
-        ${renderMobileMatchEndedPanel(game, seats, localSeat, prizeAmount, countdownSeconds, skipPrizeAnimation, isPrivateTableOrigin)}
+        ${renderMobileMatchEndedPanel(game, seats, localSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, countdownSeconds, isPrivateTableOrigin)}
       </div>
     `
   } else {
@@ -846,7 +962,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
               box-sizing:border-box;
             "
           >
-            ${renderMatchEndedPanel(game, seats, localSeat, prizeAmount, onReplayVote, countdownSeconds, skipPrizeAnimation, isPrivateTableOrigin)}
+            ${renderMatchEndedPanel(game, seats, localSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, onReplayVote, countdownSeconds, isPrivateTableOrigin)}
           </div>
         </div>
       </div>
@@ -854,25 +970,65 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
   `
   }
 
-  if (!skipPrizeAnimation) {
-    const counterEl = root.querySelector<HTMLElement>('[data-prize-counter="1"]')
-    if (counterEl && prizeAmount && prizeAmount > 0) {
-      const el = counterEl
-      const duration = 1500
-      const startTime = performance.now()
-      const target = prizeAmount
-
-      function tick(now: number): void {
-        const elapsed = now - startTime
-        const t = Math.min(elapsed / duration, 1)
-        const eased = 1 - Math.pow(1 - t, 3)
-        const current = Math.round(eased * target)
-        el.textContent = `+${current.toLocaleString('bg-BG')}`
-        if (t < 1) {
+  // Numeric counting animation (запазена — виж task-а: "красиво броене е
+  // желан визуален ефект"), но с DEADLINE-базиран lifecycle (виж
+  // prizeAnimationStartedAt doc коментара по-горе), не time-since-render.
+  // ROOT CAUSE на предишния bug (верифициран чрез code audit +
+  // контролиран repro, не предположение): match-ended екранът се
+  // re-render-ва пълноценно (renderMatchEndedScreen(), не само countdown
+  // patch-а от syncMatchEndedCountdownDisplay) при всеки WebSocket
+  // room_snapshot push, обработен от applyRoomSnapshotToActiveRoom() ->
+  // scheduleActiveRoomRender() (createActiveRoomFlowController.ts) — leave
+  // vote от партньор, replay vote, bot-takeover при disconnect, reconnect
+  // catch-up и др., НЕ секундния countdown tick. Старият вариант
+  // стартираше НОВА 1500ms RAF последователност от performance.now() при
+  // ВСЕКИ такъв re-render, докато стария RAF handle продължаваше да
+  // тиктака towards detached DOM (без видим ефект). Контролиран repro
+  // показа, че единичен/спорадичен re-render в прозореца само забавя, но
+  // не трайно заклещва стойността — последният стартиран loop сам
+  // довършва до target-а. Реално доказан "може да остане перманентно на
+  // междинна/нулева стойност" сценарий изисква НЕПРЕКЪСНАТ re-render
+  // burst, по-чест от 1500ms, БЕЗ прекъсване (напр. патологичен snapshot
+  // poток) — рядък, но възможен ръб на предишната архитектура и напълно
+  // отстранен тук, тъй като elapsed вече не зависи от render момента.
+  // Тук loop-ът computира elapsed СПРЯМО единствения prizeAnimationStartedAt
+  // (никога нов "now"), и на всеки кадър RE-QUERY-ва DOM-а
+  // (root.querySelector), за да продължи да пише в текущия (може би
+  // сменен от re-render) DOM node, вместо да държи stale reference. Ако
+  // elapsed вече >= duration (late render/re-render след прозореца — CASE
+  // G), computePrizeDisplayAmount връща directno target-а — само 1 кадър се
+  // изпълнява.
+  if (prizeAmount && prizeAmount > 0 && prizeAnimationStartedAt !== null) {
+    const target = prizeAmount
+    const startedAt = prizeAnimationStartedAt
+    const initialElapsed = renderNow - startedAt
+    if (initialElapsed < PRIZE_COUNT_DURATION_MS) {
+      const runId = ++prizeAnimationRunSeq
+      const tick = (): void => {
+        // Ако друг render() вече е стартирал по-нов run (нов prize/нов
+        // screen lifecycle), тази loop спира — по дизайн само ЕДИН активен
+        // run обновява DOM-а per prize lifecycle. Reuse-ването на same
+        // startedAt между re-render-и (виж controller-а) означава, че
+        // нормалните countdown re-render-и НЕ arm-ват нов run (elapsed вече
+        // напреднал towards >= duration или identical startedAt не тригерва
+        // нова инициализация тук отделно) — runId guard-ът е защита само
+        // срещу истински НОВ prize lifecycle, започнал по средата.
+        if (runId !== prizeAnimationRunSeq) return
+        const el = root.querySelector<HTMLElement>('[data-prize-counter="1"]')
+        if (!el) return
+        const elapsed = Date.now() - startedAt
+        const amount = computePrizeDisplayAmount(target, elapsed)
+        el.textContent = formatPrizeText(amount)
+        if (elapsed < PRIZE_COUNT_DURATION_MS) {
           requestAnimationFrame(tick)
+        } else {
+          // Explicit final snap (виж task-а т.4: "не разчитай само на
+          // rounded intermediate calculation") — computePrizeDisplayAmount
+          // вече връща exact target при elapsed>=duration, но презаписваме
+          // изрично тук за защита срещу бъдещи промени във формулата.
+          el.textContent = formatPrizeText(target)
         }
       }
-
       requestAnimationFrame(tick)
     }
   }
@@ -895,32 +1051,38 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
       ;(onStartNewGame ?? onReturnToLobby)()
     })
 
-  root
-    .querySelectorAll<HTMLButtonElement>('[data-partner-rating-value]')
-    .forEach((button) => {
-      button.addEventListener('click', () => {
-        const ratingValue = Number(button.dataset.partnerRatingValue)
+  if (partnerRatingStatus === 'idle') {
+    root
+      .querySelectorAll<HTMLButtonElement>('[data-partner-rating-value]')
+      .forEach((button) => {
+        button.addEventListener('click', () => {
+          const ratingValue = Number(button.dataset.partnerRatingValue)
 
-        if (!Number.isInteger(ratingValue)) {
-          return
-        }
+          if (!Number.isInteger(ratingValue)) {
+            return
+          }
 
-        onSubmitPartnerRating?.(ratingValue)
+          // Веднага disable-ваме тукущите бутони (instant feedback преди
+          // повикващият да е стигнал до следващия си re-render), НО
+          // authoritative-ят "submitted" state живее в повикващия (виж
+          // partnerRatingStatus doc коментара по-горе) и се задава ЕДИНСТВЕНО
+          // след server-confirmed response — onPartnerRatingSubmitted тук
+          // закача само временно 'submitting', за да не се върнат активните
+          // бутони при следващ пълен re-render (root cause на предишния bug:
+          // DOM-only disable без controller-level state), И за да не се
+          // предполага success преди server-ът реално да го потвърди
+          // (false-success UI риска — виж audit-а).
+          root
+            .querySelectorAll<HTMLButtonElement>('[data-partner-rating-value]')
+            .forEach((ratingButton) => {
+              ratingButton.disabled = true
+              ratingButton.style.cursor = 'default'
+              ratingButton.style.opacity = ratingButton === button ? '1' : '0.45'
+            })
 
-        root
-          .querySelectorAll<HTMLButtonElement>('[data-partner-rating-value]')
-          .forEach((ratingButton) => {
-            ratingButton.disabled = true
-            ratingButton.style.cursor = 'default'
-            ratingButton.style.opacity = ratingButton === button ? '1' : '0.45'
-          })
-
-        const panel = root.querySelector<HTMLElement>('[data-partner-rating-panel="1"]')
-
-        panel?.insertAdjacentHTML(
-          'beforeend',
-          '<div style="width:100%;color:#bef264;font-size:13px;font-weight:900;text-align:right;">Оценката е изпратена.</div>',
-        )
+          onPartnerRatingSubmitted?.()
+          onSubmitPartnerRating?.(ratingValue)
+        })
       })
-    })
+  }
 }

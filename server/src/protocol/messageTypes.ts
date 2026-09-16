@@ -167,6 +167,16 @@ export type ClientMessage =
       type: 'submit_partner_rating'
       roomId: RoomId
       ratingValue: number
+      // Client-generated correlation id (UUID) за ТОЗИ конкретен submit
+      // click — сървърът само го echo-ва непроменен обратно в
+      // partner_rating_result, НЕ го ползва за никаква game logic/DB
+      // scoping (DB idempotency продължава да разчита изцяло на
+      // server-owned room.game.stateVersion — виж
+      // playerProgressStore.ts::submitPartnerRating). Позволява на клиента
+      // да различи delayed response от Match 1 от текущ pending submit за
+      // Match 2 в СЪЩАТА стая (same roomId) — виж
+      // createActiveRoomFlowController.ts stale-result audit-а.
+      requestId: string
     }
   | {
       type: 'request_replay'
@@ -690,6 +700,31 @@ export type PartnerRatingSubmittedMessage = {
   raterDisplayName: string
 }
 
+// Явен success/failure ack, пратен ОБРАТНО към submitting connection-а (за
+// разлика от PartnerRatingSubmittedMessage, което е notification към
+// ПАРТНЬОРА). Позволява на клиента да различи SUBMITTING (temporary
+// optimistic disable) от SUBMITTED (server-confirmed permanent state) —
+// виж createActiveRoomFlowController.ts partner rating audit-а.
+// alreadyRated=true при duplicate response (UNIQUE constraint в
+// profile_partner_ratings) — client-ът третира duplicate като safe/
+// completed state (сървърът вече ИМА оценката), не като retry-able грешка.
+// requestId е чист echo на message.requestId от submit_partner_rating-а,
+// който предизвика този резултат — roomId САМ ПО СЕБЕ СИ НЕ Е достатъчен,
+// за да различи delayed response от ПРЕДИШЕН match (replay в СЪЩАТА стая,
+// same roomId) от текущ pending submit — виж createActiveRoomFlowController.ts
+// stale-result audit-а ("Match 1 result пристига докато Match 2 е
+// submitting" race). Сървърът НЕ валидира/интерпретира requestId-то — то е
+// client correlation token, не game-authoritative identity (DB
+// idempotency продължава да разчита изцяло на room.game.stateVersion).
+export type PartnerRatingResultMessage = {
+  type: 'partner_rating_result'
+  roomId: RoomId
+  requestId: string
+  ok: boolean
+  alreadyRated: boolean
+  message?: string
+}
+
 export type MatchmakingQueuedPlayerPreview = {
   id: string
   name: string
@@ -1092,6 +1127,7 @@ export type ServerMessage =
   | RoomResumeFailedMessage
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage
+  | PartnerRatingResultMessage
   | RoomSnapshotMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage

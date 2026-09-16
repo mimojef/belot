@@ -222,8 +222,64 @@ export function createActiveRoomFlowController(
   const playedScoringPresentationKeys = new Set<string>()
   let reactionCountdownAudioIntervalId: number | null = null
   let matchEndedSoundPlayed = false
-  let matchEndedPrizeAnimated = false
-  let matchEndedPrizeAnimatedTimerId: number | null = null
+  // Absolute Unix-ms timestamp на ПЪРВИЯ match-ended render с награда — виж
+  // renderMatchEndedScreen.ts::RenderMatchEndedScreenOptions.prizeAnimationStartedAt
+  // doc коментара за пълния root cause/rationale (numeric counting animation
+  // трябва да има ЕДИН стабилен deadline, не да се рестартира при всеки
+  // re-render, предизвикан от WebSocket room_snapshot по време на тази фаза —
+  // leave/replay vote, bot-takeover, reconnect catch-up и др.). Заменя
+  // предишните matchEndedPrizeAnimated (boolean gate) +
+  // matchEndedPrizeAnimatedTimerId (setTimeout, ръчно синхронизиран с
+  // animation duration-а) — вече излишни: renderMatchEndedScreen сам
+  // управлява RAF lifecycle-а вътрешно спрямо този timestamp.
+  let matchEndedPrizeAnimationStartedAt: number | null = null
+  // Authoritative partner-rating submit state за текущия match-ended
+  // lifecycle — виж renderMatchEndedScreen.ts::RenderMatchEndedScreenOptions.partnerRatingStatus
+  // doc коментара за пълния root cause на re-render persistence bug-а.
+  // Заменя старата чиста DOM-mutation disable логика: старият код
+  // disable-ваше rating бутоните само визуално след клик, без да пази state
+  // тук — всеки следващ пълен re-render (room_snapshot от leave/replay
+  // vote, bot-takeover, reconnect) пресъздаваше root.innerHTML от нула и
+  // връщаше активните бутони.
+  //
+  // Tri-state (НЕ просто boolean) — виж post-fix audit-а за "false-success
+  // UI" риска: клик само по себе си НЕ е достатъчен за permanent SUBMITTED
+  // state, защото server request може реално да се провали (network/server
+  // причина, различна от duplicate). 'submitting' е temporary optimistic
+  // disable (предотвратява double-click, докато чакаме server response) —
+  // 'submitted' е ЕДИНСТВЕНО след server-confirmed success ИЛИ
+  // alreadyRated:true response (виж handleServerMessage
+  // 'partner_rating_result' клона по-долу). При generic (non-duplicate)
+  // failure state се връща на 'idle', позволявайки retry.
+  //
+  // Reset-ва се на СЪЩИТЕ места като matchEndedPrizeAnimationStartedAt
+  // (напускане на match-ended lifecycle / нова игра) — виж resets по-долу —
+  // ПЛЮС при replay в СЪЩАТА стая (виж matchEndedPartnerRatingMatchKey
+  // по-долу за защита срещу "submitted от Match 1 блокира UI за Match 2").
+  let matchEndedPartnerRatingState: 'idle' | 'submitting' | 'submitted' = 'idle'
+  // Match-identity key (matchEnded.endedAt — уникален timestamp per match),
+  // за да различим "нов match-ended lifecycle в СЪЩАТА стая" (replay
+  // success, room_snapshot преход обратно в match-ended след нов рунд) от
+  // "същия match-ended lifecycle, поредният countdown re-render". За
+  // разлика от matchEndedSoundPlayed/matchEndedPrizeAnimationStartedAt (reset-
+  // вани само при enterActiveRoom/enterActiveRoomFromResume — извън обхвата
+  // на тази промяна), partner rating state ТРЯБВА да се нулира и тук:
+  // грешно заключен 'submitted' state от предишен match би блокирал
+  // легитимна нова оценка за новия match в същата стая.
+  let matchEndedPartnerRatingMatchKey: number | null = null
+  // Client-generated correlation id (crypto.randomUUID(), established
+  // pattern — виж sendTableGift/pendingRequestId по-долу за identичен
+  // idempotency-key подход) за ТЕКУЩИЯ pending partner_rating submit.
+  // Причина: matchEndedPartnerRatingMatchKey САМ ПО СЕБЕ СИ не е достатъчен
+  // guard в handleServerMessage-а — той пази render-level "кой match е
+  // текущ" state, докато race-ът тук е между ДВЕ pending submissions
+  // (Match 1's delayed response пристига точно докато Match 2 вече е
+  // 'submitting', СЪЩИЯ roomId) — нужна е identичност per submit ACTION,
+  // не per match. Задава се при click, изчиства се при resolve (виж
+  // handleServerMessage 'partner_rating_result' клона по-долу) — null
+  // означава "няма pending submit", всеки message пристигнал тогава се
+  // игнорира автоматично (requestId guard-ът никога няма да съвпадне).
+  let matchEndedPartnerRatingRequestId: string | null = null
   let replayStakeEffectShown = false
   let initialStakeEffectShown = false
   let shouldSilenceNextBiddingSnapshot = false
@@ -297,10 +353,6 @@ export function createActiveRoomFlowController(
       matchEndedCountdownIntervalId = null
     }
     matchEndedCountdownDeadlineAt = null
-    if (matchEndedPrizeAnimatedTimerId !== null) {
-      clearTimeout(matchEndedPrizeAnimatedTimerId)
-      matchEndedPrizeAnimatedTimerId = null
-    }
     clearTournamentRoundResultAutoTransitionTimer()
   }
 
@@ -4324,6 +4376,23 @@ export function createActiveRoomFlowController(
         startMatchEndedCountdown()
       }
 
+      // Replay-in-same-room защита: ако match identity (endedAt) се е
+      // променила спрямо последния match-ended lifecycle, за който сме
+      // видели rating state — това е НОВ match (replay success, нов рунд в
+      // СЪЩАТА стая, roomId непроменен) — партньорската оценка от
+      // предишния match не важи за този. Виж matchEndedPartnerRatingMatchKey
+      // doc коментара по-горе.
+      const currentMatchEndedKey = activeRoomState.game.matchEnded?.endedAt ?? null
+      if (currentMatchEndedKey !== null && currentMatchEndedKey !== matchEndedPartnerRatingMatchKey) {
+        matchEndedPartnerRatingMatchKey = currentMatchEndedKey
+        matchEndedPartnerRatingState = 'idle'
+        // Defense-in-depth (primary защита е requestId guard-ът в
+        // handleServerMessage) — изчиства pending submit correlation-а на
+        // предишния match, за да не остане "жив" pending-submitting
+        // прозорец за requestId, който никога няма да получи resolve.
+        matchEndedPartnerRatingRequestId = null
+      }
+
       // Ако някой е гласувал за изход → скочи на 30 сек.
       const leaveVotes = activeRoomState.game.matchEnded?.leaveVotes ?? []
       const currentCountdownSeconds = getMatchEndedCountdownSeconds()
@@ -4351,18 +4420,46 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         prizeAmount: activeRoomState.game?.matchEnded?.awardedPrizeAmount ?? null,
-        skipPrizeAnimation: matchEndedPrizeAnimated,
+        // Стабилен deadline за numeric prize counting animation-а (виж
+        // renderMatchEndedScreen.ts doc коментара) — подаваме СЪЩИЯ
+        // timestamp на всеки re-render (WebSocket room_snapshot по време на
+        // тази фаза), за да не се рестартира animation-ът от нула.
+        // onPrizeAnimationStart го инициализира еднократно, при първия
+        // render с реална награда.
+        prizeAnimationStartedAt: matchEndedPrizeAnimationStartedAt,
+        onPrizeAnimationStart: (startedAt) => {
+          matchEndedPrizeAnimationStartedAt = startedAt
+        },
+        partnerRatingStatus: matchEndedPartnerRatingState,
         countdownSeconds: matchEndedCountdownSeconds,
         isPrivateTableOrigin:
           activeRoomState.isPrivateTableOrigin || activeRoomState.isTournamentMatchOrigin,
         onReturnToLobby: returnToLobbyFromMatchEnded,
         onStartNewGame: startNewGameFromMatchEnded,
         onSubmitPartnerRating: (ratingValue) => {
-          if (!activeRoomState) {
+          if (!activeRoomState || matchEndedPartnerRatingRequestId === null) {
             return
           }
 
-          options.submitPartnerRating(activeRoomState.roomId, ratingValue)
+          options.submitPartnerRating(activeRoomState.roomId, ratingValue, matchEndedPartnerRatingRequestId)
+        },
+        onPartnerRatingSubmitted: () => {
+          // requestId се генерира ТУК (синхронно, преди onSubmitPartnerRating
+          // по-долу да прочете matchEndedPartnerRatingRequestId) — established
+          // pattern, виж sendTableGift/pendingRequestId (crypto.randomUUID()
+          // idempotency key). Позволява на handleServerMessage
+          // 'partner_rating_result' клона по-долу да различи delayed
+          // response от ПРЕДИШЕН submit (Match 1, или дори предишен click в
+          // СЪЩИЯ match при F3 retry) от резултата на ТОЗИ конкретен submit
+          // — виж doc коментара на matchEndedPartnerRatingRequestId по-горе
+          // за пълния "Match 1 result по време на Match 2 submitting" race.
+          matchEndedPartnerRatingRequestId = crypto.randomUUID()
+          // Temporary optimistic disable ONLY — permanent 'submitted' state
+          // (и completed текста в renderMatchEndedScreen) се задава
+          // ЕДИНСТВЕНО в handleServerMessage 'partner_rating_result' клона
+          // по-долу, след потвърден server response. Виж tri-state doc
+          // коментара на matchEndedPartnerRatingState по-горе.
+          matchEndedPartnerRatingState = 'submitting'
         },
         onReplayVote: () => {
           if (!activeRoomState) {
@@ -4385,14 +4482,6 @@ export function createActiveRoomFlowController(
           options.sendLeaveMatchVote(activeRoomState.roomId)
         },
       })
-
-      const currentPrizeAmount = activeRoomState.game?.matchEnded?.awardedPrizeAmount ?? null
-      if (!matchEndedPrizeAnimated && matchEndedPrizeAnimatedTimerId === null && currentPrizeAmount !== null && currentPrizeAmount > 0) {
-        matchEndedPrizeAnimatedTimerId = window.setTimeout(() => {
-          matchEndedPrizeAnimated = true
-          matchEndedPrizeAnimatedTimerId = null
-        }, 1700)
-      }
     } else if (isShowingScoringPhase && activeRoomState.game?.scoring) {
       clearStablePhaseRenderKey()
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
@@ -5735,7 +5824,10 @@ export function createActiveRoomFlowController(
     shouldSilenceNextBiddingSnapshot = true
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
-    matchEndedPrizeAnimated = false
+    matchEndedPrizeAnimationStartedAt = null
+    matchEndedPartnerRatingState = 'idle'
+    matchEndedPartnerRatingMatchKey = null
+    matchEndedPartnerRatingRequestId = null
     replayStakeEffectShown = false
     initialStakeEffectShown = true
     clearMatchEndedCountdown()
@@ -5798,7 +5890,10 @@ export function createActiveRoomFlowController(
     closeTableGiftModal()
     lastKnownWinningBid = null
     matchEndedSoundPlayed = false
-    matchEndedPrizeAnimated = false
+    matchEndedPrizeAnimationStartedAt = null
+    matchEndedPartnerRatingState = 'idle'
+    matchEndedPartnerRatingMatchKey = null
+    matchEndedPartnerRatingRequestId = null
     replayStakeEffectShown = false
     initialStakeEffectShown = stakeAlreadyShown
     clearMatchEndedCountdown()
@@ -5984,6 +6079,60 @@ export function createActiveRoomFlowController(
 
     if (!activeRoomState) {
       return false
+    }
+
+    if (message.type === 'partner_rating_result' && message.roomId === activeRoomState.roomId) {
+      // Server-confirmed ack за submit-натия partner rating — виж
+      // matchEndedPartnerRatingState doc коментара по-горе за пълния
+      // "false-success UI" root cause/fix rationale.
+      //
+      // Stale-message safety, layer 1 (различна стая): message.roomId ===
+      // activeRoomState.roomId по-горе отхвърля закъснял резултат за ДРУГА
+      // стая (различен roomId), тъй като activeRoomState вече сочи към
+      // новата стая по времето, в което delayed message-ът пристига.
+      //
+      // Stale-message safety, layer 2 (СЪЩАТА стая, различен match/submit —
+      // КРИТИЧЕН race, потвърден с explicit repro): roomId САМ ПО СЕБЕ СИ
+      // НЕ Е достатъчен guard, ако replay продължи в СЪЩАТА стая — Match
+      // 1's delayed partner_rating_result може да пристигне точно докато
+      // Match 2 (СЪЩИЯ roomId) вече е 'submitting', след легитимен нов
+      // submit click. matchEndedPartnerRatingMatchKey reset-ва state-а на
+      // 'idle' при ВЛИЗАНЕ в новия match, но не помага, ако delayed
+      // съобщението пристигне СЛЕД като потребителят вече е кликнал за
+      // Match 2 (тогава state вече е 'submitting' отново, разрешавайки
+      // grешния match да premине guard-а по-долу). Затова
+      // message.requestId === matchEndedPartnerRatingRequestId е
+      // задължителен — requestId е echo-нат от сървъра от точно
+      // submit_partner_rating заявката, която controller-ът генерира при
+      // ТОЗИ конкретен click (виж onPartnerRatingSubmitted по-горе), значи
+      // Match 1's requestId никога няма да съвпадне с Match 2's.
+      //
+      // Terminal-state safety (double/out-of-order result, S7): guard-ът
+      // `=== 'submitting'` по-долу е ЕДИНСТВЕНАТА врата към промяна на
+      // state-а — щом веднъж стане 'submitted', никой следващ
+      // partner_rating_result (късен duplicate success, закъснял generic
+      // failure от преди success-а да пристигне) не минава guard-а, значи
+      // 'submitted' е de facto terminal за текущия submit, никога не се
+      // връща обратно на 'idle'.
+      if (
+        matchEndedPartnerRatingState === 'submitting' &&
+        message.requestId === matchEndedPartnerRatingRequestId
+      ) {
+        matchEndedPartnerRatingRequestId = null
+        if (message.ok || message.alreadyRated) {
+          // ok:true (реален success) ИЛИ alreadyRated:true (сървърът вече
+          // ИМА тази оценка — duplicate response е safe да третираме като
+          // completed, не като retry-able грешка, виж F4 сценария).
+          matchEndedPartnerRatingState = 'submitted'
+        } else {
+          // Generic (non-duplicate) failure — връщаме на 'idle', за да НЕ
+          // остане лъжливо "Оценката е изпратена" и потребителят да може
+          // да опита отново (F3 сценарий).
+          matchEndedPartnerRatingState = 'idle'
+        }
+        scheduleActiveRoomRender()
+      }
+      return true
     }
 
     if (message.type === 'left_active_room' && message.roomId === activeRoomState.roomId) {
