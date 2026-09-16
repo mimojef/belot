@@ -246,12 +246,14 @@ function main(): void {
     const moveSeqMatch = controllerSrc.match(/async function performMoveSequence[\s\S]*?\n  \}\n/)
     if (!moveSeqMatch) fail('F1: could not locate performMoveSequence function body')
     const body = moveSeqMatch[0]
-    const routeLoopEndIndex = body.indexOf('await wait(STEP_ANIMATION_MS)')
+    const routeOverlayStartIndex = body.indexOf('playLudoMoveRouteOverlay(')
+    const routeLoopEndIndex = body.indexOf('await moveOverlay.finished')
     const animateCaptureCallIndex = body.indexOf('await animateCapture(')
-    if (routeLoopEndIndex === -1) fail('F1: could not find attacker route loop (STEP_ANIMATION_MS wait)')
+    if (routeOverlayStartIndex === -1) fail('F1: could not find attacker route overlay call')
+    if (routeLoopEndIndex === -1) fail('F1: could not find awaited attacker route overlay completion')
     if (animateCaptureCallIndex === -1) fail('F1: could not find animateCapture() call')
-    if (!(routeLoopEndIndex < animateCaptureCallIndex)) {
-      fail('F1: animateCapture() (which contains the victim flight) must be called AFTER the attacker route loop, i.e. after attacker reaches target')
+    if (!(routeOverlayStartIndex < routeLoopEndIndex && routeLoopEndIndex < animateCaptureCallIndex)) {
+      fail('F1: animateCapture() (which contains the victim flight) must be called AFTER the attacker route overlay finishes, i.e. after attacker reaches target')
     }
     const animateCaptureSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const fnMatch = animateCaptureSrc.match(/async function animateCapture[\s\S]*?\n  \}\n/)

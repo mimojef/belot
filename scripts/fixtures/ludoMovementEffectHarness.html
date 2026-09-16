@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ludoMovementEffectHarness</title>
+<style>
+  html, body { margin:0; min-height:100%; background:#0b0f14; color:#eef2f7; font-family:Arial, sans-serif; }
+  #ludo-effect-panel { position:fixed; z-index:20; left:12px; top:12px; right:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  #ludo-effect-panel button { border:1px solid #3b4858; background:#182231; color:#f7fbff; border-radius:6px; padding:8px 10px; font-weight:700; cursor:pointer; }
+  #ludo-effect-panel button:hover { background:#22324a; }
+  #ludo-effect-panel label { display:flex; gap:6px; align-items:center; background:#111923; border:1px solid #2d3a4a; border-radius:6px; padding:7px 9px; }
+  #ludo-effect-root { min-height:100vh; }
+  #ludo-effect-status { position:fixed; z-index:21; left:12px; bottom:12px; max-width:min(720px, calc(100vw - 24px)); background:#07101bcc; border:1px solid #304154; border-radius:6px; padding:8px 10px; font-size:13px; line-height:1.35; }
+</style>
+</head>
+<body>
+<div id="ludo-effect-panel"></div>
+<div id="ludo-effect-root"></div>
+<div id="ludo-effect-status">Pick a scenario.</div>
+<script type="module" src="/scripts/fixtures/ludoMovementEffectHarness.ts"></script>
+</body>
+</html>

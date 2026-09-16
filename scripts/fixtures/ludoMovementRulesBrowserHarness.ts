@@ -123,6 +123,26 @@ function hasHorizontalOverflow(): boolean {
   return document.documentElement.scrollWidth > window.innerWidth + 1
 }
 
+function countMovingPieces(pieceId?: string): number {
+  const selector = pieceId ? `[data-ludo-moving-piece="${pieceId}"]` : '[data-ludo-moving-piece]'
+  return root.querySelectorAll(selector).length
+}
+
+function countMoveTrails(pieceId?: string): number {
+  const selector = pieceId ? `[data-ludo-move-trail="${pieceId}"]` : '[data-ludo-move-trail]'
+  return root.querySelectorAll(selector).length
+}
+
+function countRenderedPieceInstances(pieceId: string): number {
+  return root.querySelectorAll(`[data-ludo-piece="${pieceId}"], [data-ludo-piece-group~="${pieceId}"]`).length
+}
+
+function countStaticPieceInstances(pieceId: string): number {
+  return Array.from(root.querySelectorAll<HTMLElement>(`[data-ludo-piece="${pieceId}"], [data-ludo-piece-group~="${pieceId}"]`)).filter(
+    (el) => !el.closest('[data-ludo-moving-piece], [data-ludo-move-trail]'),
+  ).length
+}
+
 ;(window as any).__ludoMovementRulesBrowserHarness = {
   mountWithState,
   destroyController,
@@ -135,5 +155,9 @@ function hasHorizontalOverflow(): boolean {
   clickPiece,
   isPieceOrGroupInCell,
   hasHorizontalOverflow,
+  countMovingPieces,
+  countMoveTrails,
+  countRenderedPieceInstances,
+  countStaticPieceInstances,
   getConsoleErrors: () => consoleErrors,
 }

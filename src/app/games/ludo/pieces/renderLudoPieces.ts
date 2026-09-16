@@ -13,6 +13,8 @@
 
 import { LUDO_COLOR_HEX } from '../ludoTypes'
 import type { LudoCellId, LudoColor, LudoLegalMove, LudoPiece, LudoPieceId } from '../ludoTypes'
+import { ludoGridPointForCellId, parseLudoCellId } from '../board/ludoBoardGeometry'
+import { rotateLudoGridPointForViewer } from '../board/ludoPerspective'
 
 function piecesByCell(pieces: LudoPiece[]): Map<LudoCellId, LudoPiece[]> {
   const map = new Map<LudoCellId, LudoPiece[]>()
@@ -353,6 +355,16 @@ function clusterOffsetStyle(index: number, totalTokens: number): string {
   return `position:absolute;left:50%;top:50%;transform:translate(calc(-50% + ${slot.dx}px), calc(-50% + ${slot.dy}px - 4px)) scale(${slot.scale});`
 }
 
+function clusterDepthPriority(index: number, totalTokens: number, isLocal: boolean): number {
+  const slots = clusterLayoutForCount(totalTokens)
+  const slot = slots[Math.min(index, slots.length - 1)]!
+  const yLevels = Array.from(new Set(slots.map((candidate) => candidate.dy))).sort((a, b) => a - b)
+  const yRank = yLevels.indexOf(slot.dy)
+  // Screen Y is the primary depth key. At equal Y, local identity wins;
+  // otherwise the stable slot index is the deterministic paint tiebreaker.
+  return yRank * 100 + (isLocal ? 50 : index + 1)
+}
+
 // Групираните-по-цвят пионки на една клетка се подреждат с controlled
 // diagonal overlap (виж task-а — "две пионки стоят твърде една върху
 // друга"): вместо flex-wrap (edge-case преди този fix — само рядък
@@ -363,11 +375,62 @@ function clusterOffsetStyle(index: number, totalTokens: number): string {
 // visual token на цвят, с count badge при >1 реални пионки от този цвят
 // (виж piecesByColor/renderLudoPieceHtml по-горе).
 //
+// CROSS-CELL z-index base (fix за втори edge case — виж review-а на
+// renderLudoBoard.ts's piece-layer fix-а): data-ludo-cell-pieces
+// контейнерите в piece-layer overlay-я СА grid items с numeric
+// z-index:point.row — по CSS spec, grid/flex item с z-index!=auto САМ
+// establish-ва НОВ stacking context. Затова local pawn-ът з z-index:100
+// ВЪТРЕ в собствения си cluster е topmost само спрямо siblings в СЪЩИЯ
+// контейнер — съседна клетка с по-висок row-based z-index можеше пак да
+// покрие целия local cluster, независимо от вътрешния z-index:100 (доказано
+// с реален browser hit-testing: local pawn hidden от съседен cluster, когато
+// силуетите overlap-ват). Fix: encode-ваме СЪЩАТА row информация директно в
+// САМИЯ token-ов z-index (row * ROW_Z_INDEX_MULTIPLIER + within-cluster
+// priority), не само в контейнера — така сравнението остава коректно ДОРИ
+// ако token-и от различни клетки/контейнери реално се overlap-нат visually
+// (два token-а от различни stacking contexts никога не се сравняват едно
+// към едно по CSS правила, но техните РОДИТЕЛСКИ контейнери в
+// piece-layer-а СЕ сравняват — щом containerA.z-index > containerB.z-index,
+// ЦЕЛИЯТ containerA винаги ляга над ЦЕЛИЯ containerB, независимо от
+// вътрешните им z-index стойности; encode-вайки СЪЩАТА row стойност В
+// token-а, containerA.z-index и containerB.z-index стават derived от
+// същата база като largest child z-index вътре, запазвайки консистентност).
+// localColor=null (preview/harness context, виж V6/V7 тестовете) -> row
+// остава canonical (без viewer rotation), НЕ хвърля грешка.
+//
+// LOCAL PAWN GLOBAL PRIORITY (втори review pass, browser-доказан edge case):
+// row-based ordering-ът по-горе е коректен и достатъчен за non-local
+// token-и (те трябва само взаимно да се overlap-ват предвидимо), НО when
+// local pawn-ът е в клетка с "по-нисък" (canonical/rotated) ред от съседна
+// клетка с чужд cluster, row-based правилото само по себе си пак би
+// позволило чуждия cluster да покрие local pawn-а — потвърдено с реален
+// browser hit-testing (checkLudoSharedCellStacking.ts's two-adjacent-
+// clusters сценарий). "Own pawn visible" изискването е по-силна гаранция от
+// row-based depth ефекта (объркан играч, който не вижда своята пионка, е
+// по-лош UX бъг от несъвършен overlap ред между ДВЕ чужди пионки) — затова
+// local pawn получава ФИКСИРАНА, row-НЕЗАВИСИМА z-index стойност, гарантирано
+// по-висока от ВСЯКА възможна rowZIndexBase+priority комбинация където и да
+// е на дъската (max row 14 * 1000 + 100 = 14100), не само в собствената си
+// клетка. Non-local token-и продължават да ползват row-based ordering помежду
+// си, непроменено.
+const ROW_Z_INDEX_MULTIPLIER = 1000
+const LOCAL_PAWN_GLOBAL_Z_INDEX = 100_000
+
+function computeRowZIndexBase(cellId: LudoCellId, localColor: LudoColor | null): number {
+  const cell = parseLudoCellId(cellId)
+  if (cell.kind === 'home') return 0 // home slots никога нямат multi-piece cluster/съседна container конфликт
+  const canonicalPoint = ludoGridPointForCellId(cellId)
+  const point = localColor === null ? canonicalPoint : rotateLudoGridPointForViewer(canonicalPoint, localColor)
+  return point.row * ROW_Z_INDEX_MULTIPLIER
+}
+
 // Z-ORDER (виж task-а "own pawn on top"): localColor винаги последен в
 // document order (по-късен sibling в СЪЩИЯ stacking context визуално
-// покрива по-ранните при overlap) И носи explicit z-index:100 (defense-
-// in-depth — не разчита само на document order, ако бъдещ рефакторинг
-// добави positioned ancestor между token-ите).
+// покрива по-ранните при overlap) И носи explicit z-index (defense-in-depth
+// — не разчита само на document order, ако бъдещ рефакторинг добави
+// positioned ancestor между token-ите), сега с row-base (виж
+// computeRowZIndexBase по-горе) за коректност и в cross-cell overlap
+// случаите, не само вътре в собствения cluster.
 export function renderLudoPieceCluster(
   pieces: LudoPiece[],
   selectablePieceIds: Set<LudoPieceId>,
@@ -375,16 +438,22 @@ export function renderLudoPieceCluster(
 ): string {
   if (pieces.length === 0) return ''
 
+  // Всички пионки тук са гарантирано на СЪЩАТА клетка (piecesByCell
+  // групирането в renderLudoPiecesByCell по-долу вече го гарантира преди
+  // да достигне тук) — четем cellId от първата, за row-based z-index base.
+  const rowZIndexBase = computeRowZIndexBase(pieces[0]!.cell, localColor)
+
   const colorGroups = piecesByColor(pieces)
+  // Viewer-independent color order keeps every color in the same compact
+  // slot across perspective switches. Depth, not DOM order, controls paint.
   // Детерминистичен базов ред: по цвят име (стабилен независимо от реда в
   // state.pieces масива), после local цвят (ако присъства в клетката)
   // изтеглен в самия край — последен DOM node = най-висок stacking order.
-  const orderedColors = Array.from(colorGroups.keys()).sort((a, b) => {
-    const aIsLocal = a === localColor
-    const bIsLocal = b === localColor
-    if (aIsLocal !== bIsLocal) return aIsLocal ? 1 : -1
-    return a.localeCompare(b)
-  })
+  const orderedColors = Array.from(colorGroups.keys()).sort((a, b) => a.localeCompare(b))
+  const clusterContainsLocal = localColor !== null && colorGroups.has(localColor)
+  const clusterZIndexBase = clusterContainsLocal
+    ? LOCAL_PAWN_GLOBAL_Z_INDEX + rowZIndexBase
+    : rowZIndexBase
 
   const tokens = orderedColors
     .map((color, index) => {
@@ -399,10 +468,23 @@ export function renderLudoPieceCluster(
       const representative = sorted.find((p) => selectablePieceIds.has(p.id)) ?? sorted[0]
       const groupIds = sorted.map((p) => p.id)
       const isLocal = color === localColor
-      // z-index explicit: local винаги над всичко (100), останалите следват
-      // стабилен нарастващ ред по позиция в orderedColors (1-based, никога
-      // 0, за да не легне под самия контейнер).
-      const zIndex = isLocal ? 100 : index + 1
+      // A local-containing cluster keeps the existing cross-cell protection.
+      // Inside that cluster, slot Y wins; local identity only breaks equal-Y ties.
+      // z-index explicit: local получава ФИКСИРАНА, row-независима глобална
+      // стойност (LOCAL_PAWN_GLOBAL_Z_INDEX, виж doc коментара по-горе) —
+      // гарантирано topmost навсякъде по дъската, не само в собствения си
+      // cluster. Малкият +rowZIndexBase/ROW_Z_INDEX_MULTIPLIER (0-14) delta
+      // тук е чист tiebreaker МЕЖДУ ДВЕ пионки на СЪЩИЯ local играч в ДВЕ
+      // различни клетки (реален, макар и безобиден edge case — виж
+      // checkLudoSharedCellStacking.ts — без него двете биха tied на
+      // еднакъв LOCAL_PAWN_GLOBAL_Z_INDEX, разрешено произволно по document
+      // order); никога не намалява под LOCAL_PAWN_GLOBAL_Z_INDEX, затова
+      // local остава гарантирано над ВСЯКА non-local комбинация. Останалите
+      // (non-local) следват rowZIndexBase + стабилен нарастващ ред по
+      // позиция в orderedColors (1-based, никога 0), за да остане
+      // сравнението коректно и помежду им, когато token-ите от ДВЕ различни
+      // клетки визуално overlap-нат (cross-cell edge case).
+      const zIndex = clusterZIndexBase + clusterDepthPriority(index, orderedColors.length, isLocal)
       const extraStyle = `${clusterOffsetStyle(index, orderedColors.length)}z-index:${zIndex};`
       return renderLudoPieceHtml(representative.id, selectablePieceIds.has(representative.id), group.length, groupIds, extraStyle)
     })

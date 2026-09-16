@@ -211,11 +211,42 @@ export function renderLudoBoard(localColor: LudoColor): string {
     ]),
   )
 
-  const trackAndFinishCells = cellIds
+  // Piece token layer fix (виж task-а — "4-piece shared safe cell" bug: пионка
+  // частично скрита зад съседен квадрат): преди тази поправка data-ludo-cell-
+  // pieces живееше ВЪТРЕ в самата data-ludo-cell div, която носи
+  // position:relative + numeric z-index:${point.row} — тази комбинация
+  // établishва НОВ stacking context за ВСЯКА клетка поотделно (CSS spec:
+  // position!=static + z-index!=auto = нов stacking context). Резултат: token
+  // z-index (дори explicit z-index:100 за local цвят, виж
+  // renderLudoPieceCluster в pieces/renderLudoPieces.ts) сравняваше само
+  // СРЕЩУ siblings ВЪТРЕ в СЪЩАТА клетка — никога срещу съседна клетка.
+  // Когато 3-4-piece cluster-ът (FOUR_SLOTS offset+scale) overflow-ва
+  // визуално извън собствената си клетка (capковидния силует overflow-ва по
+  // дизайн, виж overflow:visible коментара на data-ludo-board по-долу), тази
+  // overflow-ваща част попадаше "под" opaque background-а на СЪСЕДНАТА
+  // клетка, ако тя имаше по-висок row-based z-index — самата клетка (не
+  // пионка) я закриваше, независимо от token-ния z-index. Точно същият root
+  // cause вече беше открит и поправен за capture ring-овете (виж
+  // data-ludo-effects-overlay коментара в applyLudoBoardContent,
+  // renderLudoGameScreen.ts) — same fix pattern тук: piece слоят се
+  // премества в ОТДЕЛЕН overlay grid, sibling на клетките (не nested в тях),
+  // затова ВСИЧКИ track/finish piece контейнери живеят в ЕДИН споделен
+  // stacking context и z-index сравненията им са вече ГЛОБАЛНИ, не capped
+  // по клетка. Row-based overlap ефекта ("долната пионка закрива горната",
+  // task-а изискване) се пази непроменен — но вече encode-нат директно в
+  // САМИЯ token z-index (виж pieces/renderLudoPieces.ts::
+  // computeRowZIndexBase), НЕ на самия piece контейнер (виж trackAndFinish-
+  // PieceLayer по-долу за пълния rationale на този допълнителен fix pass —
+  // grid item с numeric z-index САМ establish-ва нов stacking context, което
+  // би пресъздало точно същия capping проблем едно ниво по-нагоре).
+  // data-ludo-cell-highlight остава на старото си място (inset:0, без
+  // overflow отвъд клетката, не показва същия симптом) — минимален scope.
+  const trackAndFinishCellPoints = cellIds
     .filter((id) => !id.startsWith('home-'))
-    .map((id) => {
-      const cell = parseLudoCellId(id)
-      const point = rotateLudoGridPointForViewer(ludoGridPointForCellId(id), localColor)
+    .map((id) => ({ id, cell: parseLudoCellId(id), point: rotateLudoGridPointForViewer(ludoGridPointForCellId(id), localColor) }))
+
+  const trackAndFinishCells = trackAndFinishCellPoints
+    .map(({ id, cell, point }) => {
       const isStart = LUDO_COLORS.some((color) => startCells[color] === id)
       const startColor = isStart ? (LUDO_COLORS.find((color) => startCells[color] === id) ?? null) : null
       const isStartArrow = cell.kind === 'track' && cell.index in startArrowTrackIndex
@@ -223,20 +254,12 @@ export function renderLudoBoard(localColor: LudoColor): string {
       const isSafeCell = safeCellIds.has(id)
       const finishEntryColor = cell.kind === 'track' ? (finishEntryTrackIndex[cell.index] ?? null) : null
 
-      // Пионките overflow-ват видимо над собствената си клетка (виж
-      // teardrop дизайна — renderLudoPieces.ts) — без explicit z-index тук,
-      // кой съсед печели стекинга зависи от document order в cellIds
-      // (произволен спрямо визуалната row позиция), не от реалната
-      // вертикална подредба. z-index-ът долу е спрямо РЕНДИРАНИЯ (viewer-
-      // remapped) point.row — по-долен ред (по-голямо row число) получава
-      // по-висок z-index, затова пионка от клетка ПОД покрива горния си
-      // съсед, когато overflow-ват една върху друга (виж task-а: "долната
-      // пионка да закрива част от горната"), не обратно. ВАЖНО: inline HTML
-      // style атрибутите тук са в двойни кавички — CSS коментари вътре в
-      // style="" НЕ трябва да съдържат буквални " символи (те прекратяват
-      // атрибута преждевременно в HTML parser-а, truncating целия останал
-      // style silently) — доказан реален бъг тук, затова обяснението живее
-      // като JS коментар отвън template literal-а, не inline в CSS-а.
+      // ВАЖНО: inline HTML style атрибутите тук са в двойни кавички — CSS
+      // коментари вътре в style="" НЕ трябва да съдържат буквални " символи
+      // (те прекратяват атрибута преждевременно в HTML parser-а, truncating
+      // целия останал style silently) — доказан реален бъг тук, затова
+      // обяснението живее като JS коментар отвън template literal-а, не
+      // inline в CSS-а.
       return `
         <div
           data-ludo-cell="${id}"
@@ -261,10 +284,50 @@ export function renderLudoBoard(localColor: LudoColor): string {
             finishEntryColor ? (finishEntryRotationDeg[finishEntryColor] ?? 0) : 0,
           )}
           <div data-ludo-cell-highlight="${id}" hidden style="position:absolute;inset:0;z-index:1;"></div>
-          <div data-ludo-cell-pieces="${id}" style="position:absolute;inset:0;z-index:2;display:flex;align-items:center;justify-content:center;pointer-events:none;"></div>
         </div>
       `
     })
+    .join('')
+
+  // Отделен piece overlay grid (виж коментара по-горе) — СЪЩИЯТ grid-template
+  // като data-ludo-board (GRID_SIZE x GRID_SIZE), absolute-positioned върху
+  // него, за да могат grid-column/grid-row координатите да съвпаднат 1:1 без
+  // никаква допълнителна coordinate математика. z-index:20 (на самия
+  // data-ludo-piece-layer, виж по-долу) е безопасно над максималния възможен
+  // per-cell background z-index (GRID_SIZE - 1) и под data-ludo-effects-
+  // overlay (z-index:50), за да capture ring-овете продължат да се показват
+  // над пионките, не обратно.
+  //
+  // ВАЖНО (втори review pass — cross-cell CLUSTER overlap edge case):
+  // контейнерите тук НЕ носят собствен numeric z-index (за разлика от
+  // предишната версия, z-index:point.row) — grid/flex item с z-index!=auto
+  // establish-ва НОВ stacking context по CSS spec, което би captured local
+  // pawn-а's z-index:100 САМО спрямо siblings в СЪЩИЯ контейнер, позволявайки
+  // на съседен контейнер (с по-висок row-based z-index) да покрие ЦЕЛИЯ
+  // local cluster въпреки z-index:100 вътре в него (доказано с реален browser
+  // hit-testing test, виж checkLudoSharedCellStacking.ts's "two adjacent
+  // clusters" сценарий). Вместо това row информацията се encode-ва директно
+  // в САМИЯ token z-index (pieces/renderLudoPieces.ts::computeRowZIndexBase,
+  // row*1000 + within-cluster priority) — без numeric z-index тук,
+  // контейнерите НЕ create-ват собствен stacking context, затова ВСИЧКИ
+  // piece token-и от ВСИЧКИ клетки се сравняват директно в ЕДИН споделен
+  // stacking context (data-ludo-piece-layer-а по-долу), правилно и cross-cell.
+  const trackAndFinishPieceLayer = trackAndFinishCellPoints
+    .map(
+      ({ id, point }) => `
+        <div
+          data-ludo-cell-pieces="${id}"
+          style="
+            grid-column:${point.col + 1};
+            grid-row:${point.row + 1};
+            display:flex;
+            align-items:center;
+            justify-content:center;
+            pointer-events:none;
+          "
+        ></div>
+      `,
+    )
     .join('')
 
   const homeQuadrants = LUDO_COLORS.map((color) => renderLudoHomeQuadrant(color, localColor)).join('')
@@ -329,6 +392,17 @@ export function renderLudoBoard(localColor: LudoColor): string {
           <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 100%, 0 0);background:${LUDO_COLOR_HEX[centerColorForEdge('left')]};"></div>
         </div>
         ${homeQuadrants}
+        <div data-ludo-piece-layer="1" style="
+          position:absolute;
+          inset:0;
+          display:grid;
+          grid-template-columns:repeat(${GRID_SIZE}, 1fr);
+          grid-template-rows:repeat(${GRID_SIZE}, 1fr);
+          z-index:20;
+          pointer-events:none;
+        ">
+          ${trackAndFinishPieceLayer}
+        </div>
       </div>
       <div data-ludo-effects-overlay="1" style="
         position:absolute;

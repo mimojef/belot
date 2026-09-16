@@ -41,6 +41,7 @@ import {
 } from './board/ludoCapturePresentation'
 import { playLudoCaptureFlightOverlay } from './pieces/playLudoCaptureFlightOverlay'
 import { playLudoCaptureImpactOverlay } from './pieces/playLudoCaptureImpactOverlay'
+import { playLudoMoveRouteOverlay } from './pieces/playLudoMoveRouteOverlay'
 import { rollLudoMockDiceResult } from './dice/ludoDiceState'
 import { createLudoDiceResultOverlayController } from './dice/playLudoDiceFlightOverlay'
 import { reduceLudoGame } from './engine/ludoEngineReducer'
@@ -66,9 +67,8 @@ import {
   LUDO_BOT_THINK_DELAY_MS,
   type LudoOrchestratorState,
 } from './orchestrator'
-import type { LudoCellId, LudoColor, LudoPiece, LudoPieceId, LudoPlayer } from './ludoTypes'
+import type { LudoColor, LudoPiece, LudoPieceId, LudoPlayer } from './ludoTypes'
 
-const STEP_ANIMATION_MS = 220
 const IMPACT_ANIMATION_MS = 450
 
 const EMOJI_MOCK_ITEMS = ['😀', '😂', '😮', '😢', '😡', '👍', '👏', '🎉']
@@ -111,6 +111,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let turnStartedAt = Date.now()
   let isDiceRolling = false
   let isAnimatingMove = false
+  let isDestroyed = false
   let activePopup: 'emoji' | 'phrase' | null = null
   // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
   // до следващия път, когато local player-ът получи хода си (не reset-ва
@@ -122,7 +123,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // за времетраенето на анимацията override-ваме САМО нейната cell в
   // adapted UI pieces масива — presentation frame, никога записан обратно
   // в engineState. null означава "няма активна route анимация в момента".
-  let movingPieceOverride: { pieceId: LudoPieceId; cellId: LudoCellId } | null = null
+  let movingPieceSuppressedId: LudoPieceId | null = null
+  let activeMoveOverlayCancel: (() => void) | null = null
   // Capture presentation buffer (виж task-а): dispatch(MOVE_REQUESTED) връща
   // МОМЕНТАЛНО final canonical state — captured victims вече са в home-а си
   // в engineState.pieces, ОЩЕ ПРЕДИ attacker-ът визуално да е започнал route
@@ -213,7 +215,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // pieces масивът остава недокоснат.
   function currentUiPieces(): LudoPiece[] {
     const uiPieces = ludoEnginePiecesToUiPieces(engineState.pieces)
-    return applyLudoPresentationOverrides(uiPieces, movingPieceOverride, captureVictimOverrides)
+    const presentationPieces = applyLudoPresentationOverrides(uiPieces, null, captureVictimOverrides)
+    return movingPieceSuppressedId
+      ? presentationPieces.filter((piece) => piece.id !== movingPieceSuppressedId)
+      : presentationPieces
   }
 
   // Timer/orchestrator state isolation (виж task-а т.2): ДВЕ различни
@@ -284,6 +289,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   }
 
   function render(): void {
+    if (isDestroyed) return
     options.root.innerHTML = renderLudoGameScreen(currentScreenState())
     applyLudoBoardContent(options.root, currentScreenState())
     if (activePopup) mountPopup(activePopup)
@@ -418,6 +424,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // визуално разминато до следващото хвърляне. Deadline-ите НЕ се
       // пипат тук (т.18: rerender/resize не бива да ги ресетва).
       diceResultOverlay.clearLanded()
+      activeMoveOverlayCancel?.()
+      activeMoveOverlayCancel = null
       render()
     }, 120)
   }
@@ -669,10 +677,16 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     const movingPieceBefore = engineState.pieces.find((p) => p.color === color && p.slot === slot)
     if (!movingPieceBefore) return
     const fromCellId = ludoEnginePositionToCellId(movingPieceBefore.position, color)
+    const sourcePieceEl = options.root.querySelector<HTMLElement>(
+      `[data-ludo-piece="${pieceId}"], [data-ludo-piece-group~="${pieceId}"]`,
+    )
+    const sourceCellEl = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${fromCellId}"]`)
+    const sourcePieceRect = sourcePieceEl?.getBoundingClientRect()
+    const sourceCellRect = sourceCellEl?.getBoundingClientRect()
+    const pieceSizePx = sourcePieceRect?.width || Math.min(30, (sourceCellRect?.width ?? 38) * 0.8)
 
     isAnimatingMove = true
     clearScheduledTimers()
-    render()
 
     const moveResult = dispatch({ type: 'MOVE_REQUESTED', color, slot, expectedTurnVersion: engineState.turnVersion })
     const capturedEvent = moveResult.events.find((e) => e.type === 'pieces_captured')
@@ -697,11 +711,22 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
 
     const route = buildLudoMoveRoute(fromCellId, targetCellId)
-    for (const stepCellId of route) {
-      movingPieceOverride = { pieceId, cellId: stepCellId }
-      render()
-      await wait(STEP_ANIMATION_MS)
-    }
+    movingPieceSuppressedId = pieceId
+    render()
+    const moveOverlay = playLudoMoveRouteOverlay({
+      root: options.root,
+      pieceId,
+      fromCellId,
+      route,
+      pieceSizePx,
+      initiallyHidden: areGameplayOverlaysHiddenForPopup,
+    })
+    activeMoveOverlayCancel = moveOverlay.cancel
+    await moveOverlay.finished
+    activeMoveOverlayCancel = null
+    if (isDestroyed) return
+    movingPieceSuppressedId = null
+    render()
 
     // Attacker-ът вече е визуално пристигнал на target клетката (route
     // loop-ът завърши) — чак СЕГА следва impact/capture анимацията. Victims
@@ -710,6 +735,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // victim flies home", не обратно.
     if (capturedPieceIds.length > 0) {
       await animateCapture(capturedPieceIds)
+      if (isDestroyed) return
       // Impact анимацията приключи — маха се presentation override-ът за
       // ТОЧНО тези victim id-та (не целия map — defensive за евентуален
       // бъдещ overlapping capture, макар Phase 3A да няма такъв сценарий).
@@ -719,7 +745,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
 
     diceResultOverlay.clearLanded()
-    movingPieceOverride = null
+    activeMoveOverlayCancel = null
+    movingPieceSuppressedId = null
     isAnimatingMove = false
     render()
 
@@ -839,9 +866,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   }
 
   function destroy(): void {
+    isDestroyed = true
     window.removeEventListener('resize', handleResize)
     if (resizeTimer) clearTimeout(resizeTimer)
     clearScheduledTimers()
+    activeMoveOverlayCancel?.()
+    activeMoveOverlayCancel = null
     diceResultOverlay.clearLanded()
   }
 
