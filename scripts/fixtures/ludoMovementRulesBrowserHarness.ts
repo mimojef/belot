@@ -46,6 +46,7 @@ function makeState(activeColor: LudoColor, overrides: Record<string, LudoPiecePo
     legalMoves: [],
     pieces: fullRoster(overrides),
     status: 'in_progress',
+    winnerColor: null,
     turnVersion: 0,
     pendingExtraRoll: false,
   }

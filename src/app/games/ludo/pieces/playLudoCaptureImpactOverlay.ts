@@ -28,6 +28,23 @@ const IMPACT_DURATION_MS = 340
 const PUFF_COUNT = 7
 const SPIKE_COUNT = 8
 
+const PAWN_CAPTURE_SOUND_SRC = '/audio/ludo/pawn-capture.mp3'
+
+// Минимален presentation audio side effect (не gameplay logic, не мутира
+// state). Overlay-ят по-долу се вика ЕДИНСТВЕНО от animateCapture() при
+// реален capture (виж createLudoFlowController.ts call site-а — гейтнато
+// зад capturedPieceIds.length > 0), затова звукът тук автоматично наследява
+// същата гаранция: никога не звучи при safe-cell collision, normal landing
+// върху празна клетка, или landing върху собствена пионка — тези пътища
+// изобщо не викат тази функция. Нов Audio() instance на всеки capture (не
+// pooled) — capture-ите не са high-frequency като pawn-step; play()
+// rejection се игнорира тихо, звукът е чисто декоративен.
+function playLudoPawnCaptureSound(): void {
+  if (typeof Audio === 'undefined') return
+  const audio = new Audio(PAWN_CAPTURE_SOUND_SRC)
+  void audio.play().catch(() => {})
+}
+
 // Fisher-Yates-style детерминистичен "organic" offset набор — НЕ perfect
 // symmetric spacing (за разлика от старата версия), за да прилича на
 // неправилния cloud-puff клъстер от референтния explosion стил. Стойностите
@@ -170,6 +187,7 @@ export function playLudoCaptureImpactOverlay(options: LudoCaptureImpactOptions):
   container.appendChild(coreEl)
 
   document.body.appendChild(container)
+  playLudoPawnCaptureSound()
 
   // --- POP: бърз bright flash, offset 0 -> ~0.15 ---
   const coreAnimation = coreEl.animate(

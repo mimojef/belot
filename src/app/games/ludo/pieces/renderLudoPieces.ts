@@ -15,6 +15,7 @@ import { LUDO_COLOR_HEX } from '../ludoTypes'
 import type { LudoCellId, LudoColor, LudoLegalMove, LudoPiece, LudoPieceId } from '../ludoTypes'
 import { ludoGridPointForCellId, parseLudoCellId } from '../board/ludoBoardGeometry'
 import { rotateLudoGridPointForViewer } from '../board/ludoPerspective'
+import { LUDO_FINISH_LENGTH } from '../ludoGeometryConstants'
 
 function piecesByCell(pieces: LudoPiece[]): Map<LudoCellId, LudoPiece[]> {
   const map = new Map<LudoCellId, LudoPiece[]>()
@@ -39,40 +40,8 @@ function piecesByColor(pieces: LudoPiece[]): Map<LudoColor, LudoPiece[]> {
   return map
 }
 
-// count>1 → малък кръгъл badge НАД пионката (SVG, viewBox-базиран —
-// скалира се чисто на всякакъв размер на самата пионка, desktop/mobile,
-// без отделна px логика, същия trick като rotating dice arrows-а).
-function renderStackCountBadge(count: number, hex: string): string {
-  return `
-    <svg
-      viewBox="0 0 20 20"
-      style="
-        position:absolute;
-        top:-34%; left:50%;
-        transform:translateX(-50%);
-        width:50%;
-        aspect-ratio:1/1;
-        overflow:visible;
-        filter:drop-shadow(0 1px 2px rgba(0,0,0,0.55));
-        z-index:4;
-        pointer-events:none;
-      "
-    >
-      <circle cx="10" cy="10" r="9" fill="#171717" stroke="${hex}" stroke-width="1.6"></circle>
-      <text
-        x="10" y="10.5"
-        text-anchor="middle"
-        dominant-baseline="central"
-        font-size="12"
-        font-weight="900"
-        fill="#ffffff"
-      >${count}</text>
-    </svg>
-  `
-}
-
 // count = колко реални LudoPiece записи представлява ТОЗИ visual token
-// (виж piecesByColor по-горе) — по подразбиране 1 (без badge), за
+// (виж piecesByColor по-горе) — по подразбиране 1 (без цифра), за
 // съвместимост с единствения предишен call-site (нямаше count изобщо).
 // groupIds = ВСИЧКИ реални piece id-та от стека (когато count>1) — нужно е
 // САМО за animateCapture в createLudoFlowController.ts: ако "жертвата" на
@@ -90,7 +59,7 @@ function renderStackCountBadge(count: number, hex: string): string {
 // playLudoCaptureFlightOverlay.ts, който вика точно тази функция), затова
 // "единен модел на пионката" изискването е архитектурно гарантирано — няма
 // отделен markup за различните контексти. СЪЩИЯТ DOM contract (data-ludo-
-// piece/-stack-count/-group/-selectable, count badge) — движение/
+// piece/-stack-count/-group/-selectable) — движение/
 // selection/click логиката в createLudoFlowController.ts не е пипната.
 export function renderLudoPieceHtml(
   piece: LudoPieceId,
@@ -104,6 +73,15 @@ export function renderLudoPieceHtml(
   // playLudoCaptureFlightOverlay.ts-овия call site (единичен piece, летящ
   // извън всякаква клетка-cluster логика) напълно непроменен.
   extraStyle = '',
+  // Presentation-only tip rotation (виж CENTER_TRIANGLE_TIP_ROTATION_DEG doc
+  // коментара по-долу) — приложена НА ОТДЕЛЕН вложен слой (renderLudoPieceSvg
+  // wrapper-а), НЕ на root div-а тук. Root div-ът носи positioning/scale
+  // transform-а (translateY(-4px) + extraStyle cluster offset) — CSS
+  // transform е single property, presentation rotate() тук би overwrite-нал
+  // (не composed) с тях ако беше на СЪЩИЯ елемент. 0 (default) значи "без
+  // rotation" за всички съществуващи call sites (track/home/normal finish/
+  // capture flight/move route) — напълно непроменено поведение.
+  rotationDeg = 0,
 ): string {
   const color = piece.split('-')[0] as keyof typeof LUDO_COLOR_HEX
   const hex = LUDO_COLOR_HEX[color]
@@ -137,8 +115,7 @@ export function renderLudoPieceHtml(
       "
     >
       ${selectable ? renderSelectablePieceRing() : ''}
-      ${renderLudoPieceSvg(hex, uid, selectable)}
-      ${count > 1 ? renderStackCountBadge(count, hex) : ''}
+      ${renderLudoPieceSvg(hex, uid, selectable, rotationDeg, count > 1 ? count : null)}
     </div>
   `
 }
@@ -149,16 +126,16 @@ export function renderLudoPieceHtml(
 // цветният медальон е отделен <circle>, центриран в главата на капката.
 // Профилът е по-тесен/по-остър от предишната итерация (по-близо до
 // референтния силует): широка закръглена горна част (~0-40% viewBox
-// височина), плавно монотонно стеснение до остра (не арка) долна точка
-// (~96% височина) — острият край е точно това, което "стъпва" в клетката,
+// височина), плавно монотонно стеснение до по-къса остра долна точка
+// (~88% височина) — острият край е точно това, което "стъпва" в клетката,
 // докато закръглената горна част overflow-ва нагоре (виж margin-top в
 // wrapper-а по-горе). viewBox 0 0 60 84.
 const LUDO_PIECE_SILHOUETTE_PATH =
   'M30 2 ' +
   'C44 2 55 13 55 26 ' +
   'C55 34 51 41 45 48 ' +
-  'C39 55 33 63 30 82 ' +
-  'C27 63 21 55 15 48 ' +
+  'C39 54 33 60 30 74 ' +
+  'C27 60 21 54 15 48 ' +
   'C9 41 5 34 5 26 ' +
   'C5 13 16 2 30 2 Z'
 
@@ -166,12 +143,26 @@ const LUDO_PIECE_SILHOUETTE_PATH =
 // кръг": НЕ цялото тяло на пионката е в цвета на играча, само този вътрешен
 // кръг. Позициониран в горната закръглена зона на силует path-а по-горе.
 const LUDO_PIECE_MEDALLION_CENTER = { cx: 30, cy: 26 }
-const LUDO_PIECE_MEDALLION_RADIUS = 15
+const LUDO_PIECE_MEDALLION_RADIUS = 19
 
-function renderLudoPieceSvg(hex: string, uid: string, selectable: boolean): string {
+function renderLudoPieceSvg(
+  hex: string,
+  uid: string,
+  selectable: boolean,
+  rotationDeg = 0,
+  medallionCount: number | null = null,
+): string {
   const medallionFillId = `ludo-piece-medallion-fill-${uid}`
   const bodyShadeId = `ludo-piece-body-shade-${uid}`
   const bodyHighlightId = `ludo-piece-body-highlight-${uid}`
+  // rotationDeg се прилага ТУК, на самото SVG (independent absolute layer,
+  // виж doc коментара при rotationDeg параметъра в renderLudoPieceHtml по-
+  // горе) — не носи никакъв друг transform в момента, затова composition-ът
+  // е тривиален (нищо за overwrite-ване). transform-origin:center center е
+  // default поведение за SVG, но explicit тук за яснота — ротацията е
+  // винаги около геометричния център на силует path-а, не около произволна
+  // точка.
+  const rotationStyle = rotationDeg !== 0 ? `transform:rotate(${rotationDeg}deg);transform-origin:center center;` : ''
 
   return `
     <svg
@@ -183,6 +174,7 @@ function renderLudoPieceSvg(hex: string, uid: string, selectable: boolean): stri
         height:100%;
         overflow:visible;
         filter:drop-shadow(0 2px 3px rgba(0,0,0,0.4));
+        ${rotationStyle}
       "
     >
       <defs>
@@ -215,6 +207,19 @@ function renderLudoPieceSvg(hex: string, uid: string, selectable: boolean): stri
            четимостта на черния outline/цветния медальон. -->
       <path d="${LUDO_PIECE_SILHOUETTE_PATH}" fill="url(#${bodyHighlightId})"></path>
       ${selectable ? `<path d="${LUDO_PIECE_SILHOUETTE_PATH}" fill="none" stroke="#ffd766" stroke-width="1.8" opacity="0.9"></path>` : ''}
+      ${medallionCount === null ? '' : `
+        <text
+          x="${LUDO_PIECE_MEDALLION_CENTER.cx + 1}"
+          y="${LUDO_PIECE_MEDALLION_CENTER.cy + 3.7}"
+          text-anchor="middle"
+          dominant-baseline="middle"
+          font-family="system-ui, sans-serif"
+          font-size="26"
+          font-weight="400"
+          fill="#111111"
+          transform="rotate(${-rotationDeg} ${LUDO_PIECE_MEDALLION_CENTER.cx} ${LUDO_PIECE_MEDALLION_CENTER.cy})"
+        >${medallionCount}</text>
+      `}
     </svg>
   `
 }
@@ -300,6 +305,10 @@ function clamp255(value: number): number {
 // quadrant подредба, стегнато събрана в квадратчето на клетката.
 type LudoClusterSlot = { dx: number; dy: number; scale: number }
 
+// Track and normal finish pawns are slightly larger than home pawns. This
+// shared multiplier is also used by the movement overlay when leaving home.
+export const LUDO_BOARD_PAWN_SCALE = 1.12
+
 // Единичен token (count===1 логически "1 цвят в клетката", но виж
 // clusterLayoutForCount extra-token overlap case) — непроменено спрямо
 // преди overlap fix-а изобщо: пълен размер, center-anchored (leko над
@@ -343,7 +352,47 @@ function clusterLayoutForCount(totalTokens: number): readonly LudoClusterSlot[] 
   return FOUR_SLOTS
 }
 
-function clusterOffsetStyle(index: number, totalTokens: number): string {
+// The large 0deg pawn is taller than one grid cell, so a small radial offset
+// keeps it visually centered in its own colored area without crowding the
+// common apex. The direction comes from the viewer-rotated finish[5] cell.
+const TRIANGLE_REPRESENTATIVE_SCALE = 1.42
+const TRIANGLE_REPRESENTATIVE_OUTWARD_OFFSET_PERCENT = 35
+const TOP_TRIANGLE_REPRESENTATIVE_INWARD_OFFSET_PERCENT = 55
+const BOARD_CENTER_GRID_INDEX = 7
+
+function triangleRepresentativeOffsetStyle(cellId: LudoCellId, localColor: LudoColor | null): string {
+  const canonicalPoint = ludoGridPointForCellId(cellId)
+  const point = localColor === null ? canonicalPoint : rotateLudoGridPointForViewer(canonicalPoint, localColor)
+  const offsetX = Math.sign(point.col - BOARD_CENTER_GRID_INDEX) * TRIANGLE_REPRESENTATIVE_OUTWARD_OFFSET_PERCENT
+  const offsetY = point.row < BOARD_CENTER_GRID_INDEX
+    ? TOP_TRIANGLE_REPRESENTATIVE_INWARD_OFFSET_PERCENT
+    : Math.sign(point.row - BOARD_CENTER_GRID_INDEX) * TRIANGLE_REPRESENTATIVE_OUTWARD_OFFSET_PERCENT
+  const verticalPawnLiftPx = point.row < BOARD_CENTER_GRID_INDEX
+    ? 5
+    : point.row > BOARD_CENTER_GRID_INDEX
+      ? 9
+      : 0
+  const sidePawnShiftTowardCenterPx = point.col < BOARD_CENTER_GRID_INDEX
+    ? 5
+    : point.col > BOARD_CENTER_GRID_INDEX
+      ? -5
+      : 0
+  const sidePawnShiftDownPx = point.col !== BOARD_CENTER_GRID_INDEX ? 10 : 0
+  const verticalShiftPx = sidePawnShiftDownPx - 4 - verticalPawnLiftPx
+  return `position:absolute;left:50%;top:50%;transform:translate(calc(-50% + ${offsetX}% + ${sidePawnShiftTowardCenterPx}px), calc(-50% + ${offsetY}% + ${verticalShiftPx}px)) scale(${TRIANGLE_REPRESENTATIVE_SCALE});`
+}
+
+// True only for the logical finish slot hidden under the center triangle.
+// finish-<color>-<LUDO_FINISH_LENGTH-1> клетки — единствените, визуално
+// слети с централния триъгълник (renderLudoBoard.ts). Всички други клетки
+// (track/home/междинни finish) следват стандартния quadrant layout,
+// непроменено.
+function isCenterTriangleFinishCell(cellId: LudoCellId): boolean {
+  const cell = parseLudoCellId(cellId)
+  return cell.kind === 'finish' && cell.slot === LUDO_FINISH_LENGTH - 1
+}
+
+function clusterOffsetStyle(index: number, totalTokens: number, scaleMultiplier: number): string {
   const slots = clusterLayoutForCount(totalTokens)
   const slot = slots[Math.min(index, slots.length - 1)]!
   // left:50%;top:50% center-anchor (вместо bottom:0) + fixed dx/dy quadrant
@@ -352,11 +401,15 @@ function clusterOffsetStyle(index: number, totalTokens: number): string {
   // никога не "полепва" към долния ръб на клетката преди offset-а — самият
   // offset е малък и фиксиран, затова острият връх (bottom-center на SVG
   // силуета) остава близо до клетъчния център, вътре в границите ѝ.
-  return `position:absolute;left:50%;top:50%;transform:translate(calc(-50% + ${slot.dx}px), calc(-50% + ${slot.dy}px - 4px)) scale(${slot.scale});`
+  return `position:absolute;left:50%;top:50%;transform:translate(calc(-50% + ${slot.dx}px), calc(-50% + ${slot.dy}px - 4px)) scale(${slot.scale * scaleMultiplier});`
 }
 
-function clusterDepthPriority(index: number, totalTokens: number, isLocal: boolean): number {
-  const slots = clusterLayoutForCount(totalTokens)
+function clusterDepthPriority(
+  index: number,
+  totalTokens: number,
+  isLocal: boolean,
+  slots: readonly LudoClusterSlot[] = clusterLayoutForCount(totalTokens),
+): number {
   const slot = slots[Math.min(index, slots.length - 1)]!
   const yLevels = Array.from(new Set(slots.map((candidate) => candidate.dy))).sort((a, b) => a - b)
   const yRank = yLevels.indexOf(slot.dy)
@@ -398,23 +451,10 @@ function clusterDepthPriority(index: number, totalTokens: number, isLocal: boole
 // localColor=null (preview/harness context, виж V6/V7 тестовете) -> row
 // остава canonical (без viewer rotation), НЕ хвърля грешка.
 //
-// LOCAL PAWN GLOBAL PRIORITY (втори review pass, browser-доказан edge case):
-// row-based ordering-ът по-горе е коректен и достатъчен за non-local
-// token-и (те трябва само взаимно да се overlap-ват предвидимо), НО when
-// local pawn-ът е в клетка с "по-нисък" (canonical/rotated) ред от съседна
-// клетка с чужд cluster, row-based правилото само по себе си пак би
-// позволило чуждия cluster да покрие local pawn-а — потвърдено с реален
-// browser hit-testing (checkLudoSharedCellStacking.ts's two-adjacent-
-// clusters сценарий). "Own pawn visible" изискването е по-силна гаранция от
-// row-based depth ефекта (объркан играч, който не вижда своята пионка, е
-// по-лош UX бъг от несъвършен overlap ред между ДВЕ чужди пионки) — затова
-// local pawn получава ФИКСИРАНА, row-НЕЗАВИСИМА z-index стойност, гарантирано
-// по-висока от ВСЯКА възможна rowZIndexBase+priority комбинация където и да
-// е на дъската (max row 14 * 1000 + 100 = 14100), не само в собствената си
-// клетка. Non-local token-и продължават да ползват row-based ordering помежду
-// си, непроменено.
+// A full screen row owns a range of 1000 z-index values. Same-cell slot and
+// local tie-break priorities stay inside that range, so a pawn in a lower
+// screen row always paints above a pawn in an upper row.
 const ROW_Z_INDEX_MULTIPLIER = 1000
-const LOCAL_PAWN_GLOBAL_Z_INDEX = 100_000
 
 function computeRowZIndexBase(cellId: LudoCellId, localColor: LudoColor | null): number {
   const cell = parseLudoCellId(cellId)
@@ -442,18 +482,40 @@ export function renderLudoPieceCluster(
   // групирането в renderLudoPiecesByCell по-долу вече го гарантира преди
   // да достигне тук) — четем cellId от първата, за row-based z-index base.
   const rowZIndexBase = computeRowZIndexBase(pieces[0]!.cell, localColor)
+  const clusterCell = parseLudoCellId(pieces[0]!.cell)
+
+  // finish[5] stays logically unchanged, but its large center triangle shows
+  // one representative pawn. The real piece ids remain attached to that token.
+  if (isCenterTriangleFinishCell(pieces[0]!.cell)) {
+    const sorted = [...pieces].sort((a, b) => a.id.localeCompare(b.id))
+    const representative = sorted.find((piece) => selectablePieceIds.has(piece.id)) ?? sorted[0]!
+    const zIndex = rowZIndexBase + 1
+    const extraStyle = `${triangleRepresentativeOffsetStyle(representative.cell, localColor)}z-index:${zIndex};`
+    const token = renderLudoPieceHtml(
+      representative.id,
+      selectablePieceIds.has(representative.id),
+      sorted.length,
+      sorted.map((piece) => piece.id),
+      extraStyle,
+      0,
+    )
+
+    return `
+      <div style="position:relative;width:100%;height:100%;">
+        ${token}
+      </div>
+    `
+  }
 
   const colorGroups = piecesByColor(pieces)
+  const scaleMultiplier = clusterCell.kind === 'home' ? 1 : LUDO_BOARD_PAWN_SCALE
   // Viewer-independent color order keeps every color in the same compact
   // slot across perspective switches. Depth, not DOM order, controls paint.
   // Детерминистичен базов ред: по цвят име (стабилен независимо от реда в
   // state.pieces масива), после local цвят (ако присъства в клетката)
   // изтеглен в самия край — последен DOM node = най-висок stacking order.
   const orderedColors = Array.from(colorGroups.keys()).sort((a, b) => a.localeCompare(b))
-  const clusterContainsLocal = localColor !== null && colorGroups.has(localColor)
-  const clusterZIndexBase = clusterContainsLocal
-    ? LOCAL_PAWN_GLOBAL_Z_INDEX + rowZIndexBase
-    : rowZIndexBase
+  const clusterZIndexBase = rowZIndexBase
 
   const tokens = orderedColors
     .map((color, index) => {
@@ -468,24 +530,11 @@ export function renderLudoPieceCluster(
       const representative = sorted.find((p) => selectablePieceIds.has(p.id)) ?? sorted[0]
       const groupIds = sorted.map((p) => p.id)
       const isLocal = color === localColor
-      // A local-containing cluster keeps the existing cross-cell protection.
-      // Inside that cluster, slot Y wins; local identity only breaks equal-Y ties.
-      // z-index explicit: local получава ФИКСИРАНА, row-независима глобална
-      // стойност (LOCAL_PAWN_GLOBAL_Z_INDEX, виж doc коментара по-горе) —
-      // гарантирано topmost навсякъде по дъската, не само в собствения си
-      // cluster. Малкият +rowZIndexBase/ROW_Z_INDEX_MULTIPLIER (0-14) delta
-      // тук е чист tiebreaker МЕЖДУ ДВЕ пионки на СЪЩИЯ local играч в ДВЕ
-      // различни клетки (реален, макар и безобиден edge case — виж
-      // checkLudoSharedCellStacking.ts — без него двете биха tied на
-      // еднакъв LOCAL_PAWN_GLOBAL_Z_INDEX, разрешено произволно по document
-      // order); никога не намалява под LOCAL_PAWN_GLOBAL_Z_INDEX, затова
-      // local остава гарантирано над ВСЯКА non-local комбинация. Останалите
-      // (non-local) следват rowZIndexBase + стабилен нарастващ ред по
-      // позиция в orderedColors (1-based, никога 0), за да остане
-      // сравнението коректно и помежду им, когато token-ите от ДВЕ различни
-      // клетки визуално overlap-нат (cross-cell edge case).
+      // Screen row is the primary cross-cell depth. Inside one cell, slot Y
+      // wins and local identity only breaks equal-Y ties; all such priorities
+      // stay below ROW_Z_INDEX_MULTIPLIER so they cannot overtake a lower row.
       const zIndex = clusterZIndexBase + clusterDepthPriority(index, orderedColors.length, isLocal)
-      const extraStyle = `${clusterOffsetStyle(index, orderedColors.length)}z-index:${zIndex};`
+      const extraStyle = `${clusterOffsetStyle(index, orderedColors.length, scaleMultiplier)}z-index:${zIndex};`
       return renderLudoPieceHtml(representative.id, selectablePieceIds.has(representative.id), group.length, groupIds, extraStyle)
     })
     .join('')

@@ -31,6 +31,7 @@ import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState } from './renderLudoGameScreen'
 import { renderLudoMockPopup } from './renderLudoBottomBar'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
+import { renderLudoGameEndPopup } from './renderLudoGameEndPopup'
 import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
 import {
@@ -42,6 +43,8 @@ import {
 import { playLudoCaptureFlightOverlay } from './pieces/playLudoCaptureFlightOverlay'
 import { playLudoCaptureImpactOverlay } from './pieces/playLudoCaptureImpactOverlay'
 import { playLudoMoveRouteOverlay } from './pieces/playLudoMoveRouteOverlay'
+import { LUDO_BOARD_PAWN_SCALE } from './pieces/renderLudoPieces'
+import { parseLudoCellId } from './board/ludoBoardGeometry'
 import { rollLudoMockDiceResult } from './dice/ludoDiceState'
 import { createLudoDiceResultOverlayController } from './dice/playLudoDiceFlightOverlay'
 import { reduceLudoGame } from './engine/ludoEngineReducer'
@@ -113,6 +116,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let isAnimatingMove = false
   let isDestroyed = false
   let activePopup: 'emoji' | 'phrase' | null = null
+  let hasPresentedGameEnd = false
+  let isGameEndPopupOpen = false
   // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
   // до следващия път, когато local player-ът получи хода си (не reset-ва
   // се автоматично, аналог на Belot persistent popup).
@@ -294,7 +299,29 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     applyLudoBoardContent(options.root, currentScreenState())
     if (activePopup) mountPopup(activePopup)
     if (showBotTakeoverPopup) mountBotTakeoverPopup()
+    if (isGameEndPopupOpen) mountGameEndPopup()
     wireEvents()
+  }
+
+  function mountGameEndPopup(): void {
+    if (options.root.querySelector('[data-ludo-game-end-backdrop="1"]')) return
+    const container = document.createElement('div')
+    container.innerHTML = renderLudoGameEndPopup(engineState.winnerColor === localColor)
+    const backdrop = container.firstElementChild
+    if (backdrop) options.root.appendChild(backdrop)
+    options.root.querySelector('[data-ludo-game-end-dismiss="1"]')?.addEventListener('click', () => {
+      isGameEndPopupOpen = false
+      options.root.querySelector('[data-ludo-game-end-backdrop="1"]')?.remove()
+    })
+  }
+
+  function presentGameEndOnce(): void {
+    if (hasPresentedGameEnd || engineState.status !== 'finished' || engineState.winnerColor === null) return
+    hasPresentedGameEnd = true
+    isGameEndPopupOpen = true
+    clearScheduledTimers()
+    showBotTakeoverPopup = false
+    render()
   }
 
   function mountPopup(kind: 'emoji' | 'phrase'): void {
@@ -677,18 +704,24 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     const movingPieceBefore = engineState.pieces.find((p) => p.color === color && p.slot === slot)
     if (!movingPieceBefore) return
     const fromCellId = ludoEnginePositionToCellId(movingPieceBefore.position, color)
+    const targetCellId = ludoEnginePositionToCellId(move.targetPosition, color)
     const sourcePieceEl = options.root.querySelector<HTMLElement>(
       `[data-ludo-piece="${pieceId}"], [data-ludo-piece-group~="${pieceId}"]`,
     )
     const sourceCellEl = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${fromCellId}"]`)
+    const targetCellEl = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${targetCellId}"]`)
     const sourcePieceRect = sourcePieceEl?.getBoundingClientRect()
     const sourceCellRect = sourceCellEl?.getBoundingClientRect()
-    const pieceSizePx = sourcePieceRect?.width || Math.min(30, (sourceCellRect?.width ?? 38) * 0.8)
+    const targetCellRect = targetCellEl?.getBoundingClientRect()
+    const sourceIsHome = parseLudoCellId(fromCellId).kind === 'home'
+    const boardPieceSizePx = Math.min(30, (targetCellRect?.width ?? sourceCellRect?.width ?? 38) * 0.8) * LUDO_BOARD_PAWN_SCALE
+    const pieceSizePx = sourceIsHome ? boardPieceSizePx : (sourcePieceRect?.width ?? boardPieceSizePx)
 
     isAnimatingMove = true
     clearScheduledTimers()
 
     const moveResult = dispatch({ type: 'MOVE_REQUESTED', color, slot, expectedTurnVersion: engineState.turnVersion })
+    const isGameWinningMove = moveResult.state.status === 'finished' && moveResult.state.winnerColor === color
     const capturedEvent = moveResult.events.find((e) => e.type === 'pieces_captured')
     const capturedPieceIds = capturedEvent && capturedEvent.type === 'pieces_captured' ? capturedEvent.capturedPieceIds : []
 
@@ -697,8 +730,6 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // finish, виж board/ludoMoveRoute.ts) — вече няма нужда от отделен
     // early-return за "target.kind !== 'track'" (Phase 3A special case);
     // route loop-ът по-долу работи еднакво за всички.
-    const targetCellId = ludoEnginePositionToCellId(move.targetPosition, color)
-
     // Capture presentation buffer (виж task-а и коментара при
     // captureVictimOverrides по-горе): engine-ът вече е resolve-нал
     // captured victims в home-а им (dispatch по-горе е МОМЕНТАЛЕН), но
@@ -720,6 +751,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       route,
       pieceSizePx,
       initiallyHidden: areGameplayOverlaysHiddenForPopup,
+      isGameWinningMove,
     })
     activeMoveOverlayCancel = moveOverlay.cancel
     await moveOverlay.finished
@@ -749,6 +781,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     movingPieceSuppressedId = null
     isAnimatingMove = false
     render()
+
+    if (isGameWinningMove) {
+      presentGameEndOnce()
+      return
+    }
 
     advanceTurn()
   }

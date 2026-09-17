@@ -1,11 +1,71 @@
 import { renderLudoPieceHtml } from './renderLudoPieces'
 import type { LudoCellId, LudoPieceId } from '../ludoTypes'
+import { ludoSafeCellIds, parseLudoCellId } from '../board/ludoBoardGeometry'
+import { LUDO_FINISH_LENGTH } from '../ludoGeometryConstants'
 
 const MOVE_TRAVEL_MS = 165
 const STEP_TOTAL_MS = 260
 const TRAIL_FADE_MS = 320
-const EARLY_TRAVEL_SCALE = 1.06
-const MID_TRAVEL_SCALE = 1.18
+const EARLY_TRAVEL_SCALE = 1.08
+const MID_TRAVEL_SCALE = 1.23
+
+const PAWN_STEP_SOUND_SRC = '/audio/ludo/pawn-step.mp3'
+const STAR_LANDING_SOUND_SRC = '/audio/ludo/star-landing.mp3'
+const TRIANGLE_ENTRY_SOUND_SRC = '/audio/ludo/triangle-entry.mp3'
+const END_GAME_SOUND_SRC = '/audio/ludo/end-game.mp3'
+
+// Canonical star/safe cell membership — reuse-ва СЪЩИЯ source of truth като
+// board rendering-а (ludoSafeCellIds() -> LUDO_SAFE_TRACK_INDICES в
+// ludoGeometryConstants.ts, споделен и с capture eligibility в
+// engine/ludoEngineLegalMoves.ts). Изчислено ВЕДНЪЖ на module load (списъкът
+// е статичен — 4 индекса, по един на цвят), не пресмятано наново на всяка
+// route стъпка. Set за O(1) membership check вместо Array.includes().
+const LUDO_SAFE_CELL_ID_SET = new Set(ludoSafeCellIds())
+
+// Минимален presentation audio side effect (не gameplay logic, не мутира
+// state) — по един нов Audio() instance на всяка route стъпка, вместо
+// reused/pooled element. Стъпките се редуват на ~260ms (виж STEP_TOTAL_MS),
+// значи предходният playback обикновено още не е приключил, когато следва
+// новото стъпване — reset-ване на currentTime на споделен елемент би
+// звучало като прекъснат/накъсан звук вместо чист повторен "tap"; отделен
+// instance на всяка стъпка позволява презастъпващи се опашки да звучат
+// естествено (всеки играе изцяло, независимо от следващия). play()
+// rejection (autoplay restriction и т.н.) се игнорира тихо — звукът е
+// чисто декоративен, никога не трябва да чупи движението.
+function playLudoPawnStepSound(): void {
+  if (typeof Audio === 'undefined') return
+  const audio = new Audio(PAWN_STEP_SOUND_SRC)
+  void audio.play().catch(() => {})
+}
+
+// Star/safe landing вариант — играе се ВМЕСТО pawn-step (никога заедно с
+// него, виж call site-а в route loop-а по-долу) само когато финалната
+// destination клетка на целия move е canonical safe/star cell. Междинно
+// преминаване през star (route има повече клетки след нея) си остава
+// нормалният pawn-step звук — star sound маркира "спрях тук", не "минах
+// оттук".
+function playLudoStarLandingSound(): void {
+  if (typeof Audio === 'undefined') return
+  const audio = new Audio(STAR_LANDING_SOUND_SRC)
+  void audio.play().catch(() => {})
+}
+
+function playLudoTriangleEntrySound(): void {
+  if (typeof Audio === 'undefined') return
+  const audio = new Audio(TRIANGLE_ENTRY_SOUND_SRC)
+  void audio.play().catch(() => {})
+}
+
+function playLudoEndGameSound(): void {
+  if (typeof Audio === 'undefined') return
+  const audio = new Audio(END_GAME_SOUND_SRC)
+  void audio.play().catch(() => {})
+}
+
+function isCenterTriangleCell(cellId: LudoCellId): boolean {
+  const cell = parseLudoCellId(cellId)
+  return cell.kind === 'finish' && cell.slot === LUDO_FINISH_LENGTH - 1
+}
 
 export interface LudoMoveRouteOverlayOptions {
   root: ParentNode
@@ -14,6 +74,7 @@ export interface LudoMoveRouteOverlayOptions {
   route: readonly LudoCellId[]
   pieceSizePx: number
   initiallyHidden: boolean
+  isGameWinningMove?: boolean
   debugSpeedScale?: number
 }
 
@@ -122,7 +183,8 @@ export function playLudoMoveRouteOverlay(options: LudoMoveRouteOverlayOptions): 
   const finished = (async () => {
     let current = start
     try {
-      for (const cellId of route) {
+      for (let stepIndex = 0; stepIndex < route.length; stepIndex += 1) {
+        const cellId = route[stepIndex]!
         if (cancelled) return
         const next = cellCenter(root, overlay, cellId)
         if (!next) return
@@ -163,6 +225,16 @@ export function playLudoMoveRouteOverlay(options: LudoMoveRouteOverlayOptions): 
         if (cancelled) return
         place(moving, next)
         moving.style.transform = 'translate(-50%, -50%) scale(1)'
+        const isFinalStep = stepIndex === route.length - 1
+        if (isFinalStep && options.isGameWinningMove) {
+          playLudoEndGameSound()
+        } else if (isFinalStep && isCenterTriangleCell(cellId)) {
+          playLudoTriangleEntrySound()
+        } else if (isFinalStep && LUDO_SAFE_CELL_ID_SET.has(cellId)) {
+          playLudoStarLandingSound()
+        } else {
+          playLudoPawnStepSound()
+        }
         current = next
         await wait(Math.max(0, STEP_TOTAL_MS - MOVE_TRAVEL_MS) * speedScale)
       }

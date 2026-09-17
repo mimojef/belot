@@ -55,7 +55,7 @@ export type LudoTurnPhase =
   | 'move_resolving'
   | 'turn_complete'
 
-export type LudoGameStatus = 'in_progress'
+export type LudoGameStatus = 'in_progress' | 'finished'
 
 export type LudoDiceValue = 1 | 2 | 3 | 4 | 5 | 6
 
@@ -78,6 +78,7 @@ export interface LudoGameState {
   legalMoves: readonly LudoLegalMove[]
   pieces: readonly LudoGamePiece[]
   status: LudoGameStatus
+  winnerColor: LudoColor | null
   // Increment-ва се при всяка успешна мутация — защита срещу stale actions
   // (виж reduceLudoGame). Не е "turn number"; расте и в рамките на един ход.
   turnVersion: number

@@ -226,14 +226,6 @@ function renderPlayerPanelSlot(
   // е true само за локалния играч, за да остане click тригерът точно там,
   // където преди беше единственият видим "Хвърли зара" бутон.
   const diceControl = {
-    // ФИКСИРАНА стойност — НЕ реалният dice резултат. Launcher-ът в
-    // player card-а е чисто UI за задействане (виж task-а), никога не
-    // показва падналото число; истинският резултат се вижда само на
-    // отделното "летящо" зарче в центъра на дъската (виж
-    // playLudoDiceFlightOverlay.ts, извикан от createLudoFlowController.ts
-    // handleRollDice). Затова LudoGameScreenState умишлено няма
-    // diceResult поле — тази стойност няма откъде да "изтече" в картата.
-    face: 1,
     // Огледално на старото `disabled:!state.canRollDice` на бутона — докато
     // roll-ът тече (isDiceRolling → canRollDice=false), click target-ът
     // изчезва (виж renderLudoDiceControl: isRollable=false → без

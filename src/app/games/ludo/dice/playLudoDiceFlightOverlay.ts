@@ -24,6 +24,21 @@ import { computeLudoDiceThrowTransform, type LudoDiceFace } from './ludoDiceStat
 // (CSS transition, кубчето) ЕДНОВРЕМЕННО, като едно цяло движение.
 const FLIGHT_DURATION_MS = 900
 
+const DICE_ROLL_SOUND_SRC = '/audio/ludo/dice-roll.mp3'
+
+// Минимален presentation audio side effect — НЕ gameplay logic, не мутира
+// game state. Нов Audio() instance на всеки roll (не pooled), тъй като dice
+// roll не е latency-critical/high-frequency като card-sfx (виж
+// createGameAudioController.ts CARD_SFX_POOL_SIZE коментара) — просто
+// презапочва играенето, ако предходният roll звук все още звучи. play()
+// rejection (autoplay restriction, тих tab, etc.) се игнорира тихо — звукът
+// е чисто декоративен, никога не трябва да чупи хвърлянето.
+function playLudoDiceRollSound(): void {
+  if (typeof Audio === 'undefined') return
+  const audio = new Audio(DICE_ROLL_SOUND_SRC)
+  void audio.play().catch(() => {})
+}
+
 // Responsive dice sizing (виж task-а — bug fix: зарът преди беше твърд
 // 64px, на mobile дъската се смалява, но той не, значи изглеждаше
 // прекалено голям). BOARD_COLUMNS=15 — Ludo дъската е 15x15 grid (виж
@@ -177,6 +192,7 @@ export function createLudoDiceResultOverlayController(): LudoDiceResultOverlayCo
 
   async function playFlight(options: Omit<LudoDiceFlightOptions, 'initiallyHidden'>): Promise<void> {
     clearLanded()
+    playLudoDiceRollSound()
     // isHidden се подава ВЕДНАГА, преди container-ът изобщо да бъде
     // appended — не изчакваме края на 900ms flight анимацията (виж bug fix
     // audit-а в LudoDiceFlightOptions по-горе), затова летящото зарче

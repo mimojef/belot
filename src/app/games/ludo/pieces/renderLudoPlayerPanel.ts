@@ -83,7 +83,6 @@ function buildMobileCountdownRingPath(size: number, inset: number, radius: numbe
 }
 
 export interface LudoPlayerPanelDiceControl {
-  face: number
   isRollable: boolean
   // Единственото правило (виж renderLudoGameScreen.ts::renderPlayerPanelSlot
   // и task-а): true само когато ТОЗИ player е активен И
@@ -197,7 +196,6 @@ export function renderLudoPlayerPanel(
             hex,
             avatarSize,
             insetPx,
-            face: diceControl.face,
             isRollable: diceControl.isRollable,
             shouldRotateArrows: diceControl.shouldRotateArrows,
           })

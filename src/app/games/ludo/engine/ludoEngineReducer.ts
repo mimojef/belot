@@ -18,6 +18,7 @@ import type { LudoEngineAction } from './ludoEngineActions'
 import type { LudoEngineEvent } from './ludoEngineEvents'
 import { ludoGamePieceId } from './ludoEngineTypes'
 import type { LudoGamePiece, LudoGameState } from './ludoEngineTypes'
+import { isLudoColorFinished } from './ludoEngineWinner'
 
 export interface LudoReduceResult {
   state: LudoGameState
@@ -35,6 +36,7 @@ function isActionAuthorized(state: LudoGameState, action: { color: string; expec
 }
 
 export function reduceLudoGame(state: LudoGameState, action: LudoEngineAction): LudoReduceResult {
+  if (state.status === 'finished') return rejected(state)
   switch (action.type) {
     case 'ROLL_STARTED':
       return handleRollStarted(state, action)
@@ -149,6 +151,7 @@ function handleMoveRequested(
     }
   }
 
+  const didFinish = isLudoColorFinished(nextPieces, action.color)
   const nextState: LudoGameState = {
     ...state,
     pieces: nextPieces,
@@ -159,6 +162,8 @@ function handleMoveRequested(
     // съществуващ pendingExtraRoll от самия dice===6 (handleRollResolved),
     // НЕ отделно натрупване: "6 + capture" остава точно ЕДИН extra roll.
     pendingExtraRoll: state.pendingExtraRoll || capturedSomething,
+    status: didFinish ? 'finished' : 'in_progress',
+    winnerColor: didFinish ? action.color : null,
   }
 
   return { state: nextState, events }

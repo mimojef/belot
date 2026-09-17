@@ -12,6 +12,7 @@
 import { LUDO_COLOR_HEX, LUDO_COLORS, ludoCellId, type LudoCell, type LudoColor } from '../ludoTypes'
 import { ludoAdvanceTrackIndex, ludoAllCellIds, ludoFinishEntryTrackIndex, ludoGridPointForCellId, ludoSafeCellIds, ludoStartCellIds, ludoStartTrackIndex, parseLudoCellId, LUDO_HOME_SLOTS } from './ludoBoardGeometry'
 import { rotateLudoGridPointForViewer, rotateLudoDirectionForViewer, mapLudoColorToViewerQuadrant } from './ludoPerspective'
+import { LUDO_FINISH_LENGTH } from '../ludoGeometryConstants'
 
 const GRID_SIZE = 15
 // Изнесени (export) само за да могат renderLudoGameScreen.ts да изчисли
@@ -44,8 +45,32 @@ function isFinishCell(cell: LudoCell): cell is Extract<LudoCell, { kind: 'finish
   return cell.kind === 'finish'
 }
 
+// Последният finish slot на всеки цвят (LUDO_FINISH_LENGTH-1) е геометрично
+// съседен на централния 4-триъгълен square (виж data-ludo-board-center
+// по-долу — например red finish[5] е {col:6,row:7} 0-indexed, точно ляво до
+// центъра, който започва на grid-column:7) — визуално двете трябва да се
+// четат като ЕДНО голямо триъгълно поле, не като малка решетъчна клетка,
+// долепена до по-голям елемент (виж task-а: "4-те цветни триъгълника
+// изглеждат като част от дребната решетка"). Единствената нужна промяна е
+// премахване на тънката inset border линия (CELL_LINE) точно на тази клетка
+// — самата grid geometry/coordinates остават напълно непипнати (gameplay/
+// animation разчитат на точния grid-column/row, виж ludoBoardGeometry.ts),
+// само визуалният "cell line" изчезва, давайки безшевен преход в големия
+// цветен триъгълник до нея.
+function isCenterTriangleFinishCell(cell: LudoCell): boolean {
+  return cell.kind === 'finish' && cell.slot === LUDO_FINISH_LENGTH - 1
+}
+
 function trackCellStyle(cell: LudoCell, startColor: LudoColor | null): string {
   if (isFinishCell(cell)) {
+    // Последният finish slot (виж isCenterTriangleFinishCell doc коментара
+    // по-горе) е геометрично В СЪЩАТА grid area, покрита от централния
+    // 4-триъгълен square (data-ludo-board-center) — прозрачен фон тук
+    // позволява триъгълника отдолу/отгоре да се вижда безшевно през нея,
+    // вместо тази клетка визуално да го "покрива" с непрозрачен собствен
+    // цвят и own z-index (виж z-index:${point.row} по-долу — точно това
+    // причиняваше "нарязана решетка" визуалния ефект от task-а).
+    if (cell.slot === LUDO_FINISH_LENGTH - 1) return 'background:transparent;'
     return `background:${LUDO_COLOR_HEX[cell.color]};`
   }
   if (startColor) {
@@ -245,6 +270,53 @@ export function renderLudoBoard(localColor: LudoColor): string {
     .filter((id) => !id.startsWith('home-'))
     .map((id) => ({ id, cell: parseLudoCellId(id), point: rotateLudoGridPointForViewer(ludoGridPointForCellId(id), localColor) }))
 
+  const cellBorderEdges = new Map<string, readonly [number, number, number, number]>()
+  const addCellBorderEdge = (x1: number, y1: number, x2: number, y2: number): void => {
+    const forward = x1 < x2 || (x1 === x2 && y1 <= y2)
+    const edge = forward ? [x1, y1, x2, y2] as const : [x2, y2, x1, y1] as const
+    cellBorderEdges.set(edge.join(','), edge)
+  }
+
+  for (const { cell, point } of trackAndFinishCellPoints) {
+    if (isCenterTriangleFinishCell(cell)) continue
+    const x = point.col
+    const y = point.row
+    addCellBorderEdge(x, y, x + 1, y)
+    addCellBorderEdge(x + 1, y, x + 1, y + 1)
+    addCellBorderEdge(x, y + 1, x + 1, y + 1)
+    addCellBorderEdge(x, y, x, y + 1)
+  }
+
+  // The 3x3 center square spans grid coordinates 6..9. Add its perimeter as
+  // unit edges so shared boundaries deduplicate against neighboring cells.
+  for (let coordinate = 6; coordinate < 9; coordinate += 1) {
+    addCellBorderEdge(coordinate, 6, coordinate + 1, 6)
+    addCellBorderEdge(coordinate, 9, coordinate + 1, 9)
+    addCellBorderEdge(6, coordinate, 6, coordinate + 1)
+    addCellBorderEdge(9, coordinate, 9, coordinate + 1)
+  }
+
+  const cellBorderLines = Array.from(cellBorderEdges.values())
+    .map(([x1, y1, x2, y2]) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" vector-effect="non-scaling-stroke"></line>`)
+    .join('')
+
+  const boardCellBorderOverlay = `
+    <svg
+      data-ludo-cell-border-overlay="1"
+      viewBox="0 0 ${GRID_SIZE} ${GRID_SIZE}"
+      preserveAspectRatio="none"
+      style="position:absolute;inset:0;width:100%;height:100%;overflow:visible;pointer-events:none;z-index:16;"
+    >
+      <g fill="none" stroke="${CELL_LINE}" stroke-width="1" shape-rendering="crispEdges">
+        ${cellBorderLines}
+        <line x1="6" y1="6" x2="7.5" y2="7.5" vector-effect="non-scaling-stroke"></line>
+        <line x1="9" y1="6" x2="7.5" y2="7.5" vector-effect="non-scaling-stroke"></line>
+        <line x1="9" y1="9" x2="7.5" y2="7.5" vector-effect="non-scaling-stroke"></line>
+        <line x1="6" y1="9" x2="7.5" y2="7.5" vector-effect="non-scaling-stroke"></line>
+      </g>
+    </svg>
+  `
+
   const trackAndFinishCells = trackAndFinishCellPoints
     .map(({ id, cell, point }) => {
       const isStart = LUDO_COLORS.some((color) => startCells[color] === id)
@@ -253,7 +325,6 @@ export function renderLudoBoard(localColor: LudoColor): string {
       const startArrowColor = cell.kind === 'track' ? (startArrowTrackIndex[cell.index] ?? null) : null
       const isSafeCell = safeCellIds.has(id)
       const finishEntryColor = cell.kind === 'track' ? (finishEntryTrackIndex[cell.index] ?? null) : null
-
       // ВАЖНО: inline HTML style атрибутите тук са в двойни кавички — CSS
       // коментари вътре в style="" НЕ трябва да съдържат буквални " символи
       // (те прекратяват атрибута преждевременно в HTML parser-а, truncating
@@ -267,7 +338,6 @@ export function renderLudoBoard(localColor: LudoColor): string {
             grid-column:${point.col + 1};
             grid-row:${point.row + 1};
             ${trackCellStyle(cell, startColor)}
-            box-shadow:inset 0 0 0 1px ${CELL_LINE};
             position:relative;
             display:flex;
             align-items:center;
@@ -377,7 +447,7 @@ export function renderLudoBoard(localColor: LudoColor): string {
            видим "заоблен ъгъл" ефект) — само overflow clipping-ът е
            премахнат, geometry/фон/border-shadow остават непроменени. */
         overflow:visible;
-        box-shadow:inset 0 0 0 2px rgba(0,0,0,0.35);
+        box-shadow:inset 0 0 0 1px ${CELL_LINE};
       ">
         ${trackAndFinishCells}
         <div data-ludo-board-center="1" style="
@@ -385,6 +455,7 @@ export function renderLudoBoard(localColor: LudoColor): string {
           grid-row:7 / span 3;
           position:relative;
           overflow:hidden;
+          z-index:${GRID_SIZE};
         ">
           <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 0, 100% 0);background:${LUDO_COLOR_HEX[centerColorForEdge('top')]};"></div>
           <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 100% 0, 100% 100%);background:${LUDO_COLOR_HEX[centerColorForEdge('right')]};"></div>
@@ -392,6 +463,7 @@ export function renderLudoBoard(localColor: LudoColor): string {
           <div style="position:absolute; inset:0; clip-path:polygon(50% 50%, 0 100%, 0 0);background:${LUDO_COLOR_HEX[centerColorForEdge('left')]};"></div>
         </div>
         ${homeQuadrants}
+        ${boardCellBorderOverlay}
         <div data-ludo-piece-layer="1" style="
           position:absolute;
           inset:0;

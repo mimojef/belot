@@ -56,6 +56,7 @@ export function createLudoEngineInitialState(): LudoGameState {
     legalMoves: [],
     pieces: createLudoEngineInitialPieces(),
     status: 'in_progress',
+    winnerColor: null,
     turnVersion: 0,
     pendingExtraRoll: false,
   }
