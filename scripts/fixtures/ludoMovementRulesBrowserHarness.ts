@@ -95,6 +95,31 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+// Condition-based poll за сценарии като bot autonomous turns, чийто общ
+// timing budget е сбор от няколко production константи (bot think delay +
+// dice flight + N route steps) — hardcoding-ване на сбора им във фиксиран
+// wait() е крехко при всяка бъдеща промяна на тези константи. Polling-ът
+// проверява на всеки `intervalMs` и се предава след `timeoutMs`, така че
+// реално stuck состояние (real gameplay regression) продължава да води до
+// FAIL, вместо да бъде маскирано с голям timeout.
+function waitForCondition(checkFn: () => boolean, timeoutMs: number, intervalMs = 20): Promise<boolean> {
+  return new Promise((resolve) => {
+    const start = performance.now()
+    const tick = () => {
+      if (checkFn()) {
+        resolve(true)
+        return
+      }
+      if (performance.now() - start >= timeoutMs) {
+        resolve(false)
+        return
+      }
+      setTimeout(tick, intervalMs)
+    }
+    tick()
+  })
+}
+
 function clickRoll(): void {
   root.querySelector<HTMLButtonElement>('[data-ludo-dice-roll-button="1"]')?.click()
 }
@@ -149,6 +174,7 @@ function countStaticPieceInstances(pieceId: string): number {
   queueDiceValues,
   restoreDice,
   wait,
+  waitForCondition,
   clickRoll,
   isRollButtonPresent,
   getSelectablePieceIds,

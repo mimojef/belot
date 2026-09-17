@@ -66,6 +66,7 @@ type H = {
   queueDiceValues: (values: number[]) => Promise<void>
   restoreDice: () => Promise<void>
   wait: (ms: number) => Promise<void>
+  waitForCondition: (pieceId: string, cellId: string, timeoutMs: number) => Promise<boolean>
   clickRoll: () => Promise<void>
   isRollButtonPresent: () => Promise<boolean>
   getSelectablePieceIds: () => Promise<string[]>
@@ -84,6 +85,12 @@ async function harness(page: Page): Promise<H> {
     queueDiceValues: (values) => page.evaluate(([k, v]: any) => (window as any)[k].queueDiceValues(v), [w, values] as any),
     restoreDice: () => page.evaluate((k: any) => (window as any)[k].restoreDice(), w),
     wait: (ms) => page.evaluate(([k, m]: any) => (window as any)[k].wait(m), [w, ms] as any),
+    waitForCondition: (pieceId, cellId, timeoutMs) =>
+      page.evaluate(
+        ([k, p, c, t]: any) =>
+          (window as any)[k].waitForCondition(() => (window as any)[k].isPieceOrGroupInCell(p, c), t),
+        [w, pieceId, cellId, timeoutMs] as any,
+      ),
     clickRoll: () => page.evaluate((k: any) => (window as any)[k].clickRoll(), w),
     isRollButtonPresent: () => page.evaluate((k: any) => (window as any)[k].isRollButtonPresent(), w),
     getSelectablePieceIds: () => page.evaluate((k: any) => (window as any)[k].getSelectablePieceIds(), w),
@@ -245,8 +252,13 @@ try {
     await check(`[${label}] CASE I — bot autonomously exits home to its own start without any illegal move`, async () => {
       await h.mountWithState({}, 'blue')
       await h.queueDiceValues([6])
-      await h.wait(2600) // bot think-delay (700ms) + dice flight (900ms) + route step + render margin
-      assert(await h.isPieceOrGroupInCell('blue-0', 'track-14'), 'bot did not autonomously move blue-0 onto its own start cell (track-14)')
+      // Condition-based poll instead of a fixed wait: the full bot-turn
+      // budget (think-delay + dice flight + route step + render overhead)
+      // measured ~2600-2610ms in practice, leaving near-zero margin for a
+      // hardcoded deadline. Polling up to 5000ms still fails fast on a
+      // genuinely stuck bot while tolerating normal scheduling variance.
+      const reached = await h.waitForCondition('blue-0', 'track-14', 5000)
+      assert(reached, 'bot did not autonomously move blue-0 onto its own start cell (track-14) within 5000ms')
     })
 
     // --- CASE J: landing on an opponent parked on a safe/star cell must NOT capture it (SAFE10) ---
