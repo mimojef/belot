@@ -708,6 +708,16 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomChatSubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatUnsubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatSend?: (privateRoomId: string, body: string, requestId?: string) => void
+  onLudoRoomsOpen?: () => void
+  onLudoRoomCreate?: (stake: MatchStake, playerCount: 2 | 4, manualStart: boolean) => void
+  onLudoRoomJoin?: (ludoRoomId: string) => void
+  onLudoRoomLeave?: () => void
+  onLudoRoomKick?: (profileId: string) => void
+  onLudoRoomStart?: () => void
+  onLudoGameStateOpen?: () => void
+  onLudoRollRequest?: (matchId: string, expectedRevision: number) => void
+  onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
+  onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
   onSupportMessagesLoad?: () => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
@@ -2782,6 +2792,8 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/players': 'players',
   '/ranking': 'leaderboards',
   '/shop': 'shop',
+  '/games': 'more-games',
+  '/more-games': 'more-games',
   '/admin': 'admin',
   '/admin/guest-contact': 'guest-contact-messages',
   '/admin/visitors': 'admin-visitors',
@@ -2831,22 +2843,65 @@ export function createLobbyFlowController(
   // openGiftItemModal/closeGiftItemModal коментара.
   let _giftItemCatalogRequestToken = 0
 
-  // Ludo е изолиран visual prototype overlay (не lobby sub-screen render) —
-  // delegated listener вместо re-wire при всеки render(), защото самата
-  // "Още игри" карта живее в normal render цикъла, но играта се mount-ва
-  // отделно (document.body overlay), за да не бъде пипана от lobby re-render.
-  let _ludoController: { destroy: () => void } | null = null
+  let _ludoController: {
+    destroy: () => void
+    applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot) => void
+  } | null = null
+  let _ludoLobbyController: {
+    destroy: () => void
+    setRooms: (rooms: import('../network/createGameServerClient').LudoRoomSnapshot[]) => void
+    setMyRoom: (room: import('../network/createGameServerClient').LudoRoomSnapshot | null) => void
+    showMessage: (message: string) => void
+  } | null = null
   options.root.addEventListener('click', (event) => {
     const target = event.target
     if (!(target instanceof Element)) return
     if (!target.closest('[data-ludo-play-button="1"]')) return
     if (!isLudoFeatureEnabled()) return
-    void openLudoGameOverlay()
+    void openLudoLobbyOverlay()
   })
 
-  async function openLudoGameOverlay(): Promise<void> {
+  async function openLudoLobbyOverlay(): Promise<void> {
+    if (_ludoLobbyController || !isLudoFeatureEnabled()) return
+    const profileId = options.getAuthSession?.()?.profile?.profileId
+    if (!profileId) {
+      state.errorText = 'Трябва да влезеш в профила си.'
+      render()
+      return
+    }
+    const { createLudoLobbyController } = await import('../games/ludo/createLudoLobbyController')
+    const overlayRoot = document.createElement('div')
+    overlayRoot.setAttribute('data-ludo-lobby-overlay-root', '1')
+    overlayRoot.style.position = 'fixed'
+    overlayRoot.style.inset = '0'
+    overlayRoot.style.zIndex = '490'
+    document.body.appendChild(overlayRoot)
+    history.pushState({}, '', '/games/ludo')
+    _ludoLobbyController = createLudoLobbyController({
+      root: overlayRoot,
+      localProfileId: profileId,
+      stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
+      onBack: closeLudoLobbyOverlay,
+      onRefresh: () => options.onLudoRoomsOpen?.(),
+      onCreate: (stake, playerCount, manualStart) => options.onLudoRoomCreate?.(stake, playerCount, manualStart),
+      onJoin: (roomId) => options.onLudoRoomJoin?.(roomId),
+      onLeave: () => options.onLudoRoomLeave?.(),
+      onKick: (targetProfileId) => options.onLudoRoomKick?.(targetProfileId),
+      onStart: () => options.onLudoRoomStart?.(),
+    })
+  }
+
+  function closeLudoLobbyOverlay(): void {
+    _ludoLobbyController?.destroy()
+    _ludoLobbyController = null
+    document.querySelector('[data-ludo-lobby-overlay-root="1"]')?.remove()
+    if (window.location.pathname === '/games/ludo') history.pushState({}, '', '/games')
+  }
+
+  async function openLudoGameOverlay(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
     if (_ludoController) return
     const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
+    const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
     const overlayRoot = document.createElement('div')
     overlayRoot.setAttribute('data-ludo-overlay-root', '1')
     overlayRoot.style.position = 'fixed'
@@ -2854,8 +2909,24 @@ export function createLobbyFlowController(
     overlayRoot.style.zIndex = '500'
     document.body.appendChild(overlayRoot)
 
+    const players = createLudoMockPlayers()
+    const colors = ['red', 'blue', 'green', 'yellow'] as const
+    colors.forEach((color) => { players[color] = { color, name: 'Не участва', avatarUrl: null, isBot: true } })
+    snapshot.players.forEach((player) => {
+      players[player.color] = { color: player.color, name: player.displayName, avatarUrl: player.avatarUrl, isBot: false }
+    })
+    const localProfileId = options.getAuthSession?.()?.profile?.profileId
+    const localColor = snapshot.players.find((player) => player.profileId === localProfileId)?.color ?? 'red'
     _ludoController = createLudoFlowController({
       root: overlayRoot,
+      players,
+      localColor,
+      authoritative: {
+        initialSnapshot: snapshot,
+        onRollRequest: (matchId, revision) => options.onLudoRollRequest?.(matchId, revision),
+        onMoveRequest: (matchId, revision, slot) => options.onLudoMoveRequest?.(matchId, revision, slot),
+        onReclaimRequest: (matchId, revision) => options.onLudoReclaimRequest?.(matchId, revision),
+      },
       onExit: () => {
         closeLudoGameOverlay()
       },
@@ -4901,6 +4972,9 @@ export function createLobbyFlowController(
       },
       onShopClick: () => {
         void showShopPanel()
+      },
+      onGamesClick: () => {
+        showMoreGamesPage()
       },
       onShopPurchaseClick: (packageId) => {
         openShopPurchaseConfirm(packageId)
@@ -13507,15 +13581,9 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
-  // "Още игри" — скрито зад VITE_FEATURE_LUDO. При изключен flag директен
-  // опит за отваряне (URL/navigateFromPath) пада обратно към лобито вместо
-  // да покаже екрана — виж isLudoFeatureEnabled().
+  // Показва dedicated "Игри" секцията. Feature flag-ът управлява Ludo
+  // картата вътре в нея, а не достъпа до самата navigation секция.
   function showMoreGamesPage(): void {
-    if (!isLudoFeatureEnabled()) {
-      switchToLobby()
-      render()
-      return
-    }
     leaveAdminServerIfActive()
     state.currentScreen = 'more-games'
     state.isSearching = false
@@ -14639,7 +14707,7 @@ export function createLobbyFlowController(
     faq: '/faq',
     about: '/about',
     'fair-play': '/fair-play',
-    'more-games': '/more-games',
+    'more-games': '/games',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -14668,6 +14736,7 @@ export function createLobbyFlowController(
     '/faq': 'faq',
     '/about': 'about',
     '/fair-play': 'fair-play',
+    '/games': 'more-games',
     '/more-games': 'more-games',
   }
 
@@ -14696,6 +14765,13 @@ export function createLobbyFlowController(
   function syncUrlPath(): void {
     if (!_navigationReady || _pendingInitialNav) return
     if (document.getElementById('pwa-landing-overlay') !== null) return
+    if (_ludoLobbyController) {
+      if (window.location.pathname !== '/games/ludo') {
+        history.replaceState(null, '', '/games/ludo')
+        applyRouteSeo('/games/ludo')
+      }
+      return
+    }
     // Dynamic screens manage their own URL via pushState — skip syncUrlPath for them
     if (state.currentScreen === 'admin-payment-detail') return
     if (state.currentScreen === 'tournament-detail') return
@@ -14708,6 +14784,15 @@ export function createLobbyFlowController(
   }
 
   function navigateFromPath(path: string): void {
+    if (path === '/games/ludo') {
+      if (!isLudoFeatureEnabled()) {
+        showMoreGamesPage()
+        return
+      }
+      showMoreGamesPage()
+      void openLudoLobbyOverlay()
+      return
+    }
     // Dynamic route: /admin/payments/:purchaseId
     const detailMatch = /^\/admin\/payments\/([^/]+)$/.exec(path)
     if (detailMatch) {
@@ -16371,11 +16456,46 @@ export function createLobbyFlowController(
   function handleServerMessage(message: ServerMessage): boolean {
     if (message.type === 'connected') {
       state.errorText = null
+      options.onLudoGameStateOpen?.()
       if (_pendingInitialNav) {
         _pendingInitialNav = false
         navigateFromPath(_loadPath)
       } else {
         render()
+      }
+      return true
+    }
+
+    if (message.type === 'ludo_rooms_list') {
+      _ludoLobbyController?.setRooms(message.rooms)
+      return true
+    }
+    if (message.type === 'ludo_room_updated') {
+      _ludoLobbyController?.setMyRoom(message.room)
+      options.onLudoRoomsOpen?.()
+      return true
+    }
+    if (message.type === 'ludo_room_left') {
+      _ludoLobbyController?.setMyRoom(null)
+      options.onLudoRoomsOpen?.()
+      return true
+    }
+    if (message.type === 'ludo_room_kicked') {
+      _ludoLobbyController?.setMyRoom(null)
+      _ludoLobbyController?.showMessage('Бяхте премахнат от създателя на играта.')
+      options.onLudoRoomsOpen?.()
+      return true
+    }
+    if (message.type === 'ludo_game_started') {
+      closeLudoLobbyOverlay()
+      void openLudoGameOverlay(message.snapshot)
+      return true
+    }
+    if (message.type === 'ludo_game_state') {
+      if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot)
+      else {
+        closeLudoLobbyOverlay()
+        void openLudoGameOverlay(message.snapshot)
       }
       return true
     }
@@ -16758,6 +16878,11 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'error') {
+      if (_ludoLobbyController) {
+        _ludoLobbyController.showMessage(message.message)
+        options.onLudoRoomsOpen?.()
+        return true
+      }
       // Defensive reset — never leaves an in-flight create/join marked as
       // "in flight" forever if the server rejects it (e.g. stake no longer
       // available, room full, race with another joiner).
@@ -18757,7 +18882,7 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
+      const isKnownPath = _loadPath === '/games/ludo' || !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
       if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)

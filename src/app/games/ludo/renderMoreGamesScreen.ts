@@ -1,20 +1,20 @@
-// "Още игри" — lobby sub-screen зад VITE_FEATURE_LUDO. Засега една карта:
+// "Игри" — lobby sub-screen. Засега съдържа една feature-flagged карта:
 // "Не се сърди човече" с бутон "ИГРАЙ". Визуалният стил следва
 // съществуващия action-card език от лобито (renderStakeSection и
 // съседните rules/strategy карти), не отделна design система.
 
-export function renderMoreGamesScreen(useMobileLayout = false): string {
+export function renderMoreGamesScreen(useMobileLayout = false, showLudo = true): string {
   const padding = useMobileLayout ? '14px 12px 40px' : '28px 40px 60px'
   const titleSize = useMobileLayout ? '24px' : '32px'
 
   return `
     <article style="padding:${padding};max-width:720px;box-sizing:border-box;">
       <header style="margin-bottom:${useMobileLayout ? '18px' : '26px'};">
-        <h1 style="margin:0 0 8px;color:#ffffff;font-size:${titleSize};font-weight:900;letter-spacing:-0.01em;">Още игри</h1>
+        <h1 style="margin:0 0 8px;color:#ffffff;font-size:${titleSize};font-weight:900;letter-spacing:0;">Игри</h1>
         <p style="margin:0;color:rgba(255,255,255,0.55);font-size:${useMobileLayout ? '13px' : '14px'};line-height:1.6;">Нови игри в Pika.bg, освен белот.</p>
       </header>
 
-      <div
+      ${showLudo ? `<div
         data-ludo-play-card="1"
         style="
           background:#000000;
@@ -55,7 +55,7 @@ export function renderMoreGamesScreen(useMobileLayout = false): string {
             flex-shrink:0;
           "
         >Играй</button>
-      </div>
+      </div>` : ''}
     </article>
   `
 }

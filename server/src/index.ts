@@ -293,6 +293,8 @@ import type {
 } from './protocol/messageTypes.js'
 import { validateTopicTitle, TOPIC_TITLE_MAX_CODE_POINTS } from './protocol/topicTitleValidation.js'
 import { createPrivateRoomsStore, getHumanCount, getTeamSlots } from './game/privateRoomsStore.js'
+import { createLudoRoomsStore, type LudoRoom } from './game/ludoRoomsStore.js'
+import { createLudoMatchRuntime, type LudoMatchSnapshot } from './game/ludoMatchRuntime.js'
 import type {
   PrivateRoom,
   PrivateRoomHumanOccupant,
@@ -310,6 +312,7 @@ import { seatParticipantInRoom } from './core/seatParticipantInRoom.js'
 import { updateRoomHostPlayerId } from './core/updateRoomHostPlayerId.js'
 import type {
   ClientMessage,
+  LudoRoomSnapshot,
   PrivateRoomSnapshot,
   PrivateGamesListMessage,
   PrivateGameScoreUpdatedMessage,
@@ -636,6 +639,16 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
     case 'request_private_games_list':
+    case 'request_ludo_rooms_list':
+    case 'create_ludo_room':
+    case 'join_ludo_room':
+    case 'leave_ludo_room':
+    case 'kick_from_ludo_room':
+    case 'start_ludo_room':
+    case 'ludo_game_state_request':
+    case 'ludo_roll_request':
+    case 'ludo_move_request':
+    case 'ludo_reclaim_request':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
     case 'start_private_room':
@@ -4188,6 +4201,70 @@ const privateRoomsStore = createPrivateRoomsStore({
   onRoomClosed: (room) => handlePrivateRoomClosed(room),
   onMemberLeft: (room, occupant) => handlePrivateRoomMemberLeft(room, occupant),
   onMemberKicked: (room, occupant) => handlePrivateRoomMemberKicked(room, occupant),
+})
+
+function buildLudoRoomSnapshot(room: LudoRoom): LudoRoomSnapshot {
+  return {
+    id: room.id,
+    stake: room.stake,
+    playerCount: room.playerCount,
+    manualStart: room.manualStart,
+    players: room.players.map((player) => ({
+      profileId: player.profileId,
+      displayName: player.displayName,
+      avatarUrl: player.avatarUrl,
+      isHost: player.profileId === room.hostProfileId,
+    })),
+    createdAt: room.createdAt,
+    canManualStart: room.manualStart && room.players.length === room.playerCount,
+  }
+}
+
+function broadcastLudoRoomsList(): void {
+  const rooms = ludoRoomsStore.listRooms().map(buildLudoRoomSnapshot)
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status === 'connected' && conn.currentRoomId === null) {
+      safeSendToConnection(conn.id, { type: 'ludo_rooms_list', rooms })
+    }
+  }
+}
+
+function sendLudoRoomUpdate(room: LudoRoom): void {
+  const snapshot = buildLudoRoomSnapshot(room)
+  room.players.forEach((player) => safeSendToConnection(player.connectionId, { type: 'ludo_room_updated', room: snapshot }))
+}
+
+function toLudoGameProtocolSnapshot(snapshot: LudoMatchSnapshot) {
+  return {
+    ...snapshot,
+    winnerProfileId: snapshot.state.winnerColor === null
+      ? null
+      : snapshot.players.find((player) => player.color === snapshot.state.winnerColor)?.profileId ?? null,
+  }
+}
+
+const ludoMatchRuntime = createLudoMatchRuntime({
+  onSnapshot: (snapshot) => {
+    const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
+    const type = snapshot.revision === 0 ? 'ludo_game_started' : 'ludo_game_state'
+    for (const player of snapshot.players) {
+      const connection = Object.values(serverState.connections).find(
+        (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
+      )
+      if (connection) safeSendToConnection(connection.id, { type, snapshot: protocolSnapshot })
+    }
+  },
+})
+
+const ludoRoomsStore = createLudoRoomsStore({
+  onRoomsChanged: () => broadcastLudoRoomsList(),
+  onRoomReady: (room) => {
+    ludoMatchRuntime.createMatch(room)
+  },
+  onMemberKicked: (room, player) => {
+    safeSendToConnection(player.connectionId, { type: 'ludo_room_kicked', ludoRoomId: room.id })
+    sendLudoRoomUpdate(room)
+  },
 })
 
 for (const room of Object.values(serverState.rooms)) {
@@ -19900,6 +19977,130 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'request_ludo_rooms_list') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId) {
+          const room = ludoRoomsStore.reconnectMember(connection.id, latestConnection.profileId)
+          if (room) safeSendToConnection(connection.id, { type: 'ludo_room_updated', room: buildLudoRoomSnapshot(room) })
+        }
+        safeSendToConnection(connection.id, {
+          type: 'ludo_rooms_list',
+          rooms: ludoRoomsStore.listRooms().map(buildLudoRoomSnapshot),
+        })
+        return
+      }
+
+      if (message.type === 'create_ludo_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) return
+        if (ludoMatchRuntime.requestState(latestConnection.profileId)) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_action_rejected', message: 'Вече участваш в активна Ludo игра.' })
+          return
+        }
+        const profile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        if (!profile) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
+          return
+        }
+        const eligibility = checkPrivateRoomStakeEligibility(latestConnection.profileId, profile.level, message.stake)
+        if (!eligibility.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: eligibility.message, code: eligibility.code })
+          return
+        }
+        const result = ludoRoomsStore.createRoom({
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl,
+          stake: message.stake,
+          playerCount: message.playerCount,
+          manualStart: message.manualStart,
+        })
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+        else safeSendToConnection(connection.id, { type: 'ludo_room_updated', room: buildLudoRoomSnapshot(result.room) })
+        return
+      }
+
+      if (message.type === 'join_ludo_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        if (ludoMatchRuntime.requestState(latestConnection.profileId)) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_action_rejected', message: 'Вече участваш в активна Ludo игра.' })
+          return
+        }
+        const profile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        const target = ludoRoomsStore.listRooms().find((room) => room.id === message.ludoRoomId)
+        if (!profile || !target) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Тази Ludo игра вече не е налична.' })
+          return
+        }
+        const eligibility = checkPrivateRoomStakeEligibility(latestConnection.profileId, profile.level, target.stake)
+        if (!eligibility.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: eligibility.message, code: eligibility.code })
+          return
+        }
+        const result = ludoRoomsStore.joinRoom({
+          roomId: message.ludoRoomId,
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl,
+        })
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+        else if (!result.started) sendLudoRoomUpdate(result.room)
+        return
+      }
+
+      if (message.type === 'leave_ludo_room') {
+        const room = ludoRoomsStore.getRoomByConnectionId(connection.id)
+        const remaining = ludoRoomsStore.leaveRoom(connection.id)
+        safeSendToConnection(connection.id, { type: 'ludo_room_left', ludoRoomId: room?.id ?? '' })
+        if (remaining) sendLudoRoomUpdate(remaining)
+        return
+      }
+
+      if (message.type === 'kick_from_ludo_room') {
+        const result = ludoRoomsStore.kickMember(connection.id, message.profileId)
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+        return
+      }
+
+      if (message.type === 'start_ludo_room') {
+        const result = ludoRoomsStore.startRoom(connection.id)
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+        return
+      }
+
+      if (message.type === 'ludo_game_state_request') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) return
+        const snapshot = ludoMatchRuntime.reconnect(latestConnection.profileId, connection.id)
+        if (snapshot) safeSendToConnection(connection.id, { type: 'ludo_game_state', snapshot: toLudoGameProtocolSnapshot(snapshot) })
+        return
+      }
+
+      if (message.type === 'ludo_roll_request' || message.type === 'ludo_move_request' || message.type === 'ludo_reclaim_request') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_participant', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        const result = message.type === 'ludo_roll_request'
+          ? ludoMatchRuntime.roll(message.matchId, latestConnection.profileId, message.expectedRevision)
+          : message.type === 'ludo_move_request'
+            ? ludoMatchRuntime.move(message.matchId, latestConnection.profileId, message.expectedRevision, message.slot)
+            : ludoMatchRuntime.reclaim(message.matchId, latestConnection.profileId, message.expectedRevision)
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', code: result.code, message: result.message })
+        return
+      }
+
       if (message.type === 'request_private_games_list') {
         safeSendToConnection(connection.id, buildPrivateGamesListMessage())
         return
@@ -21410,6 +21611,7 @@ wsServer.on('connection', (socket, request) => {
 
       removeConnectionFromMatchmaking(connection.id)
       privateRoomsStore.removeConnection(connection.id)
+      ludoRoomsStore.removeConnection(connection.id)
 
       const result = handleDisconnect(serverState, connection.id)
       const disconnectState = result.serverState

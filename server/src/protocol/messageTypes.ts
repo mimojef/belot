@@ -16,6 +16,8 @@ import type { TournamentMatchAssignment } from '../tournament/tournamentCoordina
 import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
+import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
+import type { LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
 
 export type TournamentMatchAssignedMessage = {
   type: 'tournament_match_assigned'
@@ -227,6 +229,16 @@ export type ClientMessage =
   | {
       type: 'request_private_rooms_list'
     }
+  | { type: 'request_ludo_rooms_list' }
+  | { type: 'create_ludo_room'; stake: MatchStake; playerCount: 2 | 4; manualStart: boolean }
+  | { type: 'join_ludo_room'; ludoRoomId: string }
+  | { type: 'leave_ludo_room' }
+  | { type: 'kick_from_ludo_room'; profileId: string }
+  | { type: 'start_ludo_room' }
+  | { type: 'ludo_game_state_request' }
+  | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
+  | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
+  | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -873,6 +885,58 @@ export type PrivateRoomsListMessage = {
   rooms: PrivateRoomSnapshot[]
 }
 
+export type LudoRoomPlayerSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  isHost: boolean
+}
+
+export type LudoRoomSnapshot = {
+  id: string
+  stake: MatchStake
+  playerCount: 2 | 4
+  manualStart: boolean
+  players: LudoRoomPlayerSnapshot[]
+  createdAt: number
+  canManualStart: boolean
+}
+
+export type LudoRoomsListMessage = { type: 'ludo_rooms_list'; rooms: LudoRoomSnapshot[] }
+export type LudoRoomUpdatedMessage = { type: 'ludo_room_updated'; room: LudoRoomSnapshot }
+export type LudoRoomLeftMessage = { type: 'ludo_room_left'; ludoRoomId: string }
+export type LudoRoomKickedMessage = { type: 'ludo_room_kicked'; ludoRoomId: string }
+export type LudoRoomStartedMessage = {
+  type: 'ludo_room_started'
+  ludoRoomId: string
+  stake: MatchStake
+  players: LudoRoomPlayerSnapshot[]
+}
+
+export type LudoGamePlayerSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  color: 'red' | 'blue' | 'green' | 'yellow'
+}
+
+export type LudoGameStateSnapshot = {
+  matchId: string
+  ludoRoomId: string
+  stake: MatchStake
+  revision: number
+  serverNow: number
+  deadlineAt: number | null
+  players: LudoGamePlayerSnapshot[]
+  state: LudoGameState
+  events: readonly LudoEngineEvent[]
+  botControlledColors: readonly ('red' | 'blue' | 'green' | 'yellow')[]
+  winnerProfileId: string | null
+}
+
+export type LudoGameStartedMessage = { type: 'ludo_game_started'; snapshot: LudoGameStateSnapshot }
+export type LudoGameStateMessage = { type: 'ludo_game_state'; snapshot: LudoGameStateSnapshot }
+
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
   room: PrivateRoomSnapshot
@@ -1103,6 +1167,13 @@ export type ServerMessage =
   | TableGiftItemSentMessage
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
+  | LudoRoomsListMessage
+  | LudoRoomUpdatedMessage
+  | LudoRoomLeftMessage
+  | LudoRoomKickedMessage
+  | LudoRoomStartedMessage
+  | LudoGameStartedMessage
+  | LudoGameStateMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage

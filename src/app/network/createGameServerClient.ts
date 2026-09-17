@@ -2,6 +2,8 @@ export type Seat = 'bottom' | 'right' | 'top' | 'left'
 export type Team = 'A' | 'B'
 export type RoomStatus = 'waiting' | 'playing' | 'finished'
 export type MatchStake = number
+import type { LudoEngineEvent } from '../games/ludo/engine/ludoEngineEvents'
+import type { LudoGameState, LudoPieceSlot } from '../games/ludo/engine/ludoEngineTypes'
 
 export type MatchRoomSnapshot = {
   stakeAmount: number
@@ -880,6 +882,16 @@ export type ClientMessage =
   | {
       type: 'request_private_rooms_list'
     }
+  | { type: 'request_ludo_rooms_list' }
+  | { type: 'create_ludo_room'; stake: MatchStake; playerCount: 2 | 4; manualStart: boolean }
+  | { type: 'join_ludo_room'; ludoRoomId: string }
+  | { type: 'leave_ludo_room' }
+  | { type: 'kick_from_ludo_room'; profileId: string }
+  | { type: 'start_ludo_room' }
+  | { type: 'ludo_game_state_request' }
+  | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
+  | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
+  | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -1004,6 +1016,23 @@ export type PrivateRoomSlotSnapshot = {
   team: Team
   slotIndex: 0 | 1
   occupant: PrivateRoomOccupantSnapshot | null
+}
+
+export type LudoRoomPlayerSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  isHost: boolean
+}
+
+export type LudoRoomSnapshot = {
+  id: string
+  stake: MatchStake
+  playerCount: 2 | 4
+  manualStart: boolean
+  players: LudoRoomPlayerSnapshot[]
+  createdAt: number
+  canManualStart: boolean
 }
 
 export type PrivateRoomSnapshot = {
@@ -1224,6 +1253,18 @@ export type ErrorMessage = {
     | 'private_room_stake_unavailable'
     | 'private_room_insufficient_balance'
     | 'private_room_level_required'
+    | 'ludo_room_not_found'
+    | 'ludo_room_full'
+    | 'ludo_room_duplicate_member'
+    | 'ludo_room_not_host'
+    | 'ludo_room_not_full'
+    | 'ludo_room_invalid_target'
+    | 'ludo_match_not_found'
+    | 'ludo_match_not_participant'
+    | 'ludo_match_not_turn'
+    | 'ludo_match_stale_action'
+    | 'ludo_match_action_rejected'
+    | 'ludo_match_finished'
     | PrivateRoomActionErrorCode
 }
 
@@ -1528,6 +1569,38 @@ export type PrivateRoomsListMessage = {
   type: 'private_rooms_list'
   rooms: PrivateRoomSnapshot[]
 }
+
+export type LudoRoomsListMessage = { type: 'ludo_rooms_list'; rooms: LudoRoomSnapshot[] }
+export type LudoRoomUpdatedMessage = { type: 'ludo_room_updated'; room: LudoRoomSnapshot }
+export type LudoRoomLeftMessage = { type: 'ludo_room_left'; ludoRoomId: string }
+export type LudoRoomKickedMessage = { type: 'ludo_room_kicked'; ludoRoomId: string }
+export type LudoRoomStartedMessage = {
+  type: 'ludo_room_started'
+  ludoRoomId: string
+  stake: MatchStake
+  players: LudoRoomPlayerSnapshot[]
+}
+export type LudoGamePlayerSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  color: 'red' | 'blue' | 'green' | 'yellow'
+}
+export type LudoGameStateSnapshot = {
+  matchId: string
+  ludoRoomId: string
+  stake: MatchStake
+  revision: number
+  serverNow: number
+  deadlineAt: number | null
+  players: LudoGamePlayerSnapshot[]
+  state: LudoGameState
+  events: readonly LudoEngineEvent[]
+  botControlledColors: readonly ('red' | 'blue' | 'green' | 'yellow')[]
+  winnerProfileId: string | null
+}
+export type LudoGameStartedMessage = { type: 'ludo_game_started'; snapshot: LudoGameStateSnapshot }
+export type LudoGameStateMessage = { type: 'ludo_game_state'; snapshot: LudoGameStateSnapshot }
 
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
@@ -2329,6 +2402,13 @@ export type ServerMessage =
   | TableGiftItemSentMessage
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
+  | LudoRoomsListMessage
+  | LudoRoomUpdatedMessage
+  | LudoRoomLeftMessage
+  | LudoRoomKickedMessage
+  | LudoRoomStartedMessage
+  | LudoGameStartedMessage
+  | LudoGameStateMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage
@@ -2493,6 +2573,16 @@ export type GameServerClient = {
     requestId: string,
   ) => void
   requestPrivateRoomsList: () => void
+  requestLudoRoomsList: () => void
+  createLudoRoom: (stake: MatchStake, playerCount: 2 | 4, manualStart: boolean) => void
+  joinLudoRoom: (ludoRoomId: string) => void
+  leaveLudoRoom: () => void
+  kickFromLudoRoom: (profileId: string) => void
+  startLudoRoom: () => void
+  requestLudoGameState: () => void
+  requestLudoRoll: (matchId: string, expectedRevision: number) => void
+  requestLudoMove: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
+  requestLudoReclaim: (matchId: string, expectedRevision: number) => void
   requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
@@ -2788,6 +2878,19 @@ export function createGameServerClient(
     send({ type: 'request_private_rooms_list' })
   }
 
+  function requestLudoRoomsList(): void { send({ type: 'request_ludo_rooms_list' }) }
+  function createLudoRoom(stake: MatchStake, playerCount: 2 | 4, manualStart: boolean): void {
+    send({ type: 'create_ludo_room', stake, playerCount, manualStart })
+  }
+  function joinLudoRoom(ludoRoomId: string): void { send({ type: 'join_ludo_room', ludoRoomId }) }
+  function leaveLudoRoom(): void { send({ type: 'leave_ludo_room' }) }
+  function kickFromLudoRoom(profileId: string): void { send({ type: 'kick_from_ludo_room', profileId }) }
+  function startLudoRoom(): void { send({ type: 'start_ludo_room' }) }
+  function requestLudoGameState(): void { send({ type: 'ludo_game_state_request' }) }
+  function requestLudoRoll(matchId: string, expectedRevision: number): void { send({ type: 'ludo_roll_request', matchId, expectedRevision }) }
+  function requestLudoMove(matchId: string, expectedRevision: number, slot: LudoPieceSlot): void { send({ type: 'ludo_move_request', matchId, expectedRevision, slot }) }
+  function requestLudoReclaim(matchId: string, expectedRevision: number): void { send({ type: 'ludo_reclaim_request', matchId, expectedRevision }) }
+
   function requestPrivateGamesList(): void {
     send({ type: 'request_private_games_list' })
   }
@@ -2937,6 +3040,16 @@ export function createGameServerClient(
     sendPhraseReaction,
     sendTableGift,
     requestPrivateRoomsList,
+    requestLudoRoomsList,
+    createLudoRoom,
+    joinLudoRoom,
+    leaveLudoRoom,
+    kickFromLudoRoom,
+    startLudoRoom,
+    requestLudoGameState,
+    requestLudoRoll,
+    requestLudoMove,
+    requestLudoReclaim,
     requestPrivateGamesList,
     createPrivateRoom,
     joinPrivateRoomSlot,

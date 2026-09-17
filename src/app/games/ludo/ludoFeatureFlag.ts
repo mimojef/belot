@@ -1,9 +1,8 @@
-// Feature flag за "Още игри" / Не се сърди човече (Ludo).
+// Feature flag за entry point-а към Не се сърди човече (Ludo).
 //
 // Изключен по подразбиране — VITE_FEATURE_LUDO идва от .env (виж
-// .env.example). Липсваща/невярна стойност → секцията "Още игри" не се
-// показва никъде и няма достъпен entry point, дори при директен опит за
-// отваряне на URL пътя (виж isLudoRouteAllowed в createLobbyFlowController).
+// .env.example). Липсваща/невярна стойност скрива Ludo картата от екрана
+// "Игри", без да премахва самата navigation секция.
 
 let flagOverrideForTests: boolean | undefined
 

@@ -1,3 +1,8 @@
+// Production room games are server-authoritative: this controller sends only
+// roll/move/reclaim intents and presents revision-ordered server snapshots.
+// The local reducer/RNG path remains solely for isolated manual and test
+// harnesses that construct the controller without `authoritative` options.
+//
 // Контролер за Ludo visual prototype — mount-ва екрана в root елемента,
 // wire-ва клик събития (piece select, roll dice, bottom bar), оркестрира
 // bot turns и human roll/move timeouts. Canonical game state/turn logic
@@ -24,8 +29,8 @@
 // popup. Deadlines се пазят с asssociated turnVersion — stale timeout от
 // стар ход се игнорира (виж isLudoDeadlineStillValid).
 //
-// Все още няма WebSocket/database — engine-ът е готов за server reuse
-// по-късно (виж task-а т.22), но тук се вика directno, синхронно, в браузъра.
+// Local dispatch/timer details above describe only the isolated fallback;
+// authoritative production transitions arrive through applyAuthoritativeSnapshot().
 
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState } from './renderLudoGameScreen'
@@ -71,6 +76,7 @@ import {
   type LudoOrchestratorState,
 } from './orchestrator'
 import type { LudoColor, LudoPiece, LudoPieceId, LudoPlayer } from './ludoTypes'
+import type { LudoGameStateSnapshot } from '../../network/createGameServerClient'
 
 const IMPACT_ANIMATION_MS = 450
 
@@ -80,6 +86,14 @@ const PHRASE_MOCK_ITEMS = ['Браво!', 'Добър ход!', 'Late удар!'
 export interface LudoFlowControllerOptions {
   root: HTMLElement
   onExit: () => void
+  players?: Record<LudoColor, LudoPlayer>
+  localColor?: LudoColor
+  authoritative?: {
+    initialSnapshot: LudoGameStateSnapshot
+    onRollRequest: (matchId: string, expectedRevision: number) => void
+    onMoveRequest: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
+    onReclaimRequest: (matchId: string, expectedRevision: number) => void
+  }
   // Test/dev seeding seam (Phase 3B browser verification, виж task-а т.21:
   // "temporary seeded/dev harness ако е нужно, не променяй permanently
   // normal initial game state само за теста") — по подразбиране липсва,
@@ -89,7 +103,7 @@ export interface LudoFlowControllerOptions {
 }
 
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
-  const players: Record<LudoColor, LudoPlayer> = createLudoMockPlayers()
+  const players: Record<LudoColor, LudoPlayer> = options.players ?? createLudoMockPlayers()
   const botControlledColorsInitial = new Set<LudoColor>(
     (Object.values(players) as LudoPlayer[]).filter((p) => p.isBot).map((p) => p.color),
   )
@@ -98,13 +112,16 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // activeColor/turnPhase/diceValue/legalMoves. Мутира се ИЗКЛЮЧИТЕЛНО
   // чрез dispatch() -> reduceLudoGame(); контролерът никога не пипа тези
   // полета directno.
-  let engineState: LudoGameState = options.initialState ?? createLudoEngineInitialState()
+  let engineState: LudoGameState = options.authoritative?.initialSnapshot.state ?? options.initialState ?? createLudoEngineInitialState()
+  let authoritativeRevision = options.authoritative?.initialSnapshot.revision ?? -1
+  let authoritativeSnapshot = options.authoritative?.initialSnapshot ?? null
+  let authoritativeTransitionQueue = Promise.resolve()
 
   // Orchestrator state (т.2: PRESENTATION/ORCHESTRATION) — bot-controlled
   // flag-ове + roll/move deadlines. Мутира се ИЗКЛЮЧИТЕЛНО чрез
   // computeLudoDeadlineStateForPhase/markLudoColorBotControlled (pure
   // helpers), контролерът само presисва резултата обратно тук.
-  let orchestrator: LudoOrchestratorState = createLudoOrchestratorInitialState(botControlledColorsInitial)
+  let orchestrator: LudoOrchestratorState = createLudoOrchestratorInitialState(options.authoritative ? new Set() : botControlledColorsInitial)
 
   // ---- PRESENTATION-ONLY state (engine-ът не знае нищо за тях) ----
   // Момент (Date.now()), в който активният играч е получил хода си —
@@ -210,7 +227,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // seat/profileId), само ТУК трябва да се смени resolution логиката —
   // всичко downstream (render layer, tests) вече чете localColor като
   // explicit подадена стойност, не я пресмята повторно.
-  const localColor: LudoColor = (
+  const localColor: LudoColor = options.localColor ?? (
     (Object.values(players) as LudoPlayer[]).find((p) => !p.isBot)?.color ?? 'red'
   )
 
@@ -246,6 +263,9 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // handleMoveTimeout fix-а по-долу — scheduleNextDeadline() ПРЕДИ render()
   // навсякъде, established pattern).
   function currentTurnCountdownMs(): number {
+    if (authoritativeSnapshot?.deadlineAt != null) {
+      return Math.max(0, authoritativeSnapshot.deadlineAt - authoritativeSnapshot.serverNow)
+    }
     const pending = resolveLudoPendingDeadlineKind(engineState.turnPhase, engineState.activeColor, orchestrator.botControlledColors)
     if (pending === 'roll') return LUDO_ROLL_TIMEOUT_MS // (A) human roll deadline — НИКОГА bot delay
     if (pending === 'move') return LUDO_MOVE_TIMEOUT_MS // (A) human move deadline — НИКОГА bot delay
@@ -287,7 +307,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       canRollDice:
         engineState.turnPhase === 'waiting_for_roll' &&
         !isAnimatingMove &&
-        !orchestrator.botControlledColors.has(engineState.activeColor),
+        !orchestrator.botControlledColors.has(engineState.activeColor) &&
+        (!options.authoritative || engineState.activeColor === localColor),
       turnSecondsLeft: Math.round(currentTurnCountdownMs() / 1000),
       useMobileLayout: isPhoneLayoutViewport(),
     }
@@ -365,6 +386,15 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     const backdrop = container.firstElementChild
     if (backdrop) options.root.appendChild(backdrop)
     options.root.querySelector('[data-ludo-bot-takeover-dismiss="1"]')?.addEventListener('click', () => {
+      if (options.authoritative && authoritativeSnapshot) {
+        options.authoritative.onReclaimRequest(authoritativeSnapshot.matchId, authoritativeRevision)
+        showBotTakeoverPopup = false
+        diceResultOverlay.setHidden(false)
+        areGameplayOverlaysHiddenForPopup = false
+        options.root.querySelector('[data-ludo-bot-takeover-backdrop="1"]')?.remove()
+        render()
+        return
+      }
       // "ВЪРНИ СЕ" (виж task-а — преди беше "Разбрах", чисто dismiss без
       // ефект). Popup lifecycle-ът (hide/close/overlay unhide) остава
       // напълно същият, независимо дали bot-ът в момента действа —
@@ -405,7 +435,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     })
 
     options.root.querySelector('[data-ludo-dice-roll-button="1"]')?.addEventListener('click', () => {
-      void handleHumanRollClick()
+      if (options.authoritative && authoritativeSnapshot) {
+        options.authoritative.onRollRequest(authoritativeSnapshot.matchId, authoritativeRevision)
+      } else {
+        void handleHumanRollClick()
+      }
     })
 
     options.root.querySelector('[data-ludo-emoji-button="1"]')?.addEventListener('click', () => {
@@ -423,7 +457,13 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     options.root.querySelectorAll<HTMLElement>('[data-ludo-piece-selectable="1"]').forEach((el) => {
       el.addEventListener('click', () => {
         const pieceId = el.getAttribute('data-ludo-piece') as LudoPieceId | null
-        if (pieceId) void handleHumanPieceClick(pieceId)
+        if (!pieceId) return
+        if (options.authoritative && authoritativeSnapshot) {
+          const slot = ludoUiPieceIdToSlot(pieceId)
+          options.authoritative.onMoveRequest(authoritativeSnapshot.matchId, authoritativeRevision, slot)
+        } else {
+          void handleHumanPieceClick(pieceId)
+        }
       })
     })
 
@@ -902,6 +942,108 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     return new Promise((resolve) => setTimeout(resolve, ms))
   }
 
+  function syncAuthoritativeDeadline(snapshot: LudoGameStateSnapshot): void {
+    if (snapshot.deadlineAt === null) {
+      turnStartedAt = Date.now()
+      return
+    }
+    const duration = snapshot.state.turnPhase === 'awaiting_move_selection' ? LUDO_MOVE_TIMEOUT_MS : LUDO_ROLL_TIMEOUT_MS
+    const localDeadline = Date.now() + Math.max(0, snapshot.deadlineAt - snapshot.serverNow)
+    turnStartedAt = localDeadline - duration
+  }
+
+  async function presentAuthoritativeRoll(snapshot: LudoGameStateSnapshot): Promise<void> {
+    const event = snapshot.events.find((item) => item.type === 'dice_accepted')
+    if (!event || event.type !== 'dice_accepted') return
+    const triggerEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${event.color}"]`)
+    const centerEl = options.root.querySelector<HTMLElement>('[data-ludo-board-center="1"]')
+    const boardEl = options.root.querySelector<HTMLElement>('[data-ludo-board="1"]')
+    if (!centerEl || !boardEl) return
+    isDiceRolling = true
+    render()
+    await diceResultOverlay.playFlight({
+      fromRect: (triggerEl ?? centerEl).getBoundingClientRect(),
+      toRect: centerEl.getBoundingClientRect(),
+      boardGridWidthPx: boardEl.getBoundingClientRect().width,
+      result: event.value as 1 | 2 | 3 | 4 | 5 | 6,
+    })
+    isDiceRolling = false
+  }
+
+  async function presentAuthoritativeMove(previous: LudoGameState, snapshot: LudoGameStateSnapshot): Promise<void> {
+    const moved = snapshot.events.find((item) => item.type === 'piece_moved')
+    if (!moved || moved.type !== 'piece_moved') return
+    const pieceId = `${moved.color}-${moved.slot}` as LudoPieceId
+    const fromCellId = ludoEnginePositionToCellId(moved.fromPosition, moved.color)
+    const targetCellId = ludoEnginePositionToCellId(moved.toPosition, moved.color)
+    const sourcePieceEl = options.root.querySelector<HTMLElement>(`[data-ludo-piece="${pieceId}"], [data-ludo-piece-group~="${pieceId}"]`)
+    const sourceCellEl = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${fromCellId}"]`)
+    const targetCellEl = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${targetCellId}"]`)
+    const sourceRect = sourcePieceEl?.getBoundingClientRect()
+    const sourceCellRect = sourceCellEl?.getBoundingClientRect()
+    const targetRect = targetCellEl?.getBoundingClientRect()
+    const sourceIsHome = parseLudoCellId(fromCellId).kind === 'home'
+    const boardPieceSize = Math.min(30, (targetRect?.width ?? sourceCellRect?.width ?? 38) * 0.8) * LUDO_BOARD_PAWN_SCALE
+    const pieceSizePx = sourceIsHome ? boardPieceSize : (sourceRect?.width ?? boardPieceSize)
+    const capture = snapshot.events.find((item) => item.type === 'pieces_captured')
+    const capturedPieceIds = capture?.type === 'pieces_captured' ? capture.capturedPieceIds : []
+    if (capturedPieceIds.length > 0) {
+      captureVictimOverrides = createLudoCaptureVictimOverrides(capturedPieceIds, targetCellId, captureVictimOverrides)
+    }
+    isAnimatingMove = true
+    movingPieceSuppressedId = pieceId
+    engineState = snapshot.state
+    render()
+    const overlay = playLudoMoveRouteOverlay({
+      root: options.root,
+      pieceId,
+      fromCellId,
+      route: buildLudoMoveRoute(fromCellId, targetCellId),
+      pieceSizePx,
+      initiallyHidden: false,
+      isGameWinningMove: previous.status !== 'finished' && snapshot.state.status === 'finished',
+    })
+    activeMoveOverlayCancel = overlay.cancel
+    await overlay.finished
+    activeMoveOverlayCancel = null
+    movingPieceSuppressedId = null
+    render()
+    if (capturedPieceIds.length > 0) {
+      await animateCapture(capturedPieceIds)
+      captureVictimOverrides = clearLudoCaptureVictimOverrides(capturedPieceIds, captureVictimOverrides)
+    }
+    diceResultOverlay.clearLanded()
+    isAnimatingMove = false
+  }
+
+  async function applyAuthoritativeTransition(snapshot: LudoGameStateSnapshot): Promise<void> {
+    if (!options.authoritative || snapshot.matchId !== options.authoritative.initialSnapshot.matchId) return
+    if (snapshot.revision <= authoritativeRevision) return
+    const previous = engineState
+    authoritativeRevision = snapshot.revision
+    authoritativeSnapshot = snapshot
+    if (snapshot.events.some((item) => item.type === 'bot_takeover_started' && item.color === localColor)) {
+      showBotTakeoverPopup = true
+    }
+    if (!snapshot.botControlledColors.includes(localColor)) showBotTakeoverPopup = false
+    syncAuthoritativeDeadline(snapshot)
+    if (snapshot.events.some((item) => item.type === 'dice_accepted')) {
+      await presentAuthoritativeRoll(snapshot)
+    }
+    if (snapshot.events.some((item) => item.type === 'piece_moved')) {
+      await presentAuthoritativeMove(previous, snapshot)
+    } else {
+      engineState = snapshot.state
+    }
+    render()
+    if (previous.status !== 'finished' && snapshot.state.status === 'finished') presentGameEndOnce()
+  }
+
+  function applyAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot): void {
+    if (!options.authoritative || snapshot.revision <= authoritativeRevision) return
+    authoritativeTransitionQueue = authoritativeTransitionQueue.then(() => applyAuthoritativeTransition(snapshot))
+  }
+
   function destroy(): void {
     isDestroyed = true
     window.removeEventListener('resize', handleResize)
@@ -916,8 +1058,9 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // (виж advanceTurn/performRollSequence коментарите по-горе), макар тук
   // ефектът да е незначителен (turnStartedAt вече е Date.now() от module
   // init, разликата е под 1ms).
-  scheduleNextDeadline()
+  if (options.authoritative) syncAuthoritativeDeadline(options.authoritative.initialSnapshot)
+  else scheduleNextDeadline()
   render()
 
-  return { destroy }
+  return { destroy, applyAuthoritativeSnapshot }
 }

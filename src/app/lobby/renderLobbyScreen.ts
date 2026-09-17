@@ -1009,6 +1009,7 @@ export type RenderLobbyScreenOptions = {
   onLobbyClick: () => void
   onPlayersClick: () => void
   onShopClick: () => void
+  onGamesClick: () => void
   onShopPurchaseClick: (packageId: string) => void
   onShopPurchaseConfirm: () => void
   onShopPurchaseCancel: () => void
@@ -2997,6 +2998,7 @@ function renderNav(state: LobbyScreenState): string {
   const tournamentsActive = activeView === 'tournaments' || activeView === 'tournament-detail'
   const topicsActive = activeView === 'topics'
   const shopActive = activeView === 'shop'
+  const gamesActive = activeView === 'more-games'
   const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = getSupportUnreadRaw(state)
@@ -3106,6 +3108,19 @@ function renderNav(state: LobbyScreenState): string {
             <path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>
           </svg>
           <span class="lobby-nav-btn-label">Магазин</span>
+        </button>
+        <button type="button" data-lobby-nav-games="1" ${gamesActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Игри" data-tooltip="Игри" style="
+          display:flex;align-items:center;justify-content:center;padding:0 18px;border:0;
+          background:${gamesActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
+          color:${gamesActive ? '#d4a520' : 'rgba(255,255,255,0.70)'};
+          border-bottom:2px solid ${gamesActive ? '#d4a520' : 'transparent'};
+          cursor:pointer;height:100%;
+        ">
+          <svg xmlns="http://www.w3.org/2000/svg" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;">
+            <line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/>
+            <path d="M15 13h.01M18 11h.01"/><path d="M17.32 5H6.68a4 4 0 0 0-3.79 2.7L1.3 12.33A5 5 0 0 0 6.03 19c1.31 0 2.55-.52 3.47-1.45L11 16h2l1.5 1.55A4.9 4.9 0 0 0 17.97 19a5 5 0 0 0 4.73-6.67L21.11 7.7A4 4 0 0 0 17.32 5Z"/>
+          </svg>
+          <span class="lobby-nav-btn-label">Игри</span>
         </button>
         ${state.profile.profileId !== null ? `
           <a href="/topics" data-lobby-nav-topics="1" ${topicsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
@@ -4060,51 +4075,6 @@ function renderStakeSection(
   `
 }
 
-// "Още игри" — вход към новите игри (VITE_FEATURE_LUDO), визуално огледало
-// на divider header стила от renderStakeSection по-горе. Самата карта е
-// линк към /more-games (лобит sub-screen), не директно към играта.
-function renderMoreGamesSection(useMobileLayout = false): string {
-  return `
-    <div style="margin-top:${useMobileLayout ? '14px' : '18px'};margin-bottom:16px;">
-      <div style="
-        display:flex; align-items:center; justify-content:center; gap:12px;
-        margin-bottom:14px;
-      ">
-        <div style="flex:1; height:2px; background:linear-gradient(90deg, #000000 0%, #d4a520 100%);"></div>
-        <div style="display:flex; align-items:center; gap:8px;">
-          <span style="color:#d4a520; font-size:16px;">&#9670;</span>
-          <span style="font-size:16px; font-weight:800; letter-spacing:0.12em; text-transform:uppercase; color:#d4a520;">Още игри</span>
-          <span style="color:#d4a520; font-size:16px;">&#9670;</span>
-        </div>
-        <div style="flex:1; height:2px; background:linear-gradient(90deg, #d4a520 0%, #000000 100%);"></div>
-      </div>
-
-      <a href="/more-games" data-lobby-more-games-card="1" style="
-        display:flex; align-items:center; gap:14px;
-        background:#000000;
-        border:2px solid rgba(212,165,32,0.78);
-        border-radius:12px;
-        padding:16px;
-        text-decoration:none; color:inherit;
-        transition:border-color 160ms ease, box-shadow 160ms ease, background 160ms ease;
-      "
-      onmouseenter="this.style.borderColor='rgba(212,165,32,0.96)';this.style.boxShadow='inset 0 0 0 1px rgba(212,165,32,0.96)';this.style.background='rgba(212,165,32,0.05)'"
-      onmouseleave="this.style.borderColor='rgba(212,165,32,0.78)';this.style.boxShadow='none';this.style.background='#000000'"
-      >
-        <div style="
-          width:48px; height:48px; border-radius:12px; flex-shrink:0;
-          background:conic-gradient(#e0473e 0deg 90deg, #3b82f6 90deg 180deg, #f2c230 180deg 270deg, #22a559 270deg 360deg);
-          box-shadow:inset 0 0 0 2px rgba(255,255,255,0.2);
-        "></div>
-        <div style="flex:1; min-width:0;">
-          <div style="font-size:15px; font-weight:800; color:#d4a520; text-transform:uppercase; letter-spacing:0.05em;">Не се сърди човече</div>
-          <div style="font-size:13px; color:rgba(255,255,255,0.5); margin-top:4px; font-weight:400;">Нова игра в Pika.bg — визуален прототип.</div>
-        </div>
-      </a>
-    </div>
-  `
-}
-
 // Тесен, dedicated тип (огледално на syncProfilePopup's popupState по-долу)
 // вместо целия LobbyScreenState — позволява на createLobbyFlowController.ts
 // да извиква syncMissionsPopup() ДИРЕКТНО, с малък литерал, без да минава
@@ -5050,12 +5020,17 @@ function renderMobileMenu(state: LobbyScreenState): string {
           "></button>
           <div data-lobby-mobile-menu-panel="1" style="
             position:absolute;right:0;top:50px;width:min(82vw,280px);
+            max-height:calc(100dvh - 70px - env(safe-area-inset-bottom, 0px));
+            overflow-y:auto;overscroll-behavior-y:contain;-webkit-overflow-scrolling:touch;
             background:#090909;border:1px solid rgba(212,165,32,0.38);border-radius:8px;
-            box-shadow:0 18px 44px rgba(0,0,0,0.68);padding:8px;display:grid;gap:6px;
+            box-shadow:0 18px 44px rgba(0,0,0,0.68);
+            padding:8px 8px max(8px, env(safe-area-inset-bottom, 0px));box-sizing:border-box;
+            display:grid;gap:6px;
             z-index:2;transform-origin:top right;${mobileMenuPanelAnimationStyle}
           ">
             <button type="button" data-lobby-nav-lobby="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('lobby', 'Лоби')}</button>
             <button type="button" data-lobby-nav-shop="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('shop', 'Магазин')}</button>
+            <button type="button" data-lobby-nav-games="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('games', 'Игри')}</button>
             ${state.profile.profileId !== null ? `
               <button type="button" data-lobby-nav-topics="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('topics', 'Теми', topicsUnreadCount)}</button>
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', 'Чат', friendChatUnreadCount)}</button>
@@ -5101,7 +5076,7 @@ function mobileMenuButtonStyle(background = 'rgba(255,255,255,0.055)', color = '
 }
 
 function mobileMenuSvgItemContent(
-  icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments' | 'topics',
+  icon: 'admin' | 'blocked' | 'chat' | 'friends' | 'games' | 'leaderboards' | 'lobby' | 'login' | 'logout' | 'players' | 'shop' | 'support' | 'tournaments' | 'topics',
   label: string,
   badgeCount = 0,
 ): string {
@@ -5129,6 +5104,8 @@ function mobileMenuSvgItemContent(
         ? '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>'
       : icon === 'shop'
         ? '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.68 13.39a2 2 0 0 0 2 1.61h9.72a2 2 0 0 0 2-1.61L23 6H6"/>'
+      : icon === 'games'
+        ? '<line x1="6" y1="12" x2="10" y2="12"/><line x1="8" y1="10" x2="8" y2="14"/><path d="M15 13h.01M18 11h.01"/><path d="M17.32 5H6.68a4 4 0 0 0-3.79 2.7L1.3 12.33A5 5 0 0 0 6.03 19c1.31 0 2.55-.52 3.47-1.45L11 16h2l1.5 1.55A4.9 4.9 0 0 0 17.97 19a5 5 0 0 0 4.73-6.67L21.11 7.7A4 4 0 0 0 17.32 5Z"/>'
       : icon === 'logout'
         ? '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>'
         : '<path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M10 17l5-5-5-5"/><path d="M15 12H3"/>'
@@ -6065,7 +6042,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
             ? renderPublicLegalPage(state.view, true)
           : state.view === 'more-games'
-            ? renderMoreGamesScreen(true)
+            ? renderMoreGamesScreen(true, isLudoFeatureEnabled())
           : state.view === 'rules'
             ? renderRulesPage(true)
           : state.view === 'strategy'
@@ -6091,7 +6068,6 @@ function renderMobileLobbyScreenContent(
       ${renderMobileLobbyChatSection(state)}
       ${renderMobileStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, state.profile.profileId === null)}
       ${renderMobileOffersSection(state.lobbyPackages, state.profile.profileId !== null)}
-      ${isLudoFeatureEnabled() ? renderMoreGamesSection(true) : ''}
       ${renderMobileQuickActions(state.dailyMissionsUnclaimedCount, getUnclaimedDailyRewardsBadgeCount(state) > 0, getPrivateRoomsBadgeCount(state.privateRooms))}
     </main>
   `
@@ -12728,7 +12704,7 @@ export function renderLobbyScreen(
               : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
                 ? renderPublicLegalPage(state.view)
               : state.view === 'more-games'
-                ? renderMoreGamesScreen(false)
+                ? renderMoreGamesScreen(false, isLudoFeatureEnabled())
               : state.view === 'rules'
                 ? renderRulesPage()
               : state.view === 'strategy'
@@ -12746,7 +12722,6 @@ export function renderLobbyScreen(
                 ? renderHeroSection(state, profileName, state.profile.avatarUrl, state.profile.yellowCoinsBalance, state.profile.wonGamesCount, state.profile.completedGamesCount, state.profile.rankTitle, state.profile.level, isPhoneLayout)
                 : renderGuestHeroCard(state, state.signupBonusYellowCoins ?? 0, isPhoneLayout)}
               ${renderStakeSection(state.selectedStake, canStartSearch, state.isSearching, state.matchRooms, state.profile.level ?? 1, state.matchRoomsLoading, isPhoneLayout, state.profile.profileId === null)}
-              ${isLudoFeatureEnabled() ? renderMoreGamesSection() : ''}
               ${renderBottomSection(
                 state.lobbyPackages,
                 state.profile.profileId !== null,
@@ -13896,6 +13871,10 @@ export function renderLobbyScreen(
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-shop="1"]')
     .forEach((btn) => btn.addEventListener('click', options.onShopClick))
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-games="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onGamesClick))
 
   root.querySelectorAll<HTMLButtonElement>('[data-lobby-shop-package]').forEach((button) => {
     button.addEventListener('click', () => {

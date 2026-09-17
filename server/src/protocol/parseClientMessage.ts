@@ -464,6 +464,53 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'request_private_rooms_list' }
     }
 
+    if (parsed.type === 'request_ludo_rooms_list') return { type: 'request_ludo_rooms_list' }
+
+    if (parsed.type === 'create_ludo_room') {
+      if (!isPositiveIntegerStake(parsed.stake)) return null
+      if (parsed.playerCount !== 2 && parsed.playerCount !== 4) return null
+      return {
+        type: 'create_ludo_room',
+        stake: parsed.stake,
+        playerCount: parsed.playerCount,
+        manualStart: parsed.manualStart === true,
+      }
+    }
+
+    if (parsed.type === 'join_ludo_room') {
+      const ludoRoomId = normalizeRequiredText(parsed.ludoRoomId)
+      return ludoRoomId === null ? null : { type: 'join_ludo_room', ludoRoomId }
+    }
+
+    if (parsed.type === 'leave_ludo_room') return { type: 'leave_ludo_room' }
+    if (parsed.type === 'start_ludo_room') return { type: 'start_ludo_room' }
+
+    if (parsed.type === 'ludo_game_state_request') return { type: 'ludo_game_state_request' }
+
+    if (parsed.type === 'ludo_roll_request') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      if (matchId === null || typeof parsed.expectedRevision !== 'number' || !Number.isSafeInteger(parsed.expectedRevision) || parsed.expectedRevision < 0) return null
+      return { type: 'ludo_roll_request', matchId, expectedRevision: parsed.expectedRevision }
+    }
+
+    if (parsed.type === 'ludo_move_request') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      if (matchId === null || typeof parsed.expectedRevision !== 'number' || !Number.isSafeInteger(parsed.expectedRevision) || parsed.expectedRevision < 0) return null
+      if (parsed.slot !== 0 && parsed.slot !== 1 && parsed.slot !== 2 && parsed.slot !== 3) return null
+      return { type: 'ludo_move_request', matchId, expectedRevision: parsed.expectedRevision, slot: parsed.slot }
+    }
+
+    if (parsed.type === 'ludo_reclaim_request') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      if (matchId === null || typeof parsed.expectedRevision !== 'number' || !Number.isSafeInteger(parsed.expectedRevision) || parsed.expectedRevision < 0) return null
+      return { type: 'ludo_reclaim_request', matchId, expectedRevision: parsed.expectedRevision }
+    }
+
+    if (parsed.type === 'kick_from_ludo_room') {
+      const profileId = normalizeRequiredText(parsed.profileId)
+      return profileId === null ? null : { type: 'kick_from_ludo_room', profileId }
+    }
+
     if (parsed.type === 'request_private_games_list') {
       return { type: 'request_private_games_list' }
     }
