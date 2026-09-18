@@ -1,3 +1,5 @@
+import { LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX } from './ludoLayerHierarchy'
+
 // Bot-takeover popup — reuse-ва Belot-овия УХ pattern (fixed scrim + centered
 // card + robot съобщение + бутон), но е НОВ, Ludo-local компонент —
 // НЕ import от src/app/activeRoom/ (виж Phase 3A audit-а: Belot popup-ите са
@@ -16,7 +18,7 @@
 export function renderLudoBotTakeoverPopup(): string {
   return `
     <div data-ludo-bot-takeover-backdrop="1" style="
-      position:fixed; inset:0; z-index:10000;
+      position:fixed; inset:0; z-index:${LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX};
       background:rgba(2,6,23,0.62);
       display:flex; align-items:center; justify-content:center;
       padding:16px; box-sizing:border-box;

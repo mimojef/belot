@@ -486,6 +486,10 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     if (parsed.type === 'start_ludo_room') return { type: 'start_ludo_room' }
 
     if (parsed.type === 'ludo_game_state_request') return { type: 'ludo_game_state_request' }
+    if (parsed.type === 'leave_ludo_match') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      return matchId === null ? null : { type: 'leave_ludo_match', matchId }
+    }
 
     if (parsed.type === 'ludo_roll_request') {
       const matchId = normalizeRequiredText(parsed.matchId)

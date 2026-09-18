@@ -37,6 +37,8 @@ import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState }
 import { renderLudoMockPopup } from './renderLudoBottomBar'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
 import { renderLudoGameEndPopup } from './renderLudoGameEndPopup'
+import { renderLudoExitConfirmPopup } from './renderLudoExitConfirmPopup'
+import { LUDO_MODAL_LAYER_Z_INDEX } from './ludoLayerHierarchy'
 import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
 import {
@@ -47,7 +49,7 @@ import {
 } from './board/ludoCapturePresentation'
 import { playLudoCaptureFlightOverlay } from './pieces/playLudoCaptureFlightOverlay'
 import { playLudoCaptureImpactOverlay } from './pieces/playLudoCaptureImpactOverlay'
-import { playLudoMoveRouteOverlay } from './pieces/playLudoMoveRouteOverlay'
+import { playLudoEndGameSound, playLudoMoveRouteOverlay } from './pieces/playLudoMoveRouteOverlay'
 import { LUDO_BOARD_PAWN_SCALE } from './pieces/renderLudoPieces'
 import { parseLudoCellId } from './board/ludoBoardGeometry'
 import { rollLudoMockDiceResult } from './dice/ludoDiceState'
@@ -85,7 +87,8 @@ const PHRASE_MOCK_ITEMS = ['Браво!', 'Добър ход!', 'Late удар!'
 
 export interface LudoFlowControllerOptions {
   root: HTMLElement
-  onExit: () => void
+  onExit: (matchId?: string) => void
+  onGameEndAcknowledged?: (matchId: string) => void
   players?: Record<LudoColor, LudoPlayer>
   localColor?: LudoColor
   authoritative?: {
@@ -93,6 +96,7 @@ export interface LudoFlowControllerOptions {
     onRollRequest: (matchId: string, expectedRevision: number) => void
     onMoveRequest: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
     onReclaimRequest: (matchId: string, expectedRevision: number) => void
+    onStateRefreshRequest?: () => void
   }
   // Test/dev seeding seam (Phase 3B browser verification, виж task-а т.21:
   // "temporary seeded/dev harness ако е нужно, не променяй permanently
@@ -103,6 +107,15 @@ export interface LudoFlowControllerOptions {
 }
 
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
+  const modalLayerRoot = document.createElement('div')
+  modalLayerRoot.setAttribute('data-ludo-modal-layer', '1')
+  modalLayerRoot.style.cssText = `position:fixed;inset:0;z-index:${LUDO_MODAL_LAYER_Z_INDEX};pointer-events:none;`
+  document.body.appendChild(modalLayerRoot)
+
+  function syncModalLayerInteractivity(): void {
+    modalLayerRoot.style.pointerEvents = modalLayerRoot.childElementCount > 0 ? 'auto' : 'none'
+  }
+
   const players: Record<LudoColor, LudoPlayer> = options.players ?? createLudoMockPlayers()
   const botControlledColorsInitial = new Set<LudoColor>(
     (Object.values(players) as LudoPlayer[]).filter((p) => p.isBot).map((p) => p.color),
@@ -114,14 +127,19 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // полета directno.
   let engineState: LudoGameState = options.authoritative?.initialSnapshot.state ?? options.initialState ?? createLudoEngineInitialState()
   let authoritativeRevision = options.authoritative?.initialSnapshot.revision ?? -1
+  let highestReceivedAuthoritativeRevision = authoritativeRevision
   let authoritativeSnapshot = options.authoritative?.initialSnapshot ?? null
   let authoritativeTransitionQueue = Promise.resolve()
+  let presentationEpoch = 0
+  let awaitingVisibilityResync = false
 
   // Orchestrator state (т.2: PRESENTATION/ORCHESTRATION) — bot-controlled
   // flag-ове + roll/move deadlines. Мутира се ИЗКЛЮЧИТЕЛНО чрез
   // computeLudoDeadlineStateForPhase/markLudoColorBotControlled (pure
   // helpers), контролерът само presисва резултата обратно тук.
-  let orchestrator: LudoOrchestratorState = createLudoOrchestratorInitialState(options.authoritative ? new Set() : botControlledColorsInitial)
+  let orchestrator: LudoOrchestratorState = createLudoOrchestratorInitialState(
+    options.authoritative ? new Set(options.authoritative.initialSnapshot.botControlledColors) : botControlledColorsInitial,
+  )
 
   // ---- PRESENTATION-ONLY state (engine-ът не знае нищо за тях) ----
   // Момент (Date.now()), в който активният играч е получил хода си —
@@ -135,10 +153,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let activePopup: 'emoji' | 'phrase' | null = null
   let hasPresentedGameEnd = false
   let isGameEndPopupOpen = false
+  let isExitConfirmOpen = false
+  let isExitLeavePending = false
   // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
   // до следващия път, когато local player-ът получи хода си (не reset-ва
   // се автоматично, аналог на Belot persistent popup).
-  let showBotTakeoverPopup = false
+  let showBotTakeoverPopup = options.authoritative?.initialSnapshot.botControlledColors.includes(options.localColor ?? 'red') ?? false
   // Presentation route buffer: докато движеща се пионка still-steps по
   // маршрута си, engine-ът ВЕЧЕ показва финалната ѝ позиция (dispatch е
   // synchronous и моментален). За да не "телепортира" визуално пионката,
@@ -264,7 +284,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // навсякъде, established pattern).
   function currentTurnCountdownMs(): number {
     if (authoritativeSnapshot?.deadlineAt != null) {
-      return Math.max(0, authoritativeSnapshot.deadlineAt - authoritativeSnapshot.serverNow)
+      return engineState.turnPhase === 'awaiting_move_selection' ? LUDO_MOVE_TIMEOUT_MS : LUDO_ROLL_TIMEOUT_MS
     }
     const pending = resolveLudoPendingDeadlineKind(engineState.turnPhase, engineState.activeColor, orchestrator.botControlledColors)
     if (pending === 'roll') return LUDO_ROLL_TIMEOUT_MS // (A) human roll deadline — НИКОГА bot delay
@@ -321,44 +341,97 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (activePopup) mountPopup(activePopup)
     if (showBotTakeoverPopup) mountBotTakeoverPopup()
     if (isGameEndPopupOpen) mountGameEndPopup()
+    if (isExitConfirmOpen) mountExitConfirmPopup()
     wireEvents()
   }
 
-  function mountGameEndPopup(): void {
-    if (options.root.querySelector('[data-ludo-game-end-backdrop="1"]')) return
+  function mountExitConfirmPopup(): void {
+    if (modalLayerRoot.querySelector('[data-ludo-exit-confirm-backdrop="1"]')) return
     const container = document.createElement('div')
-    container.innerHTML = renderLudoGameEndPopup(engineState.winnerColor === localColor)
+    container.innerHTML = renderLudoExitConfirmPopup(authoritativeSnapshot?.stake ?? null, isExitLeavePending)
     const backdrop = container.firstElementChild
-    if (backdrop) options.root.appendChild(backdrop)
-    options.root.querySelector('[data-ludo-game-end-dismiss="1"]')?.addEventListener('click', () => {
-      isGameEndPopupOpen = false
-      options.root.querySelector('[data-ludo-game-end-backdrop="1"]')?.remove()
+    if (backdrop instanceof HTMLElement) {
+      backdrop.style.pointerEvents = 'auto'
+      modalLayerRoot.appendChild(backdrop)
+      syncModalLayerInteractivity()
+    }
+    modalLayerRoot.querySelector('[data-ludo-exit-confirm-cancel="1"]')?.addEventListener('click', () => {
+      if (isExitLeavePending) return
+      isExitConfirmOpen = false
+      modalLayerRoot.querySelector('[data-ludo-exit-confirm-backdrop="1"]')?.remove()
+      syncModalLayerInteractivity()
+    })
+    modalLayerRoot.querySelector('[data-ludo-exit-confirm-submit="1"]')?.addEventListener('click', () => {
+      if (isExitLeavePending) return
+      isExitLeavePending = true
+      modalLayerRoot.querySelectorAll<HTMLButtonElement>('[data-ludo-exit-confirm-cancel="1"], [data-ludo-exit-confirm-submit="1"]').forEach((button) => {
+        button.disabled = true
+      })
+      const submit = modalLayerRoot.querySelector<HTMLButtonElement>('[data-ludo-exit-confirm-submit="1"]')
+      if (submit) submit.textContent = 'Напускане...'
+      requestExit()
     })
   }
 
-  function presentGameEndOnce(): void {
+  function openExitConfirmPopup(): void {
+    if (isExitConfirmOpen || isExitLeavePending || engineState.status === 'finished') return
+    isExitConfirmOpen = true
+    mountExitConfirmPopup()
+  }
+
+  function mountGameEndPopup(): void {
+    if (modalLayerRoot.querySelector('[data-ludo-game-end-backdrop="1"]')) return
+    const container = document.createElement('div')
+    container.innerHTML = renderLudoGameEndPopup(engineState.winnerColor === localColor)
+    const backdrop = container.firstElementChild
+    if (backdrop instanceof HTMLElement) {
+      backdrop.style.pointerEvents = 'auto'
+      modalLayerRoot.appendChild(backdrop)
+      syncModalLayerInteractivity()
+    }
+    modalLayerRoot.querySelector('[data-ludo-game-end-dismiss="1"]')?.addEventListener('click', () => {
+      isGameEndPopupOpen = false
+      modalLayerRoot.querySelector('[data-ludo-game-end-backdrop="1"]')?.remove()
+      syncModalLayerInteractivity()
+      if (options.authoritative && authoritativeSnapshot) options.onGameEndAcknowledged?.(authoritativeSnapshot.matchId)
+    })
+  }
+
+  function presentGameEndOnce(playSound = false): void {
     if (hasPresentedGameEnd || engineState.status !== 'finished' || engineState.winnerColor === null) return
     hasPresentedGameEnd = true
+    if (playSound) playLudoEndGameSound()
     isGameEndPopupOpen = true
+    isExitConfirmOpen = false
+    isExitLeavePending = false
+    activePopup = null
+    modalLayerRoot.replaceChildren()
+    syncModalLayerInteractivity()
     clearScheduledTimers()
     showBotTakeoverPopup = false
     render()
   }
 
   function mountPopup(kind: 'emoji' | 'phrase'): void {
+    if (modalLayerRoot.querySelector('[data-ludo-mock-popup-backdrop="1"]')) return
     const container = document.createElement('div')
     container.innerHTML = renderLudoMockPopup(
       kind === 'emoji' ? 'Емоджита' : 'Фрази',
       kind === 'emoji' ? EMOJI_MOCK_ITEMS : PHRASE_MOCK_ITEMS,
     )
     const backdrop = container.firstElementChild
-    if (backdrop) options.root.appendChild(backdrop)
+    if (backdrop instanceof HTMLElement) {
+      backdrop.style.pointerEvents = 'auto'
+      modalLayerRoot.appendChild(backdrop)
+      syncModalLayerInteractivity()
+    }
   }
 
   function closePopup(): void {
     activePopup = null
-    const backdrop = options.root.querySelector('[data-ludo-mock-popup-backdrop="1"]')
+    const backdrop = modalLayerRoot.querySelector('[data-ludo-mock-popup-backdrop="1"]')
     backdrop?.remove()
+    syncModalLayerInteractivity()
   }
 
   // Bot-takeover popup (т.15) — reuse-ва Belot-овия УХ pattern (scrim +
@@ -380,19 +453,24 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // пробиваха над popup-a преди този флаг).
     diceResultOverlay.setHidden(true)
     areGameplayOverlaysHiddenForPopup = true
-    if (options.root.querySelector('[data-ludo-bot-takeover-backdrop="1"]')) return
+    if (modalLayerRoot.querySelector('[data-ludo-bot-takeover-backdrop="1"]')) return
     const container = document.createElement('div')
     container.innerHTML = renderLudoBotTakeoverPopup()
     const backdrop = container.firstElementChild
-    if (backdrop) options.root.appendChild(backdrop)
-    options.root.querySelector('[data-ludo-bot-takeover-dismiss="1"]')?.addEventListener('click', () => {
+    if (backdrop instanceof HTMLElement) {
+      backdrop.style.pointerEvents = 'auto'
+      modalLayerRoot.appendChild(backdrop)
+      syncModalLayerInteractivity()
+    }
+    modalLayerRoot.querySelector('[data-ludo-bot-takeover-dismiss="1"]')?.addEventListener('click', () => {
       if (options.authoritative && authoritativeSnapshot) {
+        const button = modalLayerRoot.querySelector<HTMLButtonElement>('[data-ludo-bot-takeover-dismiss="1"]')
+        if (button?.disabled) return
+        if (button) {
+          button.disabled = true
+          button.textContent = 'Изчакай...'
+        }
         options.authoritative.onReclaimRequest(authoritativeSnapshot.matchId, authoritativeRevision)
-        showBotTakeoverPopup = false
-        diceResultOverlay.setHidden(false)
-        areGameplayOverlaysHiddenForPopup = false
-        options.root.querySelector('[data-ludo-bot-takeover-backdrop="1"]')?.remove()
-        render()
         return
       }
       // "ВЪРНИ СЕ" (виж task-а — преди беше "Разбрах", чисто dismiss без
@@ -405,8 +483,9 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       showBotTakeoverPopup = false
       diceResultOverlay.setHidden(false)
       areGameplayOverlaysHiddenForPopup = false
-      const el = options.root.querySelector('[data-ludo-bot-takeover-backdrop="1"]')
+      const el = modalLayerRoot.querySelector('[data-ludo-bot-takeover-backdrop="1"]')
       el?.remove()
+      syncModalLayerInteractivity()
       // Ако В МОМЕНТА на click-а няма активна bot анимация И local color-ът
       // реално чака нов waiting_for_roll decision (bot think-delay timer-ът
       // все още не е изстрелял действие), safe boundary-то вече е тук —
@@ -431,7 +510,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
 
   function wireEvents(): void {
     options.root.querySelector('[data-ludo-exit-button="1"]')?.addEventListener('click', () => {
-      options.onExit()
+      openExitConfirmPopup()
     })
 
     options.root.querySelector('[data-ludo-dice-roll-button="1"]')?.addEventListener('click', () => {
@@ -470,12 +549,16 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     window.addEventListener('resize', handleResize)
   }
 
+  function requestExit(): void {
+    options.onExit(authoritativeSnapshot?.matchId)
+  }
+
   function wirePopupEvents(): void {
-    options.root.querySelector('[data-ludo-mock-popup-close="1"]')?.addEventListener('click', closePopup)
-    options.root.querySelector('[data-ludo-mock-popup-backdrop="1"]')?.addEventListener('click', (event) => {
+    modalLayerRoot.querySelector('[data-ludo-mock-popup-close="1"]')?.addEventListener('click', closePopup)
+    modalLayerRoot.querySelector('[data-ludo-mock-popup-backdrop="1"]')?.addEventListener('click', (event) => {
       if (event.target === event.currentTarget) closePopup()
     })
-    options.root.querySelectorAll('[data-ludo-mock-popup-item="1"]').forEach((el) => {
+    modalLayerRoot.querySelectorAll('[data-ludo-mock-popup-item="1"]').forEach((el) => {
       el.addEventListener('click', closePopup)
     })
   }
@@ -857,13 +940,14 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // логика тук — same важи и за impact overlay-а (target rect вече е
   // viewer-relative, playLudoCaptureImpactOverlay.ts само центрира спрямо
   // него, не преизчислява никаква perspective).
-  async function animateCapture(capturedPieceIds: readonly LudoPieceId[]): Promise<void> {
+  async function animateCapture(capturedPieceIds: readonly LudoPieceId[], isPresentationCurrent: () => boolean = () => true): Promise<void> {
     const representativeEl = options.root.querySelector<HTMLElement>(
       `[data-ludo-piece="${capturedPieceIds[0]}"], [data-ludo-piece-group~="${capturedPieceIds[0]}"]`,
     )
     if (!representativeEl) return
     representativeEl.style.setProperty('animation', 'ludo-piece-shake 400ms ease-in-out')
     await wait(IMPACT_ANIMATION_MS)
+    if (!isPresentationCurrent()) return
 
     const fromRect = representativeEl.getBoundingClientRect()
     const pieceSizePx = fromRect.width
@@ -879,6 +963,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // victim, точно както изисква task-а sequencing (shake -> impact ->
     // victim се скрива -> flight).
     await playLudoCaptureImpactOverlay({ targetRect: fromRect, initiallyHidden: areGameplayOverlaysHiddenForPopup })
+    if (!isPresentationCurrent()) return
 
     // Скриваме статичния representative token НА target клетката веднага,
     // преди flight overlay-ите да стартират — иначе pionkata би изглеждала
@@ -895,6 +980,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // без нов timing параметър за конфигуриране).
     await Promise.all(
       capturedPieceIds.map(async (pieceId) => {
+        if (!isPresentationCurrent()) return
         const [color] = pieceId.split('-')
         const slot = pieceId.slice(pieceId.lastIndexOf('-') + 1)
         const homeCellId = `home-${color}-${slot}`
@@ -952,27 +1038,80 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     turnStartedAt = localDeadline - duration
   }
 
-  async function presentAuthoritativeRoll(snapshot: LudoGameStateSnapshot): Promise<void> {
+  function invalidateAuthoritativePresentations(): void {
+    presentationEpoch += 1
+    authoritativeTransitionQueue = Promise.resolve()
+    activeMoveOverlayCancel?.()
+    activeMoveOverlayCancel = null
+    diceResultOverlay.clearLanded()
+    document.querySelectorAll('[data-ludo-capture-flight], [data-ludo-capture-impact]').forEach((element) => element.remove())
+    movingPieceSuppressedId = null
+    captureVictimOverrides = new Map()
+    isDiceRolling = false
+    isAnimatingMove = false
+  }
+
+  function snapToAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot): void {
+    invalidateAuthoritativePresentations()
+    authoritativeRevision = snapshot.revision
+    highestReceivedAuthoritativeRevision = Math.max(highestReceivedAuthoritativeRevision, snapshot.revision)
+    authoritativeSnapshot = snapshot
+    engineState = snapshot.state
+    orchestrator = { ...orchestrator, botControlledColors: new Set(snapshot.botControlledColors) }
+    showBotTakeoverPopup = snapshot.state.status !== 'finished' && snapshot.botControlledColors.includes(localColor)
+    if (!showBotTakeoverPopup) {
+      diceResultOverlay.setHidden(false)
+      areGameplayOverlaysHiddenForPopup = false
+      modalLayerRoot.querySelector('[data-ludo-bot-takeover-backdrop="1"]')?.remove()
+      syncModalLayerInteractivity()
+    }
+    syncAuthoritativeDeadline(snapshot)
+    if (snapshot.state.status === 'finished' && snapshot.state.winnerColor !== null) {
+      presentGameEndOnce(false)
+      return
+    }
+    render()
+  }
+
+  function handleVisibilityChange(): void {
+    if (!options.authoritative) return
+    if (document.visibilityState === 'hidden') {
+      invalidateAuthoritativePresentations()
+      return
+    }
+    awaitingVisibilityResync = true
+    if (authoritativeSnapshot) snapToAuthoritativeSnapshot(authoritativeSnapshot)
+    options.authoritative.onStateRefreshRequest?.()
+  }
+
+  async function presentAuthoritativeRoll(snapshot: LudoGameStateSnapshot, epoch: number): Promise<boolean> {
+    if (epoch !== presentationEpoch) return false
     const event = snapshot.events.find((item) => item.type === 'dice_accepted')
-    if (!event || event.type !== 'dice_accepted') return
+    if (!event || event.type !== 'dice_accepted') return true
+    isDiceRolling = true
+    render()
     const triggerEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${event.color}"]`)
     const centerEl = options.root.querySelector<HTMLElement>('[data-ludo-board-center="1"]')
     const boardEl = options.root.querySelector<HTMLElement>('[data-ludo-board="1"]')
-    if (!centerEl || !boardEl) return
-    isDiceRolling = true
-    render()
+    if (!centerEl || !boardEl) {
+      isDiceRolling = false
+      return true
+    }
     await diceResultOverlay.playFlight({
       fromRect: (triggerEl ?? centerEl).getBoundingClientRect(),
       toRect: centerEl.getBoundingClientRect(),
       boardGridWidthPx: boardEl.getBoundingClientRect().width,
       result: event.value as 1 | 2 | 3 | 4 | 5 | 6,
     })
+    if (epoch !== presentationEpoch) return false
     isDiceRolling = false
+    return true
   }
 
-  async function presentAuthoritativeMove(previous: LudoGameState, snapshot: LudoGameStateSnapshot): Promise<void> {
+  async function presentAuthoritativeMove(previous: LudoGameState, snapshot: LudoGameStateSnapshot, epoch: number): Promise<boolean> {
+    if (epoch !== presentationEpoch) return false
     const moved = snapshot.events.find((item) => item.type === 'piece_moved')
-    if (!moved || moved.type !== 'piece_moved') return
+    if (!moved || moved.type !== 'piece_moved') return true
     const pieceId = `${moved.color}-${moved.slot}` as LudoPieceId
     const fromCellId = ludoEnginePositionToCellId(moved.fromPosition, moved.color)
     const targetCellId = ludoEnginePositionToCellId(moved.toPosition, moved.color)
@@ -1005,53 +1144,85 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     })
     activeMoveOverlayCancel = overlay.cancel
     await overlay.finished
+    if (epoch !== presentationEpoch) return false
     activeMoveOverlayCancel = null
     movingPieceSuppressedId = null
     render()
     if (capturedPieceIds.length > 0) {
-      await animateCapture(capturedPieceIds)
+      await animateCapture(capturedPieceIds, () => epoch === presentationEpoch)
+      if (epoch !== presentationEpoch) return false
       captureVictimOverrides = clearLudoCaptureVictimOverrides(capturedPieceIds, captureVictimOverrides)
     }
     diceResultOverlay.clearLanded()
     isAnimatingMove = false
+    return true
   }
 
-  async function applyAuthoritativeTransition(snapshot: LudoGameStateSnapshot): Promise<void> {
+  async function applyAuthoritativeTransition(snapshot: LudoGameStateSnapshot, epoch: number): Promise<void> {
+    if (epoch !== presentationEpoch) return
     if (!options.authoritative || snapshot.matchId !== options.authoritative.initialSnapshot.matchId) return
     if (snapshot.revision <= authoritativeRevision) return
     const previous = engineState
     authoritativeRevision = snapshot.revision
     authoritativeSnapshot = snapshot
+    orchestrator = { ...orchestrator, botControlledColors: new Set(snapshot.botControlledColors) }
     if (snapshot.events.some((item) => item.type === 'bot_takeover_started' && item.color === localColor)) {
       showBotTakeoverPopup = true
     }
-    if (!snapshot.botControlledColors.includes(localColor)) showBotTakeoverPopup = false
+    if (!snapshot.botControlledColors.includes(localColor)) {
+      showBotTakeoverPopup = false
+      diceResultOverlay.setHidden(false)
+      areGameplayOverlaysHiddenForPopup = false
+      modalLayerRoot.querySelector('[data-ludo-bot-takeover-backdrop="1"]')?.remove()
+      syncModalLayerInteractivity()
+    }
     syncAuthoritativeDeadline(snapshot)
     if (snapshot.events.some((item) => item.type === 'dice_accepted')) {
-      await presentAuthoritativeRoll(snapshot)
+      if (!await presentAuthoritativeRoll(snapshot, epoch)) return
     }
     if (snapshot.events.some((item) => item.type === 'piece_moved')) {
-      await presentAuthoritativeMove(previous, snapshot)
+      if (!await presentAuthoritativeMove(previous, snapshot, epoch)) return
     } else {
       engineState = snapshot.state
     }
     render()
-    if (previous.status !== 'finished' && snapshot.state.status === 'finished') presentGameEndOnce()
+    if (previous.status !== 'finished' && snapshot.state.status === 'finished') {
+      presentGameEndOnce(!snapshot.events.some((item) => item.type === 'piece_moved'))
+    }
   }
 
   function applyAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot): void {
-    if (!options.authoritative || snapshot.revision <= authoritativeRevision) return
-    authoritativeTransitionQueue = authoritativeTransitionQueue.then(() => applyAuthoritativeTransition(snapshot))
+    if (!options.authoritative || snapshot.matchId !== options.authoritative.initialSnapshot.matchId) return
+    if (document.visibilityState === 'hidden') {
+      if (snapshot.revision > highestReceivedAuthoritativeRevision) snapToAuthoritativeSnapshot(snapshot)
+      return
+    }
+    if (awaitingVisibilityResync) {
+      if (snapshot.revision >= authoritativeRevision) snapToAuthoritativeSnapshot(snapshot)
+      awaitingVisibilityResync = false
+      return
+    }
+    if (snapshot.revision <= highestReceivedAuthoritativeRevision) return
+    const hasRevisionGap = snapshot.revision > highestReceivedAuthoritativeRevision + 1
+    highestReceivedAuthoritativeRevision = snapshot.revision
+    if (hasRevisionGap) {
+      snapToAuthoritativeSnapshot(snapshot)
+      return
+    }
+    const epoch = presentationEpoch
+    authoritativeTransitionQueue = authoritativeTransitionQueue.then(() => applyAuthoritativeTransition(snapshot, epoch))
   }
 
   function destroy(): void {
     isDestroyed = true
     window.removeEventListener('resize', handleResize)
+    document.removeEventListener('visibilitychange', handleVisibilityChange)
     if (resizeTimer) clearTimeout(resizeTimer)
     clearScheduledTimers()
     activeMoveOverlayCancel?.()
     activeMoveOverlayCancel = null
     diceResultOverlay.clearLanded()
+    modalLayerRoot.remove()
   }
 
   // scheduleNextDeadline() ПРЕДИ render() — same fix принцип за консистентност
@@ -1060,7 +1231,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // init, разликата е под 1ms).
   if (options.authoritative) syncAuthoritativeDeadline(options.authoritative.initialSnapshot)
   else scheduleNextDeadline()
+  document.addEventListener('visibilitychange', handleVisibilityChange)
   render()
 
-  return { destroy, applyAuthoritativeSnapshot }
+  return { destroy, applyAuthoritativeSnapshot, requestExit }
 }

@@ -1,7 +1,9 @@
+import { LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX } from './ludoLayerHierarchy'
+
 export function renderLudoGameEndPopup(didLocalPlayerWin: boolean): string {
   return `
     <div data-ludo-game-end-backdrop="1" style="
-      position:fixed; inset:0; z-index:10000;
+      position:fixed; inset:0; z-index:${LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX};
       background:rgba(2,6,23,0.68);
       display:flex; align-items:center; justify-content:center;
       padding:16px; box-sizing:border-box;

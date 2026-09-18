@@ -24,6 +24,8 @@
 //                    маха от DOM-а — без remaining halo/outline.
 // Overlay-ят се маха сам след завършване, caller-ът просто await-ва промиса.
 
+import { LUDO_CAPTURE_IMPACT_Z_INDEX } from '../ludoLayerHierarchy'
+
 const IMPACT_DURATION_MS = 340
 const PUFF_COUNT = 7
 const SPIKE_COUNT = 8
@@ -98,7 +100,7 @@ export function playLudoCaptureImpactOverlay(options: LudoCaptureImpactOptions):
     position:fixed;
     left:${centerX}px; top:${centerY}px;
     width:0; height:0;
-    z-index:8500;
+    z-index:${LUDO_CAPTURE_IMPACT_Z_INDEX};
     pointer-events:none;
     visibility:${initiallyHidden ? 'hidden' : 'visible'};
   `

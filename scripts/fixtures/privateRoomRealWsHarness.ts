@@ -59,6 +59,10 @@ const controller = createLobbyFlowController({
   onPrivateRoomChatSubscribe: (privateRoomId) => send({ type: 'subscribe_private_room_chat', privateRoomId }),
   onPrivateRoomChatUnsubscribe: (privateRoomId) => send({ type: 'unsubscribe_private_room_chat', privateRoomId }),
   onPrivateRoomChatSend: (privateRoomId, body, requestId) => send({ type: 'send_private_room_chat_message', privateRoomId, body, requestId }),
+  onLudoMatchLeave: (matchId) => send({ type: 'leave_ludo_match', matchId }),
+  onLudoRollRequest: (matchId, expectedRevision) => send({ type: 'ludo_roll_request', matchId, expectedRevision }),
+  onLudoMoveRequest: (matchId, expectedRevision, slot) => send({ type: 'ludo_move_request', matchId, expectedRevision, slot }),
+  onLudoReclaimRequest: (matchId, expectedRevision) => send({ type: 'ludo_reclaim_request', matchId, expectedRevision }),
   onFriendshipsLoad: async () => ({ ok: true, friendships: friendshipsSnapshot }),
 })
 

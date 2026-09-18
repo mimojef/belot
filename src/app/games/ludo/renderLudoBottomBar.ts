@@ -2,6 +2,8 @@
 // на desktop и mobile (виж двата референта); засега бутоните отварят
 // mock popup-и без реална логика.
 
+import { LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX } from './ludoLayerHierarchy'
+
 export function renderLudoBottomBar(): string {
   return `
     <div data-ludo-bottom-bar="1" style="
@@ -71,7 +73,7 @@ export function renderLudoMockPopup(title: string, items: string[]): string {
       position:fixed; inset:0;
       background:rgba(0,0,0,0.6);
       display:flex; align-items:flex-end; justify-content:center;
-      z-index:200;
+      z-index:${LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX};
     ">
       <div style="
         width:min(420px, 100%);

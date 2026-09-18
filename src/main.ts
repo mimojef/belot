@@ -6103,6 +6103,7 @@ lobby = createLobbyFlowController({
   onLudoRoomKick: (profileId) => { client.kickFromLudoRoom(profileId) },
   onLudoRoomStart: () => { client.startLudoRoom() },
   onLudoGameStateOpen: () => { client.requestLudoGameState() },
+  onLudoMatchLeave: (matchId) => { client.leaveLudoMatch(matchId) },
   onLudoRollRequest: (matchId, revision) => { client.requestLudoRoll(matchId, revision) },
   onLudoMoveRequest: (matchId, revision, slot) => { client.requestLudoMove(matchId, revision, slot) },
   onLudoReclaimRequest: (matchId, revision) => { client.requestLudoReclaim(matchId, revision) },

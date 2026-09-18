@@ -889,6 +889,7 @@ export type ClientMessage =
   | { type: 'kick_from_ludo_room'; profileId: string }
   | { type: 'start_ludo_room' }
   | { type: 'ludo_game_state_request' }
+  | { type: 'leave_ludo_match'; matchId: string }
   | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
@@ -1601,6 +1602,7 @@ export type LudoGameStateSnapshot = {
 }
 export type LudoGameStartedMessage = { type: 'ludo_game_started'; snapshot: LudoGameStateSnapshot }
 export type LudoGameStateMessage = { type: 'ludo_game_state'; snapshot: LudoGameStateSnapshot }
+export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
@@ -2409,6 +2411,7 @@ export type ServerMessage =
   | LudoRoomStartedMessage
   | LudoGameStartedMessage
   | LudoGameStateMessage
+  | LudoMatchLeftMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage
@@ -2580,6 +2583,7 @@ export type GameServerClient = {
   kickFromLudoRoom: (profileId: string) => void
   startLudoRoom: () => void
   requestLudoGameState: () => void
+  leaveLudoMatch: (matchId: string) => void
   requestLudoRoll: (matchId: string, expectedRevision: number) => void
   requestLudoMove: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
   requestLudoReclaim: (matchId: string, expectedRevision: number) => void
@@ -2887,6 +2891,7 @@ export function createGameServerClient(
   function kickFromLudoRoom(profileId: string): void { send({ type: 'kick_from_ludo_room', profileId }) }
   function startLudoRoom(): void { send({ type: 'start_ludo_room' }) }
   function requestLudoGameState(): void { send({ type: 'ludo_game_state_request' }) }
+  function leaveLudoMatch(matchId: string): void { send({ type: 'leave_ludo_match', matchId }) }
   function requestLudoRoll(matchId: string, expectedRevision: number): void { send({ type: 'ludo_roll_request', matchId, expectedRevision }) }
   function requestLudoMove(matchId: string, expectedRevision: number, slot: LudoPieceSlot): void { send({ type: 'ludo_move_request', matchId, expectedRevision, slot }) }
   function requestLudoReclaim(matchId: string, expectedRevision: number): void { send({ type: 'ludo_reclaim_request', matchId, expectedRevision }) }
@@ -3047,6 +3052,7 @@ export function createGameServerClient(
     kickFromLudoRoom,
     startLudoRoom,
     requestLudoGameState,
+    leaveLudoMatch,
     requestLudoRoll,
     requestLudoMove,
     requestLudoReclaim,

@@ -236,6 +236,7 @@ export type ClientMessage =
   | { type: 'kick_from_ludo_room'; profileId: string }
   | { type: 'start_ludo_room' }
   | { type: 'ludo_game_state_request' }
+  | { type: 'leave_ludo_match'; matchId: string }
   | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
@@ -936,6 +937,7 @@ export type LudoGameStateSnapshot = {
 
 export type LudoGameStartedMessage = { type: 'ludo_game_started'; snapshot: LudoGameStateSnapshot }
 export type LudoGameStateMessage = { type: 'ludo_game_state'; snapshot: LudoGameStateSnapshot }
+export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
@@ -1174,6 +1176,7 @@ export type ServerMessage =
   | LudoRoomStartedMessage
   | LudoGameStartedMessage
   | LudoGameStateMessage
+  | LudoMatchLeftMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage

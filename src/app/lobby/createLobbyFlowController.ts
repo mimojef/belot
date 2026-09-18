@@ -8,6 +8,7 @@ import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
 import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
+import { LUDO_GAME_SCREEN_Z_INDEX } from '../games/ludo/ludoLayerHierarchy'
 import {
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
@@ -715,6 +716,7 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoRoomKick?: (profileId: string) => void
   onLudoRoomStart?: () => void
   onLudoGameStateOpen?: () => void
+  onLudoMatchLeave?: (matchId: string) => void
   onLudoRollRequest?: (matchId: string, expectedRevision: number) => void
   onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
   onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
@@ -2846,12 +2848,15 @@ export function createLobbyFlowController(
   let _ludoController: {
     destroy: () => void
     applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot) => void
+    requestExit: () => void
   } | null = null
+  const _acknowledgedLudoMatchIds = new Set<string>()
   let _ludoLobbyController: {
     destroy: () => void
     setRooms: (rooms: import('../network/createGameServerClient').LudoRoomSnapshot[]) => void
     setMyRoom: (room: import('../network/createGameServerClient').LudoRoomSnapshot | null) => void
     showMessage: (message: string) => void
+    requestExit: () => void
   } | null = null
   options.root.addEventListener('click', (event) => {
     const target = event.target
@@ -2895,18 +2900,20 @@ export function createLobbyFlowController(
     _ludoLobbyController?.destroy()
     _ludoLobbyController = null
     document.querySelector('[data-ludo-lobby-overlay-root="1"]')?.remove()
-    if (window.location.pathname === '/games/ludo') history.pushState({}, '', '/games')
+    if (window.location.pathname === '/games/ludo') {
+      history.pushState({}, '', '/games')
+    }
   }
 
   async function openLudoGameOverlay(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
-    if (_ludoController) return
+    if (_ludoController || _acknowledgedLudoMatchIds.has(snapshot.matchId)) return
     const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
     const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
     const overlayRoot = document.createElement('div')
     overlayRoot.setAttribute('data-ludo-overlay-root', '1')
     overlayRoot.style.position = 'fixed'
     overlayRoot.style.inset = '0'
-    overlayRoot.style.zIndex = '500'
+    overlayRoot.style.zIndex = String(LUDO_GAME_SCREEN_Z_INDEX)
     document.body.appendChild(overlayRoot)
 
     const players = createLudoMockPlayers()
@@ -2926,9 +2933,18 @@ export function createLobbyFlowController(
         onRollRequest: (matchId, revision) => options.onLudoRollRequest?.(matchId, revision),
         onMoveRequest: (matchId, revision, slot) => options.onLudoMoveRequest?.(matchId, revision, slot),
         onReclaimRequest: (matchId, revision) => options.onLudoReclaimRequest?.(matchId, revision),
+        onStateRefreshRequest: () => options.onLudoGameStateOpen?.(),
       },
-      onExit: () => {
+      onExit: (matchId) => {
+        if (matchId) options.onLudoMatchLeave?.(matchId)
+        else closeLudoGameOverlay()
+      },
+      onGameEndAcknowledged: (matchId) => {
+        _acknowledgedLudoMatchIds.add(matchId)
+        options.onLudoMatchLeave?.(matchId)
         closeLudoGameOverlay()
+        if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
+        options.onLudoRoomsOpen?.()
       },
     })
   }
@@ -16472,12 +16488,12 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_room_updated') {
       _ludoLobbyController?.setMyRoom(message.room)
-      options.onLudoRoomsOpen?.()
       return true
     }
     if (message.type === 'ludo_room_left') {
       _ludoLobbyController?.setMyRoom(null)
       options.onLudoRoomsOpen?.()
+      closeLudoLobbyOverlay()
       return true
     }
     if (message.type === 'ludo_room_kicked') {
@@ -16492,11 +16508,17 @@ export function createLobbyFlowController(
       return true
     }
     if (message.type === 'ludo_game_state') {
+      if (_acknowledgedLudoMatchIds.has(message.snapshot.matchId)) return true
       if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot)
       else {
         closeLudoLobbyOverlay()
         void openLudoGameOverlay(message.snapshot)
       }
+      return true
+    }
+    if (message.type === 'ludo_match_left') {
+      closeLudoGameOverlay()
+      if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
       return true
     }
 
@@ -18536,6 +18558,14 @@ export function createLobbyFlowController(
     // виж коментара при openImageViewer/handleWindowPopstate по-горе.
     if (handleWindowPopstate()) return
     if (handleTopicThreadPopstate()) return
+    if (_ludoController) {
+      _ludoController.requestExit()
+      return
+    }
+    if (_ludoLobbyController) {
+      _ludoLobbyController.requestExit()
+      return
+    }
     const path = window.location.pathname
     applyRouteSeo(path)
     navigateFromPath(path)

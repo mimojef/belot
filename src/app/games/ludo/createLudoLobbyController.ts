@@ -20,6 +20,7 @@ export function createLudoLobbyController(options: Options) {
   let myRoom: LudoRoomSnapshot | null = null
   let createOpen = false
   let message = ''
+  let leavePending = false
 
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:42px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
@@ -51,7 +52,7 @@ export function createLudoLobbyController(options: Options) {
   function renderWaiting(room: LudoRoomSnapshot): string {
     const isHost = room.players.some((player) => player.profileId === options.localProfileId && player.isHost)
     return `<div style="${panel}">
-      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px;"><div><strong>Чакалня</strong><div style="color:rgba(255,255,255,.62);margin-top:5px;">${room.players.length}/${room.playerCount} · Вход ${room.stake} · ${room.manualStart ? 'Ръчен старт' : 'При запълване'}</div></div><button data-ludo-room-leave="1" style="${button}">Напусни</button></div>
+      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:18px;"><div><strong>Чакалня</strong><div style="color:rgba(255,255,255,.62);margin-top:5px;">${room.players.length}/${room.playerCount} · Вход ${room.stake} · ${room.manualStart ? 'Ръчен старт' : 'При запълване'}</div></div><button data-ludo-room-leave="1" ${leavePending ? 'disabled' : ''} style="${button}${leavePending ? 'opacity:.55;cursor:wait;' : ''}">${leavePending ? 'Напускане…' : 'Напусни'}</button></div>
       <div style="display:grid;gap:8px;">${Array.from({ length: room.playerCount }, (_, index) => {
         const player = room.players[index]
         if (!player) return `<div style="border:1px dashed rgba(255,255,255,.18);border-radius:7px;padding:13px;color:rgba(255,255,255,.4);">Свободно място</div>`
@@ -73,11 +74,15 @@ export function createLudoLobbyController(options: Options) {
   }
 
   function wire(): void {
-    options.root.querySelector('[data-ludo-lobby-back]')?.addEventListener('click', options.onBack)
+    options.root.querySelector('[data-ludo-lobby-back]')?.addEventListener('click', () => {
+      requestExit()
+    })
     options.root.querySelector('[data-ludo-create-open]')?.addEventListener('click', () => { createOpen = true; render() })
     options.root.querySelector('[data-ludo-create-close]')?.addEventListener('click', () => { createOpen = false; render() })
     options.root.querySelectorAll<HTMLElement>('[data-ludo-room-join]').forEach((el) => el.addEventListener('click', () => options.onJoin(el.dataset.ludoRoomJoin!)))
-    options.root.querySelector('[data-ludo-room-leave]')?.addEventListener('click', options.onLeave)
+    options.root.querySelector('[data-ludo-room-leave]')?.addEventListener('click', () => {
+      requestExit()
+    })
     options.root.querySelectorAll<HTMLElement>('[data-ludo-room-kick]').forEach((el) => el.addEventListener('click', () => options.onKick(el.dataset.ludoRoomKick!)))
     options.root.querySelector('[data-ludo-room-start]')?.addEventListener('click', options.onStart)
     options.root.querySelector<HTMLFormElement>('[data-ludo-create-form]')?.addEventListener('submit', (event) => {
@@ -89,12 +94,25 @@ export function createLudoLobbyController(options: Options) {
     })
   }
 
+  function requestExit(): void {
+    if (leavePending) return
+    if (myRoom === null) {
+      options.onBack()
+      return
+    }
+    leavePending = true
+    message = ''
+    render()
+    options.onLeave()
+  }
+
   render()
   options.onRefresh()
   return {
     setRooms(next: LudoRoomSnapshot[]) { rooms = next; myRoom = next.find((room) => room.players.some((player) => player.profileId === options.localProfileId)) ?? null; render() },
-    setMyRoom(room: LudoRoomSnapshot | null) { myRoom = room; render() },
+    setMyRoom(room: LudoRoomSnapshot | null) { myRoom = room; if (room !== null) leavePending = false; render() },
     showMessage(next: string) { message = next; render() },
+    requestExit,
     destroy() { options.root.innerHTML = '' },
   }
 }

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import type { LudoRoom } from './ludoRoomsStore.js'
 import { reduceLudoGame } from './ludoEngine/ludoEngineReducer.js'
 import { createLudoAuthoritativeInitialState } from './ludoEngine/ludoEngineState.js'
@@ -8,7 +8,7 @@ import { pickLudoBotMove } from './ludoEngine/ludoBotPolicy.js'
 
 export const LUDO_SERVER_ROLL_TIMEOUT_MS = 10_000
 export const LUDO_SERVER_MOVE_TIMEOUT_MS = 15_000
-export const LUDO_SERVER_BOT_THINK_DELAY_MS = 700
+export const LUDO_SERVER_BOT_THINK_DELAY_MS = 1_500
 export const LUDO_FINISHED_MATCH_RETENTION_MS = 10_000
 
 export type LudoMatchPlayer = {
@@ -34,7 +34,7 @@ export type LudoMatchSnapshot = {
 
 export type LudoMatchFailure = {
   ok: false
-  code: 'ludo_match_not_found' | 'ludo_match_not_participant' | 'ludo_match_not_turn' | 'ludo_match_stale_action' | 'ludo_match_action_rejected' | 'ludo_match_finished'
+  code: 'ludo_match_not_found' | 'ludo_match_not_participant' | 'ludo_match_not_turn' | 'ludo_match_stale_action' | 'ludo_match_action_rejected' | 'ludo_match_finished' | 'ludo_match_leave_unsupported'
   message: string
 }
 
@@ -49,6 +49,7 @@ type Match = Omit<LudoMatchSnapshot, 'serverNow' | 'players' | 'events' | 'botCo
 
 type Options = {
   randomDie?: () => LudoDiceValue
+  randomTwoPlayerCreatorColor?: () => LudoColor
   now?: () => number
   initialStateFactory?: (turnOrder: readonly LudoColor[]) => LudoGameState
   finishedMatchRetentionMs?: number
@@ -57,6 +58,12 @@ type Options = {
 
 const ROOM_COLORS: readonly LudoColor[] = ['red', 'blue', 'green', 'yellow']
 const CANONICAL_TURN_ORDER: readonly LudoColor[] = ['red', 'blue', 'yellow', 'green']
+const OPPOSITE_COLOR: Readonly<Record<LudoColor, LudoColor>> = {
+  red: 'yellow',
+  yellow: 'red',
+  blue: 'green',
+  green: 'blue',
+}
 
 export function createLudoMatchRuntime(options: Options) {
   const matches = new Map<string, Match>()
@@ -64,6 +71,7 @@ export function createLudoMatchRuntime(options: Options) {
   const now = options.now ?? Date.now
   const finishedMatchRetentionMs = options.finishedMatchRetentionMs ?? LUDO_FINISHED_MATCH_RETENTION_MS
   const randomDie = options.randomDie ?? (() => (Math.floor(Math.random() * 6) + 1) as LudoDiceValue)
+  const randomTwoPlayerCreatorColor = options.randomTwoPlayerCreatorColor ?? (() => ROOM_COLORS[randomInt(ROOM_COLORS.length)]!)
 
   const snapshot = (match: Match, includeEvents = true): LudoMatchSnapshot => ({
     matchId: match.matchId,
@@ -99,9 +107,17 @@ export function createLudoMatchRuntime(options: Options) {
           : null
     match.deadlineAt = delay === null ? null : now() + delay
     if (delay === null) return
-    const expectedRevision = match.revision
+    const expectedDeadlineAt = match.deadlineAt
+    const expectedActiveColor = match.state.activeColor
+    const expectedTurnPhase = match.state.turnPhase
     match.deadlineTimer = setTimeout(() => {
-      if (match.revision !== expectedRevision || match.state.status === 'finished') return
+      if (
+        match.state.status === 'finished' ||
+        match.deadlineAt !== expectedDeadlineAt ||
+        match.state.activeColor !== expectedActiveColor ||
+        match.state.turnPhase !== expectedTurnPhase
+      ) return
+      if (isBotControlled && !match.botControlledColors.has(match.state.activeColor)) return
       if (match.state.turnPhase === 'waiting_for_roll') applyRoll(match)
       else if (match.state.turnPhase === 'awaiting_move_selection') {
         const move = pickLudoBotMove(match.state.legalMoves)
@@ -187,9 +203,18 @@ export function createLudoMatchRuntime(options: Options) {
   }
 
   function createMatch(room: LudoRoom): LudoMatchSnapshot {
-    const assigned = room.players.map((player, index) => ({ ...player, color: ROOM_COLORS[index]! }))
-    const assignedColors = new Set(assigned.map((player) => player.color))
-    const turnOrder = CANONICAL_TURN_ORDER.filter((color) => assignedColors.has(color))
+    const creatorColor = room.playerCount === 2 ? randomTwoPlayerCreatorColor() : null
+    const assigned = room.players.map((player, index) => ({
+      ...player,
+      color: creatorColor === null
+        ? ROOM_COLORS[index]!
+        : player.profileId === room.hostProfileId
+          ? creatorColor
+          : OPPOSITE_COLOR[creatorColor],
+    }))
+    const turnOrder = creatorColor === null
+      ? CANONICAL_TURN_ORDER.filter((color) => assigned.some((player) => player.color === color))
+      : [creatorColor, OPPOSITE_COLOR[creatorColor]]
     const match: Match = {
       matchId: randomUUID(), ludoRoomId: room.id, stake: room.stake, revision: 0,
       deadlineAt: null, players: assigned, state: options.initialStateFactory?.(turnOrder) ?? createLudoAuthoritativeInitialState(turnOrder),
@@ -219,6 +244,17 @@ export function createLudoMatchRuntime(options: Options) {
       player.connectionId = connectionId
       return snapshot(match, false)
     },
+    disconnect(profileId: string, connectionId: string): void {
+      const matchId = profileToMatch.get(profileId)
+      const match = matchId ? matches.get(matchId) : null
+      const player = match?.players.find((item) => item.profileId === profileId)
+      if (!match || !player || player.connectionId !== connectionId || match.state.status === 'finished') return
+      if (match.botControlledColors.has(player.color)) return
+      match.botControlledColors.add(player.color)
+      const events: LudoEngineEvent[] = [{ type: 'bot_takeover_started', color: player.color }]
+      if (match.state.activeColor === player.color) commit(match, match.state, events)
+      else publishOrchestrationChange(match, events)
+    },
     roll(matchId: string, profileId: string, expectedRevision: number): { ok: true } | LudoMatchFailure {
       const validated = validate(matchId, profileId, expectedRevision)
       if ('ok' in validated) return validated
@@ -234,17 +270,51 @@ export function createLudoMatchRuntime(options: Options) {
       if (!match) return { ok: false, code: 'ludo_match_not_found', message: 'Ludo играта не беше намерена.' }
       const player = match.players.find((item) => item.profileId === profileId)
       if (!player) return { ok: false, code: 'ludo_match_not_participant', message: 'Не участваш в тази Ludo игра.' }
-      if (expectedRevision !== match.revision) return { ok: false, code: 'ludo_match_stale_action', message: 'Играта вече е обновена.' }
       if (!match.botControlledColors.has(player.color)) return { ok: true }
-      if (match.state.activeColor === player.color && match.state.turnPhase !== 'waiting_for_roll') {
-        match.pendingReclaims.add(player.color)
-        return { ok: true }
-      }
+      void expectedRevision
+      match.pendingReclaims.delete(player.color)
       match.botControlledColors.delete(player.color)
       const events: LudoEngineEvent[] = [{ type: 'human_control_resumed', color: player.color }]
       if (match.state.activeColor === player.color) commit(match, match.state, events)
       else publishOrchestrationChange(match, events)
       return { ok: true }
+    },
+    leave(matchId: string, profileId: string): { ok: true; winnerColor: LudoColor } | LudoMatchFailure {
+      const match = matches.get(matchId)
+      if (!match) return { ok: false, code: 'ludo_match_not_found', message: 'Ludo играта не беше намерена.' }
+      const leavingPlayer = match.players.find((player) => player.profileId === profileId)
+      if (!leavingPlayer) return { ok: false, code: 'ludo_match_not_participant', message: 'Не участваш в тази Ludo игра.' }
+      if (match.state.status === 'finished') {
+        profileToMatch.delete(profileId)
+        match.players = match.players.filter((player) => player.profileId !== profileId)
+        match.pendingReclaims.delete(leavingPlayer.color)
+        match.botControlledColors.delete(leavingPlayer.color)
+        if (match.players.length === 0) {
+          if (match.finishedCleanupTimer) clearTimeout(match.finishedCleanupTimer)
+          matches.delete(matchId)
+        }
+        return { ok: true, winnerColor: match.state.winnerColor! }
+      }
+      if (match.players.length !== 2) {
+        return { ok: false, code: 'ludo_match_leave_unsupported', message: 'Напускането на започнала игра е налично само за игра с двама играчи.' }
+      }
+      const winner = match.players.find((player) => player.profileId !== profileId)!
+      profileToMatch.delete(profileId)
+      match.players = [winner]
+      match.pendingReclaims.delete(leavingPlayer.color)
+      match.botControlledColors.delete(leavingPlayer.color)
+      commit(match, {
+        ...match.state,
+        activeColor: winner.color,
+        turnPhase: 'turn_complete',
+        diceValue: null,
+        legalMoves: [],
+        status: 'finished',
+        winnerColor: winner.color,
+        turnVersion: match.state.turnVersion + 1,
+        pendingExtraRoll: false,
+      }, [])
+      return { ok: true, winnerColor: winner.color }
     },
     getMatch: (matchId: string) => matches.get(matchId),
     snapshotForMatch: (matchId: string, includeEvents = false) => {

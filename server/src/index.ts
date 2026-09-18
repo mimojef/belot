@@ -646,6 +646,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'kick_from_ludo_room':
     case 'start_ludo_room':
     case 'ludo_game_state_request':
+    case 'leave_ludo_match':
     case 'ludo_roll_request':
     case 'ludo_move_request':
     case 'ludo_reclaim_request':
@@ -20086,6 +20087,25 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'leave_ludo_match') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_participant', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        const result = ludoMatchRuntime.leave(message.matchId, latestConnection.profileId)
+        if (!result.ok) {
+          if (result.code === 'ludo_match_not_found') {
+            safeSendToConnection(connection.id, { type: 'ludo_match_left', matchId: message.matchId })
+            return
+          }
+          safeSendToConnection(connection.id, { type: 'error', code: result.code, message: result.message })
+          return
+        }
+        safeSendToConnection(connection.id, { type: 'ludo_match_left', matchId: message.matchId })
+        return
+      }
+
       if (message.type === 'ludo_roll_request' || message.type === 'ludo_move_request' || message.type === 'ludo_reclaim_request') {
         const latestConnection = getConnectionById(serverState, connection.id)
         if (!latestConnection?.profileId) {
@@ -21612,6 +21632,7 @@ wsServer.on('connection', (socket, request) => {
       removeConnectionFromMatchmaking(connection.id)
       privateRoomsStore.removeConnection(connection.id)
       ludoRoomsStore.removeConnection(connection.id)
+      if (connection.profileId) ludoMatchRuntime.disconnect(connection.profileId, connection.id)
 
       const result = handleDisconnect(serverState, connection.id)
       const disconnectState = result.serverState

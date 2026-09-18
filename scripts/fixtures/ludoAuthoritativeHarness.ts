@@ -35,6 +35,7 @@ const controller = createLudoFlowController({
     onRollRequest: (...args) => calls.push(['roll', ...args]),
     onMoveRequest: (...args) => calls.push(['move', ...args]),
     onReclaimRequest: (...args) => calls.push(['reclaim', ...args]),
+    onStateRefreshRequest: () => calls.push(['refresh']),
   },
 })
 
@@ -44,5 +45,23 @@ const controller = createLudoFlowController({
   calls: () => [...calls],
   pieceCell: (pieceId: string) => document.querySelector(`[data-ludo-piece="${pieceId}"]`)?.closest<HTMLElement>('[data-ludo-cell-pieces]')?.dataset.ludoCellPieces ?? null,
   diceVisible: () => document.querySelector('[data-ludo-dice-flight="1"]') !== null,
+  diceFlightVisible: () => {
+    const flight = document.querySelector<HTMLElement>('[data-ludo-dice-flight="1"]')
+    return flight !== null && getComputedStyle(flight).visibility === 'visible'
+  },
+  setVisibility: (state: 'hidden' | 'visible') => {
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
+    document.dispatchEvent(new Event('visibilitychange'))
+  },
+  overlays: () => ({
+    dice: document.querySelectorAll('[data-ludo-dice-flight]').length,
+    moving: document.querySelectorAll('[data-ludo-moving-piece], [data-ludo-move-trail]').length,
+    capture: document.querySelectorAll('[data-ludo-capture-flight], [data-ludo-capture-impact]').length,
+  }),
+  activeCountdown: () => {
+    const fill = document.querySelector<HTMLElement>('[data-ludo-seat-countdown-fill]')
+    return fill ? { color: fill.dataset.ludoSeatCountdownFill, delay: getComputedStyle(fill).animationDelay } : null
+  },
+  botPopup: () => document.querySelector('[data-ludo-bot-takeover-backdrop="1"]') !== null,
   endText: () => document.querySelector('[data-ludo-game-end-backdrop="1"]')?.textContent ?? '',
 }

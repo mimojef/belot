@@ -18,6 +18,7 @@
 
 import { renderLudoDice } from './renderLudoDice'
 import { computeLudoDiceThrowTransform, type LudoDiceFace } from './ludoDiceState'
+import { LUDO_DICE_OVERLAY_Z_INDEX } from '../ludoLayerHierarchy'
 
 // = точно вградения 900ms transition в renderLudoDice.ts (data-ludo-dice-
 // cube style), за да кацват "полетът" (WAAPI, container-а) и "завъртането"
@@ -96,7 +97,7 @@ export async function playLudoDiceFlightOverlay(options: LudoDiceFlightOptions):
     position:fixed;
     left:${fromX}px; top:${fromY}px;
     transform:translate(-50%, -50%) scale(0.8);
-    z-index:9999;
+    z-index:${LUDO_DICE_OVERLAY_Z_INDEX};
     pointer-events:none;
     visibility:${initiallyHidden ? 'hidden' : 'visible'};
   `
@@ -180,25 +181,34 @@ export interface LudoDiceResultOverlayController {
 export function createLudoDiceResultOverlayController(): LudoDiceResultOverlayController {
   let landedEl: HTMLElement | null = null
   let isHidden = false
+  let flightGeneration = 0
 
   function applyHiddenState(el: HTMLElement): void {
     el.style.visibility = isHidden ? 'hidden' : 'visible'
   }
 
   function clearLanded(): void {
+    flightGeneration += 1
     landedEl?.remove()
     landedEl = null
+    document.querySelectorAll('[data-ludo-dice-flight="1"]').forEach((element) => element.remove())
   }
 
   async function playFlight(options: Omit<LudoDiceFlightOptions, 'initiallyHidden'>): Promise<void> {
     clearLanded()
+    const generation = flightGeneration
     playLudoDiceRollSound()
     // isHidden се подава ВЕДНАГА, преди container-ът изобщо да бъде
     // appended — не изчакваме края на 900ms flight анимацията (виж bug fix
     // audit-а в LudoDiceFlightOptions по-горе), затова летящото зарче
     // никога не блясва видимо, ако popup-ът вече е отворен в момента, в
     // който bot-ъТ хвърля.
-    landedEl = await playLudoDiceFlightOverlay({ ...options, initiallyHidden: isHidden })
+    const nextLandedEl = await playLudoDiceFlightOverlay({ ...options, initiallyHidden: isHidden })
+    if (generation !== flightGeneration) {
+      nextLandedEl.remove()
+      return
+    }
+    landedEl = nextLandedEl
     applyHiddenState(landedEl)
   }
 

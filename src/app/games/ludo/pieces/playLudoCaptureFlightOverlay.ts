@@ -14,6 +14,7 @@
 
 import { renderLudoPieceHtml } from './renderLudoPieces'
 import type { LudoPieceId } from '../ludoTypes'
+import { LUDO_CAPTURE_FLIGHT_Z_INDEX } from '../ludoLayerHierarchy'
 
 const FLIGHT_DURATION_MS = 500
 
@@ -52,7 +53,7 @@ export async function playLudoCaptureFlightOverlay(options: LudoCaptureFlightOpt
     left:${fromX}px; top:${fromY}px;
     width:${pieceSizePx}px;
     transform:translate(-50%, -50%);
-    z-index:8000;
+    z-index:${LUDO_CAPTURE_FLIGHT_Z_INDEX};
     pointer-events:none;
     visibility:${initiallyHidden ? 'hidden' : 'visible'};
   `

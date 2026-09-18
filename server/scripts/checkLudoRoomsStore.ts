@@ -72,6 +72,33 @@ for (const playerCount of [2, 4] as const) {
   assert.equal(store.joinRoom({ roomId: room.id, ...extra }).ok, false, 'full room rejected')
 }
 
+{
+  const { host, room } = create(2, true)
+  assert.equal(store.leaveRoom(host.connectionId), null, 'A: lone creator leave tears down room')
+  assert.equal(store.listRooms().some((item) => item.id === room.id), false, 'A: torn-down room no longer exists')
+  assert.equal(store.leaveRoom(host.connectionId), null, 'A: duplicate leave is idempotent')
+  assert.equal(store.createRoom({ ...host, connectionId: `${host.connectionId}-again`, stake: 100, playerCount: 2, manualStart: true }).ok, true, 'D: creator can immediately create again')
+}
+
+{
+  const { host, room } = create(4, true)
+  const guest = player()
+  assert.equal(store.joinRoom({ roomId: room.id, ...guest }).ok, true)
+  const remaining = store.leaveRoom(guest.connectionId)
+  assert.equal(remaining?.players.length, 1, 'B: guest leave frees their seat')
+  assert.equal(remaining?.players[0]?.profileId, host.profileId, 'B: creator remains in room')
+  assert.equal(store.joinRoom({ roomId: room.id, ...guest, connectionId: `${guest.connectionId}-again` }).ok, true, 'D: guest can immediately rejoin')
+}
+
+{
+  const { host, room } = create(4, true)
+  const guest = player()
+  assert.equal(store.joinRoom({ roomId: room.id, ...guest }).ok, true)
+  const remaining = store.leaveRoom(host.connectionId)
+  assert.equal(remaining?.hostProfileId, guest.profileId, 'C: creator leave transfers host to first waiting player')
+  assert.equal(remaining?.players.length, 1, 'C: creator is removed while waiting guest remains')
+}
+
 assert.equal(started.filter((room) => room.playerCount === 2).length >= 2, true)
 assert.equal(started.filter((room) => room.playerCount === 4).length >= 2, true)
 console.log('PASS Ludo room lifecycle: 2/4 auto, 2/4 manual, join, duplicate/full, kick permissions, start removal')

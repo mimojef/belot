@@ -56,7 +56,7 @@ function playLudoTriangleEntrySound(): void {
   void audio.play().catch(() => {})
 }
 
-function playLudoEndGameSound(): void {
+export function playLudoEndGameSound(): void {
   if (typeof Audio === 'undefined') return
   const audio = new Audio(END_GAME_SOUND_SRC)
   void audio.play().catch(() => {})
