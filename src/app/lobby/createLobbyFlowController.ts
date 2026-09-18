@@ -147,6 +147,7 @@ export type LobbyFlowScreen =
   | 'about'
   | 'fair-play'
   | 'more-games'
+  | 'ludo-lobby'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type { ProfileAccessBlockCode }
@@ -2795,6 +2796,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/ranking': 'leaderboards',
   '/shop': 'shop',
   '/games': 'more-games',
+  '/games/ludo': 'ludo-lobby',
   '/more-games': 'more-games',
   '/admin': 'admin',
   '/admin/guest-contact': 'guest-contact-messages',
@@ -2863,30 +2865,46 @@ export function createLobbyFlowController(
     if (!(target instanceof Element)) return
     if (!target.closest('[data-ludo-play-button="1"]')) return
     if (!isLudoFeatureEnabled()) return
-    void openLudoLobbyOverlay()
+    showLudoLobbyPage()
+  })
+  options.root.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (!target.closest('[data-ludo-play-button="1"]')) return
+    if (!isLudoFeatureEnabled()) return
+    event.preventDefault()
+    showLudoLobbyPage()
   })
 
+  // Mount-ва createLudoLobbyController в data-ludo-lobby-mount placeholder-а,
+  // render-нат от renderLobbyScreen за state.view==='ludo-lobby' (виж
+  // showLudoLobbyPage) — нормален in-shell екран под navbar-а, НЕ fixed
+  // document.body overlay (предишната архитектура криеше navbar-а изцяло).
   async function openLudoLobbyOverlay(): Promise<void> {
     if (_ludoLobbyController || !isLudoFeatureEnabled()) return
     const profileId = options.getAuthSession?.()?.profile?.profileId
     if (!profileId) {
       state.errorText = 'Трябва да влезеш в профила си.'
+      state.currentScreen = 'more-games'
       render()
       return
     }
+    const mountRoot = options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+    if (!mountRoot) return
     const { createLudoLobbyController } = await import('../games/ludo/createLudoLobbyController')
-    const overlayRoot = document.createElement('div')
-    overlayRoot.setAttribute('data-ludo-lobby-overlay-root', '1')
-    overlayRoot.style.position = 'fixed'
-    overlayRoot.style.inset = '0'
-    overlayRoot.style.zIndex = '490'
-    document.body.appendChild(overlayRoot)
-    history.pushState({}, '', '/games/ludo')
+    // mountRoot може вече да не е в живия DOM, ако между import()-a по-горе и
+    // тук е минал unrelated re-render, който е пресъздал root.innerHTML
+    // (нов placeholder node) — mount-ваме в актуалния, не в stale reference.
+    const liveMountRoot = mountRoot.isConnected
+      ? mountRoot
+      : options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+    if (!liveMountRoot || _ludoLobbyController || state.currentScreen !== 'ludo-lobby') return
     _ludoLobbyController = createLudoLobbyController({
-      root: overlayRoot,
+      root: liveMountRoot,
       localProfileId: profileId,
       stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
-      onBack: closeLudoLobbyOverlay,
+      onBack: showMoreGamesPage,
       onRefresh: () => options.onLudoRoomsOpen?.(),
       onCreate: (stake, playerCount, manualStart) => options.onLudoRoomCreate?.(stake, playerCount, manualStart),
       onJoin: (roomId) => options.onLudoRoomJoin?.(roomId),
@@ -2899,10 +2917,6 @@ export function createLobbyFlowController(
   function closeLudoLobbyOverlay(): void {
     _ludoLobbyController?.destroy()
     _ludoLobbyController = null
-    document.querySelector('[data-ludo-lobby-overlay-root="1"]')?.remove()
-    if (window.location.pathname === '/games/ludo') {
-      history.pushState({}, '', '/games')
-    }
   }
 
   async function openLudoGameOverlay(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
@@ -4204,6 +4218,8 @@ export function createLobbyFlowController(
               ? 'fair-play'
             : state.currentScreen === 'more-games'
               ? 'more-games'
+            : state.currentScreen === 'ludo-lobby'
+              ? 'ludo-lobby'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -6701,6 +6717,26 @@ export function createLobbyFlowController(
       startTournamentListFillExpiryLoop()
     } else {
       clearTournamentListFillExpiryLoop()
+    }
+
+    // Ludo lobby живее в data-ludo-lobby-mount placeholder-а (виж
+    // openLudoLobbyOverlay) — nextRootHtml за 'ludo-lobby' view е статичен,
+    // но unrelated WS-driven re-render (badge брояч и т.н. другаде в
+    // options.root) все пак може да мине skip-if-unchanged guard-a и да
+    // презапише root.innerHTML, изтривайки mount поддървото. Ре-mount-ваме
+    // тук, ако placeholder-ът е нов/празен, вместо контролерът да остане
+    // orphaned (destroy()-нат subtree без DOM presence).
+    if (state.currentScreen === 'ludo-lobby') {
+      const mountRoot = options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+      if (mountRoot && mountRoot.childElementCount === 0) {
+        if (_ludoLobbyController) {
+          _ludoLobbyController.destroy()
+          _ludoLobbyController = null
+        }
+        void openLudoLobbyOverlay()
+      }
+    } else if (_ludoLobbyController) {
+      closeLudoLobbyOverlay()
     }
   }
 
@@ -13601,7 +13637,30 @@ export function createLobbyFlowController(
   // картата вътре в нея, а не достъпа до самата navigation секция.
   function showMoreGamesPage(): void {
     leaveAdminServerIfActive()
+    closeLudoLobbyOverlay()
     state.currentScreen = 'more-games'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
+  // "Не се сърди човече" lobby (списък с чакащи Ludo игри) — нормален
+  // in-shell екран (navbar видим), не fullscreen overlay (виж
+  // openLudoLobbyOverlay по-долу за mount механизма в data-ludo-lobby-mount
+  // placeholder-а, render-нат от renderLobbyScreen за state.view==='ludo-lobby').
+  function showLudoLobbyPage(): void {
+    if (!isLudoFeatureEnabled()) {
+      showMoreGamesPage()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'ludo-lobby'
     state.isSearching = false
     state.errorText = null
     state.profilePopupOpen = false
@@ -14724,6 +14783,7 @@ export function createLobbyFlowController(
     about: '/about',
     'fair-play': '/fair-play',
     'more-games': '/games',
+    'ludo-lobby': '/games/ludo',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -14754,6 +14814,7 @@ export function createLobbyFlowController(
     '/fair-play': 'fair-play',
     '/games': 'more-games',
     '/more-games': 'more-games',
+    '/games/ludo': 'ludo-lobby',
   }
 
   const _loadPath = window.location.pathname
@@ -14781,13 +14842,6 @@ export function createLobbyFlowController(
   function syncUrlPath(): void {
     if (!_navigationReady || _pendingInitialNav) return
     if (document.getElementById('pwa-landing-overlay') !== null) return
-    if (_ludoLobbyController) {
-      if (window.location.pathname !== '/games/ludo') {
-        history.replaceState(null, '', '/games/ludo')
-        applyRouteSeo('/games/ludo')
-      }
-      return
-    }
     // Dynamic screens manage their own URL via pushState — skip syncUrlPath for them
     if (state.currentScreen === 'admin-payment-detail') return
     if (state.currentScreen === 'tournament-detail') return
@@ -14800,13 +14854,8 @@ export function createLobbyFlowController(
   }
 
   function navigateFromPath(path: string): void {
-    if (path === '/games/ludo') {
-      if (!isLudoFeatureEnabled()) {
-        showMoreGamesPage()
-        return
-      }
+    if (path === '/games/ludo' && !isLudoFeatureEnabled()) {
       showMoreGamesPage()
-      void openLudoLobbyOverlay()
       return
     }
     // Dynamic route: /admin/payments/:purchaseId
@@ -14893,6 +14942,7 @@ export function createLobbyFlowController(
       case 'about': showAboutPage(); break
       case 'fair-play': showFairPlayPage(); break
       case 'more-games': showMoreGamesPage(); break
+      case 'ludo-lobby': showLudoLobbyPage(); break
     }
   }
 
@@ -16491,9 +16541,15 @@ export function createLobbyFlowController(
       return true
     }
     if (message.type === 'ludo_room_left') {
+      // Leaving a WAITING ROOM, не напускане на самия ludo-lobby ЕКРАН —
+      // controller-ът трябва да остане mount-нат и просто да превключи
+      // обратно към list view (виж ludo_room_kicked по-долу, идентичен
+      // pattern). closeLudoLobbyOverlay() тук destroy-ваше mount поддървото
+      // без последващ render(), оставяйки празен shell под navbar/footer,
+      // защото state.currentScreen остава 'ludo-lobby' — reconciliation-ът
+      // в renderLobby() никога не се тригерваше за да re-mount-не.
       _ludoLobbyController?.setMyRoom(null)
       options.onLudoRoomsOpen?.()
-      closeLudoLobbyOverlay()
       return true
     }
     if (message.type === 'ludo_room_kicked') {
