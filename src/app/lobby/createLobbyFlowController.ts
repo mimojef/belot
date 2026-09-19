@@ -711,6 +711,10 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomChatUnsubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatSend?: (privateRoomId: string, body: string, requestId?: string) => void
   onLudoRoomsOpen?: () => void
+  // Server-side re-check при start е eject-нал профила заради недостатъчен
+  // баланс (виж attemptLudoRoomStart.ts) — main.ts отваря non-dismissing
+  // modal при това извикване (виж task spec §3).
+  onLudoInsufficientBalanceEjected?: () => void
   onLudoRoomCreate?: (stake: MatchStake, playerCount: 2 | 4, manualStart: boolean) => void
   onLudoRoomJoin?: (ludoRoomId: string) => void
   onLudoRoomLeave?: () => void
@@ -1192,6 +1196,8 @@ export type LobbyFlowController = {
   refreshTopicsDirectoryMetadata: () => Promise<boolean>
   clearTopicsDirectoryMetadata: () => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
+  goToLudoLobby: () => void
+  goToPrivateRoomWaiting: () => void
   resetToLobby: () => void
   openTournamentBetaAccessModal: () => void
   showTournamentDetail: (tournamentId: string) => void
@@ -2849,7 +2855,7 @@ export function createLobbyFlowController(
 
   let _ludoController: {
     destroy: () => void
-    applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot) => void
+    applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot, prizeAmount: number | null) => void
     requestExit: () => void
   } | null = null
   const _acknowledgedLudoMatchIds = new Set<string>()
@@ -16554,7 +16560,16 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_room_kicked') {
       _ludoLobbyController?.setMyRoom(null)
-      _ludoLobbyController?.showMessage('Бяхте премахнат от създателя на играта.')
+      // insufficient_balance: сървърът re-check-на баланса точно при start и
+      // те е eject-нал (viж attemptLudoRoomStart.ts) — non-dismissing modal,
+      // НЕ inline toast (виж task spec §3, огледално на
+      // cross_game_commitment_blocked модала). Липсващ reason = host-kick,
+      // оригиналното поведение, непроменено.
+      if (message.reason === 'insufficient_balance') {
+        options.onLudoInsufficientBalanceEjected?.()
+      } else {
+        _ludoLobbyController?.showMessage('Бяхте премахнат от създателя на играта.')
+      }
       options.onLudoRoomsOpen?.()
       return true
     }
@@ -16565,7 +16580,7 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_game_state') {
       if (_acknowledgedLudoMatchIds.has(message.snapshot.matchId)) return true
-      if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot)
+      if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot, message.prizeAmount)
       else {
         closeLudoLobbyOverlay()
         void openLudoGameOverlay(message.snapshot)
@@ -18742,6 +18757,39 @@ export function createLobbyFlowController(
     refreshTopicsDirectoryMetadata,
     clearTopicsDirectoryMetadata,
     startMatchmaking,
+    // Cross-game commitment modal "Виж" targets — screen-навигация към
+    // съществуващ commitment, НЕ ново create/join. goToLudoLobby() е точно
+    // showLudoLobbyPage() (виж routing-а за '/games/ludo'), което вече
+    // self-refresh-ва чрез onRefresh->onLudoRoomsOpen при mount и
+    // ludoRoomsStore.reconnectMember() възстановява СЪЩАТА waiting room по
+    // profileId — не създава нова.
+    //
+    // goToPrivateRoomWaiting() навигира ДИРЕКТНО (огледално на
+    // showLudoLobbyPage()) — за разлика от Ludo, Белот private-room
+    // membership вече се resync-ва ПАСИВНО на всеки WS connect (виж
+    // resyncPrivateRoomMembership(), викана unconditionally от main.ts-ото
+    // onOpen), така state.myPrivateRoom е практически винаги вече свеж към
+    // момента на click-а — не разчитаме на isNewRoom+privateRoomJoinInFlight
+    // "fake join" trick-а (виж shouldForceWaitingScreen по-долу), защото
+    // isNewRoom там би бил false (стаята вече е позната от passive resync-а),
+    // така screen-ът никога не би force-навигирал. onPrivateRoomsOpen?.()
+    // отдолу само презарежда данните за freshness, screen-а вече е сменен.
+    goToLudoLobby: showLudoLobbyPage,
+    goToPrivateRoomWaiting: () => {
+      // private-room-waiting никога не притежава собствен URL (render()
+      // skip-ва syncUrlPath() за него, виж горе) — същото важи и за реалния
+      // "Създай маса"/"+" join flow, който винаги стартира от /lobby и
+      // просто си остава на /lobby докато е в чакалнята. Тук идваме от
+      // /games/ludo, така че без explicit push адресната лента би останала
+      // на съвсем несвързан path — push-ваме /lobby, за да съвпадне с
+      // адреса, който реален "влез в чакалнята" journey би оставил.
+      if (window.location.pathname !== '/lobby') {
+        history.pushState(null, '', '/lobby')
+      }
+      state.currentScreen = 'private-room-waiting'
+      render()
+      options.onPrivateRoomsOpen?.()
+    },
     resetToLobby,
     openTournamentBetaAccessModal,
     showTournamentDetail,

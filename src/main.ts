@@ -85,6 +85,7 @@ import {
   type AdminRegisteredProfileRow,
   type AdminProfileLinkedProfileRow,
   type AdCampaignManagementDto,
+  type CrossGameCommitmentLocation,
 } from './app/network/createGameServerClient'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
@@ -6097,6 +6098,7 @@ lobby = createLobbyFlowController({
   onPrivateRoomChatUnsubscribe: (privateRoomId) => { client.unsubscribePrivateRoomChat(privateRoomId) },
   onPrivateRoomChatSend: (privateRoomId, body, requestId) => { client.sendPrivateRoomChatMessage(privateRoomId, body, requestId) },
   onLudoRoomsOpen: () => { client.requestLudoRoomsList() },
+  onLudoInsufficientBalanceEjected: () => { showLudoInsufficientBalanceModal() },
   onLudoRoomCreate: (stake, playerCount, manualStart) => { client.createLudoRoom(stake, playerCount, manualStart) },
   onLudoRoomJoin: (ludoRoomId) => { client.joinLudoRoom(ludoRoomId) },
   onLudoRoomLeave: () => { client.leaveLudoRoom() },
@@ -6879,6 +6881,119 @@ function showSessionInGameOverlay(roomId: string, reconnectToken: string): void 
   })
 }
 
+// Cross-game commitment guard (Ludo <-> Белот) UX — server-ът казва КЪДЕ е
+// текущият commitment (виж CrossGameCommitmentLocation), тук само навигираме
+// според него. НЕ прави auto-leave никъде — "Виж" само отвежда потребителя
+// до съществуващия commitment, той сам решава дали да напусне.
+function navigateToCrossGameCommitment(location: CrossGameCommitmentLocation): void {
+  if (location.gameType === 'ludo') {
+    if (location.kind === 'waiting_room') {
+      // showLudoLobbyPage() self-refresh-ва през onRefresh->request_ludo_rooms_list;
+      // ludoRoomsStore.reconnectMember() на сървъра възстановява СЪЩАТА стая
+      // по profileId — не създава нова.
+      lobby.goToLudoLobby()
+    } else {
+      // Огледално на автоматичния on-'connected' restore (виж
+      // handleServerMessage's 'connected' case -> onLudoGameStateOpen) —
+      // request-ва authoritative snapshot-а за активния match и
+      // openLudoGameOverlay() го отваря, откъдето и да е викнато.
+      client.requestLudoGameState()
+    }
+    return
+  }
+  if (location.kind === 'waiting_room') {
+    lobby.goToPrivateRoomWaiting()
+  } else {
+    // join_matchmaking за profile, вече на опашката за същия stake, е
+    // idempotent server-side (връща текущия matchmaking_joined/status, не
+    // създава нов запис) — виж join_matchmaking handler-а в server/src/index.ts.
+    lobby.startMatchmaking(location.stake)
+  }
+}
+
+function showCrossGameCommitmentModal(location: CrossGameCommitmentLocation): void {
+  document.getElementById('cross-game-commitment-modal')?.remove()
+
+  const overlay = document.createElement('div')
+  overlay.id = 'cross-game-commitment-modal'
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:200001;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Arial,Helvetica,sans-serif;'
+  overlay.innerHTML = `
+    <div data-cross-game-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
+    <div role="dialog" aria-modal="true" aria-label="Вече участвате в друга игра" style="position:relative;width:min(92vw,440px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.55);padding:24px;">
+      <div style="display:grid;gap:16px;text-align:center;">
+        <div style="font-size:20px;line-height:1.35;font-weight:900;color:#f8fafc;">Вече участвате в друга игра.</div>
+        <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">Можете да я отворите и да я напуснете, преди да започнете нова.</div>
+        <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
+          <button type="button" data-cross-game-modal-close="1" style="height:46px;min-width:130px;border:1px solid rgba(212,165,32,0.62);border-radius:8px;background:#080808;color:#f8fafc;font-size:15px;font-weight:900;cursor:pointer;">Затвори</button>
+          <button type="button" data-cross-game-modal-view="1" style="height:46px;min-width:130px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">Виж</button>
+        </div>
+      </div>
+    </div>
+  `
+  document.body.appendChild(overlay)
+
+  function onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') close()
+  }
+
+  function close(): void {
+    document.removeEventListener('keydown', onKeydown)
+    overlay.remove()
+  }
+
+  document.addEventListener('keydown', onKeydown)
+  overlay.querySelector('[data-cross-game-modal-backdrop="1"]')?.addEventListener('click', close)
+  overlay.querySelector('[data-cross-game-modal-close="1"]')?.addEventListener('click', close)
+  overlay.querySelector('[data-cross-game-modal-view="1"]')?.addEventListener('click', () => {
+    close()
+    navigateToCrossGameCommitment(location)
+  })
+}
+
+// Ludo economy re-check ejection (viж attemptLudoRoomStart.ts §"КРИТИЧЕН
+// RE-CHECK ТОЧНО ПРИ START") — non-dismissing modal (сървърът вече е
+// eject-нал профила и НИКОЙ не е debit-нат, виж task spec §3), огледален
+// визуален стил на showCrossGameCommitmentModal (established Pika.bg modal
+// pattern — тъмен градиент фон, златна рамка, backdrop blur, responsive).
+// Единствен бутон "OK" — само затваря, никаква навигация (§3: "След OK
+// играчът трябва да е в normal /games/ludo lobby" — вече е там, тъй като
+// _ludoLobbyController.setMyRoom(null) вече се е случило преди този callback).
+function showLudoInsufficientBalanceModal(): void {
+  document.getElementById('ludo-insufficient-balance-modal')?.remove()
+
+  const overlay = document.createElement('div')
+  overlay.id = 'ludo-insufficient-balance-modal'
+  overlay.style.cssText =
+    'position:fixed;inset:0;z-index:200001;display:flex;align-items:center;justify-content:center;padding:24px;font-family:Arial,Helvetica,sans-serif;'
+  overlay.innerHTML = `
+    <div data-ludo-insufficient-balance-modal-backdrop="1" style="position:absolute;inset:0;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);"></div>
+    <div role="dialog" aria-modal="true" aria-label="Недостатъчно жълтици" style="position:relative;width:min(92vw,440px);border-radius:8px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.55);padding:24px;">
+      <div style="display:grid;gap:16px;text-align:center;">
+        <div style="font-size:20px;line-height:1.35;font-weight:900;color:#f8fafc;">Недостатъчно жълтици</div>
+        <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">Вие бяхте изключен от стая в която участвахте поради липса на достатъчно жълтици.</div>
+        <div style="display:flex;justify-content:center;gap:12px;flex-wrap:wrap;margin-top:6px;">
+          <button type="button" data-ludo-insufficient-balance-modal-ok="1" style="height:46px;min-width:130px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">OK</button>
+        </div>
+      </div>
+    </div>
+  `
+  document.body.appendChild(overlay)
+
+  function onKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Escape') close()
+  }
+
+  function close(): void {
+    document.removeEventListener('keydown', onKeydown)
+    overlay.remove()
+  }
+
+  document.addEventListener('keydown', onKeydown)
+  overlay.querySelector('[data-ludo-insufficient-balance-modal-backdrop="1"]')?.addEventListener('click', close)
+  overlay.querySelector('[data-ludo-insufficient-balance-modal-ok="1"]')?.addEventListener('click', close)
+}
+
 client = createGameServerClient({
   onOpen: () => {
     clearReconnectTimer()
@@ -7098,6 +7213,11 @@ client = createGameServerClient({
     if (message.type === 'session_in_game') {
       lobby.suspendLobbyChatForActiveRoom()
       showSessionInGameOverlay(message.roomId, message.reconnectToken)
+      return
+    }
+
+    if (message.type === 'cross_game_commitment_blocked') {
+      showCrossGameCommitmentModal(message.location)
       return
     }
 
@@ -7518,6 +7638,23 @@ client = createGameServerClient({
       if (assignment.reconnectToken !== null) {
         client.resumeRoom(assignment.roomId, assignment.reconnectToken)
       }
+    }
+
+    // Ludo wallet realtime update — server-push authoritative balance, виж
+    // task spec §"WALLET REALTIME UPDATE" + coins_gifted.recipientNewBalance
+    // прецедента по-горе. Не return-ва рано (за разлика от session_in_game/
+    // cross_game_commitment_blocked) — само синхронизира auth session-a,
+    // после потокът продължава нормално към lobby.handleServerMessage по-долу,
+    // което си върши СЪЩАТА UI логика както преди (room/match rendering).
+    if (
+      (message.type === 'ludo_game_started' || message.type === 'ludo_game_state') &&
+      currentAuthSession !== null
+    ) {
+      currentAuthSession = {
+        ...currentAuthSession,
+        profile: { ...currentAuthSession.profile, yellowCoinsBalance: message.walletBalance },
+      }
+      syncLobbyWithAuthSession()
     }
 
     if (activeRoom.handleServerMessage(message)) {

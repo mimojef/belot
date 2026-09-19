@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from 'node:crypto'
+import { randomInt } from 'node:crypto'
 import type { LudoRoom } from './ludoRoomsStore.js'
 import { reduceLudoGame } from './ludoEngine/ludoEngineReducer.js'
 import { createLudoAuthoritativeInitialState } from './ludoEngine/ludoEngineState.js'
@@ -202,7 +202,7 @@ export function createLudoMatchRuntime(options: Options) {
     return { match, player }
   }
 
-  function createMatch(room: LudoRoom): LudoMatchSnapshot {
+  function createMatch(room: LudoRoom, matchId: string): LudoMatchSnapshot {
     const creatorColor = room.playerCount === 2 ? randomTwoPlayerCreatorColor() : null
     const assigned = room.players.map((player, index) => ({
       ...player,
@@ -216,7 +216,13 @@ export function createLudoMatchRuntime(options: Options) {
       ? CANONICAL_TURN_ORDER.filter((color) => assigned.some((player) => player.color === color))
       : [creatorColor, OPPOSITE_COLOR[creatorColor]]
     const match: Match = {
-      matchId: randomUUID(), ludoRoomId: room.id, stake: room.stake, revision: 0,
+      // matchId се генерира и предава ОТВЪН (attemptLudoRoomStart.ts) —
+      // НЕ тук с randomUUID() — защото същият id вече служи като
+      // ludo_match_economy_ledger scope за atomic stake debit-а, извършен
+      // ПРЕДИ това извикване (виж task spec §"ATOMIC DEBIT ПРИ УСПЕШЕН
+      // START"). Двата трябва да са СЪЩИЯТ id, иначе payoutLudoMatchWinner
+      // не би намерил pot-а по-късно.
+      matchId, ludoRoomId: room.id, stake: room.stake, revision: 0,
       deadlineAt: null, players: assigned, state: options.initialStateFactory?.(turnOrder) ?? createLudoAuthoritativeInitialState(turnOrder),
       lastEvents: [], deadlineTimer: null, finishedCleanupTimer: null,
       botControlledColors: new Set(), pendingReclaims: new Set(),

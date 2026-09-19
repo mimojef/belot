@@ -1493,6 +1493,21 @@ export type SessionInGameMessage = {
   reconnectToken: string
 }
 
+// Огледално на server/src/protocol/messageTypes.ts — виж коментара там за
+// пълния rationale. Client-ът само чете location и навигира, никога не
+// гадае къде е активният cross-game commitment.
+export type CrossGameCommitmentLocation =
+  | { gameType: 'ludo'; kind: 'waiting_room'; ludoRoomId: string }
+  | { gameType: 'ludo'; kind: 'active_match'; matchId: string }
+  | { gameType: 'belot'; kind: 'waiting_room'; privateRoomId: string }
+  | { gameType: 'belot'; kind: 'matchmaking'; stake: MatchStake }
+
+export type CrossGameCommitmentBlockedMessage = {
+  type: 'cross_game_commitment_blocked'
+  message: string
+  location: CrossGameCommitmentLocation
+}
+
 export type MatchFoundMessage = {
   type: 'match_found'
   roomId: string
@@ -1574,7 +1589,11 @@ export type PrivateRoomsListMessage = {
 export type LudoRoomsListMessage = { type: 'ludo_rooms_list'; rooms: LudoRoomSnapshot[] }
 export type LudoRoomUpdatedMessage = { type: 'ludo_room_updated'; room: LudoRoomSnapshot }
 export type LudoRoomLeftMessage = { type: 'ludo_room_left'; ludoRoomId: string }
-export type LudoRoomKickedMessage = { type: 'ludo_room_kicked'; ludoRoomId: string }
+export type LudoRoomKickedMessage = {
+  type: 'ludo_room_kicked'
+  ludoRoomId: string
+  reason?: 'insufficient_balance'
+}
 export type LudoRoomStartedMessage = {
   type: 'ludo_room_started'
   ludoRoomId: string
@@ -1600,8 +1619,18 @@ export type LudoGameStateSnapshot = {
   botControlledColors: readonly ('red' | 'blue' | 'green' | 'yellow')[]
   winnerProfileId: string | null
 }
-export type LudoGameStartedMessage = { type: 'ludo_game_started'; snapshot: LudoGameStateSnapshot }
-export type LudoGameStateMessage = { type: 'ludo_game_state'; snapshot: LudoGameStateSnapshot }
+export type LudoGameStartedMessage = {
+  type: 'ludo_game_started'
+  snapshot: LudoGameStateSnapshot
+  walletBalance: number
+  prizeAmount: number | null
+}
+export type LudoGameStateMessage = {
+  type: 'ludo_game_state'
+  snapshot: LudoGameStateSnapshot
+  walletBalance: number
+  prizeAmount: number | null
+}
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 
 export type PrivateRoomUpdatedMessage = {
@@ -2399,6 +2428,7 @@ export type ServerMessage =
   | SessionBannedMessage
   | SessionDeletedMessage
   | SessionInGameMessage
+  | CrossGameCommitmentBlockedMessage
   | EmojiReactionMessage
   | PhraseReactionMessage
   | TableGiftItemSentMessage

@@ -129,6 +129,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let authoritativeRevision = options.authoritative?.initialSnapshot.revision ?? -1
   let highestReceivedAuthoritativeRevision = authoritativeRevision
   let authoritativeSnapshot = options.authoritative?.initialSnapshot ?? null
+  // Authoritative payout сума за local player-а, ако е match winner — виж
+  // renderLudoGameEndPopup.ts коментара. Никога null-ва вече известна
+  // стойност (само presentGameEndOnce я чете) — защитава срещу edge-case
+  // reconnect snapshot с prizeAmount:null, който теоретично би могъл да
+  // пристигне СЛЕД finish (виж applyAuthoritativeSnapshot по-долу).
+  let latestPrizeAmount: number | null = null
   let authoritativeTransitionQueue = Promise.resolve()
   let presentationEpoch = 0
   let awaitingVisibilityResync = false
@@ -382,7 +388,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   function mountGameEndPopup(): void {
     if (modalLayerRoot.querySelector('[data-ludo-game-end-backdrop="1"]')) return
     const container = document.createElement('div')
-    container.innerHTML = renderLudoGameEndPopup(engineState.winnerColor === localColor)
+    container.innerHTML = renderLudoGameEndPopup(engineState.winnerColor === localColor, latestPrizeAmount)
     const backdrop = container.firstElementChild
     if (backdrop instanceof HTMLElement) {
       backdrop.style.pointerEvents = 'auto'
@@ -1191,8 +1197,9 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
   }
 
-  function applyAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot): void {
+  function applyAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot, prizeAmount: number | null): void {
     if (!options.authoritative || snapshot.matchId !== options.authoritative.initialSnapshot.matchId) return
+    if (prizeAmount !== null) latestPrizeAmount = prizeAmount
     if (document.visibilityState === 'hidden') {
       if (snapshot.revision > highestReceivedAuthoritativeRevision) snapToAuthoritativeSnapshot(snapshot)
       return

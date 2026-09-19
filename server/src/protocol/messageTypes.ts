@@ -791,6 +791,24 @@ export type SessionInGameMessage = {
   reconnectToken: string
 }
 
+// Structured "къде точно е текущият commitment" за cross-game guard-а (Ludo
+// <-> Белот, виж hasActiveLudoCommitment/hasActiveBelotCommitment в index.ts).
+// Огледално на session_in_game по-горе (roomId+reconnectToken за "resume
+// точно тази активна Белот стая"), но generic за двата game типа и трите
+// останали commitment форми — client-ът само навигира по тези данни, никога
+// не гадае къде е активният commitment.
+export type CrossGameCommitmentLocation =
+  | { gameType: 'ludo'; kind: 'waiting_room'; ludoRoomId: string }
+  | { gameType: 'ludo'; kind: 'active_match'; matchId: string }
+  | { gameType: 'belot'; kind: 'waiting_room'; privateRoomId: string }
+  | { gameType: 'belot'; kind: 'matchmaking'; stake: MatchStake }
+
+export type CrossGameCommitmentBlockedMessage = {
+  type: 'cross_game_commitment_blocked'
+  message: string
+  location: CrossGameCommitmentLocation
+}
+
 export type EmojiReactionMessage = {
   type: 'emoji_reaction'
   roomId: RoomId
@@ -906,7 +924,15 @@ export type LudoRoomSnapshot = {
 export type LudoRoomsListMessage = { type: 'ludo_rooms_list'; rooms: LudoRoomSnapshot[] }
 export type LudoRoomUpdatedMessage = { type: 'ludo_room_updated'; room: LudoRoomSnapshot }
 export type LudoRoomLeftMessage = { type: 'ludo_room_left'; ludoRoomId: string }
-export type LudoRoomKickedMessage = { type: 'ludo_room_kicked'; ludoRoomId: string }
+// reason: undefined = премахнат от host-а (оригиналното значение);
+// 'insufficient_balance' = auto-eject от attemptLudoRoomStart.ts заради
+// недостатъчен баланс точно при start recheck-а (виж task spec §3) — client-ът
+// показва различен UI за двата случая (inline съобщение vs. non-dismissing modal).
+export type LudoRoomKickedMessage = {
+  type: 'ludo_room_kicked'
+  ludoRoomId: string
+  reason?: 'insufficient_balance'
+}
 export type LudoRoomStartedMessage = {
   type: 'ludo_room_started'
   ludoRoomId: string
@@ -935,8 +961,25 @@ export type LudoGameStateSnapshot = {
   winnerProfileId: string | null
 }
 
-export type LudoGameStartedMessage = { type: 'ludo_game_started'; snapshot: LudoGameStateSnapshot }
-export type LudoGameStateMessage = { type: 'ludo_game_state'; snapshot: LudoGameStateSnapshot }
+// walletBalance: RECIPIENT-ът own authoritative balance point-in-time на
+// изпращането (следва coins_gifted.recipientNewBalance прецедента за
+// server-push wallet realtime update — виж §"WALLET REALTIME UPDATE").
+// prizeAmount: non-null само на recipient-а, който Е match winner-ът, точно
+// в snapshot-а, където settlement-ът е приключил (§"END GAME UI / PRIZE") —
+// authoritative числото идва директно от ludoEconomyStore.payoutLudoMatchWinner,
+// client-ът никога не го смята сам.
+export type LudoGameStartedMessage = {
+  type: 'ludo_game_started'
+  snapshot: LudoGameStateSnapshot
+  walletBalance: number
+  prizeAmount: number | null
+}
+export type LudoGameStateMessage = {
+  type: 'ludo_game_state'
+  snapshot: LudoGameStateSnapshot
+  walletBalance: number
+  prizeAmount: number | null
+}
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 
 export type PrivateRoomUpdatedMessage = {
@@ -1150,6 +1193,7 @@ export type ServerMessage =
   | SessionBannedMessage
   | SessionDeletedMessage
   | SessionInGameMessage
+  | CrossGameCommitmentBlockedMessage
   | PlayerProfileMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
