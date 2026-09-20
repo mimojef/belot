@@ -8,6 +8,7 @@ import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
 import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
+import { LUDO_GAME_SCREEN_Z_INDEX } from '../games/ludo/ludoLayerHierarchy'
 import {
   renderMatchmakingRoomScreen,
   type MatchmakingRoomPlayer,
@@ -111,6 +112,7 @@ import type {
   AdCampaignManagementDto,
   AdCampaignDispatchClientDto,
 } from '../network/createGameServerClient'
+import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 
 export type LobbyFlowScreen =
   | 'lobby'
@@ -145,6 +147,8 @@ export type LobbyFlowScreen =
   | 'faq'
   | 'about'
   | 'fair-play'
+  | 'more-games'
+  | 'ludo-lobby'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type { ProfileAccessBlockCode }
@@ -745,6 +749,22 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomChatSubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatUnsubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatSend?: (privateRoomId: string, body: string, requestId?: string) => void
+  onLudoRoomsOpen?: () => void
+  // Server-side re-check при start е eject-нал профила заради недостатъчен
+  // баланс (виж attemptLudoRoomStart.ts) — main.ts отваря non-dismissing
+  // modal при това извикване (виж task spec §3).
+  onLudoInsufficientBalanceEjected?: () => void
+  onLudoRoomCreate?: (stake: MatchStake, playerCount: 2 | 4, manualStart: boolean) => void
+  onLudoRoomJoin?: (ludoRoomId: string) => void
+  onLudoRoomLeave?: () => void
+  onLudoRoomKick?: (profileId: string) => void
+  onLudoRoomStart?: () => void
+  onLudoGameStateOpen?: () => void
+  onLudoMatchLeave?: (matchId: string) => void
+  onLudoRollRequest?: (matchId: string, expectedRevision: number) => void
+  onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
+  onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
+  onLudoEmojiReactionSend?: (matchId: string, emojiId: string) => void
   onSupportMessagesLoad?: () => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
@@ -1216,6 +1236,17 @@ export type LobbyFlowController = {
   refreshTopicsDirectoryMetadata: () => Promise<boolean>
   clearTopicsDirectoryMetadata: () => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
+  goToLudoLobby: () => void
+  // Explicit "възстанови активния Ludo match" заявка (виж task-а "ludo_match_
+  // not_found lifecycle UX bug") — единствения call site, за който
+  // липсващ match е РЕАЛНА, meaningful грешка (сървърът вече е казал, чрез
+  // отделен cross-game commitment сигнал, че за профила СЪЩЕСТВУВА активен
+  // Ludo match). НЕ използвай client.requestLudoGameState() directno за
+  // тази цел никъде другаде — вместо това минавай оттук, за да остане
+  // request-ът разпознаваем в handleServerMessage-овия error branch,
+  // независимо от текущия UI lifecycle (_ludoController/_ludoLobbyController).
+  requestLudoMatchRestore: () => void
+  goToPrivateRoomWaiting: () => void
   resetToLobby: () => void
   openTournamentBetaAccessModal: () => void
   showTournamentDetail: (tournamentId: string) => void
@@ -1256,6 +1287,7 @@ export type LobbyFlowController = {
     hasQueuedPrivateRoomInvites: boolean
     isInPrivateRoomsScreen: boolean
     isConnected: boolean
+    hasActiveLudoMatch: boolean
   }
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
@@ -2860,6 +2892,9 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/players': 'players',
   '/ranking': 'leaderboards',
   '/shop': 'shop',
+  '/games': 'more-games',
+  '/games/ludo': 'ludo-lobby',
+  '/more-games': 'more-games',
   '/admin': 'admin',
   '/admin/guest-contact': 'guest-contact-messages',
   '/admin/visitors': 'admin-visitors',
@@ -2908,6 +2943,229 @@ export function createLobbyFlowController(
   // Guard срещу late-resolve overwrite при gift item catalog fetch — виж
   // openGiftItemModal/closeGiftItemModal коментара.
   let _giftItemCatalogRequestToken = 0
+
+  let _ludoController: {
+    destroy: () => void
+    applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot, prizeAmount: number | null) => void
+    applyEmojiReaction: (matchId: string, color: 'red' | 'blue' | 'green' | 'yellow', emojiId: string) => void
+    requestExit: () => void
+  } | null = null
+  const _acknowledgedLudoMatchIds = new Set<string>()
+  // Lifecycle distinction за 'ludo_match_not_found' (виж task-а "ludo_match_
+  // not_found lifecycle UX bug" — реален репорт: normal loss/win -> end-game
+  // popup -> OK -> /games/ludo показваше "Ludo играта не беше намерена."
+  // под banner-а). Root cause: ludo_game_state_request се изпраща от ДВА
+  // напълно различни, "тихи" background-и site-а — (1) options.onLudoGameStateOpen
+  // -> client.requestLudoGameState(), викан безусловно на ВСЯКО 'connected'
+  // съобщение, и (2) createLudoFlowController.ts::handleVisibilityChange()'s
+  // onStateRefreshRequest, викан при hidden->visible tab resync — НИТО едното
+  // от двете е user-initiated "искам да видя грешка, ако match липсва".
+  // Отговорът им (ludo_match_not_found) няма matchId/request id за
+  // корелация, а _ludoLobbyController остава mounted през ЦЕЛИЯ Ludo сеанс
+  // (lobby screen-ът е "под" fullscreen game overlay-я, не се unmount-ва
+  // при игра) — затова старата проверка "покажи грешка ако _ludoLobbyController
+  // е mounted" на практика хващаше почти ВСЕКИ закъснял отговор от тези тихи
+  // проби, включително такива, чийто отговор пристига СЛЕД като потребителят
+  // вече съзнателно е приключил/напуснал match-а през end-game OK
+  // (onGameEndAcknowledged -> closeLudoGameOverlay() -> _ludoController=null,
+  // но _ludoLobbyController остава).
+  //
+  // Fix (controller-lifecycle token, не текстово сравнение): моделът вече е
+  // "opt-in показвай грешка", не "opt-out скривай грешка". _isExpectingLudoMatchRestore
+  // е true САМО докато трае ЕДИНСТВЕНАТА explicit restore заявка в цялото
+  // приложение — lobby.requestLudoMatchRestore() (викана единствено от
+  // main.ts::navigateToCrossGameCommitment, само когато сървърът вече е
+  // казал, чрез ОТДЕЛЕН cross-game commitment сигнал, че за профила
+  // СЪЩЕСТВУВА активен Ludo match — тоест "expected active match unexpectedly
+  // missing" случаят от task-а). И двете тихи проби по-горе НИКОГА не пипат
+  // този флаг, затова техният ludo_match_not_found винаги е silent no-op,
+  // независимо от _ludoController/_ludoLobbyController lifecycle-а в момента
+  // на закъснелия отговор.
+  let _isExpectingLudoMatchRestore = false
+  // Lifecycle ownership за gameplay-action (roll/move/reclaim) error-и —
+  // виж task-а "ludo_match_not_turn lifecycle UX bug": реален репорт —
+  // natural finish (win ИЛИ loss) -> end-game popup -> OK -> /games/ludo
+  // показваше "Не е твоят ред." под banner-а и при двамата играчи.
+  //
+  // Root cause: _ludoLobbyController се destroy-ва САМО за миг при match
+  // start (ludo_game_started handler-а), но следващият generic render()
+  // tick веднага го пре-mount-ва (виж render()-a по-долу — "ludo-lobby"
+  // currentScreen never actually changes while playing", само fullscreen
+  // game overlay-я се показва НАД него) — затова през ЦЯЛАТА игра
+  // _ludoLobbyController реално съществува, само визуално скрит зад
+  // overlay-я. Ако играч кликне нещо invalid по ВРЕМЕ на реалния match
+  // (напр. случаен клик върху зара по време на хода на опонента —
+  // напълно нормално за реални играчи) и сървърът отговори с gameplay
+  // error (типично ludo_match_not_turn), старият generic error handler
+  // безусловно викаше _ludoLobbyController.showMessage(...) — текстът се
+  // записваше в (скрития) lobby state и оставаше "queued" невидим, докато
+  // ПО-КЪСНО closeLudoGameOverlay() (end-game OK) разкрие lobby DOM-а
+  // отново — показвайки stale текст от match, който вече е приключил.
+  //
+  // Fix (controller-lifecycle ownership, НЕ text/code match): COUNTER (не
+  // boolean — виж по-долу защо), увеличаван при ВСЕКИ roll/move/reclaim
+  // send (единствените 3 call site-а в openLudoGameOverlay() по-долу),
+  // намаляван при ВСЕКИ следващ отговор (success ludo_game_state ИЛИ
+  // error). Ако при error отговора брояча е >0 (т.е. отговорът реално
+  // "принадлежи" на неприключен gameplay request) И _ludoController вече е
+  // null (controller destroy-нат между send-а и отговора — точно end-game
+  // OK сценарият), отговорът е lifecycle-stale -> discard, никога не стига
+  // до _ludoLobbyController. Ако _ludoController все още съществува
+  // (реален active match error), поведението остава напълно непроменено —
+  // showMessage() продължава да се вика нормално.
+  //
+  // ЗАЩО COUNTER, не boolean: реален browser E2E тест разкри double-click
+  // race (изключително правдоподобен — играч кликва зара два пъти бързо,
+  // напр. при перцепирано lag) — 2 requests в полет едновременно; success
+  // response-ът на ПЪРВИЯ пристига преди error response-а на ВТОРИЯ.
+  // Boolean, clear-нат безусловно на ВСЯКО ludo_game_state, би се нулирал
+  // от 1-вия response ПРЕДИ 2-рия (реално stale) error изобщо да пристигне
+  // — точно това се случи с първата (boolean) версия на този fix. Counter-
+  // ът правилно "изчаква" двата response-а, преди да падне на 0.
+  let _ludoGameplayActionResponsesPending = 0
+  let _ludoLobbyController: {
+    destroy: () => void
+    setRooms: (rooms: import('../network/createGameServerClient').LudoRoomSnapshot[]) => void
+    setMyRoom: (room: import('../network/createGameServerClient').LudoRoomSnapshot | null) => void
+    showMessage: (message: string) => void
+    requestExit: () => void
+  } | null = null
+  options.root.addEventListener('click', (event) => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (!target.closest('[data-ludo-play-button="1"]')) return
+    if (!isLudoFeatureEnabled()) return
+    showLudoLobbyPage()
+  })
+  options.root.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (!target.closest('[data-ludo-play-button="1"]')) return
+    if (!isLudoFeatureEnabled()) return
+    event.preventDefault()
+    showLudoLobbyPage()
+  })
+
+  // Mount-ва createLudoLobbyController в data-ludo-lobby-mount placeholder-а,
+  // render-нат от renderLobbyScreen за state.view==='ludo-lobby' (виж
+  // showLudoLobbyPage) — нормален in-shell екран под navbar-а, НЕ fixed
+  // document.body overlay (предишната архитектура криеше navbar-а изцяло).
+  async function openLudoLobbyOverlay(): Promise<void> {
+    if (_ludoLobbyController || !isLudoFeatureEnabled()) return
+    const profileId = options.getAuthSession?.()?.profile?.profileId
+    if (!profileId) {
+      state.errorText = 'Трябва да влезеш в профила си.'
+      state.currentScreen = 'more-games'
+      render()
+      return
+    }
+    const mountRoot = options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+    if (!mountRoot) return
+    const { createLudoLobbyController } = await import('../games/ludo/createLudoLobbyController')
+    // mountRoot може вече да не е в живия DOM, ако между import()-a по-горе и
+    // тук е минал unrelated re-render, който е пресъздал root.innerHTML
+    // (нов placeholder node) — mount-ваме в актуалния, не в stale reference.
+    const liveMountRoot = mountRoot.isConnected
+      ? mountRoot
+      : options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+    if (!liveMountRoot || _ludoLobbyController || state.currentScreen !== 'ludo-lobby') return
+    _ludoLobbyController = createLudoLobbyController({
+      root: liveMountRoot,
+      localProfileId: profileId,
+      stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
+      onBack: showMoreGamesPage,
+      onRefresh: () => options.onLudoRoomsOpen?.(),
+      onCreate: (stake, playerCount, manualStart) => options.onLudoRoomCreate?.(stake, playerCount, manualStart),
+      onJoin: (roomId) => options.onLudoRoomJoin?.(roomId),
+      onLeave: () => options.onLudoRoomLeave?.(),
+      onKick: (targetProfileId) => options.onLudoRoomKick?.(targetProfileId),
+      onStart: () => options.onLudoRoomStart?.(),
+    })
+  }
+
+  function closeLudoLobbyOverlay(): void {
+    _ludoLobbyController?.destroy()
+    _ludoLobbyController = null
+  }
+
+  async function openLudoGameOverlay(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
+    if (_ludoController || _acknowledgedLudoMatchIds.has(snapshot.matchId)) return
+    const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
+    const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
+    const overlayRoot = document.createElement('div')
+    overlayRoot.setAttribute('data-ludo-overlay-root', '1')
+    overlayRoot.style.position = 'fixed'
+    overlayRoot.style.inset = '0'
+    overlayRoot.style.zIndex = String(LUDO_GAME_SCREEN_Z_INDEX)
+    document.body.appendChild(overlayRoot)
+
+    const players = createLudoMockPlayers()
+    const colors = ['red', 'blue', 'green', 'yellow'] as const
+    colors.forEach((color) => { players[color] = { color, name: 'Не участва', avatarUrl: null, isBot: true } })
+    snapshot.players.forEach((player) => {
+      players[player.color] = { color: player.color, name: player.displayName, avatarUrl: player.avatarUrl, isBot: false }
+    })
+    const localProfileId = options.getAuthSession?.()?.profile?.profileId
+    const localColor = snapshot.players.find((player) => player.profileId === localProfileId)?.color ?? 'red'
+    _ludoController = createLudoFlowController({
+      root: overlayRoot,
+      players,
+      localColor,
+      authoritative: {
+        initialSnapshot: snapshot,
+        // Виж _ludoGameplayActionResponsesPending doc коментара при
+        // декларацията му ("ludo_match_not_turn lifecycle UX bug") —
+        // ЕДИНСТВЕНИТЕ 3 call site-а, чийто error response трябва да се
+        // третира като gameplay-action response (lifecycle-stale-aware),
+        // не generic lobby error.
+        onRollRequest: (matchId, revision) => {
+          _ludoGameplayActionResponsesPending += 1
+          options.onLudoRollRequest?.(matchId, revision)
+        },
+        onMoveRequest: (matchId, revision, slot) => {
+          _ludoGameplayActionResponsesPending += 1
+          options.onLudoMoveRequest?.(matchId, revision, slot)
+        },
+        onReclaimRequest: (matchId, revision) => {
+          _ludoGameplayActionResponsesPending += 1
+          options.onLudoReclaimRequest?.(matchId, revision)
+        },
+        onStateRefreshRequest: () => options.onLudoGameStateOpen?.(),
+        onEmojiReactionSend: (matchId, emojiId) => options.onLudoEmojiReactionSend?.(matchId, emojiId),
+      },
+      onExit: (matchId) => {
+        if (matchId) options.onLudoMatchLeave?.(matchId)
+        else closeLudoGameOverlay()
+      },
+      onGameEndAcknowledged: (matchId) => {
+        _acknowledgedLudoMatchIds.add(matchId)
+        options.onLudoMatchLeave?.(matchId)
+        closeLudoGameOverlay()
+        if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
+        options.onLudoRoomsOpen?.()
+      },
+    })
+  }
+
+  function closeLudoGameOverlay(): void {
+    _ludoController?.destroy()
+    _ludoController = null
+    document.querySelector('[data-ludo-overlay-root="1"]')?.remove()
+    // Виж _ludoGameplayActionResponsesPending doc коментара — "ludo_match_
+    // not_turn lifecycle UX bug": _ludoLobbyController остава mounted (само
+    // визуално скрит зад fullscreen game overlay-я) през ЦЯЛАТА игра, затова
+    // ГЕНУИНЕН mid-match gameplay error (напр. случаен off-turn клик — активен
+    // match error, коректно НЕ discard-нат от gating-a по-долу) стига до
+    // showMessage() и се записва в (скрития) lobby state МНОГО ПРЕДИ end-game
+    // OK — не просто закъснели responses ПОСЛЕ destroy. Затова "принадлежи на
+    // match-а, който ТОКУ-ЩО приключва" сама по себе си не е достатъчна —
+    // трябва explicit да се изчисти всяко ВЕЧЕ queued (но никога визуално
+    // показано, защото lobby-то е било скрито) съобщение точно тук, при
+    // overlay close — то е "от" match-а, който вече приключва, независимо
+    // кога точно е пристигнал отговорът, който го е записал.
+    _ludoLobbyController?.showMessage('')
+  }
 
   function shouldSuppressLobbyRender(): boolean {
     return (options.suppressRendering === true) || (options.getIsInGame?.() ?? false)
@@ -4156,6 +4414,10 @@ export function createLobbyFlowController(
               ? 'about'
             : state.currentScreen === 'fair-play'
               ? 'fair-play'
+            : state.currentScreen === 'more-games'
+              ? 'more-games'
+            : state.currentScreen === 'ludo-lobby'
+              ? 'ludo-lobby'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -4943,6 +5205,9 @@ export function createLobbyFlowController(
       },
       onShopClick: () => {
         void showShopPanel()
+      },
+      onGamesClick: () => {
+        showMoreGamesPage()
       },
       onShopPurchaseClick: (packageId) => {
         openShopPurchaseConfirm(packageId)
@@ -6696,6 +6961,26 @@ export function createLobbyFlowController(
       startTournamentListFillExpiryLoop()
     } else {
       clearTournamentListFillExpiryLoop()
+    }
+
+    // Ludo lobby живее в data-ludo-lobby-mount placeholder-а (виж
+    // openLudoLobbyOverlay) — nextRootHtml за 'ludo-lobby' view е статичен,
+    // но unrelated WS-driven re-render (badge брояч и т.н. другаде в
+    // options.root) все пак може да мине skip-if-unchanged guard-a и да
+    // презапише root.innerHTML, изтривайки mount поддървото. Ре-mount-ваме
+    // тук, ако placeholder-ът е нов/празен, вместо контролерът да остане
+    // orphaned (destroy()-нат subtree без DOM presence).
+    if (state.currentScreen === 'ludo-lobby') {
+      const mountRoot = options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+      if (mountRoot && mountRoot.childElementCount === 0) {
+        if (_ludoLobbyController) {
+          _ludoLobbyController.destroy()
+          _ludoLobbyController = null
+        }
+        void openLudoLobbyOverlay()
+      }
+    } else if (_ludoLobbyController) {
+      closeLudoLobbyOverlay()
     }
   }
 
@@ -13755,6 +14040,45 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
+  // Показва dedicated "Игри" секцията. Feature flag-ът управлява Ludo
+  // картата вътре в нея, а не достъпа до самата navigation секция.
+  function showMoreGamesPage(): void {
+    leaveAdminServerIfActive()
+    closeLudoLobbyOverlay()
+    state.currentScreen = 'more-games'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
+  // "Не се сърди човече" lobby (списък с чакащи Ludo игри) — нормален
+  // in-shell екран (navbar видим), не fullscreen overlay (виж
+  // openLudoLobbyOverlay по-долу за mount механизма в data-ludo-lobby-mount
+  // placeholder-а, render-нат от renderLobbyScreen за state.view==='ludo-lobby').
+  function showLudoLobbyPage(): void {
+    if (!isLudoFeatureEnabled()) {
+      showMoreGamesPage()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'ludo-lobby'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+  }
+
   // Статична страница, но с nested route /tournaments/how-it-works (не flat
   // top-level path като rules/faq/fair-play) — затова управлява собствен
   // URL през pushState, огледално на showTournamentDetail, вместо да мине
@@ -15063,6 +15387,8 @@ export function createLobbyFlowController(
     faq: '/faq',
     about: '/about',
     'fair-play': '/fair-play',
+    'more-games': '/games',
+    'ludo-lobby': '/games/ludo',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -15091,6 +15417,9 @@ export function createLobbyFlowController(
     '/faq': 'faq',
     '/about': 'about',
     '/fair-play': 'fair-play',
+    '/games': 'more-games',
+    '/more-games': 'more-games',
+    '/games/ludo': 'ludo-lobby',
   }
 
   const _loadPath = window.location.pathname
@@ -15130,6 +15459,10 @@ export function createLobbyFlowController(
   }
 
   function navigateFromPath(path: string): void {
+    if (path === '/games/ludo' && !isLudoFeatureEnabled()) {
+      showMoreGamesPage()
+      return
+    }
     // Dynamic route: /admin/payments/:purchaseId
     const detailMatch = /^\/admin\/payments\/([^/]+)$/.exec(path)
     if (detailMatch) {
@@ -15213,6 +15546,8 @@ export function createLobbyFlowController(
       case 'faq': showFaqPage(); break
       case 'about': showAboutPage(); break
       case 'fair-play': showFairPlayPage(); break
+      case 'more-games': showMoreGamesPage(); break
+      case 'ludo-lobby': showLudoLobbyPage(); break
     }
   }
 
@@ -16800,12 +17135,79 @@ export function createLobbyFlowController(
   function handleServerMessage(message: ServerMessage): boolean {
     if (message.type === 'connected') {
       state.errorText = null
+      // Виж _isExpectingLudoMatchRestore doc коментара при декларацията му —
+      // тази проба е "blind" (никакво предварително известие от сървъра, че
+      // за профила изобщо съществува Ludo match), затова резултантен
+      // ludo_match_not_found никога не показва toast — този флаг НЕ се пипа
+      // тук нарочно (остава false освен по време на explicit restore).
+      options.onLudoGameStateOpen?.()
       if (_pendingInitialNav) {
         _pendingInitialNav = false
         navigateFromPath(_loadPath)
       } else {
         render()
       }
+      return true
+    }
+
+    if (message.type === 'ludo_rooms_list') {
+      _ludoLobbyController?.setRooms(message.rooms)
+      return true
+    }
+    if (message.type === 'ludo_room_updated') {
+      _ludoLobbyController?.setMyRoom(message.room)
+      return true
+    }
+    if (message.type === 'ludo_room_left') {
+      // Leaving a WAITING ROOM, не напускане на самия ludo-lobby ЕКРАН —
+      // controller-ът трябва да остане mount-нат и просто да превключи
+      // обратно към list view (виж ludo_room_kicked по-долу, идентичен
+      // pattern). closeLudoLobbyOverlay() тук destroy-ваше mount поддървото
+      // без последващ render(), оставяйки празен shell под navbar/footer,
+      // защото state.currentScreen остава 'ludo-lobby' — reconciliation-ът
+      // в renderLobby() никога не се тригерваше за да re-mount-не.
+      _ludoLobbyController?.setMyRoom(null)
+      options.onLudoRoomsOpen?.()
+      return true
+    }
+    if (message.type === 'ludo_room_kicked') {
+      _ludoLobbyController?.setMyRoom(null)
+      // insufficient_balance: сървърът re-check-на баланса точно при start и
+      // те е eject-нал (viж attemptLudoRoomStart.ts) — non-dismissing modal,
+      // НЕ inline toast (виж task spec §3, огледално на
+      // cross_game_commitment_blocked модала). Липсващ reason = host-kick,
+      // оригиналното поведение, непроменено.
+      if (message.reason === 'insufficient_balance') {
+        options.onLudoInsufficientBalanceEjected?.()
+      } else {
+        _ludoLobbyController?.showMessage('Бяхте премахнат от създателя на играта.')
+      }
+      options.onLudoRoomsOpen?.()
+      return true
+    }
+    if (message.type === 'ludo_game_started') {
+      closeLudoLobbyOverlay()
+      void openLudoGameOverlay(message.snapshot)
+      return true
+    }
+    if (message.type === 'ludo_game_state') {
+      _isExpectingLudoMatchRestore = false
+      if (_ludoGameplayActionResponsesPending > 0) _ludoGameplayActionResponsesPending -= 1
+      if (_acknowledgedLudoMatchIds.has(message.snapshot.matchId)) return true
+      if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot, message.prizeAmount)
+      else {
+        closeLudoLobbyOverlay()
+        void openLudoGameOverlay(message.snapshot)
+      }
+      return true
+    }
+    if (message.type === 'ludo_match_left') {
+      closeLudoGameOverlay()
+      if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
+      return true
+    }
+    if (message.type === 'ludo_emoji_reaction') {
+      _ludoController?.applyEmojiReaction(message.matchId, message.color, message.emojiId)
       return true
     }
 
@@ -17200,6 +17602,37 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'error') {
+      // Виж _isExpectingLudoMatchRestore doc коментара при декларацията му —
+      // 'ludo_match_not_found' е ЕДИНСТВЕНИЯТ error code, за който имаме
+      // explicit lifecycle distinction: показва се САМО ако точно ТАЗИ
+      // заявка беше explicit restore опит (lobby.requestLudoMatchRestore());
+      // всеки друг случай (background 'connected' проба, hidden->visible
+      // resync проба, или закъснял отговор ПОСЛЕД end-game OK вече е
+      // затворил match-а) е silent no-op — независимо от _ludoController/
+      // _ludoLobbyController lifecycle-а в момента на отговора.
+      if (message.code === 'ludo_match_not_found') {
+        const wasExpectingRestore = _isExpectingLudoMatchRestore
+        _isExpectingLudoMatchRestore = false
+        if (!wasExpectingRestore) return true
+      }
+      // Виж _ludoGameplayActionResponsesPending doc коментара при
+      // декларацията му — "ludo_match_not_turn lifecycle UX bug": response
+      // на roll/move/reclaim (типично ludo_match_not_turn, но и всеки друг
+      // gameplay-action error код — намерена е controller-lifecycle
+      // ownership, не text/code match) е lifecycle-stale, ако _ludoController
+      // вече е destroy-нат до момента на отговора (end-game OK/exit между
+      // send-а и отговора) — discard, никога не стига до _ludoLobbyController.
+      // Докато match-ът все още е active (_ludoController съществува),
+      // поведението остава напълно непроменено.
+      if (_ludoGameplayActionResponsesPending > 0) {
+        _ludoGameplayActionResponsesPending -= 1
+        if (!_ludoController) return true
+      }
+      if (_ludoLobbyController) {
+        _ludoLobbyController.showMessage(message.message)
+        options.onLudoRoomsOpen?.()
+        return true
+      }
       // Defensive reset — never leaves an in-flight create/join marked as
       // "in flight" forever if the server rejects it (e.g. stake no longer
       // available, room full, race with another joiner).
@@ -18853,6 +19286,14 @@ export function createLobbyFlowController(
     // виж коментара при openImageViewer/handleWindowPopstate по-горе.
     if (handleWindowPopstate()) return
     if (handleTopicThreadPopstate()) return
+    if (_ludoController) {
+      _ludoController.requestExit()
+      return
+    }
+    if (_ludoLobbyController) {
+      _ludoLobbyController.requestExit()
+      return
+    }
     const path = window.location.pathname
     applyRouteSeo(path)
     navigateFromPath(path)
@@ -18973,6 +19414,43 @@ export function createLobbyFlowController(
     refreshTopicsDirectoryMetadata,
     clearTopicsDirectoryMetadata,
     startMatchmaking,
+    // Cross-game commitment modal "Виж" targets — screen-навигация към
+    // съществуващ commitment, НЕ ново create/join. goToLudoLobby() е точно
+    // showLudoLobbyPage() (виж routing-а за '/games/ludo'), което вече
+    // self-refresh-ва чрез onRefresh->onLudoRoomsOpen при mount и
+    // ludoRoomsStore.reconnectMember() възстановява СЪЩАТА waiting room по
+    // profileId — не създава нова.
+    //
+    // goToPrivateRoomWaiting() навигира ДИРЕКТНО (огледално на
+    // showLudoLobbyPage()) — за разлика от Ludo, Белот private-room
+    // membership вече се resync-ва ПАСИВНО на всеки WS connect (виж
+    // resyncPrivateRoomMembership(), викана unconditionally от main.ts-ото
+    // onOpen), така state.myPrivateRoom е практически винаги вече свеж към
+    // момента на click-а — не разчитаме на isNewRoom+privateRoomJoinInFlight
+    // "fake join" trick-а (виж shouldForceWaitingScreen по-долу), защото
+    // isNewRoom там би бил false (стаята вече е позната от passive resync-а),
+    // така screen-ът никога не би force-навигирал. onPrivateRoomsOpen?.()
+    // отдолу само презарежда данните за freshness, screen-а вече е сменен.
+    goToLudoLobby: showLudoLobbyPage,
+    requestLudoMatchRestore: () => {
+      _isExpectingLudoMatchRestore = true
+      options.onLudoGameStateOpen?.()
+    },
+    goToPrivateRoomWaiting: () => {
+      // private-room-waiting никога не притежава собствен URL (render()
+      // skip-ва syncUrlPath() за него, виж горе) — същото важи и за реалния
+      // "Създай маса"/"+" join flow, който винаги стартира от /lobby и
+      // просто си остава на /lobby докато е в чакалнята. Тук идваме от
+      // /games/ludo, така че без explicit push адресната лента би останала
+      // на съвсем несвързан path — push-ваме /lobby, за да съвпадне с
+      // адреса, който реален "влез в чакалнята" journey би оставил.
+      if (window.location.pathname !== '/lobby') {
+        history.pushState(null, '', '/lobby')
+      }
+      state.currentScreen = 'private-room-waiting'
+      render()
+      options.onPrivateRoomsOpen?.()
+    },
     resetToLobby,
     openTournamentBetaAccessModal,
     showTournamentDetail,
@@ -19165,6 +19643,13 @@ export function createLobbyFlowController(
       hasQueuedPrivateRoomInvites: state.privateRoomInviteQueue.length > 0,
       isInPrivateRoomsScreen: state.currentScreen === 'private-rooms',
       isConnected: state.isConnected,
+      // Виж task spec §10 — реалното съществуване на активния Ludo gameplay
+      // controller-a, НЕ URL/currentScreen (потребител, разглеждащ /games/ludo
+      // лобито БЕЗ активен match, не бива да блокира update-и). _ludoController
+      // се destroy-ва (null) едва при end-game OK/Exit (closeLudoGameOverlay,
+      // виж onGameEndAcknowledged) — остава truthy докато end-game popup-ът
+      // стои отворен.
+      hasActiveLudoMatch: _ludoController !== null,
     }),
     setAdminMonitoringSnapshot: (snapshot) => {
       state.adminMonitoringSnapshot = snapshot
@@ -19199,7 +19684,7 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      const isKnownPath = !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
+      const isKnownPath = _loadPath === '/games/ludo' || !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
       if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)

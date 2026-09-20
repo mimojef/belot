@@ -16,6 +16,8 @@ import type { TournamentMatchAssignment } from '../tournament/tournamentCoordina
 import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
+import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
+import type { LudoColor, LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
 
 export type TournamentMatchAssignedMessage = {
   type: 'tournament_match_assigned'
@@ -237,6 +239,18 @@ export type ClientMessage =
   | {
       type: 'request_private_rooms_list'
     }
+  | { type: 'request_ludo_rooms_list' }
+  | { type: 'create_ludo_room'; stake: MatchStake; playerCount: 2 | 4; manualStart: boolean }
+  | { type: 'join_ludo_room'; ludoRoomId: string }
+  | { type: 'leave_ludo_room' }
+  | { type: 'kick_from_ludo_room'; profileId: string }
+  | { type: 'start_ludo_room' }
+  | { type: 'ludo_game_state_request' }
+  | { type: 'leave_ludo_match'; matchId: string }
+  | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
+  | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
+  | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
+  | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -813,6 +827,24 @@ export type SessionInGameMessage = {
   reconnectToken: string
 }
 
+// Structured "къде точно е текущият commitment" за cross-game guard-а (Ludo
+// <-> Белот, виж hasActiveLudoCommitment/hasActiveBelotCommitment в index.ts).
+// Огледално на session_in_game по-горе (roomId+reconnectToken за "resume
+// точно тази активна Белот стая"), но generic за двата game типа и трите
+// останали commitment форми — client-ът само навигира по тези данни, никога
+// не гадае къде е активният commitment.
+export type CrossGameCommitmentLocation =
+  | { gameType: 'ludo'; kind: 'waiting_room'; ludoRoomId: string }
+  | { gameType: 'ludo'; kind: 'active_match'; matchId: string }
+  | { gameType: 'belot'; kind: 'waiting_room'; privateRoomId: string }
+  | { gameType: 'belot'; kind: 'matchmaking'; stake: MatchStake }
+
+export type CrossGameCommitmentBlockedMessage = {
+  type: 'cross_game_commitment_blocked'
+  message: string
+  location: CrossGameCommitmentLocation
+}
+
 export type EmojiReactionMessage = {
   type: 'emoji_reaction'
   roomId: RoomId
@@ -906,6 +938,95 @@ export type PrivateRoomSnapshot = {
 export type PrivateRoomsListMessage = {
   type: 'private_rooms_list'
   rooms: PrivateRoomSnapshot[]
+}
+
+export type LudoRoomPlayerSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  isHost: boolean
+}
+
+export type LudoRoomSnapshot = {
+  id: string
+  stake: MatchStake
+  playerCount: 2 | 4
+  manualStart: boolean
+  players: LudoRoomPlayerSnapshot[]
+  createdAt: number
+  canManualStart: boolean
+}
+
+export type LudoRoomsListMessage = { type: 'ludo_rooms_list'; rooms: LudoRoomSnapshot[] }
+export type LudoRoomUpdatedMessage = { type: 'ludo_room_updated'; room: LudoRoomSnapshot }
+export type LudoRoomLeftMessage = { type: 'ludo_room_left'; ludoRoomId: string }
+// reason: undefined = премахнат от host-а (оригиналното значение);
+// 'insufficient_balance' = auto-eject от attemptLudoRoomStart.ts заради
+// недостатъчен баланс точно при start recheck-а (виж task spec §3) — client-ът
+// показва различен UI за двата случая (inline съобщение vs. non-dismissing modal).
+export type LudoRoomKickedMessage = {
+  type: 'ludo_room_kicked'
+  ludoRoomId: string
+  reason?: 'insufficient_balance'
+}
+export type LudoRoomStartedMessage = {
+  type: 'ludo_room_started'
+  ludoRoomId: string
+  stake: MatchStake
+  players: LudoRoomPlayerSnapshot[]
+}
+
+export type LudoGamePlayerSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  color: 'red' | 'blue' | 'green' | 'yellow'
+}
+
+export type LudoGameStateSnapshot = {
+  matchId: string
+  ludoRoomId: string
+  stake: MatchStake
+  revision: number
+  serverNow: number
+  deadlineAt: number | null
+  players: LudoGamePlayerSnapshot[]
+  state: LudoGameState
+  events: readonly LudoEngineEvent[]
+  botControlledColors: readonly ('red' | 'blue' | 'green' | 'yellow')[]
+  winnerProfileId: string | null
+}
+
+// walletBalance: RECIPIENT-ът own authoritative balance point-in-time на
+// изпращането (следва coins_gifted.recipientNewBalance прецедента за
+// server-push wallet realtime update — виж §"WALLET REALTIME UPDATE").
+// prizeAmount: non-null само на recipient-а, който Е match winner-ът, точно
+// в snapshot-а, където settlement-ът е приключил (§"END GAME UI / PRIZE") —
+// authoritative числото идва директно от ludoEconomyStore.payoutLudoMatchWinner,
+// client-ът никога не го смята сам.
+export type LudoGameStartedMessage = {
+  type: 'ludo_game_started'
+  snapshot: LudoGameStateSnapshot
+  walletBalance: number
+  prizeAmount: number | null
+}
+export type LudoGameStateMessage = {
+  type: 'ludo_game_state'
+  snapshot: LudoGameStateSnapshot
+  walletBalance: number
+  prizeAmount: number | null
+}
+export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
+// Realtime social reaction — transient presentation only, НИКОГА не се
+// персистира в LudoGameState/snapshot (виж ludoMatchRuntime.ts handler-а —
+// broadcast-ва се директно, не минава през reduceLudoGame/commit). color е
+// sender-ят, resolve-нат server-side от profileId (виж index.ts handler-а
+// за 'send_ludo_emoji_reaction') — клиентът никога не диктува чий цвят е.
+export type LudoEmojiReactionMessage = {
+  type: 'ludo_emoji_reaction'
+  matchId: string
+  color: LudoColor
+  emojiId: string
 }
 
 export type PrivateRoomUpdatedMessage = {
@@ -1119,6 +1240,7 @@ export type ServerMessage =
   | SessionBannedMessage
   | SessionDeletedMessage
   | SessionInGameMessage
+  | CrossGameCommitmentBlockedMessage
   | PlayerProfileMessage
   | RoomCreatedMessage
   | RoomJoinedMessage
@@ -1139,6 +1261,15 @@ export type ServerMessage =
   | TableGiftItemSentMessage
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
+  | LudoRoomsListMessage
+  | LudoRoomUpdatedMessage
+  | LudoRoomLeftMessage
+  | LudoRoomKickedMessage
+  | LudoRoomStartedMessage
+  | LudoGameStartedMessage
+  | LudoGameStateMessage
+  | LudoMatchLeftMessage
+  | LudoEmojiReactionMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage

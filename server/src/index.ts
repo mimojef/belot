@@ -170,6 +170,9 @@ import {
 import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
+import { createLudoEconomyStore } from './db/ludoEconomyStore.js'
+import { createActiveLudoMatchSnapshotStore } from './db/activeLudoMatchSnapshotStore.js'
+import { createAttemptLudoRoomStart } from './game/attemptLudoRoomStart.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createVipStore } from './db/vipStore.js'
 import {
@@ -293,6 +296,8 @@ import type {
 } from './protocol/messageTypes.js'
 import { validateTopicTitle, TOPIC_TITLE_MAX_CODE_POINTS } from './protocol/topicTitleValidation.js'
 import { createPrivateRoomsStore, getHumanCount, getTeamSlots } from './game/privateRoomsStore.js'
+import { createLudoRoomsStore, type LudoRoom } from './game/ludoRoomsStore.js'
+import { createLudoMatchRuntime, type LudoMatchSnapshot } from './game/ludoMatchRuntime.js'
 import type {
   PrivateRoom,
   PrivateRoomHumanOccupant,
@@ -310,6 +315,8 @@ import { seatParticipantInRoom } from './core/seatParticipantInRoom.js'
 import { updateRoomHostPlayerId } from './core/updateRoomHostPlayerId.js'
 import type {
   ClientMessage,
+  CrossGameCommitmentLocation,
+  LudoRoomSnapshot,
   PrivateRoomSnapshot,
   PrivateGamesListMessage,
   PrivateGameScoreUpdatedMessage,
@@ -644,6 +651,17 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
     case 'request_private_games_list':
+    case 'request_ludo_rooms_list':
+    case 'create_ludo_room':
+    case 'join_ludo_room':
+    case 'leave_ludo_room':
+    case 'kick_from_ludo_room':
+    case 'start_ludo_room':
+    case 'ludo_game_state_request':
+    case 'leave_ludo_match':
+    case 'ludo_roll_request':
+    case 'ludo_move_request':
+    case 'ludo_reclaim_request':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
     case 'start_private_room':
@@ -671,6 +689,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'request_player_profile':
     case 'send_emoji_reaction':
     case 'send_phrase_reaction':
+    case 'send_ludo_emoji_reaction':
     case 'subscribe_ad_campaign_management':
     case 'unsubscribe_ad_campaign_management':
     case 'request_pending_ad_campaigns':
@@ -2679,6 +2698,8 @@ setSupportedMatchStakes(matchRoomsStore.getEnabledStakes())
 setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
+const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
+const activeLudoMatchSnapshotStore = await createActiveLudoMatchSnapshotStore(databaseBootstrap.databaseFilePath)
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
@@ -4232,6 +4253,164 @@ const privateRoomsStore = createPrivateRoomsStore({
   onMemberKicked: (room, occupant) => handlePrivateRoomMemberKicked(room, occupant),
 })
 
+function buildLudoRoomSnapshot(room: LudoRoom): LudoRoomSnapshot {
+  return {
+    id: room.id,
+    stake: room.stake,
+    playerCount: room.playerCount,
+    manualStart: room.manualStart,
+    players: room.players.map((player) => ({
+      profileId: player.profileId,
+      displayName: player.displayName,
+      avatarUrl: player.avatarUrl,
+      isHost: player.profileId === room.hostProfileId,
+    })),
+    createdAt: room.createdAt,
+    canManualStart: room.manualStart && room.players.length === room.playerCount,
+  }
+}
+
+function broadcastLudoRoomsList(): void {
+  const rooms = ludoRoomsStore.listRooms().map(buildLudoRoomSnapshot)
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status === 'connected' && conn.currentRoomId === null) {
+      safeSendToConnection(conn.id, { type: 'ludo_rooms_list', rooms })
+    }
+  }
+}
+
+function sendLudoRoomUpdate(room: LudoRoom): void {
+  const snapshot = buildLudoRoomSnapshot(room)
+  room.players.forEach((player) => safeSendToConnection(player.connectionId, { type: 'ludo_room_updated', room: snapshot }))
+}
+
+function toLudoGameProtocolSnapshot(snapshot: LudoMatchSnapshot) {
+  return {
+    ...snapshot,
+    winnerProfileId: snapshot.state.winnerColor === null
+      ? null
+      : snapshot.players.find((player) => player.color === snapshot.state.winnerColor)?.profileId ?? null,
+  }
+}
+
+// Settlement hook — извиква се от onSnapshot ПРЕДИ per-player broadcast-а,
+// точно веднъж когато match-ът стигне 'finished' (естествен win reducer
+// transition ИЛИ forfeit през ludoMatchRuntime.leave() — и двата пътя минават
+// през commit()->onSnapshot, виж task spec §"NORMAL FINISH"/§"FORFEIT": "НЕ
+// прави отделна по-различна prize formula за forfeit"). Идемпотентността е
+// ledger-based (payoutLudoMatchWinner), не разчита само на "commit() никога
+// не се вика два пъти за finished match" инварианта на ludoMatchRuntime —
+// defense in depth (виж L regression теста).
+//
+// Forfeit-specific бележка: leave() премахва quitter-а от match.players
+// ПРЕДИ commit() — снимката тук съдържа само winner-а. Затова pot-ът НЕ се
+// смята от snapshot.players.length (би дал грешно "1 player" pot), а от
+// ludoEconomyStore.getLudoMatchTotalPot() — SUM на реално debit-натите
+// ledger записи, независим от по-късни in-memory промени в players масива.
+function settleLudoMatchIfNeeded(
+  snapshot: LudoMatchSnapshot,
+): { profileId: string; prizeAmount: number } | null {
+  if (snapshot.state.winnerColor === null) return null
+  const winner = snapshot.players.find((player) => player.color === snapshot.state.winnerColor)
+  if (!winner) return null
+
+  const payoutResult = ludoEconomyStore.payoutLudoMatchWinner(snapshot.matchId, winner.profileId)
+  if (!payoutResult.ok) {
+    console.error(`[ludo-economy] payout failed matchId=${snapshot.matchId}: ${payoutResult.message}`)
+    return null
+  }
+  return { profileId: winner.profileId, prizeAmount: payoutResult.prizeAmount }
+}
+
+// Persist BEFORE settlement/broadcast (виж task spec §2: "runtime state
+// mutation -> persist authoritative snapshot -> broadcast snapshot към
+// клиентите... клиентът не бива да получи state, който още не е durable").
+// try/catch defense-in-depth, огледало на persistRoomSnapshot() за Белот —
+// DB failure тук не бива да чупи gameplay-а, само да се log-не.
+function persistLudoMatchSnapshot(snapshot: LudoMatchSnapshot): void {
+  try {
+    activeLudoMatchSnapshotStore.upsertMatch(snapshot)
+  } catch (error) {
+    console.error(`[ludo-match-snapshot] failed to persist match=${snapshot.matchId}`, error)
+  }
+}
+
+const ludoMatchRuntime = createLudoMatchRuntime({
+  onSnapshot: (snapshot) => {
+    persistLudoMatchSnapshot(snapshot)
+    const winnerPayout = snapshot.state.status === 'finished' ? settleLudoMatchIfNeeded(snapshot) : null
+    // Snapshot cleanup ЕДИНСТВЕНО след успешен settlement (виж task spec §7:
+    // "НИКОГА: snapshot delete -> после payout"). winnerPayout===null при
+    // finished status значи или липсващ winner data (структурно не би
+    // трябвало да се случи), или payoutLudoMatchWinner() реално е fail-нал
+    // (виж settleLudoMatchIfNeeded по-долу) — и в двата случая пазим реда,
+    // за да може boot recovery да опита пак (idempotent, ledger-guarded).
+    if (snapshot.state.status === 'finished' && winnerPayout !== null) {
+      try {
+        activeLudoMatchSnapshotStore.markMatchRemoved(snapshot.matchId)
+      } catch (error) {
+        console.error(`[ludo-match-snapshot] failed to remove match=${snapshot.matchId}`, error)
+      }
+    }
+    const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
+    const type = snapshot.revision === 0 ? 'ludo_game_started' : 'ludo_game_state'
+    for (const player of snapshot.players) {
+      // Explicit-forfeit-нал играч (виж task-а "Explicit Изход" §2/§11) НЕ
+      // получава по-нататъшни snapshot broadcast-и — display roster-ът
+      // (snapshot.players) нарочно го пази за ОСТАНАЛИТЕ играчи (виж
+      // ludoMatchRuntime.ts::leave() коментара "display roster != active
+      // membership"), но самият forfeit-нал профил вече е навигирал/навигира
+      // към /games (виж requestExit()) и НЕ трябва да вижда собствения си
+      // leave presentation/winner popup на собствения си екран — точно
+      // прозорецът, който би се отворил, ако продължим да го broadcast-ваме
+      // тук (същата connection, все още 'connected' в краткия prozorec преди
+      // ludo_match_left да пристигне).
+      if (snapshot.state.leftColors.includes(player.color)) continue
+      const connection = Object.values(serverState.connections).find(
+        (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
+      )
+      if (connection) safeSendToConnection(connection.id, {
+        type,
+        snapshot: protocolSnapshot,
+        // Server-push authoritative balance — огледало на coins_gifted's
+        // recipientNewBalance прецедент (виж §"WALLET REALTIME UPDATE").
+        walletBalance: ludoEconomyStore.getWalletBalance(player.profileId),
+        prizeAmount: winnerPayout && winnerPayout.profileId === player.profileId ? winnerPayout.prizeAmount : null,
+      })
+    }
+  },
+})
+
+const ludoRoomsStore = createLudoRoomsStore({
+  onRoomsChanged: () => broadcastLudoRoomsList(),
+  onRoomReady: (room, matchId, precomputed) => {
+    ludoMatchRuntime.createMatch(room, matchId, precomputed)
+  },
+  onMemberKicked: (room, player) => {
+    safeSendToConnection(player.connectionId, { type: 'ludo_room_kicked', ludoRoomId: room.id })
+    sendLudoRoomUpdate(room)
+  },
+})
+
+// Canonical единствена orchestration точка за ВСЕКИ реален Ludo start path
+// (manual "Старт" + auto-full при join) — виж attemptLudoRoomStart.ts за
+// пълната rationale (re-check -> eject insufficient -> atomic debit +
+// snapshot -> finalize+createMatch).
+const attemptLudoRoomStart = createAttemptLudoRoomStart({
+  ludoRoomsStore,
+  ludoEconomyStore,
+  buildInitialMatch: (room, matchId) => ludoMatchRuntime.buildInitialMatch(room, matchId),
+  hasEnoughBalance: (profileId, amount) => matchEconomyStore.hasEnoughBalance(profileId, amount),
+  onPlayerEjectedForInsufficientBalance: (connectionId, ludoRoomId) => {
+    safeSendToConnection(connectionId, {
+      type: 'ludo_room_kicked',
+      ludoRoomId,
+      reason: 'insufficient_balance',
+    })
+  },
+  onRoomUpdated: (room) => sendLudoRoomUpdate(room),
+})
+
 for (const room of Object.values(serverState.rooms)) {
   const ensureResult = activeRoomRuntime.ensureRoom(room)
 
@@ -4243,6 +4422,32 @@ for (const room of Object.values(serverState.rooms)) {
 
   persistRoomSnapshot(room)
 }
+
+// Ludo boot recovery (виж task spec §4 "BOOT RECOVERY") — извиква се ПРЕДИ
+// httpServer.listen() по-долу, затова никой client не може да е пристигнал
+// с ludo_game_state_request преди тази стъпка да е готова (mirror-нато на
+// Белот restore loop-а точно над тук). Waiting rooms НЕ се възстановяват
+// (виж task spec §9 — без debit, без риск, extends scope-а ненужно).
+const restoredLudoMatches = activeLudoMatchSnapshotStore.loadActiveMatches()
+for (const persisted of restoredLudoMatches) {
+  ludoMatchRuntime.restoreMatch(persisted)
+  // Crash window "finished snapshot persisted, restart ПРЕДИ payout" (виж
+  // task spec §7/§15) — settleLudoMatchIfNeeded е idempotent (ledger-guarded),
+  // safe да се извика безусловно тук дори payout-ът вече да е минал (crash
+  // window "payout committed, restart ПРЕДИ snapshot delete") — в ТОЗИ
+  // случай просто връща alreadyPaid резултата и пак chisti реда.
+  if (persisted.state.status === 'finished') {
+    const winnerPayout = settleLudoMatchIfNeeded(persisted)
+    if (winnerPayout !== null) {
+      try {
+        activeLudoMatchSnapshotStore.markMatchRemoved(persisted.matchId)
+      } catch (error) {
+        console.error(`[ludo-match-snapshot] failed to remove match=${persisted.matchId}`, error)
+      }
+    }
+  }
+}
+console.log(`[ludo-match-snapshot] restored active matches=${restoredLudoMatches.length}`)
 
 function getSocketByConnectionId(connectionId: ConnectionId): WebSocket | null {
   return socketRegistry.get(connectionId) ?? null
@@ -4958,6 +5163,56 @@ function sendSessionInGameIfNeeded(
     type: 'session_in_game',
     roomId: gameSession.roomId,
     reconnectToken: gameSession.reconnectToken,
+  })
+  return true
+}
+
+// Cross-game commitment guard (Ludo <-> Белот) — един profile може да бъде
+// участник само в ЕДНА game room / active match commitment наведнъж,
+// независимо от типа игра. findActiveBelotCommitment() покрива waiting
+// private-table (privateRoomsStore) и searching matchmaking queue
+// (matchmakingState.queueEntries). findActiveLudoCommitment() огледално
+// покрива waiting Ludo room (ludoRoomsStore) и active Ludo match
+// (ludoMatchRuntime). Съзнателно НЕ проверява tournament РЕГИСТРАЦИЯ
+// (tournament_entries) — тя не създава serverState.rooms запис преди мачът
+// реално да стартира, виж audit бележките в тикета.
+//
+// Активна Белот стая (findProfileInGameSession) НЕ участва в тези функции —
+// на всеки от 5-те call site-а по-долу sendSessionInGameIfNeeded() вече се
+// извиква ПРЕДИ тази проверка и връща early с session_in_game (роля:
+// "resume точно тази активна стая"), така че findActiveBelotCommitment()
+// никога не би стигнала до active-room case-а. Не го дублираме тук — виж
+// "ВАЖНО" бележката в task spec-а за UX подобрението: session_in_game си
+// остава единствения path за active Белот commitment.
+//
+// За надежден "Виж" client-side flow (виж CrossGameCommitmentLocation в
+// protocol/messageTypes.ts) връщаме structured location вместо булев флаг —
+// server-ът казва КЪДЕ е commitment-ът, client-ът само навигира.
+function findActiveLudoCommitment(profileId: string): CrossGameCommitmentLocation | null {
+  const match = ludoMatchRuntime.requestState(profileId)
+  if (match !== null) return { gameType: 'ludo', kind: 'active_match', matchId: match.matchId }
+  const room = ludoRoomsStore.getRoomByProfileId(profileId)
+  if (room !== null) return { gameType: 'ludo', kind: 'waiting_room', ludoRoomId: room.id }
+  return null
+}
+
+function findActiveBelotCommitment(profileId: string): CrossGameCommitmentLocation | null {
+  const room = privateRoomsStore.getRoomByProfileId(profileId)
+  if (room !== null) return { gameType: 'belot', kind: 'waiting_room', privateRoomId: room.id }
+  const entry = matchmakingState.queueEntries.find((item) => item.profileId === profileId)
+  if (entry !== undefined) return { gameType: 'belot', kind: 'matchmaking', stake: entry.stake }
+  return null
+}
+
+function sendCrossGameCommitmentBlockedIfNeeded(
+  connectionId: ConnectionId,
+  commitment: CrossGameCommitmentLocation | null,
+): boolean {
+  if (commitment === null) return false
+  safeSendToConnection(connectionId, {
+    type: 'cross_game_commitment_blocked',
+    message: 'Вече участвате в друга игра. Напуснете я, преди да започнете нова.',
+    location: commitment,
   })
   return true
 }
@@ -19592,6 +19847,10 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        if (sendCrossGameCommitmentBlockedIfNeeded(connection.id, findActiveLudoCommitment(profileId))) {
+          return
+        }
+
         // Round 4 брифа §9 — target с pending BAN/DELETE (отложен, докато е
         // довършвал предишна активна игра) не трябва да може да влезе в
         // НОВА игра, дори socket connection-ът му все още технически да е
@@ -20203,6 +20462,224 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      if (message.type === 'request_ludo_rooms_list') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId) {
+          const room = ludoRoomsStore.reconnectMember(connection.id, latestConnection.profileId)
+          if (room) safeSendToConnection(connection.id, { type: 'ludo_room_updated', room: buildLudoRoomSnapshot(room) })
+        }
+        safeSendToConnection(connection.id, {
+          type: 'ludo_rooms_list',
+          rooms: ludoRoomsStore.listRooms().map(buildLudoRoomSnapshot),
+        })
+        return
+      }
+
+      if (message.type === 'create_ludo_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) return
+        if (sendCrossGameCommitmentBlockedIfNeeded(connection.id, findActiveBelotCommitment(latestConnection.profileId))) return
+        if (ludoMatchRuntime.requestState(latestConnection.profileId)) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_action_rejected', message: 'Вече участваш в активна Ludo игра.' })
+          return
+        }
+        const profile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        if (!profile) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Профилът не беше намерен.' })
+          return
+        }
+        const eligibility = checkPrivateRoomStakeEligibility(latestConnection.profileId, profile.level, message.stake)
+        if (!eligibility.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: eligibility.message, code: eligibility.code })
+          return
+        }
+        const result = ludoRoomsStore.createRoom({
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl,
+          stake: message.stake,
+          playerCount: message.playerCount,
+          manualStart: message.manualStart,
+        })
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+        else safeSendToConnection(connection.id, { type: 'ludo_room_updated', room: buildLudoRoomSnapshot(result.room) })
+        return
+      }
+
+      if (message.type === 'join_ludo_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        // Огледално на create_ludo_room по-горе — преди тази поправка тук
+        // липсваше и active-room, и cross-game проверка (виж audit бележките
+        // в тикета за cross-game commitment guard-а).
+        if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) return
+        if (sendCrossGameCommitmentBlockedIfNeeded(connection.id, findActiveBelotCommitment(latestConnection.profileId))) return
+        if (ludoMatchRuntime.requestState(latestConnection.profileId)) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_action_rejected', message: 'Вече участваш в активна Ludo игра.' })
+          return
+        }
+        const profile = playerProgressStore.getPublicProfile(latestConnection.profileId)
+        const target = ludoRoomsStore.listRooms().find((room) => room.id === message.ludoRoomId)
+        if (!profile || !target) {
+          safeSendToConnection(connection.id, { type: 'error', message: 'Тази Ludo игра вече не е налична.' })
+          return
+        }
+        const eligibility = checkPrivateRoomStakeEligibility(latestConnection.profileId, profile.level, target.stake)
+        if (!eligibility.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: eligibility.message, code: eligibility.code })
+          return
+        }
+        const result = ludoRoomsStore.joinRoom({
+          roomId: message.ludoRoomId,
+          connectionId: connection.id,
+          profileId: latestConnection.profileId,
+          displayName: profile.displayName,
+          avatarUrl: profile.avatarUrl,
+        })
+        if (!result.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+          return
+        }
+        if (result.readyToStart) attemptLudoRoomStart(result.room.id)
+        else sendLudoRoomUpdate(result.room)
+        return
+      }
+
+      if (message.type === 'leave_ludo_room') {
+        const room = ludoRoomsStore.getRoomByConnectionId(connection.id)
+        const remaining = ludoRoomsStore.leaveRoom(connection.id)
+        safeSendToConnection(connection.id, { type: 'ludo_room_left', ludoRoomId: room?.id ?? '' })
+        if (remaining) sendLudoRoomUpdate(remaining)
+        return
+      }
+
+      if (message.type === 'kick_from_ludo_room') {
+        const result = ludoRoomsStore.kickMember(connection.id, message.profileId)
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+        return
+      }
+
+      if (message.type === 'start_ludo_room') {
+        const result = ludoRoomsStore.startRoom(connection.id)
+        if (!result.ok) {
+          safeSendToConnection(connection.id, { type: 'error', message: result.message, code: result.code })
+          return
+        }
+        attemptLudoRoomStart(result.room.id)
+        return
+      }
+
+      if (message.type === 'ludo_game_state_request') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) return
+        const snapshot = ludoMatchRuntime.reconnect(latestConnection.profileId, connection.id)
+        if (snapshot) {
+          safeSendToConnection(connection.id, {
+            type: 'ludo_game_state',
+            snapshot: toLudoGameProtocolSnapshot(snapshot),
+            walletBalance: ludoEconomyStore.getWalletBalance(latestConnection.profileId),
+            prizeAmount: null,
+          })
+        } else {
+          // Explicit canonical not-found (виж task spec §8) — преди тази
+          // промяна клиентът получаваше пълна тишина тук, ако нито runtime
+          // match, нито persisted snapshot съществуват за профила (напр.
+          // match-ът вече е finished+cleanup-нат, или профилът никога не е
+          // участвал). Idempotent end-game cleanup поведението (10s
+          // finishedCleanupTimer retention) остава напълно недокоснато —
+          // тази промяна засяга само какво получава клиентът, не кога/дали
+          // runtime-ът реално чисти match-а.
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            code: 'ludo_match_not_found',
+            message: 'Ludo играта не беше намерена.',
+          })
+        }
+        return
+      }
+
+      if (message.type === 'leave_ludo_match') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_participant', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        const result = ludoMatchRuntime.leave(message.matchId, latestConnection.profileId)
+        if (!result.ok) {
+          if (result.code === 'ludo_match_not_found') {
+            safeSendToConnection(connection.id, { type: 'ludo_match_left', matchId: message.matchId })
+            return
+          }
+          safeSendToConnection(connection.id, { type: 'error', code: result.code, message: result.message })
+          return
+        }
+        safeSendToConnection(connection.id, { type: 'ludo_match_left', matchId: message.matchId })
+        return
+      }
+
+      if (message.type === 'ludo_roll_request' || message.type === 'ludo_move_request' || message.type === 'ludo_reclaim_request') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_participant', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        const result = message.type === 'ludo_roll_request'
+          ? ludoMatchRuntime.roll(message.matchId, latestConnection.profileId, message.expectedRevision)
+          : message.type === 'ludo_move_request'
+            ? ludoMatchRuntime.move(message.matchId, latestConnection.profileId, message.expectedRevision, message.slot)
+            : ludoMatchRuntime.reclaim(message.matchId, latestConnection.profileId, message.expectedRevision)
+        if (!result.ok) safeSendToConnection(connection.id, { type: 'error', code: result.code, message: result.message })
+        return
+      }
+
+      if (message.type === 'send_ludo_emoji_reaction') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) return
+        // Realtime social reaction — transient presentation, не минава през
+        // reduceLudoGame/commit (виж task-а "Ludo emoji" §4/§9: не се
+        // персистира, не участва в canonical state/revision). requestState()
+        // resolve-ва match-а/roster-а/leftColors от ПРОФИЛА (profileToMatch),
+        // не от client-подадения matchId — matchId се cross-check-ва долу
+        // само defense-in-depth (огледално на roomId===message.roomId в
+        // Belot's send_emoji_reaction handler-а).
+        const snapshot = ludoMatchRuntime.requestState(latestConnection.profileId)
+        if (!snapshot || snapshot.matchId !== message.matchId || snapshot.state.status === 'finished') return
+        const sender = snapshot.players.find((player) => player.profileId === latestConnection.profileId)
+        // Explicit "Напуснал" (leftColors) играч не може да изпраща emoji в
+        // стария match (виж task-а §8) — display roster-ът го пази за
+        // ОСТАНАЛИТЕ (renderLudoPlayerPanel "Напуснал" статус), но самият
+        // напуснал профил вече няма активно участие в turn cycle-а, значи и
+        // не в social reactions-ите.
+        if (!sender || snapshot.state.leftColors.includes(sender.color)) return
+        const emojiMsg = {
+          type: 'ludo_emoji_reaction' as const,
+          matchId: snapshot.matchId,
+          color: sender.color,
+          emojiId: message.emojiId,
+        }
+        // Broadcast само до ОСТАНАЛИТЕ non-left участници в СЪЩИЯ match —
+        // огледално на onSnapshot broadcast loop-а по-горе (leftColors
+        // skip). Изпраща се и на самия sender (същия pattern като Belot's
+        // send_emoji_reaction — sender-ът вижда собствената си анимация
+        // само след server echo, не optimistic local render).
+        for (const player of snapshot.players) {
+          if (snapshot.state.leftColors.includes(player.color)) continue
+          const targetConnection = Object.values(serverState.connections).find(
+            (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
+          )
+          if (targetConnection) safeSendToConnection(targetConnection.id, emojiMsg)
+        }
+        return
+      }
+
       if (message.type === 'request_private_games_list') {
         safeSendToConnection(connection.id, buildPrivateGamesListMessage())
         return
@@ -20217,6 +20694,10 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) {
+          return
+        }
+
+        if (sendCrossGameCommitmentBlockedIfNeeded(connection.id, findActiveLudoCommitment(latestConnection.profileId))) {
           return
         }
 
@@ -20284,6 +20765,10 @@ wsServer.on('connection', (socket, request) => {
         }
 
         if (sendSessionInGameIfNeeded(connection.id, latestConnection.profileId)) {
+          return
+        }
+
+        if (sendCrossGameCommitmentBlockedIfNeeded(connection.id, findActiveLudoCommitment(latestConnection.profileId))) {
           return
         }
 
@@ -21713,6 +22198,8 @@ wsServer.on('connection', (socket, request) => {
 
       removeConnectionFromMatchmaking(connection.id)
       privateRoomsStore.removeConnection(connection.id)
+      ludoRoomsStore.removeConnection(connection.id)
+      if (connection.profileId) ludoMatchRuntime.disconnect(connection.profileId, connection.id)
 
       const result = handleDisconnect(serverState, connection.id)
       const disconnectState = result.serverState
@@ -22435,6 +22922,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   }
 
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
+  closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('authStore', () => authStore.close())
