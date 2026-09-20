@@ -614,12 +614,6 @@ export type LobbyScreenState = {
   /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
   isAdminOrSubadmin: boolean
   /**
-   * "Игри" nav item видимост (desktop и mobile) — admin/subadmin/chat_admin/
-   * top_chat_admin/pika_team. Само UX (виж canSeeGamesMenu в
-   * createLobbyFlowController.ts) — /games route-ът не е ограничен от това поле.
-   */
-  canSeeGamesMenu: boolean
-  /**
    * admin ИЛИ pika_team — единствено за показване на бутона "(×)" в
    * "Публикации от Pika.bg". НЕ дава достъп до нищо друго (виж isAdmin/
    * isAdminOrSubadmin по-горе за админските менюта) — сървърът презаверява
@@ -3143,7 +3137,6 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           <span class="lobby-nav-btn-label">Магазин</span>
         </button>
-        ${state.canSeeGamesMenu ? `
         <button type="button" data-lobby-nav-games="1" ${gamesActive ? 'data-active="1"' : ''} class="lobby-nav-btn lobby-nav-btn-icon-only" aria-label="Игри" data-tooltip="Игри" style="
           display:flex;align-items:center;justify-content:center;padding:0 18px;border:0;
           background:${gamesActive ? 'rgba(212,165,32,0.06)' : 'transparent'};
@@ -3157,7 +3150,6 @@ function renderNav(state: LobbyScreenState): string {
           </svg>
           <span class="lobby-nav-btn-label">Игри</span>
         </button>
-        ` : ''}
         ${state.profile.profileId !== null ? `
           <a href="/topics" data-lobby-nav-topics="1" ${topicsActive ? 'data-active="1"' : ''} class="lobby-nav-btn" style="
             position:relative;display:flex; align-items:center; gap:10px;
@@ -5066,7 +5058,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
           ">
             <button type="button" data-lobby-nav-lobby="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('lobby', 'Лоби')}</button>
             <button type="button" data-lobby-nav-shop="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('shop', 'Магазин')}</button>
-            ${state.canSeeGamesMenu ? `<button type="button" data-lobby-nav-games="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('games', 'Игри')}</button>` : ''}
+            <button type="button" data-lobby-nav-games="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('games', 'Игри')}</button>
             ${state.profile.profileId !== null ? `
               <button type="button" data-lobby-nav-topics="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('topics', 'Теми', topicsUnreadCount)}</button>
               <button type="button" data-lobby-nav-chat="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('chat', 'Чат', friendChatUnreadCount)}</button>
