@@ -38,6 +38,20 @@ export type LudoMatchFailure = {
   message: string
 }
 
+// Резултат от computeInitialMatchData — цвят assignment (2-player рандом
+// избор чрез randomTwoPlayerCreatorColor) + initial engine state, изчислени
+// ЧИСТО (без никаква мутация на runtime state). Изложено публично като
+// buildInitialMatch() (виж task spec §3 "КРИТИЧЕН START TRANSACTION") —
+// caller-ът (attemptLudoRoomStart.ts) го извиква ТОЧНО ВЕДНЪЖ ПРЕДИ atomic
+// debit транзакцията, персистира РЕЗУЛТАТА атомарно с debit-а, и подава
+// СЪЩИЯ обект обратно на createMatch() по-долу — гарантира, че персистираният
+// snapshot и реалният in-memory match виждат ЕДИН И СЪЩ (не два отделни
+// random) резултат от randomTwoPlayerCreatorColor()/initialStateFactory.
+export type LudoInitialMatchData = {
+  players: Array<Omit<LudoMatchPlayer, 'connectionId'>>
+  state: LudoGameState
+}
+
 type Match = Omit<LudoMatchSnapshot, 'serverNow' | 'players' | 'events' | 'botControlledColors'> & {
   players: LudoMatchPlayer[]
   lastEvents: readonly LudoEngineEvent[]
@@ -202,7 +216,11 @@ export function createLudoMatchRuntime(options: Options) {
     return { match, player }
   }
 
-  function createMatch(room: LudoRoom, matchId: string): LudoMatchSnapshot {
+  // Чисто изчисление (виж LudoInitialMatchData doc коментара по-горе) — НЕ
+  // мутира matches/profileToMatch, safe за извикване ПРЕДИ реалния match да
+  // бъде persisted/създаден (atomic-start transaction, виж task spec §3).
+  function computeInitialMatchData(room: LudoRoom, matchId: string): LudoInitialMatchData {
+    void matchId // резервирано за бъдещ per-match deterministic seeding, засега color assignment-ът не зависи от matchId
     const creatorColor = room.playerCount === 2 ? randomTwoPlayerCreatorColor() : null
     const assigned = room.players.map((player, index) => ({
       ...player,
@@ -215,6 +233,28 @@ export function createLudoMatchRuntime(options: Options) {
     const turnOrder = creatorColor === null
       ? CANONICAL_TURN_ORDER.filter((color) => assigned.some((player) => player.color === color))
       : [creatorColor, OPPOSITE_COLOR[creatorColor]]
+    const state = options.initialStateFactory?.(turnOrder) ?? createLudoAuthoritativeInitialState(turnOrder)
+    const players = assigned.map(({ connectionId: _connectionId, ...rest }) => rest)
+    return { players, state }
+  }
+
+  function createMatch(room: LudoRoom, matchId: string, precomputed?: LudoInitialMatchData): LudoMatchSnapshot {
+    // precomputed (виж task spec §3) идва от attemptLudoRoomStart.ts, вече
+    // извикало buildInitialMatch() ВЕДНЪЖ и persisted-нало резултата атомарно
+    // с debit-а — тук НЕ бива да се преизчислява (втори randomTwoPlayer-
+    // CreatorColor() call би дал ДРУГ цвят от persisted snapshot-а). Ако
+    // липсва (директен createMatch извикване без atomic-start — тестове/
+    // mock harness), fallback-ва към старото поведение — computeInitialMatchData
+    // тук за първи път.
+    const data = precomputed ?? computeInitialMatchData(room, matchId)
+    // room.players носи ЖИВИЯ connectionId (стаята е fresh/active) — цветът
+    // идва от data.players (precomputed или току-що computed), merge-нати по
+    // profileId. За restored matches (restoreMatch по-долу) няма room обект
+    // изобщо, затова тази merge логика е специфична за createMatch пътя.
+    const assigned: LudoMatchPlayer[] = room.players.map((roomPlayer) => {
+      const colorInfo = data.players.find((player) => player.profileId === roomPlayer.profileId)!
+      return { ...roomPlayer, color: colorInfo.color }
+    })
     const match: Match = {
       // matchId се генерира и предава ОТВЪН (attemptLudoRoomStart.ts) —
       // НЕ тук с randomUUID() — защото същият id вече служи като
@@ -223,7 +263,7 @@ export function createLudoMatchRuntime(options: Options) {
       // START"). Двата трябва да са СЪЩИЯТ id, иначе payoutLudoMatchWinner
       // не би намерил pot-а по-късно.
       matchId, ludoRoomId: room.id, stake: room.stake, revision: 0,
-      deadlineAt: null, players: assigned, state: options.initialStateFactory?.(turnOrder) ?? createLudoAuthoritativeInitialState(turnOrder),
+      deadlineAt: null, players: assigned, state: data.state,
       lastEvents: [], deadlineTimer: null, finishedCleanupTimer: null,
       botControlledColors: new Set(), pendingReclaims: new Set(),
     }
@@ -235,8 +275,69 @@ export function createLudoMatchRuntime(options: Options) {
     return initial
   }
 
+  // Boot recovery (виж task spec §4) — reconstruct-ва match-а от persisted
+  // snapshot без НИКАКВА нова randomness/debit (matchId/players/state/
+  // botControlledColors идват директно от DB-то). НЕ вика options.onSnapshot
+  // (тих boot-time insert — никой не е свързан още, а и не искаме излишен
+  // re-persist веднага след като точно това е бил load-натия ред). Timer
+  // rebase (виж task spec §6, mirror-нато Belot rebaseServerStateToEventAt
+  // semantics — ФРЕШ пълен timeout прозорец спрямо restore момента, НЕ
+  // "остатъчно време" replay): scheduleDeadline() винаги смята delay-а
+  // наново спрямо now() и текущата turnPhase/botControlled статус, никога от
+  // стар persisted deadlineAt — затова просто извикването ѝ тук вече дава
+  // точно исканото поведение, без допълнителна "remaining time" логика.
+  function restoreMatch(persisted: LudoMatchSnapshot): void {
+    if (matches.has(persisted.matchId)) return // defensive — не би трябвало да се случи (boot-only извикване, преди connections)
+    const players: LudoMatchPlayer[] = persisted.players.map((player) => ({
+      ...player,
+      // Никога не наследявай stale WebSocket connection id след restart (виж
+      // task spec §1/§5) — реалният production connection-id формат никога
+      // не е празен низ, затова е безопасен sentinel. reconnect()
+      // презаписва connectionId безусловно при следващия ludo_game_state_
+      // request от играча (виж reconnect() по-долу) — не сравнява със
+      // старата стойност, затова този sentinel никога не се използва за
+      // route-ване на съобщения.
+      connectionId: '',
+    }))
+    const match: Match = {
+      matchId: persisted.matchId,
+      ludoRoomId: persisted.ludoRoomId,
+      stake: persisted.stake,
+      revision: persisted.revision,
+      deadlineAt: null,
+      players,
+      state: persisted.state,
+      lastEvents: [],
+      deadlineTimer: null,
+      finishedCleanupTimer: null,
+      // Canonical bot/human ownership запазено ТОЧНО както е било persisted
+      // (виж task spec §5: "Ако seat е бил botControlled ПРЕДИ crash: запази
+      // това canonical състояние. Ако е бил human-controlled: не го
+      // превръщай произволно веднага в permanent bot") — pendingReclaims
+      // нарочно НЕ се персистира/възстановява: тесен presentation-timing
+      // флаг (виж декларацията му по-долу), безсмислен след restart, защото
+      // никое mid-flight bot действие не преживява process kill.
+      botControlledColors: new Set(persisted.botControlledColors),
+      pendingReclaims: new Set(),
+    }
+    matches.set(match.matchId, match)
+    // Виж task spec §9 "SERVER RESTART PERSISTENCE": explicit-forfeit-нал
+    // profile НЕ влиза в profileToMatch след restore — той вече освободи
+    // active membership-а си ПРЕДИ crash-а (виж leave()), restart-ът не
+    // бива да го "върне" обратно в commitment-а. Display roster (match.
+    // players, точно над тук) остава пълен независимо — display roster !=
+    // active membership, огледално на живия (non-restart) forfeit път.
+    players
+      .filter((player) => !persisted.state.leftColors.includes(player.color))
+      .forEach((player) => profileToMatch.set(player.profileId, match.matchId))
+    scheduleDeadline(match)
+    scheduleFinishedCleanup(match)
+  }
+
   return {
     createMatch,
+    buildInitialMatch: computeInitialMatchData,
+    restoreMatch,
     requestState(profileId: string): LudoMatchSnapshot | null {
       const matchId = profileToMatch.get(profileId)
       const match = matchId ? matches.get(matchId) : null
@@ -285,11 +386,23 @@ export function createLudoMatchRuntime(options: Options) {
       else publishOrchestrationChange(match, events)
       return { ok: true }
     },
-    leave(matchId: string, profileId: string): { ok: true; winnerColor: LudoColor } | LudoMatchFailure {
+    // Explicit "Изход" forfeit (виж task-а "Explicit Изход от STARTED
+    // match") — canonical за ВСЕКИ playerCount (вече НЕ 2-player-only,
+    // ludo_match_leave_unsupported за 4p е премахнат). Temporary disconnect/
+    // reconnect/reclaim (botControlledColors/pendingReclaims) остава
+    // СЪВСЕМ отделен lifecycle, недокоснат тук.
+    leave(matchId: string, profileId: string): { ok: true } | LudoMatchFailure {
       const match = matches.get(matchId)
       if (!match) return { ok: false, code: 'ludo_match_not_found', message: 'Ludo играта не беше намерена.' }
       const leavingPlayer = match.players.find((player) => player.profileId === profileId)
       if (!leavingPlayer) return { ok: false, code: 'ludo_match_not_participant', message: 'Не участваш в тази Ludo игра.' }
+
+      // Пост-финал acknowledgment (напр. end-game OK click) — напълно
+      // отделен от explicit-forfeit пътя долу: тук match-ът вече е
+      // 'finished' (естествен win ИЛИ по-ранен forfeit), играчът просто
+      // потвърждава изход от UI-а. match.players СЕ филтрира тук (за
+      // разлика от forfeit клона долу) — веднъж match-ът приключил и всички
+      // потвърдили, display roster вече не е нужен на никого.
       if (match.state.status === 'finished') {
         profileToMatch.delete(profileId)
         match.players = match.players.filter((player) => player.profileId !== profileId)
@@ -299,28 +412,50 @@ export function createLudoMatchRuntime(options: Options) {
           if (match.finishedCleanupTimer) clearTimeout(match.finishedCleanupTimer)
           matches.delete(matchId)
         }
-        return { ok: true, winnerColor: match.state.winnerColor! }
+        return { ok: true }
       }
-      if (match.players.length !== 2) {
-        return { ok: false, code: 'ludo_match_leave_unsupported', message: 'Напускането на започнала игра е налично само за игра с двама играчи.' }
+
+      // Идемпотентност — вече forfeit-нал (напр. duplicate leave_ludo_match
+      // network retry). Активното membership release-ване е безопасно да се
+      // повтори; НЕ bump-ваме revision/broadcast-ваме отново за нищо ново.
+      if (match.state.leftColors.includes(leavingPlayer.color)) {
+        profileToMatch.delete(profileId)
+        return { ok: true }
       }
-      const winner = match.players.find((player) => player.profileId !== profileId)!
+
+      // Canonical forfeit dispatch — pieces->home, leftColors, last-player-
+      // standing win check, turn-order skip: ВСИЧКО централизирано в
+      // ludoEngineReducer.ts::handlePlayerForfeited (валидно за 2 и 4
+      // playerCount еднакво), НЕ дублирано тук.
+      const result = reduceLudoGame(match.state, { type: 'PLAYER_FORFEITED', color: leavingPlayer.color })
+
+      // Release active membership/cross-game commitment ВЕДНАГА (виж task-а
+      // §10 "CROSS-GAME MEMBERSHIP") — НЕ филтрираме от match.players
+      // (display roster остава пълен за целия оставащ match, виж §3 "не
+      // премахвай визуално целия player panel" — "display roster != active
+      // membership"), само от profileToMatch (единственият source of truth
+      // за reconnect()/requestState()/cross-game commitment guard).
       profileToMatch.delete(profileId)
-      match.players = [winner]
       match.pendingReclaims.delete(leavingPlayer.color)
       match.botControlledColors.delete(leavingPlayer.color)
-      commit(match, {
-        ...match.state,
-        activeColor: winner.color,
-        turnPhase: 'turn_complete',
-        diceValue: null,
-        legalMoves: [],
-        status: 'finished',
-        winnerColor: winner.color,
-        turnVersion: match.state.turnVersion + 1,
-        pendingExtraRoll: false,
-      }, [])
-      return { ok: true, winnerColor: winner.color }
+
+      // commit() (не publishOrchestrationChange()) само когато turn/deadline
+      // семантиката реално се променя — активен цвят се смени (forfeit-налият
+      // беше на ход) ИЛИ match-ът приключи (last-player-standing). Иначе
+      // (inactive player напуска) НЕ ресетваме вече течащия countdown на
+      // текущия активен играч — публикуваме новия state (pieces->home,
+      // leftColors) без да пипаме deadline-а, огледално на disconnect()/
+      // reclaim()'s established commit-vs-publishOrchestrationChange избор.
+      const affectsActiveTurnOrDeadline =
+        result.state.activeColor !== match.state.activeColor || result.state.status === 'finished'
+      if (affectsActiveTurnOrDeadline) {
+        commit(match, result.state, result.events)
+      } else {
+        match.state = result.state
+        publishOrchestrationChange(match, result.events)
+      }
+
+      return { ok: true }
     },
     getMatch: (matchId: string) => matches.get(matchId),
     snapshotForMatch: (matchId: string, includeEvents = false) => {

@@ -6109,6 +6109,7 @@ lobby = createLobbyFlowController({
   onLudoRollRequest: (matchId, revision) => { client.requestLudoRoll(matchId, revision) },
   onLudoMoveRequest: (matchId, revision, slot) => { client.requestLudoMove(matchId, revision, slot) },
   onLudoReclaimRequest: (matchId, revision) => { client.requestLudoReclaim(matchId, revision) },
+  onLudoEmojiReactionSend: (matchId, emojiId) => { client.sendLudoEmojiReaction(matchId, emojiId) },
   onSupportMessagesLoad: () => loadSupportMessages(),
   onSupportSend: (body, imageDataUrl) => sendSupportMessage(body, imageDataUrl),
   onGuestContactSend: (input) => sendGuestContactMessage(input),
@@ -6893,11 +6894,15 @@ function navigateToCrossGameCommitment(location: CrossGameCommitmentLocation): v
       // по profileId — не създава нова.
       lobby.goToLudoLobby()
     } else {
-      // Огледално на автоматичния on-'connected' restore (виж
-      // handleServerMessage's 'connected' case -> onLudoGameStateOpen) —
-      // request-ва authoritative snapshot-а за активния match и
-      // openLudoGameOverlay() го отваря, откъдето и да е викнато.
-      client.requestLudoGameState()
+      // Explicit restore заявка (виж task-а "ludo_match_not_found lifecycle
+      // UX bug") — lobby.requestLudoMatchRestore() (не directно client.
+      // requestLudoGameState()) маркира тази заявка като "expected active
+      // match", за да остане meaningful error handling ако match-ът реално
+      // липсва по неочаквана причина, докато тихите background проби
+      // (connect-time/visibility-resync) никога не показват грешка.
+      // openLudoGameOverlay() отваря overlay-я при успешен отговор,
+      // откъдето и да е викнато.
+      lobby.requestLudoMatchRestore()
     }
     return
   }
@@ -7856,6 +7861,7 @@ function getPwaSafetyState(): PwaUpdateSafetyState {
     isInPrivateRoomsScreen: pwaSnapshot.isInPrivateRoomsScreen,
     isConnected: pwaSnapshot.isConnected,
     isReconnecting: pwaIsReconnectingActiveRoom,
+    hasActiveLudoMatch: pwaSnapshot.hasActiveLudoMatch,
   }
 }
 

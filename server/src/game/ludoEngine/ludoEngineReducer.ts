@@ -17,7 +17,7 @@ import { applyLudoEngineCaptureToHome, findLudoEngineCaptureVictims } from './lu
 import type { LudoEngineAction } from './ludoEngineActions.js'
 import type { LudoEngineEvent } from './ludoEngineEvents.js'
 import { ludoGamePieceId } from './ludoEngineTypes.js'
-import type { LudoGamePiece, LudoGameState } from './ludoEngineTypes.js'
+import type { LudoColor, LudoGamePiece, LudoGameState } from './ludoEngineTypes.js'
 import { isLudoColorFinished } from './ludoEngineWinner.js'
 
 export interface LudoReduceResult {
@@ -35,6 +35,23 @@ function isActionAuthorized(state: LudoGameState, action: { color: string; expec
   return true
 }
 
+// Cyклиране по turnOrder, прескачайки leftColors (виж task-а "Explicit
+// Изход" §7 TURN ORDER) — единствената точка, която решава "кой е следващият
+// активен цвят", reuse-ната и от handleTurnAdvanced (нормален turn cycle) и
+// от handlePlayerForfeited (active player forfeit-ва по средата на своя
+// turn). turnOrder остава canonical/непроменен исторически ред; leftColors е
+// единственият source of truth за "кой вече не участва". Defensive fallback
+// (връща fromColor) е структурно unreachable — handlePlayerForfeited вече
+// финиширва match-а, преди да остане само 1 non-left цвят, затова тук винаги
+// има поне още един non-left кандидат за намиране.
+function findNextActiveColor(turnOrder: readonly LudoColor[], fromColor: LudoColor, leftColors: readonly LudoColor[]): LudoColor {
+  for (let step = 1; step <= turnOrder.length; step += 1) {
+    const candidate = turnOrder[(turnOrder.indexOf(fromColor) + step) % turnOrder.length]!
+    if (!leftColors.includes(candidate)) return candidate
+  }
+  return fromColor
+}
+
 export function reduceLudoGame(state: LudoGameState, action: LudoEngineAction): LudoReduceResult {
   if (state.status === 'finished') return rejected(state)
   switch (action.type) {
@@ -46,6 +63,8 @@ export function reduceLudoGame(state: LudoGameState, action: LudoEngineAction): 
       return handleMoveRequested(state, action)
     case 'TURN_ADVANCED':
       return handleTurnAdvanced(state, action)
+    case 'PLAYER_FORFEITED':
+      return handlePlayerForfeited(state, action)
   }
 }
 
@@ -196,8 +215,7 @@ function handleTurnAdvanced(
     }
   }
 
-  const currentIndex = state.turnOrder.indexOf(state.activeColor)
-  const nextColor = state.turnOrder[(currentIndex + 1) % state.turnOrder.length]!
+  const nextColor = findNextActiveColor(state.turnOrder, state.activeColor, state.leftColors)
 
   const nextState: LudoGameState = {
     ...state,
@@ -213,4 +231,85 @@ function handleTurnAdvanced(
     state: nextState,
     events: [{ type: 'turn_advanced', previousColor: state.activeColor, nextColor }],
   }
+}
+
+// Explicit "Изход" forfeit (виж task-а). За разлика от всички други handle*
+// функции, НЕ минава през isActionAuthorized — валиден е за произволен
+// participant color, независимо дали в момента е активен. Guard-ове:
+//   - action.color трябва да е реален участник (turnOrder.includes) —
+//     защита срещу невалиден color от caller-ски bug, не realistic runtime
+//     път (runtime слоят вече валидира срещу match.players);
+//   - вече forfeit-нал цвят -> rejected (idempotency, огледално на
+//     ludoEconomyStore.ts-ката ledger идемпотентност).
+// Sequence: 1) всички non-home пионки на цвета се прибират в home (canonical
+// "извън активната игра" state — никога повече legal move target, виж
+// computeLudoEngineLegalMoves: само activeColor получава ходове, а forfeit-
+// нал цвят никога повече не става activeColor); 2) added to leftColors;
+// 3) last-player-standing check (точно 1 non-left цвят измежду turnOrder
+// остава) -> match завършва, ТОЗИ цвят е winnerColor; 4) иначе, ако
+// forfeit-налият цвят Е бил activeColor -> веднага (в СЪЩАТА транзакция,
+// не чака отделен TURN_ADVANCED) преминава към следващия non-left цвят,
+// нулирайки turn-phase state-а (diceValue/legalMoves/pendingExtraRoll) —
+// не оставя "stuck" ход върху вече напуснал цвят.
+function handlePlayerForfeited(
+  state: LudoGameState,
+  action: Extract<LudoEngineAction, { type: 'PLAYER_FORFEITED' }>,
+): LudoReduceResult {
+  if (!state.turnOrder.includes(action.color)) return rejected(state)
+  if (state.leftColors.includes(action.color)) return rejected(state)
+
+  const collectedPieceIds = state.pieces
+    .filter((piece) => piece.color === action.color && piece.position.kind !== 'home')
+    .map((piece) => ludoGamePieceId(piece))
+
+  const nextPieces: LudoGamePiece[] = state.pieces.map((piece) =>
+    piece.color === action.color && piece.position.kind !== 'home'
+      ? { ...piece, position: { kind: 'home', slot: piece.slot } }
+      : piece,
+  )
+
+  const nextLeftColors = [...state.leftColors, action.color]
+  const remainingColors = state.turnOrder.filter((color) => !nextLeftColors.includes(color))
+  const events: LudoEngineEvent[] = [{ type: 'player_forfeited', color: action.color, collectedPieceIds }]
+
+  if (remainingColors.length === 1) {
+    const winner = remainingColors[0]!
+    const nextState: LudoGameState = {
+      ...state,
+      pieces: nextPieces,
+      leftColors: nextLeftColors,
+      activeColor: winner,
+      turnPhase: 'turn_complete',
+      diceValue: null,
+      legalMoves: [],
+      pendingExtraRoll: false,
+      status: 'finished',
+      winnerColor: winner,
+      turnVersion: state.turnVersion + 1,
+    }
+    return { state: nextState, events }
+  }
+
+  const wasActiveColor = state.activeColor === action.color
+  const nextActiveColor = wasActiveColor
+    ? findNextActiveColor(state.turnOrder, action.color, nextLeftColors)
+    : state.activeColor
+
+  if (wasActiveColor) {
+    events.push({ type: 'turn_advanced', previousColor: action.color, nextColor: nextActiveColor })
+  }
+
+  const nextState: LudoGameState = {
+    ...state,
+    pieces: nextPieces,
+    leftColors: nextLeftColors,
+    activeColor: nextActiveColor,
+    turnPhase: wasActiveColor ? 'waiting_for_roll' : state.turnPhase,
+    diceValue: wasActiveColor ? null : state.diceValue,
+    legalMoves: wasActiveColor ? [] : state.legalMoves,
+    pendingExtraRoll: wasActiveColor ? false : state.pendingExtraRoll,
+    turnVersion: state.turnVersion + 1,
+  }
+
+  return { state: nextState, events }
 }

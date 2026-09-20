@@ -19,6 +19,15 @@ export type PwaUpdateSafetyState = {
   isInPrivateRoomsScreen: boolean
   isConnected: boolean
   isReconnecting: boolean
+  // Ludo паралел на hasActiveRoom — виж audit findings-а: Белот-овото
+  // hasActiveRoom() е Белот-специфичен модул (createActiveRoomFlowController.ts),
+  // не знае нищо за Ludo-вия _ludoController. Source of truth: реалното
+  // съществуване на active gameplay controller-а (main.ts::getPwaSafetyState,
+  // прокарано от createLobbyFlowController.ts::getPwaUpdateSafetySnapshot),
+  // НЕ URL/currentScreen — остава true докато end-game popup-ът стои отворен
+  // (controller-ът се destroy-ва едва при OK/Exit), и false само докато
+  // потребителят разглежда /games/ludo лобито БЕЗ активен match.
+  hasActiveLudoMatch: boolean
 }
 
 export type PwaApplyFn = () => void | Promise<void>
@@ -43,6 +52,7 @@ export function setPendingPwaUpdate(applyFn: PwaApplyFn): void {
 function isSafeToApply(state: PwaUpdateSafetyState): boolean {
   if (!state.bootstrapComplete) return false
   if (state.hasActiveRoom) return false
+  if (state.hasActiveLudoMatch) return false
   if (state.isSearching) return false
   if (state.hasPrivateRoomInvite) return false
   if (state.hasQueuedPrivateRoomInvites) return false

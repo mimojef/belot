@@ -98,6 +98,7 @@ type SafetyState = {
   isInPrivateRoomsScreen: boolean
   isConnected: boolean
   isReconnecting: boolean
+  hasActiveLudoMatch: boolean
 }
 
 function safeState(overrides: Partial<SafetyState> = {}): SafetyState {
@@ -110,6 +111,7 @@ function safeState(overrides: Partial<SafetyState> = {}): SafetyState {
     isInPrivateRoomsScreen: false,
     isConnected: true,
     isReconnecting: false,
+    hasActiveLudoMatch: false,
     ...overrides,
   }
 }
@@ -211,6 +213,64 @@ await check('[A7] returning to a safe lobby state applies the pending update', a
   assert(applyCalls === 0, 'precondition: unsafe state should not apply')
   await tryApplyPendingPwaUpdate(() => safeState(), 'build-1')
   assert(applyCalls === 1, 'apply should run once the state becomes safe')
+})
+
+// ─── Ludo restart/update safety task, §16 "PWA UPDATE TEST" ─────────────────
+// Same shipped tryApplyPendingPwaUpdate()/isSafeToApply() path as A1-A7
+// above — exercises the REAL production decision function, only the input
+// state differs (hasActiveLudoMatch instead of hasActiveRoom).
+
+await check('[A13-ludo] active Ludo match (A) → update stays pending, updateSW(true) not called', async () => {
+  resetAll()
+  let applyCalls = 0
+  setPendingPwaUpdate(() => { applyCalls++ })
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveLudoMatch: true }), 'build-1')
+  assert(applyCalls === 0, 'apply must not be called while an active Ludo match/gameplay controller exists')
+  assert(hasPendingPwaUpdate(), 'update should remain pending')
+})
+
+await check('[A14-ludo] match finished but end-game popup still open (B) → still hasActiveLudoMatch=true → still blocked', async () => {
+  // The end-game popup keeps _ludoController alive until OK/Exit (see
+  // createLobbyFlowController.ts::onGameEndAcknowledged / closeLudoGameOverlay)
+  // — from this module's point of view that is INDISTINGUISHABLE from an
+  // in-progress match: both present as hasActiveLudoMatch:true. This test
+  // proves the gate does not special-case "finished" — it only cares
+  // whether the controller still exists.
+  resetAll()
+  let applyCalls = 0
+  setPendingPwaUpdate(() => { applyCalls++ })
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveLudoMatch: true }), 'build-1')
+  assert(applyCalls === 0, 'apply must stay blocked while the end-game popup (still hasActiveLudoMatch=true) is showing')
+})
+
+await check('[A15-ludo] player dismisses end-game popup (OK/Exit) → hasActiveLudoMatch=false → pending update applies exactly once', async () => {
+  resetAll()
+  let applyCalls = 0
+  setPendingPwaUpdate(() => { applyCalls++ })
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveLudoMatch: true }), 'build-1')
+  assert(applyCalls === 0, 'precondition: must still be blocked while the match/popup is active')
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveLudoMatch: false }), 'build-1')
+  assert(applyCalls === 1, 'apply should run exactly once after the controller is destroyed (OK/Exit)')
+})
+
+await check('[A16-ludo] idle /games/ludo lobby (no active match) → does NOT block an update', async () => {
+  // Explicit "not determined by URL" proof — the caller only ever sets
+  // hasActiveLudoMatch from _ludoController !== null (createLobbyFlowController.ts),
+  // never from state.currentScreen; simulating "on the ludo lobby page, no
+  // match" is exactly hasActiveLudoMatch:false, same as any other idle page.
+  resetAll()
+  let applyCalls = 0
+  setPendingPwaUpdate(() => { applyCalls++ })
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveLudoMatch: false }), 'build-1')
+  assert(applyCalls === 1, 'browsing the Ludo lobby with no active match must not block an update')
+})
+
+await check('[A17-ludo] active Ludo match AND active Белот room simultaneously → still blocked (either gate alone is sufficient)', async () => {
+  resetAll()
+  let applyCalls = 0
+  setPendingPwaUpdate(() => { applyCalls++ })
+  await tryApplyPendingPwaUpdate(() => safeState({ hasActiveLudoMatch: true, hasActiveRoom: true }), 'build-1')
+  assert(applyCalls === 0, 'either gate being true must block the update')
 })
 
 await check('[A8] concurrent coordinator calls result in exactly one updateSW call', async () => {
@@ -406,6 +466,28 @@ await check('[B7] safety snapshot reads privateRoomInvite, privateRoomInviteQueu
   assert(controllerSrc.includes("state.currentScreen === 'private-rooms'"), 'must check private-rooms screen')
   assert(controllerSrc.includes('state.isSearching'), 'must check isSearching')
   assert(controllerSrc.includes('state.isConnected'), 'must check isConnected')
+})
+
+await check('[B7-ludo] coordinator checks hasActiveLudoMatch as its own independent gate', () => {
+  assert(coordinatorSrc.includes('state.hasActiveLudoMatch'), 'isSafeToApply must check state.hasActiveLudoMatch')
+})
+
+await check('[B7-ludo2] Ludo safety source-of-truth is the gameplay controller, not the URL/currentScreen', () => {
+  assert(
+    controllerSrc.includes('hasActiveLudoMatch: _ludoController !== null'),
+    'getPwaUpdateSafetySnapshot must derive hasActiveLudoMatch from _ludoController !== null, not from state.currentScreen',
+  )
+  assert(
+    !/hasActiveLudoMatch:\s*state\.currentScreen/.test(controllerSrc),
+    'hasActiveLudoMatch must not be derived from the current screen/URL',
+  )
+})
+
+await check('[B7-ludo3] main.ts threads hasActiveLudoMatch from the lobby snapshot into the coordinator state', () => {
+  assert(
+    mainSrc.includes('hasActiveLudoMatch: pwaSnapshot.hasActiveLudoMatch'),
+    'getPwaSafetyState() must forward pwaSnapshot.hasActiveLudoMatch',
+  )
 })
 
 await check('[B8] vite.config.ts injects a build-ID define, not scriptURL-based', () => {

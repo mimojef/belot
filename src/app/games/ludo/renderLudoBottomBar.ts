@@ -1,8 +1,22 @@
-// Постоянна долна контролна зона — Изход / Емоджита / Фрази. Работи еднакво
-// на desktop и mobile (виж двата референта); засега бутоните отварят
-// mock popup-и без реална логика.
+// Постоянна долна контролна зона — Изход / Емоджита. Работи еднакво на
+// desktop и mobile. Емоджитата reuse-ват реалния Belot animated-emoji
+// каталог/asset URL-и (виж src/app/animatedEmoji/animatedEmojiAssets.ts) —
+// същият picker UX (grid от preview изображения) като активна игра Белот
+// (createActiveRoomFlowController.ts::renderEmojiPickerHtml), само
+// позиционирането/grid колоните са адаптирани към Ludo bottom bar-а
+// (Ludo няма Белотовия "stage scale" concept). "Фрази" бутонът е премахнат
+// изцяло — Ludo няма измислени игрови фрази.
+//
+// "Емоджита" triggер-ът е ЧИСТО изображение (preview-emoji-08.png), не
+// стандартен бутон с рамка/фон/надпис (виж task-а — button-frame styling-ът
+// изрично премахнат) — самото <img> Е click target-ът (data-ludo-emoji-
+// button="1" остава недокоснат, wiring-ът в createLudoFlowController.ts не
+// е пипан). Лек hover/active scale (виж ludoAnimationStyles.ts) вместо
+// bottomBarButtonStyle()-овия gold background hover, който другите bottom
+// bar бутони пазят.
 
-import { LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX } from './ludoLayerHierarchy'
+import { getAnimatedEmojiPreviewUrl, ANIMATED_EMOJI_COUNT } from '../../animatedEmoji/animatedEmojiAssets'
+import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 
 export function renderLudoBottomBar(): string {
   return `
@@ -25,14 +39,18 @@ export function renderLudoBottomBar(): string {
 
       <div style="flex:1;"></div>
 
-      <button type="button" data-ludo-bottom-bar-button="1" data-ludo-emoji-button="1" style="${bottomBarButtonStyle()}">
-        <span style="font-size:18px;">&#128512;</span>
-        <span>Емоджита</span>
-      </button>
-
-      <button type="button" data-ludo-bottom-bar-button="1" data-ludo-phrase-button="1" style="${bottomBarButtonStyle()}">
-        <span style="font-size:18px;">&#128172;</span>
-        <span>Фрази</span>
+      <button type="button" data-ludo-emoji-button="1" data-ludo-emoji-image-button="1" style="
+        width:44px; height:44px; flex-shrink:0;
+        border:0; outline:0; background:transparent; padding:0; margin:0;
+        cursor:pointer;
+        display:flex; align-items:center; justify-content:center;
+        -webkit-tap-highlight-color:transparent;
+      ">
+        <img
+          src="${getAnimatedEmojiPreviewUrl('08')}"
+          alt="Емоджита"
+          style="width:100%; height:100%; object-fit:contain; display:block; pointer-events:none;"
+        >
       </button>
     </div>
   `
@@ -53,47 +71,63 @@ function bottomBarButtonStyle(): string {
   `.replace(/\s+/g, ' ').trim()
 }
 
-// Mock popup за "Емоджита"/"Фрази" — минимален placeholder, консистентен с
-// popup стила в лобито (тъмна card + gold border), без реална мрежова
-// логика или споделено съдържание.
-export function renderLudoMockPopup(title: string, items: string[]): string {
-  const rows = items.map((item) => `
-    <button type="button" data-ludo-mock-popup-item="1" style="
-      padding:10px 14px;
-      background:rgba(255,255,255,0.04);
-      border:1px solid rgba(212,165,32,0.25);
-      border-radius:8px;
-      color:#fff; font-size:14px; text-align:left;
-      cursor:pointer;
-    ">${item}</button>
-  `).join('')
-
+// Реалният emoji picker — reuse-ва СЪЩИЯ animated-emoji каталог/preview
+// asset URL-и като активна игра Белот (getAnimatedEmojiPreviewUrl), СЪЩИЯ
+// "01".."NN" zero-padded id scheme (ANIMATED_EMOJI_COUNT), огледално на
+// createActiveRoomFlowController.ts::renderEmojiPickerHtml. НЕ full-screen
+// backdrop (за разлика от старите mock popup-и/exit-confirm) — лек floating
+// panel до бутона, не блокира dice/board кликове извън себе си (виж
+// wireEvents()/mountEmojiPicker() в createLudoFlowController.ts, които
+// explicit НЕ минават през syncModalLayerInteractivity() за тази цел).
+export function renderLudoEmojiPickerHtml(): string {
+  const isPhoneLayout = isPhoneLayoutViewport()
+  const columns = isPhoneLayout ? 4 : 6
+  const buttons: string[] = []
+  for (let i = 1; i <= ANIMATED_EMOJI_COUNT; i++) {
+    const id = String(i).padStart(2, '0')
+    buttons.push(`
+      <button
+        type="button"
+        data-ludo-emoji-pick="${id}"
+        style="
+          width:48px;height:48px;border:0;background:transparent;cursor:pointer;
+          border-radius:10px;padding:2px;
+          display:flex;align-items:center;justify-content:center;
+          transition:background 0.12s;
+        "
+        onmouseenter="this.style.background='rgba(255,255,255,0.15)'"
+        onmouseleave="this.style.background='transparent'"
+      >
+        <img src="${getAnimatedEmojiPreviewUrl(id)}" alt="" style="width:40px;height:40px;object-fit:contain;">
+      </button>
+    `)
+  }
   return `
-    <div data-ludo-mock-popup-backdrop="1" style="
-      position:fixed; inset:0;
-      background:rgba(0,0,0,0.6);
-      display:flex; align-items:flex-end; justify-content:center;
-      z-index:${LUDO_MODAL_BACKDROP_LOCAL_Z_INDEX};
-    ">
-      <div style="
-        width:min(420px, 100%);
-        max-height:70vh;
+    <div
+      data-ludo-emoji-picker="1"
+      style="
+        position:fixed;
+        bottom:76px;
+        right:max(14px, env(safe-area-inset-right));
+        max-height:min(60vh, 360px);
+        z-index:1;
+        background:rgba(20,20,24,0.96);
+        border:1px solid rgba(255,255,255,0.12);
+        border-radius:16px;
+        padding:12px;
+        box-shadow:0 8px 32px rgba(0,0,0,0.5);
+        -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);
         overflow-y:auto;
-        background:#12161d;
-        border:1px solid rgba(212,165,32,0.4);
-        border-radius:16px 16px 0 0;
-        padding:16px;
         box-sizing:border-box;
+      "
+    >
+      <div style="
+        display:grid;
+        grid-template-columns:repeat(${columns}, 48px);
+        gap:4px;
+        justify-content:center;
       ">
-        <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:12px;">
-          <span style="font-size:16px; font-weight:800; color:#d4a520;">${title}</span>
-          <button type="button" data-ludo-mock-popup-close="1" style="
-            background:none; border:none; color:rgba(255,255,255,0.6); font-size:18px; cursor:pointer;
-          ">&times;</button>
-        </div>
-        <div style="display:grid; grid-template-columns:repeat(2, 1fr); gap:8px;">
-          ${rows}
-        </div>
+        ${buttons.join('')}
       </div>
     </div>
   `

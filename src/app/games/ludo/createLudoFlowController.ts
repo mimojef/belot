@@ -33,11 +33,13 @@
 // authoritative production transitions arrive through applyAuthoritativeSnapshot().
 
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
-import { renderLudoGameScreen, applyLudoBoardContent, type LudoGameScreenState } from './renderLudoGameScreen'
-import { renderLudoMockPopup } from './renderLudoBottomBar'
+import { renderLudoGameScreen, applyLudoBoardContent, computeLudoDesktopPanelScale, type LudoGameScreenState } from './renderLudoGameScreen'
+import { renderLudoEmojiPickerHtml } from './renderLudoBottomBar'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
 import { renderLudoGameEndPopup } from './renderLudoGameEndPopup'
 import { renderLudoExitConfirmPopup } from './renderLudoExitConfirmPopup'
+import { isValidAnimatedEmojiId } from '../../animatedEmoji/animatedEmojiAssets'
+import { LUDO_EMOJI_BUBBLE_TOTAL_MS } from './pieces/renderLudoPlayerPanel'
 import { LUDO_MODAL_LAYER_Z_INDEX } from './ludoLayerHierarchy'
 import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
@@ -62,7 +64,7 @@ import {
   ludoEnginePositionToCellId,
   ludoUiPieceIdToSlot,
 } from './engine/ludoEngineAdapter'
-import type { LudoGameState, LudoPieceSlot } from './engine/ludoEngineTypes'
+import type { LudoGameState, LudoPieceSlot, LudoTurnPhase } from './engine/ludoEngineTypes'
 import type { LudoEngineAction } from './engine/ludoEngineActions'
 import {
   createLudoOrchestratorInitialState,
@@ -82,9 +84,6 @@ import type { LudoGameStateSnapshot } from '../../network/createGameServerClient
 
 const IMPACT_ANIMATION_MS = 450
 
-const EMOJI_MOCK_ITEMS = ['😀', '😂', '😮', '😢', '😡', '👍', '👏', '🎉']
-const PHRASE_MOCK_ITEMS = ['Браво!', 'Добър ход!', 'Late удар!', 'Хайде пак!', 'Извинявай!', 'Дай шест!']
-
 export interface LudoFlowControllerOptions {
   root: HTMLElement
   onExit: (matchId?: string) => void
@@ -97,6 +96,11 @@ export interface LudoFlowControllerOptions {
     onMoveRequest: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
     onReclaimRequest: (matchId: string, expectedRevision: number) => void
     onStateRefreshRequest?: () => void
+    // Realtime social reaction (виж task-а "Ludo emoji") — само за
+    // authoritative multiplayer match-ове, огледално на onRollRequest/
+    // onMoveRequest wiring-а. Не съществува в non-authoritative (dev
+    // harness) режим — emoji picker-ът остава скрит там (виж wireEvents()).
+    onEmojiReactionSend?: (matchId: string, emojiId: string) => void
   }
   // Test/dev seeding seam (Phase 3B browser verification, виж task-а т.21:
   // "temporary seeded/dev harness ако е нужно, не променяй permanently
@@ -139,6 +143,33 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let presentationEpoch = 0
   let awaitingVisibilityResync = false
 
+  // PRESENTATION GATE (виж task-а "opponent avatar swaps to dice control
+  // while pawn still animating"): server-ят auto-advance-ва turn-а В РАМКИТЕ
+  // на СЪЩИЯ commit като move-а (server ludoMatchRuntime.ts::applyMove ->
+  // advanceCompletedTurn, синхронно, преди commit()) — снапшотът, който носи
+  // piece_moved event-а, вече носи СЛЕДВАЩИЯ activeColor/turnPhase. Canonical
+  // engineState/authoritativeRevision се ъпдейтват веднага, точно както
+  // преди (НИКАКВО забавяне/подправяне на server state) — гейтът е ЧИСТО
+  // presentation слой: докато е non-null, currentScreenState() показва ТОЗИ
+  // замразен (pre-move) turn snapshot вместо да чете engineState/turnStartedAt
+  // директно, за да не "прескочи" следващия играч avatar->dice swap +
+  // countdown UI преди движещата се пионка реално да стъпи на последното си
+  // поле. Отваря се в presentAuthoritativeMove (веднага преди engineState да
+  // се презапише), затваря се СЛЕД финалния landing render (route overlay
+  // resolved) — capture impact/flight продължава да тече след release-а
+  // (различен visual слой, board-level, не player панела). Reset-ва се и в
+  // invalidateAuthoritativePresentations() (foreground snap/epoch
+  // invalidation) — same established pattern като isAnimatingMove/
+  // movingPieceSuppressedId/captureVictimOverrides там, за да не остане stale
+  // "замразен" гейт отворен след прекъснат presentation queue.
+  let presentationGateSnapshot: {
+    activeColor: LudoColor
+    turnPhase: LudoTurnPhase
+    turnStartedAt: number
+    turnCountdownMs: number
+    isHumanCountdownActive: boolean
+  } | null = null
+
   // Orchestrator state (т.2: PRESENTATION/ORCHESTRATION) — bot-controlled
   // flag-ове + roll/move deadlines. Мутира се ИЗКЛЮЧИТЕЛНО чрез
   // computeLudoDeadlineStateForPhase/markLudoColorBotControlled (pure
@@ -156,7 +187,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let isDiceRolling = false
   let isAnimatingMove = false
   let isDestroyed = false
-  let activePopup: 'emoji' | 'phrase' | null = null
+  let isEmojiPickerOpen = false
   let hasPresentedGameEnd = false
   let isGameEndPopupOpen = false
   let isExitConfirmOpen = false
@@ -171,7 +202,13 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // за времетраенето на анимацията override-ваме САМО нейната cell в
   // adapted UI pieces масива — presentation frame, никога записан обратно
   // в engineState. null означава "няма активна route анимация в момента".
-  let movingPieceSuppressedId: LudoPieceId | null = null
+  // Множествено число (Set, не единична стойност) — виж task-а "Explicit
+  // Изход" §2.1: до 4 пионки на forfeit-налия цвят могат да летят ЕДНОВРЕМЕННО
+  // (Promise.all), затова единичен movingPieceSuppressedId вече не стига.
+  // Move presentation-ът продължава да добавя/маха точно ЕДНА piece id тук —
+  // множественото API е строг superset, поведението му за 1 елемент е
+  // идентично на преди.
+  const suppressedPieceIds = new Set<LudoPieceId>()
   let activeMoveOverlayCancel: (() => void) | null = null
   // Capture presentation buffer (виж task-а): dispatch(MOVE_REQUESTED) връща
   // МОМЕНТАЛНО final canonical state — captured victims вече са в home-а си
@@ -224,6 +261,56 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // анимация), guard-ната там explicit с turnPhase==='waiting_for_roll', за
   // да не прекъсне bot's roll->move sequence по средата (виж т.4).
   let pendingHumanReclaimColor: LudoColor | null = null
+  // Explicit "Изход" forfeit presentation (виж task-а §2/§4/§8) — чисто
+  // presentation-only, transient. Показва "Излезе от играта" (мигащо) за
+  // ТОЧНО този цвят за 5 секунди, СЛЕД което автоматично се reset-ва (панелът
+  // пада обратно на постоянното "Напуснал", четено директно от
+  // engineState.leftColors — canonical, не transient). НЕ подава се при
+  // foreground snap/reconnect за исторически leave (виж §8 — snapToAuthoritative-
+  // Snapshot никога не пипа тези две полета, само applyAuthoritativeTransition
+  // за LIVE, only-just-observed forfeit събития).
+  let justLeftColor: LudoColor | null = null
+  let justLeftColorTimer: ReturnType<typeof setTimeout> | null = null
+  function clearJustLeftColorTimer(): void {
+    if (justLeftColorTimer) clearTimeout(justLeftColorTimer)
+    justLeftColorTimer = null
+  }
+
+  // Realtime emoji reaction bubbles (виж task-а "Ludo emoji" §7/§9) —
+  // ЧИСТО presentation, никога не участва в engineState/snapshot. Reuse-ва
+  // СЪЩИЯ pattern като Belot's emojiReactionUiState/addEmojiBubble
+  // (createActiveRoomFlowController.ts): ЕДНА активна bubble на цвят —
+  // ново emoji от СЪЩИЯ цвят докато старата още се показва REPLACE-ва я
+  // (не queue/accumulate), отменяйки pending cleanup timer-а на старата,
+  // адаптирано към color вместо seat. startedAt е Date.now() (Ludo
+  // convention, виж turnStartedAt по-горе), не performance.now() (Belot) —
+  // само вътрешна elapsed-time аритметика, часовникът не се сравнява cross-
+  // process. render() е full innerHTML replace (виж render() по-долу),
+  // затова презентацията (renderLudoPlayerPanel) използва СЪЩИЯ negative
+  // animation-delay trick като countdown bar-а, за да не рестартира
+  // анимацията на всеки re-render.
+  let emojiReactions: Partial<Record<LudoColor, { emojiId: string; startedAt: number }>> = {}
+  let emojiReactionTimers: Partial<Record<LudoColor, ReturnType<typeof setTimeout>>> = {}
+  function clearEmojiReactionTimers(): void {
+    for (const timerId of Object.values(emojiReactionTimers)) {
+      if (timerId !== undefined) clearTimeout(timerId)
+    }
+    emojiReactionTimers = {}
+    emojiReactions = {}
+  }
+  function addEmojiReaction(color: LudoColor, emojiId: string): void {
+    const existingTimer = emojiReactionTimers[color]
+    if (existingTimer !== undefined) clearTimeout(existingTimer)
+    emojiReactions = { ...emojiReactions, [color]: { emojiId, startedAt: Date.now() } }
+    emojiReactionTimers[color] = setTimeout(() => {
+      delete emojiReactionTimers[color]
+      const next = { ...emojiReactions }
+      delete next[color]
+      emojiReactions = next
+      render()
+    }, LUDO_EMOJI_BUBBLE_TOTAL_MS)
+    render()
+  }
 
   // Единствената точка, през която engineState се променя — reject-натите
   // действия (грешен player, wrong phase, stale turnVersion) връщат СЪЩИЯ
@@ -264,8 +351,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   function currentUiPieces(): LudoPiece[] {
     const uiPieces = ludoEnginePiecesToUiPieces(engineState.pieces)
     const presentationPieces = applyLudoPresentationOverrides(uiPieces, null, captureVictimOverrides)
-    return movingPieceSuppressedId
-      ? presentationPieces.filter((piece) => piece.id !== movingPieceSuppressedId)
+    return suppressedPieceIds.size > 0
+      ? presentationPieces.filter((piece) => !suppressedPieceIds.has(piece.id))
       : presentationPieces
   }
 
@@ -298,7 +385,39 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     return LUDO_BOT_THINK_DELAY_MS // (B) bot think delay — само когато pending==='none' (bot-controlled actor)
   }
 
+  // LIVE turn-presentation snapshot — directно от engineState/orchestrator,
+  // спрямо ТЕКУЩИЯ момент. Използва се и (а) като нормалната стойност,
+  // връщана от displayedTurnPresentation(), когато presentation gate-ът не е
+  // active, и (б) за да "замрази" pre-move snapshot-а В МОМЕНТА, В КОЙТО
+  // presentAuthoritativeMove отваря гейта (извикана ПРЕДИ engineState да се
+  // презапише там — виж call site-а).
+  function liveTurnPresentationSnapshot() {
+    return {
+      activeColor: engineState.activeColor,
+      turnPhase: engineState.turnPhase,
+      turnStartedAt,
+      turnCountdownMs: currentTurnCountdownMs(),
+      isHumanCountdownActive: resolveLudoPendingDeadlineKind(engineState.turnPhase, engineState.activeColor, orchestrator.botControlledColors) !== 'none',
+    }
+  }
+
+  // Единствената точка, през която currentScreenState() научава "кой е
+  // активен/каква фаза е turn-ът" — връща замразения presentationGateSnapshot
+  // докато гейтът е отворен (move presentation в момента тече), иначе живия
+  // engineState-based snapshot. Виж presentationGateSnapshot doc коментара
+  // по-горе за пълния rationale.
+  function displayedTurnPresentation() {
+    return presentationGateSnapshot ?? liveTurnPresentationSnapshot()
+  }
+
   function currentScreenState(): LudoGameScreenState {
+    // Gate-aware turn presentation (виж presentationGateSnapshot doc
+    // коментара при декларацията му) — ВСИЧКИ "кой е активен/каква е фазата"
+    // полета по-долу четат ОТТУК, никога directно engineState.activeColor/
+    // turnPhase/turnStartedAt — това е ЕДИНСТВЕНАТА точка, в която гейтът
+    // реално влияе на UI-а. pieces/legalMoves остават LIVE (board-ът борави
+    // с presentation override-и по свой отделен механизъм, виж currentUiPieces).
+    const turnDisplay = displayedTurnPresentation()
     return {
       players,
       // Единствен source of truth за "кой съм АЗ" (виж localColor const
@@ -311,10 +430,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // ring-ове — вече е избран конкретен ход, engine-ът е в turn_complete
       // (legalMoves вече е [] там), но пазим explicit guard-а тук за яснота.
       legalMoves: isAnimatingMove ? [] : ludoEngineLegalMovesToUiMoves(engineState.legalMoves),
-      activeColor: engineState.activeColor,
-      turnPhase: engineState.turnPhase,
-      turnStartedAt,
-      turnCountdownMs: currentTurnCountdownMs(),
+      activeColor: turnDisplay.activeColor,
+      turnPhase: turnDisplay.turnPhase,
+      turnStartedAt: turnDisplay.turnStartedAt,
+      turnCountdownMs: turnDisplay.turnCountdownMs,
       // (A) vs (B) разделяне на presentation ниво (виж currentTurnCountdownMs
       // doc коментара по-горе) — true само когато turnCountdownMs реално
       // представлява human reaction deadline (10s/15s), false когато е bot
@@ -322,7 +441,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // това да реши countdown animation vs static presentation — bot-овете
       // (истински или temporary-takeover-нат local player) никога не трябва
       // да изглеждат като "player timeout, изтичащ за 700ms".
-      isHumanCountdownActive: resolveLudoPendingDeadlineKind(engineState.turnPhase, engineState.activeColor, orchestrator.botControlledColors) !== 'none',
+      isHumanCountdownActive: turnDisplay.isHumanCountdownActive,
       isDiceRolling,
       // Interaction lock: DOM disabled state следва engine turnPhase, но
       // НЕ е authoritative за правилата — engine stale-action защитата
@@ -330,13 +449,36 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // player-ят може да roll-не само когато е реално негов ред — bot-
       // controlled цветове (включително sticky-takeover-натия local цвят)
       // никога не показват clickable launcher за друг клиент да натисне.
+      // presentationGateSnapshot===null е explicit defense-in-depth тук —
+      // докато гейтът е отворен turnDisplay.turnPhase вече е замразен на
+      // pre-move стойност (типично 'awaiting_move_selection', никога
+      // 'waiting_for_roll' за next player-a), затова тази проверка е
+      // структурно redundant, но пази инварианта дори ако displayedTurn-
+      // Presentation()-ната логика някога се промени.
       canRollDice:
-        engineState.turnPhase === 'waiting_for_roll' &&
+        turnDisplay.turnPhase === 'waiting_for_roll' &&
         !isAnimatingMove &&
-        !orchestrator.botControlledColors.has(engineState.activeColor) &&
-        (!options.authoritative || engineState.activeColor === localColor),
-      turnSecondsLeft: Math.round(currentTurnCountdownMs() / 1000),
+        presentationGateSnapshot === null &&
+        !orchestrator.botControlledColors.has(turnDisplay.activeColor) &&
+        (!options.authoritative || turnDisplay.activeColor === localColor),
+      turnSecondsLeft: Math.round(turnDisplay.turnCountdownMs / 1000),
       useMobileLayout: isPhoneLayoutViewport(),
+      // Виж task-а §3/§4/§8 — leftColors е canonical (engineState, персистира,
+      // преживява restart), justLeftColor е чисто presentation-only 5s window
+      // (виж декларацията му по-горе).
+      leftColors: engineState.leftColors,
+      justLeftColor,
+      // Responsive player-panel scale (виж computeLudoDesktopPanelScale doc
+      // коментара в renderLudoGameScreen.ts) — четено live от window всеки
+      // render() (вкл. debounced 'resize' handler-а по-долу, виж
+      // handleResize), огледално на isPhoneLayoutViewport() реда точно
+      // по-горе. Игнориран от renderLudoPlayerPanel при useMobileLayout.
+      desktopPanelScale: computeLudoDesktopPanelScale(window.innerWidth, window.innerHeight),
+      // Realtime emoji reaction bubbles (виж emojiReactions doc коментара
+      // при декларацията му по-горе) — суровите startedAt timestamps се
+      // подават directno, elapsed се смята в renderPlayerPanelSlot (СЪЩИЯТ
+      // pattern като turnElapsedMs, изчислен там спрямо turnStartedAt).
+      emojiReactions,
     }
   }
 
@@ -344,7 +486,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (isDestroyed) return
     options.root.innerHTML = renderLudoGameScreen(currentScreenState())
     applyLudoBoardContent(options.root, currentScreenState())
-    if (activePopup) mountPopup(activePopup)
+    if (isEmojiPickerOpen) mountEmojiPicker()
     if (showBotTakeoverPopup) mountBotTakeoverPopup()
     if (isGameEndPopupOpen) mountGameEndPopup()
     if (isExitConfirmOpen) mountExitConfirmPopup()
@@ -410,7 +552,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     isGameEndPopupOpen = true
     isExitConfirmOpen = false
     isExitLeavePending = false
-    activePopup = null
+    isEmojiPickerOpen = false
     modalLayerRoot.replaceChildren()
     syncModalLayerInteractivity()
     clearScheduledTimers()
@@ -418,26 +560,55 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     render()
   }
 
-  function mountPopup(kind: 'emoji' | 'phrase'): void {
-    if (modalLayerRoot.querySelector('[data-ludo-mock-popup-backdrop="1"]')) return
+  // Realtime emoji picker (виж task-а "Ludo emoji" §2/§3) — reuse-ва
+  // СЪЩИЯ animated-emoji каталог/asset URL-и/id scheme като активна игра
+  // Белот (renderLudoEmojiPickerHtml в renderLudoBottomBar.ts). За разлика
+  // от exit-confirm/game-end popup-ите, ТОВА НЕ е full-screen blocking
+  // modal — лек floating panel, който не бива да пречи на dice/board
+  // кликове извън себе си (виж task-а §6 "да не блокира dice click").
+  // Затова explicit НЕ минава през syncModalLayerInteractivity() (която
+  // прави ЦЕЛИЯ viewport-size modalLayerRoot pointer-events:auto само защото
+  // childElementCount>0) — вместо това panel-ът сам носи pointer-events:auto,
+  // modalLayerRoot остава pointer-events:none наоколо него.
+  function mountEmojiPicker(): void {
+    if (modalLayerRoot.querySelector('[data-ludo-emoji-picker="1"]')) return
     const container = document.createElement('div')
-    container.innerHTML = renderLudoMockPopup(
-      kind === 'emoji' ? 'Емоджита' : 'Фрази',
-      kind === 'emoji' ? EMOJI_MOCK_ITEMS : PHRASE_MOCK_ITEMS,
-    )
-    const backdrop = container.firstElementChild
-    if (backdrop instanceof HTMLElement) {
-      backdrop.style.pointerEvents = 'auto'
-      modalLayerRoot.appendChild(backdrop)
-      syncModalLayerInteractivity()
-    }
+    container.innerHTML = renderLudoEmojiPickerHtml()
+    const panel = container.firstElementChild
+    if (!(panel instanceof HTMLElement)) return
+    panel.style.pointerEvents = 'auto'
+    modalLayerRoot.appendChild(panel)
+    panel.querySelectorAll<HTMLButtonElement>('[data-ludo-emoji-pick]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const emojiId = button.getAttribute('data-ludo-emoji-pick')
+        if (!emojiId) return
+        closeEmojiPicker()
+        if (options.authoritative && authoritativeSnapshot) {
+          options.authoritative.onEmojiReactionSend?.(authoritativeSnapshot.matchId, emojiId)
+        } else {
+          // Non-authoritative dev/manual harness (виж task-а т.21 doc
+          // коментара при LudoFlowControllerOptions.initialState) — няма
+          // сървър да echo-не обратно, затова local preview directno тук
+          // (не production multiplayer път, единствения начин изобщо да се
+          // тества презентацията без реален match).
+          addEmojiReaction(localColor, emojiId)
+        }
+      })
+    })
+    document.addEventListener('click', handleEmojiPickerOutsideClick, { capture: true })
   }
 
-  function closePopup(): void {
-    activePopup = null
-    const backdrop = modalLayerRoot.querySelector('[data-ludo-mock-popup-backdrop="1"]')
-    backdrop?.remove()
-    syncModalLayerInteractivity()
+  function closeEmojiPicker(): void {
+    isEmojiPickerOpen = false
+    modalLayerRoot.querySelector('[data-ludo-emoji-picker="1"]')?.remove()
+    document.removeEventListener('click', handleEmojiPickerOutsideClick, { capture: true })
+  }
+
+  function handleEmojiPickerOutsideClick(event: MouseEvent): void {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest('[data-ludo-emoji-picker="1"]') || target.closest('[data-ludo-emoji-button="1"]')) return
+    closeEmojiPicker()
   }
 
   // Bot-takeover popup (т.15) — reuse-ва Belot-овия УХ pattern (scrim +
@@ -528,15 +699,9 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     })
 
     options.root.querySelector('[data-ludo-emoji-button="1"]')?.addEventListener('click', () => {
-      activePopup = 'emoji'
-      mountPopup('emoji')
-      wirePopupEvents()
-    })
-
-    options.root.querySelector('[data-ludo-phrase-button="1"]')?.addEventListener('click', () => {
-      activePopup = 'phrase'
-      mountPopup('phrase')
-      wirePopupEvents()
+      if (isEmojiPickerOpen) { closeEmojiPicker(); return }
+      isEmojiPickerOpen = true
+      mountEmojiPicker()
     })
 
     options.root.querySelectorAll<HTMLElement>('[data-ludo-piece-selectable="1"]').forEach((el) => {
@@ -557,16 +722,6 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
 
   function requestExit(): void {
     options.onExit(authoritativeSnapshot?.matchId)
-  }
-
-  function wirePopupEvents(): void {
-    modalLayerRoot.querySelector('[data-ludo-mock-popup-close="1"]')?.addEventListener('click', closePopup)
-    modalLayerRoot.querySelector('[data-ludo-mock-popup-backdrop="1"]')?.addEventListener('click', (event) => {
-      if (event.target === event.currentTarget) closePopup()
-    })
-    modalLayerRoot.querySelectorAll('[data-ludo-mock-popup-item="1"]').forEach((el) => {
-      el.addEventListener('click', closePopup)
-    })
   }
 
   let resizeTimer: ReturnType<typeof setTimeout> | null = null
@@ -871,7 +1026,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
 
     const route = buildLudoMoveRoute(fromCellId, targetCellId)
-    movingPieceSuppressedId = pieceId
+    suppressedPieceIds.add(pieceId)
     render()
     const moveOverlay = playLudoMoveRouteOverlay({
       root: options.root,
@@ -886,7 +1041,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     await moveOverlay.finished
     activeMoveOverlayCancel = null
     if (isDestroyed) return
-    movingPieceSuppressedId = null
+    suppressedPieceIds.delete(pieceId)
     render()
 
     // Attacker-ът вече е визуално пристигнал на target клетката (route
@@ -907,7 +1062,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
 
     diceResultOverlay.clearLanded()
     activeMoveOverlayCancel = null
-    movingPieceSuppressedId = null
+    suppressedPieceIds.delete(pieceId)
     isAnimatingMove = false
     render()
 
@@ -1051,10 +1206,29 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     activeMoveOverlayCancel = null
     diceResultOverlay.clearLanded()
     document.querySelectorAll('[data-ludo-capture-flight], [data-ludo-capture-impact]').forEach((element) => element.remove())
-    movingPieceSuppressedId = null
+    suppressedPieceIds.clear()
     captureVictimOverrides = new Map()
     isDiceRolling = false
     isAnimatingMove = false
+    // Виж justLeftColor doc коментара при декларацията му — foreground snap/
+    // epoch invalidation не бива да остави stale "Излезе от играта" blink
+    // window/timer нито stale презаписан forfeit-flight в опашката (виж §8
+    // "не replay-вай historical leave animation").
+    justLeftColor = null
+    clearJustLeftColorTimer()
+    // Realtime emoji reactions са transient presentation, никога не се
+    // персистират/replay-ват от snapshot (виж task-а "Ludo emoji" §9) —
+    // foreground snap/revision-gap resync не бива да остави stale bubble,
+    // видима седейки от преди прозореца на прекъсването.
+    clearEmojiReactionTimers()
+    // Presentation gate reset (виж presentationGateSnapshot doc коментара) —
+    // same established pattern като isAnimatingMove/movingPieceSuppressedId
+    // по-горе: foreground snap/epoch invalidation не бива да остави "замразен"
+    // gate отворен, докато stale presentAuthoritativeMove promise-ът никога
+    // не стигне до собствения си release (epoch guard-ът там просто връща
+    // рано, виж call site-а) — reset-ва се ТУК, синхронно, независимо от
+    // изхода на прекъснатия promise.
+    presentationGateSnapshot = null
   }
 
   function snapToAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot): void {
@@ -1136,7 +1310,14 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       captureVictimOverrides = createLudoCaptureVictimOverrides(capturedPieceIds, targetCellId, captureVictimOverrides)
     }
     isAnimatingMove = true
-    movingPieceSuppressedId = pieceId
+    // Отваряме presentation gate-а ТУК — ПРЕДИ engineState да се презапише
+    // на реда отдолу — liveTurnPresentationSnapshot() затова все още чете
+    // ПРЕДИШНИЯ (pre-move) engineState/turnStartedAt (== `previous`, същия
+    // reference), а не вече-авансирания snapshot.state (виж
+    // presentationGateSnapshot doc коментара при декларацията му за пълния
+    // root-cause rationale). Затваря се долу, СЛЕД финалния landing render.
+    presentationGateSnapshot = liveTurnPresentationSnapshot()
+    suppressedPieceIds.add(pieceId)
     engineState = snapshot.state
     render()
     const overlay = playLudoMoveRouteOverlay({
@@ -1152,7 +1333,16 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     await overlay.finished
     if (epoch !== presentationEpoch) return false
     activeMoveOverlayCancel = null
-    movingPieceSuppressedId = null
+    suppressedPieceIds.delete(pieceId)
+    // RELEASE presentation gate — точно тук, веднага след движещата се
+    // пионка стъпи на последното си поле (route overlay resolved), ПРЕДИ
+    // render()-а веднага долу — следващия render() вече показва LIVE
+    // engineState (следващия играч avatar->dice swap + countdown UI се
+    // появяват точно СЕГА, не по-рано). Capture impact/flight (ако има) тече
+    // СЛЕД това — отделен board-level visual слой, не player панела, затова
+    // gate-ът не чака и него (виж task-а: "не по-рано от final landing",
+    // изрично позволено да не чака ЦЕЛИЯ presentation).
+    presentationGateSnapshot = null
     render()
     if (capturedPieceIds.length > 0) {
       await animateCapture(capturedPieceIds, () => epoch === presentationEpoch)
@@ -1161,6 +1351,99 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
     diceResultOverlay.clearLanded()
     isAnimatingMove = false
+    return true
+  }
+
+  // Explicit "Изход" forfeit presentation (виж task-а §2/§4/§8). Reuse-ва
+  // playLudoCaptureFlightOverlay (директен smooth flight, СЪЩИЯТ pattern
+  // като capture victim flight-а) за ВСЯКА извадена пионка на forfeit-налия
+  // цвят, паралелно (Promise.all) — "не прави duplicate animation
+  // framework". Presentation gate (presentationGateSnapshot + isAnimatingMove,
+  // reuse-нати от move presentation-а) остава отворен докато flights текат,
+  // за да не изскочи next-turn dice control преди пионките реално да са
+  // "кацнали" в home (виж §8). Отделен, независим 5-секунден "Излезе от
+  // играта" blink прозорец (justLeftColor) стартира В МОМЕНТА на presentation-а
+  // (§2.3) — продължава дори след flights/gate release-а за non-finishing
+  // случая (§7 4-player, играта продължава веднага след flight-а завърши,
+  // остатъкът от blink-а е чисто декоративен, не блокира никого).
+  async function presentAuthoritativeForfeit(previous: LudoGameState, snapshot: LudoGameStateSnapshot, epoch: number): Promise<boolean> {
+    if (epoch !== presentationEpoch) return false
+    const forfeitEvent = snapshot.events.find((item) => item.type === 'player_forfeited')
+    if (!forfeitEvent || forfeitEvent.type !== 'player_forfeited') return true
+
+    // Измерваме ВСЯКА извадена пионка ПРЕДИ engineState да се презапише —
+    // DOM-ът още показва previous позициите (mirror-нато на
+    // presentAuthoritativeMove's sourcePieceEl измерване).
+    const flightTargets = forfeitEvent.collectedPieceIds.flatMap((pieceId) => {
+      const pieceEl = options.root.querySelector<HTMLElement>(
+        `[data-ludo-piece="${pieceId}"], [data-ludo-piece-group~="${pieceId}"]`,
+      )
+      const [color, slotStr] = pieceId.split('-')
+      const homeCellId = `home-${color}-${slotStr}`
+      const homeEl = options.root.querySelector<HTMLElement>(`[data-ludo-cell-pieces="${homeCellId}"]`)
+      if (!pieceEl || !homeEl) return []
+      return [{
+        pieceId,
+        fromRect: pieceEl.getBoundingClientRect(),
+        toRect: homeEl.getBoundingClientRect(),
+        pieceSizePx: pieceEl.getBoundingClientRect().width,
+      }]
+    })
+
+    const isMatchFinishingHere = previous.status !== 'finished' && snapshot.state.status === 'finished'
+
+    presentationGateSnapshot = liveTurnPresentationSnapshot()
+    isAnimatingMove = true
+    flightTargets.forEach(({ pieceId }) => suppressedPieceIds.add(pieceId))
+    justLeftColor = forfeitEvent.color
+    clearJustLeftColorTimer()
+    justLeftColorTimer = setTimeout(() => {
+      justLeftColorTimer = null
+      if (epoch !== presentationEpoch) return
+      justLeftColor = null
+      render()
+    }, 5_000)
+
+    engineState = snapshot.state
+    render()
+
+    const flightStartedAt = Date.now()
+    const flightsCompleted = Promise.all(
+      flightTargets.map(({ pieceId, fromRect, toRect, pieceSizePx }) =>
+        playLudoCaptureFlightOverlay({ pieceId, fromRect, toRect, pieceSizePx, initiallyHidden: areGameplayOverlaysHiddenForPopup }),
+      ),
+    )
+
+    // Всяка playLudoCaptureFlightOverlay премахва СВОЯ overlay възел веднага
+    // щом СОБСТВЕНАТА ѝ ~500ms анимация приключи (виж doc коментара в
+    // playLudoCaptureFlightOverlay.ts) — НЕЗАВИСИМО от долния max(5s, flights)
+    // изчакване. Затова reveal-ът (suppressedPieceIds delete + render) ТРЯБВА
+    // да стане веднага щом flightsCompleted резолвне, а НЕ да чака и
+    // остатъка от 5-те секунди — иначе overlay-ят изчезва (self-removed), но
+    // static board рендерът пак филтрира пионката (все още suppressed), и тя
+    // остава невидима до края на wait-а ("кацат, веднага след това изчезват"
+    // bug). Гейтът (presentationGateSnapshot/isAnimatingMove — управлява
+    // dice/turn UI + winner popup timing, НЕ piece visibility) остава
+    // отделно, освобождава се едва след пълния max(5s, flights).
+    await flightsCompleted
+    if (epoch !== presentationEpoch) return false
+    flightTargets.forEach(({ pieceId }) => suppressedPieceIds.delete(pieceId))
+    render()
+
+    // Winner popup чака max(5s, flights) — виж task-а §2.3 "И pawn-return
+    // flight animation-ите да са приключили". За non-finishing forfeit
+    // (играта продължава) НЕ изкуствено забавяме следващия играч — гейтът
+    // release-ва веднага след flights (§8), 5-те секунди за blink-а текат
+    // независимо чрез justLeftColorTimer по-горе.
+    if (isMatchFinishingHere) {
+      const remainingMs = 5_000 - (Date.now() - flightStartedAt)
+      if (remainingMs > 0) await wait(remainingMs)
+      if (epoch !== presentationEpoch) return false
+    }
+
+    presentationGateSnapshot = null
+    isAnimatingMove = false
+    render()
     return true
   }
 
@@ -1188,6 +1471,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
     if (snapshot.events.some((item) => item.type === 'piece_moved')) {
       if (!await presentAuthoritativeMove(previous, snapshot, epoch)) return
+    } else if (snapshot.events.some((item) => item.type === 'player_forfeited')) {
+      if (!await presentAuthoritativeForfeit(previous, snapshot, epoch)) return
     } else {
       engineState = snapshot.state
     }
@@ -1195,6 +1480,20 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (previous.status !== 'finished' && snapshot.state.status === 'finished') {
       presentGameEndOnce(!snapshot.events.some((item) => item.type === 'piece_moved'))
     }
+  }
+
+  // Realtime emoji reaction — реален server echo (виж task-а "Ludo emoji"
+  // §4), НЕ optimistic local render дори за самия sender (огледално на
+  // Belot's send_emoji_reaction/emoji_reaction flow — клиентът винаги чака
+  // сървъра). matchId guard-ът пази срещу late-arriving съобщение за
+  // предишен match instance (същия pattern като applyAuthoritativeSnapshot
+  // по-долу). emojiId се re-validate-ва и client-side (defense-in-depth,
+  // сървърът вече е validate-нал каталог range-а в parseClientMessage.ts) —
+  // невалиден id никога не стига до getAnimatedEmojiUrl().
+  function applyEmojiReaction(matchId: string, color: LudoColor, emojiId: string): void {
+    if (!options.authoritative || matchId !== options.authoritative.initialSnapshot.matchId) return
+    if (!isValidAnimatedEmojiId(emojiId)) return
+    addEmojiReaction(color, emojiId)
   }
 
   function applyAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot, prizeAmount: number | null): void {
@@ -1224,8 +1523,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     isDestroyed = true
     window.removeEventListener('resize', handleResize)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
+    document.removeEventListener('click', handleEmojiPickerOutsideClick, { capture: true })
     if (resizeTimer) clearTimeout(resizeTimer)
     clearScheduledTimers()
+    clearEmojiReactionTimers()
     activeMoveOverlayCancel?.()
     activeMoveOverlayCancel = null
     diceResultOverlay.clearLanded()
@@ -1241,5 +1542,5 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   document.addEventListener('visibilitychange', handleVisibilityChange)
   render()
 
-  return { destroy, applyAuthoritativeSnapshot, requestExit }
+  return { destroy, applyAuthoritativeSnapshot, applyEmojiReaction, requestExit }
 }

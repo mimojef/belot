@@ -510,6 +510,18 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'ludo_reclaim_request', matchId, expectedRevision: parsed.expectedRevision }
     }
 
+    if (parsed.type === 'send_ludo_emoji_reaction') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      const emojiId = normalizeRequiredText(parsed.emojiId)
+      if (matchId === null || emojiId === null) return null
+      // Същият catalog range като send_emoji_reaction (Belot) по-горе — "01"
+      // до "24", виж animatedEmojiAssets.ts::ANIMATED_EMOJI_COUNT (клиентски
+      // shared source, недостъпен тук server-side, затова идентичният regex
+      // patterned е copy-нат explicit, не import-нат cross-runtime).
+      if (!/^(?:0[1-9]|1[0-9]|2[0-4])$/.test(emojiId)) return null
+      return { type: 'send_ludo_emoji_reaction', matchId, emojiId }
+    }
+
     if (parsed.type === 'kick_from_ludo_room') {
       const profileId = normalizeRequiredText(parsed.profileId)
       return profileId === null ? null : { type: 'kick_from_ludo_room', profileId }

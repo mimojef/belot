@@ -91,4 +91,18 @@ export interface LudoGameState {
   // никаква нова turnPhase стойност не е нужна за това (виж task-а header
   // коментара "НЕ добавяй нови фази без причина").
   pendingExtraRoll: boolean
+  // Explicit-forfeit canonical state (виж task-а "Explicit Изход от STARTED
+  // match") — цветове, чийто играч е потвърдил окончателно напускане
+  // (PLAYER_FORFEITED, ludoEngineReducer.ts). ЯСНО РАЗЛИЧНО от temporary
+  // disconnect/bot-takeover (СЪВСЕМ отделен lifecycle, живее в runtime слоя
+  // — ludoMatchRuntime.ts::botControlledColors — НЕ тук): leftColors е
+  // ОКОНЧАТЕЛНО, никога не се reclaim-ва, никога не се маха. turnOrder
+  // остава НЕПРОМЕНЕН (стабилен исторически ред) — leftColors е единственият
+  // source of truth за "кой цвят вече не участва", четен от
+  // handleTurnAdvanced (skip при цикъла) и от computeLudoEngineLegalMoves
+  // indirектно (leftColor никога не е activeColor, затова никога не получава
+  // legal moves — виж findNextActiveColor в ludoEngineReducer.ts). Част от
+  // canonical persisted snapshot-а (LudoGameState цялото се персистира) —
+  // преживява server restart без допълнителна wiring.
+  leftColors: readonly LudoColor[]
 }

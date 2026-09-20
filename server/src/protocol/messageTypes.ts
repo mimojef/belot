@@ -17,7 +17,7 @@ import type { TournamentPartnerInviteDto } from '../tournament/tournamentDto.js'
 import type { TournamentRoundType } from '../tournament/tournamentTypes.js'
 import type { TopicSnapshot } from '../db/topicStore.js'
 import type { LudoEngineEvent } from '../game/ludoEngine/ludoEngineEvents.js'
-import type { LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
+import type { LudoColor, LudoGameState, LudoPieceSlot } from '../game/ludoEngine/ludoEngineTypes.js'
 
 export type TournamentMatchAssignedMessage = {
   type: 'tournament_match_assigned'
@@ -240,6 +240,7 @@ export type ClientMessage =
   | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
+  | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -981,6 +982,17 @@ export type LudoGameStateMessage = {
   prizeAmount: number | null
 }
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
+// Realtime social reaction — transient presentation only, НИКОГА не се
+// персистира в LudoGameState/snapshot (виж ludoMatchRuntime.ts handler-а —
+// broadcast-ва се директно, не минава през reduceLudoGame/commit). color е
+// sender-ят, resolve-нат server-side от profileId (виж index.ts handler-а
+// за 'send_ludo_emoji_reaction') — клиентът никога не диктува чий цвят е.
+export type LudoEmojiReactionMessage = {
+  type: 'ludo_emoji_reaction'
+  matchId: string
+  color: LudoColor
+  emojiId: string
+}
 
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
@@ -1221,6 +1233,7 @@ export type ServerMessage =
   | LudoGameStartedMessage
   | LudoGameStateMessage
   | LudoMatchLeftMessage
+  | LudoEmojiReactionMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage

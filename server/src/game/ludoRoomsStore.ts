@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
+import type { LudoInitialMatchData } from './ludoMatchRuntime.js'
 
 export type LudoRoomPlayer = {
   connectionId: string
@@ -33,7 +34,12 @@ type Callbacks = {
   // detach-а — не тук вътре — защото същият matchId трябва да служи и за
   // ludo_match_economy_ledger scope (виж collectLudoMatchStakes), и за
   // ludoMatchRuntime.createMatch(room, matchId). Store-ът просто го препредава.
-  onRoomReady: (room: LudoRoom, matchId: string) => void
+  // precomputed (виж task spec §3 "КРИТИЧЕН START TRANSACTION") — същият
+  // резултат от ludoMatchRuntime.buildInitialMatch(), който вече е persisted
+  // атомарно с debit-а в attemptLudoRoomStart.ts, ПРЕПРЕДАДЕН оттук на
+  // createMatch(), за да не се преизчислява (би дал ДРУГ рандом цвят при
+  // 2-player стаи от persisted snapshot-а).
+  onRoomReady: (room: LudoRoom, matchId: string, precomputed?: LudoInitialMatchData) => void
   onMemberKicked: (room: LudoRoom, player: LudoRoomPlayer) => void
 }
 
@@ -59,13 +65,13 @@ export function createLudoRoomsStore(callbacks: Callbacks) {
   // единственият начин room-ът да изчезне от waiting map-а — гарантира, че
   // никой duplicate/race trigger не може да detach-не/start-не един и същ
   // room обект два пъти (виж §"AUTO-START RACE / MANUAL START RACE").
-  function finalizeRoomStart(roomId: string, matchId: string): LudoRoom | null {
+  function finalizeRoomStart(roomId: string, matchId: string, precomputed?: LudoInitialMatchData): LudoRoom | null {
     const room = rooms.get(roomId)
     if (!room) return null
     rooms.delete(room.id)
     room.players.forEach((player) => connectionToRoom.delete(player.connectionId))
     callbacks.onRoomsChanged()
-    callbacks.onRoomReady(room, matchId)
+    callbacks.onRoomReady(room, matchId, precomputed)
     return room
   }
 

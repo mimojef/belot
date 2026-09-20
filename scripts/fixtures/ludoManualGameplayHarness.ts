@@ -47,6 +47,7 @@ function makeEndGameState(winnerColor: LudoColor): LudoGameState {
     winnerColor: null,
     turnVersion: 0,
     pendingExtraRoll: false,
+    leftColors: [],
   }
 }
 

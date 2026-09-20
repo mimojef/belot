@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { LudoRoom, LudoRoomsStore } from './ludoRoomsStore.js'
 import type { LudoEconomyStore } from '../db/ludoEconomyStore.js'
+import type { LudoInitialMatchData, LudoMatchSnapshot } from './ludoMatchRuntime.js'
 
 // Canonical единствена точка, през която ВСЕКИ реален Ludo start path минава
 // (manual "Старт" бутон, auto-full при join) — виж task spec §"AUTO-START
@@ -43,6 +44,14 @@ export type AttemptLudoRoomStartResult =
 export type AttemptLudoRoomStartDeps = {
   ludoRoomsStore: LudoRoomsStore
   ludoEconomyStore: LudoEconomyStore
+  // Тясна dependency (само функцията, не целия ludoMatchRuntime обект) — виж
+  // task spec §3 "КРИТИЧЕН START TRANSACTION". Чисто изчисление (виж
+  // LudoInitialMatchData doc коментара в ludoMatchRuntime.ts), извиквано
+  // ТОЧНО ВЕДНЪЖ тук, ПРЕДИ atomic debit транзакцията — резултатът е това,
+  // което се persist-ва атомарно с debit-а И се подава обратно на
+  // createMatch() (през finalizeRoomStart/onRoomReady), за да не се
+  // преизчислява случаен цвят два пъти.
+  buildInitialMatch: (room: LudoRoom, matchId: string) => LudoInitialMatchData
   hasEnoughBalance: (profileId: string, amount: number) => boolean
   onPlayerEjectedForInsufficientBalance: (connectionId: string, ludoRoomId: string) => void
   onRoomUpdated: (room: LudoRoom) => void
@@ -71,29 +80,65 @@ export function createAttemptLudoRoomStart(
 
     const matchId = randomUUID()
     const profileIds = room.players.map((player) => player.profileId)
-    const debitResult = deps.ludoEconomyStore.collectLudoMatchStakes(matchId, profileIds, room.stake)
+
+    // Виж task spec §3 "КРИТИЧЕН START TRANSACTION" — precompute-ваме ЦЕЛИЯ
+    // initial match state (color assignment + engine initial state) ТОЧНО
+    // ВЕДНЪЖ, ПРЕДИ debit-а, за да можем да го persist-нем АТОМАРНО заедно с
+    // него (виж по-долу). Ако debit-ът commit-не без този snapshot да е
+    // durable, рестартиран процес би видял "платено, но играта изчезна" —
+    // точно прозорецът, който тази задача затваря.
+    const initialMatchData = deps.buildInitialMatch(room, matchId)
+    const initialSnapshot: LudoMatchSnapshot = {
+      matchId,
+      ludoRoomId: room.id,
+      stake: room.stake,
+      revision: 0,
+      serverNow: Date.now(),
+      deadlineAt: null,
+      players: initialMatchData.players,
+      state: initialMatchData.state,
+      events: [],
+      botControlledColors: [],
+    }
+
+    const debitResult = deps.ludoEconomyStore.collectLudoMatchStakesWithInitialSnapshot(
+      matchId, profileIds, room.stake, initialSnapshot,
+    )
 
     if (!debitResult.ok) {
       // Рядък TOCTOU race — balance-ът е паднал между стъпка 3 (recheck) и
-      // атомарния debit опит (напр. паралелен gift spend). Третираме
-      // конкретния провалил се profile като insufficient — никой не е
-      // debit-нат (collectLudoMatchStakes е all-or-nothing, виж
-      // ludoEconomyStore.ts), стаята остава waiting.
+      // атомарния debit опит (напр. паралелен gift spend), ИЛИ snapshot
+      // insert-ът е fail-нал (виж инварианта в task spec §3) — в ДВАТА
+      // случая ЦЯЛАТА транзакция (debit + snapshot) е rollback-ната от
+      // collectLudoMatchStakesWithInitialSnapshot, никой не е debit-нат.
+      // Третираме конкретния провалил се profile като insufficient — стаята
+      // остава waiting.
       const failedProfileIds = debitResult.insufficientProfileId
         ? [debitResult.insufficientProfileId]
         : profileIds
       return ejectInsufficientPlayers(deps, roomId, failedProfileIds)
     }
 
-    const startedRoom = deps.ludoRoomsStore.finalizeRoomStart(roomId, matchId)
+    // DB транзакцията е COMMIT-ната тук — debit + persisted initial snapshot
+    // вече са durable заедно. Останалото (finalize room detach + in-memory
+    // createMatch) е чисто in-memory publication на СЪЩИТЕ вече-commit-нати
+    // данни (precomputed-ът се подава по-долу, не се преизчислява). Ако
+    // процесът умре точно СЕГА (след DB commit, преди тази стъпка) — boot
+    // recovery възстановява match-а от persisted snapshot-а (виж
+    // loadPersistedLudoMatches() в index.ts), СЪЩИЯТ matchId, без повторен
+    // debit.
+    const startedRoom = deps.ludoRoomsStore.finalizeRoomStart(roomId, matchId, initialMatchData)
     if (!startedRoom) {
       // Изключително рядко: стаята изчезна между re-fetch-а по-горе и този
       // финален detach (напр. duplicate trigger вклинил се точно тук).
-      // Stake-ът вече Е debit-нат в тази клонка — но createMatch никога не
-      // се извиква, затова връщаме 'not_found' само за orchestration
-      // резултата; реалната защита срещу double-debit е ledger-based
-      // идемпотентността в collectLudoMatchStakes (виж K/duplicate trigger
-      // regression теста), не разчитаме единствено на този guard.
+      // Stake-ът и snapshot-ът вече СА persisted в тази клонка — но
+      // createMatch никога не се извиква тук, затова връщаме 'not_found'
+      // само за orchestration резултата; реалната защита срещу double-debit
+      // е ledger-based идемпотентността в collectLudoMatchStakesWithInitial-
+      // Snapshot (виж K/duplicate trigger regression теста), не разчитаме
+      // единствено на този guard. Match-ът вече е durable в DB и ще бъде
+      // възстановен от boot recovery дори и този edge case да остави
+      // in-memory match-а непубликуван в тази конкретна клонка.
       return { outcome: 'not_found' }
     }
 

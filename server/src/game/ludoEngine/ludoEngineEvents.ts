@@ -34,3 +34,13 @@ export type LudoEngineEvent =
   | { type: 'turn_advanced'; previousColor: LudoColor; nextColor: LudoColor }
   | { type: 'bot_takeover_started'; color: LudoColor }
   | { type: 'human_control_resumed'; color: LudoColor }
+  // Explicit "Изход" forfeit (виж task-а). collectedPieceIds = pieces от
+  // ТОЗИ цвят, които НЕ бяха вече в home преди тази акция (т.е. реално
+  // "прибрани" от активната игра) — presentation-ът (playLudoForfeitFlight-
+  // Overlay.ts) ги анимира с полет към home; вече-home пионки не се
+  // анимират излишно (виж task-а "Пионките, които вече са в home, не се
+  // анимират излишно"). Server НЕ праща screen coordinates/from-позиции —
+  // client-ът вече разполага с `previous` engine state (виж
+  // applyAuthoritativeTransition в createLudoFlowController.ts) и извлича
+  // геометрията от там, огледално на piece_moved/pieces_captured pattern-а.
+  | { type: 'player_forfeited'; color: LudoColor; collectedPieceIds: readonly LudoPieceId[] }

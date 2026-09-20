@@ -219,19 +219,34 @@ function main(): void {
   }
 
   // --- Source review: currentScreenState() wires isHumanCountdownActive from resolveLudoPendingDeadlineKind ---
+  // NOTE: a later presentation-gate refactor introduced displayedTurnPresentation()/
+  // liveTurnPresentationSnapshot() as the single point where ALL turn-display fields
+  // (activeColor/turnPhase/turnStartedAt/turnCountdownMs/isHumanCountdownActive) are
+  // read together — either the frozen presentationGateSnapshot during an in-flight
+  // move/forfeit animation, or the live engineState-derived snapshot otherwise. This
+  // check therefore verifies the field still traces back to a LIVE
+  // resolveLudoPendingDeadlineKind(...) computation, just no longer inlined directly
+  // in currentScreenState() itself — currentScreenState() now reads it off that
+  // gate-aware snapshot instead, which is the correct, intentional architecture.
   {
     const controllerSrc = readSourceFile('../src/app/games/ludo/createLudoFlowController.ts')
     const fnMatch = controllerSrc.match(/function currentScreenState\(\): LudoGameScreenState \{[\s\S]*?\n  \}\n/)
     if (!fnMatch) fail('Source review: could not locate currentScreenState function body')
-    if (!/isHumanCountdownActive:\s*resolveLudoPendingDeadlineKind\(engineState\.turnPhase, engineState\.activeColor, orchestrator\.botControlledColors\) !== 'none'/.test(fnMatch[0])) {
-      fail('Source review: currentScreenState() must compute isHumanCountdownActive from resolveLudoPendingDeadlineKind(...) !== \'none\', live, not a stored/cached field')
+    if (!/isHumanCountdownActive:\s*turnDisplay\.isHumanCountdownActive/.test(fnMatch[0])) {
+      fail('Source review: currentScreenState() must read isHumanCountdownActive off the gate-aware turn-presentation snapshot (turnDisplay), not a separately stored/cached field')
+    }
+    if (!/isHumanCountdownActive:\s*resolveLudoPendingDeadlineKind\(engineState\.turnPhase, engineState\.activeColor, orchestrator\.botControlledColors\) !== 'none'/.test(controllerSrc)) {
+      fail('Source review: the turn-presentation snapshot feeding currentScreenState() must compute isHumanCountdownActive from resolveLudoPendingDeadlineKind(...) !== \'none\', live, not a stored/cached field')
+    }
+    if (!/function displayedTurnPresentation\(\) \{\s*return presentationGateSnapshot \?\? liveTurnPresentationSnapshot\(\)/.test(controllerSrc)) {
+      fail('Source review: displayedTurnPresentation() must return the frozen presentationGateSnapshot when a gate is open, else the live snapshot — otherwise currentScreenState() could read stale live values during an in-flight animation')
     }
     // Bot action scheduling itself must remain untouched — LUDO_BOT_THINK_DELAY_MS
     // usage in scheduleNextDeadline() must be unchanged (still arms pendingBotHandle).
     if (!/pendingBotHandle = setTimeout\(\(\) => \{[\s\S]*?\}, LUDO_BOT_THINK_DELAY_MS\)/.test(controllerSrc)) {
       fail('Source review: scheduleNextDeadline() must still arm pendingBotHandle with LUDO_BOT_THINK_DELAY_MS — bot scheduling itself must not be touched by the presentation fix')
     }
-    console.log('[checkLudoBotTimerPresentationSplit] Source review OK — isHumanCountdownActive is computed live; bot action scheduling (700ms) is untouched.')
+    console.log('[checkLudoBotTimerPresentationSplit] Source review OK — isHumanCountdownActive is computed live (via the gate-aware turn-presentation snapshot); bot action scheduling (700ms) is untouched.')
   }
 
   console.log('[checkLudoBotTimerPresentationSplit] ALL OK')

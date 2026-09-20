@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { ProfileId } from '../core/serverTypes.js'
+import { buildLudoMatchSnapshotRow, UPSERT_LUDO_MATCH_SNAPSHOT_SQL } from './activeLudoMatchSnapshotStore.js'
+import type { LudoMatchSnapshot } from '../game/ludoMatchRuntime.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -30,6 +32,30 @@ export type LudoEconomyStore = {
     matchId: string,
     profileIds: ProfileId[],
     stakeAmount: number,
+  ) =>
+    | { ok: true }
+    | { ok: false; message: string; insufficientProfileId: ProfileId | null }
+  /**
+   * КРИТИЧНА start transaction (виж task spec §3 "ЗАТВОРИ ТОЗИ ПРОЗОРЕЦ") —
+   * ЕДНА atomic DB transaction, СЪЩАТА semantics като collectLudoMatchStakes
+   * (all-or-nothing debit, идемпотентно per (matchId, profileId,
+   * 'ludo_stake_debit')), плюс insert-ва initialSnapshot-а (виж
+   * activeLudoMatchSnapshotStore.ts) в СЪЩАТА транзакция. Инвариант: ако
+   * stake debit-ът е commit-нат, initial active match snapshot ЗАДЪЛЖИТЕЛНО
+   * съществува в DB — ако snapshot insert-ът fail-не, ЦЕЛИЯТ debit се
+   * rollback-ва (никой не е задебитиран за match, който няма persisted
+   * snapshot). Reuse-ва СЪЩАТА connection като debit-а (не отделен store) —
+   * SQLite транзакциите са per-connection, затова activeLudoMatchSnapshotStore
+   * (собствена connection) не може да участва в ТАЗИ transaction; вместо това
+   * пише директно тук през UPSERT_LUDO_MATCH_SNAPSHOT_SQL (canonical текст,
+   * споделен от activeLudoMatchSnapshotStore.ts, за да остане ЕДНО място,
+   * което дефинира snapshot row shape-а).
+   */
+  collectLudoMatchStakesWithInitialSnapshot: (
+    matchId: string,
+    profileIds: ProfileId[],
+    stakeAmount: number,
+    initialSnapshot: LudoMatchSnapshot,
   ) =>
     | { ok: true }
     | { ok: false; message: string; insufficientProfileId: ProfileId | null }
@@ -122,6 +148,13 @@ export async function createLudoEconomyStore(
     WHERE match_id = ? AND entry_type = 'ludo_stake_debit';
   `)
 
+  // Реализира ТОЧНО активния критичен start transaction (виж
+  // collectLudoMatchStakesWithInitialSnapshot doc коментара по-горе) — СЪЩИЯТ
+  // SQL текст като activeLudoMatchSnapshotStore.ts's upsertMatch, за да
+  // остане редът в active_ludo_match_snapshots идентичен независимо коя от
+  // двете connections го е записала.
+  const insertInitialMatchSnapshotStatement = database.prepare(UPSERT_LUDO_MATCH_SNAPSHOT_SQL)
+
   function getWalletBalance(profileId: ProfileId): number {
     const row = selectWalletStatement.get(profileId) as WalletRow | undefined
     return row?.yellow_coins_balance ?? 0
@@ -201,6 +234,87 @@ export async function createLudoEconomyStore(
     return { ok: true }
   }
 
+  // Виж collectLudoMatchStakesWithInitialSnapshot doc коментара в
+  // LudoEconomyStore типа по-горе — ИДЕНТИЧЕН debit loop като
+  // collectLudoMatchStakes (нарочно дублиран тук, не reuse чрез helper,
+  // защото трябва да сподели ЕДНА транзакция с snapshot insert-а долу; общ
+  // helper би или разбил транзакцията на два BEGIN/COMMIT блока, или изисквал
+  // caller-ите на collectLudoMatchStakes да минават през "in transaction"
+  // флаг параметър навсякъде — по-рисково от контролирано дублиране на ~15
+  // реда добре тестван код), плюс insert на initialSnapshot-а В СЪЩАТА
+  // транзакция.
+  function collectLudoMatchStakesWithInitialSnapshot(
+    matchId: string,
+    profileIds: ProfileId[],
+    stakeAmount: number,
+    initialSnapshot: LudoMatchSnapshot,
+  ): { ok: true } | { ok: false; message: string; insufficientProfileId: ProfileId | null } {
+    if (!Number.isInteger(stakeAmount) || stakeAmount <= 0) {
+      return { ok: false, message: 'Невалиден залог за Ludo игра.', insufficientProfileId: null }
+    }
+    if (profileIds.length === 0) {
+      return { ok: false, message: 'Ludo match без играчи.', insufficientProfileId: null }
+    }
+
+    try {
+      database.exec('BEGIN;')
+
+      for (const profileId of profileIds) {
+        ensureWalletStatement.run(profileId)
+
+        if (hasLedgerEntry(matchId, profileId, 'ludo_stake_debit')) {
+          continue
+        }
+
+        const debitResult = debitWalletStatement.run(stakeAmount, profileId, stakeAmount) as { changes?: number }
+
+        if ((debitResult.changes ?? 0) === 0) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: false,
+            message: 'Недостатъчен баланс за залога.',
+            insufficientProfileId: profileId,
+          }
+        }
+
+        insertLedgerStatement.run(
+          randomUUID(),
+          matchId,
+          profileId,
+          'ludo_stake_debit',
+          stakeAmount,
+          getWalletBalance(profileId),
+        )
+      }
+
+      // Инвариант (виж task spec §3): "Ако stake debit е commit-нат, initial
+      // active match snapshot ЗАДЪЛЖИТЕЛНО съществува." Insert-ът е В СЪЩАТА
+      // транзакция като debit-а по-горе — ако ТОЗИ statement fail-не (напр.
+      // CHECK constraint violation от повреден snapshot_json), catch блокът
+      // долу ROLLBACK-ва ЦЕЛИЯ debit заедно с него, не само snapshot-а.
+      const row = buildLudoMatchSnapshotRow(initialSnapshot)
+      insertInitialMatchSnapshotStatement.run(
+        row.matchId, row.snapshotVersion, row.ludoRoomId, row.matchStatus,
+        row.revision, row.snapshotJson, row.matchStatus,
+      )
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : 'Играта не можа да стартира.',
+        insufficientProfileId: null,
+      }
+    }
+
+    return { ok: true }
+  }
+
   function payoutLudoMatchWinner(
     matchId: string,
     winnerProfileId: ProfileId,
@@ -255,6 +369,7 @@ export async function createLudoEconomyStore(
   return {
     getWalletBalance,
     collectLudoMatchStakes,
+    collectLudoMatchStakesWithInitialSnapshot,
     getLudoMatchTotalPot,
     payoutLudoMatchWinner,
     close,

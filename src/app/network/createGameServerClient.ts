@@ -893,6 +893,7 @@ export type ClientMessage =
   | { type: 'ludo_roll_request'; matchId: string; expectedRevision: number }
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
+  | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -1632,6 +1633,17 @@ export type LudoGameStateMessage = {
   prizeAmount: number | null
 }
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
+// Realtime social reaction — transient presentation only, никога не се
+// персистира в LudoGameStateSnapshot/state (виж task-а §9 "restart/
+// reconnect: не replay-вай стари emoji animations"). color е sender-ът,
+// server-resolved от profileId (клиентът никога не изпраща/получава color
+// от друг участник за себе си — виж server handler-а в index.ts).
+export type LudoEmojiReactionMessage = {
+  type: 'ludo_emoji_reaction'
+  matchId: string
+  color: 'red' | 'blue' | 'green' | 'yellow'
+  emojiId: string
+}
 
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
@@ -2442,6 +2454,7 @@ export type ServerMessage =
   | LudoGameStartedMessage
   | LudoGameStateMessage
   | LudoMatchLeftMessage
+  | LudoEmojiReactionMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage
@@ -2617,6 +2630,7 @@ export type GameServerClient = {
   requestLudoRoll: (matchId: string, expectedRevision: number) => void
   requestLudoMove: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
   requestLudoReclaim: (matchId: string, expectedRevision: number) => void
+  sendLudoEmojiReaction: (matchId: string, emojiId: string) => void
   requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
@@ -2925,6 +2939,7 @@ export function createGameServerClient(
   function requestLudoRoll(matchId: string, expectedRevision: number): void { send({ type: 'ludo_roll_request', matchId, expectedRevision }) }
   function requestLudoMove(matchId: string, expectedRevision: number, slot: LudoPieceSlot): void { send({ type: 'ludo_move_request', matchId, expectedRevision, slot }) }
   function requestLudoReclaim(matchId: string, expectedRevision: number): void { send({ type: 'ludo_reclaim_request', matchId, expectedRevision }) }
+  function sendLudoEmojiReaction(matchId: string, emojiId: string): void { send({ type: 'send_ludo_emoji_reaction', matchId, emojiId }) }
 
   function requestPrivateGamesList(): void {
     send({ type: 'request_private_games_list' })
@@ -3086,6 +3101,7 @@ export function createGameServerClient(
     requestLudoRoll,
     requestLudoMove,
     requestLudoReclaim,
+    sendLudoEmojiReaction,
     requestPrivateGamesList,
     createPrivateRoom,
     joinPrivateRoomSlot,

@@ -49,6 +49,7 @@ function makeState(activeColor: LudoColor, overrides: Record<string, LudoPiecePo
     winnerColor: null,
     turnVersion: 0,
     pendingExtraRoll: false,
+    leftColors: [],
   }
 }
 

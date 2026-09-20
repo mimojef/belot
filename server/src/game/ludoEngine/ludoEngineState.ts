@@ -59,6 +59,7 @@ export function createLudoEngineInitialState(): LudoGameState {
     winnerColor: null,
     turnVersion: 0,
     pendingExtraRoll: false,
+    leftColors: [],
   }
 }
 
@@ -80,5 +81,6 @@ export function createLudoAuthoritativeInitialState(turnOrder: readonly LudoColo
     winnerColor: null,
     turnVersion: 0,
     pendingExtraRoll: false,
+    leftColors: [],
   }
 }

@@ -171,6 +171,7 @@ import { createPasswordHash, verifyPassword } from './db/authHelpers.js'
 import { importBotProfilesCatalog } from './db/importBotProfilesCatalog.js'
 import { createMatchEconomyStore, setMatchPrizeResolver } from './db/matchEconomyStore.js'
 import { createLudoEconomyStore } from './db/ludoEconomyStore.js'
+import { createActiveLudoMatchSnapshotStore } from './db/activeLudoMatchSnapshotStore.js'
 import { createAttemptLudoRoomStart } from './game/attemptLudoRoomStart.js'
 import { createMatchRoomsStore } from './db/matchRoomsStore.js'
 import { createVipStore } from './db/vipStore.js'
@@ -680,6 +681,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'request_player_profile':
     case 'send_emoji_reaction':
     case 'send_phrase_reaction':
+    case 'send_ludo_emoji_reaction':
     case 'subscribe_ad_campaign_management':
     case 'unsubscribe_ad_campaign_management':
     case 'request_pending_ad_campaigns':
@@ -2671,6 +2673,7 @@ setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
+const activeLudoMatchSnapshotStore = await createActiveLudoMatchSnapshotStore(databaseBootstrap.databaseFilePath)
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
@@ -4277,12 +4280,50 @@ function settleLudoMatchIfNeeded(
   return { profileId: winner.profileId, prizeAmount: payoutResult.prizeAmount }
 }
 
+// Persist BEFORE settlement/broadcast (виж task spec §2: "runtime state
+// mutation -> persist authoritative snapshot -> broadcast snapshot към
+// клиентите... клиентът не бива да получи state, който още не е durable").
+// try/catch defense-in-depth, огледало на persistRoomSnapshot() за Белот —
+// DB failure тук не бива да чупи gameplay-а, само да се log-не.
+function persistLudoMatchSnapshot(snapshot: LudoMatchSnapshot): void {
+  try {
+    activeLudoMatchSnapshotStore.upsertMatch(snapshot)
+  } catch (error) {
+    console.error(`[ludo-match-snapshot] failed to persist match=${snapshot.matchId}`, error)
+  }
+}
+
 const ludoMatchRuntime = createLudoMatchRuntime({
   onSnapshot: (snapshot) => {
+    persistLudoMatchSnapshot(snapshot)
     const winnerPayout = snapshot.state.status === 'finished' ? settleLudoMatchIfNeeded(snapshot) : null
+    // Snapshot cleanup ЕДИНСТВЕНО след успешен settlement (виж task spec §7:
+    // "НИКОГА: snapshot delete -> после payout"). winnerPayout===null при
+    // finished status значи или липсващ winner data (структурно не би
+    // трябвало да се случи), или payoutLudoMatchWinner() реално е fail-нал
+    // (виж settleLudoMatchIfNeeded по-долу) — и в двата случая пазим реда,
+    // за да може boot recovery да опита пак (idempotent, ledger-guarded).
+    if (snapshot.state.status === 'finished' && winnerPayout !== null) {
+      try {
+        activeLudoMatchSnapshotStore.markMatchRemoved(snapshot.matchId)
+      } catch (error) {
+        console.error(`[ludo-match-snapshot] failed to remove match=${snapshot.matchId}`, error)
+      }
+    }
     const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
     const type = snapshot.revision === 0 ? 'ludo_game_started' : 'ludo_game_state'
     for (const player of snapshot.players) {
+      // Explicit-forfeit-нал играч (виж task-а "Explicit Изход" §2/§11) НЕ
+      // получава по-нататъшни snapshot broadcast-и — display roster-ът
+      // (snapshot.players) нарочно го пази за ОСТАНАЛИТЕ играчи (виж
+      // ludoMatchRuntime.ts::leave() коментара "display roster != active
+      // membership"), но самият forfeit-нал профил вече е навигирал/навигира
+      // към /games (виж requestExit()) и НЕ трябва да вижда собствения си
+      // leave presentation/winner popup на собствения си екран — точно
+      // прозорецът, който би се отворил, ако продължим да го broadcast-ваме
+      // тук (същата connection, все още 'connected' в краткия prozorec преди
+      // ludo_match_left да пристигне).
+      if (snapshot.state.leftColors.includes(player.color)) continue
       const connection = Object.values(serverState.connections).find(
         (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
       )
@@ -4300,8 +4341,8 @@ const ludoMatchRuntime = createLudoMatchRuntime({
 
 const ludoRoomsStore = createLudoRoomsStore({
   onRoomsChanged: () => broadcastLudoRoomsList(),
-  onRoomReady: (room, matchId) => {
-    ludoMatchRuntime.createMatch(room, matchId)
+  onRoomReady: (room, matchId, precomputed) => {
+    ludoMatchRuntime.createMatch(room, matchId, precomputed)
   },
   onMemberKicked: (room, player) => {
     safeSendToConnection(player.connectionId, { type: 'ludo_room_kicked', ludoRoomId: room.id })
@@ -4311,11 +4352,12 @@ const ludoRoomsStore = createLudoRoomsStore({
 
 // Canonical единствена orchestration точка за ВСЕКИ реален Ludo start path
 // (manual "Старт" + auto-full при join) — виж attemptLudoRoomStart.ts за
-// пълната rationale (re-check -> eject insufficient -> atomic debit ->
-// finalize+createMatch).
+// пълната rationale (re-check -> eject insufficient -> atomic debit +
+// snapshot -> finalize+createMatch).
 const attemptLudoRoomStart = createAttemptLudoRoomStart({
   ludoRoomsStore,
   ludoEconomyStore,
+  buildInitialMatch: (room, matchId) => ludoMatchRuntime.buildInitialMatch(room, matchId),
   hasEnoughBalance: (profileId, amount) => matchEconomyStore.hasEnoughBalance(profileId, amount),
   onPlayerEjectedForInsufficientBalance: (connectionId, ludoRoomId) => {
     safeSendToConnection(connectionId, {
@@ -4338,6 +4380,32 @@ for (const room of Object.values(serverState.rooms)) {
 
   persistRoomSnapshot(room)
 }
+
+// Ludo boot recovery (виж task spec §4 "BOOT RECOVERY") — извиква се ПРЕДИ
+// httpServer.listen() по-долу, затова никой client не може да е пристигнал
+// с ludo_game_state_request преди тази стъпка да е готова (mirror-нато на
+// Белот restore loop-а точно над тук). Waiting rooms НЕ се възстановяват
+// (виж task spec §9 — без debit, без риск, extends scope-а ненужно).
+const restoredLudoMatches = activeLudoMatchSnapshotStore.loadActiveMatches()
+for (const persisted of restoredLudoMatches) {
+  ludoMatchRuntime.restoreMatch(persisted)
+  // Crash window "finished snapshot persisted, restart ПРЕДИ payout" (виж
+  // task spec §7/§15) — settleLudoMatchIfNeeded е idempotent (ledger-guarded),
+  // safe да се извика безусловно тук дори payout-ът вече да е минал (crash
+  // window "payout committed, restart ПРЕДИ snapshot delete") — в ТОЗИ
+  // случай просто връща alreadyPaid резултата и пак chisti реда.
+  if (persisted.state.status === 'finished') {
+    const winnerPayout = settleLudoMatchIfNeeded(persisted)
+    if (winnerPayout !== null) {
+      try {
+        activeLudoMatchSnapshotStore.markMatchRemoved(persisted.matchId)
+      } catch (error) {
+        console.error(`[ludo-match-snapshot] failed to remove match=${persisted.matchId}`, error)
+      }
+    }
+  }
+}
+console.log(`[ludo-match-snapshot] restored active matches=${restoredLudoMatches.length}`)
 
 function getSocketByConnectionId(connectionId: ConnectionId): WebSocket | null {
   return socketRegistry.get(connectionId) ?? null
@@ -20210,12 +20278,28 @@ wsServer.on('connection', (socket, request) => {
         const latestConnection = getConnectionById(serverState, connection.id)
         if (!latestConnection?.profileId) return
         const snapshot = ludoMatchRuntime.reconnect(latestConnection.profileId, connection.id)
-        if (snapshot) safeSendToConnection(connection.id, {
-          type: 'ludo_game_state',
-          snapshot: toLudoGameProtocolSnapshot(snapshot),
-          walletBalance: ludoEconomyStore.getWalletBalance(latestConnection.profileId),
-          prizeAmount: null,
-        })
+        if (snapshot) {
+          safeSendToConnection(connection.id, {
+            type: 'ludo_game_state',
+            snapshot: toLudoGameProtocolSnapshot(snapshot),
+            walletBalance: ludoEconomyStore.getWalletBalance(latestConnection.profileId),
+            prizeAmount: null,
+          })
+        } else {
+          // Explicit canonical not-found (виж task spec §8) — преди тази
+          // промяна клиентът получаваше пълна тишина тук, ако нито runtime
+          // match, нито persisted snapshot съществуват за профила (напр.
+          // match-ът вече е finished+cleanup-нат, или профилът никога не е
+          // участвал). Idempotent end-game cleanup поведението (10s
+          // finishedCleanupTimer retention) остава напълно недокоснато —
+          // тази промяна засяга само какво получава клиентът, не кога/дали
+          // runtime-ът реално чисти match-а.
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            code: 'ludo_match_not_found',
+            message: 'Ludo играта не беше намерена.',
+          })
+        }
         return
       }
 
@@ -20250,6 +20334,46 @@ wsServer.on('connection', (socket, request) => {
             ? ludoMatchRuntime.move(message.matchId, latestConnection.profileId, message.expectedRevision, message.slot)
             : ludoMatchRuntime.reclaim(message.matchId, latestConnection.profileId, message.expectedRevision)
         if (!result.ok) safeSendToConnection(connection.id, { type: 'error', code: result.code, message: result.message })
+        return
+      }
+
+      if (message.type === 'send_ludo_emoji_reaction') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) return
+        // Realtime social reaction — transient presentation, не минава през
+        // reduceLudoGame/commit (виж task-а "Ludo emoji" §4/§9: не се
+        // персистира, не участва в canonical state/revision). requestState()
+        // resolve-ва match-а/roster-а/leftColors от ПРОФИЛА (profileToMatch),
+        // не от client-подадения matchId — matchId се cross-check-ва долу
+        // само defense-in-depth (огледално на roomId===message.roomId в
+        // Belot's send_emoji_reaction handler-а).
+        const snapshot = ludoMatchRuntime.requestState(latestConnection.profileId)
+        if (!snapshot || snapshot.matchId !== message.matchId || snapshot.state.status === 'finished') return
+        const sender = snapshot.players.find((player) => player.profileId === latestConnection.profileId)
+        // Explicit "Напуснал" (leftColors) играч не може да изпраща emoji в
+        // стария match (виж task-а §8) — display roster-ът го пази за
+        // ОСТАНАЛИТЕ (renderLudoPlayerPanel "Напуснал" статус), но самият
+        // напуснал профил вече няма активно участие в turn cycle-а, значи и
+        // не в social reactions-ите.
+        if (!sender || snapshot.state.leftColors.includes(sender.color)) return
+        const emojiMsg = {
+          type: 'ludo_emoji_reaction' as const,
+          matchId: snapshot.matchId,
+          color: sender.color,
+          emojiId: message.emojiId,
+        }
+        // Broadcast само до ОСТАНАЛИТЕ non-left участници в СЪЩИЯ match —
+        // огледално на onSnapshot broadcast loop-а по-горе (leftColors
+        // skip). Изпраща се и на самия sender (същия pattern като Belot's
+        // send_emoji_reaction — sender-ът вижда собствената си анимация
+        // само след server echo, не optimistic local render).
+        for (const player of snapshot.players) {
+          if (snapshot.state.leftColors.includes(player.color)) continue
+          const targetConnection = Object.values(serverState.connections).find(
+            (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
+          )
+          if (targetConnection) safeSendToConnection(targetConnection.id, emojiMsg)
+        }
         return
       }
 
@@ -22495,6 +22619,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   }
 
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
+  closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('authStore', () => authStore.close())

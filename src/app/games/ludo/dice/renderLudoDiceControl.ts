@@ -6,15 +6,25 @@
 // през СЪЩИЯ data-ludo-dice-roll-button="1" атрибут, който преди носеше
 // старият <button>.
 //
-// Два визуални слоя, ДВА отделни DOM елемента (не един nested):
-//  - production dice-turn image в avatar-sized click target-а;
-//  - SVG пръстен с 2 извити arc-и + arrowhead markers, който се върти
-//    ПОСТОЯННО около зара (CSS transform:rotate на самия <svg>, зарът
-//    остава напълно статичен).
-// Пръстенът е SIBLING на зара (не child), позициониран top:0;left:0
-// спрямо card-а — same convention като mobile countdown ring-а
-// (renderLudoPlayerPanel.ts), за да НЕ бъде изрязан от avatar box-а
-// overflow:hidden.
+// Два визуални слоя, ДВА отделни DOM елемента (не един nested), с explicit
+// local z-index hierarchy вътре в player card-а (position:relative root, виж
+// renderLudoPlayerPanel.ts):
+//  - z-index:1 (base) — production dice-turn image в avatar-sized click
+//    target-а, СЪЩИЯТ border-radius + overflow:hidden clipping pattern като
+//    normal avatar кутията (не квадратна с остри ръбове);
+//  - z-index:2 (overlay) — SVG пръстен с 2 извити arc-и + arrowhead markers,
+//    който се върти ПОСТОЯННО около зара (CSS transform:rotate на самия
+//    <svg>, зарът остава напълно статичен). По-висок z-index от зара
+//    гарантира стрелките да се рисуват ВИНАГИ над образа, не под него (бъгът,
+//    който тази йерархия оправя — преди образът беше на по-висок z-index от
+//    пръстена).
+// Пръстенът е SIBLING на зара (не child), позициониран top:0;left:0 спрямо
+// card-а — same convention като mobile countdown ring-а
+// (renderLudoPlayerPanel.ts), за да НЕ бъде изрязан от зара box-а
+// overflow:hidden (сега добавен на зара, но пръстенът е извън него).
+// Footer-ът (името на играча) остава z-index:auto/position:absolute без
+// numeric z-index — винаги под explicit-numbered siblings по CSS spec,
+// независимо от DOM ред, затова не се налага собствен z-index тук.
 
 function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number): { x: number; y: number } {
   const rad = (angleDeg * Math.PI) / 180
@@ -36,6 +46,11 @@ export interface LudoDiceControlOptions {
   hex: string // player hex цвят — стрелките го ползват (виж task-а т.6)
   avatarSize: number // same box размер като avatar-а, който замества
   insetPx: number // same inset gap като avatar-а — arrow ring-ът ползва точно този gap (avatarSize+insetPx*2), same formula като mobile countdown ring-а
+  // Same border-radius стойност като avatarRadius в renderLudoPlayerPanel.ts
+  // ('9px' compact / '13px' desktop) — dice image-ът замества avatar-а
+  // визуално 1:1, затова носи ТОЧНО същия radius + overflow:hidden clipping
+  // pattern като normal avatar кутията, вместо остри правоъгълни ръбове.
+  avatarRadius: string
   isRollable: boolean // true само за локалния играч на ход — добавя data-ludo-dice-roll-button="1" + pointer cursor
   // Единственото правило за rotating arrows (виж task-а): true само когато
   // ТОЗИ player е активен И turnPhase==='waiting_for_roll' — вярно за
@@ -46,7 +61,7 @@ export interface LudoDiceControlOptions {
 }
 
 export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
-  const { color, hex, avatarSize, insetPx, isRollable, shouldRotateArrows } = options
+  const { color, hex, avatarSize, insetPx, avatarRadius, isRollable, shouldRotateArrows } = options
   const ringSize = avatarSize + insetPx * 2 // same formula като buildMobileCountdownRingPath ringSize — гарантирано се събира в inset gap-а, допира footerTop с 0 overlap (виж коментара в renderLudoPlayerPanel.ts)
   const cx = ringSize / 2
   const cy = ringSize / 2
@@ -58,6 +73,15 @@ export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
   const arcTop = describeArc(cx, cy, r, -90 - ARC_SPAN_DEG / 2, -90 + ARC_SPAN_DEG / 2)
   const arcBottom = describeArc(cx, cy, r, 90 - ARC_SPAN_DEG / 2, 90 + ARC_SPAN_DEG / 2)
   const markerId = `ludo-dice-arrow-head-${color}`
+  // -webkit-tap-highlight-color:transparent — needed LOCALLY here because
+  // the whole Ludo game screen mounts on [data-ludo-overlay-root], a div
+  // appended directly to document.body (createLobbyFlowController.ts), i.e.
+  // a SIBLING of #app, not a descendant. The global mobile tap-highlight
+  // reset in style.css only targets "#app *" (+ the two other body-level
+  // exceptions it already lists) — same root cause documented there for the
+  // bidding popup/bottom-hand-cards flash, this dice tap target falls into
+  // that exact gap too. Fixed locally per this task's scope, not by
+  // widening the global selector.
   return `
     <div
       data-ludo-dice-anchor="${color}"
@@ -67,8 +91,11 @@ export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
         top:${insetPx}px; left:${insetPx}px;
         width:${avatarSize}px; height:${avatarSize}px;
         display:flex; align-items:center; justify-content:center;
-        z-index:3;
+        border-radius:${avatarRadius};
+        overflow:hidden;
+        z-index:1;
         cursor:${isRollable ? 'pointer' : 'default'};
+        -webkit-tap-highlight-color:transparent;
         ${isRollable ? '' : 'pointer-events:none;'}
       "
     >

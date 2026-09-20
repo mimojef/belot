@@ -148,7 +148,7 @@ async function patchIndexTsForDeterministicLudoWin(serverDir: string): Promise<v
     return {
       turnOrder: [...turnOrder], activeColor: winnerColor, turnPhase: 'waiting_for_roll',
       diceValue: null, legalMoves: [], pieces, status: 'in_progress', winnerColor: null,
-      turnVersion: 0, pendingExtraRoll: false,
+      turnVersion: 0, pendingExtraRoll: false, leftColors: [],
     } as any
   },
   randomDie: () => 1 as any,
@@ -388,27 +388,16 @@ try {
     assertEqual(pot, 40_000, 'total pot')
   })
 
-  // Winner determination: forfeit P2, P3, P4 in sequence so P1 remains as
-  // last-standing — leave() only supports 2-player forfeit explicitly per
-  // ludoMatchRuntime.ts, so for a 4p match we instead drive it to a
-  // deterministic winner via the SAME leave() 2-player-only guard: verify it
-  // is explicitly UNSUPPORTED for 4p (existing behavior, not something this
-  // task changes) and settle economics via a direct winner declaration using
-  // the SAME idempotent payout API the real "natural finish" reducer path
-  // would invoke — proves the settlement MATH (32000/8000 split) with real
-  // ledger + wallet numbers without requiring an hours-long dice auto-play.
-  console.log('--- D: verifying leave() 4p-forfeit-unsupported is untouched, then exercising payout math directly via the same idempotent store API a natural win would use ---')
-  send(P2, { type: 'leave_ludo_match', matchId: matchId4P })
-  const p2LeaveResult = await waitForFrame(P2, (f) => f.type === 'error' || f.type === 'ludo_match_left', 5_000, 'P2 leave 4p result')
-  await check('[D3] leave_ludo_match on a 4-player match is still unsupported (untouched lifecycle, not this task\'s concern)', () => {
-    if (p2LeaveResult.type !== 'error' || p2LeaveResult.code !== 'ludo_match_leave_unsupported') {
-      throw new Error(`expected ludo_match_leave_unsupported, got ${JSON.stringify(p2LeaveResult)}`)
-    }
-  })
-  await check('[D4] the unsupported leave attempt did not change anyone\'s balance', () => {
-    assertEqual(getWalletBalance(P1.profileId), 40_000, 'P1 unaffected')
-    assertEqual(getWalletBalance(P2.profileId), 40_000, 'P2 unaffected')
-  })
+  // Explicit "Изход" forfeit on a STARTED 4-player match is now a full,
+  // dedicated feature with its own test suite — see
+  // checkLudoExplicitForfeit.ts (turn-order skip, permanent leftColors,
+  // last-player-standing winner, pot/payout correctness, restart
+  // persistence, presentation gate). D3/D4 here used to assert the OLD
+  // ludo_match_leave_unsupported restriction, which no longer exists — that
+  // assertion is gone, not just relaxed, so it is removed rather than
+  // updated in place. D-WIN below continues to need all 4 original players
+  // untouched, so this suite does not additionally exercise a real forfeit
+  // against matchId4P.
 
   // ═══════════════════════════════════════════════════════════════════════
   // D-WIN (follow-up audit, Risk 1 + Risk 2): drive the SAME 4-player match

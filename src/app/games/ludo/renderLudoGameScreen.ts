@@ -17,6 +17,7 @@ import { ludoGridPointForCellId } from './board/ludoBoardGeometry'
 import { mapLudoColorToViewerQuadrant, rotateLudoGridPointForViewer, type LudoViewerQuadrant } from './board/ludoPerspective'
 import { renderLudoPiecesByCell } from './pieces/renderLudoPieces'
 import { renderLudoPlayerPanel } from './pieces/renderLudoPlayerPanel'
+import type { LudoPlayerLeaveStatus, LudoEmojiReactionDirection } from './pieces/renderLudoPlayerPanel'
 import { renderLudoBottomBar } from './renderLudoBottomBar'
 import { renderLudoAnimationStyles } from './ludoAnimationStyles'
 import { planLudoHighlights, renderLudoNormalHighlight, renderLudoCaptureImpactRing } from './pieces/renderLudoHighlights'
@@ -76,6 +77,47 @@ const LUDO_DESKTOP_HORIZONTAL_CHROME_PX =
 // височината (виж коментара по-горе защо header/bottomBar/action-редът са
 // константни в px, независимо от viewport-а).
 const LUDO_DESKTOP_BOARD_ROW_SIZE_CSS = `min(calc(100vh - ${LUDO_DESKTOP_VERTICAL_CHROME_PX}px), calc(100vw - ${LUDO_DESKTOP_HORIZONTAL_CHROME_PX}px))`
+
+// Responsive player-panel scale (desktop non-compact layout only) — реален
+// bug fix: преди тази промяна board-ът се смаляваше плавно (CSS min()/calc()
+// формулата по-горе), но player панелите бяха HARDCODED px константи в
+// renderLudoPlayerPanel.ts (avatarSize:124/insetPx:8/footerHeight:38/...),
+// напълно независими от board размера — при resize дъската се смаляваше,
+// картите не. Fix-ът вързва панелите към ТОЗИ SAME източник (същите chrome
+// константи по-горе), не нова паралелна breakpoint система:
+// computeLudoDesktopBoardSizePx() е ЧИСТО JS огледало на СЪЩАТА формула,
+// която LUDO_DESKTOP_BOARD_ROW_SIZE_CSS вече изразява в CSS (min на
+// height-bound/width-bound спрямо СЪЩИТЕ VERTICAL_CHROME_PX/
+// HORIZONTAL_CHROME_PX константи) — нужен е конкретен JS number (не CSS
+// var()), защото renderLudoDiceControl.ts прави реална аритметика върху
+// avatarSize/insetPx (ring size, stroke width, SVG geometry), която CSS
+// calc()/var() не може да захрани на markup-build време. Извиква се от
+// createLudoFlowController.ts::currentScreenState() при ВСЕКИ render() —
+// controller-ът вече има debounced window 'resize' listener, който вика
+// render() (виж handleResize), затова тази стойност автоматично следва
+// resize-а без отделен ResizeObserver/нова reactive система.
+export function computeLudoDesktopBoardSizePx(viewportWidthPx: number, viewportHeightPx: number): number {
+  const heightBoundPx = viewportHeightPx - LUDO_DESKTOP_VERTICAL_CHROME_PX
+  const widthBoundPx = viewportWidthPx - LUDO_DESKTOP_HORIZONTAL_CHROME_PX
+  return Math.max(0, Math.min(heightBoundPx, widthBoundPx))
+}
+
+// Reference board size, при/над който панелите остават на ОРИГИНАЛНИЯ си
+// fixed дизайн размер (scale=1, avatarSize=124px и т.н. — измерено реално:
+// board=642px на 1600x900/1440x900 desktop viewport, LUDO_DESKTOP_SIDE_CARD_
+// WIDTH_PX=144px вече е "max" бюджетът, резервиран в HORIZONTAL_CHROME по-
+// горе). Под тази граница панелите се смаляват ПРОПОРЦИОНАЛНО с дъската.
+// MIN_SCALE е readability/touch floor (задачата explicit позволява разумен
+// minimum) — картата никога не пада под 50% от дизайн размера си на desktop
+// (компактният mobile layout, отделен breakpoint, си остава напълно
+// непроменен и не минава през тази скала).
+const LUDO_DESKTOP_PANEL_REFERENCE_BOARD_PX = 640
+const LUDO_DESKTOP_PANEL_MIN_SCALE = 0.5
+
+export function computeLudoDesktopPanelScale(viewportWidthPx: number, viewportHeightPx: number): number {
+  const boardSizePx = computeLudoDesktopBoardSizePx(viewportWidthPx, viewportHeightPx)
+  return Math.min(1, Math.max(LUDO_DESKTOP_PANEL_MIN_SCALE, boardSizePx / LUDO_DESKTOP_PANEL_REFERENCE_BOARD_PX))
+}
 
 // Mobile board sizing — същия measured-constants подход като desktop-а
 // по-горе, но БЕЗ header (премахнат изцяло на mobile — виж mobile клона на
@@ -207,6 +249,30 @@ export interface LudoGameScreenState {
   canRollDice: boolean
   turnSecondsLeft: number
   useMobileLayout: boolean
+  // Explicit "Изход" forfeit presentation (виж task-а §3/§4/§8). leftColors
+  // е директно engine-ово state.leftColors — canonical, permanent, никога
+  // не мига (renderPlayerPanelSlot по-долу показва 'left' статус за всеки
+  // цвят в този списък, освен когато СЪЩИЯТ цвят е justLeftColor). justLeft
+  // е чисто presentation-only, transient (createLudoFlowController.ts-ов
+  // 5-секунден таймер) — показва 'just-left' (мигащо "Излезе от играта")
+  // САМО за цвета, чийто leave event ТОКУ-ЩО е бил presented, докато flight-ът/
+  // 5-те секунди все още текат. При foreground snap/reconnect justLeftColor
+  // винаги е null (виж §8 "не replay-вай historical leave animation") —
+  // исторически leftColors показват директно 'left', никога 'just-left'.
+  leftColors: readonly LudoColor[]
+  justLeftColor: LudoColor | null
+  // Виж computeLudoDesktopPanelScale doc коментара по-горе — 1 = ориги-
+  // налния fixed дизайн размер (голям desktop viewport), надолу до 0.5 при
+  // силно смален board. Игнориран изцяло когато useMobileLayout===true
+  // (компактният mobile layout не минава през тази скала).
+  desktopPanelScale: number
+  // Realtime emoji reaction bubbles (виж task-а "Ludo emoji" §4/§9) —
+  // чисто transient presentation, никога persisted/canonical (за разлика
+  // от leftColors по-горе). startedAt е Date.now() момента, в който
+  // createLudoFlowController.ts е получил server echo-то (виж
+  // addEmojiReaction) — elapsed се смята тук, при render(), СЪЩИЯТ pattern
+  // като turnElapsedMs по-долу.
+  emojiReactions: Partial<Record<LudoColor, { emojiId: string; startedAt: number }>>
 }
 
 function renderPlayerPanelSlot(
@@ -214,6 +280,7 @@ function renderPlayerPanelSlot(
   color: LudoColor,
   compact: boolean,
   localColor: LudoColor,
+  emojiDirection: LudoEmojiReactionDirection,
 ): string {
   const isActive = state.activeColor === color
   // Изчислено ПРИ ВСЕКИ render() спрямо реалния Date.now() — не натрупва
@@ -241,6 +308,31 @@ function renderPlayerPanelSlot(
     // — точно тази по-широка връзка беше root cause-ът на бъга.
     shouldRotateArrows: isActive && state.turnPhase === 'waiting_for_roll',
   }
+  // Виж LudoGameScreenState.leftColors/justLeftColor doc коментара —
+  // 'just-left' само докато ИМЕННО ТОЗИ цвят е активният transient
+  // presentation target; всеки ДРУГ вече напуснал цвят (включително ако
+  // justLeftColor сочи към различен, наскоро напуснал цвят в момента) вижда
+  // директно постоянното 'left'.
+  const leaveStatus: LudoPlayerLeaveStatus = !state.leftColors.includes(color)
+    ? null
+    : state.justLeftColor === color ? 'just-left' : 'left'
+
+  const emojiReaction = state.emojiReactions[color]
+  const emojiPresentation = emojiReaction
+    ? {
+        reaction: {
+          emojiId: emojiReaction.emojiId,
+          elapsedMs: Math.max(0, Date.now() - emojiReaction.startedAt),
+          // Уникален per (color, emojiId, startedAt) — ново emoji reaction
+          // за СЪЩИЯ цвят (дори идентично emojiId) е гарантирано нов DOM
+          // node identity, затова CSS animation-ът винаги рестартира чисто
+          // (огледално на Belot's reactionKey, виж task-а §7).
+          reactionKey: `${color}:${emojiReaction.emojiId}:${emojiReaction.startedAt}`,
+        },
+        direction: emojiDirection,
+      }
+    : null
+
   return renderLudoPlayerPanel(
     state.players[color],
     state.pieces,
@@ -250,6 +342,9 @@ function renderPlayerPanelSlot(
     diceControl,
     state.turnCountdownMs,
     isActive && state.isHumanCountdownActive,
+    leaveStatus,
+    state.desktopPanelScale,
+    emojiPresentation,
   )
 }
 
@@ -292,8 +387,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           overflow:hidden;
         ">
           <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-left')};">${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), true, localColor)}</div>
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-right')};">${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-left')};">${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), true, localColor, 'down')}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-right')};">${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), true, localColor, 'down')}</div>
           </div>
 
           <div style="
@@ -306,8 +401,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-left')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), true, localColor)}</div>
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-right')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), true, localColor)}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-left')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), true, localColor, 'up')}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-right')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), true, localColor, 'up')}</div>
           </div>
         </div>
 
@@ -341,8 +436,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
       ">
         <div style="display:flex; align-items:stretch; justify-content:center; gap:22px; flex-shrink:0; height:${LUDO_DESKTOP_BOARD_ROW_SIZE_CSS};">
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), false, localColor)}
-            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), false, localColor)}
+            ${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), false, localColor, 'right')}
+            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), false, localColor, 'right')}
           </div>
 
           <div style="
@@ -354,8 +449,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), false, localColor)}
-            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), false, localColor)}
+            ${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), false, localColor, 'left')}
+            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), false, localColor, 'left')}
           </div>
         </div>
       </div>

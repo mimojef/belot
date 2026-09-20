@@ -103,10 +103,10 @@ export function createLudoLobbyController(options: Options) {
 
   function renderCreateModal(): string {
     const stakes = options.stakes.length ? options.stakes : [0]
-    return `<div data-ludo-create-backdrop="1" style="position:fixed;inset:0;background:rgba(0,0,0,.78);display:grid;place-items:center;padding:14px;z-index:2;"><form data-ludo-create-form="1" style="${panel}width:min(100%,420px);max-height:calc(100dvh - 28px);overflow-y:auto;box-sizing:border-box;">
-      <h2 style="margin:0 0 18px;letter-spacing:0;">Създай Ludo игра</h2>
-      <label style="display:grid;gap:7px;margin-bottom:14px;">Брой играчи<select name="playerCount" style="min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;"><option value="2">2</option><option value="4">4</option></select></label>
-      <label style="display:grid;gap:7px;margin-bottom:14px;">Вход<select name="stake" style="min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;">${stakes.map((stake) => `<option value="${stake}">${stake} жълтици</option>`).join('')}</select></label>
+    return `<div data-ludo-create-backdrop="1" style="position:fixed;inset:0;background:rgba(0,0,0,.78);display:grid;place-items:center;padding:14px;z-index:2;"><form data-ludo-create-form="1" style="${panel}width:min(100%,420px);max-width:100%;min-width:0;max-height:calc(100dvh - 28px);overflow-y:auto;box-sizing:border-box;">
+      <h2 style="margin:0 0 18px;letter-spacing:0;">Създай игра</h2>
+      <label style="display:grid;gap:7px;margin-bottom:14px;min-width:0;">Брой играчи<select name="playerCount" style="width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;"><option value="2">2</option><option value="4">4</option></select></label>
+      <label style="display:grid;gap:7px;margin-bottom:14px;min-width:0;">Вход<select name="stake" style="width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;">${stakes.map((stake) => `<option value="${stake}">${stake} жълтици</option>`).join('')}</select></label>
       <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:10px;"><legend style="margin-bottom:8px;">Старт</legend><label><input type="radio" name="startMode" value="auto" checked> При запълване</label><label><input type="radio" name="startMode" value="manual"> Ръчен старт</label></fieldset>
       <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" data-ludo-create-close="1" style="${button}">Отказ</button><button type="submit" style="${button}background:#d4a520;color:#050505;">Създай</button></div>
     </form></div>`

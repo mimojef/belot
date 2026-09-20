@@ -33,6 +33,21 @@ export function renderLudoAnimationStyles(): string {
         from { transform:rotate(0deg); }
         to { transform:rotate(360deg); }
       }
+      @keyframes ludo-leave-status-blink {
+        0%, 100% { opacity:1; }
+        50% { opacity:0.35; }
+      }
+      /* Огледално на Belot's renderEmojiBubble fade curve (200ms in / hold /
+         400ms out от общо 4000ms — виж renderCuttingSeatPanels.ts
+         EMOJI_BUBBLE_TOTAL_MS) — процентите тук са фиксирани спрямо СЪЩАТА
+         обща продължителност (LUDO_EMOJI_BUBBLE_TOTAL_MS в
+         renderLudoPlayerPanel.ts), затова не се преизчисляват per-instance. */
+      @keyframes ludo-emoji-bubble-fade {
+        0% { opacity:0; }
+        5% { opacity:1; }
+        90% { opacity:1; }
+        100% { opacity:0; }
+      }
       [data-ludo-dice-roll-button]:hover {
         filter:brightness(1.08);
         transform:translateY(-1px);
@@ -42,6 +57,19 @@ export function renderLudoAnimationStyles(): string {
       }
       [data-ludo-bottom-bar-button]:hover {
         background:rgba(212,165,32,0.18) !important;
+      }
+      /* "Емоджита" triggerът е чисто изображение (виж renderLudoBottomBar.ts
+         doc коментара) — лек scale/opacity вместо gold background hover-а
+         по-горе, за да остане "чисто изображение, което служи за бутон". */
+      [data-ludo-emoji-image-button] img {
+        transition:transform 140ms ease, opacity 140ms ease;
+      }
+      [data-ludo-emoji-image-button]:hover img {
+        transform:scale(1.08);
+      }
+      [data-ludo-emoji-image-button]:active img {
+        transform:scale(0.94);
+        opacity:0.85;
       }
     </style>
   `
