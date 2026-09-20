@@ -198,6 +198,23 @@ function isAdminOrSubadminAuthSession(session: LobbyAuthSession | null): boolean
 }
 
 /**
+ * "Игри" navigation item видимост (desktop и mobile еднакво) — само за
+ * admin/subadmin/chat_admin/top_chat_admin/pika_team. Само UX — /games route-ът
+ * и server authorization НЕ са ограничени от този helper (виж task brief).
+ * Централен helper, за да не се дублира role check-ът между desktop и mobile
+ * render пътищата.
+ */
+function canSeeGamesMenu(role: string | null | undefined): boolean {
+  return (
+    role === 'admin'
+    || role === 'subadmin'
+    || role === 'chat_admin'
+    || role === 'top_chat_admin'
+    || role === 'pika_team'
+  )
+}
+
+/**
  * "Публикации от Pika.bg" — показва бутона "(×)" за изтриване на публикации.
  * Само UX — сървърът презаверява това право на всяко DELETE през
  * isPikaAnnouncementAuthorSession (виж authStore.ts). Умишлено по-тесен от
@@ -4507,6 +4524,7 @@ export function createLobbyFlowController(
       vipPurchaseMessageText: state.vipPurchaseMessageText,
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
+      canSeeGamesMenu: canSeeGamesMenu(authSession?.account.role ?? null),
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
