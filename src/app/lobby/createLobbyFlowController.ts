@@ -2902,6 +2902,47 @@ export function createLobbyFlowController(
   // независимо от _ludoController/_ludoLobbyController lifecycle-а в момента
   // на закъснелия отговор.
   let _isExpectingLudoMatchRestore = false
+  // Lifecycle ownership за gameplay-action (roll/move/reclaim) error-и —
+  // виж task-а "ludo_match_not_turn lifecycle UX bug": реален репорт —
+  // natural finish (win ИЛИ loss) -> end-game popup -> OK -> /games/ludo
+  // показваше "Не е твоят ред." под banner-а и при двамата играчи.
+  //
+  // Root cause: _ludoLobbyController се destroy-ва САМО за миг при match
+  // start (ludo_game_started handler-а), но следващият generic render()
+  // tick веднага го пре-mount-ва (виж render()-a по-долу — "ludo-lobby"
+  // currentScreen never actually changes while playing", само fullscreen
+  // game overlay-я се показва НАД него) — затова през ЦЯЛАТА игра
+  // _ludoLobbyController реално съществува, само визуално скрит зад
+  // overlay-я. Ако играч кликне нещо invalid по ВРЕМЕ на реалния match
+  // (напр. случаен клик върху зара по време на хода на опонента —
+  // напълно нормално за реални играчи) и сървърът отговори с gameplay
+  // error (типично ludo_match_not_turn), старият generic error handler
+  // безусловно викаше _ludoLobbyController.showMessage(...) — текстът се
+  // записваше в (скрития) lobby state и оставаше "queued" невидим, докато
+  // ПО-КЪСНО closeLudoGameOverlay() (end-game OK) разкрие lobby DOM-а
+  // отново — показвайки stale текст от match, който вече е приключил.
+  //
+  // Fix (controller-lifecycle ownership, НЕ text/code match): COUNTER (не
+  // boolean — виж по-долу защо), увеличаван при ВСЕКИ roll/move/reclaim
+  // send (единствените 3 call site-а в openLudoGameOverlay() по-долу),
+  // намаляван при ВСЕКИ следващ отговор (success ludo_game_state ИЛИ
+  // error). Ако при error отговора брояча е >0 (т.е. отговорът реално
+  // "принадлежи" на неприключен gameplay request) И _ludoController вече е
+  // null (controller destroy-нат между send-а и отговора — точно end-game
+  // OK сценарият), отговорът е lifecycle-stale -> discard, никога не стига
+  // до _ludoLobbyController. Ако _ludoController все още съществува
+  // (реален active match error), поведението остава напълно непроменено —
+  // showMessage() продължава да се вика нормално.
+  //
+  // ЗАЩО COUNTER, не boolean: реален browser E2E тест разкри double-click
+  // race (изключително правдоподобен — играч кликва зара два пъти бързо,
+  // напр. при перцепирано lag) — 2 requests в полет едновременно; success
+  // response-ът на ПЪРВИЯ пристига преди error response-а на ВТОРИЯ.
+  // Boolean, clear-нат безусловно на ВСЯКО ludo_game_state, би се нулирал
+  // от 1-вия response ПРЕДИ 2-рия (реално stale) error изобщо да пристигне
+  // — точно това се случи с първата (boolean) версия на този fix. Counter-
+  // ът правилно "изчаква" двата response-а, преди да падне на 0.
+  let _ludoGameplayActionResponsesPending = 0
   let _ludoLobbyController: {
     destroy: () => void
     setRooms: (rooms: import('../network/createGameServerClient').LudoRoomSnapshot[]) => void
@@ -2993,9 +3034,23 @@ export function createLobbyFlowController(
       localColor,
       authoritative: {
         initialSnapshot: snapshot,
-        onRollRequest: (matchId, revision) => options.onLudoRollRequest?.(matchId, revision),
-        onMoveRequest: (matchId, revision, slot) => options.onLudoMoveRequest?.(matchId, revision, slot),
-        onReclaimRequest: (matchId, revision) => options.onLudoReclaimRequest?.(matchId, revision),
+        // Виж _ludoGameplayActionResponsesPending doc коментара при
+        // декларацията му ("ludo_match_not_turn lifecycle UX bug") —
+        // ЕДИНСТВЕНИТЕ 3 call site-а, чийто error response трябва да се
+        // третира като gameplay-action response (lifecycle-stale-aware),
+        // не generic lobby error.
+        onRollRequest: (matchId, revision) => {
+          _ludoGameplayActionResponsesPending += 1
+          options.onLudoRollRequest?.(matchId, revision)
+        },
+        onMoveRequest: (matchId, revision, slot) => {
+          _ludoGameplayActionResponsesPending += 1
+          options.onLudoMoveRequest?.(matchId, revision, slot)
+        },
+        onReclaimRequest: (matchId, revision) => {
+          _ludoGameplayActionResponsesPending += 1
+          options.onLudoReclaimRequest?.(matchId, revision)
+        },
         onStateRefreshRequest: () => options.onLudoGameStateOpen?.(),
         onEmojiReactionSend: (matchId, emojiId) => options.onLudoEmojiReactionSend?.(matchId, emojiId),
       },
@@ -3017,6 +3072,19 @@ export function createLobbyFlowController(
     _ludoController?.destroy()
     _ludoController = null
     document.querySelector('[data-ludo-overlay-root="1"]')?.remove()
+    // Виж _ludoGameplayActionResponsesPending doc коментара — "ludo_match_
+    // not_turn lifecycle UX bug": _ludoLobbyController остава mounted (само
+    // визуално скрит зад fullscreen game overlay-я) през ЦЯЛАТА игра, затова
+    // ГЕНУИНЕН mid-match gameplay error (напр. случаен off-turn клик — активен
+    // match error, коректно НЕ discard-нат от gating-a по-долу) стига до
+    // showMessage() и се записва в (скрития) lobby state МНОГО ПРЕДИ end-game
+    // OK — не просто закъснели responses ПОСЛЕ destroy. Затова "принадлежи на
+    // match-а, който ТОКУ-ЩО приключва" сама по себе си не е достатъчна —
+    // трябва explicit да се изчисти всяко ВЕЧЕ queued (но никога визуално
+    // показано, защото lobby-то е било скрито) съобщение точно тук, при
+    // overlay close — то е "от" match-а, който вече приключва, независимо
+    // кога точно е пристигнал отговорът, който го е записал.
+    _ludoLobbyController?.showMessage('')
   }
 
   function shouldSuppressLobbyRender(): boolean {
@@ -16629,6 +16697,7 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_game_state') {
       _isExpectingLudoMatchRestore = false
+      if (_ludoGameplayActionResponsesPending > 0) _ludoGameplayActionResponsesPending -= 1
       if (_acknowledgedLudoMatchIds.has(message.snapshot.matchId)) return true
       if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot, message.prizeAmount)
       else {
@@ -17037,6 +17106,19 @@ export function createLobbyFlowController(
         const wasExpectingRestore = _isExpectingLudoMatchRestore
         _isExpectingLudoMatchRestore = false
         if (!wasExpectingRestore) return true
+      }
+      // Виж _ludoGameplayActionResponsesPending doc коментара при
+      // декларацията му — "ludo_match_not_turn lifecycle UX bug": response
+      // на roll/move/reclaim (типично ludo_match_not_turn, но и всеки друг
+      // gameplay-action error код — намерена е controller-lifecycle
+      // ownership, не text/code match) е lifecycle-stale, ако _ludoController
+      // вече е destroy-нат до момента на отговора (end-game OK/exit между
+      // send-а и отговора) — discard, никога не стига до _ludoLobbyController.
+      // Докато match-ът все още е active (_ludoController съществува),
+      // поведението остава напълно непроменено.
+      if (_ludoGameplayActionResponsesPending > 0) {
+        _ludoGameplayActionResponsesPending -= 1
+        if (!_ludoController) return true
       }
       if (_ludoLobbyController) {
         _ludoLobbyController.showMessage(message.message)

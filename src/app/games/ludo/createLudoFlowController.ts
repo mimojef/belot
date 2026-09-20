@@ -38,6 +38,8 @@ import { renderLudoEmojiPickerHtml } from './renderLudoBottomBar'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
 import { renderLudoGameEndPopup } from './renderLudoGameEndPopup'
 import { renderLudoExitConfirmPopup } from './renderLudoExitConfirmPopup'
+import { renderLudoSettingsPopup } from './renderLudoSettingsPopup'
+import { isLudoDiceSoundEnabled, isLudoGameSoundsEnabled, setLudoDiceSoundEnabled, setLudoGameSoundsEnabled } from './ludoSoundSettings'
 import { isValidAnimatedEmojiId } from '../../animatedEmoji/animatedEmojiAssets'
 import { LUDO_EMOJI_BUBBLE_TOTAL_MS } from './pieces/renderLudoPlayerPanel'
 import { LUDO_MODAL_LAYER_Z_INDEX } from './ludoLayerHierarchy'
@@ -192,6 +194,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let isGameEndPopupOpen = false
   let isExitConfirmOpen = false
   let isExitLeavePending = false
+  let isSettingsPopupOpen = false
   // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
   // до следващия път, когато local player-ът получи хода си (не reset-ва
   // се автоматично, аналог на Belot persistent popup).
@@ -490,7 +493,60 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (showBotTakeoverPopup) mountBotTakeoverPopup()
     if (isGameEndPopupOpen) mountGameEndPopup()
     if (isExitConfirmOpen) mountExitConfirmPopup()
+    if (isSettingsPopupOpen) mountSettingsPopup()
     wireEvents()
+  }
+
+  // Ludo "Настройки" popup (виж task-а "Ludo sound settings") — reuse-ва
+  // СЪЩИЯ mount pattern като mountExitConfirmPopup по-горе (backdrop +
+  // centered card в modalLayerRoot, pointer-events:auto докато е отворен).
+  // Чисто presentation — НЕ пипа turn/dice логика, играта продължава
+  // нормално server-side. Toggle кликовете обновяват съответния бутон
+  // directno (style + символ), без нужда от пълен re-mount на popup-а.
+  function mountSettingsPopup(): void {
+    if (modalLayerRoot.querySelector('[data-ludo-settings-backdrop="1"]')) return
+    const container = document.createElement('div')
+    container.innerHTML = renderLudoSettingsPopup()
+    const backdrop = container.firstElementChild
+    if (!(backdrop instanceof HTMLElement)) return
+    backdrop.style.pointerEvents = 'auto'
+    modalLayerRoot.appendChild(backdrop)
+    syncModalLayerInteractivity()
+
+    modalLayerRoot.querySelector('[data-ludo-settings-close="1"]')?.addEventListener('click', closeSettingsPopup)
+    backdrop.addEventListener('click', (event) => {
+      if (event.target === backdrop) closeSettingsPopup()
+    })
+    modalLayerRoot.querySelectorAll<HTMLButtonElement>('[data-ludo-settings-toggle]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const key = button.getAttribute('data-ludo-settings-toggle')
+        const nextEnabled = key === 'gameSounds'
+          ? !isLudoGameSoundsEnabled()
+          : !isLudoDiceSoundEnabled()
+        if (key === 'gameSounds') setLudoGameSoundsEnabled(nextEnabled)
+        else if (key === 'dice') setLudoDiceSoundEnabled(nextEnabled)
+        const onColor = '#22c55e'
+        const offColor = '#ef4444'
+        const color = nextEnabled ? onColor : offColor
+        button.setAttribute('aria-pressed', nextEnabled ? 'true' : 'false')
+        button.style.borderColor = color
+        button.style.color = color
+        button.style.background = nextEnabled ? 'rgba(34,197,94,0.16)' : 'rgba(239,68,68,0.16)'
+        button.innerHTML = nextEnabled ? '&#10003;' : '&#10005;'
+      })
+    })
+  }
+
+  function openSettingsPopup(): void {
+    if (isSettingsPopupOpen) return
+    isSettingsPopupOpen = true
+    mountSettingsPopup()
+  }
+
+  function closeSettingsPopup(): void {
+    isSettingsPopupOpen = false
+    modalLayerRoot.querySelector('[data-ludo-settings-backdrop="1"]')?.remove()
+    syncModalLayerInteractivity()
   }
 
   function mountExitConfirmPopup(): void {
@@ -553,6 +609,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     isExitConfirmOpen = false
     isExitLeavePending = false
     isEmojiPickerOpen = false
+    isSettingsPopupOpen = false
     modalLayerRoot.replaceChildren()
     syncModalLayerInteractivity()
     clearScheduledTimers()
@@ -688,6 +745,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   function wireEvents(): void {
     options.root.querySelector('[data-ludo-exit-button="1"]')?.addEventListener('click', () => {
       openExitConfirmPopup()
+    })
+
+    options.root.querySelector('[data-ludo-settings-button="1"]')?.addEventListener('click', () => {
+      openSettingsPopup()
     })
 
     options.root.querySelector('[data-ludo-dice-roll-button="1"]')?.addEventListener('click', () => {

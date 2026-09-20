@@ -19,6 +19,7 @@
 import { renderLudoDice } from './renderLudoDice'
 import { computeLudoDiceThrowTransform, type LudoDiceFace } from './ludoDiceState'
 import { LUDO_DICE_OVERLAY_Z_INDEX } from '../ludoLayerHierarchy'
+import { playLudoSound } from '../ludoSoundSettings'
 
 // = точно вградения 900ms transition в renderLudoDice.ts (data-ludo-dice-
 // cube style), за да кацват "полетът" (WAAPI, container-а) и "завъртането"
@@ -28,16 +29,17 @@ const FLIGHT_DURATION_MS = 900
 const DICE_ROLL_SOUND_SRC = '/audio/ludo/dice-roll.mp3'
 
 // Минимален presentation audio side effect — НЕ gameplay logic, не мутира
-// game state. Нов Audio() instance на всеки roll (не pooled), тъй като dice
-// roll не е latency-critical/high-frequency като card-sfx (виж
-// createGameAudioController.ts CARD_SFX_POOL_SIZE коментара) — просто
-// презапочва играенето, ако предходният roll звук все още звучи. play()
-// rejection (autoplay restriction, тих tab, etc.) се игнорира тихо — звукът
-// е чисто декоративен, никога не трябва да чупи хвърлянето.
+// game state. Минава през централния playLudoSound() gate (виж
+// ludoSoundSettings.ts) — 'dice' категория, gate-ната зад "Звук на зара"
+// настройката (и master "Звуци в играта" toggle-а). Нов Audio() instance на
+// всеки roll (не pooled), тъй като dice roll не е latency-critical/
+// high-frequency като card-sfx (виж createGameAudioController.ts
+// CARD_SFX_POOL_SIZE коментара) — просто презапочва играенето, ако
+// предходният roll звук все още звучи. play() rejection (autoplay
+// restriction, тих tab, etc.) се игнорира тихо — звукът е чисто
+// декоративен, никога не трябва да чупи хвърлянето.
 function playLudoDiceRollSound(): void {
-  if (typeof Audio === 'undefined') return
-  const audio = new Audio(DICE_ROLL_SOUND_SRC)
-  void audio.play().catch(() => {})
+  playLudoSound(DICE_ROLL_SOUND_SRC, 'dice')
 }
 
 // Responsive dice sizing (виж task-а — bug fix: зарът преди беше твърд

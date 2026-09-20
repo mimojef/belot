@@ -2,6 +2,7 @@ import { renderLudoPieceHtml } from './renderLudoPieces'
 import type { LudoCellId, LudoPieceId } from '../ludoTypes'
 import { ludoSafeCellIds, parseLudoCellId } from '../board/ludoBoardGeometry'
 import { LUDO_FINISH_LENGTH } from '../ludoGeometryConstants'
+import { playLudoSound } from '../ludoSoundSettings'
 
 const MOVE_TRAVEL_MS = 165
 const STEP_TOTAL_MS = 260
@@ -23,19 +24,21 @@ const END_GAME_SOUND_SRC = '/audio/ludo/end-game.mp3'
 const LUDO_SAFE_CELL_ID_SET = new Set(ludoSafeCellIds())
 
 // Минимален presentation audio side effect (не gameplay logic, не мутира
-// state) — по един нов Audio() instance на всяка route стъпка, вместо
-// reused/pooled element. Стъпките се редуват на ~260ms (виж STEP_TOTAL_MS),
-// значи предходният playback обикновено още не е приключил, когато следва
-// новото стъпване — reset-ване на currentTime на споделен елемент би
-// звучало като прекъснат/накъсан звук вместо чист повторен "tap"; отделен
-// instance на всяка стъпка позволява презастъпващи се опашки да звучат
-// естествено (всеки играе изцяло, независимо от следващия). play()
-// rejection (autoplay restriction и т.н.) се игнорира тихо — звукът е
-// чисто декоративен, никога не трябва да чупи движението.
+// state) — минава през централния playLudoSound() gate (виж
+// ludoSoundSettings.ts), 'gameplay' категория (gate-ната само зад master
+// "Звуци в играта", НЕ зад "Звук на зара" — тази настройка засяга
+// изключително dice-roll звука). По един нов Audio() instance на всяка
+// route стъпка, вместо reused/pooled element. Стъпките се редуват на ~260ms
+// (виж STEP_TOTAL_MS), значи предходният playback обикновено още не е
+// приключил, когато следва новото стъпване — reset-ване на currentTime на
+// споделен елемент би звучало като прекъснат/накъсан звук вместо чист
+// повторен "tap"; отделен instance на всяка стъпка позволява
+// презастъпващи се опашки да звучат естествено (всеки играе изцяло,
+// независимо от следващия). play() rejection (autoplay restriction и т.н.)
+// се игнорира тихо — звукът е чисто декоративен, никога не трябва да чупи
+// движението.
 function playLudoPawnStepSound(): void {
-  if (typeof Audio === 'undefined') return
-  const audio = new Audio(PAWN_STEP_SOUND_SRC)
-  void audio.play().catch(() => {})
+  playLudoSound(PAWN_STEP_SOUND_SRC, 'gameplay')
 }
 
 // Star/safe landing вариант — играе се ВМЕСТО pawn-step (никога заедно с
@@ -45,21 +48,15 @@ function playLudoPawnStepSound(): void {
 // нормалният pawn-step звук — star sound маркира "спрях тук", не "минах
 // оттук".
 function playLudoStarLandingSound(): void {
-  if (typeof Audio === 'undefined') return
-  const audio = new Audio(STAR_LANDING_SOUND_SRC)
-  void audio.play().catch(() => {})
+  playLudoSound(STAR_LANDING_SOUND_SRC, 'gameplay')
 }
 
 function playLudoTriangleEntrySound(): void {
-  if (typeof Audio === 'undefined') return
-  const audio = new Audio(TRIANGLE_ENTRY_SOUND_SRC)
-  void audio.play().catch(() => {})
+  playLudoSound(TRIANGLE_ENTRY_SOUND_SRC, 'gameplay')
 }
 
 export function playLudoEndGameSound(): void {
-  if (typeof Audio === 'undefined') return
-  const audio = new Audio(END_GAME_SOUND_SRC)
-  void audio.play().catch(() => {})
+  playLudoSound(END_GAME_SOUND_SRC, 'gameplay')
 }
 
 function isCenterTriangleCell(cellId: LudoCellId): boolean {

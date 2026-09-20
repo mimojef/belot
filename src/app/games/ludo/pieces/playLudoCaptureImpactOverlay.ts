@@ -25,6 +25,7 @@
 // Overlay-ят се маха сам след завършване, caller-ът просто await-ва промиса.
 
 import { LUDO_CAPTURE_IMPACT_Z_INDEX } from '../ludoLayerHierarchy'
+import { playLudoSound } from '../ludoSoundSettings'
 
 const IMPACT_DURATION_MS = 340
 const PUFF_COUNT = 7
@@ -38,13 +39,13 @@ const PAWN_CAPTURE_SOUND_SRC = '/audio/ludo/pawn-capture.mp3'
 // зад capturedPieceIds.length > 0), затова звукът тук автоматично наследява
 // същата гаранция: никога не звучи при safe-cell collision, normal landing
 // върху празна клетка, или landing върху собствена пионка — тези пътища
-// изобщо не викат тази функция. Нов Audio() instance на всеки capture (не
-// pooled) — capture-ите не са high-frequency като pawn-step; play()
-// rejection се игнорира тихо, звукът е чисто декоративен.
+// изобщо не викат тази функция. Минава през централния playLudoSound() gate
+// (виж ludoSoundSettings.ts) — 'gameplay' категория (gate-ната само зад
+// master "Звуци в играта", НЕ зад "Звук на зара"). Нов Audio() instance на
+// всеки capture (не pooled) — capture-ите не са high-frequency като
+// pawn-step; play() rejection се игнорира тихо, звукът е чисто декоративен.
 function playLudoPawnCaptureSound(): void {
-  if (typeof Audio === 'undefined') return
-  const audio = new Audio(PAWN_CAPTURE_SOUND_SRC)
-  void audio.play().catch(() => {})
+  playLudoSound(PAWN_CAPTURE_SOUND_SRC, 'gameplay')
 }
 
 // Fisher-Yates-style детерминистичен "organic" offset набор — НЕ perfect
