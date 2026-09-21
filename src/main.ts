@@ -109,6 +109,11 @@ import {
   renderResetPasswordScreen,
   type ResetPasswordScreenState,
 } from './app/passwordReset/renderResetPasswordScreen'
+import {
+  extractAndClearVerificationToken,
+  renderRegistrationVerificationPage,
+  type RegistrationVerificationPageState,
+} from './app/registrationVerification/renderRegistrationVerificationPage'
 
 const rootElementCandidate = document.querySelector<HTMLDivElement>('#app')
 
@@ -120,6 +125,25 @@ const rootElement: HTMLDivElement = rootElementCandidate
 
 // Определя се веднага — преди lobby/client bootstrap — за да guard-ва всички async callbacks.
 const _isResetPasswordPath = window.location.pathname === '/reset-password'
+// Email → dedicated registration verification page (§"EMAIL → DIRECT
+// REGISTRATION VERIFICATION PAGE") — mirror на _isResetPasswordPath pattern-а.
+const _isVerifyRegistrationPath = window.location.pathname === '/verify-registration'
+// §"URL FORMAT"/"execution order" — token-ът пътува в URL FRAGMENT
+// (#token=...), НЕ query string (fragment никога не стига до сървъра: nginx
+// access log, Referer header при самия GET за страницата). Extract-ва се и
+// СЕ ИЗЧИСТВА ОТ ADDRESS BAR-А тук, на най-ранната възможна точка на route
+// bootstrap-а — ПРЕДИ mountConsentUi()/initializeAnalytics() (виж extreme
+// края на тоя файл), за да няма никакъв прозорец, в който Meta Pixel-овия
+// автоматичен PageView (fbq('track','PageView'), чете document.location.href)
+// би могъл да види token-а в URL-а. Token-ът пази се само в тази локална
+// променлива — никъде другаде (нито global state, нито re-derive-ва се от
+// URL по-късно, защото URL-ът вече е изчистен).
+const _verifyRegistrationToken = _isVerifyRegistrationPath ? extractAndClearVerificationToken() : null
+// Комбиниран guard за ВСИЧКИ "dedicated standalone page, не нормалния lobby
+// bootstrap" пътища — всеки съществуващ _isResetPasswordPath gate по-долу се
+// разширява с този флаг наведнъж (не поотделно за всеки dedicated route),
+// за да не пропуснем нов route case-by-case, ако в бъдеще се добави трети.
+const _isStandaloneDedicatedPath = _isResetPasswordPath || _isVerifyRegistrationPath
 
 // Extract-нато (не само inline в onMessage) конкретно за да е тествано
 // изолирано — виж checkInitialNavUrlSync.ts. lobby.handleServerMessage(message)
@@ -749,7 +773,7 @@ async function loadAuthSession(): Promise<void> {
     syncLobbyWithAuthSession()
     void syncLobbyTopicsDirectoryMetadata()
     lobby.refreshDailyRewardsStatus()
-    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
+    if (!activeRoom.hasActiveRoom() && !_isStandaloneDedicatedPath) {
       lobby.render()
     }
   }
@@ -781,7 +805,7 @@ async function loadAuthSession(): Promise<void> {
     await syncLobbyFriendships()
     await syncLobbyChatConversations()
     await syncLobbyTopicsDirectoryMetadata()
-    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
+    if (!activeRoom.hasActiveRoom() && !_isStandaloneDedicatedPath) {
       lobby.render()
     }
   } catch {
@@ -6084,7 +6108,7 @@ async function respondTournamentPartnerInviteRequest(
 
 lobby = createLobbyFlowController({
   root: rootElement,
-  suppressRendering: _isResetPasswordPath,
+  suppressRendering: _isStandaloneDedicatedPath,
   joinMatchmaking: (stake, displayName) => {
     client.joinMatchmaking(stake, displayName)
   },
@@ -7236,7 +7260,7 @@ client = createGameServerClient({
       return
     }
 
-    if (!_isResetPasswordPath) {
+    if (!_isStandaloneDedicatedPath) {
       lobby.setConnected(true)
       lobby.setErrorText(null)
       // Нова WS връзка = нов connection.id на сървъра, старият lobby chat
@@ -7289,7 +7313,7 @@ client = createGameServerClient({
     }
 
     shouldReloadLobbyOnReconnect = true
-    if (!_isResetPasswordPath) {
+    if (!_isStandaloneDedicatedPath) {
       lobby.setConnected(false)
       scheduleServerReconnect()
 
@@ -7305,7 +7329,7 @@ client = createGameServerClient({
       return
     }
 
-    if (!_isResetPasswordPath) {
+    if (!_isStandaloneDedicatedPath) {
       lobby.setErrorText(SERVER_CONNECTION_ERROR_MESSAGE)
     }
   },
@@ -7842,7 +7866,7 @@ client = createGameServerClient({
       return
     }
 
-    if (!activeRoom.hasActiveRoom() && !_isResetPasswordPath) {
+    if (!activeRoom.hasActiveRoom() && !_isStandaloneDedicatedPath) {
       lobby.handleServerMessage(message)
     }
     requestPwaUpdateApplyAttempt()
@@ -7866,7 +7890,7 @@ const disposeViewportResizeHandler = createViewportResizeHandler(() => {
     return
   }
 
-  if (!_isResetPasswordPath) {
+  if (!_isStandaloneDedicatedPath) {
     lobby.render()
   }
 })
@@ -7941,6 +7965,7 @@ const _VALID_PATHS = new Set([
   '/about',
   '/fair-play',
   '/reset-password',
+  '/verify-registration',
 ])
 if (!isStripePaymentReturn && !isRunningAsStandalone() && !_VALID_PATHS.has(_initialPath)) {
   showLandingOverlay()
@@ -7997,6 +8022,323 @@ if (_isResetPasswordPath) {
   }
 
   _renderReset()
+} else if (_isVerifyRegistrationPath) {
+  // Email → dedicated registration verification page (§"EMAIL → DIRECT
+  // REGISTRATION VERIFICATION PAGE"). §"PREFERRED TOKEN DESIGN" — само
+  // encrypted opaque verificationToken (НИКОГА raw pendingRegistrationId)
+  // пътува тук; token-ът вече е extract-нат и fragment-ът вече е изчистен от
+  // address bar-а на най-ранната точка на bootstrap-а (виж
+  // _verifyRegistrationToken const в началото на тоя файл).
+  const _verifyToken = _verifyRegistrationToken ?? ''
+
+  let _verifyState: RegistrationVerificationPageState = _verifyToken
+    ? { phase: 'loading' }
+    : { phase: 'invalid' }
+
+  function _renderVerify(): void {
+    renderRegistrationVerificationPage(rootElement, _verifyState, {
+      onCodeChange: (code) => {
+        if (_verifyState.phase === 'form') {
+          _verifyState = { ..._verifyState, code }
+        }
+      },
+      onRememberMeChange: (checked) => {
+        if (_verifyState.phase === 'form') {
+          _verifyState = { ..._verifyState, rememberMe: checked }
+        }
+      },
+      onGoToLogin: (prefillEmail) => {
+        // Login popup prefill — best-effort, БЕЗ URL/query state (виж task
+        // spec-а "НЕ съхранявай или prefill-вай password от URL/server
+        // response" — тук само email-а, никога парола). Самото lobby
+        // bootstrap-ва нормално след redirect-а, login modal-ът се отваря
+        // explicit чрез query param, познат на съществуващия router
+        // (openAuthModal-style, mirror на ?screen= конвенцията другаде в
+        // тоя файл).
+        const target = prefillEmail
+          ? `/lobby?auth=login&email=${encodeURIComponent(prefillEmail)}`
+          : '/lobby?auth=login'
+        window.location.assign(target)
+      },
+      onGoToRegister: () => {
+        window.location.assign('/lobby?auth=register')
+      },
+      onCancelDisplayNameChange: () => {
+        if (_verifyState.phase !== 'displayName') return
+        _verifyState = {
+          phase: 'form',
+          maskedEmail: _verifyState.maskedEmail,
+          expiresAt: _verifyState.expiresAt,
+          resendAvailableAtMs: _verifyState.resendAvailableAtMs,
+          nowMs: Date.now(),
+          code: _verifyState.code,
+          rememberMe: _verifyState.rememberMe,
+          errorText: null,
+          submitting: false,
+          resending: false,
+        }
+        _renderVerify()
+      },
+      onDisplayNameDraftChange: (displayName) => {
+        if (_verifyState.phase === 'displayName') {
+          _verifyState = { ..._verifyState, displayNameDraft: displayName }
+        }
+      },
+      onSubmitDisplayName: (displayName) => {
+        if (_verifyState.phase !== 'displayName' || _verifyState.submitting) return
+        _verifyState = { ..._verifyState, submitting: true, errorText: null }
+        _renderVerify()
+        void (async () => {
+          type UpdateNameResponseBody = { ok: boolean; code?: string; message?: string; maskedEmail?: string; expiresAt?: string }
+          let responseBody: UpdateNameResponseBody | null = null
+          let responseStatus = 0
+          try {
+            const response = await fetch(`${getApiBaseUrl()}/api/auth/update-pending-registration-display-name`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ verificationToken: _verifyToken, displayName }),
+            })
+            responseStatus = response.status
+            responseBody = (await response.json()) as UpdateNameResponseBody
+          } catch {
+            responseBody = null
+          }
+
+          if (_verifyState.phase !== 'displayName') return
+
+          if (responseBody?.ok) {
+            _verifyState = {
+              phase: 'form',
+              maskedEmail: responseBody.maskedEmail ?? _verifyState.maskedEmail,
+              expiresAt: responseBody.expiresAt ?? _verifyState.expiresAt,
+              resendAvailableAtMs: _verifyState.resendAvailableAtMs,
+              nowMs: Date.now(),
+              code: _verifyState.code,
+              rememberMe: _verifyState.rememberMe,
+              errorText: null,
+              submitting: false,
+              resending: false,
+            }
+            _renderVerify()
+            return
+          }
+
+          if (responseStatus === 410 || responseBody?.code === 'REGISTRATION_EXPIRED') {
+            _verifyState = { phase: 'expired' }
+            _renderVerify()
+            return
+          }
+
+          const errorText = responseBody?.message ?? 'Възникна грешка. Моля, опитайте отново.'
+          _verifyState = { ..._verifyState, submitting: false, errorText }
+          _renderVerify()
+        })()
+      },
+      onSubmitCode: (code) => {
+        if (_verifyState.phase !== 'form' || _verifyState.submitting) return
+        const rememberMe = _verifyState.rememberMe
+        _verifyState = { ..._verifyState, submitting: true, errorText: null }
+        _renderVerify()
+        void (async () => {
+          type VerifyCodeResponseBody = { ok: boolean; code?: string; message?: string; session?: unknown }
+          const KNOWN_CODES = new Set(['INVALID_CODE', 'TOO_MANY_ATTEMPTS', 'DISPLAY_NAME_TAKEN', 'EMAIL_TAKEN'])
+          let responseBody: VerifyCodeResponseBody | null = null
+          let responseStatus = 0
+          try {
+            const response = await fetch(`${getApiBaseUrl()}/api/auth/verify-registration-email`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              // §"REMEMBER ME" — explicit true/false ВИНАГИ, никога разчитане
+              // на server default (undefined !== false на сървъра).
+              body: JSON.stringify({ verificationToken: _verifyToken, code, rememberMe }),
+            })
+            responseStatus = response.status
+            responseBody = (await response.json()) as VerifyCodeResponseBody
+          } catch {
+            responseBody = null
+          }
+
+          if (_verifyState.phase !== 'form') return
+
+          if (responseBody?.ok && responseBody.session) {
+            // Real session вече е created server-side, Set-Cookie вече е
+            // приложен от browser-а (fetch credentials:'include', same-origin
+            // response) — виж task spec-а "REMEMBER ME" анализа: confirmation
+            // чрез follow-up /api/auth/me е по-надежден сигнал за "cookie-то
+            // реално се хвана в ТОЗИ browser" от просто "response-ът е ok",
+            // защото HttpOnly cookie-та не могат да се четат директно от JS
+            // (напр. rare in-app-browser storage restrictions). §"DEVICE
+            // BEHAVIOR" (MODEL A) — това НЕ е device distinction, само
+            // session-establishment fallback: всеки browser с валиден линк +
+            // верен код активира регистрацията еднакво.
+            const maskedEmailForDisplay = _verifyState.maskedEmail
+            let autoLoginConfirmed = false
+            try {
+              const meResponse = await fetch(`${getApiBaseUrl()}/api/auth/me`, {
+                method: 'GET',
+                credentials: 'include',
+              })
+              const meBody = (await meResponse.json()) as { ok: boolean; session?: unknown } | null
+              autoLoginConfirmed = meResponse.ok && meBody?.ok === true && !!meBody.session
+            } catch {
+              autoLoginConfirmed = false
+            }
+
+            _verifyState = { phase: 'success', autoLoginConfirmed, maskedEmail: maskedEmailForDisplay }
+            _renderVerify()
+            if (autoLoginConfirmed) {
+              window.location.assign('/lobby')
+            }
+            return
+          }
+
+          if (responseStatus === 410 || responseBody?.code === 'REGISTRATION_EXPIRED') {
+            _verifyState = { phase: 'expired' }
+            _renderVerify()
+            return
+          }
+          if (responseBody?.code === 'REGISTRATION_INACTIVE') {
+            _verifyState = { phase: 'inactive' }
+            _renderVerify()
+            return
+          }
+          if (responseStatus === 404 || responseBody?.code === 'REGISTRATION_NOT_FOUND') {
+            _verifyState = { phase: 'invalid' }
+            _renderVerify()
+            return
+          }
+          if (responseBody?.code === 'DISPLAY_NAME_TAKEN') {
+            // §8 "DISPLAY_NAME_TAKEN recovery" — не dead-end, mirror на
+            // старото popup поведение: inline форма за ново име, БЕЗ да
+            // разкриваме raw pendingRegistrationId (продължаваме да носим
+            // само _verifyToken).
+            _verifyState = {
+              phase: 'displayName',
+              maskedEmail: _verifyState.maskedEmail,
+              expiresAt: _verifyState.expiresAt,
+              displayNameDraft: '',
+              errorText: null,
+              submitting: false,
+              code: _verifyState.code,
+              rememberMe,
+              resendAvailableAtMs: _verifyState.resendAvailableAtMs,
+            }
+            _renderVerify()
+            return
+          }
+
+          const errorText =
+            responseBody !== null && responseBody.message && KNOWN_CODES.has(responseBody.code ?? '')
+              ? responseBody.message
+              : responseBody?.message ?? 'Възникна грешка. Моля, опитайте отново.'
+          _verifyState = { ..._verifyState, submitting: false, errorText }
+          _renderVerify()
+        })()
+      },
+      onResend: () => {
+        if (_verifyState.phase !== 'form' || _verifyState.resending) return
+        _verifyState = { ..._verifyState, resending: true, errorText: null }
+        _renderVerify()
+        void (async () => {
+          type ResendResponseBody = { ok: boolean; message?: string; maskedEmail?: string; expiresAt?: string }
+          let responseBody: ResendResponseBody | null = null
+          try {
+            const response = await fetch(`${getApiBaseUrl()}/api/auth/resend-registration-code`, {
+              method: 'POST',
+              credentials: 'include',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ verificationToken: _verifyToken }),
+            })
+            responseBody = (await response.json()) as ResendResponseBody
+          } catch {
+            responseBody = null
+          }
+
+          if (_verifyState.phase !== 'form') return
+
+          if (!responseBody?.ok) {
+            _verifyState = {
+              ..._verifyState,
+              resending: false,
+              errorText: responseBody?.message ?? 'Изпращането временно не е налично.',
+            }
+            _renderVerify()
+            return
+          }
+
+          _verifyState = {
+            ..._verifyState,
+            resending: false,
+            errorText: null,
+            maskedEmail: responseBody.maskedEmail ?? _verifyState.maskedEmail,
+            resendAvailableAtMs: Date.now() + 60_000,
+          }
+          _renderVerify()
+        })()
+      },
+    })
+  }
+
+  _renderVerify()
+
+  if (_verifyToken) {
+    void (async () => {
+      type StatusResponseBody = {
+        ok: boolean
+        status?: 'valid' | 'expired' | 'inactive'
+        maskedEmail?: string
+        expiresAt?: string
+        resendAvailableAtMs?: number
+      }
+      let statusBody: StatusResponseBody | null = null
+      try {
+        const response = await fetch(`${getApiBaseUrl()}/api/auth/registration-verification-status`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ verificationToken: _verifyToken }),
+        })
+        statusBody = (await response.json()) as StatusResponseBody
+      } catch {
+        statusBody = null
+      }
+
+      if (!statusBody?.ok) {
+        _verifyState = { phase: 'invalid' }
+        _renderVerify()
+        return
+      }
+
+      if (statusBody.status === 'expired') {
+        _verifyState = { phase: 'expired' }
+        _renderVerify()
+        return
+      }
+
+      if (statusBody.status === 'inactive') {
+        _verifyState = { phase: 'inactive' }
+        _renderVerify()
+        return
+      }
+
+      _verifyState = {
+        phase: 'form',
+        maskedEmail: statusBody.maskedEmail ?? '',
+        expiresAt: statusBody.expiresAt ?? '',
+        resendAvailableAtMs: statusBody.resendAvailableAtMs ?? 0,
+        nowMs: Date.now(),
+        code: '',
+        // §"REMEMBER ME" — same default като popup-а (checked).
+        rememberMe: true,
+        errorText: null,
+        submitting: false,
+        resending: false,
+      }
+      _renderVerify()
+    })()
+  }
 } else if (isStripePaymentReturn) {
   history.replaceState(null, '', '/lobby')
   lobby.resetToLobby()
@@ -8071,7 +8413,7 @@ window.addEventListener('focus', () => {
 
 void loadPublicSettings()
 void loadAuthSession().then(() => {
-  if (!_isResetPasswordPath) {
+  if (!_isStandaloneDedicatedPath) {
     lobby.navigateInitialPath()
   }
   if (stripeReturnPayment === 'success') {

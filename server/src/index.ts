@@ -332,6 +332,7 @@ import {
   handleVerifyRegistrationEmail,
   handleUpdatePendingRegistrationDisplayName,
   handleCancelPendingRegistration,
+  handleRegistrationVerificationStatus,
   type RegistrationVerificationHandlerContext,
 } from './auth/registrationVerificationHandlers.js'
 import { sendRegistrationVerificationEmail } from './auth/sendRegistrationVerificationEmail.js'
@@ -783,6 +784,13 @@ if (registrationVerificationCodeSecret.length < 32) {
     'POST /api/auth/register ще връща "Регистрацията временно не е налична." докато не се конфигурира.',
   )
 }
+// Email → dedicated registration verification page (§"EMAIL → DIRECT
+// REGISTRATION VERIFICATION PAGE") — mirror на passwordResetUrl pattern-а
+// по-долу (PASSWORD_RESET_URL). Fail-safe, НЕ fail-closed: ако env var-ът
+// липсва, sendRegistrationVerificationEmail() просто не построява линк
+// (само кода, старото поведение) — регистрацията си остава напълно
+// функционална без него.
+const registrationVerificationPageUrl = process.env.REGISTRATION_VERIFICATION_URL?.trim() || ''
 const authStore = await createAuthStore(
   databaseBootstrap.databaseFilePath,
   playerProgressStore,
@@ -7640,6 +7648,7 @@ async function handleAuthRequest(
   req: IncomingMessage,
   res: ServerResponse,
   pathname: string,
+  requestUrl: URL,
 ): Promise<boolean> {
   if (pathname === '/api/auth/me' && req.method === 'GET') {
     // Auth session-lifetime fix (rolling/sliding 90-day TTL) — touchSession
@@ -7741,6 +7750,9 @@ async function handleAuthRequest(
       toEmail: getStringField(body, 'email').trim(),
       code: pendingResult.rawCode,
       expiresAt: pendingResult.expiresAt,
+      verificationPageUrl: registrationVerificationPageUrl || undefined,
+      pendingRegistrationId: pendingResult.pendingRegistrationId,
+      registrationSecret: registrationVerificationCodeSecret,
     })
 
     if (!emailResult.ok) {
@@ -7850,6 +7862,8 @@ async function handleAuthRequest(
       getFirstHeaderValue: (value) => getFirstHeaderValue(value),
       createSessionCookieHeader: (sessionToken, rememberMe) => createSessionCookieHeader(sessionToken, rememberMe),
       withPikaTeamGiftBypassFlag: (session) => withPikaTeamGiftBypassFlag(session),
+      registrationVerificationPageUrl,
+      registrationSecret: registrationVerificationCodeSecret,
     }
 
     if (pathname === '/api/auth/verify-registration-email') {
@@ -7868,6 +7882,26 @@ async function handleAuthRequest(
     }
 
     await handleCancelPendingRegistration(req, res, ctx)
+    return true
+  }
+
+  // Email → dedicated registration verification page (§"EMAIL → DIRECT
+  // REGISTRATION VERIFICATION PAGE"). POST+JSON body (§7 — verificationToken
+  // пътува в body, не query string, mirror на другите registration
+  // endpoints по-горе), НЕ GET+query-param (старият pattern, заменен).
+  if (pathname === '/api/auth/registration-verification-status' && req.method === 'POST') {
+    const ctx: RegistrationVerificationHandlerContext = {
+      store: authStore,
+      getRequestIp: (r) => getRequestIp(r),
+      sendJson: (r, status, body, headers) => sendJsonResponse(r, status, body, headers),
+      readBody: (r) => readJsonRequestBody(r, 4_096),
+      getFirstHeaderValue: (value) => getFirstHeaderValue(value),
+      createSessionCookieHeader: (sessionToken, rememberMe) => createSessionCookieHeader(sessionToken, rememberMe),
+      withPikaTeamGiftBypassFlag: (session) => withPikaTeamGiftBypassFlag(session),
+      registrationVerificationPageUrl,
+      registrationSecret: registrationVerificationCodeSecret,
+    }
+    await handleRegistrationVerificationStatus(req, res, ctx)
     return true
   }
 
@@ -18252,7 +18286,7 @@ async function handleHttpRequest(
     return
   }
 
-  if (await handleAuthRequest(req, res, requestUrl.pathname)) {
+  if (await handleAuthRequest(req, res, requestUrl.pathname, requestUrl)) {
     return
   }
 

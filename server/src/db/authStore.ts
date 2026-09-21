@@ -62,6 +62,40 @@ export type ResendRegistrationCodeResult =
   | { ok: true; rawCode: string; email: string; maskedEmail: string; expiresAt: string }
   | { ok: false; reason: 'not_found' | 'expired' | 'rate_limited' }
 
+/**
+ * Email → dedicated registration verification page (§"EMAIL → DIRECT
+ * REGISTRATION VERIFICATION PAGE"). PURE read-only lookup — за разлика от
+ * verifyRegistrationEmail()/resendRegistrationVerificationCode(), НЕ трие
+ * expired redове при среща (side-effect-free by design — статус страницата
+ * трябва да може да бъде отваряна repeatedly/refresh-вана без да consume-ва
+ * или мутира каквото и да е pending state). Разчита на СЪЩИЯ opaque
+ * pendingRegistrationId bearer capability модел като resend/update-display-
+ * name/verify (виж UpdatePendingRegistrationDisplayNameResult doc коментара) —
+ * не нов security model, не нов token.
+ *
+ * 'not_found' покрива И "никога не е съществувал", И "вече consumed от
+ * успешен verify", И "вече opportunistically изтрит от unrelated
+ * register()/resend() cleanup на ДРУГ pending ред със същия email/име" —
+ * тези три случая НЕ могат да бъдат надеждно различени, след като редът е
+ * физически изтрит (виж authStore.ts's deleteExpiredPendingRegistrationBy*
+ * statements/deletePendingRegistrationByIdStatement call sites за пълния
+ * opportunistic-delete inventory). Клиентът третира 'not_found' еднакво,
+ * независимо от истинската причина — generic "invalid link" state, никога
+ * фалшиво увереност за "already verified" или "expired", ако не можем
+ * реално да го докажем от все още съществуващ ред.
+ */
+export type PendingRegistrationVerificationStatusResult =
+  | {
+      ok: true
+      status: 'valid'
+      maskedEmail: string
+      expiresAt: string
+      /** epoch ms — kога resend бутонът отново става наличен (mirror на popup-овия resendAvailableAtMs изчисление). */
+      resendAvailableAtMs: number
+    }
+  | { ok: true; status: 'expired' }
+  | { ok: false; reason: 'not_found' | 'rate_limited' }
+
 export type VerifyRegistrationEmailResult =
   | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
   | {
@@ -418,6 +452,17 @@ export type AuthStore = {
     ipAddress: string | null
   }) => ResendRegistrationCodeResult
   /**
+   * Email → dedicated registration verification page. PURE read-only lookup,
+   * без side effects — виж PendingRegistrationVerificationStatusResult doc
+   * коментара за пълния rationale (защо 'not_found' покрива и truly-invalid,
+   * и already-consumed, и opportunistically-deleted-expired случаите
+   * еднакво, без да можем надеждно да ги различим след физическо изтриване).
+   */
+  getPendingRegistrationVerificationStatus: (input: {
+    pendingRegistrationId: string
+    ipAddress: string | null
+  }) => PendingRegistrationVerificationStatusResult
+  /**
    * Финализира pending registration -> реален account/profile/wallet/
    * progress/visitor-history в ЕДНА атомарна, concurrency-safe транзакция
    * (production report-а "VERIFY ENDPOINT"). Consume-on-success (pending
@@ -688,6 +733,9 @@ const PENDING_REGISTRATION_VERIFY_IP_WINDOW_SECONDS = 60 * 60
 /** Display-name-taken recovery (hardening pass §1) — IP-scoped anti-abuse cap (не за brute-force на кода, а за да не се ползва endpoint-ът за display-name enumeration). */
 const PENDING_REGISTRATION_UPDATE_NAME_IP_MAX_PER_WINDOW = 20
 const PENDING_REGISTRATION_UPDATE_NAME_IP_WINDOW_SECONDS = 60 * 60
+/** Email→page verification status lookup (dedicated page) — IP-scoped, generous (read-only, no secrets, opaque unguessable ID), само за hygiene mirror на останалите registration endpoints, не primary defense. */
+const PENDING_REGISTRATION_STATUS_IP_MAX_PER_WINDOW = 60
+const PENDING_REGISTRATION_STATUS_IP_WINDOW_SECONDS = 60 * 60
 
 /**
  * Registration anti-evasion gate (четвърти follow-up brief §2 — "REGISTRATION
@@ -1616,6 +1664,75 @@ export async function createAuthStore(
     }
   }
 
+  /**
+   * Email → dedicated registration verification page (§"EMAIL → DIRECT
+   * REGISTRATION VERIFICATION PAGE"). PURE read, никакъв write извън
+   * rate-limit event insert-а — виж PendingRegistrationVerificationStatusResult
+   * doc коментара за пълния "not_found покрива три различни реални причини"
+   * rationale. Umishlено НЕ трие expired redове тук (за разлика от verify/
+   * resend) — страницата трябва да може да бъде отваряна/refresh-вана
+   * repeatedly без side effects.
+   */
+  function getPendingRegistrationVerificationStatus(input: {
+    pendingRegistrationId: string
+    ipAddress: string | null
+  }): PendingRegistrationVerificationStatusResult {
+    if (!isRegistrationSecretConfigured) {
+      return { ok: false, reason: 'not_found' }
+    }
+
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+
+      if (input.ipAddress !== null) {
+        const limitedByIp = checkRegistrationRateLimit({
+          scope: 'registration-status-ip',
+          rawSubject: input.ipAddress,
+          windowSeconds: PENDING_REGISTRATION_STATUS_IP_WINDOW_SECONDS,
+          maxEvents: PENDING_REGISTRATION_STATUS_IP_MAX_PER_WINDOW,
+        })
+        if (limitedByIp) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'rate_limited' }
+        }
+      }
+
+      const row = selectPendingRegistrationByIdStatement.get(input.pendingRegistrationId) as
+        | PendingRegistrationRow
+        | undefined
+      database.exec('COMMIT;')
+
+      if (row === undefined) {
+        return { ok: false, reason: 'not_found' }
+      }
+
+      if (new Date(row.expires_at).getTime() <= Date.now()) {
+        // Row-ът СЪЩЕСТВУВА физически, но е past expires_at -> надеждно
+        // 'expired' (за разлика от not_found случая, тук ЗНАЕМ, че е било
+        // реална pending регистрация, а не невалиден/непознат идентификатор).
+        // НЕ се трие тук — следващият opportunistic cleanup (от друг register()/
+        // resend() call) ще го изчисти, или самата verify()/resend() ще го
+        // изчисти при реален опит. Status lookup остава pure read.
+        return { ok: true, status: 'expired' }
+      }
+
+      return {
+        ok: true,
+        status: 'valid',
+        maskedEmail: maskEmailForDisplay(row.normalized_email),
+        expiresAt: row.expires_at,
+        resendAvailableAtMs: new Date(row.last_code_sent_at).getTime() + PENDING_REGISTRATION_RESEND_MIN_INTERVAL_MS,
+      }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
+      return { ok: false, reason: 'not_found' }
+    }
+  }
+
   function resendRegistrationVerificationCode(input: {
     pendingRegistrationId: string
     ipAddress: string | null
@@ -2414,6 +2531,7 @@ export async function createAuthStore(
   return {
     register,
     resendRegistrationVerificationCode,
+    getPendingRegistrationVerificationStatus,
     verifyRegistrationEmail,
     updatePendingRegistrationDisplayName,
     hasActivePendingRegistrationForDisplayName,
