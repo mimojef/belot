@@ -5,6 +5,7 @@ import {
   getLocalTournamentTestDatabaseFilePath,
   isLocalTournamentTestModeEnabled,
 } from '../localTournamentTest/localTournamentTestModeGuard.js'
+import { normalizeProfileDisplayName } from './normalizeProfileIdentityText.js'
 
 export type AppliedServerMigration = {
   filename: string
@@ -53,6 +54,8 @@ const SMART_MIGRATION_HANDLERS: Record<string, (database: SqliteDatabase) => voi
     applyTournamentNextMatchStartAtMigration,
   '20260818_008_add_vip_purchase_audit_fields.sql':
     applyVipPurchaseAuditFieldsMigration,
+  '20260921_001_add_pending_registration_display_name_reservation.sql':
+    applyPendingRegistrationDisplayNameReservationMigration,
 }
 
 function getTableColumnTypes(
@@ -220,6 +223,168 @@ function applyVipPurchaseAuditFieldsMigration(database: SqliteDatabase): void {
         }.`,
       )
     }
+  }
+}
+
+// 20260921_001_add_pending_registration_display_name_reservation.sql —
+// FINAL PLAN v5 "Display Name Reservation". Виж .sql файла за пълния
+// business-rule rationale; тук е самото 9-стъпково, атомарно (единичен
+// runner-ов BEGIN...COMMIT около целия handler) DDL/backfill/postcondition
+// изпълнение:
+//   1. ALTER TABLE ADD COLUMN normalized_display_name TEXT NULL (idempotent)
+//   2. DELETE expired pending redове (bulk, преди backfill-а)
+//   3. TS normalization backfill (normalizeProfileDisplayName(), canonical
+//      helper — СЪЩАТА функция като register()/check-name/verify)
+//   4. Malformed (normalize връща null) -> normalized_display_name = NULL
+//   5. Duplicate pending групи: deterministic winner (created_at ASC,
+//      pending_registration_id ASC tie-break) взима reservation-а; losers
+//      -> NULL (НИКОГА не се трият)
+//   6. Redове, конфликтиращи с ВЕЧЕ съществуващ active profile
+//      (normalized_display_name ИЛИ normalized_username match) -> NULL
+//   7. Postcondition: 0 duplicate non-NULL normalized_display_name стойности
+//      сред pending_registrations — hard fail (throw) ако не е така,
+//      ROLLBACK-ва ЦЯЛАТА миграция, сървърът не стартира
+//   8. CREATE UNIQUE INDEX (SQLite игнорира NULL — losers/malformed/
+//      profile-conflicts remain safely non-unique-constrained)
+// Ledger insert-ът (стъпка 9) е runner-ов код, не тук.
+function applyPendingRegistrationDisplayNameReservationMigration(database: SqliteDatabase): void {
+  const tableName = 'pending_registrations'
+  const columnsBefore = getTableColumnTypes(database, tableName)
+
+  // Стъпка 1 — idempotent ADD COLUMN (restart-safety за частично приложена
+  // миграция, established pattern като другите smart handlers по-горе).
+  if (!columnsBefore.has('normalized_display_name')) {
+    database.exec(`ALTER TABLE ${tableName} ADD COLUMN normalized_display_name TEXT NULL;`)
+  }
+
+  // Стъпка 2 — bulk expired cleanup, ПРЕДИ backfill-а (не пилеем conflict-
+  // resolution усилие върху redове, които така или иначе ще бъдат изтрити).
+  database.exec(`
+    DELETE FROM ${tableName}
+    WHERE expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+  `)
+
+  type LegacyPendingRow = {
+    pending_registration_id: string
+    display_name: string
+    created_at: string
+    normalized_display_name: string | null
+  }
+
+  const remainingRows = database
+    .prepare(`SELECT pending_registration_id, display_name, created_at, normalized_display_name FROM ${tableName};`)
+    .all() as LegacyPendingRow[]
+
+  const updateNormalizedNameStatement = database.prepare(
+    `UPDATE ${tableName} SET normalized_display_name = ? WHERE pending_registration_id = ?;`,
+  )
+
+  // Стъпка 3/4 — TS normalization backfill за всеки ред, чиято
+  // normalized_display_name все още е NULL (нов ADD COLUMN на СЪЩИЯ restart
+  // задава NULL за всички; идемпотентен restart на ВЕЧЕ частично backfill-нат
+  // startup пропуска redовете, чиято стойност вече е попълнена). Malformed
+  // (normalizeProfileDisplayName връща null) остава explicit NULL — не се
+  // хвърля грешка, не се трие редът (виж §"Existing rows policy": malformed
+  // legacy имена остават функционални pending registrations, unreserved).
+  const computedNormalized = new Map<string, string | null>()
+  for (const row of remainingRows) {
+    if (row.normalized_display_name !== null) {
+      computedNormalized.set(row.pending_registration_id, row.normalized_display_name)
+      continue
+    }
+    const normalized = normalizeProfileDisplayName(row.display_name)
+    computedNormalized.set(row.pending_registration_id, normalized)
+    if (normalized !== row.normalized_display_name) {
+      updateNormalizedNameStatement.run(normalized, row.pending_registration_id)
+    }
+  }
+
+  // Стъпка 5 — duplicate pending групи, deterministic winner/loser.
+  // "created_at ASC, pending_registration_id ASC" tie-break — по-старият
+  // active claimant печели; ако created_at съвпада (crypto-random UUID-ите
+  // правят това практически невъзможно, но детерминизмът трябва да е
+  // гарантиран независимо), pending_registration_id-то решава стабилно.
+  const groupsByNormalizedName = new Map<string, LegacyPendingRow[]>()
+  for (const row of remainingRows) {
+    const normalized = computedNormalized.get(row.pending_registration_id)
+    if (normalized === null || normalized === undefined) continue
+    const group = groupsByNormalizedName.get(normalized)
+    if (group) {
+      group.push(row)
+    } else {
+      groupsByNormalizedName.set(normalized, [row])
+    }
+  }
+
+  for (const group of groupsByNormalizedName.values()) {
+    if (group.length <= 1) continue
+    const sorted = [...group].sort((a, b) => {
+      if (a.created_at !== b.created_at) return a.created_at < b.created_at ? -1 : 1
+      return a.pending_registration_id < b.pending_registration_id ? -1 : 1
+    })
+    // sorted[0] е winner — остава reserved (normalized стойността му вече е
+    // коректна от стъпка 3/4). Losers -> NULL, редът им НИКОГА не се трие.
+    for (const loser of sorted.slice(1)) {
+      updateNormalizedNameStatement.run(null, loser.pending_registration_id)
+      computedNormalized.set(loser.pending_registration_id, null)
+    }
+  }
+
+  // Стъпка 6 — конфликт срещу ВЕЧЕ съществуващи active profiles. Пресмятаме
+  // все още non-NULL redове (след duplicate resolution-а по-горе) срещу
+  // profiles.normalized_display_name/normalized_username — mirror на
+  // authStore.ts's nameConflictStatement WHERE клауза.
+  const profileConflictStatement = database.prepare(`
+    SELECT profile_id FROM profiles
+    WHERE status = 'active'
+      AND (normalized_display_name = ? OR normalized_username = ?)
+    LIMIT 1;
+  `)
+  for (const row of remainingRows) {
+    const normalized = computedNormalized.get(row.pending_registration_id)
+    if (normalized === null || normalized === undefined) continue
+    const conflict = profileConflictStatement.get(normalized, normalized) as { profile_id: string } | undefined
+    if (conflict !== undefined) {
+      updateNormalizedNameStatement.run(null, row.pending_registration_id)
+      computedNormalized.set(row.pending_registration_id, null)
+    }
+  }
+
+  // Стъпка 7 — postcondition validation. Hard fail (throw -> ROLLBACK на
+  // ЦЯЛАТА миграция от runner-а, виж SMART_MIGRATION_HANDLERS doc коментара)
+  // ако все още съществуват duplicate non-NULL normalized_display_name
+  // стойности — никога не продължаваме към CREATE UNIQUE INDEX върху
+  // недоказано чист state.
+  const duplicateCheckRows = database
+    .prepare(
+      `SELECT normalized_display_name, COUNT(*) AS cnt FROM ${tableName}
+       WHERE normalized_display_name IS NOT NULL
+       GROUP BY normalized_display_name HAVING COUNT(*) > 1;`,
+    )
+    .all() as Array<{ normalized_display_name: string; cnt: number }>
+  if (duplicateCheckRows.length > 0) {
+    throw new Error(
+      `Postcondition failed: ${duplicateCheckRows.length} duplicate non-NULL normalized_display_name ` +
+      `group(s) remain in ${tableName} after backfill/conflict-resolution — refusing to create the unique index.`,
+    )
+  }
+
+  // Стъпка 8 — unique index. SQLite unique indexes игнорират NULL по
+  // спецификация — losers/malformed/profile-conflict redовете (всички NULL
+  // сега) не участват в constraint-а, само non-NULL "winner" стойностите.
+  database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_registrations_display_name_unique
+      ON ${tableName}(normalized_display_name);
+  `)
+
+  const columnsAfter = getTableColumnTypes(database, tableName)
+  const actualType = columnsAfter.get('normalized_display_name')
+  if (actualType === undefined || actualType.toUpperCase() !== 'TEXT') {
+    throw new Error(
+      `Postcondition failed for ${tableName}.normalized_display_name: expected type TEXT, got ${
+        actualType ?? 'MISSING COLUMN'
+      }.`,
+    )
   }
 }
 

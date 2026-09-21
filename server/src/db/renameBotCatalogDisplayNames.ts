@@ -148,6 +148,30 @@ export function renameCatalogBotDisplayNames(
     }
   }
 
+  // FINAL PLAN v5 — Display Name Reservation, diagnostic-only pass. Same
+  // TOCTOU caveat as conflictCheck above applies here too: this is early UX
+  // feedback for a dry-run report, NOT the authoritative gate — see the
+  // re-check inside BEGIN IMMEDIATE below, which is what actually protects
+  // the invariant against a reservation claimed between this preflight and
+  // the write transaction.
+  const pendingConflictCheck = database.prepare(`
+    SELECT pending_registration_id
+    FROM pending_registrations
+    WHERE normalized_display_name = ?
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    LIMIT 1;
+  `)
+  for (const [profileId, newName] of Object.entries(BOT_CATALOG_DISPLAY_NAMES)) {
+    const normalized = newName.toLocaleLowerCase('bg-BG')
+    const existingPending = pendingConflictCheck.get(normalized) as { pending_registration_id: string } | undefined
+    if (existingPending) {
+      preflightIssues.push({
+        profileId,
+        reason: `normalized_display_name "${normalized}" reserved by active pending registration "${existingPending.pending_registration_id}".`,
+      })
+    }
+  }
+
   if (preflightIssues.length > 0 || !options.apply) {
     return {
       ok: preflightIssues.length === 0,
@@ -176,6 +200,44 @@ export function renameCatalogBotDisplayNames(
 
   database.exec('BEGIN IMMEDIATE;')
   try {
+    // FINAL PLAN v5 — authoritative re-check, INSIDE the write transaction,
+    // BEFORE the first identity UPDATE. The preflight pass above (conflictCheck/
+    // pendingConflictCheck) is informational only — a real registration or
+    // rename could have claimed one of these names in the window between
+    // that preflight and this BEGIN IMMEDIATE. Re-running both conflict
+    // checks here, against the now-locked transaction snapshot, is what
+    // actually closes that TOCTOU gap.
+    const authoritativeProfileConflict = database.prepare(
+      `SELECT profile_id FROM profiles WHERE normalized_display_name = ? LIMIT 1;`,
+    )
+    const authoritativePendingConflict = database.prepare(`
+      SELECT pending_registration_id
+      FROM pending_registrations
+      WHERE normalized_display_name = ?
+        AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      LIMIT 1;
+    `)
+    for (const [profileId, newName] of Object.entries(BOT_CATALOG_DISPLAY_NAMES)) {
+      const normalized = newName.toLocaleLowerCase('bg-BG')
+
+      const profileConflict = authoritativeProfileConflict.get(normalized) as { profile_id: string } | undefined
+      if (profileConflict && profileConflict.profile_id !== profileId) {
+        throw new Error(
+          `Authoritative re-check failed: normalized_display_name "${normalized}" (target for "${profileId}") ` +
+          `is now used by profile "${profileConflict.profile_id}" (claimed after the preflight pass). Rename stopped.`,
+        )
+      }
+
+      const pendingConflict = authoritativePendingConflict.get(normalized) as { pending_registration_id: string } | undefined
+      if (pendingConflict) {
+        throw new Error(
+          `Authoritative re-check failed: normalized_display_name "${normalized}" (target for "${profileId}") ` +
+          `is reserved by active pending registration "${pendingConflict.pending_registration_id}" ` +
+          `(claimed after the preflight pass). Rename stopped.`,
+        )
+      }
+    }
+
     for (const [profileId, newName] of Object.entries(BOT_CATALOG_DISPLAY_NAMES)) {
       const normalized = newName.toLocaleLowerCase('bg-BG')
       const result = updateStatement.run(newName, normalized, profileId) as { changes?: number }

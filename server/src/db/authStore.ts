@@ -51,7 +51,11 @@ export type PendingRegistrationCreatedResult =
       maskedEmail: string
       expiresAt: string
     }
-  | { ok: false; message: string; code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' }
+  | {
+      ok: false
+      message: string
+      code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' | 'DISPLAY_NAME_TAKEN'
+    }
 
 export type ResendRegistrationCodeResult =
   /** email е РЕАЛНИЯТ (normalized) адрес — само за caller-а да го подаде на sendRegistrationVerificationEmail(); HTTP response-ът към клиента трябва да ползва maskedEmail, никога email. */
@@ -439,6 +443,20 @@ export type AuthStore = {
     ipAddress: string | null
   }) => UpdatePendingRegistrationDisplayNameResult
   /**
+   * FINAL PLAN v5 — Display Name Reservation. Read-only проверка дали
+   * подаденото (raw, ще бъде normalized вътрешно) display name в момента е
+   * reserved от активна (non-expired), различна от excludePendingRegistrationId
+   * pending регистрация. Ползва се от GET /api/profile/check-name (композиран
+   * с playerProgressStore.isDisplayNameAvailable(), виж index.ts) — НЕ пипа
+   * DB-то, чисто informational availability snapshot (GET заявките никога не
+   * резервират нищо, виж register()'s doc коментар за точния момент, в който
+   * reservation-ът реално стартира).
+   */
+  hasActivePendingRegistrationForDisplayName: (
+    displayName: string,
+    excludePendingRegistrationId?: string | null,
+  ) => boolean
+  /**
    * "Смени имейла" recovery (hardening pass §3) — explicit cancel на pending
    * registration по opaque pendingRegistrationId (bearer capability, mirror
    * на resend/verify security модела). Идемпотентно — вика се безопасно
@@ -600,6 +618,15 @@ type PendingRegistrationRow = {
   last_code_sent_at: string
   resend_count: number
   failed_attempts: number
+  /**
+   * Display-name reservation (FINAL PLAN v5 — "Display Name Reservation").
+   * NULL за legacy/unreserved redове (виж migration backfill-а в
+   * ensureServerDatabaseReady.ts) — такъв ред НИКОГА не може да verify-не
+   * успешно с оригиналното си display_name (виж
+   * createVerifiedAccountAndProfileInOpenTransaction()'s own-reservation
+   * check), само през съществуващия DISPLAY_NAME_TAKEN recovery flow.
+   */
+  normalized_display_name: string | null
 }
 
 type SessionRow = {
@@ -1097,7 +1124,8 @@ export async function createAuthStore(
   const selectPendingRegistrationByEmailStatement = database.prepare(`
     SELECT pending_registration_id, normalized_email, password_hash, display_name,
            gender, visitor_id, ip_address, user_agent, code_hash, created_at,
-           expires_at, last_code_sent_at, resend_count, failed_attempts
+           expires_at, last_code_sent_at, resend_count, failed_attempts,
+           normalized_display_name
     FROM pending_registrations
     WHERE normalized_email = ?
     LIMIT 1;
@@ -1107,10 +1135,42 @@ export async function createAuthStore(
   // в register()/login(). "По-чистия вариант" (spec §"EMAIL RESERVATION") —
   // изтрити, не просто flag-нати expired редове; UNIQUE(normalized_email)
   // индексът прави това самата DB гаранция, не application-level race.
+  // Whole-row DELETE — освобождава ЕДНОВРЕМЕННО и email, И display-name
+  // reservation-а (ако имаше такъв на СЪЩИЯ ред), виж FINAL PLAN v5
+  // "Email + display-name expiry" секцията: единичен ред носи и двете
+  // claims, затова изтриването му по което и да е от двете полета освобождава
+  // и двете едновременно.
   const deleteExpiredPendingRegistrationByEmailStatement = database.prepare(`
     DELETE FROM pending_registrations
     WHERE normalized_email = ?
       AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+  `)
+
+  // Огледален cleanup, филтриран по normalized_display_name вместо email —
+  // покрива "нов email, старо display name" сценария (FINAL PLAN v5 §10.B):
+  // ако expired ред държи target името, но с ДРУГ email, cleanup-ът по email
+  // (горе) не би го докоснал — трябва отделен filter по display name.
+  // Same whole-row DELETE семантика — трие целия ред, освобождавайки и
+  // email-а на този ред заедно с името.
+  const deleteExpiredPendingRegistrationByNormalizedNameStatement = database.prepare(`
+    DELETE FROM pending_registrations
+    WHERE normalized_display_name = ?
+      AND expires_at <= strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
+  `)
+
+  // Authoritative pending-reservation conflict check — вика се ВЪТРЕ в
+  // писателската транзакция (register()/updatePendingRegistrationDisplayName()),
+  // СЛЕД съответния expired-cleanup по-горе, ПРЕДИ INSERT/UPDATE. excludePendingId
+  // (nullable) изключва собствения ред на caller-а от update-display-name
+  // сценария (виж FINAL PLAN v5 §4) — при register() винаги се подава null,
+  // тъй като новия ред още не съществува.
+  const selectActivePendingReservationConflictStatement = database.prepare(`
+    SELECT pending_registration_id
+    FROM pending_registrations
+    WHERE normalized_display_name = ?
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      AND (? IS NULL OR pending_registration_id <> ?)
+    LIMIT 1;
   `)
 
   // last_code_sent_at се подава EXPLICIT като JS-generated ISO string
@@ -1121,17 +1181,22 @@ export async function createAuthStore(
   // selectSessionStatement doc коментара по-горе за account_sessions —
   // 60s resend cooldown проверката по-долу сравнява точно тази колона чрез
   // JS `new Date()`, затова форматът трябва да е identical на expires_at).
+  // normalized_display_name — единственото ново поле (FINAL PLAN v5): claim-ва
+  // display-name reservation-а АТОМАРНО заедно с email reservation-а, в СЪЩИЯ
+  // INSERT/COMMIT — виж register()'s doc коментар по-долу за пълния rationale.
   const insertPendingRegistrationStatement = database.prepare(`
     INSERT INTO pending_registrations (
       pending_registration_id, normalized_email, password_hash, display_name,
-      gender, visitor_id, ip_address, user_agent, code_hash, expires_at, last_code_sent_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
+      gender, visitor_id, ip_address, user_agent, code_hash, expires_at, last_code_sent_at,
+      normalized_display_name
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
   `)
 
   const selectPendingRegistrationByIdStatement = database.prepare(`
     SELECT pending_registration_id, normalized_email, password_hash, display_name,
            gender, visitor_id, ip_address, user_agent, code_hash, created_at,
-           expires_at, last_code_sent_at, resend_count, failed_attempts
+           expires_at, last_code_sent_at, resend_count, failed_attempts,
+           normalized_display_name
     FROM pending_registrations
     WHERE pending_registration_id = ?
     LIMIT 1;
@@ -1160,14 +1225,20 @@ export async function createAuthStore(
     WHERE pending_registration_id = ?;
   `)
 
-  // Display-name-taken recovery (hardening pass §1) — само display_name
-  // колоната. code_hash/failed_attempts/resend_count/last_code_sent_at/
-  // expires_at НИКОГА не се пипат тук — потребителят не трябва да губи
-  // прогреса си (валиден код, resend бюджет, оригиналния 24-часов
-  // прозорец) само защото избраното от него име се е оказало заето.
+  // Display-name-taken recovery (hardening pass §1, разширен от FINAL PLAN v5) —
+  // display_name И normalized_display_name в ЕДИН UPDATE statement. Единичен
+  // write атомарно "премества" reservation-а от старото към новото име на
+  // СЪЩИЯ ред — никакъв отделен "release old -> claim new" двустъпков flow
+  // (виж updatePendingRegistrationDisplayName()'s doc коментар за пълния
+  // atomicity rationale: ако new-name conflict check-ът по-горе се провали,
+  // ROLLBACK-ът връща стария normalized_display_name непокътнат, защото този
+  // UPDATE изобщо не се изпълнява). code_hash/failed_attempts/resend_count/
+  // last_code_sent_at/expires_at НИКОГА не се пипат тук — потребителят не
+  // трябва да губи прогреса си само защото избраното от него име се е
+  // оказало заето.
   const updatePendingRegistrationDisplayNameStatement = database.prepare(`
     UPDATE pending_registrations
-    SET display_name = ?
+    SET display_name = ?, normalized_display_name = ?
     WHERE pending_registration_id = ?;
   `)
 
@@ -1253,6 +1324,8 @@ export async function createAuthStore(
     visitorId: string
     ipAddress: string | null
     userAgent: string | null
+    /** FINAL PLAN v5 — нужен за own-reservation ownership проверката веднага по-долу. */
+    pendingRegistrationId: string
   }): { accountRow: AccountRow; profileId: ProfileId } | { conflict: 'email_taken' | 'display_name_taken' } {
     const existingAccount = selectAccountByEmailStatement.get(input.normalizedEmail) as AccountRow | undefined
     if (existingAccount) {
@@ -1267,6 +1340,25 @@ export async function createAuthStore(
     const normalizedDisplayName = displayNameResult.ok ? displayNameResult.normalizedKey : input.displayName
     const canonicalDisplayName = displayNameResult.ok ? displayNameResult.canonicalDisplayName : input.displayName
     const normalizedUsername = normalizedDisplayName
+
+    // FINAL PLAN v5 — Verification ownership: ТОЗИ pending ред трябва да
+    // докаже, че реално Е authoritative reservation owner-ът на normalized
+    // display name-а, ПРЕДИ да продължи към profiles-table проверката.
+    // Покрива И "друг pending ред държи reservation-а" (winner срещу loser
+    // race, виж migration backfill-а/verify race теста), И "ТОЗИ ред е
+    // legacy/unreserved (normalized_display_name IS NULL от migration-а)" —
+    // NULL никога не match-ва тази SELECT, затова unreserved loser
+    // automатично пада в conflict клона по-долу, независимо от реда на
+    // пристигане (SQLite BEGIN IMMEDIATE извън тази функция вече сериализира
+    // конкурентни verify опити — виж verifyRegistrationEmail()).
+    const reservationOwner = selectActivePendingReservationConflictStatement.get(
+      normalizedDisplayName,
+      null,
+      null,
+    ) as { pending_registration_id: string } | undefined
+    if (reservationOwner === undefined || reservationOwner.pending_registration_id !== input.pendingRegistrationId) {
+      return { conflict: 'display_name_taken' }
+    }
 
     const nameConflict = nameConflictStatement.get(normalizedDisplayName, normalizedUsername) as
       | { profile_id: string }
@@ -1411,6 +1503,12 @@ export async function createAuthStore(
       // "по-чистия вариант" — изтрива, не флагва). Освобождава email-а за
       // нова регистрация веднага щом старият pending ред е expired.
       deleteExpiredPendingRegistrationByEmailStatement.run(email)
+      // FINAL PLAN v5 — огледален cleanup по display name, ПРЕДИ conflict
+      // check-а по-долу: ако друг, вече изтекъл pending ред държи ТОЧНО
+      // target-натото име (но с различен email, затова горният cleanup не го
+      // докосна), той трябва да бъде изчистен тук, за да не блокира новата
+      // регистрация с фалшив "заето" конфликт.
+      deleteExpiredPendingRegistrationByNormalizedNameStatement.run(displayNameResult.normalizedKey)
 
       const existingPending = selectPendingRegistrationByEmailStatement.get(email) as
         | PendingRegistrationRow
@@ -1420,24 +1518,49 @@ export async function createAuthStore(
         return { ok: false, code: 'EMAIL_VERIFICATION_PENDING', message: PENDING_REGISTRATION_EMAIL_MESSAGE }
       }
 
-      // Best-effort (НЕ authoritative) display-name uniqueness проверка тук
-      // — веднага feedback за потребителя при register(), вместо да чака до
-      // след email verification, за да разбере, че името е заето (по-добър
-      // UX от "мълчалив" late failure). Authoritative re-check СЪЩО се
-      // случва в verifyRegistrationEmail() (createVerifiedAccountAndProfileInOpenTransaction's
-      // nameConflictStatement) — истинско rejection на profiles-table race
-      // (двама pending registrants със СЪЩОТО име, единият verify-ва пръв)
-      // може да се случи само там, тъй като profiles редът не съществува
-      // все още на тази точка.
+      // Best-effort (НЕ authoritative за profiles race, но АВТОРИТЕТНО за
+      // pending-pending race — виж проверката веднага по-долу) display-name
+      // uniqueness проверка срещу СЪЩЕСТВУВАЩИ активни профили тук — веднага
+      // feedback за потребителя при register(), вместо да чака до след email
+      // verification. Authoritative re-check СЪЩО се случва в
+      // verifyRegistrationEmail() (createVerifiedAccountAndProfileInOpenTransaction's
+      // nameConflictStatement) — защита срещу profiles-table race (нов profile
+      // е бил създаден между този momент и verify-а).
       const earlyNameConflict = nameConflictStatement.get(
         displayNameResult.normalizedKey,
         displayNameResult.normalizedKey,
       ) as { profile_id: string } | undefined
       if (earlyNameConflict !== undefined) {
         database.exec('ROLLBACK;')
-        return { ok: false, message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
       }
 
+      // FINAL PLAN v5 — Display Name Reservation. Authoritative pending↔pending
+      // check: ако друга активна (non-expired), НЕ-собствена pending
+      // регистрация вече държи точно това normalized име, тази регистрация
+      // трябва да откаже ВЕДНАГА (не да чака до verify-а, както преди тази
+      // задача) — точно бизнес правилото "успешно подадена pending
+      // регистрация резервира display name-а до verify/expiry". excludeId=null
+      // тук, тъй като новият ред все още не съществува (self-conflict е
+      // структурно невъзможен).
+      const pendingNameConflict = selectActivePendingReservationConflictStatement.get(
+        displayNameResult.normalizedKey,
+        null,
+        null,
+      ) as { pending_registration_id: string } | undefined
+      if (pendingNameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+      }
+
+      // Единствен INSERT/COMMIT долу claim-ва И email-а (normalized_email
+      // UNIQUE), И display name-а (normalized_display_name UNIQUE) АТОМАРНО
+      // заедно (FINAL PLAN v5 §"REGISTER CLAIM") — reservation-ът за двете
+      // стартира в СЪЩИЯ момент, от СЪЩОТО committнато събитие. Ако
+      // последващото sendRegistrationVerificationEmail() (извън тази функция,
+      // виж index.ts) се провали, НИТО едната reservation не се отменя —
+      // pending редът остава непокътнат за resend flow-а (изрично бизнес
+      // правило, виж register()'s горен doc коментар).
       insertPendingRegistrationStatement.run(
         pendingRegistrationId,
         email,
@@ -1450,6 +1573,7 @@ export async function createAuthStore(
         codeHash,
         expiresAt,
         new Date().toISOString(),
+        displayNameResult.normalizedKey,
       )
 
       database.exec('COMMIT;')
@@ -1471,8 +1595,21 @@ export async function createAuthStore(
       const message = error instanceof Error ? error.message : String(error)
       // UNIQUE(normalized_email) race — конкурентна регистрация за СЪЩИЯ
       // email е committed-нала между opportunistic cleanup-а и INSERT-а.
-      if (message.includes('pending_registrations') || message.includes('normalized_email')) {
+      // SQLite error формат е "UNIQUE constraint failed: <table>.<column>"
+      // (потвърдено директно), затова 'normalized_email' и
+      // 'normalized_display_name' са disjoint substrings — проверени
+      // поотделно, за да се маппнат към правилния response code.
+      if (message.includes('normalized_email')) {
         return { ok: false, code: 'EMAIL_VERIFICATION_PENDING', message: PENDING_REGISTRATION_EMAIL_MESSAGE }
+      }
+      // FINAL PLAN v5 — UNIQUE(normalized_display_name) race safety net:
+      // конкурентна регистрация/pending-display-name-change за СЪЩОТО име е
+      // committed-нала между explicit-ния selectActivePendingReservationConflictStatement
+      // проверка по-горе и този INSERT (truly-concurrent BEGIN IMMEDIATE опити
+      // все пак се сериализират от SQLite, но този catch е defense-in-depth,
+      // не primary defense).
+      if (message.includes('normalized_display_name')) {
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
       }
 
       return { ok: false, message: 'Регистрацията не беше успешна.' }
@@ -1624,6 +1761,7 @@ export async function createAuthStore(
         displayName: row.display_name,
         gender: row.gender,
         visitorId: row.visitor_id ?? randomUUID(),
+        pendingRegistrationId: row.pending_registration_id,
         // Registration-time IP/UA (row.*, captured в pending_registrations
         // при ПЪРВОНАЧАЛНОТО register() извикване) има приоритет пред
         // verify-time IP/UA (input.*, от самата /verify-registration-email
@@ -1713,6 +1851,13 @@ export async function createAuthStore(
         return { ok: false, reason: 'expired' }
       }
 
+      // FINAL PLAN v5 — cleanup на target името, ако друг (различен от ТОЗИ
+      // ред) pending е вече expired, но все още физически заема
+      // normalized_display_name-а, което щеше да произведе фалшив conflict
+      // по-долу. Mirror на register()'s cleanup, но targeted само към новото
+      // желано име, никога не пипа собствения ред на A.
+      deleteExpiredPendingRegistrationByNormalizedNameStatement.run(displayNameResult.normalizedKey)
+
       // Best-effort (НЕ authoritative — mirror на register()'s early check
       // doc коментара) uniqueness срещу ЖИВИ profiles. Authoritative
       // re-check пак се случва в createVerifiedAccountAndProfileInOpenTransaction
@@ -1726,11 +1871,33 @@ export async function createAuthStore(
         return { ok: false, reason: 'display_name_taken' }
       }
 
-      // САМО display_name — password_hash/code_hash/failed_attempts/
-      // resend_count/last_code_sent_at/expires_at НЕ се пипат (hardening
-      // pass §1: потребителят не губи нито кода, нито 24-часовия прозорец).
+      // FINAL PLAN v5 — authoritative pending↔pending check, excludeId =
+      // СОБСТВЕНИЯ pending_registration_id (self-conflict е structurally
+      // невъзможен/неправилен — редакцията на собственото си желано ново
+      // име никога не бива да се самоблокира). Ако друга активна pending
+      // регистрация вече държи целевото име -> ROLLBACK -> старото
+      // normalized_display_name на ТОЗИ ред остава напълно непроменено,
+      // защото UPDATE-ът долу изобщо не се изпълнява (виж
+      // updatePendingRegistrationDisplayNameStatement doc коментара —
+      // единичен write, никакъв release-then-claim прозорец).
+      const pendingNameConflict = selectActivePendingReservationConflictStatement.get(
+        displayNameResult.normalizedKey,
+        row.pending_registration_id,
+        row.pending_registration_id,
+      ) as { pending_registration_id: string } | undefined
+      if (pendingNameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'display_name_taken' }
+      }
+
+      // display_name + normalized_display_name — password_hash/code_hash/
+      // failed_attempts/resend_count/last_code_sent_at/expires_at НЕ се
+      // пипат (hardening pass §1: потребителят не губи нито кода, нито
+      // 24-часовия прозорец). Единичен UPDATE statement — атомарно "премества"
+      // reservation-а от старото към новото име на СЪЩИЯ ред.
       updatePendingRegistrationDisplayNameStatement.run(
         displayNameResult.canonicalDisplayName,
+        displayNameResult.normalizedKey,
         row.pending_registration_id,
       )
 
@@ -1745,6 +1912,27 @@ export async function createAuthStore(
       }
       return { ok: false, reason: 'not_found' }
     }
+  }
+
+  // FINAL PLAN v5 — read-only, no DB write. Нормализира входа СЪЩАТА
+  // canonical validateProfileDisplayName()/normalizedKey логика като
+  // register()/updatePendingRegistrationDisplayName(), за да остане
+  // consistency-та гарантирана (виж "Normalization consistency" от
+  // investigation-а). Невалиден вход (не минава validation) -> връща false
+  // (не "reserved") — самата availability проверка за такъв вход вече се
+  // решава от playerProgressStore.isDisplayNameAvailable() (mirror поведение).
+  function hasActivePendingRegistrationForDisplayName(
+    displayName: string,
+    excludePendingRegistrationId: string | null = null,
+  ): boolean {
+    const displayNameResult = validateProfileDisplayName(displayName)
+    if (!displayNameResult.ok) return false
+    const row = selectActivePendingReservationConflictStatement.get(
+      displayNameResult.normalizedKey,
+      excludePendingRegistrationId,
+      excludePendingRegistrationId,
+    ) as { pending_registration_id: string } | undefined
+    return row !== undefined
   }
 
   function cancelPendingRegistration(pendingRegistrationId: string): { ok: true } {
@@ -2228,6 +2416,7 @@ export async function createAuthStore(
     resendRegistrationVerificationCode,
     verifyRegistrationEmail,
     updatePendingRegistrationDisplayName,
+    hasActivePendingRegistrationForDisplayName,
     cancelPendingRegistration,
     login,
     changePassword,

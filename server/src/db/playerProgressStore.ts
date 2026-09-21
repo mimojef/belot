@@ -657,6 +657,26 @@ export async function createPlayerProgressStore(
     LIMIT 1;
   `)
 
+  // FINAL PLAN v5 — Display Name Reservation. pending_registrations е
+  // authStore.ts's таблица, но физически живее в СЪЩИЯ SQLite файл
+  // (databaseFilePath, споделен между всички *Store модули, виж index.ts's
+  // createPlayerProgressStore/createAuthStore извиквания) — директен нов
+  // prepared statement тук е чист SQL cross-table read, БЕЗ нов dependency
+  // към authStore.ts (dependency посоката си остава authStore -> playerProgressStore,
+  // не обратното, точно съгласно одобрения план). excludePendingRegistrationId
+  // не се ползва от нито един writer в ТОЗИ файл (paid/admin rename никога
+  // не притежават свой собствен pending ред) — параметърът присъства само за
+  // еднакъв statement shape с authStore.ts's огледален
+  // selectActivePendingReservationConflictStatement, винаги извикан с null.
+  const selectActivePendingReservationConflictStatement = database.prepare(`
+    SELECT pending_registration_id
+    FROM pending_registrations
+    WHERE normalized_display_name = ?
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+      AND (? IS NULL OR pending_registration_id <> ?)
+    LIMIT 1;
+  `)
+
   const selectWalletBalanceStatement = database.prepare(`
     SELECT yellow_coins_balance
     FROM profile_wallets
@@ -1172,6 +1192,24 @@ export async function createPlayerProgressStore(
         }
       }
 
+      // FINAL PLAN v5 — Display Name Reservation. Check + write в СЪЩАТА
+      // BEGIN IMMEDIATE транзакция (не TOCTOU-уязвим pre-check в отделен
+      // повикване) — paid rename не бива да може да заграби име, което в
+      // момента е reserved от активна pending регистрация.
+      const pendingConflict = selectActivePendingReservationConflictStatement.get(
+        normalizedDisplayName,
+        null,
+        null,
+      ) as { pending_registration_id: string } | undefined
+
+      if (pendingConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return {
+          ok: false,
+          message: 'Това име вече е заето.',
+        }
+      }
+
       const debitResult = debitWalletStatement.run(
         priceAmountRaw,
         profileId,
@@ -1307,18 +1345,40 @@ export async function createPlayerProgressStore(
       return { ok: true, profile }
     }
 
-    const nameConflict = selectProfileByReservedIdentityNameStatement.get(
-      normalizedDisplayName,
-      normalizedDisplayName,
-      profileId,
-      profileId,
-    ) as { profile_id: string } | undefined
-
-    if (nameConflict !== undefined) {
-      return { ok: false, message: 'Това име вече е заето.' }
-    }
-
+    // FINAL PLAN v5 — цялата conflict-check + write последователност се
+    // премества ВЪТРЕ в нова BEGIN IMMEDIATE транзакция (преди тази задача
+    // функцията НЯМАШЕ никаква транзакция — SELECT и UPDATE бяха отделни
+    // auto-commit statement-и, реален TOCTOU gap, независим от pending
+    // reservation темата, но поправен тук като част от същата промяна,
+    // защото directно я засяга).
     try {
+      database.exec('BEGIN IMMEDIATE;')
+
+      const nameConflict = selectProfileByReservedIdentityNameStatement.get(
+        normalizedDisplayName,
+        normalizedDisplayName,
+        profileId,
+        profileId,
+      ) as { profile_id: string } | undefined
+
+      if (nameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, message: 'Това име вече е заето.' }
+      }
+
+      // Check + write в СЪЩАТА транзакция — admin rename не бива да може да
+      // заграби име, което в момента е reserved от активна pending регистрация.
+      const pendingConflict = selectActivePendingReservationConflictStatement.get(
+        normalizedDisplayName,
+        null,
+        null,
+      ) as { pending_registration_id: string } | undefined
+
+      if (pendingConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, message: 'Това име вече е заето.' }
+      }
+
       const updateResult = updateProfileDisplayNameStatement.run(
         displayName,
         normalizedDisplayName,
@@ -1328,9 +1388,17 @@ export async function createPlayerProgressStore(
       ) as { changes?: number }
 
       if ((updateResult.changes ?? 0) === 0) {
+        database.exec('ROLLBACK;')
         return { ok: false, message: 'Профилът не беше намерен.' }
       }
+
+      database.exec('COMMIT;')
     } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('normalized_display_name') || message.includes('normalized_username')) {
         return { ok: false, message: 'Това име вече е заето.' }
@@ -1798,6 +1866,30 @@ export async function createPlayerProgressStore(
         }
 
         const normalizedDisplayName = displayName.toLocaleLowerCase('bg-BG')
+
+        // FINAL PLAN v5 — Display Name Reservation. Seeding е persisted DB
+        // state, преживяващо restart-и (виж investigation-а: "не е достатъчно
+        // 'no live HTTP race' — pending_registrations е persisted, seeder-ът
+        // може да INSERT-не identity, който вече е reserved от pending ред,
+        // committнат ПРЕДИ restart-а"). Explicit fail-loud тук вместо silent
+        // INSERT OR IGNORE overwrite/skip — bot catalog имената са ФИКСИРАНИ
+        // constant-и, не могат да бъдат "избрани наново" като при human
+        // registration, затова конфликт тук изисква ръчна намеса (изчакай
+        // reservation-а да изтече/се завърши), не automatic recovery.
+        const pendingConflict = selectActivePendingReservationConflictStatement.get(
+          normalizedDisplayName,
+          null,
+          null,
+        ) as { pending_registration_id: string } | undefined
+        if (pendingConflict !== undefined) {
+          throw new Error(
+            `Catalog bot seed conflict: bot "${profileId}" wants display name ` +
+            `"${displayName}", but it is reserved by an active pending registration ` +
+            `(${pendingConflict.pending_registration_id}). Seeding stopped — wait for ` +
+            `the reservation to expire/complete, then restart the server.`,
+          )
+        }
+
         const botCode = `CATALOG_${profileId.toUpperCase().replace(/-/g, '_')}`
         insertBotProfile.run(profileId, displayName, normalizedDisplayName, gender)
         insertBotWallet.run(profileId)
@@ -1806,7 +1898,14 @@ export async function createPlayerProgressStore(
       }
     }
 
-    database.exec('BEGIN;')
+    // FINAL PLAN v5 — BEGIN IMMEDIATE (беше BEGIN;): same writer-tier
+    // atomicity guarantee като останалите identity writers (register/
+    // update-pending-name/verify-finalize/paid-rename/admin-rename/bot-catalog-
+    // rename). Seeding-ът вече се изпълнява преди HTTP listen (index.ts), но
+    // самият writer вече не разчита на този факт за защита — pending-conflict
+    // check-ът по-горе (в generateBots()) е достатъчен и явен, IMMEDIATE
+    // lock-ът е defense-in-depth, mirror на всички останали writer-и.
+    database.exec('BEGIN IMMEDIATE;')
     try {
       generateBots('male', 'bot-m-')
       generateBots('female', 'bot-f-')

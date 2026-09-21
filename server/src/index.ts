@@ -7927,7 +7927,16 @@ function handleCheckNameRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
   const excludedProfileId = session?.profile.profileId ?? null
-  const available = playerProgressStore.isDisplayNameAvailable(name, excludedProfileId)
+  // FINAL PLAN v5 — Display Name Reservation. Композира двата read-only
+  // checks: completed profiles (playerProgressStore) И активни, non-expired
+  // pending registrations (authStore) — точно бизнес правилото "името е
+  // available само ако НИТО active profile, НИТО active pending reservation
+  // го държи". Чисто informational — GET заявка, никакъв write, никаква
+  // reservation не се създава тук (виж register()'s doc коментар за точния
+  // момент, в който reservation-ът реално стартира).
+  const available =
+    playerProgressStore.isDisplayNameAvailable(name, excludedProfileId) &&
+    !authStore.hasActivePendingRegistrationForDisplayName(name)
   sendJsonResponse(res, 200, { available })
   return true
 }
