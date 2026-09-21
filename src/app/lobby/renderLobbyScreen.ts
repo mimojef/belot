@@ -60,6 +60,7 @@ import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import {
   PRIVATE_ROOM_POPUP_STYLES,
   renderPrivateRoomBlockedPopup,
+  renderPrivateRoomCreatorBlockedPopup,
   renderPrivateRoomInviteFriendsPopup,
   renderPrivateRoomJoinConfirmPopup,
   type PrivateRoomInviteEligibleFriend,
@@ -788,6 +789,7 @@ export type LobbyScreenState = {
   privateRoomConflictPromptVariant: 'generic' | 'list-join'
   privateRoomJoinSlotPopup: { team: Team; slotIndex: 0 | 1 } | null
   privateRoomBlockedPopupText: string | null
+  privateRoomCreatorBlockedPopupOpen: boolean
   inviteFriendsPopupOpen: boolean
   inviteFriends: PrivateRoomInviteEligibleFriend[] | null
   supportPopupOpen: boolean
@@ -1297,6 +1299,8 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomJoinSlotPopupCancel: () => void
   /** Затваря X-only blocked-partner popup-а (споделен между списъка и waiting room екрана). */
   onPrivateRoomBlockedPopupClose: () => void
+  /** Затваря "Създателят ви е блокирал" popup-а с бутон ОК (споделен между списъка и waiting room екрана). */
+  onPrivateRoomCreatorBlockedPopupClose: () => void
   /** "ВЛЕЗ" бутон на собствената маса в списъка — чиста навигация към вече съществуващата чакалня, без нов join. */
   onPrivateRoomListEnter: (privateRoomId: string) => void
   onPrivateRoomInvite: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -10699,6 +10703,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     ${renderPrivateRoomsCreatePopup(state)}
     ${renderPrivateRoomJoinConfirmPopup(state.privateRoomJoinSlotPopup)}
     ${renderPrivateRoomBlockedPopup(state.privateRoomBlockedPopupText)}
+    ${renderPrivateRoomCreatorBlockedPopup(state.privateRoomCreatorBlockedPopupOpen)}
   `
 }
 
@@ -15970,6 +15975,14 @@ export function renderLobbyScreen(
   root.querySelector<HTMLElement>('[data-private-room-blocked-popup-backdrop="1"]')
     ?.addEventListener('click', (event) => {
       if (event.target === event.currentTarget) options.onPrivateRoomBlockedPopupClose()
+    })
+
+  root.querySelector<HTMLButtonElement>('[data-private-room-creator-blocked-popup-ok="1"]')
+    ?.addEventListener('click', () => options.onPrivateRoomCreatorBlockedPopupClose())
+
+  root.querySelector<HTMLElement>('[data-private-room-creator-blocked-popup-backdrop="1"]')
+    ?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) options.onPrivateRoomCreatorBlockedPopupClose()
     })
 
   // "ВЛЕЗ" на собствената маса в списъка — чиста навигация, без нов join.

@@ -296,7 +296,13 @@ import type {
   TopicCreateErrorCode,
 } from './protocol/messageTypes.js'
 import { validateTopicTitle, TOPIC_TITLE_MAX_CODE_POINTS } from './protocol/topicTitleValidation.js'
-import { createPrivateRoomsStore, getHumanCount, getTeamSlots } from './game/privateRoomsStore.js'
+import {
+  createPrivateRoomsStore,
+  getHumanCount,
+  getTeamSlots,
+  isProfileBannedByRoomCreator,
+  PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION,
+} from './game/privateRoomsStore.js'
 import { createLudoRoomsStore, type LudoRoom } from './game/ludoRoomsStore.js'
 import { createLudoMatchRuntime, type LudoMatchSnapshot } from './game/ludoMatchRuntime.js'
 import type {
@@ -20880,6 +20886,19 @@ wsServer.on('connection', (socket, request) => {
           .find((r) => r.id === message.privateRoomId)
 
         if (targetPrivateRoom !== undefined) {
+          // Error priority: creator-block е преди level/balance eligibility, за да
+          // види блокираният играч причината за отказа, а не "недостатъчен баланс".
+          // Само read-only precheck — joinTeam() по-долу остава authoritative и
+          // re-check-ва същия predicate (forged/replayed/raced заявки).
+          if (isProfileBannedByRoomCreator(targetPrivateRoom, latestConnection.profileId, (a, b) => blockStore.isBlocked(a, b))) {
+            safeSendToConnection(connection.id, {
+              type: 'error',
+              message: PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION.message,
+              code: PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION.code,
+            })
+            return
+          }
+
           const eligibility = checkPrivateRoomStakeEligibility(
             latestConnection.profileId,
             publicProfile.level,

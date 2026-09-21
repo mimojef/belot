@@ -2,6 +2,7 @@ import type { MatchStake, Team } from '../network/createGameServerClient'
 import {
   PRIVATE_ROOM_POPUP_STYLES,
   renderPrivateRoomBlockedPopup,
+  renderPrivateRoomCreatorBlockedPopup,
   renderPrivateRoomInviteFriendsPopup,
   renderPrivateRoomJoinConfirmPopup,
   renderPrivateRoomKickConfirmPopup,
@@ -48,6 +49,8 @@ export type RenderPrivateRoomWaitingScreenParams = {
   leaveConfirmOpen: boolean
   kickConfirmPopup: { team: Team; slotIndex: 0 | 1; displayName: string } | null
   blockedPopupText: string | null
+  /** 'private_room_creator_blocked_you' — "Създателят ви е блокирал" popup с бутон ОК. */
+  creatorBlockedPopupOpen?: boolean
   botActionLoadingTeam: Team | null
   inviteFriendsPopupOpen: boolean
   inviteFriends: PrivateRoomInviteEligibleFriend[] | null
@@ -1145,6 +1148,7 @@ export function renderPrivateRoomWaitingScreen(params: RenderPrivateRoomWaitingS
       ` : ''}
 
       ${renderPrivateRoomBlockedPopup(params.blockedPopupText)}
+      ${renderPrivateRoomCreatorBlockedPopup(params.creatorBlockedPopupOpen === true)}
     </section>
   `
 }

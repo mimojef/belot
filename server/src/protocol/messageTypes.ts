@@ -607,6 +607,7 @@ export type PrivateRoomActionErrorCode =
   | 'private_room_team_full'
   | 'private_room_partner_blocked'
   | 'private_room_partner_blocked_by_viewer'
+  | 'private_room_creator_blocked_you'
   | 'private_room_bot_owner_missing'
   | 'private_room_not_creator'
   | 'private_room_not_ready_to_start'

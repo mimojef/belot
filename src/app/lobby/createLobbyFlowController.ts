@@ -1860,6 +1860,9 @@ type InternalLobbyFlowState = {
   // автоматично.
   privateRoomKickedPopupOpen: boolean
   privateRoomBlockedPopupText: string | null
+  // 'private_room_creator_blocked_you' — отделен от privateRoomBlockedPopupText
+  // (partner-block, X-only) popup с бутон ОК.
+  privateRoomCreatorBlockedPopupOpen: boolean
   privateRoomBotActionLoadingTeam: Team | null
   // true за периода между "потребителят натисна create/join/приеми покана"
   // и сървърният отговор — вижте private_room_updated handler-а: force-
@@ -2528,6 +2531,7 @@ function createInitialState(): InternalLobbyFlowState {
     privateRoomStartInFlight: false,
     privateRoomKickedPopupOpen: false,
     privateRoomBlockedPopupText: null,
+    privateRoomCreatorBlockedPopupOpen: false,
     privateRoomBotActionLoadingTeam: null,
     privateRoomJoinInFlight: false,
     privateRoomConflictPromptOpen: false,
@@ -4659,6 +4663,7 @@ export function createLobbyFlowController(
       privateRoomConflictPromptVariant: state.privateRoomConflictPromptVariant,
       privateRoomJoinSlotPopup: state.privateRoomJoinSlotPopup,
       privateRoomBlockedPopupText: state.privateRoomBlockedPopupText,
+      privateRoomCreatorBlockedPopupOpen: state.privateRoomCreatorBlockedPopupOpen,
       inviteFriendsPopupOpen: state.inviteFriendsPopupOpen,
       inviteFriends: resolveInviteEligibleFriends(),
       blockedPlayersPopupOpen: state.blockedPlayersPopupOpen,
@@ -6222,6 +6227,10 @@ export function createLobbyFlowController(
       onPrivateRoomJoinSlotPopupCancel: cancelPrivateRoomJoinSlotPopup,
       onPrivateRoomBlockedPopupClose: () => {
         state.privateRoomBlockedPopupText = null
+        render()
+      },
+      onPrivateRoomCreatorBlockedPopupClose: () => {
+        state.privateRoomCreatorBlockedPopupOpen = false
         render()
       },
       onPrivateRoomListEnter: handlePrivateRoomListEnter,
@@ -15675,6 +15684,7 @@ export function createLobbyFlowController(
       leaveConfirmOpen: state.privateRoomLeaveSlotConfirmOpen,
       kickConfirmPopup: state.privateRoomKickConfirmPopup,
       blockedPopupText: state.privateRoomBlockedPopupText,
+      creatorBlockedPopupOpen: state.privateRoomCreatorBlockedPopupOpen,
       botActionLoadingTeam: state.privateRoomBotActionLoadingTeam,
       manualStart: room.manualStart,
       canManualStart: room.canManualStart,
@@ -15809,6 +15819,20 @@ export function createLobbyFlowController(
       ?.addEventListener('click', (event) => {
         if (event.target === event.currentTarget) {
           state.privateRoomBlockedPopupText = null
+          render()
+        }
+      })
+
+    options.root.querySelector<HTMLButtonElement>('[data-private-room-creator-blocked-popup-ok="1"]')
+      ?.addEventListener('click', () => {
+        state.privateRoomCreatorBlockedPopupOpen = false
+        render()
+      })
+
+    options.root.querySelector<HTMLElement>('[data-private-room-creator-blocked-popup-backdrop="1"]')
+      ?.addEventListener('click', (event) => {
+        if (event.target === event.currentTarget) {
+          state.privateRoomCreatorBlockedPopupOpen = false
           render()
         }
       })
@@ -17686,7 +17710,11 @@ export function createLobbyFlowController(
           state.privateRoomStartInFlight = false
         }
         state.privateRoomJoinSlotPopup = null
-        if (
+        if (message.code === 'private_room_creator_blocked_you') {
+          // Mapping по machine-readable code — текстът на popup-а е клиентски
+          // (PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES), не се парсва message.message.
+          state.privateRoomCreatorBlockedPopupOpen = true
+        } else if (
           message.code === 'private_room_partner_blocked' ||
           message.code === 'private_room_partner_blocked_by_viewer'
         ) {
@@ -18657,6 +18685,7 @@ export function createLobbyFlowController(
         state.privateRoomJoinSlotPopup = null
         state.privateRoomLeaveSlotConfirmOpen = false
         state.privateRoomBlockedPopupText = null
+        state.privateRoomCreatorBlockedPopupOpen = false
         state.privateRoomBotActionLoadingTeam = null
         state.privateRoomInvitedProfileIds = new Set()
         // Avoid carrying a stale banner (e.g. "Домакинът затвори масата.")
@@ -18701,6 +18730,7 @@ export function createLobbyFlowController(
         state.privateRoomKickConfirmPopup = null
         state.privateRoomStartInFlight = false
         state.privateRoomBlockedPopupText = null
+        state.privateRoomCreatorBlockedPopupOpen = false
         state.privateRoomBotActionLoadingTeam = null
         state.privateRoomInvitedProfileIds = new Set()
         // Отива в ОСНОВНОТО Lobby, не в списъка "Частни маси" — ако
@@ -18899,6 +18929,7 @@ export function createLobbyFlowController(
     state.privateRoomKickConfirmPopup = null
     state.privateRoomStartInFlight = false
     state.privateRoomBlockedPopupText = null
+    state.privateRoomCreatorBlockedPopupOpen = false
     state.privateRoomBotActionLoadingTeam = null
   }
 

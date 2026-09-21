@@ -45,11 +45,21 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import WebSocket from 'ws'
+import { verifyVerificationCode } from '../src/db/authHelpers.js'
+
+// Email-verification pending-first registration (виж checkAuthSessionRollingRenewal.ts):
+// известен тестов secret на spawned сървъра, за да може 6-цифреният код да се
+// извлече от DB-съхранения code_hash със СЪЩИЯ production HMAC helper — тестът
+// контролира и secret-а, и DB файла, не е production security bypass.
+const TEST_REGISTRATION_SECRET = 'private-room-ws-roundtrip-registration-secret-0123456789'
+let testDatabaseFile = ''
 
 let passed = 0
 let failed = 0
@@ -165,13 +175,45 @@ function startServer(serverDir: string, port: number): RunningServer {
   const child = spawn(
     process.execPath,
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
-    { cwd: serverDir, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      cwd: serverDir,
+      env: { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    },
   )
   child.stdout.setEncoding('utf8')
   child.stderr.setEncoding('utf8')
   child.stdout.on('data', (c) => chunks.push(c))
   child.stderr.on('data', (c) => chunks.push(c))
   return { child, output: () => chunks.join('') }
+}
+
+// Пише директно в ИЗОЛИРАНИЯ temp DB на spawned сървъра (тестът го притежава) —
+// hasEnoughBalance() чете profile_wallets на всяко извикване, без кеш.
+function setWalletBalance(profileId: string, amount: number): void {
+  const db = new DatabaseSync(testDatabaseFile, { open: true, timeout: 5_000 })
+  try {
+    const res = db.prepare('UPDATE profile_wallets SET yellow_coins_balance = ? WHERE profile_id = ?').run(amount, profileId)
+    if (Number(res.changes) === 0) {
+      db.prepare('INSERT INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, ?)').run(profileId, amount)
+    }
+  } finally {
+    db.close()
+  }
+}
+
+function bruteForceVerificationCode(databaseFilePath: string, pendingRegistrationId: string, secret: string): string {
+  const db = new DatabaseSync(databaseFilePath, { open: true })
+  const row = db.prepare(`SELECT code_hash FROM pending_registrations WHERE pending_registration_id = ?`).get(pendingRegistrationId) as
+    | { code_hash: string }
+    | undefined
+  db.close()
+  if (!row) throw new Error(`pending_registrations row not found: ${pendingRegistrationId}`)
+  for (let candidate = 0; candidate < 1_000_000; candidate++) {
+    const code = candidate.toString().padStart(6, '0')
+    if (verifyVerificationCode(code, secret, row.code_hash)) return code
+  }
+  throw new Error(`Could not brute-force the verification code for ${pendingRegistrationId}`)
 }
 
 async function stopServer(server: RunningServer | null): Promise<void> {
@@ -199,9 +241,26 @@ async function registerProfile(port: number, tag: string): Promise<{ cookie: str
     password: 'PrivateRoomWsDiag1!',
     displayName: `PRW ${tag}`,
     gender: 'male',
+    visitorId: randomUUID(),
   })
-  if (reg.status !== 200) throw new Error(`Registration failed for ${tag}: ${JSON.stringify(reg.body)}`)
-  return { cookie: reg.setCookie as string, profileId: reg.body.session.profile.profileId }
+  // pendingRegistrationId се връща и на 503 EMAIL_DELIVERY_FAILED (Brevo не е
+  // configured в тестовата среда — очаквано, pending редът persists).
+  const pendingRegistrationId: string | undefined = reg.body?.pendingRegistrationId
+  if (!pendingRegistrationId) throw new Error(`Registration failed for ${tag}: ${JSON.stringify(reg.body)}`)
+  const code = bruteForceVerificationCode(testDatabaseFile, pendingRegistrationId, TEST_REGISTRATION_SECRET)
+  // bruteForceVerificationCode блокира event loop-а синхронно и понякога прави
+  // keep-alive връзката към spawned сървъра stale (ECONNRESET, чисто transient) —
+  // един бърз retry е достатъчен (същото като checkAuthSessionRollingRenewal.ts).
+  const verifyBody = { pendingRegistrationId, code, rememberMe: true }
+  let verified: Awaited<ReturnType<typeof httpJson>>
+  try {
+    verified = await httpJson(port, 'POST', '/api/auth/verify-registration-email', null, verifyBody)
+  } catch {
+    await sleep(200)
+    verified = await httpJson(port, 'POST', '/api/auth/verify-registration-email', null, verifyBody)
+  }
+  if (verified.status !== 200) throw new Error(`Email verification failed for ${tag}: ${JSON.stringify(verified.body)}`)
+  return { cookie: verified.setCookie as string, profileId: verified.body.session.profile.profileId }
 }
 
 async function connectClient(port: number, tag: string): Promise<TestClient> {
@@ -280,6 +339,7 @@ console.log('\ncheckPrivateRoomWebSocketRoundTrip\n')
 
 let server: RunningServer | null = null
 const isolated = await createIsolatedServerRoot(sourceServerRoot)
+testDatabaseFile = join(isolated.serverDir, 'database', 'data', 'belot-v2.sqlite')
 
 try {
   const port = await findFreePort()
@@ -749,8 +809,163 @@ try {
     if (b0 === null || b0.isBot === true) throw new Error('expected the real joiner seated at B,0')
   })
 
+  // ───────────────────────────────────────────────────────────────────────
+  // Scenario F: creator block = FULL seat ban, over the real WS protocol and
+  // the real HTTP block endpoint. Covers (letters = task spec A-H):
+  //   A partner seat denied     B opponent seats denied     C non-creator
+  //   blocker keeps the old partner rule     D (reverse direction) is proven by
+  //   Scenario E above, which must stay green     E public table unaffected
+  //   F creator himself unaffected     G raw / replayed seat frames denied,
+  //   room never mutated     H creator leaves -> host transfers -> still banned.
+  // ───────────────────────────────────────────────────────────────────────
+  console.log('\n--- Scenario F: creator block = full seat ban (real WS + real HTTP block endpoint) ---')
+
+  const creatorF = await connectClient(port, 'creatorF')
+  const blockedF = await connectClient(port, 'blockedF') // blocked BY THE CREATOR
+  const memberF = await connectClient(port, 'memberF') // ordinary participant
+  const otherF = await connectClient(port, 'otherF') // blocked only by memberF (a non-creator)
+  const brokeF = await connectClient(port, 'brokeF') // NOT blocked by anyone; zero balance (baseline for the priority check)
+
+  await check('[F1] creatorF blocks blockedF via the real HTTP block endpoint', async () => {
+    const res = await httpJson(port, 'POST', `/api/profiles/${blockedF.profileId}/block`, creatorF.cookie)
+    if (res.status !== 200 || res.body?.blocked !== true) throw new Error(`block call failed: status=${res.status} body=${JSON.stringify(res.body)}`)
+  })
+  await check('[F1b] memberF (NOT the creator) blocks otherF via the real HTTP block endpoint', async () => {
+    const res = await httpJson(port, 'POST', `/api/profiles/${otherF.profileId}/block`, memberF.cookie)
+    if (res.status !== 200 || res.body?.blocked !== true) throw new Error(`block call failed: status=${res.status} body=${JSON.stringify(res.body)}`)
+  })
+
+  send(creatorF, { type: 'create_private_room', stake: 5000, isLocked: false })
+  const createdF = await waitForFrame(creatorF, (f) => f.type === 'private_room_updated', 10_000, 'create_private_room F')
+  const roomIdF: string = createdF.room.id
+
+  const CREATOR_BLOCKED_CODE = 'private_room_creator_blocked_you'
+
+  async function expectSeatDenied(client: TestClient, team: 'A' | 'B', slotIndex: 0 | 1, expectedCode: string, label: string): Promise<void> {
+    client.frames.length = 0
+    send(client, { type: 'join_private_room', privateRoomId: roomIdF, team, slotIndex })
+    const errorFrame = await waitForFrame(client, (f) => f.type === 'error', 5_000, label)
+    if (errorFrame.code !== expectedCode) throw new Error(`expected code ${expectedCode}, got ${errorFrame.code}`)
+    if (client.frames.some((f) => f.type === 'private_room_updated')) throw new Error('a denied seat request produced a private_room_updated (seat mutation leaked)')
+  }
+
+  async function roomSnapshotF(viewer: TestClient): Promise<any> {
+    viewer.frames.length = 0
+    send(viewer, { type: 'request_private_rooms_list' })
+    const listFrame = await waitForFrame(viewer, (f) => f.type === 'private_rooms_list', 5_000, 'rooms list (F)')
+    const room = listFrame.rooms.find((r: any) => r.id === roomIdF)
+    if (room === undefined) throw new Error('room F disappeared')
+    return room
+  }
+
+  async function occupiedInRoomF(viewer: TestClient): Promise<number> {
+    return occupiedCount(await roomSnapshotF(viewer))
+  }
+
+  await check('[F2 / A] creator blocked joiner -> PARTNER seat (A,1) DENIED over real WS with private_room_creator_blocked_you', async () => {
+    await expectSeatDenied(blockedF, 'A', 1, CREATOR_BLOCKED_CODE, 'creator-ban partner seat')
+  })
+
+  await check('[F3 / B] creator blocked joiner -> OPPONENT seats (B,0) and (B,1) DENIED', async () => {
+    await expectSeatDenied(blockedF, 'B', 0, CREATOR_BLOCKED_CODE, 'creator-ban opponent seat B0')
+    await expectSeatDenied(blockedF, 'B', 1, CREATOR_BLOCKED_CODE, 'creator-ban opponent seat B1')
+  })
+
+  await check('[F4 / G] replayed raw join_private_room frames (6x, partner + opponent) are ALL denied; the room is never mutated', async () => {
+    blockedF.frames.length = 0
+    for (let i = 0; i < 3; i++) {
+      send(blockedF, { type: 'join_private_room', privateRoomId: roomIdF, team: 'A', slotIndex: 1 })
+      send(blockedF, { type: 'join_private_room', privateRoomId: roomIdF, team: 'B', slotIndex: 0 })
+    }
+    await waitForCondition('6 denial frames', () => framesOfType(blockedF, 'error').length >= 6, 5_000)
+    const codes = framesOfType(blockedF, 'error').map((f) => f.code)
+    if (!codes.every((c) => c === CREATOR_BLOCKED_CODE)) throw new Error(`unexpected codes among replays: ${JSON.stringify(codes)}`)
+    if (framesOfType(blockedF, 'private_room_updated').length > 0) throw new Error('replayed denied requests produced a private_room_updated')
+    const occupied = await occupiedInRoomF(creatorF)
+    if (occupied !== 1) throw new Error(`expected only the creator seated (1), got ${occupied}`)
+  })
+
+  await check('[F5 / C] memberF (non-creator) seats normally; otherF (blocked only by memberF) is denied JUST the partner seat with the OLD code, and may sit elsewhere', async () => {
+    memberF.frames.length = 0
+    send(memberF, { type: 'join_private_room', privateRoomId: roomIdF, team: 'B', slotIndex: 0 })
+    await waitForFrame(memberF, (f) => f.type === 'private_room_updated', 5_000, 'memberF seated at B0')
+
+    await expectSeatDenied(otherF, 'B', 1, 'private_room_partner_blocked', 'old partner rule for non-creator blocker')
+
+    otherF.frames.length = 0
+    send(otherF, { type: 'join_private_room', privateRoomId: roomIdF, team: 'A', slotIndex: 1 })
+    const updated = await waitForFrame(otherF, (f) => f.type === 'private_room_updated', 5_000, 'otherF seated at A1')
+    const a1 = slotOccupant(updated.room, 'A', 1)
+    if (a1 === null || a1.profileId !== otherF.profileId) throw new Error('otherF was not seated at A,1')
+  })
+
+  await check('[F6 / H] creator leaves -> host transfers to another player -> blockedF is STILL denied (creatorProfileId is immutable)', async () => {
+    otherF.frames.length = 0
+    send(creatorF, { type: 'leave_private_room' })
+    const transferred = await waitForFrame(
+      otherF,
+      (f) => f.type === 'private_room_updated' && slotOccupant(f.room, 'A', 0) === null,
+      5_000,
+      'private_room_updated after the creator left',
+    )
+    const newHost = transferred.room.slots.map((s: any) => s.occupant).find((o: any) => o !== null && o.isHost === true)
+    if (newHost === undefined || newHost.profileId === creatorF.profileId) {
+      throw new Error(`expected host to transfer away from the creator, got ${JSON.stringify(newHost)}`)
+    }
+    await expectSeatDenied(blockedF, 'A', 0, CREATOR_BLOCKED_CODE, 'creator-ban after host transfer (empty seat A0)')
+    await expectSeatDenied(blockedF, 'B', 1, CREATOR_BLOCKED_CODE, 'creator-ban after host transfer (B1)')
+  })
+
+  await check('[F7 / F] the creator himself is NOT affected — he can re-sit at his own table', async () => {
+    creatorF.frames.length = 0
+    send(creatorF, { type: 'join_private_room', privateRoomId: roomIdF, team: 'A', slotIndex: 0 })
+    const updated = await waitForFrame(creatorF, (f) => f.type === 'private_room_updated', 5_000, 'creator re-seated')
+    const a0 = slotOccupant(updated.room, 'A', 0)
+    if (a0 === null || a0.profileId !== creatorF.profileId) throw new Error('creator was not re-seated at A,0')
+  })
+
+  await check('[F8 / E] PUBLIC table (create_room/join_room) is unaffected: host blocked joiner, joiner still gets room_joined and no creator-ban error', async () => {
+    const pubHost = await connectClient(port, 'pubHost')
+    const pubBlocked = await connectClient(port, 'pubBlocked')
+    try {
+      const res = await httpJson(port, 'POST', `/api/profiles/${pubBlocked.profileId}/block`, pubHost.cookie)
+      if (res.status !== 200 || res.body?.blocked !== true) throw new Error(`block call failed: status=${res.status} body=${JSON.stringify(res.body)}`)
+
+      send(pubHost, { type: 'create_room' })
+      const created = await waitForFrame(pubHost, (f) => f.type === 'room_created', 10_000, 'public room_created')
+
+      pubBlocked.frames.length = 0
+      send(pubBlocked, { type: 'join_room', roomId: created.roomId })
+      await waitForFrame(pubBlocked, (f) => f.type === 'room_joined' && f.roomId === created.roomId, 10_000, 'public room_joined')
+      if (pubBlocked.frames.some((f) => f.type === 'error' && f.code === CREATOR_BLOCKED_CODE)) {
+        throw new Error('the private-table creator ban fired on a PUBLIC table')
+      }
+    } finally {
+      for (const c of [pubHost, pubBlocked]) { try { c.ws.close() } catch { /* ignore */ } }
+    }
+  })
+
+  await check('[F9 / priority] creator blocked C AND C has NO balance -> creator-block wins over the balance error (baseline: an unblocked broke player DOES get the balance error); no seat mutation', async () => {
+    setWalletBalance(brokeF.profileId, 0)
+    setWalletBalance(blockedF.profileId, 0)
+
+    const before = await roomSnapshotF(creatorF)
+
+    // Baseline — proves the zero balance really trips eligibility on the real server.
+    await expectSeatDenied(brokeF, 'B', 1, 'private_room_insufficient_balance', 'baseline: unblocked broke player -> balance error')
+
+    // The actual priority assertion — creator-block, NOT the balance error.
+    await expectSeatDenied(blockedF, 'B', 1, CREATOR_BLOCKED_CODE, 'creator-block must win over the balance error')
+    await expectSeatDenied(blockedF, 'A', 1, CREATOR_BLOCKED_CODE, 'creator-block must win over the balance error (occupied seat)')
+
+    const after = await roomSnapshotF(creatorF)
+    if (occupiedCount(after) !== occupiedCount(before)) throw new Error(`occupied seats changed: ${occupiedCount(before)} -> ${occupiedCount(after)}`)
+    if (slotOccupant(after, 'B', 1) !== null) throw new Error('B,1 was seated despite the denial')
+    if (JSON.stringify(after.slots) !== JSON.stringify(before.slots)) throw new Error('room slots changed after the denied requests')
+  })
+
   // ─── Cleanup: close every remaining socket ───────────────────────────────
-  for (const c of [hostA, guestA1, outsider, hostB, guestB1, guestB2, hostC, guestC1, guestC2, guestC3, hostD, guestD1, hostE, joinerE]) {
+  for (const c of [hostA, guestA1, outsider, hostB, guestB1, guestB2, hostC, guestC1, guestC2, guestC3, hostD, guestD1, hostE, joinerE, creatorF, blockedF, memberF, otherF, brokeF]) {
     try { c.ws.close() } catch { /* ignore */ }
   }
 } finally {

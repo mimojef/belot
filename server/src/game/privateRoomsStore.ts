@@ -56,6 +56,13 @@ export type PrivateRoom = {
   id: string
   kind: 'open' | 'locked'
   stake: MatchStake
+  /**
+   * Оригиналният създател на масата. Задава се веднъж в createRoom и НИКОГА
+   * не се променя (нито при leave/host transfer, нито при reconnect) —
+   * за разлика от hostProfileId, който се преназначава при leave на host-а.
+   * Ползва се само за creator->joiner seat ban в joinTeam.
+   */
+  readonly creatorProfileId: string | null
   hostProfileId: string | null
   hostConnectionId: string
   slots: PrivateRoomSlots
@@ -122,6 +129,33 @@ export type RoomReadiness =
   | { ready: false; reason: 'duplicate_bot_identity' }
 
 export type IsBlockedWith = (profileIdA: string, profileIdB: string) => boolean
+
+// Creator->joiner full seat ban: оригиналният създател е блокирал joiner-а.
+// Само тази посока (joiner->creator блок не активира правилото), създателят
+// сам не е засегнат, guest създател (profileId null) не може да държи блок.
+// Read-only predicate, споделен между двете места, които го ползват:
+//  - joinTeam() — AUTHORITATIVE решение (forged/replayed/raced заявки, директни
+//    store извиквания);
+//  - WS join_private_room handler-ът — само precheck за error priority, преди
+//    level/balance eligibility. Той не е authority: ако блокът се промени между
+//    precheck-а и joinTeam(), joinTeam() решава окончателно.
+export function isProfileBannedByRoomCreator(
+  room: Pick<PrivateRoom, 'creatorProfileId'>,
+  joiningProfileId: string | null,
+  isBlockedWith: IsBlockedWith,
+): boolean {
+  return (
+    joiningProfileId !== null &&
+    room.creatorProfileId !== null &&
+    joiningProfileId !== room.creatorProfileId &&
+    isBlockedWith(room.creatorProfileId, joiningProfileId)
+  )
+}
+
+export const PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION = {
+  message: 'Вие не можете да седнете в тази маса. Създателят ви е блокирал.',
+  code: 'private_room_creator_blocked_you',
+} as const
 
 // Финалната валидация преди старт на маса — вика се само когато всичките 4
 // слота вече са заети (occupiedCount===4). Duplicate-bot проверката е
@@ -434,6 +468,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       id: randomUUID(),
       kind: input.isLocked ? 'locked' : 'open',
       stake: input.stake,
+      creatorProfileId: input.profileId,
       hostProfileId: input.profileId,
       hostConnectionId: input.connectionId,
       slots,
@@ -473,6 +508,16 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       room.slots.some((s) => s.occupant?.kind === 'human' && s.occupant.profileId === input.profileId)
     ) {
       return { ok: false, message: 'Вече си в тази маса.' }
+    }
+
+    // Authoritative creator->joiner full seat ban: ако оригиналният създател е
+    // блокирал joiner-а, той не може да седне на НИТО ЕДНО място (нито партньор,
+    // нито противник). Това е окончателната защита — WS handler-ът вика същия
+    // predicate по-рано само за error priority (преди level/balance), но тази
+    // проверка НЕ бива да се маха: тя покрива forged/replayed/raced заявки и
+    // директни store извиквания.
+    if (isProfileBannedByRoomCreator(room, input.profileId, input.isBlockedWith)) {
+      return { ok: false, ...PRIVATE_ROOM_CREATOR_BLOCKED_REJECTION }
     }
 
     const targetSlot = findSlot(room, input.team, input.slotIndex)

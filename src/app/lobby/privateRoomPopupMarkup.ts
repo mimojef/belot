@@ -246,6 +246,27 @@ export function renderPrivateRoomBlockedPopup(blockedPopupText: string | null): 
   `
 }
 
+// Текстът е клиентски, закачен за кода 'private_room_creator_blocked_you' —
+// НЕ се парсва от server message-а (виж createLobbyFlowController error handler).
+export const PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES = [
+  'Вие не можете да седнете в тази маса.',
+  'Създателят ви е блокирал.',
+] as const
+
+export function renderPrivateRoomCreatorBlockedPopup(isOpen: boolean): string {
+  if (!isOpen) return ''
+  return `
+    <div class="prw-popup-backdrop" data-private-room-creator-blocked-popup-backdrop="1">
+      <div class="prw-popup-box" role="alertdialog" aria-modal="true">
+        <div class="prw-popup-text">${PRIVATE_ROOM_CREATOR_BLOCKED_POPUP_LINES.map(escapeHtml).join('<br>')}</div>
+        <div class="prw-popup-actions">
+          <button type="button" data-private-room-creator-blocked-popup-ok="1" class="prw-confirm-yes">ОК</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 // Eligible = вече изключени: самия viewer, вече седнали в масата хора.
 // "sent" state се пази client-side (виж createLobbyFlowController.ts's
 // privateRoomInvitedProfileIds) — сървърът не излага pendingInvites в
