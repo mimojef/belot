@@ -168,13 +168,19 @@ async function seedCompletedRound(input: {
     }
   }
 
-  const roundId = randomUUID()
-  database.prepare(`INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index) VALUES (?, ?, ?, 1);`).run(roundId, tournamentId, input.roundType)
-
+  // Всеки match получава СОБСТВЕН round row с уникален round_index (1..N) —
+  // огледално на production bracket seeding (createFirstRoundBracket в
+  // tournamentEconomyStore.ts), не един споделен round_index=1 за всички
+  // match-ове. ensureNextRound-ът вече е per-bracket-слот dependency-based
+  // (round_index 2i-1/2i хранят target слот i) — споделен round_index би
+  // направил всички matchesByRoundIndex записи да се презаписват на един-
+  // единствен match и pairing-ът тихо да не намери feeder двойки.
   for (let m = 0; m < matchCount; m += 1) {
     const matchId = randomUUID()
     const teamA = teamIds[m * 2]!
     const teamB = teamIds[m * 2 + 1]!
+    const roundId = randomUUID()
+    database.prepare(`INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index) VALUES (?, ?, ?, ?);`).run(roundId, tournamentId, input.roundType, m + 1)
     database.prepare(`
       INSERT INTO tournament_matches (match_id, tournament_id, round_id, room_id, team_a_id, team_b_id, status, winner_team_id, result_kind, final_score_team_a, final_score_team_b, completed_at)
       VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, 'played', 151, 90, CURRENT_TIMESTAMP);

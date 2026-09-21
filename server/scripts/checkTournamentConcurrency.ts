@@ -271,6 +271,7 @@ try {
     getPublicProfile: (profileId) => profiles.get(profileId) ?? null,
     getRoom: (roomId) => rooms.get(roomId) ?? null,
     commitRoom: (room) => { rooms.set(room.id, room) },
+    closeCompletedRoom: (room) => { rooms.delete(room.id) },
     ensureRoomRuntime: () => ({ ok: true }),
     settleTournamentPrizes: (tournamentId) => {
       const result = economyStore!.settleTournamentPrizesAtomically(tournamentId, new Date('2026-07-30T12:00:00.000Z'))

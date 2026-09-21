@@ -275,6 +275,7 @@ async function createCoordinator(input: {
     getPublicProfile: (profileId) => input.profiles.get(profileId) ?? null,
     getRoom: (roomId) => input.rooms.get(roomId) ?? null,
     commitRoom: (room) => { input.rooms.set(room.id, room) },
+    closeCompletedRoom: (room) => { input.rooms.delete(room.id) },
     ensureRoomRuntime: () => ({ ok: true }),
     settleTournamentPrizes: (tournamentId) => {
       const result = input.economyStore.settleTournamentPrizesAtomically(tournamentId, new Date('2026-07-30T12:00:00.000Z'))
@@ -500,6 +501,15 @@ try {
     room = endRoom(room, winner, winner === 'A' ? { teamA: 151, teamB: 90 } : { teamA: 90, teamB: 151 })
     rooms.set(room.id, room)
     coordinator!.onTournamentRoomCompleted(room)
+    // Симулира играчите, напускащи завършения room (WS disconnect при
+    // навигация обратно към лобито) — isProfileOnline е profile-scoped, не
+    // room-scoped (виж production коментара в getPresentSeats), затова
+    // непочистени connection ключове от СТАР, вече завършен room биха
+    // накарали следващия round-transition мач фалшиво да брои играч за
+    // "все още онлайн", без реално да е свързан към новата стая.
+    for (const key of Array.from(attachedConnections)) {
+      if (key.includes(`:${room.id}:`)) attachedConnections.delete(key)
+    }
   }
 
   // ── Live feeder progress audience (виж task spec-а: коригирана аудитория)

@@ -242,6 +242,7 @@ async function createCoordinator(input: {
     getPublicProfile: (profileId) => input.profiles.get(profileId) ?? null,
     getRoom: (roomId) => input.rooms.get(roomId) ?? null,
     commitRoom: (room) => { input.rooms.set(room.id, room) },
+    closeCompletedRoom: (room) => { input.rooms.delete(room.id) },
     ensureRoomRuntime: () => ({ ok: true }),
     settleTournamentPrizes: (tournamentId) => {
       const result = input.economyStore.settleTournamentPrizesAtomically(tournamentId, new Date('2026-07-30T12:00:00.000Z'))
@@ -304,6 +305,13 @@ async function playTournamentToCompletion(input: {
       playRoom = endRoom(playRoom, 'A')
       rooms.set(playRoom.id, playRoom)
       coordinator.onTournamentRoomCompleted(playRoom)
+      // Симулира играчите, напускащи завършения room — isProfileOnline е
+      // profile-scoped (виж production коментара в getPresentSeats), затова
+      // непочистени connection ключове от стар завършен room биха накарали
+      // следващия round-transition мач фалшиво да брои играч за "онлайн".
+      for (const key of Array.from(attachedConnections)) {
+        if (key.includes(`:${playRoom.id}:`)) attachedConnections.delete(key)
+      }
     }
     throw new Error('tournament did not reach finished status within iteration budget')
   } finally {
@@ -523,6 +531,125 @@ await check('invalid teamCapacity values are rejected by the allow-list used at 
 await runCapacityScenario(4)
 await runCapacityScenario(8)
 await runCapacityScenario(16)
+
+// ── [9] Deterministic dependency-based progression на НАЙ-ДЪЛБОКИЯ реален
+// ladder преход, поддържан от production модела (round_of_16 -> quarterfinal,
+// 16 отбора / 8 round_of_16 мача) — production максимумът е 16 отбора
+// (ALLOWED_TOURNAMENT_TEAM_CAPACITIES/TOURNAMENT_ROUND_LADDER_BY_TEAM_CAPACITY
+// спират до 16; round_of_32/32-екипен bracket не съществува в схемата или
+// типовете), затова това е директният структурен еквивалент на "R32 #1+#2 ->
+// R16 #1 докато останалите R32 играят" за реалния ladder дълбочина, който
+// системата поддържа. Довършва двата feeder мача директно през SQL
+// (deterministic, без реален gameplay flow), за да изолира чисто
+// ensureNextRound-овата per-bracket-слот eligibility логика от attendance/
+// bot-fill/connection timing shума.
+await check('[16 teams] R16 #1 + #2 finished, others still playing -> only QF #1 becomes eligible/created, unrelated QF slots stay absent, repeated tick is idempotent', async () => {
+  const teamCapacity = 16
+  const playerCapacity = teamCapacity * 2
+  const tempDir = await mkdtemp(join(tmpdir(), 'belot-tournament-vtc-r16qf-'))
+  const dbPath = join(tempDir, 'test.sqlite')
+  let db: DatabaseSync | null = null
+  let tournamentStore: Awaited<ReturnType<typeof createTournamentStore>> | null = null
+  let economyStore: Awaited<ReturnType<typeof createTournamentEconomyStore>> | null = null
+  let scheduler: Awaited<ReturnType<typeof createTournamentScheduler>> | null = null
+  let coordinator: Awaited<ReturnType<typeof createCoordinator>> | null = null
+  try {
+    db = new DatabaseSync(dbPath, { open: true, enableForeignKeyConstraints: true })
+    await applyMigrations(db)
+    tournamentStore = await createTournamentStore(dbPath)
+    economyStore = await createTournamentEconomyStore(dbPath)
+
+    const profileIds = Array.from({ length: playerCapacity }, () => randomUUID())
+    profileIds.forEach((profileId, index) => insertProfile(db!, profileId, index))
+    const profiles = new Map(profileIds.map((profileId, index) => [profileId, publicProfile(profileId, index)]))
+    const rooms = new Map<string, ServerRoom>()
+    const attachedConnections = new Set<string>()
+
+    const created = tournamentStore.createTournament({
+      kind: 'community', name: 'VTC-R16QF Tournament', creatorProfileId: profileIds[0]!,
+      visibility: 'public', entryFee: 10_000, playerCapacity, startMode: 'fill',
+    })
+    assert(created.ok === true, `create failed: ${JSON.stringify(created)}`)
+    const tournamentId = (created as { ok: true; tournament: { tournamentId: string } }).tournament.tournamentId
+    for (const profileId of profileIds) {
+      const result = economyStore.joinTournamentSoloAtomically(tournamentId, profileId)
+      assert(result.ok === true, `join failed: ${JSON.stringify(result)}`)
+    }
+
+    scheduler = await createTournamentScheduler({
+      databaseFilePath: dbPath, economyStore,
+      now: () => new Date('2026-07-30T10:00:00.000Z'),
+      setInterval: () => ({ unref() {} }) as ReturnType<typeof globalThis.setInterval>,
+      clearInterval: () => {},
+    })
+    scheduler.tickNow()
+
+    const r16Before = getMatches(db, tournamentId).filter((m) => m.roundType === 'round_of_16')
+    assert(r16Before.length === 8, `expected 8 round_of_16 matches, got ${r16Before.length}`)
+    const r16ByIndex = new Map(r16Before.map((m) => [m.roundIndex, m]))
+    const r16_1 = r16ByIndex.get(1)!
+    const r16_2 = r16ByIndex.get(2)!
+    assert(r16_1 !== undefined && r16_2 !== undefined, 'missing round_of_16 slot #1 or #2')
+
+    // Довършва САМО R16 #1 и #2 directно през SQL — deterministic, не минава
+    // през реален attendance/gameplay flow за останалите 6 мача, които
+    // умишлено остават 'awaiting_players' (still playing/not started).
+    const completeMatch = db.prepare(`
+      UPDATE tournament_matches
+      SET status = 'completed', winner_team_id = team_a_id, result_kind = 'played',
+          final_score_team_a = 151, final_score_team_b = 80, completed_at = CURRENT_TIMESTAMP
+      WHERE match_id = ?;
+    `)
+    completeMatch.run(r16_1.matchId)
+    completeMatch.run(r16_2.matchId)
+
+    coordinator = await createCoordinator({ dbPath, profiles, rooms, attachedConnections, economyStore })
+    coordinator.tickNow()
+
+    const afterFirstTick = getMatches(db, tournamentId)
+    const r16AfterFirstTick = afterFirstTick.filter((m) => m.roundType === 'round_of_16')
+    const stillPlaying = r16AfterFirstTick.filter((m) => m.roundIndex >= 3)
+    assert(stillPlaying.length === 6 && stillPlaying.every((m) => m.status !== 'completed'), 'unrelated round_of_16 matches (#3-#8) were unexpectedly resolved')
+
+    const qfAfterFirstTick = afterFirstTick.filter((m) => m.roundType === 'quarterfinal')
+    assert(qfAfterFirstTick.length === 1, `expected exactly 1 quarterfinal match created, got ${qfAfterFirstTick.length} (unrelated QF slots must stay absent while only one feeder pair is resolved)`)
+    const qf1 = qfAfterFirstTick[0]!
+    assert(qf1.roundIndex === 1, `created quarterfinal has roundIndex=${qf1.roundIndex}, expected 1 (fed by round_of_16 #1+#2)`)
+    assert(qf1.teamAId === r16_1.teamAId, 'QF #1 teamA does not match round_of_16 #1 winner')
+    assert(qf1.teamBId === r16_2.teamAId, 'QF #1 teamB does not match round_of_16 #2 winner')
+    assert(qf1.status !== 'completed', 'newly created QF #1 should not already be completed')
+    assert(qf1.roomId !== null, 'QF #1 should already have a room claimed on the same tick it was created (startable)')
+
+    const qf1MatchId = qf1.matchId
+    const qf1RoomId = qf1.roomId
+
+    // Repeated tick — idempotency: без duplicate target match, без duplicate
+    // room claim.
+    coordinator.tickNow()
+    coordinator.tickNow()
+    coordinator.tickNow()
+    const afterRepeatedTicks = getMatches(db, tournamentId)
+    const qfAfterRepeatedTicks = afterRepeatedTicks.filter((m) => m.roundType === 'quarterfinal')
+    assert(qfAfterRepeatedTicks.length === 1, `expected still exactly 1 quarterfinal match after repeated ticks, got ${qfAfterRepeatedTicks.length} (duplicate creation)`)
+    assert(qfAfterRepeatedTicks[0]!.matchId === qf1MatchId, 'quarterfinal match_id changed across repeated ticks (recreated instead of reused)')
+    assert(qfAfterRepeatedTicks[0]!.roomId === qf1RoomId, 'quarterfinal room_id changed across repeated ticks (duplicate room claim)')
+
+    const roomCountForMatch = countRows(db, `SELECT COUNT(*) AS count FROM tournament_matches WHERE tournament_id = ? AND room_id = ?;`, tournamentId, qf1RoomId)
+    assert(roomCountForMatch === 1, `room_id ${qf1RoomId} is referenced by ${roomCountForMatch} matches, expected exactly 1 (no duplicate room reuse)`)
+
+    const fkRows = db.prepare('PRAGMA foreign_key_check;').all()
+    const integrity = (db.prepare('PRAGMA integrity_check;').get() as { integrity_check: string }).integrity_check
+    assert(fkRows.length === 0, `foreign_key_check rows=${fkRows.length}`)
+    assert(integrity === 'ok', `integrity_check=${integrity}`)
+  } finally {
+    try { coordinator?.close() } catch {}
+    try { scheduler?.close() } catch {}
+    try { economyStore?.close() } catch {}
+    try { tournamentStore?.close() } catch {}
+    try { db?.close() } catch {}
+    await rm(tempDir, { recursive: true, force: true })
+  }
+})
 
 if (failed > 0) {
   console.error(`checkTournamentVariableTeamCount failed: ${failed} failed, ${passed} passed.`)

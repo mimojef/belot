@@ -262,12 +262,6 @@ type SeatAssignment = {
   publicProfile: PublicProfile
 }
 
-type RoundWinnerRow = {
-  match_id: string
-  winner_team_id: string
-  completed_at: string
-}
-
 type ReplacementRow = {
   replacement_id: string
   tournament_id: string
@@ -688,20 +682,6 @@ export async function createTournamentCoordinator(
     WHERE match_id = ?
       AND status != 'completed'
       AND (winner_team_id IS NULL OR winner_team_id = ?);
-  `)
-
-  // round_type е bind параметър — преизползва се за всеки не-final кръг в
-  // ladder-а (round_of_16/quarterfinal/semifinal), виж advanceCompletedRoundIfDue.
-  const selectRoundWinnersStatement = database.prepare(`
-    SELECT tm.match_id, tm.winner_team_id, tm.completed_at
-    FROM tournament_matches tm
-    JOIN tournament_rounds tr ON tr.round_id = tm.round_id
-    WHERE tm.tournament_id = ?
-      AND tr.round_type = ?
-      AND tm.status = 'completed'
-      AND tm.result_kind IN ('played', 'played_with_bots', 'walkover')
-      AND tm.winner_team_id IS NOT NULL
-    ORDER BY tr.round_index ASC, tm.completed_at ASC;
   `)
 
   // Общ брой мачове, зачислени за даден round_type (независимо от статус) —
@@ -1362,12 +1342,14 @@ export async function createTournamentCoordinator(
   // spec: "ack остава запис, но НЕ blocking condition"). The old ack-gate
   // could stall an entire final indefinitely if a winning human finalist
   // went offline before acknowledging — no timeout existed for that wait.
-  // The single safety condition that actually matters (siblings settled
-  // before advancing) is already enforced structurally by
-  // ensureNextRound()'s "winners.length !== currentMatches.length" guard
-  // upstream — by the time a match reaches 'awaiting_players' with
-  // deadline_kind='round_transition', the round it belongs to could only
-  // have been created because every feeder match was already complete.
+  // The single safety condition that actually matters (THIS match's own two
+  // feeders settled before advancing, not the whole round) is already
+  // enforced structurally by ensureNextRound()'s per-bracket-slot readyPairs
+  // gate upstream — by the time a match reaches 'awaiting_players' with
+  // deadline_kind='round_transition', it could only have been created because
+  // its own two immediate feeder matches were already complete (see
+  // ensureNextRound's comment for the dependency-based, not whole-round,
+  // eligibility rule).
   function isNextMatchStartDue(match: MatchRow): boolean {
     return match.next_match_start_at !== null &&
       Date.parse(match.next_match_start_at) <= Date.now()
@@ -1595,87 +1577,104 @@ export async function createTournamentCoordinator(
     commitSnapshot(refreshed, initialized)
   }
 
-  // Генерира следващия bracket кръг за (currentRoundType -> nextRoundType)
-  // веднага щом ВСИЧКИ мачове от currentRoundType са завършени с победител.
-  // Pairing: winner[0] vs winner[1], winner[2] vs winner[3]... по match
-  // order (round_index ASC) — устойчиво на bracket структурата, защото
-  // самото seed pairing (high-vs-low) вече е "изпечено" в първия кръг
-  // (createFirstRoundBracket), следващите кръгове само следват дървото.
+  // Генерира next-round мачове за (currentRoundType -> nextRoundType) НА
+  // BRACKET-СЛОТ ОСНОВА, не whole-round-basis — всеки target слот (roundIndex
+  // i, i=1..nextMatchCount) става eligible веднага щом ДВАТА му непосредствени
+  // feeder мача (currentRoundType round_index 2i-1 и 2i) са завършени с
+  // победител, независимо дали останалите currentRoundType мачове все още
+  // играят. Pairing: sibling слотове (2i-1, 2i) хранят target слот i — same
+  // deterministic bracket-tree derivation, който resolveWaitingTeamIdForFeeder
+  // вече ползва за "чакаш точно този feeder" UI push-а (виж коментара там).
+  // Устойчиво на произволен bracket размер (R32->R16->QF->SF->Final): нито
+  // едно round_type label не е hardcoded тук, само round_index аритметика.
   //
-  // Ако nextRoundType === 'final': двамата финалисти стават 'finalist',
-  // всички останали locked/finalist отбори стават 'eliminated' (пази
-  // текущия settlement contract — само финалистите получават prize payout).
+  // Ако nextRoundType === 'final': двамата финалисти стават 'finalist' (final
+  // кръгът структурно винаги е точно ЕДНА feeder двойка — двата семифинала —
+  // затова per-pair и whole-round семантиката съвпадат тук; останалите
+  // locked/finalist отбори стават 'eliminated', пазейки settlement contract-а).
   // Ако nextRoundType Е междинен кръг (напр. quarterfinal -> semifinal):
-  // само загубилите в currentRoundType стават 'eliminated' веднага —
-  // победителите остават 'locked' до следващия round transition.
+  // само загубилите от РЕАЛНО обработената двойка стават 'eliminated' веднага
+  // — победителите остават 'locked' до следващия round transition.
   function ensureNextRound(
     tournamentId: TournamentId,
     currentRoundType: TournamentRoundType,
     nextRoundType: TournamentRoundType,
+    // Теоретичният ("пълен bracket") брой мачове за currentRoundType, изведен
+    // от team capacity/ladder позицията (advanceBracketLadder), НЕ реалният
+    // текущ selectMatchesForRoundTypeStatement().length — currentRoundType
+    // вече може легитимно да е частично населен (per-pair progression: напр.
+    // само QF1/QF2 съществуват, докато QF3/QF4 все още чакат своите R16
+    // feeder-и). Използването на реалния (частичен) count тук би дало грешен
+    // nextMatchCount и би счупило четен/нечетен инварианта надолу по веригата.
+    expectedCurrentMatchCount: number,
   ): { matches: MatchRow[]; createdMatchIds: string[] } | null {
     const currentMatches = selectMatchesForRoundTypeStatement.all(tournamentId, currentRoundType) as MatchRow[]
     if (currentMatches.length === 0) return null
-    const winners = selectRoundWinnersStatement.all(tournamentId, currentRoundType) as RoundWinnerRow[]
-    if (winners.length !== currentMatches.length || winners.some((winner) => winner.winner_team_id === null)) {
-      return null
-    }
-    if (winners.length % 2 !== 0) {
-      throw new Error(`Odd number of round winners for tournament=${tournamentId} round=${currentRoundType}`)
-    }
+    const matchesByRoundIndex = new Map(currentMatches.map((match) => [match.round_index, match]))
 
-    const nextMatchCount = winners.length / 2
+    const nextMatchCount = expectedCurrentMatchCount / 2
     const existingNextMatches = selectMatchesForRoundTypeStatement.all(tournamentId, nextRoundType) as MatchRow[]
     if (existingNextMatches.length >= nextMatchCount) {
       return { matches: existingNextMatches, createdMatchIds: [] }
     }
+    const existingNextRoundIndexes = new Set(existingNextMatches.map((match) => match.round_index))
 
-    const loserTeamIds = currentMatches
-      .filter((match) => match.winner_team_id !== null)
-      .map((match) => (match.winner_team_id === match.team_a_id ? match.team_b_id : match.team_a_id))
+    // Само bracket слот-двойките с ДВА resolved feeder-а (независимо от
+    // останалите currentRoundType мачове) участват — това е самата dependency-
+    // based промяна спрямо старото "winners.length !== currentMatches.length"
+    // whole-round gate.
+    const readyPairs: Array<{ roundIndex: number; teamAId: string; teamBId: string; loserTeamIds: string[] }> = []
+    for (let i = 1; i <= nextMatchCount; i += 1) {
+      if (existingNextRoundIndexes.has(i)) continue
+      const feederA = matchesByRoundIndex.get(i * 2 - 1)
+      const feederB = matchesByRoundIndex.get(i * 2)
+      if (feederA === undefined || feederB === undefined) continue
+      if (feederA.winner_team_id === null || feederB.winner_team_id === null) continue
+      readyPairs.push({
+        roundIndex: i,
+        teamAId: feederA.winner_team_id,
+        teamBId: feederB.winner_team_id,
+        loserTeamIds: [
+          feederA.winner_team_id === feederA.team_a_id ? feederA.team_b_id : feederA.team_a_id,
+          feederB.winner_team_id === feederB.team_a_id ? feederB.team_b_id : feederB.team_a_id,
+        ],
+      })
+    }
+    if (readyPairs.length === 0) return null
 
     const createdMatchIds: string[] = []
     database.exec('BEGIN IMMEDIATE;')
     try {
       const isFinal = nextRoundType === 'final'
-      for (let i = 0; i < nextMatchCount; i += 1) {
-        const roundIndex = i + 1
-        const teamAId = winners[i * 2]!.winner_team_id
-        const teamBId = winners[i * 2 + 1]!.winner_team_id
-        insertNextRoundStatement.run(randomUUID(), tournamentId, nextRoundType, roundIndex)
-        const round = selectNextRoundIdStatement.get(tournamentId, nextRoundType, roundIndex) as { round_id: string }
+      for (const pair of readyPairs) {
+        insertNextRoundStatement.run(randomUUID(), tournamentId, nextRoundType, pair.roundIndex)
+        const round = selectNextRoundIdStatement.get(tournamentId, nextRoundType, pair.roundIndex) as { round_id: string }
         const existingMatch = existingNextMatches.find((match) => match.round_id === round.round_id)
-        if (existingMatch === undefined) {
-          const matchId = randomUUID()
-          insertFinalMatchStatement.run(matchId, tournamentId, round.round_id, teamAId, teamBId)
-          createdMatchIds.push(matchId)
-          if (isFinal) {
-            updateFinalistTeamsStatement.run(tournamentId, teamAId, teamBId)
-            updateFinalistEntriesStatement.run(tournamentId, teamAId, teamBId)
-          }
-        }
-      }
-
-      if (isFinal) {
-        updateEliminatedTeamsStatement.run(tournamentId, winners[0]!.winner_team_id, winners[1]!.winner_team_id)
-        updateEliminatedEntriesStatement.run(tournamentId, winners[0]!.winner_team_id, winners[1]!.winner_team_id)
-        if (createdMatchIds.length > 0) {
+        if (existingMatch !== undefined) continue
+        const matchId = randomUUID()
+        insertFinalMatchStatement.run(matchId, tournamentId, round.round_id, pair.teamAId, pair.teamBId)
+        createdMatchIds.push(matchId)
+        if (isFinal) {
+          updateFinalistTeamsStatement.run(tournamentId, pair.teamAId, pair.teamBId)
+          updateFinalistEntriesStatement.run(tournamentId, pair.teamAId, pair.teamBId)
+          updateEliminatedTeamsStatement.run(tournamentId, pair.teamAId, pair.teamBId)
+          updateEliminatedEntriesStatement.run(tournamentId, pair.teamAId, pair.teamBId)
           updateTournamentStatusStatement.run('final_in_progress', tournamentId, 'semifinal_in_progress')
           appendEvent(tournamentId, 'tournament_final_created', {
-            semifinalMatchIds: winners.map((winner) => winner.match_id),
-            finalistTeamIds: winners.map((winner) => winner.winner_team_id),
+            semifinalMatchIds: [matchesByRoundIndex.get(pair.roundIndex * 2 - 1)!.match_id, matchesByRoundIndex.get(pair.roundIndex * 2)!.match_id],
+            finalistTeamIds: [pair.teamAId, pair.teamBId],
           })
-        }
-      } else {
-        for (const loserTeamId of loserTeamIds) {
-          updateRoundLosersEliminatedTeamsStatement.run(tournamentId, loserTeamId)
-          updateRoundLosersEliminatedEntriesStatement.run(tournamentId, loserTeamId)
-        }
-        if (createdMatchIds.length > 0) {
+        } else {
+          for (const loserTeamId of pair.loserTeamIds) {
+            updateRoundLosersEliminatedTeamsStatement.run(tournamentId, loserTeamId)
+            updateRoundLosersEliminatedEntriesStatement.run(tournamentId, loserTeamId)
+          }
           appendEvent(tournamentId, 'tournament_round_advanced', {
             fromRoundType: currentRoundType,
             toRoundType: nextRoundType,
-            winnerTeamIds: winners.map((winner) => winner.winner_team_id),
-            eliminatedTeamIds: loserTeamIds,
+            targetRoundIndex: pair.roundIndex,
+            winnerTeamIds: [pair.teamAId, pair.teamBId],
+            eliminatedTeamIds: pair.loserTeamIds,
           })
         }
       }
@@ -1696,29 +1695,38 @@ export async function createTournamentCoordinator(
     return { matches, createdMatchIds }
   }
 
-  // Обхожда ladder-а от текущия round_type (или от началото, ако все още
-  // никой мач не е завършен) до финала, генерирайки всеки следващ кръг,
-  // веднага щом предишният е напълно завършен. Връща финалния мач (ако вече
-  // съществува), за да поддържа съществуващия "ensureMatchRoom(final)" caller,
-  // както и всеки match, реално създаден от тази конкретна извикване (за
-  // всички round types, не само финала) — за да може reconcileTournament да
-  // им извика ensureNextMatchStartAtIfReady/ensureMatchRoom В СЪЩИЯ tick,
-  // вместо да чака следващия tick цикъл (виж task spec §3: "Не допускай
-  // ситуация, при която room се създава няколко секунди след началото на
-  // 20s countdown").
+  // Обхожда целия ladder на всяко извикване (не спира на първия round type
+  // без eligible pair) — ensureNextRound вече е dependency-based per bracket-
+  // слот (виж коментара там), затова е напълно възможно QF1 да е eligible,
+  // докато QF3/QF4 още играят; следващата ladder стъпка (semifinal) просто
+  // няма да намери resolved feeder двойки и ще върне null за тях. Връща
+  // финалния мач (ако вече съществува), за да поддържа съществуващия
+  // "ensureMatchRoom(final)" caller, както и всеки match, реално създаден от
+  // тази конкретна извикване (за всички round types, не само финала) — за да
+  // може reconcileTournament да им извика
+  // ensureNextMatchStartAtIfReady/ensureMatchRoom В СЪЩИЯ tick, вместо да чака
+  // следващия tick цикъл (виж task spec §3: "Не допускай ситуация, при която
+  // room се създава няколко секунди след началото на 20s countdown").
   function advanceBracketLadder(
     tournamentId: TournamentId,
     teamCapacity: number,
   ): { final: MatchRow | null; newlyCreated: MatchRow[] } {
     const ladder = getTournamentRoundLadder(teamCapacity)
     const newlyCreated: MatchRow[] = []
+    // Пълният bracket match count на всяка ladder стъпка се преполовява всеки
+    // кръг (round_of_16=teamCapacity/2, quarterfinal=teamCapacity/4, ...,
+    // final=1) — детерминирано от bracket геометрията, независимо от колко
+    // от тези мачове реално вече съществуват в БД-то в момента (виж
+    // expectedCurrentMatchCount коментара в ensureNextRound).
+    let expectedMatchCount = teamCapacity / 2
     for (let i = 0; i < ladder.length - 1; i += 1) {
       const currentRoundType = ladder[i] as TournamentRoundType
       const nextRoundType = ladder[i + 1] as TournamentRoundType
-      const result = ensureNextRound(tournamentId, currentRoundType, nextRoundType)
+      const result = ensureNextRound(tournamentId, currentRoundType, nextRoundType, expectedMatchCount)
       if (result !== null && result.createdMatchIds.length > 0) {
         newlyCreated.push(...result.matches.filter((match) => result.createdMatchIds.includes(match.match_id)))
       }
+      expectedMatchCount /= 2
     }
     const final = (selectFinalMatchStatement.get(tournamentId) as MatchRow | undefined) ?? null
     return { final, newlyCreated }
