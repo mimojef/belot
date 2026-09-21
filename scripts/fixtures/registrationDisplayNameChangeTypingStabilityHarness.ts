@@ -142,6 +142,11 @@ function submitDisplayNameForm(): void {
     return el.dataset.harnessNodeId
   },
   isDisplayNameInputFocused: () => document.activeElement === getDisplayNameInputEl(),
+  getDisplayNameInputCaretPosition: () => {
+    const el = getDisplayNameInputEl()
+    if (el === null) return null
+    return { start: el.selectionStart, end: el.selectionEnd }
+  },
   getLastVerifySubmission: () => lastVerifySubmission,
   getLastDisplayNameSubmission: () => lastDisplayNameSubmission,
   queueVerifyResult: (result: { errorText: string | null; code?: string }) => {

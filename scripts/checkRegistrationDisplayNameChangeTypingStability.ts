@@ -1,17 +1,17 @@
 /**
  * checkRegistrationDisplayNameChangeTypingStability.ts
  *
- * INVESTIGATION (not a fix): real browser (Playwright), real production
- * code, real DOM — checks whether the SAME class of defect fixed in commit
- * 67914e3 ("fix: preserve verification code during countdown") for the
- * verification-CODE input also exists, unfixed, in the sibling
+ * REGRESSION (was: investigation) — real browser (Playwright), real
+ * production code, real DOM. Proves the SAME class of defect fixed in
+ * commit 67914e3 ("fix: preserve verification code during countdown") for
+ * the verification-CODE input is now ALSO fixed for the sibling
  * display-name-change input that appears when the server rejects a
  * verification attempt with DISPLAY_NAME_TAKEN
  * (createLobbyFlowController.ts's submitRegistrationVerificationCode ->
  * mode = 'displayName' branch).
  *
- * STATIC EVIDENCE (from code review, verified by this test):
- *  - renderRegistrationVerificationPopup.ts::renderDisplayNameForm renders
+ * ORIGINAL ROOT CAUSE (fixed):
+ *  - renderRegistrationVerificationPopup.ts::renderDisplayNameForm rendered
  *    <input data-registration-verification-display-name-input="1"> with NO
  *    value="..." binding (unlike the code input's
  *    value="${escapeHtml(state.code)}", added by 67914e3).
@@ -19,23 +19,34 @@
  *    (createLobbyFlowController.ts) calls render() on EVERY outcome —
  *    including a second failure (invalid_display_name / still taken) while
  *    state.registrationVerification.mode stays 'displayName'.
- *  - render()'s only focus-protecting early-return guard checks
- *    `[data-lobby-auth-modal-root="1"]` (the separate login/register modal),
- *    NOT `[data-registration-verification-modal-root="1"]` — so this render
- *    is never suppressed while the display-name input has focus.
  *  - render() -> renderLobby() -> renderLobbyScreen() does
  *    `root.innerHTML = nextRootHtml` whenever the computed HTML differs from
  *    the last render (errorText/isChangingDisplayName differ on every failed
- *    resubmit) — a full subtree rebuild, not a targeted patch.
+ *    resubmit) — a full subtree rebuild, not a targeted patch. This DOM
+ *    rebuild on failed resubmit is architecturally expected (there is no
+ *    targeted-patch equivalent to patchRegistrationVerificationCountdown()
+ *    for this error path) — the fix does not try to avoid the rebuild, it
+ *    makes the rebuilt input start with the right value.
  *  - attachRegistrationVerificationPopupEventListeners() DOES call
  *    `displayNameInput?.focus()` unconditionally after every rebuild, so
- *    FOCUS itself is restored — but with no value binding, the freshly
- *    created <input> is always empty, so any text the user had already
- *    retyped is silently wiped on every failed submit of a new name.
+ *    FOCUS itself was already restored — but with no value binding, the
+ *    freshly created <input> was always empty, wiping any text the user had
+ *    already retyped on every failed submit of a new name.
  *
- * This test proves (or disproves) that behavior end-to-end against the REAL
- * createLobbyFlowController, driven through a fixture harness
- * (scripts/fixtures/registrationDisplayNameChangeTypingStabilityHarness.ts)
+ * FIX (mirrors 67914e3's pattern, adapted to this field):
+ *  - new `state.registrationVerification.displayNameDraft` mirrors the
+ *    input's live value (via a new `onDisplayNameDraftChange` input-event
+ *    callback, state-sync only, no render() on keystroke).
+ *  - renderDisplayNameForm() now bakes `value="${escapeHtml(state.displayNameDraft)}"`.
+ *  - attachRegistrationVerificationPopupEventListeners() now also calls
+ *    `.setSelectionRange(value.length, value.length)` after focus, so the
+ *    caret lands at the end of the baked-in draft (same as the code input).
+ *  - displayNameDraft is reset to '' on: fresh entry into displayName mode,
+ *    successful submit, and cancel — never on a failed resubmit (that's the
+ *    whole point: the draft must survive exactly that path).
+ *
+ * This test drives the REAL createLobbyFlowController, through a fixture
+ * harness (scripts/fixtures/registrationDisplayNameChangeTypingStabilityHarness.ts)
  * exactly mirroring checkRegistrationVerificationTypingStability.ts's
  * pattern.
  */
@@ -98,6 +109,7 @@ type H = {
   getDisplayNameInputValue: () => Promise<string | null>
   getDisplayNameInputElementId: () => Promise<string | null>
   isDisplayNameInputFocused: () => Promise<boolean>
+  getDisplayNameInputCaretPosition: () => Promise<{ start: number | null; end: number | null } | null>
   getLastVerifySubmission: () => Promise<VerifySubmission>
   getLastDisplayNameSubmission: () => Promise<DisplayNameSubmission>
   queueVerifyResult: (result: { errorText: string | null; code?: string }) => Promise<void>
@@ -119,6 +131,7 @@ async function harness(page: Page): Promise<H> {
     getDisplayNameInputValue: () => page.evaluate((k: any) => (window as any)[k].getDisplayNameInputValue(), w),
     getDisplayNameInputElementId: () => page.evaluate((k: any) => (window as any)[k].getDisplayNameInputElementId(), w),
     isDisplayNameInputFocused: () => page.evaluate((k: any) => (window as any)[k].isDisplayNameInputFocused(), w),
+    getDisplayNameInputCaretPosition: () => page.evaluate((k: any) => (window as any)[k].getDisplayNameInputCaretPosition(), w),
     getLastVerifySubmission: () => page.evaluate((k: any) => (window as any)[k].getLastVerifySubmission(), w),
     getLastDisplayNameSubmission: () => page.evaluate((k: any) => (window as any)[k].getLastDisplayNameSubmission(), w),
     queueVerifyResult: (result) => page.evaluate(([k, r]: any) => (window as any)[k].queueVerifyResult(r), [w, result] as any),
@@ -182,7 +195,13 @@ try {
   })
 
   // --- C: THE CORE QUESTION — does a second failed submit wipe the typed value? ---
-  await check('[C] submitting a new name that is ALSO rejected (invalid/still taken) — does the typed value survive the resulting render()?', async () => {
+  // Node identity is deliberately NOT asserted here (unlike test B): a full
+  // render() IS expected on this path (errorText/isChangingDisplayName
+  // change, there is no targeted-patch equivalent to
+  // patchRegistrationVerificationCountdown() for this error branch) — the
+  // fix's contract is "value/focus/caret survive a rebuild", not "no
+  // rebuild happens". See the file header for the full rationale.
+  await check('[C] submitting a new name that is ALSO rejected (invalid/still taken) — value, focus and caret survive the resulting render()', async () => {
     await h.queueDisplayNameResult({ errorText: 'Невалидно потребителско име.' })
     await h.submitDisplayNameForm()
     await h.flush()
@@ -190,18 +209,34 @@ try {
     // second failure does not bounce the user back to code mode).
     assert((await h.getMode()) === 'displayName', `expected to remain in displayName mode after a second failure, got '${await h.getMode()}'`)
     const valueAfter = await h.getDisplayNameInputValue()
-    const nodeIdAfter = await h.getDisplayNameInputElementId()
-    if (valueAfter !== 'New' || nodeIdAfter !== stableNodeId) {
-      throw new Error(
-        `CONFIRMED DEFECT: typed display name was lost after a failed resubmit. ` +
-        `value before='New' after='${valueAfter}', DOM node identity stable=${nodeIdAfter === stableNodeId} ` +
-        `(node id before='${stableNodeId}' after='${nodeIdAfter}'). ` +
-        `Root cause: renderDisplayNameForm() in renderRegistrationVerificationPopup.ts has no value="..." binding ` +
-        `on the display-name input (unlike the code input's value="\${escapeHtml(state.code)}" from commit 67914e3), ` +
-        `so the full render() triggered by submitRegistrationVerificationDisplayNameChange()'s error path recreates ` +
-        `an EMPTY input every time a resubmit fails.`,
-      )
+    assert(valueAfter === 'New', `typed display name was lost after a failed resubmit: expected 'New', got '${valueAfter}'`)
+    assert((await h.isDisplayNameInputFocused()) === true, 'display-name input lost focus after the failed-resubmit render()')
+    const caret = await h.getDisplayNameInputCaretPosition()
+    assert(caret !== null && caret.start === 'New'.length && caret.end === 'New'.length, `expected caret at end of 'New' (position 3), got ${JSON.stringify(caret)}`)
+  })
+
+  // --- C2: the draft remains directly editable after the failed resubmit ---
+  await check('[C2] user can continue editing the surviving draft directly (append more characters) after the failed resubmit', async () => {
+    for (const char of ['!', '!']) {
+      await h.typeDisplayNameChar(char)
     }
+    assert((await h.getDisplayNameInputValue()) === 'New!!', `expected 'New!!', got '${await h.getDisplayNameInputValue()}'`)
+  })
+
+  // --- D: successful submit does not leave a stale draft behind ---
+  await check('[D] a successful display-name submit clears the draft (requirement F: no stale draft after success)', async () => {
+    await h.queueDisplayNameResult({ errorText: null })
+    await h.submitDisplayNameForm()
+    await h.flush()
+    assert((await h.getMode()) === 'code', `expected to return to code mode after a successful change, got '${await h.getMode()}'`)
+
+    // Re-trigger DISPLAY_NAME_TAKEN to re-enter displayName mode fresh, and
+    // confirm the OLD draft ('New!!') did not leak into this new entry.
+    await h.queueVerifyResult({ errorText: 'Това потребителско име вече е заето. Моля, изберете друго име.', code: 'DISPLAY_NAME_TAKEN' })
+    await h.fillCodeAndSubmit('654321')
+    await h.flush()
+    assert((await h.getMode()) === 'displayName', 'expected to re-enter displayName mode')
+    assert((await h.getDisplayNameInputValue()) === '', `expected a clean draft on fresh entry, got '${await h.getDisplayNameInputValue()}'`)
   })
 
   await check('Няма JS грешки в конзолата през целия сценарий', () => {

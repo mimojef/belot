@@ -1256,6 +1256,7 @@ export type RenderLobbyScreenOptions = {
   onRegistrationVerificationRememberMeChange: (checked: boolean) => void
   onRegistrationVerificationClose: () => void
   onRegistrationVerificationSubmitDisplayName: (displayName: string) => void
+  onRegistrationVerificationDisplayNameDraftChange: (displayName: string) => void
   onRegistrationVerificationCancelDisplayNameChange: () => void
   onForgotPasswordSubmit?: (email: string) => void
   onLogoutClick: () => void
@@ -15687,6 +15688,7 @@ export function renderLobbyScreen(
     onRememberMeChange: options.onRegistrationVerificationRememberMeChange,
     onClose: options.onRegistrationVerificationClose,
     onSubmitDisplayName: options.onRegistrationVerificationSubmitDisplayName,
+    onDisplayNameDraftChange: options.onRegistrationVerificationDisplayNameDraftChange,
     onCancelDisplayNameChange: options.onRegistrationVerificationCancelDisplayNameChange,
   })
 

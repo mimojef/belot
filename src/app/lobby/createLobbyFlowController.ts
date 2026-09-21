@@ -2332,6 +2332,7 @@ function createInitialState(): InternalLobbyFlowState {
       nowMs: Date.now(),
       mode: 'code',
       isChangingDisplayName: false,
+      displayNameDraft: '',
     },
     guestTrialPopup: {
       isOpen: false,
@@ -6034,6 +6035,15 @@ export function createLobbyFlowController(
       },
       onRegistrationVerificationSubmitDisplayName: (displayName) => {
         void submitRegistrationVerificationDisplayNameChange(displayName)
+      },
+      onRegistrationVerificationDisplayNameDraftChange: (displayName) => {
+        // Само state sync (mirror на onRegistrationVerificationCodeChange
+        // по-горе, СЪЩИЯТ production bug клас/fix pattern като commit 67914e3)
+        // — НЕ вика render(). DOM input-ът вече отразява каквото
+        // потребителят е написал; тук само echo-ваме в state за защита срещу
+        // full render след неуспешен resubmit (виж displayNameDraft doc
+        // коментара в renderRegistrationVerificationPopup.ts).
+        state.registrationVerification.displayNameDraft = displayName
       },
       onRegistrationVerificationCancelDisplayNameChange: () => {
         cancelRegistrationVerificationDisplayNameChange()
@@ -14830,6 +14840,7 @@ export function createLobbyFlowController(
       nowMs: Date.now(),
       mode: 'code',
       isChangingDisplayName: false,
+      displayNameDraft: '',
     }
     startRegistrationVerificationCountdown()
     render()
@@ -14851,6 +14862,7 @@ export function createLobbyFlowController(
       nowMs: Date.now(),
       mode: 'code',
       isChangingDisplayName: false,
+      displayNameDraft: '',
     }
   }
 
@@ -14876,6 +14888,10 @@ export function createLobbyFlowController(
       if (result.code === 'DISPLAY_NAME_TAKEN') {
         state.registrationVerification.mode = 'displayName'
         state.registrationVerification.errorText = result.errorText
+        // Fresh entry into displayName mode (server-driven, not a resubmit
+        // within it) -> чист draft. Старото (отхвърлено) име от code режима
+        // не е валидна отправна точка за новото избрано име.
+        state.registrationVerification.displayNameDraft = ''
         render()
         return
       }
@@ -14935,15 +14951,26 @@ export function createLobbyFlowController(
     state.registrationVerification.isChangingDisplayName = false
 
     if (result.errorText !== null) {
+      // Failed resubmit (invalid_display_name / still taken) — mode остава
+      // 'displayName', предстои нов render() от render() call-a долу.
+      // displayNameDraft НЕ се пипа тук нарочно: DOM input-ът вече го е
+      // echo-нал в state чрез onDisplayNameDraftChange при typing-а (виж
+      // renderRegistrationVerificationPopup.ts), затова следващият render()
+      // ще baked-не value="..." от ТОЧНО тази стойност — точно fix-ът за
+      // production bug-а (typed value изчезваше при неуспешен resubmit).
       state.registrationVerification.errorText = result.errorText
       render()
       return
     }
 
     // Успешна смяна — обратно към code режима, СЪЩИЯТ pending/код все още
-    // важат (само display_name се промени server-side).
+    // важат (само display_name се промени server-side). displayNameDraft
+    // се чисти — draft-ът вече е consumed/committнат server-side, не трябва
+    // да "изтече" ако потребителят по някаква причина се върне пак в
+    // displayName режима по-късно (§F: success flow не пази stale draft).
     state.registrationVerification.mode = 'code'
     state.registrationVerification.errorText = null
+    state.registrationVerification.displayNameDraft = ''
     if (result.maskedEmail) {
       state.registrationVerification.maskedEmail = result.maskedEmail
     }
@@ -14953,6 +14980,7 @@ export function createLobbyFlowController(
   function cancelRegistrationVerificationDisplayNameChange(): void {
     state.registrationVerification.mode = 'code'
     state.registrationVerification.errorText = null
+    state.registrationVerification.displayNameDraft = ''
     render()
   }
 

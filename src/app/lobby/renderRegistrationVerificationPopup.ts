@@ -32,6 +32,19 @@ export type RegistrationVerificationPopupState = {
    */
   mode: 'code' | 'displayName'
   isChangingDisplayName: boolean
+  /**
+   * Typing-stability fix (mirror на `code` doc коментара по-горе, СЪЩИЯТ
+   * production bug клас като commit 67914e3 "fix: preserve verification code
+   * during countdown" — само в display-name-change input-а вместо code
+   * input-а). Локално ехо на display-name-change input-а, синхронизирано от
+   * input event-а (виж attachRegistrationVerificationPopupEventListeners).
+   * Bind-нато обратно в template-а (value="...") — защита срещу пълен
+   * re-render на popup-а ПОКА потребителят пише: submitRegistrationVerificationDisplayNameChange()
+   * вика render() при ВСЕКИ resubmit resultат (вкл. втори неуспешен опит,
+   * докато mode остава 'displayName') — без този state mirror, freshly
+   * пресъздаденият input изгубваше вече написаното.
+   */
+  displayNameDraft: string
 }
 
 export type RegistrationVerificationPopupOptions = {
@@ -42,6 +55,7 @@ export type RegistrationVerificationPopupOptions = {
   onRememberMeChange: (checked: boolean) => void
   onClose: () => void
   onSubmitDisplayName: (displayName: string) => void
+  onDisplayNameDraftChange: (displayName: string) => void
   onCancelDisplayNameChange: () => void
 }
 
@@ -125,6 +139,7 @@ function renderDisplayNameForm(state: RegistrationVerificationPopupState): strin
           data-registration-verification-display-name-input="1"
           type="text"
           autocomplete="nickname"
+          value="${escapeHtml(state.displayNameDraft)}"
           style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;"
         >
         <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
@@ -248,7 +263,18 @@ export function attachRegistrationVerificationPopupEventListeners(
   })
 
   const displayNameInput = root.querySelector<HTMLInputElement>('[data-registration-verification-display-name-input="1"]')
-  displayNameInput?.focus()
+  if (displayNameInput) {
+    // Auto-focus, mirror на codeInput-а по-горе (виж doc коментара там за
+    // пълния rationale) — caret отива в края на вече baked-натата value
+    // (state.displayNameDraft), за да продължи потребителят да пише от
+    // там, откъдето е спрял, ако ТОЗИ rebuild е resume след неуспешен
+    // resubmit с вече въведено име.
+    displayNameInput.focus()
+    displayNameInput.setSelectionRange(displayNameInput.value.length, displayNameInput.value.length)
+    displayNameInput.addEventListener('input', () => {
+      options.onDisplayNameDraftChange(displayNameInput.value)
+    })
+  }
 
   const displayNameForm = root.querySelector<HTMLFormElement>('[data-registration-verification-display-name-form="1"]')
   displayNameForm?.addEventListener('submit', (event) => {
