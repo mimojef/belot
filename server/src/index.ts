@@ -148,6 +148,7 @@ import {
   ACTIVE_TOURNAMENT_STATUSES,
   buildTournamentRoundDtos,
   buildTeamDtos,
+  findBlockingMatchForBracketSlot,
   toTournamentPartnerInviteDto,
   toTournamentDetailDto,
   toTournamentSummaryDto,
@@ -12372,11 +12373,56 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
       if (completedEntry === undefined) continue
       const completedMatch = completedEntry.match
 
-      const completedIndex = currentRoundMatches.findIndex(({ match }) => match.matchId === completedMatch.matchId)
-      const siblingEntry = completedIndex >= 0
-        ? currentRoundMatches[completedIndex % 2 === 0 ? completedIndex + 1 : completedIndex - 1]
-        : undefined
-      if (siblingEntry === undefined) continue
+      // round_index парност (не array position) — устойчиво дори когато
+      // currentRoundMatches е частично населен (dependency-based progression:
+      // напр. само QF1/QF2 съществуват, QF3/QF4 все още не), за разлика от
+      // старото completedIndex ± 1 array-position pairing.
+      const siblingRoundIndex = completedEntry.roundIndex % 2 === 1 ? completedEntry.roundIndex + 1 : completedEntry.roundIndex - 1
+      const siblingEntry = currentRoundMatches.find(({ roundIndex }) => roundIndex === siblingRoundIndex)
+
+      if (siblingEntry === undefined) {
+        // Sibling слотът все още не съществува като match row — не защото
+        // играчът чака целия round, а защото ТОЧНО този sibling слот е
+        // dependency-blocked от по-ранен кръг (виж findBlockingMatchForBracketSlot
+        // коментара). Walk-ваме надолу по ladder-а, за да намерим НЕГОВИТЕ
+        // feeder-и (round_index siblingRoundIndex*2-1/siblingRoundIndex*2 в
+        // ladder[ladderIndex-1]) — реалния "frontier" мач, който трябва да
+        // се покаже на играча.
+        const blocking = findBlockingMatchForBracketSlot(roundDtos, ladder, ladderIndex - 1, siblingRoundIndex)
+        if (blocking === null) continue
+        const blockingTeamA = teamDtos.find((team) => team.teamId === blocking.match.teamAId) ?? null
+        const blockingTeamB = teamDtos.find((team) => team.teamId === blocking.match.teamBId) ?? null
+        if (blockingTeamA === null || blockingTeamB === null) continue
+        return {
+          tournamentId: tournament.tournamentId,
+          currentRoundType,
+          nextRoundType,
+          completedMatchId: completedMatch.matchId,
+          sibling: null,
+          blockingMatch: {
+            roundType: blocking.roundType,
+            roundIndex: blocking.roundIndex,
+            matchId: blocking.match.matchId,
+            teamA: blockingTeamA,
+            teamB: blockingTeamB,
+            scoreA: blocking.match.finalScoreTeamA ?? blocking.match.liveScoreTeamA ?? null,
+            scoreB: blocking.match.finalScoreTeamB ?? blocking.match.liveScoreTeamB ?? null,
+            status: blocking.match.status,
+            progressLabel: blocking.match.progressLabel ?? '',
+          },
+          ownResultAcknowledged: true,
+          otherFinalistReady: false,
+          nextMatchId: null,
+          nextRoomId: null,
+          nextMatchStartAt: null,
+          serverNow: new Date().toISOString(),
+          completedSemifinalMatchId: completedMatch.matchId,
+          siblingSemifinal: null,
+          finalMatchId: null,
+          finalRoomId: null,
+          finalStartAt: null,
+        }
+      }
       const sibling = siblingEntry.match
       const siblingTeamA = teamDtos.find((team) => team.teamId === sibling.teamAId) ?? null
       const siblingTeamB = teamDtos.find((team) => team.teamId === sibling.teamBId) ?? null
@@ -12437,6 +12483,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
         nextRoundType,
         completedMatchId: completedMatch.matchId,
         sibling: siblingDto,
+        blockingMatch: null,
         ownResultAcknowledged,
         otherFinalistReady,
         nextMatchId: nextMatch?.matchId ?? null,

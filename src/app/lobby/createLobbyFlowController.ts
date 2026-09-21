@@ -3844,6 +3844,12 @@ export function createLobbyFlowController(
       state.currentScreen !== 'tournament-detail' ||
       state.tournamentDetailId !== input.tournamentId ||
       waiting === null ||
+      // Живо score push-ване стига само до играч, чийто ДИРЕКТЕН sibling вече
+      // съществува (resolveWaitingTeamIdForFeeder в tournamentCoordinator.ts
+      // никога не target-ва "grandparent" чакащ) — но guard-ваме и тук
+      // defensively за STATE C (waiting.sibling === null, виж
+      // renderTournamentInterRoundBlockedScreen), за да не гръмне null deref.
+      waiting.sibling === null ||
       waiting.sibling.matchId !== input.matchId
     ) {
       return false

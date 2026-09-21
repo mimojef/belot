@@ -203,12 +203,31 @@ export type TournamentInterRoundWaitingSiblingSnapshot = {
   progressLabel: string
 }
 
+// Представя РЕАЛНИЯ, в момента блокиращ мач някъде по-надолу в bracket
+// дървото — за случая, когато sibling по-долу още не съществува като match
+// row (dependency-based progression: sibling слотът чака собствените си
+// feeder-и от по-ранен кръг). Взаимно изключващо се с sibling — точно едно
+// от двете е non-null. winnerTeamId умишлено липсва — blocking match по
+// дефиниция все още не е завършен за целите тук.
+export type TournamentInterRoundBlockingMatchSnapshot = {
+  roundType: TournamentRoundType
+  roundIndex: number
+  matchId: string
+  teamA: TournamentTeamSnapshot
+  teamB: TournamentTeamSnapshot
+  scoreA: number | null
+  scoreB: number | null
+  status: TournamentMatchStatus
+  progressLabel: string
+}
+
 export type TournamentInterRoundWaitingSnapshot = {
   tournamentId: string
   currentRoundType: TournamentRoundType
   nextRoundType: TournamentRoundType
   completedMatchId: string
-  sibling: TournamentInterRoundWaitingSiblingSnapshot
+  sibling: TournamentInterRoundWaitingSiblingSnapshot | null
+  blockingMatch: TournamentInterRoundBlockingMatchSnapshot | null
   ownResultAcknowledged: boolean
   otherFinalistReady: boolean
   nextMatchId: string | null
@@ -219,7 +238,7 @@ export type TournamentInterRoundWaitingSnapshot = {
   // above 1:1. See server/src/tournament/tournamentDto.ts's
   // TournamentInterRoundWaitingDto comment.
   completedSemifinalMatchId: string
-  siblingSemifinal: TournamentInterRoundWaitingSiblingSnapshot
+  siblingSemifinal: TournamentInterRoundWaitingSiblingSnapshot | null
   finalMatchId: string | null
   finalRoomId: string | null
   finalStartAt: string | null

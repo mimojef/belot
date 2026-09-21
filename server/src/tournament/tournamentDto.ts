@@ -240,22 +240,51 @@ export type TournamentDetailDto = TournamentSummaryDto & {
 // the existing uncommitted client code in renderTournamentsScreen.ts, which
 // reads those specific names — Phase 2 will migrate the client to the
 // generic fields and these legacy aliases can be dropped then.
+export type TournamentInterRoundWaitingSiblingDto = {
+  matchId: string
+  roundIndex: number
+  teamA: TournamentTeamDto
+  teamB: TournamentTeamDto
+  scoreA: number | null
+  scoreB: number | null
+  status: TournamentMatchStatus
+  winnerTeamId: string | null
+  progressLabel: string
+}
+
+// Represents the ACTUAL currently-blocking match somewhere further down the
+// bracket tree, for the case where `sibling` above doesn't exist yet as a
+// match row (dependency-based progression: the sibling slot's own two
+// feeders from an earlier round aren't both resolved yet). Resolved by
+// findBlockingMatchForBracketSlot in server/src/index.ts, which walks DOWN
+// the ladder reusing the same round_index odd/even pairing already used by
+// ensureNextRound/resolveWaitingTeamIdForFeeder in
+// tournamentCoordinator.ts — not a parallel bracket model, just a recursive
+// application of the existing one. winnerTeamId is intentionally omitted —
+// a blocking match is by definition not yet completed for our purposes here
+// (see findBlockingMatchForBracketSlot's "prefer not-completed" selection).
+export type TournamentInterRoundBlockingMatchDto = {
+  roundType: TournamentRoundType
+  roundIndex: number
+  matchId: string
+  teamA: TournamentTeamDto
+  teamB: TournamentTeamDto
+  scoreA: number | null
+  scoreB: number | null
+  status: TournamentMatchStatus
+  progressLabel: string
+}
+
 export type TournamentInterRoundWaitingDto = {
   tournamentId: string
   currentRoundType: TournamentRoundType
   nextRoundType: TournamentRoundType
   completedMatchId: string
-  sibling: {
-    matchId: string
-    roundIndex: number
-    teamA: TournamentTeamDto
-    teamB: TournamentTeamDto
-    scoreA: number | null
-    scoreB: number | null
-    status: TournamentMatchStatus
-    winnerTeamId: string | null
-    progressLabel: string
-  }
+  // null exactly when the direct sibling slot doesn't exist as a match row
+  // yet — in that case blockingMatch below is populated instead (mutually
+  // exclusive: exactly one of the two is non-null).
+  sibling: TournamentInterRoundWaitingSiblingDto | null
+  blockingMatch: TournamentInterRoundBlockingMatchDto | null
   ownResultAcknowledged: boolean
   otherFinalistReady: boolean
   nextMatchId: string | null
@@ -264,16 +293,7 @@ export type TournamentInterRoundWaitingDto = {
   serverNow: string
   // --- legacy aliases (Phase 1 backward compat only, see comment above) ---
   completedSemifinalMatchId: string
-  siblingSemifinal: {
-    matchId: string
-    teamA: TournamentTeamDto
-    teamB: TournamentTeamDto
-    scoreA: number | null
-    scoreB: number | null
-    status: TournamentMatchStatus
-    winnerTeamId: string | null
-    progressLabel: string
-  }
+  siblingSemifinal: TournamentInterRoundWaitingSiblingDto | null
   finalMatchId: string | null
   finalRoomId: string | null
   finalStartAt: string | null
@@ -536,6 +556,75 @@ export function buildTournamentRoundDtos(input: {
       matches,
     }
   })
+}
+
+// Намира match row-а за даден (roundType, roundIndex) bracket слот, ако вече
+// съществува в roundDtos (всеки TournamentRoundDto е точно ЕДИН round_index,
+// с точно 1 match — виж UNIQUE(tournament_id, round_type, round_index) в
+// схемата).
+export function findMatchForBracketSlot(
+  roundDtos: readonly TournamentRoundDto[],
+  roundType: TournamentRoundType,
+  roundIndex: number,
+): TournamentMatchDto | undefined {
+  return roundDtos.find((round) => round.roundType === roundType && round.roundIndex === roundIndex)?.matches[0]
+}
+
+// Recursive bracket-slot resolver — walks DOWN the ladder from a target slot
+// that has NO match row yet (i.e. its own two feeders at round_index
+// 2i-1/2i in the round below aren't both resolved), until it finds the
+// actual existing match that is currently blocking progress: either a real
+// match row that isn't completed yet, or (recursing further) the earliest
+// still-missing ancestor slot's blocker. Reuses the SAME round_index
+// odd/even pairing already used by ensureNextRound/
+// resolveWaitingTeamIdForFeeder in tournamentCoordinator.ts — no new bracket
+// model, just a downward walk of the existing one. Pure function (takes
+// roundDtos/ladder explicitly, no closure state) — unit-testable in
+// isolation from the HTTP layer. Returns null only if the ladder base is
+// reached with no blocking match found at all (shouldn't normally happen
+// for a slot that legitimately doesn't exist yet, but keeps the resolver
+// total/defensive).
+export function findBlockingMatchForBracketSlot(
+  roundDtos: readonly TournamentRoundDto[],
+  ladder: readonly TournamentRoundType[],
+  ladderIndex: number,
+  targetRoundIndex: number,
+): { roundType: TournamentRoundType; roundIndex: number; match: TournamentMatchDto } | null {
+  if (ladderIndex < 0) return null
+  const feederRoundType = ladder[ladderIndex] as TournamentRoundType
+  const feederAIndex = targetRoundIndex * 2 - 1
+  const feederBIndex = targetRoundIndex * 2
+  const feederA = findMatchForBracketSlot(roundDtos, feederRoundType, feederAIndex)
+  const feederB = findMatchForBracketSlot(roundDtos, feederRoundType, feederBIndex)
+
+  // Prefer a feeder that's still genuinely in progress/not started over one
+  // that's already completed — that's the one a viewer actually cares about
+  // seeing status/score for. If BOTH exist and neither is completed, the
+  // earlier round_index (feederA) is shown — stable, deterministic choice
+  // (matches the seed-slot ordering everywhere else in the bracket).
+  if (feederA !== undefined && feederA.status !== 'completed') {
+    return { roundType: feederRoundType, roundIndex: feederAIndex, match: feederA }
+  }
+  if (feederB !== undefined && feederB.status !== 'completed') {
+    return { roundType: feederRoundType, roundIndex: feederBIndex, match: feederB }
+  }
+  // Neither feeder row exists yet (or both are already completed, which
+  // would only happen in a one-tick race right before the coordinator
+  // creates the target row) — recurse one level further down for whichever
+  // feeder slot is genuinely missing. Missing feeder A takes priority (same
+  // deterministic tie-break as above); if A exists (and is completed, the
+  // race case) but B is missing, resolve B instead.
+  if (feederA === undefined) {
+    return findBlockingMatchForBracketSlot(roundDtos, ladder, ladderIndex - 1, feederAIndex)
+  }
+  if (feederB === undefined) {
+    return findBlockingMatchForBracketSlot(roundDtos, ladder, ladderIndex - 1, feederBIndex)
+  }
+  // Both feeders exist and are completed — transient one-tick race right
+  // before ensureNextRound creates the target row; nothing meaningful to
+  // show as "blocking" (the target is about to appear on the next
+  // refetch/push).
+  return null
 }
 
 export function toTournamentPartnerInviteDto(input: {

@@ -901,9 +901,68 @@ function renderTournamentInterRoundCountdownBlock(deadlineAt: string | null, rem
   `
 }
 
+// STATE C: директният sibling слот все още не съществува като match row —
+// dependency-based progression (§ задачата за inter-round UX): играчът вече
+// е класиран, но bracket клонът, от който ще дойде бъдещият противник, все
+// още не е стигнал дори до създаване на sibling мача (напр. чакаме SF2,
+// докато QF4 все още не е завършил). Показва конкретния блокиращ мач
+// (waiting.blockingMatch), НЕ generic "целия round още не е приключил" текст.
+// Автоматично преминава към STATE A веднага щом sibling слотът се появи
+// (следващият detail refetch/push вече ще върне waiting.sibling !== null).
+function renderTournamentInterRoundBlockedScreen(t: TournamentDetailSnapshot, waiting: NonNullable<TournamentDetailSnapshot['myInterRoundWaiting']>): string {
+  const blocking = waiting.blockingMatch
+  const labelMap = buildTournamentTeamLabelMap(t.teams)
+  const nextRound = getTournamentRoundLabel(waiting.nextRoundType)
+  if (blocking === null) {
+    // Defensive: нито sibling, нито blockingMatch — теоретично само на
+    // едно-tick race точно преди целевият мач да бъде създаден от
+    // координатора (виж findBlockingMatchForBracketSlot коментара в
+    // server/src/index.ts). Reassuring generic текст, не подвеждащото старо
+    // "другият финалист разглежда резултата".
+    return renderTournamentInterRoundOverlay(`
+      <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
+        <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
+        <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}!</div>
+        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Съперникът ви ще бъде определен съвсем скоро. Следващият ви мач ще започне автоматично.</div>
+      </div>
+    `)
+  }
+  const blockingRoundLabel = getTournamentRoundLabel(blocking.roundType)
+  const currentRoundLabel = getTournamentRoundLabel(waiting.currentRoundType)
+  const score = formatTournamentInterRoundScore(blocking.scoreA, blocking.scoreB)
+  const statusText = blocking.status === 'awaiting_players'
+    ? (blocking.progressLabel || 'Подготовка за старт')
+    : (blocking.progressLabel || 'Играе се')
+  return renderTournamentInterRoundOverlay(`
+    <div data-tournament-inter-round-waiting="1" data-tournament-inter-round-blocked="1" style="display:grid;gap:14px;">
+      <div>
+        <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
+        <div style="margin-top:8px;font-size:26px;font-weight:900;color:#22c55e;">Класирахте се за ${escapeHtml(nextRound.lowerDefinite)}!</div>
+        <div style="margin-top:6px;font-size:16px;font-weight:800;color:#dbeafe;">Другият ${escapeHtml(currentRoundLabel.lower)} още не е започнал. В момента се чака победителят от ${escapeHtml(blockingRoundLabel.lower)} ${blocking.roundIndex}.</div>
+        <div style="margin-top:6px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.6);">Може да се наложи да изчакате няколко минути. Следващият ви мач ще започне автоматично, когато съперникът ви бъде определен.</div>
+      </div>
+      <div>
+        <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);margin-bottom:8px;">${escapeHtml(blockingRoundLabel.title)} ${blocking.roundIndex}</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
+          ${renderTournamentInterRoundTeam(blocking.teamA, labelMap.get(blocking.teamA.teamId) ?? 'Отбор A')}
+          ${renderTournamentInterRoundTeam(blocking.teamB, labelMap.get(blocking.teamB.teamId) ?? 'Отбор B')}
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;border-top:1px solid rgba(255,255,255,0.08);padding-top:12px;">
+        <div>
+          <div style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.06em;color:rgba(255,255,255,0.45);">Статус</div>
+          <div data-tournament-inter-round-status="1" data-match-id="${escapeHtml(blocking.matchId)}" style="margin-top:4px;font-size:13px;font-weight:800;color:rgba(255,255,255,0.76);">${escapeHtml(statusText)}</div>
+        </div>
+        <div data-tournament-inter-round-score="1" data-match-id="${escapeHtml(blocking.matchId)}" style="font-size:24px;font-weight:900;color:#ffffff;">${escapeHtml(score)}</div>
+      </div>
+    </div>
+  `)
+}
+
 function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): string {
   const waiting = t.myInterRoundWaiting
   if (waiting === null || waiting === undefined) return ''
+  if (waiting.sibling === null) return renderTournamentInterRoundBlockedScreen(t, waiting)
   const labelMap = buildTournamentTeamLabelMap(t.teams)
   const sibling = waiting.sibling
   const score = formatTournamentInterRoundScore(sibling.scoreA, sibling.scoreB)
@@ -968,8 +1027,8 @@ function renderTournamentInterRoundWaitingScreen(t: TournamentDetailSnapshot): s
   return renderTournamentInterRoundOverlay(`
       <div data-tournament-inter-round-waiting="1" style="display:grid;gap:14px;">
         <div style="font-size:13px;font-weight:900;text-transform:uppercase;color:#93c5fd;">${escapeHtml(t.name)}</div>
-        <div style="margin-top:8px;font-size:18px;font-weight:900;color:#ffffff;">Изчаква се другият финалист</div>
-        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Другият финалист още разглежда резултата.</div>
+        <div style="margin-top:8px;font-size:18px;font-weight:900;color:#ffffff;">Подготвяме следващия ви мач</div>
+        <div style="font-size:13px;line-height:1.45;color:rgba(255,255,255,0.68);">Победителят е определен. Може да се наложи да изчакате няколко минути — следващият ви мач ще започне автоматично.</div>
       </div>
     `)
 }
