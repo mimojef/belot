@@ -75,6 +75,21 @@ export function ludoIsSafeTrackIndex(trackIndex: number): boolean {
   return LUDO_SAFE_TRACK_INDICES.includes(trackIndex)
 }
 
+// Ownership-aware вариант на "safe" — за разлика от LUDO_SAFE_TRACK_INDICES
+// (глобално safe за всички цветове), собственото exit/start поле на даден
+// цвят е safe САМО за пионки от ТОЗИ цвят, не за всички. Red на track-0 е
+// protected; Blue на track-0 НЕ е (нормален capture target). Затова тук
+// проверяваме конкретна (color, trackIndex) двойка, не самия index сам по
+// себе си — извикващият код трябва да подаде ЦВЕТА НА ПИОНКАТА, КОЯТО ВЕЧЕ
+// СТОИ на target клетката (victim-а), не цвета на пристигащата пионка (виж
+// asymmetric collision случая в ludoEngineLegalMoves.ts: Blue landing on
+// Red's occupied start protects Red; Red later landing on the SAME index,
+// сега окупиран от Blue, НЕ protect-ва Blue — защото Blue не е "blue"
+// спрямо own start index-а си там).
+export function ludoIsOwnStartTrackIndex(color: LudoGeometryColor, trackIndex: number): boolean {
+  return LUDO_START_INDEX[color] === trackIndex
+}
+
 // GAMEPLAY TURN ORDER — семантично РАЗЛИЧНО от LUDO_COLORS (ludoTypes.ts/
 // ludoEngineTypes.ts), която е просто "допустимите цветове" enumeration без
 // gameplay значение на реда (виж audit: ludoAllCellIds/ludoStartCellIds/

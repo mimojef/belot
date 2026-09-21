@@ -5,11 +5,22 @@
 // PURE: не мутира входния масив, връща нов.
 
 import type { LudoColor, LudoGamePiece } from './ludoEngineTypes.js'
+import { ludoIsOwnStartTrackIndex } from './ludoGeometryConstants.js'
 
 // Всички пионки на target позицията, които НЕ са от цвета на пристигащата
 // пионка — не само първата намерена (stack от 2-4 противникови пионки на
 // target-а -> всички биват уловени). Собствените пионки на moving color
 // НЕ се връщат тук — те остават на target-а и образуват/растат stack.
+//
+// OWNERSHIP-AWARE own-start protection (виж isCapture коментара в
+// ludoEngineLegalMoves.ts) — victim, чийто target track index Е нейният
+// собствен start (ludoIsOwnStartTrackIndex(victim.color, targetTrackIndex)),
+// е protected и се изключва от victims списъка ТУК също, за консистентност
+// с isCapture флага, изчислен upstream. Ако isCapture===true само заради
+// друга, unprotected opponent пионка на same target (mixed stack), тази
+// protected пионка пак трябва да остане на клетката — не бива да бъде
+// иззета заедно с останалите просто защото handleMoveRequested вика тази
+// функция unconditionally при isCapture===true.
 export function findLudoEngineCaptureVictims(
   pieces: readonly LudoGamePiece[],
   targetTrackIndex: number,
@@ -19,7 +30,8 @@ export function findLudoEngineCaptureVictims(
     (piece) =>
       piece.color !== capturingColor &&
       piece.position.kind === 'track' &&
-      piece.position.trackIndex === targetTrackIndex,
+      piece.position.trackIndex === targetTrackIndex &&
+      !ludoIsOwnStartTrackIndex(piece.color, targetTrackIndex),
   )
 }
 

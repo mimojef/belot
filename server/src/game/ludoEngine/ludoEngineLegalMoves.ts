@@ -15,7 +15,7 @@
 // общо), 56..61 = вече във finish lane-а (finishIndex = totalSteps - 56,
 // 0..5), >61 = overshoot (illegal, пионката просто няма move за този dice).
 
-import { ludoEngineAdvanceTrackIndex, ludoEngineStepsFromStart, ludoEngineIsSafeTrackIndex, LUDO_ENGINE_START_INDEX, LUDO_ENGINE_TRACK_LENGTH, LUDO_ENGINE_FINISH_LENGTH } from './ludoEngineGeometry.js'
+import { ludoEngineAdvanceTrackIndex, ludoEngineStepsFromStart, ludoEngineIsSafeTrackIndex, ludoEngineIsOwnStartTrackIndex, LUDO_ENGINE_START_INDEX, LUDO_ENGINE_TRACK_LENGTH, LUDO_ENGINE_FINISH_LENGTH } from './ludoEngineGeometry.js'
 import type { LudoColor, LudoDiceValue, LudoGamePiece, LudoLegalMove, LudoPiecePosition } from './ludoEngineTypes.js'
 
 // Опитва да изчисли target позицията за ЕДНА пионка на track-а — null ако
@@ -96,6 +96,20 @@ export function computeLudoEngineLegalMoves(
     // target на safe индекс — нито victim се връща в home, нито
     // pieces_captured event се emit-ва (→ нито capture animation, нито
     // extra roll от capture).
+    //
+    // OWNERSHIP-AWARE own-start protection (ново правило) — за разлика от
+    // safe/star клетката по-горе (глобално safe за всички), собственото
+    // exit/start поле на даден цвят е safe САМО за пионки ОТ ТОЗИ цвят.
+    // Затова тук не проверяваме само target index-a — за всеки potential
+    // victim проверяваме ludoEngineIsOwnStartTrackIndex(other.color,
+    // captureTargetTrackIndex): ако target-ът Е собственият start на victim-a,
+    // тази конкретна victim е protected (coexist, не се capture-ва), дори
+    // ако target-ът НЕ е собственият start на пристигащата пионка. Асиметрия
+    // (виж task-а): Blue landing на Red's occupied start НЕ capture-ва Red
+    // (Red protected на собствения си start); Red landing на СЪЩИЯ индекс,
+    // окупиран от Blue, capture-ва Blue нормално (Blue не е protected там —
+    // не е нейният own start). isCapture е true, ако съществува поне ЕДНА
+    // opponent пионка на target-a, която НЕ е protected по това правило.
     const captureTargetTrackIndex = targetPosition.kind === 'track' ? targetPosition.trackIndex : null
     const isCapture =
       captureTargetTrackIndex !== null &&
@@ -104,7 +118,8 @@ export function computeLudoEngineLegalMoves(
         (other) =>
           other.color !== activeColor &&
           other.position.kind === 'track' &&
-          other.position.trackIndex === captureTargetTrackIndex,
+          other.position.trackIndex === captureTargetTrackIndex &&
+          !ludoEngineIsOwnStartTrackIndex(other.color, captureTargetTrackIndex),
       )
 
     moves.push({

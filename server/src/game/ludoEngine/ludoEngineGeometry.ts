@@ -12,6 +12,7 @@ import {
   LUDO_SAFE_TRACK_INDICES,
   ludoAdvanceTrackIndex,
   ludoIsSafeTrackIndex,
+  ludoIsOwnStartTrackIndex,
 } from './ludoGeometryConstants.js'
 import type { LudoColor } from './ludoEngineTypes.js'
 
@@ -24,6 +25,9 @@ export const ludoEngineAdvanceTrackIndex = ludoAdvanceTrackIndex
 // source of truth, споделен и с board/ludoBoardGeometry.ts (rendering).
 export const LUDO_ENGINE_SAFE_TRACK_INDICES = LUDO_SAFE_TRACK_INDICES
 export const ludoEngineIsSafeTrackIndex = ludoIsSafeTrackIndex
+// Ownership-aware own-start-cell protection — виж ludoGeometryConstants.ts
+// doc коментара. Извикващият подава victim-а цвят + target index.
+export const ludoEngineIsOwnStartTrackIndex = ludoIsOwnStartTrackIndex
 
 // Canonical progress model (Phase 3B, виж task-а т.2 "CANONICAL PROGRESS
 // MODEL") — колко track-стъпки е изминала дадена пионка СПРЯМО СОБСТВЕНИЯ ѝ
