@@ -205,7 +205,7 @@ try {
   await applyMigrations(db)
   economyStore = await createTournamentEconomyStore(dbPath)
 
-  for (const fee of [5_000, 10_000, 20_000, 50_000, 100_000]) {
+  for (const fee of [5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 800_000, 1_000_000]) {
     const preview = calculateTournamentPrizePreview(fee, 8)
     check(`snapshot math balances for fee ${fee}`, preview.systemFee + preview.firstTeamPrize + preview.secondTeamPrize === preview.totalEntryFees)
     check(`winner players split exactly for fee ${fee}`, preview.firstPlayerPrize * 2 === preview.firstTeamPrize)

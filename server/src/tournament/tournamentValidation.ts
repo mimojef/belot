@@ -14,7 +14,7 @@ export const TOURNAMENT_PASSWORD_MAX_LENGTH = 32
 // Единствените разрешени входни стойности — server-side whitelist е
 // задължителен (клиентският <select> не е достатъчен, виж продуктовото
 // изискване).
-export const ALLOWED_TOURNAMENT_ENTRY_FEES = [5000, 10000, 20000, 50000, 100000] as const
+export const ALLOWED_TOURNAMENT_ENTRY_FEES = [5000, 10000, 20000, 50000, 100000, 200000, 500000, 800000, 1000000] as const
 export type AllowedTournamentEntryFee = (typeof ALLOWED_TOURNAMENT_ENTRY_FEES)[number]
 
 // Броят отбори, който потребителят избира при създаване — сървърът винаги

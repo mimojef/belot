@@ -139,7 +139,7 @@ try {
   db = new DatabaseSync(dbPath, { open: true, enableForeignKeyConstraints: true })
   await applyMigrations(db)
 
-  for (const fee of [5_000, 10_000, 20_000, 50_000, 100_000]) {
+  for (const fee of [5_000, 10_000, 20_000, 50_000, 100_000, 200_000, 500_000, 800_000, 1_000_000]) {
     const preview = calculateTournamentPrizePreview(fee, 8)
     check(`financial preview integer-safe for ${fee}`, Number.isInteger(preview.systemFee) && Number.isInteger(preview.firstPlayerPrize))
     check(`financial preview balances for ${fee}`, preview.systemFee + preview.prizePool === preview.totalEntryFees)

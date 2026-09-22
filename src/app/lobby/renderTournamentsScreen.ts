@@ -81,7 +81,7 @@ function formatInviteCountdown(expiresAt: string): string {
 }
 
 // ── Позволени входни стойности (огледално на server ALLOWED_TOURNAMENT_ENTRY_FEES) ──
-export const TOURNAMENT_ENTRY_FEE_OPTIONS = [5000, 10000, 20000, 50000, 100000] as const
+export const TOURNAMENT_ENTRY_FEE_OPTIONS = [5000, 10000, 20000, 50000, 100000, 200000, 500000, 800000, 1000000] as const
 
 // ── Позволен брой отбори (огледално на server ALLOWED_TOURNAMENT_TEAM_CAPACITIES) ──
 export const TOURNAMENT_TEAM_CAPACITY_OPTIONS = [4, 8, 16] as const

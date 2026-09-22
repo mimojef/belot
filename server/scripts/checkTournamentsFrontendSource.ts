@@ -122,7 +122,7 @@ await check('[31b] Entry fee опциите съответстват на server
     /TOURNAMENT_ENTRY_FEE_OPTIONS = \[([\s\S]*?)\] as const/,
   )
   const body = match?.[1] ?? ''
-  for (const fee of [5000, 10000, 20000, 50000, 100000]) {
+  for (const fee of [5000, 10000, 20000, 50000, 100000, 200000, 500000, 800000, 1000000]) {
     assert(body.includes(String(fee)), `Липсва entry fee опция ${fee} в TOURNAMENT_ENTRY_FEE_OPTIONS`)
   }
   assert(
