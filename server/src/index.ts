@@ -214,6 +214,7 @@ import { sendJsonMessage } from './core/sendJsonMessage.js'
 import type {
   ConnectionId,
   PlayerPublicProfileSnapshot,
+  RoomId,
   RoomParticipant,
   Seat,
   ServerRoom,
@@ -18750,6 +18751,53 @@ const wsServer = new WebSocketServer({
   path: '/ws',
 })
 
+// ─── WS close diagnostics (disconnect-lifecycle observability, no new policy) ─
+// Компактен, structured log за ВСЕКИ WS close, за да различаваме explicit
+// client-initiated disconnects (auth_refresh/bid_watchdog/page_unload — виж
+// GameServerClient.disconnect()'s bounded reason на клиента) от normal/
+// abnormal network-driven close-ове (code 1006 = TCP/connection killed без
+// proper close handshake), и дали disconnect-ът е станал докато connection-ът
+// е бил attach-нат към активна Belot стая. НЕ добавя нов reconnect/heartbeat
+// policy — само наблюдение върху съществуващия disconnect path.
+const WS_CLOSE_REASON_LOG_MAX_LENGTH = 200
+
+// close reason-ът идва directно от network peer-а (client или proxy) —
+// third-party bytes, никога доверени. Strip-ваме control/newline символи
+// (log injection — фалшив "[ws-close]" ред в лога) и bound-ваме дължината
+// defensively (WS spec-ът ограничава реалните close reasons до 123 bytes, но
+// не разчитаме на compliant подателя).
+function sanitizeWsCloseReasonForLog(rawReason: Buffer): string {
+  const text = rawReason.toString('utf8').replace(/[\u0000-\u001F\u007F]+/g, ' ').trim()
+  return text.length > WS_CLOSE_REASON_LOG_MAX_LENGTH
+    ? `${text.slice(0, WS_CLOSE_REASON_LOG_MAX_LENGTH)}…`
+    : text
+}
+
+// Забранено да логваме тук: reconnectToken, session token, email, IP,
+// displayName, каквито и да е пълни profile данни — само opaque
+// connectionId/roomId + code/reason/seat/lifetime, достатъчни за lifecycle
+// диагностика.
+function logWsCloseDiagnostics(input: {
+  connectionId: ConnectionId
+  code: number
+  reason: string
+  roomId: RoomId | null
+  seat: Seat | null
+  roomActive: boolean
+  lifetimeMs: number | null
+}): void {
+  console.log('[ws-close]', JSON.stringify({
+    connectionId: input.connectionId,
+    code: input.code,
+    reason: input.reason.length > 0 ? input.reason : undefined,
+    attachedToRoom: input.roomId !== null,
+    roomId: input.roomId ?? undefined,
+    seat: input.seat ?? undefined,
+    roomActive: input.roomActive,
+    lifetimeMs: input.lifetimeMs ?? undefined,
+  }))
+}
+
 wsServer.on('connection', (socket, request) => {
   if (isServerShuttingDown) {
     socket.close()
@@ -22287,7 +22335,19 @@ wsServer.on('connection', (socket, request) => {
     }
   })
 
-  socket.on('close', () => {
+  socket.on('close', (code, reason) => {
+    // Captured ПРЕДИ handleDisconnect() мутира connection state-а по-долу —
+    // това е единствената точка, в която currentRoomId/currentSeat/connectedAt
+    // все още отразяват "къде беше connection-ът в момента на затваряне".
+    const closeCode = code
+    const closeReason = sanitizeWsCloseReasonForLog(reason)
+    const preDisconnectConnection = getConnectionById(serverState, connection.id)
+    const lifetimeMs = preDisconnectConnection !== null
+      ? Date.now() - preDisconnectConnection.connectedAt
+      : null
+    const attachedRoomId = preDisconnectConnection?.currentRoomId ?? null
+    const attachedSeat = preDisconnectConnection?.currentSeat ?? null
+
     guestIdByConnection.delete(connection.id)
     lobbyChatSubscriberConnectionIds.delete(connection.id)
     adCampaignManagementSubscriberConnectionIds.delete(connection.id)
@@ -22315,9 +22375,18 @@ wsServer.on('connection', (socket, request) => {
 
       socketRegistry.delete(connection.id)
 
+      logWsCloseDiagnostics({
+        connectionId: connection.id,
+        code: closeCode,
+        reason: closeReason,
+        roomId: attachedRoomId,
+        seat: attachedSeat,
+        roomActive: result.room !== null && result.room.status === 'playing',
+        lifetimeMs,
+      })
+
       if (result.room === null) {
         serverState = disconnectState
-        console.log(`[ws] client disconnected: ${connection.id}`)
         return
       }
 
@@ -22329,13 +22398,11 @@ wsServer.on('connection', (socket, request) => {
         markRoomSnapshotRemoved(result.room.id)
         activeRoomRuntime.removeRoom(result.room.id)
         console.log(`[room-cleanup] removed inactive room=${result.room.id}`)
-        console.log(`[ws] client disconnected: ${connection.id}`)
         return
       }
 
       serverState = commitServerRoomWithSnapshot(result.room, disconnectState)
       broadcastRoomSnapshots(result.room, socketRegistry)
-      console.log(`[ws] client disconnected: ${connection.id}`)
     } catch (error) {
       socketRegistry.delete(connection.id)
       console.error(`[ws] disconnect error: ${connection.id}`, error)

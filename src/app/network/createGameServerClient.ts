@@ -2642,7 +2642,16 @@ type CreateGameServerClientOptions = {
 
 export type GameServerClient = {
   connect: () => void
-  disconnect: () => void
+  /**
+   * Explicit, client-initiated disconnect. `reason` е optional, bounded
+   * diagnostic identifier (НЕ PII/secret — виж CLOSE_REASON_MAX_BYTES по-долу
+   * и callers-ите: 'auth_refresh'/'bid_watchdog'/'page_unload') — праща се
+   * като WebSocket close reason (normal close code 1000), за да може сървърът
+   * да различи explicit disconnect от normal/abnormal network close в своя
+   * '[ws-close]' diagnostic log. НЕ добавяй нов caller без bounded, non-PII
+   * reason string.
+   */
+  disconnect: (reason?: string) => void
   isConnected: () => boolean
   ping: () => void
   createRoom: (displayName?: string) => void
@@ -2765,22 +2774,42 @@ export function createGameServerClient(
       return
     }
 
-    socket = new WebSocket(url)
+    // Socket-instance ownership guard — `thisSocket` е stable reference към
+    // ИМЕННО тази WebSocket instance, capture-ната в closure-а на всеки от
+    // 4-те listener-а по-долу. Всеки listener проверява `socket === thisSocket`
+    // ПРЕДИ да пипне shared `socket` променливата или да извика lifecycle
+    // callback — гарантира, че stale close/error/message/open от ПО-СТАР
+    // socket (напр. бавен/забавен network close, пристигнал СЛЕД като нов
+    // connect() вече е презаписал `socket` с по-нова instance) никога не може
+    // да занули по-новата връзка или да third-не onXxx() от нейно име (виж
+    // GameServerClient.disconnect() doc коментара за race-а, който това
+    // предотвратява). Message-и от `thisSocket` физически не могат да
+    // пристигнат на друга instance (browser WebSocket event target-ите са per-
+    // instance), но guard-ът тук пази срещу СЪЩИЯ stale-ownership проблем: A's
+    // late-arriving message не бива да се третира като принадлежащ на "текущата"
+    // връзка, ако B вече е поела тази роля.
+    const thisSocket = new WebSocket(url)
+    socket = thisSocket
 
-    socket.addEventListener('open', () => {
+    thisSocket.addEventListener('open', () => {
+      if (socket !== thisSocket) return
       options.onOpen?.()
     })
 
-    socket.addEventListener('close', () => {
+    thisSocket.addEventListener('close', () => {
+      if (socket !== thisSocket) return
       socket = null
       options.onClose?.()
     })
 
-    socket.addEventListener('error', (event) => {
+    thisSocket.addEventListener('error', (event) => {
+      if (socket !== thisSocket) return
       options.onError?.(event)
     })
 
-    socket.addEventListener('message', (event) => {
+    thisSocket.addEventListener('message', (event) => {
+      if (socket !== thisSocket) return
+
       const message = safeParseServerMessage(String(event.data))
 
       if (!message) {
@@ -2793,13 +2822,61 @@ export function createGameServerClient(
     })
   }
 
-  function disconnect(): void {
+  // WebSocket spec (WHATWG HTML §websocket, close(code, reason)): reason,
+  // ONCE UTF-8 ENCODED, must be ≤123 bytes, иначе close() хвърля SyntaxError
+  // SYNCHRONOUSLY. String.prototype.slice() брои UTF-16 code units, НЕ UTF-8
+  // bytes — 100 non-ASCII символа (напр. кирилица, 2 bytes/char) могат лесно
+  // да encode-нат до >200 bytes, далеч над лимита. Bound-ваме по РЕАЛНАТА
+  // encoded дължина (codepoint-safe truncation, никога не реже surrogate
+  // pair по средата), за да не throw-не close() за какъвто и да е бъдещ
+  // caller — не само за днешните 3 chisto-ASCII literal reasons.
+  const CLOSE_REASON_MAX_BYTES = 100
+  const closeReasonEncoder = new TextEncoder()
+
+  function boundCloseReasonBytes(reason: string): string {
+    if (closeReasonEncoder.encode(reason).byteLength <= CLOSE_REASON_MAX_BYTES) {
+      return reason
+    }
+    const codepoints = Array.from(reason)
+    while (codepoints.length > 0) {
+      codepoints.pop()
+      const candidate = codepoints.join('')
+      if (closeReasonEncoder.encode(candidate).byteLength <= CLOSE_REASON_MAX_BYTES) {
+        return candidate
+      }
+    }
+    return ''
+  }
+
+  function disconnect(reason?: string): void {
     if (!socket) {
       return
     }
 
-    socket.close()
-    socket = null
+    // ВАЖНО: `socket` НЕ се null-ва тук веднага (за разлика от старото
+    // поведение). close listener-ът, регистриран в connect() по-горе, е
+    // ЕДИНСТВЕНИЯТ, който прави cleanup (socket=null + onClose()) — той го
+    // прави, когато реалният WS close event пристигне, guard-нат срещу
+    // stale-ownership (виж connect() doc коментара). Ако null-нем тук
+    // synchronously, разваляме точно тази гаранция: последващ connect(),
+    // случил се ПРЕДИ реалният close event на тази instance да пристигне,
+    // веднага презаписва `socket` с нова instance — точно сценарият, който
+    // guard-ът в close listener-а е проектиран да разпознае safe (thisSocket
+    // !== socket -> skip). Explicit disconnect() продължава да води до точно
+    // ЕДИН onClose() извикване, защото closeCode 1000 гарантирано тригва
+    // browser-ния 'close' event на ТОЗИ socket.
+    //
+    // normal close code 1000 + optional bounded, non-PII diagnostic reason —
+    // праща се в WS close frame-а, който сървърът чете (виж index.ts's
+    // '[ws-close]' log) за да различи explicit disconnect от network close.
+    // Explicit if/else (не подаване на `undefined` directно) — избягва
+    // разчитане на WebIDL default-value поведение за optional параметъра
+    // между различни browser engines.
+    if (reason !== undefined) {
+      socket.close(1000, boundCloseReasonBytes(reason))
+    } else {
+      socket.close(1000)
+    }
   }
 
   function isConnected(): boolean {

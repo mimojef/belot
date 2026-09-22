@@ -755,7 +755,7 @@ async function attemptPendingChatRefresh(): Promise<void> {
 function refreshGameServerConnectionForAuth(): void {
   isRefreshingAuthConnection = true
   clearReconnectTimer()
-  client.disconnect()
+  client.disconnect('auth_refresh')
   lobby.setConnected(false)
 
   window.setTimeout(() => {
@@ -6674,7 +6674,7 @@ const activeRoom = createActiveRoomFlowController({
     // (виж флага при декларацията му) — само за explicit bid-recovery
     // случая, не за нормален connection loss.
     isZombieBidReconnectInFlight = true
-    client.disconnect()
+    client.disconnect('bid_watchdog')
   },
 })
 
@@ -7901,7 +7901,7 @@ window.addEventListener('beforeunload', () => {
   isPageUnloading = true
   clearReconnectTimer()
   disposeViewportResizeHandler()
-  client.disconnect()
+  client.disconnect('page_unload')
 })
 
 const stripeReturnParams = new URLSearchParams(window.location.search)
