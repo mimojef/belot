@@ -1,13 +1,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AuthStore, AuthSessionSnapshot } from '../db/authStore.js'
+import { normalizeEmail } from '../db/authHelpers.js'
 import { sendRegistrationVerificationEmail } from './sendRegistrationVerificationEmail.js'
-import { resolveRegistrationVerificationToken } from './registrationVerificationLinkToken.js'
+import { resolveRegistrationVerificationLocator } from './registrationVerificationLinkToken.js'
 
 // ─── Constraints ────────────────────────────────────────────────────────────
 
 const CODE_LENGTH = 6
 const PENDING_ID_MAX_LENGTH = 128
-const VERIFICATION_TOKEN_MAX_LENGTH = 512
+const VERIFICATION_LOCATOR_MAX_LENGTH = 512
 
 // ─── Response bodies ──────────────────────────────────────────────────────────
 
@@ -35,6 +36,31 @@ const RESP_EMAIL_DELIVERY_FAILED = {
   message: 'В момента не успяхме да изпратим кода за потвърждение. Моля, опитайте отново след няколко минути.',
 } as const
 
+// PUBLIC LOCATOR security model — locator alone НЕ е достатъчен за resend
+// (би rotate-нал кода без authorization proof). Само за locator-resolved
+// заявки (dedicated email-link page); старият popup flow (raw
+// pendingRegistrationId) няма email confirmation стъпка, непроменен contract.
+const RESP_RESEND_EMAIL_REQUIRED = {
+  ok: false,
+  code: 'RESEND_EMAIL_REQUIRED',
+  message: 'Въведете имейла, с който сте се регистрирали.',
+} as const
+
+const RESP_RESEND_EMAIL_MISMATCH = {
+  ok: false,
+  code: 'RESEND_EMAIL_MISMATCH',
+  message: 'Имейлът не съвпада с този от регистрацията.',
+} as const
+
+// PUBLIC LOCATOR security model — locator alone НЕ е достатъчен за display
+// name update (mutating action). Само за locator-resolved заявки; старият
+// popup flow (raw pendingRegistrationId) остава непроменен (backward compat).
+const RESP_UPDATE_NAME_CODE_REQUIRED = {
+  ok: false,
+  code: 'INVALID_CODE',
+  message: 'Невалиден код. Моля, въведете 6-цифрения код от имейла.',
+} as const
+
 // ─── Handler context ──────────────────────────────────────────────────────────
 
 export type RegistrationVerificationHandlerContext = {
@@ -47,7 +73,7 @@ export type RegistrationVerificationHandlerContext = {
   withPikaTeamGiftBypassFlag: (session: AuthSessionSnapshot) => unknown
   /** Email → dedicated registration verification page — виж sendRegistrationVerificationEmail.ts's verificationPageUrl doc коментара. '' ако не е конфигуриран (fail-safe, не fail-closed). */
   registrationVerificationPageUrl: string
-  /** Encrypted verificationToken resolution (§"PREFERRED TOKEN DESIGN") — СЪЩИЯТ registrationSecret като authStore.ts's hashVerificationCode/hmacRateLimitSubject (index.ts вече го подава на createAuthStore()), reuse-нат тук directно за token decrypt/authenticate, БЕЗ да минава през authStore-a (чиста crypto операция, не DB access). */
+  /** Encrypted verificationLocator resolution (PUBLIC LOCATOR модел) — СЪЩИЯТ registrationSecret като authStore.ts's hashVerificationCode/hmacRateLimitSubject (index.ts вече го подава на createAuthStore()), reuse-нат тук директно за locator decrypt/authenticate, БЕЗ да минава през authStore-a (чиста crypto операция, не DB access). */
   registrationSecret: string
 }
 
@@ -57,17 +83,21 @@ function getStringField(body: Record<string, unknown>, field: string): string {
 }
 
 // ─── Backward-compatible identifier resolution ──────────────────────────────
-// §"TOKEN НЕ ТРЯБВА ДА ВРЪЩА RAW PENDING ID КЪМ CLIENT" — endpoint-ите приемат
-// ИЛИ existing pendingRegistrationId (стария popup flow, непроменен
-// contract), ИЛИ нов verificationToken (dedicated email-link страницата).
-// Server-ът resolve-ва към действителния pending_registration_id ВЪТРЕ в
-// handler-а — тази стойност НИКОГА не се сериализира обратно в HTTP
-// response-а, когато request-ът е дошъл through token (виж всеки call site
-// по-долу: resolved.pendingRegistrationId се подава directно на
-// authStore-функциите, никога echo-ва се в sendJson()).
+// PUBLIC LOCATOR модел — endpoint-ите приемат ИЛИ existing
+// pendingRegistrationId (стария popup flow, непроменен bearer-capability
+// contract — този канал не е emailed/logged, различен threat model), ИЛИ нов
+// verificationLocator (dedicated email-link страницата, вече ПУБЛИЧЕН
+// identifier, не capability — виж registrationVerificationLinkToken.ts doc
+// коментара). Server-ът resolve-ва към действителния pending_registration_id
+// ВЪТРЕ в handler-а — тази стойност НИКОГА не се сериализира обратно в HTTP
+// response-а. `kind: 'locator'` резултатите по-долу изрично НЕ носят
+// authorization за mutation сами по себе си — всеки mutating handler pass-ва
+// допълнителен proof (code за verify/update-display-name, email за resend)
+// преди да позволи действието; kind:'id' (старият popup) запазва старото
+// bearer-capability поведение непроменено.
 type ResolvedIdentifier =
   | { kind: 'id'; pendingRegistrationId: string }
-  | { kind: 'token'; pendingRegistrationId: string }
+  | { kind: 'locator'; pendingRegistrationId: string }
   | { kind: 'invalid' }
   | { kind: 'expired' }
 
@@ -75,23 +105,22 @@ function resolveIdentifier(
   ctx: RegistrationVerificationHandlerContext,
   record: Record<string, unknown>,
 ): ResolvedIdentifier {
-  const verificationToken = getStringField(record, 'verificationToken')
-  if (verificationToken.length > 0) {
-    if (verificationToken.length > VERIFICATION_TOKEN_MAX_LENGTH) {
+  const verificationLocator = getStringField(record, 'verificationLocator')
+  if (verificationLocator.length > 0) {
+    if (verificationLocator.length > VERIFICATION_LOCATOR_MAX_LENGTH) {
       return { kind: 'invalid' }
     }
-    const resolved = resolveRegistrationVerificationToken(ctx.registrationSecret, verificationToken)
+    const resolved = resolveRegistrationVerificationLocator(ctx.registrationSecret, verificationLocator)
     if (!resolved.ok) {
       return { kind: 'invalid' }
     }
     if (resolved.isExpired) {
       // Authenticated expiresAt е минал — EXPIRED, независимо дали
-      // pending_registrations редът все още физически съществува (виж
-      // task spec-а §9/§10 "Този state НЕ зависи от това дали pending row
-      // все още физически съществува"). Никакъв DB lookup дори не е нужен.
+      // pending_registrations редът все още физически съществува. Никакъв
+      // DB lookup дори не е нужен.
       return { kind: 'expired' }
     }
-    return { kind: 'token', pendingRegistrationId: resolved.pendingRegistrationId }
+    return { kind: 'locator', pendingRegistrationId: resolved.pendingRegistrationId }
   }
 
   // Backward compatibility — старият popup flow праща raw pendingRegistrationId.
@@ -107,8 +136,8 @@ function resolveIdentifier(
 // REGISTRATION VERIFICATION PAGE"). PURE read, no session/cookie side
 // effects — bootstrap-ва dedicated page-a от server-side данни (maskedEmail/
 // expiresAt/resend eligibility), без да разчита на in-memory state от друг
-// таб/popup. POST (не GET) — §7: verificationToken пътува в body, не query
-// string, mirror на resend/verify/update-name endpoints-ите по-долу.
+// таб/popup. POST (не GET) — verificationLocator пътува в body, mirror на
+// resend/verify/update-name endpoints-ите по-долу.
 
 export async function handleRegistrationVerificationStatus(
   req: IncomingMessage,
@@ -143,16 +172,15 @@ export async function handleRegistrationVerificationStatus(
       ctx.sendJson(res, 429, RESP_RATE_LIMITED)
       return
     }
-    // §10 "MISSING ROW BEFORE EXPIRY" — тук стигаме само ако redът вече е
-    // missing, НО token-ът (ако имаше такъв) authenticated-но твърди, че
+    // "MISSING ROW BEFORE EXPIRY" — тук стигаме само ако redът вече е
+    // missing, НО locator-ът (ако имаше такъв) authenticated-но твърди, че
     // expiresAt все още НЕ е минал (иначе щяхме да върнем 'expired' по-горе
-    // без DB lookup изобщо). Missing row + non-expired token е НЕ "expired"
+    // без DB lookup изобщо). Missing row + non-expired locator е НЕ "expired"
     // — това е neutral "inactive request" случая (already verified ИЛИ
-    // cancelled, не можем надеждно да различим, виж task spec-а §10 explicit
-    // забрана да third-ваме категорично "already verified"). За raw-id
-    // (стар popup) заявки без token, същият missing-row случай остава
-    // просто generic not_found (съществуващо поведение, непроменено).
-    if (resolved.kind === 'token') {
+    // cancelled, не можем надеждно да различим). За raw-id (стар popup)
+    // заявки без locator, същият missing-row случай остава просто generic
+    // not_found (съществуващо поведение, непроменено).
+    if (resolved.kind === 'locator') {
       ctx.sendJson(res, 200, { ok: true, status: 'inactive' })
       return
     }
@@ -199,9 +227,28 @@ export async function handleResendRegistrationCode(
   }
   const pendingRegistrationId = resolved.pendingRegistrationId
 
+  // PUBLIC LOCATOR модел — за dedicated-page заявки (kind:'locator') локаторът
+  // САМ ПО СЕБЕ СИ НЕ Е достатъчен да resend-не/rotate-не кода (би bypass-нал
+  // authorization: attacker с прихванат/logged locator иначе би могъл да
+  // инвалидира кода, който legit потребителят вече е получил). Изискваме
+  // submitted email да съвпада с normalized email-а на pending регистрацията
+  // (сравнено server-side в authStore, никога тук). Старият popup flow
+  // (kind:'id') няма тази стъпка — непроменен bearer-capability contract.
+  let requiredNormalizedEmail: string | undefined
+  if (resolved.kind === 'locator') {
+    const submittedEmail = getStringField(body as Record<string, unknown>, 'email')
+    const normalized = normalizeEmail(submittedEmail)
+    if (normalized === null) {
+      ctx.sendJson(res, 400, RESP_RESEND_EMAIL_REQUIRED)
+      return
+    }
+    requiredNormalizedEmail = normalized
+  }
+
   const requestIp = ctx.getRequestIp(req)
   const result = ctx.store.resendRegistrationVerificationCode({
     pendingRegistrationId,
+    requiredNormalizedEmail,
     ipAddress: requestIp === 'unknown' ? null : requestIp,
   })
 
@@ -214,6 +261,10 @@ export async function handleResendRegistrationCode(
       ctx.sendJson(res, 410, RESP_EXPIRED)
       return
     }
+    if (result.reason === 'email_mismatch') {
+      ctx.sendJson(res, 400, RESP_RESEND_EMAIL_MISMATCH)
+      return
+    }
     ctx.sendJson(res, 404, RESP_NOT_FOUND)
     return
   }
@@ -222,13 +273,13 @@ export async function handleResendRegistrationCode(
     toEmail: result.email,
     code: result.rawCode,
     expiresAt: result.expiresAt,
-    // Resend: нов token, издаден за СЪЩИЯ pendingRegistrationId + СЪЩИЯ
+    // Resend: нов locator, издаден за СЪЩИЯ pendingRegistrationId + СЪЩИЯ
     // expiresAt (never extended, виж resendRegistrationVerificationCode()
-    // doc коментара) — виж task spec-а §13.O "Resend email генерира валиден
-    // token за същата pending registration и същия expiresAt". Старият
-    // token (от предишен email) остава ВАЛИДЕН И СЛЕД resend-а (mirror на
-    // старото pendingRegistrationId-based поведение) — encrypted payload-ът
-    // сочи СЪЩИЯ id, resend не го сменя.
+    // doc коментара) — resend email генерира валиден locator за същата
+    // pending registration и същия expiresAt. Старият locator (от предишен
+    // email) остава ВАЛИДЕН И СЛЕД resend-а (mirror на старото
+    // pendingRegistrationId-based поведение) — encrypted payload-ът сочи
+    // СЪЩИЯ id, resend не го сменя (само code_hash-ът в DB се презаписва).
     verificationPageUrl: ctx.registrationVerificationPageUrl || undefined,
     pendingRegistrationId,
     registrationSecret: ctx.registrationSecret,
@@ -345,11 +396,11 @@ export async function handleVerifyRegistrationEmail(
       })
       return
     }
-    // §10 "MISSING ROW BEFORE EXPIRY" — same neutral-state distinction като
-    // status endpoint-а: token authenticated-но твърди non-expired, но
+    // "MISSING ROW BEFORE EXPIRY" — same neutral-state distinction като
+    // status endpoint-а: locator authenticated-но твърди non-expired, но
     // редът вече липсва (already verified ИЛИ cancelled — не можем
     // надеждно да различим, виж doc коментара в handleRegistrationVerificationStatus).
-    if (resolved.kind === 'token') {
+    if (resolved.kind === 'locator') {
       ctx.sendJson(res, 200, { ok: false, code: 'REGISTRATION_INACTIVE', status: 'inactive' })
       return
     }
@@ -393,10 +444,30 @@ export async function handleUpdatePendingRegistrationDisplayName(
   }
   const pendingRegistrationId = resolved.pendingRegistrationId
 
+  // PUBLIC LOCATOR модел — за dedicated-page заявки (kind:'locator') локаторът
+  // САМ ПО СЕБЕ СИ НЕ Е достатъчен да update-не display name-а (mutating
+  // действие). Изискваме и правилния 6-цифрен код — клиентът вече го знае
+  // (показан е DISPLAY_NAME_TAKEN точно СЛЕД успешна code проверка в
+  // handleVerifyRegistrationEmail по-горе, пазен само в JS state, никога
+  // localStorage/URL/logs). Server-ът re-verify-ва кода тук независимо
+  // (defense-in-depth — никога не се доверява само на клиентското твърдение).
+  // Старият popup flow (kind:'id') няма тази стъпка — непроменен
+  // bearer-capability contract, backward compatible.
+  let requiredCode: string | undefined
+  if (resolved.kind === 'locator') {
+    const code = getStringField(record, 'code')
+    if (!/^[0-9]{6}$/.test(code)) {
+      ctx.sendJson(res, 400, RESP_UPDATE_NAME_CODE_REQUIRED)
+      return
+    }
+    requiredCode = code
+  }
+
   const requestIp = ctx.getRequestIp(req)
   const result = ctx.store.updatePendingRegistrationDisplayName({
     pendingRegistrationId,
     displayName,
+    requiredCode,
     ipAddress: requestIp === 'unknown' ? null : requestIp,
   })
 
@@ -407,6 +478,23 @@ export async function handleUpdatePendingRegistrationDisplayName(
     }
     if (result.reason === 'expired') {
       ctx.sendJson(res, 410, RESP_EXPIRED)
+      return
+    }
+    if (result.reason === 'too_many_attempts') {
+      ctx.sendJson(res, 429, {
+        ok: false,
+        code: 'TOO_MANY_ATTEMPTS',
+        message: 'Твърде много грешни опити. Изпратете нов код и опитайте отново.',
+      })
+      return
+    }
+    if (result.reason === 'invalid_code') {
+      ctx.sendJson(res, 400, {
+        ok: false,
+        code: 'INVALID_CODE',
+        message: 'Грешен код. Моля, опитайте отново.',
+        attemptsRemaining: result.attemptsRemaining,
+      })
       return
     }
     if (result.reason === 'invalid_display_name') {

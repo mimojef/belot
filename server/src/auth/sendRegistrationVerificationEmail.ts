@@ -2,17 +2,15 @@
 // sendPasswordResetEmail.ts (BREVO_API_KEY/CONTACT_FROM_EMAIL/CONTACT_FROM_NAME
 // env vars) — умишлено НЕ втори независим mail transport, само нов template.
 //
-// ОПЕРАЦИОННО ИЗИСКВАНЕ (не code-level, виж final report-а "Brevo click
-// tracking" секцията): Brevo-овия transactional `smtp/email` endpoint НЯМА
-// documented per-request body поле за disable-ване на click tracking —
-// tracking-ът за transactional пращания се контролира на ниво Brevo
-// account/sender settings (Brevo dashboard), не чрез request payload тук.
-// Затова click-tracking disable-ването на verification email-а трябва да
-// стане ръчно в Brevo dashboard-а за sender-а, използван от
-// CONTACT_FROM_EMAIL, ПРЕДИ production deploy на тази функционалност — не
-// може да бъде code-enforced от този файл.
+// BREVO CLICK TRACKING (не code-level): вече НЕ е deploy blocker (виж final
+// report-а "Brevo" секцията) — линкът по-долу носи PUBLIC LOCATOR (§"PUBLIC
+// LOCATOR" в registrationVerificationLinkToken.ts), не bearer capability.
+// Дори Brevo да вижда/логва/rewrite-ва линка, locator-ът сам по себе си не
+// дава право да verify-не/cancel-не/resend-не/update-не display name —
+// всички mutating действия изискват и правилния 6-цифрен код. Click tracking
+// може спокойно да остане в текущата Brevo account конфигурация.
 
-import { createRegistrationVerificationToken } from './registrationVerificationLinkToken.js'
+import { createRegistrationVerificationLocator } from './registrationVerificationLinkToken.js'
 
 const BREVO_SEND_EMAIL_URL = 'https://api.brevo.com/v3/smtp/email'
 const BREVO_FETCH_TIMEOUT_MS = 10_000
@@ -33,20 +31,23 @@ export type SendRegistrationVerificationEmailInput = {
    * няма "Въведете кода тук" линк, само кода (старото поведение) — fail-safe,
    * никога fail-closed.
    *
-   * §"PREFERRED TOKEN DESIGN"/§"URL FORMAT" — линкът НЕ носи raw
-   * pendingRegistrationId никъде (нито query, нито fragment). Носи encrypted
-   * (AES-256-GCM) opaque token (createRegistrationVerificationToken(),
-   * registrationVerificationLinkToken.ts) в URL FRAGMENT (#token=...), НЕ
-   * query string — fragment никога не стига до сървъра (nginx access log,
-   * Referer header) при самия GET за страницата; token-ът decrypt-ва се
-   * само server-side, при последващите POST заявки от dedicated page-a.
-   * Token-ът сам по себе си НЕ активира регистрацията — само идентифицира
-   * коя pending регистрация да покаже; кодът от email-а пак трябва да бъде
-   * въведен ръчно там.
+   * §"PUBLIC LOCATOR" (revised design) — линкът НЕ носи raw
+   * pendingRegistrationId никъде. Носи encrypted (AES-256-GCM) opaque LOCATOR
+   * (createRegistrationVerificationLocator(), registrationVerificationLinkToken.ts)
+   * в URL QUERY string (?verification=...), не fragment — query е по-устойчив
+   * при email click-tracking redirect chains (Brevo и подобни услуги
+   * пренаписват href-и през собствен redirect endpoint; #fragment не оцелява
+   * надеждно през сървърен redirect, query параметър оцелява). Това вече е
+   * безопасно, защото locator-ът е PUBLIC — possession alone НЕ верифицира
+   * регистрация, НЕ create-ва сесия, НЕ update-ва display name, НЕ cancel-ва,
+   * НЕ resend-ва код (виж registrationVerificationLinkToken.ts doc коментара
+   * за пълния security model). Locator-ът само идентифицира коя pending
+   * регистрация да покаже; правилният 6-цифрен код остава задължителен
+   * authorization proof за всяко state-changing действие.
    */
   verificationPageUrl?: string
   pendingRegistrationId?: string
-  /** Нужен само ако pendingRegistrationId е подаден — за token encryption. */
+  /** Нужен само ако pendingRegistrationId е подаден — за locator encryption. */
   registrationSecret?: string
 }
 
@@ -63,13 +64,15 @@ function formatExpiresAt(expiresAt: string): string {
   }).format(date)
 }
 
-/** Encrypted token във fragment-а (#token=...), НИКОГА в query string-а —
- * виж SendRegistrationVerificationEmailInput.verificationPageUrl doc
- * коментара за пълния "не разкривай raw pendingRegistrationId" rationale.
- * Mirror на sendPasswordResetEmail.ts's #token= pattern (established в тоя
- * codebase точно за тази цел — fragment никога не стига до сървъра). */
-function buildVerificationLink(verificationPageUrl: string, verificationToken: string): string {
-  return `${verificationPageUrl}#token=${verificationToken}`
+/** Encrypted opaque LOCATOR в query string-а (?verification=...) — виж
+ * SendRegistrationVerificationEmailInput.verificationPageUrl doc коментара
+ * за пълния "PUBLIC LOCATOR, query е вече допустим" rationale. URL/
+ * URLSearchParams гарантират коректно encode-ване дори ако
+ * verificationPageUrl вече носи query параметри. */
+function buildVerificationLink(verificationPageUrl: string, verificationLocator: string): string {
+  const url = new URL(verificationPageUrl)
+  url.searchParams.set('verification', verificationLocator)
+  return url.toString()
 }
 
 function buildTextContent(code: string, expiresAtLabel: string, verificationLink: string | null): string {
@@ -143,7 +146,7 @@ export async function sendRegistrationVerificationEmail(
     input.verificationPageUrl && input.pendingRegistrationId && input.registrationSecret
       ? buildVerificationLink(
           input.verificationPageUrl,
-          createRegistrationVerificationToken(
+          createRegistrationVerificationLocator(
             input.registrationSecret,
             input.pendingRegistrationId,
             input.expiresAt,

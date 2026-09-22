@@ -10,14 +10,19 @@
 // alone, per the task's explicit "Не разчитай само на in-memory... от
 // стария tab" requirement).
 //
-// §"PREFERRED TOKEN DESIGN"/§"URL FORMAT" — the link now carries an
-// AES-256-GCM encrypted, stateless, scoped, opaque `verificationToken` in
-// the URL FRAGMENT (#token=...), NEVER a raw pendingRegistrationId, NEVER a
-// query string. This suite drives the REAL server-side token module
-// (createRegistrationVerificationToken/resolveRegistrationVerificationToken)
+// §"PUBLIC LOCATOR" (revised design) — the link now carries an AES-256-GCM
+// encrypted, stateless, scoped, opaque `verificationLocator` in the URL
+// QUERY string (?verification=...), NEVER a raw pendingRegistrationId, NEVER
+// a fragment (query survives email click-tracking redirect chains better).
+// The locator is a PUBLIC identifier now, not a bearer capability —
+// possession alone must never verify/create a session/update the pending
+// display name/resend-rotate the code/cancel a pending registration (see the
+// explicit "THREAT MODEL" section near the end of this file). This suite
+// drives the REAL server-side locator module
+// (createRegistrationVerificationLocator/resolveRegistrationVerificationLocator)
 // by pointing REGISTRATION_VERIFICATION_URL at this harness's own Vite
-// origin and reading the resulting real encrypted token back out of the
-// server's HTTP responses (never fabricated locally) — the same token the
+// origin and reading the resulting real encrypted locator back out of the
+// server's HTTP responses (never fabricated locally) — the same locator the
 // production email would carry.
 //
 // Uses the same isolated-server + throwaway-secret + Vite backend-port-remap
@@ -182,17 +187,17 @@ try {
   browser = await chromium.launch()
 
   // register()/resend() responses do NOT normally echo the verification
-  // link/token back to the HTTP caller (only the email carries it) — this
-  // harness has no real inbox to read, so it reads the token the SAME way
-  // production would build it: by asking the server's OWN token module,
+  // link/locator back to the HTTP caller (only the email carries it) — this
+  // harness has no real inbox to read, so it reads the locator the SAME way
+  // production would build it: by asking the server's OWN locator module,
   // through a tiny same-process helper script that imports the real
   // registrationVerificationLinkToken.ts module with the SAME secret this
   // spawned server uses. This is NOT re-implementing the crypto locally for
   // the *page* under test — the page/server always decrypt whatever this
   // helper produces via the real production code path.
-  async function buildRealVerificationToken(pendingRegistrationId: string, expiresAt: string): Promise<string> {
+  async function buildRealVerificationLocator(pendingRegistrationId: string, expiresAt: string): Promise<string> {
     const mod = await import(new URL('../server/src/auth/registrationVerificationLinkToken.ts', import.meta.url).href)
-    return mod.createRegistrationVerificationToken(EMAIL_VERIFICATION_SECRET, pendingRegistrationId, expiresAt)
+    return mod.createRegistrationVerificationLocator(EMAIL_VERIFICATION_SECRET, pendingRegistrationId, expiresAt)
   }
 
   async function registerPending(email: string, displayName: string): Promise<{ status: number; body: any }> {
@@ -218,25 +223,31 @@ try {
     directDb((db) => db.prepare(`UPDATE pending_registrations SET expires_at = '2000-01-01T00:00:00.000Z' WHERE pending_registration_id = ?`).run(pendingRegistrationId))
   }
 
-  async function registerAndBuildToken(email: string, displayName: string): Promise<{ pendingRegistrationId: string; token: string; code: string; expiresAt: string }> {
+  async function registerAndBuildLocator(email: string, displayName: string): Promise<{ pendingRegistrationId: string; locator: string; code: string; expiresAt: string; normalizedEmail: string }> {
     const { body } = await registerPending(email, displayName)
     assert(!!body.pendingRegistrationId, `register did not return a pendingRegistrationId: ${JSON.stringify(body)}`)
     const row = getPendingRow(body.pendingRegistrationId)
-    const token = await buildRealVerificationToken(body.pendingRegistrationId, row.expires_at)
-    return { pendingRegistrationId: body.pendingRegistrationId, token, code: recoverVerificationCode(row.code_hash), expiresAt: row.expires_at }
+    const locator = await buildRealVerificationLocator(body.pendingRegistrationId, row.expires_at)
+    return {
+      pendingRegistrationId: body.pendingRegistrationId,
+      locator,
+      code: recoverVerificationCode(row.code_hash),
+      expiresAt: row.expires_at,
+      normalizedEmail: row.normalized_email,
+    }
   }
 
-  async function openVerifyPageWithToken(page: Page, token: string): Promise<void> {
-    // §5 "URL FORMAT" — fragment, not query string.
-    await page.goto(`${verificationPageUrl}#token=${encodeURIComponent(token)}`)
+  async function openVerifyPageWithLocator(page: Page, locator: string): Promise<void> {
+    // §"PUBLIC LOCATOR" — query string, not fragment.
+    await page.goto(`${verificationPageUrl}?verification=${encodeURIComponent(locator)}`)
   }
 
   // ═══════════════════════════════════════════════════════════════════
   // A — Token travels in the URL FRAGMENT, not the query string.
   // ═══════════════════════════════════════════════════════════════════
-  let seedAB: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
+  let seedAB: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
   await check('[A setup] register a pending registration + build its real encrypted token', async () => {
-    seedAB = await registerAndBuildToken(uniqueEmail('ab'), uniqueName('LinkNameAB'))
+    seedAB = await registerAndBuildLocator(uniqueEmail('ab'), uniqueName('LinkNameAB'))
   })
 
   const contextAB = await browser.newContext()
@@ -244,16 +255,16 @@ try {
   const errorsAB: string[] = []
   pageAB.on('pageerror', (err) => errorsAB.push(err.message))
 
-  await check('[A] verification link uses a URL FRAGMENT (#token=...), never a query string', async () => {
-    await openVerifyPageWithToken(pageAB, seedAB!.token)
+  await check('[A] verification link uses a URL QUERY parameter (?verification=...), never a fragment — PUBLIC LOCATOR is safe there (click-tracking-resilient)', async () => {
+    await openVerifyPageWithLocator(pageAB, seedAB!.locator)
     await pageAB.locator('[data-verify-page-code-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
     const url = new URL(pageAB.url())
-    assert(url.search === '' || !url.search.includes('token'), `token leaked into the query string: ${url.search}`)
+    assert(url.hash === '', `expected no #fragment, the locator must travel as a query param, got hash=${url.hash}`)
   })
 
-  await check('[A] fragment is cleared from the address bar immediately (before analytics/consent init could observe it)', async () => {
+  await check('[A] query is scrubbed from the address bar immediately (hygiene, before analytics/consent init could observe it) — NOT a security dependency, the locator is public', async () => {
     const url = new URL(pageAB.url())
-    assert(url.hash === '', `expected the #token fragment to be cleared from the address bar, still present: ${url.hash}`)
+    assert(url.search === '', `expected the ?verification= query to be scrubbed from the address bar, still present: ${url.search}`)
   })
 
   await check('[B] the raw pendingRegistrationId is never present anywhere in the resolved page URL', async () => {
@@ -261,11 +272,11 @@ try {
     assert(!url.includes(seedAB!.pendingRegistrationId), 'raw pendingRegistrationId leaked into the page URL')
   })
 
-  await check('[B] token payload is not readable via naive client-side base64/base64url decode (real AEAD, not a signed-but-readable payload)', () => {
-    const token = seedAB!.token
+  await check('[B] locator payload is not readable via naive client-side base64/base64url decode (real AEAD, not a signed-but-readable payload) — still true even though the locator is now PUBLIC: it must stay UNFORGEABLE (nobody can mint a locator for an arbitrary pendingRegistrationId)', () => {
+    const locator = seedAB!.locator
     const attempts = [
-      () => Buffer.from(token, 'base64').toString('utf8'),
-      () => Buffer.from(token, 'base64url').toString('utf8'),
+      () => Buffer.from(locator, 'base64').toString('utf8'),
+      () => Buffer.from(locator, 'base64url').toString('utf8'),
     ]
     for (const decode of attempts) {
       let decoded = ''
@@ -297,8 +308,8 @@ try {
   const contextTamper = await browser.newContext()
   const pageTamper = await contextTamper.newPage()
   await check('[tampered token] a corrupted token is rejected as an invalid link (GCM auth tag mismatch)', async () => {
-    const tampered = seedAB!.token.slice(0, -6) + 'AAAAAA'
-    await openVerifyPageWithToken(pageTamper, tampered)
+    const tampered = seedAB!.locator.slice(0, -6) + 'AAAAAA'
+    await openVerifyPageWithLocator(pageTamper, tampered)
     await pageTamper.locator('text=Невалиден линк').waitFor({ state: 'visible', timeout: 10_000 })
   })
   await contextTamper.close()
@@ -307,25 +318,25 @@ try {
   const pageWrongPurpose = await contextWrongPurpose.newPage()
   await check('[wrong-purpose token] a token encrypted under a different secret (simulating cross-purpose reuse) is rejected as invalid', async () => {
     const mod = await import(new URL('../server/src/auth/registrationVerificationLinkToken.ts', import.meta.url).href)
-    const wrongSecretToken: string = mod.createRegistrationVerificationToken('a-completely-different-secret-not-used-by-server-xx', seedAB!.pendingRegistrationId, seedAB!.expiresAt)
-    await openVerifyPageWithToken(pageWrongPurpose, wrongSecretToken)
+    const wrongSecretLocator: string = mod.createRegistrationVerificationLocator('a-completely-different-secret-not-used-by-server-xx', seedAB!.pendingRegistrationId, seedAB!.expiresAt)
+    await openVerifyPageWithLocator(pageWrongPurpose, wrongSecretLocator)
     await pageWrongPurpose.locator('text=Невалиден линк').waitFor({ state: 'visible', timeout: 10_000 })
   })
   await contextWrongPurpose.close()
 
   // ═══════════════════════════════════════════════════════════════════
   // SECURITY AUDIT §4 "DUAL IDENTIFIER AMBIGUITY" — a request supplying
-  // BOTH a valid verificationToken (for pending registration A) AND a raw
+  // BOTH a valid verificationLocator (for pending registration A) AND a raw
   // pendingRegistrationId (for a DIFFERENT pending registration B) must
-  // NEVER resolve to B. resolveIdentifier() checks verificationToken FIRST
+  // NEVER resolve to B. resolveIdentifier() checks verificationLocator FIRST
   // and, if present, never even reads the pendingRegistrationId field
   // (deterministic, not "whichever happens to be checked first") — this
   // proves that contract directly against the real HTTP endpoint.
   // ═══════════════════════════════════════════════════════════════════
-  let seedDualA: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
+  let seedDualA: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
   let seedDualB: { pendingRegistrationId: string } | null = null
   await check('[dual-identifier setup] register TWO separate pending registrations, A (token) and B (raw id)', async () => {
-    seedDualA = await registerAndBuildToken(uniqueEmail('duala'), uniqueName('DualIdentifierA'))
+    seedDualA = await registerAndBuildLocator(uniqueEmail('duala'), uniqueName('DualIdentifierA'))
     const { body } = await registerPending(uniqueEmail('dualb'), uniqueName('DualIdentifierB'))
     assert(!!body.pendingRegistrationId, 'setup: B registration did not return a pendingRegistrationId')
     seedDualB = { pendingRegistrationId: body.pendingRegistrationId }
@@ -333,7 +344,7 @@ try {
   await check('[dual-identifier] status endpoint with BOTH a valid token (A) and a raw id (B) resolves to A, never B', async () => {
     const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/registration-verification-status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: seedDualA!.token, pendingRegistrationId: seedDualB!.pendingRegistrationId }),
+      body: JSON.stringify({ verificationLocator: seedDualA!.locator, pendingRegistrationId: seedDualB!.pendingRegistrationId }),
     })
     const body: any = await res.json()
     assert(res.status === 200 && body.ok === true && body.status === 'valid', `expected a valid status resolving to A, got ${JSON.stringify(body)}`)
@@ -343,7 +354,7 @@ try {
     // request resolved to the same row as the token-only request would.
     const soloRes = await fetch(`http://127.0.0.1:${backendPort}/api/auth/registration-verification-status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: seedDualA!.token }),
+      body: JSON.stringify({ verificationLocator: seedDualA!.locator }),
     })
     const soloBody: any = await soloRes.json()
     assert(body.maskedEmail === soloBody.maskedEmail, `dual-field request should resolve to the SAME row as a token-only request, got ${body.maskedEmail} vs ${soloBody.maskedEmail}`)
@@ -351,7 +362,7 @@ try {
   await check('[dual-identifier] verify endpoint with BOTH fields: B\'s raw id is never used — submitting A\'s code succeeds (proves A was the resolved target, not B)', async () => {
     const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: seedDualA!.token, pendingRegistrationId: seedDualB!.pendingRegistrationId, code: seedDualA!.code, rememberMe: false }),
+      body: JSON.stringify({ verificationLocator: seedDualA!.locator, pendingRegistrationId: seedDualB!.pendingRegistrationId, code: seedDualA!.code, rememberMe: false }),
     })
     const body: any = await res.json()
     assert(res.status === 200 && body.ok === true && !!body.session, `expected A's code to activate A's registration (token took precedence over the co-supplied raw id for B), got ${JSON.stringify(body)}`)
@@ -371,7 +382,7 @@ try {
     try {
       const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/registration-verification-status`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ verificationToken: 'A'.repeat(600_000) }),
+        body: JSON.stringify({ verificationLocator: 'A'.repeat(600_000) }),
       })
       status = res.status
     } catch {
@@ -391,26 +402,26 @@ try {
   await check('[hardening] invalid base64url token is rejected with a controlled 400, not a crash', async () => {
     const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/registration-verification-status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: '!!!not-valid-base64url-at-all!!!***???' }),
+      body: JSON.stringify({ verificationLocator: '!!!not-valid-base64url-at-all!!!***???' }),
     })
     assert(res.status === 400, `expected a controlled 400 for an invalid-base64url token, got ${res.status}`)
   })
-  await check('[hardening] non-string verificationToken field (number) is rejected with a controlled 400, not a crash', async () => {
+  await check('[hardening] non-string verificationLocator field (number) is rejected with a controlled 400, not a crash', async () => {
     const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/registration-verification-status`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: 12345 }),
+      body: JSON.stringify({ verificationLocator: 12345 }),
     })
     assert(res.status === 400, `expected a controlled 400 for a non-string token field, got ${res.status}`)
   })
   await check('[hardening] expired token cannot be used to mutate state via verify (state-changing action blocked before any authStore call)', async () => {
     const mod = await import(new URL('../server/src/auth/registrationVerificationLinkToken.ts', import.meta.url).href)
     const { body: freshBody } = await registerPending(uniqueEmail('expmutate'), uniqueName('ExpiredMutateGuard'))
-    const expiredToken: string = mod.createRegistrationVerificationToken(EMAIL_VERIFICATION_SECRET, freshBody.pendingRegistrationId, '2000-01-01T00:00:00.000Z')
+    const expiredLocator: string = mod.createRegistrationVerificationLocator(EMAIL_VERIFICATION_SECRET, freshBody.pendingRegistrationId, '2000-01-01T00:00:00.000Z')
     const rowBefore = getPendingRow(freshBody.pendingRegistrationId)
     const code = recoverVerificationCode(rowBefore.code_hash)
     const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: expiredToken, code, rememberMe: true }),
+      body: JSON.stringify({ verificationLocator: expiredLocator, code, rememberMe: true }),
     })
     assert(res.status === 410, `expected 410 for an expired token on verify, got ${res.status}`)
     const rowAfter = getPendingRow(freshBody.pendingRegistrationId)
@@ -418,10 +429,10 @@ try {
     assert(rowAfter.code_hash === rowBefore.code_hash, 'expired-token verify attempt must not touch the row at all')
   })
   await check('[hardening] tampered token never reaches an authStore mutation via resend', async () => {
-    const tampered = seedAB!.token.slice(0, -8) + 'BBBBBBBB'
+    const tampered = seedAB!.locator.slice(0, -8) + 'BBBBBBBB'
     const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/resend-registration-code`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: tampered }),
+      body: JSON.stringify({ verificationLocator: tampered }),
     })
     assert(res.status === 400, `expected a controlled 400 for a tampered token on resend, got ${res.status}`)
   })
@@ -477,14 +488,14 @@ try {
   // ═══════════════════════════════════════════════════════════════════
   // rememberMe=false — non-persistent session, per existing server behavior.
   // ═══════════════════════════════════════════════════════════════════
-  let seedRM = null as Awaited<ReturnType<typeof registerAndBuildToken>> | null
+  let seedRM = null as Awaited<ReturnType<typeof registerAndBuildLocator>> | null
   await check('[rememberMe=false setup] register a pending registration', async () => {
-    seedRM = await registerAndBuildToken(uniqueEmail('rmfalse'), uniqueName('RememberFalseName'))
+    seedRM = await registerAndBuildLocator(uniqueEmail('rmfalse'), uniqueName('RememberFalseName'))
   })
   const contextRM = await browser.newContext()
   const pageRM = await contextRM.newPage()
   await check('[rememberMe=false] unchecking "Запомни ме" sends explicit rememberMe:false and yields a non-persistent cookie', async () => {
-    await openVerifyPageWithToken(pageRM, seedRM!.token)
+    await openVerifyPageWithLocator(pageRM, seedRM!.locator)
     const checkbox = pageRM.locator('[data-verify-page-remember-me="1"]')
     await checkbox.waitFor({ state: 'visible', timeout: 10_000 })
     await checkbox.uncheck()
@@ -516,7 +527,7 @@ try {
   const contextK = await browser.newContext()
   const pageK = await contextK.newPage()
   await check('[K] reopening an already-consumed (verified) link shows the NEUTRAL inactive state, not a confident "already verified" claim', async () => {
-    await openVerifyPageWithToken(pageK, seedAB!.token) // seedAB's row was consumed by the earlier successful verify
+    await openVerifyPageWithLocator(pageK, seedAB!.locator) // seedAB's row was consumed by the earlier successful verify
     await pageK.locator('text=вече не е активна').waitFor({ state: 'visible', timeout: 10_000 })
     const bodyText = await pageK.locator('#app').textContent() ?? ''
     assert(!bodyText.includes('вече е потвърдена'), 'must NOT categorically claim "already verified" when the only evidence is valid-token+missing-row')
@@ -532,15 +543,15 @@ try {
   // must ALSO show the neutral inactive state, not "already verified" and
   // not "expired" (the token itself is not yet expired).
   // ═══════════════════════════════════════════════════════════════════
-  let seedCancelled: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
+  let seedCancelled: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
   await check('[missing-row-before-expiry setup] register, then delete the row directly (simulating cancel-pending-registration) while the token is still non-expired', async () => {
-    seedCancelled = await registerAndBuildToken(uniqueEmail('cancelled'), uniqueName('CancelledLinkName'))
+    seedCancelled = await registerAndBuildLocator(uniqueEmail('cancelled'), uniqueName('CancelledLinkName'))
     deletePendingRow(seedCancelled.pendingRegistrationId)
   })
   const contextCancelled = await browser.newContext()
   const pageCancelled = await contextCancelled.newPage()
   await check('[missing-row-before-expiry] valid non-expired token + missing row shows the neutral inactive state, NOT "expired" and NOT "already verified"', async () => {
-    await openVerifyPageWithToken(pageCancelled, seedCancelled!.token)
+    await openVerifyPageWithLocator(pageCancelled, seedCancelled!.locator)
     await pageCancelled.locator('text=вече не е активна').waitFor({ state: 'visible', timeout: 10_000 })
     const bodyText = await pageCancelled.locator('#app').textContent() ?? ''
     assert(!bodyText.includes('Времето за потвърждение'), 'a non-expired token with a missing row must not show the EXPIRED state')
@@ -553,16 +564,16 @@ try {
   // purely from the AUTHENTICATED expiresAt inside the token — even if the
   // row is ALSO physically deleted (proves no DB lookup is even attempted).
   // ═══════════════════════════════════════════════════════════════════
-  let seedExpired: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
-  await check('[E setup] register, then build a token whose AUTHENTICATED expiresAt is already in the past, then physically delete the row too', async () => {
+  let seedExpired: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
+  await check('[E setup] register, then build a locator whose AUTHENTICATED expiresAt is already in the past, then physically delete the row too', async () => {
     const { body } = await registerPending(uniqueEmail('exp'), uniqueName('ExpiredLinkName'))
     assert(!!body.pendingRegistrationId, 'register did not return a pendingRegistrationId')
     const pastExpiresAt = '2000-01-01T00:00:00.000Z'
-    // Token's authenticated expiresAt is fixed at issuance — build it here
-    // with an already-past timestamp (mirroring what a real 24h-old link
-    // would carry), independent of whatever the DB row's expires_at says.
-    const token = await buildRealVerificationToken(body.pendingRegistrationId, pastExpiresAt)
-    seedExpired = { pendingRegistrationId: body.pendingRegistrationId, token, code: '', expiresAt: pastExpiresAt }
+    // The locator's authenticated expiresAt is fixed at issuance — build it
+    // here with an already-past timestamp (mirroring what a real 24h-old
+    // link would carry), independent of whatever the DB row's expires_at says.
+    const locator = await buildRealVerificationLocator(body.pendingRegistrationId, pastExpiresAt)
+    seedExpired = { pendingRegistrationId: body.pendingRegistrationId, locator, code: '', expiresAt: pastExpiresAt, normalizedEmail: '' }
     forceExpirePending(body.pendingRegistrationId)
     // Physically delete the row too — proves the EXPIRED state does not
     // depend on row presence at all (decided purely from the token).
@@ -572,7 +583,7 @@ try {
   const contextE = await browser.newContext()
   const pageE = await contextE.newPage()
   await check('[E] expired token shows the explicit 24h expired message even though the row is physically deleted, mentions email reuse, offers new registration', async () => {
-    await openVerifyPageWithToken(pageE, seedExpired!.token)
+    await openVerifyPageWithLocator(pageE, seedExpired!.locator)
     await pageE.locator('text=Времето за потвърждение').waitFor({ state: 'visible', timeout: 10_000 })
     const bodyText = await pageE.locator('body').textContent() ?? ''
     assert(bodyText.includes('24 часа') || bodyText.includes('24'), 'expected explicit 24h wording in the expired state')
@@ -600,7 +611,7 @@ try {
   const contextF = await browser.newContext()
   const pageF = await contextF.newPage()
   await check('[F] invalid/garbage token shows the invalid-link state, no enumeration leak', async () => {
-    await openVerifyPageWithToken(pageF, 'not-a-real-encrypted-token-at-all')
+    await openVerifyPageWithLocator(pageF, 'not-a-real-encrypted-token-at-all')
     await pageF.locator('text=Невалиден линк').waitFor({ state: 'visible', timeout: 10_000 })
     const rootText = await pageF.locator('#app').textContent() ?? ''
     const emailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/
@@ -609,17 +620,20 @@ try {
   await contextF.close()
 
   // ═══════════════════════════════════════════════════════════════════
-  // G/H/O — Resend generates a valid token for the SAME pending
-  // registration and the SAME expiresAt (never extended).
+  // G/H/O — Resend generates a valid locator for the SAME pending
+  // registration and the SAME expiresAt (never extended). PUBLIC LOCATOR
+  // model — resend now REQUIRES the registration email to match too (see
+  // the explicit THREAT MODEL section near the end of this file for the
+  // locator-alone-denied / wrong-email-denied coverage).
   // ═══════════════════════════════════════════════════════════════════
-  let seedResend: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
-  await check('[G/H/O setup] register, force resend cooldown elapsed, then resend', async () => {
-    seedResend = await registerAndBuildToken(uniqueEmail('resend'), uniqueName('ResendLinkName'))
+  let seedResend: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
+  await check('[G/H/O setup] register, force resend cooldown elapsed, then resend WITH the correct registration email', async () => {
+    seedResend = await registerAndBuildLocator(uniqueEmail('resend'), uniqueName('ResendLinkName'))
     directDb((db) => db.prepare(`UPDATE pending_registrations SET last_code_sent_at = '2000-01-01T00:00:00.000Z' WHERE pending_registration_id = ?`).run(seedResend!.pendingRegistrationId))
 
     const resendRes = await fetch(`http://127.0.0.1:${backendPort}/api/auth/resend-registration-code`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ verificationToken: seedResend.token }),
+      body: JSON.stringify({ verificationLocator: seedResend.locator, email: seedResend.normalizedEmail }),
     })
     const resendBody: any = await resendRes.json()
     assert(
@@ -637,7 +651,7 @@ try {
   const contextGH = await browser.newContext()
   const pageGH = await contextGH.newPage()
   await check('[G/H] the ORIGINAL token (built before resend) still opens the SAME valid verification page and activates with the resent code', async () => {
-    await openVerifyPageWithToken(pageGH, seedResend!.token)
+    await openVerifyPageWithLocator(pageGH, seedResend!.locator)
     await pageGH.locator('[data-verify-page-code-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
     const codeAfterResend = recoverVerificationCode(getPendingRow(seedResend!.pendingRegistrationId).code_hash)
     await pageGH.locator('[data-verify-page-code-input="1"]').fill(codeAfterResend)
@@ -651,18 +665,101 @@ try {
   await contextGH.close()
 
   // ═══════════════════════════════════════════════════════════════════
+  // Resend UI flow — clicking "Изпрати нов код" no longer resends directly;
+  // it transitions to an email-confirmation step (resendConfirmEmail phase).
+  // Drives the REAL dedicated page UI, real HTTP round trip.
+  // ═══════════════════════════════════════════════════════════════════
+  let seedResendUi: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
+  await check('[resend UI setup] register a pending registration for the resend-confirm-email UI scenario', async () => {
+    seedResendUi = await registerAndBuildLocator(uniqueEmail('resendui'), uniqueName('ResendUiName'))
+    directDb((db) => db.prepare(`UPDATE pending_registrations SET last_code_sent_at = '2000-01-01T00:00:00.000Z' WHERE pending_registration_id = ?`).run(seedResendUi!.pendingRegistrationId))
+  })
+  const contextResendUi = await browser.newContext()
+  const pageResendUi = await contextResendUi.newPage()
+  await check('[resend UI] clicking "Изпрати нов код" shows an email-confirmation step, NOT an immediate resend', async () => {
+    await openVerifyPageWithLocator(pageResendUi, seedResendUi!.locator)
+    await pageResendUi.locator('[data-verify-page-resend="1"]').waitFor({ state: 'visible', timeout: 10_000 })
+    await pageResendUi.locator('[data-verify-page-resend="1"]').click()
+    await pageResendUi.locator('[data-verify-page-resend-email-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
+  })
+  await check('[resend UI] wrong email is denied with a visible error, still on the confirmation step', async () => {
+    await pageResendUi.locator('[data-verify-page-resend-email-input="1"]').fill('definitely-not-the-right-email@example.test')
+    await pageResendUi.locator('[data-verify-page-resend-confirm-form="1"]').evaluate((form: HTMLFormElement) => form.requestSubmit())
+    await pageResendUi.locator('[data-verify-page-error="1"]').waitFor({ state: 'visible', timeout: 10_000 })
+    const errorText = await pageResendUi.locator('[data-verify-page-error="1"]').textContent()
+    assert(!!errorText && errorText.trim().length > 0, 'expected a visible error for the wrong resend email')
+    const stillOnConfirmStep = await pageResendUi.locator('[data-verify-page-resend-email-input="1"]').isVisible().catch(() => false)
+    assert(stillOnConfirmStep, 'wrong email must keep the user on the resend-confirm step, not silently advance')
+  })
+  await check('[resend UI] the CORRECT registration email succeeds and returns to the code form', async () => {
+    const [resendResponse] = await Promise.all([
+      pageResendUi.waitForResponse((res) => res.url().includes('/api/auth/resend-registration-code') && res.request().method() === 'POST'),
+      (async () => {
+        await pageResendUi.locator('[data-verify-page-resend-email-input="1"]').fill(seedResendUi!.normalizedEmail)
+        await pageResendUi.locator('[data-verify-page-resend-confirm-form="1"]').evaluate((form: HTMLFormElement) => form.requestSubmit())
+      })(),
+    ])
+    const requestBody = resendResponse.request().postDataJSON() as { verificationLocator?: unknown; email?: unknown }
+    assert(typeof requestBody.verificationLocator === 'string' && requestBody.verificationLocator.length > 0, 'expected the resend request to carry verificationLocator')
+    assert(requestBody.email === seedResendUi!.normalizedEmail, `expected the resend request to carry the submitted email, got ${JSON.stringify(requestBody.email)}`)
+    assert(
+      resendResponse.status() === 200 || resendResponse.status() === 503,
+      `expected the resend response to be 200 (real delivery) or 503 EMAIL_DELIVERY_FAILED (this sandbox has no Brevo key), got ${resendResponse.status()}`,
+    )
+
+    // This sandbox has no BREVO_API_KEY configured (by design, see the header
+    // comment) — the server still regenerates the code (authStore mutates
+    // BEFORE attempting delivery) but the HTTP response is 503
+    // EMAIL_DELIVERY_FAILED (ok:false), same as every other resend/register
+    // path in this suite. The UI therefore stays on the confirm-email step
+    // showing that error, which is CORRECT production behavior too (a real
+    // Brevo outage must not silently claim success). We assert on the real
+    // observable proof that the mutation happened server-side regardless
+    // (code_hash rotated) rather than requiring a real email provider here.
+    const rowAfterResend = getPendingRow(seedResendUi!.pendingRegistrationId)
+    const newCode = recoverVerificationCode(rowAfterResend.code_hash)
+    assert(newCode !== seedResendUi!.code, 'expected the resend to have rotated the code server-side even though email delivery failed in this sandbox')
+
+    const codeInputVisible = await pageResendUi.locator('[data-verify-page-code-input="1"]').isVisible({ timeout: 3_000 }).catch(() => false)
+    if (codeInputVisible) {
+      // Real Brevo delivery succeeded in this environment — drive the normal UI path.
+      await pageResendUi.locator('[data-verify-page-code-input="1"]').fill(newCode)
+      await pageResendUi.locator('[data-verify-page-form="1"]').evaluate((form: HTMLFormElement) => form.requestSubmit())
+    } else {
+      // Expected sandbox path: 503 shown on the confirm-email step. Confirm
+      // the error is visible, then complete verification directly with the
+      // (server-side, already rotated) new code — proving the resent code is
+      // real and usable, independent of this sandbox's lack of a mail provider.
+      await pageResendUi.locator('[data-verify-page-error="1"]').waitFor({ state: 'visible', timeout: 10_000 })
+      const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ verificationLocator: seedResendUi!.locator, code: newCode, rememberMe: false }),
+      })
+      const body: any = await res.json()
+      assert(res.status === 200 && body.ok === true, `expected the server-side-rotated resend code to verify successfully, got ${JSON.stringify(body)}`)
+      return
+    }
+    await pageResendUi.waitForURL(/\/lobby/, { timeout: 15_000 }).catch(() => {})
+    const sawSuccessOrLobby =
+      pageResendUi.url().includes('/lobby') ||
+      (await pageResendUi.locator('text=✅').isVisible().catch(() => false))
+    assert(sawSuccessOrLobby, `expected the resent code (via the UI email-confirm flow) to activate the registration, got url=${pageResendUi.url()}`)
+  })
+  await contextResendUi.close()
+
+  // ═══════════════════════════════════════════════════════════════════
   // J — MODEL A: a completely fresh/different browser context (no prior
   // cookies/state) with the valid link + correct code succeeds at
   // activation — this IS the confirmed product decision, not a bug.
   // ═══════════════════════════════════════════════════════════════════
-  let seedFreshDevice: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
+  let seedFreshDevice: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
   await check('[J setup] register a pending registration for the "fresh device" scenario', async () => {
-    seedFreshDevice = await registerAndBuildToken(uniqueEmail('freshdev'), uniqueName('FreshDeviceName'))
+    seedFreshDevice = await registerAndBuildLocator(uniqueEmail('freshdev'), uniqueName('FreshDeviceName'))
   })
   const contextJ = await browser.newContext() // brand new context, no cookies, no prior state
   const pageJ = await contextJ.newPage()
   await check('[J / MODEL A] a completely fresh browser context (no prior cookies/state) can still activate the registration with the valid link + correct code', async () => {
-    await openVerifyPageWithToken(pageJ, seedFreshDevice!.token)
+    await openVerifyPageWithLocator(pageJ, seedFreshDevice!.locator)
     await pageJ.locator('[data-verify-page-code-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
     await pageJ.locator('[data-verify-page-code-input="1"]').fill(seedFreshDevice!.code)
     await pageJ.locator('[data-verify-page-form="1"]').evaluate((form: HTMLFormElement) => form.requestSubmit())
@@ -705,11 +802,11 @@ try {
   // DISPLAY_NAME_TAKEN recovery from the dedicated page (§8), without
   // exposing the raw pendingRegistrationId.
   // ═══════════════════════════════════════════════════════════════════
-  let seedTakenName: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
+  let seedTakenName: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
   const takenDisplayName = uniqueName('TakenDisplayName')
   await check('[display-name-taken setup] register a FIRST account that owns a display name, then a SECOND pending registration that will collide on verify', async () => {
     // First registration reserves the display name by fully verifying.
-    const first = await registerAndBuildToken(uniqueEmail('taken-owner'), takenDisplayName)
+    const first = await registerAndBuildLocator(uniqueEmail('taken-owner'), takenDisplayName)
     const verifyRes = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ pendingRegistrationId: first.pendingRegistrationId, code: first.code, rememberMe: false }),
@@ -722,20 +819,20 @@ try {
     // the legacy/unreserved-name race the task explicitly calls out as
     // still reachable ("still possible for legacy/unreserved pending
     // registrations").
-    seedTakenName = await registerAndBuildToken(uniqueEmail('taken-challenger'), uniqueName('TempNameBeforeCollision'))
+    seedTakenName = await registerAndBuildLocator(uniqueEmail('taken-challenger'), uniqueName('TempNameBeforeCollision'))
     directDb((db) => db.prepare('UPDATE pending_registrations SET display_name = ? WHERE pending_registration_id = ?').run(takenDisplayName, seedTakenName!.pendingRegistrationId))
   })
 
   const contextTaken = await browser.newContext()
   const pageTaken = await contextTaken.newPage()
   await check('[display-name-taken] submitting the correct code with a colliding display name shows the recovery form, not a dead-end', async () => {
-    await openVerifyPageWithToken(pageTaken, seedTakenName!.token)
+    await openVerifyPageWithLocator(pageTaken, seedTakenName!.locator)
     await pageTaken.locator('[data-verify-page-code-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
     await pageTaken.locator('[data-verify-page-code-input="1"]').fill(seedTakenName!.code)
     await pageTaken.locator('[data-verify-page-form="1"]').evaluate((form: HTMLFormElement) => form.requestSubmit())
     await pageTaken.locator('[data-verify-page-display-name-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
   })
-  await check('[display-name-taken] choosing a new name recovers and completes verification, still without exposing the raw pendingRegistrationId in the URL', async () => {
+  await check('[display-name-taken] choosing a new name recovers and completes verification, still without exposing the raw pendingRegistrationId in the URL — and the update request is CODE-authorized, not locator-alone', async () => {
     const newName = uniqueName('RecoveredName')
     const [updateRequest] = await Promise.all([
       pageTaken.waitForRequest((req) => req.url().includes('/api/auth/update-pending-registration-display-name') && req.method() === 'POST'),
@@ -744,9 +841,24 @@ try {
         await pageTaken.locator('[data-verify-page-display-name-form="1"]').evaluate((form: HTMLFormElement) => form.requestSubmit())
       })(),
     ])
-    const requestBody = updateRequest.postDataJSON() as { verificationToken?: unknown; pendingRegistrationId?: unknown }
-    assert(typeof requestBody.verificationToken === 'string' && requestBody.verificationToken.length > 0, 'expected the recovery form to submit via verificationToken, not a raw id')
+    const requestBody = updateRequest.postDataJSON() as { verificationLocator?: unknown; pendingRegistrationId?: unknown; code?: unknown }
+    assert(typeof requestBody.verificationLocator === 'string' && requestBody.verificationLocator.length > 0, 'expected the recovery form to submit via verificationLocator, not a raw id')
     assert(requestBody.pendingRegistrationId === undefined, 'recovery form must not send a raw pendingRegistrationId')
+    // PUBLIC LOCATOR model — the update MUST carry the proven code too
+    // (locator alone is not authorization for this mutation, see the
+    // explicit THREAT MODEL section near the end of this file).
+    assert(requestBody.code === seedTakenName!.code, `expected the update request to carry the already-proven code, got ${JSON.stringify(requestBody.code)}`)
+
+    // Security hygiene: the code must never be persisted to browser storage —
+    // only held in transient JS state.
+    const storageLeak = await pageTaken.evaluate(() => {
+      const haystacks: string[] = []
+      for (let i = 0; i < localStorage.length; i++) { const k = localStorage.key(i); if (k) haystacks.push(localStorage.getItem(k) ?? '') }
+      for (let i = 0; i < sessionStorage.length; i++) { const k = sessionStorage.key(i); if (k) haystacks.push(sessionStorage.getItem(k) ?? '') }
+      return haystacks
+    })
+    assert(!storageLeak.some((v) => v.includes(seedTakenName!.code)), 'the verification code must never be written to localStorage/sessionStorage')
+    assert(!pageTaken.url().includes(seedTakenName!.code), 'the verification code must never appear in the URL')
 
     await pageTaken.locator('[data-verify-page-code-input="1"]').waitFor({ state: 'visible', timeout: 10_000 })
     await pageTaken.locator('[data-verify-page-code-input="1"]').fill(seedTakenName!.code)
@@ -763,14 +875,14 @@ try {
   // ═══════════════════════════════════════════════════════════════════
   // L — Mobile viewport usability.
   // ═══════════════════════════════════════════════════════════════════
-  let seedMobile: Awaited<ReturnType<typeof registerAndBuildToken>> | null = null
+  let seedMobile: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
   await check('[L setup] register a pending registration for the mobile viewport scenario', async () => {
-    seedMobile = await registerAndBuildToken(uniqueEmail('mobile'), uniqueName('MobileLinkName'))
+    seedMobile = await registerAndBuildLocator(uniqueEmail('mobile'), uniqueName('MobileLinkName'))
   })
   const contextMobile = await browser.newContext({ viewport: { width: 390, height: 844 } })
   const pageMobile = await contextMobile.newPage()
   await check('[L] mobile viewport (390x844): input/button visible, no horizontal overflow, focus retained', async () => {
-    await openVerifyPageWithToken(pageMobile, seedMobile!.token)
+    await openVerifyPageWithLocator(pageMobile, seedMobile!.locator)
     const codeInput = pageMobile.locator('[data-verify-page-code-input="1"]')
     await codeInput.waitFor({ state: 'visible', timeout: 10_000 })
     const submitBtn = pageMobile.locator('[data-verify-page-submit="1"]')
@@ -783,6 +895,123 @@ try {
     assert((await codeInput.inputValue()) === '1', 'typed value not reflected on mobile viewport')
   })
   await contextMobile.close()
+
+  // ═══════════════════════════════════════════════════════════════════
+  // THREAT MODEL — explicit, dedicated proof that ATTACKER HAS ONLY THE
+  // LOCATOR (e.g. it leaked via a Brevo click-tracking log, nginx access
+  // log, or browser history — none of that is a secret anymore under the
+  // PUBLIC LOCATOR model). With locator alone, the attacker must NOT be
+  // able to:
+  //   A. verify the registration
+  //   B. create a session
+  //   C. update the pending display name
+  //   D. cancel the pending registration
+  //   E. resend / rotate the verification code
+  // Every sub-check below hits the REAL HTTP endpoint with a REAL, valid,
+  // non-expired locator and NOTHING else (no code, no email, no session) —
+  // this is the primary acceptance criterion for the whole redesign.
+  // ═══════════════════════════════════════════════════════════════════
+  console.log('\n--- THREAT MODEL: attacker has ONLY the locator ---')
+
+  let seedThreat: Awaited<ReturnType<typeof registerAndBuildLocator>> | null = null
+  await check('[threat-model setup] register a fresh pending registration; the "attacker" below only ever uses its locator, never its code/email', async () => {
+    seedThreat = await registerAndBuildLocator(uniqueEmail('threat'), uniqueName('ThreatModelName'))
+  })
+
+  await check('[threat-model A] locator alone CANNOT verify the registration (missing code)', async () => {
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator, rememberMe: true }),
+    })
+    const body: any = await res.json()
+    assert(body.ok !== true, `expected verify to be denied without a code, got ${JSON.stringify(body)}`)
+    assert(getPendingRow(seedThreat!.pendingRegistrationId) !== undefined, 'the pending row must NOT be consumed by a code-less verify attempt')
+  })
+
+  await check('[threat-model A/B] locator + WRONG code CANNOT verify or create a session', async () => {
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator, code: '000000', rememberMe: true }),
+    })
+    assert(res.headers.get('set-cookie') === null, 'a wrong code must never set a session cookie')
+    const body: any = await res.json()
+    assert(body.ok !== true && body.session === undefined, `expected denial with no session, got ${JSON.stringify(body)}`)
+  })
+
+  await check('[threat-model C] locator alone CANNOT update the pending display name (missing code) — the row keeps its ORIGINAL display name', async () => {
+    const rowBefore = getPendingRow(seedThreat!.pendingRegistrationId)
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/update-pending-registration-display-name`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator, displayName: uniqueName('AttackerChosenName') }),
+    })
+    assert(res.status === 400, `expected a controlled 400 for a code-less display-name update, got ${res.status}`)
+    const body: any = await res.json()
+    assert(body.ok !== true, `expected ok:false for a code-less display-name update, got ${JSON.stringify(body)}`)
+    const rowAfter = getPendingRow(seedThreat!.pendingRegistrationId)
+    assert(rowAfter.display_name === rowBefore.display_name, 'the display name must be UNCHANGED after a locator-alone update attempt')
+  })
+
+  await check('[threat-model C] locator + WRONG code ALSO cannot update the display name', async () => {
+    const rowBefore = getPendingRow(seedThreat!.pendingRegistrationId)
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/update-pending-registration-display-name`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator, code: '111111', displayName: uniqueName('AttackerChosenName2') }),
+    })
+    const body: any = await res.json()
+    assert(body.ok !== true, `expected denial for a wrong-code display-name update, got ${JSON.stringify(body)}`)
+    const rowAfter = getPendingRow(seedThreat!.pendingRegistrationId)
+    assert(rowAfter.display_name === rowBefore.display_name, 'the display name must remain UNCHANGED after a wrong-code update attempt')
+  })
+
+  await check('[threat-model D] locator has NO field/path to cancel the pending registration — the cancel endpoint only ever accepts pendingRegistrationId, which the attacker (locator-only) does not have', async () => {
+    // The attacker's ONLY asset is the opaque locator string — submitting it
+    // in the pendingRegistrationId field (the only field this endpoint reads)
+    // proves it is not accepted as a valid identifier there: the endpoint is
+    // deliberately idempotent/best-effort (ok:true either way, per its own
+    // "не разкрива дали редът съществуваше" contract), so the REAL proof is
+    // that the row survives untouched.
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/cancel-pending-registration`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pendingRegistrationId: seedThreat!.locator }),
+    })
+    assert(res.status === 200, `cancel endpoint should respond 200 (idempotent contract), got ${res.status}`)
+    const rowAfter = getPendingRow(seedThreat!.pendingRegistrationId)
+    assert(rowAfter !== undefined, 'the pending row must survive — the locator string is not a valid pendingRegistrationId, so nothing was cancelled')
+  })
+
+  await check('[threat-model E] locator alone CANNOT resend/rotate the code (missing email) — the code_hash is unchanged', async () => {
+    const rowBefore = getPendingRow(seedThreat!.pendingRegistrationId)
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/resend-registration-code`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator }),
+    })
+    assert(res.status === 400, `expected a controlled 400 for an email-less resend, got ${res.status}`)
+    const body: any = await res.json()
+    assert(body.ok !== true, `expected ok:false for an email-less resend, got ${JSON.stringify(body)}`)
+    const rowAfter = getPendingRow(seedThreat!.pendingRegistrationId)
+    assert(rowAfter.code_hash === rowBefore.code_hash, 'code_hash must be UNCHANGED after a locator-alone resend attempt — the original code must still work')
+  })
+
+  await check('[threat-model E] locator + WRONG email ALSO cannot resend/rotate the code', async () => {
+    const rowBefore = getPendingRow(seedThreat!.pendingRegistrationId)
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/resend-registration-code`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator, email: 'guessed-wrong-email@example.test' }),
+    })
+    const body: any = await res.json()
+    assert(body.ok !== true, `expected denial for a wrong-email resend, got ${JSON.stringify(body)}`)
+    const rowAfter = getPendingRow(seedThreat!.pendingRegistrationId)
+    assert(rowAfter.code_hash === rowBefore.code_hash, 'code_hash must remain UNCHANGED after a wrong-email resend attempt')
+  })
+
+  await check('[threat-model / control] the ORIGINAL code — never rotated by any of the above denied attempts — still verifies successfully (proves the denials were real no-ops, not silent partial mutations)', async () => {
+    const res = await fetch(`http://127.0.0.1:${backendPort}/api/auth/verify-registration-email`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verificationLocator: seedThreat!.locator, code: seedThreat!.code, rememberMe: false }),
+    })
+    const body: any = await res.json()
+    assert(res.status === 200 && body.ok === true && !!body.session, `expected the untouched original code to still activate the registration, got ${JSON.stringify(body)}`)
+  })
 
   console.log('\n' + '═'.repeat(72))
   console.log(`Passed: ${passed}  Failed: ${failed}`)

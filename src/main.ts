@@ -110,7 +110,7 @@ import {
   type ResetPasswordScreenState,
 } from './app/passwordReset/renderResetPasswordScreen'
 import {
-  extractAndClearVerificationToken,
+  extractAndClearVerificationLocator,
   renderRegistrationVerificationPage,
   type RegistrationVerificationPageState,
 } from './app/registrationVerification/renderRegistrationVerificationPage'
@@ -128,17 +128,19 @@ const _isResetPasswordPath = window.location.pathname === '/reset-password'
 // Email → dedicated registration verification page (§"EMAIL → DIRECT
 // REGISTRATION VERIFICATION PAGE") — mirror на _isResetPasswordPath pattern-а.
 const _isVerifyRegistrationPath = window.location.pathname === '/verify-registration'
-// §"URL FORMAT"/"execution order" — token-ът пътува в URL FRAGMENT
-// (#token=...), НЕ query string (fragment никога не стига до сървъра: nginx
-// access log, Referer header при самия GET за страницата). Extract-ва се и
-// СЕ ИЗЧИСТВА ОТ ADDRESS BAR-А тук, на най-ранната възможна точка на route
-// bootstrap-а — ПРЕДИ mountConsentUi()/initializeAnalytics() (виж extreme
-// края на тоя файл), за да няма никакъв прозорец, в който Meta Pixel-овия
-// автоматичен PageView (fbq('track','PageView'), чете document.location.href)
-// би могъл да види token-а в URL-а. Token-ът пази се само в тази локална
-// променлива — никъде другаде (нито global state, нито re-derive-ва се от
-// URL по-късно, защото URL-ът вече е изчистен).
-const _verifyRegistrationToken = _isVerifyRegistrationPath ? extractAndClearVerificationToken() : null
+// §"PUBLIC LOCATOR" (revised design) — locator-ът пътува в URL QUERY string
+// (?verification=...), НЕ fragment (query е по-устойчив при email
+// click-tracking redirect chains). Extract-ва се и СЕ ИЗЧИСТВА ОТ ADDRESS
+// BAR-А тук, на най-ранната възможна точка на route bootstrap-а — ПРЕДИ
+// mountConsentUi()/initializeAnalytics() (виж края на тоя файл) — hygiene
+// (за да няма прозорец, в който Meta Pixel-овия автоматичен PageView
+// (fbq('track','PageView'), чете document.location.href) би могъл да види
+// locator-а в URL-а), НЕ security dependency: locator-ът е ПУБЛИЧЕН
+// identifier, possession alone не дава никаква capability (виж
+// registrationVerificationLinkToken.ts doc коментара). Locator-ът пази се
+// само в тази локална променлива — никъде другаде (нито global state, нито
+// re-derive-ва се от URL по-късно, защото URL-ът вече е изчистен).
+const _verifyRegistrationLocator = _isVerifyRegistrationPath ? extractAndClearVerificationLocator() : null
 // Комбиниран guard за ВСИЧКИ "dedicated standalone page, не нормалния lobby
 // bootstrap" пътища — всеки съществуващ _isResetPasswordPath gate по-долу се
 // разширява с този флаг наведнъж (не поотделно за всеки dedicated route),
@@ -8024,14 +8026,14 @@ if (_isResetPasswordPath) {
   _renderReset()
 } else if (_isVerifyRegistrationPath) {
   // Email → dedicated registration verification page (§"EMAIL → DIRECT
-  // REGISTRATION VERIFICATION PAGE"). §"PREFERRED TOKEN DESIGN" — само
-  // encrypted opaque verificationToken (НИКОГА raw pendingRegistrationId)
-  // пътува тук; token-ът вече е extract-нат и fragment-ът вече е изчистен от
-  // address bar-а на най-ранната точка на bootstrap-а (виж
-  // _verifyRegistrationToken const в началото на тоя файл).
-  const _verifyToken = _verifyRegistrationToken ?? ''
+  // REGISTRATION VERIFICATION PAGE"). §"PUBLIC LOCATOR" — encrypted opaque
+  // verificationLocator (НИКОГА raw pendingRegistrationId) пътува тук;
+  // locator-ът вече е extract-нат и query-то вече е изчистено от address
+  // bar-а на най-ранната точка на bootstrap-а (виж _verifyRegistrationLocator
+  // const в началото на тоя файл).
+  const _verifyLocator = _verifyRegistrationLocator ?? ''
 
-  let _verifyState: RegistrationVerificationPageState = _verifyToken
+  let _verifyState: RegistrationVerificationPageState = _verifyLocator
     ? { phase: 'loading' }
     : { phase: 'invalid' }
 
@@ -8086,6 +8088,13 @@ if (_isResetPasswordPath) {
       },
       onSubmitDisplayName: (displayName) => {
         if (_verifyState.phase !== 'displayName' || _verifyState.submitting) return
+        // PUBLIC LOCATOR модел — locator alone НЕ е достатъчен за display name
+        // update. `code`-ът е СЪЩИЯТ, вече доказан верен код от последния
+        // verify опит (виж onSubmitCode's DISPLAY_NAME_TAKEN branch по-долу) —
+        // captured тук (синхронно, преди reassignment-а долу) и пазен само в
+        // локална променлива/JS state, никога localStorage/sessionStorage/
+        // URL/console. Server-ът re-verify-ва го независимо (defense-in-depth).
+        const provenCode = _verifyState.code
         _verifyState = { ..._verifyState, submitting: true, errorText: null }
         _renderVerify()
         void (async () => {
@@ -8097,7 +8106,7 @@ if (_isResetPasswordPath) {
               method: 'POST',
               credentials: 'include',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ verificationToken: _verifyToken, displayName }),
+              body: JSON.stringify({ verificationLocator: _verifyLocator, code: provenCode, displayName }),
             })
             responseStatus = response.status
             responseBody = (await response.json()) as UpdateNameResponseBody
@@ -8152,7 +8161,7 @@ if (_isResetPasswordPath) {
               headers: { 'Content-Type': 'application/json' },
               // §"REMEMBER ME" — explicit true/false ВИНАГИ, никога разчитане
               // на server default (undefined !== false на сървъра).
-              body: JSON.stringify({ verificationToken: _verifyToken, code, rememberMe }),
+              body: JSON.stringify({ verificationLocator: _verifyLocator, code, rememberMe }),
             })
             responseStatus = response.status
             responseBody = (await response.json()) as VerifyCodeResponseBody
@@ -8210,10 +8219,12 @@ if (_isResetPasswordPath) {
             return
           }
           if (responseBody?.code === 'DISPLAY_NAME_TAKEN') {
-            // §8 "DISPLAY_NAME_TAKEN recovery" — не dead-end, mirror на
-            // старото popup поведение: inline форма за ново име, БЕЗ да
-            // разкриваме raw pendingRegistrationId (продължаваме да носим
-            // само _verifyToken).
+            // "DISPLAY_NAME_TAKEN recovery" — не dead-end, mirror на старото
+            // popup поведение: inline форма за ново име, БЕЗ да разкриваме
+            // raw pendingRegistrationId (продължаваме да носим само
+            // _verifyLocator). `code` вече е доказан верен ТУК (verify-ят
+            // мина code проверката, конфликтът е само на display_name), пазен
+            // в state за update-display-name-endpoint-а по-горе.
             _verifyState = {
               phase: 'displayName',
               maskedEmail: _verifyState.maskedEmail,
@@ -8237,43 +8248,93 @@ if (_isResetPasswordPath) {
           _renderVerify()
         })()
       },
+      // PUBLIC LOCATOR модел — locator alone вече НЕ е достатъчен за resend
+      // (би rotate-нал кода без authorization proof — виж final report-а
+      // "Resend" секцията). "Изпрати нов код" вече НЕ resend-ва directno —
+      // transitions към email-confirmation стъпката (resendConfirmEmail
+      // phase); реалният resend request се изпраща само от
+      // onSubmitResendEmail по-долу, СЪС submitted email.
       onResend: () => {
         if (_verifyState.phase !== 'form' || _verifyState.resending) return
-        _verifyState = { ..._verifyState, resending: true, errorText: null }
+        _verifyState = {
+          phase: 'resendConfirmEmail',
+          maskedEmail: _verifyState.maskedEmail,
+          expiresAt: _verifyState.expiresAt,
+          emailDraft: '',
+          errorText: null,
+          submitting: false,
+          code: _verifyState.code,
+          rememberMe: _verifyState.rememberMe,
+          resendAvailableAtMs: _verifyState.resendAvailableAtMs,
+        }
+        _renderVerify()
+      },
+      onResendEmailDraftChange: (email) => {
+        if (_verifyState.phase === 'resendConfirmEmail') {
+          _verifyState = { ..._verifyState, emailDraft: email }
+        }
+      },
+      onCancelResendConfirm: () => {
+        if (_verifyState.phase !== 'resendConfirmEmail') return
+        _verifyState = {
+          phase: 'form',
+          maskedEmail: _verifyState.maskedEmail,
+          expiresAt: _verifyState.expiresAt,
+          resendAvailableAtMs: _verifyState.resendAvailableAtMs,
+          nowMs: Date.now(),
+          code: _verifyState.code,
+          rememberMe: _verifyState.rememberMe,
+          errorText: null,
+          submitting: false,
+          resending: false,
+        }
+        _renderVerify()
+      },
+      onSubmitResendEmail: (email) => {
+        if (_verifyState.phase !== 'resendConfirmEmail' || _verifyState.submitting) return
+        _verifyState = { ..._verifyState, submitting: true, errorText: null }
         _renderVerify()
         void (async () => {
-          type ResendResponseBody = { ok: boolean; message?: string; maskedEmail?: string; expiresAt?: string }
+          type ResendResponseBody = { ok: boolean; code?: string; message?: string; maskedEmail?: string; expiresAt?: string }
           let responseBody: ResendResponseBody | null = null
           try {
             const response = await fetch(`${getApiBaseUrl()}/api/auth/resend-registration-code`, {
               method: 'POST',
               credentials: 'include',
               headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ verificationToken: _verifyToken }),
+              body: JSON.stringify({ verificationLocator: _verifyLocator, email }),
             })
             responseBody = (await response.json()) as ResendResponseBody
           } catch {
             responseBody = null
           }
 
-          if (_verifyState.phase !== 'form') return
+          if (_verifyState.phase !== 'resendConfirmEmail') return
 
           if (!responseBody?.ok) {
             _verifyState = {
               ..._verifyState,
-              resending: false,
+              submitting: false,
               errorText: responseBody?.message ?? 'Изпращането временно не е налично.',
             }
             _renderVerify()
             return
           }
 
+          // Успешен resend -> обратно към 'form', код-полето празно (старият
+          // код вече е невалиден — новият е в новия email), resend cooldown
+          // рестартиран.
           _verifyState = {
-            ..._verifyState,
-            resending: false,
-            errorText: null,
+            phase: 'form',
             maskedEmail: responseBody.maskedEmail ?? _verifyState.maskedEmail,
+            expiresAt: responseBody.expiresAt ?? _verifyState.expiresAt,
             resendAvailableAtMs: Date.now() + 60_000,
+            nowMs: Date.now(),
+            code: '',
+            rememberMe: _verifyState.rememberMe,
+            errorText: null,
+            submitting: false,
+            resending: false,
           }
           _renderVerify()
         })()
@@ -8283,7 +8344,7 @@ if (_isResetPasswordPath) {
 
   _renderVerify()
 
-  if (_verifyToken) {
+  if (_verifyLocator) {
     void (async () => {
       type StatusResponseBody = {
         ok: boolean
@@ -8298,7 +8359,7 @@ if (_isResetPasswordPath) {
           method: 'POST',
           credentials: 'include',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ verificationToken: _verifyToken }),
+          body: JSON.stringify({ verificationLocator: _verifyLocator }),
         })
         statusBody = (await response.json()) as StatusResponseBody
       } catch {

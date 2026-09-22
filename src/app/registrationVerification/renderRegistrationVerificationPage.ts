@@ -7,31 +7,37 @@
 // нов browser tab -> page възстановява необходимия pending verification
 // context ОТ SERVER-SIDE data", not from a tab that no longer exists.
 //
-// §"PREFERRED TOKEN DESIGN"/§"URL FORMAT" — само encrypted opaque
-// verificationToken (НИКОГА raw pendingRegistrationId) пътува в URL-а, и то
-// във FRAGMENT-а (#token=...), НЕ query string — mirror на
-// renderResetPasswordScreen.ts's extractAndClearResetToken() pattern.
-// Token-ът decrypt-ва се само server-side; клиентът никога не научава raw
-// pendingRegistrationId — само server-resolved данни (maskedEmail/
-// expiresAt/status), подадени обратно през response body-та.
+// §"PUBLIC LOCATOR" (revised design) — encrypted opaque verificationLocator
+// (НИКОГА raw pendingRegistrationId) пътува в URL-а, като normal QUERY
+// параметър (?verification=...), НЕ fragment — query е по-устойчив при email
+// click-tracking redirect chains (Brevo и подобни услуги често не запазват
+// #fragment през собствен redirect). Това вече е безопасно, защото
+// locator-ът е ПУБЛИЧЕН identifier, не bearer capability — possession alone
+// не верифицира/create-ва сесия/update-ва display name/resend-ва код (виж
+// registrationVerificationLinkToken.ts doc коментара за пълния security
+// model). Locator-ът decrypt-ва се само server-side; клиентът никога не
+// научава raw pendingRegistrationId — само server-resolved данни
+// (maskedEmail/expiresAt/status), подадени обратно през response body-та.
+// Query-то се scrub-ва от address bar-а веднага (hygiene — виж
+// extractAndClearVerificationLocator() doc коментара по-долу за защо
+// security НЕ зависи от това).
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 
-// ─── Token extraction ─────────────────────────────────────────────────────────
+// ─── Locator extraction ─────────────────────────────────────────────────────────
 
-export function extractAndClearVerificationToken(): string | null {
-  const hash = window.location.hash
-  if (!hash || hash.length < 2) return null
+/**
+ * Hygiene-only scrub — locator-ът вече е ПУБЛИЧЕН (не capability), затова
+ * оставането му видим в address bar-а/history за кратко НЕ е security риск
+ * (за разлика от старото fragment-based token design). Изчистваме го все
+ * пак веднага, за да не се trail-ва без нужда в browser history/screenshots.
+ */
+export function extractAndClearVerificationLocator(): string | null {
+  const params = new URLSearchParams(window.location.search)
+  const locator = params.get('verification')
 
-  // URLSearchParams на fragment съдържанието (без водещия #).
-  const params = new URLSearchParams(hash.slice(1))
-  const token = params.get('token')
-
-  // Веднага изчистваме fragment-а — token не трябва да стои в address bar
-  // (виж caller-а в main.ts — това се вика на най-ранната възможна точка,
-  // ПРЕДИ mountConsentUi()/initializeAnalytics()).
   history.replaceState(null, '', window.location.pathname)
 
-  return token && token.length > 0 ? token : null
+  return locator && locator.length > 0 ? locator : null
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -63,10 +69,28 @@ export type RegistrationVerificationPageState =
       rememberMe: boolean
       resendAvailableAtMs: number
     }
+  /**
+   * PUBLIC LOCATOR модел — locator alone вече НЕ е достатъчен за resend (би
+   * rotate-нал кода без authorization proof). Преди реалния resend request,
+   * искаме потвърждение на регистрационния имейл — server-ът сравнява
+   * normalized submitted email срещу normalized email-а на pending реда.
+   */
+  | {
+      phase: 'resendConfirmEmail'
+      maskedEmail: string
+      expiresAt: string
+      emailDraft: string
+      errorText: string | null
+      submitting: boolean
+      /** Съхранено, за да се върнем в 'form' с непроменен контекст при "Назад". */
+      code: string
+      rememberMe: boolean
+      resendAvailableAtMs: number
+    }
   | { phase: 'expired' }
   /**
-   * §10 "MISSING ROW BEFORE EXPIRY" — валиден (authenticated, non-expired)
-   * token, НО pending редът вече липсва в DB-то. Може да значи "вече
+   * "MISSING ROW BEFORE EXPIRY" — валиден (authenticated, non-expired)
+   * locator, НО pending редът вече липсва в DB-то. Може да значи "вече
    * потвърдена" ИЛИ "cancelled" (cancel-pending-registration) — не можем
    * надеждно да различим без нова DB persistence (tombstone), затова
    * умишлено НЕУТРАЛНО копие, НЕ категорично "вече потвърдена".
@@ -83,12 +107,16 @@ export type RegistrationVerificationPageCallbacks = {
   onCodeChange: (code: string) => void
   onRememberMeChange: (checked: boolean) => void
   onSubmitCode: (code: string) => void
+  /** "Изпрати нов код" клик — transitions към email-confirmation стъпката, НЕ resend-ва directno (locator alone не е достатъчен, виж 'resendConfirmEmail' phase doc коментара). */
   onResend: () => void
   onGoToLogin: (prefillEmail: string | null) => void
   onGoToRegister: () => void
   onDisplayNameDraftChange: (displayName: string) => void
   onSubmitDisplayName: (displayName: string) => void
   onCancelDisplayNameChange: () => void
+  onResendEmailDraftChange: (email: string) => void
+  onSubmitResendEmail: (email: string) => void
+  onCancelResendConfirm: () => void
 }
 
 // ─── Escape ───────────────────────────────────────────────────────────────────
@@ -288,6 +316,43 @@ function buildDisplayNameHtml(state: Extract<RegistrationVerificationPageState, 
   `
 }
 
+function buildResendConfirmHtml(state: Extract<RegistrationVerificationPageState, { phase: 'resendConfirmEmail' }>): string {
+  const errorBlock = state.errorText
+    ? `<div data-verify-page-error="1" style="border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;">${escapeHtml(state.errorText)}</div>`
+    : `<div data-verify-page-error="1" style="display:none;border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;text-align:center;"></div>`
+
+  return `
+    <form data-verify-page-resend-confirm-form="1" style="display:grid;gap:14px;" novalidate>
+      <div style="font-size:22px;line-height:1.25;font-weight:900;color:#f8fafc;text-align:center;">
+        Изпращане на нов код
+      </div>
+      <div style="font-size:14px;line-height:1.55;color:rgba(255,255,255,0.72);font-weight:600;text-align:center;">
+        За да изпратим нов код, потвърдете имейла, с който сте се регистрирали.
+      </div>
+      <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+        Имейл
+        <input
+          name="email"
+          data-verify-page-resend-email-input="1"
+          type="text"
+          inputmode="email"
+          autocomplete="email"
+          value="${escapeHtml(state.emailDraft)}"
+          style="${TEXT_INPUT_STYLE}"
+          ${state.submitting ? 'disabled' : ''}
+        >
+      </label>
+      ${errorBlock}
+      <button type="submit" data-verify-page-resend-confirm-submit="1" style="${state.submitting ? DISABLED_BTN_STYLE : PRIMARY_BTN_STYLE}" ${state.submitting ? 'disabled' : ''}>
+        ${state.submitting ? 'Изпращане...' : 'Изпрати нов код'}
+      </button>
+      <button type="button" data-verify-page-resend-confirm-cancel="1" style="${SECONDARY_BTN_STYLE}">
+        Назад към кода за потвърждение
+      </button>
+    </form>
+  `
+}
+
 function buildSuccessHtml(state: Extract<RegistrationVerificationPageState, { phase: 'success' }>): string {
   const loginButton = state.autoLoginConfirmed
     ? ''
@@ -329,7 +394,9 @@ export function renderRegistrationVerificationPage(
               ? buildSuccessHtml(state)
               : state.phase === 'displayName'
                 ? buildDisplayNameHtml(state)
-                : buildFormHtml(state)
+                : state.phase === 'resendConfirmEmail'
+                  ? buildResendConfirmHtml(state)
+                  : buildFormHtml(state)
 
   root.innerHTML = `
     <div style="
@@ -388,6 +455,30 @@ export function renderRegistrationVerificationPage(
 
     root.querySelector('[data-verify-page-display-name-cancel="1"]')?.addEventListener('click', () => {
       callbacks.onCancelDisplayNameChange()
+    })
+    return
+  }
+
+  if (state.phase === 'resendConfirmEmail') {
+    const emailInput = root.querySelector<HTMLInputElement>('[data-verify-page-resend-email-input="1"]')
+    if (emailInput) {
+      emailInput.focus()
+      emailInput.setSelectionRange(emailInput.value.length, emailInput.value.length)
+      emailInput.addEventListener('input', () => {
+        callbacks.onResendEmailDraftChange(emailInput.value)
+      })
+    }
+
+    const resendConfirmForm = root.querySelector<HTMLFormElement>('[data-verify-page-resend-confirm-form="1"]')
+    resendConfirmForm?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const email = emailInput?.value.trim() ?? ''
+      if (email.length === 0) return
+      callbacks.onSubmitResendEmail(email)
+    })
+
+    root.querySelector('[data-verify-page-resend-confirm-cancel="1"]')?.addEventListener('click', () => {
+      callbacks.onCancelResendConfirm()
     })
     return
   }

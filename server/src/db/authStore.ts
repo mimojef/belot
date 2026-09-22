@@ -60,7 +60,7 @@ export type PendingRegistrationCreatedResult =
 export type ResendRegistrationCodeResult =
   /** email е РЕАЛНИЯТ (normalized) адрес — само за caller-а да го подаде на sendRegistrationVerificationEmail(); HTTP response-ът към клиента трябва да ползва maskedEmail, никога email. */
   | { ok: true; rawCode: string; email: string; maskedEmail: string; expiresAt: string }
-  | { ok: false; reason: 'not_found' | 'expired' | 'rate_limited' }
+  | { ok: false; reason: 'not_found' | 'expired' | 'rate_limited' | 'email_mismatch' }
 
 /**
  * Email → dedicated registration verification page (§"EMAIL → DIRECT
@@ -107,14 +107,24 @@ export type VerifyRegistrationEmailResult =
 /**
  * Display-name-taken recovery (hardening pass §1) — позволява да се смени
  * display_name-а на ВЕЧЕ съществуващ pending registration, БЕЗ да се пипат
- * password_hash/code_hash/failed_attempts/resend_count/expires_at. Bearer
- * capability модел, mirror на resendRegistrationVerificationCode() —
- * pendingRegistrationId САМИЯТ е "authorization" (opaque, unguessable
- * UUID), same security posture като resend/verify endpoints-ите.
+ * password_hash/code_hash/resend_count/expires_at.
+ *
+ * PUBLIC LOCATOR модел (revised) — pendingRegistrationId САМ ПО СЕБЕ СИ вече
+ * НЕ е "authorization" за dedicated-page (locator-resolved) заявки. Ако
+ * caller-ът подаде `requiredCode`, той се верифицира срещу row.code_hash
+ * (СЪЩИЯТ pure timing-safe verifyVerificationCode primitive като verify()
+ * по-долу, СЪЩИЯТ споделен failed_attempts budget — грешен requiredCode
+ * увеличава failed_attempts точно както грешен verify() опит, за да не се
+ * отвори отделен unlimited-guess канал) — display_name НЕ се update-ва, ако
+ * кодът е грешен/липсва изтощен бюджет. Ако `requiredCode` е omitted (старият
+ * popup flow, kind:'id' в registrationVerificationHandlers.ts), поведението
+ * остава bearer-capability, непроменено (backward compatibility).
  */
 export type UpdatePendingRegistrationDisplayNameResult =
   | { ok: true; maskedEmail: string; expiresAt: string }
   | { ok: false; reason: 'not_found' | 'expired' | 'rate_limited' }
+  | { ok: false; reason: 'invalid_code'; attemptsRemaining: number }
+  | { ok: false; reason: 'too_many_attempts' }
   | { ok: false; reason: 'invalid_display_name'; message: string; code?: ProfileIdentityValidationCode }
   | { ok: false; reason: 'display_name_taken' }
 
@@ -449,6 +459,8 @@ export type AuthStore = {
    */
   resendRegistrationVerificationCode: (input: {
     pendingRegistrationId: string
+    /** PUBLIC LOCATOR модел — ако е подадено, resend се позволява САМО ако съвпада с row.normalized_email (виж ResendRegistrationCodeResult doc коментара). Omitted за стария popup flow (bearer-capability, непроменено). */
+    requiredNormalizedEmail?: string
     ipAddress: string | null
   }) => ResendRegistrationCodeResult
   /**
@@ -485,6 +497,8 @@ export type AuthStore = {
   updatePendingRegistrationDisplayName: (input: {
     pendingRegistrationId: string
     displayName: string
+    /** PUBLIC LOCATOR модел — ако е подадено, update се позволява САМО след успешна non-consuming code проверка (виж UpdatePendingRegistrationDisplayNameResult doc коментара). Omitted за стария popup flow (bearer-capability, непроменено). */
+    requiredCode?: string
     ipAddress: string | null
   }) => UpdatePendingRegistrationDisplayNameResult
   /**
@@ -1735,6 +1749,7 @@ export async function createAuthStore(
 
   function resendRegistrationVerificationCode(input: {
     pendingRegistrationId: string
+    requiredNormalizedEmail?: string
     ipAddress: string | null
   }): ResendRegistrationCodeResult {
     if (!isRegistrationSecretConfigured) {
@@ -1787,6 +1802,17 @@ export async function createAuthStore(
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'rate_limited' }
         }
+      }
+
+      // PUBLIC LOCATOR модел — за dedicated-page заявки caller-ът (виж
+      // registrationVerificationHandlers.ts) подава requiredNormalizedEmail,
+      // за да не позволи на locator-alone possession да rotate-не кода. Проверен
+      // СЛЕД rate-limit-ите по-горе, за да не се отвори unbounded email-guessing
+      // канал — всеки опит (верен или грешен email) консумира същия resend
+      // rate-limit budget като реален resend.
+      if (input.requiredNormalizedEmail !== undefined && input.requiredNormalizedEmail !== row.normalized_email) {
+        database.exec('ROLLBACK;')
+        return { ok: false, reason: 'email_mismatch' }
       }
 
       const rawCode = generateVerificationCode()
@@ -1924,6 +1950,7 @@ export async function createAuthStore(
   function updatePendingRegistrationDisplayName(input: {
     pendingRegistrationId: string
     displayName: string
+    requiredCode?: string
     ipAddress: string | null
   }): UpdatePendingRegistrationDisplayNameResult {
     if (!isRegistrationSecretConfigured) {
@@ -1966,6 +1993,29 @@ export async function createAuthStore(
         deletePendingRegistrationByIdStatement.run(row.pending_registration_id)
         database.exec('COMMIT;')
         return { ok: false, reason: 'expired' }
+      }
+
+      // PUBLIC LOCATOR модел — non-consuming code проверка, gated само когато
+      // caller-ът (dedicated-page locator flow) подаде requiredCode.
+      // СЪЩИЯТ pure verifyVerificationCode primitive и СЪЩИЯТ failed_attempts
+      // budget/lockout като verifyRegistrationEmail() по-горе — грешен код тук
+      // увеличава failed_attempts точно както грешен verify опит (споделен
+      // anti-brute-force бюджет, не отделен unlimited-guess канал). Успешна
+      // проверка НЕ трие реда/НЕ create-ва сесия/НЕ ресетва failed_attempts —
+      // само отключва display_name UPDATE-а по-долу (row-ът остава pending,
+      // потребителят verify-ва отново СЪС СЪЩИЯ код след успешния rename).
+      if (input.requiredCode !== undefined) {
+        if (row.failed_attempts >= PENDING_REGISTRATION_MAX_FAILED_ATTEMPTS) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'too_many_attempts' }
+        }
+        const codeIsValid = /^[0-9]{6}$/.test(input.requiredCode) && verifyVerificationCode(input.requiredCode, registrationSecret, row.code_hash)
+        if (!codeIsValid) {
+          incrementPendingRegistrationFailedAttemptsStatement.run(row.pending_registration_id)
+          database.exec('COMMIT;')
+          const attemptsRemaining = Math.max(0, PENDING_REGISTRATION_MAX_FAILED_ATTEMPTS - (row.failed_attempts + 1))
+          return { ok: false, reason: 'invalid_code', attemptsRemaining }
+        }
       }
 
       // FINAL PLAN v5 — cleanup на target името, ако друг (различен от ТОЗИ

@@ -7892,9 +7892,9 @@ async function handleAuthRequest(
   }
 
   // Email → dedicated registration verification page (§"EMAIL → DIRECT
-  // REGISTRATION VERIFICATION PAGE"). POST+JSON body (§7 — verificationToken
-  // пътува в body, не query string, mirror на другите registration
-  // endpoints по-горе), НЕ GET+query-param (старият pattern, заменен).
+  // REGISTRATION VERIFICATION PAGE"). POST+JSON body — verificationLocator
+  // (PUBLIC LOCATOR, виж registrationVerificationLinkToken.ts) пътува в
+  // body, mirror на другите registration endpoints по-горе.
   if (pathname === '/api/auth/registration-verification-status' && req.method === 'POST') {
     const ctx: RegistrationVerificationHandlerContext = {
       store: authStore,
