@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod as SharedAdminPaymentPeriod } from './sofiaDayBounds.js'
+import { composePayerCoinGiftSuccessText, composeRecipientCoinGiftNotificationText } from './paidGiftNotificationText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -21,6 +22,22 @@ export type CoinPurchaseSnapshot = {
   hiddenAt: string | null
   createdAt: string
   updatedAt: string
+  /**
+   * "Подари авоари" (Paid Gift Shop) payer/recipient split. NULL => normal
+   * purchase (payer==recipient); non-NULL => gift purchase, сочи towards
+   * получателя. НИКОГА authoritative от client — resolve-нат server-side при
+   * createPendingPurchase, snapshot-нат тук immutable за историята.
+   */
+  recipientProfileId: string | null
+  /** Display name snapshot на получателя В МОМЕНТА на покупката — преживява recipient hard-delete. */
+  recipientDisplayNameSnapshot: string | null
+  /**
+   * §3 в брифа — payer success popup текст ("Вие успешно подарихте на
+   * <recipient> <reward>."), computed от immutable snapshot данни. Non-null
+   * САМО за paid (status='paid') gift покупки; normal self-purchase остава
+   * null винаги (established success поведение непроменено).
+   */
+  payerSuccessText: string | null
 }
 
 export type FulfillPaidPurchaseParams = {
@@ -144,6 +161,7 @@ export type CoinPurchaseStore = {
   createPendingPurchase: (
     profileId: string,
     packageId: string,
+    recipientProfileId?: string | null,
   ) => { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string }
   getPurchaseById: (purchaseId: string) => CoinPurchaseSnapshot | null
   getPurchaseWithOwnerCheck: (
@@ -158,7 +176,7 @@ export type CoinPurchaseStore = {
   markPurchaseCanceledByCheckoutSessionId: (checkoutSessionId: string) => void
   markPurchaseFailedByCheckoutSessionId: (checkoutSessionId: string) => void
   fulfillPaidPurchase: (params: FulfillPaidPurchaseParams) =>
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
+    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string }
   needsPaymentMethodSnapshot: (purchaseId: string) => boolean
   updatePaymentMethodSnapshot: (
@@ -194,6 +212,8 @@ type CoinPurchaseRow = {
   card_brand: string | null
   card_last4: string | null
   card_country: string | null
+  recipient_profile_id: string | null
+  recipient_display_name_snapshot: string | null
 }
 
 type CoinPurchaseInternalRow = CoinPurchaseRow & {
@@ -214,6 +234,15 @@ type WalletRow = {
 }
 
 function rowToSnapshot(row: CoinPurchaseRow): CoinPurchaseSnapshot {
+  // §3 в брифа — payerSuccessText е computed derived field (не персистиран
+  // отделно) от immutable snapshot полетата на ТОЗИ ред: non-null само за
+  // paid gift покупки, независимо КЪДЕ/КОГА снапшотът се чете (fulfillment
+  // резултат ИЛИ по-късен listProfilePurchases/getPurchaseById lookup за
+  // polling след Stripe redirect) — единна логика, computed веднъж тук.
+  const payerSuccessText = row.status === 'paid' && row.recipient_display_name_snapshot !== null
+    ? composePayerCoinGiftSuccessText(row.recipient_display_name_snapshot, row.yellow_coins_amount)
+    : null
+
   return {
     purchaseId: row.purchase_id,
     packageId: row.package_id,
@@ -229,6 +258,9 @@ function rowToSnapshot(row: CoinPurchaseRow): CoinPurchaseSnapshot {
     hiddenAt: row.hidden_at ?? null,
     createdAt: dbDateToUtc(row.created_at),
     updatedAt: dbDateToUtc(row.updated_at),
+    recipientProfileId: row.recipient_profile_id ?? null,
+    recipientDisplayNameSnapshot: row.recipient_display_name_snapshot ?? null,
+    payerSuccessText,
   }
 }
 
@@ -263,7 +295,9 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE profile_id = ?
       AND hidden_at IS NULL
@@ -299,12 +333,20 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE profile_id = ?
       AND package_id = ?
       AND status = 'pending'
       AND hidden_at IS NULL
+      -- Recipient трябва да съвпада точно (§21/§14 в брифа: normal purchase
+      -- НЕ трябва да reuse-не gift pending ред и обратно, gift-за-X НЕ трябва
+      -- да reuse-не gift-за-Y pending ред). IS NOT DISTINCT FROM третира
+      -- NULL=NULL като match (normal==normal), докато обикновен '=' би
+      -- пропуснал NULL-срещу-NULL сравнения в SQLite.
+      AND recipient_profile_id IS NOT DISTINCT FROM ?
     ORDER BY created_at DESC
     LIMIT 1;
   `)
@@ -320,7 +362,9 @@ export async function createCoinPurchaseStore(
       price_cents,
       currency,
       provider,
-      status
+      status,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     ) VALUES (
       ?,
       ?,
@@ -331,8 +375,37 @@ export async function createCoinPurchaseStore(
       ?,
       ?,
       'stripe',
-      'pending'
+      'pending',
+      ?,
+      ?
     );
+  `)
+
+  // Recipient eligibility (§13 в брифа) — reuse established
+  // registered-human WHERE clause (friendshipStore.selectRegisteredHumanProfileStatement:
+  // profile_kind='human' AND status='active' AND account_id IS NOT NULL),
+  // РАЗШИРЕН тук с is_temporary=0 (guest/temporary профили изключени — нямат
+  // стабилна самоличност за paid reward target) И explicit active-ban
+  // изключване (profile_bans.lifted_at IS NULL AND banned_until >
+  // CURRENT_TIMESTAMP — profiles.status НИКОГА не се променя от banProfile(),
+  // виж profileBanStore.ts, затова status='active' сам по себе си НЕ
+  // изключва банnат профил). Bot профили изрично изключени — нямат account
+  // и не могат легитимно да бъдат gift recipient за paid покупка.
+  const selectGiftRecipientEligibilityStatement = database.prepare(`
+    SELECT p.display_name AS display_name
+    FROM profiles p
+    WHERE p.profile_id = ?
+      AND p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+      AND p.is_temporary = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM profile_bans pb
+        WHERE pb.profile_id = p.profile_id
+          AND pb.lifted_at IS NULL
+          AND pb.banned_until > CURRENT_TIMESTAMP
+      )
+    LIMIT 1;
   `)
 
   const selectPurchaseStatement = database.prepare(`
@@ -350,7 +423,9 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE purchase_id = ?
     LIMIT 1;
@@ -372,7 +447,9 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE purchase_id = ?
     LIMIT 1;
@@ -393,7 +470,9 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE purchase_id = ?
       AND profile_id = ?
@@ -415,7 +494,9 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE provider_checkout_session_id = ?
     LIMIT 1;
@@ -437,7 +518,9 @@ export async function createCoinPurchaseStore(
       credited_at,
       hidden_at,
       created_at,
-      updated_at
+      updated_at,
+      recipient_profile_id,
+      recipient_display_name_snapshot
     FROM coin_purchase_ledger
     WHERE provider_checkout_session_id = ?
     LIMIT 1;
@@ -569,6 +652,26 @@ export async function createCoinPurchaseStore(
     WHERE profile_id = ?;
   `)
 
+  // "Подари авоари" durable recipient notification (Round 3 §5) — payer
+  // display name snapshot в МОМЕНТА на fulfillment (не checkout момента).
+  // Read-only, безопасно дори payer вече да е изтрит (връща undefined,
+  // fallback към generic текст по-долу) — SELECT никога не enforce-ва FK.
+  const selectProfileDisplayNameStatement = database.prepare(`
+    SELECT display_name FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+
+  // INSERT OR IGNORE + composite PK (purchase_id, purchase_type) —
+  // duplicate webhook/fulfillment retry е natural no-op idempotency guard
+  // (mirror на established gift_notification_log.gift_id PK pattern,
+  // 20260923_003 migration коментара). Извиква се ВЪТРЕ в fulfillment
+  // BEGIN/COMMIT-а по-долу — durable-first invariant: reward commit и
+  // notification create успяват/провалят се АТОМАРНО заедно.
+  const insertPaidGiftNotificationStatement = database.prepare(`
+    INSERT OR IGNORE INTO paid_gift_notification_log (
+      purchase_id, purchase_type, recipient_profile_id, sender_display_name_snapshot, body_text
+    ) VALUES (?, 'coin', ?, ?, ?);
+  `)
+
   function listProfilePurchases(profileId: string): CoinPurchaseSnapshot[] {
     const normalizedProfileId = normalizeId(profileId)
 
@@ -610,6 +713,7 @@ export async function createCoinPurchaseStore(
   function createPendingPurchase(
     profileId: string,
     packageId: string,
+    recipientProfileId?: string | null,
   ): { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string } {
     const normalizedProfileId = normalizeId(profileId)
     const normalizedPackageId = normalizeId(packageId)
@@ -619,6 +723,40 @@ export async function createCoinPurchaseStore(
         ok: false,
         message: 'Невалидна заявка за покупка.',
       }
+    }
+
+    // §14 в брифа — self-gift защита, backend задължителна: recipient !=
+    // purchaser се проверява ПРЕДИ каквото и да е друго recipient
+    // resolution, за да не изтече дори eligibility грешка вместо ясния
+    // self-gift отказ.
+    const normalizedRecipientProfileId = recipientProfileId ? normalizeId(recipientProfileId) : null
+
+    if (normalizedRecipientProfileId !== null && normalizedRecipientProfileId === normalizedProfileId) {
+      return {
+        ok: false,
+        message: 'Не можете да подарите на себе си.',
+      }
+    }
+
+    let recipientDisplayName: string | null = null
+
+    if (normalizedRecipientProfileId !== null) {
+      // §12/§13 в брифа — recipient се resolve-ва canonical server-side,
+      // client-provided displayName НИКОГА не е authoritative. Eligibility
+      // WHERE clause (виж selectGiftRecipientEligibilityStatement по-горе)
+      // изключва bot/disabled/temporary/guest/banned профили.
+      const recipientRow = selectGiftRecipientEligibilityStatement.get(
+        normalizedRecipientProfileId,
+      ) as { display_name: string } | undefined
+
+      if (!recipientRow) {
+        return {
+          ok: false,
+          message: 'Получателят не може да приеме подарък в момента.',
+        }
+      }
+
+      recipientDisplayName = recipientRow.display_name
     }
 
     const activePackage = selectActivePackageStatement.get(
@@ -635,6 +773,7 @@ export async function createCoinPurchaseStore(
     const existingPending = selectPendingPurchaseStatement.get(
       normalizedProfileId,
       normalizedPackageId,
+      normalizedRecipientProfileId,
     ) as CoinPurchaseRow | undefined
 
     if (existingPending) {
@@ -655,6 +794,8 @@ export async function createCoinPurchaseStore(
       activePackage.yellow_coins_amount,
       activePackage.price_cents,
       activePackage.currency,
+      normalizedRecipientProfileId,
+      recipientDisplayName,
     )
 
     const purchase = getPurchaseById(purchaseId)
@@ -698,7 +839,7 @@ export async function createCoinPurchaseStore(
   function fulfillPaidPurchase(
     params: FulfillPaidPurchaseParams,
   ):
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
+    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
     const { checkoutSessionId, purchaseId } = params
 
@@ -725,10 +866,22 @@ export async function createCoinPurchaseStore(
   function fulfillByInternalRow(
     row: CoinPurchaseInternalRow,
   ):
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean }
+    | {
+        ok: true
+        purchase: CoinPurchaseSnapshot
+        alreadyCredited: boolean
+        payerSuccessText: string | null
+        /** Non-null САМО при реален нов fulfillment — виж identичния коментар в vipPurchaseStore.ts. */
+        recipientNotificationText: string | null
+      }
     | { ok: false; message: string } {
     if (row.status === 'paid' && row.credited_at !== null) {
-      return { ok: true, purchase: rowToSnapshot(row), alreadyCredited: true }
+      // alreadyCredited: purchase.payerSuccessText вече е computed от
+      // rowToSnapshot (immutable snapshot данни) — безопасно за повторно
+      // връщане при duplicate webhook (caller-ът решава дали вече е показал
+      // success popup-а, виж index.ts wiring).
+      const purchase = rowToSnapshot(row)
+      return { ok: true, purchase, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
     }
 
     if (row.status !== 'pending') {
@@ -738,11 +891,64 @@ export async function createCoinPurchaseStore(
       }
     }
 
+    // §15-20/§24 в брифа — наградата отива на RECIPIENT-а, не на PAYER-а.
+    // row.profile_id остава семантично "payer" навсякъде (Stripe checkout
+    // session собственик).
+    //
+    // КРИТИЧНО (review finding §1) — recipient_profile_id САМО ПО СЕБЕ СИ
+    // НЕ Е безопасен gift discriminator: то е FK колона с ON DELETE SET
+    // NULL, значи ако recipient профилът бъде hard-deleted МЕЖДУ checkout и
+    // fulfillment, SQLite нулира ТОЧНО тази колона В LEDGER РЕДА веднага
+    // при DELETE-а (cascade се изпълнява синхронно, не lazily) — ПРЕДИ
+    // webhook-ът изобщо да прочете реда. Старият код
+    // `row.recipient_profile_id ?? row.profile_id` следователно fallback-ваше
+    // към PAYER-а точно в този сценарий (доказано от
+    // checkGiftRecipientHardDeleteFallback.ts с реален FK enforcement, БЕЗ
+    // PRAGMA foreign_keys=OFF заобикаляне) — payer погрешно получаваше
+    // чуждата gift награда. recipient_display_name_snapshot (plain TEXT, НЕ
+    // FK) е durable gift marker — той НЕ се засяга от SET NULL cascade-а и
+    // остава non-null завинаги за всеки ред, който Е бил gift, независимо
+    // дали recipient-ът по-късно изчезва физически. Затова discriminator-ът
+    // тук е snapshot текста, не FK колоната:
+    //   - recipient_display_name_snapshot === null  => НИКОГА не е бил gift
+    //     (истински normal purchase) => payer==recipient established.
+    //   - recipient_display_name_snapshot !== null   => Е бил gift =>
+    //     recipient_profile_id казва КЪМ КОГО точно сега (жив recipient) или
+    //     NULL (recipient вече не съществува) — в НИКОЙ от двата случая
+    //     payer не е валиден fallback target.
+    const wasGiftPurchase = row.recipient_display_name_snapshot !== null
+
+    if (wasGiftPurchase && row.recipient_profile_id === null) {
+      // Recipient е бил валиден при checkout (snapshot доказва gift intent),
+      // но вече физически не съществува — safe-fail explicit, БЕЗ да се
+      // опитваме дори да пипнем wallet-а. Редът остава 'pending' (не
+      // 'failed') — идентично поведение на §30 permanently-pending
+      // договорката, само достигнато с explicit проверка вместо разчитане
+      // на FK constraint exception по-долу.
+      return {
+        ok: false,
+        message: 'Получателят на подаръка вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
+      }
+    }
+
+    const rewardRecipientProfileId = wasGiftPurchase
+      ? (row.recipient_profile_id as string)
+      : row.profile_id
+
+    let recipientNotificationText: string | null = null
+
     try {
       database.exec('BEGIN;')
 
-      ensureWalletStatement.run(row.profile_id)
-      creditWalletStatement.run(row.yellow_coins_amount, row.profile_id)
+      // Defense-in-depth: ако recipient профилът изчезне В ТОЧНИЯ момент
+      // между горната explicit проверка и тук (race срещу конкурентен hard
+      // delete), ensureWalletStatement/creditWalletStatement пак УДРЯТ FK
+      // constraint violation (profile_wallets.profile_id REFERENCES
+      // profiles), catch блокът по-долу ROLLBACK-ва, редът остава 'pending'
+      // permanently — safe-fail, НИКАКВА награда никога не отива към payer-а
+      // или друг профил.
+      ensureWalletStatement.run(rewardRecipientProfileId)
+      creditWalletStatement.run(row.yellow_coins_amount, rewardRecipientProfileId)
 
       const updateResult = markPaidByPurchaseIdStatement.run(row.purchase_id) as {
         changes?: number
@@ -754,10 +960,33 @@ export async function createCoinPurchaseStore(
         const fresh = getPurchaseWithProfileById(row.purchase_id)
 
         if (fresh?.status === 'paid') {
-          return { ok: true, purchase: rowToSnapshot(fresh), alreadyCredited: true }
+          const purchase = rowToSnapshot(fresh)
+          return { ok: true, purchase, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
         }
 
         return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
+      }
+
+      // "Подари авоари" durable recipient notification (Round 3 §5) — СЛЕД
+      // успешен CAS (тоя процес спечели reward claim-а), ПРЕДИ COMMIT —
+      // notification INSERT участва в СЪЩАТА транзакция като reward credit-а
+      // по-горе: ако процесът crash-не тук, ROLLBACK-ва и двете заедно
+      // (нито reward, нито notification); ако COMMIT-не успешно, и двете
+      // committed заедно. Durable-first invariant, no partial states.
+      if (wasGiftPurchase) {
+        const senderProfileRow = selectProfileDisplayNameStatement.get(row.profile_id) as
+          | { display_name: string }
+          | undefined
+        const senderDisplayName = senderProfileRow?.display_name?.trim() || 'Играч'
+        const bodyText = composeRecipientCoinGiftNotificationText(senderDisplayName, row.yellow_coins_amount)
+
+        insertPaidGiftNotificationStatement.run(
+          row.purchase_id,
+          rewardRecipientProfileId,
+          senderDisplayName,
+          bodyText,
+        )
+        recipientNotificationText = bodyText
       }
 
       database.exec('COMMIT;')
@@ -780,7 +1009,7 @@ export async function createCoinPurchaseStore(
       return { ok: false, message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
     }
 
-    return { ok: true, purchase: fulfilled, alreadyCredited: false }
+    return { ok: true, purchase: fulfilled, alreadyCredited: false, payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
   }
 
   function needsPaymentMethodSnapshot(purchaseId: string): boolean {

@@ -661,6 +661,11 @@ export type VipPurchaseSnapshot = {
   vipGrantId: string | null
   createdAt: string
   updatedAt: string
+  /** "Подари авоари" — non-null само за gift покупки. Виж server/src/db/vipPurchaseStore.ts VipPurchaseSnapshot. */
+  recipientProfileId: string | null
+  recipientDisplayNameSnapshot: string | null
+  /** §3 в брифа — payer success modal текст, non-null само за paid gift покупки. Виж server/src/db/vipPurchaseStore.ts. */
+  payerSuccessText: string | null
 }
 
 // Shop -> "Пакети" (X жълтици + X дни VIP = единична EUR цена) — DB-driven
@@ -713,6 +718,11 @@ export type BundlePurchaseSnapshot = {
   hiddenAt: string | null
   createdAt: string
   updatedAt: string
+  /** "Подари авоари" — non-null само за gift покупки. Виж server/src/db/bundlePurchaseStore.ts BundlePurchaseSnapshot. */
+  recipientProfileId: string | null
+  recipientDisplayNameSnapshot: string | null
+  /** §3 в брифа — payer success modal текст, non-null само за paid gift покупки. */
+  payerSuccessText: string | null
 }
 
 export type BundleCheckoutResponse =
@@ -801,6 +811,11 @@ export type CoinPurchaseSnapshot = {
   hiddenAt: string | null
   createdAt: string
   updatedAt: string
+  /** "Подари авоари" — non-null само за gift покупки. Виж server/src/db/coinPurchaseStore.ts CoinPurchaseSnapshot. */
+  recipientProfileId: string | null
+  recipientDisplayNameSnapshot: string | null
+  /** §3 в брифа — payer success modal текст, non-null само за paid gift покупки. */
+  payerSuccessText: string | null
 }
 
 export type CoinCheckoutResponse =
@@ -2008,6 +2023,27 @@ export type PendingGiftItemNotificationsMessage = {
   }>
 }
 
+// "Подари авоари" (Paid Gift Shop) durable recipient notification — ОТДЕЛЕН
+// domain от CoinsGiftedMessage/PendingGiftNotificationsMessage (служебно
+// "Подари жълтици") И GiftItemReceivedMessage/PendingGiftItemNotificationsMessage
+// (Item Gift System) по-горе. bodyText е server-composed, immutable snapshot
+// текст ("<PAYER> ви подари <reward>.") — клиентът НЕ реконструира текста.
+export type PaidGiftNotificationReceivedMessage = {
+  type: 'paid_gift_notification_received'
+  purchaseId: string
+  purchaseType: 'coin' | 'vip' | 'bundle'
+  bodyText: string
+}
+
+export type PendingPaidGiftNotificationsMessage = {
+  type: 'pending_paid_gift_notifications'
+  notifications: Array<{
+    purchaseId: string
+    purchaseType: 'coin' | 'vip' | 'bundle'
+    bodyText: string
+  }>
+}
+
 export type TournamentPartnerInviteReceivedMessage = {
   type: 'tournament_partner_invite_received'
   invite: TournamentPartnerInviteSnapshot
@@ -2589,6 +2625,8 @@ export type ServerMessage =
   | PendingGiftNotificationsMessage
   | GiftItemReceivedMessage
   | PendingGiftItemNotificationsMessage
+  | PaidGiftNotificationReceivedMessage
+  | PendingPaidGiftNotificationsMessage
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage

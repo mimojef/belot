@@ -113,8 +113,38 @@ function buildSchema(db: DatabaseSync): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS profiles (
       profile_id TEXT PRIMARY KEY,
+      account_id TEXT NULL,
+      profile_kind TEXT NOT NULL DEFAULT 'human' CHECK (profile_kind IN ('human', 'bot')),
       display_name TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'disabled')),
+      is_temporary INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    -- "Подари авоари" (20260923_002 migration) recipient eligibility check
+    -- (bundlePurchaseStore.selectGiftRecipientEligibilityStatement) реферира
+    -- тази таблица директно — нужна тук само за да не chупи store-a prepared
+    -- statements, dedicated gift тестове са в checkPaidGiftShopStores.ts.
+    CREATE TABLE IF NOT EXISTS profile_bans (
+      ban_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      banned_until TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      lifted_at TEXT NULL,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+    );
+
+    -- "Подари авоари" durable recipient notification (20260923_003
+    -- migration, Round 3) — reuse-вана в трите purchase store connections.
+    CREATE TABLE IF NOT EXISTS paid_gift_notification_log (
+      purchase_id TEXT NOT NULL,
+      purchase_type TEXT NOT NULL CHECK (purchase_type IN ('coin', 'vip', 'bundle')),
+      recipient_profile_id TEXT NOT NULL,
+      sender_display_name_snapshot TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      read_at TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (purchase_id, purchase_type)
     );
 
     CREATE TABLE IF NOT EXISTS profile_wallets (
@@ -170,6 +200,12 @@ function buildSchema(db: DatabaseSync): void {
       card_last4 TEXT,
       card_country TEXT,
       hidden_at TEXT,
+      -- "Подари авоари" (20260923_002 migration) — payer/recipient split.
+      -- Виж checkPaidGiftShopStores.ts за dedicated gift purchase тестове;
+      -- тук са нужни само за да не chупи store-a prepared statements.
+      recipient_profile_id TEXT NULL REFERENCES profiles(profile_id) ON DELETE SET NULL,
+      recipient_display_name_snapshot TEXT NULL,
+      deleted_recipient_profile_id_snapshot TEXT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE,
@@ -178,7 +214,7 @@ function buildSchema(db: DatabaseSync): void {
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_purchase_ledger_pending_package
-      ON bundle_purchase_ledger(profile_id, package_id, status)
+      ON bundle_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
       WHERE status = 'pending';
 
     CREATE TABLE IF NOT EXISTS vip_grants (

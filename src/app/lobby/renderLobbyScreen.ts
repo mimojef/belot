@@ -597,6 +597,11 @@ export type LobbyScreenState = {
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
   shopActiveTab: 'coins' | 'vip' | 'bundle'
+  /** "Подари авоари" (§8-12 в брифа) — виж identичното поле в createLobbyFlowController.ts LobbyScreenState. */
+  shopGiftRecipientProfileId: string | null
+  shopGiftRecipientDisplayName: string | null
+  shopGiftRecipientLoading: boolean
+  shopGiftRecipientErrorText: string | null
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -695,6 +700,9 @@ export type LobbyScreenState = {
   giftItemModalSubmittingId: string | null
   giftItemSuccessModal: { itemName: string; recipientName: string } | null
   giftItemReceivedModal: { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string } | null
+  /** "Подари авоари" — mirror на giftItemReceivedModal по-горе, виж createLobbyFlowController.ts. */
+  paidGiftNotificationModal: { purchaseId: string; purchaseType: 'coin' | 'vip' | 'bundle'; bodyText: string } | null
+  paidGiftPayerSuccessModal: { text: string } | null
   adminGiftItems: GiftItemSnapshot[]
   adminGiftItemsLoading: boolean
   adminGiftItemsErrorText: string | null
@@ -1249,6 +1257,12 @@ export type RenderLobbyScreenOptions = {
   onGiftItemSubmit: (recipientProfileId: string, giftItemId: string) => void
   onGiftItemSuccessClose: () => void
   onGiftItemReceivedClose: () => void
+  // "Подари авоари" (Paid Gift Shop) — ОТДЕЛЕН domain от onGiftCoins*
+  // (служебно, privileged-only) и onGiftItem* (Item Gift System, §38 в
+  // брифа). Навигира към Shop в gift mode, реален Stripe flow.
+  onGiftShopClick: (recipientProfileId: string) => void
+  onPaidGiftNotificationClose: () => void
+  onPaidGiftPayerSuccessClose: () => void
   onLowCoinsModalClose: () => void
   onLowCoinsShopClick: () => void
   onAuthModalClose: () => void
@@ -1509,6 +1523,7 @@ export type ProfilePopupCallbacks = {
   onGiftCoinsClick: (friendshipId: string) => void
   onGiftCoinsBypassClick: (recipientProfileId: string) => void
   onGiftItemClick: (recipientProfileId: string) => void
+  onGiftShopClick: (recipientProfileId: string) => void
   onPikaSupportChatClick: (profileId: string) => void
   onTopicsPersonalMessageClick: (profileId: string) => void
   onLikeClick: (profileId: string) => void
@@ -1721,6 +1736,11 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const recipientProfileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftItem?.trim() ?? ''
       if (recipientProfileId) cb.onGiftItemClick(recipientProfileId)
     })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-gift-shop]')
+    ?.addEventListener('click', (e) => {
+      const recipientProfileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileGiftShop?.trim() ?? ''
+      if (recipientProfileId) cb.onGiftShopClick(recipientProfileId)
+    })
   el.querySelector<HTMLButtonElement>('[data-player-profile-pika-support-chat]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfilePikaSupportChat?.trim() ?? ''
@@ -1813,6 +1833,12 @@ export function syncProfilePopup(
      * и profile.profileId съществува. Виж RenderPlayerProfilePopupOptions.
      */
     giftItemRecipientProfileId?: string | null
+    /**
+     * "Подари авоари" (Paid Gift Shop) — non-null само когато !isOwnProfile
+     * и profile.profileId съществува. Виж
+     * RenderPlayerProfilePopupOptions.giftShopRecipientProfileId.
+     */
+    giftShopRecipientProfileId?: string | null
     // Форсира skipAnimation дори при "first open" (нов popupRootEl) — нужно
     // при връщане Edit→Profile: popup DOM възелът е бил унищожен, докато
     // edit overlay-ят е бил отворен отгоре му, но КОНЦЕПТУАЛНО потребителят
@@ -1873,6 +1899,7 @@ export function syncProfilePopup(
     riskDetailErrorText: popupState.riskDetailErrorText ?? null,
     riskRecheckSubmitting: popupState.riskRecheckSubmitting ?? false,
     giftItemRecipientProfileId: popupState.giftItemRecipientProfileId ?? null,
+    giftShopRecipientProfileId: popupState.giftShopRecipientProfileId ?? null,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -1939,6 +1966,18 @@ export function escapeHtml(value: string): string {
 
 function cssEscape(value: string): string {
   return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/["\\]/g, '\\$&')
+}
+
+// "Подари авоари" (§26-28 в брифа) — payer purchase history трябва
+// недвусмислено да покаже, че конкретен ред е gift ("за <recipient>"), не
+// normal покупка. recipientDisplayNameSnapshot е non-null само за gift
+// покупки (durable snapshot, оцелява дори recipient профилът по-късно да
+// бъде hard-deleted — виж coinPurchaseStore.ts fulfillByInternalRow
+// коментара за пълния rationale). Reuse-вана от desktop+mobile, coin+bundle
+// history rows.
+function renderPurchaseHistoryGiftBadge(recipientDisplayNameSnapshot: string | null | undefined): string {
+  if (!recipientDisplayNameSnapshot) return ''
+  return `<div style="margin-top:3px;font-size:11px;font-weight:800;color:#d4a520;">Подарък за ${escapeHtml(recipientDisplayNameSnapshot)}</div>`
 }
 
 function keepComposerFocusOnPointerSubmit(button: HTMLButtonElement | null): void {
@@ -2263,6 +2302,16 @@ export function renderShopPurchaseConfirmModal(state: LobbyScreenState): string 
 
   const isProcessing = state.shopPurchaseActionPackageId === packageId
   const priceLabel = formatPackagePrice(coinPackage.priceCents, coinPackage.currency)
+  // "Подари авоари" (§26/§27 в брифа) — checkout потвърждението трябва
+  // недвусмислено да покаже "за <recipient>", не "Крайна цена" общо.
+  // displayName е preview (§12 — НЕ authoritative), backend валидира отново
+  // при checkout creation.
+  // != null (не !== null) — hardened срещу runtime undefined (напр. legacy
+  // test fixtures/partial LobbyScreenState обекти без explicit поле), не
+  // само TS-level null. Missing поле трябва да значи "normal purchase", не
+  // "gift" по подразбиране.
+  const isGiftCheckout = state.shopGiftRecipientProfileId != null
+  const giftRecipientLabel = state.shopGiftRecipientDisplayName?.trim() || 'играча'
 
   return `
     <div data-shop-purchase-confirm-root="1" style="position:fixed;inset:0;z-index:13700;display:flex;align-items:center;justify-content:center;padding:18px;">
@@ -2272,7 +2321,7 @@ export function renderShopPurchaseConfirmModal(state: LobbyScreenState): string 
 
         <div style="display:grid;gap:16px;">
           <div>
-            <div id="shop-purchase-confirm-title" style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">Потвърждение на покупка</div>
+            <div id="shop-purchase-confirm-title" style="font-size:24px;line-height:1.1;font-weight:900;color:#f8fafc;">${isGiftCheckout ? `Потвърждение на подарък за ${escapeHtml(giftRecipientLabel)}` : 'Потвърждение на покупка'}</div>
             <div style="margin-top:7px;font-size:13px;line-height:1.45;color:rgba(255,255,255,0.60);font-weight:700;">Прегледайте избрания пакет преди продължаване към Stripe Checkout.</div>
           </div>
 
@@ -2280,14 +2329,18 @@ export function renderShopPurchaseConfirmModal(state: LobbyScreenState): string 
             <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="width:82px;height:82px;object-fit:contain;">
             <div style="display:grid;gap:7px;min-width:0;">
               <div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.48);text-transform:uppercase;letter-spacing:0.08em;">${escapeHtml(coinPackage.title)}</div>
-              <div style="font-size:24px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(coinPackage.yellowCoinsAmount)} жълтици</div>
-              <div style="font-size:16px;font-weight:900;color:#ffffff;">Крайна цена: ${escapeHtml(priceLabel)}</div>
+              <div style="font-size:24px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(coinPackage.yellowCoinsAmount)} жълтици${isGiftCheckout ? ` за ${escapeHtml(giftRecipientLabel)}` : ''}</div>
+              <div style="font-size:16px;font-weight:900;color:#ffffff;">Цена: ${escapeHtml(priceLabel)}</div>
             </div>
           </div>
 
           <div style="display:grid;gap:8px;border:1px solid rgba(255,255,255,0.10);border-radius:10px;background:rgba(255,255,255,0.035);padding:13px 14px;">
             <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.78);">Жълтиците са виртуална игрова валута и не могат да се обменят за реални пари.</div>
-            <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.78);">След успешно плащане жълтиците ще бъдат добавени автоматично към профила ви.</div>
+            ${isGiftCheckout ? `
+              <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.78);">След успешно плащане жълтиците ще бъдат добавени автоматично към профила на ${escapeHtml(giftRecipientLabel)}, не към вашия.</div>
+            ` : `
+              <div style="font-size:13px;line-height:1.45;font-weight:800;color:rgba(255,255,255,0.78);">След успешно плащане жълтиците ще бъдат добавени автоматично към профила ви.</div>
+            `}
           </div>
 
           <div style="display:grid;grid-template-columns:auto minmax(0,1fr);gap:10px;align-items:start;border:1px solid rgba(212,165,32,0.28);border-radius:10px;background:rgba(212,165,32,0.08);padding:12px;">
@@ -3034,6 +3087,51 @@ function renderGiftItemReceivedModal(state: LobbyScreenState): string {
         <button
           type="button"
           data-lobby-gift-item-received-ok="1"
+          style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"
+        >OK</button>
+      </div>
+    </div>
+  `
+}
+
+// "Подари авоари" (§4 в брифа) — recipient durable notification modal, mirror
+// на renderGiftItemReceivedModal по-горе (ОТДЕЛЕН domain/queue, виж
+// createLobbyFlowController.ts enqueuePaidGiftNotifications). bodyText е
+// server-composed, immutable snapshot текст ("<PAYER> ви подари <reward>.") —
+// white-space:pre-line пази bundle-овия multi-line формат без нужда от <br>.
+export function renderPaidGiftNotificationModal(state: LobbyScreenState): string {
+  if (!state.paidGiftNotificationModal) return ''
+  const { bodyText } = state.paidGiftNotificationModal
+  return `
+    <div data-lobby-paid-gift-notification-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+        <div style="font-size:17px;line-height:1.4;color:#f8fafc;white-space:pre-line;overflow-wrap:anywhere;">${escapeHtml(bodyText)}</div>
+        <button
+          type="button"
+          data-lobby-paid-gift-notification-ok="1"
+          style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"
+        >OK</button>
+      </div>
+    </div>
+  `
+}
+
+// "Подари авоари" (§3 в брифа) — payer success modal СЛЕД confirmed
+// fulfillment. ОТДЕЛЕН от established VIP success popup/coin +N overlay
+// (normal purchase success поведение остава непроменено) — показва се само
+// за gift покупки (payerSuccessText != null от backend).
+export function renderPaidGiftPayerSuccessModal(state: LobbyScreenState): string {
+  if (!state.paidGiftPayerSuccessModal) return ''
+  const { text } = state.paidGiftPayerSuccessModal
+  return `
+    <div data-lobby-paid-gift-payer-success-root="1" style="position:fixed;inset:0;z-index:13700;display:flex;align-items:center;justify-content:center;padding:24px;">
+      <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
+      <div role="dialog" aria-modal="true" style="position:relative;width:min(92vw,400px);border-radius:12px;border:2px solid rgba(212,165,32,0.72);background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);box-shadow:0 34px 80px rgba(0,0,0,0.48);padding:32px 28px;display:flex;flex-direction:column;align-items:center;gap:18px;text-align:center;">
+        <div style="font-size:17px;line-height:1.4;color:#f8fafc;white-space:pre-line;overflow-wrap:anywhere;">${escapeHtml(text)}</div>
+        <button
+          type="button"
+          data-lobby-paid-gift-payer-success-ok="1"
           style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"
         >OK</button>
       </div>
@@ -5505,6 +5603,29 @@ function renderMobilePageTitle(title: string, subtitle = ''): string {
   `
 }
 
+// "Подари авоари" (§9-10/§35 в брифа) — mobile mirror на
+// renderShopGiftModeHeader (desktop). Reuse-ва renderMobilePageTitle-a
+// established title+subtitle pattern, само override-ва текста в gift mode.
+function renderMobileShopGiftModeTitle(state: LobbyScreenState, normalTitle: string, normalSubtitle = ''): string {
+  // == null (не === null) — hardened срещу runtime undefined, mirror на
+  // renderShopPurchaseConfirmModal isGiftCheckout коментара.
+  if (state.shopGiftRecipientProfileId == null) {
+    return renderMobilePageTitle(normalTitle, normalSubtitle)
+  }
+
+  const recipientLabel = state.shopGiftRecipientDisplayName?.trim() || 'играча'
+  const errorHtml = state.shopGiftRecipientErrorText ? `
+    <div style="margin-top:8px;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:13px;font-weight:800;padding:10px 12px;">
+      ${escapeHtml(state.shopGiftRecipientErrorText)}
+    </div>
+  ` : ''
+
+  return `
+    ${renderMobilePageTitle(`Подари на ${recipientLabel}`, `Можете да подарите на ${recipientLabel} жълтици, VIP или комбиниран пакет.`)}
+    ${errorHtml}
+  `
+}
+
 function renderMobileStateMessage(text: string, tone: 'normal' | 'error' = 'normal'): string {
   return `
     <div style="
@@ -5712,7 +5833,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
     const maxDays = state.vipPackages.reduce((max, current) => Math.max(max, current.days), 0)
 
     return `
-      ${renderMobilePageTitle('Магазин VIP')}
+      ${renderMobileShopGiftModeTitle(state, 'Магазин VIP')}
       ${tabBarHtml}
       ${state.vipPackagesLoading ? renderMobileStateMessage('Зареждане на VIP офертите...')
         : state.vipPackagesErrorText ? renderMobileStateMessage(state.vipPackagesErrorText, 'error')
@@ -5761,13 +5882,13 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
   // fall-through директно към coin rendering, значи 'bundle' tab
   // визуално ставаше active, но съдържанието оставаше coin shop.
   if (state.shopActiveTab === 'bundle') {
-    if (state.bundlePackagesLoading) return `${renderMobilePageTitle('Магазин Пакети')}${tabBarHtml}${renderMobileStateMessage('Зареждане на пакетите...')}`
-    if (state.bundlePackagesErrorText) return `${renderMobilePageTitle('Магазин Пакети')}${tabBarHtml}${renderMobileStateMessage(state.bundlePackagesErrorText, 'error')}`
+    if (state.bundlePackagesLoading) return `${renderMobileShopGiftModeTitle(state, 'Магазин Пакети')}${tabBarHtml}${renderMobileStateMessage('Зареждане на пакетите...')}`
+    if (state.bundlePackagesErrorText) return `${renderMobileShopGiftModeTitle(state, 'Магазин Пакети')}${tabBarHtml}${renderMobileStateMessage(state.bundlePackagesErrorText, 'error')}`
 
     const isLoggedInBundle = state.profile.profileId !== null
 
     return `
-      ${renderMobilePageTitle('Магазин Пакети')}
+      ${renderMobileShopGiftModeTitle(state, 'Магазин Пакети')}
       ${tabBarHtml}
       ${state.bundlePurchaseMessageText ? `<div style="margin:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:10px;color:#f8fafc;font-size:13px;font-weight:800;">${escapeHtml(state.bundlePurchaseMessageText)}</div>` : ''}
       ${state.bundlePackages.length === 0 ? renderMobileStateMessage('Няма активни пакети в момента.') : `
@@ -5825,6 +5946,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
                 <div style="min-width:0;">
                   <div style="font-size:13px;font-weight:900;color:#ffffff;">${escapeHtml(purchase.titleSnapshot)}</div>
                   <div style="margin-top:4px;font-size:12px;font-weight:800;color:${getPurchaseStatusColor(purchase.status)};">${formatAmount(purchase.yellowCoinsAmount)} + ${purchase.vipDays}д VIP · ${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
+                  ${renderPurchaseHistoryGiftBadge(purchase.recipientDisplayNameSnapshot)}
                 </div>
               </div>
             </div>
@@ -5834,11 +5956,11 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
     `
   }
 
-  if (state.shopPackagesLoading) return `${renderMobilePageTitle('Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage('Зареждане на магазина...')}`
-  if (state.shopPackagesErrorText) return `${renderMobilePageTitle('Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage(state.shopPackagesErrorText, 'error')}`
+  if (state.shopPackagesLoading) return `${renderMobileShopGiftModeTitle(state, 'Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage('Зареждане на магазина...')}`
+  if (state.shopPackagesErrorText) return `${renderMobileShopGiftModeTitle(state, 'Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage(state.shopPackagesErrorText, 'error')}`
 
   return `
-    ${renderMobilePageTitle('Магазин Жълтици', `Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)} жълтици`)}
+    ${renderMobileShopGiftModeTitle(state, 'Магазин Жълтици', `Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)} жълтици`)}
     ${tabBarHtml}
     ${state.shopPurchaseMessageText ? `<div style="margin:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:10px;color:#f8fafc;font-size:13px;font-weight:800;">${escapeHtml(state.shopPurchaseMessageText)}</div>` : ''}
     <section style="padding:12px;display:grid;gap:10px;">
@@ -5868,7 +5990,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
           const isHideConfirm = state.shopPurchaseHideConfirmId === purchase.purchaseId
           const canPay = purchase.status === 'pending'
           const disableButtons = isActionPurchase || state.shopPurchaseActionPurchaseId !== null
-          return `<div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:10px;"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;"><div style="min-width:0;"><div style="font-size:13px;font-weight:900;color:#ffffff;">${escapeHtml(purchase.title)}</div><div style="margin-top:4px;font-size:12px;font-weight:800;color:${getPurchaseStatusColor(purchase.status)};">${formatAmount(purchase.yellowCoinsAmount)} · ${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div></div><div style="display:flex;align-items:center;gap:5px;flex-shrink:0;">${canPay ? `<button type="button" data-shop-purchase-resume="${escapeHtml(purchase.purchaseId)}" ${disableButtons ? 'disabled' : ''} style="height:28px;padding:0 8px;border:0;border-radius:5px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:11px;font-weight:900;cursor:${disableButtons ? 'wait' : 'pointer'};opacity:${disableButtons ? '0.6' : '1'};">${isActionPurchase ? '...' : 'Плати'}</button>` : ''}${isHideConfirm ? `<span style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.65);">${purchase.status === 'pending' ? 'Отмени плащането?' : 'Премахни от историята?'}</span><button type="button" data-shop-purchase-hide-confirm="${escapeHtml(purchase.purchaseId)}" style="height:26px;padding:0 7px;border:1px solid rgba(255,80,80,0.5);border-radius:5px;background:rgba(255,80,80,0.12);color:#fca5a5;font-size:11px;font-weight:900;cursor:pointer;">Да</button><button type="button" data-shop-purchase-hide-cancel="1" style="height:26px;padding:0 7px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.45);font-size:11px;font-weight:900;cursor:pointer;">Не</button>` : `<button type="button" data-shop-purchase-hide="${escapeHtml(purchase.purchaseId)}" ${disableButtons ? 'disabled' : ''} style="width:26px;height:26px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.38);font-size:14px;font-weight:700;cursor:${disableButtons ? 'default' : 'pointer'};display:flex;align-items:center;justify-content:center;line-height:1;opacity:${disableButtons ? '0.4' : '1'};" title="Скрий от историята">×</button>`}</div></div></div>`
+          return `<div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:10px;"><div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;"><div style="min-width:0;"><div style="font-size:13px;font-weight:900;color:#ffffff;">${escapeHtml(purchase.title)}</div><div style="margin-top:4px;font-size:12px;font-weight:800;color:${getPurchaseStatusColor(purchase.status)};">${formatAmount(purchase.yellowCoinsAmount)} · ${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>${renderPurchaseHistoryGiftBadge(purchase.recipientDisplayNameSnapshot)}</div><div style="display:flex;align-items:center;gap:5px;flex-shrink:0;">${canPay ? `<button type="button" data-shop-purchase-resume="${escapeHtml(purchase.purchaseId)}" ${disableButtons ? 'disabled' : ''} style="height:28px;padding:0 8px;border:0;border-radius:5px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:11px;font-weight:900;cursor:${disableButtons ? 'wait' : 'pointer'};opacity:${disableButtons ? '0.6' : '1'};">${isActionPurchase ? '...' : 'Плати'}</button>` : ''}${isHideConfirm ? `<span style="font-size:10px;font-weight:800;color:rgba(255,255,255,0.65);">${purchase.status === 'pending' ? 'Отмени плащането?' : 'Премахни от историята?'}</span><button type="button" data-shop-purchase-hide-confirm="${escapeHtml(purchase.purchaseId)}" style="height:26px;padding:0 7px;border:1px solid rgba(255,80,80,0.5);border-radius:5px;background:rgba(255,80,80,0.12);color:#fca5a5;font-size:11px;font-weight:900;cursor:pointer;">Да</button><button type="button" data-shop-purchase-hide-cancel="1" style="height:26px;padding:0 7px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.45);font-size:11px;font-weight:900;cursor:pointer;">Не</button>` : `<button type="button" data-shop-purchase-hide="${escapeHtml(purchase.purchaseId)}" ${disableButtons ? 'disabled' : ''} style="width:26px;height:26px;border:1px solid rgba(255,255,255,0.14);border-radius:5px;background:transparent;color:rgba(255,255,255,0.38);font-size:14px;font-weight:700;cursor:${disableButtons ? 'default' : 'pointer'};display:flex;align-items:center;justify-content:center;line-height:1;opacity:${disableButtons ? '0.4' : '1'};" title="Скрий от историята">×</button>`}</div></div></div>`
         }).join('')}</div>` : ''}
       </section>
     ` : ''}
@@ -7584,6 +7706,7 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
                 <div>
                   <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.titleSnapshot)}</div>
                   <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
+                  ${renderPurchaseHistoryGiftBadge(purchase.recipientDisplayNameSnapshot)}
                 </div>
                 <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)} + ${purchase.vipDays}д VIP</div>
                 <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
@@ -7670,6 +7793,34 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
   `
 }
 
+// "Подари авоари" (§9-10 в брифа) — заглавие/подзаглавие override, когато
+// Shop е в gift mode (state.shopGiftRecipientProfileId != null), еднакъв за
+// трите таба (Жълтици|VIP|Пакети, §9: "tabs Жълтици|VIP|Пакети, използва
+// same shop cards, не redesign"). displayName е ЧИСТО preview (§12 в брифа
+// — НЕ authoritative), fallback към generic текст, ако все още не е
+// resolve-нат.
+function renderShopGiftModeHeader(state: LobbyScreenState, normalTitle: string): string {
+  // == null (не === null) — hardened срещу runtime undefined, mirror на
+  // renderShopPurchaseConfirmModal isGiftCheckout коментара.
+  if (state.shopGiftRecipientProfileId == null) {
+    return `<div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">${escapeHtml(normalTitle)}</div>`
+  }
+
+  const recipientLabel = state.shopGiftRecipientDisplayName?.trim() || 'играча'
+
+  return `
+    <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Подари на ${escapeHtml(recipientLabel)}</div>
+    <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.62);margin-top:4px;">
+      Можете да подарите на ${escapeHtml(recipientLabel)} жълтици, VIP или комбиниран пакет.
+    </div>
+    ${state.shopGiftRecipientErrorText ? `
+      <div style="margin-top:8px;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:13px;font-weight:800;padding:10px 12px;">
+        ${escapeHtml(state.shopGiftRecipientErrorText)}
+      </div>
+    ` : ''}
+  `
+}
+
 export function renderShopPanel(state: LobbyScreenState): string {
   const tabBar = renderShopTabBar(state.shopActiveTab, 'desktop')
 
@@ -7678,7 +7829,7 @@ export function renderShopPanel(state: LobbyScreenState): string {
       <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
         <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
           <div>
-            <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин Пакети</div>
+            ${renderShopGiftModeHeader(state, 'Магазин Пакети')}
           </div>
         </div>
         ${tabBar}
@@ -7692,7 +7843,7 @@ export function renderShopPanel(state: LobbyScreenState): string {
       <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
         <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
           <div>
-            <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин VIP</div>
+            ${renderShopGiftModeHeader(state, 'Магазин VIP')}
           </div>
         </div>
         ${tabBar}
@@ -7761,6 +7912,7 @@ export function renderShopPanel(state: LobbyScreenState): string {
                   <div>
                     <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.title)}</div>
                     <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
+                    ${renderPurchaseHistoryGiftBadge(purchase.recipientDisplayNameSnapshot)}
                   </div>
                   <div style="font-size:14px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)}</div>
                   <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
@@ -7802,7 +7954,7 @@ export function renderShopPanel(state: LobbyScreenState): string {
     <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
       <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
         <div>
-          <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин Жълтици</div>
+          ${renderShopGiftModeHeader(state, 'Магазин Жълтици')}
         </div>
         <div style="border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#0a0a0a;padding:10px 12px;color:#d4a520;font-size:13px;font-weight:900;">
           Баланс: ${formatAmount(state.profile.yellowCoinsBalance ?? 0)}
@@ -12936,6 +13088,8 @@ export function renderLobbyScreen(
     ${renderGiftItemModal(state)}
     ${renderGiftItemSuccessModal(state)}
     ${renderGiftItemReceivedModal(state)}
+    ${renderPaidGiftNotificationModal(state)}
+    ${renderPaidGiftPayerSuccessModal(state)}
     ${renderImageViewerOverlay(state)}
   ` : `
     <div
@@ -13243,6 +13397,8 @@ export function renderLobbyScreen(
     ${renderGiftItemModal(state)}
     ${renderGiftItemSuccessModal(state)}
     ${renderGiftItemReceivedModal(state)}
+    ${renderPaidGiftNotificationModal(state)}
+    ${renderPaidGiftPayerSuccessModal(state)}
     ${renderImageViewerOverlay(state)}
   `
 
@@ -15100,6 +15256,18 @@ export function renderLobbyScreen(
       options.onGiftItemReceivedClose()
     })
 
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-paid-gift-notification-ok="1"]')
+    ?.addEventListener('click', () => {
+      options.onPaidGiftNotificationClose()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-paid-gift-payer-success-ok="1"]')
+    ?.addEventListener('click', () => {
+      options.onPaidGiftPayerSuccessClose()
+    })
+
   root.querySelectorAll<HTMLButtonElement>('[data-admin-mission-edit]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const missionId = btn.dataset.adminMissionEdit?.trim() ?? ''
@@ -15398,6 +15566,10 @@ export function renderLobbyScreen(
       showPikaSupportChatButton: state.showPikaSupportChatButton,
       showTopicsPersonalMessageButton: false,
       giftItemRecipientProfileId: !profilePopupIsOwnProfile ? profilePopupResolvedProfile.profileId : null,
+      // "Подари авоари" (§8-9 в брифа) — видим за ВСЕКИ друг профил (normal
+      // ИЛИ staff), независимо от friendship статус; eligibility на
+      // получателя се проверява authoritative server-side при checkout.
+      giftShopRecipientProfileId: !profilePopupIsOwnProfile ? profilePopupResolvedProfile.profileId : null,
       ownVipActiveUntil: profilePopupIsOwnProfile ? state.ownVipActiveUntil : null,
       vipGrantOpen: state.vipGrantOpen,
       vipGrantSubmitting: state.vipGrantSubmitting,
@@ -15433,6 +15605,7 @@ export function renderLobbyScreen(
       onGiftCoinsClick: options.onGiftCoinsClick,
       onGiftCoinsBypassClick: options.onGiftCoinsBypassClick,
       onGiftItemClick: options.onGiftItemClick,
+      onGiftShopClick: options.onGiftShopClick,
       onPikaSupportChatClick: options.onPikaSupportChatClick,
       onTopicsPersonalMessageClick: () => {},
       onLikeClick: options.onLikeClick,

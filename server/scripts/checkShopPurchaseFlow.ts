@@ -131,8 +131,30 @@ function buildTestDb(dbPath: string): void {
       profile_kind TEXT NOT NULL DEFAULT 'human' CHECK (profile_kind IN ('human','bot')),
       username TEXT NULL,
       display_name TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','disabled')),
+      is_temporary INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    -- "Подари авоари" (20260923_002 migration) recipient eligibility check
+    -- (coinPurchaseStore.selectGiftRecipientEligibilityStatement) реферира
+    -- тази таблица директно — нужна тук само за да не chупи store-a prepared
+    -- statements, dedicated gift тестове са в checkPaidGiftShopStores.ts.
+    CREATE TABLE profile_bans (
+      ban_id TEXT PRIMARY KEY, profile_id TEXT NOT NULL,
+      banned_until TEXT NOT NULL, reason TEXT NOT NULL, lifted_at TEXT NULL,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+    );
+    -- "Подари авоари" durable recipient notification (20260923_003 migration, Round 3).
+    CREATE TABLE paid_gift_notification_log (
+      purchase_id TEXT NOT NULL,
+      purchase_type TEXT NOT NULL CHECK (purchase_type IN ('coin', 'vip', 'bundle')),
+      recipient_profile_id TEXT NOT NULL,
+      sender_display_name_snapshot TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      read_at TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (purchase_id, purchase_type)
     );
     CREATE TABLE profile_wallets (
       profile_id TEXT PRIMARY KEY,
@@ -167,11 +189,14 @@ function buildTestDb(dbPath: string): void {
       stripe_payment_intent_id TEXT, stripe_charge_id TEXT,
       payment_method_type TEXT, wallet_type TEXT,
       card_brand TEXT, card_last4 TEXT, card_country TEXT,
+      recipient_profile_id TEXT NULL REFERENCES profiles(profile_id) ON DELETE SET NULL,
+      recipient_display_name_snapshot TEXT NULL,
+      deleted_recipient_profile_id_snapshot TEXT NULL,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE,
       FOREIGN KEY (package_id) REFERENCES coin_packages(package_id) ON DELETE SET NULL
     );
     CREATE UNIQUE INDEX idx_coin_purchase_ledger_pending_package
-      ON coin_purchase_ledger(profile_id, package_id, status)
+      ON coin_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
       WHERE status = 'pending' AND package_id IS NOT NULL;
 
     INSERT INTO accounts VALUES ('acc-1','u1@t.bg','x','player','active',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP);

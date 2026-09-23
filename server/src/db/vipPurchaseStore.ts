@@ -3,6 +3,7 @@ import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
 import type { AdminPaymentListRow, AdminPaymentDetailRow, PaymentPeriodStats, AdminPaymentStats, PaymentMethodSnapshot } from './coinPurchaseStore.js'
+import { composePayerVipGiftSuccessText, composeRecipientVipGiftNotificationText } from './paidGiftNotificationText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -43,6 +44,11 @@ export type VipPurchaseSnapshot = {
   vipGrantId: string | null
   createdAt: string
   updatedAt: string
+  /** Mirror на coinPurchaseStore.CoinPurchaseSnapshot recipient полетата — виж коментара там. */
+  recipientProfileId: string | null
+  recipientDisplayNameSnapshot: string | null
+  /** Mirror на coinPurchaseStore.CoinPurchaseSnapshot.payerSuccessText — виж коментара там. */
+  payerSuccessText: string | null
 }
 
 export type FulfillPaidVipPurchaseParams = {
@@ -67,6 +73,7 @@ export type VipPurchaseStore = {
     profileId: string,
     packageId: VipPackageId,
     priceCents: number,
+    recipientProfileId?: string | null,
   ) => { ok: true; purchase: VipPurchaseSnapshot } | { ok: false; message: string }
   getPurchaseById: (purchaseId: string) => VipPurchaseSnapshot | null
   attachCheckoutSession: (purchaseId: string, checkoutSessionId: string) => VipPurchaseSnapshot | null
@@ -82,7 +89,7 @@ export type VipPurchaseStore = {
    * BEGIN/COMMIT, не може безопасно да участва в ТАЗИ транзакция.
    */
   fulfillPaidPurchase: (params: FulfillPaidVipPurchaseParams) =>
-    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
+    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string }
   /**
    * Admin payment statistics contribution от VIP покупки — mirror на
@@ -129,6 +136,8 @@ type VipPurchaseRow = {
   vip_grant_id: string | null
   created_at: string
   updated_at: string
+  recipient_profile_id: string | null
+  recipient_display_name_snapshot: string | null
 }
 
 type VipPurchaseInternalRow = VipPurchaseRow & {
@@ -140,6 +149,11 @@ type VipStatusRow = {
 }
 
 function rowToSnapshot(row: VipPurchaseRow): VipPurchaseSnapshot {
+  // Mirror на coinPurchaseStore.rowToSnapshot payerSuccessText коментара.
+  const payerSuccessText = row.status === 'paid' && row.recipient_display_name_snapshot !== null
+    ? composePayerVipGiftSuccessText(row.recipient_display_name_snapshot, row.days_snapshot)
+    : null
+
   return {
     purchaseId: row.purchase_id,
     packageId: row.package_id,
@@ -153,6 +167,9 @@ function rowToSnapshot(row: VipPurchaseRow): VipPurchaseSnapshot {
     vipGrantId: row.vip_grant_id,
     createdAt: dbDateToUtc(row.created_at),
     updatedAt: dbDateToUtc(row.updated_at),
+    recipientProfileId: row.recipient_profile_id ?? null,
+    recipientDisplayNameSnapshot: row.recipient_display_name_snapshot ?? null,
+    payerSuccessText,
   }
 }
 
@@ -176,7 +193,9 @@ const SELECT_COLUMNS = `
   credited_at,
   vip_grant_id,
   created_at,
-  updated_at
+  updated_at,
+  recipient_profile_id,
+  recipient_display_name_snapshot
 `
 
 export async function createVipPurchaseStore(
@@ -206,6 +225,10 @@ export async function createVipPurchaseStore(
     WHERE profile_id = ?
       AND package_id = ?
       AND status = 'pending'
+      -- Mirror на coinPurchaseStore.selectPendingPurchaseStatement коментара:
+      -- recipient трябва да съвпада точно, за да не се reuse-не грешен
+      -- pending ред между normal/gift или между различни recipients.
+      AND recipient_profile_id IS NOT DISTINCT FROM ?
     ORDER BY created_at DESC
     LIMIT 1;
   `)
@@ -219,8 +242,30 @@ export async function createVipPurchaseStore(
       price_cents_snapshot,
       currency,
       provider,
-      status
-    ) VALUES (?, ?, ?, ?, ?, ?, 'stripe', 'pending');
+      status,
+      recipient_profile_id,
+      recipient_display_name_snapshot
+    ) VALUES (?, ?, ?, ?, ?, ?, 'stripe', 'pending', ?, ?);
+  `)
+
+  // Recipient eligibility — идентичен pattern на
+  // coinPurchaseStore.selectGiftRecipientEligibilityStatement (виж коментара
+  // там за пълния rationale).
+  const selectGiftRecipientEligibilityStatement = database.prepare(`
+    SELECT p.display_name AS display_name
+    FROM profiles p
+    WHERE p.profile_id = ?
+      AND p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+      AND p.is_temporary = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM profile_bans pb
+        WHERE pb.profile_id = p.profile_id
+          AND pb.lifted_at IS NULL
+          AND pb.banned_until > CURRENT_TIMESTAMP
+      )
+    LIMIT 1;
   `)
 
   const selectPurchaseStatement = database.prepare(`
@@ -339,6 +384,18 @@ export async function createVipPurchaseStore(
     ) VALUES (?, ?, 'purchase', 'days', ?, NULL, ?, ?, ?, ?);
   `)
 
+  // "Подари авоари" durable recipient notification (Round 3 §5) — mirror на
+  // coinPurchaseStore.ts identичните statements/rationale.
+  const selectProfileDisplayNameStatement = database.prepare(`
+    SELECT display_name FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+
+  const insertPaidGiftNotificationStatement = database.prepare(`
+    INSERT OR IGNORE INTO paid_gift_notification_log (
+      purchase_id, purchase_type, recipient_profile_id, sender_display_name_snapshot, body_text
+    ) VALUES (?, 'vip', ?, ?, ?);
+  `)
+
   function listProfilePurchases(profileId: string): VipPurchaseSnapshot[] {
     const normalizedProfileId = normalizeId(profileId)
     if (normalizedProfileId.length === 0) return []
@@ -362,6 +419,7 @@ export async function createVipPurchaseStore(
     profileId: string,
     packageId: VipPackageId,
     priceCents: number,
+    recipientProfileId?: string | null,
   ): { ok: true; purchase: VipPurchaseSnapshot } | { ok: false; message: string } {
     const normalizedProfileId = normalizeId(profileId)
     if (normalizedProfileId.length === 0) {
@@ -374,9 +432,31 @@ export async function createVipPurchaseStore(
       return { ok: false, message: 'Невалидна цена.' }
     }
 
+    // §14 в брифа — self-gift защита (mirror на coinPurchaseStore).
+    const normalizedRecipientProfileId = recipientProfileId ? normalizeId(recipientProfileId) : null
+
+    if (normalizedRecipientProfileId !== null && normalizedRecipientProfileId === normalizedProfileId) {
+      return { ok: false, message: 'Не можете да подарите на себе си.' }
+    }
+
+    let recipientDisplayName: string | null = null
+
+    if (normalizedRecipientProfileId !== null) {
+      const recipientRow = selectGiftRecipientEligibilityStatement.get(
+        normalizedRecipientProfileId,
+      ) as { display_name: string } | undefined
+
+      if (!recipientRow) {
+        return { ok: false, message: 'Получателят не може да приеме подарък в момента.' }
+      }
+
+      recipientDisplayName = recipientRow.display_name
+    }
+
     const existingPending = selectPendingPurchaseStatement.get(
       normalizedProfileId,
       packageId,
+      normalizedRecipientProfileId,
     ) as VipPurchaseRow | undefined
 
     if (existingPending) {
@@ -393,6 +473,8 @@ export async function createVipPurchaseStore(
       days,
       priceCents,
       'EUR',
+      normalizedRecipientProfileId,
+      recipientDisplayName,
     )
 
     const purchase = getPurchaseById(purchaseId)
@@ -424,19 +506,57 @@ export async function createVipPurchaseStore(
   function fulfillByInternalRow(
     row: VipPurchaseInternalRow,
   ):
-    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
+    | {
+        ok: true
+        purchase: VipPurchaseSnapshot
+        alreadyCredited: boolean
+        newActiveUntil: string
+        payerSuccessText: string | null
+        /**
+         * Non-null САМО при реален нов fulfillment (alreadyCredited===false)
+         * на gift покупка — index.ts webhook handler-ът го ползва за
+         * realtime WS push към recipient-а. Винаги null при alreadyCredited
+         * (duplicate webhook retry НЕ трябва да push-не повторно, notification
+         * вече е персистиран idempotent от първия успешен fulfillment).
+         */
+        recipientNotificationText: string | null
+      }
     | { ok: false; message: string } {
+    // §15-20/§24 в брифа — наградата (VIP дни) отива на RECIPIENT-а, не на
+    // PAYER-а. row.profile_id остава семантично "payer" (Stripe session
+    // owner).
+    //
+    // КРИТИЧНО (review finding §1) — recipient_profile_id е FK колона с ON
+    // DELETE SET NULL: ако recipient hard-delete-не се МЕЖДУ checkout и
+    // fulfillment, SQLite нулира тази колона В LEDGER РЕДА веднага при
+    // DELETE-а (не lazily). Старият `row.recipient_profile_id ??
+    // row.profile_id` fallback-ваше грешно към PAYER-а в този сценарий
+    // (доказано от checkGiftRecipientHardDeleteFallback.ts с реален FK
+    // enforcement). recipient_display_name_snapshot (plain TEXT, не FK) е
+    // durable gift marker — оцелява SET NULL cascade-а. Виж identичния
+    // коментар в coinPurchaseStore.ts fulfillByInternalRow за пълния
+    // rationale.
+    const wasGiftPurchase = row.recipient_display_name_snapshot !== null
+
     if (row.status === 'paid' && row.credited_at !== null) {
       // alreadyCredited: връщаме ТЕКУЩИЯ vip_status.active_until (не
       // resulting_active_until снапшота на grant реда) — идентичен reasoning
       // на established coinPurchaseStore alreadyCredited path: източникът на
       // истина за "текущо" състояние е винаги live таблицата, не snapshot-а.
-      const statusRow = selectVipStatusStatement.get(row.profile_id) as VipStatusRow | undefined
+      // Read-only lookup — безопасно дори recipient вече да не съществува
+      // (просто връща undefined, SELECT не enforce-ва FK).
+      const alreadyCreditedTarget = wasGiftPurchase ? row.recipient_profile_id : row.profile_id
+      const statusRow = alreadyCreditedTarget
+        ? (selectVipStatusStatement.get(alreadyCreditedTarget) as VipStatusRow | undefined)
+        : undefined
+      const purchase = rowToSnapshot(row)
       return {
         ok: true,
-        purchase: rowToSnapshot(row),
+        purchase,
         alreadyCredited: true,
         newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
+        payerSuccessText: purchase.payerSuccessText,
+        recipientNotificationText: null,
       }
     }
 
@@ -447,7 +567,22 @@ export async function createVipPurchaseStore(
       }
     }
 
+    if (wasGiftPurchase && row.recipient_profile_id === null) {
+      // Recipient е бил валиден при checkout (snapshot доказва gift intent),
+      // но вече физически не съществува — safe-fail explicit, БЕЗ да се
+      // опитваме дори да четем/пипаме vip_status. Редът остава 'pending'.
+      return {
+        ok: false,
+        message: 'Получателят на подаръка вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
+      }
+    }
+
+    const rewardRecipientProfileId = wasGiftPurchase
+      ? (row.recipient_profile_id as string)
+      : row.profile_id
+
     let newActiveUntilSqlite = ''
+    let recipientNotificationText: string | null = null
 
     try {
       // BEGIN IMMEDIATE (не deferred BEGIN) — взима write lock веднага при
@@ -463,7 +598,13 @@ export async function createVipPurchaseStore(
       // active_until е в бъдещето, удължаваме ОТ него; иначе тръгваме от
       // "сега". Идентична логика на vipStore.applyGrant, реimplementирана
       // тук за да остане в СЪЩАТА транзакция като ledger CAS-а по-долу.
-      const currentStatusRow = selectVipStatusStatement.get(row.profile_id) as VipStatusRow | undefined
+      // §30 edge case: ако rewardRecipientProfileId вече не съществува
+      // физически, insertVipGrantStatement/upsertVipStatusStatement по-долу
+      // УДРЯТ FK constraint violation (vip_grants.profile_id,
+      // vip_status.profile_id REFERENCES profiles) — catch блокът ROLLBACK-ва,
+      // редът остава 'pending' permanently, safe-fail (mirror на
+      // coinPurchaseStore.fulfillByInternalRow коментара).
+      const currentStatusRow = selectVipStatusStatement.get(rewardRecipientProfileId) as VipStatusRow | undefined
       const now = new Date()
       const currentActiveUntil = currentStatusRow ? new Date(dbDateToUtc(currentStatusRow.active_until)) : null
       const extensionBase = currentActiveUntil && currentActiveUntil.getTime() > now.getTime()
@@ -486,12 +627,15 @@ export async function createVipPurchaseStore(
 
         const fresh = getPurchaseWithProfileById(row.purchase_id)
         if (fresh?.status === 'paid') {
-          const statusRow = selectVipStatusStatement.get(row.profile_id) as VipStatusRow | undefined
+          const statusRow = selectVipStatusStatement.get(rewardRecipientProfileId) as VipStatusRow | undefined
+          const purchase = rowToSnapshot(fresh)
           return {
             ok: true,
-            purchase: rowToSnapshot(fresh),
+            purchase,
             alreadyCredited: true,
             newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
+            payerSuccessText: purchase.payerSuccessText,
+            recipientNotificationText: null,
           }
         }
         return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
@@ -500,7 +644,7 @@ export async function createVipPurchaseStore(
       const grantId = randomUUID()
       insertVipGrantStatement.run(
         grantId,
-        row.profile_id,
+        rewardRecipientProfileId,
         row.days_snapshot,
         newActiveUntilSqlite,
         row.purchase_id,
@@ -509,7 +653,26 @@ export async function createVipPurchaseStore(
       )
 
       attachVipGrantIdStatement.run(grantId, row.purchase_id)
-      upsertVipStatusStatement.run(row.profile_id, newActiveUntilSqlite)
+      upsertVipStatusStatement.run(rewardRecipientProfileId, newActiveUntilSqlite)
+
+      // "Подари авоари" durable recipient notification (Round 3 §5) — mirror
+      // на coinPurchaseStore.ts identичния коментар/rationale. СЛЕД успешен
+      // CAS+grant, ПРЕДИ COMMIT — атомарно с VIP extend-а по-горе.
+      if (wasGiftPurchase) {
+        const senderProfileRow = selectProfileDisplayNameStatement.get(row.profile_id) as
+          | { display_name: string }
+          | undefined
+        const senderDisplayName = senderProfileRow?.display_name?.trim() || 'Играч'
+        const bodyText = composeRecipientVipGiftNotificationText(senderDisplayName, row.days_snapshot)
+
+        insertPaidGiftNotificationStatement.run(
+          row.purchase_id,
+          rewardRecipientProfileId,
+          senderDisplayName,
+          bodyText,
+        )
+        recipientNotificationText = bodyText
+      }
 
       database.exec('COMMIT;')
     } catch (error) {
@@ -529,13 +692,13 @@ export async function createVipPurchaseStore(
       return { ok: false, message: 'VIP беше активиран, но покупката не може да се прочете.' }
     }
 
-    return { ok: true, purchase: fulfilled, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite) }
+    return { ok: true, purchase: fulfilled, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
   }
 
   function fulfillPaidPurchase(
     params: FulfillPaidVipPurchaseParams,
   ):
-    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
+    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
     const { checkoutSessionId, purchaseId, stripePaymentStatus, stripeCurrency, stripeAmountTotalCents } = params
 

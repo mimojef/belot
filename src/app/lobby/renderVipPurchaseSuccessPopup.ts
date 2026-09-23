@@ -15,6 +15,15 @@ export type VipPurchaseSuccessPopupState = {
   phase: VipPurchaseSuccessPopupPhase
   days: number
   activeUntilLabel: string | null
+  /**
+   * "Подари авоари" (§29 в брифа) — non-null означава ТАЗИ покупка е била
+   * gift, popup-ът показва "Подаръкът за <recipient> е изпратен успешно"
+   * вместо "Вие успешно закупихте VIP...". Идва от
+   * VipPurchaseSnapshot.recipientDisplayNameSnapshot (ledger row, settle-нат
+   * от webhook-a) — НИКОГА от client-side gift navigation state (изгубено
+   * след Stripe redirect).
+   */
+  giftRecipientDisplayName: string | null
 }
 
 export type VipPurchaseSuccessPopupOptions = {
@@ -84,13 +93,20 @@ export function renderVipPurchaseSuccessPopup(state: VipPurchaseSuccessPopupStat
   }
 
   const daysWord = state.days === 1 ? 'ден' : 'дни'
-  const activeUntilLine = state.activeUntilLabel
+  const isGift = state.giftRecipientDisplayName !== null
+  // §29 в брифа — payer (платецът) НИКОГА не вижда "Получихте X дни VIP" за
+  // gift покупка (наградата е отишла при recipient-а, не при него).
+  const activeUntilLine = !isGift && state.activeUntilLabel
     ? `<div style="font-size:14px;line-height:1.5;color:rgba(255,255,255,0.72);font-weight:700;">Вашият VIP е активен до ${escapeHtml(state.activeUntilLabel)} г.</div>`
     : ''
 
   return renderModalShell(`
-    <div style="font-size:22px;line-height:1.2;font-weight:900;color:#f8fafc;">Успешно плащане</div>
-    <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.85);font-weight:800;">Вие успешно закупихте VIP за ${state.days} ${daysWord}.</div>
+    <div style="font-size:22px;line-height:1.2;font-weight:900;color:#f8fafc;">${isGift ? 'Подаръкът е изпратен' : 'Успешно плащане'}</div>
+    <div style="font-size:15px;line-height:1.5;color:rgba(255,255,255,0.85);font-weight:800;">${
+      isGift
+        ? `Подаръкът за ${escapeHtml(state.giftRecipientDisplayName ?? '')} (${state.days} ${daysWord} VIP) е изпратен успешно.`
+        : `Вие успешно закупихте VIP за ${state.days} ${daysWord}.`
+    }</div>
     ${activeUntilLine}
     <div style="display:flex;justify-content:center;margin-top:6px;">
       <button type="button" data-vip-purchase-success-popup-ok="1" style="height:46px;min-width:130px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;">OK</button>

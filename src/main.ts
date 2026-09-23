@@ -1290,7 +1290,7 @@ async function loadShopPurchases(): Promise<
   }
 }
 
-async function startShopPurchase(packageId: string): Promise<
+async function startShopPurchase(packageId: string, recipientProfileId?: string | null): Promise<
   | { ok: true; purchases: CoinPurchaseSnapshot[]; message: string }
   | { ok: false; message: string }
 > {
@@ -1301,7 +1301,12 @@ async function startShopPurchase(packageId: string): Promise<
         'Content-Type': 'application/json',
       },
       credentials: 'include',
-      body: JSON.stringify({ packageId }),
+      // "Подари авоари" (§25 в брифа) — recipientProfileId се подава САМО в
+      // gift mode; сървърът resolve-ва canonical recipient/eligibility,
+      // клиентът никога не подава display name/price/coins.
+      body: JSON.stringify(
+        recipientProfileId ? { packageId, recipientProfileId } : { packageId },
+      ),
     })
     const data = (await response.json()) as CoinCheckoutResponse
 
@@ -1396,7 +1401,7 @@ async function loadVipPurchases(): Promise<
   }
 }
 
-async function startVipPurchase(packageId: string): Promise<
+async function startVipPurchase(packageId: string, recipientProfileId?: string | null): Promise<
   | { ok: true; message: string }
   | { ok: false; message: string }
 > {
@@ -1407,7 +1412,9 @@ async function startVipPurchase(packageId: string): Promise<
         'Content-Type': 'application/json',
       },
       credentials: 'include',
-      body: JSON.stringify({ packageId }),
+      body: JSON.stringify(
+        recipientProfileId ? { packageId, recipientProfileId } : { packageId },
+      ),
     })
     const data = (await response.json()) as VipCheckoutResponse
 
@@ -1492,7 +1499,7 @@ async function loadBundlePurchases(): Promise<
   }
 }
 
-async function startBundlePurchase(packageId: string): Promise<
+async function startBundlePurchase(packageId: string, recipientProfileId?: string | null): Promise<
   | { ok: true; message: string }
   | { ok: false; message: string }
 > {
@@ -1503,7 +1510,9 @@ async function startBundlePurchase(packageId: string): Promise<
         'Content-Type': 'application/json',
       },
       credentials: 'include',
-      body: JSON.stringify({ packageId }),
+      body: JSON.stringify(
+        recipientProfileId ? { packageId, recipientProfileId } : { packageId },
+      ),
     })
     const data = (await response.json()) as BundleCheckoutResponse
 
@@ -1737,6 +1746,41 @@ async function waitForPaidVipPurchase(
   return null
 }
 
+// Mirror на waitForPaidVipPurchase — полира /api/shop/bundle-purchases.
+// Established bundle checkout не е имал dedicated success polling досега
+// (normal bundle purchase success остава established "no popup" поведение,
+// history status update при следващо Shop зареждане). Тоя poller се ползва
+// САМО за да detect-не GIFT bundle fulfillment (payerSuccessText !== null,
+// виж handleStripePaymentSuccessReturn) — normal bundle purchase поведение
+// остава непроменено.
+async function waitForPaidBundlePurchase(
+  checkoutSessionId: string,
+): Promise<BundlePurchaseSnapshot | null> {
+  const normalizedSessionId = checkoutSessionId.trim()
+  if (!normalizedSessionId) return null
+
+  const startedAt = Date.now()
+  const timeoutMs = 8500
+
+  while (Date.now() - startedAt <= timeoutMs) {
+    const result = await loadBundlePurchases()
+
+    if (result.ok) {
+      const purchase = result.purchases.find((item) => {
+        return item.providerCheckoutSessionId === normalizedSessionId
+      })
+
+      if (purchase?.status === 'paid') {
+        return purchase
+      }
+    }
+
+    await delay(700)
+  }
+
+  return null
+}
+
 function formatVipActiveUntilLabel(activeUntilIso: string): string | null {
   const parsed = new Date(activeUntilIso)
   if (!Number.isFinite(parsed.getTime())) return null
@@ -1775,7 +1819,16 @@ async function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): Pro
   // sessionStorage seenKey в handleStripePaymentSuccessReturn).
   playVipPurchaseConfirmedSound()
 
-  lobby.showVipPurchaseSuccessPopup(purchase.days, activeUntilLabel)
+  // §29 в брифа — payer вижда "Подаръкът за <recipient> е изпратен успешно",
+  // НЕ "Получихте X дни VIP", когато покупката е gift (recipientProfileId
+  // != null). Recipient snapshot идва от ledger реда (purchase, вече
+  // fulfill-нат от webhook-a), НЕ от client-side gift navigation state
+  // (което е изгубено след Stripe redirect).
+  lobby.showVipPurchaseSuccessPopup(
+    purchase.days,
+    activeUntilLabel,
+    purchase.recipientDisplayNameSnapshot,
+  )
 }
 
 async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null): Promise<void> {
@@ -1796,28 +1849,27 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
   // към success/delayed по-долу — никога отделен втори stacked popup.
   lobby.showVipPurchaseProcessingPopup()
 
-  // Success redirect URL е СПОДЕЛЕН template за coins/VIP (виж коментара
-  // до waitForPaidVipPurchase) — не знаем от URL-а сам по себе си кой тип
-  // покупка е session_id-то, затова стартираме и двата lookup-а паралелно.
-  // ВАЖНО: session_id принадлежи ТОЧНО на един purchase type — другият
-  // poller никога няма да намери match и ще изчерпи целия си 8.5s timeout
+  // Success redirect URL е СПОДЕЛЕН template за coins/VIP/bundle (виж
+  // коментара до waitForPaidVipPurchase) — не знаем от URL-а сам по себе си
+  // кой тип покупка е session_id-то, затова стартираме трите lookup-а
+  // паралелно (Round 3 разширение — преди само coin/VIP). ВАЖНО:
+  // session_id принадлежи ТОЧНО на един purchase type — другите poller-и
+  // никога няма да намерят match и ще изчерпят собствения си 8.5s timeout
   // напразно. Promise.all() тук би блокирал success прехода до по-бавния от
-  // двата (напр. VIP paid за 1-2s, но UI чака цели 8.5s заради coin poller-а,
-  // който гарантирано ще върне null). Затова reагираме на ПЪРВИЯ non-null
-  // резултат веднага, докато другият poller продължава в background-а
-  // (fire-and-forget — резултатът му вече е ирелевантен, session_id вече е
-  // разрешен еднозначно). Само ако И ДВАТА резултата дойдат null, значи
-  // нито едно потвърждение не пристигна до края на съответния timeout →
-  // delayed. Exact providerCheckoutSessionId correlation (вътре в самите
-  // poller функции) остава непроменена — само orchestration-ът на резултата
-  // тук е по-бърз.
+  // трите. Затова reагираме на ПЪРВИЯ non-null резултат веднага, докато
+  // останалите poller-и продължават в background-а (fire-and-forget —
+  // резултатът им вече е ирелевантен, session_id вече е разрешен
+  // еднозначно). Само ако И ТРИТЕ резултата дойдат null, значи нито едно
+  // потвърждение не пристигна до края на съответния timeout → delayed.
   type ResolvedPurchase =
     | { kind: 'coin'; purchase: CoinPurchaseSnapshot }
     | { kind: 'vip'; purchase: VipPurchaseSnapshot }
+    | { kind: 'bundle'; purchase: BundlePurchaseSnapshot }
 
   const resolved = await new Promise<ResolvedPurchase | null>((resolvePromise) => {
     let settled = false
     let nullCount = 0
+    const pollerCount = 3
 
     const settleOnce = (value: ResolvedPurchase | null): void => {
       if (settled) return
@@ -1831,7 +1883,7 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
         return
       }
       nullCount += 1
-      if (nullCount === 2) settleOnce(null)
+      if (nullCount === pollerCount) settleOnce(null)
     })
 
     waitForPaidVipPurchase(normalizedSessionId).then((purchase) => {
@@ -1840,16 +1892,25 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
         return
       }
       nullCount += 1
-      if (nullCount === 2) settleOnce(null)
+      if (nullCount === pollerCount) settleOnce(null)
+    })
+
+    waitForPaidBundlePurchase(normalizedSessionId).then((purchase) => {
+      if (purchase !== null) {
+        settleOnce({ kind: 'bundle', purchase })
+        return
+      }
+      nullCount += 1
+      if (nullCount === pollerCount) settleOnce(null)
     })
   })
 
   if (resolved === null) {
-    // И двата poller-а изчерпаха собствения си timeout без нито едно
-    // потвърдено плащане. Coins flow-ът остава напълно непроменен (без
-    // delayed UX за него — извън обхвата на тази задача) — само VIP loading
-    // popup-ът се превключва в 'delayed', за да НЕ остане завинаги на
-    // "Изчакваме потвърждение" без изход.
+    // И трите poller-а изчерпаха собствения си timeout без нито едно
+    // потвърдено плащане. Coins/bundle flow-ът остава напълно непроменен
+    // (без delayed UX за тях — извън обхвата на тази задача) — само VIP
+    // loading popup-ът се превключва в 'delayed', за да НЕ остане завинаги
+    // на "Изчакваме потвърждение" без изход.
     lobby.showVipPurchaseDelayedPopup()
     return
   }
@@ -1863,8 +1924,29 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
   await loadAuthSession()
   lobby.resetToLobby()
 
+  // "Подари авоари" (§3 в брифа) — унифициран payer success modal за
+  // трите продукта, САМО за gift покупки (payerSuccessText != null,
+  // backend-composed от immutable snapshot данни — canonical source of
+  // truth, виж coinPurchaseStore/vipPurchaseStore/bundlePurchaseStore.ts
+  // rowToSnapshot коментара). Normal (non-gift) self-purchase success
+  // поведение остава established и НЕПРОМЕНЕНО (coin overlay/VIP popup).
+  if (resolved.purchase.payerSuccessText !== null) {
+    lobby.closeVipPurchaseProcessingPopupSilently()
+    lobby.showPaidGiftPayerSuccessModal(resolved.purchase.payerSuccessText)
+    return
+  }
+
   if (resolved.kind === 'coin') {
+    lobby.closeVipPurchaseProcessingPopupSilently()
     showStripeCoinRewardOverlay(resolved.purchase.yellowCoinsAmount)
+    return
+  }
+
+  if (resolved.kind === 'bundle') {
+    // Established "no dedicated success popup" поведение за normal bundle
+    // покупки (виж waitForPaidBundlePurchase коментара) — history status
+    // update е достатъчен, само затваряме loading popup-а.
+    lobby.closeVipPurchaseProcessingPopupSilently()
     return
   }
 
@@ -2935,6 +3017,28 @@ async function markGiftItemDeliveryShown(transactionId: string): Promise<void> {
     )
   } catch {
     // best-effort — следващ WS connect ще донесе pending delivery-то отново, не е критично
+  }
+}
+
+// "Подари авоари" ACK (§9/§10.C в брифа) — mirror на markGiftItemDeliveryShown
+// по-горе. best-effort fire-and-forget: ако response-ът се загуби (network
+// error), notification-ът остава unread server-side и просто ще дойде
+// отново при следващ WS connect/bootstrap — idempotent retry, established
+// pattern, не критична грешка.
+async function acknowledgePaidGiftNotification(
+  purchaseId: string,
+  purchaseType: 'coin' | 'vip' | 'bundle',
+): Promise<void> {
+  try {
+    await fetch(
+      `${getApiBaseUrl()}/api/paid-gift-notifications/${purchaseType}/${encodeURIComponent(purchaseId)}/ack`,
+      {
+        method: 'POST',
+        credentials: 'include',
+      },
+    )
+  } catch {
+    // best-effort — следващ WS connect ще донесе notification-а отново, не е критично
   }
 }
 
@@ -6466,14 +6570,14 @@ lobby = createLobbyFlowController({
   onLobbyPackagesLoad: () => loadLobbyPackages(),
   onShopPackagesLoad: () => loadShopPackages(),
   onShopPurchasesLoad: () => loadShopPurchases(),
-  onShopPurchaseStart: (packageId) => startShopPurchase(packageId),
+  onShopPurchaseStart: (packageId, recipientProfileId) => startShopPurchase(packageId, recipientProfileId),
   onShopPurchaseResume: (purchaseId) => resumeShopPurchase(purchaseId),
   onShopPurchaseHide: (purchaseId) => hideShopPurchase(purchaseId),
   onVipPackagesLoad: () => loadVipPackages(),
-  onVipPurchaseStart: (packageId) => startVipPurchase(packageId),
+  onVipPurchaseStart: (packageId, recipientProfileId) => startVipPurchase(packageId, recipientProfileId),
   onBundlePackagesLoad: () => loadBundlePackages(),
   onBundlePurchasesLoad: () => loadBundlePurchases(),
-  onBundlePurchaseStart: (packageId) => startBundlePurchase(packageId),
+  onBundlePurchaseStart: (packageId, recipientProfileId) => startBundlePurchase(packageId, recipientProfileId),
   onAdminDailyRewardsLoad: () => loadAdminDailyRewards(),
   onAdminDailyRewardAdd: (amount) => addAdminDailyReward(amount),
   onAdminDailyRewardRemove: (tierId) => removeAdminDailyReward(tierId),
@@ -6525,6 +6629,7 @@ lobby = createLobbyFlowController({
   onGiftItemSubmit: (recipientProfileId, giftItemId, requestId) =>
     sendGiftItem(recipientProfileId, giftItemId, requestId),
   onMarkGiftItemDeliveryShown: (transactionId) => markGiftItemDeliveryShown(transactionId),
+  onAcknowledgePaidGiftNotification: (purchaseId, purchaseType) => acknowledgePaidGiftNotification(purchaseId, purchaseType),
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
   onVipDmFirstMessageSend: (recipientProfileId, body, imageDataUrl) => startVipDmFirstMessage(recipientProfileId, body, imageDataUrl),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),

@@ -497,7 +497,12 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; purchases: CoinPurchaseSnapshot[] }
     | { ok: false; message: string }
   >
-  onShopPurchaseStart?: (packageId: string) => Promise<
+  // "Подари авоари" (§25 в брифа) — recipientProfileId е опционален трети/
+  // втори аргумент, подаден само в gift mode (state.shopGiftRecipientProfileId).
+  // Backend resolve-ва recipient/eligibility/price canonical (виж
+  // coinPurchaseStore/vipPurchaseStore/bundlePurchaseStore.createPendingPurchase);
+  // клиентът никога не подава друго освен package identifier + recipient id.
+  onShopPurchaseStart?: (packageId: string, recipientProfileId?: string | null) => Promise<
     | { ok: true; purchases: CoinPurchaseSnapshot[]; message: string }
     | { ok: false; message: string }
   >
@@ -513,7 +518,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; packages: VipPackageSnapshot[] }
     | { ok: false; message: string }
   >
-  onVipPurchaseStart?: (packageId: string) => Promise<
+  onVipPurchaseStart?: (packageId: string, recipientProfileId?: string | null) => Promise<
     | { ok: true; message: string }
     | { ok: false; message: string }
   >
@@ -525,7 +530,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; purchases: BundlePurchaseSnapshot[] }
     | { ok: false; message: string }
   >
-  onBundlePurchaseStart?: (packageId: string) => Promise<
+  onBundlePurchaseStart?: (packageId: string, recipientProfileId?: string | null) => Promise<
     | { ok: true; message: string }
     | { ok: false; message: string }
   >
@@ -666,6 +671,9 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onMarkGiftItemDeliveryShown?: (transactionId: string) => Promise<void>
+  // "Подари авоари" recipient notification ACK — mirror на
+  // onMarkGiftItemDeliveryShown по-горе (ОТДЕЛЕН domain).
+  onAcknowledgePaidGiftNotification?: (purchaseId: string, purchaseType: 'coin' | 'vip' | 'bundle') => Promise<void>
   onNotifFriendRequestClick?: (friendshipId: string) => void
   onMarkGiftNotificationRead?: (giftId: string) => Promise<void>
   onMarkAcceptanceNotificationRead?: (friendshipId: string) => Promise<void>
@@ -1305,8 +1313,20 @@ export type LobbyFlowController = {
   refreshSupportUnread: () => void
   invalidateOwnVipStatus: () => void
   showVipPurchaseProcessingPopup: () => void
-  showVipPurchaseSuccessPopup: (days: number, activeUntilLabel: string | null) => void
+  showVipPurchaseSuccessPopup: (days: number, activeUntilLabel: string | null, giftRecipientDisplayName?: string | null) => void
   showVipPurchaseDelayedPopup: () => void
+  /**
+   * "Подари авоари" (§3 в брифа) — затваря showVipPurchaseProcessingPopup
+   * loading modal-а БЕЗ да transition-не към VIP success/delayed фаза
+   * (established VIP-specific popup). Извиква се ПРЕДИ
+   * showPaidGiftPayerSuccessModal/showStripeCoinRewardOverlay/bundle no-op
+   * за unified gift/coin/bundle success handling, mirror на established
+   * "same popup instance transitions" invariant, но за случаите, когато
+   * следващото UI Е ОТДЕЛЕН modal (не VIP popup-a самия).
+   */
+  closeVipPurchaseProcessingPopupSilently: () => void
+  /** Unified payer success modal (§3 в брифа) — mirror на showVipPurchaseSuccessPopup, но за трите продукта еднакво, текстът е готов от backend. */
+  showPaidGiftPayerSuccessModal: (text: string) => void
   removePendingFriendRequest: (friendshipId: string) => void
   getPendingFriendRequest: (friendshipId: string) => { friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null } | undefined
   isConversationOpen: (friendshipId: string) => boolean
@@ -1684,6 +1704,27 @@ type InternalLobbyFlowState = {
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
   shopActiveTab: 'coins' | 'vip' | 'bundle'
+  /**
+   * "Подари авоари" (§8-12 в брифа) — non-null означава Shop е в gift mode
+   * за ТОЗИ recipient. Navigation source: profile popup "Подари авоари"
+   * бутон ИЛИ директен /shop?giftTo=<profileId> URL (§11 в брифа). НИКОГА
+   * authoritative за checkout — checkout заявката подава само
+   * recipientProfileId, backend resolve-ва canonical recipient/eligibility
+   * (виж coinPurchaseStore.selectGiftRecipientEligibilityStatement).
+   */
+  shopGiftRecipientProfileId: string | null
+  /**
+   * Display name preview за gift mode UI title ("Подари на <DISPLAY NAME>")
+   * — ЧИСТО UI convenience, зареден от познат public profile lookup при
+   * навигация (или query param при directl URL, §11: "displayName от query
+   * НЕ е authoritative"). Backend НИКОГА не чете това поле — checkout винаги
+   * resolve-ва canonical display name сървърно.
+   */
+  shopGiftRecipientDisplayName: string | null
+  /** true докато resolve-ваме recipient display name (profile lookup) за gift mode header-а. */
+  shopGiftRecipientLoading: boolean
+  /** non-null когато recipientProfileId-то от navigation е невалидно/не може да получи подарък (§11: "Invalid profileId → безопасна грешка"). */
+  shopGiftRecipientErrorText: string | null
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -1779,6 +1820,20 @@ type InternalLobbyFlowState = {
   // showNextGiftItemNotification/completeCurrentGiftItemNotification.
   giftItemReceivedModal: { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string } | null
   giftItemNotificationQueue: Array<{ transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string }>
+  // "Подари авоари" (Paid Gift Shop) recipient durable notification — mirror
+  // на giftItemReceivedModal/giftItemNotificationQueue pattern-а по-горе
+  // (ОТДЕЛЕН domain, не merge-нат с item gift queue-то). bodyText е
+  // server-composed, immutable snapshot текст.
+  paidGiftNotificationModal: { purchaseId: string; purchaseType: 'coin' | 'vip' | 'bundle'; bodyText: string } | null
+  paidGiftNotificationQueue: Array<{ purchaseId: string; purchaseType: 'coin' | 'vip' | 'bundle'; bodyText: string }>
+  /**
+   * Payer success modal (§3 в брифа) — non-null означава "покажи 'Вие успешно
+   * подарихте на <recipient> <reward>.' modal с OK бутон" СЛЕД confirmed
+   * fulfillment. ОТДЕЛЕН от established normal purchase success поведение
+   * (VIP success popup/coin +N overlay) — gift purchase success винаги е
+   * modal+OK, normal purchase success поведение остава непроменено.
+   */
+  paidGiftPayerSuccessModal: { text: string } | null
   adminGiftItems: GiftItemSnapshot[]
   adminGiftItemsLoading: boolean
   adminGiftItemsErrorText: string | null
@@ -2400,6 +2455,7 @@ function createInitialState(): InternalLobbyFlowState {
       phase: 'loading',
       days: 0,
       activeUntilLabel: null,
+      giftRecipientDisplayName: null,
     },
     guestLockedStakePopup: {
       isOpen: false,
@@ -2436,6 +2492,10 @@ function createInitialState(): InternalLobbyFlowState {
     activeLeaderboardCategory: 'balance',
     lobbyPackages: [],
     shopActiveTab: 'coins',
+    shopGiftRecipientProfileId: null,
+    shopGiftRecipientDisplayName: null,
+    shopGiftRecipientLoading: false,
+    shopGiftRecipientErrorText: null,
     shopPackages: [],
     shopPackagesLoading: false,
     shopPackagesErrorText: null,
@@ -2513,6 +2573,9 @@ function createInitialState(): InternalLobbyFlowState {
     giftItemSuccessModal: null,
     giftItemReceivedModal: null,
     giftItemNotificationQueue: [],
+    paidGiftNotificationModal: null,
+    paidGiftNotificationQueue: [],
+    paidGiftPayerSuccessModal: null,
     adminGiftItems: [],
     adminGiftItemsLoading: false,
     adminGiftItemsErrorText: null,
@@ -4416,9 +4479,19 @@ export function createLobbyFlowController(
             state.profilePopupProfile.profileId,
           )
         : null
+    // "Подари авоари" брифа §3/§6/§7 — служебното "Подари жълтици" (accepted-
+    // friendship клонът) вече е видимо САМО за privileged caller (pika_team
+    // ИЛИ full admin), mirror на backend gate-а (isPikaTeamGiftMaxAmountSession
+    // || isAdminGiftUnlimitedSession в index.ts friendGiftMatch route).
+    // Normal user (accepted приятел, но без privilege) вече НЕ вижда този
+    // бутон — вижда само новото "Подари авоари" (giftShopRecipientProfileId,
+    // виж по-долу), независимо от friendship статус.
+    const isPrivilegedStaffGiftSender =
+      isPikaTeamGiftFriendshipBypassAuthSession(authSession) || isFullAdminAuthSession(authSession)
     if (
       friendshipAction !== null &&
-      acceptedRelationship?.status === 'accepted'
+      acceptedRelationship?.status === 'accepted' &&
+      isPrivilegedStaffGiftSender
     ) {
       friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
     }
@@ -4563,6 +4636,10 @@ export function createLobbyFlowController(
       activeLeaderboardCategory: state.activeLeaderboardCategory,
       lobbyPackages: state.lobbyPackages,
       shopActiveTab: state.shopActiveTab,
+      shopGiftRecipientProfileId: state.shopGiftRecipientProfileId,
+      shopGiftRecipientDisplayName: state.shopGiftRecipientDisplayName,
+      shopGiftRecipientLoading: state.shopGiftRecipientLoading,
+      shopGiftRecipientErrorText: state.shopGiftRecipientErrorText,
       shopPackages: state.shopPackages,
       shopPackagesLoading: state.shopPackagesLoading,
       shopPackagesErrorText: state.shopPackagesErrorText,
@@ -4649,6 +4726,8 @@ export function createLobbyFlowController(
       giftItemModalSubmittingId: state.giftItemModalSubmittingId,
       giftItemSuccessModal: state.giftItemSuccessModal,
       giftItemReceivedModal: state.giftItemReceivedModal,
+      paidGiftNotificationModal: state.paidGiftNotificationModal,
+      paidGiftPayerSuccessModal: state.paidGiftPayerSuccessModal,
       adminGiftItems: state.adminGiftItems,
       adminGiftItemsLoading: state.adminGiftItemsLoading,
       adminGiftItemsErrorText: state.adminGiftItemsErrorText,
@@ -5967,8 +6046,26 @@ export function createLobbyFlowController(
         state.giftItemSuccessModal = null
         render()
       },
+      onGiftShopClick: (recipientProfileId) => {
+        // Reuse-ва вече заредения profilePopupProfile (target профилът,
+        // чийто popup е отворен в момента на click-а) за display name preview
+        // — избягва нов network fetch, mirror на established "reuse loaded
+        // popup profile" pattern в контролера.
+        const previewDisplayName = state.profilePopupProfile?.profileId === recipientProfileId
+          ? state.profilePopupProfile.displayName
+          : null
+        void showShopPanelForGift(recipientProfileId, previewDisplayName)
+      },
       onGiftItemReceivedClose: () => {
         completeCurrentGiftItemNotification()
+        render()
+      },
+      onPaidGiftNotificationClose: () => {
+        completeCurrentPaidGiftNotification()
+        render()
+      },
+      onPaidGiftPayerSuccessClose: () => {
+        state.paidGiftPayerSuccessModal = null
         render()
       },
       onLowCoinsModalClose: () => {
@@ -6045,7 +6142,7 @@ export function createLobbyFlowController(
         closeGuestTrialPopup()
       },
       onVipPurchaseSuccessClose: () => {
-        state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', days: 0, activeUntilLabel: null }
+        state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
         render()
       },
       onGuestLockedStakePlay5000Click: () => {
@@ -10918,6 +11015,13 @@ export function createLobbyFlowController(
     state.profilePopupOpen = false
     state.profilePopupProfile = null
     state.profilePopupCanEdit = true
+    // Normal Shop entry — изчиства евентуален "leaked" gift context от
+    // предишно посещение. showShopPanelForGift() извиква ТАЗИ функция first
+    // и сетва gift state СЛЕД нея (виж таммошния коментар).
+    state.shopGiftRecipientProfileId = null
+    state.shopGiftRecipientDisplayName = null
+    state.shopGiftRecipientLoading = false
+    state.shopGiftRecipientErrorText = null
     stopWaitingRoomActivity()
     resetFinalFillSequence()
 
@@ -10960,6 +11064,50 @@ export function createLobbyFlowController(
     render()
 
     await Promise.all([loadShopPurchases(), loadVipPackages(true)])
+  }
+
+  // "Подари авоари" (§8-12 в брифа) — отваря Shop в gift mode за конкретен
+  // recipient. НЕ дублира package-loading логиката на showShopPanel(),
+  // reuse-ва я директно (същите shop cards, §9: "не redesign"). Display name
+  // preview: ако popup-ът за target профила вече е зареден (normal click
+  // path от profile popup), reuse-ва вече наличния obj без нов network fetch;
+  // при директен /shop?giftTo=<profileId> URL (§11) displayName идва от
+  // query само като non-authoritative preview, resolve-нат отделно от
+  // handleGiftShopDeepLink (виж router wiring по-долу).
+  async function showShopPanelForGift(
+    recipientProfileId: string,
+    recipientDisplayNamePreview: string | null,
+  ): Promise<void> {
+    const normalizedRecipientProfileId = recipientProfileId.trim()
+
+    if (normalizedRecipientProfileId.length === 0) {
+      return
+    }
+
+    const authSession = options.getAuthSession?.() ?? null
+
+    // §14 в брифа — self-gift: redirect към normal Shop (без gift context)
+    // вместо да се отваря gift checkout към себе си. Backend защитата
+    // (coinPurchaseStore/vipPurchaseStore/bundlePurchaseStore.createPendingPurchase)
+    // остава задължителна отделно — това е само UX preemption.
+    if (authSession !== null && authSession.profile.profileId === normalizedRecipientProfileId) {
+      await showShopPanel()
+      return
+    }
+
+    // showShopPanel() занулява shopGiftRecipient* полетата в началото си
+    // (established "clean normal entry" guard, виж коментара там) — затова
+    // gift context се сетва ТУК, СЛЕД като showShopPanel() е приключила
+    // изцяло (тя е async, await-ва package/VIP fetch-овете), не преди/по
+    // време на нея, иначе showShopPanel() би презаписала gift полетата
+    // обратно към null веднага след loading start. Кратък допълнителен
+    // render() след await показва gift header-а веднага щом Shop данните
+    // вече са заредени (нормален "presence follows data" UX за този екран).
+    await showShopPanel()
+    state.shopGiftRecipientProfileId = normalizedRecipientProfileId
+    state.shopGiftRecipientDisplayName = recipientDisplayNamePreview
+    state.shopGiftRecipientErrorText = null
+    render()
   }
 
   // ВАЖНО: за разлика от loadShopPackages/loadShopPurchases (coin пакети),
@@ -11032,7 +11180,7 @@ export function createLobbyFlowController(
     state.vipPurchaseMessageText = null
     render()
 
-    const result = await options.onVipPurchaseStart(packageId)
+    const result = await options.onVipPurchaseStart(packageId, state.shopGiftRecipientProfileId)
 
     state.vipPurchaseActionPackageId = null
 
@@ -11145,7 +11293,7 @@ export function createLobbyFlowController(
     state.bundlePurchaseMessageText = null
     render()
 
-    const result = await options.onBundlePurchaseStart(packageId)
+    const result = await options.onBundlePurchaseStart(packageId, state.shopGiftRecipientProfileId)
 
     state.bundlePurchaseActionPackageId = null
 
@@ -11252,7 +11400,7 @@ export function createLobbyFlowController(
     state.shopPurchaseMessageText = null
     render()
 
-    const result = await options.onShopPurchaseStart(packageId)
+    const result = await options.onShopPurchaseStart(packageId, state.shopGiftRecipientProfileId)
 
     state.shopPurchaseActionPackageId = null
     state.shopPurchaseConfirmPackageId = null
@@ -14011,6 +14159,109 @@ export function createLobbyFlowController(
     showNextGiftItemNotification()
   }
 
+  // ── "Подари авоари" recipient notification queue ─────────────────────────
+  // Mirror ТОЧНО на enqueueGiftItemNotifications/showNextGiftItemNotification/
+  // completeCurrentGiftItemNotification/showGiftItemReceivedBanner pattern-а
+  // по-горе (Item Gift System) — ОТДЕЛНА опашка (paidGiftNotificationQueue),
+  // не merge-ната с giftItemNotificationQueue (§1 audit находка: reuse
+  // established pattern, НЕ една архитектура за двата domain-а). Dedup по
+  // (purchaseId, purchaseType) — ако durable bootstrap fetch (WS connect) и
+  // realtime push пристигнат почти едновременно за СЪЩИЯ notification
+  // (review §10.A race), вторият enqueue е no-op (виж review Round 3 §7).
+  type PaidGiftNotificationEntry = { purchaseId: string; purchaseType: 'coin' | 'vip' | 'bundle'; bodyText: string }
+
+  function enqueuePaidGiftNotifications(items: PaidGiftNotificationEntry[]): void {
+    if (items.length === 0) return
+
+    const activeKey = state.paidGiftNotificationModal
+      ? `${state.paidGiftNotificationModal.purchaseType}:${state.paidGiftNotificationModal.purchaseId}`
+      : null
+    const queuedKeys = new Set(state.paidGiftNotificationQueue.map((q) => `${q.purchaseType}:${q.purchaseId}`))
+
+    for (const item of items) {
+      const key = `${item.purchaseType}:${item.purchaseId}`
+      if (key === activeKey || queuedKeys.has(key)) continue
+      queuedKeys.add(key)
+      state.paidGiftNotificationQueue.push(item)
+    }
+
+    showNextPaidGiftNotification()
+  }
+
+  function showNextPaidGiftNotification(): void {
+    if (state.paidGiftNotificationModal !== null) return
+    const next = state.paidGiftNotificationQueue.shift()
+    if (!next) return
+    state.paidGiftNotificationModal = next
+
+    if (options.getIsInGame?.() ?? false) {
+      showPaidGiftNotificationBanner(next)
+      return
+    }
+
+    render()
+  }
+
+  // Компактен top banner за recipient, който Е в активна игра — mirror
+  // ТОЧНО на showGiftItemReceivedBanner (§14 в брифа: "Не слагай popup-а само
+  // вътре в Lobby screen... global/app-level notification overlay"). Не
+  // блокира input/таймери, self-mounted directно на document.body.
+  function showPaidGiftNotificationBanner(notification: PaidGiftNotificationEntry): void {
+    document.body.querySelector('[data-ingame-paid-gift-banner="1"]')?.remove()
+
+    const host = document.createElement('div')
+    host.setAttribute('data-ingame-paid-gift-banner', '1')
+    host.style.cssText = [
+      'position:fixed',
+      'left:50%',
+      'top:max(12px, env(safe-area-inset-top))',
+      'transform:translateX(-50%)',
+      'z-index:13600',
+      'width:min(92vw, 460px)',
+      'pointer-events:auto',
+    ].join(';')
+    host.innerHTML = `
+      <div style="
+        display:flex;
+        align-items:center;
+        gap:12px;
+        padding:10px 12px;
+        border-radius:14px;
+        border:2px solid rgba(212,165,32,0.72);
+        background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);
+        box-shadow:0 18px 44px rgba(0,0,0,0.5);
+      ">
+        <div style="flex:1 1 auto;min-width:0;text-align:left;font-size:14px;line-height:1.35;color:#f8fafc;white-space:pre-line;overflow-wrap:anywhere;">${escapeHtml(notification.bodyText)}</div>
+        <button
+          type="button"
+          data-ingame-paid-gift-banner-ok="1"
+          style="flex:0 0 auto;height:36px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;"
+        >OK</button>
+      </div>
+    `
+    host.addEventListener('click', (event) => {
+      const target = event.target
+      if (!(target instanceof Element)) return
+      if (!target.closest('[data-ingame-paid-gift-banner-ok="1"]')) return
+      host.remove()
+      completeCurrentPaidGiftNotification()
+    })
+    document.body.appendChild(host)
+  }
+
+  // Извиква се при OK/auto-dismiss — ACK-ва ТОЗИ notification (§9 в брифа),
+  // после веднага показва следващия от опашката (mirror на
+  // completeCurrentGiftItemNotification).
+  function completeCurrentPaidGiftNotification(): void {
+    const notification = state.paidGiftNotificationModal
+    state.paidGiftNotificationModal = null
+    document.body.querySelector('[data-ingame-paid-gift-banner="1"]')?.remove()
+    if (notification) {
+      void options.onAcknowledgePaidGiftNotification?.(notification.purchaseId, notification.purchaseType)
+    }
+    showNextPaidGiftNotification()
+  }
+
   async function submitGiftItem(recipientProfileId: string, giftItemId: string): Promise<void> {
     if (!options.onGiftItemSubmit) {
       state.giftItemModalErrorText = 'Подаряването временно не е налично.'
@@ -15887,7 +16138,22 @@ export function createLobbyFlowController(
       case 'lobby': switchToLobby(); render(); break
       case 'players': void showPlayersDirectory(); break
       case 'leaderboards': void showLeaderboardsDirectory(); break
-      case 'shop': void showShopPanel(); break
+      case 'shop': {
+        // "Подари авоари" (§11 в брифа) — /shop?giftTo=<profileId> навигация.
+        // profileId не е secret (established pattern за public profile
+        // lookups), но НЕ е authoritative за recipient identity/eligibility —
+        // backend винаги resolve-ва canonical recipient при checkout (виж
+        // showShopPanelForGift/coinPurchaseStore.selectGiftRecipientEligibilityStatement).
+        // Отсъства/празен → normal Shop entry, established showShopPanel().
+        const _shopQs = new URLSearchParams(window.location.search)
+        const _giftTo = _shopQs.get('giftTo')?.trim() ?? ''
+        if (_giftTo.length > 0) {
+          void showShopPanelForGift(_giftTo, null)
+        } else {
+          void showShopPanel()
+        }
+        break
+      }
       case 'admin': void showAdminPanel(); break
       case 'guest-contact-messages': void showAdminGuestContactMessages(); break
       case 'admin-info': void showAdminInfoPanel(); break
@@ -16678,6 +16944,12 @@ export function createLobbyFlowController(
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onGiftCoinsBypassClick: (recipientProfileId) => { openGiftModalBypass(recipientProfileId) },
       onGiftItemClick: (recipientProfileId) => { openGiftItemModal(recipientProfileId) },
+      onGiftShopClick: (recipientProfileId) => {
+        const previewDisplayName = state.profilePopupProfile?.profileId === recipientProfileId
+          ? state.profilePopupProfile.displayName
+          : null
+        void showShopPanelForGift(recipientProfileId, previewDisplayName)
+      },
       onPikaSupportChatClick: (profileId) => { void startPikaSupportChatAndOpen(profileId) },
       onTopicsPersonalMessageClick: () => {},
       onLikeClick: (profileId) => { void likeProfile(profileId) },
@@ -17476,6 +17748,7 @@ export function createLobbyFlowController(
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
         giftItemRecipientProfileId: !isOwnProfile ? popupProfile.profileId : null,
+        giftShopRecipientProfileId: !isOwnProfile ? popupProfile.profileId : null,
         ownVipActiveUntil: isOwnProfile ? resolveOwnVipActiveUntilForRender(authSession) : null,
         vipGrantOpen: state.vipGrantOpen,
         vipGrantSubmitting: state.vipGrantSubmitting,
@@ -17714,6 +17987,33 @@ export function createLobbyFlowController(
           itemName: message.itemName,
           imageUrl: message.imageUrl,
           fromDisplayName: message.fromDisplayName,
+        },
+      ])
+      return true
+    }
+
+    // "Подари авоари" — offline batch flush при WS connect/reconnect (mirror
+    // на pending_gift_item_notifications по-горе, ОТДЕЛЕН domain/queue).
+    if (message.type === 'pending_paid_gift_notifications') {
+      enqueuePaidGiftNotifications(
+        message.notifications.map((n) => ({
+          purchaseId: n.purchaseId,
+          purchaseType: n.purchaseType,
+          bodyText: n.bodyText,
+        })),
+      )
+      return true
+    }
+
+    // "Подари авоари" — realtime push, получателят вече е online в момента
+    // на fulfillment (mirror на gift_item_received по-горе). Enqueue в
+    // СЪЩАТА paidGiftNotificationQueue като offline batch-а по-горе.
+    if (message.type === 'paid_gift_notification_received') {
+      enqueuePaidGiftNotifications([
+        {
+          purchaseId: message.purchaseId,
+          purchaseType: message.purchaseType,
+          bodyText: message.bodyText,
         },
       ])
       return true
@@ -19895,20 +20195,22 @@ export function createLobbyFlowController(
       // отделен втори popup stacked върху тоя).
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'loading', days: 0, activeUntilLabel: null }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'loading', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
       render()
     },
-    showVipPurchaseSuccessPopup: (days, activeUntilLabel) => {
+    showVipPurchaseSuccessPopup: (days, activeUntilLabel, giftRecipientDisplayName) => {
       // Success redirect landing — Stripe webhook вече е settle-нал точно
       // тази checkout сесия преди тази функция да се извика (виж
       // waitForPaidVipPurchase в main.ts, exact providerCheckoutSessionId
       // match) — никакъв fake success не се показва само от URL параметъра.
       // days идва от реално закупения пакет (VipPurchaseSnapshot.days),
       // activeUntilLabel от обновения /api/vip/status отговор — нито едното
-      // не е client-side изчислено.
+      // не е client-side изчислено. giftRecipientDisplayName (§29 в брифа) —
+      // идва от VipPurchaseSnapshot.recipientDisplayNameSnapshot (ledger row),
+      // non-null само за gift покупки.
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'success', days, activeUntilLabel }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'success', days, activeUntilLabel, giftRecipientDisplayName: giftRecipientDisplayName ?? null }
       render()
     },
     showVipPurchaseDelayedPopup: () => {
@@ -19917,7 +20219,16 @@ export function createLobbyFlowController(
       // грешка — VIP ще се активира автоматично, когато webhook пристигне.
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'delayed', days: 0, activeUntilLabel: null }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'delayed', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
+      render()
+    },
+    closeVipPurchaseProcessingPopupSilently: () => {
+      state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
+      render()
+    },
+    showPaidGiftPayerSuccessModal: (text) => {
+      state.currentScreen = 'shop'
+      state.paidGiftPayerSuccessModal = { text }
       render()
     },
     removePendingFriendRequest: (friendshipId: string) => {

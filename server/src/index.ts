@@ -98,6 +98,7 @@ import {
   type BundlePackageStatus,
 } from './db/shopBundlePackageStore.js'
 import { createBundlePurchaseStore } from './db/bundlePurchaseStore.js'
+import { createPaidGiftNotificationStore } from './db/paidGiftNotificationStore.js'
 import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
 import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
@@ -766,6 +767,9 @@ const shopBundlePackageStore = await createShopBundlePackageStore(
   databaseBootstrap.databaseFilePath,
 )
 const bundlePurchaseStore = await createBundlePurchaseStore(
+  databaseBootstrap.databaseFilePath,
+)
+const paidGiftNotificationStore = await createPaidGiftNotificationStore(
   databaseBootstrap.databaseFilePath,
 )
 const dailyRewardsStore = await createDailyRewardsStore(
@@ -9862,10 +9866,16 @@ async function handleShopCheckoutRequest(
   }
 
   const packageId = getStringField(body, 'packageId')
+  // "Подари авоари" (§25 в брифа) — клиентът подава само package identifier
+  // + recipientProfileId. Recipient се resolve-ва canonical server-side
+  // (виж coinPurchaseStore.selectGiftRecipientEligibilityStatement), НИКОГА
+  // от client-provided display name. Отсъства/null => normal purchase.
+  const recipientProfileId = getStringField(body, 'recipientProfileId')
 
   const pendingResult = coinPurchaseStore.createPendingPurchase(
     session.profile.profileId,
     packageId,
+    recipientProfileId,
   )
 
   if (!pendingResult.ok) {
@@ -9914,8 +9924,14 @@ async function handleShopCheckoutRequest(
         },
       ],
       metadata: {
+        // purchaseId е единственият authoritative pointer — webhook
+        // fulfillment зарежда recipient/coins/price ОТ ledger реда по
+        // purchaseId/checkoutSessionId (§24 в брифа), НЕ от тази metadata.
+        // profileId/recipientProfileId тук са само за debugging/Stripe
+        // dashboard visibility.
         purchaseId: purchase.purchaseId,
         profileId: session.profile.profileId,
+        recipientProfileId: purchase.recipientProfileId ?? '',
         packageId: purchase.packageId ?? '',
         packageKey: purchase.packageKey,
         coins: String(purchase.yellowCoinsAmount),
@@ -10078,11 +10094,15 @@ async function handleVipCheckoutRequest(
   }
 
   const priceCents = getVipPackagePriceCents(packageId)
+  // "Подари авоари" (§25 в брифа) — виж identичния коментар в
+  // handleShopCheckoutRequest (coin checkout).
+  const recipientProfileId = getStringField(body, 'recipientProfileId')
 
   const pendingResult = vipPurchaseStore.createPendingPurchase(
     session.profile.profileId,
     packageId,
     priceCents,
+    recipientProfileId,
   )
 
   if (!pendingResult.ok) {
@@ -10134,6 +10154,7 @@ async function handleVipCheckoutRequest(
         purchaseType: 'vip',
         purchaseId: purchase.purchaseId,
         profileId: session.profile.profileId,
+        recipientProfileId: purchase.recipientProfileId ?? '',
         packageId: purchase.packageId,
       },
     })
@@ -10347,10 +10368,14 @@ async function handleShopBundleCheckoutRequest(
   // поле, което се чете от body-то тук, е packageId. createPendingPurchase()
   // зарежда coins/vip_days/price директно от активния DB ред.
   const packageId = getStringField(body, 'packageId')
+  // "Подари авоари" (§25 в брифа) — виж identичния коментар в
+  // handleShopCheckoutRequest (coin checkout).
+  const recipientProfileId = getStringField(body, 'recipientProfileId')
 
   const pendingResult = bundlePurchaseStore.createPendingPurchase(
     session.profile.profileId,
     packageId,
+    recipientProfileId,
   )
 
   if (!pendingResult.ok) {
@@ -10405,6 +10430,7 @@ async function handleShopBundleCheckoutRequest(
         purchaseType: 'bundle',
         purchaseId: purchase.purchaseId,
         profileId: session.profile.profileId,
+        recipientProfileId: purchase.recipientProfileId ?? '',
         packageId: purchase.packageId ?? '',
       },
     })
@@ -14836,6 +14862,40 @@ async function handleShopHidePurchaseRequest(
   return true
 }
 
+// "Подари авоари" (§7 в брифа) — realtime push към recipient-а, ако е online
+// в момента на fulfillment. КРИТИЧНО: НЕ филтрира по currentRoomId (за
+// разлика от established coins_gifted/table gift routing) — recipient
+// трябва да получи popup независимо дали е в lobby, normal игра, private
+// игра, турнир, или има reconnect-нал multiple connections (§7 explicit
+// изискване, established lobby-only filter антипатърн НЕ се reuse-ва тук).
+// Изпраща се към ВСИЧКИ active connections на профила (§7 "можеш да
+// изпратиш notification event към всички active connections") — client-side
+// dedupe по purchaseId+purchaseType предпазва от duplicate modal (виж
+// createLobbyFlowController.ts enqueuePaidGiftNotifications). Извиква се
+// САМО при реален нов fulfillment (!alreadyCredited) — duplicate webhook
+// retry НЕ push-ва повторно (notification вече е персистиран idempotent,
+// recipient offline ще го получи през bootstrap fetch при следващ connect;
+// recipient online ПРИ FIRST fulfillment вече го е получил веднъж).
+function pushPaidGiftNotificationRealtime(
+  recipientProfileId: string,
+  purchaseId: string,
+  purchaseType: 'coin' | 'vip' | 'bundle',
+  bodyText: string,
+): void {
+  const recipientConnections = Object.values(serverState.connections).filter(
+    (c) => c.profileId === recipientProfileId && c.status === 'connected',
+  )
+
+  for (const conn of recipientConnections) {
+    safeSendToConnection(conn.id, {
+      type: 'paid_gift_notification_received',
+      purchaseId,
+      purchaseType,
+      bodyText,
+    })
+  }
+}
+
 async function handleStripeWebhookRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -14907,6 +14967,18 @@ async function handleStripeWebhookRequest(
         console.log(
           `[stripe/webhook] VIP fulfilled purchaseId=${vipResult.purchase.purchaseId} package=${vipResult.purchase.packageId} newActiveUntil=${vipResult.newActiveUntil}`,
         )
+
+        // "Подари авоари" durable notification вече е committed (вътре в
+        // fulfillPaidPurchase транзакцията) — realtime push е best-effort
+        // допълнение, САМО за реален нов fulfillment (не alreadyCredited).
+        if (vipResult.purchase.recipientProfileId !== null && vipResult.recipientNotificationText !== null) {
+          pushPaidGiftNotificationRealtime(
+            vipResult.purchase.recipientProfileId,
+            vipResult.purchase.purchaseId,
+            'vip',
+            vipResult.recipientNotificationText,
+          )
+        }
       }
 
       // Payment-method enrichment — mirror на coin flow-a (Step 2 по-долу).
@@ -14993,6 +15065,15 @@ async function handleStripeWebhookRequest(
         console.log(
           `[stripe/webhook] Bundle fulfilled purchaseId=${bundleResult.purchase.purchaseId} coins=${bundleResult.purchase.yellowCoinsAmount} vipDays=${bundleResult.purchase.vipDays} newActiveUntil=${bundleResult.newActiveUntil}`,
         )
+
+        if (bundleResult.purchase.recipientProfileId !== null && bundleResult.recipientNotificationText !== null) {
+          pushPaidGiftNotificationRealtime(
+            bundleResult.purchase.recipientProfileId,
+            bundleResult.purchase.purchaseId,
+            'bundle',
+            bundleResult.recipientNotificationText,
+          )
+        }
       }
 
       // Payment-method enrichment — mirror на VIP/coin flow-a Step 2 по-горе.
@@ -15076,6 +15157,15 @@ async function handleStripeWebhookRequest(
           console.log(
             `[stripe/webhook] fulfilled purchaseId=${result.purchase.purchaseId} coins=${result.purchase.yellowCoinsAmount}`,
           )
+
+          if (result.purchase.recipientProfileId !== null && result.recipientNotificationText !== null) {
+            pushPaidGiftNotificationRealtime(
+              result.purchase.recipientProfileId,
+              result.purchase.purchaseId,
+              'coin',
+              result.recipientNotificationText,
+            )
+          }
         }
 
         // Step 2: enrich payment method snapshot — non-blocking, must not affect credits.
@@ -15766,6 +15856,45 @@ async function handleAdminGiftItemsRequest(
 // Публичен/user-facing route за virtual item gift каталога — листване на
 // активни подаръци и изпращане на подарък от профил към профил. Виж
 // giftItemStore.ts за authoritative payment логиката (sendGiftItem).
+// "Подари авоари" (§9 в брифа) — recipient ACK endpoint за
+// paid_gift_notification_log. Ownership-scoped (WHERE
+// recipient_profile_id=authenticated caller), idempotent (mirror на
+// established giftItemStore.markDeliveryShown pattern) — profile A НИКОГА
+// не може да ACK-не notification на profile B чрез подаден произволен id,
+// тъй като acknowledgeNotification винаги подава authenticated
+// session.profile.profileId, никога client-provided recipientProfileId.
+async function handlePaidGiftNotificationRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const ackMatch = /^\/api\/paid-gift-notifications\/(coin|vip|bundle)\/([^/]+)\/ack$/.exec(pathname)
+
+  if (ackMatch === null || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const purchaseType = ackMatch[1] as 'coin' | 'vip' | 'bundle'
+  const purchaseId = decodeURIComponent(ackMatch[2] ?? '').trim()
+
+  if (purchaseId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден purchaseId.' })
+    return true
+  }
+
+  paidGiftNotificationStore.acknowledgeNotification(purchaseId, purchaseType, session.profile.profileId)
+  sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
 async function handleGiftItemsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -16067,6 +16196,26 @@ async function handleFriendsRequest(
   }
 
   if (friendGiftMatch !== null && req.method === 'POST') {
+    // "Подари авоари" брифа §6/§7 — старият normal-user wallet-to-wallet
+    // gift flow отпада за normal users (заменен от платения "Подари авоари"
+    // shop flow, coinPurchaseStore/handleShopCheckoutRequest). Служебният
+    // (privileged staff reward) gifting path ТРЯБВА да остане непроменен
+    // (§1/§7 в брифа) — ЕТО ЗАЩО тук се пуска САМО отказ на normal caller-и,
+    // не се пипа yellowCoinGiftStore/sendGift ядрото и не се добавя нова
+    // роля. Privileged критерият reuse-ва established predicates (СЪЩИТЕ,
+    // които вече upgrade-ват лимитите на тази заявка по-долу) — pika_team
+    // ИЛИ full admin, идентично на route-а /gift-coins/direct по-долу.
+    // Server-side deny (не само UI hide): manual HTTP request от normal user
+    // към ТОЗИ endpoint вече получава 403, дори ако body/friendshipId са
+    // валидни.
+    if (!isPikaTeamGiftMaxAmountSession(session) && !isAdminGiftUnlimitedSession(session)) {
+      sendJsonResponse(res, 403, {
+        ok: false,
+        message: 'Този начин на подаряване вече не е достъпен. Използвайте "Подари авоари" от профила на играча.',
+      })
+      return true
+    }
+
     const friendshipId = decodeURIComponent(friendGiftMatch[1]).trim()
     const body = await readJsonRequestBody(req)
 
@@ -19064,6 +19213,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handlePaidGiftNotificationRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleMissionsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -19375,6 +19528,22 @@ wsServer.on('connection', (socket, request) => {
       sendJsonMessage(socket, {
         type: 'pending_gift_item_notifications',
         deliveries: pendingGiftItems,
+      })
+    }
+
+    // "Подари авоари" (§8 в брифа) — durable paid gift notification bootstrap
+    // flush, ОТДЕЛЕН domain от pendingGifts (служебно "Подари жълтици") И
+    // pendingGiftItems (Item Gift System) по-горе. Reuse-ва established
+    // "unread-only fetch при всеки connect/reconnect" pattern.
+    const pendingPaidGiftNotifications = paidGiftNotificationStore.getPendingNotifications(connection.profileId)
+    if (pendingPaidGiftNotifications.length > 0) {
+      sendJsonMessage(socket, {
+        type: 'pending_paid_gift_notifications',
+        notifications: pendingPaidGiftNotifications.map((n) => ({
+          purchaseId: n.purchaseId,
+          purchaseType: n.purchaseType,
+          bodyText: n.bodyText,
+        })),
       })
     }
 
@@ -23553,6 +23722,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('matchEconomyStore', () => matchEconomyStore.close())
   closeStore('coinPackageStore', () => coinPackageStore.close())
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
+  closeStore('paidGiftNotificationStore', () => paidGiftNotificationStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
   closeStore('adCampaignsStore', () => adCampaignsStore.close())
   closeStore('siteVisitStore', () => siteVisitStore.close())

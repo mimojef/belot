@@ -81,6 +81,11 @@ export default defineConfig({
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,mp3,woff2}'],
         globIgnores: ['index.html'],
         injectionPoint: 'self.__WB_MANIFEST',
+        // "Подари авоари" feature добавка бутна главния bundle леко над
+        // default 2 MiB precache лимита (2095KB baseline -> 2100KB). Вдигнат
+        // с margin (3 MiB), не премахнат — все още предпазва от неконтролируем
+        // растеж занапред, само отразява текущия реален размер.
+        maximumFileSizeToCacheInBytes: 3 * 1024 * 1024,
       },
       integration: {
         configureCustomSWViteBuild: disableServiceWorkerCodeSplitting,

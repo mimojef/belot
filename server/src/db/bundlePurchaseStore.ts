@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import type { PaymentMethodSnapshot } from './coinPurchaseStore.js'
+import { composePayerBundleGiftSuccessText, composeRecipientBundleGiftNotificationText } from './paidGiftNotificationText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -23,6 +24,11 @@ export type BundlePurchaseSnapshot = {
   hiddenAt: string | null
   createdAt: string
   updatedAt: string
+  /** Mirror на coinPurchaseStore.CoinPurchaseSnapshot recipient полетата — виж коментара там. */
+  recipientProfileId: string | null
+  recipientDisplayNameSnapshot: string | null
+  /** Mirror на coinPurchaseStore.CoinPurchaseSnapshot.payerSuccessText — виж коментара там. */
+  payerSuccessText: string | null
 }
 
 export type FulfillPaidBundlePurchaseParams = {
@@ -44,6 +50,7 @@ export type BundlePurchaseStore = {
   createPendingPurchase: (
     profileId: string,
     packageId: string,
+    recipientProfileId?: string | null,
   ) => { ok: true; purchase: BundlePurchaseSnapshot } | { ok: false; message: string }
   getPurchaseById: (purchaseId: string) => BundlePurchaseSnapshot | null
   attachCheckoutSession: (purchaseId: string, checkoutSessionId: string) => BundlePurchaseSnapshot | null
@@ -65,7 +72,7 @@ export type BundlePurchaseStore = {
    * vipPurchaseStore.fulfillByInternalRow doc коментара).
    */
   fulfillPaidPurchase: (params: FulfillPaidBundlePurchaseParams) =>
-    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
+    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string }
   needsPaymentMethodSnapshot: (purchaseId: string) => boolean
   updatePaymentMethodSnapshot: (purchaseId: string, snapshot: PaymentMethodSnapshot) => void
@@ -92,6 +99,8 @@ type BundlePurchaseRow = {
   hidden_at: string | null
   created_at: string
   updated_at: string
+  recipient_profile_id: string | null
+  recipient_display_name_snapshot: string | null
 }
 
 type BundlePurchaseInternalRow = BundlePurchaseRow & {
@@ -127,10 +136,17 @@ const SELECT_COLUMNS = `
   credited_at,
   hidden_at,
   created_at,
-  updated_at
+  updated_at,
+  recipient_profile_id,
+  recipient_display_name_snapshot
 `
 
 function rowToSnapshot(row: BundlePurchaseRow): BundlePurchaseSnapshot {
+  // Mirror на coinPurchaseStore.rowToSnapshot payerSuccessText коментара.
+  const payerSuccessText = row.status === 'paid' && row.recipient_display_name_snapshot !== null
+    ? composePayerBundleGiftSuccessText(row.recipient_display_name_snapshot, row.title_snapshot, row.yellow_coins_amount, row.vip_days_snapshot)
+    : null
+
   return {
     purchaseId: row.purchase_id,
     packageId: row.package_id,
@@ -147,6 +163,9 @@ function rowToSnapshot(row: BundlePurchaseRow): BundlePurchaseSnapshot {
     hiddenAt: row.hidden_at ?? null,
     createdAt: dbDateToUtc(row.created_at),
     updatedAt: dbDateToUtc(row.updated_at),
+    recipientProfileId: row.recipient_profile_id ?? null,
+    recipientDisplayNameSnapshot: row.recipient_display_name_snapshot ?? null,
+    payerSuccessText,
   }
 }
 
@@ -201,6 +220,9 @@ export async function createBundlePurchaseStore(
       AND package_id = ?
       AND status = 'pending'
       AND hidden_at IS NULL
+      -- Mirror на coinPurchaseStore.selectPendingPurchaseStatement коментара:
+      -- recipient трябва да съвпада точно.
+      AND recipient_profile_id IS NOT DISTINCT FROM ?
     ORDER BY created_at DESC
     LIMIT 1;
   `)
@@ -217,8 +239,29 @@ export async function createBundlePurchaseStore(
       price_cents,
       currency,
       provider,
-      status
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'stripe', 'pending');
+      status,
+      recipient_profile_id,
+      recipient_display_name_snapshot
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'stripe', 'pending', ?, ?);
+  `)
+
+  // Recipient eligibility — идентичен pattern на
+  // coinPurchaseStore.selectGiftRecipientEligibilityStatement.
+  const selectGiftRecipientEligibilityStatement = database.prepare(`
+    SELECT p.display_name AS display_name
+    FROM profiles p
+    WHERE p.profile_id = ?
+      AND p.profile_kind = 'human'
+      AND p.status = 'active'
+      AND p.account_id IS NOT NULL
+      AND p.is_temporary = 0
+      AND NOT EXISTS (
+        SELECT 1 FROM profile_bans pb
+        WHERE pb.profile_id = p.profile_id
+          AND pb.lifted_at IS NULL
+          AND pb.banned_until > CURRENT_TIMESTAMP
+      )
+    LIMIT 1;
   `)
 
   const selectPurchaseStatement = database.prepare(`
@@ -353,6 +396,18 @@ export async function createBundlePurchaseStore(
     ) VALUES (?, ?, 'purchase', 'days', ?, NULL, ?, ?, ?, ?);
   `)
 
+  // "Подари авоари" durable recipient notification (Round 3 §5) — mirror на
+  // coinPurchaseStore.ts identичните statements/rationale.
+  const selectProfileDisplayNameStatement = database.prepare(`
+    SELECT display_name FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+
+  const insertPaidGiftNotificationStatement = database.prepare(`
+    INSERT OR IGNORE INTO paid_gift_notification_log (
+      purchase_id, purchase_type, recipient_profile_id, sender_display_name_snapshot, body_text
+    ) VALUES (?, 'bundle', ?, ?, ?);
+  `)
+
   function listProfilePurchases(profileId: string): BundlePurchaseSnapshot[] {
     const normalizedProfileId = normalizeId(profileId)
     if (normalizedProfileId.length === 0) return []
@@ -378,12 +433,34 @@ export async function createBundlePurchaseStore(
   function createPendingPurchase(
     profileId: string,
     packageId: string,
+    recipientProfileId?: string | null,
   ): { ok: true; purchase: BundlePurchaseSnapshot } | { ok: false; message: string } {
     const normalizedProfileId = normalizeId(profileId)
     const normalizedPackageId = normalizeId(packageId)
 
     if (normalizedProfileId.length === 0 || normalizedPackageId.length === 0) {
       return { ok: false, message: 'Невалидна заявка за покупка.' }
+    }
+
+    // §14 в брифа — self-gift защита (mirror на coinPurchaseStore).
+    const normalizedRecipientProfileId = recipientProfileId ? normalizeId(recipientProfileId) : null
+
+    if (normalizedRecipientProfileId !== null && normalizedRecipientProfileId === normalizedProfileId) {
+      return { ok: false, message: 'Не можете да подарите на себе си.' }
+    }
+
+    let recipientDisplayName: string | null = null
+
+    if (normalizedRecipientProfileId !== null) {
+      const recipientRow = selectGiftRecipientEligibilityStatement.get(
+        normalizedRecipientProfileId,
+      ) as { display_name: string } | undefined
+
+      if (!recipientRow) {
+        return { ok: false, message: 'Получателят не може да приеме подарък в момента.' }
+      }
+
+      recipientDisplayName = recipientRow.display_name
     }
 
     const activePackage = selectActivePackageStatement.get(normalizedPackageId) as ActiveBundlePackageRow | undefined
@@ -395,6 +472,7 @@ export async function createBundlePurchaseStore(
     const existingPending = selectPendingPurchaseStatement.get(
       normalizedProfileId,
       normalizedPackageId,
+      normalizedRecipientProfileId,
     ) as BundlePurchaseRow | undefined
 
     if (existingPending) {
@@ -413,6 +491,8 @@ export async function createBundlePurchaseStore(
       activePackage.vip_days,
       activePackage.price_cents,
       activePackage.currency,
+      normalizedRecipientProfileId,
+      recipientDisplayName,
     )
 
     const purchase = getPurchaseById(purchaseId)
@@ -445,15 +525,44 @@ export async function createBundlePurchaseStore(
   function fulfillByInternalRow(
     row: BundlePurchaseInternalRow,
   ):
-    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
+    | {
+        ok: true
+        purchase: BundlePurchaseSnapshot
+        alreadyCredited: boolean
+        newActiveUntil: string
+        payerSuccessText: string | null
+        /** Non-null САМО при реален нов fulfillment — виж identичния коментар в vipPurchaseStore.ts. */
+        recipientNotificationText: string | null
+      }
     | { ok: false; message: string } {
+    // §15-20/§24 в брифа — и двете награди (coins + VIP дни) отиват на
+    // RECIPIENT-а, не на PAYER-а. row.profile_id остава семантично "payer".
+    //
+    // КРИТИЧНО (review finding §1) — recipient_profile_id е FK колона с ON
+    // DELETE SET NULL: ако recipient hard-delete-не се МЕЖДУ checkout и
+    // fulfillment, SQLite нулира тази колона В LEDGER РЕДА веднага при
+    // DELETE-а (не lazily). Старият `row.recipient_profile_id ??
+    // row.profile_id` fallback-ваше грешно към PAYER-а в този сценарий
+    // (доказано от checkGiftRecipientHardDeleteFallback.ts с реален FK
+    // enforcement). recipient_display_name_snapshot (plain TEXT, не FK) е
+    // durable gift marker — оцелява SET NULL cascade-а. Виж identичния
+    // коментар в coinPurchaseStore.ts fulfillByInternalRow за пълния
+    // rationale.
+    const wasGiftPurchase = row.recipient_display_name_snapshot !== null
+
     if (row.status === 'paid' && row.credited_at !== null) {
-      const statusRow = selectVipStatusStatement.get(row.profile_id) as VipStatusRow | undefined
+      const alreadyCreditedTarget = wasGiftPurchase ? row.recipient_profile_id : row.profile_id
+      const statusRow = alreadyCreditedTarget
+        ? (selectVipStatusStatement.get(alreadyCreditedTarget) as VipStatusRow | undefined)
+        : undefined
+      const purchase = rowToSnapshot(row)
       return {
         ok: true,
-        purchase: rowToSnapshot(row),
+        purchase,
         alreadyCredited: true,
         newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
+        payerSuccessText: purchase.payerSuccessText,
+        recipientNotificationText: null,
       }
     }
 
@@ -464,7 +573,22 @@ export async function createBundlePurchaseStore(
       }
     }
 
+    if (wasGiftPurchase && row.recipient_profile_id === null) {
+      // Recipient е бил валиден при checkout (snapshot доказва gift intent),
+      // но вече физически не съществува — safe-fail explicit, БЕЗ да се
+      // опитваме дори да пипнем wallet-а/VIP-а. Редът остава 'pending'.
+      return {
+        ok: false,
+        message: 'Получателят на подаръка вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
+      }
+    }
+
+    const rewardRecipientProfileId = wasGiftPurchase
+      ? (row.recipient_profile_id as string)
+      : row.profile_id
+
     let newActiveUntilSqlite = ''
+    let recipientNotificationText: string | null = null
 
     try {
       // BEGIN IMMEDIATE (mirror на vipPurchaseStore.fulfillByInternalRow doc
@@ -476,8 +600,15 @@ export async function createBundlePurchaseStore(
       // 27+30=57 семантика (VIP extend, §7 в брифа) — идентична логика на
       // vipStore.applyGrant/vipPurchaseStore.fulfillByInternalRow,
       // реimplementирана тук за да остане в СЪЩАТА транзакция като wallet
-      // credit-а и ledger CAS-а по-долу (§9 "atomicity/consistency").
-      const currentStatusRow = selectVipStatusStatement.get(row.profile_id) as VipStatusRow | undefined
+      // credit-а и ledger CAS-а по-долу (§9 "atomicity/consistency"). §30
+      // edge case: explicit проверката по-горе (wasGiftPurchase &&
+      // recipient_profile_id===null) вече хваща типичния случай ПРЕДИ тази
+      // точка. FK constraint violation тук е само defense-in-depth за race
+      // (recipient изтрит между explicit-проверката и този ред) —
+      // ensureWalletStatement/insertVipGrantStatement/upsertVipStatusStatement
+      // по-долу пак УДРЯТ FK violation в тоя race, catch блокът ROLLBACK-ва,
+      // редът остава 'pending' permanently, safe-fail.
+      const currentStatusRow = selectVipStatusStatement.get(rewardRecipientProfileId) as VipStatusRow | undefined
       const now = new Date()
       const currentActiveUntil = currentStatusRow ? new Date(dbDateToUtc(currentStatusRow.active_until)) : null
       const extensionBase = currentActiveUntil && currentActiveUntil.getTime() > now.getTime()
@@ -502,12 +633,15 @@ export async function createBundlePurchaseStore(
 
         const fresh = getPurchaseWithProfileById(row.purchase_id)
         if (fresh?.status === 'paid') {
-          const statusRow = selectVipStatusStatement.get(row.profile_id) as VipStatusRow | undefined
+          const statusRow = selectVipStatusStatement.get(rewardRecipientProfileId) as VipStatusRow | undefined
+          const purchase = rowToSnapshot(fresh)
           return {
             ok: true,
-            purchase: rowToSnapshot(fresh),
+            purchase,
             alreadyCredited: true,
             newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
+            payerSuccessText: purchase.payerSuccessText,
+            recipientNotificationText: null,
           }
         }
         return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
@@ -516,13 +650,13 @@ export async function createBundlePurchaseStore(
       // CAS спечелен от ТОЗИ процес — чак СЕГА се пипат наградите
       // (wallet credit + vip_grants insert + vip_status upsert), всички в
       // СЪЩАТА транзакция, атомарно с CAS-а по-горе.
-      ensureWalletStatement.run(row.profile_id)
-      creditWalletStatement.run(row.yellow_coins_amount, row.profile_id)
+      ensureWalletStatement.run(rewardRecipientProfileId)
+      creditWalletStatement.run(row.yellow_coins_amount, rewardRecipientProfileId)
 
       const grantId = randomUUID()
       insertVipGrantStatement.run(
         grantId,
-        row.profile_id,
+        rewardRecipientProfileId,
         row.vip_days_snapshot,
         newActiveUntilSqlite,
         row.purchase_id,
@@ -531,7 +665,32 @@ export async function createBundlePurchaseStore(
       )
 
       attachVipGrantIdStatement.run(grantId, row.purchase_id)
-      upsertVipStatusStatement.run(row.profile_id, newActiveUntilSqlite)
+      upsertVipStatusStatement.run(rewardRecipientProfileId, newActiveUntilSqlite)
+
+      // "Подари авоари" durable recipient notification (Round 3 §5) — mirror
+      // на coinPurchaseStore.ts identичния коментар/rationale. СЛЕД успешен
+      // CAS+coins+VIP grant, ПРЕДИ COMMIT — атомарно с ЦЯЛАТА bundle
+      // fulfillment транзакция (coins+VIP+notification заедно).
+      if (wasGiftPurchase) {
+        const senderProfileRow = selectProfileDisplayNameStatement.get(row.profile_id) as
+          | { display_name: string }
+          | undefined
+        const senderDisplayName = senderProfileRow?.display_name?.trim() || 'Играч'
+        const bodyText = composeRecipientBundleGiftNotificationText(
+          senderDisplayName,
+          row.title_snapshot,
+          row.yellow_coins_amount,
+          row.vip_days_snapshot,
+        )
+
+        insertPaidGiftNotificationStatement.run(
+          row.purchase_id,
+          rewardRecipientProfileId,
+          senderDisplayName,
+          bodyText,
+        )
+        recipientNotificationText = bodyText
+      }
 
       database.exec('COMMIT;')
     } catch (error) {
@@ -551,13 +710,13 @@ export async function createBundlePurchaseStore(
       return { ok: false, message: 'Пакетът беше активиран, но покупката не може да се прочете.' }
     }
 
-    return { ok: true, purchase: fulfilled, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite) }
+    return { ok: true, purchase: fulfilled, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
   }
 
   function fulfillPaidPurchase(
     params: FulfillPaidBundlePurchaseParams,
   ):
-    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string }
+    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
     const { checkoutSessionId, purchaseId, stripePaymentStatus, stripeCurrency, stripeAmountTotalCents } = params
 

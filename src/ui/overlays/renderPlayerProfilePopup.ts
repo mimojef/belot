@@ -21,6 +21,18 @@ export type RenderPlayerProfilePopupOptions = {
    * profile.profileId съществува — виж giftItemStore.ts.
    */
   giftItemRecipientProfileId?: string | null
+  /**
+   * "Подари авоари" (Paid Gift Shop) — ОТДЕЛЕН бутон от служебното "Подари
+   * жълтици" (friendshipAction.giftFriendshipId/giftBypassProfileId, само
+   * privileged) и от Item Gift System (giftItemRecipientProfileId, §38 в
+   * брифа — НЕ се пипа). Non-null само когато !isOwnProfile и
+   * profile.profileId съществува — видим за ВСЕКИ друг потребител (normal
+   * ИЛИ staff), независимо от friendship статус. Отваря Shop в gift mode
+   * (/shop?giftTo=<profileId>) — eligibility на получателя се проверява
+   * authoritative server-side при checkout (§13 в брифа), тук е само UI
+   * видимост на самия бутон.
+   */
+  giftShopRecipientProfileId?: string | null
   skipAnimation?: boolean
   /**
    * Вижда се само когато ТЕКУЩИЯТ логнат профил е официалният Pika.bg
@@ -1737,6 +1749,7 @@ function renderProfileContent(
   riskDetailErrorText: string | null,
   riskRecheckSubmitting: boolean,
   giftItemRecipientProfileId: string | null,
+  giftShopRecipientProfileId: string | null,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -2003,6 +2016,28 @@ function renderProfileContent(
                       ${renderGiftBoxIcon(17)}Подарък
                     </button>
                   ` : ''}
+                ${giftShopRecipientProfileId ? `
+                    <button
+                      type="button"
+                      data-player-profile-gift-shop="${escapeHtml(giftShopRecipientProfileId)}"
+                      style="
+                        min-height:38px;
+                        padding:0 12px;
+                        border:1px solid rgba(212,165,32,0.62);
+                        border-radius:8px;
+                        background:linear-gradient(180deg, rgba(244,201,91,0.98) 0%, rgba(201,143,19,0.98) 100%);
+                        color:#080808;
+                        font-size:13px;
+                        font-weight:900;
+                        cursor:pointer;
+                        display:inline-flex;
+                        align-items:center;
+                        gap:6px;
+                      "
+                    >
+                      ${renderGiftBoxIcon(17)}Подари авоари
+                    </button>
+                  ` : ''}
                 ${profile.profileId && profile.isBlockedByMe !== null ? `
                   <button
                     type="button"
@@ -2237,6 +2272,7 @@ export function renderPlayerProfilePopup(
           options.riskDetailErrorText ?? null,
           options.riskRecheckSubmitting ?? false,
           options.giftItemRecipientProfileId ?? null,
+          options.giftShopRecipientProfileId ?? null,
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 
