@@ -180,8 +180,17 @@ function buildSchema(db: DatabaseSync): void {
       purchase_id TEXT NULL,
       amount_paid_cents INTEGER NULL,
       currency TEXT NULL,
+      bundle_purchase_id TEXT NULL,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
     );
+
+    -- 20260923_005 pre-deploy blocker fix — purchase_id остава ИЗКЛЮЧИТЕЛНО
+    -- за VIP-direct (vip_purchase_ledger); bundle-generated grants пишат
+    -- bundle_purchase_id вместо purchase_id (виж bundlePurchaseStore.ts
+    -- insertVipGrantStatement коментара).
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_bundle_purchase_id_once
+      ON vip_grants(bundle_purchase_id)
+      WHERE reason = 'purchase' AND bundle_purchase_id IS NOT NULL;
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_launch_gift_once
       ON vip_grants(profile_id)

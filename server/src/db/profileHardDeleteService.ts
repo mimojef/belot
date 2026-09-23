@@ -65,6 +65,10 @@ export type ProfileHardDeleteService = {
    * tournament_economy_ledger, yellow_coin_gift_ledger (ОТДЕЛНО за sender И
    * recipient страна), match_economy_ledger, coin_purchase_ledger,
    * profile_name_change_ledger, vip_grants, vip_purchase_ledger,
+   * bundle_purchase_ledger (20260923_004 — payer снапшот, mirror на coin/vip;
+   * bundle-ово наследеният profile_id ON DELETE CASCADE от
+   * 20260923_001_create_shop_bundle_packages.sql остана незабелязан при
+   * 20260902_002-ия sweep, защото таблицата тогава още не съществуваше),
    * table_exit_penalties, profile_match_results — за да остане
    * forensic-reconstructable "този ban/турнир/entry/ledger ред е бил на
    * deleted profile UUID X" дори след като живата FK колона се нулира от
@@ -88,9 +92,10 @@ export type ProfileHardDeleteService = {
    * wallet/gallery/progress/friendships/лични и лоби чат съобщения/topic
    * съдържание/mission+reward progress и т.н. (ON DELETE CASCADE, категория
    * A). Financial/historical/forensic state (категория B) е ON DELETE SET
-   * NULL, виж 20260902_002/20260902_003: profile_bans, yellow_coin_gift_ledger,
-   * match_economy_ledger, coin_purchase_ledger, profile_name_change_ledger,
-   * vip_grants, vip_purchase_ledger, table_exit_penalties,
+   * NULL, виж 20260902_002/20260902_003/20260923_004: profile_bans,
+   * yellow_coin_gift_ledger, match_economy_ledger, coin_purchase_ledger,
+   * profile_name_change_ledger, vip_grants, vip_purchase_ledger,
+   * bundle_purchase_ledger, table_exit_penalties,
    * profile_match_results, tournaments.creator_profile_id,
    * tournament_entries.profile_id. Плюс site_visit_events/ad_campaign audit
    * полета/topics.created_by_profile_id/tournament_economy_ledger/
@@ -482,6 +487,18 @@ export async function createProfileHardDeleteService(
 
   const snapshotVipPurchaseLedgerStatement = database.prepare(`
     UPDATE vip_purchase_ledger
+    SET deleted_profile_id_snapshot = ?
+    WHERE profile_id = ?;
+  `)
+
+  // 20260923_004 — bundle_purchase_ledger PAYER snapshot, mirror ТОЧНО на
+  // coin/vip statement-ите по-горе (виж migration коментара за пълния
+  // rationale защо тази таблица не беше включена в оригиналния 20260902_002
+  // sweep). recipient-side snapshot (deleted_recipient_profile_id_snapshot)
+  // НЕ се пипа тук — това е ОТДЕЛЕН FK/атрибуция от payer-а (Paid Gift Shop,
+  // 20260923_002).
+  const snapshotBundlePurchaseLedgerStatement = database.prepare(`
+    UPDATE bundle_purchase_ledger
     SET deleted_profile_id_snapshot = ?
     WHERE profile_id = ?;
   `)
@@ -930,6 +947,7 @@ export async function createProfileHardDeleteService(
       snapshotProfileNameChangeLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotVipGrantsStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotVipPurchaseLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
+      snapshotBundlePurchaseLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotTableExitPenaltiesStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotProfileMatchResultsStatement.run(profileRow.profile_id, profileRow.profile_id)
       captureVisitorForensicSnapshot(profileRow.profile_id)

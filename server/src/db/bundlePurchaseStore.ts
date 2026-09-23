@@ -104,7 +104,18 @@ type BundlePurchaseRow = {
 }
 
 type BundlePurchaseInternalRow = BundlePurchaseRow & {
-  profile_id: string
+  /**
+   * PAYER — вече законно NULL (20260923_004 migration, profile_id FK
+   * CASCADE -> SET NULL): ако payer-ят е hard-deleted, докато редът е бил
+   * 'pending', колоната се нулира от FK cascade-а, НЕ редът се трие.
+   * createPendingPurchase() продължава да ИЗИСКВА реален payer при checkout
+   * (профилът винаги съществува в момента на INSERT) — NULL е ЕДИНСТВЕНО
+   * post-hard-delete historical state, никога стойност, избрана при
+   * създаване. fulfillByInternalRow explicit safe-fail-ва normal (non-gift)
+   * покупка с profile_id===null, вместо тихо да credit-не "никой" — виж
+   * коментара там.
+   */
+  profile_id: string | null
 }
 
 type ActiveBundlePackageRow = {
@@ -384,15 +395,24 @@ export async function createBundlePurchaseStore(
 
   // reason='purchase' reuse-нат (vip_grants CHECK constraint вече го
   // допуска, виж 20260810_001_create_vip_status_and_grants.sql) — bundle
-  // покупка Е "purchase" семантично, не нов reason enum член. purchase_id
-  // тук сочи bundle_purchase_ledger.purchase_id (различен UUID namespace от
-  // vip_purchase_ledger) — idx_vip_grants_purchase_id_once partial index
-  // покрива И двата източника заедно.
+  // покупка Е "purchase" семантично, не нов reason enum член.
+  //
+  // КРИТИЧНО (pre-deploy blocker fix, 20260923_005) — тук се пише
+  // bundle_purchase_id, НИКОГА purchase_id: vip_grants.purchase_id е FK
+  // СТРИКТНО към vip_purchase_ledger(purchase_id) (20260818_008, отпреди
+  // bundle feature-a) — bundle_purchase_ledger.purchase_id е РАЗЛИЧЕН UUID
+  // namespace, никога не съществува в vip_purchase_ledger. По-стар код тук
+  // пишеше bundle purchase_id В purchase_id колоната, което би fail-нало с
+  // "FOREIGN KEY constraint failed" при ВСЯКА платена bundle покупка (виж
+  // 20260923_005 migration коментара за пълния rationale и production
+  // verification). idx_vip_grants_bundle_purchase_id_once (mirror на
+  // established idx_vip_grants_purchase_id_once) гарантира DB-level exactly-
+  // once grant за bundle_purchase_id, аналогично на VIP-direct.
   const insertVipGrantStatement = database.prepare(`
     INSERT INTO vip_grants (
       grant_id, profile_id, reason, interval_unit, interval_amount,
       granted_by_profile_id, resulting_active_until,
-      purchase_id, amount_paid_cents, currency
+      bundle_purchase_id, amount_paid_cents, currency
     ) VALUES (?, ?, 'purchase', 'days', ?, NULL, ?, ?, ?, ?);
   `)
 
@@ -583,9 +603,31 @@ export async function createBundlePurchaseStore(
       }
     }
 
+    // 20260923_004 companion fix — normal (non-gift) покупка, чийто PAYER е
+    // бил hard-deleted МЕЖДУ checkout и fulfillment. За normal покупки
+    // payer==reward recipient, значи rewardRecipientProfileId по-долу би
+    // станал NULL. БЕЗ тази explicit проверка ensureWalletStatement/
+    // insertVipGrantStatement/upsertVipStatusStatement биха приели
+    // profile_id=NULL мълчаливо — FK ON DELETE SET NULL прави NULL валидна
+    // FK стойност по SQL semantics (NULL никога не violate-ва FK
+    // constraint), никакво exception не се хвърля. Резултатът без тази
+    // проверка: profile_wallets/vip_status биха получили "ghost" редове с
+    // profile_id=NULL (SQLite НЕ enforce-ва NOT NULL върху non-INTEGER
+    // PRIMARY KEY колона), а creditWalletStatement UPDATE ... WHERE
+    // profile_id = NULL никога не matchва нищо по SQL NULL semantics — самата
+    // награда тихо изчезва в НИКЪДЕ, вместо да отиде към payer-а или да гръмне
+    // с ясна грешка. Safe-fail explicit тук, mirror на gift-recipient-missing
+    // проверката по-горе — редът остава 'pending' за ръчен преглед.
+    if (!wasGiftPurchase && row.profile_id === null) {
+      return {
+        ok: false,
+        message: 'Купувачът вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
+      }
+    }
+
     const rewardRecipientProfileId = wasGiftPurchase
       ? (row.recipient_profile_id as string)
-      : row.profile_id
+      : (row.profile_id as string)
 
     let newActiveUntilSqlite = ''
     let recipientNotificationText: string | null = null
@@ -654,6 +696,9 @@ export async function createBundlePurchaseStore(
       creditWalletStatement.run(row.yellow_coins_amount, rewardRecipientProfileId)
 
       const grantId = randomUUID()
+      // row.purchase_id тук бинд-ва позиционно към bundle_purchase_id
+      // колоната (виж insertVipGrantStatement SQL-а по-горе) — НЕ към
+      // purchase_id (тази остава запазена изключително за VIP-direct).
       insertVipGrantStatement.run(
         grantId,
         rewardRecipientProfileId,

@@ -59,9 +59,11 @@
  * [E3]  Липсващ checkoutSessionId → ok:false
  *
  * F. DB-level defense in depth
- * [F0]  DB UNIQUE index idx_vip_grants_purchase_id_once хваща директен опит
- *         за втори INSERT в vip_grants със същия purchase_id/reason='purchase'
- *         (последна защита зад CAS-а, споделен index с директните VIP покупки)
+ * [F0]  DB UNIQUE index idx_vip_grants_bundle_purchase_id_once (20260923_005)
+ *         хваща директен опит за втори INSERT в vip_grants със същия
+ *         bundle_purchase_id/reason='purchase' (последна защита зад CAS-а;
+ *         ОТДЕЛЕН index от idx_vip_grants_purchase_id_once — purchase_id
+ *         остава изключително за VIP-direct)
  *
  * G. Две отделни легитимни bundle покупки
  * [G0]  Две ОТДЕЛНИ покупки (различни checkout сесии) → и двете extend-ват
@@ -229,12 +231,19 @@ function buildSchema(db: DatabaseSync): void {
       purchase_id TEXT NULL,
       amount_paid_cents INTEGER NULL,
       currency TEXT NULL,
+      bundle_purchase_id TEXT NULL,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_launch_gift_once
       ON vip_grants(profile_id)
       WHERE reason = 'launch_gift';
+
+    -- 20260923_005 pre-deploy blocker fix — purchase_id остава ИЗКЛЮЧИТЕЛНО
+    -- за VIP-direct; bundle-generated grants пишат bundle_purchase_id.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_bundle_purchase_id_once
+      ON vip_grants(bundle_purchase_id)
+      WHERE reason = 'purchase' AND bundle_purchase_id IS NOT NULL;
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_purchase_id_once
       ON vip_grants(purchase_id)
@@ -590,14 +599,23 @@ await withTempDir(async (dir) => {
     assert(row.vip_grant_id !== null, 'vip_grant_id трябва да е попълнен')
   })
 
-  await check('[C3] vip_grants ред от bundle покупка попълва purchase_id/amount_paid_cents/currency', () => {
+  await check('[C3] vip_grants ред от bundle покупка попълва bundle_purchase_id/amount_paid_cents/currency (purchase_id остава NULL)', () => {
+    // 20260923_005 pre-deploy blocker fix: vip_grants.purchase_id е FK
+    // СТРИКТНО към vip_purchase_ledger(purchase_id) — bundle-generated
+    // grants пишат bundle_purchase_id вместо purchase_id (виж
+    // bundlePurchaseStore.ts insertVipGrantStatement коментара). По-старата
+    // версия на тоя тест assert-ваше purchase_id !== null тук — точно
+    // обратното на коректното поведение, и би минала само срещу hand-rolled
+    // test schema БЕЗ реалния FK constraint (виж
+    // checkBundleVipGrantLinkage.ts за FK-enforced coverage).
     const grantRow = db.prepare(`
-      SELECT purchase_id, amount_paid_cents, currency, reason FROM vip_grants
+      SELECT purchase_id, bundle_purchase_id, amount_paid_cents, currency, reason FROM vip_grants
       WHERE profile_id = ?
       ORDER BY granted_at DESC LIMIT 1
-    `).get('profile-c1b') as { purchase_id: string | null; amount_paid_cents: number | null; currency: string | null; reason: string }
+    `).get('profile-c1b') as { purchase_id: string | null; bundle_purchase_id: string | null; amount_paid_cents: number | null; currency: string | null; reason: string }
     assertEqual(grantRow.reason, 'purchase', 'reason трябва да е purchase (споделен с директни VIP покупки)')
-    assert(grantRow.purchase_id !== null, 'purchase_id трябва да е попълнен')
+    assertEqual(grantRow.purchase_id, null, 'purchase_id ТРЯБВА да е NULL за bundle-generated grant (запазено изключително за VIP-direct)')
+    assert(grantRow.bundle_purchase_id !== null, 'bundle_purchase_id трябва да е попълнен')
     assertEqual(grantRow.amount_paid_cents, 999, 'amount_paid_cents трябва да е 999')
     assertEqual(grantRow.currency, 'EUR', 'currency трябва да е EUR')
   })
@@ -729,7 +747,11 @@ await withTempDir(async (dir) => {
 
   // ─── F. DB-level defense in depth ───────────────────────────────────────────
 
-  await check('[F0] DB UNIQUE index хваща директен опит за втори vip_grants INSERT със същия purchase_id', () => {
+  await check('[F0] DB UNIQUE index хваща директен опит за втори vip_grants INSERT със същия bundle_purchase_id', () => {
+    // 20260923_005 pre-deploy blocker fix: bundle-generated grants пишат
+    // bundle_purchase_id, НЕ purchase_id (тази остава изключително за
+    // VIP-direct) — guard-ът тук трябва да тества idx_vip_grants_bundle_purchase_id_once,
+    // не idx_vip_grants_purchase_id_once.
     const pending = purchaseStore.createPendingPurchase('profile-f0', superPackageId)
     assert(pending.ok, 'pending трябва да успее')
     if (!pending.ok) return
@@ -746,13 +768,13 @@ await withTempDir(async (dir) => {
     let threw = false
     try {
       db.prepare(`
-        INSERT INTO vip_grants (grant_id, profile_id, reason, interval_unit, interval_amount, resulting_active_until, purchase_id, amount_paid_cents, currency)
+        INSERT INTO vip_grants (grant_id, profile_id, reason, interval_unit, interval_amount, resulting_active_until, bundle_purchase_id, amount_paid_cents, currency)
         VALUES ('duplicate-grant', ?, 'purchase', 'days', 30, '2099-01-01 00:00:00', ?, 999, 'EUR')
       `).run('profile-f0', pending.purchase.purchaseId)
     } catch {
       threw = true
     }
-    assert(threw, 'директен втори INSERT със същия purchase_id трябва да удари UNIQUE constraint')
+    assert(threw, 'директен втори INSERT със същия bundle_purchase_id трябва да удари UNIQUE constraint')
   })
 
   // ─── G. Две отделни легитимни покупки ───────────────────────────────────────
