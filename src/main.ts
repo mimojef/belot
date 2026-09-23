@@ -56,6 +56,11 @@ import {
   type VipPurchaseSnapshot,
   type CoinPackageStatus,
   type CoinPurchaseSnapshot,
+  type BundlePackageSnapshot,
+  type BundlePackageInput,
+  type BundlePackageStatus,
+  type BundlePurchaseSnapshot,
+  type BundleCheckoutResponse,
   type FriendshipsSnapshot,
   type GameServerClient,
   type LeaderboardsSnapshot,
@@ -549,6 +554,19 @@ type VipCheckoutResponse = {
 type VipPurchasesResponse = {
   ok: boolean
   purchases?: VipPurchaseSnapshot[]
+  message?: string
+}
+
+type BundlePackagesResponse = {
+  ok: boolean
+  packages?: BundlePackageSnapshot[]
+  package?: BundlePackageSnapshot
+  message?: string
+}
+
+type BundlePurchasesResponse = {
+  ok: boolean
+  purchases?: BundlePurchaseSnapshot[]
   message?: string
 }
 
@@ -1397,6 +1415,102 @@ async function startVipPurchase(packageId: string): Promise<
       return {
         ok: false,
         message: data.message ?? 'Stripe плащането не беше стартирано.',
+      }
+    }
+
+    window.location.assign(data.checkoutUrl)
+
+    return {
+      ok: true,
+      message: 'Пренасочване към Stripe Checkout...',
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за Stripe плащане.',
+    }
+  }
+}
+
+async function loadBundlePackages(): Promise<
+  | { ok: true; packages: BundlePackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/bundle-packages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as BundlePackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Пакетите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за пакетите.',
+    }
+  }
+}
+
+async function loadBundlePurchases(): Promise<
+  | { ok: true; purchases: BundlePurchaseSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/bundle-purchases`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as BundlePurchasesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.purchases)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Историята на покупки на пакети не беше заредена.',
+      }
+    }
+
+    return {
+      ok: true,
+      purchases: data.purchases,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за покупки на пакети.',
+    }
+  }
+}
+
+async function startBundlePurchase(packageId: string): Promise<
+  | { ok: true; message: string }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/shop/bundle-checkout`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ packageId }),
+    })
+    const data = (await response.json()) as BundleCheckoutResponse
+
+    if (!response.ok || !data.ok || !data.checkoutUrl) {
+      return {
+        ok: false,
+        message: !data.ok ? data.message : 'Stripe плащането не беше стартирано.',
       }
     }
 
@@ -2458,6 +2572,145 @@ async function deleteAdminCoinPackage(packageId: string): Promise<
       },
     )
     const data = (await response.json()) as CoinPackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Пакетът не беше изтрит.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за изтриване на пакет.',
+    }
+  }
+}
+
+async function loadAdminBundlePackages(): Promise<
+  | { ok: true; packages: BundlePackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/bundle-packages`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    const data = (await response.json()) as BundlePackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Админ пакетите не бяха заредени.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за админ пакетите.',
+    }
+  }
+}
+
+async function submitAdminBundlePackage(
+  input: BundlePackageInput,
+): Promise<
+  | { ok: true; packages: BundlePackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/bundle-packages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify(input),
+    })
+    const data = (await response.json()) as BundlePackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Пакетът не беше записан.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за запис на пакет.',
+    }
+  }
+}
+
+async function setAdminBundlePackageStatus(
+  packageId: string,
+  status: BundlePackageStatus,
+): Promise<
+  | { ok: true; packages: BundlePackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/bundle-packages/${encodeURIComponent(packageId)}/status`,
+      {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        credentials: 'include',
+        body: JSON.stringify({ status }),
+      },
+    )
+    const data = (await response.json()) as BundlePackagesResponse
+
+    if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
+      return {
+        ok: false,
+        message: data.message ?? 'Статусът на пакета не беше променен.',
+      }
+    }
+
+    return {
+      ok: true,
+      packages: data.packages,
+    }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за промяна на пакет.',
+    }
+  }
+}
+
+async function deleteAdminBundlePackage(packageId: string): Promise<
+  | { ok: true; packages: BundlePackageSnapshot[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/bundle-packages/${encodeURIComponent(packageId)}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      },
+    )
+    const data = (await response.json()) as BundlePackagesResponse
 
     if (!response.ok || !data.ok || !Array.isArray(data.packages)) {
       return {
@@ -6218,6 +6471,9 @@ lobby = createLobbyFlowController({
   onShopPurchaseHide: (purchaseId) => hideShopPurchase(purchaseId),
   onVipPackagesLoad: () => loadVipPackages(),
   onVipPurchaseStart: (packageId) => startVipPurchase(packageId),
+  onBundlePackagesLoad: () => loadBundlePackages(),
+  onBundlePurchasesLoad: () => loadBundlePurchases(),
+  onBundlePurchaseStart: (packageId) => startBundlePurchase(packageId),
   onAdminDailyRewardsLoad: () => loadAdminDailyRewards(),
   onAdminDailyRewardAdd: (amount) => addAdminDailyReward(amount),
   onAdminDailyRewardRemove: (tierId) => removeAdminDailyReward(tierId),
@@ -6235,6 +6491,11 @@ lobby = createLobbyFlowController({
     setAdminCoinPackageLobbyVisibility(packageId, showInLobby),
   onAdminCoinPackageTopOfferToggle: (packageId, isTopOffer) =>
     setAdminCoinPackageTopOffer(packageId, isTopOffer),
+  onAdminBundlePackagesLoad: () => loadAdminBundlePackages(),
+  onAdminBundlePackageSubmit: (input) => submitAdminBundlePackage(input),
+  onAdminBundlePackageStatusChange: (packageId, status) =>
+    setAdminBundlePackageStatus(packageId, status),
+  onAdminBundlePackageDelete: (packageId) => deleteAdminBundlePackage(packageId),
   onFriendshipsLoad: () => loadFriendships(),
   onFriendRequestSubmit: (profileId) => submitFriendRequest(profileId),
   onFriendAccept: (friendshipId) => submitFriendAction(friendshipId, 'accept'),

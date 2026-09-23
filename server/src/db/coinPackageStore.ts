@@ -20,6 +20,16 @@ export type CoinPackageSnapshot = {
 
 export type CoinPackageInput = {
   packageId?: string | null
+  /**
+   * ИГНОРИРАНО от upsertPackage() — задържано в типа само за structural
+   * съвместимост (frontend подава '' винаги, виж renderLobbyScreen.ts's
+   * coin admin form submit handler). packageKey е ЧИСТО ВЪТРЕШЕН slug
+   * (UNIQUE stable business key за ON CONFLICT upsert семантиката), НИКОГА
+   * derive-нат от title — title е свободен UTF-8 текст (кирилица/латиница/
+   * всякакъв нормален текст), не бива да ограничава или да бъде
+   * транслитериран за да "стане" валиден packageKey. Виж
+   * generatePackageKey()/upsertPackage() за реалната server-side логика.
+   */
   packageKey: string
   title: string
   description: string
@@ -91,13 +101,18 @@ function normalizeText(value: string, maxLength: number): string {
   return value.trim().slice(0, maxLength)
 }
 
-function normalizePackageKey(value: string): string {
-  return value
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 48)
+// packageKey е ВТОРИЧНО, ЧИСТО ВЪТРЕШНО slug поле (UNIQUE stable business
+// key за ON CONFLICT upsert семантиката), НЕ display title. Server-side
+// generated от UUID, НИКОГА derive-нато от admin-подаденото заглавие
+// (заглавието е свободен UTF-8 текст — кирилица, латиница, всякакъв
+// нормален текст трябва да работи без ASCII-транслитерация hack-ове). Виж
+// upsertPackage()'s edit-vs-create клон за защо генерирането става само за
+// НОВ пакет — при edit оригиналният packageKey се запазва непроменен,
+// независимо колко пъти title се редактира. Идентичен fix pattern на
+// shopBundlePackageStore.ts's generatePackageKey() (Cyrillic title bug,
+// същия root cause).
+function generatePackageKey(): string {
+  return `coin-${randomUUID().replace(/-/g, '').slice(0, 24)}`
 }
 
 function normalizeInteger(value: number, min: number, max: number): number | null {
@@ -284,8 +299,18 @@ export async function createCoinPackageStore(
   function upsertPackage(
     input: CoinPackageInput,
   ): { ok: true; package: CoinPackageSnapshot } | { ok: false; message: string } {
-    const packageId = normalizeText(input.packageId ?? '', 96) || randomUUID()
-    const packageKey = normalizePackageKey(input.packageKey)
+    const requestedPackageId = normalizeText(input.packageId ?? '', 96)
+    const existing = requestedPackageId ? getPackageById(requestedPackageId) : null
+    const packageId = requestedPackageId || randomUUID()
+
+    // packageKey: edit на съществуващ пакет ЗАПАЗВА оригиналния key
+    // непроменен (stable identifier за upsertPackageStatement's
+    // ON CONFLICT(package_key), НЕ бива да "мигрира" при всяка редакция на
+    // името). Нов пакет получава прясно server-generated key — клиентският
+    // input.packageKey тук се игнорира изцяло, елиминира
+    // ASCII-derived-from-title bug-а за кирилица/друг UTF-8 текст.
+    const packageKey = existing ? existing.packageKey : generatePackageKey()
+
     const title = normalizeText(input.title, 80)
     const description = normalizeText(input.description, 220)
     const yellowCoinsAmount = normalizeInteger(input.yellowCoinsAmount, 1, 100_000_000)
@@ -293,13 +318,6 @@ export async function createCoinPackageStore(
     const currency = normalizeText(input.currency.toUpperCase(), 3)
     const status = normalizeStatus(input.status)
     const sortOrder = normalizeInteger(input.sortOrder, 0, 1_000_000)
-
-    if (!/^[a-z0-9][a-z0-9_-]{1,47}$/.test(packageKey)) {
-      return {
-        ok: false,
-        message: 'Ключът на пакета трябва да съдържа само латински букви, цифри, тире или долна черта.',
-      }
-    }
 
     if (title.length < 2) {
       return {

@@ -9,6 +9,10 @@ import type {
   CoinPackageStatus,
   CoinPurchaseSnapshot,
   VipPackageSnapshot,
+  BundlePackageInput,
+  BundlePackageSnapshot,
+  BundlePackageStatus,
+  BundlePurchaseSnapshot,
   FriendRelationshipSnapshot,
   FriendshipsSnapshot,
   LeaderboardCategory,
@@ -592,7 +596,7 @@ export type LobbyScreenState = {
   leaderboardsErrorText: string | null
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
-  shopActiveTab: 'coins' | 'vip'
+  shopActiveTab: 'coins' | 'vip' | 'bundle'
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -610,6 +614,14 @@ export type LobbyScreenState = {
   vipPackagesErrorText: string | null
   vipPurchaseActionPackageId: string | null
   vipPurchaseMessageText: string | null
+  bundlePackages: BundlePackageSnapshot[]
+  bundlePackagesLoading: boolean
+  bundlePackagesErrorText: string | null
+  bundlePurchases: BundlePurchaseSnapshot[]
+  bundlePurchasesVisible: boolean
+  bundlePurchasesLoading: boolean
+  bundlePurchaseActionPackageId: string | null
+  bundlePurchaseMessageText: string | null
   /** Пълен администратор — вижда "Настройки", редакция на профили, чат с поддръжката, съобщения от гости. */
   isAdmin: boolean
   /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
@@ -649,6 +661,10 @@ export type LobbyScreenState = {
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
   adminCoinPackageEditId: string | null
+  adminBundlePackages: BundlePackageSnapshot[]
+  adminBundlePackagesLoading: boolean
+  adminBundlePackagesErrorText: string | null
+  adminBundlePackageEditId: string | null
   friendships: FriendshipsSnapshot | null
   friendsLoading: boolean
   friendsErrorText: string | null
@@ -1032,8 +1048,10 @@ export type RenderLobbyScreenOptions = {
   onShopPurchaseHideConfirm: () => void
   onShopPurchaseHideCancel: () => void
   onShopHistoryToggle: () => void
-  onShopTabClick: (tab: 'coins' | 'vip') => void
+  onShopTabClick: (tab: 'coins' | 'vip' | 'bundle') => void
   onVipPurchaseClick: (packageId: string) => void
+  onBundlePurchaseClick: (packageId: string) => void
+  onBundleHistoryToggle: () => void
   onLeaderboardsClick: () => void
   onLeaderboardCategoryClick: (category: LeaderboardCategory) => void
   onTournamentsClick: () => void
@@ -1176,6 +1194,13 @@ export type RenderLobbyScreenOptions = {
   onAdminCoinPackageDelete: (packageId: string) => void
   onAdminCoinPackageLobbyToggle: (packageId: string, showInLobby: boolean) => void
   onAdminCoinPackageTopOfferToggle: (packageId: string, isTopOffer: boolean) => void
+  onAdminBundlePackageSubmit: (input: BundlePackageInput) => void
+  onAdminBundlePackageStatusChange: (
+    packageId: string,
+    status: BundlePackageStatus,
+  ) => void
+  onAdminBundlePackageEdit: (packageId: string) => void
+  onAdminBundlePackageDelete: (packageId: string) => void
   onFriendsClick: () => void
   onBlockedPlayersClick: () => void
   onBlockedPlayersClose: () => void
@@ -2181,15 +2206,11 @@ function formatPackagePrice(priceCents: number, currency: string): string {
   }).format(priceCents / 100)
 }
 
-const EUR_TO_BGN = 1.95583
-
-function formatPackagePriceBgn(priceCents: number): string {
-  const bgn = Math.round((priceCents / 100) * EUR_TO_BGN * 100) / 100
-  return new Intl.NumberFormat('bg-BG', {
-    style: 'currency',
-    currency: 'BGN',
-  }).format(bgn)
-}
+// EUR/BGN двойно обозначаване (formatPackagePriceBgn/EUR_TO_BGN) премахнато
+// — задължителният период за двойно показване на цени приключи 23.09.2026.
+// Consumer-facing цени показват само EUR (formatPackagePrice по-горе).
+// Реалните EUR price_cents/Stripe/currency в DB НЕ са засегнати — това е
+// изцяло presentation-only промяна.
 
 function renderPublicLegalBodyHtml(pageKey: PublicLegalPageKey, isMobile = false): string {
   const page = PUBLIC_LEGAL_PAGES[pageKey]
@@ -2242,7 +2263,6 @@ export function renderShopPurchaseConfirmModal(state: LobbyScreenState): string 
 
   const isProcessing = state.shopPurchaseActionPackageId === packageId
   const priceLabel = formatPackagePrice(coinPackage.priceCents, coinPackage.currency)
-  const priceBgnLabel = formatPackagePriceBgn(coinPackage.priceCents)
 
   return `
     <div data-shop-purchase-confirm-root="1" style="position:fixed;inset:0;z-index:13700;display:flex;align-items:center;justify-content:center;padding:18px;">
@@ -2262,7 +2282,6 @@ export function renderShopPurchaseConfirmModal(state: LobbyScreenState): string 
               <div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.48);text-transform:uppercase;letter-spacing:0.08em;">${escapeHtml(coinPackage.title)}</div>
               <div style="font-size:24px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(coinPackage.yellowCoinsAmount)} жълтици</div>
               <div style="font-size:16px;font-weight:900;color:#ffffff;">Крайна цена: ${escapeHtml(priceLabel)}</div>
-              <div style="font-size:12px;font-weight:800;color:rgba(255,255,255,0.48);">Приблизително ${escapeHtml(priceBgnLabel)}</div>
             </div>
           </div>
 
@@ -4659,7 +4678,7 @@ export function renderBottomSection(
           ${formatAmount(pkg.yellowCoinsAmount)}
         </div>
         <div style="font-size:16px; line-height:1; font-weight:400; color:#ffffff; margin-top:6px; margin-bottom:7px; white-space:nowrap;">
-          ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}<span style="font-size:12px; font-weight:400; color:rgba(255,255,255,0.45);"> / ${escapeHtml(formatPackagePriceBgn(pkg.priceCents))}</span>
+          ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}
         </div>
         <button data-lobby-buy-coins-button="1" data-lobby-buy-coins-package="${escapeHtml(pkg.packageId)}" data-lobby-buy-coins-logged="${isLoggedIn ? '1' : '0'}" style="
           background:linear-gradient(135deg, #f4c95b 0%, #c98f13 100%);
@@ -5348,7 +5367,7 @@ export function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], 
             ${formatAmount(pkg.yellowCoinsAmount)}
           </div>
           <div style="margin-top:5px;font-size:14px;font-weight:800;color:#ffffff;white-space:nowrap;">
-            ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.48);"> / ${escapeHtml(formatPackagePriceBgn(pkg.priceCents))}</span>
+            ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}
           </div>
           <button type="button" data-lobby-buy-coins-package="${escapeHtml(pkg.packageId)}" data-lobby-buy-coins-logged="${isLoggedIn ? '1' : '0'}" style="
             margin-top:10px;height:34px;padding:0 12px;border:0;border-radius:7px;
@@ -5735,6 +5754,86 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
     `
   }
 
+  // Shop -> "Пакети" (mobile) — mirror структурно на VIP branch-а по-горе
+  // (mobile card padding/grid pattern), plus bundle-специфичните полета
+  // (coins+VIP badge+description) от desktop renderBundleShopPanel-а.
+  // Липсваше изцяло до сега — тази функция имаше само 'vip' branch, после
+  // fall-through директно към coin rendering, значи 'bundle' tab
+  // визуално ставаше active, но съдържанието оставаше coin shop.
+  if (state.shopActiveTab === 'bundle') {
+    if (state.bundlePackagesLoading) return `${renderMobilePageTitle('Магазин Пакети')}${tabBarHtml}${renderMobileStateMessage('Зареждане на пакетите...')}`
+    if (state.bundlePackagesErrorText) return `${renderMobilePageTitle('Магазин Пакети')}${tabBarHtml}${renderMobileStateMessage(state.bundlePackagesErrorText, 'error')}`
+
+    const isLoggedInBundle = state.profile.profileId !== null
+
+    return `
+      ${renderMobilePageTitle('Магазин Пакети')}
+      ${tabBarHtml}
+      ${state.bundlePurchaseMessageText ? `<div style="margin:12px;border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:10px;color:#f8fafc;font-size:13px;font-weight:800;">${escapeHtml(state.bundlePurchaseMessageText)}</div>` : ''}
+      ${state.bundlePackages.length === 0 ? renderMobileStateMessage('Няма активни пакети в момента.') : `
+        <section style="padding:12px;display:grid;gap:12px;">
+          ${state.bundlePackages.map((bundlePackage) => {
+            const isPurchasing = state.bundlePurchaseActionPackageId === bundlePackage.packageId
+            return `
+              <article style="
+                position:relative;
+                border:1px solid rgba(212,165,32,0.46);
+                border-radius:12px;
+                background:#080808;
+                overflow:hidden;
+                display:flex;
+                flex-direction:column;
+                align-items:center;
+                text-align:center;
+                padding:18px 16px;
+              ">
+                <div style="font-size:10px;font-weight:900;letter-spacing:0.1em;text-transform:uppercase;color:rgba(212,165,32,0.85);">ПАКЕТ</div>
+                <div style="margin-top:6px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+
+                <div style="margin-top:14px;font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
+                <div style="margin-top:2px;font-size:10px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
+
+                <div style="margin-top:10px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:5px 12px;">
+                  <span style="font-size:13px;font-weight:900;color:#f4c95b;">+ ${bundlePackage.vipDays} дни VIP</span>
+                </div>
+
+                ${bundlePackage.description ? `
+                  <div style="margin-top:10px;font-size:12px;font-weight:600;color:rgba(255,255,255,0.56);line-height:1.4;">${escapeHtml(bundlePackage.description)}</div>
+                ` : ''}
+
+                <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);margin-top:14px;"></div>
+
+                <div style="margin-top:12px;font-size:24px;font-weight:900;color:#d4a520;line-height:1;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+
+                <button
+                  type="button"
+                  data-bundle-purchase-package="${escapeHtml(bundlePackage.packageId)}"
+                  ${isPurchasing ? 'disabled' : ''}
+                  style="margin-top:18px;height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};"
+                >${isPurchasing ? 'Зарежда...' : isLoggedInBundle ? 'Купи пакет' : 'Влез за покупка'}</button>
+              </article>
+            `
+          }).join('')}
+        </section>
+      `}
+      ${isLoggedInBundle ? `
+        <section style="margin:0 12px 16px;border-top:1px solid rgba(212,165,32,0.20);padding-top:12px;">
+          <button type="button" data-bundle-history-toggle="1" style="height:40px;width:100%;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#080808;color:#f8fafc;font-size:13px;font-weight:900;">${state.bundlePurchasesVisible ? 'Скрий историята' : 'Покажи историята'}</button>
+          ${state.bundlePurchasesVisible ? `<div style="margin-top:10px;display:grid;gap:8px;">${state.bundlePurchases.length === 0 ? renderMobileStateMessage('Още няма покупки.') : state.bundlePurchases.map((purchase) => `
+            <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:10px;">
+              <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px;">
+                <div style="min-width:0;">
+                  <div style="font-size:13px;font-weight:900;color:#ffffff;">${escapeHtml(purchase.titleSnapshot)}</div>
+                  <div style="margin-top:4px;font-size:12px;font-weight:800;color:${getPurchaseStatusColor(purchase.status)};">${formatAmount(purchase.yellowCoinsAmount)} + ${purchase.vipDays}д VIP · ${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
+                </div>
+              </div>
+            </div>
+          `).join('')}</div>` : ''}
+        </section>
+      ` : ''}
+    `
+  }
+
   if (state.shopPackagesLoading) return `${renderMobilePageTitle('Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage('Зареждане на магазина...')}`
   if (state.shopPackagesErrorText) return `${renderMobilePageTitle('Магазин Жълтици')}${tabBarHtml}${renderMobileStateMessage(state.shopPackagesErrorText, 'error')}`
 
@@ -5753,7 +5852,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
               <div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.48);text-transform:uppercase;">${escapeHtml(coinPackage.title)}</div>
               <div style="margin-top:4px;font-size:22px;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
               <div style="margin-top:4px;font-size:14px;font-weight:900;color:#ffffff;white-space:nowrap;">
-                ${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}<span style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.48);"> / ${escapeHtml(formatPackagePriceBgn(coinPackage.priceCents))}</span>
+                ${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}
               </div>
               <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="margin-top:10px;height:38px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};">${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}</button>
             </div>
@@ -7341,7 +7440,7 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
-function renderShopTabBar(activeTab: 'coins' | 'vip', variant: 'desktop' | 'mobile' = 'mobile'): string {
+function renderShopTabBar(activeTab: 'coins' | 'vip' | 'bundle', variant: 'desktop' | 'mobile' = 'mobile'): string {
   const tabButtonStyle = (isActive: boolean): string => `
     flex:1; height:44px; border-radius:8px; cursor:pointer;
     font-size:14px; font-weight:900; letter-spacing:0.02em;
@@ -7352,13 +7451,14 @@ function renderShopTabBar(activeTab: 'coins' | 'vip', variant: 'desktop' | 'mobi
   `.replace(/\s+/g, ' ')
 
   const wrapStyle = variant === 'desktop'
-    ? 'display:grid;grid-template-columns:repeat(2,1fr);gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);width:420px;margin:0 auto;'
+    ? 'display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);width:420px;margin:0 auto;'
     : 'display:flex;gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);'
 
   return `
     <div style="${wrapStyle}">
       <button type="button" data-shop-tab="coins" style="${tabButtonStyle(activeTab === 'coins')}">Жълтици</button>
       <button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>
+      <button type="button" data-shop-tab="bundle" style="${tabButtonStyle(activeTab === 'bundle')}">Пакети</button>
     </div>
   `
 }
@@ -7436,8 +7536,156 @@ function renderVipShopPanel(state: LobbyScreenState): string {
   `
 }
 
+// Shop -> "Пакети" (X жълтици + X дни VIP = единична EUR цена) — структурно
+// mirror-ва renderVipShopPanel по-горе (същия card grid/бутон/message-banner
+// pattern), НЕ отделен визуален дизайн (брифа §4 "не прави отделен визуален
+// дизайн, който не съответства на текущите shop cards"). Bundle пакетите
+// нямат pre-made per-package image asset (динамичен, admin-created брой,
+// за разлика от VIP-овите 3 фиксирани), затова карта-та показва
+// coins+VIP badge текстово вместо картинка.
+function renderBundleShopPanel(state: LobbyScreenState): string {
+  const isLoggedIn = state.profile.profileId !== null
+
+  if (state.bundlePackagesLoading) {
+    return `
+      <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+        Зареждане на пакетите...
+      </div>
+    `
+  }
+
+  if (state.bundlePackagesErrorText) {
+    return `
+      <div style="min-height:360px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(248,113,113,0.34);background:rgba(127,29,29,0.28);border-radius:8px;color:#fecaca;font-size:15px;font-weight:800;text-align:center;padding:20px;">
+        ${escapeHtml(state.bundlePackagesErrorText)}
+      </div>
+    `
+  }
+
+  const purchaseHistory = `
+    <div style="display:grid;gap:10px;border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;">
+      <div style="display:flex;align-items:center;gap:12px;">
+        <div style="font-size:18px;font-weight:900;color:#f8fafc;">История на покупки</div>
+        <button data-bundle-history-toggle="1" style="
+          background:none; border:1px solid rgba(255,255,255,0.15); border-radius:6px;
+          padding:5px 10px; cursor:pointer;
+          font-size:11px; font-weight:700; color:rgba(255,255,255,0.45);
+          letter-spacing:0.03em;
+        ">${state.bundlePurchasesVisible ? 'Скрий' : 'Покажи'}</button>
+        ${state.bundlePurchasesLoading ? `<div style="font-size:12px;font-weight:900;color:#d4a520;">Зареждане...</div>` : ''}
+      </div>
+      ${state.bundlePurchasesVisible ? `
+        ${state.bundlePurchases.length === 0 ? `
+          <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Още няма покупки.</div>
+        ` : `
+          <div style="display:grid;gap:8px;">
+            ${state.bundlePurchases.map((purchase) => `
+              <div style="display:grid;grid-template-columns:1.2fr 1fr 0.8fr auto;gap:10px;align-items:center;border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:12px;">
+                <div>
+                  <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(purchase.titleSnapshot)}</div>
+                  <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.42);">${escapeHtml(formatCompactDateTime(purchase.createdAt))}</div>
+                </div>
+                <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(purchase.yellowCoinsAmount)} + ${purchase.vipDays}д VIP</div>
+                <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(purchase.priceCents, purchase.currency))}</div>
+                <div style="font-size:12px;font-weight:900;color:${getPurchaseStatusColor(purchase.status)};">${escapeHtml(formatPurchaseStatusLabel(purchase.status))}</div>
+              </div>
+            `).join('')}
+          </div>
+        `}
+      ` : ''}
+    </div>
+  `
+
+  if (state.bundlePackages.length === 0) {
+    return `
+      <div style="display:grid;gap:16px;">
+        <div style="min-height:260px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(255,255,255,0.10);background:#080808;border-radius:8px;color:rgba(255,255,255,0.64);font-size:15px;font-weight:800;text-align:center;padding:20px;">
+          Няма активни пакети в момента.
+        </div>
+        ${isLoggedIn ? purchaseHistory : ''}
+      </div>
+    `
+  }
+
+  return `
+    <div style="display:grid;gap:16px;">
+      ${state.bundlePurchaseMessageText ? `
+        <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:rgba(212,165,32,0.08);padding:12px 14px;color:#f8fafc;font-size:13px;font-weight:800;">
+          ${escapeHtml(state.bundlePurchaseMessageText)}
+        </div>
+      ` : ''}
+      <div data-bundle-package-grid="1" style="display:grid;grid-template-columns:repeat(3,minmax(0,300px));justify-content:center;gap:20px;">
+        ${state.bundlePackages.map((bundlePackage) => {
+          const isPurchasing = state.bundlePurchaseActionPackageId === bundlePackage.packageId
+          return `
+          <article style="
+            position:relative;
+            background:#000000;
+            border:1px solid rgba(212,165,32,0.42);
+            border-radius:14px;
+            overflow:hidden;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            text-align:center;
+            padding:22px 20px 20px;
+            box-shadow:0 4px 14px rgba(0,0,0,0.28);
+          ">
+            <div style="font-size:11px;font-weight:900;letter-spacing:0.1em;text-transform:uppercase;color:rgba(212,165,32,0.85);">ПАКЕТ</div>
+            <div style="margin-top:6px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+
+            <div style="margin-top:16px;font-size:24px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
+            <div style="margin-top:2px;font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
+
+            <div style="margin-top:12px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:6px 14px;">
+              <span style="font-size:14px;font-weight:900;color:#f4c95b;">+ ${bundlePackage.vipDays} дни VIP</span>
+            </div>
+
+            ${bundlePackage.description ? `
+              <div style="margin-top:12px;font-size:12px;font-weight:600;color:rgba(255,255,255,0.56);line-height:1.4;">${escapeHtml(bundlePackage.description)}</div>
+            ` : ''}
+
+            <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);margin-top:18px;"></div>
+
+            <div style="margin-top:16px;font-size:28px;font-weight:900;color:#d4a520;line-height:1;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+
+            <button
+              type="button"
+              data-bundle-purchase-package="${escapeHtml(bundlePackage.packageId)}"
+              ${isPurchasing ? 'disabled' : ''}
+              style="margin-top:22px;height:44px;width:100%;border:0;border-radius:9px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};transition:filter 0.15s;flex-shrink:0;"
+            >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}</button>
+          </article>
+          `
+        }).join('')}
+      </div>
+      <style>
+        [data-bundle-purchase-package]:not(:disabled):hover { filter:brightness(1.12); }
+        @media (max-width:720px) {
+          [data-bundle-package-grid="1"] { grid-template-columns:minmax(0,340px); }
+        }
+      </style>
+      ${isLoggedIn ? purchaseHistory : ''}
+    </div>
+  `
+}
+
 export function renderShopPanel(state: LobbyScreenState): string {
   const tabBar = renderShopTabBar(state.shopActiveTab, 'desktop')
+
+  if (state.shopActiveTab === 'bundle') {
+    return `
+      <section style="min-height:520px;display:grid;gap:18px;align-content:start;">
+        <div style="display:flex;align-items:end;justify-content:space-between;gap:16px;border-bottom:1px solid rgba(212,165,32,0.28);padding-bottom:12px;">
+          <div>
+            <div style="font-size:26px;line-height:1.05;font-weight:900;color:#f8fafc;">Магазин Пакети</div>
+          </div>
+        </div>
+        ${tabBar}
+        ${renderBundleShopPanel(state)}
+      </section>
+    `
+  }
 
   if (state.shopActiveTab === 'vip') {
     return `
@@ -7606,7 +7854,6 @@ export function renderShopPanel(state: LobbyScreenState): string {
               <div style="font-size:15px;font-weight:900;color:#ffffff;margin-bottom:14px;">${escapeHtml(coinPackage.title)}</div>
 
               <div style="font-size:17px;font-weight:900;color:#ffffff;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
-              <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.5);margin-top:2px;">${escapeHtml(formatPackagePriceBgn(coinPackage.priceCents))}</div>
 
               ${isAdmin ? `
                 <label style="display:flex;align-items:center;gap:7px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(212,165,32,0.22);cursor:pointer;user-select:none;">
@@ -8882,6 +9129,7 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     freeTopicsVipDays: 30,
   }
   const adminPackages = state.adminCoinPackages
+  const adminBundlePackages = state.adminBundlePackages
   const settingsGridStyle = isMobile
     ? 'display:grid;grid-template-columns:minmax(0,1fr);gap:14px;'
     : 'display:grid;grid-template-columns:1fr 1fr;gap:14px;'
@@ -9086,7 +9334,6 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
           return `
         <form data-lobby-admin-coin-package-form="1" style="${adminPackageFormStyle(Boolean(editPackage))}">
           <input type="hidden" name="packageId" value="${escapeHtml(editPackage?.packageId ?? '')}">
-          <input type="hidden" name="packageKey" value="${escapeHtml(editPackage?.packageKey ?? '')}">
           <div style="grid-column:1 / -1;font-size:15px;font-weight:900;color:${editPackage ? '#d4a520' : '#f8fafc'};">
             ${editPackage ? `Редактирай: ${escapeHtml(editPackage.title)}` : 'Нова оферта'}
           </div>
@@ -9137,6 +9384,112 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             ` : ''}
             <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">
               ${editPackage ? 'Запази промените' : 'Добави оферта'}
+            </button>
+          </div>
+        </form>
+          `
+        })()}
+      </div>
+
+      <div style="display:grid;gap:12px;margin-top:8px;">
+        <div style="display:flex;align-items:end;justify-content:space-between;gap:12px;">
+          <div>
+            <div style="font-size:20px;line-height:1.1;font-weight:900;color:#f8fafc;">Пакети (жълтици + VIP)</div>
+            <div style="margin-top:5px;font-size:12px;font-weight:700;color:rgba(255,255,255,0.54);">Активните пакети се показват в Магазин -> Пакети.</div>
+          </div>
+          ${state.adminBundlePackagesLoading ? `
+            <div style="font-size:12px;font-weight:900;color:#d4a520;">Зареждане...</div>
+          ` : ''}
+        </div>
+
+        ${state.adminBundlePackagesErrorText ? `
+          <div style="width:min(100%,980px);border-radius:8px;border:1px solid rgba(248,113,113,0.28);background:rgba(127,29,29,0.42);padding:10px 12px;color:#fecaca;font-size:13px;font-weight:800;">
+            ${escapeHtml(state.adminBundlePackagesErrorText)}
+          </div>
+        ` : ''}
+
+        <div style="${adminPackageListStyle}">
+          ${adminBundlePackages.length === 0 ? `
+            <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Няма създадени пакети.</div>
+          ` : adminBundlePackages.map((bundlePackage) => {
+            const isEditing = state.adminBundlePackageEditId === bundlePackage.packageId
+            return `
+            <div style="${adminPackageRowStyle(isEditing)}">
+              <div>
+                <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+                <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.44);">${escapeHtml(bundlePackage.packageKey)}</div>
+              </div>
+              <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(bundlePackage.yellowCoinsAmount)} + ${bundlePackage.vipDays}д VIP</div>
+              <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+              <div style="font-size:12px;font-weight:900;color:${bundlePackage.status === 'active' ? '#86efac' : 'rgba(255,255,255,0.46)'};">${bundlePackage.status}</div>
+              <div style="${adminPackageActionsStyle}">
+                <button type="button" data-lobby-admin-bundle-package-edit="${escapeHtml(bundlePackage.packageId)}" style="height:36px;padding:0 12px;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:${isEditing ? 'rgba(212,165,32,0.18)' : '#111111'};color:#d4a520;font-size:12px;font-weight:900;cursor:pointer;">
+                  ${isEditing ? 'Редактира се' : 'Редактирай'}
+                </button>
+                <button type="button" data-lobby-admin-bundle-package-status="${escapeHtml(bundlePackage.packageId)}" data-lobby-admin-bundle-package-next-status="${bundlePackage.status === 'active' ? 'inactive' : 'active'}" style="height:36px;padding:0 12px;border:1px solid rgba(255,255,255,0.14);border-radius:8px;background:#111111;color:rgba(255,255,255,0.65);font-size:12px;font-weight:900;cursor:pointer;">
+                  ${bundlePackage.status === 'active' ? 'Скрий' : 'Активирай'}
+                </button>
+                <button type="button" data-lobby-admin-bundle-package-delete="${escapeHtml(bundlePackage.packageId)}" style="height:36px;padding:0 10px;border:1px solid rgba(248,113,113,0.28);border-radius:8px;background:#111111;color:#f87171;font-size:12px;font-weight:900;cursor:pointer;">
+                  Изтрий
+                </button>
+              </div>
+            </div>
+          `}).join('')}
+        </div>
+
+        ${(() => {
+          const editBundlePackage = state.adminBundlePackageEditId
+            ? adminBundlePackages.find((p) => p.packageId === state.adminBundlePackageEditId) ?? null
+            : null
+          return `
+        <form data-lobby-admin-bundle-package-form="1" style="${adminPackageFormStyle(Boolean(editBundlePackage))}">
+          <input type="hidden" name="packageId" value="${escapeHtml(editBundlePackage?.packageId ?? '')}">
+          <div style="grid-column:1 / -1;font-size:15px;font-weight:900;color:${editBundlePackage ? '#d4a520' : '#f8fafc'};">
+            ${editBundlePackage ? `Редактирай: ${escapeHtml(editBundlePackage.title)}` : 'Нов пакет'}
+          </div>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Име
+            <input name="title" type="text" maxlength="80" placeholder="Супер" value="${escapeHtml(editBundlePackage?.title ?? '')}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Жълтици
+            <input name="yellowCoinsAmount" type="number" min="1" max="100000000" step="1" value="${editBundlePackage?.yellowCoinsAmount ?? 500000}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            VIP дни
+            <input name="vipDays" type="number" min="1" max="3650" step="1" value="${editBundlePackage?.vipDays ?? 30}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Цена в центове
+            <input name="priceCents" type="number" min="1" max="10000000" step="1" value="${editBundlePackage?.priceCents ?? 999}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Валута
+            <input name="currency" type="text" maxlength="3" value="${escapeHtml(editBundlePackage?.currency ?? 'EUR')}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;text-transform:uppercase;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Подредба
+            <input name="sortOrder" type="number" min="0" max="1000000" step="1" value="${editBundlePackage?.sortOrder ?? 10}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Статус
+            <select name="status" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+              <option value="active" ${(editBundlePackage?.status ?? 'active') === 'active' ? 'selected' : ''}>active</option>
+              <option value="inactive" ${editBundlePackage?.status === 'inactive' ? 'selected' : ''}>inactive</option>
+            </select>
+          </label>
+          <label style="grid-column:1 / -1;display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Описание
+            <input name="description" type="text" maxlength="220" placeholder="Описание за магазина" value="${escapeHtml(editBundlePackage?.description ?? '')}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+          </label>
+          <div style="grid-column:1 / -1;display:flex;justify-content:flex-end;gap:8px;">
+            ${editBundlePackage ? `
+              <button type="button" data-lobby-admin-bundle-package-edit-cancel="1" style="height:42px;padding:0 16px;border:1px solid rgba(255,255,255,0.18);border-radius:8px;background:transparent;color:rgba(255,255,255,0.65);font-size:13px;font-weight:900;cursor:pointer;">
+                Отказ
+              </button>
+            ` : ''}
+            <button type="submit" style="height:42px;padding:0 16px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;cursor:pointer;">
+              ${editBundlePackage ? 'Запази промените' : 'Добави пакет'}
             </button>
           </div>
         </form>
@@ -13940,7 +14293,7 @@ export function renderLobbyScreen(
   root.querySelectorAll<HTMLButtonElement>('[data-shop-tab]').forEach((button) => {
     button.addEventListener('click', () => {
       const tab = button.dataset.shopTab
-      if (tab === 'coins' || tab === 'vip') {
+      if (tab === 'coins' || tab === 'vip' || tab === 'bundle') {
         options.onShopTabClick(tab)
       }
     })
@@ -13955,6 +14308,19 @@ export function renderLobbyScreen(
       }
     })
   })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-bundle-purchase-package]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.bundlePurchasePackage?.trim() ?? ''
+
+      if (packageId.length > 0) {
+        options.onBundlePurchaseClick(packageId)
+      }
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-bundle-history-toggle="1"]')
+    ?.addEventListener('click', options.onBundleHistoryToggle)
 
   root.querySelectorAll<HTMLElement>('[data-shop-purchase-confirm-close="1"], [data-shop-purchase-confirm-cancel="1"]')
     .forEach((element) => {
@@ -14498,13 +14864,16 @@ export function renderLobbyScreen(
       }
 
       const title = String(data.get('title') ?? '').trim()
-      const existingKey = String(data.get('packageKey') ?? '').trim()
-      const packageKey = existingKey ||
-        title.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 48)
 
+      // packageKey НЕ се derive-ва от title тук (title е свободен UTF-8
+      // текст — кирилица/латиница/друг normal текст, никаква
+      // ASCII-slug транслитерация) — сървърът генерира/запазва packageKey
+      // сам (coinPackageStore.ts's upsertPackage), тук подаваме само
+      // placeholder-стойност, която сървърът изцяло игнорира. Mirror на
+      // bundle admin form fix-а (identичен bug/fix pattern).
       options.onAdminCoinPackageSubmit({
         packageId: String(data.get('packageId') ?? '').trim() || null,
-        packageKey,
+        packageKey: '',
         title,
         description: String(data.get('description') ?? '').trim(),
         yellowCoinsAmount: Number(data.get('yellowCoinsAmount')),
@@ -14541,6 +14910,77 @@ export function renderLobbyScreen(
     ?.addEventListener('click', () => {
       options.onAdminCoinPackageEdit('')
     })
+
+  // Shop -> "Пакети" admin CRUD wiring — mirror на data-lobby-admin-package-*
+  // wiring-а по-горе (жълтици), plus vipDays поле.
+  root
+    .querySelector<HTMLFormElement>('[data-lobby-admin-bundle-package-form="1"]')
+    ?.addEventListener('submit', (event) => {
+      event.preventDefault()
+      const form = event.currentTarget as HTMLFormElement
+      const data = new FormData(form)
+      const status = String(data.get('status') ?? '')
+
+      if (status !== 'active' && status !== 'inactive') {
+        return
+      }
+
+      const title = String(data.get('title') ?? '').trim()
+
+      // packageKey НЕ се derive-ва от title тук (title е свободен UTF-8
+      // текст — кирилица/латиница/друг normal текст, никаква
+      // ASCII-slug транслитерация) — сървърът генерира/запазва
+      // packageKey сам (shopBundlePackageStore.ts's upsertPackage), тук
+      // подаваме само placeholder-стойност, която сървърът изцяло
+      // игнорира. Полето остава в BundlePackageInput типа само за
+      // structural съвместимост с CoinPackageInput pattern-а.
+      options.onAdminBundlePackageSubmit({
+        packageId: String(data.get('packageId') ?? '').trim() || null,
+        packageKey: '',
+        title,
+        description: String(data.get('description') ?? '').trim(),
+        yellowCoinsAmount: Number(data.get('yellowCoinsAmount')),
+        vipDays: Number(data.get('vipDays')),
+        priceCents: Number(data.get('priceCents')),
+        currency: String(data.get('currency') ?? 'EUR').trim().toUpperCase(),
+        status,
+        sortOrder: Number(data.get('sortOrder')),
+      })
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-bundle-package-status]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyAdminBundlePackageStatus?.trim() ?? ''
+      const status = button.dataset.lobbyAdminBundlePackageNextStatus ?? ''
+
+      if (packageId.length > 0 && (status === 'active' || status === 'inactive')) {
+        options.onAdminBundlePackageStatusChange(packageId, status)
+      }
+    })
+  })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-bundle-package-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyAdminBundlePackageEdit?.trim() ?? ''
+      if (packageId.length > 0) {
+        options.onAdminBundlePackageEdit(packageId)
+      }
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-lobby-admin-bundle-package-edit-cancel="1"]')
+    ?.addEventListener('click', () => {
+      options.onAdminBundlePackageEdit('')
+    })
+
+  root.querySelectorAll<HTMLButtonElement>('[data-lobby-admin-bundle-package-delete]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const packageId = button.dataset.lobbyAdminBundlePackageDelete?.trim() ?? ''
+      if (packageId.length > 0) {
+        options.onAdminBundlePackageDelete(packageId)
+      }
+    })
+  })
 
   // Virtual Item Gift System (Етап 1) — admin CRUD wiring за
   // renderAdminGiftItemsPanel (data-admin-gift-item-*). Огледално на

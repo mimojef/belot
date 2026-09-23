@@ -623,6 +623,7 @@ export type CoinPackageSnapshot = {
 
 export type CoinPackageInput = {
   packageId?: string | null
+  /** Игнорирано от сървъра (server-side generated/preserved, виж coinPackageStore.ts's upsertPackage) — подавано само за structural съвместимост, frontend винаги изпраща ''. */
   packageKey: string
   title: string
   description: string
@@ -661,6 +662,70 @@ export type VipPurchaseSnapshot = {
   createdAt: string
   updatedAt: string
 }
+
+// Shop -> "Пакети" (X жълтици + X дни VIP = единична EUR цена) — DB-driven
+// admin-configurable каталог, mirror на CoinPackageSnapshot/CoinPackageInput
+// структурно (bundlePackageStore.ts на сървъра), plus vipDays поле.
+export type BundlePackageStatus = 'active' | 'inactive'
+
+export type BundlePackageSnapshot = {
+  packageId: string
+  packageKey: string
+  title: string
+  description: string
+  yellowCoinsAmount: number
+  vipDays: number
+  priceCents: number
+  currency: string
+  status: BundlePackageStatus
+  sortOrder: number
+}
+
+export type BundlePackageInput = {
+  packageId?: string | null
+  /** Игнорирано от сървъра (server-side generated/preserved, виж shopBundlePackageStore.ts's upsertPackage) — подавано само за structural съвместимост с CoinPackageInput pattern-а. */
+  packageKey: string
+  title: string
+  description: string
+  yellowCoinsAmount: number
+  vipDays: number
+  priceCents: number
+  currency: string
+  status: BundlePackageStatus
+  sortOrder: number
+}
+
+export type BundlePurchaseStatus = 'pending' | 'paid' | 'canceled' | 'failed'
+
+export type BundlePurchaseSnapshot = {
+  purchaseId: string
+  packageId: string | null
+  packageKeySnapshot: string
+  titleSnapshot: string
+  yellowCoinsAmount: number
+  vipDays: number
+  priceCents: number
+  currency: string
+  provider: string
+  providerCheckoutSessionId: string | null
+  status: BundlePurchaseStatus
+  creditedAt: string | null
+  hiddenAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type BundleCheckoutResponse =
+  | {
+      ok: true
+      checkoutUrl: string
+      checkoutSessionId: string
+      purchase: BundlePurchaseSnapshot
+    }
+  | {
+      ok: false
+      message: string
+    }
 
 export type MissionType =
   | 'win_games'

@@ -93,6 +93,11 @@ import {
   createCoinPackageStore,
   type CoinPackageStatus,
 } from './db/coinPackageStore.js'
+import {
+  createShopBundlePackageStore,
+  type BundlePackageStatus,
+} from './db/shopBundlePackageStore.js'
+import { createBundlePurchaseStore } from './db/bundlePurchaseStore.js'
 import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
 import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
@@ -755,6 +760,12 @@ const coinPackageStore = await createCoinPackageStore(
   databaseBootstrap.databaseFilePath,
 )
 const coinPurchaseStore = await createCoinPurchaseStore(
+  databaseBootstrap.databaseFilePath,
+)
+const shopBundlePackageStore = await createShopBundlePackageStore(
+  databaseBootstrap.databaseFilePath,
+)
+const bundlePurchaseStore = await createBundlePurchaseStore(
   databaseBootstrap.databaseFilePath,
 )
 const dailyRewardsStore = await createDailyRewardsStore(
@@ -10250,6 +10261,333 @@ async function handleVipClaimLaunchGiftRequest(
   return true
 }
 
+// ─── Магазин "Пакети" (bundle: жълтици + VIP дни = единична EUR цена) ──────
+// §3/§4 в брифа — mirror-ва coins/VIP checkout pattern-а точно
+// (handleShopCheckoutRequest/handleVipCheckoutRequest по-горе), reuse-ва
+// СЪЩАТА Stripe checkout инфраструктура и СЪЩИЯ webhook route
+// (/api/stripe/webhook), НЕ паралелна платежна логика. Клиентът изпраща
+// само packageId — coins/vip_days/price идват изцяло от
+// shopBundlePackageStore/bundlePurchaseStore (DB-driven admin CRUD, за
+// разлика от VIP_PACKAGE_CATALOG-а, който е code-level constant).
+
+async function handleShopBundlePackagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/shop/bundle-packages' || req.method !== 'GET') {
+    return false
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    packages: shopBundlePackageStore.listPublicPackages(),
+  })
+  return true
+}
+
+async function handleShopBundlePurchasesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/shop/bundle-purchases' || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    purchases: bundlePurchaseStore.listProfilePurchases(session.profile.profileId),
+  })
+  return true
+}
+
+async function handleShopBundleCheckoutRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/shop/bundle-checkout' || req.method !== 'POST') {
+    return false
+  }
+
+  // Auth+validation guard-овете вървят ПРЕДИ Stripe-configuration проверката
+  // (виж identичния коментар в handleShopCheckoutRequest/handleVipCheckoutRequest).
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, {
+      ok: false,
+      message: 'Трябва да влезеш в профила си, за да купиш пакет.',
+    })
+    return true
+  }
+
+  const body = await readJsonRequestBody(req)
+
+  if (!isRecord(body)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+    return true
+  }
+
+  // §3/§12 "Frontend трябва да изпраща само идентификатора на избрания
+  // пакет" / "клиентът не може да override-не reward или price" — ЕДИНСТВЕНОТО
+  // поле, което се чете от body-то тук, е packageId. createPendingPurchase()
+  // зарежда coins/vip_days/price директно от активния DB ред.
+  const packageId = getStringField(body, 'packageId')
+
+  const pendingResult = bundlePurchaseStore.createPendingPurchase(
+    session.profile.profileId,
+    packageId,
+  )
+
+  if (!pendingResult.ok) {
+    sendJsonResponse(res, 400, pendingResult)
+    return true
+  }
+
+  const stripeSecretKey = process.env.STRIPE_SECRET_KEY
+
+  if (!stripeSecretKey) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Stripe не е конфигуриран на сървъра. Моля, свържи се с администратор.',
+    })
+    return true
+  }
+
+  const { purchase } = pendingResult
+
+  const clientOrigin = process.env.CLIENT_ORIGIN ?? 'http://localhost:5173'
+  const successUrl =
+    process.env.STRIPE_SUCCESS_URL ??
+    `${clientOrigin}/lobby?payment=success&session_id={CHECKOUT_SESSION_ID}`
+  const cancelUrl =
+    process.env.STRIPE_CANCEL_URL ?? `${clientOrigin}/lobby?payment=cancel`
+
+  const stripe = new Stripe(stripeSecretKey)
+
+  let checkoutSession: Stripe.Checkout.Session
+
+  try {
+    checkoutSession = await stripe.checkout.sessions.create({
+      mode: 'payment',
+      success_url: successUrl,
+      cancel_url: cancelUrl,
+      line_items: [
+        {
+          price_data: {
+            currency: purchase.currency.toLowerCase(),
+            unit_amount: purchase.priceCents,
+            product_data: {
+              name: purchase.titleSnapshot,
+            },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: {
+        // purchaseType='bundle' — disambiguator за webhook routing-a (mirror
+        // на VIP checkout-a metadata.purchaseType='vip'), виж
+        // handleStripeWebhookRequest по-долу.
+        purchaseType: 'bundle',
+        purchaseId: purchase.purchaseId,
+        profileId: session.profile.profileId,
+        packageId: purchase.packageId ?? '',
+      },
+    })
+  } catch (error) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message:
+        error instanceof Error ? error.message : 'Stripe checkout не беше стартиран.',
+    })
+    return true
+  }
+
+  const attached = bundlePurchaseStore.attachCheckoutSession(
+    purchase.purchaseId,
+    checkoutSession.id,
+  )
+
+  if (attached === null) {
+    sendJsonResponse(res, 500, {
+      ok: false,
+      message: 'Checkout сесията не беше записана към покупката.',
+    })
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    checkoutUrl: checkoutSession.url,
+    checkoutSessionId: checkoutSession.id,
+    purchase: attached,
+  })
+
+  return true
+}
+
+async function handleShopBundleHidePurchaseRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/shop\/bundle-purchases\/([^/]+)\/hide$/.exec(pathname)
+
+  if (match === null || req.method !== 'PATCH') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  const purchaseId = decodeURIComponent(match[1] ?? '')
+  const result = bundlePurchaseStore.hidePurchaseForUser(purchaseId, session.profile.profileId)
+
+  if (!result.ok) {
+    sendJsonResponse(res, 400, result)
+    return true
+  }
+
+  sendJsonResponse(res, 200, {
+    ok: true,
+    purchases: bundlePurchaseStore.listProfilePurchases(session.profile.profileId),
+  })
+  return true
+}
+
+async function handleAdminBundlePackagesRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const statusMatch = /^\/api\/admin\/bundle-packages\/([^/]+)\/status$/.exec(pathname)
+  const deleteMatch = /^\/api\/admin\/bundle-packages\/([^/]+)$/.exec(pathname)
+
+  if (
+    pathname !== '/api/admin/bundle-packages' &&
+    statusMatch === null &&
+    deleteMatch === null
+  ) {
+    return false
+  }
+
+  // Reuse-ва СЪЩИЯ permission check като admin coin-packages/admin settings
+  // (§5/§12 "Използвай съществуващите permission checks за Admin. Не
+  // създавай по-слаб admin endpoint.") — стриктно isFullAdminSession
+  // (role==='admin'), НЕ subadmin.
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Нямаш достъп до админ пакетите.',
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/bundle-packages' && req.method === 'GET') {
+    sendJsonResponse(res, 200, {
+      ok: true,
+      packages: shopBundlePackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  if (pathname === '/api/admin/bundle-packages' && req.method === 'POST') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const result = shopBundlePackageStore.upsertPackage({
+      packageId: getStringField(body, 'packageId') || null,
+      packageKey: getStringField(body, 'packageKey'),
+      title: getStringField(body, 'title'),
+      description: getStringField(body, 'description'),
+      yellowCoinsAmount: getNumberField(body, 'yellowCoinsAmount') ?? 0,
+      vipDays: getNumberField(body, 'vipDays') ?? 0,
+      priceCents: getNumberField(body, 'priceCents') ?? -1,
+      currency: getStringField(body, 'currency') || 'EUR',
+      status: getStringField(body, 'status') as BundlePackageStatus,
+      sortOrder: getNumberField(body, 'sortOrder') ?? 0,
+    })
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      package: result.package,
+      packages: shopBundlePackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  if (deleteMatch !== null && req.method === 'DELETE') {
+    const result = shopBundlePackageStore.deletePackage(decodeURIComponent(deleteMatch[1] ?? ''))
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, { ok: true, packages: result.packages })
+    return true
+  }
+
+  if (statusMatch !== null && req.method === 'PATCH') {
+    const body = await readJsonRequestBody(req)
+
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request body.' })
+      return true
+    }
+
+    const result = shopBundlePackageStore.setPackageStatus(
+      decodeURIComponent(statusMatch[1] ?? ''),
+      getStringField(body, 'status') as BundlePackageStatus,
+    )
+
+    if (!result.ok) {
+      sendJsonResponse(res, 400, result)
+      return true
+    }
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      package: result.package,
+      packages: shopBundlePackageStore.listAdminPackages(),
+    })
+    return true
+  }
+
+  return false
+}
+
 // ─── Topics (Теми): read-only списък + cursor/seq history ──────────────────
 // Етап 1 — само четене. Няма send/like/create/moderation handlers тук; те
 // идват в следващи етапи.
@@ -14629,6 +14967,88 @@ async function handleStripeWebhookRequest(
       return true
     }
 
+    if (stripeSession.metadata?.purchaseType === 'bundle') {
+      const purchaseId = stripeSession.metadata?.purchaseId ?? ''
+      const checkoutSessionId = stripeSession.id
+
+      // Единствената atomic settlement точка (coins + VIP extend в ЕДНА
+      // транзакция, §8/§9 в брифа) — mirror на VIP branch-а по-горе.
+      const bundleResult = bundlePurchaseStore.fulfillPaidPurchase({
+        checkoutSessionId,
+        purchaseId,
+        stripePaymentStatus: stripeSession.payment_status,
+        stripeCurrency: (stripeSession.currency ?? '').toUpperCase(),
+        stripeAmountTotalCents: stripeSession.amount_total ?? -1,
+      })
+
+      if (!bundleResult.ok) {
+        console.error(
+          `[stripe/webhook] Bundle fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${bundleResult.message}`,
+        )
+      } else if (bundleResult.alreadyCredited) {
+        console.log(
+          `[stripe/webhook] Bundle already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
+        )
+      } else {
+        console.log(
+          `[stripe/webhook] Bundle fulfilled purchaseId=${bundleResult.purchase.purchaseId} coins=${bundleResult.purchase.yellowCoinsAmount} vipDays=${bundleResult.purchase.vipDays} newActiveUntil=${bundleResult.newActiveUntil}`,
+        )
+      }
+
+      // Payment-method enrichment — mirror на VIP/coin flow-a Step 2 по-горе.
+      // Settlement вече е приключил (успешно ИЛИ already-credited) преди
+      // тази точка — enrichment е чисто display-only, никога не влияе на/не
+      // отменя вече settle-натото плащане.
+      if (bundleResult.ok) {
+        const bundleFulfilledPurchaseId = bundleResult.purchase.purchaseId
+        const bundlePaymentIntentId =
+          typeof stripeSession.payment_intent === 'string'
+            ? stripeSession.payment_intent
+            : (stripeSession.payment_intent as { id?: string } | null)?.id ?? null
+
+        if (bundlePaymentIntentId && bundlePurchaseStore.needsPaymentMethodSnapshot(bundleFulfilledPurchaseId)) {
+          try {
+            const bundlePi = await stripe.paymentIntents.retrieve(bundlePaymentIntentId, {
+              expand: ['latest_charge'],
+            })
+
+            let bundleCharge: Stripe.Charge | null = null
+            if (bundlePi.latest_charge && typeof bundlePi.latest_charge === 'object') {
+              bundleCharge = bundlePi.latest_charge as Stripe.Charge
+            } else if (bundlePi.latest_charge && typeof bundlePi.latest_charge === 'string') {
+              bundleCharge = await stripe.charges.retrieve(bundlePi.latest_charge)
+            }
+
+            const bundlePmd = bundleCharge?.payment_method_details ?? null
+            const bundleCardDetails = bundlePmd?.card ?? null
+            const bundleWalletDetails = bundleCardDetails?.wallet ?? null
+
+            bundlePurchaseStore.updatePaymentMethodSnapshot(bundleFulfilledPurchaseId, {
+              stripePaymentIntentId: bundlePaymentIntentId,
+              stripeChargeId: bundleCharge?.id ?? null,
+              paymentMethodType: bundlePmd?.type ?? null,
+              walletType: bundleWalletDetails?.type ?? null,
+              cardBrand: bundleCardDetails?.brand ?? null,
+              cardLast4: bundleCardDetails?.last4 ?? null,
+              cardCountry: bundleCardDetails?.country ?? null,
+            })
+            console.log(
+              `[stripe/webhook] Bundle enriched purchaseId=${bundleFulfilledPurchaseId} method=${bundlePmd?.type ?? 'null'} wallet=${bundleWalletDetails?.type ?? 'null'}`,
+            )
+          } catch (bundleEnrichErr) {
+            // Log and continue — enrichment failure must never risk/undo the credit.
+            console.warn(
+              `[stripe/webhook] Bundle payment method enrichment failed purchaseId=${bundleFulfilledPurchaseId}:`,
+              bundleEnrichErr instanceof Error ? bundleEnrichErr.message : String(bundleEnrichErr),
+            )
+          }
+        }
+      }
+
+      sendJsonResponse(res, 200, { ok: true })
+      return true
+    }
+
     if (stripeSession.payment_status === 'paid') {
       const purchaseId = stripeSession.metadata?.purchaseId ?? ''
       const checkoutSessionId = stripeSession.id
@@ -14716,6 +15136,8 @@ async function handleStripeWebhookRequest(
     const stripeSession = event.data.object as Stripe.Checkout.Session
     if (stripeSession.metadata?.purchaseType === 'vip') {
       vipPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
+    } else if (stripeSession.metadata?.purchaseType === 'bundle') {
+      bundlePurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     } else {
       coinPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     }
@@ -18414,6 +18836,26 @@ async function handleHttpRequest(
   }
 
   if (await handleVipClaimLaunchGiftRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopBundlePackagesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopBundlePurchasesRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopBundleCheckoutRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleShopBundleHidePurchaseRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminBundlePackagesRequest(req, res, requestUrl.pathname)) {
     return
   }
 

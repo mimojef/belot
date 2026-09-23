@@ -74,6 +74,10 @@ import type {
   CoinPackageStatus,
   CoinPurchaseSnapshot,
   VipPackageSnapshot,
+  BundlePackageInput,
+  BundlePackageSnapshot,
+  BundlePackageStatus,
+  BundlePurchaseSnapshot,
   FriendRelationshipSnapshot,
   FriendshipsSnapshot,
   LeaderboardCategory,
@@ -513,6 +517,18 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; message: string }
     | { ok: false; message: string }
   >
+  onBundlePackagesLoad?: () => Promise<
+    | { ok: true; packages: BundlePackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onBundlePurchasesLoad?: () => Promise<
+    | { ok: true; purchases: BundlePurchaseSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onBundlePurchaseStart?: (packageId: string) => Promise<
+    | { ok: true; message: string }
+    | { ok: false; message: string }
+  >
   onAdminStatsLoad?: () => Promise<
     | { ok: true; stats: AdminStatsSnapshot }
     | { ok: false; message: string; forbidden?: boolean }
@@ -580,6 +596,27 @@ export type CreateLobbyFlowControllerOptions = {
     isTopOffer: boolean,
   ) => Promise<
     | { ok: true; packages: CoinPackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminBundlePackagesLoad?: () => Promise<
+    | { ok: true; packages: BundlePackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminBundlePackageSubmit?: (
+    input: BundlePackageInput,
+  ) => Promise<
+    | { ok: true; packages: BundlePackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminBundlePackageStatusChange?: (
+    packageId: string,
+    status: BundlePackageStatus,
+  ) => Promise<
+    | { ok: true; packages: BundlePackageSnapshot[] }
+    | { ok: false; message: string }
+  >
+  onAdminBundlePackageDelete?: (packageId: string) => Promise<
+    | { ok: true; packages: BundlePackageSnapshot[] }
     | { ok: false; message: string }
   >
   // Virtual Item Gift System (Етап 1) — ОТДЕЛЕН domain от
@@ -1646,7 +1683,7 @@ type InternalLobbyFlowState = {
   leaderboardsErrorText: string | null
   activeLeaderboardCategory: LeaderboardCategory
   lobbyPackages: CoinPackageSnapshot[]
-  shopActiveTab: 'coins' | 'vip'
+  shopActiveTab: 'coins' | 'vip' | 'bundle'
   shopPackages: CoinPackageSnapshot[]
   shopPackagesLoading: boolean
   shopPackagesErrorText: string | null
@@ -1664,6 +1701,14 @@ type InternalLobbyFlowState = {
   vipPackagesErrorText: string | null
   vipPurchaseActionPackageId: string | null
   vipPurchaseMessageText: string | null
+  bundlePackages: BundlePackageSnapshot[]
+  bundlePackagesLoading: boolean
+  bundlePackagesErrorText: string | null
+  bundlePurchases: BundlePurchaseSnapshot[]
+  bundlePurchasesVisible: boolean
+  bundlePurchasesLoading: boolean
+  bundlePurchaseActionPackageId: string | null
+  bundlePurchaseMessageText: string | null
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -1689,6 +1734,10 @@ type InternalLobbyFlowState = {
   adminCoinPackagesLoading: boolean
   adminCoinPackagesErrorText: string | null
   adminCoinPackageEditId: string | null
+  adminBundlePackages: BundlePackageSnapshot[]
+  adminBundlePackagesLoading: boolean
+  adminBundlePackagesErrorText: string | null
+  adminBundlePackageEditId: string | null
   friendships: FriendshipsSnapshot | null
   friendsLoading: boolean
   friendsErrorText: string | null
@@ -2404,6 +2453,14 @@ function createInitialState(): InternalLobbyFlowState {
     vipPackagesErrorText: null,
     vipPurchaseActionPackageId: null,
     vipPurchaseMessageText: null,
+    bundlePackages: [],
+    bundlePackagesLoading: false,
+    bundlePackagesErrorText: null,
+    bundlePurchases: [],
+    bundlePurchasesVisible: false,
+    bundlePurchasesLoading: false,
+    bundlePurchaseActionPackageId: null,
+    bundlePurchaseMessageText: null,
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -2429,6 +2486,10 @@ function createInitialState(): InternalLobbyFlowState {
     adminCoinPackagesLoading: false,
     adminCoinPackagesErrorText: null,
     adminCoinPackageEditId: null,
+    adminBundlePackages: [],
+    adminBundlePackagesLoading: false,
+    adminBundlePackagesErrorText: null,
+    adminBundlePackageEditId: null,
     friendships: null,
     friendsLoading: false,
     friendsErrorText: null,
@@ -4516,6 +4577,14 @@ export function createLobbyFlowController(
       vipPackagesErrorText: state.vipPackagesErrorText,
       vipPurchaseActionPackageId: state.vipPurchaseActionPackageId,
       vipPurchaseMessageText: state.vipPurchaseMessageText,
+      bundlePackages: state.bundlePackages,
+      bundlePackagesLoading: state.bundlePackagesLoading,
+      bundlePackagesErrorText: state.bundlePackagesErrorText,
+      bundlePurchases: state.bundlePurchases,
+      bundlePurchasesVisible: state.bundlePurchasesVisible,
+      bundlePurchasesLoading: state.bundlePurchasesLoading,
+      bundlePurchaseActionPackageId: state.bundlePurchaseActionPackageId,
+      bundlePurchaseMessageText: state.bundlePurchaseMessageText,
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
@@ -4547,6 +4616,10 @@ export function createLobbyFlowController(
       adminCoinPackagesLoading: state.adminCoinPackagesLoading,
       adminCoinPackagesErrorText: state.adminCoinPackagesErrorText,
       adminCoinPackageEditId: state.adminCoinPackageEditId,
+      adminBundlePackages: state.adminBundlePackages,
+      adminBundlePackagesLoading: state.adminBundlePackagesLoading,
+      adminBundlePackagesErrorText: state.adminBundlePackagesErrorText,
+      adminBundlePackageEditId: state.adminBundlePackageEditId,
       friendships: state.friendships,
       friendsLoading: state.friendsLoading,
       friendsErrorText: state.friendsErrorText,
@@ -5267,6 +5340,16 @@ export function createLobbyFlowController(
       onVipPurchaseClick: (packageId) => {
         void startVipPurchase(packageId)
       },
+      onBundlePurchaseClick: (packageId) => {
+        void startBundlePurchase(packageId)
+      },
+      onBundleHistoryToggle: () => {
+        state.bundlePurchasesVisible = !state.bundlePurchasesVisible
+        if (state.bundlePurchasesVisible && state.bundlePurchases.length === 0) {
+          void loadBundlePurchases()
+        }
+        render()
+      },
       onLeaderboardsClick: () => {
         void showLeaderboardsDirectory()
       },
@@ -5695,6 +5778,18 @@ export function createLobbyFlowController(
       },
       onAdminCoinPackageTopOfferToggle: (packageId, isTopOffer) => {
         void toggleAdminCoinPackageTopOffer(packageId, isTopOffer)
+      },
+      onAdminBundlePackageSubmit: (input) => {
+        void submitAdminBundlePackage(input)
+      },
+      onAdminBundlePackageStatusChange: (packageId, status) => {
+        void setAdminBundlePackageStatus(packageId, status)
+      },
+      onAdminBundlePackageEdit: (packageId) => {
+        editAdminBundlePackage(packageId)
+      },
+      onAdminBundlePackageDelete: (packageId) => {
+        void deleteAdminBundlePackage(packageId)
       },
       onFriendsClick: () => {
         void showFriendsDirectory()
@@ -10908,7 +11003,7 @@ export function createLobbyFlowController(
     render()
   }
 
-  function switchShopTab(tab: 'coins' | 'vip'): void {
+  function switchShopTab(tab: 'coins' | 'vip' | 'bundle'): void {
     if (state.shopActiveTab === tab) {
       return
     }
@@ -10916,6 +11011,9 @@ export function createLobbyFlowController(
     render()
     if (tab === 'vip' && state.vipPackages.length === 0 && !state.vipPackagesLoading) {
       void loadVipPackages()
+    }
+    if (tab === 'bundle' && state.bundlePackages.length === 0 && !state.bundlePackagesLoading) {
+      void loadBundlePackages()
     }
   }
 
@@ -10945,6 +11043,119 @@ export function createLobbyFlowController(
     }
 
     state.vipPurchaseMessageText = result.message
+    render()
+  }
+
+  // Mirror на loadVipPackages doc коментара по-горе — bundle пакетите също
+  // се редактират от Admin панела в СЪЩАТА сесия (собствена DB таблица,
+  // shopBundlePackageStore), затова refetch-ват се при всяко влизане в
+  // 'bundle' tab-а, не се кешират за целия lifetime на сесията.
+  async function loadBundlePackages(forceRefresh = false): Promise<void> {
+    if (!options.onBundlePackagesLoad) {
+      state.bundlePackagesErrorText = 'Пакетите временно не са налични.'
+      render()
+      return
+    }
+
+    if (!forceRefresh && state.bundlePackages.length > 0 && state.bundlePackagesErrorText === null) {
+      return
+    }
+
+    state.bundlePackagesLoading = true
+    state.bundlePackagesErrorText = null
+    render()
+
+    const result = await options.onBundlePackagesLoad()
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    state.bundlePackagesLoading = false
+
+    if (!result.ok) {
+      state.bundlePackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.bundlePackages = result.packages
+    state.bundlePackagesErrorText = null
+    render()
+  }
+
+  async function loadBundlePurchases(): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    if (authSession === null) {
+      state.bundlePurchases = []
+      state.bundlePurchasesLoading = false
+      render()
+      return
+    }
+
+    if (!options.onBundlePurchasesLoad) {
+      state.bundlePurchasesLoading = false
+      render()
+      return
+    }
+
+    state.bundlePurchasesLoading = true
+    render()
+
+    const result = await options.onBundlePurchasesLoad()
+
+    if (state.currentScreen !== 'shop') {
+      return
+    }
+
+    state.bundlePurchasesLoading = false
+
+    if (result.ok) {
+      state.bundlePurchases = result.purchases
+    }
+    render()
+  }
+
+  async function startBundlePurchase(packageId: string): Promise<void> {
+    const authSession = options.getAuthSession?.() ?? null
+
+    if (state.bundlePurchaseActionPackageId !== null) {
+      return
+    }
+
+    if (authSession === null) {
+      state.authModalMode = 'cta'
+      state.authErrorText = null
+      render()
+      return
+    }
+
+    if (!options.onBundlePurchaseStart) {
+      state.bundlePurchaseMessageText = 'Покупките на пакети временно не са налични.'
+      render()
+      return
+    }
+
+    state.bundlePurchaseActionPackageId = packageId
+    state.bundlePurchaseMessageText = null
+    render()
+
+    const result = await options.onBundlePurchaseStart(packageId)
+
+    state.bundlePurchaseActionPackageId = null
+
+    if (!result.ok) {
+      state.bundlePurchaseMessageText = result.message
+      render()
+      return
+    }
+
+    state.bundlePurchaseMessageText = result.message
     render()
   }
 
@@ -12078,6 +12289,8 @@ export function createLobbyFlowController(
     state.adminSettingsSuccessText = null
     state.adminCoinPackagesLoading = Boolean(options.onAdminCoinPackagesLoad)
     state.adminCoinPackagesErrorText = null
+    state.adminBundlePackagesLoading = Boolean(options.onAdminBundlePackagesLoad)
+    state.adminBundlePackagesErrorText = null
     state.adminActiveDailyRewardTiers = []
     state.adminStagedDailyRewardTiers = []
     state.adminDailyRewardsLoading = true
@@ -12097,6 +12310,7 @@ export function createLobbyFlowController(
     if (!result.ok) {
       state.adminSettingsErrorText = result.message
       state.adminCoinPackagesLoading = false
+      state.adminBundlePackagesLoading = false
       render()
       return
     }
@@ -12105,7 +12319,7 @@ export function createLobbyFlowController(
     state.adminSettingsErrorText = null
     render()
 
-    await Promise.all([loadAdminCoinPackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms()])
+    await Promise.all([loadAdminCoinPackages(), loadAdminBundlePackages(), loadAdminMissions(), loadAdminSupportConversations(), loadMatchRooms()])
   }
 
   async function loadAdminSupportConversations(): Promise<void> {
@@ -12282,6 +12496,135 @@ export function createLobbyFlowController(
 
     state.adminCoinPackages = result.packages
     state.adminCoinPackagesErrorText = null
+    render()
+  }
+
+  // Shop -> "Пакети" admin CRUD — структурно 1:1 огледало на
+  // loadAdminCoinPackages/submitAdminCoinPackage/deleteAdminCoinPackage/
+  // setAdminCoinPackageStatus по-горе (§5/§6 в брифа: "ако настоящата Admin
+  // Settings архитектура има вече подходящ generic CRUD pattern, използвай
+  // него").
+  async function loadAdminBundlePackages(): Promise<void> {
+    if (state.currentScreen !== 'admin') {
+      return
+    }
+
+    if (!options.onAdminBundlePackagesLoad) {
+      state.adminBundlePackagesLoading = false
+      state.adminBundlePackagesErrorText = 'Админ пакетите временно не са налични.'
+      render()
+      return
+    }
+
+    state.adminBundlePackagesLoading = true
+    state.adminBundlePackagesErrorText = null
+    render()
+
+    const result = await options.onAdminBundlePackagesLoad()
+
+    if (state.currentScreen !== 'admin') {
+      return
+    }
+
+    state.adminBundlePackagesLoading = false
+
+    if (!result.ok) {
+      state.adminBundlePackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminBundlePackages = result.packages
+    state.adminBundlePackagesErrorText = null
+    render()
+  }
+
+  async function submitAdminBundlePackage(input: BundlePackageInput): Promise<void> {
+    if (!options.onAdminBundlePackageSubmit) {
+      state.adminBundlePackagesErrorText = 'Записът на пакети временно не е наличен.'
+      render()
+      return
+    }
+
+    state.adminBundlePackagesErrorText = null
+    render()
+
+    const result = await options.onAdminBundlePackageSubmit(input)
+
+    if (!result.ok) {
+      state.adminBundlePackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminBundlePackages = result.packages
+    state.adminBundlePackagesErrorText = null
+    state.adminBundlePackageEditId = null
+    // Пакетите се показват директно в Shop -> "Пакети" (не admin_settings
+    // key-value, mirror на VIP price-change invalidation коментара в
+    // submitAdminSettings) — инвалидираме локалния bundle snapshot, за да не
+    // остане stale ако администраторът отвори Shop -> Пакети без пълен
+    // showShopPanel refresh cycle.
+    state.bundlePackages = []
+    render()
+  }
+
+  function editAdminBundlePackage(packageId: string): void {
+    state.adminBundlePackageEditId = packageId.length > 0 ? packageId : null
+    render()
+  }
+
+  async function deleteAdminBundlePackage(packageId: string): Promise<void> {
+    if (!options.onAdminBundlePackageDelete) {
+      state.adminBundlePackagesErrorText = 'Изтриването на пакети временно не е налично.'
+      render()
+      return
+    }
+
+    state.adminBundlePackagesErrorText = null
+    render()
+
+    const result = await options.onAdminBundlePackageDelete(packageId)
+
+    if (!result.ok) {
+      state.adminBundlePackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminBundlePackages = result.packages
+    if (state.adminBundlePackageEditId === packageId) {
+      state.adminBundlePackageEditId = null
+    }
+    state.adminBundlePackagesErrorText = null
+    state.bundlePackages = []
+    render()
+  }
+
+  async function setAdminBundlePackageStatus(
+    packageId: string,
+    status: BundlePackageStatus,
+  ): Promise<void> {
+    if (!options.onAdminBundlePackageStatusChange) {
+      state.adminBundlePackagesErrorText = 'Промяната на статус временно не е налична.'
+      render()
+      return
+    }
+
+    state.adminBundlePackagesErrorText = null
+    render()
+
+    const result = await options.onAdminBundlePackageStatusChange(packageId, status)
+
+    if (!result.ok) {
+      state.adminBundlePackagesErrorText = result.message
+      render()
+      return
+    }
+
+    state.adminBundlePackages = result.packages
+    state.adminBundlePackagesErrorText = null
+    state.bundlePackages = []
     render()
   }
 

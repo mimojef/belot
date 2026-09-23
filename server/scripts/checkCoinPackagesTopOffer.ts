@@ -190,9 +190,11 @@ async function main(): Promise<void> {
       seedDb(dbPath, CURRENT_SCHEMA_SQL)
       const store = await createCoinPackageStore(dbPath)
       try {
-        store.upsertPackage(baseInput({ packageKey: 'pkg5', isTopOffer: true, status: 'active' }))
+        const created = store.upsertPackage(baseInput({ title: 'Pkg5', isTopOffer: true, status: 'active' }))
+        assert(created.ok, 'upsert трябва да успее')
+        if (!created.ok) return
         const publicPackages = store.listPublicPackages()
-        const pkg = publicPackages.find((p) => p.packageKey === 'pkg5')
+        const pkg = publicPackages.find((p) => p.packageId === created.package.packageId)
         assert(pkg !== undefined && pkg.isTopOffer === true, 'публичният списък трябва да върне isTopOffer:true')
       } finally {
         store.close()
@@ -204,9 +206,11 @@ async function main(): Promise<void> {
       seedDb(dbPath, CURRENT_SCHEMA_SQL)
       const store = await createCoinPackageStore(dbPath)
       try {
-        store.upsertPackage(baseInput({ packageKey: 'pkg6', isTopOffer: true, showInLobby: true, status: 'active' }))
+        const created = store.upsertPackage(baseInput({ title: 'Pkg6', isTopOffer: true, showInLobby: true, status: 'active' }))
+        assert(created.ok, 'upsert трябва да успее')
+        if (!created.ok) return
         const lobbyPackages = store.listLobbyPackages()
-        const pkg = lobbyPackages.find((p) => p.packageKey === 'pkg6')
+        const pkg = lobbyPackages.find((p) => p.packageId === created.package.packageId)
         assert(pkg !== undefined && pkg.isTopOffer === true, 'лоби списъкът трябва да върне isTopOffer:true')
       } finally {
         store.close()
@@ -218,14 +222,16 @@ async function main(): Promise<void> {
       seedDb(dbPath, CURRENT_SCHEMA_SQL)
       const store = await createCoinPackageStore(dbPath)
       try {
-        store.upsertPackage(baseInput({ packageKey: 'pkg7', isTopOffer: true, status: 'inactive' }))
+        const created = store.upsertPackage(baseInput({ title: 'Pkg7', isTopOffer: true, status: 'inactive' }))
+        assert(created.ok, 'upsert трябва да успее')
+        if (!created.ok) return
         const admin = store.listAdminPackages()
-        const pkg = admin.find((p) => p.packageKey === 'pkg7')
+        const pkg = admin.find((p) => p.packageId === created.package.packageId)
         assert(pkg !== undefined && pkg.isTopOffer === true, 'admin списъкът трябва да върне isTopOffer:true дори за inactive')
 
         const publicPackages = store.listPublicPackages()
         assert(
-          publicPackages.find((p) => p.packageKey === 'pkg7') === undefined,
+          publicPackages.find((p) => p.packageId === created.package.packageId) === undefined,
           'публичният списък не трябва да включва inactive пакета (без промяна на филтрирането)',
         )
       } finally {
@@ -233,22 +239,25 @@ async function main(): Promise<void> {
       }
     })
 
-    await check('[8] обикновена редакция запазва текущата isTopOffer стойност', async () => {
+    await check('[8] обикновена редакция (explicit packageId) запазва текущата isTopOffer стойност', async () => {
       const dbPath = join(tmpDir, 'test8.db')
       seedDb(dbPath, CURRENT_SCHEMA_SQL)
       const store = await createCoinPackageStore(dbPath)
       try {
-        const created = store.upsertPackage(baseInput({ packageKey: 'pkg8', isTopOffer: true }))
+        const created = store.upsertPackage(baseInput({ title: 'Pkg8', isTopOffer: true }))
         assert(created.ok, 'upsert трябва да успее')
         if (!created.ok) return
         assert(created.package.isTopOffer === true, 'началната стойност трябва да е true')
 
-        // Симулира редакция на цената през формата (същия package_key), с isTopOffer:false в подадения вход
+        // Симулира редакция на цената през формата — explicit packageId
+        // (реалният edit contract, mirror на renderLobbyScreen.ts's hidden
+        // packageId input), с isTopOffer:false в подадения вход.
         const edited = store.upsertPackage(
-          baseInput({ packageKey: 'pkg8', priceCents: 299, isTopOffer: false }),
+          baseInput({ packageId: created.package.packageId, title: 'Pkg8', priceCents: 299, isTopOffer: false }),
         )
         assert(edited.ok, 'редакцията трябва да успее')
         if (!edited.ok) return
+        assert(edited.package.packageId === created.package.packageId, 'packageId не трябва да се промени при редакция')
         assert(edited.package.priceCents === 299, 'цената трябва да се обнови')
         assert(
           edited.package.isTopOffer === true,
@@ -306,6 +315,72 @@ async function main(): Promise<void> {
         const oldPkg = admin.find((p) => p.packageId === 'old-pkg-1')
         assert(oldPkg !== undefined, 'старият ред трябва да продължи да съществува')
         assert(oldPkg!.isTopOffer === false, 'старият ред трябва да получи isTopOffer:false по подразбиране')
+      } finally {
+        store.close()
+      }
+    })
+
+    // ─── Кирилица title / server-generated packageKey регресия ──────────────
+    // Production bug repro (coin packages имаха ИДЕНТИЧЕН bug pattern на
+    // bundle packages): admin въвежда "Празничен пакет" (кирилица) като
+    // display name -> старата frontend derive-from-title логика
+    // (title.toLowerCase().replace(/[^a-z0-9_-]+/g,'-')) strip-ваше цялата
+    // кирилица до празен string -> server-side ASCII regex validation
+    // отхвърляше празния packageKey. Тестовете тук доказват, че packageKey
+    // вече НИКОГА не се derive-ва от title.
+
+    await check('[10] create с кирилско заглавие "Празничен пакет" → ok:true, title точно кирилица, packageKey server-generated (независим от title)', async () => {
+      const dbPath = join(tmpDir, 'test10.db')
+      seedDb(dbPath, CURRENT_SCHEMA_SQL)
+      const store = await createCoinPackageStore(dbPath)
+      try {
+        // Frontend вече не подава derived packageKey (винаги '' — виж
+        // renderLobbyScreen.ts submit handler-а) — тестваме точно тоя контракт.
+        const result = store.upsertPackage(baseInput({ packageKey: '', title: 'Празничен пакет' }))
+        assert(result.ok, `create с кирилица трябва да успее: ${JSON.stringify(result)}`)
+        if (!result.ok) return
+        assert(result.package.title === 'Празничен пакет', 'title трябва да е точно кирилица, без transliteration')
+        assert(result.package.packageKey.length > 0, 'packageKey трябва да е server-generated, не празен')
+        assert(/^[a-z0-9][a-z0-9_-]*$/.test(result.package.packageKey), `server-generated packageKey трябва да е валиден ASCII slug, получих "${result.package.packageKey}"`)
+      } finally {
+        store.close()
+      }
+    })
+
+    await check('[11] edit на СЪЩИЯ пакет (title -> "Златен пакет") → packageId И packageKey остават ТОЧНО същите, няма duplicate row, public Shop API връща кирилицата точно', async () => {
+      const dbPath = join(tmpDir, 'test11.db')
+      seedDb(dbPath, CURRENT_SCHEMA_SQL)
+      const store = await createCoinPackageStore(dbPath)
+      try {
+        const created = store.upsertPackage(baseInput({ packageKey: '', title: 'Празничен пакет' }))
+        assert(created.ok, 'create трябва да успее')
+        if (!created.ok) return
+        const originalPackageId = created.package.packageId
+        const originalPackageKey = created.package.packageKey
+
+        const edited = store.upsertPackage(baseInput({
+          packageId: originalPackageId,
+          packageKey: '', // frontend винаги подава '' — сървърът трябва да игнорира и да запази оригиналния key
+          title: 'Златен пакет',
+        }))
+        assert(edited.ok, `edit трябва да успее: ${JSON.stringify(edited)}`)
+        if (!edited.ok) return
+        assert(edited.package.title === 'Златен пакет', 'title трябва да е обновен')
+        assert(edited.package.packageId === originalPackageId, 'packageId НЕ трябва да се промени при редакция на името')
+        assert(edited.package.packageKey === originalPackageKey, 'packageKey НЕ трябва да се промени при редакция на името')
+
+        // Потвърждение, че няма създаден ДУБЛИКАТ ред.
+        const adminList = store.listAdminPackages()
+        const matchingRows = adminList.filter((p) => p.packageId === originalPackageId)
+        assert(matchingRows.length === 1, 'трябва да има точно 1 ред с тоя packageId, не дубликат')
+        assert(adminList.length === 1, 'общо трябва да има точно 1 пакет в базата, не 2')
+
+        // Public Shop API връща кирилицата точно.
+        const publicList = store.listPublicPackages()
+        const found = publicList.find((p) => p.packageId === originalPackageId)
+        assert(found !== undefined, 'редактираният пакет трябва да е видим в public listing-а (active)')
+        assert(found?.title === 'Златен пакет', 'Shop API трябва да връща точното кирилско заглавие')
+        assert(found?.packageKey === originalPackageKey, 'Shop API трябва да връща same stable packageKey')
       } finally {
         store.close()
       }
