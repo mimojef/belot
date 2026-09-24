@@ -7562,25 +7562,56 @@ function renderLeaderboardsDirectory(state: LobbyScreenState): string {
   `
 }
 
+// Табовете използват малка икона (shop-tab-coins/vip/bundles.webp,
+// public/assets/lobby/) + текст под нея — иконите НЯМАТ вграден надпис
+// (за разлика от по-стар banner-style опит), затова видимият Жълтици/VIP/
+// Пакети текст остава в HTML (не се дублира, четимо е и screen reader-и
+// го виждат нормално, без нужда от отделен aria-label).
 function renderShopTabBar(activeTab: 'coins' | 'vip' | 'bundle', variant: 'desktop' | 'mobile' = 'mobile'): string {
+  const isDesktop = variant === 'desktop'
+
+  // Desktop: хоризонтален ред (икона ПРЕД текста, вертикално центрирани) —
+  // повече широчина позволява по-голяма икона (32px) и по-балансиран вид.
+  // Mobile: established layout, непроменен (икона НАД текста, компактно).
   const tabButtonStyle = (isActive: boolean): string => `
-    flex:1; height:44px; border-radius:8px; cursor:pointer;
-    font-size:14px; font-weight:900; letter-spacing:0.02em;
-    border:1px solid ${isActive ? 'rgba(212,165,32,0.85)' : 'rgba(255,255,255,0.40)'};
-    background:${isActive ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : '#0a0a0a'};
-    color:${isActive ? '#080808' : 'rgba(255,255,255,0.62)'};
-    transition:filter 0.15s,border-color 0.15s;
+    flex:1; height:64px; border-radius:8px; cursor:pointer;
+    display:flex; flex-direction:${isDesktop ? 'row' : 'column'}; align-items:center; justify-content:center; gap:${isDesktop ? '9px' : '3px'};
+    font-size:12px; font-weight:900; letter-spacing:0.02em;
+    border:1px solid ${isActive ? 'rgba(212,165,32,0.85)' : 'rgba(255,255,255,0.28)'};
+    background:${isActive ? 'linear-gradient(180deg,rgba(244,201,91,0.16) 0%,rgba(201,143,19,0.16) 100%)' : '#0a0a0a'};
+    box-shadow:${isActive ? '0 0 10px rgba(212,165,32,0.45)' : 'none'};
+    color:${isActive ? '#f4c95b' : 'rgba(255,255,255,0.58)'};
+    opacity:${isActive ? '1' : '0.82'};
+    transition:filter 0.15s,border-color 0.15s,box-shadow 0.15s,opacity 0.15s;
   `.replace(/\s+/g, ' ')
 
-  const wrapStyle = variant === 'desktop'
+  const tabIconStyle = (isActive: boolean): string => `
+    width:${isDesktop ? '32px' : '26px'}; height:${isDesktop ? '32px' : '26px'}; object-fit:contain; display:block; flex-shrink:0;
+    filter:${isActive ? 'none' : 'grayscale(0.25) brightness(0.85)'};
+  `.replace(/\s+/g, ' ')
+
+  const wrapStyle = isDesktop
     ? 'display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);width:420px;margin:0 auto;'
     : 'display:flex;gap:8px;padding:4px;border-radius:10px;background:#000000;border:1px solid rgba(212,165,32,0.22);'
 
   return `
+    <style>
+      [data-shop-tab]:hover { filter:brightness(1.18); }
+      [data-shop-tab]:focus-visible { outline:2px solid #d4a520; outline-offset:2px; }
+    </style>
     <div style="${wrapStyle}">
-      <button type="button" data-shop-tab="coins" style="${tabButtonStyle(activeTab === 'coins')}">Жълтици</button>
-      <button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">VIP</button>
-      <button type="button" data-shop-tab="bundle" style="${tabButtonStyle(activeTab === 'bundle')}">Пакети</button>
+      <button type="button" data-shop-tab="coins" style="${tabButtonStyle(activeTab === 'coins')}">
+        <img src="/assets/lobby/shop-tab-coins.webp" alt="" draggable="false" style="${tabIconStyle(activeTab === 'coins')}" />
+        Жълтици
+      </button>
+      <button type="button" data-shop-tab="vip" style="${tabButtonStyle(activeTab === 'vip')}">
+        <img src="/assets/lobby/shop-tab-vip.webp" alt="" draggable="false" style="${tabIconStyle(activeTab === 'vip')}" />
+        VIP
+      </button>
+      <button type="button" data-shop-tab="bundle" style="${tabButtonStyle(activeTab === 'bundle')}">
+        <img src="/assets/lobby/shop-tab-bundles.webp" alt="" draggable="false" style="${tabIconStyle(activeTab === 'bundle')}" />
+        Пакети
+      </button>
     </div>
   `
 }
