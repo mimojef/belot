@@ -179,7 +179,11 @@ export function renderAdminPaymentDetailPanel(
 
   const sectionB = section('Б. Клиент', [
     row('Потребител', escapeHtml(profileLabel)),
-    row('Profile ID', `<span style="font-family:monospace;font-size:12px;">${escapeHtml(p.profileId)}</span>`, copyBtn('profile-id', p.profileId)),
+    row(
+      'Profile ID',
+      p.profileId ? `<span style="font-family:monospace;font-size:12px;">${escapeHtml(p.profileId)}</span>` : '—',
+      p.profileId ? copyBtn('profile-id', p.profileId) : '',
+    ),
     row('Account ID', p.accountId ? `<span style="font-family:monospace;font-size:12px;">${escapeHtml(p.accountId)}</span>` : '—'),
     row('Email', p.email ? escapeHtml(p.email) : '—'),
     row('Текущ баланс', p.currentYellowCoinsBalance !== null ? escapeHtml(formatCoins(p.currentYellowCoinsBalance)) + ' 🟡' : '—'),

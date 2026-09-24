@@ -93,6 +93,13 @@ function shortenSessionId(id: string | null): string {
   return `${id.slice(0, 8)}…${id.slice(-8)}`
 }
 
+// profileId е null за исторически redове, чийто payer профил е hard-deleted
+// (ON DELETE SET NULL) — виж coinPurchaseStore/vipPurchaseStore.getAdminPaymentListByPeriod.
+function shortenProfileId(id: string | null): string {
+  if (!id) return '—'
+  return `${id.slice(0, 8)}…`
+}
+
 // Returns human-readable payment method label.
 // walletType takes precedence over paymentMethodType for Google/Apple Pay detection.
 export function getPaymentMethodLabel(row: {
@@ -161,7 +168,7 @@ function renderRow(row: AdminPaymentListRow): string {
       <td style="${tdStyle}">${escapeHtml(creditedAt)}</td>
       <td style="${tdStyle}">
         <div style="font-weight:700;color:#fff;">${escapeHtml(profileLabel)}</div>
-        <div style="font-size:10px;color:rgba(255,255,255,0.35);">${escapeHtml(row.profileId.slice(0, 8))}…</div>
+        <div style="font-size:10px;color:rgba(255,255,255,0.35);">${escapeHtml(shortenProfileId(row.profileId))}</div>
       </td>
       <td style="${tdStyle}">${escapeHtml(email)}</td>
       <td style="${tdStyle}">

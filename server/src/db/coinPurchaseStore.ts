@@ -87,7 +87,9 @@ export type AdminPaymentSource = 'coin' | 'vip'
 export type AdminPaymentListRow = {
   source: AdminPaymentSource
   purchaseId: string
-  profileId: string
+  // NULL за исторически redове, чийто payer профил е hard-deleted
+  // (ON DELETE SET NULL, виж 20260902_002).
+  profileId: string | null
   accountId: string | null
   username: string | null
   displayName: string | null
@@ -114,7 +116,9 @@ export type AdminPaymentListRow = {
 export type AdminPaymentDetailRow = {
   source: AdminPaymentSource
   purchaseId: string
-  profileId: string
+  // NULL за исторически redове, чийто payer профил е hard-deleted
+  // (ON DELETE SET NULL, виж 20260902_002).
+  profileId: string | null
   accountId: string | null
   username: string | null
   displayName: string | null
@@ -1122,7 +1126,10 @@ export async function createCoinPurchaseStore(
     // regardless of whether the user chose to hide the purchase from their own view.
     type ListRow = {
       purchase_id: string
-      profile_id: string
+      // profile_id е NULL за исторически redове, чийто payer е hard-deleted
+      // (ON DELETE SET NULL, виж 20260902_002) — deleted_profile_id_snapshot
+      // пази forensic reference, но не участва в тази заявка.
+      profile_id: string | null
       account_id: string | null
       username: string | null
       display_name: string | null
@@ -1182,7 +1189,7 @@ export async function createCoinPurchaseStore(
     const rows: AdminPaymentListRow[] = listRows.map(r => ({
       source:                      'coin' as const,
       purchaseId:                  r.purchase_id,
-      profileId:                   r.profile_id,
+      profileId:                   r.profile_id ?? null,
       accountId:                   r.account_id ?? null,
       username:                    r.username ?? null,
       displayName:                 r.display_name ?? null,
@@ -1212,7 +1219,9 @@ export async function createCoinPurchaseStore(
   function getAdminPaymentDetail(purchaseId: string): AdminPaymentDetailRow | null {
     type DetailRow = {
       purchase_id: string
-      profile_id: string
+      // profile_id е NULL за исторически redове, чийто payer е hard-deleted
+      // (ON DELETE SET NULL, виж 20260902_002).
+      profile_id: string | null
       account_id: string | null
       username: string | null
       display_name: string | null
@@ -1244,7 +1253,7 @@ export async function createCoinPurchaseStore(
     return {
       source:                     'coin' as const,
       purchaseId:                 r.purchase_id,
-      profileId:                  r.profile_id,
+      profileId:                  r.profile_id ?? null,
       accountId:                  r.account_id ?? null,
       username:                   r.username ?? null,
       displayName:                r.display_name ?? null,

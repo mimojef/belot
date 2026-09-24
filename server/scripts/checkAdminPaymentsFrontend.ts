@@ -337,6 +337,46 @@ check('[11b.5] mixed coin+VIP rows in same list both render without throwing', (
   assertContains(html, 'VIP 365 дни', 'VIP row must still render correctly')
 })
 
+// ─── [11c] profileId=null row (production regression, thisMonth/allTime crash) ──
+// Production bug: coin_purchase_ledger.profile_id/vip_purchase_ledger.profile_id
+// станаха NULL-able (ON DELETE SET NULL, 20260902_002) за исторически redове,
+// чийто payer профил е hard-deleted. Backend mapper-ите (coinPurchaseStore/
+// vipPurchaseStore .getAdminPaymentListByPeriod/.getAdminPaymentDetail)
+// мапваха profileId: r.profile_id без null coalescing, а frontend типа
+// декларираше profileId: string (не nullable) — contract mismatch. renderRow()
+// правеше row.profileId.slice(0, 8) unconditional → "Cannot read properties
+// of null (reading 'slice')" → render() хвърля → UI остава на "Зареждане…"
+// завинаги. Симптомът се появяваше само за thisMonth/allTime, защото само
+// по-широките периоди статистически включваха такъв исторически ред от
+// текущите production данни — today/yesterday/last7days просто нямаха такъв
+// ред в обхвата си, не защото логиката им е различна.
+console.log('\n[11c] profileId=null row (deleted payer) does not crash renderRow()')
+check('[11c.1] coin row with profileId=null renders without throwing', () => {
+  renderAdminPaymentsPanel(baseState({ rows: [makeRow({ profileId: null })], total: 1 }), NOOP_CALLBACKS)
+})
+check('[11c.2] coin row with profileId=null shows "—" instead of crashing on .slice()', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeRow({ profileId: null })], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, '—', 'expected "—" fallback for null profileId short-id display')
+})
+check('[11c.3] VIP row with profileId=null renders without throwing', () => {
+  renderAdminPaymentsPanel(baseState({ rows: [makeVipRow({ profileId: null })], total: 1 }), NOOP_CALLBACKS)
+})
+check('[11c.4] profileId=null + displayName/username=null still shows "Липсващ профил"', () => {
+  const html = renderAdminPaymentsPanel(
+    baseState({ rows: [makeRow({ profileId: null, displayName: null, username: null })], total: 1 }),
+    NOOP_CALLBACKS,
+  )
+  assertContains(html, 'Липсващ профил', 'expected existing missing-profile label, not a crash')
+})
+check('[11c.5] mixed rows: one with profileId set, one with profileId=null — both render', () => {
+  const html = renderAdminPaymentsPanel(
+    baseState({ rows: [makeRow(), makeRow({ profileId: null, purchaseId: 'pid-historical' })], total: 2 }),
+    NOOP_CALLBACKS,
+  )
+  assertContains(html, 'prof-001', 'normal row profileId prefix must still render')
+  assertContains(html, 'pid-historical', 'historical row purchaseId must still render')
+})
+
 // ─── [12] Sofia date formatting ───────────────────────────────────────────────
 console.log('\n[12] Sofia date formatting')
 check('[12.1] creditedAt renders human-readable date', () => {
@@ -991,6 +1031,27 @@ check('[44.3] null balance shows —', () => {
     NOOP_DETAIL,
   )
   assertContains(html, '—', '"—" not shown for null balance')
+})
+
+// production regression: profileId=null (hard-deleted payer, historical row)
+// — escapeHtml(p.profileId) / copyBtn('profile-id', p.profileId) both assumed
+// non-null string; detail panel crashed identically to the list row bug.
+check('[44.4] profileId=null renders without throwing', () => {
+  renderAdminPaymentDetailPanel(detailState({ purchase: makeDetailRow({ profileId: null }) }), NOOP_DETAIL)
+})
+check('[44.5] profileId=null shows — instead of crashing', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ profileId: null }) }),
+    NOOP_DETAIL,
+  )
+  assertContains(html, '—', '"—" not shown for null profileId')
+})
+check('[44.6] profileId=null: no copy button rendered for it', () => {
+  const html = renderAdminPaymentDetailPanel(
+    detailState({ purchase: makeDetailRow({ profileId: null }) }),
+    NOOP_DETAIL,
+  )
+  assertNotContains(html, 'data-copy-detail="null"', 'literal "null" must not leak into copy button data attribute')
 })
 
 // ─── [45] detail: HTML escaping ──────────────────────────────────────────────

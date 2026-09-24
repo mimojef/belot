@@ -21,7 +21,9 @@ export type AdminPaymentSource = 'coin' | 'vip'
 export type AdminPaymentListRow = {
   source: AdminPaymentSource
   purchaseId: string
-  profileId: string
+  // NULL за исторически redове, чийто payer профил е hard-deleted
+  // (ON DELETE SET NULL) — виж coinPurchaseStore/vipPurchaseStore.
+  profileId: string | null
   accountId: string | null
   username: string | null
   displayName: string | null
@@ -63,7 +65,9 @@ export type AdminPaymentListResult = {
 export type AdminPaymentDetailRow = {
   source: AdminPaymentSource
   purchaseId: string
-  profileId: string
+  // NULL за исторически redове, чийто payer профил е hard-deleted
+  // (ON DELETE SET NULL) — виж coinPurchaseStore/vipPurchaseStore.
+  profileId: string | null
   accountId: string | null
   username: string | null
   displayName: string | null

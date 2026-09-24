@@ -11881,7 +11881,21 @@ export function createLobbyFlowController(
       state.adminPaymentsTotalsByCurrency = result.summary.totalsByCurrency
       state.adminPaymentsErrorText = null
     }
-    render()
+    // render() may throw on unexpected row shapes (e.g. a future contract
+    // mismatch like the profileId=null production bug). loading is already
+    // false above, but a thrown render() would otherwise leave the PREVIOUS
+    // (loading) DOM on screen forever, since nothing else re-renders. Catch
+    // here only to force a second, error-state render — the exception itself
+    // is still logged/rethrown-visible for debugging, never swallowed silently.
+    try {
+      render()
+    } catch (err) {
+      console.error('[admin-payments] render() threw after successful fetch:', err)
+      state.adminPaymentsRows = []
+      state.adminPaymentsErrorText = 'Грешка при показване на плащанията.'
+      render()
+      throw err
+    }
   }
 
   function showAdminPaymentDetailPanel(purchaseId: string): void {
