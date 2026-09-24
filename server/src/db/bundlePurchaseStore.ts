@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
-import type { PaymentMethodSnapshot } from './coinPurchaseStore.js'
+import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
+import type { PaymentMethodSnapshot, AdminPaymentListRow, AdminPaymentDetailRow } from './coinPurchaseStore.js'
 import { composePayerBundleGiftSuccessText, composeRecipientBundleGiftNotificationText } from './paidGiftNotificationText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -80,6 +81,18 @@ export type BundlePurchaseStore = {
     purchaseId: string,
     profileId: string,
   ) => { ok: true; purchase: BundlePurchaseSnapshot } | { ok: false; message: string }
+  /**
+   * Admin payment listing contribution от bundle покупки — mirror на
+   * vipPurchaseStore.getAdminPaymentListByPeriod (whole-period, БЕЗ SQL
+   * LIMIT — caller-ът top-N-ва post-hoc в паметта, идентичен established
+   * combined-pagination pattern в server/src/index.ts). Нормализиран
+   * AdminPaymentListRow shape (source:'bundle', И yellowCoinsAmount, И
+   * vipDays non-null едновременно — единична покупка credit-ва и двете,
+   * за разлика от coin/VIP, при които е само едното).
+   */
+  getAdminPaymentListByPeriod: (params: { period: AdminPaymentPeriod; now?: Date }) => AdminPaymentListRow[]
+  /** Detail lookup само по purchase_id — връща null ако редът не е bundle (caller fallback-ва към coin/VIP store). */
+  getAdminPaymentDetail: (purchaseId: string) => AdminPaymentDetailRow | null
   close: () => void
 }
 
@@ -843,6 +856,213 @@ export async function createBundlePurchaseStore(
     return { ok: true, purchase: updated }
   }
 
+  // Mirror на coinPurchaseStore/vipPurchaseStore.getAdminPaymentListByPeriod
+  // — whole-period (БЕЗ SQL LIMIT), caller-ът (server/src/index.ts) top-N-ва
+  // post-hoc в паметта заедно с coin/VIP резултатите (established combined-
+  // pagination pattern, разширен от 2 на 3 sources).
+  function getAdminPaymentListByPeriod(params: { period: AdminPaymentPeriod; now?: Date }): AdminPaymentListRow[] {
+    const { period, now = new Date() } = params
+    const { sql, params: whereParams } = buildPeriodWhereClause(period, now, 'bpl.credited_at')
+
+    type ListRow = {
+      purchase_id: string
+      profile_id: string | null
+      account_id: string | null
+      username: string | null
+      display_name: string | null
+      email: string | null
+      profile_kind: string | null
+      package_key_snapshot: string
+      title_snapshot: string
+      yellow_coins_amount: number
+      vip_days_snapshot: number
+      price_cents: number
+      currency: string
+      provider: string
+      status: BundlePurchaseStatus
+      provider_checkout_session_id: string | null
+      payment_method_type: string | null
+      wallet_type: string | null
+      card_brand: string | null
+      card_last4: string | null
+      card_country: string | null
+      created_at: string
+      credited_at: string | null
+      hidden_at: string | null
+    }
+
+    const listRows = database.prepare(`
+      SELECT
+        bpl.purchase_id,
+        bpl.profile_id,
+        p.account_id,
+        p.username,
+        p.display_name,
+        a.email,
+        p.profile_kind,
+        bpl.package_key_snapshot,
+        bpl.title_snapshot,
+        bpl.yellow_coins_amount,
+        bpl.vip_days_snapshot,
+        bpl.price_cents,
+        bpl.currency,
+        bpl.provider,
+        bpl.status,
+        bpl.provider_checkout_session_id,
+        bpl.payment_method_type,
+        bpl.wallet_type,
+        bpl.card_brand,
+        bpl.card_last4,
+        bpl.card_country,
+        bpl.created_at,
+        bpl.credited_at,
+        bpl.hidden_at
+      FROM bundle_purchase_ledger bpl
+      LEFT JOIN profiles p ON p.profile_id = bpl.profile_id
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      WHERE bpl.status = 'paid' AND ${sql}
+      ORDER BY bpl.credited_at DESC, bpl.purchase_id DESC;
+    `).all(...whereParams) as ListRow[]
+
+    return listRows.map((r): AdminPaymentListRow => ({
+      source: 'bundle',
+      purchaseId: r.purchase_id,
+      profileId: r.profile_id ?? null,
+      accountId: r.account_id ?? null,
+      username: r.username ?? null,
+      displayName: r.display_name ?? null,
+      email: r.email ?? null,
+      profileKind: r.profile_kind ?? null,
+      packageKey: r.package_key_snapshot,
+      packageTitle: r.title_snapshot,
+      yellowCoinsAmount: r.yellow_coins_amount,
+      vipDays: r.vip_days_snapshot,
+      priceCents: r.price_cents,
+      currency: r.currency.toUpperCase(),
+      provider: r.provider,
+      status: r.status,
+      providerCheckoutSessionId: r.provider_checkout_session_id ?? null,
+      paymentMethodType: r.payment_method_type ?? null,
+      walletType: r.wallet_type ?? null,
+      cardBrand: r.card_brand ?? null,
+      cardLast4: r.card_last4 ?? null,
+      cardCountry: r.card_country ?? null,
+      createdAt: dbDateToUtc(r.created_at),
+      creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
+      hiddenAt: r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
+    }))
+  }
+
+  // Mirror на coinPurchaseStore.getAdminPaymentDetail (LEFT JOIN profile_wallets
+  // за currentYellowCoinsBalance — bundle покупки credit-ват coins, за
+  // разлика от VIP-only detail-а). JOIN-ва по profile_id (PAYER), established
+  // pattern — не разграничава gift recipient balance (mirror на coin/VIP
+  // detail-а, който прави същото).
+  function getAdminPaymentDetail(purchaseId: string): AdminPaymentDetailRow | null {
+    type DetailRow = {
+      purchase_id: string
+      profile_id: string | null
+      account_id: string | null
+      username: string | null
+      display_name: string | null
+      email: string | null
+      profile_kind: string | null
+      package_key_snapshot: string
+      title_snapshot: string
+      yellow_coins_amount: number
+      vip_days_snapshot: number
+      price_cents: number
+      currency: string
+      provider: string
+      status: BundlePurchaseStatus
+      provider_checkout_session_id: string | null
+      stripe_payment_intent_id: string | null
+      stripe_charge_id: string | null
+      payment_method_type: string | null
+      wallet_type: string | null
+      card_brand: string | null
+      card_last4: string | null
+      card_country: string | null
+      created_at: string
+      credited_at: string | null
+      updated_at: string
+      hidden_at: string | null
+      yellow_coins_balance: number | null
+    }
+
+    const r = database.prepare(`
+      SELECT
+        bpl.purchase_id,
+        bpl.profile_id,
+        p.account_id,
+        p.username,
+        p.display_name,
+        a.email,
+        p.profile_kind,
+        bpl.package_key_snapshot,
+        bpl.title_snapshot,
+        bpl.yellow_coins_amount,
+        bpl.vip_days_snapshot,
+        bpl.price_cents,
+        bpl.currency,
+        bpl.provider,
+        bpl.status,
+        bpl.provider_checkout_session_id,
+        bpl.stripe_payment_intent_id,
+        bpl.stripe_charge_id,
+        bpl.payment_method_type,
+        bpl.wallet_type,
+        bpl.card_brand,
+        bpl.card_last4,
+        bpl.card_country,
+        bpl.created_at,
+        bpl.credited_at,
+        bpl.updated_at,
+        bpl.hidden_at,
+        pw.yellow_coins_balance
+      FROM bundle_purchase_ledger bpl
+      LEFT JOIN profiles p ON p.profile_id = bpl.profile_id
+      LEFT JOIN accounts a ON a.account_id = p.account_id
+      LEFT JOIN profile_wallets pw ON pw.profile_id = bpl.profile_id
+      WHERE bpl.purchase_id = ?
+      LIMIT 1;
+    `).get(normalizeId(purchaseId)) as DetailRow | undefined
+
+    if (!r) return null
+
+    return {
+      source: 'bundle',
+      purchaseId: r.purchase_id,
+      profileId: r.profile_id ?? null,
+      accountId: r.account_id ?? null,
+      username: r.username ?? null,
+      displayName: r.display_name ?? null,
+      email: r.email ?? null,
+      profileKind: r.profile_kind ?? null,
+      packageKey: r.package_key_snapshot,
+      packageTitle: r.title_snapshot,
+      yellowCoinsAmount: r.yellow_coins_amount,
+      vipDays: r.vip_days_snapshot,
+      priceCents: r.price_cents,
+      currency: r.currency.toUpperCase(),
+      provider: r.provider,
+      status: r.status,
+      providerCheckoutSessionId: r.provider_checkout_session_id ?? null,
+      stripePaymentIntentId: r.stripe_payment_intent_id ?? null,
+      stripeChargeId: r.stripe_charge_id ?? null,
+      paymentMethodType: r.payment_method_type ?? null,
+      walletType: r.wallet_type ?? null,
+      cardBrand: r.card_brand ?? null,
+      cardLast4: r.card_last4 ?? null,
+      cardCountry: r.card_country ?? null,
+      createdAt: dbDateToUtc(r.created_at),
+      creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
+      updatedAt: dbDateToUtc(r.updated_at),
+      hiddenAt: r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
+      currentYellowCoinsBalance: r.yellow_coins_balance ?? null,
+    }
+  }
+
   function close(): void {
     database.close()
   }
@@ -859,6 +1079,8 @@ export async function createBundlePurchaseStore(
     needsPaymentMethodSnapshot,
     updatePaymentMethodSnapshot,
     hidePurchaseForUser,
+    getAdminPaymentListByPeriod,
+    getAdminPaymentDetail,
     close,
   }
 }

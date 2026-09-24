@@ -76,13 +76,15 @@ export type AdminPaymentStats = {
 export { ADMIN_PAYMENT_PERIODS } from './sofiaDayBounds.js'
 export type AdminPaymentPeriod = SharedAdminPaymentPeriod
 
-// source различава coin ('/api/shop/checkout') от VIP ('/api/vip/checkout')
-// покупки в combined admin payment listing-а (виж getAdminPaymentListByPeriod
-// в server/src/index.ts, който merge-ва coin+VIP резултати). VIP редовете
-// НЯМАТ yellowCoinsAmount/packageKey/payment-method snapshot полета (различна
-// domain схема — vip_purchase_ledger) — тия полета остават null за тях,
-// НИКОГА не се "измислят" за VIP.
-export type AdminPaymentSource = 'coin' | 'vip'
+// source различава coin ('/api/shop/checkout'), VIP ('/api/vip/checkout') и
+// bundle ('/api/shop/bundles/checkout') покупки в combined admin payment
+// listing-а (виж getAdminPaymentListByPeriod в server/src/index.ts, който
+// merge-ва coin+VIP+bundle резултати). VIP редовете НЯМАТ yellowCoinsAmount/
+// packageKey/payment-method snapshot полета (различна domain схема —
+// vip_purchase_ledger) — тия полета остават null за тях, НИКОГА не се
+// "измислят" за VIP. Bundle редовете имат И yellowCoinsAmount, И vipDays
+// едновременно (единична покупка credit-ва и двете).
+export type AdminPaymentSource = 'coin' | 'vip' | 'bundle'
 
 export type AdminPaymentListRow = {
   source: AdminPaymentSource
@@ -98,6 +100,10 @@ export type AdminPaymentListRow = {
   packageKey: string | null
   packageTitle: string
   yellowCoinsAmount: number | null
+  // VIP дни, включени в покупката — non-null само за 'vip'/'bundle' source
+  // (coin покупки нямат VIP компонент). Snapshot стойност от ledger-а към
+  // момента на checkout, никога текущ package config.
+  vipDays: number | null
   priceCents: number
   currency: string
   provider: string
@@ -127,6 +133,7 @@ export type AdminPaymentDetailRow = {
   packageKey: string | null
   packageTitle: string
   yellowCoinsAmount: number | null
+  vipDays: number | null
   priceCents: number
   currency: string
   provider: string
@@ -1198,6 +1205,7 @@ export async function createCoinPurchaseStore(
       packageKey:                  r.package_key_snapshot,
       packageTitle:                r.title_snapshot,
       yellowCoinsAmount:           r.yellow_coins_amount,
+      vipDays:                     null,
       priceCents:                  r.price_cents,
       currency:                    r.currency.toUpperCase(),
       provider:                    r.provider,
@@ -1262,6 +1270,7 @@ export async function createCoinPurchaseStore(
       packageKey:                 r.package_key_snapshot,
       packageTitle:               r.title_snapshot,
       yellowCoinsAmount:          r.yellow_coins_amount,
+      vipDays:                    null,
       priceCents:                 r.price_cents,
       currency:                   r.currency.toUpperCase(),
       provider:                   r.provider,

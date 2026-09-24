@@ -144,6 +144,7 @@ function makeRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentList
     packageKey: 'starter',
     packageTitle: 'Starter Pack',
     yellowCoinsAmount: 1500,
+    vipDays: null,
     priceCents: 499,
     currency: 'EUR',
     provider: 'stripe',
@@ -173,7 +174,31 @@ function makeVipRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentL
     packageKey: null,
     packageTitle: 'VIP 365 дни',
     yellowCoinsAmount: null,
+    vipDays: 365,
     priceCents: 100,
+    currency: 'EUR',
+    paymentMethodType: null,
+    walletType: null,
+    cardBrand: null,
+    cardLast4: null,
+    cardCountry: null,
+    ...overrides,
+  })
+}
+
+// Bundle redове имат И yellowCoinsAmount, И vipDays едновременно (единична
+// покупка credit-ва и двете) — за разлика от coin (само coins) и VIP (само
+// vipDays). Production gap fix: bundle покупки не се показваха изобщо в
+// Admin Payments (bundlePurchaseStore не участваше в handleAdminPaymentsListRequest).
+function makeBundleRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentListRow {
+  return makeRow({
+    source: 'bundle',
+    purchaseId: 'pid-bundle-001',
+    packageKey: 'mini',
+    packageTitle: 'Мини',
+    yellowCoinsAmount: 500,
+    vipDays: 7,
+    priceCents: 499,
     currency: 'EUR',
     paymentMethodType: null,
     walletType: null,
@@ -375,6 +400,48 @@ check('[11c.5] mixed rows: one with profileId set, one with profileId=null — b
   )
   assertContains(html, 'prof-001', 'normal row profileId prefix must still render')
   assertContains(html, 'pid-historical', 'historical row purchaseId must still render')
+})
+
+// ─── [11d] bundle row rendering (production gap fix: bundle purchases missing from Admin Payments) ──
+// Production gap: handleAdminPaymentsListRequest() четеше само coinPurchaseStore
+// и vipPurchaseStore — bundlePurchaseStore не участваше изобщо. Bundle
+// покупка "Мини" (4,99 €, coins+VIP) беше напълно невидима в Админ →
+// Информация → Плащания. Fix: bundlePurchaseStore.getAdminPaymentListByPeriod
+// добавен, source:'bundle' merge-нат в combined pagination.
+console.log('\n[11d] bundle row (coins + VIP days shown together, single row)')
+check('[11d.1] bundle row renders without throwing', () => {
+  renderAdminPaymentsPanel(baseState({ rows: [makeBundleRow()], total: 1 }), NOOP_CALLBACKS)
+})
+check('[11d.2] bundle row shows package title "Мини"', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeBundleRow()], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, 'Мини', 'bundle package title not found')
+})
+check('[11d.3] bundle row shows yellow coins amount with 🟡 suffix', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeBundleRow({ yellowCoinsAmount: 500 })], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, '500', 'bundle coins amount not found')
+  assertContains(html, '🟡', 'coins suffix not found for bundle row')
+})
+check('[11d.4] bundle row shows VIP days in the same cell (not a separate coin/VIP row)', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeBundleRow({ vipDays: 7 })], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, '7', 'bundle VIP days not found')
+  assertContains(html, 'VIP', 'VIP days label not found for bundle row')
+})
+check('[11d.5] bundle row shows correct price (4,99 €)', () => {
+  const html = renderAdminPaymentsPanel(baseState({ rows: [makeBundleRow({ priceCents: 499 })], total: 1 }), NOOP_CALLBACKS)
+  assertContains(html, '4', 'bundle price digits not found')
+  assertContains(html, '99', 'bundle price digits not found')
+})
+check('[11d.6] bundle row with profileId=null (hard-deleted payer) renders without throwing', () => {
+  renderAdminPaymentsPanel(baseState({ rows: [makeBundleRow({ profileId: null })], total: 1 }), NOOP_CALLBACKS)
+})
+check('[11d.7] mixed coin+VIP+bundle rows in same list all render without throwing', () => {
+  const html = renderAdminPaymentsPanel(
+    baseState({ rows: [makeRow(), makeVipRow(), makeBundleRow()], total: 3 }),
+    NOOP_CALLBACKS,
+  )
+  assertContains(html, 'Starter Pack', 'coin row must still render correctly')
+  assertContains(html, 'VIP 365 дни', 'VIP row must still render correctly')
+  assertContains(html, 'Мини', 'bundle row must still render correctly')
 })
 
 // ─── [12] Sofia date formatting ───────────────────────────────────────────────
@@ -857,6 +924,7 @@ function makeDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPay
     packageKey: 'starter',
     packageTitle: 'Starter Pack',
     yellowCoinsAmount: 500,
+    vipDays: null,
     priceCents: 999,
     currency: 'EUR',
     provider: 'stripe',
@@ -890,6 +958,7 @@ function makeVipDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): Admin
     packageKey: null,
     packageTitle: 'VIP 365 дни',
     yellowCoinsAmount: null,
+    vipDays: 365,
     priceCents: 100,
     currency: 'EUR',
     stripePaymentIntentId: null,
@@ -900,6 +969,23 @@ function makeVipDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): Admin
     cardLast4: null,
     cardCountry: null,
     currentYellowCoinsBalance: null,
+    ...overrides,
+  })
+}
+
+// Bundle detail redове имат И yellowCoinsAmount, И vipDays, И currentYellowCoinsBalance
+// (payer wallet — bundle credit-ва coins, mirror на coin detail-а).
+// Production gap fix: bundle покупки нямаха detail lookup изобщо.
+function makeBundleDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPaymentDetailRow {
+  return makeDetailRow({
+    source: 'bundle',
+    purchaseId: 'pid-bundle-detail-001',
+    packageKey: 'mini',
+    packageTitle: 'Мини',
+    yellowCoinsAmount: 500,
+    vipDays: 7,
+    priceCents: 499,
+    currency: 'EUR',
     ...overrides,
   })
 }
@@ -971,6 +1057,33 @@ console.log('\n[40b] detail page: VIP purchase renders without throwing, no coin
   check('[40b.4] amount shows 1,00 € (100 cents)', () => assertContains(html, '1,00', ''))
   check('[40b.5] status badge still renders (paid)', () => assertContains(html, 'paid', ''))
   check('[40b.6] purchase ID still renders', () => assertContains(html, 'pid-vip-detail-001', ''))
+}
+
+// ─── [40c] detail: bundle purchase (production gap fix) ─────────────────────
+console.log('\n[40c] detail page: bundle purchase shows coins + VIP days together')
+{
+  check('[40c.1] bundle detail renders without throwing', () => {
+    renderAdminPaymentDetailPanel(detailState({ purchase: makeBundleDetailRow() }), NOOP_DETAIL)
+  })
+  const html = renderAdminPaymentDetailPanel(detailState({ purchase: makeBundleDetailRow() }), NOOP_DETAIL)
+  check('[40c.2] package title shows "Мини"', () => assertContains(html, 'Мини', ''))
+  check('[40c.3] yellow coins amount shown (500)', () => assertContains(html, '500', ''))
+  check('[40c.4] VIP days shown (7)', () => assertContains(html, '7', ''))
+  check('[40c.5] price shown (4,99 €)', () => {
+    const priceHtml = renderAdminPaymentDetailPanel(detailState({ purchase: makeBundleDetailRow({ priceCents: 499 }) }), NOOP_DETAIL)
+    assertContains(priceHtml, '4', '')
+    assertContains(priceHtml, '99', '')
+  })
+  check('[40c.6] status badge still renders (paid)', () => assertContains(html, 'paid', ''))
+  check('[40c.7] purchase ID still renders', () => assertContains(html, 'pid-bundle-detail-001', ''))
+  check('[40c.8] no literal "null" leaked into markup', () => assertNotContains(html, 'null', ''))
+  check('[40c.9] profileId=null (hard-deleted payer) renders without throwing, shows —', () => {
+    const nullProfileHtml = renderAdminPaymentDetailPanel(
+      detailState({ purchase: makeBundleDetailRow({ profileId: null }) }),
+      NOOP_DETAIL,
+    )
+    assertContains(nullProfileHtml, '—', 'expected — fallback for null profileId on bundle detail')
+  })
 }
 
 // ─── [41] detail: Google Pay ─────────────────────────────────────────────────

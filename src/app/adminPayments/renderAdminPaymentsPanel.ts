@@ -67,6 +67,14 @@ function formatCoins(n: number | null): string {
   return n.toLocaleString('bg-BG')
 }
 
+// vipDays е null за coin-only redове (VIP компонент не приложим). Bundle
+// redовете имат И coins, И VIP дни едновременно — показваме и двете в
+// клетката, не разделяме на отделна колона (минимална UI промяна).
+function formatVipDays(n: number | null): string {
+  if (n === null) return ''
+  return `${n} дни VIP`
+}
+
 function formatMoney(cents: number, currency: string): string {
   try {
     return new Intl.NumberFormat('bg-BG', {
@@ -146,8 +154,11 @@ function renderRow(row: AdminPaymentListRow): string {
   const creditedAt = row.creditedAt ? formatSofiaDate(row.creditedAt) : '—'
   const money = formatMoney(row.priceCents, row.currency)
   // VIP редове нямат yellowCoinsAmount (различна domain схема) — показва "—"
-  // без 🟡 суфикса, вместо да "измисля" жълтици за не-coin покупка.
-  const coinsCell = row.yellowCoinsAmount !== null ? `${formatCoins(row.yellowCoinsAmount)} 🟡` : '—'
+  // без 🟡 суфикса, вместо да "измисля" жълтици за не-coin покупка. Bundle
+  // redове имат И coins, И VIP дни — двете се показват в една клетка.
+  const coinsPart = row.yellowCoinsAmount !== null ? `${formatCoins(row.yellowCoinsAmount)} 🟡` : null
+  const vipDaysPart = row.vipDays !== null ? formatVipDays(row.vipDays) : null
+  const coinsCell = [coinsPart, vipDaysPart].filter((p): p is string => p !== null).join(' + ') || '—'
   const methodLabel = getPaymentMethodLabel(row)
   const brandLabel = formatCardBrand(row.cardBrand)
   const last4 = row.cardLast4 ?? null

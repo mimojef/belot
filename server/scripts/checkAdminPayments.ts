@@ -107,8 +107,26 @@ function makeSchema(db: DatabaseSync): void {
       rank_title TEXT NULL,
       skill_rating INTEGER NOT NULL DEFAULT 1000,
       status TEXT NOT NULL DEFAULT 'active',
+      is_temporary INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS profile_bans (
+      ban_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      banned_until TEXT NOT NULL,
+      lifted_at TEXT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE IF NOT EXISTS paid_gift_notification_log (
+      purchase_id TEXT NOT NULL,
+      purchase_type TEXT NOT NULL CHECK (purchase_type IN ('coin', 'vip', 'bundle')),
+      recipient_profile_id TEXT NOT NULL,
+      sender_display_name_snapshot TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      read_at TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (purchase_id, purchase_type)
     );
     CREATE TABLE IF NOT EXISTS accounts (
       account_id TEXT PRIMARY KEY,
@@ -140,7 +158,8 @@ function makeSchema(db: DatabaseSync): void {
     );
     CREATE TABLE IF NOT EXISTS coin_purchase_ledger (
       purchase_id TEXT PRIMARY KEY,
-      profile_id TEXT NOT NULL,
+      profile_id TEXT NULL,
+      deleted_profile_id_snapshot TEXT NULL,
       package_id TEXT,
       package_key_snapshot TEXT NOT NULL,
       title_snapshot TEXT NOT NULL,
@@ -160,7 +179,10 @@ function makeSchema(db: DatabaseSync): void {
       wallet_type TEXT,
       card_brand TEXT,
       card_last4 TEXT,
-      card_country TEXT
+      card_country TEXT,
+      recipient_profile_id TEXT NULL,
+      recipient_display_name_snapshot TEXT NULL,
+      deleted_recipient_profile_id_snapshot TEXT NULL
     );
   `)
 }

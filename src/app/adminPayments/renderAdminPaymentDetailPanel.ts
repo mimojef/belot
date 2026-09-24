@@ -174,6 +174,7 @@ export function renderAdminPaymentDetailPanel(
     row('Статус', statusBadge(p.status)),
     row('Пакет', `<strong>${escapeHtml(p.packageTitle)}</strong>${p.packageKey !== null ? ` <span style="color:rgba(255,255,255,0.35);font-size:11px;">${escapeHtml(p.packageKey)}</span>` : ''}`),
     row('Жълтици', p.yellowCoinsAmount !== null ? escapeHtml(formatCoins(p.yellowCoinsAmount)) + ' 🟡' : '—'),
+    row('VIP дни', p.vipDays !== null ? escapeHtml(String(p.vipDays)) + ' дни' : '—'),
     row('Сума', `<strong style="color:#d4a520;">${escapeHtml(formatMoney(p.priceCents, p.currency))}</strong>`),
   ].join(''))
 

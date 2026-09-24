@@ -17593,14 +17593,19 @@ async function handleAdminPaymentsListRequest(
   const limit  = Math.min(limitRaw, 100)
   const offset = parsedOffset ?? 0
 
-  // Combined admin payments (root cause: VIP покупки бяха невидими, само
-  // coin_purchase_ledger се четеше тук). Global top-N pagination correctness:
-  // взимаме от ВСЕКИ source най-много (offset+limit) реда, започвайки от 0
-  // (не coin's собствен SQL offset/limit directно — combined sort-order-ът
-  // може да измести кои coin/VIP редове принадлежат на коя combined page).
-  // Merge-ваме, сортираме по creditedAt DESC, slice(offset, offset+limit).
+  // Combined admin payments (root cause history: VIP покупки бяха невидими,
+  // само coin_purchase_ledger се четеше тук; после bundle покупки останаха
+  // невидими по същата причина — bundlePurchaseStore изобщо не участваше).
+  // Global top-N pagination correctness: взимаме от ВСЕКИ source най-много
+  // (offset+limit) реда, започвайки от 0 (не coin's собствен SQL offset/
+  // limit директно — combined sort-order-ът може да измести кои redове от
+  // кой source принадлежат на коя combined page). Merge-ваме и трите
+  // sources, сортираме по creditedAt DESC, slice(offset, offset+limit).
   // Достатъчно за коректен global top-N без да зареждаме ЦЯЛАТА period
   // история на всяка заявка (какъвто беше предишният limit:100_000 подход).
+  // coin остава SQL-level LIMIT-нат (established top-N подход); VIP и
+  // bundle остават whole-period fetch + post-hoc JS top-N (established VIP
+  // pattern, разширен симетрично за bundle).
   const period = rawPeriod as (typeof ADMIN_PAYMENT_PERIODS)[number]
   const topNFetchLimit = offset + limit
   const coinTopN = coinPurchaseStore.getAdminPaymentListByPeriod({ period, limit: topNFetchLimit, offset: 0 })
@@ -17609,8 +17614,13 @@ async function handleAdminPaymentsListRequest(
     .slice()
     .sort((a, b) => (Date.parse(b.creditedAt ?? '') || 0) - (Date.parse(a.creditedAt ?? '') || 0))
     .slice(0, topNFetchLimit)
+  const bundleRowsForPeriod = bundlePurchaseStore.getAdminPaymentListByPeriod({ period })
+  const bundleTopN = bundleRowsForPeriod
+    .slice()
+    .sort((a, b) => (Date.parse(b.creditedAt ?? '') || 0) - (Date.parse(a.creditedAt ?? '') || 0))
+    .slice(0, topNFetchLimit)
 
-  const combinedRows: AdminPaymentListRow[] = [...coinTopN.rows, ...vipTopN].sort((a, b) => {
+  const combinedRows: AdminPaymentListRow[] = [...coinTopN.rows, ...vipTopN, ...bundleTopN].sort((a, b) => {
     const aTime = a.creditedAt ? Date.parse(a.creditedAt) : 0
     const bTime = b.creditedAt ? Date.parse(b.creditedAt) : 0
     if (bTime !== aTime) return bTime - aTime
@@ -17621,11 +17631,15 @@ async function handleAdminPaymentsListRequest(
 
   // total/totalsByCurrency остават ЦЕЛИЯТ period (coin.total вече е whole-
   // period count от summary заявката вътре в coinPurchaseStore, независимо
-  // от LIMIT-а подаден тук; vipRowsForPeriod е пълният VIP period набор).
-  const total = coinTopN.total + vipRowsForPeriod.length
+  // от LIMIT-а подаден тук; vipRowsForPeriod/bundleRowsForPeriod са пълните
+  // period набори за съответния source).
+  const total = coinTopN.total + vipRowsForPeriod.length + bundleRowsForPeriod.length
   const combinedTotalsByCurrency: Record<string, number> = { ...coinTopN.totalsByCurrency }
   for (const vipRow of vipRowsForPeriod) {
     combinedTotalsByCurrency[vipRow.currency] = (combinedTotalsByCurrency[vipRow.currency] ?? 0) + vipRow.priceCents
+  }
+  for (const bundleRow of bundleRowsForPeriod) {
+    combinedTotalsByCurrency[bundleRow.currency] = (combinedTotalsByCurrency[bundleRow.currency] ?? 0) + bundleRow.priceCents
   }
 
   sendJsonResponse(res, 200, {
@@ -17687,25 +17701,29 @@ async function handleAdminPaymentDetailRequest(
     return true
   }
 
-  // Detail lookup различава coin/VIP чрез explicit source в резултата, НЕ
-  // purchase_id prefix (двата store-а генерират UUID-и независимо, без общ
+  // Detail lookup различава coin/VIP/bundle чрез explicit source в резултата,
+  // НЕ purchase_id prefix (трите store-а генерират UUID-и независимо, без общ
   // namespace contract) — опитваме coin store-а първо (established primary
-  // path), после VIP store-а като fallback.
+  // path), после VIP, после bundle като fallback-и.
   //
-  // Fallback-ът (не source query param от клиента) е АРХИТЕКТУРНО нужен, не
-  // просто удобен избор: /admin/payments/:purchaseId е bookmarkable/
-  // refresh-safe route (виж navigateFromPath -> showAdminPaymentDetailPanel
-  // в createLobbyFlowController.ts) — при директно отваряне на този URL
-  // (нов таб, refresh, споделен линк) няма в паметта list row, от който
-  // клиентът да прочете source. Backend-ът трябва да може да resolve-не
-  // purchaseId САМОСТОЯТЕЛНО и в тоя случай, значи fallback логиката тук
-  // остава задължителна дори ако добавим source hint за click-from-list
-  // пътя — добавянето му би било чиста performance micro-optimization
-  // (спестява един безполезен PRIMARY KEY lookup на грешната таблица,
-  // практически безплатен), не premahva нуждата от fallback-а. Затова НЕ е
-  // добавен — не решава реален проблем, добавя query param + client wiring
-  // само за да отпадне fallback логика, която все пак трябва да остане.
-  const detail = coinPurchaseStore.getAdminPaymentDetail(purchaseId) ?? vipPurchaseStore.getAdminPaymentDetail(purchaseId)
+  // Fallback веригата (не source query param от клиента) е АРХИТЕКТУРНО
+  // нужна, не просто удобен избор: /admin/payments/:purchaseId е
+  // bookmarkable/refresh-safe route (виж navigateFromPath ->
+  // showAdminPaymentDetailPanel в createLobbyFlowController.ts) — при
+  // директно отваряне на този URL (нов таб, refresh, споделен линк) няма в
+  // паметта list row, от който клиентът да прочете source. Backend-ът трябва
+  // да може да resolve-не purchaseId САМОСТОЯТЕЛНО и в тоя случай, значи
+  // fallback логиката тук остава задължителна дори ако добавим source hint
+  // за click-from-list пътя — добавянето му би било чиста performance
+  // micro-optimization (спестява 1-2 безполезни PRIMARY KEY lookup-а на
+  // грешните таблици, практически безплатни), не премахва нуждата от
+  // fallback-а. Затова НЕ е добавен — не решава реален проблем, добавя query
+  // param + client wiring само за да отпадне fallback логика, която все пак
+  // трябва да остане.
+  const detail =
+    coinPurchaseStore.getAdminPaymentDetail(purchaseId) ??
+    vipPurchaseStore.getAdminPaymentDetail(purchaseId) ??
+    bundlePurchaseStore.getAdminPaymentDetail(purchaseId)
   if (!detail) {
     sendJsonResponse(res, 404, { ok: false, message: 'Плащането не е намерено.' })
     return true

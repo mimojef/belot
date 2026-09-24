@@ -845,6 +845,7 @@ export async function createVipPurchaseStore(
       // като coin package.
       packageTitle: VIP_PACKAGE_CATALOG[r.package_id].title,
       yellowCoinsAmount: null,
+      vipDays: r.days_snapshot,
       priceCents: r.price_cents_snapshot,
       currency: r.currency.toUpperCase(),
       provider: r.provider,
@@ -938,6 +939,7 @@ export async function createVipPurchaseStore(
       packageKey: null,
       packageTitle: VIP_PACKAGE_CATALOG[r.package_id].title,
       yellowCoinsAmount: null,
+      vipDays: r.days_snapshot,
       priceCents: r.price_cents_snapshot,
       currency: r.currency.toUpperCase(),
       provider: r.provider,

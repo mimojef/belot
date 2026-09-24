@@ -47,6 +47,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { createCoinPurchaseStore } from '../src/db/coinPurchaseStore.js'
 import { createVipPurchaseStore } from '../src/db/vipPurchaseStore.js'
+import { createBundlePurchaseStore } from '../src/db/bundlePurchaseStore.js'
 import { getSofiaDayBoundsUtc } from '../src/db/sofiaDayBounds.js'
 
 let passed = 0
@@ -107,7 +108,28 @@ function buildSchema(db: DatabaseSync): void {
       profile_kind TEXT NOT NULL DEFAULT 'human',
       username TEXT NULL,
       display_name TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'active',
+      is_temporary INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS profile_bans (
+      ban_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      banned_until TEXT NOT NULL,
+      lifted_at TEXT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS paid_gift_notification_log (
+      purchase_id TEXT NOT NULL,
+      purchase_type TEXT NOT NULL CHECK (purchase_type IN ('coin', 'vip', 'bundle')),
+      recipient_profile_id TEXT NOT NULL,
+      sender_display_name_snapshot TEXT NOT NULL,
+      body_text TEXT NOT NULL,
+      read_at TEXT DEFAULT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (purchase_id, purchase_type)
     );
 
     CREATE TABLE IF NOT EXISTS accounts (
@@ -134,7 +156,8 @@ function buildSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS coin_purchase_ledger (
       purchase_id TEXT PRIMARY KEY,
-      profile_id TEXT NOT NULL,
+      profile_id TEXT NULL,
+      deleted_profile_id_snapshot TEXT NULL,
       package_id TEXT,
       package_key_snapshot TEXT NOT NULL,
       title_snapshot TEXT NOT NULL,
@@ -154,7 +177,10 @@ function buildSchema(db: DatabaseSync): void {
       wallet_type TEXT,
       card_brand TEXT,
       card_last4 TEXT,
-      card_country TEXT
+      card_country TEXT,
+      recipient_profile_id TEXT NULL,
+      recipient_display_name_snapshot TEXT NULL,
+      deleted_recipient_profile_id_snapshot TEXT NULL
     );
 
     CREATE TABLE IF NOT EXISTS profile_wallets (
@@ -173,7 +199,8 @@ function buildSchema(db: DatabaseSync): void {
 
     CREATE TABLE IF NOT EXISTS vip_purchase_ledger (
       purchase_id TEXT PRIMARY KEY,
-      profile_id TEXT NOT NULL,
+      profile_id TEXT NULL,
+      deleted_profile_id_snapshot TEXT NULL,
       package_id TEXT NOT NULL CHECK (package_id IN ('vip_30', 'vip_180', 'vip_365')),
       days_snapshot INTEGER NOT NULL CHECK (days_snapshot > 0),
       price_cents_snapshot INTEGER NOT NULL CHECK (price_cents_snapshot >= 0),
@@ -192,7 +219,10 @@ function buildSchema(db: DatabaseSync): void {
       card_brand TEXT,
       card_last4 TEXT,
       card_country TEXT,
-      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+      recipient_profile_id TEXT NULL,
+      recipient_display_name_snapshot TEXT NULL,
+      deleted_recipient_profile_id_snapshot TEXT NULL,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE SET NULL
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_purchase_ledger_pending_package
@@ -209,6 +239,7 @@ function buildSchema(db: DatabaseSync): void {
       granted_by_profile_id TEXT NULL REFERENCES profiles(profile_id) ON DELETE SET NULL,
       resulting_active_until TEXT NULL,
       purchase_id TEXT NULL REFERENCES vip_purchase_ledger(purchase_id) ON DELETE SET NULL,
+      bundle_purchase_id TEXT NULL,
       amount_paid_cents INTEGER NULL,
       currency TEXT NULL,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
@@ -217,6 +248,63 @@ function buildSchema(db: DatabaseSync): void {
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_purchase_id_once
       ON vip_grants(purchase_id)
       WHERE reason = 'purchase' AND purchase_id IS NOT NULL;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_grants_bundle_purchase_id_once
+      ON vip_grants(bundle_purchase_id)
+      WHERE reason = 'purchase' AND bundle_purchase_id IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS shop_bundle_packages (
+      package_id TEXT PRIMARY KEY,
+      package_key TEXT NOT NULL UNIQUE,
+      title TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      yellow_coins_amount INTEGER NOT NULL CHECK (yellow_coins_amount > 0),
+      vip_days INTEGER NOT NULL CHECK (vip_days > 0),
+      price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+      currency TEXT NOT NULL DEFAULT 'EUR',
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS bundle_purchase_ledger (
+      purchase_id TEXT PRIMARY KEY,
+      profile_id TEXT NULL,
+      deleted_profile_id_snapshot TEXT NULL,
+      package_id TEXT,
+      package_key_snapshot TEXT NOT NULL,
+      title_snapshot TEXT NOT NULL,
+      yellow_coins_amount INTEGER NOT NULL CHECK (yellow_coins_amount > 0),
+      vip_days_snapshot INTEGER NOT NULL CHECK (vip_days_snapshot > 0),
+      price_cents INTEGER NOT NULL CHECK (price_cents >= 0),
+      currency TEXT NOT NULL,
+      provider TEXT NOT NULL DEFAULT 'stripe',
+      provider_checkout_session_id TEXT UNIQUE,
+      status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'paid', 'canceled', 'failed')),
+      credited_at TEXT,
+      vip_grant_id TEXT,
+      stripe_payment_intent_id TEXT,
+      stripe_charge_id TEXT,
+      payment_method_type TEXT,
+      wallet_type TEXT,
+      card_brand TEXT,
+      card_last4 TEXT,
+      card_country TEXT,
+      hidden_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      recipient_profile_id TEXT NULL,
+      recipient_display_name_snapshot TEXT NULL,
+      deleted_recipient_profile_id_snapshot TEXT NULL,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE SET NULL,
+      FOREIGN KEY (package_id) REFERENCES shop_bundle_packages(package_id) ON DELETE SET NULL,
+      FOREIGN KEY (vip_grant_id) REFERENCES vip_grants(grant_id) ON DELETE SET NULL
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_purchase_ledger_pending_package
+      ON bundle_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
+      WHERE status = 'pending' AND hidden_at IS NULL;
   `)
 }
 
@@ -259,6 +347,40 @@ function insertCoinPurchaseDirect(
       credited_at, created_at, updated_at
     ) VALUES (?, ?, 'starter', 'Starter Pack', 100, ?, 'EUR', 'stripe', ?, ?, ?, ?);
   `).run(id, opts.profileId, opts.priceCents, opts.status, opts.creditedAt, opts.createdAt, opts.createdAt)
+  return id
+}
+
+function insertBundlePurchaseDirect(
+  db: DatabaseSync,
+  opts: {
+    purchaseId?: string
+    profileId: string | null
+    packageKeySnapshot: string
+    titleSnapshot: string
+    yellowCoinsAmount: number
+    vipDaysSnapshot: number
+    priceCents: number
+    status: string
+    createdAt: string
+    creditedAt: string | null
+    currency?: string
+    recipientProfileId?: string | null
+    recipientDisplayNameSnapshot?: string | null
+  },
+): string {
+  const id = opts.purchaseId ?? randomUUID()
+  db.prepare(`
+    INSERT INTO bundle_purchase_ledger (
+      purchase_id, profile_id, package_key_snapshot, title_snapshot,
+      yellow_coins_amount, vip_days_snapshot, price_cents, currency, provider, status,
+      credited_at, created_at, updated_at, recipient_profile_id, recipient_display_name_snapshot
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'stripe', ?, ?, ?, ?, ?, ?);
+  `).run(
+    id, opts.profileId, opts.packageKeySnapshot, opts.titleSnapshot,
+    opts.yellowCoinsAmount, opts.vipDaysSnapshot, opts.priceCents, opts.currency ?? 'EUR',
+    opts.status, opts.creditedAt, opts.createdAt, opts.createdAt,
+    opts.recipientProfileId ?? null, opts.recipientDisplayNameSnapshot ?? null,
+  )
   return id
 }
 
@@ -529,6 +651,284 @@ await withTempDir(async (dir) => {
 
   coinStore.close()
   vipStore.close()
+  db.close()
+})
+
+// ─── [13] Production gap fix: coin + VIP + bundle заедно, combined pagination ──
+//
+// Production симптом: акаунт закупи bundle пакет "Мини" (4,99 €, coins+VIP)
+// — покупката е успешна, но НЕ се появява в Админ -> Информация -> Плащания.
+// Root cause: handleAdminPaymentsListRequest() четеше само
+// coinPurchaseStore.getAdminPaymentListByPeriod()/
+// vipPurchaseStore.getAdminPaymentListByPeriod() — bundlePurchaseStore
+// изобщо не участваше. Fix: bundlePurchaseStore получи паралелни
+// getAdminPaymentListByPeriod/getAdminPaymentDetail функции (mirror на VIP
+// store-а), server/src/index.ts ги merge-ва с coin+VIP резултатите.
+//
+// Този regression потвърждава: coin purchase + VIP purchase + bundle "Мини"
+// purchase, всички paid в един и същи ден -> list count=3, bundle е точно
+// ЕДИН row (не дублиран като отделна coin+VIP), сумата включва 4,99 €,
+// bundle row-ът има source='bundle' с правилни coins+VIP дни,
+// chronological ordering коректен, historical bundle с hard-deleted payer
+// (profileId=null) render-ва безопасно.
+console.log('\n[13] Production gap fix: coin + VIP + bundle комбинирано (regression за липсващи bundle покупки в Admin Payments)')
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'admin-payments-combined-3-source.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildSchema(db)
+
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('payer-combined-1', 'Mimojef')
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('payer-combined-2', 'Second Payer')
+
+  const coinStore = await createCoinPurchaseStore(dbPath)
+  const vipStore = await createVipPurchaseStore(dbPath)
+  const bundleStore = await createBundlePurchaseStore(dbPath)
+
+  const nowSqlite = nowSqliteUtc()
+  const now = new Date()
+
+  // Трите покупки от production сценария — всички paid днес.
+  const coinId = insertCoinPurchaseDirect(db, {
+    purchaseId: 'purchase-combined-coin',
+    profileId: 'payer-combined-1',
+    priceCents: 199,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+  const vipId = insertVipPurchaseDirect(db, {
+    purchaseId: 'purchase-combined-vip',
+    profileId: 'payer-combined-1',
+    packageId: 'vip_30',
+    priceCentsSnapshot: 299,
+    daysSnapshot: 30,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+  // "Мини" — 4,99 €, точно production сценария (профил Mimojef).
+  const bundleId = insertBundlePurchaseDirect(db, {
+    purchaseId: 'purchase-combined-bundle-mini',
+    profileId: 'payer-combined-1',
+    packageKeySnapshot: 'mini',
+    titleSnapshot: 'Мини',
+    yellowCoinsAmount: 500,
+    vipDaysSnapshot: 7,
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+
+  const coinResult = coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 50, offset: 0, now })
+  const vipRows = vipStore.getAdminPaymentListByPeriod({ period: 'today', now })
+  const bundleRows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+
+  await check('[13.1] list count = 3 (coin + VIP + bundle, всички отделни redове)', () => {
+    const total = coinResult.total + vipRows.length + bundleRows.length
+    assertEqual(total, 3, `очаквано 3, получено ${total}`)
+  })
+
+  await check('[13.2] bundle е точно ЕДИН row (не дублиран като coin+VIP)', () => {
+    assertEqual(bundleRows.length, 1, `bundle rows: получено ${bundleRows.length}`)
+    assertEqual(bundleRows[0]?.purchaseId, bundleId, 'bundle row purchaseId не съвпада')
+  })
+
+  await check('[13.3] сумата включва 4,99 € (bundle price_cents=499)', () => {
+    assertEqual(bundleRows[0]?.priceCents, 499, 'bundle priceCents трябва да е 499')
+    assertEqual(bundleRows[0]?.currency, 'EUR', 'bundle currency трябва да е EUR')
+  })
+
+  await check('[13.4] bundle row има source="bundle"', () => {
+    assertEqual(bundleRows[0]?.source, 'bundle', 'bundle row source трябва да е "bundle"')
+  })
+
+  await check('[13.5] bundle row: coins И VIP дни едновременно правилни (500 🟡 + 7 дни VIP)', () => {
+    assertEqual(bundleRows[0]?.yellowCoinsAmount, 500, 'bundle yellowCoinsAmount трябва да е 500')
+    assertEqual(bundleRows[0]?.vipDays, 7, 'bundle vipDays трябва да е 7')
+  })
+
+  await check('[13.6] bundle НЕ измисля coin-specific packageKey — точен snapshot "mini"', () => {
+    assertEqual(bundleRows[0]?.packageKey, 'mini', 'bundle packageKey трябва да е snapshot стойността')
+    assertEqual(bundleRows[0]?.packageTitle, 'Мини', 'bundle packageTitle трябва да е "Мини"')
+  })
+
+  await check('[13.7] coin row остава source="coin" с vipDays=null (не примесен с bundle)', () => {
+    const coinRow = coinResult.rows.find((r) => r.purchaseId === coinId)
+    assert(coinRow !== undefined, 'coin row трябва да съществува')
+    assertEqual(coinRow?.source, 'coin', 'coin row source трябва да е "coin"')
+    assertEqual(coinRow?.vipDays, null, 'coin row vipDays трябва да е null (coin няма VIP компонент)')
+  })
+
+  await check('[13.8] VIP row остава source="vip" с yellowCoinsAmount=null (не примесен с bundle)', () => {
+    const vipRow = vipRows.find((r) => r.purchaseId === vipId)
+    assert(vipRow !== undefined, 'VIP row трябва да съществува')
+    assertEqual(vipRow?.source, 'vip', 'VIP row source трябва да е "vip"')
+    assertEqual(vipRow?.yellowCoinsAmount, null, 'VIP row yellowCoinsAmount трябва да е null (VIP няма coins)')
+  })
+
+  await check('[13.9] combined chronological sort (creditedAt DESC) работи коректно през трите sources', () => {
+    const combined = [...coinResult.rows, ...vipRows, ...bundleRows].sort((a, b) => {
+      const aTime = a.creditedAt ? Date.parse(a.creditedAt) : 0
+      const bTime = b.creditedAt ? Date.parse(b.creditedAt) : 0
+      if (bTime !== aTime) return bTime - aTime
+      return b.purchaseId.localeCompare(a.purchaseId)
+    })
+    assertEqual(combined.length, 3, 'combined трябва да съдържа 3 redа')
+    // Всички имат идентичен creditedAt (nowSqlite) — tie-break по purchaseId DESC.
+    const expectedOrder = [coinId, vipId, bundleId].sort().reverse()
+    const actualOrder = combined.map((r) => r.purchaseId)
+    assert(
+      JSON.stringify(actualOrder) === JSON.stringify(expectedOrder),
+      `combined ordering не съвпада с очакваното tie-break: got ${JSON.stringify(actualOrder)}, expected ${JSON.stringify(expectedOrder)}`,
+    )
+  })
+
+  await check('[13.10] mixed pagination: limit=2 offset=0, после offset=2 покрива всички 3 redа без дублиране/пропуск', () => {
+    const combined = [...coinResult.rows, ...vipRows, ...bundleRows].sort((a, b) => {
+      const aTime = a.creditedAt ? Date.parse(a.creditedAt) : 0
+      const bTime = b.creditedAt ? Date.parse(b.creditedAt) : 0
+      if (bTime !== aTime) return bTime - aTime
+      return b.purchaseId.localeCompare(a.purchaseId)
+    })
+    const page1 = combined.slice(0, 2)
+    const page2 = combined.slice(2, 4)
+    assertEqual(page1.length, 2, 'page1 трябва да съдържа 2 redа')
+    assertEqual(page2.length, 1, 'page2 трябва да съдържа 1 ред')
+    const allIds = [...page1, ...page2].map((r) => r.purchaseId).sort()
+    const expectedIds = [coinId, vipId, bundleId].sort()
+    assert(
+      JSON.stringify(allIds) === JSON.stringify(expectedIds),
+      `pagination трябва да покрие точно трите redа, без дублиране/пропуск: got ${JSON.stringify(allIds)}, expected ${JSON.stringify(expectedIds)}`,
+    )
+  })
+
+  await check('[13.11] bundle detail lookup работи (fallback chain: coin -> vip -> bundle)', () => {
+    const coinDetail = coinStore.getAdminPaymentDetail(bundleId)
+    assertEqual(coinDetail, null, 'coin store не трябва да намери bundle purchase')
+    const vipDetail = vipStore.getAdminPaymentDetail(bundleId)
+    assertEqual(vipDetail, null, 'VIP store не трябва да намери bundle purchase')
+    const bundleDetail = bundleStore.getAdminPaymentDetail(bundleId)
+    assert(bundleDetail !== null, 'bundle store трябва да намери bundle purchase')
+    assertEqual(bundleDetail?.source, 'bundle', 'bundle detail source трябва да е "bundle"')
+    assertEqual(bundleDetail?.yellowCoinsAmount, 500, 'bundle detail yellowCoinsAmount трябва да е 500')
+    assertEqual(bundleDetail?.vipDays, 7, 'bundle detail vipDays трябва да е 7')
+  })
+
+  coinStore.close()
+  vipStore.close()
+  bundleStore.close()
+  db.close()
+})
+
+// ─── [14] Historical bundle с hard-deleted payer (profileId=null) ───────────
+console.log('\n[14] Historical bundle с hard-deleted payer render-ва безопасно (profileId=null)')
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'admin-payments-bundle-deleted-payer.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildSchema(db)
+
+  const bundleStore = await createBundlePurchaseStore(dbPath)
+  const nowSqlite = nowSqliteUtc()
+  const now = new Date()
+
+  // profile_id=NULL директно в ledger-а — симулира hard-deleted payer
+  // (ON DELETE SET NULL, установена семантика от 20260923_004 migration-а).
+  // Няма profiles ред за payer-а изобщо — LEFT JOIN просто не match-ва.
+  const historicalBundleId = insertBundlePurchaseDirect(db, {
+    purchaseId: 'purchase-bundle-deleted-payer',
+    profileId: null,
+    packageKeySnapshot: 'mini',
+    titleSnapshot: 'Мини',
+    yellowCoinsAmount: 500,
+    vipDaysSnapshot: 7,
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+
+  await check('[14.1] getAdminPaymentListByPeriod не хвърля за historical bundle с profileId=null', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows.length, 1, 'трябва да намери 1 historical bundle row')
+    assertEqual(rows[0]?.profileId, null, 'profileId трябва да е null (hard-deleted payer)')
+  })
+
+  await check('[14.2] getAdminPaymentDetail не хвърля за historical bundle с profileId=null', () => {
+    const detail = bundleStore.getAdminPaymentDetail(historicalBundleId)
+    assert(detail !== null, 'detail трябва да се намери')
+    assertEqual(detail?.profileId, null, 'detail profileId трябва да е null')
+    assertEqual(detail?.displayName, null, 'displayName трябва да е null (няма profiles ред)')
+  })
+
+  bundleStore.close()
+  db.close()
+})
+
+// ─── [15] Gifted bundle render-ва безопасно — payer/recipient semantics не се смесват ──
+// Gift bundle покупка (recipient_profile_id non-NULL) остава payer-центрична
+// в admin payments (mirror на established coin/VIP admin payment pattern —
+// getAdminPaymentListByPeriod/getAdminPaymentDetail НЕ четат recipient
+// полета изобщо, profileId остава PAYER-а). Потвърждаваме: gift redът не
+// хвърля, source остава 'bundle', profileId е PAYER (не recipient) — не
+// invented recipient данни в тоя response shape.
+console.log('\n[15] Gifted bundle render-ва безопасно (payer/recipient semantics не се смесват)')
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'admin-payments-bundle-gift.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildSchema(db)
+
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('gift-payer-1', 'Payer')
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('gift-recipient-1', 'Recipient')
+
+  const bundleStore = await createBundlePurchaseStore(dbPath)
+  const nowSqlite = nowSqliteUtc()
+  const now = new Date()
+
+  const giftBundleId = insertBundlePurchaseDirect(db, {
+    purchaseId: 'purchase-bundle-gift',
+    profileId: 'gift-payer-1',
+    packageKeySnapshot: 'mini',
+    titleSnapshot: 'Мини',
+    yellowCoinsAmount: 500,
+    vipDaysSnapshot: 7,
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+    recipientProfileId: 'gift-recipient-1',
+    recipientDisplayNameSnapshot: 'Recipient',
+  })
+
+  await check('[15.1] gift bundle row в getAdminPaymentListByPeriod не хвърля', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows.length, 1, 'трябва да намери 1 gift bundle row')
+  })
+
+  await check('[15.2] gift bundle row остава payer-центричен: profileId=PAYER, не recipient', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows[0]?.profileId, 'gift-payer-1', 'profileId трябва да е PAYER-а, не recipient-а')
+    assertEqual(rows[0]?.displayName, 'Payer', 'displayName трябва да е PAYER display name')
+  })
+
+  await check('[15.3] gift bundle row: source остава "bundle", coins+VIP непроменени от gift статуса', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows[0]?.source, 'bundle', 'source трябва да остане "bundle"')
+    assertEqual(rows[0]?.yellowCoinsAmount, 500, 'yellowCoinsAmount непроменен от gift статуса')
+    assertEqual(rows[0]?.vipDays, 7, 'vipDays непроменен от gift статуса')
+  })
+
+  await check('[15.4] gift bundle detail lookup не хвърля, остава payer-центричен', () => {
+    const detail = bundleStore.getAdminPaymentDetail(giftBundleId)
+    assert(detail !== null, 'detail трябва да се намери')
+    assertEqual(detail?.profileId, 'gift-payer-1', 'detail profileId трябва да е PAYER-а')
+    assertEqual(detail?.source, 'bundle', 'detail source трябва да е "bundle"')
+  })
+
+  bundleStore.close()
   db.close()
 })
 
