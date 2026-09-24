@@ -799,6 +799,8 @@ export async function createVipPurchaseStore(
       card_country: string | null
       created_at: string
       credited_at: string | null
+      recipient_profile_id: string | null
+      recipient_display_name_snapshot: string | null
     }
 
     const listRows = database.prepare(`
@@ -823,7 +825,9 @@ export async function createVipPurchaseStore(
         vpl.card_last4,
         vpl.card_country,
         vpl.created_at,
-        vpl.credited_at
+        vpl.credited_at,
+        vpl.recipient_profile_id,
+        vpl.recipient_display_name_snapshot
       FROM vip_purchase_ledger vpl
       LEFT JOIN profiles p ON p.profile_id = vpl.profile_id
       LEFT JOIN accounts a ON a.account_id = p.account_id
@@ -859,6 +863,8 @@ export async function createVipPurchaseStore(
       createdAt: dbDateToUtc(r.created_at),
       creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
       hiddenAt: null,
+      recipientProfileId: r.recipient_profile_id ?? null,
+      recipientDisplayName: r.recipient_display_name_snapshot ?? null,
     }))
   }
 
@@ -890,6 +896,8 @@ export async function createVipPurchaseStore(
       created_at: string
       credited_at: string | null
       updated_at: string
+      recipient_profile_id: string | null
+      recipient_display_name_snapshot: string | null
     }
 
     const r = database.prepare(`
@@ -917,7 +925,9 @@ export async function createVipPurchaseStore(
         vpl.card_country,
         vpl.created_at,
         vpl.credited_at,
-        vpl.updated_at
+        vpl.updated_at,
+        vpl.recipient_profile_id,
+        vpl.recipient_display_name_snapshot
       FROM vip_purchase_ledger vpl
       LEFT JOIN profiles p ON p.profile_id = vpl.profile_id
       LEFT JOIN accounts a ON a.account_id = p.account_id
@@ -957,6 +967,8 @@ export async function createVipPurchaseStore(
       updatedAt: dbDateToUtc(r.updated_at),
       hiddenAt: null,
       currentYellowCoinsBalance: null,
+      recipientProfileId: r.recipient_profile_id ?? null,
+      recipientDisplayName: r.recipient_display_name_snapshot ?? null,
     }
   }
 

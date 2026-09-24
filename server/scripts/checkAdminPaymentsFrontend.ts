@@ -158,6 +158,8 @@ function makeRow(overrides: Partial<AdminPaymentListRow> = {}): AdminPaymentList
     createdAt: '2026-06-15T10:00:00.000Z',
     creditedAt: '2026-06-15T10:05:00.000Z',
     hiddenAt: null,
+    recipientProfileId: null,
+    recipientDisplayName: null,
     ...overrides,
   }
 }
@@ -942,6 +944,8 @@ function makeDetailRow(overrides: Partial<AdminPaymentDetailRow> = {}): AdminPay
     updatedAt: '2026-06-15T10:05:01.000Z',
     hiddenAt: null,
     currentYellowCoinsBalance: 1500,
+    recipientProfileId: null,
+    recipientDisplayName: null,
     ...overrides,
   }
 }

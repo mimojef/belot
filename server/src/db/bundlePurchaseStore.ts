@@ -889,6 +889,8 @@ export async function createBundlePurchaseStore(
       created_at: string
       credited_at: string | null
       hidden_at: string | null
+      recipient_profile_id: string | null
+      recipient_display_name_snapshot: string | null
     }
 
     const listRows = database.prepare(`
@@ -916,7 +918,9 @@ export async function createBundlePurchaseStore(
         bpl.card_country,
         bpl.created_at,
         bpl.credited_at,
-        bpl.hidden_at
+        bpl.hidden_at,
+        bpl.recipient_profile_id,
+        bpl.recipient_display_name_snapshot
       FROM bundle_purchase_ledger bpl
       LEFT JOIN profiles p ON p.profile_id = bpl.profile_id
       LEFT JOIN accounts a ON a.account_id = p.account_id
@@ -950,6 +954,8 @@ export async function createBundlePurchaseStore(
       createdAt: dbDateToUtc(r.created_at),
       creditedAt: r.credited_at ? dbDateToUtc(r.credited_at) : null,
       hiddenAt: r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
+      recipientProfileId: r.recipient_profile_id ?? null,
+      recipientDisplayName: r.recipient_display_name_snapshot ?? null,
     }))
   }
 
@@ -988,6 +994,8 @@ export async function createBundlePurchaseStore(
       updated_at: string
       hidden_at: string | null
       yellow_coins_balance: number | null
+      recipient_profile_id: string | null
+      recipient_display_name_snapshot: string | null
     }
 
     const r = database.prepare(`
@@ -1019,6 +1027,8 @@ export async function createBundlePurchaseStore(
         bpl.credited_at,
         bpl.updated_at,
         bpl.hidden_at,
+        bpl.recipient_profile_id,
+        bpl.recipient_display_name_snapshot,
         pw.yellow_coins_balance
       FROM bundle_purchase_ledger bpl
       LEFT JOIN profiles p ON p.profile_id = bpl.profile_id
@@ -1060,6 +1070,8 @@ export async function createBundlePurchaseStore(
       updatedAt: dbDateToUtc(r.updated_at),
       hiddenAt: r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
       currentYellowCoinsBalance: r.yellow_coins_balance ?? null,
+      recipientProfileId: r.recipient_profile_id ?? null,
+      recipientDisplayName: r.recipient_display_name_snapshot ?? null,
     }
   }
 

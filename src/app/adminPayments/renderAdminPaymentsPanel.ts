@@ -95,6 +95,22 @@ function getProfileLabel(row: AdminPaymentListRow): string {
   return 'Липсващ профил'
 }
 
+// "Подари авоари" (Paid Gift Shop) — recipientDisplayName е immutable
+// snapshot колона (не FK), записана от РЕАЛНОТО display_name на recipient-a
+// в момента на checkout-a (createPendingPurchase изисква eligible/съществуващ
+// профил, значи snapshot-ът никога не е null/empty за gift ред) — оцелява
+// recipient hard-delete непроменен и е canonical "е ли тази покупка gift"
+// discriminator. recipientProfileId може вече да е NULL за такъв ред (ON
+// DELETE SET NULL) — не разчитаме на него за detect-ване на gift статус,
+// само на snapshot-a. Defensive fallback за trim()===''  edge case — никога
+// не показва "null"/празен текст, никога не измисля име.
+function getRecipientGiftLabel(row: { recipientDisplayName: string | null }): string | null {
+  if (row.recipientDisplayName === null) return null
+  return row.recipientDisplayName.trim().length > 0
+    ? `Подарък за ${row.recipientDisplayName}`
+    : 'Подарък за изтрит профил'
+}
+
 function shortenSessionId(id: string | null): string {
   if (!id) return '—'
   if (id.length <= 16) return id
@@ -165,6 +181,7 @@ function renderRow(row: AdminPaymentListRow): string {
   const cardDisplay = brandLabel && last4
     ? `${brandLabel} •••• ${last4}`
     : brandLabel || (last4 ? `•••• ${last4}` : '—')
+  const giftLabel = getRecipientGiftLabel(row)
 
   const copyBtn = sessionId
     ? ` <button type="button" data-copy-session="${escapeHtml(sessionId)}" title="Копирай пълния Session ID" style="
@@ -185,6 +202,7 @@ function renderRow(row: AdminPaymentListRow): string {
       <td style="${tdStyle}">
         <div style="font-weight:600;">${escapeHtml(row.packageTitle)}</div>
         ${row.packageKey !== null ? `<div style="font-size:10px;color:rgba(255,255,255,0.35);">${escapeHtml(row.packageKey)}</div>` : ''}
+        ${giftLabel !== null ? `<div style="font-size:10px;font-weight:700;color:#d4a520;margin-top:2px;">${escapeHtml(giftLabel)}</div>` : ''}
       </td>
       <td style="${tdStyle};text-align:right;font-variant-numeric:tabular-nums;">${escapeHtml(coinsCell)}</td>
       <td style="${tdStyle};text-align:right;font-weight:700;color:#d4a520;font-variant-numeric:tabular-nums;">${escapeHtml(money)}</td>

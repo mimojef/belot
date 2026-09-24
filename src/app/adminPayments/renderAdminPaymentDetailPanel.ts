@@ -168,6 +168,16 @@ export function renderAdminPaymentDetailPanel(
 
   const profileLabel = p.displayName || p.username || 'Липсващ профил'
 
+  // "Подари авоари" — recipientDisplayName (immutable snapshot, записан от
+  // реалното display_name на получателя в момента на checkout-а) е
+  // canonical "е ли тази покупка gift" discriminator. При normal (non-gift)
+  // покупка е null и тези редове изобщо не се добавят (established detail
+  // UI pattern — never показва "—" за концепции, които не приложими).
+  const isGift = p.recipientDisplayName !== null
+  const recipientLabel = isGift
+    ? (p.recipientDisplayName!.trim().length > 0 ? p.recipientDisplayName! : 'Изтрит профил')
+    : null
+
   const sectionA = section('А. Покупка', [
     row('Дата на създаване', p.createdAt ? escapeHtml(formatSofiaDate(p.createdAt)) : '—'),
     row('Дата на начисляване', p.creditedAt ? escapeHtml(formatSofiaDate(p.creditedAt)) : '—'),
@@ -176,6 +186,18 @@ export function renderAdminPaymentDetailPanel(
     row('Жълтици', p.yellowCoinsAmount !== null ? escapeHtml(formatCoins(p.yellowCoinsAmount)) + ' 🟡' : '—'),
     row('VIP дни', p.vipDays !== null ? escapeHtml(String(p.vipDays)) + ' дни' : '—'),
     row('Сума', `<strong style="color:#d4a520;">${escapeHtml(formatMoney(p.priceCents, p.currency))}</strong>`),
+    ...(isGift
+      ? [
+          row('Получател', `<span style="color:#d4a520;font-weight:700;">${escapeHtml(recipientLabel!)}</span>`),
+          ...(p.recipientProfileId
+            ? [row(
+                'Recipient Profile ID',
+                `<span style="font-family:monospace;font-size:12px;">${escapeHtml(p.recipientProfileId)}</span>`,
+                copyBtn('recipient-profile-id', p.recipientProfileId),
+              )]
+            : []),
+        ]
+      : []),
   ].join(''))
 
   const sectionB = section('Б. Клиент', [

@@ -49,6 +49,13 @@ export type AdminPaymentListRow = {
   createdAt: string
   creditedAt: string | null
   hiddenAt: string | null
+  // "Подари авоари" (Paid Gift Shop) — non-null означава ТАЗИ покупка е
+  // gift. recipientDisplayName (immutable snapshot, НЕ FK) е canonical "е
+  // ли gift" discriminator за UI — оцелява дори recipient hard-delete,
+  // докато recipientProfileId може да стане NULL (ON DELETE SET NULL).
+  // Normal (non-gift) покупки: и двете NULL.
+  recipientProfileId: string | null
+  recipientDisplayName: string | null
 }
 
 export type AdminPaymentListResult = {
@@ -98,4 +105,6 @@ export type AdminPaymentDetailRow = {
   updatedAt: string
   hiddenAt: string | null
   currentYellowCoinsBalance: number | null
+  recipientProfileId: string | null
+  recipientDisplayName: string | null
 }

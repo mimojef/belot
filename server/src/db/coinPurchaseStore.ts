@@ -117,6 +117,13 @@ export type AdminPaymentListRow = {
   createdAt: string
   creditedAt: string | null
   hiddenAt: string | null
+  // "Подари авоари" (Paid Gift Shop) — non-null означава ТАЗИ покупка е
+  // gift. recipientProfileId може да е NULL дори за gift ред (recipient
+  // hard-deleted — виж 20260902_002 semantics), затова recipientDisplayName
+  // (immutable snapshot колона, НЕ FK) е canonical "е ли gift" discriminator
+  // за UI, не recipientProfileId. Normal (non-gift) покупки: и двете NULL.
+  recipientProfileId: string | null
+  recipientDisplayName: string | null
 }
 
 export type AdminPaymentDetailRow = {
@@ -151,6 +158,8 @@ export type AdminPaymentDetailRow = {
   updatedAt: string
   hiddenAt: string | null
   currentYellowCoinsBalance: number | null
+  recipientProfileId: string | null
+  recipientDisplayName: string | null
 }
 
 export type AdminPaymentListResult = {
@@ -635,6 +644,8 @@ export async function createCoinPurchaseStore(
       cpl.credited_at,
       cpl.updated_at,
       cpl.hidden_at,
+      cpl.recipient_profile_id,
+      cpl.recipient_display_name_snapshot,
       pw.yellow_coins_balance
     FROM coin_purchase_ledger cpl
     LEFT JOIN profiles p ON p.profile_id = cpl.profile_id
@@ -1158,6 +1169,8 @@ export async function createCoinPurchaseStore(
       created_at: string
       credited_at: string | null
       hidden_at: string | null
+      recipient_profile_id: string | null
+      recipient_display_name_snapshot: string | null
     }
 
     const listRows = database.prepare(`
@@ -1184,7 +1197,9 @@ export async function createCoinPurchaseStore(
         cpl.card_country,
         cpl.created_at,
         cpl.credited_at,
-        cpl.hidden_at
+        cpl.hidden_at,
+        cpl.recipient_profile_id,
+        cpl.recipient_display_name_snapshot
       FROM coin_purchase_ledger cpl
       LEFT JOIN profiles p ON p.profile_id = cpl.profile_id
       LEFT JOIN accounts a ON a.account_id = p.account_id
@@ -1219,6 +1234,8 @@ export async function createCoinPurchaseStore(
       createdAt:                   dbDateToUtc(r.created_at),
       creditedAt:                  r.credited_at ? dbDateToUtc(r.credited_at) : null,
       hiddenAt:                    r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
+      recipientProfileId:          r.recipient_profile_id ?? null,
+      recipientDisplayName:        r.recipient_display_name_snapshot ?? null,
     }))
 
     return { rows, total, totalsByCurrency }
@@ -1255,6 +1272,8 @@ export async function createCoinPurchaseStore(
       updated_at: string
       hidden_at: string | null
       yellow_coins_balance: number | null
+      recipient_profile_id: string | null
+      recipient_display_name_snapshot: string | null
     }
     const r = adminPaymentDetailStatement.get(normalizeId(purchaseId)) as DetailRow | undefined
     if (!r) return null
@@ -1288,6 +1307,8 @@ export async function createCoinPurchaseStore(
       updatedAt:                  dbDateToUtc(r.updated_at),
       hiddenAt:                   r.hidden_at ? dbDateToUtc(r.hidden_at) : null,
       currentYellowCoinsBalance:  r.yellow_coins_balance ?? null,
+      recipientProfileId:         r.recipient_profile_id ?? null,
+      recipientDisplayName:       r.recipient_display_name_snapshot ?? null,
     }
   }
 

@@ -299,7 +299,8 @@ function buildSchema(db: DatabaseSync): void {
       deleted_recipient_profile_id_snapshot TEXT NULL,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE SET NULL,
       FOREIGN KEY (package_id) REFERENCES shop_bundle_packages(package_id) ON DELETE SET NULL,
-      FOREIGN KEY (vip_grant_id) REFERENCES vip_grants(grant_id) ON DELETE SET NULL
+      FOREIGN KEY (vip_grant_id) REFERENCES vip_grants(grant_id) ON DELETE SET NULL,
+      FOREIGN KEY (recipient_profile_id) REFERENCES profiles(profile_id) ON DELETE SET NULL
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_purchase_ledger_pending_package
@@ -320,33 +321,49 @@ function insertVipPurchaseDirect(
     createdAt: string
     creditedAt: string | null
     currency?: string
+    recipientProfileId?: string | null
+    recipientDisplayNameSnapshot?: string | null
   },
 ): string {
   const id = opts.purchaseId ?? randomUUID()
   db.prepare(`
     INSERT INTO vip_purchase_ledger (
       purchase_id, profile_id, package_id, days_snapshot, price_cents_snapshot,
-      currency, provider, status, created_at, updated_at, credited_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 'stripe', ?, ?, ?, ?);
+      currency, provider, status, created_at, updated_at, credited_at,
+      recipient_profile_id, recipient_display_name_snapshot
+    ) VALUES (?, ?, ?, ?, ?, ?, 'stripe', ?, ?, ?, ?, ?, ?);
   `).run(
     id, opts.profileId, opts.packageId, opts.daysSnapshot, opts.priceCentsSnapshot,
     opts.currency ?? 'EUR', opts.status, opts.createdAt, opts.createdAt, opts.creditedAt,
+    opts.recipientProfileId ?? null, opts.recipientDisplayNameSnapshot ?? null,
   )
   return id
 }
 
 function insertCoinPurchaseDirect(
   db: DatabaseSync,
-  opts: { purchaseId?: string; profileId: string; priceCents: number; status: string; createdAt: string; creditedAt: string | null },
+  opts: {
+    purchaseId?: string
+    profileId: string
+    priceCents: number
+    status: string
+    createdAt: string
+    creditedAt: string | null
+    recipientProfileId?: string | null
+    recipientDisplayNameSnapshot?: string | null
+  },
 ): string {
   const id = opts.purchaseId ?? randomUUID()
   db.prepare(`
     INSERT INTO coin_purchase_ledger (
       purchase_id, profile_id, package_key_snapshot, title_snapshot,
       yellow_coins_amount, price_cents, currency, provider, status,
-      credited_at, created_at, updated_at
-    ) VALUES (?, ?, 'starter', 'Starter Pack', 100, ?, 'EUR', 'stripe', ?, ?, ?, ?);
-  `).run(id, opts.profileId, opts.priceCents, opts.status, opts.creditedAt, opts.createdAt, opts.createdAt)
+      credited_at, created_at, updated_at, recipient_profile_id, recipient_display_name_snapshot
+    ) VALUES (?, ?, 'starter', 'Starter Pack', 100, ?, 'EUR', 'stripe', ?, ?, ?, ?, ?, ?);
+  `).run(
+    id, opts.profileId, opts.priceCents, opts.status, opts.creditedAt, opts.createdAt, opts.createdAt,
+    opts.recipientProfileId ?? null, opts.recipientDisplayNameSnapshot ?? null,
+  )
   return id
 }
 
@@ -869,11 +886,10 @@ await withTempDir(async (dir) => {
 
 // ─── [15] Gifted bundle render-ва безопасно — payer/recipient semantics не се смесват ──
 // Gift bundle покупка (recipient_profile_id non-NULL) остава payer-центрична
-// в admin payments (mirror на established coin/VIP admin payment pattern —
-// getAdminPaymentListByPeriod/getAdminPaymentDetail НЕ четат recipient
-// полета изобщо, profileId остава PAYER-а). Потвърждаваме: gift redът не
-// хвърля, source остава 'bundle', profileId е PAYER (не recipient) — не
-// invented recipient данни в тоя response shape.
+// в admin payments (profileId/displayName/email продължават да сочат PAYER-a,
+// НЕ recipient-а) — recipientProfileId/recipientDisplayName са ДОПЪЛНИТЕЛНИ
+// полета (Admin Payments recipient visibility feature), не заместват payer
+// identity полетата.
 console.log('\n[15] Gifted bundle render-ва безопасно (payer/recipient semantics не се смесват)')
 
 await withTempDir(async (dir) => {
@@ -926,6 +942,310 @@ await withTempDir(async (dir) => {
     assert(detail !== null, 'detail трябва да се намери')
     assertEqual(detail?.profileId, 'gift-payer-1', 'detail profileId трябва да е PAYER-а')
     assertEqual(detail?.source, 'bundle', 'detail source трябва да е "bundle"')
+  })
+
+  await check('[15.5] gift bundle row: recipientProfileId/recipientDisplayName попълнени в list', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows[0]?.recipientProfileId, 'gift-recipient-1', 'recipientProfileId трябва да сочи recipient-a')
+    assertEqual(rows[0]?.recipientDisplayName, 'Recipient', 'recipientDisplayName трябва да е snapshot името')
+  })
+
+  await check('[15.6] gift bundle detail: recipientProfileId/recipientDisplayName попълнени', () => {
+    const detail = bundleStore.getAdminPaymentDetail(giftBundleId)
+    assertEqual(detail?.recipientProfileId, 'gift-recipient-1', 'detail recipientProfileId трябва да сочи recipient-a')
+    assertEqual(detail?.recipientDisplayName, 'Recipient', 'detail recipientDisplayName трябва да е snapshot името')
+  })
+
+  bundleStore.close()
+  db.close()
+})
+
+// ─── [16] Admin Payments recipient visibility — coin/vip/bundle × normal/gift/hard-delete ──
+// Regression за новата Admin Payments функционалност: gift покупки (payer/
+// recipient semantics от Paid Gift Shop) трябва да показват "Подарък за X"
+// в списъка/детайла, докато normal покупки нямат никакъв recipient marker.
+// recipientDisplayName (immutable snapshot, НЕ FK) е единственият canonical
+// "е ли gift" discriminator — оцелява recipient hard-delete непроменен.
+console.log('\n[16] Admin Payments recipient visibility — coin/VIP/bundle × normal/gift/hard-delete')
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'admin-payments-recipient-visibility.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildSchema(db)
+
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('rv-payer-1', 'RV Payer')
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('rv-recipient-1', 'METEOPA')
+
+  const coinStore = await createCoinPurchaseStore(dbPath)
+  const vipStore = await createVipPurchaseStore(dbPath)
+  const bundleStore = await createBundlePurchaseStore(dbPath)
+  const nowSqlite = nowSqliteUtc()
+  const now = new Date()
+
+  // [1]/[2] normal coin -> няма recipient marker; gifted coin -> "Подарък за X"
+  const normalCoinId = insertCoinPurchaseDirect(db, {
+    purchaseId: 'purchase-rv-coin-normal',
+    profileId: 'rv-payer-1',
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+  const giftCoinId = insertCoinPurchaseDirect(db, {
+    purchaseId: 'purchase-rv-coin-gift',
+    profileId: 'rv-payer-1',
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+    recipientProfileId: 'rv-recipient-1',
+    recipientDisplayNameSnapshot: 'METEOPA',
+  })
+
+  await check('[16.1] normal coin: recipientProfileId/recipientDisplayName = null (list)', () => {
+    const rows = coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 50, offset: 0, now }).rows
+    const row = rows.find((r) => r.purchaseId === normalCoinId)
+    assert(row !== undefined, 'normal coin row трябва да съществува')
+    assertEqual(row?.recipientProfileId, null, 'normal coin recipientProfileId трябва да е null')
+    assertEqual(row?.recipientDisplayName, null, 'normal coin recipientDisplayName трябва да е null')
+  })
+
+  await check('[16.2] gifted coin: recipientDisplayName="METEOPA" (list)', () => {
+    const rows = coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 50, offset: 0, now }).rows
+    const row = rows.find((r) => r.purchaseId === giftCoinId)
+    assert(row !== undefined, 'gift coin row трябва да съществува')
+    assertEqual(row?.recipientProfileId, 'rv-recipient-1', 'gift coin recipientProfileId трябва да сочи recipient-a')
+    assertEqual(row?.recipientDisplayName, 'METEOPA', 'gift coin recipientDisplayName трябва да е "METEOPA"')
+  })
+
+  await check('[16.2b] gifted coin detail: recipientDisplayName="METEOPA"', () => {
+    const detail = coinStore.getAdminPaymentDetail(giftCoinId)
+    assert(detail !== null, 'gift coin detail трябва да се намери')
+    assertEqual(detail?.recipientProfileId, 'rv-recipient-1', 'detail recipientProfileId трябва да сочи recipient-a')
+    assertEqual(detail?.recipientDisplayName, 'METEOPA', 'detail recipientDisplayName трябва да е "METEOPA"')
+  })
+
+  // [3]/[4] normal VIP -> няма recipient marker; gifted VIP -> "Подарък за X"
+  const normalVipId = insertVipPurchaseDirect(db, {
+    purchaseId: 'purchase-rv-vip-normal',
+    profileId: 'rv-payer-1',
+    packageId: 'vip_30',
+    priceCentsSnapshot: 799,
+    daysSnapshot: 30,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+  const giftVipId = insertVipPurchaseDirect(db, {
+    purchaseId: 'purchase-rv-vip-gift',
+    profileId: 'rv-payer-1',
+    packageId: 'vip_30',
+    priceCentsSnapshot: 799,
+    daysSnapshot: 30,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+    recipientProfileId: 'rv-recipient-1',
+    recipientDisplayNameSnapshot: 'METEOPA',
+  })
+
+  await check('[16.3] normal VIP: recipientProfileId/recipientDisplayName = null (list)', () => {
+    const rows = vipStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find((r) => r.purchaseId === normalVipId)
+    assert(row !== undefined, 'normal VIP row трябва да съществува')
+    assertEqual(row?.recipientProfileId, null, 'normal VIP recipientProfileId трябва да е null')
+    assertEqual(row?.recipientDisplayName, null, 'normal VIP recipientDisplayName трябва да е null')
+  })
+
+  await check('[16.4] gifted VIP: recipientDisplayName="METEOPA" (list)', () => {
+    const rows = vipStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find((r) => r.purchaseId === giftVipId)
+    assert(row !== undefined, 'gift VIP row трябва да съществува')
+    assertEqual(row?.recipientProfileId, 'rv-recipient-1', 'gift VIP recipientProfileId трябва да сочи recipient-a')
+    assertEqual(row?.recipientDisplayName, 'METEOPA', 'gift VIP recipientDisplayName трябва да е "METEOPA"')
+  })
+
+  await check('[16.4b] gifted VIP detail: recipientDisplayName="METEOPA"', () => {
+    const detail = vipStore.getAdminPaymentDetail(giftVipId)
+    assert(detail !== null, 'gift VIP detail трябва да се намери')
+    assertEqual(detail?.recipientProfileId, 'rv-recipient-1', 'detail recipientProfileId трябва да сочи recipient-a')
+    assertEqual(detail?.recipientDisplayName, 'METEOPA', 'detail recipientDisplayName трябва да е "METEOPA"')
+  })
+
+  // [5]/[6] normal bundle -> няма recipient marker; gifted bundle -> "Подарък за X"
+  const normalBundleId = insertBundlePurchaseDirect(db, {
+    purchaseId: 'purchase-rv-bundle-normal',
+    profileId: 'rv-payer-1',
+    packageKeySnapshot: 'mini',
+    titleSnapshot: 'Мини',
+    yellowCoinsAmount: 200000,
+    vipDaysSnapshot: 30,
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+  })
+  const giftBundleRvId = insertBundlePurchaseDirect(db, {
+    purchaseId: 'purchase-rv-bundle-gift',
+    profileId: 'rv-payer-1',
+    packageKeySnapshot: 'mini',
+    titleSnapshot: 'Мини',
+    yellowCoinsAmount: 200000,
+    vipDaysSnapshot: 30,
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+    recipientProfileId: 'rv-recipient-1',
+    recipientDisplayNameSnapshot: 'METEOPA',
+  })
+
+  await check('[16.5] normal bundle: recipientProfileId/recipientDisplayName = null (list)', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find((r) => r.purchaseId === normalBundleId)
+    assert(row !== undefined, 'normal bundle row трябва да съществува')
+    assertEqual(row?.recipientProfileId, null, 'normal bundle recipientProfileId трябва да е null')
+    assertEqual(row?.recipientDisplayName, null, 'normal bundle recipientDisplayName трябва да е null')
+  })
+
+  await check('[16.6] gifted bundle "Мини" 200000 coins + 30 VIP дни: recipientDisplayName="METEOPA" (list)', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find((r) => r.purchaseId === giftBundleRvId)
+    assert(row !== undefined, 'gift bundle row трябва да съществува')
+    assertEqual(row?.recipientProfileId, 'rv-recipient-1', 'gift bundle recipientProfileId трябва да сочи recipient-a')
+    assertEqual(row?.recipientDisplayName, 'METEOPA', 'gift bundle recipientDisplayName трябва да е "METEOPA"')
+    assertEqual(row?.yellowCoinsAmount, 200000, 'coins остават 200000, непроменени от gift статуса')
+    assertEqual(row?.vipDays, 30, 'VIP дни остават 30, непроменени от gift статуса')
+  })
+
+  await check('[16.6b] gifted bundle detail: recipientDisplayName="METEOPA"', () => {
+    const detail = bundleStore.getAdminPaymentDetail(giftBundleRvId)
+    assert(detail !== null, 'gift bundle detail трябва да се намери')
+    assertEqual(detail?.recipientProfileId, 'rv-recipient-1', 'detail recipientProfileId трябва да сочи recipient-a')
+    assertEqual(detail?.recipientDisplayName, 'METEOPA', 'detail recipientDisplayName трябва да е "METEOPA"')
+  })
+
+  // [7] deleted recipient -> safe fallback, без crash. Реален FK hard-delete
+  // (не симулация) — recipient_profile_id -> NULL, recipient_display_name_snapshot
+  // (immutable snapshot, не FK) ОЦЕЛЯВА непроменен.
+  db.exec('PRAGMA foreign_keys = ON;')
+  db.prepare(`DELETE FROM profiles WHERE profile_id = 'rv-recipient-1'`).run()
+
+  await check('[16.7] deleted recipient: coin/VIP/bundle list не хвърлят след hard-delete', () => {
+    assert(
+      coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 50, offset: 0, now }).rows.length >= 0,
+      'coin list не трябва да хвърля',
+    )
+    assert(vipStore.getAdminPaymentListByPeriod({ period: 'today', now }).length >= 0, 'VIP list не трябва да хвърля')
+    assert(bundleStore.getAdminPaymentListByPeriod({ period: 'today', now }).length >= 0, 'bundle list не трябва да хвърля')
+  })
+
+  // ВАЖНО (established schema asymmetry, потвърдено чрез source audit):
+  // coin_purchase_ledger/vip_purchase_ledger.recipient_profile_id НЯМАТ FK
+  // constraint изобщо (само 20260923_002 ALTER TABLE ADD COLUMN, никога
+  // table-rebuild-нати с FK) — за разлика от bundle_purchase_ledger, която
+  // ИМА real FK ON DELETE SET NULL (20260923_004 table rebuild). Значи
+  // recipient_profile_id за coin/VIP НЕ се нулира от SQLite при recipient
+  // hard-delete (orphaned reference, остава непроменена стойност) — само
+  // recipient_display_name_snapshot (snapshot, никога FK, за трите
+  // таблици еднакво) е надежден "е ли gift" UI discriminator. Admin
+  // Payments UI никога не JOIN-ва към profiles през recipientProfileId за
+  // display на името — винаги ползва snapshot-a, значи тази asymmetry не
+  // чупи recipient visibility функционалността, само "Recipient Profile
+  // ID" copy полето в detail панела би показало stale ID за coin/VIP (не
+  // null) при hard-deleted recipient — приемливо forensic behavior, не bug.
+  await check('[16.8] deleted recipient (coin, БЕЗ FK constraint): recipient_profile_id остава orphaned, recipient_display_name_snapshot ОЦЕЛЯВА', () => {
+    const rows = coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 50, offset: 0, now }).rows
+    const row = rows.find((r) => r.purchaseId === giftCoinId)
+    assert(row !== undefined, 'gift coin row трябва да продължи да съществува след recipient hard-delete')
+    assertEqual(row?.recipientProfileId, 'rv-recipient-1', 'recipientProfileId остава orphaned (без FK, SQLite не я пипа)')
+    assertEqual(row?.recipientDisplayName, 'METEOPA', 'recipientDisplayName (snapshot) трябва да ОЦЕЛЕЕ непроменен')
+  })
+
+  await check('[16.9] deleted recipient (VIP, БЕЗ FK constraint): historical gift остава разпознаваем като gift', () => {
+    const rows = vipStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find((r) => r.purchaseId === giftVipId)
+    assert(row !== undefined, 'gift VIP row трябва да продължи да съществува')
+    assertEqual(row?.recipientProfileId, 'rv-recipient-1', 'recipientProfileId остава orphaned (без FK, SQLite не я пипа)')
+    assertEqual(row?.recipientDisplayName, 'METEOPA', 'recipientDisplayName (snapshot) трябва да ОЦЕЛЕЕ непроменен')
+  })
+
+  await check('[16.10] deleted recipient: historical gift остава разпознаваем като gift (bundle) + detail не хвърля', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const row = rows.find((r) => r.purchaseId === giftBundleRvId)
+    assert(row !== undefined, 'gift bundle row трябва да продължи да съществува')
+    assertEqual(row?.recipientProfileId, null, 'recipientProfileId трябва да е NULL след recipient hard-delete')
+    assertEqual(row?.recipientDisplayName, 'METEOPA', 'recipientDisplayName (snapshot) трябва да ОЦЕЛЕЕ непроменен')
+
+    const detail = bundleStore.getAdminPaymentDetail(giftBundleRvId)
+    assert(detail !== null, 'detail не трябва да хвърля след recipient hard-delete')
+    assertEqual(detail?.recipientProfileId, null, 'detail recipientProfileId трябва да е NULL')
+    assertEqual(detail?.recipientDisplayName, 'METEOPA', 'detail recipientDisplayName трябва да ОЦЕЛЕЕ')
+  })
+
+  // [10] pagination/count/total не се променят от recipient visibility fix-а
+  await check('[16.11] pagination/count/total непроменени: coin list total включва И normal, И gift redовете', () => {
+    const result = coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 50, offset: 0, now })
+    assertEqual(result.total, 2, 'coin total трябва да е 2 (normal + gift), recipient visibility не филтрира/дублира')
+  })
+
+  coinStore.close()
+  vipStore.close()
+  bundleStore.close()
+  db.close()
+})
+
+// ─── [17] deleted payer + gift recipient -> safe render (§5 hard-delete safety) ──
+// Payer hard-deleted МЕЖДУ checkout и admin view — payer-центричните полета
+// (profileId/displayName) стават NULL (established, виж profileId=null
+// regression fix-а от предишна сесия), но recipient полетата (gift marker)
+// продължават да работят независимо — двете hard-delete пътеки са ортогонални.
+console.log('\n[17] Deleted payer + gift recipient — safe render (двете hard-delete пътеки независими)')
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'admin-payments-deleted-payer-gift.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildSchema(db)
+
+  const bundleStore = await createBundlePurchaseStore(dbPath)
+  const nowSqlite = nowSqliteUtc()
+  const now = new Date()
+
+  // profile_id=NULL директно (симулира payer вече hard-deleted преди тоя
+  // read) + recipient_display_name_snapshot непразен (gift marker), без
+  // profiles ред за payer-а изобщо — LEFT JOIN просто не match-ва.
+  const giftDeletedPayerId = insertBundlePurchaseDirect(db, {
+    purchaseId: 'purchase-deleted-payer-gift',
+    profileId: null,
+    packageKeySnapshot: 'mini',
+    titleSnapshot: 'Мини',
+    yellowCoinsAmount: 200000,
+    vipDaysSnapshot: 30,
+    priceCents: 499,
+    status: 'paid',
+    createdAt: nowSqlite,
+    creditedAt: nowSqlite,
+    recipientProfileId: null, // recipient също вече hard-deleted
+    recipientDisplayNameSnapshot: 'METEOPA',
+  })
+
+  await check('[17.1] deleted payer + gift: list не хвърля', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows.length, 1, 'трябва да намери 1 row')
+  })
+
+  await check('[17.2] deleted payer + gift: profileId=null (payer), recipientDisplayName оцелява (gift marker)', () => {
+    const rows = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    assertEqual(rows[0]?.profileId, null, 'profileId трябва да е null (payer hard-deleted)')
+    assertEqual(rows[0]?.recipientProfileId, null, 'recipientProfileId трябва да е null (recipient hard-deleted)')
+    assertEqual(rows[0]?.recipientDisplayName, 'METEOPA', 'recipientDisplayName snapshot трябва да оцелее независимо от payer статуса')
+  })
+
+  await check('[17.3] deleted payer + gift: detail не хвърля, безопасен render', () => {
+    const detail = bundleStore.getAdminPaymentDetail(giftDeletedPayerId)
+    assert(detail !== null, 'detail трябва да се намери')
+    assertEqual(detail?.profileId, null, 'detail profileId трябва да е null')
+    assertEqual(detail?.recipientDisplayName, 'METEOPA', 'detail recipientDisplayName трябва да оцелее')
   })
 
   bundleStore.close()
