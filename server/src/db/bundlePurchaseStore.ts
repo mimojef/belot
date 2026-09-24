@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
-import type { PaymentMethodSnapshot, AdminPaymentListRow, AdminPaymentDetailRow } from './coinPurchaseStore.js'
+import type { PaymentMethodSnapshot, AdminPaymentListRow, AdminPaymentDetailRow, AdminPaymentStats, PaymentPeriodStats } from './coinPurchaseStore.js'
 import { composePayerBundleGiftSuccessText, composeRecipientBundleGiftNotificationText } from './paidGiftNotificationText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -93,6 +93,19 @@ export type BundlePurchaseStore = {
   getAdminPaymentListByPeriod: (params: { period: AdminPaymentPeriod; now?: Date }) => AdminPaymentListRow[]
   /** Detail lookup само по purchase_id — връща null ако редът не е bundle (caller fallback-ва към coin/VIP store). */
   getAdminPaymentDetail: (purchaseId: string) => AdminPaymentDetailRow | null
+  /**
+   * Admin Info aggregate statistics contribution от bundle покупки —
+   * mirror на coinPurchaseStore/vipPurchaseStore.getAdminPaymentStats()
+   * (СЪЩИЯТ buildPeriodWhereClause, СЪЩИЯТ status='paid' филтър, СЪЩИЯТ
+   * count+SUM(price_cents) SQL shape). Production mismatch fix: Admin Info
+   * таблото (/api/admin/stats) combine-ваше само coin+VIP stats
+   * (combineAdminPaymentStats в server/src/index.ts) — bundle покупки
+   * бяха преброени в Admin Payments detail списъка, но НЕ в aggregate
+   * count/total картите, значи двата екрана се разминаваха тихо с точно
+   * bundle-ите за периода (production доказан случай: 9 vs 6 плащания,
+   * 141.11€ vs 118.64€ разлика = точно 3-те bundle покупки).
+   */
+  getAdminPaymentStats: (now?: Date) => AdminPaymentStats
   close: () => void
 }
 
@@ -856,6 +869,32 @@ export async function createBundlePurchaseStore(
     return { ok: true, purchase: updated }
   }
 
+  // Mirror byte-for-byte на coinPurchaseStore/vipPurchaseStore.getAdminPaymentStats
+  // — СЪЩИЯТ buildPeriodWhereClause, СЪЩИЯТ status='paid' филтър, СЪЩИЯТ
+  // count+SUM(price_cents) shape. Caller-ът (combineAdminPaymentStats в
+  // server/src/index.ts) сумира резултата с coin+VIP за Admin Info
+  // aggregate картите — виж doc коментара на getAdminPaymentStats в
+  // BundlePurchaseStore type-а за пълния production mismatch rationale.
+  function getAdminPaymentStats(now: Date = new Date()): AdminPaymentStats {
+    function query(period: AdminPaymentPeriod): PaymentPeriodStats {
+      const { sql, params } = buildPeriodWhereClause(period, now, 'credited_at')
+      const row = database.prepare(`
+        SELECT COUNT(*) AS count, COALESCE(SUM(price_cents), 0) AS total_cents
+        FROM bundle_purchase_ledger
+        WHERE status = 'paid' AND ${sql}
+      `).get(...params) as { count: number; total_cents: number }
+      return { count: row.count, totalCents: row.total_cents }
+    }
+
+    return {
+      today: query('today'),
+      yesterday: query('yesterday'),
+      last7days: query('last7days'),
+      thisMonth: query('thisMonth'),
+      allTime: query('allTime'),
+    }
+  }
+
   // Mirror на coinPurchaseStore/vipPurchaseStore.getAdminPaymentListByPeriod
   // — whole-period (БЕЗ SQL LIMIT), caller-ът (server/src/index.ts) top-N-ва
   // post-hoc в паметта заедно с coin/VIP резултатите (established combined-
@@ -1093,6 +1132,7 @@ export async function createBundlePurchaseStore(
     hidePurchaseForUser,
     getAdminPaymentListByPeriod,
     getAdminPaymentDetail,
+    getAdminPaymentStats,
     close,
   }
 }

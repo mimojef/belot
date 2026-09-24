@@ -1252,6 +1252,158 @@ await withTempDir(async (dir) => {
   db.close()
 })
 
+// ─── [18] PRODUCTION MISMATCH FIX: Admin Info aggregate трябва да включва bundle ──
+// Доказан production случай: Admin Payments detail екранът за ДНЕС показваше
+// 9 плащания / 141.11€ (coin+VIP+bundle), а Admin Info aggregate таблото за
+// СЪЩИЯ ден показваше 6 / 118.64€ (само coin+VIP). Разликата = точно 3-те
+// bundle покупки за деня (4.99 + 12.49 + 4.99 = 22.47€, 9-3=6). Root cause:
+// bundlePurchaseStore нямаше getAdminPaymentStats() изобщо, и
+// combineAdminPaymentStats() в server/src/index.ts комбинираше само coin+VIP.
+// Тук възпроизвеждаме ТОЧНО production сценария (6 non-bundle + 3 bundle
+// покупки в един ден) и потвърждаваме fix-натия combine резултат.
+console.log('\n[18] Production mismatch fix: Admin Info aggregate (coin+VIP+bundle) == Admin Payments detail dataset')
+
+// Mirror byte-for-byte на combineAdminPaymentStats() в server/src/index.ts
+// (production combine функцията, извиквана от handleAdminStatsRequest) —
+// тестваме СЪЩАТА логика тук, не преоткриваме нова.
+function combineThreeSourceStats(
+  coin: { today: { count: number; totalCents: number }; yesterday: { count: number; totalCents: number }; last7days: { count: number; totalCents: number }; thisMonth: { count: number; totalCents: number }; allTime: { count: number; totalCents: number } },
+  vip: typeof coin,
+  bundle: typeof coin,
+) {
+  function combinePeriod(a: { count: number; totalCents: number }, b: { count: number; totalCents: number }, c: { count: number; totalCents: number }) {
+    return { count: a.count + b.count + c.count, totalCents: a.totalCents + b.totalCents + c.totalCents }
+  }
+  return {
+    today: combinePeriod(coin.today, vip.today, bundle.today),
+    yesterday: combinePeriod(coin.yesterday, vip.yesterday, bundle.yesterday),
+    last7days: combinePeriod(coin.last7days, vip.last7days, bundle.last7days),
+    thisMonth: combinePeriod(coin.thisMonth, vip.thisMonth, bundle.thisMonth),
+    allTime: combinePeriod(coin.allTime, vip.allTime, bundle.allTime),
+  }
+}
+
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'admin-payments-production-mismatch.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  buildSchema(db)
+
+  db.prepare(`INSERT INTO profiles (profile_id, display_name) VALUES (?, ?)`).run('mismatch-payer-1', 'Payer')
+
+  const coinStore = await createCoinPurchaseStore(dbPath)
+  const vipStore = await createVipPurchaseStore(dbPath)
+  const bundleStore = await createBundlePurchaseStore(dbPath)
+  const nowSqlite = nowSqliteUtc()
+  const now = new Date()
+
+  // 6 non-bundle paid покупки (3 coin + 3 VIP, произволно разпределение —
+  // важен е само общия брой/сума, не source mix-а) за ДНЕС, калкулирани да
+  // сумират ТОЧНО production non-bundle total-а (118.64€ = 11864 цента):
+  // coin: 499 + 999 + 1999 = 3497 цента
+  // VIP:  789 + 2269 + 5309 = 8367 цента
+  // non-bundle total: 3497 + 8367 = 11864 цента = 118.64€ (production число)
+  insertCoinPurchaseDirect(db, { purchaseId: 'mismatch-coin-1', profileId: 'mismatch-payer-1', priceCents: 499, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertCoinPurchaseDirect(db, { purchaseId: 'mismatch-coin-2', profileId: 'mismatch-payer-1', priceCents: 999, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertCoinPurchaseDirect(db, { purchaseId: 'mismatch-coin-3', profileId: 'mismatch-payer-1', priceCents: 1999, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertVipPurchaseDirect(db, { purchaseId: 'mismatch-vip-1', profileId: 'mismatch-payer-1', packageId: 'vip_30', priceCentsSnapshot: 789, daysSnapshot: 30, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertVipPurchaseDirect(db, { purchaseId: 'mismatch-vip-2', profileId: 'mismatch-payer-1', packageId: 'vip_180', priceCentsSnapshot: 2269, daysSnapshot: 180, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertVipPurchaseDirect(db, { purchaseId: 'mismatch-vip-3', profileId: 'mismatch-payer-1', packageId: 'vip_365', priceCentsSnapshot: 5309, daysSnapshot: 365, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+
+  // 3 bundle покупки — точните production стойности от доклада:
+  // Мини 4.99€ + Плюс 12.49€ + Мини 4.99€ = 499 + 1249 + 499 = 2247 цента = 22.47€
+  insertBundlePurchaseDirect(db, { purchaseId: 'mismatch-bundle-1', profileId: 'mismatch-payer-1', packageKeySnapshot: 'mini', titleSnapshot: 'Мини', yellowCoinsAmount: 200000, vipDaysSnapshot: 7, priceCents: 499, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertBundlePurchaseDirect(db, { purchaseId: 'mismatch-bundle-2', profileId: 'mismatch-payer-1', packageKeySnapshot: 'plus', titleSnapshot: 'Плюс', yellowCoinsAmount: 500000, vipDaysSnapshot: 30, priceCents: 1249, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+  insertBundlePurchaseDirect(db, { purchaseId: 'mismatch-bundle-3', profileId: 'mismatch-payer-1', packageKeySnapshot: 'mini', titleSnapshot: 'Мини', yellowCoinsAmount: 200000, vipDaysSnapshot: 7, priceCents: 499, status: 'paid', createdAt: nowSqlite, creditedAt: nowSqlite })
+
+  await check('[18.1] BEFORE fix baseline: coin+VIP-only combine (без bundle) = 6 / 118.64€ — точно production симптома', () => {
+    const coinStats = coinStore.getAdminPaymentStats(now)
+    const vipStats = vipStore.getAdminPaymentStats(now)
+    const combinedWithoutBundle = {
+      count: coinStats.today.count + vipStats.today.count,
+      totalCents: coinStats.today.totalCents + vipStats.today.totalCents,
+    }
+    assertEqual(combinedWithoutBundle.count, 6, 'без bundle: count трябва да е 6 (production симптом)')
+    assertEqual(combinedWithoutBundle.totalCents, 11864, 'без bundle: totalCents трябва да е 11864 (118.64€, production симптом)')
+  })
+
+  await check('[18.2] AFTER fix: coin+VIP+bundle combine = 9 / 141.11€ — точно Admin Payments detail стойността', () => {
+    const coinStats = coinStore.getAdminPaymentStats(now)
+    const vipStats = vipStore.getAdminPaymentStats(now)
+    const bundleStats = bundleStore.getAdminPaymentStats(now)
+    const combined = combineThreeSourceStats(coinStats, vipStats, bundleStats)
+
+    assertEqual(combined.today.count, 9, 'с bundle: count трябва да е 9 (fix-нат резултат, съвпада с Admin Payments detail)')
+    assertEqual(combined.today.totalCents, 14111, 'с bundle: totalCents трябва да е 14111 (141.11€, съвпада с Admin Payments detail)')
+  })
+
+  await check('[18.3] bundle-only contribution изолирано = 3 / 22.47€ (точните production bundle суми)', () => {
+    const bundleStats = bundleStore.getAdminPaymentStats(now)
+    assertEqual(bundleStats.today.count, 3, 'bundle-only count трябва да е 3')
+    assertEqual(bundleStats.today.totalCents, 2247, 'bundle-only totalCents трябва да е 2247 (22.47€)')
+  })
+
+  // ─── [7] Всички периоди — bundle участва навсякъде ────────────────────────
+  await check('[18.4] bundle участва във ВСИЧКИ периоди (today/yesterday/last7days/thisMonth/allTime) с коректен count/сума', () => {
+    const bundleStats = bundleStore.getAdminPaymentStats(now)
+    // Purchases са credited "сега" (nowSqlite) — попадат в СЪЩИЯ Sofia
+    // calendar ден, значи бройката/сумата в today/last7days/thisMonth/allTime
+    // трябва да е идентична (3 / 2247), yesterday=0 (различен calendar ден).
+    assertEqual(bundleStats.today.count, 3, 'today: 3 bundle покупки')
+    assertEqual(bundleStats.today.totalCents, 2247, 'today: 2247 цента')
+    assertEqual(bundleStats.yesterday.count, 0, 'yesterday: 0 bundle покупки (различен calendar ден)')
+    assertEqual(bundleStats.last7days.count, 3, 'last7days: включва днешните 3 bundle покупки')
+    assertEqual(bundleStats.last7days.totalCents, 2247, 'last7days: 2247 цента')
+    assertEqual(bundleStats.thisMonth.count, 3, 'thisMonth: включва днешните 3 bundle покупки')
+    assertEqual(bundleStats.thisMonth.totalCents, 2247, 'thisMonth: 2247 цента')
+    assertEqual(bundleStats.allTime.count, 3, 'allTime: включва всички 3 bundle покупки')
+    assertEqual(bundleStats.allTime.totalCents, 2247, 'allTime: 2247 цента')
+  })
+
+  await check('[18.5] combined (coin+VIP+bundle) резултат идентичен за today/last7days/thisMonth/allTime (всички purchases в един calendar ден)', () => {
+    const coinStats = coinStore.getAdminPaymentStats(now)
+    const vipStats = vipStore.getAdminPaymentStats(now)
+    const bundleStats = bundleStore.getAdminPaymentStats(now)
+    const combined = combineThreeSourceStats(coinStats, vipStats, bundleStats)
+
+    assertEqual(combined.today.count, 9, 'today combined count = 9')
+    assertEqual(combined.last7days.count, 9, 'last7days combined count = 9 (обхваща днешния ден)')
+    assertEqual(combined.thisMonth.count, 9, 'thisMonth combined count = 9 (обхваща днешния ден)')
+    assertEqual(combined.allTime.count, 9, 'allTime combined count = 9 (обхваща всички редове)')
+    assertEqual(combined.yesterday.count, 0, 'yesterday combined count = 0 (нищо кредитирано вчера)')
+  })
+
+  // ─── [8] CONSISTENCY: Admin Info aggregate == Admin Payments detail dataset ──
+  await check('[18.6] CONSISTENCY: aggregate count/total == сумата от трите getAdminPaymentListByPeriod detail resultsi за today', () => {
+    const coinList = coinStore.getAdminPaymentListByPeriod({ period: 'today', limit: 100, offset: 0, now })
+    const vipList = vipStore.getAdminPaymentListByPeriod({ period: 'today', now })
+    const bundleList = bundleStore.getAdminPaymentListByPeriod({ period: 'today', now })
+
+    // Detail списъкът (coin.total идва от summary заявка, VIP/bundle от
+    // whole-period array length) — mirror на handleAdminPaymentsListRequest
+    // combine логиката в server/src/index.ts.
+    const detailTotalCount = coinList.total + vipList.length + bundleList.length
+    const detailTotalCents = Object.values(coinList.totalsByCurrency).reduce((a, b) => a + b, 0)
+      + vipList.reduce((sum, r) => sum + r.priceCents, 0)
+      + bundleList.reduce((sum, r) => sum + r.priceCents, 0)
+
+    const aggregateStats = combineThreeSourceStats(
+      coinStore.getAdminPaymentStats(now),
+      vipStore.getAdminPaymentStats(now),
+      bundleStore.getAdminPaymentStats(now),
+    )
+
+    assertEqual(aggregateStats.today.count, detailTotalCount, 'Admin Info aggregate count трябва да съвпада с Admin Payments detail dataset count')
+    assertEqual(aggregateStats.today.totalCents, detailTotalCents, 'Admin Info aggregate totalCents трябва да съвпада с Admin Payments detail dataset сумата')
+    assertEqual(detailTotalCount, 9, 'sanity: detail dataset count = 9')
+    assertEqual(detailTotalCents, 14111, 'sanity: detail dataset totalCents = 14111 (141.11€)')
+  })
+
+  coinStore.close()
+  vipStore.close()
+  bundleStore.close()
+  db.close()
+})
+
 console.log(`\n  Passed: ${passed}  Failed: ${failed}\n`)
 
 if (failed > 0) {

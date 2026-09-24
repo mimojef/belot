@@ -17252,24 +17252,32 @@ async function handleAdminMissionsRequest(
 }
 
 // Admin payment statistics трябва да агрегират coin_purchase_ledger +
-// vip_purchase_ledger (production root cause: VIP покупки бяха напълно
-// невидими в "Плащания", защото coinPurchaseStore.getAdminPaymentStats()
-// query-ва само coin таблицата). Двата store-а изчисляват period boundaries
-// независимо (СЪЩИЯТ shared buildPeriodWhereClause от sofiaDayBounds.ts) —
-// тук само сумираме count/totalCents per period, без нова timezone логика.
+// vip_purchase_ledger + bundle_purchase_ledger (production root cause
+// history: VIP покупки бяха напълно невидими в "Плащания", защото
+// coinPurchaseStore.getAdminPaymentStats() query-ваше само coin таблицата
+// — fix-нато по-рано. После bundle покупки останаха невидими по СЪЩАТА
+// причина в ТОЗИ aggregate handler конкретно, докато Admin Payments detail
+// списъкът (handleAdminPaymentsListRequest) вече правилно включваше
+// bundle — двата екрана се разминаваха тихо с точно bundle count/сумата за
+// периода, доказан production случай: Admin Payments показваше 9 плащания/
+// 141.11€, Admin Info показваше 6/118.64€, разликата точно 3-те bundle
+// покупки за деня). Трите store-а изчисляват period boundaries независимо
+// (СЪЩИЯТ shared buildPeriodWhereClause от sofiaDayBounds.ts) — тук само
+// сумираме count/totalCents per period, без нова timezone логика.
 function combineAdminPaymentStats(
   coin: AdminPaymentStats,
   vip: AdminPaymentStats,
+  bundle: AdminPaymentStats,
 ): AdminPaymentStats {
-  function combinePeriod(a: PaymentPeriodStats, b: PaymentPeriodStats): PaymentPeriodStats {
-    return { count: a.count + b.count, totalCents: a.totalCents + b.totalCents }
+  function combinePeriod(a: PaymentPeriodStats, b: PaymentPeriodStats, c: PaymentPeriodStats): PaymentPeriodStats {
+    return { count: a.count + b.count + c.count, totalCents: a.totalCents + b.totalCents + c.totalCents }
   }
   return {
-    today: combinePeriod(coin.today, vip.today),
-    yesterday: combinePeriod(coin.yesterday, vip.yesterday),
-    last7days: combinePeriod(coin.last7days, vip.last7days),
-    thisMonth: combinePeriod(coin.thisMonth, vip.thisMonth),
-    allTime: combinePeriod(coin.allTime, vip.allTime),
+    today: combinePeriod(coin.today, vip.today, bundle.today),
+    yesterday: combinePeriod(coin.yesterday, vip.yesterday, bundle.yesterday),
+    last7days: combinePeriod(coin.last7days, vip.last7days, bundle.last7days),
+    thisMonth: combinePeriod(coin.thisMonth, vip.thisMonth, bundle.thisMonth),
+    allTime: combinePeriod(coin.allTime, vip.allTime, bundle.allTime),
   }
 }
 
@@ -17305,6 +17313,7 @@ async function handleAdminStatsRequest(
   const paymentStats = combineAdminPaymentStats(
     coinPurchaseStore.getAdminPaymentStats(),
     vipPurchaseStore.getAdminPaymentStats(),
+    bundlePurchaseStore.getAdminPaymentStats(),
   )
 
   const visitors = siteVisitStore.getVisitorSummary()
