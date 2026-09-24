@@ -1747,12 +1747,10 @@ async function waitForPaidVipPurchase(
 }
 
 // Mirror на waitForPaidVipPurchase — полира /api/shop/bundle-purchases.
-// Established bundle checkout не е имал dedicated success polling досега
-// (normal bundle purchase success остава established "no popup" поведение,
-// history status update при следващо Shop зареждане). Тоя poller се ползва
-// САМО за да detect-не GIFT bundle fulfillment (payerSuccessText !== null,
-// виж handleStripePaymentSuccessReturn) — normal bundle purchase поведение
-// остава непроменено.
+// Ползва се и за normal bundle success popup (showBundlePurchaseSuccessMessage),
+// и за GIFT bundle fulfillment detection (payerSuccessText !== null, виж
+// handleStripePaymentSuccessReturn) — settled ledger row е единственият
+// source of truth и за двата случая.
 async function waitForPaidBundlePurchase(
   checkoutSessionId: string,
 ): Promise<BundlePurchaseSnapshot | null> {
@@ -1828,6 +1826,30 @@ async function showVipPurchaseSuccessMessage(purchase: VipPurchaseSnapshot): Pro
     purchase.days,
     activeUntilLabel,
     purchase.recipientDisplayNameSnapshot,
+  )
+}
+
+// Mirror на showVipPurchaseSuccessMessage — normal (non-gift) bundle purchase.
+// Gift bundle покупки НЕ стигат тук (payerSuccessText!==null гейт-ва към
+// showPaidGiftPayerSuccessModal ПРЕДИ тази функция да се извика, виж
+// handleStripePaymentSuccessReturn). title/yellowCoinsAmount/vipDays идват
+// изцяло от settled BundlePurchaseSnapshot (webhook-fulfilled ledger row) —
+// никога от current package config/URL.
+function showBundlePurchaseSuccessMessage(purchase: BundlePurchaseSnapshot): void {
+  // Bundle credit-ва VIP тоже (27+30=57 extend семантика) — own VIP status
+  // трябва да се invalidate-не, mirror на showVipPurchaseSuccessMessage,
+  // за да не показва profile popup-ът stale active_until след bundle покупка.
+  lobby.invalidateOwnVipStatus()
+
+  // Звукът се пуска тук — единственото място, където loading фазата
+  // transition-ва в confirmed paid success за bundle (mirror на
+  // playVipPurchaseConfirmedSound извикването в showVipPurchaseSuccessMessage).
+  playVipPurchaseConfirmedSound()
+
+  lobby.showBundlePurchaseSuccessPopup(
+    purchase.titleSnapshot,
+    purchase.yellowCoinsAmount,
+    purchase.vipDays,
   )
 }
 
@@ -1929,7 +1951,8 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
   // backend-composed от immutable snapshot данни — canonical source of
   // truth, виж coinPurchaseStore/vipPurchaseStore/bundlePurchaseStore.ts
   // rowToSnapshot коментара). Normal (non-gift) self-purchase success
-  // поведение остава established и НЕПРОМЕНЕНО (coin overlay/VIP popup).
+  // feedback остава по product type: coin -> "+X" overlay animation,
+  // VIP/bundle -> success popup (unified modal, productKind branch).
   if (resolved.purchase.payerSuccessText !== null) {
     lobby.closeVipPurchaseProcessingPopupSilently()
     lobby.showPaidGiftPayerSuccessModal(resolved.purchase.payerSuccessText)
@@ -1943,10 +1966,7 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
   }
 
   if (resolved.kind === 'bundle') {
-    // Established "no dedicated success popup" поведение за normal bundle
-    // покупки (виж waitForPaidBundlePurchase коментара) — history status
-    // update е достатъчен, само затваряме loading popup-а.
-    lobby.closeVipPurchaseProcessingPopupSilently()
+    showBundlePurchaseSuccessMessage(resolved.purchase)
     return
   }
 

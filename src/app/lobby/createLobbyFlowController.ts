@@ -1314,6 +1314,15 @@ export type LobbyFlowController = {
   invalidateOwnVipStatus: () => void
   showVipPurchaseProcessingPopup: () => void
   showVipPurchaseSuccessPopup: (days: number, activeUntilLabel: string | null, giftRecipientDisplayName?: string | null) => void
+  /**
+   * Normal (non-gift) bundle purchase success — mirror на showVipPurchaseSuccessPopup,
+   * но за bundle (coins+VIP заедно). title/yellowCoinsAmount/vipDays идват от
+   * settled BundlePurchaseSnapshot (ledger row, webhook-fulfilled), никога от
+   * current package config/URL. Gift bundle purchases НЕ минават оттук —
+   * payerSuccessText!==null гейт-ва към showPaidGiftPayerSuccessModal преди
+   * productKind branch-а (виж handleStripePaymentSuccessReturn в main.ts).
+   */
+  showBundlePurchaseSuccessPopup: (title: string, yellowCoinsAmount: number, vipDays: number) => void
   showVipPurchaseDelayedPopup: () => void
   /**
    * "Подари авоари" (§3 в брифа) — затваря showVipPurchaseProcessingPopup
@@ -2453,9 +2462,12 @@ function createInitialState(): InternalLobbyFlowState {
     vipPurchaseSuccessPopup: {
       isOpen: false,
       phase: 'loading',
+      productKind: 'vip',
       days: 0,
       activeUntilLabel: null,
       giftRecipientDisplayName: null,
+      bundleTitle: null,
+      bundleYellowCoinsAmount: null,
     },
     guestLockedStakePopup: {
       isOpen: false,
@@ -6142,7 +6154,7 @@ export function createLobbyFlowController(
         closeGuestTrialPopup()
       },
       onVipPurchaseSuccessClose: () => {
-        state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
+        state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', productKind: 'vip', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null, bundleTitle: null, bundleYellowCoinsAmount: null }
         render()
       },
       onGuestLockedStakePlay5000Click: () => {
@@ -20209,7 +20221,7 @@ export function createLobbyFlowController(
       // отделен втори popup stacked върху тоя).
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'loading', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'loading', productKind: 'vip', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null, bundleTitle: null, bundleYellowCoinsAmount: null }
       render()
     },
     showVipPurchaseSuccessPopup: (days, activeUntilLabel, giftRecipientDisplayName) => {
@@ -20224,7 +20236,18 @@ export function createLobbyFlowController(
       // non-null само за gift покупки.
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'success', days, activeUntilLabel, giftRecipientDisplayName: giftRecipientDisplayName ?? null }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'success', productKind: 'vip', days, activeUntilLabel, giftRecipientDisplayName: giftRecipientDisplayName ?? null, bundleTitle: null, bundleYellowCoinsAmount: null }
+      render()
+    },
+    showBundlePurchaseSuccessPopup: (title, yellowCoinsAmount, vipDays) => {
+      // Mirror на showVipPurchaseSuccessPopup — title/yellowCoinsAmount/
+      // vipDays идват от settled BundlePurchaseSnapshot (webhook-fulfilled
+      // ledger row, виж showBundlePurchaseSuccessMessage в main.ts), никога
+      // от current package config/URL. Same popup instance (productKind
+      // дискриминира success copy-то в renderVipPurchaseSuccessPopup.ts).
+      state.currentScreen = 'shop'
+      state.shopActiveTab = 'bundle'
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'success', productKind: 'bundle', days: vipDays, activeUntilLabel: null, giftRecipientDisplayName: null, bundleTitle: title, bundleYellowCoinsAmount: yellowCoinsAmount }
       render()
     },
     showVipPurchaseDelayedPopup: () => {
@@ -20233,11 +20256,11 @@ export function createLobbyFlowController(
       // грешка — VIP ще се активира автоматично, когато webhook пристигне.
       state.currentScreen = 'shop'
       state.shopActiveTab = 'vip'
-      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'delayed', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
+      state.vipPurchaseSuccessPopup = { isOpen: true, phase: 'delayed', productKind: 'vip', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null, bundleTitle: null, bundleYellowCoinsAmount: null }
       render()
     },
     closeVipPurchaseProcessingPopupSilently: () => {
-      state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null }
+      state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', productKind: 'vip', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null, bundleTitle: null, bundleYellowCoinsAmount: null }
       render()
     },
     showPaidGiftPayerSuccessModal: (text) => {
