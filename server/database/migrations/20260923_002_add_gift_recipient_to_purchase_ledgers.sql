@@ -72,12 +72,31 @@ CREATE INDEX IF NOT EXISTS idx_bundle_purchase_ledger_recipient
 --   - gift към РАЗЛИЧНИ recipients (same payer/package): ПОЗВОЛЕНО
 --   - NORMAL + GIFT за същия package (same payer): ПОЗВОЛЕНО
 --
+-- PRODUCTION INCIDENT fix (rollback-нат deploy, 2026-09-24): тази версия на
+-- migration-а бе изпуснала established `hidden_at IS NULL` predicate-и за
+-- coin/bundle при пресъздаването на индексите по-долу. coin индексът вече
+-- имаше този predicate от 20260626_002_fix_pending_package_index_for_hidden.sql
+-- ("скрит pending ред не бива да блокира ново купуване на същия пакет"),
+-- byte-for-byte потвърден отново от 20260902_002 rebuild-а. bundle_purchase_ledger
+-- носи същата hidden_at колона и същата hidePurchaseForUser() функционалност
+-- (bundlePurchaseStore.ts) от самото си създаване (20260923_001) — mirror на
+-- coin, значи същия predicate важи и там, дори индексът да го е пропуснал
+-- при първоначалното дефиниране. VIP_purchase_ledger НЯМА hidden_at колона и
+-- НЯМА hide-purchase feature (виж коментара в 20260818_007) — там predicate-ът
+-- умишлено остава без hidden_at.
+--
+-- Без hidden_at IS NULL: payer с исторически СКРИТ pending ред за
+-- package/(payer==recipient) комбинация не може да отвори нов active pending
+-- checkout за същия пакет — INSERT се блъсва в UNIQUE constraint failed
+-- (точно production инцидента, profile_id=55f576db-e308-4c61-b05d-9bea82e48796,
+-- package_id=coin-package-mini, 2 pending реда, единия hidden).
+--
 -- SQLite няма ALTER INDEX — DROP + CREATE наново, additive/idempotent (IF
 -- EXISTS / IF NOT EXISTS), никаква data промяна.
 DROP INDEX IF EXISTS idx_coin_purchase_ledger_pending_package;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_coin_purchase_ledger_pending_package
   ON coin_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
-  WHERE status = 'pending' AND package_id IS NOT NULL;
+  WHERE status = 'pending' AND package_id IS NOT NULL AND hidden_at IS NULL;
 
 DROP INDEX IF EXISTS idx_vip_purchase_ledger_pending_package;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_purchase_ledger_pending_package
@@ -87,4 +106,4 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_purchase_ledger_pending_package
 DROP INDEX IF EXISTS idx_bundle_purchase_ledger_pending_package;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bundle_purchase_ledger_pending_package
   ON bundle_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
-  WHERE status = 'pending';
+  WHERE status = 'pending' AND hidden_at IS NULL;

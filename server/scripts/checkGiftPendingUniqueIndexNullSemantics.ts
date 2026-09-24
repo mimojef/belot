@@ -182,5 +182,191 @@ await withTempDir(async (dir) => {
   db.close()
 })
 
+// ═══ C) PRODUCTION INCIDENT REGRESSION — hidden_at IS NULL predicate ═════
+//
+// Production deploy failure (2026-09-24, rollback-нат): 20260923_002 бе
+// изпуснала established `hidden_at IS NULL` predicate при пресъздаването на
+// idx_coin_purchase_ledger_pending_package (установен в
+// 20260626_002_fix_pending_package_index_for_hidden.sql — "скрит pending ред
+// не бива да блокира ново купуване на същия пакет"). Реален production
+// сценарий: profile_id=55f576db-e308-4c61-b05d-9bea82e48796,
+// package_id=coin-package-mini, 2 pending реда (единия hidden) — CREATE
+// UNIQUE INDEX се блъсва в "UNIQUE constraint failed", migration транзакцията
+// се rollback-ва, startup хвърля грешка.
+//
+// bundle_purchase_ledger носи същата hidden_at колона и същия
+// hidePurchaseForUser() feature (bundlePurchaseStore.ts) от създаването си
+// (20260923_001) — mirror на coin, затова същия predicate е established и
+// там. vip_purchase_ledger НЯМА hidden_at колона/feature изобщо (виж
+// коментара в 20260818_007_create_vip_purchase_ledger.sql) — тестваме, че
+// COALESCE fix-ът за VIP работи и БЕЗ hidden_at predicate.
+
+function buildLedgerTableWithHidden(db: DatabaseSync, tableName: string, indexSql: string): void {
+  db.exec('PRAGMA foreign_keys = ON;')
+  db.exec(`
+    CREATE TABLE profiles (
+      profile_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE ${tableName} (
+      purchase_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      package_id TEXT,
+      recipient_profile_id TEXT NULL REFERENCES profiles(profile_id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      hidden_at TEXT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+    );
+  `)
+  db.exec(indexSql)
+}
+
+function insertPendingWithHidden(
+  db: DatabaseSync,
+  tableName: string,
+  payer: string,
+  pkg: string,
+  recipient: string | null,
+  hiddenAt: string | null,
+): { ok: boolean; error?: string } {
+  try {
+    db.prepare(`
+      INSERT INTO ${tableName} (purchase_id, profile_id, package_id, recipient_profile_id, status, hidden_at)
+      VALUES (?, ?, ?, ?, 'pending', ?)
+    `).run(`p-${Math.random().toString(36).slice(2)}`, payer, pkg, recipient, hiddenAt)
+    return { ok: true }
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) }
+  }
+}
+
+const FIXED_COIN_INDEX_SQL = `
+  CREATE UNIQUE INDEX idx_coin_purchase_ledger_pending_package
+    ON coin_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
+    WHERE status = 'pending' AND package_id IS NOT NULL AND hidden_at IS NULL;
+`
+
+const FIXED_BUNDLE_INDEX_SQL = `
+  CREATE UNIQUE INDEX idx_bundle_purchase_ledger_pending_package
+    ON bundle_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
+    WHERE status = 'pending' AND hidden_at IS NULL;
+`
+
+const FIXED_VIP_INDEX_SQL = `
+  CREATE UNIQUE INDEX idx_vip_purchase_ledger_pending_package
+    ON vip_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
+    WHERE status = 'pending';
+`
+
+for (const spec of [
+  { table: 'coin_purchase_ledger', indexSql: FIXED_COIN_INDEX_SQL, label: 'COIN' },
+  { table: 'bundle_purchase_ledger', indexSql: FIXED_BUNDLE_INDEX_SQL, label: 'BUNDLE' },
+] as const) {
+  await withTempDir(async (dir) => {
+    const dbPath = join(dir, `${spec.table}-hidden-fix.sqlite`)
+    const db = new DatabaseSync(dbPath, { open: true })
+    buildLedgerTableWithHidden(db, spec.table, spec.indexSql)
+    seed(db, 'payer-1')
+    seed(db, 'payer-2')
+    seed(db, 'payer-3')
+    seed(db, 'payer-4')
+    seed(db, 'payer-5')
+    seed(db, 'payer-6')
+    seed(db, 'recipient-a')
+    seed(db, 'recipient-b')
+
+    check(`[${spec.label}-HIDDEN-1] production сценарий: hidden историческ pending + нов active pending (и двата normal, recipient=NULL) — ПОЗВОЛЕНО (hidden не блокира)`, () => {
+      const historical = insertPendingWithHidden(db, spec.table, 'payer-1', 'coin-package-mini', null, '2026-01-01 00:00:00')
+      const active = insertPendingWithHidden(db, spec.table, 'payer-1', 'coin-package-mini', null, null)
+      assert(historical.ok, `hidden historical INSERT трябва да успее: ${historical.error}`)
+      assert(active.ok, `нов active INSERT ТРЯБВА да успее въпреки hidden historical реда (production incident fix): ${active.error}`)
+    })
+
+    check(`[${spec.label}-HIDDEN-2] duplicate ACTIVE normal pending (и двата hidden_at=NULL) — все още ХВАНАТ`, () => {
+      const r1 = insertPendingWithHidden(db, spec.table, 'payer-2', 'pkg-dup', null, null)
+      const r2 = insertPendingWithHidden(db, spec.table, 'payer-2', 'pkg-dup', null, null)
+      assert(r1.ok, `първи active INSERT трябва да успее: ${r1.error}`)
+      assert(!r2.ok, 'втори active normal INSERT за същия payer/package ТРЯБВА да бъде отхвърлен')
+    })
+
+    check(`[${spec.label}-HIDDEN-3] duplicate ACTIVE same-recipient gift pending (и двата hidden_at=NULL) — все още ХВАНАТ`, () => {
+      const r1 = insertPendingWithHidden(db, spec.table, 'payer-3', 'pkg-gift', 'recipient-a', null)
+      const r2 = insertPendingWithHidden(db, spec.table, 'payer-3', 'pkg-gift', 'recipient-a', null)
+      assert(r1.ok, `първи gift INSERT трябва да успее: ${r1.error}`)
+      assert(!r2.ok, 'втори active gift INSERT (същия recipient) ТРЯБВА да бъде отхвърлен')
+    })
+
+    check(`[${spec.label}-HIDDEN-4] NORMAL + GIFT (и двата active) за същия package — ПОЗВОЛЕНО`, () => {
+      const r1 = insertPendingWithHidden(db, spec.table, 'payer-4', 'pkg-mix', null, null)
+      const r2 = insertPendingWithHidden(db, spec.table, 'payer-4', 'pkg-mix', 'recipient-a', null)
+      assert(r1.ok, `normal трябва да успее: ${r1.error}`)
+      assert(r2.ok, `gift трябва да успее (различен effective recipient): ${r2.error}`)
+    })
+
+    check(`[${spec.label}-HIDDEN-5] gift към различни recipients (и двата active) — ПОЗВОЛЕНО`, () => {
+      const r1 = insertPendingWithHidden(db, spec.table, 'payer-5', 'pkg-multi', 'recipient-a', null)
+      const r2 = insertPendingWithHidden(db, spec.table, 'payer-5', 'pkg-multi', 'recipient-b', null)
+      assert(r1.ok, `gift-за-A трябва да успее: ${r1.error}`)
+      assert(r2.ok, `gift-за-B трябва да успее (различен recipient): ${r2.error}`)
+    })
+
+    check(`[${spec.label}-HIDDEN-6] два hidden реда за същия payer/package — ПОЗВОЛЕНО (hidden редовете не участват в partial index-а изобщо)`, () => {
+      const r1 = insertPendingWithHidden(db, spec.table, 'payer-6', 'pkg-multi-hidden', null, '2026-01-01 00:00:00')
+      const r2 = insertPendingWithHidden(db, spec.table, 'payer-6', 'pkg-multi-hidden', null, '2026-01-02 00:00:00')
+      assert(r1.ok, `първи hidden INSERT трябва да успее: ${r1.error}`)
+      assert(r2.ok, `втори hidden INSERT трябва да успее (hidden редовете извън partial index-а): ${r2.error}`)
+    })
+
+    db.close()
+  })
+}
+
+// VIP: без hidden_at колона/feature — потвърждаваме COALESCE fix-ът работи
+// самостоятелно (established семантика, БЕЗ hidden_at predicate).
+await withTempDir(async (dir) => {
+  const dbPath = join(dir, 'vip-no-hidden.sqlite')
+  const db = new DatabaseSync(dbPath, { open: true })
+  db.exec('PRAGMA foreign_keys = ON;')
+  db.exec(`
+    CREATE TABLE profiles (
+      profile_id TEXT PRIMARY KEY,
+      display_name TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE vip_purchase_ledger (
+      purchase_id TEXT PRIMARY KEY,
+      profile_id TEXT NOT NULL,
+      package_id TEXT,
+      recipient_profile_id TEXT NULL REFERENCES profiles(profile_id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
+    );
+  `)
+  db.exec(FIXED_VIP_INDEX_SQL)
+  seed(db, 'payer-1')
+  seed(db, 'recipient-a')
+
+  check('[VIP-NO-HIDDEN-1] duplicate normal pending — ХВАНАТ (без hidden_at concept)', () => {
+    const r1 = db.prepare(`INSERT INTO vip_purchase_ledger (purchase_id, profile_id, package_id, recipient_profile_id, status) VALUES (?, ?, ?, ?, 'pending')`)
+    let ok1 = true, ok2 = true, err2 = ''
+    try { r1.run('vp-1', 'payer-1', 'vip_30', null) } catch { ok1 = false }
+    try { r1.run('vp-2', 'payer-1', 'vip_30', null) } catch (err) { ok2 = false; err2 = err instanceof Error ? err.message : String(err) }
+    assert(ok1, 'първи INSERT трябва да успее')
+    assert(!ok2, `дублиращ INSERT ТРЯБВА да бъде отхвърлен: ${err2 || 'unexpectedly succeeded'}`)
+  })
+
+  check('[VIP-NO-HIDDEN-2] normal + gift за същия package — ПОЗВОЛЕНО', () => {
+    const stmt = db.prepare(`INSERT INTO vip_purchase_ledger (purchase_id, profile_id, package_id, recipient_profile_id, status) VALUES (?, ?, ?, ?, 'pending')`)
+    let ok1 = true, ok2 = true
+    try { stmt.run('vp-3', 'payer-1', 'vip_180', null) } catch { ok1 = false }
+    try { stmt.run('vp-4', 'payer-1', 'vip_180', 'recipient-a') } catch { ok2 = false }
+    assert(ok1, 'normal трябва да успее')
+    assert(ok2, 'gift трябва да успее')
+  })
+
+  db.close()
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) process.exit(1)

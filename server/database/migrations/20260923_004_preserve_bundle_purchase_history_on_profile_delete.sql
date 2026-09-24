@@ -131,12 +131,15 @@ CREATE INDEX idx_bundle_purchase_ledger_recipient
 
 -- Established "един pending checkout на package/профил наведнъж" гаранция —
 -- COALESCE(recipient_profile_id, profile_id) normalizира NULL recipient към
--- PAYER-а (normal purchase == payer е "своя собствен recipient"), byte-for-
--- byte идентичен на definition-а от 20260923_002 (виж коментара там за
--- пълния NULL-semantics rationale).
+-- PAYER-а (normal purchase == payer е "своя собствен recipient"), идентичен
+-- на fix-натия definition-а от 20260923_002 (виж коментара там за пълния
+-- NULL-semantics rationale и hidden_at production incident post-mortem-а).
+-- hidden_at IS NULL е ЗАДЪЛЖИТЕЛЕН тук — иначе този rebuild би презаписал
+-- 20260923_002-ия fix обратно към счупената (pre-fix) index дефиниция, тъй
+-- като този файл се прилага СЛЕД _002 в migration веригата.
 CREATE UNIQUE INDEX idx_bundle_purchase_ledger_pending_package
   ON bundle_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
-  WHERE status = 'pending';
+  WHERE status = 'pending' AND hidden_at IS NULL;
 
 -- Mirror на established idx_coin_purchase_ledger_deleted_profile_snapshot/
 -- idx_vip_purchase_ledger_deleted_profile_snapshot (20260902_002) — forensic

@@ -94,6 +94,30 @@ await withTempDir(async (dir) => {
     assert(!!row && row.sql.includes('COALESCE(recipient_profile_id, profile_id)'), `индексът трябва да използва COALESCE(recipient_profile_id, profile_id): ${row?.sql}`)
   })
 
+  // Production incident regression (2026-09-24): _002 бе изпуснала established
+  // hidden_at IS NULL predicate-и при пресъздаването на coin/bundle
+  // индексите — виж checkGiftPendingUniqueIndexNullSemantics.ts за пълния
+  // behavioral regression test. Тук потвърждаваме само, че финалната schema
+  // (след ЦЯЛАТА migration верига, вкл. 20260923_004-ия bundle rebuild) носи
+  // предиката правилно.
+  await check('[M8] idx_coin_purchase_ledger_pending_package пази established hidden_at IS NULL predicate', () => {
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_coin_purchase_ledger_pending_package'`).get() as { sql: string } | undefined
+    assert(row !== undefined, 'индексът трябва да съществува')
+    assert(!!row && row.sql.includes('hidden_at IS NULL'), `coin индексът трябва да пази hidden_at IS NULL (production incident fix): ${row?.sql}`)
+  })
+
+  await check('[M9] idx_bundle_purchase_ledger_pending_package пази hidden_at IS NULL predicate след 20260923_004 rebuild', () => {
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_bundle_purchase_ledger_pending_package'`).get() as { sql: string } | undefined
+    assert(row !== undefined, 'индексът трябва да съществува')
+    assert(!!row && row.sql.includes('hidden_at IS NULL'), `bundle индексът трябва да пази hidden_at IS NULL след 20260923_004 rebuild-а: ${row?.sql}`)
+  })
+
+  await check('[M10] idx_vip_purchase_ledger_pending_package НЯМА hidden_at predicate (VIP няма hide-purchase feature)', () => {
+    const row = db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_vip_purchase_ledger_pending_package'`).get() as { sql: string } | undefined
+    assert(row !== undefined, 'индексът трябва да съществува')
+    assert(!!row && !row.sql.includes('hidden_at'), `VIP индексът НЕ трябва да реферира hidden_at (VIP таблицата няма тази колона): ${row?.sql}`)
+  })
+
   await check('[M7] Повторно прилагане (idempotent) не хвърля грешка', async () => {
     const result = await ensureServerDatabaseReady({
       serverRootOverride: process.cwd(),
