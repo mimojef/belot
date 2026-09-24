@@ -38,7 +38,7 @@
  *        recipient ВСЕ ПАК получава наградата коректно
  * [8]  Migration chain апликва чисто от РЕАЛНО production-еквивалентно
  *        pre-bundle състояние (без 001-005 изобщо, mirror на потвърдения
- *        production HEAD) — всичките 5 файла заедно, на бъдещ deploy
+ *        production HEAD) — всичките 6 файла заедно, на бъдещ deploy
  * [9]  Realistic DB (с pre-existing несвързани данни — profiles/coin
  *        purchases отпреди bundle feature-a) апликва чисто, без interference
  * [10] PRAGMA integrity_check = 'ok' след пълната верига
@@ -80,6 +80,10 @@ const BUNDLE_FEATURE_MIGRATION_FILENAMES = [
   '20260923_003_create_paid_gift_notification_log.sql',
   '20260923_004_preserve_bundle_purchase_history_on_profile_delete.sql',
   '20260923_005_fix_bundle_vip_grant_linkage.sql',
+  // Shop -> "Пакети" Premium Visual System — visual_key колоната зависи от
+  // shop_bundle_packages (20260923_001), затова принадлежи към СЪЩАТА
+  // "production все още няма bundle feature-а" pre-condition group.
+  '20260924_001_add_visual_key_to_shop_bundle_packages.sql',
 ]
 
 async function withTempDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -445,7 +449,7 @@ await withTempDir(async (dir) => {
 await withTempDir(async (dir) => {
   const fakeServerRoot = join(dir, 'prod-equivalent')
   // Точно текущото production състояние (потвърдено read-only на
-  // 185.203.117.14): всичките 5 bundle/paid-gift migration файла ОТСЪСТВАТ.
+  // 185.203.117.14): всичките 6 bundle/paid-gift migration файла ОТСЪСТВАТ.
   await seedFakeServerRootWithRealMigrations(fakeServerRoot, BUNDLE_FEATURE_MIGRATION_FILENAMES)
   const dbPath = join(fakeServerRoot, 'database', 'data', 'belot-v2.sqlite')
 
@@ -472,10 +476,10 @@ await withTempDir(async (dir) => {
   `).run()
   dbPre.close()
 
-  // Реалният бъдещ deploy — всичките 5 файла пристигат ЗАЕДНО.
+  // Реалният бъдещ deploy — всичките 6 файла пристигат ЗАЕДНО.
   await seedFakeServerRootWithRealMigrations(fakeServerRoot, [])
 
-  await check('[8] Migration chain (всичките 5 bundle/paid-gift файла заедно) апликва чисто от production-еквивалентно състояние', async () => {
+  await check('[8] Migration chain (всичките 6 bundle/paid-gift файла заедно) апликва чисто от production-еквивалентно състояние', async () => {
     const result = await ensureServerDatabaseReady({ serverRootOverride: fakeServerRoot, databaseFilePathOverride: dbPath })
     assertEqual(result.appliedCount, BUNDLE_FEATURE_MIGRATION_FILENAMES.length, `трябва да приложи точно ${BUNDLE_FEATURE_MIGRATION_FILENAMES.length} нови миграции`)
     const appliedNames = result.appliedMigrations.map((m) => m.filename)

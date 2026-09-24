@@ -129,6 +129,7 @@ function buildBaseState(overrides: Partial<{
         currency: 'EUR',
         status: 'active',
         sortOrder: 10,
+        visualKey: null,
       },
     ],
     bundlePackagesLoading: false,

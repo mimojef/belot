@@ -336,6 +336,80 @@ try {
     assertEqual(pkg.status, 'active', 'status')
     createdPackageId = String(pkg.packageId)
     assert(createdPackageId.length > 0, 'packageId present')
+    assertEqual(pkg.visualKey, null, 'visualKey не е подаден -> established default null')
+  })
+
+  // ─── Shop -> "Пакети" Premium Visual System — visualKey API contract ──────
+
+  await check('[3b] POST /api/admin/bundle-packages с валиден visualKey → 200, response.package.visualKey точен', async () => {
+    const r = await httpJson(port, 'POST', '/api/admin/bundle-packages', {
+      cookie: adminCookie,
+      body: {
+        packageKey: `visual-${runId}`,
+        title: 'Визуален',
+        description: '',
+        yellowCoinsAmount: 250000,
+        vipDays: 15,
+        priceCents: 599,
+        currency: 'EUR',
+        status: 'active',
+        sortOrder: 15,
+        visualKey: 'crown',
+      },
+    })
+    assertEqual(r.status, 200, 'status')
+    const pkg = r.body.package as Record<string, unknown>
+    assertEqual(pkg.visualKey, 'crown', 'visualKey')
+
+    const pub = await httpJson(port, 'GET', '/api/shop/bundle-packages')
+    const packages = pub.body.packages as Array<Record<string, unknown>>
+    const publicRow = packages.find((p) => p.packageId === pkg.packageId)
+    assert(publicRow !== undefined, 'пакетът трябва да е в public listing-а')
+    assertEqual(publicRow?.visualKey, 'crown', 'public response трябва да носи visualKey')
+  })
+
+  await check('[3c] POST /api/admin/bundle-packages с непознат visualKey → 400', async () => {
+    const r = await httpJson(port, 'POST', '/api/admin/bundle-packages', {
+      cookie: adminCookie,
+      body: {
+        packageKey: `bad-visual-${runId}`,
+        title: 'Невалиден',
+        description: '',
+        yellowCoinsAmount: 100000,
+        vipDays: 10,
+        priceCents: 299,
+        currency: 'EUR',
+        status: 'active',
+        sortOrder: 16,
+        visualKey: 'totally-bogus-key',
+      },
+    })
+    assertEqual(r.status, 400, 'status')
+  })
+
+  await check('[3d] POST edit (packageId зададен) с нов visualKey → 200, persisted', async () => {
+    const r = await httpJson(port, 'POST', '/api/admin/bundle-packages', {
+      cookie: adminCookie,
+      body: {
+        packageId: createdPackageId,
+        title: 'Супер',
+        description: 'Тестов пакет',
+        yellowCoinsAmount: 500000,
+        vipDays: 30,
+        priceCents: 999,
+        currency: 'EUR',
+        status: 'active',
+        sortOrder: 10,
+        visualKey: 'treasure-chest',
+      },
+    })
+    assertEqual(r.status, 200, 'status')
+    assertEqual((r.body.package as Record<string, unknown>).visualKey, 'treasure-chest', 'visualKey updated')
+
+    const admin = await httpJson(port, 'GET', '/api/admin/bundle-packages', { cookie: adminCookie })
+    const packages = admin.body.packages as Array<Record<string, unknown>>
+    const row = packages.find((p) => p.packageId === createdPackageId)
+    assertEqual(row?.visualKey, 'treasure-chest', 'admin listing трябва да отрази новия visualKey')
   })
 
   // ─── [4] Public listing shows only active ──────────────────────────────────

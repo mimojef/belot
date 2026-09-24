@@ -176,7 +176,8 @@ function buildSchema(db: DatabaseSync): void {
       status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'inactive')),
       sort_order INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      visual_key TEXT NULL
     );
 
     CREATE TABLE IF NOT EXISTS bundle_purchase_ledger (

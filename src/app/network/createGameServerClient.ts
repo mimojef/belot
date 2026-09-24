@@ -4,6 +4,15 @@ export type RoomStatus = 'waiting' | 'playing' | 'finished'
 export type MatchStake = number
 import type { LudoEngineEvent } from '../games/ludo/engine/ludoEngineEvents'
 import type { LudoGameState, LudoPieceSlot } from '../games/ludo/engine/ludoEngineTypes'
+// Shop -> "Пакети" Premium Visual System (audit §2 "ЕДИН SOURCE OF TRUTH ЗА
+// KEYS") — reuse на ЕДИНСТВЕНИЯ shared visual key списък, споделен и от
+// сървъра (server/src/db/shopBundlePackageStore.ts write validation). НЕ
+// дублиран allowlist тук. Файлът физически живее в server/src/shared/ (не
+// frontend src/) заради server tsconfig.json rootDir/emit ограничение — виж
+// bundlePackageVisualKeys.ts doc коментара за пълния module-boundary
+// rationale. Frontend-специфични метаданни (label/artwork URL/preview)
+// остават в src/app/lobby/bundlePackageVisualCatalog.ts, НЕ тук.
+import type { BundlePackageVisualKey } from '../../../server/src/shared/bundlePackageVisualKeys'
 
 export type MatchRoomSnapshot = {
   stakeAmount: number
@@ -684,6 +693,8 @@ export type BundlePackageSnapshot = {
   currency: string
   status: BundlePackageStatus
   sortOrder: number
+  /** `null` = "без избрана визия" (established default за legacy редове) — Shop resolve-ва fallback (виж bundlePackageVisualCatalog.ts), НИКОГА derive-нат от title/coins/sortOrder. */
+  visualKey: BundlePackageVisualKey | null
 }
 
 export type BundlePackageInput = {
@@ -698,6 +709,8 @@ export type BundlePackageInput = {
   currency: string
   status: BundlePackageStatus
   sortOrder: number
+  /** `null` = "без избрана визия" — валидно. Непознат string се reject-ва server-side (400). */
+  visualKey: string | null
 }
 
 export type BundlePurchaseStatus = 'pending' | 'paid' | 'canceled' | 'failed'

@@ -98,6 +98,7 @@ function buildBaseState(shopActiveTab: 'coins' | 'vip' | 'bundle'): LobbyScreenS
         currency: 'EUR',
         status: 'active',
         sortOrder: 10,
+        visualKey: null,
       },
     ],
     bundlePackagesLoading: false,

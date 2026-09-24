@@ -10558,6 +10558,11 @@ async function handleAdminBundlePackagesRequest(
       currency: getStringField(body, 'currency') || 'EUR',
       status: getStringField(body, 'status') as BundlePackageStatus,
       sortOrder: getNumberField(body, 'sortOrder') ?? 0,
+      // Shop -> "Пакети" Premium Visual System (audit §5) — празен/липсващ
+      // field = "без избрана визия" (null, established default), НЕ грешка.
+      // Действителната known-key validation е в upsertPackage() (reuse-ва
+      // shared isValidBundlePackageVisualKey), не тук.
+      visualKey: getStringField(body, 'visualKey') || null,
     })
 
     if (!result.ok) {

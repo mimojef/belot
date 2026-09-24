@@ -62,6 +62,11 @@ import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { getAnimatedEmojiUrl, getAnimatedEmojiPreviewUrl } from '../animatedEmoji/animatedEmojiAssets'
 import { PUBLIC_LEGAL_PAGES, type PublicLegalPageKey } from './publicLegalPages'
 import {
+  BUNDLE_PACKAGE_VISUAL_CATALOG_LIST,
+  PRICE_BRUSH_ASSET_URL,
+  resolveBundlePackageVisual,
+} from './bundlePackageVisualCatalog'
+import {
   PRIVATE_ROOM_POPUP_STYLES,
   renderPrivateRoomBlockedPopup,
   renderPrivateRoomCreatorBlockedPopup,
@@ -5895,23 +5900,30 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
         <section style="padding:12px;display:grid;gap:12px;">
           ${state.bundlePackages.map((bundlePackage) => {
             const isPurchasing = state.bundlePurchaseActionPackageId === bundlePackage.packageId
+            const visual = resolveBundlePackageVisual(bundlePackage.visualKey)
             return `
               <article style="
                 position:relative;
                 border:1px solid rgba(212,165,32,0.46);
                 border-radius:12px;
-                background:#080808;
+                background:radial-gradient(120% 90% at 50% 0%, rgba(212,165,32,0.10) 0%, rgba(0,0,0,0) 55%), #080808;
                 overflow:hidden;
                 display:flex;
                 flex-direction:column;
                 align-items:center;
                 text-align:center;
-                padding:18px 16px;
+                padding:16px 16px 18px;
+                box-shadow:0 0 18px rgba(212,165,32,0.07);
+                max-width:100%;
+                box-sizing:border-box;
               ">
-                <div style="font-size:10px;font-weight:900;letter-spacing:0.1em;text-transform:uppercase;color:rgba(212,165,32,0.85);">ПАКЕТ</div>
-                <div style="margin-top:6px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+                <div style="width:170px;height:170px;max-width:100%;">
+                  <img src="${escapeHtml(visual.artworkUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center;" loading="lazy">
+                </div>
 
-                <div style="margin-top:14px;font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
+                <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+
+                <div style="margin-top:12px;font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
                 <div style="margin-top:2px;font-size:10px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
 
                 <div style="margin-top:10px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:5px 12px;">
@@ -5924,13 +5936,16 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
 
                 <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);margin-top:14px;"></div>
 
-                <div style="margin-top:12px;font-size:24px;font-weight:900;color:#d4a520;line-height:1;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+                <div style="position:relative;width:190px;max-width:100%;aspect-ratio:900/290;margin-top:12px;">
+                  <img src="${escapeHtml(PRICE_BRUSH_ASSET_URL)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;" loading="lazy">
+                  <div style="position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:19px;font-weight:900;color:#241300;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+                </div>
 
                 <button
                   type="button"
                   data-bundle-purchase-package="${escapeHtml(bundlePackage.packageId)}"
                   ${isPurchasing ? 'disabled' : ''}
-                  style="margin-top:18px;height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};"
+                  style="margin-top:16px;height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};"
                 >${isPurchasing ? 'Зарежда...' : isLoggedInBundle ? 'Купи пакет' : 'Влез за покупка'}</button>
               </article>
             `
@@ -7691,11 +7706,13 @@ function renderVipShopPanel(state: LobbyScreenState): string {
 
 // Shop -> "Пакети" (X жълтици + X дни VIP = единична EUR цена) — структурно
 // mirror-ва renderVipShopPanel по-горе (същия card grid/бутон/message-banner
-// pattern), НЕ отделен визуален дизайн (брифа §4 "не прави отделен визуален
-// дизайн, който не съответства на текущите shop cards"). Bundle пакетите
-// нямат pre-made per-package image asset (динамичен, admin-created брой,
-// за разлика от VIP-овите 3 фиксирани), затова карта-та показва
-// coins+VIP badge текстово вместо картинка.
+// pattern). Premium Visual System (по-късен audit) — всеки пакет показва
+// admin-избрано decorative artwork (resolveBundlePackageVisual, defensive
+// fallback towards coins-medium за null/unknown visualKey, виж
+// bundlePackageVisualCatalog.ts) plus цена върху reusable gold "paint brush"
+// asset. Всички реални данни (title/coins/VIP/description/price/CTA)
+// остават HTML text — artwork-ът е ЧИСТО декоративен слой, никога не
+// съдържа/замества динамичните стойности.
 function renderBundleShopPanel(state: LobbyScreenState): string {
   const isLoggedIn = state.profile.profileId !== null
 
@@ -7768,13 +7785,14 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
           ${escapeHtml(state.bundlePurchaseMessageText)}
         </div>
       ` : ''}
-      <div data-bundle-package-grid="1" style="display:grid;grid-template-columns:repeat(3,minmax(0,300px));justify-content:center;gap:20px;">
+      <div data-bundle-package-grid="1" style="display:grid;grid-template-columns:repeat(auto-fit,300px);justify-content:center;gap:20px;">
         ${state.bundlePackages.map((bundlePackage) => {
           const isPurchasing = state.bundlePurchaseActionPackageId === bundlePackage.packageId
+          const visual = resolveBundlePackageVisual(bundlePackage.visualKey)
           return `
-          <article style="
+          <article data-bundle-package-card="1" style="
             position:relative;
-            background:#000000;
+            background:radial-gradient(120% 90% at 50% 0%, rgba(212,165,32,0.10) 0%, rgba(0,0,0,0) 55%), #000000;
             border:1px solid rgba(212,165,32,0.42);
             border-radius:14px;
             overflow:hidden;
@@ -7782,13 +7800,16 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
             flex-direction:column;
             align-items:center;
             text-align:center;
-            padding:22px 20px 20px;
-            box-shadow:0 4px 14px rgba(0,0,0,0.28);
+            padding:20px 20px 20px;
+            box-shadow:0 4px 14px rgba(0,0,0,0.28), 0 0 22px rgba(212,165,32,0.08);
           ">
-            <div style="font-size:11px;font-weight:900;letter-spacing:0.1em;text-transform:uppercase;color:rgba(212,165,32,0.85);">ПАКЕТ</div>
-            <div style="margin-top:6px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+            <div style="width:180px;height:180px;max-width:100%;">
+              <img src="${escapeHtml(visual.artworkUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center;" loading="lazy">
+            </div>
 
-            <div style="margin-top:16px;font-size:24px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
+            <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+
+            <div style="margin-top:14px;font-size:26px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
             <div style="margin-top:2px;font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
 
             <div style="margin-top:12px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:6px 14px;">
@@ -7801,13 +7822,16 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
 
             <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);margin-top:18px;"></div>
 
-            <div style="margin-top:16px;font-size:28px;font-weight:900;color:#d4a520;line-height:1;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+            <div style="position:relative;width:220px;max-width:100%;aspect-ratio:900/290;margin-top:14px;">
+              <img src="${escapeHtml(PRICE_BRUSH_ASSET_URL)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;" loading="lazy">
+              <div style="position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:22px;font-weight:900;color:#241300;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+            </div>
 
             <button
               type="button"
               data-bundle-purchase-package="${escapeHtml(bundlePackage.packageId)}"
               ${isPurchasing ? 'disabled' : ''}
-              style="margin-top:22px;height:44px;width:100%;border:0;border-radius:9px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};transition:filter 0.15s;flex-shrink:0;"
+              style="margin-top:20px;height:44px;width:100%;border:0;border-radius:9px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};transition:filter 0.15s;flex-shrink:0;"
             >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}</button>
           </article>
           `
@@ -7815,6 +7839,8 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
       </div>
       <style>
         [data-bundle-purchase-package]:not(:disabled):hover { filter:brightness(1.12); }
+        [data-bundle-package-card="1"] { transition:transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease; }
+        [data-bundle-package-card="1"]:hover { transform:translateY(-4px); border-color:rgba(244,201,91,0.75); box-shadow:0 10px 26px rgba(212,165,32,0.28), 0 4px 14px rgba(0,0,0,0.35); }
         @media (max-width:720px) {
           [data-bundle-package-grid="1"] { grid-template-columns:minmax(0,340px); }
         }
@@ -9596,11 +9622,15 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             <div style="border:1px solid rgba(255,255,255,0.10);border-radius:8px;background:#080808;padding:14px;color:rgba(255,255,255,0.58);font-size:13px;font-weight:800;">Няма създадени пакети.</div>
           ` : adminBundlePackages.map((bundlePackage) => {
             const isEditing = state.adminBundlePackageEditId === bundlePackage.packageId
+            const rowVisual = resolveBundlePackageVisual(bundlePackage.visualKey)
             return `
             <div style="${adminPackageRowStyle(isEditing)}">
-              <div>
-                <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
-                <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.44);">${escapeHtml(bundlePackage.packageKey)}</div>
+              <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+                <img src="${escapeHtml(rowVisual.artworkUrl)}" alt="" style="width:32px;height:32px;object-fit:contain;flex-shrink:0;" loading="lazy">
+                <div style="min-width:0;">
+                  <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+                  <div style="margin-top:3px;font-size:11px;font-weight:800;color:rgba(255,255,255,0.44);">${escapeHtml(bundlePackage.packageKey)}</div>
+                </div>
               </div>
               <div style="font-size:13px;font-weight:900;color:#d4a520;">${formatAmount(bundlePackage.yellowCoinsAmount)} + ${bundlePackage.vipDays}д VIP</div>
               <div style="font-size:14px;font-weight:900;color:#f8fafc;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
@@ -9660,6 +9690,18 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
               <option value="active" ${(editBundlePackage?.status ?? 'active') === 'active' ? 'selected' : ''}>active</option>
               <option value="inactive" ${editBundlePackage?.status === 'inactive' ? 'selected' : ''}>inactive</option>
             </select>
+          </label>
+          <label style="display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+            Визия на картата
+            <div style="display:flex;align-items:center;gap:10px;">
+              <select name="visualKey" style="flex:1 1 auto;min-width:0;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:14px;font-weight:800;outline:none;">
+                <option value="" ${editBundlePackage?.visualKey ? '' : 'selected'}>Без избрана визия / По подразбиране</option>
+                ${BUNDLE_PACKAGE_VISUAL_CATALOG_LIST.map((visual) => `
+                  <option value="${escapeHtml(visual.key)}" ${editBundlePackage?.visualKey === visual.key ? 'selected' : ''}>${escapeHtml(visual.label)}</option>
+                `).join('')}
+              </select>
+              <img src="${escapeHtml(resolveBundlePackageVisual(editBundlePackage?.visualKey ?? null).artworkUrl)}" alt="" style="width:42px;height:42px;object-fit:contain;flex-shrink:0;border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#050505;">
+            </div>
           </label>
           <label style="grid-column:1 / -1;display:grid;gap:7px;font-size:11px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Описание
@@ -15132,6 +15174,10 @@ export function renderLobbyScreen(
         currency: String(data.get('currency') ?? 'EUR').trim().toUpperCase(),
         status,
         sortOrder: Number(data.get('sortOrder')),
+        // Shop -> "Пакети" Premium Visual System (audit §6) — празната
+        // "Без избрана визия / По подразбиране" option value="" означава
+        // null (established default), НЕ грешка/непозната стойност.
+        visualKey: String(data.get('visualKey') ?? '').trim() || null,
       })
     })
 

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isValidBundlePackageVisualKey, type BundlePackageVisualKey } from '../shared/bundlePackageVisualKeys.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -15,6 +16,15 @@ export type BundlePackageSnapshot = {
   currency: string
   status: BundlePackageStatus
   sortOrder: number
+  /**
+   * Shop -> "Пакети" Premium Visual System (audit §4) — persistent, stable
+   * визуален идентификатор за card presentation. `null` = "няма избрана
+   * визия" (established за ВСИЧКИ legacy редове преди тази фича, ИЛИ admin
+   * изрично избра "По подразбиране") — Shop resolve-ва fallback towards
+   * DEFAULT_BUNDLE_PACKAGE_VISUAL_KEY read-time (frontend catalog), НИКОГА
+   * derive-нат от title/package_key/sort_order/coins amount.
+   */
+  visualKey: BundlePackageVisualKey | null
 }
 
 export type BundlePackageInput = {
@@ -38,6 +48,8 @@ export type BundlePackageInput = {
   currency: string
   status: BundlePackageStatus
   sortOrder: number
+  /** `null` = "без избрана визия" (explicit admin избор ИЛИ поле пропуснато) — валидно, НЕ грешка. Непознат string се reject-ва в upsertPackage(). */
+  visualKey: string | null
 }
 
 export type ShopBundlePackageStore = {
@@ -68,9 +80,19 @@ type BundlePackageRow = {
   currency: string
   status: BundlePackageStatus
   sort_order: number
+  visual_key: string | null
 }
 
 function rowToSnapshot(row: BundlePackageRow): BundlePackageSnapshot {
+  // Defensive re-validation при READ (не само write) — покрива hypothetical
+  // бъдещ каталог рефакторинг, който маха/преименува key: редът остава
+  // физически в DB с вече-невалиден низ, но snapshot-ът никога не изтича
+  // произволен string навън като "валиден" BundlePackageVisualKey.
+  // Действителният UI fallback (към DEFAULT_BUNDLE_PACKAGE_VISUAL_KEY) е
+  // frontend responsibility (audit §11) — тук просто гарантираме типова
+  // коректност (null вместо невалиден string).
+  const visualKey = isValidBundlePackageVisualKey(row.visual_key) ? row.visual_key : null
+
   return {
     packageId: row.package_id,
     packageKey: row.package_key,
@@ -82,6 +104,7 @@ function rowToSnapshot(row: BundlePackageRow): BundlePackageSnapshot {
     currency: row.currency,
     status: row.status,
     sortOrder: row.sort_order,
+    visualKey,
   }
 }
 
@@ -143,7 +166,8 @@ export async function createShopBundlePackageStore(
     price_cents,
     currency,
     status,
-    sort_order
+    sort_order,
+    visual_key
   `
 
   const selectPublicPackagesStatement = database.prepare(`
@@ -176,8 +200,9 @@ export async function createShopBundlePackageStore(
       price_cents,
       currency,
       status,
-      sort_order
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      sort_order,
+      visual_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(package_key) DO UPDATE SET
       title = excluded.title,
       description = excluded.description,
@@ -187,6 +212,7 @@ export async function createShopBundlePackageStore(
       currency = excluded.currency,
       status = excluded.status,
       sort_order = excluded.sort_order,
+      visual_key = excluded.visual_key,
       updated_at = CURRENT_TIMESTAMP;
   `)
 
@@ -238,6 +264,20 @@ export async function createShopBundlePackageStore(
     const status = normalizeStatus(input.status)
     const sortOrder = normalizeInteger(input.sortOrder, 0, 1_000_000)
 
+    // Shop -> "Пакети" Premium Visual System (audit §4) — null е ЯВНО
+    // разрешено ("без избрана визия" / established default), но непознат
+    // string се reject-ва с ясна грешка (typo/stale frontend catalog build
+    // никога не бива тихо да се запише в DB). isValidBundlePackageVisualKey
+    // reuse-ва ЕДИНИЯ shared source of truth (server/src/shared/
+    // bundlePackageVisualKeys.ts) — не дублиран allowlist тук.
+    const requestedVisualKey = input.visualKey
+    const visualKey =
+      requestedVisualKey === null || requestedVisualKey === undefined
+        ? null
+        : isValidBundlePackageVisualKey(requestedVisualKey)
+          ? requestedVisualKey
+          : undefined
+
     if (title.length < 2) {
       return { ok: false, message: 'Името на пакета трябва да е поне 2 символа.' }
     }
@@ -266,6 +306,10 @@ export async function createShopBundlePackageStore(
       return { ok: false, message: 'Подредбата трябва да е цяло число между 0 и 1 000 000.' }
     }
 
+    if (visualKey === undefined) {
+      return { ok: false, message: 'Непозната визия на картата.' }
+    }
+
     upsertPackageStatement.run(
       packageId,
       packageKey,
@@ -277,6 +321,7 @@ export async function createShopBundlePackageStore(
       currency,
       status,
       sortOrder,
+      visualKey,
     )
 
     const savedPackage =
