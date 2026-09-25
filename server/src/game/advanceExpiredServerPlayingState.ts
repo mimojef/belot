@@ -1,7 +1,10 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
 import type { Seat } from '../core/serverTypes.js'
 import type { ServerCard } from './serverGameTypes.js'
-import { detectServerDeclarationsInHand } from './declarations/index.js'
+import {
+  detectServerDeclarationsInHand,
+  resolveServerDeclarationConflicts,
+} from './declarations/index.js'
 import { pickServerBotPlayCard } from './pickServerBotPlayCard.js'
 import { rebaseServerStateToEventAt } from './rebaseServerStateToEventAt.js'
 import { isServerSeatControlledByBot } from './serverTimerStateHelpers.js'
@@ -33,7 +36,12 @@ function canDeclareBotBeloteForCard(
   return leadSuit === null || leadSuit === card.suit
 }
 
-function getBotBeloteDeclarationKeysForPlay(
+// Mirrors the human client's default-selected declaration set
+// (resolveClientDeclarationConflicts pre-checks these in the popup), so a
+// bot seat or a human seat taken over on timeout declares exactly what a
+// connected human would have submitted by pressing "Продължи" without
+// touching the checkboxes.
+export function getServerDefaultDeclarationKeysForPlay(
   state: ServerAuthoritativeGameState,
   seat: Seat,
   card: ServerCard,
@@ -42,34 +50,42 @@ function getBotBeloteDeclarationKeysForPlay(
     return []
   }
 
-  if (card.rank !== 'Q' && card.rank !== 'K') {
+  const playing = state.playing
+
+  if (playing === null) {
     return []
   }
 
-  if (!canDeclareBotBeloteForCard(state, card)) {
-    return []
-  }
+  const isFirstTrick = playing.currentTrick.trickIndex === 0
 
-  const alreadyDeclared = state.declarations.some(
-    (declaration) =>
-      declaration.seat === seat &&
-      declaration.type === 'belote' &&
-      declaration.suit === card.suit,
+  const alreadyDeclaredKeys = new Set(
+    state.declarations
+      .filter((declaration) => declaration.seat === seat)
+      .map((declaration) => declaration.key),
   )
 
-  if (alreadyDeclared) {
-    return []
-  }
-
-  const candidate = detectServerDeclarationsInHand(
+  const candidates = detectServerDeclarationsInHand(
     state.hands[seat],
     state.bidding.winningBid,
-  ).find(
-    (declaration) =>
-      declaration.type === 'belote' && declaration.cardIds.includes(card.id),
-  )
+  ).filter((candidate) => {
+    if (alreadyDeclaredKeys.has(candidate.key)) {
+      return false
+    }
 
-  return candidate ? [candidate.key] : []
+    if (candidate.type === 'belote') {
+      return (
+        candidate.cardIds.includes(card.id) &&
+        candidate.privateMetadata.suit === card.suit &&
+        canDeclareBotBeloteForCard(state, card)
+      )
+    }
+
+    return isFirstTrick
+  })
+
+  const resolved = resolveServerDeclarationConflicts(candidates)
+
+  return resolved.selectedCandidates.map((candidate) => candidate.key)
 }
 
 export function advanceExpiredServerPlayingState(
@@ -107,7 +123,7 @@ export function advanceExpiredServerPlayingState(
     return { state, advanced: false, eventAt }
   }
 
-  const declarationKeys = getBotBeloteDeclarationKeysForPlay(
+  const declarationKeys = getServerDefaultDeclarationKeysForPlay(
     stateWithBotControl,
     currentSeat,
     card,
