@@ -38,6 +38,10 @@ server/database/data/
 # Database backups — генерирани на сървъра, не в git
 server/database/backups/
 
+# Временна Ludo lifecycle диагностика (LUDO_DIAGNOSTICS_UNTIL, виж
+# server/src/diagnostics/ludoDiagnosticsLog.ts) — runtime-generated, не в git
+server/database/diagnostics/
+
 # Компилирани backup/verify скриптове
 server/dist-scripts/
 

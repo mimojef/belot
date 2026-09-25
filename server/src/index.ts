@@ -19,6 +19,7 @@ import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
 import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type PrivateRoomMatchRecord } from './db/privateRoomMatchStore.js'
 import { createLudoRoomMatchStore, type LudoRoomMatchOccupant, type LudoRoomMatchRecord } from './db/ludoRoomMatchStore.js'
+import { logLudoDiagnosticEvent } from './diagnostics/ludoDiagnosticsLog.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
@@ -4477,6 +4478,22 @@ const ludoMatchRuntime = createLudoMatchRuntime({
           : snapshot.players.find((player) => player.color === snapshot.state.winnerColor)?.profileId ?? null
         ludoRoomMatchStore.recordMatchFinished(snapshot.matchId, winnerProfileId)
         broadcastLudoGamesListToLobbyConnections()
+        // Diagnostic finish + приблизителен cleanup-schedule log — виж task
+        // spec §2. "cleanup_scheduled" НЕ е observed removal event (не
+        // пипаме ludoMatchRuntime.ts::scheduleFinishedCleanup вътрешно, за
+        // да останем изцяло извън runtime module-а) — computed spрямо
+        // known LUDO_FINISHED_MATCH_RETENTION_MS constant-а, explicit
+        // маркирано като "scheduled", не "removed".
+        logLudoDiagnosticEvent('ludo_match_finished', {
+          matchId: snapshot.matchId,
+          ludoRoomId: snapshot.ludoRoomId,
+          matchStatus: snapshot.state.status,
+          winnerProfileId,
+        })
+        logLudoDiagnosticEvent('ludo_match_cleanup_scheduled', {
+          matchId: snapshot.matchId,
+          ludoRoomId: snapshot.ludoRoomId,
+        })
       } catch (error) {
         console.error(`[ludo-room-match] failed to record finish for match=${snapshot.matchId}`, error)
       }
@@ -4508,12 +4525,33 @@ const ludoMatchRuntime = createLudoMatchRuntime({
       })
     }
   },
+  // Diagnostic-only observed removal — извиква се точно СЛЕД реалния
+  // matches.delete() в ludoMatchRuntime.ts::scheduleFinishedCleanup (виж
+  // Options.onMatchRemoved doc коментара там). Единственото място, откъдето
+  // можем да наблюдаваме реалния 10s runtime cleanup timestamp, без да
+  // computer-аме приблизителна стойност (за разлика от
+  // ludo_match_cleanup_scheduled по-горе, който е computed при finish).
+  onMatchRemoved: (match) => {
+    logLudoDiagnosticEvent('ludo_match_removed', {
+      matchId: match.matchId,
+      ludoRoomId: match.ludoRoomId,
+      authoritativeRevision: match.revision,
+      matchStatus: match.state.status,
+    })
+  },
 })
 
 const ludoRoomsStore = createLudoRoomsStore({
   onRoomsChanged: () => broadcastLudoRoomsList(),
   onRoomReady: (room, matchId, precomputed) => {
     const initialSnapshot = ludoMatchRuntime.createMatch(room, matchId, precomputed)
+    logLudoDiagnosticEvent('ludo_match_started', {
+      matchId,
+      ludoRoomId: room.id,
+      matchStatus: initialSnapshot.state.status,
+      currentTurnColor: initialSnapshot.state.activeColor,
+      currentTurnProfileId: initialSnapshot.players.find((player) => player.color === initialSnapshot.state.activeColor)?.profileId,
+    })
     // "Играещи"/"Приключили" lobby history — additive side effect, отделен
     // от atomic start transaction-а по-горе (debit-ът вече е потвърден преди
     // да стигнем дотук, виж attemptLudoRoomStart.ts). initialSnapshot.players
@@ -21515,6 +21553,7 @@ wsServer.on('connection', (socket, request) => {
       if (message.type === 'ludo_game_state_request') {
         const latestConnection = getConnectionById(serverState, connection.id)
         if (!latestConnection?.profileId) return
+        logLudoDiagnosticEvent('ludo_state_request_received', { profileId: latestConnection.profileId })
         const snapshot = ludoMatchRuntime.reconnect(latestConnection.profileId, connection.id)
         if (snapshot) {
           safeSendToConnection(connection.id, {
@@ -21532,6 +21571,11 @@ wsServer.on('connection', (socket, request) => {
           // finishedCleanupTimer retention) остава напълно недокоснато —
           // тази промяна засяга само какво получава клиентът, не кога/дали
           // runtime-ът реално чисти match-а.
+          logLudoDiagnosticEvent('ludo_state_request_rejected', {
+            profileId: latestConnection.profileId,
+            requestType: 'ludo_game_state_request',
+            errorCode: 'ludo_match_not_found',
+          })
           safeSendToConnection(connection.id, {
             type: 'error',
             code: 'ludo_match_not_found',
@@ -21566,11 +21610,63 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_participant', message: 'Трябва да влезеш в профила си.' })
           return
         }
+        // Diagnostic "received" + before-state snapshot — само за roll/move
+        // (виж task spec §2, reclaim не е поискан). getMatch() е read-only,
+        // не мутира нищо (виж ludoMatchRuntime.ts) — четем ПРЕДИ action-а,
+        // защото ако резултатът е rejected с ludo_match_not_found, match-ът
+        // вече не съществува ЗА четене СЛЕД това.
+        let beforeMatch: ReturnType<typeof ludoMatchRuntime.getMatch> = undefined
+        if (message.type === 'ludo_roll_request' || message.type === 'ludo_move_request') {
+          beforeMatch = ludoMatchRuntime.getMatch(message.matchId)
+          logLudoDiagnosticEvent(
+            message.type === 'ludo_roll_request' ? 'ludo_roll_request_received' : 'ludo_move_request_received',
+            {
+              matchId: message.matchId,
+              profileId: latestConnection.profileId,
+              requestType: message.type,
+              requestRevision: message.expectedRevision,
+              authoritativeRevision: beforeMatch?.revision,
+              matchStatus: beforeMatch?.state.status,
+              currentTurnColor: beforeMatch?.state.activeColor,
+              currentTurnProfileId: beforeMatch?.players.find((player) => player.color === beforeMatch!.state.activeColor)?.profileId,
+              turnPhase: beforeMatch?.state.turnPhase,
+            },
+          )
+        }
         const result = message.type === 'ludo_roll_request'
           ? ludoMatchRuntime.roll(message.matchId, latestConnection.profileId, message.expectedRevision)
           : message.type === 'ludo_move_request'
             ? ludoMatchRuntime.move(message.matchId, latestConnection.profileId, message.expectedRevision, message.slot)
             : ludoMatchRuntime.reclaim(message.matchId, latestConnection.profileId, message.expectedRevision)
+        if (message.type === 'ludo_roll_request' || message.type === 'ludo_move_request') {
+          // rejected event-ът задължително носи authoritative context-а
+          // (revision/status/turn) — виж task-а "REJECTED CONTEXT": за
+          // всички кодове, различни от ludo_match_not_found, beforeMatch
+          // все още съществува (validate() reject-ва БЕЗ да мутира match-а —
+          // виж ludoMatchRuntime.ts::validate/roll/move), затова before-
+          // state-ът е точен и за rejection момента (не само за момента на
+          // подаване). ludo_match_not_found естествено остава без тези
+          // полета — beforeMatch е undefined, точно както task-ът очаква
+          // ("за ludo_match_not_found е нормално match-state полетата да
+          // липсват").
+          logLudoDiagnosticEvent(
+            result.ok
+              ? (message.type === 'ludo_roll_request' ? 'ludo_roll_accepted' : 'ludo_move_accepted')
+              : (message.type === 'ludo_roll_request' ? 'ludo_roll_rejected' : 'ludo_move_rejected'),
+            {
+              matchId: message.matchId,
+              profileId: latestConnection.profileId,
+              requestType: message.type,
+              requestRevision: message.expectedRevision,
+              authoritativeRevision: beforeMatch?.revision,
+              matchStatus: beforeMatch?.state.status,
+              currentTurnColor: beforeMatch?.state.activeColor,
+              currentTurnProfileId: beforeMatch?.players.find((player) => player.color === beforeMatch!.state.activeColor)?.profileId,
+              result: result.ok ? 'accepted' : 'rejected',
+              errorCode: result.ok ? undefined : result.code,
+            },
+          )
+        }
         if (!result.ok) safeSendToConnection(connection.id, { type: 'error', code: result.code, message: result.message })
         return
       }

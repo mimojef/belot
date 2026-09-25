@@ -68,6 +68,13 @@ type Options = {
   initialStateFactory?: (turnOrder: readonly LudoColor[]) => LudoGameState
   finishedMatchRetentionMs?: number
   onSnapshot: (match: LudoMatchSnapshot) => void
+  // Optional diagnostic-only observer — извиква се ТОЧНО в момента, в който
+  // scheduleFinishedCleanup() реално премахва match-а от runtime matches
+  // Map-а (виж task-а "temporary 24h Ludo diagnostics" §1 OBSERVED CLEANUP).
+  // Чист side-effect notification СЛЕД delete-а, не участва в
+  // timing/control flow решение — премахването на callback-а (или липсата
+  // му, optional) не променя кога/дали cleanup-ът реално се случва.
+  onMatchRemoved?: (match: Pick<LudoMatchSnapshot, 'matchId' | 'ludoRoomId' | 'revision' | 'state'>) => void
 }
 
 const ROOM_COLORS: readonly LudoColor[] = ['red', 'blue', 'green', 'yellow']
@@ -157,6 +164,22 @@ export function createLudoMatchRuntime(options: Options) {
         if (profileToMatch.get(player.profileId) === match.matchId) profileToMatch.delete(player.profileId)
       })
       match.finishedCleanupTimer = null
+      // Diagnostic-only, СЛЕД реалния delete — виж onMatchRemoved doc
+      // коментара в Options. try/catch defense-in-depth (същия принцип като
+      // onSnapshot call site-овете в index.ts) — observer failure никога не
+      // бива да остави match-а в неопределено runtime състояние тук.
+      try {
+        options.onMatchRemoved?.({
+          matchId: match.matchId,
+          ludoRoomId: match.ludoRoomId,
+          revision: match.revision,
+          state: match.state,
+        })
+      } catch {
+        // Diagnostic observer failure е напълно изолирано — cleanup-ът
+        // (delete-ът, profileToMatch release-а) вече е приключил преди
+        // този блок, gameplay/runtime state е недокоснато.
+      }
     }, finishedMatchRetentionMs)
     match.finishedCleanupTimer.unref()
   }
