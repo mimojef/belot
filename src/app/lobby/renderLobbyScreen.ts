@@ -5917,17 +5917,26 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
                 max-width:100%;
                 box-sizing:border-box;
               ">
-                <div style="width:170px;height:170px;max-width:100%;">
-                  <img src="${escapeHtml(visual.artworkUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center;" loading="lazy">
-                </div>
+                <div style="margin-top:4px;font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
 
-                <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+                <div style="margin-top:12px;display:flex;align-items:center;gap:12px;">
+                  <div style="width:80px;height:80px;max-width:100%;flex-shrink:0;">
+                    <img src="${escapeHtml(visual.artworkUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center;" loading="lazy">
+                  </div>
 
-                <div style="margin-top:12px;font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
-                <div style="margin-top:2px;font-size:10px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
+                  <div style="display:flex;flex-direction:column;align-items:flex-start;gap:6px;">
+                    <div>
+                      <div style="display:flex;align-items:center;gap:6px;">
+                        <img src="/assets/lobby/icon-coin.png" alt="" style="width:20px;height:20px;object-fit:contain;flex-shrink:0;">
+                        <span style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</span>
+                      </div>
+                      <div style="margin-top:2px;font-size:10px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
+                    </div>
 
-                <div style="margin-top:10px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:5px 12px;">
-                  <span style="font-size:13px;font-weight:900;color:#f4c95b;">+ ${bundlePackage.vipDays} дни VIP</span>
+                    <div style="display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:5px 12px;">
+                      <span style="font-size:13px;font-weight:900;color:#f4c95b;">+ ${bundlePackage.vipDays} дни VIP</span>
+                    </div>
+                  </div>
                 </div>
 
                 ${bundlePackage.description ? `
@@ -5938,7 +5947,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
 
                 <div style="position:relative;width:190px;max-width:100%;aspect-ratio:900/290;margin-top:12px;">
                   <img src="${escapeHtml(PRICE_BRUSH_ASSET_URL)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;" loading="lazy">
-                  <div style="position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:19px;font-weight:900;color:#241300;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+                  <div style="position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:25px;font-weight:900;color:#241300;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
                 </div>
 
                 <button
@@ -7803,17 +7812,26 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
             padding:20px 20px 20px;
             box-shadow:0 4px 14px rgba(0,0,0,0.28), 0 0 22px rgba(212,165,32,0.08);
           ">
-            <div style="width:180px;height:180px;max-width:100%;">
-              <img src="${escapeHtml(visual.artworkUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center;" loading="lazy">
-            </div>
+            <div style="margin-top:4px;font-size:18px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
 
-            <div style="margin-top:4px;font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(bundlePackage.title)}</div>
+            <div style="margin-top:14px;display:flex;align-items:center;gap:14px;">
+              <div style="width:80px;height:80px;max-width:100%;flex-shrink:0;">
+                <img src="${escapeHtml(visual.artworkUrl)}" alt="" style="width:100%;height:100%;object-fit:contain;object-position:center;" loading="lazy">
+              </div>
 
-            <div style="margin-top:14px;font-size:26px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</div>
-            <div style="margin-top:2px;font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
+              <div style="display:flex;flex-direction:column;align-items:flex-start;gap:7px;">
+                <div>
+                  <div style="display:flex;align-items:center;gap:7px;">
+                    <img src="/assets/lobby/icon-coin.png" alt="" style="width:24px;height:24px;object-fit:contain;flex-shrink:0;">
+                    <span style="font-size:26px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</span>
+                  </div>
+                  <div style="margin-top:2px;font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
+                </div>
 
-            <div style="margin-top:12px;display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:6px 14px;">
-              <span style="font-size:14px;font-weight:900;color:#f4c95b;">+ ${bundlePackage.vipDays} дни VIP</span>
+                <div style="display:inline-flex;align-items:center;gap:6px;border-radius:999px;border:1px solid rgba(244,201,91,0.5);background:rgba(212,165,32,0.10);padding:6px 14px;">
+                  <span style="font-size:14px;font-weight:900;color:#f4c95b;">+ ${bundlePackage.vipDays} дни VIP</span>
+                </div>
+              </div>
             </div>
 
             ${bundlePackage.description ? `
@@ -7824,7 +7842,7 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
 
             <div style="position:relative;width:220px;max-width:100%;aspect-ratio:900/290;margin-top:14px;">
               <img src="${escapeHtml(PRICE_BRUSH_ASSET_URL)}" alt="" style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;" loading="lazy">
-              <div style="position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:22px;font-weight:900;color:#241300;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
+              <div style="position:relative;z-index:1;display:flex;align-items:center;justify-content:center;width:100%;height:100%;font-size:25px;font-weight:900;color:#241300;white-space:nowrap;">${escapeHtml(formatPackagePrice(bundlePackage.priceCents, bundlePackage.currency))}</div>
             </div>
 
             <button
