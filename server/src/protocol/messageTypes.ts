@@ -256,6 +256,10 @@ export type ClientMessage =
       type: 'request_private_games_list'
     }
   | {
+      // "Играещи"/"Приключили" табове за /games/ludo — виж LudoGamesListMessage.
+      type: 'request_ludo_games_list'
+    }
+  | {
       type: 'add_bot_to_private_room_team'
       team: Team
     }
@@ -1030,6 +1034,34 @@ export type LudoEmojiReactionMessage = {
   emojiId: string
 }
 
+// "Играещи"/"Приключили" lobby listing за /games/ludo — mirror на
+// PrivateRoomMatchSnapshot/PrivateGamesListMessage. Individual game — един
+// players масив вместо team A/B разделение (Ludo няма отбори).
+export type LudoRoomMatchOccupantSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  color: LudoColor
+}
+
+export type LudoRoomMatchSnapshot = {
+  matchId: string
+  ludoRoomId: string
+  status: 'playing' | 'finished'
+  stake: MatchStake
+  playerCount: 2 | 4
+  players: LudoRoomMatchOccupantSnapshot[]
+  winnerProfileId: string | null
+  startedAt: number
+  finishedAt: number | null
+}
+
+export type LudoGamesListMessage = {
+  type: 'ludo_games_list'
+  playing: LudoRoomMatchSnapshot[]
+  finished: LudoRoomMatchSnapshot[]
+}
+
 export type PrivateRoomUpdatedMessage = {
   type: 'private_room_updated'
   room: PrivateRoomSnapshot
@@ -1263,6 +1295,7 @@ export type ServerMessage =
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
   | LudoRoomsListMessage
+  | LudoGamesListMessage
   | LudoRoomUpdatedMessage
   | LudoRoomLeftMessage
   | LudoRoomKickedMessage

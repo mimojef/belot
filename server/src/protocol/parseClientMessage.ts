@@ -471,6 +471,7 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     }
 
     if (parsed.type === 'request_ludo_rooms_list') return { type: 'request_ludo_rooms_list' }
+    if (parsed.type === 'request_ludo_games_list') return { type: 'request_ludo_games_list' }
 
     if (parsed.type === 'create_ludo_room') {
       if (!isPositiveIntegerStake(parsed.stake)) return null

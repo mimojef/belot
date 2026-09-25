@@ -795,6 +795,8 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomChatUnsubscribe?: (privateRoomId: string) => void
   onPrivateRoomChatSend?: (privateRoomId: string, body: string, requestId?: string) => void
   onLudoRoomsOpen?: () => void
+  // "Играещи"/"Приключили" табове за /games/ludo — виж onPrivateGamesOpen mirror-а (ако съществува) / request_ludo_games_list.
+  onLudoGamesOpen?: () => void
   // Server-side re-check при start е eject-нал профила заради недостатъчен
   // баланс (виж attemptLudoRoomStart.ts) — main.ts отваря non-dismissing
   // modal при това извикване (виж task spec §3).
@@ -3168,6 +3170,10 @@ export function createLobbyFlowController(
     destroy: () => void
     setRooms: (rooms: import('../network/createGameServerClient').LudoRoomSnapshot[]) => void
     setMyRoom: (room: import('../network/createGameServerClient').LudoRoomSnapshot | null) => void
+    setGames: (
+      playing: import('../network/createGameServerClient').LudoRoomMatchSnapshot[],
+      finished: import('../network/createGameServerClient').LudoRoomMatchSnapshot[],
+    ) => void
     showMessage: (message: string) => void
     requestExit: () => void
   } | null = null
@@ -3217,6 +3223,7 @@ export function createLobbyFlowController(
       stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
       onBack: showMoreGamesPage,
       onRefresh: () => options.onLudoRoomsOpen?.(),
+      onRefreshGames: () => options.onLudoGamesOpen?.(),
       onCreate: (stake, playerCount, manualStart) => options.onLudoRoomCreate?.(stake, playerCount, manualStart),
       onJoin: (roomId) => options.onLudoRoomJoin?.(roomId),
       onLeave: () => options.onLudoRoomLeave?.(),
@@ -17856,6 +17863,10 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_room_updated') {
       _ludoLobbyController?.setMyRoom(message.room)
+      return true
+    }
+    if (message.type === 'ludo_games_list') {
+      _ludoLobbyController?.setGames(message.playing, message.finished)
       return true
     }
     if (message.type === 'ludo_room_left') {

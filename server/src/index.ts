@@ -18,6 +18,7 @@ import Stripe from 'stripe'
 import { WebSocketServer, WebSocket, type RawData } from 'ws'
 import { createActiveRoomSnapshotStore } from './db/activeRoomSnapshotStore.js'
 import { createPrivateRoomMatchStore, type PrivateRoomMatchOccupant, type PrivateRoomMatchRecord } from './db/privateRoomMatchStore.js'
+import { createLudoRoomMatchStore, type LudoRoomMatchOccupant, type LudoRoomMatchRecord } from './db/ludoRoomMatchStore.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
@@ -335,6 +336,8 @@ import type {
   PrivateGamesListMessage,
   PrivateGameScoreUpdatedMessage,
   PrivateRoomMatchSnapshot,
+  LudoGamesListMessage,
+  LudoRoomMatchSnapshot,
 } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -667,6 +670,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'request_private_rooms_list':
     case 'request_private_games_list':
     case 'request_ludo_rooms_list':
+    case 'request_ludo_games_list':
     case 'create_ludo_room':
     case 'join_ludo_room':
     case 'leave_ludo_room':
@@ -733,6 +737,9 @@ const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
   databaseBootstrap.databaseFilePath,
 )
 const privateRoomMatchStore = await createPrivateRoomMatchStore(
+  databaseBootstrap.databaseFilePath,
+)
+const ludoRoomMatchStore = await createLudoRoomMatchStore(
   databaseBootstrap.databaseFilePath,
 )
 const playerProgressStore = await createPlayerProgressStore(
@@ -4315,6 +4322,80 @@ function sendLudoRoomUpdate(room: LudoRoom): void {
   room.players.forEach((player) => safeSendToConnection(player.connectionId, { type: 'ludo_room_updated', room: snapshot }))
 }
 
+// ─── "Играещи"/"Приключили" lobby listing за /games/ludo (виж
+// ludoRoomMatchStore.ts) — mirror на private-room-ите PrivateGamesListMessage
+// pattern-а. Individual game — един players масив, без team A/B.
+
+const LUDO_FINISHED_VISIBILITY_HOURS = 2
+
+function buildLudoRoomMatchOccupant(player: {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  color: 'red' | 'blue' | 'green' | 'yellow'
+}): LudoRoomMatchOccupant {
+  return {
+    profileId: player.profileId,
+    displayName: player.displayName,
+    avatarUrl: player.avatarUrl,
+    color: player.color,
+  }
+}
+
+// Извиква се от ludoRoomsStore.onRoomReady — room.players все още носи
+// оригиналния roster (виж recordPrivateRoomMatchStarted за аналогичния
+// Белот hook). matchData идва от computeInitialMatchData/precomputed
+// (същия color assignment, който ludoMatchRuntime.createMatch ще ползва) —
+// не преизчисляваме тук, само четем.
+function recordLudoRoomMatchStarted(
+  room: LudoRoom,
+  matchId: string,
+  players: Array<{ profileId: string; displayName: string; avatarUrl: string | null; color: 'red' | 'blue' | 'green' | 'yellow' }>,
+): void {
+  ludoRoomMatchStore.recordMatchStarted({
+    matchId,
+    ludoRoomId: room.id,
+    stake: room.stake,
+    playerCount: room.playerCount,
+    players: players.map(buildLudoRoomMatchOccupant),
+  })
+}
+
+function ludoRoomMatchRecordToSnapshot(record: LudoRoomMatchRecord): LudoRoomMatchSnapshot {
+  return {
+    matchId: record.matchId,
+    ludoRoomId: record.ludoRoomId,
+    status: record.status,
+    stake: record.stake,
+    playerCount: record.playerCount,
+    players: record.players,
+    winnerProfileId: record.winnerProfileId,
+    startedAt: Date.parse(dbDateToUtc(record.startedAt)),
+    finishedAt: record.finishedAt !== null ? Date.parse(dbDateToUtc(record.finishedAt)) : null,
+  }
+}
+
+function buildLudoGamesListMessage(): LudoGamesListMessage {
+  return {
+    type: 'ludo_games_list',
+    playing: ludoRoomMatchStore.listPlayingMatches().map(ludoRoomMatchRecordToSnapshot),
+    finished: ludoRoomMatchStore
+      .listFinishedMatches(LUDO_FINISHED_VISIBILITY_HOURS)
+      .map(ludoRoomMatchRecordToSnapshot),
+  }
+}
+
+// Mirror на broadcastPrivateGamesListToLobbyConnections — само connections
+// извън активна игра/чакалня (currentRoomId === null) виждат lobby listing-а.
+function broadcastLudoGamesListToLobbyConnections(): void {
+  const message = buildLudoGamesListMessage()
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status === 'connected' && conn.currentRoomId === null) {
+      safeSendToConnection(conn.id, message)
+    }
+  }
+}
+
 function toLudoGameProtocolSnapshot(snapshot: LudoMatchSnapshot) {
   return {
     ...snapshot,
@@ -4383,6 +4464,23 @@ const ludoMatchRuntime = createLudoMatchRuntime({
         console.error(`[ludo-match-snapshot] failed to remove match=${snapshot.matchId}`, error)
       }
     }
+    // "Играещи"/"Приключили" lobby history — чисто additive read-model side
+    // effect, НЕ участва в settlement/cleanup инвариантите по-горе. Пишем
+    // finished независимо от winnerPayout (forfeit-финал също минава оттук,
+    // а payout failure не бива да скрие мача от "Приключили" таба — log-нато
+    // е отделно в settleLudoMatchIfNeeded). try/catch defense-in-depth,
+    // огледало на persistLudoMatchSnapshot по-горе.
+    if (snapshot.state.status === 'finished') {
+      try {
+        const winnerProfileId = snapshot.state.winnerColor === null
+          ? null
+          : snapshot.players.find((player) => player.color === snapshot.state.winnerColor)?.profileId ?? null
+        ludoRoomMatchStore.recordMatchFinished(snapshot.matchId, winnerProfileId)
+        broadcastLudoGamesListToLobbyConnections()
+      } catch (error) {
+        console.error(`[ludo-room-match] failed to record finish for match=${snapshot.matchId}`, error)
+      }
+    }
     const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
     const type = snapshot.revision === 0 ? 'ludo_game_started' : 'ludo_game_state'
     for (const player of snapshot.players) {
@@ -4415,7 +4513,17 @@ const ludoMatchRuntime = createLudoMatchRuntime({
 const ludoRoomsStore = createLudoRoomsStore({
   onRoomsChanged: () => broadcastLudoRoomsList(),
   onRoomReady: (room, matchId, precomputed) => {
-    ludoMatchRuntime.createMatch(room, matchId, precomputed)
+    const initialSnapshot = ludoMatchRuntime.createMatch(room, matchId, precomputed)
+    // "Играещи"/"Приключили" lobby history — additive side effect, отделен
+    // от atomic start transaction-а по-горе (debit-ът вече е потвърден преди
+    // да стигнем дотук, виж attemptLudoRoomStart.ts). initialSnapshot.players
+    // носи вече color-assigned roster-а (същия, който ludoMatchRuntime пази).
+    try {
+      recordLudoRoomMatchStarted(room, matchId, initialSnapshot.players)
+      broadcastLudoGamesListToLobbyConnections()
+    } catch (error) {
+      console.error(`[ludo-room-match] failed to record start for match=${matchId}`, error)
+    }
   },
   onMemberKicked: (room, player) => {
     safeSendToConnection(player.connectionId, { type: 'ludo_room_kicked', ludoRoomId: room.id })
@@ -4462,6 +4570,31 @@ for (const room of Object.values(serverState.rooms)) {
 const restoredLudoMatches = activeLudoMatchSnapshotStore.loadActiveMatches()
 for (const persisted of restoredLudoMatches) {
   ludoMatchRuntime.restoreMatch(persisted)
+  // "Играещи"/"Приключили" lobby history — boot-recovery gap fix: normal
+  // start records the "playing" row via ludoRoomsStore.onRoomReady (виж
+  // recordLudoRoomMatchStarted по-горе), но restoreMatch() тук инжектира
+  // match-а директно в runtime Map-а без да минава през onRoomReady —
+  // restored match без този hook никога не получава history row, и
+  // recordMatchFinished по-долу/при по-нататъшен commit() би бил no-op
+  // (UPDATE... WHERE match_id намира 0 реда). Чисто additive side effect,
+  // same matchId/authoritative players от persisted snapshot-а, никакъв нов
+  // matchId, не пипа restoreMatch()/gameplay state/economy — mirror на
+  // recordLudoRoomMatchStarted hook-а, но извикано от recovery пътя вместо
+  // от normal-start пътя. Idempotent чрез recordMatchStarted-ия
+  // ON CONFLICT(match_id) DO NOTHING (виж ludoRoomMatchStore.ts) — ако
+  // history row вече съществува (напр. normal start path вече го е
+  // записал ПРЕДИ crash-а), insert-ът е no-op.
+  try {
+    ludoRoomMatchStore.recordMatchStarted({
+      matchId: persisted.matchId,
+      ludoRoomId: persisted.ludoRoomId,
+      stake: persisted.stake,
+      playerCount: persisted.players.length as 2 | 4,
+      players: persisted.players.map(buildLudoRoomMatchOccupant),
+    })
+  } catch (error) {
+    console.error(`[ludo-room-match] failed to record recovered start for match=${persisted.matchId}`, error)
+  }
   // Crash window "finished snapshot persisted, restart ПРЕДИ payout" (виж
   // task spec §7/§15) — settleLudoMatchIfNeeded е idempotent (ledger-guarded),
   // safe да се извика безусловно тук дори payout-ът вече да е минал (crash
@@ -4475,6 +4608,21 @@ for (const persisted of restoredLudoMatches) {
       } catch (error) {
         console.error(`[ludo-match-snapshot] failed to remove match=${persisted.matchId}`, error)
       }
+    }
+    // Виж recordMatchFinished hook-а в ludoMatchRuntime.onSnapshot по-долу за
+    // normal-flow rationale — тук е нужен отделно, защото restored match,
+    // който вече е бил 'finished' в момента на crash-а, никога повече не
+    // минава през commit()->onSnapshot (само boot recovery го докосва
+    // веднъж). Same additive/defensive try/catch, независимо от
+    // settleLudoMatchIfNeeded резултата (forfeit/no-winner случаите също
+    // трябва да се появят в "Приключили").
+    try {
+      const winnerProfileId = persisted.state.winnerColor === null
+        ? null
+        : persisted.players.find((player) => player.color === persisted.state.winnerColor)?.profileId ?? null
+      ludoRoomMatchStore.recordMatchFinished(persisted.matchId, winnerProfileId)
+    } catch (error) {
+      console.error(`[ludo-room-match] failed to record recovered finish for match=${persisted.matchId}`, error)
     }
   }
 }
@@ -21469,6 +21617,11 @@ wsServer.on('connection', (socket, request) => {
 
       if (message.type === 'request_private_games_list') {
         safeSendToConnection(connection.id, buildPrivateGamesListMessage())
+        return
+      }
+
+      if (message.type === 'request_ludo_games_list') {
+        safeSendToConnection(connection.id, buildLudoGamesListMessage())
         return
       }
 

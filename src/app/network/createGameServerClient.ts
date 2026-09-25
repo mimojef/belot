@@ -1012,6 +1012,10 @@ export type ClientMessage =
       type: 'request_private_games_list'
     }
   | {
+      // "Играещи"/"Приключили" табове за /games/ludo — виж LudoGamesListMessage.
+      type: 'request_ludo_games_list'
+    }
+  | {
       type: 'add_bot_to_private_room_team'
       team: Team
     }
@@ -1772,6 +1776,34 @@ export type LudoEmojiReactionMessage = {
   matchId: string
   color: 'red' | 'blue' | 'green' | 'yellow'
   emojiId: string
+}
+
+// "Играещи"/"Приключили" lobby listing за /games/ludo — mirror на
+// PrivateRoomMatchSnapshot/PrivateGamesListMessage. Individual game — един
+// players масив вместо team A/B (Ludo няма отбори).
+export type LudoRoomMatchOccupantSnapshot = {
+  profileId: string
+  displayName: string
+  avatarUrl: string | null
+  color: 'red' | 'blue' | 'green' | 'yellow'
+}
+
+export type LudoRoomMatchSnapshot = {
+  matchId: string
+  ludoRoomId: string
+  status: 'playing' | 'finished'
+  stake: MatchStake
+  playerCount: 2 | 4
+  players: LudoRoomMatchOccupantSnapshot[]
+  winnerProfileId: string | null
+  startedAt: number
+  finishedAt: number | null
+}
+
+export type LudoGamesListMessage = {
+  type: 'ludo_games_list'
+  playing: LudoRoomMatchSnapshot[]
+  finished: LudoRoomMatchSnapshot[]
 }
 
 export type PrivateRoomUpdatedMessage = {
@@ -2623,6 +2655,7 @@ export type ServerMessage =
   | PrivateRoomCreatedNoticeMessage
   | PrivateGamesListMessage
   | PrivateGameScoreUpdatedMessage
+  | LudoGamesListMessage
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageEventMessage
   | PrivateRoomChatErrorMessage
@@ -2807,6 +2840,7 @@ export type GameServerClient = {
   requestLudoMove: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
   requestLudoReclaim: (matchId: string, expectedRevision: number) => void
   sendLudoEmojiReaction: (matchId: string, emojiId: string) => void
+  requestLudoGamesList: () => void
   requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
@@ -3185,6 +3219,7 @@ export function createGameServerClient(
   function requestLudoMove(matchId: string, expectedRevision: number, slot: LudoPieceSlot): void { send({ type: 'ludo_move_request', matchId, expectedRevision, slot }) }
   function requestLudoReclaim(matchId: string, expectedRevision: number): void { send({ type: 'ludo_reclaim_request', matchId, expectedRevision }) }
   function sendLudoEmojiReaction(matchId: string, emojiId: string): void { send({ type: 'send_ludo_emoji_reaction', matchId, emojiId }) }
+  function requestLudoGamesList(): void { send({ type: 'request_ludo_games_list' }) }
 
   function requestPrivateGamesList(): void {
     send({ type: 'request_private_games_list' })
@@ -3347,6 +3382,7 @@ export function createGameServerClient(
     requestLudoMove,
     requestLudoReclaim,
     sendLudoEmojiReaction,
+    requestLudoGamesList,
     requestPrivateGamesList,
     createPrivateRoom,
     joinPrivateRoomSlot,

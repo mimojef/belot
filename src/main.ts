@@ -6685,6 +6685,7 @@ lobby = createLobbyFlowController({
   onPrivateRoomChatUnsubscribe: (privateRoomId) => { client.unsubscribePrivateRoomChat(privateRoomId) },
   onPrivateRoomChatSend: (privateRoomId, body, requestId) => { client.sendPrivateRoomChatMessage(privateRoomId, body, requestId) },
   onLudoRoomsOpen: () => { client.requestLudoRoomsList() },
+  onLudoGamesOpen: () => { client.requestLudoGamesList() },
   onLudoInsufficientBalanceEjected: () => { showLudoInsufficientBalanceModal() },
   onLudoRoomCreate: (stake, playerCount, manualStart) => { client.createLudoRoom(stake, playerCount, manualStart) },
   onLudoRoomJoin: (ludoRoomId) => { client.joinLudoRoom(ludoRoomId) },
