@@ -1097,6 +1097,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       pieceSizePx,
       initiallyHidden: areGameplayOverlaysHiddenForPopup,
       isGameWinningMove,
+      isLeavingBase: sourceIsHome,
     })
     activeMoveOverlayCancel = moveOverlay.cancel
     await moveOverlay.finished
@@ -1389,6 +1390,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       pieceSizePx,
       initiallyHidden: false,
       isGameWinningMove: previous.status !== 'finished' && snapshot.state.status === 'finished',
+      isLeavingBase: sourceIsHome,
     })
     activeMoveOverlayCancel = overlay.cancel
     await overlay.finished

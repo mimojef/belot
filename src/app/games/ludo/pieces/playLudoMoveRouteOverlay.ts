@@ -14,6 +14,7 @@ const PAWN_STEP_SOUND_SRC = '/audio/ludo/pawn-step.mp3'
 const STAR_LANDING_SOUND_SRC = '/audio/ludo/star-landing.mp3'
 const TRIANGLE_ENTRY_SOUND_SRC = '/audio/ludo/triangle-entry.mp3'
 const END_GAME_SOUND_SRC = '/audio/ludo/end-game.mp3'
+const PAWN_EXIT_BASE_SOUND_SRC = '/audio/ludo/pawn-exit-base.mp3'
 
 // Canonical star/safe cell membership — reuse-ва СЪЩИЯ source of truth като
 // board rendering-а (ludoSafeCellIds() -> LUDO_SAFE_TRACK_INDICES в
@@ -59,6 +60,21 @@ export function playLudoEndGameSound(): void {
   playLudoSound(END_GAME_SOUND_SRC, 'gameplay')
 }
 
+// "Излизане от базата" — играе се ИЗКЛЮЧИТЕЛНО на действието home -> track
+// (реален gameplay transition, дадено explicit от caller-а чрез
+// options.isLeavingBase — mirror на established sourceIsHome изчисление в
+// createLudoFlowController.ts, reuse-нато, НЕ ново/дублирано home detection).
+// Умишлено НЕ зависи от coordinate/index на destination клетката (никакво
+// LUDO_SAFE_CELL_ID_SET membership check тук) — дори ако собственото начално
+// поле съвпада с canonical safe/star cell, тук ЗАДЪЛЖИТЕЛНО играе exit-base
+// звукът, не star-landing (виж call site-а в route loop-а по-долу за
+// priority реда). Друга пионка, която по-късно стъпи/премине през СЪЩАТА
+// клетка чрез нормално track движение, никога не подава isLeavingBase=true —
+// получава established pawn-step/star-landing поведение непроменено.
+function playLudoPawnExitBaseSound(): void {
+  playLudoSound(PAWN_EXIT_BASE_SOUND_SRC, 'gameplay')
+}
+
 function isCenterTriangleCell(cellId: LudoCellId): boolean {
   const cell = parseLudoCellId(cellId)
   return cell.kind === 'finish' && cell.slot === LUDO_FINISH_LENGTH - 1
@@ -72,6 +88,17 @@ export interface LudoMoveRouteOverlayOptions {
   pieceSizePx: number
   initiallyHidden: boolean
   isGameWinningMove?: boolean
+  /**
+   * true САМО за home -> track прехода на ТОЗИ конкретен move (пионката
+   * реално напуска базата/двора след хвърлена 6) — подадено explicit от
+   * caller-а (performMoveSequence/presentAuthoritativeMove), reuse-вайки
+   * established `parseLudoCellId(fromCellId).kind === 'home'` изчисление,
+   * не нова detection логика тук. buildLudoMoveRoute() гарантира точно 1
+   * route стъпка за home->track (виж board/ludoMoveRoute.ts коментара:
+   * "излизане от базата няма междинни стъпки") — затова тази проверка е
+   * relevant само при stepIndex===0 в route loop-а по-долу.
+   */
+  isLeavingBase?: boolean
   debugSpeedScale?: number
 }
 
@@ -225,6 +252,14 @@ export function playLudoMoveRouteOverlay(options: LudoMoveRouteOverlayOptions): 
         const isFinalStep = stepIndex === route.length - 1
         if (isFinalStep && options.isGameWinningMove) {
           playLudoEndGameSound()
+        } else if (stepIndex === 0 && options.isLeavingBase) {
+          // Priority над triangle/star/pawn-step по-долу — дори ако
+          // собственото start поле СЪВПАДА с canonical safe/star cell
+          // (typичен Ludo дизайн), самото действие "напусна базата" винаги
+          // трябва да звучи различно от "стъпи на star" (established
+          // pattern за другите move-specific звуци тук). Не проверява
+          // cellId/index — само caller-подадения gameplay signal.
+          playLudoPawnExitBaseSound()
         } else if (isFinalStep && isCenterTriangleCell(cellId)) {
           playLudoTriangleEntrySound()
         } else if (isFinalStep && LUDO_SAFE_CELL_ID_SET.has(cellId)) {
