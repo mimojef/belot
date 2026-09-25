@@ -302,7 +302,14 @@ document.body.appendChild(privateRoomCreatedNotifContainer)
 
 const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({
   container: privateRoomCreatedNotifContainer,
-  isInActiveGame: () => activeRoom.hasActiveRoom(),
+  // "По време на игра" важи еднакво за Belot (activeRoom.hasActiveRoom())
+  // И Ludo (lobby.hasActiveLudoMatch(), mirror на established
+  // getPwaUpdateSafetySnapshot semantics) — една унифицирана проверка,
+  // не отделна/дублирана Ludo-специфична логика тук. lobby е `let`,
+  // присвоен по-долу в модула — optional chaining покрива closure-а,
+  // ако isInActiveGame() бъде извикан преди assignment-а (established
+  // pattern, mirror на onEnterPrivateRooms по-долу).
+  isInActiveGame: () => activeRoom.hasActiveRoom() || (lobby?.hasActiveLudoMatch() ?? false),
   areInGameNotificationsEnabled: () => privateRoomInGameNotificationsEnabled,
   isSoundEnabled: () => privateRoomCreatedSoundEnabled,
   onDisableInGameNotifications: () => {

@@ -32,6 +32,18 @@
  *       и без презареждане;
  *     - звукът реюзва съществуващия audio helper pattern.
  *
+ *  E) Унифицирана "по време на игра" проверка (Belot + Ludo) — root cause fix:
+ *     main.ts's isInActiveGame() четеше ЕДИНСТВЕНО activeRoom.hasActiveRoom()
+ *     (Belot-специфичен state), затова изключената настройка не потискаше
+ *     popup-а по време на активен Ludo match — Ludo никога не правеше
+ *     isInActiveGame() true. Fix-ът разширява СЪЩАТА проверка с
+ *     lobby.hasActiveLudoMatch() (нов public getter в createLobbyFlowController,
+ *     reuse-ващ established _ludoController!==null semantics от
+ *     getPwaUpdateSafetySnapshot, НЕ отделна/дублирана Ludo detection логика) —
+ *     source-text проверки на wiring-а, плюс поведенчески harness, който
+ *     реimplement-ва ТОЧНО двете комбинирани стъпки (OR на двата signal-а,
+ *     после established suppression decision-а) за 5-те изисквани сценария.
+ *
  * Изпълнява се в Node.js чрез tsx, без build/dev server.
  */
 
@@ -512,6 +524,56 @@ await check('[35] Sound toggle-ът не пипа in-game notifications preferen
   const handleIncomingFn = extractFunctionBody(notifSrc, 'function handleIncoming(notice: PrivateRoomCreatedNotice): void {', 'handleIncoming')
   assert(handleIncomingFn.includes('normalizedNotice.recipientInActiveGame && !options.areInGameNotificationsEnabled()'), 'in-game suppression логиката трябва да остане непроменена')
   assert(!handleIncomingFn.includes('isSoundEnabled'), 'in-game gate-ът не трябва да reuse-ва sound preference-a (различни concerns)')
+})
+
+// ─── E) Унифицирана "по време на игра" проверка (Belot + Ludo) ─────────────
+
+await check('[36] main.ts: isInActiveGame() комбинира Belot (activeRoom.hasActiveRoom()) И Ludo (lobby?.hasActiveLudoMatch()) чрез OR', () => {
+  const wiring = extractBlock(mainSrc, 'const privateRoomCreatedNotification = createPrivateRoomCreatedNotification({', 'privateRoomCreatedNotification wiring', '\n})')
+  assert(
+    wiring.includes('isInActiveGame: () => activeRoom.hasActiveRoom() || (lobby?.hasActiveLudoMatch() ?? false)'),
+    'isInActiveGame трябва да е ИЛИ на Belot и Ludo active state-а, не само Belot',
+  )
+})
+
+await check('[37] createLobbyFlowController излага hasActiveLudoMatch() reuse-вайки established _ludoController!==null (не нова/дублирана Ludo detection логика)', () => {
+  assert(
+    controllerSrc.includes('hasActiveLudoMatch: () => _ludoController !== null,'),
+    'публичният getter трябва да reuse-ва точно същата _ludoController!==null проверка, която вече захранва getPwaUpdateSafetySnapshot.hasActiveLudoMatch',
+  )
+  // Двете места (public getter + PWA safety snapshot) трябва да четат ЕДИН И
+  // СЪЩ вътрешен флаг — не два независимо поддържани Ludo-active detector-а.
+  const occurrences = (controllerSrc.match(/_ludoController !== null/g) ?? []).length
+  assert(occurrences >= 2, `_ludoController !== null трябва да се reuse-ва (getPwaUpdateSafetySnapshot + новия public getter), намерени ${occurrences} usage(-а)`)
+})
+
+await check('[38] Поведенчески: 5-те изисквани сценария (Belot/Ludo × ON/OFF + извън игра) дават правилното show/suppress решение', () => {
+  // Реimplement-ва ТОЧНО двете реални стъпки, verify-нати source-text по-горе:
+  //   1. isInActiveGame() = hasActiveRoom() || hasActiveLudoMatch()  (main.ts)
+  //   2. handleIncoming suppression: recipientInActiveGame && !enabled -> skip
+  //      (privateRoomCreatedNotification.ts, вече доказано в [27b]/[27f] по-горе)
+  function isInActiveGame(hasActiveRoom: boolean, hasActiveLudoMatch: boolean): boolean {
+    return hasActiveRoom || hasActiveLudoMatch
+  }
+  function willShowPopup(recipientInActiveGame: boolean, inGameNotificationsEnabled: boolean): boolean {
+    if (recipientInActiveGame && !inGameNotificationsEnabled) return false
+    return true
+  }
+
+  const scenarios: Array<{ label: string; hasActiveRoom: boolean; hasActiveLudoMatch: boolean; enabled: boolean; expectShown: boolean }> = [
+    { label: 'Belot активна + OFF -> без popup', hasActiveRoom: true, hasActiveLudoMatch: false, enabled: false, expectShown: false },
+    { label: 'Ludo активна + OFF -> без popup', hasActiveRoom: false, hasActiveLudoMatch: true, enabled: false, expectShown: false },
+    { label: 'Belot активна + ON -> popup показан', hasActiveRoom: true, hasActiveLudoMatch: false, enabled: true, expectShown: true },
+    { label: 'Ludo активна + ON -> popup показан', hasActiveRoom: false, hasActiveLudoMatch: true, enabled: true, expectShown: true },
+    { label: 'извън игра + OFF -> popup показан (настройката не влияе извън игра)', hasActiveRoom: false, hasActiveLudoMatch: false, enabled: false, expectShown: true },
+    { label: 'извън игра + ON -> popup показан (sanity)', hasActiveRoom: false, hasActiveLudoMatch: false, enabled: true, expectShown: true },
+  ]
+
+  for (const s of scenarios) {
+    const recipientInActiveGame = isInActiveGame(s.hasActiveRoom, s.hasActiveLudoMatch)
+    const shown = willShowPopup(recipientInActiveGame, s.enabled)
+    assertEqual(shown, s.expectShown, s.label)
+  }
 })
 
 console.log(`\n${passed} passed, ${failed} failed\n`)

@@ -1357,6 +1357,17 @@ export type LobbyFlowController = {
     isConnected: boolean
     hasActiveLudoMatch: boolean
   }
+  /**
+   * Реалното съществуване на активния Ludo gameplay controller-a (mirror на
+   * getPwaUpdateSafetySnapshot's hasActiveLudoMatch поле, вече изложен и
+   * самостоятелно тук за reuse извън PWA update safety контекста — виж
+   * main.ts's privateRoomCreatedNotification isInActiveGame wiring:
+   * "по време на игра" трябва да важи еднакво за Belot (activeRoom.hasActiveRoom())
+   * И Ludo, не само за Belot). _ludoController е null извън активен match,
+   * truthy докато end-game popup-ът стои отворен (виж коментара при
+   * _ludoController обявлението).
+   */
+  hasActiveLudoMatch: () => boolean
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
   forceLeaveAdminScreenForbidden: (message: string) => void
@@ -20418,6 +20429,7 @@ export function createLobbyFlowController(
       // стои отворен.
       hasActiveLudoMatch: _ludoController !== null,
     }),
+    hasActiveLudoMatch: () => _ludoController !== null,
     setAdminMonitoringSnapshot: (snapshot) => {
       state.adminMonitoringSnapshot = snapshot
       state.adminMonitoringErrorText = null
