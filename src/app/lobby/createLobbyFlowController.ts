@@ -3188,6 +3188,18 @@ export function createLobbyFlowController(
     showMessage: (message: string) => void
     requestExit: () => void
   } | null = null
+  // TOCTOU guard за openLudoLobbyOverlay() (виж task-а "Ludo games-list
+  // lifecycle fix" — доказан от одита race): guard-ът "if (_ludoLobbyController)
+  // return" е в началото на функцията, но самото присвояване на
+  // _ludoLobbyController се случва СЛЕД `await import(...)`. Ако две
+  // извиквания на openLudoLobbyOverlay() се застъпят (напр. reconciliation
+  // render() + explicit ensureLudoLobbyControllerAndRefreshGames() почти
+  // едновременно), и двете могат да минат null-проверката ПРЕДИ първата да е
+  // приключила import-а, водейки до два паралелни createLudoLobbyController()
+  // instance-а (вторият тихо презаписва reference-а към първия — orphaned
+  // duplicate DOM/state). Синхронен check-and-set ПРЕДИ първия await затваря
+  // прозореца изцяло.
+  let _isOpeningLudoLobbyOverlay = false
   options.root.addEventListener('click', (event) => {
     const target = event.target
     if (!(target instanceof Element)) return
@@ -3210,42 +3222,75 @@ export function createLobbyFlowController(
   // showLudoLobbyPage) — нормален in-shell екран под navbar-а, НЕ fixed
   // document.body overlay (предишната архитектура криеше navbar-а изцяло).
   async function openLudoLobbyOverlay(): Promise<void> {
-    if (_ludoLobbyController || !isLudoFeatureEnabled()) return
-    const profileId = options.getAuthSession?.()?.profile?.profileId
-    if (!profileId) {
-      state.errorText = 'Трябва да влезеш в профила си.'
-      state.currentScreen = 'more-games'
-      render()
-      return
+    // Синхронен check-and-set ПРЕДИ първия await — виж _isOpeningLudoLobbyOverlay
+    // doc коментара при декларацията му за пълния TOCTOU rationale.
+    if (_ludoLobbyController || _isOpeningLudoLobbyOverlay || !isLudoFeatureEnabled()) return
+    _isOpeningLudoLobbyOverlay = true
+    try {
+      const profileId = options.getAuthSession?.()?.profile?.profileId
+      if (!profileId) {
+        state.errorText = 'Трябва да влезеш в профила си.'
+        state.currentScreen = 'more-games'
+        render()
+        return
+      }
+      const mountRoot = options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+      if (!mountRoot) return
+      const { createLudoLobbyController } = await import('../games/ludo/createLudoLobbyController')
+      // mountRoot може вече да не е в живия DOM, ако между import()-a по-горе и
+      // тук е минал unrelated re-render, който е пресъздал root.innerHTML
+      // (нов placeholder node) — mount-ваме в актуалния, не в stale reference.
+      const liveMountRoot = mountRoot.isConnected
+        ? mountRoot
+        : options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
+      if (!liveMountRoot || _ludoLobbyController || state.currentScreen !== 'ludo-lobby') return
+      _ludoLobbyController = createLudoLobbyController({
+        root: liveMountRoot,
+        localProfileId: profileId,
+        stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
+        onBack: showMoreGamesPage,
+        onRefresh: () => options.onLudoRoomsOpen?.(),
+        onRefreshGames: () => options.onLudoGamesOpen?.(),
+        onCreate: (stake, playerCount, manualStart) => options.onLudoRoomCreate?.(stake, playerCount, manualStart),
+        onJoin: (roomId) => options.onLudoRoomJoin?.(roomId),
+        onLeave: () => options.onLudoRoomLeave?.(),
+        onKick: (targetProfileId) => options.onLudoRoomKick?.(targetProfileId),
+        onStart: () => options.onLudoRoomStart?.(),
+      })
+    } finally {
+      _isOpeningLudoLobbyOverlay = false
     }
-    const mountRoot = options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
-    if (!mountRoot) return
-    const { createLudoLobbyController } = await import('../games/ludo/createLudoLobbyController')
-    // mountRoot може вече да не е в живия DOM, ако между import()-a по-горе и
-    // тук е минал unrelated re-render, който е пресъздал root.innerHTML
-    // (нов placeholder node) — mount-ваме в актуалния, не в stale reference.
-    const liveMountRoot = mountRoot.isConnected
-      ? mountRoot
-      : options.root.querySelector<HTMLElement>('[data-ludo-lobby-mount="1"]')
-    if (!liveMountRoot || _ludoLobbyController || state.currentScreen !== 'ludo-lobby') return
-    _ludoLobbyController = createLudoLobbyController({
-      root: liveMountRoot,
-      localProfileId: profileId,
-      stakes: state.matchRooms.filter((room) => room.isEnabled).map((room) => room.stakeAmount),
-      onBack: showMoreGamesPage,
-      onRefresh: () => options.onLudoRoomsOpen?.(),
-      onRefreshGames: () => options.onLudoGamesOpen?.(),
-      onCreate: (stake, playerCount, manualStart) => options.onLudoRoomCreate?.(stake, playerCount, manualStart),
-      onJoin: (roomId) => options.onLudoRoomJoin?.(roomId),
-      onLeave: () => options.onLudoRoomLeave?.(),
-      onKick: (targetProfileId) => options.onLudoRoomKick?.(targetProfileId),
-      onStart: () => options.onLudoRoomStart?.(),
-    })
   }
 
   function closeLudoLobbyOverlay(): void {
     _ludoLobbyController?.destroy()
     _ludoLobbyController = null
+  }
+
+  // Гарантиран fresh refresh на "Играещи"/"Приключили" при връщане към Ludo
+  // lobby (виж onGameEndAcknowledged/ludo_match_left по-долу) — доказан от
+  // одита lifecycle gap: _ludoLobbyController може да е null (destroy-нат при
+  // ludo_game_started) през ЦЕЛИЯ мач, и в такъв случай финалния
+  // ludo_games_list broadcast (изпратен при match finish) се губи тихо заради
+  // optional chaining (_ludoLobbyController?.setGames(...)) — без опашка/
+  // retry. Тази функция НЕ пази/seed-ва стар games state — винаги презарежда
+  // директно от сървъра/DB, което е достатъчно, защото DB записът никога не
+  // се губи (виж ludoRoomMatchStore.ts — само broadcast push-ът е бил изгубен,
+  // не самите данни).
+  //
+  // Точно ЕДИН request_ludo_games_list на извикване:
+  //  - ако controller-ът вече съществува (напр. случайно пре-mount-нат по
+  //    време на мача от reconciliation render()-а) → explicit
+  //    options.onLudoGamesOpen?.() тук, защото createLudoLobbyController()
+  //    пуска onRefreshGames() САМО в собствения си constructor;
+  //  - ако не съществува → openLudoLobbyOverlay() ще го създаде, и НЕГОВИЯТ
+  //    init вече праща заявката — затова тук НЕ дублираме извикването.
+  function ensureLudoLobbyControllerAndRefreshGames(): void {
+    if (_ludoLobbyController) {
+      options.onLudoGamesOpen?.()
+    } else {
+      void openLudoLobbyOverlay()
+    }
   }
 
   async function openLudoGameOverlay(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
@@ -3303,6 +3348,12 @@ export function createLobbyFlowController(
         closeLudoGameOverlay()
         if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
         options.onLudoRoomsOpen?.()
+        // Виж ensureLudoLobbyControllerAndRefreshGames doc коментара —
+        // гарантира, че "Играещи"/"Приключили" отразяват DB веднага при
+        // връщане, независимо дали _ludoLobbyController е останал жив през
+        // мача и независимо дали финалният ludo_games_list broadcast е бил
+        // изгубен, докато е бил null.
+        ensureLudoLobbyControllerAndRefreshGames()
       },
     })
   }
@@ -17926,6 +17977,10 @@ export function createLobbyFlowController(
     if (message.type === 'ludo_match_left') {
       closeLudoGameOverlay()
       if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
+      // Explicit "Изход"/forfeit по време на мач — same lifecycle gap като
+      // natural finish (виж onGameEndAcknowledged/ensureLudoLobbyControllerAndRefreshGames
+      // doc коментара), затова same guaranteed fresh refresh при връщане.
+      ensureLudoLobbyControllerAndRefreshGames()
       return true
     }
     if (message.type === 'ludo_emoji_reaction') {
