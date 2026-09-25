@@ -339,6 +339,7 @@ import type {
   PrivateRoomMatchSnapshot,
   LudoGamesListMessage,
   LudoRoomMatchSnapshot,
+  LudoSpectatorGameStateMessage,
 } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -682,6 +683,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'ludo_roll_request':
     case 'ludo_move_request':
     case 'ludo_reclaim_request':
+    case 'watch_ludo_match':
+    case 'unwatch_ludo_match':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
     case 'start_private_room':
@@ -4406,6 +4409,55 @@ function toLudoGameProtocolSnapshot(snapshot: LudoMatchSnapshot) {
   }
 }
 
+// ─── Ludo spectator subscriptions ("Гледай", Ludo Spectator Mode Phase 1) ──
+// Read-only subscription към ЧУЖД активен match — mirror на established
+// topicMessageSubscriberTopicIdByConnectionId/topicMessageSubscribersByTopicId
+// pattern-а (Topics infrastructure по-горе в файла): скалар map, защото една
+// connection гледа максимум ЕДИН match наведнъж (точно като "гледам точно 1
+// тема наведнъж"), плюс reverse Set за O(1) broadcast fan-out по matchId.
+//
+// КРИТИЧНО: тази инфраструктура НИКОГА не докосва ludoMatchRuntime.ts
+// (profileToMatch/match.players/validate) — spectator subscription е чисто
+// additive read-model отгоре на съществуващия runtime, никога не превръща
+// spectator-а в participant. roll/move/reclaim/leave продължават да минават
+// изключително през validate()-ъ там, недокоснат от този Map.
+const ludoSpectatorMatchIdByConnectionId = new Map<ConnectionId, string>()
+const ludoSpectatorsByMatchId = new Map<string, Set<ConnectionId>>()
+
+// Idempotent — safe за извикване дори ако connection-ът в момента не гледа
+// нищо (unwatch на вече unsubscribe-нат spectator, disconnect на connection
+// без активен watch и т.н., mirror на unsubscribe_topic_messages guard-а).
+function unsubscribeLudoSpectator(connectionId: ConnectionId): void {
+  const matchId = ludoSpectatorMatchIdByConnectionId.get(connectionId)
+  if (matchId === undefined) return
+  const subscribers = ludoSpectatorsByMatchId.get(matchId)
+  subscribers?.delete(connectionId)
+  if (subscribers && subscribers.size === 0) ludoSpectatorsByMatchId.delete(matchId)
+  ludoSpectatorMatchIdByConnectionId.delete(connectionId)
+}
+
+// Reuse-ва СЪЩИЯ toLudoGameProtocolSnapshot() shape като participant
+// broadcast-а по-долу — единствената разлика е липсата на walletBalance/
+// prizeAmount полета (виж LudoSpectatorGameStateMessage doc коментара в
+// messageTypes.ts: тези са participant-only финансови полета, spectator-ът
+// никога не залага/печели от match-а).
+function buildLudoSpectatorGameStateMessage(snapshot: LudoMatchSnapshot): LudoSpectatorGameStateMessage {
+  return { type: 'ludo_spectator_game_state', snapshot: toLudoGameProtocolSnapshot(snapshot) }
+}
+
+// Извиква се допълнително от onSnapshot по-долу (виж call site-а в
+// ludoMatchRuntime-a callback-а) — НЕ заменя/променя participant broadcast
+// loop-а, чисто additive fan-out към регистрираните spectators на този
+// конкретен matchId. No-op ако няма spectators (Map lookup, без allocation).
+function broadcastLudoSpectatorSnapshot(snapshot: LudoMatchSnapshot): void {
+  const subscribers = ludoSpectatorsByMatchId.get(snapshot.matchId)
+  if (!subscribers || subscribers.size === 0) return
+  const message = buildLudoSpectatorGameStateMessage(snapshot)
+  for (const connectionId of subscribers) {
+    safeSendToConnection(connectionId, message)
+  }
+}
+
 // Settlement hook — извиква се от onSnapshot ПРЕДИ per-player broadcast-а,
 // точно веднъж когато match-ът стигне 'finished' (естествен win reducer
 // transition ИЛИ forfeit през ludoMatchRuntime.leave() — и двата пътя минават
@@ -4524,6 +4576,12 @@ const ludoMatchRuntime = createLudoMatchRuntime({
         prizeAmount: winnerPayout && winnerPayout.profileId === player.profileId ? winnerPayout.prizeAmount : null,
       })
     }
+    // Spectator fan-out ("Гледай", Phase 1) — чисто additive, СЛЕД
+    // participant broadcast-а по-горе, никога не заменя/променя поведението
+    // му. Spectators получават СЪЩИЯ authoritative snapshot, без walletBalance/
+    // prizeAmount (виж buildLudoSpectatorGameStateMessage/
+    // LudoSpectatorGameStateMessage doc коментарите).
+    broadcastLudoSpectatorSnapshot(snapshot)
   },
   // Diagnostic-only observed removal — извиква се точно СЛЕД реалния
   // matches.delete() в ludoMatchRuntime.ts::scheduleFinishedCleanup (виж
@@ -21671,6 +21729,54 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
+      // Spectator mode ("Гледай", Ludo Spectator Mode Phase 1) — read-only
+      // subscription към ЧУЖД активен match. НИКОГА не докосва
+      // ludoMatchRuntime.ts (profileToMatch/match.players/validate) —
+      // spectator-ът никога не става participant, само получава допълнителен
+      // snapshot broadcast (виж broadcastLudoSpectatorSnapshot по-горе).
+      if (message.type === 'watch_ludo_match') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (!latestConnection?.profileId) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_participant', message: 'Трябва да влезеш в профила си.' })
+          return
+        }
+        // snapshotForMatch() е read-only lookup по matchId, БЕЗ никаква
+        // participant/profileToMatch проверка (виж ludoMatchRuntime.ts) —
+        // точно затова е safe за spectator use, за разлика от reconnect()/
+        // requestState(), които са profileToMatch-scoped.
+        const snapshot = ludoMatchRuntime.snapshotForMatch(message.matchId)
+        if (!snapshot) {
+          safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_found', message: 'Ludo играта не беше намерена.' })
+          return
+        }
+        // Една connection гледа максимум ЕДИН match наведнъж (виж
+        // ludoSpectatorMatchIdByConnectionId doc коментара) — маха стария
+        // subscription, ако различен matchId, преди да регистрира новия.
+        const previousMatchId = ludoSpectatorMatchIdByConnectionId.get(connection.id)
+        if (previousMatchId !== undefined && previousMatchId !== message.matchId) {
+          unsubscribeLudoSpectator(connection.id)
+        }
+        ludoSpectatorMatchIdByConnectionId.set(connection.id, message.matchId)
+        let spectators = ludoSpectatorsByMatchId.get(message.matchId)
+        if (spectators === undefined) {
+          spectators = new Set()
+          ludoSpectatorsByMatchId.set(message.matchId, spectators)
+        }
+        spectators.add(connection.id)
+        safeSendToConnection(connection.id, buildLudoSpectatorGameStateMessage(snapshot))
+        return
+      }
+
+      if (message.type === 'unwatch_ludo_match') {
+        // Idempotent — mirror на unsubscribe_topic_messages: no-op ако
+        // connection-ът не гледа (вече, или никога не е гледал) точно този
+        // matchId.
+        if (ludoSpectatorMatchIdByConnectionId.get(connection.id) === message.matchId) {
+          unsubscribeLudoSpectator(connection.id)
+        }
+        return
+      }
+
       if (message.type === 'send_ludo_emoji_reaction') {
         const latestConnection = getConnectionById(serverState, connection.id)
         if (!latestConnection?.profileId) return
@@ -23250,6 +23356,11 @@ wsServer.on('connection', (socket, request) => {
       topicMessageSubscribersByTopicId.get(disconnectedTopicId)?.delete(connection.id)
       topicMessageSubscriberTopicIdByConnectionId.delete(connection.id)
     }
+    // Spectator mode ("Гледай") disconnect cleanup — mirror на topic
+    // subscription cleanup-а точно над тук. Никога не докосва
+    // profileToMatch/match.players (участническо membership) — само
+    // допълнителния read-only spectator Map.
+    unsubscribeLudoSpectator(connection.id)
 
     try {
       if (isServerShuttingDown) {

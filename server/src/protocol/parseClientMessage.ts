@@ -529,6 +529,19 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'send_ludo_emoji_reaction', matchId, emojiId }
     }
 
+    // Spectator mode ("Гледай", Ludo Spectator Mode Phase 1) — same matchId
+    // validation style като leave_ludo_match по-горе (единствено поле, no
+    // extra numeric/enum fields).
+    if (parsed.type === 'watch_ludo_match') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      return matchId === null ? null : { type: 'watch_ludo_match', matchId }
+    }
+
+    if (parsed.type === 'unwatch_ludo_match') {
+      const matchId = normalizeRequiredText(parsed.matchId)
+      return matchId === null ? null : { type: 'unwatch_ludo_match', matchId }
+    }
+
     if (parsed.type === 'kick_from_ludo_room') {
       const profileId = normalizeRequiredText(parsed.profileId)
       return profileId === null ? null : { type: 'kick_from_ludo_room', profileId }

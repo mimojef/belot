@@ -251,6 +251,13 @@ export type ClientMessage =
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
+  // Spectator mode ("Гледай", виж task-а "Ludo Spectator Mode Phase 1") —
+  // read-only subscription към ЧУЖД активен match, НЕ participant action.
+  // Една connection гледа максимум ЕДИН match наведнъж (виж index.ts
+  // ludoSpectatorMatchIdByConnectionId — скалар, mirror на Topics
+  // subscription модела).
+  | { type: 'watch_ludo_match'; matchId: string }
+  | { type: 'unwatch_ludo_match'; matchId: string }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -1021,6 +1028,25 @@ export type LudoGameStateMessage = {
   walletBalance: number
   prizeAmount: number | null
 }
+
+// Spectator mode ("Гледай", Ludo Spectator Mode Phase 1) — reuse-ва СЪЩИЯ
+// LudoGameStateSnapshot 1:1 (виж audit-а: connectionId вече е stripped на
+// ludoMatchRuntime ниво, LudoGameState е чисто rule-state, Ludo е perfect-
+// information игра — няма скрита за spectator информация вътре в snapshot-а
+// самия). Единствената разлика спрямо LudoGameStartedMessage/
+// LudoGameStateMessage: НИКОГА walletBalance/prizeAmount — тези са
+// participant-only финансови полета, изчислени per-recipient server-side
+// (виж index.ts onSnapshot broadcast loop-а), нямат смисъл и не бива да
+// изтичат към spectator, който никога не залага/печели от този match.
+// Един тип за initial (директен отговор на watch_ludo_match) И за всеки
+// следващ live update (spectator broadcast loop) — spectator-ът винаги
+// презаписва локалния си state с authoritative snapshot-а, никога не
+// replay-ва история (виж createLudoFlowController.ts constructor seeding
+// pattern-а, презизползван непроменен за spectator в бъдеща Phase).
+export type LudoSpectatorGameStateMessage = {
+  type: 'ludo_spectator_game_state'
+  snapshot: LudoGameStateSnapshot
+}
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 // Realtime social reaction — transient presentation only, НИКОГА не се
 // персистира в LudoGameState/snapshot (виж ludoMatchRuntime.ts handler-а —
@@ -1302,6 +1328,7 @@ export type ServerMessage =
   | LudoRoomStartedMessage
   | LudoGameStartedMessage
   | LudoGameStateMessage
+  | LudoSpectatorGameStateMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
   | PrivateRoomUpdatedMessage
