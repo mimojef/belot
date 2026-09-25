@@ -13,14 +13,12 @@ import {
   QUADRANT_SHIFT,
   HOME_QUADRANT_SPAN,
 } from './board/renderLudoBoard'
-import { ludoGridPointForCellId } from './board/ludoBoardGeometry'
-import { mapLudoColorToViewerQuadrant, rotateLudoGridPointForViewer, type LudoViewerQuadrant } from './board/ludoPerspective'
+import { mapLudoColorToViewerQuadrant, type LudoViewerQuadrant } from './board/ludoPerspective'
 import { renderLudoPiecesByCell } from './pieces/renderLudoPieces'
 import { renderLudoPlayerPanel } from './pieces/renderLudoPlayerPanel'
 import type { LudoPlayerLeaveStatus, LudoEmojiReactionDirection } from './pieces/renderLudoPlayerPanel'
 import { renderLudoBottomBar } from './renderLudoBottomBar'
 import { renderLudoAnimationStyles } from './ludoAnimationStyles'
-import { planLudoHighlights, renderLudoNormalHighlight, renderLudoCaptureImpactRing } from './pieces/renderLudoHighlights'
 import { LUDO_COLORS } from './ludoTypes'
 import type { LudoColor, LudoLegalMove, LudoPiece, LudoPlayer } from './ludoTypes'
 import type { LudoTurnPhase } from './engine/ludoEngineTypes'
@@ -478,39 +476,26 @@ function renderLudoHeader(useMobileLayout: boolean): string {
   `
 }
 
-// Прилага highlight/piece HTML в build-времеви markup — извикван след
+// Прилага piece HTML в build-времеви markup — извикван след
 // createLudoGameScreen mount-не в DOM; засега прост helper за инициален
 // render (следващ patch-driven re-render идва с интерактивност).
+//
+// Presentation-only visual hints за legal moves/capture (target cell glow,
+// selectable-piece ring, capture impact ring) са премахнати нарочно (виж
+// task-а "премахни визуалните подсказки след хвърляне на зара") —
+// state.legalMoves продължава да се подава непроменено на
+// renderLudoPiecesByCell() по-долу, което пази selectable/clickable
+// поведението (data-ludo-piece-selectable, pointer-events, click handler)
+// изцяло непокътнато; премахнати са само декоративните overlay-и, изградени
+// върху planLudoHighlights()/renderLudoNormalHighlight()/
+// renderLudoCaptureImpactRing() (виж pieces/renderLudoHighlights.ts —
+// exported helper-ите остават дефинирани там, само вече не се извикват
+// оттук).
 export function applyLudoBoardContent(root: ParentNode, state: LudoGameScreenState): void {
   const localColor = state.localColor
   const pieceFragments = renderLudoPiecesByCell(state.pieces, state.legalMoves, localColor)
   for (const { cellId, html } of pieceFragments) {
     const container = root.querySelector(`[data-ludo-cell-pieces="${cellId}"]`)
     if (container) container.innerHTML = html
-  }
-
-  const highlights = planLudoHighlights(state.legalMoves)
-  for (const cellId of highlights.normalCellIds) {
-    const el = root.querySelector(`[data-ludo-cell-highlight="${cellId}"]`)
-    if (el) {
-      el.innerHTML = renderLudoNormalHighlight()
-      el.removeAttribute('hidden')
-    }
-  }
-
-  // Capture ring-овете се рендират в board-level overlay (data-ludo-effects-
-  // overlay), НЕ вътре в target клетката — иначе съседни grid клетки,
-  // идващи след нея в document order, скриват изтичащата част на ring-а
-  // (CSS Grid stacking е по document order при еднакъв z-index). Overlay-ят
-  // е absolute-positioned над цялата дъска с висок z-index, затова ring-ът
-  // остава изцяло видим независимо къде е target клетката. Grid точката
-  // минава през същия viewer rotation като board render-а (иначе ring-ът
-  // би застанал върху грешна клетка при завъртяна perspective).
-  const effectsOverlay = root.querySelector('[data-ludo-effects-overlay="1"]')
-  if (effectsOverlay) effectsOverlay.innerHTML = ''
-  for (const cellId of highlights.captureCellIds) {
-    if (!effectsOverlay) continue
-    const point = rotateLudoGridPointForViewer(ludoGridPointForCellId(cellId), localColor)
-    effectsOverlay.insertAdjacentHTML('beforeend', renderLudoCaptureImpactRing(point))
   }
 }

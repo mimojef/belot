@@ -114,7 +114,6 @@ export function renderLudoPieceHtml(
         ${extraStyle}
       "
     >
-      ${selectable ? renderSelectablePieceRing() : ''}
       ${renderLudoPieceSvg(hex, uid, selectable, rotationDeg, count > 1 ? count : null)}
     </div>
   `
@@ -220,57 +219,6 @@ function renderLudoPieceSvg(
           transform="rotate(${-rotationDeg} ${LUDO_PIECE_MEDALLION_CENTER.cx} ${LUDO_PIECE_MEDALLION_CENTER.cy})"
         >${medallionCount}</text>
       `}
-    </svg>
-  `
-}
-
-// Selectable marker (виж task-а — референтна Ludo King снимка: плътен
-// тъмен/кафяв кръг directно зад пионката, изпълващ клетката, с
-// черно-бял сегментиран пръстен отвън, който се върти) — заменя
-// предишния тънък едноцветен dashed ring. Два слоя в ЕДИН SVG:
-//   1. Плътен тъмен фонов кръг (static, не се върти) — визуално
-//      "изпълва" клетката зад пионката, точно като референтния дизайн.
-//   2. Външен ring, редуващ черни/бели сегменти (stroke-dasharray с
-//      равни по дължина дъги, различен цвят всяка) — rotating чрез CSS
-//      animation. Двата сегмента (черен+бял) са отделни <circle> с
-//      допълващ се dasharray offset, за да се редуват равномерно.
-// viewBox-базиран SVG, скалира се чисто с piece размера, работи еднакво
-// desktop/mobile. z-index:0 (document order) държи целия marker ЗАД
-// piece SVG-то (рендирано веднага след него в родителския div).
-function renderSelectablePieceRing(): string {
-  return `
-    <svg
-      viewBox="0 0 100 100"
-      style="
-        position:absolute;
-        left:50%; top:50%;
-        transform:translate(-50%, -50%);
-        width:132%;
-        aspect-ratio:1/1;
-        overflow:visible;
-        pointer-events:none;
-        z-index:0;
-      "
-    >
-      <circle cx="50" cy="50" r="36" fill="#4a2f1c"></circle>
-      <g style="transform-origin:50px 50px; animation:ludo-dice-arrows-spin 1.6s linear infinite;">
-        <circle
-          cx="50" cy="50" r="46"
-          fill="none"
-          stroke="#f4f4f4"
-          stroke-width="9"
-          stroke-dasharray="48.2 48.2"
-          stroke-dashoffset="0"
-        ></circle>
-        <circle
-          cx="50" cy="50" r="46"
-          fill="none"
-          stroke="#161616"
-          stroke-width="9"
-          stroke-dasharray="48.2 48.2"
-          stroke-dashoffset="48.2"
-        ></circle>
-      </g>
     </svg>
   `
 }
