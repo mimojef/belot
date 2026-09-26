@@ -15583,17 +15583,37 @@ export function createLobbyFlowController(
 
     state.authSubmitInFlight = false
 
-    if (result.errorText !== null || !result.pending) {
+    if (result.errorText !== null) {
       const el = options.root.querySelector<HTMLElement>('[data-lobby-auth-error="1"]')
-      if (el) { el.textContent = result.errorText ?? 'Регистрацията не беше успешна.'; el.style.display = '' }
+      if (el) { el.textContent = result.errorText; el.style.display = '' }
       return
     }
 
-    // Email verification pending-first flow (production report-а
-    // "REGISTRATION FLOW") — успешна регистрация вече НЕ създава сесия
-    // директно, отваря verification popup-а вместо да затваря auth modal-а
-    // с authenticated state.
-    openRegistrationVerificationPopup(result.pending)
+    if (result.pending) {
+      // Email verification pending-first flow (production report-а
+      // "REGISTRATION FLOW") — успешна регистрация вече НЕ създава сесия
+      // директно, отваря verification popup-а вместо да затваря auth
+      // modal-а с authenticated state.
+      openRegistrationVerificationPopup(result.pending)
+      return
+    }
+
+    // Direct mode (registration_verification_mode='direct',
+    // server-authoritative — виж task-а §3/§9). errorText===null И
+    // !result.pending -> регистрацията е завършена ВЕДНАГА,
+    // options.onRegisterSubmit-ът (main.ts's submitRegisterRequest) вече е
+    // извикал applyNewAuthSession() ВЪТРЕ в себе си (mirror на
+    // submitLoginRequest()'s pattern) — тук просто затваряме auth modal-а и
+    // re-sync-ваме локалния state от вече обновената сесия, ИДЕНТИЧНО на
+    // submitLogin()'s success tail по-горе (никога verification popup тук).
+    state.authModalMode = 'closed'
+    state.authErrorText = null
+    const authSession = options.getAuthSession?.() ?? null
+    if (authSession !== null) {
+      state.displayName = authSession.profile.displayName
+      state.localAvatarUrl = authSession.profile.avatarUrl
+    }
+    render()
   }
 
   let registrationVerificationCountdownIntervalId: ReturnType<typeof setInterval> | null = null

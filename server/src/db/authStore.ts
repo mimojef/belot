@@ -37,24 +37,59 @@ export type AuthSessionSnapshot = {
 }
 
 /**
+ * Configurable registration mode (Admin -> Настройки -> "Метод за
+ * регистрация", виж adminSettingsStore.ts registrationVerificationMode) —
+ * SERVER-AUTHORITATIVE, четено live на всяка register() заявка, клиентът
+ * никога не го избира directno.
+ *
+ * 'email_code' (default) — СЪЩИЯТ, напълно непроменен pending-first flow:
+ * register() създава pending_registrations ред, връща
+ * {mode:'email_code', pendingRegistrationId, rawCode, maskedEmail,
+ * expiresAt} — акаунтът се материализира едва във verifyRegistrationEmail().
+ *
+ * 'direct' — email+име+парола+повтори -> account/profile/wallet/progress се
+ * материализират ВЕДНАГА, БЕЗ pending_registrations ред, БЕЗ verification
+ * code/email — register() връща {mode:'direct', sessionToken, session}
+ * directno (same shape като login()/verifyRegistrationEmail()'s success).
+ * Виж registerDirect()/materializeAccountAndProfileInOpenTransaction() за
+ * implementation-а — SAME materialization функция като email_code flow-а,
+ * само conflict-проверките преди нея се различават (виж registerDirect()'s
+ * doc коментар).
+ */
+export type RegistrationVerificationMode = 'email_code' | 'direct'
+
+/**
  * Email verification pending-first registration flow — виж register()'s doc
  * коментар за пълната policy. rawCode присъства САМО в резултата на
  * register()/resendRegistrationVerificationCode() (in-memory, връща се на
  * caller-а за да го изпрати по email) — НИКОГА не се логва, НИКОГА не се
  * връща в HTTP JSON response-а към клиента (виж registrationVerificationHandlers.ts).
+ *
+ * 'direct' success клонът (RegistrationVerificationMode='direct') връща
+ * sessionToken/session directno — index.ts's /api/auth/register handler
+ * branch-ва на `mode`, за да реши дали да изпрати verification email
+ * (email_code) или да отговори directno с {ok:true, session} (direct),
+ * mirror на login()/verifyRegistrationEmail()'s response shape.
  */
 export type PendingRegistrationCreatedResult =
   | {
       ok: true
+      mode: 'email_code'
       pendingRegistrationId: string
       rawCode: string
       maskedEmail: string
       expiresAt: string
     }
   | {
+      ok: true
+      mode: 'direct'
+      sessionToken: string
+      session: AuthSessionSnapshot
+    }
+  | {
       ok: false
       message: string
-      code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' | 'DISPLAY_NAME_TAKEN'
+      code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' | 'DISPLAY_NAME_TAKEN' | 'RATE_LIMITED'
     }
 
 export type ResendRegistrationCodeResult =
@@ -651,6 +686,19 @@ type CreateAuthStoreOptions = {
    * PASSWORD_RESET_RATE_LIMIT_SECRET за zero-new-config reuse).
    */
   registrationVerificationCodeSecret?: string
+  /**
+   * Server-authoritative registration mode (Admin -> Настройки, виж
+   * RegistrationVerificationMode doc коментара по-горе и
+   * adminSettingsStore.ts) — mirror на getSignupBonusYellowCoins injection
+   * pattern-а: authStore.ts умишлено не import-ва adminSettingsStore
+   * directno, вика тази callback-нута зависимост вместо това. Четена LIVE
+   * (без кеш) на ВСЯКА register() заявка — index.ts's wiring е
+   * `() => adminSettingsStore.getSettings().registrationVerificationMode`.
+   * Липсва/undefined -> defaults 'email_code' (виж register()'s call site) —
+   * safe fallback за тестове без explicit wiring, същия default като
+   * adminSettingsStore-овия seed/fallback.
+   */
+  getRegistrationVerificationMode?: () => RegistrationVerificationMode
 }
 
 type AccountRow = {
@@ -750,6 +798,20 @@ const PENDING_REGISTRATION_UPDATE_NAME_IP_WINDOW_SECONDS = 60 * 60
 /** Email→page verification status lookup (dedicated page) — IP-scoped, generous (read-only, no secrets, opaque unguessable ID), само за hygiene mirror на останалите registration endpoints, не primary defense. */
 const PENDING_REGISTRATION_STATUS_IP_MAX_PER_WINDOW = 60
 const PENDING_REGISTRATION_STATUS_IP_WINDOW_SECONDS = 60 * 60
+/**
+ * Direct-mode registration (registration_verification_mode='direct', виж
+ * RegistrationVerificationMode) — IP-scoped anti-abuse cap. ЕДИНСТВЕНАТА
+ * friction за direct mode (няма code/email стъпка изобщо да throttle-не
+ * automated abuse, за разлика от email_code — там spammer-ът все пак трябва
+ * да контролира реален inbox), затова по-консервативен от resend/verify-ip
+ * лимитите по-горе (20-30/час), но НЕ толкова тесен, че на практика да
+ * възстанови "едно устройство = един профил" (изрично забранено правило,
+ * виж registerDirect()'s doc коментар и task-а §6/§7) — типична споделена
+ * IP (NAT/mobile carrier/офис) с неколцина различни хора, регистриращи се
+ * близо във времето, не бива да удари лимита.
+ */
+const REGISTRATION_DIRECT_IP_MAX_PER_WINDOW = 10
+const REGISTRATION_DIRECT_IP_WINDOW_SECONDS = 60 * 60
 
 /**
  * Registration anti-evasion gate (четвърти follow-up brief §2 — "REGISTRATION
@@ -1371,12 +1433,91 @@ export async function createAuthStore(
   /**
    * Реалната account/profile/wallet/progress/visitor-history материализация
    * — извлечена от старата (pre-pending-first) register() имплементация
-   * БЕЗ функционална промяна, само преместена, за да може да се извика от
-   * verifyRegistrationEmail() ВЪТРЕ в НЕГОВАТА собствена BEGIN IMMEDIATE
-   * транзакция (caller-ът управлява BEGIN/COMMIT/ROLLBACK — тази функция
-   * само хвърля при конфликт, никога сама не пипа транзакцията). Same
-   * "one choke point" account-creation логика като преди (spec §"ВАЖНО ЗА
-   * EXISTING ACCOUNTS" — никаква паралелна account-creation пътека).
+   * БЕЗ функционална промяна (само преместена, после разцепена на shared
+   * "insert only" building block, виж configurable-registration-mode audit
+   * задачата §4). ЕДИНСТВЕНОТО място, което пише в accounts/profiles/
+   * profile_wallets/profile_progress/visitor_registration_bindings за нова
+   * регистрация — вика се и от verifyRegistrationEmail() (email_code, чрез
+   * createVerifiedAccountAndProfileInOpenTransaction по-долу), и от
+   * registerDirect() (direct mode) — "one choke point account-creation
+   * логика", никаква паралелна account-creation пътека, независимо от mode.
+   * Caller-ът управлява BEGIN/COMMIT/ROLLBACK И всички conflict-проверки
+   * ПРЕДИ да я извика — тази функция самата НИКОГА не проверява конфликти,
+   * само пише (assumption: caller вече е потвърдил че email/display name са
+   * свободни в текущата отворена транзакция).
+   */
+  function materializeAccountAndProfileInOpenTransaction(input: {
+    normalizedEmail: string
+    passwordHash: string
+    canonicalDisplayName: string
+    normalizedDisplayName: string
+    normalizedUsername: string
+    gender: 'male' | 'female' | null
+    visitorId: string
+    ipAddress: string | null
+    userAgent: string | null
+  }): { accountRow: AccountRow; profileId: ProfileId } {
+    const accountId = randomUUID()
+    const profileId = randomUUID()
+
+    insertAccountStatement.run(accountId, input.normalizedEmail, input.passwordHash)
+    insertProfileStatement.run(
+      profileId,
+      accountId,
+      input.canonicalDisplayName,
+      input.normalizedUsername,
+      input.canonicalDisplayName,
+      input.normalizedDisplayName,
+      input.gender,
+    )
+    insertWalletStatement.run(
+      profileId,
+      Math.max(0, Math.trunc(options.getSignupBonusYellowCoins?.() ?? 0)),
+    )
+    insertProgressStatement.run(profileId)
+
+    // Immediate visitor/profile binding (follow-up brief §2) — ВЪТРЕ в
+    // СЪЩАТА транзакция/connection като account/profile INSERT-ите по-горе.
+    // Виж insertVisitorRegistrationBindingStatement doc коментара по-горе —
+    // "OR IGNORE", не блокира/хвърля при вече съществуващ binding за този
+    // visitor_id (product policy: MULTIPLE PROFILES FROM SAME DEVICE Е
+    // ПОЗВОЛЕНО — виж configurable-registration-mode audit §6; тази "OR
+    // IGNORE" INSERT е чисто archival "first-registered-profile-for-this-
+    // visitor" marker, НЕ enforcement, важи еднакво за email_code И direct).
+    // site_visit_events (insertRegistrationVisitorEventStatement) остава
+    // authoritative историческия trail за admin linked-profile detection
+    // (adminProfileRiskStore.ts) — записва по един ред на ВСЯКА успешна
+    // регистрация, независимо от mode.
+    insertVisitorRegistrationBindingStatement.run(input.visitorId, profileId)
+    insertRegistrationVisitorRecordStatement.run(input.visitorId, profileId, profileId)
+    insertRegistrationVisitorEventStatement.run(
+      randomUUID(),
+      input.visitorId,
+      profileId,
+      input.ipAddress,
+      input.userAgent,
+    )
+
+    const accountRow: AccountRow = {
+      account_id: accountId,
+      email: input.normalizedEmail,
+      password_hash: input.passwordHash,
+      role: 'player',
+      status: 'active',
+      created_at: new Date().toISOString(),
+    }
+
+    return { accountRow, profileId }
+  }
+
+  /**
+   * email_code verify-time материализация — ИДЕНТИЧНО поведение като преди
+   * разцепването (виж materializeAccountAndProfileInOpenTransaction doc
+   * коментара по-горе за пълния rationale защо е extracted): същите
+   * conflict-проверки (email uniqueness, FINAL PLAN v5 pending-ownership
+   * reservation check, profiles-table name conflict), само самите INSERT-и
+   * вече живеят в shared helper-а. Извикана от verifyRegistrationEmail()
+   * ВЪТРЕ в НЕГОВАТА собствена BEGIN IMMEDIATE транзакция.
    */
   function createVerifiedAccountAndProfileInOpenTransaction(input: {
     normalizedEmail: string
@@ -1429,53 +1570,155 @@ export async function createAuthStore(
       return { conflict: 'display_name_taken' }
     }
 
-    const accountId = randomUUID()
-    const profileId = randomUUID()
-
-    insertAccountStatement.run(accountId, input.normalizedEmail, input.passwordHash)
-    insertProfileStatement.run(
-      profileId,
-      accountId,
-      canonicalDisplayName,
-      normalizedUsername,
+    return materializeAccountAndProfileInOpenTransaction({
+      normalizedEmail: input.normalizedEmail,
+      passwordHash: input.passwordHash,
       canonicalDisplayName,
       normalizedDisplayName,
-      input.gender,
-    )
-    insertWalletStatement.run(
-      profileId,
-      Math.max(0, Math.trunc(options.getSignupBonusYellowCoins?.() ?? 0)),
-    )
-    insertProgressStatement.run(profileId)
+      normalizedUsername,
+      gender: input.gender,
+      visitorId: input.visitorId,
+      ipAddress: input.ipAddress,
+      userAgent: input.userAgent,
+    })
+  }
 
-    // Immediate visitor/profile binding (follow-up brief §2) — ВЪТРЕ в
-    // СЪЩАТА транзакция/connection като account/profile INSERT-ите по-горе.
-    // Виж insertVisitorRegistrationBindingStatement doc коментара по-горе —
-    // "OR IGNORE", не блокира/хвърля при вече съществуващ binding за този
-    // visitor_id. site_visit_events (insertRegistrationVisitorEventStatement)
-    // остава authoritative историческия trail за admin linked-profile
-    // detection (adminProfileRiskStore.ts) — записва по един ред на ВСЯКА
-    // верифицирана регистрация.
-    insertVisitorRegistrationBindingStatement.run(input.visitorId, profileId)
-    insertRegistrationVisitorRecordStatement.run(input.visitorId, profileId, profileId)
-    insertRegistrationVisitorEventStatement.run(
-      randomUUID(),
-      input.visitorId,
-      profileId,
-      input.ipAddress,
-      input.userAgent,
-    )
+  /**
+   * Direct-mode registration (registration_verification_mode='direct', виж
+   * RegistrationVerificationMode) — email+име+парола -> account/profile
+   * ВЕДНАГА, БЕЗ pending_registrations ред, БЕЗ verification code/email.
+   * Извикана от register() ПОСЛЕ споделената validation/existingAccount
+   * проверка там (email format/normalize, password, display-name
+   * format/normalize, visitorId format, duplicate email — виж register()'s
+   * doc коментар) — тук остават само conflict-проверките, СПЕЦИФИЧНИ за
+   * direct (различни от email_code verify-owneship модела, защото няма
+   * pending ред, който да docaже ownership):
+   *
+   *   1. IP rate limit (registration-direct-ip) — ЕДИНСТВЕНАТА anti-abuse
+   *      friction за direct mode (виж REGISTRATION_DIRECT_IP_* доc коментара
+   *      по-горе за пълния rationale/window/limit).
+   *   2. Symmetric active-pending-reservation guard — СЪЩАТА заявка
+   *      (selectActivePendingReservationConflictStatement, excludeId=null)
+   *      като register()'s pendingNameConflict проверка за email_code —
+   *      direct регистрация НЕ трябва да открадне име, което В МОМЕНТА е
+   *      резервирано от друг, все още валиден (non-expired) email_code
+   *      pending ред (виж task-а §5 "email_code flow не трябва да може да
+   *      вземе име, което междувременно вече е създадено от direct
+   *      registration" — симетрията е гарантирана, защото и двата flow-а
+   *      четат СЪЩИТЕ два data source-а: profiles + active pending redове).
+   *   3. profiles-table name conflict (nameConflictStatement) — СЪЩАТА
+   *      заявка като email_code flow-а/verify-я.
+   *
+   * След двете проверки — СЪЩАТА materializeAccountAndProfileInOpenTransaction
+   * (§4 "account/profile creation трябва да има един shared implementation"),
+   * после createSession() directно (mirror на old pre-pending-first
+   * register()'s поведение) — НЕ verifyRegistrationEmail(), защото няма
+   * pending ред за consume-ване.
+   *
+   * НЕ premahva/отслабва device/visitor blocking — такъв не съществува в
+   * текущия код (продуктово решение, виж checkOpenRegistrationPolicy.ts) —
+   * insertVisitorRegistrationBindingStatement вътре в
+   * materializeAccountAndProfileInOpenTransaction е "OR IGNORE" archival
+   * marker, никога gate.
+   */
+  function registerDirect(input: {
+    normalizedEmail: string
+    passwordHash: string
+    canonicalDisplayName: string
+    normalizedDisplayName: string
+    gender: 'male' | 'female' | null
+    visitorId: string
+    ipAddress: string | null
+    userAgent: string | null
+  }): PendingRegistrationCreatedResult {
+    try {
+      database.exec('BEGIN IMMEDIATE;')
 
-    const accountRow: AccountRow = {
-      account_id: accountId,
-      email: input.normalizedEmail,
-      password_hash: input.passwordHash,
-      role: 'player',
-      status: 'active',
-      created_at: new Date().toISOString(),
+      if (input.ipAddress !== null) {
+        const limitedByIp = checkRegistrationRateLimit({
+          scope: 'registration-direct-ip',
+          rawSubject: input.ipAddress,
+          windowSeconds: REGISTRATION_DIRECT_IP_WINDOW_SECONDS,
+          maxEvents: REGISTRATION_DIRECT_IP_MAX_PER_WINDOW,
+        })
+        if (limitedByIp) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: false,
+            code: 'RATE_LIMITED',
+            message: 'Твърде много регистрации от този адрес. Опитайте отново след малко.',
+          }
+        }
+      }
+
+      const normalizedUsername = input.normalizedDisplayName
+
+      // Symmetric guard (виж registerDirect()'s doc коментар по-горе, т.2) —
+      // ИДЕНТИЧНА заявка като register()'s pendingNameConflict проверка за
+      // email_code, excludeId=null (direct регистрацията няма собствен
+      // pending ред за self-exclusion).
+      const pendingNameConflict = selectActivePendingReservationConflictStatement.get(
+        input.normalizedDisplayName,
+        null,
+        null,
+      ) as { pending_registration_id: string } | undefined
+      if (pendingNameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+      }
+
+      const nameConflict = nameConflictStatement.get(input.normalizedDisplayName, normalizedUsername) as
+        | { profile_id: string }
+        | undefined
+      if (nameConflict !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+      }
+
+      const materialized = materializeAccountAndProfileInOpenTransaction({
+        normalizedEmail: input.normalizedEmail,
+        passwordHash: input.passwordHash,
+        canonicalDisplayName: input.canonicalDisplayName,
+        normalizedDisplayName: input.normalizedDisplayName,
+        normalizedUsername,
+        gender: input.gender,
+        visitorId: input.visitorId,
+        ipAddress: input.ipAddress,
+        userAgent: input.userAgent,
+      })
+
+      database.exec('COMMIT;')
+
+      // rememberMe=true — direct регистрацията е "register-and-immediately-
+      // logged-in" UX (mirror на remember-me checked-by-default login
+      // конвенцията, виж login()'s doc коментар "REMEMBER ME"), няма отделен
+      // UI checkbox на register формата за това.
+      const session = createSession(materialized.accountRow, materialized.profileId, true)
+
+      return { ok: true, mode: 'direct', sessionToken: session.sessionToken, session: session.session }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // keep original error
+      }
+
+      const message = error instanceof Error ? error.message : String(error)
+      // UNIQUE(accounts.email) race — конкурентна регистрация за СЪЩИЯ email
+      // committed-нала между register()'s early existingAccount проверка и
+      // тази транзакция (TOCTOU, extremely tight window — SQLite BEGIN
+      // IMMEDIATE все пак сериализира истински-конкурентни опити).
+      if (message.includes('accounts.email')) {
+        return { ok: false, message: 'Вече има регистрация с този email.' }
+      }
+      // UNIQUE(profiles.normalized_display_name) race — mirror на
+      // createVerifiedAccountAndProfileInOpenTransaction's аналогичен catch.
+      if (message.includes('normalized_display_name') || message.includes('normalized_username')) {
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+      }
+
+      return { ok: false, message: 'Регистрацията не беше успешна.' }
     }
-
-    return { accountRow, profileId }
   }
 
   function checkRegistrationRateLimit(input: {
@@ -1551,12 +1794,45 @@ export async function createAuthStore(
       return { ok: false, message: 'Вече има регистрация с този email.' }
     }
 
-    const pendingRegistrationId = randomUUID()
+    const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
     const passwordHash = createPasswordHash(input.password)
+
+    // Server-authoritative registration mode (Admin -> Настройки, виж
+    // RegistrationVerificationMode/adminSettingsStore.ts) — четена LIVE тук,
+    // на ВСЯКА заявка (без кеш, mirror на getSignupBonusYellowCoins pattern-а)
+    // — клиентът никога не избира/подава mode, само сървърът решава.
+    // Default 'email_code', ако callback-ът липсва (тестове без explicit
+    // wiring) — same default като adminSettingsStore-овия seed/fallback,
+    // гарантира 100% непроменено production поведение до explicit admin
+    // превключване (виж task-а §12 "backward compatibility").
+    const registrationMode = options.getRegistrationVerificationMode?.() ?? 'email_code'
+
+    if (registrationMode === 'direct') {
+      // Direct mode (виж registerDirect()'s doc коментар за пълния flow) —
+      // email+parola+display name вече валидирани по-горе (СЪЩАТА validation
+      // като email_code клона отдолу), existingAccount вече проверен
+      // (веднага по-горе) — оттук registerDirect() продължава със
+      // собствените си (direct-специфични) conflict-проверки +
+      // materialization + session creation. НЕ се създава pending_registrations
+      // ред, НЕ се изпраща verification email — index.ts's HTTP handler
+      // разпознава mode:'direct' в резултата и пропуска
+      // sendRegistrationVerificationEmail() изцяло.
+      return registerDirect({
+        normalizedEmail: email,
+        passwordHash,
+        canonicalDisplayName: displayNameResult.canonicalDisplayName,
+        normalizedDisplayName: displayNameResult.normalizedKey,
+        gender,
+        visitorId,
+        ipAddress: input.ipAddress ?? null,
+        userAgent: input.userAgent ?? null,
+      })
+    }
+
+    const pendingRegistrationId = randomUUID()
     const rawCode = generateVerificationCode()
     const codeHash = hashVerificationCode(rawCode, registrationSecret)
     const expiresAt = new Date(Date.now() + PENDING_REGISTRATION_TTL_MS).toISOString()
-    const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
 
     try {
       database.exec('BEGIN IMMEDIATE;')
@@ -1642,6 +1918,7 @@ export async function createAuthStore(
 
       return {
         ok: true,
+        mode: 'email_code',
         pendingRegistrationId,
         rawCode,
         maskedEmail: maskEmailForDisplay(email),

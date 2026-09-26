@@ -147,6 +147,13 @@ export function createLocalTournamentTestService(
     if (!pendingResult.ok) {
       throw new Error(`Failed to create local test human account "${email}": ${pendingResult.message}`)
     }
+    // Този harness никога не wire-ва getRegistrationVerificationMode (виж
+    // createAuthStore() call site-а за local tournament testing) — register()
+    // defaults на 'email_code', значи този клон е чисто TS narrowing, никога
+    // реален runtime path тук.
+    if (pendingResult.mode !== 'email_code') {
+      throw new Error(`Local test human account "${email}" registered via unexpected mode "${pendingResult.mode}".`)
+    }
     const verifyResult = deps.authStore.verifyRegistrationEmail({
       pendingRegistrationId: pendingResult.pendingRegistrationId,
       code: pendingResult.rawCode,

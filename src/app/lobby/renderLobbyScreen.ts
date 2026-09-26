@@ -2512,7 +2512,7 @@ function renderAuthModal(state: LobbyScreenState): string {
       </div>
     `
     : `
-      <form data-lobby-auth-form="${isLogin ? 'login' : 'register'}" style="display:grid;gap:12px;">
+      <form id="${isLogin ? 'lobby-login-form' : 'lobby-register-form'}" data-lobby-auth-form="${isLogin ? 'login' : 'register'}" style="display:grid;gap:12px;">
         <div style="font-size:25px;line-height:1.1;font-weight:900;color:#f8fafc;text-align:center;">
           ${isLogin ? 'Вход в профила' : 'Създай профил'}
         </div>
@@ -2520,7 +2520,7 @@ function renderAuthModal(state: LobbyScreenState): string {
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
             Име в играта
             <span style="position:relative;display:block;">
-              <input name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
+              <input id="register-display-name" name="displayName" autocomplete="nickname" data-name-check-input="register" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;">
             </span>
             <span data-name-hint="register" style="min-height:14px;display:block;overflow:hidden;text-overflow:ellipsis;font-size:11px;font-weight:800;line-height:1.25;letter-spacing:0;text-transform:none;pointer-events:none;white-space:nowrap;"></span>
             <span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 3 символа. Букви на кирилица или латиница, цифри и по един интервал между думите.</span>
@@ -2545,7 +2545,24 @@ function renderAuthModal(state: LobbyScreenState): string {
         ` : ''}
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
           Email
-          <input name="email" type="email" autocomplete="email" placeholder="Реален e-mail" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;" placeholder-color="rgba(255,255,255,0.35)">
+          ${isLogin
+            ? `<input id="login-email" name="email" type="email" autocomplete="username" placeholder="Реален e-mail" style="height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:700;outline:none;" placeholder-color="rgba(255,255,255,0.35)">`
+            : // Registration-only — НЕ е <input> изобщо (name/id/autocomplete
+              // workaround-ите не спряха Chrome-овия saved-address dropdown,
+              // виж task-а). contenteditable="plaintext-only" div — Chrome
+              // няма стандартен credential/address autofill target тук, защото
+              // елементът не е <input>. Fallback: ако браузър не разпознае
+              // "plaintext-only" (invalid value -> "inherit" по spec), JS
+              // wiring-ът (wireLobbyScreen) добавя defensive paste/keydown/
+              // input sanitization, която пази plain single-line text дори
+              // ако браузърът третира елемента като напълно rich-editable.
+              // НЕ FormData участник (div-ове нямат value) — четено directno
+              // от textContent при submit (виж wireLobbyScreen).
+              // height/box-sizing/line-height/padding/white-space/overflow/
+              // text-transform живеят в .registration-contact-editor (виж
+              // src/style.css) — не дублирани тук inline, за да останат
+              // single source of truth.
+              `<div id="register-profile-contact" class="registration-contact-editor" contenteditable="plaintext-only" role="textbox" aria-label="Имейл" aria-multiline="false" tabindex="0" inputmode="email" spellcheck="false" autocapitalize="none" autocorrect="off" data-placeholder="Реален e-mail" style="border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;font-size:15px;font-weight:700;outline:none;"></div>`}
         </label>
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
           <span style="display:flex;align-items:baseline;gap:6px;">
@@ -2553,18 +2570,32 @@ function renderAuthModal(state: LobbyScreenState): string {
             ${isRegister ? `<span style="font-size:11px;font-weight:400;letter-spacing:0;text-transform:none;color:#ffffff;">Мин. 6 символа</span>` : ''}
           </span>
           <span style="position:relative;display:block;">
-            <input name="password" type="password" autocomplete="${isLogin ? 'current-password' : 'new-password'}" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
-            <button type="button" data-toggle-password="password" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
-              <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
-            </button>
+            ${isLogin
+              ? `<input id="login-password" name="password" type="password" autocomplete="current-password" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+                 <button type="button" data-toggle-password="password" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                 </button>`
+              : // Registration-only — type="text" (НЕ type="password"), за да
+                // не се разпознава от Chrome Password Manager като credential
+                // field изобщо (name/id/autocomplete workaround-ите НЕ бяха
+                // достатъчни — Chrome прихващаше focus/caret още на самия
+                // type="password"). Визуално маскирано чрез CSS
+                // -webkit-text-security (виж .registration-secret-input в
+                // src/style.css) — идентичен визуален ефект на type="password"
+                // (disc символи), стойността остава directno value на ТОЗИ
+                // input (без второ копие/hidden поле/JS mirror state).
+                `<input id="register-profile-secret" name="profileSecret" type="text" class="registration-secret-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+                 <button type="button" data-toggle-password="profileSecret" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+                   <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                 </button>`}
           </span>
         </label>
         ${isRegister ? `
         <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
           Повтори паролата
           <span style="position:relative;display:block;">
-            <input name="confirmPassword" type="password" autocomplete="new-password" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
-            <button type="button" data-toggle-password="confirmPassword" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
+            <input id="register-profile-secret-confirm" name="profileSecretConfirm" type="text" class="registration-secret-input" autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false" style="width:100%;box-sizing:border-box;height:42px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 44px 0 12px;font-size:15px;font-weight:700;outline:none;">
+            <button type="button" data-toggle-password="profileSecretConfirm" style="position:absolute;right:10px;top:50%;transform:translateY(-50%);background:none;border:none;cursor:pointer;color:rgba(255,255,255,0.4);padding:4px;display:flex;align-items:center;justify-content:center;">
               <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
             </button>
           </span>
@@ -9354,6 +9385,11 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // остане консистентен с server DEFAULT_SETTINGS/migration seed
     // (adminSettingsStore.ts, 30), не независима стойност.
     freeTopicsVipDays: 30,
+    // Само fallback докато state.adminSettings се зарежда — трябва да
+    // остане консистентен с server DEFAULT_SETTINGS/migration seed
+    // (adminSettingsStore.ts, 'email_code') — backward compatibility default,
+    // не независима стойност.
+    registrationVerificationMode: 'email_code',
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -9473,6 +9509,20 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Брой VIP дни, които профилът получава еднократно при първи опит за писане в Темите. Стойност 0 изключва безплатния VIP и насочва потребителя към VIP офертите в магазина.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Метод за регистрация</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Метод за регистрация
+              <select name="registrationVerificationMode" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+                <option value="email_code" ${settings.registrationVerificationMode === 'email_code' ? 'selected' : ''}>С потвърждение по имейл</option>
+                <option value="direct" ${settings.registrationVerificationMode === 'direct' ? 'selected' : ''}>Без потвърждение по имейл</option>
+              </select>
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">„С потвърждение по имейл“ — сегашният flow: изпраща се код за потвърждение, акаунтът се създава след успешно въвеждане на кода. „Без потвърждение по имейл“ — акаунтът се създава веднага след регистрационната форма, без код/имейл. Промяната влиза в сила незабавно, без restart.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -15086,6 +15136,12 @@ export function renderLobbyScreen(
       const vipPrice365DaysCents = Number(data.get('vipPrice365DaysCents'))
       const pikaTeamDailyGiftLimit = Number(data.get('pikaTeamDailyGiftLimit'))
       const freeTopicsVipDays = Number(data.get('freeTopicsVipDays'))
+      // Strict enum (виж task-а §11) — <select> markup-ът по-долу изброява
+      // ЕДИНСТВЕНО 'email_code'/'direct' като <option value>, затова
+      // FormData стойността тук е гарантирано една от двете; сървърът
+      // (adminSettingsStore.ts) все пак re-validate-ва независимо
+      // (defense-in-depth, не разчита само на client markup-а).
+      const registrationVerificationMode = data.get('registrationVerificationMode') === 'direct' ? 'direct' : 'email_code'
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -15095,6 +15151,7 @@ export function renderLobbyScreen(
         vipPrice365DaysCents,
         pikaTeamDailyGiftLimit,
         freeTopicsVipDays,
+        registrationVerificationMode,
       })
     })
 
@@ -16472,11 +16529,106 @@ export function renderLobbyScreen(
       })
     }
 
+    // Registration-only contenteditable email editor (виж
+    // .registration-contact-editor doc коментара в src/style.css за пълния
+    // rationale — replacement на <input>, за да няма стандартен Chrome
+    // credential/address autofill target). Wiring-ът тук ЕДИНСТВЕНО за
+    // register формата (login-ът си остава истински <input type="email">,
+    // хванат от emailInput по-горе).
+    const contactEditor = form.querySelector<HTMLElement>('#register-profile-contact')
+    if (contactEditor) {
+      // Selection/Range API — стабилен, не-deprecated начин да вмъкнеш plain
+      // text node на текущата caret позиция (вместо document.execCommand,
+      // deprecated). Ползван и от paste, и от drop handler-а по-долу.
+      const insertPlainTextAtCaret = (text: string): void => {
+        const selection = window.getSelection()
+        if (!selection || selection.rangeCount === 0) return
+        const range = selection.getRangeAt(0)
+        range.deleteContents()
+        const textNode = document.createTextNode(text)
+        range.insertNode(textNode)
+        range.setStartAfter(textNode)
+        range.setEndAfter(textNode)
+        selection.removeAllRanges()
+        selection.addRange(range)
+      }
+      const placeCaretAtEnd = (): void => {
+        const range = document.createRange()
+        range.selectNodeContents(contactEditor)
+        range.collapse(false)
+        const selection = window.getSelection()
+        selection?.removeAllRanges()
+        selection?.addRange(range)
+      }
+
+      // Enter не бива да вкарва нов ред (виж task-а §2 "Enter да не вкарва
+      // newline") — еднородово поле, mirror на native <input> semantics.
+      contactEditor.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') event.preventDefault()
+      })
+
+      // Paste — приема САМО plain text (виж task-а §4). preventDefault спира
+      // браузъра от директно вмъкване на каквото е в clipboard-а (HTML/rich
+      // content), взимаме explicit text/plain, чистим CR/LF (paste-нат
+      // многоредов текст никога не бива да произведе newline тук) и го
+      // вмъкваме directno на caret позицията.
+      contactEditor.addEventListener('paste', (event) => {
+        event.preventDefault()
+        const text = (event.clipboardData?.getData('text/plain') ?? '').replace(/[\r\n]+/g, '')
+        if (text !== '') insertPlainTextAtCaret(text)
+      })
+
+      // Drop — same "plain text only" гаранция като paste-а по-горе (drag-
+      // натнат rich text/HTML от друга страница носи same риск).
+      contactEditor.addEventListener('drop', (event) => {
+        event.preventDefault()
+        const text = (event.dataTransfer?.getData('text/plain') ?? '').replace(/[\r\n]+/g, '')
+        if (text !== '') insertPlainTextAtCaret(text)
+      })
+
+      // Defensive normalize (виж task-а §1 "safe fallback... sanitize-вай
+      // въвеждането до plain text") — покрива браузъри, които не почитат
+      // contenteditable="plaintext-only" (invalid value -> "inherit" per
+      // spec би направило div-а non-editable вместо rich-editable, но
+      // defense-in-depth тук пази срещу браузъри, които вместо това tretират
+      // го като пълноценно rich-editable) — сваля произволна markup
+      // структура (stray <br>/<div>/nested nodes от IME/autocomplete
+      // suggestions) до един-единствен plain text node.
+      contactEditor.addEventListener('input', () => {
+        const hasNonTextNode =
+          contactEditor.childNodes.length > 1 ||
+          (contactEditor.firstChild !== null && contactEditor.firstChild.nodeType !== Node.TEXT_NODE)
+        if (hasNonTextNode) {
+          const plainText = contactEditor.textContent ?? ''
+          contactEditor.textContent = plainText
+          placeCaretAtEnd()
+        }
+        // Force true emptiness за :empty CSS placeholder селектора — някои
+        // браузъри оставят stray <br> след backspace-ване на целия текст.
+        if (contactEditor.textContent === '') {
+          contactEditor.innerHTML = ''
+        }
+      })
+    }
+
     form.querySelectorAll<HTMLButtonElement>('[data-toggle-password]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const fieldName = btn.dataset.togglePassword ?? ''
         const input = form.querySelector<HTMLInputElement>(`input[name="${fieldName}"]`)
         if (!input) return
+        // Registration secret полета (profileSecret/profileSecretConfirm) са
+        // ВИНАГИ type="text" (виж .registration-secret-input в
+        // src/style.css/markup-а по-горе) — show/hide тук НЕ пипа input.type,
+        // само toggle-ва -webkit-text-security маскирането чрез
+        // --revealed модификатор класа. Login/change-password полетата
+        // остават на established type="password"⇄type="text" swap-а по-долу
+        // (двата механизма НЕ се смесват на един и същ input).
+        if (input.classList.contains('registration-secret-input')) {
+          const isHidden = !input.classList.contains('registration-secret-input--revealed')
+          input.classList.toggle('registration-secret-input--revealed', isHidden)
+          btn.style.color = isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)'
+          return
+        }
         const isHidden = input.type === 'password'
         input.type = isHidden ? 'text' : 'password'
         btn.style.color = isHidden ? 'rgba(212,165,32,0.8)' : 'rgba(255,255,255,0.4)'
@@ -16497,10 +16649,26 @@ export function renderLobbyScreen(
     form.addEventListener('submit', (event) => {
       event.preventDefault()
       const data = new FormData(form)
-      const email = String(data.get('email') ?? '')
-      const password = String(data.get('password') ?? '')
 
       if (form.dataset.lobbyAuthForm === 'register') {
+        // Registration-only field-name adapter (виж task-а "различен подход
+        // за registration password/email полетата") — UI input-ите/editor-ите
+        // тук са с НЕУТРАЛНА идентичност (profileSecret/profileSecretConfirm
+        // <input>-и + #register-profile-contact contenteditable div, не login
+        // credential name/id), четени тук и map-нати към съществуващите
+        // registration payload полета (email/password/confirmPassword) —
+        // server API contract-ът/onRegisterSubmit() остават напълно
+        // непроменени, само тази локална JS адаптация.
+        //
+        // email-ът НЕ идва от FormData — #register-profile-contact е
+        // contenteditable <div>, не form control, затова НЕ участва във
+        // FormData изобщо (само елементи с реален value participate). Четем
+        // directno textContent на editor-а.
+        const contactEditor = form.querySelector<HTMLElement>('#register-profile-contact')
+        const email = String(contactEditor?.textContent ?? '').trim()
+        const password = String(data.get('profileSecret') ?? '')
+        const confirmPassword = String(data.get('profileSecretConfirm') ?? '')
+
         const displayNameInput = form.querySelector<HTMLInputElement>('input[name="displayName"]')
         const displayNameValidation = validateProfileDisplayName(displayNameInput?.value ?? '')
         if (!displayNameValidation.ok) {
@@ -16509,7 +16677,6 @@ export function renderLobbyScreen(
         }
         if (displayNameInput) displayNameInput.value = displayNameValidation.canonicalDisplayName
 
-        const confirmPassword = String(data.get('confirmPassword') ?? '')
         if (password !== confirmPassword) {
           showAuthError('Паролите не съвпадат.')
           return
@@ -16524,6 +16691,9 @@ export function renderLobbyScreen(
         return
       }
 
+      // Login — непроменено: name="email"/"password", autocomplete="username"/"current-password".
+      const email = String(data.get('email') ?? '')
+      const password = String(data.get('password') ?? '')
       const rememberMe = data.get('rememberMe') === 'on'
       options.onLoginSubmit(email, password, rememberMe)
     })

@@ -355,6 +355,26 @@ function backdatePendingRegistration(databaseFile: string, pendingRegistrationId
   db.close()
 }
 
+/**
+ * Симулира "legacy/unreserved" pending ред — normalized_display_name=NULL,
+ * точно както migration 20260921_001_add_pending_registration_display_name_
+ * reservation.sql backfill-ва ambiguous/duplicate историческа данни (виж
+ * нейния doc коментар: "ТОЗИ ред е legacy/unreserved... NULL никога не
+ * match-ва тази SELECT, затова unreserved loser automатично пада в conflict
+ * клона"). ЕДИНСТВЕНИЯТ начин, по който verify() все още може легитимно да
+ * достигне DISPLAY_NAME_TAKEN конфликт (не register()/update-display-name,
+ * и двата вече проверяват active-pending-reservation ПРЕДИ да позволят
+ * claim — виж authStore.ts's FINAL PLAN v5 doc коментари) — HARDENING-A
+ * тества точно ТОЗИ (реален, документиран) legacy-row код path, виж теста
+ * doc коментара за пълния root-cause анализ.
+ */
+function nullifyPendingRegistrationDisplayNameReservation(databaseFile: string, pendingRegistrationId: string): void {
+  const db = new DatabaseSync(databaseFile)
+  db.exec('PRAGMA journal_mode = WAL;')
+  db.prepare(`UPDATE pending_registrations SET normalized_display_name = NULL WHERE pending_registration_id = ?`).run(pendingRegistrationId)
+  db.close()
+}
+
 function backdateAllActiveSessionsExpiry(databaseFile: string, isoValue: string): void {
   const db = new DatabaseSync(databaseFile)
   db.exec('PRAGMA journal_mode = WAL;')
@@ -768,11 +788,38 @@ try {
   // ═══════════════════════════════════════════════════════════════════════
 
   // ── HARDENING-A. DISPLAY_NAME_TAKEN при verify -> recoverable БЕЗ 24h чакане
+  //
+  // ROOT CAUSE на предишния (остарял test setup) провал, документиран тук за
+  // бъдещи читатели: FINAL PLAN v5 (migration 20260921_001_add_pending_
+  // registration_display_name_reservation.sql) добави active-pending-
+  // reservation guard-ове И в register(), И в update-pending-registration-
+  // display-name — от този момент нататък е СТРУКТУРНО невъзможно двама
+  // РАЗЛИЧНИ, НОРМАЛНИ pending redове да "състезават" за едно и също име чак
+  // до verify-я: вторият register() опит (тук — user3-ия, преди тази
+  // корекция) вече се отхвърля ВЕДНАГА при самата регистрация (виж
+  // register()'s pendingNameConflict проверка), не по-късно при verify.
+  // Старият test setup ("user2 register -> user3 register+verify със СЪЩОТО
+  // име -> user2 verify открива конфликта") предхожда тази защита и вече не
+  // е конструируем през публичните endpoints.
+  //
+  // Единственият ДОКУМЕНТИРАН, реално поддържан код path, който verify()
+  // все още може легитимно да достигне DISPLAY_NAME_TAKEN, е "legacy/
+  // unreserved" pending ред (normalized_display_name IS NULL — виж
+  // createVerifiedAccountAndProfileInOpenTransaction's reservationOwner
+  // проверка и migration-ния backfill doc коментар за "unreserved loser
+  // automатично пада в conflict клона"). Тестът по-долу симулира точно това
+  // (nullifyPendingRegistrationDisplayNameReservation) — единствената
+  // минимална промяна спрямо оригинала — за да достигне РЕАЛНО targeted
+  // verify() DISPLAY_NAME_TAKEN сценария, СЪС СЪЩАТА security цел:
+  // потребител с валиден, все още неизтекъл код не бива да бъде заключен за
+  // 24ч само защото избраното му име се е оказало заето — recovery чрез
+  // update-pending-registration-display-name, без нов email/парола/код.
   await check('HARDENING-A. DISPLAY_NAME_TAKEN при verify -> смяна на името без нов email/парола/код/24ч', async () => {
     const raceName = `RaceName${runId}`
     const raceName2 = `RaceName${runId}Two`
 
-    // user2 регистрира pending с raceName (все още свободно -> минава early check-а).
+    // user2 регистрира pending с raceName (все още свободно -> минава early
+    // check-а, реален active reservation).
     const user2Email = `email-verify-${runId}-hard-a-u2@example.test`
     const registerU2 = await attemptRegister(port, { email: user2Email, displayName: raceName })
     const pendingU2 = pendingIdFromResult(registerU2)
@@ -780,6 +827,13 @@ try {
     const rowBeforeConflict = getPendingRegistrationRow(isolated.databaseFile, pendingU2)
     assert(rowBeforeConflict !== undefined, 'pending row not found (user2)')
     const originalExpiresAt = rowBeforeConflict!.expires_at
+
+    // Симулира "legacy/unreserved" ред (виж doc коментара по-горе за пълния
+    // root-cause rationale) — user2's ред вече НЕ държи active reservation
+    // за raceName (normalized_display_name=NULL), значи user3 може легитимно
+    // да регистрира+verify-не СЪЩОТО име през нормалните endpoints, без
+    // register()'s pendingNameConflict guard да го отхвърли.
+    nullifyPendingRegistrationDisplayNameReservation(isolated.databaseFile, pendingU2)
 
     // user3 verify-ва ПЪРВИ със СЪЩОТО raceName -> заема го в profiles.
     const user3Email = `email-verify-${runId}-hard-a-u3@example.test`

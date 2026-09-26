@@ -928,6 +928,21 @@ async function submitRegisterRequest(body: Record<string, string>): Promise<{
     })
     const data = await readAuthResponse(response)
 
+    // Direct mode success (registration_verification_mode='direct',
+    // server-authoritative — виж task-а §9/§10). Frontend НЕ избира/знае
+    // mode-а предварително, реагира само на response shape-а: session
+    // присъства -> регистрацията е завършена ВЕДНАГА, mirror на
+    // submitLoginRequest()'s success клон точно над тук — applyNewAuthSession()
+    // тук, caller-ът (createLobbyFlowController.ts's submitRegister())
+    // просто re-reads options.getAuthSession() след errorText===null &&
+    // !pending, СЪЩИЯТ established pattern, никакъв нов "session" field в
+    // return contract-а. pendingRegistrationId никога не присъства
+    // едновременно с session в реален response.
+    if (response.ok && data.ok && data.session) {
+      await applyNewAuthSession(data.session, true)
+      return { errorText: null }
+    }
+
     // pendingRegistrationId/maskedEmail/expiresAt присъстват и на 503
     // EMAIL_DELIVERY_FAILED (hardening pass §4) — pending редът Е реален
     // (само доставката е провалила), затова НЕ третираме това като hard

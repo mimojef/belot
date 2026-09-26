@@ -831,6 +831,13 @@ const authStore = await createAuthStore(
   {
     getSignupBonusYellowCoins: () =>
       adminSettingsStore.getSettings().signupBonusYellowCoins,
+    // Server-authoritative registration mode (Admin -> Настройки -> "Метод
+    // за регистрация", виж adminSettingsStore.ts/authStore.ts's
+    // RegistrationVerificationMode doc коментара) — четено live на всяка
+    // register() заявка, mirror на getSignupBonusYellowCoins wiring-а точно
+    // над тук (без кеш, промяната от админ панела е ефективна веднага).
+    getRegistrationVerificationMode: () =>
+      adminSettingsStore.getSettings().registrationVerificationMode,
     getActiveBanForProfile: (profileId) => {
       const activeBan = profileBanStore.getActiveBan(profileId)
       if (activeBan === null) return null
@@ -8045,10 +8052,16 @@ async function handleAuthRequest(
     const ipAddress = resolvedIp === 'unknown' ? null : resolvedIp
     const userAgent = getFirstHeaderValue(req.headers['user-agent'])
 
-    // Email verification pending-first flow (production report-а
-    // "REGISTRATION FLOW") — register() вече НЕ създава account/profile/
-    // session директно, само pending_registrations ред + rawCode (само за
-    // ТОЗИ handler да го изпрати по email — НИКОГА в HTTP response-а).
+    // Server-authoritative registration mode branch (Admin -> Настройки,
+    // виж authStore.ts's RegistrationVerificationMode/register() doc
+    // коментар) — authStore.register() САМО решава кой клон да изпълни
+    // (четейки adminSettingsStore живо, wired чрез getRegistrationVerificationMode
+    // options callback-а по-долу в createAuthStore() bootstrap-а), клиентът
+    // никога не подава/избира mode. Резултатът е discriminated по `mode`:
+    // 'email_code' — СЪЩОТО поведение като преди (pending_registrations ред
+    // + rawCode за ТОЗИ handler да го изпрати по email — НИКОГА в HTTP
+    // response-а); 'direct' — account/profile вече материализирани, session
+    // готова, БЕЗ email изобщо да се праща (виж клона по-долу).
     const pendingResult = authStore.register({
       email: getStringField(body, 'email'),
       password: getStringField(body, 'password'),
@@ -8062,6 +8075,24 @@ async function handleAuthRequest(
     if (!pendingResult.ok) {
       const status = 'code' in pendingResult && pendingResult.code === 'EMAIL_VERIFICATION_PENDING' ? 409 : 400
       sendJsonResponse(res, status, pendingResult)
+      return true
+    }
+
+    if (pendingResult.mode === 'direct') {
+      // Direct mode — account/profile/wallet/progress/session вече
+      // материализирани directno в authStore.register()/registerDirect()
+      // (виж authStore.ts). НЕ изпращаме verification email, НЕ създаваме
+      // pending_registrations ред — отговаряме directно със session, mirror
+      // на login()/verify-registration-email()'s success response shape
+      // (СЪЩИТЕ withPikaTeamGiftBypassFlag/createSessionCookieHeader helper-и,
+      // rememberMe=true — виж authStore.ts's registerDirect() doc коментар
+      // защо direct регистрацията винаги ползва persistent сесия).
+      sendJsonResponse(
+        res,
+        200,
+        { ok: true, session: withPikaTeamGiftBypassFlag(pendingResult.session) },
+        { 'Set-Cookie': createSessionCookieHeader(pendingResult.sessionToken, true) },
+      )
       return true
     }
 
@@ -15605,6 +15636,26 @@ async function handleAdminSettingsRequest(
       }
     }
 
+    // "Метод за регистрация" — strict enum, не число (виж task-а §11:
+    // "Допустими са САМО email_code/direct. Невалидна стойност трябва да
+    // бъде отказана."). Explicit 400 reject тук (mirror на numericFieldKeys
+    // цикъла по-горе), не разчита само на adminSettingsStore.updateSettings()'s
+    // собствена validation — same "не silent-ignore invalid type" принцип.
+    // Изчислено ВЕДНЪЖ тук (typed narrowing), reuse-нато directno в
+    // updateSettings() call-а по-долу — избягва повторен unsafe string cast.
+    let nextRegistrationVerificationMode: 'email_code' | 'direct' | undefined
+    if ('registrationVerificationMode' in body) {
+      const rawRegistrationVerificationMode = body.registrationVerificationMode
+      if (rawRegistrationVerificationMode !== 'email_code' && rawRegistrationVerificationMode !== 'direct') {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: 'Полето "registrationVerificationMode" трябва да е "email_code" или "direct".',
+        })
+        return true
+      }
+      nextRegistrationVerificationMode = rawRegistrationVerificationMode
+    }
+
     const result = adminSettingsStore.updateSettings({
       signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
       profileNameChangePrice: getNumberField(body, 'profileNameChangePrice') ?? undefined,
@@ -15613,6 +15664,7 @@ async function handleAdminSettingsRequest(
       vipPrice365DaysCents: getNumberField(body, 'vipPrice365DaysCents') ?? undefined,
       pikaTeamDailyGiftLimit: getNumberField(body, 'pikaTeamDailyGiftLimit') ?? undefined,
       freeTopicsVipDays: getNumberField(body, 'freeTopicsVipDays') ?? undefined,
+      registrationVerificationMode: nextRegistrationVerificationMode,
     })
 
     if (!result.ok) {

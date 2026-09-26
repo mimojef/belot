@@ -492,6 +492,8 @@ export type AdminSettingsSnapshot = {
   pikaTeamDailyGiftLimit: number
   /** Брой VIP дни при еднократен launch gift за писане в "Теми", виж server/src/db/adminSettingsStore.ts. */
   freeTopicsVipDays: number
+  /** "Метод за регистрация" (email verification code vs direct) — виж server/src/db/adminSettingsStore.ts RegistrationVerificationMode doc коментара. SERVER-AUTHORITATIVE — само admin панела го чете/пише, register() flow-ът реагира на response shape-а, не на тази стойност directno (виж createLobbyFlowController.ts submitRegister()). */
+  registrationVerificationMode: 'email_code' | 'direct'
 }
 
 export type AdminPaymentPeriodStats = {

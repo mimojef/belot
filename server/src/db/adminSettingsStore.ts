@@ -1,5 +1,15 @@
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
+/**
+ * Mirror на authStore.ts's RegistrationVerificationMode — декларирана
+ * локално (не import-нат от authStore.ts) за да остане adminSettingsStore.ts
+ * decoupled от authStore.ts (established convention тук — двата store-а
+ * никога не се import-ват директно един друг, само wire-нати заедно чрез
+ * callback-и в index.ts, виж getSignupBonusYellowCoins pattern-а). Двата
+ * литерала трябва да останат структурно идентични.
+ */
+export type RegistrationVerificationMode = 'email_code' | 'direct'
+
 export type AdminSettingsSnapshot = {
   signupBonusYellowCoins: number
   profileNameChangePrice: number
@@ -21,6 +31,16 @@ export type AdminSettingsSnapshot = {
    * магазина (виж index.ts handleVipClaimLaunchGiftRequest).
    */
   freeTopicsVipDays: number
+  /**
+   * "Метод за регистрация" (Admin -> Настройки) — SERVER-AUTHORITATIVE,
+   * четено live от authStore.ts's register() на ВСЯКА заявка (виж
+   * getRegistrationVerificationMode wiring-а в index.ts). 'email_code'
+   * (default) е СЪЩИЯТ pending-first email verification flow, непроменен.
+   * 'direct' създава account/profile веднага, без verification код/email.
+   * Клиентът НИКОГА не избира/подава тази стойност — виж
+   * RegistrationVerificationMode doc коментара по-горе.
+   */
+  registrationVerificationMode: RegistrationVerificationMode
 }
 
 export type AdminSettingsStore = {
@@ -66,6 +86,13 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // да остане РАВЕН на предишната hardcoded VIP_LAUNCH_GIFT_INTERVAL
   // константа в index.ts, за да запази статуквото след deploy.
   freeTopicsVipDays: 30,
+  // Само fallback за база без seed-натата migration
+  // (20260926_001_seed_registration_verification_mode.sql) — реалната production
+  // стойност идва от admin_settings реда, seed-нат веднъж. ЗАДЪЛЖИТЕЛНО
+  // 'email_code' — backward compatibility (виж task-а §12): direct mode
+  // никога не се активира автоматично при deploy, само explicit admin
+  // превключване от панела.
+  registrationVerificationMode: 'email_code',
 }
 
 const SETTING_KEYS = {
@@ -76,6 +103,7 @@ const SETTING_KEYS = {
   vipPrice365DaysCents: 'vip_price_365_days_cents',
   pikaTeamDailyGiftLimit: 'pika_team_daily_gift_limit',
   freeTopicsVipDays: 'free_topics_vip_days',
+  registrationVerificationMode: 'registration_verification_mode',
 } as const
 
 // VIP е платен пакет — 0 € не е валидна цена (би направило пакета безплатен
@@ -114,6 +142,25 @@ function parseStoredInteger(value: string, fallback: number): number {
   return parsed
 }
 
+const REGISTRATION_VERIFICATION_MODE_VALUES: readonly RegistrationVerificationMode[] = ['email_code', 'direct']
+
+/** Strict enum validation — ЕДИНСТВЕНО 'email_code'/'direct' са допустими (виж task-а §11), всичко друго се отказва. */
+function normalizeRegistrationVerificationMode(value: unknown): RegistrationVerificationMode | null {
+  if (typeof value !== 'string') {
+    return null
+  }
+  return (REGISTRATION_VERIFICATION_MODE_VALUES as readonly string[]).includes(value)
+    ? (value as RegistrationVerificationMode)
+    : null
+}
+
+function parseStoredRegistrationVerificationMode(
+  value: string,
+  fallback: RegistrationVerificationMode,
+): RegistrationVerificationMode {
+  return normalizeRegistrationVerificationMode(value) ?? fallback
+}
+
 export async function createAdminSettingsStore(
   databaseFilePath: string,
 ): Promise<AdminSettingsStore> {
@@ -136,7 +183,8 @@ export async function createAdminSettingsStore(
       'vip_price_180_days_cents',
       'vip_price_365_days_cents',
       'pika_team_daily_gift_limit',
-      'free_topics_vip_days'
+      'free_topics_vip_days',
+      'registration_verification_mode'
     );
   `)
 
@@ -193,6 +241,10 @@ export async function createAdminSettingsStore(
         values.get(SETTING_KEYS.freeTopicsVipDays) ?? '',
         DEFAULT_SETTINGS.freeTopicsVipDays,
       ),
+      registrationVerificationMode: parseStoredRegistrationVerificationMode(
+        values.get(SETTING_KEYS.registrationVerificationMode) ?? '',
+        DEFAULT_SETTINGS.registrationVerificationMode,
+      ),
     }
   }
 
@@ -227,6 +279,10 @@ export async function createAdminSettingsStore(
       input.freeTopicsVipDays === undefined
         ? undefined
         : normalizeSettingNumber(input.freeTopicsVipDays, 0, 3_650)
+    const nextRegistrationVerificationMode =
+      input.registrationVerificationMode === undefined
+        ? undefined
+        : normalizeRegistrationVerificationMode(input.registrationVerificationMode)
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -277,6 +333,13 @@ export async function createAdminSettingsStore(
       }
     }
 
+    if (input.registrationVerificationMode !== undefined && nextRegistrationVerificationMode === null) {
+      return {
+        ok: false,
+        message: 'Методът за регистрация трябва да е "email_code" или "direct".',
+      }
+    }
+
     if (nextSignupBonus !== undefined) {
       upsertSettingStatement.run(
         SETTING_KEYS.signupBonusYellowCoins,
@@ -309,6 +372,10 @@ export async function createAdminSettingsStore(
 
     if (nextFreeTopicsVipDays !== undefined) {
       upsertSettingStatement.run(SETTING_KEYS.freeTopicsVipDays, String(nextFreeTopicsVipDays))
+    }
+
+    if (nextRegistrationVerificationMode !== undefined) {
+      upsertSettingStatement.run(SETTING_KEYS.registrationVerificationMode, nextRegistrationVerificationMode)
     }
 
     return {

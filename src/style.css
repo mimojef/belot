@@ -214,3 +214,82 @@ body::before {
   }
 }
 
+/*
+ * Registration-only password/repeat-password inputs (renderLobbyScreen.ts's
+ * auth modal, register mode) — реалният <input> е type="text" (НЕ
+ * type="password"), за да не се разпознава от Chrome Password Manager като
+ * credential field (name/id/autocomplete-only workaround-и не бяха
+ * достатъчни — Chrome прихващаше focus/caret директно заради type="password").
+ * Визуалната маска идва изцяло от -webkit-text-security (Chromium/WebKit-only
+ * property) — идентичен визуален ефект на type="password" (disc символи по
+ * символ вместо реален текст), стойността остава directno value на СЪЩИЯ
+ * input (без второ поле/hidden copy/JS mirror state).
+ *
+ * .registration-secret-input е default-масираното състояние; show/hide
+ * бутонът (data-toggle-password) добавя/маха --revealed модификатора, за
+ * разлика от login/change-password полетата, които продължават да сменят
+ * истинския input.type между "password"/"text".
+ */
+.registration-secret-input {
+  -webkit-text-security: disc;
+}
+
+.registration-secret-input--revealed {
+  -webkit-text-security: none;
+}
+
+/*
+ * Registration-only email field (renderLobbyScreen.ts's auth modal, register
+ * mode) — НЕ е <input>, за да няма стандартен HTML credential/address
+ * autofill target за Chrome (name/id/autocomplete-only workaround-и върху
+ * <input type="text"> не спряха saved-address dropdown-а). Реален
+ * contenteditable div, визуално идентичен на нормално еднородово input поле:
+ * flex+align-items центрира текста вертикално (div-овете нямат UA input
+ * vertical-centering по подразбиране), nowrap+overflow-x:auto имитира
+ * стандартното input поведение при препълване (хоризонтален скрол, не wrap
+ * на нов ред).
+ */
+.registration-contact-editor {
+  /* Нормален едноредов editable text box — вертикалното центриране е чрез
+     line-height (НЕ flex/align-items), mirror на стандартната <input>
+     техника: line-height = content-box height (height - 2*border, БЕЗ
+     вертикален padding — padding-ът тук е само хоризонтален, виж по-долу),
+     за да са caret-ът и текстът точно центрирани. box-sizing:border-box
+     гарантира height:42px да включва border-а (не да го добавя отгоре). */
+  height: 42px;
+  box-sizing: border-box;
+  line-height: 40px;
+  padding: 0 12px;
+  white-space: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
+  cursor: text;
+  scrollbar-width: none;
+  /* Родителският <label> (renderLobbyScreen.ts) ползва text-transform:
+     uppercase за собствения си caption текст ("EMAIL" и т.н.) —
+     text-transform Е наследимо CSS свойство и без тази explicit reset щеше
+     да покаже въведения email изцяло с ГЛАВНИ букви (истинските <input>
+     елементи НЕ наследяват text-transform от предци заради browser UA
+     stylesheet-а за form controls, но обикновен <div> го наследява
+     нормално). !important, за да надделее над родителския inline
+     text-transform:uppercase независимо от specificity/DOM позиция. */
+  text-transform: none !important;
+}
+
+.registration-contact-editor::-webkit-scrollbar {
+  display: none;
+}
+
+/*
+ * CSS-only placeholder (contenteditable няма native placeholder атрибут).
+ * :empty изисква буквално 0 child nodes — wireLobbyScreen.ts's input
+ * handler explicit нулира innerHTML, когато textContent стане '' (браузърите
+ * често оставят stray <br> след backspace-ване на целия текст, което би
+ * счупило :empty match-а без тази defensive стъпка).
+ */
+.registration-contact-editor[data-placeholder]:empty::before {
+  content: attr(data-placeholder);
+  color: rgba(255, 255, 255, 0.35);
+  pointer-events: none;
+}
+
