@@ -37,11 +37,12 @@
 //   I4. без background/border около бутона (само transparent/0).
 //   I5. и двата call sites (mobile inline, renderLudoHeader за desktop)
 //       подават РЕАЛНОТО state.spectatorViewers (не hardcoded/мок масив).
-//   I6. фиксиран 44px размер, ТОЧНО съвпадащ с emoji бутона в
-//       renderLudoBottomBar.ts (не vw/clamp responsive скала).
-//   I7. mobile позиция top:0;left:0 (не top:4;left:4) — coригирано
-//       позициониране, за да не засича top-left avatar card-а при по-големия
-//       44px размер (виж геометричния анализ в source doc коментара).
+//   I6. фиксиран 52px размер (explicit user override, по-голям от 44px
+//       emoji бутона в renderLudoBottomBar.ts — нарочно), не vw/clamp
+//       responsive скала.
+//   I7. mobile позиция top:8px;left:8px (explicit user override) —
+//       позициониране, за да не засича top-left avatar card-а при 52px
+//       размера (виж геометричния анализ в source doc коментара).
 //   G1. currentScreenState() показва spectatorViewers: [] за spectator-а
 //       самия (isSpectator ? [] : spectatorViewers) — иконата НИКОГА не се
 //       вижда на самите зрители, дори defense-in-depth (сървърът и без друго
@@ -293,8 +294,18 @@ async function main(): Promise<void> {
   }
 
   // --- G7: exposed return обект включва applySpectatorViewers ---
+  // Толерантен към допълнителни, вече одобрени properties между
+  // applySpectatorViewers и requestExit (напр. notifyGameplayActionRejected,
+  // добавен в по-ранна dice premature-reset bug-fix задача) — assertion-ът
+  // проверява само, че applySpectatorViewers присъства в СЪЩИЯ return-shape
+  // между destroy/applyAuthoritativeSnapshot/applyEmojiReaction и requestExit,
+  // не точен, крехък списък от properties.
   {
-    if (!/return\s*\{\s*destroy,\s*applyAuthoritativeSnapshot,\s*applyEmojiReaction,\s*applySpectatorViewers,\s*requestExit\s*\}/.test(controllerSource)) {
+    if (
+      !/return\s*\{\s*destroy,\s*applyAuthoritativeSnapshot,\s*applyEmojiReaction,\s*applySpectatorViewers,\s*(?:\w+,\s*)*requestExit\s*\}/.test(
+        controllerSource,
+      )
+    ) {
       fail('G7: expected the controller factory to expose applySpectatorViewers on its returned object')
     }
     console.log('[checkLudoSpectatorViewerIcon] G7 OK — applySpectatorViewers is exposed on the controller return object.')
