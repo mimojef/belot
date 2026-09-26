@@ -271,6 +271,12 @@ export interface LudoGameScreenState {
   // addEmojiReaction) — elapsed се смята тук, при render(), СЪЩИЯТ pattern
   // като turnElapsedMs по-долу.
   emojiReactions: Partial<Record<LudoColor, { emojiId: string; startedAt: number }>>
+  // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — гейтва
+  // ЕДИНСТВЕНО bottom bar label/emoji visibility (виж renderLudoBottomBar
+  // по-долу). Board/pieces/dice/animations rendering-ът е напълно
+  // independent от това поле — interaction gating-ът живее в
+  // createLudoFlowController.ts (canRollDice/legalMoves), не тук.
+  viewMode: 'player' | 'spectator'
 }
 
 function renderPlayerPanelSlot(
@@ -404,7 +410,7 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
         </div>
 
-        ${renderLudoBottomBar()}
+        ${renderLudoBottomBar(state.viewMode)}
       </div>
     `
   }
@@ -453,7 +459,7 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
         </div>
       </div>
 
-      ${renderLudoBottomBar()}
+      ${renderLudoBottomBar(state.viewMode)}
     </div>
   `
 }

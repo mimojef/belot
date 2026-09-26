@@ -18,7 +18,16 @@
 import { getAnimatedEmojiPreviewUrl, ANIMATED_EMOJI_COUNT } from '../../animatedEmoji/animatedEmojiAssets'
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 
-export function renderLudoBottomBar(): string {
+// viewMode ('player' default за backward compatibility — участник поведение
+// напълно непроменено): 'spectator' (Ludo Spectator Mode Phase 2) сменя
+// "Изход" -> "Назад" (виж createLudoFlowController.ts wireEvents() —
+// spectator click отива directno към requestExit(), без exit-confirm/forfeit
+// popup) и напълно премахва emoji бутона (spectator social reactions не са
+// поддържани — виж task-а т.5 "Скрий emoji/phrases/gameplay-social controls
+// за spectator"). Settings бутонът остава за двата режима (звук настройка
+// не е gameplay/social).
+export function renderLudoBottomBar(viewMode: 'player' | 'spectator' = 'player'): string {
+  const isSpectator = viewMode === 'spectator'
   return `
     <div data-ludo-bottom-bar="1" style="
       position:sticky;
@@ -34,7 +43,7 @@ export function renderLudoBottomBar(): string {
     ">
       <button type="button" data-ludo-bottom-bar-button="1" data-ludo-exit-button="1" style="${bottomBarButtonStyle()}">
         <span style="font-size:18px;">&#8618;</span>
-        <span>Изход</span>
+        <span>${isSpectator ? 'Назад' : 'Изход'}</span>
       </button>
 
       <button
@@ -62,6 +71,7 @@ export function renderLudoBottomBar(): string {
 
       <div style="flex:1;"></div>
 
+      ${isSpectator ? '' : `
       <button type="button" data-ludo-emoji-button="1" data-ludo-emoji-image-button="1" style="
         width:44px; height:44px; flex-shrink:0;
         border:0; outline:0; background:transparent; padding:0; margin:0;
@@ -74,7 +84,7 @@ export function renderLudoBottomBar(): string {
           alt="Емоджита"
           style="width:100%; height:100%; object-fit:contain; display:block; pointer-events:none;"
         >
-      </button>
+      </button>`}
     </div>
   `
 }

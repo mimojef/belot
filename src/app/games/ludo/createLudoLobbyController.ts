@@ -12,6 +12,8 @@ type Options = {
   onLeave: () => void
   onKick: (profileId: string) => void
   onStart: () => void
+  // "Гледай" (Spectator mode, Phase 2) — само за 'playing' game cards.
+  onWatch: (matchId: string) => void
 }
 
 type LifecycleTab = 'waiting' | 'playing' | 'finished'
@@ -271,10 +273,20 @@ export function createLudoLobbyController(options: Options) {
     const winnerLine = winner
       ? `<div style="margin-top:10px;font-size:12px;font-weight:800;color:#f4c95b;">🏆 Победител: ${esc(winner.displayName)}</div>`
       : ''
+    // "Гледай" (Spectator mode, Phase 2) — само за реално активни ('playing')
+    // игри, никога за приключили (виж task-а т.7 "Ludo Spectator Mode
+    // Phase 1" audit-а — matchId вече е наличен в LudoRoomMatchSnapshot,
+    // нулева backend промяна нужна тук).
+    const watchButtonHtml = kind === 'playing'
+      ? `<button type="button" data-ludo-watch-match="${esc(game.matchId)}" style="${button}min-height:34px;padding:0 14px;font-size:12px;">Гледай</button>`
+      : ''
     return `<article style="${panel}">
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px;">
         <strong style="color:${kind === 'playing' ? '#f4c95b' : 'rgba(255,255,255,.85)'};">${statusLabel}</strong>
-        <div style="color:rgba(255,255,255,.62);font-size:13px;">Вход ${game.stake}</div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          <div style="color:rgba(255,255,255,.62);font-size:13px;">Вход ${game.stake}</div>
+          ${watchButtonHtml}
+        </div>
       </div>
       <div class="ludo-slots">${slotsHtml}</div>
       ${winnerLine}
@@ -380,6 +392,7 @@ export function createLudoLobbyController(options: Options) {
     })
     options.root.querySelectorAll<HTMLElement>('[data-ludo-room-kick]').forEach((el) => el.addEventListener('click', () => options.onKick(el.dataset.ludoRoomKick!)))
     options.root.querySelector('[data-ludo-room-start]')?.addEventListener('click', options.onStart)
+    options.root.querySelectorAll<HTMLElement>('[data-ludo-watch-match]').forEach((el) => el.addEventListener('click', () => options.onWatch(el.dataset.ludoWatchMatch!)))
     options.root.querySelector<HTMLFormElement>('[data-ludo-create-form]')?.addEventListener('submit', (event) => {
       event.preventDefault()
       const data = new FormData(event.currentTarget as HTMLFormElement)

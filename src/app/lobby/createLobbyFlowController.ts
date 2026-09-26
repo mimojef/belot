@@ -812,6 +812,11 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
   onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
   onLudoEmojiReactionSend?: (matchId: string, emojiId: string) => void
+  // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — read-only
+  // subscription към ЧУЖД активен match (виж server Phase 1
+  // watch_ludo_match/unwatch_ludo_match handler-ите).
+  onLudoWatchMatch?: (matchId: string) => void
+  onLudoUnwatchMatch?: (matchId: string) => void
   onSupportMessagesLoad?: () => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
@@ -3105,6 +3110,18 @@ export function createLobbyFlowController(
     requestExit: () => void
   } | null = null
   const _acknowledgedLudoMatchIds = new Set<string>()
+  // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — единственият
+  // source of truth за "кой match се опитвам/съм да гледам в момента".
+  // null = никакъв активен spectator intent. Служи ДВОЙНО: (1) race/staleness
+  // guard за входящи ludo_spectator_game_state/error съобщения — сравнено
+  // срещу message.snapshot.matchId, отхвърля всеки response, който вече не
+  // отговаря на текущия watch intent (switch/затворен overlay междувременно,
+  // виж openLudoSpectatorOverlay/closeLudoSpectatorOverlay); (2) double-
+  // click guard — втори opита за СЪЩИЯ matchId, докато вече чакаме/гледаме
+  // него, е no-op. Никога не се бърка с participant lifecycle (_ludoController/
+  // _acknowledgedLudoMatchIds/profileToMatch на сървъра) — spectator НИКОГА
+  // не става participant (виж Phase 1 backend audit-а).
+  let _ludoSpectatorMatchId: string | null = null
   // Lifecycle distinction за 'ludo_match_not_found' (виж task-а "ludo_match_
   // not_found lifecycle UX bug" — реален репорт: normal loss/win -> end-game
   // popup -> OK -> /games/ludo показваше "Ludo играта не беше намерена."
@@ -3256,6 +3273,7 @@ export function createLobbyFlowController(
         onLeave: () => options.onLudoRoomLeave?.(),
         onKick: (targetProfileId) => options.onLudoRoomKick?.(targetProfileId),
         onStart: () => options.onLudoRoomStart?.(),
+        onWatch: (matchId) => { void openLudoSpectatorOverlay(matchId) },
       })
     } finally {
       _isOpeningLudoLobbyOverlay = false
@@ -3375,6 +3393,106 @@ export function createLobbyFlowController(
     // overlay close — то е "от" match-а, който вече приключва, независимо
     // кога точно е пристигнал отговорът, който го е записал.
     _ludoLobbyController?.showMessage('')
+  }
+
+  // ─── Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) ──────────────
+  // Read-only overlay entry, ОТДЕЛЕН от participant openLudoGameOverlay() —
+  // explicit localColor:undefined/viewMode:'spectator' (НЕ participant
+  // fallback-а `?? 'red'`), reuse-ва СЪЩИЯ createLudoFlowController/
+  // renderLudoGameScreen presentation pipeline 1:1 (board/pieces/dice/
+  // animations/captures/end-game/sounds — нулев дублиран renderer).
+  async function openLudoSpectatorOverlay(matchId: string): Promise<void> {
+    // Double-click / "вече гледам точно този match" guard — покрива и
+    // pending (изпратен watch, чакаме initial snapshot) И вече mount-нат
+    // случай с една проверка (виж _ludoSpectatorMatchId doc коментара).
+    if (_ludoSpectatorMatchId === matchId) return
+    // Switching към друг match, докато вече гледаме/чакаме предишен —
+    // затвори стария subscription/overlay first (unwatch + destroy), преди
+    // да регистрираме новия intent.
+    if (_ludoSpectatorMatchId !== null) closeLudoSpectatorOverlay()
+    _ludoSpectatorMatchId = matchId
+    options.onLudoWatchMatch?.(matchId)
+  }
+
+  // Извиква се от "Назад" (spectator bottom bar, чрез createLudoFlowController
+  // onExit callback-а по-долу) И от ludo_match_not_found lifecycle handler-а
+  // (виж message dispatcher-а) И при switch към друг match
+  // (openLudoSpectatorOverlay по-горе) — idempotent, safe при повторно
+  // извикване (mirror на established closeLudoLobbyOverlay стил).
+  function closeLudoSpectatorOverlay(): void {
+    if (_ludoSpectatorMatchId !== null) {
+      options.onLudoUnwatchMatch?.(_ludoSpectatorMatchId)
+    }
+    _ludoSpectatorMatchId = null
+    closeLudoGameOverlay()
+  }
+
+  // Mount-ва фрешен spectator controller от INITIAL snapshot-а (виж
+  // ludo_spectator_game_state handler-а по-долу — извиква се САМО когато
+  // _ludoController е null, т.е. това е първият snapshot за текущия watch
+  // intent, не live update). Seed-ва engineState directno от snapshot-а (виж
+  // createLudoFlowController.ts constructor pattern-а) — НИКОГА replay на
+  // история, същия механизъм като participant reconnect.
+  async function mountLudoSpectatorController(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
+    if (_ludoController) return
+    const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
+    const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
+    // Stale guard СЛЕД await-овете по-горе (виж task-а "race/lifecycle
+    // safety"): докато dynamic import-ите са pending, spectator-ът може вече
+    // да е затворил overlay-я ("Назад") или да е превключил към друг match —
+    // и двата пътя нулират/сменят _ludoSpectatorMatchId synchronously. Ако
+    // вече не съвпада, никога не mount-вай screen, който потребителят вече е
+    // напуснал (виж task-а "не допускай стар asynchronous response да отвори
+    // вече напуснат spectator screen").
+    if (_ludoSpectatorMatchId !== snapshot.matchId || _ludoController) return
+
+    const overlayRoot = document.createElement('div')
+    overlayRoot.setAttribute('data-ludo-overlay-root', '1')
+    overlayRoot.style.position = 'fixed'
+    overlayRoot.style.inset = '0'
+    overlayRoot.style.zIndex = String(LUDO_GAME_SCREEN_Z_INDEX)
+    document.body.appendChild(overlayRoot)
+
+    const players = createLudoMockPlayers()
+    const colors = ['red', 'blue', 'green', 'yellow'] as const
+    colors.forEach((color) => { players[color] = { color, name: 'Не участва', avatarUrl: null, isBot: true } })
+    snapshot.players.forEach((player) => {
+      players[player.color] = { color: player.color, name: player.displayName, avatarUrl: player.avatarUrl, isBot: false }
+    })
+
+    _ludoController = createLudoFlowController({
+      root: overlayRoot,
+      players,
+      // Explicit undefined — НЕ participant `?? 'red'` fallback-а. Нужен е
+      // genuine viewMode:'spectator' гейт (виж createLudoFlowController.ts
+      // isSpectator gate-овете), защото localColor си има собствен вътрешен
+      // "find first non-bot player" fallback, който би направил spectator-а
+      // да изглежда като реален участник, ако разчитахме само на undefined.
+      localColor: undefined,
+      viewMode: 'spectator',
+      authoritative: {
+        initialSnapshot: snapshot,
+        // Defensive no-ops (виж task-а "НЕ разчитай само на скриване на
+        // UI") — structurally недостижими (canRollDice/legalMoves са винаги
+        // false/[] за spectator, виж createLudoFlowController.ts isSpectator
+        // gate-овете), но explicit no-op тук е допълнителен presentation-
+        // layer guard, отделен от Phase 1 backend authorization-а (истинската
+        // security граница — виж server/src/game/ludoMatchRuntime.ts
+        // validate()).
+        onRollRequest: () => {},
+        onMoveRequest: () => {},
+        onReclaimRequest: () => {},
+      },
+      onExit: () => {
+        closeLudoSpectatorOverlay()
+        if (window.location.pathname !== '/games') history.pushState({}, '', '/games')
+        options.onLudoRoomsOpen?.()
+        // Виж ensureLudoLobbyControllerAndRefreshGames doc коментара —
+        // гарантира, че "Играещи"/"Приключили" отразяват DB веднага при
+        // връщане към lobby-то.
+        ensureLudoLobbyControllerAndRefreshGames()
+      },
+    })
   }
 
   function shouldSuppressLobbyRender(): boolean {
@@ -17910,6 +18028,17 @@ export function createLobbyFlowController(
       // ludo_match_not_found никога не показва toast — този флаг НЕ се пипа
       // тук нарочно (остава false освен по време на explicit restore).
       options.onLudoGameStateOpen?.()
+      // Spectator reconnect (Ludo Spectator Mode Phase 2, виж task-а т.7) —
+      // ако spectator overlay-ят все още е активен (watch intent survives
+      // WS drop), преизпрати explicit watch_ludo_match за СЪЩИЯ matchId.
+      // Отговорът (ludo_spectator_game_state) resync-ва authoritative state
+      // през established applyAuthoritativeSnapshot()'s revision-gap
+      // detection (виж createLudoFlowController.ts:1611-1617) — automatически
+      // silent snap (без replay/animation), ако сме пропуснали >1 revision
+      // докато сме били disconnected. НЕ използва participant
+      // ludoMatchRuntime.reconnect() flow-а (profileToMatch-scoped,
+      // недостъпен за spectator — виж Phase 1 audit-а).
+      if (_ludoSpectatorMatchId !== null) options.onLudoWatchMatch?.(_ludoSpectatorMatchId)
       if (_pendingInitialNav) {
         _pendingInitialNav = false
         navigateFromPath(_loadPath)
@@ -17971,6 +18100,26 @@ export function createLobbyFlowController(
       else {
         closeLudoLobbyOverlay()
         void openLudoGameOverlay(message.snapshot)
+      }
+      return true
+    }
+    if (message.type === 'ludo_spectator_game_state') {
+      // Stale/no-longer-relevant guard (виж task-а "race/lifecycle safety" —
+      // _ludoSpectatorMatchId doc коментара): ако не съвпада с текущия watch
+      // intent, spectator-ът вече е switch-нал към друг match или е
+      // натиснал "Назад" СЛЕД като е бил изпратен watch_ludo_match, чийто
+      // отговор е точно това съобщение — discard, никога не отваря/обновява
+      // вече-напуснат spectator screen.
+      if (_ludoSpectatorMatchId !== message.snapshot.matchId) return true
+      if (_ludoController) {
+        // Live update — reuse на established authoritative presentation
+        // pipeline (dice/movement/captures/end-game/sounds), нула replay
+        // риск (revision-guard-нато вътре в applyAuthoritativeSnapshot).
+        // prizeAmount винаги null — spectator никога не залага/печели.
+        _ludoController.applyAuthoritativeSnapshot(message.snapshot, null)
+      } else {
+        // Initial snapshot — mount-ва фрешен controller (seed, НЕ replay).
+        void mountLudoSpectatorController(message.snapshot)
       }
       return true
     }
@@ -18415,6 +18564,20 @@ export function createLobbyFlowController(
       // затворил match-а) е silent no-op — независимо от _ludoController/
       // _ludoLobbyController lifecycle-а в момента на отговора.
       if (message.code === 'ludo_match_not_found') {
+        // Spectator watch attempt (Ludo Spectator Mode Phase 2) — relevant
+        // lifecycle case: изпратихме watch_ludo_match и все още чакаме
+        // initial snapshot (_ludoController все още null за този intent) —
+        // match-ът не съществува/вече е cleanup-нат (10s finished-match
+        // retention изтекла, виж LUDO_FINISHED_MATCH_RETENTION_MS в
+        // ludoMatchRuntime.ts). Explicit lifecycle ownership check, mirror
+        // на established wasExpectingRestore pattern-а точно под тук — НЕ
+        // text/code match сам по себе си.
+        if (_ludoSpectatorMatchId !== null && !_ludoController) {
+          _ludoSpectatorMatchId = null
+          _ludoLobbyController?.showMessage('Играта вече не е налична за гледане.')
+          options.onLudoGamesOpen?.()
+          return true
+        }
         const wasExpectingRestore = _isExpectingLudoMatchRestore
         _isExpectingLudoMatchRestore = false
         if (!wasExpectingRestore) return true

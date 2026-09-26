@@ -110,9 +110,24 @@ export interface LudoFlowControllerOptions {
   // controller-ът вика createLudoEngineInitialState() точно както преди.
   // Production call site (createLobbyFlowController.ts) никога не я подава.
   initialState?: LudoGameState
+  // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — backward-
+  // compatible: по подразбиране 'player', ЗАДЪЛЖИТЕЛНО за всички
+  // съществуващи call site-ове (участник gameplay поведението остава
+  // напълно непроменено). 'spectator' изключва roll/pawn/reclaim/leave
+  // interaction (виж isSpectator gate-овете по-долу) — ЧИСТО presentation
+  // gate, НЕ единствената security граница (Phase 1 backend authorization
+  // вече отхвърля non-participant roll/move/reclaim/leave независимо от
+  // това какво прави frontend-ът, виж server/src/game/ludoMatchRuntime.ts
+  // validate()).
+  viewMode?: 'player' | 'spectator'
 }
 
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
+  // Единствената точка, която решава "spectator ли съм" — всички
+  // interaction/popup gate-ове по-долу четат ТОЗИ const, не options.viewMode
+  // directno (mirror на localColor const-а по-горе за същата причина:
+  // единен, лесно одитируем source of truth).
+  const isSpectator = options.viewMode === 'spectator'
   const modalLayerRoot = document.createElement('div')
   modalLayerRoot.setAttribute('data-ludo-modal-layer', '1')
   modalLayerRoot.style.cssText = `position:fixed;inset:0;z-index:${LUDO_MODAL_LAYER_Z_INDEX};pointer-events:none;`
@@ -198,7 +213,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
   // до следващия път, когато local player-ът получи хода си (не reset-ва
   // се автоматично, аналог на Belot persistent popup).
-  let showBotTakeoverPopup = options.authoritative?.initialSnapshot.botControlledColors.includes(options.localColor ?? 'red') ?? false
+  let showBotTakeoverPopup = !isSpectator && (options.authoritative?.initialSnapshot.botControlledColors.includes(options.localColor ?? 'red') ?? false)
   // Presentation route buffer: докато движеща се пионка still-steps по
   // маршрута си, engine-ът ВЕЧЕ показва финалната ѝ позиция (dispatch е
   // synchronous и моментален). За да не "телепортира" визуално пионката,
@@ -432,7 +447,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // По време на анимация не показваме legal-move highlights/capture
       // ring-ове — вече е избран конкретен ход, engine-ът е в turn_complete
       // (legalMoves вече е [] там), но пазим explicit guard-а тук за яснота.
-      legalMoves: isAnimatingMove ? [] : ludoEngineLegalMovesToUiMoves(engineState.legalMoves),
+      // Spectator: НИКОГА legal moves -> нито една пионка не рендира
+      // data-ludo-piece-selectable (виж renderLudoPieces.ts) -> wireEvents()
+      // pawn click handler-ът намира 0 елемента, structurally не може да
+      // изпрати onMoveRequest (виж isSpectator doc коментара по-горе).
+      legalMoves: isSpectator || isAnimatingMove ? [] : ludoEngineLegalMovesToUiMoves(engineState.legalMoves),
       activeColor: turnDisplay.activeColor,
       turnPhase: turnDisplay.turnPhase,
       turnStartedAt: turnDisplay.turnStartedAt,
@@ -459,6 +478,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // структурно redundant, но пази инварианта дори ако displayedTurn-
       // Presentation()-ната логика някога се промени.
       canRollDice:
+        !isSpectator &&
         turnDisplay.turnPhase === 'waiting_for_roll' &&
         !isAnimatingMove &&
         presentationGateSnapshot === null &&
@@ -482,6 +502,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // подават directno, elapsed се смята в renderPlayerPanelSlot (СЪЩИЯТ
       // pattern като turnElapsedMs, изчислен там спрямо turnStartedAt).
       emojiReactions,
+      // Spectator mode (Ludo Spectator Mode Phase 2) — гейтва bottom bar
+      // label/emoji visibility (виж renderLudoBottomBar), без да пипа board/
+      // pieces/dice/animations rendering-а самия (изцяло reused).
+      viewMode: options.viewMode ?? 'player',
     }
   }
 
@@ -586,7 +610,16 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   function mountGameEndPopup(): void {
     if (modalLayerRoot.querySelector('[data-ludo-game-end-backdrop="1"]')) return
     const container = document.createElement('div')
-    container.innerHTML = renderLudoGameEndPopup(engineState.winnerColor === localColor, latestPrizeAmount)
+    // Spectator: никога "ти спечели/загуби" framing, обвързан с borrowed
+    // (find-first-non-bot fallback) localColor identity — виж isSpectator
+    // doc коментара. Победителят/крайният резултат си остават видими чрез
+    // неутрален spectatorWinnerDisplayName текст (виж renderLudoGameEndPopup
+    // doc коментара), latestPrizeAmount винаги null за spectator.
+    container.innerHTML = renderLudoGameEndPopup(
+      !isSpectator && engineState.winnerColor === localColor,
+      latestPrizeAmount,
+      isSpectator ? (engineState.winnerColor !== null ? players[engineState.winnerColor]?.name ?? null : null) : undefined,
+    )
     const backdrop = container.firstElementChild
     if (backdrop instanceof HTMLElement) {
       backdrop.style.pointerEvents = 'auto'
@@ -744,7 +777,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
 
   function wireEvents(): void {
     options.root.querySelector('[data-ludo-exit-button="1"]')?.addEventListener('click', () => {
-      openExitConfirmPopup()
+      // Spectator "Назад" — директен requestExit(), без confirm/forfeit
+      // popup (spectator никога не е заложил/участвал, няма какво да
+      // "напусне" в participant смисъл — виж task-а т.5).
+      if (isSpectator) requestExit()
+      else openExitConfirmPopup()
     })
 
     options.root.querySelector('[data-ludo-settings-button="1"]')?.addEventListener('click', () => {
@@ -1300,7 +1337,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     authoritativeSnapshot = snapshot
     engineState = snapshot.state
     orchestrator = { ...orchestrator, botControlledColors: new Set(snapshot.botControlledColors) }
-    showBotTakeoverPopup = snapshot.state.status !== 'finished' && snapshot.botControlledColors.includes(localColor)
+    showBotTakeoverPopup = !isSpectator && snapshot.state.status !== 'finished' && snapshot.botControlledColors.includes(localColor)
     if (!showBotTakeoverPopup) {
       diceResultOverlay.setHidden(false)
       areGameplayOverlaysHiddenForPopup = false
@@ -1518,10 +1555,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     authoritativeRevision = snapshot.revision
     authoritativeSnapshot = snapshot
     orchestrator = { ...orchestrator, botControlledColors: new Set(snapshot.botControlledColors) }
-    if (snapshot.events.some((item) => item.type === 'bot_takeover_started' && item.color === localColor)) {
+    if (!isSpectator && snapshot.events.some((item) => item.type === 'bot_takeover_started' && item.color === localColor)) {
       showBotTakeoverPopup = true
     }
-    if (!snapshot.botControlledColors.includes(localColor)) {
+    if (isSpectator || !snapshot.botControlledColors.includes(localColor)) {
       showBotTakeoverPopup = false
       diceResultOverlay.setHidden(false)
       areGameplayOverlaysHiddenForPopup = false
