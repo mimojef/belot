@@ -340,6 +340,7 @@ import type {
   LudoGamesListMessage,
   LudoRoomMatchSnapshot,
   LudoSpectatorGameStateMessage,
+  LudoMatchSpectatorsMessage,
 } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -4427,13 +4428,18 @@ const ludoSpectatorsByMatchId = new Map<string, Set<ConnectionId>>()
 // Idempotent — safe за извикване дори ако connection-ът в момента не гледа
 // нищо (unwatch на вече unsubscribe-нат spectator, disconnect на connection
 // без активен watch и т.н., mirror на unsubscribe_topic_messages guard-а).
-function unsubscribeLudoSpectator(connectionId: ConnectionId): void {
+// Връща matchId-то, от което реално е unsubscribe-нат (или null, ако е бил
+// no-op) — call site-овете използват това, за да известят participant-ите
+// на ТОЗИ match за промяна в viewer count-а (виж
+// broadcastLudoMatchSpectatorsToParticipants по-долу).
+function unsubscribeLudoSpectator(connectionId: ConnectionId): string | null {
   const matchId = ludoSpectatorMatchIdByConnectionId.get(connectionId)
-  if (matchId === undefined) return
+  if (matchId === undefined) return null
   const subscribers = ludoSpectatorsByMatchId.get(matchId)
   subscribers?.delete(connectionId)
   if (subscribers && subscribers.size === 0) ludoSpectatorsByMatchId.delete(matchId)
   ludoSpectatorMatchIdByConnectionId.delete(connectionId)
+  return matchId
 }
 
 // Reuse-ва СЪЩИЯ toLudoGameProtocolSnapshot() shape като participant
@@ -4455,6 +4461,53 @@ function broadcastLudoSpectatorSnapshot(snapshot: LudoMatchSnapshot): void {
   const message = buildLudoSpectatorGameStateMessage(snapshot)
   for (const connectionId of subscribers) {
     safeSendToConnection(connectionId, message)
+  }
+}
+
+// ─── Viewer-indicator за participants ("наднича във вашата игра") ─────────
+// Дедуплицирано по profileId, НЕ connectionId — един профил с няколко
+// tabs/connections, гледащи СЪЩИЯ match, се появява точно ЕДИН път (виж
+// task-а "Един profile с няколко connections/tabs да се показва само
+// веднъж"). connectionId -> profileId resolve-ва се live, чрез
+// serverState.connections (същия getConnectionById pattern като навсякъде
+// другаде в този файл) — НЕ persisted мапинг, затова автоматично остава
+// коректен и след disconnect на ЕДНА от няколко connections на същия
+// профил (другата все още в Set-а -> профилът остава).
+function buildLudoMatchSpectatorsMessage(matchId: string): LudoMatchSpectatorsMessage {
+  const connectionIds = ludoSpectatorsByMatchId.get(matchId)
+  const seenProfileIds = new Set<string>()
+  const spectators: LudoMatchSpectatorsMessage['spectators'] = []
+  if (connectionIds) {
+    for (const connectionId of connectionIds) {
+      const profileId = getConnectionById(serverState, connectionId)?.profileId
+      if (!profileId || seenProfileIds.has(profileId)) continue
+      seenProfileIds.add(profileId)
+      const publicProfile = playerProgressStore.getPublicProfile(profileId)
+      spectators.push({ profileId, displayName: publicProfile?.displayName ?? 'Играч' })
+    }
+  }
+  return { type: 'ludo_match_spectators', matchId, spectators }
+}
+
+// Извиква се при ВСЯКА промяна на spectator membership-а за matchId (watch/
+// unwatch/switch/disconnect — виж call site-овете при watch_ludo_match/
+// unwatch_ludo_match handler-ите и централния disconnect handler по-долу).
+// Изпраща се ЕДИНСТВЕНО до real-time свързаните participants на match-а
+// (mirror на established per-player broadcast loop-а в ludoMatchRuntime-a
+// onSnapshot callback-а по-горе — leftColors skip, live connection lookup),
+// НИКОГА до самите spectators. No-op ако match-ът вече не съществува в
+// runtime-а (напр. cleanup вече е минал) — чисто presentation side-channel,
+// никога не участва в gameplay/economy инвариантите.
+function broadcastLudoMatchSpectatorsToParticipants(matchId: string): void {
+  const match = ludoMatchRuntime.getMatch(matchId)
+  if (!match) return
+  const message = buildLudoMatchSpectatorsMessage(matchId)
+  for (const player of match.players) {
+    if (match.state.leftColors.includes(player.color)) continue
+    const connection = Object.values(serverState.connections).find(
+      (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
+    )
+    if (connection) safeSendToConnection(connection.id, message)
   }
 }
 
@@ -21752,9 +21805,13 @@ wsServer.on('connection', (socket, request) => {
         // Една connection гледа максимум ЕДИН match наведнъж (виж
         // ludoSpectatorMatchIdByConnectionId doc коментара) — маха стария
         // subscription, ако различен matchId, преди да регистрира новия.
+        // Viewer-indicator известяване (виж task-а "membership live updates
+        // при watch/unwatch/switch/disconnect"): стария match губи viewer-а,
+        // новия го получава — ДВЕ отделни broadcast-и, различни matchId.
         const previousMatchId = ludoSpectatorMatchIdByConnectionId.get(connection.id)
         if (previousMatchId !== undefined && previousMatchId !== message.matchId) {
           unsubscribeLudoSpectator(connection.id)
+          broadcastLudoMatchSpectatorsToParticipants(previousMatchId)
         }
         ludoSpectatorMatchIdByConnectionId.set(connection.id, message.matchId)
         let spectators = ludoSpectatorsByMatchId.get(message.matchId)
@@ -21764,6 +21821,7 @@ wsServer.on('connection', (socket, request) => {
         }
         spectators.add(connection.id)
         safeSendToConnection(connection.id, buildLudoSpectatorGameStateMessage(snapshot))
+        broadcastLudoMatchSpectatorsToParticipants(message.matchId)
         return
       }
 
@@ -21773,6 +21831,7 @@ wsServer.on('connection', (socket, request) => {
         // matchId.
         if (ludoSpectatorMatchIdByConnectionId.get(connection.id) === message.matchId) {
           unsubscribeLudoSpectator(connection.id)
+          broadcastLudoMatchSpectatorsToParticipants(message.matchId)
         }
         return
       }
@@ -23359,8 +23418,14 @@ wsServer.on('connection', (socket, request) => {
     // Spectator mode ("Гледай") disconnect cleanup — mirror на topic
     // subscription cleanup-а точно над тук. Никога не докосва
     // profileToMatch/match.players (участническо membership) — само
-    // допълнителния read-only spectator Map.
-    unsubscribeLudoSpectator(connection.id)
+    // допълнителния read-only spectator Map. Viewer-indicator известяване
+    // (виж task-а "membership live updates при disconnect") — ако тази
+    // connection е била последната за даден профил на този match, viewer-ът
+    // изчезва от participants-ката гледна точка; ако профилът все още гледа
+    // през друга connection (multi-tab), buildLudoMatchSpectatorsMessage
+    // дедупликацията по profileId го пази видим.
+    const disconnectedSpectatorMatchId = unsubscribeLudoSpectator(connection.id)
+    if (disconnectedSpectatorMatchId !== null) broadcastLudoMatchSpectatorsToParticipants(disconnectedSpectatorMatchId)
 
     try {
       if (isServerShuttingDown) {

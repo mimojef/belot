@@ -1779,6 +1779,20 @@ export type LudoSpectatorGameStateMessage = {
   type: 'ludo_spectator_game_state'
   snapshot: LudoGameStateSnapshot
 }
+
+// Viewer-indicator ("наднича във вашата игра") — изпраща се ЕДИНСТВЕНО до
+// participants (виж server/src/index.ts broadcastLudoMatchSpectatorsToParticipants),
+// НИКОГА до самите spectators. Дедуплицирано по profileId server-side — един
+// профил с няколко tabs/connections се появява точно веднъж.
+export type LudoMatchSpectatorSnapshot = {
+  profileId: string
+  displayName: string
+}
+export type LudoMatchSpectatorsMessage = {
+  type: 'ludo_match_spectators'
+  matchId: string
+  spectators: LudoMatchSpectatorSnapshot[]
+}
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 // Realtime social reaction — transient presentation only, никога не се
 // персистира в LudoGameStateSnapshot/state (виж task-а §9 "restart/
@@ -2651,6 +2665,7 @@ export type ServerMessage =
   | LudoGameStartedMessage
   | LudoGameStateMessage
   | LudoSpectatorGameStateMessage
+  | LudoMatchSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
   | PrivateRoomUpdatedMessage

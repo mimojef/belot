@@ -3107,6 +3107,8 @@ export function createLobbyFlowController(
     destroy: () => void
     applyAuthoritativeSnapshot: (snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot, prizeAmount: number | null) => void
     applyEmojiReaction: (matchId: string, color: 'red' | 'blue' | 'green' | 'yellow', emojiId: string) => void
+    applySpectatorViewers: (matchId: string, viewers: Array<{ profileId: string; displayName: string }>) => void
+    notifyGameplayActionRejected: () => void
     requestExit: () => void
   } | null = null
   const _acknowledgedLudoMatchIds = new Set<string>()
@@ -18137,6 +18139,16 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'ludo_match_spectators') {
+      // Viewer-indicator ("наднича във вашата игра") — сървърът изпраща
+      // това ЕДИНСТВЕНО до participants (виж index.ts
+      // broadcastLudoMatchSpectatorsToParticipants), никога до spectators.
+      // matchId staleness guard-ът живее вътре в applySpectatorViewers
+      // (mirror на applyEmojiReaction pattern-а).
+      _ludoController?.applySpectatorViewers(message.matchId, message.spectators)
+      return true
+    }
+
     if (message.type === 'ad_campaign_pending_ads') {
       state.pendingAdCampaignQueue = mergeIncomingAdCampaignDispatches(
         state.pendingAdCampaignQueue,
@@ -18594,6 +18606,14 @@ export function createLobbyFlowController(
       if (_ludoGameplayActionResponsesPending > 0) {
         _ludoGameplayActionResponsesPending -= 1
         if (!_ludoController) return true
+        // "Roll already initiated" optimistic guard (виж createLudoFlowController.ts
+        // isRollAlreadyInitiated doc коментара) — ако точно ТОЗИ roll/move/
+        // reclaim request е бил отхвърлен (типично ludo_match_not_turn) и
+        // match-ът все още е active, връщаме зара обратно към играча.
+        // No-op ако флагът вече е false (move/reclaim rejection, или roll-ът
+        // реално е бил приет междувременно) — безопасно да се вика
+        // безусловно за ВСИЧКИ 3 gameplay-action типа.
+        _ludoController.notifyGameplayActionRejected()
       }
       if (_ludoLobbyController) {
         _ludoLobbyController.showMessage(message.message)

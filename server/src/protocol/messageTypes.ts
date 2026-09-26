@@ -1047,6 +1047,25 @@ export type LudoSpectatorGameStateMessage = {
   type: 'ludo_spectator_game_state'
   snapshot: LudoGameStateSnapshot
 }
+
+// Viewer-indicator ("наднича във вашата игра", Ludo Spectator Mode —
+// viewer icon) — изпраща се ЕДИНСТВЕНО до participants (виж
+// broadcastLudoMatchSpectatorsToParticipants в index.ts), НИКОГА до самите
+// spectators. Дедуплицирано по profileId (не connectionId) — един профил с
+// няколко tabs/connections се появява точно веднъж (виж
+// buildLudoMatchSpectatorsMessage doc коментара). displayName е снимка към
+// момента на broadcast-а (playerProgressStore.getPublicProfile), не се
+// persist-ва никъде — чисто ephemeral presentation, огледално на
+// LudoEmojiReactionMessage.
+export type LudoMatchSpectatorSnapshot = {
+  profileId: string
+  displayName: string
+}
+export type LudoMatchSpectatorsMessage = {
+  type: 'ludo_match_spectators'
+  matchId: string
+  spectators: LudoMatchSpectatorSnapshot[]
+}
 export type LudoMatchLeftMessage = { type: 'ludo_match_left'; matchId: string }
 // Realtime social reaction — transient presentation only, НИКОГА не се
 // персистира в LudoGameState/snapshot (виж ludoMatchRuntime.ts handler-а —
@@ -1329,6 +1348,7 @@ export type ServerMessage =
   | LudoGameStartedMessage
   | LudoGameStateMessage
   | LudoSpectatorGameStateMessage
+  | LudoMatchSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
   | PrivateRoomUpdatedMessage

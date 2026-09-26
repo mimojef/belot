@@ -244,6 +244,15 @@ export interface LudoGameScreenState {
   // играч индикатор остава, но не "изгаря" визуално за bot-ови 700ms.
   isHumanCountdownActive: boolean
   isDiceRolling: boolean
+  // Optimistic "roll already initiated" presentation guard (виж task-а: "в
+  // момента на валидното натискане на зара, зарът... да изчезва веднага",
+  // без да чака authoritative turnPhase/flight animation) — виж
+  // createLudoFlowController.ts::isRollAlreadyInitiated doc коментара за
+  // пълния rationale (само authoritative режим; local/mock engine пътят
+  // вече работи коректно чрез самия turnPhase). renderPlayerPanelSlot
+  // по-долу го combine-ва с turnPhase==='waiting_for_roll', за да покаже
+  // аватара веднага, преди сървърът изобщо да е потвърдил roll-а.
+  isRollAlreadyInitiated: boolean
   canRollDice: boolean
   turnSecondsLeft: number
   useMobileLayout: boolean
@@ -277,6 +286,12 @@ export interface LudoGameScreenState {
   // independent от това поле — interaction gating-ът живее в
   // createLudoFlowController.ts (canRollDice/legalMoves), не тук.
   viewMode: 'player' | 'spectator'
+  // Viewer-indicator ("наднича във вашата игра") — само за participant view
+  // (createLudoFlowController.ts подава [] за spectator-а самия, виж
+  // isSpectator gate-а там). Дедуплицирано по profileId server-side (виж
+  // server/src/index.ts buildLudoMatchSpectatorsMessage) — тук е чисто
+  // presentation, никаква допълнителна dedup логика.
+  spectatorViewers: Array<{ profileId: string; displayName: string }>
 }
 
 function renderPlayerPanelSlot(
@@ -291,27 +306,48 @@ function renderPlayerPanelSlot(
   // грешка и остава коректно дори re-render-ът да е закъснял (browser/tab
   // lag), защото винаги гледа реалния deadline, не брой изминали tick-ове.
   const turnElapsedMs = isActive ? Math.max(0, Date.now() - state.turnStartedAt) : 0
-  // dice control замества avatar-а само за активния играч (виж
-  // renderLudoPlayerPanel.ts — рендерира се единствено когато isActive е
-  // true, затова е безопасно да подадем обекта безусловно тук). isRollable
-  // е true само за локалния играч, за да остане click тригерът точно там,
-  // където преди беше единственият видим "Хвърли зара" бутон.
-  const diceControl = {
-    // Огледално на старото `disabled:!state.canRollDice` на бутона — докато
-    // roll-ът тече (isDiceRolling → canRollDice=false), click target-ът
-    // изчезва (виж renderLudoDiceControl: isRollable=false → без
-    // data-ludo-dice-roll-button атрибут, pointer-events:none), same
-    // guard като старото disabled state.
-    isRollable: isActive && color === localColor && state.canRollDice,
-    // Единственото правило за rotating arrows (виж task-а): "ТОЗИ PLAYER В
-    // МОМЕНТА ЧАКА ДА ХВЪРЛИ" = activeColor===color && turnPhase===
-    // 'waiting_for_roll'. Важи ЕДНАКВО за local human, bot, timeout auto-
-    // roll — не отделна логика per actor type (turnPhase вече е authoritative
-    // за всички от тях еднакво, engine-ът не различава кой е dispatch-нал
-    // действието). НЕ използва isDiceRolling/isRollable/isActive самостоятелно
-    // — точно тази по-широка връзка беше root cause-ът на бъга.
-    shouldRotateArrows: isActive && state.turnPhase === 'waiting_for_roll',
-  }
+  // Dice control замества avatar-а — ЕДИНСТВЕНО докато активният играч
+  // РЕАЛНО чака да хвърли зара (turnPhase==='waiting_for_roll'), не просто
+  // докато е активен (виж task-а: "след хвърляне... зарът... да изчезне и
+  // на негово място веднага да се показва нормалният аватар"). Преди тази
+  // промяна diceControl обектът се подаваше БЕЗУСЛОВНО за isActive===true
+  // (renderLudoPlayerPanel.ts условието `isActive && diceControl` реално
+  // работеше като чист isActive, защото diceControl винаги беше truthy
+  // обект) — значи зарът+стрелките оставаха видими и през
+  // awaiting_move_selection/move_resolving/turn_complete, докато играчът
+  // вече трябваше да избере/мести пионка. isWaitingForRoll е ТОЧНО СЪЩОТО
+  // authoritative условие, което вече управлява shouldRotateArrows по-долу
+  // (turnPhase е authoritative еднакво за local human/bot/timeout auto-roll)
+  // — сега гейтва и самото ПОКАЗВАНЕ на dice control-а, не само въртенето на
+  // стрелките му. Extra roll (pendingExtraRoll, виж
+  // server/ludoEngineReducer.ts handleTurnAdvanced) връща turnPhase обратно
+  // в 'waiting_for_roll' за СЪЩИЯ activeColor — same условие автоматично
+  // показва зара отново без отделна логика тук.
+  //
+  // isRollAlreadyInitiated (виж LudoGameScreenState doc коментара по-горе) —
+  // допълнителен optimistic guard САМО за localColor: в момента на валиден
+  // click, authoritative turnPhase ОЩЕ Е 'waiting_for_roll' (не се сменя,
+  // докато сървърът не потвърди с dice_accepted event), но играчът вече е
+  // видял "аватар вместо зар" веднага, без да чака flight анимацията. Не
+  // засяга ДРУГИ цветове (bot/opponent панелите остават с нормалното
+  // turnPhase-based поведение — те и без друго никога не са тези, които
+  // click-ват local-ния roll бутон).
+  const isWaitingForRoll = isActive && state.turnPhase === 'waiting_for_roll' && !(color === localColor && state.isRollAlreadyInitiated)
+  // isRollable е true само за локалния играч, за да остане click тригерът
+  // точно там, където преди беше единственият видим "Хвърли зара" бутон.
+  const diceControl = isWaitingForRoll
+    ? {
+        // Огледално на старото `disabled:!state.canRollDice` на бутона —
+        // докато roll-ът тече (isDiceRolling → canRollDice=false), click
+        // target-ът изчезва (виж renderLudoDiceControl: isRollable=false →
+        // без data-ludo-dice-roll-button атрибут, pointer-events:none), same
+        // guard като старото disabled state.
+        isRollable: color === localColor && state.canRollDice,
+        // Единственото правило за rotating arrows (виж task-а): "ТОЗИ PLAYER
+        // В МОМЕНТА ЧАКА ДА ХВЪРЛИ" = isWaitingForRoll (виж по-горе).
+        shouldRotateArrows: true,
+      }
+    : null
   // Виж LudoGameScreenState.leftColors/justLeftColor doc коментара —
   // 'just-left' само докато ИМЕННО ТОЗИ цвят е активният transient
   // presentation target; всеки ДРУГ вече напуснал цвят (включително ако
@@ -369,15 +405,28 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
     // изчислен така, че сборът от всички редове+gap-ове+padding+bottom bar
     // да запълва точно 100dvh — bottom bar-ът винаги остава в нормалния
     // flex поток след тази зона, никога зад/под нея.
+    //
+    // Spectator viewer icon — размер/позиция (52px, top:8px;left:8px) —
+    // EXPLICIT user override на по-ранната geometric-safety стойност
+    // (44px/top:0;left:0, виж git history за пълния ludoMobileCardLeftCss()/
+    // LUDO_MOBILE_BOARD_SIZE_CSS анализ: top-left avatar card-ът може да
+    // седи само ~33-43px от левия ръб на "width-bound" viewport-и като
+    // тествания 360×800, а rowTop е доказано >=42px universally). При 52px
+    // (по-голям от 44px reference-а) и 8px offset вместо 0, clearance-ът е
+    // ПО-МАЛЪК от предишната safe версия — user изрично поиска точно тези
+    // стойности и ще прави сам visual QA, затова не пресмятаме нов safe cap
+    // тук.
     return `
       ${renderLudoAnimationStyles()}
       <div data-ludo-screen="1" style="
+        position:relative;
         display:flex; flex-direction:column;
         height:100dvh;
         background:radial-gradient(circle at 50% 0%, #1a2230 0%, #0a0d13 70%);
         box-sizing:border-box;
         overflow:hidden;
       ">
+        ${renderLudoSpectatorViewerIcon(state.spectatorViewers.length, LUDO_SPECTATOR_VIEWER_ICON_SIZE_PX, 'position:absolute; top:8px; left:8px; z-index:6;')}
         <div style="
           flex:1;
           min-height:0;
@@ -424,7 +473,7 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
       box-sizing:border-box;
       overflow:hidden;
     ">
-      ${renderLudoHeader(false)}
+      ${renderLudoHeader(false, state.spectatorViewers)}
 
       <div style="
         flex:1;
@@ -464,7 +513,7 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
   `
 }
 
-function renderLudoHeader(useMobileLayout: boolean): string {
+function renderLudoHeader(useMobileLayout: boolean, spectatorViewers: LudoGameScreenState['spectatorViewers']): string {
   return `
     <header style="
       display:flex; align-items:center; justify-content:space-between;
@@ -477,8 +526,38 @@ function renderLudoHeader(useMobileLayout: boolean): string {
           <div style="font-size:${useMobileLayout ? '10px' : '11px'}; font-weight:700; color:#d4a520; letter-spacing:0.08em; text-transform:uppercase;">Pika.bg — Още игри</div>
           <div style="font-size:${useMobileLayout ? '15px' : '20px'}; font-weight:900; color:#fff;">Не се сърди човече</div>
         </div>
+        ${renderLudoSpectatorViewerIcon(spectatorViewers.length, LUDO_SPECTATOR_VIEWER_ICON_SIZE_PX, 'margin-left:14px;')}
       </div>
     </header>
+  `
+}
+
+// Viewer-indicator ("наднича във вашата игра") икона — вижда се ЕДИНСТВЕНО
+// на participants (state.spectatorViewers е [] за spectator-а самия, виж
+// createLudoFlowController.ts isSpectator gate-а), hidden при 0 зрители,
+// появява се веднага при >=1 (виж task-а). object-fit:contain пази aspect
+// ratio на изходния asset (208x187, виж scripts/checkLudoSpectatorViewerIcon.ts) —
+// НИКОГА не разтяга. Без фон/рамка/квадрат — самото <img> е click target-ът
+// (mirror на established emoji бутон стил в renderLudoBottomBar.ts).
+//
+// Размер: ФИКСИРАН 52px (explicit user instruction, увеличен от 44px —
+// самата стойност вече НЕ съвпада с "Емоджита" бутона в
+// renderLudoBottomBar.ts, width:44px/height:44px — това е нарочно, не
+// пропуск). Без vw/clamp responsive скалиране, same convention.
+const LUDO_SPECTATOR_VIEWER_ICON_SIZE_PX = '52px'
+const LUDO_SPECTATOR_VIEWER_ICON_URL = '/images/ludo/ludo-spectator-viewer.webp'
+function renderLudoSpectatorViewerIcon(viewerCount: number, sizeCss: string, extraStyle = ''): string {
+  if (viewerCount === 0) return ''
+  return `
+    <button type="button" data-ludo-spectator-viewer-icon="1" aria-label="Зрители наблюдават играта" style="
+      border:0; background:transparent; padding:0; cursor:pointer;
+      display:flex; align-items:center; justify-content:center;
+      width:${sizeCss}; height:${sizeCss}; flex-shrink:0;
+      -webkit-tap-highlight-color:transparent;
+      ${extraStyle}
+    ">
+      <img src="${LUDO_SPECTATOR_VIEWER_ICON_URL}" alt="" style="width:100%; height:100%; object-fit:contain; display:block; pointer-events:none;">
+    </button>
   `
 }
 

@@ -35,11 +35,12 @@
 import { isPhoneLayoutViewport } from '../../../ui/layout/viewportStage'
 import { renderLudoGameScreen, applyLudoBoardContent, computeLudoDesktopPanelScale, type LudoGameScreenState } from './renderLudoGameScreen'
 import { renderLudoEmojiPickerHtml } from './renderLudoBottomBar'
+import { renderLudoSpectatorViewersPopoverHtml } from './renderLudoSpectatorViewersPopover'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
 import { renderLudoGameEndPopup } from './renderLudoGameEndPopup'
 import { renderLudoExitConfirmPopup } from './renderLudoExitConfirmPopup'
 import { renderLudoSettingsPopup } from './renderLudoSettingsPopup'
-import { isLudoDiceSoundEnabled, isLudoGameSoundsEnabled, setLudoDiceSoundEnabled, setLudoGameSoundsEnabled } from './ludoSoundSettings'
+import { isLudoDiceSoundEnabled, isLudoGameSoundsEnabled, setLudoDiceSoundEnabled, setLudoGameSoundsEnabled, playLudoSound } from './ludoSoundSettings'
 import { isValidAnimatedEmojiId } from '../../animatedEmoji/animatedEmojiAssets'
 import { LUDO_EMOJI_BUBBLE_TOTAL_MS } from './pieces/renderLudoPlayerPanel'
 import { LUDO_MODAL_LAYER_Z_INDEX } from './ludoLayerHierarchy'
@@ -122,6 +123,13 @@ export interface LudoFlowControllerOptions {
   viewMode?: 'player' | 'spectator'
 }
 
+// Viewer-indicator ("наднича във вашата игра") появяване-звук — mirror на
+// DICE_ROLL_SOUND_SRC конвенцията в playLudoDiceFlightOverlay.ts (module-level
+// const, не per-instance). Played through the established playLudoSound()
+// gate (виж applySpectatorViewers по-долу) — 'gameplay' категория, не
+// dice-specific.
+const LUDO_SPECTATOR_VIEWER_APPEARS_SOUND_SRC = '/audio/ludo/spectator-viewer-appears.mp3'
+
 export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // Единствената точка, която решава "spectator ли съм" — всички
   // interaction/popup gate-ове по-долу четат ТОЗИ const, не options.viewMode
@@ -203,6 +211,41 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let turnStartedAt = Date.now()
   let isDiceRolling = false
   let isAnimatingMove = false
+  // Optimistic "roll already initiated" UI guard (виж task-а: "в момента на
+  // валидното натискане на зара, зарът със стрелките да изчезва веднага",
+  // не чак след като flight-ът приключи). ЕДИНСТВЕНО за authoritative
+  // (истински multiplayer) режим — local/mock engine пътят (performRollSequence
+  // + dispatch ROLL_STARTED) вече синхронно мести engineState.turnPhase от
+  // 'waiting_for_roll' в 'rolling' ПРЕДИ render()-а, значи isWaitingForRoll
+  // (renderLudoGameScreen.ts) вече го крие правилно там без нужда от този
+  // флаг. Проблемът е ЕДИНСТВЕНО в authoritative режима: onRollRequest е
+  // fire-and-forget мрежов request — engineState/turnPhase НЕ се променя
+  // изобщо, докато не пристигне реалният server snapshot с dice_accepted
+  // event (виж presentAuthoritativeRoll по-долу) — цялата flight анимация
+  // междувременно engineState още показва 'waiting_for_roll', затова чист
+  // presentation local флаг тук, НЕ authoritative state мутация.
+  //
+  // Reset (пази guard-а от stuck-true forever) — ТОЧНИЯТ момент на всеки от
+  // трите е критичен (виж bug fix "зарът премигва по време на flight-а" —
+  // root cause беше reset ТВЪРДЕ РАНО, виж presentAuthoritativeRoll doc
+  // коментара там за пълния анализ):
+  //   1) В presentAuthoritativeRoll — ЕДИНСТВЕНО СЛЕД flight-а приключи
+  //      (не при пристигането на dice_accepted-а, ПРЕДИ flight-а!). engineState.
+  //      turnPhase остава 'waiting_for_roll' през ЦЯЛАТА presentAuthoritativeRoll
+  //      функция (реалният презапис engineState=snapshot.state идва от
+  //      caller-а, applyAuthoritativeTransition, чак СЛЕД await-натото
+  //      връщане) — ранен reset тук веднага "отваря" isWaitingForRoll пак,
+  //      diceControl reappear-ва на render()-а точно там и остава видим
+  //      цялата flight (никой друг render() не тече междувременно).
+  //   2) Извикан от notifyGameplayActionRejected() (виж декларацията му
+  //      по-долу) — routing-ан от createLobbyFlowController.ts, когато
+  //      сървърът реално отхвърли roll заявката (типично ludo_match_not_turn)
+  //      — task-ът explicit изисква "UI трябва коректно да може да върне
+  //      зара".
+  //   3) В invalidateAuthoritativePresentations() (foreground snap/epoch
+  //      invalidation, established pattern като isDiceRolling/isAnimatingMove
+  //      там) — reconnect/resync никога не оставя stuck guard.
+  let isRollAlreadyInitiated = false
   let isDestroyed = false
   let isEmojiPickerOpen = false
   let hasPresentedGameEnd = false
@@ -210,6 +253,24 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   let isExitConfirmOpen = false
   let isExitLeavePending = false
   let isSettingsPopupOpen = false
+  // Viewer-indicator ("наднича във вашата игра") — participant-only (виж
+  // isSpectator gate-а в currentScreenState() по-долу); popover state е
+  // локален presentation toggle, НЕ persisted/authoritative. spectatorViewers
+  // идва изцяло от сървъра (applySpectatorViewers по-долу, mirror на
+  // applyEmojiReaction pattern-а) — контролерът никога сам не изчислява
+  // membership-а.
+  let spectatorViewers: Array<{ profileId: string; displayName: string }> = []
+  let isSpectatorViewersPopoverOpen = false
+  // Sound-transition guard (виж task-а "звук само при реален transition
+  // 0 -> >=1 в рамките на текущия participant screen"): false докато нито
+  // едно applySpectatorViewers съобщение не е получено СЛЕД mount-ването на
+  // ТОЗИ controller instance. Гарантира, че initial render/reconnect (нова
+  // controller instance при всеки reconnect, виж mountLudoGameController в
+  // createLobbyFlowController.ts) никога не пуска звук дори ако сървърът
+  // веднага съобщи за вече съществуващи spectators — само СЛЕДВАЩА, реална
+  // 0->>=1 промяна В РАМКИТЕ на тази сесия го прави (виж applySpectatorViewers
+  // по-долу).
+  let hasReceivedSpectatorViewersUpdate = false
   // Показва bot-takeover popup-а веднъж, СЛЕД move timeout (т.15) — sticky
   // до следващия път, когато local player-ът получи хода си (не reset-ва
   // се автоматично, аналог на Belot persistent popup).
@@ -465,6 +526,14 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // да изглеждат като "player timeout, изтичащ за 700ms".
       isHumanCountdownActive: turnDisplay.isHumanCountdownActive,
       isDiceRolling,
+      // Optimistic "скрий зара веднага при валиден click" guard (виж
+      // isRollAlreadyInitiated doc коментара при декларацията му) —
+      // renderLudoGameScreen.ts::renderPlayerPanelSlot го combine-ва с
+      // turnPhase==='waiting_for_roll', за да покаже аватара веднага след
+      // click-а, БЕЗ да чака authoritative turnPhase реално да се смени
+      // (той не се сменя, докато сървърът не потвърди roll-а с dice_accepted
+      // event — виж presentAuthoritativeRoll).
+      isRollAlreadyInitiated,
       // Interaction lock: DOM disabled state следва engine turnPhase, но
       // НЕ е authoritative за правилата — engine stale-action защитата
       // (turnVersion) е вторият защитен слой (виж task-а т.21). local
@@ -506,6 +575,13 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // label/emoji visibility (виж renderLudoBottomBar), без да пипа board/
       // pieces/dice/animations rendering-а самия (изцяло reused).
       viewMode: options.viewMode ?? 'player',
+      // Viewer-indicator — НИКОГА за spectator-а самия (изрично [] тук,
+      // независимо какво евентуално би стигнало в spectatorViewers
+      // променливата — сървърът и без друго никога не изпраща
+      // ludo_match_spectators до spectator connections, виж index.ts
+      // broadcastLudoMatchSpectatorsToParticipants, но local defense-in-depth
+      // гейт тук е евтин и explicit).
+      spectatorViewers: isSpectator ? [] : spectatorViewers,
     }
   }
 
@@ -518,6 +594,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (isGameEndPopupOpen) mountGameEndPopup()
     if (isExitConfirmOpen) mountExitConfirmPopup()
     if (isSettingsPopupOpen) mountSettingsPopup()
+    if (isSpectatorViewersPopoverOpen) mountSpectatorViewersPopover()
     wireEvents()
   }
 
@@ -643,6 +720,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     isExitLeavePending = false
     isEmojiPickerOpen = false
     isSettingsPopupOpen = false
+    isSpectatorViewersPopoverOpen = false
     modalLayerRoot.replaceChildren()
     syncModalLayerInteractivity()
     clearScheduledTimers()
@@ -699,6 +777,38 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (!(target instanceof Element)) return
     if (target.closest('[data-ludo-emoji-picker="1"]') || target.closest('[data-ludo-emoji-button="1"]')) return
     closeEmojiPicker()
+  }
+
+  // Viewer-indicator popover ("наднича във вашата игра") — лек floating
+  // panel, mirror на mountEmojiPicker/closeEmojiPicker/
+  // handleEmojiPickerOutsideClick точно над тук (НЕ full-screen blocking
+  // modal — explicit НЕ минава през syncModalLayerInteractivity(), панелът
+  // сам носи pointer-events:auto). Remove-then-remount (не early-return guard
+  // като mountEmojiPicker) — списъкът трябва да остане live-обновяван, ако
+  // popover-ът е отворен точно когато membership-ът се промени (виж task-а
+  // "Membership да се обновява live").
+  function mountSpectatorViewersPopover(): void {
+    modalLayerRoot.querySelector('[data-ludo-spectator-viewers-popover="1"]')?.remove()
+    const container = document.createElement('div')
+    container.innerHTML = renderLudoSpectatorViewersPopoverHtml(spectatorViewers, isPhoneLayoutViewport())
+    const panel = container.firstElementChild
+    if (!(panel instanceof HTMLElement)) return
+    panel.style.pointerEvents = 'auto'
+    modalLayerRoot.appendChild(panel)
+    document.addEventListener('click', handleSpectatorViewersPopoverOutsideClick, { capture: true })
+  }
+
+  function closeSpectatorViewersPopover(): void {
+    isSpectatorViewersPopoverOpen = false
+    modalLayerRoot.querySelector('[data-ludo-spectator-viewers-popover="1"]')?.remove()
+    document.removeEventListener('click', handleSpectatorViewersPopoverOutsideClick, { capture: true })
+  }
+
+  function handleSpectatorViewersPopoverOutsideClick(event: MouseEvent): void {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest('[data-ludo-spectator-viewers-popover="1"]') || target.closest('[data-ludo-spectator-viewer-icon="1"]')) return
+    closeSpectatorViewersPopover()
   }
 
   // Bot-takeover popup (т.15) — reuse-ва Belot-овия УХ pattern (scrim +
@@ -788,8 +898,34 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       openSettingsPopup()
     })
 
+    // Viewer-indicator icon click — toggle popover (виж task-а "При
+    // натискане... отвори малък popup"). Иконата се рендира ЕДИНСТВЕНО
+    // когато spectatorViewers.length>0 (виж renderLudoSpectatorViewerIcon в
+    // renderLudoGameScreen.ts), затова тук просто toggle-ваме flag-а — няма
+    // риск от clickable, но невидим елемент.
+    options.root.querySelector('[data-ludo-spectator-viewer-icon="1"]')?.addEventListener('click', () => {
+      if (isSpectatorViewersPopoverOpen) {
+        closeSpectatorViewersPopover()
+      } else {
+        isSpectatorViewersPopoverOpen = true
+      }
+      render()
+    })
+
     options.root.querySelector('[data-ludo-dice-roll-button="1"]')?.addEventListener('click', () => {
+      // isRollAlreadyInitiated guard-ва срещу double roll/double click (виж
+      // task-а) — проверен ПЪРВО, синхронно, независимо от DOM timing (виж
+      // декларацията му по-горе за пълния rationale).
       if (options.authoritative && authoritativeSnapshot) {
+        if (isRollAlreadyInitiated) return
+        // Optimistic: скрий зара+стрелките ВЕДНАГА, покажи аватара, преди
+        // мрежовият request изобщо да е тръгнал — не чакай server response/
+        // flight animation (виж task-а). Летящият зар towards центъра
+        // остава напълно недокоснат — той стартира по-късно, в
+        // presentAuthoritativeRoll, когато реалният dice_accepted event
+        // пристигне.
+        isRollAlreadyInitiated = true
+        render()
         options.authoritative.onRollRequest(authoritativeSnapshot.matchId, authoritativeRevision)
       } else {
         void handleHumanRollClick()
@@ -1309,6 +1445,12 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     captureVictimOverrides = new Map()
     isDiceRolling = false
     isAnimatingMove = false
+    // Виж isRollAlreadyInitiated doc коментара при декларацията му — same
+    // established pattern: foreground snap/epoch invalidation никога не
+    // бива да остави optimistic "скрий зара" guard-а stuck-true forever
+    // (reconnect/resync праща нова controller instance или fresh snapshot,
+    // не бива стар guard да продължи да крие легитимно 'waiting_for_roll').
+    isRollAlreadyInitiated = false
     // Виж justLeftColor doc коментара при декларацията му — foreground snap/
     // epoch invalidation не бива да остави stale "Излезе от играта" blink
     // window/timer нито stale презаписан forfeit-flight в опашката (виж §8
@@ -1367,6 +1509,24 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (epoch !== presentationEpoch) return false
     const event = snapshot.events.find((item) => item.type === 'dice_accepted')
     if (!event || event.type !== 'dice_accepted') return true
+    // ВАЖНО (виж bug fix task-а — "зарът премигва обратно по време на
+    // flight-а"): isRollAlreadyInitiated НЕ се reset-ва тук, ПРЕДИ render()-а
+    // отдолу. Root cause на премигването: engineState.turnPhase ОЩЕ Е
+    // 'waiting_for_roll' в тази точка (не се сменя, докато презентацията тук
+    // не приключи — виж applyAuthoritativeTransition, engineState=snapshot.
+    // state се случва чак СЛЕД await-натото връщане на тази функция). Ако
+    // guard-ът се reset-не тук, renderPlayerPanelSlot's isWaitingForRoll
+    // (renderLudoGameScreen.ts) веднага пак вижда turnPhase==='waiting_for_
+    // roll' И isRollAlreadyInitiated===false → diceControl reappear-ва точно
+    // на render()-а долу, и остава видим през ЦЯЛАТА await-ната flight (никой
+    // друг render() не тече междувременно — самият overlay е независим DOM
+    // subtree в document.body, не минава през root re-render). isDiceRolling
+    // САМО ПО СЕБЕ СИ не help-ва тук — isWaitingForRoll изобщо не го чете.
+    // Затова guard-ът остава true през ЦЕЛИЯ presentAuthoritativeRoll extent
+    // (и двата изхода долу) — reset-ва се едва СЛЕД flight-а, симетрично с
+    // isDiceRolling=false, когато вече е safe (следващият render() на
+    // caller-а винаги идва СЛЕД engineState да е бил обновен спрямо
+    // пост-roll turnPhase-а, виж applyAuthoritativeTransition).
     isDiceRolling = true
     render()
     const triggerEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${event.color}"]`)
@@ -1374,6 +1534,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     const boardEl = options.root.querySelector<HTMLElement>('[data-ludo-board="1"]')
     if (!centerEl || !boardEl) {
       isDiceRolling = false
+      isRollAlreadyInitiated = false
       return true
     }
     await diceResultOverlay.playFlight({
@@ -1384,6 +1545,13 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     })
     if (epoch !== presentationEpoch) return false
     isDiceRolling = false
+    // Safe reset-ов момент (виж коментара по-горе при декларацията на
+    // guard-а) — flight-ът приключи, caller-ът (applyAuthoritativeTransition)
+    // ей сега ще презапише engineState с post-roll snapshot.state (turnPhase
+    // вече НЕ е 'waiting_for_roll', типично 'awaiting_move_selection') и ще
+    // render()-не — isWaitingForRoll вече е false и по двете причини
+    // едновременно, без risk от премигване назад.
+    isRollAlreadyInitiated = false
     return true
   }
 
@@ -1596,6 +1764,52 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     addEmojiReaction(color, emojiId)
   }
 
+  // Server отхвърли roll/move/reclaim request (типично ludo_match_not_turn —
+  // виж createLobbyFlowController.ts _ludoGameplayActionResponsesPending doc
+  // коментара за пълния routing rationale). ЕДИНСТВЕНАТА цел тук: върни зара
+  // обратно, ако точно ТОЗИ отхвърлен request беше нашия optimistic roll
+  // click (isRollAlreadyInitiated, виж декларацията му) — task-ът explicit
+  // изисква "ако roll заявката бъде отказана... UI трябва коректно да може
+  // да върне зара". No-op ако флагът вече е false (move/reclaim rejection,
+  // или roll-ът реално е бил приет междувременно от presentAuthoritativeRoll)
+  // — безопасно извикан безусловно за всичките 3 gameplay-action типа.
+  function notifyGameplayActionRejected(): void {
+    if (!isRollAlreadyInitiated) return
+    isRollAlreadyInitiated = false
+    render()
+  }
+
+  // Viewer-indicator ("наднича във вашата игра") — server echo, mirror на
+  // applyEmojiReaction по-горе (matchId staleness guard срещу late-arriving
+  // съобщение за предишен match instance). Сървърът вече е дедупликирал по
+  // profileId (виж index.ts buildLudoMatchSpectatorsMessage) — тук е чисто
+  // presentation state update, никаква допълнителна логика. Ако popover-ът
+  // е отворен и новият списък стане празен (последният spectator напусна),
+  // затваряме popover-а автоматично — няма смисъл да стои отворен towards
+  // празен списък.
+  //
+  // Звук при появата на иконата (виж task-а "spectator-viewer-appears.mp3"):
+  // пуска се ЕДИНСТВЕНО при реален 0 -> >=1 transition НА ТОЗИ controller
+  // instance (hasReceivedSpectatorViewersUpdate guard-ът по-горе изключва
+  // самия ПЪРВИ update, който получаваме — initial render/reconnect не
+  // трябва да "изсвири" звук само защото сървърът веднага съобщава за вече
+  // съществуващи spectators). Локален "gameplay" presentation side effect,
+  // минаващ през established playLudoSound() gate (master "Звуци в играта"
+  // toggle) — не gameplay logic, не мутира state. Спectator-ът никога не
+  // получава ludo_match_spectators (виж index.ts/G1 regression теста), значи
+  // никога не чува тоЗи звук самиЯТ той — само participants, при които
+  // иконата реално се появява.
+  function applySpectatorViewers(matchId: string, viewers: Array<{ profileId: string; displayName: string }>): void {
+    if (!options.authoritative || matchId !== options.authoritative.initialSnapshot.matchId) return
+    const wasEmpty = spectatorViewers.length === 0
+    const shouldPlayAppearSound = hasReceivedSpectatorViewersUpdate && wasEmpty && viewers.length > 0
+    spectatorViewers = viewers
+    hasReceivedSpectatorViewersUpdate = true
+    if (viewers.length === 0) isSpectatorViewersPopoverOpen = false
+    if (shouldPlayAppearSound) playLudoSound(LUDO_SPECTATOR_VIEWER_APPEARS_SOUND_SRC, 'gameplay')
+    render()
+  }
+
   function applyAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot, prizeAmount: number | null): void {
     if (!options.authoritative || snapshot.matchId !== options.authoritative.initialSnapshot.matchId) return
     if (prizeAmount !== null) latestPrizeAmount = prizeAmount
@@ -1624,6 +1838,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     window.removeEventListener('resize', handleResize)
     document.removeEventListener('visibilitychange', handleVisibilityChange)
     document.removeEventListener('click', handleEmojiPickerOutsideClick, { capture: true })
+    document.removeEventListener('click', handleSpectatorViewersPopoverOutsideClick, { capture: true })
     if (resizeTimer) clearTimeout(resizeTimer)
     clearScheduledTimers()
     clearEmojiReactionTimers()
@@ -1642,5 +1857,5 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   document.addEventListener('visibilitychange', handleVisibilityChange)
   render()
 
-  return { destroy, applyAuthoritativeSnapshot, applyEmojiReaction, requestExit }
+  return { destroy, applyAuthoritativeSnapshot, applyEmojiReaction, applySpectatorViewers, notifyGameplayActionRejected, requestExit }
 }
