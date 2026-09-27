@@ -174,11 +174,56 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   const isSpectator = options.viewMode === 'spectator'
   const modalLayerRoot = document.createElement('div')
   modalLayerRoot.setAttribute('data-ludo-modal-layer', '1')
+  // ВИНАГИ pointer-events:none (виж syncModalLayerInteractivity() doc
+  // коментара по-долу за root-cause анализа защо тая стойност никога не
+  // бива да се сменя динамично) — root-ът е fullscreen (position:fixed;
+  // inset:0), но НЕ носи собствено визуално съдържание, само hosting
+  // container за модалите/попъп-овете по-долу.
   modalLayerRoot.style.cssText = `position:fixed;inset:0;z-index:${LUDO_MODAL_LAYER_Z_INDEX};pointer-events:none;`
   document.body.appendChild(modalLayerRoot)
 
+  // FIXED (виж bug report "modal layer прихваща gameplay click-ове след
+  // emoji/viewer popover", live-confirmed чрез elementFromPoint diagnostic:
+  // topmost element = [data-ludo-modal-layer="1"]) — тая функция вече е
+  // no-op, оставена като stub (не изтрита), за да НЕ пипаме ~10-те
+  // съществуващи call site-а (settings/exit-confirm/game-end/bot-takeover
+  // open+close, applyAuthoritativeTransition-ови defensive cleanup-и).
+  //
+  // ROOT CAUSE: modalLayerRoot е ЕДИН fullscreen container, споделен между
+  // ДВЕ категории деца — (A) "истински" модали (settings/exit-confirm/
+  // game-end/bot-takeover backdrop-и) И (B) леки floating panels (emoji
+  // picker, spectator viewers popover), които НИКОГА не викат тая функция
+  // сами (виж mountEmojiPicker/mountSpectatorViewersPopover doc коментарите
+  // — explicit решение да останат "leight", без blocking backdrop).
+  // Старата логика (`childElementCount > 0 ? 'auto' : 'none'`) броеше
+  // ВСИЧКИ деца безразборно — ако emoji-picker/viewer-popover (категория B)
+  // бяха mount-нати в МОМЕНТА, в който НЯКОЙ ДРУГ call site (напр.
+  // bot-takeover-backdrop defensive cleanup-ът в applyAuthoritativeTransition,
+  // който тече на ВСЕКИ authoritative snapshot, дори когато няма bot-
+  // takeover) пресмяташе interactivity-то, childElementCount отчиташе >=1
+  // (заради панела от категория B) и погрешно вдигаше root-а на
+  // pointer-events:auto — правейки ЦЕЛИЯ viewport (fullscreen,
+  // z-index:10000, над board/dice-а) click-прихващащ, БЕЗ никаква видима
+  // причина. И тъй като mountEmojiPicker/closeEmojiPicker/
+  // mountSpectatorViewersPopover/closeSpectatorViewersPopover никога не
+  // викат тая функция, стойността 'auto' оставаше stuck дори СЛЕД
+  // затварянето на panel-а, докато следваща authoritative snapshot (с
+  // childElementCount реално 0 по онова време) случайно не я reset-неше
+  // обратно — обяснява и "следващият ми ход пак работи нормално".
+  //
+  // FIX: ненужно е root-ът изобщо да сменя pointer-events — ВСЕКИ
+  // съществуващ consumer (settings/exit-confirm/game-end/bot-takeover
+  // backdrop, emoji-picker panel, spectator-viewers-popover panel) вече
+  // носи СОБСТВЕН explicit `pointer-events:auto` на собствения си
+  // top-level елемент (виж всеки mount* по-долу) — стандартно CSS
+  // поведение гарантира descendant pointer-events:auto да override-ва
+  // ancestor pointer-events:none, значи всеки от тях си остава напълно
+  // clickable, дори root-ът да е ПОСТОЯННО 'none'. Затова root-ът вече е
+  // hardcoded 'none' веднъж, при създаването му по-горе, и никога не се
+  // пипа отново.
   function syncModalLayerInteractivity(): void {
-    modalLayerRoot.style.pointerEvents = modalLayerRoot.childElementCount > 0 ? 'auto' : 'none'
+    // No-op — виж doc коментара по-горе. Запазена като функция (не
+    // изтрита), за да останат ~10-те съществуващи call site-а валидни.
   }
 
   const players: Record<LudoColor, LudoPlayer> = options.players ?? createLudoMockPlayers()
