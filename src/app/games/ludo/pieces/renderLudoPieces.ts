@@ -110,6 +110,19 @@ export function renderLudoPieceHtml(
         transform:translateY(-4px);
         pointer-events:${selectable ? 'auto' : 'none'};
         cursor:${selectable ? 'pointer' : 'default'};
+        /* -webkit-tap-highlight-color:transparent — needed LOCALLY here
+           because the whole Ludo game screen mounts on
+           [data-ludo-overlay-root], a div appended directly to
+           document.body (createLobbyFlowController.ts), i.e. a SIBLING of
+           #app, not a descendant. The global mobile tap-highlight reset in
+           style.css only targets "#app *" (+ the body-level exceptions it
+           already lists) — same root cause already documented/fixed there
+           for the bidding popup/bottom-hand-cards flash and here for
+           renderLudoDiceControl.ts's roll button; this pawn tap target
+           falls into that exact gap too. Fixed locally per-element (mirrors
+           the dice control's established fix), not by widening the global
+           selector. */
+        -webkit-tap-highlight-color:transparent;
         transition:filter 160ms ease;
         ${extraStyle}
       "
