@@ -1,5 +1,5 @@
 import { strict as assert } from 'node:assert'
-import { createLudoMatchRuntime, type LudoMatchSnapshot } from '../src/game/ludoMatchRuntime.js'
+import { createLudoMatchRuntime, LUDO_SERVER_ROLL_TIMEOUT_MS, type LudoMatchSnapshot } from '../src/game/ludoMatchRuntime.js'
 import type { LudoGamePiece, LudoGameState, LudoPiecePosition } from '../src/game/ludoEngine/ludoEngineTypes.js'
 import type { LudoRoom } from '../src/game/ludoRoomsStore.js'
 
@@ -226,7 +226,7 @@ function scenario(initial: LudoGameState, die: 1 | 2 | 3 | 4 | 5 | 6, finishedMa
   assert.equal(after.state.activeColor, before.state.activeColor, 'inactive reclaim preserves active color')
   assert.equal(after.state.turnPhase, before.state.turnPhase, 'inactive reclaim preserves phase')
   assert.equal(after.deadlineAt, before.deadlineAt, 'inactive reclaim preserves absolute server deadline')
-  assert.equal(after.deadlineAt! - after.serverNow, 8_000, 'inactive reclaim preserves remaining time')
+  assert.equal(after.deadlineAt! - after.serverNow, LUDO_SERVER_ROLL_TIMEOUT_MS - 2_000, 'inactive reclaim preserves remaining time')
   assert.equal(after.revision, before.revision + 1, 'ownership broadcast advances revision once')
   runtime.destroy()
 }

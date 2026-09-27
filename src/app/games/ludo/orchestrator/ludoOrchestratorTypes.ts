@@ -19,7 +19,22 @@
 
 import type { LudoColor, LudoTurnPhase } from '../engine/ludoEngineTypes'
 
-export const LUDO_ROLL_TIMEOUT_MS = 10_000
+// Виж task-а "Ludo turn timeouts" — ROLL намален от 10s на 5s (MOVE остава
+// 15s, непроменено). Тия 2 константи СА client-side mirror-ът на server-ови
+// LUDO_SERVER_ROLL_TIMEOUT_MS/LUDO_SERVER_MOVE_TIMEOUT_MS
+// (server/src/game/ludoMatchRuntime.ts) — двойка ЧИСЛОВО синхронизирани, но
+// физически отделни декларации (client/server са напълно отделни
+// TypeScript проекти/bundles, без споделен package/import boundary между
+// тях, established convention още преди тая задача). Reuse-ват се и от
+// non-authoritative (dev/mock) local timer path-а тук, и от authoritative
+// countdown presentation-а в createLudoFlowController.ts (currentTurnCountdownMs) —
+// ЕДИНСТВЕН client-side source of truth за визуалната countdown
+// продължителност (CSS animation-duration string-ът в
+// renderLudoPlayerPanel.ts вече е dynamically parametrized спрямо тая
+// стойност, не hardcoded — синхронизацията с реалния timeout е автоматична,
+// без нужда от отделна CSS промяна). Regression guard за числово
+// разминаване спрямо server-а: server/scripts/checkLudoTurnTimeouts.ts.
+export const LUDO_ROLL_TIMEOUT_MS = 5_000
 export const LUDO_MOVE_TIMEOUT_MS = 15_000
 // Кратко "мислене" преди bot action — presentation delay, НЕ human timeout
 // (виж task-а т.16: bot никога не чака 10s/15s human таймери).

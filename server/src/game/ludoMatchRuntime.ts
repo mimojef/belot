@@ -6,7 +6,15 @@ import type { LudoColor, LudoDiceValue, LudoGameState, LudoPieceSlot } from './l
 import type { LudoEngineEvent } from './ludoEngine/ludoEngineEvents.js'
 import { pickLudoBotMove } from './ludoEngine/ludoBotPolicy.js'
 
-export const LUDO_SERVER_ROLL_TIMEOUT_MS = 10_000
+// Виж task-а "Ludo turn timeouts" — ROLL намален от 10s на 5s (MOVE остава
+// 15s, непроменено). Единственият authoritative source of truth за реалния
+// server-side turn deadline (scheduleDeadline() по-долу) — client-ovият
+// mirror е LUDO_ROLL_TIMEOUT_MS/LUDO_MOVE_TIMEOUT_MS
+// (src/app/games/ludo/orchestrator/ludoOrchestratorTypes.ts), числово
+// синхронизиран, но физически отделна декларация (client/server са
+// отделни TS проекти/bundles, established convention). Regression guard
+// за числово разминаване между двете: server/scripts/checkLudoTurnTimeouts.ts.
+export const LUDO_SERVER_ROLL_TIMEOUT_MS = 5_000
 export const LUDO_SERVER_MOVE_TIMEOUT_MS = 15_000
 export const LUDO_SERVER_BOT_THINK_DELAY_MS = 1_500
 export const LUDO_FINISHED_MATCH_RETENTION_MS = 10_000
