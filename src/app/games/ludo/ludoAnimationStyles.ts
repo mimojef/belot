@@ -48,10 +48,6 @@ export function renderLudoAnimationStyles(): string {
         90% { opacity:1; }
         100% { opacity:0; }
       }
-      [data-ludo-dice-roll-button]:hover {
-        filter:brightness(1.08);
-        transform:translateY(-1px);
-      }
       [data-ludo-piece-selectable]:hover {
         filter:brightness(1.25);
       }
@@ -70,6 +66,12 @@ export function renderLudoAnimationStyles(): string {
       [data-ludo-emoji-image-button]:active img {
         transform:scale(0.94);
         opacity:0.85;
+      }
+      /* Gift action icon hover (виж renderLudoPlayerPanel.ts::renderLudoGiftActionIcon) —
+         1:1 с Belot's [data-active-room-gift-icon]:hover (renderCuttingSeatPanels.ts). */
+      [data-ludo-gift-icon]:hover {
+        background:linear-gradient(180deg, rgba(48,42,20,0.97) 0%, rgba(22,18,6,0.98) 100%) !important;
+        border-color:rgba(255,224,128,1) !important;
       }
     </style>
   `

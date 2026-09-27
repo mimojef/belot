@@ -16,7 +16,7 @@ import {
 import { mapLudoColorToViewerQuadrant, type LudoViewerQuadrant } from './board/ludoPerspective'
 import { renderLudoPiecesByCell } from './pieces/renderLudoPieces'
 import { renderLudoPlayerPanel } from './pieces/renderLudoPlayerPanel'
-import type { LudoPlayerLeaveStatus, LudoEmojiReactionDirection } from './pieces/renderLudoPlayerPanel'
+import type { LudoPlayerLeaveStatus, LudoEmojiReactionDirection, LudoGiftIconSide } from './pieces/renderLudoPlayerPanel'
 import { renderLudoBottomBar } from './renderLudoBottomBar'
 import { renderLudoAnimationStyles } from './ludoAnimationStyles'
 import { LUDO_COLORS } from './ludoTypes'
@@ -30,6 +30,7 @@ import type { LudoTurnPhase } from './engine/ludoEngineTypes'
 function viewerColorAt(quadrant: LudoViewerQuadrant, localColor: LudoColor): LudoColor {
   return LUDO_COLORS.find((color) => mapLudoColorToViewerQuadrant(color, localColor) === quadrant)!
 }
+
 
 // Desktop board sizing — измерени (не гадани) pixel constants за
 // header/bottom bar/action-бутон/padding/gap-ове, за да може дъската да
@@ -309,6 +310,13 @@ function renderPlayerPanelSlot(
   compact: boolean,
   localColor: LudoColor,
   emojiDirection: LudoEmojiReactionDirection,
+  // Виж renderLudoPlayerPanel.ts::LudoGiftIconSide doc коментара — explicit
+  // подадено per call site, различно за mobile vs desktop (mobile: 'left'/
+  // 'right', extend towards хоризонталния съсед в реда; desktop: 'top'/
+  // 'bottom', extend towards вертикалния съсед в СЪЩАТА колона), НЕЗАВИСИМО
+  // от emojiDirection-а (explicit user screenshot feedback, виж git history
+  // за итерациите).
+  giftSide: LudoGiftIconSide,
 ): string {
   const isActive = state.activeColor === color
   // Изчислено ПРИ ВСЕКИ render() спрямо реалния Date.now() — не натрупва
@@ -393,6 +401,32 @@ function renderPlayerPanelSlot(
       }
     : null
 
+  // Виж LudoGiftIconSide doc коментара (renderLudoPlayerPanel.ts) — null
+  // за local player-я самия (§2 в task-а "local player НЕ вижда gift button
+  // към самия себе си"), за spectator view (§10 "spectator mode НЕ трябва
+  // да вижда gift buttons") и за non-participant ("Не участва") slot-ове
+  // (виж task-а "Ludo player cards — non-participant presentation" §1) —
+  // state.players[color].isBot===true e authoritative signal ЕДИНСТВЕНО за
+  // "няма реален participant на тоя цвят" (виж renderLudoPlayerPanel.ts's
+  // doc коментар при isBot проверката за avatar-а — same source, не текстово
+  // сравнение с "Не участва"). Гейтва ЕДИНСТВЕНО presentation-а тук;
+  // authoritative server validation (resolveLudoGiftParticipants.ts) е
+  // отделен, independent защитен слой (виж §5 в task-а).
+  const giftIcon: LudoGiftIconSide | null =
+    state.viewMode === 'player' && color !== localColor && !state.players[color].isBot ? giftSide : null
+
+  // Виж task-а "Ludo profile popup integration" §1-4/§7 — reuse на
+  // съществуващия Belot/lobby profile popup, click target само за реален
+  // (isBot===false), друг участник. За разлика от giftIcon по-горе (винаги
+  // participant-only), avatar click трябва да работи и за spectator (§7 —
+  // "spectator трябва да може да отвори профила на реалните участници"),
+  // затова local-color self-exclusion се прилага САМО в 'player' viewMode
+  // (spectator-ът няма реален "себе си" цвят измежду 4-те — localColor там
+  // е вътрешен fallback, не истинска self-identity, виж createLudoFlowController.
+  // ts doc коментарите за isSpectator/localColor gate конвенцията другаде).
+  const isAvatarClickable =
+    !state.players[color].isBot && (state.viewMode === 'spectator' || color !== localColor)
+
   return renderLudoPlayerPanel(
     state.players[color],
     state.pieces,
@@ -405,6 +439,8 @@ function renderPlayerPanelSlot(
     leaveStatus,
     state.desktopPanelScale,
     emojiPresentation,
+    giftIcon,
+    isAvatarClickable,
   )
 }
 
@@ -460,8 +496,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           overflow:hidden;
         ">
           <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-left')};">${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), true, localColor, 'down')}</div>
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-right')};">${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), true, localColor, 'down')}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-left')};">${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), true, localColor, 'down', 'right')}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('top-right')};">${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), true, localColor, 'down', 'left')}</div>
           </div>
 
           <div style="
@@ -474,8 +510,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="position:relative; width:${LUDO_MOBILE_BOARD_SIZE_CSS}; height:${LUDO_MOBILE_CARD_ROW_HEIGHT_PX}px; flex-shrink:0;">
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-left')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), true, localColor, 'up')}</div>
-            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-right')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), true, localColor, 'up')}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-left')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), true, localColor, 'up', 'right')}</div>
+            <div style="position:absolute; top:0; left:${ludoMobileCardLeftCss('bottom-right')};">${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), true, localColor, 'up', 'left')}</div>
           </div>
         </div>
 
@@ -509,8 +545,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
       ">
         <div style="display:flex; align-items:stretch; justify-content:center; gap:22px; flex-shrink:0; height:${LUDO_DESKTOP_BOARD_ROW_SIZE_CSS};">
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), false, localColor, 'right')}
-            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), false, localColor, 'right')}
+            ${renderPlayerPanelSlot(state, viewerColorAt('top-left', localColor), false, localColor, 'right', 'bottom')}
+            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-left', localColor), false, localColor, 'right', 'top')}
           </div>
 
           <div style="
@@ -522,8 +558,8 @@ export function renderLudoGameScreen(state: LudoGameScreenState): string {
           </div>
 
           <div style="display:flex; flex-direction:column; justify-content:space-between; flex-shrink:0;">
-            ${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), false, localColor, 'left')}
-            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), false, localColor, 'left')}
+            ${renderPlayerPanelSlot(state, viewerColorAt('top-right', localColor), false, localColor, 'left', 'bottom')}
+            ${renderPlayerPanelSlot(state, viewerColorAt('bottom-right', localColor), false, localColor, 'left', 'top')}
           </div>
         </div>
       </div>

@@ -251,6 +251,12 @@ export type ClientMessage =
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
+  // In-game gift (виж LudoGiftSentMessage/LudoGiftSendResultMessage doc
+  // коментарите по-долу и resolveLudoGiftParticipants.ts) — mirror на
+  // send_table_gift по-горе, matchId вместо roomId. requestId е client-
+  // generated idempotency key (giftItemStore.sendGiftItem UNIQUE
+  // request_id), same convention.
+  | { type: 'send_ludo_gift'; matchId: string; recipientProfileId: string; giftItemId: string; requestId: string }
   // Spectator mode ("Гледай", виж task-а "Ludo Spectator Mode Phase 1") —
   // read-only subscription към ЧУЖД активен match, НЕ participant action.
   // Една connection гледа максимум ЕДИН match наведнъж (виж index.ts
@@ -1021,12 +1027,15 @@ export type LudoGameStartedMessage = {
   snapshot: LudoGameStateSnapshot
   walletBalance: number
   prizeAmount: number | null
+  /** Виж ActiveLudoGiftSnapshot doc коментара по-долу — reconnect-safe active gift reconciliation. */
+  activeLudoGifts?: ActiveLudoGiftSnapshot[]
 }
 export type LudoGameStateMessage = {
   type: 'ludo_game_state'
   snapshot: LudoGameStateSnapshot
   walletBalance: number
   prizeAmount: number | null
+  activeLudoGifts?: ActiveLudoGiftSnapshot[]
 }
 
 // Spectator mode ("Гледай", Ludo Spectator Mode Phase 1) — reuse-ва СЪЩИЯ
@@ -1046,6 +1055,7 @@ export type LudoGameStateMessage = {
 export type LudoSpectatorGameStateMessage = {
   type: 'ludo_spectator_game_state'
   snapshot: LudoGameStateSnapshot
+  activeLudoGifts?: ActiveLudoGiftSnapshot[]
 }
 
 // Viewer-indicator ("наднича във вашата игра", Ludo Spectator Mode —
@@ -1077,6 +1087,71 @@ export type LudoEmojiReactionMessage = {
   matchId: string
   color: LudoColor
   emojiId: string
+}
+
+// ─── Ludo in-game gifts — 1:1 mirror на Belot table gift (Stage 2, виж
+// TableGiftItemSentMessage/TableGiftSendResultMessage/ActiveTableGiftSnapshot
+// по-горе), адаптирано за matchId/LudoColor вместо roomId/Seat. Reuse-ва
+// ИЗЦЯЛО giftItemStore.sendGiftItem (context='ludo', contextId=matchId) —
+// нула паралелна payment/economy логика, виж resolveLudoGiftParticipants.ts
+// за server-authoritative match membership валидацията.
+//
+// Ephemeral, self-expiring, reconnect-safe presentation state — държи се
+// в index.ts-local Map (activeLudoGiftsByMatchId), НИКОГА в
+// ludoMatchRuntime.ts/LudoGameState (не е gameplay, не участва в
+// authoritative engine state machine-а). 60 секунди (виж
+// LUDO_GIFT_OVERLAY_DURATION_MS в index.ts), идентично на Belot-овия
+// TABLE_GIFT_OVERLAY_DURATION_MS.
+export type ActiveLudoGiftSnapshot = {
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderColor: LudoColor
+  senderDisplayName: string
+  recipientColor: LudoColor
+  sentAt: string
+  expiresAt: string
+}
+
+/**
+ * Room-wide (match-wide) broadcast при УСПЕШЕН НОВ Ludo gift transaction.
+ * Изпраща се точно веднъж на transaction (idempotent replay guard в
+ * giftItemStore) — до всички currently-connected participants (с изключение
+ * на leftColors, mirror на Belot's onSnapshot broadcast loop) И до всички
+ * активни spectators на match-а (виж index.ts broadcastLudoSpectatorSnapshot
+ * fan-out convention — presentation-only, spectators никога не могат да
+ * пращат, само да видят).
+ */
+export type LudoGiftSentMessage = {
+  type: 'ludo_gift_sent'
+  matchId: string
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderColor: LudoColor
+  senderDisplayName: string
+  recipientProfileId: string
+  recipientColor: LudoColor
+  chargedPrice: number
+  sentAt: string
+  expiresAt: string
+}
+
+/** Личен отговор към изпращача (успех/грешка + нов баланс) — mirror на TableGiftSendResultMessage. */
+export type LudoGiftSendResultMessage = {
+  type: 'ludo_gift_send_result'
+  matchId: string
+  requestId: string
+  ok: boolean
+  message?: string
+  transactionId?: string
+  chargedPrice?: number
+  senderBalanceAfter?: number
+  isReplay?: boolean
 }
 
 // "Играещи"/"Приключили" lobby listing за /games/ludo — mirror на
@@ -1351,6 +1426,8 @@ export type ServerMessage =
   | LudoMatchSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
+  | LudoGiftSentMessage
+  | LudoGiftSendResultMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage

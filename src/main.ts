@@ -6720,6 +6720,9 @@ lobby = createLobbyFlowController({
   onLudoMoveRequest: (matchId, revision, slot) => { client.requestLudoMove(matchId, revision, slot) },
   onLudoReclaimRequest: (matchId, revision) => { client.requestLudoReclaim(matchId, revision) },
   onLudoEmojiReactionSend: (matchId, emojiId) => { client.sendLudoEmojiReaction(matchId, emojiId) },
+  onSendLudoGift: (matchId, recipientProfileId, giftItemId, requestId) => {
+    client.sendLudoGift(matchId, recipientProfileId, giftItemId, requestId)
+  },
   onLudoWatchMatch: (matchId) => { client.watchLudoMatch(matchId) },
   onLudoUnwatchMatch: (matchId) => { client.unwatchLudoMatch(matchId) },
   onSupportMessagesLoad: () => loadSupportMessages(),

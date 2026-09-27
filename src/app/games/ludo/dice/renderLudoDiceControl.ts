@@ -9,15 +9,25 @@
 // Два визуални слоя, ДВА отделни DOM елемента (не един nested), с explicit
 // local z-index hierarchy вътре в player card-а (position:relative root, виж
 // renderLudoPlayerPanel.ts):
-//  - z-index:1 (base) — production dice-turn image в avatar-sized click
+//  - z-index:7 (base) — production dice-turn image в avatar-sized click
 //    target-а, СЪЩИЯТ border-radius + overflow:hidden clipping pattern като
 //    normal avatar кутията (не квадратна с остри ръбове);
-//  - z-index:2 (overlay) — SVG пръстен с 2 извити arc-и + arrowhead markers,
+//  - z-index:8 (overlay) — SVG пръстен с 2 извити arc-и + arrowhead markers,
 //    който се върти ПОСТОЯННО около зара (CSS transform:rotate на самия
 //    <svg>, зарът остава напълно статичен). По-висок z-index от зара
 //    гарантира стрелките да се рисуват ВИНАГИ над образа, не под него (бъгът,
 //    който тази йерархия оправя — преди образът беше на по-висок z-index от
 //    пръстена).
+//  Виж task-а "Ludo gift presentation — dice зад gift overlay": base z-index
+//  вдигнат от 1 на 7 (arrow ring от 2 на 8) — renderLudoPlayerPanel.ts's
+//  gift overlay slot е z-index:6; преди тая промяна активен gift overlay
+//  визуално покриваше dice control-а, докато е СЪЩИЯТ играч на ход. И двата
+//  DOM елемента тук се рендират ЕДИНСТВЕНО когато dice control-ът реално е
+//  показан (isActive && diceControl в renderLudoPlayerPanel.ts) — когато не
+//  е показан, avatar кутията остава на z-index:auto (под gift overlay-я,
+//  непроменено поведение), затова тая промяна засяга ИЗКЛЮЧИТЕЛНО
+//  "dice control е видим" случая (dice control > gift overlay > avatar,
+//  точно колкото е нужно).
 // Пръстенът е SIBLING на зара (не child), позициониран top:0;left:0 спрямо
 // card-а — same convention като mobile countdown ring-а
 // (renderLudoPlayerPanel.ts), за да НЕ бъде изрязан от зара box-а
@@ -93,7 +103,7 @@ export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
         display:flex; align-items:center; justify-content:center;
         border-radius:${avatarRadius};
         overflow:hidden;
-        z-index:1;
+        z-index:7;
         cursor:${isRollable ? 'pointer' : 'default'};
         -webkit-tap-highlight-color:transparent;
         ${isRollable ? '' : 'pointer-events:none;'}
@@ -113,7 +123,7 @@ export function renderLudoDiceControl(options: LudoDiceControlOptions): string {
       viewBox="0 0 ${ringSize} ${ringSize}"
       style="
         position:absolute; top:0; left:0;
-        z-index:2;
+        z-index:8;
         pointer-events:none;
         transform-origin:50% 50%;
         will-change:transform;

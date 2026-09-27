@@ -517,6 +517,28 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'ludo_reclaim_request', matchId, expectedRevision: parsed.expectedRevision }
     }
 
+    if (parsed.type === 'send_ludo_gift') {
+      // Mirror на send_table_gift parsing по-горе — виж root-cause коментара
+      // там за защо тоя whitelist ред е задължителен (TS union само по себе
+      // си НЕ прави runtime parser-а permissive).
+      const matchId = normalizeRequiredText(parsed.matchId)
+      const recipientProfileId = normalizeRequiredText(parsed.recipientProfileId)
+      const giftItemId = normalizeRequiredText(parsed.giftItemId)
+      const requestId = normalizeRequiredText(parsed.requestId)
+
+      if (matchId === null || recipientProfileId === null || giftItemId === null || requestId === null) {
+        return null
+      }
+
+      return {
+        type: 'send_ludo_gift',
+        matchId,
+        recipientProfileId,
+        giftItemId,
+        requestId,
+      }
+    }
+
     if (parsed.type === 'send_ludo_emoji_reaction') {
       const matchId = normalizeRequiredText(parsed.matchId)
       const emojiId = normalizeRequiredText(parsed.emojiId)

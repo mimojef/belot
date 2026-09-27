@@ -28,7 +28,7 @@
 // адаптирано към Ludo card geometry (виж task-а "Ludo emoji" §5/§6).
 
 import { LUDO_COLOR_HEX, LUDO_COLOR_LABEL } from '../ludoTypes'
-import type { LudoPiece, LudoPlayer } from '../ludoTypes'
+import type { LudoColor, LudoPiece, LudoPlayer } from '../ludoTypes'
 import { renderLudoDiceControl } from '../dice/renderLudoDiceControl'
 import { getAnimatedEmojiUrl } from '../../../animatedEmoji/animatedEmojiAssets'
 import { LUDO_EMOJI_REACTION_Z_INDEX } from '../ludoLayerHierarchy'
@@ -138,6 +138,138 @@ export interface LudoPlayerEmojiReaction {
 // renderLudoGameScreen.ts спрямо реалната quadrant позиция на card-а.
 export type LudoEmojiReactionDirection = 'up' | 'down' | 'left' | 'right'
 
+// Gift icon side (виж task-а "Ludo подаръци — позициониране v2/v3", explicit
+// user screenshot annotations):
+//   MOBILE (2 реда карета над/под дъската) — 'left'/'right', вертикално
+//     центриран спрямо ЦЯЛАТА височина на картата, extend towards
+//     хоризонталния съсед в СЪЩИЯ ред ('right' за лявото каре, 'left' за
+//     дясното). Потвърдено от user като финално — НЕ пипай mobile повече.
+//   DESKTOP (2 колони карета от двете страни на дъската, top+bottom
+//     stacked във всяка колона) — 'top'/'bottom', ХОРИЗОНТАЛНО центриран
+//     спрямо ЦЯЛАТА широчина на картата, extend towards вертикалния съсед
+//     в СЪЩАТА колона ('bottom' за горното каре в колоната, 'top' за
+//     долното) — explicit user поправка: desktop-ът НЕ трябва да reuse-ва
+//     mobile-овия left/right принцип (визуално изглеждаше идентично на
+//     mobile), а вместо това бутонът стои в междинната междина между двете
+//     stacked карета на СЪЩАТА колона.
+// renderLudoGameScreen.ts::renderPlayerPanelSlot подава explicit тази
+// стойност per call site (знае и layout-а, и quadrant-а директно) —
+// НЕЗАВИСИМО от emojiDirection-а (up/down/left/right), който остава чисто
+// за emoji bubble-а.
+export type LudoGiftIconSide = 'left' | 'right' | 'top' | 'bottom'
+
+// Дублирано копие (проектът НЕ споделя icon helper-и между render модули —
+// established convention, виж renderCuttingSeatPanels.ts/
+// renderPlayerProfilePopup.ts/renderLobbyScreen.ts за същия SVG). Идентичен
+// на Belot's gift-box SVG — визуално 1:1 изискване (task-а "Ludo подаръци").
+function renderLudoGiftBoxIcon(sizePx: number): string {
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" style="display:inline-block;flex:0 0 auto;vertical-align:-3px;" aria-hidden="true" focusable="false"><rect x="3" y="8" width="18" height="4"/><path d="M12 8v13"/><path d="M19 12v7a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-7"/><path d="M7.5 8a2.5 2.5 0 0 1 0-5C11 3 12 8 12 8s1-5 4.5-5a2.5 2.5 0 0 1 0 5"/></svg>`
+}
+
+// Non-participant avatar placeholder (виж task-а "Ludo player cards —
+// non-participant presentation") — заменя предишната инициал-буква ("H" от
+// "Не участва") за slot-ове без реален participant. Чист кръгъл
+// "забранителен" знак (кръг + диагонална черта), inline SVG, БЕЗ нов image
+// asset. currentColor наследява родителския `color:#16314f` (същия navy
+// тон като старата инициал-буква, за визуална консистентност с
+// avatar кутията) — неутрален, не alarm-червен. viewBox 24x24 + explicit
+// width/height в px (подадени от caller-а спрямо avatarSize) — мащабира се
+// автоматично с avatar контейнера на desktop/mobile (same convention като
+// renderLudoGiftBoxIcon по-горе).
+function renderLudoNonParticipantSign(sizePx: number): string {
+  return `<svg width="${sizePx}" height="${sizePx}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="display:block;" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="9.5"/><line x1="5.7" y1="18.3" x2="18.3" y2="5.7"/></svg>`
+}
+
+// Самостоятелен gift action бутон — outer edge badge, извън card-a
+// (сравнимо с Belot's renderSeatGiftActionIcon), сега edge-centered вместо
+// corner-based (виж LudoGiftIconSide doc коментара по-горе за пълния
+// rationale/history). Pika.bg стил: dark/black background, gold border,
+// gold SVG — 1:1 визуално с Belot/предишната версия (същите цветове/
+// border/shadow/border-radius/размер), само позиционирането е сменено.
+// useCompactLayout(mobile) ползва fixed literal px (established Ludo
+// convention за compact layout, виж avatarSize/insetPx/... по-горе),
+// desktop скалира с board-linked `scale`.
+function renderLudoGiftActionIcon(
+  color: LudoColor,
+  side: LudoGiftIconSide,
+  useCompactLayout: boolean,
+  scale: number,
+): string {
+  const sizePx = useCompactLayout ? 30 : Math.max(18, Math.round(36 * scale))
+  const iconSizePx = useCompactLayout ? 18 : Math.max(11, Math.round(22 * scale))
+  // ИЗЦЯЛО ИЗВЪН картата, с explicit GAP_PX gap от ръба ѝ (6px, виж git
+  // history за 3px->6px итерацията) — offsetPx = -(sizePx + GAP_PX): бутонът
+  // се измества с целия си размер ПЛЮС GAP_PX извън card-а, значи
+  // най-близкият му ръб седи точно GAP_PX от card edge-а, никакво
+  // препокриване.
+  //   'left'/'right' (mobile) — центриран по ВИСОЧИНА (top:50%), extend по
+  //     хоризонталната ос.
+  //   'top'/'bottom' (desktop) — центриран по ШИРОЧИНА (left:50%), extend
+  //     по вертикалната ос.
+  const GAP_PX = 6
+  const offsetPx = -(sizePx + GAP_PX)
+  const positionStyle =
+    side === 'right' ? `top:50%; right:${offsetPx}px; transform:translateY(-50%);`
+    : side === 'left' ? `top:50%; left:${offsetPx}px; transform:translateY(-50%);`
+    : side === 'bottom' ? `bottom:${offsetPx}px; left:50%; transform:translateX(-50%);`
+    : `top:${offsetPx}px; left:50%; transform:translateX(-50%);` // side === 'top'
+
+  return `
+    <div
+      data-ludo-gift-icon="${color}"
+      title="Изпрати подарък"
+      role="button"
+      style="
+        position:absolute;
+        ${positionStyle}
+        width:${sizePx}px; height:${sizePx}px;
+        border-radius:10px;
+        display:flex;
+        align-items:center;
+        justify-content:center;
+        background:linear-gradient(180deg, rgba(28,28,28,0.97) 0%, rgba(10,10,10,0.98) 100%);
+        border:2px solid rgba(255,224,128,0.96);
+        color:rgba(255,224,128,0.98);
+        box-shadow:0 6px 14px rgba(0,0,0,0.4), 0 0 6px rgba(255,224,128,0.28);
+        cursor:pointer;
+        pointer-events:auto;
+        z-index:9;
+        transition:background 0.15s ease, border-color 0.15s ease;
+      "
+    >${renderLudoGiftBoxIcon(iconSizePx)}</div>
+  `
+}
+
+/**
+ * Празен slot за 60-секундния gift overlay (виж task-а "Ludo подаръци" §7/
+ * §8) — mirror на Belot's renderSeatGiftOverlaySlot. Стои ВЪТРЕ в card-а,
+ * ТОЧНО върху avatar/dice-control area-та (същите top/left/width/height
+ * координати като data-ludo-dice-anchor кутията по-долу), z-index:6 над
+ * avatar/dice control (и двата default z-index:auto, DOM-order painting).
+ * Съдържанието се попълва императивно от createLudoFlowController.ts-овия
+ * syncGiftOverlays(), затова тук винаги е рендиран празен и скрит
+ * (display:none) — presentation state не живее в render-build markup-а.
+ */
+function renderLudoGiftOverlaySlot(color: LudoColor, insetPx: number, avatarSize: number, avatarRadius: string): string {
+  return `
+    <div
+      data-ludo-gift-overlay="${color}"
+      style="
+        position:absolute;
+        top:${insetPx}px; left:${insetPx}px;
+        width:${avatarSize}px; height:${avatarSize}px;
+        display:none;
+        align-items:center;
+        justify-content:center;
+        border-radius:${avatarRadius};
+        overflow:hidden;
+        pointer-events:none;
+        z-index:6;
+      "
+    ></div>
+  `
+}
+
 // Реалната animated emoji презентация (не static preview от picker-а) —
 // огледално на Belot's renderEmojiBubble (renderCuttingSeatPanels.ts):
 // same бял кръгъл "bubble", same img treatment, same fade-in/hold/fade-out
@@ -229,6 +361,22 @@ export function renderLudoPlayerPanel(
   // ReactionBubble doc коментарите по-горе) — null когато няма активна
   // reaction за ТОЗИ играч в момента (нормалният случай).
   emojiPresentation: { reaction: LudoPlayerEmojiReaction; direction: LudoEmojiReactionDirection } | null = null,
+  // Виж LudoGiftIconSide doc коментара по-горе — null за local player-я
+  // самия (не пращаш подарък на себе си) и за spectator view (виж task-а
+  // §10 "spectator mode НЕ трябва да вижда gift buttons"), избрана страна за
+  // всеки друг участник.
+  giftIcon: LudoGiftIconSide | null = null,
+  // Виж task-а "Ludo profile popup integration" — true САМО за реален,
+  // друг (не-local) участник, независимо от viewMode (participant ИЛИ
+  // spectator, виж createLudoFlowController.ts/renderLudoGameScreen.ts
+  // gating коментарите). Прилага се ЕДИНСТВЕНО върху plain-avatar branch-а
+  // по-долу — НИКОГА върху dice-control branch-а (dice click винаги си
+  // остава roll action, виж task-а §6 — mutually exclusive branches, значи
+  // няма нужда от допълнителен guard тук). Click handler-ът/profileId
+  // resolve-ването живеят в createLudoFlowController.ts::wireEvents() (виж
+  // data-ludo-avatar-clickable атрибута по-долу) — тук само presentation
+  // (cursor + click target атрибут).
+  isAvatarClickable = false,
 ): string {
   void pieces
   const hex = LUDO_COLOR_HEX[player.color]
@@ -350,6 +498,7 @@ export function renderLudoPlayerPanel(
         : `
       <div
         data-ludo-dice-anchor="${player.color}"
+        ${isAvatarClickable ? `data-ludo-avatar-clickable="${player.color}"` : ''}
         style="
         position:absolute;
         top:${insetPx}px; left:${insetPx}px;
@@ -362,12 +511,24 @@ export function renderLudoPlayerPanel(
         display:flex; align-items:center; justify-content:center;
         color:#16314f; font-weight:900; font-size:${fallbackFontSize};
         overflow:hidden;
+        cursor:${isAvatarClickable ? 'pointer' : 'default'};
       ">
         ${player.avatarUrl
           ? `<img src="${player.avatarUrl}" alt="" style="width:100%;height:100%;object-fit:cover;">`
-          : initials}
+          // player.isBot===true е ЕДИНСТВЕНО за non-participant mock filler
+          // slot-ове (виж createLobbyFlowController.ts::openLudoGameOverlay/
+          // mountLudoSpectatorController — placeholder-и, никога overwrite-нати
+          // от authoritative snapshot.players) — authoritative signal, НЕ
+          // текстово сравнение с player.name==='Не участва'. Реален participant
+          // винаги носи isBot:false тук, независимо от текущ bot-takeover
+          // статус (viж botControlledColors, отделна orchestrator концепция).
+          : player.isBot
+            ? renderLudoNonParticipantSign(Math.round(avatarSize * 0.5))
+            : initials}
       </div>
       `}
+
+      ${renderLudoGiftOverlaySlot(player.color, insetPx, avatarSize, avatarRadius)}
 
       ${isActive && useCompactLayout ? (() => {
         const ringSize = avatarSize + insetPx * 2 // топ area над footer-а (58+6*2=70)
@@ -453,6 +614,7 @@ export function renderLudoPlayerPanel(
         </div>
       </div>
     </div>
+    ${giftIcon ? renderLudoGiftActionIcon(player.color, giftIcon, useCompactLayout, scale) : ''}
     ${emojiBubbleHtml}
     </div>
   `

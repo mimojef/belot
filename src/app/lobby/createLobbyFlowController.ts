@@ -115,6 +115,7 @@ import type {
   TopicMuteEvidenceModeratorEntry,
   AdCampaignManagementDto,
   AdCampaignDispatchClientDto,
+  ActiveLudoGiftSnapshot,
 } from '../network/createGameServerClient'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 
@@ -812,6 +813,12 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
   onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
   onLudoEmojiReactionSend?: (matchId: string, emojiId: string) => void
+  // In-game gift (виж createLudoFlowController.ts authoritative.onGiftSend
+  // doc коментара) — mirror на onGiftItemSubmit/sendTableGift wiring-а в
+  // createActiveRoomFlowController.ts, matchId вместо roomId.
+  // onGiftItemCatalogLoad по-горе се reuse-ва directno за каталога (СЪЩИЯ
+  // public /api/gift-items endpoint, никакво отделно поле нужно тук).
+  onSendLudoGift?: (matchId: string, recipientProfileId: string, giftItemId: string, requestId: string) => void
   // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — read-only
   // subscription към ЧУЖД активен match (виж server Phase 1
   // watch_ludo_match/unwatch_ludo_match handler-ите).
@@ -3110,6 +3117,25 @@ export function createLobbyFlowController(
     applySpectatorViewers: (matchId: string, viewers: Array<{ profileId: string; displayName: string }>) => void
     notifyGameplayActionRejected: () => void
     requestExit: () => void
+    applyGiftSent: (message: {
+      matchId: string
+      transactionId: string
+      giftItemId: string
+      giftName: string
+      imageUrl: string
+      senderColor: 'red' | 'blue' | 'green' | 'yellow'
+      senderDisplayName: string
+      recipientColor: 'red' | 'blue' | 'green' | 'yellow'
+      expiresAt: string
+    }) => void
+    applyGiftSendResult: (message: {
+      requestId: string
+      ok: boolean
+      message?: string
+      chargedPrice?: number
+      senderBalanceAfter?: number
+    }) => void
+    applyActiveGiftsFromSnapshot: (gifts: ActiveLudoGiftSnapshot[]) => void
   } | null = null
   const _acknowledgedLudoMatchIds = new Set<string>()
   // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — единственият
@@ -3313,7 +3339,10 @@ export function createLobbyFlowController(
     }
   }
 
-  async function openLudoGameOverlay(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
+  async function openLudoGameOverlay(
+    snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot,
+    initialActiveGifts: ActiveLudoGiftSnapshot[] = [],
+  ): Promise<void> {
     if (_ludoController || _acknowledgedLudoMatchIds.has(snapshot.matchId)) return
     const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
     const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
@@ -3357,6 +3386,17 @@ export function createLobbyFlowController(
         },
         onStateRefreshRequest: () => options.onLudoGameStateOpen?.(),
         onEmojiReactionSend: (matchId, emojiId) => options.onLudoEmojiReactionSend?.(matchId, emojiId),
+        onGiftSend: (matchId, recipientProfileId, giftItemId, requestId) =>
+          options.onSendLudoGift?.(matchId, recipientProfileId, giftItemId, requestId),
+        onGiftItemCatalogLoad: () => options.onGiftItemCatalogLoad?.() ?? Promise.resolve({ ok: false, message: 'Подаряването временно не е налично.' }),
+        isConnected: () => state.isConnected,
+        getWalletBalance: () => options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null,
+        onGiftBalanceUpdate: (newBalance) => {
+          const authSession = options.getAuthSession?.() ?? null
+          if (authSession?.profile) authSession.profile.yellowCoinsBalance = newBalance
+        },
+        initialActiveGifts,
+        onOpenProfile: (profileId, displayNameHint) => { void openProtectedProfileById(profileId, displayNameHint, 'other') },
       },
       onExit: (matchId) => {
         if (matchId) options.onLudoMatchLeave?.(matchId)
@@ -3435,7 +3475,10 @@ export function createLobbyFlowController(
   // intent, не live update). Seed-ва engineState directno от snapshot-а (виж
   // createLudoFlowController.ts constructor pattern-а) — НИКОГА replay на
   // история, същия механизъм като participant reconnect.
-  async function mountLudoSpectatorController(snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot): Promise<void> {
+  async function mountLudoSpectatorController(
+    snapshot: import('../network/createGameServerClient').LudoGameStateSnapshot,
+    initialActiveGifts: ActiveLudoGiftSnapshot[] = [],
+  ): Promise<void> {
     if (_ludoController) return
     const { createLudoFlowController } = await import('../games/ludo/createLudoFlowController')
     const { createLudoMockPlayers } = await import('../games/ludo/mock/ludoMockState')
@@ -3484,6 +3527,19 @@ export function createLobbyFlowController(
         onRollRequest: () => {},
         onMoveRequest: () => {},
         onReclaimRequest: () => {},
+        // Spectator-ят никога не пише gifts (isSpectator gate-ва
+        // giftPickerModal-а до null вътре в контролера, виж task-а §10) — но
+        // МОЖЕ да ВИДИ realtime gift анимацията (виж index.ts
+        // broadcastToLudoMatchAndSpectators-подобния spectator fan-out в
+        // send_ludo_gift handler-а), затова initialActiveGifts все пак се
+        // подава, за reconnect-safe presentation при "влизам да гледам, докато
+        // gift overlay-ят вече е активен".
+        initialActiveGifts,
+        // За разлика от gift-а по-горе, avatar click -> profile popup Е
+        // разрешен за spectator (виж task-а "Ludo profile popup integration"
+        // §7) — reuse на СЪЩАТА openProtectedProfileById, никаква отделна
+        // spectator-specific логика.
+        onOpenProfile: (profileId, displayNameHint) => { void openProtectedProfileById(profileId, displayNameHint, 'other') },
       },
       onExit: () => {
         closeLudoSpectatorOverlay()
@@ -18111,17 +18167,23 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_game_started') {
       closeLudoLobbyOverlay()
-      void openLudoGameOverlay(message.snapshot)
+      void openLudoGameOverlay(message.snapshot, message.activeLudoGifts ?? [])
       return true
     }
     if (message.type === 'ludo_game_state') {
       _isExpectingLudoMatchRestore = false
       if (_ludoGameplayActionResponsesPending > 0) _ludoGameplayActionResponsesPending -= 1
       if (_acknowledgedLudoMatchIds.has(message.snapshot.matchId)) return true
-      if (_ludoController) _ludoController.applyAuthoritativeSnapshot(message.snapshot, message.prizeAmount)
-      else {
+      if (_ludoController) {
+        _ludoController.applyAuthoritativeSnapshot(message.snapshot, message.prizeAmount)
+        // Виж task-а "Ludo подаръци" §8/§9 — reconciliation на ВСЕКИ snapshot
+        // push (не само reconnect), mirror на Belot's
+        // applyActiveTableGiftsFromSnapshot call site-а. Presentation-only,
+        // не участва в revision/turnPhase gate-овете по-горе.
+        _ludoController.applyActiveGiftsFromSnapshot(message.activeLudoGifts ?? [])
+      } else {
         closeLudoLobbyOverlay()
-        void openLudoGameOverlay(message.snapshot)
+        void openLudoGameOverlay(message.snapshot, message.activeLudoGifts ?? [])
       }
       return true
     }
@@ -18139,9 +18201,10 @@ export function createLobbyFlowController(
         // риск (revision-guard-нато вътре в applyAuthoritativeSnapshot).
         // prizeAmount винаги null — spectator никога не залага/печели.
         _ludoController.applyAuthoritativeSnapshot(message.snapshot, null)
+        _ludoController.applyActiveGiftsFromSnapshot(message.activeLudoGifts ?? [])
       } else {
         // Initial snapshot — mount-ва фрешен controller (seed, НЕ replay).
-        void mountLudoSpectatorController(message.snapshot)
+        void mountLudoSpectatorController(message.snapshot, message.activeLudoGifts ?? [])
       }
       return true
     }
@@ -18166,6 +18229,24 @@ export function createLobbyFlowController(
       // matchId staleness guard-ът живее вътре в applySpectatorViewers
       // (mirror на applyEmojiReaction pattern-а).
       _ludoController?.applySpectatorViewers(message.matchId, message.spectators)
+      return true
+    }
+
+    if (message.type === 'ludo_gift_sent') {
+      // Realtime gift broadcast (виж index.ts send_ludo_gift handler-а) —
+      // стига И до participants, И до active spectators на match-а (виж
+      // task-а §10 "spectators МОГАТ да видят gift animation/event, без send
+      // controls"). matchId staleness guard-ът живее вътре в applyGiftSent
+      // (mirror на applyEmojiReaction pattern-а).
+      _ludoController?.applyGiftSent(message)
+      return true
+    }
+
+    if (message.type === 'ludo_gift_send_result') {
+      // Личен отговор към sender-а — no-op ако picker-ът вече е затворен/
+      // controller instance-ът е сменен (виж applyGiftSendResult doc
+      // коментара в createLudoFlowController.ts).
+      _ludoController?.applyGiftSendResult(message)
       return true
     }
 

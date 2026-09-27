@@ -204,6 +204,8 @@ import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js
 import { broadcastRoomSnapshots, setBroadcastRoomSnapshotsMonitoringHook } from './core/broadcastRoomSnapshots.js'
 import { broadcastToRoomConnections } from './core/broadcastToRoomConnections.js'
 import { resolveTableGiftParticipants } from './core/resolveTableGiftParticipants.js'
+import { resolveLudoGiftParticipants, type LudoGiftMatchLike } from './core/resolveLudoGiftParticipants.js'
+import type { LudoColor } from './game/ludoEngine/ludoEngineTypes.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
 import { computeActiveRoomsSnapshot } from './core/computeActiveRoomsSnapshot.js'
 import { createInitialServerState } from './core/createInitialServerState.js'
@@ -341,6 +343,7 @@ import type {
   LudoRoomMatchSnapshot,
   LudoSpectatorGameStateMessage,
   LudoMatchSpectatorsMessage,
+  ActiveLudoGiftSnapshot,
 } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -403,6 +406,8 @@ const GAME_RUNTIME_TICK_MS = 250
 const GAME_WORKER_TICK_FAILURE_LOG_INTERVAL_MS = 5_000
 /** Колко дълго table gift overlay-ът стои върху avatar-а на получателя. */
 const TABLE_GIFT_OVERLAY_DURATION_MS = 60_000
+/** Ludo in-game gift — идентична продължителност на Belot table gift-а. */
+const LUDO_GIFT_OVERLAY_DURATION_MS = 60_000
 const MATCH_PLAYERS_REQUIRED = 4
 const MAX_JSON_BODY_BYTES = 15_000_000
 const GUEST_CONTACT_MAX_JSON_BODY_BYTES = 20_000
@@ -704,6 +709,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     // Мутира wallet + DB (gift transaction) — принадлежи на shutdown-guarded
     // групата, за разлика от read-only reaction съобщенията по-долу.
     case 'send_table_gift':
+    case 'send_ludo_gift':
     case 'toggle_topic_message_like':
     case 'create_topic':
     case 'subscribe_topics_directory':
@@ -4455,7 +4461,11 @@ function unsubscribeLudoSpectator(connectionId: ConnectionId): string | null {
 // messageTypes.ts: тези са participant-only финансови полета, spectator-ът
 // никога не залага/печели от match-а).
 function buildLudoSpectatorGameStateMessage(snapshot: LudoMatchSnapshot): LudoSpectatorGameStateMessage {
-  return { type: 'ludo_spectator_game_state', snapshot: toLudoGameProtocolSnapshot(snapshot) }
+  return {
+    type: 'ludo_spectator_game_state',
+    snapshot: toLudoGameProtocolSnapshot(snapshot),
+    activeLudoGifts: buildActiveLudoGiftsSnapshot(snapshot.matchId),
+  }
 }
 
 // Извиква се допълнително от onSnapshot по-долу (виж call site-а в
@@ -4516,6 +4526,68 @@ function broadcastLudoMatchSpectatorsToParticipants(matchId: string): void {
     )
     if (connection) safeSendToConnection(connection.id, message)
   }
+}
+
+// ─── Ludo in-game gifts ─────────────────────────────────────────────────
+// 1:1 mirror на Belot table gift-а (ServerRoom.config.activeTableGifts), но
+// Ludo match-овете нямат аналог на ServerRoom.config, затова ephemeral-ото
+// active-gift state живее тук, index.ts-local, keyed по matchId — НИКОГА в
+// ludoMatchRuntime.ts (не е gameplay state, не участва в reducer-а/
+// revision-а). Чисто in-memory, НЕ persisted (виж task-а §9 "не създавай нова
+// DB persistence само за 60-сек presentation state") — сървърен restart
+// изгубва активните overlay-и, точно като Belot's room.config поле, което
+// също не преживява restart.
+const activeLudoGiftsByMatchId = new Map<string, Partial<Record<LudoColor, ActiveLudoGiftSnapshot>>>()
+const ludoGiftExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+// Lazy expiry filtering — reconnect-ващ/watch-ващ клиент никога не получава
+// вече изтекъл gift overlay (mirror на createRoomSnapshotMessage.ts's
+// activeTableGifts filter). Връща [] (не undefined) — call site-овете
+// подават директно като optional поле, [] е валиден "няма активни" case.
+function buildActiveLudoGiftsSnapshot(matchId: string): ActiveLudoGiftSnapshot[] {
+  const gifts = activeLudoGiftsByMatchId.get(matchId)
+  if (!gifts) return []
+  const nowMs = Date.now()
+  return Object.values(gifts).filter(
+    (gift): gift is ActiveLudoGiftSnapshot => gift !== undefined && Date.parse(gift.expiresAt) > nowMs,
+  )
+}
+
+function clearLudoGiftExpiryTimer(matchId: string, color: LudoColor): void {
+  const key = `${matchId}:${color}`
+  const timerId = ludoGiftExpiryTimers.get(key)
+  if (timerId !== undefined) {
+    clearTimeout(timerId)
+    ludoGiftExpiryTimers.delete(key)
+  }
+}
+
+// Root cause fix mirror (виж scheduleTableGiftExpiryFinalization-а по-долу
+// за пълния rationale) — per-gift setTimeout, armиран точно в момента на
+// изпращане. transactionId stale-guard: ако entry-то за тоя цвят вече е
+// заменено от по-нов gift, тоя timeout е no-op.
+function scheduleLudoGiftExpiryFinalization(
+  matchId: string,
+  recipientColor: LudoColor,
+  transactionId: string,
+  imageUrl: string,
+  delayMs: number,
+): void {
+  const key = `${matchId}:${recipientColor}`
+  clearLudoGiftExpiryTimer(matchId, recipientColor)
+  const timerId = setTimeout(() => {
+    ludoGiftExpiryTimers.delete(key)
+    const gifts = activeLudoGiftsByMatchId.get(matchId)
+    if (!gifts) return
+    const currentEntry = gifts[recipientColor]
+    if (currentEntry === undefined || currentEntry.transactionId !== transactionId) return
+    delete gifts[recipientColor]
+    if (Object.values(gifts).every((entry) => entry === undefined)) {
+      activeLudoGiftsByMatchId.delete(matchId)
+    }
+    void tryFinalizeDeletedGiftImage(imageUrl)
+  }, delayMs)
+  ludoGiftExpiryTimers.set(key, timerId)
 }
 
 // Settlement hook — извиква се от onSnapshot ПРЕДИ per-player broadcast-а,
@@ -4612,6 +4684,10 @@ const ludoMatchRuntime = createLudoMatchRuntime({
     }
     const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
     const type = snapshot.revision === 0 ? 'ludo_game_started' : 'ludo_game_state'
+    // Виж activeLudoGiftsByMatchId doc коментара по-горе — reconciliation на
+    // ВСЕКИ snapshot push (не само reconnect), mirror на Belot's
+    // createRoomSnapshotMessage.ts::activeTableGifts lazy expiry filtering.
+    const activeLudoGifts = buildActiveLudoGiftsSnapshot(snapshot.matchId)
     for (const player of snapshot.players) {
       // Explicit-forfeit-нал играч (виж task-а "Explicit Изход" §2/§11) НЕ
       // получава по-нататъшни snapshot broadcast-и — display roster-ът
@@ -4634,6 +4710,7 @@ const ludoMatchRuntime = createLudoMatchRuntime({
         // recipientNewBalance прецедент (виж §"WALLET REALTIME UPDATE").
         walletBalance: ludoEconomyStore.getWalletBalance(player.profileId),
         prizeAmount: winnerPayout && winnerPayout.profileId === player.profileId ? winnerPayout.prizeAmount : null,
+        activeLudoGifts,
       })
     }
     // Spectator fan-out ("Гледай", Phase 1) — чисто additive, СЛЕД
@@ -4656,6 +4733,20 @@ const ludoMatchRuntime = createLudoMatchRuntime({
       authoritativeRevision: match.revision,
       matchStatus: match.state.status,
     })
+    // Виж activeLudoGiftsByMatchId doc коментара по-горе — match runtime-ът
+    // вече е премахнат (10s finishedCleanupTimer), никой presentation
+    // reconciliation няма да прочете тия entries отново. Explicit clear на
+    // Map-а + всеки pending per-color expiry timer (иначе timer-ът пак ще
+    // изгасне по-късно, но само за да намери matchId-то вече липсващо от
+    // activeLudoGiftsByMatchId — no-op, но по-чисто е да не оставяме
+    // dangling timers/keys за приключил match).
+    const gifts = activeLudoGiftsByMatchId.get(match.matchId)
+    if (gifts) {
+      for (const color of Object.keys(gifts) as LudoColor[]) {
+        clearLudoGiftExpiryTimer(match.matchId, color)
+      }
+      activeLudoGiftsByMatchId.delete(match.matchId)
+    }
   },
 })
 
@@ -15915,6 +16006,23 @@ async function tryFinalizeDeletedGiftImage(imageUrl: string): Promise<void> {
     }
   }
 
+  // Същата "C" проверка, но за Ludo in-game gifts (виж
+  // activeLudoGiftsByMatchId doc коментара по-горе) — споделеният каталог
+  // означава, че СЪЩИЯТ imageUrl може да бъде едновременно активен table
+  // gift (Belot) И активен Ludo gift, затова двете trees се обхождат тук
+  // еднакво, преди да разрешим физическото изтриване.
+  for (const gifts of activeLudoGiftsByMatchId.values()) {
+    for (const gift of Object.values(gifts)) {
+      if (
+        gift !== undefined &&
+        gift.imageUrl === trimmedUrl &&
+        Date.parse(gift.expiresAt) > nowMs
+      ) {
+        return
+      }
+    }
+  }
+
   void deleteUploadFileByUrl(trimmedUrl)
 }
 
@@ -21724,6 +21832,7 @@ wsServer.on('connection', (socket, request) => {
             snapshot: toLudoGameProtocolSnapshot(snapshot),
             walletBalance: ludoEconomyStore.getWalletBalance(latestConnection.profileId),
             prizeAmount: null,
+            activeLudoGifts: buildActiveLudoGiftsSnapshot(snapshot.matchId),
           })
         } else {
           // Explicit canonical not-found (виж task spec §8) — преди тази
@@ -21925,6 +22034,155 @@ wsServer.on('connection', (socket, request) => {
           )
           if (targetConnection) safeSendToConnection(targetConnection.id, emojiMsg)
         }
+        return
+      }
+
+      if (message.type === 'send_ludo_gift') {
+        // In-game gift (виж resolveLudoGiftParticipants.ts) — REUSE-ва
+        // изцяло Belot table gift-а (Stage 2) payment/idempotency service
+        // (giftItemStore.sendGiftItem), само с context='ludo' +
+        // contextId=matchId. Никаква паралелна payment/economy логика тук,
+        // mirror на send_table_gift handler-а по-горе.
+        const latestConnection = getConnectionById(serverState, connection.id)
+        const match = ludoMatchRuntime.getMatch(message.matchId)
+        const matchLike: LudoGiftMatchLike | null = match
+          ? { matchId: match.matchId, status: match.state.status, leftColors: match.state.leftColors, players: match.players }
+          : null
+        const resolution = resolveLudoGiftParticipants({
+          connection: latestConnection ?? null,
+          match: matchLike,
+          recipientProfileId: message.recipientProfileId,
+        })
+
+        if (!resolution.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'ludo_gift_send_result',
+            matchId: message.matchId,
+            requestId: message.requestId,
+            ok: false,
+            message: resolution.message,
+          })
+          return
+        }
+
+        const giftResult = giftItemStore.sendGiftItem(
+          resolution.senderProfileId,
+          resolution.recipientProfileId,
+          message.giftItemId,
+          message.requestId,
+          'ludo',
+          message.matchId,
+        )
+
+        if (!giftResult.ok) {
+          safeSendToConnection(connection.id, {
+            type: 'ludo_gift_send_result',
+            matchId: message.matchId,
+            requestId: message.requestId,
+            ok: false,
+            message: giftResult.message,
+          })
+          return
+        }
+
+        // Idempotent replay (същият requestId) — sender-ят получава success
+        // отговор, но НЕ произвеждаме втори match broadcast и не мутираме
+        // overlay state повторно (mirror на send_table_gift-а по-горе).
+        if (!giftResult.isReplay) {
+          const nowMs = Date.now()
+          const sentAt = new Date(nowMs).toISOString()
+          const expiresAt = new Date(nowMs + LUDO_GIFT_OVERLAY_DURATION_MS).toISOString()
+          const giftName = giftResult.giftItem?.name ?? ''
+          const imageUrl = giftResult.giftItem?.imageUrl ?? ''
+
+          const activeGifts = activeLudoGiftsByMatchId.get(message.matchId) ?? {}
+          // §7C hook (виж tryFinalizeDeletedGiftImage doc коментара) — ако
+          // тоя нов подарък ЗАМЕСТВА стар active gift за тоя recipient
+          // color, старото изображение вече не е "active gift reference" за
+          // тоя match. Ако старият gift е бил logically deleted
+          // междувременно, финализирай сега (best-effort).
+          const previousImageUrl = activeGifts[resolution.recipientColor]?.imageUrl ?? null
+          clearLudoGiftExpiryTimer(message.matchId, resolution.recipientColor)
+          activeGifts[resolution.recipientColor] = {
+            transactionId: giftResult.transaction.transactionId,
+            giftItemId: giftResult.transaction.giftItemId,
+            giftName,
+            imageUrl,
+            senderProfileId: resolution.senderProfileId,
+            senderColor: resolution.senderColor,
+            senderDisplayName: resolution.senderDisplayName,
+            recipientColor: resolution.recipientColor,
+            sentAt,
+            expiresAt,
+          }
+          activeLudoGiftsByMatchId.set(message.matchId, activeGifts)
+
+          scheduleLudoGiftExpiryFinalization(
+            message.matchId,
+            resolution.recipientColor,
+            giftResult.transaction.transactionId,
+            imageUrl,
+            LUDO_GIFT_OVERLAY_DURATION_MS,
+          )
+
+          const giftSentMessage = {
+            type: 'ludo_gift_sent' as const,
+            matchId: message.matchId,
+            transactionId: giftResult.transaction.transactionId,
+            giftItemId: giftResult.transaction.giftItemId,
+            giftName,
+            imageUrl,
+            senderProfileId: resolution.senderProfileId,
+            senderColor: resolution.senderColor,
+            senderDisplayName: resolution.senderDisplayName,
+            recipientProfileId: resolution.recipientProfileId,
+            recipientColor: resolution.recipientColor,
+            chargedPrice: giftResult.transaction.chargedPrice,
+            sentAt,
+            expiresAt,
+          }
+
+          // Participant fan-out — mirror на onSnapshot broadcast loop-а
+          // по-горе (leftColors skip, live connection lookup).
+          if (match) {
+            for (const player of match.players) {
+              if (match.state.leftColors.includes(player.color)) continue
+              const targetConnection = Object.values(serverState.connections).find(
+                (candidate) => candidate.profileId === player.profileId && candidate.status === 'connected',
+              )
+              if (targetConnection) safeSendToConnection(targetConnection.id, giftSentMessage)
+            }
+          }
+          // Spectator fan-out — presentation-only, spectators никога не
+          // могат да пращат (виж resolveLudoGiftParticipants.ts — само
+          // participants минават валидацията по-горе), но МОГАТ да видят
+          // realtime анимацията, mirror на broadcastLudoSpectatorSnapshot.
+          const spectatorConnectionIds = ludoSpectatorsByMatchId.get(message.matchId)
+          if (spectatorConnectionIds) {
+            for (const spectatorConnectionId of spectatorConnectionIds) {
+              safeSendToConnection(spectatorConnectionId, giftSentMessage)
+            }
+          }
+
+          if (previousImageUrl !== null && previousImageUrl !== imageUrl) {
+            void tryFinalizeDeletedGiftImage(previousImageUrl)
+          }
+        }
+
+        // НЕ викаме giftItemStore.createDeliveryNotification за context='ludo'
+        // — mirror на table gift-а: презентацията е изцяло чрез match
+        // broadcast + ephemeral state, не личен delivery log (би дал ВТОРА
+        // презентация за един и същ transaction).
+        safeSendToConnection(connection.id, {
+          type: 'ludo_gift_send_result',
+          matchId: message.matchId,
+          requestId: message.requestId,
+          ok: true,
+          transactionId: giftResult.transaction.transactionId,
+          chargedPrice: giftResult.transaction.chargedPrice,
+          senderBalanceAfter: giftResult.senderBalanceAfter,
+          isReplay: giftResult.isReplay,
+        })
         return
       }
 

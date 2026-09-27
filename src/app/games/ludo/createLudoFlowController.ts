@@ -43,7 +43,9 @@ import { renderLudoSettingsPopup } from './renderLudoSettingsPopup'
 import { isLudoDiceSoundEnabled, isLudoGameSoundsEnabled, setLudoDiceSoundEnabled, setLudoGameSoundsEnabled, playLudoSound } from './ludoSoundSettings'
 import { isValidAnimatedEmojiId } from '../../animatedEmoji/animatedEmojiAssets'
 import { LUDO_EMOJI_BUBBLE_TOTAL_MS } from './pieces/renderLudoPlayerPanel'
-import { LUDO_MODAL_LAYER_Z_INDEX } from './ludoLayerHierarchy'
+import { LUDO_MODAL_LAYER_Z_INDEX, LUDO_GIFT_MODAL_Z_INDEX, LUDO_GIFT_FLIGHT_Z_INDEX } from './ludoLayerHierarchy'
+import { createGiftPickerModal, type GiftPickerModal, type GiftPickerCatalogLoadResult } from '../../gifts/createGiftPickerModal'
+import { playGiftFlightAnimation } from '../../gifts/playGiftFlightAnimation'
 import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
 import {
@@ -83,7 +85,7 @@ import {
   type LudoOrchestratorState,
 } from './orchestrator'
 import type { LudoColor, LudoPiece, LudoPieceId, LudoPlayer } from './ludoTypes'
-import type { LudoGameStateSnapshot } from '../../network/createGameServerClient'
+import type { LudoGameStateSnapshot, ActiveLudoGiftSnapshot } from '../../network/createGameServerClient'
 
 const IMPACT_ANIMATION_MS = 450
 
@@ -104,6 +106,40 @@ export interface LudoFlowControllerOptions {
     // onMoveRequest wiring-а. Не съществува в non-authoritative (dev
     // harness) режим — emoji picker-ът остава скрит там (виж wireEvents()).
     onEmojiReactionSend?: (matchId: string, emojiId: string) => void
+    // In-game gift (виж task-а "Ludo подаръци") — mirror на onEmojiReactionSend
+    // wiring-а, само за authoritative multiplayer match-ове (spectator-ите
+    // никога не викат onGiftSend, виж isSpectator gate-а при giftPickerModal
+    // декларацията по-долу — presentation-only, authoritative server-side
+    // validation е resolveLudoGiftParticipants.ts, независим защитен слой).
+    onGiftSend?: (matchId: string, recipientProfileId: string, giftItemId: string, requestId: string) => void
+    // Reuse на СЪЩИЯ public /api/gift-items catalog endpoint, wired directno
+    // от createLobbyFlowController.ts (options.onGiftItemCatalogLoad, вече
+    // reuse-нат и от lobby "Подарък"/table gift picker-ите).
+    onGiftItemCatalogLoad?: () => Promise<GiftPickerCatalogLoadResult>
+    isConnected?: () => boolean
+    getWalletBalance?: () => number | null
+    // Server-authoritative нов баланс СЛЕД успешен gift send (mirror на
+    // Belot's handleTableGiftSendResult, което пише directno в authSession.
+    // profile.yellowCoinsBalance) — самият Ludo controller НЕ пази копие на
+    // баланса, делегира изцяло на caller-а (createLobbyFlowController.ts),
+    // точно както getWalletBalance по-горе чете от СЪЩИЯ global source.
+    onGiftBalanceUpdate?: (newBalance: number) => void
+    // Reconnect-safety (виж task-а §9) — вече активни gift overlay-и към
+    // момента на mount-ването (initial ludo_game_started/ludo_game_state/
+    // ludo_spectator_game_state push, виж server-ови activeLudoGiftsByMatchId
+    // doc коментара). Default [] за евентуални по-стари/incomplete call sites.
+    initialActiveGifts?: ActiveLudoGiftSnapshot[]
+    // Avatar click -> profile popup (виж task-а "Ludo profile popup
+    // integration") — reuse на съществуващия Belot/lobby profile popup flow
+    // (createLobbyFlowController.ts::openProtectedProfileById), НЕ нов
+    // Ludo-specific popup. Wired и за participant, и за spectator mount
+    // (mountLudoSpectatorController) — за разлика от onGiftSend/
+    // onGiftItemCatalogLoad, тук НЯМА isSpectator restriction (виж task-а
+    // §7 "spectator трябва да може да отвори профила на реалните
+    // участници"). displayNameHint е чисто UX detail (показва се докато
+    // profile fetch-ът е pending) — самият popup презаписва с authoritative
+    // данните веднага след като заредят.
+    onOpenProfile?: (profileId: string, displayNameHint: string | null) => void
   }
   // Test/dev seeding seam (Phase 3B browser verification, виж task-а т.21:
   // "temporary seeded/dev harness ако е нужно, не променяй permanently
@@ -266,6 +302,268 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // never leaves a stuck-hidden button, mirror на isRollAlreadyInitiated
   // reset-а там).
   const rollInFlightColors = new Set<LudoColor>()
+
+  // ── In-game gifts (виж task-а "Ludo подаръци") ──────────────────────────
+  // 1:1 mirror на Belot table gift-а (createActiveRoomFlowController.ts
+  // Stage 2) — canonical active overlay state (keyed по RECIPIENT color),
+  // dedup Set по transactionId (idempotent replay/late-arriving duplicate
+  // broadcast guard), per-color fade-out timers, pending-landing suppression
+  // (докато flight анимацията за ТОЗИ transaction still тече, canonical
+  // overlay-ят не се разкрива визуално — виж playGift/releasePendingGiftLanding
+  // по-долу).
+  type LudoGiftOverlayState = {
+    transactionId: string
+    giftItemId: string
+    giftName: string
+    imageUrl: string
+    senderColor: LudoColor
+    senderDisplayName: string
+    expiresAt: string
+  }
+  let activeGiftOverlays: Partial<Record<LudoColor, LudoGiftOverlayState>> = {}
+  const processedGiftTransactionIds = new Set<string>()
+  const GIFT_TRANSACTION_DEDUP_LIMIT = 64
+  const giftOverlayTimerIds: Partial<Record<LudoColor, number>> = {}
+  const pendingGiftLandingTransactionIdByColor: Partial<Record<LudoColor, string>> = {}
+  const GIFT_FADE_MS = 320
+
+  // Само за authoritative (multiplayer) participant режим — spectator-ите
+  // (§10 в task-а "НЕ трябва да може да праща gifts") никога не получават
+  // instance на picker-а, огледално на roll-бутона (isRollable: color ===
+  // localColor && canRollDice) и isSpectator gate-овете навсякъде другаде в
+  // тоя файл.
+  const giftPickerModal: GiftPickerModal | null =
+    options.authoritative && !isSpectator
+      ? createGiftPickerModal({
+          hostAttribute: 'data-ludo-gift-modal-host',
+          toastAttribute: 'data-ludo-gift-toast',
+          zIndex: LUDO_GIFT_MODAL_Z_INDEX,
+          onCatalogLoad: () =>
+            options.authoritative!.onGiftItemCatalogLoad?.() ??
+            Promise.resolve({ ok: false, message: 'Подаряването временно не е налично.' }),
+          getBalance: () => options.authoritative!.getWalletBalance?.() ?? null,
+          isConnected: () => options.authoritative!.isConnected?.() ?? true,
+          onSubmit: (recipientColor, recipientProfileId, giftItemId, requestId) => {
+            if (!authoritativeSnapshot) return
+            options.authoritative!.onGiftSend?.(authoritativeSnapshot.matchId, recipientProfileId, giftItemId, requestId)
+            void recipientColor
+          },
+          onBalanceUpdate: (newBalance) => options.authoritative!.onGiftBalanceUpdate?.(newBalance),
+        })
+      : null
+
+  function rememberGiftTransaction(transactionId: string): void {
+    processedGiftTransactionIds.add(transactionId)
+    if (processedGiftTransactionIds.size > GIFT_TRANSACTION_DEDUP_LIMIT) {
+      const oldest = processedGiftTransactionIds.values().next().value
+      if (oldest !== undefined) processedGiftTransactionIds.delete(oldest)
+    }
+  }
+
+  function clearGiftOverlayTimer(color: LudoColor): void {
+    const timerId = giftOverlayTimerIds[color]
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId)
+      delete giftOverlayTimerIds[color]
+    }
+  }
+
+  function escapeGiftHtml(value: string): string {
+    return value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+  }
+
+  function renderGiftOverlayInnerHtml(overlay: LudoGiftOverlayState): string {
+    return `<img src="${escapeGiftHtml(overlay.imageUrl)}" alt="${escapeGiftHtml(overlay.giftName)}" style="width:100%;height:100%;object-fit:cover;display:block;">`
+  }
+
+  // seat/color е absolute (color) key — DOM slot-ът (renderLudoGiftOverlaySlot)
+  // е рендиран веднъж per color panel, независимо от viewer quadrant
+  // rotation-а (rotation-ът е само в positioning-а на panel wrapper-а).
+  function hideGiftOverlayNode(color: LudoColor): void {
+    const node = options.root.querySelector<HTMLElement>(`[data-ludo-gift-overlay="${color}"]`)
+    if (!node) return
+    node.style.transition = `opacity ${GIFT_FADE_MS}ms ease`
+    node.style.opacity = '0'
+    window.setTimeout(() => {
+      if (node.dataset.giftTransactionId === undefined) return
+      node.style.display = 'none'
+      node.innerHTML = ''
+      delete node.dataset.giftTransactionId
+    }, GIFT_FADE_MS)
+  }
+
+  // Извиква се от render() при ВСЕКИ re-render (turn change/dice/pawn move/
+  // resize и т.н.) — виж task-а §8 "Gift overlay НЕ трябва да изчезва само
+  // защото... UI rerender-ва". Presentation timer-ът (giftOverlayTimerIds)
+  // се armира ТОЧНО ВЕДНЪЖ per (color, "timer currently armed") — remainingMs
+  // се computer-а от authoritative expiresAt (absolute timestamp), не от нов
+  // фиксиран 60s prozorec при всеки sync — гарантира "оставащото време НЕ се
+  // рестартира" независимо колко пъти render() се извика междувременно.
+  function syncGiftOverlays(): void {
+    const nowMs = Date.now()
+
+    for (const [colorKey, overlay] of Object.entries(activeGiftOverlays) as [LudoColor, LudoGiftOverlayState | undefined][]) {
+      if (!overlay) continue
+
+      // Докато flight анимацията за ТОЗИ конкретен transaction все още тече,
+      // DOM-ът остава напълно недокоснат — canonical state вече е новия
+      // gift, но визуално не го разкриваме преди landing (виж playGiftFlight
+      // onLanded/releasePendingGiftLanding по-долу).
+      if (pendingGiftLandingTransactionIdByColor[colorKey] === overlay.transactionId) continue
+
+      const remainingMs = Date.parse(overlay.expiresAt) - nowMs
+
+      if (remainingMs <= 0) {
+        clearGiftOverlayTimer(colorKey)
+        delete activeGiftOverlays[colorKey]
+        hideGiftOverlayNode(colorKey)
+        continue
+      }
+
+      const node = options.root.querySelector<HTMLElement>(`[data-ludo-gift-overlay="${colorKey}"]`)
+      if (!node) continue
+
+      if (node.dataset.giftTransactionId !== overlay.transactionId) {
+        node.dataset.giftTransactionId = overlay.transactionId
+        node.innerHTML = renderGiftOverlayInnerHtml(overlay)
+      }
+
+      // Винаги (пре)прилагаме визуалното състояние — пълен rebuild на root
+      // innerHTML-а нулира inline стиловете при всеки render().
+      node.style.display = 'flex'
+      node.style.transition = `opacity ${GIFT_FADE_MS}ms ease`
+      node.style.opacity = '1'
+      window.setTimeout(() => {
+        node.style.transition = ''
+      }, GIFT_FADE_MS)
+
+      if (giftOverlayTimerIds[colorKey] === undefined) {
+        giftOverlayTimerIds[colorKey] = window.setTimeout(() => {
+          delete giftOverlayTimerIds[colorKey]
+          delete activeGiftOverlays[colorKey]
+          hideGiftOverlayNode(colorKey)
+        }, remainingMs)
+      }
+    }
+  }
+
+  function clearAllGiftOverlays(): void {
+    for (const color of Object.keys(activeGiftOverlays) as LudoColor[]) {
+      clearGiftOverlayTimer(color)
+    }
+    activeGiftOverlays = {}
+    processedGiftTransactionIds.clear()
+    for (const key of Object.keys(pendingGiftLandingTransactionIdByColor) as LudoColor[]) {
+      delete pendingGiftLandingTransactionIdByColor[key]
+    }
+    document.body.querySelector('[data-ludo-gift-flight-layer="1"]')?.remove()
+  }
+
+  // Reconciliation entry point — извиква се (1) веднъж при construction (виж
+  // options.authoritative.initialActiveGifts, reconnect-safety §9), (2) при
+  // всяко следващо authoritative snapshot push, ако носи activeLudoGifts
+  // поле (routing-ано от createLobbyFlowController.ts, виж applyGiftSent за
+  // realtime-only новите transactions). Presentation-only reconciliation —
+  // НЕ мутира gameplay state, само canonical gift overlay map-а.
+  function applyActiveGiftsFromSnapshot(gifts: readonly ActiveLudoGiftSnapshot[]): void {
+    const nowMs = Date.now()
+    for (const gift of gifts) {
+      if (Date.parse(gift.expiresAt) <= nowMs) continue
+      rememberGiftTransaction(gift.transactionId)
+      activeGiftOverlays[gift.recipientColor] = {
+        transactionId: gift.transactionId,
+        giftItemId: gift.giftItemId,
+        giftName: gift.giftName,
+        imageUrl: gift.imageUrl,
+        senderColor: gift.senderColor,
+        senderDisplayName: gift.senderDisplayName,
+        expiresAt: gift.expiresAt,
+      }
+      delete pendingGiftLandingTransactionIdByColor[gift.recipientColor]
+    }
+  }
+
+  // Освобождава suppression-а САМО ако transactionId-то все още е "текущо
+  // очакваното" за тоя color (mirror на Belot's releasePendingTableGiftLanding
+  // stale-callback защитата) — ако вече е надминат от по-нов gift, тоя late
+  // callback е no-op, по-новият полет ще си свърши работата сам.
+  function releasePendingGiftLanding(recipientColor: LudoColor, transactionId: string): void {
+    if (pendingGiftLandingTransactionIdByColor[recipientColor] !== transactionId) return
+    delete pendingGiftLandingTransactionIdByColor[recipientColor]
+    syncGiftOverlays()
+  }
+
+  function playGiftFlight(senderColor: LudoColor, recipientColor: LudoColor, imageUrl: string, transactionId: string): void {
+    const fromEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${senderColor}"]`)
+    const toEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${recipientColor}"]`)
+    if (!fromEl || !toEl) {
+      releasePendingGiftLanding(recipientColor, transactionId)
+      return
+    }
+    playGiftFlightAnimation({
+      fromEl,
+      toEl,
+      imageUrl,
+      layerAttribute: 'data-ludo-gift-flight-layer',
+      zIndex: LUDO_GIFT_FLIGHT_Z_INDEX,
+      onLanded: () => releasePendingGiftLanding(recipientColor, transactionId),
+      onCancelled: () => releasePendingGiftLanding(recipientColor, transactionId),
+    })
+  }
+
+  // Server broadcast при нов, успешно изпратен gift (виж index.ts
+  // 'ludo_gift_sent') — routing-ан от createLobbyFlowController.ts, mirror
+  // на applyEmojiReaction. Dedup СТРОГО по transactionId (idempotent replay/
+  // late-arriving duplicate broadcast never произвежда втори flight).
+  function applyGiftSent(message: {
+    matchId: string
+    transactionId: string
+    giftItemId: string
+    giftName: string
+    imageUrl: string
+    senderColor: LudoColor
+    senderDisplayName: string
+    recipientColor: LudoColor
+    expiresAt: string
+  }): void {
+    if (!options.authoritative || message.matchId !== options.authoritative.initialSnapshot.matchId) return
+    if (processedGiftTransactionIds.has(message.transactionId)) return
+    rememberGiftTransaction(message.transactionId)
+    activeGiftOverlays[message.recipientColor] = {
+      transactionId: message.transactionId,
+      giftItemId: message.giftItemId,
+      giftName: message.giftName,
+      imageUrl: message.imageUrl,
+      senderColor: message.senderColor,
+      senderDisplayName: message.senderDisplayName,
+      expiresAt: message.expiresAt,
+    }
+    // Суспендирай визуалното разкриване на overlay-а, докато flight-ът лети
+    // (виж syncGiftOverlays guard-а) — playGiftFlight release-ва го при
+    // landing/cancel.
+    pendingGiftLandingTransactionIdByColor[message.recipientColor] = message.transactionId
+    playGiftFlight(message.senderColor, message.recipientColor, message.imageUrl, message.transactionId)
+    render()
+  }
+
+  // Личен отговор към sender-а (виж index.ts 'ludo_gift_send_result') —
+  // routing-ан от createLobbyFlowController.ts. No-op, ако picker-ът вече е
+  // затворен/reconnected instance (giftPickerModal===null за spectator).
+  function applyGiftSendResult(message: {
+    requestId: string
+    ok: boolean
+    message?: string
+    chargedPrice?: number
+    senderBalanceAfter?: number
+  }): void {
+    giftPickerModal?.handleSendResult(message.requestId, message)
+  }
+
   let isDestroyed = false
   let isEmojiPickerOpen = false
   let hasPresentedGameEnd = false
@@ -621,6 +919,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (isSettingsPopupOpen) mountSettingsPopup()
     if (isSpectatorViewersPopoverOpen) mountSpectatorViewersPopover()
     wireEvents()
+    syncGiftOverlays()
   }
 
   // Ludo "Настройки" popup (виж task-а "Ludo sound settings") — reuse-ва
@@ -935,6 +1234,49 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
         isSpectatorViewersPopoverOpen = true
       }
       render()
+    })
+
+    // Gift icon click (виж task-а "Ludo подаръци") — иконата се рендира
+    // ЕДИНСТВЕНО за други (не-local) participants (виж renderLudoGameScreen.
+    // ts::renderPlayerPanelSlot giftIcon gate-а), но giftPickerModal===null
+    // gate-ът тук е допълнителна defense-in-depth (никога не съществува в
+    // non-authoritative dev harness/spectator режим — виж декларацията му).
+    // querySelectorAll, не querySelector — до 3 опонента могат да имат
+    // иконата едновременно (4-player match).
+    options.root.querySelectorAll<HTMLElement>('[data-ludo-gift-icon]').forEach((iconEl) => {
+      iconEl.addEventListener('click', () => {
+        if (giftPickerModal === null || !authoritativeSnapshot) return
+        const color = iconEl.getAttribute('data-ludo-gift-icon') as LudoColor | null
+        if (!color) return
+        const recipient = authoritativeSnapshot.players.find((player) => player.color === color)
+        if (!recipient) return
+        giftPickerModal.open(color, recipient.profileId, recipient.displayName)
+      })
+    })
+
+    // Avatar click -> reuse на съществуващия Belot/lobby profile popup (виж
+    // task-а "Ludo profile popup integration"). Атрибутът се рендира
+    // ЕДИНСТВЕНО за реален, друг participant (виж renderLudoGameScreen.ts::
+    // isAvatarClickable) — never за local player, non-participant ("Не
+    // участва") slot, ИЛИ докато dice control-ът заема тая позиция (dice
+    // control branch-ът в renderLudoPlayerPanel.ts никога не рендира тоя
+    // атрибут — mutually exclusive branches, виж §6 в task-а). profileId се
+    // resolve-ва тук, при click-а, от authoritativeSnapshot.players (same
+    // established pattern като gift icon-а по-горе) — никога от DOM данни.
+    // options.authoritative?.onOpenProfile е недефиниран в non-authoritative
+    // dev harness режим (mirror на onGiftSend/onEmojiReactionSend) — тогава
+    // querySelectorAll намира 0 елемента и без друго (isAvatarClickable
+    // изисква authoritative players state), но проверката тук е explicit
+    // defense-in-depth.
+    options.root.querySelectorAll<HTMLElement>('[data-ludo-avatar-clickable]').forEach((avatarEl) => {
+      avatarEl.addEventListener('click', () => {
+        if (!options.authoritative?.onOpenProfile || !authoritativeSnapshot) return
+        const color = avatarEl.getAttribute('data-ludo-avatar-clickable') as LudoColor | null
+        if (!color) return
+        const target = authoritativeSnapshot.players.find((player) => player.color === color)
+        if (!target) return
+        options.authoritative.onOpenProfile(target.profileId, target.displayName)
+      })
     })
 
     options.root.querySelector('[data-ludo-dice-roll-button="1"]')?.addEventListener('click', () => {
@@ -1499,6 +1841,16 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // рано, виж call site-а) — reset-ва се ТУК, синхронно, независимо от
     // изхода на прекъснатия promise.
     presentationGateSnapshot = null
+    // Виж applyActiveGiftsFromSnapshot doc коментара — reconnect/resync/tab-
+    // hide изчиства ВСИЧКИ active gift overlay-и тук (same established
+    // pattern като всичко останало transient в тая функция); следващият
+    // authoritative push винаги носи прясно activeLudoGifts поле (виж
+    // createLobbyFlowController.ts dispatcher-а — извиква
+    // applyActiveGiftsFromSnapshot СЛЕД applyAuthoritativeSnapshot за всяко
+    // ludo_game_state/ludo_game_started/ludo_spectator_game_state съобщение),
+    // значи никой все още валиден gift не остава изгубен, само моментно
+    // невидим до следващия render().
+    clearAllGiftOverlays()
   }
 
   function snapToAuthoritativeSnapshot(snapshot: LudoGameStateSnapshot): void {
@@ -1882,6 +2234,8 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     activeMoveOverlayCancel = null
     diceResultOverlay.clearLanded()
     modalLayerRoot.remove()
+    clearAllGiftOverlays()
+    giftPickerModal?.destroy()
   }
 
   // scheduleNextDeadline() ПРЕДИ render() — same fix принцип за консистентност
@@ -1890,8 +2244,23 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // init, разликата е под 1ms).
   if (options.authoritative) syncAuthoritativeDeadline(options.authoritative.initialSnapshot)
   else scheduleNextDeadline()
+  // Виж applyActiveGiftsFromSnapshot doc коментара — reconnect-safety §9:
+  // вече активни gift overlay-и към момента на mount-ването (нов controller
+  // instance при всеки reconnect, виж mountLudoGameController pattern-а в
+  // createLobbyFlowController.ts) се seed-ват тук, ПРЕДИ първия render().
+  if (options.authoritative) applyActiveGiftsFromSnapshot(options.authoritative.initialActiveGifts ?? [])
   document.addEventListener('visibilitychange', handleVisibilityChange)
   render()
 
-  return { destroy, applyAuthoritativeSnapshot, applyEmojiReaction, applySpectatorViewers, notifyGameplayActionRejected, requestExit }
+  return {
+    destroy,
+    applyAuthoritativeSnapshot,
+    applyEmojiReaction,
+    applySpectatorViewers,
+    notifyGameplayActionRejected,
+    requestExit,
+    applyGiftSent,
+    applyGiftSendResult,
+    applyActiveGiftsFromSnapshot,
+  }
 }

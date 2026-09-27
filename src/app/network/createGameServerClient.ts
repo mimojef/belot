@@ -1009,6 +1009,8 @@ export type ClientMessage =
   | { type: 'ludo_move_request'; matchId: string; expectedRevision: number; slot: LudoPieceSlot }
   | { type: 'ludo_reclaim_request'; matchId: string; expectedRevision: number }
   | { type: 'send_ludo_emoji_reaction'; matchId: string; emojiId: string }
+  // In-game gift — mirror на send_table_gift по-горе, matchId вместо roomId.
+  | { type: 'send_ludo_gift'; matchId: string; recipientProfileId: string; giftItemId: string; requestId: string }
   // Spectator mode ("Гледай", Phase 2) — mirror на server-а (виж
   // server/src/protocol/messageTypes.ts Phase 1).
   | { type: 'watch_ludo_match'; matchId: string }
@@ -1764,12 +1766,14 @@ export type LudoGameStartedMessage = {
   snapshot: LudoGameStateSnapshot
   walletBalance: number
   prizeAmount: number | null
+  activeLudoGifts?: ActiveLudoGiftSnapshot[]
 }
 export type LudoGameStateMessage = {
   type: 'ludo_game_state'
   snapshot: LudoGameStateSnapshot
   walletBalance: number
   prizeAmount: number | null
+  activeLudoGifts?: ActiveLudoGiftSnapshot[]
 }
 // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — reuse-ва СЪЩИЯ
 // LudoGameStateSnapshot 1:1 (виж server/src/protocol/messageTypes.ts Phase 1
@@ -1780,6 +1784,7 @@ export type LudoGameStateMessage = {
 export type LudoSpectatorGameStateMessage = {
   type: 'ludo_spectator_game_state'
   snapshot: LudoGameStateSnapshot
+  activeLudoGifts?: ActiveLudoGiftSnapshot[]
 }
 
 // Viewer-indicator ("наднича във вашата игра") — изпраща се ЕДИНСТВЕНО до
@@ -1806,6 +1811,52 @@ export type LudoEmojiReactionMessage = {
   matchId: string
   color: 'red' | 'blue' | 'green' | 'yellow'
   emojiId: string
+}
+
+// Ludo in-game gifts — 1:1 mirror на ActiveTableGiftSnapshot/
+// TableGiftItemSentMessage/TableGiftSendResultMessage (Belot Stage 2) по-
+// горе, matchId/LudoColor вместо roomId/Seat. Виж server/src/index.ts
+// activeLudoGiftsByMatchId doc коментара за пълния server rationale.
+export type ActiveLudoGiftSnapshot = {
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderColor: 'red' | 'blue' | 'green' | 'yellow'
+  senderDisplayName: string
+  recipientColor: 'red' | 'blue' | 'green' | 'yellow'
+  sentAt: string
+  expiresAt: string
+}
+
+export type LudoGiftSentMessage = {
+  type: 'ludo_gift_sent'
+  matchId: string
+  transactionId: string
+  giftItemId: string
+  giftName: string
+  imageUrl: string
+  senderProfileId: string
+  senderColor: 'red' | 'blue' | 'green' | 'yellow'
+  senderDisplayName: string
+  recipientProfileId: string
+  recipientColor: 'red' | 'blue' | 'green' | 'yellow'
+  chargedPrice: number
+  sentAt: string
+  expiresAt: string
+}
+
+export type LudoGiftSendResultMessage = {
+  type: 'ludo_gift_send_result'
+  matchId: string
+  requestId: string
+  ok: boolean
+  message?: string
+  transactionId?: string
+  chargedPrice?: number
+  senderBalanceAfter?: number
+  isReplay?: boolean
 }
 
 // "Играещи"/"Приключили" lobby listing за /games/ludo — mirror на
@@ -2670,6 +2721,8 @@ export type ServerMessage =
   | LudoMatchSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
+  | LudoGiftSentMessage
+  | LudoGiftSendResultMessage
   | PrivateRoomUpdatedMessage
   | PrivateRoomLeftMessage
   | PrivateRoomExpiredMessage
@@ -2872,6 +2925,7 @@ export type GameServerClient = {
   requestLudoMove: (matchId: string, expectedRevision: number, slot: LudoPieceSlot) => void
   requestLudoReclaim: (matchId: string, expectedRevision: number) => void
   sendLudoEmojiReaction: (matchId: string, emojiId: string) => void
+  sendLudoGift: (matchId: string, recipientProfileId: string, giftItemId: string, requestId: string) => void
   requestLudoGamesList: () => void
   watchLudoMatch: (matchId: string) => void
   unwatchLudoMatch: (matchId: string) => void
@@ -3253,6 +3307,9 @@ export function createGameServerClient(
   function requestLudoMove(matchId: string, expectedRevision: number, slot: LudoPieceSlot): void { send({ type: 'ludo_move_request', matchId, expectedRevision, slot }) }
   function requestLudoReclaim(matchId: string, expectedRevision: number): void { send({ type: 'ludo_reclaim_request', matchId, expectedRevision }) }
   function sendLudoEmojiReaction(matchId: string, emojiId: string): void { send({ type: 'send_ludo_emoji_reaction', matchId, emojiId }) }
+  function sendLudoGift(matchId: string, recipientProfileId: string, giftItemId: string, requestId: string): void {
+    send({ type: 'send_ludo_gift', matchId, recipientProfileId, giftItemId, requestId })
+  }
   function requestLudoGamesList(): void { send({ type: 'request_ludo_games_list' }) }
   // Spectator mode ("Гледай", Phase 2) — read-only subscription към ЧУЖД
   // активен match, виж server/src/index.ts watch_ludo_match/unwatch_ludo_match
@@ -3421,6 +3478,7 @@ export function createGameServerClient(
     requestLudoMove,
     requestLudoReclaim,
     sendLudoEmojiReaction,
+    sendLudoGift,
     requestLudoGamesList,
     watchLudoMatch,
     unwatchLudoMatch,
