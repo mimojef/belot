@@ -4682,6 +4682,33 @@ const ludoMatchRuntime = createLudoMatchRuntime({
         console.error(`[ludo-room-match] failed to record finish for match=${snapshot.matchId}`, error)
       }
     }
+    // Level/rank progression (виж task-а "Ludo -> level/rank progression") —
+    // +1 completed_games_count за ВСЕКИ реален участник, чрез game-agnostic
+    // playerProgressStore.recordCompletedGameForProfile() (НЕ recordCompletedMatch,
+    // виж doc коментара там: Belot-only team/did_win/is_guest_trial колони,
+    // неприложими за Ludo free-for-all playerCount:4). Итерира
+    // snapshot.players директно — spectators/non-participants structurally
+    // никога не влизат в тоя масив (watch_ludo_match е напълно отделен
+    // subscription механизъм), а Ludo няма bot-owned profiles (botControlledColors
+    // е само временен takeover флаг върху СЪЩЕСТВУВАЩ human seat, виж
+    // ludoMatchRuntime.ts) — затова НЯМА bot-exclusion филтър тук, за разлика
+    // от playerProgressStore.recordCompletedMatch()'s temp-bot-* skip.
+    // Forfeit-нал играч (leftColors) остава в snapshot.players до собствения
+    // си пост-финален "leave" ack (виж ludoMatchRuntime.ts::leave() doc
+    // коментара "display roster != active membership") — по аналогия с
+    // Belot's controlledByBot (bot takeover след disconnect НЕ маха профила
+    // от progression-а, виж playerProgressStore.ts::recordCompletedMatch),
+    // умишлено НЕ филтрираме по leftColors/botControlledColors тук: мачът
+    // реално приключи според текущите правила, всеки стартирал участник
+    // получава +1, независимо дали е бил bot-controlled/forfeit-нал междувременно.
+    // won_games_count НИКОГА не се пипа тук (виж recordCompletedGameForProfile
+    // doc коментара в playerProgressStore.ts §4) — Ludo участва само в
+    // completed_games_count/level/rank, не в Belot-ovата "Победи"/"Успех %" статистика.
+    if (snapshot.state.status === 'finished') {
+      for (const player of snapshot.players) {
+        playerProgressStore.recordCompletedGameForProfile(snapshot.matchId, player.profileId, 'ludo_match')
+      }
+    }
     const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
     const type = snapshot.revision === 0 ? 'ludo_game_started' : 'ludo_game_state'
     // Виж activeLudoGiftsByMatchId doc коментара по-горе — reconciliation на

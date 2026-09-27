@@ -120,6 +120,25 @@ export type PlayerProgressStore = {
   seedCatalogBotsIfNeeded: () => void
   refillCatalogBotWallets: () => void
   recordCompletedMatch: (room: ServerRoom) => void
+  /**
+   * Минимален, game-agnostic idempotent "+1 completed_games_count" helper
+   * (виж task-а "Ludo -> level/rank progression"). За разлика от
+   * recordCompletedMatch() (Belot-specific: team/did_win/is_guest_trial,
+   * пише profile_match_results), тук НЯМА game-specific колони — само
+   * scopeId (caller-defined uniqueness key, за Ludo: matchId) + profileId.
+   * Идемпотентно per (scopeId, profileId) чрез profile_completed_game_ledger
+   * PRIMARY KEY — повторно извикване за същия scopeId+profileId е no-op
+   * (recorded:false), mirror на ludoEconomyStore.ts's ledger pattern.
+   * НИКОГА не пипа won_games_count (винаги didWin:false вътрешно към
+   * incrementCompletedGame) — победа/загуба в scopeId-govия game mode е
+   * извън обхвата на тази функция (виж task-а §4: Ludo резултат не бива да
+   * се смесва с won_games_count/success% семантиката).
+   */
+  recordCompletedGameForProfile: (
+    scopeId: string,
+    profileId: ProfileId,
+    source: string,
+  ) => { recorded: boolean }
   submitPartnerRating: (
     room: ServerRoom,
     raterSeat: Seat,
@@ -769,6 +788,17 @@ export async function createPlayerProgressStore(
     DELETE FROM profile_gallery_images
     WHERE profile_id = ?
       AND image_id = ?;
+  `)
+
+  // Виж recordCompletedGameForProfile() по-долу — game-agnostic idempotency
+  // guard (profile_completed_game_ledger, миграция 20260927_001), НЕ
+  // profile_match_results (Belot-specific team/did_win/is_guest_trial
+  // колони, неприложими за напр. Ludo free-for-all playerCount:4).
+  const insertCompletedGameLedgerStatement = database.prepare(`
+    INSERT INTO profile_completed_game_ledger (
+      scope_id, profile_id, source
+    ) VALUES (?, ?, ?)
+    ON CONFLICT(scope_id, profile_id) DO NOTHING;
   `)
 
   const insertMatchResultStatement = database.prepare(`
@@ -1563,6 +1593,60 @@ export async function createPlayerProgressStore(
     updateProfileRankStatement.run(rankLevel, getRankTitleForLevel(rankLevel), profileId)
   }
 
+  // Виж task-а "Ludo -> level/rank progression" §3 IDEMPOTENCY. Единствен
+  // writer, който Ludo (или бъдещ трети game mode) може безопасно да вика за
+  // "+1 completed game", БЕЗ да пипа Belot-specific profile_match_results
+  // schema и БЕЗ fake team/did_win данни. scopeId е caller-defined
+  // uniqueness key (за Ludo: matchId) — profile_completed_game_ledger
+  // PRIMARY KEY(scope_id, profile_id) гарантира максимум едно +1 на profile
+  // за даден scopeId, дори при theoretично повторно извикване на hook-а
+  // (defense-in-depth, mirror на ludoEconomyStore.ts's hasLedgerEntry/
+  // ON CONFLICT DO NOTHING pattern за парите — не разчитаме само на
+  // runtime "onSnapshot fires exactly once" инварианта).
+  //
+  // BEGIN IMMEDIATE обвива ledger insert-а И incrementCompletedGame()
+  // reuse-ва СЪЩИЯ database connection/prepared statements) в ЕДНА atomic
+  // транзакция — или и двете се случват, или нито едно (никога "ledger
+  // казва recorded, но completed_games_count не е повишен" partial state).
+  //
+  // didWin винаги false тук (виж task-а §4: Ludo НЕ пипа won_games_count/
+  // success% — тая семантика исторически принадлежи на Belot resultatите,
+  // не бива да се смесва мълчаливо с друг game mode).
+  function recordCompletedGameForProfile(
+    scopeId: string,
+    profileId: ProfileId,
+    source: string,
+  ): { recorded: boolean } {
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const insertResult = insertCompletedGameLedgerStatement.run(
+        scopeId,
+        profileId,
+        source,
+      ) as { changes?: number }
+
+      if ((insertResult.changes ?? 0) === 0) {
+        database.exec('COMMIT;')
+        return { recorded: false }
+      }
+
+      incrementCompletedGame(profileId, false)
+      database.exec('COMMIT;')
+      return { recorded: true }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+      console.error(
+        `[profile-progress] failed to record completed game scopeId=${scopeId} profileId=${profileId} source=${source}`,
+        error,
+      )
+      return { recorded: false }
+    }
+  }
+
   function getParticipantSkillRating(participant: ServerRoom['seats'][Seat]['participant']): number {
     if (participant === null) return 1000
     if (participant.kind === 'bot') return participant.identity.skillRating ?? 1000
@@ -1973,6 +2057,7 @@ export async function createPlayerProgressStore(
     seedCatalogBotsIfNeeded,
     refillCatalogBotWallets,
     recordCompletedMatch,
+    recordCompletedGameForProfile,
     submitPartnerRating,
     close,
   }

@@ -809,6 +809,19 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoRoomStart?: () => void
   onLudoGameStateOpen?: () => void
   onLudoMatchLeave?: (matchId: string) => void
+  // Виж task-а "Ludo -> level/rank progression: stale profile cache след
+  // мач" — извиква се ЕДИНСТВЕНО при onGameEndAcknowledged() (реално
+  // приключен И acknowledged Ludo match — виж call site-а по-долу), НИКОГА
+  // при обикновен requestExit()/spectator "Назад" (незавършена игра или
+  // read-only гледане). Чист "моля опресни auth/profile state" сигнал —
+  // НЕ дублира /api/auth/me fetch логика тук (тя си остава изцяло в
+  // main.ts::loadAuthSession(), единствения established mechanism, който
+  // Belot-ovия createActiveRoomFlowController.ts::showLobby() вече ползва).
+  // Persistence-ът (recordCompletedGameForProfile) вече е приключил СИНХРОННО
+  // на сървъра много преди клиентът изобщо да получи end-game snapshot-а —
+  // тоя callback е ЧИСТО read-refresh, не тригва никакъв нов progression
+  // write.
+  onLudoMatchEndedProfileRefresh?: () => void
   onLudoRollRequest?: (matchId: string, expectedRevision: number) => void
   onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
   onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
@@ -3414,6 +3427,15 @@ export function createLobbyFlowController(
         // мача и независимо дали финалният ludo_games_list broadcast е бил
         // изгубен, докато е бил null.
         ensureLudoLobbyControllerAndRefreshGames()
+        // Виж task-а "Ludo -> level/rank progression: stale profile cache
+        // след мач" — server-ovият progression write (recordCompletedGameForProfile)
+        // вече е приключил синхронно ПРЕДИ end-game snapshot-ът изобщо да
+        // стигне клиента, значи ТУК е коректният момент за profile refetch
+        // (реално приключен И acknowledged match — не requestExit() на
+        // незавършена игра, не spectator "Назад"). Само сигнал — main.ts
+        // решава КАК да опресни (loadAuthSession(), established Belot
+        // mechanism), никаква /api/auth/me логика тук.
+        options.onLudoMatchEndedProfileRefresh?.()
       },
     })
   }

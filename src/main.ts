@@ -6716,6 +6716,14 @@ lobby = createLobbyFlowController({
   onLudoRoomStart: () => { client.startLudoRoom() },
   onLudoGameStateOpen: () => { client.requestLudoGameState() },
   onLudoMatchLeave: (matchId) => { client.leaveLudoMatch(matchId) },
+  // Виж task-а "Ludo -> level/rank progression: stale profile cache след
+  // мач" — createLobbyFlowController.ts::onGameEndAcknowledged вика това
+  // ЕДИНСТВЕНО след реално приключен И acknowledged Ludo match (никога за
+  // requestExit()/spectator). Reuse-ва СЪЩИЯ established mechanism, който
+  // Belot's createActiveRoomFlowController.ts::showLobby() вече ползва за
+  // точно същия проблем (fresh /api/auth/me fetch + currentAuthSession
+  // update) — никаква нова fetch логика тук, само извикване на loadAuthSession().
+  onLudoMatchEndedProfileRefresh: () => { void loadAuthSession() },
   onLudoRollRequest: (matchId, revision) => { client.requestLudoRoll(matchId, revision) },
   onLudoMoveRequest: (matchId, revision, slot) => { client.requestLudoMove(matchId, revision, slot) },
   onLudoReclaimRequest: (matchId, revision) => { client.requestLudoReclaim(matchId, revision) },
