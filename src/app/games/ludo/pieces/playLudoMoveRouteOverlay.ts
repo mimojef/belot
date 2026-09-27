@@ -3,6 +3,7 @@ import type { LudoCellId, LudoPieceId } from '../ludoTypes'
 import { ludoSafeCellIds, parseLudoCellId } from '../board/ludoBoardGeometry'
 import { LUDO_FINISH_LENGTH } from '../ludoGeometryConstants'
 import { playLudoSound } from '../ludoSoundSettings'
+import { LUDO_MOVE_ROUTE_Z_INDEX, LUDO_MOVE_ROUTE_TRAIL_Z_INDEX } from '../ludoLayerHierarchy'
 
 const MOVE_TRAVEL_MS = 165
 const STEP_TOTAL_MS = 260
@@ -111,26 +112,41 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function centerRelativeToOverlay(cell: Element, overlay: HTMLElement): { x: number; y: number } {
-  const cellRect = cell.getBoundingClientRect()
-  const overlayRect = overlay.getBoundingClientRect()
-  return {
-    x: cellRect.left - overlayRect.left + cellRect.width / 2,
-    y: cellRect.top - overlayRect.top + cellRect.height / 2,
-  }
-}
-
-function cellCenter(root: ParentNode, overlay: HTMLElement, cellId: LudoCellId): { x: number; y: number } | null {
+// ROOT CAUSE FIX (виж task-а "emoji cleanup убива pawn move animation" —
+// пионката изчезваше по средата на hop-а всеки път, когато КАКЪВТО И ДА Е
+// unrelated render() (emoji reaction cleanup, viewer popover toggle, gift
+// overlay sync, spectator viewer update и т.н.) се случеше по средата на
+// route анимацията): движещата се пионка/trail nodes-и по-рано живееха
+// ВЪТРЕ в `[data-ludo-effects-overlay="1"]`, който самият е част от
+// renderLudoBoard.ts-овия markup — т.е. дете на createLudoFlowController.ts
+// ::options.root, чийто innerHTML СЕ ЗАМЕСТВА ЦЯЛОСТНО при ВСЕКИ render()
+// call, независимо от причината. Board rebuild detach-ваше overlay div-а
+// (и moving/trail децата му) от документа по средата на WAAPI анимацията —
+// detached node продължава да "тече" вътрешно (animation.finished пак се
+// resolve-ва накрая), но е невидим, докато board-ът не бъде rebuild-нат.
+//
+// FIX: mirror на established pattern-а на playLudoCaptureFlightOverlay.ts/
+// playLudoDiceFlightOverlay.ts (dice/capture overlay-ите ВЕЧЕ живееха на
+// document.body точно по тая причина) — moving/trail nodes-ите вече се
+// appendват directno на document.body (sibling на options.root, никога
+// пипнати от generic render()), позиционирани с position:fixed чрез СУРОВИ
+// (viewport-absolute) getBoundingClientRect() координати, вместо
+// board-overlay-relative математика. Клетъчните lookup-и (`root.querySelector
+// ('[data-ludo-cell-pieces=...]')`) остават directно спрямо `root` — те се
+// извикват ФРЕШ на всяка route стъпка, значи дори board rebuild междувременно
+// (същия layout, нови DOM nodes) не чупи следващото измерване.
+function cellCenter(root: ParentNode, cellId: LudoCellId): { x: number; y: number } | null {
   const cell = root.querySelector(`[data-ludo-cell-pieces="${cellId}"]`)
   if (!cell) return null
-  return centerRelativeToOverlay(cell, overlay)
+  const rect = cell.getBoundingClientRect()
+  return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }
 }
 
 function createPieceNode(pieceId: LudoPieceId, pieceSizePx: number, kind: 'moving' | 'trail'): HTMLElement {
   const node = document.createElement('div')
   node.setAttribute(kind === 'moving' ? 'data-ludo-moving-piece' : 'data-ludo-move-trail', pieceId)
   node.style.cssText = `
-    position:absolute;
+    position:fixed;
     width:${pieceSizePx}px;
     left:0;
     top:0;
@@ -138,7 +154,7 @@ function createPieceNode(pieceId: LudoPieceId, pieceSizePx: number, kind: 'movin
     transform-origin:center center;
     pointer-events:none;
     will-change:left, top, opacity, transform;
-    z-index:${kind === 'moving' ? 80 : 60};
+    z-index:${kind === 'moving' ? LUDO_MOVE_ROUTE_Z_INDEX : LUDO_MOVE_ROUTE_TRAIL_Z_INDEX};
   `
   node.innerHTML = renderLudoPieceHtml(pieceId, false, 1, [pieceId])
   if (kind === 'moving') {
@@ -163,10 +179,10 @@ function place(node: HTMLElement, point: { x: number; y: number }): void {
   node.style.top = `${point.y}px`
 }
 
-function playTrail(overlay: HTMLElement, pieceId: LudoPieceId, pieceSizePx: number, point: { x: number; y: number }, speedScale: number): Animation | null {
+function playTrail(pieceId: LudoPieceId, pieceSizePx: number, point: { x: number; y: number }, speedScale: number): Animation | null {
   const trail = createPieceNode(pieceId, pieceSizePx, 'trail')
   place(trail, point)
-  overlay.appendChild(trail)
+  document.body.appendChild(trail)
   const animation = trail.animate(
     [
       { opacity: 0.34, transform: 'translate(-50%, -50%) scale(0.96)' },
@@ -182,16 +198,15 @@ function playTrail(overlay: HTMLElement, pieceId: LudoPieceId, pieceSizePx: numb
 export function playLudoMoveRouteOverlay(options: LudoMoveRouteOverlayOptions): LudoMoveRouteOverlayResult {
   const { root, pieceId, fromCellId, route, pieceSizePx, initiallyHidden } = options
   const speedScale = Math.max(0.1, options.debugSpeedScale ?? 1)
-  const overlay = root.querySelector<HTMLElement>('[data-ludo-effects-overlay="1"]')
-  if (!overlay || route.length === 0) return { finished: Promise.resolve(), cancel: () => {} }
+  if (route.length === 0) return { finished: Promise.resolve(), cancel: () => {} }
 
-  const start = cellCenter(root, overlay, fromCellId)
+  const start = cellCenter(root, fromCellId)
   if (!start) return { finished: Promise.resolve(), cancel: () => {} }
 
   const moving = createPieceNode(pieceId, pieceSizePx, 'moving')
   moving.style.visibility = initiallyHidden ? 'hidden' : 'visible'
   place(moving, start)
-  overlay.appendChild(moving)
+  document.body.appendChild(moving)
 
   const trailAnimations: Animation[] = []
   let cancelled = false
@@ -201,7 +216,7 @@ export function playLudoMoveRouteOverlay(options: LudoMoveRouteOverlayOptions): 
     cancelled = true
     activeAnimation?.cancel()
     for (const animation of trailAnimations) animation.cancel()
-    overlay.querySelectorAll(`[data-ludo-moving-piece="${pieceId}"], [data-ludo-move-trail="${pieceId}"]`).forEach((node) => node.remove())
+    document.body.querySelectorAll(`[data-ludo-moving-piece="${pieceId}"], [data-ludo-move-trail="${pieceId}"]`).forEach((node) => node.remove())
   }
 
   const finished = (async () => {
@@ -210,10 +225,10 @@ export function playLudoMoveRouteOverlay(options: LudoMoveRouteOverlayOptions): 
       for (let stepIndex = 0; stepIndex < route.length; stepIndex += 1) {
         const cellId = route[stepIndex]!
         if (cancelled) return
-        const next = cellCenter(root, overlay, cellId)
+        const next = cellCenter(root, cellId)
         if (!next) return
 
-        const trail = playTrail(overlay, pieceId, pieceSizePx, current, speedScale)
+        const trail = playTrail(pieceId, pieceSizePx, current, speedScale)
         if (trail) trailAnimations.push(trail)
 
         activeAnimation = moving.animate(

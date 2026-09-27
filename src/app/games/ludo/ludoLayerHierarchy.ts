@@ -1,6 +1,19 @@
 // Global Ludo layers. Modal UI is portalled to document.body so these values
 // are compared in the same root stacking context as gameplay effects.
 export const LUDO_GAME_SCREEN_Z_INDEX = 500
+// Виж task-а "emoji cleanup убива pawn move animation" — moving/trail
+// pieces-ите на playLudoMoveRouteOverlay.ts преди живееха ВЪТРЕ в board-овия
+// `[data-ludo-effects-overlay="1"]` div (част от options.root markup-а),
+// значи всеки generic render() (включ. emoji reaction cleanup, viewer
+// popover toggle, gift/spectator updates) ги detach-ваше по средата на
+// анимацията чрез innerHTML replace. Fix-нато да mirror-ват established
+// document.body-hosted pattern-а на playLudoCaptureFlightOverlay.ts/dice
+// overlay-я — под CAPTURE_FLIGHT (move-route анимацията винаги приключва
+// ПРЕДИ евентуален capture flight/impact за същия ход), над game screen-а.
+export const LUDO_MOVE_ROUTE_Z_INDEX = 7_500
+// Trail-ът стои леко под движещата се пионка (mirror на старата relative
+// разлика moving z-index:80 vs trail z-index:60).
+export const LUDO_MOVE_ROUTE_TRAIL_Z_INDEX = 7_480
 export const LUDO_CAPTURE_FLIGHT_Z_INDEX = 8_000
 export const LUDO_CAPTURE_IMPACT_Z_INDEX = 8_500
 export const LUDO_EMOJI_REACTION_Z_INDEX = 8_800
