@@ -253,6 +253,15 @@ export interface LudoGameScreenState {
   // по-долу го combine-ва с turnPhase==='waiting_for_roll', за да покаже
   // аватара веднага, преди сървърът изобщо да е потвърдил roll-а.
   isRollAlreadyInitiated: boolean
+  // Per-color presentation guard — виж createLudoFlowController.ts::
+  // rollInFlightColors doc коментара за пълния rationale. За разлика от
+  // isRollAlreadyInitiated (local-only optimistic click guard), този списък
+  // покрива authoritative roll presentation-и за ЛЮБОЙ цвят (local ИЛИ
+  // remote/bot) — renderPlayerPanelSlot по-долу го чете за ВСЕКИ цвят, не
+  // само за localColor, за да скрие opponent-ския зар веднага щом
+  // presentAuthoritativeRoll стартира за него, вместо да чака flight-ът да
+  // приключи.
+  rollInFlightColors: readonly LudoColor[]
   canRollDice: boolean
   turnSecondsLeft: number
   useMobileLayout: boolean
@@ -332,7 +341,18 @@ function renderPlayerPanelSlot(
   // засяга ДРУГИ цветове (bot/opponent панелите остават с нормалното
   // turnPhase-based поведение — те и без друго никога не са тези, които
   // click-ват local-ния roll бутон).
-  const isWaitingForRoll = isActive && state.turnPhase === 'waiting_for_roll' && !(color === localColor && state.isRollAlreadyInitiated)
+  //
+  // rollInFlightColors (виж LudoGameScreenState doc коментара по-горе) —
+  // допълнителен guard за ВСЕКИ цвят (local ИЛИ remote/bot), докато
+  // presentAuthoritativeRoll реално тече за него (dice_accepted вече е
+  // пристигнал, flight анимацията все още не е приключила). Оправя точно
+  // bug-а "opponent-ският зар остава видим по време на dice flight" — преди
+  // тази промяна суспенсията работеше само за localColor.
+  const isWaitingForRoll =
+    isActive &&
+    state.turnPhase === 'waiting_for_roll' &&
+    !(color === localColor && state.isRollAlreadyInitiated) &&
+    !state.rollInFlightColors.includes(color)
   // isRollable е true само за локалния играч, за да остане click тригерът
   // точно там, където преди беше единственият видим "Хвърли зара" бутон.
   const diceControl = isWaitingForRoll

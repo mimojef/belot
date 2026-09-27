@@ -246,6 +246,26 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   //      invalidation, established pattern като isDiceRolling/isAnimatingMove
   //      там) — reconnect/resync никога не оставя stuck guard.
   let isRollAlreadyInitiated = false
+  // Per-color presentation guard за authoritative roll-ове от ЛЮБОЙ цвят
+  // (local И remote/bot) — виж task-а "Ludo presentation bug: opponent dice
+  // не се скрива веднага". isRollAlreadyInitiated по-горе е СЪЗНАТЕЛНО
+  // local-only (renderPlayerPanelSlot го combine-ва с `color === localColor`)
+  // — покрива само optimistic прозореца click -> server response, преди
+  // presentAuthoritativeRoll изобщо да е стартирал. За ВСЯКО цвят (включващо
+  // local-я, once dice_accepted реално пристигне) имаме нужда от отделен
+  // guard, защото engineState.turnPhase остава 'waiting_for_roll' през
+  // ЦЯЛАТА presentAuthoritativeRoll функция (виж doc коментара ѝ) — без този
+  // Set, renderPlayerPanelSlot's isWaitingForRoll вижда turnPhase==='waiting_
+  // for_roll' за bot/opponent цвета непроменено и показва зара+стрелките
+  // видими цялата flight animation. Set (не global boolean), защото ключът е
+  // event.color — не бива да скрие зара на грешния player, ако по някаква
+  // причина presentation-и за 2 различни цвята се застъпят във времето.
+  // Populate: началото на presentAuthoritativeRoll (add(event.color)).
+  // Clear: и двата изхода на presentAuthoritativeRoll (delete(event.color)),
+  // плюс invalidateAuthoritativePresentations() (.clear() — reconnect/resync
+  // never leaves a stuck-hidden button, mirror на isRollAlreadyInitiated
+  // reset-а там).
+  const rollInFlightColors = new Set<LudoColor>()
   let isDestroyed = false
   let isEmojiPickerOpen = false
   let hasPresentedGameEnd = false
@@ -534,6 +554,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       // (той не се сменя, докато сървърът не потвърди roll-а с dice_accepted
       // event — виж presentAuthoritativeRoll).
       isRollAlreadyInitiated,
+      // Виж rollInFlightColors doc коментара при декларацията му — plain
+      // array snapshot (Array.from), mirror на leftColors convention-а по-долу
+      // (render layer чете чрез .includes(color), не държи референция към
+      // живия Set).
+      rollInFlightColors: Array.from(rollInFlightColors),
       // Interaction lock: DOM disabled state следва engine turnPhase, но
       // НЕ е authoritative за правилата — engine stale-action защитата
       // (turnVersion) е вторият защитен слой (виж task-а т.21). local
@@ -1451,6 +1476,10 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // (reconnect/resync праща нова controller instance или fresh snapshot,
     // не бива стар guard да продължи да крие легитимно 'waiting_for_roll').
     isRollAlreadyInitiated = false
+    // Виж rollInFlightColors doc коментара при декларацията му — same
+    // established pattern: reconnect/resync/tab-hide не бива да остави stuck
+    // "hidden dice" за никой цвят (нито за local-я, нито за bot/opponent).
+    rollInFlightColors.clear()
     // Виж justLeftColor doc коментара при декларацията му — foreground snap/
     // epoch invalidation не бива да остави stale "Излезе от играта" blink
     // window/timer нито stale презаписан forfeit-flight в опашката (виж §8
@@ -1528,6 +1557,11 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // caller-а винаги идва СЛЕД engineState да е бил обновен спрямо
     // пост-roll turnPhase-а, виж applyAuthoritativeTransition).
     isDiceRolling = true
+    // Виж rollInFlightColors doc коментара при декларацията му — populate-ва
+    // се ТУК, за ВСЯКО цвят (local или remote/bot), точно преди първия render()
+    // по-долу, за да е renderPlayerPanelSlot's isWaitingForRoll вече false за
+    // event.color на самия този render() call (никакъв frame с видим зар).
+    rollInFlightColors.add(event.color)
     render()
     const triggerEl = options.root.querySelector<HTMLElement>(`[data-ludo-dice-anchor="${event.color}"]`)
     const centerEl = options.root.querySelector<HTMLElement>('[data-ludo-board-center="1"]')
@@ -1535,6 +1569,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     if (!centerEl || !boardEl) {
       isDiceRolling = false
       isRollAlreadyInitiated = false
+      rollInFlightColors.delete(event.color)
       return true
     }
     await diceResultOverlay.playFlight({
@@ -1552,6 +1587,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     // render()-не — isWaitingForRoll вече е false и по двете причини
     // едновременно, без risk от премигване назад.
     isRollAlreadyInitiated = false
+    rollInFlightColors.delete(event.color)
     return true
   }
 
