@@ -4632,17 +4632,67 @@ function persistLudoMatchSnapshot(snapshot: LudoMatchSnapshot): void {
   }
 }
 
+// Level/rank progression + "Победи" (виж task-а "Ludo -> level/rank
+// progression" и "Ludo wins") — completed +1 за ВСЕКИ реален участник и won +1
+// за победителя, чрез game-agnostic
+// playerProgressStore.recordCompletedGameForProfile() (НЕ recordCompletedMatch,
+// виж doc коментара там: Belot-only team/did_win/is_guest_trial колони,
+// неприложими за Ludo free-for-all playerCount:4). Итерира
+// snapshot.players директно — spectators/non-participants structurally
+// никога не влизат в тоя масив (watch_ludo_match е напълно отделен
+// subscription механизъм), а Ludo няма bot-owned profiles (botControlledColors
+// е само временен takeover флаг върху СЪЩЕСТВУВАЩ human seat, виж
+// ludoMatchRuntime.ts) — затова НЯМА bot-exclusion филтър тук, за разлика
+// от playerProgressStore.recordCompletedMatch()'s temp-bot-* skip.
+// Forfeit-нал играч (leftColors) остава в snapshot.players до собствения
+// си пост-финален "leave" ack (виж ludoMatchRuntime.ts::leave() doc
+// коментара "display roster != active membership") — по аналогия с
+// Belot's controlledByBot, умишлено НЕ филтрираме по leftColors/
+// botControlledColors тук. Победителят е winnerColor — при forfeit
+// ludoEngineReducer го задава на последния останал играч.
+// Вика се и от normal finish (onSnapshot), и от boot recovery за вече
+// finished snapshot — идемпотентно (ledger PRIMARY KEY + did_win), затова
+// двойното извикване е безопасно и recovery пътят няма собствена брояч логика.
+// Връща false, ако записът за поне един участник е fail-нал (DB грешка) —
+// caller-ите тогава НЕ махат finished snapshot-а (markMatchRemoved), за да
+// може следващият boot recovery да довърши записа. Всички участници се
+// опитват независимо от предишен fail.
+function recordLudoMatchProgression(snapshot: LudoMatchSnapshot): boolean {
+  if (snapshot.state.status !== 'finished') return true
+  let allRecorded = true
+  for (const player of snapshot.players) {
+    const result = playerProgressStore.recordCompletedGameForProfile(
+      snapshot.matchId,
+      player.profileId,
+      'ludo_match',
+      player.color === snapshot.state.winnerColor,
+    )
+    if (!result.ok) allRecorded = false
+  }
+  return allRecorded
+}
+
 const ludoMatchRuntime = createLudoMatchRuntime({
   onSnapshot: (snapshot) => {
     persistLudoMatchSnapshot(snapshot)
     const winnerPayout = snapshot.state.status === 'finished' ? settleLudoMatchIfNeeded(snapshot) : null
+    // Progression ПРЕДИ snapshot cleanup-а по-долу: ако процесът падне между
+    // persist и progression записа, finished snapshot-ът още е в
+    // active_ludo_match_snapshots и boot recovery го довършва през същата
+    // идемпотентна функция.
+    const progressionRecorded = recordLudoMatchProgression(snapshot)
     // Snapshot cleanup ЕДИНСТВЕНО след успешен settlement (виж task spec §7:
-    // "НИКОГА: snapshot delete -> после payout"). winnerPayout===null при
-    // finished status значи или липсващ winner data (структурно не би
-    // трябвало да се случи), или payoutLudoMatchWinner() реално е fail-нал
-    // (виж settleLudoMatchIfNeeded по-долу) — и в двата случая пазим реда,
-    // за да може boot recovery да опита пак (idempotent, ledger-guarded).
-    if (snapshot.state.status === 'finished' && winnerPayout !== null) {
+    // "НИКОГА: snapshot delete -> после payout") И успешен progression запис.
+    // winnerPayout===null при finished status значи или липсващ winner data
+    // (структурно не би трябвало да се случи), или payoutLudoMatchWinner()
+    // реално е fail-нал (виж settleLudoMatchIfNeeded по-долу);
+    // progressionRecorded===false значи DB грешка в progression записа — и в
+    // двата случая пазим реда, за да може boot recovery да опита пак
+    // (payout: ledger-guarded; progression: ledger PRIMARY KEY + did_win).
+    if (snapshot.state.status === 'finished' && !progressionRecorded) {
+      console.error(`[ludo-match-snapshot] progression not recorded, keeping finished snapshot for recovery match=${snapshot.matchId}`)
+    }
+    if (snapshot.state.status === 'finished' && winnerPayout !== null && progressionRecorded) {
       try {
         activeLudoMatchSnapshotStore.markMatchRemoved(snapshot.matchId)
       } catch (error) {
@@ -4680,33 +4730,6 @@ const ludoMatchRuntime = createLudoMatchRuntime({
         })
       } catch (error) {
         console.error(`[ludo-room-match] failed to record finish for match=${snapshot.matchId}`, error)
-      }
-    }
-    // Level/rank progression (виж task-а "Ludo -> level/rank progression") —
-    // +1 completed_games_count за ВСЕКИ реален участник, чрез game-agnostic
-    // playerProgressStore.recordCompletedGameForProfile() (НЕ recordCompletedMatch,
-    // виж doc коментара там: Belot-only team/did_win/is_guest_trial колони,
-    // неприложими за Ludo free-for-all playerCount:4). Итерира
-    // snapshot.players директно — spectators/non-participants structurally
-    // никога не влизат в тоя масив (watch_ludo_match е напълно отделен
-    // subscription механизъм), а Ludo няма bot-owned profiles (botControlledColors
-    // е само временен takeover флаг върху СЪЩЕСТВУВАЩ human seat, виж
-    // ludoMatchRuntime.ts) — затова НЯМА bot-exclusion филтър тук, за разлика
-    // от playerProgressStore.recordCompletedMatch()'s temp-bot-* skip.
-    // Forfeit-нал играч (leftColors) остава в snapshot.players до собствения
-    // си пост-финален "leave" ack (виж ludoMatchRuntime.ts::leave() doc
-    // коментара "display roster != active membership") — по аналогия с
-    // Belot's controlledByBot (bot takeover след disconnect НЕ маха профила
-    // от progression-а, виж playerProgressStore.ts::recordCompletedMatch),
-    // умишлено НЕ филтрираме по leftColors/botControlledColors тук: мачът
-    // реално приключи според текущите правила, всеки стартирал участник
-    // получава +1, независимо дали е бил bot-controlled/forfeit-нал междувременно.
-    // won_games_count НИКОГА не се пипа тук (виж recordCompletedGameForProfile
-    // doc коментара в playerProgressStore.ts §4) — Ludo участва само в
-    // completed_games_count/level/rank, не в Belot-ovата "Победи"/"Успех %" статистика.
-    if (snapshot.state.status === 'finished') {
-      for (const player of snapshot.players) {
-        playerProgressStore.recordCompletedGameForProfile(snapshot.matchId, player.profileId, 'ludo_match')
       }
     }
     const protocolSnapshot = toLudoGameProtocolSnapshot(snapshot)
@@ -4876,7 +4899,16 @@ for (const persisted of restoredLudoMatches) {
   // случай просто връща alreadyPaid резултата и пак chisti реда.
   if (persisted.state.status === 'finished') {
     const winnerPayout = settleLudoMatchIfNeeded(persisted)
-    if (winnerPayout !== null) {
+    // Crash window "finished snapshot persisted, restart ПРЕДИ progression
+    // записа" — същата идемпотентна функция като normal finish; ако
+    // progression-ът вече е записан, е no-op (ledger PRIMARY KEY + did_win).
+    // Преди markMatchRemoved по-долу, по същата причина като в onSnapshot;
+    // при повторен fail редът остава за следващия boot.
+    const progressionRecorded = recordLudoMatchProgression(persisted)
+    if (!progressionRecorded) {
+      console.error(`[ludo-match-snapshot] recovered progression not recorded, keeping finished snapshot match=${persisted.matchId}`)
+    }
+    if (winnerPayout !== null && progressionRecorded) {
       try {
         activeLudoMatchSnapshotStore.markMatchRemoved(persisted.matchId)
       } catch (error) {

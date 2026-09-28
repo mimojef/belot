@@ -51,8 +51,9 @@
  *        случайност)
  *   [S9] Persistence regression guard — playerProgressStore.ts продължава
  *        да export-ва `recordCompletedGameForProfile`, migration файлът
- *        продължава да съществува, index.ts продължава да го извиква вътре
- *        в status==='finished' блока — тоя UI fix НЕ е пипнал persistence-а
+ *        продължава да съществува, index.ts продължава да го извиква (с
+ *        didWin = player.color === winnerColor) — тоя UI fix НЕ е пипнал
+ *        persistence-а
  *
  * Изход: process.exit(0) при успех, process.exit(1) с описание на грешката.
  */
@@ -164,7 +165,8 @@ check('[S9] Persistence слоят (playerProgressStore.ts / migration / index.t
   assert.match(playerProgressStoreSrc, /function recordCompletedGameForProfile\(/, 'recordCompletedGameForProfile трябва да продължава да съществува непроменено')
   const migrationPath = resolve(serverRoot, 'database/migrations/20260927_001_create_profile_completed_game_ledger.sql')
   assert.ok(existsSync(migrationPath), 'migration файлът трябва да продължава да съществува')
-  assert.match(indexTsSrc, /playerProgressStore\.recordCompletedGameForProfile\(snapshot\.matchId, player\.profileId, 'ludo_match'\)/, 'index.ts-овия Ludo progression call site трябва да остане непроменен')
+  // Call site-ът подава и didWin (виж task-а "Ludo wins" / checkLudoProgressionIntegration.ts [E1]).
+  assert.match(indexTsSrc, /playerProgressStore\.recordCompletedGameForProfile\(\s*snapshot\.matchId,\s*player\.profileId,\s*'ludo_match',\s*player\.color === snapshot\.state\.winnerColor,\s*\)/, 'index.ts-овия Ludo progression call site трябва да продължава да съществува')
 })
 
 console.log('\n' + '═'.repeat(75))

@@ -50,6 +50,52 @@ export type RegisteredProfileListRow = {
   email: string | null
 }
 
+export type LudoMatchWinReconciliationPreview = {
+  profiles: Array<{ profileId: ProfileId; displayName: string | null; missingWins: number }>
+  totalProfiles: number
+  totalMissingWins: number
+}
+
+// Кандидати за Ludo win reconciliation — споделено между store-а и read-only
+// preview script-а (scripts/reconcileLudoMatchWins.ts). INNER JOIN към
+// ledger-а: мач без ledger ред (отпреди 007130f) никога не е кандидат;
+// winner_profile_id IS NULL не може да е равно на profile_id.
+export const LUDO_MATCH_WIN_RECONCILIATION_CANDIDATES_SQL = `
+  SELECT l.scope_id, l.profile_id
+  FROM profile_completed_game_ledger l
+  INNER JOIN ludo_room_matches m
+    ON m.match_id = l.scope_id
+  WHERE l.source = 'ludo_match'
+    AND l.did_win = 0
+    AND m.status = 'finished'
+    AND m.winner_profile_id = l.profile_id
+  ORDER BY l.profile_id, l.scope_id
+`
+
+export const LUDO_MATCH_WIN_RECONCILIATION_PREVIEW_SQL = `
+  SELECT c.profile_id, p.display_name, COUNT(*) AS missing_wins
+  FROM (${LUDO_MATCH_WIN_RECONCILIATION_CANDIDATES_SQL}) c
+  LEFT JOIN profiles p
+    ON p.profile_id = c.profile_id
+  GROUP BY c.profile_id, p.display_name
+  ORDER BY missing_wins DESC, c.profile_id
+`
+
+export function toLudoMatchWinReconciliationPreview(
+  rows: Array<{ profile_id: string; display_name: string | null; missing_wins: number }>,
+): LudoMatchWinReconciliationPreview {
+  const profiles = rows.map((row) => ({
+    profileId: row.profile_id,
+    displayName: row.display_name,
+    missingWins: Number(row.missing_wins),
+  }))
+  return {
+    profiles,
+    totalProfiles: profiles.length,
+    totalMissingWins: profiles.reduce((sum, row) => sum + row.missingWins, 0),
+  }
+}
+
 export type PlayerProgressStore = {
   createTemporaryHumanProfile: (
     displayName: string,
@@ -121,24 +167,39 @@ export type PlayerProgressStore = {
   refillCatalogBotWallets: () => void
   recordCompletedMatch: (room: ServerRoom) => void
   /**
-   * Минимален, game-agnostic idempotent "+1 completed_games_count" helper
-   * (виж task-а "Ludo -> level/rank progression"). За разлика от
+   * Минимален, game-agnostic idempotent completed/won game helper (виж
+   * task-а "Ludo -> level/rank progression" + "Ludo wins"). За разлика от
    * recordCompletedMatch() (Belot-specific: team/did_win/is_guest_trial,
    * пише profile_match_results), тук НЯМА game-specific колони — само
    * scopeId (caller-defined uniqueness key, за Ludo: matchId) + profileId.
    * Идемпотентно per (scopeId, profileId) чрез profile_completed_game_ledger
-   * PRIMARY KEY — повторно извикване за същия scopeId+profileId е no-op
-   * (recorded:false), mirror на ludoEconomyStore.ts's ledger pattern.
-   * НИКОГА не пипа won_games_count (винаги didWin:false вътрешно към
-   * incrementCompletedGame) — победа/загуба в scopeId-govия game mode е
-   * извън обхвата на тази функция (виж task-а §4: Ludo резултат не бива да
-   * се смесва с won_games_count/success% семантиката).
+   * PRIMARY KEY + did_win флага:
+   *   - няма ред -> insert, completed +1, won +1 ако didWin;
+   *   - ред с did_win=0 и didWin=true -> did_win 0->1, само won +1;
+   *   - всичко останало -> no-op.
+   * ok = false САМО при DB грешка (транзакцията е rollback-ната, нищо не е
+   * записано — caller-ът трябва да може да опита пак); no-op/несъществуващ
+   * profile са ok:true. recorded = дали completed_games_count е увеличен;
+   * winRecorded = дали won_games_count е увеличен.
    */
   recordCompletedGameForProfile: (
     scopeId: string,
     profileId: ProfileId,
     source: string,
-  ) => { recorded: boolean }
+    didWin: boolean,
+  ) => { ok: boolean; recorded: boolean; winRecorded: boolean }
+  /**
+   * Read-only: Ludo ledger редове (source='ludo_match', did_win=0), чийто
+   * ludo_room_matches ред е finished с winner_profile_id = ledger profile_id.
+   * Ludo мачове без ledger ред (отпреди 007130f) структурно не влизат.
+   */
+  previewLudoMatchWinReconciliation: () => LudoMatchWinReconciliationPreview
+  /**
+   * Прилага preview-то: за всеки кандидат did_win 0->1 и won_games_count +1
+   * (completed_games_count не се пипа). Идемпотентно — повторно изпълнение
+   * намира 0 кандидата.
+   */
+  reconcileLudoMatchWins: () => { profilesAffected: number; winsReconciled: number }
   submitPartnerRating: (
     room: ServerRoom,
     raterSeat: Seat,
@@ -796,10 +857,36 @@ export async function createPlayerProgressStore(
   // колони, неприложими за напр. Ludo free-for-all playerCount:4).
   const insertCompletedGameLedgerStatement = database.prepare(`
     INSERT INTO profile_completed_game_ledger (
-      scope_id, profile_id, source
-    ) VALUES (?, ?, ?)
+      scope_id, profile_id, source, did_win
+    ) VALUES (?, ?, ?, ?)
     ON CONFLICT(scope_id, profile_id) DO NOTHING;
   `)
+
+  // did_win 0->1 guard (миграция 20260928_002) — changes=1 само при
+  // първото маркиране; повторно извикване намира did_win=1 -> changes=0.
+  const markCompletedGameLedgerWinStatement = database.prepare(`
+    UPDATE profile_completed_game_ledger
+    SET did_win = 1
+    WHERE scope_id = ?
+      AND profile_id = ?
+      AND did_win = 0;
+  `)
+
+  const incrementWonGamesStatement = database.prepare(`
+    UPDATE profile_progress
+    SET
+      won_games_count = won_games_count + 1,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE profile_id = ?;
+  `)
+
+  const selectLudoMatchWinReconciliationCandidatesStatement = database.prepare(
+    LUDO_MATCH_WIN_RECONCILIATION_CANDIDATES_SQL,
+  )
+
+  const selectLudoMatchWinReconciliationPreviewStatement = database.prepare(
+    LUDO_MATCH_WIN_RECONCILIATION_PREVIEW_SQL,
+  )
 
   const insertMatchResultStatement = database.prepare(`
     INSERT OR IGNORE INTO profile_match_results (
@@ -1593,46 +1680,72 @@ export async function createPlayerProgressStore(
     updateProfileRankStatement.run(rankLevel, getRankTitleForLevel(rankLevel), profileId)
   }
 
+  // did_win 0->1 + won_games_count +1 за вече съществуващ ledger ред.
+  // Извиква се САМО вътре в отворена транзакция (recordCompletedGameForProfile
+  // / reconcileLudoMatchWins) — UPDATE-ът с `did_win = 0` guard е
+  // idempotency-то: втори път changes=0 и won_games_count не се пипа.
+  // completed_games_count/rank НЕ се пипат (рангът зависи само от completed).
+  function markExistingLedgerRowAsWin(scopeId: string, profileId: ProfileId): boolean {
+    const markResult = markCompletedGameLedgerWinStatement.run(scopeId, profileId) as {
+      changes?: number
+    }
+
+    if ((markResult.changes ?? 0) === 0) {
+      return false
+    }
+
+    ensureProgressStatement.run(profileId)
+    incrementWonGamesStatement.run(profileId)
+    return true
+  }
+
   // Виж task-а "Ludo -> level/rank progression" §3 IDEMPOTENCY. Единствен
   // writer, който Ludo (или бъдещ трети game mode) може безопасно да вика за
-  // "+1 completed game", БЕЗ да пипа Belot-specific profile_match_results
-  // schema и БЕЗ fake team/did_win данни. scopeId е caller-defined
-  // uniqueness key (за Ludo: matchId) — profile_completed_game_ledger
-  // PRIMARY KEY(scope_id, profile_id) гарантира максимум едно +1 на profile
-  // за даден scopeId, дори при theoretично повторно извикване на hook-а
-  // (defense-in-depth, mirror на ludoEconomyStore.ts's hasLedgerEntry/
-  // ON CONFLICT DO NOTHING pattern за парите — не разчитаме само на
-  // runtime "onSnapshot fires exactly once" инварианта).
+  // completed/won game, БЕЗ да пипа Belot-specific profile_match_results
+  // schema и БЕЗ fake team данни. scopeId е caller-defined uniqueness key
+  // (за Ludo: matchId) — profile_completed_game_ledger PRIMARY KEY
+  // (scope_id, profile_id) гарантира максимум едно completed +1 на profile
+  // за даден scopeId, а did_win колоната — максимум едно won +1, дори при
+  // повторно извикване на hook-а (normal finish + boot recovery, duplicate
+  // snapshot) — mirror на ludoEconomyStore.ts's ledger pattern.
   //
-  // BEGIN IMMEDIATE обвива ledger insert-а И incrementCompletedGame()
-  // reuse-ва СЪЩИЯ database connection/prepared statements) в ЕДНА atomic
-  // транзакция — или и двете се случват, или нито едно (никога "ledger
-  // казва recorded, но completed_games_count не е повишен" partial state).
+  // BEGIN IMMEDIATE обвива ledger insert/update-а И брояч update-ите в ЕДНА
+  // atomic транзакция — никога "ledger казва recorded/did_win, но брояча
+  // не е повишен" partial state.
   //
-  // didWin винаги false тук (виж task-а §4: Ludo НЕ пипа won_games_count/
-  // success% — тая семантика исторически принадлежи на Belot resultatите,
-  // не бива да се смесва мълчаливо с друг game mode).
+  // ok:false (само catch клона) казва на Ludo caller-а да НЕ маха finished
+  // snapshot-а, за да може boot recovery да опита пак. Изтрит (hard delete)
+  // profile е ok:true no-op — иначе FK грешката би задържала snapshot-а
+  // завинаги и recovery би я повтарял при всеки boot.
   function recordCompletedGameForProfile(
     scopeId: string,
     profileId: ProfileId,
     source: string,
-  ): { recorded: boolean } {
+    didWin: boolean,
+  ): { ok: boolean; recorded: boolean; winRecorded: boolean } {
     try {
       database.exec('BEGIN IMMEDIATE;')
+      if (!profileExists(profileId)) {
+        database.exec('COMMIT;')
+        return { ok: true, recorded: false, winRecorded: false }
+      }
+
       const insertResult = insertCompletedGameLedgerStatement.run(
         scopeId,
         profileId,
         source,
+        didWin ? 1 : 0,
       ) as { changes?: number }
 
-      if ((insertResult.changes ?? 0) === 0) {
+      if ((insertResult.changes ?? 0) > 0) {
+        incrementCompletedGame(profileId, didWin)
         database.exec('COMMIT;')
-        return { recorded: false }
+        return { ok: true, recorded: true, winRecorded: didWin }
       }
 
-      incrementCompletedGame(profileId, false)
+      const winRecorded = didWin ? markExistingLedgerRowAsWin(scopeId, profileId) : false
       database.exec('COMMIT;')
-      return { recorded: true }
+      return { ok: true, recorded: false, winRecorded }
     } catch (error) {
       try {
         database.exec('ROLLBACK;')
@@ -1640,10 +1753,54 @@ export async function createPlayerProgressStore(
         // surface the original failure
       }
       console.error(
-        `[profile-progress] failed to record completed game scopeId=${scopeId} profileId=${profileId} source=${source}`,
+        `[profile-progress] failed to record completed game scopeId=${scopeId} profileId=${profileId} source=${source} didWin=${didWin}`,
         error,
       )
-      return { recorded: false }
+      return { ok: false, recorded: false, winRecorded: false }
+    }
+  }
+
+  function previewLudoMatchWinReconciliation(): LudoMatchWinReconciliationPreview {
+    const rows = selectLudoMatchWinReconciliationPreviewStatement.all() as Array<{
+      profile_id: string
+      display_name: string | null
+      missing_wins: number
+    }>
+    return toLudoMatchWinReconciliationPreview(rows)
+  }
+
+  // Backfill за Ludo мачовете, отчетени от 007130f насам с hardcoded
+  // didWin=false. Кандидатите идват САМО от съществуващи ledger редове
+  // (LUDO_MATCH_WIN_RECONCILIATION_CANDIDATES_SQL) — нов ledger ред /
+  // completed +1 тук никога не се създава, затова Ludo мачове отпреди
+  // 007130f остават извън progression-а. Едната транзакция + did_win guard
+  // правят повторното изпълнение no-op.
+  function reconcileLudoMatchWins(): { profilesAffected: number; winsReconciled: number } {
+    try {
+      database.exec('BEGIN IMMEDIATE;')
+      const candidates = selectLudoMatchWinReconciliationCandidatesStatement.all() as Array<{
+        scope_id: string
+        profile_id: string
+      }>
+      const affectedProfileIds = new Set<string>()
+      let winsReconciled = 0
+
+      for (const candidate of candidates) {
+        if (markExistingLedgerRowAsWin(candidate.scope_id, candidate.profile_id)) {
+          affectedProfileIds.add(candidate.profile_id)
+          winsReconciled += 1
+        }
+      }
+
+      database.exec('COMMIT;')
+      return { profilesAffected: affectedProfileIds.size, winsReconciled }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+      throw error
     }
   }
 
@@ -2058,6 +2215,8 @@ export async function createPlayerProgressStore(
     refillCatalogBotWallets,
     recordCompletedMatch,
     recordCompletedGameForProfile,
+    previewLudoMatchWinReconciliation,
+    reconcileLudoMatchWins,
     submitPartnerRating,
     close,
   }
