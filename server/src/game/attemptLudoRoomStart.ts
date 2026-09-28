@@ -99,6 +99,9 @@ export function createAttemptLudoRoomStart(
       state: initialMatchData.state,
       events: [],
       botControlledColors: [],
+      // Anti-bad-luck dice fairness (виж ludoMatchRuntime.ts::LudoColorDiceLuckState
+      // doc коментара) — чисто нов match, никаква roll история все още.
+      diceLuckByColor: {},
     }
 
     const debitResult = deps.ludoEconomyStore.collectLudoMatchStakesWithInitialSnapshot(

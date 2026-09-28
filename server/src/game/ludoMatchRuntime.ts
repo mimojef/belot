@@ -19,6 +19,75 @@ export const LUDO_SERVER_MOVE_TIMEOUT_MS = 15_000
 export const LUDO_SERVER_BOT_THINK_DELAY_MS = 1_500
 export const LUDO_FINISHED_MATCH_RETENTION_MS = 10_000
 
+// Anti-bad-luck dice fairness (виж task-а "Ludo зар — anti-bad-luck") —
+// per-color, server-authoritative. Всеки цвят пази собствена серия
+// поредни хвърляния БЕЗ естествена/forced 6 (реални dice rolls, не
+// "ходове" — виж applyRoll() по-долу, единственото call site, което
+// консумира/обновява това state). НЕ живее в LudoGameState (engine rule
+// state) — LudoGameState се spread-ва 1:1 в client protocol snapshot-а
+// (виж index.ts::toLudoGameProtocolSnapshot, коментара за "Ludo е
+// perfect-information игра, LudoGameState няма скрита информация"), а
+// точно тази серия/target ТРЯБВА да остане скрита от клиента (задачата
+// изисква "невидимо" anti-luck поведение, никакъв UI индикатор). Затова
+// живее на Match ниво, като botControlledColors — persisted през СЪЩИЯ
+// established LudoMatchSnapshot JSON blob механизъм (виж
+// activeLudoMatchSnapshotStore.ts — генерично JSON.stringify на цялото
+// persistable snapshot, никаква migration нужна), но изрично STRIPPED
+// преди изпращане към клиента (toLudoGameProtocolSnapshot в index.ts).
+export type LudoAntiLuckTarget = 6 | 7 | 8 | 9 | 10
+export type LudoColorDiceLuckState = {
+  // Брой ПОРЕДНИ реални dice rolls на този цвят от последната 6 (естествена
+  // или forced) насам, БЕЗ да броим текущото/предстоящото хвърляне.
+  consecutiveRollsWithoutSix: number
+  // Избран ЕДНОКРАТНО (виж advanceLudoDiceLuckState) точно след 5-ото
+  // поредно хвърляне без 6 — таен "deadline" roll номер (6-10), на който
+  // резултатът задължително е 6, ако до него не е паднала естествена 6.
+  antiLuckTarget: LudoAntiLuckTarget | null
+}
+// Partial (не Record<LudoColor,...>) — стар persisted snapshot (преди тази
+// промяна) няма това поле изобщо; readLudoDiceLuckState() по-долу дефолтва
+// липсващ цвят безопасно, без нужда от миграция/upfront популиране на
+// всичките 4 цвята (само turnOrder цветовете на match-а реално стрелят).
+export type LudoDiceLuckByColor = Partial<Record<LudoColor, LudoColorDiceLuckState>>
+
+const LUDO_ANTI_LUCK_TARGETS: readonly LudoAntiLuckTarget[] = [6, 7, 8, 9, 10]
+
+function createDefaultLudoColorDiceLuckState(): LudoColorDiceLuckState {
+  return { consecutiveRollsWithoutSix: 0, antiLuckTarget: null }
+}
+
+function readLudoDiceLuckState(diceLuckByColor: LudoDiceLuckByColor, color: LudoColor): LudoColorDiceLuckState {
+  return diceLuckByColor[color] ?? createDefaultLudoColorDiceLuckState()
+}
+
+// Решава РЕАЛНИЯ резултат на текущото хвърляне — единствената точка, в
+// която "поредното хвърляне номер X от серията" среща вече избрания (ако
+// има) antiLuckTarget. Rolls 1-5 (antiLuckTarget винаги null дотогава) и
+// rolls между 6 и target-1 минават през rollNormalDie() непроменени —
+// вероятностите НЕ се променят преди target-а (задачата, §"Не променяй
+// вероятностите преди защитата").
+function resolveLudoDieValue(luck: LudoColorDiceLuckState, rollNormalDie: () => LudoDiceValue): LudoDiceValue {
+  const rollNumberInSeries = luck.consecutiveRollsWithoutSix + 1
+  if (luck.antiLuckTarget !== null && rollNumberInSeries === luck.antiLuckTarget) return 6
+  return rollNormalDie()
+}
+
+// Обновява серията СЛЕД като реалният резултат (natural ИЛИ forced 6) вече
+// е известен — pure функция, никакъв RNG освен pickTarget() (извикан
+// ТОЧНО веднъж, само в момента, в който петото поредно не-6 хвърляне
+// приключва серията от нормални хвърляния). Всяка 6 (natural или forced)
+// reset-ва без изключение (задачата §6).
+function advanceLudoDiceLuckState(
+  luck: LudoColorDiceLuckState,
+  value: LudoDiceValue,
+  pickTarget: () => LudoAntiLuckTarget,
+): LudoColorDiceLuckState {
+  if (value === 6) return createDefaultLudoColorDiceLuckState()
+  const consecutiveRollsWithoutSix = luck.consecutiveRollsWithoutSix + 1
+  const antiLuckTarget = luck.antiLuckTarget ?? (consecutiveRollsWithoutSix === 5 ? pickTarget() : null)
+  return { consecutiveRollsWithoutSix, antiLuckTarget }
+}
+
 export type LudoMatchPlayer = {
   profileId: string
   displayName: string
@@ -38,6 +107,7 @@ export type LudoMatchSnapshot = {
   state: LudoGameState
   events: readonly LudoEngineEvent[]
   botControlledColors: readonly LudoColor[]
+  diceLuckByColor: LudoDiceLuckByColor
 }
 
 export type LudoMatchFailure = {
@@ -71,6 +141,13 @@ type Match = Omit<LudoMatchSnapshot, 'serverNow' | 'players' | 'events' | 'botCo
 
 type Options = {
   randomDie?: () => LudoDiceValue
+  // Извиква се ЕДНОКРАТНО на серия (виж advanceLudoDiceLuckState) — отделен
+  // injectable RNG hook от randomDie(), established convention за "рядко,
+  // fairness-sensitive еднократен избор" (mirror-нато на
+  // randomTwoPlayerCreatorColor по-долу, node:crypto randomInt default), за
+  // да остане normalDie()-ят напълно недокоснат/непроменен за rolls 1-5 и
+  // между 6 и target-1.
+  randomAntiLuckTarget?: () => LudoAntiLuckTarget
   randomTwoPlayerCreatorColor?: () => LudoColor
   now?: () => number
   initialStateFactory?: (turnOrder: readonly LudoColor[]) => LudoGameState
@@ -100,6 +177,7 @@ export function createLudoMatchRuntime(options: Options) {
   const now = options.now ?? Date.now
   const finishedMatchRetentionMs = options.finishedMatchRetentionMs ?? LUDO_FINISHED_MATCH_RETENTION_MS
   const randomDie = options.randomDie ?? (() => (Math.floor(Math.random() * 6) + 1) as LudoDiceValue)
+  const randomAntiLuckTarget = options.randomAntiLuckTarget ?? (() => LUDO_ANTI_LUCK_TARGETS[randomInt(LUDO_ANTI_LUCK_TARGETS.length)]!)
   const randomTwoPlayerCreatorColor = options.randomTwoPlayerCreatorColor ?? (() => ROOM_COLORS[randomInt(ROOM_COLORS.length)]!)
 
   const snapshot = (match: Match, includeEvents = true): LudoMatchSnapshot => ({
@@ -113,6 +191,7 @@ export function createLudoMatchRuntime(options: Options) {
     state: match.state,
     events: includeEvents ? match.lastEvents : [],
     botControlledColors: [...match.botControlledColors],
+    diceLuckByColor: match.diceLuckByColor,
   })
 
   function scheduleDeadline(match: Match): void {
@@ -218,8 +297,24 @@ export function createLudoMatchRuntime(options: Options) {
       type: 'ROLL_STARTED', color: match.state.activeColor, expectedTurnVersion: match.state.turnVersion,
     })
     if (started.state === match.state) return false
+    // Anti-bad-luck (виж doc коментара на LudoColorDiceLuckState в началото
+    // на файла) — четем/обновяваме серията на ТОЧНО този цвят, ЕДИНСТВЕНОТО
+    // call site, което произвежда реален dice roll (включително bot-
+    // triggered rolls през scheduleDeadline()'s timeout callback по-долу,
+    // и extra rolls след 6/capture — TURN_ADVANCED просто връща turnPhase
+    // към waiting_for_roll за СЪЩИЯ цвят, следващият applyRoll() тук вижда
+    // вече-обновеното state от предишното хвърляне, т.е. extra roll-ът
+    // естествено е "roll №1 от новата серия" ако предишният резултат е
+    // бил 6).
+    const rollingColor = started.state.activeColor
+    const luckBeforeRoll = readLudoDiceLuckState(match.diceLuckByColor, rollingColor)
+    const dieValue = resolveLudoDieValue(luckBeforeRoll, randomDie)
+    match.diceLuckByColor = {
+      ...match.diceLuckByColor,
+      [rollingColor]: advanceLudoDiceLuckState(luckBeforeRoll, dieValue, randomAntiLuckTarget),
+    }
     const resolved = reduceLudoGame(started.state, {
-      type: 'ROLL_RESOLVED', color: started.state.activeColor, expectedTurnVersion: started.state.turnVersion, value: randomDie(),
+      type: 'ROLL_RESOLVED', color: rollingColor, expectedTurnVersion: started.state.turnVersion, value: dieValue,
     })
     const final = advanceCompletedTurn(resolved.state, resolved.events)
     commit(match, final.state, final.events)
@@ -297,6 +392,7 @@ export function createLudoMatchRuntime(options: Options) {
       deadlineAt: null, players: assigned, state: data.state,
       lastEvents: [], deadlineTimer: null, finishedCleanupTimer: null,
       botControlledColors: new Set(), pendingReclaims: new Set(),
+      diceLuckByColor: {},
     }
     matches.set(match.matchId, match)
     assigned.forEach((player) => profileToMatch.set(player.profileId, match.matchId))
@@ -350,6 +446,12 @@ export function createLudoMatchRuntime(options: Options) {
       // никое mid-flight bot действие не преживява process kill.
       botControlledColors: new Set(persisted.botControlledColors),
       pendingReclaims: new Set(),
+      // Backward compatibility (виж task-а §"backward compatibility случай")
+      // — snapshot, persisted ПРЕДИ тази промяна, няма това поле изобщо
+      // (JSON.parse дава undefined, не throw). Безопасен default: празна
+      // серия за всеки цвят, идентично на съвсем нов match — никаква
+      // migration, никакво чупене на restore.
+      diceLuckByColor: persisted.diceLuckByColor ?? {},
     }
     matches.set(match.matchId, match)
     // Виж task spec §9 "SERVER RESTART PERSISTENCE": explicit-forfeit-нал

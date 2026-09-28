@@ -4415,8 +4415,15 @@ function broadcastLudoGamesListToLobbyConnections(): void {
 }
 
 function toLudoGameProtocolSnapshot(snapshot: LudoMatchSnapshot) {
+  // diceLuckByColor (anti-bad-luck dice fairness state, виж
+  // ludoMatchRuntime.ts::LudoColorDiceLuckState doc коментара) е СЪРВЪРНА
+  // тайна — НИКОГА не бива да достигне клиента (нито участник, нито
+  // spectator, виж buildLudoSpectatorGameStateMessage по-долу, което
+  // reuse-ва точно тази функция). Изрично stripped тук, единствената точка,
+  // през която LudoMatchSnapshot се превръща в client protocol payload.
+  const { diceLuckByColor: _diceLuckByColor, ...clientSnapshot } = snapshot
   return {
-    ...snapshot,
+    ...clientSnapshot,
     winnerProfileId: snapshot.state.winnerColor === null
       ? null
       : snapshot.players.find((player) => player.color === snapshot.state.winnerColor)?.profileId ?? null,
