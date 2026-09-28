@@ -4,7 +4,7 @@ import { reduceLudoGame } from './ludoEngine/ludoEngineReducer.js'
 import { createLudoAuthoritativeInitialState } from './ludoEngine/ludoEngineState.js'
 import type { LudoColor, LudoDiceValue, LudoGameState, LudoPieceSlot } from './ludoEngine/ludoEngineTypes.js'
 import type { LudoEngineEvent } from './ludoEngine/ludoEngineEvents.js'
-import { pickLudoBotMove } from './ludoEngine/ludoBotPolicy.js'
+import { pickLudoBotMoveForState } from './ludoEngine/ludoBotPolicy.js'
 
 // Виж task-а "Ludo turn timeouts" — ROLL намален от 10s на 5s (MOVE остава
 // 15s, непроменено). Единственият authoritative source of truth за реалния
@@ -149,7 +149,7 @@ export function createLudoMatchRuntime(options: Options) {
       if (isBotControlled && !match.botControlledColors.has(match.state.activeColor)) return
       if (match.state.turnPhase === 'waiting_for_roll') applyRoll(match)
       else if (match.state.turnPhase === 'awaiting_move_selection') {
-        const move = pickLudoBotMove(match.state.legalMoves)
+        const move = pickLudoBotMoveForState(match.state)
         if (move) {
           const takeoverEvents: LudoEngineEvent[] = []
           if (!isBotControlled) {
