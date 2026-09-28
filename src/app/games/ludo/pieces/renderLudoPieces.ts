@@ -115,7 +115,7 @@ export function renderLudoPieceHtml(
            [data-ludo-overlay-root], a div appended directly to
            document.body (createLobbyFlowController.ts), i.e. a SIBLING of
            #app, not a descendant. The global mobile tap-highlight reset in
-           style.css only targets "#app *" (+ the body-level exceptions it
+           style.css only targets #app * (+ the body-level exceptions it
            already lists) — same root cause already documented/fixed there
            for the bidding popup/bottom-hand-cards flash and here for
            renderLudoDiceControl.ts's roll button; this pawn tap target
