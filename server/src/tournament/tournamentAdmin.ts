@@ -219,11 +219,15 @@ type AdminDeps = {
   getCoordinatorHealth?: () => { state: string; lastSuccessAt: string | null; lastError: string | null } | null
   getSchedulerHealth?: () => { state: string; lastSuccessAt: string | null; lastError: string | null } | null
   runCoordinatorTick?: () => void
+  /** Clock за health integrity cache-а (default Date.now) — override-ва се само от тестове. */
+  now?: () => number
 }
 
 const ACTIVE_STATUSES = ['open', 'starting', 'semifinal_in_progress', 'final_in_progress']
 const TERMINAL_STATUSES = ['finished', 'cancelled', 'admin_cancelled', 'auto_cancelled', 'failed']
 const MAX_SEARCH_LENGTH = 80
+/** getHealthSnapshot(): TTL на кеширания integrity summary (integrityErrorCount/recoverableWarningCount). */
+const HEALTH_INTEGRITY_CACHE_TTL_MS = 30_000
 
 function asUtc(value: string | null): string | null {
   return value === null ? null : dbDateToUtc(value)
@@ -373,6 +377,77 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
     ) VALUES (?, ?, ?, ?, 'admin', ?);
   `)
 
+  // analyzeTournamentIntegrity() statements — prepare-нати веднъж при init
+  // (преди: 6x database.prepare() на ВСЯКО извикване).
+  const integrityTeamsStatement = database.prepare(`
+    SELECT team_id, status, seed_slot
+    FROM tournament_teams
+    WHERE tournament_id = ?;
+  `)
+
+  const integrityRoundsStatement = database.prepare(`
+    SELECT round_id, round_type, round_index
+    FROM tournament_rounds
+    WHERE tournament_id = ?;
+  `)
+
+  const integrityMatchesStatement = database.prepare(`
+    SELECT tm.match_id, tm.round_id, tm.room_id, tm.team_a_id, tm.team_b_id, tm.status,
+           tm.winner_team_id, tm.result_kind, tm.attendance_resolution_kind
+    FROM tournament_matches tm
+    WHERE tm.tournament_id = ?;
+  `)
+
+  const integrityEntriesStatement = database.prepare(`
+    SELECT profile_id, team_id, status
+    FROM tournament_entries
+    WHERE tournament_id = ?;
+  `)
+
+  const integrityDuplicateProfilesStatement = database.prepare(`
+    SELECT profile_id, COUNT(*) AS count
+    FROM tournament_entries
+    WHERE tournament_id = ?
+    GROUP BY profile_id
+    HAVING COUNT(*) > 1;
+  `)
+
+  const integrityReplacementsConflictStatement = database.prepare(`
+    SELECT match_id, assigned_seat, COUNT(*) AS count
+    FROM tournament_match_no_show_replacements
+    WHERE tournament_id = ? AND status IN ('active', 'takeover_pending')
+    GROUP BY match_id, assigned_seat
+    HAVING COUNT(*) > 1;
+  `)
+
+  const healthActiveTournamentCountStatement = database.prepare(`
+    SELECT COUNT(*) AS count FROM tournaments
+    WHERE status IN ('open', 'starting', 'semifinal_in_progress', 'final_in_progress');
+  `)
+
+  const healthPendingSettlementCountStatement = database.prepare(`
+    SELECT COUNT(*) AS count FROM tournaments
+    WHERE status = 'final_in_progress' AND settlement_state = 'pending';
+  `)
+
+  const healthIntegritySampleStatement = database.prepare(`
+    SELECT tournament_id FROM tournaments
+    WHERE status IN ('starting', 'semifinal_in_progress', 'final_in_progress', 'finished')
+    ORDER BY updated_at DESC
+    LIMIT 100;
+  `)
+
+  // getHealthSnapshot() integrity summary cache — само скъпата част (sample
+  // query + до 100x analyzeTournamentIntegrity). Един запис, TTL guard при
+  // извикване, без timers. Direct callers на analyzeTournamentIntegrity()
+  // (buildSummary/reconcile/cancelOpen) НЕ минават оттук и остават fresh.
+  const nowMs = deps.now ?? Date.now
+  let healthIntegrityCache: {
+    computedAtMs: number
+    integrityErrorCount: number
+    recoverableWarningCount: number
+  } | null = null
+
   function buildWhere(filter: AdminTournamentListFilter): { where: string; params: Array<string | number> } {
     const conditions: string[] = []
     const params: Array<string | number> = []
@@ -445,22 +520,9 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
     }
 
     const issues: TournamentIntegrityIssue[] = []
-    const teams = database.prepare(`
-      SELECT team_id, status, seed_slot
-      FROM tournament_teams
-      WHERE tournament_id = ?;
-    `).all(tournamentId) as Array<{ team_id: string; status: string; seed_slot: number | null }>
-    const rounds = database.prepare(`
-      SELECT round_id, round_type, round_index
-      FROM tournament_rounds
-      WHERE tournament_id = ?;
-    `).all(tournamentId) as Array<{ round_id: string; round_type: 'semifinal' | 'final'; round_index: number }>
-    const matches = database.prepare(`
-      SELECT tm.match_id, tm.round_id, tm.room_id, tm.team_a_id, tm.team_b_id, tm.status,
-             tm.winner_team_id, tm.result_kind, tm.attendance_resolution_kind
-      FROM tournament_matches tm
-      WHERE tm.tournament_id = ?;
-    `).all(tournamentId) as Array<{
+    const teams = integrityTeamsStatement.all(tournamentId) as Array<{ team_id: string; status: string; seed_slot: number | null }>
+    const rounds = integrityRoundsStatement.all(tournamentId) as Array<{ round_id: string; round_type: 'semifinal' | 'final'; round_index: number }>
+    const matches = integrityMatchesStatement.all(tournamentId) as Array<{
       match_id: string
       round_id: string
       room_id: string | null
@@ -471,11 +533,7 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       result_kind: string | null
       attendance_resolution_kind: string | null
     }>
-    const entries = database.prepare(`
-      SELECT profile_id, team_id, status
-      FROM tournament_entries
-      WHERE tournament_id = ?;
-    `).all(tournamentId) as Array<{ profile_id: string; team_id: string | null; status: string }>
+    const entries = integrityEntriesStatement.all(tournamentId) as Array<{ profile_id: string; team_id: string | null; status: string }>
     const paidParticipantEntries = entries.filter((entry) => (
       entry.status === 'confirmed'
       || entry.status === 'finalist'
@@ -499,13 +557,7 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       addIssue(issues, 'invalid_entry_debit_sum', 'error', 'Entry debit ledger sum does not match financial snapshot.', false)
     }
 
-    const duplicateProfiles = database.prepare(`
-      SELECT profile_id, COUNT(*) AS count
-      FROM tournament_entries
-      WHERE tournament_id = ?
-      GROUP BY profile_id
-      HAVING COUNT(*) > 1;
-    `).all(tournamentId)
+    const duplicateProfiles = integrityDuplicateProfilesStatement.all(tournamentId)
     if (duplicateProfiles.length > 0) {
       addIssue(issues, 'duplicate_entry_profile', 'error', 'Duplicate participant profile was found.', false)
     }
@@ -587,13 +639,7 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
       }
     }
 
-    const replacementsConflict = database.prepare(`
-      SELECT match_id, assigned_seat, COUNT(*) AS count
-      FROM tournament_match_no_show_replacements
-      WHERE tournament_id = ? AND status IN ('active', 'takeover_pending')
-      GROUP BY match_id, assigned_seat
-      HAVING COUNT(*) > 1;
-    `).all(tournamentId)
+    const replacementsConflict = integrityReplacementsConflictStatement.all(tournamentId)
     if (replacementsConflict.length > 0) {
       addIssue(issues, 'replacement_state_conflict', 'error', 'Conflicting no-show replacements were found.', false)
     }
@@ -888,26 +934,30 @@ export async function createTournamentAdminStore(deps: AdminDeps): Promise<Tourn
     }
   }
 
+  function getHealthIntegritySummary(): { integrityErrorCount: number; recoverableWarningCount: number } {
+    const now = nowMs()
+    if (healthIntegrityCache !== null && now - healthIntegrityCache.computedAtMs < HEALTH_INTEGRITY_CACHE_TTL_MS) {
+      return healthIntegrityCache
+    }
+    const sample = (healthIntegritySampleStatement.all() as Array<{ tournament_id: string }>)
+      .map((row) => analyzeTournamentIntegrity(row.tournament_id))
+    healthIntegrityCache = {
+      computedAtMs: now,
+      integrityErrorCount: sample.filter((report) => report.state === 'error').length,
+      recoverableWarningCount: sample.flatMap((report) => report.issues).filter((issue) => issue.recoverable).length,
+    }
+    return healthIntegrityCache
+  }
+
   function getHealthSnapshot() {
-    const activeTournamentCount = coerceCount(database.prepare(`
-      SELECT COUNT(*) AS count FROM tournaments
-      WHERE status IN ('open', 'starting', 'semifinal_in_progress', 'final_in_progress');
-    `).get())
-    const pendingSettlementCount = coerceCount(database.prepare(`
-      SELECT COUNT(*) AS count FROM tournaments
-      WHERE status = 'final_in_progress' AND settlement_state = 'pending';
-    `).get())
-    const sample = (database.prepare(`
-      SELECT tournament_id FROM tournaments
-      WHERE status IN ('starting', 'semifinal_in_progress', 'final_in_progress', 'finished')
-      ORDER BY updated_at DESC
-      LIMIT 100;
-    `).all() as Array<{ tournament_id: string }>).map((row) => analyzeTournamentIntegrity(row.tournament_id))
+    const activeTournamentCount = coerceCount(healthActiveTournamentCountStatement.get())
+    const pendingSettlementCount = coerceCount(healthPendingSettlementCountStatement.get())
+    const integrity = getHealthIntegritySummary()
     return {
       activeTournamentCount,
       pendingSettlementCount,
-      integrityErrorCount: sample.filter((report) => report.state === 'error').length,
-      recoverableWarningCount: sample.flatMap((report) => report.issues).filter((issue) => issue.recoverable).length,
+      integrityErrorCount: integrity.integrityErrorCount,
+      recoverableWarningCount: integrity.recoverableWarningCount,
       lastSuccessfulReconciliation: deps.getCoordinatorHealth?.()?.lastSuccessAt ?? deps.getSchedulerHealth?.()?.lastSuccessAt ?? null,
       lastFailedReconciliationCode: deps.getCoordinatorHealth?.()?.lastError !== null && deps.getCoordinatorHealth?.()?.lastError !== undefined
         ? 'coordinator_error'

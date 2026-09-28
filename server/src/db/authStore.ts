@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, scryptSync } from 'node:crypto'
+import { createHash, randomBytes, randomUUID, scryptSync } from 'node:crypto'
 import type { AccountId, PlayerPublicProfileSnapshot, ProfileId } from '../core/serverTypes.js'
 import {
   createPasswordHash,
@@ -613,7 +613,7 @@ export type AuthStore = {
   logout: (sessionToken: string | null) => void
   /**
    * Bulk session revocation по profile_id (spec §1, BAN/HARD-DELETE
-   * enforcement) — mirror на logout()'s revokeSessionStatement, но за
+   * enforcement) — mirror на logout()'s revokeSession*Statement, но за
    * ВСИЧКИ живи (revoked_at IS NULL) сесии на профила наведнъж, не само
    * една конкретна по token. Ползва СЪЩИЯ account_sessions.revoked_at модел
    * (getSession() вече филтрира revoked_at IS NULL) — никаква паралелна
@@ -699,6 +699,13 @@ type CreateAuthStoreOptions = {
    * adminSettingsStore-овия seed/fallback.
    */
   getRegistrationVerificationMode?: () => RegistrationVerificationMode
+  /**
+   * Test/diagnostic instrumentation — вика се при ВСЯКО изчисление на legacy
+   * scrypt session hash (hashSessionTokenLegacy). Production wiring не го
+   * подава. Позволява regression тестовете да докажат, че fast lookup-ът на
+   * нова/migrated сесия не изпълнява scrypt.
+   */
+  onLegacySessionHash?: () => void
 }
 
 type AccountRow = {
@@ -831,8 +838,25 @@ function createSessionToken(): string {
   return randomBytes(32).toString('base64url')
 }
 
-function hashSessionToken(token: string): string {
+/**
+ * Legacy session hash (account_sessions.token_hash) — synchronous scrypt KDF.
+ * Остава САМО за backward compatibility: пише се веднъж при createSession()
+ * (rollback към стар build продължава да намира сесиите) и се чете само при
+ * fast-lookup miss (стари сесии без token_lookup_hash). НИКОГА не е на
+ * нормалния request path за нова/migrated сесия — виж fetchValidSessionRow().
+ */
+function hashSessionTokenLegacy(token: string): string {
   return scryptSync(token, 'belot-v2-session-v1', 32).toString('hex')
+}
+
+/**
+ * Fast session lookup hash (account_sessions.token_lookup_hash) — SHA-256
+ * на raw token-а, lowercase hex. Token-ът е randomBytes(32) (256 бита
+ * ентропия), затова KDF stretching не добавя сигурност — SHA-256 е
+ * достатъчен preimage-resistant lookup key, без CPU-тежкия scrypt.
+ */
+function hashSessionTokenLookup(token: string): string {
+  return createHash('sha256').update(token, 'utf8').digest('hex')
 }
 
 function createCookieExpiresAt(): Date {
@@ -1088,9 +1112,11 @@ export async function createAuthStore(
       account_id,
       profile_id,
       token_hash,
+      token_lookup_hash,
       expires_at,
       remember_me
     ) VALUES (
+      ?,
       ?,
       ?,
       ?,
@@ -1116,7 +1142,13 @@ export async function createAuthStore(
   // сравнение срещу strftime('%Y-%m-%dT%H:%M:%fZ','now') — СЪЩИЯТ ISO
   // формат като съхранения expires_at, коректно lexicographically
   // сравним за произволна разлика, не само за дни.
-  const selectSessionStatement = database.prepare(`
+  //
+  // Session fast lookup — двата SELECT-а (fast по token_lookup_hash, legacy
+  // по token_hash) се генерират от ЕДИН И СЪЩ template, различават се
+  // единствено по key колоната, затова validation условията (revoked_at /
+  // expires_at / JOIN accounts) не могат да drift-нат между тях.
+  function buildValidSessionSelectSql(keyColumn: 'token_lookup_hash' | 'token_hash'): string {
+    return `
     SELECT
       s.session_id,
       s.account_id,
@@ -1130,10 +1162,33 @@ export async function createAuthStore(
     FROM account_sessions s
     JOIN accounts a
       ON a.account_id = s.account_id
-    WHERE s.token_hash = ?
+    WHERE s.${keyColumn} = ?
       AND s.revoked_at IS NULL
       AND s.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     LIMIT 1;
+  `
+  }
+
+  const selectSessionByLookupHashStatement = database.prepare(buildValidSessionSelectSql('token_lookup_hash'))
+  const selectSessionByLegacyHashStatement = database.prepare(buildValidSessionSelectSql('token_hash'))
+
+  // Lazy migration на legacy сесия (token_lookup_hash IS NULL) след успешен
+  // legacy lookup. Guard-ове:
+  //   - token_lookup_hash IS NULL -> idempotent: конкурентни backfill-ове
+  //     (два таба / два PM2 процеса) — само първият пише, останалите
+  //     получават changes=0; SQLite сериализира writes.
+  //   - revoked_at IS NULL + expires_at > now -> defense-in-depth срещу race
+  //     с logout/expire между SELECT-а и UPDATE-а: revoked/expired ред
+  //     никога не получава lookup hash (не се "възкресява" през fast path).
+  //   - OR IGNORE -> хипотетичен UNIQUE конфликт на partial index-а никога
+  //     не проваля auth request-а (backfill-ът е само оптимизация).
+  const backfillSessionLookupHashStatement = database.prepare(`
+    UPDATE OR IGNORE account_sessions
+    SET token_lookup_hash = ?
+    WHERE session_id = ?
+      AND token_lookup_hash IS NULL
+      AND revoked_at IS NULL
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now');
   `)
 
   // Auth session-lifetime fix — rolling renewal UPDATE, викан ЕДИНСТВЕНО от
@@ -1215,7 +1270,16 @@ export async function createAuthStore(
     WHERE account_id = ?;
   `)
 
-  const revokeSessionStatement = database.prepare(`
+  // logout(): първо fast revoke по token_lookup_hash; legacy revoke по
+  // token_hash само ако fast-ът не е засегнал ред (стара, още не-migrated сесия).
+  const revokeSessionByLookupHashStatement = database.prepare(`
+    UPDATE account_sessions
+    SET revoked_at = CURRENT_TIMESTAMP
+    WHERE token_lookup_hash = ?
+      AND revoked_at IS NULL;
+  `)
+
+  const revokeSessionByLegacyHashStatement = database.prepare(`
     UPDATE account_sessions
     SET revoked_at = CURRENT_TIMESTAMP
     WHERE token_hash = ?
@@ -1302,7 +1366,7 @@ export async function createAuthStore(
   // CURRENT_TIMESTAMP/SQLite CURRENT_TIMESTAMP литерал, чийто формат
   // ("YYYY-MM-DD HH:MM:SS", без 'T'/'Z') не е JS Date-parseable съвместим с
   // expires_at-овия ISO формат (mirror на same bug class като
-  // selectSessionStatement doc коментара по-горе за account_sessions —
+  // buildValidSessionSelectSql doc коментара по-горе за account_sessions —
   // 60s resend cooldown проверката по-долу сравнява точно тази колона чрез
   // JS `new Date()`, затова форматът трябва да е identical на expires_at).
   // normalized_display_name — единственото ново поле (FINAL PLAN v5): claim-ва
@@ -1408,7 +1472,8 @@ export async function createAuthStore(
       sessionId,
       account.account_id,
       profileId,
-      hashSessionToken(sessionToken),
+      computeLegacySessionHash(sessionToken),
+      hashSessionTokenLookup(sessionToken),
       createIsoExpiresAt(),
       rememberMe ? 1 : 0,
     )
@@ -2490,14 +2555,51 @@ export async function createAuthStore(
     }
   }
 
-  /** Общ SELECT+валидация за getSession/touchSession по-долу — самото fetch-ване не се променя от auth session-lifetime fix-а, само добавя (вече игнорираното от getSession) expires_at поле. */
+  /** Единствената точка, която изчислява legacy scrypt session hash (+ test instrumentation hook). */
+  function computeLegacySessionHash(sessionToken: string): string {
+    options.onLegacySessionHash?.()
+    return hashSessionTokenLegacy(sessionToken)
+  }
+
+  /**
+   * Общ SELECT+валидация за getSession/touchSession по-долу.
+   *
+   * Session fast lookup:
+   *   1. SHA-256 lookup по token_lookup_hash — hit -> връща реда БЕЗ scrypt
+   *      (всички нови сесии + всички вече migrated стари).
+   *   2. Само при fast miss: legacy scrypt lookup по token_hash със СЪЩАТА
+   *      validation (общ SQL template). Hit -> lazy backfill на
+   *      token_lookup_hash (guarded UPDATE, виж
+   *      backfillSessionLookupHashStatement) и връща реда.
+   * Докато legacy fallback-ът съществува, невалиден/непознат token плаща
+   * SHA-256 + scrypt (както преди тази промяна).
+   */
   function fetchValidSessionRow(sessionToken: string | null): SessionRow | null {
     if (sessionToken === null) {
       return null
     }
 
-    const row = selectSessionStatement.get(hashSessionToken(sessionToken)) as SessionRow | undefined
-    return row ?? null
+    const lookupHash = hashSessionTokenLookup(sessionToken)
+    const fastRow = selectSessionByLookupHashStatement.get(lookupHash) as SessionRow | undefined
+    if (fastRow !== undefined) {
+      return fastRow
+    }
+
+    const legacyRow = selectSessionByLegacyHashStatement.get(computeLegacySessionHash(sessionToken)) as SessionRow | undefined
+    if (legacyRow === undefined) {
+      return null
+    }
+
+    try {
+      backfillSessionLookupHashStatement.run(lookupHash, legacyRow.session_id)
+    } catch (error) {
+      // Backfill-ът е само оптимизация — write failure (напр. SQLITE_BUSY след
+      // busy_timeout) не бива да проваля иначе валиден auth lookup; следващият
+      // request просто ще опита отново.
+      console.warn('[authStore] session lookup hash backfill failed:', error instanceof Error ? error.message : String(error))
+    }
+
+    return legacyRow
   }
 
   function toSessionSnapshot(row: SessionRow): AuthSessionSnapshot | null {
@@ -2568,7 +2670,7 @@ export async function createAuthStore(
    * той е поне 59 дни по-кратък от новия 90-дневен прозорец (под cutoff-а),
    * значи renewal-ът винаги matchва при първия ѝ /api/auth/me след deploy
    * (ако сесията все още не е изтекла по старите 30 дни — иначе изобщо не
-   * стига дотук, selectSessionStatement вече я е филтрирал).
+   * стига дотук, fetchValidSessionRow() вече я е филтрирал).
    */
   function touchSession(sessionToken: string | null): { session: AuthSessionSnapshot | null; renewed: boolean; rememberMe: boolean } {
     const row = fetchValidSessionRow(sessionToken)
@@ -2616,7 +2718,13 @@ export async function createAuthStore(
       return
     }
 
-    revokeSessionStatement.run(hashSessionToken(sessionToken))
+    const fastResult = revokeSessionByLookupHashStatement.run(hashSessionTokenLookup(sessionToken)) as { changes?: number }
+    if ((fastResult.changes ?? 0) > 0) {
+      return
+    }
+
+    // Стара, още не-migrated сесия (token_lookup_hash IS NULL) — legacy revoke.
+    revokeSessionByLegacyHashStatement.run(computeLegacySessionHash(sessionToken))
   }
 
   function revokeAllSessionsForProfile(profileId: string): number {
