@@ -21,6 +21,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
+import {
+  createLudoE2eTestRegistrationHeaders,
+  createLudoE2eTestVisitorId,
+  enableDirectRegistrationInIsolatedDb,
+  withLudoE2eRegistrationEnv,
+} from './ludoE2eTestRegistration.js'
 
 let passed = 0
 let failed = 0
@@ -69,9 +75,9 @@ async function waitForCondition(label: string, predicate: () => Promise<boolean>
   }
   throw new Error(`Timeout: ${label}`)
 }
-async function httpJson(port: number, method: string, pathname: string, cookie: string | null, body?: unknown) {
+async function httpJson(port: number, method: string, pathname: string, cookie: string | null, body?: unknown, extraHeaders: Record<string, string> = {}) {
   const res = await fetch(`http://127.0.0.1:${port}${pathname}`, {
-    method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}) },
+    method, headers: { 'Content-Type': 'application/json', ...(cookie ? { Cookie: cookie } : {}), ...extraHeaders },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   const setCookie = (res.headers.getSetCookie?.()[0] ?? res.headers.get('set-cookie'))?.split(';')[0] ?? null
@@ -162,7 +168,7 @@ function startServer(serverDir: string, port: number): RunningServer {
   const child = spawn(
     process.execPath,
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
-    { cwd: serverDir, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: serverDir, env: withLudoE2eRegistrationEnv({ ...process.env, PORT: String(port) }), stdio: ['ignore', 'pipe', 'pipe'] },
   )
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
   child.stdout.on('data', (c) => chunks.push(c)); child.stderr.on('data', (c) => chunks.push(c))
@@ -182,7 +188,8 @@ async function registerAndLogin(port: number, tag: string, runId: string) {
   const email = `ludo-econ-${tag}-${runId}@example.test`
   const reg = await httpJson(port, 'POST', '/api/auth/register', null, {
     email, password: 'LudoEcon1!', displayName: `LE${tag.replace(/[^a-zA-Z0-9]/g, '')}`, gender: 'male',
-  })
+    visitorId: createLudoE2eTestVisitorId(runId, tag),
+  }, createLudoE2eTestRegistrationHeaders(runId, tag))
   if (reg.status !== 200) throw new Error(`Registration failed for ${tag}: ${JSON.stringify(reg.body)}`)
   return { cookie: reg.setCookie as string, profileId: reg.body.session.profile.profileId as string }
 }
@@ -209,8 +216,13 @@ async function noFrameArrives(c: TestClient, pred: (f: any) => boolean, waitMs =
 }
 
 let dbFile = ''
+// Busy timeout (node:sqlite `timeout` option = PRAGMA busy_timeout) за
+// директните test връзки, които ПИШАТ в изолираната база, докато spawn-натият
+// test server също пише — без него всеки конфликт на запис е моментален
+// SQLITE_BUSY ("database is locked") вместо кратко изчакване.
+const TEST_DB_WRITE_BUSY_TIMEOUT_MS = 5000
 function setWalletBalance(profileId: string, amount: number): void {
-  const db = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true })
+  const db = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true, timeout: TEST_DB_WRITE_BUSY_TIMEOUT_MS })
   try {
     db.prepare(`INSERT INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, ?)
        ON CONFLICT(profile_id) DO UPDATE SET yellow_coins_balance = excluded.yellow_coins_balance`).run(profileId, amount)
@@ -264,6 +276,7 @@ try {
     throw err
   }
   console.log('Server ready.\n')
+  await enableDirectRegistrationInIsolatedDb(isolated.dbFile)
 
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
   const STARTING_BALANCE = 50_000
@@ -836,7 +849,7 @@ try {
     assertEqual(countLudoLedgerEntries(lMatchId, L2.profileId, 'ludo_winner_payout'), 1, 'L2 payout row count')
   })
   await check('[L2] a duplicate INSERT attempt for the SAME (match_id, profile_id, entry_type) is rejected by the UNIQUE constraint (ON CONFLICT DO NOTHING) and the wallet is untouched', () => {
-    const db = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true })
+    const db = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true, timeout: TEST_DB_WRITE_BUSY_TIMEOUT_MS })
     try {
       const before = getWalletBalance(L2.profileId)
       // Directly attempt the exact insert shape payoutLudoMatchWinner uses —

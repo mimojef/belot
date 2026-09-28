@@ -37,6 +37,12 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
+import {
+  createLudoE2eTestRegistrationHeaders,
+  createLudoE2eTestVisitorId,
+  enableDirectRegistrationInIsolatedDb,
+  withLudoE2eRegistrationEnv,
+} from './ludoE2eTestRegistration.js'
 
 let passed = 0
 let failed = 0
@@ -114,7 +120,7 @@ function startServer(serverDir: string, port: number): RunningServer {
   const child = spawn(
     process.execPath,
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
-    { cwd: serverDir, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'] },
+    { cwd: serverDir, env: withLudoE2eRegistrationEnv({ ...process.env, PORT: String(port) }), stdio: ['ignore', 'pipe', 'pipe'] },
   )
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
   child.stdout.on('data', (c) => chunks.push(c)); child.stderr.on('data', (c) => chunks.push(c))
@@ -145,8 +151,11 @@ type TestClient = { profileId: string; cookie: string; ws: WebSocket; frames: an
 async function registerAndLogin(port: number, tag: string, runId: string) {
   const email = `ludo-restart-${tag}-${runId}@example.test`
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'LudoRestart1!', displayName: `LR${tag}${runId.slice(-5)}`, gender: 'male' }),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...createLudoE2eTestRegistrationHeaders(runId, tag) },
+    body: JSON.stringify({
+      email, password: 'LudoRestart1!', displayName: `LR${tag}${runId.slice(-5)}`, gender: 'male',
+      visitorId: createLudoE2eTestVisitorId(runId, tag),
+    }),
   })
   const body = await res.json()
   if (res.status !== 200) throw new Error(`register ${tag} failed: ${JSON.stringify(body)}`)
@@ -229,6 +238,8 @@ try {
     throw new Error('server did not become ready')
   }
   console.log('Server ready.\n')
+  // Persisted в изолираната база — важи и след всички restart-и по-долу.
+  await enableDirectRegistrationInIsolatedDb(isolated.dbFile)
 
   // ═══════════════════════════════════════════════════════════════════════
   // A: full restart continuity — real 2-client match, real moves, hard

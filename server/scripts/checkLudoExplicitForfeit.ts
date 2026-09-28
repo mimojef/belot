@@ -26,6 +26,12 @@ import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import WebSocket from 'ws'
+import {
+  createLudoE2eTestRegistrationHeaders,
+  createLudoE2eTestVisitorId,
+  enableDirectRegistrationInIsolatedDb,
+  withLudoE2eRegistrationEnv,
+} from './ludoE2eTestRegistration.js'
 
 let passed = 0
 let failed = 0
@@ -84,7 +90,7 @@ type RunningServer = { child: ChildProcessWithoutNullStreams; output(): string }
 function startServer(serverDir: string, port: number): RunningServer {
   const chunks: string[] = []
   const child = spawn(process.execPath, [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')], {
-    cwd: serverDir, env: { ...process.env, PORT: String(port) }, stdio: ['ignore', 'pipe', 'pipe'],
+    cwd: serverDir, env: withLudoE2eRegistrationEnv({ ...process.env, PORT: String(port) }), stdio: ['ignore', 'pipe', 'pipe'],
   })
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8')
   child.stdout.on('data', (c) => chunks.push(c)); child.stderr.on('data', (c) => chunks.push(c))
@@ -115,8 +121,11 @@ type TestClient = { profileId: string; cookie: string; ws: WebSocket; frames: an
 async function registerAndLogin(port: number, tag: string, runId: string) {
   const email = `ludo-forfeit-${tag}-${runId}@example.test`
   const res = await fetch(`http://127.0.0.1:${port}/api/auth/register`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password: 'LudoForfeit1!', displayName: `LF${tag}${runId.slice(-5)}`, gender: 'male' }),
+    method: 'POST', headers: { 'Content-Type': 'application/json', ...createLudoE2eTestRegistrationHeaders(runId, tag) },
+    body: JSON.stringify({
+      email, password: 'LudoForfeit1!', displayName: `LF${tag}${runId.slice(-5)}`, gender: 'male',
+      visitorId: createLudoE2eTestVisitorId(runId, tag),
+    }),
   })
   const body = await res.json()
   if (res.status !== 200) throw new Error(`register ${tag} failed: ${JSON.stringify(body)}`)
@@ -156,8 +165,13 @@ function latestSnapshotFrame(c: TestClient): any {
 }
 
 let dbFile = ''
+// Busy timeout (node:sqlite `timeout` option = PRAGMA busy_timeout) за
+// директните test връзки, които ПИШАТ в изолираната база, докато spawn-натият
+// test server също пише — без него всеки конфликт на запис е моментален
+// SQLITE_BUSY ("database is locked") вместо кратко изчакване.
+const TEST_DB_WRITE_BUSY_TIMEOUT_MS = 5000
 function setWalletBalance(profileId: string, amount: number): void {
-  const db = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true })
+  const db = new DatabaseSync(dbFile, { open: true, enableForeignKeyConstraints: true, timeout: TEST_DB_WRITE_BUSY_TIMEOUT_MS })
   try {
     db.prepare(`INSERT INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, ?)
       ON CONFLICT(profile_id) DO UPDATE SET yellow_coins_balance = excluded.yellow_coins_balance`).run(profileId, amount)
@@ -212,6 +226,8 @@ try {
   console.log(`Waiting for server on port ${port}...`)
   if (!(await waitForHealth(port))) { console.error(server.output()); throw new Error('server did not become ready') }
   console.log('Server ready.\n')
+  // Persisted в изолираната база — важи и след restart-а в сценарий F.
+  await enableDirectRegistrationInIsolatedDb(isolated.dbFile)
 
   // ═══════════════════════════════════════════════════════════════════════
   // B: 4-player, first leave — display roster stays, permanent leftColors,
