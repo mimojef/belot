@@ -18,6 +18,10 @@
  *     3+0 / 2+1 / 1+2 между first-3 и next-2, random тип/цвят/шаблон
  * [9] Anchor constraints: ALL_TRUMPS/NO_TRUMPS rescue преизползва вече
  *     наличните natural J/A вместо да добавя нови — никога 4 J / 4 A
+ * [10] Sequence guard: пази natural кварти/квинти (rescued seat, партньор,
+ *      противници) от rescue swap-овете, вкл. когато изместена карта създава
+ *      поредица при ДРУГ seat; допуска най-много 1 нова дълга поредица на
+ *      маса (25%/10% allowance, изтеглен веднъж на execution, не reroll-нат)
  */
 
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../src/core/serverTypes.js'
@@ -26,6 +30,7 @@ import {
   applyServerAntiBadLuckRescueSwaps,
   applyServerAntiBadLuckToDeck,
   getServerFirstFiveDeckIndicesBySeat,
+  getServerFullHandDeckIndicesBySeat,
 } from '../src/game/antiBadLuck/applyServerAntiBadLuckToDeck.js'
 import {
   getServerAntiBadLuckKeepStrength,
@@ -39,11 +44,19 @@ import {
   pickServerAntiBadLuckRescueVariant,
 } from '../src/game/antiBadLuck/pickServerAntiBadLuckRescue.js'
 import {
+  SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE,
+  SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE,
+  findServerAntiBadLuckLongRuns,
+  isServerAntiBadLuckSequencePlanSafe,
+  type ServerAntiBadLuckSequenceAllowance,
+} from '../src/game/antiBadLuck/serverAntiBadLuckSequenceGuard.js'
+import {
   createEmptyServerAntiBadLuckState,
   type ServerAntiBadLuckAnchorConstraints,
   type ServerAntiBadLuckRescue,
   type ServerAntiBadLuckState,
 } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+import { SERVER_SUITS } from '../src/game/serverCardConstants.js'
 import { abandonHumanControlForRoom } from '../src/game/abandonHumanControlForRoom.js'
 import { createInitialAuthoritativeGameState } from '../src/game/createInitialAuthoritativeGameState.js'
 import { createServerDeck } from '../src/game/createServerDeck.js'
@@ -114,6 +127,13 @@ const ALL_BAD_DECK = buildDeck(BAD_HANDS)
 
 function firstFive(deck: readonly ServerCard[], seat: Seat): ServerCard[] {
   return FIRST_FIVE_INDICES[seat].map((index) => deck[index])
+}
+
+// Пълни финални 8 карти на всеки seat (3+2+3) — за sequence guard тестовете.
+const FULL_HAND_INDICES = getServerFullHandDeckIndicesBySeat(FIRST_DEAL_SEAT)
+
+function fullHand(deck: readonly ServerCard[], seat: Seat): ServerCard[] {
+  return FULL_HAND_INDICES[seat].map((index) => deck[index])
 }
 
 function isValidDeck(deck: readonly ServerCard[]): boolean {
@@ -565,7 +585,13 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   // 5% е само safety bound на стрес теста, НЕ продуктово правило: rescue се
   // прилага винаги, когато има безопасен swap план; иначе natural deal + pending.
   check(`[7l] неприложени rescue-и: ${fallbackCount} от ${chosenCount} (${pct(fallbackCount, chosenCount)}) — всички остават pending`, fallbackStaysPending && share(fallbackCount, chosenCount) < 0.05)
-  check(`[7m] без защитени естествени GOOD ръце rescue винаги се прилага (${fallbackWithoutProtection} неприложени)`, fallbackWithoutProtection === 0)
+  // От sequence guard-а (виж [10]): дори без защитен natural GOOD hand, rescue
+  // вече МОЖЕ да остане непринложен — единствената безопасна GOOD/anchor
+  // реализация може да разрушава natural quart/quint, или да създава 2+
+  // нови дълги поредици, или точно 1 нова, дето еднократният allowance не
+  // позволява. Това е ново, очаквано поведение от sequence guard-а, не
+  // регресия — bound-ът само пази от драстичен скок (стрес safety, не правило).
+  check(`[7m] без защитени естествени GOOD ръце: ${fallbackWithoutProtection} неприложени от sequence guard-а (очаквано > 0, виж [10])`, share(fallbackWithoutProtection, chosenCount) < 0.02)
 }
 
 {
@@ -896,6 +922,189 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   }
   check(`[9i] инвариант (случаен natural shuffle): никога 4 J/4 A в първите 5 след rescue (ALL_TRUMPS n=${allTrumpsChecked}, NO_TRUMPS n=${noTrumpsChecked})`,
     neverFourAnchorsGlobal && allTrumpsChecked > 100 && noTrumpsChecked > 100)
+}
+
+// ---------------------------------------------------------------------------
+// [10] Sequence guard: пази natural кварти/квинти от rescue swap-овете (вкл.
+//      при друг seat чрез изместена карта); допуска само 0 или точно 1 нова
+//      дълга поредица (25%/10%, изтеглени веднъж на execution).
+// ---------------------------------------------------------------------------
+{
+  const NEUTRAL_HAND = cards('clubs-7', 'diamonds-8', 'hearts-9', 'spades-10', 'clubs-Q', 'diamonds-K', 'hearts-A', 'spades-J')
+  const ALLOW_BOTH: ServerAntiBadLuckSequenceAllowance = { allowArtificialQuart: true, allowArtificialQuintPlus: true }
+  const ALLOW_NEITHER: ServerAntiBadLuckSequenceAllowance = { allowArtificialQuart: false, allowArtificialQuintPlus: false }
+  const ALLOW_QUART_ONLY: ServerAntiBadLuckSequenceAllowance = { allowArtificialQuart: true, allowArtificialQuintPlus: false }
+  const ALLOW_QUINT_ONLY: ServerAntiBadLuckSequenceAllowance = { allowArtificialQuart: false, allowArtificialQuintPlus: true }
+
+  const allNeutral = (override: Partial<Record<Seat, ServerCard[]>>): Record<Seat, ServerCard[]> => ({
+    bottom: override.bottom ?? NEUTRAL_HAND,
+    right: override.right ?? NEUTRAL_HAND,
+    top: override.top ?? NEUTRAL_HAND,
+    left: override.left ?? NEUTRAL_HAND,
+  })
+
+  // [10.1] natural quart на non-rescue seat (right) не може да бъде разрушена.
+  const naturalRightQuart = cards('hearts-7', 'hearts-8', 'hearts-9', 'hearts-10', 'clubs-K', 'diamonds-A', 'spades-Q', 'clubs-J')
+  const postRightBrokenQuart = cards('hearts-7', 'hearts-8', 'hearts-9', 'hearts-Q', 'clubs-K', 'diamonds-A', 'spades-Q', 'clubs-J')
+  check('[10.1] natural quart на non-rescue seat не може да бъде разрушена от swap',
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ right: naturalRightQuart }), allNeutral({ right: postRightBrokenQuart }), ALLOW_BOTH))
+
+  // [10.2] natural quint на non-rescue seat не може да бъде разрушена (дори до quart).
+  const naturalRightQuint = cards('hearts-7', 'hearts-8', 'hearts-9', 'hearts-10', 'hearts-J', 'diamonds-K', 'spades-A', 'clubs-Q')
+  const postRightShrunkToQuart = cards('hearts-7', 'hearts-8', 'hearts-9', 'hearts-10', 'clubs-J', 'diamonds-K', 'spades-A', 'clubs-Q')
+  check('[10.2] natural quint на non-rescue seat не може да бъде разрушена (дори свита до quart)',
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ right: naturalRightQuint }), allNeutral({ right: postRightShrunkToQuart }), ALLOW_BOTH))
+
+  // [10.3] natural quart/quint на самия rescued seat (bottom) също се пази.
+  check('[10.3a] natural quart на rescued seat (bottom) също се пази',
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ bottom: naturalRightQuart }), allNeutral({ bottom: postRightBrokenQuart }), ALLOW_BOTH))
+  check('[10.3b] natural quint на rescued seat (bottom) също се пази',
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ bottom: naturalRightQuint }), allNeutral({ bottom: postRightShrunkToQuart }), ALLOW_BOTH))
+
+  // [10.4]/[10.10]/[10.11] rescue създава quart при rescued seat (bottom) —
+  // класифицира се като artificial QUART, allowed само ако allowArtificialQuart.
+  const naturalBottomNoRun = cards('clubs-7', 'clubs-8', 'clubs-9', 'diamonds-K', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
+  const postBottomWithQuart = cards('clubs-7', 'clubs-8', 'clubs-9', 'clubs-10', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
+  const bottomQuartRun = findServerAntiBadLuckLongRuns(postBottomWithQuart).clubs
+  check('[10.4] rescue-нова тройка clubs 7-8-9-10 се класифицира като QUART (дължина 4)',
+    bottomQuartRun?.kind === 'QUART' && bottomQuartRun.length === 4)
+  check('[10.11] allowArtificialQuart=true → quart candidate се допуска (ако друго минава)',
+    isServerAntiBadLuckSequencePlanSafe(allNeutral({ bottom: naturalBottomNoRun }), allNeutral({ bottom: postBottomWithQuart }), ALLOW_QUART_ONLY))
+  check('[10.10] allowArtificialQuart=false → никакъв quart candidate не се допуска',
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ bottom: naturalBottomNoRun }), allNeutral({ bottom: postBottomWithQuart }), ALLOW_QUINT_ONLY))
+
+  // [10.5] изместена карта създава quart при ДРУГ (non-rescue) seat (right) —
+  // guard-ът я открива по същия механизъм (гледа всичките 4 seats еднакво).
+  const naturalRightNoRun = cards('diamonds-7', 'diamonds-8', 'diamonds-9', 'clubs-K', 'hearts-A', 'spades-Q', 'clubs-7', 'hearts-K')
+  const postRightWithQuart = cards('diamonds-7', 'diamonds-8', 'diamonds-9', 'diamonds-10', 'hearts-A', 'spades-Q', 'clubs-7', 'hearts-K')
+  check('[10.5] изместена карта създава quart при друг seat (right) → guard-ът я открива',
+    isServerAntiBadLuckSequencePlanSafe(allNeutral({ right: naturalRightNoRun }), allNeutral({ right: postRightWithQuart }), ALLOW_QUART_ONLY) &&
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ right: naturalRightNoRun }), allNeutral({ right: postRightWithQuart }), ALLOW_QUINT_ONLY))
+
+  // [10.6] изместена карта създава quint при друг seat (top).
+  const naturalTopNoRun = cards('spades-7', 'spades-8', 'clubs-K', 'diamonds-A', 'hearts-Q', 'clubs-7', 'diamonds-8', 'hearts-K')
+  const postTopWithQuint = cards('spades-7', 'spades-8', 'spades-9', 'spades-10', 'spades-J', 'clubs-7', 'diamonds-8', 'hearts-K')
+  check('[10.6]/[10.12] изместена карта създава quint при друг seat (top): allowQuintPlus=true допуска, allowQuintPlus=false отхвърля',
+    isServerAntiBadLuckSequencePlanSafe(allNeutral({ top: naturalTopNoRun }), allNeutral({ top: postTopWithQuint }), ALLOW_QUINT_ONLY) &&
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ top: naturalTopNoRun }), allNeutral({ top: postTopWithQuint }), ALLOW_QUART_ONLY))
+
+  // [10.7] natural quart (left), удължена до quint след rescue → класифицира
+  // се като НОВА QUINT_PLUS (не quart) — gate-ва се само от quint allowance-а.
+  const naturalLeftQuart = cards('diamonds-7', 'diamonds-8', 'diamonds-9', 'diamonds-10', 'clubs-K', 'hearts-A', 'spades-Q', 'clubs-7')
+  const postLeftExtendedToQuint = cards('diamonds-7', 'diamonds-8', 'diamonds-9', 'diamonds-10', 'diamonds-J', 'hearts-A', 'spades-Q', 'clubs-7')
+  check('[10.7] natural quart → post quint се брои за нова QUINT_PLUS, не за quart',
+    !isServerAntiBadLuckSequencePlanSafe(allNeutral({ left: naturalLeftQuart }), allNeutral({ left: postLeftExtendedToQuint }), ALLOW_QUART_ONLY) &&
+    isServerAntiBadLuckSequencePlanSafe(allNeutral({ left: naturalLeftQuart }), allNeutral({ left: postLeftExtendedToQuint }), ALLOW_QUINT_ONLY))
+
+  // [10.7b] natural quint (5), удължен до по-дълъг quint (6) → остава в СЪЩИЯ
+  // bucket (QUINT_PLUS), не се брои за нова отделна поредица — позволено дори
+  // с ALLOW_NEITHER, докато natural run-ът е изцяло запазен вътре в новия.
+  const naturalLeftQuint5 = cards('spades-7', 'spades-8', 'spades-9', 'spades-10', 'spades-J', 'clubs-K', 'diamonds-A', 'hearts-Q')
+  const postLeftQuint6 = cards('spades-7', 'spades-8', 'spades-9', 'spades-10', 'spades-J', 'spades-Q', 'diamonds-A', 'hearts-Q')
+  check('[10.7b] natural quint(5) → post quint(6) остава в QUINT_PLUS bucket-а, не е нова поредица (allowed дори с ALLOW_NEITHER)',
+    isServerAntiBadLuckSequencePlanSafe(allNeutral({ left: naturalLeftQuint5 }), allNeutral({ left: postLeftQuint6 }), ALLOW_NEITHER))
+
+  // [10.8] quint не се брои като няколко припокриващи се quart-а (maximal run).
+  const handWithQuint = cards('hearts-7', 'hearts-8', 'hearts-9', 'hearts-10', 'hearts-J', 'clubs-K', 'diamonds-A', 'spades-Q')
+  const quintRuns = findServerAntiBadLuckLongRuns(handWithQuint)
+  check('[10.8] quint се разпознава като 1 maximal run (не 2 припокриващи се quart-а)',
+    Object.keys(quintRuns).length === 1 && quintRuns.hearts?.kind === 'QUINT_PLUS' && quintRuns.hearts.length === 5 && quintRuns.hearts.cardIds.length === 5)
+
+  // [10.9] 2 нови дълги поредици на масата (bottom quart + top quint) →
+  // unconditional reject, дори с двата allowance-а true.
+  check('[10.9] 2 нови дълги поредици на масата → reject дори с ALLOW_BOTH',
+    !isServerAntiBadLuckSequencePlanSafe(
+      allNeutral({ bottom: naturalBottomNoRun, top: naturalTopNoRun }),
+      allNeutral({ bottom: postBottomWithQuart, top: postTopWithQuint }),
+      ALLOW_BOTH,
+    ))
+
+  // [10.13] Allowance-ът, веднъж фиксиран, важи еднакво за РАЗЛИЧНИ candidates
+  // (различни seats/suits) — не се "reroll-ва" per-candidate: проверяваме
+  // няколко различни quart/quint сценария под ЕДНА И СЪЩА allowance стойност.
+  const quartScenarios: Array<[Record<Seat, ServerCard[]>, Record<Seat, ServerCard[]>]> = [
+    [allNeutral({ bottom: naturalBottomNoRun }), allNeutral({ bottom: postBottomWithQuart })],
+    [allNeutral({ right: naturalRightNoRun }), allNeutral({ right: postRightWithQuart })],
+  ]
+  const consistentAcrossCandidates = quartScenarios.every(
+    ([natural, post]) => !isServerAntiBadLuckSequencePlanSafe(natural, post, ALLOW_NEITHER),
+  ) && quartScenarios.every(
+    ([natural, post]) => isServerAntiBadLuckSequencePlanSafe(natural, post, ALLOW_QUART_ONLY),
+  )
+  check('[10.13] фиксиран allowance управлява ЕДНАКВО различни candidates (не се reroll-ва per-candidate)', consistentAcrossCandidates)
+
+  // [10.13b]/[10.14] Статистически seeded тест през ПЪЛНИЯ pipeline: allowance
+  // се тегли ТОЧНО ВЕДНЪЖ (преди candidate search-а) от nextRandom — за
+  // single-pending-seat сценарий (без arbitration draws) първите 2 извиквания
+  // на seed-натия RNG СА allowArtificialQuart/allowArtificialQuintPlus (виж
+  // applyServerAntiBadLuckToDeck.ts). Ground-truth probe с независим RNG
+  // instance върху СЪЩИЯ seed string предсказва тези 2 стойности; сравняваме
+  // срещу реално наблюдаваната поява на нова quart/quint в резултата — ако
+  // allowance се reroll-ваше per-candidate/retry, щяхме да видим violations
+  // (нова quart/quint да се появи и при ground-truth=false).
+  let quartAllowedCount = 0
+  let quintAllowedCount = 0
+  let totalPendingExecutions = 0
+  let violations = 0
+  let newRunAtNonRescuedSeat = 0
+  const SAMPLE_SIZE = 6000
+
+  for (let seed = 0; seed < SAMPLE_SIZE; seed += 1) {
+    const dealSeed = `seq-stat-deal-${seed}`
+    const natural = shuffleWithRandom(FULL_DECK, createSeededRandom(`seq-stat-natural-${seed}`))
+    const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(dealSeed))
+
+    if (!result.rescueKinds.bottom) {
+      continue
+    }
+
+    totalPendingExecutions += 1
+
+    const probe = createSeededRandom(dealSeed)
+    const expectedQuart = probe() < SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE
+    const expectedQuintPlus = probe() < SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE
+    if (expectedQuart) quartAllowedCount += 1
+    if (expectedQuintPlus) quintAllowedCount += 1
+
+    let sawNewQuart = false
+    let sawNewQuintPlus = false
+
+    for (const seat of SERVER_SEAT_ORDER) {
+      const naturalRuns = findServerAntiBadLuckLongRuns(fullHand(natural, seat))
+      const postRuns = findServerAntiBadLuckLongRuns(fullHand(result.deck, seat))
+
+      for (const suit of SERVER_SUITS) {
+        const nat = naturalRuns[suit]
+        const post = postRuns[suit]
+
+        if (!nat && post) {
+          if (post.kind === 'QUART') sawNewQuart = true
+          else sawNewQuintPlus = true
+          if (seat !== 'bottom') newRunAtNonRescuedSeat += 1
+        } else if (nat && post && post.length > nat.length && nat.kind === 'QUART' && post.kind === 'QUINT_PLUS') {
+          sawNewQuintPlus = true
+          if (seat !== 'bottom') newRunAtNonRescuedSeat += 1
+        }
+      }
+    }
+
+    if (sawNewQuart && !expectedQuart) violations += 1
+    if (sawNewQuintPlus && !expectedQuintPlus) violations += 1
+  }
+
+  const shareOf = (count: number, total: number) => count / total
+  check(`[10.13b] нова quart/quint в резултата винаги съвпада с еднократния ground-truth allowance (0 violations от ${totalPendingExecutions})`,
+    violations === 0 && totalPendingExecutions > 1000)
+  check(`[10.14a] quart allowance ≈25% (${quartAllowedCount}/${totalPendingExecutions} = ${(shareOf(quartAllowedCount, totalPendingExecutions) * 100).toFixed(1)}%)`,
+    shareOf(quartAllowedCount, totalPendingExecutions) > 0.21 && shareOf(quartAllowedCount, totalPendingExecutions) < 0.29)
+  check(`[10.14b] quint+ allowance ≈10% (${quintAllowedCount}/${totalPendingExecutions} = ${(shareOf(quintAllowedCount, totalPendingExecutions) * 100).toFixed(1)}%)`,
+    shareOf(quintAllowedCount, totalPendingExecutions) > 0.07 && shareOf(quintAllowedCount, totalPendingExecutions) < 0.13)
+  // [10.15]/[10.16] реалният pipeline анализира ПЪЛНИТЕ 8 карти (не само
+  // първите 5) на ВСИЧКИТЕ 4 seats — потвърждаваме, че тестът реално засича
+  // случаи, в които изместена карта създава/засяга поредица при seat, различен
+  // от rescued (bottom), не само теоретично на хартия.
+  check(`[10.15] статистическият тест реално засича нови поредици и при non-rescued seats (${newRunAtNonRescuedSeat} случая)`,
+    newRunAtNonRescuedSeat > 0)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

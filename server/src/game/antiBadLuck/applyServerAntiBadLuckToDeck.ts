@@ -42,6 +42,12 @@ import {
   pickServerAntiBadLuckRescueVariant,
 } from './pickServerAntiBadLuckRescue.js'
 import {
+  SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE,
+  SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE,
+  isServerAntiBadLuckSequencePlanSafe,
+  type ServerAntiBadLuckSequenceAllowance,
+} from './serverAntiBadLuckSequenceGuard.js'
+import {
   SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD,
   createEmptyServerAntiBadLuckState,
   type ServerAntiBadLuckAnchorConstraints,
@@ -52,8 +58,13 @@ import {
 } from './serverAntiBadLuckTypes.js'
 
 const FIRST_FIVE_CARD_COUNT = 5
+const FULL_HAND_CARD_COUNT = 8
 const MAX_RESCUE_PLAN_ATTEMPTS = 16
 const NO_ANCHOR_CONSTRAINTS: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: [] }
+const NO_SEQUENCE_ALLOWANCE: ServerAntiBadLuckSequenceAllowance = {
+  allowArtificialQuart: false,
+  allowArtificialQuintPlus: false,
+}
 
 type RescueMap = Partial<Record<Seat, ServerAntiBadLuckRescue>>
 type RescueKindMap = Partial<Record<Seat, ServerAntiBadLuckRescueKind>>
@@ -103,6 +114,43 @@ export function getServerFirstFiveDeckIndicesBySeat(
     1,
   )
   const toIndices = (seat: Seat) => afterNextTwo.hands[seat].map((card) => Number(card.id))
+
+  return {
+    bottom: toIndices('bottom'),
+    right: toIndices('right'),
+    top: toIndices('top'),
+    left: toIndices('left'),
+  }
+}
+
+// Deck индексите за пълните финални 8 карти на всеки seat (3+2+3, същият
+// dealServerCardsInPackets ред като deal-first-3 → deal-next-2 →
+// deal-last-3). Ползва се само от sequence guard-а — не влияе на реалното
+// раздаване, чисто структурна симулация върху dummy index deck.
+export function getServerFullHandDeckIndicesBySeat(
+  firstDealSeat: Seat,
+): Record<Seat, number[]> {
+  const indexDeck: ServerCard[] = Array.from({ length: FULL_HAND_CARD_COUNT * 4 }, (_, index) => ({
+    id: String(index),
+    suit: 'clubs',
+    rank: '7',
+  }))
+  const afterFirstThree = dealServerCardsInPackets(indexDeck, createEmptyHands(), firstDealSeat, 3, 1)
+  const afterNextTwo = dealServerCardsInPackets(
+    afterFirstThree.remainingDeck,
+    afterFirstThree.hands,
+    firstDealSeat,
+    2,
+    1,
+  )
+  const afterLastThree = dealServerCardsInPackets(
+    afterNextTwo.remainingDeck,
+    afterNextTwo.hands,
+    firstDealSeat,
+    3,
+    1,
+  )
+  const toIndices = (seat: Seat) => afterLastThree.hands[seat].map((card) => Number(card.id))
 
   return {
     bottom: toIndices('bottom'),
@@ -332,9 +380,38 @@ export function applyServerAntiBadLuckToDeck(
     left: isServerGoodFirstFive(getFirstFive(sourceDeck, 'left')),
   })
 
+  // Sequence guard гледа пълните финални 8 карти (не само първите 5) на
+  // всичките 4 seats — изместена карта може да създаде кварта/квинта при
+  // seat, който изобщо не е rescued. canCheckSequences е defensive за
+  // деградирали тестови/edge-case decks с < 32 карти (реалната игра винаги
+  // подава пълните 32).
+  const canCheckSequences = deck.length >= FULL_HAND_CARD_COUNT * 4
+  const fullHandIndices = canCheckSequences ? getServerFullHandDeckIndicesBySeat(firstDealSeat) : null
+  const getFullHand = (sourceDeck: readonly ServerCard[], seat: Seat) =>
+    fullHandIndices![seat].map((deckIndex) => sourceDeck[deckIndex])
+  const buildFullHands = (sourceDeck: readonly ServerCard[]): Record<Seat, ServerCard[]> => ({
+    bottom: getFullHand(sourceDeck, 'bottom'),
+    right: getFullHand(sourceDeck, 'right'),
+    top: getFullHand(sourceDeck, 'top'),
+    left: getFullHand(sourceDeck, 'left'),
+  })
+  const naturalFullHands = canCheckSequences ? buildFullHands(deck) : null
+
   const isNaturalGood = evaluate(deck)
   const rescueSeat = pickRescueSeat(previous, isNaturalGood, nextRandom)
   const rescueSeats: Seat[] = rescueSeat ? [rescueSeat] : []
+
+  // Artificial-sequence allowance-ите се теглят ТОЧНО ВЕДНЪЖ на rescue
+  // execution, преди candidate search-а — не се reroll-ват между candidates,
+  // retry-и, suit-ове или exhaustive fallback (иначе 25%/10% биха станали
+  // "25%/10% на опит", а не реална продуктова вероятност).
+  const sequenceAllowance: ServerAntiBadLuckSequenceAllowance =
+    rescueSeats.length > 0
+      ? {
+          allowArtificialQuart: nextRandom() < SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE,
+          allowArtificialQuintPlus: nextRandom() < SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE,
+        }
+      : NO_SEQUENCE_ALLOWANCE
 
   // Основният тип се тегли веднъж на seat (строго 1/3) и е фиксиран за всички
   // retry-и по-долу. Цветът (1/4) / шаблонът (1/2) е предпочитан — сменя се в
@@ -358,8 +435,11 @@ export function applyServerAntiBadLuckToDeck(
   let finalDeck = deck
   let appliedRescues: RescueMap = {}
 
-  // Безопасен план: същите 32 карти, rescued seats са GOOD и никой естествено
-  // GOOD seat не губи GOOD първите си 5. Никога full reshuffle.
+  // Безопасен план: същите 32 карти, rescued seats са GOOD, никой естествено
+  // GOOD seat не губи GOOD първите си 5, и sequence guard-ът минава (никоя
+  // естествена кварта/квинта на никой seat не е разрушена; най-много 1 нова
+  // дълга поредица общо на масата, и то само ако еднократно изтегленият
+  // allowance го позволява). Никога full reshuffle.
   const tryPlan = (rescues: RescueMap): boolean => {
     const rescueCount = Object.keys(rescues).length
 
@@ -373,7 +453,9 @@ export function applyServerAntiBadLuckToDeck(
       hasSameCardSet(deck, rescuedDeck) &&
       SERVER_SEAT_ORDER.every((seat) =>
         rescues[seat] || isNaturalGood[seat] ? isRescuedGood[seat] : true,
-      )
+      ) &&
+      (!canCheckSequences ||
+        isServerAntiBadLuckSequencePlanSafe(naturalFullHands!, buildFullHands(rescuedDeck), sequenceAllowance))
 
     if (isPlanValid) {
       finalDeck = rescuedDeck
