@@ -5,6 +5,7 @@
 // (createInitialAuthoritativeGameState).
 
 import type { Seat } from '../../core/serverTypes.js'
+import type { ServerSuit } from '../serverGameTypes.js'
 
 // Seat става pending след толкова поредни BAD първи 5 карти.
 export const SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD = 5
@@ -32,6 +33,14 @@ export type ServerAntiBadLuckRescueKind = {
 
 export type ServerAntiBadLuckRescue = ServerAntiBadLuckRescueKind & {
   cardIds: string[]
+}
+
+// Runtime constraint за ALL_TRUMPS/NO_TRUMPS candidate generation — изчислен
+// от natural J/A цветовете в първите 5 на seat-а точно преди generation.
+// Факт от natural deal-а, НЕ част от rescue kind (type/variant остават чист
+// random избор) и НЕ се persist-ва — пресмята се наново всяко раздаване.
+export type ServerAntiBadLuckAnchorConstraints = {
+  naturalAnchorSuits: ServerSuit[]
 }
 
 function createEmptySeatState(): ServerAntiBadLuckSeatState {

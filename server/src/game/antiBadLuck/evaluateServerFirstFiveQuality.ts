@@ -1,5 +1,5 @@
 import { SERVER_SUITS } from '../serverCardConstants.js'
-import type { ServerCard, ServerRank } from '../serverGameTypes.js'
+import type { ServerCard, ServerRank, ServerSuit } from '../serverGameTypes.js'
 import type { ServerAntiBadLuckRescueKind } from './serverAntiBadLuckTypes.js'
 
 export const SERVER_ANTI_BAD_LUCK_TRUMP_VALUES: Record<ServerRank, number> = {
@@ -96,4 +96,13 @@ export function isServerGoodFirstFive(cards: readonly ServerCard[]): boolean {
     isServerAllTrumpsGoodFirstFive(cards) ||
     isServerSuitGoodFirstFive(cards)
   )
+}
+
+// Natural anchor (J за ALL_TRUMPS / A за NO_TRUMPS) цветове сред първите 5 —
+// runtime constraint за rescue candidate generation (не се persist-ва).
+export function getServerAntiBadLuckNaturalAnchorSuits(
+  cards: readonly ServerCard[],
+  anchorRank: ServerRank,
+): ServerSuit[] {
+  return cards.filter((card) => card.rank === anchorRank).map((card) => card.suit)
 }

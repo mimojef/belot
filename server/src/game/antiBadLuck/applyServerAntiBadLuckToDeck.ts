@@ -32,6 +32,7 @@ import { dealServerCardsInPackets } from '../dealServerCardsInPackets.js'
 import type { ServerCard } from '../serverGameTypes.js'
 import {
   getServerAntiBadLuckKeepStrength,
+  getServerAntiBadLuckNaturalAnchorSuits,
   isServerGoodFirstFive,
 } from './evaluateServerFirstFiveQuality.js'
 import {
@@ -43,6 +44,7 @@ import {
 import {
   SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD,
   createEmptyServerAntiBadLuckState,
+  type ServerAntiBadLuckAnchorConstraints,
   type ServerAntiBadLuckRescue,
   type ServerAntiBadLuckRescueKind,
   type ServerAntiBadLuckSeatState,
@@ -51,9 +53,28 @@ import {
 
 const FIRST_FIVE_CARD_COUNT = 5
 const MAX_RESCUE_PLAN_ATTEMPTS = 16
+const NO_ANCHOR_CONSTRAINTS: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: [] }
 
 type RescueMap = Partial<Record<Seat, ServerAntiBadLuckRescue>>
 type RescueKindMap = Partial<Record<Seat, ServerAntiBadLuckRescueKind>>
+type AnchorConstraintsMap = Partial<Record<Seat, ServerAntiBadLuckAnchorConstraints>>
+
+// Natural J (ALL_TRUMPS) / A (NO_TRUMPS) цветове от seat-овите natural първи
+// 5 — runtime constraint за candidate generation, НЕ част от rescueKind.
+function getAnchorConstraintsForType(
+  type: ServerAntiBadLuckRescueKind['type'],
+  naturalFirstFive: readonly ServerCard[],
+): ServerAntiBadLuckAnchorConstraints {
+  if (type === 'ALL_TRUMPS') {
+    return { naturalAnchorSuits: getServerAntiBadLuckNaturalAnchorSuits(naturalFirstFive, 'J') }
+  }
+
+  if (type === 'NO_TRUMPS') {
+    return { naturalAnchorSuits: getServerAntiBadLuckNaturalAnchorSuits(naturalFirstFive, 'A') }
+  }
+
+  return NO_ANCHOR_CONSTRAINTS
+}
 
 export type ServerAntiBadLuckDealResult = {
   deck: ServerCard[]
@@ -127,6 +148,7 @@ function pickRescueSeat(
 function pickRescues(
   rescueSeats: readonly Seat[],
   rescueKinds: RescueKindMap,
+  anchorConstraintsBySeat: AnchorConstraintsMap,
   nextRandom: () => number,
 ): RescueMap {
   const rescues: RescueMap = {}
@@ -135,7 +157,13 @@ function pickRescues(
   // Random ред, за да няма отбор с постоянно предимство при избора на тройка.
   for (const seat of shuffleWithRandom(rescueSeats, nextRandom)) {
     const kind = rescueKinds[seat] as ServerAntiBadLuckRescueKind
-    const rescue = pickServerAntiBadLuckRescue(kind.type, usedCardIds, nextRandom, kind.variant)
+    const rescue = pickServerAntiBadLuckRescue(
+      kind.type,
+      usedCardIds,
+      nextRandom,
+      kind.variant,
+      anchorConstraintsBySeat[seat] ?? NO_ANCHOR_CONSTRAINTS,
+    )
 
     if (rescue) {
       rescues[seat] = rescue
@@ -154,13 +182,17 @@ function pickRescues(
 function* enumerateRescuePlans(
   rescueSeats: readonly Seat[],
   rescueKinds: RescueKindMap,
+  anchorConstraintsBySeat: AnchorConstraintsMap,
   nextRandom: () => number,
 ): Generator<RescueMap> {
   const seats = shuffleWithRandom(rescueSeats, nextRandom)
   const candidatesBySeat = new Map(
     seats.map((seat) => {
       const kind = rescueKinds[seat] as ServerAntiBadLuckRescueKind
-      const candidates = getServerAntiBadLuckRescueCandidates(kind.type)
+      const candidates = getServerAntiBadLuckRescueCandidates(
+        kind.type,
+        anchorConstraintsBySeat[seat] ?? NO_ANCHOR_CONSTRAINTS,
+      )
 
       return [
         seat,
@@ -306,11 +338,21 @@ export function applyServerAntiBadLuckToDeck(
 
   // Основният тип се тегли веднъж на seat (строго 1/3) и е фиксиран за всички
   // retry-и по-долу. Цветът (1/4) / шаблонът (1/2) е предпочитан — сменя се в
-  // рамките на типа само ако за него няма безопасна реализация.
+  // рамките на типа само ако за него няма безопасна реализация. Anchor
+  // constraints (natural J/A цветове) са runtime factи от natural deal-а —
+  // изчисляват се тук и се подават на candidate generation-а по-долу, но НЕ
+  // влизат в rescueKind (type/variant си остават чист random избор).
   const rescueKinds: RescueKindMap = {}
+  const anchorConstraintsBySeat: AnchorConstraintsMap = {}
   rescueSeats.forEach((seat) => {
     const type = pickServerAntiBadLuckRescueType(nextRandom)
-    rescueKinds[seat] = { type, variant: pickServerAntiBadLuckRescueVariant(type, nextRandom) }
+    const anchorConstraints = getAnchorConstraintsForType(type, getFirstFive(deck, seat))
+
+    anchorConstraintsBySeat[seat] = anchorConstraints
+    rescueKinds[seat] = {
+      type,
+      variant: pickServerAntiBadLuckRescueVariant(type, nextRandom, anchorConstraints),
+    }
   })
 
   let finalDeck = deck
@@ -345,13 +387,13 @@ export function applyServerAntiBadLuckToDeck(
   // 1) Random опити: random тройка в предпочитания цвят/шаблон (позициите — по
   //    сила на естествените карти, равенство → random).
   for (let attempt = 0; rescueSeats.length > 0 && attempt < MAX_RESCUE_PLAN_ATTEMPTS && !isComplete(); attempt += 1) {
-    tryPlan(pickRescues(rescueSeats, rescueKinds, nextRandom))
+    tryPlan(pickRescues(rescueSeats, rescueKinds, anchorConstraintsBySeat, nextRandom))
   }
 
   // 2) Гаранция: ако съществува безопасна реализация в същите основни типове
   //    (предпочитаният цвят/шаблон първи), намери я.
   if (!isComplete()) {
-    for (const rescues of enumerateRescuePlans(rescueSeats, rescueKinds, nextRandom)) {
+    for (const rescues of enumerateRescuePlans(rescueSeats, rescueKinds, anchorConstraintsBySeat, nextRandom)) {
       if (tryPlan(rescues)) {
         break
       }

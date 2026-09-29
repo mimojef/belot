@@ -16,6 +16,8 @@
  *     естествено GOOD seat без rescue не губи GOOD ръката си
  * [7] Rescue output: точно 3 контролирани, 2 естествени неконтролирани,
  *     3+0 / 2+1 / 1+2 между first-3 и next-2, random тип/цвят/шаблон
+ * [9] Anchor constraints: ALL_TRUMPS/NO_TRUMPS rescue преизползва вече
+ *     наличните natural J/A вместо да добавя нови — никога 4 J / 4 A
  */
 
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../src/core/serverTypes.js'
@@ -32,9 +34,13 @@ import {
   isServerNoTrumpsGoodFirstFive,
   isServerSuitGoodFirstFive,
 } from '../src/game/antiBadLuck/evaluateServerFirstFiveQuality.js'
-import { pickServerAntiBadLuckRescue } from '../src/game/antiBadLuck/pickServerAntiBadLuckRescue.js'
+import {
+  pickServerAntiBadLuckRescue,
+  pickServerAntiBadLuckRescueVariant,
+} from '../src/game/antiBadLuck/pickServerAntiBadLuckRescue.js'
 import {
   createEmptyServerAntiBadLuckState,
+  type ServerAntiBadLuckAnchorConstraints,
   type ServerAntiBadLuckRescue,
   type ServerAntiBadLuckState,
 } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
@@ -546,7 +552,11 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   check(`[7f2] приложен тип (n=${rescueCount}): ${typeLabel(types, rescueCount)}`, types.size === 3 && [...types.values()].every((count) => share(count, rescueCount) > 0.31 && share(count, rescueCount) < 0.357))
   check(`[7g] приложен SUIT цвят ~25%: ${[...suits.entries()].map(([suit, count]) => `${suit} ${pct(count, suitTotal)}`).join(', ')}`, suits.size === 4 && [...suits.values()].every((count) => share(count, suitTotal) > 0.21 && share(count, suitTotal) < 0.29))
   check('[7h] SUIT тройката не е винаги една и съща (> 10 варианта)', suitTriples.size > 10)
-  check(`[7i] предпочитан шаблон ~50/50: ${templateLabel(chosenTemplates)}`, ['ALL_TRUMPS', 'NO_TRUMPS'].every((type) => templateShare(chosenTemplates, type, 'TRIPLE') > 0.46 && templateShare(chosenTemplates, type, 'TRIPLE') < 0.54))
+  // От anchor constraints фикса (виж [9]): при 2 natural J/A вариантът се
+  // форсира PAIR_PLUS (никога TRIPLE) вместо random 50/50 — реалният natural
+  // shuffle съдържа такива seats с забележима честота, затова TRIPLE делът
+  // тук вече е under 50% by design (виж [9f-*] за чистото 50/50 при 0 natural).
+  check(`[7i] предпочитан шаблон (изместен от anchor forcing при 2 natural, виж [9f]): ${templateLabel(chosenTemplates)}`, ['ALL_TRUMPS', 'NO_TRUMPS'].every((type) => templateShare(chosenTemplates, type, 'TRIPLE') > 0.38 && templateShare(chosenTemplates, type, 'TRIPLE') < 0.54))
   // Стрес сценарий: JJJ/AAA изисква 3 от 4-те J/A и често е невъзможен без да
   // развали защитена GOOD ръка → реализира се JJ9/AA10 в същия тип.
   check(`[7i2] приложени шаблони (стрес): ${templateLabel(templates)}`, ['ALL_TRUMPS', 'NO_TRUMPS'].every((type) => templateShare(templates, type, 'TRIPLE') > 0.2) && templateTotal > 0)
@@ -722,6 +732,170 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
     contrastHand,
     { type: 'NO_TRUMPS', variant: 'TRIPLE', cardIds: ['clubs-A', 'diamonds-A', 'spades-A'] },
     ['spades-9', 'hearts-7'])
+}
+
+// ---------------------------------------------------------------------------
+// [9] Anchor constraints: ALL_TRUMPS/NO_TRUMPS rescue никога не добавя J/A
+//     над вече наличните natural J/A (fix за 4-J/4-A bug-а).
+// ---------------------------------------------------------------------------
+{
+  function runAnchorSuite(anchorRank: 'J' | 'A', companionRank: '9' | '10', type: 'ALL_TRUMPS' | 'NO_TRUMPS') {
+    const label = type
+    const twoNatural: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: ['clubs', 'hearts'] }
+    const oneNatural: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: ['clubs'] }
+    const anchorId = (suit: string) => `${suit}-${anchorRank}`
+    const companionId = (suit: string) => `${suit}-${companionRank}`
+    const countAnchors = (cardIds: string[]) => cardIds.filter((id) => id.endsWith(`-${anchorRank}`)).length
+
+    // 2 natural anchors → форсиран PAIR_PLUS с точно тези 2 + matching companion.
+    let twoExact = true
+    const twoCompanions = new Set<string>()
+    for (let seed = 0; seed < 300; seed += 1) {
+      const random = createSeededRandom(`${label}-2-${seed}`)
+      const variant = pickServerAntiBadLuckRescueVariant(type, random, twoNatural)
+      twoExact &&= variant === 'PAIR_PLUS'
+      const rescue = pickServerAntiBadLuckRescue(type, new Set(), random, variant, twoNatural)
+      twoExact &&= !!rescue && rescue.variant === 'PAIR_PLUS' && rescue.cardIds.length === 3 &&
+        rescue.cardIds.includes(anchorId('clubs')) && rescue.cardIds.includes(anchorId('hearts')) &&
+        (rescue.cardIds.includes(companionId('clubs')) || rescue.cardIds.includes(companionId('hearts')))
+      if (rescue) twoCompanions.add(rescue.cardIds.find((id) => id.endsWith(`-${companionRank}`))!)
+    }
+    check(`[9a-${label}] 2 natural ${anchorRank} → точно тези 2 + matching ${companionRank} (300 seeds)`, twoExact)
+    check(`[9b-${label}] 2 natural ${anchorRank}: и двата matching ${companionRank} се появяват (seeded random): ${[...twoCompanions].join(', ')}`,
+      twoCompanions.has(companionId('clubs')) && twoCompanions.has(companionId('hearts')) && twoCompanions.size === 2)
+
+    // 2 natural anchors никога не водят до 3-то/4-то anchor.
+    let neverExtra = true
+    let neverExtraChecked = 0
+    for (let seed = 0; seed < 1000; seed += 1) {
+      const random = createSeededRandom(`${label}-count-${seed}`)
+      const variant = pickServerAntiBadLuckRescueVariant(type, random, twoNatural)
+      const rescue = pickServerAntiBadLuckRescue(type, new Set(), random, variant, twoNatural)
+      if (!rescue) continue
+      neverExtraChecked += 1
+      neverExtra &&= countAnchors(rescue.cardIds) === 2
+    }
+    check(`[9c-${label}] 2 natural ${anchorRank} → rescue никога не добавя 3-то/4-то ${anchorRank} (${neverExtraChecked} samples)`, neverExtra && neverExtraChecked > 900)
+
+    // 1 natural anchor участва задължително — и в TRIPLE, и в PAIR_PLUS.
+    let oneTripleOk = true
+    let onePairOk = true
+    for (let seed = 0; seed < 300; seed += 1) {
+      const randomTriple = createSeededRandom(`${label}-1triple-${seed}`)
+      const triple = pickServerAntiBadLuckRescue(type, new Set(), randomTriple, 'TRIPLE', oneNatural)
+      oneTripleOk &&= !!triple && triple.cardIds.includes(anchorId('clubs')) && countAnchors(triple.cardIds) === 3
+
+      const randomPair = createSeededRandom(`${label}-1pair-${seed}`)
+      const pair = pickServerAntiBadLuckRescue(type, new Set(), randomPair, 'PAIR_PLUS', oneNatural)
+      onePairOk &&= !!pair && pair.cardIds.includes(anchorId('clubs')) && countAnchors(pair.cardIds) === 2
+    }
+    check(`[9d-${label}] 1 natural ${anchorRank} + TRIPLE → participira, краен брой = 3 (300 seeds)`, oneTripleOk)
+    check(`[9e-${label}] 1 natural ${anchorRank} + PAIR_PLUS → participira, краен брой = 2 (300 seeds)`, onePairOk)
+
+    // 0 natural anchors → старото 50/50 preferred variant поведение.
+    let zeroTriple = 0
+    const zeroTotal = 600
+    for (let seed = 0; seed < zeroTotal; seed += 1) {
+      const random = createSeededRandom(`${label}-0-${seed}`)
+      if (pickServerAntiBadLuckRescueVariant(type, random) === 'TRIPLE') zeroTriple += 1
+    }
+    check(`[9f-${label}] 0 natural ${anchorRank} → preferred variant ~50/50 (TRIPLE ${zeroTriple}/${zeroTotal})`,
+      zeroTriple / zeroTotal > 0.44 && zeroTriple / zeroTotal < 0.56)
+
+    // 2 natural anchors, и двата matching companion недостъпни → null (fallback
+    // остава pending, без 3-то anchor, без смяна на типа).
+    const blocked = pickServerAntiBadLuckRescue(
+      type,
+      new Set([companionId('clubs'), companionId('hearts')]),
+      createSeededRandom(`${label}-blocked`),
+      'PAIR_PLUS',
+      twoNatural,
+    )
+    check(`[9j-${label}] 2 natural ${anchorRank}, и двата matching ${companionRank} недостъпни → null`, blocked === null)
+
+    return { twoNatural }
+  }
+
+  runAnchorSuite('J', '9', 'ALL_TRUMPS')
+  runAnchorSuite('A', '10', 'NO_TRUMPS')
+
+  // End-to-end: реален pending seat с 2 natural J, минал през пълния
+  // applyServerAntiBadLuckToDeck pipeline (случайно избран тип — филтрираме
+  // семплите, дето sluchayno е паднал върху ALL_TRUMPS).
+  const twoNaturalJDeck = buildDeck({
+    bottom: ['clubs-J', 'hearts-J', 'clubs-7', 'diamonds-7', 'hearts-7'],
+    right: BAD_HANDS.right,
+    top: BAD_HANDS.top,
+    left: BAD_HANDS.left,
+  })
+  let allTrumpsSamples = 0
+  let twoNaturalEndToEndOk = true
+  for (let seed = 0; seed < 2000; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(twoNaturalJDeck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`2j-e2e-${seed}`))
+    if (result.rescueKinds.bottom?.type !== 'ALL_TRUMPS') continue
+    allTrumpsSamples += 1
+    const five = firstFive(result.deck, 'bottom').map((card) => card.id)
+    const jCount = five.filter((id) => id.endsWith('-J')).length
+    twoNaturalEndToEndOk &&= jCount <= 2
+    if (result.rescues.bottom) {
+      twoNaturalEndToEndOk &&= jCount === 2 && five.includes('clubs-J') && five.includes('hearts-J')
+    }
+  }
+  check(`[9g] end-to-end (пълен pipeline): 2 natural J + ALL_TRUMPS rescue → никога 3-то/4-то J (${allTrumpsSamples} samples)`,
+    twoNaturalEndToEndOk && allTrumpsSamples > 100)
+
+  const twoNaturalADeck = buildDeck({
+    bottom: ['clubs-A', 'hearts-A', 'clubs-7', 'diamonds-7', 'hearts-7'],
+    right: BAD_HANDS.right,
+    top: BAD_HANDS.top,
+    // BAD_HANDS.left държи hearts-A — заменен с spades-9, за да не се
+    // дублира с bottom-овото natural hearts-A в този fixture.
+    left: ['spades-K', 'clubs-9', 'diamonds-10', 'spades-9', 'spades-J'],
+  })
+  let noTrumpsSamples = 0
+  let twoNaturalEndToEndOkA = true
+  for (let seed = 0; seed < 2000; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(twoNaturalADeck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`2a-e2e-${seed}`))
+    if (result.rescueKinds.bottom?.type !== 'NO_TRUMPS') continue
+    noTrumpsSamples += 1
+    const five = firstFive(result.deck, 'bottom').map((card) => card.id)
+    const aCount = five.filter((id) => id.endsWith('-A')).length
+    twoNaturalEndToEndOkA &&= aCount <= 2
+    if (result.rescues.bottom) {
+      twoNaturalEndToEndOkA &&= aCount === 2 && five.includes('clubs-A') && five.includes('hearts-A')
+    }
+  }
+  check(`[9h] end-to-end (пълен pipeline): 2 natural A + NO_TRUMPS rescue → никога 3-то/4-то A (${noTrumpsSamples} samples)`,
+    twoNaturalEndToEndOkA && noTrumpsSamples > 100)
+
+  // Глобален инвариант върху случайни natural shuffle-и (4 pending seats):
+  // никога 4 J след ALL_TRUMPS rescue, никога 4 A след NO_TRUMPS rescue.
+  let neverFourAnchorsGlobal = true
+  let allTrumpsChecked = 0
+  let noTrumpsChecked = 0
+  for (let seed = 0; seed < 3000; seed += 1) {
+    const natural = shuffleWithRandom(FULL_DECK, createSeededRandom(`anchor-inv-${seed}`))
+    const result = applyServerAntiBadLuckToDeck(
+      natural,
+      FIRST_DEAL_SEAT,
+      stateWithPending({ bottom: 5, right: 5, top: 5, left: 5 }),
+      createSeededRandom(`anchor-inv-deck-${seed}`),
+    )
+    for (const seat of Object.keys(result.rescues) as Seat[]) {
+      const rescue = result.rescues[seat]!
+      const five = firstFive(result.deck, seat).map((card) => card.id)
+      if (rescue.type === 'ALL_TRUMPS') {
+        allTrumpsChecked += 1
+        neverFourAnchorsGlobal &&= five.filter((id) => id.endsWith('-J')).length <= 3
+      }
+      if (rescue.type === 'NO_TRUMPS') {
+        noTrumpsChecked += 1
+        neverFourAnchorsGlobal &&= five.filter((id) => id.endsWith('-A')).length <= 3
+      }
+    }
+  }
+  check(`[9i] инвариант (случаен natural shuffle): никога 4 J/4 A в първите 5 след rescue (ALL_TRUMPS n=${allTrumpsChecked}, NO_TRUMPS n=${noTrumpsChecked})`,
+    neverFourAnchorsGlobal && allTrumpsChecked > 100 && noTrumpsChecked > 100)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

@@ -11,9 +11,12 @@ import {
   SERVER_ANTI_BAD_LUCK_TRUMP_VALUES,
 } from './evaluateServerFirstFiveQuality.js'
 import type {
+  ServerAntiBadLuckAnchorConstraints,
   ServerAntiBadLuckRescue,
   ServerAntiBadLuckRescueType,
 } from './serverAntiBadLuckTypes.js'
+
+const NO_ANCHOR_CONSTRAINTS: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: [] }
 
 const RESCUE_TYPES: ServerAntiBadLuckRescueType[] = ['SUIT', 'ALL_TRUMPS', 'NO_TRUMPS']
 const PAIR_TEMPLATES = ['TRIPLE', 'PAIR_PLUS'] as const
@@ -87,17 +90,62 @@ function getPairTemplateTriples(
   return triples
 }
 
+// Ограничава кандидатите до тези, дето включват вече наличните natural
+// anchor (J/A) цветове — за да не rescue-нем над естествени карти вместо да
+// ги преизползваме (иначе рискуваме 4 J/4 A в първите 5).
+// 0 natural → без ограничение (старото поведение).
+// 1 natural → само candidates, включващи точно този цвят (TRIPLE/PAIR_PLUS
+//   и двата остават възможни, 50/50 preferred variant).
+// 2 natural → форсиран PAIR_PLUS с anchor = точно тези 2 цвята, companion
+//   само към единия от тях (TRIPLE винаги отпада — би добавил 3-то anchor).
+// 3+ natural → seat вече е natural GOOD (не би трябвало да стигне дотук);
+//   defensive — без candidates изобщо.
+function getConstrainedPairTemplateTriples(
+  anchorRank: ServerRank,
+  companionRank: ServerRank,
+  template: PairTemplate,
+  requiredSuits: readonly ServerSuit[],
+): string[][] {
+  if (requiredSuits.length >= 3) {
+    return []
+  }
+
+  if (requiredSuits.length === 2) {
+    if (template === 'TRIPLE') {
+      return []
+    }
+
+    const [first, second] = requiredSuits
+
+    return [
+      [toCardId(first, anchorRank), toCardId(second, anchorRank), toCardId(first, companionRank)],
+      [toCardId(first, anchorRank), toCardId(second, anchorRank), toCardId(second, companionRank)],
+    ]
+  }
+
+  const allTriples = getPairTemplateTriples(anchorRank, companionRank, template)
+
+  if (requiredSuits.length === 0) {
+    return allTriples
+  }
+
+  const requiredCardId = toCardId(requiredSuits[0], anchorRank)
+
+  return allTriples.filter((triple) => triple.includes(requiredCardId))
+}
+
 function getTypeCandidates(
   type: ServerAntiBadLuckRescueType,
   variant: string,
+  anchorConstraints: ServerAntiBadLuckAnchorConstraints = NO_ANCHOR_CONSTRAINTS,
 ): string[][] {
   if (type === 'SUIT') {
     return getSuitTriples(variant as ServerSuit)
   }
 
   return type === 'ALL_TRUMPS'
-    ? getPairTemplateTriples('J', '9', variant as PairTemplate)
-    : getPairTemplateTriples('A', '10', variant as PairTemplate)
+    ? getConstrainedPairTemplateTriples('J', '9', variant as PairTemplate, anchorConstraints.naturalAnchorSuits)
+    : getConstrainedPairTemplateTriples('A', '10', variant as PairTemplate, anchorConstraints.naturalAnchorSuits)
 }
 
 function getTypeVariants(type: ServerAntiBadLuckRescueType): readonly string[] {
@@ -116,19 +164,27 @@ export function pickServerAntiBadLuckRescueType(
 // изчерпателното търсене, когато random опитите не намерят съвместим план.
 export function getServerAntiBadLuckRescueCandidates(
   type: ServerAntiBadLuckRescueType,
+  anchorConstraints: ServerAntiBadLuckAnchorConstraints = NO_ANCHOR_CONSTRAINTS,
 ): ServerAntiBadLuckRescue[] {
   return getTypeVariants(type).flatMap((variant) =>
-    getTypeCandidates(type, variant).map((cardIds) => ({ type, variant, cardIds })),
+    getTypeCandidates(type, variant, anchorConstraints).map((cardIds) => ({ type, variant, cardIds })),
   )
 }
 
 // Предпочитан цвят (1/4) / шаблон (1/2) в рамките на типа. Сменя се само ако
 // за него няма безопасна реализация — така retry-ите не изкривяват
 // честотата на цветовете/шаблоните.
+// При 2 natural anchor цвята (ALL_TRUMPS/NO_TRUMPS) TRIPLE отпада изцяло —
+// форсираме PAIR_PLUS, защото TRIPLE винаги би добавил 3-то anchor.
 export function pickServerAntiBadLuckRescueVariant(
   type: ServerAntiBadLuckRescueType,
   nextRandom: () => number = Math.random,
+  anchorConstraints: ServerAntiBadLuckAnchorConstraints = NO_ANCHOR_CONSTRAINTS,
 ): string {
+  if (type !== 'SUIT' && anchorConstraints.naturalAnchorSuits.length >= 2) {
+    return 'PAIR_PLUS'
+  }
+
   return pickRandom(getTypeVariants(type), nextRandom)
 }
 
@@ -140,11 +196,15 @@ export function pickServerAntiBadLuckRescue(
   unavailableCardIds: ReadonlySet<string>,
   nextRandom: () => number = Math.random,
   onlyVariant?: string,
+  anchorConstraints: ServerAntiBadLuckAnchorConstraints = NO_ANCHOR_CONSTRAINTS,
 ): ServerAntiBadLuckRescue | null {
   const isAvailable = (cardIds: string[]) => cardIds.every((cardId) => !unavailableCardIds.has(cardId))
   const availableVariants = getTypeVariants(type)
     .filter((variant) => onlyVariant === undefined || variant === onlyVariant)
-    .map((variant) => ({ variant, triples: getTypeCandidates(type, variant).filter(isAvailable) }))
+    .map((variant) => ({
+      variant,
+      triples: getTypeCandidates(type, variant, anchorConstraints).filter(isAvailable),
+    }))
     .filter(({ triples }) => triples.length > 0)
 
   if (availableVariants.length === 0) {
