@@ -16,6 +16,7 @@ import {
   createEmptyTrickState,
   createEmptyWonTricks,
 } from './createServerRoundDefaults.js'
+import { createEmptyServerAntiBadLuckState } from './antiBadLuck/serverAntiBadLuckTypes.js'
 
 function getTeamBySeat(seat: Seat): Team {
   return seat === 'bottom' || seat === 'top' ? 'A' : 'B'
@@ -78,5 +79,6 @@ export function createInitialAuthoritativeGameState(
       carryOver: createEmptyCarryOverPoints(),
     },
     timer: createEmptyTimerState(),
+    antiBadLuck: createEmptyServerAntiBadLuckState(),
   }
 }

@@ -1,4 +1,5 @@
 import type { Seat, Team } from '../core/serverTypes.js'
+import type { ServerAntiBadLuckState } from './antiBadLuck/serverAntiBadLuckTypes.js'
 import type { ServerDeclarationPublicLabel } from './declarations/serverDeclarationTypes.js'
 import type { AuthoritativePhaseType } from './serverPhaseTypes.js'
 
@@ -194,4 +195,7 @@ export type ServerAuthoritativeGameState = {
     carryOver: ServerCarryOverPoints
   }
   timer: ServerTimerState
+  // Server-only Anti Bad Luck (seat-based). Optional за legacy persisted
+  // states — липсващ = празен state. Никога не се изпраща към клиента.
+  antiBadLuck?: ServerAntiBadLuckState
 }

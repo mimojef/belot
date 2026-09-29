@@ -24,6 +24,7 @@
     "check:worker-candidate-apply": "tsx scripts/checkGameWorkerCandidateApply.ts && tsx scripts/checkGameWorkerCandidateApplyIntegration.ts",
     "check:matchmaking-blocked-partnership": "tsx scripts/checkMatchmakingBlockedPartnership.ts",
     "check:matchmaking-preview-bot-fallback": "tsx scripts/checkMatchmakingPreviewBotFallback.ts",
+    "check:anti-bad-luck": "tsx scripts/checkAntiBadLuck.ts",
     "check:private-room-deterministic-seat-mapping": "tsx scripts/checkPrivateRoomDeterministicSeatMapping.ts",
     "check:private-room-bot-ownership": "tsx scripts/checkPrivateRoomBotOwnership.ts",
     "check:private-room-team-join-choice": "tsx scripts/checkPrivateRoomTeamJoinChoice.ts",
