@@ -890,9 +890,12 @@ check('[10-color] След подаване в Y → color-сигнал рабо
     ),
   ]
 
+  // Изчистено ♦ (първо изчистване) → цветен сигнал към ♥. ♦ е
+  // firstDiscardedSuitByPartner → никога цел (checkPartnerFirstDiscardExclusion.ts).
   const botHand: ServerCard[] = [
     makeCard('clubs', 'A'),
     makeCard('diamonds', 'K'),
+    makeCard('hearts', 'K'),
   ]
 
   const state = makeBaseState({
@@ -905,7 +908,21 @@ check('[10-color] След подаване в Y → color-сигнал рабо
 
   const result = pickServerBotPlayCard(state, BOT)
   assert(result !== null, 'Трябва да върне карта')
-  assertEqual(result!.suit, 'diamonds', 'Боя (color-сигнал печели след изпълнен план)')
+  assertEqual(result!.suit, 'hearts', 'Боя (color-сигнал печели след изпълнен план)')
+
+  // Без ♥ → fallback, но никога първата изчистена ♦.
+  const withoutTarget = pickServerBotPlayCard(
+    makeBaseState({
+      botSeat: BOT,
+      hand: [makeCard('clubs', 'A'), makeCard('diamonds', 'K')],
+      bidEntries: COMBO_ENTRIES,
+      winningBid: BOT_ALL_TRUMPS_WIN,
+      completedTricks,
+    }),
+    BOT,
+  )
+  assert(withoutTarget !== null, 'Трябва да върне карта')
+  assert(withoutTarget!.suit !== 'diamonds', 'Първата изчистена боя (♦) не е цел за търсене на партньора')
 })
 
 // [11] Симетрия: различни X/Y/Z комбинации, без hardcode

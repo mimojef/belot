@@ -227,6 +227,8 @@
     "check:strict-mode-bidding": "tsx scripts/checkStrictModeBidding.ts",
     "check:partner-raise-all-trumps-bid": "tsx scripts/checkPartnerRaiseAllTrumpsBid.ts",
     "check:partner-raise-all-trumps-lead": "tsx scripts/checkPartnerRaiseAllTrumpsLead.ts",
+    "check:partner-first-discard-exclusion": "tsx scripts/checkPartnerFirstDiscardExclusion.ts",
+    "check:bot-cashable-master-lead": "tsx scripts/checkBotCashableMasterLead.ts",
     "check:orphan-room-binding-cleanup": "tsx scripts/checkOrphanRoomBindingCleanup.ts",
     "check:animated-emoji-cache-busting": "tsx scripts/checkAnimatedEmojiCacheBusting.ts",
     "backup:db": "tsx scripts/backupDatabase.ts",

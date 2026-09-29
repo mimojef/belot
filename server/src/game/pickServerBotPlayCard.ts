@@ -592,6 +592,104 @@ function partnerSignaledSuit(
 }
 
 /**
+ * Карта, която при този договор е ДИРЕКТНА заявка „търси ме тук“, а не
+ * изчистване/цветен сигнал (същите рангове като partnerMandatoryRequestedSuit;
+ * при всичко коз 9-ката също не е цветен сигнал — виж
+ * partnerAllTrumpsColorSignaledSuitOrder).
+ */
+function isDirectRequestDiscard(card: ServerCard, contract: Contract): boolean {
+  if (contract === 'all-trumps') return card.rank === 'J' || card.rank === '9'
+  if (contract === 'no-trumps') return card.rank === 'A'
+  return card.rank === 'J' || card.rank === 'A'
+}
+
+/**
+ * firstDiscardedSuitByPartner — първата боя, която партньорът е изчистил
+ * (цветен сигнал, не директна заявка) на взятка на нашия отбор в ТЕКУЩОТО
+ * раздаване. HARD EXCLUSION: никой по-късен сигнал не може да я избере като
+ * боя, в която да търсим партньора. Извежда се от completedTricks, които се
+ * нулират при всяко ново раздаване → state-ът е per partner, per deal.
+ */
+function getFirstDiscardedSuitByPartner(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerSuit | null {
+  const partner = getPartnerSeat(seat)
+
+  for (const trick of state.playing?.completedTricks ?? []) {
+    if (trick.winnerSeat !== seat && trick.winnerSeat !== partner) continue
+
+    const ledSuit = trick.plays[0]?.card.suit
+    const card = trick.plays.find(p => p.seat === partner)?.card
+    if (!ledSuit || !card) continue
+    if (card.suit === ledSuit || card.suit === trumpSuit) continue
+    if (isDirectRequestDiscard(card, contract)) continue
+
+    return card.suit
+  }
+
+  return null
+}
+
+/**
+ * Подреден списък от бои, в които да търсим партньора по неговите
+ * изчиствания. Първо е резултатът от съществуващото правило (`primarySuit`),
+ * освен ако е firstDiscardedSuitByPartner. След него — fallback боите:
+ * без първата изчистена, без коз, без бои, с които ботът е водил, без опасни;
+ * неизчистените от партньора са преди по-късно изчистените.
+ *
+ * Пример (ботът води ♣, партньорът чисти ♥, после ♦): [♠, ♦], никога ♥.
+ * Само ♥ изчистена: [♦, ♠].
+ */
+function partnerDiscardSignalSuitOrder(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+  primarySuit: ServerSuit | null,
+): ServerSuit[] {
+  const excludedSuit = getFirstDiscardedSuitByPartner(seat, state, trumpSuit, contract)
+
+  if (!excludedSuit) {
+    return primarySuit ? [primarySuit] : []
+  }
+
+  const partner = getPartnerSeat(seat)
+  const tricks = state.playing?.completedTricks ?? []
+  const botLeadSuits = new Set(
+    tricks
+      .filter(t => t.leaderSeat === seat)
+      .map(t => t.plays[0]?.card.suit)
+      .filter((s): s is ServerSuit => !!s),
+  )
+  const partnerDiscardedSuits = new Set(
+    tricks
+      .filter(t => t.winnerSeat === seat || t.winnerSeat === partner)
+      .map(t => ({ led: t.plays[0]?.card.suit, card: t.plays.find(p => p.seat === partner)?.card }))
+      .filter(({ led, card }) => !!led && !!card && card.suit !== led)
+      .map(({ card }) => card!.suit),
+  )
+  const dangerSuits = getDangerSuits(seat, state)
+  const order: ServerSuit[] = primarySuit && primarySuit !== excludedSuit ? [primarySuit] : []
+
+  const fallbackSuits = ALL_SUITS.filter(s =>
+    s !== excludedSuit &&
+    s !== trumpSuit &&
+    !order.includes(s) &&
+    !botLeadSuits.has(s) &&
+    !dangerSuits.has(s),
+  )
+
+  return [
+    ...order,
+    ...fallbackSuits.filter(s => !partnerDiscardedSuits.has(s)),
+    ...fallbackSuits.filter(s => partnerDiscardedSuits.has(s)),
+  ]
+}
+
+/**
  * Силен директен сигнал от партньорска изчистена карта.
  *
  * Четем само последната взятка, спечелена от нашия отбор.
@@ -644,33 +742,83 @@ function partnerMandatoryRequestedSuit(
 
 // ─── Suit scoring: how attractive is a suit to lead? ─────────────────────────
 
-function partnerAllTrumpsColorSignaledSuit(
+/**
+ * Цветен сигнал при всичко коз (последната наша взятка) като подреден списък:
+ * целта по правилото „другата боя от същия цвят“, освен ако е
+ * firstDiscardedSuitByPartner, после fallback боите
+ * (виж partnerDiscardSignalSuitOrder). Празен списък = няма сигнал.
+ */
+function partnerAllTrumpsColorSignaledSuitOrder(
   seat: Seat,
   state: ServerAuthoritativeGameState,
-): ServerSuit | null {
+): ServerSuit[] {
   const partner = getPartnerSeat(seat)
   const tricks = state.playing?.completedTricks ?? []
   const ourWonTricks = tricks.filter(
     t => t.winnerSeat === seat || t.winnerSeat === partner
   )
   const lastOurTrick = ourWonTricks[ourWonTricks.length - 1]
-  if (!lastOurTrick) return null
+  if (!lastOurTrick) return []
 
   const leadSuit = lastOurTrick.plays[0]?.card.suit
-  if (!leadSuit) return null
+  if (!leadSuit) return []
 
   const partnerPlay = lastOurTrick.plays.find(p => p.seat === partner)
-  if (!partnerPlay) return null
+  if (!partnerPlay) return []
 
   const card = partnerPlay.card
   if (card.suit === leadSuit || card.rank === 'J' || card.rank === '9') {
-    return null
+    return []
   }
 
   const targetSuit = resolveColorSignal(card.suit, seat, state)
-  if (!targetSuit) return null
 
-  return targetSuit
+  return partnerDiscardSignalSuitOrder(seat, state, null, 'all-trumps', targetSuit)
+}
+
+function chooseAllTrumpsColorSignaledLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  for (const suit of partnerAllTrumpsColorSignaledSuitOrder(seat, state)) {
+    const suitCards = bySuit(validCards, suit)
+    if (suitCards.length > 0) {
+      return highestCard(suitCards, trumpSuit, contract)
+    }
+  }
+
+  return null
+}
+
+// Сигнал от изчиствания при боя/безкоз: подреденият списък от
+// partnerDiscardSignalSuitOrder — всяка следваща боя е fallback, ако за
+// предходната няма безопасна карта.
+function choosePartnerDiscardSignaledLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  const order = partnerDiscardSignalSuitOrder(
+    seat,
+    state,
+    trumpSuit,
+    contract,
+    partnerSignaledSuit(seat, state, trumpSuit),
+  )
+
+  for (const suit of order) {
+    const signaledCard = chooseSafeSignaledLeadCard(seat, state, validCards, suit, trumpSuit, contract)
+    if (signaledCard) {
+      return signaledCard
+    }
+  }
+
+  return null
 }
 
 /**
@@ -1598,6 +1746,45 @@ function chooseNoTrumpsSafeDevelopmentLead(
 
 // ─── Leading strategy ─────────────────────────────────────────────────────────
 
+/**
+ * Сигурна властна карта от ВЕЧЕ РАЗИГРАВАНА боя (боя, водена поне веднъж в
+ * текущото раздаване), която да приберем преди да отваряме нова боя или да
+ * изпълняваме партньорски сигнал.
+ *
+ * „Властна“ = isCardMaster спрямо всички излезли карти, с подредбата на
+ * режима (без коз: A-10-K-Q-J-9-8-7; всичко коз / коз: J-9-A-10-K-Q-8-7; при
+ * боя некозова карта не е властна, ако противник може да цака). Неразигравани
+ * бои се пропускат, за да не превърнем всяка начална висока карта в
+ * приоритет над останалата стратегия. Козовете при боя се пазят за контрол.
+ * Изчислява се наново при всеки ход → след всяка взятка ръката се преоценява.
+ */
+function chooseCashableMasterLead(
+  seat: Seat,
+  state: ServerAuthoritativeGameState,
+  validCards: ServerCard[],
+  trumpSuit: ServerSuit | null,
+  contract: Contract,
+): ServerCard | null {
+  const ledSuits = new Set(
+    (state.playing?.completedTricks ?? [])
+      .map(trick => trick.plays[0]?.card.suit)
+      .filter((suit): suit is ServerSuit => !!suit),
+  )
+
+  const masters = validCards.filter(c =>
+    ledSuits.has(c.suit) &&
+    !(contract === 'suit' && c.suit === trumpSuit) &&
+    !isUnsafeTenLeadInPlainSuit(c, seat, state, trumpSuit, contract) &&
+    isCardMaster(c, seat, state, trumpSuit, contract)
+  )
+
+  if (masters.length === 0) return null
+
+  return masters.reduce((best, c) =>
+    dumpValue(c, trumpSuit, contract) > dumpValue(best, trumpSuit, contract) ? c : best
+  )
+}
+
 function isDefendingSuitContract(
   seat: Seat,
   state: ServerAuthoritativeGameState,
@@ -1715,6 +1902,15 @@ function chooseLead(
     return defensiveReturn
   }
 
+  // Защитник при боя: първо прибираме сигурната властна карта от вече
+  // разиграна боя, после водим синглетон за цакане.
+  if (isDefendingSuitContract(seat, state, contract)) {
+    const cashableMaster = chooseCashableMasterLead(seat, state, validCards, trumpSuit, contract)
+    if (cashableMaster) {
+      return cashableMaster
+    }
+  }
+
   const defensiveSingletonLead = chooseDefensiveSingletonLead(
     seat,
     state,
@@ -1790,6 +1986,16 @@ function chooseLead(
     }
   }
 
+  // Сигурна властна карта от вече разиграна боя — преди партньорските
+  // сигнали. Не важи за безкоз на обявилия отбор: там
+  // chooseNoTrumpsDeclarerControlLead по-горе управлява входовете.
+  if (contract !== 'all-trumps' && !shouldHoldNoTrumpsMasters) {
+    const cashableMaster = chooseCashableMasterLead(seat, state, validCards, trumpSuit, contract)
+    if (cashableMaster) {
+      return cashableMaster
+    }
+  }
+
   if (contract !== 'all-trumps') {
     const mandatorySuit = partnerMandatoryRequestedSuit(seat, state, trumpSuit, contract)
     if (mandatorySuit) {
@@ -1799,19 +2005,9 @@ function chooseLead(
       }
     }
 
-    const signaled = partnerSignaledSuit(seat, state, trumpSuit)
-    if (signaled) {
-      const signaledCard = chooseSafeSignaledLeadCard(
-        seat,
-        state,
-        validCards,
-        signaled,
-        trumpSuit,
-        contract,
-      )
-      if (signaledCard) {
-        return signaledCard
-      }
+    const signaledCard = choosePartnerDiscardSignaledLead(seat, state, validCards, trumpSuit, contract)
+    if (signaledCard) {
+      return signaledCard
     }
   }
 
@@ -1860,22 +2056,12 @@ function chooseLead(
     }
 
     // ── Rule 4: Сигнализирана боя (висока карта на партньора на наша взятка)
-    const signaled =
+    const signaledCard =
       contract === 'no-trumps' || contract === 'suit'
-        ? partnerSignaledSuit(seat, state, trumpSuit)
+        ? choosePartnerDiscardSignaledLead(seat, state, validCards, trumpSuit, contract)
         : null
-    if (signaled) {
-      const signaledCard = chooseSafeSignaledLeadCard(
-        seat,
-        state,
-        validCards,
-        signaled,
-        trumpSuit,
-        contract,
-      )
-      if (signaledCard) {
-        return signaledCard
-      }
+    if (signaledCard) {
+      return signaledCard
     }
   }
 
@@ -1952,12 +2138,9 @@ function chooseLead(
         }
       }
 
-      const earlyColorSignaledSuit = partnerAllTrumpsColorSignaledSuit(seat, state)
-      if (earlyColorSignaledSuit) {
-        const colorSignaledCards = bySuit(validCards, earlyColorSignaledSuit)
-        if (colorSignaledCards.length > 0) {
-          return highestCard(colorSignaledCards, trumpSuit, contract)
-        }
+      const earlyColorSignaledCard = chooseAllTrumpsColorSignaledLead(seat, state, validCards, trumpSuit, contract)
+      if (earlyColorSignaledCard) {
+        return earlyColorSignaledCard
       }
 
       const longSuitUnlock = chooseAllTrumpsDeclarerLongSuitUnlock(state, validCards)
@@ -2024,12 +2207,9 @@ function chooseLead(
       }
 
       // Никой цвят не е безопасен → най-ниската карта (не даряваме 9-ки)
-      const colorSignaledSuit = partnerAllTrumpsColorSignaledSuit(seat, state)
-      if (colorSignaledSuit) {
-        const colorSignaledCards = bySuit(validCards, colorSignaledSuit)
-        if (colorSignaledCards.length > 0) {
-          return highestCard(colorSignaledCards, trumpSuit, contract)
-        }
+      const colorSignaledCard = chooseAllTrumpsColorSignaledLead(seat, state, validCards, trumpSuit, contract)
+      if (colorSignaledCard) {
+        return colorSignaledCard
       }
 
       return lowestCard(validCards, trumpSuit, contract)
@@ -2090,6 +2270,13 @@ function chooseLead(
       )
       if (masterNines.length > 0) {
         return masterNines[0]!
+      }
+
+      // Стъпка 2б: сигурна властна карта от вече разиграна боя (напр. A след
+      //   излезли J и 9) — преди атаката „9 без J“ и преди най-малката карта.
+      const cashableMaster = chooseCashableMasterLead(seat, state, validCards, trumpSuit, contract)
+      if (cashableMaster) {
+        return cashableMaster
       }
 
       // Стъпка 3: имаме ли 9 без J → водим с НАЙ-МАЛКАТА карта от същия цвят
