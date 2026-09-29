@@ -185,7 +185,7 @@ export type ForceRemoveTeamResult =
     }
   | {
       ok: false
-      reason: 'tournament_not_found' | 'tournament_not_open' | 'team_not_found' | 'team_not_complete'
+      reason: 'tournament_not_found' | 'tournament_not_open' | 'team_not_found' | 'team_not_complete' | 'cannot_force_remove_self'
     }
 
 // Creator/admin moderation removal на единичен forming-team participant
@@ -206,7 +206,13 @@ export type ForceRemoveEntryResult =
     }
   | {
       ok: false
-      reason: 'tournament_not_found' | 'tournament_not_open' | 'entry_not_found' | 'entry_not_confirmed' | 'team_not_forming'
+      reason:
+        | 'tournament_not_found'
+        | 'tournament_not_open'
+        | 'entry_not_found'
+        | 'entry_not_confirmed'
+        | 'team_not_forming'
+        | 'cannot_force_remove_self'
     }
 
 export type StartTournamentResult =
@@ -4317,6 +4323,16 @@ export async function createTournamentEconomyStore(
         }
 
         const members = selectConfirmedEntriesForTeamStatement.all(teamId) as TournamentEntryRow[]
+
+        // Moderation removal е само за ДРУГИ участници. Actor-ът в собствения
+        // си отбор трябва да ползва leaveTournamentAndRefundAtomically
+        // („Откажи участие“) — иначе би блокирал себе си и партньора си.
+        // ROLLBACK преди каквато и да е промяна: без refund/block/notice/event.
+        if (members.some((member) => member.profile_id === actorProfileId)) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'cannot_force_remove_self' }
+        }
+
         const actorIsCreator = freshTournament.creator_profile_id === actorProfileId
         const noticeReason = actorIsCreator ? 'force_removed_by_creator' : 'force_removed_by_admin'
         const actorRole: 'player' | 'admin' = actorIsCreator ? 'player' : 'admin'
@@ -4431,6 +4447,13 @@ export async function createTournamentEconomyStore(
         if (entryRow === undefined || entryRow.tournament_id !== tournamentId) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'entry_not_found' }
+        }
+        // Moderation removal е само за ДРУГИ участници — собственото отписване
+        // минава през leaveTournamentAndRefundAtomically („Откажи участие“).
+        // ROLLBACK преди каквато и да е промяна: без refund/block/notice/event.
+        if (entryRow.profile_id === actorProfileId) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'cannot_force_remove_self' }
         }
         if (entryRow.status !== 'confirmed') {
           database.exec('ROLLBACK;')

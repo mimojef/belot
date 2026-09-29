@@ -765,13 +765,18 @@ function renderTournamentTeamModerateButton(kind: 'team' | 'entry', targetId: st
   `
 }
 
-function renderTournamentTeamCard(
+// Export-нат за regression теста checkTournamentSelfForceRemove.ts.
+export function renderTournamentTeamCard(
   team: TournamentDetailSnapshot['teams'][number],
   label: string,
   canModerateTeams: boolean,
+  viewerProfileId: string | null,
 ): string {
   const isComplete = team.status !== 'forming'
-  const moderateButton = !canModerateTeams
+  // Moderation е само за ДРУГИ участници — за собствения отбор/запис viewer-ът
+  // ползва „Откажи участие“ (сървърът връща cannot_force_remove_self).
+  const viewerIsMember = viewerProfileId !== null && team.members.some((member) => member.profileId === viewerProfileId)
+  const moderateButton = !canModerateTeams || viewerIsMember
     ? ''
     : isComplete
       ? renderTournamentTeamModerateButton('team', team.teamId)
@@ -816,7 +821,7 @@ function renderTournamentPendingShuffleEntrantsList(t: TournamentDetailSnapshot)
   `
 }
 
-function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
+function renderTournamentTeamsList(t: TournamentDetailSnapshot, viewerProfileId: string | null): string {
   if (t.shuffleEnabled && t.teamsShuffledAt === null) {
     return renderTournamentPendingShuffleEntrantsList(t)
   }
@@ -826,7 +831,7 @@ function renderTournamentTeamsList(t: TournamentDetailSnapshot): string {
   const labelMap = buildTournamentTeamLabelMap(t.teams)
   return `
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;">
-      ${t.teams.map((team) => renderTournamentTeamCard(team, labelMap.get(team.teamId) ?? '', t.viewer.canModerateTeams)).join('')}
+      ${t.teams.map((team) => renderTournamentTeamCard(team, labelMap.get(team.teamId) ?? '', t.viewer.canModerateTeams, viewerProfileId)).join('')}
     </div>
   `
 }
@@ -1281,7 +1286,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
 
       <div style="background:#0d0d0d;border:1px solid rgba(255,255,255,0.1);border-radius:10px;padding:16px;margin-bottom:14px;">
         <div style="font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:8px;">${t.shuffleEnabled && t.teamsShuffledAt === null ? 'Участници' : 'Отбори'}</div>
-        ${renderTournamentTeamsList(t)}
+        ${renderTournamentTeamsList(t, state.profile.profileId)}
       </div>
 
       ${renderTournamentPartnerPanel(state, t)}

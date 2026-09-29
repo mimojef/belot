@@ -14647,6 +14647,7 @@ const FORCE_REMOVE_TEAM_FAILURE_MESSAGES: Record<string, string> = {
   tournament_not_open: 'Турнирът вече не може да бъде модерирана — не е в статус „Записване".',
   team_not_found: 'Отборът не е намерен.',
   team_not_complete: 'Отборът не е готов и не може да бъде отписан по този начин.',
+  cannot_force_remove_self: 'За да се отпишете от турнира, използвайте „Откажи участие“.',
 }
 
 async function handleTournamentForceRemoveTeamRequest(
@@ -14749,6 +14750,7 @@ const FORCE_REMOVE_ENTRY_FAILURE_MESSAGES: Record<string, string> = {
   entry_not_found: 'Играчът не е намерен.',
   entry_not_confirmed: 'Играчът вече не участва активно в турнира.',
   team_not_forming: 'Играчът вече е в готов отбор и не може да бъде отписан по този начин.',
+  cannot_force_remove_self: 'За да се отпишете от турнира, използвайте „Откажи участие“.',
 }
 
 async function handleTournamentForceRemoveEntryRequest(
