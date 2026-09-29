@@ -6,12 +6,13 @@
 
 import type { Seat } from '../../core/serverTypes.js'
 
-export const SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD = 3
+// Seat става pending след толкова поредни BAD първи 5 карти.
+export const SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD = 5
 
 export type ServerAntiBadLuckSeatState = {
   consecutiveBadDeals: number
   // dealIndex, в който seat-ът е достигнал прага — по-малко = по-стар pending
-  // (приоритет при двама pending партньори). null = не е pending.
+  // (приоритет в опашката за единствения rescue на раздаване). null = не е pending.
   pendingSinceDealIndex: number | null
 }
 

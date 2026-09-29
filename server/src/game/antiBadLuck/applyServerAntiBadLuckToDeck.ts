@@ -5,9 +5,11 @@
 // Flow:
 //  1. Естествените първи 5 на всеки seat се изчисляват от позициите в deck-а
 //     (симулация със същия dealServerCardsInPackets: 3 + 2 от firstDealSeat).
-//  2. Rescue кандидат = pending seat (>= 3 поредни BAD), чиито естествени първи
+//  2. Rescue кандидат = pending seat (>= 5 поредни BAD), чиито естествени първи
 //     5 са отново BAD. Естествен GOOD → без rescue, counter = 0.
-//  3. Максимум 1 rescue на отбор: по-стар pending печели, равенство → random.
+//  3. Максимум 1 rescue на цялото раздаване (без значение от отбора): по-стар
+//     pending печели, равенство → seeded random. Неизбраните остават pending
+//     със стария си момент (или се нулират при естествен GOOD).
 //  4. При rescue НЯМА повторно разбъркване: rescue карта, която вече е в
 //     първите 5 на seat-а, остава на мястото си; всяка липсваща се swap-ва на
 //     мястото на НАЙ-СЛАБАТА естествена карта от първите 5 според избрания
@@ -23,12 +25,7 @@
 //     остава pending.
 //  6. Streak-овете се обновяват по реално раздадените първи 5.
 
-import {
-  SERVER_TEAM_A_SEATS,
-  SERVER_TEAM_B_SEATS,
-  SERVER_SEAT_ORDER,
-  type Seat,
-} from '../../core/serverTypes.js'
+import { SERVER_SEAT_ORDER, type Seat } from '../../core/serverTypes.js'
 import { shuffleWithRandom } from '../../core/seededRandom.js'
 import { createEmptyHands } from '../createServerRoundDefaults.js'
 import { dealServerCardsInPackets } from '../dealServerCardsInPackets.js'
@@ -98,13 +95,15 @@ function isPending(seatState: ServerAntiBadLuckSeatState): boolean {
   return seatState.pendingSinceDealIndex !== null
 }
 
-function pickTeamRescueSeat(
-  teamSeats: readonly Seat[],
+// Опашка за единствения rescue на раздаването: pending seat-ове с естествено
+// BAD първи 5; най-старият pendingSinceDealIndex печели, при равенство —
+// seeded random (не seat order).
+function pickRescueSeat(
   previous: ServerAntiBadLuckState,
   isNaturalGood: Record<Seat, boolean>,
   nextRandom: () => number,
 ): Seat | null {
-  const candidates = teamSeats.filter(
+  const candidates = SERVER_SEAT_ORDER.filter(
     (seat) => isPending(previous.seats[seat]) && !isNaturalGood[seat],
   )
 
@@ -302,10 +301,8 @@ export function applyServerAntiBadLuckToDeck(
   })
 
   const isNaturalGood = evaluate(deck)
-  const rescueSeats = [
-    pickTeamRescueSeat(SERVER_TEAM_A_SEATS, previous, isNaturalGood, nextRandom),
-    pickTeamRescueSeat(SERVER_TEAM_B_SEATS, previous, isNaturalGood, nextRandom),
-  ].filter((seat): seat is Seat => seat !== null)
+  const rescueSeat = pickRescueSeat(previous, isNaturalGood, nextRandom)
+  const rescueSeats: Seat[] = rescueSeat ? [rescueSeat] : []
 
   // Основният тип се тегли веднъж на seat (строго 1/3) и е фиксиран за всички
   // retry-и по-долу. Цветът (1/4) / шаблонът (1/2) е предпочитан — сменя се в

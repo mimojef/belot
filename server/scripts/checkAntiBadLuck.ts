@@ -4,11 +4,14 @@
  *
  * [1] GOOD detection: AAA, AA10, JJJ, JJ9, SUIT (J + >= 31)
  * [2] BAD detection: AA10 с чужда 10, JJ9 с чужда 9, >= 31 без J, J + < 31
- * [3] BAD streak: BAD×3 → pending, GOOD reset, естествен GOOD отменя rescue
- * [4] Team arbitration: противници заедно, партньори никога, стар pending,
- *     равен pending → random
+ * [3] BAD streak: BAD×4 → още не, BAD×5 → pending, GOOD reset, естествен GOOD
+ *     отменя rescue
+ * [4] Pending опашка: максимум 1 rescue на раздаване за цялата маса (без
+ *     значение от отбора), най-стар pending печели, равен момент → seeded
+ *     random, неизбраните остават pending със стария момент (или reset при
+ *     естествен GOOD), failed rescue запазва pending
  * [5] Bots: permanent bot / bot takeover / reclaim / JSON restore пазят state
- * [6] Deck invariants: 32 уникални карти, два rescue-а без обща карта, без
+ * [6] Deck invariants: 32 уникални карти, максимум 1 rescue на раздаване, без
  *     secondary shuffle — променят се само необходимите swap позиции,
  *     естествено GOOD seat без rescue не губи GOOD ръката си
  * [7] Rescue output: точно 3 контролирани, 2 естествени неконтролирани,
@@ -116,7 +119,7 @@ function stateWithPending(pending: Partial<Record<Seat, number>>): ServerAntiBad
   const state = createEmptyServerAntiBadLuckState()
   state.dealIndex = 10
   for (const [seat, since] of Object.entries(pending) as Array<[Seat, number]>) {
-    state.seats[seat] = { consecutiveBadDeals: 3 + (10 - since), pendingSinceDealIndex: since }
+    state.seats[seat] = { consecutiveBadDeals: 5 + (10 - since), pendingSinceDealIndex: since }
   }
   return state
 }
@@ -151,83 +154,146 @@ for (const seat of SERVER_SEAT_ORDER) {
 }
 
 // ---------------------------------------------------------------------------
-// [3] BAD streak
+// [3] BAD streak (праг: 5 поредни BAD първи 5)
 // ---------------------------------------------------------------------------
+const goodBottomDeck = buildDeck({ ...BAD_HANDS, bottom: ['clubs-A', 'diamonds-A', 'spades-A', 'hearts-7', 'clubs-7'] })
+
+function dealSequence(decks: ServerCard[][], seed: string): ServerAntiBadLuckState {
+  const random = createSeededRandom(seed)
+  let state: ServerAntiBadLuckState | undefined
+  for (const deck of decks) {
+    state = applyServerAntiBadLuckToDeck(deck, FIRST_DEAL_SEAT, state, random).antiBadLuck
+  }
+  return state!
+}
+
 {
   const random = createSeededRandom('streak')
   let state: ServerAntiBadLuckState | undefined
-  for (let deal = 1; deal <= 3; deal += 1) {
+  for (let deal = 1; deal <= 5; deal += 1) {
     const result = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, state, random)
-    check(`[3a] BAD deal ${deal}: deck не е пипан`, result.deck === ALL_BAD_DECK && Object.keys(result.rescues).length === 0)
+    check(`[3a] BAD deal ${deal}: без rescue, deck не е пипан`, result.deck === ALL_BAD_DECK && Object.keys(result.rescues).length === 0)
     state = result.antiBadLuck
+    if (deal === 4) {
+      check('[3b] 4 поредни BAD → counter 4, още НЕ е pending', SERVER_SEAT_ORDER.every((seat) => state!.seats[seat].consecutiveBadDeals === 4 && state!.seats[seat].pendingSinceDealIndex === null))
+    }
   }
-  check('[3b] BAD/BAD/BAD → counter 3 за всички', SERVER_SEAT_ORDER.every((seat) => state!.seats[seat].consecutiveBadDeals === 3))
-  check('[3c] BAD/BAD/BAD → pending от deal 3', SERVER_SEAT_ORDER.every((seat) => state!.seats[seat].pendingSinceDealIndex === 3))
+  check('[3c] 5 поредни BAD → counter 5, pending от deal 5', SERVER_SEAT_ORDER.every((seat) => state!.seats[seat].consecutiveBadDeals === 5 && state!.seats[seat].pendingSinceDealIndex === 5))
 
-  // GOOD reset
-  const goodBottomDeck = buildDeck({ ...BAD_HANDS, bottom: ['clubs-A', 'diamonds-A', 'spades-A', 'hearts-7', 'clubs-7'] })
-  let resetState = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, undefined, random).antiBadLuck
-  resetState = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, resetState, random).antiBadLuck
-  resetState = applyServerAntiBadLuckToDeck(goodBottomDeck, FIRST_DEAL_SEAT, resetState, random).antiBadLuck
-  check('[3d] BAD/BAD/GOOD → counter 0, не е pending', resetState.seats.bottom.consecutiveBadDeals === 0 && resetState.seats.bottom.pendingSinceDealIndex === null)
-  check('[3e] BAD/BAD/BAD за другите → pending', resetState.seats.top.pendingSinceDealIndex === 3)
+  const resetState = dealSequence([ALL_BAD_DECK, ALL_BAD_DECK, ALL_BAD_DECK, ALL_BAD_DECK, goodBottomDeck], 'reset')
+  check('[3d] BAD×4, после GOOD → counter 0, не е pending', resetState.seats.bottom.consecutiveBadDeals === 0 && resetState.seats.bottom.pendingSinceDealIndex === null)
+  check('[3e] BAD×5 за другите → pending от deal 5', resetState.seats.top.pendingSinceDealIndex === 5 && resetState.seats.top.consecutiveBadDeals === 5)
 
-  // Естествен GOOD след 3 BAD отменя rescue
-  const onlyBottomPending = stateWithPending({ bottom: 3 })
+  // След 5 BAD: естествен GOOD на следващото раздаване отменя rescue.
+  const onlyBottomPending = stateWithPending({ bottom: 5 })
   const naturalGood = applyServerAntiBadLuckToDeck(goodBottomDeck, FIRST_DEAL_SEAT, onlyBottomPending, random)
-  check('[3f] естествен GOOD след 3 BAD → без rescue, deck непроменен', naturalGood.deck === goodBottomDeck && !naturalGood.rescues.bottom)
+  check('[3f] след 5 BAD естествен GOOD → без rescue, deck непроменен', naturalGood.deck === goodBottomDeck && !naturalGood.rescues.bottom)
   check('[3g] естествен GOOD → counter 0, pending отпада', naturalGood.antiBadLuck.seats.bottom.consecutiveBadDeals === 0 && naturalGood.antiBadLuck.seats.bottom.pendingSinceDealIndex === null)
 
-  // Естествен BAD след 3 BAD → rescue в същото раздаване
+  // След 5 BAD: естествен BAD → rescue в същото раздаване.
   const rescued = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, onlyBottomPending, random)
-  check('[3h] естествен BAD след 3 BAD → rescue', !!rescued.rescues.bottom && isServerGoodFirstFive(firstFive(rescued.deck, 'bottom')))
-  check('[3i] след rescue → counter 0', rescued.antiBadLuck.seats.bottom.consecutiveBadDeals === 0 && rescued.antiBadLuck.seats.bottom.pendingSinceDealIndex === null)
-  check('[3j] counter < 3 не дава rescue', Object.keys(applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, undefined, random).rescues).length === 0)
+  check('[3h] след 5 BAD естествен BAD → rescue', !!rescued.rescues.bottom && isServerGoodFirstFive(firstFive(rescued.deck, 'bottom')))
+  check('[3i] след успешен rescue → counter 0, pending изчистен', rescued.antiBadLuck.seats.bottom.consecutiveBadDeals === 0 && rescued.antiBadLuck.seats.bottom.pendingSinceDealIndex === null)
+
+  const fourBad = dealSequence([ALL_BAD_DECK, ALL_BAD_DECK, ALL_BAD_DECK, ALL_BAD_DECK], 'four')
+  const fifthDeal = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, fourBad, random)
+  check('[3j] counter 4 (< 5) не дава rescue в 5-тото раздаване', Object.keys(fifthDeal.rescues).length === 0)
 }
 
 // ---------------------------------------------------------------------------
-// [4] Team arbitration
+// [4] Pending опашка: максимум 1 rescue на раздаване за цялата маса
 // ---------------------------------------------------------------------------
 {
-  let opponentsBothCount = 0
-  let sameTypePairsResolved = 0
-  let partnersNever = true
+  let maxOnePerDeal = true
+  let opponentsNeverBoth = true
+  let partnersNeverBoth = true
   let olderWins = true
-  const tieWinners = new Set<Seat>()
+  let olderAcrossTeamsWins = true
+  let loserKeepsMoment = true
+  const opponentTieWinners = new Set<Seat>()
+  const partnerTieWinners = new Set<Seat>()
+  const fourWayTieWinners = new Map<Seat, number>()
 
-  for (let seed = 0; seed < 300; seed += 1) {
-    const random = createSeededRandom(`team-${seed}`)
-    const opponents = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 7 }), random)
-    if (opponents.rescues.bottom && opponents.rescues.right) {
-      opponentsBothCount += 1
-      // Един и същ основен тип (JJJ/JJ9 × 2, AAA/AA10 × 2, SUIT × 2) → разрешен в рамките на типа.
-      if (opponents.rescueKinds.bottom?.type === opponents.rescueKinds.right?.type) sameTypePairsResolved += 1
-    }
+  for (let seed = 0; seed < 400; seed += 1) {
+    const random = createSeededRandom(`queue-${seed}`)
 
-    const all = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, top: 5, right: 6, left: 6 }), random)
-    const rescuedSeats = Object.keys(all.rescues) as Seat[]
-    partnersNever &&= rescuedSeats.length >= 1 && new Set(rescuedSeats.map(teamOf)).size === rescuedSeats.length
-    rescuedSeats.filter((seat) => teamOf(seat) === 'A').forEach((seat) => tieWinners.add(seat))
+    const all = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5, top: 5, left: 5 }), random)
+    const allRescued = Object.keys(all.rescues) as Seat[]
+    maxOnePerDeal &&= allRescued.length === 1 && Object.keys(all.rescueKinds).length === 1
+    allRescued.forEach((seat) => fourWayTieWinners.set(seat, (fourWayTieWinners.get(seat) ?? 0) + 1))
 
+    const opponents = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5 }), random)
+    opponentsNeverBoth &&= Object.keys(opponents.rescues).length === 1
+    Object.keys(opponents.rescues).forEach((seat) => opponentTieWinners.add(seat as Seat))
+
+    const partners = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, top: 5 }), random)
+    partnersNeverBoth &&= Object.keys(partners.rescues).length === 1
+    Object.keys(partners.rescues).forEach((seat) => partnerTieWinners.add(seat as Seat))
+
+    // Партньори: по-старият (top: 4) печели пред по-новия (bottom: 8).
     const older = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ top: 4, bottom: 8 }), random)
     olderWins &&= !!older.rescues.top && !older.rescues.bottom
-    olderWins &&= older.antiBadLuck.seats.bottom.pendingSinceDealIndex === 8 || older.antiBadLuck.seats.bottom.pendingSinceDealIndex === null
+
+    // Противници: по-старият (right: 3) печели пред bottom (6) и left (7).
+    const olderAcross = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 6, right: 3, left: 7 }), random)
+    olderAcrossTeamsWins &&= Object.keys(olderAcross.rescues).length === 1 && !!olderAcross.rescues.right
+
+    // Неизбраният pending с естествено BAD запазва стария момент (counter + 1).
+    for (const [seat, since, previousCount] of [['bottom', 6, 9], ['left', 7, 8]] as const) {
+      const seatState = olderAcross.antiBadLuck.seats[seat]
+      loserKeepsMoment &&= isServerGoodFirstFive(firstFive(olderAcross.deck, seat))
+        ? seatState.pendingSinceDealIndex === null
+        : seatState.pendingSinceDealIndex === since && seatState.consecutiveBadDeals === previousCount + 1
+    }
   }
 
-  // Без естествено GOOD ръце всяка двойка основни типове има валидна реализация
-  // → двойният rescue е задължителен всеки път.
-  check(`[4a] двама противници получават rescue едновременно (${opponentsBothCount}/300)`, opponentsBothCount === 300)
-  check(`[4a2] еднакъв основен тип при двамата се разрешава в типа (${sameTypePairsResolved} случая)`, sameTypePairsResolved > 60)
-  check('[4b] двама партньори никога не получават rescue заедно', partnersNever)
-  check('[4c] по-старият pending има приоритет; другият остава pending (или GOOD)', olderWins)
-  check('[4d] равен pending момент → random (и bottom, и top печелят)', tieWinners.has('bottom') && tieWinners.has('top'))
+  check('[4a] максимум 1 rescue на раздаване (4 pending seats, 400 seeds)', maxOnePerDeal)
+  check('[4b] двама pending противници НЕ получават rescue едновременно', opponentsNeverBoth)
+  check('[4c] двама pending партньори НЕ получават rescue едновременно', partnersNeverBoth)
+  check('[4d] най-старият pending печели (партньори)', olderWins)
+  check('[4e] най-старият pending печели независимо от отбора', olderAcrossTeamsWins)
+  check('[4f] равен момент при противници → seeded random (и двамата печелят)', opponentTieWinners.has('bottom') && opponentTieWinners.has('right'))
+  check('[4g] равен момент при партньори → seeded random (и двамата печелят)', partnerTieWinners.has('bottom') && partnerTieWinners.has('top'))
+  check(`[4h] равен момент при 4 seats → всеки печели (${SERVER_SEAT_ORDER.map((seat) => `${seat} ${fourWayTieWinners.get(seat) ?? 0}`).join(', ')})`,
+    SERVER_SEAT_ORDER.every((seat) => (fourWayTieWinners.get(seat) ?? 0) > 60))
+  check('[4i] неизбран pending с естествено BAD запазва стария pending момент', loserKeepsMoment)
 
-  const partner = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, top: 5 }), createSeededRandom('partner'))
-  const loser: Seat = partner.rescues.bottom ? 'top' : 'bottom'
-  const loserGood = isServerGoodFirstFive(firstFive(partner.deck, loser))
-  check('[4e] неизбраният партньор: BAD → остава pending с оригиналния момент', loserGood
-    ? partner.antiBadLuck.seats[loser].pendingSinceDealIndex === null
-    : partner.antiBadLuck.seats[loser].pendingSinceDealIndex === 5)
+  // Детерминизъм: същият seed → същият избор.
+  const first = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5 }), createSeededRandom('same'))
+  const second = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5 }), createSeededRandom('same'))
+  check('[4j] tie-break е seeded: същият seed → същият seat и същото тесте', JSON.stringify(first.rescues) === JSON.stringify(second.rescues) && first.deck.map((card) => card.id).join() === second.deck.map((card) => card.id).join())
+
+  // Неизбран pending с естествено GOOD → reset (top е GOOD, bottom е по-стар и е избран).
+  const topGoodDeck = buildDeck({ ...BAD_HANDS, top: ['clubs-A', 'diamonds-A', 'spades-A', 'hearts-Q', 'spades-Q'] })
+  // (3 от асата са в защитената ръка на top → при NO_TRUMPS rescue за bottom е
+  // невъзможен и bottom остава pending — това не засяга top.)
+  let goodLoserReset = true
+  let bottomRescuedCount = 0
+  for (let seed = 0; seed < 100; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(topGoodDeck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 4, top: 5 }), createSeededRandom(`good-loser-${seed}`))
+    if (result.rescues.bottom) bottomRescuedCount += 1
+    goodLoserReset &&= !result.rescues.top && Object.keys(result.rescues).length <= 1 &&
+      isServerGoodFirstFive(firstFive(result.deck, 'top')) &&
+      result.antiBadLuck.seats.top.pendingSinceDealIndex === null && result.antiBadLuck.seats.top.consecutiveBadDeals === 0 &&
+      (result.rescues.bottom ? result.antiBadLuck.seats.bottom.pendingSinceDealIndex === null : result.antiBadLuck.seats.bottom.pendingSinceDealIndex === 4)
+  }
+  check(`[4k] неизбран pending с естествено GOOD → pending отпада, counter 0 (bottom rescued ${bottomRescuedCount}/100)`, goodLoserReset && bottomRescuedCount > 50)
+
+  // Failed rescue: всяка J и всяко A е в защитена естествено GOOD ръка →
+  // нито SUIT, нито ALL_TRUMPS, нито NO_TRUMPS може да се реализира безопасно.
+  const blockedDeck = buildDeck({
+    bottom: ['hearts-7', 'hearts-8', 'spades-8', 'clubs-Q', 'diamonds-Q'],
+    right: ['clubs-J', 'diamonds-J', 'hearts-J', 'clubs-7', 'diamonds-7'],
+    top: ['clubs-A', 'diamonds-A', 'hearts-A', 'clubs-K', 'diamonds-K'],
+    left: ['spades-J', 'spades-A', 'spades-7', 'clubs-8', 'diamonds-8'],
+  })
+  let failedKeepsPending = true
+  for (let seed = 0; seed < 60; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(blockedDeck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 3 }), createSeededRandom(`blocked-${seed}`))
+    failedKeepsPending &&= !!result.rescueKinds.bottom && Object.keys(result.rescues).length === 0 && result.deck === blockedDeck &&
+      result.antiBadLuck.seats.bottom.pendingSinceDealIndex === 3 && result.antiBadLuck.seats.bottom.consecutiveBadDeals === 13
+  }
+  check('[4l] failed rescue → естествено тесте, seat остава pending със стария момент (не губи приоритет)', failedKeepsPending)
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +335,10 @@ function dealState(room: ServerRoom, antiBadLuck: ServerAntiBadLuckState, seed: 
 
   check('[5a] initial match state → празен antiBadLuck', JSON.stringify(createInitialAuthoritativeGameState(makeRoom({ bottom: 'human', right: 'bot', top: 'human', left: 'bot' })).antiBadLuck) === JSON.stringify(createEmptyServerAntiBadLuckState()))
   check('[5b] permanent bot получава rescue като човек (идентичен резултат)', JSON.stringify(humans.hands) === JSON.stringify(bots.hands) && JSON.stringify(humans.antiBadLuck) === JSON.stringify(bots.antiBadLuck))
-  check('[5c] rescued bot seat има GOOD първи 5', isServerGoodFirstFive(bots.hands.right) && isServerGoodFirstFive(bots.hands.bottom))
+  // Двама pending bots → точно един rescue (опашката), той е GOOD и е reset-нат.
+  const rescuedBots = (['bottom', 'right'] as const).filter((seat) => bots.antiBadLuck.seats[seat].pendingSinceDealIndex === null)
+  check('[5c] 2 pending bot seats → точно един rescued bot seat с GOOD първи 5, другият остава pending',
+    rescuedBots.length === 1 && isServerGoodFirstFive(bots.hands[rescuedBots[0]!]))
 
   // Bot takeover → reclaim → state не се reset-ва.
   const streakState = stateWithPending({ top: 2 })
@@ -403,10 +472,10 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
     }
 
     const rescueIds = new Set(rescuedSeats.flatMap((seat) => result.rescues[seat]!.cardIds))
-    if (rescuedSeats.length === 2) {
+    if (rescuedSeats.length > 1) {
       doubleRescues += 1
-      noSharedCards &&= rescueIds.size === 6
     }
+    noSharedCards &&= rescueIds.size === rescuedSeats.length * 3
 
     const diff = diffAgainstNatural(natural, result)
     onlyNeededPositionsChanged &&= diff.changed.every((index) => diff.allowed.has(index))
@@ -456,7 +525,7 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   const distributionLabel = [3, 2, 1].map((n) => `${n}+${3 - n}=${firstThreeDistribution.get(n) ?? 0}`).join(', ')
 
   check('[6a] винаги 32 уникални карти, естественото тесте не се мутира', allValid)
-  check(`[6b] два едновременни rescue-а без обща карта (${doubleRescues} двойни)`, noSharedCards && doubleRescues > 500)
+  check(`[6b] максимум 1 rescue на раздаване дори при 4 pending seats (${doubleRescues} двойни)`, noSharedCards && doubleRescues === 0)
   check('[6d] няма secondary shuffle: променени са само необходимите swap позиции', onlyNeededPositionsChanged)
   check('[6e] брой променени позиции <= 2 × необходимите swap-ове', swapCountBounded)
   check(`[6f] естествено GOOD seat без rescue остава GOOD (${naturalGoodChecked} случая)`, naturalGoodProtected && naturalGoodChecked > 1000)
