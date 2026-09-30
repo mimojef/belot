@@ -621,7 +621,7 @@ let missionRotationTimeout: ReturnType<typeof setTimeout> | null = null
 // назад + 5 дни operational margin — единствената нужна промяна е тази
 // константа. Дългосрочните profile<->visitor/IP връзки са в compact
 // profile_visitor_links/profile_ip_links (не се purge-ват).
-const SITE_VISIT_RETENTION_DAYS = 90
+const SITE_VISIT_RETENTION_DAYS = 35
 // site_visitors — отделен, по-дълъг срок по last_seen_at: пази first_seen_at/
 // first_referrer/first_source и identity-то на връщащ се visitor.
 const SITE_VISITOR_RETENTION_DAYS = 365
