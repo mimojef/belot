@@ -17,6 +17,7 @@ import {
   type ProfileIdentityValidationCode,
 } from './normalizeProfileIdentityText.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
+import { createProfileVisitLinkWriter } from './profileVisitLinks.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -1055,6 +1056,8 @@ export async function createAuthStore(
     );
   `)
 
+  const profileVisitLinkWriter = createProfileVisitLinkWriter(database)
+
   const insertRegistrationVisitorEventStatement = database.prepare(`
     INSERT OR IGNORE INTO site_visit_events (
       page_view_id,
@@ -1555,13 +1558,19 @@ export async function createAuthStore(
     // регистрация, независимо от mode.
     insertVisitorRegistrationBindingStatement.run(input.visitorId, profileId)
     insertRegistrationVisitorRecordStatement.run(input.visitorId, profileId, profileId)
-    insertRegistrationVisitorEventStatement.run(
-      randomUUID(),
+    const registrationPageViewId = randomUUID()
+    const registrationEventResult = insertRegistrationVisitorEventStatement.run(
+      registrationPageViewId,
       input.visitorId,
       profileId,
       input.ipAddress,
       input.userAgent,
-    )
+    ) as { changes?: number }
+    // Dual-write към compact profile_visitor_links/profile_ip_links — СЪЩАТА
+    // функция като siteVisitStore.recordPageView, в СЪЩАТА транзакция.
+    if (Number(registrationEventResult.changes ?? 0) > 0) {
+      profileVisitLinkWriter.recordLinksForEvent(registrationPageViewId)
+    }
 
     const accountRow: AccountRow = {
       account_id: accountId,

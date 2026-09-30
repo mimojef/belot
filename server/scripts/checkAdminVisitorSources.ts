@@ -22,7 +22,9 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { setTimeout as delay } from 'node:timers/promises'
+import { readFileSync } from 'node:fs'
 import { createSiteVisitStore } from '../src/db/siteVisitStore.js'
+const PROFILE_VISIT_LINKS_MIGRATION_PATH = new URL('../database/migrations/20260930_001_create_profile_visit_links.sql', import.meta.url)
 
 let passed = 0
 let failed = 0
@@ -85,6 +87,8 @@ function makeSchema(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_sve_at ON site_visit_events(occurred_at);
   `)
+  // Compact profile_visitor_links/profile_ip_links (siteVisitStore dual-write) — DDL-ът от самата миграция.
+  db.exec(readFileSync(PROFILE_VISIT_LINKS_MIGRATION_PATH, 'utf8'))
 }
 
 async function withDb(fn: (dbPath: string, db: DatabaseSync) => Promise<void>): Promise<void> {

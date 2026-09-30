@@ -1,3 +1,4 @@
+import { createProfileVisitLinkWriter } from './profileVisitLinks.js'
 import { getSofiaDayBoundsUtc, toSqliteUtc } from './sofiaDayBounds.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -214,6 +215,10 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
       ?
     );
   `)
+
+  // Dual-write към profile_visitor_links/profile_ip_links (Фаза 1) — в СЪЩАТА
+  // транзакция като raw event-а, виж recordPageView.
+  const profileVisitLinkWriter = createProfileVisitLinkWriter(database)
 
   const insertEventStatement = database.prepare(`
     INSERT OR IGNORE INTO site_visit_events (
@@ -455,6 +460,11 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
         database.exec('ROLLBACK;')
         return { ok: true, recorded: false, duplicate: true }
       }
+
+      // Само за реално вмъкнат ред (не за дубликат по-горе) — иначе
+      // event_count би се удвоил. Грешка тук rollback-ва и raw event-а
+      // (catch по-долу) — без частично състояние.
+      profileVisitLinkWriter.recordLinksForEvent(input.pageViewId)
 
       if (input.attributionReferrer !== null || input.attributionSource !== null) {
         updateVisitorLastTouchStatement.run(

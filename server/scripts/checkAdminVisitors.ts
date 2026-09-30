@@ -21,7 +21,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createSiteVisitStore } from '../src/db/siteVisitStore.js'
+const PROFILE_VISIT_LINKS_MIGRATION_PATH = new URL('../database/migrations/20260930_001_create_profile_visit_links.sql', import.meta.url)
 
 // ─── Брояч ────────────────────────────────────────────────────────────────────
 
@@ -101,6 +103,8 @@ function makeSchema(db: DatabaseSync): void {
     CREATE INDEX IF NOT EXISTS idx_site_visit_events_occurred_at ON site_visit_events(occurred_at);
     CREATE INDEX IF NOT EXISTS idx_site_visitors_last_seen_at ON site_visitors(last_seen_at);
   `)
+  // Compact profile_visitor_links/profile_ip_links (siteVisitStore dual-write) — DDL-ът от самата миграция.
+  db.exec(readFileSync(PROFILE_VISIT_LINKS_MIGRATION_PATH, 'utf8'))
 }
 
 function iv(db: DatabaseSync, id: string, profileId: string | null, ip: string | null, firstSeen: string, lastSeen: string, source: string | null = null, device: string | null = null, os: string | null = null): void {

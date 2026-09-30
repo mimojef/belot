@@ -6,7 +6,9 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { createSiteVisitStore } from '../src/db/siteVisitStore.js'
+const PROFILE_VISIT_LINKS_MIGRATION_PATH = new URL('../database/migrations/20260930_001_create_profile_visit_links.sql', import.meta.url)
 import { getSofiaDayBoundsUtc, sofiaMidnightUtc, toSqliteUtc } from '../src/db/sofiaDayBounds.js'
 
 // ─── Брояч ────────────────────────────────────────────────────────────────────
@@ -84,6 +86,8 @@ async function withTempDb(fn: (dbPath: string) => Promise<void>): Promise<void> 
       );
       CREATE INDEX IF NOT EXISTS idx_site_visit_events_occurred_at ON site_visit_events(occurred_at);
     `)
+    // Compact profile_visitor_links/profile_ip_links (siteVisitStore dual-write) — DDL-ът от самата миграция.
+    db.exec(readFileSync(PROFILE_VISIT_LINKS_MIGRATION_PATH, 'utf8'))
     db.close()
     await fn(dbPath)
   } finally {
