@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { ProfileId } from '../core/serverTypes.js'
+import { createProfileVisitLinkReader } from './profileVisitLinks.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -282,10 +283,25 @@ export async function createProfileHardDeleteService(
   // коментарите в ProfileHardDeleteService типа по-горе. Reuse-ва
   // idx_admin_profile_deletion_visitor_snapshots_visitor индекса (visitor
   // lookup); IP lookup е нарочно unindexed (виж коментара там).
+  //
+  // Фаза 2 (raw retention SITE_VISIT_RETENTION_DAYS, 35 от Фаза 2B): at-delete snapshot-ът се агрегира от raw
+  // site_visit_events, затова за профил, неактивен > retention прозореца
+  // преди изтриването, snapshot-ът е празен. UNION с compact
+  // profile_visitor_links (оцеляват hard delete — без FK) пази дългосрочния
+  // мост visitor_id -> изтрит профил. "Изтрит" = има admin_profile_deletions
+  // ред (същият източник като snapshot-а; temporary guest профили, трити
+  // от playerProgressStore, НЕ са hard-deleted и не се връщат). UNION
+  // дедупликира — профил, присъстващ и в двата източника, се връща веднъж.
   const selectDeletedProfileIdsForVisitorIdStatement = database.prepare(`
-    SELECT DISTINCT deleted_profile_id
+    SELECT deleted_profile_id
     FROM admin_profile_deletion_visitor_snapshots
-    WHERE anonymous_visitor_id = ?;
+    WHERE anonymous_visitor_id = ?
+    UNION
+    SELECT l.profile_id
+    FROM profile_visitor_links l
+    WHERE l.anonymous_visitor_id = ?
+      AND EXISTS (SELECT 1 FROM admin_profile_deletions d WHERE d.deleted_profile_id = l.profile_id)
+      AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = l.profile_id);
   `)
 
   // 48h recency (пети follow-up brief §2/§3/§4) — last_seen_at ВЕЧЕ пази
@@ -297,11 +313,20 @@ export async function createProfileHardDeleteService(
   // Никаква schema/snapshot промяна не беше нужна — last_seen_at вече
   // съществуваше и вече пазеше правилния timestamp (виж 20260902_003
   // migration-а — captureVisitorForensicSnapshot's MAX(occurred_at) агрегация).
+  // Фаза 2: същият UNION с compact profile_ip_links (last_seen_at там е
+  // точният MAX(occurred_at) на връзката — същата 48h семантика).
   const selectDeletedProfileIdsForIpStatement = database.prepare(`
-    SELECT DISTINCT deleted_profile_id
+    SELECT deleted_profile_id
     FROM admin_profile_deletion_visitor_snapshots
     WHERE ip_address = ?
-      AND last_seen_at >= datetime('now', '-48 hours');
+      AND last_seen_at >= datetime('now', '-48 hours')
+    UNION
+    SELECT l.profile_id
+    FROM profile_ip_links l
+    WHERE l.ip_address = ?
+      AND l.last_seen_at >= datetime('now', '-48 hours')
+      AND EXISTS (SELECT 1 FROM admin_profile_deletions d WHERE d.deleted_profile_id = l.profile_id)
+      AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = l.profile_id);
   `)
 
   // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
@@ -532,6 +557,15 @@ export async function createProfileHardDeleteService(
   // COALESCE(ip_address, '') в GROUP BY — SQL NULL никога не се счита равен
   // на друг NULL, затова без coalesce множество събития без captured IP
   // биха създали дублирани редове вместо да се агрегират в един.
+  //
+  // Фаза 2: snapshot-ът остава НЕПРОМЕНЕН (raw източник, (visitor, IP)
+  // гранулярност, която compact таблиците нямат) — покрива raw retention
+  // прозореца към момента на изтриване. Дългосрочната история е в compact
+  // profile_visitor_links/profile_ip_links: без FK → hard delete НЕ ги
+  // cascade-ва, редовете на изтрития профил остават непроменени. Умишлено НЕ
+  // копираме compact редове в snapshot-а — backfillProfileVisitLinks merge-ва
+  // snapshot-а обратно в compact с max(event_count), а смесен източник би
+  // дал двойно броене.
   const selectVisitorAggregatesForProfileStatement = database.prepare(`
     SELECT
       anonymous_visitor_id,
@@ -557,17 +591,12 @@ export async function createProfileHardDeleteService(
 
   // Targeted risk-cache invalidation (production bug fix — hard delete
   // променя topology-то на linked group-ата, но cache редовете на
-  // останалите linked profiles не бяха invalidated). Стъпка 1: target-ovите
-  // distinct non-empty visitor ids, ПРЕДИ да ги изгубим (site_visit_events.
-  // profile_id е ON DELETE SET NULL cascade — виж primitive doc коментара).
-  // Reuse-ва idx_site_visit_events_profile_time, никакъв нов индекс.
-  const selectDistinctVisitorIdsForProfileStatement = database.prepare(`
-    SELECT DISTINCT anonymous_visitor_id
-    FROM site_visit_events
-    WHERE profile_id = ?
-      AND anonymous_visitor_id IS NOT NULL
-      AND anonymous_visitor_id != '';
-  `)
+  // останалите linked profiles не бяха invalidated). Фаза 2: чете от
+  // compact profile_visitor_links — СЪЩИЯ източник, от който
+  // adminProfileRiskStore вече строи linked групата (вкл. връзки, по-стари
+  // от raw retention прозореца); иначе partner, свързан само чрез стара
+  // история, би останал с stale check_complete=1.
+  const linkReader = createProfileVisitLinkReader(database)
 
   // Avatar/gallery physical file cleanup (production gap fix) — profiles.
   // avatar_url вече е прочетен през selectProfileForDeleteStatement.
@@ -667,13 +696,11 @@ export async function createProfileHardDeleteService(
   /**
    * Targeted invalidation (spec: НЕ global scan) на risk cache редове за
    * останалите CURRENT profiles, споделящи поне един от target-овите
-   * visitor ids — извиква се ПРЕДИ deleteProfileStatement.run() по-долу,
-   * докато target-овата site_visit_events attribution все още е налична
-   * (виж selectDistinctVisitorIdsForProfileStatement коментара). Стъпка 2
-   * reuse-ва idx_site_visit_events_visitor_time (същия index/pattern като
-   * adminProfileRiskStore.findProfilesForVisitorIds) — bounded само към
-   * target-овите visitor ids, не whole-table scan. JOIN към profiles
-   * гарантира "CURRENT profiles" (hard-deleted профили вече нямат ред там).
+   * visitor ids — извиква се ПРЕДИ deleteProfileStatement.run() по-долу
+   * (target-ът е още CURRENT, затова reader-ът го вижда). И двете стъпки
+   * са reader-ските заявки на adminProfileRiskStore (PK / idx_profile_
+   * visitor_links_visitor) — bounded само към target-овите visitor ids, не
+   * whole-table scan. JOIN към profiles гарантира "CURRENT profiles".
    *
    * Само маркира check_complete=0 — НЕ пипа linked_profiles_count тук.
    * Existing lazy list flow (computeAndCacheRiskForProfiles) прави пълен
@@ -683,26 +710,19 @@ export async function createProfileHardDeleteService(
    * UPDATE-а — няма какво да се invalidate-ва.
    */
   function invalidateAffectedRiskCache(targetProfileId: string): void {
-    const visitorIdRows = selectDistinctVisitorIdsForProfileStatement.all(targetProfileId) as Array<{
-      anonymous_visitor_id: string
-    }>
-    if (visitorIdRows.length === 0) return
+    const visitorIds = [...(linkReader.findVisitorIdsForProfiles([targetProfileId]).get(targetProfileId) ?? [])]
+    if (visitorIds.length === 0) return
 
-    const visitorIds = visitorIdRows.map((row) => row.anonymous_visitor_id)
-    const visitorPlaceholders = visitorIds.map(() => '?').join(', ')
+    const affectedProfileIdSet = new Set<string>()
+    for (const profileIds of linkReader.findProfilesForVisitorIds(visitorIds).values()) {
+      for (const profileId of profileIds) {
+        if (profileId !== targetProfileId) affectedProfileIdSet.add(profileId)
+      }
+    }
 
-    const affectedProfileRows = database.prepare(`
-      SELECT DISTINCT sve.profile_id AS profileId
-      FROM site_visit_events sve
-      JOIN profiles p ON p.profile_id = sve.profile_id
-      WHERE sve.anonymous_visitor_id IN (${visitorPlaceholders})
-        AND sve.profile_id IS NOT NULL
-        AND sve.profile_id != ?
-    `).all(...visitorIds, targetProfileId) as Array<{ profileId: string }>
+    if (affectedProfileIdSet.size === 0) return
 
-    if (affectedProfileRows.length === 0) return
-
-    const affectedProfileIds = affectedProfileRows.map((row) => row.profileId)
+    const affectedProfileIds = [...affectedProfileIdSet]
     const affectedPlaceholders = affectedProfileIds.map(() => '?').join(', ')
 
     database.prepare(`
@@ -799,12 +819,12 @@ export async function createProfileHardDeleteService(
   }
 
   function findDeletedProfileIdsForVisitorId(visitorId: string): ProfileId[] {
-    const rows = selectDeletedProfileIdsForVisitorIdStatement.all(visitorId) as Array<{ deleted_profile_id: string }>
+    const rows = selectDeletedProfileIdsForVisitorIdStatement.all(visitorId, visitorId) as Array<{ deleted_profile_id: string }>
     return rows.map((row) => row.deleted_profile_id)
   }
 
   function findDeletedProfileIdsForIp(ipAddress: string): ProfileId[] {
-    const rows = selectDeletedProfileIdsForIpStatement.all(ipAddress) as Array<{ deleted_profile_id: string }>
+    const rows = selectDeletedProfileIdsForIpStatement.all(ipAddress, ipAddress) as Array<{ deleted_profile_id: string }>
     return rows.map((row) => row.deleted_profile_id)
   }
 
@@ -958,8 +978,8 @@ export async function createProfileHardDeleteService(
       captureModerationSnapshot(profileRow.profile_id)
 
       // Виж invalidateAffectedRiskCache doc коментара — трябва да се
-      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (target-овата
-      // site_visit_events attribution още е налична в тази точка).
+      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (target-ът още е
+      // CURRENT профил в тази точка).
       invalidateAffectedRiskCache(profileRow.profile_id)
 
       // Виж collectUploadedFileUrlsForProfile doc коментара — трябва да се

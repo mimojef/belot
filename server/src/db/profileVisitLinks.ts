@@ -7,8 +7,11 @@
 //   * writer  — dual-write за ЕДИН вече вмъкнат site_visit_events ред;
 //               вика се в СЪЩАТА транзакция като raw INSERT-а
 //               (siteVisitStore.recordPageView, authStore регистрацията);
-//   * reader  — compact еквиваленти на raw заявките в adminProfileRiskStore.
-//               Фаза 1: НЕ се ползват от production readers — само от
+//   * reader  — Фаза 2: ЕДИНСТВЕНИЯТ източник на историческите profile<->
+//               visitor / profile<->IP връзки за adminProfileRiskStore
+//               (linked profiles, shared visitor/IP, recheck, latest
+//               activity), profileHardDeleteService (risk cache
+//               invalidation) и siteVisitStore forensic helper-ите; плюс
 //               verification script-а и тестовете;
 //   * backfill — идемпотентен merge от текущата raw история, на batch-ове.
 
@@ -70,7 +73,13 @@ export function createProfileVisitLinkWriter(database: SqliteDatabase): ProfileV
   }
 }
 
-// ─── Reader (compact еквиваленти; Фаза 1 — без production call site) ──────
+// ─── Reader (compact еквиваленти на старите raw заявки; Фаза 2 production) ─
+//
+// Compact връзките НЕ се purge-ват автоматично (нито visitor, нито IP) —
+// дългосрочна история. Възможна бъдеща IP retention политика (НЕ е
+// имплементирана): DELETE на profile_ip_links редове с last_seen_at по-стар
+// от N месеца, на batch-ове по idx_profile_ip_links_last_seen_at, само за
+// CURRENT профили (forensic историята на hard-deleted профили остава).
 
 export type CompactDetailedLinkedProfileRow = {
   profileId: ProfileId
@@ -112,6 +121,9 @@ export type ProfileVisitLinkReader = {
    * Допустима разлика: occurred_at (INSERT default) и last_seen_at (UPDATE
    * CURRENT_TIMESTAMP) са отделни statements в една транзакция — могат да
    * се разминат с 1 секунда само ако секундата се смени между тях.
+   * Retention: site_visitors се пази SITE_VISITOR_RETENTION_DAYS (365) по
+   * last_seen_at, т.е. по-дълго от raw събитията (SITE_VISIT_RETENTION_DAYS) — guest
+   * активността остава видима поне толкова, колкото в стария raw модел.
    */
   findLatestActivityAtForVisitorIds: (visitorIds: string[]) => Map<string, string>
   /** Mirror на adminProfileRiskStore.getDetailedLinkedProfiles върху compact таблиците. */
@@ -216,8 +228,11 @@ export function createProfileVisitLinkReader(database: SqliteDatabase): ProfileV
 
   function getDetailedLinkedProfiles(targetProfileId: ProfileId, options?: CompactReadOptions): CompactDetailedLinkedProfileRow[] {
     const since = sinceFilter('l', options)
+    // JOIN profiles и за target-а: за вече изтрит target raw не връща нищо
+    // (profile_id е SET NULL), затова и compact не трябва.
     const visitorIds = (database.prepare(`
       SELECT l.anonymous_visitor_id FROM profile_visitor_links l
+      JOIN profiles tp ON tp.profile_id = l.profile_id
       WHERE l.profile_id = ? ${since.sql}
     `).all(targetProfileId, ...since.params) as Array<{ anonymous_visitor_id: string }>).map((row) => row.anonymous_visitor_id)
     if (visitorIds.length === 0) return []

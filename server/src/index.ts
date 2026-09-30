@@ -616,7 +616,20 @@ let supportCleanupInterval: ReturnType<typeof setInterval> | null = null
 let siteVisitRetentionInterval: ReturnType<typeof setInterval> | null = null
 let siteVisitRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = null
 let missionRotationTimeout: ReturnType<typeof setTimeout> | null = null
+// Raw site_visit_events. Фаза 2A: остава 90 (без промяна на production
+// данните). Фаза 2B: 35 = Admin visitor статистиките гледат максимум 30 дни
+// назад + 5 дни operational margin — единствената нужна промяна е тази
+// константа. Дългосрочните profile<->visitor/IP връзки са в compact
+// profile_visitor_links/profile_ip_links (не се purge-ват).
 const SITE_VISIT_RETENTION_DAYS = 90
+// site_visitors — отделен, по-дълъг срок по last_seen_at: пази first_seen_at/
+// first_referrer/first_source и identity-то на връщащ се visitor.
+const SITE_VISITOR_RETENTION_DAYS = 365
+// Малки autocommit batch-ове + пауза: node:sqlite е синхронен, всеки batch
+// блокира event loop-а (≈10ms p50 за 200 реда при 6 индекса), паузата го
+// освобождава за gameplay/HTTP. Първият run след 90 → 35 (Фаза 2B) ≈ 2.4k batch-а.
+const SITE_VISIT_RETENTION_BATCH_SIZE = 200
+const SITE_VISIT_RETENTION_BATCH_PAUSE_MS = 100
 const SITE_VISIT_RETENTION_INTERVAL_MS = 24 * 60 * 60 * 1000
 const SITE_VISIT_RETENTION_STARTUP_DELAY_MS = 30 * 1000
 
@@ -2785,8 +2798,8 @@ const siteVisitStore = await createSiteVisitStore(databaseBootstrap.databaseFile
 // hasActiveMuteSnapshotForDeletedProfile, profileBanStore.
 // getActiveBanForDeletedProfile) остават непроменени в съответните store-ове
 // — forensic/hard-delete-evidence capability, независима от admin
-// linked-profile detection (adminProfileRiskStore.ts ползва собствени SQL
-// заявки над site_visit_events, не тези helper-и).
+// linked-profile detection (adminProfileRiskStore.ts ползва compact
+// profile_visitor_links/profile_ip_links reader-а, не тези helper-и).
 
 // Password reset store — optional. Ако env липсва, store-ът е null и само
 // forgot/reset endpoints връщат EMAIL_DELIVERY_FAILED. Останалият server работи.
@@ -2810,29 +2823,40 @@ let passwordResetUrl: string = ''
   }
 }
 
-function runSiteVisitRetentionCleanup(): void {
-  if (isServerShuttingDown) {
+let isSiteVisitRetentionCleanupRunning = false
+
+async function runSiteVisitRetentionCleanup(): Promise<void> {
+  if (isServerShuttingDown || isSiteVisitRetentionCleanupRunning) {
     return
   }
 
+  isSiteVisitRetentionCleanupRunning = true
   try {
-    const result = siteVisitStore.purgeOlderThanDays(SITE_VISIT_RETENTION_DAYS)
-    if (result.deletedEvents > 0 || result.deletedVisitors > 0) {
+    const result = await siteVisitStore.purgeOlderThanDays({
+      eventRetentionDays: SITE_VISIT_RETENTION_DAYS,
+      visitorRetentionDays: SITE_VISITOR_RETENTION_DAYS,
+      batchSize: SITE_VISIT_RETENTION_BATCH_SIZE,
+      batchPauseMs: SITE_VISIT_RETENTION_BATCH_PAUSE_MS,
+      shouldContinue: () => !isServerShuttingDown,
+    })
+    if (result.deletedEvents > 0 || result.deletedVisitors > 0 || result.outcome !== 'completed') {
       console.log(
-        `[visits] Retention cleanup: deleted events=${result.deletedEvents} orphanVisitors=${result.deletedVisitors}`,
+        `[visits] Retention cleanup (${result.outcome}): deleted events=${result.deletedEvents} (batches=${result.eventBatches}, cutoff=${result.eventCutoff}) orphanVisitors=${result.deletedVisitors} (batches=${result.visitorBatches}, cutoff=${result.visitorCutoff}) busyRetries=${result.busyRetries}`,
       )
     }
   } catch (error) {
     console.error('[visits] Retention cleanup failed:', error)
+  } finally {
+    isSiteVisitRetentionCleanupRunning = false
   }
 }
 
 siteVisitRetentionStartupTimeout = setTimeout(
-  runSiteVisitRetentionCleanup,
+  () => { void runSiteVisitRetentionCleanup() },
   SITE_VISIT_RETENTION_STARTUP_DELAY_MS,
 )
 siteVisitRetentionInterval = setInterval(
-  runSiteVisitRetentionCleanup,
+  () => { void runSiteVisitRetentionCleanup() },
   SITE_VISIT_RETENTION_INTERVAL_MS,
 )
 

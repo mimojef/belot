@@ -36,6 +36,7 @@ import { tmpdir } from 'node:os'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { verifyVerificationCode } from '../src/db/authHelpers.js'
+import { backfillProfileVisitLinks } from '../src/db/profileVisitLinks.js'
 
 const PASSWORD = 'RiskSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -79,6 +80,16 @@ function fail(label: string, reason: unknown): void {
   failed++
   const msg = reason instanceof Error ? reason.message : String(reason)
   console.error(`  FAIL  ${label}: ${msg}`)
+}
+
+// Фаза 2: adminProfileRiskStore чете compact profile_visitor_links/
+// profile_ip_links. Raw site_visit_events редовете тук се seed-ват директно
+// (без recordPageView dual-write), затова след всеки seed блок пускаме
+// идемпотентния production backfill — същия инвариант compact ⊇ raw, който
+// production поддържа (dual-write + backfill).
+function syncCompactVisitLinks(db: DatabaseSync): void {
+  db.exec('PRAGMA busy_timeout = 5000;')
+  backfillProfileVisitLinks(db)
 }
 
 async function check(label: string, fn: () => Promise<void> | void): Promise<void> {
@@ -506,6 +517,7 @@ try {
       page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address
     ) VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-01 08:00:00', '203.0.113.90')
   `).run(randomUUID(), noPingVisitorId, noPingX.profileId)
+  syncCompactVisitLinks(seedDb)
   seedDb.close()
 
   // ── (а) authorization: subadmin/player => 403 на risk-detail/risk-recheck ──
@@ -691,6 +703,7 @@ try {
       INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
       VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.70')
     `).run(randomUUID(), visitorId, staleCleanX.profileId)
+    syncCompactVisitLinks(db)
     db.close()
   }
   await check('[invalidate-A] admin -> POST risk-recheck(staleCleanX) => открива A indirectly -> A става risk=true, check_complete=false', async () => {
@@ -744,6 +757,7 @@ try {
       INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
       VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.80')
     `).run(randomUUID(), visitorId, staleRiskyX.profileId)
+    syncCompactVisitLinks(db)
     db.close()
   }
   await check('[invalidate-B] admin -> POST risk-recheck(staleRiskyX) => открива A indirectly -> A invalidate-ва (check_complete=false), стар count=1 остава непроменен до full analysis', async () => {
@@ -850,6 +864,7 @@ try {
       INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
       VALUES (?, ?, ?, '/lobby', 'navigate', CURRENT_TIMESTAMP, '203.0.113.90')
     `).run(randomUUID(), `visitor-no-pingpong-${runId}`, noPingX.profileId)
+    syncCompactVisitLinks(db)
     db.close()
   }
   await check('[no-pingpong-B] admin -> POST risk-recheck(noPingX) => ново evidence СЛЕД noPingA.checked_at -> noPingA става check_complete=0', async () => {
@@ -1032,6 +1047,7 @@ try {
       INSERT INTO site_visit_events (page_view_id, anonymous_visitor_id, profile_id, path, navigation_type, occurred_at, ip_address)
       VALUES (?, ?, ?, '/lobby', 'navigate', '2026-01-02 10:00:00', '203.0.113.103')
     `).run(randomUUID(), visitorDSolo, invD.profileId)
+    syncCompactVisitLinks(db)
     db.close()
   }
 

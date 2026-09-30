@@ -550,7 +550,9 @@ try {
     }
     const store = await createSiteVisitStore(isolated.databaseFile)
     try {
-      const result = store.purgeOlderThanDays(90)
+      // Фаза 2: purgeOlderThanDays е async с options — 90/90 е 1:1 старото
+      // purgeOlderThanDays(90) (един срок за events и orphan visitors).
+      const result = await store.purgeOlderThanDays({ eventRetentionDays: 90, visitorRetentionDays: 90, batchPauseMs: 0 })
       await check('[10.1] retention изтрива old event и orphan visitor', () => {
         if (result.deletedEvents < 1 || result.deletedVisitors < 2) throw new Error(JSON.stringify(result))
       })

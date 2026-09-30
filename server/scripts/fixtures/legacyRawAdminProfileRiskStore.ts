@@ -1,5 +1,9 @@
-import type { ProfileId } from '../core/serverTypes.js'
-import { createProfileVisitLinkReader } from './profileVisitLinks.js'
+// TEST-ONLY reference: точното съдържание на server/src/db/adminProfileRiskStore.ts
+// ПРЕДИ Фаза 2 (commit 1e26564) — старият raw site_visit_events алгоритъм.
+// Ползва се САМО от checkProfileVisitHistoryRetention.ts / checkProfileVisitLinks.ts
+// за 1:1 regression сравнение raw vs compact. НЕ се import-ва от production код.
+
+import type { ProfileId } from '../../src/core/serverTypes.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -37,7 +41,7 @@ export type AdminProfileRiskStore = {
   /**
    * За всеки target profile id БЕЗ вече завършен (check_complete=1) cache
    * ред: намира дали споделя anonymous_visitor_id с друг профил
-   * (profile_visitor_links — дългосрочна compact история), и ако да — маркира И target-а (check_complete=1,
+   * (site_visit_events), и ако да — маркира И target-а (check_complete=1,
    * точен count), И всеки намерен "linked partner" (check_complete=0, груб
    * count) като risk_detected=1 (spec §6 — старият профил light-ва се
    * червено веднага щом нов свързан профил бъде открит, без explicit
@@ -62,7 +66,7 @@ export type AdminProfileRiskStore = {
   close: () => void
 }
 
-export async function createAdminProfileRiskStore(databaseFilePath: string): Promise<AdminProfileRiskStore> {
+export async function createLegacyRawAdminProfileRiskStore(databaseFilePath: string): Promise<AdminProfileRiskStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
     open: true,
@@ -144,28 +148,60 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
     return result
   }
 
-  // Фаза 2: историческите profile<->visitor и profile<->IP връзки се четат от
-  // compact profile_visitor_links / profile_ip_links (дългосрочни, оцеляват
-  // raw retention purge-а и hard delete), НЕ от site_visit_events (пази само
-  // последните SITE_VISIT_RETENTION_DAYS дни). Reader-ът JOIN-ва към profiles
-  // за CURRENT профили — същото като raw, където profile_id на изтрит профил
-  // вече е SET NULL, затова изтрит профил никога не е активен linked profile.
-  const linkReader = createProfileVisitLinkReader(database)
-
-  // Batch visitor ids за target profile ids — PK (profile_id, anonymous_visitor_id).
+  // Batch намира visitor ids за дадени target profile ids — query A от
+  // проучването (EXPLAIN QUERY PLAN потвърди: SEARCH USING INDEX
+  // idx_site_visit_events_profile_time, без нов индекс).
   function findVisitorIdsForProfiles(profileIds: ProfileId[]): Map<ProfileId, Set<string>> {
-    return linkReader.findVisitorIdsForProfiles(profileIds)
+    const result = new Map<ProfileId, Set<string>>()
+    if (profileIds.length === 0) return result
+
+    const placeholders = profileIds.map(() => '?').join(', ')
+    const rows = database.prepare(`
+      SELECT DISTINCT profile_id, anonymous_visitor_id
+      FROM site_visit_events
+      WHERE profile_id IN (${placeholders})
+    `).all(...profileIds) as Array<{ profile_id: string; anonymous_visitor_id: string }>
+
+    for (const row of rows) {
+      let set = result.get(row.profile_id)
+      if (!set) {
+        set = new Set<string>()
+        result.set(row.profile_id, set)
+      }
+      set.add(row.anonymous_visitor_id)
+    }
+    return result
   }
 
   // Batch намира ДРУГИ profile ids, споделящи поне един от дадените visitor
-  // ids (idx_profile_visitor_links_visitor). Връща за всеки visitor id
-  // множеството от CURRENT profile ids, видени с него (за in-memory
+  // ids (query B от проучването — SEARCH USING INDEX
+  // idx_site_visit_events_visitor_time, без нов индекс). Връща за всеки
+  // visitor id множеството от profile ids, видени с него (за in-memory
   // group-иране по target по-долу).
   function findProfilesForVisitorIds(visitorIds: string[]): Map<string, Set<ProfileId>> {
-    return linkReader.findProfilesForVisitorIds(visitorIds)
+    const result = new Map<string, Set<ProfileId>>()
+    if (visitorIds.length === 0) return result
+
+    const placeholders = visitorIds.map(() => '?').join(', ')
+    const rows = database.prepare(`
+      SELECT DISTINCT anonymous_visitor_id, profile_id
+      FROM site_visit_events
+      WHERE anonymous_visitor_id IN (${placeholders})
+        AND profile_id IS NOT NULL
+    `).all(...visitorIds) as Array<{ anonymous_visitor_id: string; profile_id: string }>
+
+    for (const row of rows) {
+      let set = result.get(row.anonymous_visitor_id)
+      if (!set) {
+        set = new Set<ProfileId>()
+        result.set(row.anonymous_visitor_id, set)
+      }
+      set.add(row.profile_id)
+    }
+    return result
   }
 
-  // Batch намира latest_shared_evidence_at = последната активност ЗА ВСЕКИ
+  // Batch намира latest_shared_evidence_at = MAX(occurred_at) ЗА ВСЕКИ
   // visitor_id (round 3 fix — "по-ново от последния full check" критерий).
   // Важно: MAX-ът е per VISITOR ID, не per profile_id — "shared evidence"
   // за (target, partner) двойката е доказано от самото съществуване на
@@ -176,14 +212,24 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
   // ново посещение само от target-а никога не би "освежило" връзката към
   // partner-а, и последният remain stuck incomplete forever. Scoped само
   // към visitorIds, подадени от вика (обичайно малка bounded група), не
-  // global scan.
-  //
-  // Фаза 2: старият raw MAX(occurred_at) по visitor броеше и guest (profile_id
-  // NULL) page views. findLatestActivityAtForVisitorIds запазва ТАЗИ семантика
-  // без raw събитията: max(site_visitors.last_seen_at, MAX(link last_seen_at))
-  // — само profiled compact evidence би пропуснал guest активността.
+  // global scan. Ползва СЪЩИЯ idx_site_visit_events_visitor_time индекс
+  // като findProfilesForVisitorIds.
   function findLatestEvidenceAtForVisitorIds(visitorIds: string[]): Map<string, string> {
-    return linkReader.findLatestActivityAtForVisitorIds(visitorIds)
+    const result = new Map<string, string>()
+    if (visitorIds.length === 0) return result
+
+    const placeholders = visitorIds.map(() => '?').join(', ')
+    const rows = database.prepare(`
+      SELECT anonymous_visitor_id, MAX(occurred_at) AS latestEvidenceAt
+      FROM site_visit_events
+      WHERE anonymous_visitor_id IN (${placeholders})
+      GROUP BY anonymous_visitor_id
+    `).all(...visitorIds) as Array<{ anonymous_visitor_id: string; latestEvidenceAt: string }>
+
+    for (const row of rows) {
+      result.set(row.anonymous_visitor_id, row.latestEvidenceAt)
+    }
+    return result
   }
 
   /**
@@ -346,13 +392,98 @@ export async function createAdminProfileRiskStore(databaseFilePath: string): Pro
     return row ? toCachedCheck(row) : { checkedAt: new Date().toISOString(), riskDetected: false, linkedProfilesCount: 0, checkComplete: true }
   }
 
-  // Фаза 2: compact reader (виж linkReader по-горе) — същият алгоритъм като
-  // стария raw: target visitor ids → CURRENT candidates (JOIN profiles,
-  // изтрити профили НЕ се показват) → sharedVisitorIdsCount (distinct shared
-  // visitor ids) → sharedIpCount (distinct IP-та, видени и за target-а, и за
-  // candidate-а). Всички заявки са bounded към target/candidate групата.
   function getDetailedLinkedProfiles(targetProfileId: ProfileId): DetailedLinkedProfileRow[] {
-    return linkReader.getDetailedLinkedProfiles(targetProfileId)
+    const visitorIdRows = database.prepare(`
+      SELECT DISTINCT anonymous_visitor_id
+      FROM site_visit_events
+      WHERE profile_id = ?
+    `).all(targetProfileId) as Array<{ anonymous_visitor_id: string }>
+
+    const visitorIds = visitorIdRows.map((r) => r.anonymous_visitor_id)
+    if (visitorIds.length === 0) return []
+
+    const visitorPlaceholders = visitorIds.map(() => '?').join(', ')
+
+    // CURRENT (не hard-deleted) profiles, различни от target-а, споделящи
+    // поне един visitor id — join към profiles за да изключим orphan
+    // profile_id referenced само в стари site_visit_events редове на вече
+    // изтрит профил (FK на site_visit_events.profile_id е ON DELETE SET
+    // NULL, така че такива редове вече имат profile_id=NULL и не се
+    // хващат тук, но join-ът е defensive допълнителна гаранция).
+    const candidateRows = database.prepare(`
+      SELECT DISTINCT sve.profile_id AS profileId, p.username AS username, p.display_name AS displayName
+      FROM site_visit_events sve
+      JOIN profiles p ON p.profile_id = sve.profile_id
+      WHERE sve.anonymous_visitor_id IN (${visitorPlaceholders})
+        AND sve.profile_id IS NOT NULL
+        AND sve.profile_id != ?
+    `).all(...visitorIds, targetProfileId) as Array<{ profileId: string; username: string | null; displayName: string }>
+
+    if (candidateRows.length === 0) return []
+
+    const candidateIds = candidateRows.map((r) => r.profileId)
+
+    // sharedVisitorIdsCount за всеки candidate — заявката е scoped само към
+    // target-ните visitor ids И candidate-ните profile ids (малка bounded
+    // linked група), не global scan.
+    const candidatePlaceholders = candidateIds.map(() => '?').join(', ')
+    const sharedVisitorRows = database.prepare(`
+      SELECT profile_id AS profileId, COUNT(DISTINCT anonymous_visitor_id) AS sharedCount
+      FROM site_visit_events
+      WHERE profile_id IN (${candidatePlaceholders})
+        AND anonymous_visitor_id IN (${visitorPlaceholders})
+      GROUP BY profile_id
+    `).all(...candidateIds, ...visitorIds) as Array<{ profileId: string; sharedCount: number }>
+
+    const sharedVisitorCountByProfile = new Map<string, number>()
+    for (const row of sharedVisitorRows) {
+      sharedVisitorCountByProfile.set(row.profileId, row.sharedCount)
+    }
+
+    // sharedIpCount — non-null ip_address стойности, видени И за target-а,
+    // И за всеки candidate. Scoped само към target+тази малка candidate
+    // група (не global scan) — 2 малки заявки: target-овите IP-та, после
+    // candidate-ите IP-та само измежду тях.
+    const targetIpRows = database.prepare(`
+      SELECT DISTINCT ip_address FROM site_visit_events
+      WHERE profile_id = ? AND ip_address IS NOT NULL
+    `).all(targetProfileId) as Array<{ ip_address: string }>
+    const targetIps = new Set(targetIpRows.map((r) => r.ip_address))
+
+    const sharedIpCountByProfile = new Map<string, number>()
+    if (targetIps.size > 0) {
+      const candidateIpRows = database.prepare(`
+        SELECT profile_id AS profileId, ip_address AS ipAddress
+        FROM site_visit_events
+        WHERE profile_id IN (${candidatePlaceholders})
+          AND ip_address IS NOT NULL
+      `).all(...candidateIds) as Array<{ profileId: string; ipAddress: string }>
+
+      const ipsByProfile = new Map<string, Set<string>>()
+      for (const row of candidateIpRows) {
+        let set = ipsByProfile.get(row.profileId)
+        if (!set) {
+          set = new Set<string>()
+          ipsByProfile.set(row.profileId, set)
+        }
+        set.add(row.ipAddress)
+      }
+      for (const [profileId, ips] of ipsByProfile) {
+        let count = 0
+        for (const ip of ips) {
+          if (targetIps.has(ip)) count += 1
+        }
+        sharedIpCountByProfile.set(profileId, count)
+      }
+    }
+
+    return candidateRows.map((row) => ({
+      profileId: row.profileId,
+      username: row.username,
+      displayName: row.displayName,
+      sharedVisitorIdsCount: sharedVisitorCountByProfile.get(row.profileId) ?? 0,
+      sharedIpCount: sharedIpCountByProfile.get(row.profileId) ?? 0,
+    }))
   }
 
   function close(): void {

@@ -1,4 +1,4 @@
-import { createProfileVisitLinkWriter } from './profileVisitLinks.js'
+import { createProfileVisitLinkReader, createProfileVisitLinkWriter } from './profileVisitLinks.js'
 import { getSofiaDayBoundsUtc, toSqliteUtc } from './sofiaDayBounds.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -103,9 +103,9 @@ export type SiteVisitStore = {
    * gate-а, премахнат — виж authStore.ts's register() doc коментар; вече
    * без call site, запазена за admin/support reference) — всички CURRENT
    * (non-null) profile ids, някога видени с този
-   * anonymous_visitor_id (site_visit_events, същия idx_site_visit_events_
-   * visitor_time индекс като adminProfileRiskStore.findProfilesForVisitorIds
-   * — bounded, indexed lookup, НЕ table scan). Директен single-hop match
+   * anonymous_visitor_id (Фаза 2: compact profile_visitor_links, същия
+   * reader като adminProfileRiskStore.findProfilesForVisitorIds —
+   * bounded, indexed lookup, НЕ table scan). Директен single-hop match
    * (visitor_id -> profiles, видени точно с него) — умишлено НЕ разширява
    * транзитивно през други visitor ids на намерените профили (за разлика от
    * adminProfileRiskStore-ия admin-only "linked profiles" 2-hop анализ,
@@ -117,8 +117,8 @@ export type SiteVisitStore = {
    * Forensic query (по-рано ползвана от registration anti-evasion gate-а,
    * премахнат — вече без call site, запазена за admin/support reference) —
    * евтина, single-profile-scoped проверка
-   * "виждан ли е бил ТОЗИ профил и от този IP" (idx_site_visit_events_
-   * profile_time индекс, филтрирано по profile_id first). Ползва се само за
+   * "виждан ли е бил ТОЗИ профил и от този IP" (Фаза 2: compact
+   * profile_ip_links, PRIMARY KEY lookup). Ползва се само за
    * по-богат audit log (match_type: device_and_ip vs device) СЛЕД като
    * device match вече е открил блокиран профил — НЕ е основният IP lookup
    * механизъм (виж findFirstActivelyModeratedProfileIdForIp по-долу за
@@ -170,8 +170,87 @@ export type SiteVisitStore = {
     offset: number
   }, now?: Date) => VisitorListResult
   getVisitorSources: (params: { period: VisitorListPeriod; type: VisitorListType; device: VisitorDeviceFilter; os: VisitorOsFilter }, now?: Date) => VisitorSourcesResult
-  purgeOlderThanDays: (days: number) => { deletedEvents: number; deletedVisitors: number }
+  /**
+   * Retention cleanup на малки autocommit batch-ове (виж SiteVisitRetentionOptions).
+   * Async — между batch-овете връща контрола на event loop-а, за да не
+   * блокира gameplay/HTTP при голям първоначален purge. Идемпотентен:
+   * прекъснат run (shutdown / batch limit / SQLITE_BUSY) просто продължава
+   * при следващото извикване.
+   */
+  purgeOlderThanDays: (options: SiteVisitRetentionOptions) => Promise<SiteVisitRetentionResult>
   close: () => void
+}
+
+export type SiteVisitRetentionOptions = {
+  /** Raw site_visit_events: трият се събития с occurred_at < now - eventRetentionDays. */
+  eventRetentionDays: number
+  /**
+   * site_visitors: трият се visitors с last_seen_at < now - visitorRetentionDays,
+   * които вече нямат нито едно raw събитие. Отделен (по-дълъг) срок — пази
+   * first_seen_at/first_referrer/first_source и identity-то на връщащ се
+   * visitor ("нов посетител" не се завишава). Никога по-кратък от
+   * eventRetentionDays.
+   */
+  visitorRetentionDays: number
+  /** Редове на DELETE batch (default 200 — измерено ≈10ms p50 sync блокиране при 6 индекса). */
+  batchSize?: number
+  /** Пауза между batch-овете, през която event loop-ът е свободен (default 100ms). */
+  batchPauseMs?: number
+  /** busy_timeout САМО за cleanup batch-а (default 200ms) — sync чакане блокира event loop-а. */
+  batchBusyTimeoutMs?: number
+  /** Retry-и на един batch при SQLITE_BUSY, преди run-ът да спре с outcome 'busy' (default 5). */
+  maxBusyRetriesPerBatch?: number
+  /** Async backoff между busy retry-ите: delay × номер на опита (default 1000ms). */
+  busyRetryDelayMs?: number
+  /** Горна граница на batch-овете в един run (default 5000 ≈ 1M реда); остатъкът — при следващия run. */
+  maxBatchesPerRun?: number
+  now?: Date
+  /** Проверява се преди всеки batch (напр. !isServerShuttingDown). */
+  shouldContinue?: () => boolean
+  /** Инжектируем за тестове. */
+  sleep?: (ms: number) => Promise<void>
+}
+
+export type SiteVisitRetentionResult = {
+  deletedEvents: number
+  deletedVisitors: number
+  eventBatches: number
+  visitorBatches: number
+  busyRetries: number
+  outcome: 'completed' | 'stopped' | 'batch_limit' | 'busy'
+  eventCutoff: string
+  visitorCutoff: string
+}
+
+// eventRetentionDays/visitorRetentionDays default-ите са само fallback при
+// невалидна стойност — консервативни (старият 90-дневен raw срок), така че
+// грешен вход никога не съкращава историята. Реалните стойности идват от
+// index.ts (SITE_VISIT_RETENTION_DAYS / SITE_VISITOR_RETENTION_DAYS).
+export const SITE_VISIT_RETENTION_DEFAULTS = {
+  eventRetentionDays: 90,
+  visitorRetentionDays: 365,
+  batchSize: 200,
+  batchPauseMs: 100,
+  batchBusyTimeoutMs: 200,
+  maxBusyRetriesPerBatch: 5,
+  busyRetryDelayMs: 1000,
+  maxBatchesPerRun: 5000,
+} as const
+
+// busy_timeout на връзката за нормалните writes (recordPageView) — mirror на
+// authStore/adminProfileRiskStore/topicModerationStore (5000).
+const CONNECTION_BUSY_TIMEOUT_MS = 5000
+
+// SQLITE_BUSY (5) / SQLITE_LOCKED (6), вкл. extended кодове (напр. BUSY_SNAPSHOT).
+function isSqliteBusyError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const errcode = (error as { errcode?: unknown }).errcode
+  if (typeof errcode === 'number') {
+    const primaryCode = errcode & 0xff
+    return primaryCode === 5 || primaryCode === 6
+  }
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && /database (?:table )?is locked/i.test(message)
 }
 
 export async function createSiteVisitStore(databaseFilePath: string): Promise<SiteVisitStore> {
@@ -183,6 +262,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
 
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
+  database.exec(`PRAGMA busy_timeout = ${CONNECTION_BUSY_TIMEOUT_MS};`)
 
   const insertVisitorStatement = database.prepare(`
     INSERT OR IGNORE INTO site_visitors (
@@ -258,26 +338,20 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     );
   `)
 
-  // Registration anti-evasion gate — виж findProfileIdsForVisitorId doc
-  // коментара в SiteVisitStore типа по-горе. Reuse-ва idx_site_visit_events_
-  // visitor_time (същия индекс/pattern като adminProfileRiskStore.
-  // findProfilesForVisitorIds).
-  const selectProfileIdsForVisitorIdStatement = database.prepare(`
-    SELECT DISTINCT profile_id
-    FROM site_visit_events
-    WHERE anonymous_visitor_id = ?
-      AND profile_id IS NOT NULL;
-  `)
+  // Forensic helper-и — виж findProfileIdsForVisitorId/hasProfileEventFromIp
+  // doc коментарите в SiteVisitStore типа по-горе. Фаза 2: дългосрочна
+  // compact история (profile_visitor_links / profile_ip_links) вместо raw
+  // site_visit_events (SITE_VISIT_RETENTION_DAYS). CURRENT профили (JOIN/EXISTS profiles) —
+  // mirror на raw, където profile_id на изтрит профил е SET NULL.
+  const linkReader = createProfileVisitLinkReader(database)
 
-  // Registration anti-evasion gate — виж hasProfileEventFromIp doc коментара
-  // в SiteVisitStore типа по-горе. Reuse-ва idx_site_visit_events_profile_time
-  // (profile_id, occurred_at) — филтрирано по profile_id first, bounded към
-  // единичния профил, НЕ global ip_address scan.
+  // PRIMARY KEY (profile_id, ip_address) lookup.
   const selectProfileEventFromIpStatement = database.prepare(`
     SELECT 1
-    FROM site_visit_events
-    WHERE profile_id = ?
-      AND ip_address = ?
+    FROM profile_ip_links l
+    WHERE l.profile_id = ?
+      AND l.ip_address = ?
+      AND EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = l.profile_id)
     LIMIT 1;
   `)
 
@@ -382,20 +456,40 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     GROUP BY view_layout;
   `)
 
-  const purgeEventsStatement = database.prepare(`
+  // Retention batch-ове (виж purgeOlderThanDays) — autocommit DELETE на най-
+  // старите N реда. Subquery-то върви по idx_site_visit_events_occurred_at
+  // (covering: rowid е в индекса), без temp B-tree. Compact
+  // profile_visitor_links/profile_ip_links НЕ се пипат (няма FK/trigger).
+  const purgeEventsBatchStatement = database.prepare(`
     DELETE FROM site_visit_events
-    WHERE occurred_at < datetime('now', ?);
+    WHERE rowid IN (
+      SELECT rowid
+      FROM site_visit_events
+      WHERE occurred_at < ?
+      ORDER BY occurred_at
+      LIMIT ?
+    );
   `)
 
-  const purgeOrphanVisitorsStatement = database.prepare(`
+  // site_visitors по ОТДЕЛНИЯ (по-дълъг) срок: idx_site_visitors_last_seen_at
+  // + NOT EXISTS по idx_site_visit_events_visitor_time. NOT EXISTS guard-ът е
+  // задължителен: site_visit_events.anonymous_visitor_id е ON DELETE CASCADE,
+  // затова visitor с оцеляло raw събитие никога не се трие (би изтрил и
+  // събитието). Visitor НЕ се трие само защото вече няма raw събития.
+  const purgeOrphanVisitorsBatchStatement = database.prepare(`
     DELETE FROM site_visitors
-    WHERE last_seen_at < datetime('now', ?)
-      AND NOT EXISTS (
-        SELECT 1
-        FROM site_visit_events e
-        WHERE e.anonymous_visitor_id = site_visitors.anonymous_visitor_id
-        LIMIT 1
-      );
+    WHERE rowid IN (
+      SELECT v.rowid
+      FROM site_visitors v
+      WHERE v.last_seen_at < ?
+        AND NOT EXISTS (
+          SELECT 1
+          FROM site_visit_events e
+          WHERE e.anonymous_visitor_id = v.anonymous_visitor_id
+        )
+      ORDER BY v.last_seen_at
+      LIMIT ?
+    );
   `)
 
   function getChanges(result: unknown): number {
@@ -405,8 +499,7 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
   }
 
   function findProfileIdsForVisitorId(visitorId: string): string[] {
-    const rows = selectProfileIdsForVisitorIdStatement.all(visitorId) as Array<{ profile_id: string }>
-    return rows.map((row) => row.profile_id)
+    return [...(linkReader.findProfilesForVisitorIds([visitorId]).get(visitorId) ?? [])]
   }
 
   function hasProfileEventFromIp(profileId: string, ipAddress: string): boolean {
@@ -792,23 +885,117 @@ export async function createSiteVisitStore(databaseFilePath: string): Promise<Si
     return { rows, total }
   }
 
-  function purgeOlderThanDays(days: number): { deletedEvents: number; deletedVisitors: number } {
-    const normalizedDays = Number.isInteger(days) && days > 0 ? days : 90
-    const cutoffModifier = `-${normalizedDays} days`
-    database.exec('BEGIN IMMEDIATE;')
+  function positiveIntegerOr(value: number | undefined, fallback: number): number {
+    return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback
+  }
+
+  function nonNegativeNumberOr(value: number | undefined, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : fallback
+  }
+
+  // Един autocommit DELETE batch (без BEGIN IMMEDIATE — write lock-ът се
+  // държи само за самия statement) с КРАТЪК busy_timeout: node:sqlite е
+  // синхронен, затова чакането на lock блокира event loop-а — cleanup-ът
+  // чака най-много batchBusyTimeoutMs и после async retry-ва, вместо да
+  // стои 5s като нормалните writes. Връзката се връща на
+  // CONNECTION_BUSY_TIMEOUT_MS в същия sync блок, т.е. преди recordPageView
+  // изобщо да може да се изпълни.
+  function runRetentionBatch(
+    statement: ReturnType<SqliteDatabase['prepare']>,
+    cutoff: string,
+    batchSize: number,
+    busyTimeoutMs: number,
+  ): number {
+    database.exec(`PRAGMA busy_timeout = ${Math.floor(busyTimeoutMs)};`)
     try {
-      const deletedEvents = getChanges(purgeEventsStatement.run(cutoffModifier))
-      const deletedVisitors = getChanges(purgeOrphanVisitorsStatement.run(cutoffModifier))
-      database.exec('COMMIT;')
-      return { deletedEvents, deletedVisitors }
-    } catch (error) {
-      try {
-        database.exec('ROLLBACK;')
-      } catch {
-        // Preserve the original failure.
-      }
-      throw error
+      return getChanges(statement.run(cutoff, batchSize))
+    } finally {
+      database.exec(`PRAGMA busy_timeout = ${CONNECTION_BUSY_TIMEOUT_MS};`)
     }
+  }
+
+  async function purgeOlderThanDays(options: SiteVisitRetentionOptions): Promise<SiteVisitRetentionResult> {
+    const defaults = SITE_VISIT_RETENTION_DEFAULTS
+    const eventRetentionDays = positiveIntegerOr(options.eventRetentionDays, defaults.eventRetentionDays)
+    const visitorRetentionDays = Math.max(
+      positiveIntegerOr(options.visitorRetentionDays, defaults.visitorRetentionDays),
+      eventRetentionDays,
+    )
+    const batchSize = positiveIntegerOr(options.batchSize, defaults.batchSize)
+    const batchPauseMs = nonNegativeNumberOr(options.batchPauseMs, defaults.batchPauseMs)
+    const batchBusyTimeoutMs = nonNegativeNumberOr(options.batchBusyTimeoutMs, defaults.batchBusyTimeoutMs)
+    const maxBusyRetries = Number.isInteger(options.maxBusyRetriesPerBatch) && options.maxBusyRetriesPerBatch! >= 0
+      ? options.maxBusyRetriesPerBatch!
+      : defaults.maxBusyRetriesPerBatch
+    const busyRetryDelayMs = nonNegativeNumberOr(options.busyRetryDelayMs, defaults.busyRetryDelayMs)
+    const maxBatchesPerRun = positiveIntegerOr(options.maxBatchesPerRun, defaults.maxBatchesPerRun)
+    const shouldContinue = options.shouldContinue ?? (() => true)
+    const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)))
+
+    // Cutoff-ите са фиксирани в началото на run-а (не "гонят" часовника) и
+    // са в същия формат като occurred_at/last_seen_at (CURRENT_TIMESTAMP UTC).
+    const nowMs = (options.now ?? new Date()).getTime()
+    const eventCutoff = toSqliteUtc(new Date(nowMs - eventRetentionDays * 86_400_000))
+    const visitorCutoff = toSqliteUtc(new Date(nowMs - visitorRetentionDays * 86_400_000))
+
+    const result: SiteVisitRetentionResult = {
+      deletedEvents: 0,
+      deletedVisitors: 0,
+      eventBatches: 0,
+      visitorBatches: 0,
+      busyRetries: 0,
+      outcome: 'completed',
+      eventCutoff,
+      visitorCutoff,
+    }
+    const finish = (outcome: SiteVisitRetentionResult['outcome']): SiteVisitRetentionResult => {
+      result.outcome = outcome
+      return result
+    }
+
+    // Първо raw събитията, после orphan visitors (visitor без събития може да
+    // стане orphan едва след като събитията му са изтрити).
+    const phases = [
+      { kind: 'events' as const, statement: purgeEventsBatchStatement, cutoff: eventCutoff },
+      { kind: 'visitors' as const, statement: purgeOrphanVisitorsBatchStatement, cutoff: visitorCutoff },
+    ]
+
+    let batchesThisRun = 0
+    for (const phase of phases) {
+      for (;;) {
+        if (!shouldContinue()) return finish('stopped')
+        if (batchesThisRun >= maxBatchesPerRun) return finish('batch_limit')
+
+        let changes = 0
+        for (let attempt = 0; ; attempt += 1) {
+          try {
+            changes = runRetentionBatch(phase.statement, phase.cutoff, batchSize, batchBusyTimeoutMs)
+            break
+          } catch (error) {
+            if (!isSqliteBusyError(error)) throw error
+            // Контролиран отказ: нищо частично (batch-ът е един autocommit
+            // statement), следващият run продължава оттук.
+            if (attempt >= maxBusyRetries) return finish('busy')
+            result.busyRetries += 1
+            await sleep(busyRetryDelayMs * (attempt + 1))
+            if (!shouldContinue()) return finish('stopped')
+          }
+        }
+
+        batchesThisRun += 1
+        if (phase.kind === 'events') {
+          result.eventBatches += 1
+          result.deletedEvents += changes
+        } else {
+          result.visitorBatches += 1
+          result.deletedVisitors += changes
+        }
+        if (changes < batchSize) break
+        await sleep(batchPauseMs)
+      }
+    }
+
+    return finish('completed')
   }
 
   function close(): void {

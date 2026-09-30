@@ -19,6 +19,7 @@ import { createAuthStore } from '../src/db/authStore.js'
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createProfileHardDeleteService } from '../src/db/profileHardDeleteService.js'
 import { createAdminProfileRiskStore } from '../src/db/adminProfileRiskStore.js'
+import { createLegacyRawAdminProfileRiskStore } from './fixtures/legacyRawAdminProfileRiskStore.js'
 import { backfillProfileVisitLinks, createProfileVisitLinkReader, createProfileVisitLinkWriter } from '../src/db/profileVisitLinks.js'
 import { verifyProfileVisitLinks } from '../src/db/profileVisitLinkVerification.js'
 
@@ -286,7 +287,10 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   const compactTotal = countRows(db, `SELECT COALESCE(SUM(event_count), 0) AS n FROM profile_visitor_links;`)
   check('[13] SUM(event_count) = брой raw събития с профил', rawTotal === compactTotal, `raw=${rawTotal} compact=${compactTotal}`)
 
-  // [14] Raw-vs-compact equivalence срещу РЕАЛНИЯ production алгоритъм.
+  // [14] Raw-vs-compact equivalence: стария raw алгоритъм (legacy fixture,
+  // adminProfileRiskStore преди Фаза 2) срещу production store-а (Фаза 2 —
+  // compact) и compact reader-а.
+  const legacyRawRiskStore = await createLegacyRawAdminProfileRiskStore(dbPath)
   const riskStore = await createAdminProfileRiskStore(dbPath)
   const reader = createProfileVisitLinkReader(db)
   const normalize = (rows: Array<{ profileId: string; sharedVisitorIdsCount: number; sharedIpCount: number }>) =>
@@ -294,23 +298,25 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   let detailedEqual = true
   let nonEmptyComparisons = 0
   for (const profileId of profiles) {
-    const rawRows = riskStore.getDetailedLinkedProfiles(profileId)
+    const rawRows = legacyRawRiskStore.getDetailedLinkedProfiles(profileId)
     const compactRows = reader.getDetailedLinkedProfiles(profileId)
-    if (normalize(rawRows) !== normalize(compactRows)) {
+    if (normalize(rawRows) !== normalize(compactRows) || normalize(rawRows) !== normalize(riskStore.getDetailedLinkedProfiles(profileId))) {
       detailedEqual = false
       console.error(`    ${profileId}: raw=${normalize(rawRows)} compact=${normalize(compactRows)}`)
     }
     if (rawRows.length > 0) nonEmptyComparisons += 1
   }
-  check(`[14] adminProfileRiskStore.getDetailedLinkedProfiles (raw) = compact reader за всички профили (${nonEmptyComparisons} с връзки)`, detailedEqual && nonEmptyComparisons > 0)
+  check(`[14] legacy raw getDetailedLinkedProfiles = compact reader = production adminProfileRiskStore за всички профили (${nonEmptyComparisons} с връзки)`, detailedEqual && nonEmptyComparisons > 0)
 
   let recheckEqual = true
   for (const profileId of profiles) {
-    const rawCheck = riskStore.recheckSingleProfile(profileId)
+    const rawCheck = legacyRawRiskStore.recheckSingleProfile(profileId)
     const compactLinked = reader.getDetailedLinkedProfiles(profileId).length
-    if (rawCheck.linkedProfilesCount !== compactLinked || rawCheck.riskDetected !== (compactLinked > 0)) recheckEqual = false
+    const productionCheck = riskStore.recheckSingleProfile(profileId)
+    if (rawCheck.linkedProfilesCount !== compactLinked || rawCheck.riskDetected !== (compactLinked > 0) ||
+      productionCheck.linkedProfilesCount !== rawCheck.linkedProfilesCount || productionCheck.riskDetected !== rawCheck.riskDetected) recheckEqual = false
   }
-  check('[14] risk recheck (linked count / riskDetected) raw = compact', recheckEqual)
+  check('[14] risk recheck (linked count / riskDetected) legacy raw = compact = production', recheckEqual)
 
   const rawVisitorIds = db.prepare(`SELECT DISTINCT profile_id, anonymous_visitor_id FROM site_visit_events WHERE profile_id IS NOT NULL;`).all() as Array<{ profile_id: string; anonymous_visitor_id: string }>
   const compactVisitorIds = reader.findVisitorIdsForProfiles(profiles)
@@ -352,6 +358,7 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   backfillProfileVisitLinks(db)
   check('[17] backfill след purge не намалява event_count/first_seen_at', dumpLinks(db) === compactBeforePurge)
 
+  legacyRawRiskStore.close()
   riskStore.close()
   store.close()
   db.close()
