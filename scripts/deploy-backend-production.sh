@@ -39,13 +39,16 @@
 #     server_migrations (filename PRIMARY KEY, лексикографски ред).
 #     Затова backup + explicit confirmation ТРЯБВА да станат ПРЕДИ
 #     restart, не след него. Ред при pending migrations: confirmation
-#     ПЪРВО, после `pm2 stop` (quiesce — migration DB backup изисква
-#     DB без active writer, доказана production причина за backup, зависнал
-#     >24min/~99% CPU при online writer), после bounded DB backup, чак
-#     тогава dist activation + финалният `pm2 restart` (apply-ва migrations).
+#     ПЪРВО, после live consistent DB snapshot (sqlite3 VACUUM INTO) ДОКАТО
+#     старият backend е ONLINE, после snapshot verification (integrity_check,
+#     foreign_key_check, SHA256), чак тогава `pm2 stop` -> dist activation ->
+#     финалният `pm2 restart` (apply-ва migrations). Backup времето НЕ е част
+#     от downtime-а.
 #
 # Изисква: git, npm, node, pm2, flock, curl, timeout, sha256sum/shasum (за
-# backup verification consistency с останалите production scripts).
+# backup verification consistency с останалите production scripts); при
+# pending migrations още sqlite3 CLI >= 3.27.0 (VACUUM INTO), nice и
+# (по избор) ionice.
 # Изпълнява се от /var/www/belot-v2 (production repo checkout).
 
 set -euo pipefail
@@ -133,13 +136,15 @@ ACTIVATION_DIST_BACKUP_DIR=""
 # ─── PM2 quiesce-for-backup auto-recovery guard (виж "Backend quiesce" /
 # "DB backup" стъпките по-долу) ───────────────────────────────────────────
 # PM2_QUIESCED_FOR_BACKUP е "true" само в прозореца между потвърден "pm2
-# stop $PM2_APP_NAME" (нужен, защото migration DB backup изисква quiescent
-# DB — online writer по време на node:sqlite backup() е доказаната
-# production причина за >24min/~99% CPU зависване) и момента, в който
+# stop $PM2_APP_NAME" (стъпка 5c — вече СЛЕД verified live DB snapshot;
+# старият writer трябва да е спрян преди dist activation и migrations) и
+# момента, в който
 # RESTART_STARTED става "true" (непосредствено преди РЕАЛНИЯ финален "pm2
-# restart" с новия dist, стъпка 7). Ако скриптът бъде прекъснат ИЛИ провали
-# се по каквато и да е причина (backup error, timeout, integrity failure,
-# Ctrl+C/SIGINT, SIGTERM, dist activation failure) докато е "true" —
+# restart" с новия dist, стъпка 7). Snapshot/verify failure-ите са ПРЕДИ
+# stop-а (флагът е още "false" — backend-ът просто остава ONLINE). Ако
+# скриптът бъде прекъснат ИЛИ провали се по каквато и да е причина СЛЕД
+# stop-а (stop verify timeout, Ctrl+C/SIGINT, SIGTERM, dist activation
+# failure) докато е "true" —
 # cleanup() автоматично връща backend-а online (pm2 restart, best-effort)
 # ПРЕДИ да излезе, точно както ACTIVATION_ARMED автоматично връща стария
 # dist. Двата guard-а работят заедно (dist restore ПЪРВО, после PM2 online),
@@ -185,15 +190,15 @@ cleanup() {
       fi
     fi
   fi
-  # Backend е бил спрян (quiesced) за migration DB backup, но РЕАЛНИЯТ
+  # Backend е бил спрян (стъпка 5c, след verified snapshot), но РЕАЛНИЯТ
   # финален restart (стъпка 7, с новия dist) никога не е стартирал — dist/
   # вече е възстановен (клонът точно над този, ако е било армирано) или
-  # изобщо не е бил пипнат (backup стъпката е ПРЕДИ dist activation), значи
+  # изобщо не е бил пипнат (stop стъпката е ПРЕДИ dist activation), значи
   # връщането на backend-а online тук е безопасно "activation/migration
   # никога не са се случили", НЕ "rollback след restart/migrations" —
   # последното си остава изрично забранено (виж ROLLBACK_HINT по-долу).
   if [ "$PM2_QUIESCED_FOR_BACKUP" = "true" ] && [ "$RESTART_STARTED" = "false" ]; then
-    printf '[deploy-backend] cleanup: backend беше спрян за migration DB backup, но финалният restart никога не стартира (прекъсване/failure ПРЕДИ migrations) — връщам стария backend online.\n' >&2
+    printf '[deploy-backend] cleanup: backend беше спрян за activation/restart, но финалният restart никога не стартира (прекъсване/failure ПРЕДИ migrations) — връщам стария backend online.\n' >&2
     if pm2 restart "$PM2_APP_NAME" >/dev/null 2>&1; then
       printf '[deploy-backend] cleanup: pm2 restart %s -> OK, backend е върнат online (стар dist, DB немигрирана).\n' "$PM2_APP_NAME" >&2
     else
@@ -264,18 +269,23 @@ wait_for_public_health_200() {
   printf '%s' "$status"
 }
 
-# ─── Bounded migration DB backup config ─────────────────────────────────────
-# Root cause на доказания production инцидент: node:sqlite backup() е
-# извикван, докато старият PM2 процес ОЩЕ пишеше активно в SQLite (WAL
-# постоянно се променяше по време на копирането) — на ~369MB DB това доведе
-# до ~99% CPU, >24min без завършване, temp файл близо до пълния DB размер,
-# ~1TB logical read I/O. Ръчен "pm2 stop" ПРЕДИ backup-а реши проблема
-# моментално. Затова: backend вече се спира (виж "Backend quiesce" стъпката)
-# ПРЕДИ backup-а по конструкция — DB е quiescent, backup-ът би трябвало да
-# приключи бързо независимо от размера. DB_BACKUP_TIMEOUT_SECONDS остава
-# defensive upper bound (НЕ очакван normal-case timing) — "не допускай вечен
-# backup loop" дори ако нещо неочаквано държи writer lock.
+# ─── Bounded migration DB snapshot config ───────────────────────────────────
+# История: доказан production инцидент — node:sqlite backup() (online backup
+# API) е извикван, докато старият PM2 процес ОЩЕ пишеше активно в SQLite;
+# backup API-то рестартира копирането при всяка промяна на source-а, WAL
+# постоянно се променяше — на ~369MB DB това доведе до ~99% CPU, >24min без
+# завършване, ~1TB logical read I/O. Временният fix беше pm2 stop ПРЕДИ
+# backup-а (backup времето влизаше в downtime-а).
+#
+# Сега: live consistent snapshot чрез sqlite3 VACUUM INTO (стъпка 5) —
+# ЕДНА read транзакция (WAL snapshot isolation), без рестартиране/
+# догонване при паралелни writes, докато backend-ът остава ONLINE; pm2 stop
+# е СЛЕД verified snapshot. DB_BACKUP_TIMEOUT_SECONDS е горна граница за
+# самия VACUUM INTO (при timeout — abort, backend остава ONLINE);
+# DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS е горна граница за integrity_check +
+# foreign_key_check върху snapshot файла (също преди pm2 stop).
 DB_BACKUP_TIMEOUT_SECONDS="${DB_BACKUP_TIMEOUT_SECONDS:-300}"
+DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS="${DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS:-600}"
 
 # ─── PM2 stop verification (bounded) ────────────────────────────────────────
 # След "pm2 stop $PM2_APP_NAME" потвърждаваме И PM2-регистрирания статус, И
@@ -515,17 +525,30 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
   printf '%s\n' "$PENDING_MIGRATIONS" | while IFS= read -r m; do
     log "  - $m"
   done
+
+  # Live consistent snapshot (стъпка 5) изисква sqlite3 CLI с VACUUM INTO
+  # (SQLite >= 3.27.0). Проверява се ТУК — преди confirmation, pm2 stop или
+  # каквато и да е промяна — само когато реално има pending migrations
+  # (обикновен code deploy не зависи от sqlite3).
+  if ! command -v sqlite3 >/dev/null 2>&1; then
+    rm -rf "$STAGING_DIST_DIR"
+    fail "sqlite3 CLI не е намерен в PATH — нужен за live VACUUM INTO DB snapshot при pending migrations. Backend е ONLINE и непипнат, staging build изчистен."
+  fi
+  SQLITE3_VERSION="$(sqlite3 -version 2>/dev/null | awk '{print $1}')"
+  if [ -z "$SQLITE3_VERSION" ] || [ "$(printf '%s\n3.27.0\n' "$SQLITE3_VERSION" | sort -V | head -n 1)" != "3.27.0" ]; then
+    rm -rf "$STAGING_DIST_DIR"
+    fail "sqlite3 CLI версия \"$SQLITE3_VERSION\" не поддържа VACUUM INTO (нужна >= 3.27.0). Backend е ONLINE и непипнат, staging build изчистен."
+  fi
+  log "sqlite3 CLI за live snapshot: $SQLITE3_VERSION (VACUUM INTO: OK)"
 else
   log "Няма чакащи migrations. Обикновен backend code deploy — без DB backup, без quiesce, без допълнителен downtime."
 fi
 
 # ─── 4. Explicit restart confirmation (ПРЕДИ каквато и да е PM2/DB операция) ─
-# Confirmation-ът е ПРЕДИ backend quiesce/DB backup по конструкция (corrective
-# pass — по-рано backup-ът минаваше ПРЕДИ confirmation-а, докато старият PM2
-# процес ОЩЕ пишеше активно, което е доказаната production root cause за
-# >24min/~99% CPU зависване, виж бележката при DB_BACKUP_TIMEOUT_SECONDS
-# по-горе). Ако операторът НЕ потвърди — backend остава online, DB backup
-# НИКОГА не започва, dist НЕ се активира, migrations НЕ се прилагат.
+# Confirmation-ът е ПРЕДИ live DB snapshot/pm2 stop по конструкция —
+# snapshot-ът натоварва production DB-то, затова започва само след изрично
+# съгласие на оператора. Ако операторът НЕ потвърди — backend остава online,
+# DB snapshot НИКОГА не започва, dist НЕ се активира, migrations НЕ се прилагат.
 section "Restart confirmation"
 
 printf '\n'
@@ -537,7 +560,9 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
   printf '%s\n' "$PENDING_MIGRATIONS" | while IFS= read -r m; do
     printf '  - %s\n' "$m"
   done
-  printf 'Backend will be STOPPED, a bounded DB backup will be taken (quiescent DB), THEN restarted with the new build.\n'
+  printf 'A live consistent DB snapshot (SQLite VACUUM INTO) will be taken FIRST, while the backend stays ONLINE.\n'
+  printf 'Only after the snapshot passes verification (integrity_check, foreign_key_check, SHA256) will the backend be\n'
+  printf 'STOPPED briefly for dist activation + restart; pending migrations run at startup. This is NOT zero downtime.\n'
 fi
 printf '\n'
 printf 'Type exactly RESTART to proceed, anything else (or empty) STOPs without restart.\n'
@@ -550,21 +575,149 @@ if [ "$CONFIRMATION" != "RESTART" ]; then
 fi
 log "Restart потвърден от оператор."
 
-# ─── 5. Backend quiesce + bounded DB backup (САМО ако има pending migrations) ─
-# Ред: pm2 stop -> bounded verify че старият процес реално е спрян -> bounded
-# node:sqlite backup() (DB вече quiescent, не online writer) -> integrity_check
-# -> едва тогава mv -f към финалния backup път. Ако КАКВОТО И ДА Е стъпка тук
-# се провали/timeout-не/бъде прекъсната (Ctrl+C, SIGTERM, shell error) —
+# ─── 5. Live consistent DB snapshot -> verify -> backend stop (САМО при pending migrations) ─
+# Ред: live SQLite snapshot чрез VACUUM INTO, ДОКАТО старият PM2 backend Е
+# ONLINE (bounded timeout, nice/ionice, busy_timeout) ->
+# verify (файлът съществува и е non-zero, integrity_check = "ok",
+# foreign_key_check = 0 реда, SHA256) -> mv към финалния backup път ->
+# ЧАК ТОГАВА pm2 stop -> bounded verify че старият процес реално е спрян ->
+# dist activation -> финален pm2 restart (apply-ва migrations при startup).
+# Времето за backup вече НЕ е част от downtime-а.
+#
+# Всеки failure/timeout/прекъсване в snapshot/verify частта е ПРЕДИ pm2 stop:
+# backend-ът остава ONLINE и непокътнат (PM2_QUIESCED_FOR_BACKUP още
+# "false" — cleanup() НЕ прави restart), live dist не е пипнат (activation
+# е стъпка 6), deployment marker не е пипнат (пише се само в стъпка 10),
+# migrations не са приложени, собствените temp артефакти се чистят.
+# Failure/прекъсване СЛЕД pm2 stop, но ПРЕДИ финалния restart —
 # PM2_QUIESCED_FOR_BACKUP="true" && RESTART_STARTED="false" кара cleanup()
-# (виж дефиницията горе) автоматично да върне backend-а online, БЕЗ
-# migrations да са приложени, БЕЗ marker промяна.
+# автоматично да върне стария backend online (непроменено поведение).
 if [ -n "$PENDING_MIGRATIONS" ]; then
-  section "Backend quiesce (stop before migration DB backup)"
+  section "Live DB snapshot (backend ONLINE, VACUUM INTO, bounded timeout ${DB_BACKUP_TIMEOUT_SECONDS}s)"
 
-  log "pm2 stop $PM2_APP_NAME (controlled — migration DB backup изисква quiescent DB, не active writer)..."
+  mkdir -p "$DB_BACKUP_ROOT"
+  DB_BACKUP_ID="$(date -u +%Y%m%d%H%M%S)-${GIT_SHORT_SHA}"
+  DB_BACKUP_DIR_CANDIDATE="$DB_BACKUP_ROOT/$DB_BACKUP_ID"
+  # mkdir БЕЗ -p — отказва съществуваща директория: гарантира уникален,
+  # собствен per-run път. DB_BACKUP_DIR (ползван от cleanup() за rmdir-
+  # ако-празна) се присвоява САМО след успешно създаване — никога чужда
+  # директория.
+  if ! mkdir "$DB_BACKUP_DIR_CANDIDATE" 2>/dev/null; then
+    rm -rf "$STAGING_DIST_DIR"
+    fail "DB backup директорията вече съществува или не може да бъде създадена: $DB_BACKUP_DIR_CANDIDATE. Backend остава ONLINE (PM2 НЕ е спиран), live dist и deployment marker НЕ са пипнати, migrations НЕ са приложени."
+  fi
+  DB_BACKUP_DIR="$DB_BACKUP_DIR_CANDIDATE"
+  DB_BACKUP_PATH="$DB_BACKUP_DIR/belot-v2.sqlite"
+  DB_BACKUP_TMP="$DB_BACKUP_PATH.tmp"
+  DB_BACKUP_CHECKSUM_FILE="$DB_BACKUP_PATH.sha256"
+
+  # Abort ПРЕДИ pm2 stop: чисти само собствените temp артефакти (tmp +
+  # SQLite sidecar-и) и празната per-run директория (rmdir, никога rm -rf),
+  # чисти staging build-а и спира. PM2_QUIESCED_FOR_BACKUP е "false" —
+  # cleanup() НЕ пипа PM2; backend-ът просто продължава да работи.
+  snapshot_abort_backend_online() {
+    rm -f -- "$DB_BACKUP_TMP" "${DB_BACKUP_TMP}-journal" "${DB_BACKUP_TMP}-wal" "${DB_BACKUP_TMP}-shm"
+    ACTIVE_TMP_FILE=""
+    rmdir "$DB_BACKUP_DIR" 2>/dev/null || true
+    rm -rf "$STAGING_DIST_DIR"
+    fail "$1 Backend остава ONLINE (PM2 НЕ е спиран), live dist и deployment marker НЕ са пипнати, migrations НЕ са приложени."
+  }
+
+  for DB_BACKUP_TARGET in "$DB_BACKUP_TMP" "${DB_BACKUP_TMP}-journal" "${DB_BACKUP_TMP}-wal" "${DB_BACKUP_TMP}-shm" "$DB_BACKUP_PATH" "$DB_BACKUP_CHECKSUM_FILE"; do
+    if [ -e "$DB_BACKUP_TARGET" ]; then
+      # Не наш файл — НЕ го трием; спираме без cleanup на чужди артефакти.
+      rm -rf "$STAGING_DIST_DIR"
+      fail "Snapshot target вече съществува: $DB_BACKUP_TARGET — отказвам да го презапиша. Backend остава ONLINE (PM2 НЕ е спиран), live dist и deployment marker НЕ са пипнати."
+    fi
+  done
+
+  ACTIVE_TMP_FILE="$DB_BACKUP_TMP"
+
+  # VACUUM INTO (SQLite >= 3.27.0) пише transactionally consistent snapshot:
+  # цялото копиране върви в ЕДНА read транзакция срещу live DB-то (WAL
+  # snapshot isolation) — паралелните writes на live backend-а продължават
+  # и НЕ влизат в snapshot-а; няма "догонване" на растящ WAL (за разлика от
+  # online backup API-то, което рестартира при всяка промяна на source-а —
+  # доказаната причина за >24min/~99% CPU инцидента). VACUUM INTO само чете
+  # source DB-то. БЕЗ -readonly: production A/B тест върху един и същ
+  # замразен source — normal връзка 6s срещу 54s с -readonly, при
+  # идентичен .sha3sum --schema (source = fast = readonly snapshot),
+  # integrity_check ok и foreign_key_check 0 и за двата. Snapshot файлът се
+  # проверява read-only в 5b. busy_timeout покрива
+  # кратки lock-ове (напр. checkpoint). nice + ionice (ако е наличен)
+  # намаляват CPU/IO натиска върху live backend-а; timeout налага горна
+  # граница. Никакъв cp на live .sqlite файла.
+  SNAPSHOT_PRIORITY=(nice -n 10)
+  if command -v ionice >/dev/null 2>&1; then
+    SNAPSHOT_PRIORITY=(ionice -c 2 -n 7 nice -n 10)
+  fi
+  DB_BACKUP_TMP_SQL="${DB_BACKUP_TMP//\'/\'\'}"
+  log "VACUUM INTO snapshot на live DB (backend ONLINE, ${SNAPSHOT_PRIORITY[*]}, timeout ${DB_BACKUP_TIMEOUT_SECONDS}s) -> $DB_BACKUP_TMP"
+  SNAPSHOT_STARTED_AT=$SECONDS
+  SNAPSHOT_EXIT_CODE=0
+  printf "PRAGMA busy_timeout=10000;\nVACUUM INTO '%s';\n" "$DB_BACKUP_TMP_SQL" \
+    | timeout "${DB_BACKUP_TIMEOUT_SECONDS}s" "${SNAPSHOT_PRIORITY[@]}" sqlite3 -bail -batch "$DB_FILE" >/dev/null \
+    || SNAPSHOT_EXIT_CODE=$?
+
+  if [ "$SNAPSHOT_EXIT_CODE" -ne 0 ]; then
+    if [ "$SNAPSHOT_EXIT_CODE" -eq 124 ]; then
+      snapshot_abort_backend_online "DB snapshot TIMEOUT след ${DB_BACKUP_TIMEOUT_SECONDS}s (DB_BACKUP_TIMEOUT_SECONDS) — sqlite3 е прекратен, temp файлове изчистени."
+    fi
+    snapshot_abort_backend_online "VACUUM INTO snapshot се провали (sqlite3 exit code $SNAPSHOT_EXIT_CODE) — temp файлове изчистени."
+  fi
+  log "Snapshot готов за $((SECONDS - SNAPSHOT_STARTED_AT))s (backend беше ONLINE през цялото време)."
+
+  # ─── 5b. Snapshot verification — ЗАДЪЛЖИТЕЛНО преди pm2 stop ─────────────
+  [ -s "$DB_BACKUP_TMP" ] || snapshot_abort_backend_online "Snapshot файлът липсва или е празен след VACUUM INTO: $DB_BACKUP_TMP."
+
+  VERIFY_EXIT_CODE=0
+  VERIFY_OUTPUT="$(timeout "${DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS}s" node --input-type=module -e "
+    import { DatabaseSync } from 'node:sqlite'
+    const db = new DatabaseSync(process.argv[1], { open: true, readOnly: true })
+    try {
+      const integrity = db.prepare('PRAGMA integrity_check').all().map((r) => r.integrity_check).join('; ')
+      const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all().length
+      process.stdout.write(integrity + '\n' + foreignKeyViolations)
+    } finally {
+      db.close()
+    }
+  " "$DB_BACKUP_TMP")" || VERIFY_EXIT_CODE=$?
+
+  if [ "$VERIFY_EXIT_CODE" -ne 0 ]; then
+    snapshot_abort_backend_online "Snapshot verification (integrity_check/foreign_key_check) не завърши (exit code $VERIFY_EXIT_CODE; 124 = timeout ${DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS}s) — невалидният snapshot е изтрит."
+  fi
+  INTEGRITY_RESULT="$(printf '%s\n' "$VERIFY_OUTPUT" | head -n 1)"
+  FOREIGN_KEY_VIOLATIONS="$(printf '%s\n' "$VERIFY_OUTPUT" | tail -n 1)"
+  if [ "$INTEGRITY_RESULT" != "ok" ]; then
+    snapshot_abort_backend_online "Snapshot integrity_check върна \"$INTEGRITY_RESULT\" вместо \"ok\" — невалидният snapshot е изтрит."
+  fi
+  if [ "$FOREIGN_KEY_VIOLATIONS" != "0" ]; then
+    snapshot_abort_backend_online "Snapshot foreign_key_check върна \"$FOREIGN_KEY_VIOLATIONS\" реда вместо 0 — snapshot-ът е изтрит."
+  fi
+
+  DB_BACKUP_SHA256="$(sha256_of "$DB_BACKUP_TMP")"
+  if ! printf '%s' "$DB_BACKUP_SHA256" | grep -Eq '^[0-9a-f]{64}$'; then
+    snapshot_abort_backend_online "Не успях да изчисля SHA256 на snapshot-а (получих \"$DB_BACKUP_SHA256\")."
+  fi
+
+  mv -f "$DB_BACKUP_TMP" "$DB_BACKUP_PATH"
+  ACTIVE_TMP_FILE=""
+  if ! printf '%s  %s\n' "$DB_BACKUP_SHA256" "belot-v2.sqlite" > "$DB_BACKUP_CHECKSUM_FILE"; then
+    rm -rf "$STAGING_DIST_DIR"
+    fail "Не успях да запиша SHA256 файла $DB_BACKUP_CHECKSUM_FILE. Snapshot-ът е валиден и запазен ($DB_BACKUP_PATH, SHA256 $DB_BACKUP_SHA256). Backend остава ONLINE (PM2 НЕ е спиран), live dist и deployment marker НЕ са пипнати."
+  fi
+  log "DB snapshot: $DB_BACKUP_PATH (integrity_check: ok, foreign_key_check: 0 реда, SHA256: $DB_BACKUP_SHA256 -> $DB_BACKUP_CHECKSUM_FILE)"
+
+  # ─── 5c. Backend stop — ЧАК СЛЕД verified snapshot ─────────────────────────
+  # Оттук downtime-ът е само: pm2 stop -> dist activation -> pm2 restart ->
+  # migrations/startup. Без изкуствено изчакване — wait_for_pm2_stopped
+  # връща веднага щом старият процес реално е спрян.
+  section "Backend stop (СЛЕД verified snapshot — само за activation/restart/migrations)"
+
+  log "pm2 stop $PM2_APP_NAME (snapshot вече е verified; старият writer трябва да е спрян преди dist activation и migrations)..."
   if ! pm2 stop "$PM2_APP_NAME"; then
     rm -rf "$STAGING_DIST_DIR"
-    fail "pm2 stop $PM2_APP_NAME се провали — backend може да е в неопределено състояние. РЪЧНА проверка нужна НЕЗАБАВНО (pm2 status $PM2_APP_NAME)."
+    fail "pm2 stop $PM2_APP_NAME се провали — backend може да е в неопределено състояние. РЪЧНА проверка нужна НЕЗАБАВНО (pm2 status $PM2_APP_NAME). Verified DB snapshot: $DB_BACKUP_PATH"
   fi
   # Въоръжаваме recovery guard-а ВЕДНАГА след успешния stop команда — дори
   # ако последващия bounded verify по-долу timeout-не (неясно дали реално е
@@ -576,68 +729,6 @@ if [ -n "$PENDING_MIGRATIONS" ]; then
     fail "Не успях да потвърдя, че $PM2_APP_NAME е спрян (status=stopped И старият PID $OLD_PID вече не работи) в рамките на ${PM2_STOP_VERIFY_MAX_SECONDS}s. cleanup ще опита да върне backend-а online."
   fi
   log "PM2 stop потвърден: status=stopped, старият PID ($OLD_PID) вече не работи."
-
-  section "DB backup (backend quiesced, bounded timeout ${DB_BACKUP_TIMEOUT_SECONDS}s)"
-
-  mkdir -p "$DB_BACKUP_ROOT"
-  DB_BACKUP_ID="$(date -u +%Y%m%d%H%M%S)-${GIT_SHORT_SHA}"
-  DB_BACKUP_DIR="$DB_BACKUP_ROOT/$DB_BACKUP_ID"
-  mkdir -p "$DB_BACKUP_DIR"
-  DB_BACKUP_PATH="$DB_BACKUP_DIR/belot-v2.sqlite"
-  DB_BACKUP_TMP="$DB_BACKUP_PATH.tmp"
-
-  ACTIVE_TMP_FILE="$DB_BACKUP_TMP"
-  # node:sqlite `backup()` — същият online-backup механизъм, ползван от
-  # server/src/db/backupHelpers.ts (runDatabaseBackup) за production daily
-  # backups. Пише в .tmp, verify-ва, чак тогава атомарен rename. `timeout`
-  # налага bounded upper bound (виж DB_BACKUP_TIMEOUT_SECONDS бележката горе)
-  # — defensive, DB вече е quiescent (backend спрян стъпката над), значи
-  # normal-case завършва бързо независимо от DB размера.
-  BACKUP_EXIT_CODE=0
-  timeout "${DB_BACKUP_TIMEOUT_SECONDS}s" node --input-type=module -e "
-    import { DatabaseSync, backup } from 'node:sqlite'
-    const src = new DatabaseSync(process.argv[1], { open: true, readOnly: true })
-    try {
-      await backup(src, process.argv[2])
-    } finally {
-      src.close()
-    }
-  " "$DB_FILE" "$DB_BACKUP_TMP" || BACKUP_EXIT_CODE=$?
-
-  if [ "$BACKUP_EXIT_CODE" -ne 0 ]; then
-    rm -f -- "$DB_BACKUP_TMP" "${DB_BACKUP_TMP}-journal" "${DB_BACKUP_TMP}-wal" "${DB_BACKUP_TMP}-shm"
-    ACTIVE_TMP_FILE=""
-    rmdir "$DB_BACKUP_DIR" 2>/dev/null || true
-    rm -rf "$STAGING_DIST_DIR"
-    if [ "$BACKUP_EXIT_CODE" -eq 124 ]; then
-      fail "DB backup TIMEOUT след ${DB_BACKUP_TIMEOUT_SECONDS}s (DB_BACKUP_TIMEOUT_SECONDS) — backup процесът е прекратен, temp файлове изчистени. cleanup ще върне backend-а online (migration НЕ е приложена)."
-    else
-      fail "DB backup се провали (node exit code $BACKUP_EXIT_CODE) — temp файлове изчистени. cleanup ще върне backend-а online (migration НЕ е приложена)."
-    fi
-  fi
-
-  INTEGRITY_RESULT="$(node --input-type=module -e "
-    import { DatabaseSync } from 'node:sqlite'
-    const db = new DatabaseSync(process.argv[1], { open: true, readOnly: true })
-    try {
-      const row = db.prepare('PRAGMA integrity_check').get()
-      process.stdout.write(row && row.integrity_check ? row.integrity_check : '')
-    } finally {
-      db.close()
-    }
-  " "$DB_BACKUP_TMP")"
-
-  if [ "$INTEGRITY_RESULT" != "ok" ]; then
-    rm -f -- "$DB_BACKUP_TMP" "${DB_BACKUP_TMP}-journal" "${DB_BACKUP_TMP}-wal" "${DB_BACKUP_TMP}-shm"
-    ACTIVE_TMP_FILE=""
-    rmdir "$DB_BACKUP_DIR" 2>/dev/null || true
-    rm -rf "$STAGING_DIST_DIR"
-    fail "DB backup integrity_check върна \"$INTEGRITY_RESULT\" вместо \"ok\" — backup-ът е изтрит. cleanup ще върне backend-а online (migration НЕ е приложена)."
-  fi
-
-  mv -f "$DB_BACKUP_TMP" "$DB_BACKUP_PATH"
-  ACTIVE_TMP_FILE=""
-  log "DB backup: $DB_BACKUP_PATH (integrity_check: ok)"
 fi
 
 # ─── 6. Dist activation — staging -> live, НЕПОСРЕДСТВЕНО преди restart ────
@@ -645,9 +736,9 @@ fi
 # build-ът е седял изолирано в STAGING_DIST_DIR. При обикновен code deploy
 # (без pending migrations) старият PM2 процес е обслужвал живия dist/
 # непрекъснато и непроменено през целия build/verify/confirmation прозорец.
-# При pending migrations backend-ът вече Е спрян (стъпка 5, "Backend
-# quiesce") — dist активацията тук се случва, докато PM2 е stopped, ПРЕДИ
-# финалния restart по-долу, който го връща online с новия код.
+# При pending migrations backend-ът вече Е спрян (стъпка 5c, СЛЕД verified
+# live DB snapshot) — dist активацията тук се случва, докато PM2 е stopped,
+# ПРЕДИ финалния restart по-долу, който го връща online с новия код.
 #
 # Безопасна activation (НЕ rm -rf преди успешен mv на staging):
 #   1) mv DIST_DIR -> DIST_BACKUP_DIR (rename, старият dist е физически
@@ -925,7 +1016,8 @@ log "NEW_PID:                 $NEW_PID"
 log "Server build status:     OK"
 if [ -n "$PENDING_MIGRATIONS" ]; then
   log "Migration status:        приложени ($(printf '%s\n' "$PENDING_MIGRATIONS" | grep -c . || true) миграция/и, виж списъка по-горе)"
-  log "DB backup path:          $DB_BACKUP_PATH"
+  log "DB backup path:          $DB_BACKUP_PATH (live VACUUM INTO snapshot, backend ONLINE по време на backup-а)"
+  log "DB backup SHA256:        $DB_BACKUP_SHA256 ($DB_BACKUP_CHECKSUM_FILE)"
 else
   log "Migration status:        няма чакащи миграции (обикновен code deploy)"
   log "DB backup path:          (няма — не е било нужно)"

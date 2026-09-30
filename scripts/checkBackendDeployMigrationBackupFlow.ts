@@ -1,61 +1,71 @@
 /**
  * checkBackendDeployMigrationBackupFlow.ts
  *
- * Regression check за доказан production инцидент: migration DB backup
- * (`node:sqlite backup()`) в scripts/deploy-backend-production.sh се
- * изпълняваше докато PM2 backend-ът ОЩЕ пишеше активно в SQLite. На ~369MB
- * production DB това доведе до ~99% CPU, >24min без завършване, .tmp файл
- * близо до пълния DB размер, ~1TB logical read I/O, постоянно променящ се
- * WAL. Ръчен "pm2 stop" ПРЕДИ backup-а реши проблема моментално.
+ * Regression check за migration DB backup flow-а в
+ * scripts/deploy-backend-production.sh.
  *
- * Fix-ът (deploy-backend-production.sh) reorder-ва flow-а: RESTART
- * confirmation → (ако pending migrations) pm2 stop → bounded verify stopped
- * → bounded (timeout) node:sqlite backup() → integrity_check → dist
- * activation → финален pm2 restart (apply-ва migrations при startup). Ако
- * backup-ът timeout-не/fail-не/бъде прекъснат ПРЕДИ финалния restart,
- * cleanup() trap-ът (PM2_QUIESCED_FOR_BACKUP && !RESTART_STARTED)
- * автоматично връща стария backend online.
+ * История: доказан production инцидент — `node:sqlite backup()` (online
+ * backup API) се изпълняваше докато PM2 backend-ът ОЩЕ пишеше активно в
+ * SQLite; API-то рестартира копирането при всяка промяна на source-а — на
+ * ~369MB DB: ~99% CPU, >24min без завършване, ~1TB logical read I/O.
+ * Временният fix спираше PM2 ПРЕДИ backup-а (backup времето влизаше в
+ * downtime-а).
+ *
+ * Текущ flow (live consistent snapshot): RESTART confirmation → (ако pending
+ * migrations) sqlite3 VACUUM INTO snapshot ДОКАТО backend-ът е ONLINE
+ * (bounded timeout, nice/ionice, busy_timeout=10000, БЕЗ -readonly) → read-only verify
+ * (non-empty, integrity_check = ok, foreign_key_check = 0, SHA256) → mv към
+ * финалния raw .sqlite път → ЧАК ТОГАВА pm2 stop → bounded stop verify →
+ * dist activation → финален pm2 restart (apply-ва migrations при startup).
+ * Snapshot/verify failure → abort ПРЕДИ pm2 stop: backend остава ONLINE,
+ * live dist/marker непипнати, temp артефакти изчистени. Failure СЛЕД stop,
+ * но преди restart → cleanup() връща стария backend online (непроменено).
  *
  * Established harness convention (виж checkBackendDeployHealthRetry.ts):
  * тества РЕАЛНИЯ bash код от production скрипта — extract-ва стабилни
- * function/constant блокове чрез anchor-based substring slicing (не
- * преписан duplicate) и ги source-ва в изолирани bash процеси срещу
- * контролирани fake pm2/PID/filesystem фикстури. Не spawn-ва целия
- * deploy-backend-production.sh (би изисквало mock на git/npm/tsc/pm2
- * process-management/interactive confirmation/реален SQLite backup — извън
- * обхвата на този конкретен fix) — за орkestration reda, който е непрактично
- * safe да се изпълни изолирано (RESTART confirmation gating, secion
- * ordering), използва static source-order assertions, mirror на
- * established [7]/[8] checks в checkBackendDeployHealthRetry.ts.
+ * function/section блокове чрез anchor-based substring slicing (не
+ * преписан duplicate) и ги изпълнява в изолирани bash процеси срещу
+ * контролирани fake pm2/sqlite3/filesystem фикстури. Не spawn-ва целия
+ * deploy-backend-production.sh. sqlite3 CLI shim-ът изпълнява SQL-а със
+ * СЪЩИЯ SQLite engine (node:sqlite), така че VACUUM INTO семантиката
+ * (consistency, WAL) е реална; реалният sqlite3 CLI не е наличен
+ * на Windows dev machine-а.
  *
  * === Section A (executable): wait_for_pm2_stopped bounded retry ===
- * [A1] pm2 status става "stopped" И реалният PID реално умира -> success (exit 0)
- * [A2] pm2 status остава "online" безкрайно -> bounded timeout, failure (exit 1)
- * [A3] pm2 status "stopped", но PID е ОЩЕ реално жив -> bounded timeout, failure
- *      (доказва, че се проверяват И ДВЕТЕ условия, не само едното)
- * [A4] Retry интервалът се съобразява (не busy-loop) при бавна transition
+ * [A1]–[A4] — непроменени.
  *
  * === Section B (executable): temp sidecar cleanup (real code slice) ===
- * [B1] Всичките 4 sidecar varianta (.tmp/.tmp-journal/.tmp-wal/.tmp-shm) се премахват
- * [B2] Липсващи sidecar-и не chупят cleanup-а (rm -f no-op safe)
- * [B3] Празна DB_BACKUP_DIR (след sidecar cleanup) се премахва (rmdir)
- * [B4] НЕпразна DB_BACKUP_DIR (симулира успешен завършен backup) НЕ се премахва
- * [B5] Sibling backup директория от ДРУГ (по-стар, завършен) run остава напълно недокосната
+ * [B1]–[B5] — непроменени.
  *
- * === Section C (executable): bounded timeout мехнизъм ===
- * [C1] `timeout` командата реално bound-ва хvнещ процес (exit 124) в configured прозорец
+ * === Section C (executable): bounded timeout механизъм ===
+ * [C1] — непроменен.
  *
  * === Section D (static source-order assertions) ===
- * [D1] "pm2 stop $PM2_APP_NAME" е ПРЕДИ node:sqlite backup() извикването в source реда
- * [D2] RESTART confirmation-declined клонът е ПРЕДИ "Backend quiesce" секцията
- * [D3] "Backend quiesce" секцията е изцяло gate-ната зад PENDING_MIGRATIONS (no pending -> no quiesce/backup)
- * [D4] PM2_QUIESCED_FOR_BACKUP="true" е ВЕДНАГА след pm2 stop, ПРЕДИ bounded verify/backup
- * [D5] cleanup(): dist-restore клонът е ПРЕДИ PM2 quiesce-recovery клона (dist коректен ПРЕДИ backend online)
- * [D6] Ред в "Backend quiesce": backup exit-code check -> integrity_check -> mv, всичко ПРЕДИ "Dist activation"
+ * [D1] VACUUM INTO snapshot е ПРЕДИ pm2 stop
+ * [D2] RESTART confirmation-declined клонът е ПРЕДИ секция 5
+ * [D3] Секция 5 е изцяло gate-ната зад PENDING_MIGRATIONS
+ * [D4] PM2_QUIESCED_FOR_BACKUP="true" е СЛЕД verified snapshot и веднага след pm2 stop
+ * [D5] cleanup(): dist-restore клонът е ПРЕДИ PM2 recovery клона
+ * [D6] Ред: snapshot exit → non-empty → integrity/FK → gates → SHA256 → mv → checksum файл → pm2 stop
  * [D7] cleanup() включва всичките 4 sidecar варианта
  * [D8] Никакъв wildcard/global delete по DB_BACKUP_ROOT/DIST_BACKUP_ROOT
- * [D9] node:sqlite backup() е обвит в `timeout "${DB_BACKUP_TIMEOUT_SECONDS}s"` (default 300)
- * [D10] Non-pending-migrations normal deploy flow остава непроменен (без quiesce/backup секция преди Dist activation)
+ * [D9] timeout + nice/ionice + busy_timeout=10000, source invocation БЕЗ -readonly; verify bounded и read-only
+ * [D10] Non-pending-migrations flow без pm2 stop извън guard-а
+ * [D11] Никаква pm2 команда между началото на секция 5 и pm2 stop
+ * [D12] sqlite3 >= 3.27.0 се проверява ПРЕДИ confirmation, само при pending migrations
+ * [D13] Confirmation текстът: snapshot първо, backend ONLINE, НЕ zero downtime
+ * [D14] Без cp на live DB и без node:sqlite backup()
+ *
+ * === Section E (executable): реалният snapshot/verify код срещу реални SQLite бази ===
+ * [E1] успех: raw .sqlite, integrity ok, FK 0, SHA256 файл, 0 pm2 извиквания
+ * [E1b] ionice argv, когато е наличен
+ * [E2] writes по време на snapshot-а продължават без грешки; snapshot-ът е
+ *      transactionally consistent и не съдържа по-късните writes
+ * [E3]–[E7] timeout / sqlite3 грешка / празен файл / повреден файл / FK
+ *      нарушение → abort ПРЕДИ pm2 stop, 0 pm2 извиквания, temp и staging
+ *      изчистени, production DB непроменен
+ * [E8] съществуваща per-run директория → отказ, чуждият backup непипнат
+ * [E9] VACUUM INTO върху WAL база → самостоятелен файл (без sidecar-и)
  */
 
 import { spawn } from 'node:child_process'
@@ -396,80 +406,84 @@ await check('[C1] `timeout` командата реално bound-ва hanging �
 console.log('\n=== Section D: static source-order assertions (пълния flow, mirror established [7]/[8] pattern) ===\n')
 
 const FULL_SOURCE = await readFile(SCRIPT_PATH, 'utf8')
+const SECTION_5_ANCHOR = '# ─── 5. Live consistent DB snapshot'
+const SECTION_5C_ANCHOR = '# ─── 5c. Backend stop'
+const SECTION_6_ANCHOR = '# ─── 6. Dist activation'
+const VACUUM_CALL = `sqlite3 -bail -batch "$DB_FILE"`
 
-await check('[D1] "pm2 stop $PM2_APP_NAME" е ПРЕДИ node:sqlite backup() извикването в source реда', () => {
-  const pmStopIdx = FULL_SOURCE.indexOf('pm2 stop "$PM2_APP_NAME"')
-  const backupCallIdx = FULL_SOURCE.indexOf('await backup(src, process.argv[2])')
+await check('[D1] live VACUUM INTO snapshot е ПРЕДИ "pm2 stop $PM2_APP_NAME" в source реда (backup вече не е в downtime-а)', () => {
+  const vacuumIdx = FULL_SOURCE.indexOf(VACUUM_CALL)
+  const pmStopIdx = FULL_SOURCE.indexOf('if ! pm2 stop "$PM2_APP_NAME"; then')
+  assert(vacuumIdx !== -1, 'sqlite3 VACUUM INTO call трябва да съществува')
   assert(pmStopIdx !== -1, '"pm2 stop $PM2_APP_NAME" call трябва да съществува')
-  assert(backupCallIdx !== -1, 'node:sqlite backup() call трябва да съществува')
-  assert(pmStopIdx < backupCallIdx, 'pm2 stop трябва да е ПРЕДИ node:sqlite backup() в source реда')
+  assert(vacuumIdx < pmStopIdx, 'VACUUM INTO snapshot трябва да е ПРЕДИ pm2 stop')
+  assert(FULL_SOURCE.includes(`VACUUM INTO '%s';`), 'SQL-ът трябва да е VACUUM INTO към temp target')
 })
 
-await check('[D2] RESTART confirmation-declined клонът е ПРЕДИ "Backend quiesce" секцията', () => {
+await check('[D2] RESTART confirmation-declined клонът е ПРЕДИ секция 5 (отказ => никакъв snapshot/pm2 stop)', () => {
   const declineIdx = FULL_SOURCE.indexOf('if [ "$CONFIRMATION" != "RESTART" ]')
-  const quiesceSectionIdx = FULL_SOURCE.indexOf('# ─── 5. Backend quiesce')
-  assert(declineIdx !== -1, 'confirmation decline branch трябва да съществува')
-  assert(quiesceSectionIdx !== -1, '"Backend quiesce" секцията трябва да съществува')
-  assert(declineIdx < quiesceSectionIdx, 'confirmation decline клонът трябва да е ПРЕДИ backend quiesce секцията (отказ => никакъв pm2 stop/backup)')
+  const section5Idx = FULL_SOURCE.indexOf(SECTION_5_ANCHOR)
+  assert(declineIdx !== -1 && section5Idx !== -1, 'anchor-ите трябва да съществуват')
+  assert(declineIdx < section5Idx, 'confirmation decline клонът трябва да е ПРЕДИ snapshot/stop секцията')
 })
 
-await check('[D3] "Backend quiesce" секцията е изцяло gate-ната зад PENDING_MIGRATIONS', () => {
-  const quiesceSectionIdx = FULL_SOURCE.indexOf('# ─── 5. Backend quiesce')
-  const distActivationIdx = FULL_SOURCE.indexOf('# ─── 6. Dist activation')
-  const block = FULL_SOURCE.slice(quiesceSectionIdx, distActivationIdx)
+await check('[D3] Секция 5 е изцяло gate-ната зад PENDING_MIGRATIONS (no pending -> без snapshot и без pm2 stop)', () => {
+  const block = FULL_SOURCE.slice(FULL_SOURCE.indexOf(SECTION_5_ANCHOR), FULL_SOURCE.indexOf(SECTION_6_ANCHOR))
   const guardIdx = block.indexOf('if [ -n "$PENDING_MIGRATIONS" ]; then')
-  const pmStopIdxInBlock = block.indexOf('pm2 stop "$PM2_APP_NAME"')
-  assert(guardIdx !== -1, 'PENDING_MIGRATIONS guard трябва да съществува в тази секция')
-  assert(pmStopIdxInBlock !== -1, 'pm2 stop трябва да е в тази секция')
-  assert(guardIdx < pmStopIdxInBlock, 'guard-ът трябва да отваря ПРЕДИ pm2 stop-а (no pending migrations -> няма quiesce/backup path)')
+  assert(guardIdx !== -1, 'PENDING_MIGRATIONS guard трябва да съществува в секцията')
+  assert(guardIdx < block.indexOf(VACUUM_CALL), 'guard-ът трябва да е ПРЕДИ snapshot-а')
+  assert(guardIdx < block.indexOf('pm2 stop "$PM2_APP_NAME"'), 'guard-ът трябва да е ПРЕДИ pm2 stop-а')
 })
 
-await check('[D4] PM2_QUIESCED_FOR_BACKUP="true" е ВЕДНАГА след pm2 stop, ПРЕДИ bounded verify/backup', () => {
-  // indexOf(..., pmStopIdx) нарочно прескача по-ранното упоменаване на
-  // "PM2_QUIESCED_FOR_BACKUP=\"true\"" в doc коментара над самата секция
-  // (обяснява механизма преди кода) — търсим РЕАЛНОТО присвояване, което е
-  // логически СЛЕД действителния "pm2 stop" call, не първото text срещане.
+await check('[D4] PM2_QUIESCED_FOR_BACKUP="true" е ВЕДНАГА след pm2 stop и ПРЕДИ bounded verify — и СЛЕД целия snapshot verify', () => {
   const pmStopIdx = FULL_SOURCE.indexOf('if ! pm2 stop "$PM2_APP_NAME"; then')
   const quiescedFlagIdx = FULL_SOURCE.indexOf('PM2_QUIESCED_FOR_BACKUP="true"', pmStopIdx)
   const verifyCallIdx = FULL_SOURCE.indexOf('wait_for_pm2_stopped "$PM2_APP_NAME" "$OLD_PID"')
-  const backupCallIdx = FULL_SOURCE.indexOf('await backup(src, process.argv[2])')
-  assert(pmStopIdx !== -1 && quiescedFlagIdx !== -1 && verifyCallIdx !== -1 && backupCallIdx !== -1, 'всички anchor-и трябва да съществуват')
+  const snapshotMvIdx = FULL_SOURCE.indexOf('mv -f "$DB_BACKUP_TMP" "$DB_BACKUP_PATH"')
+  assert(pmStopIdx !== -1 && quiescedFlagIdx !== -1 && verifyCallIdx !== -1 && snapshotMvIdx !== -1, 'всички anchor-и трябва да съществуват')
+  assert(snapshotMvIdx < pmStopIdx, 'verified snapshot (mv към финалния път) трябва да е ПРЕДИ pm2 stop')
   assert(pmStopIdx < quiescedFlagIdx, 'флагът трябва да се сложи СЛЕД pm2 stop call-а')
-  assert(quiescedFlagIdx < verifyCallIdx, 'флагът трябва да се сложи ПРЕДИ bounded verify-а')
-  assert(verifyCallIdx < backupCallIdx, 'bounded verify трябва да е ПРЕДИ backup() извикването')
+  assert(quiescedFlagIdx < verifyCallIdx, 'флагът трябва да се сложи ПРЕДИ bounded stop verify-а')
+  const beforeStop = FULL_SOURCE.slice(0, pmStopIdx)
+  assert(!beforeStop.split('\n').some((line) => /^\s*PM2_QUIESCED_FOR_BACKUP="true"/.test(line)), 'флагът НЕ трябва да се присвоява никъде преди pm2 stop')
 })
 
-await check('[D5] cleanup(): dist-restore клонът е ПРЕДИ PM2 quiesce-recovery клона', () => {
-  const cleanupStartIdx = FULL_SOURCE.indexOf('cleanup() {')
-  const cleanupEndIdx = FULL_SOURCE.indexOf('trap cleanup EXIT')
-  const cleanupBody = FULL_SOURCE.slice(cleanupStartIdx, cleanupEndIdx)
+await check('[D5] cleanup(): dist-restore клонът е ПРЕДИ PM2 recovery клона', () => {
+  const cleanupBody = FULL_SOURCE.slice(FULL_SOURCE.indexOf('cleanup() {'), FULL_SOURCE.indexOf('trap cleanup EXIT'))
   const activationIfIdx = cleanupBody.indexOf('if [ "$ACTIVATION_ARMED" = "true" ]')
   const quiescedIfIdx = cleanupBody.indexOf('if [ "$PM2_QUIESCED_FOR_BACKUP" = "true" ]')
-  assert(activationIfIdx !== -1, 'ACTIVATION_ARMED guard трябва да съществува в cleanup()')
-  assert(quiescedIfIdx !== -1, 'PM2_QUIESCED_FOR_BACKUP guard трябва да съществува в cleanup()')
-  assert(activationIfIdx < quiescedIfIdx, 'dist-restore клонът трябва да е ПРЕДИ PM2 quiesce-recovery клона (dist коректен ПРЕДИ backend online)')
+  assert(activationIfIdx !== -1 && quiescedIfIdx !== -1, 'двата guard-а трябва да съществуват в cleanup()')
+  assert(activationIfIdx < quiescedIfIdx, 'dist-restore клонът трябва да е ПРЕДИ PM2 recovery клона')
   assert(cleanupBody.includes('pm2 restart "$PM2_APP_NAME"'), 'recovery клонът трябва реално да вика pm2 restart')
-  assert(cleanupBody.includes('RESTART_STARTED" = "false'), 'recovery клонът трябва да е gate-нат зад RESTART_STARTED="false" (никога след реалния restart)')
+  assert(cleanupBody.includes('RESTART_STARTED" = "false'), 'recovery клонът трябва да е gate-нат зад RESTART_STARTED="false"')
 })
 
-await check('[D6] Ред в "Backend quiesce": backup exit-code check -> integrity_check -> mv, всичко ПРЕДИ "Dist activation"', () => {
-  const quiesceIdx = FULL_SOURCE.indexOf('# ─── 5. Backend quiesce')
-  const activationIdx = FULL_SOURCE.indexOf('# ─── 6. Dist activation')
-  const block = FULL_SOURCE.slice(quiesceIdx, activationIdx)
-  const backupExitCheckIdx = block.indexOf('if [ "$BACKUP_EXIT_CODE" -ne 0 ]')
-  const integrityCheckIdx = block.indexOf('PRAGMA integrity_check')
-  const integrityGateIdx = block.indexOf('if [ "$INTEGRITY_RESULT" != "ok" ]')
-  const mvIdx = block.lastIndexOf('mv -f "$DB_BACKUP_TMP" "$DB_BACKUP_PATH"')
-  assert(backupExitCheckIdx !== -1 && integrityCheckIdx !== -1 && integrityGateIdx !== -1 && mvIdx !== -1, 'всички anchor-и трябва да съществуват')
-  assert(backupExitCheckIdx < integrityCheckIdx, 'backup exit-code check трябва да е ПРЕДИ integrity_check-а')
-  assert(integrityCheckIdx < integrityGateIdx, 'integrity_check изпълнението трябва да е ПРЕДИ неговия резултатен gate')
-  assert(integrityGateIdx < mvIdx, 'integrity gate трябва да е ПРЕДИ финалния mv на backup файла')
+await check('[D6] Ред в секция 5: snapshot exit check -> non-empty -> integrity/FK verify -> gates -> SHA256 -> mv -> pm2 stop, всичко ПРЕДИ Dist activation', () => {
+  const block = FULL_SOURCE.slice(FULL_SOURCE.indexOf(SECTION_5_ANCHOR), FULL_SOURCE.indexOf(SECTION_6_ANCHOR))
+  const order = [
+    'if [ "$SNAPSHOT_EXIT_CODE" -ne 0 ]',
+    '[ -s "$DB_BACKUP_TMP" ]',
+    "PRAGMA integrity_check",
+    "PRAGMA foreign_key_check",
+    'if [ "$INTEGRITY_RESULT" != "ok" ]',
+    'if [ "$FOREIGN_KEY_VIOLATIONS" != "0" ]',
+    'DB_BACKUP_SHA256="$(sha256_of "$DB_BACKUP_TMP")"',
+    'mv -f "$DB_BACKUP_TMP" "$DB_BACKUP_PATH"',
+    '> "$DB_BACKUP_CHECKSUM_FILE"',
+    SECTION_5C_ANCHOR,
+    'if ! pm2 stop "$PM2_APP_NAME"; then',
+  ]
+  let last = -1
+  for (const needle of order) {
+    const idx = block.indexOf(needle, last + 1)
+    assert(idx !== -1, `липсва (или е в грешен ред): ${needle}`)
+    assert(idx > last, `грешен ред при: ${needle}`)
+    last = idx
+  }
 })
 
 await check('[D7] cleanup() включва всичките 4 sidecar варианта', () => {
-  const cleanupStartIdx = FULL_SOURCE.indexOf('cleanup() {')
-  const cleanupEndIdx = FULL_SOURCE.indexOf('trap cleanup EXIT')
-  const cleanupBody = FULL_SOURCE.slice(cleanupStartIdx, cleanupEndIdx)
+  const cleanupBody = FULL_SOURCE.slice(FULL_SOURCE.indexOf('cleanup() {'), FULL_SOURCE.indexOf('trap cleanup EXIT'))
   for (const needle of ['"$ACTIVE_TMP_FILE"', '"${ACTIVE_TMP_FILE}-journal"', '"${ACTIVE_TMP_FILE}-wal"', '"${ACTIVE_TMP_FILE}-shm"']) {
     assert(cleanupBody.includes(needle), `cleanup() трябва да включва ${needle}`)
   }
@@ -481,28 +495,378 @@ await check('[D8] Никакъв wildcard/global delete по DB_BACKUP_ROOT/DIST
   assert(!FULL_SOURCE.includes('rm -rf "$DB_BACKUP_DIR"'), 'DB_BACKUP_DIR никога не се трие с rm -rf (само rmdir-ако-празна)')
 })
 
-await check('[D9] node:sqlite backup() е обвит в bounded `timeout "${DB_BACKUP_TIMEOUT_SECONDS}s"` (default 300)', () => {
-  assert(FULL_SOURCE.includes('DB_BACKUP_TIMEOUT_SECONDS="${DB_BACKUP_TIMEOUT_SECONDS:-300}"'), 'configurable default трябва да е 300s')
-  assert(/timeout "\$\{DB_BACKUP_TIMEOUT_SECONDS\}s" node --input-type=module/.test(FULL_SOURCE), 'backup() извикването трябва да е обвито в timeout')
+await check('[D9] Snapshot: bounded timeout + nice/ionice + busy_timeout=10000, source invocation БЕЗ -readonly; verify bounded и read-only', () => {
+  const snapshotLine = FULL_SOURCE.split('\n').find((line) => line.includes('sqlite3 -bail -batch') && line.includes('"$DB_FILE"'))
+  assert(snapshotLine !== undefined, 'VACUUM INTO source invocation трябва да съществува')
+  assert(!snapshotLine!.includes('-readonly'), `VACUUM INTO source invocation НЕ трябва да има -readonly (production A/B: 6s vs 54s, идентична schema): ${snapshotLine}`)
+  assert(!/sqlite3 [^\n]*-readonly/.test(FULL_SOURCE.split('\n').filter((line) => !line.trimStart().startsWith('#')).join('\n')), 'никъде не трябва да има sqlite3 ... -readonly извън коментари')
+  const verifyBlock = FULL_SOURCE.slice(FULL_SOURCE.indexOf('VERIFY_OUTPUT="$(timeout'), FULL_SOURCE.indexOf('if [ "$VERIFY_EXIT_CODE" -ne 0 ]'))
+  assert(verifyBlock.includes("new DatabaseSync(process.argv[1], { open: true, readOnly: true })"), 'integrity_check/foreign_key_check върху snapshot-а трябва да са read-only')
+  assert(FULL_SOURCE.includes('DB_BACKUP_TIMEOUT_SECONDS="${DB_BACKUP_TIMEOUT_SECONDS:-300}"'), 'configurable snapshot timeout (default 300)')
+  assert(FULL_SOURCE.includes('DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS="${DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS:-600}"'), 'configurable verify timeout (default 600)')
+  assert(FULL_SOURCE.includes(`| timeout "\${DB_BACKUP_TIMEOUT_SECONDS}s" "\${SNAPSHOT_PRIORITY[@]}" ${VACUUM_CALL}`), 'sqlite3 трябва да е обвит в timeout + priority prefix')
+  assert(FULL_SOURCE.includes('SNAPSHOT_PRIORITY=(nice -n 10)'), 'nice трябва да е винаги в prefix-а')
+  assert(FULL_SOURCE.includes('SNAPSHOT_PRIORITY=(ionice -c 2 -n 7 nice -n 10)'), 'ionice трябва да се добавя, ако е наличен')
+  assert(FULL_SOURCE.includes('PRAGMA busy_timeout=10000;'), 'busy_timeout=10000')
+  assert(FULL_SOURCE.includes('VERIFY_OUTPUT="$(timeout "${DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS}s" node'), 'verify трябва да е bounded')
 })
 
-await check('[D10] Non-pending-migrations normal deploy flow остава непроменен (без quiesce/backup секция преди Dist activation)', () => {
+await check('[D10] Non-pending-migrations flow: detection -> confirmation -> секция 5 -> activation, без pm2 stop извън guard-а', () => {
   const detectionIdx = FULL_SOURCE.indexOf('# ─── 3. Migration detection')
   const confirmationIdx = FULL_SOURCE.indexOf('# ─── 4. Explicit restart confirmation')
-  const quiesceIdx = FULL_SOURCE.indexOf('# ─── 5. Backend quiesce')
-  const activationIdx = FULL_SOURCE.indexOf('# ─── 6. Dist activation')
-  assert(detectionIdx < confirmationIdx, 'detection трябва да е ПРЕДИ confirmation')
-  assert(confirmationIdx < quiesceIdx, 'confirmation трябва да е ПРЕДИ quiesce секцията')
-  assert(quiesceIdx < activationIdx, 'quiesce секцията трябва да е ПРЕДИ dist activation')
-  // Между confirmation и guard-а НЕ трябва да съществува РЕАЛНО извикване на
-  // pm2 stop (търсим точния command literal, не bare думите "pm2 stop" —
-  // последното се появява легитимно и в doc коментара, обясняващ flow-а над
-  // самата "# ─── 5. Backend quiesce" секция) — вече проверено structурно
-  // от [D3] (guard-ът обгражда РЕАЛНИЯ call), тук потвърждаваме че извън
-  // guard-натия блок (преди "if [ -n \"$PENDING_MIGRATIONS\" ]; then" реда)
-  // няма нито един реален "pm2 stop" command call.
-  const betweenConfirmationAndGuard = FULL_SOURCE.slice(confirmationIdx, FULL_SOURCE.indexOf('if [ -n "$PENDING_MIGRATIONS" ]; then', quiesceIdx))
-  assert(!betweenConfirmationAndGuard.includes('pm2 stop "$PM2_APP_NAME"'), 'pm2 stop команден call не трябва да съществува ИЗВЪН PENDING_MIGRATIONS guard-а')
+  const section5Idx = FULL_SOURCE.indexOf(SECTION_5_ANCHOR)
+  const activationIdx = FULL_SOURCE.indexOf(SECTION_6_ANCHOR)
+  assert(detectionIdx < confirmationIdx && confirmationIdx < section5Idx && section5Idx < activationIdx, 'грешен ред на секциите')
+  const betweenConfirmationAndGuard = FULL_SOURCE.slice(confirmationIdx, FULL_SOURCE.indexOf('if [ -n "$PENDING_MIGRATIONS" ]; then', section5Idx))
+  assert(!betweenConfirmationAndGuard.includes('pm2 stop "$PM2_APP_NAME"'), 'pm2 stop не трябва да съществува ИЗВЪН PENDING_MIGRATIONS guard-а')
+})
+
+await check('[D11] Между началото на секция 5 и pm2 stop няма НИКАКВА pm2 команда (snapshot/verify failure => backend остава online)', () => {
+  const block = FULL_SOURCE.slice(FULL_SOURCE.indexOf(SECTION_5_ANCHOR), FULL_SOURCE.indexOf('if ! pm2 stop "$PM2_APP_NAME"; then'))
+  const codeLines = block.split('\n').filter((line) => !/^\s*#/.test(line))
+  assert(!codeLines.some((line) => /(^|[\s;|&(])pm2\s/.test(line.replace(/"[^"]*"/g, '""'))), 'не трябва да има pm2 команда преди stop-а в секция 5')
+  assert(block.includes('snapshot_abort_backend_online()'), 'abort helper-ът за failure преди stop трябва да съществува')
+  assert(block.includes('Backend остава ONLINE (PM2 НЕ е спиран)'), 'abort съобщението трябва да казва, че backend-ът остава ONLINE')
+})
+
+await check('[D12] sqlite3 CLI (>= 3.27.0) се проверява ПРЕДИ confirmation и само при pending migrations', () => {
+  const sqliteCheckIdx = FULL_SOURCE.indexOf('if ! command -v sqlite3 >/dev/null 2>&1; then')
+  const versionCheckIdx = FULL_SOURCE.indexOf('3.27.0')
+  const confirmationIdx = FULL_SOURCE.indexOf('# ─── 4. Explicit restart confirmation')
+  const detectionGuardIdx = FULL_SOURCE.indexOf('if [ -n "$PENDING_MIGRATIONS" ]; then', FULL_SOURCE.indexOf('# ─── 3. Migration detection'))
+  assert(sqliteCheckIdx !== -1 && versionCheckIdx !== -1, 'sqlite3 наличност + версия трябва да се проверяват')
+  assert(detectionGuardIdx < sqliteCheckIdx && sqliteCheckIdx < confirmationIdx, 'проверката трябва да е в pending-migrations клона на detection-а, ПРЕДИ confirmation')
+})
+
+await check('[D13] Confirmation съобщението казва: snapshot първо, backend ONLINE, stop само за activation/restart, НЕ zero downtime', () => {
+  assert(FULL_SOURCE.includes('A live consistent DB snapshot (SQLite VACUUM INTO) will be taken FIRST, while the backend stays ONLINE.'), 'snapshot-first/online текст')
+  assert(FULL_SOURCE.includes('STOPPED briefly for dist activation + restart'), 'stop само за activation/restart')
+  assert(FULL_SOURCE.includes('This is NOT zero downtime.'), 'без обещание за zero downtime')
+  assert(!FULL_SOURCE.includes('Backend will be STOPPED, a bounded DB backup will be taken'), 'старото съобщение трябва да е премахнато')
+})
+
+await check('[D14] Няма cp на live DB и няма online backup API (node:sqlite backup()) за migration backup-а', () => {
+  assert(!/\bcp\b[^\n]*"\$DB_FILE"/.test(FULL_SOURCE), 'не трябва да има cp на $DB_FILE')
+  assert(!FULL_SOURCE.includes('await backup(src'), 'node:sqlite backup() не трябва да се ползва повече')
+})
+
+console.log('\n=== Section E: реалният snapshot/verify код (extracted) срещу реални SQLite бази ===\n')
+
+// Реалният код на секция 5 от началото до "5c. Backend stop" (т.е. целия
+// snapshot + verify, БЕЗ pm2 stop частта), плюс реалните log/fail/section/
+// sha256_of helper-и от скрипта. Затваряме отворения `if [ -n
+// "$PENDING_MIGRATIONS" ]` блок с `fi` в harness-а.
+const HELPERS = [
+  await extractBetween("log() { printf '[deploy-backend] %s\\n' \"$1\"; }", '# ─── Own-temp/backup cleanup on interrupt', ['fail()', 'section()']),
+  await extractBetween('sha256_of() {', 'http_status_for() {', ['CHECKSUM_TOOL']),
+].join('\n')
+const SNAPSHOT_SLICE = await extractBetween(SECTION_5_ANCHOR, SECTION_5C_ANCHOR, [VACUUM_CALL, 'snapshot_abort_backend_online', 'PRAGMA foreign_key_check'])
+
+const fwd = (p: string) => p.replace(/\\/g, '/')
+
+// Node-базиран sqlite3 shim: `sqlite3 -bail -batch FILE < script` —
+// изпълнява SQL-а от stdin срещу FILE със СЪЩИЯ SQLite engine (node:sqlite),
+// read-only само ако е подаден -readonly. SHIM_MODE управлява fault injection.
+async function makeToolDir(): Promise<{ dir: string; pm2Log: string; ioniceLog: string; cleanup: () => Promise<void> }> {
+  const dir = await mkdtemp(join(tmpdir(), 'belot-snapshot-tools-'))
+  const pm2Log = join(dir, 'pm2-calls.log')
+  const ioniceLog = join(dir, 'ionice-calls.log')
+  const shimJs = join(dir, 'sqlite3-shim.mjs')
+  await writeFile(shimJs, `
+import { DatabaseSync } from 'node:sqlite'
+import { readFileSync, writeFileSync } from 'node:fs'
+const args = process.argv.slice(2)
+const file = args.find((a) => !a.startsWith('-'))
+const sql = readFileSync(0, 'utf8')
+const mode = process.env.SHIM_MODE ?? 'real'
+const target = (sql.match(/VACUUM INTO '((?:[^']|'')*)'/) ?? [])[1]?.replace(/''/g, "'")
+if (mode === 'hang') { setTimeout(() => {}, 600000) }
+else if (mode === 'error') { process.stderr.write('Error: simulated sqlite3 failure\\n'); process.exit(1) }
+else if (mode === 'empty') { writeFileSync(target, '') }
+else if (mode === 'garbage') { writeFileSync(target, 'SQLite format 3\\u0000' + 'x'.repeat(8192)) }
+else {
+  const db = new DatabaseSync(file, { readOnly: args.includes('-readonly') })
+  try { db.exec(sql) } catch (e) { process.stderr.write(String(e) + '\\n'); process.exit(1) } finally { db.close() }
+}
+`, 'utf8')
+  await writeFile(join(dir, 'sqlite3'), `#!/usr/bin/env bash\nexec node "${fwd(shimJs)}" "$@"\n`, 'utf8')
+  await writeFile(join(dir, 'pm2'), `#!/usr/bin/env bash\necho "pm2 $*" >> "${fwd(pm2Log)}"\nexit 0\n`, 'utf8')
+  await writeFile(join(dir, 'ionice'), `#!/usr/bin/env bash\necho "ionice $*" >> "${fwd(ioniceLog)}"\nshift 4\nexec "$@"\n`, 'utf8')
+  for (const tool of ['sqlite3', 'pm2', 'ionice']) await chmod(join(dir, tool), 0o755)
+  return { dir, pm2Log, ioniceLog, cleanup: () => rm(dir, { recursive: true, force: true }) }
+}
+
+// Реална WAL SQLite база с две FK-свързани таблици (optional orphan за E6).
+async function makeSourceDb(dir: string, rows: number, withFkViolation = false): Promise<string> {
+  const dbPath = fwd(join(dir, 'belot-v2.sqlite'))
+  const script = `
+import { DatabaseSync } from 'node:sqlite'
+const db = new DatabaseSync(process.argv[2])
+db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;')
+db.exec('CREATE TABLE parent (id INTEGER PRIMARY KEY, payload TEXT); CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id), payload TEXT);')
+db.exec('CREATE TABLE pairs_a (id INTEGER PRIMARY KEY, batch INTEGER); CREATE TABLE pairs_b (id INTEGER PRIMARY KEY, batch INTEGER);')
+db.exec('BEGIN')
+const insP = db.prepare('INSERT INTO parent (payload) VALUES (?)'); const insC = db.prepare('INSERT INTO child (parent_id, payload) VALUES (?, ?)')
+for (let i = 1; i <= ${rows}; i++) { insP.run('p'.repeat(200) + i); insC.run(i, 'c'.repeat(200) + i) }
+db.exec('COMMIT')
+if (${withFkViolation}) { db.exec('PRAGMA foreign_keys = OFF'); db.prepare('INSERT INTO child (parent_id, payload) VALUES (999999999, ?)').run('orphan') }
+db.close()
+`
+  const scriptPath = join(dir, 'make-db.mjs')
+  await writeFile(scriptPath, script, 'utf8')
+  const code = await new Promise<number>((resolveRun) => spawn('node', [scriptPath, dbPath]).on('close', (c) => resolveRun(c ?? -1)))
+  assert(code === 0, 'source DB setup failed')
+  return dbPath
+}
+
+async function runSnapshotSlice(opts: {
+  dbFile: string
+  backupRoot: string
+  tools: { dir: string }
+  shimMode?: string
+  timeoutSeconds?: number
+  withIonice?: boolean
+}): Promise<{ code: number; stdout: string; stderr: string; durationMs: number; backupPath: string; sha: string }> {
+  const stagingDir = fwd(join(opts.backupRoot, 'staging-dist'))
+  await mkdir(stagingDir, { recursive: true })
+  const toolPath = toPosixPath(opts.tools.dir)
+  // Без withIonice fake ionice shim-ът се маха от tool директорията (на
+  // Windows dev machine реален ionice няма) — остава само nice. С withIonice
+  // shim-ът записва argv и exec-ва останалата команда.
+  const harness = `#!/usr/bin/env bash
+set -euo pipefail
+export PATH="${toolPath}:$PATH"
+${opts.withIonice ? '' : `mv "${toolPath}/ionice" "${toolPath}/ionice.disabled" 2>/dev/null || true`}
+CHECKSUM_TOOL=sha256sum
+DB_FILE="${opts.dbFile}"
+DB_BACKUP_ROOT="${fwd(opts.backupRoot)}/backend-deploy-migration"
+STAGING_DIST_DIR="${stagingDir}"
+GIT_SHORT_SHA="abc1234"
+PENDING_MIGRATIONS="20990101_001_test.sql"
+DB_BACKUP_TIMEOUT_SECONDS="${opts.timeoutSeconds ?? 60}"
+DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS="60"
+ACTIVE_TMP_FILE=""
+DB_BACKUP_DIR=""
+${HELPERS}
+${SNAPSHOT_SLICE}
+fi
+echo "SNAPSHOT_OK path=$DB_BACKUP_PATH sha=$DB_BACKUP_SHA256"
+`
+  const env: Record<string, string> = {}
+  if (opts.shimMode) env.SHIM_MODE = opts.shimMode
+  const result = await runBashHarness(harness, [], env)
+  const match = result.stdout.match(/SNAPSHOT_OK path=(\S+) sha=([0-9a-f]{64})/)
+  return { ...result, backupPath: match?.[1] ?? '', sha: match?.[2] ?? '' }
+}
+
+async function readPm2Calls(pm2Log: string): Promise<string> {
+  return existsSync(pm2Log) ? (await readFile(pm2Log, 'utf8')).trim() : ''
+}
+
+async function inspectDb(dbPath: string): Promise<{ integrity: string; fk: number; parent: number; child: number; pairsA: number; pairsB: number }> {
+  const script = `
+import { DatabaseSync } from 'node:sqlite'
+const db = new DatabaseSync(process.argv[2], { readOnly: true })
+const n = (t) => db.prepare('SELECT COUNT(*) AS n FROM ' + t).get().n
+process.stdout.write(JSON.stringify({ integrity: db.prepare('PRAGMA integrity_check').get().integrity_check, fk: db.prepare('PRAGMA foreign_key_check').all().length,
+  parent: n('parent'), child: n('child'), pairsA: n('pairs_a'), pairsB: n('pairs_b') }))
+db.close()
+`
+  const dir = await mkdtemp(join(tmpdir(), 'belot-inspect-'))
+  const scriptPath = join(dir, 'inspect.mjs')
+  await writeFile(scriptPath, script, 'utf8')
+  const out = await new Promise<string>((resolveRun) => {
+    let s = ''
+    const child = spawn('node', [scriptPath, dbPath])
+    child.stdout.on('data', (d) => { s += d.toString() })
+    child.on('close', () => resolveRun(s))
+  })
+  await rm(dir, { recursive: true, force: true })
+  return JSON.parse(out)
+}
+
+async function sha256File(path: string): Promise<string> {
+  const { createHash } = await import('node:crypto')
+  return createHash('sha256').update(await readFile(path)).digest('hex')
+}
+
+await check('[E1] Успешен live snapshot: валиден файл, integrity ok, FK 0, SHA256 файл съвпада, НИКАКВО pm2 извикване, без temp остатъци', async () => {
+  const work = await mkdtemp(join(tmpdir(), 'belot-snapshot-e1-'))
+  const tools = await makeToolDir()
+  try {
+    const dbFile = await makeSourceDb(work, 2000)
+    const result = await runSnapshotSlice({ dbFile, backupRoot: work, tools })
+    assertEqual(result.code, 0, `exit code (stderr: ${result.stderr})`)
+    assert(result.backupPath.endsWith('/belot-v2.sqlite') && existsSync(result.backupPath), 'финалният backup трябва да съществува като raw .sqlite')
+    assert(!existsSync(`${result.backupPath}.tmp`), 'temp файлът трябва да е преименуван')
+    const inspected = await inspectDb(result.backupPath)
+    assertEqual(inspected.integrity, 'ok', 'integrity_check')
+    assertEqual(inspected.fk, 0, 'foreign_key_check')
+    assertEqual(inspected.child, 2000, 'snapshot трябва да съдържа данните')
+    const shaFile = (await readFile(`${result.backupPath}.sha256`, 'utf8')).trim()
+    assertEqual(shaFile, `${await sha256File(result.backupPath)}  belot-v2.sqlite`, 'SHA256 файлът трябва да съвпада с реалния файл (sha256sum формат)')
+    assertEqual(result.sha, await sha256File(result.backupPath), 'отчетеният SHA256')
+    assertEqual(await readPm2Calls(tools.pm2Log), '', 'snapshot/verify частта НЕ трябва да вика pm2')
+  } finally {
+    await tools.cleanup()
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+await check('[E1b] ionice, ако е наличен: извиква се с -c 2 -n 7 и после nice -n 10 sqlite3', async () => {
+  const work = await mkdtemp(join(tmpdir(), 'belot-snapshot-e1b-'))
+  const tools = await makeToolDir()
+  try {
+    const dbFile = await makeSourceDb(work, 50)
+    const result = await runSnapshotSlice({ dbFile, backupRoot: work, tools, withIonice: true })
+    assertEqual(result.code, 0, `exit code (stderr: ${result.stderr})`)
+    const ioniceCalls = existsSync(tools.ioniceLog) ? (await readFile(tools.ioniceLog, 'utf8')).trim() : ''
+    assert(ioniceCalls.startsWith('ionice -c 2 -n 7 nice -n 10 sqlite3 -bail -batch '), `ionice argv: "${ioniceCalls}"`)
+    assert(!ioniceCalls.includes('-readonly'), `sqlite3 source invocation не трябва да има -readonly: "${ioniceCalls}"`)
+  } finally {
+    await tools.cleanup()
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+await check('[E2] Source продължава да приема writes ПО ВРЕМЕ на snapshot-а; snapshot-ът е transactionally consistent и не съдържа по-късните writes', async () => {
+  const work = await mkdtemp(join(tmpdir(), 'belot-snapshot-e2-'))
+  const tools = await makeToolDir()
+  try {
+    const dbFile = await makeSourceDb(work, 60000)
+    const writerScript = join(work, 'writer.mjs')
+    const writerLog = fwd(join(work, 'writer.log'))
+    // Всеки commit вмъква по един ред в pairs_a И pairs_b в една транзакция —
+    // consistent snapshot трябва винаги да има равни бройки.
+    await writeFile(writerScript, `
+import { DatabaseSync } from 'node:sqlite'
+import { appendFileSync } from 'node:fs'
+const db = new DatabaseSync(process.argv[2])
+db.exec('PRAGMA busy_timeout = 10000')
+const a = db.prepare('INSERT INTO pairs_a (batch) VALUES (?)'); const b = db.prepare('INSERT INTO pairs_b (batch) VALUES (?)')
+const stopAt = Date.now() + Number(process.argv[4])
+let i = 0, errors = 0
+while (Date.now() < stopAt) {
+  try { db.exec('BEGIN IMMEDIATE'); a.run(i); b.run(i); db.exec('COMMIT'); i++ } catch (e) { errors++; try { db.exec('ROLLBACK') } catch {} }
+  if (i % 25 === 0) appendFileSync(process.argv[3], Date.now() + ' ' + i + '\\n')
+}
+appendFileSync(process.argv[3], 'DONE ' + i + ' errors=' + errors + '\\n')
+db.close()
+`, 'utf8')
+    const writer = spawn('node', [writerScript, dbFile, writerLog, '6000'])
+    const writerDone = new Promise<void>((resolveRun) => writer.on('close', () => resolveRun()))
+    await new Promise((r) => setTimeout(r, 800))
+    const snapshotStartMs = Date.now()
+    const result = await runSnapshotSlice({ dbFile, backupRoot: work, tools })
+    const snapshotEndMs = Date.now()
+    await writerDone
+    assertEqual(result.code, 0, `snapshot exit code (stderr: ${result.stderr})`)
+    const logLines = (await readFile(writerLog, 'utf8')).trim().split('\n')
+    const doneLine = logLines.find((line) => line.startsWith('DONE'))!
+    const totalCommitted = Number(doneLine.split(' ')[1])
+    assert(doneLine.includes('errors=0'), `writer-ът не трябва да получава грешки (SQLITE_BUSY) заради snapshot-а: ${doneLine}`)
+    const progressDuringSnapshot = logLines.filter((line) => !line.startsWith('DONE')).map((line) => line.split(' ').map(Number))
+      .filter(([at]) => at >= snapshotStartMs && at <= snapshotEndMs)
+    assert(progressDuringSnapshot.length >= 2 && progressDuringSnapshot[progressDuringSnapshot.length - 1]![1]! > progressDuringSnapshot[0]![1]!,
+      `writer-ът трябва да напредва ПО ВРЕМЕ на snapshot-а (${progressDuringSnapshot.length} точки)`)
+    const snap = await inspectDb(result.backupPath)
+    assertEqual(snap.integrity, 'ok', 'snapshot integrity_check')
+    assertEqual(snap.pairsA, snap.pairsB, 'snapshot трябва да е transactionally consistent (pairs_a == pairs_b)')
+    const source = await inspectDb(dbFile)
+    assertEqual(source.pairsA, totalCommitted, 'source съдържа всички commit-нати writes')
+    assert(snap.pairsA < source.pairsA, `по-късните writes не са в snapshot-а (snapshot=${snap.pairsA}, source=${source.pairsA})`)
+    assertEqual(await readPm2Calls(tools.pm2Log), '', 'pm2 не трябва да се вика')
+  } finally {
+    await tools.cleanup()
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+async function expectAbortBackendOnline(label: string, opts: { shimMode?: string; timeoutSeconds?: number; fkViolation?: boolean; rows?: number }, messageNeedle: string): Promise<void> {
+  await check(label, async () => {
+    const work = await mkdtemp(join(tmpdir(), 'belot-snapshot-abort-'))
+    const tools = await makeToolDir()
+    try {
+      const dbFile = await makeSourceDb(work, opts.rows ?? 200, opts.fkViolation ?? false)
+      const sourceShaBefore = await sha256File(dbFile)
+      const result = await runSnapshotSlice({ dbFile, backupRoot: work, tools, shimMode: opts.shimMode, timeoutSeconds: opts.timeoutSeconds })
+      assert(result.code !== 0, 'трябва да abort-не')
+      assert(result.stderr.includes(messageNeedle), `съобщението трябва да съдържа "${messageNeedle}": ${result.stderr}`)
+      assert(result.stderr.includes('Backend остава ONLINE (PM2 НЕ е спиран)'), 'съобщението трябва да казва, че backend-ът остава ONLINE')
+      assertEqual(await readPm2Calls(tools.pm2Log), '', 'pm2 НЕ трябва да бъде извикван (нито stop, нито restart)')
+      const backupRoot = join(work, 'backend-deploy-migration')
+      const leftovers = existsSync(backupRoot) ? (await import('node:fs')).readdirSync(backupRoot) : []
+      assertEqual(leftovers.length, 0, `не трябва да остават temp/per-run директории: ${JSON.stringify(leftovers)}`)
+      assert(!existsSync(join(work, 'staging-dist')), 'staging build-ът трябва да е изчистен')
+      assertEqual(await sha256File(dbFile), sourceShaBefore, 'production DB файлът не трябва да е променен')
+    } finally {
+      await tools.cleanup()
+      await rm(work, { recursive: true, force: true })
+    }
+  })
+}
+
+await expectAbortBackendOnline('[E3] Snapshot TIMEOUT -> abort ПРЕДИ pm2 stop, temp изчистен, backend online', { shimMode: 'hang', timeoutSeconds: 2 }, 'DB snapshot TIMEOUT')
+await expectAbortBackendOnline('[E4] sqlite3 грешка -> abort ПРЕДИ pm2 stop', { shimMode: 'error' }, 'VACUUM INTO snapshot се провали')
+await expectAbortBackendOnline('[E5] Празен snapshot файл -> abort ПРЕДИ pm2 stop', { shimMode: 'empty' }, 'липсва или е празен')
+await expectAbortBackendOnline('[E6] Повреден snapshot (integrity/verify failure) -> abort ПРЕДИ pm2 stop, невалидният файл изтрит', { shimMode: 'garbage' }, 'Snapshot')
+await expectAbortBackendOnline('[E7] foreign_key_check > 0 -> abort ПРЕДИ pm2 stop', { fkViolation: true }, 'foreign_key_check върна "1"')
+
+await check('[E8] Съществуваща per-run backup директория -> отказ, чуждият backup НЕ се пипа, pm2 не се вика', async () => {
+  const work = await mkdtemp(join(tmpdir(), 'belot-snapshot-e8-'))
+  const tools = await makeToolDir()
+  try {
+    const dbFile = await makeSourceDb(work, 10)
+    const backupRoot = fwd(join(work, 'backend-deploy-migration'))
+    const runDir = `${backupRoot}/20990101000000-abc1234`
+    await mkdir(runDir, { recursive: true })
+    const foreignFile = `${runDir}/belot-v2.sqlite`
+    await writeFile(foreignFile, 'foreign backup from another run', 'utf8')
+    // Фиксиран `date` -> същият per-run път; mkdir без -p трябва да откаже.
+    const harness = `#!/usr/bin/env bash
+set -euo pipefail
+export PATH="${toPosixPath(tools.dir)}:$PATH"
+CHECKSUM_TOOL=sha256sum
+DB_FILE="${dbFile}"
+DB_BACKUP_ROOT="${backupRoot}"
+STAGING_DIST_DIR="${fwd(join(work, 'staging-dist'))}"
+GIT_SHORT_SHA="abc1234"
+PENDING_MIGRATIONS="x.sql"
+DB_BACKUP_TIMEOUT_SECONDS=60
+DB_SNAPSHOT_VERIFY_TIMEOUT_SECONDS=60
+ACTIVE_TMP_FILE=""
+DB_BACKUP_DIR=""
+date() { printf '20990101000000'; }
+${HELPERS}
+${SNAPSHOT_SLICE}
+fi
+echo SHOULD_NOT_REACH
+`
+    const result = await runBashHarness(harness, [], {})
+    assert(result.code !== 0 && !result.stdout.includes('SHOULD_NOT_REACH'), 'трябва да откаже')
+    assert(result.stderr.includes('вече съществува'), `съобщение: ${result.stderr}`)
+    assert(result.stderr.includes('Backend остава ONLINE (PM2 НЕ е спиран)'), 'backend остава online')
+    assert(existsSync(foreignFile) && (await readFile(foreignFile, 'utf8')) === 'foreign backup from another run', 'чуждият backup НЕ трябва да бъде пипнат')
+    assertEqual(await readPm2Calls(tools.pm2Log), '', 'pm2 не трябва да се вика')
+  } finally {
+    await tools.cleanup()
+    await rm(work, { recursive: true, force: true })
+  }
+})
+
+await check('[E9] VACUUM INTO върху WAL база дава самостоятелен snapshot (без -wal/-shm)', async () => {
+  const work = await mkdtemp(join(tmpdir(), 'belot-snapshot-e9-'))
+  const tools = await makeToolDir()
+  try {
+    const dbFile = await makeSourceDb(work, 100)
+    assert(existsSync(`${dbFile}-wal`) || existsSync(dbFile), 'source е WAL база')
+    const result = await runSnapshotSlice({ dbFile, backupRoot: work, tools })
+    assertEqual(result.code, 0, `exit (stderr: ${result.stderr})`)
+    assert(!existsSync(`${result.backupPath}-wal`) && !existsSync(`${result.backupPath}-shm`), 'финалният snapshot е самостоятелен файл (без sidecar-и)')
+  } finally {
+    await tools.cleanup()
+    await rm(work, { recursive: true, force: true })
+  }
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)
