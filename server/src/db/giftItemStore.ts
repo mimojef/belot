@@ -52,6 +52,9 @@ export type PendingGiftItemDelivery = {
   itemName: string
   imageUrl: string
   fromDisplayName: string
+  /** Стабилен sender profile_id (от gift_item_transactions) — за "Подари и
+   * ти". null само ако transaction редът липсва (не би трябвало). */
+  fromProfileId: ProfileId | null
 }
 
 export type SendGiftItemResult =
@@ -363,11 +366,16 @@ export async function createGiftItemStore(
   // insertion-order fallback (SQLite implicit column, без schema промяна —
   // gift_item_delivery_log няма WITHOUT ROWID) вместо недетерминистичен ред
   // между redове със същия created_at.
+  // sender_profile_id идва от gift_item_transactions (един ред на delivery,
+  // transaction_id е PRIMARY KEY там) — delivery log-ът пази само display
+  // name snapshot, който НЕ е идентификатор.
   const selectPendingDeliveriesStatement = database.prepare(`
-    SELECT transaction_id, gift_item_id, item_name, image_url, from_display_name
-    FROM gift_item_delivery_log
-    WHERE recipient_profile_id = ? AND shown_at IS NULL
-    ORDER BY created_at ASC, rowid ASC;
+    SELECT d.transaction_id, d.gift_item_id, d.item_name, d.image_url, d.from_display_name,
+           t.sender_profile_id AS from_profile_id
+    FROM gift_item_delivery_log d
+    LEFT JOIN gift_item_transactions t ON t.transaction_id = d.transaction_id
+    WHERE d.recipient_profile_id = ? AND d.shown_at IS NULL
+    ORDER BY d.created_at ASC, d.rowid ASC;
   `)
 
   const markDeliveryShownStatement = database.prepare(`
@@ -726,6 +734,7 @@ export async function createGiftItemStore(
       item_name: string
       image_url: string
       from_display_name: string
+      from_profile_id: string | null
     }>
 
     return rows.map((r) => ({
@@ -734,6 +743,7 @@ export async function createGiftItemStore(
       itemName: r.item_name,
       imageUrl: r.image_url,
       fromDisplayName: r.from_display_name,
+      fromProfileId: r.from_profile_id ?? null,
     }))
   }
 

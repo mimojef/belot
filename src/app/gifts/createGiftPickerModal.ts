@@ -48,6 +48,8 @@ export interface GiftPickerModalConfig {
   onSubmit: (recipientKey: string, recipientProfileId: string, giftItemId: string, requestId: string) => void
   /** Извиква се точно преди success close+toast — caller-ят пише новия баланс в собствения си state. */
   onBalanceUpdate?: (newBalance: number) => void
+  /** Optional: извиква се след всяко затваряне на отворен picker (×, backdrop, success). */
+  onClose?: () => void
 }
 
 type GiftPickerModalState = {
@@ -266,9 +268,11 @@ export function createGiftPickerModal(config: GiftPickerModalConfig): GiftPicker
   }
 
   function close(): void {
+    const wasOpen = modal !== null
     catalogRequestToken += 1
     modal = null
     syncModal()
+    if (wasOpen) config.onClose?.()
   }
 
   function submit(giftItemId: string): void {

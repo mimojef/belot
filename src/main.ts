@@ -32,6 +32,7 @@ import {
 import { validateProfileDisplayName } from './app/lobby/profileDisplayNameValidation'
 import { readProfileImageFileAsDataUrl } from './app/profileImages/profileImageUploadHelpers'
 import type { GiftLimitErrorPayload } from './app/lobby/formatGiftLimitError'
+import { canOfferGiftBack, renderGiftItemReceivedActionsHtml } from './app/gifts/giftItemReceivedActions'
 import type { AvatarCropSelection, GuestContactFormInput } from './app/lobby/renderLobbyScreen'
 import { formatTopicsSectionMuteErrorText } from './app/lobby/renderTopicsScreen'
 import type { PlayerAccountRole, ActiveProfileBanSnapshot } from './ui/overlays/renderPlayerProfilePopup'
@@ -7444,10 +7445,26 @@ function showCoinsGiftedPopup(amount: number, fromDisplayName: string): void {
 // showCoinsGiftedPopup по-горе (директен coin transfer). Огледален
 // standalone document.body-appended popup, но за virtual item подарък
 // (картинка вместо сума). Виж giftItemStore.ts (сървър).
-function showGiftItemReceivedPopup(itemName: string, imageUrl: string, fromDisplayName: string): void {
+//
+// "Подари и ти": fromProfileId (стабилен sender id от сървъра) → съществуващия
+// gift picker с recipient = подателя (lobby.openGiftBackFromSender): lobby
+// picker извън игра, in-game picker по време на Белот/Ludo. Без fromProfileId
+// бутонът не се показва.
+function showGiftItemReceivedPopup(itemName: string, imageUrl: string, fromDisplayName: string, fromProfileId: string | null = null): void {
   const existing = document.getElementById('gift-item-received-popup')
   existing?.remove()
   playPlayerSeatFillSound()
+
+  // Показва се и по време на Белот/Ludo — тогава lobby.openGiftBackFromSender
+  // отваря in-game picker-а (createGiftPickerModal) без да напуска играта.
+  const showGiftBack = canOfferGiftBack(fromProfileId, currentAuthSession?.profile.profileId ?? null)
+  const renderActions = (state: { pending: boolean; errorText: string | null }) => renderGiftItemReceivedActionsHtml({
+    okAttribute: 'data-gift-item-received-ok',
+    giftBackAttribute: 'data-gift-item-received-gift-back',
+    showGiftBack: showGiftBack && state.errorText === null,
+    isGiftBackPending: state.pending,
+    errorText: state.errorText,
+  })
 
   const host = document.createElement('div')
   host.id = 'gift-item-received-popup'
@@ -7460,12 +7477,42 @@ function showGiftItemReceivedPopup(itemName: string, imageUrl: string, fromDispl
         <div style="font-size:20px;font-weight:900;color:#f8fafc;line-height:1.2;">${escapeHtmlMain(fromDisplayName)} ви подари</div>
         <div style="font-size:20px;font-weight:900;color:#f4c95b;margin-top:6px;">${escapeHtmlMain(itemName)}</div>
       </div>
-      <button id="gift-item-received-ok" type="button" style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;font-family:inherit;">OK</button>
+      <div data-gift-item-received-actions-host="1" style="width:100%;display:flex;flex-direction:column;gap:12px;">${renderActions({ pending: false, errorText: null })}</div>
     </div>
   `
 
   document.body.appendChild(host)
-  host.querySelector<HTMLButtonElement>('#gift-item-received-ok')?.addEventListener('click', () => host.remove())
+
+  let isGiftBackInFlight = false
+  host.addEventListener('click', (event) => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+
+    if (target.closest('[data-gift-item-received-ok="1"]')) {
+      host.remove()
+      return
+    }
+
+    if (!target.closest('[data-gift-item-received-gift-back="1"]') || isGiftBackInFlight) return
+    isGiftBackInFlight = true
+    const actionsHost = host.querySelector<HTMLElement>('[data-gift-item-received-actions-host="1"]')
+    if (actionsHost) actionsHost.innerHTML = renderActions({ pending: true, errorText: null })
+
+    void lobby.openGiftBackFromSender(fromProfileId, fromDisplayName).then((result) => {
+      isGiftBackInFlight = false
+      if (!host.isConnected) return
+      if (result.status === 'opened') {
+        host.remove()
+        return
+      }
+      if (actionsHost) {
+        actionsHost.innerHTML = renderActions({
+          pending: false,
+          errorText: result.status === 'error' ? result.message : null,
+        })
+      }
+    })
+  })
 }
 
 function escapeHtmlMain(value: string): string {
@@ -8194,7 +8241,7 @@ client = createGameServerClient({
     // засяга получателя баланс (виж giftItemStore.sendGiftItem — само
     // sender се дебитва), затова тук няма currentAuthSession balance sync.
     if (message.type === 'gift_item_received') {
-      showGiftItemReceivedPopup(message.itemName, message.imageUrl, message.fromDisplayName)
+      showGiftItemReceivedPopup(message.itemName, message.imageUrl, message.fromDisplayName, message.fromProfileId ?? null)
       return
     }
 

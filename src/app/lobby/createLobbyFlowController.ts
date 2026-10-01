@@ -22,6 +22,14 @@ import type { PrivateRoomInviteEligibleFriend } from './privateRoomPopupMarkup'
 import { formatTournamentStartCountdown, formatTournamentFillExpiryCountdown, hasTournamentRoundTransitionAssignment, renderTournamentPartnerSearchSection, isoToDatetimeLocalValue } from './renderTournamentsScreen'
 import { showStakeDeductionEffect } from '../activeRoom/renderStakeDeductionEffect'
 import {
+  canOfferGiftBack,
+  GIFT_BACK_IN_GAME_PICKER_Z_INDEX,
+  renderGiftItemReceivedActionsHtml,
+  type GiftBackResolution,
+  type GiftItemReceivedEntry,
+} from '../gifts/giftItemReceivedActions'
+import { createGiftPickerModal, type GiftPickerModal } from '../gifts/createGiftPickerModal'
+import {
   renderLobbyScreen,
   escapeHtml,
   formatNotificationBadgeCount,
@@ -1393,6 +1401,12 @@ export type LobbyFlowController = {
    * _ludoController обявлението).
    */
   hasActiveLudoMatch: () => boolean
+  /**
+   * "Подари и ти" от live push received popup-а (main.ts). Валидира подателя
+   * по стабилния profile_id и отваря съществуващия gift item picker с
+   * recipient = подателя; при невалиден профил връща error (picker не се отваря).
+   */
+  openGiftBackFromSender: (senderProfileId: string | null, displayNameHint: string) => Promise<GiftBackResolution>
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
   forceLeaveAdminScreenForbidden: (message: string) => void
@@ -1865,8 +1879,12 @@ type InternalLobbyFlowState = {
   // fix: преди тук се пазеше само последният push-нат масив и никой код не
   // consume-ваше остатъка след затваряне на popup-а — виж
   // showNextGiftItemNotification/completeCurrentGiftItemNotification.
-  giftItemReceivedModal: { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string } | null
-  giftItemNotificationQueue: Array<{ transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string }>
+  giftItemReceivedModal: GiftItemReceivedEntry | null
+  giftItemNotificationQueue: GiftItemReceivedEntry[]
+  // "Подари и ти" от received модала: true докато се валидира подателят
+  // (onProfileByIdLoad); error = съществуващото съобщение при невалиден профил.
+  giftItemReceivedGiftBackPending: boolean
+  giftItemReceivedGiftBackError: string | null
   // "Подари авоари" (Paid Gift Shop) recipient durable notification — mirror
   // на giftItemReceivedModal/giftItemNotificationQueue pattern-а по-горе
   // (ОТДЕЛЕН domain, не merge-нат с item gift queue-то). bodyText е
@@ -2623,6 +2641,8 @@ function createInitialState(): InternalLobbyFlowState {
     giftItemSuccessModal: null,
     giftItemReceivedModal: null,
     giftItemNotificationQueue: [],
+    giftItemReceivedGiftBackPending: false,
+    giftItemReceivedGiftBackError: null,
     paidGiftNotificationModal: null,
     paidGiftNotificationQueue: [],
     paidGiftPayerSuccessModal: null,
@@ -5005,6 +5025,8 @@ export function createLobbyFlowController(
       giftItemModalSubmittingId: state.giftItemModalSubmittingId,
       giftItemSuccessModal: state.giftItemSuccessModal,
       giftItemReceivedModal: state.giftItemReceivedModal,
+      giftItemReceivedGiftBackPending: state.giftItemReceivedGiftBackPending,
+      giftItemReceivedGiftBackError: state.giftItemReceivedGiftBackError,
       paidGiftNotificationModal: state.paidGiftNotificationModal,
       paidGiftPayerSuccessModal: state.paidGiftPayerSuccessModal,
       adminGiftItems: state.adminGiftItems,
@@ -6324,6 +6346,7 @@ export function createLobbyFlowController(
       onGiftItemSuccessClose: () => {
         state.giftItemSuccessModal = null
         render()
+        showNextGiftItemNotification()
       },
       onGiftShopClick: (recipientProfileId) => {
         // Reuse-ва вече заредения profilePopupProfile (target профилът,
@@ -6338,6 +6361,9 @@ export function createLobbyFlowController(
       onGiftItemReceivedClose: () => {
         completeCurrentGiftItemNotification()
         render()
+      },
+      onGiftItemReceivedGiftBack: () => {
+        void handleGiftItemReceivedGiftBack()
       },
       onPaidGiftNotificationClose: () => {
         completeCurrentPaidGiftNotification()
@@ -6528,6 +6554,7 @@ export function createLobbyFlowController(
         void submitForgotPassword(email)
       },
       onLogoutClick: () => {
+        _inGameGiftBackPicker?.destroy()
         void options.onLogout?.()
       },
       onBellClick: () => {
@@ -14281,11 +14308,12 @@ export function createLobbyFlowController(
   // openGiftModalBypass/submitGiftCoinsCore по-горе (директен coin
   // transfer). Виж giftItemStore.ts (сървър) за authoritative payment
   // логиката — тук само UI state + network round trip.
-  function openGiftItemModal(recipientProfileId: string): void {
+  function openGiftItemModal(recipientProfileId: string, recipientDisplayName: string | null = null): void {
     state.giftItemModalRecipientProfileId = recipientProfileId
-    state.giftItemModalRecipientName = state.profilePopupProfile?.profileId === recipientProfileId
-      ? state.profilePopupProfile.displayName
-      : 'играч'
+    state.giftItemModalRecipientName = recipientDisplayName
+      ?? (state.profilePopupProfile?.profileId === recipientProfileId
+        ? state.profilePopupProfile.displayName
+        : 'играч')
     state.giftItemModalErrorText = null
     state.giftItemModalSubmittingId = null
     // Fresh fetch на ВСЯКО отваряне (не само "ако все още не е зареден веднъж
@@ -14331,6 +14359,188 @@ export function createLobbyFlowController(
     state.giftItemModalErrorText = null
     state.giftItemModalSubmittingId = null
     render()
+    // Received popup-ите, чакали докато picker-ът е бил отворен (виж
+    // isGiftItemSendFlowOpen), продължават оттук.
+    showNextGiftItemNotification()
+  }
+
+  // ── "Подари и ти" ────────────────────────────────────────────────────────
+  // НЕ е отделна система: валидира подателя по стабилния profile_id чрез
+  // съществуващия onProfileByIdLoad и после отваря съществуващ gift picker:
+  //  - извън игра — lobby openGiftItemModal → submitGiftItem;
+  //  - по време на Белот/Ludo — споделения createGiftPickerModal (същият
+  //    компонент като Ludo in-game gift-а), self-mounted в document.body, без
+  //    да пипа игровия render/state/таймери.
+  // И двата пътя пращат през СЪЩИЯ options.onGiftItemSubmit → POST
+  // /api/profile/:id/send-gift-item; цена, баланс, debit, transaction,
+  // известия и idempotency остават server-side в giftItemStore.sendGiftItem
+  // (sender идва от session-а). Игровите таймери НЕ се паузират/удължават —
+  // ако ходът изтече, докато picker-ът е отворен, сървърът действа нормално.
+  // Невалиден/блокиран/изтрит подател → съществуващото server съобщение от
+  // profile load-а се връща като error и picker-ът НЕ се отваря.
+  const GIFT_BACK_PICKER_KEY = 'gift-back'
+  let _giftBackResolveInFlight = false
+  let _inGameGiftBackPicker: GiftPickerModal | null = null
+
+  function isInAnyGame(): boolean {
+    return (options.getIsInGame?.() ?? false) || _ludoController !== null
+  }
+
+  function getInGameGiftBackPicker(): GiftPickerModal {
+    if (_inGameGiftBackPicker) return _inGameGiftBackPicker
+    _inGameGiftBackPicker = createGiftPickerModal({
+      hostAttribute: 'data-gift-back-picker-host',
+      toastAttribute: 'data-gift-back-picker-toast',
+      zIndex: GIFT_BACK_IN_GAME_PICKER_Z_INDEX,
+      onCatalogLoad: () => options.onGiftItemCatalogLoad?.()
+        ?? Promise.resolve({ ok: false, message: 'Подаряването временно не е налично.' }),
+      getBalance: () => options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null,
+      isConnected: () => state.isConnected,
+      // recipientProfileId идва от picker state-а (зададен при open() от
+      // resolve-натия sender id), не от DOM.
+      onSubmit: (_recipientKey, recipientProfileId, giftItemId, requestId) => {
+        void submitInGameGiftBack(recipientProfileId, giftItemId, requestId)
+      },
+      onBalanceUpdate: (newBalance) => {
+        const authSession = options.getAuthSession?.() ?? null
+        if (authSession?.profile) authSession.profile.yellowCoinsBalance = newBalance
+      },
+      // Чакащите received popup-и продължават след затваряне (×/backdrop/success).
+      onClose: () => {
+        showNextGiftItemNotification()
+      },
+    })
+    return _inGameGiftBackPicker
+  }
+
+  async function submitInGameGiftBack(recipientProfileId: string, giftItemId: string, requestId: string): Promise<void> {
+    const picker = _inGameGiftBackPicker
+    if (!picker) return
+    if (!options.onGiftItemSubmit) {
+      picker.handleSendResult(requestId, { ok: false, message: 'Подаряването временно не е налично.' })
+      return
+    }
+    const balanceBefore = options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null
+    try {
+      const result = await options.onGiftItemSubmit(recipientProfileId, giftItemId, requestId)
+      picker.handleSendResult(requestId, result.ok
+        ? {
+            ok: true,
+            senderBalanceAfter: result.senderBalanceAfter,
+            chargedPrice: balanceBefore !== null && balanceBefore > result.senderBalanceAfter
+              ? balanceBefore - result.senderBalanceAfter
+              : undefined,
+          }
+        : { ok: false, message: result.message })
+    } catch {
+      picker.handleSendResult(requestId, { ok: false, message: 'Няма връзка със сървъра.' })
+    }
+  }
+
+  // Lobby picker извън игра, споделения in-game picker по време на игра.
+  function openGiftBackPicker(recipientProfileId: string, recipientDisplayName: string): void {
+    if (isInAnyGame()) {
+      getInGameGiftBackPicker().open(GIFT_BACK_PICKER_KEY, recipientProfileId, recipientDisplayName)
+      return
+    }
+    openGiftItemModal(recipientProfileId, recipientDisplayName)
+  }
+
+  async function resolveGiftBackRecipient(
+    senderProfileId: string | null,
+    displayNameHint: string,
+  ): Promise<
+    | { status: 'ok'; profileId: string; displayName: string }
+    | { status: 'busy' }
+    | { status: 'error'; message: string }
+  > {
+    const ownProfileId = options.getAuthSession?.()?.profile.profileId ?? null
+
+    const loadProfileById = options.onProfileByIdLoad
+    if (senderProfileId === null || !canOfferGiftBack(senderProfileId, ownProfileId) || !loadProfileById) {
+      return { status: 'error', message: 'Подаряването временно не е налично.' }
+    }
+    const senderId: string = senderProfileId
+
+    // Lobby picker-ът не може да се рендира при suppressRendering (dedicated
+    // пътища); по време на игра се ползва in-game picker-ът.
+    if (!isInAnyGame() && options.suppressRendering === true) {
+      return { status: 'error', message: 'Подаряването временно не е налично.' }
+    }
+
+    if (_giftBackResolveInFlight) {
+      return { status: 'busy' }
+    }
+
+    _giftBackResolveInFlight = true
+    try {
+      const result = await loadProfileById(senderId)
+      if (!result.ok) {
+        return {
+          status: 'error',
+          message: result.message || `Профилът на ${displayNameHint || 'потребителя'} не беше зареден.`,
+        }
+      }
+      // Recipient = точно sender profile_id-то (сървърът трябва да е върнал
+      // СЪЩИЯ профил); display name е само етикет в picker-а.
+      if (result.profile.profileId !== senderId) {
+        return { status: 'error', message: `Профилът на ${displayNameHint || 'потребителя'} не беше зареден.` }
+      }
+      return { status: 'ok', profileId: senderId, displayName: result.profile.displayName }
+    } catch {
+      return { status: 'error', message: 'Няма връзка със сървъра.' }
+    } finally {
+      _giftBackResolveInFlight = false
+    }
+  }
+
+  // Public entry point за live push popup-а в main.ts (standalone DOM popup,
+  // извън lobby state). При 'opened' caller-ът затваря своя popup.
+  async function openGiftBackFromSender(
+    senderProfileId: string | null,
+    displayNameHint: string,
+  ): Promise<GiftBackResolution> {
+    const resolution = await resolveGiftBackRecipient(senderProfileId, displayNameHint)
+    if (resolution.status !== 'ok') return resolution
+    openGiftBackPicker(resolution.profileId, resolution.displayName)
+    return { status: 'opened' }
+  }
+
+  // "Подари и ти" от опашката (lobby модала извън Белот или in-game банера в
+  // Белот). Валидацията минава ПРЕДИ затварянето, за да може грешката да се
+  // покаже в същия popup/банер.
+  async function handleGiftItemReceivedGiftBack(): Promise<void> {
+    const delivery = state.giftItemReceivedModal
+    if (!delivery || state.giftItemReceivedGiftBackPending) return
+
+    state.giftItemReceivedGiftBackPending = true
+    state.giftItemReceivedGiftBackError = null
+    syncGiftItemReceivedPresentation()
+
+    const resolution = await resolveGiftBackRecipient(delivery.fromProfileId, delivery.fromDisplayName)
+
+    // Popup-ът е затворен/сменен междувременно (напр. OK) — нищо не отваряме.
+    if (state.giftItemReceivedModal !== delivery) return
+    state.giftItemReceivedGiftBackPending = false
+
+    if (resolution.status !== 'ok') {
+      state.giftItemReceivedGiftBackError = resolution.status === 'error' ? resolution.message : null
+      syncGiftItemReceivedPresentation()
+      return
+    }
+
+    // Picker-ът се отваря ПРЕДИ complete-а, така че следващият чакащ
+    // received popup остава в опашката (isGiftItemSendFlowOpen) вместо да
+    // се появи върху picker-а.
+    openGiftBackPicker(resolution.profileId, resolution.displayName)
+    completeCurrentGiftItemNotification()
+    render()
+  }
+
+  function isGiftItemSendFlowOpen(): boolean {
+    return state.giftItemModalRecipientProfileId !== null
+      || state.giftItemSuccessModal !== null
+      || (_inGameGiftBackPicker?.isOpenFor(GIFT_BACK_PICKER_KEY) ?? false)
   }
 
   // ── Incoming gift-item notification queue ────────────────────────────────
@@ -14341,7 +14551,7 @@ export function createLobbyFlowController(
   // realtime push (gift_item_received) — виж брифа §4 "Realtime + offline
   // трябва да ползват една queue". Никакъв dedup по sender/gift/recipient —
   // всеки delivery е отделно събитие (explicit изискване, брифа §5 Scenario C).
-  type GiftItemNotificationEntry = { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string }
+  type GiftItemNotificationEntry = GiftItemReceivedEntry
 
   function enqueueGiftItemNotifications(items: GiftItemNotificationEntry[]): void {
     if (items.length === 0) return
@@ -14364,6 +14574,10 @@ export function createLobbyFlowController(
   // като overlay-ите в active-room контролера), а не lobby markup.
   function showNextGiftItemNotification(): void {
     if (state.giftItemReceivedModal !== null) return
+    // "Подари и ти": докато gift picker/success модалът е отворен, следващият
+    // received popup чака (иначе би излязъл върху picker-а). Продължава от
+    // closeGiftItemModal/onGiftItemSuccessClose.
+    if (isGiftItemSendFlowOpen()) return
     const next = state.giftItemNotificationQueue.shift()
     if (!next) return
     state.giftItemReceivedModal = next
@@ -14380,12 +14594,7 @@ export function createLobbyFlowController(
   // НЕ блокира input и не пипа игрови таймери. Затварянето минава през
   // СЪЩИЯ completeCurrentGiftItemNotification() като модала, така че
   // mark-shown семантиката остава непроменена от Stage 1.
-  function showGiftItemReceivedBanner(delivery: {
-    transactionId: string
-    itemName: string
-    imageUrl: string
-    fromDisplayName: string
-  }): void {
+  function showGiftItemReceivedBanner(delivery: GiftItemReceivedEntry): void {
     document.body.querySelector('[data-ingame-gift-banner="1"]')?.remove()
 
     const host = document.createElement('div')
@@ -14402,38 +14611,69 @@ export function createLobbyFlowController(
     host.innerHTML = `
       <div style="
         display:flex;
-        align-items:center;
-        gap:12px;
+        flex-direction:column;
+        gap:10px;
         padding:10px 12px;
         border-radius:14px;
         border:2px solid rgba(212,165,32,0.72);
         background:linear-gradient(180deg,rgba(32,32,32,0.98) 0%,rgba(8,8,8,0.99) 100%);
         box-shadow:0 18px 44px rgba(0,0,0,0.5);
+        box-sizing:border-box;
       ">
-        <img
-          src="${escapeHtml(delivery.imageUrl)}"
-          alt="${escapeHtml(delivery.itemName)}"
-          style="width:75px;height:75px;object-fit:contain;flex:0 0 auto;"
-        />
-        <div style="flex:1 1 auto;min-width:0;text-align:left;">
-          <div style="font-size:15px;line-height:1.25;color:#f8fafc;overflow-wrap:anywhere;"><span style="font-weight:900;">${escapeHtml(delivery.fromDisplayName)}</span><span style="font-weight:400;"> ти подари</span></div>
-          <div style="margin-top:4px;font-size:14px;font-weight:800;color:#f4c95b;overflow-wrap:anywhere;">${escapeHtml(delivery.itemName)}</div>
+        <div style="display:flex;align-items:center;gap:12px;">
+          <img
+            src="${escapeHtml(delivery.imageUrl)}"
+            alt="${escapeHtml(delivery.itemName)}"
+            style="width:75px;height:75px;object-fit:contain;flex:0 0 auto;"
+          />
+          <div style="flex:1 1 auto;min-width:0;text-align:left;">
+            <div style="font-size:15px;line-height:1.25;color:#f8fafc;overflow-wrap:anywhere;"><span style="font-weight:900;">${escapeHtml(delivery.fromDisplayName)}</span><span style="font-weight:400;"> ти подари</span></div>
+            <div style="margin-top:4px;font-size:14px;font-weight:800;color:#f4c95b;overflow-wrap:anywhere;">${escapeHtml(delivery.itemName)}</div>
+          </div>
         </div>
-        <button
-          type="button"
-          data-ingame-gift-banner-ok="1"
-          style="flex:0 0 auto;height:36px;padding:0 18px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:pointer;"
-        >OK</button>
+        <div data-ingame-gift-banner-actions-host="1" style="display:flex;flex-direction:column;gap:8px;">${renderGiftItemReceivedBannerActions()}</div>
       </div>
     `
+    // Един делегиран listener на banner host-а (създава се наново заедно с
+    // host-а при всеки нов банер — без натрупване на listeners).
     host.addEventListener('click', (event) => {
       const target = event.target
       if (!(target instanceof Element)) return
+      if (target.closest('[data-ingame-gift-banner-gift-back="1"]')) {
+        void handleGiftItemReceivedGiftBack()
+        return
+      }
       if (!target.closest('[data-ingame-gift-banner-ok="1"]')) return
       host.remove()
       completeCurrentGiftItemNotification()
     })
     document.body.appendChild(host)
+  }
+
+  function renderGiftItemReceivedBannerActions(): string {
+    const delivery = state.giftItemReceivedModal
+    const ownProfileId = options.getAuthSession?.()?.profile.profileId ?? null
+    return renderGiftItemReceivedActionsHtml({
+      okAttribute: 'data-ingame-gift-banner-ok',
+      giftBackAttribute: 'data-ingame-gift-banner-gift-back',
+      showGiftBack: delivery !== null
+        && canOfferGiftBack(delivery.fromProfileId, ownProfileId)
+        && state.giftItemReceivedGiftBackError === null,
+      isGiftBackPending: state.giftItemReceivedGiftBackPending,
+      errorText: state.giftItemReceivedGiftBackError,
+      compact: true,
+    })
+  }
+
+  // Received UI-ят на текущия delivery е или in-game банерът (Белот), или
+  // lobby модалът — обновява само съответния (банерът не минава през render()).
+  function syncGiftItemReceivedPresentation(): void {
+    const actionsHost = document.body.querySelector<HTMLElement>('[data-ingame-gift-banner="1"] [data-ingame-gift-banner-actions-host="1"]')
+    if (actionsHost && state.giftItemReceivedModal !== null) {
+      actionsHost.innerHTML = renderGiftItemReceivedBannerActions()
+      return
+    }
+    render()
   }
 
   // Извиква се от onGiftItemReceivedClose (auto-dismiss ИЛИ явен X/OK клик —
@@ -14443,6 +14683,8 @@ export function createLobbyFlowController(
   function completeCurrentGiftItemNotification(): void {
     const delivery = state.giftItemReceivedModal
     state.giftItemReceivedModal = null
+    state.giftItemReceivedGiftBackPending = false
+    state.giftItemReceivedGiftBackError = null
     // Ако текущото delivery е било показано като in-game banner, махаме го —
     // no-op, когато е бил показан нормалният модал.
     document.body.querySelector('[data-ingame-gift-banner="1"]')?.remove()
@@ -14556,6 +14798,13 @@ export function createLobbyFlowController(
   }
 
   async function submitGiftItem(recipientProfileId: string, giftItemId: string): Promise<void> {
+    // Един submit наведнъж (бързи/повторни кликове не пращат втори request с
+    // нов requestId), и само към recipient-а, за който picker-ът е отворен —
+    // DOM data атрибутът не може да пренасочи подаръка. Сървърът така или
+    // иначе валидира recipient-а и взима sender-а от session-а.
+    if (state.giftItemModalSubmittingId !== null) return
+    if (recipientProfileId !== state.giftItemModalRecipientProfileId) return
+
     if (!options.onGiftItemSubmit) {
       state.giftItemModalErrorText = 'Подаряването временно не е налично.'
       render()
@@ -18356,6 +18605,7 @@ export function createLobbyFlowController(
           itemName: d.itemName,
           imageUrl: d.imageUrl,
           fromDisplayName: d.fromDisplayName,
+          fromProfileId: d.fromProfileId ?? null,
         })),
       )
       return true
@@ -18374,6 +18624,7 @@ export function createLobbyFlowController(
           itemName: message.itemName,
           imageUrl: message.imageUrl,
           fromDisplayName: message.fromDisplayName,
+          fromProfileId: message.fromProfileId ?? null,
         },
       ])
       return true
@@ -20791,6 +21042,7 @@ export function createLobbyFlowController(
       hasActiveLudoMatch: _ludoController !== null,
     }),
     hasActiveLudoMatch: () => _ludoController !== null,
+    openGiftBackFromSender: (senderProfileId, displayNameHint) => openGiftBackFromSender(senderProfileId, displayNameHint),
     setAdminMonitoringSnapshot: (snapshot) => {
       state.adminMonitoringSnapshot = snapshot
       state.adminMonitoringErrorText = null

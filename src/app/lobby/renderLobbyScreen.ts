@@ -124,6 +124,7 @@ import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListen
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 import { renderTournamentBetaAccessModal, attachTournamentBetaAccessModalEventListeners, type TournamentBetaAccessModalState } from './renderTournamentBetaAccessModal'
+import { canOfferGiftBack, renderGiftItemReceivedActionsHtml, type GiftItemReceivedEntry } from '../gifts/giftItemReceivedActions'
 
 // Каноничната desktop content ширина за целия сайт — вече ползвана от
 // renderNav() (виж по-долу) и non-topics content wrapper-а (desktop клона на
@@ -708,7 +709,9 @@ export type LobbyScreenState = {
   giftItemModalErrorText: string | null
   giftItemModalSubmittingId: string | null
   giftItemSuccessModal: { itemName: string; recipientName: string } | null
-  giftItemReceivedModal: { transactionId: string; itemName: string; imageUrl: string; fromDisplayName: string } | null
+  giftItemReceivedModal: GiftItemReceivedEntry | null
+  giftItemReceivedGiftBackPending: boolean
+  giftItemReceivedGiftBackError: string | null
   /** "Подари авоари" — mirror на giftItemReceivedModal по-горе, виж createLobbyFlowController.ts. */
   paidGiftNotificationModal: { purchaseId: string; purchaseType: 'coin' | 'vip' | 'bundle'; bodyText: string } | null
   paidGiftPayerSuccessModal: { text: string } | null
@@ -1266,6 +1269,8 @@ export type RenderLobbyScreenOptions = {
   onGiftItemSubmit: (recipientProfileId: string, giftItemId: string) => void
   onGiftItemSuccessClose: () => void
   onGiftItemReceivedClose: () => void
+  /** "Подари и ти" — отваря съществуващия gift item picker към подателя. */
+  onGiftItemReceivedGiftBack: () => void
   // "Подари авоари" (Paid Gift Shop) — ОТДЕЛЕН domain от onGiftCoins*
   // (служебно, privileged-only) и onGiftItem* (Item Gift System, §38 в
   // брифа). Навигира към Shop в gift mode, реален Stripe flow.
@@ -3114,7 +3119,14 @@ function renderGiftItemSuccessModal(state: LobbyScreenState): string {
 // (showGiftItemReceivedPopup), не през тази функция.
 function renderGiftItemReceivedModal(state: LobbyScreenState): string {
   if (!state.giftItemReceivedModal) return ''
-  const { itemName, imageUrl, fromDisplayName } = state.giftItemReceivedModal
+  const { itemName, imageUrl, fromDisplayName, fromProfileId } = state.giftItemReceivedModal
+  const actionsHtml = renderGiftItemReceivedActionsHtml({
+    okAttribute: 'data-lobby-gift-item-received-ok',
+    giftBackAttribute: 'data-lobby-gift-item-received-gift-back',
+    showGiftBack: canOfferGiftBack(fromProfileId, state.profile.profileId) && !state.giftItemReceivedGiftBackError,
+    isGiftBackPending: state.giftItemReceivedGiftBackPending,
+    errorText: state.giftItemReceivedGiftBackError,
+  })
   return `
     <div data-lobby-gift-item-received-root="1" style="position:fixed;inset:0;z-index:13600;display:flex;align-items:center;justify-content:center;padding:24px;">
       <div style="position:absolute;inset:0;background:rgba(0,0,0,0.76);-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);"></div>
@@ -3124,11 +3136,7 @@ function renderGiftItemReceivedModal(state: LobbyScreenState): string {
           <div style="font-size:20px;line-height:1.2;color:#f8fafc;"><span style="font-weight:900;">${escapeHtml(fromDisplayName)}</span><span style="font-weight:400;"> ти подари</span></div>
           <div style="margin-top:8px;font-size:16px;font-weight:800;color:#f4c95b;">${escapeHtml(itemName)}</div>
         </div>
-        <button
-          type="button"
-          data-lobby-gift-item-received-ok="1"
-          style="width:100%;height:44px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:15px;font-weight:900;cursor:pointer;"
-        >OK</button>
+        ${actionsHtml}
       </div>
     </div>
   `
@@ -15437,6 +15445,14 @@ export function renderLobbyScreen(
     .querySelector<HTMLButtonElement>('[data-lobby-gift-item-received-ok="1"]')
     ?.addEventListener('click', () => {
       options.onGiftItemReceivedClose()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-gift-item-received-gift-back="1"]')
+    ?.addEventListener('click', (event) => {
+      const button = event.currentTarget
+      if (button instanceof HTMLButtonElement) button.disabled = true
+      options.onGiftItemReceivedGiftBack()
     })
 
   root

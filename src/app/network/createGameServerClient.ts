@@ -2138,6 +2138,9 @@ export type GiftItemReceivedMessage = {
   itemName: string
   imageUrl: string
   fromDisplayName: string
+  /** Стабилен sender profile_id — единственият идентификатор за "Подари и
+   * ти" (fromDisplayName е само за показване). Optional за стари сървъри. */
+  fromProfileId?: string | null
 }
 
 export type PendingGiftItemNotificationsMessage = {
@@ -2148,6 +2151,7 @@ export type PendingGiftItemNotificationsMessage = {
     itemName: string
     imageUrl: string
     fromDisplayName: string
+    fromProfileId?: string | null
   }>
 }
 

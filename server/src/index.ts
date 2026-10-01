@@ -16618,6 +16618,9 @@ async function handleGiftItemsRequest(
           itemName,
           imageUrl,
           fromDisplayName: senderName,
+          // Стабилен sender id за "Подари и ти" — от transaction-а (session-
+          // derived senderProfileId), не display name.
+          fromProfileId: result.transaction.senderProfileId,
         })
       } else {
         giftItemStore.createDeliveryNotification(
