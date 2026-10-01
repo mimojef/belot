@@ -1,4 +1,5 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
+import type { ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 import { advanceExpiredServerAutoPhaseState } from './advanceExpiredServerAutoPhaseState.js'
 import { advanceExpiredServerBiddingState } from './advanceExpiredServerBiddingState.js'
 import { advanceExpiredServerCuttingState } from './advanceExpiredServerCuttingState.js'
@@ -17,6 +18,7 @@ export function advanceOneServerStep(
   state: ServerAuthoritativeGameState,
   now: number,
   fallbackEventAt: number,
+  antiBadLuckConfig: ServerAntiBadLuckConfig,
 ): AdvanceOneServerStepResult {
   if (state.phase === 'cutting' && state.round.selectedCutIndex !== null) {
     return advanceExpiredServerCuttingState(state, now)
@@ -25,7 +27,7 @@ export function advanceOneServerStep(
   const phaseAutoAdvanceExpiry = getServerPhaseAutoAdvanceExpiry(state)
 
   if (phaseAutoAdvanceExpiry !== null && now >= phaseAutoAdvanceExpiry) {
-    return advanceExpiredServerAutoPhaseState(state, phaseAutoAdvanceExpiry)
+    return advanceExpiredServerAutoPhaseState(state, phaseAutoAdvanceExpiry, antiBadLuckConfig)
   }
 
   const expiresAt = getServerTimerExpiry(state)

@@ -1,5 +1,6 @@
 import type { Seat, ServerRoom } from '../core/serverTypes.js'
 import type { ClientBidAction } from '../protocol/messageTypes.js'
+import type { ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 
 export type ActiveRoomRuntimeHealth = {
   activeRooms: number
@@ -53,6 +54,8 @@ export type RuntimeRoomTickResult =
 export type TickRoomsInput = {
   now: number
   rooms: readonly ServerRoom[]
+  // Admin Anti Bad Luck config — задължителен за всеки tick (без fallback).
+  antiBadLuckConfig: ServerAntiBadLuckConfig
 }
 
 export type TickRoomsResult = {

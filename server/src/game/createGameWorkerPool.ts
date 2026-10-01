@@ -16,6 +16,7 @@ import type {
   GameWorkerTickRoomInput,
   GameWorkerTickRoomResult,
 } from './workerProtocol.js'
+import { assertServerAntiBadLuckConfig, type ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 
 export type GameWorkerPoolState =
   | 'idle'
@@ -75,6 +76,7 @@ export type GameWorkerPool = {
   computeTickRooms(
     rooms: GameWorkerTickRoomInput[],
     now: number,
+    antiBadLuckConfig: ServerAntiBadLuckConfig,
   ): Promise<GameWorkerTickRoomResult[]>
   getHealth(): GameWorkerPoolHealth
   // Monitoring-only, best-effort: per-worker CPU usage. Всеки entry е null
@@ -520,8 +522,10 @@ export function createGameWorkerPool(
   async function computeTickRooms(
     rooms: GameWorkerTickRoomInput[],
     now: number,
+    antiBadLuckConfig: ServerAntiBadLuckConfig,
   ): Promise<GameWorkerTickRoomResult[]> {
     validateTickInputs(rooms, now)
+    assertServerAntiBadLuckConfig(antiBadLuckConfig, '[worker-pool] computeTickRooms')
 
     const orderedResults = new Array<GameWorkerTickRoomResult>(rooms.length)
     const groupsByWorkerId = new Map<string, WorkerGroupEntry[]>()
@@ -581,6 +585,7 @@ export function createGameWorkerPool(
           const workerResults = await bundle.tickClient.computeTickRooms(
             group.map((entry) => entry.input),
             now,
+            antiBadLuckConfig,
           )
           const inputByRoomId = new Map(
             group.map((entry) => [entry.input.roomId, entry.input] as const),

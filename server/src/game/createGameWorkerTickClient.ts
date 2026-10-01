@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { isServerAntiBadLuckConfig, type ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 import {
   GAME_WORKER_PROTOCOL_VERSION,
   isGameWorkerComputeTickRoomsResponseMessage,
@@ -23,6 +24,7 @@ export type GameWorkerTickClient = {
   computeTickRooms(
     rooms: GameWorkerTickRoomInput[],
     now: number,
+    antiBadLuckConfig: ServerAntiBadLuckConfig,
   ): Promise<GameWorkerTickRoomResult[]>
 
   shutdown(): Promise<void>
@@ -202,6 +204,7 @@ export function createGameWorkerTickClient(
   function computeTickRooms(
     rooms: GameWorkerTickRoomInput[],
     now: number,
+    antiBadLuckConfig: ServerAntiBadLuckConfig,
   ): Promise<GameWorkerTickRoomResult[]> {
     if (isShuttingDown) {
       return Promise.reject(
@@ -212,6 +215,12 @@ export function createGameWorkerTickClient(
     if (!Number.isFinite(now)) {
       return Promise.reject(
         new Error(`[tick-client] now must be a finite number, got ${String(now)}`),
+      )
+    }
+
+    if (!isServerAntiBadLuckConfig(antiBadLuckConfig)) {
+      return Promise.reject(
+        new Error(`[tick-client] invalid antiBadLuckConfig: ${JSON.stringify(antiBadLuckConfig)}`),
       )
     }
 
@@ -293,6 +302,7 @@ export function createGameWorkerTickClient(
         type: 'compute_tick_rooms',
         requestId,
         now,
+        antiBadLuckConfig,
         rooms,
       }
 

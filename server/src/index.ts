@@ -27,6 +27,11 @@ import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import {
+  SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES,
+  isServerAntiBadLuckThreshold,
+  type ServerAntiBadLuckConfig,
+} from './game/antiBadLuck/serverAntiBadLuckTypes.js'
+import {
   createAuthStore,
   createClearSessionCookieHeader,
   createSessionCookieHeader,
@@ -787,6 +792,41 @@ if (cleanedUpTempBots > 0) {
 }
 const adminSettingsStore = await createAdminSettingsStore(
   databaseBootstrap.databaseFilePath,
+)
+
+// Anti Bad Luck runtime config (admin_settings) — main thread cache, подаван
+// ЗАДЪЛЖИТЕЛНО при всеки game tick към worker-а (workerProtocol v4). Initial
+// read при startup, immediate update след успешен PATCH
+// (handleAdminSettingsRequest), defensive refresh на ~5s — пази и бъдещ
+// multi-instance deployment, където PATCH може да мине през друга инстанция.
+// Грешка при refresh пази последната ПРОЧЕТЕНА от базата стойност (не
+// default 5). Стойността никога не стига до клиент/snapshot.
+const ANTI_BAD_LUCK_CONFIG_REFRESH_INTERVAL_MS = 5_000
+let antiBadLuckRuntimeConfig: ServerAntiBadLuckConfig = adminSettingsStore.getAntiBadLuckRuntimeConfig()
+console.log(
+  `[anti-bad-luck] runtime config: threshold=${antiBadLuckRuntimeConfig.threshold} resetGeneration=${antiBadLuckRuntimeConfig.resetGeneration}`,
+)
+
+function refreshAntiBadLuckRuntimeConfig(reason: string): void {
+  try {
+    const next = adminSettingsStore.getAntiBadLuckRuntimeConfig()
+    if (
+      next.threshold !== antiBadLuckRuntimeConfig.threshold ||
+      next.resetGeneration !== antiBadLuckRuntimeConfig.resetGeneration
+    ) {
+      console.log(
+        `[anti-bad-luck] runtime config (${reason}): threshold ${antiBadLuckRuntimeConfig.threshold} -> ${next.threshold}, resetGeneration ${antiBadLuckRuntimeConfig.resetGeneration} -> ${next.resetGeneration}`,
+      )
+    }
+    antiBadLuckRuntimeConfig = next
+  } catch (error) {
+    console.error('[anti-bad-luck] runtime config refresh failed — keeping last known config:', error)
+  }
+}
+
+let antiBadLuckConfigRefreshInterval: ReturnType<typeof setInterval> | null = setInterval(
+  () => refreshAntiBadLuckRuntimeConfig('periodic'),
+  ANTI_BAD_LUCK_CONFIG_REFRESH_INTERVAL_MS,
 )
 const coinPackageStore = await createCoinPackageStore(
   databaseBootstrap.databaseFilePath,
@@ -5173,6 +5213,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
     const batchResult = await gameWorkerTickOrchestrator.computeCandidates({
       now,
       rooms: roomsToTick,
+      antiBadLuckConfig: antiBadLuckRuntimeConfig,
     })
 
     if (isServerShuttingDown) {
@@ -15839,6 +15880,23 @@ async function handleAdminSettingsRequest(
       nextRegistrationVerificationMode = rawRegistrationVerificationMode
     }
 
+    // "Anti Bad Luck праг" — strict allowlist, само JSON number (не string
+    // "5"). Explicit 400 тук (mirror на registrationVerificationMode), store-ът
+    // re-validate-ва независимо (defense-in-depth).
+    let nextAntiBadLuckThreshold: (typeof SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES)[number] | undefined
+    if ('antiBadLuckThreshold' in body) {
+      const rawAntiBadLuckThreshold = body.antiBadLuckThreshold
+      if (!isServerAntiBadLuckThreshold(rawAntiBadLuckThreshold)) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: `Полето "antiBadLuckThreshold" трябва да е ${SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES.join(', ')}.`,
+        })
+        return true
+      }
+      nextAntiBadLuckThreshold = rawAntiBadLuckThreshold
+    }
+
+    const previousAntiBadLuckConfig = antiBadLuckRuntimeConfig
     const result = adminSettingsStore.updateSettings({
       signupBonusYellowCoins: getNumberField(body, 'signupBonusYellowCoins') ?? undefined,
       profileNameChangePrice: getNumberField(body, 'profileNameChangePrice') ?? undefined,
@@ -15848,11 +15906,22 @@ async function handleAdminSettingsRequest(
       pikaTeamDailyGiftLimit: getNumberField(body, 'pikaTeamDailyGiftLimit') ?? undefined,
       freeTopicsVipDays: getNumberField(body, 'freeTopicsVipDays') ?? undefined,
       registrationVerificationMode: nextRegistrationVerificationMode,
+      antiBadLuckThreshold: nextAntiBadLuckThreshold,
     })
 
     if (!result.ok) {
       sendJsonResponse(res, 400, result)
       return true
+    }
+
+    if (nextAntiBadLuckThreshold !== undefined) {
+      // Immediate cache update — следващият game tick вече носи новия config.
+      refreshAntiBadLuckRuntimeConfig('admin PATCH')
+      if (previousAntiBadLuckConfig.threshold !== antiBadLuckRuntimeConfig.threshold) {
+        console.log(
+          `[anti-bad-luck] admin profile=${session.profile.profileId} changed threshold ${previousAntiBadLuckConfig.threshold} -> ${antiBadLuckRuntimeConfig.threshold} (resetGeneration=${antiBadLuckRuntimeConfig.resetGeneration})`,
+        )
+      }
     }
 
     sendJsonResponse(res, 200, {
@@ -24363,6 +24432,11 @@ function clearMutationTimersForShutdown(): void {
   if (siteVisitRetentionInterval !== null) {
     clearInterval(siteVisitRetentionInterval)
     siteVisitRetentionInterval = null
+  }
+
+  if (antiBadLuckConfigRefreshInterval !== null) {
+    clearInterval(antiBadLuckConfigRefreshInterval)
+    antiBadLuckConfigRefreshInterval = null
   }
 
   if (siteVisitRetentionStartupTimeout !== null) {

@@ -156,6 +156,7 @@ export function createWorkerBackedActiveRoomRuntime(
         const partialResult = delegate.tickRooms({
           now: input.now,
           rooms: group.map((entry) => entry.room),
+          antiBadLuckConfig: input.antiBadLuckConfig,
         })
 
         if (

@@ -15,6 +15,10 @@ import type {
 import type { ServerRoom } from '../src/core/serverTypes.js'
 import { createInProcessGameWorkerManager } from '../src/game/createInProcessGameWorkerManager.js'
 import { createWorkerBackedActiveRoomRuntime } from '../src/game/createWorkerBackedActiveRoomRuntime.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -382,6 +386,7 @@ function makeFakeDelegate(
   const tickResult = runtime.tickRooms({
     now: 12345,
     rooms: [roomB, roomA, roomC],
+    antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
   })
 
   // Два batch-а: по един за всеки worker
@@ -467,6 +472,7 @@ function makeFakeDelegate(
       runtime.tickRooms({
         now: 1000,
         rooms: [unassignedRoom],
+        antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
       }),
     (err) =>
       err instanceof Error &&
@@ -793,6 +799,7 @@ function makeFakeDelegate(
   const tickResult = runtime.tickRooms({
     now: 9999,
     rooms,
+    antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
   })
 
   assert.equal(
@@ -1229,7 +1236,7 @@ function makeFakeSynchronizer(
   sync.forgetCalls.length = 0
 
   // tick
-  runtime.tickRooms({ now: 1000, rooms: [room] })
+  runtime.tickRooms({ now: 1000, rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   // hasRoom
   runtime.hasRoom('unrelated-room')
   // listTrackedRoomIds

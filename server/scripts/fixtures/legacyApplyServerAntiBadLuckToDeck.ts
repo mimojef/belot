@@ -1,3 +1,9 @@
+// TEST-ONLY reference: точното съдържание на
+// server/src/game/antiBadLuck/applyServerAntiBadLuckToDeck.ts ПРЕДИ
+// конфигурируемия праг (commit ec4e3a6) — hardcoded праг 5, persisted
+// pendingSinceDealIndex. Ползва се САМО от checkAntiBadLuckThresholdConfig.ts
+// за bit-identical сравнение при праг 5. НЕ се import-ва от production код.
+
 // Прилага Anti Bad Luck върху вече разбъркания и цепнат deck, точно преди
 // deal-first-3. Гледа САМО първите 5 естествени карти на всеки seat — никакъв
 // резултат, bidding, profile или човек/бот.
@@ -5,13 +11,8 @@
 // Flow:
 //  1. Естествените първи 5 на всеки seat се изчисляват от позициите в deck-а
 //     (симулация със същия dealServerCardsInPackets: 3 + 2 от firstDealSeat).
-//  0. Admin config (виж ServerAntiBadLuckConfig): threshold 0 → целият
-//     Anti Bad Luck се пропуска (deck-ът остава естественият, state-ът е
-//     празен); state от по-стара resetGeneration се изхвърля (започва начисто).
-//  2. Rescue кандидат = pending seat (>= threshold поредни BAD ПРЕДИ това
-//     раздаване, преизчислено по ТЕКУЩИЯ праг), чиито естествени първи
-//     5 са отново BAD → rescue най-рано на (threshold + 1)-вото BAD.
-//     Естествен GOOD → без rescue, counter = 0.
+//  2. Rescue кандидат = pending seat (>= 5 поредни BAD), чиито естествени първи
+//     5 са отново BAD. Естествен GOOD → без rescue, counter = 0.
 //  3. Максимум 1 rescue на цялото раздаване (без значение от отбора): по-стар
 //     pending печели, равенство → seeded random. Неизбраните остават pending
 //     със стария си момент (или се нулират при естествен GOOD).
@@ -30,41 +31,40 @@
 //     остава pending.
 //  6. Streak-овете се обновяват по реално раздадените първи 5.
 
-import { SERVER_SEAT_ORDER, type Seat } from '../../core/serverTypes.js'
-import { shuffleWithRandom } from '../../core/seededRandom.js'
-import { createEmptyHands } from '../createServerRoundDefaults.js'
-import { dealServerCardsInPackets } from '../dealServerCardsInPackets.js'
-import type { ServerCard } from '../serverGameTypes.js'
+import { SERVER_SEAT_ORDER, type Seat } from '../../src/core/serverTypes.js'
+import { shuffleWithRandom } from '../../src/core/seededRandom.js'
+import { createEmptyHands } from '../../src/game/createServerRoundDefaults.js'
+import { dealServerCardsInPackets } from '../../src/game/dealServerCardsInPackets.js'
+import type { ServerCard } from '../../src/game/serverGameTypes.js'
 import {
   getServerAntiBadLuckKeepStrength,
   getServerAntiBadLuckNaturalAnchorSuits,
   isServerGoodFirstFive,
-} from './evaluateServerFirstFiveQuality.js'
+} from '../../src/game/antiBadLuck/evaluateServerFirstFiveQuality.js'
 import {
   getServerAntiBadLuckRescueCandidates,
   pickServerAntiBadLuckRescue,
   pickServerAntiBadLuckRescueType,
   pickServerAntiBadLuckRescueVariant,
-} from './pickServerAntiBadLuckRescue.js'
+} from '../../src/game/antiBadLuck/pickServerAntiBadLuckRescue.js'
 import {
   SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE,
   SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE,
   isServerAntiBadLuckSequencePlanSafe,
   type ServerAntiBadLuckSequenceAllowance,
-} from './serverAntiBadLuckSequenceGuard.js'
-import { isServerAntiBadLuckSquarePlanSafe } from './serverAntiBadLuckSquareGuard.js'
+} from '../../src/game/antiBadLuck/serverAntiBadLuckSequenceGuard.js'
+import { isServerAntiBadLuckSquarePlanSafe } from '../../src/game/antiBadLuck/serverAntiBadLuckSquareGuard.js'
 import {
-  SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG,
-  assertServerAntiBadLuckConfig,
   createEmptyServerAntiBadLuckState,
-  getServerAntiBadLuckStateResetGeneration,
-  type ServerAntiBadLuckConfig,
   type ServerAntiBadLuckAnchorConstraints,
   type ServerAntiBadLuckRescue,
   type ServerAntiBadLuckRescueKind,
   type ServerAntiBadLuckSeatState,
   type ServerAntiBadLuckState,
-} from './serverAntiBadLuckTypes.js'
+} from '../../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Hardcoded праг отпреди конфигурацията (константата вече не съществува).
+const SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD = 5
 
 const FIRST_FIVE_CARD_COUNT = 5
 const FULL_HAND_CARD_COUNT = 8
@@ -169,34 +169,20 @@ export function getServerFullHandDeckIndicesBySeat(
   }
 }
 
-// Pending момент по ТЕКУЩИЯ праг, изведен от непрекъснатата серия: серия от
-// `consecutiveBadDeals` BAD, завършваща в раздаване `dealIndex`, е започнала в
-// dealIndex − consecutiveBadDeals + 1 и е достигнала прага в
-// dealIndex − consecutiveBadDeals + threshold. При непроменен праг това е
-// ТОЧНО стойността, която старият код записваше в pendingSinceDealIndex.
-// При промяна на прага eligibility-то се преизчислява: увеличаване отлага,
-// намаляване може да направи seat-а eligible веднага (count-ът се пази).
-function getPendingSinceDealIndex(
-  consecutiveBadDeals: number,
-  dealIndex: number,
-  threshold: number,
-): number | null {
-  return consecutiveBadDeals >= threshold ? dealIndex - consecutiveBadDeals + threshold : null
+function isPending(seatState: ServerAntiBadLuckSeatState): boolean {
+  return seatState.pendingSinceDealIndex !== null
 }
 
 // Опашка за единствения rescue на раздаването: pending seat-ове с естествено
-// BAD първи 5; най-старият pending (по текущия праг) печели, при равенство —
+// BAD първи 5; най-старият pendingSinceDealIndex печели, при равенство —
 // seeded random (не seat order).
 function pickRescueSeat(
   previous: ServerAntiBadLuckState,
   isNaturalGood: Record<Seat, boolean>,
   nextRandom: () => number,
-  threshold: number,
 ): Seat | null {
-  const pendingSince = (seat: Seat) =>
-    getPendingSinceDealIndex(previous.seats[seat].consecutiveBadDeals, previous.dealIndex, threshold)
   const candidates = SERVER_SEAT_ORDER.filter(
-    (seat) => pendingSince(seat) !== null && !isNaturalGood[seat],
+    (seat) => isPending(previous.seats[seat]) && !isNaturalGood[seat],
   )
 
   if (candidates.length === 0) {
@@ -204,10 +190,10 @@ function pickRescueSeat(
   }
 
   const oldestPending = Math.min(
-    ...candidates.map((seat) => pendingSince(seat) as number),
+    ...candidates.map((seat) => previous.seats[seat].pendingSinceDealIndex as number),
   )
   const oldestCandidates = candidates.filter(
-    (seat) => pendingSince(seat) === oldestPending,
+    (seat) => previous.seats[seat].pendingSinceDealIndex === oldestPending,
   )
 
   return oldestCandidates.length === 1
@@ -365,7 +351,6 @@ function getNextSeatState(
   previousSeatState: ServerAntiBadLuckSeatState,
   isGood: boolean,
   dealIndex: number,
-  threshold: number,
 ): ServerAntiBadLuckSeatState {
   if (isGood) {
     return { consecutiveBadDeals: 0, pendingSinceDealIndex: null }
@@ -375,42 +360,19 @@ function getNextSeatState(
 
   return {
     consecutiveBadDeals,
-    pendingSinceDealIndex: getPendingSinceDealIndex(consecutiveBadDeals, dealIndex, threshold),
+    pendingSinceDealIndex:
+      previousSeatState.pendingSinceDealIndex ??
+      (consecutiveBadDeals >= SERVER_ANTI_BAD_LUCK_STREAK_THRESHOLD ? dealIndex : null),
   }
 }
 
-function createEmptyStateForGeneration(resetGeneration: number): ServerAntiBadLuckState {
-  return { ...createEmptyServerAntiBadLuckState(), resetGeneration }
-}
-
-// `config` default-ът (праг 5) е САМО за ниски тестови/диагностични
-// извиквания — production пътят (dealServerFirstThreePhase) винаги подава
-// explicit admin config, без fallback.
-export function applyServerAntiBadLuckToDeck(
+export function legacyApplyServerAntiBadLuckToDeck(
   deck: ServerCard[],
   firstDealSeat: Seat,
   previousState: ServerAntiBadLuckState | undefined,
   nextRandom: () => number = Math.random,
-  config: ServerAntiBadLuckConfig = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG,
 ): ServerAntiBadLuckDealResult {
-  assertServerAntiBadLuckConfig(config, 'applyServerAntiBadLuckToDeck')
-
-  // Праг 0: Anti Bad Luck е напълно изключен — естественият (разбъркан и
-  // цепнат) deck се връща НЕПОКЪТНАТ (същата референция), без nextRandom
-  // извикване, без rescue, и state-ът се изчиства (нищо не се натрупва,
-  // нищо не остава „замразено“ за по-късно).
-  if (config.threshold === 0) {
-    return { deck, antiBadLuck: createEmptyStateForGeneration(config.resetGeneration), rescueKinds: {}, rescues: {} }
-  }
-
-  // State, изчислен преди последното admin превключване към 0 (по-стара
-  // resetGeneration), се изхвърля — 0 → X и бързо X → 0 → X без раздаване
-  // между тях започват начисто, без retroactive rescue.
-  const previous =
-    previousState !== undefined && getServerAntiBadLuckStateResetGeneration(previousState) === config.resetGeneration
-      ? previousState
-      : createEmptyStateForGeneration(config.resetGeneration)
-  const threshold = config.threshold
+  const previous = previousState ?? createEmptyServerAntiBadLuckState()
 
   if (deck.length < FIRST_FIVE_CARD_COUNT * 4) {
     return { deck, antiBadLuck: previous, rescueKinds: {}, rescues: {} }
@@ -445,7 +407,7 @@ export function applyServerAntiBadLuckToDeck(
   const naturalFullHands = canCheckFullHands ? buildFullHands(deck) : null
 
   const isNaturalGood = evaluate(deck)
-  const rescueSeat = pickRescueSeat(previous, isNaturalGood, nextRandom, threshold)
+  const rescueSeat = pickRescueSeat(previous, isNaturalGood, nextRandom)
   const rescueSeats: Seat[] = rescueSeat ? [rescueSeat] : []
 
   // Artificial-sequence allowance-ите се теглят ТОЧНО ВЕДНЪЖ на rescue
@@ -536,12 +498,11 @@ export function applyServerAntiBadLuckToDeck(
 
   const isFinalGood = finalDeck === deck ? isNaturalGood : evaluate(finalDeck)
   const nextSeatState = (seat: Seat) =>
-    getNextSeatState(previous.seats[seat], appliedRescues[seat] ? true : isFinalGood[seat], dealIndex, threshold)
+    getNextSeatState(previous.seats[seat], appliedRescues[seat] ? true : isFinalGood[seat], dealIndex)
 
   return {
     deck: finalDeck,
     antiBadLuck: {
-      resetGeneration: config.resetGeneration,
       dealIndex,
       seats: {
         bottom: nextSeatState('bottom'),

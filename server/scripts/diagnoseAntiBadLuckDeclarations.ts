@@ -66,6 +66,7 @@ import {
 } from '../src/game/antiBadLuck/serverAntiBadLuckSquareGuard.js'
 import type {
   ServerAntiBadLuckAnchorConstraints,
+  ServerAntiBadLuckConfig,
   ServerAntiBadLuckRescue,
   ServerAntiBadLuckState,
 } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
@@ -183,6 +184,10 @@ function getAnchorConstraintsForType(
   }
   return { naturalAnchorSuits: [] }
 }
+
+// Explicit config — диагностиката остава при текущия production праг 5
+// (admin setting default); applyServerAntiBadLuckToDeck вече приема config.
+const DIAGNOSTIC_ANTI_BAD_LUCK_CONFIG: ServerAntiBadLuckConfig = { threshold: 5, resetGeneration: 0 }
 
 function stateWithBottomPending(): ServerAntiBadLuckState {
   return {
@@ -382,7 +387,7 @@ for (let seed = 0; seed < SAMPLE_SIZE; seed += 1) {
   const dealSeed = `diag-deal-${seed}`
 
   // --- Baseline статистики: РЕАЛНАТА, непроменена production функция ---
-  const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithBottomPending(), createSeededRandom(dealSeed))
+  const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithBottomPending(), createSeededRandom(dealSeed), DIAGNOSTIC_ANTI_BAD_LUCK_CONFIG)
 
   if (!result.rescueKinds.bottom) {
     continue // bottom естествено GOOD — rescue изобщо не се опитва

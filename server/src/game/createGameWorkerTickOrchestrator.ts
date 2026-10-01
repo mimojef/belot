@@ -2,6 +2,7 @@ import type { ServerRoom } from '../core/serverTypes.js'
 import type { GameWorkerTickClient } from './createGameWorkerTickClient.js'
 import type { RoomRevisionRegistry } from './createRoomRevisionRegistry.js'
 import type { TickRoomsInput, TickRoomsResult } from './activeRoomRuntime.js'
+import { isServerAntiBadLuckConfig, type ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -84,6 +85,8 @@ export type GameWorkerTickOrchestrator = {
   computeCandidates(input: {
     now: number
     rooms: ServerRoom[]
+    // Admin Anti Bad Luck config — задължителен, валидиран (без fallback).
+    antiBadLuckConfig: ServerAntiBadLuckConfig
   }): Promise<GameWorkerTickBatchResult>
 
   getHealth(): GameWorkerTickOrchestratorHealth
@@ -129,9 +132,14 @@ export function createGameWorkerTickOrchestrator(
 
   // ─── Input validation ──────────────────────────────────────────────────────
 
-  function validateInput(input: { now: number; rooms: ServerRoom[] }): string | null {
+  function validateInput(input: { now: number; rooms: ServerRoom[]; antiBadLuckConfig: ServerAntiBadLuckConfig }): string | null {
     if (!Number.isFinite(input.now)) {
       return `[tick-orchestrator] now must be a finite number, got ${String(input.now)}`
+    }
+
+    // Задължителен admin config — невалиден/липсващ → failed batch, без fallback.
+    if (!isServerAntiBadLuckConfig(input.antiBadLuckConfig)) {
+      return `[tick-orchestrator] invalid antiBadLuckConfig: ${JSON.stringify(input.antiBadLuckConfig)}`
     }
 
     if (!Array.isArray(input.rooms) || input.rooms.length === 0) {
@@ -170,6 +178,7 @@ export function createGameWorkerTickOrchestrator(
   async function runWorkerCandidate(
     rooms: ServerRoom[],
     now: number,
+    antiBadLuckConfig: ServerAntiBadLuckConfig,
     tickClient: TickClientTarget,
   ): Promise<GameWorkerTickBatchResult> {
     // Capture baseRevisions before the async round-trip
@@ -181,7 +190,7 @@ export function createGameWorkerTickOrchestrator(
 
     let workerResults
     try {
-      workerResults = await tickClient.computeTickRooms(inputs, now)
+      workerResults = await tickClient.computeTickRooms(inputs, now, antiBadLuckConfig)
     } catch (err) {
       return failed(normalizeError(err))
     }
@@ -222,11 +231,12 @@ export function createGameWorkerTickOrchestrator(
   function runSyncCandidate(
     rooms: ServerRoom[],
     now: number,
+    antiBadLuckConfig: ServerAntiBadLuckConfig,
     syncTarget: SyncTickTarget,
   ): GameWorkerTickBatchResult {
     let syncResult: TickRoomsResult
     try {
-      syncResult = syncTarget.tickRooms({ now, rooms })
+      syncResult = syncTarget.tickRooms({ now, rooms, antiBadLuckConfig })
     } catch (err) {
       return failed(normalizeError(err))
     }
@@ -257,6 +267,7 @@ export function createGameWorkerTickOrchestrator(
   async function computeCandidates(input: {
     now: number
     rooms: ServerRoom[]
+    antiBadLuckConfig: ServerAntiBadLuckConfig
   }): Promise<GameWorkerTickBatchResult> {
     if (isShuttingDown) {
       return failed('[tick-orchestrator] computeCandidates() called after shutdown')
@@ -272,10 +283,10 @@ export function createGameWorkerTickOrchestrator(
       return failed(validationError)
     }
 
-    const { now, rooms } = input
+    const { now, rooms, antiBadLuckConfig } = input
 
     if (config.mode === 'in-process') {
-      const batchPromise = Promise.resolve(runSyncCandidate(rooms, now, config.syncTickTarget))
+      const batchPromise = Promise.resolve(runSyncCandidate(rooms, now, antiBadLuckConfig, config.syncTickTarget))
       inFlightBatch = batchPromise
 
       try {
@@ -286,7 +297,7 @@ export function createGameWorkerTickOrchestrator(
     }
 
     // Worker-candidate mode
-    const batchPromise = runWorkerCandidate(rooms, now, config.tickClient)
+    const batchPromise = runWorkerCandidate(rooms, now, antiBadLuckConfig, config.tickClient)
     inFlightBatch = batchPromise
 
     try {

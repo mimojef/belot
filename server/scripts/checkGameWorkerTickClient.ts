@@ -26,6 +26,10 @@ import { addHumanToRoom } from '../src/core/addHumanToRoom.js'
 import { addBotToRoom } from '../src/core/addBotToRoom.js'
 import { initializeRoomAuthoritativeGameState } from '../src/game/initializeRoomAuthoritativeGameState.js'
 import { advanceRoomAuthoritativeGame } from '../src/game/advanceRoomAuthoritativeGame.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -175,7 +179,7 @@ await check('1: valid request се post-ва', async () => {
   const client = createGameWorkerTickClient({ endpoint: ep })
   const inputs = [makeFakeInput('room-1', 0)]
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
 
   const posted = ep.getPostedMessages()
   assert.equal(posted.length, 1)
@@ -201,7 +205,7 @@ await check('2: valid response resolve-ва', async () => {
     capturedRequestId = (msg as Record<string, unknown>)['requestId'] as string
   }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   ep.emit(makeValidResponse(capturedRequestId, inputs))
   const results = await promise
   assert.equal(results.length, 1)
@@ -222,7 +226,7 @@ await check('3: request ID correlation', async () => {
     origPost(msg)
   }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   // Wrong requestId → should be ignored
   ep.emit(makeValidResponse('wrong-id', inputs))
   // Correct requestId
@@ -240,7 +244,7 @@ await check('4: wrong revision → reject', async () => {
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   ep.emit({
     protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
     type: 'compute_tick_rooms_response',
@@ -259,7 +263,7 @@ await check('5: unknown result room ID → reject', async () => {
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   ep.emit({
     protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
     type: 'compute_tick_rooms_response',
@@ -278,7 +282,7 @@ await check('6: missing result → reject', async () => {
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   ep.emit({
     protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
     type: 'compute_tick_rooms_response',
@@ -298,7 +302,7 @@ await check('7: duplicate result room IDs → malformed correlated reject', asyn
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   // Дублирани IDs → isGameWorkerComputeTickRoomsResponseMessage връща false
   // → клиентът открива correlated + malformed → immediate reject
   ep.emit({
@@ -325,7 +329,7 @@ await check('7b: malformed correlated response → immediate reject (not timeout
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
 
   // Wrong protocolVersion → type guard fails → correlated + malformed → immediate reject
   ep.emit({
@@ -346,10 +350,10 @@ await check('7c: unrelated malformed message → ignored, valid response resolve
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
 
   // Напълно неразпознато съобщение — без type=compute_tick_rooms_response → игнорирано
-  ep.emit({ type: 'ready', workerId: 'worker-1', protocolVersion: 3, startedAt: Date.now() })
+  ep.emit({ type: 'ready', workerId: 'worker-1', protocolVersion: GAME_WORKER_PROTOCOL_VERSION, startedAt: Date.now() })
   ep.emit({ type: 'pong', requestId: 'some-ping', receivedAt: Date.now() })
   ep.emit({ type: 'health_response', requestId: 'hr', workerId: 'w', startedAt: 0, uptimeMs: 0, activeRooms: 0 })
   ep.emit({ this_is: 'garbage', foo: 42 })
@@ -370,7 +374,7 @@ await check('8: revision mismatch in result → reject', async () => {
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   ep.emit({
     protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
     type: 'compute_tick_rooms_response',
@@ -386,7 +390,7 @@ await check('9: malformed response с различен requestId → ignored (ti
   const client = createGameWorkerTickClient({ endpoint: ep, requestTimeoutMs: 50 })
   const inputs = [makeFakeInput('room-bad', 0)]
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   // requestId = 'whatever' не е в pending → не е correlated → игнориран
   ep.emit({ type: 'compute_tick_rooms_response', protocolVersion: 999, requestId: 'whatever' })
   await assert.rejects(promise, /timed out/)
@@ -401,7 +405,7 @@ await check('10: correlated worker_error → reject', async () => {
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   ep.emit({ type: 'worker_error', requestId: sentId, message: 'worker crashed' })
   await assert.rejects(promise, /worker_error/)
 })
@@ -412,7 +416,7 @@ await check('11: timeout → reject', async () => {
   const client = createGameWorkerTickClient({ endpoint: ep, requestTimeoutMs: 30 })
   const inputs = [makeFakeInput('room-to', 0)]
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   await assert.rejects(promise, /timed out/)
 })
 
@@ -425,7 +429,7 @@ await check('12: late response after timeout → ignore', async () => {
   let sentId = ''
   ep.postMessage = (msg) => { sentId = (msg as Record<string, unknown>)['requestId'] as string }
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   await assert.rejects(promise, /timed out/)
   // Send late response — should be silently ignored
   ep.emit(makeValidResponse(sentId, inputs))
@@ -439,7 +443,7 @@ await check('13: postMessage throw → reject and cleanup', async () => {
   const client = createGameWorkerTickClient({ endpoint: ep })
   const inputs = [makeFakeInput('room-throw', 0)]
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   await assert.rejects(promise, /Failed to send/)
 })
 
@@ -450,7 +454,7 @@ await check('14: duplicate input room ID → local reject', async () => {
   const inputs = [makeFakeInput('room-dup', 0), makeFakeInput('room-dup', 1)]
 
   await assert.rejects(
-    client.computeTickRooms(inputs, Date.now()),
+    client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG),
     /Duplicate roomId/,
   )
 })
@@ -464,7 +468,7 @@ await check('15: room.id mismatch → local reject', async () => {
   ]
 
   await assert.rejects(
-    client.computeTickRooms(inputs, Date.now()),
+    client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG),
     /room\.id must equal roomId/,
   )
 })
@@ -478,7 +482,7 @@ await check('16: invalid revision → local reject', async () => {
   ]
 
   await assert.rejects(
-    client.computeTickRooms(inputs, Date.now()),
+    client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG),
     /non-negative safe integer/,
   )
 })
@@ -489,7 +493,7 @@ await check('17: shutdown rejects pending', async () => {
   const client = createGameWorkerTickClient({ endpoint: ep })
   const inputs = [makeFakeInput('room-sd', 0)]
 
-  const promise = client.computeTickRooms(inputs, Date.now())
+  const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
   await client.shutdown()
   await assert.rejects(promise, /Shutting down/)
 })
@@ -541,7 +545,7 @@ await check('20: no unhandled rejection при timeout', async () => {
   process.on('unhandledRejection', handler)
 
   try {
-    const promise = client.computeTickRooms(inputs, Date.now())
+    const promise = client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
     // Properly catch the rejection
     await promise.catch(() => {})
     await new Promise((r) => setTimeout(r, 50))
@@ -702,7 +706,7 @@ function buildRealisticRoom(id: string): ServerRoom {
 }
 
 // W1: Проверява реалния ready message — type, protocolVersion, workerId
-await check('W1: lifecycle ready — protocolVersion === 3 и workerId в ready message', async () => {
+await check('W1: lifecycle ready — protocolVersion === GAME_WORKER_PROTOCOL_VERSION и workerId в ready message', async () => {
   const worker = new Worker(workerUrl, { workerData: { workerId: 'test-worker-1' } })
 
   try {
@@ -750,6 +754,7 @@ await check('W3: compute за assigned room → result received', async () => {
     const results = await client.computeTickRooms(
       [{ roomId: 'room-w3', baseRevision: 0, room }],
       Date.now(),
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
 
     assert.equal(results.length, 1)
@@ -770,13 +775,14 @@ await check('W4: unchanged candidate при no-op tick', async () => {
       ? room.game.timerDeadlineAt - 10_000  // 10 секунди преди изтичане на таймера
       : Date.now() - 1000
 
-    const localResult = advanceRoomAuthoritativeGame(room, nowForTest)
+    const localResult = advanceRoomAuthoritativeGame(room, nowForTest, TEST_ANTI_BAD_LUCK_CONFIG)
     assert.strictEqual(localResult, room, 'Локалният advance трябва да върне same reference при no-op')
 
     const client = createGameWorkerTickClient({ endpoint })
     const results = await client.computeTickRooms(
       [{ roomId: 'room-w4', baseRevision: 0, room }],
       nowForTest,
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
     assert.equal(results.length, 1)
     assert.equal(results[0].result, 'unchanged', `Очакваме точно 'unchanged', получихме '${results[0].result}'`)
@@ -798,13 +804,14 @@ await check('W5: advanced candidate при изтекъл таймер', async (
     const farFutureNow = (room.game.timerDeadlineAt ?? room.updatedAt) + 60_000
 
     // Доказваме локално, че advance ще промени стайта (не-детерминистично, но структурно)
-    const localProof = advanceRoomAuthoritativeGame(room, farFutureNow)
+    const localProof = advanceRoomAuthoritativeGame(room, farFutureNow, TEST_ANTI_BAD_LUCK_CONFIG)
     assert.notStrictEqual(localProof, room, 'Локалният advance трябва да върне нов обект при изтекъл таймер')
 
     const client = createGameWorkerTickClient({ endpoint })
     const results = await client.computeTickRooms(
       [{ roomId: 'room-w5', baseRevision: 0, room }],
       farFutureNow,
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
     assert.equal(results.length, 1)
     assert.equal(results[0].result, 'advanced', `Очакваме точно 'advanced', получихме '${results[0].result}'`)
@@ -834,6 +841,7 @@ await check('W6: unassigned room → not_assigned', async () => {
     const results = await client.computeTickRooms(
       [{ roomId: 'room-w6-unassigned', baseRevision: 0, room }],
       Date.now(),
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
     assert.equal(results.length, 1)
     assert.equal(results[0].result, 'error')
@@ -863,6 +871,7 @@ await check('W8: compute след release → not_assigned', async () => {
     const results = await client.computeTickRooms(
       [{ roomId: 'room-w8', baseRevision: 0, room }],
       Date.now(),
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
     assert.equal(results[0].result, 'error')
     if (results[0].result === 'error') {
@@ -926,6 +935,7 @@ await check('W10: partial batch — assigned и unassigned', async () => {
         { roomId: 'room-w10-unassigned', baseRevision: 0, room: unassignedRoom },
       ],
       Date.now(),
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
 
     assert.equal(results.length, 2)
@@ -985,6 +995,7 @@ await check('W13: no unhandled rejection при real worker request', async () =
       const results = await client.computeTickRooms(
         [{ roomId: 'room-w13-unassigned', baseRevision: 0, room }],
         Date.now(),
+        TEST_ANTI_BAD_LUCK_CONFIG,
       )
 
       assert.equal(results.length, 1)
@@ -1057,6 +1068,7 @@ await check('Clone: critical nested fields preserved after structured-clone', as
     const results = await client.computeTickRooms(
       [{ roomId: 'room-clone-test', baseRevision: 0, room: originalRoom }],
       farFutureNow,
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
 
     assert.equal(results.length, 1)
@@ -1152,7 +1164,7 @@ await withWorker(async (worker, endpoint) => {
 
     const jsonSize = JSON.stringify(inputs).length
     const start = performance.now()
-    const results = await client.computeTickRooms(inputs, Date.now())
+    const results = await client.computeTickRooms(inputs, Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
     const elapsed = performance.now() - start
 
     console.log(

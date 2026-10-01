@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createGameWorkerLifecycleClient } from '../src/game/createGameWorkerLifecycleClient.js'
 import { createGameWorkerPool } from '../src/game/createGameWorkerPool.js'
+import { GAME_WORKER_PROTOCOL_VERSION } from '../src/game/workerProtocol.js'
 
 let passed = 0
 let failed = 0
@@ -50,7 +51,7 @@ parentPort.on('message', (message) => {
 // Burn a little CPU so cpuUsage() has something non-zero to report.
 const busyStart = Date.now()
 while (Date.now() - busyStart < 50) { Math.sqrt(Math.random()) }
-parentPort.postMessage({ type: 'ready', workerId, protocolVersion: 3, startedAt })
+parentPort.postMessage({ type: 'ready', workerId, protocolVersion: ${GAME_WORKER_PROTOCOL_VERSION}, startedAt })
 `
   await writeFile(file, source, 'utf8')
   return {

@@ -12,6 +12,10 @@ import {
 import { createRoomRevisionRegistry } from '../src/game/createRoomRevisionRegistry.js'
 import { initializeRoomAuthoritativeGameState } from '../src/game/initializeRoomAuthoritativeGameState.js'
 import { resolveGameWorkerEntryUrl } from '../src/game/resolveGameWorkerEntryUrl.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 type RoomRecord = {
   room: ServerRoom
@@ -406,6 +410,7 @@ async function runStressLevel(
       const batch = await orchestrator.computeCandidates({
         now: getFarFutureNow(roomsById.values()),
         rooms,
+        antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
       })
       const tickLatencyMs = performance.now() - tickStartedAt
 

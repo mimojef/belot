@@ -132,6 +132,10 @@ import { renderTournamentBetaAccessModal, attachTournamentBetaAccessModalEventLi
 // не могат двете стойности да се разминат при бъдеща промяна.
 const PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX = 1640
 
+// "Anti Bad Luck праг" admin select — mirror на server allowlist-а
+// (SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES); сървърът е източникът на истина.
+const ADMIN_ANTI_BAD_LUCK_THRESHOLD_OPTIONS: ReadonlyArray<AdminSettingsSnapshot['antiBadLuckThreshold']> = [0, 5, 6, 7, 8, 9, 10]
+
 const MISSION_TYPE_LABELS: Record<string, string> = {
   win_games: 'Спечели N игри',
   win_capot_games: 'Спечели N игри с капо',
@@ -9390,6 +9394,10 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // (adminSettingsStore.ts, 'email_code') — backward compatibility default,
     // не независима стойност.
     registrationVerificationMode: 'email_code',
+    // Само fallback докато state.adminSettings се зарежда — трябва да
+    // остане консистентен с server DEFAULT_SETTINGS/migration seed
+    // (adminSettingsStore.ts, 5), не независима стойност.
+    antiBadLuckThreshold: 5,
   }
   const adminPackages = state.adminCoinPackages
   const adminBundlePackages = state.adminBundlePackages
@@ -9523,6 +9531,19 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">„С потвърждение по имейл“ — сегашният flow: изпраща се код за потвърждение, акаунтът се създава след успешно въвеждане на кода. „Без потвърждение по имейл“ — акаунтът се създава веднага след регистрационната форма, без код/имейл. Промяната влиза в сила незабавно, без restart.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Anti Bad Luck (Белот)</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Anti Bad Luck праг
+              <select name="antiBadLuckThreshold" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+                ${ADMIN_ANTI_BAD_LUCK_THRESHOLD_OPTIONS.map((value) => `<option value="${value}" ${settings.antiBadLuckThreshold === value ? 'selected' : ''}>${value === 0 ? 'Изключено (0)' : String(value)}</option>`).join('')}
+              </select>
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Брой поредни слаби раздавания (първите 5 карти), след които играчът получава помощ. При 5 — помощ най-рано на следващото слабо раздаване след 5 поредни слаби (т.е. на 6-тото). При 0 системата е напълно изключена — обикновено разбъркване, цепене и раздаване. Промяната важи от следващото раздаване на всяка маса, без restart; изключването (0) нулира натрупания прогрес на всички маси.</div>
         </div>
 
         ${state.adminSettingsErrorText ? `
@@ -15142,6 +15163,15 @@ export function renderLobbyScreen(
       // (adminSettingsStore.ts) все пак re-validate-ва независимо
       // (defense-in-depth, не разчита само на client markup-а).
       const registrationVerificationMode = data.get('registrationVerificationMode') === 'direct' ? 'direct' : 'email_code'
+      // <select> markup-ът изброява ЕДИНСТВЕНО allowlist стойностите; сървърът
+      // re-validate-ва независимо. Непозната стойност → submit-ът се отказва
+      // (не се праща тихо друг праг).
+      const antiBadLuckThreshold = ADMIN_ANTI_BAD_LUCK_THRESHOLD_OPTIONS.find(
+        (value) => String(value) === String(data.get('antiBadLuckThreshold') ?? ''),
+      )
+      if (antiBadLuckThreshold === undefined) {
+        return
+      }
 
       options.onAdminSettingsSubmit({
         signupBonusYellowCoins,
@@ -15152,6 +15182,7 @@ export function renderLobbyScreen(
         pikaTeamDailyGiftLimit,
         freeTopicsVipDays,
         registrationVerificationMode,
+        antiBadLuckThreshold,
       })
     })
 

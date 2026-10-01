@@ -30,6 +30,10 @@ import { createRoomWithHumanHost } from '../src/core/createRoomWithHumanHost.js'
 import { addHumanToRoom } from '../src/core/addHumanToRoom.js'
 import { addBotToRoom } from '../src/core/addBotToRoom.js'
 import { initializeRoomAuthoritativeGameState } from '../src/game/initializeRoomAuthoritativeGameState.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 let passCount = 0
 let failCount = 0
@@ -242,6 +246,7 @@ await check('EW3: real shared Worker tick flow keeps lifecycle ready through tic
     const results = await tickClient.computeTickRooms(
       [{ roomId, baseRevision: 0, room }],
       Date.now(),
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
 
     assert.strictEqual(results.length, 1)
@@ -335,6 +340,7 @@ await check('LC2: tick client ignores lifecycle responses while pending on share
     const tickPromise = tickClient.computeTickRooms(
       [{ roomId, baseRevision: 0, room }],
       Date.now(),
+      TEST_ANTI_BAD_LUCK_CONFIG,
     )
     let tickSettled = false
     tickPromise.then(
@@ -434,7 +440,7 @@ await check('CWE1: correlated tick worker_error rejects tick request and leaves 
       room: buildRealisticRoom('cwe1-room'),
     }
 
-    const tickPromise = tickClient.computeTickRooms([input], Date.now())
+    const tickPromise = tickClient.computeTickRooms([input], Date.now(), TEST_ANTI_BAD_LUCK_CONFIG)
 
     await nextMicrotask()
     assert.ok(capturedRequestId !== null, 'tick requestId must be captured')

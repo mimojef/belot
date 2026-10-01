@@ -59,6 +59,7 @@ import {
   isServerAntiBadLuckSquarePlanSafe,
 } from '../src/game/antiBadLuck/serverAntiBadLuckSquareGuard.js'
 import {
+  SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG,
   createEmptyServerAntiBadLuckState,
   type ServerAntiBadLuckAnchorConstraints,
   type ServerAntiBadLuckRescue,
@@ -374,7 +375,9 @@ function dealState(room: ServerRoom, antiBadLuck: ServerAntiBadLuckState, seed: 
     deck: [...ALL_BAD_DECK],
     antiBadLuck,
   }
-  return dealServerNextTwoPhase(dealServerFirstThreePhase(prepared, createSeededRandom(seed)))
+  // Test adapter: explicit production default (праг 5) — dealServerFirstThreePhase
+  // вече изисква config (без fallback).
+  return dealServerNextTwoPhase(dealServerFirstThreePhase(prepared, SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG, createSeededRandom(seed)))
 }
 
 {

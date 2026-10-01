@@ -15,6 +15,10 @@ import {
 import { createRoomRevisionRegistry } from '../src/game/createRoomRevisionRegistry.js'
 import { initializeRoomAuthoritativeGameState } from '../src/game/initializeRoomAuthoritativeGameState.js'
 import { resolveGameWorkerEntryUrl } from '../src/game/resolveGameWorkerEntryUrl.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 type RoomRecord = {
   room: ServerRoom
@@ -301,6 +305,7 @@ await check('E2E1: normal two-worker runtime ticks, releases, and shuts down cle
     const firstTick = await orchestrator.computeCandidates({
       now: getFarFutureNow(roomsById.values()),
       rooms: [...roomsById.values()].map((record) => record.room),
+      antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
     })
 
     assert.equal(firstTick.status, 'completed')
@@ -335,6 +340,7 @@ await check('E2E1: normal two-worker runtime ticks, releases, and shuts down cle
     const remainingTick = await orchestrator.computeCandidates({
       now: getFarFutureNow(roomsById.values()),
       rooms: [...roomsById.values()].map((record) => record.room),
+      antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
     })
 
     assert.equal(remainingTick.status, 'completed')
@@ -414,6 +420,7 @@ await check('E2E2: failed worker keeps ownership, healthy worker continues, and 
     const firstTick = await orchestrator.computeCandidates({
       now: getFarFutureNow(roomsById.values()),
       rooms: [...roomsById.values()].map((record) => record.room),
+      antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
     })
 
     assert.equal(firstTick.status, 'completed')
@@ -454,6 +461,7 @@ await check('E2E2: failed worker keeps ownership, healthy worker continues, and 
     const secondTick = await orchestrator.computeCandidates({
       now: getFarFutureNow(roomsById.values()),
       rooms: [...roomsById.values()].map((record) => record.room),
+      antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
     })
 
     assert.equal(secondTick.status, 'completed')

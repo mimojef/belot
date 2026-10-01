@@ -1,3 +1,10 @@
+import {
+  SERVER_ANTI_BAD_LUCK_DEFAULT_THRESHOLD,
+  isServerAntiBadLuckThreshold,
+  type ServerAntiBadLuckConfig,
+  type ServerAntiBadLuckThreshold,
+} from '../game/antiBadLuck/serverAntiBadLuckTypes.js'
+
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 /**
@@ -41,10 +48,26 @@ export type AdminSettingsSnapshot = {
    * RegistrationVerificationMode doc коментара по-горе.
    */
   registrationVerificationMode: RegistrationVerificationMode
+  /**
+   * "Anti Bad Luck праг" (Admin -> Настройки) — SERVER-AUTHORITATIVE.
+   * Allowlist 0|5|6|7|8|9|10, default 5 (= поведението преди настройката).
+   * Seat става pending след N поредни BAD първи 5 → rescue най-рано на
+   * (N + 1)-вото BAD; 0 = системата е напълно изключена. Стига до game
+   * worker-а само през getAntiBadLuckRuntimeConfig() (main thread cache в
+   * index.ts) — никога в game/lobby snapshot към клиент.
+   */
+  antiBadLuckThreshold: ServerAntiBadLuckThreshold
 }
 
 export type AdminSettingsStore = {
   getSettings: () => AdminSettingsSnapshot
+  /**
+   * Runtime config за game worker-а: прагът + вътрешната reset generation
+   * (увеличава се атомарно при всяко превключване към 0, виж updateSettings).
+   * Generation-ът НЕ е част от AdminSettingsSnapshot (не се показва/приема
+   * през admin API).
+   */
+  getAntiBadLuckRuntimeConfig: () => ServerAntiBadLuckConfig
   updateSettings: (
     input: Partial<AdminSettingsSnapshot>,
   ) => { ok: true; settings: AdminSettingsSnapshot } | { ok: false; message: string }
@@ -93,6 +116,11 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // никога не се активира автоматично при deploy, само explicit admin
   // превключване от панела.
   registrationVerificationMode: 'email_code',
+  // Само fallback за база без seed-натата migration
+  // (20261001_001_seed_anti_bad_luck_settings.sql) или при невалидна
+  // запазена стойност — 5 запазва поведението отпреди настройката. Никога 0:
+  // повредена стойност не бива тихо да изключва системата.
+  antiBadLuckThreshold: SERVER_ANTI_BAD_LUCK_DEFAULT_THRESHOLD,
 }
 
 const SETTING_KEYS = {
@@ -104,7 +132,11 @@ const SETTING_KEYS = {
   pikaTeamDailyGiftLimit: 'pika_team_daily_gift_limit',
   freeTopicsVipDays: 'free_topics_vip_days',
   registrationVerificationMode: 'registration_verification_mode',
+  antiBadLuckThreshold: 'anti_bad_luck_threshold',
 } as const
+
+// Вътрешен (не admin-editable) ключ — виж getAntiBadLuckRuntimeConfig.
+const ANTI_BAD_LUCK_RESET_GENERATION_KEY = 'anti_bad_luck_reset_generation'
 
 // VIP е платен пакет — 0 € не е валидна цена (би направило пакета безплатен
 // без изричен "безплатен VIP" flow). Долна граница 1 цент.
@@ -154,6 +186,23 @@ function normalizeRegistrationVerificationMode(value: unknown): RegistrationVeri
     : null
 }
 
+/** Strict allowlist validation — само 0|5|6|7|8|9|10 (цели числа, не string-ове). */
+function normalizeAntiBadLuckThreshold(value: unknown): ServerAntiBadLuckThreshold | null {
+  return isServerAntiBadLuckThreshold(value) ? value : null
+}
+
+// Запазената стойност е TEXT — приема само точния десетичен запис на
+// позволена стойност; всичко друго → default 5 (не 0).
+function parseStoredAntiBadLuckThreshold(value: string): ServerAntiBadLuckThreshold {
+  const parsed = /^\d+$/.test(value) ? Number(value) : Number.NaN
+  return isServerAntiBadLuckThreshold(parsed) ? parsed : SERVER_ANTI_BAD_LUCK_DEFAULT_THRESHOLD
+}
+
+function parseStoredResetGeneration(value: string | undefined): number {
+  const parsed = value !== undefined && /^\d+$/.test(value) ? Number(value) : Number.NaN
+  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0
+}
+
 function parseStoredRegistrationVerificationMode(
   value: string,
   fallback: RegistrationVerificationMode,
@@ -172,6 +221,9 @@ export async function createAdminSettingsStore(
 
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
+  // updateSettings пише в BEGIN IMMEDIATE транзакция — mirror на другите
+  // write store-ове (5000).
+  database.exec('PRAGMA busy_timeout = 5000;')
 
   const selectSettingsStatement = database.prepare(`
     SELECT setting_key, setting_value
@@ -184,8 +236,15 @@ export async function createAdminSettingsStore(
       'vip_price_365_days_cents',
       'pika_team_daily_gift_limit',
       'free_topics_vip_days',
-      'registration_verification_mode'
+      'registration_verification_mode',
+      'anti_bad_luck_threshold'
     );
+  `)
+
+  const selectAntiBadLuckRuntimeStatement = database.prepare(`
+    SELECT setting_key, setting_value
+    FROM admin_settings
+    WHERE setting_key IN ('anti_bad_luck_threshold', 'anti_bad_luck_reset_generation');
   `)
 
   const upsertSettingStatement = database.prepare(`
@@ -245,6 +304,16 @@ export async function createAdminSettingsStore(
         values.get(SETTING_KEYS.registrationVerificationMode) ?? '',
         DEFAULT_SETTINGS.registrationVerificationMode,
       ),
+      antiBadLuckThreshold: parseStoredAntiBadLuckThreshold(values.get(SETTING_KEYS.antiBadLuckThreshold) ?? ''),
+    }
+  }
+
+  function getAntiBadLuckRuntimeConfig(): ServerAntiBadLuckConfig {
+    const rows = selectAntiBadLuckRuntimeStatement.all() as SettingRow[]
+    const values = new Map(rows.map((row) => [row.setting_key, row.setting_value]))
+    return {
+      threshold: parseStoredAntiBadLuckThreshold(values.get(SETTING_KEYS.antiBadLuckThreshold) ?? ''),
+      resetGeneration: parseStoredResetGeneration(values.get(ANTI_BAD_LUCK_RESET_GENERATION_KEY)),
     }
   }
 
@@ -283,6 +352,10 @@ export async function createAdminSettingsStore(
       input.registrationVerificationMode === undefined
         ? undefined
         : normalizeRegistrationVerificationMode(input.registrationVerificationMode)
+    const nextAntiBadLuckThreshold =
+      input.antiBadLuckThreshold === undefined
+        ? undefined
+        : normalizeAntiBadLuckThreshold(input.antiBadLuckThreshold)
 
     if (input.signupBonusYellowCoins !== undefined && nextSignupBonus === null) {
       return {
@@ -340,42 +413,77 @@ export async function createAdminSettingsStore(
       }
     }
 
-    if (nextSignupBonus !== undefined) {
-      upsertSettingStatement.run(
-        SETTING_KEYS.signupBonusYellowCoins,
-        String(nextSignupBonus),
-      )
+    if (input.antiBadLuckThreshold !== undefined && nextAntiBadLuckThreshold === null) {
+      return {
+        ok: false,
+        message: 'Anti Bad Luck прагът трябва да е 0, 5, 6, 7, 8, 9 или 10.',
+      }
     }
 
-    if (nextNameChangePrice !== undefined) {
-      upsertSettingStatement.run(
-        SETTING_KEYS.profileNameChangePrice,
-        String(nextNameChangePrice),
-      )
-    }
+    // Всички записи на един PATCH — една BEGIN IMMEDIATE транзакция (atomic):
+    // особено прагът + reset generation при превключване към 0 трябва да се
+    // видят заедно или изобщо.
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      if (nextSignupBonus !== undefined) {
+        upsertSettingStatement.run(
+          SETTING_KEYS.signupBonusYellowCoins,
+          String(nextSignupBonus),
+        )
+      }
 
-    if (nextVipPrice30 !== undefined) {
-      upsertSettingStatement.run(SETTING_KEYS.vipPrice30DaysCents, String(nextVipPrice30))
-    }
+      if (nextNameChangePrice !== undefined) {
+        upsertSettingStatement.run(
+          SETTING_KEYS.profileNameChangePrice,
+          String(nextNameChangePrice),
+        )
+      }
 
-    if (nextVipPrice180 !== undefined) {
-      upsertSettingStatement.run(SETTING_KEYS.vipPrice180DaysCents, String(nextVipPrice180))
-    }
+      if (nextVipPrice30 !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.vipPrice30DaysCents, String(nextVipPrice30))
+      }
 
-    if (nextVipPrice365 !== undefined) {
-      upsertSettingStatement.run(SETTING_KEYS.vipPrice365DaysCents, String(nextVipPrice365))
-    }
+      if (nextVipPrice180 !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.vipPrice180DaysCents, String(nextVipPrice180))
+      }
 
-    if (nextPikaTeamDailyGiftLimit !== undefined) {
-      upsertSettingStatement.run(SETTING_KEYS.pikaTeamDailyGiftLimit, String(nextPikaTeamDailyGiftLimit))
-    }
+      if (nextVipPrice365 !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.vipPrice365DaysCents, String(nextVipPrice365))
+      }
 
-    if (nextFreeTopicsVipDays !== undefined) {
-      upsertSettingStatement.run(SETTING_KEYS.freeTopicsVipDays, String(nextFreeTopicsVipDays))
-    }
+      if (nextPikaTeamDailyGiftLimit !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.pikaTeamDailyGiftLimit, String(nextPikaTeamDailyGiftLimit))
+      }
 
-    if (nextRegistrationVerificationMode !== undefined) {
-      upsertSettingStatement.run(SETTING_KEYS.registrationVerificationMode, nextRegistrationVerificationMode)
+      if (nextFreeTopicsVipDays !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.freeTopicsVipDays, String(nextFreeTopicsVipDays))
+      }
+
+      if (nextRegistrationVerificationMode !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.registrationVerificationMode, nextRegistrationVerificationMode)
+      }
+
+      if (nextAntiBadLuckThreshold !== undefined) {
+        // Старата стойност се чете ВЪТРЕ в транзакцията (writer lock-ът вече е
+        // взет) — превключване X → 0 (X ≠ 0) увеличава reset generation-а,
+        // така че anti-bad-luck state-ът на всички активни мачове се изхвърля
+        // при следващото им раздаване (виж applyServerAntiBadLuckToDeck).
+        // 0 → 0 и X → Y (Y ≠ 0) НЕ пипат generation-а.
+        const previous = getAntiBadLuckRuntimeConfig()
+        upsertSettingStatement.run(SETTING_KEYS.antiBadLuckThreshold, String(nextAntiBadLuckThreshold))
+        if (nextAntiBadLuckThreshold === 0 && previous.threshold !== 0) {
+          upsertSettingStatement.run(ANTI_BAD_LUCK_RESET_GENERATION_KEY, String(previous.resetGeneration + 1))
+        }
+      }
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Preserve the original failure.
+      }
+      throw error
     }
 
     return {
@@ -402,6 +510,7 @@ export async function createAdminSettingsStore(
 
   return {
     getSettings,
+    getAntiBadLuckRuntimeConfig,
     updateSettings,
     getLobbyChatPikaAnnouncementCutoffSeq,
     close,

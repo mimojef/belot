@@ -7,6 +7,7 @@ import {
   type GameWorkerTickRoomResult,
 } from './workerProtocol.js'
 import { advanceRoomAuthoritativeGame } from './advanceRoomAuthoritativeGame.js'
+import { isServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 
 // ─── Startup validation ───────────────────────────────────────────────────────
 
@@ -99,6 +100,9 @@ function isValidComputeTickRoomsMessage(
   if (msg['protocolVersion'] !== GAME_WORKER_PROTOCOL_VERSION) return false
   if (typeof msg['requestId'] !== 'string' || (msg['requestId'] as string).trim() === '') return false
   if (typeof msg['now'] !== 'number' || !Number.isFinite(msg['now'])) return false
+  // Allowlist validation на admin Anti Bad Luck config-а — невалиден/липсващ
+  // config отхвърля ЦЯЛОТО съобщение (invalid message), никакъв fallback.
+  if (!isServerAntiBadLuckConfig(msg['antiBadLuckConfig'])) return false
   if (!Array.isArray(msg['rooms'])) return false
 
   const seenIds = new Set<string>()
@@ -229,7 +233,7 @@ parentPort.on('message', (raw: unknown) => {
       }
 
       try {
-        const nextRoom = advanceRoomAuthoritativeGame(room, message.now)
+        const nextRoom = advanceRoomAuthoritativeGame(room, message.now, message.antiBadLuckConfig)
         if (nextRoom === room) {
           results.push({ roomId, baseRevision, result: 'unchanged' })
         } else {

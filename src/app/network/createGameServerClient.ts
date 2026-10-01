@@ -494,6 +494,8 @@ export type AdminSettingsSnapshot = {
   freeTopicsVipDays: number
   /** "Метод за регистрация" (email verification code vs direct) — виж server/src/db/adminSettingsStore.ts RegistrationVerificationMode doc коментара. SERVER-AUTHORITATIVE — само admin панела го чете/пише, register() flow-ът реагира на response shape-а, не на тази стойност directno (виж createLobbyFlowController.ts submitRegister()). */
   registrationVerificationMode: 'email_code' | 'direct'
+  /** "Anti Bad Luck праг" — 0 (изключено) | 5..10. SERVER-AUTHORITATIVE (allowlist валидация в server/src/db/adminSettingsStore.ts); само admin панела го чете/пише, никога не идва в game/lobby snapshot. */
+  antiBadLuckThreshold: 0 | 5 | 6 | 7 | 8 | 9 | 10
 }
 
 export type AdminPaymentPeriodStats = {

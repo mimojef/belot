@@ -57,7 +57,7 @@ export function createInProcessActiveRoomRuntime(
       const results: RuntimeRoomTickResult[] = []
 
       for (const room of input.rooms) {
-        const nextRoom = advanceRoomAuthoritativeGame(room, input.now)
+        const nextRoom = advanceRoomAuthoritativeGame(room, input.now, input.antiBadLuckConfig)
 
         const runtime = roomGameRuntimeRegistry.get(room.id) ?? null
 

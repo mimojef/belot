@@ -1,4 +1,5 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
+import type { ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 import { advanceOneServerStep } from './advanceOneServerStep.js'
 import { getServerPhaseAutoAdvanceExpiry } from './getServerPhaseAutoAdvanceExpiry.js'
 import { getServerTimerExpiry } from './getServerTimerExpiry.js'
@@ -17,7 +18,8 @@ function isDealVisualPhase(phase: ServerAuthoritativeGameState['phase']): boolea
 
 export function advanceServerGameToNow(
   state: ServerAuthoritativeGameState,
-  now?: number,
+  now: number | undefined,
+  antiBadLuckConfig: ServerAntiBadLuckConfig,
 ): ServerAuthoritativeGameState {
   const resolvedNow = resolveServerNow(now)
   let currentState = state
@@ -28,7 +30,7 @@ export function advanceServerGameToNow(
 
   for (let step = 0; step < MAX_SERVER_CATCH_UP_STEPS; step += 1) {
     const previousPhase = currentState.phase
-    const result = advanceOneServerStep(currentState, resolvedNow, lastEventAt)
+    const result = advanceOneServerStep(currentState, resolvedNow, lastEventAt, antiBadLuckConfig)
 
     if (!result.advanced) {
       return currentState

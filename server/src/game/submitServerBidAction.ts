@@ -33,11 +33,13 @@ export function submitServerBidAction(
   })
 
   if (finalizedState.phase === 'deal-last-3') {
-    return enterServerPhase(finalizedState, 'deal-last-3')
+    // deal-last-3 / next-round никога не минават през deal-first-3 (Anti Bad
+    // Luck) — explicit null, виж enterServerPhase.
+    return enterServerPhase(finalizedState, 'deal-last-3', null)
   }
 
   if (finalizedState.phase === 'next-round') {
-    return enterServerPhase(finalizedState, 'next-round')
+    return enterServerPhase(finalizedState, 'next-round', null)
   }
 
   return finalizedState

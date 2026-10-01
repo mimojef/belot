@@ -1,4 +1,5 @@
 import type { ServerAuthoritativeGameState } from './serverGameTypes.js'
+import type { ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 import { enterServerPhase } from './enterServerPhase.js'
 import { advanceToNextServerPhase } from './advanceToNextServerPhase.js'
 import { startNextServerRound } from './startNextServerRound.js'
@@ -9,6 +10,7 @@ import {
 
 export function runServerPhaseTransition(
   state: ServerAuthoritativeGameState,
+  antiBadLuckConfig: ServerAntiBadLuckConfig,
 ): ServerAuthoritativeGameState {
   if (state.phase === 'match-ended') {
     return state
@@ -26,6 +28,7 @@ export function runServerPhaseTransition(
           timer: clearServerTimerState(),
         },
         'match-ended',
+        antiBadLuckConfig,
       )
     }
 
@@ -42,5 +45,5 @@ export function runServerPhaseTransition(
     return state
   }
 
-  return enterServerPhase(advancedState, advancedState.phase)
+  return enterServerPhase(advancedState, advancedState.phase, antiBadLuckConfig)
 }

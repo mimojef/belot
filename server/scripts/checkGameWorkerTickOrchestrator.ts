@@ -34,6 +34,10 @@ import { addHumanToRoom } from '../src/core/addHumanToRoom.js'
 import { addBotToRoom } from '../src/core/addBotToRoom.js'
 import { initializeRoomAuthoritativeGameState } from '../src/game/initializeRoomAuthoritativeGameState.js'
 import { advanceRoomAuthoritativeGame } from '../src/game/advanceRoomAuthoritativeGame.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 // ─── Test harness ─────────────────────────────────────────────────────────────
 
@@ -414,7 +418,7 @@ await check('F1: unchanged result → kind=unchanged', async () => {
     revisionRegistry: reg,
     tickClient: makeFakeTickClient(),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r1')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r1')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     assert.strictEqual(result.results.length, 1)
@@ -441,7 +445,7 @@ await check('F2: advanced result → kind=advanced with matching room', async ()
       })),
     }),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r2')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r2')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     const r = result.results[0]
@@ -470,7 +474,7 @@ await check('F3: not_assigned error → kind=not_assigned', async () => {
       })),
     }),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r3')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r3')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     const r = result.results[0]
@@ -499,7 +503,7 @@ await check('F4: compute_failed error → kind=compute_failed', async () => {
       })),
     }),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r4')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r4')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     assert.strictEqual(result.results[0].kind, 'compute_failed')
@@ -524,7 +528,7 @@ await check('F5: revision is echoed correctly in candidate result', async () => 
       })),
     }),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r5')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r5')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     assert.strictEqual(result.results[0].baseRevision, 2)
@@ -561,7 +565,7 @@ await check('F6: stale after registry.bump() between request and response', asyn
   })
 
   const room = makeFakeRoom('r6')
-  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
   // Wait for the fake client to be invoked before bumping
   await requestStartedGate
@@ -599,6 +603,7 @@ await check('F7: partial batch — unchanged + not_assigned + compute_failed', a
   const result = await orch.computeCandidates({
     now: Date.now(),
     rooms: [makeFakeRoom('r7a'), makeFakeRoom('r7b'), makeFakeRoom('r7c')],
+    antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
   })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
@@ -620,7 +625,7 @@ await check('F8: whole request reject → status=failed', async () => {
     revisionRegistry: reg,
     tickClient: makeFakeTickClient({ throwOnCompute: 'tick client exploded' }),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r8')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r8')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(result.message.includes('tick client exploded'))
@@ -643,7 +648,7 @@ await check('F9: no automatic retry on failed batch', async () => {
       },
     },
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r9')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r9')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   assert.strictEqual(callCount, 1, 'should only be called once — no retry')
   await orch.shutdown()
@@ -673,9 +678,9 @@ await check('F10: second computeCandidates() while pending → busy', async () =
   })
 
   const room = makeFakeRoom('r10')
-  const firstBatch = orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const firstBatch = orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
-  const secondResult = await orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const secondResult = await orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(secondResult.status, 'busy')
 
   resolveFirst()
@@ -695,9 +700,9 @@ await check('F11: in-flight guard released after success', async () => {
     tickClient: makeFakeTickClient(),
   })
   const room = makeFakeRoom('r11')
-  const r1 = await orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const r1 = await orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(r1.status, 'completed')
-  const r2 = await orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const r2 = await orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(r2.status, 'completed')
   await orch.shutdown()
 })
@@ -725,9 +730,9 @@ await check('F12: in-flight guard released after reject', async () => {
     },
   })
   const room = makeFakeRoom('r12')
-  const r1 = await orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const r1 = await orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(r1.status, 'failed')
-  const r2 = await orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const r2 = await orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(r2.status, 'completed')
   await orch.shutdown()
 })
@@ -756,7 +761,7 @@ await check('F13: shutdown while pending → batch completes before shutdown res
   })
 
   const room = makeFakeRoom('r13')
-  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [room] })
+  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
   let shutdownResolved = false
   const shutdownPromise = orch.shutdown().then(() => { shutdownResolved = true })
@@ -794,7 +799,7 @@ await check('F15: computeCandidates() after shutdown → failed', async () => {
     tickClient: makeFakeTickClient(),
   })
   await orch.shutdown()
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r15')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r15')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(result.message.includes('shutdown'))
@@ -813,6 +818,7 @@ await check('F16: duplicate input roomId → failed', async () => {
   const result = await orch.computeCandidates({
     now: Date.now(),
     rooms: [makeFakeRoom('r16'), makeFakeRoom('r16')],
+    antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG,
   })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
@@ -829,7 +835,7 @@ await check('F17: room not in registry → failed', async () => {
     revisionRegistry: reg,
     tickClient: makeFakeTickClient(),
   })
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r17')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r17')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(result.message.includes('not registered') || result.message.includes('registry'))
@@ -847,10 +853,10 @@ await check('F18: registry lookup uses room.id and rejects unknown room', async 
     tickClient: makeFakeTickClient(),
   })
   // Known room → completed
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r18')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r18')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   // Unknown room → failed (registry lookup by room.id fails)
-  const result2 = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r18-unknown')] })
+  const result2 = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('r18-unknown')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result2.status, 'failed')
   await orch.shutdown()
 })
@@ -864,7 +870,7 @@ await check('F19: invalid now (NaN) → failed', async () => {
     revisionRegistry: reg,
     tickClient: makeFakeTickClient(),
   })
-  const result = await orch.computeCandidates({ now: NaN, rooms: [makeFakeRoom('r19')] })
+  const result = await orch.computeCandidates({ now: NaN, rooms: [makeFakeRoom('r19')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(result.message.includes('now'))
@@ -923,7 +929,7 @@ await check('OH3: inFlight=true while batch pending', async () => {
     },
   })
 
-  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh3')] })
+  const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh3')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
   // At this point the batch is pending — inFlight should be true
   assert.strictEqual(orch.getHealth().inFlight, true)
@@ -944,7 +950,7 @@ await check('OH4: inFlight=false after success', async () => {
     revisionRegistry: reg,
     tickClient: makeFakeTickClient(),
   })
-  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh4')] })
+  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh4')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(orch.getHealth().inFlight, false)
   await orch.shutdown()
 })
@@ -957,7 +963,7 @@ await check('OH5: inFlight=false after failed request', async () => {
     revisionRegistry: reg,
     tickClient: makeFakeTickClient({ throwOnCompute: true }),
   })
-  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh5')] })
+  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('oh5')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(orch.getHealth().inFlight, false)
   await orch.shutdown()
 })
@@ -1011,7 +1017,7 @@ await check('S1: sync target called, tick client not called', async () => {
     syncTickTarget: syncTarget,
   })
 
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s1')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s1')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   assert.strictEqual(syncTarget.callCount, 1)
   assert.strictEqual(tickClientCalled, false)
@@ -1029,7 +1035,7 @@ await check('S2: sync unchanged → kind=unchanged', async () => {
     syncTickTarget: makeFakeSyncTarget(),
   })
 
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s2')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s2')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     assert.strictEqual(result.results[0].kind, 'unchanged')
@@ -1057,7 +1063,7 @@ await check('S3: sync advanced → kind=advanced', async () => {
     syncTickTarget: syncTarget,
   })
 
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s3')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s3')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'completed')
   if (result.status === 'completed') {
     const r = result.results[0]
@@ -1087,7 +1093,7 @@ await check('S4: revision not bumped by sync orchestrator', async () => {
     }),
   })
 
-  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s4')] })
+  await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s4')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(reg.get('s4'), 1, 'Orchestrator must not bump revision')
   await orch.shutdown()
 })
@@ -1103,7 +1109,7 @@ await check('S5: sync target throws → status=failed', async () => {
     syncTickTarget: makeFakeSyncTarget({ throwOnTick: 'sync crash' }),
   })
 
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s5')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s5')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(result.message.includes('sync crash'))
@@ -1133,8 +1139,8 @@ await check('S6: busy guard works in in-process mode', async () => {
 
   const room = makeFakeRoom('s6')
   const [r1, r2] = await Promise.all([
-    orch.computeCandidates({ now: Date.now(), rooms: [room] }),
-    orch.computeCandidates({ now: Date.now(), rooms: [room] }),
+    orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG }),
+    orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG }),
   ])
 
   const statuses = [r1.status, r2.status]
@@ -1163,7 +1169,7 @@ await check('S7: sync target returns unregistered roomId → status=failed', asy
     }),
   })
 
-  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s7-known')] })
+  const result = await orch.computeCandidates({ now: Date.now(), rooms: [makeFakeRoom('s7-known')], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
   assert.strictEqual(result.status, 'failed')
   if (result.status === 'failed') {
     assert.ok(
@@ -1245,7 +1251,7 @@ await check('RW2-RW6: assign room + registry.ensure + computeCandidates → vali
     })
 
     const room = buildRealisticRoom(roomId)
-    const result = await orch.computeCandidates({ now: Date.now(), rooms: [room] })
+    const result = await orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
     assert.strictEqual(result.status, 'completed')
     if (result.status === 'completed') {
@@ -1282,10 +1288,10 @@ await check('RW7: advanced candidate при far-future now (real worker)', async
     // Затова не правим deepStrictEqual между локален и worker-candidate резултат.
     const farFutureNow = (room.game.timerDeadlineAt ?? room.updatedAt) + 60_000
 
-    const localProof = advanceRoomAuthoritativeGame(room, farFutureNow)
+    const localProof = advanceRoomAuthoritativeGame(room, farFutureNow, TEST_ANTI_BAD_LUCK_CONFIG)
     assert.notStrictEqual(localProof, room, 'local advance must return new object')
 
-    const result = await orch.computeCandidates({ now: farFutureNow, rooms: [room] })
+    const result = await orch.computeCandidates({ now: farFutureNow, rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
     assert.strictEqual(result.status, 'completed')
     if (result.status === 'completed') {
@@ -1333,7 +1339,7 @@ await check('RW8: stale simulation — deterministic gate, bump after request st
         rooms: Parameters<typeof realClient.computeTickRooms>[0],
         now: Parameters<typeof realClient.computeTickRooms>[1],
       ) {
-        const pendingResult = realClient.computeTickRooms(rooms, now)
+        const pendingResult = realClient.computeTickRooms(rooms, now, TEST_ANTI_BAD_LUCK_CONFIG)
         markRequestStarted()
         const results = await pendingResult
         await releaseGate
@@ -1348,7 +1354,7 @@ await check('RW8: stale simulation — deterministic gate, bump after request st
     })
 
     const room = buildRealisticRoom(roomId)
-    const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [room] })
+    const batchPromise = orch.computeCandidates({ now: Date.now(), rooms: [room], antiBadLuckConfig: TEST_ANTI_BAD_LUCK_CONFIG })
 
     // Wait until computeTickRooms has been called and real request is in-flight
     await requestStarted

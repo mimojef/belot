@@ -13,7 +13,11 @@ import {
   type GameWorkerPool,
 } from '../src/game/createGameWorkerPool.js'
 import { resolveGameWorkerEntryUrl } from '../src/game/resolveGameWorkerEntryUrl.js'
-import type { GameWorkerTickRoomInput } from '../src/game/workerProtocol.js'
+import { GAME_WORKER_PROTOCOL_VERSION, type GameWorkerTickRoomInput } from '../src/game/workerProtocol.js'
+import { SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG } from '../src/game/antiBadLuck/serverAntiBadLuckTypes.js'
+
+// Test adapter: production tick API-тата изискват explicit Anti Bad Luck config (без fallback).
+const TEST_ANTI_BAD_LUCK_CONFIG = SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG
 
 let passCount = 0
 let failCount = 0
@@ -124,7 +128,7 @@ async function writeFakeWorker(
 import { appendFileSync } from 'node:fs'
 import { parentPort, workerData } from 'node:worker_threads'
 
-const protocolVersion = 3
+const protocolVersion = ${GAME_WORKER_PROTOCOL_VERSION}
 const mode = ${JSON.stringify(mode)}
 const eventFile = ${JSON.stringify(eventFile)}
 const workerId = workerData.workerId
@@ -607,6 +611,7 @@ try {
         const results = await pool.computeTickRooms(
           [makeInput('room-b-advanced', 2), makeInput('room-a', 1)],
           Date.now(),
+          TEST_ANTI_BAD_LUCK_CONFIG,
         )
 
         assert.equal(results.length, 2)
@@ -634,6 +639,7 @@ try {
           pool.computeTickRooms(
             [makeInput('dup-room', 1), makeInput('dup-room', 2)],
             Date.now(),
+            TEST_ANTI_BAD_LUCK_CONFIG,
           ),
           /Duplicate roomId/,
         )
@@ -652,6 +658,7 @@ try {
         const results = await pool.computeTickRooms(
           [makeInput('missing-owner-room', 5)],
           Date.now(),
+          TEST_ANTI_BAD_LUCK_CONFIG,
         )
 
         assert.equal(results.length, 1)
@@ -684,6 +691,7 @@ try {
         const results = await pool.computeTickRooms(
           [makeInput('failing-room', 20), makeInput('healthy-room', 10)],
           Date.now(),
+          TEST_ANTI_BAD_LUCK_CONFIG,
         )
 
         assert.equal(results.length, 2)
@@ -724,6 +732,7 @@ try {
         const results = await pool.computeTickRooms(
           [makeInput('bad-revision-room', 42)],
           Date.now(),
+          TEST_ANTI_BAD_LUCK_CONFIG,
         )
 
         assert.equal(results.length, 1)
@@ -758,6 +767,7 @@ try {
         const results = await pool.computeTickRooms(
           [makeInput('room-b-crash', 1)],
           Date.now(),
+          TEST_ANTI_BAD_LUCK_CONFIG,
         )
 
         assert.equal(results.length, 1)
@@ -881,6 +891,7 @@ try {
           room,
         })),
         Date.now(),
+        TEST_ANTI_BAD_LUCK_CONFIG,
       )
 
       assert.equal(results.length, 3)

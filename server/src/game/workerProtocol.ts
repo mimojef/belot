@@ -1,6 +1,8 @@
 import type { ServerRoom } from '../core/serverTypes.js'
+import type { ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
 
-export const GAME_WORKER_PROTOCOL_VERSION = 3
+// 4: compute_tick_rooms носи задължителен antiBadLuckConfig (admin setting).
+export const GAME_WORKER_PROTOCOL_VERSION = 4
 
 export type WorkerRequestId = string
 
@@ -45,6 +47,9 @@ export type GameWorkerComputeTickRoomsRequestMessage = {
   type: 'compute_tick_rooms'
   requestId: WorkerRequestId
   now: number
+  // Admin Anti Bad Luck config, подаван при ВСЕКИ tick. Задължителен —
+  // worker-ът отказва съобщение без валиден config (без fallback).
+  antiBadLuckConfig: ServerAntiBadLuckConfig
   rooms: GameWorkerTickRoomInput[]
 }
 
