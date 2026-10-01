@@ -39,6 +39,14 @@ export function getServerPhaseAutoAdvanceDelay(
       playing.completedTricks.length >= TRICKS_PER_ROUND &&
       playing.currentTurnSeat === null
     ) {
+      // A confirmed "Долу картите" sweep also satisfies the generic
+      // completedTricks>=8 && currentTurnSeat===null shape — check it FIRST
+      // so the client gets enough time to play the full throw-down animation
+      // before the server auto-advances to scoring (see Part E / Part I).
+      if (playing.sweepResolution !== null) {
+        return SERVER_TIMING_CONFIG.sweepResolutionAutoAdvanceMs
+      }
+
       return ROUND_COMPLETE_PLAYING_AUTO_ADVANCE_MS
     }
   }

@@ -13,6 +13,7 @@ import { resumeHumanControlForRoom } from './resumeHumanControlForRoom.js'
 import { submitHumanBidActionForRoom } from './submitHumanBidActionForRoom.js'
 import { submitHumanCutIndexForRoom } from './submitHumanCutIndexForRoom.js'
 import { submitHumanPlayCardForRoom } from './submitHumanPlayCardForRoom.js'
+import { submitHumanSweepDecisionForRoom } from './submitHumanSweepDecisionForRoom.js'
 import {
   ensureRoomGameRuntime,
   getGameRuntimeCountsByPhase,
@@ -102,6 +103,14 @@ export function createInProcessActiveRoomRuntime(
         input.seat,
         input.cardId,
         input.declarationKeys,
+      )
+    },
+
+    submitSweepDecision(input) {
+      return submitHumanSweepDecisionForRoom(
+        input.room,
+        input.seat,
+        input.decision,
       )
     },
 

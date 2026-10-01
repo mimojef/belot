@@ -162,6 +162,14 @@ export type ClientMessage =
       declarationKeys?: string[]
     }
   | {
+      // "Долу картите" — OK/X отговор на sweep offer-а (виж
+      // RoomSweepOfferSnapshot). roomId/seat се извеждат server-side от
+      // connection-а, не от client payload-а.
+      type: 'submit_sweep_decision'
+      roomId: RoomId
+      decision: 'accept' | 'decline'
+    }
+  | {
       type: 'resume_human_control'
       roomId: RoomId
     }
@@ -519,6 +527,26 @@ export type RoomDeclarationSnapshot = {
   valid: boolean
 }
 
+export type RoomSweepOfferSnapshot = {
+  seat: Seat
+  expiresAt: number
+}
+
+export type RoomSweepAutoCreditedBeloteSnapshot = {
+  seat: Seat
+  team: 'A' | 'B'
+  suit: 'clubs' | 'diamonds' | 'hearts' | 'spades'
+}
+
+export type RoomSweepResolutionSnapshot = {
+  winnerSeat: Seat
+  winnerTeam: 'A' | 'B'
+  throwOrder: Seat[]
+  handsAtResolution: Record<Seat, RoomCardSnapshot[]>
+  autoCreditedBelotes: RoomSweepAutoCreditedBeloteSnapshot[]
+  resolvedAt: number
+}
+
 export type RoomPlayingSnapshot = {
   winningBid: RoomWinningBidSnapshot
   currentTurnSeat: Seat | null
@@ -526,6 +554,11 @@ export type RoomPlayingSnapshot = {
   completedTricksCount: number
   latestCompletedTrick: RoomCompletedTrickSnapshot | null
   validCardIds: string[] | null
+  // "Долу картите" — sweepOffer е seat-gated (само за offered seat-а, като
+  // canSubmitBid); sweepResolution НЕ е seat-gated (всички 4 играча трябва
+  // да видят reveal/throw-down анимацията).
+  sweepOffer: RoomSweepOfferSnapshot | null
+  sweepResolution: RoomSweepResolutionSnapshot | null
 }
 
 export type RoomTeamPointsSnapshot = {

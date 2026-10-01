@@ -30,6 +30,12 @@ export type SubmitPlayInput = {
   declarationKeys?: string[]
 }
 
+export type SubmitSweepDecisionInput = {
+  room: ServerRoom
+  seat: Seat
+  decision: 'accept' | 'decline'
+}
+
 export type ResumeHumanControlInput = {
   room: ServerRoom
   seat: Seat
@@ -81,6 +87,7 @@ export interface ActiveRoomRuntime {
   submitBid(input: SubmitBidInput): RuntimeCommandResult
   submitCut(input: SubmitCutInput): RuntimeCommandResult
   submitPlay(input: SubmitPlayInput): RuntimeCommandResult
+  submitSweepDecision(input: SubmitSweepDecisionInput): RuntimeCommandResult
   resumeHumanControl(input: ResumeHumanControlInput): RuntimeCommandResult
   abandonHumanControl(input: AbandonHumanControlInput): RuntimeCommandResult
 }

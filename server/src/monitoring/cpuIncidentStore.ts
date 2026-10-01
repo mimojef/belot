@@ -284,7 +284,11 @@ function buildSummaryFields(incident: ClosedIncident): Omit<IncidentRow, 'id'> {
       : avgOf(spikeContexts.map((c) => c.wsConnections).filter((v): v is number => v !== null)),
 
     gameplay_per_min: sumActivity(
-      (a) => a.gameplayBidAccepted + a.gameplayCutAccepted + a.gameplayPlayAccepted,
+      (a) =>
+        a.gameplayBidAccepted +
+        a.gameplayCutAccepted +
+        a.gameplayPlayAccepted +
+        a.gameplaySweepDecisionAccepted,
     ) / durationMin,
     lobby_chat_per_min: sumActivity((a) => a.lobbyChatMessages) / durationMin,
     direct_chat_per_min: sumActivity((a) => a.directChatFriendMessages + a.directChatVipDmMessages) / durationMin,

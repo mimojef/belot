@@ -167,7 +167,11 @@ function createBiddingSnapshot(
   }
 }
 
-function createPlayingSnapshot(
+// Exported (only beyond this file's own use) so "Долу картите" seat-gating
+// logic (sweepOffer vs sweepResolution) can be unit-tested directly without
+// needing a full ServerRoom fixture — виж
+// scripts/checkSweepDownTheCards.ts §14.
+export function createPlayingSnapshot(
   authoritativeState: ServerAuthoritativeGameState,
   yourSeat: Seat | null,
 ): RoomPlayingSnapshot | null {
@@ -203,6 +207,35 @@ function createPlayingSnapshot(
         }
       : null
 
+  // "Долу картите" — sweepOffer е seat-gated (само offered seat-ът го вижда,
+  // огледално на validCardIds/canSubmitBid по-горе); sweepResolution НЕ е
+  // seat-gated — всички 4 играча трябва да видят reveal/throw-down анимацията.
+  const sweepOffer: RoomPlayingSnapshot['sweepOffer'] =
+    playing.sweepOffer !== null && yourSeat !== null && playing.sweepOffer.seat === yourSeat
+      ? { seat: playing.sweepOffer.seat, expiresAt: playing.sweepOffer.expiresAt }
+      : null
+
+  const sweepResolution: RoomPlayingSnapshot['sweepResolution'] =
+    playing.sweepResolution !== null
+      ? {
+          winnerSeat: playing.sweepResolution.winnerSeat,
+          winnerTeam: playing.sweepResolution.winnerTeam,
+          throwOrder: playing.sweepResolution.throwOrder,
+          handsAtResolution: {
+            bottom: playing.sweepResolution.handsAtResolution.bottom.map(createCardSnapshot),
+            right: playing.sweepResolution.handsAtResolution.right.map(createCardSnapshot),
+            top: playing.sweepResolution.handsAtResolution.top.map(createCardSnapshot),
+            left: playing.sweepResolution.handsAtResolution.left.map(createCardSnapshot),
+          },
+          autoCreditedBelotes: playing.sweepResolution.autoCreditedBelotes.map((entry) => ({
+            seat: entry.seat,
+            team: entry.team,
+            suit: entry.suit,
+          })),
+          resolvedAt: playing.sweepResolution.resolvedAt,
+        }
+      : null
+
   return {
     winningBid: authoritativeState.bidding.winningBid ?? null,
     currentTurnSeat: playing.currentTurnSeat,
@@ -210,6 +243,8 @@ function createPlayingSnapshot(
     completedTricksCount: playing.completedTricks.length,
     latestCompletedTrick,
     validCardIds,
+    sweepOffer,
+    sweepResolution,
   }
 }
 

@@ -69,6 +69,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
+  submitSweepDecision?: (roomId: string, decision: 'accept' | 'decline') => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number, requestId: string) => void
   sendReplayVote: (roomId: string) => void
@@ -207,6 +208,11 @@ export type PlayingUiCache = {
   lastPlayingShellKey: string | null
   lastTrickStableKey: string | null
   lastScoreHudRenderedHtml: string | null
+  // "Долу картите" — виж renderPlayingScreen.ts / animateSweepThrowDown.ts.
+  sweepOfferDismissedKey: string | null
+  sweepAcceptSent: boolean
+  lastSweepResolutionKey: string | null
+  isSweepAnimating: boolean
 }
 
 export type BiddingUiState = {

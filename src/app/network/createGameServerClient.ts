@@ -931,6 +931,12 @@ export type ClientMessage =
       declarationKeys?: string[]
     }
   | {
+      // "Долу картите" — OK/X отговор на sweep offer-а.
+      type: 'submit_sweep_decision'
+      roomId: string
+      decision: 'accept' | 'decline'
+    }
+  | {
       type: 'resume_human_control'
       roomId: string
     }
@@ -1292,6 +1298,26 @@ export type RoomDeclarationSnapshot = {
   valid: boolean
 }
 
+export type RoomSweepOfferSnapshot = {
+  seat: Seat
+  expiresAt: number
+}
+
+export type RoomSweepAutoCreditedBeloteSnapshot = {
+  seat: Seat
+  team: Team
+  suit: 'clubs' | 'diamonds' | 'hearts' | 'spades'
+}
+
+export type RoomSweepResolutionSnapshot = {
+  winnerSeat: Seat
+  winnerTeam: Team
+  throwOrder: Seat[]
+  handsAtResolution: Record<Seat, RoomCardSnapshot[]>
+  autoCreditedBelotes: RoomSweepAutoCreditedBeloteSnapshot[]
+  resolvedAt: number
+}
+
 export type RoomPlayingSnapshot = {
   winningBid: RoomWinningBidSnapshot
   currentTurnSeat: Seat | null
@@ -1299,6 +1325,10 @@ export type RoomPlayingSnapshot = {
   completedTricksCount: number
   latestCompletedTrick: RoomCompletedTrickSnapshot | null
   validCardIds: string[] | null
+  // "Долу картите" — sweepOffer е seat-gated (само за offered seat-а);
+  // sweepResolution НЕ е seat-gated (всички играчи виждат reveal анимацията).
+  sweepOffer: RoomSweepOfferSnapshot | null
+  sweepResolution: RoomSweepResolutionSnapshot | null
 }
 
 export type RoomTeamPointsSnapshot = {
@@ -2906,6 +2936,7 @@ export type GameServerClient = {
   submitBidAction: (roomId: string, action: ClientBidAction) => void
   submitCutIndex: (roomId: string, cutIndex: number) => void
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
+  submitSweepDecision: (roomId: string, decision: 'accept' | 'decline') => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number, requestId: string) => void
   sendReplayVote: (roomId: string) => void
@@ -3234,6 +3265,14 @@ export function createGameServerClient(
     })
   }
 
+  function submitSweepDecision(roomId: string, decision: 'accept' | 'decline'): void {
+    send({
+      type: 'submit_sweep_decision',
+      roomId,
+      decision,
+    })
+  }
+
   function resumeHumanControl(roomId: string): void {
     send({
       type: 'resume_human_control',
@@ -3464,6 +3503,7 @@ export function createGameServerClient(
     submitBidAction,
     submitCutIndex,
     submitPlayCard,
+    submitSweepDecision,
     resumeHumanControl,
     submitPartnerRating,
     sendReplayVote,

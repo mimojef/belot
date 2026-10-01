@@ -15,6 +15,7 @@ import { getTeamBySeat } from './serverStateHelpers.js'
 import { getServerTrickWinner } from './getServerTrickWinner.js'
 import { getServerValidPlayCards } from './getServerValidPlayCards.js'
 import { createServerDeclarationRecord } from './serverDeclarationRecordHelpers.js'
+import { computeServerSweepEligibility } from './computeServerSweepEligibility.js'
 import {
   addDeclarationsToMatchMissionCounts,
   addDeclarationsToMatchMissionCountsBySeat,
@@ -23,6 +24,7 @@ import {
   clearServerTimerState,
   getServerTimerNow,
   createServerPlayingTimerState,
+  createServerSweepOfferTimerState,
   isServerSeatControlledByBot,
   resolveServerBotActionDelayMs,
 } from './serverTimerStateHelpers.js'
@@ -205,15 +207,33 @@ function applyTrickCompletion(
   const nextCompletedTricks = [...playing.completedTricks, completedTrick]
   const isRoundComplete = nextCompletedTricks.length >= TRICKS_PER_ROUND
 
+  // "Долу картите" — ако ръката не е приключила И победителят в тази взятка
+  // не е отказвал вече тази ръка, проверяваме дали остатъкът от ръката му
+  // гарантира печалба на всички оставащи взятки (виж
+  // computeServerSweepEligibility.ts). Ползваме hands-а както е в `state`
+  // (подаден на applyTrickCompletion) — победителят вече има свалена
+  // изиграната карта (stateWithCard.hands), другите 3 места вече са
+  // намалени от собствените им по-ранни submitServerPlayCard извиквания
+  // в същата взятка.
+  const alreadyDeclinedSweep = playing.declinedSweepSeats.includes(winnerSeat)
+  const isSweepEligible =
+    !isRoundComplete &&
+    !alreadyDeclinedSweep &&
+    computeServerSweepEligibility({
+      sweepSeat: winnerSeat,
+      hands: state.hands,
+      winningBid: state.bidding.winningBid,
+    })
+
   const nextPlaying: ServerPlayingState = {
     ...playing,
-    currentTurnSeat: isRoundComplete ? null : winnerSeat,
+    currentTurnSeat: isRoundComplete || isSweepEligible ? null : winnerSeat,
     completedTricks: nextCompletedTricks,
     lastCompletedTrickWinnerSeat: winnerSeat,
     lastCompletedTrickWinnerTeam: winnerTeam,
     currentTrick: {
       leaderSeat: winnerSeat,
-      currentSeat: isRoundComplete ? null : winnerSeat,
+      currentSeat: isRoundComplete || isSweepEligible ? null : winnerSeat,
       plays: [],
       winnerSeat: null,
       trickIndex: trickIndex + 1,
@@ -226,6 +246,13 @@ function applyTrickCompletion(
       ...playing.wonTricksByTeam,
       [winnerTeam]: [...playing.wonTricksByTeam[winnerTeam], trickCards],
     },
+    sweepOffer: isSweepEligible
+      ? {
+          seat: winnerSeat,
+          offeredAtTrickIndex: trickIndex + 1,
+          expiresAt: getServerTimerNow() + SERVER_TIMING_CONFIG.sweepOfferHumanTimeoutMs,
+        }
+      : null,
   }
 
   if (isRoundComplete) {
@@ -242,6 +269,14 @@ function applyTrickCompletion(
     ...state,
     playing: nextPlaying,
   }
+
+  if (isSweepEligible) {
+    return {
+      ...nextState,
+      timer: createServerSweepOfferTimerState(nextState, winnerSeat),
+    }
+  }
+
   const timerStartsAt =
     getServerTimerNow() + SERVER_TIMING_CONFIG.playAfterTrickCollectionDelayMs
   const winnerTimerStartedAt = isServerSeatControlledByBot(nextState, winnerSeat)

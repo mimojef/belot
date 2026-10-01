@@ -91,10 +91,15 @@ export function logAcceptedCardPlayAudit(options: {
 }
 
 export function logRejectedGameplayAction(options: {
-  actionType: 'submit_play_card' | 'submit_bid_action' | 'submit_cut_index'
+  actionType:
+    | 'submit_play_card'
+    | 'submit_bid_action'
+    | 'submit_cut_index'
+    | 'submit_sweep_decision'
   roomId: string | null
   seat: Seat | null
   cardId?: string | null
+  decision?: 'accept' | 'decline' | null
   connectionId: string
   connectionStatus: string
   reason: string
@@ -106,6 +111,7 @@ export function logRejectedGameplayAction(options: {
       roomId: options.roomId,
       seat: options.seat,
       cardId: options.cardId ?? null,
+      decision: options.decision ?? null,
       connectionId: options.connectionId,
       connectionStatus: options.connectionStatus,
       reason: options.reason,

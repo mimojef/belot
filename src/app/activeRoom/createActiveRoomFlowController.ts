@@ -4512,11 +4512,15 @@ export function createActiveRoomFlowController(
         scaledStageWidth,
         scaledStageHeight,
         submitPlayCard: options.submitPlayCard,
+        submitSweepDecision: options.submitSweepDecision,
         onDeclarationBubbleShown: (seat, lines) => {
           options.gameAudio?.playDeclarationBubble(lines, getSeatGender(seat))
         },
         onPlayedCardLanded: () => {
           options.gameAudio?.playCardOnTable()
+        },
+        onSweepCaptionShow: () => {
+          options.gameAudio?.playDownTheCards()
         },
         syncSeatPanels,
         emojiBubbles: getEmojiBubblesForRender(),

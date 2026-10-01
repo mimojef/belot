@@ -4,6 +4,7 @@ import { advanceExpiredServerAutoPhaseState } from './advanceExpiredServerAutoPh
 import { advanceExpiredServerBiddingState } from './advanceExpiredServerBiddingState.js'
 import { advanceExpiredServerCuttingState } from './advanceExpiredServerCuttingState.js'
 import { advanceExpiredServerPlayingState } from './advanceExpiredServerPlayingState.js'
+import { advanceExpiredServerSweepOfferState } from './advanceExpiredServerSweepOfferState.js'
 import { getServerPhaseAutoAdvanceExpiry } from './getServerPhaseAutoAdvanceExpiry.js'
 import { getServerTimerExpiry } from './getServerTimerExpiry.js'
 
@@ -54,6 +55,10 @@ export function advanceOneServerStep(
     state.playing.currentTurnSeat !== null
   ) {
     return advanceExpiredServerPlayingState(state, now)
+  }
+
+  if (state.phase === 'playing' && state.playing !== null && state.playing.sweepOffer !== null) {
+    return advanceExpiredServerSweepOfferState(state, now)
   }
 
   return {

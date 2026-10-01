@@ -181,6 +181,10 @@ export function createPlayingUiCache(): PlayingUiCache {
     lastPlayingShellKey: null,
     lastTrickStableKey: null,
     lastScoreHudRenderedHtml: null,
+    sweepOfferDismissedKey: null,
+    sweepAcceptSent: false,
+    lastSweepResolutionKey: null,
+    isSweepAnimating: false,
   }
 }
 
@@ -199,6 +203,8 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
     document.body.querySelector('[data-mobile-bubble-layer-host]')?.remove()
     document.body.querySelector('[data-mobile-phrase-overlay-host]')?.remove()
     document.body.querySelector('[data-playing-bottom-hand-host]')?.remove()
+    document.body.querySelector('[data-sweep-offer-prompt-root]')?.remove()
+    document.body.querySelector('[data-sweep-throw-down-overlay]')?.remove()
     const seatPanelsHost = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (seatPanelsHost) {
       seatPanelsHost.style.position = ''
@@ -237,6 +243,10 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.lastPlayingShellKey = null
   cache.lastTrickStableKey = null
   cache.lastScoreHudRenderedHtml = null
+  cache.sweepOfferDismissedKey = null
+  cache.sweepAcceptSent = false
+  cache.lastSweepResolutionKey = null
+  cache.isSweepAnimating = false
 }
 
 export function createBiddingUiState(): BiddingUiState {

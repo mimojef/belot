@@ -338,6 +338,23 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       }
     }
 
+    if (parsed.type === 'submit_sweep_decision') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const decision = parsed.decision === 'accept' || parsed.decision === 'decline'
+        ? parsed.decision
+        : null
+
+      if (roomId === null || decision === null) {
+        return null
+      }
+
+      return {
+        type: 'submit_sweep_decision',
+        roomId,
+        decision,
+      }
+    }
+
     if (parsed.type === 'resume_human_control') {
       const roomId = normalizeRequiredText(parsed.roomId)
 

@@ -683,6 +683,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'submit_bid_action':
     case 'submit_cut_index':
     case 'submit_play_card':
+    case 'submit_sweep_decision':
     case 'resume_human_control':
     case 'submit_partner_rating':
     case 'request_replay':
@@ -20616,6 +20617,105 @@ wsServer.on('connection', (socket, request) => {
         // на мача (worker-tick следващия път вече ще вижда и previousRoom, и
         // nextRoom като match-ended, значи idempotency guard-ът никога не би
         // хванал прехода само от worker-tick страна).
+        if (shouldRunMatchCompletionSideEffects(room, result.room)) {
+          recordPrivateGameFinishedIfApplicable(result.room)
+        } else {
+          notifyPrivateGameScoreProgress(result.room)
+        }
+        return
+      }
+
+      if (message.type === 'submit_sweep_decision') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+
+        if (latestConnection === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Connection was not found.',
+          })
+          return
+        }
+
+        // Mirrors submit_play_card's stale-connection guard — виж
+        // checkGameplayActionStaleConnectionGuard.ts.
+        if (latestConnection.status !== 'connected') {
+          logRejectedGameplayAction({
+            actionType: 'submit_sweep_decision',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            decision: message.decision,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: 'stale_connection',
+          })
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Връзката не е активна.',
+          })
+          return
+        }
+
+        if (latestConnection.currentRoomId !== message.roomId) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'You are not attached to this room.',
+          })
+          return
+        }
+
+        if (!latestConnection.currentSeat) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Your seat was not found.',
+          })
+          return
+        }
+
+        const room = serverState.rooms[message.roomId] ?? null
+
+        if (room === null) {
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: 'Room was not found.',
+          })
+          return
+        }
+
+        const result = activeRoomRuntime.submitSweepDecision({
+          room,
+          seat: latestConnection.currentSeat,
+          decision: message.decision,
+        })
+
+        if (!result.ok) {
+          logRejectedGameplayAction({
+            actionType: 'submit_sweep_decision',
+            roomId: message.roomId,
+            seat: latestConnection.currentSeat,
+            decision: message.decision,
+            connectionId: connection.id,
+            connectionStatus: latestConnection.status,
+            reason: result.message,
+          })
+          safeSendToConnection(connection.id, {
+            type: 'error',
+            message: result.message,
+          })
+          return
+        }
+
+        activityCounters.incrementGame('gameplaySweepDecisionAccepted')
+        serverState = commitServerRoomWithSnapshot(result.room)
+        activeRoomRuntime.ensureRoom(result.room)
+        broadcastRoomSnapshots(result.room, socketRegistry)
+        // Same reasoning as submit_play_card above — a direct human
+        // submit_sweep_decision commit bypasses the worker-tick
+        // applyAcceptedGameWorkerCandidate path, so "Играещи" score push
+        // needs to be nudged here too. An accepted sweep never itself flips
+        // the room straight to match-ended (phase stays 'playing' pending
+        // the throw-down animation — виж getServerPhaseAutoAdvanceDelay.ts),
+        // so this always takes the notifyPrivateGameScoreProgress branch in
+        // practice, but the same guard is reused for consistency.
         if (shouldRunMatchCompletionSideEffects(room, result.room)) {
           recordPrivateGameFinishedIfApplicable(result.room)
         } else {

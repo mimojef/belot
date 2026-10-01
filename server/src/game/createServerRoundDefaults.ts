@@ -73,6 +73,9 @@ export function createEmptyPlayingState(): ServerPlayingState {
     lastCompletedTrickWinnerTeam: null,
     wonTricksBySeat: createEmptyWonTricksBySeat(),
     wonTricksByTeam: createEmptyWonTricks(),
+    sweepOffer: null,
+    declinedSweepSeats: [],
+    sweepResolution: null,
   }
 }
 

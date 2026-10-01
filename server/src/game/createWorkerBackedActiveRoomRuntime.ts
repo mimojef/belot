@@ -10,6 +10,7 @@ import type {
   SubmitBidInput,
   SubmitCutInput,
   SubmitPlayInput,
+  SubmitSweepDecisionInput,
   TickRoomsInput,
   TickRoomsResult,
 } from './activeRoomRuntime.js'
@@ -238,6 +239,20 @@ export function createWorkerBackedActiveRoomRuntime(
       }
 
       return delegate.submitPlay(input)
+    },
+
+    submitSweepDecision(input: SubmitSweepDecisionInput): RuntimeCommandResult {
+      const workerId =
+        workerManager.getWorkerIdForRoom(input.room.id)
+
+      if (workerId === null) {
+        return {
+          ok: false,
+          message: 'Room has no worker assignment.',
+        }
+      }
+
+      return delegate.submitSweepDecision(input)
     },
 
     resumeHumanControl(

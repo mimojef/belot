@@ -7,6 +7,10 @@ import {
 export type GameAudioController = {
   playBidBubble(label: string, gender?: VoiceGender | null): void
   playDeclarationBubble(lines: string[], gender?: VoiceGender | null): void
+  // "Долу картите" — виж DOWN_THE_CARDS_AUDIO_FILE по-долу. Няма реален
+  // record-нат audio файл все още (виж коментара там) — методът е safe
+  // no-op, докато файлът не бъде добавен.
+  playDownTheCards(gender?: VoiceGender | null): void
   playCardMove(): void
   playCardOnTable(): void
   playMatchEnded(): void
@@ -45,6 +49,17 @@ const DEFAULT_FEMALE_DECLARATION_BASE_PATH = '/audio/table-calls-women'
 const DEFAULT_SFX_BASE_PATH = '/audio/card-sfx'
 const DEFAULT_GAME_SOUNDS_BASE_PATH = '/audio/game-sounds'
 const REACTION_COUNTDOWN_WARNING_FILE = 'counter.mp3'
+// "Долу картите" table-call line — same lookup convention as
+// BID_AUDIO_BY_LABEL/DECLARATION_AUDIO_BY_LABEL (per-gender table-calls
+// directory + filename). NOTE: no actual audio asset has been recorded for
+// this yet — see the final report's known-gap note. The path is wired
+// end-to-end so dropping a real `down-the-cards.mp3` file at
+// /audio/table-calls/ (and /audio/table-calls-women/) is the only
+// remaining step; until then createAudio()/HTMLAudioElement's own 404
+// error event fails this silently (same graceful-failure behavior already
+// relied on elsewhere in this controller — playSfx/enqueueSpeech never
+// throw into gameplay on a load/play rejection).
+const DOWN_THE_CARDS_AUDIO_FILE = 'down-the-cards.mp3'
 const REACTION_COUNTDOWN_WARNING_OVERLAP_MS = 90
 
 const DEFAULT_DEAL_PACKET_COUNT = 4
@@ -507,6 +522,10 @@ export function createGameAudioController(
     enqueueSpeechSequence(sources)
   }
 
+  function playDownTheCards(gender?: VoiceGender | null): void {
+    enqueueSpeech(buildFilePath(getBidBasePath(gender), DOWN_THE_CARDS_AUDIO_FILE))
+  }
+
   function playCardMove(): void {
     cardMovePool.play()
   }
@@ -671,6 +690,7 @@ export function createGameAudioController(
   return {
     playBidBubble,
     playDeclarationBubble,
+    playDownTheCards,
     playCardMove,
     playCardOnTable,
     playMatchEnded,

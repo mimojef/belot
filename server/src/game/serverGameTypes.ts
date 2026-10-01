@@ -133,6 +133,27 @@ export type ServerScoreBreakdown = {
   total: ServerRoundScore
 }
 
+export type ServerSweepOffer = {
+  seat: Seat
+  offeredAtTrickIndex: number
+  expiresAt: number
+}
+
+export type ServerSweepAutoCreditedBelote = {
+  seat: Seat
+  team: Team
+  suit: ServerSuit
+}
+
+export type ServerSweepResolution = {
+  winnerSeat: Seat
+  winnerTeam: Team
+  throwOrder: Seat[] // [winnerSeat, then the other 3 in table rotation order starting after winnerSeat]
+  handsAtResolution: Record<Seat, ServerCard[]> // each seat's remaining cards at the moment OK was accepted (captured BEFORE hands are cleared) — client uses this to animate/reveal
+  autoCreditedBelotes: ServerSweepAutoCreditedBelote[]
+  resolvedAt: number
+}
+
 export type ServerPlayingState = {
   hasStarted: boolean
   currentTurnSeat: Seat | null
@@ -142,6 +163,10 @@ export type ServerPlayingState = {
   lastCompletedTrickWinnerTeam: Team | null
   wonTricksBySeat: Record<Seat, ServerCard[][]>
   wonTricksByTeam: Record<Team, ServerCard[][]>
+  // "Долу картите" — виж computeServerSweepEligibility.ts / submitServerSweepDecision.ts.
+  sweepOffer: ServerSweepOffer | null
+  declinedSweepSeats: Seat[]
+  sweepResolution: ServerSweepResolution | null
 }
 
 export type ServerScoringState = {

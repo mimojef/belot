@@ -6994,6 +6994,9 @@ const activeRoom = createActiveRoomFlowController({
   submitPlayCard: (roomId, cardId, declarationKeys) => {
     client.submitPlayCard(roomId, cardId, declarationKeys)
   },
+  submitSweepDecision: (roomId, decision) => {
+    client.submitSweepDecision(roomId, decision)
+  },
   resumeHumanControl: (roomId) => {
     client.resumeHumanControl(roomId)
   },

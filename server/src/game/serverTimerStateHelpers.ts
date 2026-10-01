@@ -101,6 +101,18 @@ export function createServerPlayingTimerState(
   return createServerTimerStateForSeat(activeSeat, durationMs, startedAt)
 }
 
+export function createServerSweepOfferTimerState(
+  state: ServerAuthoritativeGameState,
+  activeSeat: Seat,
+  startedAt: number = getServerTimerNow(),
+): ServerTimerState {
+  const durationMs = isServerSeatControlledByBot(state, activeSeat)
+    ? resolveServerBotActionDelayMs(state, SERVER_TIMING_CONFIG.sweepOfferBotDelayMs)
+    : SERVER_TIMING_CONFIG.sweepOfferHumanTimeoutMs
+
+  return createServerTimerStateForSeat(activeSeat, durationMs, startedAt)
+}
+
 export function createServerScoringTimerState(
   startedAt: number = getServerTimerNow(),
 ): ServerTimerState {

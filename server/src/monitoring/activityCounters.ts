@@ -42,6 +42,7 @@ export type GameActivityCounters = {
   gameplayBidAccepted: number
   gameplayCutAccepted: number
   gameplayPlayAccepted: number
+  gameplaySweepDecisionAccepted: number
   roomSnapshotBroadcasts: number
 }
 
@@ -104,6 +105,7 @@ const GAME_KEYS: Array<keyof GameActivityCounters> = [
   'gameplayBidAccepted',
   'gameplayCutAccepted',
   'gameplayPlayAccepted',
+  'gameplaySweepDecisionAccepted',
   'roomSnapshotBroadcasts',
 ]
 

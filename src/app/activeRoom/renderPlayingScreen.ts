@@ -43,6 +43,8 @@ import {
 } from './cutting/cuttingSeatLayout'
 import { sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { animateTrickCollection } from './animateTrickCollection'
+import { animateSweepThrowDown } from './animateSweepThrowDown'
+import { removeSweepOfferPopup, renderSweepOfferPopup } from './renderSweepOfferPopup'
 import type { PlayingUiCache } from './activeRoomTypes'
 import { renderScoreHud } from './renderScoreHud'
 import {
@@ -430,6 +432,14 @@ function getPlayKey(play: RoomPlayCardSnapshot): string {
 
 function getCompletedTrickKey(trick: RoomCompletedTrickSnapshot): string {
   return `${trick.trickIndex}:${trick.winnerSeat}:${getTrickKey(trick.plays)}`
+}
+
+function getSweepOfferKey(offer: { seat: Seat; expiresAt: number }): string {
+  return `${offer.seat}:${offer.expiresAt}`
+}
+
+function getSweepResolutionKey(resolution: { winnerSeat: Seat; resolvedAt: number }): string {
+  return `${resolution.winnerSeat}:${resolution.resolvedAt}`
 }
 
 function getSortOptions(
@@ -1412,6 +1422,11 @@ function resetCacheForFreshSnapshot(
   cache.lastPlayingShellKey = null
   cache.lastTrickStableKey = null
   cache.lastScoreHudRenderedHtml = null
+  cache.sweepOfferDismissedKey = null
+  cache.sweepAcceptSent = false
+  cache.lastSweepResolutionKey = null
+  cache.isSweepAnimating = false
+  removeSweepOfferPopup(document)
 }
 
 function scheduleCompletedTrickCollection(
@@ -1652,6 +1667,81 @@ function queryCurrentTrickCards(root: HTMLDivElement): HTMLElement[] {
   return Array.from(scope.querySelectorAll<HTMLElement>('[data-current-trick-card]'))
 }
 
+const SWEEP_CAPTION_ATTR = 'data-sweep-caption-banner'
+const SWEEP_BELOTE_INDICATOR_LIFETIME_MS = 1200
+
+// Short "Долу картите" caption, shown once the claimant's cards land and
+// auto-hidden quickly (per spec: "кратък надпис", "да се скрие бързо" — kept
+// noticeably snappier than the ~3.2s bidding speech-bubble lifecycle, which
+// is a different, deliberately longer-lived UI element).
+function showSweepCaptionBanner(): void {
+  document.body.querySelector(`[${SWEEP_CAPTION_ATTR}]`)?.remove()
+
+  const el = document.createElement('div')
+  el.setAttribute(SWEEP_CAPTION_ATTR, '1')
+  el.textContent = 'Долу картите'
+  el.style.position = 'fixed'
+  el.style.left = '50%'
+  el.style.top = '38%'
+  el.style.transform = 'translate(-50%,-50%)'
+  el.style.zIndex = '9600'
+  el.style.pointerEvents = 'none'
+  el.style.fontFamily = 'Inter, system-ui, sans-serif'
+  el.style.fontSize = '34px'
+  el.style.fontWeight = '900'
+  el.style.color = '#f5a623'
+  el.style.textShadow = '0 2px 10px rgba(0,0,0,0.6)'
+  el.style.opacity = '0'
+  el.style.transition = 'opacity 180ms ease-out'
+  document.body.appendChild(el)
+  requestAnimationFrame(() => {
+    el.style.opacity = '1'
+  })
+}
+
+function hideSweepCaptionBanner(): void {
+  const el = document.body.querySelector<HTMLElement>(`[${SWEEP_CAPTION_ATTR}]`)
+  if (!el) return
+  el.style.opacity = '0'
+  window.setTimeout(() => el.remove(), 220)
+}
+
+// "Белот +20" auto-credit indicator — reuses the same visual language as
+// the in-play declaration bubbles (gold accent, bold label over the table),
+// anchored near the seat whose cards just landed.
+function showSweepBeloteIndicator(seat: Seat, suit: string): void {
+  const anchor = document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seat}"]`)
+  const rect = anchor?.getBoundingClientRect() ?? null
+  const el = document.createElement('div')
+  el.textContent = 'Белот +20'
+  el.style.position = 'fixed'
+  el.style.left = rect ? `${rect.left + rect.width / 2}px` : '50%'
+  el.style.top = rect ? `${rect.top}px` : '50%'
+  el.style.transform = 'translate(-50%,-100%)'
+  el.style.zIndex = '9600'
+  el.style.pointerEvents = 'none'
+  el.style.fontFamily = 'Inter, system-ui, sans-serif'
+  el.style.fontSize = '18px'
+  el.style.fontWeight = '900'
+  el.style.color = '#101010'
+  el.style.background = '#f5a623'
+  el.style.padding = '4px 10px'
+  el.style.borderRadius = '999px'
+  el.style.boxShadow = '0 6px 16px rgba(0,0,0,0.4)'
+  el.style.opacity = '0'
+  el.style.transition = 'opacity 160ms ease-out, transform 160ms ease-out'
+  el.setAttribute('data-sweep-belote-suit', suit)
+  document.body.appendChild(el)
+  requestAnimationFrame(() => {
+    el.style.opacity = '1'
+    el.style.transform = 'translate(-50%,-130%)'
+  })
+  window.setTimeout(() => {
+    el.style.opacity = '0'
+    window.setTimeout(() => el.remove(), 200)
+  }, SWEEP_BELOTE_INDICATOR_LIFETIME_MS)
+}
+
 export type RenderPlayingScreenOptions = {
   root: HTMLDivElement
   game: RoomGameSnapshot
@@ -1663,8 +1753,10 @@ export type RenderPlayingScreenOptions = {
   scaledStageWidth: number
   scaledStageHeight: number
   submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
+  submitSweepDecision?: (roomId: string, decision: 'accept' | 'decline') => void
   onDeclarationBubbleShown?: (seat: Seat, lines: string[]) => void
   onPlayedCardLanded?: () => void
+  onSweepCaptionShow?: () => void
   syncSeatPanels?: (html: string) => void
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
@@ -1684,8 +1776,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     scaledStageWidth: sourceScaledStageWidth,
     scaledStageHeight: sourceScaledStageHeight,
     submitPlayCard,
+    submitSweepDecision,
     onDeclarationBubbleShown,
     onPlayedCardLanded,
+    onSweepCaptionShow,
     syncSeatPanels,
     emojiBubbles,
     phraseBubbles,
@@ -1704,6 +1798,9 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   const snapshotTrickKey = getTrickKey(snapshotPlays)
   const latestCompletedTrickKey =
     latestCompletedTrick !== null ? getCompletedTrickKey(latestCompletedTrick) : null
+  const sweepOffer = playing?.sweepOffer ?? null
+  const sweepResolution = playing?.sweepResolution ?? null
+  const sweepResolutionKey = sweepResolution !== null ? getSweepResolutionKey(sweepResolution) : null
 
   if (!cache.hasRenderedSnapshot) {
     clearDeclarationBubbleUiState(cache)
@@ -1711,11 +1808,18 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     cache.lastCompletedTricksCount = completedCount
     cache.lastTrickKey = snapshotTrickKey
     cache.latestCompletedTrickKey = latestCompletedTrickKey
+    // Reconnect/first-paint safety (mirrors the trick-collection cache
+    // seeding above): if sweepResolution is already present on the very
+    // first snapshot this client sees (e.g. reconnecting mid-animation), we
+    // must NOT replay the throw-down animation for something that already
+    // happened before this client connected — just render the resolved
+    // end-state.
+    cache.lastSweepResolutionKey = sweepResolutionKey
   } else if (completedCount < cache.lastCompletedTricksCount) {
     resetCacheForFreshSnapshot(cache, snapshotTrickKey, completedCount, latestCompletedTrickKey)
   }
 
-  if (isCollectingTrickOnEntry) {
+  if (isCollectingTrickOnEntry || cache.isSweepAnimating) {
     return
   }
 
@@ -1838,6 +1942,17 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   function canSubmitHandCard(cardId: string): boolean {
     if (!isMyTurn) {
+      return false
+    }
+
+    // "Долу картите" optimistic lock: block further card plays immediately
+    // on OK-click (before the server's next snapshot confirms the sweep),
+    // and for the duration of the throw-down reveal animation. In practice
+    // the server already sets currentTurnSeat=null for both the pending
+    // offer and the resolved-but-animating window, so isMyTurn is normally
+    // already false here too — this is defense in depth for the brief
+    // window between the click and the next snapshot.
+    if (cache.sweepAcceptSent || cache.isSweepAnimating) {
       return false
     }
 
@@ -2439,5 +2554,79 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       cache.bufferedCompletedTrick,
       PLAY_CARD_ENTRY_ANIMATION_MS + COMPLETED_TRICK_PREVIEW_MS,
     )
+  }
+
+  // "Долу картите" — popup (seat-gated snapshot: non-null here IS this
+  // client's own offer) and throw-down reveal, driven purely by diffing
+  // game.playing.sweepOffer / sweepResolution against the cache, same
+  // snapshot-diffing philosophy as the trick-collection animation above (no
+  // discrete one-shot server push event).
+  const sweepOfferKey = sweepOffer !== null ? getSweepOfferKey(sweepOffer) : null
+  const shouldShowSweepOfferPopup =
+    sweepOffer !== null &&
+    !cache.sweepAcceptSent &&
+    cache.sweepOfferDismissedKey !== sweepOfferKey
+
+  if (shouldShowSweepOfferPopup && sweepOffer !== null) {
+    renderSweepOfferPopup({
+      root: document.body,
+      onAccept: () => {
+        if (cache.sweepAcceptSent) {
+          return
+        }
+        cache.sweepAcceptSent = true
+        removeSweepOfferPopup(document)
+        submitSweepDecision?.(roomId, 'accept')
+      },
+      onDecline: () => {
+        cache.sweepOfferDismissedKey = sweepOfferKey
+        removeSweepOfferPopup(document)
+        submitSweepDecision?.(roomId, 'decline')
+      },
+    })
+  } else {
+    removeSweepOfferPopup(document)
+  }
+
+  if (
+    sweepResolution !== null &&
+    sweepResolutionKey !== null &&
+    sweepResolutionKey !== cache.lastSweepResolutionKey &&
+    !cache.isSweepAnimating
+  ) {
+    cache.lastSweepResolutionKey = sweepResolutionKey
+    cache.isSweepAnimating = true
+    cache.sweepAcceptSent = false
+    removeSweepOfferPopup(document)
+
+    const resolvedSweep = sweepResolution
+    void animateSweepThrowDown({
+      throwOrder: resolvedSweep.throwOrder,
+      handsAtResolution: resolvedSweep.handsAtResolution,
+      getSeatHandAnchorElement: (seat) =>
+        document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seat}"]`),
+      getTableCenterElement: () =>
+        document.querySelector<HTMLElement>('[data-active-room-playing-visual="1"]'),
+      onCaptionShow: () => {
+        onSweepCaptionShow?.()
+        showSweepCaptionBanner()
+      },
+      onCaptionHide: () => {
+        hideSweepCaptionBanner()
+      },
+      onSeatThrown: (seat) => {
+        const creditedForSeat = resolvedSweep.autoCreditedBelotes.filter((entry) => entry.seat === seat)
+        for (const credited of creditedForSeat) {
+          showSweepBeloteIndicator(seat, credited.suit)
+        }
+      },
+      onComplete: () => {
+        cache.isSweepAnimating = false
+        const latestOptions = latestRenderOptionsByCache.get(cache)
+        if (latestOptions) {
+          renderPlayingScreen(latestOptions)
+        }
+      },
+    })
   }
 }
