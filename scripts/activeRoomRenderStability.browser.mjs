@@ -27,6 +27,10 @@ class FakeAudio {
     audioPlays += 1
     return Promise.resolve()
   }
+
+  pause() {}
+
+  addEventListener() {}
 }
 
 Object.defineProperty(window, 'Audio', {

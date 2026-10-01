@@ -1,3 +1,9 @@
+import {
+  isGameSoundsEnabled,
+  onGameSoundsDisabled,
+  trackGameAudio,
+} from './gameSoundSettings'
+
 export type GameAudioController = {
   playBidBubble(label: string, gender?: VoiceGender | null): void
   playDeclarationBubble(lines: string[], gender?: VoiceGender | null): void
@@ -141,6 +147,7 @@ const CARD_SFX_POOL_SIZE = 4
 type PreloadedSfxPool = {
   play(): void
   prime(): void
+  stop(): void
 }
 
 function createPreloadedSfxPool(src: string, size: number): PreloadedSfxPool {
@@ -203,7 +210,18 @@ function createPreloadedSfxPool(src: string, size: number): PreloadedSfxPool {
     }
   }
 
-  return { play, prime }
+  function stop(): void {
+    for (const audio of elements) {
+      audio.pause()
+      try {
+        audio.currentTime = 0
+      } catch {
+        // See play() — Safari can throw on a not-yet-seekable element.
+      }
+    }
+  }
+
+  return { play, prime, stop }
 }
 
 function buildFilePath(basePath: string, fileName: string): string {
@@ -211,6 +229,12 @@ function buildFilePath(basePath: string, fileName: string): string {
 }
 
 function canPlayAudioNow(): boolean {
+  // "Звуци по време на игра" (gameSoundSettings.ts) — единственият gate за
+  // всички звуци на контролера; всеки play път минава оттук.
+  if (!isGameSoundsEnabled()) {
+    return false
+  }
+
   if (typeof document === 'undefined') {
     return true
   }
@@ -374,6 +398,7 @@ export function createGameAudioController(
     }
 
     const audio = createAudio(src)
+    trackGameAudio(audio)
     void audio.play().catch(() => {})
   }
 
@@ -636,6 +661,12 @@ export function createGameAudioController(
       stopBackgroundAudio()
     })
   }
+
+  onGameSoundsDisabled(() => {
+    stopBackgroundAudio()
+    cardOnTablePool.stop()
+    cardMovePool.stop()
+  })
 
   return {
     playBidBubble,

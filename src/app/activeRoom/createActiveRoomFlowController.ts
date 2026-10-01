@@ -119,6 +119,13 @@ import { renderScoringScreen } from './renderScoringPanel'
 import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
 import { showStakeDeductionEffect } from './renderStakeDeductionEffect'
+import {
+  renderActiveRoomDesktopActionBar,
+  renderActiveRoomMobileActionBar,
+  renderActiveRoomSettingsPanel,
+  renderGameSoundsToggleState,
+} from './renderActiveRoomActionBar'
+import { isGameSoundsEnabled, setGameSoundsEnabled } from '../audio/gameSoundSettings'
 import { PHRASE_REACTIONS, getPhraseReactionText } from './phraseReactions'
 import {
   removeSeatProfileOverlay,
@@ -812,73 +819,10 @@ export function createActiveRoomFlowController(
 
   function renderFloatingLeaveButton(): string {
     if (isPhoneLayoutViewport()) {
-      return `
-        <div
-          data-active-room-mobile-action-bar="1"
-          style="
-            position:fixed;
-            left:0;
-            right:0;
-            bottom:0;
-            z-index:9399;
-            height:${ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT}px;
-            background:#000000;
-            pointer-events:none;
-          "
-        >
-          <button
-            type="button"
-            data-active-room-leave-button="1"
-            title="Напусни масата"
-            style="
-              position:absolute;
-              left:16px;
-              top:50%;
-              transform:translateY(-50%);
-              height:40px;
-              min-width:104px;
-              border:0;
-              border-radius:8px;
-              padding:0 16px;
-              background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
-              color:#171717;
-              font-size:14px;
-              font-weight:900;
-              cursor:pointer;
-              box-shadow:0 10px 22px rgba(0,0,0,0.30);
-              pointer-events:auto;
-            "
-          >
-            Изход
-          </button>
-        </div>
-      `
+      return renderActiveRoomMobileActionBar()
     }
 
-    return `
-      <button
-        type="button"
-        data-active-room-leave-button="1"
-        title="Напусни масата"
-        style="
-          position:fixed;
-          left:18px;
-          bottom:24px;
-          z-index:9400;
-          border:1px solid rgba(251,191,36,0.45);
-          border-radius:12px;
-          padding:14px 22px;
-          background:linear-gradient(180deg, #f6d36b 0%, #c98b1a 100%);
-          color:#171717;
-          font-size:15px;
-          font-weight:900;
-          cursor:pointer;
-          box-shadow:0 16px 34px rgba(0,0,0,0.28);
-        "
-      >
-        Изход
-      </button>
-    `
+    return renderActiveRoomDesktopActionBar()
   }
 
   function renderLeavePenaltyWarning(): string {
@@ -1013,9 +957,56 @@ export function createActiveRoomFlowController(
     `
   }
 
+  function closeActiveRoomSettingsPanel(): void {
+    document.body.querySelector('[data-active-room-settings-backdrop="1"]')?.remove()
+    document.body
+      .querySelector('[data-active-room-settings-button="1"]')
+      ?.setAttribute('aria-expanded', 'false')
+  }
+
+  // "Настройки" panel от ⚙️ бутона до "Изход" (mobile и desktop). Toggle-ът обновява
+  // само собствения си бутон — без re-render на масата.
+  function openActiveRoomSettingsPanel(): void {
+    if (document.body.querySelector('[data-active-room-settings-backdrop="1"]')) {
+      return
+    }
+
+    const placement = document.body.querySelector('[data-active-room-mobile-action-bar="1"]')
+      ? 'mobile'
+      : 'desktop'
+    document.body.insertAdjacentHTML('beforeend', renderActiveRoomSettingsPanel(isGameSoundsEnabled(), placement))
+    document.body
+      .querySelector('[data-active-room-settings-button="1"]')
+      ?.setAttribute('aria-expanded', 'true')
+
+    const backdrop = document.body.querySelector<HTMLElement>('[data-active-room-settings-backdrop="1"]')
+    backdrop?.addEventListener('click', (event) => {
+      if (event.target === backdrop) {
+        closeActiveRoomSettingsPanel()
+      }
+    })
+    backdrop
+      ?.querySelector('[data-active-room-settings-close="1"]')
+      ?.addEventListener('click', closeActiveRoomSettingsPanel)
+
+    const toggle = backdrop?.querySelector<HTMLButtonElement>('[data-active-room-game-sounds-toggle="1"]')
+    toggle?.addEventListener('click', () => {
+      const nextEnabled = !isGameSoundsEnabled()
+      setGameSoundsEnabled(nextEnabled)
+      const state = renderGameSoundsToggleState(nextEnabled)
+      toggle.setAttribute('aria-checked', nextEnabled ? 'true' : 'false')
+      toggle.style.borderColor = state.borderColor
+      toggle.style.background = state.background
+      toggle.style.color = state.color
+      toggle.textContent = state.label
+    })
+  }
+
   function removeLeaveButton(): void {
+    closeActiveRoomSettingsPanel()
     document.body.querySelector('[data-active-room-leave-button="1"]')?.remove()
     document.body.querySelector('[data-active-room-mobile-action-bar="1"]')?.remove()
+    document.body.querySelector('[data-active-room-desktop-action-bar="1"]')?.remove()
     // Warning-ът живее в options.root (не document.body), но трябва да умре
     // заедно с останалия leave UI на всяко от местата, откъдето тази функция
     // вече се вика (match-ended, room exit/reset) — иначе би останал stale
@@ -1047,6 +1038,15 @@ export function createActiveRoomFlowController(
           }
 
           requestActiveRoomLeave()
+        })
+      document.body
+        .querySelector<HTMLButtonElement>('[data-active-room-settings-button="1"]')
+        ?.addEventListener('click', () => {
+          if (document.body.querySelector('[data-active-room-settings-backdrop="1"]')) {
+            closeActiveRoomSettingsPanel()
+          } else {
+            openActiveRoomSettingsPanel()
+          }
         })
     }
 
@@ -3476,7 +3476,7 @@ export function createActiveRoomFlowController(
         showStakeDeductionEffect(activeRoomState.stake, {
           x: window.innerWidth / 2,
           y: window.innerHeight / 2,
-        })
+        }, { isInGame: true })
       }
 
       if (matchEndedSoundPlayed && !replayStakeEffectShown) {
@@ -3484,7 +3484,7 @@ export function createActiveRoomFlowController(
         showStakeDeductionEffect(activeRoomState.stake, {
           x: window.innerWidth / 2,
           y: window.innerHeight / 2,
-        })
+        }, { isInGame: true })
       }
 
       const cuttingVisualCountdownContext = {

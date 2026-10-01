@@ -1,3 +1,5 @@
+import { playGameSound } from '../audio/gameSoundSettings'
+
 const COUNTER_DURATION_MS = 700
 const HOLD_AFTER_MS = 900
 const FADE_OUT_MS = 400
@@ -22,10 +24,17 @@ function getEffectCenter(): { x: number; y: number } {
 export function showStakeDeductionEffect(
   stakeAmount: number,
   centerOverride?: { x: number; y: number },
+  options: { isInGame?: boolean } = {},
 ): void {
-  const audio = new Audio('/audio/game-sounds/coins.mp3')
-  audio.volume = 0.9
-  void audio.play().catch(() => {})
+  // В активна игра монетите са игрови звук и се gate-ват от "Звуци по време
+  // на игра"; lobby matchmaking call site-ът (без isInGame) не се променя.
+  if (options.isInGame) {
+    playGameSound('/audio/game-sounds/coins.mp3', { volume: 0.9 })
+  } else {
+    const audio = new Audio('/audio/game-sounds/coins.mp3')
+    audio.volume = 0.9
+    void audio.play().catch(() => {})
+  }
 
   const center = centerOverride ?? getEffectCenter()
 

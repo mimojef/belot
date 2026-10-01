@@ -65,6 +65,7 @@
     "check:profile-access-block-popup": "node server/node_modules/tsx/dist/cli.mjs scripts/checkProfileAccessBlockPopup.ts",
     "check:own-vip-status-async-popup-sync": "node server/node_modules/tsx/dist/cli.mjs scripts/checkOwnVipStatusAsyncPopupSync.ts",
     "check:gameplay-sfx-latency": "npx tsx scripts/checkGameplaySfxLatency.ts",
+    "check:game-sound-settings": "npx tsx scripts/checkGameSoundSettings.ts",
     "check:playing-screen-trick-hud-patch": "npx tsx scripts/checkPlayingScreenTrickHudPatch.ts",
     "check:bidding-board-lifecycle": "npx tsx scripts/checkBiddingBoardLifecycle.ts",
     "check:bidding-board-overlay-invariant": "npx tsx scripts/checkBiddingBoardOverlayInvariant.ts",

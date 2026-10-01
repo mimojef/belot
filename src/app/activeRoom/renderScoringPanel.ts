@@ -15,6 +15,7 @@ import {
 } from './activeRoomShared'
 import { renderScoreHud } from './renderScoreHud'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { playGameSound } from '../audio/gameSoundSettings'
 
 const SCORING_PANEL_MAX_WIDTH_PX = 730
 
@@ -768,10 +769,7 @@ function playScoringSumSound(): void {
     return
   }
 
-  const audio = new Audio(SUM_COUNTER_AUDIO_SRC)
-  audio.preload = 'auto'
-  audio.volume = SUM_COUNTER_AUDIO_VOLUME
-  void audio.play().catch(() => {})
+  playGameSound(SUM_COUNTER_AUDIO_SRC, { volume: SUM_COUNTER_AUDIO_VOLUME })
 }
 
 function animateScoringSumCounters(root: HTMLElement): void {
