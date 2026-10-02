@@ -940,10 +940,13 @@ await check('[17e] control: all tricks sure for the TEAM but not personally -> N
   assert(eligible === false, 'expected NOT eligible: only the team, not the claimant, takes everything')
 })
 
-await check('[17f] control: own higher card first forces an OPPONENT card out, then the next is master -> eligible', () => {
-  // no-trumps (A > 10 > K): led first, K♠ loses to the opponent's 10♠. Led
-  // A♠ first, the opponent must follow with the singleton 10♠, then K♠ is
-  // master — the claimant personally wins both tricks.
+await check('[17f] revised: drawing out an OPPONENT card with a higher own card first does NOT rescue eligibility -> NOT eligible', () => {
+  // Business rule revision: the personal-win invariant is now deliberately
+  // order-insensitive for ALL three other seats, not just the partner.
+  // no-trumps (A > 10 > K): led K♠ first, it loses to the opponent's 10♠ —
+  // that alone is enough to disqualify, even though leading A♠ first would
+  // have drawn the 10♠ out and made K♠ safe. See [18] below for the full
+  // opponent-symmetry suite.
   const eligible = computeServerSweepEligibility({
     sweepSeat: 'bottom',
     hands: {
@@ -954,7 +957,190 @@ await check('[17f] control: own higher card first forces an OPPONENT card out, t
     },
     winningBid: NO_TRUMPS_BID,
   })
-  assert(eligible === true, 'expected eligible via A♠ then K♠')
+  assert(eligible === false, 'expected NOT eligible: opponent 10♠ can legally beat K♠ if led first, regardless of order')
+})
+
+// ---- [18] opponent symmetry: the SAME order-insensitive "any lead, any
+// other seat" invariant that already protects the partner must now also
+// protect against BOTH opponents, symmetrically. ----
+
+await check('[18a] LEFT opponent can legally take a remaining trick -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', '7')],
+      right: [card('clubs', '7'), card('clubs', '8')],
+      top: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('spades', 'K'), card('spades', 'Q')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: left opponent K♠/Q♠ beats the claimant 7♠')
+})
+
+await check('[18b] RIGHT opponent can legally take a remaining trick -> NOT eligible (symmetric to 18a)', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', '7')],
+      right: [card('spades', 'K'), card('spades', 'Q')],
+      top: [card('clubs', '7'), card('clubs', '8')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: right opponent K♠/Q♠ beats the claimant 7♠')
+})
+
+await check('[18c] opponent holds a stronger trump in a suit contract -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', '9'), card('hearts', '7')],
+      right: [card('hearts', 'J'), card('clubs', '8')],
+      top: [card('clubs', '9'), card('clubs', '10')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: opponent J♥ (highest trump) legally beats both claimant hearts')
+})
+
+await check('[18d] opponent\'s nominally-higher card in a DIFFERENT suit cannot legally contest -> eligible', () => {
+  // Opponents are void of spades, so a heart/other-suit card they hold —
+  // however high its rank — can never legally win a spades trick. This
+  // alone must not block the sweep.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', 'K')],
+      right: [card('hearts', 'J'), card('clubs', '8')],
+      top: [card('clubs', '7'), card('clubs', '9')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === true, 'expected eligible: opponent\'s hearts J is irrelevant to a spades trick, no legal threat exists')
+})
+
+await check('[18e] seat symmetry: claimant=right, opponent=top threat -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'right',
+    hands: {
+      right: [card('spades', 'A'), card('spades', '7')],
+      top: [card('spades', 'K'), card('spades', 'Q')],
+      left: [card('clubs', '7'), card('clubs', '8')],
+      bottom: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: seat-symmetric opponent threat (claimant=right, opponent=top)')
+})
+
+await check('[18f] seat symmetry: claimant=left, opponent=bottom threat -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'left',
+    hands: {
+      left: [card('spades', 'A'), card('spades', '7')],
+      bottom: [card('spades', 'K'), card('spades', 'Q')],
+      right: [card('clubs', '7'), card('clubs', '8')],
+      top: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: seat-symmetric opponent threat (claimant=left, opponent=bottom)')
+})
+
+await check('[18g] positive control: no other seat has any legal way to win any remaining trick -> eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'J'), card('hearts', '9')],
+      right: [card('clubs', '7'), card('clubs', '8')],
+      top: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('spades', '7'), card('spades', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === true, 'expected eligible: claimant holds the two highest trumps, nobody can ever legally beat them')
+})
+
+// ---- [19] ALL_TRUMPS ranking: J > 9 > A > 10 > K > Q > 8 > 7 ----
+
+const ALL_TRUMPS_BID = { seat: 'bottom', contract: 'all-trumps', trumpSuit: null, doubled: false, redoubled: false } as const
+
+await check('[19a] all-trumps ranking: opponent\'s 9 (rank-power 6) legally beats claimant\'s 10 and A (rank-power 4/5) -> NOT eligible', () => {
+  // This pins down that the ALL_TRUMPS table (J=7,9=6,A=5,10=4,K=3,Q=2,8=1,7=0)
+  // is actually used here, not accidentally the NO_TRUMPS table (where 9
+  // would be one of the weakest ranks) — if the wrong table were used, this
+  // opponent 9 would be seen as harmless and eligibility would wrongly flip
+  // to true.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', '10'), card('hearts', 'A')],
+      right: [card('hearts', '9'), card('clubs', '8')],
+      top: [card('clubs', '7'), card('clubs', '9')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: ALL_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: opponent\'s 9 outranks both claimant hearts under all-trumps ranking')
+})
+
+await check('[19b] all-trumps ranking positive control: claimant\'s J+9 (the two top ranks) beat an opponent\'s lone A -> eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'J'), card('hearts', '9')],
+      right: [card('hearts', 'A'), card('clubs', '8')],
+      top: [card('clubs', '7'), card('clubs', '10')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: ALL_TRUMPS_BID,
+  })
+  assert(eligible === true, 'expected eligible: J and 9 are the two highest all-trumps ranks, opponent\'s A cannot beat either')
+})
+
+// ---- [20] NO_TRUMPS ranking: A > 10 > K > Q > J > 9 > 8 > 7 ----
+
+await check('[20a] no-trumps ranking: opponent\'s Q legally beats claimant\'s J (J is LOW under no-trumps, unlike all-trumps) -> NOT eligible', () => {
+  // This is the inverse pin of [19]: under ALL_TRUMPS, J is the single
+  // highest rank; under NO_TRUMPS it is 4th-from-top (A>10>K>Q>J>9>8>7), so
+  // an opponent's Q legitimately beats it. If the code accidentally reused
+  // the ALL_TRUMPS table here, J would wrongly look unbeatable.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'A'), card('hearts', 'J')],
+      right: [card('hearts', 'Q'), card('clubs', '8')],
+      top: [card('clubs', '7'), card('clubs', '9')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: opponent\'s Q outranks claimant\'s J under no-trumps ranking')
+})
+
+// ---- [21] SUIT CONTRACT: a harmless off-suit, non-trump card must NOT block ----
+
+await check('[21] suit contract: opponent\'s off-suit, non-trump card cannot legally contest a different led suit -> eligible', () => {
+  // Complements [2] (where an opponent DOES hold trump and legally cuts).
+  // Here nobody besides bottom holds any hearts (trump) at all, so a
+  // nominally-high off-suit card (diamonds J) held by an opponent can never
+  // legally win a spades trick — follow-suit/trump rules only let lead-suit
+  // or trump cards win.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', 'K')],
+      right: [card('diamonds', 'J'), card('clubs', '8')],
+      top: [card('clubs', '7'), card('clubs', '9')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === true, 'expected eligible: no other seat holds trump or the led suit, an off-suit card can never legally win')
 })
 
 console.log('\n' + '═'.repeat(64))
