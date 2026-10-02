@@ -44,6 +44,12 @@ import {
 import { sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { animateTrickCollection } from './animateTrickCollection'
 import { animateSweepThrowDown } from './animateSweepThrowDown'
+import {
+  getHandFanOffset,
+  HAND_FAN_EDGE_DROP,
+  HAND_FAN_ROTATION_STEP,
+  HAND_FAN_SPACING,
+} from './handFanGeometry'
 import { removeSweepOfferPopup, renderSweepOfferPopup } from './renderSweepOfferPopup'
 import type { PlayingUiCache } from './activeRoomTypes'
 import { renderScoreHud } from './renderScoreHud'
@@ -859,17 +865,12 @@ function getBottomHandOffset(index: number, count: number, stageScale: number): 
 } {
   const isMobileLayout = isPhoneLayoutViewport()
   const fanScale = isMobileLayout ? getBottomHandMobileFanScale(stageScale) : 1
-  const spreadStep = (isMobileLayout ? BOTTOM_HAND_MOBILE_SPACING : 62) * fanScale
-  const centeredIndex = index - (count - 1) / 2
-  const maxCentered = Math.max(1, (count - 1) / 2)
-  const edgeProgress = Math.abs(centeredIndex) / maxCentered
-  const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
-  const edgeDrop = edgeProgress * edgeProgress * 34 * countProgress * fanScale
-  return {
-    x: centeredIndex * spreadStep,
-    y: edgeDrop,
-    rotate: centeredIndex * 5,
-  }
+  return getHandFanOffset(index, count, {
+    spacing: (isMobileLayout ? BOTTOM_HAND_MOBILE_SPACING : HAND_FAN_SPACING) * fanScale,
+    edgeDropMax: HAND_FAN_EDGE_DROP,
+    rotationStep: HAND_FAN_ROTATION_STEP,
+    edgeDropScale: fanScale,
+  })
 }
 
 function getPlayingCountdownState(
@@ -915,6 +916,110 @@ function getPlayingCountdownState(
   }
 }
 
+// Face markup shared by the normal played (trick) cards and the "Долу картите"
+// reveal (animateSweepThrowDown.ts), so both look and size identically.
+function renderTableCardFaceHtml(card: RoomCardSnapshot): string {
+  const cardColor = isRedSuit(card.suit) ? '#b3261e' : '#13253d'
+  const symbol = SUIT_SYMBOL[card.suit] ?? ''
+  const cardImagePath = getCardFaceImagePath(card)
+
+  return `
+    <div
+      style="
+        position:absolute;
+        inset:0;
+        border-radius:14px;
+        box-shadow:0 16px 34px rgba(0,0,0,0.24),inset 0 1px 0 rgba(255,255,255,0.95);
+        border:1px solid rgba(21,48,82,0.10);
+        overflow:hidden;
+      "
+    >
+      <div
+        style="
+          position:absolute;
+          inset:0;
+          border-radius:14px;
+          background:linear-gradient(180deg,rgba(255,255,255,0.99) 0%,rgba(241,245,250,0.99) 100%);
+          z-index:1;
+        "
+      >
+        <div
+          style="
+            position:absolute;
+            left:9px;
+            top:10px;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            gap:1px;
+            color:${cardColor};
+            line-height:1;
+          "
+        >
+          <span style="font-size:30px;font-weight:900;letter-spacing:0.02em;">${escapeHtml(card.rank)}</span>
+          <span style="font-size:45px;font-weight:900;">${symbol}</span>
+        </div>
+        <div
+          style="
+            position:absolute;
+            right:9px;
+            bottom:8px;
+            display:flex;
+            flex-direction:column;
+            align-items:center;
+            gap:1px;
+            color:${cardColor};
+            line-height:1;
+            transform:rotate(180deg);
+          "
+        >
+          <span style="font-size:30px;font-weight:900;letter-spacing:0.02em;">${escapeHtml(card.rank)}</span>
+          <span style="font-size:45px;font-weight:900;">${symbol}</span>
+        </div>
+        <div
+          style="
+            position:absolute;
+            left:50%;
+            top:54%;
+            transform:translate(-50%,-50%);
+            color:${cardColor};
+            font-size:54px;
+            line-height:1;
+            font-weight:900;
+          "
+        >${symbol}</div>
+      </div>
+      <img
+        src="${escapeHtml(cardImagePath)}"
+        alt="${escapeHtml(card.rank)} ${escapeHtml(card.suit)}"
+        onerror="this.style.display='none'"
+        style="
+          position:absolute;
+          inset:0;
+          width:100%;
+          height:100%;
+          display:block;
+          object-fit:fill;
+          border-radius:14px;
+          pointer-events:none;
+          user-select:none;
+          -webkit-user-drag:none;
+          z-index:2;
+        "
+      />
+    </div>
+    <div
+      style="
+        position:absolute;
+        inset:4px;
+        border-radius:10px;
+        border:1px solid rgba(20,49,84,0.12);
+        z-index:3;
+      "
+    ></div>
+  `
+}
+
 function renderTrickCard(
   play: RoomPlayCardSnapshot,
   index: number,
@@ -945,9 +1050,6 @@ function renderTrickCard(
     `
   }
 
-  const cardColor = isRedSuit(play.card.suit) ? '#b3261e' : '#13253d'
-  const symbol = SUIT_SYMBOL[play.card.suit] ?? ''
-  const cardImagePath = getCardFaceImagePath(play.card)
 
   return `
     <div
@@ -972,99 +1074,7 @@ function renderTrickCard(
         ${animationStyle}
       "
     >
-      <div
-        style="
-          position:absolute;
-          inset:0;
-          border-radius:14px;
-          box-shadow:0 16px 34px rgba(0,0,0,0.24),inset 0 1px 0 rgba(255,255,255,0.95);
-          border:1px solid rgba(21,48,82,0.10);
-          overflow:hidden;
-        "
-      >
-        <div
-          style="
-            position:absolute;
-            inset:0;
-            border-radius:14px;
-            background:linear-gradient(180deg,rgba(255,255,255,0.99) 0%,rgba(241,245,250,0.99) 100%);
-            z-index:1;
-          "
-        >
-          <div
-            style="
-              position:absolute;
-              left:9px;
-              top:10px;
-              display:flex;
-              flex-direction:column;
-              align-items:center;
-              gap:1px;
-              color:${cardColor};
-              line-height:1;
-            "
-          >
-            <span style="font-size:30px;font-weight:900;letter-spacing:0.02em;">${escapeHtml(play.card.rank)}</span>
-            <span style="font-size:45px;font-weight:900;">${symbol}</span>
-          </div>
-          <div
-            style="
-              position:absolute;
-              right:9px;
-              bottom:8px;
-              display:flex;
-              flex-direction:column;
-              align-items:center;
-              gap:1px;
-              color:${cardColor};
-              line-height:1;
-              transform:rotate(180deg);
-            "
-          >
-            <span style="font-size:30px;font-weight:900;letter-spacing:0.02em;">${escapeHtml(play.card.rank)}</span>
-            <span style="font-size:45px;font-weight:900;">${symbol}</span>
-          </div>
-          <div
-            style="
-              position:absolute;
-              left:50%;
-              top:54%;
-              transform:translate(-50%,-50%);
-              color:${cardColor};
-              font-size:54px;
-              line-height:1;
-              font-weight:900;
-            "
-          >${symbol}</div>
-        </div>
-        <img
-          src="${escapeHtml(cardImagePath)}"
-          alt="${escapeHtml(play.card.rank)} ${escapeHtml(play.card.suit)}"
-          onerror="this.style.display='none'"
-          style="
-            position:absolute;
-            inset:0;
-            width:100%;
-            height:100%;
-            display:block;
-            object-fit:fill;
-            border-radius:14px;
-            pointer-events:none;
-            user-select:none;
-            -webkit-user-drag:none;
-            z-index:2;
-          "
-        />
-      </div>
-      <div
-        style="
-          position:absolute;
-          inset:4px;
-          border-radius:10px;
-          border:1px solid rgba(20,49,84,0.12);
-          z-index:3;
-        "
-      ></div>
+      ${renderTableCardFaceHtml(play.card)}
     </div>
   `
 }
@@ -1670,10 +1680,8 @@ function queryCurrentTrickCards(root: HTMLDivElement): HTMLElement[] {
 const SWEEP_CAPTION_ATTR = 'data-sweep-caption-banner'
 const SWEEP_BELOTE_INDICATOR_LIFETIME_MS = 1200
 
-// Short "Долу картите" caption, shown once the claimant's cards land and
-// auto-hidden quickly (per spec: "кратък надпис", "да се скрие бързо" — kept
-// noticeably snappier than the ~3.2s bidding speech-bubble lifecycle, which
-// is a different, deliberately longer-lived UI element).
+// Large "Долу картите" caption — first step of the sweep presentation, shown
+// together with the sound for SWEEP_CAPTION_VISIBLE_MS before the reveal.
 function showSweepCaptionBanner(): void {
   document.body.querySelector(`[${SWEEP_CAPTION_ATTR}]`)?.remove()
 
@@ -1682,15 +1690,20 @@ function showSweepCaptionBanner(): void {
   el.textContent = 'Долу картите'
   el.style.position = 'fixed'
   el.style.left = '50%'
-  el.style.top = '38%'
+  el.style.top = '45%'
   el.style.transform = 'translate(-50%,-50%)'
   el.style.zIndex = '9600'
   el.style.pointerEvents = 'none'
+  el.style.whiteSpace = 'nowrap'
   el.style.fontFamily = 'Inter, system-ui, sans-serif'
-  el.style.fontSize = '34px'
+  el.style.fontSize = 'clamp(40px, 8vw, 76px)'
   el.style.fontWeight = '900'
   el.style.color = '#f5a623'
-  el.style.textShadow = '0 2px 10px rgba(0,0,0,0.6)'
+  el.style.padding = '0.18em 0.6em'
+  el.style.borderRadius = '0.4em'
+  el.style.background = 'rgba(8,8,8,0.62)'
+  el.style.boxShadow = '0 12px 36px rgba(0,0,0,0.45)'
+  el.style.textShadow = '0 3px 14px rgba(0,0,0,0.7)'
   el.style.opacity = '0'
   el.style.transition = 'opacity 180ms ease-out'
   document.body.appendChild(el)
@@ -1708,7 +1721,7 @@ function hideSweepCaptionBanner(): void {
 
 // "Белот +20" auto-credit indicator — reuses the same visual language as
 // the in-play declaration bubbles (gold accent, bold label over the table),
-// anchored near the seat whose cards just landed.
+// anchored near the credited seat once the reveal has landed.
 function showSweepBeloteIndicator(seat: Seat, suit: string): void {
   const anchor = document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seat}"]`)
   const rect = anchor?.getBoundingClientRect() ?? null
@@ -1831,7 +1844,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     !cache.isTrickCollectionAnimating &&
     cache.pendingCompletedTrickKey === null
   ) {
+    // "Долу картите": the resolution snapshot jumps completedTricksCount to 8
+    // with server-synthesized tricks — those are presented by
+    // animateSweepThrowDown, never as a normal trick collection.
     const canAnimateCompletedTrick =
+      sweepResolution === null &&
       latestCompletedTrick !== null &&
       latestCompletedTrick.plays.length === 4 &&
       latestCompletedTrickKey !== null &&
@@ -1905,7 +1922,25 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     cache.flyingCardPlayKey = getPlayKey(newestDisplayedPlay)
   }
 
-  const sortedHand = sortLocalHandForDisplay(game.ownHand, getSortOptions(winningBid))
+  // "Долу картите": the resolution snapshot already has empty hands, but the
+  // cards must stay in the players' hands until the reveal starts (after the
+  // caption) — so the render that kicks off the presentation draws them from
+  // handsAtResolution; animateSweepThrowDown hides each real fan when that
+  // fan starts closing.
+  const isSweepPresentationStarting =
+    sweepResolution !== null && sweepResolutionKey !== cache.lastSweepResolutionKey
+  const displayedOwnHand = isSweepPresentationStarting
+    ? sweepResolution.handsAtResolution[localSeat]
+    : game.ownHand
+  const displayedHandCounts: Record<Seat, number> = isSweepPresentationStarting
+    ? {
+        bottom: sweepResolution.handsAtResolution.bottom.length,
+        right: sweepResolution.handsAtResolution.right.length,
+        top: sweepResolution.handsAtResolution.top.length,
+        left: sweepResolution.handsAtResolution.left.length,
+      }
+    : game.handCounts
+  const sortedHand = sortLocalHandForDisplay(displayedOwnHand, getSortOptions(winningBid))
   const isMyTurn = playing?.currentTurnSeat === localSeat
   const displayedTrickIndex = isShowingBufferedCompletedTrick
     ? cache.bufferedCompletedTrick?.trickIndex ?? null
@@ -2020,7 +2055,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   }
 
   const panelHandCounts = {
-    ...game.handCounts,
+    ...displayedHandCounts,
     [localSeat]: 0,
   }
   const dealtHandsForPanels: DealtHandsData = {
@@ -2245,7 +2280,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       game.dealerSeat ?? 'null',
       playingCountdownSeat ?? 'null',
       playingCountdownSeat !== null ? (playingCountdownRemainingMs !== null ? '1' : '0') : '0',
-      JSON.stringify(game.handCounts),
+      JSON.stringify(displayedHandCounts),
       JSON.stringify(declarationBubbles),
     ].join('|')
 
@@ -2561,9 +2596,14 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   // game.playing.sweepOffer / sweepResolution against the cache, same
   // snapshot-diffing philosophy as the trick-collection animation above (no
   // discrete one-shot server push event).
+  // The offer arrives in the same snapshot as the trick that earned it, so
+  // the popup waits until that trick's preview + collection animation has
+  // fully finished — scheduleCompletedTrickCollection's completion re-renders
+  // this screen, and that render shows the popup.
   const sweepOfferKey = sweepOffer !== null ? getSweepOfferKey(sweepOffer) : null
   const shouldShowSweepOfferPopup =
     sweepOffer !== null &&
+    !cache.isTrickCollectionAnimating &&
     !cache.sweepAcceptSent &&
     cache.sweepOfferDismissedKey !== sweepOfferKey
 
@@ -2600,13 +2640,32 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     removeSweepOfferPopup(document)
 
     const resolvedSweep = sweepResolution
+    const sweepSortOptions = getSortOptions(winningBid)
     void animateSweepThrowDown({
-      throwOrder: resolvedSweep.throwOrder,
-      handsAtResolution: resolvedSweep.handsAtResolution,
-      getSeatHandAnchorElement: (seat) =>
-        document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seat}"]`),
-      getTableCenterElement: () =>
+      rows: resolvedSweep.throwOrder.map((seat) => ({
+        seat,
+        visualSeat: getVisualSeatForLocalPerspective(seat, localSeat),
+        cards: sortLocalHandForDisplay(resolvedSweep.handsAtResolution[seat] ?? [], sweepSortOptions),
+      })),
+      claimantSeat: resolvedSweep.winnerSeat,
+      getStageElement: () =>
         document.querySelector<HTMLElement>('[data-active-room-playing-visual="1"]'),
+      stageWidth: ACTIVE_ROOM_STAGE_WIDTH,
+      stageHeight: ACTIVE_ROOM_STAGE_HEIGHT,
+      cardWidth: TRICK_W,
+      cardHeight: TRICK_H,
+      renderCardFaceHtml: renderTableCardFaceHtml,
+      getSeatFanCardElements: (seat) =>
+        Array.from(
+          seat === localSeat
+            ? document.querySelectorAll<HTMLElement>('[data-playing-bottom-hand-host] [data-card-id]')
+            : document.querySelectorAll<HTMLElement>(`[data-active-room-seat-card-fan="${seat}"] > div`),
+        ),
+      getSeatAnchorElement: (seat) =>
+        document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${seat}"]`),
+      getCollectTargetElement: () =>
+        document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${resolvedSweep.winnerSeat}"]`),
+      collectVisualSeat: getVisualSeatForLocalPerspective(resolvedSweep.winnerSeat, localSeat),
       onCaptionShow: () => {
         onSweepCaptionShow?.()
         showSweepCaptionBanner()
@@ -2614,10 +2673,9 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       onCaptionHide: () => {
         hideSweepCaptionBanner()
       },
-      onSeatThrown: (seat) => {
-        const creditedForSeat = resolvedSweep.autoCreditedBelotes.filter((entry) => entry.seat === seat)
-        for (const credited of creditedForSeat) {
-          showSweepBeloteIndicator(seat, credited.suit)
+      onRevealComplete: () => {
+        for (const credited of resolvedSweep.autoCreditedBelotes) {
+          showSweepBeloteIndicator(credited.seat, credited.suit)
         }
       },
       onComplete: () => {

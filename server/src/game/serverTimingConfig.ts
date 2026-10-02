@@ -18,17 +18,27 @@ const PLAY_AFTER_TRICK_COLLECTION_DELAY_MS =
   TRICK_COLLECTION_FLY_MS +
   TRICK_COLLECTION_CARD_STAGGER_MS * (TRICK_COLLECTION_CARD_COUNT - 1)
 
-// "Долу картите" — client-side animateSweepThrowDown.ts budget: кратък
-// "Долу картите" caption (~700ms, incl. fade) + 4 seats хвърлят ръцете си
-// последователно (~550ms видима пауза на място) + кратка финална пауза
-// преди auto-advance към scoring. Сървърът трябва да изчака поне толкова,
-// за да не отреже анимацията — виж getServerPhaseAutoAdvanceDelay.ts.
-const SWEEP_CAPTION_MS = 700
-const SWEEP_PER_SEAT_THROW_MS = 550
-const SWEEP_SEAT_COUNT = 4
-const SWEEP_FINAL_PAUSE_MS = 500
+// "Долу картите" — огледало на client-side animateSweepThrowDown.ts timeline-а:
+// надпис + звук (1500ms) → ветрилото на заявилия се свива (180ms) и лети/се
+// разперва в центъра (320ms) → стои само в центъра 1000ms → другите ветрила
+// се свиват (180ms) и се разперват открити до местата си (320ms) → картите
+// стоят открити (1500ms) → общ куп към заявилия (gather 180ms + fly 560ms) →
+// финална пауза 50ms. Сървърът трябва да изчака поне толкова (+ малък буфер
+// за мрежа/render), за да не отреже анимацията — виж
+// getServerPhaseAutoAdvanceDelay.ts.
+const SWEEP_CAPTION_MS = 1500
+const SWEEP_REVEAL_MS = 2 * (180 + 320) + 1000
+const SWEEP_REVEAL_HOLD_MS = 1500
+const SWEEP_COLLECTION_MS = 180 + 560
+const SWEEP_FINAL_PAUSE_MS = 50
+const SWEEP_CLIENT_SLACK_MS = 500
 const SWEEP_RESOLUTION_AUTO_ADVANCE_MS =
-  SWEEP_CAPTION_MS + SWEEP_PER_SEAT_THROW_MS * SWEEP_SEAT_COUNT + SWEEP_FINAL_PAUSE_MS
+  SWEEP_CAPTION_MS +
+  SWEEP_REVEAL_MS +
+  SWEEP_REVEAL_HOLD_MS +
+  SWEEP_COLLECTION_MS +
+  SWEEP_FINAL_PAUSE_MS +
+  SWEEP_CLIENT_SLACK_MS
 
 // Само в strictly local tournament test mode (виж
 // localTournamentTestModeGuard.ts) — заменя фиксираните 800ms bot delay-и с

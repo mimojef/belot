@@ -19,6 +19,8 @@
  *  [13] duplicate accept request (double-click) is a no-op the second time
  *  [14] snapshot gating: sweepOffer is seat-gated, sweepResolution is NOT
  *  [15] normal trick flow is unaffected; a prior decline is never re-offered
+ *  [16] sweep is offered only with at least 2 remaining cards (1 card -> no offer)
+ *  [17] the sweep is personal: a partner card that can beat the claimant blocks it
  *
  * Judgment call documented in the final report: the synthesized auto-credited
  * belote ServerDeclaration records are written with `announced: true` (NOT
@@ -470,12 +472,12 @@ await check('[6] remaining-card points are credited to the sweeping team via the
 })
 
 await check('[7] "последно 10" (last trick bonus) is credited to the sweeping team', () => {
-  // 7 zero-point prior tricks won by right (team B); the 8th (last) trick is
-  // the single-card synthesized sweep trick — all remaining cards are
-  // zero-point filler, so the ONLY points the sweeping team can gain are the
-  // +10 last-trick bonus.
+  // 6 zero-point prior tricks won by right (team B); the last 2 tricks are
+  // synthesized by the sweep (minimum allowed — see [16]) — all remaining
+  // cards are zero-point filler, so the ONLY points the sweeping team can
+  // gain are the +10 last-trick bonus.
   const state = buildScoringFixture({
-    priorTricks: Array.from({ length: 7 }, () => ({ winnerSeat: 'right' as Seat, points: 0 })),
+    priorTricks: Array.from({ length: 6 }, () => ({ winnerSeat: 'right' as Seat, points: 0 })),
     sweeperRemainingPoints: 0,
   })
   const next = submitServerSweepDecision(state, 'bottom', 'accept')
@@ -762,6 +764,197 @@ await check('[15b] a sweep-eligible winner who already declined this round is ne
   assert(next.playing.lastCompletedTrickWinnerSeat === 'bottom', `expected bottom (trump) to win the trick, got ${next.playing.lastCompletedTrickWinnerSeat}`)
   assert(next.playing.sweepOffer === null, 'expected NO sweepOffer: bottom already declined this round')
   assert(next.playing.currentTurnSeat === 'bottom', 'expected normal progression since the sweep offer is suppressed')
+})
+
+// ---- [16] minimum remaining cards ----
+
+await check('[16a] 2 remaining cards + unbeatable hand -> sweepOffer is created', () => {
+  // trick index 5 (6th trick): after it every seat holds 2 cards. bottom wins
+  // with trump and keeps clubs J+9; nobody else holds a club.
+  const hands: Record<Seat, Card[]> = {
+    bottom: [card('clubs', 'J'), card('clubs', '9')],
+    right: [card('diamonds', '7'), card('diamonds', '8')],
+    top: [card('hearts', '7'), card('hearts', '8')],
+    left: [card('spades', '7'), card('spades', '8'), card('spades', 'K')],
+  }
+  const plays = [
+    { seat: 'bottom' as Seat, card: card('clubs', '10', '-lead') },
+    { seat: 'right' as Seat, card: card('diamonds', '9', '-lead') },
+    { seat: 'top' as Seat, card: card('hearts', '9', '-lead') },
+  ]
+  const state = baseState({
+    hands,
+    contract: 'suit',
+    trumpSuit: 'clubs',
+    completedTricks: Array.from({ length: 5 }, (_, i) => fillerTrick(i, 'bottom')),
+    currentTrick: { leaderSeat: 'bottom', currentSeat: 'left', plays, winnerSeat: null, trickIndex: 5 },
+    currentTurnSeat: 'left',
+  })
+
+  const next = submitServerPlayCard(state, 'left', 'spades-K')
+  assert(next.playing.lastCompletedTrickWinnerSeat === 'bottom', `expected bottom to win the trick, got ${next.playing.lastCompletedTrickWinnerSeat}`)
+  assert(next.hands.bottom.length === 2, `expected 2 remaining cards, got ${next.hands.bottom.length}`)
+  assert(next.playing.sweepOffer !== null && next.playing.sweepOffer.seat === 'bottom', 'expected a sweepOffer for bottom')
+  assert(next.playing.currentTurnSeat === null, 'expected play to pause for the sweep offer')
+})
+
+await check('[16b] 1 remaining card + otherwise valid sweep -> NO sweepOffer', () => {
+  // trick index 6 (7th trick): after it every seat holds 1 card. bottom wins
+  // with trump and keeps the unbeatable clubs J — all other conditions hold,
+  // but a single last trick is never offered.
+  const hands: Record<Seat, Card[]> = {
+    bottom: [card('clubs', 'J')],
+    right: [card('diamonds', '7')],
+    top: [card('hearts', '7')],
+    left: [card('spades', '7'), card('spades', 'K')],
+  }
+  const plays = [
+    { seat: 'bottom' as Seat, card: card('clubs', '10', '-lead') },
+    { seat: 'right' as Seat, card: card('diamonds', '9', '-lead') },
+    { seat: 'top' as Seat, card: card('hearts', '9', '-lead') },
+  ]
+  const state = baseState({
+    hands,
+    contract: 'suit',
+    trumpSuit: 'clubs',
+    completedTricks: Array.from({ length: 6 }, (_, i) => fillerTrick(i, 'bottom')),
+    currentTrick: { leaderSeat: 'bottom', currentSeat: 'left', plays, winnerSeat: null, trickIndex: 6 },
+    currentTurnSeat: 'left',
+  })
+
+  const next = submitServerPlayCard(state, 'left', 'spades-K')
+  assert(next.playing.lastCompletedTrickWinnerSeat === 'bottom', `expected bottom to win the trick, got ${next.playing.lastCompletedTrickWinnerSeat}`)
+  assert(next.hands.bottom.length === 1, `expected 1 remaining card, got ${next.hands.bottom.length}`)
+  assert(next.playing.sweepOffer === null, 'expected NO sweepOffer with only 1 remaining card')
+  assert(next.playing.currentTurnSeat === 'bottom', 'expected normal progression to the last trick')
+  assert(next.timer.activeSeat === 'bottom', 'expected a normal playing timer for the winner')
+})
+
+await check('[16c] computeServerSweepEligibility: unbeatable single card -> false', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('clubs', 'J')],
+      right: [card('diamonds', '7')],
+      top: [card('hearts', '7')],
+      left: [card('spades', '7')],
+    },
+    winningBid: { seat: 'bottom', contract: 'suit', trumpSuit: 'clubs', doubled: false, redoubled: false },
+  })
+  assert(eligible === false, 'expected a single remaining card to never be sweep-eligible')
+})
+
+// ---- [17] the sweep is PERSONAL: the partner never helps ----
+
+const HEARTS_TRUMP_BID = { seat: 'bottom', contract: 'suit', trumpSuit: 'hearts', doubled: false, redoubled: false } as const
+const NO_TRUMPS_BID = { seat: 'bottom', contract: 'no-trumps', trumpSuit: null, doubled: false, redoubled: false } as const
+
+await check('[17a] real bug: trump hearts, claimant 10♥+7♥, partner K♥+J♦ -> NOT eligible', () => {
+  // Opponents hold no hearts, so the team takes both tricks either way, and
+  // the old solver found "lead 10♥ (partner forced to drop K♥), then 7♥ is
+  // master". But led 7♥, the partner's K♥ wins — the claimant cannot take
+  // the rest personally.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', '10'), card('hearts', '7')],
+      right: [card('clubs', '8'), card('clubs', '9')],
+      top: [card('hearts', 'K'), card('diamonds', 'J')],
+      left: [card('spades', 'Q'), card('diamonds', 'A')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: partner K♥ beats claimant 7♥')
+})
+
+await check('[17b] real bug via trick completion: no sweepOffer for 10♥+7♥ vs partner K♥', () => {
+  const hands: Record<Seat, Card[]> = {
+    bottom: [card('hearts', '10'), card('hearts', '7')],
+    right: [card('clubs', '8'), card('clubs', '9')],
+    top: [card('hearts', 'K'), card('diamonds', 'J')],
+    left: [card('spades', 'Q'), card('diamonds', 'A'), card('spades', '7')],
+  }
+  const plays = [
+    { seat: 'bottom' as Seat, card: card('hearts', 'J', '-lead') },
+    { seat: 'right' as Seat, card: card('clubs', '7', '-lead') },
+    { seat: 'top' as Seat, card: card('hearts', '8', '-lead') },
+  ]
+  const state = baseState({
+    hands,
+    contract: 'suit',
+    trumpSuit: 'hearts',
+    completedTricks: Array.from({ length: 5 }, (_, i) => fillerTrick(i, 'bottom')),
+    currentTrick: { leaderSeat: 'bottom', currentSeat: 'left', plays, winnerSeat: null, trickIndex: 5 },
+    currentTurnSeat: 'left',
+  })
+
+  const next = submitServerPlayCard(state, 'left', 'spades-7')
+  assert(next.playing.lastCompletedTrickWinnerSeat === 'bottom', `expected bottom to win the trick, got ${next.playing.lastCompletedTrickWinnerSeat}`)
+  assert(next.hands.bottom.length === 2, `expected 2 remaining cards, got ${next.hands.bottom.length}`)
+  assert(next.playing.sweepOffer === null, 'expected NO sweepOffer')
+  assert(next.playing.currentTurnSeat === 'bottom', 'expected normal progression')
+})
+
+await check('[17c] control: claimant personally wins every trick (partner holds only a lower trump) -> eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'J'), card('hearts', '9')],
+      right: [card('clubs', '8'), card('clubs', '9')],
+      top: [card('hearts', '7'), card('diamonds', '8')],
+      left: [card('spades', 'Q'), card('diamonds', 'A')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === true, 'expected eligible: J♥/9♥ beat everything incl. the partner 7♥')
+})
+
+await check('[17d] control: a remaining trick is necessarily won by the partner -> NOT eligible', () => {
+  // no-trumps: partner holds K♠+Q♠ — whatever order, one of them beats 7♠.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', '7')],
+      right: [card('clubs', '8'), card('clubs', '9')],
+      top: [card('spades', 'K'), card('spades', 'Q')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: the partner wins a trick')
+})
+
+await check('[17e] control: all tricks sure for the TEAM but not personally -> NOT eligible', () => {
+  // no-trumps: opponents are void in spades. Leading A♠ forces the partner's
+  // singleton 8♠ out (old solver: eligible), but led 7♠ the partner's 8♠ wins.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', '7')],
+      right: [card('clubs', '8'), card('clubs', '9')],
+      top: [card('spades', '8'), card('diamonds', '9')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: only the team, not the claimant, takes everything')
+})
+
+await check('[17f] control: own higher card first forces an OPPONENT card out, then the next is master -> eligible', () => {
+  // no-trumps (A > 10 > K): led first, K♠ loses to the opponent's 10♠. Led
+  // A♠ first, the opponent must follow with the singleton 10♠, then K♠ is
+  // master — the claimant personally wins both tricks.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', 'K')],
+      right: [card('spades', '10'), card('clubs', '7')],
+      top: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('clubs', '8'), card('clubs', '9')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === true, 'expected eligible via A♠ then K♠')
 })
 
 console.log('\n' + '═'.repeat(64))

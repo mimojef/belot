@@ -103,7 +103,7 @@ function getGatherOffset(index: number, total: number, spreadPx: number): Point 
   return { x: centeredIndex * spreadPx, y: index * 2 }
 }
 
-function getWinnerAnchor(targetRect: DOMRect, winnerSeat: Seat): Point {
+export function getWinnerAnchor(targetRect: DOMRect, winnerSeat: Seat): Point {
   const center = getRectCenter(targetRect)
   if (winnerSeat === 'bottom') return { x: center.x, y: targetRect.top + targetRect.height * 0.12 }
   if (winnerSeat === 'top') return { x: center.x, y: targetRect.bottom - targetRect.height * 0.12 }

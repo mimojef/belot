@@ -11,6 +11,12 @@ import {
 } from './cuttingSeatLayout'
 import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
 import {
+  getHandFanOffset,
+  HAND_FAN_EDGE_DROP,
+  HAND_FAN_ROTATION_STEP,
+  HAND_FAN_SPACING,
+} from '../handFanGeometry'
+import {
   ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
   BOTTOM_HAND_MOBILE_CARD_WIDTH,
   BOTTOM_HAND_MOBILE_CARD_HEIGHT,
@@ -624,20 +630,13 @@ function getFanOffset(
   mobileBottomSeat = false,
   panelScale = 1,
 ): { x: number; y: number; rotate: number } {
-  const centered = index - (count - 1) / 2
-  const maxCentered = Math.max(1, (count - 1) / 2)
-  const edgeProgress = Math.abs(centered) / maxCentered
-  const countProgress = Math.min(1, Math.max(0, (count - 1) / 7))
   const bottomFanScale = mobileBottomSeat ? getBottomHandMobileFanScale(panelScale) : 1
-  const spacing = (mobileBottomSeat ? BOTTOM_HAND_MOBILE_SPACING : compact ? 42 : 62) * bottomFanScale
-  const edgeDropMax = compact ? 20 : 34
-  const rotationStep = compact ? 3.4 : 5
-  const edgeDrop = edgeProgress * edgeProgress * edgeDropMax * countProgress * bottomFanScale
-  return {
-    x: centered * spacing,
-    y: edgeDrop,
-    rotate: centered * rotationStep,
-  }
+  return getHandFanOffset(index, count, {
+    spacing: (mobileBottomSeat ? BOTTOM_HAND_MOBILE_SPACING : compact ? 42 : HAND_FAN_SPACING) * bottomFanScale,
+    edgeDropMax: compact ? 20 : HAND_FAN_EDGE_DROP,
+    rotationStep: compact ? 3.4 : HAND_FAN_ROTATION_STEP,
+    edgeDropScale: bottomFanScale,
+  })
 }
 
 function renderPanelCardFanWrapper(
