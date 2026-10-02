@@ -1769,7 +1769,8 @@ export type RenderPlayingScreenOptions = {
   submitSweepDecision?: (roomId: string, decision: 'accept' | 'decline') => void
   onDeclarationBubbleShown?: (seat: Seat, lines: string[]) => void
   onPlayedCardLanded?: () => void
-  onSweepCaptionShow?: () => void
+  // receives the claimant's seat — the "Долу картите" voice follows their gender
+  onSweepCaptionShow?: (claimantSeat: Seat) => void
   syncSeatPanels?: (html: string) => void
   emojiBubbles?: Partial<Record<Seat, SeatEmojiBubble>> | null
   phraseBubbles?: Partial<Record<Seat, SeatPhraseBubble>> | null
@@ -2667,7 +2668,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${resolvedSweep.winnerSeat}"]`),
       collectVisualSeat: getVisualSeatForLocalPerspective(resolvedSweep.winnerSeat, localSeat),
       onCaptionShow: () => {
-        onSweepCaptionShow?.()
+        onSweepCaptionShow?.(resolvedSweep.winnerSeat)
         showSweepCaptionBanner()
       },
       onCaptionHide: () => {

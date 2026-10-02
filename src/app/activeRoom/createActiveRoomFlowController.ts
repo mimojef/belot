@@ -4519,8 +4519,8 @@ export function createActiveRoomFlowController(
         onPlayedCardLanded: () => {
           options.gameAudio?.playCardOnTable()
         },
-        onSweepCaptionShow: () => {
-          options.gameAudio?.playDownTheCards()
+        onSweepCaptionShow: (claimantSeat) => {
+          options.gameAudio?.playDownTheCards(getSeatGender(claimantSeat))
         },
         syncSeatPanels,
         emojiBubbles: getEmojiBubblesForRender(),

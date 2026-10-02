@@ -473,6 +473,75 @@ check('final collection is one pile flying to the claimant together', () => {
   assert(!/staggerDelayMs|index \* SWEEP_/.test(animateSource), 'no per-card stagger allowed in the collection')
 })
 
+console.log('\nH) Audio routing (voice follows the claimant\'s gender)')
+
+// Minimal browser fakes (same approach as checkGameSoundSettings.ts) so the
+// real createGameAudioController runs and we can see which file it loads.
+const createdAudioSources: string[] = []
+class FakeAudioElement {
+  src: string
+  preload = ''
+  volume = 1
+  muted = false
+  currentTime = 0
+  duration = 1
+  onended: (() => void) | null = null
+  onerror: (() => void) | null = null
+  constructor(src: string) {
+    this.src = src
+    createdAudioSources.push(src)
+  }
+  load(): void {}
+  play(): Promise<void> { return Promise.resolve() }
+  pause(): void {}
+  addEventListener(): void {}
+}
+const fakeStorage = new Map<string, string>()
+;(globalThis as any).localStorage = {
+  getItem: (key: string) => fakeStorage.get(key) ?? null,
+  setItem: (key: string, value: string) => { fakeStorage.set(key, String(value)) },
+  removeItem: (key: string) => { fakeStorage.delete(key) },
+}
+;(globalThis as any).Audio = FakeAudioElement
+;(globalThis as any).document = { visibilityState: 'visible', hasFocus: () => true, addEventListener: () => {} }
+;(globalThis as any).window = {
+  addEventListener: () => {},
+  setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
+  clearTimeout: (id: any) => clearTimeout(id),
+}
+
+const { createGameAudioController } = await import('../src/app/audio/createGameAudioController')
+
+function downTheCardsSourceFor(gender: 'male' | 'female' | null | undefined): string | undefined {
+  createdAudioSources.length = 0
+  createGameAudioController().playDownTheCards(gender)
+  return createdAudioSources.find((src) => src.includes('down-the-cards'))
+}
+
+check('male claimant → /audio/table-calls/down-the-cards.mp3', () => {
+  const src = downTheCardsSourceFor('male')
+  assert(src === '/audio/table-calls/down-the-cards.mp3', `got ${src}`)
+})
+
+check('female claimant → /audio/table-calls-women/down-the-cards.mp3', () => {
+  const src = downTheCardsSourceFor('female')
+  assert(src === '/audio/table-calls-women/down-the-cards.mp3', `got ${src}`)
+})
+
+check('unknown gender falls back to the male/default voice', () => {
+  const src = downTheCardsSourceFor(null)
+  assert(src === '/audio/table-calls/down-the-cards.mp3', `got ${src}`)
+})
+
+check('the gender passed is the CLAIMANT\'s (winnerSeat → getSeatGender)', () => {
+  const controllerSource = readFileSync(join(process.cwd(), 'src/app/activeRoom/createActiveRoomFlowController.ts'), 'utf8')
+  assert(renderSource.includes('onSweepCaptionShow?.(resolvedSweep.winnerSeat)'), 'caption must pass the claimant seat')
+  assert(
+    /onSweepCaptionShow: \(claimantSeat\) => \{\s*options\.gameAudio\?\.playDownTheCards\(getSeatGender\(claimantSeat\)\)/.test(controllerSource),
+    'controller must play the voice with the claimant seat gender',
+  )
+})
+
 console.log(`\n${passed} passed, ${failed} failed`)
 if (failed > 0) {
   process.exit(1)
