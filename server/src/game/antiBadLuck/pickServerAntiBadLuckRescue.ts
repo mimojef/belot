@@ -19,6 +19,43 @@ import type {
 const NO_ANCHOR_CONSTRAINTS: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: [] }
 
 const RESCUE_TYPES: ServerAntiBadLuckRescueType[] = ['SUIT', 'ALL_TRUMPS', 'NO_TRUMPS']
+// Общ, подреден списък на трите типа — reuse-ван от minimum-swap planner-а
+// (applyServerAntiBadLuckToDeck.ts) за enumeration, вместо да се дублира литерала.
+export const SERVER_ANTI_BAD_LUCK_RESCUE_TYPES: readonly ServerAntiBadLuckRescueType[] = RESCUE_TYPES
+
+// Тегла за избор на rescue type САМО измежду типовете, достигащи глобалния
+// минимален safe swap count (виж pickServerAntiBadLuckWeightedRescueType).
+// Първа версия — фиксирани константи, НЕ admin-конфигурируеми в тази задача.
+export const SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS: Record<ServerAntiBadLuckRescueType, number> = {
+  SUIT: 33,
+  ALL_TRUMPS: 33,
+  NO_TRUMPS: 34,
+}
+
+// Единствен seeded weighted draw измежду eligible types (тези с >=1 safe
+// candidate на глобалния минимум swap count) — теглата се renormalize-ват
+// автоматично, защото сумираме само над подадените eligibleTypes. Извиква се
+// ТОЧНО ВЕДНЪЖ на rescue execution — без reroll, без candidate count да
+// влияе на вероятността (candidate-ите вътре в типа се броят отделно, виж
+// pickRandom по-долу / избора на конкретен candidate в applyServerAntiBadLuckToDeck.ts).
+export function pickServerAntiBadLuckWeightedRescueType(
+  eligibleTypes: readonly ServerAntiBadLuckRescueType[],
+  weights: Record<ServerAntiBadLuckRescueType, number>,
+  nextRandom: () => number = Math.random,
+): ServerAntiBadLuckRescueType {
+  const total = eligibleTypes.reduce((sum, type) => sum + weights[type], 0)
+  let roll = nextRandom() * total
+
+  for (const type of eligibleTypes) {
+    roll -= weights[type]
+    if (roll <= 0) {
+      return type
+    }
+  }
+
+  return eligibleTypes[eligibleTypes.length - 1]
+}
+
 const PAIR_TEMPLATES = ['TRIPLE', 'PAIR_PLUS'] as const
 
 type PairTemplate = (typeof PAIR_TEMPLATES)[number]

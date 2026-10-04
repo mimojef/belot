@@ -156,3 +156,109 @@ export function isServerAntiBadLuckSequencePlanSafe(
 
   return newQuartCount === 1 ? allowance.allowArtificialQuart : allowance.allowArtificialQuintPlus
 }
+
+// ---------------------------------------------------------------------------
+// Natural run PRESERVATION at threshold >= 3 (ТЕРЦА/20 и по-дълги) —
+// напълно отделен guard от artificial QUART/QUINT_PLUS gating-а по-горе
+// (праг >=4, 25%/10% allowance). Този guard:
+//   A. пази САМО съществуваща natural терца (>=3) от разрушаване;
+//   B. НИКОГА не гейтва/отхвърля нова artificial терца (none → length 3) —
+//      artificial терца е позволена без ограничение, точно както досега.
+// Нарочно НЕ е част от isServerAntiBadLuckSequencePlanSafe/allowance логиката
+// по-горе, за да не се размесят "защита на natural" и "gating на artificial"
+// — това са различни правила с различни proценти (0% allowance тук, просто
+// unconditional protection).
+// ---------------------------------------------------------------------------
+export type ServerAntiBadLuckNaturalRunKind = 'TERZA' | 'QUART' | 'QUINT_PLUS'
+
+export type ServerAntiBadLuckNaturalRun = {
+  suit: ServerSuit
+  kind: ServerAntiBadLuckNaturalRunKind
+  length: number
+  cardIds: string[]
+}
+
+function toNaturalRunKind(length: number): ServerAntiBadLuckNaturalRunKind {
+  return length === 3 ? 'TERZA' : length === 4 ? 'QUART' : 'QUINT_PLUS'
+}
+
+// Maximal same-suit consecutive run с дължина >= 3 — същият maximal-run
+// алгоритъм като findServerAntiBadLuckLongRuns по-горе (и терцата вътре в
+// natural QUART/QUINT_PLUS НИКОГА не се брои отделно — maximal run, не
+// sliding-window под-прозорци).
+export function findServerAntiBadLuckNaturalRuns(
+  cards: readonly ServerCard[],
+): Partial<Record<ServerSuit, ServerAntiBadLuckNaturalRun>> {
+  const result: Partial<Record<ServerSuit, ServerAntiBadLuckNaturalRun>> = {}
+
+  for (const suit of SERVER_SUITS) {
+    const suitCards = cards
+      .filter((card) => card.suit === suit)
+      .slice()
+      .sort((left, right) => getRunRankIndex(left.rank) - getRunRankIndex(right.rank))
+
+    let currentRun: ServerCard[] = []
+
+    const flush = () => {
+      if (currentRun.length >= 3) {
+        result[suit] = {
+          suit,
+          kind: toNaturalRunKind(currentRun.length),
+          length: currentRun.length,
+          cardIds: currentRun.map((card) => card.id),
+        }
+      }
+      currentRun = []
+    }
+
+    for (const card of suitCards) {
+      const previous = currentRun[currentRun.length - 1]
+
+      if (previous && getRunRankIndex(card.rank) === getRunRankIndex(previous.rank) + 1) {
+        currentRun.push(card)
+        continue
+      }
+
+      flush()
+      currentRun = [card]
+    }
+
+    flush()
+  }
+
+  return result
+}
+
+// Destruction-ONLY проверка: всяка natural терца/50/100 (maximal run >=3) на
+// който и да е от 4-те seats трябва да остане ЦЯЛА (всичките ѝ карти) вътре
+// в candidate run-а. Растеж (терца→50, терца→100, 50→100) е позволен —
+// "contained" подмножество, не точно равенство. НЕ брои/гейтва нови runs —
+// това е изцяло отговорност на isServerAntiBadLuckSequencePlanSafe по-горе
+// за QUART/QUINT_PLUS; нова TERZA (none → 3) тук винаги минава (return true
+// за тази клетка), защото artificial терца не се ограничава изобщо.
+export function isServerAntiBadLuckNaturalRunPreserved(
+  naturalHandsBySeat: Record<Seat, readonly ServerCard[]>,
+  candidateHandsBySeat: Record<Seat, readonly ServerCard[]>,
+): boolean {
+  for (const seat of SERVER_SEAT_ORDER) {
+    const naturalRuns = findServerAntiBadLuckNaturalRuns(naturalHandsBySeat[seat])
+    const candidateRuns = findServerAntiBadLuckNaturalRuns(candidateHandsBySeat[seat])
+
+    for (const suit of SERVER_SUITS) {
+      const naturalRun = naturalRuns[suit]
+
+      if (!naturalRun) {
+        continue // няма natural run тук — нищо за пазене (new-run gating не е тук)
+      }
+
+      const candidateRun = candidateRuns[suit]
+      const isPreserved = !!candidateRun && naturalRun.cardIds.every((id) => candidateRun.cardIds.includes(id))
+
+      if (!isPreserved) {
+        return false
+      }
+    }
+  }
+
+  return true
+}

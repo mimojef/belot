@@ -5,8 +5,10 @@
  * границите (без fallback към 5).
  *
  * [1]  allowlist / config validation
- * [2]  default 5 и bit-identical поведение спрямо СТАРИЯ алгоритъм
- *      (fixtures/legacyApplyServerAntiBadLuckToDeck.ts) върху случайни серии
+ * [2]  default 5 + инварианти (deck/rescue/state) на minimum-swap планера
+ *      в същия стрес сценарий, преди ползван за bit-identical сравнение с
+ *      fixtures/legacyApplyServerAntiBadLuckToDeck.ts (вече умишлено
+ *      различаващ се алгоритъм — виж коментара в [2])
  * [3]  прагове 5..10: pending след T BAD, rescue най-рано на (T+1)-вото
  * [4]  увеличаване на прага пази count, отлага eligibility
  * [5]  намаляване пази count, може да направи seat eligible веднага
@@ -74,7 +76,6 @@ import type { ServerAuthoritativeGameState, ServerCard } from '../src/game/serve
 import { createActiveRoomSnapshotStore } from '../src/db/activeRoomSnapshotStore.js'
 import { createAdminSettingsStore } from '../src/db/adminSettingsStore.js'
 import { createRoomSnapshotMessage } from '../src/protocol/createRoomSnapshotMessage.js'
-import { legacyApplyServerAntiBadLuckToDeck } from './fixtures/legacyApplyServerAntiBadLuckToDeck.js'
 
 let passed = 0
 let failed = 0
@@ -150,8 +151,6 @@ function stateWithCounts(counts: Partial<Record<Seat, number>>, dealIndex = 10, 
   return state
 }
 
-const stripGeneration = (state: ServerAntiBadLuckState) => JSON.stringify({ dealIndex: state.dealIndex, seats: state.seats })
-
 // ─── [1] allowlist / config validation ──────────────────────────────────────
 console.log('\n[1] allowlist / config validation')
 check('[1a] allowlist е точно 0,5,6,7,8,9,10', JSON.stringify(SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES) === JSON.stringify([0, 5, 6, 7, 8, 9, 10]))
@@ -168,39 +167,53 @@ check('[1e] assertServerAntiBadLuckConfig хвърля при невалиден
 console.log('\n[2] default 5 и backward compatibility (legacy vs new)')
 check('[2a] default config = { threshold: 5, resetGeneration: 0 }', JSON.stringify(SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG) === JSON.stringify({ threshold: 5, resetGeneration: 0 }))
 {
-  let identical = true
+  // Minimum-swap planner-ът (вижте applyServerAntiBadLuckToDeck.ts) съзнателно
+  // НЕ е bit-identical с legacyApplyServerAntiBadLuckToDeck — старият picker
+  // тегли основен тип на сляпо 1/3 преди да провери safety; новият
+  // enumerate-ва ВСИЧКИ candidates на трите типа и избира измежду тези на
+  // глобалния минимален swap count. Тук вече НЕ сравняваме bit-за-bit, а
+  // проверяваме, че инвариантите, дето останалите 15 секции на този файл
+  // (независими от rescue-selection алгоритъма: allowlist, thresholds,
+  // bots/takeover, persistence, worker protocol, privacy) разчитат на,
+  // продължават да важат за НОВИЯ алгоритъм в същия стрес сценарий:
+  // валиден 32-карти deck, най-много 1 rescue на раздаване, rescued seat
+  // винаги GOOD, state-формата е непроменена (dealIndex/seats shape).
+  let allDecksValid = true
+  let maxOneRescuePerDeal = true
+  let rescuedSeatsAlwaysGood = true
+  let stateShapeConsistent = true
   let deals = 0
   let rescues = 0
   let multiPendingDeals = 0
-  let firstMismatch = ''
-  for (let seed = 0; seed < 400 && identical; seed += 1) {
+  for (let seed = 0; seed < 400; seed += 1) {
     const deckRandom = createSeededRandom(`legacy-decks-${seed}`)
-    const legacyRandom = createSeededRandom(`legacy-rng-${seed}`)
     const newRandom = createSeededRandom(`legacy-rng-${seed}`)
-    let legacyState: ServerAntiBadLuckState | undefined
     let newState: ServerAntiBadLuckState | undefined
     for (let deal = 0; deal < 18; deal += 1) {
       // ~75% тестета с BAD първи 5 за всички (дълги серии), иначе random shuffle.
       const deck = deckRandom() < 0.75
         ? buildDeck(BAD_HANDS, `filler-${seed}-${deal}`)
         : shuffleWithRandom(FULL_DECK, deckRandom)
-      const legacy = legacyApplyServerAntiBadLuckToDeck(deck, FIRST_DEAL_SEAT, legacyState, legacyRandom)
       const current = applyServerAntiBadLuckToDeck(deck, FIRST_DEAL_SEAT, newState, newRandom, SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG)
       deals += 1
-      if (Object.values(legacyState?.seats ?? {}).filter((seat) => seat.pendingSinceDealIndex !== null).length >= 2) multiPendingDeals += 1
-      if (ids(legacy.deck) !== ids(current.deck) || JSON.stringify(legacy.rescues) !== JSON.stringify(current.rescues) ||
-        JSON.stringify(legacy.rescueKinds) !== JSON.stringify(current.rescueKinds) || stripGeneration(legacy.antiBadLuck) !== stripGeneration(current.antiBadLuck)) {
-        identical = false
-        firstMismatch = `seed=${seed} deal=${deal}`
-        break
+      if (Object.values(newState?.seats ?? {}).filter((seat) => seat.pendingSinceDealIndex !== null).length >= 2) multiPendingDeals += 1
+
+      const deckIds = current.deck.map((card) => card.id)
+      allDecksValid &&= deckIds.length === 32 && new Set(deckIds).size === 32
+      const rescuedSeats = Object.keys(current.rescues) as Seat[]
+      maxOneRescuePerDeal &&= rescuedSeats.length <= 1
+      for (const seat of rescuedSeats) {
+        const five = FIRST_FIVE_INDICES[seat].map((index) => current.deck[index])
+        rescuedSeatsAlwaysGood &&= isServerGoodFirstFive(five)
       }
-      rescues += Object.keys(current.rescues).length
-      legacyState = legacy.antiBadLuck
+      stateShapeConsistent &&= typeof current.antiBadLuck.dealIndex === 'number' && SERVER_SEAT_ORDER.every((seat) => typeof current.antiBadLuck.seats[seat].consecutiveBadDeals === 'number')
+
+      rescues += rescuedSeats.length
       newState = current.antiBadLuck
     }
   }
-  check(`[2b] праг 5: deck, rescues, rescue kinds и state са BIT-IDENTICAL със стария алгоритъм (${deals} раздавания, ${rescues} rescues, ${multiPendingDeals} с ≥2 pending)`,
-    identical && rescues > 100 && multiPendingDeals > 100, firstMismatch)
+  check(`[2b] праг 5: новият minimum-swap алгоритъм пази deck/rescue/state инвариантите в същия стрес сценарий (${deals} раздавания, ${rescues} rescues, ${multiPendingDeals} с ≥2 pending)`,
+    allDecksValid && maxOneRescuePerDeal && rescuedSeatsAlwaysGood && stateShapeConsistent && rescues > 100 && multiPendingDeals > 100)
   const withoutConfig = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithCounts({ bottom: 5 }), createSeededRandom('default'))
   const withDefault = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithCounts({ bottom: 5 }), createSeededRandom('default'), SERVER_ANTI_BAD_LUCK_DEFAULT_CONFIG)
   check('[2c] нисък helper без config = explicit default (праг 5)', ids(withoutConfig.deck) === ids(withDefault.deck) && JSON.stringify(withoutConfig.antiBadLuck) === JSON.stringify(withDefault.antiBadLuck))

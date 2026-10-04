@@ -21,12 +21,21 @@
 //     тип (getServerAntiBadLuckKeepStrength), равенство → random. Позицията
 //     (first-3 / next-2) не участва. Естествената карта отива на мястото на
 //     rescue картата; всички други позиции остават непокътнати.
-//  5. Основният тип (строго 1/3) се тегли веднъж на seat и НЕ се сменя.
-//     Цветът/шаблонът се тегли random като предпочитан и се сменя (в същия
-//     тип) само ако за него няма безопасна реализация. Планът
-//     се отхвърля, ако наруши deck invariant или отнеме естествено GOOD първи 5
-//     на друг seat → random retry, после изчерпателно търсене в същите типове.
-//     Само ако няма никаква безопасна реализация → естествените карти, seat-ът
+//  5. Minimum-change planner (pickMinimumSwapRescuePlan): ВМЕСТО да се избира
+//     type на сляпо и после да се опитва да се построи, enumerate-ваме
+//     ВСИЧКИ concrete realized plans (enumerateServerAntiBadLuckRealizedPlans
+//     — explicit, RNG-free tie enumeration, виж файла) за SUIT/ALL_TRUMPS/
+//     NO_TRUMPS, валидираме всеки един (GOOD-preservation на всички 4 seats +
+//     natural run preservation >=3 [терца/50/100] + sequence guard + square
+//     guard), tiered по swap count (1 → 2 → 3, спираме на първия tier с >=1
+//     safe plan — виж isRealizedPlanSafe/SWAP_COUNT_TIERS), и теглим type-а
+//     (претеглено, SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS) САМО измежду
+//     типовете, достигащи този минимум. Конкретният realized plan вътре в
+//     избрания type се избира uniform random (seeded) измежду ВСИЧКИ safe
+//     planове на този тип в tier-а. RNG се ползва ЕДИНСТВЕНО за: rescue-seat
+//     tie-break, sequenceAllowance (веднъж), weighted type draw, concrete
+//     plan draw — candidate enumeration/validation (вкл. rejected candidates)
+//     е 0% RNG. Ако няма никакъв safe plan → естествените карти, seat-ът
 //     остава pending.
 //  6. Streak-овете се обновяват по реално раздадените първи 5.
 
@@ -40,15 +49,17 @@ import {
   getServerAntiBadLuckNaturalAnchorSuits,
   isServerGoodFirstFive,
 } from './evaluateServerFirstFiveQuality.js'
+import { enumerateServerAntiBadLuckRealizedPlans } from './enumerateServerAntiBadLuckRealizedPlans.js'
 import {
+  SERVER_ANTI_BAD_LUCK_RESCUE_TYPES,
+  SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS,
   getServerAntiBadLuckRescueCandidates,
-  pickServerAntiBadLuckRescue,
-  pickServerAntiBadLuckRescueType,
-  pickServerAntiBadLuckRescueVariant,
+  pickServerAntiBadLuckWeightedRescueType,
 } from './pickServerAntiBadLuckRescue.js'
 import {
   SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE,
   SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE,
+  isServerAntiBadLuckNaturalRunPreserved,
   isServerAntiBadLuckSequencePlanSafe,
   type ServerAntiBadLuckSequenceAllowance,
 } from './serverAntiBadLuckSequenceGuard.js'
@@ -68,7 +79,6 @@ import {
 
 const FIRST_FIVE_CARD_COUNT = 5
 const FULL_HAND_CARD_COUNT = 8
-const MAX_RESCUE_PLAN_ATTEMPTS = 16
 const NO_ANCHOR_CONSTRAINTS: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: [] }
 const NO_SEQUENCE_ALLOWANCE: ServerAntiBadLuckSequenceAllowance = {
   allowArtificialQuart: false,
@@ -77,7 +87,6 @@ const NO_SEQUENCE_ALLOWANCE: ServerAntiBadLuckSequenceAllowance = {
 
 type RescueMap = Partial<Record<Seat, ServerAntiBadLuckRescue>>
 type RescueKindMap = Partial<Record<Seat, ServerAntiBadLuckRescueKind>>
-type AnchorConstraintsMap = Partial<Record<Seat, ServerAntiBadLuckAnchorConstraints>>
 
 // Natural J (ALL_TRUMPS) / A (NO_TRUMPS) цветове от seat-овите natural първи
 // 5 — runtime constraint за candidate generation, НЕ част от rescueKind.
@@ -99,8 +108,9 @@ function getAnchorConstraintsForType(
 export type ServerAntiBadLuckDealResult = {
   deck: ServerCard[]
   antiBadLuck: ServerAntiBadLuckState
-  // За избраните seats (вкл. тези без безопасен план): изтегленият основен тип
-  // (фиксиран) и предпочитаният цвят/шаблон — само за server-side тестове.
+  // Реализираният тип/вариант САМО за seats с приложен (успешен) rescue —
+  // винаги в синхрон с `rescues` (same keys). Ако никъде няма safe candidate,
+  // seat-ът липсва и от двете (само за server-side тестове).
   rescueKinds: RescueKindMap
   rescues: RescueMap
 }
@@ -215,85 +225,6 @@ function pickRescueSeat(
     : shuffleWithRandom(oldestCandidates, nextRandom)[0]
 }
 
-// Random тройки в предпочитания цвят/шаблон на всеки seat.
-function pickRescues(
-  rescueSeats: readonly Seat[],
-  rescueKinds: RescueKindMap,
-  anchorConstraintsBySeat: AnchorConstraintsMap,
-  nextRandom: () => number,
-): RescueMap {
-  const rescues: RescueMap = {}
-  const usedCardIds = new Set<string>()
-
-  // Random ред, за да няма отбор с постоянно предимство при избора на тройка.
-  for (const seat of shuffleWithRandom(rescueSeats, nextRandom)) {
-    const kind = rescueKinds[seat] as ServerAntiBadLuckRescueKind
-    const rescue = pickServerAntiBadLuckRescue(
-      kind.type,
-      usedCardIds,
-      nextRandom,
-      kind.variant,
-      anchorConstraintsBySeat[seat] ?? NO_ANCHOR_CONSTRAINTS,
-    )
-
-    if (rescue) {
-      rescues[seat] = rescue
-      rescue.cardIds.forEach((cardId) => usedCardIds.add(cardId))
-    }
-  }
-
-  return rescues
-}
-
-// Изчерпателно обхождане на всички реализации на вече избраните основни
-// типове: първо планове за всички rescue seats, после — ако няма нито един —
-// единични. Кандидатите в предпочитания цвят/шаблон са първи (в random ред),
-// така че друг цвят/шаблон се взима само ако предпочитаният е невъзможен.
-// Използва се само когато random опитите не са намерили план за всички seats.
-function* enumerateRescuePlans(
-  rescueSeats: readonly Seat[],
-  rescueKinds: RescueKindMap,
-  anchorConstraintsBySeat: AnchorConstraintsMap,
-  nextRandom: () => number,
-): Generator<RescueMap> {
-  const seats = shuffleWithRandom(rescueSeats, nextRandom)
-  const candidatesBySeat = new Map(
-    seats.map((seat) => {
-      const kind = rescueKinds[seat] as ServerAntiBadLuckRescueKind
-      const candidates = getServerAntiBadLuckRescueCandidates(
-        kind.type,
-        anchorConstraintsBySeat[seat] ?? NO_ANCHOR_CONSTRAINTS,
-      )
-
-      return [
-        seat,
-        [
-          ...shuffleWithRandom(candidates.filter((rescue) => rescue.variant === kind.variant), nextRandom),
-          ...shuffleWithRandom(candidates.filter((rescue) => rescue.variant !== kind.variant), nextRandom),
-        ],
-      ]
-    }),
-  )
-
-  if (seats.length === 2) {
-    const [firstSeat, secondSeat] = seats
-
-    for (const first of candidatesBySeat.get(firstSeat) ?? []) {
-      for (const second of candidatesBySeat.get(secondSeat) ?? []) {
-        if (second.cardIds.every((cardId) => !first.cardIds.includes(cardId))) {
-          yield { [firstSeat]: first, [secondSeat]: second }
-        }
-      }
-    }
-  }
-
-  for (const seat of seats) {
-    for (const rescue of candidatesBySeat.get(seat) ?? []) {
-      yield { [seat]: rescue }
-    }
-  }
-}
-
 // Една обща permutation от swap-ове върху естественото тесте. Rescue карта,
 // която вече е в първите 5 на seat-а, остава на мястото си. Всяка липсваща
 // заема позицията на най-слабата естествена карта от първите 5 според
@@ -359,6 +290,197 @@ function hasSameCardSet(left: readonly ServerCard[], right: readonly ServerCard[
   const rightIds = new Set(right.map((card) => card.id))
 
   return rightIds.size === right.length && [...rightIds].every((cardId) => leftIds.has(cardId))
+}
+
+type MinimumSwapCandidate = {
+  rescue: ServerAntiBadLuckRescue
+  swapCount: number
+  resultDeck: ServerCard[]
+}
+
+// Проверява дали `resultDeck` е безопасен краен resultDeck: deck invariant +
+// GOOD-preservation на всичките 4 seats + natural run preservation
+// (терца/50/100, >=3) + sequence guard (artificial QUART/QUINT_PLUS, >=4,
+// 25%/10% allowance) + square guard. Изцяло RNG-free — resultDeck вече е
+// конкретен, напълно детерминиран final deck (виж
+// enumerateServerAntiBadLuckRealizedPlans), не candidate description.
+function isRealizedPlanSafe(
+  deck: readonly ServerCard[],
+  resultDeck: readonly ServerCard[],
+  seat: Seat,
+  getFirstFiveOf: (sourceDeck: readonly ServerCard[], checkSeat: Seat) => ServerCard[],
+  isNaturalGood: Record<Seat, boolean>,
+  naturalFullHands: Record<Seat, ServerCard[]> | null,
+  buildFullHands: (sourceDeck: readonly ServerCard[]) => Record<Seat, ServerCard[]>,
+  sequenceAllowance: ServerAntiBadLuckSequenceAllowance,
+): boolean {
+  if (!hasSameCardSet(deck, resultDeck)) {
+    return false
+  }
+
+  if (!isServerGoodFirstFive(getFirstFiveOf(resultDeck, seat))) {
+    return false
+  }
+
+  const othersStillGood = SERVER_SEAT_ORDER.every(
+    (otherSeat) =>
+      otherSeat === seat || !isNaturalGood[otherSeat] || isServerGoodFirstFive(getFirstFiveOf(resultDeck, otherSeat)),
+  )
+
+  if (!othersStillGood) {
+    return false
+  }
+
+  if (!naturalFullHands) {
+    return true
+  }
+
+  const resultFullHands = buildFullHands(resultDeck)
+
+  return (
+    isServerAntiBadLuckNaturalRunPreserved(naturalFullHands, resultFullHands) &&
+    isServerAntiBadLuckSequencePlanSafe(naturalFullHands, resultFullHands, sequenceAllowance) &&
+    isServerAntiBadLuckSquarePlanSafe(naturalFullHands, resultFullHands)
+  )
+}
+
+const SWAP_COUNT_TIERS = [1, 2, 3] as const
+
+// Minimum-change planner — изцяло RNG-free enumeration/validation, tiered по
+// swap count за performance:
+//  1. За трите типа (SUIT/ALL_TRUMPS/NO_TRUMPS) enumerate-ваме ВСИЧКИ abstract
+//     candidates (getServerAntiBadLuckRescueCandidates) и смятаме swapCount-а
+//     им чисто (cardIds срещу natural first five) — 0 RNG.
+//  2. Tier 1 (swapCount=1): enumerate-ваме ВСИЧКИ concrete realized plans
+//     (enumerateServerAntiBadLuckRealizedPlans — explicit tie enumeration,
+//     0 RNG) за candidates от трите типа, валидираме ги (isRealizedPlanSafe).
+//     Ако поне един е safe → глобалният минимум е 1, Tier 2/3 изобщо не се
+//     разглеждат (нито enumeration, нито validation).
+//  3. Иначе Tier 2, после Tier 3 — само ако предходният tier няма safe plan.
+//  4. Типът се тегли претеглено (SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS)
+//     САМО измежду типовете с >=1 safe plan в намерения минимален tier;
+//     candidate count никога не участва в това тегло. Конкретният realized
+//     plan вътре в избрания тип — uniform random измежду ВСИЧКИ safe
+//     realized plans на този тип в tier-а (не допълнителен TRIPLE/PAIR_PLUS
+//     слой) — без RNG draw, ако pool-ът има точно 1 план.
+// null, ако и трите tier-а нямат safe plan никъде (seat остава pending).
+function pickMinimumSwapRescuePlan(
+  seat: Seat,
+  deck: readonly ServerCard[],
+  firstFiveIndices: Record<Seat, number[]>,
+  isNaturalGood: Record<Seat, boolean>,
+  naturalFullHands: Record<Seat, ServerCard[]> | null,
+  buildFullHands: (sourceDeck: readonly ServerCard[]) => Record<Seat, ServerCard[]>,
+  sequenceAllowance: ServerAntiBadLuckSequenceAllowance,
+  nextRandom: () => number,
+): { rescue: ServerAntiBadLuckRescue; deck: ServerCard[] } | null {
+  const getFirstFiveOf = (sourceDeck: readonly ServerCard[], checkSeat: Seat) =>
+    firstFiveIndices[checkSeat].map((index) => sourceDeck[index])
+  const naturalFirstFive = getFirstFiveOf(deck, seat)
+  const naturalIds = new Set(naturalFirstFive.map((card) => card.id))
+
+  // Стъпка 1: ЧИСТО (RNG-free) изчисляване на swapCount за всеки abstract
+  // candidate на трите типа — групирани по тип, за да може Tier loop-ът
+  // по-долу да ги филтрира по swapCount без да ги regenerate-ва.
+  const candidatesByType: Record<ServerAntiBadLuckRescue['type'], Array<{ rescue: ServerAntiBadLuckRescue; swapCount: number }>> = {
+    SUIT: [],
+    ALL_TRUMPS: [],
+    NO_TRUMPS: [],
+  }
+
+  for (const type of SERVER_ANTI_BAD_LUCK_RESCUE_TYPES) {
+    const anchorConstraints = getAnchorConstraintsForType(type, naturalFirstFive)
+
+    for (const rescue of getServerAntiBadLuckRescueCandidates(type, anchorConstraints)) {
+      const swapCount = rescue.cardIds.filter((cardId) => !naturalIds.has(cardId)).length
+
+      // Defensive invariant: seat-ът тук е ВИНАГИ natural BAD (pickRescueSeat
+      // филтрира само !isNaturalGood seats). candidate.cardIds описва ТОЧНО
+      // критерия, по който isServerGoodFirstFive определя GOOD за този тип
+      // (същите SERVER_ANTI_BAD_LUCK_* константи). Ако всичките 3 карти вече
+      // са в естествените първи 5 (swapCount 0), естественият first-5 би
+      // трябвало вече да е GOOD по този тип — противоречие с BAD
+      // предусловието. Fail-fast вместо тих грешен rescue.
+      if (swapCount === 0) {
+        throw new Error(
+          `[anti-bad-luck] invariant violated: 0-swap rescue candidate (type=${type}) за natural BAD seat ${seat} — ` +
+            'candidate-ът вече прави естествения first-5 GOOD, което противоречи на BAD предусловието',
+        )
+      }
+
+      candidatesByType[type].push({ rescue, swapCount })
+    }
+  }
+
+  const safeByType: Record<ServerAntiBadLuckRescue['type'], MinimumSwapCandidate[]> = {
+    SUIT: [],
+    ALL_TRUMPS: [],
+    NO_TRUMPS: [],
+  }
+  const seenResultDeckKeysByType: Record<ServerAntiBadLuckRescue['type'], Set<string>> = {
+    SUIT: new Set(),
+    ALL_TRUMPS: new Set(),
+    NO_TRUMPS: new Set(),
+  }
+
+  for (const tier of SWAP_COUNT_TIERS) {
+    let foundSafePlanAtThisTier = false
+
+    for (const type of SERVER_ANTI_BAD_LUCK_RESCUE_TYPES) {
+      for (const { rescue, swapCount } of candidatesByType[type]) {
+        if (swapCount !== tier) {
+          continue
+        }
+
+        for (const realizedPlan of enumerateServerAntiBadLuckRealizedPlans(deck, seat, firstFiveIndices, rescue)) {
+          if (!isRealizedPlanSafe(deck, realizedPlan.resultDeck, seat, getFirstFiveOf, isNaturalGood, naturalFullHands, buildFullHands, sequenceAllowance)) {
+            continue
+          }
+
+          // Canonicalize/dedupe: различни target-set/assignment избори могат
+          // да доведат до идентичен final deck (напр. всички "donor" позиции
+          // в същия друг seat) — вече dedupe-нато вътре в enumerate-функцията
+          // за ЕДИН candidate; тук пазим defensive dedupe и между РАЗЛИЧНИ
+          // candidates на СЪЩИЯ тип (структурно не би трябвало да се случи,
+          // защото различни cardIds сетове винаги дават различен final deck
+          // first-five, но пазим инварианта explicit).
+          const key = realizedPlan.resultDeck.map((card) => card.id).join(',')
+
+          if (seenResultDeckKeysByType[type].has(key)) {
+            continue
+          }
+
+          seenResultDeckKeysByType[type].add(key)
+          safeByType[type].push({ rescue, swapCount, resultDeck: realizedPlan.resultDeck })
+          foundSafePlanAtThisTier = true
+        }
+      }
+    }
+
+    if (foundSafePlanAtThisTier) {
+      break
+    }
+  }
+
+  const eligibleTypes = SERVER_ANTI_BAD_LUCK_RESCUE_TYPES.filter((type) => safeByType[type].length > 0)
+
+  if (eligibleTypes.length === 0) {
+    return null
+  }
+
+  const chosenType = pickServerAntiBadLuckWeightedRescueType(
+    eligibleTypes,
+    SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS,
+    nextRandom,
+  )
+  const pool = safeByType[chosenType]
+  // Uniform selection над ВСИЧКИ safe concrete realized plans на избрания
+  // тип (не допълнителен TRIPLE/PAIR_PLUS 50/50 слой — виж header коментара).
+  // Без RNG draw, ако има точно 1 план (документирана оптимизация, виж [16]
+  // тестовете в checkAntiBadLuck.ts).
+  const chosen = pool.length === 1 ? pool[0]! : pool[Math.floor(nextRandom() * pool.length)]!
+
+  return { rescue: chosen.rescue, deck: chosen.resultDeck }
 }
 
 function getNextSeatState(
@@ -460,77 +582,31 @@ export function applyServerAntiBadLuckToDeck(
         }
       : NO_SEQUENCE_ALLOWANCE
 
-  // Основният тип се тегли веднъж на seat (строго 1/3) и е фиксиран за всички
-  // retry-и по-долу. Цветът (1/4) / шаблонът (1/2) е предпочитан — сменя се в
-  // рамките на типа само ако за него няма безопасна реализация. Anchor
-  // constraints (natural J/A цветове) са runtime factи от natural deal-а —
-  // изчисляват се тук и се подават на candidate generation-а по-долу, но НЕ
-  // влизат в rescueKind (type/variant си остават чист random избор).
+  // Minimum-change planner: enumerate → validate (GOOD + natural run +
+  // sequence + square) → глобален минимален swap count → претеглен избор на
+  // тип измежду eligible типовете → seeded избор на конкретен candidate.
+  // rescueSeats има най-много 1 елемент (pickRescueSeat никога не връща
+  // повече от 1 seat за раздаване), затова няма multi-seat conflict logic.
   const rescueKinds: RescueKindMap = {}
-  const anchorConstraintsBySeat: AnchorConstraintsMap = {}
-  rescueSeats.forEach((seat) => {
-    const type = pickServerAntiBadLuckRescueType(nextRandom)
-    const anchorConstraints = getAnchorConstraintsForType(type, getFirstFive(deck, seat))
-
-    anchorConstraintsBySeat[seat] = anchorConstraints
-    rescueKinds[seat] = {
-      type,
-      variant: pickServerAntiBadLuckRescueVariant(type, nextRandom, anchorConstraints),
-    }
-  })
-
   let finalDeck = deck
   let appliedRescues: RescueMap = {}
 
-  // Безопасен план: същите 32 карти, rescued seats са GOOD, никой естествено
-  // GOOD seat не губи GOOD първите си 5, sequence guard-ът минава (никоя
-  // естествена кварта/квинта на никой seat не е разрушена; най-много 1 нова
-  // дълга поредица общо на масата, и то само ако еднократно изтегленият
-  // allowance го позволява) и square guard-ът минава (никое естествено каре
-  // не е разрушено; НИКАКВО ново artificial каре на който и да е seat — за
-  // разлика от sequence-ите тук няма процентен allowance). Никога full
-  // reshuffle.
-  const tryPlan = (rescues: RescueMap): boolean => {
-    const rescueCount = Object.keys(rescues).length
+  if (rescueSeat) {
+    const plan = pickMinimumSwapRescuePlan(
+      rescueSeat,
+      deck,
+      firstFiveIndices,
+      isNaturalGood,
+      naturalFullHands,
+      buildFullHands,
+      sequenceAllowance,
+      nextRandom,
+    )
 
-    if (rescueCount <= Object.keys(appliedRescues).length) {
-      return false
-    }
-
-    const rescuedDeck = applyServerAntiBadLuckRescueSwaps(deck, firstFiveIndices, rescues, nextRandom)
-    const isRescuedGood = evaluate(rescuedDeck)
-    const rescuedFullHands = canCheckFullHands ? buildFullHands(rescuedDeck) : null
-    const isPlanValid =
-      hasSameCardSet(deck, rescuedDeck) &&
-      SERVER_SEAT_ORDER.every((seat) =>
-        rescues[seat] || isNaturalGood[seat] ? isRescuedGood[seat] : true,
-      ) &&
-      (!canCheckFullHands ||
-        (isServerAntiBadLuckSequencePlanSafe(naturalFullHands!, rescuedFullHands!, sequenceAllowance) &&
-          isServerAntiBadLuckSquarePlanSafe(naturalFullHands!, rescuedFullHands!)))
-
-    if (isPlanValid) {
-      finalDeck = rescuedDeck
-      appliedRescues = rescues
-    }
-
-    return isPlanValid
-  }
-  const isComplete = () => Object.keys(appliedRescues).length === rescueSeats.length
-
-  // 1) Random опити: random тройка в предпочитания цвят/шаблон (позициите — по
-  //    сила на естествените карти, равенство → random).
-  for (let attempt = 0; rescueSeats.length > 0 && attempt < MAX_RESCUE_PLAN_ATTEMPTS && !isComplete(); attempt += 1) {
-    tryPlan(pickRescues(rescueSeats, rescueKinds, anchorConstraintsBySeat, nextRandom))
-  }
-
-  // 2) Гаранция: ако съществува безопасна реализация в същите основни типове
-  //    (предпочитаният цвят/шаблон първи), намери я.
-  if (!isComplete()) {
-    for (const rescues of enumerateRescuePlans(rescueSeats, rescueKinds, anchorConstraintsBySeat, nextRandom)) {
-      if (tryPlan(rescues)) {
-        break
-      }
+    if (plan) {
+      finalDeck = plan.deck
+      appliedRescues = { [rescueSeat]: plan.rescue }
+      rescueKinds[rescueSeat] = { type: plan.rescue.type, variant: plan.rescue.variant }
     }
   }
 

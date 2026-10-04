@@ -26,6 +26,18 @@
  *      declaration ranks) от rescue swap-овете на всичките 4 seats; ВСЯКО
  *      artificial каре се reject-ва безусловно (без процентен allowance, за
  *      разлика от sequence guard-а) — 7/8 не са square declaration
+ * [12] Minimum-swap planner — weighted rescue type selection
+ *      (pickServerAntiBadLuckWeightedRescueType) измежду eligible типовете
+ *      (тези на глобалния минимален swap count); candidate count в типа не
+ *      влияе на type probability
+ * [13] Natural run preservation (ТЕРЦА/20 и по-дълги, праг >=3,
+ *      isServerAntiBadLuckNaturalRunPreserved) — destruction-only, отделно от
+ *      artificial QUART/QUINT_PLUS allowance-а в [10]; растеж позволен,
+ *      artificial терца неограничена
+ * [14] End-to-end: natural терца/50/100 никога не се разрушава от rescue
+ *      през пълния pipeline
+ * [15] Defensive invariant: 0-swap rescue candidate никога не възниква за
+ *      natural BAD seat
  */
 
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../src/core/serverTypes.js'
@@ -36,6 +48,7 @@ import {
   getServerFirstFiveDeckIndicesBySeat,
   getServerFullHandDeckIndicesBySeat,
 } from '../src/game/antiBadLuck/applyServerAntiBadLuckToDeck.js'
+import { enumerateServerAntiBadLuckRealizedPlans } from '../src/game/antiBadLuck/enumerateServerAntiBadLuckRealizedPlans.js'
 import {
   getServerAntiBadLuckKeepStrength,
   isServerAllTrumpsGoodFirstFive,
@@ -44,13 +57,19 @@ import {
   isServerSuitGoodFirstFive,
 } from '../src/game/antiBadLuck/evaluateServerFirstFiveQuality.js'
 import {
+  SERVER_ANTI_BAD_LUCK_RESCUE_TYPES,
+  SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS,
+  getServerAntiBadLuckRescueCandidates,
   pickServerAntiBadLuckRescue,
   pickServerAntiBadLuckRescueVariant,
+  pickServerAntiBadLuckWeightedRescueType,
 } from '../src/game/antiBadLuck/pickServerAntiBadLuckRescue.js'
 import {
   SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUART_CHANCE,
   SERVER_ANTI_BAD_LUCK_ARTIFICIAL_QUINT_PLUS_CHANCE,
   findServerAntiBadLuckLongRuns,
+  findServerAntiBadLuckNaturalRuns,
+  isServerAntiBadLuckNaturalRunPreserved,
   isServerAntiBadLuckSequencePlanSafe,
   type ServerAntiBadLuckSequenceAllowance,
 } from '../src/game/antiBadLuck/serverAntiBadLuckSequenceGuard.js'
@@ -340,7 +359,10 @@ function dealSequence(decks: ServerCard[][], seed: string): ServerAntiBadLuckSta
   let failedKeepsPending = true
   for (let seed = 0; seed < 60; seed += 1) {
     const result = applyServerAntiBadLuckToDeck(blockedDeck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 3 }), createSeededRandom(`blocked-${seed}`))
-    failedKeepsPending &&= !!result.rescueKinds.bottom && Object.keys(result.rescues).length === 0 && result.deck === blockedDeck &&
+    // rescueKinds вече се записва само при успешен (приложен) rescue (виж
+    // minimum-swap planner-а) — при пълен fallback (никъде безопасен
+    // candidate) rescueKinds.bottom е undefined, не "избран тип, нереализиран".
+    failedKeepsPending &&= !result.rescueKinds.bottom && Object.keys(result.rescues).length === 0 && result.deck === blockedDeck &&
       result.antiBadLuck.seats.bottom.pendingSinceDealIndex === 3 && result.antiBadLuck.seats.bottom.consecutiveBadDeals === 13
   }
   check('[4l] failed rescue → естествено тесте, seat остава pending със стария момент (не губи приоритет)', failedKeepsPending)
@@ -473,14 +495,10 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   const suits = new Map<string, number>()
   const templates = new Map<string, number>()
   const suitTriples = new Set<string>()
-  const chosenTypes = new Map<string, number>()
-  let chosenCount = 0
-  let typeNeverSwitched = true
-  let fallbackCount = 0
-  let fallbackWithoutProtection = 0
-  let preferredVariantKept = 0
-  const chosenTemplates = new Map<string, number>()
-  let fallbackStaysPending = true
+  const swapCounts = new Map<number, number>()
+  let noSafeAnywhereCount = 0
+  let noSafeAnywhereEligible = 0
+  let zeroSwapInvariantHeld = true
 
   for (let seed = 0; seed < 4000; seed += 1) {
     // Естествено разбъркано тесте; и четирите seats са pending → арбитраж + защита на естествен GOOD.
@@ -490,30 +508,30 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
     const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5, top: 5, left: 5 }), createSeededRandom(`deck-${seed}`))
     allValid &&= isValidDeck(result.deck) && natural.map((card) => card.id).join(',') === naturalSnapshot
 
-    // Изтегленият основен тип е фиксиран: приложеният rescue е от него, иначе няма rescue.
-    const hasProtectedGood = SERVER_SEAT_ORDER.some((seat) => naturalGood[seat] && !result.rescueKinds[seat])
-    for (const seat of Object.keys(result.rescueKinds) as Seat[]) {
-      const { type, variant: preferredVariant } = result.rescueKinds[seat]!
-      const rescue = result.rescues[seat]
-      chosenCount += 1
-      chosenTypes.set(type, (chosenTypes.get(type) ?? 0) + 1)
-      if (type !== 'SUIT') chosenTemplates.set(`${type}:${preferredVariant}`, (chosenTemplates.get(`${type}:${preferredVariant}`) ?? 0) + 1)
-      if (rescue) {
-        typeNeverSwitched &&= rescue.type === type
-        if (rescue.variant === preferredVariant) preferredVariantKept += 1
-      } else {
-        fallbackCount += 1
-        // Без защитени естествени GOOD ръце всяка комбинация от типове е реализуема.
-        if (!hasProtectedGood) fallbackWithoutProtection += 1
-        fallbackStaysPending &&= !isServerGoodFirstFive(firstFive(result.deck, seat)) ? result.antiBadLuck.seats[seat].pendingSinceDealIndex === 5 : true
-      }
-    }
-    typeNeverSwitched &&= (Object.keys(result.rescues) as Seat[]).every((seat) => !!result.rescueKinds[seat])
-
+    // rescueKinds вече е винаги в синхрон с rescues (само успешни rescue-та) —
+    // "избран тип, нереализиран variant" вече не съществува като отделно
+    // състояние (виж minimum-swap planner-а).
+    // Ако поне един seat е естествено BAD, арбитражът е имал кандидат този
+    // кръг (знаменател); "никъде безопасен candidate" (пълен fallback,
+    // rescuedSeats празно) е бройката неуспешни измежду тях.
+    const hadEligibleCandidate = SERVER_SEAT_ORDER.some((seat) => !naturalGood[seat])
     const rescuedSeats = Object.keys(result.rescues) as Seat[]
     if (rescuedSeats.length === 0) {
       allValid &&= result.deck === natural
+      if (hadEligibleCandidate) {
+        noSafeAnywhereEligible += 1
+        noSafeAnywhereCount += 1
+      }
       continue
+    }
+    if (hadEligibleCandidate) {
+      noSafeAnywhereEligible += 1
+    }
+
+    for (const seat of rescuedSeats) {
+      const swapCount = result.rescues[seat]!.cardIds.filter((id) => !firstFive(natural, seat).some((card) => card.id === id)).length
+      swapCounts.set(swapCount, (swapCounts.get(swapCount) ?? 0) + 1)
+      zeroSwapInvariantHeld &&= swapCount >= 1
     }
 
     for (const seat of SERVER_SEAT_ORDER) {
@@ -594,62 +612,60 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
     share(map.get(`${type}:${variant}`), (map.get(`${type}:TRIPLE`) ?? 0) + (map.get(`${type}:PAIR_PLUS`) ?? 0))
   const templateLabel = (map: Map<string, number>) => ['ALL_TRUMPS', 'NO_TRUMPS'].map((type) => `${type} TRIPLE ${(templateShare(map, type, 'TRIPLE') * 100).toFixed(1)}% / PAIR_PLUS ${(templateShare(map, type, 'PAIR_PLUS') * 100).toFixed(1)}%`).join('; ')
 
-  check(`[7f] избран основен тип ~1/3 (n=${chosenCount}): ${typeLabel(chosenTypes, chosenCount)}`, chosenTypes.size === 3 && [...chosenTypes.values()].every((count) => share(count, chosenCount) > 0.31 && share(count, chosenCount) < 0.357))
-  check(`[7f2] приложен тип (n=${rescueCount}): ${typeLabel(types, rescueCount)}`, types.size === 3 && [...types.values()].every((count) => share(count, rescueCount) > 0.31 && share(count, rescueCount) < 0.357))
+  // [7f]/[7f2]: minimum-swap planner-ът НЕ тегли типа на сляпо 1/3 — типът се
+  // определя от това кой achieve-ва глобалния минимален swap count (виж
+  // pickMinimumSwapRescuePlan), а SUIT има много повече кандидати (всичките 4
+  // цвята наведнъж) от ALL_TRUMPS/NO_TRUMPS → по design доминира дела на
+  // приложения тип. Проверяваме структурни инварианти вместо фиксирано 1/3:
+  // всичките 3 типа все пак се реализират поне веднъж (никой не е напълно
+  // недостижим) и swap count-ът е винаги в очаквания диапазон 1-3.
+  check(`[7f] приложен тип (n=${rescueCount}, очаквано SUIT-доминиран заради по-богат candidate pool): ${typeLabel(types, rescueCount)}`, types.size === 3)
+  check(`[7f2] swap count на приложения rescue е винаги 1, 2 или 3 (разпределение: ${[...swapCounts.entries()].sort().map(([count, n]) => `${count}=${n}`).join(', ')})`,
+    [...swapCounts.keys()].every((count) => count >= 1 && count <= 3))
   check(`[7g] приложен SUIT цвят ~25%: ${[...suits.entries()].map(([suit, count]) => `${suit} ${pct(count, suitTotal)}`).join(', ')}`, suits.size === 4 && [...suits.values()].every((count) => share(count, suitTotal) > 0.21 && share(count, suitTotal) < 0.29))
   check('[7h] SUIT тройката не е винаги една и съща (> 10 варианта)', suitTriples.size > 10)
-  // От anchor constraints фикса (виж [9]): при 2 natural J/A вариантът се
-  // форсира PAIR_PLUS (никога TRIPLE) вместо random 50/50 — реалният natural
-  // shuffle съдържа такива seats с забележима честота, затова TRIPLE делът
-  // тук вече е under 50% by design (виж [9f-*] за чистото 50/50 при 0 natural).
-  check(`[7i] предпочитан шаблон (изместен от anchor forcing при 2 natural, виж [9f]): ${templateLabel(chosenTemplates)}`, ['ALL_TRUMPS', 'NO_TRUMPS'].every((type) => templateShare(chosenTemplates, type, 'TRIPLE') > 0.38 && templateShare(chosenTemplates, type, 'TRIPLE') < 0.54))
-  // Стрес сценарий: JJJ/AAA изисква 3 от 4-те J/A и често е невъзможен без да
-  // развали защитена GOOD ръка → реализира се JJ9/AA10 в същия тип.
-  check(`[7i2] приложени шаблони (стрес): ${templateLabel(templates)}`, ['ALL_TRUMPS', 'NO_TRUMPS'].every((type) => templateShare(templates, type, 'TRIPLE') > 0.2) && templateTotal > 0)
-  check('[7k] compatibility retry никога не сменя основния тип', typeNeverSwitched)
-  check(`[7k2] предпочитаният цвят/шаблон е запазен в ${pct(preferredVariantKept, rescueCount)} от приложените (стрес)`, share(preferredVariantKept, rescueCount) > 0.8)
-  // 5% е само safety bound на стрес теста, НЕ продуктово правило: rescue се
-  // прилага винаги, когато има безопасен swap план; иначе natural deal + pending.
-  check(`[7l] неприложени rescue-и: ${fallbackCount} от ${chosenCount} (${pct(fallbackCount, chosenCount)}) — всички остават pending`, fallbackStaysPending && share(fallbackCount, chosenCount) < 0.05)
-  // От sequence guard-а (виж [10]): дори без защитен natural GOOD hand, rescue
-  // вече МОЖЕ да остане непринложен — единствената безопасна GOOD/anchor
-  // реализация може да разрушава natural quart/quint, или да създава 2+
-  // нови дълги поредици, или точно 1 нова, дето еднократният allowance не
-  // позволява. Това е ново, очаквано поведение от sequence guard-а, не
-  // регресия — bound-ът само пази от драстичен скок (стрес safety, не правило).
-  check(`[7m] без защитени естествени GOOD ръце: ${fallbackWithoutProtection} неприложени от sequence guard-а (очаквано > 0, виж [10])`, share(fallbackWithoutProtection, chosenCount) < 0.02)
+  // [7i2]: PAIR_PLUS има 3х повече комбинаторни варианти от TRIPLE (12 vs 4) →
+  // по-вероятно да достигне по-нисък swap count при minimum-swap избора, затова
+  // доминира силно (очаквано, не регресия) — проверяваме само, че и двата
+  // шаблона се появяват поне веднъж, когато типът изобщо е приложен.
+  check(`[7i2] приложени шаблони (стрес, PAIR_PLUS-доминирани заради по-богат combinatorics): ${templateLabel(templates)}`, templateTotal > 0)
+  // [7l]/[7m]: "никъде безопасен candidate" (пълен fallback, seat остава
+  // pending) вече не е обвързано с конкретен тип (enumerate-ваме и трите
+  // наведнъж) — проверяваме само, че такъв случай си остава рядък стрес ръб,
+  // не правило, и винаги оставя естественото тесте непипнато.
+  check(`[7l] "никъде безопасен candidate" остава рядък стрес ръб: ${noSafeAnywhereCount} от ${noSafeAnywhereEligible} eligible кръга (${pct(noSafeAnywhereCount, noSafeAnywhereEligible)})`,
+    share(noSafeAnywhereCount, noSafeAnywhereEligible) < 0.05)
+  check('[7m] defensive invariant: swap count никога не е 0 (seat-ът е винаги natural BAD тук)', zeroSwapInvariantHeld)
 }
 
 {
   // Реалистичен сценарий: един pending seat, естествено разбъркани тестета.
   const types = new Map<string, number>()
   const templates = new Map<string, number>()
-  let chosen = 0
+  let eligible = 0
   let applied = 0
-  let keptPreferred = 0
   for (let seed = 0; seed < 4000; seed += 1) {
     const natural = shuffleWithRandom(FULL_DECK, createSeededRandom(`single-natural-${seed}`))
+    if (isServerGoodFirstFive(firstFive(natural, 'bottom'))) continue
+    eligible += 1
     const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`single-deck-${seed}`))
-    const kind = result.rescueKinds.bottom
     const rescue = result.rescues.bottom
-    if (!kind) continue
-    chosen += 1
     if (!rescue) continue
     applied += 1
-    if (rescue.variant === kind.variant) keptPreferred += 1
     types.set(rescue.type, (types.get(rescue.type) ?? 0) + 1)
     if (rescue.type !== 'SUIT') templates.set(`${rescue.type}:${rescue.variant}`, (templates.get(`${rescue.type}:${rescue.variant}`) ?? 0) + 1)
   }
   const share = (count: number | undefined, total: number) => (count ?? 0) / total
   const pct = (count: number | undefined, total: number) => `${(share(count, total) * 100).toFixed(1)}%`
-  const tripleShare = (type: string) => share(templates.get(`${type}:TRIPLE`), (templates.get(`${type}:TRIPLE`) ?? 0) + (templates.get(`${type}:PAIR_PLUS`) ?? 0))
-  // От square guard-а (виж [11]): дори с 1 pending seat, rescue вече МОЖЕ да
-  // остане непринложен, ако единствената безопасна GOOD/anchor реализация
-  // би създала artificial каре (без процентен allowance, за разлика от
-  // sequence-ите) — ново, очаквано поведение, не регресия.
-  check(`[7n] 1 pending seat: приложени ${applied}/${chosen} (${pct(applied, chosen)}), запазен цвят/шаблон ${pct(keptPreferred, applied)}`, share(applied, chosen) > 0.95 && share(keptPreferred, applied) > 0.9)
-  check(`[7n2] 1 pending seat: типове ${['SUIT', 'ALL_TRUMPS', 'NO_TRUMPS'].map((type) => `${type} ${pct(types.get(type), applied)}`).join(', ')}`, [...types.values()].every((count) => share(count, applied) > 0.31 && share(count, applied) < 0.357))
-  check(`[7n3] 1 pending seat: JJJ ${(tripleShare('ALL_TRUMPS') * 100).toFixed(1)}%, AAA ${(tripleShare('NO_TRUMPS') * 100).toFixed(1)}% от типа`, tripleShare('ALL_TRUMPS') > 0.35 && tripleShare('NO_TRUMPS') > 0.35)
+  // От square/sequence guard-а (виж [10]/[11]): дори с 1 pending seat, rescue
+  // вече МОЖЕ да остане непринложен, ако единствената безопасна GOOD/anchor
+  // реализация би разрушила natural run/square или би създала artificial
+  // каре — ново, очаквано поведение, не регресия.
+  check(`[7n] 1 pending seat: приложени ${applied}/${eligible} (${pct(applied, eligible)})`, share(applied, eligible) > 0.95)
+  // Minimum-swap selection-ът не тегли типа 1/3 на сляпо (виж [7f]) — тук само
+  // потвърждаваме, че и трите типа все пак се реализират в реалистичен,
+  // единичен-pending-seat сценарий (не само в 4-way стрес сценария от [7f]).
+  check(`[7n2] 1 pending seat: типове ${['SUIT', 'ALL_TRUMPS', 'NO_TRUMPS'].map((type) => `${type} ${pct(types.get(type), applied)}`).join(', ')}`, types.size === 3)
 }
 
 {
@@ -1155,7 +1171,14 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   // [11.1] rescued seat: ALL_TRUMPS rescue би създал 4×J чрез J в last-3 →
   // guard-ът никога не позволява финал с 4 J, но намира safe candidate
   // (различен TRIPLE/PAIR_PLUS realization) в повечето случаи ([11.11]).
-  const item1Bottom = ['clubs-7', 'clubs-8', 'diamonds-7', 'diamonds-8', 'hearts-7', 'clubs-J', 'hearts-9', 'spades-8']
+  // Fixture-ът е построен така, че ALL_TRUMPS (1 natural J anchor → TRIPLE
+  // swapCount 2) да бъде ДОСТИЖИМ при глобалния минимум редом със SUIT (също
+  // swapCount 2 чрез natural diamonds/hearts/spades карти) — за разлика от
+  // стария "0 J anchor" fixture, дето SUIT винаги е по-евтин (swapCount 2 <
+  // ALL_TRUMPS-овите 3) и minimum-swap planner-ът никога не стига до
+  // ALL_TRUMPS изобщо (проверено експериментално). spades-J е в last-3 —
+  // точно TRIPLE-реализацията, изключваща spades, би довела до 4×J.
+  const item1Bottom = ['clubs-J', 'diamonds-7', 'diamonds-K', 'hearts-8', 'spades-10', 'spades-J', 'hearts-7', 'diamonds-8']
   const item1Remaining = FULL_DECK.map((card) => card.id).filter((id) => !item1Bottom.includes(id))
   const item1Deck = buildFullHandDeck({
     bottom: item1Bottom,
@@ -1166,7 +1189,7 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   let item1AllTrumpsSamples = 0
   let item1AllTrumpsApplied = 0
   let item1NeverFourJ = true
-  for (let seed = 0; seed < 800; seed += 1) {
+  for (let seed = 0; seed < 2000; seed += 1) {
     const result = applyServerAntiBadLuckToDeck(item1Deck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`sq-item1-${seed}`))
     if (result.rescueKinds.bottom?.type !== 'ALL_TRUMPS') continue
     item1AllTrumpsSamples += 1
@@ -1179,8 +1202,9 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   check(`[11.11a] ...но намира safe candidate в повечето случаи вместо direct pending (${item1AllTrumpsApplied}/${item1AllTrumpsSamples} приложени)`,
     item1AllTrumpsApplied / item1AllTrumpsSamples > 0.5)
 
-  // [11.2] rescued seat: NO_TRUMPS rescue би създал 4×A чрез A в last-3.
-  const item2Bottom = ['clubs-7', 'clubs-8', 'diamonds-7', 'diamonds-8', 'hearts-7', 'clubs-A', 'hearts-9', 'spades-8']
+  // [11.2] rescued seat: NO_TRUMPS rescue би създал 4×A чрез A в last-3
+  // (огледално на [11.1], с A/10 вместо J/9 — виж коментара там).
+  const item2Bottom = ['clubs-A', 'diamonds-7', 'diamonds-K', 'hearts-8', 'spades-J', 'spades-A', 'hearts-7', 'diamonds-9']
   const item2Remaining = FULL_DECK.map((card) => card.id).filter((id) => !item2Bottom.includes(id))
   const item2Deck = buildFullHandDeck({
     bottom: item2Bottom,
@@ -1191,7 +1215,7 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   let item2NoTrumpsSamples = 0
   let item2NoTrumpsApplied = 0
   let item2NeverFourA = true
-  for (let seed = 0; seed < 800; seed += 1) {
+  for (let seed = 0; seed < 2000; seed += 1) {
     const result = applyServerAntiBadLuckToDeck(item2Deck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`sq-item2-${seed}`))
     if (result.rescueKinds.bottom?.type !== 'NO_TRUMPS') continue
     item2NoTrumpsSamples += 1
@@ -1241,32 +1265,33 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   check('[11.10b] 4×7 (или 4×8) не се третира като artificial square от guard-а',
     isServerAntiBadLuckSquarePlanSafe(allNeutralSquare({ bottom: naturalBottomThreeSevens }), allNeutralSquare({ bottom: postBottomFourSevens })))
 
-  // [11.12] Ако НЯМА safe candidate за избрания top-level type → natural deal,
-  // seat остава pending, pending priority се запазва. Fixture (открит чрез
-  // насочено търсене): bottom натурално вече държи 4×J (защитено natural
-  // square) + точно 1 natural A → 1-anchor NO_TRUMPS форсира candidates,
-  // дето задължително заменят точно 2-та natural J в първите пет (J е с
-  // най-ниска NO_TRUMPS сила измежду наличните карти) → унищожават natural 4×J
-  // за ВСЕКИ от 9-те candidate реализации.
+  // [11.12] Ако НЯМА safe candidate измежду ТРИТЕ типа (SUIT/ALL_TRUMPS/
+  // NO_TRUMPS) → natural deal, seat остава pending, pending priority се
+  // запазва. Fixture (открит чрез насочено търсене): bottom натурално вече
+  // държи 4×J (защитено natural square) + точно 1 natural A → J е с
+  // най-ниска keep-strength измежду наличните карти при SUIT/ALL_TRUMPS/
+  // NO_TRUMPS candidate-и, затова буквално ВСЕКИ candidate на ВСЕКИ от трите
+  // типа измества/унищожава по една от natural-те 4 J → square guard-ът
+  // reject-ва всичко, seat-ът остава pending (без изключение, проверено
+  // директно през пълния pipeline, без да се филтрира по конкретен тип —
+  // minimum-swap planner-ът опитва и трите типа наведнъж).
   const item12Deck = buildFullHandDeck({
     bottom: ['diamonds-A', 'hearts-Q', 'spades-10', 'hearts-J', 'diamonds-J', 'spades-J', 'hearts-K', 'clubs-J'],
     right: ['clubs-8', 'spades-A', 'diamonds-Q', 'clubs-A', 'clubs-9', 'diamonds-9', 'diamonds-10', 'clubs-Q'],
     top: ['hearts-A', 'hearts-9', 'hearts-8', 'diamonds-7', 'spades-9', 'spades-7', 'spades-Q', 'diamonds-K'],
     left: ['diamonds-8', 'clubs-10', 'spades-8', 'spades-K', 'hearts-7', 'clubs-K', 'clubs-7', 'hearts-10'],
   })
-  let item12NoTrumpsSamples = 0
   let item12AlwaysPending = true
-  for (let seed = 0; seed < 400; seed += 1) {
+  for (let seed = 0; seed < 1000; seed += 1) {
     const result = applyServerAntiBadLuckToDeck(item12Deck, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`sq-item12-${seed}`))
-    if (result.rescueKinds.bottom?.type !== 'NO_TRUMPS') continue
-    item12NoTrumpsSamples += 1
     item12AlwaysPending &&=
       !result.rescues.bottom &&
+      !result.rescueKinds.bottom &&
       result.deck === item12Deck &&
       result.antiBadLuck.seats.bottom.pendingSinceDealIndex === 5
   }
-  check(`[11.12] няма safe candidate → natural deal + pending остава, priority запазен (${item12NoTrumpsSamples} NO_TRUMPS samples)`,
-    item12AlwaysPending && item12NoTrumpsSamples > 50)
+  check('[11.12] няма safe candidate измежду трите типа → natural deal + pending остава, priority запазен (1000 samples)',
+    item12AlwaysPending)
 
   // [11.13] Sequence guard-ът продължава да работи непроменено — square
   // guard-ът е независим и не блокира candidate, дето засяга само поредица.
@@ -1274,6 +1299,477 @@ function diffAgainstNatural(natural: readonly ServerCard[], result: ReturnType<t
   const postBottomQuartOnly = cards('clubs-7', 'clubs-8', 'clubs-9', 'clubs-10', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
   check('[11.13] square guard не блокира candidate, дето създава само нова поредица (без каре)',
     isServerAntiBadLuckSquarePlanSafe(allNeutralSquare({ bottom: naturalBottomQuartSetup }), allNeutralSquare({ bottom: postBottomQuartOnly })))
+}
+
+// ---------------------------------------------------------------------------
+// [12] Minimum-swap planner: weighted rescue type selection измежду eligible
+//      типовете (pickServerAntiBadLuckWeightedRescueType) — candidate count
+//      НЕ трябва да влияе върху type probability (теглим типа ПРЕДИ да
+//      избираме candidate вътре в него).
+// ---------------------------------------------------------------------------
+{
+  function drawShares(eligibleTypes: readonly ('SUIT' | 'ALL_TRUMPS' | 'NO_TRUMPS')[], samples: number, seedPrefix: string) {
+    const counts = new Map<string, number>()
+    for (let seed = 0; seed < samples; seed += 1) {
+      const type = pickServerAntiBadLuckWeightedRescueType(eligibleTypes, SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS, createSeededRandom(`${seedPrefix}-${seed}`))
+      counts.set(type, (counts.get(type) ?? 0) + 1)
+    }
+    return counts
+  }
+  const share = (count: number | undefined, total: number) => (count ?? 0) / total
+  const SAMPLES = 20000
+
+  const all3 = drawShares(SERVER_ANTI_BAD_LUCK_RESCUE_TYPES, SAMPLES, 'w-all3')
+  check(`[12a] 3 eligible типа (33/33/34): SUIT ${share(all3.get('SUIT'), SAMPLES).toFixed(3)}, ALL_TRUMPS ${share(all3.get('ALL_TRUMPS'), SAMPLES).toFixed(3)}, NO_TRUMPS ${share(all3.get('NO_TRUMPS'), SAMPLES).toFixed(3)}`,
+    Math.abs(share(all3.get('SUIT'), SAMPLES) - 0.33) < 0.02 &&
+    Math.abs(share(all3.get('ALL_TRUMPS'), SAMPLES) - 0.33) < 0.02 &&
+    Math.abs(share(all3.get('NO_TRUMPS'), SAMPLES) - 0.34) < 0.02)
+
+  const suitAllTrumps = drawShares(['SUIT', 'ALL_TRUMPS'], SAMPLES, 'w-suit-at')
+  check(`[12b] 2 eligible (SUIT+ALL_TRUMPS, 33:33 renormalized → 50/50): SUIT ${share(suitAllTrumps.get('SUIT'), SAMPLES).toFixed(3)}`,
+    suitAllTrumps.get('NO_TRUMPS') === undefined && Math.abs(share(suitAllTrumps.get('SUIT'), SAMPLES) - 0.5) < 0.02)
+
+  const allTrumpsNoTrumps = drawShares(['ALL_TRUMPS', 'NO_TRUMPS'], SAMPLES, 'w-at-nt')
+  check(`[12c] 2 eligible (ALL_TRUMPS+NO_TRUMPS, 33:34 renormalized → ~49.3/50.7): ALL_TRUMPS ${share(allTrumpsNoTrumps.get('ALL_TRUMPS'), SAMPLES).toFixed(3)}`,
+    allTrumpsNoTrumps.get('SUIT') === undefined && Math.abs(share(allTrumpsNoTrumps.get('ALL_TRUMPS'), SAMPLES) - 33 / 67) < 0.02)
+
+  const onlyNoTrumps = drawShares(['NO_TRUMPS'], 500, 'w-only-nt')
+  check('[12d] 1 eligible тип → винаги точно той (candidate count в типа не участва тук изобщо)', onlyNoTrumps.get('NO_TRUMPS') === 500 && onlyNoTrumps.size === 1)
+
+  // Детерминизъм: същият eligibleTypes + seed → същият избор (seeded).
+  const first = pickServerAntiBadLuckWeightedRescueType(SERVER_ANTI_BAD_LUCK_RESCUE_TYPES, SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS, createSeededRandom('det'))
+  const second = pickServerAntiBadLuckWeightedRescueType(SERVER_ANTI_BAD_LUCK_RESCUE_TYPES, SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS, createSeededRandom('det'))
+  check('[12e] seeded: същият seed → същият избор', first === second)
+}
+
+// ---------------------------------------------------------------------------
+// [13] Natural run preservation (ТЕРЦА/20 и по-дълги, праг >=3) —
+//      isServerAntiBadLuckNaturalRunPreserved: ЕДИНСТВЕНО destruction-ONLY
+//      guard, НЕ гейтва нова artificial терца (unrestricted, за разлика от
+//      artificial QUART/QUINT_PLUS gating-а в [10], праг >=4, 25%/10%).
+// ---------------------------------------------------------------------------
+{
+  const NEUTRAL = cards('clubs-7', 'diamonds-8', 'hearts-9', 'spades-10', 'clubs-Q', 'diamonds-K', 'hearts-A', 'spades-J')
+  const allNeutral13 = (override: Partial<Record<Seat, ServerCard[]>>): Record<Seat, ServerCard[]> => ({
+    bottom: override.bottom ?? NEUTRAL, right: override.right ?? NEUTRAL, top: override.top ?? NEUTRAL, left: override.left ?? NEUTRAL,
+  })
+
+  // [13a] natural терца (7-8-9) разрушена → reject.
+  const naturalTerza = cards('clubs-7', 'clubs-8', 'clubs-9', 'diamonds-K', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
+  const terzaDestroyed = cards('clubs-7', 'clubs-8', 'clubs-Q', 'diamonds-K', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
+  check('[13a] natural терца (7-8-9) разрушена от swap → reject',
+    !isServerAntiBadLuckNaturalRunPreserved(allNeutral13({ bottom: naturalTerza }), allNeutral13({ bottom: terzaDestroyed })))
+
+  // [13b] natural терца, израснала до 50 (7-8-9-10), пазейки оригиналните 3 → allowed (растеж позволен).
+  const terzaGrownToQuart = cards('clubs-7', 'clubs-8', 'clubs-9', 'clubs-10', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
+  check('[13b] natural терца → 50 (запазва оригиналните 3 карти) → allowed (растеж)',
+    isServerAntiBadLuckNaturalRunPreserved(allNeutral13({ bottom: naturalTerza }), allNeutral13({ bottom: terzaGrownToQuart })))
+
+  // [13c] natural терца, израснала директно до 100+ (7-8-9-10-J) → allowed.
+  const terzaGrownToQuint = cards('clubs-7', 'clubs-8', 'clubs-9', 'clubs-10', 'clubs-J', 'spades-Q', 'diamonds-7', 'hearts-K')
+  check('[13c] natural терца → 100+ (запазва оригиналните 3 карти) → allowed (растеж)',
+    isServerAntiBadLuckNaturalRunPreserved(allNeutral13({ bottom: naturalTerza }), allNeutral13({ bottom: terzaGrownToQuint })))
+
+  // [13d] нова artificial терца (none → 3) → НИКОГА не се гейтва тук (за разлика от QUART/QUINT_PLUS в [10]).
+  const noRunAtAll = cards('clubs-7', 'diamonds-9', 'hearts-K', 'spades-Q', 'clubs-A', 'diamonds-10', 'hearts-7', 'spades-8')
+  const newArtificialTerza = cards('clubs-7', 'clubs-8', 'clubs-9', 'spades-Q', 'clubs-A', 'diamonds-10', 'hearts-7', 'spades-8')
+  check('[13d] нова artificial терца (none → 3) → allowed без ограничение (artificial терца е неограничена)',
+    isServerAntiBadLuckNaturalRunPreserved(allNeutral13({ bottom: noRunAtAll }), allNeutral13({ bottom: newArtificialTerza })))
+
+  // [13e] natural терца на ДРУГ (non-rescue) seat (right) също се пази.
+  check('[13e] natural терца на non-rescue seat (right) също се пази',
+    !isServerAntiBadLuckNaturalRunPreserved(allNeutral13({ right: naturalTerza }), allNeutral13({ right: terzaDestroyed })))
+
+  // [13f] natural QUART (4), израснал до по-дълъг QUINT_PLUS (5), пазейки оригиналните 4 → allowed.
+  const naturalQuart = cards('clubs-7', 'clubs-8', 'clubs-9', 'clubs-10', 'hearts-A', 'spades-Q', 'diamonds-7', 'hearts-K')
+  const quartGrownToQuint = cards('clubs-7', 'clubs-8', 'clubs-9', 'clubs-10', 'clubs-J', 'spades-Q', 'diamonds-7', 'hearts-K')
+  check('[13f] natural QUART → QUINT_PLUS (запазва оригиналните 4) → allowed (растеж)',
+    isServerAntiBadLuckNaturalRunPreserved(allNeutral13({ bottom: naturalQuart }), allNeutral13({ bottom: quartGrownToQuint })))
+
+  // [13g] no double-counting: QUINT_PLUS (5) се разпознава като 1 maximal run, не като 3 припокриващи се терци.
+  const handWithQuint = cards('hearts-7', 'hearts-8', 'hearts-9', 'hearts-10', 'hearts-J', 'clubs-K', 'diamonds-A', 'spades-Q')
+  const quintRuns = findServerAntiBadLuckNaturalRuns(handWithQuint)
+  check('[13g] QUINT_PLUS (5) се разпознава като 1 maximal run (не 3 припокриващи се терци)',
+    Object.keys(quintRuns).length === 1 && quintRuns.hearts?.kind === 'QUINT_PLUS' && quintRuns.hearts.cardIds.length === 5)
+}
+
+// ---------------------------------------------------------------------------
+// [14] End-to-end: natural терца/50/100 никога не се разрушава от rescue
+//      през пълния pipeline (случаен natural shuffle, 4 pending seats).
+// ---------------------------------------------------------------------------
+{
+  let naturalRunsPreserved = true
+  let naturalRunsChecked = 0
+  for (let seed = 0; seed < 4000; seed += 1) {
+    const natural = shuffleWithRandom(FULL_DECK, createSeededRandom(`run-preserve-natural-${seed}`))
+    const naturalFullHandsAll = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(natural, seat)])) as Record<Seat, ServerCard[]>
+    const hasAnyNaturalRun = SERVER_SEAT_ORDER.some((seat) => Object.keys(findServerAntiBadLuckNaturalRuns(naturalFullHandsAll[seat])).length > 0)
+    if (!hasAnyNaturalRun) continue
+    naturalRunsChecked += 1
+    const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5, top: 5, left: 5 }), createSeededRandom(`run-preserve-deck-${seed}`))
+    const resultFullHandsAll = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(result.deck, seat)])) as Record<Seat, ServerCard[]>
+    naturalRunsPreserved &&= isServerAntiBadLuckNaturalRunPreserved(naturalFullHandsAll, resultFullHandsAll)
+  }
+  check(`[14] natural терца/50/100 (run>=3) никога не се разрушава от rescue (${naturalRunsChecked} раздавания с >=1 natural run от 4000)`,
+    naturalRunsPreserved && naturalRunsChecked > 500)
+}
+
+// ---------------------------------------------------------------------------
+// [15] Defensive invariant: 0-swap rescue candidate никога не възниква —
+//      seat-ът е винаги natural BAD, затова candidate.cardIds (критерият за
+//      GOOD по този тип) никога не може да е вече 100% natural (виж [7m] за
+//      end-to-end проверка през пълния pipeline; тук — директно върху
+//      candidate generation-а, без да минаваме през rescue arbitration-а).
+// ---------------------------------------------------------------------------
+{
+  let neverZeroSwap = true
+  let candidatesChecked = 0
+  for (let seed = 0; seed < 3000; seed += 1) {
+    const natural = shuffleWithRandom(FULL_DECK, createSeededRandom(`zero-swap-${seed}`))
+    for (const seat of SERVER_SEAT_ORDER) {
+      const naturalFirstFiveForSeat = firstFive(natural, seat)
+      if (isServerGoodFirstFive(naturalFirstFiveForSeat)) continue
+      const naturalIds = new Set(naturalFirstFiveForSeat.map((card) => card.id))
+      for (const type of SERVER_ANTI_BAD_LUCK_RESCUE_TYPES) {
+        for (const candidate of getServerAntiBadLuckRescueCandidates(type)) {
+          candidatesChecked += 1
+          const swapCount = candidate.cardIds.filter((id) => !naturalIds.has(id)).length
+          neverZeroSwap &&= swapCount >= 1
+        }
+      }
+    }
+  }
+  check(`[15] 0-swap candidate никога не възниква за natural BAD seat (${candidatesChecked} candidate-checks)`,
+    neverZeroSwap && candidatesChecked > 100000)
+}
+
+// ---------------------------------------------------------------------------
+// [16] Cross-type global minimum: фиксирано тесте, дето SUIT (swapCount=1) е
+//      strict по-евтин от NO_TRUMPS (2) и ALL_TRUMPS (3) за bottom — SUIT
+//      трябва ВИНАГИ да бъде избран (500/500 seeds), никога по-скъпите типове.
+//      Същото тесте доказва и [17] (same-type SUIT 1 vs 2): SUIT има
+//      кандидати в diamonds (swapCount=1) И в hearts/spades/clubs
+//      (swapCount=2 всеки) — само diamonds (1-swap) трябва да бъде избиран.
+// ---------------------------------------------------------------------------
+{
+  const deck16 = buildDeck({
+    bottom: ['diamonds-7', 'diamonds-A', 'diamonds-K', 'clubs-K', 'spades-Q'],
+    right: ['hearts-8', 'spades-7', 'spades-8', 'clubs-Q', 'diamonds-Q'],
+    top: ['hearts-Q', 'spades-K', 'clubs-10', 'diamonds-9', 'hearts-9'],
+    left: ['clubs-8', 'diamonds-10', 'hearts-7', 'spades-9', 'diamonds-8'],
+  })
+  let allSuit = true
+  let allSwapOne = true
+  const variants = new Set<string>()
+  for (let seed = 0; seed < 500; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(deck16, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`cross-type-min-${seed}`))
+    const rescue = result.rescues.bottom
+    allSuit &&= rescue?.type === 'SUIT'
+    if (rescue) {
+      variants.add(rescue.variant)
+      const swapCount = rescue.cardIds.filter((id) => !firstFive(deck16, 'bottom').map((c) => c.id).includes(id)).length
+      allSwapOne &&= swapCount === 1
+    }
+  }
+  check(`[16] cross-type global minimum: SUIT (swapCount=1) печели винаги срещу NO_TRUMPS(2)/ALL_TRUMPS(3) (500 seeds)`, allSuit)
+  check(`[17] same-type SUIT: само swapCount=1 candidate (diamonds) се избира, никога 2-swap siblings (variants: ${[...variants].join(', ')})`,
+    allSwapOne && variants.size === 1 && variants.has('diamonds'))
+}
+
+// ---------------------------------------------------------------------------
+// [18] Same-type ALL_TRUMPS: 1-anchor (clubs-J) + natural companion hearts-9
+//      дава ТОЧНО 1 swapCount=1 candidate ({clubs-J,hearts-J,hearts-9}) сред
+//      9-те 1-anchor candidates (другите 8 са swapCount=2) — само той трябва
+//      да бъде избиран, докато SUIT/NO_TRUMPS за това тесте са по-скъпи (2/3).
+// ---------------------------------------------------------------------------
+{
+  const deck18 = buildDeck({
+    bottom: ['clubs-J', 'hearts-9', 'diamonds-K', 'spades-Q', 'diamonds-7'],
+    right: ['hearts-8', 'spades-7', 'spades-8', 'clubs-Q', 'diamonds-Q'],
+    top: ['hearts-Q', 'spades-K', 'clubs-10', 'diamonds-9', 'hearts-K'],
+    left: ['clubs-7', 'diamonds-8', 'hearts-7', 'spades-9', 'clubs-8'],
+  })
+  let allAllTrumps = true
+  let allExactCandidate = true
+  for (let seed = 0; seed < 500; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(deck18, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`same-type-at-${seed}`))
+    const rescue = result.rescues.bottom
+    allAllTrumps &&= rescue?.type === 'ALL_TRUMPS'
+    if (rescue) {
+      allExactCandidate &&= [...rescue.cardIds].sort().join(',') === ['clubs-J', 'hearts-J', 'hearts-9'].sort().join(',')
+    }
+  }
+  check('[18] same-type ALL_TRUMPS: 1-swap candidate (clubs-J+hearts-J+hearts-9) печели винаги срещу 2-swap siblings (500 seeds)',
+    allAllTrumps && allExactCandidate)
+}
+
+// ---------------------------------------------------------------------------
+// [19] Same-type NO_TRUMPS: огледално на [18], с A/10 вместо J/9.
+// ---------------------------------------------------------------------------
+{
+  const deck19 = buildDeck({
+    bottom: ['clubs-A', 'hearts-10', 'diamonds-K', 'spades-Q', 'diamonds-7'],
+    right: ['hearts-8', 'spades-7', 'spades-8', 'clubs-Q', 'diamonds-Q'],
+    top: ['hearts-Q', 'spades-K', 'clubs-10', 'diamonds-9', 'hearts-K'],
+    left: ['clubs-7', 'diamonds-8', 'hearts-7', 'spades-9', 'clubs-8'],
+  })
+  let allNoTrumps = true
+  let allExactCandidate = true
+  for (let seed = 0; seed < 500; seed += 1) {
+    const result = applyServerAntiBadLuckToDeck(deck19, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom(`same-type-nt-${seed}`))
+    const rescue = result.rescues.bottom
+    allNoTrumps &&= rescue?.type === 'NO_TRUMPS'
+    if (rescue) {
+      allExactCandidate &&= [...rescue.cardIds].sort().join(',') === ['clubs-A', 'hearts-A', 'hearts-10'].sort().join(',')
+    }
+  }
+  check('[19] same-type NO_TRUMPS: 1-swap candidate (clubs-A+hearts-A+hearts-10) печели винаги срещу 2-swap siblings (500 seeds)',
+    allNoTrumps && allExactCandidate)
+}
+
+// ---------------------------------------------------------------------------
+// [20] 3-swap се избира САМО когато няма safe 1/2-swap realization никъде.
+//      Реален fixture, открит чрез random search (seed-ът е deterministично
+//      възпроизводим): за seat `top`, SUIT hearts (swapCount=1, 3 realized
+//      plans) и SUIT spades (swapCount=2, 6 realized plans) са ВСИЧКИ unsafe
+//      (sequence/run guard), докато SUIT clubs (swapCount=3) има safe plan.
+// ---------------------------------------------------------------------------
+{
+  const natural20 = shuffleWithRandom(FULL_DECK, createSeededRandom('swap3-search-natural-252'))
+  const result20 = applyServerAntiBadLuckToDeck(natural20, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5, top: 5, left: 5 }), createSeededRandom('swap3-search-deck-252'))
+  const rescue20 = result20.rescues.top
+  const naturalTopFive20 = firstFive(natural20, 'top').map((c) => c.id)
+  const swapCount20 = rescue20 ? rescue20.cardIds.filter((id) => !naturalTopFive20.includes(id)).length : -1
+
+  // Независима проверка: 1-swap (hearts) и 2-swap (spades) SUIT candidates
+  // за 'top' в това тесте наистина съществуват, но ВСИЧКИТЕ им realized
+  // plans са unsafe — потвърждава, че 3 е ГЛОБАЛНИЯТ минимум тук, не просто
+  // "каквото е приложено".
+  const heartsCandidate = { type: 'SUIT' as const, variant: 'hearts', cardIds: ['hearts-J', 'hearts-9', 'hearts-10'] }
+  const spadesCandidate = { type: 'SUIT' as const, variant: 'spades', cardIds: ['spades-J', 'spades-7', 'spades-9'] }
+  const naturalFullHands20 = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(natural20, seat)])) as Record<Seat, ServerCard[]>
+  const isPlanSafe = (resultDeck: ServerCard[]) => {
+    const resultFullHands = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(resultDeck, seat)])) as Record<Seat, ServerCard[]>
+    return isServerGoodFirstFive(firstFive(resultDeck, 'top')) &&
+      isServerAntiBadLuckNaturalRunPreserved(naturalFullHands20, resultFullHands) &&
+      isServerAntiBadLuckSequencePlanSafe(naturalFullHands20, resultFullHands, { allowArtificialQuart: false, allowArtificialQuintPlus: false }) &&
+      isServerAntiBadLuckSquarePlanSafe(naturalFullHands20, resultFullHands)
+  }
+  const heartsPlans = enumerateServerAntiBadLuckRealizedPlans(natural20, 'top', FIRST_FIVE_INDICES, heartsCandidate)
+  const spadesPlans = enumerateServerAntiBadLuckRealizedPlans(natural20, 'top', FIRST_FIVE_INDICES, spadesCandidate)
+  const heartsAllUnsafe = heartsPlans.length > 0 && heartsPlans.every((plan) => !isPlanSafe(plan.resultDeck))
+  const spadesAllUnsafe = spadesPlans.length > 0 && spadesPlans.every((plan) => !isPlanSafe(plan.resultDeck))
+
+  check(`[20] 3-swap избран само защото 1-swap (hearts, ${heartsPlans.length} realizations) и 2-swap (spades, ${spadesPlans.length} realizations) са ВСИЧКИ unsafe`,
+    swapCount20 === 3 && rescue20?.type === 'SUIT' && rescue20.variant === 'clubs' && heartsAllUnsafe && spadesAllUnsafe)
+}
+
+// ---------------------------------------------------------------------------
+// [21] Candidate-count independence (explicit 20-vs-1 сценарий от focused
+//      audit-а): eligibleTypes с 1 тип, дето абстрактно би имал 20 safe
+//      candidates, срещу друг тип с 1 safe candidate — weighted draw вижда
+//      само ИМЕНАТА на типовете (eligibleTypes), никога броя кандидати.
+// ---------------------------------------------------------------------------
+{
+  const eligibleTypes: Array<'SUIT' | 'ALL_TRUMPS' | 'NO_TRUMPS'> = ['SUIT', 'ALL_TRUMPS']
+  const counts = new Map<string, number>()
+  const SAMPLES = 20000
+  for (let seed = 0; seed < SAMPLES; seed += 1) {
+    const type = pickServerAntiBadLuckWeightedRescueType(eligibleTypes, SERVER_ANTI_BAD_LUCK_RESCUE_TYPE_WEIGHTS, createSeededRandom(`count-independence-${seed}`))
+    counts.set(type, (counts.get(type) ?? 0) + 1)
+  }
+  const suitShare = (counts.get('SUIT') ?? 0) / SAMPLES
+  check(`[21] SUIT с хипотетични 20 candidates срещу ALL_TRUMPS с 1 candidate (равни тегла 33:33) → ~50/50, не 20:1 (SUIT ${suitShare.toFixed(3)})`,
+    Math.abs(suitShare - 0.5) < 0.02)
+}
+
+// ---------------------------------------------------------------------------
+// [22] Generator duplicate check: getServerAntiBadLuckRescueCandidates не
+//      произвежда duplicate logical (canonical cardId-set) plans за никой
+//      тип, при никое от 0/1/2-anchor състоянията.
+// ---------------------------------------------------------------------------
+{
+  const noAnchor: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: [] }
+  const oneAnchor: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: ['clubs'] }
+  const twoAnchor: ServerAntiBadLuckAnchorConstraints = { naturalAnchorSuits: ['clubs', 'hearts'] }
+  let anyDuplicate = false
+  const report: string[] = []
+
+  for (const type of ['SUIT', 'ALL_TRUMPS', 'NO_TRUMPS'] as const) {
+    for (const [label, anchors] of [['0-anchor', noAnchor], ['1-anchor', oneAnchor], ['2-anchor', twoAnchor]] as const) {
+      const candidates = getServerAntiBadLuckRescueCandidates(type, anchors)
+      const keys = candidates.map((c) => [...c.cardIds].sort().join(','))
+      const hasDuplicate = new Set(keys).size !== keys.length
+      anyDuplicate ||= hasDuplicate
+      report.push(`${type}/${label}=${candidates.length}${hasDuplicate ? '(DUP!)' : ''}`)
+    }
+  }
+  check(`[22] 0 duplicate canonical cardId-set candidates за всички типове × anchor states (${report.join(', ')})`, !anyDuplicate)
+}
+
+// ---------------------------------------------------------------------------
+// [23] Weakest-card tie: enumerateServerAntiBadLuckRealizedPlans намира
+//      ВСИЧКИ distinct realizations на един candidate (не само произволна
+//      едната, както преди фикса) — ако поне една е safe, candidate-ът
+//      остава viable за planner-а, дори друга tied realization да е unsafe.
+//      Fixture: {hearts-J,hearts-9,hearts-7} (1 missing = hearts-J); natural
+//      терца hearts-7/8/9 на bottom + tied филър diamonds-7 (keepStrength 0
+//      и двете, off-suit за SUIT hearts). hearts-J естествено седи в right.
+// ---------------------------------------------------------------------------
+{
+  const tieBottom = ['hearts-7', 'hearts-8', 'hearts-9', 'diamonds-7', 'diamonds-A', 'clubs-K', 'spades-Q', 'diamonds-9']
+  const tieRight = ['hearts-J', 'spades-7', 'spades-8', 'clubs-Q', 'diamonds-Q', 'clubs-10', 'diamonds-10', 'spades-10']
+  const tieTop = ['clubs-7', 'clubs-8', 'clubs-9', 'clubs-J', 'clubs-A', 'diamonds-8', 'hearts-10', 'spades-9']
+  const tieLeft = ['diamonds-J', 'diamonds-K', 'hearts-Q', 'hearts-K', 'hearts-A', 'spades-J', 'spades-K', 'spades-A']
+  const tieDeck = buildFullHandDeck({ bottom: tieBottom, right: tieRight, top: tieTop, left: tieLeft })
+  const tieCandidate = { type: 'SUIT' as const, variant: 'hearts', cardIds: ['hearts-J', 'hearts-9', 'hearts-7'] }
+
+  const tiePlans = enumerateServerAntiBadLuckRealizedPlans(tieDeck, 'bottom', FIRST_FIVE_INDICES, tieCandidate)
+  const naturalFullHandsForTie = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(tieDeck, seat)])) as Record<Seat, ServerCard[]>
+  const isTiePlanSafe = (resultDeck: ServerCard[]) => {
+    const resultFullHands = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(resultDeck, seat)])) as Record<Seat, ServerCard[]>
+    return isServerAntiBadLuckNaturalRunPreserved(naturalFullHandsForTie, resultFullHands)
+  }
+  const safeCount = tiePlans.filter((plan) => isTiePlanSafe(plan.resultDeck)).length
+  const unsafeCount = tiePlans.length - safeCount
+  check(`[23] 1 candidate, ${tiePlans.length} distinct tie realizations намерени, ${safeCount} safe / ${unsafeCount} unsafe → candidate остава viable`,
+    tiePlans.length >= 2 && safeCount >= 1 && unsafeCount >= 1)
+}
+
+// ---------------------------------------------------------------------------
+// [24] Weakest-card tie: candidate, чиито ВСИЧКИ realizations са unsafe →
+//      reject. Реален fixture (от [20], seed=252): SUIT hearts за seat `top`
+//      има 3 distinct realizations, ВСИЧКИТЕ unsafe.
+// ---------------------------------------------------------------------------
+{
+  const natural24 = shuffleWithRandom(FULL_DECK, createSeededRandom('swap3-search-natural-252'))
+  const heartsCandidate24 = { type: 'SUIT' as const, variant: 'hearts', cardIds: ['hearts-J', 'hearts-9', 'hearts-10'] }
+  const naturalFullHands24 = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(natural24, seat)])) as Record<Seat, ServerCard[]>
+  const isPlanSafe24 = (resultDeck: ServerCard[]) => {
+    const resultFullHands = Object.fromEntries(SERVER_SEAT_ORDER.map((seat) => [seat, fullHand(resultDeck, seat)])) as Record<Seat, ServerCard[]>
+    return isServerGoodFirstFive(firstFive(resultDeck, 'top')) &&
+      isServerAntiBadLuckNaturalRunPreserved(naturalFullHands24, resultFullHands) &&
+      isServerAntiBadLuckSequencePlanSafe(naturalFullHands24, resultFullHands, { allowArtificialQuart: false, allowArtificialQuintPlus: false }) &&
+      isServerAntiBadLuckSquarePlanSafe(naturalFullHands24, resultFullHands)
+  }
+  const plans24 = enumerateServerAntiBadLuckRealizedPlans(natural24, 'top', FIRST_FIVE_INDICES, heartsCandidate24)
+  const allUnsafe24 = plans24.length > 0 && plans24.every((plan) => !isPlanSafe24(plan.resultDeck))
+  const result24 = applyServerAntiBadLuckToDeck(natural24, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5, right: 5, top: 5, left: 5 }), createSeededRandom('swap3-search-deck-252'))
+  check(`[24] candidate с ${plans24.length} realizations, ВСИЧКИ unsafe → reject (planner-ът никога не го избира за 'top')`,
+    allUnsafe24 && result24.rescueKinds.top?.variant !== 'hearts')
+}
+
+// ---------------------------------------------------------------------------
+// [25] Displaced-card natural terza destruction на NON-RESCUED seat —
+//      deterministic. Пряк тест на isServerAntiBadLuckNaturalRunPreserved
+//      (вече покрит структурно от [13e]), плюс end-to-end през [14]
+//      (2553+ раздавания, 0 нарушения) потвърждава, че механизмът наистина
+//      работи през реалния swap pipeline, не само на хартия.
+// ---------------------------------------------------------------------------
+{
+  const naturalRightTerza25 = cards('hearts-7', 'hearts-8', 'hearts-9', 'diamonds-K', 'spades-Q', 'clubs-A', 'diamonds-7', 'hearts-K')
+  const rightTerzaDestroyedByDisplacement = cards('hearts-7', 'hearts-9', 'diamonds-K', 'spades-Q', 'clubs-A', 'diamonds-7', 'hearts-K', 'clubs-J')
+  const neutral25 = cards('clubs-7', 'diamonds-8', 'clubs-K', 'spades-10', 'clubs-Q', 'diamonds-Q', 'hearts-A', 'spades-J')
+  check('[25] displaced карта (hearts-8 напуска, clubs-J пристига) разрушава natural терца на non-rescued seat (right) → reject',
+    !isServerAntiBadLuckNaturalRunPreserved(
+      { bottom: neutral25, right: naturalRightTerza25, top: neutral25, left: neutral25 },
+      { bottom: neutral25, right: rightTerzaDestroyedByDisplacement, top: neutral25, left: neutral25 },
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// [26] Unrelated нова терца НЕ компенсира разрушена original natural терца —
+//      isServerAntiBadLuckNaturalRunPreserved е keyed per-suit per-seat, не
+//      "има ли играчът терца някъде" — нова терца в ДРУГ suit едновременно с
+//      разрушаване на оригиналната все още трябва да reject-не.
+// ---------------------------------------------------------------------------
+{
+  const neutral26 = cards('spades-7', 'spades-8', 'clubs-K', 'spades-10', 'clubs-Q', 'diamonds-Q', 'hearts-A', 'spades-J')
+  const naturalBottom26 = cards('clubs-7', 'clubs-8', 'clubs-9', 'diamonds-K', 'spades-Q', 'hearts-K', 'diamonds-7', 'hearts-Q')
+  // clubs терца разрушена (8 заменена с Q) И едновременно се появява НОВА,
+  // несвързана терца в diamonds (diamonds-7,8,9), чрез замяна на hearts-K и
+  // hearts-Q с diamonds-8 и diamonds-9.
+  const clubsDestroyedDiamondsNewTerza = cards('clubs-7', 'clubs-Q', 'clubs-9', 'diamonds-K', 'spades-Q', 'diamonds-8', 'diamonds-7', 'diamonds-9')
+  check('[26] clubs терца разрушена (8→Q) + нова несвързана diamonds терца (7-8-9) едновременно → все пак reject (per-suit keying, не компенсира)',
+    !isServerAntiBadLuckNaturalRunPreserved(
+      { bottom: naturalBottom26, right: neutral26, top: neutral26, left: neutral26 },
+      { bottom: clubsDestroyedDiamondsNewTerza, right: neutral26, top: neutral26, left: neutral26 },
+    ))
+}
+
+// [27] Artificial нова терца остава напълно позволена — вече потвърдено от
+// [13d] (none → 3, allowed без ограничение). Не дублираме тук.
+
+// ---------------------------------------------------------------------------
+// [28] RNG instrumentation: rejected candidates консумират 0 RNG draws.
+//      ALL_BAD_DECK (пълен 0-anchor universe, ~84 abstract candidates, almost
+//      всички rejected освен печелившия) → total calls е малко И фиксирано
+//      (sequenceAllowance ×2 + type-pick ×1 + plan-pick ×0/1), НЕ расте с
+//      броя enumerate-нати/rejected candidates.
+// ---------------------------------------------------------------------------
+{
+  function makeCountingRandom(seed: string) {
+    const base = createSeededRandom(seed)
+    let calls = 0
+    return { next: () => { calls += 1; return base() }, count: () => calls }
+  }
+  const counting28 = makeCountingRandom('rng-free-28')
+  const result28 = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), counting28.next)
+  check(`[28] 0-anchor universe (~84 abstract candidates, почти всички rejected): total nextRandom() calls = ${counting28.count()} (<=5, независимо от enumeration size)`,
+    !!result28.rescues.bottom && counting28.count() <= 5)
+}
+
+// ---------------------------------------------------------------------------
+// [29] Candidate universe size variation НЕ добавя RNG draws преди type
+//      selection: 0-anchor (пълен universe) срещу 2-anchor ALL_TRUMPS
+//      (universe намален от 16 на 2 ALL_TRUMPS candidates) — totals трябва
+//      да са РАВНИ (и двете движени само от sequenceAllowance+type+plan).
+// ---------------------------------------------------------------------------
+{
+  function makeCountingRandom(seed: string) {
+    const base = createSeededRandom(seed)
+    let calls = 0
+    return { next: () => { calls += 1; return base() }, count: () => calls }
+  }
+  const fullUniverseDeck29 = ALL_BAD_DECK
+  const reducedUniverseDeck29 = buildDeck({
+    bottom: ['clubs-J', 'hearts-J', 'clubs-7', 'diamonds-7', 'spades-9'],
+    right: BAD_HANDS.right,
+    top: BAD_HANDS.top,
+    left: BAD_HANDS.left,
+  })
+  const countingFull29 = makeCountingRandom('universe-full-29')
+  const resultFull29 = applyServerAntiBadLuckToDeck(fullUniverseDeck29, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), countingFull29.next)
+  const countingReduced29 = makeCountingRandom('universe-reduced-29')
+  const resultReduced29 = applyServerAntiBadLuckToDeck(reducedUniverseDeck29, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), countingReduced29.next)
+  check(`[29] candidate universe size (84 vs ~70 abstract candidates) не влияе на RNG calls преди type selection: full=${countingFull29.count()}, reduced=${countingReduced29.count()}`,
+    !!resultFull29.rescues.bottom && !!resultReduced29.rescues.bottom && countingFull29.count() === countingReduced29.count())
+}
+
+// ---------------------------------------------------------------------------
+// [30] Финалният избран resultDeck е ТОЧНО deck-ът, който е бил validated —
+//      няма second/re-rolled realization. Детерминизъм: същият seed → същият
+//      deck (ако имаше скрит re-roll след избора, различни извиквания биха
+//      могли да покажат нестабилност дори при same-seed since re-roll би
+//      консумирал допълнителен RNG state по различен начин). Плюс directна
+//      проверка: прилагайки избрания rescue отново РЪЧНО чрез
+//      enumerateServerAntiBadLuckRealizedPlans дава resultDeck измежду
+//      чиито realizations е И точно примененият.
+// ---------------------------------------------------------------------------
+{
+  const idsOf = (deck: readonly ServerCard[]) => deck.map((card) => card.id).join(',')
+  const first30 = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom('final-plan-30'))
+  const second30 = applyServerAntiBadLuckToDeck(ALL_BAD_DECK, FIRST_DEAL_SEAT, stateWithPending({ bottom: 5 }), createSeededRandom('final-plan-30'))
+  const deterministic30 = idsOf(first30.deck) === idsOf(second30.deck) && JSON.stringify(first30.rescues) === JSON.stringify(second30.rescues)
+
+  let matchesEnumeration30 = false
+  if (first30.rescues.bottom) {
+    const replay = enumerateServerAntiBadLuckRealizedPlans(ALL_BAD_DECK, 'bottom', FIRST_FIVE_INDICES, first30.rescues.bottom)
+    matchesEnumeration30 = replay.some((plan) => idsOf(plan.resultDeck) === idsOf(first30.deck))
+  }
+  check('[30] seeded детерминизъм: същият seed → identичен deck и rescue (без скрит re-roll)', deterministic30)
+  check('[30b] приложеният resultDeck е измежду RNG-free enumerated realizations на приложения candidate (не нов random swap)',
+    matchesEnumeration30)
 }
 
 console.log(`\n${passed} passed, ${failed} failed`)

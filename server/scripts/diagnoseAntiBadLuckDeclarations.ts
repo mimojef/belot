@@ -390,7 +390,13 @@ for (let seed = 0; seed < SAMPLE_SIZE; seed += 1) {
   const result = applyServerAntiBadLuckToDeck(natural, FIRST_DEAL_SEAT, stateWithBottomPending(), createSeededRandom(dealSeed), DIAGNOSTIC_ANTI_BAD_LUCK_CONFIG)
 
   if (!result.rescueKinds.bottom) {
-    continue // bottom естествено GOOD — rescue изобщо не се опитва
+    // rescueKinds вече се записва само при успешен (приложен) rescue (виж
+    // minimum-swap planner-а) — това пропуска И "bottom естествено GOOD,
+    // rescue изобщо не е опитан", И "bottom BAD, опитан, но никъде няма
+    // safe candidate" (пълен fallback). За целите на тази диагностика
+    // (статистики само върху РЕАЛНО приложени rescue-та) двата случая са
+    // еквивалентни — и в двата няма приложен rescue за анализ.
+    continue
   }
 
   totalExecutions += 1
