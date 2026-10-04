@@ -1143,6 +1143,200 @@ await check('[21] suit contract: opponent\'s off-suit, non-trump card cannot leg
   assert(eligible === true, 'expected eligible: no other seat holds trump or the led suit, an off-suit card can never legally win')
 })
 
+// ============================================================================
+// ---- [22] SEQUENTIAL UNIVERSAL algorithm regression — production incident
+// room 229cf8fc-a259-4bf7-9771-6e6c2e5843b6, round 1. The single-level "flat"
+// check (shipped in 0366126) let a responder's ONE matching-suit card be
+// counted as a "blocker" against BOTH of the claimant's same-suit remaining
+// cards independently — but sequentially that one card can only ever be
+// played once, exposing a hidden trump on the second real trick. ----
+// ============================================================================
+
+const DIAMONDS_TRUMP_BID = { seat: 'right', contract: 'suit', trumpSuit: 'diamonds', doubled: false, redoubled: false } as const
+
+await check('[22A] EXACT production fixture (room 229cf8fc round 1) -> NOT eligible', () => {
+  // right leads clubs-10 then clubs-A (or the reverse): bottom follows suit
+  // with its one club on trick 1, then is void and forced to cut with
+  // diamonds-Q on trick 2.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'right',
+    hands: {
+      right: [card('clubs', '10'), card('clubs', 'A')],
+      bottom: [card('diamonds', 'Q'), card('clubs', '7')],
+      top: [card('clubs', '8'), card('spades', '7')],
+      left: [card('clubs', '9'), card('hearts', '7')],
+    },
+    winningBid: DIAMONDS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: bottom cuts with diamonds-Q on the second trick once void of clubs')
+})
+
+await check('[22B] same fixture WITHOUT the trump threat (bottom holds no diamonds at all) -> eligible', () => {
+  // Identical shape to [22A] — bottom still has exactly one club and one
+  // "spare" card — except the spare is a harmless off-suit, non-trump card
+  // instead of diamonds-Q. Isolates that it really was the trump specifically
+  // causing the NOT-eligible verdict in [22A], not the mere fact of having 2 cards.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'right',
+    hands: {
+      right: [card('clubs', '10'), card('clubs', 'A')],
+      bottom: [card('clubs', '7'), card('hearts', '7')],
+      top: [card('clubs', '8'), card('spades', '7')],
+      left: [card('clubs', '9'), card('hearts', '8')],
+    },
+    winningBid: DIAMONDS_TRUMP_BID,
+  })
+  assert(eligible === true, 'expected eligible: nobody holds trump, both club leads are genuinely safe sequentially')
+})
+
+await check('[22C] minimal isolation: claimant leads one suit twice, a single responder holds exactly ONE card of that suit + trump -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('clubs', '10'), card('clubs', 'A')],
+      top: [card('clubs', '7'), card('hearts', '7')], // one club (safe to follow once) + the only trump
+      right: [card('diamonds', '7'), card('diamonds', '8')], // harmless, void of clubs and trump
+      left: [card('spades', '7'), card('spades', '8')], // harmless, void of clubs and trump
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: top is void of clubs after trick 1 and legally cuts trick 2 with the trump')
+})
+
+await check('[22D] same setup but the responder holds TWO cards of the claimant\'s suit (never needs to cut) -> eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('clubs', '10'), card('clubs', 'A')],
+      top: [card('clubs', '7'), card('clubs', '8')], // TWO clubs, zero trump — can follow suit both times, never forced to cut
+      right: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('spades', '7'), card('spades', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === true, 'expected eligible: top can always follow suit with its two clubs, both claimant leads stay safe sequentially')
+})
+
+// ---- [22E] seat symmetry: the SAME depletion-then-cut pattern at partner, LEFT opponent, RIGHT opponent ----
+
+await check('[22E-partner] depletion-then-cut threat sits with the PARTNER (top, for sweepSeat=bottom) -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('clubs', '10'), card('clubs', 'A')],
+      top: [card('clubs', '7'), card('hearts', '7')], // bottom's partner
+      right: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('spades', '7'), card('spades', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: partner cuts trick 2 once void of clubs')
+})
+
+await check('[22E-left] depletion-then-cut threat sits with LEFT (bottom\'s opponent, team B) -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('clubs', '10'), card('clubs', 'A')],
+      left: [card('clubs', '7'), card('hearts', '7')], // bottom's opponent
+      right: [card('diamonds', '7'), card('diamonds', '8')],
+      top: [card('spades', '7'), card('spades', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: left opponent cuts trick 2 once void of clubs')
+})
+
+await check('[22E-right] depletion-then-cut threat sits with RIGHT (bottom\'s opponent, team B) -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('clubs', '10'), card('clubs', 'A')],
+      right: [card('clubs', '7'), card('hearts', '7')], // bottom's opponent
+      top: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('spades', '7'), card('spades', '8')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: right opponent cuts trick 2 once void of clubs')
+})
+
+// ---- [22F] ALL_TRUMPS / NO_TRUMPS: sequential (depth-2) ranking must stay correct ----
+// Note: neither all-trumps nor no-trumps has a "void of led suit -> may cut
+// with trump" escape at all (off-suit cards can NEVER win in either contract
+// — see getValidCardsInAllTrumpsContract and the inline no-trumps branch of
+// getServerValidPlayCards) — so the depletion-then-CUT mechanism in [22A-E]
+// is structurally specific to suit contracts. These two tests instead confirm
+// the ranking table is still applied correctly at BOTH recursion depths (not
+// just the first trick) under the new sequential search.
+
+await check('[22F-all-trumps] a responder holding both remaining same-suit cards, one of which outranks EITHER claimant lead -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'A'), card('hearts', 'K')], // all-trumps power 5, 3
+      right: [card('hearts', '9'), card('hearts', 'J')], // power 6, 7 — forced to overtrump on whichever is led
+      top: [card('clubs', '7'), card('clubs', '8')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: ALL_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: opponent\'s 9/J both outrank claimant\'s A/K under all-trumps ranking, for either lead order')
+})
+
+await check('[22F-no-trumps] a responder holding both remaining same-suit cards, one of which outranks EITHER claimant lead -> NOT eligible', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'Q'), card('hearts', 'J')], // no-trumps power 4, 3
+      right: [card('hearts', 'K'), card('hearts', '10')], // power 5, 6 — both outrank Q and J
+      top: [card('clubs', '7'), card('clubs', '8')],
+      left: [card('diamonds', '7'), card('diamonds', '8')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: opponent\'s K/10 both outrank claimant\'s Q/J under no-trumps ranking, for either lead order')
+})
+
+// ---- [22G] no-draw-out regression: ONE specific lead order would let the
+// claimant draw out the only dangerous card and then sweep everything — the
+// UNIVERSAL (not existential) quantifier over the claimant's own lead choice
+// must still reject this, because it is not safe for the OTHER lead order too ----
+
+await check('[22G] a lead order exists that would draw out the only threat and win everything, but the reverse order loses -> NOT eligible', () => {
+  // no-trumps (A > 10 > K): leading A first draws out the opponent's
+  // singleton 10, making K safe afterward — but leading K FIRST loses to that
+  // same 10 directly. The new universal-over-leads invariant must reject this
+  // regardless, because it must hold no matter which card gets led first.
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('spades', 'A'), card('spades', 'K')],
+      right: [card('spades', '10'), card('clubs', '7')],
+      top: [card('diamonds', '7'), card('diamonds', '8')],
+      left: [card('clubs', '8'), card('clubs', '9')],
+    },
+    winningBid: NO_TRUMPS_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: leading K first loses to opponent\'s 10 directly — draw-out via A-first does not rescue it')
+})
+
+// ---- [22H] minimum 2 remaining cards — unchanged ----
+
+await check('[22H] 1 remaining card -> NOT eligible regardless of how safe it looks (offer requires >= 2)', () => {
+  const eligible = computeServerSweepEligibility({
+    sweepSeat: 'bottom',
+    hands: {
+      bottom: [card('hearts', 'J')], // the single highest possible card — would be trivially unbeatable
+      right: [card('clubs', '7')],
+      top: [card('diamonds', '7')],
+      left: [card('spades', '7')],
+    },
+    winningBid: HEARTS_TRUMP_BID,
+  })
+  assert(eligible === false, 'expected NOT eligible: fewer than MIN_SWEEP_REMAINING_CARDS=2 remaining cards never offers a sweep')
+})
+
 console.log('\n' + '═'.repeat(64))
 console.log(`Passed: ${passed}  Failed: ${failed}`)
 if (failed > 0) process.exit(1)
