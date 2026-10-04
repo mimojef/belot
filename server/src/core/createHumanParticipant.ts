@@ -14,6 +14,9 @@ type CreateHumanParticipantOptions = {
   identity?: Partial<PlayerIdentitySnapshot>
   publicProfile?: PlayerPublicProfileSnapshot | null
   isGuestTrial?: boolean
+  // Виж HumanRoomParticipant.stakeLedgerScope — САМО matchmaking humans го
+  // подават (queue:${entryId}), виж createMatchedRoomFromEntries.ts.
+  stakeLedgerScope?: string | null
 }
 
 function createDefaultIdentity(): PlayerIdentitySnapshot {
@@ -50,5 +53,6 @@ export function createHumanParticipant(
     },
     publicProfile: options.publicProfile ?? null,
     ...(options.isGuestTrial ? { isGuestTrial: true } : {}),
+    stakeLedgerScope: options.stakeLedgerScope ?? null,
   }
 }

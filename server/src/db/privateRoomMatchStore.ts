@@ -43,6 +43,17 @@ export type PrivateRoomMatchStore = {
   /** finished_at >= now - visibilityHours (SQLite native datetime('now', ...) сравнение — виж likeStore.ts/yellowCoinGiftStore.ts за established конвенцията, избягва JS<->SQLite timezone/format mismatch). */
   listFinishedMatches: (visibilityHours: number) => PrivateRoomMatchRecord[]
   getMatch: (roomId: string) => PrivateRoomMatchRecord | null
+  /**
+   * Технически-abort cleanup САМО за zombie room lifecycle (root-cause audit:
+   * "session_in_game lock" §7 "Private room case") — НЕ е общ retention/
+   * cleanup job (виж "Никога не трие редове" коментара най-отгоре, който
+   * важи за нормалния finish/history lifecycle). Изрично `WHERE status =
+   * 'playing'` — никога не докосва 'finished' редове, значи не може да
+   * изтрие реална match история, дори при грешен/повторен caller. Връща
+   * true само ако реално е изтрила ред (idempotent — втори опит за същия
+   * roomId връща false без грешка).
+   */
+  deleteOrphanedPlayingMatch: (roomId: string) => boolean
   close: () => void
 }
 
@@ -142,6 +153,11 @@ export async function createPrivateRoomMatchStore(
     WHERE room_id = ?;
   `)
 
+  const deleteOrphanedPlayingMatchStatement = database.prepare(`
+    DELETE FROM private_room_matches
+    WHERE room_id = ? AND status = 'playing';
+  `)
+
   function recordMatchStarted(input: {
     roomId: string
     privateRoomId: string
@@ -181,6 +197,11 @@ export async function createPrivateRoomMatchStore(
     return row ? rowToRecord(row) : null
   }
 
+  function deleteOrphanedPlayingMatch(roomId: string): boolean {
+    const result = deleteOrphanedPlayingMatchStatement.run(roomId) as { changes?: number }
+    return (result.changes ?? 0) > 0
+  }
+
   function close(): void {
     database.close()
   }
@@ -192,6 +213,7 @@ export async function createPrivateRoomMatchStore(
     listPlayingMatches,
     listFinishedMatches,
     getMatch,
+    deleteOrphanedPlayingMatch,
     close,
   }
 }

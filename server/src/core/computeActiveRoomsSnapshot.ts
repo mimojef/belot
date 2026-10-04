@@ -27,6 +27,16 @@ export type ActiveRoomSnapshot = {
   workerId: string | null
   createdAt: number
   lastActivityAt: number
+  // Minimal zombie-room admin visibility (see roomTickHealthTracker.ts) —
+  // null for a healthy room. Already served as-is via the existing
+  // /api/admin/monitoring/current JSON diagnostics endpoint; deliberately
+  // NOT a new admin UI/table.
+  quarantineStatus: string | null
+  quarantineDetail: string | null
+  // Present only for tournament-match-origin rooms — lets an operator find
+  // the stuck bracket match without inventing new tournament semantics.
+  tournamentId: string | null
+  tournamentMatchId: string | null
 }
 
 function classifySeat(
@@ -57,9 +67,15 @@ function getRoomPhase(room: ServerRoom): string {
     : (room.game.phase ?? 'bootstrap')
 }
 
+export type ActiveRoomQuarantineInfo = {
+  status: string
+  detail: string | null
+}
+
 export function computeActiveRoomSnapshot(
   room: ServerRoom,
   getWorkerIdForRoom: (roomId: RoomId) => string | null,
+  getQuarantineInfo: (roomId: RoomId) => ActiveRoomQuarantineInfo | null = () => null,
 ): ActiveRoomSnapshot {
   let connectedHumans = 0
   let disconnectedHumans = 0
@@ -75,6 +91,8 @@ export function computeActiveRoomSnapshot(
     else bots += 1
   }
 
+  const quarantineInfo = getQuarantineInfo(room.id)
+
   return {
     roomId: room.id,
     phase: getRoomPhase(room),
@@ -85,6 +103,10 @@ export function computeActiveRoomSnapshot(
     workerId: getWorkerIdForRoom(room.id),
     createdAt: room.createdAt,
     lastActivityAt: room.updatedAt,
+    quarantineStatus: quarantineInfo?.status ?? null,
+    quarantineDetail: quarantineInfo?.detail ?? null,
+    tournamentId: room.config.tournamentId ?? null,
+    tournamentMatchId: room.config.tournamentMatchId ?? null,
   }
 }
 
@@ -120,9 +142,10 @@ function compareActiveRoomSnapshots(
 export function computeActiveRoomsSnapshot(
   rooms: Record<RoomId, ServerRoom>,
   getWorkerIdForRoom: (roomId: RoomId) => string | null,
+  getQuarantineInfo: (roomId: RoomId) => ActiveRoomQuarantineInfo | null = () => null,
 ): ActiveRoomSnapshot[] {
   const snapshots = Object.values(rooms).map((room) =>
-    computeActiveRoomSnapshot(room, getWorkerIdForRoom),
+    computeActiveRoomSnapshot(room, getWorkerIdForRoom, getQuarantineInfo),
   )
   snapshots.sort(compareActiveRoomSnapshots)
   return snapshots

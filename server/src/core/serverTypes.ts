@@ -112,6 +112,24 @@ export type HumanRoomParticipant = {
   identity: PlayerIdentitySnapshot
   publicProfile?: PlayerPublicProfileSnapshot | null
   isGuestTrial?: boolean
+  /**
+   * Exact match_economy_ledger scope string под който е записан ЭТОГО
+   * participant-а stake_debit — ако изобще е имал такъв (root-cause audit
+   * follow-up: "economy-safe technical-abort"). САМО matchmaking human
+   * participants го имат ненулево (`queue:${entryId}` — виж
+   * createMatchedRoomFromEntries.ts), защото ТОЗИ e единствения случай,
+   * където debit scope-ът не може да се reconstruct-не от room-а самия
+   * (private-room human/bot stakes и matchmaking bot stakes са винаги
+   * room-scoped — `${roomId}:v{N}` — discoverable директно от DB чрез LIKE
+   * pattern, виж matchEconomyStore.getRoomStakeLedgerScope, затова НЕ им
+   * трябва този field). `undefined` след JSON round-trip на legacy snapshot
+   * (записан преди това поле да съществува) означава "неизвестна
+   * provenance" — explicit различно от `null` ("нямаше stake"), но
+   * evaluateAutoAbortEligibility третира и двете като "not traceable" с
+   * `?? null` normalization, за да не разчита на TS-only разлика, която
+   * runtime JSON round-trip не гарантира.
+   */
+  stakeLedgerScope?: string | null
 }
 
 export type BotRoomParticipant = {

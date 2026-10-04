@@ -68,10 +68,26 @@ export type GameWorkerCpuUsageEntry = {
   cpuUsage: NodeJS.CpuUsage | null
 }
 
+export type ReleaseRoomIfWorkerUnavailableResult = {
+  // true само когато bookkeeping-ът реално е изчистен тук (worker-ът беше
+  // confirmed non-ready). false значи "нищо не е променено" — или room-ът
+  // вече няма assignment, или assigned worker-ът изглежда ready (в този
+  // случай caller-ът НЕ трябва да презаписва assignment-а — виж коментара на
+  // releaseRoomIfWorkerUnavailable по-долу за пълния safety argument).
+  released: boolean
+  previousWorkerId: string | null
+  previousWorkerState: GameWorkerLifecycleState | null
+}
+
 export type GameWorkerPool = {
   start(): Promise<void>
   ensureRoom(roomId: string): EnsurePoolRoomResult
   releaseRoom(roomId: string): Promise<void>
+  // Lifecycle-recovery escalation primitive (НЕ част от normal gameplay
+  // path) — виж коментара на имплементацията за пълния safety argument.
+  // Никога не променя поведението на releaseRoom/computeTickRooms за живи
+  // worker-и (T5 invariant в checkGameWorkerPool.ts остава непроменен).
+  releaseRoomIfWorkerUnavailable(roomId: string): ReleaseRoomIfWorkerUnavailableResult
   getWorkerIdForRoom(roomId: string): string | null
   computeTickRooms(
     rooms: GameWorkerTickRoomInput[],
@@ -467,6 +483,73 @@ export function createGameWorkerPool(
     return roomAssignments.get(roomId) ?? null
   }
 
+  // Zombie-room lifecycle escalation primitive (виж server/src/index.ts
+  // attemptRoomTickRecovery) — покрива ЕДИНСТВЕНО случая "worker-ът, на
+  // който room-ът е assigned, е потвърдено non-ready (crashed/failed)".
+  //
+  // releaseRoom() по-горе НЕ може да служи за това: тя минава през
+  // bundle.shadowSynchronizer.forgetRoomAndWait(), който праща съобщение
+  // на самия worker и чака ack — но reconcileRoom() в
+  // createRoomShadowSynchronizer.ts explicit reject-ва веднага щом
+  // config.client.getState() !== 'ready' (виж коментара там), БЕЗ да чисти
+  // local bookkeeping-а. За мъртъв worker това означава releaseRoom()
+  // permanently reject-ва и roomAssignments никога не се чисти — точно
+  // lifecycle hole-ът, доказан в root-cause audit-а.
+  //
+  // Затова тук НЕ се опитваме да "комуникираме" с мъртвия worker (той не
+  // може да отговори на нищо, завинаги) — правим ЧИСТО LOCAL bookkeeping
+  // cleanup, safe ЕДИНСТВЕНО защото:
+  //  (a) проверяваме lifecycleClient.getState() точно тук, synchronously,
+  //      непосредствено преди cleanup-а (не stale кеширана информация);
+  //  (b) non-ready е terminal в този клиент (виж handleRuntimeWorkerExit/
+  //      handleRuntimeWorkerError в createGameWorkerLifecycleClient.ts —
+  //      няма respawn/recovery обратно към 'ready' никъде в кода), затова
+  //      няма race с "worker-ът точно се връща към live" междувременно;
+  //  (c) мъртъв worker_thread не държи никакво mutable state за room-а,
+  //      което да "изтече" след release — всеки compute_tick_rooms request
+  //      носи пълния authoritative ServerRoom JSON fresh при всяко
+  //      повикване (виж gameWorkerThread.ts), значи няма duplicate-state
+  //      риск от това, че "забравяме" room-а локално, без worker-ът да го
+  //      е "забравил" насрещно.
+  //
+  // Ако worker-ът ВСЕ ОЩЕ е 'ready' (т.е. самата room е хвърлила
+  // deterministic computation error, не worker-а умрял), този метод
+  // връща released:false и НЕ променя нищо — caller-ът не трябва да пробва
+  // ensureRoom() след това (би създало duplicate ownership opit срещу жив
+  // worker, който все още смята, че притежава room-а).
+  function releaseRoomIfWorkerUnavailable(
+    roomId: string,
+  ): ReleaseRoomIfWorkerUnavailableResult {
+    if (!isValidRoomId(roomId)) {
+      return { released: false, previousWorkerId: null, previousWorkerState: null }
+    }
+
+    const workerId = roomAssignments.get(roomId) ?? null
+
+    if (workerId === null) {
+      return { released: false, previousWorkerId: null, previousWorkerState: null }
+    }
+
+    const bundle = bundleByWorkerId.get(workerId) ?? null
+
+    if (bundle === null) {
+      // Bundle-ът вече не съществува (пул shutdown в процес) — няма какво
+      // да се release-не локално; само report-вай старото assignment.
+      return { released: false, previousWorkerId: workerId, previousWorkerState: null }
+    }
+
+    const workerState = bundle.lifecycleClient.getState()
+
+    if (workerState === 'ready') {
+      return { released: false, previousWorkerId: workerId, previousWorkerState: workerState }
+    }
+
+    roomAssignments.delete(roomId)
+    bundle.assignedRoomIds.delete(roomId)
+
+    return { released: true, previousWorkerId: workerId, previousWorkerState: workerState }
+  }
+
   function validateTickInputs(
     rooms: GameWorkerTickRoomInput[],
     now: number,
@@ -741,6 +824,7 @@ export function createGameWorkerPool(
     start,
     ensureRoom,
     releaseRoom,
+    releaseRoomIfWorkerUnavailable,
     getWorkerIdForRoom,
     computeTickRooms,
     getHealth,

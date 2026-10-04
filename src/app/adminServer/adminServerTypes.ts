@@ -115,6 +115,10 @@ export type ActiveRoomSnapshot = {
   workerId: string | null
   createdAt: number
   lastActivityAt: number
+  quarantineStatus: string | null
+  quarantineDetail: string | null
+  tournamentId: string | null
+  tournamentMatchId: string | null
 }
 
 /**

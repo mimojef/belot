@@ -4,8 +4,49 @@ import {
   SERVER_SEAT_ORDER,
   SERVER_TEAM_A_SEATS,
 } from '../core/serverTypes.js'
+import { escapeSqlLikePattern } from './normalizeProfileIdentityText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+// Transient-vs-permanent classification for technical-abort refund failures
+// (root-cause audit follow-up — "refund retry exhaustion" fix, §2 of the
+// brief: classify with concrete codebase types, not fragile string
+// matching where it can be avoided). Mirrors the exact
+// SQLITE_BUSY(5)/SQLITE_LOCKED(6) detection already proven in
+// siteVisitStore.ts's isSqliteBusyError — same node:sqlite error shape
+// (numeric `errcode`, extended codes folded via `& 0xff`); duplicated
+// locally because every store file in this codebase already owns its own
+// copy of this exact helper rather than sharing one (established
+// convention here, not a new one). The string-regex fallback only covers
+// the case where `errcode` is absent — it is the SAME fallback
+// siteVisitStore.ts already relies on in production, not a new fragile
+// heuristic.
+export function isSqliteBusyError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const errcode = (error as { errcode?: unknown }).errcode
+  if (typeof errcode === 'number') {
+    const primaryCode = errcode & 0xff
+    return primaryCode === 5 || primaryCode === 6
+  }
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && /database (?:table )?is locked/i.test(message)
+}
+
+// A thrown exception from the refund write transaction below is classified
+// 'transient' ONLY when it is a positively-identified lock/busy condition —
+// exactly the class of failure a DB outage/contention produces, and the
+// class this fix's retry policy exists to ride out. Any OTHER thrown
+// exception (corrupted file, disk full, unexpected constraint violation)
+// is NOT assumed safe to retry forever — it is classified 'permanent' so
+// it surfaces as a loud terminal admin-required state instead of silently
+// retrying an error nobody has proven is recoverable. Structural data
+// problems (missing debit row, unreadable amount) never reach this
+// function at all — they are caught by an explicit pre-check BEFORE the
+// try/catch (see refundParticipantScopedStake's amount===null branch) and
+// classified 'permanent' directly, with no DB exception involved.
+export function classifyRefundThrowAsRetryKind(error: unknown): 'transient' | 'permanent' {
+  return isSqliteBusyError(error) ? 'transient' : 'permanent'
+}
 
 const BOT_WALLET_REFILL_THRESHOLD = 5_000
 const BOT_WALLET_REFILL_AMOUNT = 50_000
@@ -36,6 +77,44 @@ export type MatchEconomyStore = {
   ) =>
     | { ok: true; awardedPerSeat: Partial<Record<import('../core/serverTypes.js').Seat, number>> }
     | { ok: false; message: string }
+  /**
+   * Technical-abort refund [1/2] — ROOM-SCOPED debits (root-cause audit:
+   * "zombie Belot room / session_in_game lock", economy-safety follow-up).
+   * Finds every stake_debit ledger row whose scope starts with
+   * `${roomId}:v` (ЛЮБОЙ stateVersion suffix — виж getRoomStakeLedgerScope
+   * коментара защо текущия room.game.stateVersion не може да се ползва за
+   * reconstruct-ване на оригиналния scope) that has NEITHER a matching
+   * stake_refund NOR a winner_payout for the exact same (scope, profileId)
+   * — т.е. пари, които са излезли и никога не са се върнали в каквато и да
+   * е форма. Покрива: private-room human stakes (collectRoomStakes),
+   * private-room/matchmaking bot stakes (collectBotStakes) — ВСИЧКИ от тях
+   * са room-scoped по дефиниция. НЕ покрива matchmaking HUMAN stakes (виж
+   * refundParticipantScopedStake за тях — queue-scoped, различен namespace).
+   * Idempotent: втори опит намира нула недовършени редове и връща празен
+   * масив, не хвърля, не refund-ва повторно.
+   */
+  refundUnsettledRoomScopedStakes: (
+    roomId: string,
+  ) =>
+    | { ok: true; refunds: Array<{ profileId: ProfileId; amount: number; scope: string }> }
+    | { ok: false; message: string; kind: 'transient' | 'permanent' }
+  /**
+   * Technical-abort refund [2/2] — PARTICIPANT-SCOPED debit (за matchmaking
+   * human stakes, чийто ledger scope е `queue:${entryId}` — НЕ room-scoped,
+   * затова не се намира от refundUnsettledRoomScopedStakes по-горе). Scope-ът
+   * идва от HumanRoomParticipant.stakeLedgerScope (записан при room creation
+   * от createMatchedRoomFromEntries.ts) — caller-ът (abortQuarantinedRoom)
+   * никога не вика това за participant без такъв scope (виж
+   * evaluateAutoAbortEligibility — legacy rooms без scope са explicitly
+   * excluded от auto-abort). Idempotent: ако refund вече съществува (или
+   * debit никога не е съществувал), връща refunded:false без промяна.
+   */
+  refundParticipantScopedStake: (
+    scope: string,
+    profileId: ProfileId,
+  ) =>
+    | { ok: true; refunded: boolean; amount: number | null }
+    | { ok: false; message: string; kind: 'transient' | 'permanent' }
   close: () => void
 }
 
@@ -54,6 +133,20 @@ function getPrizeAmount(stakeAmount: number): number {
 }
 
 type MatchEconomyEntryType = 'stake_debit' | 'stake_refund' | 'winner_payout'
+
+// Единствен source of truth за room-scoped ledger scope string — ВСИЧКИ
+// room-scoped debit/payout пътища (collectRoomStakes/collectBotStakes/
+// payoutMatchWinners) ТРЯБВА да минават през тази функция, не да inline-ват
+// шаблона. Критично за technical-abort refund-а (виж
+// refundUnsettledRoomScopedStakes по-долу): scope-ът вгражда
+// room.game.stateVersion ВЪВ МОМЕНТА НА ДЕБИТА (ниска стойност, при room
+// start), не текущата stateVersion на stuck room-а (която може да е 75+
+// tick-а по-късно) — затова refund-ът НЕ reconstruct-ва scope от текущия
+// room обект, а чете го директно от вече записаните ledger редове чрез LIKE
+// pattern (виж долу). Тази функция остава единствен authoritative формат.
+export function getRoomStakeLedgerScope(room: ServerRoom): string {
+  return `${room.id}:v${room.game.stateVersion}`
+}
 
 function getTeamBySeat(seat: (typeof SERVER_SEAT_ORDER)[number]): Team {
   return SERVER_TEAM_A_SEATS.includes(seat) ? 'A' : 'B'
@@ -381,7 +474,7 @@ export async function createMatchEconomyStore(
       }
     }
 
-    const scope = `${room.id}:v${room.game.stateVersion}`
+    const scope = getRoomStakeLedgerScope(room)
     const profileIds = getHumanProfileIds(room)
 
     try {
@@ -464,7 +557,7 @@ export async function createMatchEconomyStore(
       return { ok: false, message: 'Невалиден залог за бот.' }
     }
 
-    const scope = `${room.id}:v${room.game.stateVersion}`
+    const scope = getRoomStakeLedgerScope(room)
     const botProfileIds = getBotProfileIds(room)
 
     if (botProfileIds.length === 0) {
@@ -535,7 +628,7 @@ export async function createMatchEconomyStore(
 
     const prizeAmount = getPrizeAmount(stakeAmount)
     const winningSeatEntries = getWinningSeatEntries(room, winnerTeam)
-    const scope = `${room.id}:v${room.game.stateVersion}`
+    const scope = getRoomStakeLedgerScope(room)
     const awardedPerSeat: Partial<Record<(typeof SERVER_SEAT_ORDER)[number], number>> = {}
 
     try {
@@ -587,6 +680,147 @@ export async function createMatchEconomyStore(
     return { ok: true, awardedPerSeat }
   }
 
+  // §1/§2 technical-abort refund (root-cause audit, economy-safety
+  // follow-up) — всички stake_debit редове, чиито room_id scope съвпада с
+  // `${roomId}:v%` (room-scoped — private-room humans + bots от ВСЕКИ room
+  // тип), БЕЗ matching stake_refund/winner_payout за СЪЩОТО (scope,
+  // profile_id). LIKE pattern-ът escape-ва roomId (UUID-и нямат % / _, но
+  // defensive — established конвенция, виж tournamentEconomyStore.ts).
+  const selectUnrefundedRoomScopedDebitsStatement = database.prepare(`
+    SELECT room_id, profile_id, amount
+    FROM match_economy_ledger AS debit
+    WHERE debit.room_id LIKE ? ESCAPE '\\'
+      AND debit.entry_type = 'stake_debit'
+      AND NOT EXISTS (
+        SELECT 1 FROM match_economy_ledger AS refund
+        WHERE refund.room_id = debit.room_id
+          AND refund.profile_id = debit.profile_id
+          AND refund.entry_type = 'stake_refund'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM match_economy_ledger AS payout
+        WHERE payout.room_id = debit.room_id
+          AND payout.profile_id = debit.profile_id
+          AND payout.entry_type = 'winner_payout'
+      );
+  `)
+
+  function refundUnsettledRoomScopedStakes(
+    roomId: string,
+  ):
+    | { ok: true; refunds: Array<{ profileId: ProfileId; amount: number; scope: string }> }
+    | { ok: false; message: string; kind: 'transient' | 'permanent' } {
+    const likePattern = `${escapeSqlLikePattern(roomId)}:v%`
+    const rows = selectUnrefundedRoomScopedDebitsStatement.all(likePattern) as Array<{
+      room_id: string
+      profile_id: ProfileId
+      amount: number
+    }>
+
+    if (rows.length === 0) {
+      return { ok: true, refunds: [] }
+    }
+
+    const refunds: Array<{ profileId: ProfileId; amount: number; scope: string }> = []
+
+    try {
+      database.exec('BEGIN;')
+
+      for (const row of rows) {
+        ensureWalletStatement.run(row.profile_id)
+        creditWalletStatement.run(row.amount, row.profile_id)
+        insertLedgerStatement.run(
+          randomUUID(),
+          row.room_id,
+          row.profile_id,
+          'stake_refund',
+          row.amount,
+          getWalletBalance(row.profile_id),
+        )
+        refunds.push({ profileId: row.profile_id, amount: row.amount, scope: row.room_id })
+      }
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+
+      return {
+        ok: false,
+        message:
+          error instanceof Error ? error.message : 'Room-scoped залозите не бяха върнати.',
+        kind: classifyRefundThrowAsRetryKind(error),
+      }
+    }
+
+    return { ok: true, refunds }
+  }
+
+  function refundParticipantScopedStake(
+    scope: string,
+    profileId: ProfileId,
+  ):
+    | { ok: true; refunded: boolean; amount: number | null }
+    | { ok: false; message: string; kind: 'transient' | 'permanent' } {
+    if (!hasLedgerEntry(scope, profileId, 'stake_debit')) {
+      return { ok: true, refunded: false, amount: null }
+    }
+
+    if (
+      hasLedgerEntry(scope, profileId, 'stake_refund') ||
+      hasLedgerEntry(scope, profileId, 'winner_payout')
+    ) {
+      return { ok: true, refunded: false, amount: getLedgerAmount(scope, profileId, 'stake_refund') }
+    }
+
+    const amount = getLedgerAmount(scope, profileId, 'stake_debit')
+
+    if (amount === null) {
+      // Structural data inconsistency, never a thrown DB exception — a
+      // stake_debit ledger ROW exists (checked above) but its amount
+      // column cannot be read back. No retry can fix a row that is
+      // already there and already unreadable — always 'permanent'.
+      return {
+        ok: false,
+        message: `stake_debit amount unreadable scope=${scope} profile=${profileId}`,
+        kind: 'permanent',
+      }
+    }
+
+    try {
+      database.exec('BEGIN;')
+      ensureWalletStatement.run(profileId)
+      creditWalletStatement.run(amount, profileId)
+      insertLedgerStatement.run(
+        randomUUID(),
+        scope,
+        profileId,
+        'stake_refund',
+        amount,
+        getWalletBalance(profileId),
+      )
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original failure
+      }
+
+      return {
+        ok: false,
+        message:
+          error instanceof Error ? error.message : 'Залогът не беше върнат.',
+        kind: classifyRefundThrowAsRetryKind(error),
+      }
+    }
+
+    return { ok: true, refunded: true, amount }
+  }
+
   function close(): void {
     database.close()
   }
@@ -599,6 +833,8 @@ export async function createMatchEconomyStore(
     collectRoomStakes,
     collectBotStakes,
     payoutMatchWinners,
+    refundUnsettledRoomScopedStakes,
+    refundParticipantScopedStake,
     close,
   }
 }

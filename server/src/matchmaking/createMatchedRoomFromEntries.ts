@@ -141,6 +141,15 @@ export function createMatchedRoomFromEntries(
         skillRating: entry.publicProfile?.skillRating ?? null,
       },
       publicProfile: entry.publicProfile,
+      // Economy-safe technical-abort follow-up (root-cause audit) —
+      // matchEconomyStore.collectQueueStake() debited this human under
+      // ledger scope `queue:${entry.entryId}` BEFORE this room even
+      // existed (see matchmakingTickInterval's early-debit path in
+      // index.ts). That scope is NOT derivable from the room afterwards —
+      // record it now, at the only point where both facts (entryId AND the
+      // resulting participant) are known together, so a later technical
+      // abort can find and refund the EXACT original debit.
+      stakeLedgerScope: `queue:${entry.entryId}`,
     })
 
     nextRoom = seatParticipantInRoom(nextRoom, seat, participant)

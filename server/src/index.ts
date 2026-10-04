@@ -237,6 +237,7 @@ import type {
   Team,
 } from './core/serverTypes.js'
 import { SERVER_SEAT_ORDER } from './core/serverTypes.js'
+import { abortQuarantinedRoom, type RefundEntry } from './core/abortQuarantinedRoom.js'
 import {
   createReconnectedHumanParticipant,
   findHumanParticipantByReconnectToken,
@@ -295,6 +296,14 @@ import type {
   GameWorkerSnapshot,
 } from './game/gameWorkerManager.js'
 import { createRoomRevisionRegistry } from './game/createRoomRevisionRegistry.js'
+import {
+  createRoomTickHealthTracker,
+  type RoomTickFailureKind,
+} from './game/roomTickHealthTracker.js'
+import {
+  handleRoomTickFailure as handleRoomTickFailurePipeline,
+  type RoomTickRecoveryDependencies,
+} from './core/roomTickRecoveryPipeline.js'
 import {
   createRoomShadowSynchronizer,
   type RoomShadowSynchronizer,
@@ -3665,6 +3674,12 @@ reconcileLegacySoloTournamentEntriesOnBoot()
 
 let serverState: ServerState = loadPersistedServerState()
 const roomRevisionRegistry = createRoomRevisionRegistry()
+// Zombie-room liveness tracking (root-cause audit "session_in_game lock") —
+// runtime-only, NOT persisted, intentionally reconstructable from nothing on
+// every restart (see roomTickHealthTracker.ts header comment). Shared by
+// tickRoomGameRuntimes()/attemptRoomTickRecovery() below and by
+// seedRestoredActiveRooms() at startup.
+const roomTickHealth = createRoomTickHealthTracker()
 
 for (const room of Object.values(serverState.rooms)) {
   roomRevisionRegistry.ensure(room.id)
@@ -4923,9 +4938,20 @@ for (const room of Object.values(serverState.rooms)) {
   const ensureResult = activeRoomRuntime.ensureRoom(room)
 
   if (!ensureResult.ok) {
-    throw new Error(
-      `[startup] Unable to restore active room=${room.id}: ${ensureResult.reason}`,
+    // §6 startup self-healing (root-cause audit) — a single corrupt/
+    // over-capacity persisted room must never crash the ENTIRE server
+    // startup (which would also prevent every OTHER healthy room from
+    // ever recovering). This loop runs against a throwaway single-worker
+    // manager (the real pool does not exist yet) — record a soft failure
+    // signal and keep booting; seedRestoredActiveRooms() below retries
+    // registration for every persisted room against the REAL pool shortly
+    // after, and will quarantine it (loudly) for real if it still fails
+    // there.
+    console.error(
+      `[startup] Unable to restore active room=${room.id}: ${ensureResult.reason} -- deferring to seedRestoredActiveRooms() retry against the real pool.`,
     )
+    roomTickHealth.recordFailure(room.id, 'not_assigned', Date.now())
+    continue
   }
 
   persistRoomSnapshot(room)
@@ -5173,18 +5199,179 @@ function forceRemoveTournamentRoomById(roomId: string): void {
   activeRoomRuntime.removeRoom(roomId)
 }
 
+// ─── Zombie-room lifecycle escalation (root-cause audit: session_in_game
+// lock) ──────────────────────────────────────────────────────────────────
+//
+// runAbortQuarantinedRoom(): thin, production-wiring wrapper around the
+// standalone, dependency-injected abortQuarantinedRoom() in
+// server/src/core/abortQuarantinedRoom.ts (extracted specifically so the
+// teardown sequencing/idempotency logic can be unit tested without a real
+// server, real SQLite database, or real timers — see
+// checkAbortQuarantinedRoom.ts). See that module's header comment for the
+// full economy-safety rationale: this performs ZERO
+// match_economy_ledger/profile_match_results/table_exit_penalties/
+// tournament-settlement writes, ever.
+// Economy-safe technical-abort refund wiring (root-cause audit follow-up —
+// matchmaking stake-loss blocker). Two independent ledger lookups, covering
+// the two disjoint scope namespaces a Belot room can ever owe money under:
+//  [1] room-scoped debits (`${roomId}:v{N}`) — private-room human stakes
+//      AND bot stakes in ANY room type (collectRoomStakes/collectBotStakes
+//      always use this scope) — found purely from roomId, no participant
+//      field needed.
+//  [2] participant-scoped debits (`queue:${entryId}`) — matchmaking HUMAN
+//      stakes only, found via HumanRoomParticipant.stakeLedgerScope.
+// abortQuarantinedRoom() only ever calls this AFTER
+// evaluateAutoAbortEligibility() has confirmed every human stake on this
+// room is traceable, so a missing stakeLedgerScope here already means
+// "this participant simply has none" (private-room human, or unstaked),
+// never "legacy room we should have refused".
+function refundTechnicalAbortStakes(
+  room: ServerRoom,
+): { ok: true; refunds: RefundEntry[] } | { ok: false; message: string; kind: 'transient' | 'permanent' } {
+  const roomScopedResult = matchEconomyStore.refundUnsettledRoomScopedStakes(room.id)
+  if (!roomScopedResult.ok) {
+    return roomScopedResult
+  }
+
+  const refunds: RefundEntry[] = [...roomScopedResult.refunds]
+
+  for (const seat of SERVER_SEAT_ORDER) {
+    const participant = room.seats[seat].participant
+    if (participant?.kind !== 'human') {
+      continue
+    }
+
+    const scope = participant.stakeLedgerScope ?? null
+    if (scope === null) {
+      continue
+    }
+
+    const profileId =
+      participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
+    if (profileId === null) {
+      continue
+    }
+
+    const participantResult = matchEconomyStore.refundParticipantScopedStake(scope, profileId)
+    if (!participantResult.ok) {
+      return participantResult
+    }
+    if (participantResult.refunded && participantResult.amount !== null) {
+      refunds.push({ profileId, amount: participantResult.amount, scope })
+    }
+  }
+
+  return { ok: true, refunds }
+}
+
+function runAbortQuarantinedRoom(
+  roomId: string,
+  reason: string,
+): ReturnType<typeof abortQuarantinedRoom> {
+  const result = abortQuarantinedRoom(
+    serverState,
+    roomId,
+    reason,
+    (id, state) => removeCommittedServerRoom(id, state),
+    {
+      finalizeActiveTableGiftImagesForRoom,
+      cleanupTempBotsFromRoom,
+      markRoomSnapshotRemoved,
+      removeRuntimeRoom: (id) => activeRoomRuntime.removeRoom(id),
+      removeHealthTracking: (id) => roomTickHealth.remove(id),
+      isPrivateTableOriginRoom: (room) => room.config.isPrivateTableOrigin === true,
+      deleteOrphanedPrivateMatchRow: (id) => privateRoomMatchStore.deleteOrphanedPlayingMatch(id),
+      forgetPrivateGameScoreDedup: (id) => lastNotifiedPrivateGameScoreByRoomId.delete(id),
+      broadcastPrivateGamesListToLobbyConnections,
+      refundStakes: refundTechnicalAbortStakes,
+      log: (message) => console.error(message),
+    },
+  )
+
+  serverState = result.nextServerState
+  return result
+}
+
+// Thin production wiring over the extracted, dependency-injected
+// roomTickRecoveryPipeline.ts (same rationale as runAbortQuarantinedRoom
+// above) — see checkRoomTickRecoveryPipeline.ts for the direct end-to-end
+// wiring test this enables: failure -> recovery attempts -> exhaustion ->
+// quarantine -> abort, driven through the REAL control flow with an
+// injected clock, not two separately-tested halves assumed to compose.
+function getRoomTickRecoveryDependencies(): RoomTickRecoveryDependencies {
+  return {
+    health: roomTickHealth,
+    getRoom: (roomId) => serverState.rooms[roomId] ?? null,
+    hasWorkerPool: gameWorkerPool !== null,
+    getWorkerIdForRoom: (roomId) => gameWorkerPool?.getWorkerIdForRoom(roomId) ?? null,
+    releaseRoomIfWorkerUnavailable: (roomId) =>
+      gameWorkerPool?.releaseRoomIfWorkerUnavailable(roomId) ?? {
+        released: false,
+        previousWorkerId: null,
+      },
+    ensureRoom: (room) => activeRoomRuntime.ensureRoom(room),
+    abortRoom: (roomId, reason) => runAbortQuarantinedRoom(roomId, reason),
+    log: (message) => console.error(message),
+  }
+}
+
+function handleRoomTickFailure(roomId: string, kind: RoomTickFailureKind, now: number): void {
+  handleRoomTickFailurePipeline(roomId, kind, now, getRoomTickRecoveryDependencies())
+}
+
 async function tickRoomGameRuntimes(): Promise<void> {
   if (isServerShuttingDown) {
     return
   }
 
-  const trackedRoomIds = activeRoomRuntime.listTrackedRoomIds()
+  const now = Date.now()
+  const allRoomIds = Object.keys(serverState.rooms)
+  let trackedRoomIds = activeRoomRuntime.listTrackedRoomIds()
+
+  // §6 self-healing reconciliation (root-cause audit) — cheap common-case
+  // check: in steady state every persisted room is already tracked, so
+  // this costs one length comparison per tick. Only walks
+  // serverState.rooms when the counts diverge (e.g. a startup-time
+  // ensureRoom() capacity failure, or any other path that left a room
+  // persisted but untracked) — retries registration immediately (safe:
+  // there is no existing worker assignment to conflict with, unlike the
+  // live-vs-dead-worker distinction attemptRoomTickRecovery() must make
+  // for already-assigned rooms) so the room re-enters the normal tick
+  // pipeline instead of being invisible to it forever. Still bounded by
+  // the same absolute quarantine ceiling if it never succeeds.
+  if (allRoomIds.length !== trackedRoomIds.length) {
+    const trackedSet = new Set(trackedRoomIds)
+    let reconciledAny = false
+
+    for (const roomId of allRoomIds) {
+      if (trackedSet.has(roomId) || roomTickHealth.isQuarantined(roomId)) {
+        continue
+      }
+
+      const room = serverState.rooms[roomId]
+      if (room === undefined) {
+        continue
+      }
+
+      const ensureResult = activeRoomRuntime.ensureRoom(room)
+
+      if (ensureResult.ok) {
+        reconciledAny = true
+        continue
+      }
+
+      handleRoomTickFailure(roomId, 'not_assigned', now)
+    }
+
+    if (reconciledAny) {
+      trackedRoomIds = activeRoomRuntime.listTrackedRoomIds()
+    }
+  }
 
   if (trackedRoomIds.length === 0) {
     return
   }
 
-  const now = Date.now()
   const roomsToTick: ServerRoom[] = []
 
   for (const roomId of trackedRoomIds) {
@@ -5193,6 +5380,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
     if (room === null) {
       activeRoomRuntime.removeRoom(roomId)
       roomRevisionRegistry.remove(roomId)
+      roomTickHealth.remove(roomId)
       continue
     }
 
@@ -5203,6 +5391,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
       cleanupTempBotsFromRoom(room)
       markRoomSnapshotRemoved(roomId)
       activeRoomRuntime.removeRoom(roomId)
+      roomTickHealth.remove(roomId)
       console.log(`[room-cleanup] removed inactive room=${roomId}`)
       continue
     }
@@ -5231,11 +5420,25 @@ async function tickRoomGameRuntimes(): Promise<void> {
     }
 
     for (const tickResult of batchResult.results) {
-      if (tickResult.kind === 'unchanged' || tickResult.kind === 'stale') {
+      if (tickResult.kind === 'unchanged') {
+        // Legitimate "nothing to do yet" — the tick pipeline is healthy for
+        // this room (worker alive, assignment valid, computation ran
+        // without error); it is just waiting on a timer/human action that
+        // has not expired yet. Counts as liveness, same as 'advanced'.
+        roomTickHealth.recordSuccess(tickResult.roomId, now)
+        continue
+      }
+
+      if (tickResult.kind === 'stale') {
+        // Benign TOCTOU (room was concurrently mutated by a direct human
+        // submit between candidate compute and apply) — happens on
+        // perfectly healthy, actively-played rooms too. Not a liveness
+        // signal either way; the next tick recomputes against fresh state.
         continue
       }
 
       if (tickResult.kind === 'not_assigned') {
+        handleRoomTickFailure(tickResult.roomId, 'not_assigned', now)
         continue
       }
 
@@ -5243,6 +5446,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
         logGameWorkerTickFailure(
           `Candidate compute failed room=${tickResult.roomId}: ${tickResult.message}`,
         )
+        handleRoomTickFailure(tickResult.roomId, 'compute_failed', now)
         continue
       }
 
@@ -5407,18 +5611,23 @@ async function tickRoomGameRuntimes(): Promise<void> {
         console.error(
           `[game-worker-tick] Failed to persist candidate roomId=${roomId}: ${formatErrorMessage(applyResult.error)}`,
         )
+        handleRoomTickFailure(roomId, 'apply_failed', now)
         continue
       }
 
       if (applyResult.kind === 'invalid') {
         console.error(`[game-worker-tick] ${applyResult.message}`)
+        handleRoomTickFailure(roomId, 'apply_failed', now)
         continue
       }
 
       if (applyResult.kind !== 'applied') {
+        // 'stale'/'missing' at the apply stage — same benign TOCTOU as the
+        // candidate-stage 'stale' kind above, not a liveness signal.
         continue
       }
 
+      roomTickHealth.recordSuccess(roomId, now)
     }
   }
 }
@@ -24064,27 +24273,57 @@ let startupWorkerHealth: GameWorkerLifecycleHealth | null = null
 let gameWorkerPool: GameWorkerPool | null = null
 let gameWorkerTickOrchestrator: GameWorkerTickOrchestrator
 
+// §6 startup self-healing (root-cause audit) — iterates ALL persisted
+// rooms in serverState.rooms directly, NOT only
+// activeRoomRuntime.listTrackedRoomIds(). A room can fail the earlier
+// synchronous registration loop above (which runs against a throwaway
+// single-worker manager, before the real worker pool/gameWorkerPool
+// variable even exists) and therefore never become "tracked" at all —
+// iterating serverState.rooms directly guarantees every persisted active
+// room gets at least one registration attempt against the REAL pool,
+// instead of silently falling through both registration passes and
+// becoming an untracked zombie from the very first tick.
+//
+// Failure here is handled the same way as a runtime recovery failure
+// (quarantine + loud log), never a thrown error that would crash the
+// entire server over one room — see quarantineRoomTick()/§6 for the full
+// rationale.
 function seedRestoredActiveRooms(): number {
-  const restoredRoomIds = activeRoomRuntime.listTrackedRoomIds()
+  let seededCount = 0
 
-  for (const roomId of restoredRoomIds) {
-    const room = serverState.rooms[roomId] ?? null
-
-    if (room === null) {
-      activeRoomRuntime.removeRoom(roomId)
-      continue
-    }
-
-    const result = activeRoomRuntime.ensureRoom(room)
-
-    if (!result.ok) {
-      throw new Error(
-        `[startup] Failed to assign restored room=${roomId}: ${result.reason}`,
-      )
+  for (const trackedRoomId of activeRoomRuntime.listTrackedRoomIds()) {
+    if (serverState.rooms[trackedRoomId] === undefined) {
+      activeRoomRuntime.removeRoom(trackedRoomId)
+      roomTickHealth.remove(trackedRoomId)
     }
   }
 
-  return restoredRoomIds.length
+  for (const room of Object.values(serverState.rooms)) {
+    const result = activeRoomRuntime.ensureRoom(room)
+
+    if (!result.ok) {
+      // Soft failure signal only (not an immediate quarantine+abort) — a
+      // capacity/ops shortfall at boot (e.g. no_capacity) says nothing
+      // about whether THIS room's state is actually corrupt, and
+      // destroying an otherwise-healthy, resumable room over a transient
+      // capacity shortfall would be strictly worse than the zombie bug
+      // this fix addresses. The reconciliation step at the top of
+      // tickRoomGameRuntimes() below retries ensureRoom() for any
+      // untracked room on every subsequent tick, so this room re-enters
+      // the SAME bounded recovery/quarantine pipeline as every other
+      // failure kind — it is never silently abandoned, but it is also
+      // never destroyed on a single startup-time capacity blip.
+      console.error(
+        `[startup] Failed to assign restored room=${room.id}: ${result.reason} -- will keep retrying via the normal tick-based recovery pipeline.`,
+      )
+      roomTickHealth.recordFailure(room.id, 'not_assigned', Date.now())
+      continue
+    }
+
+    seededCount += 1
+  }
+
+  return seededCount
 }
 
 try {
@@ -24354,8 +24593,16 @@ try {
     getActiveRoomCount: () => Object.keys(serverState.rooms).length,
     getRoomsByPhase: () => countServerRoomsByPhase(serverState.rooms),
     getActiveRooms: () =>
-      computeActiveRoomsSnapshot(serverState.rooms, (roomId) =>
-        gameWorkerPool?.getWorkerIdForRoom(roomId) ?? null,
+      computeActiveRoomsSnapshot(
+        serverState.rooms,
+        (roomId) => gameWorkerPool?.getWorkerIdForRoom(roomId) ?? null,
+        (roomId) => {
+          const health = roomTickHealth.getSnapshot(roomId)
+          if (health === null || health.status === 'healthy' || health.status === 'recovering') {
+            return null
+          }
+          return { status: health.status, detail: health.quarantineDetail }
+        },
       ),
     getWorkerPoolHealth: () => gameWorkerPool?.getHealth() ?? null,
     getWorkerCpuUsages: () => gameWorkerPool?.getWorkerCpuUsages() ?? Promise.resolve([]),
