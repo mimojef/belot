@@ -4761,6 +4761,47 @@ export function createLobbyFlowController(
     }
   }
 
+  /**
+   * Authoritative UI predicate за "може ли viewer-ът да gift-ва жълтици
+   * към accepted приятел" — mirror на backend isPikaTeamGiftMaxAmountSession
+   * || isAdminGiftUnlimitedSession (authStore.ts, /api/friends/:id/gift-coins
+   * и /api/friends/gift-coins/direct). Само pika_team и full admin, изрично
+   * БЕЗ subadmin/chat_admin/top_chat_admin/player — не разширява правата,
+   * само именува вече съществуващото условие, за reuse по-долу.
+   */
+  function isPrivilegedGiftCoinsSenderAuthSession(authSession: LobbyAuthSession | null): boolean {
+    return isPikaTeamGiftFriendshipBypassAuthSession(authSession) || isFullAdminAuthSession(authSession)
+  }
+
+  /**
+   * Единствен source of truth за giftFriendshipId overlay-а върху вече
+   * конструиран friendshipAction — "Подари жълтици" брифа §3/§6/§7: служебният
+   * бутон (accepted-friendship клонът) е видим САМО за privileged sender
+   * (isPrivilegedGiftCoinsSenderAuthSession по-горе). Normal user (accepted
+   * приятел, без privilege) никога не вижда този бутон, независимо от target
+   * профила — вижда само "Подари авоари" (giftShopRecipientProfileId).
+   *
+   * Извиквана И от buildLobbyScreenState(), И от buildPopupFriendshipAction()
+   * по-долу — преди имаха две независими копия на същата проверка, и само
+   * едната беше поправена (production regression: popup render path-ът
+   * показваше "Подари жълтици" на обикновен потребител за всеки accepted
+   * приятел, защото пропускаше privilege проверката). Mutира подадения
+   * friendshipAction директно (same pattern като преди extraction-а).
+   */
+  function applyPrivilegedGiftCoinsFriendshipOverlay(
+    authSession: LobbyAuthSession | null,
+    friendshipAction: LobbyScreenState['friendshipAction'],
+    acceptedRelationship: FriendRelationshipSnapshot | null,
+  ): void {
+    if (
+      friendshipAction !== null &&
+      acceptedRelationship?.status === 'accepted' &&
+      isPrivilegedGiftCoinsSenderAuthSession(authSession)
+    ) {
+      friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
+    }
+  }
+
   // Pure snapshot builder — извлечена от renderLobby() (виж call site-а там)
   // за reuse и от targeted-patch пътищата (appendTopicMessageNode/
   // refreshTopicsUnreadDom, viж handleServerMessage topic_* handlers), които
@@ -4778,22 +4819,7 @@ export function createLobbyFlowController(
             state.profilePopupProfile.profileId,
           )
         : null
-    // "Подари авоари" брифа §3/§6/§7 — служебното "Подари жълтици" (accepted-
-    // friendship клонът) вече е видимо САМО за privileged caller (pika_team
-    // ИЛИ full admin), mirror на backend gate-а (isPikaTeamGiftMaxAmountSession
-    // || isAdminGiftUnlimitedSession в index.ts friendGiftMatch route).
-    // Normal user (accepted приятел, но без privilege) вече НЕ вижда този
-    // бутон — вижда само новото "Подари авоари" (giftShopRecipientProfileId,
-    // виж по-долу), независимо от friendship статус.
-    const isPrivilegedStaffGiftSender =
-      isPikaTeamGiftFriendshipBypassAuthSession(authSession) || isFullAdminAuthSession(authSession)
-    if (
-      friendshipAction !== null &&
-      acceptedRelationship?.status === 'accepted' &&
-      isPrivilegedStaffGiftSender
-    ) {
-      friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
-    }
+    applyPrivilegedGiftCoinsFriendshipOverlay(authSession, friendshipAction, acceptedRelationship)
     const lobbyState: LobbyScreenState = {
       // Established API origin resolver (main.ts getApiBaseUrl) — local dev
       // frontend :5173 + backend :3001 split origin, same-origin/proxy в
@@ -17377,9 +17403,7 @@ export function createLobbyFlowController(
       state.profilePopupProfile?.profileId
         ? findRelationshipByProfileId(state.friendships, state.profilePopupProfile.profileId)
         : null
-    if (friendshipAction !== null && acceptedRelationship?.status === 'accepted') {
-      friendshipAction.giftFriendshipId = acceptedRelationship.friendshipId
-    }
+    applyPrivilegedGiftCoinsFriendshipOverlay(authSession, friendshipAction, acceptedRelationship)
     return friendshipAction
   }
 
