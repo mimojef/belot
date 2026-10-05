@@ -27,8 +27,9 @@
  *   [P13] "Долу картите" ПРЕДИ accept: няма sweepOffer, няма handsAtResolution,
  *         timerDeadlineAt=null (eligibility side-channel), ръцете не изтичат
  *   [P14] "Долу картите" СЛЕД accept: handsAtResolution е публичен и пълен
- *   [P15] нормалният player snapshot е НЕПРОМЕНЕН (декларациите за играча все
- *         още носят пълна metadata — Phase 2B е отделна)
+ *   [P15] player snapshot пази собствените си private данни (ownHand/token),
+ *         а декларациите са СЪЩАТА canonical публична проекция като при
+ *         spectator (Phase 2B)
  */
 
 const { createRoomSnapshotMessage, createSpectatorRoomSnapshotMessage } = await import(
@@ -391,15 +392,17 @@ await check('[P5] no unplayed card identity (id or suit+rank) anywhere in the pa
   assertNoHiddenCardLeak(spectatorMidPlay, midPlayHiddenCards, 'mid-play')
 })
 
-await check('[P5b] detector sanity: the NAIVE yourSeat=null room_snapshot DOES leak (declarations) — redaction is required', () => {
-  const naive = createRoomSnapshotMessage(midPlayRoom, null)
+await check('[P5b] detector sanity: the raw authoritative declarations DO leak — the detector flags them', () => {
+  // Суровите ServerDeclaration записи (privateMetadata) = това, което
+  // снапшотите изпращаха преди Phase 2B. Ако детекторът не ги хване, [P5]
+  // не доказва нищо.
   let detected = false
   try {
-    assertNoHiddenCardLeak(naive, midPlayHiddenCards, 'naive')
+    assertNoHiddenCardLeak({ declarations: midPlayState.declarations }, midPlayHiddenCards, 'raw')
   } catch {
     detected = true
   }
-  assert(detected, 'the leak detector must flag the naive snapshot; otherwise [P5] proves nothing')
+  assert(detected, 'the leak detector must flag raw declaration metadata; otherwise [P5] proves nothing')
 })
 
 await check('[P6] Терца held in hand -> no cards/cardIds/suit/highRank', () => {
@@ -564,13 +567,17 @@ await check('[P14] after acceptance: handsAtResolution is public and complete fo
   assert(spectator.game!.playing!.sweepOffer === null, 'sweepOffer stays null')
 })
 
-await check('[P15] normal player snapshot projection is unchanged (declarations still carry full metadata)', () => {
+await check('[P15] player snapshot keeps its own private data; declarations use the SAME public projection as spectator (Phase 2B)', () => {
   const player = createRoomSnapshotMessage(midPlayRoom, 'bottom')
   assert(player.type === 'room_snapshot', 'player snapshot type unchanged')
   assert(player.reconnectToken === 'RECONNECT_TOKEN_SECRET_bottom', 'player keeps own reconnect token')
   assert(player.game!.ownHand.length === midPlayHands.bottom.length, 'player keeps own hand')
+  assert(
+    JSON.stringify(player.game!.declarations) === JSON.stringify(spectatorMidPlay.game!.declarations),
+    'player and spectator must receive the identical canonical declaration projection',
+  )
   const kare = player.game!.declarations.find((d: any) => d.seat === 'right')!
-  assert(kare.points === 200 && kare.cardIds.length === 4, 'Phase 2A must NOT redact the player projection (Phase 2B)')
+  assert(kare.points === null && JSON.stringify(kare.cardIds) === JSON.stringify(['diamonds-J']), 'opponent Каре stays redacted for players too')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

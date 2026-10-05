@@ -517,12 +517,22 @@ export type RoomCompletedTrickSnapshot = {
   winnerSeat: Seat
 }
 
+/**
+ * ПУБЛИЧНАТА проекция на една декларация — еднаква за всеки viewer (играчи и
+ * spectator), виж createPublicDeclarationSnapshots в
+ * createRoomSnapshotMessage.ts (единствен source of truth за disclosure
+ * правилата). cards/cardIds съдържат САМО вече изиграни карти; suit/highRank
+ * са null, докато комбинацията не е изцяло изиграна (Белот: suit е видим
+ * от изиграната карта); points е null само за Каре с неизиграна карта
+ * (100/150/200 издава ранга). При scoring/match-ended всички карти са
+ * изиграни, затова metadata-та е пълна.
+ */
 export type RoomDeclarationSnapshot = {
   seat: Seat
   team: 'A' | 'B'
   type: 'sequence' | 'square' | 'belote'
   publicLabel: string
-  points: number
+  points: number | null
   cards: RoomCardSnapshot[]
   cardIds: string[]
   suit: 'clubs' | 'diamonds' | 'hearts' | 'spades' | null
@@ -653,18 +663,9 @@ export type RoomSnapshotMessage = {
 // belot_spectator_snapshot, построен от createSpectatorRoomSnapshotMessage
 // (allowlist projection, без никакви private/decision полета).
 
-/**
- * Declaration за spectator — същата форма като RoomDeclarationSnapshot, но
- * cards/cardIds съдържат САМО вече изиграни (публични) карти, а suit/
- * highRank/points са null, докато от тях може да се извлече неизиграна
- * карта (виж redactDeclarationsForSpectator в createRoomSnapshotMessage.ts).
- */
-export type RoomSpectatorDeclarationSnapshot = Omit<RoomDeclarationSnapshot, 'points'> & {
-  points: number | null
-}
-
-export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'declarations' | 'ownHand'> & {
-  declarations: RoomSpectatorDeclarationSnapshot[]
+// Декларациите вече са публичната проекция за всички viewers
+// (RoomDeclarationSnapshot) — spectator-ът ползва същата форма.
+export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'ownHand'> & {
   ownHand: []
 }
 

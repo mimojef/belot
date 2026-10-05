@@ -1288,7 +1288,10 @@ export type RoomDeclarationSnapshot = {
   team: Team
   type: 'sequence' | 'square' | 'belote'
   publicLabel: string
-  points: number
+  // Публична проекция от сървъра: null само за Каре с още неизиграна карта
+  // (стойността издава ранга); cards/cardIds съдържат само изиграни карти.
+  // При scoring всичко е изиграно -> пълна metadata.
+  points: number | null
   cards: RoomCardSnapshot[]
   cardIds: string[]
   suit: 'clubs' | 'diamonds' | 'hearts' | 'spades' | null

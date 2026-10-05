@@ -16,7 +16,6 @@ import {
   type RoomSnapshotMessage,
   type RoomTeamPointsSnapshot,
   type BelotSpectatorSnapshotMessage,
-  type RoomSpectatorDeclarationSnapshot,
   type RoomSpectatorGameSnapshot,
 } from './messageTypes.js'
 
@@ -101,23 +100,79 @@ function createCardSnapshot(card: ServerAuthoritativeGameState['deck'][number]):
   }
 }
 
-function createDeclarationSnapshot(
-  declaration: ServerAuthoritativeGameState['declarations'][number],
-): RoomDeclarationSnapshot {
-  return {
-    seat: declaration.seat,
-    team: declaration.team,
-    type: declaration.type,
-    publicLabel: declaration.publicLabel,
-    points: declaration.points,
-    cards: declaration.cards.map(createCardSnapshot),
-    cardIds: declaration.cardIds,
-    suit: declaration.suit,
-    highRank: declaration.highRank,
-    declaredAtTrickIndex: declaration.declaredAtTrickIndex,
-    announced: declaration.announced,
-    valid: declaration.valid,
+// ─── Declaration disclosure (единствен source of truth) ────────────────────
+//
+// Authoritative ServerDeclaration носи privateMetadata (cards/cardIds/suit/
+// highRank), а card id кодира реалната карта (`${suit}-${rank}`). Преди тази
+// проекция пълната metadata отиваше към ВСИЧКИ играчи — противник можеше от
+// WebSocket payload-а да научи неизиграни карти от чужда декларация.
+//
+// Политика: еднаква публична проекция за всеки viewer (собственик, партньор,
+// противник, spectator). Собственикът не губи нищо — той вече знае ръката си
+// чрез ownHand, а клиентът преди scoring ползва от декларацията само seat/
+// type/publicLabel/announced/declaredAtTrickIndex/points (подпис на
+// балончето) и cardIds.includes(изиграната карта) за Белот trigger-а.
+//
+// Само transport/view проекция — authoritative state не се променя.
+
+/**
+ * Карта е "скрита", докато е в ръката на някой играч (authoritativeState.hands).
+ * Изиграните карти (current/completed tricks) вече не са в hands; при приет
+ * "Долу картите" hands се изпразват и всички карти стават публични чрез
+ * sweepResolution.handsAtResolution. Декларациите и ръцете се нулират атомарно
+ * при нов рунд (createServerRoundStartState), затова стара декларация никога
+ * не се сравнява с ръцете на следващия рунд.
+ */
+function collectHiddenCardIds(authoritativeState: ServerAuthoritativeGameState): Set<string> {
+  const hidden = new Set<string>()
+  for (const seat of SERVER_SEAT_ORDER) {
+    for (const card of authoritativeState.hands[seat]) {
+      hidden.add(card.id)
+    }
   }
+  return hidden
+}
+
+/**
+ * Публичната презентация на декларацията (seat/team/type/publicLabel/
+ * announced/trick index/valid) винаги е видима; metadata, от която се
+ * възстановява неизиграна карта — не:
+ *  - cards/cardIds: само вече изиграни карти (за Белот това е изиграната
+ *    Дама/Поп — достатъчно за trigger-а на балончето в клиента);
+ *  - suit/highRank: само ако цялата комбинация е изиграна (изключение: Белот
+ *    suit, щом поне една от двете карти е изиграна — мастта е видима от нея);
+ *  - points: за Каре стойността (100/150/200) издава ранга -> null докато има
+ *    неизиграна карта; за поредици/Белот е еднозначна от publicLabel.
+ * При scoring/match-ended всички карти са изиграни -> пълна metadata.
+ */
+export function createPublicDeclarationSnapshots(
+  authoritativeState: ServerAuthoritativeGameState,
+): RoomDeclarationSnapshot[] {
+  const hiddenCardIds = collectHiddenCardIds(authoritativeState)
+
+  return authoritativeState.declarations.map((declaration) => {
+    const visibleCards = declaration.cards.filter((card) => !hiddenCardIds.has(card.id))
+    const visibleCardIds = declaration.cardIds.filter((cardId) => !hiddenCardIds.has(cardId))
+    const isFullyRevealed =
+      visibleCards.length === declaration.cards.length &&
+      visibleCardIds.length === declaration.cardIds.length
+    const isBeloteWithVisibleCard = declaration.type === 'belote' && visibleCards.length > 0
+
+    return {
+      seat: declaration.seat,
+      team: declaration.team,
+      type: declaration.type,
+      publicLabel: declaration.publicLabel,
+      points: isFullyRevealed || declaration.type !== 'square' ? declaration.points : null,
+      cards: visibleCards.map(createCardSnapshot),
+      cardIds: visibleCardIds,
+      suit: isFullyRevealed || isBeloteWithVisibleCard ? declaration.suit : null,
+      highRank: isFullyRevealed ? declaration.highRank : null,
+      declaredAtTrickIndex: declaration.declaredAtTrickIndex,
+      announced: declaration.announced,
+      valid: declaration.valid,
+    }
+  })
 }
 
 function createTeamPointsSnapshot(score: {
@@ -348,7 +403,7 @@ function createGameSnapshot(
     playing: createPlayingSnapshot(authoritativeState, yourSeat),
     scoring: createScoringSnapshot(authoritativeState),
     matchEnded: createMatchEndedSnapshot(authoritativeState, room.replayVotes ?? [], room.leaveVotes ?? [], room.awardedPrizePerSeat, yourSeat),
-    declarations: authoritativeState.declarations.map(createDeclarationSnapshot),
+    declarations: createPublicDeclarationSnapshots(authoritativeState),
     score: {
       match: createTeamPointsSnapshot(authoritativeState.score.match),
     },
@@ -407,72 +462,10 @@ export function createRoomSnapshotMessage(
 // така че бъдещо ново private поле в RoomSnapshotMessage/RoomGameSnapshot НЕ
 // изтича автоматично към spectator. Private/decision полетата се форсират
 // повторно (defense in depth), независимо от yourSeat=null семантиката.
-//
-// Нормалният player snapshot (createRoomSnapshotMessage) НЕ се променя тук —
-// redaction-ът на декларациите за всички viewers е отделна фаза (2B).
+// Декларациите идват от base.game — вече публичната canonical проекция
+// (createPublicDeclarationSnapshots), обща за всички viewers.
 
-/**
- * Карта е "скрита", докато е в ръката на някой играч (authoritativeState.hands).
- * Изиграните карти (current/completed tricks) вече не са в hands; при приет
- * "Долу картите" hands се изпразват и всички карти стават публични чрез
- * sweepResolution.handsAtResolution — в този момент и декларациите се
- * разкриват напълно.
- */
-function collectHiddenCardIds(authoritativeState: ServerAuthoritativeGameState): Set<string> {
-  const hidden = new Set<string>()
-  for (const seat of SERVER_SEAT_ORDER) {
-    for (const card of authoritativeState.hands[seat]) {
-      hidden.add(card.id)
-    }
-  }
-  return hidden
-}
-
-/**
- * Spectator вижда публичната презентация на декларацията (seat/team/type/
- * publicLabel/announced/trick index), но не и metadata, от която се
- * възстановява неизиграна карта:
- *  - cards/cardIds: само вече изиграни карти (за Белот това е изиграната
- *    Дама/Поп — достатъчно за trigger-а на балончето в клиента);
- *  - suit/highRank: само ако цялата комбинация е изиграна (изключение: Белот
- *    suit, щом поне една от двете карти е изиграна — мастта е видима от нея);
- *  - points: за Каре стойността (100/150/200) издава ранга -> null докато има
- *    неизиграна карта; за поредици/Белот е еднозначна от publicLabel.
- */
-export function redactDeclarationsForSpectator(
-  authoritativeState: ServerAuthoritativeGameState,
-): RoomSpectatorDeclarationSnapshot[] {
-  const hiddenCardIds = collectHiddenCardIds(authoritativeState)
-
-  return authoritativeState.declarations.map((declaration) => {
-    const visibleCards = declaration.cards.filter((card) => !hiddenCardIds.has(card.id))
-    const visibleCardIds = declaration.cardIds.filter((cardId) => !hiddenCardIds.has(cardId))
-    const isFullyRevealed =
-      visibleCards.length === declaration.cards.length &&
-      visibleCardIds.length === declaration.cardIds.length
-    const isBeloteWithVisibleCard = declaration.type === 'belote' && visibleCards.length > 0
-
-    return {
-      seat: declaration.seat,
-      team: declaration.team,
-      type: declaration.type,
-      publicLabel: declaration.publicLabel,
-      points: isFullyRevealed || declaration.type !== 'square' ? declaration.points : null,
-      cards: visibleCards.map(createCardSnapshot),
-      cardIds: visibleCardIds,
-      suit: isFullyRevealed || isBeloteWithVisibleCard ? declaration.suit : null,
-      highRank: isFullyRevealed ? declaration.highRank : null,
-      declaredAtTrickIndex: declaration.declaredAtTrickIndex,
-      announced: declaration.announced,
-      valid: declaration.valid,
-    }
-  })
-}
-
-function createSpectatorGameSnapshot(
-  game: RoomGameSnapshot,
-  authoritativeState: ServerAuthoritativeGameState,
-): RoomSpectatorGameSnapshot {
+function createSpectatorGameSnapshot(game: RoomGameSnapshot): RoomSpectatorGameSnapshot {
   // "Долу картите" timer side-channel: при чакащ private sweepOffer сървърът
   // държи currentTurnSeat=null, но timerDeadlineAt сочи изтичането на
   // офертата — това би доказало eligibility на победителя във взятката. Във
@@ -534,7 +527,7 @@ function createSpectatorGameSnapshot(
           awardedPrizeAmount: null,
         }
       : null,
-    declarations: redactDeclarationsForSpectator(authoritativeState),
+    declarations: game.declarations,
     score: game.score,
     handCounts: game.handCounts,
     ownHand: [],
@@ -543,11 +536,7 @@ function createSpectatorGameSnapshot(
 
 export function createSpectatorRoomSnapshotMessage(room: ServerRoom): BelotSpectatorSnapshotMessage {
   const base = createRoomSnapshotMessage(room, null)
-  const authoritativeState = room.game.authoritativeState
-  const game =
-    base.game && isAuthoritativeGameState(authoritativeState)
-      ? createSpectatorGameSnapshot(base.game, authoritativeState)
-      : null
+  const game = base.game ? createSpectatorGameSnapshot(base.game) : null
 
   return {
     type: 'belot_spectator_snapshot',

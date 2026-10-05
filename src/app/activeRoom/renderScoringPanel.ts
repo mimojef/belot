@@ -148,7 +148,8 @@ function getSquareStrength(declaration: RoomDeclarationSnapshot): number {
 }
 
 function getSequenceStrength(declaration: RoomDeclarationSnapshot): number {
-  return declaration.points * 100 + getRankStrength(declaration.highRank)
+  // points е null само за Каре с неизиграна карта — поредиците винаги го имат.
+  return (declaration.points ?? 0) * 100 + getRankStrength(declaration.highRank)
 }
 
 function getStrongestDeclaration(
