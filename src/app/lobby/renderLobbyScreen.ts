@@ -56,6 +56,7 @@ import { renderCpuIncidentsList } from '../adminServer/renderAdminCpuIncidents'
 import type { PlayerAccountRole, PlayerProfileFriendshipAction } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderPlayerProfilePopup } from '../../ui/overlays/renderPlayerProfilePopup'
 import { renderProfileAccessBlockPopup, attachProfileAccessBlockPopupListeners, type ProfileAccessBlockPopupState } from '../../ui/overlays/renderProfileAccessBlockPopup'
+import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 import type { AdminRegisteredProfilesModalState } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { renderAdminRegisteredProfilesModal } from '../adminInfo/renderAdminRegisteredProfilesModal'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
@@ -817,6 +818,13 @@ export type LobbyScreenState = {
   privateRoomsLifecycleTab: 'waiting' | 'playing' | 'finished'
   privateGamesPlaying: PrivateRoomMatchSnapshot[]
   privateGamesFinished: PrivateRoomMatchSnapshot[]
+  // ─── Belot Spectator Mode ("Гледай", Phase 3A) ──────────────────────────
+  belotSpectatingEnabled: boolean
+  belotSpectatorVipPopupOpen: boolean
+  belotSpectatorVipHasClaimedLaunchGift: boolean | null
+  belotSpectatorVipLaunchGiftDays: number | null
+  belotSpectatorVipClaimSubmitting: boolean
+  belotSpectatorVipClaimErrorText: string | null
   privateRoomInvite: {
     inviteId: string
     fromProfileId: string
@@ -1123,6 +1131,11 @@ export type RenderLobbyScreenOptions = {
   onTopicsVipPopupClose: () => void
   onTopicsVipPopupClaimLaunchGift: () => void
   onTopicsVipPopupGoToShop: () => void
+  // ─── Belot Spectator Mode ("Гледай", Phase 3A) ──────────────────────────
+  onWatchBelotRoomClick: (roomId: string) => void
+  onBelotSpectatorVipPopupClose: () => void
+  onBelotSpectatorVipPopupClaimLaunchGift: () => void
+  onBelotSpectatorVipPopupGoToShop: () => void
   // ─── Topics Moderation (Етап 4) ──────────────────────────────────────────
   onTopicMuteHistoryOpen: () => void
   onTopicMuteHistoryClose: () => void
@@ -11302,6 +11315,22 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     }
   }
 
+  // "Гледай" — server-authoritative capability (state.belotSpectatingEnabled,
+  // виж PrivateGamesListMessage.belotSpectatingEnabled), НЕ client-only guess.
+  // Видим и за non-VIP (VIP gate-ът е в click handler-а, не тук — виж §2/§3
+  // брифа) — всеки ред в "Играещи" вече structurally е watchable (виж
+  // belotSpectatingEnabled полето в renderLobbyScreen.ts state коментара).
+  const watchBelotRoomButtonHtml = (roomId: string): string => `
+    <button
+      type="button"
+      data-watch-belot-room="${escapeHtml(roomId)}"
+      style="
+        padding:7px 14px;background:rgba(167,139,250,0.18);border:1px solid rgba(167,139,250,0.55);
+        border-radius:9px;color:#a78bfa;font-size:13px;font-weight:700;cursor:pointer;white-space:nowrap;flex-shrink:0;
+      "
+    >Гледай</button>
+  `
+
   const playingGameCardHtml = (game: PrivateRoomMatchSnapshot): string => `
     <div style="box-sizing:border-box;width:100%;padding:12px 16px;background:rgba(255,255,255,0.04);border-radius:12px;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
       <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;">
@@ -11310,6 +11339,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
             Вход ${formatStake(game.stake)} жълт.
           </div>
         </div>
+        ${state.belotSpectatingEnabled ? watchBelotRoomButtonHtml(game.roomId) : ''}
       </div>
       ${matchTeamsHtml(game)}
     </div>
@@ -11408,6 +11438,15 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
     ${renderPrivateRoomJoinConfirmPopup(state.privateRoomJoinSlotPopup)}
     ${renderPrivateRoomBlockedPopup(state.privateRoomBlockedPopupText)}
     ${renderPrivateRoomCreatorBlockedPopup(state.privateRoomCreatorBlockedPopupOpen)}
+    ${renderVipRequiredPopup({
+      open: state.belotSpectatorVipPopupOpen,
+      namespace: 'belot-spectator',
+      featureLabel: 'Гледането на игри',
+      hasClaimedLaunchGift: state.belotSpectatorVipHasClaimedLaunchGift,
+      launchGiftDays: state.belotSpectatorVipLaunchGiftDays,
+      claimSubmitting: state.belotSpectatorVipClaimSubmitting,
+      claimErrorText: state.belotSpectatorVipClaimErrorText,
+    })}
   `
 }
 
@@ -14358,6 +14397,28 @@ export function renderLobbyScreen(
     })
     root.querySelector<HTMLButtonElement>('[data-topics-vip-popup-go-to-shop="1"]')?.addEventListener('click', () => {
       options.onTopicsVipPopupGoToShop()
+    })
+  }
+
+  // ─── Belot Spectator Mode ("Гледай", Phase 3A) ──────────────────────────
+  {
+    root.querySelectorAll<HTMLButtonElement>('[data-watch-belot-room]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const roomId = btn.getAttribute('data-watch-belot-room')
+        if (roomId) options.onWatchBelotRoomClick(roomId)
+      })
+    })
+    root.querySelector<HTMLElement>('[data-belot-spectator-vip-popup-backdrop="1"]')?.addEventListener('click', (event) => {
+      if (event.target === event.currentTarget) options.onBelotSpectatorVipPopupClose()
+    })
+    root.querySelector<HTMLButtonElement>('[data-belot-spectator-vip-popup-close="1"]')?.addEventListener('click', () => {
+      options.onBelotSpectatorVipPopupClose()
+    })
+    root.querySelector<HTMLButtonElement>('[data-belot-spectator-vip-popup-claim="1"]')?.addEventListener('click', () => {
+      options.onBelotSpectatorVipPopupClaimLaunchGift()
+    })
+    root.querySelector<HTMLButtonElement>('[data-belot-spectator-vip-popup-go-to-shop="1"]')?.addEventListener('click', () => {
+      options.onBelotSpectatorVipPopupGoToShop()
     })
   }
 

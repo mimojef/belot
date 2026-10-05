@@ -1,7 +1,15 @@
-// VIP-required popup за "Теми" composer (Етап 2). Отваря се при tap върху
-// composer-а от Non-VIP регистриран потребител. Композицията следва
-// конвенцията на renderPlayerProfilePopup.ts (inline стилове, escapeHtml,
-// data-* атрибути за wiring в renderLobbyScreen.ts).
+// VIP-required popup — общ, reusable компонент (първоначално само за "Теми"
+// composer, Етап 2; от Phase 3A го ползва и Belot Spectator "Гледай" flow-а).
+// Отваря се при tap/click от Non-VIP регистриран потребител. Композицията
+// следва конвенцията на renderPlayerProfilePopup.ts (inline стилове,
+// escapeHtml, data-* атрибути за wiring в renderLobbyScreen.ts).
+//
+// `namespace` генерира data-${namespace}-vip-popup-* атрибутите — всеки
+// caller (Topics, Belot spectator, ...) wire-ва собствен independent popup
+// instance, без DOM collision, дори ако theoretically и двата биха били в
+// markup-а едновременно. `featureLabel` е subject-ът на двете заглавни
+// изречения ("${featureLabel} е достъпно само за VIP." / "${featureLabel}
+// изисква активен VIP.") — единствената content разлика между caller-и.
 //
 // Три състояния:
 //   A) Статусът все още не е зареден (isVipGateLoaded=false) -> "Зареждане..."
@@ -9,9 +17,9 @@
 //      безплатно" (X е server-side admin-configurable стойност, виж
 //      adminSettingsStore.ts freeTopicsVipDays)
 //   C) hasClaimedLaunchGift===true ИЛИ launchGiftDays===0 -> само "Вземи VIP",
-//      отваря Shop -> VIP tab директно (виж openVipShopFromTopicsPopup в
-//      createLobbyFlowController.ts) — БЕЗ inert "ще бъдат налични скоро"
-//      съобщение, магазинът вече работи.
+//      отваря Shop -> VIP tab директно (виж openVipShopFromTopicsPopup /
+//      openVipShopFromBelotSpectatorPopup в createLobbyFlowController.ts) —
+//      БЕЗ inert "ще бъдат налични скоро" съобщение, магазинът вече работи.
 
 function escapeHtml(value: string): string {
   return value
@@ -24,6 +32,10 @@ function escapeHtml(value: string): string {
 
 export type VipRequiredPopupState = {
   open: boolean
+  /** Drives data-${namespace}-vip-popup-* attribute names — виж file header. */
+  namespace: string
+  /** Subject на "${featureLabel} е достъпно само за VIP." / "... изисква активен VIP." */
+  featureLabel: string
   /** null = VIP gate статусът все още не е зареден — показваме кратко "Зареждане...". */
   hasClaimedLaunchGift: boolean | null
   /** null = все още не е зареден. 0 = безплатният подарък е изключен от admin настройка (виж freeTopicsVipDays). */
@@ -35,6 +47,7 @@ export type VipRequiredPopupState = {
 export function renderVipRequiredPopup(state: VipRequiredPopupState): string {
   if (!state.open) return ''
 
+  const ns = state.namespace
   const isLoaded = state.hasClaimedLaunchGift !== null && state.launchGiftDays !== null
   const giftAvailable = isLoaded && state.hasClaimedLaunchGift === false && (state.launchGiftDays as number) > 0
 
@@ -42,11 +55,11 @@ export function renderVipRequiredPopup(state: VipRequiredPopupState): string {
     ? `<div style="padding:24px 0;text-align:center;color:rgba(248,250,252,0.5);font-size:14px;">Зареждане...</div>`
     : giftAvailable
       ? `
-        <p style="margin:0 0 4px;font-size:15px;line-height:1.5;color:#f8fafc;font-weight:700;">Писането в „Теми“ е достъпно само за VIP.</p>
+        <p style="margin:0 0 4px;font-size:15px;line-height:1.5;color:#f8fafc;font-weight:700;">${escapeHtml(state.featureLabel)} е достъпно само за VIP.</p>
         <p style="margin:0 0 16px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.72);">Pika.bg ви подарява ${state.launchGiftDays} дни безплатен VIP.</p>
         <button
           type="button"
-          data-topics-vip-popup-claim="1"
+          data-${ns}-vip-popup-claim="1"
           ${state.claimSubmitting ? 'disabled' : ''}
           style="
             width:100%;padding:12px 16px;border:0;border-radius:10px;
@@ -59,11 +72,11 @@ export function renderVipRequiredPopup(state: VipRequiredPopupState): string {
         ${state.claimErrorText ? `<p style="margin:12px 0 0;font-size:13px;color:#f87171;text-align:center;">${escapeHtml(state.claimErrorText)}</p>` : ''}
       `
       : `
-        <p style="margin:0 0 4px;font-size:15px;line-height:1.5;color:#f8fafc;font-weight:700;">Писането в „Теми“ изисква активен VIP.</p>
+        <p style="margin:0 0 4px;font-size:15px;line-height:1.5;color:#f8fafc;font-weight:700;">${escapeHtml(state.featureLabel)} изисква активен VIP.</p>
         <p style="margin:0 0 16px;font-size:14px;line-height:1.5;color:rgba(248,250,252,0.72);">${state.hasClaimedLaunchGift ? 'Безплатният подарък вече е използван за този профил.' : 'Разгледай VIP офертите в магазина.'}</p>
         <button
           type="button"
-          data-topics-vip-popup-go-to-shop="1"
+          data-${ns}-vip-popup-go-to-shop="1"
           style="
             width:100%;padding:12px 16px;border:0;border-radius:10px;
             background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);
@@ -74,11 +87,11 @@ export function renderVipRequiredPopup(state: VipRequiredPopupState): string {
       `
 
   return `
-    <div data-topics-vip-popup-backdrop="1" style="
+    <div data-${ns}-vip-popup-backdrop="1" style="
       position:fixed;inset:0;z-index:1200;background:rgba(0,0,0,0.6);
       display:flex;align-items:center;justify-content:center;padding:16px;
     ">
-      <div data-topics-vip-popup-card="1" style="
+      <div data-${ns}-vip-popup-card="1" style="
         width:100%;max-width:360px;box-sizing:border-box;
         background:#141414;border:1px solid rgba(212,165,32,0.24);border-radius:16px;
         padding:22px 20px;box-shadow:0 20px 60px rgba(0,0,0,0.5);
@@ -87,7 +100,7 @@ export function renderVipRequiredPopup(state: VipRequiredPopupState): string {
           <span style="font-size:13px;font-weight:900;letter-spacing:0.04em;color:#d4a520;text-transform:uppercase;">VIP</span>
           <button
             type="button"
-            data-topics-vip-popup-close="1"
+            data-${ns}-vip-popup-close="1"
             aria-label="Затвори"
             style="border:0;background:transparent;color:rgba(248,250,252,0.6);font-size:20px;line-height:1;cursor:pointer;padding:4px;"
           >&times;</button>

@@ -2275,6 +2275,8 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
     </section>
     ${renderVipRequiredPopup({
       open: state.topicsVipPopupOpen,
+      namespace: 'topics',
+      featureLabel: 'Писането в „Теми“',
       hasClaimedLaunchGift: state.topicsVipGate ? state.topicsVipGate.hasClaimedLaunchGift : null,
       launchGiftDays: state.topicsVipGate ? state.topicsVipGate.launchGiftDays : null,
       claimSubmitting: state.topicsVipClaimSubmitting,

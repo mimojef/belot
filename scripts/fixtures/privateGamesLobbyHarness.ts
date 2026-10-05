@@ -21,6 +21,13 @@ function record(name: string) {
   }
 }
 
+// Belot Spectator Mode VIP gate — configurable mock responses (виж
+// checkBelotSpectatorWatchVipFlow.ts). Default: gate още не е "resolved"
+// (getVipGateStatusResponse() връща null) значи ensureTopicsVipGateLoaded
+// не пише нищо в state — тестовете explicit сетват сценарий преди click.
+let vipGateStatusResponse: { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean; launchGiftDays: number } | { ok: false } = { ok: false }
+let claimLaunchGiftResponse: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean; giftDisabled: boolean } = { ok: false, alreadyClaimed: false, giftDisabled: false }
+
 const controller = createLobbyFlowController({
   root,
   joinMatchmaking: () => {},
@@ -43,6 +50,16 @@ const controller = createLobbyFlowController({
   onPrivateRoomChatSubscribe: record('onPrivateRoomChatSubscribe'),
   onPrivateRoomChatUnsubscribe: record('onPrivateRoomChatUnsubscribe'),
   onPrivateRoomChatSend: record('onPrivateRoomChatSend'),
+  onWatchBelotRoom: record('onWatchBelotRoom'),
+  onUnwatchBelotRoom: record('onUnwatchBelotRoom'),
+  onGetTopicsVipGateStatus: async () => {
+    record('onGetTopicsVipGateStatus')()
+    return vipGateStatusResponse
+  },
+  onClaimTopicsLaunchGift: async () => {
+    record('onClaimTopicsLaunchGift')()
+    return claimLaunchGiftResponse
+  },
 })
 
 function q<T extends Element>(selector: string): T | null {
@@ -55,8 +72,8 @@ function q<T extends Element>(selector: string): T | null {
   pushRoomsList: (rooms: unknown[]) => {
     controller.handleServerMessage({ type: 'private_rooms_list', rooms } as any)
   },
-  pushGamesList: (playing: unknown[], finished: unknown[]) => {
-    controller.handleServerMessage({ type: 'private_games_list', playing, finished } as any)
+  pushGamesList: (playing: unknown[], finished: unknown[], belotSpectatingEnabled = false) => {
+    controller.handleServerMessage({ type: 'private_games_list', playing, finished, belotSpectatingEnabled } as any)
   },
   pushGameScoreUpdate: (roomId: string, teamAScore: number, teamBScore: number) => {
     controller.handleServerMessage({ type: 'private_game_score_updated', roomId, teamAScore, teamBScore } as any)
@@ -103,4 +120,58 @@ function q<T extends Element>(selector: string): T | null {
   getCalls: () => calls,
   clearCalls: () => { calls.length = 0 },
   destroy: () => controller.destroy(),
+
+  // ─── Belot Spectator Mode ("Гледай", Phase 3A) ────────────────────────
+  hasWatchButton: (roomId: string): boolean => q(`[data-watch-belot-room="${roomId}"]`) !== null,
+  clickWatchBelotRoom: (roomId: string) => {
+    q<HTMLButtonElement>(`[data-watch-belot-room="${roomId}"]`)?.click()
+  },
+  setVipGateStatusResponse: (response: typeof vipGateStatusResponse) => { vipGateStatusResponse = response },
+  setClaimLaunchGiftResponse: (response: typeof claimLaunchGiftResponse) => { claimLaunchGiftResponse = response },
+  isBelotSpectatorVipPopupOpen: (): boolean => q('[data-belot-spectator-vip-popup-backdrop="1"]') !== null,
+  getBelotSpectatorVipPopupCardText: (): string | null =>
+    q<HTMLElement>('[data-belot-spectator-vip-popup-card="1"]')?.textContent?.trim() ?? null,
+  clickBelotSpectatorVipPopupClaim: () => {
+    q<HTMLButtonElement>('[data-belot-spectator-vip-popup-claim="1"]')?.click()
+  },
+  clickBelotSpectatorVipPopupGoToShop: () => {
+    q<HTMLButtonElement>('[data-belot-spectator-vip-popup-go-to-shop="1"]')?.click()
+  },
+  clickBelotSpectatorVipPopupClose: () => {
+    q<HTMLButtonElement>('[data-belot-spectator-vip-popup-close="1"]')?.click()
+  },
+  pushBelotSpectateStarted: (roomId: string) => {
+    controller.handleServerMessage({ type: 'belot_spectate_started', roomId } as any)
+  },
+  pushBelotSpectateDenied: (roomId: string, code: string, message: string) => {
+    controller.handleServerMessage({ type: 'belot_spectate_denied', roomId, code, message } as any)
+  },
+  pushBelotSpectateEnded: (roomId: string, reason: string) => {
+    controller.handleServerMessage({ type: 'belot_spectate_ended', roomId, reason } as any)
+  },
+  pushBelotSpectatorSnapshot: (roomId: string) => {
+    controller.handleServerMessage({
+      type: 'belot_spectator_snapshot',
+      viewerRole: 'spectator',
+      roomId,
+      roomStatus: 'playing',
+      yourSeat: null,
+      reconnectToken: null,
+      seats: [],
+      game: null,
+      stakeAmount: null,
+      isGuestTrial: false,
+      isPrivateTableOrigin: true,
+      isTournamentMatchOrigin: false,
+      activeTableGifts: [],
+    } as any)
+  },
+  pushConnected: () => {
+    controller.handleServerMessage({ type: 'connected', clientId: 'c1', message: 'ok' } as any)
+  },
+  getSpectatingBelotRoomId: (): string | null => controller.getSpectatingBelotRoomId(),
+  getPendingBelotSpectatorRoomId: (): string | null => controller.getPendingBelotSpectatorRoomId(),
+  getBelotSpectatorSnapshotRoomId: (): string | null => controller.getBelotSpectatorSnapshotRoomId(),
+  unwatchBelotSpectatorRoom: () => controller.unwatchBelotSpectatorRoom(),
+  getShopActiveTab: (): string => controller.getShopActiveTab(),
 }

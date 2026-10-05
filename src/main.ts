@@ -6753,6 +6753,8 @@ lobby = createLobbyFlowController({
   },
   onLudoWatchMatch: (matchId) => { client.watchLudoMatch(matchId) },
   onLudoUnwatchMatch: (matchId) => { client.unwatchLudoMatch(matchId) },
+  onWatchBelotRoom: (roomId) => { client.watchBelotRoom(roomId) },
+  onUnwatchBelotRoom: (roomId) => { client.unwatchBelotRoom(roomId) },
   onSupportMessagesLoad: () => loadSupportMessages(),
   onSupportSend: (body, imageDataUrl) => sendSupportMessage(body, imageDataUrl),
   onGuestContactSend: (input) => sendGuestContactMessage(input),

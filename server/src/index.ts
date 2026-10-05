@@ -3937,6 +3937,7 @@ function buildPrivateGamesListMessage(): PrivateGamesListMessage {
     finished: privateRoomMatchStore
       .listFinishedMatches(PRIVATE_ROOM_FINISHED_VISIBILITY_HOURS)
       .map(privateRoomMatchRecordToSnapshot),
+    belotSpectatingEnabled: isBelotSpectatorFeatureEnabled(),
   }
 }
 

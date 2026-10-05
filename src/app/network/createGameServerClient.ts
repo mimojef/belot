@@ -1027,6 +1027,11 @@ export type ClientMessage =
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
     }
+  // Belot Spectator Mode ("Гледай", Phase 2A/2C/3A) — mirror на server-а
+  // (server/src/protocol/messageTypes.ts). Spectator НИКОГА не използва
+  // join_room/resume_room/leave_active_room — само тези два типа.
+  | { type: 'watch_belot_room'; roomId: string }
+  | { type: 'unwatch_belot_room'; roomId: string }
   | {
       // "Играещи"/"Приключили" табове за /games/ludo — виж LudoGamesListMessage.
       type: 'request_ludo_games_list'
@@ -2034,6 +2039,70 @@ export type PrivateGamesListMessage = {
   type: 'private_games_list'
   playing: PrivateRoomMatchSnapshot[]
   finished: PrivateRoomMatchSnapshot[]
+  /** Server-authoritative capability (Phase 3A) — виж messageTypes.ts коментара. */
+  belotSpectatingEnabled: boolean
+}
+
+// ─── Belot Spectator Mode ("Гледай", Phase 2A/2C/3A) ───────────────────────
+// Spectator е read-only WS subscriber — НИКОГА room_snapshot, seat,
+// reconnectToken или currentRoomId (виж server/src/core/belotSpectatorRegistry.ts).
+// Phase 3A пази/маршрутизира тези съобщения, но още НЕ рендерира пълен
+// spectator playing screen (виж createLobbyFlowController.ts коментара) —
+// затова `game` тук reuse-ва СЪЩИЯ RoomGameSnapshot тип, вместо нов частичен
+// shape, за да не се налага повторно typing при Phase 3B.
+export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'ownHand'> & { ownHand: [] }
+
+export type BelotSpectatorSnapshotMessage = {
+  type: 'belot_spectator_snapshot'
+  viewerRole: 'spectator'
+  roomId: string
+  roomStatus: RoomStatus
+  yourSeat: null
+  reconnectToken: null
+  seats: RoomSeatSnapshot[]
+  game: RoomSpectatorGameSnapshot | null
+  stakeAmount: number | null
+  isGuestTrial: boolean
+  isPrivateTableOrigin: boolean
+  isTournamentMatchOrigin: boolean
+  activeTableGifts: ActiveTableGiftSnapshot[]
+}
+
+export type BelotSpectateStartedMessage = {
+  type: 'belot_spectate_started'
+  roomId: string
+}
+
+export type BelotSpectateDenialCode =
+  | 'feature_disabled'
+  | 'connection_inactive'
+  | 'not_authenticated'
+  | 'vip_required'
+  | 'room_not_found'
+  | 'room_not_watchable'
+  | 'participant'
+  | 'active_game_commitment'
+  | 'ludo_spectating'
+  | 'already_watching_other_room'
+
+export type BelotSpectateDeniedMessage = {
+  type: 'belot_spectate_denied'
+  roomId: string
+  code: BelotSpectateDenialCode
+  message: string
+}
+
+export type BelotSpectateEndedReason =
+  | 'unwatched'
+  | 'room_removed'
+  | 'game_commitment'
+  | 'ludo_spectating'
+  | 'replaced'
+
+export type BelotSpectateEndedMessage = {
+  type: 'belot_spectate_ended'
+  roomId: string
+  reason: BelotSpectateEndedReason
 }
 
 export type PrivateGameScoreUpdatedMessage = {
@@ -2779,6 +2848,10 @@ export type ServerMessage =
   | PrivateRoomCreatedNoticeMessage
   | PrivateGamesListMessage
   | PrivateGameScoreUpdatedMessage
+  | BelotSpectatorSnapshotMessage
+  | BelotSpectateStartedMessage
+  | BelotSpectateDeniedMessage
+  | BelotSpectateEndedMessage
   | LudoGamesListMessage
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageEventMessage
@@ -2969,6 +3042,8 @@ export type GameServerClient = {
   requestLudoGamesList: () => void
   watchLudoMatch: (matchId: string) => void
   unwatchLudoMatch: (matchId: string) => void
+  watchBelotRoom: (roomId: string) => void
+  unwatchBelotRoom: (roomId: string) => void
   requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
@@ -3364,6 +3439,10 @@ export function createGameServerClient(
   // handler-ите (Phase 1).
   function watchLudoMatch(matchId: string): void { send({ type: 'watch_ludo_match', matchId }) }
   function unwatchLudoMatch(matchId: string): void { send({ type: 'unwatch_ludo_match', matchId }) }
+  // Belot Spectator Mode ("Гледай", Phase 3A) — НИКОГА join_room/resume_room/
+  // leave_active_room; spectator няма reconnectToken (виж server-а).
+  function watchBelotRoom(roomId: string): void { send({ type: 'watch_belot_room', roomId }) }
+  function unwatchBelotRoom(roomId: string): void { send({ type: 'unwatch_belot_room', roomId }) }
 
   function requestPrivateGamesList(): void {
     send({ type: 'request_private_games_list' })
@@ -3531,6 +3610,8 @@ export function createGameServerClient(
     requestLudoGamesList,
     watchLudoMatch,
     unwatchLudoMatch,
+    watchBelotRoom,
+    unwatchBelotRoom,
     requestPrivateGamesList,
     createPrivateRoom,
     joinPrivateRoomSlot,

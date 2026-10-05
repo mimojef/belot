@@ -1427,6 +1427,16 @@ export type PrivateGamesListMessage = {
   type: 'private_games_list'
   playing: PrivateRoomMatchSnapshot[]
   finished: PrivateRoomMatchSnapshot[]
+  /**
+   * Server-authoritative capability (Phase 3A) — mirror на
+   * isBelotSpectatorFeatureEnabled() (виж core/belotSpectatorFeatureFlag.ts).
+   * Всеки ред в `playing` вече structurally satisfies isBelotRoomWatchable
+   * (само private-table-origin, non-tournament, non-guest-trial, status
+   * 'playing' маси се записват тук — виж recordPrivateRoomMatchStarted), така
+   * че клиентът не се нуждае от per-room watchable флаг — само от този
+   * общ feature gate, за да знае дали да показва "Гледай" бутона въобще.
+   */
+  belotSpectatingEnabled: boolean
 }
 
 // Targeted score-only delta push докато "Играещи" таб е отворен — избягва
