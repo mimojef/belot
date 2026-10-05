@@ -272,6 +272,11 @@ export type ClientMessage =
   // subscription модела).
   | { type: 'watch_ludo_match'; matchId: string }
   | { type: 'unwatch_ludo_match'; matchId: string }
+  // Belot Spectator Mode ("Гледай", Phase 2A) — read-only subscription към
+  // играеща частна Белот маса (roomId = ServerRoom id от "Играещи"), НЕ
+  // participant action. Една connection гледа максимум ЕДНА маса.
+  | { type: 'watch_belot_room'; roomId: RoomId }
+  | { type: 'unwatch_belot_room'; roomId: RoomId }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -641,6 +646,80 @@ export type RoomSnapshotMessage = {
   activeTableGifts?: ActiveTableGiftSnapshot[]
 }
 
+// ─── Belot Spectator Mode ("Гледай", Phase 2A — server foundation) ─────────
+// Spectator-ът е websocket subscriber БЕЗ game membership (виж
+// core/belotSpectatorRegistry.ts) — никога не получава room_snapshot, seat,
+// reconnectToken или currentRoomId. Получава изключително
+// belot_spectator_snapshot, построен от createSpectatorRoomSnapshotMessage
+// (allowlist projection, без никакви private/decision полета).
+
+/**
+ * Declaration за spectator — същата форма като RoomDeclarationSnapshot, но
+ * cards/cardIds съдържат САМО вече изиграни (публични) карти, а suit/
+ * highRank/points са null, докато от тях може да се извлече неизиграна
+ * карта (виж redactDeclarationsForSpectator в createRoomSnapshotMessage.ts).
+ */
+export type RoomSpectatorDeclarationSnapshot = Omit<RoomDeclarationSnapshot, 'points'> & {
+  points: number | null
+}
+
+export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'declarations' | 'ownHand'> & {
+  declarations: RoomSpectatorDeclarationSnapshot[]
+  ownHand: []
+}
+
+export type BelotSpectatorSnapshotMessage = {
+  type: 'belot_spectator_snapshot'
+  viewerRole: 'spectator'
+  roomId: RoomId
+  roomStatus: RoomStatus
+  yourSeat: null
+  reconnectToken: null
+  seats: RoomSeatSnapshot[]
+  game: RoomSpectatorGameSnapshot | null
+  stakeAmount: number | null
+  isGuestTrial: boolean
+  isPrivateTableOrigin: boolean
+  isTournamentMatchOrigin: boolean
+  activeTableGifts: ActiveTableGiftSnapshot[]
+}
+
+export type BelotSpectateStartedMessage = {
+  type: 'belot_spectate_started'
+  roomId: RoomId
+}
+
+export type BelotSpectateDenialCode =
+  | 'feature_disabled'
+  | 'connection_inactive'
+  | 'not_authenticated'
+  | 'room_not_found'
+  | 'room_not_watchable'
+  | 'participant'
+  | 'active_game_commitment'
+  | 'ludo_spectating'
+  | 'already_watching_other_room'
+
+export type BelotSpectateDeniedMessage = {
+  type: 'belot_spectate_denied'
+  roomId: RoomId
+  code: BelotSpectateDenialCode
+  message: string
+}
+
+export type BelotSpectateEndedReason =
+  | 'unwatched'
+  | 'room_removed'
+  | 'game_commitment'
+  | 'ludo_spectating'
+  | 'replaced'
+
+export type BelotSpectateEndedMessage = {
+  type: 'belot_spectate_ended'
+  roomId: RoomId
+  reason: BelotSpectateEndedReason
+}
+
 export type ConnectedMessage = {
   type: 'connected'
   clientId: string
@@ -670,6 +749,7 @@ export type ErrorMessage = {
     | 'private_room_stake_unavailable'
     | 'private_room_insufficient_balance'
     | 'private_room_level_required'
+    | 'spectator_action_forbidden'
     | PrivateRoomActionErrorCode
 }
 
@@ -1457,6 +1537,10 @@ export type ServerMessage =
   | LudoGameStateMessage
   | LudoSpectatorGameStateMessage
   | LudoMatchSpectatorsMessage
+  | BelotSpectatorSnapshotMessage
+  | BelotSpectateStartedMessage
+  | BelotSpectateDeniedMessage
+  | BelotSpectateEndedMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
   | LudoGiftSentMessage

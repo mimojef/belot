@@ -16,6 +16,18 @@ export function setBroadcastRoomSnapshotsMonitoringHook(hook: (() => void) | nul
   onBroadcastHook = hook
 }
 
+// Belot Spectator Mode ("Гледай", Phase 2A) — централен spectator fan-out.
+// Вика се веднъж на broadcast събитие, СЛЕД player snapshot-ите (които
+// остават напълно непроменени) — така всичките 24 call site-а в index.ts
+// автоматично покриват spectators без промяна. Wiring-ът (index.ts) подава
+// broadcastBelotSpectatorSnapshot, който строи spectator payload-а максимум
+// веднъж и само ако стаята има spectators. Дефолтва към no-op.
+let spectatorFanoutHook: ((room: ServerRoom) => void) | null = null
+
+export function setBroadcastRoomSnapshotsSpectatorHook(hook: ((room: ServerRoom) => void) | null): void {
+  spectatorFanoutHook = hook
+}
+
 export function broadcastRoomSnapshots(
   room: ServerRoom,
   socketRegistry: Map<ConnectionId, WebSocket>,
@@ -55,6 +67,15 @@ export function broadcastRoomSnapshots(
       console.error(
         `[room-snapshot] broadcast failed room=${room.id} connection=${participant.connectionId}: ${message}`,
       )
+    }
+  }
+
+  if (spectatorFanoutHook !== null) {
+    try {
+      spectatorFanoutHook(room)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[room-snapshot] spectator fan-out failed room=${room.id}: ${message}`)
     }
   }
 }

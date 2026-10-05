@@ -210,7 +210,20 @@ import { createTableExitPenaltyStore } from './db/tableExitPenaltyStore.js'
 import { createYellowCoinGiftStore, type YellowCoinGiftSnapshot } from './db/yellowCoinGiftStore.js'
 import { createGiftItemStore } from './db/giftItemStore.js'
 import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js'
-import { broadcastRoomSnapshots, setBroadcastRoomSnapshotsMonitoringHook } from './core/broadcastRoomSnapshots.js'
+import {
+  broadcastRoomSnapshots,
+  setBroadcastRoomSnapshotsMonitoringHook,
+  setBroadcastRoomSnapshotsSpectatorHook,
+} from './core/broadcastRoomSnapshots.js'
+import {
+  createBelotSpectatorRegistry,
+  findProfileSpectatorConnectionIds,
+  isProfileSpectatingBelot as isProfileSpectatingBelotInRegistry,
+} from './core/belotSpectatorRegistry.js'
+import { broadcastBelotSpectatorSnapshot } from './core/broadcastBelotSpectatorSnapshot.js'
+import { evaluateBelotSpectatorWatchEligibility } from './core/evaluateBelotSpectatorWatchEligibility.js'
+import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag.js'
+import { createSpectatorRoomSnapshotMessage } from './protocol/createRoomSnapshotMessage.js'
 import { broadcastToRoomConnections } from './core/broadcastToRoomConnections.js'
 import { resolveTableGiftParticipants } from './core/resolveTableGiftParticipants.js'
 import { resolveLudoGiftParticipants, type LudoGiftMatchLike } from './core/resolveLudoGiftParticipants.js'
@@ -236,6 +249,7 @@ import type {
   RoomId,
   RoomParticipant,
   Seat,
+  ServerConnection,
   ServerRoom,
   ServerState,
   Team,
@@ -362,6 +376,10 @@ import type {
   LudoSpectatorGameStateMessage,
   LudoMatchSpectatorsMessage,
   ActiveLudoGiftSnapshot,
+  BelotSpectateDeniedMessage,
+  BelotSpectateEndedMessage,
+  BelotSpectateEndedReason,
+  BelotSpectateStartedMessage,
 } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -723,6 +741,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'ludo_reclaim_request':
     case 'watch_ludo_match':
     case 'unwatch_ludo_match':
+    case 'watch_belot_room':
+    case 'unwatch_belot_room':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
     case 'start_private_room':
@@ -3661,6 +3681,10 @@ function removeCommittedServerRoom(
   const nextRooms = { ...currentServerState.rooms }
   delete nextRooms[roomId]
   roomRevisionRegistry.remove(roomId)
+  // Belot Spectator Mode — единствената choke point за room removal (всички
+  // cleanup/abort/force-remove пътища минават оттук): известява и чисти
+  // spectators на премахнатата стая.
+  endBelotSpectatorsForRoom(roomId, 'room_removed')
 
   const nextState: ServerState = {
     ...currentServerState,
@@ -3675,6 +3699,11 @@ function removeCommittedServerRoom(
 }
 
 reconcileLegacySoloTournamentEntriesOnBoot()
+
+// Belot Spectator Mode ("Гледай", Phase 2A) — in-memory, НЕ persisted
+// spectator subscriptions (виж core/belotSpectatorRegistry.ts). Деклариран
+// преди първото възможно извикване на removeCommittedServerRoom.
+const belotSpectatorRegistry = createBelotSpectatorRegistry()
 
 let serverState: ServerState = loadPersistedServerState()
 const roomRevisionRegistry = createRoomRevisionRegistry()
@@ -4544,6 +4573,129 @@ function unsubscribeLudoSpectator(connectionId: ConnectionId): string | null {
   if (subscribers && subscribers.size === 0) ludoSpectatorsByMatchId.delete(matchId)
   ludoSpectatorMatchIdByConnectionId.delete(connectionId)
   return matchId
+}
+
+// ─── Belot spectator subscriptions ("Гледай", Belot Spectator Mode Phase 2A) ─
+// Spectator = websocket subscriber БЕЗ game membership (виж
+// core/belotSpectatorRegistry.ts). НИКОГА не пише в ServerRoom,
+// connection.currentRoomId/currentSeat, reconnectToken или persisted state —
+// затова всички съществуващи gameplay/social guard-ове (currentRoomId ===
+// roomId && currentSeat) остават deny-by-default за spectator-а. Profile-
+// level въпросите resolve-ват profileId live от serverState.connections.
+
+function resolveConnectionProfileId(connectionId: ConnectionId): string | null {
+  return getConnectionById(serverState, connectionId)?.profileId ?? null
+}
+
+/** Гледа ли профилът Belot маса през КОЯТО И ДА Е своя connection (multi-tab). */
+function isProfileSpectatingBelot(profileId: string | null): boolean {
+  return isProfileSpectatingBelotInRegistry(belotSpectatorRegistry, profileId, resolveConnectionProfileId)
+}
+
+function isProfileLudoSpectating(profileId: string): boolean {
+  for (const connectionId of ludoSpectatorMatchIdByConnectionId.keys()) {
+    if (resolveConnectionProfileId(connectionId) === profileId) return true
+  }
+  return false
+}
+
+function hasProfileActiveGameCommitment(profileId: string): boolean {
+  return (
+    isProfileInActiveGame(profileId) ||
+    findProfileInGameSession(profileId) !== null ||
+    findActiveBelotCommitment(profileId) !== null ||
+    findActiveLudoCommitment(profileId) !== null
+  )
+}
+
+function sendBelotSpectateEnded(connectionId: ConnectionId, roomId: string, reason: BelotSpectateEndedReason): void {
+  const message: BelotSpectateEndedMessage = { type: 'belot_spectate_ended', roomId, reason }
+  safeSendToConnection(connectionId, message)
+}
+
+// Idempotent — no-op ако connection-ът не гледа нищо.
+function endBelotSpectatingForConnection(
+  connectionId: ConnectionId,
+  reason: BelotSpectateEndedReason,
+  notify: boolean,
+): void {
+  const roomId = belotSpectatorRegistry.unwatch(connectionId)
+  if (roomId !== null && notify) sendBelotSpectateEnded(connectionId, roomId, reason)
+}
+
+function endBelotSpectatingForProfile(profileId: string | null, reason: BelotSpectateEndedReason): void {
+  if (profileId === null) return
+  for (const connectionId of findProfileSpectatorConnectionIds(belotSpectatorRegistry, profileId, resolveConnectionProfileId)) {
+    endBelotSpectatingForConnection(connectionId, reason, true)
+  }
+}
+
+function endBelotSpectatorsForRoom(roomId: string, reason: BelotSpectateEndedReason): void {
+  for (const connectionId of belotSpectatorRegistry.removeRoom(roomId)) {
+    sendBelotSpectateEnded(connectionId, roomId, reason)
+  }
+}
+
+// Defense in depth за gameplay/social WS действия: самата connection гледа,
+// или профилът гледа през друг таб и ТАЗИ connection не е закачена за игра
+// (такава connection и без това се отказва от currentRoomId guard-овете —
+// тук само получава ясен spectator_action_forbidden).
+function isBelotSpectatorRequester(connection: ServerConnection): boolean {
+  if (belotSpectatorRegistry.isConnectionSpectating(connection.id)) return true
+  return connection.currentRoomId === null && isProfileSpectatingBelot(connection.profileId)
+}
+
+const BELOT_SPECTATOR_FORBIDDEN_MESSAGE_TYPES: ReadonlySet<ClientMessage['type']> = new Set<ClientMessage['type']>([
+  'submit_bid_action',
+  'submit_cut_index',
+  'submit_play_card',
+  'submit_sweep_decision',
+  'resume_human_control',
+  'submit_partner_rating',
+  'request_replay',
+  'request_leave_match',
+  'send_emoji_reaction',
+  'send_phrase_reaction',
+  'send_table_gift',
+  'send_ludo_gift',
+  'request_player_profile',
+])
+
+// Действия, с които профилът поема ИГРОВО commitment (матчмейкинг, частна/
+// Ludo маса, влизане/resume в стая) — spectator subscription-ите на профила
+// приключват ПРЕДИ handler-а, за да не съществуват едновременно spectator и
+// participant роли за един профил.
+const BELOT_SPECTATOR_GAME_COMMITMENT_MESSAGE_TYPES: ReadonlySet<ClientMessage['type']> = new Set<ClientMessage['type']>([
+  'create_room',
+  'join_room',
+  'join_matchmaking',
+  'resume_room',
+  'create_private_room',
+  'join_private_room',
+  'create_ludo_room',
+  'join_ludo_room',
+])
+
+// HTTP gift endpoint-ите НЕ са table-scoped (няма connection/currentRoomId
+// context) — затова spectator-ът се разпознава profile-level, през КОЯТО И ДА
+// Е своя connection (втори таб/устройство не заобикаля забраната). Вика се
+// СЛЕД auth и ПРЕДИ всякакво balance/ledger/purchase действие.
+function rejectHttpGiftIfBelotSpectator(res: ServerResponse, senderProfileId: string): boolean {
+  if (!isProfileSpectatingBelot(senderProfileId)) return false
+  sendJsonResponse(res, 403, {
+    ok: false,
+    code: 'spectator_action_forbidden',
+    message: 'Наблюдателите не могат да изпращат подаръци.',
+  })
+  return true
+}
+
+function sendBelotSpectatorActionForbidden(connectionId: ConnectionId): void {
+  safeSendToConnection(connectionId, {
+    type: 'error',
+    code: 'spectator_action_forbidden',
+    message: 'Наблюдателите не могат да извършват това действие.',
+  })
 }
 
 // Reuse-ва СЪЩИЯ toLudoGameProtocolSnapshot() shape като participant
@@ -6000,6 +6152,11 @@ function displaceProfileConnections(
     ) {
       continue
     }
+
+    // Belot Spectator Mode — изместената connection спира да е spectator
+    // веднага (не чака асинхронния 'close' event), за да не остане профилът
+    // spectator през вече мъртъв таб.
+    endBelotSpectatingForConnection(conn.id, 'replaced', true)
 
     const socket = socketRegistry.get(conn.id)
     if (socket && socket.readyState === WebSocket.OPEN) {
@@ -10692,6 +10849,12 @@ async function handleShopCheckoutRequest(
   // от client-provided display name. Отсъства/null => normal purchase.
   const recipientProfileId = getStringField(body, 'recipientProfileId')
 
+  // Belot Spectator Mode — платен подарък (recipientProfileId) е gift send:
+  // забранен, докато профилът гледа маса. Нормална покупка за себе си — не.
+  if (recipientProfileId.trim().length > 0 && rejectHttpGiftIfBelotSpectator(res, session.profile.profileId)) {
+    return true
+  }
+
   const pendingResult = coinPurchaseStore.createPendingPurchase(
     session.profile.profileId,
     packageId,
@@ -10917,6 +11080,11 @@ async function handleVipCheckoutRequest(
   // "Подари авоари" (§25 в брифа) — виж identичния коментар в
   // handleShopCheckoutRequest (coin checkout).
   const recipientProfileId = getStringField(body, 'recipientProfileId')
+
+  // Belot Spectator Mode — виж identичния guard в handleShopCheckoutRequest.
+  if (recipientProfileId.trim().length > 0 && rejectHttpGiftIfBelotSpectator(res, session.profile.profileId)) {
+    return true
+  }
 
   const pendingResult = vipPurchaseStore.createPendingPurchase(
     session.profile.profileId,
@@ -11191,6 +11359,11 @@ async function handleShopBundleCheckoutRequest(
   // "Подари авоари" (§25 в брифа) — виж identичния коментар в
   // handleShopCheckoutRequest (coin checkout).
   const recipientProfileId = getStringField(body, 'recipientProfileId')
+
+  // Belot Spectator Mode — виж identичния guard в handleShopCheckoutRequest.
+  if (recipientProfileId.trim().length > 0 && rejectHttpGiftIfBelotSpectator(res, session.profile.profileId)) {
+    return true
+  }
 
   const pendingResult = bundlePurchaseStore.createPendingPurchase(
     session.profile.profileId,
@@ -16840,6 +17013,10 @@ async function handleGiftItemsRequest(
   const senderProfileId = session.profile.profileId
 
   if (sendMatch !== null && req.method === 'POST') {
+    if (rejectHttpGiftIfBelotSpectator(res, senderProfileId)) {
+      return true
+    }
+
     const recipientProfileId = decodeURIComponent(sendMatch[1] ?? '')
     const body = await readJsonRequestBody(req)
 
@@ -17102,6 +17279,16 @@ async function handleFriendsRequest(
       ok: true,
       friendships: result.friendships,
     })
+    return true
+  }
+
+  // Belot Spectator Mode — spectator не може да подарява жълтици (и двата
+  // gift-coins route-а), независимо от ролята/friendship policy-то по-долу.
+  if (
+    (friendGiftMatch !== null || pathname === '/api/friends/gift-coins/direct') &&
+    req.method === 'POST' &&
+    rejectHttpGiftIfBelotSpectator(res, profileId)
+  ) {
     return true
   }
 
@@ -20269,6 +20456,17 @@ setBroadcastRoomSnapshotsMonitoringHook(() => {
   activityCounters.incrementGame('roomSnapshotBroadcasts')
 })
 
+// Belot Spectator Mode ("Гледай", Phase 2A) — централен spectator fan-out
+// след player snapshot-ите на всеки broadcastRoomSnapshots (виж hook-а там).
+setBroadcastRoomSnapshotsSpectatorHook((room) => {
+  broadcastBelotSpectatorSnapshot({
+    room,
+    registry: belotSpectatorRegistry,
+    getConnection: (connectionId) => getConnectionById(serverState, connectionId),
+    getSocket: getSocketByConnectionId,
+  })
+})
+
 const httpServer = createServer((req, res) => {
   void handleHttpRequest(req, res).catch((error) => {
     const message = error instanceof Error ? error.message : 'Unexpected server error.'
@@ -20626,6 +20824,31 @@ wsServer.on('connection', (socket, request) => {
           })
         }
         return
+      }
+
+      // Belot Spectator Mode ("Гледай", Phase 2A). size() > 0 guard-ът прави
+      // двете проверки zero-cost за нормалните играчи, докато никой не гледа.
+      if (belotSpectatorRegistry.size() > 0) {
+        const spectatorCheckConnection = getConnectionById(serverState, connection.id)
+
+        // Defense in depth: spectator НИКОГА не стига до gameplay/social
+        // handler-ите (те и без това го отказват чрез currentRoomId/currentSeat
+        // guard-овете, тъй като spectator connection никога не ги получава).
+        if (
+          spectatorCheckConnection !== null &&
+          BELOT_SPECTATOR_FORBIDDEN_MESSAGE_TYPES.has(message.type) &&
+          isBelotSpectatorRequester(spectatorCheckConnection)
+        ) {
+          sendBelotSpectatorActionForbidden(connection.id)
+          return
+        }
+
+        // Профил, който поема игрово commitment, спира да е spectator ПРЕДИ
+        // handler-а (spectator и participant роли никога едновременно).
+        if (spectatorCheckConnection !== null && BELOT_SPECTATOR_GAME_COMMITMENT_MESSAGE_TYPES.has(message.type)) {
+          endBelotSpectatingForProfile(spectatorCheckConnection.profileId, 'game_commitment')
+          endBelotSpectatingForConnection(connection.id, 'game_commitment', true)
+        }
       }
 
       if (message.type === 'ping') {
@@ -22517,6 +22740,10 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, { type: 'error', code: 'ludo_match_not_found', message: 'Ludo играта не беше намерена.' })
           return
         }
+        // Belot/Ludo spectator взаимно изключване: Ludo watch приключва
+        // всяко Belot spectating на профила (виж watch_belot_room — обратната
+        // посока се отказва с ludo_spectating).
+        endBelotSpectatingForProfile(latestConnection.profileId, 'ludo_spectating')
         // Една connection гледа максимум ЕДИН match наведнъж (виж
         // ludoSpectatorMatchIdByConnectionId doc коментара) — маха стария
         // subscription, ако различен matchId, преди да регистрира новия.
@@ -22547,6 +22774,69 @@ wsServer.on('connection', (socket, request) => {
         if (ludoSpectatorMatchIdByConnectionId.get(connection.id) === message.matchId) {
           unsubscribeLudoSpectator(connection.id)
           broadcastLudoMatchSpectatorsToParticipants(message.matchId)
+        }
+        return
+      }
+
+      // Belot Spectator Mode ("Гледай", Phase 2A) — read-only subscription
+      // към играеща частна Белот маса. НИКОГА не пипа ServerRoom,
+      // connection.currentRoomId/currentSeat или reconnectToken — само
+      // belotSpectatorRegistry. Невалиден watch не мутира нищо.
+      if (message.type === 'watch_belot_room') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        const room = serverState.rooms[message.roomId] ?? null
+        const featureEnabled = isBelotSpectatorFeatureEnabled()
+        const profileId = latestConnection?.profileId ?? null
+        const profileSpectatorConnectionIds =
+          featureEnabled && profileId !== null
+            ? findProfileSpectatorConnectionIds(belotSpectatorRegistry, profileId, resolveConnectionProfileId)
+            : []
+
+        const eligibility = evaluateBelotSpectatorWatchEligibility({
+          featureEnabled,
+          connection: latestConnection,
+          room,
+          profileHasActiveGameCommitment:
+            featureEnabled && profileId !== null && hasProfileActiveGameCommitment(profileId),
+          profileIsLudoSpectating: featureEnabled && profileId !== null && isProfileLudoSpectating(profileId),
+          profileWatchedRoomIds: profileSpectatorConnectionIds
+            .map((spectatorConnectionId) => belotSpectatorRegistry.getWatchedRoomId(spectatorConnectionId))
+            .filter((watchedRoomId): watchedRoomId is string => watchedRoomId !== null),
+        })
+
+        if (!eligibility.ok || room === null) {
+          const denied: BelotSpectateDeniedMessage = {
+            type: 'belot_spectate_denied',
+            roomId: message.roomId,
+            code: eligibility.ok ? 'room_not_found' : eligibility.code,
+            message: eligibility.ok ? 'Играта не беше намерена.' : eligibility.message,
+          }
+          safeSendToConnection(connection.id, denied)
+          return
+        }
+
+        // Същият профил вече гледа СЪЩАТА маса през друга connection (нов
+        // таб/reconnect преди стария socket да е затворен) — subscription-ът
+        // се прехвърля, никога два паралелни за един профил.
+        for (const spectatorConnectionId of profileSpectatorConnectionIds) {
+          if (spectatorConnectionId !== connection.id) {
+            endBelotSpectatingForConnection(spectatorConnectionId, 'replaced', true)
+          }
+        }
+
+        // Повторен watch на същата маса от същата connection е idempotent —
+        // registry.watch е no-op, клиентът получава свеж ACK + snapshot.
+        belotSpectatorRegistry.watch(connection.id, room.id)
+        const started: BelotSpectateStartedMessage = { type: 'belot_spectate_started', roomId: room.id }
+        safeSendToConnection(connection.id, started)
+        safeSendToConnection(connection.id, createSpectatorRoomSnapshotMessage(room))
+        return
+      }
+
+      if (message.type === 'unwatch_belot_room') {
+        // Idempotent — no-op ако connection-ът не гледа точно тази маса.
+        if (belotSpectatorRegistry.getWatchedRoomId(connection.id) === message.roomId) {
+          endBelotSpectatingForConnection(connection.id, 'unwatched', true)
         }
         return
       }
@@ -24290,6 +24580,9 @@ wsServer.on('connection', (socket, request) => {
     // дедупликацията по profileId го пази видим.
     const disconnectedSpectatorMatchId = unsubscribeLudoSpectator(connection.id)
     if (disconnectedSpectatorMatchId !== null) broadcastLudoMatchSpectatorsToParticipants(disconnectedSpectatorMatchId)
+    // Belot Spectator Mode ("Гледай", Phase 2A) — disconnect cleanup (socket-ът
+    // вече е затворен, затова без belot_spectate_ended известяване).
+    endBelotSpectatingForConnection(connection.id, 'unwatched', false)
 
     try {
       if (isServerShuttingDown) {

@@ -581,6 +581,18 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return matchId === null ? null : { type: 'unwatch_ludo_match', matchId }
     }
 
+    // Belot Spectator Mode ("Гледай", Phase 2A) — mirror на watch_ludo_match
+    // validation стила (единствено задължително текстово поле).
+    if (parsed.type === 'watch_belot_room') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      return roomId === null ? null : { type: 'watch_belot_room', roomId }
+    }
+
+    if (parsed.type === 'unwatch_belot_room') {
+      const roomId = normalizeRequiredText(parsed.roomId)
+      return roomId === null ? null : { type: 'unwatch_belot_room', roomId }
+    }
+
     if (parsed.type === 'kick_from_ludo_room') {
       const profileId = normalizeRequiredText(parsed.profileId)
       return profileId === null ? null : { type: 'kick_from_ludo_room', profileId }

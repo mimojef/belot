@@ -25,3 +25,13 @@ export function sendJsonMessage<T>(socket: WebSocket, payload: T): void {
     if (messageType !== null) onSentHook(messageType)
   }
 }
+
+/**
+ * Праща ВЕЧЕ сериализиран payload (един JSON.stringify за N получатели —
+ * виж broadcastBelotSpectatorSnapshot). Monitoring hook-ът се вика със същия
+ * messageType, огледално на sendJsonMessage.
+ */
+export function sendSerializedJsonMessage(socket: WebSocket, serializedPayload: string, messageType: string): void {
+  socket.send(serializedPayload)
+  if (onSentHook !== null) onSentHook(messageType)
+}
