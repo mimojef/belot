@@ -231,6 +231,7 @@
     "check:belot-spectator-projection": "tsx scripts/checkBelotSpectatorSnapshotProjection.ts",
     "check:belot-spectator-registry": "tsx scripts/checkBelotSpectatorRegistry.ts",
     "check:belot-spectator-ws": "tsx scripts/checkBelotSpectatorWebSocket.ts --server-root=.",
+    "check:belot-spectator-vip": "tsx scripts/checkBelotSpectatorVipAuthorization.ts --server-root=.",
     "check:belot-declaration-snapshot-privacy": "tsx scripts/checkBelotDeclarationSnapshotPrivacy.ts",
     "check:partner-suit-all-trumps": "tsx scripts/checkPartnerSuitAllTrumpsLead.ts",
     "check:all-trumps-guaranteed-suit-continuation": "tsx scripts/checkAllTrumpsGuaranteedSuitContinuation.ts",

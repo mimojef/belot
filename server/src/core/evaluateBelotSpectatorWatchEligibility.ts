@@ -1,4 +1,5 @@
 import type { BelotSpectateDenialCode } from '../protocol/messageTypes.js'
+import { evaluateVipSpectatorGateEligibility } from './evaluateVipSpectatorGateEligibility.js'
 import { SERVER_SEAT_ORDER, type ProfileId, type RoomId, type ServerConnection, type ServerRoom } from './serverTypes.js'
 
 /**
@@ -14,6 +15,13 @@ export type BelotSpectatorWatchEligibilityInput = {
   featureEnabled: boolean
   connection: ServerConnection | null
   room: ServerRoom | null
+  /**
+   * Phase 2C: VIP-only gate. Caller-ът (index.ts) резолвва
+   * vipStore.getStatus(profileId) и подава само { isActive } — САМО
+   * canonical vipStore е source of truth, никаква duplicate expiration
+   * логика тук. Няма role bypass.
+   */
+  vipStatus: { isActive: boolean }
   /** isProfileInActiveGame / waiting private room / matchmaking / Ludo room/match. */
   profileHasActiveGameCommitment: boolean
   profileIsLudoSpectating: boolean
@@ -68,6 +76,11 @@ export function evaluateBelotSpectatorWatchEligibility(
   const profileId = connection.profileId
   if (profileId === null || profileId.length === 0) {
     return deny('not_authenticated', 'Трябва да влезеш в профила си.')
+  }
+
+  const vipGate = evaluateVipSpectatorGateEligibility({ vipStatus: input.vipStatus })
+  if (!vipGate.ok) {
+    return deny(vipGate.code, 'Гледането на тази маса изисква активен VIP.')
   }
 
   if (room === null) {

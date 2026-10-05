@@ -694,6 +694,7 @@ export type BelotSpectateDenialCode =
   | 'feature_disabled'
   | 'connection_inactive'
   | 'not_authenticated'
+  | 'vip_required'
   | 'room_not_found'
   | 'room_not_watchable'
   | 'participant'

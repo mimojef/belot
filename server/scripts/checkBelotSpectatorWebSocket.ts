@@ -10,6 +10,13 @@
  * Сървър 1 — BELOT_SPECTATOR_ENABLED не е зададен (default OFF):
  *   [W0]  watch_belot_room -> belot_spectate_denied feature_disabled
  *
+ * Phase 2C: watch_belot_room вече е VIP-only — spectatorUser получава
+ * реален active VIP чрез canonical vipStore.grantVip() ПРЕДИ W1, иначе
+ * целият Phase 2A сценарий би fail-нал с vip_required. Отделен role/
+ * VIP-expiry/free-gift matrix е в checkBelotSpectatorVipAuthorization.ts —
+ * тук само потвърждаваме, че спечелил VIP-gate-а spectator продължава да
+ * минава през same Phase 2A правилата непроменени.
+ *
  * Сървър 2 — BELOT_SPECTATOR_ENABLED=1, частна маса 2 хора + 2 бота:
  *   [W1]  watch -> belot_spectate_started + belot_spectator_snapshot (yourSeat/
  *         reconnectToken null, ownHand []), никога room_snapshot
@@ -18,7 +25,8 @@
  *   [W3]  live updates стигат до spectator-а като belot_spectator_snapshot
  *   [W4]  нито една неизиграна карта на човешките играчи не изтича в
  *         spectator frame-ите (освен в публичните trick/reveal секции)
- *   [W5]  participant (host) watch на собствената маса -> denied participant
+ *   [W5]  participant (host, с active VIP — за да изолираме точно тази
+ *         проверка от VIP gate-а) watch на собствената маса -> denied participant
  *   [W6]  всеки gameplay/social WS action -> spectator_action_forbidden
  *   [W7]  bidding: spectator bid в хода на host-а -> отказ, state непроменен
  *   [W8]  playing: spectator play на картата на host-а -> отказ, ръката непроменена
@@ -48,6 +56,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import WebSocket from 'ws'
+import { createVipStore } from '../src/db/vipStore.js'
 
 const SESSION_COOKIE_NAME = 'belot_session'
 const STAKE = 5000
@@ -249,6 +258,19 @@ function countRows(databaseFile: string, sql: string, ...params: Array<string | 
   }
 }
 
+// Phase 2C: grant-ва активен VIP чрез РЕАЛНИЯ canonical vipStore (не mock,
+// не отделна spectator-specific таблица) — виж server/src/db/vipStore.ts.
+// Отделна connection от сървърния процес, затворена веднага след grant-а
+// (WAL + busy_timeout вече конфигурирани в createVipStore).
+async function grantVip(databaseFile: string, profileId: string, days = 30): Promise<void> {
+  const store = await createVipStore(databaseFile)
+  try {
+    store.grantVip(profileId, 'admin_grant', { unit: 'days', amount: days })
+  } finally {
+    store.close()
+  }
+}
+
 // ─── WS clients ───────────────────────────────────────────────────────────
 
 type TestClient = { user: SeededUser; ws: WebSocket; frames: any[]; label: string }
@@ -364,6 +386,10 @@ try {
   const giftItemId = `spectator-gift-${randomUUID()}`
   seedGiftItem(dbFile, giftItemId, 100)
   const spectatorHostFriendshipId = createAcceptedFriendship(dbFile, spectatorUser.profileId, hostUser.profileId)
+  // Phase 2C: без активен VIP spectatorUser би получил vip_required на
+  // всеки watch_belot_room по-долу — целият W1+ Phase 2A сценарий изисква
+  // реален active VIP, grant-нат през canonical vipStore.
+  await grantVip(dbFile, spectatorUser.profileId)
 
   const host = await connectClient(port, hostUser, 'host')
   const guest = await connectClient(port, guestUser, 'guest')
@@ -449,6 +475,12 @@ try {
   })
 
   await check('[W5] a participant cannot watch their own table', async () => {
+    // Phase 2C: VIP gate-ът е ПРЕДИ participant проверката (виж canonical
+    // ordering в evaluateBelotSpectatorWatchEligibility.ts) — без VIP host
+    // би получил vip_required тук, не participant. Host получава VIP само
+    // за да изолираме точно participant проверката; VIP gate-ът без role/
+    // participant bypass е покрит отделно в checkBelotSpectatorVipAuthorization.ts.
+    await grantVip(dbFile, hostUser.profileId)
     const from = host.frames.length
     send(host, { type: 'watch_belot_room', roomId })
     const denied = await waitForFrame(host, (f) => f.type === 'belot_spectate_denied', 5_000, 'host denied', from)

@@ -11,8 +11,9 @@
  *   [R4]  removeRoom чисти всички spectators на стаята и само тях
  *   [R5]  isProfileSpectatingBelot е profile-level (multi-tab), resolve-ва
  *         profileId live (няма втори profile source of truth)
- *   [E1]  feature flag OFF -> feature_disabled (дори за иначе валиден watch)
- *   [E2]  валидна private playing маса -> ok
+ *   [E1]  feature flag OFF -> feature_disabled (дори за иначе валиден watch,
+ *         дори с active VIP — VIP gate-ът никога не се достига)
+ *   [E2]  валидна private playing маса + active VIP -> ok
  *   [E3]  неактивна connection / без профил -> deny
  *   [E4]  несъществуваща / tournament / guest / matchmaking / finished маса -> deny
  *   [E5]  participant (вкл. permanently-left) -> deny
@@ -20,6 +21,11 @@
  *   [E7]  Ludo spectator -> deny (взаимно изключване)
  *   [E8]  профилът вече гледа ДРУГА маса -> deny; СЪЩАТА -> ok
  *   [E9]  eligibility не мутира подадените обекти
+ *   [V1]  Phase 2C: без active VIP -> vip_required, преди room проверките
+ *   [V2]  изтекъл VIP (isActive=false) -> vip_required
+ *   [V3]  VIP gate-ът се проверява СЛЕД not_authenticated, но ПРЕДИ
+ *         room_not_found/room_not_watchable/participant/commitment
+ *   [V4]  evaluateVipSpectatorGateEligibility: pure, само isActive решава
  *   [F1]  fan-out без spectators -> нищо не се строи/сериализира
  *   [F2]  fan-out: payload се сериализира ВЕДНЪЖ за N spectators, идентичен низ
  *   [F3]  fan-out: connection, станала participant -> evict + belot_spectate_ended
@@ -35,6 +41,7 @@ const { createBelotSpectatorRegistry, isProfileSpectatingBelot, findProfileSpect
   '../src/core/belotSpectatorRegistry.js'
 )
 const { evaluateBelotSpectatorWatchEligibility } = await import('../src/core/evaluateBelotSpectatorWatchEligibility.js')
+const { evaluateVipSpectatorGateEligibility } = await import('../src/core/evaluateVipSpectatorGateEligibility.js')
 const { broadcastBelotSpectatorSnapshot } = await import('../src/core/broadcastBelotSpectatorSnapshot.js')
 const { broadcastRoomSnapshots, setBroadcastRoomSnapshotsSpectatorHook } = await import('../src/core/broadcastRoomSnapshots.js')
 const { isBelotSpectatorFeatureEnabled } = await import('../src/core/belotSpectatorFeatureFlag.js')
@@ -162,6 +169,10 @@ function baseEligibilityInput(overrides: Record<string, unknown> = {}): any {
     featureEnabled: true,
     connection: connection('conn-spectator', 'profile-spectator'),
     room: room('room-1'),
+    // Phase 2C: default fixture профил е active VIP, за да изолираме
+    // room/participant/commitment тестовете (E2-E9) от VIP gate-а — VIP-
+    // specific поведение се тества отделно по-долу (V1-V4).
+    vipStatus: { isActive: true },
     profileHasActiveGameCommitment: false,
     profileIsLudoSpectating: false,
     profileWatchedRoomIds: [],
@@ -308,6 +319,56 @@ await check('[E9] eligibility evaluation never mutates its inputs', () => {
   evaluateBelotSpectatorWatchEligibility(input)
   evaluateBelotSpectatorWatchEligibility(baseEligibilityInput())
   assert(JSON.stringify(input) === before, 'input must be unchanged')
+})
+
+// ─── VIP gate (Phase 2C) ────────────────────────────────────────────────────
+
+await check('[V1] no active VIP -> vip_required, no role bypass encoded in the gate', () => {
+  const result = evaluateBelotSpectatorWatchEligibility(baseEligibilityInput({ vipStatus: { isActive: false } }))
+  assert(!result.ok && result.code === 'vip_required', JSON.stringify(result))
+})
+
+await check('[V2] expired VIP (isActive=false) -> vip_required, identical to never having VIP', () => {
+  const result = evaluateBelotSpectatorWatchEligibility(baseEligibilityInput({ vipStatus: { isActive: false } }))
+  assert(!result.ok && result.code === 'vip_required', JSON.stringify(result))
+})
+
+await check('[V3] VIP gate runs after not_authenticated but before room/participant/commitment checks', () => {
+  // Guest (no profileId) -> not_authenticated wins even without VIP info mattering.
+  const guest = evaluateBelotSpectatorWatchEligibility(
+    baseEligibilityInput({ connection: connection('c', null), vipStatus: { isActive: false } }),
+  )
+  assert(!guest.ok && guest.code === 'not_authenticated', JSON.stringify(guest))
+
+  // Authenticated, no VIP, room missing/not watchable/participant/committed —
+  // vip_required must win over ALL of those, proving the gate is checked first.
+  const missingRoom = evaluateBelotSpectatorWatchEligibility(
+    baseEligibilityInput({ room: null, vipStatus: { isActive: false } }),
+  )
+  assert(!missingRoom.ok && missingRoom.code === 'vip_required', JSON.stringify(missingRoom))
+
+  const participantNoVip = evaluateBelotSpectatorWatchEligibility(
+    baseEligibilityInput({ connection: connection('c', 'profile-player-top'), vipStatus: { isActive: false } }),
+  )
+  assert(!participantNoVip.ok && participantNoVip.code === 'vip_required', JSON.stringify(participantNoVip))
+
+  const committedNoVip = evaluateBelotSpectatorWatchEligibility(
+    baseEligibilityInput({ profileHasActiveGameCommitment: true, vipStatus: { isActive: false } }),
+  )
+  assert(!committedNoVip.ok && committedNoVip.code === 'vip_required', JSON.stringify(committedNoVip))
+
+  // flag OFF + no VIP -> feature_disabled still wins (flag check is first of all).
+  const flagOff = evaluateBelotSpectatorWatchEligibility(
+    baseEligibilityInput({ featureEnabled: false, vipStatus: { isActive: false } }),
+  )
+  assert(!flagOff.ok && flagOff.code === 'feature_disabled', JSON.stringify(flagOff))
+})
+
+await check('[V4] evaluateVipSpectatorGateEligibility: pure, decided only by isActive', () => {
+  const allowed = evaluateVipSpectatorGateEligibility({ vipStatus: { isActive: true } })
+  assert(allowed.ok, JSON.stringify(allowed))
+  const denied = evaluateVipSpectatorGateEligibility({ vipStatus: { isActive: false } })
+  assert(!denied.ok && denied.code === 'vip_required', JSON.stringify(denied))
 })
 
 // ─── Fan-out ──────────────────────────────────────────────────────────────

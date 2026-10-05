@@ -22778,7 +22778,7 @@ wsServer.on('connection', (socket, request) => {
         return
       }
 
-      // Belot Spectator Mode ("Гледай", Phase 2A) — read-only subscription
+      // Belot Spectator Mode ("Гледай", Phase 2A/2C) — read-only subscription
       // към играеща частна Белот маса. НИКОГА не пипа ServerRoom,
       // connection.currentRoomId/currentSeat или reconnectToken — само
       // belotSpectatorRegistry. Невалиден watch не мутира нищо.
@@ -22791,11 +22791,20 @@ wsServer.on('connection', (socket, request) => {
           featureEnabled && profileId !== null
             ? findProfileSpectatorConnectionIds(belotSpectatorRegistry, profileId, resolveConnectionProfileId)
             : []
+        // Phase 2C: VIP-only gate. Canonical source of truth е ЕДИНСТВЕНО
+        // vipStore.getStatus() (vip_status.active_until) — никакъв role
+        // bypass, никаква spectator-specific VIP state/duplicate expiration
+        // логика. Resolve-ва се тук, pure eligibility функцията само приема
+        // готов { isActive }.
+        const vipStatus = profileId !== null
+          ? vipStore.getStatus(profileId)
+          : { isActive: false, activeUntil: null }
 
         const eligibility = evaluateBelotSpectatorWatchEligibility({
           featureEnabled,
           connection: latestConnection,
           room,
+          vipStatus,
           profileHasActiveGameCommitment:
             featureEnabled && profileId !== null && hasProfileActiveGameCommitment(profileId),
           profileIsLudoSpectating: featureEnabled && profileId !== null && isProfileLudoSpectating(profileId),
