@@ -1,4 +1,5 @@
 import type {
+  BelotSpectatorSnapshotMessage,
   ClientBidAction,
   MatchFoundMessage,
   MatchStake,
@@ -20,7 +21,21 @@ import type { PendingDeclarationPrompt } from './declarations/declarationPromptT
 
 export type ActiveRoomState = {
   roomId: string
+  /**
+   * Phase 3B viewer model — `seat` остава САМО perspectiveSeat (visual
+   * rotation/geometry/layout, напр. getVisualSeatForLocalPerspective), не
+   * "кой съм аз за decision логика". За participant `seat` си е реалното
+   * място, непроменено от преди. За Belot spectator `seat` е ФИКСИРАНО
+   * 'bottom' — чисто координатна перспектива, НЕ значи spectator-ът "е"
+   * bottom играчът.
+   *
+   * `controlledSeat` е единственият достоверен сигнал за "моя decision/
+   * turn/bot-takeover/countdown-warning/gift/profile interaction" — Seat за
+   * participant (= seat), null за spectator. Виж §2 брифа "VIEWER MODEL".
+   */
   seat: Seat
+  viewerRole: 'participant' | 'spectator'
+  controlledSeat: Seat | null
   stake: MatchStake
   humanPlayers: number
   botPlayers: number
@@ -128,12 +143,34 @@ export type CreateActiveRoomFlowControllerOptions = {
   // — readyState изглежда OPEN, но нищо реално не се доставя), помолва main.ts
   // да задейства СЪЩЕСТВУВАЩИЯ disconnect->reconnect->resume механизъм.
   forceReconnectForZombieConnection: () => void
+  // Belot Spectator Mode ("Гледай", Phase 3B) — "Изход" бутон, докато
+  // viewerRole==='spectator', НИКОГА не минава през leaveActiveRoom (без
+  // penalty warning, без participant leave semantics). Вика се САМО с
+  // roomId — main.ts оркестрира unwatch_belot_room + lobby navigation (виж
+  // §14 брифа "Използвай същия navigation helper като Exit").
+  onSpectatorExitRequested: (roomId: string) => void
 }
 
 export type ActiveRoomFlowController = {
   render: () => void
   enterActiveRoom: (message: MatchFoundMessage, stakeAlreadyShown?: boolean) => void
   enterActiveRoomFromResume: (roomId: string, seat: Seat, stake: MatchStake) => void
+  // Belot Spectator Mode ("Гледай", Phase 3B) — отваря activeRoom viewer-а
+  // за spectator с ПЪРВИЯ валиден belot_spectator_snapshot (виж §4/§5
+  // брифа). НЕ приема reconnectToken/controlled seat, НЕ attach-ва
+  // participant semantics, НЕ изпраща resume/join.
+  enterActiveRoomAsSpectator: (roomId: string, snapshot: BelotSpectatorSnapshotMessage) => void
+  // Последващ belot_spectator_snapshot за ВЕЧЕ отворен spectator view —
+  // mirror на applyRoomSnapshotToActiveRoom, но за spectator envelope.
+  // Връща false ако няма отворен spectator view за точно тази roomId.
+  applySpectatorSnapshotToActiveRoom: (snapshot: BelotSpectatorSnapshotMessage) => boolean
+  // Затваря spectator view locally (immediate, optimistic — виж §14 брифа:
+  // "ако server unwatch ACK се забави, UX не трябва да остане блокиран").
+  // No-op ако текущият view не е spectator view. Използва се И от explicit
+  // "Изход", И от belot_spectate_ended/denied-while-viewing — една cleanup
+  // пътека (виж §15 брифа "не дублирай два различни cleanup flow-а").
+  exitSpectatorView: () => void
+  isSpectatorView: () => boolean
   handleServerMessage: (message: ServerMessage) => boolean
   completePendingTournamentRoundResultTransition: () => boolean
   getResumeInfo: () => { roomId: string; reconnectToken: string } | null
@@ -142,6 +179,9 @@ export type ActiveRoomFlowController = {
   setConnectionState: (isConnected: boolean, message: string | null) => void
   leaveActiveRoom: () => void
   hasActiveRoom: () => boolean
+  // "Реален участник" (seat/decision rights), за разлика от hasActiveRoom()
+  // (= "activeRoom view е отворен", вярно и за spectator). Виж §3 брифа.
+  isActiveRoomParticipant: () => boolean
   getActiveNonTournamentRoomInfo: () => { roomId: string; stakeAmount: number } | null
   getCurrentRoomId: () => string | null
   // STATE B silent attach (§ "SILENT ATTACH") — arms a watch for roomId's

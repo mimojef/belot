@@ -1,5 +1,6 @@
 import {
   type ActiveTableGiftSnapshot,
+  type BelotSpectatorSnapshotMessage,
   type ClientBidAction,
   type MatchFoundMessage,
   type MatchStake,
@@ -785,12 +786,16 @@ export function createActiveRoomFlowController(
     }
   }
 
+  // Phase 3B: ползва controlledSeat (НЕ perspectiveSeat `seat`) — spectator
+  // (controlledSeat=null) винаги получава null тук, независимо от кой е
+  // визуално "bottom". Виж §2/§11 брифа — това е единствения source на
+  // bot-takeover-popup/countdown-bot-check решенията по-долу.
   function getLocalSeatSnapshot(): RoomSeatSnapshot | null {
-    if (!activeRoomState) {
+    if (!activeRoomState || activeRoomState.controlledSeat === null) {
       return null
     }
 
-    return activeRoomState.seats.find((seat) => seat.seat === activeRoomState!.seat) ?? null
+    return activeRoomState.seats.find((seat) => seat.seat === activeRoomState!.controlledSeat) ?? null
   }
 
   function formatCoinAmount(value: number): string {
@@ -1017,7 +1022,13 @@ export function createActiveRoomFlowController(
   }
 
   function syncLeaveControls(): void {
-    if (!activeRoomState || isMatchEndedState()) {
+    // §13 брифа: spectator action bar е ВИНАГИ само ⚙️ Настройки + Изход,
+    // във всяка фаза вкл. match-ended — за разлика от participant, чийто
+    // floating "Изход" се крие на match-ended (екранът там вече има
+    // собствени "Към лобито"/"Преиграй" бутони, виж §18/renderMatchEndedScreen).
+    const shouldHideForMatchEnded =
+      isMatchEndedState() && activeRoomState?.viewerRole !== 'spectator'
+    if (!activeRoomState || shouldHideForMatchEnded) {
       removeLeaveButton()
       return
     }
@@ -1028,6 +1039,15 @@ export function createActiveRoomFlowController(
         .querySelector<HTMLButtonElement>('[data-active-room-leave-button="1"]')
         ?.addEventListener('click', () => {
           if (!activeRoomState) {
+            return
+          }
+
+          // §14 брифа: spectator "Изход" НИКОГА не минава през
+          // leaveActiveRoom (penalty warning/participant leave semantics) —
+          // optimistic local cleanup веднага, независимо от connection
+          // state (deterministic UX, не чака server ACK).
+          if (activeRoomState.viewerRole === 'spectator') {
+            options.onSpectatorExitRequested(activeRoomState.roomId)
             return
           }
 
@@ -1965,7 +1985,13 @@ export function createActiveRoomFlowController(
       return null
     }
 
-    const { seat } = activeRoomState!
+    // Phase 3B §10: countdown warning audio е participant-only — spectator
+    // (controlledSeat=null) никога не "е на ред", независимо кой е визуално
+    // 'bottom'.
+    const seat = activeRoomState!.controlledSeat
+    if (seat === null) {
+      return null
+    }
     const localSeatSnapshot = getLocalSeatSnapshot()
 
     if (localSeatSnapshot?.isBot || localSeatSnapshot?.isControlledByBot) {
@@ -2484,7 +2510,9 @@ export function createActiveRoomFlowController(
   }
 
   function ensureEmojiButton(isScoring: boolean, stageScale: number): void {
-    if (isScoring || !activeRoomState) {
+    // §12 брифа: spectator не изпраща emoji/phrase — бутоните изобщо не се
+    // mount-ват (не просто disabled), defense-in-depth отвъд server guard-а.
+    if (isScoring || !activeRoomState || activeRoomState.viewerRole === 'spectator') {
       removeEmojiButton()
       return
     }
@@ -2781,9 +2809,14 @@ export function createActiveRoomFlowController(
     startBidResponseWatchdog()
   }
 
+  // Phase 3B: параметърът е controlledSeat (Seat | null), не perspectiveSeat
+  // — за spectator (null) `entry.seat === localSeat` никога не може да
+  // съвпадне, затова bot-takeover/pendingBidSent-reset логиката по-долу е
+  // автоматично безопасна. (Bot-takeover тук е и допълнително защитен от
+  // wasMyTurn, derive-нато от server-trusted biddingSnapshot.canSubmitBid.)
   function syncBiddingUiState(
     biddingSnapshot: RoomBiddingSnapshot | null,
-    localSeat: Seat,
+    localSeat: Seat | null,
   ): void {
     if (!biddingSnapshot) {
       clearBiddingUiState()
@@ -3229,7 +3262,7 @@ export function createActiveRoomFlowController(
       isShowingBiddingPhase || authoritativePhase === 'deal-last-3' || isShowingNextRoundPause
 
     if (shouldSyncBiddingSnapshot) {
-      syncBiddingUiState(activeRoomState.game?.bidding ?? null, activeRoomState.seat)
+      syncBiddingUiState(activeRoomState.game?.bidding ?? null, activeRoomState.controlledSeat)
     } else if (!isShowingNextRoundPause) {
       clearBiddingUiState()
     }
@@ -3250,8 +3283,11 @@ export function createActiveRoomFlowController(
       shouldRenderCutAnimation && cuttingAnimation.latchedCutterDisplayName.trim()
         ? cuttingAnimation.latchedCutterDisplayName
         : cutterDisplayName
+    // Вече gate-нато допълнително от cuttingSnapshotForRender.canSubmitCut
+    // (server-trusted, false за spectator) на call site-а по-долу — тук
+    // ползваме controlledSeat за defense-in-depth консистентност (§8 брифа).
     const isLocalPlayerCutter =
-      cutterSeatForRender !== null && activeRoomState.seat === cutterSeatForRender
+      cutterSeatForRender !== null && activeRoomState.controlledSeat === cutterSeatForRender
     const cutAnimationForRender: RenderCuttingAnimationState | null =
       shouldRenderCutAnimation && cuttingAnimation.latchedCuttingSnapshot?.selectedCutIndex !== null
         ? {
@@ -3515,6 +3551,7 @@ export function createActiveRoomFlowController(
       const cuttingPanelsHtml = createCuttingSeatPanelsHtml({
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
+        controlledSeat: activeRoomState.controlledSeat,
         dealerSeat: dealerSeatForRender,
         cutterSeat: cutterSeatForRender,
         cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
@@ -3840,6 +3877,7 @@ export function createActiveRoomFlowController(
       const dealOverlayEarlyReturnPanelsHtml = (): string => createCuttingSeatPanelsHtml({
         seats: activeRoomState!.seats,
         localSeat: activeRoomState!.seat,
+        controlledSeat: activeRoomState!.controlledSeat,
         dealerSeat,
         cutterSeat: null,
         cuttingCountdownRemainingMs: null,
@@ -3938,6 +3976,7 @@ export function createActiveRoomFlowController(
       syncSeatPanels(createCuttingSeatPanelsHtml({
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
+        controlledSeat: activeRoomState.controlledSeat,
         dealerSeat,
         cutterSeat: null,
         cuttingCountdownRemainingMs: null,
@@ -4056,7 +4095,7 @@ export function createActiveRoomFlowController(
 
       const biddingPopupTurnKey =
         biddingSnapshot.canSubmitBid &&
-        biddingSnapshot.currentBidderSeat === activeRoomState.seat &&
+        biddingSnapshot.currentBidderSeat === activeRoomState.controlledSeat &&
         !biddingUiState.pendingBidSent
           ? `${activeRoomState.roomId}:${biddingSnapshot.currentBidderSeat}:${biddingSnapshot.entries.length}:${biddingGame.timerDeadlineAt ?? 'none'}`
           : null
@@ -4107,6 +4146,7 @@ export function createActiveRoomFlowController(
       const biddingSeatPanelsHtml = createCuttingSeatPanelsHtml({
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
+        controlledSeat: activeRoomState.controlledSeat,
         dealerSeat,
         cutterSeat: null,
         cuttingCountdownRemainingMs: null,
@@ -4416,6 +4456,7 @@ export function createActiveRoomFlowController(
         game: activeRoomState.game,
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
+        controlledSeat: activeRoomState.controlledSeat,
         stageScale,
         scaledStageWidth,
         scaledStageHeight,
@@ -4506,6 +4547,7 @@ export function createActiveRoomFlowController(
         game: activeRoomState.game,
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
+        controlledSeat: activeRoomState.controlledSeat,
         roomId: activeRoomState.roomId,
         winningBid: lastKnownWinningBid,
         stageScale,
@@ -5729,7 +5771,7 @@ export function createActiveRoomFlowController(
   }
 
   function applyRoomSnapshotToActiveRoom(message: RoomSnapshotMessage): boolean {
-    if (!activeRoomState) {
+    if (!activeRoomState || activeRoomState.viewerRole !== 'participant') {
       return false
     }
 
@@ -5795,7 +5837,7 @@ export function createActiveRoomFlowController(
       wasPendingBidSentBeforeSnapshot &&
       biddingUiState.pendingBidSent &&
       activeRoomState.game?.authoritativePhase === 'bidding' &&
-      activeRoomState.game.bidding?.currentBidderSeat === activeRoomState.seat
+      activeRoomState.game.bidding?.currentBidderSeat === activeRoomState.controlledSeat
     ) {
       biddingUiState.pendingBidSent = false
       activeRoomState.errorText = 'Обявата не беше потвърдена. Опитайте отново.'
@@ -5846,6 +5888,8 @@ export function createActiveRoomFlowController(
     activeRoomState = {
       roomId,
       seat,
+      viewerRole: 'participant',
+      controlledSeat: seat,
       stake,
       humanPlayers: 4,
       botPlayers: 0,
@@ -5876,6 +5920,157 @@ export function createActiveRoomFlowController(
     }
 
     scheduleActiveRoomRender()
+  }
+
+  // ─── Belot Spectator Mode ("Гледай", Phase 3B) ──────────────────────────
+  // Spectator reuse-ва СЪЩИЯ activeRoom renderer — explicit viewer model
+  // (виж activeRoomTypes.ts коментара): seat='bottom' е ФИКСИРАНА visual
+  // perspective (geometry/rotation само), viewerRole='spectator',
+  // controlledSeat=null е единственият decision/turn/bot-takeover/countdown/
+  // gift/profile-interaction gate. НИКОГА reconnectToken, НИКОГА
+  // tournament/participant fields, НИКОГА resume/join заявка.
+  function enterActiveRoomAsSpectator(roomId: string, snapshot: BelotSpectatorSnapshotMessage): void {
+    resetCuttingAnimationState()
+    clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
+    clearTournamentAttendanceTicker()
+    clearRenderStabilityGuards()
+    clearTournamentRoundResultAutoTransitionTimer()
+    clearReactionCountdownAudioTicker()
+    clearBiddingUiState()
+    clearEmojiReactionUiState()
+    clearPhraseReactionUiState()
+    clearAllTableGiftOverlays()
+    closeTableGiftModal()
+    shouldSilenceNextBiddingSnapshot = true
+    lastKnownWinningBid = null
+    matchEndedSoundPlayed = false
+    matchEndedPrizeAnimationStartedAt = null
+    matchEndedPartnerRatingState = 'idle'
+    matchEndedPartnerRatingMatchKey = null
+    matchEndedPartnerRatingRequestId = null
+    replayStakeEffectShown = false
+    initialStakeEffectShown = true
+    clearMatchEndedCountdown()
+    matchEndedCountdownSeconds = 120
+    clearTournamentRoundResultState()
+    resetPlayingUiCache(playingCache)
+    removePersistentBotTakeoverPopup()
+    removeSeatProfileOverlay()
+    closeProfileAccessBlockPopup()
+    removeSeatPanels()
+    removeLeaveButton()
+    removeBottomHandOverlay()
+    removeBiddingPopupOverlay()
+
+    activeRoomState = {
+      roomId,
+      seat: 'bottom',
+      viewerRole: 'spectator',
+      controlledSeat: null,
+      stake: (snapshot.stakeAmount !== null && snapshot.stakeAmount > 0 ? snapshot.stakeAmount : 5000) as MatchStake,
+      humanPlayers: 4,
+      botPlayers: 0,
+      shouldStartImmediately: false,
+      roomStatus: snapshot.roomStatus,
+      reconnectToken: null,
+      seats: snapshot.seats,
+      game: snapshot.game,
+      isConnected: options.isConnected(),
+      errorText: null,
+      leavePenaltyWarningOpen: false,
+      isGuestTrial: snapshot.isGuestTrial,
+      isPrivateTableOrigin: snapshot.isPrivateTableOrigin,
+      isTournamentMatchOrigin: snapshot.isTournamentMatchOrigin,
+      tournamentId: null,
+      tournamentMatchId: null,
+      tournamentRoundType: null,
+      tournamentAttendance: null,
+      tournamentBotReplacements: [],
+      tournamentBanners: [],
+      activeTableGiftOverlays: {},
+    }
+    applyActiveTableGiftsFromSnapshot(snapshot.activeTableGifts)
+
+    scheduleActiveRoomRender()
+  }
+
+  // mirror на applyRoomSnapshotToActiveRoom, за spectator envelope — виж
+  // §5 брифа "SPECTATOR SNAPSHOT APPLICATION": никакъв currentSeat/
+  // reconnectToken/own-hand identity не се синтезира тук, само копира вече
+  // public полетата от snapshot-а.
+  function applySpectatorSnapshotToActiveRoom(snapshot: BelotSpectatorSnapshotMessage): boolean {
+    if (!activeRoomState || activeRoomState.viewerRole !== 'spectator') {
+      return false
+    }
+
+    if (snapshot.roomId !== activeRoomState.roomId) {
+      return false
+    }
+
+    activeRoomState.roomStatus = snapshot.roomStatus
+    activeRoomState.seats = snapshot.seats
+    activeRoomState.game = snapshot.game
+    activeRoomState.errorText = null
+    activeRoomState.isGuestTrial = snapshot.isGuestTrial
+    activeRoomState.isPrivateTableOrigin = snapshot.isPrivateTableOrigin
+    activeRoomState.isTournamentMatchOrigin = snapshot.isTournamentMatchOrigin
+    applyActiveTableGiftsFromSnapshot(snapshot.activeTableGifts)
+    if (snapshot.stakeAmount !== null && snapshot.stakeAmount > 0) {
+      activeRoomState.stake = snapshot.stakeAmount as MatchStake
+    }
+
+    scheduleActiveRoomRender(
+      cuttingAnimation.isAnimating ||
+        dealingAnimation.isAnimating ||
+        dealNextTwoAnimation.isAnimating ||
+        dealLastThreeAnimation.isAnimating,
+    )
+    return true
+  }
+
+  // Единствена cleanup пътека за spectator view — викана И от explicit
+  // "Изход", И от belot_spectate_ended/denied-while-viewing (виж §14/§15
+  // брифа). Optimistic/immediate — не чака server ACK.
+  function exitSpectatorView(): void {
+    if (!activeRoomState || activeRoomState.viewerRole !== 'spectator') {
+      return
+    }
+
+    resetCuttingAnimationState()
+    clearDealingAnimationState()
+    clearDealNextTwoAnimationState()
+    clearDealLastThreeAnimationState()
+    clearScoringCountdownTicker()
+    clearTournamentAttendanceTicker()
+    clearRenderStabilityGuards()
+    clearTournamentRoundResultAutoTransitionTimer()
+    clearReactionCountdownAudioTicker()
+    clearBiddingUiState()
+    clearEmojiReactionUiState()
+    clearPhraseReactionUiState()
+    clearAllTableGiftOverlays()
+    closeTableGiftModal()
+    resetPlayingUiCache(playingCache)
+    removePersistentBotTakeoverPopup()
+    removeSeatProfileOverlay()
+    closeProfileAccessBlockPopup()
+    removeSeatPanels()
+    removeLeaveButton()
+    removeBottomHandOverlay()
+    removeBiddingPopupOverlay()
+    options.root.innerHTML = ''
+    activeRoomState = null
+  }
+
+  function isSpectatorView(): boolean {
+    return activeRoomState?.viewerRole === 'spectator'
+  }
+
+  function isActiveRoomParticipant(): boolean {
+    return activeRoomState !== null && activeRoomState.viewerRole === 'participant'
   }
 
   function enterActiveRoom(message: MatchFoundMessage, stakeAlreadyShown = false): void {
@@ -5912,6 +6107,8 @@ export function createActiveRoomFlowController(
     activeRoomState = {
       roomId: message.roomId,
       seat: message.seat,
+      viewerRole: 'participant',
+      controlledSeat: message.seat,
       stake: message.stake,
       humanPlayers: message.humanPlayers,
       botPlayers: message.botPlayers,
@@ -6518,6 +6715,14 @@ export function createActiveRoomFlowController(
 
     closeReactionPickersOnOutsideClick(target)
 
+    // §12/§21 брифа: spectator не праща gifts и profile clicks са disabled —
+    // defense-in-depth отвъд render-level suppression (gift icon никога не
+    // се mount-ва за spectator, виж createCuttingSeatPanelsHtml call sites),
+    // за да няма "изглежда работещ, но сървърът го отказва" UI изобщо.
+    if (activeRoomState?.viewerRole === 'spectator') {
+      return
+    }
+
     // Gift иконата седи ВЪТРЕ в data-profile-seat-btn — прихващаме я преди
     // profile popup-а, за да не се отворят и двете от един клик.
     const giftIcon = target.closest<HTMLElement>('[data-active-room-gift-icon]')
@@ -6551,6 +6756,10 @@ export function createActiveRoomFlowController(
     render: renderActiveRoomScreen,
     enterActiveRoom,
     enterActiveRoomFromResume,
+    enterActiveRoomAsSpectator,
+    applySpectatorSnapshotToActiveRoom,
+    exitSpectatorView,
+    isSpectatorView,
     handleServerMessage,
     completePendingTournamentRoundResultTransition: completeTournamentRoundResultTransition,
     getResumeInfo,
@@ -6559,6 +6768,7 @@ export function createActiveRoomFlowController(
     setConnectionState,
     leaveActiveRoom,
     hasActiveRoom,
+    isActiveRoomParticipant,
     getActiveNonTournamentRoomInfo,
     getCurrentRoomId,
     armPendingTournamentSilentEntry,

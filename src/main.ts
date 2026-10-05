@@ -7125,6 +7125,16 @@ const activeRoom = createActiveRoomFlowController({
     isZombieBidReconnectInFlight = true
     client.disconnect('bid_watchdog')
   },
+  // Belot Spectator Mode ("Гледай", Phase 3B) — "Изход" докато гледаш.
+  // Optimistic/immediate local cleanup (activeRoom.exitSpectatorView) +
+  // explicit unwatch_belot_room send & lobby navigation (виж §14 брифа:
+  // "ако server ACK се забави, UX не трябва да остане блокиран"). Единен
+  // helper с belot_spectate_ended handling по-долу (виж §15 "не дублирай
+  // два различни cleanup flow-а").
+  onSpectatorExitRequested: (_roomId) => {
+    activeRoom.exitSpectatorView()
+    lobby?.unwatchBelotSpectatorRoom()
+  },
 })
 
 const tournamentFeederWaitingStripContainer = document.createElement('div')
@@ -8324,6 +8334,51 @@ client = createGameServerClient({
       currentTournamentReclaimTournamentId = null
       tournamentReclaimModal.hide()
       tournamentMatchStartPopup.clearAssignmentForRoom(message.roomId)
+      return
+    }
+
+    // Belot Spectator Mode ("Гледай", Phase 3B) — lobby.handleServerMessage
+    // остава единствен owner на session/VIP bookkeeping-а (Phase 3A:
+    // spectatingBelotRoomId, pending watch intent, VIP popup flow,
+    // navigation-after-ended) — тук само оркестрираме activeRoom view-а
+    // (отваря/обновява/затваря), mirror на room_resumed по-горе. Викаме
+    // lobby.handleServerMessage ПЪРВО за всеки тип, после решаваме дали
+    // activeRoom трябва да реагира.
+    if (message.type === 'belot_spectate_started') {
+      lobby.handleServerMessage(message)
+      return
+    }
+
+    if (message.type === 'belot_spectator_snapshot') {
+      lobby.handleServerMessage(message)
+      // Stale guard (lobby вече проверява вътрешно, но не touch-ва
+      // activeRoom само на базата на своето state) — реагираме само ако
+      // ТОЗИ roomId е реално текущо watched-ата стая.
+      if (lobby.getSpectatingBelotRoomId() !== message.roomId) {
+        return
+      }
+      if (activeRoom.isSpectatorView() && activeRoom.getCurrentRoomId() === message.roomId) {
+        activeRoom.applySpectatorSnapshotToActiveRoom(message)
+      } else if (!activeRoom.hasActiveRoom()) {
+        // §4 брифа: НЕ отваряй game screen преди първи валиден snapshot —
+        // точно тук пристига той за първи път.
+        removeLandingOverlay()
+        lobby.suspendLobbyChatForActiveRoom()
+        activeRoom.enterActiveRoomAsSpectator(message.roomId, message)
+      }
+      return
+    }
+
+    if (message.type === 'belot_spectate_ended' || message.type === 'belot_spectate_denied') {
+      // §15/§16 брифа: lobby решава popup/info-text/navigation; activeRoom
+      // само затваря своя view ако той реално е за тази стая (покрива и
+      // "vip_required по време на reconnect, докато вече гледаш" случая,
+      // §16 — НЕ отваря VIP popup автоматично, lobby-то вече не прави това
+      // за background denial).
+      lobby.handleServerMessage(message)
+      if (activeRoom.isSpectatorView() && activeRoom.getCurrentRoomId() === message.roomId) {
+        activeRoom.exitSpectatorView()
+      }
       return
     }
 

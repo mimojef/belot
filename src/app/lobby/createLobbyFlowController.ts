@@ -10155,27 +10155,34 @@ export function createLobbyFlowController(
     render()
   }
 
-  /** Explicit unwatch — Phase 3B ще го закачи за spectator Exit бутона. НИКОГА leave_active_room. */
+  /** Explicit unwatch — Phase 3B spectator Exit бутона (през activeRoom controller/main.ts). НИКОГА leave_active_room. */
   function unwatchBelotSpectatorRoom(): void {
     if (state.spectatingBelotRoomId === null) return
     options.onUnwatchBelotRoom?.(state.spectatingBelotRoomId)
     state.spectatingBelotRoomId = null
     state.pendingBelotSpectatorRoomId = null
     state.belotSpectatorSnapshot = null
+    // §14 брифа: Изход връща точно в "Частни маси -> Играещи" — СЪЩИЯТ
+    // helper като belot_spectate_ended (виж по-долу), без дублиран cleanup flow.
+    navigateAfterBelotSpectateEnded()
     render()
   }
 
   /**
-   * Навигация след belot_spectate_ended (виж handleServerMessage по-горе) —
-   * Phase 3A няма отделен spectator screen, от който да напуска (watch_belot_room
-   * се праща само от "Частни маси -> Играещи" в тази фаза), затова тук само
-   * гарантираме правилния tab. Phase 3B ще extend-не тук реалната navigation
-   * от spectator playing screen, без да дублира cleanup-а по-горе.
+   * Навигация след belot_spectate_ended ИЛИ explicit "Изход" (§14/§15
+   * брифа) — единствен helper за двата пътя. Phase 3B: activeRoom view-ът
+   * вече е fullscreen overlay, скриващ лобито изцяло, затова navigate-ваме
+   * БЕЗУСЛОВНО (не само "ако вече си на private-rooms") — независимо какъв
+   * currentScreen е останал stale от преди watch-а, потребителят трябва да
+   * се озове точно в "Частни маси -> Играещи" с fresh данни.
    */
   function navigateAfterBelotSpectateEnded(): void {
-    if (state.currentScreen === 'private-rooms') {
-      state.privateRoomsLifecycleTab = 'playing'
-    }
+    state.currentScreen = 'private-rooms'
+    state.privateRoomsTab = 'all'
+    state.privateRoomsLifecycleTab = 'playing'
+    state.privateGamesLoaded = true
+    options.onPrivateRoomsOpen?.()
+    options.onPrivateGamesOpen?.()
   }
 
   // ─── Create Topic popup (Custom Topic Creation) ──────────────────────────
@@ -20292,6 +20299,11 @@ export function createLobbyFlowController(
         if (state.spectatingBelotRoomId === message.roomId) {
           state.spectatingBelotRoomId = null
           state.belotSpectatorSnapshot = null
+          // §16 брифа: reconnect denial докато вече гледаш (напр. VIP е
+          // изтекъл междувременно) -> тих cleanup + връщане в "Частни маси
+          // -> Играещи", БЕЗ VIP popup (popup-ът е user-action driven, не
+          // фонов reconnect fail).
+          navigateAfterBelotSpectateEnded()
           render()
         }
         return true

@@ -50,6 +50,7 @@
     "check:topics-replies-likes-client": "npx tsx scripts/checkTopicsRepliesLikesClient.ts",
     "check:private-games-lobby-tabs": "npx tsx scripts/checkPrivateGamesLobbyTabs.ts",
     "check:belot-spectator-watch-vip-flow": "npx tsx scripts/checkBelotSpectatorWatchVipFlow.ts",
+    "check:belot-spectator-active-room-view": "npx tsx scripts/checkBelotSpectatorActiveRoomView.ts",
     "check:topic-message-self-delete-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageSelfDeleteClient.ts --project-root=.",
     "check:topic-message-edit-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageEditClient.ts --project-root=.",
     "check:topic-unread-seen-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicUnreadSeenClient.ts --project-root=.",

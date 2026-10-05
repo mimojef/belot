@@ -1760,6 +1760,8 @@ export type RenderPlayingScreenOptions = {
   game: RoomGameSnapshot
   seats: RoomSeatSnapshot[]
   localSeat: Seat
+  /** Phase 3B: null за Belot spectator — единствен gate за "мой ред"/bot-takeover/click-eligibility, виж §2/§8/§11 брифа. localSeat остава чисто geometry/perspective. */
+  controlledSeat: Seat | null
   roomId: string
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
   stageScale: number
@@ -1784,6 +1786,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     game,
     seats,
     localSeat,
+    controlledSeat,
     roomId,
     winningBid,
     stageScale: sourceStageScale,
@@ -1942,7 +1945,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       }
     : game.handCounts
   const sortedHand = sortLocalHandForDisplay(displayedOwnHand, getSortOptions(winningBid))
-  const isMyTurn = playing?.currentTurnSeat === localSeat
+  // Phase 3B §8/§11: controlledSeat (не localSeat/perspective) — spectator
+  // (controlledSeat=null) никога не "е на ред", независимо кой е визуално
+  // 'bottom'. Това е единствения gate за bot-takeover trigger по-долу
+  // (syncPlayingBotTakeoverState) и за click-eligibility.
+  const isMyTurn = controlledSeat !== null && playing?.currentTurnSeat === controlledSeat
   const displayedTrickIndex = isShowingBufferedCompletedTrick
     ? cache.bufferedCompletedTrick?.trickIndex ?? null
     : completedCount
@@ -2055,10 +2062,17 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     }
   }
 
-  const panelHandCounts = {
-    ...displayedHandCounts,
-    [localSeat]: 0,
-  }
+  // Phase 3B §6: за spectator (controlledSeat=null) НЕ зануляваме bottom-ия
+  // count — няма отделен renderBottomHandOverlay (виж по-долу), затова
+  // bottom се рисува от панела точно като top/left/right: handCounts cards
+  // backs (ownHand е [] за spectator, значи renderDealtCardFanInPanel вече
+  // рисува card=null -> гръб за всеки, автоматично, без нов renderer).
+  const panelHandCounts = controlledSeat === null
+    ? displayedHandCounts
+    : {
+        ...displayedHandCounts,
+        [localSeat]: 0,
+      }
   const dealtHandsForPanels: DealtHandsData = {
     handCounts: panelHandCounts,
     ownHand: sortedHand,
@@ -2250,13 +2264,18 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     }
   }
 
-  const bottomHandHost = syncBottomHandOverlay(renderBottomHandOverlay({
-    cards: sortedHand,
-    validCardIds,
-    isMyTurn,
-    stageScale,
-    hoveredHandCardId: cache.hoveredHandCardId,
-  }))
+  // Phase 3B §6: spectator няма "собствена" ръка — bottom се рисува от
+  // seat панела (handCounts card backs, виж panelHandCounts по-горе), не от
+  // този floating clickable overlay. removeBottomHandOverlay() е idempotent.
+  const bottomHandHost = controlledSeat === null
+    ? (removeBottomHandOverlay(), null)
+    : syncBottomHandOverlay(renderBottomHandOverlay({
+        cards: sortedHand,
+        validCardIds,
+        isMyTurn,
+        stageScale,
+        hoveredHandCardId: cache.hoveredHandCardId,
+      }))
 
   if (isPhoneLayout) {
     syncMobileTrickLayer(renderMobileTrickLayerHtml({
@@ -2299,6 +2318,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       syncSeatPanels(createCuttingSeatPanelsHtml({
         seats,
         localSeat,
+        controlledSeat,
         dealerSeat: game.dealerSeat ?? null,
         cutterSeat: null,
         cuttingCountdownRemainingMs: null,

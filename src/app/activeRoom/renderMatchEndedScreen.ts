@@ -27,6 +27,8 @@ type RenderMatchEndedScreenOptions = {
   game: RoomGameSnapshot
   seats: RoomSeatSnapshot[]
   localSeat: Seat
+  /** Phase 3B §18: null (Belot spectator) -> partner rating/replay/leave-vote/prize controls се крият; остава само score summary. НЕ окончателен scoring redesign (виж §18 брифа, Phase 5 TODO за НИЕ/ВИЕ). */
+  controlledSeat?: Seat | null
   stageScale: number
   scaledStageWidth: number
   scaledStageHeight: number
@@ -501,6 +503,7 @@ function renderMobileMatchEndedPanel(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
   localSeat: Seat,
+  controlledSeat: Seat | null,
   prizeAmount: number | null | undefined,
   prizeAnimationStartedAt: number | null,
   renderNow: number,
@@ -559,7 +562,7 @@ function renderMobileMatchEndedPanel(
           >
             ${resultLabel}
           </div>
-          ${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</div>` : ''}
+          ${controlledSeat !== null && winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</div>` : ''}
         </div>
 
         <div
@@ -589,8 +592,9 @@ function renderMobileMatchEndedPanel(
           ${sortedSeats.map((s) => renderMobilePlayerTile(s, replayVotes.includes(s.seat), leaveVotes.includes(s.seat))).join('')}
         </div>
 
-        ${renderMobilePartnerRating(localSeat, seats, partnerRatingStatus)}
+        ${controlledSeat !== null ? renderMobilePartnerRating(localSeat, seats, partnerRatingStatus) : ''}
 
+        ${controlledSeat !== null ? `
         <div style="display:grid;gap:8px;">
           <button
             type="button"
@@ -656,6 +660,7 @@ function renderMobileMatchEndedPanel(
             `}
           </div>
         </div>
+        ` : ''}
 
         <div style="display:flex;justify-content:flex-end;">
           <div
@@ -677,6 +682,7 @@ function renderMatchEndedPanel(
   game: RoomGameSnapshot,
   seats: RoomSeatSnapshot[],
   localSeat: Seat,
+  controlledSeat: Seat | null,
   prizeAmount: number | null | undefined,
   prizeAnimationStartedAt: number | null,
   renderNow: number,
@@ -739,7 +745,7 @@ function renderMatchEndedPanel(
               letter-spacing:0.04em;
             "
           >
-            ${resultLabel}${winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</span>` : ''}
+            ${resultLabel}${controlledSeat !== null && winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</span>` : ''}
           </div>
         </div>
         <div style="height:2px;background:linear-gradient(90deg, transparent 0%, #facc15 30%, #facc15 70%, transparent 100%);margin-bottom:20px;border-radius:1px;"></div>
@@ -752,11 +758,12 @@ function renderMatchEndedPanel(
             align-items:stretch;
           "
         >
-          ${renderTeamPlayers('Ние', ourSeats, ourScore, replayVotes, leaveVotes, renderPartnerRating(localSeat, seats, partnerRatingStatus))}
+          ${renderTeamPlayers('Ние', ourSeats, ourScore, replayVotes, leaveVotes, controlledSeat !== null ? renderPartnerRating(localSeat, seats, partnerRatingStatus) : '')}
           <div style="background:linear-gradient(180deg,transparent 0%,#facc15 25%,#facc15 75%,transparent 100%);border-radius:1px;"></div>
           ${renderTeamPlayers('Вие', theirSeats, theirScore, replayVotes, leaveVotes)}
         </div>
 
+        ${controlledSeat !== null ? `
         <div
           style="
             margin-top:24px;
@@ -837,6 +844,7 @@ function renderMatchEndedPanel(
           </button>
           `}
         </div>
+        ` : ''}
 
         <div style="display:flex;justify-content:flex-end;margin-top:14px;">
           <div
@@ -860,6 +868,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     game,
     seats,
     localSeat,
+    controlledSeat = localSeat,
     stageScale,
     scaledStageWidth,
     scaledStageHeight,
@@ -912,7 +921,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
           font-family:Inter, system-ui, sans-serif;
         "
       >
-        ${renderMobileMatchEndedPanel(game, seats, localSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, countdownSeconds, isPrivateTableOrigin)}
+        ${renderMobileMatchEndedPanel(game, seats, localSeat, controlledSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, countdownSeconds, isPrivateTableOrigin)}
       </div>
     `
   } else {
@@ -962,7 +971,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
               box-sizing:border-box;
             "
           >
-            ${renderMatchEndedPanel(game, seats, localSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, onReplayVote, countdownSeconds, isPrivateTableOrigin)}
+            ${renderMatchEndedPanel(game, seats, localSeat, controlledSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, onReplayVote, countdownSeconds, isPrivateTableOrigin)}
           </div>
         </div>
       </div>

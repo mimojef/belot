@@ -74,6 +74,14 @@ export type SeatPhraseBubble = {
 export type RenderCuttingSeatPanelsOptions = {
   seats: RoomSeatSnapshot[]
   localSeat: Seat
+  /**
+   * Phase 3B — separate от `localSeat` (perspective/geometry, непроменено
+   * use-case): gate ЕДИНСТВЕНО за gift-icon eligibility
+   * (canSendGiftToSeat). null (Belot spectator) -> gift иконата никога не
+   * се mount-ва за никой seat. Participant: подава се същото като
+   * localSeat.
+   */
+  controlledSeat?: Seat | null
   dealerSeat: Seat | null
   cutterSeat: Seat | null
   cuttingCountdownRemainingMs: number | null
@@ -1219,7 +1227,11 @@ export function createCuttingSeatPanelHtml(
   phraseBubbles: Partial<Record<Seat, SeatPhraseBubble>> | null,
   tournamentBotReplacements?: TournamentBotReplacementSnapshot[] | null,
   skipBubbleRender = false,
-  localSeat?: Seat | null,
+  // Вече неизползван тук (gift eligibility мина на controlledSeat по-долу)
+  // — пазим позиционния слот, за да не чупим call site-а.
+  _localSeat?: Seat | null,
+  /** Phase 3B — виж RenderCuttingSeatPanelsOptions.controlledSeat коментара. */
+  controlledSeat?: Seat | null,
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
   // Подарък може да се прати към всеки различен от собственото място —
@@ -1230,6 +1242,9 @@ export function createCuttingSeatPanelHtml(
   // crash). isBotReplacement (tournament no-show takeover, показва
   // оригиналния ЧОВЕШКИ replaced player визуално) остава изключен — твърде
   // много неясна semantics кой реално получава подаръка в тоя edge case.
+  // Phase 3B §12: controlledSeat (НЕ localSeat/perspective) — spectator
+  // (controlledSeat=null) никога не вижда gift иконата на никой seat,
+  // независимо кой е визуално 'bottom'.
   const canSendGiftToSeat =
     seat.isOccupied &&
     !isBotReplacement &&
@@ -1237,8 +1252,8 @@ export function createCuttingSeatPanelHtml(
     // по-стар сървър/snapshot без profileId поле.
     seat.profileId != null &&
     seat.profileId.length > 0 &&
-    localSeat != null &&
-    seat.seat !== localSeat
+    controlledSeat != null &&
+    seat.seat !== controlledSeat
   const isBottomSeat = visualSeat === 'bottom'
   const isMobileLayout = isPhoneLayoutViewport()
   const isCountdownSeat = seat.seat === countdownSeat
@@ -1523,6 +1538,7 @@ export function createCuttingSeatPanelsHtml(
   const {
     seats,
     localSeat,
+    controlledSeat,
     dealerSeat,
     cutterSeat,
     cuttingCountdownRemainingMs,
@@ -1594,6 +1610,7 @@ export function createCuttingSeatPanelsHtml(
         tournamentBotReplacements ?? null,
         separateBubbleLayer === true,
         localSeat,
+        controlledSeat,
       )
     })
     .join('')
