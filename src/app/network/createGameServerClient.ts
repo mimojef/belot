@@ -2854,7 +2854,7 @@ export type AdCampaignManagementDto = {
   createdAt: string
   createdByProfileId: string | null
   createdByDisplayName: string | null
-  createdByRole: 'admin' | 'pika_team'
+  createdByRole: 'admin' | 'pika_team' | 'marketing'
   dispatchCount: number
   lastDispatchAt: string | null
 }

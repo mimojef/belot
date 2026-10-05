@@ -383,7 +383,7 @@ export type ClientMessage =
       type: 'unsubscribe_topics_directory'
     }
   | {
-      /** Admin/pika_team management view realtime sync — виж adCampaignManagementSubscriberConnectionIds в index.ts. */
+      /** Admin/pika_team/marketing management view realtime sync — виж adCampaignManagementSubscriberConnectionIds в index.ts. */
       type: 'subscribe_ad_campaign_management'
     }
   | {
@@ -2039,7 +2039,7 @@ export type AdCampaignManagementDto = {
   createdAt: string
   createdByProfileId: string | null
   createdByDisplayName: string | null
-  createdByRole: 'admin' | 'pika_team'
+  createdByRole: 'admin' | 'pika_team' | 'marketing'
   dispatchCount: number
   lastDispatchAt: string | null
 }

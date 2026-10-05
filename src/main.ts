@@ -4932,6 +4932,25 @@ async function submitTopChatAdminRoleChange(
   }
 }
 
+async function submitMarketingRoleChange(
+  profileId: string,
+  action: 'grant' | 'revoke',
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/admin/profiles/${encodeURIComponent(profileId)}/marketing`,
+      { method: action === 'grant' ? 'POST' : 'DELETE', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string }
+    if (!response.ok || !data.ok) {
+      return { ok: false, message: data.message ?? 'Действието не бе завършено.' }
+    }
+    return { ok: true }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function submitChangePassword(
   currentPassword: string,
   newPassword: string,
@@ -6821,6 +6840,8 @@ lobby = createLobbyFlowController({
   onAdminRevokePikaTeam: (profileId) => submitPikaTeamRoleChange(profileId, 'revoke'),
   onAdminGrantTopChatAdmin: (profileId) => submitTopChatAdminRoleChange(profileId, 'grant'),
   onAdminRevokeTopChatAdmin: (profileId) => submitTopChatAdminRoleChange(profileId, 'revoke'),
+  onAdminGrantMarketing: (profileId) => submitMarketingRoleChange(profileId, 'grant'),
+  onAdminRevokeMarketing: (profileId) => submitMarketingRoleChange(profileId, 'revoke'),
   onAdminHistoryWindowChange: (window: HistoryWindow) => {
     invalidateHistoryGeneration()
     fetchAdminHistory(window)

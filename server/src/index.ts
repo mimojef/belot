@@ -36,25 +36,29 @@ import {
   createClearSessionCookieHeader,
   createSessionCookieHeader,
   getSessionTokenFromCookieHeader,
+  isAdCampaignManagerRole,
   isAdCampaignManagerSession,
   isAdminGiftUnlimitedSession,
   isAdminOrSubadminSession,
   isFullAdminSession,
   isLafcheMessageDeleteModeratorSession,
   isLafcheModeratorSession,
+  isLafcheOwnPostDeleteSession,
   isPikaAnnouncementAuthorSession,
   isPikaTeamGiftFriendshipBypassSession,
   isPikaTeamGiftMaxAmountSession,
   isPikaTeamSupportChatSession,
   isTopicMessageModeratorSession,
   isTopicModeratorSession,
+  isTopicOwnRootCascadeDeleteSession,
   isTopicWholeTopicModeratorSession,
+  type AdCampaignManagerRole,
   type AuthSessionSnapshot,
 } from './db/authStore.js'
 import { createChatStore } from './db/chatStore.js'
 import { createLobbyChatStore } from './db/lobbyChatStore.js'
 import { createTopicStore, type TopicSnapshot } from './db/topicStore.js'
-import { createTopicMessageStore, type TopicMessageSnapshot, type TopicMessageDeletionEvent } from './db/topicMessageStore.js'
+import { createTopicMessageStore, type TopicMessageSnapshot, type TopicMessageDeletionEvent, type TopicMessageSenderRole } from './db/topicMessageStore.js'
 import { createTopicReadStateStore } from './db/topicReadStateStore.js'
 import {
   createTopicModerationStore,
@@ -9514,6 +9518,62 @@ async function handleAdminTopChatAdminRoleRequest(
 }
 
 /**
+ * Управление на marketing ("Маркетинг") роля — огледално на
+ * handleAdminTopChatAdminRoleRequest. POST = grant, DELETE = revoke. Само
+ * пълен admin (isFullAdminSession) — marketing/pika_team/subadmin и т.н. НЕ
+ * могат да задават роли.
+ */
+async function handleAdminMarketingRoleRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = pathname.match(/^\/api\/admin\/profiles\/([^/]+)\/marketing$/)
+  if (!match) return false
+
+  if (req.method !== 'POST' && req.method !== 'DELETE') return false
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Само администратор може да управлява роли.' })
+    return true
+  }
+
+  const targetProfileId = decodeURIComponent((match[1] ?? '').trim())
+
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(targetProfileId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден profileId.' })
+    return true
+  }
+
+  const result = authStore.setMarketingRole({
+    actorAccountId: session.account.accountId,
+    targetProfileId,
+    action: req.method === 'POST' ? 'grant' : 'revoke',
+  })
+
+  if (!result.ok) {
+    const statusByCode: Record<typeof result.code, number> = {
+      not_found: 404,
+      no_account: 400,
+      self: 400,
+      target_is_admin: 409,
+      conflict: 409,
+      profile_inactive: 400,
+      profile_temporary: 400,
+      account_inactive: 400,
+    }
+    sendJsonResponse(res, statusByCode[result.code], { ok: false, message: result.message })
+    return true
+  }
+
+  sendJsonResponse(res, 200, { ok: true, role: result.role })
+  return true
+}
+
+/**
  * Само пълен admin (isFullAdminSession — role==='admin' от FRESH session,
  * не frontend-only проверка) може да "подари" VIP дни директно от чужд
  * profile popup. Grant-ва през СЪЩИЯ vipStore.grantVip() authoritative
@@ -12055,6 +12115,16 @@ function parseTopicMuteEvidenceReasonCategory(raw: unknown): TopicMuteEvidenceRe
     : null
 }
 
+// Immutable role-at-write snapshot за topic_messages.sender_role /
+// topics.created_by_role. 'marketing' се записва като 'player' — в "Теми"/
+// "Лафче" marketing е обикновен потребител (без author badge, без 72h
+// auto-delete exemption), а DB CHECK-овете на тези колони умишлено не
+// включват 'marketing' (виж 20261005_001_add_marketing_role.sql).
+function getTopicAuthorRoleSnapshotForProfile(profileId: string): TopicMessageSenderRole {
+  const role = authStore.getAccountRoleForProfile(profileId) ?? 'player'
+  return role === 'marketing' ? 'player' : role
+}
+
 // isTopicModeratorSession гарантира role !== 'player'/'chat_admin'/'guest' —
 // type predicate стеснява само session (non-null), не и вложеното
 // account.role поле, затова explicit cast тук (огледално на
@@ -12836,13 +12906,14 @@ async function handleTopicMessageDeleteRequest(
     return true
   }
 
-  // "Лафче" (topic-lafche) няма own-delete право изобщо — единственият
-  // валиден path е moderator (isModerator блокът по-горе, isLafcheModeratorSession).
-  // За разлика от normal Topics, фактът че потребителят е автор на поста
-  // НЕ му дава delete право тук — reuse-ва СЪЩИЯ topicId===LAFCHE_TOPIC_ID
-  // branch, който вече определи isModerator по-горе (не дублира permission
-  // helper). Normal Topics own-delete остава напълно непроменено.
-  if (topicId === LAFCHE_TOPIC_ID) {
+  // "Лафче" (topic-lafche) няма own-delete право за обикновен потребител —
+  // единственият валиден path е moderator (isModerator блокът по-горе,
+  // isLafcheModeratorSession). Изключение: role='marketing'
+  // (isLafcheOwnPostDeleteSession) може да трие СОБСТВЕНИТЕ си постове —
+  // продължава към owner path-а по-долу (handler 403 pre-check за чужд пост +
+  // ownership re-check в deleteOwnMessage), никога към moderator path-а.
+  // Normal Topics own-delete остава напълно непроменено.
+  if (topicId === LAFCHE_TOPIC_ID && !isLafcheOwnPostDeleteSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да изтриеш това съобщение.' })
     return true
   }
@@ -12866,6 +12937,9 @@ async function handleTopicMessageDeleteRequest(
     topicId,
     messageId,
     ownerProfileId: session.profile.profileId,
+    // role='marketing' може да изтрие собствената си тема (root) заедно с
+    // чуждите отговори в нея; ownership на root-а се re-check-ва в store-а.
+    cascadeLiveReplies: isTopicOwnRootCascadeDeleteSession(session),
   })
 
   if (!result.ok && result.code === 'not_found') {
@@ -18846,16 +18920,19 @@ async function handleAdminAdCampaignsRequest(
   const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
   const session = authStore.getSession(sessionToken)
 
-  // Admin И pika_team имат ЕДНАКВИ права тук — виж isAdCampaignManagerSession
-  // (authStore.ts). Няма значение кой е създал кампанията — всеки от двамата
-  // може да send/delete всяка кампания.
+  // Admin, pika_team И marketing имат ЕДНАКВИ права тук — виж
+  // isAdCampaignManagerSession (authStore.ts). Няма значение кой е създал
+  // кампанията — всеки от тях може да send/delete всяка кампания.
   if (!isAdCampaignManagerSession(session)) {
     sendJsonResponse(res, 403, { ok: false, message: 'Forbidden' })
     return true
   }
 
   const actorProfileId = session.profile.profileId ?? ''
-  const actorRole = session.account.role === 'pika_team' ? 'pika_team' as const : 'admin' as const
+  // isAdCampaignManagerSession гарантира role ∈ AdCampaignManagerRole — type
+  // predicate-ът стеснява само session, не и вложеното account.role поле,
+  // затова explicit cast (огледално на toTopicModeratorRole).
+  const actorRole = session.account.role as AdCampaignManagerRole
   const actor = { profileId: actorProfileId, role: actorRole }
 
   if (pathname === '/api/admin/ad-campaigns' && req.method === 'GET') {
@@ -19760,6 +19837,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminTopChatAdminRoleRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminMarketingRoleRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -23315,7 +23396,7 @@ wsServer.on('connection', (socket, request) => {
         const role = latestConnection?.profileId != null
           ? authStore.getAccountRoleForProfile(latestConnection.profileId)
           : null
-        if (role === 'admin' || role === 'pika_team') {
+        if (isAdCampaignManagerRole(role)) {
           adCampaignManagementSubscriberConnectionIds.add(connection.id)
         }
         return
@@ -23710,7 +23791,7 @@ wsServer.on('connection', (socket, request) => {
 
           const publicProfile = playerProgressStore.getPublicProfile(senderProfileId)
           const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
-          const senderRole = authStore.getAccountRoleForProfile(senderProfileId) ?? 'player'
+          const senderRole = getTopicAuthorRoleSnapshotForProfile(senderProfileId)
 
           let row: TopicMessageSnapshot
           try {
@@ -23907,7 +23988,7 @@ wsServer.on('connection', (socket, request) => {
 
           const publicProfile = playerProgressStore.getPublicProfile(senderProfileId)
           const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
-          const senderRole = authStore.getAccountRoleForProfile(senderProfileId) ?? 'player'
+          const senderRole = getTopicAuthorRoleSnapshotForProfile(senderProfileId)
 
           let row: TopicMessageSnapshot
           try {
@@ -24116,7 +24197,7 @@ wsServer.on('connection', (socket, request) => {
         // 72h auto-delete exemption guard-а (findInactivityCandidates в
         // topicHardDeleteService.ts) — по-късна промотиране/демотиране на
         // автора НЕ променя вече записаната стойност.
-        const creatorRole = authStore.getAccountRoleForProfile(creatorProfileId) ?? 'player'
+        const creatorRole = getTopicAuthorRoleSnapshotForProfile(creatorProfileId)
 
         // Duplicate-check + insert е ЕДНА атомична BEGIN IMMEDIATE транзакция
         // вътре в topicStore.createTopic — виж коментара там за пълния

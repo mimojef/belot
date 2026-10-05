@@ -21,7 +21,7 @@ import { createProfileVisitLinkWriter } from './profileVisitLinks.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-export type AccountRoleValue = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+export type AccountRoleValue = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'marketing' | 'subadmin' | 'admin'
 
 export type AuthAccountSnapshot = {
   accountId: AccountId
@@ -224,21 +224,59 @@ export function isPikaAnnouncementAuthorSession(
   )
 }
 
+export type AdCampaignManagerRole = 'admin' | 'pika_team' | 'marketing'
+
 /**
- * "Рекламни кампании" (ad campaigns) management достъп — admin И pika_team
- * имат ЕДНАКВИ права (виждат/create/send/delete всяка кампания, независимо
- * кой я е създал). Умишлено нов, тесен predicate, а не reuse на
- * isPikaAnnouncementAuthorSession, въпреки идентичното тяло — established
- * конвенция в проекта е всяко permission да си има собствен predicate, за
- * да не се разширят случайно правата на едната фича заради промяна в другата.
+ * "Реклами" (ad campaigns) management достъп на ниво роля — единствен source
+ * of truth за role set-а на Ads секцията. Ползва се директно от call sites,
+ * които имат само роля (WS subscribe_ad_campaign_management чете ролята по
+ * profileId), и от isAdCampaignManagerSession по-долу.
+ */
+export function isAdCampaignManagerRole(role: AccountRoleValue | null): role is AdCampaignManagerRole {
+  return role === 'admin' || role === 'pika_team' || role === 'marketing'
+}
+
+/**
+ * "Рекламни кампании" (ad campaigns) management достъп — admin, pika_team И
+ * marketing имат ЕДНАКВИ права (виждат/create/send/delete всяка кампания,
+ * независимо кой я е създал). Умишлено нов, тесен predicate, а не reuse на
+ * isPikaAnnouncementAuthorSession — established конвенция в проекта е всяко
+ * permission да си има собствен predicate, за да не се разширят случайно
+ * правата на едната фича заради промяна в другата. marketing е включен САМО
+ * тук — НЕ наследява нито едно друго admin/pika_team право.
  */
 export function isAdCampaignManagerSession(
   session: AuthSessionSnapshot | null,
 ): session is AuthSessionSnapshot {
-  return session !== null && (
-    session.account.role === 'admin'
-    || session.account.role === 'pika_team'
-  )
+  return session !== null && isAdCampaignManagerRole(session.account.role)
+}
+
+/**
+ * "Лафче" own-post delete — САМО role='marketing'. По подразбиране Лафче
+ * няма own-delete за никого (единственият path е moderator, виж
+ * isLafcheMessageDeleteModeratorSession); marketing получава ИЗКЛЮЧИТЕЛНО
+ * правото да трие СОБСТВЕНИТЕ си постове там. Ownership-ът се проверява
+ * отделно (handler pre-check + topicMessageStore.deleteOwnMessage) — този
+ * predicate НЕ дава право върху чужди постове и НЕ е moderator право.
+ */
+export function isLafcheOwnPostDeleteSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'marketing'
+}
+
+/**
+ * "Теми" own-root (собствена тема/thread) delete ДОРИ при живи чужди
+ * отговори — САМО role='marketing'. Обикновеният author own-delete отказва
+ * root с live replies ('has_live_replies'); marketing може да изтрие целия
+ * собствен thread (root + всички отговори в него). Ownership на ROOT-а
+ * остава задължителна (проверява се в topicMessageStore.deleteOwnMessage) —
+ * НЕ дава право върху чужди теми/постове и НЕ е moderator право.
+ */
+export function isTopicOwnRootCascadeDeleteSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'marketing'
 }
 
 /**
@@ -430,7 +468,7 @@ export function isPikaTeamSupportChatSession(
   return session !== null && session.account.role === 'pika_team'
 }
 
-export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin'
+export type ElevatedRole = 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'marketing'
 
 export type SubadminRoleChangeErrorCode =
   | 'not_found'
@@ -463,6 +501,12 @@ export type TopChatAdminRoleChangeErrorCode = SubadminRoleChangeErrorCode
 export type TopChatAdminRoleChangeResult =
   | { ok: true; role: 'top_chat_admin' | 'player' }
   | { ok: false; code: TopChatAdminRoleChangeErrorCode; message: string }
+
+export type MarketingRoleChangeErrorCode = SubadminRoleChangeErrorCode
+
+export type MarketingRoleChangeResult =
+  | { ok: true; role: 'marketing' | 'player' }
+  | { ok: false; code: MarketingRoleChangeErrorCode; message: string }
 
 export type AuthStore = {
   /**
@@ -656,6 +700,11 @@ export type AuthStore = {
     targetProfileId: string
     action: 'grant' | 'revoke'
   }) => TopChatAdminRoleChangeResult
+  setMarketingRole: (input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }) => MarketingRoleChangeResult
   /** Роля на акаунта зад даден профил — само за UI показване (badge), null ако профилът няма акаунт (бот/гост/изтрит). */
   getAccountRoleForProfile: (profileId: string) => AccountRoleValue | null
   close: () => void
@@ -2825,7 +2874,7 @@ export async function createAuthStore(
           ok: false,
           code: 'profile_temporary',
           message: `Не можеш да направиш временен профил ${
-            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : 'субадмин'
+            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : input.role === 'marketing' ? 'Маркетинг' : 'субадмин'
           }.`,
         }
       }
@@ -2835,7 +2884,7 @@ export async function createAuthStore(
           ok: false,
           code: 'profile_inactive',
           message: `Не можеш да направиш неактивен профил ${
-            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : 'субадмин'
+            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : input.role === 'marketing' ? 'Маркетинг' : 'субадмин'
           }.`,
         }
       }
@@ -2845,7 +2894,7 @@ export async function createAuthStore(
           ok: false,
           code: 'account_inactive',
           message: `Не можеш да направиш неактивен акаунт ${
-            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : 'субадмин'
+            input.role === 'chat_admin' ? 'чат админ' : input.role === 'pika_team' ? 'Екип Pika.bg' : input.role === 'top_chat_admin' ? 'TOP чат админ' : input.role === 'marketing' ? 'Маркетинг' : 'субадмин'
           }.`,
         }
       }
@@ -2881,6 +2930,7 @@ export async function createAuthStore(
       | 'grant_chat_admin' | 'revoke_chat_admin'
       | 'grant_pika_team' | 'revoke_pika_team'
       | 'grant_top_chat_admin' | 'revoke_top_chat_admin'
+      | 'grant_marketing' | 'revoke_marketing'
 
     database.exec('BEGIN IMMEDIATE;')
 
@@ -2968,6 +3018,14 @@ export async function createAuthStore(
     return changeElevatedRole({ ...input, role: 'top_chat_admin' }) as TopChatAdminRoleChangeResult
   }
 
+  function setMarketingRole(input: {
+    actorAccountId: string
+    targetProfileId: string
+    action: 'grant' | 'revoke'
+  }): MarketingRoleChangeResult {
+    return changeElevatedRole({ ...input, role: 'marketing' }) as MarketingRoleChangeResult
+  }
+
   function close(): void {
     database.close()
   }
@@ -2990,6 +3048,7 @@ export async function createAuthStore(
     setChatAdminRole,
     setPikaTeamRole,
     setTopChatAdminRole,
+    setMarketingRole,
     getAccountRoleForProfile,
     close,
   }

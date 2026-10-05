@@ -128,6 +128,7 @@
     "check:chat-admin-role": "tsx scripts/checkChatAdminRole.ts --server-root=.",
     "check:pika-team-role": "tsx scripts/checkPikaTeamRole.ts",
     "check:top-chat-admin-role": "tsx scripts/checkTopChatAdminRole.ts",
+    "check:marketing-role": "tsx scripts/checkMarketingRole.ts --server-root=.",
     "check:lobby-chat-admin-name-color": "tsx scripts/checkLobbyChatAdminNameColor.ts",
     "check:lobby-chat-mobile-fullscreen": "tsx scripts/checkLobbyChatMobileFullscreen.ts --project-root=..",
     "check:topics-composer-non-vip-tap-event-order": "tsx scripts/checkTopicsComposerNonVipTapEventOrder.ts --project-root=..",

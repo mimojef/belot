@@ -200,11 +200,15 @@ export type TopicMessageStore = {
    * 'has_live_replies' ако root-ът има поне 1 live reply, race-safe проверка
    * вътре в BEGIN IMMEDIATE), insert-ва self-delete audit ред вместо
    * moderator audit. Виж имплементацията за пълния rationale.
+   * cascadeLiveReplies=true (само за isTopicOwnRootCascadeDeleteSession, т.е.
+   * role='marketing') — собственият ROOT се трие ЗАЕДНО с live replies вместо
+   * 'has_live_replies'; ownership на root-а остава задължителна.
    */
   deleteOwnMessage: (input: {
     topicId: string
     messageId: string
     ownerProfileId: string
+    cascadeLiveReplies?: boolean
   }) => (
     | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
     | { ok: false; code: 'not_found' | 'already_deleted' | 'has_live_replies' }
@@ -1062,11 +1066,19 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
    * никога не разклонява към cascade collection (affectedMessageIds е винаги
    * точно [target.message_id] тук, за разлика от deleteMessage-a's root case).
    * Idempotent: вече-deleted target → already_deleted, без нов audit/event ред.
+   *
+   * cascadeLiveReplies=true (caller-gated: САМО isTopicOwnRootCascadeDeleteSession,
+   * role='marketing') — ROOT target НЕ се отказва при live replies, а се
+   * soft-delete-ва заедно с тях (thread-wide, mirror на deleteMessage-a's
+   * root case). Ownership проверката по-горе остава непроменена (само
+   * собствен root), audit-ът остава self-delete (един ред за root-а).
+   * Няма ефект за REPLY target.
    */
   function deleteOwnMessage(input: {
     topicId: string
     messageId: string
     ownerProfileId: string
+    cascadeLiveReplies?: boolean
   }):
     | { ok: true; deletedMessageIds: string[]; deletedAttachmentFilenames: string[]; parentMessageId: string | null; deletedAt: string }
     | { ok: false; code: 'not_found' | 'already_deleted' | 'has_live_replies' } {
@@ -1090,13 +1102,21 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
     }
 
     const isRoot = target.parent_message_id === null
+    const cascadeLiveReplies = isRoot && input.cascadeLiveReplies === true
     const affectedMessageIds: string[] = [target.message_id]
 
     let deletedAttachmentFilenames: string[] = []
 
     database.exec('BEGIN IMMEDIATE;')
     try {
-      if (isRoot) {
+      if (cascadeLiveReplies) {
+        // Reply ids се събират ВЪТРЕ в BEGIN IMMEDIATE (след придобит write
+        // lock), за да хване и reply, insert-нат точно преди delete-а.
+        const replyRows = selectReplyIdsForRootStatement.all(target.message_id) as Array<{ message_id: string }>
+        for (const row of replyRows) {
+          affectedMessageIds.push(row.message_id)
+        }
+      } else if (isRoot) {
         // Fresh live-reply count СЛЕД придобит BEGIN IMMEDIATE write lock —
         // established SQLite semantics гарантира, че никой друг writer не
         // може да insert-не reply МЕЖДУ тази проверка и самия soft-delete по-
@@ -1125,8 +1145,9 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
       }
 
       if (isRoot) {
-        // Self-delete root requires zero live replies (checked above) —
-        // thread has zero live messages left, drop the row entirely.
+        // Self-delete root requires zero live replies (checked above) or
+        // cascaded them (cascadeLiveReplies) — thread has zero live messages
+        // left, drop the row entirely.
         deleteRootLatestSeqStatement.run(target.message_id)
       } else {
         // A reply died; root may still be live with other replies —

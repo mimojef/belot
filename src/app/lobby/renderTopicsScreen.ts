@@ -291,7 +291,10 @@ function renderTopicMessageDeleteButton(
 
   // Moderator capability има предимство при overlap — root с replies остава
   // enabled, thread-wide delete (§7/§23), независимо че viewer е и author.
-  const isBlockedOwnRootWithReplies = !isModerator && isOwner && isRoot && replyCount > 0
+  // role='marketing' (canCascadeDeleteOwnTopicRoot) може да изтрие собствен
+  // root ЗАЕДНО с отговорите (server: isTopicOwnRootCascadeDeleteSession).
+  const isOwnRootCascadeDelete = !isModerator && isOwner && isRoot && replyCount > 0 && state.canCascadeDeleteOwnTopicRoot
+  const isBlockedOwnRootWithReplies = !isModerator && isOwner && isRoot && replyCount > 0 && !state.canCascadeDeleteOwnTopicRoot
 
   // isModeratorAction определя confirmation текста (root: "и всички
   // отговори" САМО ако действа moderator capability-то; ordinary own-root
@@ -299,7 +302,10 @@ function renderTopicMessageDeleteButton(
   // — §24). Пренасяме го през data-attribute, тъй като render-ът тук вече
   // знае authoritative viewer capability (isModerator/isOwner), докато click
   // handler-ът долу (renderLobbyScreen.ts) само чете DOM.
-  const isModeratorAction = isModerator
+  // isOwnRootCascadeDelete е също thread-wide (root + replies) — същият
+  // confirmation текст като moderator root delete; server-side пътят остава
+  // owner path (deleteOwnMessage), не moderator.
+  const isModeratorAction = isModerator || isOwnRootCascadeDelete
 
   return `
     <button
@@ -790,9 +796,14 @@ function renderLafcheMuteButton(state: LobbyScreenState, senderProfileId: string
 // normal Topics own-delete, авторството НЕ дава delete право тук —
 // обикновен потребител никога не вижда кошче върху собствен Lafche пост
 // (server-side guard-нато огледално в handleTopicMessageDeleteRequest/index.ts).
-function renderLafcheDeleteButton(state: LobbyScreenState, messageId: string): string {
+// Изключение: role='marketing' (canDeleteOwnLafchePosts) вижда кошче САМО
+// върху собствените си постове (server: isLafcheOwnPostDeleteSession + ownership).
+function renderLafcheDeleteButton(state: LobbyScreenState, messageId: string, senderProfileId: string): string {
   const isModerator = state.isLafcheMessageDeleteModerator
-  if (!isModerator) return ''
+  const isOwnMarketingPost = state.canDeleteOwnLafchePosts
+    && state.profile.profileId !== null
+    && senderProfileId === state.profile.profileId
+  if (!isModerator && !isOwnMarketingPost) return ''
   return `
     <button
       type="button"
@@ -868,7 +879,7 @@ export function renderLafcheMessageRow(state: LobbyScreenState, message: TopicMe
             })}
             <span style="font-size:12px;font-weight:400;color:rgba(248,250,252,0.42);white-space:nowrap;">${escapeHtml(formatLafchePostTime(message.createdAt))}</span>
             ${renderLafcheMuteButton(state, message.senderProfileId, message.senderDisplayName, message.messageId)}
-            ${renderLafcheDeleteButton(state, message.messageId)}
+            ${renderLafcheDeleteButton(state, message.messageId, message.senderProfileId)}
           </div>
           ${isEditing
             ? renderTopicMessageEditForm(state, message.messageId)

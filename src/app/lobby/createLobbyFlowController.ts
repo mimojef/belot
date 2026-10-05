@@ -225,8 +225,8 @@ function isPikaAnnouncementAuthorAuthSession(session: LobbyAuthSession | null): 
 }
 
 /**
- * "Рекламни кампании" management достъп — admin И pika_team имат ЕДНАКВИ
- * права. Само UX — сървърът презаверява това право на всеки HTTP/WS
+ * "Рекламни кампании" management достъп — admin, pika_team И marketing имат
+ * ЕДНАКВИ права. Само UX — сървърът презаверява това право на всеки HTTP/WS
  * management action през isAdCampaignManagerSession (authStore.ts). Нов
  * тесен predicate, не reuse на isPikaAnnouncementAuthorAuthSession, по
  * установената конвенция в проекта (виж коментара там).
@@ -235,7 +235,26 @@ function isAdCampaignManagerAuthSession(session: LobbyAuthSession | null): boole
   return session !== null && (
     session.account.role === 'admin'
     || session.account.role === 'pika_team'
+    || session.account.role === 'marketing'
   )
+}
+
+/**
+ * "Лафче" own-post delete UI (кошче върху СОБСТВЕН пост) — само role='marketing'.
+ * Само UX — сървърът презаверява през isLafcheOwnPostDeleteSession + ownership
+ * check (authStore.ts / handleTopicMessageDeleteRequest). НЕ е moderator право.
+ */
+function isLafcheOwnPostDeleteAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && session.account.role === 'marketing'
+}
+
+/**
+ * "Теми" собствен root ("тема") с отговори остава изтриваем (thread-wide) —
+ * само role='marketing'. Само UX — сървърът презаверява през
+ * isTopicOwnRootCascadeDeleteSession + ownership check в deleteOwnMessage.
+ */
+function isTopicOwnRootCascadeDeleteAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && session.account.role === 'marketing'
 }
 
 /**
@@ -904,6 +923,8 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminRevokePikaTeam?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminGrantTopChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminRevokeTopChatAdmin?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminGrantMarketing?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
+  onAdminRevokeMarketing?: (profileId: string) => Promise<{ ok: true } | { ok: false; message: string }>
   onAdminHistoryWindowChange?: (window: import('../adminServer/adminServerTypes.js').HistoryWindow) => void
   onAdminCpuIncidentsLoad?: () => Promise<
     | { ok: true; incidents: import('../adminServer/adminServerTypes.js').CpuIncidentSummary[] }
@@ -1720,6 +1741,9 @@ type InternalLobbyFlowState = {
   topChatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'pika_team' | null } | null
   topChatAdminActionBusy: boolean
   topChatAdminActionToast: { text: string; ok: boolean } | null
+  marketingActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | null } | null
+  marketingActionBusy: boolean
+  marketingActionToast: { text: string; ok: boolean } | null
   /** "Дай VIP" inline grant форма в чужд profile popup — само за пълен admin. */
   vipGrantOpen: boolean
   vipGrantSubmitting: boolean
@@ -2474,6 +2498,9 @@ function createInitialState(): InternalLobbyFlowState {
     topChatAdminActionConfirm: null,
     topChatAdminActionBusy: false,
     topChatAdminActionToast: null,
+    marketingActionConfirm: null,
+    marketingActionBusy: false,
+    marketingActionToast: null,
     vipGrantOpen: false,
     vipGrantSubmitting: false,
     vipGrantErrorText: null,
@@ -4945,6 +4972,9 @@ export function createLobbyFlowController(
       topChatAdminActionConfirm: state.topChatAdminActionConfirm,
       topChatAdminActionBusy: state.topChatAdminActionBusy,
       topChatAdminActionToast: state.topChatAdminActionToast,
+      marketingActionConfirm: state.marketingActionConfirm,
+      marketingActionBusy: state.marketingActionBusy,
+      marketingActionToast: state.marketingActionToast,
       players: state.players,
       playersPage: state.playersPage,
       playersTotalCount: state.playersTotalCount,
@@ -5403,6 +5433,8 @@ export function createLobbyFlowController(
       isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
       isLafcheModerator: isLafcheModeratorAuthSession(options.getAuthSession?.() ?? null),
       isLafcheMessageDeleteModerator: isLafcheMessageDeleteModeratorAuthSession(options.getAuthSession?.() ?? null),
+      canDeleteOwnLafchePosts: isLafcheOwnPostDeleteAuthSession(options.getAuthSession?.() ?? null),
+      canCascadeDeleteOwnTopicRoot: isTopicOwnRootCascadeDeleteAuthSession(options.getAuthSession?.() ?? null),
     }
 
     return lobbyState
@@ -5580,6 +5612,18 @@ export function createLobbyFlowController(
       },
       onTopChatAdminActionConfirm: () => {
         void confirmTopChatAdminAction()
+      },
+      onProfileGrantMarketingClick: (profileId) => {
+        getPopupCallbacks().onGrantMarketingClick(profileId)
+      },
+      onProfileRevokeMarketingClick: (profileId) => {
+        getPopupCallbacks().onRevokeMarketingClick(profileId)
+      },
+      onMarketingActionCancel: () => {
+        cancelMarketingAction()
+      },
+      onMarketingActionConfirm: () => {
+        void confirmMarketingAction()
       },
       onProfileVipGrantOpen: (profileId) => {
         getPopupCallbacks().onVipGrantOpen(profileId)
@@ -17615,6 +17659,25 @@ export function createLobbyFlowController(
         syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
         render()
       },
+      onGrantMarketingClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        const previousRole = state.profilePopupTargetRole === 'subadmin' || state.profilePopupTargetRole === 'chat_admin' || state.profilePopupTargetRole === 'pika_team' || state.profilePopupTargetRole === 'top_chat_admin'
+          ? state.profilePopupTargetRole
+          : null
+        state.marketingActionConfirm = { profileId, displayName, action: 'grant', previousRole }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
+      onRevokeMarketingClick: (profileId) => {
+        if (!profileId) return
+        const displayName = state.profilePopupProfile?.displayName ?? 'потребителя'
+        state.marketingActionConfirm = { profileId, displayName, action: 'revoke' }
+        state.profilePopupOpen = false
+        syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+        render()
+      },
       // За разлика от subadmin/chat-admin/pika-team/top-chat-admin grant-овете
       // по-горе, "Дай VIP" НЕ затваря popup-а и НЕ отваря отделен confirm
       // overlay — компактна inline форма В САМИЯ popup (виж task brief-а).
@@ -18197,6 +18260,52 @@ export function createLobbyFlowController(
     setTimeout(() => {
       if (toastGeneration !== topChatAdminActionToastGeneration) return
       state.topChatAdminActionToast = null
+      render()
+    }, 3500)
+  }
+
+  function cancelMarketingAction(): void {
+    if (state.marketingActionBusy) return
+    state.marketingActionConfirm = null
+    render()
+  }
+
+  let marketingActionToastGeneration = 0
+
+  async function confirmMarketingAction(): Promise<void> {
+    const pending = state.marketingActionConfirm
+    if (!pending || state.marketingActionBusy) return
+
+    state.marketingActionBusy = true
+    render()
+
+    const caller = pending.action === 'grant' ? options.onAdminGrantMarketing : options.onAdminRevokeMarketing
+    const result = await caller?.(pending.profileId)
+
+    state.marketingActionBusy = false
+    state.marketingActionConfirm = null
+
+    if (result?.ok) {
+      state.marketingActionToast = {
+        text: pending.action === 'grant' ? 'Потребителят вече е Маркетинг.' : 'Ролята Маркетинг е премахната.',
+        ok: true,
+      }
+      if (state.profilePopupTargetRoleProfileId === pending.profileId) {
+        state.profilePopupTargetRoleProfileId = null
+        state.profilePopupTargetRole = null
+      }
+    } else {
+      state.marketingActionToast = {
+        text: result?.message ?? 'Действието не бе завършено.',
+        ok: false,
+      }
+    }
+    render()
+
+    const toastGeneration = ++marketingActionToastGeneration
+    setTimeout(() => {
+      if (toastGeneration !== marketingActionToastGeneration) return
+      state.marketingActionToast = null
       render()
     }, 3500)
   }

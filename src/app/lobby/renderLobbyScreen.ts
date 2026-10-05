@@ -505,6 +505,10 @@ export type LobbyScreenState = {
   isLafcheModerator: boolean
   /** Client-side UX gate само за "Лафче" individual-post delete — isLafcheModerator + chat_admin, за paritет с normal Topics individual-message delete (isTopicMessageModerator). Умишлено разделено от isLafcheModerator, за да не разшири mute/report UI-то. Виж isLafcheMessageDeleteModeratorAuthSession в createLobbyFlowController.ts. Server е authoritative (isLafcheMessageDeleteModeratorSession в authStore.ts). */
   isLafcheMessageDeleteModerator: boolean
+  /** Client-side UX gate (само role='marketing') — кошче върху СОБСТВЕНИТЕ "Лафче" постове. НЕ е moderator право (чужди постове остават без кошче). Виж isLafcheOwnPostDeleteAuthSession в createLobbyFlowController.ts. Server е authoritative (isLafcheOwnPostDeleteSession в authStore.ts). */
+  canDeleteOwnLafchePosts: boolean
+  /** Client-side UX gate (само role='marketing') — собствен root ("тема") с отговори остава изтриваем (thread-wide). Виж isTopicOwnRootCascadeDeleteAuthSession в createLobbyFlowController.ts. Server е authoritative (isTopicOwnRootCascadeDeleteSession в authStore.ts). */
+  canCascadeDeleteOwnTopicRoot: boolean
   blockedPlayersPopupOpen: boolean
   blockedPlayers: PlayerPublicProfileSnapshot[] | null
   blockedPlayersLoading: boolean
@@ -591,6 +595,9 @@ export type LobbyScreenState = {
   topChatAdminActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'pika_team' | null } | null
   topChatAdminActionBusy: boolean
   topChatAdminActionToast: { text: string; ok: boolean } | null
+  marketingActionConfirm: { profileId: string; displayName: string; action: 'grant' | 'revoke'; previousRole?: 'subadmin' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | null } | null
+  marketingActionBusy: boolean
+  marketingActionToast: { text: string; ok: boolean } | null
   players: PlayerPublicProfileSnapshot[]
   playersPage: number
   playersTotalCount: number
@@ -1028,6 +1035,10 @@ export type RenderLobbyScreenOptions = {
   onProfileRevokeTopChatAdminClick: (profileId: string | null) => void
   onTopChatAdminActionCancel: () => void
   onTopChatAdminActionConfirm: () => void
+  onProfileGrantMarketingClick: (profileId: string | null) => void
+  onProfileRevokeMarketingClick: (profileId: string | null) => void
+  onMarketingActionCancel: () => void
+  onMarketingActionConfirm: () => void
   onProfileVipGrantOpen: (profileId: string | null) => void
   onProfileVipGrantCancel: () => void
   onProfileVipGrantSubmit: (profileId: string | null, rawDays: string) => void
@@ -1549,6 +1560,8 @@ export type ProfilePopupCallbacks = {
   onRevokePikaTeamClick: (profileId: string | null) => void
   onGrantTopChatAdminClick: (profileId: string | null) => void
   onRevokeTopChatAdminClick: (profileId: string | null) => void
+  onGrantMarketingClick: (profileId: string | null) => void
+  onRevokeMarketingClick: (profileId: string | null) => void
   onVipGrantOpen: (profileId: string | null) => void
   onVipGrantCancel: () => void
   onVipGrantSubmit: (profileId: string | null, rawDays: string) => void
@@ -1642,6 +1655,22 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     })
     revokeTopChatAdminEl.addEventListener('mouseenter', () => { revokeTopChatAdminEl.style.textDecoration = 'underline' })
     revokeTopChatAdminEl.addEventListener('mouseleave', () => { revokeTopChatAdminEl.style.textDecoration = 'none' })
+  }
+  const grantMarketingEl = el.querySelector<HTMLElement>('[data-player-profile-grant-marketing="1"]')
+  if (grantMarketingEl) {
+    grantMarketingEl.addEventListener('click', () => {
+      cb.onGrantMarketingClick(profileId)
+    })
+    grantMarketingEl.addEventListener('mouseenter', () => { grantMarketingEl.style.textDecoration = 'underline' })
+    grantMarketingEl.addEventListener('mouseleave', () => { grantMarketingEl.style.textDecoration = 'none' })
+  }
+  const revokeMarketingEl = el.querySelector<HTMLElement>('[data-player-profile-revoke-marketing="1"]')
+  if (revokeMarketingEl) {
+    revokeMarketingEl.addEventListener('click', () => {
+      cb.onRevokeMarketingClick(profileId)
+    })
+    revokeMarketingEl.addEventListener('mouseenter', () => { revokeMarketingEl.style.textDecoration = 'underline' })
+    revokeMarketingEl.addEventListener('mouseleave', () => { revokeMarketingEl.style.textDecoration = 'none' })
   }
   const vipGrantOpenEl = el.querySelector<HTMLElement>('[data-player-profile-vip-grant-open="1"]')
   if (vipGrantOpenEl) {
@@ -11922,6 +11951,89 @@ export function renderTopChatAdminActionToast(state: LobbyScreenState): string {
   `
 }
 
+export function renderMarketingActionConfirmPopup(state: LobbyScreenState): string {
+  const pending = state.marketingActionConfirm
+  if (!pending) return ''
+
+  const isGrant = pending.action === 'grant'
+  const title = isGrant ? 'Направи Маркетинг?' : 'Премахни Маркетинг?'
+  const baseMessage = isGrant
+    ? 'Потребителят ще има пълен достъп до секция „Реклами“ и ще може да трие собствените си постове и теми в „Лафче“ и „Теми“. Няма да получи mute/ban, триене на чуждо съдържание, админ панела или други административни права.'
+    : 'Потребителят ще загуби достъпа до секция „Реклами“ и допълнителните права върху собственото си съдържание.'
+  const previousLabel = pending.previousRole === 'subadmin'
+    ? 'Субадмин'
+    : pending.previousRole === 'chat_admin'
+      ? 'Чат админ'
+      : pending.previousRole === 'pika_team'
+        ? 'Екип Pika.bg'
+        : pending.previousRole === 'top_chat_admin'
+          ? 'TOP чат админ'
+          : null
+  const message = isGrant && previousLabel
+    ? `${baseMessage} Текущата роля „${previousLabel}“ ще бъде заменена.`
+    : baseMessage
+  const confirmLabel = isGrant ? 'Направи Маркетинг' : 'Премахни'
+  const busy = state.marketingActionBusy
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9600;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.7);
+    ">
+      <div style="
+        background:#1a1a2e;border:1px solid rgba(56,189,248,0.42);
+        border-radius:16px;padding:28px 28px 24px;max-width:400px;width:90%;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+      ">
+        <div style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">${escapeHtml(title)}</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:24px;">${escapeHtml(message)}</div>
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-marketing-action-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-marketing-action-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(56,189,248,0.68);
+            background:linear-gradient(180deg, rgba(125,211,252,0.98) 0%, rgba(56,189,248,0.98) 100%);
+            border-radius:10px;color:#080808;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай...' : escapeHtml(confirmLabel)}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
+export function renderMarketingActionToast(state: LobbyScreenState): string {
+  const toast = state.marketingActionToast
+  if (!toast) return ''
+
+  return `
+    <div style="
+      position:fixed;inset:0;z-index:9700;
+      display:flex;align-items:flex-end;justify-content:center;
+      padding-bottom:64px;
+      pointer-events:none;
+    ">
+      <div style="
+        pointer-events:auto;
+        background:#1a1a2e;
+        border:1px solid ${toast.ok ? 'rgba(56,189,248,0.58)' : 'rgba(239,68,68,0.55)'};
+        border-radius:12px;
+        padding:14px 22px;
+        text-align:center;
+        box-shadow:0 8px 40px rgba(0,0,0,0.7);
+        max-width:calc(100vw - 48px);
+        animation:prInfoIn 0.18s ease both;
+      ">
+        <div style="font-size:14px;font-weight:800;color:${toast.ok ? '#7dd3fc' : '#fca5a5'};">${escapeHtml(toast.text)}</div>
+      </div>
+    </div>
+  `
+}
+
 function renderPrivateRoomInfoPopup(state: LobbyScreenState): string {
   if (!state.privateRoomInfoText) return ''
   return `
@@ -13244,6 +13356,8 @@ export function renderLobbyScreen(
       ${renderPikaTeamActionToast(state)}
       ${renderTopChatAdminActionConfirmPopup(state)}
       ${renderTopChatAdminActionToast(state)}
+      ${renderMarketingActionConfirmPopup(state)}
+      ${renderMarketingActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderProfileAccessBlockPopup(state.profileAccessBlockPopup)}
@@ -13553,6 +13667,8 @@ export function renderLobbyScreen(
       ${renderPikaTeamActionToast(state)}
       ${renderTopChatAdminActionConfirmPopup(state)}
       ${renderTopChatAdminActionToast(state)}
+      ${renderMarketingActionConfirmPopup(state)}
+      ${renderMarketingActionToast(state)}
       ${renderBlockedPlayersPopup(state)}
       ${renderBlockLimitPopup(state)}
       ${renderProfileAccessBlockPopup(state.profileAccessBlockPopup)}
@@ -15816,6 +15932,8 @@ export function renderLobbyScreen(
       onRevokePikaTeamClick: options.onProfileRevokePikaTeamClick,
       onGrantTopChatAdminClick: options.onProfileGrantTopChatAdminClick,
       onRevokeTopChatAdminClick: options.onProfileRevokeTopChatAdminClick,
+      onGrantMarketingClick: options.onProfileGrantMarketingClick,
+      onRevokeMarketingClick: options.onProfileRevokeMarketingClick,
       onVipGrantOpen: options.onProfileVipGrantOpen,
       onVipGrantCancel: options.onProfileVipGrantCancel,
       onVipGrantSubmit: options.onProfileVipGrantSubmit,
@@ -17231,6 +17349,12 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-top-chat-admin-action-cancel="1"]')
     ?.addEventListener('click', options.onTopChatAdminActionCancel)
+
+  root.querySelector<HTMLButtonElement>('[data-marketing-action-confirm="1"]')
+    ?.addEventListener('click', options.onMarketingActionConfirm)
+
+  root.querySelector<HTMLButtonElement>('[data-marketing-action-cancel="1"]')
+    ?.addEventListener('click', options.onMarketingActionCancel)
 
   if (root.querySelector('[data-private-room-info-toast="1"]')) {
     if (privateRoomInfoDismissTimer !== null) clearTimeout(privateRoomInfoDismissTimer)

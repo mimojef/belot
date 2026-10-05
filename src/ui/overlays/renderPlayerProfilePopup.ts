@@ -138,7 +138,7 @@ export type RenderPlayerProfilePopupOptions = {
   riskRecheckSubmitting?: boolean
 }
 
-export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'marketing' | 'subadmin' | 'admin'
 
 /** Активен бан на разглеждания профил (само за viewerIsFullAdmin) — виж handleAdminProfileBanRequest GET в server/src/index.ts. */
 export type ActiveProfileBanSnapshot = {
@@ -1125,6 +1125,72 @@ function renderTopChatAdminRoleControls(
 }
 
 /**
+ * Огледално на renderTopChatAdminRoleControls, за marketing ("Маркетинг")
+ * роля — само пълен admin вижда grant/revoke (server: isFullAdminSession на
+ * /api/admin/profiles/:id/marketing).
+ */
+function renderMarketingRoleControls(
+  isOwnProfile: boolean,
+  viewerIsFullAdmin: boolean,
+  targetAccountRole: PlayerAccountRole | null,
+): string {
+  if (isOwnProfile || !viewerIsFullAdmin || targetAccountRole === null || targetAccountRole === 'admin') {
+    return ''
+  }
+
+  if (targetAccountRole === 'marketing') {
+    return `
+      <span
+        data-player-profile-marketing-badge="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          padding:3px 10px;
+          border-radius:999px;
+          background:rgba(56,189,248,0.16);
+          border:1px solid rgba(56,189,248,0.58);
+          color:#38bdf8;
+          font-size:11px;
+          font-weight:900;
+          letter-spacing:0.04em;
+          text-transform:uppercase;
+          white-space:nowrap;
+        "
+      >Маркетинг</span>
+      <span
+        data-player-profile-revoke-marketing="1"
+        style="
+          display:inline-flex;
+          align-items:center;
+          gap:6px;
+          color:#f87171;
+          font-size:14px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+        "
+      >Премахни Маркетинг</span>
+    `
+  }
+
+  return `
+    <span
+      data-player-profile-grant-marketing="1"
+      style="
+        display:inline-flex;
+        align-items:center;
+        gap:6px;
+        color:#38bdf8;
+        font-size:14px;
+        font-weight:900;
+        cursor:pointer;
+        white-space:nowrap;
+      "
+    >Направи Маркетинг</span>
+  `
+}
+
+/**
  * "Дай VIP" trigger линк — само viewerIsFullAdmin (role==='admin', НЕ
  * subadmin/pika_team/top_chat_admin/chat_admin), само чужд профил
  * (isOwnProfile===false), само с валиден profileId. Скрит докато формата
@@ -1851,6 +1917,7 @@ function renderProfileContent(
             ${renderChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderPikaTeamRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderTopChatAdminRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
+            ${renderMarketingRoleControls(isOwnProfile, viewerIsFullAdmin, targetAccountRole)}
             ${renderVipGrantTrigger(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen)}
           </div>
 

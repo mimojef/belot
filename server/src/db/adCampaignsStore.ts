@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-export type AdCampaignActorRole = 'admin' | 'pika_team'
+export type AdCampaignActorRole = 'admin' | 'pika_team' | 'marketing'
 
 export type AdCampaignActor = {
   profileId: string
