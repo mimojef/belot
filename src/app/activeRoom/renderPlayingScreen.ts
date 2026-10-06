@@ -301,6 +301,12 @@ function resolvePlayedCardFlySourceFromSeat(options: {
   }
 }
 
+// Phase 3B.2 (D9): ownership регистър на активните played-card flight-ове.
+// Overlay-ят им живее в document.body (извън root), затова root.innerHTML
+// reset не го маха — disposePlayingTransientPresentation() ги прекратява
+// при spectator teardown, вместо картата да долети над lobby-то.
+const activePlayedCardFlights = new Set<() => void>()
+
 async function animatePlayedCardFromHand(options: {
   sourceRect: DOMRect
   sourcePhysicalWidth: number
@@ -339,6 +345,7 @@ async function animatePlayedCardFromHand(options: {
 
   const overlay = document.createElement('div')
   overlay.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:9000;overflow:visible'
+  overlay.setAttribute('data-played-card-fly-overlay', '1')
   document.body.appendChild(overlay)
 
   const clone = cardElement.cloneNode(true) as HTMLElement
@@ -358,8 +365,21 @@ async function animatePlayedCardFromHand(options: {
 
   cardElement.style.visibility = 'hidden'
 
+  let isFlightCancelled = false
+  let flightAnimation: Animation | null = null
+  const cancelFlight = (): void => {
+    isFlightCancelled = true
+    flightAnimation?.cancel()
+    overlay.remove()
+    cardElement.style.visibility = ''
+  }
+  activePlayedCardFlights.add(cancelFlight)
+
   try {
     await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+    if (isFlightCancelled) {
+      return
+    }
 
     const targetCenterX = targetRect.left + targetRect.width / 2
     const targetCenterY = targetRect.top + targetRect.height / 2
@@ -389,7 +409,7 @@ async function animatePlayedCardFromHand(options: {
     // fire the sound twice alongside onfinish.
     const safetyTimeoutId = window.setTimeout(callOnLandedOnce, durationMs + 60)
 
-    const anim = clone.animate(
+    const anim = flightAnimation = clone.animate(
       [
         { transform: `translate(0,0) rotate(0deg) scale(${visualScale})`, opacity: 1 },
         {
@@ -415,6 +435,7 @@ async function animatePlayedCardFromHand(options: {
       callOnLandedOnce()
     }
   } finally {
+    activePlayedCardFlights.delete(cancelFlight)
     overlay.remove()
     cardElement.style.visibility = ''
   }
@@ -1501,14 +1522,15 @@ function scheduleCompletedTrickCollection(
 
 function syncPlayingBotTakeoverState(options: {
   cache: PlayingUiCache
-  localSeat: Seat
+  /** Controlled participant seat; null за spectator (никога "мой" ход). */
+  ownSeat: Seat | null
   isMyTurn: boolean
   snapshotPlays: RoomPlayCardSnapshot[]
   latestCompletedTrick: RoomCompletedTrickSnapshot | null
 }): void {
   const {
     cache,
-    localSeat,
+    ownSeat,
     isMyTurn,
     snapshotPlays,
     latestCompletedTrick,
@@ -1525,7 +1547,8 @@ function syncPlayingBotTakeoverState(options: {
     }
 
     if (
-      play.seat === localSeat &&
+      ownSeat !== null &&
+      play.seat === ownSeat &&
       cache.wasMyTurn &&
       !cache.pendingPlayCardSent &&
       !cache.hasShownBotTakeover
@@ -1534,7 +1557,7 @@ function syncPlayingBotTakeoverState(options: {
       cache.hasShownBotTakeover = true
     }
 
-    if (play.seat === localSeat) {
+    if (ownSeat !== null && play.seat === ownSeat) {
       cache.pendingPlayCardSent = false
     }
 
@@ -1755,6 +1778,25 @@ function showSweepBeloteIndicator(seat: Seat, suit: string): void {
   }, SWEEP_BELOTE_INDICATOR_LIFETIME_MS)
 }
 
+/**
+ * Phase 3B.2 (D9): прекратява всички playing-owned transient presentation
+ * artifacts, които живеят ИЗВЪН root-а (document.body) и затова не се махат
+ * от root.innerHTML reset: активни played-card flights (cancel + overlay
+ * remove), "Долу картите" caption банера и "Белот +20" индикаторите.
+ * Sweep throw-down overlay-ят и floating own hand се махат от
+ * resetPlayingUiCache (activeRoomShared.ts); неговият animationToken bump
+ * прави късните trick/sweep/flight callback-и no-op. Вика се от spectator
+ * teardown-а (exitSpectatorView), заедно с resetPlayingUiCache.
+ */
+export function disposePlayingTransientPresentation(): void {
+  for (const cancelFlight of [...activePlayedCardFlights]) {
+    cancelFlight()
+  }
+  activePlayedCardFlights.clear()
+  document.body.querySelector(`[${SWEEP_CAPTION_ATTR}]`)?.remove()
+  document.body.querySelectorAll('[data-sweep-belote-suit]').forEach((el) => el.remove())
+}
+
 export type RenderPlayingScreenOptions = {
   root: HTMLDivElement
   game: RoomGameSnapshot
@@ -1815,7 +1857,9 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   const snapshotTrickKey = getTrickKey(snapshotPlays)
   const latestCompletedTrickKey =
     latestCompletedTrick !== null ? getCompletedTrickKey(latestCompletedTrick) : null
-  const sweepOffer = playing?.sweepOffer ?? null
+  // Phase 3B.2 defense in depth: sweepOffer е private decision UI — server-ът
+  // никога не го праща на spectator, а client-ът го приема само за controlled seat.
+  const sweepOffer = controlledSeat !== null ? (playing?.sweepOffer ?? null) : null
   const sweepResolution = playing?.sweepResolution ?? null
   const sweepResolutionKey = sweepResolution !== null ? getSweepResolutionKey(sweepResolution) : null
 
@@ -1903,7 +1947,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     : null
   let pendingPlayedCardSource: PlayedCardFlySource | null = null
   const shouldAnimateNewestViaOverlay = animateNewest && newestDisplayedPlay !== null
-  if (animateNewest && newestDisplayedPlay?.seat === localSeat) {
+  // Собствената изиграна карта лети от записания hand rect само за
+  // controlled participant; за spectator визуално долният seat е чужд и
+  // ползва стандартния seat/fan source.
+  if (animateNewest && controlledSeat !== null && newestDisplayedPlay?.seat === controlledSeat) {
     pendingPlayedCardSource = playedCardFlySourceByCache.get(cache) ?? (
       cache.lastPlayedCardRect === null
         ? null
@@ -1933,8 +1980,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   // fan starts closing.
   const isSweepPresentationStarting =
     sweepResolution !== null && sweepResolutionKey !== cache.lastSweepResolutionKey
+  // Own hand = само на контролирания participant. Spectator няма собствена
+  // ръка — визуално долната се рисува от displayedHandCounts като гърбове
+  // (panel fan), а лицата идват единствено от reveal анимацията.
   const displayedOwnHand = isSweepPresentationStarting
-    ? sweepResolution.handsAtResolution[localSeat]
+    ? (controlledSeat !== null ? sweepResolution.handsAtResolution[controlledSeat] : [])
     : game.ownHand
   const displayedHandCounts: Record<Seat, number> = isSweepPresentationStarting
     ? {
@@ -2045,7 +2095,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
   syncPlayingBotTakeoverState({
     cache,
-    localSeat,
+    ownSeat: controlledSeat,
     isMyTurn,
     snapshotPlays,
     latestCompletedTrick,
@@ -2071,13 +2121,17 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     ? displayedHandCounts
     : {
         ...displayedHandCounts,
-        [localSeat]: 0,
+        // собствената ръка живее във floating overlay-я, не в панела
+        [controlledSeat]: 0,
       }
   const dealtHandsForPanels: DealtHandsData = {
     handCounts: panelHandCounts,
     ownHand: sortedHand,
     previousOwnHand: null,
-    localSeat,
+    // Phase 3B.2 (D5/D3): own-hand identity = controlledSeat. Spectator
+    // (null) рендерира и визуално долната ръка като чужда (remote geometry,
+    // panel fan — реалният sweep source).
+    ownHandSeat: controlledSeat,
     maxCardsPerSeat: 8,
     animStartIndex: 0,
     seatAnimDelays: null,
@@ -2662,6 +2716,12 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
 
     const resolvedSweep = sweepResolution
     const sweepSortOptions = getSortOptions(winningBid)
+    // Phase 3B.2 (D9): resetPlayingUiCache (exit-from-playing/spectator
+    // teardown) bump-ва animationToken — късните sweep callback-и не бива да
+    // re-render-ват playing screen-а или да вмъкват body-level индикатори
+    // върху вече показаното lobby.
+    const sweepAnimToken = cache.animationToken
+    const isSweepStillOwned = (): boolean => cache.animationToken === sweepAnimToken
     void animateSweepThrowDown({
       rows: resolvedSweep.throwOrder.map((seat) => ({
         seat,
@@ -2676,9 +2736,13 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       cardWidth: TRICK_W,
       cardHeight: TRICK_H,
       renderCardFaceHtml: renderTableCardFaceHtml,
+      // Phase 3B.2 (D3): floating own-hand host съществува САМО за
+      // контролирания participant seat. Spectator (controlledSeat=null) —
+      // визуално долната ръка е panel fan като останалите три, затова тя е
+      // реалният source: затваря се и не остават дублирани гърбове.
       getSeatFanCardElements: (seat) =>
         Array.from(
-          seat === localSeat
+          controlledSeat !== null && seat === controlledSeat
             ? document.querySelectorAll<HTMLElement>('[data-playing-bottom-hand-host] [data-card-id]')
             : document.querySelectorAll<HTMLElement>(`[data-active-room-seat-card-fan="${seat}"] > div`),
         ),
@@ -2688,6 +2752,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         document.querySelector<HTMLElement>(`[data-active-room-seat-anchor="${resolvedSweep.winnerSeat}"]`),
       collectVisualSeat: getVisualSeatForLocalPerspective(resolvedSweep.winnerSeat, localSeat),
       onCaptionShow: () => {
+        if (!isSweepStillOwned()) return
         onSweepCaptionShow?.(resolvedSweep.winnerSeat)
         showSweepCaptionBanner()
       },
@@ -2695,12 +2760,14 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         hideSweepCaptionBanner()
       },
       onRevealComplete: () => {
+        if (!isSweepStillOwned()) return
         for (const credited of resolvedSweep.autoCreditedBelotes) {
           showSweepBeloteIndicator(credited.seat, credited.suit)
         }
       },
       onComplete: () => {
         cache.isSweepAnimating = false
+        if (!isSweepStillOwned()) return
         const latestOptions = latestRenderOptionsByCache.get(cache)
         if (latestOptions) {
           renderPlayingScreen(latestOptions)

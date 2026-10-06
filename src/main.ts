@@ -92,7 +92,14 @@ import {
   type AdminProfileLinkedProfileRow,
   type AdCampaignManagementDto,
   type CrossGameCommitmentLocation,
+  type BelotSpectateEndedMessage,
+  type BelotSpectateDeniedMessage,
 } from './app/network/createGameServerClient'
+import {
+  decideSocketCloseAction,
+  decideSocketOpenAction,
+  shouldOfflineRecoveryForceLobbyReload,
+} from './app/network/socketReconnectPolicy'
 import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/viewportStage'
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
@@ -421,9 +428,14 @@ let pwaIsReconnectingActiveRoom = false
 // callback) — shouldReloadLobbyOnReconnect/forceOfflineLobbyReload остават
 // непокътнати за lobby и всеки друг reconnect сценарий.
 let isZombieBidReconnectInFlight = false
+// Phase 3B.2 (D2): сетва се от onClose САМО при активна Belot spectator
+// сесия; консумира се в onOpen — spectator-ът re-watch-ва същата маса
+// вместо forced lobby reload (виж socketReconnectPolicy.ts).
+let isBelotSpectatorReconnectInFlight = false
 let showOfflineConnectionOverlay: () => void = () => {
   shouldReloadLobbyOnReconnect = true
 }
+let hideOfflineConnectionOverlay: () => void = () => {}
 let currentAuthSession: AuthSession | null = null
 
 const SESSION_CACHE_KEY = 'pika_session_cache'
@@ -7355,6 +7367,27 @@ function requestActiveRoomResume(): boolean {
   return true
 }
 
+// Belot spectator сесия = lobby-owned spectatingBelotRoomId (оцелява и
+// докато view-ът още чака първия snapshot) ИЛИ отворен spectator view.
+function isBelotSpectatorSessionActive(): boolean {
+  return lobby.getSpectatingBelotRoomId() !== null || activeRoom.isSpectatorView()
+}
+
+// Phase 3B.2 (D8): ЕДИНСТВЕНИЯТ server-driven spectator termination път
+// (belot_spectate_ended / belot_spectate_denied). Редът е съществен:
+// 1) activeRoom teardown ПЪРВО (view, анимации, body-level artifacts) — докато
+//    activeRoom е жив, lobby render-ът е suppressed (getIsInGame), което
+//    преди оставяше празен root до пристигането на private_games_list;
+// 2) lobby-то чисти spectator сесията, навигира към Частни маси -> Играещи и
+//    render-ва НЕЗАБАВНО (кеширан списък), после request-ва свеж списък.
+// Manual "Изход" (onSpectatorExitRequested) минава през същата подредба.
+function finishBelotSpectatorView(message: BelotSpectateEndedMessage | BelotSpectateDeniedMessage): void {
+  if (activeRoom.isSpectatorView() && activeRoom.getCurrentRoomId() === message.roomId) {
+    activeRoom.exitSpectatorView()
+  }
+  lobby.handleServerMessage(message)
+}
+
 function showSessionDisplacedOverlay(): void {
   const existing = document.getElementById('session-displaced-overlay')
   if (existing) return
@@ -7743,25 +7776,52 @@ client = createGameServerClient({
     // navigation, дори shouldReloadLobbyOnReconnect да е сетнат от
     // showOfflineConnectionOverlay() по-рано в същия close/reconnect цикъл.
     // Едностреличен bypass: консумира се веднага, не остава "заклещен".
-    if (isZombieBidReconnectInFlight) {
-      isZombieBidReconnectInFlight = false
-      if (activeRoom.hasActiveRoom()) {
-        shouldReloadLobbyOnReconnect = false
-        activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
-        requestActiveRoomResume()
-        return
-      }
-      // Стаята вече не е активна (играчът е напуснал междувременно по друг
-      // път) — продължи по нормалния flow по-долу, все едно случаят никога
-      // не е бил "zombie bid reconnect".
-    }
+    // Стаята вече не е активна при zombie reconnect (играчът е напуснал
+    // междувременно по друг път) — decideSocketOpenAction продължава по
+    // нормалния flow, все едно случаят никога не е бил "zombie bid reconnect".
+    const wasZombieBidReconnect = isZombieBidReconnectInFlight
+    isZombieBidReconnectInFlight = false
+    // Phase 3B.2 (D2): същият едностреличен pattern за spectator reconnect.
+    const wasBelotSpectatorReconnect = isBelotSpectatorReconnectInFlight
+    isBelotSpectatorReconnectInFlight = false
+    const openDecision = decideSocketOpenAction({
+      isZombieBidReconnectInFlight: wasZombieBidReconnect,
+      isBelotSpectatorReconnectInFlight: wasBelotSpectatorReconnect,
+      spectatingBelotRoomId: lobby.getSpectatingBelotRoomId(),
+      shouldReloadLobbyOnReconnect,
+      hasActiveRoom: activeRoom.hasActiveRoom(),
+    })
 
-    if (shouldReloadLobbyOnReconnect) {
-      forceOfflineLobbyReload()
+    if (openDecision === 'zombie-bid-resume') {
+      shouldReloadLobbyOnReconnect = false
+      activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
+      requestActiveRoomResume()
       return
     }
 
-    if (activeRoom.hasActiveRoom()) {
+    if (openDecision === 'belot-spectator-rewatch') {
+      // НЕ resume_room/reconnectToken, НЕ forced lobby reload: lobby-ният
+      // 'connected' handler (Phase 3A) праща watch_belot_room за същата
+      // маса; belot_spectator_snapshot възстановява view-а, а
+      // belot_spectate_denied (напр. vip_required) минава през
+      // finishBelotSpectatorView -> Частни маси -> Играещи, без VIP popup.
+      shouldReloadLobbyOnReconnect = false
+      hideOfflineConnectionOverlay()
+      activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
+      requestPwaUpdateApplyAttempt()
+      return
+    }
+
+    if (openDecision === 'belot-spectator-session-lost') {
+      // Сесията е приключила по време на прекъсването — затвори view-а и
+      // продължи по нормалния lobby reconnect flow по-долу.
+      shouldReloadLobbyOnReconnect = false
+      hideOfflineConnectionOverlay()
+      activeRoom.exitSpectatorView()
+    } else if (openDecision === 'forced-lobby-reload') {
+      forceOfflineLobbyReload()
+      return
+    } else if (openDecision === 'active-room-resume') {
       activeRoom.setConnectionState(true, SERVER_RESUME_WAIT_MESSAGE)
       requestActiveRoomResume()
       return
@@ -7809,9 +7869,26 @@ client = createGameServerClient({
       return
     }
 
+    const closeDecision = decideSocketCloseAction({
+      isBelotSpectatorSessionActive: isBelotSpectatorSessionActive(),
+      hasActiveRoom: activeRoom.hasActiveRoom(),
+    })
+
+    if (closeDecision === 'belot-spectator-reconnect') {
+      // Phase 3B.2 (D2): spectator session state се пази; НЕ се насрочва
+      // forced lobby reload (showOfflineConnectionOverlay би сетнал
+      // shouldReloadLobbyOnReconnect). In-room reconnect съобщението стига;
+      // onOpen re-watch-ва същата маса.
+      isBelotSpectatorReconnectInFlight = true
+      pwaIsReconnectingActiveRoom = true
+      activeRoom.setConnectionState(false, SERVER_RESTART_WAIT_MESSAGE)
+      scheduleServerReconnect()
+      return
+    }
+
     showOfflineConnectionOverlay()
 
-    if (activeRoom.hasActiveRoom()) {
+    if (closeDecision === 'active-room-reconnect') {
       shouldReloadLobbyOnReconnect = true
       pwaIsReconnectingActiveRoom = true
       activeRoom.setConnectionState(false, SERVER_RESTART_WAIT_MESSAGE)
@@ -8374,11 +8451,9 @@ client = createGameServerClient({
       // само затваря своя view ако той реално е за тази стая (покрива и
       // "vip_required по време на reconnect, докато вече гледаш" случая,
       // §16 — НЕ отваря VIP popup автоматично, lobby-то вече не прави това
-      // за background denial).
-      lobby.handleServerMessage(message)
-      if (activeRoom.isSpectatorView() && activeRoom.getCurrentRoomId() === message.roomId) {
-        activeRoom.exitSpectatorView()
-      }
+      // за background denial). Phase 3B.2 (D8): teardown преди lobby
+      // render-а — виж finishBelotSpectatorView.
+      finishBelotSpectatorView(message)
       return
     }
 
@@ -9049,7 +9124,11 @@ void loadGuestTrialStatus().finally(() => {
   let consecutiveNetworkFailures = 0
 
   function showOfflineOverlay(): void {
-    shouldReloadLobbyOnReconnect = true
+    // Phase 3B.2 (D2): активна Belot spectator сесия НЕ насрочва forced
+    // lobby reload — възстановява се чрез socket reconnect + re-watch.
+    if (shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive())) {
+      shouldReloadLobbyOnReconnect = true
+    }
     if (overlayEl) return
     const el = document.createElement('div')
     el.style.cssText = [
@@ -9079,6 +9158,13 @@ void loadGuestTrialStatus().finally(() => {
 
   showOfflineConnectionOverlay = showOfflineOverlay
 
+  function hideOfflineOverlay(): void {
+    overlayEl?.remove()
+    overlayEl = null
+  }
+
+  hideOfflineConnectionOverlay = hideOfflineOverlay
+
   async function checkNetworkHealth(): Promise<void> {
     if (networkMonitorInFlight || offlineLobbyReloadScheduled || isPageUnloading) return
     networkMonitorInFlight = true
@@ -9093,6 +9179,10 @@ void loadGuestTrialStatus().finally(() => {
         consecutiveNetworkFailures = 0
         if (overlayEl !== null && shouldReloadLobbyOnReconnect) {
           forceOfflineLobbyReload()
+        } else if (overlayEl !== null && !shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive())) {
+          // Spectator: мрежата е обратно — само махни overlay-я; socket
+          // reconnect-ът re-watch-ва същата маса.
+          hideOfflineOverlay()
         }
         return
       }
@@ -9114,9 +9204,19 @@ void loadGuestTrialStatus().finally(() => {
     // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
   }
 
+  // Автоматично възстановяване при 'online' — за активна spectator сесия без
+  // reload (state-ът е ephemeral); explicit "Опитай отново" остава hard reload.
+  function handleBrowserOnline(): void {
+    if (!shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive())) {
+      hideOfflineOverlay()
+      return
+    }
+    hardReload()
+  }
+
   if (!navigator.onLine) showOfflineOverlay()
   window.addEventListener('offline', showOfflineOverlay)
-  window.addEventListener('online', hardReload)
+  window.addEventListener('online', handleBrowserOnline)
   window.setInterval(() => {
     void checkNetworkHealth()
   }, 3000)

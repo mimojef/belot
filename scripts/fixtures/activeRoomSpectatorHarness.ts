@@ -289,12 +289,12 @@ async function enterAsParticipant(roomId: string, seat: 'bottom' | 'right' | 'to
   await waitForRenderedFrame()
 }
 
-async function applyParticipantSnapshot(roomId: string, game: RoomGameSnapshot, seats = makeSeats()): Promise<void> {
+async function applyParticipantSnapshot(roomId: string, game: RoomGameSnapshot, seats = makeSeats(), yourSeat: 'bottom' | 'right' | 'top' | 'left' = 'bottom'): Promise<void> {
   controller.handleServerMessage({
     type: 'room_snapshot',
     roomId,
     roomStatus: 'playing',
-    yourSeat: 'bottom',
+    yourSeat,
     reconnectToken: 'token',
     seats,
     game,
@@ -423,6 +423,98 @@ function hasPrizeCounter(): boolean {
   return document.body.querySelector('[data-prize-counter="1"]') !== null
 }
 
+// ─── Phase 3B.2 helpers (D3/D4/D5/D9) ──────────────────────────────────────
+
+function seatPanelHasTiLabel(seat: string): boolean {
+  const card = document.body.querySelector<HTMLElement>(`[data-seat-profile-card="${seat}"]`)
+  return card ? /(^|\s)ТИ(\s|$)/.test(card.innerText) : false
+}
+
+function seatPanelText(seat: string): string {
+  return document.body.querySelector<HTMLElement>(`[data-seat-profile-card="${seat}"]`)?.innerText ?? ''
+}
+
+// Кой actual seat е визуално най-долу (= perspective seat-а на viewer-а).
+function lowestSeatPanel(): string | null {
+  let lowest: { seat: string; y: number } | null = null
+  for (const seat of ['bottom', 'right', 'top', 'left']) {
+    const card = document.body.querySelector<HTMLElement>(`[data-seat-profile-card="${seat}"]`)
+    if (!card) continue
+    const rect = card.getBoundingClientRect()
+    const y = rect.top + rect.height / 2
+    if (lowest === null || y > lowest.y) lowest = { seat, y }
+  }
+  return lowest?.seat ?? null
+}
+
+// Visible = рендерирана карта, която не е скрита от sweep анимацията
+// (animateSweepThrowDown скрива source fan cards с visibility:hidden).
+function fanMetrics(seat: string): { count: number; visible: number; faces: number; cardW: number; cardH: number; bottomEdge: number } | null {
+  const fan = cardFanElements(seat)[0]
+  if (!fan) return null
+  const cards = Array.from(fan.children) as HTMLElement[]
+  const visible = cards.filter((c) => getComputedStyle(c).visibility !== 'hidden' && Number(getComputedStyle(c).opacity) > 0.05)
+  const rects = cards.map((c) => c.getBoundingClientRect())
+  return {
+    count: cards.length,
+    visible: visible.length,
+    faces: fan.querySelectorAll('img').length,
+    cardW: Math.round(Math.min(rects[0]?.width ?? 0, rects[0]?.height ?? 0)),
+    cardH: Math.round(Math.max(rects[0]?.width ?? 0, rects[0]?.height ?? 0)),
+    bottomEdge: Math.round(Math.max(0, ...rects.map((r) => r.bottom))),
+  }
+}
+
+function mobileActionBarTop(): number | null {
+  const bar = document.body.querySelector<HTMLElement>('[data-active-room-mobile-action-bar]')
+  return bar ? Math.round(bar.getBoundingClientRect().top) : null
+}
+
+function countSweepRevealCards(): number {
+  return document.body.querySelectorAll('[data-sweep-reveal-card]').length
+}
+
+function hasSweepThrowDownOverlay(): boolean {
+  return document.body.querySelector('[data-sweep-throw-down-overlay]') !== null
+}
+
+function hasSweepCaption(): boolean {
+  return document.body.querySelector('[data-sweep-caption-banner]') !== null
+}
+
+function hasPlayedCardFlyOverlay(): boolean {
+  return document.body.querySelector('[data-played-card-fly-overlay]') !== null
+}
+
+function bottomHandHostVisibilities(): string[] {
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[data-playing-bottom-hand-host] [data-card-id]'))
+    .map((el) => getComputedStyle(el).visibility)
+}
+
+const SWEEP_SUIT_BY_SEAT = { bottom: 'clubs', right: 'diamonds', top: 'hearts', left: 'spades' } as const
+function makeSweepHands(count: number): Record<'bottom' | 'right' | 'top' | 'left', RoomCardSnapshot[]> {
+  const ranks = ['A', 'K', 'Q', 'J', '10', '9', '8', '7'] as const
+  const hands = {} as Record<'bottom' | 'right' | 'top' | 'left', RoomCardSnapshot[]>
+  for (const seat of ['bottom', 'right', 'top', 'left'] as const) {
+    const suit = SWEEP_SUIT_BY_SEAT[seat]
+    hands[seat] = ranks.slice(0, count).map((rank) => ({ id: `${suit}-${rank}`, suit, rank }))
+  }
+  return hands
+}
+
+function makeSweepResolution(winnerSeat: 'bottom' | 'right' | 'top' | 'left', count: number) {
+  const order = ['bottom', 'right', 'top', 'left'] as const
+  const start = order.indexOf(winnerSeat)
+  return {
+    winnerSeat,
+    winnerTeam: winnerSeat === 'bottom' || winnerSeat === 'top' ? 'A' : 'B',
+    throwOrder: [0, 1, 2, 3].map((i) => order[(start + i) % 4]),
+    handsAtResolution: makeSweepHands(count),
+    autoCreditedBelotes: [],
+    resolvedAt: Date.now(),
+  }
+}
+
 function reset(): void {
   calls.length = 0
   document.body.querySelectorAll('[data-bidding-popup-host]').forEach((n) => n.remove())
@@ -482,5 +574,18 @@ function reset(): void {
   hasProfilePopupOpen,
   hasMatchEndedActionButtons,
   hasPrizeCounter,
+  // Phase 3B.2
+  seatPanelHasTiLabel,
+  seatPanelText,
+  lowestSeatPanel,
+  fanMetrics,
+  mobileActionBarTop,
+  countSweepRevealCards,
+  hasSweepThrowDownOverlay,
+  hasSweepCaption,
+  hasPlayedCardFlyOverlay,
+  bottomHandHostVisibilities,
+  makeSweepHands,
+  makeSweepResolution,
   getCalls: () => calls,
 }

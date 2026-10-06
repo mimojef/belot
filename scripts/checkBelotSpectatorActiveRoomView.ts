@@ -54,6 +54,24 @@
  *   [H5] participant leave click никога не вика onSpectatorExitRequested
  *
  * I. Source review (defense-in-depth отвъд DOM snapshot теста)
+ *
+ * Phase 3B.2 (viewer/hands D4/D5, sweep D3, cleanup D9):
+ *   [3B2-H1] participant: perspectiveSeat == controlledSeat (seated right)
+ *   [3B2-H2] spectator: perspectiveSeat bottom, controlledSeat null
+ *   [3B2-H3] spectator: няма „ТИ“ върху долния (или който и да е) играч
+ *   [3B2-H4] participant own seat: „ТИ“ остава
+ *   [3B2-H5] spectator: четирите скрити ръце са гърбове
+ *   [3B2-H6] spectator bottom: panel/remote-hand path, не floating own-hand
+ *   [3B2-H7] mobile spectator bottom: без own-hand sizing, не е под action bar-а
+ *   [3B2-H8] mobile participant bottom: own-hand sizing непроменен
+ *   [3B2-S1..S6] spectator sweep, winner bottom: без offer/reveal преди OK;
+ *        bottom panel fan е source, затваря се, без дублирани гърбове, без остатък
+ *   [3B2-S7] същото с winner non-bottom
+ *   [3B2-S8] participant sweep: floating own-hand host остава source
+ *   [3B2-C3/C4/C5] Exit по време на летяща карта: без transient карта, без
+ *        leave_active_room, без penalty confirmation
+ *   [3B2-C3b] Exit по време на sweep: без caption/overlay/късен re-render
+ *   [3B2-C6] re-entry след Exit
  */
 
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
@@ -152,6 +170,18 @@ type H = {
   hasProfilePopupOpen: () => boolean
   hasMatchEndedActionButtons: () => boolean
   hasPrizeCounter: () => boolean
+  seatPanelHasTiLabel: (seat: string) => boolean
+  seatPanelText: (seat: string) => string
+  lowestSeatPanel: () => string | null
+  fanMetrics: (seat: string) => { count: number; visible: number; faces: number; cardW: number; cardH: number; bottomEdge: number } | null
+  mobileActionBarTop: () => number | null
+  countSweepRevealCards: () => number
+  hasSweepThrowDownOverlay: () => boolean
+  hasSweepCaption: () => boolean
+  hasPlayedCardFlyOverlay: () => boolean
+  bottomHandHostVisibilities: () => string[]
+  makeSweepHands: (count: number) => Record<string, Array<{ id: string; suit: string; rank: string }>>
+  makeSweepResolution: (winnerSeat: string, count: number) => unknown
   getCalls: () => Array<{ name: string; args: unknown[] }>
 }
 
@@ -506,6 +536,315 @@ try {
     assert(source.includes('const isMyTurn = controlledSeat !== null && playing?.currentTurnSeat === controlledSeat'), 'isMyTurn must require a non-null controlledSeat')
     assert(source.includes('controlledSeat === null\n    ? displayedHandCounts'), 'panelHandCounts must not zero the bottom seat for spectator')
     assert(/controlledSeat === null\s*\n\s*\? \(removeBottomHandOverlay\(\), null\)/.test(source), 'bottom hand overlay must be skipped for spectator')
+  })
+
+  // ═══ Phase 3B.2 — VIEWER / HANDS (D4/D5) ═════════════════════════════════
+  // Viewer модел без public getter: perspectiveSeat = seat-ът, чийто panel е
+  // визуално най-долу; controlledSeat = seat-ът с „ТИ“ / own-hand path.
+  await check('[3B2-H1] participant: perspectiveSeat == controlledSeat (seated right -> right panel is bottom + "ТИ")', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.enterAsParticipant('room-3b2-h1', 'right'))
+    await call(page, (h: H, g: unknown) => (h as any).applyParticipantSnapshot('room-3b2-h1', g, (h as any).makeSeats(), 'right'), await call(page, (h: H) => h.biddingGame()))
+    await waitUntil(() => call(page, (h: H) => h.lowestSeatPanel() === 'right'))
+    assertEqual(await call(page, (h: H) => h.seatPanelHasTiLabel('right')), true, 'controlled seat "ТИ"')
+    for (const seat of ['bottom', 'top', 'left']) {
+      assertEqual(await call(page, (h: H, s: string) => h.seatPanelHasTiLabel(s), seat), false, `${seat} has no "ТИ"`)
+    }
+    assertNoPageErrors(page, '3B2-H1')
+    await page.close()
+  })
+
+  {
+    const page = await newPage()
+    await call(page, (h: H, g: unknown) => h.enterAsSpectator('room-3b2-h', g), await call(page, (h: H) => h.playingGame()))
+    await waitUntil(() => call(page, (h: H) => h.countVisibleCardsInFan('bottom') === 8))
+
+    await check('[3B2-H2] spectator: perspectiveSeat bottom, controlledSeat null', async () => {
+      assertEqual(await call(page, (h: H) => h.lowestSeatPanel()), 'bottom', 'perspective seat')
+      assertEqual(await call(page, (h: H) => h.isSpectatorViewFn()), true, 'spectator view')
+      assertEqual(await call(page, (h: H) => h.hasBottomHandOverlay()), false, 'no controlled own-hand surface')
+    })
+
+    await check('[3B2-H3] spectator: bottom player label has no "ТИ" (nor any seat)', async () => {
+      for (const seat of ['bottom', 'right', 'top', 'left']) {
+        assertEqual(await call(page, (h: H, s: string) => h.seatPanelHasTiLabel(s), seat), false, `${seat} "ТИ"`)
+      }
+      const bottomText = await call(page, (h: H) => h.seatPanelText('bottom'))
+      assert(bottomText.length > 0, 'bottom panel still renders the real player identity')
+    })
+
+    await check('[3B2-H5] spectator: all four hidden hands are card backs', async () => {
+      for (const seat of ['bottom', 'right', 'top', 'left']) {
+        const m = await call(page, (h: H, s: string) => h.fanMetrics(s), seat)
+        assert(m !== null, `${seat} fan exists`)
+        assertEqual(m!.count, 8, `${seat} count`)
+        assertEqual(m!.faces, 0, `${seat} face cards`)
+      }
+    })
+
+    await check('[3B2-H6] spectator bottom: panel/remote-hand path, not floating own-hand path', async () => {
+      const bottom = await call(page, (h: H) => h.fanMetrics('bottom'))
+      const top = await call(page, (h: H) => h.fanMetrics('top'))
+      assertEqual(await call(page, (h: H) => h.hasBottomHandOverlay()), false, 'no floating own-hand host')
+      assertEqual(bottom!.cardW, top!.cardW, 'bottom panel fan uses the same card size as the remote top fan')
+    })
+
+    assertNoPageErrors(page, '3B2 viewer/hands')
+    await page.close()
+  }
+
+  await check('[3B2-H4] participant own seat: "ТИ" stays as before', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.enterAsParticipant('room-3b2-h4', 'bottom'))
+    await call(page, (h: H, g: unknown) => h.applyParticipantSnapshot('room-3b2-h4', g), await call(page, (h: H) => h.biddingGame()))
+    await waitUntil(() => call(page, (h: H) => h.seatPanelHasTiLabel('bottom')))
+    for (const seat of ['right', 'top', 'left']) {
+      assertEqual(await call(page, (h: H, s: string) => h.seatPanelHasTiLabel(s), seat), false, `${seat} has no "ТИ"`)
+    }
+    assertNoPageErrors(page, '3B2-H4')
+    await page.close()
+  })
+
+  async function newMobilePage(): Promise<Page> {
+    const context = await browser!.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true, deviceScaleFactor: 2 })
+    const page = await context.newPage()
+    const pageErrors: string[] = []
+    page.on('pageerror', (e) => pageErrors.push(e.message))
+    await page.goto(baseUrl)
+    await page.waitForFunction(() => (window as any).__activeRoomSpectatorHarness !== undefined, undefined, { timeout: 10_000 })
+    ;(page as any).__pageErrors = pageErrors
+    return page
+  }
+
+  const ownBiddingHand = [
+    { id: 'clubs-A', suit: 'clubs', rank: 'A' },
+    { id: 'clubs-K', suit: 'clubs', rank: 'K' },
+    { id: 'hearts-Q', suit: 'hearts', rank: 'Q' },
+    { id: 'spades-J', suit: 'spades', rank: 'J' },
+    { id: 'diamonds-10', suit: 'diamonds', rank: '10' },
+  ]
+
+  await check('[3B2-H7] mobile spectator bottom: no own-hand sizing (same size as top), not under the action bar', async () => {
+    const page = await newMobilePage()
+    await call(page, (h: H, g: unknown) => h.enterAsSpectator('room-3b2-h7', g), await call(page, (h: H) => h.biddingGame()))
+    await waitUntil(() => call(page, (h: H) => (h.fanMetrics('bottom')?.count ?? 0) === 5 && (h.fanMetrics('top')?.count ?? 0) === 5))
+    const bottom = (await call(page, (h: H) => h.fanMetrics('bottom')))!
+    const top = (await call(page, (h: H) => h.fanMetrics('top')))!
+    assertEqual(bottom.faces, 0, 'mobile spectator bottom backs only')
+    assertEqual(bottom.cardW, top.cardW, 'mobile spectator bottom card size == remote top card size')
+    const barTop = await call(page, (h: H) => h.mobileActionBarTop())
+    const limit = barTop ?? 844
+    assert(bottom.bottomEdge <= limit + 1, `bottom fan (edge ${bottom.bottomEdge}) must not sit under the action bar/viewport (${limit})`)
+    assertNoPageErrors(page, '3B2-H7')
+    await page.close()
+  })
+
+  await check('[3B2-H8] mobile participant bottom: own-hand sizing unchanged (larger than remote top)', async () => {
+    const page = await newMobilePage()
+    await call(page, (h: H) => h.enterAsParticipant('room-3b2-h8', 'bottom'))
+    await call(page, (h: H, g: unknown) => h.applyParticipantSnapshot('room-3b2-h8', g), await call(page, (h: H, own: unknown) => h.biddingGame({ ownHand: own } as any), ownBiddingHand))
+    await waitUntil(() => call(page, (h: H) => (h.fanMetrics('bottom')?.faces ?? 0) === 5 && (h.fanMetrics('top')?.count ?? 0) === 5))
+    const bottom = (await call(page, (h: H) => h.fanMetrics('bottom')))!
+    const top = (await call(page, (h: H) => h.fanMetrics('top')))!
+    assert(bottom.cardW > top.cardW, `participant own hand (${bottom.cardW}) must keep own-hand sizing > remote (${top.cardW})`)
+    assertNoPageErrors(page, '3B2-H8')
+    await page.close()
+  })
+
+  // ═══ Phase 3B.2 — SWEEP (D3) ═════════════════════════════════════════════
+  // Timeline (animateSweepThrowDown): caption 1.5s → claimant close+fly →
+  // 1s beat → others close+fly (~3.0s) → hold 1.5s → collect → done ≈5.8s.
+  const SWEEP_REVEAL_PROBE_MS = 3_600
+  const SWEEP_DONE_PROBE_MS = 6_800
+  // Cold entry директно в mid-hand snapshot пуска existing deal catch-up
+  // (3 → 5 → 8 карти, ~4.5s). Sweep/flight тестовете влизат с пълна ръка,
+  // изчакват catch-up-а да се успокои и чак тогава подават mid-hand snapshot.
+  async function enterSettledSpectator(page: Page, roomId: string): Promise<void> {
+    await call(page, (h: H, args: [string, unknown]) => h.enterAsSpectator(args[0], args[1]), [roomId, await call(page, (h: H) => h.playingGame())])
+    await waitUntil(() => call(page, (h: H) => ['bottom', 'right', 'top', 'left'].every((s) => h.fanMetrics(s)?.visible === 8)))
+  }
+
+  async function runSpectatorSweep(winnerSeat: string, roomId: string): Promise<void> {
+    const page = await newPage()
+    const pre = await call(page, (h: H) => h.playingGame({
+      handCounts: { bottom: 3, right: 3, top: 3, left: 3 },
+      playing: {
+        winningBid: { seat: 'bottom', contract: 'all-trumps', trumpSuit: null, doubled: false, redoubled: false },
+        currentTurnSeat: 'bottom', currentTrickPlays: [], completedTricksCount: 5, latestCompletedTrick: null,
+        validCardIds: null, sweepOffer: null, sweepResolution: null,
+      },
+    } as any))
+    await enterSettledSpectator(page, roomId)
+    await call(page, (h: H, args: [string, unknown]) => h.applySpectatorSnapshot(args[0], args[1]), [roomId, pre])
+    await waitUntil(() => call(page, (h: H) => ['bottom', 'right', 'top', 'left'].every((s) => h.fanMetrics(s)?.count === 3 && h.fanMetrics(s)?.visible === 3)))
+
+    // S1 — преди OK: spectator никога не вижда offer popup / reveal, дори ако
+    // snapshot-ът (хипотетично) носи sweepOffer за seat-а на долния играч.
+    const withOffer = await call(page, (h: H, g: any) => ({ ...g, playing: { ...g.playing, sweepOffer: { seat: 'bottom', expiresAt: Date.now() + 10_000 } } }), pre)
+    await call(page, (h: H, args: [string, unknown]) => h.applySpectatorSnapshot(args[0], args[1]), [roomId, withOffer])
+    assertEqual(await call(page, (h: H) => h.hasSweepOfferPopup()), false, 'S1 no sweep offer popup')
+    assertEqual(await call(page, (h: H) => h.countSweepRevealCards()), 0, 'S1 no reveal')
+
+    const resolved = await call(page, (h: H, args: [any, string]) => ({
+      ...args[0],
+      handCounts: { bottom: 0, right: 0, top: 0, left: 0 },
+      playing: { ...args[0].playing, sweepOffer: null, sweepResolution: h.makeSweepResolution(args[1], 3) },
+    }), [pre, winnerSeat])
+    await call(page, (h: H, args: [string, unknown]) => h.applySpectatorSnapshot(args[0], args[1]), [roomId, resolved])
+    // По време на caption-а долното ветрило е още там (handsAtResolution counts).
+    const atStart = await call(page, (h: H) => h.fanMetrics('bottom'))
+    assert(atStart !== null && atStart.count === 3 && atStart.visible === 3, `bottom fan visible at sweep start: ${JSON.stringify(atStart)}`)
+
+    await sleep(SWEEP_REVEAL_PROBE_MS)
+    // S2/S3 — bottom panel fan е намерен като source и е затворен (скрит).
+    const bottomDuring = await call(page, (h: H) => h.fanMetrics('bottom'))
+    assert(bottomDuring !== null && bottomDuring.count === 3, `bottom panel fan still mounted as source: ${JSON.stringify(bottomDuring)}`)
+    assertEqual(bottomDuring!.visible, 0, 'S3 bottom fan closed during reveal')
+    // S4 — без дублирани гърбове: 12 reveal карти и нула видими panel карти.
+    let visiblePanelCards = 0
+    for (const seat of ['bottom', 'right', 'top', 'left']) {
+      visiblePanelCards += (await call(page, (h: H, s: string) => h.fanMetrics(s), seat))?.visible ?? 0
+    }
+    assertEqual(visiblePanelCards, 0, 'S4 no visible panel cards alongside the reveal')
+    assertEqual(await call(page, (h: H) => h.countSweepRevealCards()), 12, 'S4 exactly 4x3 revealed cards')
+
+    await sleep(SWEEP_DONE_PROBE_MS - SWEEP_REVEAL_PROBE_MS)
+    // S5 — след collect: няма остатъчни карти.
+    assertEqual(await call(page, (h: H) => h.hasSweepThrowDownOverlay()), false, 'S5 overlay removed')
+    assertEqual(await call(page, (h: H) => h.countSweepRevealCards()), 0, 'S5 no reveal cards')
+    const bottomAfter = await call(page, (h: H) => h.fanMetrics('bottom'))
+    assertEqual(bottomAfter?.visible ?? 0, 0, 'S5 no residual bottom cards')
+    assertNoPageErrors(page, `sweep winner ${winnerSeat}`)
+    await page.close()
+  }
+
+  await check('[3B2-S1..S6] spectator accepted sweep, winner bottom: bottom fan is the source, closes, no duplicates, no residue', async () => {
+    await runSpectatorSweep('bottom', 'room-3b2-s6')
+  })
+
+  await check('[3B2-S7] spectator accepted sweep, winner non-bottom (right): same guarantees', async () => {
+    await runSpectatorSweep('right', 'room-3b2-s7')
+  })
+
+  await check('[3B2-S8] participant sweep: floating own-hand host stays the source (existing behavior)', async () => {
+    const page = await newPage()
+    const hands = await call(page, (h: H) => h.makeSweepHands(3))
+    const pre = await call(page, (h: H, own: unknown) => h.playingGame({
+      handCounts: { bottom: 3, right: 3, top: 3, left: 3 },
+      ownHand: own,
+      playing: {
+        winningBid: { seat: 'bottom', contract: 'all-trumps', trumpSuit: null, doubled: false, redoubled: false },
+        currentTurnSeat: 'right', currentTrickPlays: [], completedTricksCount: 5, latestCompletedTrick: null,
+        validCardIds: null, sweepOffer: null, sweepResolution: null,
+      },
+    } as any), hands.bottom)
+    await call(page, (h: H) => h.enterAsParticipant('room-3b2-s8', 'bottom'))
+    await call(page, (h: H, g: unknown) => h.applyParticipantSnapshot('room-3b2-s8', g), pre)
+    await waitUntil(() => call(page, (h: H) => h.bottomHandOverlayCardCount() === 3))
+    const resolved = await call(page, (h: H, g: any) => ({
+      ...g,
+      ownHand: [],
+      handCounts: { bottom: 0, right: 0, top: 0, left: 0 },
+      playing: { ...g.playing, sweepResolution: h.makeSweepResolution('bottom', 3) },
+    }), pre)
+    await call(page, (h: H, g: unknown) => h.applyParticipantSnapshot('room-3b2-s8', g), resolved)
+    const atStart = await call(page, (h: H) => h.bottomHandHostVisibilities())
+    assertEqual(atStart.length, 3, 'participant own hand still shown (handsAtResolution) at sweep start')
+    assertEqual((await call(page, (h: H) => h.fanMetrics('bottom')))?.count ?? 0, 0, 'participant bottom panel fan stays empty (own hand is the host)')
+    await sleep(SWEEP_REVEAL_PROBE_MS)
+    const during = await call(page, (h: H) => h.bottomHandHostVisibilities())
+    assert(during.length === 3 && during.every((v) => v === 'hidden'), `own-hand host cards are the hidden sources: ${JSON.stringify(during)}`)
+    assertEqual(await call(page, (h: H) => h.countSweepRevealCards()), 12, '4x3 revealed cards')
+    await sleep(SWEEP_DONE_PROBE_MS - SWEEP_REVEAL_PROBE_MS)
+    assertEqual(await call(page, (h: H) => h.hasSweepThrowDownOverlay()), false, 'overlay removed')
+    assertNoPageErrors(page, '3B2-S8')
+    await page.close()
+  })
+
+  // ═══ Phase 3B.2 — CLEANUP (D9) ═══════════════════════════════════════════
+  await check('[3B2-C3/C4/C5] Exit during a flying-card animation: no transient card, no leave, no penalty', async () => {
+    const page = await newPage()
+    await enterSettledSpectator(page, 'room-3b2-c3')
+    // Deal catch-up completion timer-ът идва малко след като ветрилата са пълни.
+    await sleep(1_500)
+    const result = await page.evaluate(async () => {
+      const h = (window as any).__activeRoomSpectatorHarness
+      const next = h.playingGame({
+        handCounts: { bottom: 8, right: 7, top: 8, left: 8 },
+        playing: {
+          winningBid: { seat: 'bottom', contract: 'all-trumps', trumpSuit: null, doubled: false, redoubled: false },
+          currentTurnSeat: 'top', currentTrickPlays: [{ seat: 'right', card: { id: 'hearts-A', suit: 'hearts', rank: 'A' } }],
+          completedTricksCount: 0, latestCompletedTrick: null, validCardIds: null, sweepOffer: null, sweepResolution: null,
+        },
+      })
+      h.getCalls().length = 0
+      await h.applySpectatorSnapshot('room-3b2-c3', next)
+      const during = h.hasPlayedCardFlyOverlay()
+      h.clickLeaveButton()
+      await new Promise((r) => requestAnimationFrame(() => r(null)))
+      const afterExit = h.hasPlayedCardFlyOverlay()
+      return { during, afterExit }
+    })
+    assert(result.during, 'precondition: a played-card flight overlay must be in progress')
+    // Production Exit path: onSpectatorExitRequested -> main.ts вика
+    // exitSpectatorView(); harness-ът го записва, тук го изпълняваме ние.
+    await call(page, (h: H) => h.exitSpectator())
+    assertEqual(await call(page, (h: H) => h.hasPlayedCardFlyOverlay()), false, 'no flying card right after exit')
+    await sleep(600)
+    assertEqual(await call(page, (h: H) => h.hasPlayedCardFlyOverlay()), false, 'no flying card after the flight would have landed')
+    const calls = await call(page, (h: H) => h.getCalls())
+    assert(calls.some((c) => c.name === 'onSpectatorExitRequested'), 'Exit goes through onSpectatorExitRequested')
+    assert(!calls.some((c) => c.name === 'leaveActiveRoom'), 'C4 no leave_active_room')
+    assertEqual(await page.locator('[data-active-room-leave-warning="1"]').count(), 0, 'C5 no penalty confirmation')
+    assertNoPageErrors(page, '3B2-C3')
+    await page.close()
+  })
+
+  await check('[3B2-C3b] Exit during sweep presentation: no caption/overlay/belote indicator left behind', async () => {
+    const page = await newPage()
+    const pre = await call(page, (h: H) => h.playingGame({
+      handCounts: { bottom: 3, right: 3, top: 3, left: 3 },
+      playing: {
+        winningBid: { seat: 'bottom', contract: 'all-trumps', trumpSuit: null, doubled: false, redoubled: false },
+        currentTurnSeat: 'bottom', currentTrickPlays: [], completedTricksCount: 5, latestCompletedTrick: null,
+        validCardIds: null, sweepOffer: null, sweepResolution: null,
+      },
+    } as any))
+    await enterSettledSpectator(page, 'room-3b2-c3b')
+    await call(page, (h: H, g: unknown) => h.applySpectatorSnapshot('room-3b2-c3b', g), pre)
+    await waitUntil(() => call(page, (h: H) => h.fanMetrics('bottom')?.count === 3))
+    const resolved = await call(page, (h: H, g: any) => ({
+      ...g,
+      handCounts: { bottom: 0, right: 0, top: 0, left: 0 },
+      playing: { ...g.playing, sweepResolution: h.makeSweepResolution('top', 3) },
+    }), pre)
+    await call(page, (h: H, g: unknown) => h.applySpectatorSnapshot('room-3b2-c3b', g), resolved)
+    await sleep(400)
+    assertEqual(await call(page, (h: H) => h.hasSweepCaption()), true, 'precondition: sweep caption shown')
+    await call(page, (h: H) => h.exitSpectator())
+    assertEqual(await call(page, (h: H) => h.hasSweepCaption()), false, 'caption removed on exit')
+    await sleep(SWEEP_DONE_PROBE_MS)
+    assertEqual(await call(page, (h: H) => h.hasSweepCaption()), false, 'no late caption')
+    assertEqual(await call(page, (h: H) => h.hasSweepThrowDownOverlay()), false, 'no sweep overlay after exit')
+    assertEqual(await call(page, (h: H) => h.countSweepRevealCards()), 0, 'no reveal cards after exit')
+    assertEqual(await call(page, (h: H) => h.hasActiveRoomFn()), false, 'late sweep onComplete must not resurrect the view')
+    assertNoPageErrors(page, '3B2-C3b')
+    await page.close()
+  })
+
+  await check('[3B2-C6] re-entry after Exit works (fresh view, correct room, no stale overlays)', async () => {
+    const page = await newPage()
+    await call(page, (h: H, g: unknown) => h.enterAsSpectator('room-3b2-c6a', g), await call(page, (h: H) => h.playingGame()))
+    await call(page, (h: H) => h.clickLeaveButton())
+    await call(page, (h: H) => h.exitSpectator())
+    await call(page, (h: H, g: unknown) => h.enterAsSpectator('room-3b2-c6b', g), await call(page, (h: H) => h.playingGame()))
+    await waitUntil(() => call(page, (h: H) => h.fanMetrics('bottom')?.count === 8))
+    assertEqual(await call(page, (h: H) => h.getCurrentRoomIdFn()), 'room-3b2-c6b', 'room id')
+    assertEqual(await call(page, (h: H) => h.isSpectatorViewFn()), true, 'spectator view')
+    assertEqual(await call(page, (h: H) => h.seatPanelHasTiLabel('bottom')), false, 'still no "ТИ" after re-entry')
+    assertEqual(await call(page, (h: H) => h.hasPlayedCardFlyOverlay()), false, 'no stale flight overlay')
+    assertNoPageErrors(page, '3B2-C6')
+    await page.close()
   })
 } finally {
   if (browser) await browser.close()

@@ -27,6 +27,9 @@ function record(name: string) {
 // не пише нищо в state — тестовете explicit сетват сценарий преди click.
 let vipGateStatusResponse: { ok: true; isActive: boolean; hasClaimedLaunchGift: boolean; launchGiftDays: number } | { ok: false } = { ok: false }
 let claimLaunchGiftResponse: { ok: true; isActive: boolean; activeUntil?: string | null } | { ok: false; alreadyClaimed: boolean; giftDisabled: boolean } = { ok: false, alreadyClaimed: false, giftDisabled: false }
+// Phase 3B.2 (D1): симулира мрежова латентност на VIP status заявката —
+// popup-ът не бива да се insert-ва, докато статусът е unknown.
+let vipGateStatusDelayMs = 0
 
 const controller = createLobbyFlowController({
   root,
@@ -54,6 +57,9 @@ const controller = createLobbyFlowController({
   onUnwatchBelotRoom: record('onUnwatchBelotRoom'),
   onGetTopicsVipGateStatus: async () => {
     record('onGetTopicsVipGateStatus')()
+    if (vipGateStatusDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, vipGateStatusDelayMs))
+    }
     return vipGateStatusResponse
   },
   onClaimTopicsLaunchGift: async () => {
@@ -127,6 +133,7 @@ function q<T extends Element>(selector: string): T | null {
     q<HTMLButtonElement>(`[data-watch-belot-room="${roomId}"]`)?.click()
   },
   setVipGateStatusResponse: (response: typeof vipGateStatusResponse) => { vipGateStatusResponse = response },
+  setVipGateStatusDelayMs: (ms: number) => { vipGateStatusDelayMs = ms },
   setClaimLaunchGiftResponse: (response: typeof claimLaunchGiftResponse) => { claimLaunchGiftResponse = response },
   isBelotSpectatorVipPopupOpen: (): boolean => q('[data-belot-spectator-vip-popup-backdrop="1"]') !== null,
   getBelotSpectatorVipPopupCardText: (): string | null =>

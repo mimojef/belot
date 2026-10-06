@@ -116,6 +116,7 @@ import {
 } from './renderBiddingScreen'
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { renderPlayingScreen, removeBottomHandOverlay, type RenderPlayingScreenOptions } from './renderPlayingScreen'
+import { disposePlayingTransientPresentation } from './renderPlayingScreen'
 import { renderScoringScreen } from './renderScoringPanel'
 import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
@@ -3817,12 +3818,13 @@ export function createActiveRoomFlowController(
             handCounts,
             ownHand: displayOwnHand,
             previousOwnHand: previousDisplayOwnHand,
-            localSeat: activeRoomState.seat,
+            // Own-hand identity = controlledSeat (spectator: null), НЕ perspective.
+            ownHandSeat: activeRoomState.controlledSeat,
             maxCardsPerSeat: dealMaxCards,
             hideNewCardsUntilAnimDelaySeats,
             replaceLocalHandAtRevealSeats:
-              showPackets && activeDealPhase === 'deal-last-3'
-                ? { [activeRoomState.seat]: true }
+              showPackets && activeDealPhase === 'deal-last-3' && activeRoomState.controlledSeat !== null
+                ? { [activeRoomState.controlledSeat]: true }
                 : undefined,
             animStartIndex:
               shouldRenderDealLastThreeAnimation
@@ -4059,7 +4061,7 @@ export function createActiveRoomFlowController(
         handCounts,
         ownHand,
         previousOwnHand: null,
-        localSeat: activeRoomState.seat,
+        ownHandSeat: activeRoomState.controlledSeat,
         maxCardsPerSeat: 5,
         animStartIndex: 0,
         seatAnimDelays: null,
@@ -6054,6 +6056,9 @@ export function createActiveRoomFlowController(
     clearAllTableGiftOverlays()
     closeTableGiftModal()
     resetPlayingUiCache(playingCache)
+    // Phase 3B.2 (D9): body-level transient artifacts (летяща карта, sweep
+    // caption, "Белот +20") — иначе продължават над lobby-то след Изход.
+    disposePlayingTransientPresentation()
     removePersistentBotTakeoverPopup()
     removeSeatProfileOverlay()
     closeProfileAccessBlockPopup()

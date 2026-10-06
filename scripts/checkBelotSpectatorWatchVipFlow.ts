@@ -34,6 +34,16 @@
  *   [C6] reconnect denial (vip_required, без matching pending) -> тих cleanup, БЕЗ popup
  *   [C7] source review: Belot spectator кодът никога не вика resume_room/leave_active_room/join_room
  *
+ * E. Phase 3B.2 (D1 VIP popup flash, D8 blank root, D10 echo, R7)
+ *   [E1/V1] fresh client + active VIP + бавен status -> 0 popup вмъквания, един watch
+ *   [E2/V2+V3] inactive VIP + неизползван gift -> free popup едва след load; click не claim-ва
+ *   [E3/V5] използван gift -> „Вземи VIP“ след load
+ *   [E4] status load failure -> без client догадки/popup; watch се праща (server решава)
+ *   [E5/R7] background re-watch vip_required -> чист state, Частни маси -> Играещи, без popup
+ *   [E6/C2] belot_spectate_ended рендерира стабилния Играещи shell веднага
+ *   [E7/D10] explicit unwatch навигира веднъж; server echo-то ended се игнорира
+ *   [E8/C6] re-entry с „Гледай“ след exit
+ *
  * D. Regression (пуснати отделно в cull regression пас, не тук):
  *   checkTopicsComposerVipGate.ts, checkPrivateGamesLobbyTabs.ts
  */
@@ -377,6 +387,153 @@ try {
       assertEqual(popupOpen, false, 'a background reconnect denial must never open the VIP popup')
       const spectating = await call(page, (h: H) => h.getSpectatingBelotRoomId())
       assertEqual(spectating, null, 'spectating state must be cleared silently')
+    })
+
+    await page.close()
+  }
+
+  // ── E. Phase 3B.2 — VIP decision ordering, termination, re-entry ────────
+  async function installPopupInsertionCounter(page: Page): Promise<void> {
+    await page.evaluate(() => {
+      const w = window as any
+      w.__vipPopupInsertions = 0
+      new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          for (const n of m.addedNodes) {
+            if (!(n instanceof Element)) continue
+            if (n.matches('[data-belot-spectator-vip-popup-backdrop]') || n.querySelector('[data-belot-spectator-vip-popup-backdrop]')) {
+              w.__vipPopupInsertions += 1
+            }
+          }
+        }
+      }).observe(document.body, { childList: true, subtree: true })
+    })
+  }
+  const popupInsertions = (page: Page) => page.evaluate(() => (window as any).__vipPopupInsertions as number)
+
+  await check('[E1/V1] fresh client + active VIP + slow status load -> 0 popup insertions, status awaited, watch sent once', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.navigateToPrivateRooms())
+    await call(page, (h: H, games: unknown) => h.pushGamesList(games as any[], [], true), [makePlayingGame('room-e1')])
+    await call(page, (h: H) => h.clickLifecycleTab('playing'))
+    await call(page, (h: H) => h.setVipGateStatusResponse({ ok: true, isActive: true, hasClaimedLaunchGift: true, launchGiftDays: 30 }))
+    await call(page, (h: any) => h.setVipGateStatusDelayMs(300))
+    await installPopupInsertionCounter(page)
+    await call(page, (h: H) => h.clearCalls())
+    await call(page, (h: H) => h.clickWatchBelotRoom('room-e1'))
+    await call(page, (h: H) => h.clickWatchBelotRoom('room-e1')) // double click while status is loading
+    await page.waitForTimeout(120)
+    const midCalls = await call(page, (h: H) => h.getCalls())
+    assert(!midCalls.some((c) => c.name === 'onWatchBelotRoom'), 'watch must wait for the canonical VIP status')
+    assertEqual(await popupInsertions(page), 0, 'no popup while VIP status is unknown')
+    await page.waitForTimeout(450)
+    const calls = await call(page, (h: H) => h.getCalls())
+    assertEqual(calls.filter((c) => c.name === 'onGetTopicsVipGateStatus').length, 1, 'single VIP status request')
+    assertEqual(calls.filter((c) => c.name === 'onWatchBelotRoom' && c.args[0] === 'room-e1').length, 1, 'exactly one watch after status load')
+    assertEqual(await popupInsertions(page), 0, 'active VIP must never insert the VIP popup')
+    await page.close()
+  })
+
+  await check('[E2/V2+V3] slow status + inactive VIP + unused gift -> free popup only AFTER load; click never claims', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.navigateToPrivateRooms())
+    await call(page, (h: H, games: unknown) => h.pushGamesList(games as any[], [], true), [makePlayingGame('room-e2')])
+    await call(page, (h: H) => h.clickLifecycleTab('playing'))
+    await call(page, (h: H) => h.setVipGateStatusResponse({ ok: true, isActive: false, hasClaimedLaunchGift: false, launchGiftDays: 30 }))
+    await call(page, (h: any) => h.setVipGateStatusDelayMs(250))
+    await installPopupInsertionCounter(page)
+    await call(page, (h: H) => h.clearCalls())
+    await call(page, (h: H) => h.clickWatchBelotRoom('room-e2'))
+    await page.waitForTimeout(100)
+    assertEqual(await popupInsertions(page), 0, 'popup must not appear before the status is known')
+    await page.waitForTimeout(350)
+    assert(await call(page, (h: H) => h.isBelotSpectatorVipPopupOpen()), 'free-VIP popup after load')
+    const text = await call(page, (h: H) => h.getBelotSpectatorVipPopupCardText())
+    assert(text !== null && /30 дни безплатно/.test(text), `expected free-gift wording, got: ${text}`)
+    const calls = await call(page, (h: H) => h.getCalls())
+    assert(!calls.some((c) => c.name === 'onClaimTopicsLaunchGift'), 'the click itself must not claim')
+    assert(!calls.some((c) => c.name === 'onWatchBelotRoom'), 'no watch before VIP')
+    await page.close()
+  })
+
+  await check('[E3/V5] slow status + gift already used -> "Вземи VIP" popup after load', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.navigateToPrivateRooms())
+    await call(page, (h: H, games: unknown) => h.pushGamesList(games as any[], [], true), [makePlayingGame('room-e3')])
+    await call(page, (h: H) => h.clickLifecycleTab('playing'))
+    await call(page, (h: H) => h.setVipGateStatusResponse({ ok: true, isActive: false, hasClaimedLaunchGift: true, launchGiftDays: 30 }))
+    await call(page, (h: any) => h.setVipGateStatusDelayMs(200))
+    await call(page, (h: H) => h.clickWatchBelotRoom('room-e3'))
+    await page.waitForTimeout(400)
+    const text = await call(page, (h: H) => h.getBelotSpectatorVipPopupCardText())
+    assert(text !== null && /Вземи VIP/.test(text), `expected "Вземи VIP" variant, got: ${text}`)
+    await page.close()
+  })
+
+  await check('[E4] VIP status load failure -> no client guess/popup; watch sent (server stays authority)', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.navigateToPrivateRooms())
+    await call(page, (h: H, games: unknown) => h.pushGamesList(games as any[], [], true), [makePlayingGame('room-e4')])
+    await call(page, (h: H) => h.clickLifecycleTab('playing'))
+    await call(page, (h: H) => h.setVipGateStatusResponse({ ok: false }))
+    await call(page, (h: any) => h.setVipGateStatusDelayMs(100))
+    await installPopupInsertionCounter(page)
+    await call(page, (h: H) => h.clearCalls())
+    await call(page, (h: H) => h.clickWatchBelotRoom('room-e4'))
+    await page.waitForTimeout(300)
+    assertEqual(await popupInsertions(page), 0, 'no popup on unknown status')
+    const calls = await call(page, (h: H) => h.getCalls())
+    assert(calls.some((c) => c.name === 'onWatchBelotRoom' && c.args[0] === 'room-e4'), 'watch must still be attempted')
+    await page.close()
+  })
+
+  {
+    const page = await newPage()
+    await call(page, (h: H) => h.navigateToPrivateRooms())
+    await call(page, (h: H, games: unknown) => h.pushGamesList(games as any[], [], true), [makePlayingGame('room-e5')])
+    await call(page, (h: H) => h.clickLifecycleTab('waiting'))
+
+    await check('[E5/R7] background re-watch vip_required while spectating -> clean state, Частни маси -> Играещи, no popup', async () => {
+      await call(page, (h: H, roomId: string) => h.pushBelotSpectateStarted(roomId), 'room-e5')
+      await call(page, (h: H) => h.clearCalls())
+      await call(page, (h: H, roomId: string) => h.pushBelotSpectateDenied(roomId, 'vip_required', 'Гледането на тази маса изисква активен VIP.'), 'room-e5')
+      await page.waitForTimeout(30)
+      assertEqual(await call(page, (h: H) => h.getSpectatingBelotRoomId()), null, 'spectator state cleared')
+      assertEqual(await call(page, (h: H) => h.isBelotSpectatorVipPopupOpen()), false, 'no automatic VIP popup')
+      assertEqual(await call(page, (h: H) => h.getCurrentScreen()), 'private-rooms', 'back on Частни маси')
+      assertEqual(await call(page, (h: any) => h.getActiveLifecycleTab()), 'playing', 'on the Играещи tab')
+    })
+
+    await check('[E6/C2] belot_spectate_ended renders the stable Играещи shell immediately, before any list response', async () => {
+      await call(page, (h: H) => h.clickLifecycleTab('waiting'))
+      await call(page, (h: H, roomId: string) => h.pushBelotSpectateStarted(roomId), 'room-e5')
+      await call(page, (h: H) => h.clearCalls())
+      await call(page, (h: H, roomId: string) => h.pushBelotSpectateEnded(roomId, 'room_removed'), 'room-e5')
+      // NO pushGamesList here — the shell must already be on screen.
+      assertEqual(await call(page, (h: any) => h.getActiveLifecycleTab()), 'playing', 'Играещи tab rendered synchronously')
+      assert(await call(page, (h: H) => h.hasWatchButton('room-e5')), 'cached list visible immediately (no blank root)')
+      const calls = await call(page, (h: H) => h.getCalls())
+      assertEqual(calls.filter((c) => c.name === 'onPrivateGamesOpen').length, 1, 'fresh list requested once')
+    })
+
+    await check('[E7/D10] explicit unwatch navigates once; the server echo belot_spectate_ended is ignored', async () => {
+      await call(page, (h: H, roomId: string) => h.pushBelotSpectateStarted(roomId), 'room-e5')
+      await call(page, (h: H) => h.clearCalls())
+      await call(page, (h: H) => h.unwatchBelotSpectatorRoom())
+      await call(page, (h: H, roomId: string) => h.pushBelotSpectateEnded(roomId, 'unwatched'), 'room-e5')
+      const calls = await call(page, (h: H) => h.getCalls())
+      assertEqual(calls.filter((c) => c.name === 'onUnwatchBelotRoom').length, 1, 'single unwatch')
+      assertEqual(calls.filter((c) => c.name === 'onPrivateGamesOpen').length, 1, 'games list requested exactly once')
+      assertEqual(calls.filter((c) => c.name === 'onPrivateRoomsOpen').length, 1, 'rooms list requested exactly once')
+    })
+
+    await check('[E8/C6] re-entry: "Гледай" after exit watches again', async () => {
+      await call(page, (h: H) => h.setVipGateStatusResponse({ ok: true, isActive: true, hasClaimedLaunchGift: true, launchGiftDays: 30 }))
+      await call(page, (h: H) => h.clearCalls())
+      await call(page, (h: H) => h.clickWatchBelotRoom('room-e5'))
+      await page.waitForTimeout(80)
+      const calls = await call(page, (h: H) => h.getCalls())
+      assert(calls.some((c) => c.name === 'onWatchBelotRoom' && c.args[0] === 'room-e5'), 're-watch after exit')
     })
 
     await page.close()

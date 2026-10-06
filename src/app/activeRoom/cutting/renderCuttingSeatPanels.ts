@@ -37,7 +37,14 @@ export type DealtHandsData = {
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
   previousOwnHand: RoomCardSnapshot[] | null
-  localSeat: Seat
+  /**
+   * Seat-ът, чиято ръка е СОБСТВЕНАТА ръка на контролирания участник
+   * (ownHand, own-hand sizing/анимации). Participant: реалният му seat
+   * (== perspective). Belot spectator: null — няма собствена ръка; долният
+   * seat е визуална позиция (perspective), рендерира се като чужда ръка.
+   * НИКОГА не се попълва с perspective seat за spectator.
+   */
+  ownHandSeat: Seat | null
   seatAnimDelays: Partial<Record<Seat, number>> | null
   hideNewCardsUntilAnimDelaySeats?: Partial<Record<Seat, boolean>>
   replaceLocalHandAtRevealSeats?: Partial<Record<Seat, boolean>>
@@ -647,10 +654,18 @@ function getFanOffset(
   })
 }
 
+// Phone-only presentation branch за ЧУЖДА ръка, визуално позиционирана долу
+// (Belot spectator perspective). Ветрилото е remote/compact (същите карти
+// като останалите hidden ръце) и се вдига така, че долният ръб на картите
+// да остава над профилния панел/action bar-а, вместо да виси под него като
+// own-hand ветрилото. Чисто geometry — не носи player identity.
+const REMOTE_BOTTOM_PHONE_FAN_CENTER_Y = -20
+
 function renderPanelCardFanWrapper(
   actualSeat: Seat,
   visualSeat: Seat,
   cardElements: string,
+  isOwnHand: boolean,
 ): string {
   let fanCenterX: number
   let fanCenterY: number
@@ -658,7 +673,7 @@ function renderPanelCardFanWrapper(
   let fanRotateDeg = 0
   const mobileSideFanOutset = isPhoneLayoutViewport() ? 34 : 0
 
-  const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom'
+  const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom' && isOwnHand
 
   if (visualSeat === 'bottom') {
     fanCenterX = 180
@@ -707,7 +722,10 @@ function renderDealtCardFanInPanel(
   const count = Math.min(dealtHands.maxCardsPerSeat, Math.max(0, dealtHands.handCounts[actualSeat] ?? 0))
   if (count === 0) return ''
 
-  const isLocalSeat = actualSeat === dealtHands.localSeat
+  // Own-hand identity идва САМО от ownHandSeat (controlled participant) —
+  // никога от визуалната позиция. Spectator (ownHandSeat=null) -> всички 4
+  // ръце, вкл. визуално долната, са чужди (гърбове, remote geometry).
+  const isLocalSeat = dealtHands.ownHandSeat !== null && actualSeat === dealtHands.ownHandSeat
   const cards = isLocalSeat ? dealtHands.ownHand.slice(0, count) : []
 
   const animDelay = dealtHands.seatAnimDelays?.[actualSeat] ?? null
@@ -715,8 +733,11 @@ function renderDealtCardFanInPanel(
     dealtHands.hideNewCardsUntilAnimDelaySeats?.[actualSeat] === true
   const shouldReplaceLocalHandAtReveal =
     dealtHands.replaceLocalHandAtRevealSeats?.[actualSeat] === true
-  const compactFan = isPhoneLayoutViewport() && visualSeat !== 'bottom'
-  const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom'
+  // Own-hand phone sizing само за собствената долна ръка; participant-ът е
+  // винаги визуално долу, затова поведението му е непроменено.
+  const mobileBottomSeat = isPhoneLayoutViewport() && visualSeat === 'bottom' && isLocalSeat
+  const compactFan = isPhoneLayoutViewport() && !mobileBottomSeat
+  const remoteBottomOnPhone = isPhoneLayoutViewport() && visualSeat === 'bottom' && !isLocalSeat
 
   const previousCards = isLocalSeat && dealtHands.previousOwnHand ? dealtHands.previousOwnHand : []
   const previousIndexById = new Map(previousCards.map((c, idx) => [c.id, idx]))
@@ -745,6 +766,7 @@ function renderDealtCardFanInPanel(
       actualSeat,
       visualSeat,
       `${previousCardElements}${finalCardElements}`,
+      isLocalSeat,
     )
   }
 
@@ -802,7 +824,9 @@ function renderDealtCardFanInPanel(
 
   if (visualSeat === 'bottom') {
     fanCenterX = 180
-    fanCenterY = (-PANEL_CARD_HEIGHT / 2 - 8 + 200) + (mobileBottomSeat ? BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET : 0)
+    fanCenterY = remoteBottomOnPhone
+      ? REMOTE_BOTTOM_PHONE_FAN_CENTER_Y
+      : (-PANEL_CARD_HEIGHT / 2 - 8 + 200) + (mobileBottomSeat ? BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET : 0)
     fanRotateDeg = 0
   } else if (visualSeat === 'top') {
     fanCenterX = 93
@@ -1234,6 +1258,12 @@ export function createCuttingSeatPanelHtml(
   controlledSeat?: Seat | null,
 ): string {
   const { seat, isBotReplacement } = resolveSeatIdentityForRender(rawSeat, tournamentBotReplacements)
+  // Phase 3B.2 (D4): "ТИ" принадлежи на КОНТРОЛИРАНИЯ seat, не на визуално
+  // долния. Spectator (controlledSeat=null) никъде няма "ТИ". undefined
+  // (call site без controlledSeat) запазва legacy семантиката
+  // controlled == perspective.
+  const resolvedControlledSeat = controlledSeat === undefined ? (_localSeat ?? null) : controlledSeat
+  const isControlledSeat = resolvedControlledSeat !== null && seat.seat === resolvedControlledSeat
   // Подарък може да се прати към всеки различен от собственото място —
   // включително bots (Stage 2.1), стига да имат реален profileId (regular
   // matchmaking bots имат стабилен DB-backed profileId, виж
@@ -1389,6 +1419,8 @@ export function createCuttingSeatPanelHtml(
             ${renderSeatGiftOverlaySlot(seat.seat, 18)}
           </div>
 
+          ${isControlledSeat
+            ? `
           <div
             style="
               position:absolute;
@@ -1405,13 +1437,14 @@ export function createCuttingSeatPanelHtml(
           >
             ${CUTTING_VISUAL_SEAT_LABELS[visualSeat]}
           </div>
-
+`
+            : ''}
           <div
             style="
               position:absolute;
               left:148px;
               right:18px;
-              top:58px;
+              top:${isControlledSeat ? '58px' : '44px'};
               color:#f8fafc;
               font-size:${isMobileLayout ? '25px' : '22px'};
               font-weight:800;

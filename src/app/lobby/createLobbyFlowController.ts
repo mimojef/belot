@@ -5960,7 +5960,7 @@ export function createLobbyFlowController(
         void openVipShopFromTopicsPopup()
       },
       onWatchBelotRoomClick: (roomId) => {
-        handleWatchBelotRoomClick(roomId)
+        void handleWatchBelotRoomClick(roomId)
       },
       onBelotSpectatorVipPopupClose: () => {
         closeBelotSpectatorVipPopup()
@@ -9975,24 +9975,38 @@ export function createLobbyFlowController(
   // ─── VIP gate + launch gift (Етап 2; споделено от Belot Spectator "Гледай"
   // flow-а от Phase 3A — виж topicsVipGate полето и бележката там) ────────
 
+  // In-flight споделен promise — второ извикване по време на зареждане
+  // (напр. Belot "Гледай" click, докато private-rooms екранът вече тегли
+  // статуса) await-ва СЪЩАТА заявка, вместо да върне веднага с unknown gate.
+  let topicsVipGateLoadInFlight: Promise<void> | null = null
+
   async function ensureTopicsVipGateLoaded(): Promise<void> {
-    if (state.topicsVipGate !== null || state.topicsVipGateLoading || !options.onGetTopicsVipGateStatus) {
+    if (state.topicsVipGate !== null || !options.onGetTopicsVipGateStatus) {
       return
     }
-    state.topicsVipGateLoading = true
-    render()
-    const result = await options.onGetTopicsVipGateStatus()
-    state.topicsVipGateLoading = false
-    // Stale-navigation guard — discard, ако потребителят е напуснал И двата
-    // екрана, от които тази canonical VIP gate данни се ползват (Topics
-    // composer, Belot spectator "Гледай"), докато заявката е летяла.
-    if (state.currentScreen !== 'topics' && state.currentScreen !== 'private-rooms') {
-      return
+    if (topicsVipGateLoadInFlight !== null) {
+      return topicsVipGateLoadInFlight
     }
-    if (result.ok) {
-      state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift, launchGiftDays: result.launchGiftDays }
-    }
-    render()
+    const loadGateStatus = options.onGetTopicsVipGateStatus
+    topicsVipGateLoadInFlight = (async () => {
+      state.topicsVipGateLoading = true
+      render()
+      const result = await loadGateStatus()
+      state.topicsVipGateLoading = false
+      // Stale-navigation guard — discard, ако потребителят е напуснал И двата
+      // екрана, от които тази canonical VIP gate данни се ползват (Topics
+      // composer, Belot spectator "Гледай"), докато заявката е летяла.
+      if (state.currentScreen !== 'topics' && state.currentScreen !== 'private-rooms') {
+        return
+      }
+      if (result.ok) {
+        state.topicsVipGate = { isActive: result.isActive, hasClaimedLaunchGift: result.hasClaimedLaunchGift, launchGiftDays: result.launchGiftDays }
+      }
+      render()
+    })().finally(() => {
+      topicsVipGateLoadInFlight = null
+    })
+    return topicsVipGateLoadInFlight
   }
 
   /** Force re-fetch (не lazy-guard-нат) — ползва се след claim, след vip_required error от сървъра, и след launch-gift race от друг таб (Етап 2 корекция т.5). */
@@ -10050,10 +10064,36 @@ export function createLobbyFlowController(
   // отделен (собствен DOM instance, namespace 'belot-spectator' в
   // renderVipRequiredPopup.ts), за да не си пречат двата независими popup-а.
 
-  function handleWatchBelotRoomClick(roomId: string): void {
+  // Double-click guard докато "Гледай" решението чака VIP статуса — втори
+  // click за СЪЩАТА маса не праща втори watch_belot_room.
+  let belotWatchDecisionPendingRoomId: string | null = null
+
+  async function handleWatchBelotRoomClick(roomId: string): Promise<void> {
     if (!state.belotSpectatingEnabled) return
+    if (belotWatchDecisionPendingRoomId === roomId) return
     state.pendingBelotSpectatorRoomId = roomId
-    if (state.topicsVipGate?.isActive) {
+    // Phase 3B.2 (D1): решението popup/watch се взема САМО върху известен
+    // canonical VIP статус. Докато статусът е unknown, НЕ се render-ва
+    // никакъв VIP popup — първо await-ваме съществуващото зареждане, иначе
+    // active VIP потребител вижда за 15–40 ms грешния "Вземи VIP" popup.
+    if (state.topicsVipGate === null) {
+      belotWatchDecisionPendingRoomId = roomId
+      try {
+        await ensureTopicsVipGateLoaded()
+      } finally {
+        belotWatchDecisionPendingRoomId = null
+      }
+      // User intent-ът се е сменил междувременно (друг "Гледай" click,
+      // cancel, напуснат екран) — този click вече не решава нищо.
+      if (state.pendingBelotSpectatorRoomId !== roomId || state.currentScreen !== 'private-rooms') return
+      if (state.topicsVipGate === null) {
+        // Статусът не можа да се зареди — без client-side guess; server-ът
+        // остава authority (vip_required -> съществуващия popup fallback).
+        options.onWatchBelotRoom?.(roomId)
+        return
+      }
+    }
+    if (state.topicsVipGate.isActive) {
       // CASE A — active VIP: директно watch, без popup (§3 брифа).
       options.onWatchBelotRoom?.(roomId)
       return
@@ -20343,6 +20383,11 @@ export function createLobbyFlowController(
     }
 
     if (message.type === 'belot_spectate_ended') {
+      // Stale echo guard (D10): explicit "Изход" вече е изчистил локалния
+      // spectator state и навигирал (unwatchBelotSpectatorRoom) — server-ският
+      // belot_spectate_ended {reason:'unwatched'} за СЪЩАТА стая пристига
+      // след това и не бива да навигира/refresh-ва списъка втори път.
+      if (state.spectatingBelotRoomId !== message.roomId) return true
       state.spectatingBelotRoomId = null
       state.pendingBelotSpectatorRoomId = null
       state.belotSpectatorSnapshot = null
