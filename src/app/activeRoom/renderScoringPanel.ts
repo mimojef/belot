@@ -73,6 +73,7 @@ type RenderScoringScreenOptions = {
   game: RoomGameSnapshot
   seats: RoomSeatSnapshot[]
   localSeat: Seat
+  controlledSeat: Seat | null
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
   countdownSeconds: number
   animateSumCounters: boolean
@@ -399,14 +400,27 @@ function formatBidLabel(
 function getBidOwnerLabel(
   winningBid: NonNullable<RoomWinningBidSnapshot> | null,
   localSeat: Seat,
+  controlledSeat: Seat | null,
 ): string {
   if (winningBid === null) {
     return '—'
   }
 
+  // Phase 5A: spectator няма local team — authoritative отбор на обявилия.
+  if (controlledSeat === null) {
+    return isTeamASeat(winningBid.seat) ? 'ОТБОР А' : 'ОТБОР Б'
+  }
+
   return isTeamASeat(winningBid.seat) === isTeamASeat(localSeat)
     ? 'НИЕ'
     : 'ВИЕ'
+}
+
+// Phase 5A: седалката, спрямо която се подреждат колоните. Participant —
+// собственият отбор вляво (НИЕ). Spectator — фиксирано Team A вляво (ОТБОР А),
+// никога по perspective seat-а.
+function getScoringColumnAnchorSeat(localSeat: Seat, controlledSeat: Seat | null): Seat {
+  return controlledSeat === null ? 'bottom' : localSeat
 }
 
 function getBidMultiplierLabel(
@@ -494,7 +508,7 @@ function formatRawHandValue(points: number, tricksWon: number): string {
   return String(points)
 }
 
-function renderMatrixHeaderRow(): string {
+function renderMatrixHeaderRow(leftLabel: string, rightLabel: string): string {
   return `
     <div
       style="
@@ -520,7 +534,7 @@ function renderMatrixHeaderRow(): string {
           font-weight:700;
         "
       >
-        НИЕ
+        ${escapeHtml(leftLabel)}
       </div>
 
       <div
@@ -535,7 +549,7 @@ function renderMatrixHeaderRow(): string {
           font-weight:700;
         "
       >
-        ВИЕ
+        ${escapeHtml(rightLabel)}
       </div>
     </div>
   `
@@ -813,7 +827,8 @@ function animateScoringSumCounters(root: HTMLElement): void {
 
 function renderScoringPanelHtml(
   game: RoomGameSnapshot,
-  localSeat: Seat,
+  perspectiveSeat: Seat,
+  controlledSeat: Seat | null,
   fallbackWinningBid: NonNullable<RoomWinningBidSnapshot> | null,
   countdownSeconds: number,
   animateSumCounters: boolean,
@@ -824,10 +839,14 @@ function renderScoringPanelHtml(
     return ''
   }
 
+  const localSeat = getScoringColumnAnchorSeat(perspectiveSeat, controlledSeat)
+  const columnLabels = controlledSeat === null
+    ? { left: 'ОТБОР А', right: 'ОТБОР Б' }
+    : { left: 'НИЕ', right: 'ВИЕ' }
   const winningBid = scoring.winningBid ?? fallbackWinningBid
   const bidIcon = resolveBidIcon(winningBid)
   const bidLabel = formatBidLabel(winningBid)
-  const bidOwnerLabel = getBidOwnerLabel(winningBid, localSeat)
+  const bidOwnerLabel = getBidOwnerLabel(winningBid, localSeat, controlledSeat)
   const bidMultiplierLabel = getBidMultiplierLabel(winningBid)
   const rawHands = getPerspectivePoints(scoring.rawHandPoints, localSeat)
   const rawHandTricksWon = getPerspectivePoints(scoring.rawHandTricksWon, localSeat)
@@ -946,7 +965,7 @@ function renderScoringPanelHtml(
             "
           ></div>
 
-          ${renderMatrixHeaderRow()}
+          ${renderMatrixHeaderRow(columnLabels.left, columnLabels.right)}
           ${renderMatrixRow('Белоти', formatBonusValue(belote.ourPoints), formatBonusValue(belote.theirPoints), {
             minHeight: 60,
             valueColor: '#f4b63a',
@@ -1015,6 +1034,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
     game,
     seats,
     localSeat,
+    controlledSeat,
     winningBid,
     countdownSeconds,
     animateSumCounters,
@@ -1086,7 +1106,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
               "
             >
               ${scoringPanelMobileScale === 1
-                ? renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds, animateSumCounters)
+                ? renderScoringPanelHtml(game, localSeat, controlledSeat, winningBid, countdownSeconds, animateSumCounters)
                 : `
                   <div
                     style="
@@ -1095,7 +1115,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
                       transform-origin:center center;
                     "
                   >
-                    ${renderScoringPanelHtml(game, localSeat, winningBid, countdownSeconds, animateSumCounters)}
+                    ${renderScoringPanelHtml(game, localSeat, controlledSeat, winningBid, countdownSeconds, animateSumCounters)}
                   </div>
                 `
               }
@@ -1108,6 +1128,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
         game,
         seats,
         localSeat,
+        controlledSeat,
         winningBid: game.scoring?.winningBid ?? winningBid,
         stageScale,
       })}

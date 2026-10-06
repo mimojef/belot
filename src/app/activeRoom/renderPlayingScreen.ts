@@ -2198,6 +2198,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     game,
     seats,
     localSeat,
+    controlledSeat,
     winningBid,
     stageScale,
   })

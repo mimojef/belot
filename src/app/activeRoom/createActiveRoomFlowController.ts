@@ -3333,6 +3333,7 @@ export function createActiveRoomFlowController(
           game: activeRoomState.game,
           seats: activeRoomState.seats,
           localSeat: activeRoomState.seat,
+          controlledSeat: activeRoomState.controlledSeat,
           winningBid: lastKnownWinningBid,
           stageScale,
         })
@@ -4412,10 +4413,15 @@ export function createActiveRoomFlowController(
       if (renderTournamentFinalResultScreen({ mobileLayoutAttribute, tableBackground })) return
     } else if (isShowingMatchEndedPhase && activeRoomState.game) {
       cuttingVisualCountdown.resetCuttingVisualCountdownState()
+      // Phase 5A: 120-сек countdown-ът е participant replay/decision timer —
+      // при 0 вика returnToLobbyFromMatchEnded() (leave_active_room). Spectator
+      // не гласува и не е участник: не го armва; view-ът се затваря от
+      // сървъра (room removal -> belot_spectate_ended) или чрез Изход.
+      const isParticipantMatchEnded = activeRoomState.controlledSeat !== null
       if (!matchEndedSoundPlayed) {
         matchEndedSoundPlayed = true
         options.gameAudio?.playMatchEnded()
-        startMatchEndedCountdown()
+        if (isParticipantMatchEnded) startMatchEndedCountdown()
       }
 
       // Replay-in-same-room защита: ако match identity (endedAt) се е
@@ -4438,7 +4444,7 @@ export function createActiveRoomFlowController(
       // Ако някой е гласувал за изход → скочи на 30 сек.
       const leaveVotes = activeRoomState.game.matchEnded?.leaveVotes ?? []
       const currentCountdownSeconds = getMatchEndedCountdownSeconds()
-      if (leaveVotes.length > 0 && currentCountdownSeconds > 30) {
+      if (isParticipantMatchEnded && leaveVotes.length > 0 && currentCountdownSeconds > 30) {
         const shortenedDeadlineAt = Date.now() + 30_000
         matchEndedCountdownDeadlineAt =
           matchEndedCountdownDeadlineAt === null
@@ -4447,7 +4453,7 @@ export function createActiveRoomFlowController(
       }
 
       matchEndedCountdownSeconds = getMatchEndedCountdownSeconds()
-      if (matchEndedCountdownSeconds <= 0) {
+      if (isParticipantMatchEnded && matchEndedCountdownSeconds <= 0) {
         clearMatchEndedCountdown()
         returnToLobbyFromMatchEnded()
         return
@@ -4533,6 +4539,7 @@ export function createActiveRoomFlowController(
         game: activeRoomState.game,
         seats: activeRoomState.seats,
         localSeat: activeRoomState.seat,
+        controlledSeat: activeRoomState.controlledSeat,
         winningBid: lastKnownWinningBid,
         countdownSeconds: getScoringVisualCountdownSeconds(),
         animateSumCounters: shouldAnimateScoringPresentation(),

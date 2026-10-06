@@ -45,6 +45,9 @@ type RenderScoreHudOptions = {
   game: RoomGameSnapshot
   seats: RoomSeatSnapshot[]
   localSeat: Seat
+  // Phase 5A: null = spectator (няма local team) -> ОТБОР А / ОТБОР Б,
+  // authoritative teamA/teamB, без „ТИ“. localSeat остава само geometry.
+  controlledSeat: Seat | null
   winningBid: NonNullable<RoomWinningBidSnapshot> | null
   stageScale: number
 }
@@ -53,8 +56,9 @@ function isTeamASeat(seat: Seat): boolean {
   return seat === 'bottom' || seat === 'top'
 }
 
-function formatSeatForLocalPerspective(seat: Seat | null, localSeat: Seat): string {
+function formatSeatForLocalPerspective(seat: Seat | null, localSeat: Seat, controlledSeat: Seat | null): string {
   if (seat === null) return '—'
+  if (controlledSeat === null) return isTeamASeat(seat) ? 'ОТБОР А' : 'ОТБОР Б'
   const visualSeat = getVisualSeatForLocalPerspective(seat, localSeat)
 
   if (visualSeat === 'bottom') return 'ТИ'
@@ -68,6 +72,7 @@ function formatBidOwnerLabel(
   seat: Seat | null,
   seats: RoomSeatSnapshot[],
   localSeat: Seat,
+  controlledSeat: Seat | null,
 ): string {
   if (seat === null) return '—'
 
@@ -76,7 +81,7 @@ function formatBidOwnerLabel(
 
   return seatSnapshot?.isOccupied && displayName.length > 0
     ? displayName
-    : formatSeatForLocalPerspective(seat, localSeat)
+    : formatSeatForLocalPerspective(seat, localSeat, controlledSeat)
 }
 
 
@@ -154,20 +159,40 @@ function getScoreForLocalPerspective(game: RoomGameSnapshot, localSeat: Seat): {
     : { ourScore: teamBScore, theirScore: teamAScore }
 }
 
+// Participant: НИЕ/ВИЕ спрямо собствения отбор. Spectator: фиксирано
+// ОТБОР А (teamA) / ОТБОР Б (teamB) — никога обърнато по perspective.
+function getScoreColumns(game: RoomGameSnapshot, localSeat: Seat, controlledSeat: Seat | null): {
+  leftLabel: string
+  leftScore: number
+  rightLabel: string
+  rightScore: number
+} {
+  if (controlledSeat === null) {
+    return {
+      leftLabel: 'ОТБОР А',
+      leftScore: game.score.match.teamA,
+      rightLabel: 'ОТБОР Б',
+      rightScore: game.score.match.teamB,
+    }
+  }
+  const { ourScore, theirScore } = getScoreForLocalPerspective(game, localSeat)
+  return { leftLabel: 'НИЕ', leftScore: ourScore, rightLabel: 'ВИЕ', rightScore: theirScore }
+}
+
 export function renderScoreHud(options: RenderScoreHudOptions): string {
-  const { game, seats, localSeat, winningBid, stageScale } = options
+  const { game, seats, localSeat, controlledSeat, winningBid, stageScale } = options
   const isMobileLayout = isPhoneLayoutViewport()
   const hudMobileScale = isMobileLayout && typeof window !== 'undefined'
     ? getScoreHudMobileScale(window.innerWidth, stageScale)
     : 1
   const effectiveHudScale = stageScale * hudMobileScale
-  const { ourScore, theirScore } = getScoreForLocalPerspective(game, localSeat)
+  const { leftLabel, leftScore, rightLabel, rightScore } = getScoreColumns(game, localSeat, controlledSeat)
   const bidLabel = formatBidType(winningBid)
   const bidIconMarkup = getBidIconMarkup(winningBid)
   const showIcon = bidIconMarkup.length > 0
   const bidMultiplierLabel = getBidMultiplierLabel(winningBid)
   const bidOwnerLabel = winningBid
-    ? formatBidOwnerLabel(winningBid.seat, seats, localSeat)
+    ? formatBidOwnerLabel(winningBid.seat, seats, localSeat, controlledSeat)
     : '—'
   const bidSummary = `${bidLabel}${bidMultiplierLabel}: ${bidOwnerLabel}`
 
@@ -247,7 +272,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
                   margin-bottom:12px;
                 "
               >
-                НИЕ
+                ${leftLabel}
               </div>
 
               <div
@@ -258,7 +283,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
                   color:#ffffff;
                 "
               >
-                ${ourScore}
+                ${leftScore}
               </div>
             </div>
 
@@ -291,7 +316,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
                   margin-bottom:12px;
                 "
               >
-                ВИЕ
+                ${rightLabel}
               </div>
 
               <div
@@ -302,7 +327,7 @@ export function renderScoreHud(options: RenderScoreHudOptions): string {
                   color:#ffffff;
                 "
               >
-                ${theirScore}
+                ${rightScore}
               </div>
             </div>
           </div>

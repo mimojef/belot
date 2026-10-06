@@ -23,6 +23,10 @@ class FakeAudio {
   play(): Promise<void> {
     return Promise.resolve()
   }
+  // trackGameAudio() (scoring sum SFX) закача ended/error listeners.
+  addEventListener(): void {}
+  removeEventListener(): void {}
+  pause(): void {}
 }
 Object.defineProperty(window, 'Audio', { configurable: true, value: FakeAudio })
 
@@ -202,7 +206,8 @@ function scoringGame(overrides: Partial<RoomGameSnapshot> = {}): RoomGameSnapsho
       carryOver: { teamA: 0, teamB: 0 },
       isCapotRound: false,
       isNonCapotRound: false,
-      outcomeLabel: 'normal',
+      outcomeLabel: 'Обявилият е изкарал',
+      outcomeShortLabel: 'Изкарана',
     } as any,
     matchEnded: null,
     declarations: [],
@@ -474,6 +479,41 @@ async function applySpectatorSnapshotWithGifts(roomId: string, game: RoomGameSna
   return result
 }
 
+// ─── Phase 5A helpers (D11 team scoring semantics) ──────────────────────────
+
+// HUD: двете колони (label + score) в реда, в който се рендерират.
+function scoreHudColumns(): Array<{ label: string; score: string }> | null {
+  const hud = document.body.querySelector<HTMLElement>('[data-active-room-score-hud]')
+  if (!hud) return null
+  const grid = Array.from(hud.querySelectorAll<HTMLElement>('div')).find((el) => el.style.gridTemplateColumns.includes('40px'))
+  if (!grid) return null
+  const cells = Array.from(grid.children) as HTMLElement[]
+  const column = (cell: HTMLElement | undefined) => {
+    const parts = (cell?.innerText ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+    return { label: parts[0] ?? '', score: parts[1] ?? '' }
+  }
+  return [column(cells[0]), column(cells[2])]
+}
+
+function scoreHudText(): string {
+  return document.body.querySelector<HTMLElement>('[data-active-room-score-hud]')?.innerText ?? ''
+}
+
+// Scoring panel (section-ът с „Белоти“ реда).
+function scoringPanelText(): string {
+  const section = Array.from(document.body.querySelectorAll<HTMLElement>('section')).find((s) => /белоти/i.test(s.innerText))
+  return section?.innerText ?? ''
+}
+
+function matchEndedInfo(): { text: string; hasCountdown: boolean; overflow: boolean } {
+  const section = Array.from(document.body.querySelectorAll<HTMLElement>('section')).find((s) => /КРАЙ НА ИГРАТА|ПОБЕДИТЕЛ|ГУБЕЩ/.test(s.innerText))
+  return {
+    text: section?.innerText ?? '',
+    hasCountdown: document.body.querySelector('[data-match-ended-countdown]') !== null,
+    overflow: section ? section.scrollWidth > section.clientWidth + 1 : false,
+  }
+}
+
 function clickSeatProfile(seat: string): boolean {
   const btn = document.body.querySelector<HTMLElement>(`[data-profile-seat-btn="${seat}"]`)
   if (!btn) return false
@@ -669,5 +709,10 @@ function reset(): void {
   tableGiftFlyers,
   tableGiftOverlayInfo,
   applySpectatorSnapshotWithGifts,
+  // Phase 5A
+  scoreHudColumns,
+  scoreHudText,
+  scoringPanelText,
+  matchEndedInfo,
   getCalls: () => calls,
 }

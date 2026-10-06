@@ -27,7 +27,7 @@ type RenderMatchEndedScreenOptions = {
   game: RoomGameSnapshot
   seats: RoomSeatSnapshot[]
   localSeat: Seat
-  /** Phase 3B §18: null (Belot spectator) -> partner rating/replay/leave-vote/prize controls се крият; остава само score summary. НЕ окончателен scoring redesign (виж §18 брифа, Phase 5 TODO за НИЕ/ВИЕ). */
+  /** Phase 3B §18 + Phase 5A: null (Belot spectator) -> няма partner rating/replay/leave-vote/prize controls и няма participant countdown; резултатът е team-based (ОТБОР А / ОТБОР Б, ПОБЕДИТЕЛ: ОТБОР X), без local win/loss. */
   controlledSeat?: Seat | null
   stageScale: number
   scaledStageWidth: number
@@ -103,6 +103,45 @@ function getTeamScore(
   team: Team,
 ): number {
   return team === 'A' ? score.teamA : score.teamB
+}
+
+type MatchEndedTeamPresentation = {
+  resultLabel: string
+  resultColor: string
+  leftTeam: Team
+  rightTeam: Team
+  leftTitle: string
+  rightTitle: string
+}
+
+// Phase 5A: participant (controlledSeat !== null) — local-team семантика
+// (ПОБЕДИТЕЛ/ГУБЕЩ, Ние/Вие), непроменена. Spectator (null) — няма local
+// team: authoritative Отбор А вляво / Отбор Б вдясно, team-based победител.
+function getMatchEndedTeamPresentation(
+  winnerTeam: Team | null,
+  localSeat: Seat,
+  controlledSeat: Seat | null,
+  winnerColor: string,
+): MatchEndedTeamPresentation {
+  if (controlledSeat === null) {
+    return {
+      resultLabel: winnerTeam === null ? 'КРАЙ НА ИГРАТА' : `ПОБЕДИТЕЛ: ОТБОР ${winnerTeam === 'A' ? 'А' : 'Б'}`,
+      resultColor: winnerTeam === null ? '#e2e8f0' : winnerColor,
+      leftTeam: 'A',
+      rightTeam: 'B',
+      leftTitle: 'Отбор А',
+      rightTitle: 'Отбор Б',
+    }
+  }
+  const localTeam = getTeamBySeat(localSeat)
+  return {
+    resultLabel: winnerTeam === null ? 'КРАЙ НА ИГРАТА' : winnerTeam === localTeam ? 'ПОБЕДИТЕЛ' : 'ГУБЕЩ',
+    resultColor: winnerTeam === null ? '#e2e8f0' : winnerTeam === localTeam ? winnerColor : '#cbd5e1',
+    leftTeam: localTeam,
+    rightTeam: getOpponentTeam(localTeam),
+    leftTitle: 'Ние',
+    rightTitle: 'Вие',
+  }
 }
 
 // Стабилен, deadline-базиран numeric counting модел (виж
@@ -512,23 +551,13 @@ function renderMobileMatchEndedPanel(
   isPrivateTableOrigin = false,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
-  const opponentTeam = getOpponentTeam(localTeam)
   const matchEnded = game.matchEnded
   const finalScore = matchEnded?.finalScore ?? game.score.match
-  const ourScore = getTeamScore(finalScore, localTeam)
-  const theirScore = getTeamScore(finalScore, opponentTeam)
   const winnerTeam = matchEnded?.winnerTeam ?? null
-  const resultLabel =
-    winnerTeam === null
-      ? 'КРАЙ НА ИГРАТА'
-      : winnerTeam === localTeam
-        ? 'ПОБЕДИТЕЛ'
-        : 'ГУБЕЩ'
-  const resultColor = winnerTeam === null
-    ? '#e2e8f0'
-    : winnerTeam === localTeam
-      ? '#d4a520'
-      : '#cbd5e1'
+  const presentation = getMatchEndedTeamPresentation(winnerTeam, localSeat, controlledSeat, '#d4a520')
+  const ourScore = getTeamScore(finalScore, presentation.leftTeam)
+  const theirScore = getTeamScore(finalScore, presentation.rightTeam)
+  const { resultLabel, resultColor } = presentation
   const replayVotes = game.matchEnded?.replayVotes ?? []
   const leaveVotes = game.matchEnded?.leaveVotes ?? []
   const sortedSeats = seats.slice().sort((a, b) => {
@@ -573,11 +602,11 @@ function renderMobileMatchEndedPanel(
           "
         >
           <div style="border:1px solid rgba(212,165,32,0.34);border-radius:8px;padding:8px 10px;background:rgba(10,10,10,0.76);">
-            <div style="color:rgba(226,232,240,0.62);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;">Ние</div>
+            <div style="color:rgba(226,232,240,0.62);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;">${presentation.leftTitle}</div>
             <div style="color:#f8fafc;font-size:28px;line-height:1;font-weight:900;">${ourScore}</div>
           </div>
           <div style="border:1px solid rgba(212,165,32,0.34);border-radius:8px;padding:8px 10px;background:rgba(10,10,10,0.76);">
-            <div style="color:rgba(226,232,240,0.62);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;">Вие</div>
+            <div style="color:rgba(226,232,240,0.62);font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.08em;">${presentation.rightTitle}</div>
             <div style="color:#f8fafc;font-size:28px;line-height:1;font-weight:900;">${theirScore}</div>
           </div>
         </div>
@@ -662,6 +691,7 @@ function renderMobileMatchEndedPanel(
         </div>
         ` : ''}
 
+        ${controlledSeat !== null ? `
         <div style="display:flex;justify-content:flex-end;">
           <div
             data-match-ended-countdown="1"
@@ -673,6 +703,7 @@ function renderMobileMatchEndedPanel(
             "
           >${countdownSeconds}с</div>
         </div>
+        ` : ''}
       </div>
     </section>
   `
@@ -692,25 +723,15 @@ function renderMatchEndedPanel(
   isPrivateTableOrigin = false,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
-  const opponentTeam = getOpponentTeam(localTeam)
   const matchEnded = game.matchEnded
   const finalScore = matchEnded?.finalScore ?? game.score.match
-  const ourScore = getTeamScore(finalScore, localTeam)
-  const theirScore = getTeamScore(finalScore, opponentTeam)
   const winnerTeam = matchEnded?.winnerTeam ?? null
-  const resultLabel =
-    winnerTeam === null
-      ? 'КРАЙ НА ИГРАТА'
-      : winnerTeam === localTeam
-        ? 'ПОБЕДИТЕЛ'
-        : 'ГУБЕЩ'
-  const resultColor = winnerTeam === null
-    ? '#e2e8f0'
-    : winnerTeam === localTeam
-      ? '#facc15'
-      : '#cbd5e1'
-  const ourSeats = seats.filter((seat) => getTeamBySeat(seat.seat) === localTeam)
-  const theirSeats = seats.filter((seat) => getTeamBySeat(seat.seat) === opponentTeam)
+  const presentation = getMatchEndedTeamPresentation(winnerTeam, localSeat, controlledSeat, '#facc15')
+  const ourScore = getTeamScore(finalScore, presentation.leftTeam)
+  const theirScore = getTeamScore(finalScore, presentation.rightTeam)
+  const { resultLabel, resultColor } = presentation
+  const ourSeats = seats.filter((seat) => getTeamBySeat(seat.seat) === presentation.leftTeam)
+  const theirSeats = seats.filter((seat) => getTeamBySeat(seat.seat) === presentation.rightTeam)
   const replayVotes = game.matchEnded?.replayVotes ?? []
   const leaveVotes = game.matchEnded?.leaveVotes ?? []
 
@@ -758,9 +779,9 @@ function renderMatchEndedPanel(
             align-items:stretch;
           "
         >
-          ${renderTeamPlayers('Ние', ourSeats, ourScore, replayVotes, leaveVotes, controlledSeat !== null ? renderPartnerRating(localSeat, seats, partnerRatingStatus) : '')}
+          ${renderTeamPlayers(presentation.leftTitle, ourSeats, ourScore, replayVotes, leaveVotes, controlledSeat !== null ? renderPartnerRating(localSeat, seats, partnerRatingStatus) : '')}
           <div style="background:linear-gradient(180deg,transparent 0%,#facc15 25%,#facc15 75%,transparent 100%);border-radius:1px;"></div>
-          ${renderTeamPlayers('Вие', theirSeats, theirScore, replayVotes, leaveVotes)}
+          ${renderTeamPlayers(presentation.rightTitle, theirSeats, theirScore, replayVotes, leaveVotes)}
         </div>
 
         ${controlledSeat !== null ? `
@@ -846,6 +867,7 @@ function renderMatchEndedPanel(
         </div>
         ` : ''}
 
+        ${controlledSeat !== null ? `
         <div style="display:flex;justify-content:flex-end;margin-top:14px;">
           <div
             data-match-ended-countdown="1"
@@ -857,6 +879,7 @@ function renderMatchEndedPanel(
             "
           >${countdownSeconds}с</div>
         </div>
+        ` : ''}
       </div>
     </section>
   `
