@@ -220,7 +220,7 @@ import {
   findProfileSpectatorConnectionIds,
   isProfileSpectatingBelot as isProfileSpectatingBelotInRegistry,
 } from './core/belotSpectatorRegistry.js'
-import { broadcastBelotSpectatorSnapshot } from './core/broadcastBelotSpectatorSnapshot.js'
+import { broadcastBelotSpectatorPublicEvent, broadcastBelotSpectatorSnapshot } from './core/broadcastBelotSpectatorSnapshot.js'
 import { evaluateBelotSpectatorWatchEligibility } from './core/evaluateBelotSpectatorWatchEligibility.js'
 import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag.js'
 import { createSpectatorRoomSnapshotMessage } from './protocol/createRoomSnapshotMessage.js'
@@ -21575,6 +21575,14 @@ wsServer.on('connection', (socket, request) => {
               sendJsonMessage(sock, emojiMsg)
             }
           }
+          // Phase 4A (D6): същото публично събитие и към spectator-ите на стаята.
+          broadcastBelotSpectatorPublicEvent({
+            room: emojiRoom,
+            event: emojiMsg,
+            registry: belotSpectatorRegistry,
+            getConnection: (connectionId) => getConnectionById(serverState, connectionId),
+            getSocket: getSocketByConnectionId,
+          })
         }
         return
       }
@@ -21603,6 +21611,14 @@ wsServer.on('connection', (socket, request) => {
               sendJsonMessage(sock, phraseMsg)
             }
           }
+          // Phase 4A (D6): същото публично събитие и към spectator-ите на стаята.
+          broadcastBelotSpectatorPublicEvent({
+            room: phraseRoom,
+            event: phraseMsg,
+            registry: belotSpectatorRegistry,
+            getConnection: (connectionId) => getConnectionById(serverState, connectionId),
+            getSocket: getSocketByConnectionId,
+          })
         }
         return
       }

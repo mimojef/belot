@@ -399,6 +399,45 @@ function hasSoundToggle(): boolean {
   return document.body.querySelector('[data-active-room-game-sounds-toggle="1"]') !== null
 }
 
+// ─── Phase 4A helpers (D6 public phrase/emoji) ─────────────────────────────
+
+async function injectServerMessage(message: unknown): Promise<boolean> {
+  const handled = controller.handleServerMessage(message as any)
+  await waitForRenderedFrame()
+  return handled
+}
+
+function centerOf(el: Element | null): { x: number; y: number } | null {
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  if (r.width === 0 && r.height === 0) return null
+  return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }
+}
+
+// Bubble-ът (phrase/emoji) за actual seat: има ли съдържание, къде е, и кой
+// seat panel е най-близо до него (seat-to-screen mapping проверка).
+function reactionBubbleInfo(kind: 'phrase' | 'emoji', seat: string): { hasContent: boolean; nearestPanelSeat: string | null } {
+  const host = document.body.querySelector<HTMLElement>(`[data-seat-${kind}-bubble="${seat}"]`)
+  // Най-големият видим descendant (bubble body), не <style> keyframes child-а.
+  let content: Element | null = null
+  let bestArea = 0
+  for (const el of Array.from(host?.querySelectorAll('*') ?? [])) {
+    if (el.tagName === 'STYLE') continue
+    const r = el.getBoundingClientRect()
+    if (r.width * r.height > bestArea) { bestArea = r.width * r.height; content = el }
+  }
+  const bubbleCenter = centerOf(content)
+  if (!host || !content || !bubbleCenter) return { hasContent: false, nearestPanelSeat: null }
+  let nearest: { seat: string; d: number } | null = null
+  for (const s of ['bottom', 'right', 'top', 'left']) {
+    const c = centerOf(document.body.querySelector(`[data-seat-profile-card="${s}"]`))
+    if (!c) continue
+    const d = Math.hypot(c.x - bubbleCenter.x, c.y - bubbleCenter.y)
+    if (nearest === null || d < nearest.d) nearest = { seat: s, d }
+  }
+  return { hasContent: true, nearestPanelSeat: nearest?.seat ?? null }
+}
+
 function clickSeatProfile(seat: string): boolean {
   const btn = document.body.querySelector<HTMLElement>(`[data-profile-seat-btn="${seat}"]`)
   if (!btn) return false
@@ -587,5 +626,8 @@ function reset(): void {
   bottomHandHostVisibilities,
   makeSweepHands,
   makeSweepResolution,
+  // Phase 4A
+  injectServerMessage,
+  reactionBubbleInfo,
   getCalls: () => calls,
 }

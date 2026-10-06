@@ -72,6 +72,13 @@
  *        leave_active_room, без penalty confirmation
  *   [3B2-C3b] Exit по време на sweep: без caption/overlay/късен re-render
  *   [3B2-C6] re-entry след Exit
+ *
+ * Phase 4A (D6 public phrase/emoji, client presentation reuse):
+ *   [4A-P3] spectator вижда phrase над реалния sender seat
+ *   [4A-E3] spectator вижда emoji при реалния sender seat
+ *   [4A-F]  reaction за друга стая се игнорира
+ *   [4A-P4/E4] spectator няма phrase/emoji send controls
+ *   [4A-P1] participant (seated right): perspective mapping-ът е непроменен
  */
 
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
@@ -182,6 +189,8 @@ type H = {
   bottomHandHostVisibilities: () => string[]
   makeSweepHands: (count: number) => Record<string, Array<{ id: string; suit: string; rank: string }>>
   makeSweepResolution: (winnerSeat: string, count: number) => unknown
+  injectServerMessage: (message: unknown) => Promise<boolean>
+  reactionBubbleInfo: (kind: 'phrase' | 'emoji', seat: string) => { hasContent: boolean; nearestPanelSeat: string | null }
   getCalls: () => Array<{ name: string; args: unknown[] }>
 }
 
@@ -844,6 +853,64 @@ try {
     assertEqual(await call(page, (h: H) => h.seatPanelHasTiLabel('bottom')), false, 'still no "ТИ" after re-entry')
     assertEqual(await call(page, (h: H) => h.hasPlayedCardFlyOverlay()), false, 'no stale flight overlay')
     assertNoPageErrors(page, '3B2-C6')
+    await page.close()
+  })
+
+  // ═══ Phase 4A — PUBLIC PHRASE / EMOJI (D6) ═══════════════════════════════
+  // Същият production handler (emoji_reaction/phrase_reaction) и същите
+  // renderer-и; seat-to-screen mapping-ът е perspective-based.
+  {
+    const page = await newPage()
+    await enterSettledSpectator(page, 'room-4a')
+
+    await check('[4A-P3] spectator sees a player phrase over the real sender seat (right/top/bottom)', async () => {
+      for (const seat of ['right', 'top', 'bottom']) {
+        const handled = await call(page, (h: H, s: string) => h.injectServerMessage({ type: 'phrase_reaction', roomId: 'room-4a', seat: s, phraseId: 'phrase_01' }), seat)
+        assertEqual(handled, true, `${seat} phrase handled by the spectator view`)
+        await waitUntil(() => call(page, (h: H, s: string) => h.reactionBubbleInfo('phrase', s).hasContent, seat))
+        const info = await call(page, (h: H, s: string) => h.reactionBubbleInfo('phrase', s), seat)
+        assertEqual(info.nearestPanelSeat, seat, `${seat} phrase bubble sits at the ${seat} panel`)
+      }
+      const bottomText = await page.locator('[data-seat-phrase-bubble="bottom"]').innerText()
+      assert(bottomText.includes('Браво, майсторе!'), `phrase text rendered: ${bottomText}`)
+    })
+
+    await check('[4A-E3] spectator sees a player emoji at the real sender seat (left/bottom)', async () => {
+      for (const seat of ['left', 'bottom']) {
+        await call(page, (h: H, s: string) => h.injectServerMessage({ type: 'emoji_reaction', roomId: 'room-4a', seat: s, emojiId: '05' }), seat)
+        await waitUntil(() => call(page, (h: H, s: string) => h.reactionBubbleInfo('emoji', s).hasContent, seat))
+        const info = await call(page, (h: H, s: string) => h.reactionBubbleInfo('emoji', s), seat)
+        assertEqual(info.nearestPanelSeat, seat, `${seat} emoji sits at the ${seat} panel`)
+      }
+    })
+
+    await check('[4A-F] reaction for another room is ignored by the spectator view', async () => {
+      await call(page, (h: H) => h.injectServerMessage({ type: 'emoji_reaction', roomId: 'room-other', seat: 'top', emojiId: '05' }))
+      await sleep(300)
+      assertEqual((await call(page, (h: H) => h.reactionBubbleInfo('emoji', 'top'))).hasContent, false, 'no bubble from another room')
+    })
+
+    await check('[4A-P4/E4] spectator still has no phrase/emoji send controls', async () => {
+      assertEqual(await call(page, (h: H) => h.hasPhraseToggle()), false, 'no phrase toggle')
+      assertEqual(await call(page, (h: H) => h.hasEmojiToggle()), false, 'no emoji toggle')
+      const calls = await call(page, (h: H) => h.getCalls())
+      assert(!calls.some((c) => /phrase|emoji/i.test(c.name)), `no send call: ${calls.map((c) => c.name).join(',')}`)
+    })
+
+    assertNoPageErrors(page, '4A spectator reactions')
+    await page.close()
+  }
+
+  await check('[4A-P1] participant seated right: phrase from right still shows at the visual bottom (perspective mapping unchanged)', async () => {
+    const page = await newPage()
+    await call(page, (h: H) => h.enterAsParticipant('room-4a-p', 'right'))
+    await call(page, (h: H, g: unknown) => (h as any).applyParticipantSnapshot('room-4a-p', g, (h as any).makeSeats(), 'right'), await call(page, (h: H) => h.biddingGame()))
+    await waitUntil(() => call(page, (h: H) => h.lowestSeatPanel() === 'right'))
+    await call(page, (h: H) => h.injectServerMessage({ type: 'phrase_reaction', roomId: 'room-4a-p', seat: 'right', phraseId: 'phrase_02' }))
+    await waitUntil(() => call(page, (h: H) => h.reactionBubbleInfo('phrase', 'right').hasContent))
+    const info = await call(page, (h: H) => h.reactionBubbleInfo('phrase', 'right'))
+    assertEqual(info.nearestPanelSeat, 'right', 'own phrase at own (visually bottom) panel')
+    assertNoPageErrors(page, '4A-P1')
     await page.close()
   })
 } finally {
