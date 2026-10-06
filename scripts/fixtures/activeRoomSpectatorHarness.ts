@@ -36,6 +36,9 @@ function record(name: string) {
   return (...args: unknown[]) => { calls.push({ name, args }) }
 }
 
+let emulateMainSpectatorExit = false
+function setEmulateMainSpectatorExit(value: boolean): void { emulateMainSpectatorExit = value }
+
 const controller = createActiveRoomFlowController({
   root: root as unknown as HTMLDivElement,
   isConnected: () => true,
@@ -68,7 +71,14 @@ const controller = createActiveRoomFlowController({
   onTournamentFinalResultContinue: record('onTournamentFinalResultContinue'),
   requestBidResync: record('requestBidResync'),
   forceReconnectForZombieConnection: record('forceReconnectForZombieConnection'),
-  onSpectatorExitRequested: record('onSpectatorExitRequested'),
+  // Phase 5B: emulateMainSpectatorExit=true огледално повтаря main.ts
+  // (activeRoom.exitSpectatorView() + lobby.unwatchBelotSpectatorRoom()).
+  onSpectatorExitRequested: (...args: unknown[]) => {
+    calls.push({ name: 'onSpectatorExitRequested', args })
+    if (!emulateMainSpectatorExit) return
+    controller.exitSpectatorView()
+    calls.push({ name: 'unwatchBelotSpectatorRoom', args })
+  },
 })
 
 function waitForRenderedFrame(): Promise<void> {
@@ -714,5 +724,7 @@ function reset(): void {
   scoreHudText,
   scoringPanelText,
   matchEndedInfo,
+  // Phase 5B
+  setEmulateMainSpectatorExit,
   getCalls: () => calls,
 }

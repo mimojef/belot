@@ -326,6 +326,42 @@ export function createActiveRoomFlowController(
   }
   let matchEndedCountdownSeconds = 120
   let matchEndedCountdownIntervalId: number | null = null
+  // Phase 5B: spectator final board. При първия match-ended snapshot на
+  // spectator session-а изгледът се замразява (replay/нов мач в същата стая
+  // НЕ го презаписва) и след SPECTATOR_FINAL_BOARD_MS се излиза през
+  // canonical Изход пътя (onSpectatorExitRequested -> unwatch -> Частни маси
+  // -> Играещи). Чисто client-side, ephemeral; token-ът пази стар timer от
+  // това да затвори нов spectator session.
+  const SPECTATOR_FINAL_BOARD_MS = 10_000
+  let spectatorFinalBoard: { roomId: string; token: number; timerId: number } | null = null
+  let spectatorFinalBoardTokenSeq = 0
+
+  function clearSpectatorFinalBoard(): void {
+    if (spectatorFinalBoard !== null) {
+      window.clearTimeout(spectatorFinalBoard.timerId)
+      spectatorFinalBoard = null
+    }
+  }
+
+  function isSpectatorFinalBoardFrozen(roomId: string): boolean {
+    return spectatorFinalBoard !== null && spectatorFinalBoard.roomId === roomId
+  }
+
+  // Вика се след като spectator activeRoomState.game е обновен/създаден.
+  function syncSpectatorFinalBoard(): void {
+    if (!activeRoomState || activeRoomState.viewerRole !== 'spectator') return
+    if (spectatorFinalBoard !== null) return
+    if (activeRoomState.game?.authoritativePhase !== 'match-ended') return
+    const roomId = activeRoomState.roomId
+    const token = ++spectatorFinalBoardTokenSeq
+    const timerId = window.setTimeout(() => {
+      if (spectatorFinalBoard === null || spectatorFinalBoard.token !== token) return
+      spectatorFinalBoard = null
+      if (!activeRoomState || activeRoomState.viewerRole !== 'spectator' || activeRoomState.roomId !== roomId) return
+      options.onSpectatorExitRequested(roomId)
+    }, SPECTATOR_FINAL_BOARD_MS)
+    spectatorFinalBoard = { roomId, token, timerId }
+  }
   // Targeted ticker за tournament attendance екрана (§"3-MINUTE SCREEN
   // REALTIME BEHAVIOR" в task spec-а) — patch-ва само timer текста между
   // реалните room_snapshot push-ове (сървърът вече push-ва цял snapshot при
@@ -5939,6 +5975,7 @@ export function createActiveRoomFlowController(
   // gift/profile-interaction gate. НИКОГА reconnectToken, НИКОГА
   // tournament/participant fields, НИКОГА resume/join заявка.
   function enterActiveRoomAsSpectator(roomId: string, snapshot: BelotSpectatorSnapshotMessage): void {
+    clearSpectatorFinalBoard()
     resetCuttingAnimationState()
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
@@ -6002,6 +6039,7 @@ export function createActiveRoomFlowController(
       activeTableGiftOverlays: {},
     }
     applyActiveTableGiftsFromSnapshot(snapshot.activeTableGifts)
+    syncSpectatorFinalBoard()
 
     scheduleActiveRoomRender()
   }
@@ -6019,6 +6057,12 @@ export function createActiveRoomFlowController(
       return false
     }
 
+    // Phase 5B: финалното табло е замразено — replay/нов мач в същата стая
+    // (dealing/bidding snapshot-и) не го презаписва до auto-exit/Изход.
+    if (isSpectatorFinalBoardFrozen(snapshot.roomId)) {
+      return true
+    }
+
     activeRoomState.roomStatus = snapshot.roomStatus
     activeRoomState.seats = snapshot.seats
     activeRoomState.game = snapshot.game
@@ -6030,6 +6074,7 @@ export function createActiveRoomFlowController(
     if (snapshot.stakeAmount !== null && snapshot.stakeAmount > 0) {
       activeRoomState.stake = snapshot.stakeAmount as MatchStake
     }
+    syncSpectatorFinalBoard()
 
     scheduleActiveRoomRender(
       cuttingAnimation.isAnimating ||
@@ -6044,6 +6089,9 @@ export function createActiveRoomFlowController(
   // "Изход", И от belot_spectate_ended/denied-while-viewing (виж §14/§15
   // брифа). Optimistic/immediate — не чака server ACK.
   function exitSpectatorView(): void {
+    // Phase 5B: всеки spectator teardown (Изход, ended/denied, session-lost)
+    // отменя final-board timer-а.
+    clearSpectatorFinalBoard()
     if (!activeRoomState || activeRoomState.viewerRole !== 'spectator') {
       return
     }
@@ -6086,6 +6134,7 @@ export function createActiveRoomFlowController(
   }
 
   function enterActiveRoom(message: MatchFoundMessage, stakeAlreadyShown = false): void {
+    clearSpectatorFinalBoard()
     resetCuttingAnimationState()
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
