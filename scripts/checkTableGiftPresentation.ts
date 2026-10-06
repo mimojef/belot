@@ -23,7 +23,8 @@
  *   [6]  Reconnect: snapshot попълва overlay-и, но НЕ пуска летящата
  *        анимация (тя тръгва само от live push branch-а)
  *   [7]  Overlay-ът НЕ пипа avatar src — рисува се в отделен слот
- *   [8]  Gift иконата се показва само за чужди, човешки, заети места
+ *   [8]  Gift иконата се показва само за чужди заети места и само за
+ *        participant (controlledSeat != null) — spectator няма gift control
  *   [9]  syncTableGiftOverlays е вързан в syncActiveRoomOverlayEffects
  *        (=> playing фазата минава оттам автоматично)
  *   [10] Gift state НЕ участва в никой stable render key (PATCH пътят
@@ -305,7 +306,13 @@ await check('[8] Gift иконата се показва за чужди зае�
   // != null (не !==) — покрива и undefined от по-стар snapshot без полето.
   assert(guard.includes('seat.profileId != null'), 'изисква реален profileId (покрива и rare bot без profileId)')
   assert(guard.includes('seat.profileId.length > 0'), 'празен profileId не се приема')
-  assert(guard.includes('seat.seat !== localSeat'), 'собственото място е изключено')
+  // Belot spectator (Phase 3B): gift control-ът е participant-only —
+  // контролираното място (controlledSeat), не perspective seat-ът. Spectator
+  // има controlledSeat=null и никога не получава gift икона; за participant
+  // controlledSeat === собственото място, значи поведението е непроменено.
+  assert(guard.includes('controlledSeat != null'), 'spectator (controlledSeat=null) не получава gift control')
+  assert(guard.includes('seat.seat !== controlledSeat'), 'собственото (контролирано) място е изключено')
+  assert(!guard.includes('seat.seat !== localSeat'), 'gate-ът не ползва perspective seat-а (localSeat)')
 })
 
 // ─── [9] Sync е вързан в общия overlay tail ───────────────────────────────
