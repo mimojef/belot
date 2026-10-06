@@ -3,6 +3,7 @@ import type {
   BelotSpectateEndedMessage,
   EmojiReactionMessage,
   PhraseReactionMessage,
+  TableGiftItemSentMessage,
 } from '../protocol/messageTypes.js'
 import { createSpectatorRoomSnapshotMessage } from '../protocol/createRoomSnapshotMessage.js'
 import type { BelotSpectatorRegistry } from './belotSpectatorRegistry.js'
@@ -86,8 +87,23 @@ export function broadcastBelotSpectatorSnapshot(input: BroadcastBelotSpectatorSn
 }
 
 // Публични transient presentation събития, които spectator-ите виждат
-// (Phase 4A, D6). Затворен union — нищо друго не минава през този път.
-export type BelotSpectatorPublicPresentationEvent = EmojiReactionMessage | PhraseReactionMessage
+// (Phase 4A D6 phrase/emoji, Phase 4B D7 table gift). Затворен union —
+// нищо друго не минава през този път.
+export type BelotSpectatorPublicPresentationEvent =
+  | EmojiReactionMessage
+  | PhraseReactionMessage
+  | TableGiftItemSentMessage
+
+// Table gift към spectator: participant payload-ът БЕЗ chargedPrice (данни за
+// покупката) и recipientProfileId — точно полетата на static overlay-я, които
+// spectator snapshot-ът вече показва публично (activeTableGifts), плюс
+// type/roomId. Client animation-ът не чете пропуснатите полета.
+export type BelotSpectatorTableGiftItemSentMessage = Omit<TableGiftItemSentMessage, 'chargedPrice' | 'recipientProfileId'>
+
+type BelotSpectatorPublicPresentationPayload =
+  | EmojiReactionMessage
+  | PhraseReactionMessage
+  | BelotSpectatorTableGiftItemSentMessage
 
 export type BroadcastBelotSpectatorPublicEventInput = {
   room: ServerRoom
@@ -99,15 +115,31 @@ export type BroadcastBelotSpectatorPublicEventInput = {
 
 // Whitelist копие — точно полетата, които participant-ите вече получават,
 // дори ако извикващият някога подаде обект с допълнителни полета.
-function toPublicPresentationPayload(event: BelotSpectatorPublicPresentationEvent): BelotSpectatorPublicPresentationEvent {
+function toPublicPresentationPayload(event: BelotSpectatorPublicPresentationEvent): BelotSpectatorPublicPresentationPayload {
   if (event.type === 'emoji_reaction') {
     return { type: 'emoji_reaction', roomId: event.roomId, seat: event.seat, emojiId: event.emojiId }
+  }
+  if (event.type === 'table_gift_item_sent') {
+    return {
+      type: 'table_gift_item_sent',
+      roomId: event.roomId,
+      transactionId: event.transactionId,
+      giftItemId: event.giftItemId,
+      giftName: event.giftName,
+      imageUrl: event.imageUrl,
+      senderProfileId: event.senderProfileId,
+      senderSeat: event.senderSeat,
+      senderDisplayName: event.senderDisplayName,
+      recipientSeat: event.recipientSeat,
+      sentAt: event.sentAt,
+      expiresAt: event.expiresAt,
+    }
   }
   return { type: 'phrase_reaction', roomId: event.roomId, seat: event.seat, phraseId: event.phraseId }
 }
 
 /**
- * Spectator fan-out за ЕДНО публично phrase/emoji събитие (Phase 4A).
+ * Spectator fan-out за ЕДНО публично phrase/emoji/table-gift събитие (Phase 4A/4B).
  *
  * Participant broadcast-ът остава непроменен в handler-а; тук същото публично
  * събитие отива само до spectator subscriber-ите на ТАЗИ стая. Transient е —

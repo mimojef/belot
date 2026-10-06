@@ -21712,8 +21712,8 @@ wsServer.on('connection', (socket, request) => {
             TABLE_GIFT_OVERLAY_DURATION_MS,
           )
 
-          broadcastToRoomConnections(resolution.room, socketRegistry, {
-            type: 'table_gift_item_sent',
+          const tableGiftMsg = {
+            type: 'table_gift_item_sent' as const,
             roomId: resolution.room.id,
             transactionId: giftResult.transaction.transactionId,
             giftItemId: giftResult.transaction.giftItemId,
@@ -21727,6 +21727,16 @@ wsServer.on('connection', (socket, request) => {
             chargedPrice: giftResult.transaction.chargedPrice,
             sentAt,
             expiresAt,
+          }
+          broadcastToRoomConnections(resolution.room, socketRegistry, tableGiftMsg)
+          // Phase 4B (D7): публичната летяща анимация и към spectator-ите на
+          // стаята (helper-ът маха chargedPrice/recipientProfileId).
+          broadcastBelotSpectatorPublicEvent({
+            room: resolution.room,
+            event: tableGiftMsg,
+            registry: belotSpectatorRegistry,
+            getConnection: (connectionId) => getConnectionById(serverState, connectionId),
+            getSocket: getSocketByConnectionId,
           })
 
           if (previousImageUrl !== null && previousImageUrl !== imageUrl) {

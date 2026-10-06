@@ -79,6 +79,11 @@
  *   [4A-F]  reaction за друга стая се игнорира
  *   [4A-P4/E4] spectator няма phrase/emoji send controls
  *   [4A-P1] participant (seated right): perspective mapping-ът е непроменен
+ *
+ * Phase 4B (D7 public table gift, client presentation reuse):
+ *   [4B-G6/G7] existing flying gift animation от реалния sender към реалния recipient
+ *   [4B-G10] след landing: един static overlay, без flyer/дубликат (и след snapshot)
+ *   [4B-G8] spectator няма gift send control
  */
 
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
@@ -191,6 +196,9 @@ type H = {
   makeSweepResolution: (winnerSeat: string, count: number) => unknown
   injectServerMessage: (message: unknown) => Promise<boolean>
   reactionBubbleInfo: (kind: 'phrase' | 'emoji', seat: string) => { hasContent: boolean; nearestPanelSeat: string | null }
+  tableGiftFlyers: () => Array<{ src: string; nearestPanelSeat: string | null }>
+  tableGiftOverlayInfo: (seat: string) => { imgCount: number; src: string | null; totalOverlayImgs: number }
+  applySpectatorSnapshotWithGifts: (roomId: string, game: unknown, gifts: unknown[]) => Promise<boolean>
   getCalls: () => Array<{ name: string; args: unknown[] }>
 }
 
@@ -913,6 +921,67 @@ try {
     assertNoPageErrors(page, '4A-P1')
     await page.close()
   })
+
+  // ═══ Phase 4B — PUBLIC TABLE GIFT FLIGHT (D7) ════════════════════════════
+  // Същият production handler (table_gift_item_sent) и същата
+  // playTableGiftFlightAnimation; spectator payload-ът е без
+  // chargedPrice/recipientProfileId (виж server checkBelotSpectatorPublicTableGift).
+  {
+    const page = await newPage()
+    await enterSettledSpectator(page, 'room-4b')
+    const giftImage = '/uploads/gift-items/spectator-test.webp'
+    const now = Date.now()
+    const spectatorGiftEvent = {
+      type: 'table_gift_item_sent', roomId: 'room-4b', transactionId: 'tx-4b-1', giftItemId: 'gift-4b', giftName: 'Rose',
+      imageUrl: giftImage, senderProfileId: 'profile-right', senderSeat: 'right', senderDisplayName: 'Играч right',
+      recipientSeat: 'top', sentAt: new Date(now).toISOString(), expiresAt: new Date(now + 60_000).toISOString(),
+    }
+
+    await check('[4B-G6/G7] spectator plays the existing flying gift animation from the real sender to the real recipient', async () => {
+      const handled = await call(page, (h: H, e: unknown) => h.injectServerMessage(e), spectatorGiftEvent)
+      assertEqual(handled, true, 'gift event handled by the spectator view')
+      await sleep(120)
+      const early = await call(page, (h: H) => h.tableGiftFlyers())
+      assertEqual(early.length, 1, 'exactly one flyer (existing flight layer)')
+      assert(early[0]!.src.includes('spectator-test.webp'), `gift asset: ${early[0]!.src}`)
+      assertEqual(early[0]!.nearestPanelSeat, 'right', 'flight starts at the sender (right)')
+      // Overlay-ят е suppressed до landing (existing timing).
+      assertEqual((await call(page, (h: H) => h.tableGiftOverlayInfo('top'))).imgCount, 0, 'overlay hidden while the gift flies')
+      await sleep(1_380)
+      const late = await call(page, (h: H) => h.tableGiftFlyers())
+      assertEqual(late.length, 1, 'still flying near the end')
+      assertEqual(late[0]!.nearestPanelSeat, 'top', 'flight lands at the recipient (top)')
+    })
+
+    await check('[4B-G10] after landing: one static overlay at the recipient, no flyer, no duplicate (also after a snapshot with the same gift)', async () => {
+      await waitUntil(() => call(page, (h: H) => h.tableGiftFlyers().length === 0), 3_000)
+      await waitUntil(() => call(page, (h: H) => h.tableGiftOverlayInfo('top').imgCount === 1), 3_000)
+      const overlay = await call(page, (h: H) => h.tableGiftOverlayInfo('top'))
+      assert((overlay.src ?? '').includes('spectator-test.webp'), `overlay asset: ${overlay.src}`)
+      assertEqual(overlay.totalOverlayImgs, 1, 'exactly one gift overlay on the table')
+      const snapshotGift = {
+        transactionId: 'tx-4b-1', giftItemId: 'gift-4b', giftName: 'Rose', imageUrl: giftImage, senderProfileId: 'profile-right',
+        senderSeat: 'right', senderDisplayName: 'Играч right', recipientSeat: 'top', sentAt: spectatorGiftEvent.sentAt, expiresAt: spectatorGiftEvent.expiresAt,
+      }
+      await call(page, (h: H, g: unknown) => h.applySpectatorSnapshotWithGifts('room-4b', h.playingGame(), [g]), snapshotGift)
+      await sleep(300)
+      assertEqual((await call(page, (h: H) => h.tableGiftFlyers())).length, 0, 'snapshot never replays the flight')
+      assertEqual((await call(page, (h: H) => h.tableGiftOverlayInfo('top'))).totalOverlayImgs, 1, 'still exactly one overlay')
+      // Network duplicate на същия transactionId -> no-op (existing dedup).
+      await call(page, (h: H, e: unknown) => h.injectServerMessage(e), spectatorGiftEvent)
+      await sleep(150)
+      assertEqual((await call(page, (h: H) => h.tableGiftFlyers())).length, 0, 'duplicate transaction does not fly again')
+    })
+
+    await check('[4B-G8] spectator still has no gift send control', async () => {
+      assertEqual(await call(page, (h: H) => h.hasAnyGiftIcon()), false, 'no gift icon')
+      const calls = await call(page, (h: H) => h.getCalls())
+      assert(!calls.some((c) => /gift/i.test(c.name)), `no gift send call: ${calls.map((c) => c.name).join(',')}`)
+    })
+
+    assertNoPageErrors(page, '4B spectator table gift')
+    await page.close()
+  }
 } finally {
   if (browser) await browser.close()
   if (vite) await vite.close()

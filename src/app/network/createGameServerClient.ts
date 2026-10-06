@@ -1743,9 +1743,11 @@ export type TableGiftItemSentMessage = {
   senderProfileId: string
   senderSeat: Seat
   senderDisplayName: string
-  recipientProfileId: string
+  // Phase 4B: spectator копието на event-а не носи recipientProfileId и
+  // chargedPrice (само participant-ите ги получават); presentation-ът не ги чете.
+  recipientProfileId?: string
   recipientSeat: Seat
-  chargedPrice: number
+  chargedPrice?: number
   sentAt: string
   expiresAt: string
 }

@@ -438,6 +438,42 @@ function reactionBubbleInfo(kind: 'phrase' | 'emoji', seat: string): { hasConten
   return { hasContent: true, nearestPanelSeat: nearest?.seat ?? null }
 }
 
+// ─── Phase 4B helpers (D7 public table gift) ──────────────────────────────
+
+function nearestPanelSeatTo(point: { x: number; y: number }): string | null {
+  let nearest: { seat: string; d: number } | null = null
+  for (const s of ['bottom', 'right', 'top', 'left']) {
+    const c = centerOf(document.body.querySelector(`[data-seat-profile-card="${s}"]`))
+    if (!c) continue
+    const d = Math.hypot(c.x - point.x, c.y - point.y)
+    if (nearest === null || d < nearest.d) nearest = { seat: s, d }
+  }
+  return nearest?.seat ?? null
+}
+
+function tableGiftFlyers(): Array<{ src: string; nearestPanelSeat: string | null }> {
+  return Array.from(document.body.querySelectorAll<HTMLImageElement>('[data-table-gift-flight-layer] img')).map((img) => {
+    const c = centerOf(img)
+    return { src: img.getAttribute('src') ?? '', nearestPanelSeat: c ? nearestPanelSeatTo(c) : null }
+  })
+}
+
+function tableGiftOverlayInfo(seat: string): { imgCount: number; src: string | null; totalOverlayImgs: number } {
+  const node = document.body.querySelector(`[data-seat-gift-overlay="${seat}"]`)
+  const imgs = node ? Array.from(node.querySelectorAll('img')) : []
+  return {
+    imgCount: imgs.length,
+    src: imgs[0]?.getAttribute('src') ?? null,
+    totalOverlayImgs: document.body.querySelectorAll('[data-seat-gift-overlay] img').length,
+  }
+}
+
+async function applySpectatorSnapshotWithGifts(roomId: string, game: RoomGameSnapshot, activeTableGifts: unknown[]): Promise<boolean> {
+  const result = controller.applySpectatorSnapshotToActiveRoom({ ...makeSpectatorSnapshot(roomId, game), activeTableGifts } as any)
+  await waitForRenderedFrame()
+  return result
+}
+
 function clickSeatProfile(seat: string): boolean {
   const btn = document.body.querySelector<HTMLElement>(`[data-profile-seat-btn="${seat}"]`)
   if (!btn) return false
@@ -629,5 +665,9 @@ function reset(): void {
   // Phase 4A
   injectServerMessage,
   reactionBubbleInfo,
+  // Phase 4B
+  tableGiftFlyers,
+  tableGiftOverlayInfo,
+  applySpectatorSnapshotWithGifts,
   getCalls: () => calls,
 }
