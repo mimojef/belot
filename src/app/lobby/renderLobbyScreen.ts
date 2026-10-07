@@ -3299,6 +3299,7 @@ function renderNav(state: LobbyScreenState): string {
     <nav style="
       background: #0a0a0a;
       border-bottom: 1px solid rgba(255,255,255,0.10);
+      width: 100%;
       max-width: ${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px;
       margin: 0 auto;
       box-sizing: border-box;
@@ -13484,12 +13485,20 @@ export function renderLobbyScreen(
       <div data-lobby-scale-stage="1" style="${state.view === 'topics'
         ? 'width:100%;height:100%;display:flex;flex-direction:column;min-height:0;'
         : `width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin:0 auto; zoom:var(--lobby-scale);${state.view === 'chat' ? ' flex:1 1 0; display:flex; flex-direction:column;' : ''}`}">
-        ${renderNav(state)}
+        ${state.view === 'topics'
+          // Topics stage-ът е без zoom (вътрешните scroll anchor-и/popover-и
+          // разчитат на незуумнати координати), затова nav-ът получава
+          // СЪЩИЯ canonical desktop shell като останалите изгледи:
+          // PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX + zoom:var(--lobby-scale).
+          ? `<div data-topics-desktop-nav-shell="1" style="flex-shrink:0;width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px;margin:0 auto;zoom:var(--lobby-scale);">${renderNav(state)}</div>`
+          : renderNav(state)}
 
         <div
           ${state.view === 'topics' ? 'data-topics-desktop-shell="1"' : ''}
           style="${state.view === 'topics'
-          ? `flex:1;min-height:0;display:flex;flex-direction:column;max-width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px;width:100%;margin:0 auto;padding:16px 20px;background:#000000;box-sizing:border-box;overflow:hidden;`
+          // Същите визуални хоризонтални граници като zoom-натия desktop
+          // stage: PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX × --lobby-scale.
+          ? `flex:1;min-height:0;display:flex;flex-direction:column;width:calc(${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px * var(--lobby-scale));max-width:100%;margin:0 auto;padding:16px 20px;background:#000000;box-sizing:border-box;overflow:hidden;`
           : `max-width: ${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;${state.view === 'chat' ? ' flex:1 1 0; width:100%; display:flex; flex-direction:column;' : ''}`}">
           ${state.view === 'support'
             ? renderAdminSupportPage(state)
@@ -14514,46 +14523,6 @@ export function renderLobbyScreen(
     // веднъж — виж module-level guard-овете по-горе.
     latestImageViewerOpenHandler = (attachment) => options.onImageViewerOpen(attachment)
     latestImageViewerCloseHandler = state.imageViewer ? () => options.onImageViewerClose() : null
-  }
-
-  // ─── UI polish pass v2: Topics desktop shell = РЕАЛНАТА рендирана navbar
-  // ширина ─────────────────────────────────────────────────────────────────
-  //
-  // Root cause на предишния опит (max-width:1640px reuse): nav (`renderNav`)
-  // има `margin:0 auto` за центриране — а auto margins на cross-axis-а на
-  // flex item ИЗКЛЮЧВАТ align-items:stretch (spec поведение) и вместо това
-  // карат nav да се самоопредели по max-content (сумата от logo+бутони+gaps),
-  // центриран чрез auto margins, capped единствено от max-width:1640px,
-  // никога реално достигнат. Затова nav рендира ~1260-1330px, докато Topics
-  // content wrapper-ът (без auto-margin self-centering — просто `width:100%`
-  // вътре в ВЕЧЕ центриран 1640px родител) реално ЗАПЪЛВА тези 1640px.
-  // Двете стойности са фундаментално различни механизми — споделеният
-  // max-width taван не гарантира еднаква ФАКТИЧЕСКИ рендирана ширина.
-  //
-  // nav-ът е content-driven (не мога/не трябва да го променям — user
-  // изрично забрани пипане на navbar-а) — затова тук directly МЕРИМ
-  // реалната му getBoundingClientRect().width СЛЕД render и я прилагаме
-  // като max-width на Topics shell-а. Това е "reuse на реалната navbar shell
-  // width логика", буквално — не копие на константа, която може да се
-  // разсинхронизира ако nav съдържанието се промени (нови бутони, badge-ове).
-  //
-  // Само desktop (data-topics-desktop-shell съществува единствено в desktop
-  // клона на markup-а по-горе — mobile изобщо няма nav/scale-stage структура,
-  // затова querySelector тук естествено връща null на mobile, без нужда от
-  // изричен isPhoneLayoutViewport() check).
-  {
-    const navEl = root.querySelector<HTMLElement>('nav')
-    const topicsShellEl = root.querySelector<HTMLElement>('[data-topics-desktop-shell="1"]')
-    if (navEl && topicsShellEl) {
-      const navWidth = navEl.getBoundingClientRect().width
-      // min(navWidth, наличната viewport ширина минус safe padding) идва
-      // автоматично от CSS max-width семантиката — width:100% (вече в
-      // markup-а) + max-width:navWidth означава браузърът естествено избира
-      // по-малкото от двете, без допълнителна JS логика тук.
-      if (navWidth > 0) {
-        topicsShellEl.style.maxWidth = `${Math.round(navWidth)}px`
-      }
-    }
   }
 
   // ─── Topics Moderation (Етап 4) ────────────────────────────────────────
