@@ -2107,6 +2107,18 @@ export type BelotSpectateEndedMessage = {
   reason: BelotSpectateEndedReason
 }
 
+/** Viewer-indicator: само за участниците на масата ("{име} гледа вашата игра"). */
+export type BelotRoomSpectatorSnapshot = {
+  profileId: string
+  displayName: string
+}
+
+export type BelotRoomSpectatorsMessage = {
+  type: 'belot_room_spectators'
+  roomId: string
+  spectators: BelotRoomSpectatorSnapshot[]
+}
+
 export type PrivateGameScoreUpdatedMessage = {
   type: 'private_game_score_updated'
   roomId: string
@@ -2854,6 +2866,7 @@ export type ServerMessage =
   | BelotSpectateStartedMessage
   | BelotSpectateDeniedMessage
   | BelotSpectateEndedMessage
+  | BelotRoomSpectatorsMessage
   | LudoGamesListMessage
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageEventMessage

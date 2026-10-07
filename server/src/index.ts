@@ -221,6 +221,7 @@ import {
   isProfileSpectatingBelot as isProfileSpectatingBelotInRegistry,
 } from './core/belotSpectatorRegistry.js'
 import { broadcastBelotSpectatorPublicEvent, broadcastBelotSpectatorSnapshot } from './core/broadcastBelotSpectatorSnapshot.js'
+import { buildBelotRoomSpectatorsMessage } from './core/buildBelotRoomSpectatorsMessage.js'
 import { evaluateBelotSpectatorWatchEligibility } from './core/evaluateBelotSpectatorWatchEligibility.js'
 import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag.js'
 import { createSpectatorRoomSnapshotMessage } from './protocol/createRoomSnapshotMessage.js'
@@ -377,6 +378,7 @@ import type {
   LudoMatchSpectatorsMessage,
   ActiveLudoGiftSnapshot,
   BelotSpectateDeniedMessage,
+  BelotRoomSpectatorsMessage,
   BelotSpectateEndedMessage,
   BelotSpectateEndedReason,
   BelotSpectateStartedMessage,
@@ -4614,14 +4616,39 @@ function sendBelotSpectateEnded(connectionId: ConnectionId, roomId: string, reas
   safeSendToConnection(connectionId, message)
 }
 
-// Idempotent — no-op ако connection-ът не гледа нищо.
+// ─── Viewer-indicator за участниците ("{име} гледа вашата игра") ─────────
+// Списъкът е deduplicate-нат по profileId (виж buildBelotRoomSpectatorsMessage)
+// и се изпраща ЕДИНСТВЕНО до participant connections на стаята
+// (broadcastToRoomConnections), никога до spectators. No-op ако стаята вече
+// не съществува (room removal не известява — стаята изчезва).
+function buildBelotRoomSpectatorsMessageForRoom(roomId: string): BelotRoomSpectatorsMessage {
+  return buildBelotRoomSpectatorsMessage({
+    roomId,
+    registry: belotSpectatorRegistry,
+    resolveConnectionProfileId,
+    getPublicDisplayName: (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
+  })
+}
+
+function broadcastBelotRoomSpectatorsToParticipants(roomId: string): void {
+  const room = serverState.rooms[roomId] ?? null
+  if (room === null) return
+  broadcastToRoomConnections(room, socketRegistry, buildBelotRoomSpectatorsMessageForRoom(roomId))
+}
+
+// Idempotent — no-op ако connection-ът не гледа нищо. notifyParticipants=false
+// само когато call site-ът сам изпраща ЕДИН обединен update след това (виж
+// watch_belot_room "replaced" — иначе участниците биха видели 1 -> 0 -> 1).
 function endBelotSpectatingForConnection(
   connectionId: ConnectionId,
   reason: BelotSpectateEndedReason,
   notify: boolean,
-): void {
+  notifyParticipants = true,
+): string | null {
   const roomId = belotSpectatorRegistry.unwatch(connectionId)
   if (roomId !== null && notify) sendBelotSpectateEnded(connectionId, roomId, reason)
+  if (roomId !== null && notifyParticipants) broadcastBelotRoomSpectatorsToParticipants(roomId)
+  return roomId
 }
 
 function endBelotSpectatingForProfile(profileId: string | null, reason: BelotSpectateEndedReason): void {
@@ -20465,6 +20492,7 @@ setBroadcastRoomSnapshotsSpectatorHook((room) => {
     registry: belotSpectatorRegistry,
     getConnection: (connectionId) => getConnectionById(serverState, connectionId),
     getSocket: getSocketByConnectionId,
+    onSpectatorsRemoved: () => broadcastBelotRoomSpectatorsToParticipants(room.id),
   })
 })
 
@@ -21834,6 +21862,12 @@ wsServer.on('connection', (socket, request) => {
             })
 
         broadcastRoomSnapshots(result.room, socketRegistry)
+        // Viewer-indicator: участникът получава ВЕДНАГА текущия списък (вкл.
+        // празен — изчиства stale state отпреди disconnect-а), без да чака
+        // следваща spectator membership промяна.
+        if (isBelotSpectatorFeatureEnabled()) {
+          safeSendToConnection(connection.id, buildBelotRoomSpectatorsMessageForRoom(result.room.id))
+        }
         return
       }
 
@@ -22854,18 +22888,26 @@ wsServer.on('connection', (socket, request) => {
         // Същият профил вече гледа СЪЩАТА маса през друга connection (нов
         // таб/reconnect преди стария socket да е затворен) — subscription-ът
         // се прехвърля, никога два паралелни за един профил.
+        // Viewer-indicator: всички засегнати стаи получават ЕДИН update след
+        // watch-а (replaced таб на същата маса не мига 1 -> 0 -> 1).
+        const viewerListRoomIdsToRefresh = new Set<string>([room.id])
         for (const spectatorConnectionId of profileSpectatorConnectionIds) {
           if (spectatorConnectionId !== connection.id) {
-            endBelotSpectatingForConnection(spectatorConnectionId, 'replaced', true)
+            const replacedRoomId = endBelotSpectatingForConnection(spectatorConnectionId, 'replaced', true, false)
+            if (replacedRoomId !== null) viewerListRoomIdsToRefresh.add(replacedRoomId)
           }
         }
 
         // Повторен watch на същата маса от същата connection е idempotent —
         // registry.watch е no-op, клиентът получава свеж ACK + snapshot.
-        belotSpectatorRegistry.watch(connection.id, room.id)
+        const previousWatchedRoomId = belotSpectatorRegistry.watch(connection.id, room.id)
+        if (previousWatchedRoomId !== null) viewerListRoomIdsToRefresh.add(previousWatchedRoomId)
         const started: BelotSpectateStartedMessage = { type: 'belot_spectate_started', roomId: room.id }
         safeSendToConnection(connection.id, started)
         safeSendToConnection(connection.id, createSpectatorRoomSnapshotMessage(room))
+        for (const refreshRoomId of viewerListRoomIdsToRefresh) {
+          broadcastBelotRoomSpectatorsToParticipants(refreshRoomId)
+        }
         return
       }
 

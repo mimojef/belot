@@ -16,6 +16,9 @@ export type BroadcastBelotSpectatorSnapshotInput = {
   registry: BelotSpectatorRegistry
   getConnection: (connectionId: ConnectionId) => ServerConnection | null
   getSocket: (connectionId: ConnectionId) => WebSocket | null
+  // Вика се ВЕДНЪЖ след fan-out-а, ако invariant guard-ът е махнал поне един
+  // spectator (viewer-indicator update към участниците).
+  onSpectatorsRemoved?: () => void
 }
 
 /**
@@ -37,12 +40,14 @@ export function broadcastBelotSpectatorSnapshot(input: BroadcastBelotSpectatorSn
 
   let serializedSnapshot: string | null = null
   let sentCount = 0
+  let removedCount = 0
 
   for (const connectionId of connectionIds) {
     const connection = getConnection(connectionId)
 
     if (connection === null) {
       registry.unwatch(connectionId)
+      removedCount += 1
       continue
     }
 
@@ -55,6 +60,7 @@ export function broadcastBelotSpectatorSnapshot(input: BroadcastBelotSpectatorSn
 
     if (hasBecomeParticipant) {
       registry.unwatch(connectionId)
+      removedCount += 1
       if (isSocketOpen) {
         const ended: BelotSpectateEndedMessage = {
           type: 'belot_spectate_ended',
@@ -83,6 +89,7 @@ export function broadcastBelotSpectatorSnapshot(input: BroadcastBelotSpectatorSn
     }
   }
 
+  if (removedCount > 0) input.onSpectatorsRemoved?.()
   return sentCount
 }
 

@@ -117,6 +117,12 @@ import {
 import { sortLocalHandForAllTrumps, sortLocalHandForDisplay, type SortDisplayOptions } from './sortLocalHand'
 import { renderPlayingScreen, removeBottomHandOverlay, type RenderPlayingScreenOptions } from './renderPlayingScreen'
 import { disposePlayingTransientPresentation } from './renderPlayingScreen'
+import {
+  BELOT_SPECTATOR_VIEWER_APPEARS_SOUND_SRC,
+  removeBelotSpectatorViewersOverlay,
+  syncBelotSpectatorViewersOverlay,
+  type BelotSpectatorViewer,
+} from './renderBelotSpectatorViewers'
 import { renderScoringScreen } from './renderScoringPanel'
 import { renderMatchEndedScreen } from './renderMatchEndedScreen'
 import { renderScoreHud } from './renderScoreHud'
@@ -127,7 +133,7 @@ import {
   renderActiveRoomSettingsPanel,
   renderGameSoundsToggleState,
 } from './renderActiveRoomActionBar'
-import { isGameSoundsEnabled, setGameSoundsEnabled } from '../audio/gameSoundSettings'
+import { isGameSoundsEnabled, playGameSound, setGameSoundsEnabled } from '../audio/gameSoundSettings'
 import { PHRASE_REACTIONS, getPhraseReactionText } from './phraseReactions'
 import {
   removeSeatProfileOverlay,
@@ -335,6 +341,55 @@ export function createActiveRoomFlowController(
   const SPECTATOR_FINAL_BOARD_MS = 10_000
   let spectatorFinalBoard: { roomId: string; token: number; timerId: number } | null = null
   let spectatorFinalBoardTokenSeq = 0
+
+  // Belot viewer-indicator ("{име} гледа вашата игра") — САМО за participant
+  // (controlledSeat !== null). Състоянието е отделно от phase render-а:
+  // update-ът само sync-ва body-level иконата/popover-а (виж
+  // renderBelotSpectatorViewers.ts) — никакъв scheduleActiveRoomRender.
+  // belotSpectatorViewersHydrated=false -> следващият списък е hydration
+  // (вход/resume/reconnect) и НЕ пуска звук; звук само при реален 0 -> 1+.
+  let belotSpectatorViewers: BelotSpectatorViewer[] = []
+  let belotSpectatorViewersHydrated = false
+  let isBelotSpectatorViewersPopoverOpen = false
+
+  function clearBelotSpectatorViewersState(): void {
+    belotSpectatorViewers = []
+    belotSpectatorViewersHydrated = false
+    isBelotSpectatorViewersPopoverOpen = false
+    removeBelotSpectatorViewersOverlay()
+  }
+
+  function syncBelotSpectatorViewersIndicator(): void {
+    const visible =
+      activeRoomState !== null &&
+      activeRoomState.viewerRole === 'participant' &&
+      activeRoomState.controlledSeat !== null &&
+      belotSpectatorViewers.length > 0
+    if (!visible) isBelotSpectatorViewersPopoverOpen = false
+    syncBelotSpectatorViewersOverlay({
+      visible,
+      viewers: belotSpectatorViewers,
+      popoverOpen: isBelotSpectatorViewersPopoverOpen,
+      onIconClick: () => {
+        isBelotSpectatorViewersPopoverOpen = !isBelotSpectatorViewersPopoverOpen
+        syncBelotSpectatorViewersIndicator()
+      },
+      onOutsideClick: () => {
+        isBelotSpectatorViewersPopoverOpen = false
+        syncBelotSpectatorViewersIndicator()
+      },
+    })
+  }
+
+  function applyBelotRoomSpectators(viewers: BelotSpectatorViewer[]): void {
+    if (!activeRoomState || activeRoomState.controlledSeat === null) return
+    const wasEmpty = belotSpectatorViewers.length === 0
+    const shouldPlayAppearSound = belotSpectatorViewersHydrated && wasEmpty && viewers.length > 0
+    belotSpectatorViewers = viewers.map((viewer) => ({ profileId: viewer.profileId, displayName: viewer.displayName }))
+    belotSpectatorViewersHydrated = true
+    if (shouldPlayAppearSound) playGameSound(BELOT_SPECTATOR_VIEWER_APPEARS_SOUND_SRC)
+    syncBelotSpectatorViewersIndicator()
+  }
 
   function clearSpectatorFinalBoard(): void {
     if (spectatorFinalBoard !== null) {
@@ -5813,6 +5868,7 @@ export function createActiveRoomFlowController(
     syncLeaveControls()
     syncPersistentBotTakeoverPopup()
     syncTableGiftOverlays()
+    syncBelotSpectatorViewersIndicator()
   }
 
   function applyRoomSnapshotToActiveRoom(message: RoomSnapshotMessage): boolean {
@@ -5898,6 +5954,7 @@ export function createActiveRoomFlowController(
   }
 
   function enterActiveRoomFromResume(roomId: string, seat: Seat, stake: MatchStake): void {
+    clearBelotSpectatorViewersState()
     resetCuttingAnimationState()
     clearDealingAnimationState()
     clearDealNextTwoAnimationState()
@@ -5975,6 +6032,7 @@ export function createActiveRoomFlowController(
   // gift/profile-interaction gate. НИКОГА reconnectToken, НИКОГА
   // tournament/participant fields, НИКОГА resume/join заявка.
   function enterActiveRoomAsSpectator(roomId: string, snapshot: BelotSpectatorSnapshotMessage): void {
+    clearBelotSpectatorViewersState()
     clearSpectatorFinalBoard()
     resetCuttingAnimationState()
     clearDealingAnimationState()
@@ -6122,6 +6180,7 @@ export function createActiveRoomFlowController(
     removeBottomHandOverlay()
     removeBiddingPopupOverlay()
     options.root.innerHTML = ''
+    clearBelotSpectatorViewersState()
     activeRoomState = null
   }
 
@@ -6134,6 +6193,7 @@ export function createActiveRoomFlowController(
   }
 
   function enterActiveRoom(message: MatchFoundMessage, stakeAlreadyShown = false): void {
+    clearBelotSpectatorViewersState()
     clearSpectatorFinalBoard()
     resetCuttingAnimationState()
     clearDealingAnimationState()
@@ -6419,6 +6479,7 @@ export function createActiveRoomFlowController(
       closeProfileAccessBlockPopup()
       removeSeatPanels()
       removeLeaveButton()
+      clearBelotSpectatorViewersState()
       activeRoomState = null
       options.showLobby(
         message.penalty
@@ -6458,6 +6519,7 @@ export function createActiveRoomFlowController(
       closeProfileAccessBlockPopup()
       removeSeatPanels()
       removeLeaveButton()
+      clearBelotSpectatorViewersState()
       activeRoomState = null
       options.showLobby(message.message, message.roomId)
       return true
@@ -6571,6 +6633,12 @@ export function createActiveRoomFlowController(
       return true
     }
 
+    // Belot viewer-indicator — само overlay sync, БЕЗ phase render.
+    if (message.type === 'belot_room_spectators' && message.roomId === activeRoomState.roomId) {
+      applyBelotRoomSpectators(message.spectators)
+      return true
+    }
+
     return false
   }
 
@@ -6594,6 +6662,8 @@ export function createActiveRoomFlowController(
       clearPendingCutSubmission()
       clearPendingBidSubmission()
       playingCache.pendingPlayCardSent = false
+      // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
+      belotSpectatorViewersHydrated = false
     }
 
     activeRoomState.isConnected = value
@@ -6624,6 +6694,8 @@ export function createActiveRoomFlowController(
       clearPendingCutSubmission()
       clearPendingBidSubmission()
     }
+    // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
+    if (!isConnected) belotSpectatorViewersHydrated = false
 
     activeRoomState.isConnected = isConnected
     activeRoomState.errorText = message
@@ -6668,6 +6740,7 @@ export function createActiveRoomFlowController(
     removeSeatPanels()
     removeLeaveButton()
     options.leaveActiveRoom(roomId)
+    clearBelotSpectatorViewersState()
     activeRoomState = null
     options.showLobby(null, roomId)
   }
@@ -6703,6 +6776,7 @@ export function createActiveRoomFlowController(
     removeSeatPanels()
     removeLeaveButton()
     options.leaveActiveRoom(roomId)
+    clearBelotSpectatorViewersState()
     activeRoomState = null
     options.startNewGame(stake, displayName || undefined)
   }

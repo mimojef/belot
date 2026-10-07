@@ -722,6 +722,22 @@ export type BelotSpectateEndedMessage = {
   reason: BelotSpectateEndedReason
 }
 
+/**
+ * Viewer-indicator за участниците ("гледа вашата игра"). САМО public полета —
+ * deduplicate-нато по profileId (един човек = един ред, независимо от tabs).
+ */
+export type BelotRoomSpectatorSnapshot = {
+  profileId: string
+  displayName: string
+}
+
+/** Изпраща се ЕДИНСТВЕНО до participant connections на стаята, никога до spectators. */
+export type BelotRoomSpectatorsMessage = {
+  type: 'belot_room_spectators'
+  roomId: RoomId
+  spectators: BelotRoomSpectatorSnapshot[]
+}
+
 export type ConnectedMessage = {
   type: 'connected'
   clientId: string
@@ -1553,6 +1569,7 @@ export type ServerMessage =
   | BelotSpectateStartedMessage
   | BelotSpectateDeniedMessage
   | BelotSpectateEndedMessage
+  | BelotRoomSpectatorsMessage
   | LudoMatchLeftMessage
   | LudoEmojiReactionMessage
   | LudoGiftSentMessage

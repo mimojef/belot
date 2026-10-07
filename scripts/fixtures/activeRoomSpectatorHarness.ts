@@ -6,6 +6,7 @@
 // без реален WS/server — client-side viewer-model/rendering safety е под
 // тест, не server protocol-а, вече покрит в Phase 2A/2C/3A server тестовете).
 import { createActiveRoomFlowController } from '/src/app/activeRoom/createActiveRoomFlowController.ts'
+import { setGameSoundsEnabled } from '/src/app/audio/gameSoundSettings.ts'
 import type {
   BelotSpectatorSnapshotMessage,
   RoomCardSnapshot,
@@ -16,11 +17,15 @@ import type {
 const root = document.createElement('div')
 document.body.appendChild(root)
 
+// Записва реално пуснатите звуци (src) — за viewer-indicator sound тестовете.
+const audioPlays: string[] = []
 class FakeAudio {
-  constructor(_src?: string) {}
+  private readonly src: string
+  constructor(src?: string) { this.src = src ?? '' }
   preload = ''
   volume = 1
   play(): Promise<void> {
+    audioPlays.push(this.src)
     return Promise.resolve()
   }
   // trackGameAudio() (scoring sum SFX) закача ended/error listeners.
@@ -489,6 +494,89 @@ async function applySpectatorSnapshotWithGifts(roomId: string, game: RoomGameSna
   return result
 }
 
+// ─── Belot viewer-indicator helpers ─────────────────────────────────────────
+
+function rectOf(el: Element | null): { left: number; top: number; right: number; bottom: number; width: number; height: number } | null {
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  if (r.width === 0 && r.height === 0) return null
+  return { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height }
+}
+
+// Обединен rect на видимото съдържание (HUD wrapper-ът е 0x0, съдържанието е absolute).
+function unionRectOf(el: Element | null): ReturnType<typeof rectOf> {
+  if (!el) return null
+  let u: { left: number; top: number; right: number; bottom: number } | null = null
+  for (const node of [el, ...Array.from(el.querySelectorAll('*'))]) {
+    const r = node.getBoundingClientRect()
+    if (r.width === 0 || r.height === 0) continue
+    u = u === null ? { left: r.left, top: r.top, right: r.right, bottom: r.bottom } : { left: Math.min(u.left, r.left), top: Math.min(u.top, r.top), right: Math.max(u.right, r.right), bottom: Math.max(u.bottom, r.bottom) }
+  }
+  return u === null ? null : { ...u, width: u.right - u.left, height: u.bottom - u.top }
+}
+
+function topMostProfileCardRect(): ReturnType<typeof rectOf> {
+  let best: ReturnType<typeof rectOf> = null
+  for (const card of Array.from(document.body.querySelectorAll('[data-seat-profile-card]'))) {
+    const r = rectOf(card)
+    if (r && (best === null || r.top < best.top)) best = r
+  }
+  return best
+}
+
+function viewerIndicatorInfo() {
+  const icon = document.body.querySelector<HTMLElement>('[data-belot-spectator-viewer-icon]')
+  const img = icon?.querySelector('img') ?? null
+  const popover = document.body.querySelector<HTMLElement>('[data-belot-spectator-viewers-popover]')
+  return {
+    icon: rectOf(icon),
+    iconInRoot: icon ? root.contains(icon) : false,
+    imgSrc: img?.getAttribute('src') ?? null,
+    iconTransform: icon ? getComputedStyle(icon).transform : null,
+    imgTransform: img ? getComputedStyle(img).transform : null,
+    styleText: (icon?.getAttribute('style') ?? '') + (img?.getAttribute('style') ?? ''),
+    popover: rectOf(popover),
+    popoverRows: popover ? Array.from(popover.querySelectorAll('[data-belot-spectator-viewer-row]')).map((r) => (r as HTMLElement).innerText) : [],
+    popoverHtml: popover?.innerHTML ?? '',
+    popoverHasImg: popover ? popover.querySelector('img') !== null : false,
+    viewport: { width: window.innerWidth, height: window.innerHeight },
+    hud: unionRectOf(document.body.querySelector('[data-active-room-score-hud]')),
+    topProfile: topMostProfileCardRect(),
+    leave: rectOf(document.body.querySelector('[data-active-room-leave-button]')),
+    settings: rectOf(document.body.querySelector('[data-active-room-settings-button]')),
+  }
+}
+
+function clickViewerIcon(): boolean {
+  const icon = document.body.querySelector<HTMLElement>('[data-belot-spectator-viewer-icon]')
+  if (!icon) return false
+  icon.click()
+  return true
+}
+
+function clickOutsideViewers(): void {
+  root.click()
+}
+
+function setConnectionStateFn(isConnected: boolean): void {
+  controller.setConnectionState(isConnected, isConnected ? null : 'reconnecting')
+}
+
+// Брои замени на root-а (пълен phase render) между start/stop.
+let rootMutationCount = 0
+let rootObserver: MutationObserver | null = null
+function startRootMutationCount(): void {
+  rootMutationCount = 0
+  rootObserver?.disconnect()
+  rootObserver = new MutationObserver((records) => { rootMutationCount += records.length })
+  rootObserver.observe(root, { childList: true })
+}
+function stopRootMutationCount(): number {
+  rootObserver?.disconnect()
+  rootObserver = null
+  return rootMutationCount
+}
+
 // ─── Phase 5A helpers (D11 team scoring semantics) ──────────────────────────
 
 // HUD: двете колони (label + score) в реда, в който се рендерират.
@@ -726,5 +814,15 @@ function reset(): void {
   matchEndedInfo,
   // Phase 5B
   setEmulateMainSpectatorExit,
+  // Belot viewer-indicator
+  viewerIndicatorInfo,
+  clickViewerIcon,
+  clickOutsideViewers,
+  setConnectionStateFn,
+  startRootMutationCount,
+  stopRootMutationCount,
+  getAudioPlays: () => audioPlays.slice(),
+  clearAudioPlays: () => { audioPlays.length = 0 },
+  setGameSoundsEnabledFn: (enabled: boolean) => setGameSoundsEnabled(enabled),
   getCalls: () => calls,
 }
