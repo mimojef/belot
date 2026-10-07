@@ -7288,7 +7288,7 @@ export function renderTopicsPersonalChatPanel(state: LobbyScreenState): string {
 function renderChatPanel(state: LobbyScreenState): string {
   if (state.chatLoading) {
     return `
-      <div style="min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
+      <div style="flex:1 1 0;min-height:520px;display:flex;align-items:center;justify-content:center;border:1px solid rgba(212,165,32,0.34);background:#050505;border-radius:8px;color:#d4a520;font-size:18px;font-weight:900;">
         Зареждане на чат...
       </div>
     `
@@ -7319,8 +7319,8 @@ function renderChatPanel(state: LobbyScreenState): string {
   `
 
   return `
-    <section style="min-height:520px;display:grid;grid-template-columns:300px minmax(0,1fr) 250px;gap:14px;align-content:start;">
-      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;max-height:560px;">
+    <section style="flex:1 1 0;min-height:520px;display:grid;grid-template-columns:300px minmax(0,1fr) 250px;grid-template-rows:minmax(0,1fr);gap:14px;">
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow:hidden;display:flex;flex-direction:column;min-height:0;">
         <div style="padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);flex-shrink:0;">
           <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
             <div style="font-size:22px;font-weight:900;color:#f8fafc;">${state.chatShowArchived ? 'Архивирани' : 'Чат'}</div>
@@ -7375,18 +7375,18 @@ function renderChatPanel(state: LobbyScreenState): string {
         `}
       </div>
 
-      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#111 0%,#050505 100%);min-width:0;overflow:hidden;">
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:linear-gradient(180deg,#111 0%,#050505 100%);min-width:0;min-height:0;overflow:hidden;display:flex;flex-direction:column;">
         ${activeConversation === null ? `
-          <div style="min-height:520px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;text-align:center;padding:20px;">
+          <div style="flex:1;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.62);font-size:15px;font-weight:800;text-align:center;padding:20px;">
             Избери приятел от списъка.
           </div>
         ` : `
-          <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);">
+          <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-bottom:1px solid rgba(212,165,32,0.24);flex-shrink:0;">
             <div style="font-size:19px;font-weight:900;color:#f8fafc;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
             ${activeConversation.friendIsPikaTeam === true ? pikaSupportBadge : ''}
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
           </div>
-          <div data-chat-messages-scroll="1" style="height:350px;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+          <div data-chat-messages-scroll="1" style="flex:1 1 0;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
             ${state.chatMessagesLoading ? `
               <div style="margin:auto;color:#d4a520;font-size:15px;font-weight:900;">Зареждане...</div>
             ` : state.chatMessages.length === 0 ? `
@@ -7423,7 +7423,7 @@ function renderChatPanel(state: LobbyScreenState): string {
               `}).join('')}
             `}
           </div>
-          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);">
+          <form data-lobby-chat-form="${escapeHtml(activeConversation.friendshipId)}" style="display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-top:1px solid rgba(212,165,32,0.20);flex-shrink:0;">
             <div style="display:flex;gap:10px;align-items:center;">
               ${renderChatImagePickerControls(state, activeConversation.friendshipId)}
               ${renderComposerEmojiPicker(state, COMPOSER_EMOJI_KEY_PERSONAL, 42)}
@@ -7434,7 +7434,7 @@ function renderChatPanel(state: LobbyScreenState): string {
         `}
       </div>
 
-      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow-y:auto;padding:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
+      <div style="border:1px solid rgba(212,165,32,0.30);border-radius:8px;background:#050505;overflow-y:auto;min-height:0;padding:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
         <div style="display:grid;grid-template-columns:repeat(3,1fr);grid-template-rows:repeat(8,1fr);gap:2px;">
           ${CHAT_EMOJIS.map((emoji) => `
             <button type="button" data-chat-emoji="${escapeHtml(emoji.code)}" style="border:0;background:#0a0a0a;padding:2px;cursor:pointer;border-radius:6px;display:flex;align-items:center;justify-content:center;" onmouseenter="this.style.background='rgba(212,165,32,0.15)'" onmouseleave="this.style.background='#0a0a0a'">
@@ -13426,7 +13426,12 @@ export function renderLobbyScreen(
         font-family: Arial, Helvetica, sans-serif;
         ${state.view === 'topics'
           ? 'overflow:hidden;display:flex;flex-direction:column;'
-          : 'overflow-y:auto;overflow-x:hidden;'}
+          : state.view === 'chat'
+            // Desktop Чат: flex height chain (root -> scale stage -> content ->
+            // renderChatPanel), за да се разпъне чатът до долния край на
+            // viewport-а. Без vh: stage-ът е под zoom:var(--lobby-scale).
+            ? 'overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;'
+            : 'overflow-y:auto;overflow-x:hidden;'}
         z-index: 50;
       "
     >
@@ -13478,14 +13483,14 @@ export function renderLobbyScreen(
 
       <div data-lobby-scale-stage="1" style="${state.view === 'topics'
         ? 'width:100%;height:100%;display:flex;flex-direction:column;min-height:0;'
-        : `width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin:0 auto; zoom:var(--lobby-scale);`}">
+        : `width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin:0 auto; zoom:var(--lobby-scale);${state.view === 'chat' ? ' flex:1 1 0; display:flex; flex-direction:column;' : ''}`}">
         ${renderNav(state)}
 
         <div
           ${state.view === 'topics' ? 'data-topics-desktop-shell="1"' : ''}
           style="${state.view === 'topics'
           ? `flex:1;min-height:0;display:flex;flex-direction:column;max-width:${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px;width:100%;margin:0 auto;padding:16px 20px;background:#000000;box-sizing:border-box;overflow:hidden;`
-          : `max-width: ${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;`}">
+          : `max-width: ${PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX}px; margin: 0 auto; padding: 16px 20px; background:#000000; box-sizing:border-box;${state.view === 'chat' ? ' flex:1 1 0; width:100%; display:flex; flex-direction:column;' : ''}`}">
           ${state.view === 'support'
             ? renderAdminSupportPage(state)
             : state.view === 'guest-contact-messages'

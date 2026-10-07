@@ -45,6 +45,7 @@
     "check:bootstrap-recovery": "npx tsx scripts/checkBootstrapRecovery.ts",
     "check:consent-analytics": "npx tsx scripts/checkConsentAnalytics.ts",
     "check:chat-draft-preserved": "npx tsx scripts/checkChatDraftPreserved.ts",
+    "check:desktop-chat-viewport-height": "npx tsx scripts/checkDesktopChatViewportHeight.ts",
     "check:topics-switch-race": "npx tsx scripts/checkTopicsSwitchRace.ts",
     "check:topics-composer-vip-gate": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicsComposerVipGate.ts",
     "check:topics-replies-likes-client": "npx tsx scripts/checkTopicsRepliesLikesClient.ts",
