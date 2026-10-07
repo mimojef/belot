@@ -84,8 +84,8 @@ export type RenderCuttingSeatPanelsOptions = {
   /**
    * Phase 3B — separate от `localSeat` (perspective/geometry, непроменено
    * use-case): gate ЕДИНСТВЕНО за gift-icon eligibility
-   * (canSendGiftToSeat). null (Belot spectator) -> gift иконата никога не
-   * се mount-ва за никой seat. Participant: подава се същото като
+   * (canSendGiftToSeat). null (Belot spectator) -> gift икона на всички заети
+   * места (spectator table gift). Participant: подава се същото като
    * localSeat.
    */
   controlledSeat?: Seat | null
@@ -516,8 +516,11 @@ function renderSeatGiftActionIcon(
   // (не го замества) — transform-origin остава default (center), затова
   // scale-ът разширява бутона симетрично около собствения му център, без
   // да размества позицията, зададена от translateX/Y(-50%).
+  // bottom (само Belot spectator — participant никога не подарява на
+  // собственото, визуално долно място): вдясно от card-а, като top —
+  // над него е ветрилото с карти.
   const positionStyle =
-    visualSeat === 'top'
+    visualSeat === 'top' || visualSeat === 'bottom'
       ? `right:${offsetPx}px; top:50%; transform:translateY(-50%) scale(${inverseScale});`
       : `left:50%; top:${offsetPx}px; transform:translateX(-50%) scale(${inverseScale});`
 
@@ -1272,9 +1275,13 @@ export function createCuttingSeatPanelHtml(
   // crash). isBotReplacement (tournament no-show takeover, показва
   // оригиналния ЧОВЕШКИ replaced player визуално) остава изключен — твърде
   // много неясна semantics кой реално получава подаръка в тоя edge case.
-  // Phase 3B §12: controlledSeat (НЕ localSeat/perspective) — spectator
-  // (controlledSeat=null) никога не вижда gift иконата на никой seat,
-  // независимо кой е визуално 'bottom'.
+  // controlledSeat (НЕ localSeat/perspective):
+  //  - participant (controlledSeat = собственото място) -> всяко друго място;
+  //  - Belot spectator (controlledSeat === null, изрично) -> ВСИЧКИТЕ заети
+  //    места (spectator table gift; сървърът валидира получателя срещу
+  //    гледаната стая), вкл. визуално 'bottom';
+  //  - legacy call site без controlledSeat (undefined) -> без gift икона.
+  const isSpectatorViewerGift = controlledSeat === null
   const canSendGiftToSeat =
     seat.isOccupied &&
     !isBotReplacement &&
@@ -1282,8 +1289,7 @@ export function createCuttingSeatPanelHtml(
     // по-стар сървър/snapshot без profileId поле.
     seat.profileId != null &&
     seat.profileId.length > 0 &&
-    controlledSeat != null &&
-    seat.seat !== controlledSeat
+    (isSpectatorViewerGift || (controlledSeat != null && seat.seat !== controlledSeat))
   const isBottomSeat = visualSeat === 'bottom'
   const isMobileLayout = isPhoneLayoutViewport()
   const isCountdownSeat = seat.seat === countdownSeat
@@ -1476,6 +1482,7 @@ export function createCuttingSeatPanelHtml(
           ${cutterBadgeHtml}
         </div>
         ${renderCuttingDealerBadge(visualSeat, dealerSeat, seat.seat)}
+        ${renderSeatGiftActionIcon(seat, canSendGiftToSeat, visualSeat, panelScale)}
       </div>
     `
   }

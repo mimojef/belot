@@ -1721,7 +1721,10 @@ export type ActiveTableGiftSnapshot = {
   giftName: string
   imageUrl: string
   senderProfileId: string
-  senderSeat: Seat
+  /** null само за подарък от Belot spectator. */
+  senderSeat: Seat | null
+  /** Липсва при по-стари записи -> 'participant'. */
+  senderKind?: 'participant' | 'spectator'
   senderDisplayName: string
   recipientSeat: Seat
   sentAt: string
@@ -1741,7 +1744,10 @@ export type TableGiftItemSentMessage = {
   giftName: string
   imageUrl: string
   senderProfileId: string
-  senderSeat: Seat
+  /** 'spectator' -> senderSeat е null; полетът тръгва от spectator anchor-а и
+   * след кацане се показва "От {senderDisplayName}". Липсва -> 'participant'. */
+  senderKind?: 'participant' | 'spectator'
+  senderSeat: Seat | null
   senderDisplayName: string
   // Phase 4B: spectator копието на event-а не носи recipientProfileId и
   // chargedPrice (само participant-ите ги получават); presentation-ът не ги чете.

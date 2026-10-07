@@ -7,6 +7,7 @@
 // тест, не server protocol-а, вече покрит в Phase 2A/2C/3A server тестовете).
 import { createActiveRoomFlowController } from '/src/app/activeRoom/createActiveRoomFlowController.ts'
 import { setGameSoundsEnabled } from '/src/app/audio/gameSoundSettings.ts'
+import { getBelotSpectatorViewerOriginRect } from '/src/app/activeRoom/renderBelotSpectatorViewers.ts'
 import type {
   BelotSpectatorSnapshotMessage,
   RoomCardSnapshot,
@@ -59,7 +60,7 @@ const controller = createActiveRoomFlowController({
   sendEmojiReaction: record('sendEmojiReaction'),
   sendPhraseReaction: record('sendPhraseReaction'),
   sendTableGift: record('sendTableGift'),
-  onGiftItemCatalogLoad: async () => ({ ok: true, items: [] }),
+  onGiftItemCatalogLoad: async () => ({ ok: true, items: [{ giftItemId: 'gift-rose', name: 'Роза', imageUrl: '/images/belot/belot-spectator-viewer.webp', price: 100 }] }),
   getAuthSession: () => ({ profile: { yellowCoinsBalance: 50000 } }),
   requestPlayerProfile: record('requestPlayerProfile'),
   getFriendshipAction: () => null,
@@ -494,6 +495,70 @@ async function applySpectatorSnapshotWithGifts(roomId: string, game: RoomGameSna
   return result
 }
 
+// ─── Belot spectator table-gift helpers ────────────────────────────────────
+
+function giftIconSeats(): string[] {
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[data-active-room-gift-icon]'))
+    .map((el) => el.getAttribute('data-active-room-gift-icon') ?? '')
+    .sort()
+}
+
+function clickGiftIcon(seat: string): boolean {
+  const icon = document.body.querySelector<HTMLElement>(`[data-active-room-gift-icon="${seat}"]`)
+  if (!icon) return false
+  icon.click()
+  return true
+}
+
+function tableGiftModalInfo(): { open: boolean; text: string; pickIds: string[] } {
+  const host = document.body.querySelector<HTMLElement>('[data-table-gift-modal-host="1"]')
+  return {
+    open: host !== null && host.innerHTML.trim().length > 0,
+    text: host?.innerText ?? '',
+    pickIds: host ? Array.from(host.querySelectorAll('[data-table-gift-pick]')).map((el) => el.getAttribute('data-table-gift-pick') ?? '') : [],
+  }
+}
+
+function pickTableGift(giftItemId: string): boolean {
+  const el = document.body.querySelector<HTMLElement>(`[data-table-gift-pick="${giftItemId}"]`)
+  if (!el) return false
+  el.click()
+  return true
+}
+
+function viewerOriginRect(): { cx: number; cy: number; width: number } {
+  const r = getBelotSpectatorViewerOriginRect()
+  return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2), width: Math.round(r.width) }
+}
+
+function flyerCenters(): Array<{ cx: number; cy: number }> {
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[data-table-gift-flight-layer] img')).map((img) => {
+    const r = img.getBoundingClientRect()
+    return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) }
+  })
+}
+
+function profileCenter(seat: string): { cx: number; cy: number } | null {
+  const el = document.body.querySelector<HTMLElement>(`[data-seat-panels-host="1"] [data-profile-seat-btn="${seat}"]`)
+  if (!el) return null
+  const r = el.getBoundingClientRect()
+  return { cx: Math.round(r.left + r.width / 2), cy: Math.round(r.top + r.height / 2) }
+}
+
+function giftSenderLabels(): Array<{ seat: string; text: string; transactionId: string; pointerEvents: string; overflow: boolean; centerX: number }> {
+  return Array.from(document.body.querySelectorAll<HTMLElement>('[data-table-gift-sender-label]')).map((el) => {
+    const r = el.getBoundingClientRect()
+    return {
+      seat: el.getAttribute('data-table-gift-sender-label') ?? '',
+      text: el.textContent ?? '',
+      transactionId: el.dataset.transactionId ?? '',
+      pointerEvents: getComputedStyle(el).pointerEvents,
+      overflow: r.right > window.innerWidth + 1 || r.left < -1,
+      centerX: Math.round(r.left + r.width / 2),
+    }
+  })
+}
+
 // ─── Belot viewer-indicator helpers ─────────────────────────────────────────
 
 function rectOf(el: Element | null): { left: number; top: number; right: number; bottom: number; width: number; height: number } | null {
@@ -824,5 +889,14 @@ function reset(): void {
   getAudioPlays: () => audioPlays.slice(),
   clearAudioPlays: () => { audioPlays.length = 0 },
   setGameSoundsEnabledFn: (enabled: boolean) => setGameSoundsEnabled(enabled),
+  // Belot spectator table gifts
+  giftIconSeats,
+  clickGiftIcon,
+  tableGiftModalInfo,
+  pickTableGift,
+  viewerOriginRect,
+  flyerCenters,
+  profileCenter,
+  giftSenderLabels,
   getCalls: () => calls,
 }

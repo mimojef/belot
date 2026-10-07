@@ -30,7 +30,7 @@
  *   [W6]  всеки gameplay/social WS action -> spectator_action_forbidden
  *   [W7]  bidding: spectator bid в хода на host-а -> отказ, state непроменен
  *   [W8]  playing: spectator play на картата на host-а -> отказ, ръката непроменена
- *   [W9]  emoji/phrase не стигат до играчите; table gift -> без transaction/wallet промяна
+ *   [W9]  emoji/phrase не стигат до играчите; table gift извън гледаната маса -> без transaction/wallet промяна
  *   [W10] HTTP gifts (send-gift-item, gift-coins, gift-coins/direct, платени
  *         gift checkout-и) -> 403 spectator_action_forbidden, без balance/
  *         ledger/transaction side effects
@@ -553,7 +553,7 @@ try {
       { type: 'request_leave_match', roomId },
       { type: 'send_emoji_reaction', roomId, emojiId: '01' },
       { type: 'send_phrase_reaction', roomId, phraseId: 'phrase_01' },
-      { type: 'send_table_gift', roomId, recipientProfileId: hostUser.profileId, giftItemId, requestId: randomUUID() },
+      { type: 'send_table_gift', roomId: 'room-not-watched-by-spectator', recipientProfileId: hostUser.profileId, giftItemId, requestId: randomUUID() },
       { type: 'send_ludo_gift', matchId: 'any-match', recipientProfileId: hostUser.profileId, giftItemId, requestId: randomUUID() },
       { type: 'request_player_profile', roomId, seat: hostSeat },
     ]
@@ -565,14 +565,16 @@ try {
     }
   })
 
-  await check('[W9] emoji/phrase never reach players; table gift has no wallet/transaction side effects', async () => {
+  // Spectator table gift към ГЛЕДАНАТАТА маса е позволен (checkBelotSpectatorTableGiftSend.ts);
+  // към стая, която spectator-ът НЕ гледа, остава забранен без странични ефекти.
+  await check('[W9] emoji/phrase never reach players; table gift outside the watched room has no wallet/transaction side effects', async () => {
     const hostFrom = host.frames.length
     const guestFrom = guest.frames.length
     const walletBefore = readWallet(dbFile, spectatorUser.profileId)
     const requestId = randomUUID()
     send(spectator, { type: 'send_emoji_reaction', roomId, emojiId: '02' })
     send(spectator, { type: 'send_phrase_reaction', roomId, phraseId: 'phrase_02' })
-    send(spectator, { type: 'send_table_gift', roomId, recipientProfileId: hostUser.profileId, giftItemId, requestId })
+    send(spectator, { type: 'send_table_gift', roomId: 'room-not-watched-by-spectator', recipientProfileId: hostUser.profileId, giftItemId, requestId })
     await sleep(1_500)
     for (const [client, from] of [[host, hostFrom], [guest, guestFrom]] as Array<[TestClient, number]>) {
       const leaked = client.frames.slice(from).filter((f) => ['emoji_reaction', 'phrase_reaction', 'table_gift_item_sent'].includes(f.type))

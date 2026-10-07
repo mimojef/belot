@@ -231,12 +231,17 @@ export type ActiveTableGiftSnapshot = {
   giftName: string
   imageUrl: string
   senderProfileId: ProfileId
-  senderSeat: Seat
+  /** null само когато подаръкът е изпратен от Belot spectator (няма място). */
+  senderSeat: Seat | null
+  /** Липсва при по-стари (restore-нати) записи -> третира се като 'participant'. */
+  senderKind?: TableGiftSenderKind
   senderDisplayName: string
   recipientSeat: Seat
   sentAt: string
   expiresAt: string
 }
+
+export type TableGiftSenderKind = 'participant' | 'spectator'
 
 export type ServerRoomConfig = {
   maxPlayers: 4

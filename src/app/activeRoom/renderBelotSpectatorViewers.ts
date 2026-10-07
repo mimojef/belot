@@ -68,6 +68,35 @@ function computeIconLayout(): { sizePx: number; topCss: string; rightCss: string
   return { sizePx, topCss, rightCss }
 }
 
+function iconPositionCss(layout: { sizePx: number; topCss: string; rightCss: string }): string[] {
+  return [
+    'position:fixed',
+    `top:${layout.topCss}`,
+    `right:${layout.rightCss}`,
+    `width:${layout.sizePx}px`,
+    `height:${layout.sizePx}px`,
+  ]
+}
+
+/**
+ * Origin rect за полет на подарък от Belot spectator — ТОЧНО позицията и
+ * размерът на viewer иконата горе вдясно. Ако иконата е в DOM-а (участник с
+ * видими зрители) -> нейният rect. Иначе (spectator viewer: иконата нарочно
+ * не се рендерира) -> временен НЕВИДИМ probe със същите CSS правила (вкл.
+ * env(safe-area-inset-*)), измерен и веднага премахнат. Никаква видима икона.
+ */
+export function getBelotSpectatorViewerOriginRect(): DOMRect {
+  const icon = document.body.querySelector<HTMLElement>(`[${ICON_ATTR}]`)
+  if (icon) return icon.getBoundingClientRect()
+  const probe = document.createElement('div')
+  probe.setAttribute('data-belot-spectator-viewer-anchor-probe', '1')
+  probe.style.cssText = [...iconPositionCss(computeIconLayout()), 'visibility:hidden', 'pointer-events:none'].join(';')
+  document.body.appendChild(probe)
+  const rect = probe.getBoundingClientRect()
+  probe.remove()
+  return rect
+}
+
 let outsideClickHandler: ((event: MouseEvent) => void) | null = null
 let resizeHandler: (() => void) | null = null
 
@@ -114,11 +143,7 @@ export function syncBelotSpectatorViewersOverlay(options: SyncBelotSpectatorView
     options.onIconClick()
   }
   icon.style.cssText = [
-    'position:fixed',
-    `top:${layout.topCss}`,
-    `right:${layout.rightCss}`,
-    `width:${layout.sizePx}px`,
-    `height:${layout.sizePx}px`,
+    ...iconPositionCss(layout),
     'border:0',
     'background:transparent',
     'padding:0',

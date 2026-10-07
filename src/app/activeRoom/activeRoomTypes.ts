@@ -71,9 +71,12 @@ export type ActiveTableGiftOverlay = {
   giftItemId: string
   giftName: string
   imageUrl: string
-  senderSeat: Seat
+  /** null само за подарък от Belot spectator. */
+  senderSeat: Seat | null
   senderDisplayName: string
   expiresAt: string
+  /** 'spectator' -> след live landing се показва "От {senderDisplayName}" (4 s). */
+  senderKind: 'participant' | 'spectator'
 }
 
 export type CreateActiveRoomFlowControllerOptions = {

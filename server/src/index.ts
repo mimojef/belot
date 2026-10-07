@@ -227,6 +227,7 @@ import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag
 import { createSpectatorRoomSnapshotMessage } from './protocol/createRoomSnapshotMessage.js'
 import { broadcastToRoomConnections } from './core/broadcastToRoomConnections.js'
 import { resolveTableGiftParticipants } from './core/resolveTableGiftParticipants.js'
+import { resolveSpectatorTableGiftParticipants } from './core/resolveSpectatorTableGiftParticipants.js'
 import { resolveLudoGiftParticipants, type LudoGiftMatchLike } from './core/resolveLudoGiftParticipants.js'
 import type { LudoColor } from './game/ludoEngine/ludoEngineTypes.js'
 import { countServerRoomsByPhase } from './core/countServerRoomsByPhase.js'
@@ -253,6 +254,7 @@ import type {
   ServerConnection,
   ServerRoom,
   ServerState,
+  TableGiftSenderKind,
   Team,
 } from './core/serverTypes.js'
 import { SERVER_SEAT_ORDER } from './core/serverTypes.js'
@@ -20863,9 +20865,18 @@ wsServer.on('connection', (socket, request) => {
         // Defense in depth: spectator НИКОГА не стига до gameplay/social
         // handler-ите (те и без това го отказват чрез currentRoomId/currentSeat
         // guard-овете, тъй като spectator connection никога не ги получава).
+        // Тясно изключение: send_table_gift остава в забранения списък, НО
+        // connection, която е регистриран spectator ТОЧНО на тази стая, минава
+        // към spectator table-gift resolver-а в handler-а (получател = само
+        // участник на гледаната маса). Втори таб, който не гледа тази стая,
+        // остава забранен.
+        const isSpectatorTableGiftForWatchedRoom =
+          message.type === 'send_table_gift' &&
+          belotSpectatorRegistry.getWatchedRoomId(connection.id) === message.roomId
         if (
           spectatorCheckConnection !== null &&
           BELOT_SPECTATOR_FORBIDDEN_MESSAGE_TYPES.has(message.type) &&
+          !isSpectatorTableGiftForWatchedRoom &&
           isBelotSpectatorRequester(spectatorCheckConnection)
         ) {
           sendBelotSpectatorActionForbidden(connection.id)
@@ -21656,12 +21667,48 @@ wsServer.on('connection', (socket, request) => {
         // service (giftItemStore.sendGiftItem), само с context='game' + roomId.
         // Никаква паралелна платежна логика тук.
         const giftConn = getConnectionById(serverState, connection.id)
-        const resolution = resolveTableGiftParticipants({
-          connection: giftConn,
-          rooms: serverState.rooms,
-          claimedRoomId: message.roomId,
-          recipientProfileId: message.recipientProfileId,
-        })
+        // Belot spectator (не закачен за игра, регистриран за ТАЗИ стая) ->
+        // spectator resolver; всички останали -> непроменения participant path.
+        const spectatorWatchedRoomId = belotSpectatorRegistry.getWatchedRoomId(connection.id)
+        const isSpectatorGiftSender =
+          giftConn !== null && giftConn.currentRoomId === null && spectatorWatchedRoomId !== null
+        const resolution: (
+          | { ok: false; message: string }
+          | {
+              ok: true
+              room: ServerRoom
+              senderProfileId: string
+              senderKind: TableGiftSenderKind
+              senderSeat: Seat | null
+              senderDisplayName: string
+              recipientProfileId: string
+              recipientSeat: Seat
+            }
+        ) = (() => {
+          if (isSpectatorGiftSender) {
+            const spectatorResolution = resolveSpectatorTableGiftParticipants({
+              connection: giftConn,
+              connectionId: connection.id,
+              watchedRoomId: spectatorWatchedRoomId,
+              rooms: serverState.rooms,
+              claimedRoomId: message.roomId,
+              recipientProfileId: message.recipientProfileId,
+              getPublicDisplayName: (profileId) => playerProgressStore.getPublicProfile(profileId)?.displayName ?? null,
+            })
+            return spectatorResolution.ok
+              ? { ...spectatorResolution, senderKind: 'spectator' as const, senderSeat: null }
+              : spectatorResolution
+          }
+          const participantResolution = resolveTableGiftParticipants({
+            connection: giftConn,
+            rooms: serverState.rooms,
+            claimedRoomId: message.roomId,
+            recipientProfileId: message.recipientProfileId,
+          })
+          return participantResolution.ok
+            ? { ...participantResolution, senderKind: 'participant' as const }
+            : participantResolution
+        })()
 
         if (!resolution.ok) {
           safeSendToConnection(connection.id, {
@@ -21720,6 +21767,7 @@ wsServer.on('connection', (socket, request) => {
             giftName,
             imageUrl,
             senderProfileId: resolution.senderProfileId,
+            senderKind: resolution.senderKind,
             senderSeat: resolution.senderSeat,
             senderDisplayName: resolution.senderDisplayName,
             recipientSeat: resolution.recipientSeat,
@@ -21748,6 +21796,7 @@ wsServer.on('connection', (socket, request) => {
             giftName,
             imageUrl,
             senderProfileId: resolution.senderProfileId,
+            senderKind: resolution.senderKind,
             senderSeat: resolution.senderSeat,
             senderDisplayName: resolution.senderDisplayName,
             recipientProfileId: resolution.recipientProfileId,

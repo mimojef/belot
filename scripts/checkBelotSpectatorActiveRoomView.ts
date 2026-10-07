@@ -24,7 +24,7 @@
  *   [C4] bot-controlled "own" seat -> НЯМА bot-takeover popup за spectator
  *   [C5] няма emoji бутон
  *   [C6] няма phrase бутон
- *   [C7] няма gift икона (никъде)
+ *   [C7] gift иконата е само на 4-те seat panel-а (spectator table gift), никъде другаде
  *   [C8] profile click -> no-op (no popup, no request)
  *   [C9] action bar: само Settings + Изход (leave+settings бутони присъстват, нищо друго)
  *
@@ -83,7 +83,7 @@
  * Phase 4B (D7 public table gift, client presentation reuse):
  *   [4B-G6/G7] existing flying gift animation от реалния sender към реалния recipient
  *   [4B-G10] след landing: един static overlay, без flyer/дубликат (и след snapshot)
- *   [4B-G8] spectator няма gift send control
+ *   [4B-G8] spectator gift control = само seat gift иконите; нищо не се праща без клик
  */
 
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
@@ -172,6 +172,7 @@ type H = {
   hasPhraseToggle: () => boolean
   hasGiftIcon: (seat: string) => boolean
   hasAnyGiftIcon: () => boolean
+  giftIconSeats: () => string[]
   hasLeaveButton: () => boolean
   hasSettingsButton: () => boolean
   clickLeaveButton: () => boolean
@@ -344,9 +345,12 @@ try {
       assertEqual(has, false, 'no phrase toggle')
     })
 
-    await check('[C7] no gift icon anywhere', async () => {
-      const has = await call(page, (h: H) => h.hasAnyGiftIcon())
-      assertEqual(has, false, 'no gift icon')
+    // Spectator table gifts: gift иконата е на ВСИЧКИ заети места (вкл. bottom),
+    // само в seat panel-ите — нищо в action bar-а.
+    await check('[C7] gift icons only on the 4 seat panels (spectator table gift), nowhere else', async () => {
+      assertEqual(JSON.stringify(await call(page, (h: H) => h.giftIconSeats())), JSON.stringify(['bottom', 'left', 'right', 'top']), 'gift seats')
+      const outsidePanels = await page.evaluate(() => Array.from(document.querySelectorAll('[data-active-room-gift-icon]')).filter((el) => !el.closest('[data-seat-panels-host]')).length)
+      assertEqual(outsidePanels, 0, 'no gift control outside the seat panels')
     })
 
     await check('[C8] profile click is a no-op (no popup, no request)', async () => {
@@ -363,8 +367,8 @@ try {
       assert(hasLeave && hasSettings, 'leave+settings must be present')
       const hasEmoji = await call(page, (h: H) => h.hasEmojiToggle())
       const hasPhrase = await call(page, (h: H) => h.hasPhraseToggle())
-      const hasGift = await call(page, (h: H) => h.hasAnyGiftIcon())
-      assert(!hasEmoji && !hasPhrase && !hasGift, 'no other action buttons must exist')
+      const actionBarGift = await page.evaluate(() => document.querySelectorAll('[data-active-room-mobile-action-bar] [data-active-room-gift-icon], [data-active-room-desktop-action-bar] [data-active-room-gift-icon]').length)
+      assert(!hasEmoji && !hasPhrase && actionBarGift === 0, 'no other action buttons must exist')
     })
 
     assertNoPageErrors(page, 'controls block')
@@ -973,8 +977,8 @@ try {
       assertEqual((await call(page, (h: H) => h.tableGiftFlyers())).length, 0, 'duplicate transaction does not fly again')
     })
 
-    await check('[4B-G8] spectator still has no gift send control', async () => {
-      assertEqual(await call(page, (h: H) => h.hasAnyGiftIcon()), false, 'no gift icon')
+    await check('[4B-G8] spectator gift control is only the seat gift icons; nothing is sent without a click', async () => {
+      assertEqual(JSON.stringify(await call(page, (h: H) => h.giftIconSeats())), JSON.stringify(['bottom', 'left', 'right', 'top']), 'seat gift icons')
       const calls = await call(page, (h: H) => h.getCalls())
       assert(!calls.some((c) => /gift/i.test(c.name)), `no gift send call: ${calls.map((c) => c.name).join(',')}`)
     })

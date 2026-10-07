@@ -1023,7 +1023,10 @@ export type TableGiftItemSentMessage = {
   giftName: string
   imageUrl: string
   senderProfileId: string
-  senderSeat: Seat
+  /** 'spectator' -> Belot spectator sender: senderSeat е null, клиентът
+   * стартира полета от spectator viewer anchor-а и показва "От {име}". */
+  senderKind: 'participant' | 'spectator'
+  senderSeat: Seat | null
   senderDisplayName: string
   recipientProfileId: string
   recipientSeat: Seat

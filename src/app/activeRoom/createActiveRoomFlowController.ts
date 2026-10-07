@@ -119,6 +119,7 @@ import { renderPlayingScreen, removeBottomHandOverlay, type RenderPlayingScreenO
 import { disposePlayingTransientPresentation } from './renderPlayingScreen'
 import {
   BELOT_SPECTATOR_VIEWER_APPEARS_SOUND_SRC,
+  getBelotSpectatorViewerOriginRect,
   removeBelotSpectatorViewersOverlay,
   syncBelotSpectatorViewersOverlay,
   type BelotSpectatorViewer,
@@ -5205,6 +5206,7 @@ export function createActiveRoomFlowController(
         giftName: gift.giftName,
         imageUrl: gift.imageUrl,
         senderSeat: gift.senderSeat,
+        senderKind: gift.senderKind ?? 'participant',
         senderDisplayName: gift.senderDisplayName,
         expiresAt: gift.expiresAt,
       }
@@ -5358,6 +5360,12 @@ export function createActiveRoomFlowController(
   }
 
   function clearAllTableGiftOverlays(): void {
+    // Летящите подаръци и "От {име}" надписите живеят в document.body —
+    // teardown (Изход/напускане/нова стая) ги прекратява, вместо да
+    // долетят/останат над lobby-то.
+    for (const flight of [...activeTableGiftFlights]) flight.cancel()
+    activeTableGiftFlights.clear()
+    clearAllSpectatorGiftSenderLabels()
     for (const seat of Object.keys(tableGiftOverlayTimerIds) as Seat[]) {
       clearTableGiftOverlayTimer(seat)
     }
@@ -5402,8 +5410,93 @@ export function createActiveRoomFlowController(
     syncTableGiftOverlays()
   }
 
+  // Belot spectator gift: "От {име}" надпис върху долната част на avatar-а на
+  // получателя, 4 s след РЕАЛНИЯ landing (никога от snapshot hydration).
+  // Body-level fixed елемент (не вътре в overlay node-а — той е clip-нат и
+  // се пренаписва при panel rebuild). Keyed по recipient seat (по-нов gift на
+  // същия получател заменя надписа — "последният печели"), guard-нат по
+  // transactionId (стар timer не маха по-нов надпис).
+  // Origin на летящия подарък: седалката на participant sender-а, или
+  // spectator viewer anchor-ът горе вдясно (spectator sender няма седалка).
+  type TableGiftFlightOrigin = { kind: 'seat'; seat: Seat } | { kind: 'spectator' }
+  const SPECTATOR_GIFT_SENDER_LABEL_MS = 4000
+  const spectatorGiftSenderLabelBySeat: Partial<Record<Seat, { transactionId: string; timerId: number }>> = {}
+  const activeTableGiftFlights = new Set<Animation>()
+
+  function removeSpectatorGiftSenderLabel(seat: Seat): void {
+    const entry = spectatorGiftSenderLabelBySeat[seat]
+    if (entry) window.clearTimeout(entry.timerId)
+    delete spectatorGiftSenderLabelBySeat[seat]
+    document.body.querySelector(`[data-table-gift-sender-label="${seat}"]`)?.remove()
+  }
+
+  function clearAllSpectatorGiftSenderLabels(): void {
+    for (const seat of Object.keys(spectatorGiftSenderLabelBySeat) as Seat[]) {
+      removeSpectatorGiftSenderLabel(seat)
+    }
+    document.body.querySelectorAll('[data-table-gift-sender-label]').forEach((node) => node.remove())
+  }
+
+  function showSpectatorGiftSenderLabel(recipientSeat: Seat, transactionId: string): void {
+    const overlay = activeRoomState?.activeTableGiftOverlays[recipientSeat]
+    // Всеки landing на този получател маха стария надпис (и participant gift).
+    removeSpectatorGiftSenderLabel(recipientSeat)
+    if (!overlay || overlay.transactionId !== transactionId || overlay.senderKind !== 'spectator') return
+    const anchor = document.body.querySelector<HTMLElement>(
+      `[data-seat-panels-host="1"] [data-profile-seat-btn="${recipientSeat}"]`,
+    )
+    const rect = anchor?.getBoundingClientRect()
+    if (!rect || rect.width === 0) return
+
+    const label = document.createElement('div')
+    label.setAttribute('data-table-gift-sender-label', recipientSeat)
+    label.dataset.transactionId = transactionId
+    label.textContent = `От ${overlay.senderDisplayName}`
+    const maxWidthPx = Math.max(120, Math.min(220, window.innerWidth - 16))
+    label.style.cssText = [
+      'position:fixed',
+      'left:0px',
+      `top:${Math.round(rect.bottom - 6)}px`,
+      'transform:translateY(-100%)',
+      `max-width:${maxWidthPx}px`,
+      'padding:3px 9px',
+      'border-radius:999px',
+      'background:rgba(10,10,10,0.82)',
+      'border:1px solid rgba(212,165,32,0.7)',
+      'color:#f8e7b0',
+      'font:700 12px/1.3 Inter, system-ui, sans-serif',
+      'white-space:nowrap',
+      'overflow:hidden',
+      'text-overflow:ellipsis',
+      'pointer-events:none',
+      'z-index:61',
+      'box-sizing:border-box',
+    ].join(';')
+    document.body.appendChild(label)
+    // Центриран върху avatar-а, но clamp-нат в viewport-а (mobile странични места).
+    const labelWidth = label.getBoundingClientRect().width
+    const centeredLeft = rect.left + rect.width / 2 - labelWidth / 2
+    const clampedLeft = Math.max(8, Math.min(window.innerWidth - 8 - labelWidth, centeredLeft))
+    label.style.left = `${Math.round(clampedLeft)}px`
+
+    const timerId = window.setTimeout(() => {
+      if (spectatorGiftSenderLabelBySeat[recipientSeat]?.transactionId !== transactionId) return
+      removeSpectatorGiftSenderLabel(recipientSeat)
+    }, SPECTATOR_GIFT_SENDER_LABEL_MS)
+    spectatorGiftSenderLabelBySeat[recipientSeat] = { transactionId, timerId }
+  }
+
+  // Live landing (или fallback reveal без анимация): release на overlay-а +
+  // spectator sender надпис. Надписът е вързан за транзакцията, НЕ за
+  // pending-landing маркера (snapshot hydration може да го е махнал рано —
+  // известен общ timing проблем, не се поправя тук).
+  function landTableGift(recipientSeat: Seat, transactionId: string): void {
+    releasePendingTableGiftLanding(recipientSeat, transactionId)
+    showSpectatorGiftSenderLabel(recipientSeat, transactionId)
+  }
+
   function playTableGiftFlightAnimation(
-    senderSeat: Seat,
+    origin: TableGiftFlightOrigin,
     recipientSeat: Seat,
     imageUrl: string,
     transactionId: string,
@@ -5414,13 +5507,13 @@ export function createActiveRoomFlowController(
     // layout-нато), overlay-ът НЕ бива да остане hidden завинаги — веднага
     // освобождаваме suppression-а и показваме canonical state-а directно.
     if (typeof document.createElement('div').animate !== 'function') {
-      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      landTableGift(recipientSeat, transactionId)
       return
     }
 
     const panelsHost = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (!panelsHost) {
-      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      landTableGift(recipientSeat, transactionId)
       return
     }
 
@@ -5430,23 +5523,25 @@ export function createActiveRoomFlowController(
     // (getCuttingSeatPanelAnchorStyle(visualSeat, ...)), не чрез стойността
     // на атрибута. Затова тук се търси директно по абсолютния seat, а
     // getBoundingClientRect връща вече правилната визуална позиция.
-    const fromSeatNode = panelsHost.querySelector<HTMLElement>(
-      `[data-profile-seat-btn="${senderSeat}"]`,
-    )
     const toSeatNode = panelsHost.querySelector<HTMLElement>(
       `[data-profile-seat-btn="${recipientSeat}"]`,
     )
+    // Spectator sender: viewer иконата горе вдясно (участник) или невидимият
+    // anchor на същата позиция (spectator viewer) — виж
+    // getBelotSpectatorViewerOriginRect.
+    const fromRect: DOMRect | null = origin.kind === 'spectator'
+      ? getBelotSpectatorViewerOriginRect()
+      : panelsHost.querySelector<HTMLElement>(`[data-profile-seat-btn="${origin.seat}"]`)?.getBoundingClientRect() ?? null
 
-    if (!fromSeatNode || !toSeatNode) {
-      releasePendingTableGiftLanding(recipientSeat, transactionId)
+    if (!fromRect || !toSeatNode) {
+      landTableGift(recipientSeat, transactionId)
       return
     }
 
-    const fromRect = fromSeatNode.getBoundingClientRect()
     const toRect = toSeatNode.getBoundingClientRect()
 
     if (fromRect.width === 0 || toRect.width === 0) {
-      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      landTableGift(recipientSeat, transactionId)
       return
     }
 
@@ -5514,18 +5609,23 @@ export function createActiveRoomFlowController(
       },
     )
 
+    activeTableGiftFlights.add(animation)
     animation.onfinish = () => {
       flyer.remove()
+      activeTableGiftFlights.delete(animation)
       // Landing: освобождава suppression-а САМО ако transactionId-то все
       // още е "текущо очакваното" за тоя seat (виж releasePendingTableGiftLanding
       // stale-callback защитата) — после syncTableGiftOverlays() реално
       // разкрива canonical overlay-а. Ако вече е надминат от по-нов gift
       // (различен transactionId в pendingLandingTransactionIdBySeat), този
       // late callback е no-op — по-новият полет ще си свърши работата сам.
-      releasePendingTableGiftLanding(recipientSeat, transactionId)
+      // Реалният landing активира и spectator "От {име}" надписа (guard по
+      // transactionId вътре в showSpectatorGiftSenderLabel).
+      landTableGift(recipientSeat, transactionId)
     }
     animation.oncancel = () => {
       flyer.remove()
+      activeTableGiftFlights.delete(animation)
       // Fallback (§7): cancel (напр. room end/cleanup по средата на полета)
       // не бива да остави overlay-а hidden завинаги.
       releasePendingTableGiftLanding(recipientSeat, transactionId)
@@ -5572,7 +5672,10 @@ export function createActiveRoomFlowController(
     // snapshot).
     if (!seatSnapshot || !seatSnapshot.profileId) return
 
-    if (recipientSeat === activeRoomState.seat) return
+    // Собственото (КОНТРОЛИРАНО) място, не perspective seat-ът — spectator
+    // (controlledSeat=null) може да подари и на визуално долния играч.
+    const controlledSeat = activeRoomState.controlledSeat
+    if (controlledSeat !== null && recipientSeat === controlledSeat) return
 
     tableGiftModal = {
       recipientSeat,
@@ -6608,6 +6711,7 @@ export function createActiveRoomFlowController(
         giftName: message.giftName,
         imageUrl: message.imageUrl,
         senderSeat: message.senderSeat,
+        senderKind: message.senderKind ?? 'participant',
         senderDisplayName: message.senderDisplayName,
         expiresAt: message.expiresAt,
       }
@@ -6619,7 +6723,13 @@ export function createActiveRoomFlowController(
       // маркера (onfinish success) ИЛИ да го махне веднага (fallback, ако
       // sender/recipient DOM anchor липсва — виж §7 от брифа, overlay-ът
       // никога не бива да остане hidden завинаги).
-      playTableGiftFlightAnimation(message.senderSeat, message.recipientSeat, message.imageUrl, message.transactionId)
+      // Spectator sender няма място -> origin е spectator viewer anchor-ът
+      // горе вдясно (никакъв fake seat).
+      const flightOrigin: TableGiftFlightOrigin =
+        message.senderKind === 'spectator' || message.senderSeat === null
+          ? { kind: 'spectator' }
+          : { kind: 'seat', seat: message.senderSeat }
+      playTableGiftFlightAnimation(flightOrigin, message.recipientSeat, message.imageUrl, message.transactionId)
 
       // Gift overlay state не участва в cuttingStableRenderKey/
       // biddingStableRenderKey и не се чете от renderPlayingScreen — същата
@@ -6850,21 +6960,20 @@ export function createActiveRoomFlowController(
 
     closeReactionPickersOnOutsideClick(target)
 
-    // §12/§21 брифа: spectator не праща gifts и profile clicks са disabled —
-    // defense-in-depth отвъд render-level suppression (gift icon никога не
-    // се mount-ва за spectator, виж createCuttingSeatPanelsHtml call sites),
-    // за да няма "изглежда работещ, но сървърът го отказва" UI изобщо.
-    if (activeRoomState?.viewerRole === 'spectator') {
-      return
-    }
-
     // Gift иконата седи ВЪТРЕ в data-profile-seat-btn — прихващаме я преди
-    // profile popup-а, за да не се отворят и двете от един клик.
+    // profile popup-а, за да не се отворят и двете от един клик. Spectator
+    // също може да подарява (table gift към играчите на гледаната маса —
+    // единственото позволено spectator действие освен Настройки/Изход).
     const giftIcon = target.closest<HTMLElement>('[data-active-room-gift-icon]')
     if (giftIcon && activeRoomState) {
       e.stopPropagation()
       const giftSeat = giftIcon.getAttribute('data-active-room-gift-icon') as Seat | null
       if (giftSeat) openTableGiftModal(giftSeat)
+      return
+    }
+
+    // §12/§21 брифа: profile clicks са disabled за spectator.
+    if (activeRoomState?.viewerRole === 'spectator') {
       return
     }
 

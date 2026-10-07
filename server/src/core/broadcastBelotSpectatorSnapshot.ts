@@ -135,6 +135,7 @@ function toPublicPresentationPayload(event: BelotSpectatorPublicPresentationEven
       giftName: event.giftName,
       imageUrl: event.imageUrl,
       senderProfileId: event.senderProfileId,
+      senderKind: event.senderKind,
       senderSeat: event.senderSeat,
       senderDisplayName: event.senderDisplayName,
       recipientSeat: event.recipientSeat,

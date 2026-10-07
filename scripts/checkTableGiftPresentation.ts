@@ -23,8 +23,8 @@
  *   [6]  Reconnect: snapshot попълва overlay-и, но НЕ пуска летящата
  *        анимация (тя тръгва само от live push branch-а)
  *   [7]  Overlay-ът НЕ пипа avatar src — рисува се в отделен слот
- *   [8]  Gift иконата се показва само за чужди заети места и само за
- *        participant (controlledSeat != null) — spectator няма gift control
+ *   [8]  Gift иконата: participant -> чужди заети места; Belot spectator
+ *        (controlledSeat === null) -> всички заети места (spectator table gift)
  *   [9]  syncTableGiftOverlays е вързан в syncActiveRoomOverlayEffects
  *        (=> playing фазата минава оттам автоматично)
  *   [10] Gift state НЕ участва в никой stable render key (PATCH пътят
@@ -306,12 +306,12 @@ await check('[8] Gift иконата се показва за чужди зае�
   // != null (не !==) — покрива и undefined от по-стар snapshot без полето.
   assert(guard.includes('seat.profileId != null'), 'изисква реален profileId (покрива и rare bot без profileId)')
   assert(guard.includes('seat.profileId.length > 0'), 'празен profileId не се приема')
-  // Belot spectator (Phase 3B): gift control-ът е participant-only —
-  // контролираното място (controlledSeat), не perspective seat-ът. Spectator
-  // има controlledSeat=null и никога не получава gift икона; за participant
-  // controlledSeat === собственото място, значи поведението е непроменено.
-  assert(guard.includes('controlledSeat != null'), 'spectator (controlledSeat=null) не получава gift control')
-  assert(guard.includes('seat.seat !== controlledSeat'), 'собственото (контролирано) място е изключено')
+  // Gate по controlledSeat (не perspective seat): participant -> всяко друго
+  // място (непроменено); Belot spectator (controlledSeat === null) -> всички
+  // заети места (spectator table gift; сървърът валидира получателя срещу
+  // гледаната маса).
+  assert(seatPanelsSrc.includes('const isSpectatorViewerGift = controlledSeat === null'), 'spectator (controlledSeat=null) е изричен gift случай')
+  assert(guard.includes('(isSpectatorViewerGift || (controlledSeat != null && seat.seat !== controlledSeat))'), 'participant: собственото (контролирано) място е изключено')
   assert(!guard.includes('seat.seat !== localSeat'), 'gate-ът не ползва perspective seat-а (localSeat)')
 })
 
@@ -424,11 +424,14 @@ await check('[14] Летящата анимация ползва transform/opaci
     'слоят се търси преди създаване (преизползва се, не се пресъздава)',
   )
   assert(flight.includes('getBoundingClientRect()'), 'позициите идват от реални DOM rect-ове')
+  // Origin API: participant sender -> седалката му (абсолютен seat); Belot
+  // spectator sender -> viewer anchor-ът горе вдясно (без fake seat).
   assert(
-    flight.includes('data-profile-seat-btn="${senderSeat}"') &&
+    flight.includes('data-profile-seat-btn="${origin.seat}"') &&
       flight.includes('data-profile-seat-btn="${recipientSeat}"'),
     'anchor-ите се намират по абсолютен seat (DOM slot-овете са keyed така)',
   )
+  assert(flight.includes('getBelotSpectatorViewerOriginRect()'), 'spectator sender тръгва от viewer anchor-а')
   assert(flight.includes('flyer.remove()'), 'летящият елемент се маха след края')
 })
 
@@ -843,24 +846,30 @@ await check('[28] applyActiveTableGiftsFromSnapshot показва overlay ди�
 // ─── [29] Missing DOM anchor fallback: overlay се показва, не остава hidden ──
 
 await check('[29] playTableGiftFlightAnimation освобождава pending-landing веднага, ако анимацията не може да стартира', () => {
+  // Сигнатурата приема origin (седалка ИЛИ spectator anchor) — без fake seat.
   const fn = extractFunctionBody(
     activeRoomSrc,
-    'function playTableGiftFlightAnimation(\r\n    senderSeat: Seat,\r\n    recipientSeat: Seat,\r\n    imageUrl: string,\r\n    transactionId: string,\r\n  ): void {',
+    'function playTableGiftFlightAnimation(\r\n    origin: TableGiftFlightOrigin,\r\n    recipientSeat: Seat,\r\n    imageUrl: string,\r\n    transactionId: string,\r\n  ): void {',
   )
 
+  // landTableGift = releasePendingTableGiftLanding + (само за spectator
+  // gift) "От {име}" надпис — release-ът остава задължителен.
+  const land = extractFunctionBody(activeRoomSrc, 'function landTableGift(recipientSeat: Seat, transactionId: string): void {')
+  assert(land.includes('releasePendingTableGiftLanding(recipientSeat, transactionId)'), 'landTableGift release-ва pending-landing')
+
   // Всеки ранен return path (без Web Animations API, липсващ seat-panels
-  // host, липсващ sender/recipient DOM anchor, zero-size rect) трябва да
-  // вика releasePendingTableGiftLanding ПРЕДИ да върне управлението.
+  // host, липсващ sender/recipient anchor, zero-size rect) трябва да
+  // release-не pending-landing (през landTableGift) ПРЕДИ да върне управлението.
   const earlyReturnGuards = [
     "document.createElement('div').animate !== 'function'",
     "!panelsHost",
-    '!fromSeatNode || !toSeatNode',
+    '!fromRect || !toSeatNode',
     'fromRect.width === 0 || toRect.width === 0',
   ]
   for (const guard of earlyReturnGuards) {
     const guardIdx = fn.indexOf(guard)
     assert(guardIdx !== -1, `трябва да съдържа guard-а: ${guard}`)
-    const nextReleaseIdx = fn.indexOf('releasePendingTableGiftLanding(recipientSeat, transactionId)', guardIdx)
+    const nextReleaseIdx = fn.indexOf('landTableGift(recipientSeat, transactionId)', guardIdx)
     const nextReturnIdx = fn.indexOf('return', guardIdx)
     assert(
       nextReleaseIdx !== -1 && nextReleaseIdx < nextReturnIdx + 50,

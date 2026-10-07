@@ -14,7 +14,7 @@
  *        летяща анимация (само static overlay в snapshot-а)
  *   [G5] spectator payload = точно публичните overlay полета (без chargedPrice,
  *        recipientProfileId, balance/ledger данни); иначе идентичен с participant-ския
- *   [G9] spectator send_table_gift -> spectator_action_forbidden, без transaction,
+ *   [G9] spectator send_table_gift към НЕгледана стая -> spectator_action_forbidden, без transaction,
  *        без промяна в портфейла, без event към никого
  *   [U1] unit: helper projection-ът маха chargedPrice/recipientProfileId и всяко
  *        извънредно поле
@@ -270,7 +270,7 @@ function giftEventsFrom(client: TestClient, from: number): any[] {
 // (activeTableGifts), плюс type/roomId.
 const SPECTATOR_GIFT_KEYS = [
   'expiresAt', 'giftItemId', 'giftName', 'imageUrl', 'recipientSeat', 'roomId',
-  'senderDisplayName', 'senderProfileId', 'senderSeat', 'sentAt', 'transactionId', 'type',
+  'senderDisplayName', 'senderKind', 'senderProfileId', 'senderSeat', 'sentAt', 'transactionId', 'type',
 ]
 function stripMeta(frame: any): any {
   const { __receivedAt: _ignored, ...rest } = frame
@@ -315,7 +315,7 @@ console.log('\ncheckBelotSpectatorPublicTableGift\n')
     registry.watch('c1', 'room-u')
     const event: any = {
       type: 'table_gift_item_sent', roomId: 'room-u', transactionId: 'tx-1', giftItemId: 'g-1', giftName: 'Rose',
-      imageUrl: '/uploads/gift-items/rose.webp', senderProfileId: 'p-s', senderSeat: 'bottom', senderDisplayName: 'Sender',
+      imageUrl: '/uploads/gift-items/rose.webp', senderProfileId: 'p-s', senderKind: 'participant', senderSeat: 'bottom', senderDisplayName: 'Sender',
       recipientProfileId: 'p-r', recipientSeat: 'top', chargedPrice: 100, sentAt: 'a', expiresAt: 'b',
       senderBalanceAfter: 4900, ledgerId: 'L1', ownHand: [{ id: 'hearts-A' }],
     }
@@ -451,11 +451,12 @@ try {
     assert(!JSON.stringify(snap.activeTableGifts).includes('chargedPrice'), 'snapshot overlay has no price')
   })
 
-  await check('[G9] spectator send_table_gift -> spectator_action_forbidden, no transaction, no wallet change, no event', async () => {
+  // Позволеният spectator gift (гледаната маса) е покрит в checkBelotSpectatorTableGiftSend.ts.
+  await check('[G9] spectator send_table_gift to a room it does NOT watch -> spectator_action_forbidden, no transaction, no wallet change, no event', async () => {
     mark()
     const walletBefore = readWallet(dbFile, users.spec.profileId)
     const specRequestId = randomUUID()
-    send(spec, { type: 'send_table_gift', roomId: table1.roomId, recipientProfileId: users.host.profileId, giftItemId, requestId: specRequestId })
+    send(spec, { type: 'send_table_gift', roomId: 'room-not-watched-by-spectator', recipientProfileId: users.host.profileId, giftItemId, requestId: specRequestId })
     const error = await waitForFrame(spec, (f) => f.type === 'error' || f.type === 'table_gift_send_result', 5_000, 'spectator gift response', marks.get(spec))
     assert(error.type === 'error' && error.code === 'spectator_action_forbidden', JSON.stringify(error))
     await sleep(800)
