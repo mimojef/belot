@@ -730,7 +730,7 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; friendships: FriendshipsSnapshot }
     | { ok: false; message: string }
   >
-  onBlockProfile?: (profileId: string) => Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true }>
+  onBlockProfile?: (profileId: string) => Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true; protectedStaffProfile?: true }>
   onLoadBlockedPlayers?: () => Promise<{ ok: true; profiles: PlayerPublicProfileSnapshot[]; count: number; limit: number } | { ok: false; message: string }>
   onLikeProfile?: (profileId: string) => Promise<
     | { ok: true; liked: boolean; likesCount: number }
@@ -14003,6 +14003,10 @@ export function createLobbyFlowController(
     const result = await options.onBlockProfile(profileId)
 
     if ('ok' in result && !result.ok) {
+      // Защитен профил (екип Pika.bg): main.ts вече показа централния
+      // informational popup — без дублиран inline текст, profile popup-ът
+      // остава отворен непроменен.
+      if (result.protectedStaffProfile) return
       if (result.limitReached) {
         state.blockLimitPopupOpen = true
         render()
@@ -14141,7 +14145,9 @@ export function createLobbyFlowController(
       state.profileAccessBlockPopup = {
         ...state.profileAccessBlockPopup,
         blockSubmitting: false,
-        blockErrorText: result.message,
+        // Защитен профил (екип Pika.bg): централният informational popup
+        // вече е показан от main.ts — само освобождаваме loading state-а.
+        blockErrorText: result.protectedStaffProfile ? null : result.message,
       }
       render()
       return

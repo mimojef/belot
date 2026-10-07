@@ -111,6 +111,10 @@ import {
 import { createBundlePurchaseStore } from './db/bundlePurchaseStore.js'
 import { createPaidGiftNotificationStore } from './db/paidGiftNotificationStore.js'
 import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
+import {
+  PROTECTED_STAFF_PROFILE_BLOCK_MESSAGE,
+  PROTECTED_STAFF_PROFILE_ERROR_CODE,
+} from './core/protectedStaffProfiles.js'
 import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
 import {
@@ -9650,6 +9654,12 @@ async function handleAdminPikaTeamRoleRequest(
     return true
   }
 
+  // Защитена роля: incoming blocks са изтрити в role транзакцията — инвалидираме
+  // lobby chat block кеша на засегнатите blocker-и (иначе биха продължили да
+  // филтрират профила до изтичане на кеша).
+  for (const blockerProfileId of result.removedIncomingBlockerProfileIds ?? []) {
+    invalidateLobbyChatBlockCache(blockerProfileId)
+  }
   sendJsonResponse(res, 200, { ok: true, role: result.role })
   return true
 }
@@ -9756,6 +9766,12 @@ async function handleAdminMarketingRoleRequest(
     return true
   }
 
+  // Защитена роля: incoming blocks са изтрити в role транзакцията — инвалидираме
+  // lobby chat block кеша на засегнатите blocker-и (иначе биха продължили да
+  // филтрират профила до изтичане на кеша).
+  for (const blockerProfileId of result.removedIncomingBlockerProfileIds ?? []) {
+    invalidateLobbyChatBlockCache(blockerProfileId)
+  }
   sendJsonResponse(res, 200, { ok: true, role: result.role })
   return true
 }
@@ -10241,6 +10257,22 @@ async function handleProfileBlockRequest(
     }
 
     const result = blockStore.toggleBlock(myProfileId, targetProfileId)
+
+    // Профили от екипа на Pika.bg (account role pika_team/marketing) не могат
+    // да бъдат блокирани. Invariant-ът се налага атомарно в
+    // blockStore.toggleBlock (role check + INSERT в една BEGIN IMMEDIATE
+    // транзакция); тук само го превеждаме в HTTP отговор. Евентуален стар
+    // block (toggle към unblock) остава позволен. Отказът е преди всякакви
+    // side effects (chat cache и т.н.) — никакъв нов ред, никакъв limit slot.
+    if (result.protectedStaffProfile) {
+      sendJsonResponse(res, 403, {
+        ok: false,
+        code: PROTECTED_STAFF_PROFILE_ERROR_CODE,
+        message: PROTECTED_STAFF_PROFILE_BLOCK_MESSAGE,
+      })
+      return true
+    }
+
     invalidateLobbyChatBlockCache(myProfileId)
 
     if (result.limitReached) {

@@ -192,6 +192,7 @@
     "check:gift-limit-frontend": "tsx scripts/checkGiftLimitFrontend.ts",
     "check:admin-profile-moderation": "tsx scripts/checkAdminProfileModeration.ts",
     "check:social-block-profile-authorization": "tsx scripts/checkSocialBlockProfileAuthorization.ts",
+    "check:protected-staff-profile-block": "tsx scripts/checkProtectedStaffProfileBlock.ts",
     "check:profile-name-release-and-admin-edit-target": "tsx scripts/checkProfileNameReleaseAndAdminEditTarget.ts",
     "check:avatar-upload-security": "tsx scripts/checkAvatarUploadSecurity.ts",
     "check:players-search": "tsx scripts/checkPlayersSearch.ts",

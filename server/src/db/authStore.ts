@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID, scryptSync } from 'node:crypto'
 import type { AccountId, PlayerPublicProfileSnapshot, ProfileId } from '../core/serverTypes.js'
+import { isProtectedStaffRole } from '../core/protectedStaffProfiles.js'
 import {
   createPasswordHash,
   generateVerificationCode,
@@ -493,7 +494,7 @@ export type ChatAdminRoleChangeResult =
 export type PikaTeamRoleChangeErrorCode = SubadminRoleChangeErrorCode
 
 export type PikaTeamRoleChangeResult =
-  | { ok: true; role: 'pika_team' | 'player' }
+  | { ok: true; role: 'pika_team' | 'player'; removedIncomingBlockerProfileIds?: string[] }
   | { ok: false; code: PikaTeamRoleChangeErrorCode; message: string }
 
 export type TopChatAdminRoleChangeErrorCode = SubadminRoleChangeErrorCode
@@ -505,7 +506,7 @@ export type TopChatAdminRoleChangeResult =
 export type MarketingRoleChangeErrorCode = SubadminRoleChangeErrorCode
 
 export type MarketingRoleChangeResult =
-  | { ok: true; role: 'marketing' | 'player' }
+  | { ok: true; role: 'marketing' | 'player'; removedIncomingBlockerProfileIds?: string[] }
   | { ok: false; code: MarketingRoleChangeErrorCode; message: string }
 
 export type AuthStore = {
@@ -1296,6 +1297,25 @@ export async function createAuthStore(
     SET role = ?, updated_at = CURRENT_TIMESTAMP
     WHERE account_id = ?
       AND role = ?;
+  `)
+
+  // Защитени от блокиране роли (pika_team/marketing, виж
+  // core/protectedStaffProfiles.ts): при успешно назначаване всички incoming
+  // blocks към профила/ите на акаунта се премахват в СЪЩАТА транзакция като
+  // смяната на ролята. Blocker-ите се четат преди DELETE-а, за да може
+  // caller-ът да инвалидира in-memory кешовете им (lobby chat block cache).
+  const selectIncomingBlockersForAccountStatement = database.prepare(`
+    SELECT DISTINCT player_blocks.blocker_profile_id AS blocker_profile_id
+    FROM player_blocks
+    INNER JOIN profiles ON profiles.profile_id = player_blocks.blocked_profile_id
+    WHERE profiles.account_id = ?;
+  `)
+
+  const deleteIncomingBlocksForAccountStatement = database.prepare(`
+    DELETE FROM player_blocks
+    WHERE blocked_profile_id IN (
+      SELECT profile_id FROM profiles WHERE account_id = ?
+    );
   `)
 
   const insertAdminRoleAuditLogStatement = database.prepare(`
@@ -2823,7 +2843,7 @@ export async function createAuthStore(
     targetProfileId: string
     role: ElevatedRole
     action: 'grant' | 'revoke'
-  }): { ok: true; role: 'player' | ElevatedRole } | { ok: false; code: SubadminRoleChangeErrorCode; message: string } {
+  }): { ok: true; role: 'player' | ElevatedRole; removedIncomingBlockerProfileIds?: string[] } | { ok: false; code: SubadminRoleChangeErrorCode; message: string } {
     const profileRow = selectProfileRoleEligibilityStatement.get(input.targetProfileId) as
       | { account_id: string | null; status: 'active' | 'disabled'; is_temporary: number }
       | undefined
@@ -2963,6 +2983,16 @@ export async function createAuthStore(
         }
       }
 
+      // Защитена роля (pika_team/marketing) -> incoming blocks изчезват атомарно
+      // с role смяната. Отнемане на ролята НЕ възстановява старите blocks.
+      let removedIncomingBlockerProfileIds: string[] = []
+      if (isProtectedStaffRole(toRole)) {
+        removedIncomingBlockerProfileIds = (
+          selectIncomingBlockersForAccountStatement.all(targetAccountId) as Array<{ blocker_profile_id: string }>
+        ).map((row) => row.blocker_profile_id)
+        deleteIncomingBlocksForAccountStatement.run(targetAccountId)
+      }
+
       insertAdminRoleAuditLogStatement.run(
         randomUUID(),
         input.actorAccountId,
@@ -2974,7 +3004,7 @@ export async function createAuthStore(
 
       database.exec('COMMIT;')
 
-      return { ok: true, role: toRole }
+      return { ok: true, role: toRole, removedIncomingBlockerProfileIds }
     } catch (error) {
       try {
         database.exec('ROLLBACK;')

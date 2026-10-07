@@ -118,6 +118,11 @@ import { mountConsentUi } from './app/consent/consentUi'
 import { initializeAnalytics } from './app/analytics/initializeAnalytics'
 import { trackCompleteRegistration } from './app/analytics/metaPixel'
 import {
+  PROTECTED_STAFF_PROFILE_BLOCK_MESSAGE,
+  PROTECTED_STAFF_PROFILE_ERROR_CODE,
+  showProtectedStaffBlockNotice,
+} from './app/social/protectedStaffBlockNotice'
+import {
   extractAndClearResetToken,
   renderResetPasswordScreen,
   type ResetPasswordScreenState,
@@ -3319,7 +3324,7 @@ async function submitFriendAction(
 
 async function submitProfileBlock(
   profileId: string,
-): Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true }> {
+): Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true; protectedStaffProfile?: true }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/profiles/${encodeURIComponent(profileId)}/block`, {
       method: 'POST',
@@ -3330,6 +3335,17 @@ async function submitProfileBlock(
       blocked?: boolean
       message?: string
       limitReached?: boolean
+      code?: string
+    }
+
+    // Server отказва блокиране на профил от екипа на Pika.bg (pika_team /
+    // marketing). Централен informational popup за ВСИЧКИ block entry
+    // points (lobby/in-game profile popup + access-denial popup-и) —
+    // извикващите само освобождават loading state без дублиран inline текст.
+    if (data.code === PROTECTED_STAFF_PROFILE_ERROR_CODE) {
+      const message = data.message ?? PROTECTED_STAFF_PROFILE_BLOCK_MESSAGE
+      showProtectedStaffBlockNotice(message)
+      return { ok: false, message, protectedStaffProfile: true }
     }
 
     if (!response.ok || !data.ok) {
@@ -7071,7 +7087,7 @@ const activeRoom = createActiveRoomFlowController({
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onBlockProfile: async (profileId) => {
     const result = await submitProfileBlock(profileId)
-    if ('ok' in result && !result.ok) return { message: result.message }
+    if ('ok' in result && !result.ok) return { message: result.protectedStaffProfile ? null : result.message }
     return { message: 'blocked' in result && result.blocked ? 'Играчът е блокиран.' : 'Операцията не успя.' }
   },
   onBlockProfileFull: (profileId) => submitProfileBlock(profileId),

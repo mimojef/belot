@@ -18,7 +18,7 @@ let _actionMessage: string | null = null
 let _getFriendshipAction: ((profileId: string) => PlayerProfileFriendshipAction | null) | null = null
 let _onSendFriendRequest: ((profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>) | null = null
 let _onLikeProfile: ((profileId: string) => Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }>) | null = null
-let _onBlockProfile: ((profileId: string) => Promise<{ message: string }>) | null = null
+let _onBlockProfile: ((profileId: string) => Promise<{ message: string | null }>) | null = null
 
 function getHost(): HTMLDivElement | null {
   return document.getElementById(HOST_ID) as HTMLDivElement | null
@@ -131,7 +131,7 @@ export function showSeatProfileOverlay(
   getFriendshipAction?: ((profileId: string) => PlayerProfileFriendshipAction | null) | null,
   onSendFriendRequest?: ((profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>) | null,
   onLikeProfile?: ((profileId: string) => Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }>) | null,
-  onBlockProfile?: ((profileId: string) => Promise<{ message: string }>) | null,
+  onBlockProfile?: ((profileId: string) => Promise<{ message: string | null }>) | null,
 ): void {
   _getFriendshipAction = getFriendshipAction ?? null
   _onSendFriendRequest = onSendFriendRequest ?? null

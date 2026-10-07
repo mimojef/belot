@@ -6463,9 +6463,14 @@ export function createActiveRoomFlowController(
         profileAccessBlockPopup = {
           ...profileAccessBlockPopup,
           blockSubmitting: false,
-          blockErrorText: result.limitReached
-            ? 'Достигнахте лимита блокирани играчи.'
-            : result.message,
+          // Защитен профил (екип Pika.bg): main.ts вече показа централния
+          // informational popup — тук само освобождаваме loading state-а,
+          // без дублиран inline текст.
+          blockErrorText: result.protectedStaffProfile
+            ? null
+            : result.limitReached
+              ? 'Достигнахте лимита блокирани играчи.'
+              : result.message,
         }
         renderProfileAccessBlockPopupState()
         return

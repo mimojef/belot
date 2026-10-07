@@ -112,7 +112,7 @@ export type CreateActiveRoomFlowControllerOptions = {
   getFriendshipAction: (profileId: string) => import('../../ui/overlays/renderPlayerProfilePopup').PlayerProfileFriendshipAction | null
   onSendFriendRequest: (profileId: string) => Promise<{ ok: true; newLabel: string } | { ok: false; message: string }>
   onLikeProfile: (profileId: string) => Promise<{ ok: true; liked: boolean; likesCount: number } | { ok: false }>
-  onBlockProfile: (profileId: string) => Promise<{ message: string }>
+  onBlockProfile: (profileId: string) => Promise<{ message: string | null }>
   /**
    * Пълен authoritative block резултат (не truncated {message}) — само за
    * "Блокирай" от access-denial popup-а (target has blocked viewer), където
@@ -121,7 +121,7 @@ export type CreateActiveRoomFlowControllerOptions = {
    * като onBlockProfile по-горе (виж main.ts wiring-а — и двата викат
    * submitProfileBlock), не втори мрежов път.
    */
-  onBlockProfileFull: (profileId: string) => Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true }>
+  onBlockProfileFull: (profileId: string) => Promise<{ blocked: boolean } | { ok: false; message: string; limitReached?: true; protectedStaffProfile?: true }>
   /** leftRoomId — стаята, от която играчът реално/логически излиза точно в
    * този момент (ако има такава) — позволява на извикващия (main.ts) да
    * изчисти всякакъв global "stale" state, обвързан конкретно с тази стая
