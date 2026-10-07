@@ -195,8 +195,9 @@ try {
       assertEqual(await page.locator('[data-belot-spectator-viewer-anchor-probe]').count(), 0, 'probe removed')
       await inject(page, giftEvent('room-g', { senderKind: 'spectator', senderSeat: null, senderDisplayName: 'Ани', recipientSeat: 'top' }))
       await sleep(60)
-      const early = (await call(page, (h: H) => h.flyerCenters()))[0]
-      assert(dist(early, anchor) < 30, `flight starts at the top-right anchor: flyer ${JSON.stringify(early)} anchor ${JSON.stringify(anchor)}`)
+      // Origin = първият keyframe (детерминистично; flyer-ът тръгва веднага по пътя).
+      const early = (await call(page, (h: H) => h.giftFlightKeyframes()))![0]
+      assert(dist(early, anchor) < 3, `flight starts at the top-right anchor: flyer ${JSON.stringify(early)} anchor ${JSON.stringify(anchor)}`)
       assert(anchor.cx > 1180 && anchor.cy < 70, `anchor is top-right: ${JSON.stringify(anchor)}`)
       await sleep(800)
       assertEqual((await labels(page)).length, 0, 'no label before landing')
@@ -280,8 +281,9 @@ try {
       const iconCenter = { cx: Math.round(icon!.left + icon!.width / 2), cy: Math.round(icon!.top + icon!.height / 2) }
       await inject(page, giftEvent('room-p', { senderKind: 'spectator', senderSeat: null, senderDisplayName: 'Ани', recipientSeat: 'right' }))
       await sleep(60)
-      const early = (await call(page, (h: H) => h.flyerCenters()))[0]
-      assert(dist(early, iconCenter) < 30, `flight starts at the viewer icon: ${JSON.stringify(early)} vs ${JSON.stringify(iconCenter)}`)
+      // Origin = първият keyframe (детерминистично; flyer-ът тръгва веднага по пътя).
+      const early = (await call(page, (h: H) => h.giftFlightKeyframes()))![0]
+      assert(dist(early, iconCenter) < 3, `flight starts at the viewer icon: ${JSON.stringify(early)} vs ${JSON.stringify(iconCenter)}`)
       await waitUntil(async () => (await labels(page)).length === 1, 3_000)
       assertEqual((await labels(page))[0].text, 'От Ани', 'participants see the label too')
     })
@@ -306,8 +308,9 @@ try {
     assert(anchor.cx > 300 && anchor.cy < 70, `mobile anchor top-right: ${JSON.stringify(anchor)}`)
     await inject(page, giftEvent('room-m', { senderKind: 'spectator', senderSeat: null, senderDisplayName: 'Много дълго потребителско име за тест на мобилен', recipientSeat: 'left' }))
     await sleep(60)
-    const early = (await call(page, (h: H) => h.flyerCenters()))[0]
-    assert(dist(early, anchor) < 30, `mobile origin: ${JSON.stringify(early)} vs ${JSON.stringify(anchor)}`)
+    // Origin = първият keyframe (детерминистично; flyer-ът тръгва веднага по пътя).
+    const early = (await call(page, (h: H) => h.giftFlightKeyframes()))![0]
+    assert(dist(early, anchor) < 3, `mobile origin: ${JSON.stringify(early)} vs ${JSON.stringify(anchor)}`)
     await waitUntil(async () => (await labels(page)).length === 1, 3_000)
     const l = (await labels(page))[0]
     assert(l.text.startsWith('От Много'), 'label text')
@@ -316,6 +319,100 @@ try {
     await page.close()
   })
   // C17 (desktop) е покрит от desktop блока по-горе.
+
+  // ── Flight path: spectator 2-stage, participant unchanged ───────────────
+  await check('[P1] spectator gift: 2-stage route origin -> table center -> recipient (keyframes + real motion)', async () => {
+    const page = await newPage()
+    await enterSettledSpectator(page, 'room-path')
+    const anchor = await call(page, (h: H) => h.viewerOriginRect())
+    const center = await call(page, (h: H) => h.tableCenterFromProfiles())
+    const target = await call(page, (h: H) => h.profileCenter('left'))
+    await inject(page, giftEvent('room-path', { senderKind: 'spectator', senderSeat: null, senderDisplayName: 'Ани', recipientSeat: 'left' }))
+    const kf = await call(page, (h: H) => h.giftFlightKeyframes())
+    assert(kf !== null && kf.length === 5, `keyframes ${JSON.stringify(kf)}`)
+    assertEqual(JSON.stringify(kf!.map((k: any) => k.offset)), JSON.stringify([0, 0.1, 0.48, 0.88, 1]), 'offsets')
+    assert(dist(kf![0], anchor) < 3 && dist(kf![1], anchor) < 3, `segment 1 starts at the spectator origin: ${JSON.stringify(kf![0])} vs ${JSON.stringify(anchor)}`)
+    assert(dist(kf![2], center) < 3, `waypoint is the table center: ${JSON.stringify(kf![2])} vs ${JSON.stringify(center)}`)
+    assert(dist(kf![4], target) < 3, `segment 2 ends at the recipient: ${JSON.stringify(kf![4])} vs ${JSON.stringify(target)}`)
+    // Реалното движение минава през центъра (а не по горния ръб).
+    let minToCenter = Number.POSITIVE_INFINITY
+    let topEdgeSamples = 0
+    for (let i = 0; i < 45; i++) {
+      const f = (await call(page, (h: H) => h.flyerCenters()))[0]
+      if (!f) break
+      minToCenter = Math.min(minToCenter, dist(f, center))
+      if (f.cy < 60 && dist(f, anchor) > 80) topEdgeSamples++
+      await sleep(35)
+    }
+    assert(minToCenter < 40, `flyer passes the table center (min distance ${Math.round(minToCenter)})`)
+    assertEqual(topEdgeSamples, 0, 'no travel along the top edge away from the origin')
+    assertNoPageErrors(page, 'P1')
+    await page.close()
+  })
+
+  {
+    const page = await newPage()
+    await enterSettledParticipant(page, 'room-path-p')
+
+    await check('[P2] participant viewer: spectator gift uses the same 2-stage route from the real viewer icon', async () => {
+      await inject(page, { type: 'belot_room_spectators', roomId: 'room-path-p', spectators: [{ profileId: 'spec-1', displayName: 'Ани' }] })
+      const icon = (await call(page, (h: H) => h.viewerIndicatorInfo())).icon!
+      const iconCenter = { cx: Math.round(icon.left + icon.width / 2), cy: Math.round(icon.top + icon.height / 2) }
+      const center = await call(page, (h: H) => h.tableCenterFromProfiles())
+      await inject(page, giftEvent('room-path-p', { senderKind: 'spectator', senderSeat: null, senderDisplayName: 'Ани', recipientSeat: 'top' }))
+      const kf = (await call(page, (h: H) => h.giftFlightKeyframes()))!
+      assert(dist(kf[0], iconCenter) < 3, `origin = viewer icon: ${JSON.stringify(kf[0])} vs ${JSON.stringify(iconCenter)}`)
+      assert(dist(kf[2], center) < 3, `waypoint = table center: ${JSON.stringify(kf[2])} vs ${JSON.stringify(center)}`)
+    })
+
+    await check('[P3] participant -> participant gift path is unchanged (arc, offsets 0/0.13/0.62/0.88/1)', async () => {
+      await sleep(FLIGHT_MS + 300)
+      const from = await call(page, (h: H) => h.profileCenter('left'))
+      const to = await call(page, (h: H) => h.profileCenter('right'))
+      await inject(page, giftEvent('room-path-p', { senderKind: 'participant', senderSeat: 'left', senderDisplayName: 'Играч', recipientSeat: 'right' }))
+      const kf = (await call(page, (h: H) => h.giftFlightKeyframes()))!
+      assertEqual(JSON.stringify(kf.map((k: any) => k.offset)), JSON.stringify([0, 0.13, 0.62, 0.88, 1]), 'participant offsets unchanged')
+      assert(dist(kf[0], from) < 3 && dist(kf[4], to) < 3, 'seat to seat')
+      assert(Math.abs(kf[2].cx - Math.round((from!.cx + to!.cx) / 2)) <= 2, `arc midpoint x: ${kf[2].cx}`)
+      assert(Math.abs(kf[2].cy - (Math.min(from!.cy, to!.cy) - 60)) <= 2, `arc lifts 60px above: ${kf[2].cy}`)
+    })
+    assertNoPageErrors(page, 'P2/P3')
+    await page.close()
+  }
+
+  // ── Gift picker stacking: above played-card flight ──────────────────────
+  for (const [mobile, label] of [[false, '[L1] desktop'], [true, '[L2] mobile']] as const) {
+    await check(`${label} gift picker stays above a played-card flight and remains interactable`, async () => {
+      const page = await newPage(mobile)
+      await enterSettledSpectator(page, 'room-layer')
+      await call(page, (h: H) => h.clickGiftIcon('top'))
+      await waitUntil(() => call(page, (h: H) => h.tableGiftModalInfo().pickIds.length > 0), 3_000)
+      // Играч хвърля карта, докато picker-ът е отворен.
+      const result = await page.evaluate(async () => {
+        const h = (window as any).__activeRoomSpectatorHarness
+        await h.applySpectatorSnapshot('room-layer', h.playingGame({
+          handCounts: { bottom: 8, right: 7, top: 8, left: 8 },
+          playing: {
+            winningBid: { seat: 'bottom', contract: 'all-trumps', trumpSuit: null, doubled: false, redoubled: false },
+            currentTurnSeat: 'top', currentTrickPlays: [{ seat: 'right', card: { id: 'hearts-A', suit: 'hearts', rank: 'A' } }],
+            completedTricksCount: 0, latestCompletedTrick: null, validCardIds: null, sweepOffer: null, sweepResolution: null,
+          },
+        }))
+        return h.giftModalTopmostCheck()
+      })
+      assert(result !== null, 'modal open')
+      assert(result!.flyOverlayZ !== null, 'precondition: a played-card flight is in progress')
+      assert(Number(result!.hostZ) > Number(result!.flyOverlayZ), `picker z ${result!.hostZ} > played card z ${result!.flyOverlayZ}`)
+      assertEqual(result!.pickOnTop, true, 'gift pick button is the topmost element')
+      await sleep(400)
+      assertEqual((await call(page, (h: H) => h.giftModalTopmostCheck()))!.pickOnTop, true, 'still on top after the card landed')
+      await call(page, (h: H) => h.pickTableGift('gift-rose'))
+      const sends = (await call(page, (h: H) => h.getCalls())).filter((c: any) => c.name === 'sendTableGift')
+      assertEqual(sends.length, 1, 'picker remains interactable (send fired)')
+      assertNoPageErrors(page, label)
+      await page.close()
+    })
+  }
 
   await check('[R1] source review: flight origin API without fake seat; label bound to live landing only', async () => {
     const here = dirname(fileURLToPath(import.meta.url))

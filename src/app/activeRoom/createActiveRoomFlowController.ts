@@ -135,6 +135,7 @@ import {
   renderGameSoundsToggleState,
 } from './renderActiveRoomActionBar'
 import { isGameSoundsEnabled, playGameSound, setGameSoundsEnabled } from '../audio/gameSoundSettings'
+import { GIFT_BACK_IN_GAME_PICKER_Z_INDEX } from '../gifts/giftItemReceivedActions'
 import { PHRASE_REACTIONS, getPhraseReactionText } from './phraseReactions'
 import {
   removeSeatProfileOverlay,
@@ -5490,6 +5491,20 @@ export function createActiveRoomFlowController(
   // spectator sender надпис. Надписът е вързан за транзакцията, НЕ за
   // pending-landing маркера (snapshot hydration може да го е махнал рано —
   // известен общ timing проблем, не се поправя тук).
+  // Визуалният център на масата за spectator gift waypoint-а: средата на
+  // четирите profile anchor-а (top/bottom/left/right са разположени около
+  // масата във всяка фаза, desktop и mobile). Fallback: центърът на viewport-а.
+  function getTableGiftFlightCenter(panelsHost: HTMLElement): { x: number; y: number } {
+    const centers = Array.from(panelsHost.querySelectorAll<HTMLElement>('[data-profile-seat-btn]'))
+      .map((node) => node.getBoundingClientRect())
+      .filter((rect) => rect.width > 0 && rect.height > 0)
+      .map((rect) => ({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 }))
+    if (centers.length < 2) return { x: window.innerWidth / 2, y: window.innerHeight / 2 }
+    const xs = centers.map((c) => c.x)
+    const ys = centers.map((c) => c.y)
+    return { x: (Math.min(...xs) + Math.max(...xs)) / 2, y: (Math.min(...ys) + Math.max(...ys)) / 2 }
+  }
+
   function landTableGift(recipientSeat: Seat, transactionId: string): void {
     releasePendingTableGiftLanding(recipientSeat, transactionId)
     showSpectatorGiftSenderLabel(recipientSeat, transactionId)
@@ -5587,8 +5602,27 @@ export function createActiveRoomFlowController(
     const toX = toRect.left + toRect.width / 2 - minWidthPx / 2
     const toY = toRect.top + toRect.height / 2 - minHeightPx / 2
 
-    const animation = flyer.animate(
-      [
+    // Participant sender: непроменената дъга (лека дъга нагоре между seat-овете).
+    // Belot spectator sender: 2 сегмента — от viewer anchor-а горе вдясно по
+    // диагонал към центъра на масата, после към получателя (иначе дъгата
+    // "min(fromY,toY) - 60" от горния ръб минава по самия горен край на екрана).
+    let keyframes: Keyframe[]
+    if (origin.kind === 'spectator') {
+      const center = getTableGiftFlightCenter(panelsHost)
+      const centerX = center.x - minWidthPx / 2
+      const centerY = center.y - minHeightPx / 2
+      keyframes = [
+        // Поява при spectator anchor-а.
+        { transform: `translate(${fromX}px, ${fromY}px) scale(0.2)`, opacity: 0, offset: 0 },
+        { transform: `translate(${fromX}px, ${fromY}px) scale(1)`, opacity: 1, offset: 0.1 },
+        // Сегмент 1: диагонално към центъра на масата.
+        { transform: `translate(${centerX}px, ${centerY}px) scale(1.08)`, opacity: 1, offset: 0.48 },
+        // Сегмент 2: от центъра към получателя + bounce.
+        { transform: `translate(${toX}px, ${toY}px) scale(1.22)`, opacity: 1, offset: 0.88 },
+        { transform: `translate(${toX}px, ${toY}px) scale(0.92)`, opacity: 0.9, offset: 1 },
+      ]
+    } else {
+      keyframes = [
         // Поява при изпращача.
         { transform: `translate(${fromX}px, ${fromY}px) scale(0.2)`, opacity: 0, offset: 0 },
         { transform: `translate(${fromX}px, ${fromY}px) scale(1)`, opacity: 1, offset: 0.13 },
@@ -5601,7 +5635,11 @@ export function createActiveRoomFlowController(
         // Кацане + bounce.
         { transform: `translate(${toX}px, ${toY}px) scale(1.22)`, opacity: 1, offset: 0.88 },
         { transform: `translate(${toX}px, ${toY}px) scale(0.92)`, opacity: 0.9, offset: 1 },
-      ],
+      ]
+    }
+
+    const animation = flyer.animate(
+      keyframes,
       {
         duration: TABLE_GIFT_FLIGHT_MS,
         easing: 'cubic-bezier(0.22, 0.61, 0.36, 1)',
@@ -5941,7 +5979,11 @@ export function createActiveRoomFlowController(
 
     const host = document.createElement('div')
     host.setAttribute('data-table-gift-modal-host', '1')
-    host.style.cssText = 'position:fixed;inset:0;z-index:65;'
+    // Каноничният in-game gift picker слой (същият като "Подари и ти"): над
+    // масата/HUD-а/анимациите (летяща карта 9001, sweep 9500-9600, action bar
+    // ≤ 9401), под игровите модали (declaration 9999, bot takeover 10000,
+    // leave warning 11000). Преди беше 65 -> изиграна карта минаваше отгоре.
+    host.style.cssText = `position:fixed;inset:0;z-index:${GIFT_BACK_IN_GAME_PICKER_Z_INDEX};`
     host.innerHTML = renderTableGiftModalInnerHtml()
     // Делегиран listener, закачен само веднъж при създаване — четем
     // текущия target при всеки click (никакъв closure към конкретен item).

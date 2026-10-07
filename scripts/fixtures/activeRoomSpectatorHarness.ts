@@ -559,6 +559,41 @@ function giftSenderLabels(): Array<{ seat: string; text: string; transactionId: 
   })
 }
 
+// Keyframes на летящия подарък (Web Animations API): offset + центърът на
+// flyer-а (translate + половин размер) за всеки keyframe.
+function giftFlightKeyframes(): Array<{ offset: number; cx: number; cy: number }> | null {
+  const img = document.body.querySelector<HTMLElement>('[data-table-gift-flight-layer] img')
+  const animation = img?.getAnimations()[0]
+  if (!img || !animation) return null
+  const w = parseFloat(img.style.width)
+  const h = parseFloat(img.style.height)
+  return (animation.effect as KeyframeEffect).getKeyframes().map((kf) => {
+    const m = /translate\(([-\d.]+)px,\s*([-\d.]+)px\)/.exec(String(kf.transform))
+    return { offset: Number(kf.computedOffset ?? kf.offset), cx: Math.round(Number(m?.[1]) + w / 2), cy: Math.round(Number(m?.[2]) + h / 2) }
+  })
+}
+
+// Независимо изчислен център на масата: средата на bounding box-а на 4-те profile anchor-а.
+function tableCenterFromProfiles(): { cx: number; cy: number } | null {
+  const rects = Array.from(document.body.querySelectorAll<HTMLElement>('[data-seat-panels-host="1"] [data-profile-seat-btn]'))
+    .map((el) => el.getBoundingClientRect()).filter((r) => r.width > 0)
+  if (rects.length < 2) return null
+  const xs = rects.map((r) => r.left + r.width / 2)
+  const ys = rects.map((r) => r.top + r.height / 2)
+  return { cx: Math.round((Math.min(...xs) + Math.max(...xs)) / 2), cy: Math.round((Math.min(...ys) + Math.max(...ys)) / 2) }
+}
+
+// Кой елемент е най-отгоре в центъра на първия gift pick бутон в модала.
+function giftModalTopmostCheck(): { hostZ: string; pickOnTop: boolean; flyOverlayZ: string | null } | null {
+  const host = document.body.querySelector<HTMLElement>('[data-table-gift-modal-host="1"]')
+  const pick = host?.querySelector<HTMLElement>('[data-table-gift-pick]')
+  if (!host || !pick) return null
+  const r = pick.getBoundingClientRect()
+  const top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+  const fly = document.body.querySelector<HTMLElement>('[data-played-card-fly-overlay]')
+  return { hostZ: getComputedStyle(host).zIndex, pickOnTop: top !== null && pick.contains(top), flyOverlayZ: fly ? getComputedStyle(fly).zIndex : null }
+}
+
 // ─── Belot viewer-indicator helpers ─────────────────────────────────────────
 
 function rectOf(el: Element | null): { left: number; top: number; right: number; bottom: number; width: number; height: number } | null {
@@ -898,5 +933,8 @@ function reset(): void {
   flyerCenters,
   profileCenter,
   giftSenderLabels,
+  giftFlightKeyframes,
+  tableCenterFromProfiles,
+  giftModalTopmostCheck,
   getCalls: () => calls,
 }
