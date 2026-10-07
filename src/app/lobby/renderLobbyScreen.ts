@@ -134,6 +134,43 @@ import { canOfferGiftBack, renderGiftItemReceivedActionsHtml, type GiftItemRecei
 // не могат двете стойности да се разминат при бъдеща промяна.
 const PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX = 1640
 
+// Desktop root резервира scrollbar gutter от двете страни (scrollbar-gutter:
+// stable both-edges), за да е shell-ът точно в центъра на viewport-а. Резерв
+// за 2 × най-широкия класически desktop scrollbar (17px).
+const PIKA_DESKTOP_SCROLLBAR_GUTTERS_RESERVE_PX = 34
+
+// Намаляващата стълба на --lobby-scale (под 1701px). Всяка стъпка се прилага
+// при `max-width: threshold`, където threshold е по-голямото от оригиналния
+// праг и последната ширина, при която ПРЕДИШНАТА (по-голяма) стъпка още НЕ се
+// побира (stage × scale + двата gutter-а). Така никоя ширина не получава scale,
+// при който stage-ът е по-широк от наличното място (overflow + изместен център).
+const PIKA_DESKTOP_SCALE_DOWN_STEPS: ReadonlyArray<{ scale: number; maxWidthPx: number }> = [
+  { scale: 0.96, maxWidthPx: 1700 },
+  { scale: 0.91, maxWidthPx: 1600 },
+  { scale: 0.86, maxWidthPx: 1500 },
+  { scale: 0.80, maxWidthPx: 1400 },
+  { scale: 0.73, maxWidthPx: 1280 },
+  { scale: 0.64, maxWidthPx: 1120 },
+  { scale: 0.55, maxWidthPx: 960 },
+  { scale: 0.45, maxWidthPx: 768 },
+]
+
+function renderDesktopLobbyScaleDownMediaQueries(): string {
+  let largerScale = 1
+  return PIKA_DESKTOP_SCALE_DOWN_STEPS.map(({ scale, maxWidthPx }) => {
+    // Закръгляне до 0.01px преди ceil: 1640 × 0.55 = 902.0000000000001 в IEEE754.
+    const largerStageWidthPx = Math.round(PIKA_DESKTOP_CONTENT_MAX_WIDTH_PX * largerScale * 100) / 100
+    const largerScaleFitsFromPx = Math.ceil(largerStageWidthPx + PIKA_DESKTOP_SCROLLBAR_GUTTERS_RESERVE_PX)
+    const thresholdPx = Math.max(maxWidthPx, largerScaleFitsFromPx - 1)
+    largerScale = scale
+    return `
+        @media (max-width: ${thresholdPx}px) {
+          [data-lobby-screen-root="1"] { --lobby-scale: ${scale.toFixed(2)}; }
+        }
+`
+  }).join('')
+}
+
 // "Anti Bad Luck праг" admin select — mirror на server allowlist-а
 // (SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES); сървърът е източникът на истина.
 const ADMIN_ANTI_BAD_LUCK_THRESHOLD_OPTIONS: ReadonlyArray<AdminSettingsSnapshot['antiBadLuckThreshold']> = [0, 5, 6, 7, 8, 9, 10]
@@ -13433,6 +13470,13 @@ export function renderLobbyScreen(
             // viewport-а. Без vh: stage-ът е под zoom:var(--lobby-scale).
             ? 'overflow-y:auto;overflow-x:hidden;display:flex;flex-direction:column;'
             : 'overflow-y:auto;overflow-x:hidden;'}
+        /* Общ desktop scroll owner за ВСИЧКИ изгледи: винаги резервирано място
+           за vertical scrollbar, симетрично от двете страни (both-edges), за да
+           е shell-ът точно в центъра на viewport-а независимо дали текущият
+           изглед има overflow (Topics е hidden, Chat обикновено без overflow,
+           Lobby/Players/... скролват). Scale стълбата отчита двата gutter-а —
+           виж renderDesktopLobbyScaleDownMediaQueries. */
+        scrollbar-gutter: stable both-edges;
         z-index: 50;
       "
     >
@@ -13449,37 +13493,7 @@ export function renderLobbyScreen(
           [data-lobby-screen-root="1"] { --lobby-scale: 1.02; }
         }
 
-        @media (max-width: 1700px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.96; }
-        }
-
-        @media (max-width: 1600px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.91; }
-        }
-
-        @media (max-width: 1500px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.86; }
-        }
-
-        @media (max-width: 1400px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.80; }
-        }
-
-        @media (max-width: 1280px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.73; }
-        }
-
-        @media (max-width: 1120px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.64; }
-        }
-
-        @media (max-width: 960px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.55; }
-        }
-
-        @media (max-width: 768px) {
-          [data-lobby-screen-root="1"] { --lobby-scale: 0.45; }
-        }
+        ${renderDesktopLobbyScaleDownMediaQueries()}
       </style>
 
       <div data-lobby-scale-stage="1" style="${state.view === 'topics'
