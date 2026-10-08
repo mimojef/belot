@@ -91,6 +91,22 @@ export type TopicMuteEvidenceEntry = {
   createdAt: string
 }
 
+/**
+ * Известие за ПРИКЛЮЧВАНЕ на мют (виж topic_mute_end_notices migration) —
+ * 'expired' = естествено изтичане (открито от sweepExpiredSectionMutes),
+ * 'unmuted' = предсрочно премахване от модератор. noticeId е стабилен за
+ * доставка/потвърждение от всички устройства на профила.
+ */
+export type TopicMuteEndNoticeKind = 'expired' | 'unmuted'
+
+export type TopicMuteEndNotice = {
+  noticeId: string
+  profileId: string
+  kind: TopicMuteEndNoticeKind
+  mutedUntil: string | null
+  endedAt: string
+}
+
 export type TopicReportStatus = 'pending' | 'reviewed' | 'dismissed'
 
 export type TopicReportSnapshot = {
@@ -171,12 +187,44 @@ export type TopicModerationStore = {
     sourceMessageId?: string | null
     sourceKind?: TopicMuteEvidenceSourceKind
   }) => TopicSectionMuteSnapshot
+  /**
+   * Същото като muteProfileInTopics, но отказва (без никаква промяна в
+   * mute/audit/evidence), ако профилът ВЕЧЕ има активен мют — проверката е
+   * вътре в СЪЩАТА транзакция (не двоен мют при concurrent заявки). За
+   * profile-popup входа ("Не позволявай втори мют, докато първият е активен").
+   */
+  muteProfileInTopicsIfNotMuted: (input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    reasonCategory?: TopicMuteEvidenceReasonCategory | null
+    durationMs: number
+  }) => { ok: true; snapshot: TopicSectionMuteSnapshot } | { ok: false; code: 'already_muted'; snapshot: TopicSectionMuteSnapshot }
+  /**
+   * При реално предсрочно премахване създава (в същата транзакция) и
+   * 'unmuted' известие за потребителя — `notice` е null само при changed=false.
+   */
   unmuteProfileInTopics: (input: {
     topicId: string
     profileId: string
     actorAccountId: string
     actorRole: TopicModeratorRole
-  }) => { changed: boolean }
+  }) => { changed: boolean; notice: TopicMuteEndNotice | null }
+  /**
+   * Открива естествено изтеклите мютове (muted_until <= now), приключва ги
+   * атомарно (трие topic_section_mutes реда, evidence -> 'expired') и създава
+   * по едно 'expired' известие на приключване. Idempotent: повторно
+   * извикване/рестарт не дава дубликати (UNIQUE end_key). Връща само НОВО
+   * създадените известия.
+   */
+  sweepExpiredSectionMutes: (now?: number) => TopicMuteEndNotice[]
+  listPendingMuteEndNotices: (profileId: string) => TopicMuteEndNotice[]
+  /** Маркира всички pending известия на профила като 'superseded' (има нов активен мют). Връща noticeId-тата. */
+  supersedePendingMuteEndNotices: (profileId: string) => string[]
+  /** OK от което и да е устройство — само собствено pending известие. */
+  acknowledgeMuteEndNotice: (profileId: string, noticeId: string) => boolean
   getSectionMuteSnapshot: (profileId: string) => TopicSectionMuteSnapshot
   /** Server-authoritative enforcement lookup за ВСИЧКИ 5 Topics write paths — expiry checked at read time, никога persisted boolean. */
   isProfileMutedInTopicsSection: (profileId: string) => boolean
@@ -744,11 +792,54 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     sourceMessageId?: string | null
     sourceKind?: TopicMuteEvidenceSourceKind
   }): TopicSectionMuteSnapshot {
+    const result = applySectionMute(input, false)
+    return result.snapshot
+  }
+
+  function muteProfileInTopicsIfNotMuted(input: {
+    topicId: string
+    profileId: string
+    actorAccountId: string
+    actorRole: TopicModeratorRole
+    reason: string
+    reasonCategory?: TopicMuteEvidenceReasonCategory | null
+    durationMs: number
+  }): { ok: true; snapshot: TopicSectionMuteSnapshot } | { ok: false; code: 'already_muted'; snapshot: TopicSectionMuteSnapshot } {
+    const result = applySectionMute({ ...input, sourceMessageId: null, sourceKind: 'unspecified' }, true)
+    return result.applied
+      ? { ok: true, snapshot: result.snapshot }
+      : { ok: false, code: 'already_muted', snapshot: result.snapshot }
+  }
+
+  function applySectionMute(
+    input: {
+      topicId: string
+      profileId: string
+      actorAccountId: string
+      actorRole: TopicModeratorRole
+      reason: string
+      reasonCategory?: TopicMuteEvidenceReasonCategory | null
+      durationMs: number
+      sourceMessageId?: string | null
+      sourceKind?: TopicMuteEvidenceSourceKind
+    },
+    requireNotActive: boolean,
+  ): { applied: boolean; snapshot: TopicSectionMuteSnapshot } {
     const now = Date.now()
     const mutedUntil = toSqliteDateTimeString(new Date(now + input.durationMs))
 
     database.exec('BEGIN IMMEDIATE;')
     try {
+      if (requireNotActive) {
+        const existing = selectSectionMuteStatement.get(input.profileId) as TopicSectionMuteRow | undefined
+        if (toSectionMuteSnapshot(existing, now).isMuted) {
+          database.exec('ROLLBACK;')
+          return { applied: false, snapshot: toSectionMuteSnapshot(existing, now) }
+        }
+      }
+      // Нов мют -> всяко още непотвърдено "Вече можете да пишете" известие
+      // става подвеждащо (случаи C/G) — супресира се в СЪЩАТА транзакция.
+      supersedePendingNoticesStatement.run(input.profileId)
       upsertSectionMuteStatement.run(input.profileId, mutedUntil, input.actorAccountId, input.reason)
       const auditLogId = appendAudit({
         actorAccountId: input.actorAccountId,
@@ -782,7 +873,7 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     }
 
     const row = selectSectionMuteStatement.get(input.profileId) as TopicSectionMuteRow
-    return toSectionMuteSnapshot(row, now)
+    return { applied: true, snapshot: toSectionMuteSnapshot(row, now) }
   }
 
   // Ръчен unmute ТРИЕ реда (не overwrite с минала дата) — same rationale
@@ -800,31 +891,99 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
   // презаписва предишния state ред, значи предишният evidence ред би
   // трябвало вече да е expired/manually_unmuted от предходно действие; LIMIT
   // 1 е defensive, не разчита на тази инвариантност строго).
-  const markLatestActiveMuteEvidenceUnmutedStatement = database.prepare(`
+  // rowid DESC е tie-break за два mute-а в една и съща секунда (created_at е
+  // с точност до секунда) — "последният наложен" остава детерминистичен.
+  const selectLatestActiveMuteEvidenceIdStatement = database.prepare(`
+    SELECT mute_history_id FROM topic_mute_evidence
+    WHERE profile_id = ? AND status = 'active'
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT 1;
+  `)
+  const markMuteEvidenceUnmutedStatement = database.prepare(`
     UPDATE topic_mute_evidence
     SET status = 'manually_unmuted', unmuted_at = CURRENT_TIMESTAMP, unmuted_by_account_id = ?
-    WHERE mute_history_id = (
-      SELECT mute_history_id FROM topic_mute_evidence
-      WHERE profile_id = ? AND status = 'active'
-      ORDER BY created_at DESC
-      LIMIT 1
-    );
+    WHERE mute_history_id = ?;
   `)
+
+  // ─── Известия за приключване на мют (topic_mute_end_notices) ─────────────
+  const insertMuteEndNoticeStatement = database.prepare(`
+    INSERT OR IGNORE INTO topic_mute_end_notices (
+      notice_id, profile_id, end_key, mute_history_id, kind, muted_until, ended_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?);
+  `)
+  const supersedePendingNoticesStatement = database.prepare(`
+    UPDATE topic_mute_end_notices SET status = 'superseded'
+    WHERE profile_id = ? AND status = 'pending';
+  `)
+  const selectPendingNoticesStatement = database.prepare(`
+    SELECT notice_id, profile_id, kind, muted_until, ended_at FROM topic_mute_end_notices
+    WHERE profile_id = ? AND status = 'pending'
+    ORDER BY created_at ASC, rowid ASC;
+  `)
+  const acknowledgeNoticeStatement = database.prepare(`
+    UPDATE topic_mute_end_notices SET status = 'acknowledged', acknowledged_at = CURRENT_TIMESTAMP
+    WHERE notice_id = ? AND profile_id = ? AND status = 'pending';
+  `)
+  const selectExpiredSectionMutesStatement = database.prepare(`
+    SELECT profile_id, muted_until FROM topic_section_mutes WHERE muted_until <= ?;
+  `)
+  // Точно съвпадение по muted_until — ако междувременно е наложен нов мют
+  // (UPSERT с бъдещ muted_until), DELETE-ът не засяга нищо и известие НЕ се
+  // създава (случай C: никакво фалшиво "приключи").
+  const deleteExpiredSectionMuteStatement = database.prepare(`
+    DELETE FROM topic_section_mutes WHERE profile_id = ? AND muted_until = ?;
+  `)
+  const markExpiredActiveEvidenceStatement = database.prepare(`
+    UPDATE topic_mute_evidence SET status = 'expired'
+    WHERE profile_id = ? AND status = 'active' AND muted_until <= ?;
+  `)
+
+  function insertMuteEndNotice(input: {
+    profileId: string
+    endKey: string
+    muteHistoryId: string | null
+    kind: TopicMuteEndNoticeKind
+    mutedUntil: string | null
+    endedAt: string
+  }): TopicMuteEndNotice | null {
+    const noticeId = randomUUID()
+    const result = insertMuteEndNoticeStatement.run(
+      noticeId,
+      input.profileId,
+      input.endKey,
+      input.muteHistoryId,
+      input.kind,
+      input.mutedUntil,
+      input.endedAt,
+    )
+    if (Number(result.changes) === 0) return null
+    return {
+      noticeId,
+      profileId: input.profileId,
+      kind: input.kind,
+      mutedUntil: input.mutedUntil !== null ? dbDateToUtc(input.mutedUntil) : null,
+      endedAt: dbDateToUtc(input.endedAt),
+    }
+  }
 
   function unmuteProfileInTopics(input: {
     topicId: string
     profileId: string
     actorAccountId: string
     actorRole: TopicModeratorRole
-  }): { changed: boolean } {
-    const row = selectSectionMuteStatement.get(input.profileId) as TopicSectionMuteRow | undefined
-    const wasActive = row !== undefined && toSectionMuteSnapshot(row, Date.now()).isMuted
-    if (!wasActive) {
-      return { changed: false }
-    }
-
+  }): { changed: boolean; notice: TopicMuteEndNotice | null } {
     database.exec('BEGIN IMMEDIATE;')
+    let notice: TopicMuteEndNotice | null = null
     try {
+      // Проверката "активен ли е" е ВЪТРЕ в транзакцията — мют, изтекъл
+      // точно сега, се третира като естествено изтичане (sweep-ът ще създаде
+      // 'expired' известие), никога като предсрочно премахване.
+      const now = Date.now()
+      const row = selectSectionMuteStatement.get(input.profileId) as TopicSectionMuteRow | undefined
+      if (row === undefined || !toSectionMuteSnapshot(row, now).isMuted) {
+        database.exec('ROLLBACK;')
+        return { changed: false, notice: null }
+      }
       deleteSectionMuteStatement.run(input.profileId)
       appendAudit({
         actorAccountId: input.actorAccountId,
@@ -835,14 +994,92 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
         reason: null,
         expiresAt: null,
       })
-      markLatestActiveMuteEvidenceUnmutedStatement.run(input.actorAccountId, input.profileId)
+      const latestEvidence = selectLatestActiveMuteEvidenceIdStatement.get(input.profileId) as
+        | { mute_history_id: string }
+        | undefined
+      if (latestEvidence) {
+        markMuteEvidenceUnmutedStatement.run(input.actorAccountId, latestEvidence.mute_history_id)
+      }
+      notice = insertMuteEndNotice({
+        profileId: input.profileId,
+        endKey: latestEvidence?.mute_history_id ?? `section:${input.profileId}:${row.muted_until}`,
+        muteHistoryId: latestEvidence?.mute_history_id ?? null,
+        kind: 'unmuted',
+        mutedUntil: row.muted_until,
+        endedAt: toSqliteDateTimeString(new Date(now)),
+      })
       database.exec('COMMIT;')
     } catch (error) {
       database.exec('ROLLBACK;')
       throw error
     }
 
-    return { changed: true }
+    return { changed: true, notice }
+  }
+
+  function sweepExpiredSectionMutes(now: number = Date.now()): TopicMuteEndNotice[] {
+    const nowSql = toSqliteDateTimeString(new Date(now))
+    const created: TopicMuteEndNotice[] = []
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const expiredRows = selectExpiredSectionMutesStatement.all(nowSql) as Array<{ profile_id: string; muted_until: string }>
+      for (const row of expiredRows) {
+        const latestEvidence = selectLatestActiveMuteEvidenceIdStatement.get(row.profile_id) as
+          | { mute_history_id: string }
+          | undefined
+        const deleted = deleteExpiredSectionMuteStatement.run(row.profile_id, row.muted_until)
+        if (Number(deleted.changes) === 0) continue
+        markExpiredActiveEvidenceStatement.run(row.profile_id, nowSql)
+        const notice = insertMuteEndNotice({
+          profileId: row.profile_id,
+          endKey: latestEvidence?.mute_history_id ?? `section:${row.profile_id}:${row.muted_until}`,
+          muteHistoryId: latestEvidence?.mute_history_id ?? null,
+          kind: 'expired',
+          mutedUntil: row.muted_until,
+          endedAt: row.muted_until,
+        })
+        if (notice !== null) created.push(notice)
+      }
+      database.exec('COMMIT;')
+    } catch (error) {
+      database.exec('ROLLBACK;')
+      throw error
+    }
+
+    return created
+  }
+
+  type MuteEndNoticeRow = {
+    notice_id: string
+    profile_id: string
+    kind: TopicMuteEndNoticeKind
+    muted_until: string | null
+    ended_at: string
+  }
+
+  function listPendingMuteEndNotices(profileId: string): TopicMuteEndNotice[] {
+    const rows = selectPendingNoticesStatement.all(profileId) as MuteEndNoticeRow[]
+    return rows.map((row) => ({
+      noticeId: row.notice_id,
+      profileId: row.profile_id,
+      kind: row.kind,
+      mutedUntil: row.muted_until !== null ? dbDateToUtc(row.muted_until) : null,
+      endedAt: dbDateToUtc(row.ended_at),
+    }))
+  }
+
+  function supersedePendingMuteEndNotices(profileId: string): string[] {
+    const pendingIds = listPendingMuteEndNotices(profileId).map((notice) => notice.noticeId)
+    if (pendingIds.length > 0) {
+      supersedePendingNoticesStatement.run(profileId)
+    }
+    return pendingIds
+  }
+
+  function acknowledgeMuteEndNotice(profileId: string, noticeId: string): boolean {
+    const result = acknowledgeNoticeStatement.run(noticeId, profileId)
+    return Number(result.changes) > 0
   }
 
   function getSectionMuteSnapshot(profileId: string): TopicSectionMuteSnapshot {
@@ -1325,7 +1562,12 @@ export async function createTopicModerationStore(databaseFilePath: string): Prom
     getMuteSnapshot,
     isProfileMutedInTopic,
     muteProfileInTopics,
+    muteProfileInTopicsIfNotMuted,
     unmuteProfileInTopics,
+    sweepExpiredSectionMutes,
+    listPendingMuteEndNotices,
+    supersedePendingMuteEndNotices,
+    acknowledgeMuteEndNotice,
     getSectionMuteSnapshot,
     isProfileMutedInTopicsSection,
     getActiveSectionMutedProfileIds,

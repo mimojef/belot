@@ -43,6 +43,7 @@ import {
   isFullAdminSession,
   isLafcheMessageDeleteModeratorSession,
   isLafcheModeratorSession,
+  isProfileMuteModeratorSession,
   isLafcheOwnPostDeleteSession,
   isMarketingGiftFriendshipBypassSession,
   isMarketingGiftMaxAmountSession,
@@ -69,6 +70,7 @@ import {
   type TopicModerationAction,
   type TopicMuteEvidenceSourceKind,
   type TopicMuteEvidenceReasonCategory,
+  type TopicMuteEndNotice,
 } from './db/topicModerationStore.js'
 import { createTopicHardDeleteService, GENERAL_TOPIC_ID } from './db/topicHardDeleteService.js'
 import {
@@ -117,6 +119,8 @@ import { createBlockStore, BLOCK_LIMIT } from './db/blockStore.js'
 import {
   PROTECTED_STAFF_PROFILE_BLOCK_MESSAGE,
   PROTECTED_STAFF_PROFILE_ERROR_CODE,
+  PROTECTED_STAFF_PROFILE_MUTE_MESSAGE,
+  isMuteProtectedStaffTarget,
 } from './core/protectedStaffProfiles.js'
 import { createLikeStore } from './db/likeStore.js'
 import { createMissionStore, type MissionType } from './db/missionStore.js'
@@ -789,6 +793,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'ad_campaign_mark_shown':
     case 'ad_campaign_dismiss':
     case 'ad_campaign_click':
+    case 'ack_mute_end_notice':
       return false
   }
 
@@ -2193,6 +2198,94 @@ function broadcastTopicsSectionMuteIndicatorChange(profileId: string, isTopicsSe
         profileId,
         isTopicsSectionMuted,
       })
+    }
+  }
+}
+
+// Единният мют забранява писането в Лафче, Теми И чатовете на частните маси —
+// общ текст за всеки отказан опит за изпращане (срокът/причината се връщат
+// отделно в mutedUntil/reason и клиентът ги показва).
+const MUTED_SEND_MESSAGE = 'Временно сте заглушени. Не можете да изпращате съобщения до изтичане на наказанието.'
+
+// Audit/evidence context за действия, инициирани от профилния popup (мют И
+// unmute) — topic_moderation_audit_log.topic_id / topic_mute_evidence.
+// source_topic_id са NOT NULL, но БЕЗ FK към topics, затова stable literal е
+// безопасен (няма фиктивна публикация/тема).
+const PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID = 'profile-popup'
+
+// Сървърна проверка на ЦЕЛТА на мют — важи за ВСИЧКИ входове за налагане
+// (Лафче, Теми, профил): без самомют и без служебни профили (admin,
+// pika_team, marketing, официалния Pika.bg). null = позволено.
+function getMuteTargetRejection(
+  actorProfileId: string | null,
+  targetProfileId: string,
+): { status: number; code: string; message: string } | null {
+  if (actorProfileId !== null && targetProfileId === actorProfileId) {
+    return { status: 403, code: 'self_mute', message: 'Не можете да заглушите собствения си профил.' }
+  }
+  if (isMuteProtectedStaffTarget(authStore.getAccountRoleForProfile(targetProfileId), targetProfileId)) {
+    return { status: 403, code: PROTECTED_STAFF_PROFILE_ERROR_CODE, message: PROTECTED_STAFF_PROFILE_MUTE_MESSAGE }
+  }
+  return null
+}
+
+function toMuteEndNoticeSnapshot(notice: TopicMuteEndNotice) {
+  return {
+    noticeId: notice.noticeId,
+    kind: notice.kind,
+    mutedUntil: notice.mutedUntil,
+    endedAt: notice.endedAt,
+  }
+}
+
+function broadcastMuteEndNoticesCleared(profileId: string, noticeIds: readonly string[]): void {
+  if (noticeIds.length === 0) return
+  broadcastToProfileConnections(profileId, { type: 'mute_end_notices_cleared', noticeIds: [...noticeIds] })
+}
+
+// Доставка на непотвърдените известия за приключил мют. Преди доставка се
+// проверява АКТУАЛНОТО състояние: ако междувременно има нов активен мют,
+// "Вече можете да пишете" е подвеждащо — известията се супресират и
+// отворените popup-и се затварят (случай G). targetSocket = само тази
+// връзка (connect/reconnect); иначе — всички връзки на профила (онлайн).
+function deliverPendingMuteEndNotices(profileId: string, targetSocket?: WebSocket): void {
+  if (topicModerationStore.getSectionMuteSnapshot(profileId).isMuted) {
+    broadcastMuteEndNoticesCleared(profileId, topicModerationStore.supersedePendingMuteEndNotices(profileId))
+    return
+  }
+  const pending = topicModerationStore.listPendingMuteEndNotices(profileId)
+  if (pending.length === 0) return
+  const message = { type: 'mute_end_notices' as const, notices: pending.map(toMuteEndNoticeSnapshot) }
+  if (targetSocket) {
+    sendJsonMessage(targetSocket, message)
+  } else {
+    broadcastToProfileConnections(profileId, message)
+  }
+}
+
+// Един глобален sweep (не timer на потребител) — открива естествено
+// изтеклите мютове в DB, приключва ги атомарно и доставя 'expired'
+// известията онлайн. Офлайн профилите ги получават при следващ connect
+// (известията са в DB, преживяват restart). Извиква се и веднага при
+// старт, за да хване мютове, изтекли докато сървърът е бил спрян.
+const MUTE_EXPIRY_SWEEP_INTERVAL_MS = 5_000
+
+function runMuteExpirySweep(): void {
+  let notices: TopicMuteEndNotice[]
+  try {
+    notices = topicModerationStore.sweepExpiredSectionMutes()
+  } catch (error) {
+    console.error('[mute-expiry-sweep] failed', error instanceof Error ? error.message : String(error))
+    return
+  }
+  const profileIds = new Set(notices.map((notice) => notice.profileId))
+  for (const profileId of profileIds) {
+    try {
+      notifyProfileOfTopicMuteStateChange(profileId, PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID, { isMuted: false, mutedUntil: null, reason: null })
+      broadcastTopicsSectionMuteIndicatorChange(profileId, false)
+      deliverPendingMuteEndNotices(profileId)
+    } catch (error) {
+      console.error('[mute-expiry-sweep] delivery failed', error instanceof Error ? error.message : String(error))
     }
   }
 }
@@ -12648,6 +12741,12 @@ async function handleTopicMuteRequest(
     sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
     return true
   }
+  // Самомют и служебни профили — отказ БЕЗ промяна в mute/audit/evidence.
+  const targetRejection = getMuteTargetRejection(session.profile.profileId, targetProfileId)
+  if (targetRejection !== null) {
+    sendJsonResponse(res, targetRejection.status, { ok: false, code: targetRejection.code, message: targetRejection.message })
+    return true
+  }
   const reason = parseTopicModerationReason(parsedBody.reason)
   if (reason === null) {
     sendJsonResponse(res, 400, { ok: false, message: 'Липсва или невалидна причина.' })
@@ -12669,6 +12768,7 @@ async function handleTopicMuteRequest(
   // остава само audit/source context (кой topic е бил отворен, когато
   // модераторът е натиснал "Заглуши"), enforcement-ът важи навсякъде в
   // Теми след тази заявка.
+  const supersededNoticeIds = topicModerationStore.listPendingMuteEndNotices(targetProfileId).map((notice) => notice.noticeId)
   const muteSnapshot = topicModerationStore.muteProfileInTopics({
     topicId,
     profileId: targetProfileId,
@@ -12683,6 +12783,7 @@ async function handleTopicMuteRequest(
 
   notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, muteSnapshot)
   broadcastTopicsSectionMuteIndicatorChange(targetProfileId, muteSnapshot.isMuted)
+  broadcastMuteEndNoticesCleared(targetProfileId, supersededNoticeIds)
 
   sendJsonResponse(res, 200, { ok: true, mute: muteSnapshot })
   return true
@@ -12751,6 +12852,7 @@ async function handleTopicUnmuteRequest(
   if (changed) {
     notifyProfileOfTopicMuteStateChange(targetProfileId, topicId, { isMuted: false, mutedUntil: null, reason: null })
     broadcastTopicsSectionMuteIndicatorChange(targetProfileId, false)
+    deliverPendingMuteEndNotices(targetProfileId)
   }
 
   sendJsonResponse(res, 200, { ok: true })
@@ -12764,7 +12866,8 @@ async function handleTopicUnmuteRequest(
 // имат REFERENCES, този explicit няма) — safe stable literal, не изисква
 // реален topic row, чисто audit-trail context "unmute-нат от профилния
 // popup, не от конкретна тема/съобщение".
-const PROFILE_POPUP_UNMUTE_AUDIT_TOPIC_ID = 'profile-popup'
+// (Константата PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID е дефинирана по-горе,
+// до getMuteTargetRejection — общ контекст за мют И unmute от профила.)
 
 /**
  * Profile-scoped early unmute — за mute overlay иконата върху аватара в
@@ -12813,18 +12916,109 @@ async function handleProfileUnmuteRequest(
   }
 
   const { changed } = topicModerationStore.unmuteProfileInTopics({
-    topicId: PROFILE_POPUP_UNMUTE_AUDIT_TOPIC_ID,
+    topicId: PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID,
     profileId: targetProfileId,
     actorAccountId: session.account.accountId,
     actorRole: toTopicModeratorRole(session),
   })
 
   if (changed) {
-    notifyProfileOfTopicMuteStateChange(targetProfileId, PROFILE_POPUP_UNMUTE_AUDIT_TOPIC_ID, { isMuted: false, mutedUntil: null, reason: null })
+    notifyProfileOfTopicMuteStateChange(targetProfileId, PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID, { isMuted: false, mutedUntil: null, reason: null })
     broadcastTopicsSectionMuteIndicatorChange(targetProfileId, false)
+    deliverPendingMuteEndNotices(targetProfileId)
   }
 
   sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
+/**
+ * НАЛАГАНЕ на мют директно от профилния popup — без публикация. САМО admin и
+ * pika_team (isProfileMuteModeratorSession; ролята е от сървърната сесия,
+ * никога от клиента). Reuse-ва СЪЩИЯ мют (topic_section_mutes + audit +
+ * evidence в една транзакция, sourceKind 'unspecified', контекст
+ * 'profile-popup') — напълно еквивалентен на мют от публикация. Отказва без
+ * промяна: несъществуващ профил, самомют, служебен профил, вече активен мют
+ * (проверен вътре в транзакцията), невалиден срок/основание/категория.
+ */
+async function handleProfileMuteRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  if (pathname !== '/api/topics/profile-mute' || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isProfileMuteModeratorSession(session)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Нямаш право да заглушаваш потребители.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  const parsedBody = body as { profileId?: unknown; reason?: unknown; durationMs?: unknown; reasonCategory?: unknown }
+
+  const targetProfileId = typeof parsedBody.profileId === 'string' ? parsedBody.profileId.trim() : ''
+  if (targetProfileId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва потребител.' })
+    return true
+  }
+  if (playerProgressStore.getPublicProfile(targetProfileId) === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+    return true
+  }
+  const targetRejection = getMuteTargetRejection(session.profile.profileId, targetProfileId)
+  if (targetRejection !== null) {
+    sendJsonResponse(res, targetRejection.status, { ok: false, code: targetRejection.code, message: targetRejection.message })
+    return true
+  }
+  const reason = parseTopicModerationReason(parsedBody.reason)
+  if (reason === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Липсва или невалидна причина.' })
+    return true
+  }
+  const durationMs = parseTopicModerationDurationMs(parsedBody.durationMs)
+  if (durationMs === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна продължителност.' })
+    return true
+  }
+  if (parsedBody.reasonCategory !== undefined && parsedBody.reasonCategory !== null
+    && parseTopicMuteEvidenceReasonCategory(parsedBody.reasonCategory) === null) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна категория.' })
+    return true
+  }
+  const reasonCategory = parseTopicMuteEvidenceReasonCategory(parsedBody.reasonCategory)
+
+  const supersededNoticeIds = topicModerationStore.listPendingMuteEndNotices(targetProfileId).map((notice) => notice.noticeId)
+  const result = topicModerationStore.muteProfileInTopicsIfNotMuted({
+    topicId: PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID,
+    profileId: targetProfileId,
+    actorAccountId: session.account.accountId,
+    actorRole: toTopicModeratorRole(session),
+    reason,
+    reasonCategory,
+    durationMs,
+  })
+
+  if (!result.ok) {
+    sendJsonResponse(res, 409, { ok: false, code: 'already_muted', message: 'Потребителят вече е заглушен.', mute: result.snapshot })
+    return true
+  }
+
+  notifyProfileOfTopicMuteStateChange(targetProfileId, PROFILE_POPUP_MODERATION_AUDIT_TOPIC_ID, result.snapshot)
+  broadcastTopicsSectionMuteIndicatorChange(targetProfileId, result.snapshot.isMuted)
+  broadcastMuteEndNoticesCleared(targetProfileId, supersededNoticeIds)
+
+  sendJsonResponse(res, 200, { ok: true, mute: result.snapshot })
   return true
 }
 
@@ -13252,6 +13446,20 @@ async function handleTopicMessageEditRequest(
   const lockSnapshot = topicModerationStore.getTopicLockSnapshot(topicId)
   if (lockSnapshot?.isLocked) {
     sendJsonResponse(res, 409, { ok: false, code: 'topic_locked', message: 'Темата е заключена.' })
+    return true
+  }
+
+  // Единен мют забранява и РЕДАКЦИЯТА на собствени публикации/отговори
+  // (иначе мютнат потребител би преписвал свои съобщения в 15-мин прозорец).
+  const editorMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(auth.profileId)
+  if (editorMuteSnapshot.isMuted) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      code: 'topic_muted',
+      message: MUTED_SEND_MESSAGE,
+      mutedUntil: editorMuteSnapshot.mutedUntil ?? undefined,
+      reason: editorMuteSnapshot.reason ?? undefined,
+    })
     return true
   }
 
@@ -17853,7 +18061,7 @@ async function handleChatRequest(
       sendJsonResponse(res, 403, {
         ok: false,
         code: 'topic_muted',
-        message: 'Временно сте заглушени в секция „Теми“.',
+        message: MUTED_SEND_MESSAGE,
         mutedUntil: vipDmStartMuteSnapshot.mutedUntil ?? undefined,
         reason: vipDmStartMuteSnapshot.reason ?? undefined,
       })
@@ -18052,7 +18260,7 @@ async function handleChatRequest(
         sendJsonResponse(res, 403, {
           ok: false,
           code: 'topic_muted',
-          message: 'Временно сте заглушени в секция „Теми“.',
+          message: MUTED_SEND_MESSAGE,
           mutedUntil: vipDmSendMuteSnapshot.mutedUntil ?? undefined,
           reason: vipDmSendMuteSnapshot.reason ?? undefined,
         })
@@ -20316,6 +20524,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleProfileMuteRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleTopicMuteEvidenceForSelfRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -20889,6 +21101,15 @@ wsServer.on('connection', (socket, request) => {
           dispatches: pendingAdCampaigns,
         })
       }
+    }
+
+    // Непотвърдени известия за приключил мют (офлайн доставка / refresh /
+    // reconnect). НАРОЧНО и по време на активна игра — popup-ът е глобален
+    // и не пипа gameplay. Грешка тук не бива да проваля connect bootstrap-а.
+    try {
+      deliverPendingMuteEndNotices(connection.profileId, socket)
+    } catch (error) {
+      console.error('[mute-end-notices] connect delivery failed', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -23676,6 +23897,31 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        // Единен мют (Лафче + Теми + чатовете на частните маси) — проверява
+        // се при ВСЯКО изпращане от DB по authoritative profileId на сесията
+        // (не по флаг в паметта/клиента), ПРЕДИ запис в privateRoomChatStore
+        // и broadcast. Fail-closed: ако проверката не може да се изпълни,
+        // съобщението НЕ се публикува. Връзката и мястото на масата остават.
+        let senderMuteSnapshot: ReturnType<typeof topicModerationStore.getSectionMuteSnapshot>
+        try {
+          senderMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(latestConnection.profileId)
+        } catch (error) {
+          console.error('[private-room-chat] mute check failed', error instanceof Error ? error.message : String(error))
+          sendPrivateRoomChatError('mute_check_unavailable', 'Съобщението не можа да бъде изпратено. Опитай отново.')
+          return
+        }
+        if (senderMuteSnapshot.isMuted) {
+          safeSendToConnection(connection.id, {
+            type: 'private_room_chat_error',
+            code: 'muted',
+            message: MUTED_SEND_MESSAGE,
+            ...(requestId ? { requestId } : {}),
+            ...(senderMuteSnapshot.mutedUntil ? { mutedUntil: senderMuteSnapshot.mutedUntil } : {}),
+            ...(senderMuteSnapshot.reason ? { reason: senderMuteSnapshot.reason } : {}),
+          })
+          return
+        }
+
         const validation = validatePrivateRoomChatBody(message.body)
 
         if (!validation.ok) {
@@ -23923,6 +24169,17 @@ wsServer.on('connection', (socket, request) => {
             type: 'ad_campaign_pending_ads',
             dispatches: pendingAdCampaigns,
           })
+        }
+        return
+      }
+
+      if (message.type === 'ack_mute_end_notice') {
+        // OK на което и да е устройство -> известието е обработено за целия
+        // профил; другите сесии затварят popup-а (mute_end_notices_cleared).
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (latestConnection?.profileId == null) return
+        if (topicModerationStore.acknowledgeMuteEndNotice(latestConnection.profileId, message.noticeId)) {
+          broadcastMuteEndNoticesCleared(latestConnection.profileId, [message.noticeId])
         }
         return
       }
@@ -24226,7 +24483,7 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, {
             type: 'topic_message_error',
             code: 'topic_muted',
-            message: 'Временно сте заглушени в секция „Теми“.',
+            message: MUTED_SEND_MESSAGE,
             requestId,
             mutedUntil: sectionMuteSnapshot.mutedUntil ?? undefined,
             topicId: message.topicId,
@@ -24420,7 +24677,7 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, {
             type: 'topic_reply_error',
             code: 'topic_muted',
-            message: 'Временно сте заглушени в секция „Теми“.',
+            message: MUTED_SEND_MESSAGE,
             requestId,
             mutedUntil: sectionMuteSnapshot.mutedUntil ?? undefined,
             topicId: message.topicId,
@@ -24667,7 +24924,7 @@ wsServer.on('connection', (socket, request) => {
           safeSendToConnection(connection.id, {
             type: 'topic_create_error',
             code: 'topic_muted',
-            message: 'Временно сте заглушени в секция „Теми“.',
+            message: MUTED_SEND_MESSAGE,
             requestId,
             mutedUntil: sectionMuteSnapshot.mutedUntil ?? undefined,
             reason: sectionMuteSnapshot.reason ?? undefined,
@@ -25028,6 +25285,17 @@ const matchmakingTickInterval = setInterval(() => {
   backgroundJobMetrics.recordSync('matchmakingTick', processMatchmaking)
 }, MATCHMAKING_TICK_MS)
 
+// Мют lifecycle: еднократен sweep при старт (мютове, изтекли докато
+// сървърът е бил спрян -> 'expired' известия в DB за следващ connect) +
+// един глобален интервал. Стартира СЛЕД serverState/всички helper-и.
+runMuteExpirySweep()
+let muteExpirySweepInterval: ReturnType<typeof setInterval> | null = setInterval(() => {
+  if (isServerShuttingDown) {
+    return
+  }
+  runMuteExpirySweep()
+}, MUTE_EXPIRY_SWEEP_INTERVAL_MS)
+
 const gameRuntimeTickInterval = setInterval(() => {
   if (isServerShuttingDown) {
     return
@@ -25368,6 +25636,11 @@ function clearMutationTimersForShutdown(): void {
   if (siteVisitRetentionInterval !== null) {
     clearInterval(siteVisitRetentionInterval)
     siteVisitRetentionInterval = null
+  }
+
+  if (muteExpirySweepInterval !== null) {
+    clearInterval(muteExpirySweepInterval)
+    muteExpirySweepInterval = null
   }
 
   if (antiBadLuckConfigRefreshInterval !== null) {

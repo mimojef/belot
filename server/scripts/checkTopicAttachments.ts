@@ -78,6 +78,7 @@ const rootLatestSeqMigrationPath = resolve(serverRoot, 'database/migrations/2026
 // "no such table".
 const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260814_001_create_topic_section_mutes.sql')
 const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
+const muteEndNoticesMigrationPath = resolve(serverRoot, 'database/migrations/20261008_001_create_topic_mute_end_notices.sql')
 // topicModerationStore.ts чете/пише source_attachment_is_evidence_copy —
 // добавена от тази последваща миграция, не от базовата topic_mute_evidence CREATE.
 const muteEvidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
@@ -495,6 +496,7 @@ await withTempDir(async (dir) => {
   await applyMigrationFile(db, editMigrationPath)
   await applyMigrationFile(db, sectionMutesMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
+  await applyMigrationFile(db, muteEndNoticesMigrationPath)
   await applyMigrationFile(db, muteEvidenceAttachmentCopyMigrationPath)
   await applyMigrationFile(db, rootLatestSeqMigrationPath)
   db.prepare(`INSERT INTO accounts (account_id) VALUES ('moderator-1')`).run()

@@ -102,6 +102,13 @@ export type RenderPlayerProfilePopupOptions = {
    * изглежда напълно нормален.
    */
   targetMute?: TopicMuteSnapshot | null
+  /**
+   * Бутон "Мют" (налагане на мют директно от профила) — САМО за viewer с
+   * роля admin или pika_team (UX gate; сървърът презаверява ролята и
+   * защитените профили). Показва се само за чужд профил, когато mute
+   * статусът е зареден и НЯМА активен мют (иначе — overlay-ят за активен мют).
+   */
+  viewerCanProfileMute?: boolean
   banPopupOpen?: boolean
   banPopupDaysDraft?: string
   banPopupReasonDraft?: string
@@ -239,7 +246,7 @@ function renderProfileAvatarMuteOverlay(targetProfileId: string, targetDisplayNa
       data-player-profile-mute-overlay="${escapeHtml(targetProfileId)}"
       data-player-profile-mute-overlay-name="${escapeHtml(targetDisplayName)}"
       title="Активен mute – отвори информация"
-      aria-label="${escapeHtml(targetDisplayName)} е заглушен в „Теми“ — отвори информация за заглушаването"
+      aria-label="${escapeHtml(targetDisplayName)} е временно заглушен — отвори информация за заглушаването"
       style="
         position:absolute;
         inset:0;
@@ -1336,6 +1343,41 @@ function formatModerationDateTime(iso: string): string {
  * "БАН" се заменя с read-only "Баннат до …" индикатор + "Премахни бан"
  * (renderUnbanControls) вместо да позволи duplicate active ban (spec §11).
  */
+function renderProfileMuteActionButton(
+  profileId: string | null,
+  displayName: string,
+  isOwnProfile: boolean,
+  viewerCanProfileMute: boolean,
+  targetMute: TopicMuteSnapshot | null | undefined,
+): string {
+  // Без зареден статус (null/undefined) бутон не се показва — не допускаме
+  // "Мют" върху профил, който може вече да е заглушен.
+  if (isOwnProfile || !viewerCanProfileMute || !profileId || !targetMute || targetMute.isMuted) {
+    return ''
+  }
+
+  return `
+    <button
+      type="button"
+      data-player-profile-mute-action="${escapeHtml(profileId)}"
+      data-player-profile-mute-action-name="${escapeHtml(displayName)}"
+      style="
+        min-height:38px;
+        padding:0 12px;
+        border:1px solid rgba(239,68,68,0.60);
+        border-radius:8px;
+        background:rgba(239,68,68,0.12);
+        color:#fecaca;
+        font-size:13px;
+        font-weight:900;
+        cursor:pointer;
+      "
+    >
+      Мют
+    </button>
+  `
+}
+
 function renderModerationControls(
   profileId: string | null,
   isOwnProfile: boolean,
@@ -1798,6 +1840,7 @@ function renderProfileContent(
   vipGrantErrorText: string | null,
   activeBan: ActiveProfileBanSnapshot | null | undefined,
   targetMute: TopicMuteSnapshot | null | undefined,
+  viewerCanProfileMute: boolean,
   banPopupOpen: boolean,
   banPopupDaysDraft: string,
   banPopupReasonDraft: string,
@@ -2126,6 +2169,7 @@ function renderProfileContent(
                     ${profile.isBlockedByMe ? 'Деблокирай' : 'Блокирай'}
                   </button>
                 ` : ''}
+                ${renderProfileMuteActionButton(profile.profileId, displayName, isOwnProfile, viewerCanProfileMute, targetMute)}
                 ${renderModerationControls(profile.profileId, isOwnProfile, viewerIsFullAdmin, activeBan)}
               </div>
               ${friendshipAction?.message ? `
@@ -2322,6 +2366,7 @@ export function renderPlayerProfilePopup(
           options.vipGrantErrorText ?? null,
           options.activeBan ?? null,
           options.targetMute ?? null,
+          options.viewerCanProfileMute ?? false,
           options.banPopupOpen ?? false,
           options.banPopupDaysDraft ?? '',
           options.banPopupReasonDraft ?? '',

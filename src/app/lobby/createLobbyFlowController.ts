@@ -299,6 +299,19 @@ function isTopicMessageModeratorAuthSession(session: LobbyAuthSession | null): b
  * isTopicWholeTopicModeratorAuthSession по-долу (по-тесен permission set,
  * corrective pass брифа §A1/§A2).
  */
+/**
+ * Бутон "Мют" в профилния popup — само UX gate (сървърът презаверява през
+ * isProfileMuteModeratorSession в authStore.ts). САМО admin и pika_team —
+ * по-тесен от isTopicModeratorAuthSession (subadmin/top_chat_admin запазват
+ * само премахването на мют от профила).
+ */
+function isProfileMuteModeratorAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+  )
+}
+
 function isTopicModeratorAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && (
     session.account.role === 'admin'
@@ -1171,6 +1184,16 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true }
     | { ok: false; message: string }
   >
+  /** НАЛАГАНЕ на мют от профилния popup (само admin/pika_team) — без topicId. Виж submitTopicModerationAction's kind==='mute'&&topicId===null branch. */
+  onProfileMuteProfile?: (
+    profileId: string,
+    reason: string,
+    durationMs: number,
+    reasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null,
+  ) => Promise<
+    | { ok: true; mute: TopicMuteSnapshot }
+    | { ok: false; message: string; mute?: TopicMuteSnapshot }
+  >
   onTopicDelete?: (topicId: string, reason: string) => Promise<
     | { ok: true }
     | { ok: false; message: string }
@@ -1637,7 +1660,8 @@ type InternalLobbyFlowState = {
     | { kind: 'lock'; topicId: string; topicTitle: string }
     | {
         kind: 'mute'
-        topicId: string
+        /** null = отворено от бутона "Мют" в профилния popup (без тема/публикация) — submit вика options.onProfileMuteProfile. */
+        topicId: string | null
         targetProfileId: string
         targetDisplayName: string
         /** Post-ът, чийто mute бутон е бил натиснат — snapshot evidence context (Лафче mute-evidence брифа §1/§3). null = mute инициирано без конкретен пост (напр. бъдещ profile-popup entry point). */
@@ -5519,6 +5543,7 @@ export function createLobbyFlowController(
       adminTopicReportsFilter: state.adminTopicReportsFilter,
       adminTopicReportActionBusyId: state.adminTopicReportActionBusyId,
       isTopicModerator: isTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
+      isProfileMuteModerator: isProfileMuteModeratorAuthSession(options.getAuthSession?.() ?? null),
       isWholeTopicModerator: isTopicWholeTopicModeratorAuthSession(options.getAuthSession?.() ?? null),
       isTopicMessageModerator: isTopicMessageModeratorAuthSession(options.getAuthSession?.() ?? null),
       isLafcheModerator: isLafcheModeratorAuthSession(options.getAuthSession?.() ?? null),
@@ -5726,6 +5751,9 @@ export function createLobbyFlowController(
       },
       onProfileMuteOverlayClick: (profileId, displayName) => {
         getPopupCallbacks().onMuteOverlayClick(profileId, displayName)
+      },
+      onProfileMuteActionClick: (profileId, displayName) => {
+        getPopupCallbacks().onMuteActionClick(profileId, displayName)
       },
       onProfileBanOpen: (profileId) => {
         getPopupCallbacks().onBanOpen(profileId)
@@ -8829,6 +8857,31 @@ export function createLobbyFlowController(
     render()
   }
 
+  /**
+   * Бутон "Мют" в профилния popup — отваря СЪЩИЯ topicModerationActionPopup
+   * (срок/основание/категория) с topicId: null (без тема/публикация). Само
+   * когато статусът на целта е зареден и НЯМА активен мют — при активен мют
+   * се ползва съществуващият overlay (openProfileMuteOverlayPopup).
+   */
+  function openProfileMuteActionPopup(targetProfileId: string, targetDisplayName: string): void {
+    if (!isProfileMuteModeratorAuthSession(options.getAuthSession?.() ?? null)) return
+    const mute = state.profilePopupTargetMute
+    if (state.profilePopupTargetMuteProfileId !== targetProfileId || mute === null || mute.isMuted) return
+    state.topicModerationActionPopup = {
+      kind: 'mute',
+      topicId: null,
+      targetProfileId,
+      targetDisplayName,
+      sourceMessageId: null,
+      sourceKind: 'unspecified',
+    }
+    state.topicModerationActionDurationMs = null
+    state.topicModerationActionReason = ''
+    state.topicModerationActionReasonCategory = null
+    state.topicModerationActionErrorText = null
+    render()
+  }
+
   function closeTopicModerationActionPopup(): void {
     if (state.topicModerationActionBusy) return
     state.topicModerationActionPopup = null
@@ -8926,7 +8979,34 @@ export function createLobbyFlowController(
       return
     }
 
-    // kind === 'mute'
+    // kind === 'mute' от профилния popup (topicId === null) — само admin/pika_team.
+    if (pending.topicId === null) {
+      const profileResult = await options.onProfileMuteProfile?.(
+        pending.targetProfileId,
+        reason,
+        durationMs,
+        state.topicModerationActionReasonCategory,
+      )
+      state.topicModerationActionBusy = false
+      const latestMute = profileResult?.mute ?? null
+      if (latestMute !== null && state.profilePopupTargetMuteProfileId === pending.targetProfileId) {
+        // Статусът в профила се обновява веднага (без refresh) — бутонът
+        // "Мют" изчезва и се показва overlay-ят за активен мют.
+        state.profilePopupTargetMute = latestMute
+      }
+      if (!profileResult || !profileResult.ok) {
+        state.topicModerationActionErrorText = profileResult?.message ?? 'Грешка при заглушаване.'
+        render()
+        return
+      }
+      state.topicModerationActionPopup = null
+      if (state.profilePopupOpen) {
+        renderPopupOnly()
+      }
+      render()
+      return
+    }
+
     const result = await options.onTopicMuteProfile?.(
       pending.topicId,
       pending.targetProfileId,
@@ -17735,6 +17815,9 @@ export function createLobbyFlowController(
       onCancel: () => { closeTopicModerationActionPopup() },
       onSubmit: () => { void submitTopicModerationAction() },
       onHistoryOpenForProfile: (profileId) => { void openTopicMuteHistoryModeratorPopup(profileId) },
+      onDurationChange: (durationMs) => { updateTopicModerationActionDuration(durationMs) },
+      onReasonChange: (reason) => { updateTopicModerationActionReason(reason) },
+      onReasonCategoryChange: (category) => { updateTopicModerationActionReasonCategory(category) },
     })
   }
 
@@ -17998,6 +18081,9 @@ export function createLobbyFlowController(
       },
       onMuteOverlayClick: (profileId, displayName) => {
         openProfileMuteOverlayPopup(profileId, displayName)
+      },
+      onMuteActionClick: (profileId, displayName) => {
+        openProfileMuteActionPopup(profileId, displayName)
       },
       onBanOpen: (profileId) => {
         if (!profileId) return
@@ -18737,6 +18823,7 @@ export function createLobbyFlowController(
         isOwnProfile,
         friendshipAction: buildPopupFriendshipAction(),
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
+        viewerCanProfileMute: isProfileMuteModeratorAuthSession(authSession),
         targetAccountRole: state.profilePopupTargetRole,
         showPikaSupportChatButton: shouldShowPikaSupportChatButton(authSession),
         showTopicsPersonalMessageButton,
@@ -20728,7 +20815,11 @@ export function createLobbyFlowController(
         state.privateRoomWaitingChatSending = false
         state.privateRoomWaitingChatPendingRequestId = null
       }
-      state.privateRoomWaitingChatErrorText = message.message
+      // Единен мют — същият текст/срок/причина като в Лафче и Теми.
+      // Стар сървър (без mutedUntil) или друга грешка -> текстът от сървъра.
+      state.privateRoomWaitingChatErrorText = message.code === 'muted'
+        ? formatTopicsSectionMuteErrorText(message.mutedUntil, message.reason)
+        : message.message
       render()
       return true
     }

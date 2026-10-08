@@ -908,6 +908,11 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'request_pending_ad_campaigns' }
     }
 
+    if (parsed.type === 'ack_mute_end_notice') {
+      const noticeId = normalizeRequiredText(parsed.noticeId)
+      return noticeId === null ? null : { type: 'ack_mute_end_notice', noticeId }
+    }
+
     if (parsed.type === 'ad_campaign_mark_shown') {
       const dispatchId = normalizeRequiredText(parsed.dispatchId)
       if (dispatchId === null) return null

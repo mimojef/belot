@@ -131,7 +131,8 @@ await check('[6] formatTopicsSectionMuteErrorText: пълен 3-редов из�
   const result = formatTopicsSectionMuteErrorText(fixedIso, 'test reason')
   const lines = result.split('\n')
   assertEqual(lines.length, 3, 'изходът трябва да е точно 3 реда: intro, expiry, reason')
-  assertEqual(lines[0], 'Временно сте заглушени в секция „Теми“.', 'ред 1 трябва да е точния intro текст')
+  // Единен мют (Лафче + Теми + чатовете на частните маси) — общ текст при отказ.
+  assertEqual(lines[0], 'Временно сте заглушени. Не можете да изпращате съобщения до изтичане на наказанието.', 'ред 1 трябва да е точния intro текст')
   assert(lines[1]!.startsWith('Можете да публикувате отново след '), 'ред 2 трябва да започва с точната фраза')
   assert(lines[1]!.endsWith(' ч.'), 'ред 2 трябва да завършва с точно " ч." (не " ч. ч.")')
   const chCountInExpiryLine = (lines[1]!.match(/ч\./g) ?? []).length

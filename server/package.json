@@ -121,6 +121,8 @@
     "check:tournament-unified-transition-timing": "tsx scripts/checkTournamentUnifiedTransitionTiming.ts --project-root=..",
     "check:local-tournament-room-bot-delay": "tsx scripts/checkLocalTournamentRoomBotDelay.ts",
     "check:human-turn-timeout": "tsx scripts/checkHumanTurnTimeout.ts",
+    "check:mute-end-notices": "tsx scripts/checkMuteEndNotices.ts",
+    "check:unified-mute-ws": "tsx scripts/checkUnifiedMuteWebSocket.ts --server-root=.",
     "check:server-migration-restart-safety": "tsx scripts/checkServerMigrationRestartSafety.ts --server-root=.",
     "check:subadmin-http-authorization": "tsx scripts/checkSubadminHttpAuthorization.ts --server-root=.",
     "check:subadmin-profile-popup-rendering": "tsx scripts/checkSubadminProfilePopupRendering.ts",

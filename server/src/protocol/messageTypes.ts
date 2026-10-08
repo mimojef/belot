@@ -402,6 +402,11 @@ export type ClientMessage =
       type: 'request_pending_ad_campaigns'
     }
   | {
+      /** OK на popup "Заглушението изтече/е премахнато" — важи за профила на всички устройства. */
+      type: 'ack_mute_end_notice'
+      noticeId: string
+    }
+  | {
       /** Best-effort analytics timestamp — НЕ гейтва pending статуса (виж shown_at семантика брифа). */
       type: 'ad_campaign_mark_shown'
       dispatchId: string
@@ -1514,12 +1519,40 @@ export type PrivateRoomChatErrorCode =
   | 'invalid_body'
   | 'rate_limited'
   | 'duplicate_message'
+  // Активен мют (единен за Лафче, Теми и чатовете на частните маси).
+  | 'muted'
+  // Проверката за мют не можа да бъде изпълнена — съобщението НЕ е публикувано.
+  | 'mute_check_unavailable'
 
 export type PrivateRoomChatErrorMessage = {
   type: 'private_room_chat_error'
   code: PrivateRoomChatErrorCode
   message: string
   requestId?: string
+  // Само при code === 'muted' (server-authoritative срок/причина).
+  mutedUntil?: string
+  reason?: string
+}
+
+// --- Известия за приключил мют (виж topic_mute_end_notices) ---
+export type MuteEndNoticeSnapshot = {
+  noticeId: string
+  kind: 'expired' | 'unmuted'
+  mutedUntil: string | null
+  endedAt: string
+}
+
+// Непотвърдени известия — при connect и веднага след създаване (онлайн).
+export type MuteEndNoticesMessage = {
+  type: 'mute_end_notices'
+  notices: MuteEndNoticeSnapshot[]
+}
+
+// Известието е обработено (OK на друго устройство или супресирано от нов
+// мют) — клиентът затваря/маха съответния popup от опашката.
+export type MuteEndNoticesClearedMessage = {
+  type: 'mute_end_notices_cleared'
+  noticeIds: string[]
 }
 
 // --- Личен (1:1 приятелски) чат — push нотификация при ново съобщение ---
@@ -1609,6 +1642,8 @@ export type ServerMessage =
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageReceivedMessage
   | PrivateRoomChatErrorMessage
+  | MuteEndNoticesMessage
+  | MuteEndNoticesClearedMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage

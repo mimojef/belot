@@ -59,6 +59,7 @@ const threadReadStateMigrationPath = resolve(serverRoot, 'database/migrations/20
 const sectionMutesMigrationPath = resolve(serverRoot, 'database/migrations/20260814_001_create_topic_section_mutes.sql')
 const lafcheSeedMigrationPath = resolve(serverRoot, 'database/migrations/20260817_002_seed_topic_lafche.sql')
 const muteEvidenceMigrationPath = resolve(serverRoot, 'database/migrations/20260817_003_create_topic_mute_evidence.sql')
+const muteEndNoticesMigrationPath = resolve(serverRoot, 'database/migrations/20261008_001_create_topic_mute_end_notices.sql')
 const evidenceAttachmentCopyMigrationPath = resolve(serverRoot, 'database/migrations/20260818_005_add_topic_mute_evidence_attachment_copy.sql')
 const rootLatestSeqMigrationPath = resolve(serverRoot, 'database/migrations/20260824_001_create_topic_root_latest_seq.sql')
 
@@ -146,6 +147,7 @@ async function setupDb(dir: string, filename: string): Promise<string> {
   await applyMigrationFile(db, sectionMutesMigrationPath)
   await applyMigrationFile(db, lafcheSeedMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
+  await applyMigrationFile(db, muteEndNoticesMigrationPath)
   await applyMigrationFile(db, evidenceAttachmentCopyMigrationPath)
   await applyMigrationFile(db, rootLatestSeqMigrationPath)
   db.prepare(`INSERT INTO accounts (account_id) VALUES (?)`).run('moderator-1')
@@ -170,6 +172,7 @@ async function setupDbLegacyPreMigration005(dir: string, filename: string): Prom
   await applyMigrationFile(db, sectionMutesMigrationPath)
   await applyMigrationFile(db, lafcheSeedMigrationPath)
   await applyMigrationFile(db, muteEvidenceMigrationPath)
+  await applyMigrationFile(db, muteEndNoticesMigrationPath)
   // ЛИПСВА evidenceAttachmentCopyMigrationPath — нарочно, симулира текущата
   // production схема ПРЕДИ 20260818_005 да е приложена.
   await applyMigrationFile(db, rootLatestSeqMigrationPath)

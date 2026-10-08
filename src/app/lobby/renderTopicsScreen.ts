@@ -98,8 +98,8 @@ function renderTopicAuthorMuteIndicator(params: {
         ${params.sourceMessageId !== null ? `data-topic-mute-toggle-message-id="${escapeHtml(params.sourceMessageId)}"` : ''}
         data-topic-mute-toggle-source-kind="${params.sourceKind}"
         class="topic-mute-indicator"
-        title="Заглушен в „Теми“ — управлявай"
-        aria-label="${escapeHtml(params.targetDisplayName)} е заглушен в „Теми“ — управлявай заглушаването"
+        title="Временно заглушен — управлявай"
+        aria-label="${escapeHtml(params.targetDisplayName)} е временно заглушен — управлявай заглушаването"
         style="border:0;background:transparent;padding:0;margin:0;color:#ef4444;cursor:pointer;display:inline-flex;align-items:center;flex:0 0 auto;"
       >${icon}</button>
     `
@@ -109,8 +109,8 @@ function renderTopicAuthorMuteIndicator(params: {
     <span
       class="topic-mute-indicator"
       role="img"
-      aria-label="Временно заглушен в секция „Теми“"
-      title="Временно заглушен в секция „Теми“"
+      aria-label="Временно заглушен"
+      title="Временно заглушен"
       style="color:#ef4444;display:inline-flex;align-items:center;flex:0 0 auto;"
     >${icon}</span>
   `
@@ -1432,7 +1432,10 @@ export function renderTopicModerationActionPopup(
   // 'global' rendра САМО profile-popup-origin unmute (topicId===null);
   // 'topics-view' рендра всичко ОСВЕН него (lock/mute + topic-context unmute) —
   // взаимно изключващи се, за да няма дублиране при state.view==='topics'.
-  const isProfilePopupOriginUnmute = pending.kind === 'unmute' && pending.topicId === null
+  // Profile-popup origin = unmute ИЛИ mute (бутон "Мют" в профила) с
+  // topicId===null — рендира се в 'global' scope НАД самия profile popup.
+  const isProfilePopupOriginUnmute =
+    (pending.kind === 'unmute' || pending.kind === 'mute') && pending.topicId === null
   if (scope === 'global' && !isProfilePopupOriginUnmute) return ''
   if (scope === 'topics-view' && isProfilePopupOriginUnmute) return ''
 
@@ -1448,7 +1451,7 @@ export function renderTopicModerationActionPopup(
         <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
           <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:12px;">Заглушен потребител</div>
           <div style="font-size:14px;color:rgba(255,255,255,0.82);line-height:1.5;margin-bottom:${pending.reason ? '10' : '12'}px;">
-            ${escapeHtml(pending.targetDisplayName)} е временно ограничен от публикуване в секция „Теми“${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
+            ${escapeHtml(pending.targetDisplayName)} е временно заглушен в Лафче, Теми и чатовете на частните маси${pending.mutedUntil ? ` до ${escapeHtml(formatModerationExpiry(pending.mutedUntil))}` : ''}.
           </div>
           ${pending.reason ? `
           <div style="font-size:13px;color:rgba(255,255,255,0.68);line-height:1.4;margin-bottom:12px;">
@@ -1477,12 +1480,14 @@ export function renderTopicModerationActionPopup(
   const title = isLock ? 'Заключи темата' : 'Заглуши потребител'
   const subtitle = isLock
     ? escapeHtml(pending.topicTitle)
-    : `${escapeHtml(pending.targetDisplayName)} — в секция „Теми“`
+    : `${escapeHtml(pending.targetDisplayName)} — Лафче, Теми и чатовете на частните маси`
   const busy = state.topicModerationActionBusy
   const selectedDurationMs = state.topicModerationActionDurationMs
+  // 'global' (profile-popup origin) трябва да е НАД profile popup-а (12000/12100).
+  const overlayZIndex = scope === 'global' ? 12200 : 9600
 
   return `
-    <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
+    <div style="position:fixed;inset:0;z-index:${overlayZIndex};display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
       <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
         <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:4px;">${escapeHtml(title)}</div>
         <div style="font-size:13px;color:rgba(255,255,255,0.55);margin-bottom:${isLock ? '16' : '4'}px;">${subtitle}</div>
@@ -1640,9 +1645,12 @@ function renderTopicsSectionMutePopup(state: LobbyScreenState): string {
   return `
     <div style="position:fixed;inset:0;z-index:9600;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.7);padding:16px;">
       <div style="background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);border-radius:16px;padding:24px;max-width:400px;width:100%;box-shadow:0 20px 60px rgba(0,0,0,0.6);">
-        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:12px;">Временно ограничение в „Теми“</div>
-        <div style="font-size:14px;color:rgba(255,255,255,0.82);line-height:1.5;margin-bottom:${snapshot.reason ? '10' : '18'}px;">
-          Временно сте заглушени в секция „Теми“ и не можете да публикувате до ${escapeHtml(formatModerationExpiry(snapshot.mutedUntil))}.
+        <div style="font-size:17px;font-weight:900;color:#fff;margin-bottom:12px;">Временно ограничение</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.82);line-height:1.5;margin-bottom:8px;">
+          ${MUTE_IMPOSED_TEXT}
+        </div>
+        <div style="font-size:13px;color:rgba(255,255,255,0.72);line-height:1.4;margin-bottom:${snapshot.reason ? '10' : '18'}px;">
+          <span style="font-weight:800;color:rgba(255,255,255,0.85);">Срок:</span> до ${escapeHtml(formatModerationExpiry(snapshot.mutedUntil))}
         </div>
         ${snapshot.reason ? `
         <div style="font-size:13px;color:rgba(255,255,255,0.68);line-height:1.4;margin-bottom:18px;">
@@ -1988,8 +1996,13 @@ export function formatModerationExpiry(iso: string): string {
 // index.ts). И двата случая се третират еднакво: потребителят НИКОГА не
 // вижда "Причина:" с празна стойност или null/undefined — вместо това
 // винаги вижда explicit "Причина: Не е посочена причина."
+// Единен мют (Лафче + Теми + чатовете на частните маси) — общи текстове.
+// MUTE_SEND_BLOCKED_TEXT е огледало на сървърния MUTED_SEND_MESSAGE (index.ts).
+export const MUTE_IMPOSED_TEXT = 'Временно сте заглушени. Не можете да пишете в Лафче, Теми и чатовете на частните маси до изтичане на наказанието.'
+export const MUTE_SEND_BLOCKED_TEXT = 'Временно сте заглушени. Не можете да изпращате съобщения до изтичане на наказанието.'
+
 export function formatTopicsSectionMuteErrorText(mutedUntil: string | null | undefined, reason: string | null | undefined): string {
-  const lines = ['Временно сте заглушени в секция „Теми“.']
+  const lines = [MUTE_SEND_BLOCKED_TEXT]
   if (mutedUntil) {
     lines.push(`Можете да публикувате отново след ${formatModerationExpiry(mutedUntil)}`)
   }

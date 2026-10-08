@@ -108,6 +108,7 @@ const migrationFiles = [
   '20260818_005_add_topic_mute_evidence_attachment_copy.sql',
   '20260824_001_create_topic_root_latest_seq.sql',
   '20260901_001_add_created_by_role_to_topics.sql',
+  '20261008_001_create_topic_mute_end_notices.sql',
 ].map((name) => resolve(serverRoot, 'database/migrations', name))
 
 let passed = 0

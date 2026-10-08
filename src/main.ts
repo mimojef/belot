@@ -104,6 +104,7 @@ import { createViewportResizeHandler, isPhoneLayoutViewport } from './ui/layout/
 import { createProfileLikeNotification } from './ui/notifications/profileLikeNotification'
 import { createFriendRequestNotification } from './ui/notifications/friendRequestNotification'
 import { createPartnerRatingNotification } from './ui/notifications/partnerRatingNotification'
+import { createMuteEndNoticePopupController } from './ui/notifications/muteEndNoticePopup'
 import { createChatMessageNotification } from './ui/notifications/chatMessageNotification'
 import { createPrivateRoomCreatedNotification } from './ui/notifications/privateRoomCreatedNotification'
 import { createTournamentEconomyNotification } from './ui/notifications/tournamentEconomyNotification'
@@ -5745,6 +5746,34 @@ async function unmuteProfileGlobal(
   }
 }
 
+/**
+ * НАЛАГАНЕ на мют от профилния popup (само admin/pika_team — сървърът
+ * проверява ролята от сесията). Без topicId/публикация — същият единен мют.
+ * mute се връща и при 409 already_muted, за да се синхронизира overlay-ят.
+ */
+async function muteProfileGlobal(
+  profileId: string,
+  reason: string,
+  durationMs: number,
+  reasonCategory: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null,
+): Promise<{ ok: true; mute: TopicMuteSnapshot } | { ok: false; message: string; mute?: TopicMuteSnapshot }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/topics/profile-mute`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profileId, reason, durationMs, reasonCategory }),
+    })
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; message?: string; mute?: TopicMuteSnapshot }
+    if (!response.ok || !data.ok || !data.mute) {
+      return { ok: false, message: data.message ?? 'Грешка при заглушаване.', ...(data.mute ? { mute: data.mute } : {}) }
+    }
+    return { ok: true, mute: data.mute }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
 async function deleteTopic(
   topicId: string,
   reason: string,
@@ -6980,6 +7009,8 @@ lobby = createLobbyFlowController({
     muteProfileInTopic(topicId, profileId, reason, durationMs, sourceMessageId, sourceKind, reasonCategory),
   onTopicUnmuteProfile: (topicId, profileId) => unmuteProfileInTopic(topicId, profileId),
   onProfileUnmuteProfile: (profileId) => unmuteProfileGlobal(profileId),
+  onProfileMuteProfile: (profileId, reason, durationMs, reasonCategory) =>
+    muteProfileGlobal(profileId, reason, durationMs, reasonCategory),
   onTopicDelete: (topicId, reason) => deleteTopic(topicId, reason),
   onTopicMessageDelete: (topicId, messageId) => deleteTopicMessage(topicId, messageId),
   onTopicMessageEdit: (topicId, messageId, body) => editTopicMessage(topicId, messageId, body),
@@ -7797,6 +7828,16 @@ function showLudoInsufficientBalanceModal(): void {
   overlay.querySelector('[data-ludo-insufficient-balance-modal-ok="1"]')?.addEventListener('click', close)
 }
 
+// OK -> server ack (известието се маркира за целия профил; другите сесии
+// получават mute_end_notices_cleared). Ако връзката е паднала, ack-ът не
+// стига до сървъра и известието ще дойде пак при reconnect — затова
+// popup-ът не се губи, а и не се дублира в рамките на тази сесия.
+const muteEndNoticePopup = createMuteEndNoticePopupController({
+  onAcknowledge: (noticeId) => {
+    client.ackMuteEndNotice(noticeId)
+  },
+})
+
 client = createGameServerClient({
   onOpen: () => {
     clearReconnectTimer()
@@ -7977,6 +8018,19 @@ client = createGameServerClient({
     }
   },
   onMessage: (message) => {
+    // Известия за приключил мют — глобален popup над лоби/чакалня/активна
+    // игра; не минава през lobby/activeRoom controller-ите и не пипа
+    // gameplay state. Обработват се преди всичко останало.
+    if (message.type === 'mute_end_notices') {
+      muteEndNoticePopup.enqueue(message.notices)
+      return
+    }
+
+    if (message.type === 'mute_end_notices_cleared') {
+      muteEndNoticePopup.clear(message.noticeIds)
+      return
+    }
+
     if (message.type === 'connected') {
       handleConnectedServerMessage(lobby, message, () => {
         pwaBootstrapServerStateResolved = true

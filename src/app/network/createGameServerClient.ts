@@ -1135,6 +1135,10 @@ export type ClientMessage =
       type: 'request_pending_ad_campaigns'
     }
   | {
+      type: 'ack_mute_end_notice'
+      noticeId: string
+    }
+  | {
       type: 'ad_campaign_mark_shown'
       dispatchId: string
     }
@@ -2176,12 +2180,35 @@ export type PrivateRoomChatErrorCode =
   | 'invalid_body'
   | 'rate_limited'
   | 'duplicate_message'
+  | 'muted'
+  | 'mute_check_unavailable'
 
 export type PrivateRoomChatErrorMessage = {
   type: 'private_room_chat_error'
   code: PrivateRoomChatErrorCode
   message: string
   requestId?: string
+  /** Само при code === 'muted' — server-authoritative срок/причина на единния мют. */
+  mutedUntil?: string
+  reason?: string
+}
+
+/** Известие за приключил мют — 'expired' (естествено) или 'unmuted' (предсрочно). */
+export type MuteEndNoticeSnapshot = {
+  noticeId: string
+  kind: 'expired' | 'unmuted'
+  mutedUntil: string | null
+  endedAt: string
+}
+
+export type MuteEndNoticesMessage = {
+  type: 'mute_end_notices'
+  notices: MuteEndNoticeSnapshot[]
+}
+
+export type MuteEndNoticesClearedMessage = {
+  type: 'mute_end_notices_cleared'
+  noticeIds: string[]
 }
 
 export type ProfileLikedMessage = {
@@ -2890,6 +2917,8 @@ export type ServerMessage =
   | PrivateRoomChatHistoryMessage
   | PrivateRoomChatMessageEventMessage
   | PrivateRoomChatErrorMessage
+  | MuteEndNoticesMessage
+  | MuteEndNoticesClearedMessage
   | ProfileLikedMessage
   | FriendRequestReceivedMessage
   | FriendRequestCancelledMessage
@@ -3106,6 +3135,7 @@ export type GameServerClient = {
   subscribeAdCampaignManagement: () => void
   unsubscribeAdCampaignManagement: () => void
   requestPendingAdCampaigns: () => void
+  ackMuteEndNotice: (noticeId: string) => void
   markAdCampaignDispatchShown: (dispatchId: string) => void
   dismissAdCampaignDispatch: (dispatchId: string) => void
   clickAdCampaignDispatch: (dispatchId: string) => void
@@ -3597,6 +3627,10 @@ export function createGameServerClient(
     send({ type: 'request_pending_ad_campaigns' })
   }
 
+  function ackMuteEndNotice(noticeId: string): void {
+    send({ type: 'ack_mute_end_notice', noticeId })
+  }
+
   function markAdCampaignDispatchShown(dispatchId: string): void {
     send({ type: 'ad_campaign_mark_shown', dispatchId })
   }
@@ -3681,6 +3715,7 @@ export function createGameServerClient(
     subscribeAdCampaignManagement,
     unsubscribeAdCampaignManagement,
     requestPendingAdCampaigns,
+    ackMuteEndNotice,
     markAdCampaignDispatchShown,
     dismissAdCampaignDispatch,
     clickAdCampaignDispatch,

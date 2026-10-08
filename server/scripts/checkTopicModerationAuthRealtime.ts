@@ -874,9 +874,9 @@ try {
     assertEqual(allowedResult.type, 'topic_message', `очаквано разрешен write след естествен expiry, получено ${allowedResult.type}/${String((allowedResult as { code?: string }).code)}`)
   })
 
-  await check('[H12] Moderator popup subtitle text вече казва „в секция Теми", НЕ „в тази тема" (source-level copy check)', async () => {
+  await check('[H12] Moderator popup subtitle text назовава трите канала на единния мют, НЕ „в тази тема" (source-level copy check)', async () => {
     const renderTopicsScreenSource = await (await import('node:fs/promises')).readFile(resolve(serverRoot, '..', 'src/app/lobby/renderTopicsScreen.ts'), 'utf8')
-    assert(renderTopicsScreenSource.includes('в секция „Теми“'), 'renderTopicsScreen.ts трябва да съдържа новия "в секция „Теми“" copy')
+    assert(renderTopicsScreenSource.includes('— Лафче, Теми и чатовете на частните маси'), 'renderTopicsScreen.ts трябва да съдържа copy-то на единния мют')
     assert(!renderTopicsScreenSource.includes('— в тази тема`'), 'renderTopicsScreen.ts НЕ трябва повече да съдържа старото "— в тази тема" subtitle copy')
   })
 

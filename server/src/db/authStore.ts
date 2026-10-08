@@ -323,6 +323,22 @@ export function isTopicModeratorSession(
  * за General/user topics ("Лафче" брифа §6: "Не давай тези права автоматично
  * на subadmin/chat_admin").
  */
+/**
+ * НАЛАГАНЕ на мют директно от профилния popup (POST /api/topics/profile-mute)
+ * — САМО admin и pika_team ("Екип Pika.bg"). Умишлено по-тесен от
+ * isTopicModeratorSession/isLafcheModeratorSession: subadmin/top_chat_admin
+ * запазват мют от публикации и премахване от профила, но НЕ получават
+ * profile-mute. Не замествай другите moderator predicate-и с тази функция.
+ */
+export function isProfileMuteModeratorSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && (
+    session.account.role === 'admin'
+    || session.account.role === 'pika_team'
+  )
+}
+
 export function isLafcheModeratorSession(
   session: AuthSessionSnapshot | null,
 ): session is AuthSessionSnapshot {

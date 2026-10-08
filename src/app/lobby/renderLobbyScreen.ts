@@ -486,7 +486,8 @@ export type LobbyScreenState = {
     | { kind: 'lock'; topicId: string; topicTitle: string }
     | {
         kind: 'mute'
-        topicId: string
+        /** null = бутон "Мют" в профилния popup (без тема/публикация). */
+        topicId: string | null
         targetProfileId: string
         targetDisplayName: string
         sourceMessageId: string | null
@@ -541,6 +542,8 @@ export type LobbyScreenState = {
   adminTopicReportActionBusyId: string | null
   /** Client-side UX gate (server е authoritative на всяко HTTP moderation действие) — виж isTopicModeratorAuthSession в createLobbyFlowController.ts. Покрива mute/unmute/reports/audit UI. */
   isTopicModerator: boolean
+  /** Бутон "Мют" в профилния popup — само admin/pika_team (UX gate; сървърът презаверява). Виж isProfileMuteModeratorAuthSession в createLobbyFlowController.ts. */
+  isProfileMuteModerator?: boolean
   /** По-тесен client-side UX gate за whole-topic Lock/Unlock/Delete контроли — виж isTopicWholeTopicModeratorAuthSession в createLobbyFlowController.ts. */
   isWholeTopicModerator: boolean
   /** Client-side UX gate за individual root съобщение/reply moderation delete (5 роли, вкл. chat_admin) — виж isTopicMessageModeratorAuthSession в createLobbyFlowController.ts. Различен role set от isTopicModerator. */
@@ -1096,6 +1099,7 @@ export type RenderLobbyScreenOptions = {
   onProfileVipGrantCancel: () => void
   onProfileVipGrantSubmit: (profileId: string | null, rawDays: string) => void
   onProfileMuteOverlayClick: (profileId: string, displayName: string) => void
+  onProfileMuteActionClick: (profileId: string, displayName: string) => void
   onProfileBanOpen: (profileId: string | null) => void
   onProfileBanCancel: () => void
   onProfileBanSubmit: (profileId: string | null, rawDays: string, reason: string) => void
@@ -1624,6 +1628,7 @@ export type ProfilePopupCallbacks = {
   onVipGrantCancel: () => void
   onVipGrantSubmit: (profileId: string | null, rawDays: string) => void
   onMuteOverlayClick: (profileId: string, displayName: string) => void
+  onMuteActionClick: (profileId: string, displayName: string) => void
   onBanOpen: (profileId: string | null) => void
   onBanCancel: () => void
   onBanSubmit: (profileId: string | null, rawDays: string, reason: string) => void
@@ -1762,6 +1767,15 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       const id = btn.dataset.playerProfileMuteOverlay?.trim() ?? ''
       const name = btn.dataset.playerProfileMuteOverlayName?.trim() ?? ''
       if (id) cb.onMuteOverlayClick(id, name)
+    })
+  // Бутон "Мют" (само admin/pika_team, само без активен мют) — отваря
+  // СЪЩИЯ moderation popup за срок/основание (openProfileMuteActionPopup).
+  el.querySelector<HTMLButtonElement>('[data-player-profile-mute-action]')
+    ?.addEventListener('click', (e) => {
+      const btn = e.currentTarget as HTMLButtonElement
+      const id = btn.dataset.playerProfileMuteAction?.trim() ?? ''
+      const name = btn.dataset.playerProfileMuteActionName?.trim() ?? ''
+      if (id) cb.onMuteActionClick(id, name)
     })
   el.querySelector<HTMLButtonElement>('[data-player-profile-ban-open]')
     ?.addEventListener('click', (e) => {
@@ -1902,6 +1916,7 @@ export function syncProfilePopup(
     isOwnProfile?: boolean
     friendshipAction: PlayerProfileFriendshipAction | null
     viewerIsFullAdmin?: boolean
+    viewerCanProfileMute?: boolean
     targetAccountRole?: PlayerAccountRole | null
     showPikaSupportChatButton?: boolean
     showTopicsPersonalMessageButton?: boolean
@@ -1971,6 +1986,7 @@ export function syncProfilePopup(
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen || (popupState.skipAnimation ?? false),
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
+    viewerCanProfileMute: popupState.viewerCanProfileMute ?? false,
     targetAccountRole: popupState.targetAccountRole ?? null,
     // НЕ "?? null" тук — undefined е explicit "not loaded yet" сигнал
     // (виж LobbyScreenState.ownVipActiveUntil), не omitted-prop default.
@@ -2027,6 +2043,10 @@ export function syncProfileMuteOverlayUnmutePopup(
     onCancel: () => void
     onSubmit: () => void
     onHistoryOpenForProfile: (profileId: string) => void
+    // Само за mute от профила (срок/основание/категория) — unmute няма тези полета.
+    onDurationChange: (durationMs: number) => void
+    onReasonChange: (reason: string) => void
+    onReasonCategoryChange: (category: 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other' | null) => void
   },
 ): void {
   const html = renderTopicModerationActionPopup(state, 'global')
@@ -2053,6 +2073,22 @@ export function syncProfileMuteOverlayUnmutePopup(
     btn.addEventListener('click', () => {
       cb.onHistoryOpenForProfile(profileId)
     })
+  })
+  el.querySelectorAll<HTMLButtonElement>('[data-topic-moderation-duration]').forEach((btn) => {
+    const durationMs = Number.parseInt(btn.dataset.topicModerationDuration ?? '', 10)
+    if (!Number.isFinite(durationMs)) return
+    btn.addEventListener('click', () => {
+      cb.onDurationChange(durationMs)
+    })
+  })
+  el.querySelector<HTMLTextAreaElement>('[data-topic-moderation-reason="1"]')?.addEventListener('input', (event) => {
+    cb.onReasonChange((event.currentTarget as HTMLTextAreaElement).value)
+  })
+  el.querySelector<HTMLSelectElement>('[data-topic-moderation-reason-category="1"]')?.addEventListener('change', (event) => {
+    const value = (event.currentTarget as HTMLSelectElement).value
+    cb.onReasonCategoryChange(
+      value === '' ? null : (value as 'insults' | 'provocation' | 'spam' | 'inappropriate_content' | 'other'),
+    )
   })
 }
 
@@ -15969,6 +16005,7 @@ export function renderLobbyScreen(
       isOwnProfile: profilePopupIsOwnProfile,
       friendshipAction: state.friendshipAction,
       viewerIsFullAdmin: state.isAdmin,
+      viewerCanProfileMute: state.isProfileMuteModerator ?? false,
       targetAccountRole: state.profilePopupTargetRole,
       showPikaSupportChatButton: state.showPikaSupportChatButton,
       showTopicsPersonalMessageButton: false,
@@ -16030,6 +16067,7 @@ export function renderLobbyScreen(
       onVipGrantCancel: options.onProfileVipGrantCancel,
       onVipGrantSubmit: options.onProfileVipGrantSubmit,
       onMuteOverlayClick: options.onProfileMuteOverlayClick,
+      onMuteActionClick: options.onProfileMuteActionClick,
       onBanOpen: options.onProfileBanOpen,
       onBanCancel: options.onProfileBanCancel,
       onBanSubmit: options.onProfileBanSubmit,
