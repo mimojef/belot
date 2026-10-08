@@ -14,6 +14,14 @@ export type PikaTeamDailyGiftLimitErrorPayload = {
   remaining: number
 }
 
+/** Mirror на PikaTeamDailyGiftLimitErrorPayload по-горе, но за role='marketing' (отделен pool, виж yellowCoinGiftStore.ts). */
+export type MarketingDailyGiftLimitErrorPayload = {
+  code: 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED'
+  limit: number
+  used: number
+  remaining: number
+}
+
 const numFmt = new Intl.NumberFormat('bg-BG')
 const dateFmt = new Intl.DateTimeFormat('bg-BG', {
   timeZone: 'Europe/Sofia',
@@ -31,6 +39,18 @@ const FULL_BASE = 'Този играч вече е получил максима
 // независимо от кой code branch е дошъл резултатът.
 export function formatPikaTeamDailyGiftLimitError(
   result: PikaTeamDailyGiftLimitErrorPayload & { message?: string },
+): string {
+  if (result.remaining > 0) {
+    return `Можеш да подариш още максимум ${numFmt.format(result.remaining)} жълтици днес.`
+  }
+  return 'Достигнат е дневният лимит за подаряване на жълтици. Лимитът се занулява в 00:00 ч.'
+}
+
+// Mirror на formatPikaTeamDailyGiftLimitError по-горе, но за role='marketing'
+// (отделен pool) — server вече връща готово Bulgarian съобщение, тук само
+// pass-through wrapper за единен извикващ pattern.
+export function formatMarketingDailyGiftLimitError(
+  result: MarketingDailyGiftLimitErrorPayload & { message?: string },
 ): string {
   if (result.remaining > 0) {
     return `Можеш да подариш още максимум ${numFmt.format(result.remaining)} жълтици днес.`

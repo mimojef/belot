@@ -38,6 +38,9 @@ import {
   isLafcheModeratorSession,
   isLafcheOwnPostDeleteSession,
   isLobbyChatModeratorSession,
+  isMarketingGiftFriendshipBypassSession,
+  isMarketingGiftMaxAmountSession,
+  isPikaAnnouncementAuthorRole,
   isPikaAnnouncementAuthorSession,
   isPikaTeamGiftFriendshipBypassSession,
   isPikaTeamGiftMaxAmountSession,
@@ -71,6 +74,12 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
 
 function assert(condition: boolean, message: string): void {
   if (!condition) throw new Error(message)
+}
+
+function assertEqual<T>(actual: T, expected: T, label: string): void {
+  if (actual !== expected) {
+    throw new Error(`${label}: got ${String(actual)}, expected ${String(expected)}`)
+  }
 }
 
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
@@ -216,7 +225,7 @@ const EXPECTED_PREDICATE_MATRIX: Array<[string, (s: AuthSessionSnapshot | null) 
   ['isFullAdminSession', isFullAdminSession, 'admin'],
   ['isAdminOrSubadminSession', isAdminOrSubadminSession, 'subadmin,admin'],
   ['isLobbyChatModeratorSession', isLobbyChatModeratorSession, 'chat_admin,pika_team,top_chat_admin,subadmin,admin'],
-  ['isPikaAnnouncementAuthorSession', isPikaAnnouncementAuthorSession, 'pika_team,admin'],
+  ['isPikaAnnouncementAuthorSession', isPikaAnnouncementAuthorSession, 'pika_team,marketing,admin'],
   ['isTopicModeratorSession (mute/unmute/reports/audit)', isTopicModeratorSession, 'pika_team,top_chat_admin,subadmin,admin'],
   ['isLafcheModeratorSession (Лафче mute/report)', isLafcheModeratorSession, 'pika_team,top_chat_admin,admin'],
   ['isLafcheMessageDeleteModeratorSession', isLafcheMessageDeleteModeratorSession, 'chat_admin,pika_team,top_chat_admin,admin'],
@@ -224,6 +233,8 @@ const EXPECTED_PREDICATE_MATRIX: Array<[string, (s: AuthSessionSnapshot | null) 
   ['isTopicMessageModeratorSession (delete чужд пост)', isTopicMessageModeratorSession, 'chat_admin,pika_team,top_chat_admin,subadmin,admin'],
   ['isPikaTeamGiftFriendshipBypassSession', isPikaTeamGiftFriendshipBypassSession, 'pika_team'],
   ['isPikaTeamGiftMaxAmountSession', isPikaTeamGiftMaxAmountSession, 'pika_team'],
+  ['isMarketingGiftFriendshipBypassSession', isMarketingGiftFriendshipBypassSession, 'marketing'],
+  ['isMarketingGiftMaxAmountSession', isMarketingGiftMaxAmountSession, 'marketing'],
   ['isPikaTeamSupportChatSession', isPikaTeamSupportChatSession, 'pika_team'],
   ['isAdminGiftUnlimitedSession', isAdminGiftUnlimitedSession, 'admin'],
 ]
@@ -424,6 +435,11 @@ await check('P. isAdCampaignManagerRole (WS subscribe gate) → admin/pika_team/
   assert(actual === 'pika_team,marketing,admin', actual)
   assert(!isAdCampaignManagerRole(null), 'null role')
 })
+await check('P. isPikaAnnouncementAuthorRole (Lobby WS send gate) → admin/pika_team/marketing само', () => {
+  const actual = ALL_ROLES.filter((role) => isPikaAnnouncementAuthorRole(role)).join(',')
+  assert(actual === 'pika_team,marketing,admin', actual)
+  assert(!isPikaAnnouncementAuthorRole(null), 'null role')
+})
 
 console.log('\n=== C. client UX predicates / source wiring ===')
 const controller = readSource('src/app/lobby/createLobbyFlowController.ts')
@@ -441,13 +457,24 @@ await check('C1. client isAdCampaignManagerAuthSession включва marketing 
 })
 await check('C2. client moderator/admin predicates НЕ включват marketing', () => {
   for (const name of [
-    'isFullAdminAuthSession', 'isAdminOrSubadminAuthSession', 'isPikaAnnouncementAuthorAuthSession', 'isTopicMessageModeratorAuthSession',
+    'isFullAdminAuthSession', 'isAdminOrSubadminAuthSession', 'isTopicMessageModeratorAuthSession',
     'isTopicModeratorAuthSession', 'isLafcheModeratorAuthSession', 'isLafcheMessageDeleteModeratorAuthSession', 'isTopicWholeTopicModeratorAuthSession',
   ]) {
     const body = fnBody(controller, name)
     assert(body.length > 0, `${name} missing`)
     assert(!body.includes('marketing'), `${name} must not include marketing`)
   }
+})
+await check('C2b. client isPikaAnnouncementAuthorAuthSession (Lobby "Публикации от Pika.bg") включва marketing, но Lafche/Topics moderator predicates не са засегнати', () => {
+  const body = fnBody(controller, 'isPikaAnnouncementAuthorAuthSession')
+  assert(body.includes("'marketing'") && body.includes("'admin'") && body.includes("'pika_team'"), body)
+  assert(controller.includes('canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession)'), 'canDeleteLobbyChat wiring')
+  assert(controller.includes('canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession)'), 'canWriteLobbyChat wiring')
+})
+await check('C2c. client gift bypass UX predicates: isMarketingGiftFriendshipBypassAuthSession е собствен, независим predicate', () => {
+  const body = fnBody(controller, 'isMarketingGiftFriendshipBypassAuthSession')
+  assert(body.includes("role === 'marketing'"), body)
+  assert(controller.includes('isMarketingGiftFriendshipBypassAuthSession(authSession)'), 'used at a call site')
 })
 await check('C3. own-content UX gates: Лафче кошче само върху собствен пост; собствен root с отговори не е blocked', () => {
   assert(/function isLafcheOwnPostDeleteAuthSession[\s\S]*?role === 'marketing'/.test(controller), 'lafche own gate')
@@ -712,10 +739,127 @@ try {
     const name = await request(port, 'POST', `/api/admin/profiles/${other.profileId}/display-name`, { displayName: 'Hacked' }, marketing.cookie)
     assert(settings.status === 403 && vip.status === 403 && name.status === 403, `${settings.status}/${vip.status}/${name.status}`)
   })
-  await check('H28. "Публикации от Pika.bg" delete (lobby chat) → 403', async () => {
-    const res = await request(port, 'DELETE', `/api/lobby-chat/messages/${randomUUID()}`, undefined, marketing.cookie)
-    assert(res.status === 403, `${res.status}`)
+  console.log('\n--- "Публикации от Pika.bg" (Lobby) — ново marketing право, scoped ИЗРИЧНО само тук ---')
+  const insertLobbyChatMessage = (sender: TestUser, role: 'admin' | 'pika_team' | 'marketing' | 'player', body: string): string => {
+    const messageId = randomUUID()
+    withDb(isolated.databaseFile, (db) => db.prepare(`
+      INSERT INTO lobby_chat_messages (message_id, sender_profile_id, sender_display_name, sender_is_chat_admin, sender_role, body)
+      VALUES (?, ?, 'X', 0, ?, ?);
+    `).run(messageId, sender.profileId, role, body))
+    return messageId
+  }
+  const lobbyChatDeletedAt = (messageId: string) =>
+    withDb(isolated.databaseFile, (db) => (db.prepare('SELECT deleted_at FROM lobby_chat_messages WHERE message_id = ?').get(messageId) as { deleted_at: string | null }).deleted_at)
+
+  const wsMktLobby = await openWs(port, marketing.cookie)
+  let marketingLobbyOwnMessageId = ''
+  await check('H28a. marketing публикува в "Публикации от Pika.bg" през WS → sender_role в DB = marketing (ново право, брифа §1)', async () => {
+    wsMktLobby.send(JSON.stringify({ type: 'subscribe_lobby_chat' }))
+    await waitForWs(wsMktLobby, (m) => m.type === 'lobby_chat_history')
+    const requestId = randomUUID()
+    wsMktLobby.send(JSON.stringify({ type: 'send_lobby_chat_message', body: 'marketing lobby post', requestId }))
+    const msg = await waitForWs(wsMktLobby, (m) => (m.type === 'lobby_chat_message' || m.type === 'lobby_chat_error') && m.requestId === requestId)
+    assert(msg.type === 'lobby_chat_message', JSON.stringify(msg))
+    assertEqual(msg.senderRole as string, 'marketing', 'senderRole broadcast')
+    const row = withDb(isolated.databaseFile, (db) => db.prepare('SELECT sender_role FROM lobby_chat_messages WHERE message_id = ?').get(msg.messageId as string) as { sender_role: string })
+    assert(row.sender_role === 'marketing', JSON.stringify(row))
+    marketingLobbyOwnMessageId = msg.messageId as string
   })
+  await check('H28b. marketing изтрива СОБСТВЕН пост в "Публикации от Pika.bg" (HTTP DELETE) → 200', async () => {
+    const res = await request(port, 'DELETE', `/api/lobby-chat/messages/${marketingLobbyOwnMessageId}`, undefined, marketing.cookie)
+    assert(res.status === 200, `${res.status} ${res.text}`)
+    assert(lobbyChatDeletedAt(marketingLobbyOwnMessageId) !== null, 'own post not deleted')
+  })
+  await check('H28c. marketing изтрива ЧУЖД (admin) пост в "Публикации от Pika.bg" → 200 (както pika_team, брифа §1)', async () => {
+    const foreignId = insertLobbyChatMessage(admin, 'admin', 'admin lobby post')
+    const res = await request(port, 'DELETE', `/api/lobby-chat/messages/${foreignId}`, undefined, marketing.cookie)
+    assert(res.status === 200, `${res.status} ${res.text}`)
+    assert(lobbyChatDeletedAt(foreignId) !== null, 'foreign post not deleted')
+  })
+  await check('H28d. player НЕ може да публикува (WS forbidden) НИ да изтрива (HTTP 403) в "Публикации от Pika.bg"', async () => {
+    const wsPlayerLobby = await openWs(port, player.cookie)
+    wsPlayerLobby.send(JSON.stringify({ type: 'subscribe_lobby_chat' }))
+    await waitForWs(wsPlayerLobby, (m) => m.type === 'lobby_chat_history')
+    const requestId = randomUUID()
+    wsPlayerLobby.send(JSON.stringify({ type: 'send_lobby_chat_message', body: 'player should not post', requestId }))
+    const err = await waitForWs(wsPlayerLobby, (m) => m.type === 'lobby_chat_error' && m.requestId === requestId)
+    assert(err.code === 'forbidden', JSON.stringify(err))
+    wsPlayerLobby.close()
+    const foreignId = insertLobbyChatMessage(admin, 'admin', 'admin lobby post 2')
+    const del = await request(port, 'DELETE', `/api/lobby-chat/messages/${foreignId}`, undefined, player.cookie)
+    assert(del.status === 403 && lobbyChatDeletedAt(foreignId) === null, `${del.status}`)
+  })
+  await check('H28e. pika_team/admin "Публикации от Pika.bg" права — непроменени (regression)', async () => {
+    const pikaOwn = insertLobbyChatMessage(pika, 'pika_team', 'pika lobby post')
+    const pikaDel = await request(port, 'DELETE', `/api/lobby-chat/messages/${pikaOwn}`, undefined, pika.cookie)
+    const adminForeign = insertLobbyChatMessage(marketing, 'marketing', 'marketing lobby post for admin to delete')
+    const adminDel = await request(port, 'DELETE', `/api/lobby-chat/messages/${adminForeign}`, undefined, admin.cookie)
+    assert(pikaDel.status === 200 && adminDel.status === 200, `${pikaDel.status}/${adminDel.status}`)
+    assert(lobbyChatDeletedAt(pikaOwn) !== null && lobbyChatDeletedAt(adminForeign) !== null, 'not deleted')
+  })
+  wsMktLobby.close()
+
+  console.log('\n--- Gift-coins "служебно подаряване" за marketing (HTTP E2E, брифа §2/§3) ---')
+  withDb(isolated.databaseFile, (db) => db.prepare('UPDATE profile_wallets SET yellow_coins_balance = 1000000 WHERE profile_id = ?').run(marketing.profileId))
+  await check('H28f. marketing директно подарява на НЕ-приятел (/api/friends/gift-coins/direct) → 200', async () => {
+    const before = withDb(isolated.databaseFile, (db) => (db.prepare('SELECT yellow_coins_balance b FROM profile_wallets WHERE profile_id = ?').get(target.profileId) as { b: number }).b)
+    const res = await request(port, 'POST', '/api/friends/gift-coins/direct', { recipientProfileId: target.profileId, amount: 10_000 }, marketing.cookie)
+    assert(res.status === 200 && res.body?.ok === true, `${res.status} ${res.text}`)
+    const after = withDb(isolated.databaseFile, (db) => (db.prepare('SELECT yellow_coins_balance b FROM profile_wallets WHERE profile_id = ?').get(target.profileId) as { b: number }).b)
+    assertEqual(after - before, 10_000, 'recipient balance delta')
+  })
+  await check('H28g. player НЕ може да ползва /api/friends/gift-coins/direct → 403 (непроменено)', async () => {
+    const res = await request(port, 'POST', '/api/friends/gift-coins/direct', { recipientProfileId: target.profileId, amount: 1_000 }, player.cookie)
+    assert(res.status === 403, `${res.status} ${res.text}`)
+  })
+  await check('H28h. marketing подарява на приятел (/api/friends/:id/gift-coins, нормален friend flow) → 200', async () => {
+    const reqFriend = await request(port, 'POST', '/api/friends/request', { profileId: other.profileId }, marketing.cookie)
+    assert(reqFriend.status === 200 && reqFriend.body?.ok === true, `friend request: ${reqFriend.status} ${reqFriend.text}`)
+    const friendshipId = withDb(isolated.databaseFile, (db) => (db.prepare(
+      'SELECT friendship_id FROM profile_friendships WHERE requester_profile_id = ? AND addressee_profile_id = ? ORDER BY created_at DESC LIMIT 1',
+    ).get(marketing.profileId, other.profileId) as { friendship_id?: string } | undefined)?.friendship_id ?? '')
+    assert(friendshipId !== '', 'friendshipId missing')
+    const accept = await request(port, 'POST', `/api/friends/${friendshipId}/accept`, undefined, other.cookie)
+    assert(accept.status === 200, `accept: ${accept.status} ${accept.text}`)
+    const res = await request(port, 'POST', `/api/friends/${friendshipId}/gift-coins`, { amount: 5_000 }, marketing.cookie)
+    assert(res.status === 200 && res.body?.ok === true, `${res.status} ${res.text}`)
+  })
+  await check('H28i. /api/auth/me за marketing връща marketingGiftMaxAmount=100000 и marketingDailyGiftLimitStatus; pika_team полетата остават null', async () => {
+    const me = await request(port, 'GET', '/api/auth/me', undefined, marketing.cookie)
+    const session = me.body?.session as { marketingGiftMaxAmount?: number; marketingDailyGiftLimitStatus?: unknown; pikaTeamGiftMaxAmount?: unknown } | undefined
+    assertEqual(session?.marketingGiftMaxAmount, 100_000, 'marketingGiftMaxAmount')
+    assert(session?.marketingDailyGiftLimitStatus != null, 'marketingDailyGiftLimitStatus missing')
+    assert(session?.pikaTeamGiftMaxAmount == null, 'marketing session must NOT carry pikaTeamGiftMaxAmount')
+  })
+  await check('H28j. /api/auth/me за pika_team остава непроменено (само pikaTeamGiftMaxAmount, не marketingGiftMaxAmount) — regression', async () => {
+    const me = await request(port, 'GET', '/api/auth/me', undefined, pika.cookie)
+    const session = me.body?.session as { pikaTeamGiftMaxAmount?: number; marketingGiftMaxAmount?: unknown } | undefined
+    assertEqual(session?.pikaTeamGiftMaxAmount, 100_000, 'pikaTeamGiftMaxAmount')
+    assert(session?.marketingGiftMaxAmount == null, 'pika_team session must NOT carry marketingGiftMaxAmount')
+  })
+
+  console.log('\n--- Admin Settings: marketingDailyGiftLimit (отделна настройка от pikaTeamDailyGiftLimit) ---')
+  await check('H28k. GET /api/admin/settings връща marketingDailyGiftLimit отделно от pikaTeamDailyGiftLimit', async () => {
+    const res = await request(port, 'GET', '/api/admin/settings', undefined, admin.cookie)
+    const settings = res.body?.settings as { marketingDailyGiftLimit?: number; pikaTeamDailyGiftLimit?: number } | undefined
+    assert(res.status === 200 && typeof settings?.marketingDailyGiftLimit === 'number' && typeof settings?.pikaTeamDailyGiftLimit === 'number', res.text)
+  })
+  await check('H28l. PATCH /api/admin/settings marketingDailyGiftLimit=15000 персистира и НЕ променя pikaTeamDailyGiftLimit', async () => {
+    const before = await request(port, 'GET', '/api/admin/settings', undefined, admin.cookie)
+    const priorPikaTeamLimit = (before.body?.settings as { pikaTeamDailyGiftLimit?: number } | undefined)?.pikaTeamDailyGiftLimit
+    const patch = await request(port, 'PATCH', '/api/admin/settings', { marketingDailyGiftLimit: 15_000 }, admin.cookie)
+    assert(patch.status === 200, `${patch.status} ${patch.text}`)
+    const after = await request(port, 'GET', '/api/admin/settings', undefined, admin.cookie)
+    const settings = after.body?.settings as { marketingDailyGiftLimit?: number; pikaTeamDailyGiftLimit?: number } | undefined
+    assertEqual(settings?.marketingDailyGiftLimit, 15_000, 'marketingDailyGiftLimit persisted')
+    assertEqual(settings?.pikaTeamDailyGiftLimit, priorPikaTeamLimit, 'pikaTeamDailyGiftLimit must stay unchanged')
+  })
+  await check('H28m. marketing (не admin) НЕ може да чете/пише Admin Settings → 403 (marketing получава НЕ достъп до Admin Panel)', async () => {
+    const get = await request(port, 'GET', '/api/admin/settings', undefined, marketing.cookie)
+    const patch = await request(port, 'PATCH', '/api/admin/settings', { marketingDailyGiftLimit: 1 }, marketing.cookie)
+    assert(get.status === 403 && patch.status === 403, `${get.status}/${patch.status}`)
+  })
+
   await check('H29. /api/auth/me за marketing връща role=marketing (UX gate-овете се хранят от него)', async () => {
     const me = await request(port, 'GET', '/api/auth/me', undefined, marketing.cookie)
     assert((me.body?.session as { account?: { role?: string } })?.account?.role === 'marketing', me.text)

@@ -206,23 +206,36 @@ export function isLobbyChatModeratorSession(
   )
 }
 
+export type PikaAnnouncementAuthorRole = 'admin' | 'pika_team' | 'marketing'
+
 /**
  * "Публикации от Pika.bg" (бивш общ Live Chat в лобито, ограничен до
- * официален канал) — write И delete достъп: admin/pika_team. Умишлено
- * по-тесен от isLobbyChatModeratorSession (5 роли, delete-only, за
- * стария общ чат) — subadmin/chat_admin/top_chat_admin НЕ получават
- * автоматично право тук само защото са могли да трият в стария общ чат
- * (Публикации от Pika.bg брифа §2/§3: "Не разширявай автоматично
+ * официален канал) — write И delete достъп (включително на ЧУЖДИ публикации)
+ * — admin/pika_team/marketing. Умишлено по-тесен от isLobbyChatModeratorSession
+ * (5 роли, delete-only, за стария общ чат) — subadmin/chat_admin/top_chat_admin
+ * НЕ получават автоматично право тук само защото са могли да трият в стария
+ * общ чат (Публикации от Pika.bg брифа §2/§3: "Не разширявай автоматично
  * правата на други роли само защото преди са имали право"). НЕ замествай
  * isLobbyChatModeratorSession другаде с тази функция.
+ *
+ * marketing role permission model брифа §1: marketing получава ТОЧНО същите
+ * права тук като pika_team (публикуване + изтриване на свои И чужди
+ * публикации), но ИЗРИЧНО САМО за тази секция — това НЕ дава на marketing
+ * никакви moderator права в Лафче или Теми (виж isTopicModeratorSession/
+ * isLafcheModeratorSession/isLafcheMessageDeleteModeratorSession/
+ * isTopicWholeTopicModeratorSession/isTopicMessageModeratorSession по-долу,
+ * никоя от които не включва 'marketing'). Role-only вариант (не session)
+ * заради WS send gate-а в index.ts (send_lobby_chat_message), който има само
+ * ролята на подателя, не цял AuthSessionSnapshot.
  */
+export function isPikaAnnouncementAuthorRole(role: AccountRoleValue | null): role is PikaAnnouncementAuthorRole {
+  return role === 'admin' || role === 'pika_team' || role === 'marketing'
+}
+
 export function isPikaAnnouncementAuthorSession(
   session: AuthSessionSnapshot | null,
 ): session is AuthSessionSnapshot {
-  return session !== null && (
-    session.account.role === 'admin'
-    || session.account.role === 'pika_team'
-  )
+  return session !== null && isPikaAnnouncementAuthorRole(session.account.role)
 }
 
 export type AdCampaignManagerRole = 'admin' | 'pika_team' | 'marketing'
@@ -428,6 +441,36 @@ export function isPikaTeamGiftMaxAmountSession(
   session: AuthSessionSnapshot | null,
 ): session is AuthSessionSnapshot {
   return session !== null && session.account.role === 'pika_team'
+}
+
+/**
+ * Gift-yellow-coins friendship-gate bypass — САМО role='marketing' (marketing
+ * role permission model брифа §2: "служебно подаряване на жълтици... както
+ * pika_team"). Mirror на isPikaTeamGiftFriendshipBypassSession по-горе, но
+ * умишлено собствен, независим predicate — established конвенция в проекта
+ * (виж коментара на isPikaTeamGiftMaxAmountSession защо идентични тела не се
+ * обединяват в един predicate). Call sites OR-ват двата predicate-а изрично
+ * (index.ts) вместо да разширяват pika_team-овия.
+ */
+export function isMarketingGiftFriendshipBypassSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'marketing'
+}
+
+/**
+ * Gift-yellow-coins single-операция max amount bypass + recipient window
+ * exemption — САМО role='marketing', mirror на isPikaTeamGiftMaxAmountSession
+ * по-горе (marketing role permission model брифа §2: "същата стойност като
+ * pika_team per-transaction max"). Независим predicate от
+ * isPikaTeamGiftMaxAmountSession — НЕ контролира дневния лимит (виж
+ * marketingDailyGiftLimit в adminSettingsStore.ts и §4.5-marketing блока в
+ * yellowCoinGiftStore.ts, който е ОТДЕЛЕН pool от pikaTeamDailyGiftLimit).
+ */
+export function isMarketingGiftMaxAmountSession(
+  session: AuthSessionSnapshot | null,
+): session is AuthSessionSnapshot {
+  return session !== null && session.account.role === 'marketing'
 }
 
 /**

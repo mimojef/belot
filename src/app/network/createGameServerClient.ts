@@ -490,6 +490,8 @@ export type AdminSettingsSnapshot = {
   vipPrice365DaysCents: number
   /** Дневен лимит (календарен ден, Europe/Sofia) за подаряване от pika_team, виж server/src/db/adminSettingsStore.ts. */
   pikaTeamDailyGiftLimit: number
+  /** Дневен лимит (календарен ден, Europe/Sofia) за подаряване от marketing — ОТДЕЛЕН, независим pool от pikaTeamDailyGiftLimit, виж server/src/db/adminSettingsStore.ts. */
+  marketingDailyGiftLimit: number
   /** Брой VIP дни при еднократен launch gift за писане в "Теми", виж server/src/db/adminSettingsStore.ts. */
   freeTopicsVipDays: number
   /** "Метод за регистрация" (email verification code vs direct) — виж server/src/db/adminSettingsStore.ts RegistrationVerificationMode doc коментара. SERVER-AUTHORITATIVE — само admin панела го чете/пише, register() flow-ът реагира на response shape-а, не на тази стойност directno (виж createLobbyFlowController.ts submitRegister()). */

@@ -498,6 +498,10 @@ type AuthSession = {
   pikaTeamGiftMaxAmount?: number | null
   /** Informational UI сигнал — non-null само за role==='pika_team' (server: withPikaTeamGiftBypassFlag). Authoritative проверката остава сървърна (yellowCoinGiftStore.sendGiftCore §4.5). */
   pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
+  /** Mirror на pikaTeamGiftMaxAmount по-горе, но за role==='marketing' (отделен, независим механизъм). */
+  marketingGiftMaxAmount?: number | null
+  /** Mirror на pikaTeamDailyGiftLimitStatus по-горе, но за role==='marketing' (отделен pool). */
+  marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
 }
 
 type AuthResponse = {
@@ -661,7 +665,7 @@ type GiftCoinsResponse = {
   senderProfile?: PlayerPublicProfileSnapshot
   recipientProfile?: PlayerPublicProfileSnapshot
   message?: string
-  code?: 'RECIPIENT_WINDOW_LIMIT_PARTIAL' | 'RECIPIENT_WINDOW_LIMIT_FULL' | 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED'
+  code?: 'RECIPIENT_WINDOW_LIMIT_PARTIAL' | 'RECIPIENT_WINDOW_LIMIT_FULL' | 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED' | 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED'
   receivedInWindow?: number
   remainingAllowance?: number
   attemptedAmount?: number
@@ -674,6 +678,8 @@ type GiftCoinsResponse = {
   // notifyGiftRecipientAndRespond в index.ts) — undefined за нормални
   // sender-и, не се показва нищо в UI.
   pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
+  // Mirror на pikaTeamDailyGiftLimitStatus по-горе, но за role==='marketing' (отделен pool).
+  marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
 }
 
 type DailyMissionsApiResponse = {
@@ -4394,12 +4400,21 @@ type GiftCoinsSubmitResult =
       senderProfile: PlayerPublicProfileSnapshot
       recipientProfile: PlayerPublicProfileSnapshot
       pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
+      marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
     }
   | ({ ok: false; message: string } & GiftLimitErrorPayload)
   | {
       ok: false
       message: string
       code: 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED'
+      limit: number
+      used: number
+      remaining: number
+    }
+  | {
+      ok: false
+      message: string
+      code: 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED'
       limit: number
       used: number
       remaining: number
@@ -4472,6 +4487,30 @@ async function submitGiftCoinsToUrl(url: string, requestBody: Record<string, unk
           remaining: data.remaining ?? 0,
         }
       }
+      // Mirror на PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED branch-а по-горе, но за
+      // role='marketing' (отделен pool, виж yellowCoinGiftStore.ts).
+      if (data.code === 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED') {
+        if (currentAuthSession !== null) {
+          currentAuthSession = {
+            ...currentAuthSession,
+            marketingDailyGiftLimitStatus: {
+              limit: data.limit ?? 0,
+              used: data.used ?? 0,
+              remaining: data.remaining ?? 0,
+            },
+          }
+          saveSessionCache(currentAuthSession)
+        }
+
+        return {
+          ok: false,
+          message: data.message ?? 'Достигнат е дневният лимит за подаряване на жълтици.',
+          code: data.code,
+          limit: data.limit ?? 0,
+          used: data.used ?? 0,
+          remaining: data.remaining ?? 0,
+        }
+      }
       return {
         ok: false,
         message: data.message ?? 'Подаръкът не беше изпратен.',
@@ -4489,6 +4528,9 @@ async function submitGiftCoinsToUrl(url: string, requestBody: Record<string, unk
         ...(data.pikaTeamDailyGiftLimitStatus !== undefined
           ? { pikaTeamDailyGiftLimitStatus: data.pikaTeamDailyGiftLimitStatus }
           : {}),
+        ...(data.marketingDailyGiftLimitStatus !== undefined
+          ? { marketingDailyGiftLimitStatus: data.marketingDailyGiftLimitStatus }
+          : {}),
       }
       // saveSessionCache directly (не syncLobbyWithAuthSession) — избягва
       // двоен render() в рамките на един gift attempt (виж коментара на
@@ -4503,6 +4545,7 @@ async function submitGiftCoinsToUrl(url: string, requestBody: Record<string, unk
       senderProfile: data.senderProfile,
       recipientProfile: data.recipientProfile,
       pikaTeamDailyGiftLimitStatus: data.pikaTeamDailyGiftLimitStatus,
+      marketingDailyGiftLimitStatus: data.marketingDailyGiftLimitStatus,
     }
   } catch {
     return {

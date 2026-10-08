@@ -32,6 +32,16 @@ export type AdminSettingsSnapshot = {
    */
   pikaTeamDailyGiftLimit: number
   /**
+   * Дневен лимит (календарен ден, Europe/Sofia) за подаряване на жълтици от
+   * профили с роля marketing — ОТДЕЛЕН, независим pool от
+   * pikaTeamDailyGiftLimit по-горе (marketing role permission model брифа
+   * §3: "двете роли НЕ трябва да делят общ дневен consumption pool").
+   * Прилага се ОТДЕЛНО за всеки marketing профил (виж §4.5-marketing блока в
+   * yellowCoinGiftStore.ts). 0 = подаряването е забранено за marketing (НЕ
+   * "unlimited"). Не засяга pika_team usage и обратно.
+   */
+  marketingDailyGiftLimit: number
+  /**
    * Брой VIP дни, които профилът получава еднократно при първи опит за
    * писане в "Теми" (launch gift, виж vipStore.ts claimLaunchGift) — 0
    * изключва безплатния VIP и насочва потребителя към VIP офертите в
@@ -104,6 +114,12 @@ const DEFAULT_SETTINGS: AdminSettingsSnapshot = {
   // разчита само на тази стойност, значи deploy-ът не трябва сам по себе си
   // да вдига ефективния economy лимит). Admin може да го промени от панела.
   pikaTeamDailyGiftLimit: 200_000,
+  // Няма seed-ваща migration (admin_settings е key/value, няма нужда от
+  // schema промяна за нов ключ) — marketing role permission model брифа §3,
+  // default 200 000 mirror-ва pikaTeamDailyGiftLimit за консистентност, но
+  // е ОТДЕЛЕН, независим pool (виж doc коментара на полето по-горе). Admin
+  // може да го промени от панела независимо от pikaTeamDailyGiftLimit.
+  marketingDailyGiftLimit: 200_000,
   // Само fallback за база без seed-натата migration (20260911_001) — реалната
   // production стойност идва от admin_settings реда, seed-нат веднъж. Трябва
   // да остане РАВЕН на предишната hardcoded VIP_LAUNCH_GIFT_INTERVAL
@@ -130,6 +146,7 @@ const SETTING_KEYS = {
   vipPrice180DaysCents: 'vip_price_180_days_cents',
   vipPrice365DaysCents: 'vip_price_365_days_cents',
   pikaTeamDailyGiftLimit: 'pika_team_daily_gift_limit',
+  marketingDailyGiftLimit: 'marketing_daily_gift_limit',
   freeTopicsVipDays: 'free_topics_vip_days',
   registrationVerificationMode: 'registration_verification_mode',
   antiBadLuckThreshold: 'anti_bad_luck_threshold',
@@ -235,6 +252,7 @@ export async function createAdminSettingsStore(
       'vip_price_180_days_cents',
       'vip_price_365_days_cents',
       'pika_team_daily_gift_limit',
+      'marketing_daily_gift_limit',
       'free_topics_vip_days',
       'registration_verification_mode',
       'anti_bad_luck_threshold'
@@ -296,6 +314,10 @@ export async function createAdminSettingsStore(
         values.get(SETTING_KEYS.pikaTeamDailyGiftLimit) ?? '',
         DEFAULT_SETTINGS.pikaTeamDailyGiftLimit,
       ),
+      marketingDailyGiftLimit: parseStoredInteger(
+        values.get(SETTING_KEYS.marketingDailyGiftLimit) ?? '',
+        DEFAULT_SETTINGS.marketingDailyGiftLimit,
+      ),
       freeTopicsVipDays: parseStoredInteger(
         values.get(SETTING_KEYS.freeTopicsVipDays) ?? '',
         DEFAULT_SETTINGS.freeTopicsVipDays,
@@ -344,6 +366,10 @@ export async function createAdminSettingsStore(
       input.pikaTeamDailyGiftLimit === undefined
         ? undefined
         : normalizeSettingNumber(input.pikaTeamDailyGiftLimit, 0, 100_000_000)
+    const nextMarketingDailyGiftLimit =
+      input.marketingDailyGiftLimit === undefined
+        ? undefined
+        : normalizeSettingNumber(input.marketingDailyGiftLimit, 0, 100_000_000)
     const nextFreeTopicsVipDays =
       input.freeTopicsVipDays === undefined
         ? undefined
@@ -396,6 +422,13 @@ export async function createAdminSettingsStore(
       return {
         ok: false,
         message: 'Дневният лимит за подаряване от Екип Pika.bg трябва да е цяло число между 0 и 100 000 000.',
+      }
+    }
+
+    if (input.marketingDailyGiftLimit !== undefined && nextMarketingDailyGiftLimit === null) {
+      return {
+        ok: false,
+        message: 'Дневният лимит за подаряване от Marketing трябва да е цяло число между 0 и 100 000 000.',
       }
     }
 
@@ -453,6 +486,10 @@ export async function createAdminSettingsStore(
 
       if (nextPikaTeamDailyGiftLimit !== undefined) {
         upsertSettingStatement.run(SETTING_KEYS.pikaTeamDailyGiftLimit, String(nextPikaTeamDailyGiftLimit))
+      }
+
+      if (nextMarketingDailyGiftLimit !== undefined) {
+        upsertSettingStatement.run(SETTING_KEYS.marketingDailyGiftLimit, String(nextMarketingDailyGiftLimit))
       }
 
       if (nextFreeTopicsVipDays !== undefined) {

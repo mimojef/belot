@@ -61,6 +61,24 @@ export type PikaTeamDailyGiftLimitError = {
   attemptedAmount: number
 }
 
+/**
+ * Mirror на PikaTeamDailyGiftLimitError по-горе, но за role='marketing' —
+ * ОТДЕЛЕН, независим pool (marketingDailyGiftLimit в adminSettingsStore.ts,
+ * виж §4.5-marketing блока по-долу). marketing role permission model брифа
+ * §3: "двете роли не трябва да делят общ дневен consumption pool" —
+ * отделен error type (не reuse на PikaTeamDailyGiftLimitError), за да не се
+ * смесят двата механизма на caller страната.
+ */
+export type MarketingDailyGiftLimitError = {
+  ok: false
+  code: 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED'
+  message: string
+  limit: number
+  used: number
+  remaining: number
+  attemptedAmount: number
+}
+
 export type YellowCoinGiftStore = {
   /**
    * isRoleBasedPikaTeamSender — вика се от index.ts route с
@@ -76,6 +94,7 @@ export type YellowCoinGiftStore = {
     amount: number,
     isRoleBasedPikaTeamSender?: boolean,
     isRoleBasedAdminSender?: boolean,
+    isRoleBasedMarketingSender?: boolean,
   ) =>
     | {
         ok: true
@@ -85,6 +104,7 @@ export type YellowCoinGiftStore = {
       }
     | GiftLimitError
     | PikaTeamDailyGiftLimitError
+    | MarketingDailyGiftLimitError
     | { ok: false; message: string }
   /**
    * Same сделка/ledger/лимити като sendGift, но получателят се адресира
@@ -104,6 +124,7 @@ export type YellowCoinGiftStore = {
     amount: number,
     isRoleBasedPikaTeamSender?: boolean,
     isRoleBasedAdminSender?: boolean,
+    isRoleBasedMarketingSender?: boolean,
   ) =>
     | {
         ok: true
@@ -113,6 +134,7 @@ export type YellowCoinGiftStore = {
       }
     | GiftLimitError
     | PikaTeamDailyGiftLimitError
+    | MarketingDailyGiftLimitError
     | { ok: false; message: string }
   createGiftNotification: (giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number) => void
   getPendingGiftNotifications: (profileId: ProfileId) => PendingGiftNotification[]
@@ -128,6 +150,14 @@ export type YellowCoinGiftStore = {
    * sendGiftToProfile) — тази функция е ЧИСТО за показване, не за validation.
    */
   getPikaTeamDailyGiftLimitStatus: (senderProfileId: ProfileId) => {
+    limit: number
+    used: number
+    remaining: number
+  }
+  /** Mirror на getPikaTeamGiftMaxAmount по-горе, но за role='marketing'. */
+  getMarketingGiftMaxAmount: () => number
+  /** Mirror на getPikaTeamDailyGiftLimitStatus по-горе, но за role='marketing' (отделен pool). */
+  getMarketingDailyGiftLimitStatus: (senderProfileId: ProfileId) => {
     limit: number
     used: number
     remaining: number
@@ -342,6 +372,20 @@ export async function createYellowCoinGiftStore(
       AND created_at >= ?;
   `)
 
+  // Mirror на selectPikaTeamSentTodaySofiaStatement по-горе, но за
+  // role='marketing' — отделен prepared statement (не reuse), за да остане
+  // независим от pika_team механизма дори ако двата запитвания се разминат
+  // по-нататък (marketing role permission model брифа §3: "отделен,
+  // независим pool"). Текущо SQL текстовете са идентични по дизайн — и
+  // двата филтрират по sender_profile_id, затова usage-ът на един sender
+  // никога не влияе на лимита на другия sender/роля.
+  const selectMarketingSentTodaySofiaStatement = database.prepare(`
+    SELECT COALESCE(SUM(amount), 0) AS sent_amount
+    FROM yellow_coin_gift_ledger
+    WHERE sender_profile_id = ?
+      AND created_at >= ?;
+  `)
+
   // Единична заявка за съгласуван snapshot на 60-дневния прозорец по получател
   const selectRecipientWindowStatement = database.prepare(`
     WITH window_gifts AS (
@@ -446,6 +490,7 @@ export async function createYellowCoinGiftStore(
       | { ok: true; recipientProfileId: ProfileId }
       | { ok: false; message: string },
     isRoleBasedPikaTeamSender: boolean,
+    isRoleBasedMarketingSender: boolean,
     isRoleBasedAdminSender: boolean,
   ):
     | {
@@ -456,6 +501,7 @@ export async function createYellowCoinGiftStore(
       }
     | GiftLimitError
     | PikaTeamDailyGiftLimitError
+    | MarketingDailyGiftLimitError
     | { ok: false; message: string } {
     // Чиста TypeScript валидация преди базата. Authoritative sender-specific
     // max — pikaTeamGiftBypassProfileId (legacy ЕДИН конкретен profile) ИЛИ
@@ -470,7 +516,11 @@ export async function createYellowCoinGiftStore(
     // различни permission-и (виж isPikaTeamGiftMaxAmountSession коментара).
     const isPikaTeamSender = pikaTeamGiftBypassProfileId !== null
       && senderProfileId === pikaTeamGiftBypassProfileId
-    const hasHigherMaxAmount = isPikaTeamSender || isRoleBasedPikaTeamSender
+    // isRoleBasedMarketingSender добавя role='marketing' към същия higher-max
+    // bypass (marketing role permission model брифа §2: "същата стойност
+    // като pika_team per-transaction max") — НЕ засяга §4.5 дневния лимит
+    // по-долу, който е отделен, независим pool за marketing.
+    const hasHigherMaxAmount = isPikaTeamSender || isRoleBasedPikaTeamSender || isRoleBasedMarketingSender
     const maxAmountForSender = hasHigherMaxAmount ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER : MAX_GIFT_AMOUNT
     const amount = isRoleBasedAdminSender
       ? normalizeGiftAmountForAdmin(amountRaw)
@@ -537,7 +587,7 @@ export async function createYellowCoinGiftStore(
       // горе) умишлено НЕ bypass-ва §4 — само role-based pika_team го прави,
       // тъй като задачата изисква новия лимит да е source of truth именно за
       // истинска accounts.role='pika_team', не за legacy hardcoded profile.
-      if (!isRoleBasedPikaTeamSender && !isRoleBasedAdminSender) {
+      if (!isRoleBasedPikaTeamSender && !isRoleBasedMarketingSender && !isRoleBasedAdminSender) {
         const sentTodayRow = selectSentTodayStatement.get(senderProfileId) as
           | { sent_amount: number }
           | undefined
@@ -583,6 +633,39 @@ export async function createYellowCoinGiftStore(
               ? `Можеш да подариш още максимум ${formatBgNumber(remaining)} жълтици днес.`
               : 'Достигнат е дневният лимит за подаряване на жълтици. Лимитът се занулява в 00:00 ч.',
             limit: pikaTeamDailyGiftLimit,
+            used: usedToday,
+            remaining,
+            attemptedAmount: amount,
+          }
+        }
+      }
+
+      // 4.6. marketing календарен-ден (Europe/Sofia) дневен лимит — mirror
+      // на §4.5 по-горе, но ЕДИН НЕЗАВИСИМ pool (marketingDailyGiftLimit,
+      // отделен от pikaTeamDailyGiftLimit — marketing role permission model
+      // брифа §3: "двете роли не трябва да делят общ дневен consumption
+      // pool"). Прилаган ОТДЕЛНО за всеки marketing профил (per
+      // senderProfileId), reuse-ва selectMarketingSentTodaySofiaStatement
+      // (собствен statement, виж коментара там).
+      if (isRoleBasedMarketingSender) {
+        const marketingDailyGiftLimit = adminSettingsStore.getSettings().marketingDailyGiftLimit
+        const sofiaDayStartUtc = getSofiaDayStartUtcSqliteString()
+        const sentTodaySofiaRow = selectMarketingSentTodaySofiaStatement.get(
+          senderProfileId,
+          sofiaDayStartUtc,
+        ) as { sent_amount: number } | undefined
+        const usedToday = sentTodaySofiaRow?.sent_amount ?? 0
+        const remaining = Math.max(0, marketingDailyGiftLimit - usedToday)
+
+        if (amount > remaining) {
+          database.exec('ROLLBACK;')
+          return {
+            ok: false,
+            code: 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED',
+            message: remaining > 0
+              ? `Можеш да подариш още максимум ${formatBgNumber(remaining)} жълтици днес.`
+              : 'Достигнат е дневният лимит за подаряване на жълтици. Лимитът се занулява в 00:00 ч.',
+            limit: marketingDailyGiftLimit,
             used: usedToday,
             remaining,
             attemptedAmount: amount,
@@ -720,6 +803,11 @@ export async function createYellowCoinGiftStore(
     amountRaw: number,
     isRoleBasedPikaTeamSender: boolean = false,
     isRoleBasedAdminSender: boolean = false,
+    // Нов, trailing-ОПЦИОНАЛЕН параметър — умишлено НЕ вмъкнат между
+    // isRoleBasedPikaTeamSender/isRoleBasedAdminSender, за да не счупи
+    // съществуващите positional call sites (checkYellowCoinGiftLimit.ts,
+    // ~60+ извиквания с 3-5 позиционни аргумента).
+    isRoleBasedMarketingSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, friendshipId, amountRaw, () => {
       // 1. Проверка за прието приятелство
@@ -735,7 +823,7 @@ export async function createYellowCoinGiftStore(
 
       // 2. Определяне на получателя
       return { ok: true, recipientProfileId: getRecipientProfileId(friendship, senderProfileId) }
-    }, isRoleBasedPikaTeamSender, isRoleBasedAdminSender)
+    }, isRoleBasedPikaTeamSender, isRoleBasedMarketingSender, isRoleBasedAdminSender)
   }
 
   // pika_team friendship-gate bypass (виж isPikaTeamGiftFriendshipBypassSession
@@ -751,6 +839,9 @@ export async function createYellowCoinGiftStore(
     amountRaw: number,
     isRoleBasedPikaTeamSender: boolean = false,
     isRoleBasedAdminSender: boolean = false,
+    // Виж коментара на sendGift по-горе — trailing-ОПЦИОНАЛЕН, не вмъкнат
+    // между съществуващите параметри.
+    isRoleBasedMarketingSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, null, amountRaw, () => {
       if (playerProgressStore.getPublicProfile(recipientProfileId) === null) {
@@ -758,7 +849,7 @@ export async function createYellowCoinGiftStore(
       }
 
       return { ok: true, recipientProfileId }
-    }, isRoleBasedPikaTeamSender, isRoleBasedAdminSender)
+    }, isRoleBasedPikaTeamSender, isRoleBasedMarketingSender, isRoleBasedAdminSender)
   }
 
   function createGiftNotification(giftId: string, recipientProfileId: ProfileId, fromDisplayName: string, amount: number): void {
@@ -810,6 +901,33 @@ export async function createYellowCoinGiftStore(
     return { limit, used, remaining: Math.max(0, limit - used) }
   }
 
+  // Mirror на getPikaTeamGiftMaxAmount по-горе, но за role='marketing' —
+  // СЪЩАТА константа/стойност (marketing role permission model брифа §2:
+  // "същата стойност като pika_team per-transaction max"), reuse-ва MAX_
+  // GIFT_AMOUNT_PIKA_TEAM_SENDER директно (не отделна константа — задачата
+  // изрично допуска reuse на СТОЙНОСТТА, само gate-ът е отделен).
+  function getMarketingGiftMaxAmount(): number {
+    return MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
+  }
+
+  // Mirror на getPikaTeamDailyGiftLimitStatus по-горе, но за role='marketing'
+  // — reuse-ва marketingDailyGiftLimit setting-а + selectMarketingSentTodaySofiaStatement
+  // (собствен, независим pool).
+  function getMarketingDailyGiftLimitStatus(senderProfileId: ProfileId): {
+    limit: number
+    used: number
+    remaining: number
+  } {
+    const limit = adminSettingsStore.getSettings().marketingDailyGiftLimit
+    const sofiaDayStartUtc = getSofiaDayStartUtcSqliteString()
+    const row = selectMarketingSentTodaySofiaStatement.get(
+      senderProfileId,
+      sofiaDayStartUtc,
+    ) as { sent_amount: number } | undefined
+    const used = row?.sent_amount ?? 0
+    return { limit, used, remaining: Math.max(0, limit - used) }
+  }
+
   function close(): void {
     database.close()
   }
@@ -823,6 +941,8 @@ export async function createYellowCoinGiftStore(
     isPikaTeamGiftBypassProfileId,
     getPikaTeamGiftMaxAmount,
     getPikaTeamDailyGiftLimitStatus,
+    getMarketingGiftMaxAmount,
+    getMarketingDailyGiftLimitStatus,
     close,
   }
 }

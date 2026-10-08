@@ -740,6 +740,8 @@ export type LobbyScreenState = {
   giftModalUnlimitedForAdmin: boolean
   /** Informational UI (limit/used/remaining) — non-null само за role==='pika_team'. Authoritative проверката е сървърна (yellowCoinGiftStore.sendGiftCore §4.5). */
   giftModalPikaTeamDailyLimitStatus: { limit: number; used: number; remaining: number } | null
+  /** Mirror на giftModalPikaTeamDailyLimitStatus по-горе, но за role==='marketing' (отделен pool). */
+  giftModalMarketingDailyLimitStatus: { limit: number; used: number; remaining: number } | null
   giftModalErrorText: string | null
   giftSuccessModal: { amount: number; friendName: string } | null
   giftReceivedModal: { amount: number; fromDisplayName: string } | null
@@ -3033,6 +3035,13 @@ function renderGiftCoinsModal(state: LobbyScreenState): string {
               Дневен лимит: ${state.giftModalPikaTeamDailyLimitStatus.limit.toLocaleString('bg-BG')}<br>
               Подарени днес: ${state.giftModalPikaTeamDailyLimitStatus.used.toLocaleString('bg-BG')}<br>
               Остават днес: ${state.giftModalPikaTeamDailyLimitStatus.remaining.toLocaleString('bg-BG')}
+            </div>
+          ` : ''}
+          ${state.giftModalMarketingDailyLimitStatus ? `
+            <div style="border-radius:8px;border:1px solid rgba(212,165,32,0.30);background:rgba(212,165,32,0.08);padding:10px 12px;font-size:12.5px;line-height:1.6;color:rgba(255,255,255,0.78);font-weight:700;">
+              Дневен лимит (Marketing): ${state.giftModalMarketingDailyLimitStatus.limit.toLocaleString('bg-BG')}<br>
+              Подарени днес: ${state.giftModalMarketingDailyLimitStatus.used.toLocaleString('bg-BG')}<br>
+              Остават днес: ${state.giftModalMarketingDailyLimitStatus.remaining.toLocaleString('bg-BG')}
             </div>
           ` : ''}
           <label style="display:grid;gap:6px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
@@ -9474,6 +9483,10 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
     // (adminSettingsStore.ts, 200 000), не независима стойност.
     pikaTeamDailyGiftLimit: 200_000,
     // Само fallback докато state.adminSettings се зарежда — трябва да
+    // остане консистентен с server DEFAULT_SETTINGS (adminSettingsStore.ts,
+    // 200 000) — отделен, независим pool от pikaTeamDailyGiftLimit.
+    marketingDailyGiftLimit: 200_000,
+    // Само fallback докато state.adminSettings се зарежда — трябва да
     // остане консистентен с server DEFAULT_SETTINGS/migration seed
     // (adminSettingsStore.ts, 30), не независима стойност.
     freeTopicsVipDays: 30,
@@ -9594,6 +9607,17 @@ export function renderAdminPanel(state: LobbyScreenState, isMobile = false): str
             </label>
           </div>
           <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Максимален общ брой жълтици, които един профил от Екип Pika.bg може да подари за календарен ден. Лимитът се занулява в 00:00 ч.</div>
+        </div>
+
+        <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
+          <div style="font-size:15px;font-weight:900;color:#f8fafc;">Marketing</div>
+          <div style="${settingsGridStyle}">
+            <label style="display:grid;gap:7px;font-size:12px;font-weight:900;letter-spacing:0.08em;text-transform:uppercase;color:#d4a520;">
+              Дневен лимит за подаряване — Marketing
+              <input name="marketingDailyGiftLimit" type="number" min="0" max="100000000" step="1000" value="${settings.marketingDailyGiftLimit}" style="width:100%;box-sizing:border-box;height:44px;border-radius:8px;border:1px solid rgba(212,165,32,0.34);background:#050505;color:#ffffff;padding:0 12px;font-size:15px;font-weight:800;outline:none;">
+            </label>
+          </div>
+          <div style="font-size:11px;font-weight:700;color:rgba(255,255,255,0.42);">Максимален общ брой жълтици, които един профил с роля Marketing може да подари за календарен ден. ОТДЕЛЕН лимит от Екип Pika.bg — не делят общ дневен пул. Лимитът се занулява в 00:00 ч.</div>
         </div>
 
         <div style="border-top:1px solid rgba(212,165,32,0.22);padding-top:14px;display:grid;gap:14px;">
@@ -15329,6 +15353,7 @@ export function renderLobbyScreen(
       const vipPrice180DaysCents = Number(data.get('vipPrice180DaysCents'))
       const vipPrice365DaysCents = Number(data.get('vipPrice365DaysCents'))
       const pikaTeamDailyGiftLimit = Number(data.get('pikaTeamDailyGiftLimit'))
+      const marketingDailyGiftLimit = Number(data.get('marketingDailyGiftLimit'))
       const freeTopicsVipDays = Number(data.get('freeTopicsVipDays'))
       // Strict enum (виж task-а §11) — <select> markup-ът по-долу изброява
       // ЕДИНСТВЕНО 'email_code'/'direct' като <option value>, затова
@@ -15353,6 +15378,7 @@ export function renderLobbyScreen(
         vipPrice180DaysCents,
         vipPrice365DaysCents,
         pikaTeamDailyGiftLimit,
+        marketingDailyGiftLimit,
         freeTopicsVipDays,
         registrationVerificationMode,
         antiBadLuckThreshold,

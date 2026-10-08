@@ -1,4 +1,4 @@
-import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError } from './formatGiftLimitError'
+import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError, formatMarketingDailyGiftLimitError } from './formatGiftLimitError'
 import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
 import { decideOpenImageViewer, decideRequestImageViewerClose, decideHandlePopstate, type ImageViewerAction, type ImageViewerHistoryState } from './imageViewerHistoryState'
@@ -6,7 +6,7 @@ import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tourn
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
-import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload } from './formatGiftLimitError'
+import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload, MarketingDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import { LUDO_GAME_SCREEN_Z_INDEX } from '../games/ludo/ludoLayerHierarchy'
 import {
@@ -185,9 +185,11 @@ type GiftCoinsSubmitResult =
       senderProfile: PlayerPublicProfileSnapshot
       recipientProfile: PlayerPublicProfileSnapshot
       pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
+      marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number }
     }
   | ({ ok: false; message: string } & GiftLimitErrorPayload)
   | ({ ok: false; message: string } & PikaTeamDailyGiftLimitErrorPayload)
+  | ({ ok: false; message: string } & MarketingDailyGiftLimitErrorPayload)
   | { ok: false; message: string }
 
 export type LobbyAuthSession = {
@@ -199,6 +201,10 @@ export type LobbyAuthSession = {
   pikaTeamGiftMaxAmount?: number | null
   /** Server-derived, non-null само за role==='pika_team' (виж AuthSession в main.ts). Обновява се и след всеки успешен gift, виж submitGiftCoinsCore. */
   pikaTeamDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
+  /** Mirror на pikaTeamGiftMaxAmount по-горе, но за role==='marketing' (отделен, независим механизъм). */
+  marketingGiftMaxAmount?: number | null
+  /** Mirror на pikaTeamDailyGiftLimitStatus по-горе, но за role==='marketing' (отделен pool). */
+  marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
 }
 
 /** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
@@ -212,16 +218,22 @@ function isAdminOrSubadminAuthSession(session: LobbyAuthSession | null): boolean
 }
 
 /**
- * "Публикации от Pika.bg" — показва бутона "(×)" за изтриване на публикации.
- * Само UX — сървърът презаверява това право на всяко DELETE през
+ * "Публикации от Pika.bg" — показва бутона за публикуване И "(×)" за
+ * изтриване на (собствени И чужди) публикации. Само UX — сървърът
+ * презаверява това право на всяко write/DELETE през
  * isPikaAnnouncementAuthorSession (виж authStore.ts). Умишлено по-тесен от
  * старото поведение (admin/subadmin/chat_admin/pika_team/top_chat_admin) —
- * виж §3 в "Публикации от Pika.bg" брифа.
+ * виж §3 в "Публикации от Pika.bg" брифа. marketing е добавен тук (marketing
+ * role permission model брифа §1: "същите права като pika_team, само в
+ * Lobby") — ИЗРИЧНО НЕ разширява isTopicModeratorAuthSession/
+ * isLafcheModeratorAuthSession/isLafcheMessageDeleteModeratorAuthSession/
+ * isTopicWholeTopicModeratorAuthSession другаде в този файл.
  */
 function isPikaAnnouncementAuthorAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && (
     session.account.role === 'admin'
     || session.account.role === 'pika_team'
+    || session.account.role === 'marketing'
   )
 }
 
@@ -349,6 +361,17 @@ function isTopicWholeTopicModeratorAuthSession(session: LobbyAuthSession | null)
  */
 function isPikaTeamGiftFriendshipBypassAuthSession(session: LobbyAuthSession | null): boolean {
   return session !== null && session.account.role === 'pika_team'
+}
+
+/**
+ * Mirror на isPikaTeamGiftFriendshipBypassAuthSession по-горе, но за
+ * role='marketing' (marketing role permission model брифа §2) — само UX,
+ * сървърът презаверява през isMarketingGiftFriendshipBypassSession
+ * (authStore.ts) на /api/friends/gift-coins/direct. Умишлено собствен,
+ * независим predicate (established конвенция в проекта).
+ */
+function isMarketingGiftFriendshipBypassAuthSession(session: LobbyAuthSession | null): boolean {
+  return session !== null && session.account.role === 'marketing'
 }
 
 export type CreateLobbyFlowControllerOptions = {
@@ -4793,11 +4816,15 @@ export function createLobbyFlowController(
       targetProfileId,
     )
 
-    // pika_team friendship-gate bypass — виж isPikaTeamGiftFriendshipBypassAuthSession
-    // коментара по-горе. Само UX сигнал за gift бутона; изчислен веднъж тук и
+    // pika_team/marketing friendship-gate bypass — виж
+    // isPikaTeamGiftFriendshipBypassAuthSession/isMarketingGiftFriendshipBypassAuthSession
+    // коментарите по-горе. Само UX сигнал за gift бутона; изчислен веднъж тук и
     // приложен само към клоновете, в които приятелството НЕ е прието
     // (accepted клонът по-долу вече показва gift бутон през giftFriendshipId).
-    const giftBypassProfileId = isPikaTeamGiftFriendshipBypassAuthSession(authSession)
+    const giftBypassProfileId = (
+      isPikaTeamGiftFriendshipBypassAuthSession(authSession) ||
+      isMarketingGiftFriendshipBypassAuthSession(authSession)
+    )
       ? targetProfileId
       : null
 
@@ -4841,7 +4868,11 @@ export function createLobbyFlowController(
    * само именува вече съществуващото условие, за reuse по-долу.
    */
   function isPrivilegedGiftCoinsSenderAuthSession(authSession: LobbyAuthSession | null): boolean {
-    return isPikaTeamGiftFriendshipBypassAuthSession(authSession) || isFullAdminAuthSession(authSession)
+    return (
+      isPikaTeamGiftFriendshipBypassAuthSession(authSession) ||
+      isMarketingGiftFriendshipBypassAuthSession(authSession) ||
+      isFullAdminAuthSession(authSession)
+    )
   }
 
   /**
@@ -5104,7 +5135,12 @@ export function createLobbyFlowController(
       giftModalFriendshipId: state.giftModalFriendshipId,
       giftModalBypassRecipientProfileId: state.giftModalBypassRecipientProfileId,
       giftModalFriendName: state.giftModalFriendName,
-      giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT,
+      // Mirror-ва се от pikaTeamGiftMaxAmount ИЛИ marketingGiftMaxAmount (само
+      // едно от двете е non-null за даден session — сървърът никога не
+      // попълва и двете, виж withPikaTeamGiftBypassFlag в index.ts) — СЪЩАТА
+      // UI стойност (100 000) за двете роли (marketing role permission model
+      // брифа §2: "същата стойност като pika_team per-transaction max").
+      giftModalMaxAmount: authSession?.pikaTeamGiftMaxAmount ?? authSession?.marketingGiftMaxAmount ?? DEFAULT_GIFT_MAX_AMOUNT,
       // role==='admin' sender — UI-only relax на min/max/step (задачата: "не
       // разчитай само на frontend, но UI и backend трябва да са
       // синхронизирани"). Derived директно от authSession.account.role (вече
@@ -5113,6 +5149,9 @@ export function createLobbyFlowController(
       // bypass, yellowCoinGiftStore.ts) — тук само какво показва modal-ът.
       giftModalUnlimitedForAdmin: isFullAdminAuthSession(authSession),
       giftModalPikaTeamDailyLimitStatus: authSession?.pikaTeamDailyGiftLimitStatus ?? null,
+      // Mirror на giftModalPikaTeamDailyLimitStatus по-горе, но за
+      // role==='marketing' (отделен pool).
+      giftModalMarketingDailyLimitStatus: authSession?.marketingDailyGiftLimitStatus ?? null,
       giftModalErrorText: state.giftModalErrorText,
       giftSuccessModal: state.giftSuccessModal,
       giftReceivedModal: state.giftReceivedModal,
@@ -14563,6 +14602,8 @@ export function createLobbyFlowController(
     if (!result.ok) {
       if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
         state.giftModalErrorText = formatPikaTeamDailyGiftLimitError(result)
+      } else if ('code' in result && result.code === 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED') {
+        state.giftModalErrorText = formatMarketingDailyGiftLimitError(result)
       } else if ('code' in result) {
         state.giftModalErrorText = formatGiftLimitError(result)
       } else {
@@ -14580,11 +14621,13 @@ export function createLobbyFlowController(
     state.profilePopupProfile = result.recipientProfile
     const recipientProfileId = result.recipientProfile.profileId
     state.friendActionMessageProfileId = recipientProfileId
-    // Server-returned remaining (result.pikaTeamDailyGiftLimitStatus, виж
-    // notifyGiftRecipientAndRespond в index.ts) — НЕ клиентско изчисление.
-    // Reuse на съществуващия inline friendActionMessage механизъм (profile
-    // popup action area), не нов notification/toast subsystem.
-    state.friendActionMessage = result.pikaTeamDailyGiftLimitStatus?.remaining === 0
+    // Server-returned remaining (result.pikaTeamDailyGiftLimitStatus /
+    // result.marketingDailyGiftLimitStatus, виж notifyGiftRecipientAndRespond
+    // в index.ts) — НЕ клиентско изчисление. Reuse на съществуващия inline
+    // friendActionMessage механизъм (profile popup action area), не нов
+    // notification/toast subsystem. Само едно от двете полета е non-undefined
+    // за даден sender (сървърът никога не попълва и двете).
+    state.friendActionMessage = (result.pikaTeamDailyGiftLimitStatus?.remaining === 0 || result.marketingDailyGiftLimitStatus?.remaining === 0)
       ? 'Достигна дневния си лимит за подаряване. Новият лимит ще бъде наличен след 00:00 ч.'
       : `Подаръкът от ${amount} жълтици е изпратен.`
     render()

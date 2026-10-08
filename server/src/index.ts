@@ -44,6 +44,9 @@ import {
   isLafcheMessageDeleteModeratorSession,
   isLafcheModeratorSession,
   isLafcheOwnPostDeleteSession,
+  isMarketingGiftFriendshipBypassSession,
+  isMarketingGiftMaxAmountSession,
+  isPikaAnnouncementAuthorRole,
   isPikaAnnouncementAuthorSession,
   isPikaTeamGiftFriendshipBypassSession,
   isPikaTeamGiftMaxAmountSession,
@@ -1150,7 +1153,7 @@ type LobbyChatBroadcastSnapshot = {
   senderProfileId: string
   senderDisplayName: string
   senderIsChatAdmin: boolean
-  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin'
+  senderRole: 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'subadmin' | 'admin' | 'marketing'
   body: string
   createdAt: string
 }
@@ -8572,6 +8575,8 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
 ): (T extends null ? null : T & {
   pikaTeamGiftMaxAmount: number | null
   pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
+  marketingGiftMaxAmount: number | null
+  marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
 }) | null {
   if (session === null || session.profile.profileId === null) return session as null
   const isLegacyProfileBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
@@ -8580,6 +8585,12 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
   // проверката ('pika_team') остават identical на предиката в authStore.ts.
   const isRoleBasedPikaTeam = session.account.role === 'pika_team'
   const hasHigherMaxAmount = isLegacyProfileBypass || isRoleBasedPikaTeam
+  // Mirror на isRoleBasedPikaTeam по-горе, но за role='marketing' (marketing
+  // role permission model брифа §2/§3) — ОТДЕЛЕН флаг/pool, не комбиниран с
+  // hasHigherMaxAmount (той остава чисто pika_team-related по именуване,
+  // marketingGiftMaxAmount/marketingDailyGiftLimitStatus са самостоятелни
+  // полета за marketing).
+  const isRoleBasedMarketing = session.account.role === 'marketing'
   return {
     ...session,
     pikaTeamGiftMaxAmount: hasHigherMaxAmount ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount() : null,
@@ -8591,9 +8602,15 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     pikaTeamDailyGiftLimitStatus: isRoleBasedPikaTeam
       ? yellowCoinGiftStore.getPikaTeamDailyGiftLimitStatus(session.profile.profileId)
       : null,
+    marketingGiftMaxAmount: isRoleBasedMarketing ? yellowCoinGiftStore.getMarketingGiftMaxAmount() : null,
+    marketingDailyGiftLimitStatus: isRoleBasedMarketing
+      ? yellowCoinGiftStore.getMarketingDailyGiftLimitStatus(session.profile.profileId)
+      : null,
   } as T extends null ? null : T & {
     pikaTeamGiftMaxAmount: number | null
     pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
+    marketingGiftMaxAmount: number | null
+    marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
   }
 }
 
@@ -16367,6 +16384,7 @@ async function handleAdminSettingsRequest(
       'vipPrice180DaysCents',
       'vipPrice365DaysCents',
       'pikaTeamDailyGiftLimit',
+      'marketingDailyGiftLimit',
       'freeTopicsVipDays',
     ] as const
     for (const key of numericFieldKeys) {
@@ -16423,6 +16441,7 @@ async function handleAdminSettingsRequest(
       vipPrice180DaysCents: getNumberField(body, 'vipPrice180DaysCents') ?? undefined,
       vipPrice365DaysCents: getNumberField(body, 'vipPrice365DaysCents') ?? undefined,
       pikaTeamDailyGiftLimit: getNumberField(body, 'pikaTeamDailyGiftLimit') ?? undefined,
+      marketingDailyGiftLimit: getNumberField(body, 'marketingDailyGiftLimit') ?? undefined,
       freeTopicsVipDays: getNumberField(body, 'freeTopicsVipDays') ?? undefined,
       registrationVerificationMode: nextRegistrationVerificationMode,
       antiBadLuckThreshold: nextAntiBadLuckThreshold,
@@ -17199,6 +17218,7 @@ function notifyGiftRecipientAndRespond(
     recipientProfile: PlayerPublicProfileSnapshot
   },
   isRoleBasedPikaTeamSender: boolean = false,
+  isRoleBasedMarketingSender: boolean = false,
 ): void {
   const recipientProfileId = result.recipientProfile.profileId
   if (recipientProfileId) {
@@ -17230,6 +17250,11 @@ function notifyGiftRecipientAndRespond(
   const pikaTeamDailyGiftLimitStatus = isRoleBasedPikaTeamSender && result.senderProfile.profileId !== null
     ? yellowCoinGiftStore.getPikaTeamDailyGiftLimitStatus(result.senderProfile.profileId)
     : undefined
+  // Mirror на pikaTeamDailyGiftLimitStatus по-горе, но за role='marketing'
+  // (отделен pool, виж yellowCoinGiftStore.getMarketingDailyGiftLimitStatus).
+  const marketingDailyGiftLimitStatus = isRoleBasedMarketingSender && result.senderProfile.profileId !== null
+    ? yellowCoinGiftStore.getMarketingDailyGiftLimitStatus(result.senderProfile.profileId)
+    : undefined
 
   sendJsonResponse(res, 200, {
     ok: true,
@@ -17237,6 +17262,7 @@ function notifyGiftRecipientAndRespond(
     senderProfile: result.senderProfile,
     recipientProfile: result.recipientProfile,
     pikaTeamDailyGiftLimitStatus,
+    marketingDailyGiftLimitStatus,
   })
 }
 
@@ -17367,7 +17393,11 @@ async function handleFriendsRequest(
     // Server-side deny (не само UI hide): manual HTTP request от normal user
     // към ТОЗИ endpoint вече получава 403, дори ако body/friendshipId са
     // валидни.
-    if (!isPikaTeamGiftMaxAmountSession(session) && !isAdminGiftUnlimitedSession(session)) {
+    if (
+      !isPikaTeamGiftMaxAmountSession(session) &&
+      !isMarketingGiftMaxAmountSession(session) &&
+      !isAdminGiftUnlimitedSession(session)
+    ) {
       sendJsonResponse(res, 403, {
         ok: false,
         message: 'Този начин на подаряване вече не е достъпен. Използвайте "Подари авоари" от профила на играча.',
@@ -17402,10 +17432,14 @@ async function handleFriendsRequest(
       amount,
       isPikaTeamGiftMaxAmountSession(session),
       isAdminGiftUnlimitedSession(session),
+      isMarketingGiftMaxAmountSession(session),
     )
 
     if (!result.ok) {
-      if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
+      if (
+        'code' in result &&
+        (result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED' || result.code === 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED')
+      ) {
         sendJsonResponse(res, 400, {
           ok: false,
           code: result.code,
@@ -17432,7 +17466,7 @@ async function handleFriendsRequest(
       return true
     }
 
-    notifyGiftRecipientAndRespond(res, result, isPikaTeamGiftMaxAmountSession(session))
+    notifyGiftRecipientAndRespond(res, result, isPikaTeamGiftMaxAmountSession(session), isMarketingGiftMaxAmountSession(session))
     return true
   }
 
@@ -17442,10 +17476,14 @@ async function handleFriendsRequest(
   // лимити/validation (sendGiftToProfile дели цялото ядро с sendGift по-
   // горе, виж yellowCoinGiftStore.ts) — единствената разлика е адресиране
   // по recipientProfileId вместо friendshipId. Authoritative gate тук е
-  // isPikaTeamGiftFriendshipBypassSession (role==='pika_team' единствено) —
-  // никоя друга роля не може да достигне до този route.
+  // isPikaTeamGiftFriendshipBypassSession (role==='pika_team') ИЛИ
+  // isMarketingGiftFriendshipBypassSession (role==='marketing', marketing
+  // role permission model брифа §2) — никоя друга роля не може да достигне
+  // до този route. Двата predicate-а остават независими (OR тук, не
+  // обединени в authStore.ts) — промяна на едното право утре няма
+  // автоматично да промени другото.
   if (pathname === '/api/friends/gift-coins/direct' && req.method === 'POST') {
-    if (!isPikaTeamGiftFriendshipBypassSession(session)) {
+    if (!isPikaTeamGiftFriendshipBypassSession(session) && !isMarketingGiftFriendshipBypassSession(session)) {
       sendJsonResponse(res, 403, {
         ok: false,
         message: 'Нямаш право да подаряваш жълтици без приятелство.',
@@ -17482,10 +17520,20 @@ async function handleFriendsRequest(
       return true
     }
 
-    const result = yellowCoinGiftStore.sendGiftToProfile(profileId, recipientProfileId, amount, isPikaTeamGiftMaxAmountSession(session))
+    const result = yellowCoinGiftStore.sendGiftToProfile(
+      profileId,
+      recipientProfileId,
+      amount,
+      isPikaTeamGiftMaxAmountSession(session),
+      false,
+      isMarketingGiftMaxAmountSession(session),
+    )
 
     if (!result.ok) {
-      if ('code' in result && result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED') {
+      if (
+        'code' in result &&
+        (result.code === 'PIKA_TEAM_DAILY_GIFT_LIMIT_EXCEEDED' || result.code === 'MARKETING_DAILY_GIFT_LIMIT_EXCEEDED')
+      ) {
         sendJsonResponse(res, 400, {
           ok: false,
           code: result.code,
@@ -17512,7 +17560,7 @@ async function handleFriendsRequest(
       return true
     }
 
-    notifyGiftRecipientAndRespond(res, result, isPikaTeamGiftMaxAmountSession(session))
+    notifyGiftRecipientAndRespond(res, result, isPikaTeamGiftMaxAmountSession(session), isMarketingGiftMaxAmountSession(session))
     return true
   }
 
@@ -18188,7 +18236,8 @@ async function handleChatAttachmentDownloadRequest(
 }
 
 // Модерация на "Публикации от Pika.bg" (бивш общ лайв чат, вече ограничен
-// до официален канал) — САМО admin ИЛИ pika_team (isPikaAnnouncementAuthorSession),
+// до официален канал) — admin, pika_team ИЛИ marketing (isPikaAnnouncementAuthorSession,
+// marketing role permission model брифа §1 — право важи САМО тук, не в Лафче/Теми),
 // умишлено по-тесен от isLobbyChatModeratorSession (5 роли) — subadmin/
 // chat_admin/top_chat_admin вече не трият тук (Публикации от Pika.bg брифа §3:
 // "Не разширявай автоматично правата на други роли само защото преди са
@@ -18226,11 +18275,11 @@ async function handleLobbyChatDeleteRequest(
     return true
   }
 
-  // isPikaAnnouncementAuthorSession гарантира role === 'admin' | 'pika_team'.
+  // isPikaAnnouncementAuthorSession гарантира role === 'admin' | 'pika_team' | 'marketing'.
   const result = lobbyChatStore.deleteMessage({
     messageId,
     actorAccountId: session.account.accountId,
-    actorRoleAtDeletion: session.account.role as 'admin' | 'pika_team',
+    actorRoleAtDeletion: session.account.role as 'admin' | 'pika_team' | 'marketing',
   })
 
   if (!result.ok && result.code === 'not_found') {
@@ -23936,7 +23985,7 @@ wsServer.on('connection', (socket, request) => {
         }
 
         const senderRoleForGate = authStore.getAccountRoleForProfile(latestConnection.profileId) ?? 'player'
-        if (senderRoleForGate !== 'admin' && senderRoleForGate !== 'pika_team') {
+        if (!isPikaAnnouncementAuthorRole(senderRoleForGate)) {
           sendLobbyChatError('forbidden', 'Само екипът на Pika.bg може да публикува тук.')
           return
         }
@@ -23966,8 +24015,9 @@ wsServer.on('connection', (socket, request) => {
         const publicProfile = playerProgressStore.getPublicProfile(latestConnection.profileId)
         const senderDisplayName = publicProfile?.displayName?.trim() || 'Играч'
         const senderRole = senderRoleForGate
-        // senderRoleForGate е стеснен до 'admin' | 'pika_team' от write gate-а
-        // по-горе — chat_admin вече не може да изпраща тук, значи винаги false.
+        // senderRoleForGate е стеснен до 'admin' | 'pika_team' | 'marketing' от
+        // write gate-а по-горе (isPikaAnnouncementAuthorRole) — chat_admin вече
+        // не може да изпраща тук, значи винаги false.
         const senderIsChatAdmin = false
 
         const snapshot = lobbyChatStore.insertMessage({
