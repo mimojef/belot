@@ -12,7 +12,7 @@ import { join } from 'node:path'
 // ── Константи ─────────────────────────────────────────────────────────────────
 
 export const BACKUP_DAILY_NAME_RE = /^belot-v2-(\d{4}-\d{2}-\d{2})\.sqlite$/
-export const RETENTION_COUNT = 14
+export const RETENTION_COUNT = 3
 export const REQUIRED_TABLES = [
   'server_migrations',
   'accounts',

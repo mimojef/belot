@@ -9,16 +9,19 @@
  * [1] Валиден backup: tmp → verify → rename, без остатъчен .tmp
  * [2] Повторно изпълнение в същия ден: валиден файл → SKIP, retention пак се вика
  * [3] Невалиден съществуващ backup: заменя се с нов валиден
- * [4] Retention над 14 файла: само BACKUP_DAILY_NAME_RE файлове се докосват
+ * [4] Retention над RETENTION_COUNT (3): само BACKUP_DAILY_NAME_RE файлове се докосват
  * [5] Stale .tmp преди старт: почиства се преди backup()
  * [6] Грешка от backup(): fake backupFn записва partial .tmp и хвърля → cleanup
  * [7] Грешка при verify на tmp: .tmp се изтрива, финален файл не се създава
  * [8] Restore verification tmpdir: почиства се при грешка, оригиналът непокътнат
  * [9] Retention при SKIP path (вече валиден дневен backup)
+ * [10] Production сценарий: 14 дневни (25.09–08.10) → SKIP пази точно 06–08.10;
+ *      повторен SKIP не трие нищо; следващият ден пази 07–09.10; непознати
+ *      файлове, подобни имена, .tmp и подпапки остават непокътнати
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import { copyFile, mkdir, mkdtemp, readdir, rm, stat, unlink, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readdir, readFile, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -81,6 +84,16 @@ function makeValidDb(dbPath: string): void {
     INSERT INTO profile_wallets VALUES ('prof-1', 50000);
   `)
   db.close()
+}
+
+async function listDaily(backupDir: string): Promise<string[]> {
+  return (await readdir(backupDir)).filter(f => BACKUP_DAILY_NAME_RE.test(f)).sort()
+}
+
+function expectExactly(actual: string[], expected: string[]): void {
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+    throw new Error(`очаквани=[${expected.join(', ')}] реални=[${actual.join(', ')}]`)
+  }
 }
 
 async function withTmpDir(fn: (dir: string) => Promise<void>): Promise<void> {
@@ -168,9 +181,9 @@ await withTmpDir(async (dir) => {
   const { finalPath } = await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-01-02' })
   const statBefore = await stat(finalPath)
 
-  // 15 фиктивни стари файла — при SKIP retention трябва да ги изчисти
+  // 15 фиктивни стари файла (2025-12-01..15) — при SKIP retention трябва да ги изчисти
   for (let i = 1; i <= 15; i++) {
-    const ds = `2025-${String(i).padStart(2, '0')}-01`
+    const ds = `2025-12-${String(i).padStart(2, '0')}`
     await writeFile(join(backupDir, `belot-v2-${ds}.sqlite`), `fake-${i}`, 'utf8')
   }
 
@@ -188,9 +201,12 @@ await withTmpDir(async (dir) => {
   await check('[2.3] Retention изпълнен при SKIP (лог съдържа DELETED)', () => {
     if (!log.some(l => l.startsWith('DELETED:'))) throw new Error(JSON.stringify(log))
   })
-  await check('[2.4] Общо файлове ≤ RETENTION_COUNT', async () => {
-    const daily = (await readdir(backupDir)).filter(f => BACKUP_DAILY_NAME_RE.test(f))
-    if (daily.length > RETENTION_COUNT) throw new Error(`${daily.length} > ${RETENTION_COUNT}`)
+  await check('[2.4] Пазят се точно последните 3 дневни (вкл. днешния)', async () => {
+    expectExactly(await listDaily(backupDir), [
+      'belot-v2-2025-12-14.sqlite',
+      'belot-v2-2025-12-15.sqlite',
+      'belot-v2-2026-01-02.sqlite',
+    ])
   })
 })
 
@@ -223,9 +239,9 @@ await withTmpDir(async (dir) => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// [4] Retention: 16 файла → 14; непознати файлове и подпапки непокътнати
+// [4] Retention: 16 файла → 3; непознати файлове и подпапки непокътнати
 // ═══════════════════════════════════════════════════════════════════════════════
-console.log('\n[4] Retention: 16 файла → 14; непознати непокътнати')
+console.log('\n[4] Retention: 16 файла → 3; непознати непокътнати')
 await withTmpDir(async (dir) => {
   const sourceFile = join(dir, 'source.sqlite')
   const backupDir  = join(dir, 'backups', 'daily')
@@ -233,7 +249,7 @@ await withTmpDir(async (dir) => {
   makeValidDb(sourceFile)
 
   for (let i = 1; i <= 15; i++) {
-    const ds = `2025-${String(i).padStart(2, '0')}-01`
+    const ds = `2025-12-${String(i).padStart(2, '0')}`
     await writeFile(join(backupDir, `belot-v2-${ds}.sqlite`), `fake-${i}`, 'utf8')
   }
 
@@ -245,15 +261,22 @@ await withTmpDir(async (dir) => {
 
   const daily = (await readdir(backupDir)).filter(f => BACKUP_DAILY_NAME_RE.test(f)).sort()
 
+  await check('[4.0] RETENTION_COUNT е 3 (одобрена политика)', () => {
+    if (RETENTION_COUNT !== 3) throw new Error(`RETENTION_COUNT=${RETENTION_COUNT}`)
+  })
   await check('[4.1] Точно RETENTION_COUNT файла', () => {
     if (daily.length !== RETENTION_COUNT) throw new Error(`${daily.length} файла`)
   })
-  await check('[4.2] Най-новият е запазен', () => {
-    if (!daily.includes('belot-v2-2026-06-01.sqlite')) throw new Error(daily.join(', '))
+  await check('[4.2] Пазят се точно 3-те най-нови, вкл. новосъздадения', () => {
+    expectExactly(daily, [
+      'belot-v2-2025-12-14.sqlite',
+      'belot-v2-2025-12-15.sqlite',
+      'belot-v2-2026-06-01.sqlite',
+    ])
   })
   await check('[4.3] Най-старите са изтрити', () => {
-    if (daily.includes('belot-v2-2025-01-01.sqlite')) throw new Error('2025-01 е останал')
-    if (daily.includes('belot-v2-2025-02-01.sqlite')) throw new Error('2025-02 е останал')
+    if (daily.includes('belot-v2-2025-12-01.sqlite')) throw new Error('2025-12-01 е останал')
+    if (daily.includes('belot-v2-2025-12-13.sqlite')) throw new Error('2025-12-13 е останал')
   })
   await check('[4.4] README.txt е непокътнат', async () => {
     await stat(join(backupDir, 'README.txt'))
@@ -454,11 +477,11 @@ await withTmpDir(async (dir) => {
   await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-09-01' })
 
   for (let i = 1; i <= 15; i++) {
-    const ds = `2024-${String(i).padStart(2, '0')}-01`
+    const ds = `2024-12-${String(i).padStart(2, '0')}`
     await writeFile(join(backupDir, `belot-v2-${ds}.sqlite`), `old-${i}`, 'utf8')
   }
 
-  // Второ извикване → SKIP + retention трябва да изтрие 2 от 16
+  // Второ извикване → SKIP + retention трябва да изтрие 13 от 16
   const { log } = await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-09-01' })
 
   await check('[9.1] SKIP path е изпълнен', () => {
@@ -478,6 +501,108 @@ await withTmpDir(async (dir) => {
       throw new Error('файлът за деня е изтрит')
     }
   })
+  await check('[9.5] Пазят се точно последните 3', async () => {
+    expectExactly(await listDaily(backupDir), [
+      'belot-v2-2024-12-14.sqlite',
+      'belot-v2-2024-12-15.sqlite',
+      'belot-v2-2026-09-01.sqlite',
+    ])
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// [10] Production сценарий: 14 дневни → 3; повторен SKIP; следващ ден
+// ═══════════════════════════════════════════════════════════════════════════════
+console.log('\n[10] Production сценарий: 14 дневни (25.09–08.10) → 3')
+await withTmpDir(async (dir) => {
+  const sourceFile = join(dir, 'source.sqlite')
+  const backupDir  = join(dir, 'backups', 'daily')
+  makeValidDb(sourceFile)
+
+  // Днешният (08.10) е реален валиден backup → следващото извикване минава по SKIP.
+  await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-10-08' })
+  // 06.10 и 07.10 — реални валидни копия; 25.09–05.10 — фиктивно съдържание.
+  await copyFile(join(backupDir, 'belot-v2-2026-10-08.sqlite'), join(backupDir, 'belot-v2-2026-10-06.sqlite'))
+  await copyFile(join(backupDir, 'belot-v2-2026-10-08.sqlite'), join(backupDir, 'belot-v2-2026-10-07.sqlite'))
+  const older = [
+    '2026-09-25', '2026-09-26', '2026-09-27', '2026-09-28', '2026-09-29', '2026-09-30',
+    '2026-10-01', '2026-10-02', '2026-10-03', '2026-10-04', '2026-10-05',
+  ]
+  for (const ds of older) {
+    await writeFile(join(backupDir, `belot-v2-${ds}.sqlite`), `old-${ds}`, 'utf8')
+  }
+
+  // Файлове, които retention НЕ бива да докосва: подобни имена, .tmp от друг ден,
+  // sidecar файлове, ръчни копия, непознати файлове и подпапки (вкл. с дневно име).
+  const untouched = [
+    'belot-v2-2026-09-01.sqlite.tmp',
+    'belot-v2-2026-09-01.sqlite.sha256',
+    'belot-v2-2026-09-01.sqlite-wal',
+    'belot-v2-2026-09-01.sqlite.bak',
+    'belot-v2-2026-09-01-manual.sqlite',
+    'belot-v2-manual.sqlite',
+    'other-2026-09-01.sqlite',
+    'README.txt',
+    join('subdir', 'note.txt'),
+    join('subdir', 'belot-v2-2026-09-01.sqlite'),
+  ]
+  await mkdir(join(backupDir, 'subdir'), { recursive: true })
+  for (const f of untouched) await writeFile(join(backupDir, f), `keep:${f}`, 'utf8')
+
+  await check('[10.0] Изходно състояние: 14 дневни архива', async () => {
+    const daily = await listDaily(backupDir)
+    if (daily.length !== 14) throw new Error(`${daily.length} файла`)
+  })
+
+  const first = await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-10-08' })
+  const expectedKept = [
+    'belot-v2-2026-10-06.sqlite',
+    'belot-v2-2026-10-07.sqlite',
+    'belot-v2-2026-10-08.sqlite',
+  ]
+
+  await check('[10.1] Същия ден → SKIP', () => {
+    if (!first.log.some(l => l.startsWith('SKIP:'))) throw new Error(JSON.stringify(first.log))
+  })
+  await check('[10.2] Пазят се точно 06.10, 07.10, 08.10', async () => {
+    expectExactly(await listDaily(backupDir), expectedKept)
+  })
+  await check('[10.3] Изтрити са точно 11-те по-стари (25.09–05.10)', () => {
+    const line = first.log.find(l => l.startsWith('DELETED:'))
+    if (!line) throw new Error(JSON.stringify(first.log))
+    const deleted = line.slice('DELETED: '.length).split(', ').sort()
+    expectExactly(deleted, older.map(ds => `belot-v2-${ds}.sqlite`))
+  })
+  await check('[10.4] Запазените 3 са валидни SQLite backup-и', () => {
+    for (const f of expectedKept) verifyBackupFile(join(backupDir, f))
+  })
+
+  const second = await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-10-08' })
+  await check('[10.5] Повторен SKIP в същия ден не трие нищо', async () => {
+    if (!second.log.some(l => l.startsWith('SKIP:'))) throw new Error(JSON.stringify(second.log))
+    if (second.log.some(l => l.startsWith('DELETED:'))) throw new Error(JSON.stringify(second.log))
+    expectExactly(await listDaily(backupDir), expectedKept)
+  })
+
+  const nextDay = await runDatabaseBackup({ sourceFile, backupDir, dateStr: '2026-10-09' })
+  await check('[10.6] Следващ ден → OK и изтрит само 06.10', () => {
+    if (!nextDay.log.some(l => l.startsWith('OK:'))) throw new Error(JSON.stringify(nextDay.log))
+    if (!nextDay.log.includes('DELETED: belot-v2-2026-10-06.sqlite')) throw new Error(JSON.stringify(nextDay.log))
+  })
+  await check('[10.7] Пазят се точно 07.10, 08.10, 09.10', async () => {
+    expectExactly(await listDaily(backupDir), [
+      'belot-v2-2026-10-07.sqlite',
+      'belot-v2-2026-10-08.sqlite',
+      'belot-v2-2026-10-09.sqlite',
+    ])
+  })
+  await check('[10.8] Непознати файлове, подобни имена, .tmp и подпапки са непокътнати', async () => {
+    for (const f of untouched) {
+      const content = await readFile(join(backupDir, f), 'utf8').catch(() => null)
+      if (content !== `keep:${f}`) throw new Error(`${f} е изтрит или променен`)
+    }
+  })
+  await check('[10.9] Source базата е непокътната', () => { verifyBackupFile(sourceFile) })
 })
 
 // ── Резултат ──────────────────────────────────────────────────────────────────
