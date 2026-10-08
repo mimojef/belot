@@ -4,6 +4,10 @@ import {
 } from '../matchmaking/matchmakingTypes.js'
 import { SERVER_SEAT_ORDER, type Seat } from '../core/serverTypes.js'
 import type { ClientBidAction, ClientMessage, PrivateRoomWaitMinutes } from './messageTypes.js'
+import {
+  DEFAULT_HUMAN_TURN_TIMEOUT_MS,
+  isHumanTurnTimeoutMs,
+} from '../shared/humanTurnTimeoutOptions.js'
 
 const ALLOWED_PRIVATE_ROOM_WAIT_MINUTES: readonly PrivateRoomWaitMinutes[] = [5, 10, 15, 30]
 const DEFAULT_PRIVATE_ROOM_WAIT_MINUTES: PrivateRoomWaitMinutes = 15
@@ -612,12 +616,25 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
         return null
       }
 
+      // Същата семантика като waitMinutes: липсващо поле (legacy клиент) =
+      // стандартът, невалидна стойност = отхвърляне на цялото съобщение.
+      const humanTurnTimeoutMs =
+        parsed.humanTurnTimeoutMs === undefined
+          ? DEFAULT_HUMAN_TURN_TIMEOUT_MS
+          : isHumanTurnTimeoutMs(parsed.humanTurnTimeoutMs)
+            ? parsed.humanTurnTimeoutMs
+            : null
+      if (humanTurnTimeoutMs === null) {
+        return null
+      }
+
       return {
         type: 'create_private_room',
         stake: parsed.stake,
         isLocked: parsed.isLocked === true,
         waitMinutes,
         manualStart: parsed.manualStart === true,
+        humanTurnTimeoutMs,
         displayName: normalizeOptionalDisplayName(parsed.displayName),
       }
     }

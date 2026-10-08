@@ -1,3 +1,4 @@
+import type { HumanTurnTimeoutMs } from '../shared/humanTurnTimeoutOptions.js'
 import type {
   ActiveTableGiftSnapshot,
   PlayerIdentitySnapshot,
@@ -219,6 +220,8 @@ export type ClientMessage =
       isLocked: boolean
       waitMinutes: PrivateRoomWaitMinutes
       manualStart?: boolean
+      // "Време за реакция" (ms) — липсващо = DEFAULT_HUMAN_TURN_TIMEOUT_MS.
+      humanTurnTimeoutMs?: HumanTurnTimeoutMs
       displayName?: string
     }
   | {
@@ -616,6 +619,13 @@ export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
   timerDeadlineAt: number | null
+  // Пълната продължителност на човешки ход ("Време за реакция") за тази игра —
+  // клиентът я ползва като animation-duration на countdown лентата.
+  humanTurnTimeoutMs: number
+  // Server Date.now() в момента на построяване на snapshot-а — клиентът оценява
+  // разликата между часовниците, за да позиционира лентата спрямо
+  // timerDeadlineAt.
+  serverNow: number
   dealerSeat: Seat | null
   firstDealSeat: Seat | null
   cutting: RoomCuttingSnapshot | null
@@ -1080,6 +1090,8 @@ export type PrivateRoomSnapshot = {
   // автоматично; само creator-ът (occupant.isHost===true) може да изпрати
   // start_private_room, и то само когато canManualStart===true.
   manualStart: boolean
+  // "Време за реакция" (ms), фиксирано при създаване на масата.
+  humanTurnTimeoutMs: HumanTurnTimeoutMs
   // Server-derived: manualStart===true И всичките 4 слота са заети (readiness
   // все още не е гарантирана тук — block-partnership отказът стига до
   // клиента чрез съществуващия private_room_partner_blocked error path при

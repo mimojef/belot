@@ -51,14 +51,19 @@ const localBotActionDelayMs = isLocalTournamentTestModeEnabled()
   ? pickLocalTournamentTestBotActionDelayMs(getLocalTournamentTestTimingOverrides())
   : null
 
+// *HumanTimeoutMs = стандартното "Време за реакция" (15s) за всички маси без
+// изричен override. Частна маса може да избере друга стойност от
+// HUMAN_TURN_TIMEOUT_OPTIONS_MS (state.humanTurnTimeoutMs) — виж
+// resolveServerHumanTurnTimeoutMs в serverTimerStateHelpers.ts. Bot delay-ите
+// и sweepOfferHumanTimeoutMs НЕ зависят от него.
 export const SERVER_TIMING_CONFIG = {
-  cutHumanTimeoutMs: 20000,
+  cutHumanTimeoutMs: 15000,
   cutBotDelayMs: localBotActionDelayMs ?? 800,
 
-  bidHumanTimeoutMs: 20000,
+  bidHumanTimeoutMs: 15000,
   bidBotDelayMs: localBotActionDelayMs ?? 800,
 
-  playHumanTimeoutMs: 20000,
+  playHumanTimeoutMs: 15000,
   playBotDelayMs: localBotActionDelayMs ?? 800,
   playAfterTrickCollectionDelayMs: PLAY_AFTER_TRICK_COLLECTION_DELAY_MS,
 

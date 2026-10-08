@@ -78,6 +78,12 @@ import {
 } from './biddingUiState'
 import { createCuttingVisualCountdownTracker } from './cutting/cuttingVisualCountdown'
 import {
+  computeSeatCountdownRemainingMs,
+  getReactionWarningThresholdMs,
+  resolveHumanTurnTimeoutMs,
+} from './reactionCountdown'
+import { sharedServerClock } from '../network/serverClock'
+import {
   CUTTING_VISUAL_ANIMATION_TOTAL_MS,
   type RenderCuttingAnimationState,
   renderCuttingScreen,
@@ -108,8 +114,6 @@ import {
   unmountDealPacketOverlay,
 } from './dealPacketOverlay'
 import {
-  BID_BOT_DELAY_MS,
-  BID_HUMAN_TIMEOUT_MS,
   getBidActionLabel,
   renderBiddingStageHtml,
   createBiddingInteractionHtml,
@@ -154,7 +158,6 @@ const SEAT_LABELS: Record<Seat, string> = {
   left: 'Ляво',
 }
 
-const REACTION_COUNTDOWN_WARNING_THRESHOLD_MS = 7_000
 
 // submit_bid_action е fire-and-forget (createGameServerClient.ts) — ако
 // сървърът никога не отговори (silent drop, изгубен snapshot и т.н.),
@@ -1449,7 +1452,16 @@ export function createActiveRoomFlowController(
           if (newKey !== existingKey) existing.setAttribute('data-countdown-key', newKey)
           if (newActive !== existingActive) existing.setAttribute('data-countdown-active', newActive)
           const newStyle = fill.getAttribute('style') ?? ''
-          if (existing.getAttribute('style') !== newStyle) existing.setAttribute('style', newStyle)
+          if (newKey !== existingKey && newActive === '1') {
+            // Нов ход на същия seat: идентичен style string (напр. същият
+            // animation-delay) не би рестартирал CSS анимацията — форсираме
+            // restart, за да започне лентата от позицията на новия deadline.
+            existing.style.animation = 'none'
+            void existing.offsetWidth
+            existing.setAttribute('style', newStyle)
+          } else if (existing.getAttribute('style') !== newStyle) {
+            existing.setAttribute('style', newStyle)
+          }
         }
       }
 
@@ -2103,7 +2115,7 @@ export function createActiveRoomFlowController(
         currentCutCycleKey !== null &&
         cuttingAnimation.pendingCycleKey !== currentCutCycleKey
       ) {
-        return Math.max(0, timerDeadlineAt - Date.now())
+        return Math.max(0, timerDeadlineAt - sharedServerClock.getServerNow())
       }
     }
 
@@ -2112,7 +2124,7 @@ export function createActiveRoomFlowController(
       game.bidding?.canSubmitBid &&
       !biddingUiState.pendingBidSent
     ) {
-      return Math.max(0, timerDeadlineAt - Date.now())
+      return Math.max(0, timerDeadlineAt - sharedServerClock.getServerNow())
     }
 
     if (
@@ -2120,7 +2132,7 @@ export function createActiveRoomFlowController(
       game.playing?.currentTurnSeat === seat &&
       !playingCache.pendingPlayCardSent
     ) {
-      return Math.max(0, timerDeadlineAt - Date.now())
+      return Math.max(0, timerDeadlineAt - sharedServerClock.getServerNow())
     }
 
     return null
@@ -2128,10 +2140,13 @@ export function createActiveRoomFlowController(
 
   function updateReactionCountdownAudio(): void {
     const remainingMs = getLocalReactionCountdownRemainingMs()
+    const warningThresholdMs = getReactionWarningThresholdMs(
+      resolveHumanTurnTimeoutMs(activeRoomState?.game),
+    )
     const shouldPlay =
       remainingMs !== null &&
       remainingMs > 0 &&
-      remainingMs <= REACTION_COUNTDOWN_WARNING_THRESHOLD_MS
+      remainingMs <= warningThresholdMs
 
     options.gameAudio?.syncReactionCountdownWarning(shouldPlay)
   }
@@ -3618,9 +3633,16 @@ export function createActiveRoomFlowController(
         }, { isInGame: true })
       }
 
+      const cutterSeatSnapshotForCountdown =
+        cutterSeatForRender !== null
+          ? activeRoomState.seats.find((seat) => seat.seat === cutterSeatForRender) ?? null
+          : null
       const cuttingVisualCountdownContext = {
         roomId: activeRoomState.roomId,
         game: activeRoomState.game,
+        isCutterBot:
+          cutterSeatSnapshotForCountdown?.isBot === true ||
+          cutterSeatSnapshotForCountdown?.isControlledByBot === true,
       }
 
       cuttingVisualCountdown.syncCuttingVisualCountdownState(cuttingVisualCountdownContext)
@@ -3650,6 +3672,7 @@ export function createActiveRoomFlowController(
         dealerSeat: dealerSeatForRender,
         cutterSeat: cutterSeatForRender,
         cuttingCountdownRemainingMs: cuttingCountdownRemainingMsForRender,
+        countdownTotalMs: resolveHumanTurnTimeoutMs(activeRoomState.game),
         countdownKey: cutterSeatForRender !== null &&
           cuttingCountdownRemainingMsForRender !== null &&
           activeRoomState.game?.timerDeadlineAt != null
@@ -4172,22 +4195,18 @@ export function createActiveRoomFlowController(
         biddingSnapshot.currentBidderSeat !== null
           ? activeRoomState.seats.find((seat) => seat.seat === biddingSnapshot.currentBidderSeat) ?? null
           : null
-      const biddingCountdownTotalMs = BID_HUMAN_TIMEOUT_MS
-      const rawBiddingCountdownRemainingMs =
-        biddingSnapshot.currentBidderSeat !== null &&
-        biddingGame.timerDeadlineAt !== null
-          ? Math.max(0, biddingGame.timerDeadlineAt - Date.now())
-          : null
+      const biddingCountdownTotalMs = resolveHumanTurnTimeoutMs(biddingGame)
       const biddingCountdownRemainingMs =
-        rawBiddingCountdownRemainingMs === null
-          ? null
-          : biddingCurrentSeatSnapshot?.isBot || biddingCurrentSeatSnapshot?.isControlledByBot
-            ? Math.max(
-                0,
-                BID_HUMAN_TIMEOUT_MS -
-                  (BID_BOT_DELAY_MS - Math.min(BID_BOT_DELAY_MS, rawBiddingCountdownRemainingMs)),
-              )
-            : rawBiddingCountdownRemainingMs
+        biddingSnapshot.currentBidderSeat !== null
+          ? computeSeatCountdownRemainingMs({
+              deadlineAt: biddingGame.timerDeadlineAt,
+              totalMs: biddingCountdownTotalMs,
+              isBotSeat:
+                biddingCurrentSeatSnapshot?.isBot === true ||
+                biddingCurrentSeatSnapshot?.isControlledByBot === true,
+              serverNow: sharedServerClock.getServerNow(),
+            })
+          : null
 
       const biddingPopupTurnKey =
         biddingSnapshot.canSubmitBid &&

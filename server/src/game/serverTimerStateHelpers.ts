@@ -5,6 +5,7 @@ import {
   getLocalTournamentTestRoomBotDelayOverrides,
   isLocalTournamentTestModeEnabled,
 } from '../localTournamentTest/localTournamentTestModeGuard.js'
+import { isHumanTurnTimeoutMs } from '../shared/humanTurnTimeoutOptions.js'
 import type {
   ServerAuthoritativeGameState,
   ServerTimerState,
@@ -65,6 +66,37 @@ export function resolveServerBotActionDelayMs(
   return hasHumanSeat ? overrides.humanRoomBotDelayMs : overrides.siblingBotOnlyRoomBotDelayMs
 }
 
+// "Време за реакция" — единствената точка, която чете state.humanTurnTimeoutMs.
+// Override-ът се приема само ако е от whitelist-а (HUMAN_TURN_TIMEOUT_OPTIONS_MS);
+// null/липсващ/невалиден (legacy persisted state, повреден JSON) пада обратно
+// на стандартната стойност за фазата, така че произволен timeout не може да
+// бъде наложен. Засяга само човешкия timeout — bot delay-ите и sweepOffer
+// остават непроменени.
+export function resolveServerHumanTurnTimeoutMs(
+  state: Pick<ServerAuthoritativeGameState, 'humanTurnTimeoutMs'>,
+  standardTimeoutMs: number,
+): number {
+  return isHumanTurnTimeoutMs(state.humanTurnTimeoutMs)
+    ? state.humanTurnTimeoutMs
+    : standardTimeoutMs
+}
+
+// Ефективната продължителност на човешки ход за текущата фаза — изпраща се
+// в snapshot-а като пълната дължина на клиентската countdown лента, така че
+// animation-duration винаги съвпада със сървърния durationMs.
+export function getServerHumanTurnTimeoutMsForPhase(
+  state: ServerAuthoritativeGameState,
+): number {
+  const standardTimeoutMs =
+    state.phase === 'cutting'
+      ? SERVER_TIMING_CONFIG.cutHumanTimeoutMs
+      : state.phase === 'bidding'
+        ? SERVER_TIMING_CONFIG.bidHumanTimeoutMs
+        : SERVER_TIMING_CONFIG.playHumanTimeoutMs
+
+  return resolveServerHumanTurnTimeoutMs(state, standardTimeoutMs)
+}
+
 export function createServerCuttingTimerState(
   state: ServerAuthoritativeGameState,
   activeSeat: Seat,
@@ -72,7 +104,7 @@ export function createServerCuttingTimerState(
 ): ServerTimerState {
   const durationMs = isServerSeatControlledByBot(state, activeSeat)
     ? resolveServerBotActionDelayMs(state, SERVER_TIMING_CONFIG.cutBotDelayMs)
-    : SERVER_TIMING_CONFIG.cutHumanTimeoutMs
+    : resolveServerHumanTurnTimeoutMs(state, SERVER_TIMING_CONFIG.cutHumanTimeoutMs)
 
   return createServerTimerStateForSeat(activeSeat, durationMs, startedAt)
 }
@@ -84,7 +116,7 @@ export function createServerBiddingTimerState(
 ): ServerTimerState {
   const durationMs = isServerSeatControlledByBot(state, activeSeat)
     ? resolveServerBotActionDelayMs(state, SERVER_TIMING_CONFIG.bidBotDelayMs)
-    : SERVER_TIMING_CONFIG.bidHumanTimeoutMs
+    : resolveServerHumanTurnTimeoutMs(state, SERVER_TIMING_CONFIG.bidHumanTimeoutMs)
 
   return createServerTimerStateForSeat(activeSeat, durationMs, startedAt)
 }
@@ -96,7 +128,7 @@ export function createServerPlayingTimerState(
 ): ServerTimerState {
   const durationMs = isServerSeatControlledByBot(state, activeSeat)
     ? resolveServerBotActionDelayMs(state, SERVER_TIMING_CONFIG.playBotDelayMs)
-    : SERVER_TIMING_CONFIG.playHumanTimeoutMs
+    : resolveServerHumanTurnTimeoutMs(state, SERVER_TIMING_CONFIG.playHumanTimeoutMs)
 
   return createServerTimerStateForSeat(activeSeat, durationMs, startedAt)
 }

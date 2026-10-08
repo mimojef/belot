@@ -220,6 +220,11 @@ export type ServerAuthoritativeGameState = {
     carryOver: ServerCarryOverPoints
   }
   timer: ServerTimerState
+  // "Време за реакция" override, фиксиран при създаване на мача (само частни
+  // маси). null/липсващ (вкл. legacy persisted states) = стандартните
+  // SERVER_TIMING_CONFIG.*HumanTimeoutMs. Чете се САМО през
+  // resolveServerHumanTurnTimeoutMs (whitelist validation).
+  humanTurnTimeoutMs?: number | null
   // Server-only Anti Bad Luck (seat-based). Optional за legacy persisted
   // states — липсващ = празен state. Никога не се изпраща към клиента.
   antiBadLuck?: ServerAntiBadLuckState

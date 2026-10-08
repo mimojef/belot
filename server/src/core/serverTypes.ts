@@ -252,6 +252,13 @@ export type ServerRoomConfig = {
   targetScore: number
   turnTimeMs: number
   reconnectGraceMs: number
+  /**
+   * "Време за реакция" override — задава се само за игри от частна маса
+   * (HUMAN_TURN_TIMEOUT_OPTIONS_MS). Копира се в authoritative state при
+   * инициализация (вкл. replay), откъдето го четат таймерите. Липсващ/null =
+   * стандартните SERVER_TIMING_CONFIG.*HumanTimeoutMs.
+   */
+  humanTurnTimeoutMs?: number | null
   isGuestTrial?: boolean
   /**
    * True само за игри, стартирали от частна маса (нормален 4-human старт

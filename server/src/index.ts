@@ -3853,6 +3853,7 @@ function buildPrivateRoomSnapshot(room: PrivateRoom): PrivateRoomSnapshot {
     createdAt: room.createdAt,
     expiresAt: room.expiresAt,
     manualStart: room.manualStart,
+    humanTurnTimeoutMs: room.humanTurnTimeoutMs,
     canManualStart: room.manualStart && room.slots.every((s) => s.occupant !== null),
   }
 }
@@ -4175,6 +4176,7 @@ function handlePrivateRoomReady(privateRoom: PrivateRoom): void {
       isPrivate: true,
       isPrivateTableOrigin: true,
       stakeAmount: privateRoom.stake,
+      humanTurnTimeoutMs: privateRoom.humanTurnTimeoutMs,
     },
   })
   let nextServerState = upsertServerRoom(serverState, currentRoom)
@@ -23296,6 +23298,7 @@ wsServer.on('connection', (socket, request) => {
           isLocked: message.isLocked,
           waitMinutes: message.waitMinutes,
           manualStart: message.manualStart ?? false,
+          humanTurnTimeoutMs: message.humanTurnTimeoutMs,
         })
 
         if (!createResult.ok) {

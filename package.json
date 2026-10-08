@@ -26,6 +26,8 @@
     "check:ludo-timer-presentation": "npx tsx scripts/checkLudoTimerPresentation.ts",
     "check:ludo-reclaim-flow": "npx tsx scripts/checkLudoReclaimFlow.ts",
     "check:ludo-bot-timer-isolation": "npx tsx scripts/checkLudoBotTimerIsolation.ts",
+    "check:reaction-countdown-math": "npx tsx scripts/checkReactionCountdownMath.ts",
+    "check:reaction-countdown-browser": "npx tsx scripts/checkReactionCountdownBrowser.ts",
     "check:ludo-bot-timer-presentation-split": "npx tsx scripts/checkLudoBotTimerPresentationSplit.ts",
     "check:password-reset-frontend": "npx tsx scripts/checkPasswordResetFrontend.ts",
     "check:gift-notification-modal-fix": "npx tsx scripts/checkGiftNotificationModalFix.ts",

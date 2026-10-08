@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 import type { PrivateRoomActionErrorCode, PrivateRoomWaitMinutes } from '../protocol/messageTypes.js'
+import {
+  DEFAULT_HUMAN_TURN_TIMEOUT_MS,
+  isHumanTurnTimeoutMs,
+  type HumanTurnTimeoutMs,
+} from '../shared/humanTurnTimeoutOptions.js'
 import type {
   BotBehaviorPreset,
   BotDifficulty,
@@ -83,6 +88,11 @@ export type PrivateRoom = {
    * Default false (сегашното auto-start поведение).
    */
   manualStart: boolean
+  /**
+   * "Време за реакция" — избира се при createRoom и НЕ се променя след това;
+   * важи за всички участници (копира се в ServerRoomConfig при старт).
+   */
+  readonly humanTurnTimeoutMs: HumanTurnTimeoutMs
 }
 
 export function getTeamSlots(room: PrivateRoom, team: Team): [PrivateRoomSlot, PrivateRoomSlot] {
@@ -251,6 +261,7 @@ export type CreateRoomInput = {
   isLocked: boolean
   waitMinutes: PrivateRoomWaitMinutes
   manualStart: boolean
+  humanTurnTimeoutMs?: HumanTurnTimeoutMs
 }
 
 export type CreateRoomResult =
@@ -477,6 +488,9 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
       createdAt: now,
       expiresAt: now + timeoutMs,
       manualStart: input.manualStart,
+      humanTurnTimeoutMs: isHumanTurnTimeoutMs(input.humanTurnTimeoutMs)
+        ? input.humanTurnTimeoutMs
+        : DEFAULT_HUMAN_TURN_TIMEOUT_MS,
     }
 
     rooms.set(room.id, room)

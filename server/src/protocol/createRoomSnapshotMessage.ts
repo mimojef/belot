@@ -1,6 +1,7 @@
 import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../core/serverTypes.js'
 import { getValidServerBidActions } from '../game/getValidServerBidActions.js'
 import { getServerValidPlayCards } from '../game/getServerValidPlayCards.js'
+import { getServerHumanTurnTimeoutMsForPhase } from '../game/serverTimerStateHelpers.js'
 import type { ServerAuthoritativeGameState } from '../game/serverGameTypes.js'
 import {
   getDisplayNameFromIdentity,
@@ -385,6 +386,8 @@ function createGameSnapshot(
     phase: room.game.phase,
     authoritativePhase: phase,
     timerDeadlineAt: room.game.timerDeadlineAt,
+    humanTurnTimeoutMs: getServerHumanTurnTimeoutMsForPhase(authoritativeState),
+    serverNow: Date.now(),
     dealerSeat: authoritativeState.round.dealerSeat,
     firstDealSeat: authoritativeState.round.firstDealSeat,
     cutting: includeCuttingSnapshot
@@ -479,6 +482,10 @@ function createSpectatorGameSnapshot(game: RoomGameSnapshot): RoomSpectatorGameS
     phase: game.phase,
     authoritativePhase: game.authoritativePhase,
     timerDeadlineAt: shouldHideTimerDeadline ? null : game.timerDeadlineAt,
+    // Публични: продължителността е еднаква за всички на масата, а serverNow
+    // е само часовник — не разкриват private eligibility.
+    humanTurnTimeoutMs: game.humanTurnTimeoutMs,
+    serverNow: game.serverNow,
     dealerSeat: game.dealerSeat,
     firstDealSeat: game.firstDealSeat,
     cutting: game.cutting

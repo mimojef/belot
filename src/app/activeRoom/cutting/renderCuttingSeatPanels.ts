@@ -9,7 +9,8 @@ import {
   getCuttingSeatPanelAnchorStyle,
   getVisualSeatForLocalPerspective,
 } from './cuttingSeatLayout'
-import { CUTTING_COUNTDOWN_MS } from './cuttingVisualCountdown'
+import { computeCountdownFillAnimation } from '../reactionCountdown'
+import { DEFAULT_HUMAN_TURN_TIMEOUT_MS } from '../../../../server/src/shared/humanTurnTimeoutOptions'
 import {
   getHandFanOffset,
   HAND_FAN_EDGE_DROP,
@@ -115,10 +116,6 @@ export type RenderCuttingSeatPanelsOptions = {
   separateBubbleLayer?: boolean
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value))
-}
-
 function renderCuttingCountdownFillStyle(
   shouldShowCuttingCountdown: boolean,
   cuttingCountdownRemainingMs: number | null,
@@ -128,13 +125,18 @@ function renderCuttingCountdownFillStyle(
     return 'opacity:0; transform:scaleX(0);'
   }
 
-  const remainingMs = clamp(cuttingCountdownRemainingMs, 0, countdownTotalMs)
-  const elapsedMs = countdownTotalMs - remainingMs
+  // duration = пълният ход; delay позиционира лентата спрямо server
+  // deadline-а (виж computeCountdownFillAnimation) — анимацията свършва точно
+  // в deadline-а и при refresh/закъснял render продължава от реалното време.
+  const { durationMs, delayMs } = computeCountdownFillAnimation(
+    cuttingCountdownRemainingMs,
+    countdownTotalMs,
+  )
 
   return `
     opacity:1;
-    animation: belot-active-room-cutting-countdown ${countdownTotalMs}ms linear forwards;
-    animation-delay:-${elapsedMs}ms;
+    animation: belot-active-room-cutting-countdown ${durationMs}ms linear forwards;
+    animation-delay:${delayMs}ms;
     animation-fill-mode:both;
   `
 }
@@ -1605,7 +1607,7 @@ export function createCuttingSeatPanelsHtml(
       ? cuttingCountdownRemainingMs
       : countdownRemainingMs
   const effectiveCountdownTotalMs =
-    countdownTotalMs === undefined ? CUTTING_COUNTDOWN_MS : countdownTotalMs
+    countdownTotalMs === undefined ? DEFAULT_HUMAN_TURN_TIMEOUT_MS : countdownTotalMs
   const effectiveHighlightSeat =
     highlightSeat === undefined ? cutterSeat : highlightSeat
   const effectiveHighlightBadgeLabel =

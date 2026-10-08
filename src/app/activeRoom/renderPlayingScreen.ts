@@ -63,6 +63,8 @@ import {
   renderDeclarationPrompt,
 } from './declarations/renderDeclarationPrompt'
 import { getViewportStageMetrics, isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { computeSeatCountdownRemainingMs, resolveHumanTurnTimeoutMs } from './reactionCountdown'
+import { sharedServerClock } from '../network/serverClock'
 
 const PLAY_CARD_ENTRY_ANIMATION_MS = 400
 const COMPLETED_TRICK_PREVIEW_MS = 220
@@ -70,8 +72,6 @@ const TRICK_COLLECTION_GATHER_MS = 180
 const TRICK_COLLECTION_FLY_MS = 420
 const TRICK_COLLECTION_CARD_STAGGER_MS = 35
 const PLAYING_COLLECT_OVERLAY_Z_INDEX = 9000
-const PLAY_HUMAN_TIMEOUT_MS = 20_000
-const PLAY_BOT_DELAY_MS = 800
 const DECLARATION_BUBBLE_VISIBLE_MS = 1_500
 
 const TRICK_W = 170
@@ -904,6 +904,7 @@ function getPlayingCountdownState(
   countdownTotalMs: number
 } {
   const countdownSeat = game.playing?.currentTurnSeat ?? null
+  const countdownTotalMs = resolveHumanTurnTimeoutMs(game)
 
   if (
     countdownSeat === null ||
@@ -913,27 +914,26 @@ function getPlayingCountdownState(
     return {
       countdownSeat,
       countdownRemainingMs: null,
-      countdownTotalMs: PLAY_HUMAN_TIMEOUT_MS,
+      countdownTotalMs,
     }
   }
 
-  const rawCountdownRemainingMs = Math.max(0, game.timerDeadlineAt - Date.now())
   const currentTurnSeatSnapshot =
     seats.find((seat) => seat.seat === countdownSeat) ?? null
 
-  const countdownRemainingMs = currentTurnSeatSnapshot?.isBot
-    || currentTurnSeatSnapshot?.isControlledByBot
-    ? Math.max(
-        0,
-        PLAY_HUMAN_TIMEOUT_MS -
-          (PLAY_BOT_DELAY_MS - Math.min(PLAY_BOT_DELAY_MS, rawCountdownRemainingMs)),
-      )
-    : rawCountdownRemainingMs
+  const countdownRemainingMs = computeSeatCountdownRemainingMs({
+    deadlineAt: game.timerDeadlineAt,
+    totalMs: countdownTotalMs,
+    isBotSeat:
+      currentTurnSeatSnapshot?.isBot === true ||
+      currentTurnSeatSnapshot?.isControlledByBot === true,
+    serverNow: sharedServerClock.getServerNow(),
+  })
 
   return {
     countdownSeat,
     countdownRemainingMs,
-    countdownTotalMs: PLAY_HUMAN_TIMEOUT_MS,
+    countdownTotalMs,
   }
 }
 
@@ -2355,6 +2355,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       game.dealerSeat ?? 'null',
       playingCountdownSeat ?? 'null',
       playingCountdownSeat !== null ? (playingCountdownRemainingMs !== null ? '1' : '0') : '0',
+      // Нов deadline за същия seat (напр. "Върни се") трябва да рестартира
+      // лентата, дори нищо друго по панелите да не се е променило.
+      String(game.timerDeadlineAt ?? 'null'),
+      String(playingCountdownTotalMs),
       JSON.stringify(displayedHandCounts),
       JSON.stringify(declarationBubbles),
     ].join('|')

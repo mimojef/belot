@@ -29,7 +29,9 @@ function createDefaultRoomConfig(): ServerRoomConfig {
     joinCode: null,
     stakeAmount: null,
     targetScore: 151,
-    turnTimeMs: 20000,
+    // Информативно (bootstrap state) — реалните таймери идват от
+    // SERVER_TIMING_CONFIG / humanTurnTimeoutMs.
+    turnTimeMs: 15000,
     reconnectGraceMs: 30000,
   }
 }

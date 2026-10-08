@@ -1,3 +1,9 @@
+import {
+  DEFAULT_HUMAN_TURN_TIMEOUT_MS,
+  HUMAN_TURN_TIMEOUT_OPTIONS_MS,
+  isHumanTurnTimeoutMs,
+  type HumanTurnTimeoutMs,
+} from '../../../server/src/shared/humanTurnTimeoutOptions'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -1402,7 +1408,7 @@ export type RenderLobbyScreenOptions = {
   onPrivateRoomsLifecycleTabChange: (tab: 'waiting' | 'playing' | 'finished') => void
   onPrivateRoomsCreateOpen: () => void
   onPrivateRoomsCreateClose: () => void
-  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
+  onPrivateRoomCreate: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
   /** Клик върху ред в списъка — само preview navigation, не изпраща join_private_room; реалният seat claim минава през конкретния "+" на waiting-room екрана. */
   onPrivateRoomJoin: (privateRoomId: string) => void
   /** Клик върху зает seat/avatar в списъка "Частни маси" — отваря съществуващия profile popup flow (не влиза в масата). */
@@ -11276,6 +11282,7 @@ function renderPrivateRoomsPage(state: LobbyScreenState): string {
             </div>
             <div style="font-size:12px;color:rgba(255,255,255,0.4);margin-top:3px;">
               Вход ${formatStake(room.stake)} жълт. · ${occupiedCount}/4 места · ~${minutesLeft} мин.
+              ${isHumanTurnTimeoutMs(room.humanTurnTimeoutMs) ? ` · Ход ${room.humanTurnTimeoutMs / 1000} сек.` : ''}
               ${isLocked ? ' · <span style="color:rgba(239,68,68,0.8);">Заключена</span>' : ''}
             </div>
           </div>
@@ -11605,6 +11612,16 @@ function renderPrivateRoomsCreatePopup(state: LobbyScreenState): string {
               color-scheme:dark;
             ">
               ${WAIT_MINUTES_OPTIONS.map((m) => `<option value="${m}"${m === DEFAULT_WAIT_MINUTES ? ' selected' : ''}>${m} минути</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <div style="font-size:12px;color:rgba(255,255,255,0.5);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.04em;">Време за реакция</div>
+            <select name="humanTurnTimeoutMs" data-private-room-reaction-time="1" style="
+              width:100%;padding:10px 12px;background:#2a2a3e;
+              border:1px solid rgba(255,255,255,0.2);border-radius:9px;color:#fff;font-size:14px;
+              color-scheme:dark;
+            ">
+              ${HUMAN_TURN_TIMEOUT_OPTIONS_MS.map((ms) => `<option value="${ms}"${ms === DEFAULT_HUMAN_TURN_TIMEOUT_MS ? ' selected' : ''}>${ms / 1000} секунди</option>`).join('')}
             </select>
           </div>
           <button type="submit" style="
@@ -17047,7 +17064,11 @@ export function renderLobbyScreen(
       const waitMinutes: 5 | 10 | 15 | 30 = [5, 10, 15, 30].includes(rawWaitMinutes)
         ? (rawWaitMinutes as 5 | 10 | 15 | 30)
         : 15
-      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart)
+      const rawHumanTurnTimeoutMs = Number(data.get('humanTurnTimeoutMs'))
+      const humanTurnTimeoutMs: HumanTurnTimeoutMs = isHumanTurnTimeoutMs(rawHumanTurnTimeoutMs)
+        ? rawHumanTurnTimeoutMs
+        : DEFAULT_HUMAN_TURN_TIMEOUT_MS
+      options.onPrivateRoomCreate(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs)
     })
 
   // Отделен бутон от "+"-ите по-долу (различно DOM поддърво в roomRowHtml) —

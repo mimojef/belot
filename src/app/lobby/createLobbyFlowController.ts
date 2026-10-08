@@ -1,3 +1,4 @@
+import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
 import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError, formatMarketingDailyGiftLimitError } from './formatGiftLimitError'
 import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
@@ -833,7 +834,7 @@ export type CreateLobbyFlowControllerOptions = {
   onPrivateRoomsClose?: () => void
   /** "Играещи"/"Приключили" табове — извиква се веднъж при first-open на всеки от двата (lazy load, не при "Чакащи"). */
   onPrivateGamesOpen?: () => void
-  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
+  onPrivateRoomCreate?: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
   onPrivateRoomJoinSlot?: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   onPrivateRoomLeave?: () => void
   onPrivateRoomInvite?: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -6852,7 +6853,7 @@ export function createLobbyFlowController(
         state.privateRoomsCreatePopupOpen = false
         render()
       },
-      onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart) => {
+      onPrivateRoomCreate: (stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs) => {
         if (state.myPrivateRoom !== null) {
           state.privateRoomsCreatePopupOpen = false
           openPrivateRoomConflictPrompt()
@@ -6885,7 +6886,7 @@ export function createLobbyFlowController(
 
         state.privateRoomsCreatePopupOpen = false
         state.privateRoomJoinInFlight = true
-        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes, manualStart)
+        options.onPrivateRoomCreate?.(stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs)
       },
       onPrivateRoomJoin: handlePrivateRoomJoin,
       onPrivateRoomMemberClick: (profileId, displayName) => {

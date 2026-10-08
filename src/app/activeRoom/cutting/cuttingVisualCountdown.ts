@@ -1,10 +1,15 @@
 import type { RoomGameSnapshot } from '../../network/createGameServerClient'
-
-export const CUTTING_COUNTDOWN_MS = 20000
+import { sharedServerClock } from '../../network/serverClock'
+import {
+  computeSeatCountdownRemainingMs,
+  resolveHumanTurnTimeoutMs,
+} from '../reactionCountdown'
 
 type CuttingVisualCountdownContext = {
   roomId: string
   game: RoomGameSnapshot | null
+  // true, когато цепещият е бот / поет от бот — лентата изтича за bot delay-а.
+  isCutterBot?: boolean
 }
 
 export type CuttingVisualCountdownTracker = {
@@ -50,13 +55,15 @@ function getServerTimerDeadlineAt(context: CuttingVisualCountdownContext | null)
   return parseTimerDeadlineAt(context?.game?.timerDeadlineAt)
 }
 
+// Оставащото време се изчислява винаги от authoritative server deadline-а
+// (както при bidding/playing), а не от момента, в който клиентът е видял
+// хода — иначе refresh/reconnect по средата на цепенето рестартира лентата
+// от 100%, докато сървърът продължава да брои.
 export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTracker {
   let activeCuttingVisualTurnKey: string | null = null
-  let activeCuttingVisualStartedAt = 0
 
   function resetCuttingVisualCountdownState(): void {
     activeCuttingVisualTurnKey = null
-    activeCuttingVisualStartedAt = 0
   }
 
   function getCuttingVisualTurnKey(
@@ -83,19 +90,7 @@ export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTra
   function syncCuttingVisualCountdownState(
     context: CuttingVisualCountdownContext | null,
   ): void {
-    const turnKey = getCuttingVisualTurnKey(context)
-
-    if (turnKey === null) {
-      resetCuttingVisualCountdownState()
-      return
-    }
-
-    if (activeCuttingVisualTurnKey === turnKey) {
-      return
-    }
-
-    activeCuttingVisualTurnKey = turnKey
-    activeCuttingVisualStartedAt = performance.now()
+    activeCuttingVisualTurnKey = getCuttingVisualTurnKey(context)
   }
 
   function getCuttingVisualCountdownRemainingMs(
@@ -103,21 +98,16 @@ export function createCuttingVisualCountdownTracker(): CuttingVisualCountdownTra
   ): number | null {
     const turnKey = getCuttingVisualTurnKey(context)
 
-    if (turnKey === null) {
+    if (turnKey === null || turnKey !== activeCuttingVisualTurnKey) {
       return null
     }
 
-    if (
-      activeCuttingVisualTurnKey !== turnKey ||
-      !Number.isFinite(activeCuttingVisualStartedAt) ||
-      activeCuttingVisualStartedAt <= 0
-    ) {
-      return CUTTING_COUNTDOWN_MS
-    }
-
-    const elapsedMs = Math.max(0, performance.now() - activeCuttingVisualStartedAt)
-
-    return Math.max(0, CUTTING_COUNTDOWN_MS - elapsedMs)
+    return computeSeatCountdownRemainingMs({
+      deadlineAt: getServerTimerDeadlineAt(context),
+      totalMs: resolveHumanTurnTimeoutMs(context?.game),
+      isBotSeat: context?.isCutterBot === true,
+      serverNow: sharedServerClock.getServerNow(),
+    })
   }
 
   return {

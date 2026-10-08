@@ -171,9 +171,9 @@ await check('[integration] createServerCuttingTimerState/createServerBiddingTime
   assert(siblingCuttingTimer.durationMs === 1500, `expected cutting timer 1500ms for bot-only room, got ${siblingCuttingTimer.durationMs}`)
 
   // The human seat's OWN timer must stay on the unrelated *HumanTimeoutMs
-  // constants (20000ms) — this change only touches bot-controlled seats.
+  // constants (15000ms standard "Време за реакция") — this change only touches bot-controlled seats.
   const humanSeatTimer = createServerCuttingTimerState(humanState, 'bottom')
-  assert(humanSeatTimer.durationMs === 20000, `human seat's own timer should stay at the human timeout (20000ms), got ${humanSeatTimer.durationMs}`)
+  assert(humanSeatTimer.durationMs === 15000, `human seat's own timer should stay at the human timeout (15000ms), got ${humanSeatTimer.durationMs}`)
 })
 
 await check('source: resolveServerBotActionDelayMs has no room/tournament id parameter or reference', async () => {

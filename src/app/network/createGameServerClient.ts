@@ -13,6 +13,8 @@ import type { LudoGameState, LudoPieceSlot } from '../games/ludo/engine/ludoEngi
 // rationale. Frontend-специфични метаданни (label/artwork URL/preview)
 // остават в src/app/lobby/bundlePackageVisualCatalog.ts, НЕ тук.
 import type { BundlePackageVisualKey } from '../../../server/src/shared/bundlePackageVisualKeys'
+import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
+import { sharedServerClock } from './serverClock'
 
 export type MatchRoomSnapshot = {
   stakeAmount: number
@@ -979,6 +981,7 @@ export type ClientMessage =
       isLocked: boolean
       waitMinutes: 5 | 10 | 15 | 30
       manualStart?: boolean
+      humanTurnTimeoutMs?: HumanTurnTimeoutMs
       displayName?: string
     }
   | {
@@ -1186,6 +1189,8 @@ export type PrivateRoomSnapshot = {
   createdAt: number
   expiresAt: number
   manualStart: boolean
+  // "Време за реакция" (ms). Optional — стар сървър по време на deploy не го праща.
+  humanTurnTimeoutMs?: number
   canManualStart: boolean
 }
 
@@ -1381,6 +1386,12 @@ export type RoomGameSnapshot = {
   phase: RoomGamePhaseSnapshot | null
   authoritativePhase: RoomAuthoritativePhaseSnapshot | null
   timerDeadlineAt: number | null
+  // "Време за реакция" — пълната продължителност на човешки ход (ms).
+  // Optional за съвместимост със стар сървър по време на deploy; липсващ =
+  // DEFAULT_HUMAN_TURN_TIMEOUT_MS (виж resolveHumanTurnTimeoutMs).
+  humanTurnTimeoutMs?: number
+  // Server Date.now() при построяване на snapshot-а (clock offset sample).
+  serverNow?: number
   dealerSeat: Seat | null
   firstDealSeat: Seat | null
   cutting: RoomCuttingSnapshot | null
@@ -3068,7 +3079,7 @@ export type GameServerClient = {
   watchBelotRoom: (roomId: string) => void
   unwatchBelotRoom: (roomId: string) => void
   requestPrivateGamesList: () => void
-  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean) => void
+  createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
   leavePrivateRoom: () => void
   inviteToPrivateRoom: (toProfiles: Array<{ profileId: string; displayName: string }>) => void
@@ -3186,11 +3197,18 @@ export function createGameServerClient(
     thisSocket.addEventListener('message', (event) => {
       if (socket !== thisSocket) return
 
+      const receivedAt = Date.now()
       const message = safeParseServerMessage(String(event.data))
 
       if (!message) {
         console.warn('[game-server] invalid server message:', event.data)
         return
+      }
+
+      // Clock offset sample при самото получаване (преди буфериране/render),
+      // за да позиционира countdown лентите спрямо server deadline-а.
+      if (message.type === 'room_snapshot' || message.type === 'belot_spectator_snapshot') {
+        sharedServerClock.recordServerNowSample(message.game?.serverNow, receivedAt)
       }
 
       console.log('[game-server] message', message.type, message)
@@ -3471,8 +3489,8 @@ export function createGameServerClient(
     send({ type: 'request_private_games_list' })
   }
 
-  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean): void {
-    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart })
+  function createPrivateRoom(stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs): void {
+    send({ type: 'create_private_room', stake, isLocked, waitMinutes, manualStart, humanTurnTimeoutMs })
   }
 
   function joinPrivateRoomSlot(privateRoomId: string, team: Team, slotIndex: 0 | 1): void {
