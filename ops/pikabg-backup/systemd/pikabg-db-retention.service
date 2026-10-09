@@ -1,0 +1,10 @@
+[Unit]
+Description=PikaBG Google Drive backup retention
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=RCLONE_CONFIG=/root/.config/rclone/rclone.conf
+ExecStart=/usr/local/sbin/pikabg-db-retention --execute

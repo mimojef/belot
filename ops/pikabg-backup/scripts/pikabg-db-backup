@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+DB="/var/www/belot-v2/server/database/data/belot-v2.sqlite"
+LOCAL_ROOT="/var/backups/pikabg-db"
+REMOTE_ROOT="pikabg-drive:PikaBG-Backups/database"
+
+exec 9>/var/lock/pikabg-db-backup.lock
+if ! flock -n 9; then
+    echo "[backup] Another backup is already running — skip."
+    exit 0
+fi
+
+STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+DAY="$(date -u +%Y-%m-%d)"
+
+mkdir -p "$LOCAL_ROOT"
+
+BASE="belot-v2-${STAMP}"
+SNAPSHOT="$LOCAL_ROOT/${BASE}.sqlite"
+ARCHIVE="$LOCAL_ROOT/${BASE}.sqlite.zst"
+SHA_FILE="$ARCHIVE.sha256"
+REMOTE_DIR="$REMOTE_ROOT/$DAY"
+
+cleanup() {
+    rm -f "$SNAPSHOT"
+}
+trap cleanup EXIT
+
+echo "[backup] START $STAMP"
+echo "[backup] source=$DB"
+
+if [ ! -s "$DB" ]; then
+    echo "[backup] ERROR: source database missing or empty"
+    exit 1
+fi
+
+echo
+echo "[backup] Health before:"
+curl -fsS http://127.0.0.1:3001/health >/dev/null \
+    && echo "[backup] health=OK" \
+    || echo "[backup] health=WARNING"
+
+echo
+echo "[backup] Creating live SQLite snapshot..."
+START="$(date +%s)"
+
+timeout 300s \
+    ionice -c2 -n7 \
+    nice -n 10 \
+    sqlite3 -bail -batch "$DB" <<SQL
+PRAGMA busy_timeout=10000;
+VACUUM INTO '$SNAPSHOT';
+SQL
+
+END="$(date +%s)"
+
+echo "[backup] snapshot_seconds=$((END-START))"
+echo "[backup] snapshot_bytes=$(stat -c %s "$SNAPSHOT")"
+
+echo
+echo "[backup] Checking SQLite integrity..."
+INTEGRITY="$(sqlite3 -bail -batch -readonly "$SNAPSHOT" 'PRAGMA integrity_check;')"
+if [ "$INTEGRITY" != "ok" ]; then
+    echo "[backup] ERROR: integrity_check=$INTEGRITY"
+    exit 1
+fi
+echo "[backup] integrity_check=ok"
+
+FK_COUNT="$(
+    sqlite3 -bail -batch -readonly "$SNAPSHOT" 'PRAGMA foreign_key_check;' |
+    wc -l
+)"
+if [ "$FK_COUNT" -ne 0 ]; then
+    echo "[backup] ERROR: foreign_key_violations=$FK_COUNT"
+    exit 1
+fi
+echo "[backup] foreign_key_violations=0"
+
+echo
+echo "[backup] Compressing with zstd..."
+START="$(date +%s)"
+
+zstd -q -3 -T2 "$SNAPSHOT" -o "$ARCHIVE"
+
+END="$(date +%s)"
+
+echo "[backup] compression_seconds=$((END-START))"
+echo "[backup] archive_bytes=$(stat -c %s "$ARCHIVE")"
+
+rm -f "$SNAPSHOT"
+
+echo
+echo "[backup] Creating SHA256..."
+(
+    cd "$LOCAL_ROOT"
+    sha256sum "$(basename "$ARCHIVE")" > "$(basename "$SHA_FILE")"
+)
+cat "$SHA_FILE"
+
+echo
+echo "[backup] Uploading to Google Drive..."
+rclone mkdir "$REMOTE_DIR"
+
+rclone copyto \
+    "$ARCHIVE" \
+    "$REMOTE_DIR/$(basename "$ARCHIVE")" \
+    --transfers 1 \
+    --checkers 2 \
+    --drive-chunk-size 64M \
+    --retries 5 \
+    --low-level-retries 10 \
+    --stats 30s \
+    --stats-one-line
+
+rclone copyto \
+    "$SHA_FILE" \
+    "$REMOTE_DIR/$(basename "$SHA_FILE")" \
+    --transfers 1 \
+    --retries 5
+
+echo
+echo "[backup] Verifying uploaded archive via MD5..."
+LOCAL_MD5="$(md5sum "$ARCHIVE" | awk '{print $1}')"
+REMOTE_MD5="$(
+    rclone md5sum "$REMOTE_DIR/$(basename "$ARCHIVE")" |
+    awk 'NR==1 {print $1}'
+)"
+
+echo "[backup] local_md5=$LOCAL_MD5"
+echo "[backup] remote_md5=$REMOTE_MD5"
+
+if [ -z "$REMOTE_MD5" ] || [ "$LOCAL_MD5" != "$REMOTE_MD5" ]; then
+    echo "[backup] ERROR: uploaded file checksum mismatch"
+    exit 1
+fi
+
+echo
+echo "[backup] Health after:"
+curl -fsS http://127.0.0.1:3001/health >/dev/null \
+    && echo "[backup] health=OK" \
+    || echo "[backup] health=WARNING"
+
+echo
+echo "[backup] Local retention: keeping last 24 hours..."
+find "$LOCAL_ROOT" -maxdepth 1 -type f \
+    \( -name 'belot-v2-*.sqlite.zst' -o -name 'belot-v2-*.sqlite.zst.sha256' \) \
+    -mmin +1440 -print -delete
+
+echo
+echo "[backup] SUCCESS"
+echo "[backup] local=$ARCHIVE"
+echo "[backup] remote=$REMOTE_DIR/$(basename "$ARCHIVE")"
+echo "[backup] completed=$(date -u +%FT%TZ)"

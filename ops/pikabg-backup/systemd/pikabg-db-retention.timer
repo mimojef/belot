@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PikaBG backup retention daily
+
+[Timer]
+OnCalendar=*-*-* 03:20:00
+Persistent=true
+AccuracySec=1min
+Unit=pikabg-db-retention.service
+
+[Install]
+WantedBy=timers.target

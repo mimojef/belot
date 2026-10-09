@@ -1,0 +1,124 @@
+#!/usr/bin/env python3
+
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone, timedelta
+
+REMOTE_ROOT = "pikabg-drive:PikaBG-Backups/database"
+EXECUTE = "--execute" in sys.argv
+
+pattern = re.compile(
+    r"^(?P<dir>.*?/)?belot-v2-(?P<stamp>\d{8}T\d{6}Z)\.sqlite\.zst$"
+)
+
+def run(*args, check=True):
+    return subprocess.run(
+        args,
+        text=True,
+        capture_output=True,
+        check=check,
+    )
+
+result = run(
+    "/usr/bin/rclone",
+    "lsf",
+    REMOTE_ROOT,
+    "--recursive",
+    "--files-only",
+)
+
+archives = []
+
+for raw in result.stdout.splitlines():
+    path = raw.strip()
+    m = pattern.match(path)
+    if not m:
+        continue
+
+    ts = datetime.strptime(
+        m.group("stamp"),
+        "%Y%m%dT%H%M%SZ",
+    ).replace(tzinfo=timezone.utc)
+
+    archives.append((ts, path))
+
+archives.sort(reverse=True)
+
+now = datetime.now(timezone.utc)
+
+keep = set()
+delete = set()
+hour_bucket_seen = set()
+day_bucket_seen = set()
+
+for ts, path in archives:
+    age = now - ts
+
+    if age <= timedelta(hours=24):
+        keep.add(path)
+        continue
+
+    if age <= timedelta(days=14):
+        bucket = ts.strftime("%Y-%m-%dT%H")
+        if bucket not in hour_bucket_seen:
+            hour_bucket_seen.add(bucket)
+            keep.add(path)
+        else:
+            delete.add(path)
+        continue
+
+    if age <= timedelta(days=90):
+        bucket = ts.strftime("%Y-%m-%d")
+        if bucket not in day_bucket_seen:
+            day_bucket_seen.add(bucket)
+            keep.add(path)
+        else:
+            delete.add(path)
+        continue
+
+    delete.add(path)
+
+print(f"[retention] mode={'EXECUTE' if EXECUTE else 'DRY-RUN'}")
+print(f"[retention] now={now.isoformat()}")
+print(f"[retention] archives={len(archives)}")
+print(f"[retention] keep={len(keep)}")
+print(f"[retention] delete={len(delete)}")
+
+print()
+print("=== KEEP ===")
+for path in sorted(keep):
+    print(f"KEEP   {path}")
+
+print()
+print("=== DELETE ===")
+for path in sorted(delete):
+    print(f"DELETE {path}")
+    print(f"DELETE {path}.sha256")
+
+if not EXECUTE:
+    print()
+    print("[retention] DRY-RUN ONLY — nothing deleted.")
+    sys.exit(0)
+
+for path in sorted(delete):
+    remote_archive = f"{REMOTE_ROOT}/{path}"
+    remote_sha = f"{remote_archive}.sha256"
+
+    print(f"[retention] deleting {path}")
+
+    run(
+        "/usr/bin/rclone",
+        "deletefile",
+        remote_archive,
+    )
+
+    run(
+        "/usr/bin/rclone",
+        "deletefile",
+        remote_sha,
+        check=False,
+    )
+
+print()
+print("[retention] COMPLETE")
