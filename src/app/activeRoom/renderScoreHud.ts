@@ -8,6 +8,7 @@ import { escapeHtml } from './activeRoomShared'
 import { getVisualSeatForLocalPerspective } from './cutting/cuttingSeatLayout'
 import { formatBidType, getBidMultiplierLabel } from './winningBidHelpers'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
+import { getActiveSpectatorTeamLabels } from './spectatorTeamLabels'
 
 const SCORE_HUD_INTERNAL_OFFSET = 18
 const SCORE_HUD_WIDTH = 300
@@ -58,7 +59,7 @@ function isTeamASeat(seat: Seat): boolean {
 
 function formatSeatForLocalPerspective(seat: Seat | null, localSeat: Seat, controlledSeat: Seat | null): string {
   if (seat === null) return '—'
-  if (controlledSeat === null) return isTeamASeat(seat) ? 'ОТБОР А' : 'ОТБОР Б'
+  if (controlledSeat === null) return isTeamASeat(seat) ? getActiveSpectatorTeamLabels().teamA : getActiveSpectatorTeamLabels().teamB
   const visualSeat = getVisualSeatForLocalPerspective(seat, localSeat)
 
   if (visualSeat === 'bottom') return 'ТИ'
@@ -169,9 +170,9 @@ function getScoreColumns(game: RoomGameSnapshot, localSeat: Seat, controlledSeat
 } {
   if (controlledSeat === null) {
     return {
-      leftLabel: 'ОТБОР А',
+      leftLabel: getActiveSpectatorTeamLabels().teamA,
       leftScore: game.score.match.teamA,
-      rightLabel: 'ОТБОР Б',
+      rightLabel: getActiveSpectatorTeamLabels().teamB,
       rightScore: game.score.match.teamB,
     }
   }

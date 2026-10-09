@@ -57,6 +57,8 @@
     "check:private-games-lobby-tabs": "npx tsx scripts/checkPrivateGamesLobbyTabs.ts",
     "check:belot-spectator-watch-vip-flow": "npx tsx scripts/checkBelotSpectatorWatchVipFlow.ts",
     "check:belot-spectator-active-room-view": "npx tsx scripts/checkBelotSpectatorActiveRoomView.ts",
+    "check:tournament-matches-layout": "npx tsx scripts/checkTournamentMatchesViewLayout.ts",
+    "check:tournament-matches-browser-e2e": "npx tsx scripts/checkTournamentMatchesBrowserE2E.ts",
     "check:topic-message-self-delete-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageSelfDeleteClient.ts --project-root=.",
     "check:topic-message-edit-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicMessageEditClient.ts --project-root=.",
     "check:topic-unread-seen-client": "node server/node_modules/tsx/dist/cli.mjs scripts/checkTopicUnreadSeenClient.ts --project-root=.",

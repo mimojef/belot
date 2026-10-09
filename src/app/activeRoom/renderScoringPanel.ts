@@ -16,6 +16,7 @@ import {
 import { renderScoreHud } from './renderScoreHud'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import { playGameSound } from '../audio/gameSoundSettings'
+import { getActiveSpectatorTeamLabels } from './spectatorTeamLabels'
 
 const SCORING_PANEL_MAX_WIDTH_PX = 730
 
@@ -408,7 +409,7 @@ function getBidOwnerLabel(
 
   // Phase 5A: spectator няма local team — authoritative отбор на обявилия.
   if (controlledSeat === null) {
-    return isTeamASeat(winningBid.seat) ? 'ОТБОР А' : 'ОТБОР Б'
+    return isTeamASeat(winningBid.seat) ? getActiveSpectatorTeamLabels().teamA : getActiveSpectatorTeamLabels().teamB
   }
 
   return isTeamASeat(winningBid.seat) === isTeamASeat(localSeat)
@@ -841,7 +842,7 @@ function renderScoringPanelHtml(
 
   const localSeat = getScoringColumnAnchorSeat(perspectiveSeat, controlledSeat)
   const columnLabels = controlledSeat === null
-    ? { left: 'ОТБОР А', right: 'ОТБОР Б' }
+    ? { left: getActiveSpectatorTeamLabels().teamA, right: getActiveSpectatorTeamLabels().teamB }
     : { left: 'НИЕ', right: 'ВИЕ' }
   const winningBid = scoring.winningBid ?? fallbackWinningBid
   const bidIcon = resolveBidIcon(winningBid)

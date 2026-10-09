@@ -331,6 +331,9 @@ export type TournamentDetailSnapshot = TournamentSummarySnapshot & {
   // доказателство (§"КРИТИЧНО РАЗГРАНИЧЕНИЕ" в допълнението) — НЕ derivable
   // от myActiveMatch/myInterRoundWaiting самостоятелно.
   viewerHasUnresolvedBotReplacement: boolean
+  // "Турнирни срещи" (Виж игрите) — optional за съвместимост със стар сървър.
+  matchesLiveToken?: string | null
+  belotSpectatingEnabled?: boolean
 }
 
 export type TournamentCreateInput = {
@@ -1037,6 +1040,10 @@ export type ClientMessage =
   // join_room/resume_room/leave_active_room — само тези два типа.
   | { type: 'watch_belot_room'; roomId: string }
   | { type: 'unwatch_belot_room'; roomId: string }
+  // "Турнирни срещи" — live резултати за ЕДИН турнир; token идва от
+  // TournamentDetailSnapshot.matchesLiveToken.
+  | { type: 'subscribe_tournament_matches'; tournamentId: string; token: string }
+  | { type: 'unsubscribe_tournament_matches'; tournamentId: string }
   | {
       // "Играещи"/"Приключили" табове за /games/ludo — виж LudoGamesListMessage.
       type: 'request_ludo_games_list'
@@ -2415,6 +2422,22 @@ export type TournamentFeederScoreProgressMessage = {
   status: 'in_progress'
 }
 
+// "Турнирни срещи" (Виж игрите) — mirror на server/src/protocol/messageTypes.ts.
+// Пристигат само докато клиентът е абониран (subscribe_tournament_matches).
+export type TournamentMatchLiveScoreMessage = {
+  type: 'tournament_match_live_score'
+  tournamentId: string
+  matchId: string
+  roomId: string
+  scoreTeamA: number
+  scoreTeamB: number
+}
+
+export type TournamentMatchesChangedMessage = {
+  type: 'tournament_matches_changed'
+  tournamentId: string
+}
+
 // Server-initiated entry-fee refund notice (§4/§5 в task spec-а) — само за
 // creator cancellation / fill-expiry auto-cancel refund-и до реално
 // refund-нати online профили. Debit известията (join/partner invite) идват
@@ -2946,6 +2969,8 @@ export type ServerMessage =
   | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
+  | TournamentMatchLiveScoreMessage
+  | TournamentMatchesChangedMessage
   | TournamentEconomyNoticeMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageEventMessage
@@ -3111,6 +3136,8 @@ export type GameServerClient = {
   unwatchLudoMatch: (matchId: string) => void
   watchBelotRoom: (roomId: string) => void
   unwatchBelotRoom: (roomId: string) => void
+  subscribeTournamentMatches: (tournamentId: string, token: string) => void
+  unsubscribeTournamentMatches: (tournamentId: string) => void
   requestPrivateGamesList: () => void
   createPrivateRoom: (stake: MatchStake, isLocked: boolean, waitMinutes: 5 | 10 | 15 | 30, manualStart: boolean, humanTurnTimeoutMs: HumanTurnTimeoutMs) => void
   joinPrivateRoomSlot: (privateRoomId: string, team: Team, slotIndex: 0 | 1) => void
@@ -3518,6 +3545,12 @@ export function createGameServerClient(
   // leave_active_room; spectator няма reconnectToken (виж server-а).
   function watchBelotRoom(roomId: string): void { send({ type: 'watch_belot_room', roomId }) }
   function unwatchBelotRoom(roomId: string): void { send({ type: 'unwatch_belot_room', roomId }) }
+  function subscribeTournamentMatches(tournamentId: string, token: string): void {
+    send({ type: 'subscribe_tournament_matches', tournamentId, token })
+  }
+  function unsubscribeTournamentMatches(tournamentId: string): void {
+    send({ type: 'unsubscribe_tournament_matches', tournamentId })
+  }
 
   function requestPrivateGamesList(): void {
     send({ type: 'request_private_games_list' })
@@ -3691,6 +3724,8 @@ export function createGameServerClient(
     unwatchLudoMatch,
     watchBelotRoom,
     unwatchBelotRoom,
+    subscribeTournamentMatches,
+    unsubscribeTournamentMatches,
     requestPrivateGamesList,
     createPrivateRoom,
     joinPrivateRoomSlot,

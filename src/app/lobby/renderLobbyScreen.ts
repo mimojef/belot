@@ -1016,6 +1016,8 @@ export type LobbyScreenState = {
   tournamentCreateBusy: boolean
   tournamentCreateErrorText: string | null
   tournamentDetailId: string | null
+  /** "Турнирни срещи" (Виж игрите) под-изглед на tournament-detail екрана. */
+  tournamentMatchesViewOpen: boolean
   tournamentDetailLoading: boolean
   tournamentDetailErrorText: string | null
   tournamentDetail: TournamentDetailSnapshot | null
@@ -1229,6 +1231,9 @@ export type RenderLobbyScreenOptions = {
   onTopicMessageAuthorClick: (profileId: string, displayName: string) => void
   onTopicMessagePersonalClick: (profileId: string, displayName: string) => void
   onTournamentHowItWorksOpen: () => void
+  onTournamentMatchesOpen: () => void
+  onTournamentMatchesBack: () => void
+  onWatchTournamentMatchClick: (roomId: string) => void
   onTournamentsFilterChange: (filter: 'all' | 'mine') => void
   onTournamentCreatePopupOpen: () => void
   onTournamentCreatePopupClose: () => void
@@ -17200,6 +17205,18 @@ export function renderLobbyScreen(
 
   root.querySelectorAll<HTMLButtonElement>('[data-tournament-how-it-works-open="1"]')
     .forEach((btn) => btn.addEventListener('click', options.onTournamentHowItWorksOpen))
+
+  // "Турнирни срещи" (Виж игрите)
+  root.querySelectorAll<HTMLButtonElement>('[data-tournament-matches-open="1"]')
+    .forEach((btn) => btn.addEventListener('click', options.onTournamentMatchesOpen))
+  root.querySelector<HTMLButtonElement>('[data-tournament-matches-back="1"]')
+    ?.addEventListener('click', options.onTournamentMatchesBack)
+  root.querySelectorAll<HTMLButtonElement>('[data-watch-tournament-match]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const roomId = btn.getAttribute('data-watch-tournament-match')
+      if (roomId) options.onWatchTournamentMatchClick(roomId)
+    })
+  })
 
   root.querySelectorAll<HTMLButtonElement>('[data-tournament-how-it-works-back="1"]')
     .forEach((btn) => btn.addEventListener('click', options.onTournamentsClick))

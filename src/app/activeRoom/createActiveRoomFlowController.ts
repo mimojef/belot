@@ -152,6 +152,7 @@ import {
   type ProfileAccessBlockPopupState,
 } from '../../ui/overlays/renderProfileAccessBlockPopup'
 import { isProfileAccessBlockCode, precheckGiftRecipient, setGiftPrecheckPending } from '../gifts/giftRecipientPrecheck'
+import { syncActiveSpectatorTeamLabels } from './spectatorTeamLabels'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -6325,6 +6326,7 @@ export function createActiveRoomFlowController(
       activeTableGiftOverlays: {},
     }
     applyActiveTableGiftsFromSnapshot(snapshot.activeTableGifts)
+    syncActiveSpectatorTeamLabels({ roomId, isTournamentMatchOrigin: snapshot.isTournamentMatchOrigin })
     syncSpectatorFinalBoard()
 
     scheduleActiveRoomRender()
@@ -6360,6 +6362,7 @@ export function createActiveRoomFlowController(
     if (snapshot.stakeAmount !== null && snapshot.stakeAmount > 0) {
       activeRoomState.stake = snapshot.stakeAmount as MatchStake
     }
+    syncActiveSpectatorTeamLabels({ roomId: snapshot.roomId, isTournamentMatchOrigin: snapshot.isTournamentMatchOrigin })
     syncSpectatorFinalBoard()
 
     scheduleActiveRoomRender(
@@ -6376,8 +6379,9 @@ export function createActiveRoomFlowController(
   // брифа). Optimistic/immediate — не чака server ACK.
   function exitSpectatorView(): void {
     // Phase 5B: всеки spectator teardown (Изход, ended/denied, session-lost)
-    // отменя final-board timer-а.
+    // отменя final-board timer-а; турнирните етикети се връщат към default.
     clearSpectatorFinalBoard()
+    syncActiveSpectatorTeamLabels(null)
     if (!activeRoomState || activeRoomState.viewerRole !== 'spectator') {
       return
     }

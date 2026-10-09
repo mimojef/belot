@@ -34,8 +34,50 @@ const TOURNAMENT_STATUS_LABELS_BG: Record<TournamentStatus, string> = {
   failed: 'Технически проблем',
 }
 
-export function getTournamentStatusLabel(status: TournamentStatus): string {
+const TOURNAMENT_ACTIVE_ROUND_LABELS_BG: Record<TournamentRoundType, string> = {
+  round_of_16: 'Осминафинали',
+  quarterfinal: 'Четвъртфинали',
+  semifinal: 'Полуфинали',
+  final: 'Финал',
+}
+
+// activeRoundType е само за ПОКАЗВАНЕ: вътрешният статус
+// 'semifinal_in_progress' е генеричен маркер "bracket в ход" (покрива и
+// осмина-/четвъртфиналите), затова надписът за течащ турнир следва реалния
+// активен кръг. State machine-ът не се променя.
+export function getTournamentStatusLabel(status: TournamentStatus, activeRoundType: TournamentRoundType | null = null): string {
+  if ((status === 'semifinal_in_progress' || status === 'final_in_progress') && activeRoundType !== null) {
+    return TOURNAMENT_ACTIVE_ROUND_LABELS_BG[activeRoundType]
+  }
   return TOURNAMENT_STATUS_LABELS_BG[status] ?? status
+}
+
+const ROUND_TYPE_ORDER: readonly TournamentRoundType[] = ['round_of_16', 'quarterfinal', 'semifinal', 'final']
+
+/**
+ * Реалният текущ кръг: най-ранният кръг с още незавършена среща (per-pair
+ * progression позволява следващ кръг да започне, докато друга двойка още
+ * играе); ако всички съществуващи срещи са завършени — последният кръг.
+ * null, когато още няма срещи.
+ */
+export function resolveActiveTournamentRoundType(
+  rounds: readonly TournamentRoundRecord[],
+  matches: readonly TournamentMatchRecord[],
+): TournamentRoundType | null {
+  const roundTypeById = new Map(rounds.map((round) => [round.roundId, round.roundType]))
+  let earliestActive: TournamentRoundType | null = null
+  let latestExisting: TournamentRoundType | null = null
+  for (const match of matches) {
+    const roundType = roundTypeById.get(match.roundId)
+    if (roundType === undefined) continue
+    const order = ROUND_TYPE_ORDER.indexOf(roundType)
+    if (latestExisting === null || order > ROUND_TYPE_ORDER.indexOf(latestExisting)) latestExisting = roundType
+    const isFinished = match.status === 'completed' || match.status === 'walkover' || match.status === 'cancelled'
+    if (!isFinished && (earliestActive === null || order < ROUND_TYPE_ORDER.indexOf(earliestActive))) {
+      earliestActive = roundType
+    }
+  }
+  return earliestActive ?? latestExisting
 }
 
 export type TournamentCreatorDto = {
@@ -225,6 +267,14 @@ export type TournamentDetailDto = TournamentSummaryDto & {
   // само КЪДЕ е участникът в турнира, не дали изобщо е бил заместван).
   // false за viewer без сесия.
   viewerHasUnresolvedBotReplacement: boolean
+  // "Турнирни срещи" (Виж игрите) — токен за subscribe_tournament_matches
+  // (виж tournamentMatchesViewerRegistry.ts). Издава се само тук, след HTTP
+  // access проверките; null, когато live абонаментът не е приложим.
+  matchesLiveToken: string | null
+  // Mirror на isBelotSpectatorFeatureEnabled() — дали "Гледай" изобщо да се
+  // показва за активните срещи (VIP и останалите проверки остават на сървъра
+  // при watch_belot_room).
+  belotSpectatingEnabled: boolean
 }
 
 // Generic across every round transition (round_of_16->quarterfinal,
@@ -370,6 +420,8 @@ export type ToTournamentSummaryDtoInput = {
   // DTO слой умишлено няма достъп до accounts таблицата, само получава
   // резултата. Виж §"КОГА Е ПОЗВОЛЕНО" в task spec-а.
   viewerIsAdmin?: boolean
+  // Реалният текущ кръг (resolveActiveTournamentRoundType) — само за statusLabel.
+  activeRoundType?: TournamentRoundType | null
 }
 
 function computeViewerParticipation(input: ToTournamentSummaryDtoInput): TournamentViewerParticipationDto {
@@ -434,7 +486,7 @@ export function toTournamentSummaryDto(input: ToTournamentSummaryDtoInput): Tour
     visibility: tournament.visibility,
     requiresPassword: tournament.visibility === 'password',
     status: tournament.status,
-    statusLabel: getTournamentStatusLabel(tournament.status),
+    statusLabel: getTournamentStatusLabel(tournament.status, input.activeRoundType ?? null),
     championTeamId: tournament.championTeamId,
     runnerUpTeamId: tournament.runnerUpTeamId,
     settlementState: tournament.settlementState,
@@ -475,6 +527,8 @@ export function toTournamentDetailDto(input: ToTournamentSummaryDtoInput): Tourn
     incomingPartnerInvite: null,
     outgoingPartnerInvite: null,
     viewerHasUnresolvedBotReplacement: false,
+    matchesLiveToken: null,
+    belotSpectatingEnabled: false,
   }
 }
 

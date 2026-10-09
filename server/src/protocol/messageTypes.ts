@@ -56,6 +56,27 @@ export type TournamentFeederScoreProgressMessage = {
   status: 'in_progress'
 }
 
+// "Турнирни срещи" (Виж игрите) — live push само до connections, които
+// изрично следят срещите на ТОЗИ турнир (subscribe_tournament_matches).
+// Резултатът е authoritative room score.match (същият източник като
+// liveScoreTeamA/B в tournament detail DTO-то) и се изпраща само при реална
+// промяна. Lifecycle промените (старт/край на мач, нов кръг, край на турнира)
+// идват като tournament_matches_changed — клиентът презарежда detail-а по
+// HTTP (със същите access проверки), вместо сървърът да дублира DTO-то тук.
+export type TournamentMatchLiveScoreMessage = {
+  type: 'tournament_match_live_score'
+  tournamentId: string
+  matchId: string
+  roomId: string
+  scoreTeamA: number
+  scoreTeamB: number
+}
+
+export type TournamentMatchesChangedMessage = {
+  type: 'tournament_matches_changed'
+  tournamentId: string
+}
+
 // Server-initiated entry-fee refund notice (§4 в task spec-а) — изпраща се
 // само до реално refund-нати online профили при creator cancellation или
 // fill-expiry auto-cancel. Debit-нотификациите (join/partner invite create
@@ -280,6 +301,13 @@ export type ClientMessage =
   // participant action. Една connection гледа максимум ЕДНА маса.
   | { type: 'watch_belot_room'; roomId: RoomId }
   | { type: 'unwatch_belot_room'; roomId: RoomId }
+  // "Турнирни срещи" (Виж игрите) — read-only live subscription към
+  // резултатите на срещите в ЕДИН турнир. token идва от tournament detail
+  // DTO-то (matchesLiveToken) — само клиент, минал HTTP access проверките
+  // (beta gate, парола), може да се абонира. Една connection следи максимум
+  // един турнир.
+  | { type: 'subscribe_tournament_matches'; tournamentId: string; token: string }
+  | { type: 'unsubscribe_tournament_matches'; tournamentId: string }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -1663,6 +1691,8 @@ export type ServerMessage =
   | TournamentActiveParticipationMessage
   | TournamentFeederMatchCompletedMessage
   | TournamentFeederScoreProgressMessage
+  | TournamentMatchLiveScoreMessage
+  | TournamentMatchesChangedMessage
   | TournamentEconomyNoticeMessage
   | LobbyChatHistoryMessage
   | LobbyChatMessageReceivedMessage

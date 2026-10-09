@@ -179,6 +179,7 @@ import {
   findBlockingMatchForBracketSlot,
   toTournamentPartnerInviteDto,
   toTournamentDetailDto,
+  resolveActiveTournamentRoundType,
   toTournamentSummaryDto,
   type TournamentPartnerCandidateDto,
   type TournamentSummaryDto,
@@ -235,6 +236,14 @@ import { broadcastBelotSpectatorPublicEvent, broadcastBelotSpectatorSnapshot } f
 import { buildBelotRoomSpectatorsMessage } from './core/buildBelotRoomSpectatorsMessage.js'
 import { evaluateBelotSpectatorWatchEligibility } from './core/evaluateBelotSpectatorWatchEligibility.js'
 import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag.js'
+import {
+  createTournamentMatchesLiveTokenSigner,
+  createTournamentMatchesViewerRegistry,
+} from './tournament/tournamentMatchesViewerRegistry.js'
+import {
+  resolveTournamentMatchSpectatorFacts,
+  type TournamentMatchSpectatorFacts,
+} from './tournament/tournamentMatchSpectatorFacts.js'
 import { createSpectatorRoomSnapshotMessage } from './protocol/createRoomSnapshotMessage.js'
 import { broadcastToRoomConnections } from './core/broadcastToRoomConnections.js'
 import { resolveTableGiftParticipants } from './core/resolveTableGiftParticipants.js'
@@ -255,7 +264,7 @@ import { handleDisconnect } from './core/handleDisconnect.js'
 import { handleJoinRoom } from './core/handleJoinRoom.js'
 import { markHumanParticipantDisconnected } from './core/markHumanParticipantDisconnected.js'
 import { rawDataToText } from './core/rawDataToText.js'
-import { sendJsonMessage } from './core/sendJsonMessage.js'
+import { sendJsonMessage, sendSerializedJsonMessage } from './core/sendJsonMessage.js'
 import type {
   ConnectionId,
   PlayerPublicProfileSnapshot,
@@ -384,6 +393,8 @@ import type {
   PrivateRoomSnapshot,
   PrivateGamesListMessage,
   PrivateGameScoreUpdatedMessage,
+  TournamentMatchLiveScoreMessage,
+  TournamentMatchesChangedMessage,
   PrivateRoomMatchSnapshot,
   LudoGamesListMessage,
   LudoRoomMatchSnapshot,
@@ -758,6 +769,8 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'unwatch_ludo_match':
     case 'watch_belot_room':
     case 'unwatch_belot_room':
+    case 'subscribe_tournament_matches':
+    case 'unsubscribe_tournament_matches':
     case 'add_bot_to_private_room_team':
     case 'remove_bot_from_private_room_team':
     case 'start_private_room':
@@ -3775,7 +3788,68 @@ function commitServerRoomWithSnapshot(
   // безопасно е да се вика тук без риск от spam при всяка карта (виж
   // notifyFeederScoreProgress коментара в tournamentCoordinator.ts).
   tournamentCoordinator?.notifyFeederScoreProgress(room)
+  notifyTournamentMatchesViewersScore(room)
   return commitServerRoomReplacement(room, currentServerState)
+}
+
+// "Турнирни срещи" — live резултат към абонатите на турнира. Евтин no-op за
+// нетурнирни стаи и за турнири без абонати; push само при реална промяна на
+// authoritative score.match (не при всяка карта). Източникът е същият като
+// liveScoreTeamA/B в buildTournamentDetailDto, затова списъкът никога не се
+// разминава с масата.
+function notifyTournamentMatchesViewersScore(room: ServerRoom): void {
+  if (!isTournamentMatchRoom(room)) return
+  const tournamentId = room.config.tournamentId
+  const matchId = room.config.tournamentMatchId
+  if (!tournamentId || !matchId) return
+  if (!tournamentMatchesViewerRegistry.hasSubscribers(tournamentId)) return
+  const authState = room.game.authoritativeState
+  if (authState === null || 'kind' in authState || authState.matchEnded !== null) return
+
+  const scoreTeamA = authState.score.match.teamA
+  const scoreTeamB = authState.score.match.teamB
+  const signature = `${scoreTeamA}:${scoreTeamB}`
+  if (lastNotifiedTournamentMatchesScoreByRoomId.get(room.id) === signature) return
+  lastNotifiedTournamentMatchesScoreByRoomId.set(room.id, signature)
+
+  sendToTournamentMatchesViewers(tournamentId, {
+    type: 'tournament_match_live_score',
+    tournamentId,
+    matchId,
+    roomId: room.id,
+    scoreTeamA,
+    scoreTeamB,
+  })
+}
+
+// Само connections извън игра получават push-а (списъкът се вижда само в
+// лобито); затворени/изчезнали connections се чистят от registry-то.
+function sendToTournamentMatchesViewers(
+  tournamentId: string,
+  message: TournamentMatchLiveScoreMessage | TournamentMatchesChangedMessage,
+): void {
+  let serialized: string | null = null
+  for (const connectionId of tournamentMatchesViewerRegistry.listSubscriberConnectionIds(tournamentId)) {
+    const connection = getConnectionById(serverState, connectionId)
+    const socket = socketRegistry.get(connectionId)
+    if (connection === null || socket === undefined) {
+      tournamentMatchesViewerRegistry.unsubscribe(connectionId)
+      continue
+    }
+    if (connection.status !== 'connected' || connection.currentRoomId !== null) continue
+    if (socket.readyState !== WebSocket.OPEN) continue
+    serialized ??= JSON.stringify(message)
+    try {
+      sendSerializedJsonMessage(socket, serialized, message.type)
+    } catch (error) {
+      console.error(`[tournament-matches] push failed connection=${connectionId}`, sanitizeErrorMessage(error))
+    }
+  }
+}
+
+function broadcastTournamentMatchesChanged(tournamentId: string): void {
+  if (!tournamentMatchesViewerRegistry.hasSubscribers(tournamentId)) return
+  sendToTournamentMatchesViewers(tournamentId, { type: 'tournament_matches_changed', tournamentId })
 }
 
 function removeCommittedServerRoom(
@@ -3789,6 +3863,7 @@ function removeCommittedServerRoom(
   // cleanup/abort/force-remove пътища минават оттук): известява и чисти
   // spectators на премахнатата стая.
   endBelotSpectatorsForRoom(roomId, 'room_removed')
+  lastNotifiedTournamentMatchesScoreByRoomId.delete(roomId)
 
   const nextState: ServerState = {
     ...currentServerState,
@@ -3808,6 +3883,15 @@ reconcileLegacySoloTournamentEntriesOnBoot()
 // spectator subscriptions (виж core/belotSpectatorRegistry.ts). Деклариран
 // преди първото възможно извикване на removeCommittedServerRoom.
 const belotSpectatorRegistry = createBelotSpectatorRegistry()
+
+// "Турнирни срещи" (Виж игрите) — in-memory live абонаменти за резултатите
+// на срещите в турнир (виж tournament/tournamentMatchesViewerRegistry.ts).
+// Деклариран тук по същата причина като belotSpectatorRegistry по-горе.
+const tournamentMatchesViewerRegistry = createTournamentMatchesViewerRegistry()
+const tournamentMatchesLiveTokenSigner = createTournamentMatchesLiveTokenSigner()
+// Dedup по roomId — push само при реална промяна на score.match (mirror на
+// lastNotifiedPrivateGameScoreByRoomId). Чисти се при room removal.
+const lastNotifiedTournamentMatchesScoreByRoomId = new Map<string, string>()
 
 let serverState: ServerState = loadPersistedServerState()
 const roomRevisionRegistry = createRoomRevisionRegistry()
@@ -4713,6 +4797,26 @@ function hasProfileActiveGameCommitment(profileId: string): boolean {
     findActiveBelotCommitment(profileId) !== null ||
     findActiveLudoCommitment(profileId) !== null
   )
+}
+
+// "Турнирни срещи" — persisted факти за watch_belot_room към турнирна стая
+// (виж tournamentMatch в evaluateBelotSpectatorWatchEligibility.ts и
+// tournament/tournamentMatchSpectatorFacts.ts). Чете само DB, извиква се
+// единствено при explicit watch, не при всеки tick.
+function resolveTournamentSpectatorFacts(room: ServerRoom, profileId: string): TournamentMatchSpectatorFacts | null {
+  const tournamentId = room.config.tournamentId ?? null
+  if (tournamentId === null) return null
+  const otherActiveTournamentId = tournamentCoordinator?.getActiveTournamentIdForProfile(profileId) ?? null
+  return resolveTournamentMatchSpectatorFacts({
+    room,
+    profileId,
+    tournament: tournamentStore.getTournamentById(tournamentId),
+    matches: tournamentStore.getMatchesForTournament(tournamentId),
+    entries: tournamentStore.getEntriesForTournament(tournamentId),
+    otherActiveTournamentStatus: otherActiveTournamentId !== null && otherActiveTournamentId !== tournamentId
+      ? tournamentStore.getTournamentById(otherActiveTournamentId)?.status ?? null
+      : null,
+  })
 }
 
 function sendBelotSpectateEnded(connectionId: ConnectionId, roomId: string, reason: BelotSpectateEndedReason): void {
@@ -13939,7 +14043,18 @@ function buildTournamentSummaryDto(
     viewerEntryStatus: viewerEntry?.status ?? null,
     viewerEntryJoinedAs: viewerEntry?.joinedAs ?? null,
     viewerIsAdmin: isTournamentModerationAdminProfile(viewerProfileId),
+    activeRoundType: resolveActiveRoundTypeForLabel(tournament),
   })
+}
+
+// Надписът на течащ турнир следва реалния кръг (виж getTournamentStatusLabel);
+// rounds/matches се четат само за турнири в ход.
+function resolveActiveRoundTypeForLabel(tournament: TournamentRecord): TournamentRoundType | null {
+  if (tournament.status !== 'semifinal_in_progress' && tournament.status !== 'final_in_progress') return null
+  return resolveActiveTournamentRoundType(
+    tournamentStore.getRoundsForTournament(tournament.tournamentId),
+    tournamentStore.getMatchesForTournament(tournament.tournamentId),
+  )
 }
 
 function isTournamentRosterEntryStatus(status: TournamentEntryStatus): boolean {
@@ -14029,6 +14144,7 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     viewerEntryStatus: viewerEntry?.status ?? null,
     viewerEntryJoinedAs: viewerEntry?.joinedAs ?? null,
     viewerIsAdmin: isTournamentModerationAdminProfile(viewerProfileId),
+    activeRoundType: resolveActiveTournamentRoundType(rounds, matches),
   })
   const inviteToDto = (invite: NonNullable<typeof incomingPartnerInvite>) => toTournamentPartnerInviteDto({
     invite,
@@ -14227,6 +14343,11 @@ function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId:
     incomingPartnerInvite: incomingPartnerInvite ? inviteToDto(incomingPartnerInvite) : null,
     outgoingPartnerInvite: outgoingPartnerInvite ? inviteToDto(outgoingPartnerInvite) : null,
     viewerHasUnresolvedBotReplacement,
+    // "Турнирни срещи" — buildTournamentDetailDto се вика само след като
+    // caller-ът е приложил access проверките, затова токенът е доказателство
+    // за достъп и за WS абонамента (виж tournamentMatchesViewerRegistry.ts).
+    matchesLiveToken: tournamentMatchesLiveTokenSigner.sign(tournament.tournamentId),
+    belotSpectatingEnabled: isBelotSpectatorFeatureEnabled(),
   }
 }
 
@@ -23230,6 +23351,10 @@ wsServer.on('connection', (socket, request) => {
           profileWatchedRoomIds: profileSpectatorConnectionIds
             .map((spectatorConnectionId) => belotSpectatorRegistry.getWatchedRoomId(spectatorConnectionId))
             .filter((watchedRoomId): watchedRoomId is string => watchedRoomId !== null),
+          tournamentMatch:
+            featureEnabled && profileId !== null && room !== null && isTournamentMatchRoom(room)
+              ? resolveTournamentSpectatorFacts(room, profileId)
+              : null,
         })
 
         if (!eligibility.ok || room === null) {
@@ -23274,6 +23399,22 @@ wsServer.on('connection', (socket, request) => {
         if (belotSpectatorRegistry.getWatchedRoomId(connection.id) === message.roomId) {
           endBelotSpectatingForConnection(connection.id, 'unwatched', true)
         }
+        return
+      }
+
+      // "Турнирни срещи" (Виж игрите) — read-only live абонамент. Токенът
+      // доказва, че клиентът е получил tournament detail-а през HTTP (където
+      // са beta gate-ът и паролата) — тук не се дублират тези проверки.
+      // Невалиден токен (напр. след server restart) тихо се игнорира:
+      // клиентът презарежда detail-а при reconnect и се абонира наново.
+      if (message.type === 'subscribe_tournament_matches') {
+        if (!tournamentMatchesLiveTokenSigner.verify(message.tournamentId, message.token)) return
+        tournamentMatchesViewerRegistry.subscribe(connection.id, message.tournamentId)
+        return
+      }
+
+      if (message.type === 'unsubscribe_tournament_matches') {
+        tournamentMatchesViewerRegistry.unsubscribe(connection.id, message.tournamentId)
         return
       }
 
@@ -25038,6 +25179,7 @@ wsServer.on('connection', (socket, request) => {
     lobbyChatSubscriberConnectionIds.delete(connection.id)
     adCampaignManagementSubscriberConnectionIds.delete(connection.id)
     topicsDirectorySubscriberConnectionIds.delete(connection.id)
+    tournamentMatchesViewerRegistry.unsubscribe(connection.id)
 
     const disconnectedTopicId = topicMessageSubscriberTopicIdByConnectionId.get(connection.id)
     if (disconnectedTopicId !== undefined) {
@@ -25426,6 +25568,9 @@ try {
           ...update,
         })
       }
+    },
+    onMatchesChanged: (tournamentId) => {
+      broadcastTournamentMatchesChanged(tournamentId)
     },
     logError: (message, error) => console.error(message, sanitizeErrorMessage(error)),
     onRoundStarted: () => {

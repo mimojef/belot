@@ -178,6 +178,11 @@ type TournamentCoordinatorDeps = {
   // е този, който гледа в момента (сравнява по matchId).
   notifyFeederMatchCompleted: (profileIds: ProfileId[], update: TournamentFeederMatchUpdate) => void
   notifyFeederScoreProgress: (profileIds: ProfileId[], update: TournamentFeederProgressUpdate) => void
+  // "Турнирни срещи" (Виж игрите) — информативен hook при промяна в
+  // списъка със срещи на турнира (мач стартира, мач завършва/нов кръг,
+  // турнирът е settle-нат). Само сигнал за read-only viewers да презаредят
+  // detail-а; никога не влияе на турнирната логика (грешките се поглъщат).
+  onMatchesChanged?: (tournamentId: TournamentId) => void
   isConnectionAttached: (input: {
     profileId: ProfileId
     connectionId: ConnectionId
@@ -902,6 +907,15 @@ export async function createTournamentCoordinator(
     insertEventStatement.run(randomUUID(), tournamentId, eventType, JSON.stringify(payload))
   }
 
+  // Read-only viewer сигнал (виж onMatchesChanged в deps) — никога не хвърля.
+  function notifyMatchesChanged(tournamentId: TournamentId): void {
+    try {
+      deps.onMatchesChanged?.(tournamentId)
+    } catch {
+      // информативен hook — никога не влияе на tournament логиката
+    }
+  }
+
   function getTeamEntries(tournamentId: TournamentId, teamId: TournamentTeamId): TeamEntryRow[] {
     return sortTeamEntries(
       selectEntriesForTeamStatement.all(tournamentId, teamId) as TeamEntryRow[],
@@ -1561,7 +1575,8 @@ export async function createTournamentCoordinator(
     const initialized = initializeRoomAuthoritativeGameState(withBots)
     const startedAt = utcNow()
     const update = markMatchInProgressStatement.run(startedAt, match.match_id, initialized.id)
-    if (dbChanges(update) > 0) {
+    const startedNow = dbChanges(update) > 0
+    if (startedNow) {
       gameStartsLastTick += 1
       appendEvent(match.tournament_id, 'tournament_match_game_started', {
         matchId: match.match_id,
@@ -1575,6 +1590,7 @@ export async function createTournamentCoordinator(
       throw new Error(`No runtime capacity for tournament room=${initialized.id}: ${ensureResult.reason}`)
     }
     commitSnapshot(refreshed, initialized)
+    if (startedNow) notifyMatchesChanged(match.tournament_id)
   }
 
   // Генерира next-round мачове за (currentRoundType -> nextRoundType) НА
@@ -1865,6 +1881,7 @@ export async function createTournamentCoordinator(
       if (result === 'created') createdRoomsLastTick += 1
       if (result === 'recovered') recoveredRoomsLastTick += 1
     }
+    if (newlyCreated.length > 0) notifyMatchesChanged(tournament.tournament_id)
   }
 
   function reconcileSettlementDueTournament(tournament: TournamentRow): void {
@@ -1873,6 +1890,7 @@ export async function createTournamentCoordinator(
     if (settlement.ok) {
       if (settlement.alreadySettled !== true) {
         tournamentsSettledLastTick += 1
+        notifyMatchesChanged(tournament.tournament_id)
       }
       processedLastTick += 1
       return
@@ -2044,6 +2062,7 @@ export async function createTournamentCoordinator(
     const completed = selectMatchByRoomStatement.get(room.id) as MatchRow
     advanceCompletedMatch(completed)
     closeCompletedTournamentRoom(completed, room)
+    notifyMatchesChanged(completed.tournament_id)
   }
 
   function tryTakeoverNoShowBot(input: {

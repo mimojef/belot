@@ -27,6 +27,24 @@ export type BelotSpectatorWatchEligibilityInput = {
   profileIsLudoSpectating: boolean
   /** Стаите, които профилът ВЕЧЕ гледа през която и да е своя connection. */
   profileWatchedRoomIds: RoomId[]
+  /**
+   * "Турнирни срещи" — факти за турнирна стая, resolve-нати от caller-а от
+   * persisted tournament данните. null/undefined за нетурнирни стаи; за
+   * турнирна стая липсата им се третира като deny (fail-closed).
+   *  - matchInProgress: DB срещата, свързана с ТАЗИ стая (room_id), е
+   *    'in_progress' — гарантира точна асоциация среща <-> маса.
+   *  - profileAssignedToMatch: профилът е член на някой от двата отбора в
+   *    срещата (вкл. временно заменен от бот) — той трябва да се върне в
+   *    играта, не да я гледа.
+   *  - profileHasActiveTournamentParticipation: профилът е активен участник
+   *    в течащ турнир — assignment/resume flow-ът му не бива да се смесва
+   *    със spectator view.
+   */
+  tournamentMatch?: {
+    matchInProgress: boolean
+    profileAssignedToMatch: boolean
+    profileHasActiveTournamentParticipation: boolean
+  } | null
 }
 
 export type BelotSpectatorWatchEligibility =
@@ -37,11 +55,21 @@ function deny(code: BelotSpectateDenialCode, message: string): BelotSpectatorWat
   return { ok: false, code, message }
 }
 
+export function isTournamentMatchSpectatorRoom(room: ServerRoom): boolean {
+  return (
+    room.config.isTournamentMatchOrigin === true &&
+    typeof room.config.tournamentId === 'string' && room.config.tournamentId.length > 0 &&
+    typeof room.config.tournamentMatchId === 'string' && room.config.tournamentMatchId.length > 0
+  )
+}
+
+// Гледаеми са играещи частни маси и (от "Турнирни срещи") играещи турнирни
+// маси. Matchmaking и guest trial маси остават негледаеми.
 export function isBelotRoomWatchable(room: ServerRoom): boolean {
   const authoritativeState = room.game.authoritativeState
+  const isPrivateTable = room.config.isPrivateTableOrigin === true && room.config.isTournamentMatchOrigin !== true
   return (
-    room.config.isPrivateTableOrigin === true &&
-    room.config.isTournamentMatchOrigin !== true &&
+    (isPrivateTable || isTournamentMatchSpectatorRoom(room)) &&
     room.config.isGuestTrial !== true &&
     room.status === 'playing' &&
     authoritativeState !== null &&
@@ -93,6 +121,19 @@ export function evaluateBelotSpectatorWatchEligibility(
 
   if (isProfileParticipantInRoom(room, profileId)) {
     return deny('participant', 'Ти си участник в тази игра.')
+  }
+
+  if (isTournamentMatchSpectatorRoom(room)) {
+    const tournamentMatch = input.tournamentMatch ?? null
+    if (tournamentMatch === null || !tournamentMatch.matchInProgress) {
+      return deny('room_not_watchable', 'Тази игра не може да бъде гледана.')
+    }
+    if (tournamentMatch.profileAssignedToMatch) {
+      return deny('participant', 'Ти си участник в тази игра.')
+    }
+    if (tournamentMatch.profileHasActiveTournamentParticipation) {
+      return deny('active_game_commitment', 'Не можеш да гледаш турнирни маси, докато участваш в активен турнир.')
+    }
   }
 
   // connection.currentRoomId !== null => тази connection вече е закачена за

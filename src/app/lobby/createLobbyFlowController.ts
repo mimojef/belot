@@ -129,6 +129,15 @@ import type {
   ActiveLudoGiftSnapshot,
 } from '../network/createGameServerClient'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
+import {
+  applyTournamentMatchLiveScore,
+  isTournamentMatchesLiveRelevant,
+  resolveTournamentMatchTeamLetters,
+} from '../tournaments/renderTournamentMatchesView'
+import {
+  forgetTournamentSpectatorTeamLabels,
+  rememberTournamentSpectatorTeamLabels,
+} from '../activeRoom/spectatorTeamLabels'
 
 export type LobbyFlowScreen =
   | 'lobby'
@@ -908,6 +917,9 @@ export type CreateLobbyFlowControllerOptions = {
   /** Belot Spectator Mode ("Гледай", Phase 3A) — mirror на Ludo watch/unwatch по-горе. */
   onWatchBelotRoom?: (roomId: string) => void
   onUnwatchBelotRoom?: (roomId: string) => void
+  /** "Турнирни срещи" (Виж игрите) — live абонамент за резултатите на срещите в турнир. */
+  onTournamentMatchesSubscribe?: (tournamentId: string, token: string) => void
+  onTournamentMatchesUnsubscribe?: (tournamentId: string) => void
   onSupportMessagesLoad?: () => Promise<
     | { ok: true; messages: SupportMessageSnapshot[] }
     | { ok: false; message: string }
@@ -2313,6 +2325,12 @@ type InternalLobbyFlowState = {
   tournamentCreateBusy: boolean
   tournamentCreateErrorText: string | null
   tournamentDetailId: string | null
+  /** "Турнирни срещи" (Виж игрите) под-изглед на tournament-detail екрана. */
+  tournamentMatchesViewOpen: boolean
+  /** tournamentId, за който ТАЗИ WS връзка в момента е абонирана за live резултати (null = няма абонамент). */
+  tournamentMatchesSubscribedTournamentId: string | null
+  /** Откъде е стартирано текущото Belot гледане — определя връщането след Изход/край. null = "Частни маси". */
+  belotSpectatorReturnTournamentId: string | null
   tournamentDetailLoading: boolean
   tournamentDetailErrorText: string | null
   tournamentDetail: TournamentDetailSnapshot | null
@@ -2986,6 +3004,9 @@ function createInitialState(): InternalLobbyFlowState {
     tournamentCreateBusy: false,
     tournamentCreateErrorText: null,
     tournamentDetailId: null,
+    tournamentMatchesViewOpen: false,
+    tournamentMatchesSubscribedTournamentId: null,
+    belotSpectatorReturnTournamentId: null,
     tournamentDetailLoading: false,
     tournamentDetailErrorText: null,
     tournamentDetail: null,
@@ -5417,6 +5438,7 @@ export function createLobbyFlowController(
       tournamentCreateBusy: state.tournamentCreateBusy,
       tournamentCreateErrorText: state.tournamentCreateErrorText,
       tournamentDetailId: state.tournamentDetailId,
+      tournamentMatchesViewOpen: state.tournamentMatchesViewOpen,
       tournamentDetailLoading: state.tournamentDetailLoading,
       tournamentDetailErrorText: state.tournamentDetailErrorText,
       tournamentDetail: state.tournamentDetail,
@@ -6168,6 +6190,16 @@ export function createLobbyFlowController(
       },
       onTournamentHowItWorksOpen: () => {
         showTournamentHowItWorksPage()
+      },
+      onTournamentMatchesOpen: () => {
+        openTournamentMatchesView()
+      },
+      onTournamentMatchesBack: () => {
+        closeTournamentMatchesView()
+      },
+      onWatchTournamentMatchClick: (roomId) => {
+        if (state.tournamentDetailId === null) return
+        void handleWatchBelotRoomClick(roomId, state.tournamentDetailId)
       },
       onTournamentsFilterChange: (filter) => {
         setTournamentsFilter(filter)
@@ -10199,9 +10231,30 @@ export function createLobbyFlowController(
   // click за СЪЩАТА маса не праща втори watch_belot_room.
   let belotWatchDecisionPendingRoomId: string | null = null
 
-  async function handleWatchBelotRoomClick(roomId: string): Promise<void> {
-    if (!state.belotSpectatingEnabled) return
+  // returnTournamentId !== null => "Гледай" от "Турнирни срещи" на този турнир
+  // (Изход/край на гледането връща там, не в "Частни маси").
+  async function handleWatchBelotRoomClick(roomId: string, returnTournamentId: string | null = null): Promise<void> {
+    const spectatingEnabled = returnTournamentId === null
+      ? state.belotSpectatingEnabled
+      : state.tournamentDetail?.tournamentId === returnTournamentId && state.tournamentDetail.belotSpectatingEnabled === true
+    if (!spectatingEnabled) return
     if (belotWatchDecisionPendingRoomId === roomId) return
+    const isStillOnOriginScreen = () => (
+      returnTournamentId === null
+        ? state.currentScreen === 'private-rooms'
+        : isViewingTournamentMatches(returnTournamentId)
+    )
+    state.belotSpectatorReturnTournamentId = returnTournamentId
+    // Турнирна маса: зрителят вижда реалните букви от схемата ("ОТБОР A" /
+    // "ОТБОР H"), не default ОТБОР А/Б на масата.
+    const tournamentLetters = returnTournamentId !== null && state.tournamentDetail !== null
+      ? resolveTournamentMatchTeamLetters(state.tournamentDetail, roomId)
+      : null
+    if (tournamentLetters !== null) {
+      rememberTournamentSpectatorTeamLabels(roomId, tournamentLetters.teamA, tournamentLetters.teamB)
+    } else {
+      forgetTournamentSpectatorTeamLabels()
+    }
     state.pendingBelotSpectatorRoomId = roomId
     // Phase 3B.2 (D1): решението popup/watch се взема САМО върху известен
     // canonical VIP статус. Докато статусът е unknown, НЕ се render-ва
@@ -10216,7 +10269,7 @@ export function createLobbyFlowController(
       }
       // User intent-ът се е сменил междувременно (друг "Гледай" click,
       // cancel, напуснат екран) — този click вече не решава нищо.
-      if (state.pendingBelotSpectatorRoomId !== roomId || state.currentScreen !== 'private-rooms') return
+      if (state.pendingBelotSpectatorRoomId !== roomId || !isStillOnOriginScreen()) return
       if (state.topicsVipGate === null) {
         // Статусът не можа да се зареди — без client-side guess; server-ът
         // остава authority (vip_required -> съществуващия popup fallback).
@@ -10348,6 +10401,23 @@ export function createLobbyFlowController(
    * се озове точно в "Частни маси -> Играещи" с fresh данни.
    */
   function navigateAfterBelotSpectateEnded(): void {
+    // "Турнирни срещи" — гледането е стартирано от списъка със срещи на
+    // турнир: връщаме точно там с пресни authoritative данни (приключилата
+    // среща вече е в историята).
+    const returnTournamentId = state.belotSpectatorReturnTournamentId
+    state.belotSpectatorReturnTournamentId = null
+    forgetTournamentSpectatorTeamLabels()
+    if (returnTournamentId !== null) {
+      state.currentScreen = 'tournament-detail'
+      state.tournamentDetailId = returnTournamentId
+      state.tournamentMatchesViewOpen = true
+      const targetUrl = getTournamentMatchesPath(returnTournamentId)
+      if (window.location.pathname !== targetUrl) {
+        history.pushState(null, '', targetUrl)
+      }
+      void fetchTournamentDetail(returnTournamentId)
+      return
+    }
     state.currentScreen = 'private-rooms'
     state.privateRoomsTab = 'all'
     state.privateRoomsLifecycleTab = 'playing'
@@ -10883,6 +10953,7 @@ export function createLobbyFlowController(
   function showTournamentDetailFromCreatedTournament(tournamentId: string): void {
     state.currentScreen = 'tournament-detail'
     state.tournamentDetailId = tournamentId
+    state.tournamentMatchesViewOpen = false
     state.tournamentDetailLoading = false
     state.tournamentDetailErrorText = null
     state.tournamentDetailRequiresPassword = false
@@ -10899,12 +10970,154 @@ export function createLobbyFlowController(
     void fetchTournamentDetail(tournamentId)
   }
 
+  // ─── "Турнирни срещи" (Виж игрите) ────────────────────────────────────────
+  // Под-изглед на tournament-detail екрана (URL /tournaments/:id/games) върху
+  // СЪЩИЯ authoritative detail snapshot. Live резултатите идват по WS само
+  // докато изгледът е отворен (reconcile от render()); lifecycle промени
+  // (старт/край на мач, нов кръг) водят до debounced HTTP refetch. Рядък
+  // fallback refresh покрива пропуснати push-ове (напр. reconnect).
+  const TOURNAMENT_MATCHES_FALLBACK_REFRESH_MS = 30_000
+  // Lifecycle push-ът отива едновременно до всички зрители на турнира —
+  // случайното разсейване (300–1500 ms) пречи на N едновременни detail
+  // заявки към сървъра в един и същи момент.
+  const TOURNAMENT_MATCHES_REFETCH_MIN_DELAY_MS = 300
+  const TOURNAMENT_MATCHES_REFETCH_JITTER_MS = 1200
+  let tournamentMatchesFallbackIntervalId: ReturnType<typeof setInterval> | null = null
+  let tournamentMatchesRefetchTimerId: ReturnType<typeof setTimeout> | null = null
+  // Кога за последно е поискан пресен detail за изгледа — fallback-ът се
+  // пропуска, ако push-ът вече е довел до скорошно обновяване.
+  let tournamentMatchesLastRefreshAt = 0
+  // `${tournamentId}:${token}` — нов токен (напр. след server restart) води до
+  // повторен subscribe, иначе reconcile е no-op.
+  let tournamentMatchesSubscribedKey: string | null = null
+
+  function getTournamentMatchesPath(tournamentId: string): string {
+    return `/tournaments/${encodeURIComponent(tournamentId)}/games`
+  }
+
+  function isViewingTournamentMatches(tournamentId?: string): boolean {
+    return (
+      state.currentScreen === 'tournament-detail' &&
+      state.tournamentMatchesViewOpen &&
+      state.tournamentDetailId !== null &&
+      (tournamentId === undefined || state.tournamentDetailId === tournamentId)
+    )
+  }
+
+  function openTournamentMatchesView(): void {
+    const tournamentId = state.tournamentDetailId
+    if (state.currentScreen !== 'tournament-detail' || tournamentId === null) return
+    state.tournamentMatchesViewOpen = true
+    const targetUrl = getTournamentMatchesPath(tournamentId)
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    window.scrollTo(0, 0)
+    tournamentMatchesLastRefreshAt = Date.now()
+    void fetchTournamentDetail(tournamentId)
+  }
+
+  function closeTournamentMatchesView(): void {
+    const tournamentId = state.tournamentDetailId
+    if (!state.tournamentMatchesViewOpen || tournamentId === null) return
+    state.tournamentMatchesViewOpen = false
+    const targetUrl = `/tournaments/${encodeURIComponent(tournamentId)}`
+    if (window.location.pathname !== targetUrl) {
+      history.pushState(null, '', targetUrl)
+    }
+    render()
+    window.scrollTo(0, 0)
+  }
+
+  function scheduleTournamentMatchesRefetch(tournamentId: string): void {
+    if (tournamentMatchesRefetchTimerId !== null) return
+    tournamentMatchesRefetchTimerId = setTimeout(() => {
+      tournamentMatchesRefetchTimerId = null
+      if (!isViewingTournamentMatches(tournamentId)) return
+      tournamentMatchesLastRefreshAt = Date.now()
+      void fetchTournamentDetail(tournamentId)
+    }, TOURNAMENT_MATCHES_REFETCH_MIN_DELAY_MS + Math.random() * TOURNAMENT_MATCHES_REFETCH_JITTER_MS)
+  }
+
+  // Вика се от всеки render() — гарантира, че абонаментът и fallback таймерът
+  // живеят точно докато изгледът е отворен за течащ турнир, независимо по кой
+  // път потребителят е напуснал екрана.
+  function reconcileTournamentMatchesSubscription(): void {
+    const detail = state.tournamentDetail
+    const token = detail?.matchesLiveToken ?? null
+    const desiredTournamentId =
+      isViewingTournamentMatches() &&
+      detail !== null &&
+      detail.tournamentId === state.tournamentDetailId &&
+      token !== null &&
+      isTournamentMatchesLiveRelevant(detail.status)
+        ? detail.tournamentId
+        : null
+    const desiredKey = desiredTournamentId !== null ? `${desiredTournamentId}:${token}` : null
+
+    if (state.tournamentMatchesSubscribedTournamentId === null) tournamentMatchesSubscribedKey = null
+    if (tournamentMatchesSubscribedKey !== desiredKey) {
+      const subscribedTournamentId = state.tournamentMatchesSubscribedTournamentId
+      if (subscribedTournamentId !== null && subscribedTournamentId !== desiredTournamentId) {
+        options.onTournamentMatchesUnsubscribe?.(subscribedTournamentId)
+      }
+      if (desiredTournamentId !== null && token !== null) {
+        options.onTournamentMatchesSubscribe?.(desiredTournamentId, token)
+      }
+      state.tournamentMatchesSubscribedTournamentId = desiredTournamentId
+      tournamentMatchesSubscribedKey = desiredKey
+    }
+
+    if (desiredTournamentId !== null && tournamentMatchesFallbackIntervalId === null) {
+      tournamentMatchesFallbackIntervalId = setInterval(() => {
+        const tournamentId = state.tournamentDetailId
+        if (tournamentId === null || !isViewingTournamentMatches(tournamentId)) return
+        // По време на гледане на маса лобито е скрито — няма смисъл от refetch.
+        if (state.spectatingBelotRoomId !== null || document.visibilityState === 'hidden') return
+        if (Date.now() - tournamentMatchesLastRefreshAt < TOURNAMENT_MATCHES_FALLBACK_REFRESH_MS - 1_000) return
+        tournamentMatchesLastRefreshAt = Date.now()
+        void fetchTournamentDetail(tournamentId)
+      }, TOURNAMENT_MATCHES_FALLBACK_REFRESH_MS)
+    } else if (desiredTournamentId === null && tournamentMatchesFallbackIntervalId !== null) {
+      clearInterval(tournamentMatchesFallbackIntervalId)
+      tournamentMatchesFallbackIntervalId = null
+    }
+    if (desiredTournamentId === null && tournamentMatchesRefetchTimerId !== null) {
+      clearTimeout(tournamentMatchesRefetchTimerId)
+      tournamentMatchesRefetchTimerId = null
+    }
+  }
+
+  // Targeted DOM patch — без пълен render(), за да не се губи scroll позиция.
+  function patchTournamentMatchLiveScoreDom(matchId: string, scoreTeamA: number, scoreTeamB: number): void {
+    const scoreEls = options.root.querySelectorAll<HTMLElement>('[data-tournament-live-score]')
+    for (const el of scoreEls) {
+      if (el.dataset.tournamentLiveScore !== matchId) continue
+      if (el.dataset.tournamentLiveScoreTeam === 'a') el.textContent = String(scoreTeamA)
+      else if (el.dataset.tournamentLiveScoreTeam === 'b') el.textContent = String(scoreTeamB)
+    }
+  }
+
+  // Директно отваряне на /tournaments/:id/games (deep link, refresh, back/
+  // forward от друг екран) — нормалният detail flow, после под-изгледът.
+  // URL-ът временно се подменя (replaceState), за да не добави
+  // showTournamentDetail излишен history запис.
+  function showTournamentMatchesFromRoute(tournamentId: string): void {
+    history.replaceState(null, '', `/tournaments/${encodeURIComponent(tournamentId)}`)
+    showTournamentDetail(tournamentId)
+    state.tournamentMatchesViewOpen = true
+    history.replaceState(null, '', getTournamentMatchesPath(tournamentId))
+    render()
+  }
+
   function showTournamentDetail(tournamentId: string): void {
     leaveAdminServerIfActive()
     stopWaitingRoomActivity()
     resetFinalFillSequence()
     state.currentScreen = 'tournament-detail'
     state.tournamentDetailId = tournamentId
+    state.tournamentMatchesViewOpen = false
     state.tournamentDetail = null
     state.tournamentInterRoundPendingResult = null
     clearTournamentInterRoundPendingRefetch()
@@ -10941,6 +11154,7 @@ export function createLobbyFlowController(
     resetFinalFillSequence()
     state.currentScreen = 'tournament-detail'
     state.tournamentDetailId = tournamentId
+    state.tournamentMatchesViewOpen = false
     state.tournamentDetail = null
     state.tournamentInterRoundPendingResult = {
       tournamentId,
@@ -17235,9 +17449,36 @@ export function createLobbyFlowController(
       return
     }
 
+    // Dynamic route: /tournaments/:tournamentId/games ("Турнирни срещи").
+    // Back/forward между detail и срещите на СЪЩИЯ турнир само превключва
+    // под-изгледа (без loading flash); иначе — нормално отваряне на detail-а.
+    const tournamentMatchesMatch = /^\/tournaments\/([^/]+)\/games$/.exec(path)
+    if (tournamentMatchesMatch) {
+      const tournamentId = decodeURIComponent(tournamentMatchesMatch[1] ?? '')
+      if (state.currentScreen === 'tournament-detail' && state.tournamentDetailId === tournamentId) {
+        state.tournamentMatchesViewOpen = true
+        render()
+        void fetchTournamentDetail(tournamentId)
+      } else {
+        showTournamentMatchesFromRoute(tournamentId)
+      }
+      return
+    }
+
     // Dynamic route: /tournaments/:tournamentId
     const tournamentDetailMatch = /^\/tournaments\/([^/]+)$/.exec(path)
     if (tournamentDetailMatch) {
+      if (
+        state.currentScreen === 'tournament-detail' &&
+        state.tournamentMatchesViewOpen &&
+        state.tournamentDetailId === decodeURIComponent(tournamentDetailMatch[1] ?? '')
+      ) {
+        // Back от "Турнирни срещи" към detail-а на същия турнир — само
+        // затваря под-изгледа, без нов loading.
+        state.tournamentMatchesViewOpen = false
+        render()
+        return
+      }
       showTournamentDetail(decodeURIComponent(tournamentDetailMatch[1] ?? ''))
       return
     }
@@ -17843,6 +18084,7 @@ export function createLobbyFlowController(
       return
     }
     reconcileLobbyChatSubscription()
+    reconcileTournamentMatchesSubscription()
     // Teardown-only reconcile за Topics realtime subscription — setup
     // (subscribe) се прави ИЗРИЧНО и последователно от openTopic/
     // loadTopicMessagesForActiveTopic (Етап 2 корекция т.1 gap-closing flow),
@@ -19016,6 +19258,13 @@ export function createLobbyFlowController(
       // belot_spectate_denied handler-ът по-горе третира евентуален отказ
       // (напр. VIP е изтекъл междувременно) като тих cleanup, без popup spam.
       if (state.spectatingBelotRoomId !== null) options.onWatchBelotRoom?.(state.spectatingBelotRoomId)
+      // "Турнирни срещи" — новата WS връзка няма абонамент; пресен detail
+      // носи валиден токен (след server restart старият е невалиден), а
+      // следващият render() се абонира наново.
+      state.tournamentMatchesSubscribedTournamentId = null
+      if (isViewingTournamentMatches() && state.tournamentDetailId !== null) {
+        void fetchTournamentDetail(state.tournamentDetailId)
+      }
       if (_pendingInitialNav) {
         _pendingInitialNav = false
         navigateFromPath(_loadPath)
@@ -20637,6 +20886,26 @@ export function createLobbyFlowController(
       return true
     }
 
+    // "Турнирни срещи" — live резултат: patch на кеширания detail + targeted
+    // DOM update. Непозната/неактивна среща => authoritative refetch, никога
+    // локално "досъздаване" на състояние.
+    if (message.type === 'tournament_match_live_score') {
+      if (!isViewingTournamentMatches(message.tournamentId) || state.tournamentDetail === null) return true
+      const patched = applyTournamentMatchLiveScore(state.tournamentDetail, message)
+      if (patched === null) {
+        scheduleTournamentMatchesRefetch(message.tournamentId)
+        return true
+      }
+      state.tournamentDetail = patched
+      patchTournamentMatchLiveScoreDom(message.matchId, message.scoreTeamA, message.scoreTeamB)
+      return true
+    }
+
+    if (message.type === 'tournament_matches_changed') {
+      if (isViewingTournamentMatches(message.tournamentId)) scheduleTournamentMatchesRefetch(message.tournamentId)
+      return true
+    }
+
     if (message.type === 'private_game_score_updated') {
       // Targeted score-only DOM patch — БЕЗ render(), за да не прекъсва
       // scroll/popup/tab state докато "Играещи" таб е отворен (§7 брифа).
@@ -21797,7 +22066,7 @@ export function createLobbyFlowController(
     navigateInitialPath: () => {
       _navigationReady = true
       applyRouteSeo(_loadPath || '/lobby')
-      const isKnownPath = _loadPath === '/games/ludo' || !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath)
+      const isKnownPath = _loadPath === '/games/ludo' || !!PATH_TO_SCREEN[_loadPath] || /^\/admin\/payments\/[^/]+$/.test(_loadPath) || /^\/admin\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+$/.test(_loadPath) || /^\/tournaments\/[^/]+\/games$/.test(_loadPath)
       if (!_loadPath || !isKnownPath) return
       if (state.isConnected) {
         navigateFromPath(_loadPath)

@@ -9,6 +9,13 @@ import type {
 } from '../network/createGameServerClient'
 import type { LobbyScreenState } from './renderLobbyScreen'
 import { getNextTournamentRoundLabel, getPreviousTournamentRoundType, getTournamentRoundLabel } from '../tournaments/tournamentRoundLabels'
+import { TOURNAMENT_TEAM_SLOT_LETTERS } from '../tournaments/tournamentTeamLabels'
+import {
+  renderTournamentGamesButton,
+  renderTournamentMatchesView,
+  shouldShowTournamentGamesButton,
+} from '../tournaments/renderTournamentMatchesView'
+import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
 
 // Временен публичен maintenance guard (виж fix(tournaments): show development
 // notice) — НЕ трие/променя реалната turnament UI логика по-долу в този файл,
@@ -700,11 +707,9 @@ function renderTournamentFillTimeoutCancelledCallout(t: TournamentDetailSnapshot
   `
 }
 
-// A-P покрива максималния поддържан bracket размер (16 отбора). За 4/8
-// отбора се ползват само първите 4/8 букви — mapping-ът е positional
-// (index в t.teams), затова разширяването тук не променя нищо за
-// съществуващите 4-отборни турнири.
-const TOURNAMENT_TEAM_SLOT_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P'] as const
+// A-P буквите (TOURNAMENT_TEAM_SLOT_LETTERS) живеят в споделения
+// tournaments/tournamentTeamLabels.ts — същият positional mapping се ползва и
+// от изгледа "Турнирни срещи" (renderTournamentMatchesView.ts).
 
 // Стабилна идентификация "Отбор A/B/C/D" — еднаква за двамата партньори, за
 // refresh, reconnect, server restart и finished-tournament преглед. Чисто
@@ -1189,6 +1194,24 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
     return renderTournamentInterRoundOpponentKnownScreen(t)
   }
 
+  // "Турнирни срещи" (Виж игрите) — под-изглед на detail екрана върху СЪЩИТЕ
+  // authoritative данни. Участническите inter-round екрани по-горе остават с
+  // приоритет; бутонът се появява само за започнал/завършил турнир.
+  if (state.tournamentMatchesViewOpen && shouldShowTournamentGamesButton(t.status)) {
+    return `
+      ${renderTournamentMatchesView(t)}
+      ${renderVipRequiredPopup({
+        open: state.belotSpectatorVipPopupOpen,
+        namespace: 'belot-spectator',
+        featureLabel: 'Гледането на игри',
+        hasClaimedLaunchGift: state.belotSpectatorVipHasClaimedLaunchGift,
+        launchGiftDays: state.belotSpectatorVipLaunchGiftDays,
+        claimSubmitting: state.belotSpectatorVipClaimSubmitting,
+        claimErrorText: state.belotSpectatorVipClaimErrorText,
+      })}
+    `
+  }
+
   const avatarLetter = t.creator.displayName.slice(0, 1).toUpperCase()
   const startInfo = computeTournamentStartInfo(t)
 
@@ -1210,6 +1233,7 @@ export function renderTournamentDetailScreen(state: LobbyScreenState): string {
         <h2 style="font-size:22px;font-weight:900;color:#ffffff;margin:0;">${escapeHtml(t.name)}</h2>
         <span style="font-size:11px;font-weight:900;text-transform:uppercase;letter-spacing:0.04em;color:${statusBadgeColor(t.status)};border:1px solid ${statusBadgeColor(t.status)}55;border-radius:999px;padding:3px 10px;">${escapeHtml(t.statusLabel)}</span>
         ${t.requiresPassword ? '<span title="С парола" style="font-size:15px;">🔒</span>' : ''}
+        ${renderTournamentGamesButton(t)}
       </div>
 
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap;">

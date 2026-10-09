@@ -597,6 +597,19 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return roomId === null ? null : { type: 'unwatch_belot_room', roomId }
     }
 
+    if (parsed.type === 'subscribe_tournament_matches') {
+      const tournamentId = normalizeRequiredText(parsed.tournamentId)
+      const token = normalizeRequiredText(parsed.token)
+      return tournamentId === null || token === null
+        ? null
+        : { type: 'subscribe_tournament_matches', tournamentId, token }
+    }
+
+    if (parsed.type === 'unsubscribe_tournament_matches') {
+      const tournamentId = normalizeRequiredText(parsed.tournamentId)
+      return tournamentId === null ? null : { type: 'unsubscribe_tournament_matches', tournamentId }
+    }
+
     if (parsed.type === 'kick_from_ludo_room') {
       const profileId = normalizeRequiredText(parsed.profileId)
       return profileId === null ? null : { type: 'kick_from_ludo_room', profileId }
