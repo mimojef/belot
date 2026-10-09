@@ -1788,6 +1788,19 @@ export async function createTournamentCoordinator(
       completeFinalSideEffects(match, match.winner_team_id)
       return
     }
+    // Елиминира ЗАГУБИЛИЯ ТУК ВЕДНАГА, независимо от sibling-а му в bracket
+    // двойката (QF1+QF2 -> SF1 и т.н.). ensureNextRound/advanceBracketLadder
+    // по-долу всe пак чакат ДВАТА feeder-а на следващия слот, за да създадат
+    // следващия мач (неизбежно за semifinal -> final, където финалът структурно
+    // има само един слот) — но самото "извади ли ме bracket-ът" решение не
+    // бива да зависи от sibling мача. Без това, загубилият в SF1 остава
+    // 'confirmed' (активен участник — блокира spectator достъп, показва
+    // несъществуващ "очакван следващ кръг"), докато SF2 все още играе. Final
+    // round_type е изключен тук — загубилият финала е 'runner_up', не
+    // 'eliminated' (виж completeFinalSideEffects по-горе).
+    const loserTeamId = match.winner_team_id === match.team_a_id ? match.team_b_id : match.team_a_id
+    updateRoundLosersEliminatedTeamsStatement.run(match.tournament_id, loserTeamId)
+    updateRoundLosersEliminatedEntriesStatement.run(match.tournament_id, loserTeamId)
     // Всеки не-final round type (round_of_16/quarterfinal/semifinal) следва
     // общата ladder логика — не само 'semifinal' както преди. Всеки
     // новосъздаден match (включително финала, ако е точно той) получава
