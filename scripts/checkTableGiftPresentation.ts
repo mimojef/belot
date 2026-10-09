@@ -505,6 +505,16 @@ await check('[17] handleTableGiftSendResult затваря modal-а и осво�
     fn.indexOf('if (!message.ok)') < fn.indexOf('closeTableGiftModal()'),
     'failure проверката трябва да е ПРЕДИ close (не затваряй модала при грешка)',
   )
+  // Единственото изключение: отказ заради блокиране (profile access block
+  // code) затваря селектора и показва block popup-а. Всяка друга грешка НЕ
+  // затваря модала.
+  const failureBranch = fn.slice(fn.indexOf('if (!message.ok) {'), fn.indexOf('// Server-authoritative нов баланс'))
+  const blockSubBranch = /if \(isProfileAccessBlockCode\(message\.code\)\) \{[\s\S]*?return\r?\n\s*\}/.exec(failureBranch)
+  assert(blockSubBranch !== null && blockSubBranch[0].includes('closeTableGiftModal()'), 'block отказът затваря селектора')
+  assert(
+    !failureBranch.replace(blockSubBranch![0], '').includes('closeTableGiftModal()'),
+    'обща грешка (без block code) НЕ трябва да затваря модала',
+  )
 })
 
 // ─── [18] Duplicate-click guard: request НЕ се дублира докато е in-flight ──

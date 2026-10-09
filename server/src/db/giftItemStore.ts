@@ -74,7 +74,18 @@ export type SendGiftItemResult =
        */
       isReplay: boolean
     }
-  | { ok: false; message: string }
+  | {
+      ok: false
+      message: string
+      /**
+       * Само при блокиране между sender и recipient (в която и да е посока) —
+       * СЪЩИТЕ кодове като getProfileAccessDenial в index.ts, за да може
+       * клиентът да покаже съществуващия profile access block popup.
+       */
+      code?: GiftItemBlockedCode
+    }
+
+export type GiftItemBlockedCode = 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
 
 export type GiftItemStore = {
   /** Изключва И is_active=0, И deleted_at IS NOT NULL redове. */
@@ -344,6 +355,14 @@ export async function createGiftItemStore(
     UPDATE profile_wallets
     SET yellow_coins_balance = yellow_coins_balance - ?, updated_at = CURRENT_TIMESTAMP
     WHERE profile_id = ? AND yellow_coins_balance >= ?;
+  `)
+
+  // Еднопосочна проверка в player_blocks (виж blockStore.isBlocked) — чете
+  // се ВЪТРЕ в sendGiftItem BEGIN IMMEDIATE транзакцията, преди debit-а.
+  const selectBlockStatement = database.prepare(`
+    SELECT 1 AS found FROM player_blocks
+    WHERE blocker_profile_id = ? AND blocked_profile_id = ?
+    LIMIT 1;
   `)
 
   const insertTransactionStatement = database.prepare(`
@@ -641,6 +660,23 @@ export async function createGiftItemStore(
       if (senderProfileId === recipientProfileId) {
         database.exec('ROLLBACK;')
         return { ok: false, message: 'Не можеш да си изпратиш подарък сам на себе си.' }
+      }
+
+      // 4b. Блокиране в която и да е посока — authoritative за ВСИЧКИ пътища
+      // (HTTP profile/"Подари и ти", Belot table gift (играч и зрител), Ludo).
+      // В същата BEGIN IMMEDIATE транзакция като debit-а: blockStore.toggleBlock
+      // също е BEGIN IMMEDIATE върху същия DB файл, затова block, направен
+      // докато picker-ът е отворен, винаги се вижда тук. Idempotent replay (§1)
+      // остава ПРЕДИ тази проверка — вече записан transaction не се променя.
+      // Текстовете са огледални на getProfileAccessDenial (index.ts).
+      if (selectBlockStatement.get(senderProfileId, recipientProfileId) !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'profile_blocked_by_viewer', message: 'Този потребител е блокиран от Вас.' }
+      }
+
+      if (selectBlockStatement.get(recipientProfileId, senderProfileId) !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'profile_blocked_viewer', message: 'Този потребител ви е блокирал.' }
       }
 
       // 5-6. gift item съществува, активен е, НЕ е logically deleted, цената

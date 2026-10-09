@@ -17346,7 +17346,11 @@ async function handleGiftItemsRequest(
     const itemName = result.giftItem?.name ?? ''
     const imageUrl = result.giftItem?.imageUrl ?? ''
 
-    if (recipientProfileIdResolved) {
+    // Idempotent replay (същият requestId) — sender-ът получава success
+    // отговор, но известието към получателя НЕ се повтаря (live push или
+    // offline delivery ред) — mirror на !isReplay guard-а в send_table_gift/
+    // send_ludo_gift handler-ите.
+    if (recipientProfileIdResolved && !result.isReplay) {
       // Stage 2: получателят се смята за ONLINE и когато е на маса.
       // Преди тук имаше и `c.currentRoomId == null` — играещ получател
       // отиваше в persisted offline queue. Сега получава LIVE push, за да
@@ -22041,6 +22045,7 @@ wsServer.on('connection', (socket, request) => {
             requestId: message.requestId,
             ok: false,
             message: giftResult.message,
+            ...(giftResult.code ? { code: giftResult.code } : {}),
           })
           return
         }
@@ -23356,6 +23361,7 @@ wsServer.on('connection', (socket, request) => {
             requestId: message.requestId,
             ok: false,
             message: giftResult.message,
+            ...(giftResult.code ? { code: giftResult.code } : {}),
           })
           return
         }

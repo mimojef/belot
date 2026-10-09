@@ -70,6 +70,8 @@ export interface GiftPickerModal {
   handleSendResult(requestId: string, result: GiftPickerSendResult): void
   /** true ако модалът в момента е отворен за точно тоя recipientKey. */
   isOpenFor(recipientKey: string): boolean
+  /** Съществуващия non-blocking toast — напр. неуспешна проверка преди open(). */
+  showToast(text: string): void
   /** Премахва DOM nodes + timers — извиква се при controller destroy/reconnect invalidate. */
   destroy(): void
 }
@@ -369,5 +371,5 @@ export function createGiftPickerModal(config: GiftPickerModalConfig): GiftPicker
     }
   }
 
-  return { open, close, handleSendResult, isOpenFor, destroy }
+  return { open, close, handleSendResult, isOpenFor, showToast, destroy }
 }

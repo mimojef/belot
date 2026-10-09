@@ -229,6 +229,15 @@ function buildBaseSchema(db: DatabaseSync): void {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
     );
+
+    -- Production schema (20260519_003_create_player_blocks.sql, по-стар от
+    -- gift_item_catalog migration-а) — sendGiftItem чете block-овете.
+    CREATE TABLE IF NOT EXISTS player_blocks (
+      blocker_profile_id TEXT NOT NULL,
+      blocked_profile_id TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      PRIMARY KEY (blocker_profile_id, blocked_profile_id)
+    );
   `)
 }
 
@@ -1715,6 +1724,140 @@ await withTempDir(async (dir) => {
     assertEqual(store.getTotalChargedYellowCoins(), 8000, 'tombstoned gift item-ът НЕ маха миналите си транзакции от сумата')
 
     store.close()
+  })
+
+  // ── [BL] Блокиране между sender и recipient (която и да е посока) ───────
+  // sendGiftItem отказва ПРЕДИ debit-а, в същата транзакция; кодът е
+  // огледален на getProfileAccessDenial (profile access block popup).
+  async function setupBlockCase(name: string, blocks: Array<[string, string]>) {
+    const dbPath = join(dir, `testBL-${name}.sqlite`)
+    const db = new DatabaseSync(dbPath, { open: true })
+    buildBaseSchema(db)
+    await applyGiftItemMigrations(db)
+    seedProfile(db, 'bl-a', 10_000)
+    seedProfile(db, 'bl-b', 10_000)
+    db.exec(`INSERT INTO gift_items (gift_item_id, name, image_url, price, is_active, sort_order)
+      VALUES ('item-bl', 'Роза', '/uploads/gift-items/bl.webp', 1500, 1, 0)`)
+    for (const [blocker, blocked] of blocks) {
+      db.prepare('INSERT INTO player_blocks (blocker_profile_id, blocked_profile_id) VALUES (?, ?)').run(blocker, blocked)
+    }
+    db.close()
+    const store = await createGiftItemStore(dbPath, makeMockProgressStore(new Set(['bl-a', 'bl-b'])))
+    return { dbPath, store }
+  }
+
+  function assertNoSideEffects(dbPath: string, label: string): void {
+    const db = new DatabaseSync(dbPath, { open: true })
+    try {
+      assertEqual(getWalletBalance(db, 'bl-a'), 10_000, `${label}: баланс A непроменен`)
+      assertEqual(getWalletBalance(db, 'bl-b'), 10_000, `${label}: баланс B непроменен`)
+      assertEqual(countTransactions(db), 0, `${label}: няма transaction ред`)
+      const deliveries = db.prepare('SELECT COUNT(*) AS cnt FROM gift_item_delivery_log').get() as { cnt: number }
+      assertEqual(deliveries.cnt, 0, `${label}: няма delivery ред`)
+    } finally {
+      db.close()
+    }
+  }
+
+  for (const context of [['profile', null], ['game', 'room-bl'], ['ludo', 'match-bl']] as const) {
+    const [ctx, roomId] = context
+
+    await check(`[BL1/${ctx}] A блокира B: A→B и B→A се отказват с правилния code, без debit/transaction`, async () => {
+      const { dbPath, store } = await setupBlockCase(`1-${ctx}`, [['bl-a', 'bl-b']])
+      const aToB = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', `req-bl1-ab-${ctx}`, ctx, roomId)
+      assert(aToB.ok === false && aToB.code === 'profile_blocked_by_viewer', `A→B code=${!aToB.ok ? aToB.code : 'ok'}`)
+      if (!aToB.ok) assertEqual(aToB.message, 'Този потребител е блокиран от Вас.', 'A→B message')
+      const bToA = store.sendGiftItem('bl-b', 'bl-a', 'item-bl', `req-bl1-ba-${ctx}`, ctx, roomId)
+      assert(bToA.ok === false && bToA.code === 'profile_blocked_viewer', `B→A code=${!bToA.ok ? bToA.code : 'ok'}`)
+      if (!bToA.ok) assertEqual(bToA.message, 'Този потребител ви е блокирал.', 'B→A message')
+      store.close()
+      assertNoSideEffects(dbPath, 'BL1')
+    })
+
+    await check(`[BL2/${ctx}] B блокира A: и двете посоки се отказват`, async () => {
+      const { dbPath, store } = await setupBlockCase(`2-${ctx}`, [['bl-b', 'bl-a']])
+      const aToB = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', `req-bl2-ab-${ctx}`, ctx, roomId)
+      assert(aToB.ok === false && aToB.code === 'profile_blocked_viewer', `A→B code=${!aToB.ok ? aToB.code : 'ok'}`)
+      const bToA = store.sendGiftItem('bl-b', 'bl-a', 'item-bl', `req-bl2-ba-${ctx}`, ctx, roomId)
+      assert(bToA.ok === false && bToA.code === 'profile_blocked_by_viewer', `B→A code=${!bToA.ok ? bToA.code : 'ok'}`)
+      store.close()
+      assertNoSideEffects(dbPath, 'BL2')
+    })
+
+    await check(`[BL3/${ctx}] Взаимно блокиране: отказ с code на подателя-блокиращ`, async () => {
+      const { dbPath, store } = await setupBlockCase(`3-${ctx}`, [['bl-a', 'bl-b'], ['bl-b', 'bl-a']])
+      const aToB = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', `req-bl3-ab-${ctx}`, ctx, roomId)
+      assert(aToB.ok === false && aToB.code === 'profile_blocked_by_viewer', `A→B code=${!aToB.ok ? aToB.code : 'ok'}`)
+      const bToA = store.sendGiftItem('bl-b', 'bl-a', 'item-bl', `req-bl3-ba-${ctx}`, ctx, roomId)
+      assert(bToA.ok === false && bToA.code === 'profile_blocked_by_viewer', `B→A code=${!bToA.ok ? bToA.code : 'ok'}`)
+      store.close()
+      assertNoSideEffects(dbPath, 'BL3')
+    })
+
+    await check(`[BL4/${ctx}] Без блокиране: нормално изпращане (регресия)`, async () => {
+      const { dbPath, store } = await setupBlockCase(`4-${ctx}`, [])
+      const result = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', `req-bl4-${ctx}`, ctx, roomId)
+      assert(result.ok === true, 'неблокиран подарък трябва да успее')
+      if (result.ok) assertEqual(result.senderBalanceAfter, 8500, 'единичен debit')
+      store.close()
+      const db = new DatabaseSync(dbPath, { open: true })
+      assertEqual(countTransactions(db), 1, 'точно 1 transaction')
+      db.close()
+    })
+  }
+
+  await check('[BL5] Block след отваряне на picker-а (между два send-а): следващият send е отказан, unblock връща нормалното поведение', async () => {
+    const { dbPath, store } = await setupBlockCase('5', [])
+    const first = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', 'req-bl5-1', 'game', 'room-bl')
+    assert(first.ok === true, 'преди block-а подаръкът минава')
+    // Block от отделна връзка (както blockStore.toggleBlock) докато store-ът е отворен.
+    const other = new DatabaseSync(dbPath, { open: true })
+    other.prepare('INSERT INTO player_blocks (blocker_profile_id, blocked_profile_id) VALUES (?, ?)').run('bl-b', 'bl-a')
+    const second = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', 'req-bl5-2', 'game', 'room-bl')
+    assert(second.ok === false && second.code === 'profile_blocked_viewer', 'след block-а → отказ')
+    assertEqual(getWalletBalance(other, 'bl-a'), 8500, 'само първият debit')
+    assertEqual(countTransactions(other), 1, 'само първият transaction')
+    other.prepare('DELETE FROM player_blocks').run()
+    const third = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', 'req-bl5-3', 'game', 'room-bl')
+    assert(third.ok === true, 'след unblock подаръкът пак минава')
+    other.close()
+    store.close()
+  })
+
+  await check('[BL6] Replay на вече успешен requestId след block: idempotent success, без втори debit/transaction', async () => {
+    const { dbPath, store } = await setupBlockCase('6', [])
+    const first = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', 'req-bl6', 'profile', null)
+    assert(first.ok === true, 'първоначалният подарък минава')
+    const other = new DatabaseSync(dbPath, { open: true })
+    other.prepare('INSERT INTO player_blocks (blocker_profile_id, blocked_profile_id) VALUES (?, ?)').run('bl-b', 'bl-a')
+    const replay = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', 'req-bl6', 'profile', null)
+    assert(replay.ok === true && replay.isReplay === true, 'replay остава idempotent success (isReplay=true)')
+    if (first.ok && replay.ok) assertEqual(replay.transaction.transactionId, first.transaction.transactionId, 'същият transaction')
+    assertEqual(getWalletBalance(other, 'bl-a'), 8500, 'един debit')
+    assertEqual(countTransactions(other), 1, 'един transaction')
+    // Нов requestId след block-а → отказ.
+    const fresh = store.sendGiftItem('bl-a', 'bl-b', 'item-bl', 'req-bl6-new', 'profile', null)
+    assert(fresh.ok === false && fresh.code === 'profile_blocked_viewer', 'нов requestId след block → отказ')
+    other.close()
+    store.close()
+  })
+
+  await check('[BL7] Bot recipient без block: непроменено поведение; block към bot profile → отказ (същото правило)', async () => {
+    const { dbPath, store } = await setupBlockCase('7', [])
+    const db = new DatabaseSync(dbPath, { open: true })
+    seedProfile(db, 'bl-bot', 0)
+    db.close()
+    store.close()
+    const botStore = await createGiftItemStore(dbPath, makeMockProgressStore(new Set(['bl-a', 'bl-b', 'bl-bot'])))
+    const ok = botStore.sendGiftItem('bl-a', 'bl-bot', 'item-bl', 'req-bl7-1', 'game', 'room-bl')
+    assert(ok.ok === true, 'gift към bot без block минава')
+    const db2 = new DatabaseSync(dbPath, { open: true })
+    db2.prepare('INSERT INTO player_blocks (blocker_profile_id, blocked_profile_id) VALUES (?, ?)').run('bl-a', 'bl-bot')
+    const blocked = botStore.sendGiftItem('bl-a', 'bl-bot', 'item-bl', 'req-bl7-2', 'game', 'room-bl')
+    assert(blocked.ok === false && blocked.code === 'profile_blocked_by_viewer', 'block към bot → отказ')
+    assertEqual(getWalletBalance(db2, 'bl-a'), 8500, 'един debit')
+    db2.close()
+    botStore.close()
   })
 })
 

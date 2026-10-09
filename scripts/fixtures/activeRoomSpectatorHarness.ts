@@ -45,6 +45,44 @@ function record(name: string) {
 let emulateMainSpectatorExit = false
 function setEmulateMainSpectatorExit(value: boolean): void { emulateMainSpectatorExit = value }
 
+// Gift recipient precheck (onProfileByIdLoad = GET /api/profiles/:id в
+// production) — по подразбиране 'ok' (непроменено поведение за останалите
+// тестове); 'deferred' държи заявката до resolveDeferredProfileLoad().
+type ProfileLoadMode = 'ok' | 'profile_blocked_by_viewer' | 'profile_blocked_viewer' | 'error' | 'deferred'
+let profileLoadMode: ProfileLoadMode = 'ok'
+const profileLoadRequests: string[] = []
+let deferredProfileLoad: { profileId: string; resolve: (mode: Exclude<ProfileLoadMode, 'deferred'>) => void } | null = null
+function setProfileLoadMode(mode: ProfileLoadMode): void { profileLoadMode = mode }
+function resolveDeferredProfileLoad(mode: Exclude<ProfileLoadMode, 'deferred'>): boolean {
+  if (!deferredProfileLoad) return false
+  const pending = deferredProfileLoad
+  deferredProfileLoad = null
+  pending.resolve(mode)
+  return true
+}
+function profileLoadResult(profileId: string, mode: Exclude<ProfileLoadMode, 'deferred'>) {
+  if (mode === 'ok') return { ok: true as const, profile: { profileId } }
+  if (mode === 'error') return { ok: false as const, message: 'Няма връзка със сървъра.' }
+  return { ok: false as const, message: 'blocked', code: mode }
+}
+async function stubProfileByIdLoad(profileId: string) {
+  profileLoadRequests.push(profileId)
+  if (profileLoadMode !== 'deferred') return profileLoadResult(profileId, profileLoadMode)
+  return new Promise<ReturnType<typeof profileLoadResult>>((resolve) => {
+    deferredProfileLoad = { profileId, resolve: (mode) => resolve(profileLoadResult(profileId, mode)) }
+  })
+}
+function profileAccessBlockPopupInfo(): { visible: boolean; text: string } {
+  const node = document.querySelector('[data-profile-access-block-popup-root="1"]')
+  return { visible: node !== null, text: node?.textContent?.replace(/\s+/g, ' ').trim() ?? '' }
+}
+function tableGiftToastText(): string | null {
+  return document.querySelector('[data-table-gift-toast="1"]')?.textContent ?? null
+}
+function giftPrecheckPendingCss(): string | null {
+  return document.getElementById('gift-recipient-precheck-pending-style')?.textContent ?? null
+}
+
 const controller = createActiveRoomFlowController({
   root: root as unknown as HTMLDivElement,
   isConnected: () => true,
@@ -61,6 +99,7 @@ const controller = createActiveRoomFlowController({
   sendPhraseReaction: record('sendPhraseReaction'),
   sendTableGift: record('sendTableGift'),
   onGiftItemCatalogLoad: async () => ({ ok: true, items: [{ giftItemId: 'gift-rose', name: 'Роза', imageUrl: '/images/belot/belot-spectator-viewer.webp', price: 100 }] }),
+  onProfileByIdLoad: stubProfileByIdLoad,
   getAuthSession: () => ({ profile: { yellowCoinsBalance: 50000 } }),
   requestPlayerProfile: record('requestPlayerProfile'),
   getFriendshipAction: () => null,
@@ -936,5 +975,12 @@ function reset(): void {
   giftFlightKeyframes,
   tableCenterFromProfiles,
   giftModalTopmostCheck,
+  // Gift recipient block precheck
+  setProfileLoadMode,
+  resolveDeferredProfileLoad,
+  getProfileLoadRequests: () => profileLoadRequests.slice(),
+  profileAccessBlockPopupInfo,
+  tableGiftToastText,
+  giftPrecheckPendingCss,
   getCalls: () => calls,
 }

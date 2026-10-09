@@ -148,8 +148,10 @@ import {
 } from './renderSeatProfileOverlay'
 import {
   mountStandaloneProfileAccessBlockPopup,
+  type ProfileAccessBlockCode,
   type ProfileAccessBlockPopupState,
 } from '../../ui/overlays/renderProfileAccessBlockPopup'
+import { isProfileAccessBlockCode, precheckGiftRecipient, setGiftPrecheckPending } from '../gifts/giftRecipientPrecheck'
 
 const SEAT_LABELS: Record<Seat, string> = {
   bottom: 'Долу',
@@ -5712,12 +5714,62 @@ export function createActiveRoomFlowController(
   } | null = null
   let tableGiftCatalogRequestToken = 0
   let tableGiftToastTimerId: number | null = null
+  // Проверка за блокиране преди отваряне на селектора — един in-flight
+  // наведнъж (повторни кликове се игнорират). closeTableGiftModal (вкл. всички
+  // reset/exit пътища) я инвалидира; резултатът се прилага само ако СЪЩАТА
+  // стая и СЪЩИЯТ получател на мястото са все още актуални.
+  let tableGiftPrecheck: { token: number; roomId: string; seat: Seat; profileId: string } | null = null
+  let tableGiftPrecheckToken = 0
 
   function getMyYellowCoinsBalance(): number | null {
     return options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null
   }
 
+  function clearTableGiftPrecheck(): void {
+    tableGiftPrecheck = null
+    setGiftPrecheckPending('belot-table-gift', null)
+  }
+
+  function showTableGiftRecipientBlocked(profileId: string, code: ProfileAccessBlockCode): void {
+    profileAccessBlockPopup = { profileId, code }
+    renderProfileAccessBlockPopupState()
+  }
+
   function openTableGiftModal(recipientSeat: Seat): void {
+    if (!activeRoomState || tableGiftPrecheck !== null) return
+
+    const seatSnapshot = activeRoomState.seats.find((s) => s.seat === recipientSeat)
+    if (!seatSnapshot || !seatSnapshot.profileId) return
+    const controlledSeat = activeRoomState.controlledSeat
+    if (controlledSeat !== null && recipientSeat === controlledSeat) return
+
+    const token = ++tableGiftPrecheckToken
+    const roomId = activeRoomState.roomId
+    const profileId = seatSnapshot.profileId
+    tableGiftPrecheck = { token, roomId, seat: recipientSeat, profileId }
+    setGiftPrecheckPending('belot-table-gift', `[data-active-room-gift-icon="${recipientSeat}"]`)
+
+    void (async () => {
+      const result = await precheckGiftRecipient(options.onProfileByIdLoad, profileId)
+      if (tableGiftPrecheck?.token !== token) return
+      clearTableGiftPrecheck()
+      // Остарял резултат: друга/напусната стая или друг играч на мястото.
+      if (!activeRoomState || activeRoomState.roomId !== roomId) return
+      if (activeRoomState.seats.find((s) => s.seat === recipientSeat)?.profileId !== profileId) return
+
+      if (result.status === 'blocked') {
+        showTableGiftRecipientBlocked(profileId, result.code)
+        return
+      }
+      if (result.status === 'error') {
+        showTableGiftToast(result.message)
+        return
+      }
+      openTableGiftModalAfterPrecheck(recipientSeat)
+    })()
+  }
+
+  function openTableGiftModalAfterPrecheck(recipientSeat: Seat): void {
     if (!activeRoomState) return
 
     const seatSnapshot = activeRoomState.seats.find((s) => s.seat === recipientSeat)
@@ -5770,6 +5822,7 @@ export function createActiveRoomFlowController(
   }
 
   function closeTableGiftModal(): void {
+    clearTableGiftPrecheck()
     tableGiftCatalogRequestToken += 1
     tableGiftModal = null
     syncTableGiftModal()
@@ -5807,6 +5860,7 @@ export function createActiveRoomFlowController(
     requestId: string
     ok: boolean
     message?: string
+    code?: ProfileAccessBlockCode
     chargedPrice?: number
     senderBalanceAfter?: number
   }): void {
@@ -5815,6 +5869,16 @@ export function createActiveRoomFlowController(
     }
 
     if (!message.ok) {
+      // Единственото изключение от "не затваряй модала при грешка": сървърът
+      // отказа заради блокиране (напр. block, направен докато селекторът е
+      // отворен) — затваряме селектора и показваме popup-а за СЪЩИЯ получател,
+      // към който е бил този request.
+      if (isProfileAccessBlockCode(message.code)) {
+        const blockedProfileId = tableGiftModal.recipientProfileId
+        closeTableGiftModal()
+        showTableGiftRecipientBlocked(blockedProfileId, message.code)
+        return
+      }
       tableGiftModal.submittingGiftItemId = null
       tableGiftModal.pendingRequestId = null
       tableGiftModal.errorText = message.message ?? 'Подаръкът не беше изпратен.'
@@ -7078,6 +7142,11 @@ export function createActiveRoomFlowController(
     setConnectionState,
     leaveActiveRoom,
     hasActiveRoom,
+    showProfileAccessBlockPopup: (profileId: string, code: ProfileAccessBlockCode) => {
+      if (!activeRoomState) return
+      removeSeatProfileOverlay()
+      showTableGiftRecipientBlocked(profileId, code)
+    },
     isActiveRoomParticipant,
     getActiveNonTournamentRoomInfo,
     getCurrentRoomId,

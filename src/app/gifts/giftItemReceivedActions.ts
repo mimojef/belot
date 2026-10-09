@@ -29,6 +29,8 @@ export type GiftBackResolution =
   | { status: 'opened' }
   | { status: 'busy' }
   | { status: 'error'; message: string }
+  /** Блокиране в която и да е посока — caller-ът показва profile access block popup-а. */
+  | { status: 'blocked'; profileId: string; code: 'profile_blocked_by_viewer' | 'profile_blocked_viewer' }
 
 export function canOfferGiftBack(
   fromProfileId: string | null | undefined,

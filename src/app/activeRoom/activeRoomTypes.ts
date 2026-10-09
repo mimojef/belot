@@ -106,6 +106,8 @@ export type CreateActiveRoomFlowControllerOptions = {
     | { ok: true; items: Array<{ giftItemId: string; name: string; imageUrl: string; price: number }> }
     | { ok: false; message: string }
   >
+  /** Проверка за блокиране преди отваряне на gift селектора (GET /api/profiles/:id). */
+  onProfileByIdLoad?: import('../gifts/giftRecipientPrecheck').GiftRecipientProfileLoader
   /** Reuse на СЪЩОТО authSession balance поле, което ползва и lobby-то. */
   getAuthSession?: () => { profile: { yellowCoinsBalance: number | null } } | null
   requestPlayerProfile: (roomId: string, seat: Seat) => void
@@ -182,6 +184,8 @@ export type ActiveRoomFlowController = {
   setConnectionState: (isConnected: boolean, message: string | null) => void
   leaveActiveRoom: () => void
   hasActiveRoom: () => boolean
+  /** Съществуващия profile access block popup (standalone) — за "Подари и ти" по време на Белот. */
+  showProfileAccessBlockPopup: (profileId: string, code: import('../../ui/overlays/renderProfileAccessBlockPopup').ProfileAccessBlockCode) => void
   // "Реален участник" (seat/decision rights), за разлика от hasActiveRoom()
   // (= "activeRoom view е отворен", вярно и за spectator). Виж §3 брифа.
   isActiveRoomParticipant: () => boolean

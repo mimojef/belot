@@ -1056,6 +1056,8 @@ export type TableGiftSendResultMessage = {
   requestId: string
   ok: boolean
   message?: string
+  /** Само при блокиране sender↔recipient (която и да е посока) — кодовете на profile access block popup-а. */
+  code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
   transactionId?: string
   chargedPrice?: number
   senderBalanceAfter?: number
@@ -1299,6 +1301,8 @@ export type LudoGiftSendResultMessage = {
   requestId: string
   ok: boolean
   message?: string
+  /** Само при блокиране sender↔recipient (която и да е посока) — кодовете на profile access block popup-а. */
+  code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer'
   transactionId?: string
   chargedPrice?: number
   senderBalanceAfter?: number

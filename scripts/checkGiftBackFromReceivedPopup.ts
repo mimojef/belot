@@ -13,7 +13,8 @@
 //    from_display_name към ДРУГ съществуващ потребител пак стига до A);
 //  - cancel от picker-а не праща нищо; недостатъчен баланс = сегашното
 //    поведение; бързи/повторни кликове → 1 request, 1 debit;
-//  - блокиран подател / липсващ sender id → без невалиден picker;
+//  - блокиран подател → съществуващият profile access block popup, без picker;
+//  - липсващ sender id → без невалиден picker;
 //  - mobile (320/360) и desktop layout на бутоните.
 //
 // Harness: scripts/giftBackTestHarness.ts (изолирано копие на server/src +
@@ -232,12 +233,14 @@ try {
 
   // ── 3. Невалиден подател ──────────────────────────────────────────────
   console.log('\n=== Invalid sender ===')
-  // (a) Подател, когото B е блокирал → съществуващото сървърно съобщение, без picker.
+  // (a) Подател, когото B блокира СЛЕД като подаръкът е получен (offline
+  // delivery) → съществуващият block popup, без picker. Подарък от вече
+  // блокиран подател не може да бъде изпратен изобщо (giftItemStore.sendGiftItem).
+  await sendGiftViaApi(A, B) // offline delivery
   const blockRes = await fetch(`${backendOrigin}/api/profiles/${encodeURIComponent(A.profileId)}/block`, {
     method: 'POST', headers: { Cookie: `belot_session=${B.cookie}` },
   })
   assert(blockRes.ok, `block failed: ${blockRes.status}`)
-  await sendGiftViaApi(A, B) // offline delivery
   // (b) Legacy delivery без transaction ред → fromProfileId null.
   db.exec('PRAGMA foreign_keys = OFF;')
   db.prepare(`INSERT INTO gift_item_delivery_log (transaction_id, recipient_profile_id, gift_item_id, item_name, image_url, from_display_name) VALUES (?, ?, ?, ?, ?, ?)`)
@@ -249,19 +252,24 @@ try {
   await check('[13] mobile 320: бутоните са вътре в popup-а', async () => {
     await assertActionsLayout(bSmall.page, `${LOBBY} [role="dialog"]`, 'mobile 320 offline')
   })
-  await check('[14] блокиран подател: "Подари и ти" показва съществуващото съобщение и НЕ отваря picker', async () => {
+  // Блокиран подател (B е блокирал A) → съществуващият profile access block
+  // popup ("Този потребител е блокиран от Вас."), received popup-ът се
+  // затваря, picker НЕ се отваря; следващият чакащ received popup изчаква
+  // затварянето на block popup-а (не излиза върху него).
+  const BLOCK_POPUP = '[data-profile-access-block-popup-root="1"]'
+  await check('[14] блокиран подател: "Подари и ти" показва съществуващия block popup и НЕ отваря picker', async () => {
     await bSmall.page.locator(LOBBY_BACK).click()
-    await bSmall.page.locator(`${LOBBY} [data-gift-item-received-error="1"]`).waitFor({ state: 'visible', timeout: 10_000 })
-    const errorText = await bSmall.page.locator(`${LOBBY} [data-gift-item-received-error="1"]`).innerText()
-    assert(errorText.includes('блокиран'), `error text: ${errorText}`)
+    await bSmall.page.locator(BLOCK_POPUP).waitFor({ state: 'visible', timeout: 10_000 })
+    const popupText = await bSmall.page.locator(BLOCK_POPUP).innerText()
+    assert(popupText.includes('Този потребител е блокиран от Вас.'), `popup text: ${popupText}`)
     await snap(bSmall.page, 'mobile-320-blocked')
     assert((await bSmall.page.locator(PICKER).count()) === 0, 'picker opened for blocked sender')
-    assert((await bSmall.page.locator(LOBBY_BACK).count()) === 0, '"Подари и ти" should be hidden after error')
+    assert((await bSmall.page.locator(LOBBY).count()) === 0, 'received popup must be closed / next one must wait')
     assert(bSmall.giftSendUrls.length === 0, 'send happened')
   })
-  await check('[15] "OK" след грешката затваря и показва следващия (legacy) popup', async () => {
-    await bSmall.page.locator(LOBBY_OK).click()
-    await bSmall.page.waitForTimeout(400)
+  await check('[15] затварянето на block popup-а показва следващия (legacy) popup', async () => {
+    await bSmall.page.locator(`${BLOCK_POPUP} [role="dialog"] [data-profile-access-block-close="1"]`).click()
+    await bSmall.page.locator(BLOCK_POPUP).waitFor({ state: 'detached', timeout: 5_000 })
     await bSmall.page.locator(LOBBY).waitFor({ state: 'visible', timeout: 5_000 })
   })
   await check('[16] delivery без sender profile_id → само "OK" (без невалиден gift flow)', async () => {

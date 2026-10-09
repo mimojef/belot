@@ -45,6 +45,13 @@ import { isValidAnimatedEmojiId } from '../../animatedEmoji/animatedEmojiAssets'
 import { LUDO_EMOJI_BUBBLE_TOTAL_MS } from './pieces/renderLudoPlayerPanel'
 import { LUDO_MODAL_LAYER_Z_INDEX, LUDO_GIFT_MODAL_Z_INDEX, LUDO_GIFT_FLIGHT_Z_INDEX } from './ludoLayerHierarchy'
 import { createGiftPickerModal, type GiftPickerModal, type GiftPickerCatalogLoadResult } from '../../gifts/createGiftPickerModal'
+import {
+  isProfileAccessBlockCode,
+  precheckGiftRecipient,
+  setGiftPrecheckPending,
+  type GiftRecipientProfileLoader,
+} from '../../gifts/giftRecipientPrecheck'
+import type { ProfileAccessBlockCode } from '../../../ui/overlays/renderProfileAccessBlockPopup'
 import { playGiftFlightAnimation } from '../../gifts/playGiftFlightAnimation'
 import { createLudoMockPlayers } from './mock/ludoMockState'
 import { buildLudoMoveRoute } from './board/ludoMoveRoute'
@@ -116,6 +123,10 @@ export interface LudoFlowControllerOptions {
     // от createLobbyFlowController.ts (options.onGiftItemCatalogLoad, вече
     // reuse-нат и от lobby "Подарък"/table gift picker-ите).
     onGiftItemCatalogLoad?: () => Promise<GiftPickerCatalogLoadResult>
+    // Проверка за блокиране преди отваряне на picker-а (GET /api/profiles/:id)
+    // и показване на съществуващия profile access block popup (lobby-то).
+    onGiftRecipientProfileLoad?: GiftRecipientProfileLoader
+    onGiftRecipientBlocked?: (profileId: string, code: ProfileAccessBlockCode) => void
     isConnected?: () => boolean
     getWalletBalance?: () => number | null
     // Server-authoritative нов баланс СЛЕД успешен gift send (mirror на
@@ -390,12 +401,53 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
           isConnected: () => options.authoritative!.isConnected?.() ?? true,
           onSubmit: (recipientColor, recipientProfileId, giftItemId, requestId) => {
             if (!authoritativeSnapshot) return
+            pendingGiftSubmit = { requestId, recipientProfileId }
             options.authoritative!.onGiftSend?.(authoritativeSnapshot.matchId, recipientProfileId, giftItemId, requestId)
             void recipientColor
           },
           onBalanceUpdate: (newBalance) => options.authoritative!.onGiftBalanceUpdate?.(newBalance),
+          onClose: () => { pendingGiftSubmit = null },
         })
       : null
+  // Последният изпратен request от отворения picker — server отказ заради
+  // блокиране показва popup-а САМО за този request/получател (stale guard).
+  let pendingGiftSubmit: { requestId: string; recipientProfileId: string } | null = null
+  // Проверка за блокиране преди open() — една наведнъж; destroy я инвалидира.
+  let giftPrecheck: { token: number; matchId: string; color: LudoColor; profileId: string } | null = null
+  let giftPrecheckToken = 0
+
+  function clearGiftPrecheck(): void {
+    giftPrecheck = null
+    setGiftPrecheckPending('ludo-gift', null)
+  }
+
+  function openGiftPickerWithPrecheck(color: LudoColor, profileId: string, displayName: string): void {
+    if (giftPickerModal === null || !authoritativeSnapshot || giftPrecheck !== null) return
+    const token = ++giftPrecheckToken
+    const matchId = authoritativeSnapshot.matchId
+    giftPrecheck = { token, matchId, color, profileId }
+    setGiftPrecheckPending('ludo-gift', `[data-ludo-gift-icon="${color}"]`)
+
+    void (async () => {
+      const result = await precheckGiftRecipient(options.authoritative?.onGiftRecipientProfileLoad, profileId)
+      if (giftPrecheck?.token !== token) return
+      clearGiftPrecheck()
+      // Остарял резултат: друг/приключил мач или друг играч с този цвят.
+      if (isDestroyed || giftPickerModal === null || !authoritativeSnapshot) return
+      if (authoritativeSnapshot.matchId !== matchId || authoritativeSnapshot.state.status === 'finished') return
+      if (authoritativeSnapshot.players.find((player) => player.color === color)?.profileId !== profileId) return
+
+      if (result.status === 'blocked') {
+        options.authoritative?.onGiftRecipientBlocked?.(profileId, result.code)
+        return
+      }
+      if (result.status === 'error') {
+        giftPickerModal.showToast(result.message)
+        return
+      }
+      giftPickerModal.open(color, profileId, displayName)
+    })()
+  }
 
   function rememberGiftTransaction(transactionId: string): void {
     processedGiftTransactionIds.add(transactionId)
@@ -603,9 +655,20 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     requestId: string
     ok: boolean
     message?: string
+    code?: ProfileAccessBlockCode
     chargedPrice?: number
     senderBalanceAfter?: number
   }): void {
+    // Сървърен отказ заради блокиране (напр. block, направен докато picker-ът
+    // е отворен) — затваряме picker-а и показваме popup-а за получателя на
+    // СЪЩИЯ request; остарели отговори (picker затворен/друг request) се игнорират.
+    if (!message.ok && isProfileAccessBlockCode(message.code) && giftPickerModal !== null) {
+      const pending = pendingGiftSubmit
+      if (pending === null || pending.requestId !== message.requestId) return
+      giftPickerModal.close()
+      options.authoritative?.onGiftRecipientBlocked?.(pending.recipientProfileId, message.code)
+      return
+    }
     giftPickerModal?.handleSendResult(message.requestId, message)
   }
 
@@ -1295,7 +1358,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
         if (!color) return
         const recipient = authoritativeSnapshot.players.find((player) => player.color === color)
         if (!recipient) return
-        giftPickerModal.open(color, recipient.profileId, recipient.displayName)
+        openGiftPickerWithPrecheck(color, recipient.profileId, recipient.displayName)
       })
     })
 
@@ -2280,6 +2343,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     diceResultOverlay.clearLanded()
     modalLayerRoot.remove()
     clearAllGiftOverlays()
+    clearGiftPrecheck()
     giftPickerModal?.destroy()
   }
 

@@ -3040,7 +3040,7 @@ async function sendGiftItem(
   requestId: string,
 ): Promise<
   | { ok: true; itemName: string; senderBalanceAfter: number }
-  | { ok: false; message: string }
+  | { ok: false; message: string; code?: 'profile_blocked_by_viewer' | 'profile_blocked_viewer' }
 > {
   try {
     const response = await fetch(
@@ -3057,10 +3057,14 @@ async function sendGiftItem(
       giftItem?: GiftItemSnapshot
       senderBalanceAfter?: number
       message?: string
+      code?: string
     }
 
     if (!response.ok || !data.ok) {
-      return { ok: false, message: data.message ?? 'Подаръкът не беше изпратен.' }
+      // Блокиране (която и да е посока) — кодът стига до picker-а, за да
+      // покаже съществуващия profile access block popup.
+      const code = data.code === 'profile_blocked_by_viewer' || data.code === 'profile_blocked_viewer' ? data.code : undefined
+      return { ok: false, message: data.message ?? 'Подаръкът не беше изпратен.', ...(code ? { code } : {}) }
     }
 
     return {
@@ -6682,6 +6686,7 @@ lobby = createLobbyFlowController({
   },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
+  onShowInGameProfileAccessBlockPopup: (profileId, code) => activeRoom.showProfileAccessBlockPopup(profileId, code),
   onShowModerationForcedExitPopup: (input) => {
     showModerationForcedExitPopup(input)
   },
@@ -7145,6 +7150,7 @@ const activeRoom = createActiveRoomFlowController({
   },
   // Reuse на СЪЩИЯ public catalog endpoint като lobby gift модала.
   onGiftItemCatalogLoad: () => loadGiftItemCatalog(),
+  onProfileByIdLoad: (profileId) => loadProfileById(profileId),
   getAuthSession: () => currentAuthSession,
   requestPlayerProfile: (roomId, seat) => {
     client.requestPlayerProfile(roomId, seat)
@@ -7662,6 +7668,13 @@ function showGiftItemReceivedPopup(itemName: string, imageUrl: string, fromDispl
       if (!host.isConnected) return
       if (result.status === 'opened') {
         host.remove()
+        return
+      }
+      // Блокиране → received popup-ът се затваря и се показва съществуващият
+      // profile access block popup (само ако popup-ът е все още отворен).
+      if (result.status === 'blocked') {
+        host.remove()
+        lobby.showGiftRecipientBlockedPopup(result.profileId, result.code)
         return
       }
       if (actionsHost) {

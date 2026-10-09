@@ -30,6 +30,7 @@ import {
   type GiftItemReceivedEntry,
 } from '../gifts/giftItemReceivedActions'
 import { createGiftPickerModal, type GiftPickerModal } from '../gifts/createGiftPickerModal'
+import { isProfileAccessBlockCode, precheckGiftRecipient, setGiftPrecheckPending } from '../gifts/giftRecipientPrecheck'
 import {
   renderLobbyScreen,
   escapeHtml,
@@ -734,8 +735,10 @@ export type CreateLobbyFlowControllerOptions = {
     requestId: string,
   ) => Promise<
     | { ok: true; itemName: string; senderBalanceAfter: number }
-    | { ok: false; message: string }
+    | { ok: false; message: string; code?: ProfileAccessBlockCode }
   >
+  /** Profile access block popup-а на active room контролера (Белот) — lobby render-ът е suppressed там. */
+  onShowInGameProfileAccessBlockPopup?: (profileId: string, code: ProfileAccessBlockCode) => void
   onMarkGiftItemDeliveryShown?: (transactionId: string) => Promise<void>
   // "Подари авоари" recipient notification ACK — mirror на
   // onMarkGiftItemDeliveryShown по-горе (ОТДЕЛЕН domain).
@@ -1486,6 +1489,8 @@ export type LobbyFlowController = {
    * recipient = подателя; при невалиден профил връща error (picker не се отваря).
    */
   openGiftBackFromSender: (senderProfileId: string | null, displayNameHint: string) => Promise<GiftBackResolution>
+  /** Съществуващия profile access block popup (lobby или Белот standalone) — при 'blocked' от openGiftBackFromSender. */
+  showGiftRecipientBlockedPopup: (profileId: string, code: ProfileAccessBlockCode) => void
   setAdminMonitoringSnapshot: (snapshot: import('../adminServer/adminServerTypes.js').MonitoringSnapshot) => void
   setAdminMonitoringError: (message: string) => void
   forceLeaveAdminScreenForbidden: (message: string) => void
@@ -3541,6 +3546,8 @@ export function createLobbyFlowController(
         onGiftSend: (matchId, recipientProfileId, giftItemId, requestId) =>
           options.onSendLudoGift?.(matchId, recipientProfileId, giftItemId, requestId),
         onGiftItemCatalogLoad: () => options.onGiftItemCatalogLoad?.() ?? Promise.resolve({ ok: false, message: 'Подаряването временно не е налично.' }),
+        onGiftRecipientProfileLoad: options.onProfileByIdLoad,
+        onGiftRecipientBlocked: (profileId, code) => { showGiftRecipientBlockedPopup(profileId, code) },
         isConnected: () => state.isConnected,
         getWalletBalance: () => options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null,
         onGiftBalanceUpdate: (newBalance) => {
@@ -6395,6 +6402,7 @@ export function createLobbyFlowController(
         }
         state.profileAccessBlockPopup = null
         render()
+        showNextGiftItemNotification()
       },
       onProfileAccessBlockUnblock: (profileId) => {
         void (async () => {
@@ -6405,6 +6413,9 @@ export function createLobbyFlowController(
           // (fresh onProfileByIdLoad заявка), за да не дублираме profile
           // rendering логика и да не показваме stale/cached denial state.
           await openProtectedProfileById(profileId)
+          // Block popup-ът е затворен от openProtectedProfileById — чакащите
+          // received подаръци продължават (виж showNextGiftItemNotification).
+          showNextGiftItemNotification()
         })()
       },
       onProfileAccessBlockBlock: (profileId) => {
@@ -6535,7 +6546,7 @@ export function createLobbyFlowController(
         render()
       },
       onGiftItemClick: (recipientProfileId) => {
-        openGiftItemModal(recipientProfileId)
+        openGiftItemModalWithPrecheck(recipientProfileId)
       },
       onGiftItemModalClose: () => {
         closeGiftItemModal()
@@ -14260,6 +14271,7 @@ export function createLobbyFlowController(
         state.profileAccessBlockPopup = null
         state.blockLimitPopupOpen = true
         render()
+        showNextGiftItemNotification()
         return
       }
       state.profileAccessBlockPopup = {
@@ -14318,6 +14330,7 @@ export function createLobbyFlowController(
       if (state.profileAccessBlockPopup?.profileId === profileId && state.profileAccessBlockPopup.blockSuccess) {
         state.profileAccessBlockPopup = null
         render()
+        showNextGiftItemNotification()
       }
     }, 900)
   }
@@ -14752,6 +14765,55 @@ export function createLobbyFlowController(
     )
   }
 
+  // Съществуващия profile access block popup за получател на подарък (виж
+  // renderProfileAccessBlockPopup). По време на Белот lobby render-ът е
+  // suppressed → standalone popup-ът на active room контролера.
+  function showGiftRecipientBlockedPopup(profileId: string, code: ProfileAccessBlockCode): void {
+    if (options.getIsInGame?.() ?? false) {
+      options.onShowInGameProfileAccessBlockPopup?.(profileId, code)
+      return
+    }
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupContext = 'other'
+    syncProfilePopup({ isOpen: false, profile: null, canEdit: false, friendshipAction: null }, getPopupCallbacks())
+    state.profileAccessBlockPopup = { profileId, code }
+    render()
+  }
+
+  // "Подари" от профилния popup — проверка за блокиране ПРЕДИ openGiftItemModal.
+  // Една in-flight проверка; резултатът се прилага само ако popup-ът е все
+  // още отворен за СЪЩИЯ профил.
+  let _profileGiftPrecheck: { token: number; profileId: string } | null = null
+  let _profileGiftPrecheckToken = 0
+
+  function openGiftItemModalWithPrecheck(recipientProfileId: string): void {
+    if (_profileGiftPrecheck !== null) return
+    const token = ++_profileGiftPrecheckToken
+    _profileGiftPrecheck = { token, profileId: recipientProfileId }
+    setGiftPrecheckPending('lobby-profile-gift', `[data-player-profile-gift-item="${CSS.escape(recipientProfileId)}"]`)
+
+    void (async () => {
+      const result = await precheckGiftRecipient(options.onProfileByIdLoad, recipientProfileId)
+      if (_profileGiftPrecheck?.token !== token) return
+      _profileGiftPrecheck = null
+      setGiftPrecheckPending('lobby-profile-gift', null)
+      if (!state.profilePopupOpen || state.profilePopupProfile?.profileId !== recipientProfileId) return
+
+      if (result.status === 'blocked') {
+        showGiftRecipientBlockedPopup(recipientProfileId, result.code)
+        return
+      }
+      if (result.status === 'error') {
+        state.friendActionMessageProfileId = recipientProfileId
+        state.friendActionMessage = result.message
+        renderPopupOnly()
+        return
+      }
+      openGiftItemModal(recipientProfileId)
+    })()
+  }
+
   // Virtual item gift system (Етап 1) — ОТДЕЛЕН domain от openGiftModal/
   // openGiftModalBypass/submitGiftCoinsCore по-горе (директен coin
   // transfer). Виж giftItemStore.ts (сървър) за authoritative payment
@@ -14829,6 +14891,8 @@ export function createLobbyFlowController(
   const GIFT_BACK_PICKER_KEY = 'gift-back'
   let _giftBackResolveInFlight = false
   let _inGameGiftBackPicker: GiftPickerModal | null = null
+  // requestId на последния submit от ОТВОРЕНИЯ in-game picker (null след close).
+  let _giftBackPendingRequestId: string | null = null
 
   function isInAnyGame(): boolean {
     return (options.getIsInGame?.() ?? false) || _ludoController !== null
@@ -14855,6 +14919,7 @@ export function createLobbyFlowController(
       },
       // Чакащите received popup-и продължават след затваряне (×/backdrop/success).
       onClose: () => {
+        _giftBackPendingRequestId = null
         showNextGiftItemNotification()
       },
     })
@@ -14869,8 +14934,17 @@ export function createLobbyFlowController(
       return
     }
     const balanceBefore = options.getAuthSession?.()?.profile?.yellowCoinsBalance ?? null
+    _giftBackPendingRequestId = requestId
     try {
       const result = await options.onGiftItemSubmit(recipientProfileId, giftItemId, requestId)
+      // Сървърен отказ заради блокиране — само за request-а на ОТВОРЕНИЯ
+      // picker (затворен/повторно отворен междувременно → игнорира се).
+      if (!result.ok && isProfileAccessBlockCode(result.code)) {
+        if (_giftBackPendingRequestId !== requestId) return
+        showGiftRecipientBlockedPopup(recipientProfileId, result.code)
+        picker.close()
+        return
+      }
       picker.handleSendResult(requestId, result.ok
         ? {
             ok: true,
@@ -14901,6 +14975,7 @@ export function createLobbyFlowController(
     | { status: 'ok'; profileId: string; displayName: string }
     | { status: 'busy' }
     | { status: 'error'; message: string }
+    | { status: 'blocked'; profileId: string; code: ProfileAccessBlockCode }
   > {
     const ownProfileId = options.getAuthSession?.()?.profile.profileId ?? null
 
@@ -14923,6 +14998,9 @@ export function createLobbyFlowController(
     _giftBackResolveInFlight = true
     try {
       const result = await loadProfileById(senderId)
+      if (!result.ok && isProfileAccessBlockCode(result.code)) {
+        return { status: 'blocked', profileId: senderId, code: result.code }
+      }
       if (!result.ok) {
         return {
           status: 'error',
@@ -14970,6 +15048,17 @@ export function createLobbyFlowController(
     // Popup-ът е затворен/сменен междувременно (напр. OK) — нищо не отваряме.
     if (state.giftItemReceivedModal !== delivery) return
     state.giftItemReceivedGiftBackPending = false
+
+    // Блокиране → received popup-ът/банерът се затваря и се показва
+    // съществуващият profile access block popup (без picker).
+    if (resolution.status === 'blocked') {
+      // Popup-ът ПРЕДИ complete-а: следващият чакащ received popup изчаква
+      // затварянето му (виж showNextGiftItemNotification), вместо да излезе отгоре.
+      showGiftRecipientBlockedPopup(resolution.profileId, resolution.code)
+      completeCurrentGiftItemNotification()
+      render()
+      return
+    }
 
     if (resolution.status !== 'ok') {
       state.giftItemReceivedGiftBackError = resolution.status === 'error' ? resolution.message : null
@@ -15026,6 +15115,10 @@ export function createLobbyFlowController(
     // received popup чака (иначе би излязъл върху picker-а). Продължава от
     // closeGiftItemModal/onGiftItemSuccessClose.
     if (isGiftItemSendFlowOpen()) return
+    // Profile access block popup-ът (напр. "Подари и ти" към блокиран подател)
+    // е отворен — received модалът се рендира СЛЕД него (същия z-index) и би
+    // го покрил. Продължава при затварянето на popup-а (виж onProfileAccessBlockClose).
+    if (state.profileAccessBlockPopup !== null) return
     const next = state.giftItemNotificationQueue.shift()
     if (!next) return
     state.giftItemReceivedModal = next
@@ -15275,6 +15368,17 @@ export function createLobbyFlowController(
     const result = await options.onGiftItemSubmit(recipientProfileId, giftItemId, requestId)
 
     state.giftItemModalSubmittingId = null
+
+    // Сървърен отказ заради блокиране — затваряме селектора и показваме
+    // popup-а само ако селекторът е все още отворен за СЪЩИЯ получател.
+    // Popup-ът ПРЕДИ close-а — closeGiftItemModal пуска чакащите received
+    // popup-и, които трябва да изчакат block popup-а.
+    if (!result.ok && isProfileAccessBlockCode(result.code)) {
+      if (state.giftItemModalRecipientProfileId !== recipientProfileId) return
+      showGiftRecipientBlockedPopup(recipientProfileId, result.code)
+      closeGiftItemModal()
+      return
+    }
 
     if (!result.ok) {
       state.giftItemModalErrorText = result.message
@@ -17954,7 +18058,7 @@ export function createLobbyFlowController(
       onFriendRemoveClick: (friendshipId) => { void removeFriendRelationship(friendshipId) },
       onGiftCoinsClick: (friendshipId) => { openGiftModal(friendshipId) },
       onGiftCoinsBypassClick: (recipientProfileId) => { openGiftModalBypass(recipientProfileId) },
-      onGiftItemClick: (recipientProfileId) => { openGiftItemModal(recipientProfileId) },
+      onGiftItemClick: (recipientProfileId) => { openGiftItemModalWithPrecheck(recipientProfileId) },
       onGiftShopClick: (recipientProfileId) => {
         const previewDisplayName = state.profilePopupProfile?.profileId === recipientProfileId
           ? state.profilePopupProfile.displayName
@@ -21659,6 +21763,7 @@ export function createLobbyFlowController(
     }),
     hasActiveLudoMatch: () => _ludoController !== null,
     openGiftBackFromSender: (senderProfileId, displayNameHint) => openGiftBackFromSender(senderProfileId, displayNameHint),
+    showGiftRecipientBlockedPopup: (profileId, code) => showGiftRecipientBlockedPopup(profileId, code),
     setAdminMonitoringSnapshot: (snapshot) => {
       state.adminMonitoringSnapshot = snapshot
       state.adminMonitoringErrorText = null
