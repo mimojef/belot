@@ -75,7 +75,7 @@ export type CreditCampaignUnitsResult =
       grantedRewards: GrantedRewardSummary[]
       skippedRewards: SkippedRewardSummary[]
     }
-  | { ok: false; reason: 'no_eligible_campaign' | 'campaign_already_archived' | 'negative_total_rejected' }
+  | { ok: false; reason: 'no_eligible_campaign' | 'campaign_already_archived' | 'negative_total_rejected' | 'ineligible_profile' }
 
 export type CampaignRewardNotificationSnapshot = {
   notificationId: string
@@ -169,6 +169,29 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec('PRAGMA busy_timeout = 5000;')
+
+  // ─── Profile eligibility (Фаза 3 §"Изключване на неелигибилни събития")
+  // defense-in-depth, УНИВЕРСАЛНА за всеки caller (Belot/Ludo/бъдещи игри) —
+  // синтетични ботове (profile_kind='bot') и гост/временни профили
+  // (is_temporary=1, СЪЩИЯТ флаг, ползван вече от coinPurchaseStore.ts/
+  // bundlePurchaseStore.ts/vipPurchaseStore.ts/tournamentEconomyStore.ts за
+  // идентична цел — "guest/temporary профили изключени") никога не получават
+  // автоматично game-win начисление. Само за creditCampaignUnits (реални
+  // игрови събития) — НЕ за applyManualAdjustment (explicit admin действие,
+  // извън обхвата на тая проверка) и НЕ за retryPendingGiftReward (довършва
+  // ВЕЧЕ начислена по-рано награда, не начислява нови единици).
+
+  const selectProfileEligibilityStatement = database.prepare(`
+    SELECT profile_kind, is_temporary FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+
+  function isProfileEligibleForGameCredit(profileId: string): boolean {
+    const row = selectProfileEligibilityStatement.get(profileId) as
+      | { profile_kind: string; is_temporary: number }
+      | undefined
+    if (row === undefined) return false
+    return row.profile_kind === 'human' && row.is_temporary === 0
+  }
 
   // ─── Campaign resolution (time-window, за game/purchase събития) ───
 
@@ -648,6 +671,12 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
   function creditCampaignUnits(input: CreditGameOrPurchaseEventInput): CreditCampaignUnitsResult {
     return runInTransaction(() => {
+      if (
+        (input.sourceType === 'belot_win' || input.sourceType === 'ludo_win') &&
+        !isProfileEligibleForGameCredit(input.profileId)
+      ) {
+        return { ok: false, reason: 'ineligible_profile' }
+      }
       const resolved = resolveCampaignForEvent(input.eventAt)
       if (!resolved.ok) return { ok: false, reason: resolved.reason }
       const unitsAmount = resolveUnitsAmountForEvent(resolved.campaign.campaign_id, input)

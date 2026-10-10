@@ -14,6 +14,12 @@ export type ActiveLudoMatchSnapshotStore = {
   loadActiveMatches: () => LudoMatchSnapshot[]
   upsertMatch: (snapshot: LudoMatchSnapshot) => void
   markMatchRemoved: (matchId: string) => void
+  // Фаза 3 (кампании) — durable "оригинален момент на приключване" за
+  // crash-recovery/campaign-attribution (виж campaignGameHooks.ts): редът се
+  // пише ЕДИНСТВЕНО от UPSERT_LUDO_MATCH_SNAPSHOT_SQL по-долу чрез
+  // COALESCE(...,CURRENT_TIMESTAMP) — записан точно ВЕДНЪЖ, оцелява boot
+  // restart непроменен, за разлика от "now" по време на recovery-то.
+  getFinishedAt: (matchId: string) => string | null
   close: () => void
 }
 
@@ -144,6 +150,10 @@ export async function createActiveLudoMatchSnapshotStore(
     DELETE FROM active_ludo_match_snapshots WHERE match_id = ?;
   `)
 
+  const selectFinishedAtStatement = database.prepare(`
+    SELECT finished_at FROM active_ludo_match_snapshots WHERE match_id = ? LIMIT 1;
+  `)
+
   function loadActiveMatches(): LudoMatchSnapshot[] {
     const rows = loadActiveMatchesStatement.all() as ActiveLudoMatchSnapshotRow[]
     const now = Date.now()
@@ -165,6 +175,11 @@ export async function createActiveLudoMatchSnapshotStore(
     markMatchRemovedStatement.run(matchId)
   }
 
+  function getFinishedAt(matchId: string): string | null {
+    const row = selectFinishedAtStatement.get(matchId) as { finished_at: string | null } | undefined
+    return row?.finished_at ?? null
+  }
+
   function close(): void {
     database.close()
   }
@@ -173,6 +188,7 @@ export async function createActiveLudoMatchSnapshotStore(
     loadActiveMatches,
     upsertMatch,
     markMatchRemoved,
+    getFinishedAt,
     close,
   }
 }
