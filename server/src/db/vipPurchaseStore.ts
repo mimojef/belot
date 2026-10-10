@@ -89,7 +89,7 @@ export type VipPurchaseStore = {
    * BEGIN/COMMIT, не може безопасно да участва в ТАЗИ транзакция.
    */
   fulfillPaidPurchase: (params: FulfillPaidVipPurchaseParams) =>
-    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
+    | { ok: true; purchase: VipPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string }
   /**
    * Admin payment statistics contribution от VIP покупки — mirror на
@@ -509,6 +509,14 @@ export async function createVipPurchaseStore(
     | {
         ok: true
         purchase: VipPurchaseSnapshot
+        /**
+         * Платецът (Stripe checkout session собственик) — виж identичния
+         * коментар в coinPurchaseStore.ts::fulfillByInternalRow (Фаза 5):
+         * campaign crediting hook-ът в index.ts начислява тематични единици
+         * на ПЛАТЕЦА, не на gift получателя (VipPurchaseSnapshot нарочно не
+         * го носи — immutable purchase история, не award target).
+         */
+        payerProfileId: string
         alreadyCredited: boolean
         newActiveUntil: string
         payerSuccessText: string | null
@@ -553,6 +561,7 @@ export async function createVipPurchaseStore(
       return {
         ok: true,
         purchase,
+        payerProfileId: row.profile_id,
         alreadyCredited: true,
         newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
         payerSuccessText: purchase.payerSuccessText,
@@ -632,6 +641,7 @@ export async function createVipPurchaseStore(
           return {
             ok: true,
             purchase,
+            payerProfileId: fresh.profile_id,
             alreadyCredited: true,
             newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
             payerSuccessText: purchase.payerSuccessText,
@@ -692,13 +702,13 @@ export async function createVipPurchaseStore(
       return { ok: false, message: 'VIP беше активиран, но покупката не може да се прочете.' }
     }
 
-    return { ok: true, purchase: fulfilled, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
+    return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
   }
 
   function fulfillPaidPurchase(
     params: FulfillPaidVipPurchaseParams,
   ):
-    | { ok: true; purchase: VipPurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
+    | { ok: true; purchase: VipPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
     const { checkoutSessionId, purchaseId, stripePaymentStatus, stripeCurrency, stripeAmountTotalCents } = params
 

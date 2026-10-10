@@ -80,7 +80,9 @@ function renderStatusBadge(row: AdminCampaignRow): string {
 }
 
 function renderPackageOption(pack: AdminCampaignReferenceData['purchasePackages'][number]): string {
-  const label = `${pack.kind === 'bundle' ? 'Bundle' : 'Coins'} · ${pack.title} · ${formatNumber(pack.yellowCoinsAmount)}`
+  const kindLabel = pack.kind === 'bundle' ? 'Bundle' : pack.kind === 'vip' ? 'VIP' : 'Coins'
+  const amountLabel = pack.kind === 'vip' ? `${formatNumber(pack.vipDays ?? 0)} дни` : formatNumber(pack.yellowCoinsAmount)
+  const label = `${kindLabel} · ${pack.title} · ${amountLabel}`
   return `<option value="${esc(pack.packageKey)}">${esc(label)} (${esc(pack.packageKey)})</option>`
 }
 

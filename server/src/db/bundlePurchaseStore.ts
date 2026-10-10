@@ -73,7 +73,7 @@ export type BundlePurchaseStore = {
    * vipPurchaseStore.fulfillByInternalRow doc коментара).
    */
   fulfillPaidPurchase: (params: FulfillPaidBundlePurchaseParams) =>
-    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
+    | { ok: true; purchase: BundlePurchaseSnapshot; payerProfileId: string | null; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string }
   needsPaymentMethodSnapshot: (purchaseId: string) => boolean
   updatePaymentMethodSnapshot: (purchaseId: string, snapshot: PaymentMethodSnapshot) => void
@@ -574,6 +574,15 @@ export async function createBundlePurchaseStore(
     | {
         ok: true
         purchase: BundlePurchaseSnapshot
+        /**
+         * Платецът (Stripe checkout session собственик) — виж identичния
+         * коментар в coinPurchaseStore.ts::fulfillByInternalRow (Фаза 5).
+         * `null` само ако платецът е бил hard-deleted СЛЕД покупката
+         * (20260923_004 — profile_id FK е ON DELETE SET NULL за bundle,
+         * за разлика от coin/VIP) — campaign hook-ът в index.ts трябва да
+         * пропусне начисляването в тоя случай (няма кой да се начисли).
+         */
+        payerProfileId: string | null
         alreadyCredited: boolean
         newActiveUntil: string
         payerSuccessText: string | null
@@ -605,6 +614,7 @@ export async function createBundlePurchaseStore(
       return {
         ok: true,
         purchase,
+        payerProfileId: row.profile_id,
         alreadyCredited: true,
         newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
         payerSuccessText: purchase.payerSuccessText,
@@ -706,6 +716,7 @@ export async function createBundlePurchaseStore(
           return {
             ok: true,
             purchase,
+            payerProfileId: fresh.profile_id,
             alreadyCredited: true,
             newActiveUntil: statusRow ? dbDateToUtc(statusRow.active_until) : '',
             payerSuccessText: purchase.payerSuccessText,
@@ -781,13 +792,13 @@ export async function createBundlePurchaseStore(
       return { ok: false, message: 'Пакетът беше активиран, но покупката не може да се прочете.' }
     }
 
-    return { ok: true, purchase: fulfilled, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
+    return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
   }
 
   function fulfillPaidPurchase(
     params: FulfillPaidBundlePurchaseParams,
   ):
-    | { ok: true; purchase: BundlePurchaseSnapshot; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
+    | { ok: true; purchase: BundlePurchaseSnapshot; payerProfileId: string | null; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
     const { checkoutSessionId, purchaseId, stripePaymentStatus, stripeCurrency, stripeAmountTotalCents } = params
 

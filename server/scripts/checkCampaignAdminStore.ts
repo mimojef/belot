@@ -484,6 +484,30 @@ try {
     assert(!result.ok && result.reason === 'campaign_deleted', `expected campaign_deleted, got ${JSON.stringify(result)}`)
   })
 
+  // ─── Фаза 5 регресия: vip_days reward payload трябва да пише 'days' (мн.ч.) ───
+  await check('[28] vip_days reward tier -> запазеният reward_payload_json.unit е "days" (мн.ч.), съвпада с vip_grants.interval_unit CHECK', () => {
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({ rewardTiers: [{ tierId: null, thresholdUnits: 100, rewards: [{ rewardType: 'vip_days', days: 5 }] }] }),
+      ADMIN_ACTOR,
+    )
+    assert(result.ok, `expected ok, got ${JSON.stringify(result)}`)
+    if (!result.ok) return
+    const tierId = result.value.rewardTiers[0]!.tierId!
+    const row = (async () => {
+      const db = await openRawDb()
+      try {
+        return db.prepare(`SELECT reward_payload_json FROM campaign_tier_rewards WHERE tier_id = ? AND reward_type = 'vip_days';`).get(tierId) as { reward_payload_json: string } | undefined
+      } finally {
+        db.close()
+      }
+    })()
+    return row.then((r) => {
+      assert(r !== undefined, 'очаква се запазен vip_days ред')
+      const payload = JSON.parse(r!.reward_payload_json) as { unit: string }
+      assert(payload.unit === 'days', `очаква се unit="days" (мн.ч.), получено "${payload.unit}" — тая стойност трябва да мине vip_grants.interval_unit CHECK (IN ('days','months','years')) при реално предоставяне на наградата`)
+    })
+  })
+
 } finally {
   adminStore?.close()
   campaignsStore?.close()

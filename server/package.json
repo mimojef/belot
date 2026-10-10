@@ -86,6 +86,8 @@
     "check:campaign-gift-sender-protection": "tsx scripts/checkCampaignGiftSenderProtection.ts --server-root=.",
     "check:campaign-game-hooks": "tsx scripts/checkCampaignGameHooks.ts",
     "check:campaign-admin-store": "tsx scripts/checkCampaignAdminStore.ts --server-root=.",
+    "check:admin-campaigns-http-flow": "tsx scripts/checkAdminCampaignsHttpFlow.ts --server-root=.",
+    "check:campaign-purchase-hooks": "tsx scripts/checkCampaignPurchaseHooks.ts",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",

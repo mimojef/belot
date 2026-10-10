@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { CampaignActionActor, CampaignRecord, CampaignStatus } from './campaignsStore.js'
+import { VIP_PACKAGE_CATALOG, VIP_PACKAGE_IDS } from '../db/vipPurchaseStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -42,7 +43,7 @@ export type CampaignAdminMarketingProfile = {
 export type CampaignAdminPurchasePackage = {
   packageKey: string
   title: string
-  kind: 'coins' | 'bundle'
+  kind: 'coins' | 'bundle' | 'vip'
   yellowCoinsAmount: number
   vipDays: number | null
   status: 'active' | 'inactive'
@@ -439,7 +440,24 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
       status: row.status,
     }))
 
-    return [...coins, ...bundles]
+    // VIP пакети — code-level catalog (vipPurchaseStore.VIP_PACKAGE_CATALOG),
+    // НЕ DB таблица (цените са admin-configurable, но самите 3 packageId-та
+    // са фиксирани server-side константи, виж doc коментара там). Винагu
+    // "active" — няма admin UI за деактивиране на VIP пакет. Добавено във
+    // Фаза 5, за да могат admin-ите реално да конфигурират earn rule за
+    // чисти VIP покупки (не само coin/bundle) — package_key стойностите
+    // ('vip_30'/'vip_180'/'vip_365') са РЕАЛНИТЕ VipPackageId константи,
+    // не измислени — виж campaignPurchaseHooks.ts за crediting страната.
+    const vipPackages = VIP_PACKAGE_IDS.map((packageId) => ({
+      packageKey: packageId,
+      title: VIP_PACKAGE_CATALOG[packageId].title,
+      kind: 'vip' as const,
+      yellowCoinsAmount: 0,
+      vipDays: VIP_PACKAGE_CATALOG[packageId].days,
+      status: 'active' as const,
+    }))
+
+    return [...coins, ...bundles, ...vipPackages]
   }
 
   function listGiftItems(): CampaignAdminGiftItem[] {
@@ -646,7 +664,15 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
         if (reward.rewardType === 'yellow_coins') {
           insertTierRewardStatement.run(randomUUID(), tierId, 'yellow_coins', JSON.stringify({ amount: reward.amount }))
         } else if (reward.rewardType === 'vip_days') {
-          insertTierRewardStatement.run(randomUUID(), tierId, 'vip_days', JSON.stringify({ unit: 'day', amount: reward.days }))
+          // "days" (мн.ч.) — трябва да съвпада ТОЧНО с vip_grants.interval_unit
+          // CHECK constraint-а ('days'|'months'|'years', виж
+          // 20260810_001_create_vip_status_and_grants.sql) и с
+          // campaignCreditStore.ts::grantVipDaysInline, който го препредава
+          // директно без нормализация. Открито и коригирано във Фаза 5
+          // (§2 задължителна Фаза 4 проверка) — старата 'day' (ед.ч.) стойност
+          // никога не беше exercised от Фаза 4's собствени тестове (само
+          // конфигурация/валидация, никога реално прекосяване на праг).
+          insertTierRewardStatement.run(randomUUID(), tierId, 'vip_days', JSON.stringify({ unit: 'days', amount: reward.days }))
         } else {
           insertTierRewardStatement.run(randomUUID(), tierId, 'gift_item', JSON.stringify({ giftItemId: reward.giftItemId }))
         }

@@ -50,6 +50,12 @@ import type { LudoMatchSnapshot } from '../game/ludoMatchRuntime.js'
 import { dbDateToUtc } from '../db/dbDate.js'
 import { isCampaignsFeatureEnabled } from './campaignsFeatureFlag.js'
 import type { CampaignCreditStore } from './campaignCreditStore.js'
+// type-only — campaignPurchaseHooks.ts самата ИМПОРТИРА cursor helper-ите
+// от тоя файл (виж по-долу); пълен VALUE import тук би създал circular
+// runtime dependency между двата модула. Самата reconcile функция се
+// инжектира отвън (виж CampaignCreditReconciliationJobDeps.reconcilePurchases
+// по-долу) — index.ts е единствената точка, която импортира ОБЕ стойности.
+import type { PurchaseCampaignReconciliationResult } from './campaignPurchaseHooks.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -220,20 +226,26 @@ const RECONCILIATION_UNBOUNDED_SINCE_ISO = '1970-01-01T00:00:00.000Z'
 const RECONCILIATION_DEFAULT_LIMIT = 10_000
 const RECONCILIATION_INITIAL_CURSOR = { eventAt: '', sourceId: '', profileId: '' }
 
-type ReconciliationSourceType = 'belot_win' | 'ludo_win'
+// Фаза 5 добавя 3 нови source_type ключове (purchase reconciliation,
+// campaignPurchaseHooks.ts) — виж migration
+// 20261015_001_extend_campaign_credit_reconciliation_state_source_types.sql
+// за CHECK constraint rebuild-а. Hелпърите по-долу са export-нати изрично
+// за да ги преизползва campaignPurchaseHooks.ts — "не създавай втори
+// независим и противоречив механизъм" (виж Фаза 5 §7).
+export type ReconciliationSourceType = 'belot_win' | 'ludo_win' | 'package_purchase_coin' | 'package_purchase_bundle' | 'package_purchase_vip'
 
-type ReconciliationCursor = {
+export type ReconciliationCursor = {
   eventAt: string
   sourceId: string
   profileId: string
 }
 
-function normalizeReconciliationLimit(limit: number): number {
+export function normalizeReconciliationLimit(limit: number): number {
   if (!Number.isFinite(limit) || limit <= 0) return RECONCILIATION_DEFAULT_LIMIT
   return Math.max(1, Math.floor(limit))
 }
 
-function getReconciliationCursor(
+export function getReconciliationCursor(
   database: SqliteDatabase,
   sourceType: ReconciliationSourceType,
 ): ReconciliationCursor {
@@ -257,7 +269,7 @@ function getReconciliationCursor(
     : { eventAt: row.cursor_event_at, sourceId: row.cursor_source_id, profileId: row.cursor_profile_id }
 }
 
-function saveReconciliationCursor(
+export function saveReconciliationCursor(
   database: SqliteDatabase,
   sourceType: ReconciliationSourceType,
   cursor: ReconciliationCursor,
@@ -274,7 +286,7 @@ function saveReconciliationCursor(
   `).run(sourceType, cursor.eventAt, cursor.sourceId, cursor.profileId)
 }
 
-function resetReconciliationCursor(database: SqliteDatabase, sourceType: ReconciliationSourceType): void {
+export function resetReconciliationCursor(database: SqliteDatabase, sourceType: ReconciliationSourceType): void {
   saveReconciliationCursor(database, sourceType, RECONCILIATION_INITIAL_CURSOR)
 }
 
@@ -719,6 +731,7 @@ export type CampaignCreditReconciliationHealth = {
   lastError: string | null
   lastBelotResult: BelotCampaignReconciliationResult | null
   lastLudoResult: LudoCampaignReconciliationResult | null
+  lastPurchaseResult: PurchaseCampaignReconciliationResult | null
 }
 
 export type CampaignCreditReconciliationJob = {
@@ -739,6 +752,18 @@ export type CampaignCreditReconciliationJobDeps = {
   now?: () => Date
   setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
   clearInterval?: (id: ReturnType<typeof globalThis.setInterval>) => void
+  /**
+   * Фаза 5 — инжектирана зависимост (не статичен import, виж доc коментара
+   * най-отгоре за circular-import rationale). index.ts подава
+   * campaignPurchaseHooks.js::reconcileMissingPurchaseCampaignCredits тук.
+   * Optional — ако не е подадена (напр. по-стари тестове), purchase
+   * reconciliation просто не се изпълнява в тоя job instance.
+   */
+  reconcilePurchases?: (
+    databaseFilePath: string,
+    campaignCreditStore: CampaignCreditStore,
+    bounds: { limit?: number },
+  ) => Promise<PurchaseCampaignReconciliationResult>
 }
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 300_000
@@ -765,6 +790,7 @@ export function createCampaignCreditReconciliationJob(
   let lastError: string | null = null
   let lastBelotResult: BelotCampaignReconciliationResult | null = null
   let lastLudoResult: LudoCampaignReconciliationResult | null = null
+  let lastPurchaseResult: PurchaseCampaignReconciliationResult | null = null
 
   async function runTickBody(): Promise<void> {
     if (!isCampaignsFeatureEnabled()) return
@@ -776,9 +802,18 @@ export function createCampaignCreditReconciliationJob(
       deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true },
     )
     lastLudoResult = ludoResult
+    const purchaseResult = deps.reconcilePurchases
+      ? await deps.reconcilePurchases(deps.databaseFilePath, deps.campaignCreditStore, { limit })
+      : null
+    lastPurchaseResult = purchaseResult
     if (belotResult.scanned > 0 || ludoResult.scanned > 0) {
       console.log(
         `[campaign-credit-reconciliation] belot scanned=${belotResult.scanned} credited=${belotResult.credited} skippedInsufficientStakeInfo=${belotResult.skippedInsufficientStakeInfo} failed=${belotResult.failed} wrapped=${belotResult.cursorWrapped ? 1 : 0} | ludo scanned=${ludoResult.scanned} credited=${ludoResult.credited} failed=${ludoResult.failed} wrapped=${ludoResult.cursorWrapped ? 1 : 0}`,
+      )
+    }
+    if (purchaseResult !== null && (purchaseResult.coin.scanned > 0 || purchaseResult.bundle.scanned > 0 || purchaseResult.vip.scanned > 0)) {
+      console.log(
+        `[campaign-credit-reconciliation] coin scanned=${purchaseResult.coin.scanned} credited=${purchaseResult.coin.credited} failed=${purchaseResult.coin.failed} wrapped=${purchaseResult.coin.cursorWrapped ? 1 : 0} | bundle scanned=${purchaseResult.bundle.scanned} credited=${purchaseResult.bundle.credited} failed=${purchaseResult.bundle.failed} wrapped=${purchaseResult.bundle.cursorWrapped ? 1 : 0} | vip scanned=${purchaseResult.vip.scanned} credited=${purchaseResult.vip.credited} failed=${purchaseResult.vip.failed} wrapped=${purchaseResult.vip.cursorWrapped ? 1 : 0}`,
       )
     }
   }
@@ -831,6 +866,7 @@ export function createCampaignCreditReconciliationJob(
       lastError,
       lastBelotResult,
       lastLudoResult,
+      lastPurchaseResult,
     }),
     close: () => stop(),
   }

@@ -196,7 +196,7 @@ export type CoinPurchaseStore = {
   markPurchaseCanceledByCheckoutSessionId: (checkoutSessionId: string) => void
   markPurchaseFailedByCheckoutSessionId: (checkoutSessionId: string) => void
   fulfillPaidPurchase: (params: FulfillPaidPurchaseParams) =>
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
+    | { ok: true; purchase: CoinPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string }
   needsPaymentMethodSnapshot: (purchaseId: string) => boolean
   updatePaymentMethodSnapshot: (
@@ -861,7 +861,7 @@ export async function createCoinPurchaseStore(
   function fulfillPaidPurchase(
     params: FulfillPaidPurchaseParams,
   ):
-    | { ok: true; purchase: CoinPurchaseSnapshot; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
+    | { ok: true; purchase: CoinPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
     const { checkoutSessionId, purchaseId } = params
 
@@ -891,6 +891,15 @@ export async function createCoinPurchaseStore(
     | {
         ok: true
         purchase: CoinPurchaseSnapshot
+        /**
+         * Платецът (Stripe checkout session собственик) — НЕ е част от
+         * CoinPurchaseSnapshot (виж коментара на recipientProfileId там:
+         * snapshot-ът е immutable purchase история, "кой е платил" е
+         * отделен facts, НЕ award target). Добавено само тук (Фаза 5) — за
+         * campaign crediting hook-а в index.ts, който трябва да начисли
+         * тематични единици на ПЛАТЕЦА, не на gift получателя.
+         */
+        payerProfileId: string
         alreadyCredited: boolean
         payerSuccessText: string | null
         /** Non-null САМО при реален нов fulfillment — виж identичния коментар в vipPurchaseStore.ts. */
@@ -903,7 +912,7 @@ export async function createCoinPurchaseStore(
       // връщане при duplicate webhook (caller-ът решава дали вече е показал
       // success popup-а, виж index.ts wiring).
       const purchase = rowToSnapshot(row)
-      return { ok: true, purchase, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
+      return { ok: true, purchase, payerProfileId: row.profile_id, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
     }
 
     if (row.status !== 'pending') {
@@ -983,7 +992,7 @@ export async function createCoinPurchaseStore(
 
         if (fresh?.status === 'paid') {
           const purchase = rowToSnapshot(fresh)
-          return { ok: true, purchase, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
+          return { ok: true, purchase, payerProfileId: fresh.profile_id, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
         }
 
         return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
@@ -1031,7 +1040,7 @@ export async function createCoinPurchaseStore(
       return { ok: false, message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
     }
 
-    return { ok: true, purchase: fulfilled, alreadyCredited: false, payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
+    return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
   }
 
   function needsPaymentMethodSnapshot(purchaseId: string): boolean {

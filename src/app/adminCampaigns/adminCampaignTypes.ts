@@ -54,7 +54,7 @@ export type AdminCampaignMarketingProfile = {
 export type AdminCampaignPurchasePackage = {
   packageKey: string
   title: string
-  kind: 'coins' | 'bundle'
+  kind: 'coins' | 'bundle' | 'vip'
   yellowCoinsAmount: number
   vipDays: number | null
   status: 'active' | 'inactive'

@@ -37,6 +37,10 @@ import {
   createCampaignCreditReconciliationJob,
 } from './campaigns/campaignGameHooks.js'
 import {
+  recordPurchaseForCampaign,
+  reconcileMissingPurchaseCampaignCredits,
+} from './campaigns/campaignPurchaseHooks.js'
+import {
   SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES,
   isServerAntiBadLuckThreshold,
   type ServerAntiBadLuckConfig,
@@ -2992,6 +2996,11 @@ const campaignCreditReconciliationJob = campaignCreditStore !== null
   ? createCampaignCreditReconciliationJob({
       databaseFilePath: databaseBootstrap.databaseFilePath,
       campaignCreditStore,
+      // Фаза 5 — инжектирана зависимост (виж campaignGameHooks.ts doc
+      // коментара за circular-import rationale: campaignPurchaseHooks.ts
+      // внася cursor helper-ите от campaignGameHooks.ts, затова последният
+      // не прави статичен value import обратно).
+      reconcilePurchases: reconcileMissingPurchaseCampaignCredits,
     })
   : null
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
@@ -16509,6 +16518,20 @@ async function handleStripeWebhookRequest(
         }
       }
 
+      // Кампании (Фаза 5) — СЛЕД реалния VIP settlement (вече commit-нат,
+      // успешно ИЛИ alreadyCredited replay — hook-ът е idempotent). Вика се
+      // безусловно при vipResult.ok, НЕЗАВИСИМО от payment-method enrichment
+      // по-долу (display-only, никога не влияе на начислението).
+      if (vipResult.ok && campaignCreditStore !== null) {
+        recordPurchaseForCampaign({
+          campaignCreditStore,
+          payerProfileId: vipResult.payerProfileId,
+          purchaseId: vipResult.purchase.purchaseId,
+          packageKey: vipResult.purchase.packageId,
+          creditedAtIso: vipResult.purchase.creditedAt,
+        })
+      }
+
       // Payment-method enrichment — mirror на coin flow-a (Step 2 по-долу).
       // Settlement (grant/credit) вече е приключил (успешно ИЛИ е бил
       // already-credited) преди тази точка — enrichment е чисто display-only
@@ -16604,6 +16627,19 @@ async function handleStripeWebhookRequest(
         }
       }
 
+      // Кампании (Фаза 5) — mirror на VIP branch-а по-горе. payerProfileId
+      // може да е null (payer hard-deleted след покупката, 20260923_004) —
+      // recordPurchaseForCampaign просто skip-ва в тоя случай.
+      if (bundleResult.ok && campaignCreditStore !== null) {
+        recordPurchaseForCampaign({
+          campaignCreditStore,
+          payerProfileId: bundleResult.payerProfileId,
+          purchaseId: bundleResult.purchase.purchaseId,
+          packageKey: bundleResult.purchase.packageKeySnapshot,
+          creditedAtIso: bundleResult.purchase.creditedAt,
+        })
+      }
+
       // Payment-method enrichment — mirror на VIP/coin flow-a Step 2 по-горе.
       // Settlement вече е приключил (успешно ИЛИ already-credited) преди
       // тази точка — enrichment е чисто display-only, никога не влияе на/не
@@ -16694,6 +16730,18 @@ async function handleStripeWebhookRequest(
               result.recipientNotificationText,
             )
           }
+        }
+
+        // Кампании (Фаза 5) — mirror на VIP/bundle branch-овете по-горе.
+        // result.ok вече е потвърден (сме в else клона на !result.ok по-горе).
+        if (campaignCreditStore !== null) {
+          recordPurchaseForCampaign({
+            campaignCreditStore,
+            payerProfileId: result.payerProfileId,
+            purchaseId: result.purchase.purchaseId,
+            packageKey: result.purchase.packageKey,
+            creditedAtIso: result.purchase.creditedAt,
+          })
         }
 
         // Step 2: enrich payment method snapshot — non-blocking, must not affect credits.

@@ -674,8 +674,14 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
   function creditCampaignUnits(input: CreditGameOrPurchaseEventInput): CreditCampaignUnitsResult {
     return runInTransaction(() => {
+      // Фаза 5 — defense-in-depth разширена и за package_purchase. На
+      // практика payer-ите на реални Stripe покупки минават през login,
+      // не biha стигнали дотук като bot/guest-trial, но проверката е
+      // универсална по дизайн (виж isProfileEligibleForGameCredit doc
+      // коментара) — безопасно е да покрива ВСЕКИ автоматичен game/purchase
+      // credit път, не само двата изрично тестваните досега.
       if (
-        (input.sourceType === 'belot_win' || input.sourceType === 'ludo_win') &&
+        (input.sourceType === 'belot_win' || input.sourceType === 'ludo_win' || input.sourceType === 'package_purchase') &&
         !isProfileEligibleForGameCredit(input.profileId)
       ) {
         return { ok: false, reason: 'ineligible_profile' }
