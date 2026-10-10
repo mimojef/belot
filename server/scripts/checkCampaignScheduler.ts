@@ -410,10 +410,26 @@ try {
     assert(!importsFeatureFlag(schedulerSource), 'campaignScheduler.ts must not import campaignsFeatureFlag.ts')
   })
 
-  await check('[11] index.ts не wire-ва още campaignsStore/campaignScheduler — нулево поведенческо въздействие върху живия сървър в тази фаза', async () => {
+  // Фаза 4 (admin UI) легитимно wire-ва campaignsStore/campaignScheduler в
+  // index.ts — админ панелът трябва да извиква реалните lifecycle преходи
+  // (schedule/activate/stop/clone), и scheduler-ът трябва да работи за
+  // автоматичните преходи, докато флагът е включен за тестване. Старата
+  // проверка (Фази 1-3: "index.ts няма НИКАКВО reference") вече е обсолетна
+  // по дизайн — заменена с проверка на РЕАЛНИЯ инвариант, който винаги е имал
+  // значение: нулево поведенческо въздействие в production, докато флагът е
+  // изключен (и двете инстанции трябва да бъдат създадени УСЛОВНО спрямо
+  // isCampaignsFeatureEnabled()).
+  await check('[11] index.ts wire-ва campaignsStore/campaignScheduler само УСЛОВНО спрямо isCampaignsFeatureEnabled() — нулево поведенческо въздействие, докато флагът е изключен', async () => {
     const { readFile } = await import('node:fs/promises')
     const indexSource = await readFile(new URL('../src/index.ts', import.meta.url), 'utf8')
-    assert(!indexSource.includes('campaignsStore') && !indexSource.includes('campaignScheduler'), 'index.ts must not reference the new campaign modules in this phase')
+    assert(indexSource.includes('createCampaignsStore'), 'index.ts трябва да инстанцира campaignsStore (admin lifecycle операции)')
+    assert(indexSource.includes('createCampaignScheduler'), 'index.ts трябва да инстанцира campaignScheduler (auto-transitions за admin тестване)')
+
+    const campaignsStoreCreation = indexSource.match(/const campaignsStore = ([^\n]+\n)+?\s*: null/)
+    assert(campaignsStoreCreation !== null && /isCampaignsFeatureEnabled\(\)/.test(campaignsStoreCreation[0]), 'campaignsStore създаването трябва да е условно спрямо isCampaignsFeatureEnabled()')
+
+    const schedulerCreation = indexSource.match(/const campaignScheduler = ([^\n]+\n)+?\s*: null/)
+    assert(schedulerCreation !== null && /campaignsStore !== null/.test(schedulerCreation[0]), 'campaignScheduler създаването трябва да е условно спрямо campaignsStore !== null (и той вече е флаг-условен)')
   })
 } finally {
   await cleanup()

@@ -584,6 +584,58 @@ export async function createCampaignsStore(databaseFilePath: string): Promise<Ca
         source.unitNamePlural,
         source.giftSenderProfileId,
       )
+      const earnRows = database.prepare(`
+        SELECT game_kind, stake_amount, units_per_win
+        FROM campaign_earn_rules
+        WHERE campaign_id = ?
+        ORDER BY game_kind ASC, stake_amount ASC;
+      `).all(sourceCampaignId) as Array<{ game_kind: string; stake_amount: number; units_per_win: number }>
+      for (const row of earnRows) {
+        database.prepare(`
+          INSERT INTO campaign_earn_rules (campaign_id, game_kind, stake_amount, units_per_win)
+          VALUES (?, ?, ?, ?);
+        `).run(newCampaignId, row.game_kind, row.stake_amount, row.units_per_win)
+      }
+
+      const packageRows = database.prepare(`
+        SELECT package_key, units_per_purchase
+        FROM campaign_package_earn_rules
+        WHERE campaign_id = ?
+        ORDER BY package_key ASC;
+      `).all(sourceCampaignId) as Array<{ package_key: string; units_per_purchase: number }>
+      for (const row of packageRows) {
+        database.prepare(`
+          INSERT INTO campaign_package_earn_rules (campaign_id, package_key, units_per_purchase)
+          VALUES (?, ?, ?);
+        `).run(newCampaignId, row.package_key, row.units_per_purchase)
+      }
+
+      const tierRows = database.prepare(`
+        SELECT tier_id, threshold_units
+        FROM campaign_reward_tiers
+        WHERE campaign_id = ?
+        ORDER BY threshold_units ASC;
+      `).all(sourceCampaignId) as Array<{ tier_id: string; threshold_units: number }>
+      for (const tierRow of tierRows) {
+        const newTierId = randomUUID()
+        database.prepare(`
+          INSERT INTO campaign_reward_tiers (tier_id, campaign_id, threshold_units)
+          VALUES (?, ?, ?);
+        `).run(newTierId, newCampaignId, tierRow.threshold_units)
+
+        const rewardRows = database.prepare(`
+          SELECT reward_type, reward_payload_json
+          FROM campaign_tier_rewards
+          WHERE tier_id = ?
+          ORDER BY rowid ASC;
+        `).all(tierRow.tier_id) as Array<{ reward_type: string; reward_payload_json: string }>
+        for (const rewardRow of rewardRows) {
+          database.prepare(`
+            INSERT INTO campaign_tier_rewards (tier_reward_id, tier_id, reward_type, reward_payload_json)
+            VALUES (?, ?, ?, ?);
+          `).run(randomUUID(), newTierId, rewardRow.reward_type, rewardRow.reward_payload_json)
+        }
+      }
       insertEvent(newCampaignId, 'campaign_cloned', actor, { sourceCampaignId })
       database.exec('COMMIT;')
       return { ok: true, campaign: getCampaignByIdInternal(newCampaignId)! }

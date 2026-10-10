@@ -27,6 +27,9 @@ import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
+import { createCampaignsStore } from './campaigns/campaignsStore.js'
+import { createCampaignAdminStore, type CampaignAdminSaveInput } from './campaigns/campaignAdminStore.js'
+import { createCampaignScheduler } from './campaigns/campaignScheduler.js'
 import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import {
   recordBelotMatchForCampaign,
@@ -2967,6 +2970,15 @@ setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
 const activeLudoMatchSnapshotStore = await createActiveLudoMatchSnapshotStore(databaseBootstrap.databaseFilePath)
+const campaignsStore = isCampaignsFeatureEnabled()
+  ? await createCampaignsStore(databaseBootstrap.databaseFilePath)
+  : null
+const campaignAdminStore = isCampaignsFeatureEnabled()
+  ? await createCampaignAdminStore(databaseBootstrap.databaseFilePath)
+  : null
+const campaignScheduler = campaignsStore !== null
+  ? createCampaignScheduler({ store: campaignsStore })
+  : null
 const campaignCreditStore = isCampaignsFeatureEnabled()
   ? await createCampaignCreditStore(databaseBootstrap.databaseFilePath)
   : null
@@ -17479,6 +17491,204 @@ async function handlePaidGiftNotificationRequest(
   return true
 }
 
+function campaignLifecycleErrorMessage(reason: string): string {
+  switch (reason) {
+    case 'campaign_not_found':
+      return 'Кампанията не беше намерена.'
+    case 'invalid_status':
+      return 'Кампанията не е в подходящ статус за това действие.'
+    case 'invalid_period':
+      return 'Периодът на кампанията е невалиден.'
+    case 'overlaps_existing_campaign':
+      return 'Периодът се застъпва с друга планирана или активна кампания.'
+    case 'already_expired':
+      return 'Кампанията вече е изтекла.'
+    case 'another_campaign_active':
+      return 'Вече има активна кампания.'
+    case 'cannot_delete_active_campaign':
+      return 'Активна кампания не може да се изтрие.'
+    case 'already_deleted':
+      return 'Кампанията вече е изтрита.'
+    default:
+      return 'Действието не може да бъде изпълнено.'
+  }
+}
+
+async function handleAdminCampaignsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const basePath = '/api/admin/campaigns'
+  if (pathname !== basePath && !pathname.startsWith(`${basePath}/`)) {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (!isFullAdminSession(session)) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Нямаш достъп до админ кампаниите.',
+    })
+    return true
+  }
+
+  if (!isCampaignsFeatureEnabled() || campaignsStore === null || campaignAdminStore === null) {
+    sendJsonResponse(res, 403, {
+      ok: false,
+      message: 'Кампаниите са изключени от feature flag.',
+    })
+    return true
+  }
+
+  if (session.profile.profileId === null) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Невалидна админ сесия.' })
+    return true
+  }
+  const actor = { type: 'admin' as const, profileId: session.profile.profileId }
+
+  if (pathname === basePath) {
+    if (req.method === 'GET') {
+      sendJsonResponse(res, 200, { ok: true, ...campaignAdminStore.getSnapshot() })
+      return true
+    }
+
+    if (req.method === 'POST') {
+      const body = await readJsonRequestBody(req, 256_000)
+      if (!isRecord(body)) {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+        return true
+      }
+      const result = campaignAdminStore.saveCampaignConfiguration(body as unknown as CampaignAdminSaveInput, actor)
+      if (!result.ok) {
+        sendJsonResponse(res, 400, { ok: false, message: result.message, reason: result.reason })
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, campaign: result.value, ...campaignAdminStore.getSnapshot() })
+      return true
+    }
+
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const detailMatch = new RegExp(`^${basePath}/([^/]+)$`).exec(pathname)
+  if (detailMatch !== null) {
+    const campaignId = decodeURIComponent(detailMatch[1] ?? '')
+    if (req.method === 'PUT') {
+      const body = await readJsonRequestBody(req, 256_000)
+      if (!isRecord(body)) {
+        sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+        return true
+      }
+      const result = campaignAdminStore.saveCampaignConfiguration(
+        { ...(body as unknown as CampaignAdminSaveInput), campaignId },
+        actor,
+      )
+      if (!result.ok) {
+        sendJsonResponse(res, 400, { ok: false, message: result.message, reason: result.reason })
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, campaign: result.value, ...campaignAdminStore.getSnapshot() })
+      return true
+    }
+
+    if (req.method === 'DELETE') {
+      const result = campaignsStore.softDeleteCampaign(campaignId, actor)
+      if (!result.ok) {
+        sendJsonResponse(res, result.reason === 'campaign_not_found' ? 404 : 409, {
+          ok: false,
+          message: campaignLifecycleErrorMessage(result.reason),
+          reason: result.reason,
+        })
+        return true
+      }
+      const deletedSnapshot = campaignAdminStore.validateCampaignReady(campaignId)
+      sendJsonResponse(res, 200, { ok: true, campaign: deletedSnapshot.ok ? deletedSnapshot.value : null, ...campaignAdminStore.getSnapshot() })
+      return true
+    }
+
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const actionMatch = new RegExp(`^${basePath}/([^/]+)/([^/]+)$`).exec(pathname)
+  if (actionMatch === null) return false
+
+  const campaignId = decodeURIComponent(actionMatch[1] ?? '')
+  const action = decodeURIComponent(actionMatch[2] ?? '')
+
+  if (action === 'marketing-sender') {
+    if (req.method !== 'PATCH') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    const body = await readJsonRequestBody(req)
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+      return true
+    }
+    const result = campaignAdminStore.updateMarketingSender(
+      campaignId,
+      typeof body.giftSenderProfileId === 'string' ? body.giftSenderProfileId : null,
+      actor,
+    )
+    if (!result.ok) {
+      sendJsonResponse(res, 400, { ok: false, message: result.message, reason: result.reason })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, campaign: result.value, ...campaignAdminStore.getSnapshot() })
+    return true
+  }
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (action === 'schedule' || action === 'activate') {
+    const ready = campaignAdminStore.validateCampaignReady(campaignId)
+    if (!ready.ok) {
+      sendJsonResponse(res, 400, { ok: false, message: ready.message, reason: ready.reason })
+      return true
+    }
+  }
+
+  const lifecycleResult =
+    action === 'schedule'
+      ? campaignsStore.scheduleCampaign(campaignId, actor)
+      : action === 'activate'
+        ? campaignsStore.activateCampaign(campaignId, new Date(), actor)
+        : action === 'stop'
+          ? campaignsStore.stopCampaign(campaignId, actor)
+          : action === 'clone'
+            ? campaignsStore.cloneCampaign(campaignId, actor)
+            : action === 'delete'
+              ? campaignsStore.softDeleteCampaign(campaignId, actor)
+              : null
+
+  if (lifecycleResult === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Непознато действие.' })
+    return true
+  }
+
+  if (!lifecycleResult.ok) {
+    const reason = lifecycleResult.reason
+    sendJsonResponse(res, reason === 'campaign_not_found' ? 404 : 409, {
+      ok: false,
+      message: campaignLifecycleErrorMessage(reason),
+      reason,
+    })
+    return true
+  }
+
+  const campaign = campaignAdminStore.getSnapshot().campaigns.find((row) => row.campaignId === lifecycleResult.campaign.campaignId) ?? null
+  sendJsonResponse(res, 200, { ok: true, campaign, ...campaignAdminStore.getSnapshot() })
+  return true
+}
+
 async function handleGiftItemsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -20871,6 +21081,10 @@ async function handleHttpRequest(
   }
 
   if (await handleAdminSettingsRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleAdminCampaignsRequest(req, res, requestUrl.pathname)) {
     return
   }
 
@@ -26095,11 +26309,20 @@ function closeActiveRoomSnapshotStore(): boolean {
 
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
   closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())
+  if (campaignCreditReconciliationJob !== null) {
+    closeStore('campaignCreditReconciliationJob', () => campaignCreditReconciliationJob.close())
+  }
+  if (campaignScheduler !== null) {
+    closeStore('campaignScheduler', () => campaignScheduler.close())
+  }
   if (campaignCreditStore !== null) {
     closeStore('campaignCreditStore', () => campaignCreditStore.close())
   }
-  if (campaignCreditReconciliationJob !== null) {
-    closeStore('campaignCreditReconciliationJob', () => campaignCreditReconciliationJob.close())
+  if (campaignAdminStore !== null) {
+    closeStore('campaignAdminStore', () => campaignAdminStore.close())
+  }
+  if (campaignsStore !== null) {
+    closeStore('campaignsStore', () => campaignsStore.close())
   }
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
@@ -26255,5 +26478,6 @@ httpServer.listen(PORT, HOST, () => {
   // httpServer.listen() callback-а (fire-and-forget) и извън game-worker
   // tick loop-а. Job/store се създават само ако CAMPAIGNS_FEATURE_ENABLED=1
   // при startup; при изключен flag няма допълнителна campaign DB connection.
+  campaignScheduler?.start()
   campaignCreditReconciliationJob?.start()
 })

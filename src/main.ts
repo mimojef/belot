@@ -39,6 +39,8 @@ import type { PlayerAccountRole, ActiveProfileBanSnapshot } from './ui/overlays/
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, CpuIncidentSummary, CpuIncidentDetail } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow } from './app/adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignAction } from './app/adminCampaigns/renderAdminCampaignsPanel'
 import {
   createGameServerClient,
   type ConnectedMessage,
@@ -2432,6 +2434,101 @@ async function postAdminTournamentAction(
       refundedEntries: data.refundedEntries,
       totalRefunded: data.totalRefunded,
     }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+type AdminCampaignsSnapshotResult =
+  | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
+  | { ok: false; message: string; forbidden?: boolean }
+
+async function parseAdminCampaignsSnapshotResponse(response: Response): Promise<AdminCampaignsSnapshotResult> {
+  if (response.status === 403) {
+    return { ok: false, message: 'Нямаш достъп до админ кампаниите.', forbidden: true }
+  }
+  const data = (await response.json()) as {
+    ok: boolean
+    campaigns?: AdminCampaignRow[]
+    referenceData?: AdminCampaignReferenceData
+    message?: string
+  }
+  if (!response.ok || !data.ok || !Array.isArray(data.campaigns) || !data.referenceData) {
+    return { ok: false, message: data.message ?? 'Грешка при зареждане на кампаниите.' }
+  }
+  return { ok: true, campaigns: data.campaigns, referenceData: data.referenceData }
+}
+
+async function loadAdminCampaigns(): Promise<AdminCampaignsSnapshotResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns`, {
+      method: 'GET',
+      credentials: 'include',
+    })
+    return await parseAdminCampaignsSnapshotResponse(response)
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function saveAdminCampaign(draft: AdminCampaignEditorDraft): Promise<AdminCampaignsSnapshotResult> {
+  try {
+    const body = JSON.stringify({
+      name: draft.name,
+      startsAt: draft.startsAt,
+      endsAt: draft.endsAt,
+      unitNameSingular: draft.unitNameSingular,
+      unitNamePlural: draft.unitNamePlural,
+      giftSenderProfileId: draft.giftSenderProfileId,
+      earnRules: draft.earnRules,
+      packageEarnRules: draft.packageEarnRules,
+      rewardTiers: draft.rewardTiers,
+    })
+    const response = draft.campaignId
+      ? await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(draft.campaignId)}`, {
+          method: 'PUT',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        })
+      : await fetch(`${getApiBaseUrl()}/api/admin/campaigns`, {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+        })
+    return await parseAdminCampaignsSnapshotResponse(response)
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function postAdminCampaignAction(campaignId: string, action: AdminCampaignAction): Promise<AdminCampaignsSnapshotResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/${action}`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    })
+    return await parseAdminCampaignsSnapshotResponse(response)
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function saveAdminCampaignMarketingSender(
+  campaignId: string,
+  giftSenderProfileId: string | null,
+): Promise<AdminCampaignsSnapshotResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/marketing-sender`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ giftSenderProfileId }),
+    })
+    return await parseAdminCampaignsSnapshotResponse(response)
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -6975,6 +7072,10 @@ lobby = createLobbyFlowController({
     | { ok: true; alreadyCancelled: boolean; refundedEntries: number; totalRefunded: number }
     | { ok: false; message: string; forbidden?: boolean }
   >,
+  onAdminCampaignsLoad: () => loadAdminCampaigns(),
+  onAdminCampaignSaveRequest: (draft) => saveAdminCampaign(draft),
+  onAdminCampaignActionRequest: (campaignId, action) => postAdminCampaignAction(campaignId, action),
+  onAdminCampaignMarketingSenderSaveRequest: (campaignId, giftSenderProfileId) => saveAdminCampaignMarketingSender(campaignId, giftSenderProfileId),
   onAdCampaignsLoad: () => loadAdCampaignManagement(),
   onAdCampaignCreateSubmit: (input) => createAdCampaignSubmit(input),
   onAdCampaignSendSubmit: (campaignId) => sendAdCampaignSubmit(campaignId),

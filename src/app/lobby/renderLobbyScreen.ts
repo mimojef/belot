@@ -116,6 +116,8 @@ import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../a
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes'
 import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow } from '../adminCampaigns/adminCampaignTypes'
+import { renderAdminCampaignsPanel, attachAdminCampaignsHandlers, type AdminCampaignAction, type AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel'
 import { renderAdCampaignManagementPanel, attachAdCampaignManagementPanelHandlers } from '../adCampaigns/renderAdCampaignManagementPanel'
 import { renderAdCampaignPopup, attachAdCampaignPopupHandlers } from '../adCampaigns/renderAdCampaignPopup'
 import {
@@ -423,7 +425,7 @@ export type GuestContactFormInput = {
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games' | 'ludo-lobby'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-campaigns' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games' | 'ludo-lobby'
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -776,6 +778,13 @@ export type LobbyScreenState = {
   adminGiftItemsErrorText: string | null
   adminGiftItemEditId: string | null
   adminGiftItemsTotalChargedYellowCoins: number
+  adminCampaigns: AdminCampaignRow[]
+  adminCampaignsReferenceData: AdminCampaignReferenceData | null
+  adminCampaignsLoading: boolean
+  adminCampaignsErrorText: string | null
+  adminCampaignsSuccessText: string | null
+  adminCampaignsFilter: AdminCampaignFilter
+  adminCampaignEditorDraft: AdminCampaignEditorDraft | null
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
@@ -1512,6 +1521,15 @@ export type RenderLobbyScreenOptions = {
   onAdminGiftItemStatusToggle?: (giftItemId: string, isActive: boolean) => void
   onAdminGiftItemDelete?: (giftItemId: string) => void
   onAdminGiftItemImageUpload?: (file: File) => void
+  onAdminCampaignsOpen?: () => void
+  onAdminCampaignsBack?: () => void
+  onAdminCampaignCreate?: () => void
+  onAdminCampaignEdit?: (campaignId: string) => void
+  onAdminCampaignFilter?: (filter: AdminCampaignFilter) => void
+  onAdminCampaignDraftChange?: (draft: AdminCampaignEditorDraft) => void
+  onAdminCampaignSave?: (draft: AdminCampaignEditorDraft) => void
+  onAdminCampaignAction?: (campaignId: string, action: AdminCampaignAction) => void
+  onAdminCampaignMarketingSenderSave?: (campaignId: string, giftSenderProfileId: string | null) => void
   onAdCampaignsOpen?: () => void
   onAdCampaignsBack?: () => void
   onAdCampaignCreate?: (input: { imageDataUrl: string; targetUrl: string }) => void
@@ -3332,7 +3350,7 @@ function renderNav(state: LobbyScreenState): string {
   const topicsActive = activeView === 'topics'
   const shopActive = activeView === 'shop'
   const gamesActive = activeView === 'more-games' || activeView === 'ludo-lobby'
-  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-campaigns' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = getSupportUnreadRaw(state)
   const notificationsBadgeCount = getNotificationsBadgeCount(state)
@@ -3631,6 +3649,20 @@ function renderNav(state: LobbyScreenState): string {
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"/><path d="M1 12h2M21 12h2M12 1v2M12 21v2"/></svg>
                   Настройки
+                </button>
+                <button type="button" data-lobby-nav-admin-campaigns="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 5h14l-2 4 2 4H4"/></svg>
+                  Кампании
                 </button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="
@@ -5381,6 +5413,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
               ${state.isAdminOrSubadmin ? `
                 ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
+                <button type="button" data-lobby-nav-admin-campaigns="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Кампании')}</button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
                 <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
@@ -6470,6 +6503,8 @@ function renderMobileLobbyScreenContent(
                 actionInfoText: state.adminTournamentActionInfoText,
                 cancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
               })
+          : state.view === 'admin-campaigns'
+            ? renderAdminCampaignsPanel(state, false)
           : state.view === 'admin-ad-campaigns'
             ? renderAdCampaignManagementPanel({
                 isAdCampaignManager: state.isAdCampaignManager,
@@ -13663,6 +13698,8 @@ export function renderLobbyScreen(
                     actionInfoText: state.adminTournamentActionInfoText,
                     cancelConfirmOpen: state.adminTournamentCancelConfirmOpen,
                   })
+              : state.view === 'admin-campaigns'
+                ? renderAdminCampaignsPanel(state, true)
               : state.view === 'admin-ad-campaigns'
                 ? renderAdCampaignManagementPanel({
                     isAdCampaignManager: state.isAdCampaignManager,
@@ -15052,6 +15089,13 @@ export function renderLobbyScreen(
     ?.addEventListener('click', () => {
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminTournamentsOpen?.()
+    })
+
+  root
+    .querySelector<HTMLButtonElement>('[data-lobby-nav-admin-campaigns="1"]')
+    ?.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminCampaignsOpen?.()
     })
 
   root
@@ -18063,6 +18107,17 @@ export function renderLobbyScreen(
     onCancelOpen: () => { options.onAdminTournamentCancelOpen?.() },
     onCancelConfirm: () => { options.onAdminTournamentCancelConfirm?.() },
     onCancelDismiss: () => { options.onAdminTournamentCancelDismiss?.() },
+  })
+
+  attachAdminCampaignsHandlers(root, state, {
+    onBack: () => { options.onAdminCampaignsBack?.() },
+    onCreate: () => { options.onAdminCampaignCreate?.() },
+    onEdit: (campaignId) => { options.onAdminCampaignEdit?.(campaignId) },
+    onFilter: (filter) => { options.onAdminCampaignFilter?.(filter) },
+    onDraftChange: (draft) => { options.onAdminCampaignDraftChange?.(draft) },
+    onSave: (draft) => { options.onAdminCampaignSave?.(draft) },
+    onAction: (campaignId, action) => { options.onAdminCampaignAction?.(campaignId, action) },
+    onMarketingSenderSave: (campaignId, giftSenderProfileId) => { options.onAdminCampaignMarketingSenderSave?.(campaignId, giftSenderProfileId) },
   })
 
   attachAdCampaignManagementPanelHandlers(root, {

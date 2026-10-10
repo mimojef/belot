@@ -7,6 +7,8 @@ import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tourn
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow } from '../adminCampaigns/adminCampaignTypes.js'
+import type { AdminCampaignAction, AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel.js'
 import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload, MarketingDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
 import { LUDO_GAME_SCREEN_Z_INDEX } from '../games/ludo/ludoLayerHierarchy'
@@ -152,6 +154,7 @@ export type LobbyFlowScreen =
   | 'admin-payment-detail'
   | 'admin-tournaments'
   | 'admin-tournament-detail'
+  | 'admin-campaigns'
   | 'admin-ad-campaigns'
   | 'admin-gift-items'
   | 'tournaments'
@@ -1062,6 +1065,22 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onAdminTournamentCancelOpen?: (tournamentId: string) => Promise<
     | { ok: true; alreadyCancelled: boolean; refundedEntries: number; totalRefunded: number }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignsLoad?: () => Promise<
+    | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignSaveRequest?: (draft: AdminCampaignEditorDraft) => Promise<
+    | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignActionRequest?: (campaignId: string, action: AdminCampaignAction) => Promise<
+    | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignMarketingSenderSaveRequest?: (campaignId: string, giftSenderProfileId: string | null) => Promise<
+    | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
     | { ok: false; message: string; forbidden?: boolean }
   >
   /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
@@ -2012,6 +2031,13 @@ type InternalLobbyFlowState = {
   adminGiftItemEditId: string | null
   /** SUM(charged_price) от gift_item_transactions (виж giftItemStore.getTotalChargedYellowCoins) — fresh от сървъра при load И при всяка mutation, виж loadAdminGiftItems/submitAdminGiftItem/deleteAdminGiftItem/setAdminGiftItemStatus. */
   adminGiftItemsTotalChargedYellowCoins: number
+  adminCampaigns: AdminCampaignRow[]
+  adminCampaignsReferenceData: AdminCampaignReferenceData | null
+  adminCampaignsLoading: boolean
+  adminCampaignsErrorText: string | null
+  adminCampaignsSuccessText: string | null
+  adminCampaignsFilter: AdminCampaignFilter
+  adminCampaignEditorDraft: AdminCampaignEditorDraft | null
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceProcessingIds: Set<string>
   acceptanceErrorText: string | null
@@ -2786,6 +2812,13 @@ function createInitialState(): InternalLobbyFlowState {
     adminGiftItemsErrorText: null,
     adminGiftItemEditId: null,
     adminGiftItemsTotalChargedYellowCoins: 0,
+    adminCampaigns: [],
+    adminCampaignsReferenceData: null,
+    adminCampaignsLoading: false,
+    adminCampaignsErrorText: null,
+    adminCampaignsSuccessText: null,
+    adminCampaignsFilter: 'all',
+    adminCampaignEditorDraft: null,
     acceptanceNotifications: [],
     acceptanceProcessingIds: new Set<string>(),
     acceptanceErrorText: null,
@@ -3244,6 +3277,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/admin/visitors': 'admin-visitors',
   '/admin/payments': 'admin-payments',
   '/admin/tournaments': 'admin-tournaments',
+  '/admin/campaigns': 'admin-campaigns',
   '/admin/ad-campaigns': 'admin-ad-campaigns',
   '/admin/gift-items': 'admin-gift-items',
   '/friends': 'friends',
@@ -5007,6 +5041,8 @@ export function createLobbyFlowController(
               ? 'admin-tournaments'
             : state.currentScreen === 'admin-tournament-detail'
               ? 'admin-tournament-detail'
+            : state.currentScreen === 'admin-campaigns'
+              ? 'admin-campaigns'
             : state.currentScreen === 'admin-ad-campaigns'
               ? 'admin-ad-campaigns'
             : state.currentScreen === 'admin-gift-items'
@@ -5226,6 +5262,13 @@ export function createLobbyFlowController(
       adminGiftItemsErrorText: state.adminGiftItemsErrorText,
       adminGiftItemEditId: state.adminGiftItemEditId,
       adminGiftItemsTotalChargedYellowCoins: state.adminGiftItemsTotalChargedYellowCoins,
+      adminCampaigns: state.adminCampaigns,
+      adminCampaignsReferenceData: state.adminCampaignsReferenceData,
+      adminCampaignsLoading: state.adminCampaignsLoading,
+      adminCampaignsErrorText: state.adminCampaignsErrorText,
+      adminCampaignsSuccessText: state.adminCampaignsSuccessText,
+      adminCampaignsFilter: state.adminCampaignsFilter,
+      adminCampaignEditorDraft: state.adminCampaignEditorDraft,
       acceptanceNotifications: state.acceptanceNotifications,
       acceptanceErrorText: state.acceptanceErrorText,
       chatConversations: state.chatConversations,
@@ -7625,6 +7668,38 @@ export function createLobbyFlowController(
         if (!state.adminTournamentCancelConfirmOpen) return
         state.adminTournamentCancelConfirmOpen = false
         render()
+      },
+      onAdminCampaignsOpen: () => {
+        showAdminCampaignsPanel()
+      },
+      onAdminCampaignsBack: () => {
+        void showAdminPanel()
+      },
+      onAdminCampaignCreate: () => {
+        state.adminCampaignEditorDraft = createBlankAdminCampaignDraft()
+        state.adminCampaignsErrorText = null
+        state.adminCampaignsSuccessText = null
+        render()
+      },
+      onAdminCampaignEdit: (campaignId) => {
+        editAdminCampaign(campaignId)
+      },
+      onAdminCampaignFilter: (filter) => {
+        state.adminCampaignsFilter = filter
+        render()
+      },
+      onAdminCampaignDraftChange: (draft) => {
+        state.adminCampaignEditorDraft = draft
+        render()
+      },
+      onAdminCampaignSave: (draft) => {
+        void submitAdminCampaignSave(draft)
+      },
+      onAdminCampaignAction: (campaignId, action) => {
+        void submitAdminCampaignAction(campaignId, action)
+      },
+      onAdminCampaignMarketingSenderSave: (campaignId, giftSenderProfileId) => {
+        void submitAdminCampaignMarketingSenderSave(campaignId, giftSenderProfileId)
       },
       onAdCampaignsOpen: () => {
         showAdCampaignManagementPanel()
@@ -13133,6 +13208,177 @@ export function createLobbyFlowController(
     await fetchAdminTournamentDetail(tournamentId)
   }
 
+  // Кампании (Фаза 4 — admin UI) — mirror на showAdminTournamentsPanel/
+  // fetchAdminTournaments по-горе. isFullAdminAuthSession guard (не
+  // isAdminOrSubadminAuthSession) — съвпада с handleAdminCampaignsRequest's
+  // isFullAdminSession изискване на сървъра (server/src/index.ts).
+  function createBlankAdminCampaignDraft(): AdminCampaignEditorDraft {
+    const now = Date.now()
+    return {
+      campaignId: null,
+      name: '',
+      startsAt: new Date(now + 3_600_000).toISOString(),
+      endsAt: new Date(now + 8 * 24 * 3_600_000).toISOString(),
+      unitNameSingular: '',
+      unitNamePlural: '',
+      giftSenderProfileId: null,
+      earnRules: [],
+      packageEarnRules: [],
+      rewardTiers: [],
+    }
+  }
+
+  function showAdminCampaignsPanel(historyMode: 'push' | 'replace' = 'push'): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (!isFullAdminAuthSession(authSession)) {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до админ панела.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-campaigns'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
+    state.adminCampaignsLoading = true
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = null
+    state.adminCampaignEditorDraft = null
+    const target = '/admin/campaigns'
+    if (window.location.pathname !== target) {
+      if (historyMode === 'replace') history.replaceState(null, '', target)
+      else history.pushState(null, '', target)
+    }
+    render()
+    void fetchAdminCampaigns()
+  }
+
+  async function fetchAdminCampaigns(): Promise<void> {
+    if (!options.onAdminCampaignsLoad) {
+      state.adminCampaignsLoading = false
+      state.adminCampaignsErrorText = 'Зареждането не е конфигурирано.'
+      if (state.currentScreen === 'admin-campaigns') render()
+      return
+    }
+    const result = await options.onAdminCampaignsLoad()
+    if (state.currentScreen !== 'admin-campaigns') return
+    state.adminCampaignsLoading = false
+    if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaigns = result.campaigns
+    state.adminCampaignsReferenceData = result.referenceData
+    state.adminCampaignsErrorText = null
+    render()
+  }
+
+  function editAdminCampaign(campaignId: string): void {
+    const row = state.adminCampaigns.find((campaign) => campaign.campaignId === campaignId)
+    if (!row) return
+    state.adminCampaignEditorDraft = {
+      campaignId: row.campaignId,
+      name: row.name,
+      startsAt: row.startsAt,
+      endsAt: row.endsAt,
+      unitNameSingular: row.unitNameSingular,
+      unitNamePlural: row.unitNamePlural,
+      giftSenderProfileId: row.giftSenderProfileId,
+      earnRules: row.earnRules,
+      packageEarnRules: row.packageEarnRules,
+      rewardTiers: row.rewardTiers,
+    }
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = null
+    render()
+  }
+
+  async function submitAdminCampaignSave(draft: AdminCampaignEditorDraft): Promise<void> {
+    if (!options.onAdminCampaignSaveRequest) {
+      state.adminCampaignsErrorText = 'Записът на кампании временно не е наличен.'
+      render()
+      return
+    }
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = null
+    render()
+    const result = await options.onAdminCampaignSaveRequest(draft)
+    if (!result.ok) {
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaigns = result.campaigns
+    state.adminCampaignsReferenceData = result.referenceData
+    state.adminCampaignEditorDraft = null
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = draft.campaignId ? 'Кампанията е обновена.' : 'Кампанията е създадена.'
+    render()
+  }
+
+  function adminCampaignActionSuccessText(action: AdminCampaignAction): string {
+    switch (action) {
+      case 'schedule': return 'Кампанията е планирана.'
+      case 'activate': return 'Кампанията е активирана.'
+      case 'stop': return 'Кампанията е спряна.'
+      case 'clone': return 'Кампанията е клонирана.'
+      case 'delete': return 'Кампанията е изтрита.'
+    }
+  }
+
+  async function submitAdminCampaignAction(campaignId: string, action: AdminCampaignAction): Promise<void> {
+    if (!options.onAdminCampaignActionRequest) {
+      state.adminCampaignsErrorText = 'Действието временно не е налично.'
+      render()
+      return
+    }
+    state.adminCampaignsErrorText = null
+    render()
+    const result = await options.onAdminCampaignActionRequest(campaignId, action)
+    if (!result.ok) {
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaigns = result.campaigns
+    state.adminCampaignsReferenceData = result.referenceData
+    if (state.adminCampaignEditorDraft?.campaignId === campaignId) state.adminCampaignEditorDraft = null
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = adminCampaignActionSuccessText(action)
+    render()
+  }
+
+  async function submitAdminCampaignMarketingSenderSave(campaignId: string, giftSenderProfileId: string | null): Promise<void> {
+    if (!options.onAdminCampaignMarketingSenderSaveRequest) {
+      state.adminCampaignsErrorText = 'Действието временно не е налично.'
+      render()
+      return
+    }
+    state.adminCampaignsErrorText = null
+    render()
+    const result = await options.onAdminCampaignMarketingSenderSaveRequest(campaignId, giftSenderProfileId)
+    if (!result.ok) {
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaigns = result.campaigns
+    state.adminCampaignsReferenceData = result.referenceData
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = 'Подателят е запазен.'
+    render()
+  }
+
   function upsertAdCampaignManagementRow(
     rows: AdCampaignManagementDto[],
     campaign: AdCampaignManagementDto,
@@ -17338,6 +17584,7 @@ export function createLobbyFlowController(
     'admin-visitors': '/admin/visitors',
     'admin-payments': '/admin/payments',
     'admin-tournaments': '/admin/tournaments',
+    'admin-campaigns': '/admin/campaigns',
     'admin-ad-campaigns': '/admin/ad-campaigns',
     tournaments: '/tournaments',
     topics: '/topics',
@@ -17367,6 +17614,7 @@ export function createLobbyFlowController(
     '/admin/visitors': 'admin-visitors',
     '/admin/payments': 'admin-payments',
     '/admin/tournaments': 'admin-tournaments',
+    '/admin/campaigns': 'admin-campaigns',
     '/admin/ad-campaigns': 'admin-ad-campaigns',
     '/admin/gift-items': 'admin-gift-items',
     '/tournaments': 'tournaments',
@@ -17538,6 +17786,7 @@ export function createLobbyFlowController(
         showAdminTournamentsPanel()
         break
       }
+      case 'admin-campaigns': showAdminCampaignsPanel('replace'); break
       case 'admin-ad-campaigns': showAdCampaignManagementPanel('replace'); break
       case 'admin-gift-items': showAdminGiftItemsPanel('replace'); break
       case 'tournaments': void showTournamentsList(); break
