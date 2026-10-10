@@ -17,6 +17,7 @@ import { extname, join, resolve } from 'node:path'
 import { ensureServerDatabaseReady } from '../src/db/ensureServerDatabaseReady.js'
 import { createCampaignsStore, type CampaignsStore } from '../src/campaigns/campaignsStore.js'
 import { createCampaignCreditStore, type CampaignCreditStore } from '../src/campaigns/campaignCreditStore.js'
+import { getSofiaDayStartUtcSqliteString } from '../src/db/sofiaDayBoundary.js'
 
 let passed = 0
 let failed = 0
@@ -257,6 +258,19 @@ async function addRewardTier(campaignId: string, thresholdUnits: number, rewards
       tierRewardIds.push(tierRewardId)
     }
     return tierRewardIds
+  } finally {
+    db.close()
+  }
+}
+
+/** Директен raw-SQL update на gift_sender_profile_id — заобикаля
+ * campaignsStore.updateCampaign()'s not_editable lock (status != draft/scheduled)
+ * нарочно, само за тестова симулация на "причината е била отстранена по
+ * някакъв бъдещ admin механизъм" (виж коментарите на call sites). */
+async function setGiftSenderDirectly(campaignId: string, giftSenderProfileId: string): Promise<void> {
+  const db = await openRawDb()
+  try {
+    db.prepare(`UPDATE campaigns SET gift_sender_profile_id = ? WHERE campaign_id = ?;`).run(giftSenderProfileId, campaignId)
   } finally {
     db.close()
   }
@@ -777,6 +791,257 @@ try {
     } finally {
       db.close()
     }
+  })
+
+  // ═══ Фаза 2 корекции (следващ кръг): request_id уникалност, recovery,
+  // реален дневен лимит, delivery-log видимост, hard-delete на подател ═══
+
+  // ─── 30. Един и същ gift item в ДВА различни прага — и двата се предоставят ───
+  await check('[30] Един gift item, зададен в два различни прага — ДВЕ отделни, независими доставки', async () => {
+    const marketingSender = await seedProfile('Marketing Sender 6', { accountRole: 'marketing' })
+    const sharedGiftId = await seedGiftItem('Споделен подарък (2 прага)')
+    const campaignShared = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
+    await addRewardTier(campaignShared, 500, [{ type: 'gift_item', payload: { giftItemId: sharedGiftId } }])
+    await addRewardTier(campaignShared, 1000, [{ type: 'gift_item', payload: { giftItemId: sharedGiftId } }])
+
+    const player = await seedProfile('Player Shared Gift')
+    // Директно 1000 units в едно начисление — и двата прага трябва да предоставят ПО ЕДНО копие.
+    const result = creditStore.applyManualAdjustment({
+      campaignId: campaignShared,
+      profileId: player,
+      unitsDelta: 1000,
+      reason: 'test: same gift item at two tiers',
+      adminProfileId: ADMIN_ACTOR.profileId,
+    })
+    assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
+    if (!result.ok) return
+    assert(result.grantedRewards.filter((r) => r.type === 'gift_item').length === 2, `expected 2 gift_item rewards granted, got ${JSON.stringify(result.grantedRewards)}`)
+    assert(result.skippedRewards.length === 0, `expected 0 skipped, got ${JSON.stringify(result.skippedRewards)}`)
+
+    const txCount = await countRows(
+      `SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ? AND gift_item_id = ?;`,
+      player,
+      sharedGiftId,
+    )
+    assert(txCount === 2, `expected 2 separate gift_item_transactions rows, got ${txCount}`)
+    const claimsCount = await countRows(`SELECT COUNT(*) AS c FROM campaign_reward_claims WHERE campaign_id = ? AND profile_id = ?;`, campaignShared, player)
+    assert(claimsCount === 2, `expected 2 claim rows (one per tier), got ${claimsCount}`)
+  })
+
+  // ─── 31. Няколко различни подаръка в ЕДИН праг ───
+  await check('[31] Няколко различни gift items в един и същ праг — всички се предоставят', async () => {
+    const marketingSender = await seedProfile('Marketing Sender 7', { accountRole: 'marketing' })
+    const giftA = await seedGiftItem('Подарък А (multi-gift tier)')
+    const giftB = await seedGiftItem('Подарък Б (multi-gift tier)')
+    const giftC = await seedGiftItem('Подарък В (multi-gift tier)')
+    const campaignMultiGift = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
+    await addRewardTier(campaignMultiGift, 10, [
+      { type: 'gift_item', payload: { giftItemId: giftA } },
+      { type: 'gift_item', payload: { giftItemId: giftB } },
+      { type: 'gift_item', payload: { giftItemId: giftC } },
+    ])
+
+    const player = await seedProfile('Player Multi Gift Tier')
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-multi-gift', eventAt: sampleEventAtFor(campaignMultiGift), stakeAmount: 0 })
+    assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
+    if (!result.ok) return
+    assert(result.grantedRewards.filter((r) => r.type === 'gift_item').length === 3, `expected all 3 distinct gifts granted, got ${JSON.stringify(result.grantedRewards)}`)
+    const txCount = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
+    assert(txCount === 3, `expected 3 separate gift_item_transactions rows, got ${txCount}`)
+  })
+
+  // ─── 32. Повторение на СЪЩАТА конкретна награда (replay на идентично събитие) ───
+  await check('[32] Повторен опит за СЪЩИЯ tier_reward (replay на идентично събитие) не създава втора доставка', async () => {
+    const marketingSender = await seedProfile('Marketing Sender 8', { accountRole: 'marketing' })
+    const giftId = await seedGiftItem('Replay подарък')
+    const campaignReplay = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
+    await addRewardTier(campaignReplay, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Replay Gift')
+
+    const first = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-replay-1', eventAt: sampleEventAtFor(campaignReplay), stakeAmount: 0 })
+    const second = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-replay-1', eventAt: sampleEventAtFor(campaignReplay), stakeAmount: 0 })
+    assert(first.ok && second.ok && second.alreadyCredited, `expected idempotent replay, got ${JSON.stringify([first, second])}`)
+    const txCount = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
+    assert(txCount === 1, `expected exactly 1 delivery despite replay, got ${txCount}`)
+  })
+
+  // ─── 33-36. Recovery на пропуснати gift-item награди ───
+  await check('[33] listPendingGiftRewardGaps открива пропусната награда поради invalid_sender', async () => {
+    const nonMarketing = await seedProfile('Future Fix Not Marketing', { accountRole: 'player' })
+    const giftId = await seedGiftItem('Recovery подарък 1')
+    const campaignRecovery = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: nonMarketing })
+    const [tierRewardId] = await addRewardTier(campaignRecovery, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Recovery 1')
+
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-1', eventAt: sampleEventAtFor(campaignRecovery), stakeAmount: 0 })
+    assert(result.ok && result.skippedRewards.length === 1, 'setup: expected the gift to be skipped initially')
+
+    const gaps = creditStore.listPendingGiftRewardGaps(campaignRecovery)
+    assert(gaps.length === 1 && gaps[0].profileId === player && gaps[0].tierRewardId === tierRewardId, `expected exactly 1 gap for this player/tier, got ${JSON.stringify(gaps)}`)
+  })
+
+  await check('[34] retryPendingGiftReward: след поправка на причината, наградата се предоставя БЕЗ ново начисление на единици', async () => {
+    const giftId = await seedGiftItem('Recovery подарък 2')
+    const campaignRecovery2 = await seedCampaign(campaignsStore, ADMIN_ACTOR)
+    const [tierRewardId] = await addRewardTier(campaignRecovery2, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Recovery 2')
+
+    // Начално начисление БЕЗ зададен gift_sender_profile_id -> invalid_sender, пропусната.
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-2', eventAt: sampleEventAtFor(campaignRecovery2), stakeAmount: 0 })
+    assert(result.ok && result.skippedRewards.some((s) => s.reason === 'invalid_sender'), 'setup: expected invalid_sender skip')
+    const totalBeforeRetry = creditStore.getProfileCampaignTotal(campaignRecovery2, player)
+
+    // "Admin поправя причината" — задава валиден marketing подател. ЗАБЕЛЕЖКА:
+    // campaignsStore.updateCampaign() е заключен след 'finished' (Фаза 1, по
+    // дизайн — виж not_editable). Реалният admin UI механизъм "поправи
+    // подателя на вече активна/приключила кампания" е бъдеща фаза извън
+    // Campaign Credit Store-а; тук директно симулираме резултата от такава
+    // бъдеща поправка с raw SQL, за да тестваме retry логиката самостоятелно.
+    const marketingSender = await seedProfile('Marketing Sender Fixed', { accountRole: 'marketing' })
+    await setGiftSenderDirectly(campaignRecovery2, marketingSender)
+
+    const retryResult = creditStore.retryPendingGiftReward(campaignRecovery2, player, tierRewardId)
+    assert(retryResult.ok && !retryResult.alreadyClaimed, `expected successful retry, got ${JSON.stringify(retryResult)}`)
+
+    const totalAfterRetry = creditStore.getProfileCampaignTotal(campaignRecovery2, player)
+    assert(totalAfterRetry === totalBeforeRetry, `retry must NOT change units total: before=${totalBeforeRetry}, after=${totalAfterRetry}`)
+    const txCount = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ? AND sender_profile_id = ?;`, player, marketingSender)
+    assert(txCount === 1, `expected exactly 1 delivery from the fixed sender, got ${txCount}`)
+
+    // Повторен retry — idempotent replay, без втора доставка, без промяна.
+    const secondRetry = creditStore.retryPendingGiftReward(campaignRecovery2, player, tierRewardId)
+    assert(secondRetry.ok && secondRetry.alreadyClaimed, `expected alreadyClaimed on second retry, got ${JSON.stringify(secondRetry)}`)
+    const txCountAfterSecondRetry = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
+    assert(txCountAfterSecondRetry === 1, 'second retry must not create a duplicate delivery')
+  })
+
+  await check('[35] retryPendingGiftReward работи дори за АРХИВИРАНА (симулирано) кампания — задължението надживява статуса', async () => {
+    const giftId = await seedGiftItem('Recovery подарък 3 (archived)')
+    const campaignArchivedSim = await seedCampaign(campaignsStore, ADMIN_ACTOR) // без marketing подател -> invalid_sender
+    const [tierRewardId] = await addRewardTier(campaignArchivedSim, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Recovery 3')
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-3', eventAt: sampleEventAtFor(campaignArchivedSim), stakeAmount: 0 })
+    assert(result.ok && result.skippedRewards.length === 1, 'setup: expected skip')
+
+    // Симулираме архивиране директно (archived_at колоната съществува от Фаза 0; реалният archiving job е бъдеща фаза).
+    const db = await openRawDb()
+    try {
+      db.prepare(`UPDATE campaigns SET archived_at = CURRENT_TIMESTAMP WHERE campaign_id = ?;`).run(campaignArchivedSim)
+    } finally {
+      db.close()
+    }
+
+    const marketingSender = await seedProfile('Marketing Sender For Archived', { accountRole: 'marketing' })
+    await setGiftSenderDirectly(campaignArchivedSim, marketingSender)
+    const retryResult = creditStore.retryPendingGiftReward(campaignArchivedSim, player, tierRewardId)
+    assert(retryResult.ok && !retryResult.alreadyClaimed, `expected successful retry even for archived campaign, got ${JSON.stringify(retryResult)}`)
+  })
+
+  await check('[36] Неуспешен retry НЕ създава известие за неполучена награда (само запазена audit event)', async () => {
+    const nonMarketing = await seedProfile('Still Not Marketing', { accountRole: 'player' })
+    const giftId = await seedGiftItem('Recovery подарък 4 (still failing)')
+    const campaignStillBroken = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: nonMarketing })
+    const [tierRewardId] = await addRewardTier(campaignStillBroken, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Recovery 4')
+    creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-4', eventAt: sampleEventAtFor(campaignStillBroken), stakeAmount: 0 })
+
+    const notificationsBefore = creditStore.listPendingNotifications(player).length
+    const retryResult = creditStore.retryPendingGiftReward(campaignStillBroken, player, tierRewardId)
+    assert(!retryResult.ok && retryResult.reason === 'invalid_sender', `expected retry to still fail (sender unchanged), got ${JSON.stringify(retryResult)}`)
+    const notificationsAfter = creditStore.listPendingNotifications(player).length
+    assert(notificationsAfter === notificationsBefore, 'failed retry must NOT create any notification')
+    const auditCount = await countRows(
+      `SELECT COUNT(*) AS c FROM campaign_events WHERE campaign_id = ? AND event_type = 'campaign_gift_reward_retry_failed';`,
+      campaignStillBroken,
+    )
+    assert(auditCount === 1, 'failed retry must still leave an audit trail event')
+  })
+
+  // ─── 37. Реалният дневен маркетинг лимит (yellowCoinGiftStore механизъм) ───
+  await check('[37] Реалната SUM(yellow_coin_gift_ledger.amount) за подателя за деня остава 0 след служебен кампаниен подарък', async () => {
+    const marketingSender = await seedProfile('Marketing Sender Real Limit', { accountRole: 'marketing' })
+    const giftId = await seedGiftItem('Лимит тест подарък')
+    const campaignLimit = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
+    await addRewardTier(campaignLimit, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Real Limit Test')
+
+    // Точно СЪЩАТА заявка каквата ползва yellowCoinGiftStore::getMarketingDailyGiftLimitStatus
+    // (виж src/db/yellowCoinGiftStore.ts:382-387) — верифицираме РЕАЛНИЯ механизъм, не предположение.
+    const sofiaDayStartUtc = getSofiaDayStartUtcSqliteString()
+    const usedBefore = await countRows(
+      `SELECT COALESCE(SUM(amount), 0) AS c FROM yellow_coin_gift_ledger WHERE sender_profile_id = ? AND created_at >= ?;`,
+      marketingSender,
+      sofiaDayStartUtc,
+    )
+    assert(usedBefore === 0, 'sanity: no pre-existing yellow_coin_gift_ledger activity for this fresh sender')
+
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-real-limit', eventAt: sampleEventAtFor(campaignLimit), stakeAmount: 0 })
+    assert(result.ok && result.grantedRewards.some((r) => r.type === 'gift_item'), 'setup: expected gift granted')
+
+    const usedAfter = await countRows(
+      `SELECT COALESCE(SUM(amount), 0) AS c FROM yellow_coin_gift_ledger WHERE sender_profile_id = ? AND created_at >= ?;`,
+      marketingSender,
+      sofiaDayStartUtc,
+    )
+    assert(usedAfter === 0, `campaign gift must NOT contribute to the real daily-limit ledger SUM: usedAfter=${usedAfter}`)
+
+    // yellow_coin_gift_ledger самата таблица няма ВЪОБЩЕ ред за тази доставка — потвърждава пълна изолация.
+    const ledgerRowCount = await countRows(`SELECT COUNT(*) AS c FROM yellow_coin_gift_ledger WHERE sender_profile_id = ?;`, marketingSender)
+    assert(ledgerRowCount === 0, 'campaign gift delivery must leave zero rows in the unrelated coin-gift ledger table')
+  })
+
+  // ─── 38. Delivery-log видимост — gift_item_delivery_log ред се записва коректно ───
+  await check('[38] Служебният подарък пише gift_item_delivery_log ред (съществуващият "appear to recipient" механизъм)', async () => {
+    const marketingSender = await seedProfile('Marketing Sender Delivery Log', { accountRole: 'marketing' })
+    const giftId = await seedGiftItem('Delivery log тест подарък')
+    const campaignDelivery = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
+    await addRewardTier(campaignDelivery, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Delivery Log Test')
+
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-delivery-log', eventAt: sampleEventAtFor(campaignDelivery), stakeAmount: 0 })
+    assert(result.ok, 'credit failed')
+
+    const db = await openRawDb()
+    try {
+      const deliveryRow = db.prepare(`
+        SELECT recipient_profile_id, gift_item_id, item_name, from_display_name, shown_at
+        FROM gift_item_delivery_log
+        WHERE recipient_profile_id = ?;
+      `).get(player) as { recipient_profile_id: string; gift_item_id: string; item_name: string; from_display_name: string; shown_at: string | null } | undefined
+      assert(deliveryRow !== undefined, 'expected a gift_item_delivery_log row for the recipient — needed for the EXISTING getPendingDeliveries()/next-connect mechanism to surface the gift')
+      assert(deliveryRow!.gift_item_id === giftId, 'delivery log gift_item_id mismatch')
+      assert(deliveryRow!.shown_at === null, 'expected shown_at=NULL (not yet shown) right after granting')
+    } finally {
+      db.close()
+    }
+  })
+
+  // ─── 39. Риск: hard-delete на marketing подателя (документирана находка, не "поправка") ───
+  await check('[39] ДОКУМЕНТИРАНА НАХОДКА: hard-delete на marketing подателя каскадно трие вече предоставени gift_item_transactions (gift_item_transactions.sender_profile_id е ON DELETE CASCADE, не SET NULL)', async () => {
+    const marketingSender = await seedProfile('Marketing Sender To Delete', { accountRole: 'marketing' })
+    const giftId = await seedGiftItem('Подарък преди изтриване на подателя')
+    const campaignDeleteRisk = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
+    await addRewardTier(campaignDeleteRisk, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
+    const player = await seedProfile('Player Before Sender Delete')
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-sender-delete-risk', eventAt: sampleEventAtFor(campaignDeleteRisk), stakeAmount: 0 })
+    assert(result.ok && result.grantedRewards.some((r) => r.type === 'gift_item'), 'setup: expected gift granted before sender deletion')
+
+    const txCountBeforeDelete = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
+    assert(txCountBeforeDelete === 1, 'sanity: 1 transaction row before sender hard-delete')
+
+    const db = await openRawDb()
+    try {
+      db.prepare(`DELETE FROM profiles WHERE profile_id = ?;`).run(marketingSender)
+    } finally {
+      db.close()
+    }
+
+    const txCountAfterDelete = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
+    // Документира ТЕКУЩОТО (пред-съществуващо, не въведено от Фаза 2) поведение
+    // на схемата — CASCADE изтрива историята. Тестът потвърждава находката, не
+    // твърди че това е желаното поведение (виж отчета за препоръка: защита на
+    // marketing профили от hard-delete на application ниво, НЕ FK schema промяна).
+    assert(txCountAfterDelete === 0, `EXPECTED (documented risk): hard-delete of the sender CASCADE-deletes prior campaign gift history — got ${txCountAfterDelete} rows remaining (schema may have changed; re-verify this finding if it did)`)
   })
 } finally {
   if (campaignsStore !== undefined) campaignsStore.close()

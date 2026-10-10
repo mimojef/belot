@@ -90,12 +90,43 @@ export type AcknowledgeNotificationResult =
   | { ok: true }
   | { ok: false; reason: 'notification_not_found' | 'not_owner' }
 
+export type PendingGiftRewardGap = {
+  campaignId: string
+  profileId: string
+  tierRewardId: string
+  giftItemId: string
+  thresholdUnits: number
+}
+
+export type RetryPendingGiftRewardResult =
+  | { ok: true; alreadyClaimed: boolean; summary: GrantedRewardSummary | null }
+  | { ok: false; reason: 'campaign_not_found' | 'tier_reward_not_found' | 'invalid_sender' | 'sender_equals_recipient' | 'gift_item_unavailable' }
+
 export type CampaignCreditStore = {
   creditCampaignUnits: (input: CreditGameOrPurchaseEventInput) => CreditCampaignUnitsResult
   applyManualAdjustment: (input: ManualAdjustmentInput) => CreditCampaignUnitsResult
   getProfileCampaignTotal: (campaignId: string, profileId: string) => number
   listPendingNotifications: (profileId: string) => CampaignRewardNotificationSnapshot[]
   acknowledgeNotification: (notificationId: string, profileId: string) => AcknowledgeNotificationResult
+  /**
+   * Всички due-и-незаявени gift-item награди (threshold_units <= текущия
+   * total на играча), независимо от archived_at на кампанията — веднъж
+   * прекосен прагът, задължението за наградата е исторически факт и трябва
+   * да остане разрешимо дори след архивиране (§2 от задачата за корекции).
+   * Скениране за admin/бъдещ reconciliation UI — не пипа ledger/totals.
+   */
+  listPendingGiftRewardGaps: (campaignId?: string) => PendingGiftRewardGap[]
+  /**
+   * Еднократен, идемпотентен опит за предоставяне на КОНКРЕТНА пропусната
+   * gift-item награда (напр. след като admin е сменил невалидния marketing
+   * подател). Никога не пипа campaign_unit_ledger/campaign_profile_totals
+   * (единиците са вече начислени — това само довършва ДОСТАВКАТА).
+   * alreadyClaimed=true при replay (вече предоставена междувременно) — без
+   * повторен debit/grant. Успешен retry създава нормалното "получи награда"
+   * известие; неуспешен retry НЕ създава известие за пропусната награда
+   * (§2: "не трябва да... създава известие за неполучена награда").
+   */
+  retryPendingGiftReward: (campaignId: string, profileId: string, tierRewardId: string) => RetryPendingGiftRewardResult
   close: () => void
 }
 
@@ -315,6 +346,27 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     ) VALUES (?, ?, ?, ?, ?, 'campaign_reward', NULL, ?);
   `)
 
+  // Mirror на giftItemStore.createDeliveryNotification — ЕДИНСТВЕНИЯТ
+  // съществуващ механизъм, по който подаръкът реално "се появява" на
+  // получателя (live WS push, ако е online В МОМЕНТА на обикновено
+  // 'profile'-context изпращане, инак persisted delivery-log ред, flush-нат
+  // при следващо connect — виж server/src/index.ts:21119). Без този ред,
+  // gift_item_transactions редът е коректен за финансова история, но
+  // получателят НЯМА как да "види" подаръка през съществуващия UI
+  // механизъм. Нямаме достъп до live connection registry тук (campaignCreditStore
+  // е чист DB модул, съзнателно изолиран от WS слоя в тази фаза) — затова
+  // ВИНАГИ пишем delivery-log ред (не опитваме live push); ако получателят е
+  // online точно сега, просто ще го види при следващия си connect/refresh
+  // вместо инстантно — приемлив, безопасен trade-off, не загубена доставка.
+  // createDeliveryNotification() в giftItemStore.ts НЕ отваря собствена
+  // транзакция (само единичен prepared statement run) — безопасно за
+  // reimplement тук, без nested-transaction риск.
+  const insertDeliveryLogStatement = database.prepare(`
+    INSERT INTO gift_item_delivery_log (
+      transaction_id, recipient_profile_id, gift_item_id, item_name, image_url, from_display_name
+    ) VALUES (?, ?, ?, ?, ?, ?);
+  `)
+
   /**
    * Служебна, безплатна gift-item доставка от marketing подателя на
    * кампанията — reimplement на giftItemStore.sendGiftItem СТРУКТУРАТА, но
@@ -327,6 +379,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   function grantCampaignGiftItemInline(
     campaign: CampaignRow,
     recipientProfileId: string,
+    tierRewardId: string,
     giftItemId: string,
   ):
     | { ok: true; summary: GrantedRewardSummary }
@@ -364,12 +417,16 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     const senderDisplayName = senderDisplayNameRow?.display_name ?? 'Pika.bg'
 
     const transactionId = randomUUID()
-    // Детерминистичен request_id (campaign+profile+gift) — стабилен при
-    // retry; UNIQUE constraint-ът на request_id е допълнителен DB-level
-    // backstop (primary idempotency е claim-guard-ът на ниво
-    // campaign_reward_claims — threshold loop-ът никога не вика тази
-    // функция повторно за вече claim-нат tier_reward).
-    const requestId = `campaign:${campaign.campaign_id}:${recipientProfileId}:${giftItemId}`
+    // Детерминистичен request_id — КЛЮЧИРАН по tier_reward_id, НЕ по
+    // giftItemId: два различни прага (напр. 500 и 1000 тикви), предоставящи
+    // ЕДИН И СЪЩ gift item на един играч, трябва да бъдат ДВЕ отделни,
+    // валидни доставки, не колизия на UNIQUE(request_id). tier_reward_id
+    // вече еднозначно идентифицира "тази конкретна награда на тази
+    // конкретна кампания" — primary idempotency guard си остава
+    // campaign_reward_claims (threshold loop-ът никога не вика тази функция
+    // повторно за вече claim-нат tier_reward_id); request_id UNIQUE е
+    // допълнителен DB-level backstop за СЪЩИЯ tier_reward_id, не за gift item-а.
+    const requestId = `campaign:${campaign.campaign_id}:${recipientProfileId}:${tierRewardId}`
     insertGiftTransactionStatement.run(
       transactionId,
       giftItem.gift_item_id,
@@ -378,6 +435,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
       giftItem.price,
       requestId,
     )
+    insertDeliveryLogStatement.run(transactionId, recipientProfileId, giftItem.gift_item_id, giftItem.name, giftItem.image_url, senderDisplayName)
 
     return {
       ok: true,
@@ -457,7 +515,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
       // reward_type === 'gift_item'
       const giftItemId = String(payload.giftItemId)
-      const result = grantCampaignGiftItemInline(campaign, profileId, giftItemId)
+      const result = grantCampaignGiftItemInline(campaign, profileId, row.tier_reward_id, giftItemId)
       if (result.ok) {
         insertClaimStatement.run(campaign.campaign_id, profileId, row.tier_reward_id, giftItemId)
         granted.push(result.summary)
@@ -569,6 +627,25 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     }
   }
 
+  /** Mirror на runInTransaction, за caller-и с различна резултатна форма
+   * (напр. retryPendingGiftReward) — без NegativeTotalRejectedError special
+   * case, който е специфичен само за единиц-начисляващите пътища. */
+  function runInSimpleTransaction<T>(fn: () => T): T {
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const result = fn()
+      database.exec('COMMIT;')
+      return result
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface original error
+      }
+      throw error
+    }
+  }
+
   function creditCampaignUnits(input: CreditGameOrPurchaseEventInput): CreditCampaignUnitsResult {
     return runInTransaction(() => {
       const resolved = resolveCampaignForEvent(input.eventAt)
@@ -648,12 +725,125 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     return { ok: true }
   }
 
+  // ─── Recovery на пропуснати gift-item награди (§2 от Фаза 2 корекции) ───
+  // Умишлено БЕЗ archived_at филтър в двете заявки по-долу — прекосеният
+  // праг е вече исторически факт (campaign_profile_totals), задължението за
+  // наградата надживява архивирането на кампанията. Нито една от двете
+  // функции не пипа campaign_unit_ledger/campaign_profile_totals.
+
+  const selectAllPendingGiftGapsStatement = database.prepare(`
+    SELECT crt.campaign_id, cpt.profile_id, ctr.tier_reward_id, crt.threshold_units, ctr.reward_payload_json
+    FROM campaign_profile_totals cpt
+    JOIN campaign_reward_tiers crt ON crt.campaign_id = cpt.campaign_id AND crt.threshold_units <= cpt.units_total
+    JOIN campaign_tier_rewards ctr ON ctr.tier_id = crt.tier_id AND ctr.reward_type = 'gift_item'
+    LEFT JOIN campaign_reward_claims crc
+      ON crc.campaign_id = crt.campaign_id AND crc.profile_id = cpt.profile_id AND crc.tier_reward_id = ctr.tier_reward_id
+    WHERE crc.tier_reward_id IS NULL
+    ORDER BY crt.campaign_id ASC, crt.threshold_units ASC;
+  `)
+
+  const selectPendingGiftGapsForCampaignStatement = database.prepare(`
+    SELECT crt.campaign_id, cpt.profile_id, ctr.tier_reward_id, crt.threshold_units, ctr.reward_payload_json
+    FROM campaign_profile_totals cpt
+    JOIN campaign_reward_tiers crt ON crt.campaign_id = cpt.campaign_id AND crt.threshold_units <= cpt.units_total
+    JOIN campaign_tier_rewards ctr ON ctr.tier_id = crt.tier_id AND ctr.reward_type = 'gift_item'
+    LEFT JOIN campaign_reward_claims crc
+      ON crc.campaign_id = crt.campaign_id AND crc.profile_id = cpt.profile_id AND crc.tier_reward_id = ctr.tier_reward_id
+    WHERE crc.tier_reward_id IS NULL AND crt.campaign_id = ?
+    ORDER BY crt.threshold_units ASC;
+  `)
+
+  function listPendingGiftRewardGaps(campaignId?: string): PendingGiftRewardGap[] {
+    const rows = (
+      campaignId === undefined
+        ? selectAllPendingGiftGapsStatement.all()
+        : selectPendingGiftGapsForCampaignStatement.all(campaignId)
+    ) as Array<{ campaign_id: string; profile_id: string; tier_reward_id: string; threshold_units: number; reward_payload_json: string }>
+    return rows.map((row) => ({
+      campaignId: row.campaign_id,
+      profileId: row.profile_id,
+      tierRewardId: row.tier_reward_id,
+      giftItemId: String((JSON.parse(row.reward_payload_json) as Record<string, unknown>).giftItemId),
+      thresholdUnits: row.threshold_units,
+    }))
+  }
+
+  const selectTierRewardForRetryStatement = database.prepare(`
+    SELECT ctr.tier_reward_id, ctr.reward_type, ctr.reward_payload_json
+    FROM campaign_tier_rewards ctr
+    JOIN campaign_reward_tiers crt ON crt.tier_id = ctr.tier_id
+    WHERE ctr.tier_reward_id = ? AND crt.campaign_id = ?
+    LIMIT 1;
+  `)
+
+  const selectExistingClaimStatement = database.prepare(`
+    SELECT 1 AS found FROM campaign_reward_claims WHERE campaign_id = ? AND profile_id = ? AND tier_reward_id = ? LIMIT 1;
+  `)
+
+  function retryPendingGiftReward(campaignId: string, profileId: string, tierRewardId: string): RetryPendingGiftRewardResult {
+    return runInSimpleTransaction<RetryPendingGiftRewardResult>(() => {
+      const campaign = selectCampaignByIdStatement.get(campaignId) as CampaignRow | undefined
+      if (campaign === undefined) {
+        return { ok: false, reason: 'campaign_not_found' }
+      }
+      // Съзнателно НЕ проверяваме campaign.archived_at тук — вече начислено/
+      // прекосено задължение за награда трябва да остане разрешимо дори
+      // след архивиране (§2: "кампанията вече е приключила, но дължимата
+      // награда все още не е предоставена").
+
+      const tierReward = selectTierRewardForRetryStatement.get(tierRewardId, campaignId) as
+        | { tier_reward_id: string; reward_type: string; reward_payload_json: string }
+        | undefined
+      if (tierReward === undefined || tierReward.reward_type !== 'gift_item') {
+        return { ok: false, reason: 'tier_reward_not_found' }
+      }
+
+      if (selectExistingClaimStatement.get(campaignId, profileId, tierRewardId) !== undefined) {
+        // Вече предоставена междувременно (напр. друг retry опит, или
+        // нормален threshold loop я е хванал по-рано) — idempotent replay,
+        // без повторен grant, без ново известие.
+        return { ok: true, alreadyClaimed: true, summary: null }
+      }
+
+      const giftItemId = String((JSON.parse(tierReward.reward_payload_json) as Record<string, unknown>).giftItemId)
+      const result = grantCampaignGiftItemInline(campaign, profileId, tierRewardId, giftItemId)
+      if (!result.ok) {
+        insertCampaignEventStatement.run(
+          randomUUID(),
+          campaignId,
+          'campaign_gift_reward_retry_failed',
+          JSON.stringify({ profileId, tierRewardId, giftItemId, reason: result.reason, actorType: 'system' }),
+        )
+        // Нищо не е променено — следващ retry (след отстраняване на
+        // причината) ще опита пак. Без известие за неполучена награда.
+        return { ok: false, reason: result.reason }
+      }
+
+      insertClaimStatement.run(campaignId, profileId, tierRewardId, giftItemId)
+      insertNotificationStatement.run(
+        randomUUID(),
+        campaignId,
+        profileId,
+        JSON.stringify({
+          campaignName: campaign.name,
+          unitNameSingular: campaign.unit_name_singular,
+          unitNamePlural: campaign.unit_name_plural,
+          unitsTotal: getProfileCampaignTotalInternal(campaignId, profileId),
+          rewards: [result.summary],
+        }),
+      )
+      return { ok: true, alreadyClaimed: false, summary: result.summary }
+    })
+  }
+
   return {
     creditCampaignUnits,
     applyManualAdjustment,
     getProfileCampaignTotal: getProfileCampaignTotalInternal,
     listPendingNotifications,
     acknowledgeNotification,
+    listPendingGiftRewardGaps,
+    retryPendingGiftReward,
     close: () => database.close(),
   }
 }
