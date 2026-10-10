@@ -51,16 +51,16 @@
  *   [35] Белот: сценарият от §2 буквално (completed match, campaign credit
  *        временно пропуснат, СЪЩИЯТ job instance, БЕЗ restart) ->
  *        tickNow() два пъти -> credited точно веднъж, без дублиране
- *   [36] Reconciliation job: lookback bound изключва стар мач; по-широк
- *        lookback го хваща
- *   [37] Reconciliation job: limit cap-ва обработените редове в един tick;
- *        остатъкът се хваща на следващия
+ *   [36] Reconciliation job: durable cursor няма 48ч/72ч прозорец — стар
+ *        валиден мач се backfill-ва без full scan на всеки tick
+ *   [37] Reconciliation job: limit cap + cursor обработват backlog-а през
+ *        следващи tick-ове, без първата страница да блокира остатъка
  *   [38] Reconciliation: архивирана (archived_at) кампания -> НИКОГА не се
  *        начислява, дори мача да е бил в оригиналния и прозорец
  *   [39] Reconciliation: стар мач от ПЪРВАТА (вече finished) кампания се
  *        приписва на НЕЯ, не на по-новата кампания, създадена междувременно
  *   [40] Диагностика: getHealth() отразява lastBelotResult/lastLudoResult/lastError
- *   [41] Feature flag OFF: job tick е евтин no-op (0 scanned, без DB заявки)
+ *   [41] Feature flag OFF: job tick е евтин no-op (0 scanned, без DB промени)
  *   [42] Source review — index.ts вече НЯМА `&& campaignCredited` никъде
  *   [43] Source review — index.ts стартира reconciliation job-а в
  *        httpServer.listen() и го затваря при shutdown
@@ -879,39 +879,31 @@ await check('[35] Белот §2 сценарий: completed match + време�
   }
 })
 
-// ─── [36]-[37]: bounded lookback + limit ───
+// ─── [36]-[37]: durable cursor + limit ───
 
-await check('[36] Reconciliation job: lookback bound изключва стар мач; по-широк lookback го хваща', async () => {
-  // startOffsetHours=-150 -> кампанийния прозорец покрива и "преди 100ч"
-  // момента на мача по-долу (default прозорецът, [-1h,+1000h), НЕ би го
-  // покрил — това тества lookback bound-а на job-а, не campaign window-а).
+await check('[36] Reconciliation job: durable cursor няма 48ч/72ч прозорец — стар валиден мач се backfill-ва', async () => {
+  // startOffsetHours=-150 -> кампанийният прозорец покрива и "преди 100ч"
+  // момента на мача по-долу. Старият 48h job би го изпуснал; cursor job-ът
+  // няма time-window loss и пак остава bounded чрез limit.
   const { campaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 60, units: 11 }], { startOffsetHours: -150 })
   const winnerId = randomUUID()
   insertProfile(winnerId, 'T36 winner')
   const roomId = `belot-room-${randomUUID()}`
-  const oldCompletedAt = new Date(Date.now() - 100 * 3_600_000) // 100ч в миналото
+  const oldCompletedAt = new Date(Date.now() - 100 * 3_600_000)
   seedMatchResult(roomId, winnerId, { didWin: true, completedAtIso: oldCompletedAt.toISOString().slice(0, 19).replace('T', ' ') })
   seedStakeDebit(roomId, winnerId, 60)
 
-  const narrowJob = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 1 })
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 1 })
   try {
-    await narrowJob.tickNow()
+    await job.tickNow()
   } finally {
-    narrowJob.close()
-  }
-  assert.equal(countLedgerRowsForSource('belot_win', roomId), 0, '1ч lookback не бива да хване мач от преди 100ч')
-
-  const wideJob = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 200 })
-  try {
-    await wideJob.tickNow()
-  } finally {
-    wideJob.close()
+    job.close()
   }
   const row = getLedgerRow(campaignId, winnerId, 'belot_win', roomId)
-  assert.ok(row !== undefined && row.units_amount === 11, '200ч lookback трябва да хване мача')
+  assert.ok(row !== undefined && row.units_amount === 11, 'старият мач трябва да бъде credit-нат въпреки lookbackHours=1 legacy параметъра')
 })
 
-await check('[37] Reconciliation job: limit cap-ва обработените редове в един tick; остатъкът се хваща на следващия', async () => {
+await check('[37] Reconciliation job: limit cap + cursor обработват backlog-а през следващи tick-ове', async () => {
   seedActiveCampaign([{ gameKind: 'belot', stake: 45, units: 7 }])
   const winnerA = randomUUID()
   const winnerB = randomUUID()
@@ -919,10 +911,22 @@ await check('[37] Reconciliation job: limit cap-ва обработените р
   insertProfile(winnerB, 'T37 winner B')
   const roomA = `belot-room-${randomUUID()}`
   const roomB = `belot-room-${randomUUID()}`
-  seedMatchResult(roomA, winnerA, { didWin: true })
+  const futureA = new Date(Date.now() + 60 * 60_000).toISOString().slice(0, 19).replace('T', ' ')
+  const futureB = new Date(Date.now() + 120 * 60_000).toISOString().slice(0, 19).replace('T', ' ')
+  seedMatchResult(roomA, winnerA, { didWin: true, completedAtIso: futureA })
   seedStakeDebit(roomA, winnerA, 45)
-  seedMatchResult(roomB, winnerB, { didWin: true })
+  seedMatchResult(roomB, winnerB, { didWin: true, completedAtIso: futureB })
   seedStakeDebit(roomB, winnerB, 45)
+
+  const cursorBeforeFutureRows = new Date(Date.now() + 30 * 60_000).toISOString().slice(0, 19).replace('T', ' ')
+  rawDb.prepare(`
+    INSERT INTO campaign_credit_reconciliation_state (source_type, cursor_event_at, cursor_source_id, cursor_profile_id)
+    VALUES ('belot_win', ?, '', '')
+    ON CONFLICT(source_type) DO UPDATE SET
+      cursor_event_at = excluded.cursor_event_at,
+      cursor_source_id = excluded.cursor_source_id,
+      cursor_profile_id = excluded.cursor_profile_id;
+  `).run(cursorBeforeFutureRows)
 
   const cappedJob = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, limit: 1 })
   try {
@@ -949,7 +953,7 @@ await check('[38] Reconciliation: архивирана (archived_at) кампа�
   seedMatchResult(roomId, winnerId, { didWin: true })
   seedStakeDebit(roomId, winnerId, 33)
 
-  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 999_999 })
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
   try {
     await job.tickNow()
   } finally {
@@ -986,7 +990,7 @@ await check('[39] Reconciliation: стар мач се приписва на П�
   // default прозорец [-1h,+1000h), НЕ покрива firstEventAt (~-499h).
   const { campaignId: secondCampaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 21, units: 777 }])
 
-  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 999_999 })
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
   try {
     await job.tickNow()
   } finally {
@@ -1165,10 +1169,12 @@ await check('[42] index.ts вика recordLudoMatchForCampaign ТОЧНО 2 пъ
 
 await check('[43] index.ts стартира campaignCreditReconciliationJob в httpServer.listen() и го затваря при shutdown', () => {
   const createIdx = indexTsSource.indexOf('createCampaignCreditReconciliationJob({')
-  const startIdx = indexTsSource.indexOf('campaignCreditReconciliationJob.start()')
+  const startIdx = indexTsSource.indexOf('campaignCreditReconciliationJob?.start()')
   const closeIdx = indexTsSource.indexOf("closeStore('campaignCreditReconciliationJob'")
+  const flagGateIdx = indexTsSource.indexOf('const campaignCreditStore = isCampaignsFeatureEnabled()')
   const listenIdx = indexTsSource.indexOf('httpServer.listen(PORT, HOST, () => {')
-  assert.ok(createIdx !== -1 && startIdx !== -1 && closeIdx !== -1 && listenIdx !== -1, 'очакваните call sites не бяха намерени')
+  assert.ok(createIdx !== -1 && startIdx !== -1 && closeIdx !== -1 && flagGateIdx !== -1 && listenIdx !== -1, 'очакваните call sites не бяха намерени')
+  assert.ok(flagGateIdx < createIdx, 'campaign credit store/job трябва да са gated от feature flag преди createCampaignCreditReconciliationJob')
   assert.ok(createIdx < listenIdx, 'job-ът трябва да се създаде ПРЕДИ httpServer.listen()')
   assert.ok(startIdx > listenIdx, '.start() трябва да е ВЪТРЕ в httpServer.listen() callback-а')
 })

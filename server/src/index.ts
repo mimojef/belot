@@ -27,6 +27,7 @@ import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
+import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import {
   recordBelotMatchForCampaign,
   recordLudoMatchForCampaign,
@@ -2966,17 +2967,21 @@ setMatchPrizeResolver((stake) => matchRoomsStore.getPrizeAmount(stake))
 const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databaseFilePath)
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
 const activeLudoMatchSnapshotStore = await createActiveLudoMatchSnapshotStore(databaseBootstrap.databaseFilePath)
-const campaignCreditStore = await createCampaignCreditStore(databaseBootstrap.databaseFilePath)
+const campaignCreditStore = isCampaignsFeatureEnabled()
+  ? await createCampaignCreditStore(databaseBootstrap.databaseFilePath)
+  : null
 // Фаза 3 §8/§2(одит) — bounded, idempotent retry за кампанийни начисления,
 // пропуснати от fast-path hook-овете (recordBelotMatchForCampaign/
 // recordLudoMatchForCampaign) поради временна грешка, БЕЗ да изисква
 // restart. Виж campaignGameHooks.ts doc коментара за пълния rationale
-// (lookback bound + row limit -> никога пълно историческо сканиране;
+// (durable cursor + row limit -> никога пълно историческо сканиране на tick;
 // delegira на campaignCreditStore за archived/window/idempotency проверки).
-const campaignCreditReconciliationJob = createCampaignCreditReconciliationJob({
-  databaseFilePath: databaseBootstrap.databaseFilePath,
-  campaignCreditStore,
-})
+const campaignCreditReconciliationJob = campaignCreditStore !== null
+  ? createCampaignCreditReconciliationJob({
+      databaseFilePath: databaseBootstrap.databaseFilePath,
+      campaignCreditStore,
+    })
+  : null
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
@@ -5188,12 +5193,14 @@ const ludoMatchRuntime = createLudoMatchRuntime({
     // противно на §7. Recovery при fast-path миш минава изцяло през
     // createCampaignCreditReconciliationJob (ползва ludo_room_matches,
     // пишан безусловно по-долу, независимо от тоя резултат).
-    const finishedAtIso = activeLudoMatchSnapshotStore.getFinishedAt(snapshot.matchId)
-    recordLudoMatchForCampaign({
-      campaignCreditStore,
-      snapshot,
-      eventAt: finishedAtIso !== null ? new Date(dbDateToUtc(finishedAtIso)) : new Date(),
-    })
+    if (campaignCreditStore !== null) {
+      const finishedAtIso = activeLudoMatchSnapshotStore.getFinishedAt(snapshot.matchId)
+      recordLudoMatchForCampaign({
+        campaignCreditStore,
+        snapshot,
+        eventAt: finishedAtIso !== null ? new Date(dbDateToUtc(finishedAtIso)) : new Date(),
+      })
+    }
     // Snapshot cleanup ЕДИНСТВЕНО след успешен settlement (виж task spec §7:
     // "НИКОГА: snapshot delete -> после payout") И успешен progression запис.
     // winnerPayout===null при finished status значи или липсващ winner data
@@ -5438,12 +5445,14 @@ for (const persisted of restoredLudoMatches) {
     // ПРЕДИ crash-а, COALESCE-guarded в UPSERT_LUDO_MATCH_SNAPSHOT_SQL), не
     // текущия restart момент — критично за §9 (точна campaign window
     // атрибуция на вече приключил мач).
-    const recoveredFinishedAtIso = activeLudoMatchSnapshotStore.getFinishedAt(persisted.matchId)
-    recordLudoMatchForCampaign({
-      campaignCreditStore,
-      snapshot: persisted,
-      eventAt: recoveredFinishedAtIso !== null ? new Date(dbDateToUtc(recoveredFinishedAtIso)) : new Date(),
-    })
+    if (campaignCreditStore !== null) {
+      const recoveredFinishedAtIso = activeLudoMatchSnapshotStore.getFinishedAt(persisted.matchId)
+      recordLudoMatchForCampaign({
+        campaignCreditStore,
+        snapshot: persisted,
+        eventAt: recoveredFinishedAtIso !== null ? new Date(dbDateToUtc(recoveredFinishedAtIso)) : new Date(),
+      })
+    }
     if (winnerPayout !== null && progressionRecorded) {
       try {
         activeLudoMatchSnapshotStore.markMatchRemoved(persisted.matchId)
@@ -6025,17 +6034,19 @@ async function tickRoomGameRuntimes(): Promise<void> {
           // side effects тук — провал в campaign модула никога не чупи/
           // блокира мача самия. isTournamentMatchRoom(room) се подава explicit
           // (виж campaignGameHooks.ts doc коментара защо не го дублираме там).
-          runMatchCompletionSideEffect(
-            'record-campaign-belot-win',
-            room.id,
-            () => {
-              recordBelotMatchForCampaign({
-                campaignCreditStore,
-                room,
-                isTournamentMatch: isTournamentMatchRoom(room),
-              })
-            },
-          )
+          if (campaignCreditStore !== null) {
+            runMatchCompletionSideEffect(
+              'record-campaign-belot-win',
+              room.id,
+              () => {
+                recordBelotMatchForCampaign({
+                  campaignCreditStore,
+                  room,
+                  isTournamentMatch: isTournamentMatchRoom(room),
+                })
+              },
+            )
+          }
           if (!room.config.isGuestTrial && !isTournamentMatchRoom(room)) {
             runMatchCompletionSideEffect(
               'top-up-depleted-bot-wallets',
@@ -26084,8 +26095,12 @@ function closeActiveRoomSnapshotStore(): boolean {
 
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
   closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())
-  closeStore('campaignCreditStore', () => campaignCreditStore.close())
-  closeStore('campaignCreditReconciliationJob', () => campaignCreditReconciliationJob.close())
+  if (campaignCreditStore !== null) {
+    closeStore('campaignCreditStore', () => campaignCreditStore.close())
+  }
+  if (campaignCreditReconciliationJob !== null) {
+    closeStore('campaignCreditReconciliationJob', () => campaignCreditReconciliationJob.close())
+  }
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('authStore', () => authStore.close())
@@ -26238,8 +26253,7 @@ httpServer.listen(PORT, HOST, () => {
   // дефиницията по-горе): веднага прави една обходка (immediate tick в
   // start()), после на фиксиран интервал (default 5 мин), изцяло извън
   // httpServer.listen() callback-а (fire-and-forget) и извън game-worker
-  // tick loop-а. Безопасно да се стартира безусловно — feature flag-ът се
-  // проверява ВЪТРЕ във всеки tick (евтино, без DB connection, ако е
-  // изключен), mirror на кампанийния lifecycle-scheduler модул's подход.
-  campaignCreditReconciliationJob.start()
+  // tick loop-а. Job/store се създават само ако CAMPAIGNS_FEATURE_ENABLED=1
+  // при startup; при изключен flag няма допълнителна campaign DB connection.
+  campaignCreditReconciliationJob?.start()
 })

@@ -210,7 +210,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     WHERE archived_at IS NULL
       AND status IN ('active', 'finished', 'stopped')
       AND datetime(starts_at) <= datetime(?)
-    ORDER BY starts_at DESC;
+    ORDER BY datetime(starts_at) DESC, starts_at DESC;
   `)
 
   const selectStoppedEventStatement = database.prepare(`
@@ -229,17 +229,20 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   function getEffectiveWindowEndIso(campaign: CampaignRow): string {
     if (campaign.status !== 'stopped') return campaign.ends_at
     const row = selectStoppedEventStatement.get(campaign.campaign_id) as { created_at: string } | undefined
-    return row?.created_at ?? campaign.ends_at
+    return row === undefined ? campaign.ends_at : new Date(dbDateToUtc(row.created_at)).toISOString()
   }
 
   function resolveCampaignForEvent(
     eventAt: Date,
   ): { ok: true; campaign: CampaignRow } | { ok: false; reason: 'no_eligible_campaign' } {
     const eventAtIso = eventAt.toISOString()
+    const eventAtMs = eventAt.getTime()
     const candidates = selectCandidateCampaignsStatement.all(eventAtIso) as CampaignRow[]
     for (const candidate of candidates) {
       const effectiveEndIso = getEffectiveWindowEndIso(candidate)
-      if (eventAtIso < effectiveEndIso) {
+      const startsAtMs = new Date(dbDateToUtc(candidate.starts_at)).getTime()
+      const endsAtMs = new Date(dbDateToUtc(effectiveEndIso)).getTime()
+      if (startsAtMs <= eventAtMs && eventAtMs < endsAtMs) {
         return { ok: true, campaign: candidate }
       }
     }

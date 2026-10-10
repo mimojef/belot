@@ -180,13 +180,13 @@ export function recordLudoMatchForCampaign(deps: {
 // (пари/ELO/статистика) вече е коректно финализиран.
 //
 // Ограничения (виж §2 от одитната задача):
-//   - `sinceIso` long-bounds заявката до последните N часа (виж
-//     createCampaignCreditReconciliationJob — default 48ч) — НЕ пълно
-//     историческо сканиране при всеки tick, независимо колко расте
-//     таблицата с времето. И двете WHERE клаузи са index-backed
-//     (idx_profile_match_results_is_guest_trial / idx_ludo_room_matches_finished_at).
+//   - production job-ът пази durable cursor за Belot и Ludo поотделно и
+//     сканира малка страница след cursor-а; когато стигне края, wrap-ва към
+//     началото. Така няма 48ч прозорец, който да изгуби валидни печалби, и
+//     няма първи 500 "заседнали" реда, които да блокират останалите.
 //   - `limit` cap-ва броя редове за обработка в един run (defense-in-depth
-//     срещу неочакван backlog).
+//     срещу неочакван backlog) и cursor-ът се мести след всеки опит; crash
+//     преди cursor update просто води до идемпотентен retry.
 //   - Никога не инвентира ставка (Белот: доказана чрез match_economy_ledger
 //     или explicit "недостоверно, пропусни"; Ludo: stake е директна NOT NULL
 //     колона в ludo_room_matches — няма ambiguous случай).
@@ -199,6 +199,8 @@ export type BelotCampaignReconciliationResult = {
   scanned: number
   credited: number
   skippedInsufficientStakeInfo: number
+  failed: number
+  cursorWrapped: boolean
 }
 
 export type ReconciliationBounds = {
@@ -206,10 +208,75 @@ export type ReconciliationBounds = {
   sinceIso?: string
   /** Максимален брой редове за обработка в тоя извикване. */
   limit?: number
+  /**
+   * Production job mode: persist a stable cursor per source table and advance
+   * through the backlog in small pages. Direct/manual calls stay stateless by
+   * default, which keeps existing one-shot maintenance checks predictable.
+   */
+  useDurableCursor?: boolean
 }
 
 const RECONCILIATION_UNBOUNDED_SINCE_ISO = '1970-01-01T00:00:00.000Z'
 const RECONCILIATION_DEFAULT_LIMIT = 10_000
+const RECONCILIATION_INITIAL_CURSOR = { eventAt: '', sourceId: '', profileId: '' }
+
+type ReconciliationSourceType = 'belot_win' | 'ludo_win'
+
+type ReconciliationCursor = {
+  eventAt: string
+  sourceId: string
+  profileId: string
+}
+
+function normalizeReconciliationLimit(limit: number): number {
+  if (!Number.isFinite(limit) || limit <= 0) return RECONCILIATION_DEFAULT_LIMIT
+  return Math.max(1, Math.floor(limit))
+}
+
+function getReconciliationCursor(
+  database: SqliteDatabase,
+  sourceType: ReconciliationSourceType,
+): ReconciliationCursor {
+  database.prepare(`
+    INSERT OR IGNORE INTO campaign_credit_reconciliation_state (
+      source_type, cursor_event_at, cursor_source_id, cursor_profile_id
+    ) VALUES (?, '', '', '');
+  `).run(sourceType)
+
+  const row = database.prepare(`
+    SELECT cursor_event_at, cursor_source_id, cursor_profile_id
+    FROM campaign_credit_reconciliation_state
+    WHERE source_type = ?
+    LIMIT 1;
+  `).get(sourceType) as
+    | { cursor_event_at: string; cursor_source_id: string; cursor_profile_id: string }
+    | undefined
+
+  return row === undefined
+    ? RECONCILIATION_INITIAL_CURSOR
+    : { eventAt: row.cursor_event_at, sourceId: row.cursor_source_id, profileId: row.cursor_profile_id }
+}
+
+function saveReconciliationCursor(
+  database: SqliteDatabase,
+  sourceType: ReconciliationSourceType,
+  cursor: ReconciliationCursor,
+): void {
+  database.prepare(`
+    INSERT INTO campaign_credit_reconciliation_state (
+      source_type, cursor_event_at, cursor_source_id, cursor_profile_id, updated_at
+    ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(source_type) DO UPDATE SET
+      cursor_event_at = excluded.cursor_event_at,
+      cursor_source_id = excluded.cursor_source_id,
+      cursor_profile_id = excluded.cursor_profile_id,
+      updated_at = CURRENT_TIMESTAMP;
+  `).run(sourceType, cursor.eventAt, cursor.sourceId, cursor.profileId)
+}
+
+function resetReconciliationCursor(database: SqliteDatabase, sourceType: ReconciliationSourceType): void {
+  saveReconciliationCursor(database, sourceType, RECONCILIATION_INITIAL_CURSOR)
+}
 
 export async function reconcileMissingBelotCampaignCredits(
   databaseFilePath: string,
@@ -220,12 +287,14 @@ export async function reconcileMissingBelotCampaignCredits(
     scanned: 0,
     credited: 0,
     skippedInsufficientStakeInfo: 0,
+    failed: 0,
+    cursorWrapped: false,
   }
 
   if (!isCampaignsFeatureEnabled()) return result
 
   const sinceIso = bounds.sinceIso ?? RECONCILIATION_UNBOUNDED_SINCE_ISO
-  const limit = bounds.limit ?? RECONCILIATION_DEFAULT_LIMIT
+  const limit = normalizeReconciliationLimit(bounds.limit ?? RECONCILIATION_DEFAULT_LIMIT)
 
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -235,8 +304,13 @@ export async function reconcileMissingBelotCampaignCredits(
   database.exec('PRAGMA busy_timeout = 5000;')
 
   try {
-    // completed_at е TEXT ISO; lexicographic >= работи коректно за ISO 8601.
-    const selectMissingCreditsStatement = database.prepare(`
+    type BelotMissingCreditRow = {
+      room_id: string
+      profile_id: string
+      completed_at: string
+    }
+
+    const selectMissingCreditsSinceStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
@@ -248,7 +322,62 @@ export async function reconcileMissingBelotCampaignCredits(
             AND cul.source_id = pmr.room_id
             AND cul.profile_id = pmr.profile_id
         )
-      ORDER BY pmr.completed_at ASC
+      ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectMissingCreditsAfterCursorStatement = database.prepare(`
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      FROM profile_match_results pmr
+      WHERE pmr.did_win = 1
+        AND pmr.is_guest_trial = 0
+        AND (
+          pmr.completed_at > ?
+          OR (pmr.completed_at = ? AND pmr.room_id > ?)
+          OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id > ?)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unit_ledger cul
+          WHERE cul.source_type = 'belot_win'
+            AND cul.source_id = pmr.room_id
+            AND cul.profile_id = pmr.profile_id
+        )
+      ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectMissingCreditsFromStartStatement = database.prepare(`
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      FROM profile_match_results pmr
+      WHERE pmr.did_win = 1
+        AND pmr.is_guest_trial = 0
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unit_ledger cul
+          WHERE cul.source_type = 'belot_win'
+            AND cul.source_id = pmr.room_id
+            AND cul.profile_id = pmr.profile_id
+        )
+      ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectMissingCreditsThroughCursorStatement = database.prepare(`
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      FROM profile_match_results pmr
+      WHERE pmr.did_win = 1
+        AND pmr.is_guest_trial = 0
+        AND (
+          pmr.completed_at < ?
+          OR (pmr.completed_at = ? AND pmr.room_id < ?)
+          OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id <= ?)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unit_ledger cul
+          WHERE cul.source_type = 'belot_win'
+            AND cul.source_id = pmr.room_id
+            AND cul.profile_id = pmr.profile_id
+        )
+      ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
 
@@ -262,51 +391,101 @@ export async function reconcileMissingBelotCampaignCredits(
       SELECT 1 FROM match_economy_ledger WHERE room_id = ? AND entry_type = 'stake_debit' LIMIT 1;
     `)
 
-    const rows = selectMissingCreditsStatement.all(sinceIso, limit) as Array<{
-      room_id: string
-      profile_id: string
-      completed_at: string
-    }>
+    let rows: BelotMissingCreditRow[]
+    if (bounds.useDurableCursor === true) {
+      const cursor = getReconciliationCursor(database, 'belot_win')
+      if (cursor.eventAt === '') {
+        rows = selectMissingCreditsFromStartStatement.all(limit) as BelotMissingCreditRow[]
+      } else {
+        rows = selectMissingCreditsAfterCursorStatement.all(
+          cursor.eventAt,
+          cursor.eventAt,
+          cursor.sourceId,
+          cursor.eventAt,
+          cursor.sourceId,
+          cursor.profileId,
+          limit,
+        ) as BelotMissingCreditRow[]
+        if (rows.length < limit) {
+          const wrappedRows = selectMissingCreditsThroughCursorStatement.all(
+            cursor.eventAt,
+            cursor.eventAt,
+            cursor.sourceId,
+            cursor.eventAt,
+            cursor.sourceId,
+            cursor.profileId,
+            limit - rows.length,
+          ) as BelotMissingCreditRow[]
+          if (wrappedRows.length > 0) {
+            result.cursorWrapped = true
+            rows = rows.concat(wrappedRows)
+          } else if (rows.length === 0) {
+            resetReconciliationCursor(database, 'belot_win')
+          }
+        }
+      }
+    } else {
+      // completed_at е TEXT ISO/SQLite timestamp; lexicographic >= works for the
+      // formats produced by this codebase. Stateless/manual calls retain the
+      // old sinceIso escape hatch; production job uses the durable cursor above.
+      rows = selectMissingCreditsSinceStatement.all(sinceIso, limit) as BelotMissingCreditRow[]
+    }
 
     for (const row of rows) {
       result.scanned += 1
 
-      const ownStakeRow = selectOwnStakeDebitStatement.get(row.room_id, row.profile_id) as
-        | { amount: number }
-        | undefined
+      try {
+        const ownStakeRow = selectOwnStakeDebitStatement.get(row.room_id, row.profile_id) as
+          | { amount: number }
+          | undefined
 
-      let stakeAmount: number
-      if (ownStakeRow !== undefined) {
-        stakeAmount = ownStakeRow.amount
-      } else {
-        const anyStakeRow = selectAnyStakeDebitForRoomStatement.get(row.room_id) as { [key: string]: unknown } | undefined
-        if (anyStakeRow !== undefined) {
-          // Друг участник в стаята е дебитиран, този — не: аномалия, не
-          // познаваме реалната ставка за ТОЗИ профил.
-          console.error(
-            `[campaign-game-hooks] belot reconciliation: room=${row.room_id} profile=${row.profile_id} has no stake_debit while another participant does — insufficient info, skipping`,
-          )
-          result.skippedInsufficientStakeInfo += 1
-          continue
+        let stakeAmount: number
+        if (ownStakeRow !== undefined) {
+          stakeAmount = ownStakeRow.amount
+        } else {
+          const anyStakeRow = selectAnyStakeDebitForRoomStatement.get(row.room_id) as { [key: string]: unknown } | undefined
+          if (anyStakeRow !== undefined) {
+            // Друг участник в стаята е дебитиран, този — не: аномалия, не
+            // познаваме реалната ставка за ТОЗИ профил.
+            console.error(
+              `[campaign-game-hooks] belot reconciliation: room=${row.room_id} profile=${row.profile_id} has no stake_debit while another participant does — insufficient info, skipping`,
+            )
+            result.skippedInsufficientStakeInfo += 1
+            continue
+          }
+          // Никой в стаята няма stake_debit ред -> доказана нулева ставка.
+          stakeAmount = 0
         }
-        // Никой в стаята няма stake_debit ред -> доказана нулева ставка.
-        stakeAmount = 0
-      }
 
-      const creditResult = campaignCreditStore.creditCampaignUnits({
-        profileId: row.profile_id,
-        sourceType: 'belot_win',
-        sourceId: row.room_id,
-        eventAt: new Date(dbDateToUtc(row.completed_at)),
-        stakeAmount,
-      })
+        const creditResult = campaignCreditStore.creditCampaignUnits({
+          profileId: row.profile_id,
+          sourceType: 'belot_win',
+          sourceId: row.room_id,
+          eventAt: new Date(dbDateToUtc(row.completed_at)),
+          stakeAmount,
+        })
 
-      if (creditResult.ok) {
-        result.credited += 1
-      } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+        if (creditResult.ok) {
+          result.credited += 1
+        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+          console.error(
+            `[campaign-game-hooks] belot reconciliation credit failed room=${row.room_id} profile=${row.profile_id} reason=${creditResult.reason}`,
+          )
+        }
+      } catch (error) {
+        result.failed += 1
         console.error(
-          `[campaign-game-hooks] belot reconciliation credit failed room=${row.room_id} profile=${row.profile_id} reason=${creditResult.reason}`,
+          `[campaign-game-hooks] belot reconciliation unexpected failure room=${row.room_id} profile=${row.profile_id}`,
+          error,
         )
+      } finally {
+        if (bounds.useDurableCursor === true) {
+          saveReconciliationCursor(database, 'belot_win', {
+            eventAt: row.completed_at,
+            sourceId: row.room_id,
+            profileId: row.profile_id,
+          })
+        }
       }
     }
   } finally {
@@ -319,6 +498,8 @@ export async function reconcileMissingBelotCampaignCredits(
 export type LudoCampaignReconciliationResult = {
   scanned: number
   credited: number
+  failed: number
+  cursorWrapped: boolean
 }
 
 /**
@@ -335,12 +516,12 @@ export async function reconcileMissingLudoCampaignCredits(
   campaignCreditStore: CampaignCreditStore,
   bounds: ReconciliationBounds = {},
 ): Promise<LudoCampaignReconciliationResult> {
-  const result: LudoCampaignReconciliationResult = { scanned: 0, credited: 0 }
+  const result: LudoCampaignReconciliationResult = { scanned: 0, credited: 0, failed: 0, cursorWrapped: false }
 
   if (!isCampaignsFeatureEnabled()) return result
 
   const sinceIso = bounds.sinceIso ?? RECONCILIATION_UNBOUNDED_SINCE_ISO
-  const limit = bounds.limit ?? RECONCILIATION_DEFAULT_LIMIT
+  const limit = normalizeReconciliationLimit(bounds.limit ?? RECONCILIATION_DEFAULT_LIMIT)
 
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -350,7 +531,14 @@ export async function reconcileMissingLudoCampaignCredits(
   database.exec('PRAGMA busy_timeout = 5000;')
 
   try {
-    const selectMissingCreditsStatement = database.prepare(`
+    type LudoMissingCreditRow = {
+      match_id: string
+      winner_profile_id: string
+      stake: number
+      finished_at: string
+    }
+
+    const selectMissingCreditsSinceStatement = database.prepare(`
       SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
              lrm.stake AS stake, lrm.finished_at AS finished_at
       FROM ludo_room_matches lrm
@@ -363,34 +551,141 @@ export async function reconcileMissingLudoCampaignCredits(
             AND cul.source_id = lrm.match_id
             AND cul.profile_id = lrm.winner_profile_id
         )
-      ORDER BY lrm.finished_at ASC
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
       LIMIT ?;
     `)
 
-    const rows = selectMissingCreditsStatement.all(sinceIso, limit) as Array<{
-      match_id: string
-      winner_profile_id: string
-      stake: number
-      finished_at: string
-    }>
+    const selectMissingCreditsAfterCursorStatement = database.prepare(`
+      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
+             lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm
+      WHERE lrm.status = 'finished'
+        AND lrm.winner_profile_id IS NOT NULL
+        AND lrm.finished_at IS NOT NULL
+        AND (
+          lrm.finished_at > ?
+          OR (lrm.finished_at = ? AND lrm.match_id > ?)
+          OR (lrm.finished_at = ? AND lrm.match_id = ? AND lrm.winner_profile_id > ?)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unit_ledger cul
+          WHERE cul.source_type = 'ludo_win'
+            AND cul.source_id = lrm.match_id
+            AND cul.profile_id = lrm.winner_profile_id
+        )
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectMissingCreditsFromStartStatement = database.prepare(`
+      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
+             lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm
+      WHERE lrm.status = 'finished'
+        AND lrm.winner_profile_id IS NOT NULL
+        AND lrm.finished_at IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unit_ledger cul
+          WHERE cul.source_type = 'ludo_win'
+            AND cul.source_id = lrm.match_id
+            AND cul.profile_id = lrm.winner_profile_id
+        )
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectMissingCreditsThroughCursorStatement = database.prepare(`
+      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
+             lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm
+      WHERE lrm.status = 'finished'
+        AND lrm.winner_profile_id IS NOT NULL
+        AND lrm.finished_at IS NOT NULL
+        AND (
+          lrm.finished_at < ?
+          OR (lrm.finished_at = ? AND lrm.match_id < ?)
+          OR (lrm.finished_at = ? AND lrm.match_id = ? AND lrm.winner_profile_id <= ?)
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM campaign_unit_ledger cul
+          WHERE cul.source_type = 'ludo_win'
+            AND cul.source_id = lrm.match_id
+            AND cul.profile_id = lrm.winner_profile_id
+        )
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+      LIMIT ?;
+    `)
+
+    let rows: LudoMissingCreditRow[]
+    if (bounds.useDurableCursor === true) {
+      const cursor = getReconciliationCursor(database, 'ludo_win')
+      if (cursor.eventAt === '') {
+        rows = selectMissingCreditsFromStartStatement.all(limit) as LudoMissingCreditRow[]
+      } else {
+        rows = selectMissingCreditsAfterCursorStatement.all(
+          cursor.eventAt,
+          cursor.eventAt,
+          cursor.sourceId,
+          cursor.eventAt,
+          cursor.sourceId,
+          cursor.profileId,
+          limit,
+        ) as LudoMissingCreditRow[]
+        if (rows.length < limit) {
+          const wrappedRows = selectMissingCreditsThroughCursorStatement.all(
+            cursor.eventAt,
+            cursor.eventAt,
+            cursor.sourceId,
+            cursor.eventAt,
+            cursor.sourceId,
+            cursor.profileId,
+            limit - rows.length,
+          ) as LudoMissingCreditRow[]
+          if (wrappedRows.length > 0) {
+            result.cursorWrapped = true
+            rows = rows.concat(wrappedRows)
+          } else if (rows.length === 0) {
+            resetReconciliationCursor(database, 'ludo_win')
+          }
+        }
+      }
+    } else {
+      rows = selectMissingCreditsSinceStatement.all(sinceIso, limit) as LudoMissingCreditRow[]
+    }
 
     for (const row of rows) {
       result.scanned += 1
 
-      const creditResult = campaignCreditStore.creditCampaignUnits({
-        profileId: row.winner_profile_id,
-        sourceType: 'ludo_win',
-        sourceId: row.match_id,
-        eventAt: new Date(dbDateToUtc(row.finished_at)),
-        stakeAmount: row.stake,
-      })
+      try {
+        const creditResult = campaignCreditStore.creditCampaignUnits({
+          profileId: row.winner_profile_id,
+          sourceType: 'ludo_win',
+          sourceId: row.match_id,
+          eventAt: new Date(dbDateToUtc(row.finished_at)),
+          stakeAmount: row.stake,
+        })
 
-      if (creditResult.ok) {
-        result.credited += 1
-      } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+        if (creditResult.ok) {
+          result.credited += 1
+        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+          console.error(
+            `[campaign-game-hooks] ludo reconciliation credit failed match=${row.match_id} profile=${row.winner_profile_id} reason=${creditResult.reason}`,
+          )
+        }
+      } catch (error) {
+        result.failed += 1
         console.error(
-          `[campaign-game-hooks] ludo reconciliation credit failed match=${row.match_id} profile=${row.winner_profile_id} reason=${creditResult.reason}`,
+          `[campaign-game-hooks] ludo reconciliation unexpected failure match=${row.match_id} profile=${row.winner_profile_id}`,
+          error,
         )
+      } finally {
+        if (bounds.useDurableCursor === true) {
+          saveReconciliationCursor(database, 'ludo_win', {
+            eventAt: row.finished_at,
+            sourceId: row.match_id,
+            profileId: row.winner_profile_id,
+          })
+        }
       }
     }
   } finally {
@@ -447,7 +742,6 @@ export type CampaignCreditReconciliationJobDeps = {
 }
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 300_000
-const DEFAULT_RECONCILIATION_LOOKBACK_HOURS = 48
 const DEFAULT_RECONCILIATION_LIMIT = 500
 
 function sanitizeReconciliationError(error: unknown): string {
@@ -458,7 +752,6 @@ export function createCampaignCreditReconciliationJob(
   deps: CampaignCreditReconciliationJobDeps,
 ): CampaignCreditReconciliationJob {
   const intervalMs = deps.intervalMs ?? DEFAULT_RECONCILIATION_INTERVAL_MS
-  const lookbackHours = deps.lookbackHours ?? DEFAULT_RECONCILIATION_LOOKBACK_HOURS
   const limit = deps.limit ?? DEFAULT_RECONCILIATION_LIMIT
   const now = deps.now ?? (() => new Date())
   const setTimer = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms))
@@ -475,18 +768,17 @@ export function createCampaignCreditReconciliationJob(
 
   async function runTickBody(): Promise<void> {
     if (!isCampaignsFeatureEnabled()) return
-    const sinceIso = new Date(now().getTime() - lookbackHours * 3_600_000).toISOString()
     const belotResult = await reconcileMissingBelotCampaignCredits(
-      deps.databaseFilePath, deps.campaignCreditStore, { sinceIso, limit },
+      deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true },
     )
     lastBelotResult = belotResult
     const ludoResult = await reconcileMissingLudoCampaignCredits(
-      deps.databaseFilePath, deps.campaignCreditStore, { sinceIso, limit },
+      deps.databaseFilePath, deps.campaignCreditStore, { limit, useDurableCursor: true },
     )
     lastLudoResult = ludoResult
     if (belotResult.scanned > 0 || ludoResult.scanned > 0) {
       console.log(
-        `[campaign-credit-reconciliation] belot scanned=${belotResult.scanned} credited=${belotResult.credited} skippedInsufficientStakeInfo=${belotResult.skippedInsufficientStakeInfo} | ludo scanned=${ludoResult.scanned} credited=${ludoResult.credited}`,
+        `[campaign-credit-reconciliation] belot scanned=${belotResult.scanned} credited=${belotResult.credited} skippedInsufficientStakeInfo=${belotResult.skippedInsufficientStakeInfo} failed=${belotResult.failed} wrapped=${belotResult.cursorWrapped ? 1 : 0} | ludo scanned=${ludoResult.scanned} credited=${ludoResult.credited} failed=${ludoResult.failed} wrapped=${ludoResult.cursorWrapped ? 1 : 0}`,
       )
     }
   }

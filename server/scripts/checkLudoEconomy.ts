@@ -131,8 +131,8 @@ async function createIsolatedServerRoot(originalServerRoot: string) {
 async function patchIndexTsForDeterministicLudoWin(serverDir: string): Promise<void> {
   const indexPath = join(serverDir, 'src', 'index.ts')
   const original = await readFile(indexPath, 'utf8')
-  const needle = 'const ludoMatchRuntime = createLudoMatchRuntime({\n  onSnapshot: (snapshot) => {'
-  if (!original.includes(needle)) {
+  const needle = /const ludoMatchRuntime = createLudoMatchRuntime\(\{\r?\n  onSnapshot: \(snapshot\) => \{/
+  if (!needle.test(original)) {
     throw new Error('patchIndexTsForDeterministicLudoWin: anchor text not found in index.ts — update the test patch to match the current createLudoMatchRuntime call shape')
   }
   const injected = `const ludoMatchRuntime = createLudoMatchRuntime({
