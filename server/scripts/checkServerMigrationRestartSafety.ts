@@ -234,7 +234,17 @@ function assertHealthyInvariants(database: Awaited<ReturnType<typeof openDatabas
 const realMigrationFileNames = await loadRealMigrationFileNames()
 assert(realMigrationFileNames.includes(MIGRATION_001), `${MIGRATION_001} not found under ${sourceMigrationsDirectoryPath}`)
 assert(realMigrationFileNames.includes(MIGRATION_002), `${MIGRATION_002} not found under ${sourceMigrationsDirectoryPath}`)
-const beforeMigrationFileNames = realMigrationFileNames.filter((name) => !name.startsWith('20260801_'))
+// Само MIGRATION_001/MIGRATION_002 се изключват (и после ръчно се добавят
+// обратно по-долу, за да симулират "новият код пристига") — изключване по
+// '20260801_' ПРЕФИКС би изхвърлило и 20260801_003_add_tournament_inter_round_waiting.sql
+// (отделна, несвързана миграция със същата дата), която никога не се
+// добавя обратно никъде в този файл, и перманентно би липсвала от всеки
+// temp root тук. 003 няма DDL зависимост от 001/002 (нови collona/таблица,
+// без FK/CHECK към техните колони) — безопасно е да остане в "before"
+// множеството, точно като всяка друга немасирана историческа миграция.
+const beforeMigrationFileNames = realMigrationFileNames.filter(
+  (name) => name !== MIGRATION_001 && name !== MIGRATION_002,
+)
 assert(beforeMigrationFileNames.length < realMigrationFileNames.length, 'expected at least one 20260801_* migration to be excluded from the "before" set')
 
 // ═══ A. Fresh DB → full startup (001+002) → restart safety [1]-[9] ═══
