@@ -1016,8 +1016,15 @@ try {
     }
   })
 
-  // ─── 39. Риск: hard-delete на marketing подателя (документирана находка, не "поправка") ───
-  await check('[39] ДОКУМЕНТИРАНА НАХОДКА: hard-delete на marketing подателя каскадно трие вече предоставени gift_item_transactions (gift_item_transactions.sender_profile_id е ON DELETE CASCADE, не SET NULL)', async () => {
+  // ─── 39. Риск от Фаза 2 вече ПОПРАВЕН във Фаза 2.1 (BEFORE DELETE trigger,
+  // 20261013_001_protect_campaign_gift_sender_profiles.sql) — hard-delete на
+  // marketing подателя вече се отказва директно на SQL ниво, историята
+  // оцелява непокътната. Тестът потвърждава ПОПРАВКАТА, не вече-невалидния
+  // стар "документирана находка" резултат. Пълният functional/application-
+  // level test suite за защитата живее отделно в
+  // checkCampaignGiftSenderProtection.ts — тук само sanity-confirm, че
+  // credit store-ния flow не разчита на остарялото cascade поведение.
+  await check('[39] Фаза 2.1 поправка: hard-delete на marketing подателя вече се ОТКАЗВА (trigger), историята оцелява', async () => {
     const marketingSender = await seedProfile('Marketing Sender To Delete', { accountRole: 'marketing' })
     const giftId = await seedGiftItem('Подарък преди изтриване на подателя')
     const campaignDeleteRisk = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
@@ -1027,21 +1034,23 @@ try {
     assert(result.ok && result.grantedRewards.some((r) => r.type === 'gift_item'), 'setup: expected gift granted before sender deletion')
 
     const txCountBeforeDelete = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
-    assert(txCountBeforeDelete === 1, 'sanity: 1 transaction row before sender hard-delete')
+    assert(txCountBeforeDelete === 1, 'sanity: 1 transaction row before sender hard-delete attempt')
 
     const db = await openRawDb()
     try {
-      db.prepare(`DELETE FROM profiles WHERE profile_id = ?;`).run(marketingSender)
+      let threw = false
+      try {
+        db.prepare(`DELETE FROM profiles WHERE profile_id = ?;`).run(marketingSender)
+      } catch {
+        threw = true
+      }
+      assert(threw, 'Фаза 2.1 trigger-ът трябва да отхвърли директния DELETE на защитен campaign gift sender')
     } finally {
       db.close()
     }
 
     const txCountAfterDelete = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
-    // Документира ТЕКУЩОТО (пред-съществуващо, не въведено от Фаза 2) поведение
-    // на схемата — CASCADE изтрива историята. Тестът потвърждава находката, не
-    // твърди че това е желаното поведение (виж отчета за препоръка: защита на
-    // marketing профили от hard-delete на application ниво, НЕ FK schema промяна).
-    assert(txCountAfterDelete === 0, `EXPECTED (documented risk): hard-delete of the sender CASCADE-deletes prior campaign gift history — got ${txCountAfterDelete} rows remaining (schema may have changed; re-verify this finding if it did)`)
+    assert(txCountAfterDelete === 1, `expected the gift history to SURVIVE the rejected delete attempt, got ${txCountAfterDelete} rows`)
   })
 } finally {
   if (campaignsStore !== undefined) campaignsStore.close()

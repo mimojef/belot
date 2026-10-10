@@ -14,6 +14,7 @@ export type HardDeleteProfileResult =
         | 'invalid_reason'
         | 'active_tournament_dependency'
         | 'invalid_support_request_message'
+        | 'campaign_gift_sender_protected'
     }
 
 /**
@@ -171,6 +172,20 @@ export type ProfileHardDeleteService = {
    */
   hasActiveTournamentDependency: (profileId: ProfileId) => boolean
   /**
+   * Фаза 2.1 — true ако profileId фигурира като sender_profile_id в поне
+   * един gift_item_transactions ред с context='campaign_reward' (реално
+   * предоставена кампанийна награда, не обикновен peer-to-peer подарък).
+   * Защитава по ИСТОРИЧЕСКО участие, не по текуща роля — профил, който
+   * впоследствие е загубил marketing ролята, остава защитен (§2 от
+   * задачата). Публичен read-only pre-check (mirror на
+   * hasActiveTournamentDependency) — index.ts го ползва ПРЕДИ да запише
+   * pending delete marker за target в активна игра, за да не остане
+   * неизпълним завинаги pending ред (за разлика от турнирната зависимост,
+   * тази защита никога не "изчезва" сама). hardDeleteProfile() пак
+   * re-check-ва authoritative вътре в своята BEGIN IMMEDIATE транзакция.
+   */
+  hasCampaignGiftSenderHistory: (profileId: ProfileId) => boolean
+  /**
    * Forensic/hard-delete-evidence query (по-рано ползвана от registration
    * anti-evasion gate-а, премахнат — вече без call site, запазена за
    * admin/support reference) — distinct deleted_profile_id стойности,
@@ -277,6 +292,20 @@ export async function createProfileHardDeleteService(
       AND t.status IN (${ACTIVE_STATUS_PLACEHOLDERS})
     LIMIT 1;
   `)
+
+  // Фаза 2.1 — виж hasCampaignGiftSenderHistory doc коментара в типа по-горе.
+  // Индексиран lookup (idx_gift_item_transactions_sender(sender_profile_id, created_at),
+  // виж 20260909_001_create_gift_item_catalog.sql) — O(log n), не table scan.
+  const selectCampaignGiftSenderHistoryStatement = database.prepare(`
+    SELECT 1 FROM gift_item_transactions
+    WHERE sender_profile_id = ? AND context = 'campaign_reward'
+    LIMIT 1;
+  `)
+
+  // Mirror на RAISE(ABORT, 'campaign_gift_sender_protected') текста от
+  // 20261013_001_protect_campaign_gift_sender_profiles.sql trigger-а — DB-level
+  // backstop detection (виж catch блока в hardDeleteProfile по-долу).
+  const CAMPAIGN_GIFT_SENDER_PROTECTED_TRIGGER_MESSAGE = 'campaign_gift_sender_protected'
 
   // Registration anti-evasion gate (hard-delete evasion fix) — виж
   // findDeletedProfileIdsForVisitorId/findDeletedProfileIdsForIp doc
@@ -818,6 +847,10 @@ export async function createProfileHardDeleteService(
     return entryDependency !== undefined
   }
 
+  function hasCampaignGiftSenderHistory(profileId: ProfileId): boolean {
+    return selectCampaignGiftSenderHistoryStatement.get(profileId) !== undefined
+  }
+
   function findDeletedProfileIdsForVisitorId(visitorId: string): ProfileId[] {
     const rows = selectDeletedProfileIdsForVisitorIdStatement.all(visitorId, visitorId) as Array<{ deleted_profile_id: string }>
     return rows.map((row) => row.deleted_profile_id)
@@ -883,6 +916,16 @@ export async function createProfileHardDeleteService(
       if (hasActiveTournamentDependency(profileRow.profile_id)) {
         database.exec('ROLLBACK;')
         return { ok: false, code: 'active_tournament_dependency' }
+      }
+
+      // Фаза 2.1 — campaign gift sender protection (re-checked authoritative
+      // вътре в транзакцията, race-safe спрямо конкурентно начисляване на
+      // нова кампанийна награда от същия подател между upstream pre-check-а
+      // и реалното изпълнение тук). Отказваме delete-а изцяло — никаква
+      // snapshot/partial логика, профилът остава напълно непипнат.
+      if (hasCampaignGiftSenderHistory(profileRow.profile_id)) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'campaign_gift_sender_protected' }
       }
 
       // Support deletion archive — EXPLICIT ATTRIBUTION ONLY (виж primitive-ия
@@ -1044,6 +1087,20 @@ export async function createProfileHardDeleteService(
       } catch {
         // keep original error
       }
+
+      // Фаза 2.1 defense-in-depth backstop — ако application-level
+      // проверката по-горе по някаква причина е пропусната/байпасната (напр.
+      // бъдещ код path, директен SQL), DB trigger-ът
+      // (20261013_001_protect_campaign_gift_sender_profiles.sql) все пак
+      // блокира самия DELETE FROM profiles statement с точно тоя RAISE
+      // текст. Превеждаме го в същия graceful резултат, вместо да позволим
+      // суров SQLite error да изтече навън — профилът вече е непипнат
+      // (ROLLBACK по-горе е върнал ЦЯЛАТА транзакция, вкл. всички snapshot
+      // UPDATE-и, в оригиналното й състояние).
+      if (error instanceof Error && error.message.includes(CAMPAIGN_GIFT_SENDER_PROTECTED_TRIGGER_MESSAGE)) {
+        return { ok: false, code: 'campaign_gift_sender_protected' }
+      }
+
       throw error
     }
 
@@ -1076,6 +1133,7 @@ export async function createProfileHardDeleteService(
   return {
     hardDeleteProfile,
     hasActiveTournamentDependency,
+    hasCampaignGiftSenderHistory,
     findDeletedProfileIdsForVisitorId,
     findDeletedProfileIdsForIp,
     hasActiveMuteSnapshotForDeletedProfile,

@@ -10303,6 +10303,22 @@ async function handleAdminProfileHardDeleteRequest(
       return true
     }
 
+    // Фаза 2.1 — за разлика от турнирната зависимост (която изчезва сама
+    // след terminal completion), campaign gift sender защитата е постоянна
+    // — профилът НИКОГА няма да стане изтриваем сам по себе си. Без тази
+    // pre-check проверка ТУК, pending delete маркерът би се записал и после
+    // би се опитвал (и провалял) завинаги при всеки следващ match-end hook
+    // за target-а (виж applyPendingModerationForRoomParticipants). Отказваме
+    // веднага вместо да записваме неизпълним pending ред.
+    if (profileHardDeleteService.hasCampaignGiftSenderHistory(targetProfileId)) {
+      sendJsonResponse(res, 409, {
+        ok: false,
+        code: 'campaign_gift_sender_protected',
+        message: 'Този профил е изпращал кампанийни награди и не може да бъде изтрит окончателно — историята на предоставените награди трябва да се запази.',
+      })
+      return true
+    }
+
     // Round 3 корекция — pre-check ПРЕДИ да запишем pending маркера (не
     // само при terminal completion): ако supportRequestMessageId е подаден,
     // но не е валиден user-authored съобщение на ТОЗИ target, ЦЯЛОТО pending
@@ -10368,6 +10384,7 @@ async function handleAdminProfileHardDeleteRequest(
       invalid_reason: 400,
       active_tournament_dependency: 409,
       invalid_support_request_message: 400,
+      campaign_gift_sender_protected: 409,
     }
     const messageByCode: Record<typeof result.code, string> = {
       not_found: 'Профилът не беше намерен.',
@@ -10375,6 +10392,7 @@ async function handleAdminProfileHardDeleteRequest(
       invalid_reason: 'Причината е задължителна.',
       active_tournament_dependency: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
       invalid_support_request_message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
+      campaign_gift_sender_protected: 'Този профил е изпращал кампанийни награди и не може да бъде изтрит окончателно — историята на предоставените награди трябва да се запази.',
     }
     sendJsonResponse(res, statusByCode[result.code], { ok: false, code: result.code, message: messageByCode[result.code] })
     return true

@@ -83,6 +83,7 @@
     "check:campaign-scheduler": "tsx scripts/checkCampaignScheduler.ts --server-root=.",
     "check:campaign-credit-store": "tsx scripts/checkCampaignCreditStore.ts --server-root=.",
     "check:campaign-reward-vip-grants-migration": "tsx scripts/checkCampaignRewardVipGrantsMigration.ts --server-root=.",
+    "check:campaign-gift-sender-protection": "tsx scripts/checkCampaignGiftSenderProtection.ts --server-root=.",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",
