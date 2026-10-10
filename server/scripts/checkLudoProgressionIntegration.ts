@@ -77,8 +77,9 @@
  *   [E2] Source review — onSnapshot И boot recovery викат
  *        recordLudoMatchProgression ПРЕДИ markMatchRemoved; старият inline
  *        блок е премахнат (единствен call site към store-а). Фаза 3
- *        (кампании) добавя campaignCredited като трети, успореден gate на
- *        СЪЩИЯ markMatchRemoved call — проверката е обновена да го очаква.
+ *        (кампании) НЕ добавя трети gate тук (одит-корекция — campaign
+ *        резултатът не гейтва cleanup, за да не се трупат finished
+ *        snapshots при персистентна грешка) — проверката остава непроменена.
  *   [E3] Source review — миграцията 20260927_001 дефинира
  *        profile_completed_game_ledger с PRIMARY KEY (scope_id, profile_id)
  *   [E4] Source review — миграцията 20260928_002 добавя did_win
@@ -717,24 +718,26 @@ await check('[E2] onSnapshot И boot recovery викат recordLudoMatchProgress
   const onSnapshotStart = codeOnly.indexOf('const ludoMatchRuntime = createLudoMatchRuntime({')
   assert.ok(onSnapshotStart >= 0)
   const onSnapshotProgression = codeOnly.indexOf('const progressionRecorded = recordLudoMatchProgression(snapshot)', onSnapshotStart)
-  // Фаза 3 (кампании) добавя трети, успореден gate (campaignCredited) върху
-  // СЪЩИЯ markMatchRemoved call — виж campaignGameHooks.ts doc коментара:
-  // reuse-ва точно тоя "пази реда, ако side effect fail-не" trick, за да
-  // наследи campaign crediting-ът СЪЩАТА boot-recovery retry гаранция,
-  // без нов отделен механизъм. progressionRecorded продължава да е ЕДИН от
-  // гейтовете (не е заменен), затова проверката тук си остава валидна.
-  const onSnapshotRemoveGuard = codeOnly.indexOf("if (snapshot.state.status === 'finished' && winnerPayout !== null && progressionRecorded && campaignCredited) {", onSnapshotStart)
+  // Фаза 3 (кампании) одит-корекция: recordLudoMatchForCampaign-ия резултат
+  // НЕ гейтва markMatchRemoved (виж campaignGameHooks.ts doc коментара —
+  // гейтване с кампанийния резултат би оставило finished snapshots да се
+  // трупат безкрайно при персистентна кампанийна грешка). Recovery за
+  // кампании минава през отделен createCampaignCreditReconciliationJob
+  // (ludo_room_matches-based), не през тоя retained-snapshot механизъм.
+  // Проверката тук остава ТОЧНО както преди кампаниите — само
+  // progressionRecorded гейтва cleanup-а.
+  const onSnapshotRemoveGuard = codeOnly.indexOf("if (snapshot.state.status === 'finished' && winnerPayout !== null && progressionRecorded) {", onSnapshotStart)
   const onSnapshotRemove = codeOnly.indexOf('activeLudoMatchSnapshotStore.markMatchRemoved(snapshot.matchId)', onSnapshotStart)
   assert.ok(onSnapshotProgression > onSnapshotStart && onSnapshotProgression < onSnapshotRemove, 'onSnapshot: progression трябва да е преди snapshot cleanup-а')
-  assert.ok(onSnapshotRemoveGuard > onSnapshotProgression && onSnapshotRemoveGuard < onSnapshotRemove, 'onSnapshot: markMatchRemoved трябва да е guard-нат и от progressionRecorded (и Фаза 3: campaignCredited)')
+  assert.ok(onSnapshotRemoveGuard > onSnapshotProgression && onSnapshotRemoveGuard < onSnapshotRemove, 'onSnapshot: markMatchRemoved трябва да е guard-нат от progressionRecorded')
 
   const recoveryStart = codeOnly.indexOf('for (const persisted of restoredLudoMatches) {')
   assert.ok(recoveryStart >= 0)
   const recoveryProgression = codeOnly.indexOf('const progressionRecorded = recordLudoMatchProgression(persisted)', recoveryStart)
-  const recoveryRemoveGuard = codeOnly.indexOf('if (winnerPayout !== null && progressionRecorded && campaignCredited) {', recoveryStart)
+  const recoveryRemoveGuard = codeOnly.indexOf('if (winnerPayout !== null && progressionRecorded) {', recoveryStart)
   const recoveryRemove = codeOnly.indexOf('activeLudoMatchSnapshotStore.markMatchRemoved(persisted.matchId)', recoveryStart)
   assert.ok(recoveryProgression > recoveryStart && recoveryProgression < recoveryRemove, 'recovery: progression трябва да е преди snapshot cleanup-а')
-  assert.ok(recoveryRemoveGuard > recoveryProgression && recoveryRemoveGuard < recoveryRemove, 'recovery: markMatchRemoved трябва да е guard-нат и от progressionRecorded (и Фаза 3: campaignCredited)')
+  assert.ok(recoveryRemoveGuard > recoveryProgression && recoveryRemoveGuard < recoveryRemove, 'recovery: markMatchRemoved трябва да е guard-нат от progressionRecorded')
 
   const helperBody = codeOnly.slice(codeOnly.indexOf('function recordLudoMatchProgression('), onSnapshotStart)
   assert.ok(/if \(!result\.ok\) allRecorded = false/.test(helperBody), 'helper-ът трябва да връща false при ok:false')

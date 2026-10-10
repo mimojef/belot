@@ -26,7 +26,7 @@
  *   [14] source_id/campaign_id/event_at коректно записани в ledger
  *   [15] Ludo реална победа (real runtime forfeit-finish) -> печелившият начислен, губещият не (loserRow===undefined)
  *   [17] Ludo winnerColor===null (status finished без winner) -> no-op
- *   [18] Ludo hook грешка -> връща false (за markMatchRemoved gate-а)
+ *   [18] Ludo hook грешка -> връща false (само diagnostic, виж [33])
  *   [19] activeLudoMatchSnapshotStore.getFinishedAt — стабилен след повторен upsert
  *   [20] Reconciliation: липсващ ledger ред с доказан stake -> backfill-ва се
  *   [21] Reconciliation: вече начислен мач -> НЕ се пипа повторно (0 credited)
@@ -34,7 +34,36 @@
  *   [23] Reconciliation: аномален частичен debit -> skipped, НЕ се познава ставка
  *   [24] Reconciliation: Guest Trial ред -> изключен от скенирането
  *   [25] Source review — index.ts викa recordBelotMatchForCampaign СЛЕД payout-match-winners, вътре в shouldRunMatchCompletionSideEffects guard-а
- *   [26] Source review — index.ts гейтва markMatchRemoved (onSnapshot И boot recovery) с campaignCredited
+ *   [26] Source review — markMatchRemoved (onSnapshot И boot recovery) НЕ е гейтнат от campaign резултата (одит-корекция)
+ *
+ * ОДИТ (виж "ФАЗА 3 — ФИНАЛЕН ОДИТ"), [27]+:
+ *   [27]-[31] Ludo: 5те "успешно обработени без начисление" случая (flag off/
+ *        без кампания/без rule/неелигибилен профил/explicit 0-units rule) —
+ *        recordLudoMatchForCampaign връща true, без хвърляне
+ *   [32] Ludo: real-wiring mirror (persist->progression->campaign hook
+ *        (резултатът се игнорира)->markMatchRemoved) — snapshot се маха
+ *        безусловно, независимо от campaign резултата
+ *   [33] Ludo: временна грешка (trigger-simulated) -> hook връща false, НО
+ *        snapshot ПАК се маха (без трупане — виж §1 "Провери, че не се
+ *        натрупват приключили Ludo snapshots")
+ *   [34] Ludo: СЪЩАТА временна грешка -> reconciliationJob.tickNow() (без
+ *        restart) backfill-ва точно веднъж; втори tickNow() -> 0 промени
+ *   [35] Белот: сценарият от §2 буквално (completed match, campaign credit
+ *        временно пропуснат, СЪЩИЯТ job instance, БЕЗ restart) ->
+ *        tickNow() два пъти -> credited точно веднъж, без дублиране
+ *   [36] Reconciliation job: lookback bound изключва стар мач; по-широк
+ *        lookback го хваща
+ *   [37] Reconciliation job: limit cap-ва обработените редове в един tick;
+ *        остатъкът се хваща на следващия
+ *   [38] Reconciliation: архивирана (archived_at) кампания -> НИКОГА не се
+ *        начислява, дори мача да е бил в оригиналния и прозорец
+ *   [39] Reconciliation: стар мач от ПЪРВАТА (вече finished) кампания се
+ *        приписва на НЕЯ, не на по-новата кампания, създадена междувременно
+ *   [40] Диагностика: getHealth() отразява lastBelotResult/lastLudoResult/lastError
+ *   [41] Feature flag OFF: job tick е евтин no-op (0 scanned, без DB заявки)
+ *   [42] Source review — index.ts вече НЯМА `&& campaignCredited` никъде
+ *   [43] Source review — index.ts стартира reconciliation job-а в
+ *        httpServer.listen() и го затваря при shutdown
  *
  * Изход: process.exit(0) при успех, process.exit(1) иначе.
  */
@@ -53,6 +82,8 @@ import {
   recordBelotMatchForCampaign,
   recordLudoMatchForCampaign,
   reconcileMissingBelotCampaignCredits,
+  reconcileMissingLudoCampaignCredits,
+  createCampaignCreditReconciliationJob,
 } from '../src/campaigns/campaignGameHooks.js'
 import { createActiveLudoMatchSnapshotStore } from '../src/db/activeLudoMatchSnapshotStore.js'
 import { createLudoMatchRuntime, type LudoMatchSnapshot } from '../src/game/ludoMatchRuntime.js'
@@ -132,10 +163,17 @@ function hoursFromNow(hours: number): string {
 // draft/schedule дори да стартира. eventAt=now е валиден sample В рамките на
 // тоя прозорец за всички тестове по-долу (makeBelotRoom's default endedAt е
 // Date.now()).
-function seedActiveCampaign(earnRules: Array<{ gameKind: 'belot' | 'ludo'; stake: number; units: number }>): { campaignId: string; eventAt: Date } {
-  const eventAt = new Date()
-  const startsAt = hoursFromNow(-1)
-  const endsAt = hoursFromNow(1000)
+function seedActiveCampaign(
+  earnRules: Array<{ gameKind: 'belot' | 'ludo'; stake: number; units: number }>,
+  windowOverride: { startOffsetHours?: number; endOffsetHours?: number } = {},
+): { campaignId: string; eventAt: Date } {
+  const startOffsetHours = windowOverride.startOffsetHours ?? -1
+  const endOffsetHours = windowOverride.endOffsetHours ?? 1000
+  const startsAt = hoursFromNow(startOffsetHours)
+  const endsAt = hoursFromNow(endOffsetHours)
+  // Representative sample В рамките на [startsAt,endsAt) — 1ч след starts_at,
+  // mirror на checkCampaignCreditStore.ts's sampleEventAtFor() прецедент.
+  const eventAt = new Date(new Date(startsAt).getTime() + 3_600_000)
 
   const draft = campaignsStore.createDraftCampaign(
     { name: `Hooks Test Campaign ${randomUUID()}`, startsAt, endsAt, unitNameSingular: 'тиква', unitNamePlural: 'тикви', giftSenderProfileId: null },
@@ -152,6 +190,16 @@ function seedActiveCampaign(earnRules: Array<{ gameKind: 'belot' | 'ludo'; stake
 
   const scheduled = campaignsStore.scheduleCampaign(campaignId, ADMIN_ACTOR)
   if (!scheduled.ok) throw new Error('seedActiveCampaign: scheduleCampaign failed')
+  // Ако ends_at вече е в миналото (напр. windowOverride симулира историческа,
+  // отдавна приключила кампания — виж [39]), activateCampaign правилно би
+  // отказал с 'already_expired' (Фаза 1 правило: "не активирай за кратко
+  // само за да приключиш") — минава директно scheduled -> finished, mirror
+  // на checkCampaignCreditStore.ts's seedCampaign() прецедент.
+  if (new Date(endsAt).getTime() <= Date.now()) {
+    const expired = campaignsStore.expireScheduledCampaignWithoutActivating(campaignId, new Date(), ADMIN_ACTOR)
+    if (!expired.ok) throw new Error(`seedActiveCampaign: expireScheduledCampaignWithoutActivating failed: ${JSON.stringify(expired)}`)
+    return { campaignId, eventAt }
+  }
   const activated = campaignsStore.activateCampaign(campaignId, new Date(), ADMIN_ACTOR)
   if (!activated.ok) throw new Error('seedActiveCampaign: activateCampaign failed')
   const finished = campaignsStore.finishCampaign(campaignId, new Date(new Date(endsAt).getTime() + 3_600_000), ADMIN_ACTOR)
@@ -581,7 +629,7 @@ await check('[18] Ludo hook грешка (затворена connection) -> вр
   assert.doesNotThrow(() => {
     credited = recordLudoMatchForCampaign({ campaignCreditStore: isolatedStore, snapshot: fakeSnapshot, eventAt: new Date() })
   })
-  assert.equal(credited, false, 'грешка в credit store-а трябва да върне false (за markMatchRemoved gate-а в index.ts)')
+  assert.equal(credited, false, 'грешка в credit store-а трябва да върне false (само diagnostic логване — виж [33] за доказателство, че cleanup-ът НЕ зависи от тая стойност)')
 })
 
 await check('[19] activeLudoMatchSnapshotStore.getFinishedAt — стабилен "оригинален момент" след повторен upsert', async () => {
@@ -608,6 +656,393 @@ await check('[19] activeLudoMatchSnapshotStore.getFinishedAt — стабиле�
     snapshotStore.close()
   }
 })
+
+// ═══════════════════════════════════════════════════════════════════════
+// ОДИТ [27]-[41]: Ludo campaignCredited gate + Belot/Ludo retry без restart
+// ═══════════════════════════════════════════════════════════════════════
+console.log('\n=== [27]-[41] Одит: Ludo gate semantics + bounded periodic reconciliation ===')
+
+function makeFinishedLudoSnapshot(opts: { matchId?: string; stake: number; winnerProfileId: string; loserProfileId: string }): LudoMatchSnapshot {
+  return {
+    matchId: opts.matchId ?? `ludo-match-${randomUUID()}`,
+    ludoRoomId: `ludo-room-${randomUUID()}`,
+    stake: opts.stake,
+    revision: 1,
+    serverNow: Date.now(),
+    deadlineAt: null,
+    players: [
+      { profileId: opts.winnerProfileId, displayName: 'Winner', avatarUrl: null, color: 'red' as const },
+      { profileId: opts.loserProfileId, displayName: 'Loser', avatarUrl: null, color: 'blue' as const },
+    ],
+    state: { status: 'finished', winnerColor: 'red' } as any,
+    events: [],
+    botControlledColors: [],
+    diceLuckByColor: {},
+  } as unknown as LudoMatchSnapshot
+}
+
+// ─── [27]-[31]: 5 "успешно обработени без начисление" случая ───
+
+await check('[27] Ludo flag OFF -> recordLudoMatchForCampaign връща true, нулеви ledger редове', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T27 winner')
+  insertProfile(loser, 'T27 loser')
+  seedActiveCampaign([{ gameKind: 'ludo', stake: 150, units: 30 }])
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+  const previous = process.env.CAMPAIGNS_FEATURE_ENABLED
+  delete process.env.CAMPAIGNS_FEATURE_ENABLED
+  let credited: boolean
+  try {
+    credited = recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+  } finally {
+    process.env.CAMPAIGNS_FEATURE_ENABLED = previous
+  }
+  assert.equal(credited, true, 'flag off трябва да се счита за успешно обработен случай')
+  assert.equal(countLedgerRowsForSource('ludo_win', snapshot.matchId), 0)
+})
+
+await check('[28] Ludo без елигибилна кампания -> връща true, нулеви ledger редове', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T28 winner')
+  insertProfile(loser, 'T28 loser')
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+  const farFutureEventAt = new Date(Date.now() + 5000 * 3_600_000)
+  const credited = recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: farFutureEventAt })
+  assert.equal(credited, true)
+  assert.equal(countLedgerRowsForSource('ludo_win', snapshot.matchId), 0)
+})
+
+await check('[29] Ludo без earn rule за тая ставка -> връща true, ledger ред с units_amount=0 (без начисление)', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T29 winner')
+  insertProfile(loser, 'T29 loser')
+  const { campaignId } = seedActiveCampaign([{ gameKind: 'ludo', stake: 999, units: 30 }]) // друга ставка, не 777
+  const snapshot = makeFinishedLudoSnapshot({ stake: 777, winnerProfileId: winner, loserProfileId: loser })
+  const credited = recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+  assert.equal(credited, true)
+  const row = getLedgerRow(campaignId, winner, 'ludo_win', snapshot.matchId)
+  assert.ok(row !== undefined && row.units_amount === 0, 'липсващо rule -> 0 units, не грешка')
+})
+
+await check('[30] Ludo неелигибилен (is_temporary=1) печеливш профил -> връща true, нулеви ledger редове', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T30 winner', { isTemporary: true })
+  insertProfile(loser, 'T30 loser')
+  seedActiveCampaign([{ gameKind: 'ludo', stake: 150, units: 30 }])
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+  const credited = recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+  assert.equal(credited, true, 'ineligible_profile трябва да се счита за успешно обработен случай')
+  assert.equal(countLedgerRowsForSource('ludo_win', snapshot.matchId), 0)
+})
+
+await check('[31] Ludo explicit 0-units rule -> връща true, ledger ред с units_amount=0', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T31 winner')
+  insertProfile(loser, 'T31 loser')
+  const { campaignId } = seedActiveCampaign([{ gameKind: 'ludo', stake: 150, units: 0 }])
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+  const credited = recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+  assert.equal(credited, true)
+  const row = getLedgerRow(campaignId, winner, 'ludo_win', snapshot.matchId)
+  assert.ok(row !== undefined && row.units_amount === 0)
+})
+
+// ─── [32]-[34]: gate semantics + no accumulation + retry-without-restart ───
+
+const auditSnapshotStore = await createActiveLudoMatchSnapshotStore(dbPath)
+
+// Mirror ТОЧНО на index.ts's (одит-коригирана) onSnapshot последователност:
+// persist -> recordLudoMatchForCampaign (резултатът се ИГНОРИРА за gating,
+// само diagnostic) -> markMatchRemoved, безусловно спрямо campaign резултата
+// (progression/payout се симулират като вече успешни — тук тестваме само
+// campaign-свързаната част от инварианта).
+function applyLudoFinishedLifecycleForAudit(snapshot: LudoMatchSnapshot): void {
+  auditSnapshotStore.upsertMatch(snapshot)
+  recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+  auditSnapshotStore.markMatchRemoved(snapshot.matchId)
+}
+function isAuditSnapshotRetained(matchId: string): boolean {
+  return auditSnapshotStore.loadActiveMatches().some((s) => s.matchId === matchId)
+}
+function injectCampaignLedgerFailure(profileId: string): () => void {
+  const triggerName = `fail_campaign_ledger_${randomUUID().replace(/-/g, '')}`
+  rawDb.exec(`
+    CREATE TRIGGER ${triggerName}
+    BEFORE INSERT ON campaign_unit_ledger
+    WHEN NEW.profile_id = '${profileId}'
+    BEGIN SELECT RAISE(ABORT, 'simulated transient campaign DB failure'); END;
+  `)
+  return () => rawDb.exec(`DROP TRIGGER ${triggerName};`)
+}
+
+await check('[32] Real-wiring mirror: snapshot се маха безусловно след нормален (успешен) campaign hook', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T32 winner')
+  insertProfile(loser, 'T32 loser')
+  seedActiveCampaign([{ gameKind: 'ludo', stake: 150, units: 30 }])
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+  applyLudoFinishedLifecycleForAudit(snapshot)
+  assert.equal(isAuditSnapshotRetained(snapshot.matchId), false, 'успешен случай -> snapshot премахнат нормално')
+})
+
+await check('[33] Временна campaign грешка (trigger) -> hook връща false, НО snapshot ПАК се маха (без трупане)', () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T33 winner')
+  insertProfile(loser, 'T33 loser')
+  seedActiveCampaign([{ gameKind: 'ludo', stake: 150, units: 30 }])
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+  const clearFailure = injectCampaignLedgerFailure(winner)
+  try {
+    const credited = recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+    assert.equal(credited, false, 'hook-ът трябва да регистрира неуспеха')
+  } finally {
+    clearFailure()
+  }
+  // Верният lifecycle mirror (index.ts): markMatchRemoved се извиква
+  // БЕЗУСЛОВНО спрямо campaign резултата (виж applyLudoFinishedLifecycleForAudit).
+  auditSnapshotStore.upsertMatch(snapshot)
+  auditSnapshotStore.markMatchRemoved(snapshot.matchId)
+  assert.equal(isAuditSnapshotRetained(snapshot.matchId), false, 'временна campaign грешка НЕ бива да остави snapshot-а да се трупа')
+  assert.equal(countLedgerRowsForSource('ludo_win', snapshot.matchId), 0, 'rollback — никакъв частичен ledger ред')
+})
+
+await check('[34] Същата временна грешка -> reconciliationJob.tickNow() (БЕЗ restart) backfill-ва точно веднъж; втори tickNow() -> 0 промени', async () => {
+  const winner = randomUUID()
+  const loser = randomUUID()
+  insertProfile(winner, 'T34 winner')
+  insertProfile(loser, 'T34 loser')
+  const { campaignId } = seedActiveCampaign([{ gameKind: 'ludo', stake: 150, units: 30 }])
+  const snapshot = makeFinishedLudoSnapshot({ stake: 150, winnerProfileId: winner, loserProfileId: loser })
+
+  const clearFailure = injectCampaignLedgerFailure(winner)
+  try {
+    recordLudoMatchForCampaign({ campaignCreditStore, snapshot, eventAt: new Date() })
+  } finally {
+    clearFailure()
+  }
+  assert.equal(countLedgerRowsForSource('ludo_win', snapshot.matchId), 0, 'precondition: hook-ът реално е fail-нал')
+  // ludo_room_matches се пише БЕЗУСЛОВНО от index.ts независимо от campaign
+  // резултата (виж campaignGameHooks.ts doc коментара) — тук го seed-ваме
+  // директно, mirror на реалния ludoRoomMatchStore.recordMatchFinished call site.
+  rawDb.prepare(`
+    INSERT INTO ludo_room_matches (match_id, ludo_room_id, status, stake, player_count, players_json, winner_profile_id, finished_at)
+    VALUES (?, ?, 'finished', ?, 2, '[]', ?, ?);
+  `).run(snapshot.matchId, snapshot.ludoRoomId, snapshot.stake, winner, new Date().toISOString().slice(0, 19).replace('T', ' '))
+
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
+  try {
+    await job.tickNow()
+    const row = getLedgerRow(campaignId, winner, 'ludo_win', snapshot.matchId)
+    assert.ok(row !== undefined && row.units_amount === 30, 'първи tickNow (БЕЗ restart) трябва да backfill-не пропуснатия credit')
+
+    await job.tickNow()
+    assert.equal(countLedgerRowsForSource('ludo_win', snapshot.matchId), 1, 'втори tickNow не бива да дублира реда')
+  } finally {
+    job.close()
+  }
+})
+
+// ─── [35]: Белот сценарий от §2 — БЕЗ restart, периодичен retry ───
+
+await check('[35] Белот §2 сценарий: completed match + временно пропуснат credit + СЪЩИЯТ job instance БЕЗ restart -> credited точно веднъж', async () => {
+  const { campaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 80, units: 20 }])
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T35 winner')
+  const roomId = `belot-room-${randomUUID()}`
+  // 1) Белот приключва успешно (profile_match_results + stake_debit вече
+  //    записани — mirror на recordCompletedMatch/payoutMatchWinners).
+  seedMatchResult(roomId, winnerId, { didWin: true })
+  seedStakeDebit(roomId, winnerId, 80)
+  // 2) Кампанийното начисляване "се е провалило временно" -> campaign_unit_ledger
+  //    няма ред за тоя мач (precondition, без нужда да force-ваме реална грешка —
+  //    резултатът е същият: липсващ credit, сървърът продължава да работи).
+  assert.equal(countLedgerRowsForSource('belot_win', roomId), 0)
+
+  // 3) Сървърът продължава да работи — СЪЩИЯТ job instance, НИКАКЪВ restart.
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
+  try {
+    await job.tickNow()
+    const row = getLedgerRow(campaignId, winnerId, 'belot_win', roomId)
+    assert.ok(row !== undefined && row.units_amount === 20, 'първият tick (без restart) трябва да хване пропуснатия Белот credit')
+
+    await job.tickNow()
+    assert.equal(countLedgerRowsForSource('belot_win', roomId), 1, 'повторен tick без restart не бива да дублира начислението')
+  } finally {
+    job.close()
+  }
+})
+
+// ─── [36]-[37]: bounded lookback + limit ───
+
+await check('[36] Reconciliation job: lookback bound изключва стар мач; по-широк lookback го хваща', async () => {
+  // startOffsetHours=-150 -> кампанийния прозорец покрива и "преди 100ч"
+  // момента на мача по-долу (default прозорецът, [-1h,+1000h), НЕ би го
+  // покрил — това тества lookback bound-а на job-а, не campaign window-а).
+  const { campaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 60, units: 11 }], { startOffsetHours: -150 })
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T36 winner')
+  const roomId = `belot-room-${randomUUID()}`
+  const oldCompletedAt = new Date(Date.now() - 100 * 3_600_000) // 100ч в миналото
+  seedMatchResult(roomId, winnerId, { didWin: true, completedAtIso: oldCompletedAt.toISOString().slice(0, 19).replace('T', ' ') })
+  seedStakeDebit(roomId, winnerId, 60)
+
+  const narrowJob = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 1 })
+  try {
+    await narrowJob.tickNow()
+  } finally {
+    narrowJob.close()
+  }
+  assert.equal(countLedgerRowsForSource('belot_win', roomId), 0, '1ч lookback не бива да хване мач от преди 100ч')
+
+  const wideJob = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 200 })
+  try {
+    await wideJob.tickNow()
+  } finally {
+    wideJob.close()
+  }
+  const row = getLedgerRow(campaignId, winnerId, 'belot_win', roomId)
+  assert.ok(row !== undefined && row.units_amount === 11, '200ч lookback трябва да хване мача')
+})
+
+await check('[37] Reconciliation job: limit cap-ва обработените редове в един tick; остатъкът се хваща на следващия', async () => {
+  seedActiveCampaign([{ gameKind: 'belot', stake: 45, units: 7 }])
+  const winnerA = randomUUID()
+  const winnerB = randomUUID()
+  insertProfile(winnerA, 'T37 winner A')
+  insertProfile(winnerB, 'T37 winner B')
+  const roomA = `belot-room-${randomUUID()}`
+  const roomB = `belot-room-${randomUUID()}`
+  seedMatchResult(roomA, winnerA, { didWin: true })
+  seedStakeDebit(roomA, winnerA, 45)
+  seedMatchResult(roomB, winnerB, { didWin: true })
+  seedStakeDebit(roomB, winnerB, 45)
+
+  const cappedJob = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, limit: 1 })
+  try {
+    await cappedJob.tickNow()
+    const creditedCount = countLedgerRowsForSource('belot_win', roomA) + countLedgerRowsForSource('belot_win', roomB)
+    assert.equal(creditedCount, 1, 'limit=1 трябва да обработи само ЕДИН от двата мача в тоя tick')
+
+    await cappedJob.tickNow()
+    const creditedAfterSecondTick = countLedgerRowsForSource('belot_win', roomA) + countLedgerRowsForSource('belot_win', roomB)
+    assert.equal(creditedAfterSecondTick, 2, 'следващият tick трябва да хване остатъка')
+  } finally {
+    cappedJob.close()
+  }
+})
+
+// ─── [38]-[39]: archived campaign + old-match attribution ───
+
+await check('[38] Reconciliation: архивирана (archived_at) кампания -> НИКОГА не се начислява', async () => {
+  const { campaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 33, units: 99 }])
+  rawDb.prepare(`UPDATE campaigns SET archived_at = CURRENT_TIMESTAMP WHERE campaign_id = ?;`).run(campaignId)
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T38 winner')
+  const roomId = `belot-room-${randomUUID()}`
+  seedMatchResult(roomId, winnerId, { didWin: true })
+  seedStakeDebit(roomId, winnerId, 33)
+
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 999_999 })
+  try {
+    await job.tickNow()
+  } finally {
+    job.close()
+  }
+  // Проверка СПЕЦИФИЧНО за архивираната campaignId — не room-wide count
+  // (друга, НЕархивирана кампания с overlapping прозорец легитимно би могла
+  // да credit-не СЪЩИЯ мач с 0 units по собствено несвързано rule-отсъствие;
+  // релевантният факт тук е, че АРХИВИРАНАТА конкретно не получава ред).
+  assert.equal(getLedgerRow(campaignId, winnerId, 'belot_win', roomId), undefined, 'архивирана кампания никога не получава нови начисления')
+})
+
+await check('[39] Reconciliation: стар мач се приписва на ПЪРВАТА (вече finished) кампания, не на по-новата', async () => {
+  // Умишлено НЕ-overlapping прозорци (реалистичен "Halloween завърши, Christmas
+  // започна по-късно" сценарий) — с default overlapping прозорци (всички
+  // [-1h,+1000h)) resolveCampaignForEvent's `ORDER BY starts_at DESC` би
+  // предпочел ПОСЛЕДНО-seed-натата кампания за event near "now", правейки
+  // теста недетерминиран спрямо реда на изпълнение, не спрямо реалната логика.
+  const { campaignId: firstCampaignId, eventAt: firstEventAt } = seedActiveCampaign(
+    [{ gameKind: 'belot', stake: 21, units: 5 }],
+    { startOffsetHours: -500, endOffsetHours: -100 },
+  )
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T39 winner')
+  const roomId = `belot-room-${randomUUID()}`
+  // Мачът принадлежи на ПЪРВАТА кампания (eventAt в нейния прозорец).
+  seedMatchResult(roomId, winnerId, {
+    didWin: true,
+    completedAtIso: firstEventAt.toISOString().slice(0, 19).replace('T', ' '),
+  })
+  seedStakeDebit(roomId, winnerId, 21)
+  // Втора кампания се появява МЕЖДУВРЕМЕННО (различен game_kind rule, за да
+  // се различи еднозначно каквото евентуално би го credit-нало грешно) —
+  // default прозорец [-1h,+1000h), НЕ покрива firstEventAt (~-499h).
+  const { campaignId: secondCampaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 21, units: 777 }])
+
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore, lookbackHours: 999_999 })
+  try {
+    await job.tickNow()
+  } finally {
+    job.close()
+  }
+  const firstRow = getLedgerRow(firstCampaignId, winnerId, 'belot_win', roomId)
+  const secondRow = getLedgerRow(secondCampaignId, winnerId, 'belot_win', roomId)
+  assert.ok(firstRow !== undefined && firstRow.units_amount === 5, 'стария мач трябва да е credited към ПЪРВАТА кампания (5 units)')
+  assert.equal(secondRow, undefined, 'не бива да получи грешно начисление от по-новата кампания (777 units)')
+})
+
+// ─── [40]-[41]: diagnostic visibility + flag-off cheap no-op ───
+
+await check('[40] getHealth() отразява lastBelotResult/lastLudoResult/lastError след успешен tick', async () => {
+  seedActiveCampaign([{ gameKind: 'belot', stake: 15, units: 3 }])
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T40 winner')
+  const roomId = `belot-room-${randomUUID()}`
+  seedMatchResult(roomId, winnerId, { didWin: true })
+  seedStakeDebit(roomId, winnerId, 15)
+
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
+  try {
+    assert.equal(job.getHealth().state, 'idle', 'преди start()/tickNow() -> idle')
+    await job.tickNow()
+    const health = job.getHealth()
+    assert.equal(health.lastError, null)
+    assert.ok(health.lastBelotResult !== null && health.lastBelotResult.scanned >= 1, 'lastBelotResult трябва да отразява реалния scan')
+    assert.ok(health.lastLudoResult !== null, 'lastLudoResult трябва да е попълнен дори при 0 Ludo пропуски')
+    assert.ok(health.lastSuccessAt !== null && health.lastTickAt !== null)
+  } finally {
+    job.close()
+  }
+})
+
+await check('[41] Feature flag OFF: job tick е евтин no-op (0 scanned, без DB промени)', async () => {
+  seedActiveCampaign([{ gameKind: 'belot', stake: 15, units: 3 }])
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T41 winner')
+  const roomId = `belot-room-${randomUUID()}`
+  seedMatchResult(roomId, winnerId, { didWin: true })
+  seedStakeDebit(roomId, winnerId, 15)
+
+  const previous = process.env.CAMPAIGNS_FEATURE_ENABLED
+  delete process.env.CAMPAIGNS_FEATURE_ENABLED
+  const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
+  try {
+    await job.tickNow()
+  } finally {
+    job.close()
+    process.env.CAMPAIGNS_FEATURE_ENABLED = previous
+  }
+  assert.equal(countLedgerRowsForSource('belot_win', roomId), 0, 'flag off -> нулево DB въздействие, дори за реално пропуснат мач')
+})
+
+auditSnapshotStore.close()
 
 // ═══════════════════════════════════════════════════════════════════════
 // [20]-[24] Reconciliation (§8 crash recovery)
@@ -714,9 +1149,28 @@ await check('[25] index.ts вика recordBelotMatchForCampaign СЛЕД payout-
   assert.ok(guardIdx !== -1 && guardIdx < campaignIdx, 'campaign hook трябва да е след shouldRunMatchCompletionSideEffects guard-а')
 })
 
-await check('[26] index.ts гейтва markMatchRemoved (onSnapshot И boot recovery) с campaignCredited', () => {
+await check('[26] index.ts markMatchRemoved (onSnapshot И boot recovery) НЕ е гейтнат от campaign резултата (одит-корекция)', () => {
   const occurrences = indexTsSource.split('&& campaignCredited').length - 1
-  assert.equal(occurrences, 2, 'очакват се точно 2 call sites, гейтващи markMatchRemoved с campaignCredited (normal onSnapshot + boot recovery)')
+  assert.equal(occurrences, 0, 'markMatchRemoved не бива да зависи от campaign резултата — виж campaignGameHooks.ts doc коментара (accumulation risk)')
+  // Двата gate-а трябва да са точно както ПРЕДИ кампаниите (само progression/payout).
+  const onSnapshotGuardCount = indexTsSource.split("winnerPayout !== null && progressionRecorded) {").length - 1
+  assert.ok(onSnapshotGuardCount >= 1, 'onSnapshot guard-ът трябва да остане progression/payout-only')
+})
+
+await check('[42] index.ts вика recordLudoMatchForCampaign ТОЧНО 2 пъти (onSnapshot + boot recovery), резултатът не се присвоява на гейтваща променлива', () => {
+  const callCount = (indexTsSource.match(/recordLudoMatchForCampaign\(/g) ?? []).length
+  assert.equal(callCount, 2, 'fast-path hook-ът трябва да продължи да се вика от двата call sites')
+  assert.ok(!/const campaignCredited = recordLudoMatchForCampaign/.test(indexTsSource), 'резултатът не бива да се присвоява на гейтваща campaignCredited променлива')
+})
+
+await check('[43] index.ts стартира campaignCreditReconciliationJob в httpServer.listen() и го затваря при shutdown', () => {
+  const createIdx = indexTsSource.indexOf('createCampaignCreditReconciliationJob({')
+  const startIdx = indexTsSource.indexOf('campaignCreditReconciliationJob.start()')
+  const closeIdx = indexTsSource.indexOf("closeStore('campaignCreditReconciliationJob'")
+  const listenIdx = indexTsSource.indexOf('httpServer.listen(PORT, HOST, () => {')
+  assert.ok(createIdx !== -1 && startIdx !== -1 && closeIdx !== -1 && listenIdx !== -1, 'очакваните call sites не бяха намерени')
+  assert.ok(createIdx < listenIdx, 'job-ът трябва да се създаде ПРЕДИ httpServer.listen()')
+  assert.ok(startIdx > listenIdx, '.start() трябва да е ВЪТРЕ в httpServer.listen() callback-а')
 })
 
 // ═══════════════════════════════════════════════════════════════════════

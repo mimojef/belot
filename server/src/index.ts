@@ -30,7 +30,7 @@ import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
 import {
   recordBelotMatchForCampaign,
   recordLudoMatchForCampaign,
-  reconcileMissingBelotCampaignCredits,
+  createCampaignCreditReconciliationJob,
 } from './campaigns/campaignGameHooks.js'
 import {
   SERVER_ANTI_BAD_LUCK_THRESHOLD_VALUES,
@@ -2967,6 +2967,16 @@ const matchEconomyStore = await createMatchEconomyStore(databaseBootstrap.databa
 const ludoEconomyStore = await createLudoEconomyStore(databaseBootstrap.databaseFilePath)
 const activeLudoMatchSnapshotStore = await createActiveLudoMatchSnapshotStore(databaseBootstrap.databaseFilePath)
 const campaignCreditStore = await createCampaignCreditStore(databaseBootstrap.databaseFilePath)
+// Фаза 3 §8/§2(одит) — bounded, idempotent retry за кампанийни начисления,
+// пропуснати от fast-path hook-овете (recordBelotMatchForCampaign/
+// recordLudoMatchForCampaign) поради временна грешка, БЕЗ да изисква
+// restart. Виж campaignGameHooks.ts doc коментара за пълния rationale
+// (lookback bound + row limit -> никога пълно историческо сканиране;
+// delegira на campaignCreditStore за archived/window/idempotency проверки).
+const campaignCreditReconciliationJob = createCampaignCreditReconciliationJob({
+  databaseFilePath: databaseBootstrap.databaseFilePath,
+  campaignCreditStore,
+})
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
@@ -5167,16 +5177,19 @@ const ludoMatchRuntime = createLudoMatchRuntime({
     // active_ludo_match_snapshots и boot recovery го довършва през същата
     // идемпотентна функция.
     const progressionRecorded = recordLudoMatchProgression(snapshot)
-    // Кампании (Фаза 3) — reuse-ва СЪЩИЯТ "пази реда, ако side effect-ът не е
-    // успешен" trick като progressionRecorded по-горе: campaignCredited=false
-    // предпазва markMatchRemoved по-долу, затова СЪЩИЯТ boot-recovery retry
-    // loop (виж persisted-match блока по-долу) автоматично довършва и
-    // кампанийното начисление при следващ restart, без нов отделен
-    // reconciliation механизъм за Ludo. eventAt идва от durable finished_at
-    // колоната (записана ТОЧНО сега от persistLudoMatchSnapshot по-горе) —
-    // не от "now", за да остане identичен момент и при boot-recovery replay.
+    // Кампании (Фаза 3, КОРИГИРАНО след одит §1/§2) — fast-path начисление,
+    // извиква се ТУК за незабавен credit при успех. eventAt идва от durable
+    // finished_at колоната (записана ТОЧНО сега от persistLudoMatchSnapshot
+    // по-горе), не от "now". ВАЖНО: резултатът НЕ гейтва markMatchRemoved
+    // по-долу (за разлика от progressionRecorded) — виж campaignGameHooks.ts
+    // doc коментара: гейтването на cleanup с campaign резултата би оставило
+    // finished snapshots да се трупат безкрайно при ПЕРСИСТЕНТНА (не
+    // еднократна) кампанийна грешка, докато не дойде restart — директно
+    // противно на §7. Recovery при fast-path миш минава изцяло през
+    // createCampaignCreditReconciliationJob (ползва ludo_room_matches,
+    // пишан безусловно по-долу, независимо от тоя резултат).
     const finishedAtIso = activeLudoMatchSnapshotStore.getFinishedAt(snapshot.matchId)
-    const campaignCredited = recordLudoMatchForCampaign({
+    recordLudoMatchForCampaign({
       campaignCreditStore,
       snapshot,
       eventAt: finishedAtIso !== null ? new Date(dbDateToUtc(finishedAtIso)) : new Date(),
@@ -5192,7 +5205,7 @@ const ludoMatchRuntime = createLudoMatchRuntime({
     if (snapshot.state.status === 'finished' && !progressionRecorded) {
       console.error(`[ludo-match-snapshot] progression not recorded, keeping finished snapshot for recovery match=${snapshot.matchId}`)
     }
-    if (snapshot.state.status === 'finished' && winnerPayout !== null && progressionRecorded && campaignCredited) {
+    if (snapshot.state.status === 'finished' && winnerPayout !== null && progressionRecorded) {
       try {
         activeLudoMatchSnapshotStore.markMatchRemoved(snapshot.matchId)
       } catch (error) {
@@ -5419,18 +5432,19 @@ for (const persisted of restoredLudoMatches) {
     if (!progressionRecorded) {
       console.error(`[ludo-match-snapshot] recovered progression not recorded, keeping finished snapshot match=${persisted.matchId}`)
     }
-    // Кампании (Фаза 3) — mirror на onSnapshot's campaignCredited по-горе.
+    // Кампании (Фаза 3, КОРИГИРАНО след одит) — mirror на onSnapshot's
+    // fast-path по-горе, НЕ гейтва markMatchRemoved (виж doc коментара там).
     // getFinishedAt тук връща ОРИГИНАЛНИЯ момент на приключване (записан
     // ПРЕДИ crash-а, COALESCE-guarded в UPSERT_LUDO_MATCH_SNAPSHOT_SQL), не
     // текущия restart момент — критично за §9 (точна campaign window
     // атрибуция на вече приключил мач).
     const recoveredFinishedAtIso = activeLudoMatchSnapshotStore.getFinishedAt(persisted.matchId)
-    const campaignCredited = recordLudoMatchForCampaign({
+    recordLudoMatchForCampaign({
       campaignCreditStore,
       snapshot: persisted,
       eventAt: recoveredFinishedAtIso !== null ? new Date(dbDateToUtc(recoveredFinishedAtIso)) : new Date(),
     })
-    if (winnerPayout !== null && progressionRecorded && campaignCredited) {
+    if (winnerPayout !== null && progressionRecorded) {
       try {
         activeLudoMatchSnapshotStore.markMatchRemoved(persisted.matchId)
       } catch (error) {
@@ -26071,6 +26085,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
   closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())
   closeStore('campaignCreditStore', () => campaignCreditStore.close())
+  closeStore('campaignCreditReconciliationJob', () => campaignCreditReconciliationJob.close())
   closeStore('playerProgressStore', () => playerProgressStore.close())
   closeStore('adminSettingsStore', () => adminSettingsStore.close())
   closeStore('authStore', () => authStore.close())
@@ -26218,24 +26233,13 @@ httpServer.listen(PORT, HOST, () => {
   console.log(
     `[game-runtime] passive hook enabled | tick=${GAME_RUNTIME_TICK_MS}ms`,
   )
-  // Кампании (Фаза 3 §8) — еднократен boot-time reconciliation pass за
-  // Белот (виж campaignGameHooks.ts doc коментара за пълния rationale:
-  // Ludo вече наследява retry-on-restart безплатно чрез markMatchRemoved
-  // gate-а, Белот няма еквивалентен persisted-retry gate, затова тук
-  // backfill-ваме от profile_match_results). Fire-and-forget — НЕ блокира
-  // httpServer.listen() callback-а и НЕ е на recurring таймер (виж task spec
-  // §6 — campaigns admin lifecycle/periodic scheduler модулът остава
-  // изцяло несвързан с production lifecycle в тая фаза, само този
-  // еднократен credit-reconciliation pass се добавя).
-  void reconcileMissingBelotCampaignCredits(databaseBootstrap.databaseFilePath, campaignCreditStore)
-    .then((result) => {
-      if (result.scanned > 0) {
-        console.log(
-          `[campaign-game-hooks] boot reconciliation: scanned=${result.scanned} credited=${result.credited} skippedInsufficientStakeInfo=${result.skippedInsufficientStakeInfo}`,
-        )
-      }
-    })
-    .catch((error) => {
-      console.error('[campaign-game-hooks] boot reconciliation failed', error)
-    })
+  // Кампании (Фаза 3 §8, периодичен retry след одит §2) — стартира
+  // bounded reconciliation job-а (виж campaignCreditReconciliationJob
+  // дефиницията по-горе): веднага прави една обходка (immediate tick в
+  // start()), после на фиксиран интервал (default 5 мин), изцяло извън
+  // httpServer.listen() callback-а (fire-and-forget) и извън game-worker
+  // tick loop-а. Безопасно да се стартира безусловно — feature flag-ът се
+  // проверява ВЪТРЕ във всеки tick (евтино, без DB connection, ако е
+  // изключен), mirror на кампанийния lifecycle-scheduler модул's подход.
+  campaignCreditReconciliationJob.start()
 })
