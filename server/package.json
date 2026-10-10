@@ -81,6 +81,7 @@
     "check:campaigns-feature-flag": "tsx scripts/checkCampaignsFeatureFlag.ts",
     "check:campaigns-store": "tsx scripts/checkCampaignsStore.ts --server-root=.",
     "check:campaign-scheduler": "tsx scripts/checkCampaignScheduler.ts --server-root=.",
+    "check:campaign-credit-store": "tsx scripts/checkCampaignCreditStore.ts --server-root=.",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",
