@@ -33,6 +33,12 @@
  *      РЕД се пише (resolveUnitsAmountForEvent връща 0, creditCore не
  *      skip-ва INSERT-а), но lookup-ът ИЗРИЧНО филтрира `units_amount > 0`
  *      -> връща null, никога "+0" (task spec §9).
+ * [M8] Фаза 6.1 — scoped source_id (`${roomId}:v${N}`, виж
+ *      campaignGameHooks.ts::recordBelotMatchForCampaign) се намира от
+ *      lookup-а чрез LIKE-prefix match на голия roomId.
+ * [M9] Фаза 6.1 — два мача в СЪЩАТА стая (v1/v2) резолюират НЕЗАВИСИМО,
+ *      никога кръстосано (виж checkCampaignBelotReplayMatchIdentity.ts за
+ *      пълния end-to-end replay lifecycle покритие).
  */
 
 import { randomUUID } from 'node:crypto'
@@ -345,6 +351,60 @@ await check('[M7] no earn rule for the stake — 0-units ledger row is filtered 
   assert(rowCount === 1, `expected a 0-amount ledger row to still be written, got ${rowCount} rows`)
   const snapshot = creditStore.getMatchCreditSnapshot(profile, 'belot_win', 'room-m7', eventAt.toISOString())
   assert(snapshot === null, 'lookup must filter out the 0-units row, never showing a fabricated "+0" result')
+})
+
+await check('[M8] Phase 6.1 scoped source_id (`${roomId}:v${N}`) is found via LIKE-prefix match on the bare roomId', async () => {
+  // Отделна, свежа кампания (НЕ campaign1 — вече архивирана от [M6] по-горе,
+  // значи вече не резолюира за никакво ново събитие в прозореца си).
+  const campaignM8 = await seedCampaign(campaignsStore, adminActor)
+  const eventAt = sampleEventAtFor(campaignM8)
+  const roomId = 'room-m8'
+  const scopedSourceId = `${roomId}:v7`
+  const result = creditStore.creditCampaignUnits({
+    profileId: winnerProfile,
+    sourceType: 'belot_win',
+    sourceId: scopedSourceId,
+    eventAt,
+    stakeAmount: 0,
+  })
+  assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
+
+  // Caller-ът (index.ts WS handler) подава голия roomId, никога scoped
+  // стойността — виж campaignCreditStore.ts::getMatchCreditSnapshot doc
+  // коментара.
+  const snapshot = creditStore.getMatchCreditSnapshot(winnerProfile, 'belot_win', roomId, eventAt.toISOString())
+  assert(snapshot !== null, 'expected the scoped-format row to be found via the bare roomId LIKE prefix match')
+  assert(snapshot!.unitsAmount === 25, `expected 25 units, got ${snapshot!.unitsAmount}`)
+})
+
+await check('[M9] Two matches in the same room (scoped v1/v2) resolve independently via lookup, never cross-matched', async () => {
+  const campaignM9 = await seedCampaign(campaignsStore, adminActor)
+  const roomId = 'room-m9'
+  const eventAtMatch1 = sampleEventAtFor(campaignM9)
+  const eventAtMatch2 = new Date(eventAtMatch1.getTime() + 60_000)
+
+  const resultMatch1 = creditStore.creditCampaignUnits({
+    profileId: winnerProfile,
+    sourceType: 'belot_win',
+    sourceId: `${roomId}:v1`,
+    eventAt: eventAtMatch1,
+    stakeAmount: 0,
+  })
+  assert(resultMatch1.ok, `match 1 credit failed: ${JSON.stringify(resultMatch1)}`)
+
+  const resultMatch2 = creditStore.creditCampaignUnits({
+    profileId: winnerProfile,
+    sourceType: 'belot_win',
+    sourceId: `${roomId}:v2`,
+    eventAt: eventAtMatch2,
+    stakeAmount: 0,
+  })
+  assert(resultMatch2.ok, `match 2 credit failed: ${JSON.stringify(resultMatch2)}`)
+
+  const snapshotMatch1 = creditStore.getMatchCreditSnapshot(winnerProfile, 'belot_win', roomId, eventAtMatch1.toISOString())
+  const snapshotMatch2 = creditStore.getMatchCreditSnapshot(winnerProfile, 'belot_win', roomId, eventAtMatch2.toISOString())
+  assert(snapshotMatch1 !== null && snapshotMatch1.unitsAmount === 25, 'match 1 lookup should resolve its own 25 units')
+  assert(snapshotMatch2 !== null && snapshotMatch2.unitsAmount === 25, 'match 2 lookup should resolve its own 25 units, not match 1 again')
 })
 
 campaignsStore.close()

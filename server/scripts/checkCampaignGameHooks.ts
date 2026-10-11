@@ -86,6 +86,11 @@ import {
   createCampaignCreditReconciliationJob,
 } from '../src/campaigns/campaignGameHooks.js'
 import { createActiveLudoMatchSnapshotStore } from '../src/db/activeLudoMatchSnapshotStore.js'
+// Фаза 6.1 — reuse на ПРОДУКЦИОННИЯ scope helper (не дублираме шаблона в
+// теста) — виж campaignGameHooks.ts::recordBelotMatchForCampaign doc
+// коментара: belot_win's source_id вече е `${room.id}:v${stateVersion}`,
+// не голия room.id.
+import { getRoomStakeLedgerScope } from '../src/db/matchEconomyStore.js'
 import { createLudoMatchRuntime, type LudoMatchSnapshot } from '../src/game/ludoMatchRuntime.js'
 import type { LudoRoom } from '../src/game/ludoRoomsStore.js'
 import type { ServerRoom, Seat, Team } from '../src/core/serverTypes.js'
@@ -330,11 +335,12 @@ await check('[1] Белот победа (отбор A, stake=100): и двам�
   const { campaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 100, units: 25 }])
   const roomId = `belot-room-${randomUUID()}`
   const room = makeBelotRoom(roomId, seatProfiles, { stakeAmount: 100, winnerTeam: 'A' })
+  const matchSourceId = getRoomStakeLedgerScope(room)
 
   recordBelotMatchForCampaign({ campaignCreditStore, room, isTournamentMatch: false })
 
-  const bottomRow = getLedgerRow(campaignId, seatProfiles.bottom, 'belot_win', roomId)
-  const topRow = getLedgerRow(campaignId, seatProfiles.top, 'belot_win', roomId)
+  const bottomRow = getLedgerRow(campaignId, seatProfiles.bottom, 'belot_win', matchSourceId)
+  const topRow = getLedgerRow(campaignId, seatProfiles.top, 'belot_win', matchSourceId)
   assert.ok(bottomRow !== undefined && bottomRow.units_amount === 25, 'bottom (team A, winner) трябва да е credited 25')
   assert.ok(topRow !== undefined && topRow.units_amount === 25, 'top (team A, winner) трябва да е credited 25')
 })
@@ -345,11 +351,12 @@ await check('[2] Губещ отбор (B) не получава ledger ред',
   seedActiveCampaign([{ gameKind: 'belot', stake: 100, units: 25 }])
   const roomId = `belot-room-${randomUUID()}`
   const room = makeBelotRoom(roomId, seatProfiles, { stakeAmount: 100, winnerTeam: 'A' })
+  const matchSourceId = getRoomStakeLedgerScope(room)
 
   recordBelotMatchForCampaign({ campaignCreditStore, room, isTournamentMatch: false })
 
-  assert.equal(countLedgerRowsForSource('belot_win', roomId), 2, 'само 2-та печеливши (team A) seats трябва да имат ledger редове')
-  const rightRow = rawDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE profile_id = ? AND source_id = ?;`).get(seatProfiles.right, roomId)
+  assert.equal(countLedgerRowsForSource('belot_win', matchSourceId), 2, 'само 2-та печеливши (team A) seats трябва да имат ledger редове')
+  const rightRow = rawDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE profile_id = ? AND source_id = ?;`).get(seatProfiles.right, matchSourceId)
   assert.equal(rightRow, undefined, 'губещ (team B) не бива да е в ledger-а изобщо')
 })
 
@@ -373,11 +380,12 @@ await check('[3] Бот участник (kind=bot, НЕ temp-bot-*) на печ
     stakeAmount: 100, winnerTeam: 'A',
     seatParticipants: { top: makeBotParticipant(botTop) },
   })
+  const matchSourceId = getRoomStakeLedgerScope(room)
 
   recordBelotMatchForCampaign({ campaignCreditStore, room, isTournamentMatch: false })
 
-  assert.equal(countLedgerRowsForSource('belot_win', roomId), 1, 'само human bottom трябва да е credited, ботът на top изключен')
-  const humanRow = rawDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE profile_id = ? AND source_id = ?;`).get(humanBottom, roomId)
+  assert.equal(countLedgerRowsForSource('belot_win', matchSourceId), 1, 'само human bottom трябва да е credited, ботът на top изключен')
+  const humanRow = rawDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE profile_id = ? AND source_id = ?;`).get(humanBottom, matchSourceId)
   assert.ok(humanRow !== undefined, 'човешкия победител трябва да е credited')
 })
 
@@ -431,15 +439,17 @@ await check('[7] Различни stakes -> различни units_per_win rules
   const seatsA: Record<Seat, string> = { bottom: randomUUID(), top: randomUUID(), right: randomUUID(), left: randomUUID() }
   for (const [seat, id] of Object.entries(seatsA)) insertProfile(id, `T7a ${seat}`)
   const roomA = `belot-room-${randomUUID()}`
-  recordBelotMatchForCampaign({ campaignCreditStore, room: makeBelotRoom(roomA, seatsA, { stakeAmount: 50, winnerTeam: 'A' }), isTournamentMatch: false })
+  const matchA = makeBelotRoom(roomA, seatsA, { stakeAmount: 50, winnerTeam: 'A' })
+  recordBelotMatchForCampaign({ campaignCreditStore, room: matchA, isTournamentMatch: false })
 
   const seatsB: Record<Seat, string> = { bottom: randomUUID(), top: randomUUID(), right: randomUUID(), left: randomUUID() }
   for (const [seat, id] of Object.entries(seatsB)) insertProfile(id, `T7b ${seat}`)
   const roomB = `belot-room-${randomUUID()}`
-  recordBelotMatchForCampaign({ campaignCreditStore, room: makeBelotRoom(roomB, seatsB, { stakeAmount: 200, winnerTeam: 'A' }), isTournamentMatch: false })
+  const matchB = makeBelotRoom(roomB, seatsB, { stakeAmount: 200, winnerTeam: 'A' })
+  recordBelotMatchForCampaign({ campaignCreditStore, room: matchB, isTournamentMatch: false })
 
-  assert.equal(getLedgerRow(campaignId, seatsA.bottom, 'belot_win', roomA)?.units_amount, 10)
-  assert.equal(getLedgerRow(campaignId, seatsB.bottom, 'belot_win', roomB)?.units_amount, 60)
+  assert.equal(getLedgerRow(campaignId, seatsA.bottom, 'belot_win', getRoomStakeLedgerScope(matchA))?.units_amount, 10)
+  assert.equal(getLedgerRow(campaignId, seatsB.bottom, 'belot_win', getRoomStakeLedgerScope(matchB))?.units_amount, 60)
 })
 
 await check('[8] Доказана нулева ставка (stakeAmount:0) с конфигурирано rule -> credited', () => {
@@ -447,8 +457,9 @@ await check('[8] Доказана нулева ставка (stakeAmount:0) с �
   const seats: Record<Seat, string> = { bottom: randomUUID(), top: randomUUID(), right: randomUUID(), left: randomUUID() }
   for (const [seat, id] of Object.entries(seats)) insertProfile(id, `T8 ${seat}`)
   const roomId = `belot-room-${randomUUID()}`
-  recordBelotMatchForCampaign({ campaignCreditStore, room: makeBelotRoom(roomId, seats, { stakeAmount: 0, winnerTeam: 'A' }), isTournamentMatch: false })
-  assert.equal(getLedgerRow(campaignId, seats.bottom, 'belot_win', roomId)?.units_amount, 5)
+  const match = makeBelotRoom(roomId, seats, { stakeAmount: 0, winnerTeam: 'A' })
+  recordBelotMatchForCampaign({ campaignCreditStore, room: match, isTournamentMatch: false })
+  assert.equal(getLedgerRow(campaignId, seats.bottom, 'belot_win', getRoomStakeLedgerScope(match))?.units_amount, 5)
 })
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -497,7 +508,7 @@ await check('[11] Повторно извикване за СЪЩИЯ room (дв
   recordBelotMatchForCampaign({ campaignCreditStore, room, isTournamentMatch: false })
   recordBelotMatchForCampaign({ campaignCreditStore, room, isTournamentMatch: false })
 
-  assert.equal(countLedgerRowsForSource('belot_win', roomId), 2, 'двоен call не бива да дублира редове')
+  assert.equal(countLedgerRowsForSource('belot_win', getRoomStakeLedgerScope(room)), 2, 'двоен call не бива да дублира редове')
   assert.equal(campaignCreditStore.getProfileCampaignTotal(campaignId, seats.bottom), 25, 'total не бива да се удвои')
 })
 
@@ -530,8 +541,9 @@ await check('[14] source_id/campaign_id/event_at коректно записан
   for (const [seat, id] of Object.entries(seats)) insertProfile(id, `T14 ${seat}`)
   const roomId = `belot-room-${randomUUID()}`
   const endedAt = Date.now() - 60_000
-  recordBelotMatchForCampaign({ campaignCreditStore, room: makeBelotRoom(roomId, seats, { stakeAmount: 100, winnerTeam: 'A', endedAt }), isTournamentMatch: false })
-  const row = getLedgerRow(campaignId, seats.bottom, 'belot_win', roomId)
+  const match = makeBelotRoom(roomId, seats, { stakeAmount: 100, winnerTeam: 'A', endedAt })
+  recordBelotMatchForCampaign({ campaignCreditStore, room: match, isTournamentMatch: false })
+  const row = getLedgerRow(campaignId, seats.bottom, 'belot_win', getRoomStakeLedgerScope(match))
   assert.ok(row !== undefined, 'ledger редът трябва да съществува')
   assert.equal(new Date(row!.event_at).getTime(), endedAt, 'event_at трябва да е точно matchEnded.endedAt, не "сега"')
 })

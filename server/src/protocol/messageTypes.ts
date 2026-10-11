@@ -458,17 +458,21 @@ export type ClientMessage =
       // няма write операция, няма game-state мутация.
       //
       // matchEndedAt (= authoritativeState.matchEnded.endedAt, Unix-ms) —
-      // ЗАДЪЛЖИТЕЛЕН anti-staleness discriminator. campaign_unit_ledger's
-      // natural key за belot_win е (campaign_id, profile_id, source_type,
-      // source_id=room.id) — room.id ОСТАВА СЪЩ при replay в СЪЩАТА стая
-      // (виж index.ts applyReplayRestart — reuses room.id), значи redовен
-      // ВТОРИ win в същата стая/кампания/профил може да е idempotency-skip-нат
-      // от INSERT OR IGNORE (пре-съществуващо Phase 2/3 ограничение, не
-      // променено тук). Без тази проверка handler-ът би показал Match 1's
-      // credit row за Match 2 (грешно приписване). Handler-ът сравнява
-      // normalize-натия timestamp срещу campaign_unit_ledger.event_at и
-      // връща null (не fabricate-ва), ако не съвпада точно — виж
-      // campaignCreditStore.ts::getMatchCreditSnapshot.
+      // ЗАДЪЛЖИТЕЛЕН anti-staleness discriminator. ФАЗА 6.1 ПОПРАВКА: преди
+      // тая фаза campaign_unit_ledger's natural key за belot_win използваше
+      // source_id=room.id директно — room.id ОСТАВА СЪЩ при replay в СЪЩАТА
+      // стая (виж index.ts applyReplayRestart — reuses room.id), значи
+      // Мач 2's INSERT ... OR IGNORE колизираше със Мач 1's ред и биваше
+      // ТИХО пропускан (реално изгубена награда, не само грешен display).
+      // Поправено в campaignGameHooks.ts::recordBelotMatchForCampaign:
+      // source_id вече е `${room.id}:v${stateVersion}` (match-unique, виж
+      // doc коментара там). matchEndedAt тук остава ЗАДЪЛЖИТЕЛЕН
+      // defense-in-depth discriminator — handler-ът сравнява normalize-натия
+      // timestamp срещу campaign_unit_ledger.event_at (виж
+      // campaignCreditStore.ts::getMatchCreditSnapshot) и връща null (не
+      // fabricate-ва), ако не съвпада точно, покривайки и старите legacy
+      // редове (source_id=голия room.id), за които sourceId сам по себе си
+      // не би различил мач 1 от мач 2.
       type: 'request_campaign_match_credit'
       roomId: RoomId
       matchEndedAt: number

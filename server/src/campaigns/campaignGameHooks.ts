@@ -48,6 +48,13 @@ import { SERVER_SEAT_ORDER, type ServerRoom } from '../core/serverTypes.js'
 import { getTeamBySeat } from '../game/serverStateHelpers.js'
 import type { LudoMatchSnapshot } from '../game/ludoMatchRuntime.js'
 import { dbDateToUtc } from '../db/dbDate.js'
+// Фаза 6.1 — reuse на ЕДИНСТВЕНИЯ authoritative формат за "уникален mач в
+// рамките на тая стая" (`${room.id}:v${room.game.stateVersion}`), вместо да
+// дублираме шаблона тук. Същата функция вече е доказана за real-money stake/
+// payout ledger-а (matchEconomyStore.ts::collectRoomStakes/payoutMatchWinners)
+// — виж doc коментара при recordBelotMatchForCampaign по-долу за пълния root
+// cause/rationale на Фаза 6.1.
+import { getRoomStakeLedgerScope } from '../db/matchEconomyStore.js'
 import { isCampaignsFeatureEnabled } from './campaignsFeatureFlag.js'
 import type { CampaignCreditStore } from './campaignCreditStore.js'
 // type-only — campaignPurchaseHooks.ts самата ИМПОРТИРА cursor helper-ите
@@ -71,6 +78,31 @@ function getHumanWinnerProfileId(room: ServerRoom, seat: Seat): string | null {
  * matchEconomyStore.payoutMatchWinners. `isTournamentMatch` се подава от
  * caller-а (isTournamentMatchRoom(room) е private helper в index.ts) — не го
  * дублираме тук, за да няма drift риск между двете копия на логиката.
+ *
+ * ФАЗА 6.1 ПОПРАВКА (критичен дефект, открит при Фаза 6 финалния одит):
+ * sourceId ТУК беше `room.id` directно — но „Играй пак“ (applyReplayRestart
+ * в index.ts) ПАЗИ room.id СЪЩИЯ, само увеличава room.game.stateVersion и
+ * стартира нов мач в СЪЩАТА стая. campaign_unit_ledger's natural key е
+ * (campaign_id, profile_id, source_type, source_id) — с голия room.id като
+ * source_id, Мач 2's INSERT ... OR IGNORE колизираше със Мач 1's ВЕЧЕ
+ * съществуващ ред и биваше ТИХО пропуснат: Мач 2 НИКОГА не получаваше
+ * своите тикви (не просто грешен display — реално изгубена награда).
+ *
+ * ПОПРАВКА: sourceId вече е getRoomStakeLedgerScope(room) =
+ * `${room.id}:v${room.game.stateVersion}` — ТОЧНО същия established формат,
+ * който matchEconomyStore.ts вече ползва за РЕАЛНИТЕ пари (stake_debit/
+ * winner_payout в match_economy_ledger), доказано коректен за replay-in-
+ * same-room сценария (stateVersion се увеличава при всеки
+ * applyReplayRestart/initializeRoomAuthoritativeGameState, но остава
+ * СТАБИЛЕН през целия match-ended lifecycle на дадения мач — виж
+ * syncRoomWithAuthoritativeState.ts/advanceRoomAuthoritativeGame.ts
+ * reference-equality short circuit-а). Мач 1 и Мач 2 вече получават РАЗЛИЧНИ
+ * source_id стойности -> и двата коректно се начисляват, без колизия.
+ *
+ * Обратна съвместимост: стари ledger редове с source_id=голия room.id
+ * ОСТАВАТ непипнати (без миграция) — reconciliation-ът по-долу разпознава
+ * И двата формата (виж doc коментара там), а getMatchCreditSnapshot в
+ * campaignCreditStore.ts приема и двата при lookup.
  */
 export function recordBelotMatchForCampaign(deps: {
   campaignCreditStore: CampaignCreditStore
@@ -103,6 +135,7 @@ export function recordBelotMatchForCampaign(deps: {
 
     const eventAt = new Date(state.matchEnded.endedAt)
     const winnerTeam = state.matchEnded.winnerTeam
+    const matchSourceId = getRoomStakeLedgerScope(room)
 
     for (const seat of SERVER_SEAT_ORDER) {
       if (getTeamBySeat(seat) !== winnerTeam) continue
@@ -112,14 +145,14 @@ export function recordBelotMatchForCampaign(deps: {
       const result = campaignCreditStore.creditCampaignUnits({
         profileId,
         sourceType: 'belot_win',
-        sourceId: room.id,
+        sourceId: matchSourceId,
         eventAt,
         stakeAmount,
       })
 
       if (!result.ok && result.reason !== 'no_eligible_campaign' && result.reason !== 'ineligible_profile') {
         console.error(
-          `[campaign-game-hooks] belot campaign credit failed room=${room.id} profile=${profileId} reason=${result.reason}`,
+          `[campaign-game-hooks] belot campaign credit failed room=${room.id} match=${matchSourceId} profile=${profileId} reason=${result.reason}`,
         )
       }
     }
@@ -322,18 +355,37 @@ export async function reconcileMissingBelotCampaignCredits(
       completed_at: string
     }
 
+    // Фаза 6.1 — anti-double-credit заради новия per-match sourceId формат
+    // (виж recordBelotMatchForCampaign doc коментара по-горе). profile_match_results
+    // остава room-scoped (room_id, profile_id) PRIMARY KEY — ЕДИН ред per
+    // (room,profile) за цялата история на стаята, независимо от replay
+    // (INSERT OR IGNORE в playerProgressStore.ts мълчаливо пропуска всеки
+    // следващ мач в същата стая; не променяме тая таблица тук — извън
+    // обхвата на кампанийната поправка, виж финалния отчет за пълния
+    // rationale). Затова reconciliation-ът структурно МОЖЕ да разпознае най-
+    // много ЕДИН мач на стая от profile_match_results — но ТОЧНО тоя мач
+    // може вече коректно да е начислен от fast-path hook-а под НОВИЯ scoped
+    // source_id (`${room_id}:v${stateVersion}`), не голия room_id. Без тая
+    // проверка reconciliation-ът би го сметнал за "липсващ" (голия room_id
+    // не съвпада с scoped реда) и би го начислил ПОВТОРНО под legacy формат
+    // — явно дублиране, в разрез с идемпотентността (§3). `pmr.room_id` е
+    // ВИНАГИ server-генериран randomUUID() (виж createServerRoom.ts) — няма
+    // '%'/'_' literal risk в LIKE pattern-а.
+    const NOT_ALREADY_CREDITED_SQL = `
+          NOT EXISTS (
+            SELECT 1 FROM campaign_unit_ledger cul
+            WHERE cul.source_type = 'belot_win'
+              AND cul.profile_id = pmr.profile_id
+              AND (cul.source_id = pmr.room_id OR cul.source_id LIKE pmr.room_id || ':v%')
+          )`
+
     const selectMissingCreditsSinceStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
         AND pmr.is_guest_trial = 0
         AND pmr.completed_at >= ?
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'belot_win'
-            AND cul.source_id = pmr.room_id
-            AND cul.profile_id = pmr.profile_id
-        )
+        AND ${NOT_ALREADY_CREDITED_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -348,12 +400,7 @@ export async function reconcileMissingBelotCampaignCredits(
           OR (pmr.completed_at = ? AND pmr.room_id > ?)
           OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id > ?)
         )
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'belot_win'
-            AND cul.source_id = pmr.room_id
-            AND cul.profile_id = pmr.profile_id
-        )
+        AND ${NOT_ALREADY_CREDITED_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -363,12 +410,7 @@ export async function reconcileMissingBelotCampaignCredits(
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
         AND pmr.is_guest_trial = 0
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'belot_win'
-            AND cul.source_id = pmr.room_id
-            AND cul.profile_id = pmr.profile_id
-        )
+        AND ${NOT_ALREADY_CREDITED_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -383,12 +425,7 @@ export async function reconcileMissingBelotCampaignCredits(
           OR (pmr.completed_at = ? AND pmr.room_id < ?)
           OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id <= ?)
         )
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'belot_win'
-            AND cul.source_id = pmr.room_id
-            AND cul.profile_id = pmr.profile_id
-        )
+        AND ${NOT_ALREADY_CREDITED_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -469,6 +506,15 @@ export async function reconcileMissingBelotCampaignCredits(
           stakeAmount = 0
         }
 
+        // Фаза 6.1 — тук УМИШЛЕНО продължаваме да пишем голия row.room_id
+        // (legacy формат), НЕ ${room.id}:v${stateVersion} scoped формата от
+        // recordBelotMatchForCampaign по-горе. profile_match_results (pmr)
+        // няма stateVersion колона (room-scoped PK, виж NOT_ALREADY_CREDITED_SQL
+        // doc коментара по-горе за пълния rationale) — reconciliation-ът
+        // структурно вижда най-много ЕДИН мач на стая, затова пише под
+        // "за тая стая изобщо" legacy идентичност. NOT_ALREADY_CREDITED_SQL
+        // по-горе вече гарантира, че този INSERT никога не колизира/дублира
+        // с мач, който fast-path hook-ът вече е начислил под scoped формата.
         const creditResult = campaignCreditStore.creditCampaignUnits({
           profileId: row.profile_id,
           sourceType: 'belot_win',

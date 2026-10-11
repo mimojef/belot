@@ -37,6 +37,7 @@
 import { randomUUID } from 'node:crypto'
 import { addCalendarInterval, type VipInterval } from '../db/vipStore.js'
 import { dbDateToUtc } from '../db/dbDate.js'
+import { escapeSqlLikePattern } from '../db/normalizeProfileIdentityText.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -133,11 +134,18 @@ export type CampaignCreditStore = {
    * не различава двата случая (виж CampaignMatchCreditResultMessage doc
    * коментара в messageTypes.ts).
    *
-   * expectedEventAtIso — ЗАДЪЛЖИТЕЛНА anti-staleness проверка (виж
-   * messageTypes.ts::request_campaign_match_credit doc коментара за пълния
-   * root cause: source_id=room.id не е match-unique при replay в СЪЩАТА
-   * стая). Ако намереният ред не отговаря ТОЧНО на този event_at, връщаме
-   * null — редът принадлежи на ПРЕДИШЕН мач в същата стая, не на текущия.
+   * expectedEventAtIso — ЗАДЪЛЖИТЕЛНА anti-staleness проверка. Фаза 6.1
+   * направи belot_win's source_id match-unique
+   * (`${room.id}:v${stateVersion}`, виж campaignGameHooks.ts::
+   * recordBelotMatchForCampaign), но ТОЗИ lookup приема sourceId параметъра
+   * като голия roomId (caller-ът — index.ts's WS handler — не знае/не
+   * подава stateVersion) и го съпоставя И срещу точно равенство (стари
+   * legacy редове с голия room.id), И срещу `${sourceId}:v%` префикс (нови
+   * scoped редове) — виж SQL-а по-долу. event_at остава задължителна
+   * допълнителна проверка defense-in-depth: гарантира коректност дори за
+   * старите legacy редове (точно равенство на sourceId сам по себе си не
+   * различава мач 1 от мач 2 в същата стая, виж doc коментара в
+   * messageTypes.ts).
    */
   getMatchCreditSnapshot: (
     profileId: string,
@@ -340,13 +348,28 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     return row?.units_total ?? 0
   }
 
+  // Фаза 6.1 — source_id за belot_win вече е
+  // `${room.id}:v${stateVersion}` (виж campaignGameHooks.ts::
+  // recordBelotMatchForCampaign doc коментара за пълния root cause: "Играй
+  // пак" пази room.id, второ начисление в същата стая със голия room.id
+  // като source_id колизираше със първото). Caller-ът тук (index.ts's WS
+  // handler) подава roomId (голия, client-познатия identifier) — затова
+  // съпоставяме И срещу точно равенство (стари/legacy редове), И срещу
+  // `${roomId}:v%` префикс (нови scoped редове), комбинирано с точното
+  // event_at съвпадение (вече гарантира "точно тоя мач", виж по-долу) —
+  // никога не показва мач 1's данни за мач 2's заявка. ESCAPE изрично
+  // неутрализира '%'/'_' в caller-подадения roomId (той е client-visible
+  // стойност, макар да е само lookup key, не authorization) — за ludo_win
+  // sourceId вече Е уникален match id без ':v' суфикс, затова LIKE клона
+  // там просто никога не съвпада (безобиден no-op).
   const selectMatchCreditStatement = database.prepare(`
     SELECT cul.campaign_id AS campaign_id, cul.units_amount AS units_amount,
            c.name AS campaign_name, c.unit_name_singular AS unit_name_singular,
            c.unit_name_plural AS unit_name_plural, c.unit_icon_url AS unit_icon_url
     FROM campaign_unit_ledger cul
     JOIN campaigns c ON c.campaign_id = cul.campaign_id
-    WHERE cul.profile_id = ? AND cul.source_type = ? AND cul.source_id = ?
+    WHERE cul.profile_id = ? AND cul.source_type = ?
+      AND (cul.source_id = ? OR cul.source_id LIKE ? ESCAPE '\\')
       AND cul.event_at = ? AND cul.units_amount > 0
     LIMIT 1;
   `)
@@ -357,7 +380,14 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     sourceId: string,
     expectedEventAtIso: string,
   ): MatchCreditSnapshot | null {
-    const row = selectMatchCreditStatement.get(profileId, sourceType, sourceId, expectedEventAtIso) as
+    const scopedSourceIdLikePattern = `${escapeSqlLikePattern(sourceId)}:v%`
+    const row = selectMatchCreditStatement.get(
+      profileId,
+      sourceType,
+      sourceId,
+      scopedSourceIdLikePattern,
+      expectedEventAtIso,
+    ) as
       | {
           campaign_id: string
           units_amount: number
