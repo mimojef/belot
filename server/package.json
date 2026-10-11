@@ -94,6 +94,8 @@
     "check:campaign-match-credit-ws-authorization": "tsx scripts/checkCampaignMatchCreditWebSocketAuthorization.ts --server-root=.",
     "check:campaign-profile-summary-store": "tsx scripts/checkCampaignProfileSummaryStore.ts --server-root=.",
     "check:campaign-profile-summary-http-authorization": "tsx scripts/checkCampaignProfileSummaryHttpAuthorization.ts --server-root=.",
+    "check:campaign-reward-congratulations-store": "tsx scripts/checkCampaignRewardCongratulationsStore.ts --server-root=.",
+    "check:campaign-reward-congratulations-wire-up": "tsx scripts/checkCampaignRewardCongratulationsWireUp.ts --server-root=.",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",

@@ -108,10 +108,20 @@ export function recordBelotMatchForCampaign(deps: {
   campaignCreditStore: CampaignCreditStore
   room: ServerRoom
   isTournamentMatch: boolean
+  /**
+   * Фаза 9 — извиква се ВЕДНАГА след успешно (не alreadyCredited) записан
+   * durable notification ред, за realtime WS push към играча, АКО е online
+   * в момента (виж index.ts::pushCampaignRewardNotificationRealtime).
+   * Чисто side-channel callback — campaignGameHooks.ts остава без директен
+   * import на WS/socket слоя, mirror на вече установеното decoupling
+   * (campaignCreditStore.ts doc коментара за "чист DB модул"). Опционален —
+   * тестове без този callback продължават непроменени.
+   */
+  onRewardNotification?: (profileId: string, notification: import('./campaignCreditStore.js').CampaignRewardNotificationForPush) => void
 }): void {
   try {
     if (!isCampaignsFeatureEnabled()) return
-    const { room, isTournamentMatch, campaignCreditStore } = deps
+    const { room, isTournamentMatch, campaignCreditStore, onRewardNotification } = deps
     if (room.config.isGuestTrial === true) return
     if (isTournamentMatch) return
 
@@ -155,6 +165,10 @@ export function recordBelotMatchForCampaign(deps: {
           `[campaign-game-hooks] belot campaign credit failed room=${room.id} match=${matchSourceId} profile=${profileId} reason=${result.reason}`,
         )
       }
+
+      if (result.ok && result.notification !== null) {
+        onRewardNotification?.(profileId, result.notification)
+      }
     }
   } catch (error) {
     console.error('[campaign-game-hooks] unexpected error crediting belot match', error)
@@ -174,10 +188,12 @@ export function recordLudoMatchForCampaign(deps: {
   campaignCreditStore: CampaignCreditStore
   snapshot: LudoMatchSnapshot
   eventAt: Date
+  /** Фаза 9 — виж doc коментара на recordBelotMatchForCampaign-ия еднакъв параметър по-горе. */
+  onRewardNotification?: (profileId: string, notification: import('./campaignCreditStore.js').CampaignRewardNotificationForPush) => void
 }): boolean {
   try {
     if (!isCampaignsFeatureEnabled()) return true
-    const { snapshot, eventAt, campaignCreditStore } = deps
+    const { snapshot, eventAt, campaignCreditStore, onRewardNotification } = deps
     if (snapshot.state.status !== 'finished') return true
     if (snapshot.state.winnerColor === null) return true
 
@@ -197,6 +213,9 @@ export function recordLudoMatchForCampaign(deps: {
         `[campaign-game-hooks] ludo campaign credit failed match=${snapshot.matchId} profile=${winner.profileId} reason=${result.reason} (fast-path miss — reconciliation job ще го довърши)`,
       )
       return false
+    }
+    if (result.ok && result.notification !== null) {
+      onRewardNotification?.(winner.profileId, result.notification)
     }
     return true
   } catch (error) {

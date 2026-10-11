@@ -130,6 +130,7 @@ import { renderTopicsScreen, renderAdminTopicReportsPanel, LAFCHE_TOPIC_ID, LAFC
 import { renderGuestTrialPopup, attachGuestTrialPopupEventListeners, type GuestTrialPopupState } from './renderGuestTrialPopup'
 import { renderRegistrationVerificationPopup, attachRegistrationVerificationPopupEventListeners, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import { renderVipPurchaseSuccessPopup, attachVipPurchaseSuccessPopupEventListeners, type VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
+import { renderCampaignRewardCongratulationsPopup, attachCampaignRewardCongratulationsPopupEventListeners, type CampaignRewardCongratulationsGroup } from '../../ui/overlays/renderCampaignRewardCongratulationsPopup'
 import { renderGuestLockedStakePopup, attachGuestLockedStakePopupEventListeners, type GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import { renderLevelLockedStakePopup, attachLevelLockedStakePopupEventListeners, type LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 import { renderTournamentBetaAccessModal, attachTournamentBetaAccessModalEventListeners, type TournamentBetaAccessModalState } from './renderTournamentBetaAccessModal'
@@ -835,6 +836,8 @@ export type LobbyScreenState = {
   registrationVerification: RegistrationVerificationPopupState
   guestTrialPopup: GuestTrialPopupState
   vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
+  /** Фаза 9 — поздравителен popup за действително предоставени кампанийни награди; виж createLobbyFlowController.ts::maybeShowNextCampaignRewardCongratulations. */
+  campaignRewardCongratulationsModal: CampaignRewardCongratulationsGroup | null
   guestLockedStakePopup: GuestLockedStakePopupState
   levelLockedStakePopup: LevelLockedStakePopupState
   tournamentBetaAccessModal: TournamentBetaAccessModalState
@@ -1387,6 +1390,8 @@ export type RenderLobbyScreenOptions = {
   onGuestTrialLoginClick: () => void
   onGuestTrialClose: () => void
   onVipPurchaseSuccessClose: () => void
+  /** Фаза 9 — затваряне на поздравителния popup; acknowledge-ва ВСИЧКИТЕ notificationId-та от текущо показания слят group и показва следващия queued (ако има). */
+  onCampaignRewardCongratulationsClose: () => void
   onGuestLockedStakePlay5000Click: () => void
   onGuestLockedStakeRegisterClick: () => void
   onGuestLockedStakeLoginClick: () => void
@@ -13546,6 +13551,7 @@ export function renderLobbyScreen(
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderRegistrationVerificationPopup(state.registrationVerification)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
+      ${renderCampaignRewardCongratulationsPopup(state.campaignRewardCongratulationsModal)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderTournamentBetaAccessModal(state.tournamentBetaAccessModal)}
@@ -13849,6 +13855,7 @@ export function renderLobbyScreen(
       ${renderGuestTrialPopup(state.guestTrialPopup)}
       ${renderRegistrationVerificationPopup(state.registrationVerification)}
       ${renderVipPurchaseSuccessPopup(state.vipPurchaseSuccessPopup)}
+      ${renderCampaignRewardCongratulationsPopup(state.campaignRewardCongratulationsModal)}
       ${renderGuestLockedStakePopup(state.guestLockedStakePopup)}
       ${renderLevelLockedStakePopup(state.levelLockedStakePopup)}
       ${renderTournamentBetaAccessModal(state.tournamentBetaAccessModal)}
@@ -16835,6 +16842,10 @@ export function renderLobbyScreen(
 
   attachVipPurchaseSuccessPopupEventListeners(root, {
     onClose: options.onVipPurchaseSuccessClose,
+  })
+
+  attachCampaignRewardCongratulationsPopupEventListeners(root, {
+    onClose: options.onCampaignRewardCongratulationsClose,
   })
 
   root

@@ -1631,6 +1631,36 @@ export type PlayerCampaignProfileSummary = {
   lastFinished: LastFinishedCampaignProfileResult | null
 }
 
+// Фаза 9 (поздравителен popup за действително предоставени кампанийни
+// награди) — виж server/src/campaigns/campaignCreditStore.ts::
+// GrantedRewardSummary/CampaignRewardNotificationSnapshot doc коментарите.
+// Push-only (сървър -> клиент, durable flush при connect/reconnect,
+// mirror на established pending_paid_gift_notifications pattern) — НЕ
+// въвежда нов ClientMessage член, затова няма parser-case риска от Фаза 7.
+export type CampaignGrantedRewardSummary =
+  | { type: 'yellow_coins'; amount: number }
+  | { type: 'vip_days'; interval: { unit: 'days' | 'months' | 'years'; amount: number }; activeUntil: string }
+  | { type: 'gift_item'; giftItemId: string; name: string; imageUrl: string; senderDisplayName: string }
+
+export type CampaignRewardNotificationPayload = {
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitsTotal: number
+  rewards: CampaignGrantedRewardSummary[]
+}
+
+export type PendingCampaignRewardNotification = {
+  notificationId: string
+  campaignId: string
+  payload: CampaignRewardNotificationPayload
+}
+
+export type PendingCampaignRewardNotificationsMessage = {
+  type: 'pending_campaign_reward_notifications'
+  notifications: PendingCampaignRewardNotification[]
+}
+
 export type RoomSnapshotMessage = {
   type: 'room_snapshot'
   roomId: string
@@ -3047,6 +3077,7 @@ export type ServerMessage =
   | PendingGiftItemNotificationsMessage
   | PaidGiftNotificationReceivedMessage
   | PendingPaidGiftNotificationsMessage
+  | PendingCampaignRewardNotificationsMessage
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage

@@ -5221,6 +5221,7 @@ const ludoMatchRuntime = createLudoMatchRuntime({
         campaignCreditStore,
         snapshot,
         eventAt: finishedAtIso !== null ? new Date(dbDateToUtc(finishedAtIso)) : new Date(),
+        onRewardNotification: pushCampaignRewardNotificationRealtime,
       })
     }
     // Snapshot cleanup ЕДИНСТВЕНО след успешен settlement (виж task spec §7:
@@ -5473,6 +5474,7 @@ for (const persisted of restoredLudoMatches) {
         campaignCreditStore,
         snapshot: persisted,
         eventAt: recoveredFinishedAtIso !== null ? new Date(dbDateToUtc(recoveredFinishedAtIso)) : new Date(),
+        onRewardNotification: pushCampaignRewardNotificationRealtime,
       })
     }
     if (winnerPayout !== null && progressionRecorded) {
@@ -6065,6 +6067,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
                   campaignCreditStore,
                   room,
                   isTournamentMatch: isTournamentMatchRoom(room),
+                  onRewardNotification: pushCampaignRewardNotificationRealtime,
                 })
               },
             )
@@ -16491,6 +16494,37 @@ function pushPaidGiftNotificationRealtime(
   }
 }
 
+// Фаза 9 (поздравителен popup за действително предоставени кампанийни
+// награди) — realtime push, mirror на pushPaidGiftNotificationRealtime
+// по-горе. Извиква се от campaignGameHooks.ts/campaignPurchaseHooks.ts's
+// `onRewardNotification` callback ВЕДНАГА след успешно (не alreadyCredited)
+// записан durable notification ред — т.е. ТОЧНО при самото предоставяне, не
+// при някакво по-късно read. Ако играчът НЕ е online в тоя момент, push-ът
+// просто няма адресат — notification редът вече е durable в DB и ще бъде
+// доставен през bootstrap flush-а (виж connection handler-а) при следващия
+// connect (§8 "преживява logout/login/reconnect/restart").
+function pushCampaignRewardNotificationRealtime(
+  profileId: string,
+  notification: { notificationId: string; campaignId: string; payload: unknown },
+): void {
+  const recipientConnections = Object.values(serverState.connections).filter(
+    (c) => c.profileId === profileId && c.status === 'connected',
+  )
+
+  for (const conn of recipientConnections) {
+    safeSendToConnection(conn.id, {
+      type: 'pending_campaign_reward_notifications',
+      notifications: [
+        {
+          notificationId: notification.notificationId,
+          campaignId: notification.campaignId,
+          payload: notification.payload,
+        },
+      ],
+    })
+  }
+}
+
 async function handleStripeWebhookRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -16587,6 +16621,7 @@ async function handleStripeWebhookRequest(
           purchaseId: vipResult.purchase.purchaseId,
           packageKey: vipResult.purchase.packageId,
           creditedAtIso: vipResult.purchase.creditedAt,
+          onRewardNotification: pushCampaignRewardNotificationRealtime,
         })
       }
 
@@ -16695,6 +16730,7 @@ async function handleStripeWebhookRequest(
           purchaseId: bundleResult.purchase.purchaseId,
           packageKey: bundleResult.purchase.packageKeySnapshot,
           creditedAtIso: bundleResult.purchase.creditedAt,
+          onRewardNotification: pushCampaignRewardNotificationRealtime,
         })
       }
 
@@ -16799,6 +16835,7 @@ async function handleStripeWebhookRequest(
             purchaseId: result.purchase.purchaseId,
             packageKey: result.purchase.packageKey,
             creditedAtIso: result.purchase.creditedAt,
+            onRewardNotification: pushCampaignRewardNotificationRealtime,
           })
         }
 
@@ -17593,6 +17630,59 @@ async function handlePaidGiftNotificationRequest(
   }
 
   paidGiftNotificationStore.acknowledgeNotification(purchaseId, purchaseType, session.profile.profileId)
+  sendJsonResponse(res, 200, { ok: true })
+  return true
+}
+
+// Фаза 9 (поздравителен popup за действително предоставени кампанийни
+// награди) — recipient ACK endpoint за campaign_reward_notifications,
+// mirror на handlePaidGiftNotificationRequest по-горе. Ownership-scoped
+// (campaignCreditStore.acknowledgeNotification вече проверява
+// profile_id === authenticated caller, виж doc коментара там — profile A
+// НИКОГА не може да ACK-не известие на profile B чрез подаден произволен
+// notificationId). Чисто state-преход (pending -> acknowledged) — НИКАКВО
+// начисляване/предоставяне на награда тук (§9 "Няма награждаване чрез read
+// или acknowledge операция").
+async function handleCampaignRewardNotificationAckRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/campaign-reward-notifications\/([^/]+)\/ack$/.exec(pathname)
+
+  if (match === null || req.method !== 'POST') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+
+  if (session === null || session.profile.profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  if (campaignCreditStore === null) {
+    // Флагът е изключен след вече изпратен notificationId към клиента
+    // (напр. deploy race) — graceful no-op, не грешка (§14).
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  const notificationId = decodeURIComponent(match[1] ?? '').trim()
+  if (notificationId.length === 0) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалиден notificationId.' })
+    return true
+  }
+
+  const result = campaignCreditStore.acknowledgeNotification(notificationId, session.profile.profileId)
+  if (!result.ok) {
+    // 'notification_not_found' | 'not_owner' — и двете без разкриване на
+    // детайл отвъд generic отказ (§9 "никаква четене на чужди известия").
+    sendJsonResponse(res, 404, { ok: false, message: 'Известието не беше намерено.' })
+    return true
+  }
+
   sendJsonResponse(res, 200, { ok: true })
   return true
 }
@@ -21214,6 +21304,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleCampaignRewardNotificationAckRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleMissionsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -21554,6 +21648,30 @@ wsServer.on('connection', (socket, request) => {
           bodyText: n.bodyText,
         })),
       })
+    }
+
+    // Фаза 9 — durable "поздравления за действително предоставени
+    // кампанийни награди" bootstrap flush, mirror на
+    // pendingPaidGiftNotifications по-горе (ОТДЕЛЕН domain). Fires на ВСЯКА
+    // нова WS connection (fresh login И reconnect след drop) — покрива §8's
+    // "преживява logout/login/reconnect/restart" изисквания без polling:
+    // известието остава 'pending' в DB до explicit ack, затова просто ще се
+    // появи пак при следващия connect, ако клиентът не е успял да го
+    // покаже/потвърди. campaignCreditStore е null когато
+    // CAMPAIGNS_FEATURE_ENABLED е изключен — guard-ваме явно (§14, без
+    // ненужна DB заявка).
+    if (campaignCreditStore !== null) {
+      const pendingCampaignRewardNotifications = campaignCreditStore.listPendingNotifications(connection.profileId)
+      if (pendingCampaignRewardNotifications.length > 0) {
+        sendJsonMessage(socket, {
+          type: 'pending_campaign_reward_notifications',
+          notifications: pendingCampaignRewardNotifications.map((n) => ({
+            notificationId: n.notificationId,
+            campaignId: n.campaignId,
+            payload: n.payload,
+          })),
+        })
+      }
     }
 
     // Durable "партньорът ти се отписа" flush (§ "PARTNER-LEFT NOTIFICATION

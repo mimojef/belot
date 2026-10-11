@@ -66,6 +66,30 @@ export type SkippedRewardSummary = {
   reason: 'invalid_sender' | 'sender_equals_recipient' | 'gift_item_unavailable'
 }
 
+/**
+ * Фаза 9 — точният замразен snapshot на durable notification реда,
+ * записан (ако изобщо е записан, виж `notification: null` по-долу) в СЪЩАТА
+ * транзакция от creditCore/retryPendingGiftReward. Експозира се нагоре от
+ * `CreditCampaignUnitsResult`/`RetryPendingGiftRewardResult`, за да могат
+ * caller-ите в index.ts (campaignGameHooks.ts/campaignPurchaseHooks.ts call
+ * sites) да push-нат realtime WS известие към играча, ако е online В
+ * МОМЕНТА на предоставянето — без caller-ите да дублират payload-изграждащата
+ * логика (виж doc коментара на insertNotificationStatement.run по-долу).
+ */
+export type CampaignRewardNotificationPayload = {
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitsTotal: number
+  rewards: GrantedRewardSummary[]
+}
+
+export type CampaignRewardNotificationForPush = {
+  notificationId: string
+  campaignId: string
+  payload: CampaignRewardNotificationPayload
+}
+
 export type CreditCampaignUnitsResult =
   | {
       ok: true
@@ -75,6 +99,8 @@ export type CreditCampaignUnitsResult =
       unitsTotal: number
       grantedRewards: GrantedRewardSummary[]
       skippedRewards: SkippedRewardSummary[]
+      /** non-null САМО когато ТОЧНО тая извикване реално записа нов durable notification ред (granted.length>0, !alreadyCredited). */
+      notification: CampaignRewardNotificationForPush | null
     }
   | { ok: false; reason: 'no_eligible_campaign' | 'campaign_already_archived' | 'negative_total_rejected' | 'ineligible_profile' }
 
@@ -100,7 +126,7 @@ export type PendingGiftRewardGap = {
 }
 
 export type RetryPendingGiftRewardResult =
-  | { ok: true; alreadyClaimed: boolean; summary: GrantedRewardSummary | null }
+  | { ok: true; alreadyClaimed: boolean; summary: GrantedRewardSummary | null; notification: CampaignRewardNotificationForPush | null }
   | { ok: false; reason: 'campaign_not_found' | 'tier_reward_not_found' | 'invalid_sender' | 'sender_equals_recipient' | 'gift_item_unavailable' }
 
 /**
@@ -810,6 +836,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
         unitsTotal: getProfileCampaignTotalInternal(campaign.campaign_id, profileId),
         grantedRewards: [],
         skippedRewards: [],
+        notification: null,
       }
     }
 
@@ -826,19 +853,18 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
     const { granted, skipped } = grantDueRewardsInCurrentTransaction(campaign, profileId, unitsTotal)
 
+    let notification: CampaignRewardNotificationForPush | null = null
     if (granted.length > 0) {
-      insertNotificationStatement.run(
-        randomUUID(),
-        campaign.campaign_id,
-        profileId,
-        JSON.stringify({
-          campaignName: campaign.name,
-          unitNameSingular: campaign.unit_name_singular,
-          unitNamePlural: campaign.unit_name_plural,
-          unitsTotal,
-          rewards: granted,
-        }),
-      )
+      const notificationId = randomUUID()
+      const payload: CampaignRewardNotificationPayload = {
+        campaignName: campaign.name,
+        unitNameSingular: campaign.unit_name_singular,
+        unitNamePlural: campaign.unit_name_plural,
+        unitsTotal,
+        rewards: granted,
+      }
+      insertNotificationStatement.run(notificationId, campaign.campaign_id, profileId, JSON.stringify(payload))
+      notification = { notificationId, campaignId: campaign.campaign_id, payload }
     }
 
     return {
@@ -849,6 +875,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
       unitsTotal,
       grantedRewards: granted,
       skippedRewards: skipped,
+      notification,
     }
   }
 
@@ -1058,7 +1085,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
         // Вече предоставена междувременно (напр. друг retry опит, или
         // нормален threshold loop я е хванал по-рано) — idempotent replay,
         // без повторен grant, без ново известие.
-        return { ok: true, alreadyClaimed: true, summary: null }
+        return { ok: true, alreadyClaimed: true, summary: null, notification: null }
       }
 
       const giftItemId = String((JSON.parse(tierReward.reward_payload_json) as Record<string, unknown>).giftItemId)
@@ -1076,19 +1103,21 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
       }
 
       insertClaimStatement.run(campaignId, profileId, tierRewardId, giftItemId)
-      insertNotificationStatement.run(
-        randomUUID(),
-        campaignId,
-        profileId,
-        JSON.stringify({
-          campaignName: campaign.name,
-          unitNameSingular: campaign.unit_name_singular,
-          unitNamePlural: campaign.unit_name_plural,
-          unitsTotal: getProfileCampaignTotalInternal(campaignId, profileId),
-          rewards: [result.summary],
-        }),
-      )
-      return { ok: true, alreadyClaimed: false, summary: result.summary }
+      const notificationId = randomUUID()
+      const payload: CampaignRewardNotificationPayload = {
+        campaignName: campaign.name,
+        unitNameSingular: campaign.unit_name_singular,
+        unitNamePlural: campaign.unit_name_plural,
+        unitsTotal: getProfileCampaignTotalInternal(campaignId, profileId),
+        rewards: [result.summary],
+      }
+      insertNotificationStatement.run(notificationId, campaignId, profileId, JSON.stringify(payload))
+      return {
+        ok: true,
+        alreadyClaimed: false,
+        summary: result.summary,
+        notification: { notificationId, campaignId, payload },
+      }
     })
   }
 

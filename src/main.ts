@@ -3211,6 +3211,25 @@ async function acknowledgePaidGiftNotification(
   }
 }
 
+// Фаза 9 — mirror на acknowledgePaidGiftNotification по-горе, за
+// campaign_reward_notifications. Best-effort fire-and-forget (§8: "При
+// временна мрежова грешка... не приемай локално скриване за доказателство,
+// че известието е успешно потвърдено на сървъра") — при грешка редът
+// остава 'pending' server-side, ще бъде доставен пак при следващ connect.
+async function acknowledgeCampaignRewardNotification(notificationId: string): Promise<void> {
+  try {
+    await fetch(
+      `${getApiBaseUrl()}/api/campaign-reward-notifications/${encodeURIComponent(notificationId)}/ack`,
+      {
+        method: 'POST',
+        credentials: 'include',
+      },
+    )
+  } catch {
+    // best-effort — следващ WS connect ще донесе известието отново, не е критично
+  }
+}
+
 async function loadLobbyPackages(): Promise<
   | { ok: true; packages: CoinPackageSnapshot[] }
   | { ok: false; message: string }
@@ -6918,6 +6937,7 @@ lobby = createLobbyFlowController({
     sendGiftItem(recipientProfileId, giftItemId, requestId),
   onMarkGiftItemDeliveryShown: (transactionId) => markGiftItemDeliveryShown(transactionId),
   onAcknowledgePaidGiftNotification: (purchaseId, purchaseType) => acknowledgePaidGiftNotification(purchaseId, purchaseType),
+  onCampaignRewardNotificationAck: (notificationId) => acknowledgeCampaignRewardNotification(notificationId),
   onPikaSupportChatStart: (recipientProfileId) => startPikaSupportChat(recipientProfileId),
   onVipDmFirstMessageSend: (recipientProfileId, body, imageDataUrl) => startVipDmFirstMessage(recipientProfileId, body, imageDataUrl),
   onChatConversationsLoad: (includeArchived) => loadChatConversations(includeArchived),
@@ -7316,6 +7336,10 @@ const activeRoom = createActiveRoomFlowController({
     void loadAuthSession()
     void attemptPendingChatRefresh()
     requestPwaUpdateApplyAttempt()
+    // Фаза 9 (§5) — Белот стаята (End Game/replay-declined/guest-trial-end...)
+    // точно се напусна, играчът е потвърдено обратно в лобито. Безопасен
+    // момент да опитаме следващото опашено кампанийно поздравление, ако има.
+    lobby.maybeShowCampaignRewardCongratulations()
   },
   startNewGame: (stake, displayName) => {
     lobby.setConnected(client.isConnected())

@@ -65,6 +65,7 @@ import type { ProfileAccessBlockCode, ProfileAccessBlockPopupState } from '../..
 import type { GuestTrialPopupState } from './renderGuestTrialPopup'
 import { patchRegistrationVerificationCountdown, type RegistrationVerificationPopupState } from './renderRegistrationVerificationPopup'
 import type { VipPurchaseSuccessPopupState } from './renderVipPurchaseSuccessPopup'
+import type { CampaignRewardCongratulationsGroup } from '../../ui/overlays/renderCampaignRewardCongratulationsPopup'
 import type { GuestLockedStakePopupState } from './renderGuestLockedStakePopup'
 import type { LevelLockedStakePopupState } from './renderLevelLockedStakePopup'
 import type { TournamentBetaAccessModalState } from './renderTournamentBetaAccessModal'
@@ -771,6 +772,8 @@ export type CreateLobbyFlowControllerOptions = {
   // "Подари авоари" recipient notification ACK — mirror на
   // onMarkGiftItemDeliveryShown по-горе (ОТДЕЛЕН domain).
   onAcknowledgePaidGiftNotification?: (purchaseId: string, purchaseType: 'coin' | 'vip' | 'bundle') => Promise<void>
+  /** Фаза 9 — POST ack за ЕДИН campaign_reward_notifications ред; извикан веднъж за всеки notificationId в слятата показана група. */
+  onCampaignRewardNotificationAck?: (notificationId: string) => Promise<void>
   onNotifFriendRequestClick?: (friendshipId: string) => void
   onMarkGiftNotificationRead?: (giftId: string) => Promise<void>
   onMarkAcceptanceNotificationRead?: (friendshipId: string) => Promise<void>
@@ -1455,6 +1458,8 @@ export type LobbyFlowController = {
   requestLudoMatchRestore: () => void
   goToPrivateRoomWaiting: () => void
   resetToLobby: () => void
+  /** Фаза 9 — опит за показване на следващата опашена кампанийна поздравление, ако е безопасен момент (виж isSafeToShowCampaignRewardCongratulations); no-op ако опашката е празна или моментът не е безопасен. Извиква се от main.ts's showLobby() (Белот End Game "затвори" -> лоби). */
+  maybeShowCampaignRewardCongratulations: () => void
   openTournamentBetaAccessModal: () => void
   showTournamentDetail: (tournamentId: string) => void
   showTournamentInterRoundPendingResult: (
@@ -1902,6 +1907,16 @@ type InternalLobbyFlowState = {
   registrationVerification: RegistrationVerificationPopupState
   guestTrialPopup: GuestTrialPopupState
   vipPurchaseSuccessPopup: VipPurchaseSuccessPopupState
+  /**
+   * Фаза 9 — поздравителен popup за действително предоставени кампанийни
+   * награди (жълтици/VIP/подарък). `campaignRewardCongratulationsQueue` е
+   * FIFO от ВЕЧЕ-слети-по-campaignId групи (виж
+   * enqueueCampaignRewardNotifications) — всяка чака безопасен момент
+   * (виж maybeShowNextCampaignRewardCongratulations). Само ЕДНА наведнъж е
+   * показана (campaignRewardCongratulationsModal); останалите чакат.
+   */
+  campaignRewardCongratulationsQueue: CampaignRewardCongratulationsGroup[]
+  campaignRewardCongratulationsModal: CampaignRewardCongratulationsGroup | null
   guestLockedStakePopup: GuestLockedStakePopupState
   levelLockedStakePopup: LevelLockedStakePopupState
   tournamentBetaAccessModal: TournamentBetaAccessModalState
@@ -2726,6 +2741,8 @@ function createInitialState(): InternalLobbyFlowState {
       bundleTitle: null,
       bundleYellowCoinsAmount: null,
     },
+    campaignRewardCongratulationsQueue: [],
+    campaignRewardCongratulationsModal: null,
     guestLockedStakePopup: {
       isOpen: false,
     },
@@ -3679,6 +3696,9 @@ export function createLobbyFlowController(
         // решава КАК да опресни (loadAuthSession(), established Belot
         // mechanism), никаква /api/auth/me логика тук.
         options.onLudoMatchEndedProfileRefresh?.()
+        // Фаза 9 (§6) — Ludo финалният popup точно се затвори, overlay-ят се
+        // затваря, играчът се връща към /games лобито. Безопасен момент.
+        maybeShowNextCampaignRewardCongratulations()
       },
     })
   }
@@ -5349,6 +5369,7 @@ export function createLobbyFlowController(
       registrationVerification: { ...state.registrationVerification, nowMs: Date.now() },
       guestTrialPopup: state.guestTrialPopup,
       vipPurchaseSuccessPopup: state.vipPurchaseSuccessPopup,
+      campaignRewardCongratulationsModal: state.campaignRewardCongratulationsModal,
       guestLockedStakePopup: state.guestLockedStakePopup,
       levelLockedStakePopup: state.levelLockedStakePopup,
       tournamentBetaAccessModal: state.tournamentBetaAccessModal,
@@ -6794,6 +6815,14 @@ export function createLobbyFlowController(
       onVipPurchaseSuccessClose: () => {
         state.vipPurchaseSuccessPopup = { isOpen: false, phase: 'loading', productKind: 'vip', days: 0, activeUntilLabel: null, giftRecipientDisplayName: null, bundleTitle: null, bundleYellowCoinsAmount: null }
         render()
+        // Фаза 9 — безопасен момент (§7: "Изчакай реалното служебно
+        // предоставяне... покажи поздравителния popup при подходящ
+        // безопасен момент"): VIP/bundle покупка-успех popup-ът точно се
+        // затвори, играчът е потвърдено в лобито.
+        maybeShowNextCampaignRewardCongratulations()
+      },
+      onCampaignRewardCongratulationsClose: () => {
+        closeCampaignRewardCongratulationsPopup()
       },
       onGuestLockedStakePlay5000Click: () => {
         closeGuestLockedStakePopup()
@@ -15857,6 +15886,101 @@ export function createLobbyFlowController(
     showNextPaidGiftNotification()
   }
 
+  // ── Фаза 9: поздравителен popup за действително предоставени кампанийни
+  // награди (ОТДЕЛЕН от giftItem/paidGift опашките по-горе — умишлено, виж
+  // §1 audit находката цитирана при тях: reuse established pattern, не
+  // unified queue). За разлика от gift item/paid gift banner-ите (които
+  // показват дори in-game), тая popup НИКОГА не се показва над активна
+  // игра/End Game — §5/§6/§12 явно изискват "никакво поздравление върху
+  // незатворен End Game". Затова, за разлика от showNextGiftItemNotification,
+  // няма in-game банер клон — ако моментът не е безопасен, групата просто
+  // остава в опашката до следващия trigger point (WS push, resetToLobby,
+  // Ludo onGameEndAcknowledged, VIP/bundle purchase success close) — виж
+  // call sites-ите. Никакъв polling — чисто event-driven.
+
+  function isSafeToShowCampaignRewardCongratulations(): boolean {
+    if (state.campaignRewardCongratulationsModal !== null) return false
+    if (options.getIsInGame?.() ?? false) return false
+    // Не прекъсвай друг критичен/блокиращ popup — консервативен избор на
+    // проверки, mirror на showNextGiftItemNotification-ия "чакай" подход.
+    if (state.giftItemReceivedModal !== null) return false
+    if (state.paidGiftNotificationModal !== null) return false
+    if (state.profileAccessBlockPopup !== null) return false
+    if (state.authModalMode !== 'closed') return false
+    if (state.vipPurchaseSuccessPopup.isOpen) return false
+    if (isGiftItemSendFlowOpen()) return false
+    return true
+  }
+
+  /**
+   * Слива входящите known-pending redове по campaignId (§4: "Не смесвай
+   * награди от различни кампании" + "Групирай наличните неизпоказани
+   * известия, когато това е безопасно") — ВСЕКИ отделен durable
+   * notification ред носи ВЕЧЕ напълно коректен, слят rewards масив за
+   * собственото си начисляващо събитие (виж grantDueRewardsInCurrentTransaction
+   * в campaignCreditStore.ts — един credit call, кръстосал няколко прага
+   * наведнъж, вече пише ЕДИН ред с всичките награди). Сливане тук покрива
+   * ДОПЪЛНИТЕЛНИЯ случай — няколко ОТДЕЛНИ редове за СЪЩАТА кампания
+   * (напр. нормален grant + по-късен успешен gift retry) — показани в ЕДИН
+   * popup. Сливане само в ОПАШКАТА, никога в ВЕЧЕ показания modal (би
+   * променило съдържание под очите на играча) — нов ред за кампания, чийто
+   * popup вече се показва, просто чака като СЛЕДВАЩ отделен queue entry.
+   */
+  function enqueueCampaignRewardNotifications(
+    raw: Array<{ notificationId: string; campaignId: string; payload: import('../network/createGameServerClient').CampaignRewardNotificationPayload }>,
+  ): void {
+    if (raw.length === 0) return
+    for (const item of raw) {
+      const existing = state.campaignRewardCongratulationsQueue.find((group) => group.campaignId === item.campaignId)
+      if (existing) {
+        existing.rewards = [...existing.rewards, ...item.payload.rewards]
+        existing.unitsTotal = item.payload.unitsTotal
+        existing.notificationIds = [...existing.notificationIds, item.notificationId]
+        continue
+      }
+      state.campaignRewardCongratulationsQueue.push({
+        campaignId: item.campaignId,
+        campaignName: item.payload.campaignName,
+        unitNameSingular: item.payload.unitNameSingular,
+        unitNamePlural: item.payload.unitNamePlural,
+        unitsTotal: item.payload.unitsTotal,
+        rewards: [...item.payload.rewards],
+        notificationIds: [item.notificationId],
+      })
+    }
+    maybeShowNextCampaignRewardCongratulations()
+  }
+
+  function maybeShowNextCampaignRewardCongratulations(): void {
+    if (!isSafeToShowCampaignRewardCongratulations()) return
+    const next = state.campaignRewardCongratulationsQueue.shift()
+    if (!next) return
+    state.campaignRewardCongratulationsModal = next
+    render()
+  }
+
+  /**
+   * Затваряне на popup-а (единственият бутон, "Страхотно!") —
+   * acknowledge-ва ВСИЧКИТЕ notificationId-та от слятата група (§8: "не
+   * може да се показва отново след успешно потвърждаване"). Fire-and-forget
+   * HTTP заявка на профил — ако мрежата прекъсне точно сега, редът остава
+   * 'pending' server-side и ще бъде доставен пак при следващ connect (§8:
+   * "предпочитай липса на загубени известия" пред математическа
+   * exactly-once визуализация). Локалното затваряне НЕ е доказателство за
+   * сървърен ack — само HTTP 200 отговора е.
+   */
+  function closeCampaignRewardCongratulationsPopup(): void {
+    const current = state.campaignRewardCongratulationsModal
+    state.campaignRewardCongratulationsModal = null
+    if (current) {
+      for (const notificationId of current.notificationIds) {
+        void options.onCampaignRewardNotificationAck?.(notificationId)
+      }
+    }
+    render()
+    maybeShowNextCampaignRewardCongratulations()
+  }
+
   async function submitGiftItem(recipientProfileId: string, giftItemId: string): Promise<void> {
     // Един submit наведнъж (бързи/повторни кликове не пращат втори request с
     // нов requestId), и само към recipient-а, за който picker-ът е отворен —
@@ -19898,6 +20022,19 @@ export function createLobbyFlowController(
       return true
     }
 
+    // Фаза 9 — durable bootstrap flush (connect/reconnect), mirror на
+    // pending_paid_gift_notifications по-горе. Нищо друго реално-живо не
+    // изпраща "campaign_reward_notification_received" push — наградите се
+    // предоставят и записват server-side напълно decoupled от текущата WS
+    // connection на играча (виж campaignCreditStore.ts::creditCore), затова
+    // ЕДИНСТВЕНАТА delivery точка е тая bootstrap заявка на всяко ново
+    // connection — достатъчна за §8's "преживява reconnect/restart/logout-login",
+    // без нужда от отделен realtime push вариант.
+    if (message.type === 'pending_campaign_reward_notifications') {
+      enqueueCampaignRewardNotifications(message.notifications)
+      return true
+    }
+
     // "Подари авоари" — realtime push, получателят вече е online в момента
     // на fulfillment (mirror на gift_item_received по-горе). Enqueue в
     // СЪЩАТА paidGiftNotificationQueue като offline batch-а по-горе.
@@ -22187,6 +22324,7 @@ export function createLobbyFlowController(
       options.onPrivateRoomsOpen?.()
     },
     resetToLobby,
+    maybeShowCampaignRewardCongratulations: maybeShowNextCampaignRewardCongratulations,
     openTournamentBetaAccessModal,
     showTournamentDetail,
     showTournamentInterRoundPendingResult,

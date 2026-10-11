@@ -58,10 +58,12 @@ export function recordPurchaseForCampaign(deps: {
   purchaseId: string
   packageKey: string
   creditedAtIso: string | null
+  /** Фаза 9 — виж doc коментара на recordBelotMatchForCampaign-ия еднакъв параметър в campaignGameHooks.ts. */
+  onRewardNotification?: (profileId: string, notification: import('./campaignCreditStore.js').CampaignRewardNotificationForPush) => void
 }): void {
   try {
     if (!isCampaignsFeatureEnabled()) return
-    const { campaignCreditStore, payerProfileId, purchaseId, packageKey, creditedAtIso } = deps
+    const { campaignCreditStore, payerProfileId, purchaseId, packageKey, creditedAtIso, onRewardNotification } = deps
 
     if (payerProfileId === null) return
 
@@ -84,6 +86,10 @@ export function recordPurchaseForCampaign(deps: {
       console.error(
         `[campaign-purchase-hooks] purchase campaign credit failed purchaseId=${purchaseId} profile=${payerProfileId} reason=${result.reason}`,
       )
+    }
+
+    if (result.ok && result.notification !== null) {
+      onRewardNotification?.(payerProfileId, result.notification)
     }
   } catch (error) {
     console.error('[campaign-purchase-hooks] unexpected error crediting purchase', error)
