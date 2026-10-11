@@ -447,6 +447,32 @@ export type ClientMessage =
       type: 'ad_campaign_click'
       dispatchId: string
     }
+  | {
+      // Фаза 6 — End Game "спечелени тематични единици" lookup. ЧИСТО
+      // read-only заявка, профилът се резолюва СЪРВЪРНО от connection-а
+      // (виж index.ts handler-а) — roomId тук е САМО query key, НИКОГА
+      // authorization bypass (campaign_unit_ledger заявката е вътрешно
+      // scoped по profile_id, затова произволен roomId просто би върнал
+      // "няма ред", никога чужди данни). Mirror на submit_partner_rating's
+      // request/response shape, но без roomId/seat membership проверка —
+      // няма write операция, няма game-state мутация.
+      //
+      // matchEndedAt (= authoritativeState.matchEnded.endedAt, Unix-ms) —
+      // ЗАДЪЛЖИТЕЛЕН anti-staleness discriminator. campaign_unit_ledger's
+      // natural key за belot_win е (campaign_id, profile_id, source_type,
+      // source_id=room.id) — room.id ОСТАВА СЪЩ при replay в СЪЩАТА стая
+      // (виж index.ts applyReplayRestart — reuses room.id), значи redовен
+      // ВТОРИ win в същата стая/кампания/профил може да е idempotency-skip-нат
+      // от INSERT OR IGNORE (пре-съществуващо Phase 2/3 ограничение, не
+      // променено тук). Без тази проверка handler-ът би показал Match 1's
+      // credit row за Match 2 (грешно приписване). Handler-ът сравнява
+      // normalize-натия timestamp срещу campaign_unit_ledger.event_at и
+      // връща null (не fabricate-ва), ако не съвпада точно — виж
+      // campaignCreditStore.ts::getMatchCreditSnapshot.
+      type: 'request_campaign_match_credit'
+      roomId: RoomId
+      matchEndedAt: number
+    }
 
 export type RoomSeatSnapshot = {
   seat: Seat
@@ -929,6 +955,34 @@ export type PartnerRatingResultMessage = {
   ok: boolean
   alreadyRated: boolean
   message?: string
+}
+
+// Фаза 6 — отговор на request_campaign_match_credit. `credit: null` значи
+// "нищо за показване точно сега" — умишлено НЕ различава "никога няма да
+// получи" (flag off/без кампания/неелигибилен/губещ/spectator) от "все още
+// се обработва" (campaign hook fail-нал временно, reconciliation ще го
+// хване по-късно) — И ДВЕТЕ визуално резолюират еднакво ("не показвай
+// нищо", виж task spec §8), затова protocol-ът не се усложнява с trinary
+// статус. Клиентът прави ограничен (не infinite) bounded retry само докато
+// е на СЪЩИЯ match-ended екран — виж createActiveRoomFlowController.ts.
+// unitsAmount е ВИНАГИ > 0 тук (сървърът филтрира confirmed-0 резултати,
+// mirror на "не показвай +0 тикви" изискването) — campaignId е ОРИГИНАЛНИЯТ
+// campaign_unit_ledger.campaign_id ред (никога "текущата активна кампания"),
+// затова името/иконката/единиците остават коректни дори кампанията вече да
+// е приключила/архивирана междувременно (task spec §6).
+export type CampaignMatchCreditSnapshot = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsAmount: number
+}
+
+export type CampaignMatchCreditResultMessage = {
+  type: 'campaign_match_credit_result'
+  roomId: RoomId
+  credit: CampaignMatchCreditSnapshot | null
 }
 
 export type MatchmakingQueuedPlayerPreview = {

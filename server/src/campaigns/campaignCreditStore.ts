@@ -102,10 +102,49 @@ export type RetryPendingGiftRewardResult =
   | { ok: true; alreadyClaimed: boolean; summary: GrantedRewardSummary | null }
   | { ok: false; reason: 'campaign_not_found' | 'tier_reward_not_found' | 'invalid_sender' | 'sender_equals_recipient' | 'gift_item_unavailable' }
 
+/**
+ * Фаза 6 (Белот End Game "спечелени тематични единици") — точният,
+ * действително начислен резултат за КОНКРЕТЕН мач, не натрупания профилен
+ * total (виж task spec §4: "Не използвай общия натрупан брой"). campaignId
+ * тук е ОРИГИНАЛНИЯТ campaign_unit_ledger.campaign_id ред, никога "текущата
+ * активна кампания" (§6) — коректен дори кампанията да е приключила/
+ * архивирана между начисляването и прочитането.
+ */
+export type MatchCreditSnapshot = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsAmount: number
+}
+
 export type CampaignCreditStore = {
   creditCampaignUnits: (input: CreditGameOrPurchaseEventInput) => CreditCampaignUnitsResult
   applyManualAdjustment: (input: ManualAdjustmentInput) => CreditCampaignUnitsResult
   getProfileCampaignTotal: (campaignId: string, profileId: string) => number
+  /**
+   * Read-only lookup за ЕДИН конкретен (profileId, sourceType, sourceId)
+   * campaign_unit_ledger ред — caller-ът (index.ts's WS handler) ВИНАГИ
+   * подава server-resolved profileId от connection-а, никога client-подаден
+   * (виж task spec §4 "не позволявай заявител да получава чужди лични
+   * начисления"). Връща null при 0 units_amount (валидно "липсва rule"
+   * изходно, не грешка — виж creditCore-а) ИЛИ при липсващ ред — caller-ът
+   * не различава двата случая (виж CampaignMatchCreditResultMessage doc
+   * коментара в messageTypes.ts).
+   *
+   * expectedEventAtIso — ЗАДЪЛЖИТЕЛНА anti-staleness проверка (виж
+   * messageTypes.ts::request_campaign_match_credit doc коментара за пълния
+   * root cause: source_id=room.id не е match-unique при replay в СЪЩАТА
+   * стая). Ако намереният ред не отговаря ТОЧНО на този event_at, връщаме
+   * null — редът принадлежи на ПРЕДИШЕН мач в същата стая, не на текущия.
+   */
+  getMatchCreditSnapshot: (
+    profileId: string,
+    sourceType: 'belot_win' | 'ludo_win',
+    sourceId: string,
+    expectedEventAtIso: string,
+  ) => MatchCreditSnapshot | null
   listPendingNotifications: (profileId: string) => CampaignRewardNotificationSnapshot[]
   acknowledgeNotification: (notificationId: string, profileId: string) => AcknowledgeNotificationResult
   /**
@@ -299,6 +338,44 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   function getProfileCampaignTotalInternal(campaignId: string, profileId: string): number {
     const row = selectTotalsStatement.get(campaignId, profileId) as { units_total: number } | undefined
     return row?.units_total ?? 0
+  }
+
+  const selectMatchCreditStatement = database.prepare(`
+    SELECT cul.campaign_id AS campaign_id, cul.units_amount AS units_amount,
+           c.name AS campaign_name, c.unit_name_singular AS unit_name_singular,
+           c.unit_name_plural AS unit_name_plural, c.unit_icon_url AS unit_icon_url
+    FROM campaign_unit_ledger cul
+    JOIN campaigns c ON c.campaign_id = cul.campaign_id
+    WHERE cul.profile_id = ? AND cul.source_type = ? AND cul.source_id = ?
+      AND cul.event_at = ? AND cul.units_amount > 0
+    LIMIT 1;
+  `)
+
+  function getMatchCreditSnapshotInternal(
+    profileId: string,
+    sourceType: 'belot_win' | 'ludo_win',
+    sourceId: string,
+    expectedEventAtIso: string,
+  ): MatchCreditSnapshot | null {
+    const row = selectMatchCreditStatement.get(profileId, sourceType, sourceId, expectedEventAtIso) as
+      | {
+          campaign_id: string
+          units_amount: number
+          campaign_name: string
+          unit_name_singular: string
+          unit_name_plural: string
+          unit_icon_url: string | null
+        }
+      | undefined
+    if (row === undefined) return null
+    return {
+      campaignId: row.campaign_id,
+      campaignName: row.campaign_name,
+      unitNameSingular: row.unit_name_singular,
+      unitNamePlural: row.unit_name_plural,
+      unitIconUrl: row.unit_icon_url,
+      unitsAmount: row.units_amount,
+    }
   }
 
   // ─── Reward granting (reimplemented inline — виж коментара най-отгоре) ───
@@ -878,6 +955,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     creditCampaignUnits,
     applyManualAdjustment,
     getProfileCampaignTotal: getProfileCampaignTotalInternal,
+    getMatchCreditSnapshot: getMatchCreditSnapshotInternal,
     listPendingNotifications,
     acknowledgeNotification,
     listPendingGiftRewardGaps,

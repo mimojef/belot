@@ -7236,6 +7236,9 @@ const activeRoom = createActiveRoomFlowController({
   submitPartnerRating: (roomId, ratingValue, requestId) => {
     client.submitPartnerRating(roomId, ratingValue, requestId)
   },
+  requestCampaignMatchCredit: (roomId, matchEndedAt) => {
+    client.requestCampaignMatchCredit(roomId, matchEndedAt)
+  },
   sendReplayVote: (roomId) => {
     client.sendReplayVote(roomId)
   },

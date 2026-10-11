@@ -1157,6 +1157,17 @@ export type ClientMessage =
       type: 'ad_campaign_click'
       dispatchId: string
     }
+  | {
+      // Фаза 6 — виж server/src/protocol/messageTypes.ts
+      // ClientMessage::request_campaign_match_credit doc коментара за
+      // пълния security rationale (read-only, profileId се резолюва
+      // сървърно от connection-а, roomId тук е само query key) и за
+      // matchEndedAt anti-staleness discriminator-а (replay-in-same-room
+      // защита срещу показване на ПРЕДИШЕН match-ov credit).
+      type: 'request_campaign_match_credit'
+      roomId: string
+      matchEndedAt: number
+    }
 
 export type PrivateRoomOccupantSnapshot = {
   profileId: string | null
@@ -1543,6 +1554,27 @@ export type PartnerRatingResultMessage = {
   ok: boolean
   alreadyRated: boolean
   message?: string
+}
+
+// Фаза 6 (Белот End Game "спечелени тематични единици") — виж
+// server/src/protocol/messageTypes.ts::CampaignMatchCreditSnapshot /
+// CampaignMatchCreditResultMessage doc коментарите за пълния rationale.
+// `credit: null` умишлено НЕ различава "никога няма да получи" от "все
+// още се обработва" (reconciliation retry) — контролерът прави ограничен
+// bounded retry, виж createActiveRoomFlowController.ts.
+export type CampaignMatchCreditSnapshot = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsAmount: number
+}
+
+export type CampaignMatchCreditResultMessage = {
+  type: 'campaign_match_credit_result'
+  roomId: string
+  credit: CampaignMatchCreditSnapshot | null
 }
 
 export type RoomSnapshotMessage = {
@@ -2887,6 +2919,7 @@ export type ServerMessage =
   | ActiveRoomLeftMessage
   | PartnerRatingSubmittedMessage
   | PartnerRatingResultMessage
+  | CampaignMatchCreditResultMessage
   | RoomSnapshotMessage
   | PlayerProfileMessage
   | ChatMessageReceivedMessage
@@ -3107,6 +3140,7 @@ export type GameServerClient = {
   submitSweepDecision: (roomId: string, decision: 'accept' | 'decline') => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number, requestId: string) => void
+  requestCampaignMatchCredit: (roomId: string, matchEndedAt: number) => void
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
@@ -3469,6 +3503,14 @@ export function createGameServerClient(
     })
   }
 
+  function requestCampaignMatchCredit(roomId: string, matchEndedAt: number): void {
+    send({
+      type: 'request_campaign_match_credit',
+      roomId,
+      matchEndedAt,
+    })
+  }
+
   function sendReplayVote(roomId: string): void {
     send({
       type: 'request_replay',
@@ -3700,6 +3742,7 @@ export function createGameServerClient(
     submitSweepDecision,
     resumeHumanControl,
     submitPartnerRating,
+    requestCampaignMatchCredit,
     sendReplayVote,
     sendLeaveMatchVote,
     sendEmojiReaction,

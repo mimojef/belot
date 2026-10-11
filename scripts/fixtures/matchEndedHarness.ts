@@ -5,7 +5,7 @@
 // маси (включително стартирани със "Запълни с ботове") и остава за публични.
 import { renderMatchEndedScreen } from '/src/app/activeRoom/renderMatchEndedScreen.ts'
 import { getActiveRoomStageMetrics } from '/src/app/activeRoom/activeRoomShared.ts'
-import type { RoomGameSnapshot, RoomSeatSnapshot } from '/src/app/network/createGameServerClient.ts'
+import type { CampaignMatchCreditSnapshot, RoomGameSnapshot, RoomSeatSnapshot } from '/src/app/network/createGameServerClient.ts'
 
 const root = document.createElement('div')
 root.style.position = 'fixed'
@@ -237,6 +237,50 @@ function paintRating(winnerTeam: 'A' | 'B'): void {
   })
 }
 
+// Фаза 6 — mirror на prizeAnimationStartedAt module state по-горе, но за
+// кампанийния unit counter (ОТДЕЛЕН lifecycle, виж
+// createActiveRoomFlowController.ts::matchEndedCampaignCreditAnimationStartedAt
+// doc коментара). resetCampaignUnitAnimation() симулира нов match-ended
+// lifecycle (replay success в нова/друга стая).
+let campaignUnitAnimationStartedAt: number | null = null
+
+function resetCampaignUnitAnimation(): void {
+  campaignUnitAnimationStartedAt = null
+}
+
+// Параметризирана paint функция за кампанийния unit counter regression
+// check-а. `credit` е null/undefined за "нищо за показване" случая (task
+// spec §5/§8 — pending ИЛИ genuinely absent, визуално идентично).
+function paintCampaignUnitCredit(
+  winnerTeam: 'A' | 'B',
+  credit: CampaignMatchCreditSnapshot | null,
+  controlledSeat: 'bottom' | 'top' | 'left' | 'right' | null = 'bottom',
+): void {
+  const { stageScale, scaledStageWidth, scaledStageHeight } = getActiveRoomStageMetrics()
+  renderMatchEndedScreen({
+    root: root as unknown as HTMLDivElement,
+    game: buildGame(winnerTeam, null),
+    seats: buildSeats(false),
+    localSeat: 'bottom',
+    controlledSeat,
+    stageScale,
+    scaledStageWidth,
+    scaledStageHeight,
+    prizeAmount: null,
+    countdownSeconds: 87,
+    campaignUnitCredit: credit,
+    campaignUnitAnimationStartedAt,
+    onCampaignUnitAnimationStart: (startedAt) => {
+      campaignUnitAnimationStartedAt = startedAt
+    },
+    isPrivateTableOrigin: false,
+    onReturnToLobby: () => {},
+    onStartNewGame: () => {},
+    onReplayVote: () => {},
+    onLeaveVote: () => {},
+  })
+}
+
 ;(window as any).__matchEndedHarness = {
   paint,
   paintPrize,
@@ -246,4 +290,6 @@ function paintRating(winnerTeam: 'A' | 'B'): void {
   getOnSubmitPartnerRatingCallCount,
   getPartnerRatingStatus,
   resolveSubmit,
+  paintCampaignUnitCredit,
+  resetCampaignUnitAnimation,
 }

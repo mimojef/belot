@@ -821,6 +821,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'ad_campaign_dismiss':
     case 'ad_campaign_click':
     case 'ack_mute_end_notice':
+    case 'request_campaign_match_credit':
       return false
   }
 
@@ -22208,6 +22209,48 @@ wsServer.on('connection', (socket, request) => {
               raterParticipant?.identity.displayName?.trim() || 'Партньорът ти',
           })
         }
+        return
+      }
+
+      // Фаза 6 — End Game "спечелени тематични единици" lookup. Чисто
+      // read-only — profileId се резолюва ИЗКЛЮЧИТЕЛНО от connection-а
+      // (виж CampaignMatchCreditResultMessage doc коментара в
+      // messageTypes.ts за пълния security rationale: client-подаден
+      // roomId е безопасен query key, никога authorization bypass).
+      // Hardcoded sourceType='belot_win' тук — Фаза 6 е изрично само Белот
+      // (виж task spec §12 "не променяй Ludo End Game").
+      if (message.type === 'request_campaign_match_credit') {
+        const latestConnection = getConnectionById(serverState, connection.id)
+        if (
+          latestConnection === null ||
+          latestConnection.profileId === null ||
+          campaignCreditStore === null ||
+          !Number.isFinite(message.matchEndedAt)
+        ) {
+          safeSendToConnection(connection.id, {
+            type: 'campaign_match_credit_result',
+            roomId: message.roomId,
+            credit: null,
+          })
+          return
+        }
+        // expectedEventAtIso нормализира client-подадения matchEndedAt (Unix-ms)
+        // в точно СЪЩИЯ ISO формат, в който campaignGameHooks.ts пази
+        // campaign_unit_ledger.event_at (eventAt.toISOString(), виж
+        // recordBelotMatchForCampaign) — anti-staleness discriminator за
+        // replay-in-same-room случая (виж messageTypes.ts doc коментара).
+        const expectedEventAtIso = new Date(message.matchEndedAt).toISOString()
+        const credit = campaignCreditStore.getMatchCreditSnapshot(
+          latestConnection.profileId,
+          'belot_win',
+          message.roomId,
+          expectedEventAtIso,
+        )
+        safeSendToConnection(connection.id, {
+          type: 'campaign_match_credit_result',
+          roomId: message.roomId,
+          credit,
+        })
         return
       }
 

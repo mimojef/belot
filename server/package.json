@@ -88,6 +88,7 @@
     "check:campaign-admin-store": "tsx scripts/checkCampaignAdminStore.ts --server-root=.",
     "check:admin-campaigns-http-flow": "tsx scripts/checkAdminCampaignsHttpFlow.ts --server-root=.",
     "check:campaign-purchase-hooks": "tsx scripts/checkCampaignPurchaseHooks.ts",
+    "check:campaign-match-credit-lookup": "tsx scripts/checkCampaignMatchCreditLookup.ts --server-root=.",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",

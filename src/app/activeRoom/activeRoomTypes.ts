@@ -90,6 +90,13 @@ export type CreateActiveRoomFlowControllerOptions = {
   submitSweepDecision?: (roomId: string, decision: 'accept' | 'decline') => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number, requestId: string) => void
+  /**
+   * Фаза 6 — read-only заявка за реално начислените кампанийни единици за
+   * конкретния приключил мач (roomId). Optional, защото е нова, не-critical
+   * визуализация — виж createActiveRoomFlowController.ts за bounded-retry
+   * логиката, която extend-ва End Game екрана само когато е наличен.
+   */
+  requestCampaignMatchCredit?: (roomId: string, matchEndedAt: number) => void
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void

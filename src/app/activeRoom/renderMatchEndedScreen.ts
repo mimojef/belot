@@ -1,4 +1,5 @@
 import type {
+  CampaignMatchCreditSnapshot,
   RoomGameSnapshot,
   RoomSeatSnapshot,
   Seat,
@@ -21,6 +22,13 @@ import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 // разлика в стойността — това е чисто defense-in-depth срещу дублирано
 // scheduling work, не корекция на грешна стойност.
 let prizeAnimationRunSeq = 0
+
+// Фаза 6 — отделен run counter за кампанийния unit counter, mirror на
+// prizeAnimationRunSeq по-горе (виж doc коментара там за пълния rationale).
+// Отделен от prizeAnimationRunSeq, защото двата counter-а имат собствен,
+// НЕЗАВИСИМ lifecycle/start момент (кредитът обикновено пристига СЛЕД
+// първия match-ended render — delayed crediting, виж task spec §5).
+let campaignUnitAnimationRunSeq = 0
 
 type RenderMatchEndedScreenOptions = {
   root: HTMLDivElement
@@ -51,6 +59,19 @@ type RenderMatchEndedScreenOptions = {
   // onPrizeAnimationStart callback-а по-долу.
   prizeAnimationStartedAt?: number | null
   onPrizeAnimationStart?: (startedAt: number) => void
+  // Фаза 6 — реално начислените кампанийни единици за ТОЗИ конкретен
+  // приключил мач (виж createActiveRoomFlowController.ts::matchEndedCampaignCredit
+  // doc коментара за пълния data-flow rationale). `null`/`undefined` означава
+  // "нищо за показване точно сега" (umishleno НЕ различава "никога няма да
+  // получи" от "все още се обработва", виж task spec §5/§8) — екранът просто
+  // не показва нищо допълнително, mirror на "липсва награда" случая за
+  // prizeAmount по-горе.
+  campaignUnitCredit?: CampaignMatchCreditSnapshot | null
+  // Собствен deadline-базиран animation timestamp, mirror на
+  // prizeAnimationStartedAt по-горе, но ОТДЕЛЕН lifecycle — кредитът
+  // обикновено пристига СЛЕД първия render (delayed crediting).
+  campaignUnitAnimationStartedAt?: number | null
+  onCampaignUnitAnimationStart?: (startedAt: number) => void
   // Authoritative/stable флаг, собственост на повикващия
   // (createActiveRoomFlowController.ts) — виж onPartnerRatingSubmitted
   // по-долу и doc коментара при click handler-a. Same clas bug като prize
@@ -161,6 +182,44 @@ function computePrizeDisplayAmount(target: number, elapsedMs: number): number {
 
 function formatPrizeText(amount: number): string {
   return `+${amount.toLocaleString('bg-BG')}`
+}
+
+// Фаза 6 — текст на кампанийния unit counter. Единствено число за amount===1,
+// множествено за всичко друго — приблизително, но достатъчно за пари/бонус
+// тип UI текст (campaigns.unit_name_singular/unit_name_plural са именно за
+// тази цел, виж campaignAdminStore.ts).
+function formatCampaignUnitAmountText(
+  amount: number,
+  unitNameSingular: string,
+  unitNamePlural: string,
+): string {
+  const unitLabel = amount === 1 ? unitNameSingular : unitNamePlural
+  return `+${amount.toLocaleString('bg-BG')} ${unitLabel}`
+}
+
+// Фаза 6 — reuse-ва СЪЩАТА ease-out-cubic формула като prize counter-а
+// (computePrizeDisplayAmount е generic — target/elapsedMs, без prize-specific
+// hardcoding), за да е animation-ът визуално идентичен (task spec §9: "ползвай
+// съществуващия animation стил"). Връща '' (нищо за render) ако credit е
+// null/undefined ИЛИ 0 единици — mirror на "липсва награда" случая за
+// prizeAmount. unitIconUrl е optional — при липса/счупен URL показваме само
+// текст (onerror hide, established pattern — виж renderPlayingScreen.ts
+// card image fallback), никога fabricate-ната/guessed икона.
+function renderCampaignUnitCounterHtml(
+  credit: CampaignMatchCreditSnapshot | null | undefined,
+  animationStartedAt: number | null,
+  renderNow: number,
+  fontSizePx: number,
+  iconSizePx: number,
+): string {
+  if (!credit || credit.unitsAmount <= 0) return ''
+  const elapsed = animationStartedAt === null ? 0 : renderNow - animationStartedAt
+  const amount = computePrizeDisplayAmount(credit.unitsAmount, elapsed)
+  const amountText = formatCampaignUnitAmountText(amount, credit.unitNameSingular, credit.unitNamePlural)
+  const iconHtml = credit.unitIconUrl
+    ? `<img src="${escapeHtml(credit.unitIconUrl)}" alt="" onerror="this.style.display='none'" style="width:${iconSizePx}px;height:${iconSizePx}px;object-fit:contain;flex:0 0 auto;" />`
+    : ''
+  return `<span data-campaign-unit-counter="1" style="display:inline-flex;align-items:center;gap:4px;color:#facc15;font-size:${fontSizePx}px;font-weight:900;white-space:nowrap;vertical-align:middle;">${iconHtml}<span data-campaign-unit-amount-text="1">${escapeHtml(amountText)}</span></span>`
 }
 
 function getSeatInitial(displayName: string): string {
@@ -549,6 +608,8 @@ function renderMobileMatchEndedPanel(
   partnerRatingStatus: 'idle' | 'submitting' | 'submitted',
   countdownSeconds = 120,
   isPrivateTableOrigin = false,
+  campaignUnitCredit: CampaignMatchCreditSnapshot | null | undefined = null,
+  campaignUnitAnimationStartedAt: number | null = null,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
   const matchEnded = game.matchEnded
@@ -591,7 +652,12 @@ function renderMobileMatchEndedPanel(
           >
             ${resultLabel}
           </div>
-          ${controlledSeat !== null && winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</div>` : ''}
+          ${controlledSeat !== null && winnerTeam === localTeam ? `
+          <div style="display:flex;flex-direction:column;align-items:flex-end;gap:2px;">
+            ${prizeAmount && prizeAmount > 0 ? `<div data-prize-counter="1" style="color:#22c55e;font-size:20px;font-weight:900;white-space:nowrap;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</div>` : ''}
+            ${renderCampaignUnitCounterHtml(campaignUnitCredit, campaignUnitAnimationStartedAt, renderNow, 15, 16)}
+          </div>
+          ` : ''}
         </div>
 
         <div
@@ -721,6 +787,8 @@ function renderMatchEndedPanel(
   _onReplayVote?: () => void,
   countdownSeconds = 120,
   isPrivateTableOrigin = false,
+  campaignUnitCredit: CampaignMatchCreditSnapshot | null | undefined = null,
+  campaignUnitAnimationStartedAt: number | null = null,
 ): string {
   const localTeam = getTeamBySeat(localSeat)
   const matchEnded = game.matchEnded
@@ -766,7 +834,7 @@ function renderMatchEndedPanel(
               letter-spacing:0.04em;
             "
           >
-            ${resultLabel}${controlledSeat !== null && winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</span>` : ''}
+            ${resultLabel}${controlledSeat !== null && winnerTeam === localTeam && prizeAmount && prizeAmount > 0 ? `<span data-prize-counter="1" style="margin-left:16px;color:#22c55e;">${formatPrizeText(computePrizeDisplayAmount(prizeAmount, prizeAnimationStartedAt === null ? 0 : renderNow - prizeAnimationStartedAt))}</span>` : ''}${controlledSeat !== null && winnerTeam === localTeam ? `<span style="margin-left:14px;">${renderCampaignUnitCounterHtml(campaignUnitCredit, campaignUnitAnimationStartedAt, renderNow, 18, 20)}</span>` : ''}
           </div>
         </div>
         <div style="height:2px;background:linear-gradient(90deg, transparent 0%, #facc15 30%, #facc15 70%, transparent 100%);margin-bottom:20px;border-radius:1px;"></div>
@@ -898,6 +966,9 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
     prizeAmount,
     prizeAnimationStartedAt: prizeAnimationStartedAtOption = null,
     onPrizeAnimationStart,
+    campaignUnitCredit = null,
+    campaignUnitAnimationStartedAt: campaignUnitAnimationStartedAtOption = null,
+    onCampaignUnitAnimationStart,
     partnerRatingStatus = 'idle',
     countdownSeconds,
     isPrivateTableOrigin = false,
@@ -918,6 +989,13 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
   if (prizeAnimationStartedAt === null && prizeAmount && prizeAmount > 0) {
     prizeAnimationStartedAt = renderNow
     onPrizeAnimationStart?.(prizeAnimationStartedAt)
+  }
+  // Фаза 6 — same deadline-init pattern, ОТДЕЛЕН lifecycle от prize-а (виж
+  // campaignUnitAnimationStartedAt doc коментара на options типа по-горе).
+  let campaignUnitAnimationStartedAt = campaignUnitAnimationStartedAtOption
+  if (campaignUnitAnimationStartedAt === null && campaignUnitCredit && campaignUnitCredit.unitsAmount > 0) {
+    campaignUnitAnimationStartedAt = renderNow
+    onCampaignUnitAnimationStart?.(campaignUnitAnimationStartedAt)
   }
   const isPhoneLayout = isPhoneLayoutViewport()
   const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
@@ -944,7 +1022,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
           font-family:Inter, system-ui, sans-serif;
         "
       >
-        ${renderMobileMatchEndedPanel(game, seats, localSeat, controlledSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, countdownSeconds, isPrivateTableOrigin)}
+        ${renderMobileMatchEndedPanel(game, seats, localSeat, controlledSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, countdownSeconds, isPrivateTableOrigin, campaignUnitCredit, campaignUnitAnimationStartedAt)}
       </div>
     `
   } else {
@@ -994,7 +1072,7 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
               box-sizing:border-box;
             "
           >
-            ${renderMatchEndedPanel(game, seats, localSeat, controlledSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, onReplayVote, countdownSeconds, isPrivateTableOrigin)}
+            ${renderMatchEndedPanel(game, seats, localSeat, controlledSeat, prizeAmount, prizeAnimationStartedAt, renderNow, partnerRatingStatus, onReplayVote, countdownSeconds, isPrivateTableOrigin, campaignUnitCredit, campaignUnitAnimationStartedAt)}
           </div>
         </div>
       </div>
@@ -1059,6 +1137,37 @@ export function renderMatchEndedScreen(options: RenderMatchEndedScreenOptions): 
           // вече връща exact target при elapsed>=duration, но презаписваме
           // изрично тук за защита срещу бъдещи промени във формулата.
           el.textContent = formatPrizeText(target)
+        }
+      }
+      requestAnimationFrame(tick)
+    }
+  }
+
+  // Фаза 6 — same deadline-based RAF counting animation като prize-а по-горе,
+  // ОТДЕЛЕН run counter/lifecycle (campaignUnitAnimationRunSeq) — виж doc
+  // коментара там и на campaignUnitAnimationRunSeq по-горе. Обновява само
+  // вложения [data-campaign-unit-amount-text="1"] текстов елемент, НЕ целия
+  // [data-campaign-unit-counter="1"] wrapper (който съдържа и икона) — пълна
+  // textContent презапис на wrapper-а би изтрил иконата при всеки кадър.
+  if (campaignUnitCredit && campaignUnitCredit.unitsAmount > 0 && campaignUnitAnimationStartedAt !== null) {
+    const target = campaignUnitCredit.unitsAmount
+    const unitNameSingular = campaignUnitCredit.unitNameSingular
+    const unitNamePlural = campaignUnitCredit.unitNamePlural
+    const startedAt = campaignUnitAnimationStartedAt
+    const initialElapsed = renderNow - startedAt
+    if (initialElapsed < PRIZE_COUNT_DURATION_MS) {
+      const runId = ++campaignUnitAnimationRunSeq
+      const tick = (): void => {
+        if (runId !== campaignUnitAnimationRunSeq) return
+        const el = root.querySelector<HTMLElement>('[data-campaign-unit-amount-text="1"]')
+        if (!el) return
+        const elapsed = Date.now() - startedAt
+        const amount = computePrizeDisplayAmount(target, elapsed)
+        el.textContent = formatCampaignUnitAmountText(amount, unitNameSingular, unitNamePlural)
+        if (elapsed < PRIZE_COUNT_DURATION_MS) {
+          requestAnimationFrame(tick)
+        } else {
+          el.textContent = formatCampaignUnitAmountText(target, unitNameSingular, unitNamePlural)
         }
       }
       requestAnimationFrame(tick)

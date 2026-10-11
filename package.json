@@ -99,6 +99,7 @@
     "check:tournament-final-prize-popup": "npx tsx scripts/checkTournamentFinalPrizePopup.ts",
     "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",
     "check:match-ended-prize-display": "npx tsx scripts/checkMatchEndedPrizeDisplay.ts",
+    "check:campaign-match-credit-display": "npx tsx scripts/checkCampaignMatchCreditDisplay.ts",
     "check:match-ended-partner-rating-persistence": "npx tsx scripts/checkMatchEndedPartnerRatingPersistence.ts",
     "check:partner-rating-stale-message-safety": "npx tsx scripts/checkPartnerRatingStaleMessageSafety.ts",
     "check:private-room-wait-time-countdown": "npx tsx scripts/checkPrivateRoomWaitTimeCountdown.ts",

@@ -1,6 +1,7 @@
 import {
   type ActiveTableGiftSnapshot,
   type BelotSpectatorSnapshotMessage,
+  type CampaignMatchCreditSnapshot,
   type ClientBidAction,
   type MatchFoundMessage,
   type MatchStake,
@@ -303,6 +304,34 @@ export function createActiveRoomFlowController(
   // означава "няма pending submit", всеки message пристигнал тогава се
   // игнорира автоматично (requestId guard-ът никога няма да съвпадне).
   let matchEndedPartnerRatingRequestId: string | null = null
+  // Фаза 6 — реално начислените кампанийни единици за ТОЗИ конкретен
+  // приключил мач (не натрупания профилен total, виж task spec §4). `null`
+  // означава "нищо за показване точно сега" — умишлено НЕ различава "никога
+  // няма да получи" от "все още се обработва" (виж CampaignMatchCreditResultMessage
+  // doc коментара в createGameServerClient.ts). Mirror на
+  // matchEndedPartnerRatingState lifecycle-а — reset-ва се на СЪЩИТЕ места
+  // (enterActiveRoom/enterActiveRoomFromResume/enterActiveRoomAsSpectator)
+  // ПЛЮС при replay в СЪЩАТА стая (виж matchEndedCampaignCreditMatchKey).
+  let matchEndedCampaignCredit: CampaignMatchCreditSnapshot | null = null
+  // Match-identity key (matchEnded.endedAt), identичен на
+  // matchEndedPartnerRatingMatchKey по-горе — различава нов match-ended
+  // lifecycle в СЪЩАТА стая (replay success) от поредния re-render на СЪЩИЯ
+  // match-ended екран. При промяна тригерира ЕДНОКРАТНА заявка (виж
+  // requestCampaignMatchCreditForCurrentMatch по-долу).
+  let matchEndedCampaignCreditMatchKey: number | null = null
+  // Bounded retry state — виж CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS по-долу.
+  // НЕ infinite polling (task spec §5 изрична забрана): след изчерпване на
+  // delay масива, заявки спират тихо — екранът просто не показва единици
+  // (идентично на "никога няма да получи" случая, виж null doc коментара
+  // по-горе).
+  let matchEndedCampaignCreditRetryCount = 0
+  let matchEndedCampaignCreditRetryTimerId: number | null = null
+  // Собствен стабилен deadline за numeric counting animation-а на
+  // кампанийните единици — отделен от matchEndedPrizeAnimationStartedAt,
+  // защото кредитът обикновено пристига СЛЕД първия match-ended render
+  // (delayed crediting, виж task spec §5), значи animation-ът му трябва
+  // собствен start момент, не споделен с жълтиците.
+  let matchEndedCampaignCreditAnimationStartedAt: number | null = null
   let replayStakeEffectShown = false
   let initialStakeEffectShown = false
   let shouldSilenceNextBiddingSnapshot = false
@@ -471,6 +500,56 @@ export function createActiveRoomFlowController(
     matchEndedCountdownIntervalId = window.setInterval(() => {
       syncMatchEndedCountdownDisplay()
     }, 1000)
+  }
+
+  // Фаза 6 — bounded retry delays за кампанийния credit lookup. НЕ infinite
+  // polling (task spec §5) — след тези 3 опита (общо ~10.5 сек покритие на
+  // delayed-crediting прозореца) спираме тихо, екранът просто не показва
+  // единици (идентично на "никога няма да получи" случая).
+  const CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS = [1500, 3000, 6000]
+
+  function clearCampaignMatchCreditRetryTimer(): void {
+    if (matchEndedCampaignCreditRetryTimerId !== null) {
+      window.clearTimeout(matchEndedCampaignCreditRetryTimerId)
+      matchEndedCampaignCreditRetryTimerId = null
+    }
+  }
+
+  function resetCampaignMatchCreditState(): void {
+    clearCampaignMatchCreditRetryTimer()
+    matchEndedCampaignCredit = null
+    matchEndedCampaignCreditMatchKey = null
+    matchEndedCampaignCreditRetryCount = 0
+    matchEndedCampaignCreditAnimationStartedAt = null
+  }
+
+  // Изпраща request_campaign_match_credit за ТЕКУЩИЯ match-ended lifecycle
+  // и, ако отговорът (или липсата му при временна мрежова грешка) остане
+  // "нищо за показване", планира ограничен брой retry опити — виж
+  // CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS по-горе. matchKey guard-ът по-долу
+  // гарантира, че закъснял retry timer от ПРЕДИШЕН match-ended lifecycle
+  // (replay success в СЪЩАТА стая) никога не препокрива/заявява за грешния
+  // мач — mirror на matchEndedPartnerRatingMatchKey guard-а.
+  function requestCampaignMatchCreditForCurrentMatch(roomId: string, matchKey: number): void {
+    if (!options.requestCampaignMatchCredit) return
+    options.requestCampaignMatchCredit(roomId, matchKey)
+    scheduleCampaignMatchCreditRetry(roomId, matchKey)
+  }
+
+  function scheduleCampaignMatchCreditRetry(roomId: string, matchKey: number): void {
+    if (matchEndedCampaignCreditRetryCount >= CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS.length) return
+    const delay = CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS[matchEndedCampaignCreditRetryCount]
+    matchEndedCampaignCreditRetryCount += 1
+    matchEndedCampaignCreditRetryTimerId = window.setTimeout(() => {
+      matchEndedCampaignCreditRetryTimerId = null
+      // Guard: ако вече сме в НОВ match-ended lifecycle (replay в СЪЩАТА
+      // стая) или кредитът вече е резолюиран от по-ранен response, не прави
+      // нищо — retry-то е за остарял lifecycle.
+      if (matchEndedCampaignCreditMatchKey !== matchKey || matchEndedCampaignCredit !== null) return
+      if (!options.requestCampaignMatchCredit) return
+      options.requestCampaignMatchCredit(roomId, matchKey)
+      scheduleCampaignMatchCreditRetry(roomId, matchKey)
+    }, delay)
   }
 
   function clearTournamentRoundResultAutoTransitionTimer(): void {
@@ -4556,6 +4635,24 @@ export function createActiveRoomFlowController(
         matchEndedPartnerRatingRequestId = null
       }
 
+      // Фаза 6 — same replay-in-same-room защита за кампанийния credit
+      // lookup, виж matchEndedCampaignCreditMatchKey doc коментара по-горе.
+      // Заявката се изпраща ЕДНОКРАТНО при влизане в НОВ match-ended
+      // lifecycle (не при всеки re-render) — само за реални участници
+      // (spectator/controlledSeat===null никога няма личен credit, виж task
+      // spec §7) и никога за Guest Trial (§7, остава изключен до отделно
+      // одобрение, mirror на onReplayVote-а по-долу).
+      if (currentMatchEndedKey !== null && currentMatchEndedKey !== matchEndedCampaignCreditMatchKey) {
+        matchEndedCampaignCreditMatchKey = currentMatchEndedKey
+        matchEndedCampaignCredit = null
+        matchEndedCampaignCreditRetryCount = 0
+        matchEndedCampaignCreditAnimationStartedAt = null
+        clearCampaignMatchCreditRetryTimer()
+        if (isParticipantMatchEnded && !activeRoomState.isGuestTrial) {
+          requestCampaignMatchCreditForCurrentMatch(activeRoomState.roomId, currentMatchEndedKey)
+        }
+      }
+
       // Ако някой е гласувал за изход → скочи на 30 сек.
       const leaveVotes = activeRoomState.game.matchEnded?.leaveVotes ?? []
       const currentCountdownSeconds = getMatchEndedCountdownSeconds()
@@ -4593,6 +4690,17 @@ export function createActiveRoomFlowController(
         prizeAnimationStartedAt: matchEndedPrizeAnimationStartedAt,
         onPrizeAnimationStart: (startedAt) => {
           matchEndedPrizeAnimationStartedAt = startedAt
+        },
+        // Фаза 6 — точният, действително начислен резултат за ТОЗИ мач (не
+        // натрупания профилен total, виж task spec §4). `null` докато
+        // кредитът не е резолюиран (pending ИЛИ genuinely absent, виж
+        // matchEndedCampaignCredit doc коментара по-горе) — екранът просто
+        // не показва нищо допълнително, идентично на "няма кампания"/flag
+        // off случая (§8).
+        campaignUnitCredit: matchEndedCampaignCredit,
+        campaignUnitAnimationStartedAt: matchEndedCampaignCreditAnimationStartedAt,
+        onCampaignUnitAnimationStart: (startedAt) => {
+          matchEndedCampaignCreditAnimationStartedAt = startedAt
         },
         partnerRatingStatus: matchEndedPartnerRatingState,
         countdownSeconds: matchEndedCountdownSeconds,
@@ -6205,6 +6313,7 @@ export function createActiveRoomFlowController(
     matchEndedPartnerRatingState = 'idle'
     matchEndedPartnerRatingMatchKey = null
     matchEndedPartnerRatingRequestId = null
+    resetCampaignMatchCreditState()
     replayStakeEffectShown = false
     initialStakeEffectShown = true
     clearMatchEndedCountdown()
@@ -6284,6 +6393,7 @@ export function createActiveRoomFlowController(
     matchEndedPartnerRatingState = 'idle'
     matchEndedPartnerRatingMatchKey = null
     matchEndedPartnerRatingRequestId = null
+    resetCampaignMatchCreditState()
     replayStakeEffectShown = false
     initialStakeEffectShown = true
     clearMatchEndedCountdown()
@@ -6446,6 +6556,7 @@ export function createActiveRoomFlowController(
     matchEndedPartnerRatingState = 'idle'
     matchEndedPartnerRatingMatchKey = null
     matchEndedPartnerRatingRequestId = null
+    resetCampaignMatchCreditState()
     replayStakeEffectShown = false
     initialStakeEffectShown = stakeAlreadyShown
     clearMatchEndedCountdown()
@@ -6689,6 +6800,25 @@ export function createActiveRoomFlowController(
           // да опита отново (F3 сценарий).
           matchEndedPartnerRatingState = 'idle'
         }
+        scheduleActiveRoomRender()
+      }
+      return true
+    }
+
+    if (message.type === 'campaign_match_credit_result' && message.roomId === activeRoomState.roomId) {
+      // Stale-message guard mirror на partner_rating_result-а (layer 2 —
+      // СЪЩАТА стая, различен match-ended lifecycle): ако роля е СЪЩИЯТ
+      // roomId, но по времето на пристигане вече сме в НОВ match-ended
+      // lifecycle (replay success), matchEndedCampaignCreditMatchKey вече е
+      // сменен от requestCampaignMatchCreditForCurrentMatch-а за новия мач —
+      // delayed response за СТАРИЯ мач просто се отхвърля тук (не презаписва
+      // текущия lifecycle's state). Изрична event_at проверка на сървъра
+      // (виж index.ts handler-а) вече предотвратява ПОГРЕШНО приписване на
+      // данни между мачове — тази guard е допълнителна defense-in-depth за
+      // "кой lifecycle е текущ в UI-а точно сега".
+      if (matchEndedCampaignCreditMatchKey !== null && message.credit !== null) {
+        matchEndedCampaignCredit = message.credit
+        clearCampaignMatchCreditRetryTimer()
         scheduleActiveRoomRender()
       }
       return true
