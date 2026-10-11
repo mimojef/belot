@@ -906,6 +906,11 @@ export type CreateLobbyFlowControllerOptions = {
   onLudoMoveRequest?: (matchId: string, expectedRevision: number, slot: 0 | 1 | 2 | 3) => void
   onLudoReclaimRequest?: (matchId: string, expectedRevision: number) => void
   onLudoEmojiReactionSend?: (matchId: string, emojiId: string) => void
+  // Фаза 7 — End Game "спечелени тематични единици" read-only lookup, mirror
+  // на createActiveRoomFlowController.ts-овото options.requestCampaignMatchCredit
+  // wiring. matchId тук е snapshot.matchId (виж server/src/protocol/
+  // messageTypes.ts::request_campaign_match_credit gameKind:'ludo' клона).
+  onLudoCampaignMatchCreditRequest?: (matchId: string) => void
   // In-game gift (виж createLudoFlowController.ts authoritative.onGiftSend
   // doc коментара) — mirror на onGiftItemSubmit/sendTableGift wiring-а в
   // createActiveRoomFlowController.ts, matchId вместо roomId.
@@ -3348,6 +3353,7 @@ export function createLobbyFlowController(
       senderBalanceAfter?: number
     }) => void
     applyActiveGiftsFromSnapshot: (gifts: ActiveLudoGiftSnapshot[]) => void
+    applyCampaignMatchCreditResult: (matchId: string, credit: import('../network/createGameServerClient').CampaignMatchCreditSnapshot | null) => void
   } | null = null
   const _acknowledgedLudoMatchIds = new Set<string>()
   // Spectator mode ("Гледай", Ludo Spectator Mode Phase 2) — единственият
@@ -3598,6 +3604,7 @@ export function createLobbyFlowController(
         },
         onStateRefreshRequest: () => options.onLudoGameStateOpen?.(),
         onEmojiReactionSend: (matchId, emojiId) => options.onLudoEmojiReactionSend?.(matchId, emojiId),
+        onCampaignMatchCreditRequest: (matchId) => options.onLudoCampaignMatchCreditRequest?.(matchId),
         onGiftSend: (matchId, recipientProfileId, giftItemId, requestId) =>
           options.onSendLudoGift?.(matchId, recipientProfileId, giftItemId, requestId),
         onGiftItemCatalogLoad: () => options.onGiftItemCatalogLoad?.() ?? Promise.resolve({ ok: false, message: 'Подаряването временно не е налично.' }),
@@ -3750,6 +3757,13 @@ export function createLobbyFlowController(
         onRollRequest: () => {},
         onMoveRequest: () => {},
         onReclaimRequest: () => {},
+        // Фаза 7 — spectator никога не залага/печели, затова никога не вика
+        // campaign credit lookup-а (controller-овия isSpectator guard вече
+        // предотвратява извикването, виж createLudoFlowController.ts
+        // requestCampaignMatchCreditForThisMatch) — explicit no-op тук е
+        // same defense-in-depth presentation-layer convention като roll/
+        // move/reclaim по-горе.
+        onCampaignMatchCreditRequest: () => {},
         // Spectator-ят никога не пише gifts (isSpectator gate-ва
         // giftPickerModal-а до null вътре в контролера, виж task-а §10) — но
         // МОЖЕ да ВИДИ realtime gift анимацията (виж index.ts
@@ -19616,6 +19630,18 @@ export function createLobbyFlowController(
     }
     if (message.type === 'ludo_emoji_reaction') {
       _ludoController?.applyEmojiReaction(message.matchId, message.color, message.emojiId)
+      return true
+    }
+
+    if (message.type === 'campaign_match_credit_result') {
+      // Фаза 7 — reuse на СЪЩИЯ WS pair като Белот (виж server/src/protocol/
+      // messageTypes.ts gameKind:'ludo' клона). roomId тук носи
+      // snapshot.matchId. matchId staleness/relevance guard-ът живее вътре
+      // в applyCampaignMatchCreditResult (mirror на applyEmojiReaction
+      // pattern-а по-горе) — ако activeRoom (Белот) вече е обработил
+      // съобщението (hasActiveRoom), тоя branch изобщо не се достига (виж
+      // main.ts onMessage dispatch fallback-а).
+      _ludoController?.applyCampaignMatchCreditResult(message.roomId, message.credit)
       return true
     }
 

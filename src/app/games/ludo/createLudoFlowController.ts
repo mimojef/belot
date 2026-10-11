@@ -37,7 +37,7 @@ import { renderLudoGameScreen, applyLudoBoardContent, computeLudoDesktopPanelSca
 import { renderLudoEmojiPickerHtml } from './renderLudoBottomBar'
 import { renderLudoSpectatorViewersPopoverHtml } from './renderLudoSpectatorViewersPopover'
 import { renderLudoBotTakeoverPopup } from './renderLudoBotTakeoverPopup'
-import { renderLudoGameEndPopup } from './renderLudoGameEndPopup'
+import { renderLudoGameEndPopup, renderLudoCampaignUnitLineHtml } from './renderLudoGameEndPopup'
 import { renderLudoExitConfirmPopup } from './renderLudoExitConfirmPopup'
 import { renderLudoSettingsPopup } from './renderLudoSettingsPopup'
 import { isLudoDiceSoundEnabled, isLudoGameSoundsEnabled, setLudoDiceSoundEnabled, setLudoGameSoundsEnabled, playLudoSound } from './ludoSoundSettings'
@@ -92,7 +92,7 @@ import {
   type LudoOrchestratorState,
 } from './orchestrator'
 import type { LudoColor, LudoPiece, LudoPieceId, LudoPlayer } from './ludoTypes'
-import type { LudoGameStateSnapshot, ActiveLudoGiftSnapshot } from '../../network/createGameServerClient'
+import type { LudoGameStateSnapshot, ActiveLudoGiftSnapshot, CampaignMatchCreditSnapshot } from '../../network/createGameServerClient'
 
 const IMPACT_ANIMATION_MS = 450
 
@@ -113,6 +113,16 @@ export interface LudoFlowControllerOptions {
     // onMoveRequest wiring-а. Не съществува в non-authoritative (dev
     // harness) режим — emoji picker-ът остава скрит там (виж wireEvents()).
     onEmojiReactionSend?: (matchId: string, emojiId: string) => void
+    // Фаза 7 — End Game "спечелени тематични единици" read-only lookup,
+    // mirror на Белот's requestCampaignMatchCredit (createActiveRoomFlowController.ts),
+    // reuse-ващ СЪЩИЯ сървърен request_campaign_match_credit/
+    // campaign_match_credit_result WS pair (gameKind:'ludo' discriminator,
+    // виж server/src/protocol/messageTypes.ts). Извиква се ЕДНОКРАТНО при
+    // presentGameEndOnce (виж там), само за реални участници (НЕ
+    // spectator — spectator никога не залага/печели, mirror на prizeLine
+    // gate-а в renderLudoGameEndPopup.ts). Отговорът пристига обратно през
+    // applyCampaignMatchCreditResult по-долу.
+    onCampaignMatchCreditRequest?: (matchId: string) => void
     // In-game gift (виж task-а "Ludo подаръци") — mirror на onEmojiReactionSend
     // wiring-а, само за authoritative multiplayer match-ове (spectator-ите
     // никога не викат onGiftSend, виж isSpectator gate-а при giftPickerModal
@@ -256,6 +266,21 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
   // reconnect snapshot с prizeAmount:null, който теоретично би могъл да
   // пристигне СЛЕД finish (виж applyAuthoritativeSnapshot по-долу).
   let latestPrizeAmount: number | null = null
+  // Фаза 7 — реално потвърдените тематични единици за ТОЗИ конкретен мач
+  // (campaign_unit_ledger ред), mirror на latestPrizeAmount по-горе, но
+  // ОТДЕЛЕН lifecycle. За разлика от Белот (replay в СЪЩАТА стая, виж
+  // createActiveRoomFlowController.ts matchEndedCampaignCredit doc
+  // коментара), ВСЕКИ Ludo мач получава СВОЙ собствен controller instance
+  // (openLudoGameOverlay конструира фрешен controller за всеки нов match,
+  // виж createLobbyFlowController.ts) — затова НЯМА нужда от match-key
+  // transition detection тук, state-ът просто живее за цялата продължителност
+  // на тоя instance. `null` означава "нищо за показване точно сега"
+  // (умишлено не различава "никога" от "все още се обработва", mirror на
+  // renderLudoGameEndPopup.ts doc коментара).
+  let matchEndedCampaignCredit: CampaignMatchCreditSnapshot | null = null
+  let matchEndedCampaignCreditRequested = false
+  let matchEndedCampaignCreditRetryCount = 0
+  let matchEndedCampaignCreditRetryTimerId: number | null = null
   let authoritativeTransitionQueue = Promise.resolve()
   let presentationEpoch = 0
   let awaitingVisibilityResync = false
@@ -1128,6 +1153,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
       !isSpectator && engineState.winnerColor === localColor,
       latestPrizeAmount,
       isSpectator ? (engineState.winnerColor !== null ? players[engineState.winnerColor]?.name ?? null : null) : undefined,
+      matchEndedCampaignCredit,
     )
     const backdrop = container.firstElementChild
     if (backdrop instanceof HTMLElement) {
@@ -1137,10 +1163,104 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     }
     modalLayerRoot.querySelector('[data-ludo-game-end-dismiss="1"]')?.addEventListener('click', () => {
       isGameEndPopupOpen = false
+      // Фаза 7 — popup-ът вече е затворен: никакво закъсняло начисление не
+      // бива да го отваря повторно (task spec §5) — спираме bounded retry-я
+      // веднага. Самите данни (campaign_unit_ledger) остават записани за
+      // бъдещи профилни/наградни изгледи, независимо от тая локална спирка.
+      clearCampaignMatchCreditRetryTimer()
       modalLayerRoot.querySelector('[data-ludo-game-end-backdrop="1"]')?.remove()
       syncModalLayerInteractivity()
       if (options.authoritative && authoritativeSnapshot) options.onGameEndAcknowledged?.(authoritativeSnapshot.matchId)
     })
+  }
+
+  // Фаза 7 — bounded retry delays, mirror на Белот's
+  // CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS (createActiveRoomFlowController.ts)
+  // — НЕ infinite polling (task spec §5). След изчерпване на тия 3 опита
+  // (~10.5 сек покритие), заявки спират тихо.
+  const CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS = [1500, 3000, 6000]
+
+  function clearCampaignMatchCreditRetryTimer(): void {
+    if (matchEndedCampaignCreditRetryTimerId !== null) {
+      window.clearTimeout(matchEndedCampaignCreditRetryTimerId)
+      matchEndedCampaignCreditRetryTimerId = null
+    }
+  }
+
+  // Targeted DOM patch за ВЕЧЕ mount-натия popup (виж mountGameEndPopup's
+  // idempotency guard по-горе — повторно извикване на mountGameEndPopup()
+  // НЕ презаписва вече съществуващ backdrop, затова закъсняло начисление,
+  // пристигнало СЛЕД първоначалния mount, трябва explicit DOM patch, не
+  // пълен re-mount). Ако backdrop-ът вече не съществува (popup затворен,
+  // виж dismiss handler-а по-горе), НЕ прави нищо — task spec §5 "не
+  // отваряй повторно само заради закъснялото начисление".
+  function updateGameEndPopupCampaignUnitLine(): void {
+    const backdrop = modalLayerRoot.querySelector('[data-ludo-game-end-backdrop="1"]')
+    if (!backdrop) return
+    // Defense-in-depth (mirror на renderLudoGameEndPopup.ts's
+    // didLocalPlayerWin gate) — targeted patch-ът минава ПОКРАЙ тая
+    // функция, затова проверката трябва да се повтори тук explicit:
+    // spectator/губещ никога не виждат кампанийна награда, дори ако
+    // credit по някаква причина е naличен locally (task spec §8).
+    const canShowCampaignUnit = !isSpectator && engineState.winnerColor === localColor
+    const newLineHtml = canShowCampaignUnit ? renderLudoCampaignUnitLineHtml(matchEndedCampaignCredit) : ''
+    const existingLine = backdrop.querySelector('[data-ludo-campaign-unit-line="1"]')
+    if (existingLine) {
+      if (newLineHtml === '') existingLine.remove()
+      else existingLine.outerHTML = newLineHtml
+      return
+    }
+    if (newLineHtml === '') return
+    const anchor = backdrop.querySelector('[data-ludo-prize-line="1"]') ?? backdrop.querySelector('#ludo-game-end-title')
+    anchor?.insertAdjacentHTML('afterend', newLineHtml)
+  }
+
+  function scheduleCampaignMatchCreditRetry(matchId: string): void {
+    if (matchEndedCampaignCreditRetryCount >= CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS.length) return
+    const delay = CAMPAIGN_MATCH_CREDIT_RETRY_DELAYS_MS[matchEndedCampaignCreditRetryCount]
+    matchEndedCampaignCreditRetryCount += 1
+    matchEndedCampaignCreditRetryTimerId = window.setTimeout(() => {
+      matchEndedCampaignCreditRetryTimerId = null
+      if (matchEndedCampaignCredit !== null) return
+      if (isDestroyed || !options.authoritative?.onCampaignMatchCreditRequest) return
+      options.authoritative.onCampaignMatchCreditRequest(matchId)
+      scheduleCampaignMatchCreditRetry(matchId)
+    }, delay)
+  }
+
+  // Фаза 7 — изпраща request_campaign_match_credit за ТОЗИ мач ЕДНОКРАТНО
+  // (matchEndedCampaignCreditRequested guard), само за реални участници
+  // (spectator never залага/печели — виж renderLudoGameEndPopup.ts
+  // prizeLine gate-а за established прецедента). Ботове/temp
+  // профили/ineligible се филтрират СЪРВЪРНО (isProfileEligibleForGameCredit,
+  // campaignCreditStore.ts) — тук просто няма допълнителна проверка,
+  // защото local player, който вижда popup-а, по дефиниция е реален
+  // (автентикиран) участник.
+  function requestCampaignMatchCreditForThisMatch(): void {
+    if (isSpectator || matchEndedCampaignCreditRequested) return
+    if (!options.authoritative || !authoritativeSnapshot) return
+    const onRequest = options.authoritative.onCampaignMatchCreditRequest
+    if (!onRequest) return
+    matchEndedCampaignCreditRequested = true
+    const matchId = authoritativeSnapshot.matchId
+    onRequest(matchId)
+    scheduleCampaignMatchCreditRetry(matchId)
+  }
+
+  // Фаза 7 — получен отговор от campaign_match_credit_result (виж
+  // createLobbyFlowController.ts dispatch-а). matchId guard-ът отхвърля
+  // закъснял отговор за ПРЕДИШЕН match instance (defense-in-depth —
+  // практически всеки Ludo мач вече получава фрешен controller instance,
+  // виж matchEndedCampaignCredit декларацията по-горе, но guard-ът пази
+  // срещу теоретичен race ПРЕДИ destroy() да е изчистил timer-а). `credit:
+  // null` се третира идентично на "нищо ново" — НЕ null-ва вече получена
+  // стойност (mirror на latestPrizeAmount's established защита).
+  function applyCampaignMatchCreditResult(matchId: string, credit: CampaignMatchCreditSnapshot | null): void {
+    if (!options.authoritative || matchId !== authoritativeSnapshot?.matchId) return
+    if (credit === null) return
+    matchEndedCampaignCredit = credit
+    clearCampaignMatchCreditRetryTimer()
+    if (isGameEndPopupOpen) updateGameEndPopupCampaignUnitLine()
   }
 
   function presentGameEndOnce(playSound = false): void {
@@ -1156,6 +1276,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     modalLayerRoot.replaceChildren()
     syncModalLayerInteractivity()
     clearScheduledTimers()
+    requestCampaignMatchCreditForThisMatch()
     showBotTakeoverPopup = false
     render()
   }
@@ -2337,6 +2458,7 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     document.removeEventListener('click', handleSpectatorViewersPopoverOutsideClick, { capture: true })
     if (resizeTimer) clearTimeout(resizeTimer)
     clearScheduledTimers()
+    clearCampaignMatchCreditRetryTimer()
     clearEmojiReactionTimers()
     activeMoveOverlayCancel?.()
     activeMoveOverlayCancel = null
@@ -2371,5 +2493,6 @@ export function createLudoFlowController(options: LudoFlowControllerOptions) {
     applyGiftSent,
     applyGiftSendResult,
     applyActiveGiftsFromSnapshot,
+    applyCampaignMatchCreditResult,
   }
 }

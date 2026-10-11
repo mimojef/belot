@@ -944,6 +944,45 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
       return { type: 'ad_campaign_click', dispatchId }
     }
 
+    // Фаза 6 (Белот) / Фаза 7 (Ludo разширение) — виж messageTypes.ts::
+    // ClientMessage::request_campaign_match_credit doc коментара.
+    // КРИТИЧНА поправка: тоя case липсваше тук от самото въвеждане на
+    // съобщението във Фаза 6 — всяко такова съобщение, изпратено от
+    // реален клиент, се отхвърляше тихо от parseClientMessage (return null
+    // по-долу, преди да стигне index.ts's handler), значи цялата "спечелени
+    // тематични единици" функционалност никога не е работила end-to-end
+    // през реален WebSocket round-trip, независимо че handler/store кодът
+    // е бил коректен — виж checkCampaignMatchCreditWebSocketAuthorization.ts
+    // за real-server regression теста, който го откри.
+    //
+    // matchEndedAt е ЗАДЪЛЖИТЕЛЕН само логически за gameKind:'belot'
+    // (index.ts handler-ът сам проверява Number.isFinite и връща null
+    // credit при липса/невалидна стойност, не хвърля) — тук validate-ваме
+    // само ФОРМАТА: undefined е валиден passthrough (Ludo случая), present-
+    // но-невалидно отхвърля ЦЯЛОТО съобщение (established pattern, виж
+    // humanTurnTimeoutMs по-горе).
+    if (parsed.type === 'request_campaign_match_credit') {
+      const gameKind = parsed.gameKind === 'belot' || parsed.gameKind === 'ludo' ? parsed.gameKind : null
+      const roomId = normalizeRequiredText(parsed.roomId)
+      const matchEndedAt =
+        parsed.matchEndedAt === undefined
+          ? undefined
+          : typeof parsed.matchEndedAt === 'number' && Number.isFinite(parsed.matchEndedAt)
+            ? parsed.matchEndedAt
+            : null
+
+      if (gameKind === null || roomId === null || matchEndedAt === null) {
+        return null
+      }
+
+      return {
+        type: 'request_campaign_match_credit',
+        gameKind,
+        roomId,
+        matchEndedAt,
+      }
+    }
+
     return null
   } catch {
     return null

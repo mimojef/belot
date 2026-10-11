@@ -473,9 +473,25 @@ export type ClientMessage =
       // fabricate-ва), ако не съвпада точно, покривайки и старите legacy
       // редове (source_id=голия room.id), за които sourceId сам по себе си
       // не би различил мач 1 от мач 2.
+      //
+      // ФАЗА 7 разширение — gameKind discriminator. roomId тук е ОБЩ "match
+      // identifier" field за ДВЕТЕ игри (за Белот: room.id; за Ludo:
+      // snapshot.matchId — виж campaignGameHooks.ts::recordLudoMatchForCampaign,
+      // sourceId=snapshot.matchId е ВЕЧЕ match-unique при създаването си,
+      // randomUUID() per match, никога преизползван при "нова игра" — за
+      // разлика от Белот room.id, затова Ludo lookup-ът НЕ се нуждае от
+      // matchEndedAt anti-staleness discriminator) — не преименуваме полето,
+      // за да не пипаме непроменения, вече тестван Белот call site/тестове
+      // (минимално безопасно разширение, виж task spec §4). matchEndedAt
+      // остава ЗАДЪЛЖИТЕЛЕН за gameKind:'belot' (непроменено поведение),
+      // ИЗРИЧНО ОТСЪСТВА (undefined) за gameKind:'ludo' — handler-ът го
+      // проверява само когато е нужно, виж index.ts handler-а и
+      // campaignCreditStore.ts::getMatchCreditSnapshot (expectedEventAtIso
+      // параметър вече nullable).
       type: 'request_campaign_match_credit'
+      gameKind: 'belot' | 'ludo'
       roomId: RoomId
-      matchEndedAt: number
+      matchEndedAt?: number
     }
 
 export type RoomSeatSnapshot = {

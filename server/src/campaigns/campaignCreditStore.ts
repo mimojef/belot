@@ -146,12 +146,20 @@ export type CampaignCreditStore = {
    * старите legacy редове (точно равенство на sourceId сам по себе си не
    * различава мач 1 от мач 2 в същата стая, виж doc коментара в
    * messageTypes.ts).
+   *
+   * ФАЗА 7 — expectedEventAtIso вече е NULL-able: за sourceType='ludo_win'
+   * sourceId (snapshot.matchId) е ВЕЧЕ match-unique при самото създаване
+   * (randomUUID() per match, никога преизползван — за разлика от Белот
+   * room.id при "Играй пак") — event_at anti-staleness проверка просто не е
+   * нужна там. `null` означава "пропусни event_at филтъра, точното
+   * sourceId съвпадение е достатъчно"; за 'belot_win' caller-ът ПРОДЪЛЖАВА
+   * да подава реална стойност (непроменено поведение).
    */
   getMatchCreditSnapshot: (
     profileId: string,
     sourceType: 'belot_win' | 'ludo_win',
     sourceId: string,
-    expectedEventAtIso: string,
+    expectedEventAtIso: string | null,
   ) => MatchCreditSnapshot | null
   listPendingNotifications: (profileId: string) => CampaignRewardNotificationSnapshot[]
   acknowledgeNotification: (notificationId: string, profileId: string) => AcknowledgeNotificationResult
@@ -374,19 +382,44 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     LIMIT 1;
   `)
 
+  // Фаза 7 — вариант БЕЗ event_at филтър, за sourceType='ludo_win' (sourceId
+  // вече е match-unique, виж doc коментара на getMatchCreditSnapshot типа
+  // по-горе). LIKE клона остава no-op за ludo (никога ':v' суфикс), но го
+  // пазим за SQL консистентност/бъдещ reuse.
+  const selectMatchCreditStatementNoEventAtCheck = database.prepare(`
+    SELECT cul.campaign_id AS campaign_id, cul.units_amount AS units_amount,
+           c.name AS campaign_name, c.unit_name_singular AS unit_name_singular,
+           c.unit_name_plural AS unit_name_plural, c.unit_icon_url AS unit_icon_url
+    FROM campaign_unit_ledger cul
+    JOIN campaigns c ON c.campaign_id = cul.campaign_id
+    WHERE cul.profile_id = ? AND cul.source_type = ?
+      AND (cul.source_id = ? OR cul.source_id LIKE ? ESCAPE '\\')
+      AND cul.units_amount > 0
+    LIMIT 1;
+  `)
+
   function getMatchCreditSnapshotInternal(
     profileId: string,
     sourceType: 'belot_win' | 'ludo_win',
     sourceId: string,
-    expectedEventAtIso: string,
+    expectedEventAtIso: string | null,
   ): MatchCreditSnapshot | null {
     const scopedSourceIdLikePattern = `${escapeSqlLikePattern(sourceId)}:v%`
-    const row = selectMatchCreditStatement.get(
-      profileId,
-      sourceType,
-      sourceId,
-      scopedSourceIdLikePattern,
-      expectedEventAtIso,
+    const row = (
+      expectedEventAtIso === null
+        ? selectMatchCreditStatementNoEventAtCheck.get(
+            profileId,
+            sourceType,
+            sourceId,
+            scopedSourceIdLikePattern,
+          )
+        : selectMatchCreditStatement.get(
+            profileId,
+            sourceType,
+            sourceId,
+            scopedSourceIdLikePattern,
+            expectedEventAtIso,
+          )
     ) as
       | {
           campaign_id: string

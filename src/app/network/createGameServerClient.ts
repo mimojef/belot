@@ -1158,15 +1158,18 @@ export type ClientMessage =
       dispatchId: string
     }
   | {
-      // Фаза 6 — виж server/src/protocol/messageTypes.ts
-      // ClientMessage::request_campaign_match_credit doc коментара за
-      // пълния security rationale (read-only, profileId се резолюва
-      // сървърно от connection-а, roomId тук е само query key) и за
-      // matchEndedAt anti-staleness discriminator-а (replay-in-same-room
-      // защита срещу показване на ПРЕДИШЕН match-ov credit).
+      // Фаза 6 (Белот) / Фаза 7 (Ludo разширение) — виж
+      // server/src/protocol/messageTypes.ts ClientMessage::
+      // request_campaign_match_credit doc коментара за пълния security
+      // rationale (read-only, profileId се резолюва сървърно от
+      // connection-а, roomId тук е само query key — за Ludo носи
+      // snapshot.matchId) и за matchEndedAt anti-staleness
+      // discriminator-а (само за gameKind:'belot' — Ludo matchId вече е
+      // match-unique, никога не се нуждае от него).
       type: 'request_campaign_match_credit'
+      gameKind: 'belot' | 'ludo'
       roomId: string
-      matchEndedAt: number
+      matchEndedAt?: number
     }
 
 export type PrivateRoomOccupantSnapshot = {
@@ -3140,7 +3143,7 @@ export type GameServerClient = {
   submitSweepDecision: (roomId: string, decision: 'accept' | 'decline') => void
   resumeHumanControl: (roomId: string) => void
   submitPartnerRating: (roomId: string, ratingValue: number, requestId: string) => void
-  requestCampaignMatchCredit: (roomId: string, matchEndedAt: number) => void
+  requestCampaignMatchCredit: (gameKind: 'belot' | 'ludo', roomId: string, matchEndedAt?: number) => void
   sendReplayVote: (roomId: string) => void
   sendLeaveMatchVote: (roomId: string) => void
   sendEmojiReaction: (roomId: string, emojiId: string) => void
@@ -3503,9 +3506,10 @@ export function createGameServerClient(
     })
   }
 
-  function requestCampaignMatchCredit(roomId: string, matchEndedAt: number): void {
+  function requestCampaignMatchCredit(gameKind: 'belot' | 'ludo', roomId: string, matchEndedAt?: number): void {
     send({
       type: 'request_campaign_match_credit',
+      gameKind,
       roomId,
       matchEndedAt,
     })

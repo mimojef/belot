@@ -6950,6 +6950,7 @@ lobby = createLobbyFlowController({
   onLudoMoveRequest: (matchId, revision, slot) => { client.requestLudoMove(matchId, revision, slot) },
   onLudoReclaimRequest: (matchId, revision) => { client.requestLudoReclaim(matchId, revision) },
   onLudoEmojiReactionSend: (matchId, emojiId) => { client.sendLudoEmojiReaction(matchId, emojiId) },
+  onLudoCampaignMatchCreditRequest: (matchId) => { client.requestCampaignMatchCredit('ludo', matchId) },
   onSendLudoGift: (matchId, recipientProfileId, giftItemId, requestId) => {
     client.sendLudoGift(matchId, recipientProfileId, giftItemId, requestId)
   },
@@ -7237,7 +7238,7 @@ const activeRoom = createActiveRoomFlowController({
     client.submitPartnerRating(roomId, ratingValue, requestId)
   },
   requestCampaignMatchCredit: (roomId, matchEndedAt) => {
-    client.requestCampaignMatchCredit(roomId, matchEndedAt)
+    client.requestCampaignMatchCredit('belot', roomId, matchEndedAt)
   },
   sendReplayVote: (roomId) => {
     client.sendReplayVote(roomId)
