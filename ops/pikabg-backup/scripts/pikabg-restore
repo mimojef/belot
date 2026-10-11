@@ -1,0 +1,123 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+# Фаза 10.1 §4 — Restore helper. Разопакова SQLite snapshot + uploads/ tar
+# архив в ЕДНА target директория (никога директно продукционните пътища,
+# виж safety guard-а по-долу — тая фаза изрично забранява реален restore
+# върху VPS). Проверява checksums (ако .sha256 sidecar съществува до всеки
+# архив) И DB-URL <-> файл консистентността СЛЕД extraction, чрез СЪЩИЯ
+# pikabg-backup-verify-consistency helper, ползван от backup-а.
+#
+# Usage:
+#   pikabg-restore --db-archive <path/to/belot-v2-<stamp>.sqlite.zst> \
+#                   --uploads-archive <path/to/belot-v2-<stamp>-uploads.tar.zst> \
+#                   --target-dir <empty or scratch directory>
+#
+# Резултат (при success):
+#   <target-dir>/belot-v2.sqlite        — възстановената база
+#   <target-dir>/uploads/...            — възстановената структура, вкл.
+#                                          campaign-themes/<campaignId>/
+#                                          icons|tables|card-backs/
+#
+# Продукционен restore (презапис на реалните /var/www/belot-v2/server/...
+# пътища) изисква ръчно, обмислено копиране от оператора СЛЕД проверка тук —
+# тоя script НИКОГА не пише директно в production пътища.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VERIFY_SCRIPT="$SCRIPT_DIR/pikabg-backup-verify-consistency.mjs"
+
+DB_ARCHIVE=""
+UPLOADS_ARCHIVE=""
+TARGET_DIR=""
+SKIP_CHECKSUM=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --db-archive) DB_ARCHIVE="$2"; shift 2 ;;
+        --uploads-archive) UPLOADS_ARCHIVE="$2"; shift 2 ;;
+        --target-dir) TARGET_DIR="$2"; shift 2 ;;
+        --skip-checksum) SKIP_CHECKSUM=1; shift ;;
+        *) echo "[restore] Unknown argument: $1"; exit 2 ;;
+    esac
+done
+
+if [ -z "$DB_ARCHIVE" ] || [ -z "$UPLOADS_ARCHIVE" ] || [ -z "$TARGET_DIR" ]; then
+    echo "[restore] Usage: pikabg-restore --db-archive <path> --uploads-archive <path> --target-dir <dir>"
+    exit 2
+fi
+
+# Твърд guard — никога пряк restore върху реални production пътища в тая
+# фаза ("Не прави реален restore върху продукцията"). Никакъв флаг не го
+# заобикаля умишлено — продукционен restore е ръчна, разгледана стъпка
+# извън обхвата на тоя helper.
+case "$TARGET_DIR" in
+    /var/www/*|/var/backups/*)
+        echo "[restore] ERROR: target-dir looks like a production/backup-storage path ($TARGET_DIR) — refusing."
+        echo "[restore] This phase forbids a real restore onto production. Use a scratch directory."
+        exit 2
+        ;;
+esac
+
+if [ ! -f "$DB_ARCHIVE" ]; then
+    echo "[restore] ERROR: db archive not found: $DB_ARCHIVE"
+    exit 1
+fi
+if [ ! -f "$UPLOADS_ARCHIVE" ]; then
+    echo "[restore] ERROR: uploads archive not found: $UPLOADS_ARCHIVE"
+    exit 1
+fi
+
+mkdir -p "$TARGET_DIR"
+
+if [ "$SKIP_CHECKSUM" != "1" ]; then
+    echo "[restore] Verifying archive checksums..."
+    for ARCHIVE in "$DB_ARCHIVE" "$UPLOADS_ARCHIVE"; do
+        SHA_FILE="$ARCHIVE.sha256"
+        if [ -f "$SHA_FILE" ]; then
+            (cd "$(dirname "$ARCHIVE")" && sha256sum -c "$(basename "$SHA_FILE")")
+            echo "[restore] checksum_ok=$(basename "$ARCHIVE")"
+        else
+            echo "[restore] WARNING: no .sha256 sidecar found for $(basename "$ARCHIVE") — skipping checksum verification for it"
+        fi
+    done
+fi
+
+echo
+echo "[restore] Validating archive integrity (zstd -t)..."
+zstd -t "$DB_ARCHIVE"
+zstd -t "$UPLOADS_ARCHIVE"
+echo "[restore] archive_integrity=ok"
+
+echo
+echo "[restore] Restoring SQLite database -> $TARGET_DIR/belot-v2.sqlite"
+zstd -dc "$DB_ARCHIVE" > "$TARGET_DIR/belot-v2.sqlite"
+INTEGRITY="$(sqlite3 -bail -batch -readonly "$TARGET_DIR/belot-v2.sqlite" 'PRAGMA integrity_check;')"
+if [ "$INTEGRITY" != "ok" ]; then
+    echo "[restore] ERROR: restored database failed integrity_check=$INTEGRITY"
+    exit 1
+fi
+echo "[restore] db_integrity_check=ok"
+
+echo
+echo "[restore] Restoring uploads/ -> $TARGET_DIR/uploads/"
+zstd -dc "$UPLOADS_ARCHIVE" | tar --one-file-system -xf - -C "$TARGET_DIR"
+RESTORED_FILE_COUNT="$(find "$TARGET_DIR/uploads" -type f | wc -l)"
+echo "[restore] restored_file_count=$RESTORED_FILE_COUNT"
+
+echo
+echo "[restore] Verifying DB URLs resolve to restored files..."
+if node "$VERIFY_SCRIPT" --db "$TARGET_DIR/belot-v2.sqlite" --uploads-dir "$TARGET_DIR"; then
+    echo "[restore] consistency=ok"
+else
+    echo "[restore] ERROR: restored DB references files that are missing after extraction — see report above"
+    exit 1
+fi
+
+echo
+echo "[restore] SUCCESS"
+echo "[restore] database=$TARGET_DIR/belot-v2.sqlite"
+echo "[restore] uploads=$TARGET_DIR/uploads"
+echo "[restore] Campaign theme folders preserved as campaign-themes/<campaignId>/icons|tables|card-backs/."
+echo "[restore] To apply to production: stop writes, manually copy these two paths over the real"
+echo "[restore] server/database/data/belot-v2.sqlite and server/uploads/ ONLY after independent review."

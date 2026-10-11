@@ -1,124 +1,179 @@
-#!/usr/bin/env python3
+#!/usr/bin/env node
+// pikabg-db-retention
+//
+// Фаза 10.1 — разширен от "само database/ remote folder" да покрива и
+// uploads/ remote folder (uploads tar.zst + sha256 + manifest.json), СЪС
+// СЪЩАТА tiered retention логика (24ч всички, 24ч-14д по 1/час, 14д-90д по
+// 1/ден) — "Съвместимост със съществуващото retention поведение" (§3).
+// Систем timer/schedule (daily @ 03:20) остава НЕПРОМЕНЕН — тая разширена
+// логика тече в СЪЩОТО вече планирано изпълнение.
+//
+// Пренаписан от Python (виж git history) на Node CommonJS — ЕДИНСТВЕНАТА
+// причина: тестваемост в тая сесия (без реален python3 на dev машината,
+// виж README.md "Тестова методология"); самата tiered-retention АРИТМЕТИКА
+// е 1:1 същата, непроменена логика, само транслирана. CommonJS (не .mjs),
+// extensionless файл — за да остане инсталационният път идентичен
+// (/usr/local/sbin/pikabg-db-retention, СЪЩОТО ExecStart в systemd unit-а,
+// непипнат). rclone остава единственото external binary (неизбежно — няма
+// Node rclone SDK), извикан през spawnSync със shell:true (без поведенческа
+// разлика на production Linux spawn, виж verify-consistency.mjs).
 
-import re
-import subprocess
-import sys
-from datetime import datetime, timezone, timedelta
+const { spawnSync } = require('node:child_process')
 
-REMOTE_ROOT = "pikabg-drive:PikaBG-Backups/database"
-EXECUTE = "--execute" in sys.argv
+const REMOTE_DB_ROOT = process.env.PIKABG_REMOTE_DB_ROOT || 'pikabg-drive:PikaBG-Backups/database'
+const REMOTE_UPLOADS_ROOT = process.env.PIKABG_REMOTE_UPLOADS_ROOT || 'pikabg-drive:PikaBG-Backups/uploads'
+const EXECUTE = process.argv.includes('--execute')
 
-pattern = re.compile(
-    r"^(?P<dir>.*?/)?belot-v2-(?P<stamp>\d{8}T\d{6}Z)\.sqlite\.zst$"
-)
+const DB_PATTERN = /^(?<dir>.*?\/)?belot-v2-(?<stamp>\d{8}T\d{6}Z)\.sqlite\.zst$/
+const UPLOADS_PATTERN = /^(?<dir>.*?\/)?belot-v2-(?<stamp>\d{8}T\d{6}Z)-uploads\.tar\.zst$/
 
-def run(*args, check=True):
-    return subprocess.run(
-        args,
-        text=True,
-        capture_output=True,
-        check=check,
-    )
+function run(args, { check = true } = {}) {
+  const result = spawnSync(args[0], args.slice(1), { shell: true, encoding: 'utf8' })
+  if (check && result.status !== 0) {
+    throw new Error(`command failed: ${args.join(' ')}\n${result.stderr}`)
+  }
+  return result
+}
 
-result = run(
-    "/usr/bin/rclone",
-    "lsf",
-    REMOTE_ROOT,
-    "--recursive",
-    "--files-only",
-)
+function parseStamp(stamp) {
+  // "YYYYMMDDTHHMMSSZ" -> Date (UTC)
+  const y = stamp.slice(0, 4)
+  const mo = stamp.slice(4, 6)
+  const d = stamp.slice(6, 8)
+  const h = stamp.slice(9, 11)
+  const mi = stamp.slice(11, 13)
+  const s = stamp.slice(13, 15)
+  return new Date(`${y}-${mo}-${d}T${h}:${mi}:${s}Z`)
+}
 
-archives = []
+function listRemoteArchives(remoteRoot, pattern) {
+  const result = run(['/usr/bin/rclone', 'lsf', remoteRoot, '--recursive', '--files-only'])
+  const archives = []
+  for (const raw of result.stdout.split('\n')) {
+    const path = raw.trim()
+    if (!path) continue
+    const m = pattern.exec(path)
+    if (!m) continue
+    archives.push({ ts: parseStamp(m.groups.stamp), path })
+  }
+  archives.sort((a, b) => b.ts - a.ts)
+  return archives
+}
 
-for raw in result.stdout.splitlines():
-    path = raw.strip()
-    m = pattern.match(path)
-    if not m:
-        continue
+const HOUR_MS = 60 * 60 * 1000
+const DAY_MS = 24 * HOUR_MS
 
-    ts = datetime.strptime(
-        m.group("stamp"),
-        "%Y%m%dT%H%M%SZ",
-    ).replace(tzinfo=timezone.utc)
+function computeKeepDelete(archives, now) {
+  const keep = new Set()
+  const del = new Set()
+  const hourBucketSeen = new Set()
+  const dayBucketSeen = new Set()
 
-    archives.append((ts, path))
+  for (const { ts, path } of archives) {
+    const ageMs = now - ts
 
-archives.sort(reverse=True)
+    if (ageMs <= 24 * HOUR_MS) {
+      keep.add(path)
+      continue
+    }
 
-now = datetime.now(timezone.utc)
-
-keep = set()
-delete = set()
-hour_bucket_seen = set()
-day_bucket_seen = set()
-
-for ts, path in archives:
-    age = now - ts
-
-    if age <= timedelta(hours=24):
+    if (ageMs <= 14 * DAY_MS) {
+      const bucket = ts.toISOString().slice(0, 13) // YYYY-MM-DDTHH
+      if (!hourBucketSeen.has(bucket)) {
+        hourBucketSeen.add(bucket)
         keep.add(path)
-        continue
+      } else {
+        del.add(path)
+      }
+      continue
+    }
 
-    if age <= timedelta(days=14):
-        bucket = ts.strftime("%Y-%m-%dT%H")
-        if bucket not in hour_bucket_seen:
-            hour_bucket_seen.add(bucket)
-            keep.add(path)
-        else:
-            delete.add(path)
-        continue
+    if (ageMs <= 90 * DAY_MS) {
+      const bucket = ts.toISOString().slice(0, 10) // YYYY-MM-DD
+      if (!dayBucketSeen.has(bucket)) {
+        dayBucketSeen.add(bucket)
+        keep.add(path)
+      } else {
+        del.add(path)
+      }
+      continue
+    }
 
-    if age <= timedelta(days=90):
-        bucket = ts.strftime("%Y-%m-%d")
-        if bucket not in day_bucket_seen:
-            day_bucket_seen.add(bucket)
-            keep.add(path)
-        else:
-            delete.add(path)
-        continue
+    del.add(path)
+  }
 
-    delete.add(path)
+  return { keep, delete: del }
+}
 
-print(f"[retention] mode={'EXECUTE' if EXECUTE else 'DRY-RUN'}")
-print(f"[retention] now={now.isoformat()}")
-print(f"[retention] archives={len(archives)}")
-print(f"[retention] keep={len(keep)}")
-print(f"[retention] delete={len(delete)}")
+function deleteArchive(remoteRoot, path, sidecarSuffixes, extraPaths) {
+  const remoteArchive = `${remoteRoot}/${path}`
+  console.log(`[retention] deleting ${path}`)
+  run(['/usr/bin/rclone', 'deletefile', remoteArchive])
+  for (const suffix of sidecarSuffixes) {
+    run(['/usr/bin/rclone', 'deletefile', `${remoteArchive}${suffix}`], { check: false })
+  }
+  for (const extra of extraPaths) {
+    run(['/usr/bin/rclone', 'deletefile', `${remoteRoot}/${extra}`], { check: false })
+  }
+}
 
-print()
-print("=== KEEP ===")
-for path in sorted(keep):
-    print(f"KEEP   {path}")
+// belot-v2-<stamp>-uploads.tar.zst -> belot-v2-<stamp>.manifest.json — две
+// различни базови имена за СЪЩИЯ backup round (виж pikabg-db-backup), затова
+// манифестът не е просто "<path>.manifest.json" sidecar suffix, а отделно
+// извлечено име.
+function uploadsManifestPath(uploadsArchivePath) {
+  const m = UPLOADS_PATTERN.exec(uploadsArchivePath)
+  if (!m) return []
+  const directory = m.groups.dir || ''
+  const stamp = m.groups.stamp
+  return [`${directory}belot-v2-${stamp}.manifest.json`]
+}
 
-print()
-print("=== DELETE ===")
-for path in sorted(delete):
-    print(f"DELETE {path}")
-    print(f"DELETE {path}.sha256")
+function processCategory(label, remoteRoot, pattern, now, sidecarSuffixes, extraPathsFor) {
+  const archives = listRemoteArchives(remoteRoot, pattern)
+  const { keep, delete: del } = computeKeepDelete(archives, now)
 
-if not EXECUTE:
-    print()
-    print("[retention] DRY-RUN ONLY — nothing deleted.")
-    sys.exit(0)
+  console.log(`[retention] category=${label} mode=${EXECUTE ? 'EXECUTE' : 'DRY-RUN'}`)
+  console.log(`[retention] category=${label} archives=${archives.length} keep=${keep.size} delete=${del.size}`)
 
-for path in sorted(delete):
-    remote_archive = f"{REMOTE_ROOT}/{path}"
-    remote_sha = f"{remote_archive}.sha256"
+  console.log(`=== ${label} KEEP ===`)
+  for (const path of [...keep].sort()) console.log(`KEEP   ${path}`)
 
-    print(f"[retention] deleting {path}")
+  console.log(`=== ${label} DELETE ===`)
+  for (const path of [...del].sort()) {
+    const extras = extraPathsFor ? extraPathsFor(path) : []
+    console.log(`DELETE ${path}` + sidecarSuffixes.map((s) => ` ${path}${s}`).join('') + extras.map((e) => ` ${e}`).join(''))
+  }
 
-    run(
-        "/usr/bin/rclone",
-        "deletefile",
-        remote_archive,
-    )
+  if (!EXECUTE) return
 
-    run(
-        "/usr/bin/rclone",
-        "deletefile",
-        remote_sha,
-        check=False,
-    )
+  for (const path of [...del].sort()) {
+    const extras = extraPathsFor ? extraPathsFor(path) : []
+    deleteArchive(remoteRoot, path, sidecarSuffixes, extras)
+  }
+}
 
-print()
-print("[retention] COMPLETE")
+function main() {
+  const now = new Date()
+  console.log(`[retention] now=${now.toISOString()}`)
+  console.log()
+
+  processCategory('database', REMOTE_DB_ROOT, DB_PATTERN, now, ['.sha256'])
+  console.log()
+  processCategory('uploads', REMOTE_UPLOADS_ROOT, UPLOADS_PATTERN, now, ['.sha256'], uploadsManifestPath)
+
+  if (!EXECUTE) {
+    console.log()
+    console.log('[retention] DRY-RUN ONLY — nothing deleted.')
+    return
+  }
+
+  console.log()
+  console.log('[retention] COMPLETE')
+}
+
+module.exports = { computeKeepDelete, uploadsManifestPath }
+
+if (require.main === module) {
+  main()
+}

@@ -2,11 +2,28 @@
 set -Eeuo pipefail
 umask 077
 
-DB="/var/www/belot-v2/server/database/data/belot-v2.sqlite"
-LOCAL_ROOT="/var/backups/pikabg-db"
-REMOTE_ROOT="pikabg-drive:PikaBG-Backups/database"
+# Фаза 10.1 — разширен от "само SQLite" да покрива и server/uploads/ (виж
+# README.md за пълния рационал). Пътищата, hostname-ите за health check и
+# rclone remote root-овете остават production defaults, но са override-ваеми
+# през env vars ИЗКЛЮЧИТЕЛНО за изолирана тестова употреба
+# (PIKABG_BACKUP_LOCAL_ONLY=1 вид test harness) — production systemd unit-ът
+# не задава тия env vars, затова поведението на VPS е 100% същото като преди.
+DB="${PIKABG_DB_PATH:-/var/www/belot-v2/server/database/data/belot-v2.sqlite}"
+UPLOADS_DIR="${PIKABG_UPLOADS_DIR:-/var/www/belot-v2/server/uploads}"
+LOCAL_ROOT="${PIKABG_LOCAL_ROOT:-/var/backups/pikabg-db}"
+REMOTE_DB_ROOT="${PIKABG_REMOTE_DB_ROOT:-pikabg-drive:PikaBG-Backups/database}"
+REMOTE_UPLOADS_ROOT="${PIKABG_REMOTE_UPLOADS_ROOT:-pikabg-drive:PikaBG-Backups/uploads}"
+HEALTH_URL="${PIKABG_HEALTH_URL:-http://127.0.0.1:3001/health}"
+LOCK_FILE="${PIKABG_LOCK_FILE:-/var/lock/pikabg-db-backup.lock}"
+VERIFY_SCRIPT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/pikabg-backup-verify-consistency.mjs"
+# Тестова употреба само (НИКОГА зададено от production systemd unit-а) —
+# прескача curl health check и rclone upload/verify, за да може целия
+# tar/VACUUM/compress/checksum/manifest/consistency-retry/local-retention
+# път да се упражни в изолирана среда без мрежа/credentials/работещ сървър.
+LOCAL_ONLY="${PIKABG_BACKUP_LOCAL_ONLY:-0}"
+MAX_CONSISTENCY_ATTEMPTS=3
 
-exec 9>/var/lock/pikabg-db-backup.lock
+exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
     echo "[backup] Another backup is already running — skip."
     exit 0
@@ -18,138 +35,243 @@ DAY="$(date -u +%Y-%m-%d)"
 mkdir -p "$LOCAL_ROOT"
 
 BASE="belot-v2-${STAMP}"
-SNAPSHOT="$LOCAL_ROOT/${BASE}.sqlite"
-ARCHIVE="$LOCAL_ROOT/${BASE}.sqlite.zst"
-SHA_FILE="$ARCHIVE.sha256"
-REMOTE_DIR="$REMOTE_ROOT/$DAY"
+DB_SNAPSHOT="$LOCAL_ROOT/${BASE}.sqlite"
+DB_ARCHIVE="$LOCAL_ROOT/${BASE}.sqlite.zst"
+DB_SHA_FILE="$DB_ARCHIVE.sha256"
+UPLOADS_ARCHIVE="$LOCAL_ROOT/${BASE}-uploads.tar.zst"
+UPLOADS_SHA_FILE="$UPLOADS_ARCHIVE.sha256"
+MANIFEST_FILE="$LOCAL_ROOT/${BASE}.manifest.json"
+REMOTE_DB_DIR="$REMOTE_DB_ROOT/$DAY"
+REMOTE_UPLOADS_DIR="$REMOTE_UPLOADS_ROOT/$DAY"
 
+# .partial/.attempt suffixes за §3 "защита от частично записан архив" — само
+# атомарен `mv` към крайното име след пълна валидация премества файла на
+# мястото, което retention/upload логиката по-долу реално разглежда.
 cleanup() {
-    rm -f "$SNAPSHOT"
+    rm -f "$DB_SNAPSHOT" "$LOCAL_ROOT"/*.attempt.* 2>/dev/null || true
 }
 trap cleanup EXIT
 
 echo "[backup] START $STAMP"
-echo "[backup] source=$DB"
+echo "[backup] db_source=$DB"
+echo "[backup] uploads_source=$UPLOADS_DIR"
 
 if [ ! -s "$DB" ]; then
     echo "[backup] ERROR: source database missing or empty"
     exit 1
 fi
 
-echo
-echo "[backup] Health before:"
-curl -fsS http://127.0.0.1:3001/health >/dev/null \
-    && echo "[backup] health=OK" \
-    || echo "[backup] health=WARNING"
+if [ ! -d "$UPLOADS_DIR" ]; then
+    echo "[backup] ERROR: uploads directory missing: $UPLOADS_DIR"
+    exit 1
+fi
 
-echo
-echo "[backup] Creating live SQLite snapshot..."
-START="$(date +%s)"
+if [ "$LOCAL_ONLY" != "1" ]; then
+    echo
+    echo "[backup] Health before:"
+    curl -fsS "$HEALTH_URL" >/dev/null \
+        && echo "[backup] health=OK" \
+        || echo "[backup] health=WARNING"
+fi
 
-timeout 300s \
-    ionice -c2 -n7 \
-    nice -n 10 \
-    sqlite3 -bail -batch "$DB" <<SQL
+# ─── §3 Дисков контрол — ПРЕДИ да пипаме каквото и да е, за да не оставим
+# частичен archive ако мястото се окаже недостатъчно по средата. Изисква
+# ~1.2x текущия размер на uploads/ (компресията на вече компресирани
+# webp/gif/jpeg печели малко) + ~1.5x текущия DB размер (VACUUM INTO + самия
+# snapshot) + 200MB fixed buffer. ───
+echo
+echo "[backup] Checking disk space..."
+UPLOADS_BYTES="$(du -sb "$UPLOADS_DIR" | cut -f1)"
+DB_BYTES="$(stat -c %s "$DB")"
+REQUIRED_BYTES=$(( UPLOADS_BYTES * 12 / 10 + DB_BYTES * 15 / 10 + 200 * 1024 * 1024 ))
+AVAILABLE_BYTES="$(df --output=avail -B1 "$LOCAL_ROOT" | tail -1 | tr -d ' ')"
+echo "[backup] uploads_bytes=$UPLOADS_BYTES db_bytes=$DB_BYTES required_bytes=$REQUIRED_BYTES available_bytes=$AVAILABLE_BYTES"
+if [ "$AVAILABLE_BYTES" -lt "$REQUIRED_BYTES" ]; then
+    echo "[backup] ERROR: insufficient disk space — aborting WITHOUT touching previous backups"
+    exit 1
+fi
+
+# ─── §3 Consistency retry loop — tar на uploads/ ПЪРВО, DB snapshot ВТОРО
+# (виж README.md за пълния race-анализ): нов файл се пише на диск ПРЕДИ DB
+# commit-а във всичките upload route-ове (avatars/gift-items/campaign-
+# themes), а старият файл се трие ПОСЛЕ commit-а — затова "DB реферира файл,
+# който tar-ът няма" е единствената реално опасна несъвместимост, и tar-
+# първо/DB-второ подредбата е единствената посока, в която retry-ът винаги
+# я поправя на следващия опит (DB-то, взето по-късно, вижда по-новото
+# състояние; "излишен" стар файл в tar-а, вече изтрит от DB-то, е напълно
+# безобиден, не тригерва retry). ───
+attempt=1
+consistent=0
+while [ "$attempt" -le "$MAX_CONSISTENCY_ATTEMPTS" ]; do
+    echo
+    echo "[backup] Consistency attempt $attempt/$MAX_CONSISTENCY_ATTEMPTS"
+
+    UPLOADS_TMP="$LOCAL_ROOT/${BASE}-uploads.tar.zst.attempt.$attempt"
+    DB_SNAPSHOT_TMP="$LOCAL_ROOT/${BASE}.sqlite.attempt.$attempt"
+
+    echo "[backup] Archiving uploads/ (no symlink dereference, single filesystem)..."
+    tar --one-file-system -cf - -C "$(dirname "$UPLOADS_DIR")" "$(basename "$UPLOADS_DIR")" \
+        | zstd -q -3 -T2 -o "$UPLOADS_TMP"
+    echo "[backup] uploads_archive_bytes=$(stat -c %s "$UPLOADS_TMP")"
+
+    # Тестов hook, НИКОГА зададен от production — позволява детерминистично
+    # (без timing race) да се докаже retry-on-inconsistency пътя (§6 тест
+    # "Подмяна на изображение по време на backup"): симулира "admin replace
+    # точно в прозореца между tar-а и DB snapshot-а" на дадения attempt номер.
+    if [ -n "${PIKABG_TEST_RACE_INJECT_CMD:-}" ] && [ "$attempt" = "${PIKABG_TEST_RACE_INJECT_ON_ATTEMPT:-1}" ]; then
+        echo "[backup] (test) injecting simulated image replace race..."
+        eval "$PIKABG_TEST_RACE_INJECT_CMD"
+    fi
+
+    echo "[backup] Creating live SQLite snapshot..."
+    timeout 300s \
+        ionice -c2 -n7 \
+        nice -n 10 \
+        sqlite3 -bail -batch "$DB" <<SQL
 PRAGMA busy_timeout=10000;
-VACUUM INTO '$SNAPSHOT';
+VACUUM INTO '$DB_SNAPSHOT_TMP';
 SQL
 
-END="$(date +%s)"
+    echo "[backup] Checking SQLite integrity..."
+    INTEGRITY="$(sqlite3 -bail -batch -readonly "$DB_SNAPSHOT_TMP" 'PRAGMA integrity_check;')"
+    if [ "$INTEGRITY" != "ok" ]; then
+        echo "[backup] ERROR: integrity_check=$INTEGRITY"
+        rm -f "$UPLOADS_TMP" "$DB_SNAPSHOT_TMP"
+        exit 1
+    fi
+    FK_COUNT="$(sqlite3 -bail -batch -readonly "$DB_SNAPSHOT_TMP" 'PRAGMA foreign_key_check;' | wc -l)"
+    if [ "$FK_COUNT" -ne 0 ]; then
+        echo "[backup] ERROR: foreign_key_violations=$FK_COUNT"
+        rm -f "$UPLOADS_TMP" "$DB_SNAPSHOT_TMP"
+        exit 1
+    fi
+    echo "[backup] integrity_check=ok foreign_key_violations=0"
 
-echo "[backup] snapshot_seconds=$((END-START))"
-echo "[backup] snapshot_bytes=$(stat -c %s "$SNAPSHOT")"
+    echo "[backup] Verifying DB <-> uploads archive consistency..."
+    if node "$VERIFY_SCRIPT" --db "$DB_SNAPSHOT_TMP" --uploads-archive "$UPLOADS_TMP"; then
+        echo "[backup] consistency=ok"
+        mv "$UPLOADS_TMP" "$UPLOADS_ARCHIVE.raw"
+        mv "$DB_SNAPSHOT_TMP" "$DB_SNAPSHOT"
+        consistent=1
+        break
+    fi
 
-echo
-echo "[backup] Checking SQLite integrity..."
-INTEGRITY="$(sqlite3 -bail -batch -readonly "$SNAPSHOT" 'PRAGMA integrity_check;')"
-if [ "$INTEGRITY" != "ok" ]; then
-    echo "[backup] ERROR: integrity_check=$INTEGRITY"
+    echo "[backup] WARNING: inconsistent snapshot (race with an image replace/remove) — retrying"
+    rm -f "$UPLOADS_TMP" "$DB_SNAPSHOT_TMP"
+    attempt=$((attempt + 1))
+done
+
+if [ "$consistent" -ne 1 ]; then
+    echo "[backup] ERROR: could not produce a consistent DB+uploads snapshot after $MAX_CONSISTENCY_ATTEMPTS attempts"
+    echo "[backup] Previous valid backups are UNTOUCHED."
     exit 1
 fi
-echo "[backup] integrity_check=ok"
 
-FK_COUNT="$(
-    sqlite3 -bail -batch -readonly "$SNAPSHOT" 'PRAGMA foreign_key_check;' |
-    wc -l
-)"
-if [ "$FK_COUNT" -ne 0 ]; then
-    echo "[backup] ERROR: foreign_key_violations=$FK_COUNT"
-    exit 1
+# uploads архива вече е валидиран (consistency check-а директно чете
+# zstd-decompress-натия tar listing) — преименуваме го на крайното .zst име;
+# .raw суфикса по-горе е само за да не се обърка с незавършено .attempt.N.
+mv "$UPLOADS_ARCHIVE.raw" "$UPLOADS_ARCHIVE"
+
+echo
+echo "[backup] Compressing DB snapshot with zstd..."
+zstd -q -3 -T2 "$DB_SNAPSHOT" -o "$DB_ARCHIVE"
+echo "[backup] db_archive_bytes=$(stat -c %s "$DB_ARCHIVE")"
+rm -f "$DB_SNAPSHOT"
+
+echo
+echo "[backup] Validating archives (no partial writes survive)..."
+zstd -t "$DB_ARCHIVE"
+zstd -t "$UPLOADS_ARCHIVE"
+zstd -dc "$UPLOADS_ARCHIVE" | tar -tf - >/dev/null
+echo "[backup] archive_validation=ok"
+
+echo
+echo "[backup] Creating SHA256 checksums..."
+(cd "$LOCAL_ROOT" && sha256sum "$(basename "$DB_ARCHIVE")" > "$(basename "$DB_SHA_FILE")")
+(cd "$LOCAL_ROOT" && sha256sum "$(basename "$UPLOADS_ARCHIVE")" > "$(basename "$UPLOADS_SHA_FILE")")
+cat "$DB_SHA_FILE"
+cat "$UPLOADS_SHA_FILE"
+
+UPLOADS_FILE_COUNT="$(zstd -dc "$UPLOADS_ARCHIVE" | tar -tf - | wc -l)"
+cat > "$MANIFEST_FILE" <<JSON
+{
+  "stamp": "$STAMP",
+  "day": "$DAY",
+  "scope": ["sqlite_database", "uploads_directory"],
+  "db_archive": "$(basename "$DB_ARCHIVE")",
+  "db_archive_sha256": "$(awk '{print $1}' "$DB_SHA_FILE")",
+  "db_archive_bytes": $(stat -c %s "$DB_ARCHIVE"),
+  "uploads_archive": "$(basename "$UPLOADS_ARCHIVE")",
+  "uploads_archive_sha256": "$(awk '{print $1}' "$UPLOADS_SHA_FILE")",
+  "uploads_archive_bytes": $(stat -c %s "$UPLOADS_ARCHIVE"),
+  "uploads_file_count": $UPLOADS_FILE_COUNT,
+  "consistency_attempts_used": $attempt,
+  "created_at_utc": "$(date -u +%FT%TZ)"
+}
+JSON
+cat "$MANIFEST_FILE"
+
+if [ "$LOCAL_ONLY" = "1" ]; then
+    echo
+    echo "[backup] LOCAL_ONLY=1 — skipping remote upload/verify (test mode)."
+    echo "[backup] Local retention: keeping last 24 hours..."
+    find "$LOCAL_ROOT" -maxdepth 1 -type f \
+        \( -name 'belot-v2-*.sqlite.zst' -o -name 'belot-v2-*.sqlite.zst.sha256' \
+        -o -name 'belot-v2-*-uploads.tar.zst' -o -name 'belot-v2-*-uploads.tar.zst.sha256' \
+        -o -name 'belot-v2-*.manifest.json' \) \
+        -mmin +1440 -print -delete
+    echo
+    echo "[backup] SUCCESS (local-only)"
+    exit 0
 fi
-echo "[backup] foreign_key_violations=0"
 
 echo
-echo "[backup] Compressing with zstd..."
-START="$(date +%s)"
-
-zstd -q -3 -T2 "$SNAPSHOT" -o "$ARCHIVE"
-
-END="$(date +%s)"
-
-echo "[backup] compression_seconds=$((END-START))"
-echo "[backup] archive_bytes=$(stat -c %s "$ARCHIVE")"
-
-rm -f "$SNAPSHOT"
+echo "[backup] Uploading database archive to Google Drive..."
+rclone mkdir "$REMOTE_DB_DIR"
+rclone copyto "$DB_ARCHIVE" "$REMOTE_DB_DIR/$(basename "$DB_ARCHIVE")" \
+    --transfers 1 --checkers 2 --drive-chunk-size 64M --retries 5 --low-level-retries 10 \
+    --stats 30s --stats-one-line
+rclone copyto "$DB_SHA_FILE" "$REMOTE_DB_DIR/$(basename "$DB_SHA_FILE")" --transfers 1 --retries 5
 
 echo
-echo "[backup] Creating SHA256..."
-(
-    cd "$LOCAL_ROOT"
-    sha256sum "$(basename "$ARCHIVE")" > "$(basename "$SHA_FILE")"
-)
-cat "$SHA_FILE"
+echo "[backup] Uploading uploads archive to Google Drive..."
+rclone mkdir "$REMOTE_UPLOADS_DIR"
+rclone copyto "$UPLOADS_ARCHIVE" "$REMOTE_UPLOADS_DIR/$(basename "$UPLOADS_ARCHIVE")" \
+    --transfers 1 --checkers 2 --drive-chunk-size 64M --retries 5 --low-level-retries 10 \
+    --stats 30s --stats-one-line
+rclone copyto "$UPLOADS_SHA_FILE" "$REMOTE_UPLOADS_DIR/$(basename "$UPLOADS_SHA_FILE")" --transfers 1 --retries 5
+rclone copyto "$MANIFEST_FILE" "$REMOTE_UPLOADS_DIR/$(basename "$MANIFEST_FILE")" --transfers 1 --retries 5
 
 echo
-echo "[backup] Uploading to Google Drive..."
-rclone mkdir "$REMOTE_DIR"
-
-rclone copyto \
-    "$ARCHIVE" \
-    "$REMOTE_DIR/$(basename "$ARCHIVE")" \
-    --transfers 1 \
-    --checkers 2 \
-    --drive-chunk-size 64M \
-    --retries 5 \
-    --low-level-retries 10 \
-    --stats 30s \
-    --stats-one-line
-
-rclone copyto \
-    "$SHA_FILE" \
-    "$REMOTE_DIR/$(basename "$SHA_FILE")" \
-    --transfers 1 \
-    --retries 5
-
-echo
-echo "[backup] Verifying uploaded archive via MD5..."
-LOCAL_MD5="$(md5sum "$ARCHIVE" | awk '{print $1}')"
-REMOTE_MD5="$(
-    rclone md5sum "$REMOTE_DIR/$(basename "$ARCHIVE")" |
-    awk 'NR==1 {print $1}'
-)"
-
-echo "[backup] local_md5=$LOCAL_MD5"
-echo "[backup] remote_md5=$REMOTE_MD5"
-
-if [ -z "$REMOTE_MD5" ] || [ "$LOCAL_MD5" != "$REMOTE_MD5" ]; then
-    echo "[backup] ERROR: uploaded file checksum mismatch"
-    exit 1
-fi
+echo "[backup] Verifying uploaded archives via MD5..."
+for pair in "$DB_ARCHIVE:$REMOTE_DB_DIR" "$UPLOADS_ARCHIVE:$REMOTE_UPLOADS_DIR"; do
+    ARCHIVE_PATH="${pair%%:*}"
+    REMOTE_DIR="${pair##*:}"
+    LOCAL_MD5="$(md5sum "$ARCHIVE_PATH" | awk '{print $1}')"
+    REMOTE_MD5="$(rclone md5sum "$REMOTE_DIR/$(basename "$ARCHIVE_PATH")" | awk 'NR==1 {print $1}')"
+    echo "[backup] $(basename "$ARCHIVE_PATH") local_md5=$LOCAL_MD5 remote_md5=$REMOTE_MD5"
+    if [ -z "$REMOTE_MD5" ] || [ "$LOCAL_MD5" != "$REMOTE_MD5" ]; then
+        echo "[backup] ERROR: uploaded file checksum mismatch for $(basename "$ARCHIVE_PATH")"
+        exit 1
+    fi
+done
 
 echo
 echo "[backup] Health after:"
-curl -fsS http://127.0.0.1:3001/health >/dev/null \
+curl -fsS "$HEALTH_URL" >/dev/null \
     && echo "[backup] health=OK" \
     || echo "[backup] health=WARNING"
 
 echo
 echo "[backup] Local retention: keeping last 24 hours..."
 find "$LOCAL_ROOT" -maxdepth 1 -type f \
-    \( -name 'belot-v2-*.sqlite.zst' -o -name 'belot-v2-*.sqlite.zst.sha256' \) \
+    \( -name 'belot-v2-*.sqlite.zst' -o -name 'belot-v2-*.sqlite.zst.sha256' \
+    -o -name 'belot-v2-*-uploads.tar.zst' -o -name 'belot-v2-*-uploads.tar.zst.sha256' \
+    -o -name 'belot-v2-*.manifest.json' \) \
     -mmin +1440 -print -delete
 
 echo
 echo "[backup] SUCCESS"
-echo "[backup] local=$ARCHIVE"
-echo "[backup] remote=$REMOTE_DIR/$(basename "$ARCHIVE")"
+echo "[backup] db_local=$DB_ARCHIVE db_remote=$REMOTE_DB_DIR/$(basename "$DB_ARCHIVE")"
+echo "[backup] uploads_local=$UPLOADS_ARCHIVE uploads_remote=$REMOTE_UPLOADS_DIR/$(basename "$UPLOADS_ARCHIVE")"
 echo "[backup] completed=$(date -u +%FT%TZ)"
