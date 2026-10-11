@@ -421,6 +421,16 @@ export type CreateLobbyFlowControllerOptions = {
   getOnlinePlayersCount?: () => number
   getApiBaseUrl?: () => string
   getIsInGame?: () => boolean
+  /**
+   * Фаза 9.1 — true докато main.ts's showStripeCoinRewardOverlay (транзитна
+   * "+X" coin purchase анимация) е still активна, вкл. hold+fade-out фазата,
+   * не само brояча. Проверява се в isSafeToShowCampaignRewardCongratulations,
+   * за да НЕ се покаже поздравителният popup ВЪРХУ анимацията (§3 "Не
+   * прекъсвай нормалната анимация") — overlay-ят живее изцяло в main.ts
+   * (document.body, извън lobby controller-ния DOM), затова състоянието му
+   * се подава explicit, mirror на getIsInGame.
+   */
+  getIsCoinRewardOverlayActive?: () => boolean
   onLobbyChatSubscribe?: () => void
   onLobbyChatUnsubscribe?: () => void
   onLobbyChatSend?: (body: string, requestId: string) => void
@@ -15909,6 +15919,13 @@ export function createLobbyFlowController(
     if (state.authModalMode !== 'closed') return false
     if (state.vipPurchaseSuccessPopup.isOpen) return false
     if (isGiftItemSendFlowOpen()) return false
+    // Фаза 9.1 — "+X" coin purchase анимацията живее извън lobby controller
+    // state-а (main.ts, document.body), затова се проверява explicit, за да
+    // не се покаже поздравлението ВЪРХУ нея (§3 "Не прекъсвай нормалната
+    // анимация"). Realtime push, пристигнал по време на анимацията, просто
+    // изчаква в опашката — showStripeCoinRewardOverlay's onComplete ще
+    // опита отново веднага след приключването ѝ.
+    if (options.getIsCoinRewardOverlayActive?.() ?? false) return false
     return true
   }
 
@@ -15931,6 +15948,17 @@ export function createLobbyFlowController(
   ): void {
     if (raw.length === 0) return
     for (const item of raw) {
+      // Фаза 9.1 — defense-in-depth dedupe по notificationId: realtime push
+      // + bootstrap flush на почти-едновременен reconnect (или сървърен
+      // retry) биха могли да доставят СЪЩИЯ notificationId два пъти, преди
+      // ack-ът да е стигнал сървъра. Без тая проверка rewards/notificationIds
+      // биха се удвоили в сляната група -> дублирани суми и двоен ack опит
+      // при затваряне. Проверява И опашката, И ВЕЧЕ показания modal.
+      const alreadySeen =
+        state.campaignRewardCongratulationsQueue.some((group) => group.notificationIds.includes(item.notificationId))
+        || (state.campaignRewardCongratulationsModal?.notificationIds.includes(item.notificationId) ?? false)
+      if (alreadySeen) continue
+
       const existing = state.campaignRewardCongratulationsQueue.find((group) => group.campaignId === item.campaignId)
       if (existing) {
         existing.rewards = [...existing.rewards, ...item.payload.rewards]

@@ -1656,9 +1656,26 @@ function playStripeRewardSound(): void {
   }
 }
 
-function showStripeCoinRewardOverlay(amount: number): void {
+// Фаза 9.1 — true докато "+X" coin purchase анимацията (вкл. hold+fade-out
+// фазата, не само brояча) е активна. Проверява се от
+// createLobbyFlowController.ts::isSafeToShowCampaignRewardCongratulations
+// (viz getIsCoinRewardOverlayActive option по-долу), за да не се покаже
+// поздравителният popup върху анимацията.
+let isStripeCoinRewardOverlayActive = false
+
+/**
+ * `onComplete` (Фаза 9.1) — извиква се ТОЧНО когато анимацията реално е
+ * премахната от DOM-а (не по-рано) — точката, в която §2's "4. Нормалната
+ * анимация за покупката приключва. 5. Показва се поздравителният popup..."
+ * естествено се задейства. Вика се и в early-return клона (safeAmount<=0),
+ * за да не загуби caller-ят изобщо trigger-а при тоя edge case.
+ */
+function showStripeCoinRewardOverlay(amount: number, onComplete?: () => void): void {
   const safeAmount = Math.max(0, Math.trunc(amount))
-  if (safeAmount <= 0) return
+  if (safeAmount <= 0) {
+    onComplete?.()
+    return
+  }
 
   document.getElementById('stripe-coin-reward-overlay')?.remove()
 
@@ -1693,6 +1710,7 @@ function showStripeCoinRewardOverlay(amount: number): void {
   overlay.appendChild(numberEl)
   document.body.appendChild(overlay)
   playStripeRewardSound()
+  isStripeCoinRewardOverlayActive = true
 
   const durationMs = 1500
   const start = performance.now()
@@ -1720,7 +1738,11 @@ function showStripeCoinRewardOverlay(amount: number): void {
       overlay.style.transition = 'opacity 0.45s ease, transform 0.45s ease'
       overlay.style.opacity = '0'
       overlay.style.transform = 'scale(1.03)'
-      window.setTimeout(() => overlay.remove(), 480)
+      window.setTimeout(() => {
+        overlay.remove()
+        isStripeCoinRewardOverlayActive = false
+        onComplete?.()
+      }, 480)
     }, 850)
   }
 
@@ -2011,7 +2033,15 @@ async function handleStripePaymentSuccessReturn(checkoutSessionId: string | null
 
   if (resolved.kind === 'coin') {
     lobby.closeVipPurchaseProcessingPopupSilently()
-    showStripeCoinRewardOverlay(resolved.purchase.yellowCoinsAmount)
+    // Фаза 9.1 — §2 "4. Нормалната анимация... приключва. 5. Показва се
+    // поздравителният popup...": onComplete е единствената нова жица тук,
+    // точно след overlay.remove(). Ако известието още не е пристигнало
+    // дотук, опашката просто е празна — realtime push-ът (пристигнал
+    // по-късно, докато играчът е още online) ще опита показването сам,
+    // виж enqueueCampaignRewardNotifications в createLobbyFlowController.ts.
+    showStripeCoinRewardOverlay(resolved.purchase.yellowCoinsAmount, () => {
+      lobby.maybeShowCampaignRewardCongratulations()
+    })
     return
   }
 
@@ -6825,6 +6855,7 @@ lobby = createLobbyFlowController({
   },
   getAuthSession: () => currentAuthSession,
   getIsInGame: () => activeRoom.hasActiveRoom(),
+  getIsCoinRewardOverlayActive: () => isStripeCoinRewardOverlayActive,
   onShowInGameProfileAccessBlockPopup: (profileId, code) => activeRoom.showProfileAccessBlockPopup(profileId, code),
   onShowModerationForcedExitPopup: (input) => {
     showModerationForcedExitPopup(input)

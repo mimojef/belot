@@ -103,6 +103,7 @@
     "check:ludo-game-end-campaign-credit": "npx tsx scripts/checkLudoGameEndCampaignCredit.ts",
     "check:campaign-profile-popup-ui": "npx tsx scripts/checkCampaignProfilePopupUi.ts",
     "check:campaign-reward-congratulations-ui": "npx tsx scripts/checkCampaignRewardCongratulationsUi.ts",
+    "check:campaign-reward-congratulations-coin-purchase": "npx tsx scripts/checkCampaignRewardCongratulationsCoinPurchase.ts",
     "check:match-ended-partner-rating-persistence": "npx tsx scripts/checkMatchEndedPartnerRatingPersistence.ts",
     "check:partner-rating-stale-message-safety": "npx tsx scripts/checkPartnerRatingStaleMessageSafety.ts",
     "check:private-room-wait-time-countdown": "npx tsx scripts/checkPrivateRoomWaitTimeCountdown.ts",
