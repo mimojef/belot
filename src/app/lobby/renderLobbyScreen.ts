@@ -600,6 +600,10 @@ export type LobbyScreenState = {
   vipGrantErrorText: string | null
   /** Активен бан на разглеждания в попъпа профил — само за isAdmin (пълен) viewer; виж renderPlayerProfilePopup. */
   profilePopupActiveBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null
+  /** Фаза 8 — кампаниен progress/history summary за разглеждания в попъпа профил (собствен ИЛИ чужд); виж ensureProfilePopupCampaignSummaryLoaded в createLobbyFlowController.ts. */
+  profilePopupCampaignSummary: import('../../app/network/createGameServerClient').PlayerCampaignProfileSummary | null
+  profilePopupCampaignAllRewardsExpanded: boolean
+  profilePopupCampaignHistoryOpen: boolean
   /** Активен Topics-section mute на разглеждания в попъпа профил — само за viewer с mute/unmute право; виж ensureProfilePopupMuteStatusLoaded в createLobbyFlowController.ts. */
   profilePopupTargetMute: TopicMuteSnapshot | null
   banPopupOpen: boolean
@@ -1122,6 +1126,8 @@ export type RenderLobbyScreenOptions = {
   onProfileDeleteSubmit: (profileId: string | null, reason: string) => void
   onProfileRiskRecheckClick: (profileId: string | null) => void
   onProfileRiskLinkedProfileClick: (profileId: string) => void
+  onProfileCampaignsNavClick: (profileId: string | null) => void
+  onProfileCampaignViewAllRewardsToggle: (profileId: string | null) => void
   onProfileEditClose: () => void
   onProfileEditSubmit: (
     avatarFile: File | null,
@@ -1663,6 +1669,8 @@ export type ProfilePopupCallbacks = {
   onDeleteSubmit: (profileId: string | null, reason: string) => void
   onRiskRecheckClick: (profileId: string | null) => void
   onRiskLinkedProfileClick: (profileId: string) => void
+  onCampaignsNavClick: (profileId: string | null) => void
+  onCampaignViewAllRewardsToggle: (profileId: string | null) => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -1844,6 +1852,10 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
       if (linkedProfileId) cb.onRiskLinkedProfileClick(linkedProfileId)
     })
   })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-campaigns-nav="1"]')
+    ?.addEventListener('click', () => { cb.onCampaignsNavClick(profileId) })
+  el.querySelector<HTMLButtonElement>('[data-player-profile-campaign-view-all-rewards="1"]')
+    ?.addEventListener('click', () => { cb.onCampaignViewAllRewardsToggle(profileId) })
   el.querySelector<HTMLButtonElement>('[data-player-profile-like]')
     ?.addEventListener('click', (e) => {
       const profileId = (e.currentTarget as HTMLButtonElement).dataset.playerProfileLike?.trim() ?? ''
@@ -1967,6 +1979,9 @@ export function syncProfilePopup(
     riskDetailRows?: import('../../app/network/createGameServerClient').AdminProfileLinkedProfileRow[] | null
     riskDetailErrorText?: string | null
     riskRecheckSubmitting?: boolean
+    campaignSummary?: import('../../app/network/createGameServerClient').PlayerCampaignProfileSummary | null
+    campaignAllRewardsExpanded?: boolean
+    campaignHistoryOpen?: boolean
     /**
      * Virtual item gift system (Етап 1) — non-null само когато !isOwnProfile
      * и profile.profileId съществува. Виж RenderPlayerProfilePopupOptions.
@@ -2040,6 +2055,9 @@ export function syncProfilePopup(
     riskRecheckSubmitting: popupState.riskRecheckSubmitting ?? false,
     giftItemRecipientProfileId: popupState.giftItemRecipientProfileId ?? null,
     giftShopRecipientProfileId: popupState.giftShopRecipientProfileId ?? null,
+    campaignSummary: popupState.campaignSummary ?? null,
+    campaignAllRewardsExpanded: popupState.campaignAllRewardsExpanded ?? false,
+    campaignHistoryOpen: popupState.campaignHistoryOpen ?? false,
   })
   attachPopupListeners(el, cb, popupState.profile?.profileId ?? null)
 }
@@ -16068,6 +16086,9 @@ export function renderLobbyScreen(
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
       activeBan: state.profilePopupActiveBan,
+      campaignSummary: state.profilePopupCampaignSummary,
+      campaignAllRewardsExpanded: state.profilePopupCampaignAllRewardsExpanded,
+      campaignHistoryOpen: state.profilePopupCampaignHistoryOpen,
       targetMute: state.profilePopupTargetMute,
       banPopupOpen: state.banPopupOpen,
       banPopupDaysDraft: state.banPopupDaysDraft,
@@ -16128,6 +16149,8 @@ export function renderLobbyScreen(
       onDeleteSubmit: options.onProfileDeleteSubmit,
       onRiskRecheckClick: options.onProfileRiskRecheckClick,
       onRiskLinkedProfileClick: options.onProfileRiskLinkedProfileClick,
+      onCampaignsNavClick: options.onProfileCampaignsNavClick,
+      onCampaignViewAllRewardsToggle: options.onProfileCampaignViewAllRewardsToggle,
     },
   )
 

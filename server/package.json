@@ -92,6 +92,8 @@
     "check:campaign-belot-replay-match-identity": "tsx scripts/checkCampaignBelotReplayMatchIdentity.ts",
     "check:campaign-belot-reliable-reconciliation": "tsx scripts/checkCampaignBelotReliableReconciliation.ts --server-root=.",
     "check:campaign-match-credit-ws-authorization": "tsx scripts/checkCampaignMatchCreditWebSocketAuthorization.ts --server-root=.",
+    "check:campaign-profile-summary-store": "tsx scripts/checkCampaignProfileSummaryStore.ts --server-root=.",
+    "check:campaign-profile-summary-http-authorization": "tsx scripts/checkCampaignProfileSummaryHttpAuthorization.ts --server-root=.",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",

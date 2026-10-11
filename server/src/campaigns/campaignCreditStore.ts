@@ -120,10 +120,88 @@ export type MatchCreditSnapshot = {
   unitsAmount: number
 }
 
+/**
+ * Фаза 8 (профилен popup "Кампании под Ранг" + "Виж всички награди" +
+ * последна приключила кампания) — read-only изгледни типове. `status` тук е
+ * UI-ниво разлика между "праг все още не е достигнат" (locked), "праг е
+ * достигнат, но ИМЕННО тая награда още няма campaign_reward_claims ред"
+ * (pending — почти изключително gift-item доставки, неуспели веднъж, виж
+ * grantCampaignGiftItemInline по-горе) и "действително предоставена"
+ * (granted) — виж task spec §3: "Не бъркай достигнат праг с успешно
+ * предоставена награда."
+ */
+export type CampaignProfileTierRewardStatus = 'granted' | 'pending' | 'locked'
+
+export type CampaignProfileTierRewardView =
+  | { rewardType: 'yellow_coins'; amount: number }
+  | { rewardType: 'vip_days'; days: number }
+  | { rewardType: 'gift_item'; giftItemId: string; name: string | null; imageUrl: string | null }
+
+export type CampaignProfileTierRewardEntry = {
+  tierRewardId: string
+  reward: CampaignProfileTierRewardView
+  status: CampaignProfileTierRewardStatus
+}
+
+export type CampaignProfileTierView = {
+  tierId: string
+  thresholdUnits: number
+  rewards: CampaignProfileTierRewardEntry[]
+}
+
+export type ActiveCampaignProfileProgress = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsTotal: number
+  /** Всички прагове, възходящ ред по threshold_units — за "Виж всички награди" (§4). */
+  tiers: CampaignProfileTierView[]
+  /**
+   * Първият праг (възходящ ред), който има ХОТЯ БИ една награда със статус
+   * различен от 'granted' — покрива И "следващ непрекосен праг" (locked), И
+   * "прекосен праг с още дължима награда" (pending), виж §3 doc коментара
+   * по-горе. `null` = всички прагове са напълно предоставени ("Всички
+   * награди са получени!", §3).
+   */
+  nextIncompleteTier: CampaignProfileTierView | null
+}
+
+/**
+ * Последна действително проведена (реално активирана поне веднъж, виж
+ * campaign_activated filter-а в SQL-а по-долу) и вече приключила/спряна
+ * кампания за даден профил (§6). Soft-delete (campaigns.deleted_at) НЕ я
+ * крие тук — виж doc коментара при selectLastFinishedCampaignForProfileSummaryStatement.
+ */
+export type LastFinishedCampaignProfileResult = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsTotal: number
+}
+
+export type PlayerCampaignProfileSummary = {
+  active: ActiveCampaignProfileProgress | null
+  lastFinished: LastFinishedCampaignProfileResult | null
+}
+
 export type CampaignCreditStore = {
   creditCampaignUnits: (input: CreditGameOrPurchaseEventInput) => CreditCampaignUnitsResult
   applyManualAdjustment: (input: ManualAdjustmentInput) => CreditCampaignUnitsResult
   getProfileCampaignTotal: (campaignId: string, profileId: string) => number
+  /**
+   * Фаза 8 — пълният read-only изглед за профилния popup (активен прогрес +
+   * прагове + последна приключила кампания), за КОНКРЕТЕН вече разрешен за
+   * преглед (access-control е отговорност на caller-а — index.ts HTTP
+   * handler, виж getProfileAccessDenial) profileId. Никакво начисляване или
+   * страничен ефект — чисти SELECT-и. Безопасно за own ИЛИ чужд профил —
+   * просто връща ТОЧНО тематичните данни на подадения profileId, без да
+   * разкрива финансови журнали/admin настройки (§8/§9).
+   */
+  getProfileCampaignSummary: (profileId: string) => PlayerCampaignProfileSummary
   /**
    * Read-only lookup за ЕДИН конкретен (profileId, sourceType, sourceId)
    * campaign_unit_ledger ред — caller-ът (index.ts's WS handler) ВИНАГИ
@@ -1014,11 +1092,182 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     })
   }
 
+  // ─── Фаза 8 — профилен popup read-only summary ───
+
+  type CampaignBasicSummaryRow = {
+    campaign_id: string
+    name: string
+    unit_name_singular: string
+    unit_name_plural: string
+    unit_icon_url: string | null
+  }
+
+  const selectActiveCampaignForProfileSummaryStatement = database.prepare(`
+    SELECT campaign_id, name, unit_name_singular, unit_name_plural, unit_icon_url
+    FROM campaigns
+    WHERE status = 'active' AND deleted_at IS NULL
+    LIMIT 1;
+  `)
+
+  // Последна РЕАЛНО активирана поне веднъж (EXISTS campaign_activated —
+  // изключва scheduled кампании, изтекли преди да бъдат активирани, viж
+  // expireScheduledCampaignWithoutActivating/'campaign_expired_before_activation'
+  // в campaignsStore.ts, §6: "не показвай... планирана кампания, изтекла
+  // преди активиране, като проведена") кампания, вече приключена/спряна.
+  // ORDER BY updated_at DESC — finishCampaign/stopCampaign пипат updated_at
+  // точно в момента на преход и нищо не го променя после (кампания в
+  // 'finished'/'stopped' вече не е editable, виж campaignsStore.ts
+  // updateCampaign guard-а), затова е надежден "кога приключи" sort key,
+  // без нужда от допълнителен JOIN към campaign_events. ПРЕДНАМЕРЕНО БЕЗ
+  // deleted_at филтър — soft-delete не трябва да заличи резултата (§6:
+  // "Soft-delete на кампания не трябва да унищожи резултата").
+  const selectLastFinishedCampaignForProfileSummaryStatement = database.prepare(`
+    SELECT campaign_id, name, unit_name_singular, unit_name_plural, unit_icon_url
+    FROM campaigns c
+    WHERE c.status IN ('finished', 'stopped')
+      AND EXISTS (
+        SELECT 1 FROM campaign_events ce
+        WHERE ce.campaign_id = c.campaign_id AND ce.event_type = 'campaign_activated'
+      )
+    ORDER BY c.updated_at DESC, c.rowid DESC
+    LIMIT 1;
+  `)
+
+  const selectCampaignTierRewardRowsForSummaryStatement = database.prepare(`
+    SELECT crt.tier_id AS tier_id, crt.threshold_units AS threshold_units,
+           ctr.tier_reward_id AS tier_reward_id, ctr.reward_type AS reward_type,
+           ctr.reward_payload_json AS reward_payload_json
+    FROM campaign_reward_tiers crt
+    JOIN campaign_tier_rewards ctr ON ctr.tier_id = crt.tier_id
+    WHERE crt.campaign_id = ?
+    ORDER BY crt.threshold_units ASC, ctr.rowid ASC;
+  `)
+
+  const selectProfileClaimedTierRewardIdsStatement = database.prepare(`
+    SELECT tier_reward_id FROM campaign_reward_claims WHERE campaign_id = ? AND profile_id = ?;
+  `)
+
+  function buildTierViewsForProfileSummary(
+    campaignId: string,
+    profileId: string,
+    unitsTotal: number,
+  ): CampaignProfileTierView[] {
+    const rows = selectCampaignTierRewardRowsForSummaryStatement.all(campaignId) as Array<{
+      tier_id: string
+      threshold_units: number
+      tier_reward_id: string
+      reward_type: CampaignAdminRewardTypeLocal
+      reward_payload_json: string
+    }>
+    const claimedIds = new Set(
+      (selectProfileClaimedTierRewardIdsStatement.all(campaignId, profileId) as Array<{ tier_reward_id: string }>).map(
+        (row) => row.tier_reward_id,
+      ),
+    )
+
+    const tiersById = new Map<string, CampaignProfileTierView>()
+    const tierOrder: string[] = []
+
+    for (const row of rows) {
+      let tier = tiersById.get(row.tier_id)
+      if (tier === undefined) {
+        tier = { tierId: row.tier_id, thresholdUnits: row.threshold_units, rewards: [] }
+        tiersById.set(row.tier_id, tier)
+        tierOrder.push(row.tier_id)
+      }
+
+      const reward = parseRewardViewForSummary(row.reward_type, row.reward_payload_json)
+      if (reward === null) continue
+
+      const status: CampaignProfileTierRewardStatus = claimedIds.has(row.tier_reward_id)
+        ? 'granted'
+        : row.threshold_units <= unitsTotal
+          ? 'pending'
+          : 'locked'
+
+      tier.rewards.push({ tierRewardId: row.tier_reward_id, reward, status })
+    }
+
+    return tierOrder.map((tierId) => tiersById.get(tierId)!)
+  }
+
+  type CampaignAdminRewardTypeLocal = 'yellow_coins' | 'vip_days' | 'gift_item'
+
+  function parseRewardViewForSummary(
+    rewardType: CampaignAdminRewardTypeLocal,
+    rewardPayloadJson: string,
+  ): CampaignProfileTierRewardView | null {
+    let payload: Record<string, unknown>
+    try {
+      payload = JSON.parse(rewardPayloadJson) as Record<string, unknown>
+    } catch {
+      return null
+    }
+
+    if (rewardType === 'yellow_coins') {
+      const amount = Number(payload.amount)
+      return Number.isFinite(amount) && amount > 0 ? { rewardType: 'yellow_coins', amount } : null
+    }
+
+    if (rewardType === 'vip_days') {
+      const days = Number(payload.amount)
+      return Number.isFinite(days) && days > 0 ? { rewardType: 'vip_days', days } : null
+    }
+
+    const giftItemId = typeof payload.giftItemId === 'string' ? payload.giftItemId : ''
+    if (giftItemId.length === 0) return null
+    const giftItemRow = selectGiftItemStatement.get(giftItemId) as
+      | { gift_item_id: string; name: string; image_url: string; price: number; is_active: number; deleted_at: string | null }
+      | undefined
+    return {
+      rewardType: 'gift_item',
+      giftItemId,
+      name: giftItemRow?.name ?? null,
+      imageUrl: giftItemRow?.image_url ?? null,
+    }
+  }
+
+  function getProfileCampaignSummary(profileId: string): PlayerCampaignProfileSummary {
+    const activeCampaignRow = selectActiveCampaignForProfileSummaryStatement.get() as CampaignBasicSummaryRow | undefined
+    let active: ActiveCampaignProfileProgress | null = null
+    if (activeCampaignRow !== undefined) {
+      const unitsTotal = getProfileCampaignTotalInternal(activeCampaignRow.campaign_id, profileId)
+      const tiers = buildTierViewsForProfileSummary(activeCampaignRow.campaign_id, profileId, unitsTotal)
+      const nextIncompleteTier = tiers.find((tier) => tier.rewards.some((entry) => entry.status !== 'granted')) ?? null
+      active = {
+        campaignId: activeCampaignRow.campaign_id,
+        campaignName: activeCampaignRow.name,
+        unitNameSingular: activeCampaignRow.unit_name_singular,
+        unitNamePlural: activeCampaignRow.unit_name_plural,
+        unitIconUrl: activeCampaignRow.unit_icon_url,
+        unitsTotal,
+        tiers,
+        nextIncompleteTier,
+      }
+    }
+
+    const lastFinishedRow = selectLastFinishedCampaignForProfileSummaryStatement.get() as CampaignBasicSummaryRow | undefined
+    let lastFinished: LastFinishedCampaignProfileResult | null = null
+    if (lastFinishedRow !== undefined) {
+      lastFinished = {
+        campaignId: lastFinishedRow.campaign_id,
+        campaignName: lastFinishedRow.name,
+        unitNameSingular: lastFinishedRow.unit_name_singular,
+        unitNamePlural: lastFinishedRow.unit_name_plural,
+        unitIconUrl: lastFinishedRow.unit_icon_url,
+        unitsTotal: getProfileCampaignTotalInternal(lastFinishedRow.campaign_id, profileId),
+      }
+    }
+
+    return { active, lastFinished }
+  }
+
   return {
     creditCampaignUnits,
     applyManualAdjustment,
     getProfileCampaignTotal: getProfileCampaignTotalInternal,
     getMatchCreditSnapshot: getMatchCreditSnapshotInternal,
+    getProfileCampaignSummary,
     listPendingNotifications,
     acknowledgeNotification,
     listPendingGiftRewardGaps,

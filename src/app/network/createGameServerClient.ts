@@ -1580,6 +1580,57 @@ export type CampaignMatchCreditResultMessage = {
   credit: CampaignMatchCreditSnapshot | null
 }
 
+// Фаза 8 (профилен popup "Кампании под Ранг" + "Виж всички награди" +
+// последна приключила кампания) — виж
+// server/src/campaigns/campaignCreditStore.ts::PlayerCampaignProfileSummary
+// doc коментарите за пълния rationale. Fetched чрез HTTP GET
+// /api/profiles/:profileId/campaign-summary (не WS — mirror на вече
+// съществуващия by-id профил fetch, виж loadProfileById в main.ts), затова
+// тук е чист read-only snapshot тип, не ClientMessage/ServerMessage member.
+export type PlayerCampaignTierRewardStatus = 'granted' | 'pending' | 'locked'
+
+export type PlayerCampaignTierRewardView =
+  | { rewardType: 'yellow_coins'; amount: number }
+  | { rewardType: 'vip_days'; days: number }
+  | { rewardType: 'gift_item'; giftItemId: string; name: string | null; imageUrl: string | null }
+
+export type PlayerCampaignTierRewardEntry = {
+  tierRewardId: string
+  reward: PlayerCampaignTierRewardView
+  status: PlayerCampaignTierRewardStatus
+}
+
+export type PlayerCampaignTierView = {
+  tierId: string
+  thresholdUnits: number
+  rewards: PlayerCampaignTierRewardEntry[]
+}
+
+export type ActiveCampaignProfileProgress = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsTotal: number
+  tiers: PlayerCampaignTierView[]
+  nextIncompleteTier: PlayerCampaignTierView | null
+}
+
+export type LastFinishedCampaignProfileResult = {
+  campaignId: string
+  campaignName: string
+  unitNameSingular: string
+  unitNamePlural: string
+  unitIconUrl: string | null
+  unitsTotal: number
+}
+
+export type PlayerCampaignProfileSummary = {
+  active: ActiveCampaignProfileProgress | null
+  lastFinished: LastFinishedCampaignProfileResult | null
+}
+
 export type RoomSnapshotMessage = {
   type: 'room_snapshot'
   roomId: string

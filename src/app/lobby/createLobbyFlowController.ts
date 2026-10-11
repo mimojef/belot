@@ -498,6 +498,22 @@ export type CreateLobbyFlowControllerOptions = {
   onAdminGetActiveBan?: (
     profileId: string,
   ) => Promise<{ ok: true; activeBan: import('../../ui/overlays/renderPlayerProfilePopup').ActiveProfileBanSnapshot | null } | { ok: false; message: string }>
+  /**
+   * Фаза 8 — GET кампаниен profile summary (активен прогрес + последна
+   * приключила кампания) за РАЗГЛЕЖДАНИЯ в popup-а профил, собствен ИЛИ
+   * чужд (за разлика от onAdminGetActiveBan по-горе, НЕ е admin-only —
+   * достъпността се проверява server-side чрез getProfileAccessDenial,
+   * виж handleProfileCampaignSummaryRequest в index.ts). `summary: null`
+   * = нищо за показване (flag off / блокиран достъп / без активна и без
+   * предишна кампания), `ok:false` = network грешка (попъпът просто не
+   * показва кампанийната секция, без error toast — виж §10/§11).
+   */
+  onProfilePopupCampaignSummaryLoad?: (
+    profileId: string,
+  ) => Promise<
+    | { ok: true; summary: import('../network/createGameServerClient').PlayerCampaignProfileSummary | null }
+    | { ok: false }
+  >
   /** Само за пълен admin, никога за собствения профил — server-side authoritative проверка в handleAdminProfileBanRequest. */
   onAdminBanProfile?: (
     targetProfileId: string,
@@ -1786,6 +1802,21 @@ type InternalLobbyFlowState = {
   /** profileId, за който profilePopupActiveBan вече е (или се) зарежда — memoization guard, аналогично на profilePopupTargetRoleProfileId. */
   profilePopupActiveBanProfileId: string | null
   /**
+   * Фаза 8 — кампаниен progress/history summary за разглеждания в popup-а
+   * профил (собствен ИЛИ чужд). null = все още не е зареден ИЛИ reeal
+   * резолвнат "нищо за показване" (flag off/без кампания/блокиран достъп) —
+   * виж ensureProfilePopupCampaignSummaryLoaded. Попъпът не различава двата
+   * случая визуално (просто не показва секцията), mirror на
+   * CampaignMatchCreditSnapshot's null конвенция от Фаза 6/7.
+   */
+  profilePopupCampaignSummary: import('../network/createGameServerClient').PlayerCampaignProfileSummary | null
+  /** profileId, за който profilePopupCampaignSummary вече е (или се) зарежда — memoization guard, аналогично на profilePopupActiveBanProfileId. */
+  profilePopupCampaignSummaryProfileId: string | null
+  /** "Виж всички награди" (§4) — разгънат/свит, нулира се при смяна на разглеждания профил (виж onClose/openProtectedProfileById). */
+  profilePopupCampaignAllRewardsExpanded: boolean
+  /** Горна навигация "Кампании" (§5) — показва/скрива панела с последната приключила кампания. */
+  profilePopupCampaignHistoryOpen: boolean
+  /**
    * Активен Topics-section mute на разглеждания в попъпа профил — само за
    * viewer с mute/unmute право (isTopicModeratorAuthSession), никога за
    * обикновен потребител. Виж ensureProfilePopupMuteStatusLoaded. null =
@@ -2604,6 +2635,10 @@ function createInitialState(): InternalLobbyFlowState {
     profilePopupTargetRoleProfileId: null,
     profilePopupActiveBan: null,
     profilePopupActiveBanProfileId: null,
+    profilePopupCampaignSummary: null,
+    profilePopupCampaignSummaryProfileId: null,
+    profilePopupCampaignAllRewardsExpanded: false,
+    profilePopupCampaignHistoryOpen: false,
     profilePopupTargetMute: null,
     profilePopupTargetMuteProfileId: null,
     banPopupOpen: false,
@@ -5121,6 +5156,9 @@ export function createLobbyFlowController(
       vipGrantSubmitting: state.vipGrantSubmitting,
       vipGrantErrorText: state.vipGrantErrorText,
       profilePopupActiveBan: state.profilePopupActiveBan,
+      profilePopupCampaignSummary: state.profilePopupCampaignSummary,
+      profilePopupCampaignAllRewardsExpanded: state.profilePopupCampaignAllRewardsExpanded,
+      profilePopupCampaignHistoryOpen: state.profilePopupCampaignHistoryOpen,
       profilePopupTargetMute: state.profilePopupTargetMute,
       banPopupOpen: state.banPopupOpen,
       banPopupDaysDraft: state.banPopupDaysDraft,
@@ -5694,6 +5732,7 @@ export function createLobbyFlowController(
 
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
+    ensureProfilePopupCampaignSummaryLoaded()
     ensureProfilePopupMuteStatusLoaded()
     // Покрива входни точки, които отварят own profile popup-а само чрез
     // plain render() (напр. onProfileClick), не renderPopupOnly() — иначе
@@ -5873,6 +5912,12 @@ export function createLobbyFlowController(
       },
       onProfileRiskLinkedProfileClick: (profileId) => {
         getPopupCallbacks().onRiskLinkedProfileClick(profileId)
+      },
+      onProfileCampaignsNavClick: (profileId) => {
+        getPopupCallbacks().onCampaignsNavClick(profileId)
+      },
+      onProfileCampaignViewAllRewardsToggle: (profileId) => {
+        getPopupCallbacks().onCampaignViewAllRewardsToggle(profileId)
       },
       onProfileEditClose: () => {
         if (state.profileEditorSubmitting) return
@@ -18766,6 +18811,20 @@ export function createLobbyFlowController(
         // canonical (не local preview), same access-block/friendship gate.
         void openProtectedProfileById(linkedProfileId)
       },
+      onCampaignsNavClick: (_profileId) => {
+        // Toggle, не "отвори нов popup" (§5: "компактна лента за
+        // навигация... в бъдеще да можем да добавяме други бутони") —
+        // показва/скрива последната приключила кампания В РАМКИТЕ на
+        // същия popup.
+        state.profilePopupCampaignHistoryOpen = !state.profilePopupCampaignHistoryOpen
+        renderPopupOnly()
+      },
+      onCampaignViewAllRewardsToggle: (_profileId) => {
+        // §4: "Виж всички награди" разгъва/свива списъка В РАМКИТЕ на
+        // същия profile popup — не нов модален прозорец.
+        state.profilePopupCampaignAllRewardsExpanded = !state.profilePopupCampaignAllRewardsExpanded
+        renderPopupOnly()
+      },
     }
   }
 
@@ -18860,6 +18919,46 @@ export function createLobbyFlowController(
       }
       if (result.ok) {
         state.profilePopupActiveBan = result.activeBan
+        renderPopupOnly()
+      }
+    })()
+  }
+
+  /**
+   * Фаза 8 — кампаниен progress/history summary за profile popup-а (§2-§7
+   * от задачата). За разлика от ensureProfilePopupActiveBanLoaded по-горе,
+   * НЕ е admin-only и НЕ прескача собствения профил — достъпен е за ВСЕКИ
+   * viewer, собствен ИЛИ чужд разглеждан профил (access control-ът е
+   * server-side, виж getProfileAccessDenial в handleProfileCampaignSummaryRequest).
+   * Memoization guard чрез profilePopupCampaignSummaryProfileId, СЪЩИЯТ
+   * "покрий всички входни точки" pattern (renderLobby()/renderPopupOnly()).
+   * При смяна на target profileId нулираме и expand/history toggle-ите
+   * (§10: "Ако играчът смени разглеждания профил, старите данни не трябва
+   * да останат на екрана") — нов профил винаги започва от collapsed view.
+   */
+  function ensureProfilePopupCampaignSummaryLoaded(): void {
+    const profile = state.profilePopupProfile
+
+    if (!state.profilePopupOpen || profile === null || profile.profileId === null) {
+      return
+    }
+    if (state.profilePopupCampaignSummaryProfileId === profile.profileId) {
+      return
+    }
+
+    const targetProfileId = profile.profileId
+    state.profilePopupCampaignSummaryProfileId = targetProfileId
+    state.profilePopupCampaignSummary = null
+    state.profilePopupCampaignAllRewardsExpanded = false
+    state.profilePopupCampaignHistoryOpen = false
+
+    void (async () => {
+      const result = await options.onProfilePopupCampaignSummaryLoad?.(targetProfileId)
+      if (!result || state.profilePopupCampaignSummaryProfileId !== targetProfileId) {
+        return
+      }
+      if (result.ok) {
+        state.profilePopupCampaignSummary = result.summary
         renderPopupOnly()
       }
     })()
@@ -19415,6 +19514,7 @@ export function createLobbyFlowController(
     const authSession = options.getAuthSession?.() ?? null
     ensureProfilePopupTargetRoleLoaded()
     ensureProfilePopupActiveBanLoaded()
+    ensureProfilePopupCampaignSummaryLoaded()
     ensureProfilePopupMuteStatusLoaded()
     ensureProfilePopupRiskDetailLoaded()
     ensureOwnVipStatusLoaded()
@@ -19460,6 +19560,9 @@ export function createLobbyFlowController(
         riskDetailRows: state.riskDetailRows,
         riskDetailErrorText: state.riskDetailErrorText,
         riskRecheckSubmitting: state.riskRecheckSubmitting,
+        campaignSummary: state.profilePopupCampaignSummary,
+        campaignAllRewardsExpanded: state.profilePopupCampaignAllRewardsExpanded,
+        campaignHistoryOpen: state.profilePopupCampaignHistoryOpen,
         skipAnimation: renderOptions?.skipAnimation,
       },
       getPopupCallbacks(),

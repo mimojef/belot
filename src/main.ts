@@ -96,6 +96,7 @@ import {
   type CrossGameCommitmentLocation,
   type BelotSpectateEndedMessage,
   type BelotSpectateDeniedMessage,
+  type PlayerCampaignProfileSummary,
 } from './app/network/createGameServerClient'
 import {
   decideSocketCloseAction,
@@ -4918,6 +4919,28 @@ async function adminGetActiveBan(
   }
 }
 
+// Фаза 8 (профилен popup "Кампании") — read-only, работи за собствен ИЛИ
+// чужд разглеждан профил (виж getProfileAccessDenial server-side), затова
+// НЕ е admin-only (за разлика от adminGetActiveBan по-горе). Mirror на
+// loadProfileById-ия HTTP паттерн.
+async function fetchProfileCampaignSummary(
+  targetProfileId: string,
+): Promise<{ ok: true; summary: PlayerCampaignProfileSummary | null } | { ok: false }> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/profiles/${encodeURIComponent(targetProfileId)}/campaign-summary`,
+      { method: 'GET', credentials: 'include' },
+    )
+    const data = (await response.json().catch(() => ({}))) as { ok?: boolean; summary?: PlayerCampaignProfileSummary | null }
+    if (!response.ok || !data.ok) {
+      return { ok: false }
+    }
+    return { ok: true, summary: data.summary ?? null }
+  } catch {
+    return { ok: false }
+  }
+}
+
 async function adminBanProfile(
   targetProfileId: string,
   days: number,
@@ -6823,6 +6846,7 @@ lobby = createLobbyFlowController({
   onProfileNameChangeSubmit: (targetProfileId, displayName) => submitProfileNameChange(targetProfileId, displayName),
   onAdminGrantVip: (targetProfileId, days) => adminGrantVip(targetProfileId, days),
   onAdminGetActiveBan: (targetProfileId) => adminGetActiveBan(targetProfileId),
+  onProfilePopupCampaignSummaryLoad: (targetProfileId) => fetchProfileCampaignSummary(targetProfileId),
   onAdminBanProfile: (targetProfileId, days, reason) => adminBanProfile(targetProfileId, days, reason),
   onAdminUnbanProfile: (targetProfileId) => adminUnbanProfile(targetProfileId),
   onAdminHardDeleteProfile: (targetProfileId, reason, supportRequestMessageId) =>

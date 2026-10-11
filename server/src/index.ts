@@ -10870,6 +10870,63 @@ async function handleProfileByIdRequest(
   return true
 }
 
+// Фаза 8 (профилен popup "Кампании") — read-only summary за ПРОИЗВОЛЕН
+// профил (собствен или чужд, виж §8 от задачата). Отделен HTTP route от
+// handleProfileByIdRequest по-горе (регекс-ите не могат да се засенчат —
+// handleProfileByIdRequest изисква точно 1 path segment, този тук точно 2),
+// mirror на handleAdminProfileBanRequest's GET вариант за стилов паттерн.
+// Същата блокиране-проверка като базовия профил fetch (getProfileAccessDenial)
+// — но вместо да разкрива block код/причина, просто връща summary:null
+// (§9: "данните на различни профили не се смесват", консистентно с
+// "null значи нищо за показване" конвенцията от Фаза 6/7 campaign_match_credit_result).
+// Изисква логнат viewer (campaignCreditStore е единственият authoritative
+// източник; чисто read, без crediting side-effect — §9 "отварянето е
+// read-only").
+async function handleProfileCampaignSummaryRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const match = /^\/api\/profiles\/([^/]+)\/campaign-summary$/.exec(pathname)
+  if (!match || req.method !== 'GET') {
+    return false
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  const session = authStore.getSession(sessionToken)
+  const currentProfileId = session?.profile.profileId ?? null
+
+  if (currentProfileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Изисква се вход.' })
+    return true
+  }
+
+  // Флагът е ИЗКЛЮЧЕН -> campaignCreditStore е null (виж instantiation-а
+  // по-горе) -> нищо за показване, без ненужна DB заявка (§11: "При
+  // изключен флаг... Не се правят ненужни кампанийни заявки").
+  if (campaignCreditStore === null) {
+    sendJsonResponse(res, 200, { ok: true, summary: null })
+    return true
+  }
+
+  const profileId = decodeURIComponent(match[1] ?? '')
+  const profile = playerProgressStore.getPublicProfile(profileId)
+
+  if (profile === null) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
+    return true
+  }
+
+  if (getProfileAccessDenial(currentProfileId, profileId) !== null) {
+    sendJsonResponse(res, 200, { ok: true, summary: null })
+    return true
+  }
+
+  const summary = campaignCreditStore.getProfileCampaignSummary(profileId)
+  sendJsonResponse(res, 200, { ok: true, summary })
+  return true
+}
+
 async function handlePlayersSearchRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -21046,6 +21103,10 @@ async function handleHttpRequest(
   }
 
   if (await handleProfileByIdRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
+  if (await handleProfileCampaignSummaryRequest(req, res, requestUrl.pathname)) {
     return
   }
 

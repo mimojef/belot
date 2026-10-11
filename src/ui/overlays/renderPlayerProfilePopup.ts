@@ -1,6 +1,11 @@
 import type {
   AdminProfileLinkedProfileRow,
   PlayerPublicProfileSnapshot,
+  PlayerCampaignProfileSummary,
+  ActiveCampaignProfileProgress,
+  PlayerCampaignTierView,
+  PlayerCampaignTierRewardEntry,
+  PlayerCampaignTierRewardView,
   Seat,
   TopicMuteSnapshot,
 } from '../../app/network/createGameServerClient'
@@ -143,6 +148,18 @@ export type RenderPlayerProfilePopupOptions = {
   riskDetailRows?: AdminProfileLinkedProfileRow[] | null
   riskDetailErrorText?: string | null
   riskRecheckSubmitting?: boolean
+  /**
+   * Фаза 8 — активен кампаниен прогрес (карето под "Ранг") + последна
+   * приключила кампания (горна навигация "Кампании") за РАЗГЛЕЖДАНИЯ
+   * профил (собствен ИЛИ чужд). `null` = нищо за показване (flag off,
+   * без активна и без предишна кампания, или все още не е зареден) —
+   * попъпът изглежда точно като преди Фаза 8 в този случай (§11).
+   */
+  campaignSummary?: PlayerCampaignProfileSummary | null
+  /** "Виж всички награди" (§4) — разгънат/свит state. */
+  campaignAllRewardsExpanded?: boolean
+  /** Горна навигация "Кампании" (§5) — показва/скрива последната приключила кампания. */
+  campaignHistoryOpen?: boolean
 }
 
 export type PlayerAccountRole = 'player' | 'chat_admin' | 'pika_team' | 'top_chat_admin' | 'marketing' | 'subadmin' | 'admin'
@@ -1823,6 +1840,287 @@ function renderDeletePopup(
   `)
 }
 
+// ══════════════ Фаза 8 — "Кампании" в профилния popup ══════════════
+// §2/§3 (активно каре под "Ранг"), §4 ("Виж всички награди" expand в
+// рамките на същия popup), §5/§6 (горна навигация "Кампании" -> последна
+// приключила кампания). Всички стойности идват от сървъра
+// (campaignCreditStore.ts::getProfileCampaignSummary) — нищо тук не е
+// hardcoded количество/име, виж task spec §3 doc коментара в
+// campaignCreditStore.ts за пълния "не бъркай достигнат праг с успешно
+// предоставена награда" rationale.
+
+function formatCampaignUnitsLabel(amount: number, singular: string, plural: string): string {
+  const unitLabel = Math.abs(amount) === 1 ? singular : plural
+  return `${new Intl.NumberFormat('bg-BG').format(amount)} ${escapeHtml(unitLabel)}`
+}
+
+/** Кратко описание на ЕДНА награда — reuse-вано И в компактния "следваща награда" ред (§3), И във всеки ред на "Виж всички награди" (§4). */
+function renderCampaignRewardDescriptionHtml(reward: PlayerCampaignTierRewardView): string {
+  if (reward.rewardType === 'yellow_coins') {
+    return `
+      <span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;">
+        <img src="/assets/lobby/icon-coin.png" alt="" style="width:16px;height:16px;display:block;object-fit:contain;flex:0 0 auto;" />
+        ${escapeHtml(new Intl.NumberFormat('bg-BG').format(reward.amount))} жълтици
+      </span>
+    `
+  }
+
+  if (reward.rewardType === 'vip_days') {
+    return `
+      <span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap;color:#d4a520;font-weight:900;">
+        ${escapeHtml(String(reward.days))} VIP ${reward.days === 1 ? 'ден' : 'дни'}
+      </span>
+    `
+  }
+
+  // gift_item — действителното име/изображение от каталога, когато е налично (§4); fallback текст иначе.
+  const giftImageHtml = reward.imageUrl
+    ? `<img src="${escapeHtml(reward.imageUrl)}" alt="" style="width:20px;height:20px;display:block;object-fit:contain;flex:0 0 auto;border-radius:4px;" />`
+    : ''
+  return `
+    <span style="display:inline-flex;align-items:center;gap:6px;min-width:0;">
+      ${giftImageHtml}
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(reward.name ?? 'Подарък')}</span>
+    </span>
+  `
+}
+
+function renderCampaignTierRewardStatusBadgeHtml(status: PlayerCampaignTierRewardEntry['status']): string {
+  if (status === 'granted') {
+    return `<span style="font-size:11px;font-weight:900;color:#86efac;white-space:nowrap;">Получена</span>`
+  }
+  if (status === 'pending') {
+    return `<span style="font-size:11px;font-weight:900;color:#fbbf24;white-space:nowrap;">Очаква предоставяне</span>`
+  }
+  return `<span style="font-size:11px;font-weight:800;color:rgba(226,232,240,0.55);white-space:nowrap;">Заключена</span>`
+}
+
+/** Компактен ред с всички награди на даден праг, БЕЗ статус-бадж — за карето под "Ранг" (§2/§3, "точните награди НАД числовия прогрес"). */
+function renderCampaignTierRewardsCompactHtml(tier: PlayerCampaignTierView): string {
+  return `
+    <div data-player-profile-campaign-next-rewards="1" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;">
+      ${tier.rewards.map((entry) => `<div>${renderCampaignRewardDescriptionHtml(entry.reward)}</div>`).join('')}
+    </div>
+  `
+}
+
+/** Един праг в "Виж всички награди" списъка (§4) — threshold + всички награди + статус на всяка. */
+function renderCampaignAllRewardsTierRowHtml(tier: PlayerCampaignTierView, unitNameSingular: string, unitNamePlural: string): string {
+  return `
+    <div
+      data-player-profile-campaign-tier-row="1"
+      style="
+        display:flex;
+        flex-direction:column;
+        gap:8px;
+        padding:12px 14px;
+        border-radius:10px;
+        background:rgba(255,255,255,0.04);
+        border:1px solid rgba(255,255,255,0.08);
+      "
+    >
+      <div style="font-size:14px;font-weight:900;color:#d4a520;">
+        ${formatCampaignUnitsLabel(tier.thresholdUnits, unitNameSingular, unitNamePlural)}
+      </div>
+      ${tier.rewards.map((entry) => `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;">
+          <div style="font-size:13px;font-weight:700;color:#f8fafc;">${renderCampaignRewardDescriptionHtml(entry.reward)}</div>
+          ${renderCampaignTierRewardStatusBadgeHtml(entry.status)}
+        </div>
+      `).join('')}
+    </div>
+  `
+}
+
+/** "Виж всички награди" — пълният, разгъваем списък (§4), toggle-нат от бутона в renderActiveCampaignCard. Скролва заедно с останалата част от popup-а (card-ът вече е overflow:auto), не отваря отделен модал. */
+function renderCampaignAllRewardsPanelHtml(active: ActiveCampaignProfileProgress, expanded: boolean): string {
+  if (!expanded) return ''
+
+  return `
+    <div
+      data-player-profile-campaign-all-rewards-panel="1"
+      style="
+        display:flex;
+        flex-direction:column;
+        gap:10px;
+        margin-top:4px;
+      "
+    >
+      ${active.tiers.map((tier) => renderCampaignAllRewardsTierRowHtml(tier, active.unitNameSingular, active.unitNamePlural)).join('')}
+    </div>
+  `
+}
+
+/** Активната кампания — карето веднага под "Ранг" (§2/§3). */
+function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewardsExpanded: boolean): string {
+  const iconHtml = active.unitIconUrl
+    ? `<img src="${escapeHtml(active.unitIconUrl)}" alt="" style="width:22px;height:22px;display:block;object-fit:contain;flex:0 0 auto;" onerror="this.style.display='none'" />`
+    : ''
+
+  const nextTier = active.nextIncompleteTier
+  // Всички прагове са напълно предоставени — §3: "Всички награди са получени!"
+  const rightSideHtml = nextTier === null
+    ? `<div style="font-size:13px;font-weight:900;color:#86efac;text-align:right;">Всички награди са получени!</div>`
+    : `
+      <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;">
+        <div style="font-size:12px;font-weight:800;color:rgba(226,232,240,0.75);text-align:right;">
+          При ${formatCampaignUnitsLabel(nextTier.thresholdUnits, active.unitNameSingular, active.unitNamePlural)} получаваш:
+        </div>
+        ${renderCampaignTierRewardsCompactHtml(nextTier)}
+      </div>
+    `
+
+  const progressThreshold = nextTier?.thresholdUnits ?? active.unitsTotal
+  const ratio = progressThreshold > 0 ? Math.max(0, Math.min(1, active.unitsTotal / progressThreshold)) : 1
+  const remainingUnits = Math.max(0, progressThreshold - active.unitsTotal)
+
+  const remainingLineHtml = nextTier === null
+    ? ''
+    : remainingUnits > 0
+      ? `<div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">Още ${formatCampaignUnitsLabel(remainingUnits, active.unitNameSingular, active.unitNamePlural)} до следващата награда</div>`
+      : `<div style="margin-top:9px;font-size:12px;font-weight:800;color:#fbbf24;">Очаква предоставяне на наградата</div>`
+
+  return `
+    <div
+      data-player-profile-campaign-card="1"
+      style="
+        border-radius:8px;
+        background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
+        border:1px solid rgba(212,165,32,0.42);
+        padding:16px;
+        box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
+      "
+    >
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;">
+        <div style="min-width:0;">
+          <div style="display:flex;align-items:center;gap:8px;font-size:16px;font-weight:900;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;">
+            ${iconHtml}
+            <span style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(active.campaignName)}</span>
+          </div>
+          <div style="margin-top:6px;font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(148,163,184,0.85);">
+            Твоят прогрес
+          </div>
+          <div style="margin-top:2px;font-size:18px;font-weight:900;color:#f8fafc;">
+            ${formatCampaignUnitsLabel(active.unitsTotal, active.unitNameSingular, active.unitNamePlural)}
+          </div>
+        </div>
+        <div style="flex:0 0 auto;max-width:60%;">
+          ${rightSideHtml}
+        </div>
+      </div>
+
+      <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:6px;">
+        <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;">
+          ${new Intl.NumberFormat('bg-BG').format(active.unitsTotal)} / ${new Intl.NumberFormat('bg-BG').format(progressThreshold)}
+        </div>
+      </div>
+
+      <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
+        <div
+          style="
+            width:${(ratio * 100).toFixed(2)}%;
+            height:100%;
+            border-radius:999px;
+            background:linear-gradient(90deg, #d4a520 0%, #f4c95b 100%);
+            box-shadow:0 0 12px rgba(212,165,32,0.36);
+          "
+        ></div>
+      </div>
+
+      ${remainingLineHtml}
+
+      ${active.tiers.length > 0 ? `
+        <button
+          type="button"
+          data-player-profile-campaign-view-all-rewards="1"
+          style="
+            margin-top:12px;
+            min-height:34px;
+            padding:0 14px;
+            border:1px solid rgba(212,165,32,0.45);
+            border-radius:8px;
+            background:rgba(212,165,32,0.08);
+            color:#d4a520;
+            font-size:12px;
+            font-weight:900;
+            cursor:pointer;
+          "
+        >${allRewardsExpanded ? 'Скрий наградите' : 'Виж всички награди'}</button>
+      ` : ''}
+
+      ${renderCampaignAllRewardsPanelHtml(active, allRewardsExpanded)}
+    </div>
+  `
+}
+
+/** Горна навигация "Кампании" (§5) — компактна лента НАД заглавието "Профил на играч", изградена да поема бъдещи допълнителни бутони. */
+function renderCampaignNavBarHtml(campaignSummary: PlayerCampaignProfileSummary | null | undefined): string {
+  if (!campaignSummary) return ''
+
+  return `
+    <div
+      data-player-profile-nav-bar="1"
+      style="
+        display:flex;
+        align-items:center;
+        gap:8px;
+        margin-bottom:14px;
+      "
+    >
+      <button
+        type="button"
+        data-player-profile-campaigns-nav="1"
+        style="
+          min-height:32px;
+          padding:0 14px;
+          border:1px solid rgba(212,165,32,0.45);
+          border-radius:999px;
+          background:rgba(212,165,32,0.10);
+          color:#d4a520;
+          font-size:12px;
+          font-weight:900;
+          cursor:pointer;
+          white-space:nowrap;
+        "
+      >Кампании</button>
+    </div>
+  `
+}
+
+/** Панел на последната приключила/спряна кампания (§6/§7), показан след клик на "Кампании" от горната навигация. */
+function renderLastFinishedCampaignPanelHtml(
+  campaignSummary: PlayerCampaignProfileSummary | null | undefined,
+  historyOpen: boolean,
+): string {
+  if (!campaignSummary || !historyOpen) return ''
+
+  const lastFinished = campaignSummary.lastFinished
+
+  const bodyHtml = lastFinished === null
+    ? `<div style="font-size:13px;font-weight:700;color:rgba(226,232,240,0.70);">Няма предишна приключила кампания.</div>`
+    : `
+      <div style="font-size:15px;font-weight:900;color:#f8fafc;">${escapeHtml(lastFinished.campaignName)}</div>
+      <div style="margin-top:6px;font-size:13px;font-weight:700;color:rgba(226,232,240,0.80);">
+        Общо събрани: ${formatCampaignUnitsLabel(lastFinished.unitsTotal, lastFinished.unitNameSingular, lastFinished.unitNamePlural)}
+      </div>
+    `
+
+  return `
+    <div
+      data-player-profile-campaign-history-panel="1"
+      style="
+        border-radius:10px;
+        background:rgba(255,255,255,0.04);
+        border:1px solid rgba(255,255,255,0.08);
+        padding:14px;
+        margin-bottom:14px;
+      "
+    >
+      ${bodyHtml}
+    </div>
+  `
+}
+
 function renderProfileContent(
   profile: PlayerPublicProfileSnapshot,
   seat: Seat | null,
@@ -1859,6 +2157,8 @@ function renderProfileContent(
   riskRecheckSubmitting: boolean,
   giftItemRecipientProfileId: string | null,
   giftShopRecipientProfileId: string | null,
+  campaignSummary: PlayerCampaignProfileSummary | null | undefined,
+  campaignAllRewardsExpanded: boolean,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -2200,6 +2500,8 @@ function renderProfileContent(
 
       ${renderRankProgress(profile)}
 
+      ${campaignSummary?.active ? renderActiveCampaignCard(campaignSummary.active, campaignAllRewardsExpanded) : ''}
+
       ${renderGameStats(profile)}
 
       <div
@@ -2385,6 +2687,8 @@ export function renderPlayerProfilePopup(
           options.riskRecheckSubmitting ?? false,
           options.giftItemRecipientProfileId ?? null,
           options.giftShopRecipientProfileId ?? null,
+          options.campaignSummary ?? null,
+          options.campaignAllRewardsExpanded ?? false,
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 
@@ -2630,6 +2934,29 @@ export function renderPlayerProfilePopup(
           border-top:none !important;
           border-bottom:none !important;
         }
+
+        [data-player-profile-campaign-card="1"] > div:first-child {
+          flex-direction:column !important;
+          align-items:stretch !important;
+        }
+
+        [data-player-profile-campaign-card="1"] > div:first-child > div:last-child {
+          max-width:100% !important;
+          align-items:flex-start !important;
+          text-align:left !important;
+        }
+
+        [data-player-profile-campaign-card="1"] > div:first-child > div:last-child * {
+          text-align:left !important;
+        }
+
+        [data-player-profile-campaign-next-rewards="1"] {
+          align-items:flex-start !important;
+        }
+
+        [data-player-profile-nav-bar="1"] {
+          margin-bottom:10px !important;
+        }
       }
     </style>
 
@@ -2683,6 +3010,8 @@ export function renderPlayerProfilePopup(
             animation:${options.skipAnimation ? 'none' : 'belot-player-profile-fade-in 160ms ease both'};
           "
         >
+          ${renderCampaignNavBarHtml(options.campaignSummary)}
+
           <div
             style="
               display:flex;
@@ -2734,6 +3063,8 @@ export function renderPlayerProfilePopup(
               ×
             </button>
           </div>
+
+          ${renderLastFinishedCampaignPanelHtml(options.campaignSummary, options.campaignHistoryOpen ?? false)}
 
           ${popupBody}
         </div>
