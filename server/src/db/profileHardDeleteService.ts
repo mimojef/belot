@@ -71,7 +71,8 @@ export type ProfileHardDeleteService = {
    * bundle-ово наследеният profile_id ON DELETE CASCADE от
    * 20260923_001_create_shop_bundle_packages.sql остана незабелязан при
    * 20260902_002-ия sweep, защото таблицата тогава още не съществуваше),
-   * table_exit_penalties, profile_match_results — за да остане
+   * table_exit_penalties, profile_match_results, belot_match_completion_ledger
+   * (Фаза 6.2, mirror на profile_match_results) — за да остане
    * forensic-reconstructable "този ban/турнир/entry/ledger ред е бил на
    * deleted profile UUID X" дори след като живата FK колона се нулира от
    * cascade-а. Amount/balance/economy/резултат/timestamp/reason стойностите
@@ -98,7 +99,7 @@ export type ProfileHardDeleteService = {
    * yellow_coin_gift_ledger, match_economy_ledger, coin_purchase_ledger,
    * profile_name_change_ledger, vip_grants, vip_purchase_ledger,
    * bundle_purchase_ledger, table_exit_penalties,
-   * profile_match_results, tournaments.creator_profile_id,
+   * profile_match_results, belot_match_completion_ledger, tournaments.creator_profile_id,
    * tournament_entries.profile_id. Плюс site_visit_events/ad_campaign audit
    * полета/topics.created_by_profile_id/tournament_economy_ledger/
    * tournament_events, които вече бяха SET NULL от самото начало. Всички
@@ -569,6 +570,15 @@ export async function createProfileHardDeleteService(
     WHERE profile_id = ?;
   `)
 
+  // Фаза 6.2 — belot_match_completion_ledger mirror-ва profile_match_results's
+  // "historical game results" категория (виж 20261016_001_create_belot_match_completion_ledger.sql
+  // doc коментара) — forensic-reconstructable дори след hard delete.
+  const snapshotBelotMatchCompletionLedgerStatement = database.prepare(`
+    UPDATE belot_match_completion_ledger
+    SET deleted_profile_id_snapshot = ?
+    WHERE profile_id = ?;
+  `)
+
   // Forensic visitor snapshot (blocker round 2 корекция, spec: "deleted_profile_id
   // -> anonymous_visitor_id -> IP history / first_seen / last_seen / event_count").
   // Директен източник е site_visit_events.profile_id, НЕ site_visitors.first/
@@ -1013,6 +1023,7 @@ export async function createProfileHardDeleteService(
       snapshotBundlePurchaseLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotTableExitPenaltiesStatement.run(profileRow.profile_id, profileRow.profile_id)
       snapshotProfileMatchResultsStatement.run(profileRow.profile_id, profileRow.profile_id)
+      snapshotBelotMatchCompletionLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
       captureVisitorForensicSnapshot(profileRow.profile_id)
       // Виж captureModerationSnapshot doc коментара — трябва да се изпълни
       // ПРЕДИ deleteProfileStatement.run() по-долу (topic_section_mutes

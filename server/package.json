@@ -90,6 +90,7 @@
     "check:campaign-purchase-hooks": "tsx scripts/checkCampaignPurchaseHooks.ts",
     "check:campaign-match-credit-lookup": "tsx scripts/checkCampaignMatchCreditLookup.ts --server-root=.",
     "check:campaign-belot-replay-match-identity": "tsx scripts/checkCampaignBelotReplayMatchIdentity.ts",
+    "check:campaign-belot-reliable-reconciliation": "tsx scripts/checkCampaignBelotReliableReconciliation.ts --server-root=.",
     "check:tournament-persistence": "tsx scripts/checkTournamentPersistence.ts",
     "check:tournament-end-to-end": "tsx scripts/checkTournamentEndToEnd.ts",
     "check:tournament-variable-team-count": "tsx scripts/checkTournamentVariableTeamCount.ts --project-root=..",

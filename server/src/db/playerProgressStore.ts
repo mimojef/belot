@@ -20,6 +20,10 @@ import {
 } from './normalizeProfileIdentityText.js'
 import { createRankProgressSnapshot, getRankTitleForLevel, computeEloChange } from '../progression/rankProgression.js'
 import { getSofiaDayBoundsUtc } from './sofiaDayBounds.js'
+// Фаза 6.2 — reuse на СЪЩИЯ established match-scope формат, вече доказан
+// за real-money stake/payout ledger-а (виж matchEconomyStore.ts doc
+// коментара) — belot_match_completion_ledger's PRIMARY KEY компонент.
+import { getRoomStakeLedgerScope } from './matchEconomyStore.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -314,6 +318,10 @@ function getParticipantProfileId(
 
 function getRuntimeMatchEnded(room: ServerRoom): {
   winnerTeam: Team
+  // Фаза 6.2 — belot_match_completion_ledger's authoritative ended_at
+  // (виж recordCompletedMatch по-долу) идва оттук, не от CURRENT_TIMESTAMP
+  // при INSERT момента (за разлика от profile_match_results.completed_at).
+  endedAt: number
 } | null {
   const authoritativeState = room.game.authoritativeState
 
@@ -328,6 +336,7 @@ function getRuntimeMatchEnded(room: ServerRoom): {
 
   return {
     winnerTeam: authoritativeState.matchEnded.winnerTeam,
+    endedAt: authoritativeState.matchEnded.endedAt,
   }
 }
 
@@ -896,6 +905,36 @@ export async function createPlayerProgressStore(
       did_win,
       is_guest_trial
     ) VALUES (
+      ?,
+      ?,
+      ?,
+      ?,
+      ?
+    );
+  `)
+
+  // Фаза 6.2 — виж 20261016_001_create_belot_match_completion_ledger.sql doc
+  // коментара за пълния design rationale. match_scope (ПЪРВИ параметър) е
+  // getRoomStakeLedgerScope(room) — MATCH-unique (за разлика от
+  // insertMatchResultStatement's голия room_id по-горе), затова replay
+  // мачове в СЪЩАТА стая пишат ОТДЕЛНИ редове тук, никога колизия.
+  // stake_amount е АВТОРИТЕТЕН room.config.stakeAmount В МОМЕНТА на
+  // извикването — НЕ извеждан от match_economy_ledger наличие/липса (виж
+  // task spec §1/§2 "не приемай липса на финансов запис за залог=0").
+  const insertBelotMatchCompletionLedgerStatement = database.prepare(`
+    INSERT OR IGNORE INTO belot_match_completion_ledger (
+      match_scope,
+      profile_id,
+      room_id,
+      team,
+      did_win,
+      stake_amount,
+      ended_at,
+      is_guest_trial
+    ) VALUES (
+      ?,
+      ?,
+      ?,
       ?,
       ?,
       ?,
@@ -1832,28 +1871,94 @@ export async function createPlayerProgressStore(
     const avgA = teamRatings.A.length > 0 ? teamRatings.A.reduce((s, r) => s + r, 0) / teamRatings.A.length : 1000
     const avgB = teamRatings.B.length > 0 ? teamRatings.B.reduce((s, r) => s + r, 0) / teamRatings.B.length : 1000
 
+    // Фаза 6.2 (одит-поправка #2, "атомарност на целия мач, не само на
+    // един участник") — belot_match_completion_ledger's редове за ВСИЧКИ
+    // seats на тоя мач се пишат в ЕДНА SQLite транзакция, НЕЗАВИСИМО от
+    // profile_match_results's собствен per-seat loop по-долу (който остава
+    // 100% непроменен спрямо pre-Фаза-6.2 кода — виж коментара там).
+    // Причина за decoupling-а (вместо per-seat pairing, предишния опит):
+    // ако seat 3 от 4 се провали ПОСЛЕ seat 1/2 вече са commit-нати
+    // поотделно, belot_match_completion_ledger би останала ЧАСТИЧНО
+    // записана за мача (seats 1,2,4 присъстват, seat 3 — не) — ако seat 3
+    // се окаже победител, неговият credit става НЕВЪЗСТАНОВИМ (нито primary
+    // scan, нито legacy sweep виждат profile без ред в ПОНЕ една от двете
+    // таблици). Единственият начин да се гарантира "всички seats заедно
+    // или никой" за belot_match_completion_ledger е ЕДНА транзакция,
+    // обхващаща ВСИЧКИ редове накуп — виж checkCampaignBelotReliableReconciliation.ts
+    // [S23] за explicit regression тест (инжектирана грешка на ТРЕТИЯ
+    // участник, след че първите двама вече са "обработени" в same-batch
+    // смисъл — нулев ред остава записан за мача).
+    //
+    // matchScope/endedAtIso са room-level (константни за целия мач) —
+    // computирани ВЕДНЪЖ. stake_amount е NOT NULL в схемата — ако
+    // room.config.stakeAmount липсва/невалиден, НЕ измисляме стойност
+    // (task spec §1/§2): само НОВИЯТ журнален запис се skip-ва ЗА ЦЕЛИЯ
+    // мач (логнато ВЕДНЪЖ) — profile_match_results's собствен insert
+    // по-долу остава напълно незасегнат.
+    const matchScope = getRoomStakeLedgerScope(room)
+    const endedAtIso = new Date(matchEnded.endedAt).toISOString()
+    const rawStakeAmount = room.config.stakeAmount
+    const belotLedgerStakeAmount =
+      typeof rawStakeAmount === 'number' && Number.isFinite(rawStakeAmount) && rawStakeAmount >= 0
+        ? rawStakeAmount
+        : null
+
+    type SeatOutcome = { profileId: ProfileId; team: Team; didWin: boolean; participant: RoomParticipant }
+    const seatOutcomes: SeatOutcome[] = []
     for (const seat of SERVER_SEAT_ORDER) {
       const participant = room.seats[seat].participant
-
-      if (participant === null) {
-        continue
-      }
-
+      if (participant === null) continue
       const profileId =
         participant.kind === 'human'
           ? getParticipantProfileId(participant)
           : (participant.botProfileId ?? null)
-
-      if (profileId === null) {
-        continue
-      }
-
-      if (profileId.startsWith('temp-bot-')) {
-        continue
-      }
-
+      if (profileId === null) continue
+      if (profileId.startsWith('temp-bot-')) continue
       const team = getTeamBySeat(seat)
-      const didWin = team === matchEnded.winnerTeam
+      seatOutcomes.push({ profileId, team, didWin: team === matchEnded.winnerTeam, participant })
+    }
+
+    if (belotLedgerStakeAmount === null) {
+      console.error(
+        `[player-progress] belot_match_completion_ledger skipped for ENTIRE match (missing/invalid stakeAmount) room=${room.id} scope=${matchScope}`,
+      )
+    } else if (seatOutcomes.length > 0) {
+      try {
+        database.exec('BEGIN;')
+        for (const outcome of seatOutcomes) {
+          insertBelotMatchCompletionLedgerStatement.run(
+            matchScope,
+            outcome.profileId,
+            room.id,
+            outcome.team,
+            outcome.didWin ? 1 : 0,
+            belotLedgerStakeAmount,
+            endedAtIso,
+            room.config.isGuestTrial ? 1 : 0,
+          )
+        }
+        database.exec('COMMIT;')
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // surface the original failure
+        }
+        console.error(
+          `[player-progress] belot_match_completion_ledger: whole-match atomic insert failed, rolled back ENTIRE match room=${room.id} scope=${matchScope}`,
+          error,
+        )
+      }
+    }
+
+    // ─── profile_match_results + ELO/completed-games — ИЗЦЯЛО непроменено
+    // спрямо pre-Фаза-6.2 кода (виж doc коментара най-отгоре за decoupling
+    // rationale-то). Всяко .run() тук autocommit-ва individually, точно
+    // както преди каквато и да е Фаза 6.2 промяна — "не нарушавай
+    // съществуващите ELO, win-count и economy операции".
+    for (const outcome of seatOutcomes) {
+      const { profileId, team, didWin, participant } = outcome
+
       const result = insertMatchResultStatement.run(
         room.id,
         profileId,

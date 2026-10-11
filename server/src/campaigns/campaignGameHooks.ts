@@ -265,7 +265,13 @@ const RECONCILIATION_INITIAL_CURSOR = { eventAt: '', sourceId: '', profileId: ''
 // за CHECK constraint rebuild-а. Hелпърите по-долу са export-нати изрично
 // за да ги преизползва campaignPurchaseHooks.ts — "не създавай втори
 // независим и противоречив механизъм" (виж Фаза 5 §7).
-export type ReconciliationSourceType = 'belot_win' | 'ludo_win' | 'package_purchase_coin' | 'package_purchase_bundle' | 'package_purchase_vip'
+// Фаза 6.2 — 'belot_win_legacy' е ОТДЕЛЕН durable cursor за legacy sweep-а
+// (profile_match_results, pre-belot_match_completion_ledger редове) — виж
+// 20261017_001_extend_campaign_credit_reconciliation_state_for_belot_legacy.sql
+// doc коментара за пълния "защо" (без собствен cursor, постоянно
+// недопустим prefix на пагинацията би блокирал напредването към следващи,
+// допустими редове).
+export type ReconciliationSourceType = 'belot_win' | 'belot_win_legacy' | 'ludo_win' | 'package_purchase_coin' | 'package_purchase_bundle' | 'package_purchase_vip'
 
 export type ReconciliationCursor = {
   eventAt: string
@@ -349,83 +355,283 @@ export async function reconcileMissingBelotCampaignCredits(
   database.exec('PRAGMA busy_timeout = 5000;')
 
   try {
-    type BelotMissingCreditRow = {
+    // ─── Фаза 6.2 — ПЪРВИЧЕН източник: belot_match_completion_ledger ───
+    // match-scoped (PRIMARY KEY (match_scope, profile_id)), пише се атомарно
+    // В playerProgressStore.ts::recordCompletedMatch (ПЪРВАТА side-effect
+    // стъпка след shouldRunMatchCompletionSideEffects guard-а, преди payout
+    // и преди тоя campaign hook) — виж 20261016_001_create_belot_match_completion_ledger.sql
+    // doc коментара за пълния design rationale (защо не match_economy_ledger
+    // — няма ред при нулев залог; защо не разширение на profile_match_results
+    // — би пипнало admin "изиграни игри" статистика).
+    //
+    // stake_amount/ended_at ТУК са АВТОРИТЕТНИ колони (записани В МОМЕНТА на
+    // приключване), НЕ извеждани от match_economy_ledger наличие/липса —
+    // точно изискването от task spec §1/§2. match_scope е ТОЧНО същия
+    // формат, който fast-path hook-ът (recordBelotMatchForCampaign) пише
+    // като source_id — точно равенство е достатъчно, НЕ LIKE prefix.
+    type BelotNewMissingCreditRow = {
+      match_scope: string
+      profile_id: string
+      room_id: string
+      stake_amount: number
+      ended_at: string
+    }
+
+    const NOT_ALREADY_CREDITED_NEW_SQL = `
+          NOT EXISTS (
+            SELECT 1 FROM campaign_unit_ledger cul
+            WHERE cul.source_type = 'belot_win'
+              AND cul.profile_id = bmcl.profile_id
+              AND cul.source_id = bmcl.match_scope
+          )`
+
+    const selectNewMissingCreditsSinceStatement = database.prepare(`
+      SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+      FROM belot_match_completion_ledger bmcl
+      WHERE bmcl.did_win = 1
+        AND bmcl.is_guest_trial = 0
+        AND bmcl.profile_id IS NOT NULL
+        AND bmcl.ended_at >= ?
+        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+      ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectNewMissingCreditsAfterCursorStatement = database.prepare(`
+      SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+      FROM belot_match_completion_ledger bmcl
+      WHERE bmcl.did_win = 1
+        AND bmcl.is_guest_trial = 0
+        AND bmcl.profile_id IS NOT NULL
+        AND (
+          bmcl.ended_at > ?
+          OR (bmcl.ended_at = ? AND bmcl.match_scope > ?)
+          OR (bmcl.ended_at = ? AND bmcl.match_scope = ? AND bmcl.profile_id > ?)
+        )
+        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+      ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectNewMissingCreditsFromStartStatement = database.prepare(`
+      SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+      FROM belot_match_completion_ledger bmcl
+      WHERE bmcl.did_win = 1
+        AND bmcl.is_guest_trial = 0
+        AND bmcl.profile_id IS NOT NULL
+        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+      ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
+      LIMIT ?;
+    `)
+
+    const selectNewMissingCreditsThroughCursorStatement = database.prepare(`
+      SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+      FROM belot_match_completion_ledger bmcl
+      WHERE bmcl.did_win = 1
+        AND bmcl.is_guest_trial = 0
+        AND bmcl.profile_id IS NOT NULL
+        AND (
+          bmcl.ended_at < ?
+          OR (bmcl.ended_at = ? AND bmcl.match_scope < ?)
+          OR (bmcl.ended_at = ? AND bmcl.match_scope = ? AND bmcl.profile_id <= ?)
+        )
+        AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+      ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
+      LIMIT ?;
+    `)
+
+    let newRows: BelotNewMissingCreditRow[]
+    if (bounds.useDurableCursor === true) {
+      const cursor = getReconciliationCursor(database, 'belot_win')
+      if (cursor.eventAt === '') {
+        newRows = selectNewMissingCreditsFromStartStatement.all(limit) as BelotNewMissingCreditRow[]
+      } else {
+        newRows = selectNewMissingCreditsAfterCursorStatement.all(
+          cursor.eventAt,
+          cursor.eventAt,
+          cursor.sourceId,
+          cursor.eventAt,
+          cursor.sourceId,
+          cursor.profileId,
+          limit,
+        ) as BelotNewMissingCreditRow[]
+        if (newRows.length < limit) {
+          const wrappedRows = selectNewMissingCreditsThroughCursorStatement.all(
+            cursor.eventAt,
+            cursor.eventAt,
+            cursor.sourceId,
+            cursor.eventAt,
+            cursor.sourceId,
+            cursor.profileId,
+            limit - newRows.length,
+          ) as BelotNewMissingCreditRow[]
+          if (wrappedRows.length > 0) {
+            result.cursorWrapped = true
+            newRows = newRows.concat(wrappedRows)
+          } else if (newRows.length === 0) {
+            resetReconciliationCursor(database, 'belot_win')
+          }
+        }
+      }
+    } else {
+      // ended_at е TEXT ISO; lexicographic >= работи за форматите, които
+      // тая кодова база произвежда. Stateless/manual извиквания пазят старата
+      // sinceIso escape hatch; production job-ът ползва durable cursor-а.
+      newRows = selectNewMissingCreditsSinceStatement.all(sinceIso, limit) as BelotNewMissingCreditRow[]
+    }
+
+    for (const row of newRows) {
+      result.scanned += 1
+
+      try {
+        const creditResult = campaignCreditStore.creditCampaignUnits({
+          profileId: row.profile_id,
+          sourceType: 'belot_win',
+          sourceId: row.match_scope,
+          eventAt: new Date(dbDateToUtc(row.ended_at)),
+          stakeAmount: row.stake_amount,
+        })
+
+        if (creditResult.ok) {
+          result.credited += 1
+        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+          console.error(
+            `[campaign-game-hooks] belot reconciliation credit failed match=${row.match_scope} profile=${row.profile_id} reason=${creditResult.reason}`,
+          )
+        }
+      } catch (error) {
+        result.failed += 1
+        console.error(
+          `[campaign-game-hooks] belot reconciliation unexpected failure match=${row.match_scope} profile=${row.profile_id}`,
+          error,
+        )
+      } finally {
+        if (bounds.useDurableCursor === true) {
+          saveReconciliationCursor(database, 'belot_win', {
+            eventAt: row.ended_at,
+            sourceId: row.match_scope,
+            profileId: row.profile_id,
+          })
+        }
+      }
+    }
+
+    // ─── Фаза 6.1/6.2 — LEGACY sweep: profile_match_results ───
+    // СОБСТВЕН durable cursor ('belot_win_legacy', виж
+    // 20261017_001_extend_campaign_credit_reconciliation_state_for_belot_legacy.sql) —
+    // КРИТИЧНА поправка (одит след първия Фаза 6.2 diff): чист LIMIT БЕЗ
+    // cursor би спрял да напредва, ако префикса по completed_at ASC е
+    // ПОСТОЯННО недопустим (напр. извън прозореца на ВСЯКА кампания) — NOT
+    // EXISTS филтъра никога не маха такъв ред от "липсващи", затова
+    // следващия tick би върнал СЪЩИТЕ редове отново, вместо да напредне
+    // towards следващите, допустими редове отвъд тях. Durable cursor-ът
+    // (идентичен 4-statement cursor/wrap pattern на primary scan-а по-горе)
+    // напредва МОНОТОННО през (completed_at, room_id, profile_id)
+    // подредбата на ВСЕКИ обработен ред — независимо дали в крайна сметка
+    // се credit-ва, или само се "прескача" (no_eligible_campaign/
+    // ineligible_profile/insufficient stake info) — виж checkCampaignBelotReliableReconciliation.ts
+    // [S19]/[S20] за explicit regression тест на "2000 исторически реда,
+    // първите 500 извън прозорец" сценария.
+    //
+    // Покрива ИЗКЛЮЧИТЕЛНО исторически мачове, за които НИКОГА не е писан
+    // ред в belot_match_completion_ledger (т.е. completed-match side
+    // effect-ът е run-нал ПРЕДИ тая миграция да съществува) — НЕ дублира
+    // нищо, което primary scan-ът по-горе вече ще/е обработил, защото
+    // изключваме всеки (room_id, profile_id), който ИМА ред в новата
+    // таблица, дори ако тоя ред още чака reconciliation (ще се обработи от
+    // primary scan-а).
+    //
+    // ПРИЕТ edge-case trade-off (виж checkCampaignBelotReliableReconciliation.ts
+    // [S14] за explicit тест на границата): проверката е по (room_id,
+    // profile_id), не по конкретен мач — ако ЕДНА И СЪЩА стая/профил
+    // двойка съдържа И pre-6.2 legacy мач, И post-6.2 нов мач (изисква
+    // стаята да е "жива" точно през deploy момента на тая миграция — на
+    // практика невъзможно, кампаниите никога не са били активни в
+    // продукция), legacy частта остава ПОСТОЯННО непокрита от тоя sweep.
+    // Failure mode-ът е БЕЗОПАСЕН (под-начисление, НИКОГА двойно
+    // начисление) — съзнателно предпочетено пред риска от double-credit
+    // race (primary scan-ът cursor/limit-paginира, legacy sweep-ът има
+    // СОБСТВЕН независим cursor — без тая изключваща проверка, двата биха
+    // могли да credit-нат ЕДИН И СЪЩИ реален мач под ДВА различни
+    // source_id формата в рамките на един tick).
+    type BelotLegacyMissingCreditRow = {
       room_id: string
       profile_id: string
       completed_at: string
     }
 
-    // Фаза 6.1 — anti-double-credit заради новия per-match sourceId формат
-    // (виж recordBelotMatchForCampaign doc коментара по-горе). profile_match_results
-    // остава room-scoped (room_id, profile_id) PRIMARY KEY — ЕДИН ред per
-    // (room,profile) за цялата история на стаята, независимо от replay
-    // (INSERT OR IGNORE в playerProgressStore.ts мълчаливо пропуска всеки
-    // следващ мач в същата стая; не променяме тая таблица тук — извън
-    // обхвата на кампанийната поправка, виж финалния отчет за пълния
-    // rationale). Затова reconciliation-ът структурно МОЖЕ да разпознае най-
-    // много ЕДИН мач на стая от profile_match_results — но ТОЧНО тоя мач
-    // може вече коректно да е начислен от fast-path hook-а под НОВИЯ scoped
-    // source_id (`${room_id}:v${stateVersion}`), не голия room_id. Без тая
-    // проверка reconciliation-ът би го сметнал за "липсващ" (голия room_id
-    // не съвпада с scoped реда) и би го начислил ПОВТОРНО под legacy формат
-    // — явно дублиране, в разрез с идемпотентността (§3). `pmr.room_id` е
-    // ВИНАГИ server-генериран randomUUID() (виж createServerRoom.ts) — няма
-    // '%'/'_' literal risk в LIKE pattern-а.
-    const NOT_ALREADY_CREDITED_SQL = `
+    const NOT_ALREADY_CREDITED_LEGACY_SQL = `
           NOT EXISTS (
             SELECT 1 FROM campaign_unit_ledger cul
             WHERE cul.source_type = 'belot_win'
               AND cul.profile_id = pmr.profile_id
               AND (cul.source_id = pmr.room_id OR cul.source_id LIKE pmr.room_id || ':v%')
           )`
+    const NOT_IN_NEW_LEDGER_SQL = `
+          NOT EXISTS (
+            SELECT 1 FROM belot_match_completion_ledger bmcl2
+            WHERE bmcl2.room_id = pmr.room_id AND bmcl2.profile_id = pmr.profile_id
+          )`
 
-    const selectMissingCreditsSinceStatement = database.prepare(`
+    const selectLegacyMissingCreditsSinceStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
         AND pmr.is_guest_trial = 0
+        AND pmr.profile_id IS NOT NULL
         AND pmr.completed_at >= ?
-        AND ${NOT_ALREADY_CREDITED_SQL}
+        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
+        AND ${NOT_IN_NEW_LEDGER_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
 
-    const selectMissingCreditsAfterCursorStatement = database.prepare(`
+    const selectLegacyMissingCreditsAfterCursorStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
         AND pmr.is_guest_trial = 0
+        AND pmr.profile_id IS NOT NULL
         AND (
           pmr.completed_at > ?
           OR (pmr.completed_at = ? AND pmr.room_id > ?)
           OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id > ?)
         )
-        AND ${NOT_ALREADY_CREDITED_SQL}
+        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
+        AND ${NOT_IN_NEW_LEDGER_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
 
-    const selectMissingCreditsFromStartStatement = database.prepare(`
+    const selectLegacyMissingCreditsFromStartStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
         AND pmr.is_guest_trial = 0
-        AND ${NOT_ALREADY_CREDITED_SQL}
+        AND pmr.profile_id IS NOT NULL
+        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
+        AND ${NOT_IN_NEW_LEDGER_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
 
-    const selectMissingCreditsThroughCursorStatement = database.prepare(`
+    const selectLegacyMissingCreditsThroughCursorStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
       FROM profile_match_results pmr
       WHERE pmr.did_win = 1
         AND pmr.is_guest_trial = 0
+        AND pmr.profile_id IS NOT NULL
         AND (
           pmr.completed_at < ?
           OR (pmr.completed_at = ? AND pmr.room_id < ?)
           OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id <= ?)
         )
-        AND ${NOT_ALREADY_CREDITED_SQL}
+        AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
+        AND ${NOT_IN_NEW_LEDGER_SQL}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -440,47 +646,47 @@ export async function reconcileMissingBelotCampaignCredits(
       SELECT 1 FROM match_economy_ledger WHERE room_id = ? AND entry_type = 'stake_debit' LIMIT 1;
     `)
 
-    let rows: BelotMissingCreditRow[]
+    let legacyRows: BelotLegacyMissingCreditRow[]
     if (bounds.useDurableCursor === true) {
-      const cursor = getReconciliationCursor(database, 'belot_win')
-      if (cursor.eventAt === '') {
-        rows = selectMissingCreditsFromStartStatement.all(limit) as BelotMissingCreditRow[]
+      const legacyCursor = getReconciliationCursor(database, 'belot_win_legacy')
+      if (legacyCursor.eventAt === '') {
+        legacyRows = selectLegacyMissingCreditsFromStartStatement.all(limit) as BelotLegacyMissingCreditRow[]
       } else {
-        rows = selectMissingCreditsAfterCursorStatement.all(
-          cursor.eventAt,
-          cursor.eventAt,
-          cursor.sourceId,
-          cursor.eventAt,
-          cursor.sourceId,
-          cursor.profileId,
+        legacyRows = selectLegacyMissingCreditsAfterCursorStatement.all(
+          legacyCursor.eventAt,
+          legacyCursor.eventAt,
+          legacyCursor.sourceId,
+          legacyCursor.eventAt,
+          legacyCursor.sourceId,
+          legacyCursor.profileId,
           limit,
-        ) as BelotMissingCreditRow[]
-        if (rows.length < limit) {
-          const wrappedRows = selectMissingCreditsThroughCursorStatement.all(
-            cursor.eventAt,
-            cursor.eventAt,
-            cursor.sourceId,
-            cursor.eventAt,
-            cursor.sourceId,
-            cursor.profileId,
-            limit - rows.length,
-          ) as BelotMissingCreditRow[]
-          if (wrappedRows.length > 0) {
+        ) as BelotLegacyMissingCreditRow[]
+        if (legacyRows.length < limit) {
+          const wrappedLegacyRows = selectLegacyMissingCreditsThroughCursorStatement.all(
+            legacyCursor.eventAt,
+            legacyCursor.eventAt,
+            legacyCursor.sourceId,
+            legacyCursor.eventAt,
+            legacyCursor.sourceId,
+            legacyCursor.profileId,
+            limit - legacyRows.length,
+          ) as BelotLegacyMissingCreditRow[]
+          if (wrappedLegacyRows.length > 0) {
             result.cursorWrapped = true
-            rows = rows.concat(wrappedRows)
-          } else if (rows.length === 0) {
-            resetReconciliationCursor(database, 'belot_win')
+            legacyRows = legacyRows.concat(wrappedLegacyRows)
+          } else if (legacyRows.length === 0) {
+            resetReconciliationCursor(database, 'belot_win_legacy')
           }
         }
       }
     } else {
-      // completed_at е TEXT ISO/SQLite timestamp; lexicographic >= works for the
-      // formats produced by this codebase. Stateless/manual calls retain the
-      // old sinceIso escape hatch; production job uses the durable cursor above.
-      rows = selectMissingCreditsSinceStatement.all(sinceIso, limit) as BelotMissingCreditRow[]
+      // Stateless/manual извиквания (без durable cursor) пазят старата
+      // sinceIso-bounded еднократна страница — production job-ът винаги
+      // ползва useDurableCursor:true (виж createCampaignCreditReconciliationJob).
+      legacyRows = selectLegacyMissingCreditsSinceStatement.all(sinceIso, limit) as BelotLegacyMissingCreditRow[]
     }
 
-    for (const row of rows) {
+    for (const row of legacyRows) {
       result.scanned += 1
 
       try {
@@ -497,24 +703,18 @@ export async function reconcileMissingBelotCampaignCredits(
             // Друг участник в стаята е дебитиран, този — не: аномалия, не
             // познаваме реалната ставка за ТОЗИ профил.
             console.error(
-              `[campaign-game-hooks] belot reconciliation: room=${row.room_id} profile=${row.profile_id} has no stake_debit while another participant does — insufficient info, skipping`,
+              `[campaign-game-hooks] belot reconciliation (legacy sweep): room=${row.room_id} profile=${row.profile_id} has no stake_debit while another participant does — insufficient info, skipping`,
             )
             result.skippedInsufficientStakeInfo += 1
             continue
           }
-          // Никой в стаята няма stake_debit ред -> доказана нулева ставка.
+          // Никой в стаята няма stake_debit ред -> доказана нулева ставка
+          // (ТОЗИ heuristic е ограничен до pre-Фаза-6.2 исторически редове
+          // без belot_match_completion_ledger еквивалент — новите редове
+          // по-горе вече ползват авторитетния stake_amount, без heuristic).
           stakeAmount = 0
         }
 
-        // Фаза 6.1 — тук УМИШЛЕНО продължаваме да пишем голия row.room_id
-        // (legacy формат), НЕ ${room.id}:v${stateVersion} scoped формата от
-        // recordBelotMatchForCampaign по-горе. profile_match_results (pmr)
-        // няма stateVersion колона (room-scoped PK, виж NOT_ALREADY_CREDITED_SQL
-        // doc коментара по-горе за пълния rationale) — reconciliation-ът
-        // структурно вижда най-много ЕДИН мач на стая, затова пише под
-        // "за тая стая изобщо" legacy идентичност. NOT_ALREADY_CREDITED_SQL
-        // по-горе вече гарантира, че този INSERT никога не колизира/дублира
-        // с мач, който fast-path hook-ът вече е начислил под scoped формата.
         const creditResult = campaignCreditStore.creditCampaignUnits({
           profileId: row.profile_id,
           sourceType: 'belot_win',
@@ -527,18 +727,22 @@ export async function reconcileMissingBelotCampaignCredits(
           result.credited += 1
         } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
           console.error(
-            `[campaign-game-hooks] belot reconciliation credit failed room=${row.room_id} profile=${row.profile_id} reason=${creditResult.reason}`,
+            `[campaign-game-hooks] belot reconciliation (legacy sweep) credit failed room=${row.room_id} profile=${row.profile_id} reason=${creditResult.reason}`,
           )
         }
       } catch (error) {
         result.failed += 1
         console.error(
-          `[campaign-game-hooks] belot reconciliation unexpected failure room=${row.room_id} profile=${row.profile_id}`,
+          `[campaign-game-hooks] belot reconciliation (legacy sweep) unexpected failure room=${row.room_id} profile=${row.profile_id}`,
           error,
         )
       } finally {
+        // Cursor-ът напредва на ВСЕКИ обработен ред — credited, skipped
+        // (no_eligible_campaign/ineligible_profile/insufficient stake
+        // info), ИЛИ failed — виж doc коментара най-отгоре за пълния "защо"
+        // (иначе постоянно недопустим prefix блокира напредването).
         if (bounds.useDurableCursor === true) {
-          saveReconciliationCursor(database, 'belot_win', {
+          saveReconciliationCursor(database, 'belot_win_legacy', {
             eventAt: row.completed_at,
             sourceId: row.room_id,
             profileId: row.profile_id,

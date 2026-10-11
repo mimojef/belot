@@ -33,12 +33,14 @@
  * [R6]  И двамата победители от един Белот отбор credited във ВСЕКИ отделен мач.
  * [R7]  Победител в Мач 1, същият профил губи в Мач 2 -> само Мач 1's credit, нищо фалшиво за Мач 2.
  * [R8]  Restart между два мача (нов store instance върху СЪЩИЯ DB файл) -> credit-ва се коректно.
- * [R9]  Reconciliation на ПРОПУСНАТ втори мач — ДОКУМЕНТИРАНО структурно
- *       ограничение: profile_match_results (room_id,profile_id) PRIMARY KEY
- *       не разграничава мачове в рамките на стаята (виж doc коментара в
- *       campaignGameHooks.ts) — reconciliation safety net-ът МОЖЕ да покрие
- *       най-много ПЪРВИЯ мач на стаята; НЕ дублира/обърква данни, но не
- *       "измисля" пропуснат втори мач от данни, които физически не съществуват.
+ * [R9]  Reconciliation на пропуснат ВТОРИ мач (само профил_match_results
+ *       seed-нат, БЕЗ belot_match_completion_ledger ред — симулира
+ *       ИСТОРИЧЕСКИ, pre-Фаза-6.2 запис) — LEGACY sweep-ът покрива най-
+ *       много ПЪРВИЯ мач на стаята; НЕ дублира/обърква данни. Виж
+ *       checkCampaignBelotReliableReconciliation.ts за ПЪЛНОТО Фаза 6.2
+ *       покритие на НОВИЯ belot_match_completion_ledger-driven recovery
+ *       път, който ВЕЧЕ възстановява ВСЕКИ пропуснат replay мач, не само
+ *       първия — тоя тест тук документира само legacy-only границата.
  * [R10] Reconciliation НЕ дублира Мач 1 (вече credited от fast-path под нов формат).
  * [R11] Различни кампании при последователни мачове в СЪЩАТА стая -> всеки мач коректно към СВОЯТА кампания.
  * [R12] End Game lookup (getMatchCreditSnapshot) за Мач 1 връща Мач 1's данни, за Мач 2 — Мач 2's, никога кръстосано.
@@ -429,7 +431,7 @@ await check('[R8] Restart между два мача (нов store instance, С�
 // ═══════════════════════════════════════════════════════════════════════
 console.log('\n=== [R9]-[R10] Reconciliation safety net ===')
 
-await check('[R9] Reconciliation на пропуснат ВТОРИ мач — документирано структурно ограничение', async () => {
+await check('[R9] Legacy sweep (без belot_match_completion_ledger ред) покрива само ПЪРВИЯ мач на стаята', async () => {
   const { campaignId } = seedActiveCampaign([{ gameKind: 'belot', stake: 100, units: 25 }])
   const seats: Record<Seat, string> = { bottom: randomUUID(), top: randomUUID(), right: randomUUID(), left: randomUUID() }
   for (const [seat, id] of Object.entries(seats)) insertProfile(id, `R9 ${seat}`)
