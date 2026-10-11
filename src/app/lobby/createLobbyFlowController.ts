@@ -7,7 +7,7 @@ import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tourn
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow } from '../adminCampaigns/adminCampaignTypes.js'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind } from '../adminCampaigns/adminCampaignTypes.js'
 import type { AdminCampaignAction, AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel.js'
 import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload, MarketingDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
@@ -1114,6 +1114,14 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string; forbidden?: boolean }
   >
   onAdminCampaignMarketingSenderSaveRequest?: (campaignId: string, giftSenderProfileId: string | null) => Promise<
+    | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignThemeAssetUploadRequest?: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => Promise<
+    | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignThemeAssetRemoveRequest?: (campaignId: string, kind: AdminCampaignThemeAssetKind) => Promise<
     | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
     | { ok: false; message: string; forbidden?: boolean }
   >
@@ -7799,6 +7807,12 @@ export function createLobbyFlowController(
       onAdminCampaignMarketingSenderSave: (campaignId, giftSenderProfileId) => {
         void submitAdminCampaignMarketingSenderSave(campaignId, giftSenderProfileId)
       },
+      onAdminCampaignThemeAssetUpload: (campaignId, kind, imageDataUrl) => {
+        void submitAdminCampaignThemeAssetUpload(campaignId, kind, imageDataUrl)
+      },
+      onAdminCampaignThemeAssetRemove: (campaignId, kind) => {
+        void submitAdminCampaignThemeAssetRemove(campaignId, kind)
+      },
       onAdCampaignsOpen: () => {
         showAdCampaignManagementPanel()
       },
@@ -13474,6 +13488,55 @@ export function createLobbyFlowController(
     state.adminCampaignsReferenceData = result.referenceData
     state.adminCampaignsErrorText = null
     state.adminCampaignsSuccessText = 'Подателят е запазен.'
+    render()
+  }
+
+  async function submitAdminCampaignThemeAssetUpload(
+    campaignId: string,
+    kind: AdminCampaignThemeAssetKind,
+    imageDataUrl: string,
+  ): Promise<void> {
+    if (!options.onAdminCampaignThemeAssetUploadRequest) {
+      state.adminCampaignsErrorText = 'Действието временно не е налично.'
+      render()
+      return
+    }
+    state.adminCampaignsErrorText = null
+    render()
+    const result = await options.onAdminCampaignThemeAssetUploadRequest(campaignId, kind, imageDataUrl)
+    if (!result.ok) {
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaigns = result.campaigns
+    state.adminCampaignsReferenceData = result.referenceData
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = 'Тематичният ресурс е качен.'
+    render()
+  }
+
+  async function submitAdminCampaignThemeAssetRemove(
+    campaignId: string,
+    kind: AdminCampaignThemeAssetKind,
+  ): Promise<void> {
+    if (!options.onAdminCampaignThemeAssetRemoveRequest) {
+      state.adminCampaignsErrorText = 'Действието временно не е налично.'
+      render()
+      return
+    }
+    state.adminCampaignsErrorText = null
+    render()
+    const result = await options.onAdminCampaignThemeAssetRemoveRequest(campaignId, kind)
+    if (!result.ok) {
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaigns = result.campaigns
+    state.adminCampaignsReferenceData = result.referenceData
+    state.adminCampaignsErrorText = null
+    state.adminCampaignsSuccessText = 'Тематичният ресурс е премахнат.'
     render()
   }
 

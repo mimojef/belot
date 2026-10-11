@@ -1,6 +1,7 @@
 export type AdminCampaignStatus = 'draft' | 'scheduled' | 'active' | 'finished' | 'stopped'
 export type AdminCampaignGameKind = 'belot' | 'ludo'
 export type AdminCampaignRewardType = 'yellow_coins' | 'vip_days' | 'gift_item'
+export type AdminCampaignThemeAssetKind = 'unit_icon' | 'table_bg_desktop' | 'table_bg_mobile' | 'card_back'
 
 export type AdminCampaignEarnRule = {
   gameKind: AdminCampaignGameKind

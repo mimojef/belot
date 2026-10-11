@@ -116,7 +116,7 @@ import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../a
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes'
 import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow } from '../adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind } from '../adminCampaigns/adminCampaignTypes'
 import { renderAdminCampaignsPanel, attachAdminCampaignsHandlers, type AdminCampaignAction, type AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel'
 import { renderAdCampaignManagementPanel, attachAdCampaignManagementPanelHandlers } from '../adCampaigns/renderAdCampaignManagementPanel'
 import { renderAdCampaignPopup, attachAdCampaignPopupHandlers } from '../adCampaigns/renderAdCampaignPopup'
@@ -1541,6 +1541,8 @@ export type RenderLobbyScreenOptions = {
   onAdminCampaignSave?: (draft: AdminCampaignEditorDraft) => void
   onAdminCampaignAction?: (campaignId: string, action: AdminCampaignAction) => void
   onAdminCampaignMarketingSenderSave?: (campaignId: string, giftSenderProfileId: string | null) => void
+  onAdminCampaignThemeAssetUpload?: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
+  onAdminCampaignThemeAssetRemove?: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
   onAdCampaignsOpen?: () => void
   onAdCampaignsBack?: () => void
   onAdCampaignCreate?: (input: { imageDataUrl: string; targetUrl: string }) => void
@@ -18152,6 +18154,8 @@ export function renderLobbyScreen(
     onSave: (draft) => { options.onAdminCampaignSave?.(draft) },
     onAction: (campaignId, action) => { options.onAdminCampaignAction?.(campaignId, action) },
     onMarketingSenderSave: (campaignId, giftSenderProfileId) => { options.onAdminCampaignMarketingSenderSave?.(campaignId, giftSenderProfileId) },
+    onThemeAssetUpload: (campaignId, kind, imageDataUrl) => { options.onAdminCampaignThemeAssetUpload?.(campaignId, kind, imageDataUrl) },
+    onThemeAssetRemove: (campaignId, kind) => { options.onAdminCampaignThemeAssetRemove?.(campaignId, kind) },
   })
 
   attachAdCampaignManagementPanelHandlers(root, {

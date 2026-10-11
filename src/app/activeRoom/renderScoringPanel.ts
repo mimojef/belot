@@ -7,11 +7,10 @@ import type {
   Seat,
 } from '../network/createGameServerClient'
 import {
-  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
-  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   escapeHtml,
+  getActiveRoomTableBackground,
 } from './activeRoomShared'
 import { renderScoreHud } from './renderScoreHud'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
@@ -1045,9 +1044,7 @@ export function renderScoringScreen(options: RenderScoringScreenOptions): void {
   } = options
   const isPhoneLayout = isPhoneLayoutViewport()
   const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
-  const tableBackground = isPhoneLayout
-    ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
-    : ACTIVE_ROOM_TABLE_BACKGROUND
+  const tableBackground = getActiveRoomTableBackground(isPhoneLayout)
   const scoringPanelMobileScale = isPhoneLayout && typeof window !== 'undefined'
     ? getScoringPanelMobileScale(window.innerWidth, stageScale)
     : 1

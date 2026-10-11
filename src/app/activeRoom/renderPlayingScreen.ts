@@ -14,9 +14,7 @@ import {
   ACTIVE_ROOM_MAX_STAGE_SCALE,
   ACTIVE_ROOM_MIN_STAGE_SCALE,
   ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
-  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
   ACTIVE_ROOM_TABLE_STAGE_BACKGROUND,
-  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
@@ -25,6 +23,7 @@ import {
   BOTTOM_HAND_MOBILE_CARD_HEIGHT,
   BOTTOM_HAND_MOBILE_SPACING,
   BOTTOM_HAND_MOBILE_CENTER_Y_OFFSET,
+  getActiveRoomTableBackground,
   getBottomHandMobileFanScale,
   escapeHtml,
 } from './activeRoomShared'
@@ -2147,9 +2146,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   )
   const isPhoneLayout = isPhoneLayoutViewport()
   const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
-  const tableBackground = isPhoneLayout
-    ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
-    : ACTIVE_ROOM_TABLE_BACKGROUND
+  const tableBackground = getActiveRoomTableBackground(isPhoneLayout)
   const mobileStageMetrics = isPhoneLayout
     ? getViewportStageMetrics({
         baseWidth: ACTIVE_ROOM_STAGE_WIDTH,

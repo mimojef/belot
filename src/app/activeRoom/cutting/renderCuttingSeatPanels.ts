@@ -1,5 +1,5 @@
 import type { RoomCardSnapshot, RoomSeatSnapshot, Seat, TournamentBotReplacementSnapshot } from '../../network/createGameServerClient'
-import { CARD_BACK_IMAGE_PATH, getCardFaceImagePath } from '../cardImageAssets'
+import { getCardFaceImagePath, getActiveRoomCardBackImageValue } from '../cardImageAssets'
 import { getAnimatedEmojiUrl } from '../../animatedEmoji/animatedEmojiAssets'
 import {
   CUTTING_VISUAL_SEAT_INITIALS,
@@ -568,7 +568,7 @@ const PANEL_CARD_REPOSITION_EASING = 'cubic-bezier(0.22,1,0.36,1)'
 function renderPanelCardBack(): string {
   return `
     <span style="position:absolute;inset:0;border-radius:16px;background:linear-gradient(180deg,rgba(255,255,255,0.98) 0%,rgba(241,245,249,0.98) 100%);"></span>
-    <span style="position:absolute;inset:11px;border-radius:12px;border:1px solid rgba(15,23,42,0.10);background-image:url('${CARD_BACK_IMAGE_PATH}');background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
+    <span style="position:absolute;inset:11px;border-radius:12px;border:1px solid rgba(15,23,42,0.10);background-image:${getActiveRoomCardBackImageValue()};background-size:cover;background-position:center;background-repeat:no-repeat;"></span>
   `
 }
 

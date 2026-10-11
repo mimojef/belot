@@ -54,6 +54,18 @@ export type CampaignSchedulerDeps = {
   // Monitoring-only, best-effort — mirror на tournamentScheduler.ts
   // onTickTiming: никога не хвърля, никога не влияе на scheduler логиката.
   onTickTiming?: (durationMs: number) => void
+  /**
+   * Фаза 10 — извиква се ВЕДНАГА след успешен (не "already"/not-ready)
+   * автоматичен activate/finish преход, за да може index.ts (единственото
+   * място с достъп до WS connections) да broadcast-не актуалната активна
+   * тема към всички свързани клиенти — scheduler-ът самия остава
+   * "НУЛЕВА директна DB/WS зависимост" (виж doc коментара най-отгоре),
+   * чисто side-channel callback, mirror на Фаза 9's onRewardNotification
+   * pattern в campaignGameHooks.ts/campaignPurchaseHooks.ts. Best-effort —
+   * грешка в callback-а никога не чупи scheduler tick-а (виж runTick-а).
+   */
+  onCampaignActivated?: (campaignId: CampaignId) => void
+  onCampaignFinished?: (campaignId: CampaignId) => void
 }
 
 const DEFAULT_INTERVAL_MS = 15_000
@@ -81,13 +93,27 @@ export function createCampaignScheduler(deps: CampaignSchedulerDeps): CampaignSc
   let lastError: string | null = null
   let processedLastTick = 0
 
+  function safeNotify(fn: (() => void) | undefined): void {
+    if (!fn) return
+    try {
+      fn()
+    } catch (error) {
+      logError('[campaign-scheduler] onCampaignActivated/onCampaignFinished callback failed', error)
+    }
+  }
+
   function handleDueScheduledCampaign(campaignId: CampaignId, tickNow: Date): void {
     const activateResult = deps.store.activateCampaign(campaignId, tickNow, SYSTEM_ACTOR)
-    if (!activateResult.ok && activateResult.reason === 'already_expired') {
+    if (activateResult.ok) {
+      safeNotify(() => deps.onCampaignActivated?.(campaignId))
+      return
+    }
+    if (activateResult.reason === 'already_expired') {
       // Цялият период (вкл. ends_at) вече е отминал преди сървърът да успее
       // да активира кампанията изобщо (напр. дълго прекъсване) — директно
       // scheduled -> finished, НИКОГА за кратко през 'active' (виж §5 от
-      // task spec-а: "Не я активирай за кратко само за да я приключиш").
+      // task spec-а: "Не я активирай за кратко само само за да я приключиш").
+      // Никога не е била "активна" визуално -> няма тема за broadcast-ване.
       deps.store.expireScheduledCampaignWithoutActivating(campaignId, tickNow, SYSTEM_ACTOR)
     }
     // 'another_campaign_active' / 'invalid_status' / 'campaign_not_found' —
@@ -119,7 +145,10 @@ export function createCampaignScheduler(deps: CampaignSchedulerDeps): CampaignSc
       const dueActiveIds = deps.store.listDueActiveCampaignIds(tickNow, batchSize)
       for (const campaignId of dueActiveIds) {
         try {
-          deps.store.finishCampaign(campaignId, tickNow, SYSTEM_ACTOR)
+          const finishResult = deps.store.finishCampaign(campaignId, tickNow, SYSTEM_ACTOR)
+          if (finishResult.ok) {
+            safeNotify(() => deps.onCampaignFinished?.(campaignId))
+          }
           processedLastTick += 1
         } catch (error) {
           lastError = sanitizeError(error)

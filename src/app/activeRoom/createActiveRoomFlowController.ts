@@ -42,8 +42,6 @@ import {
 } from './activeRoomTypes'
 import {
   ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT,
-  ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND,
-  ACTIVE_ROOM_TABLE_BACKGROUND,
   ACTIVE_ROOM_STAGE_HEIGHT,
   ACTIVE_ROOM_STAGE_WIDTH,
   ACTIVE_ROOM_VIEWPORT_HORIZONTAL_PADDING,
@@ -56,10 +54,13 @@ import {
   createPhraseReactionUiState,
   createPlayingUiCache,
   escapeHtml,
+  getActiveCampaignTheme,
   getActiveRoomStageMetrics,
+  getActiveRoomTableBackground,
   getSeatAfterDealerForDealFallback,
   resetPlayingUiCache,
   computeNextLastKnownWinningBid,
+  setActiveCampaignTheme,
 } from './activeRoomShared'
 import { isPhoneLayoutViewport } from '../../ui/layout/viewportStage'
 import {
@@ -3312,9 +3313,7 @@ export function createActiveRoomFlowController(
 
     const isPhoneLayout = isPhoneLayoutViewport()
     const mobileLayoutAttribute = isPhoneLayout ? 'data-mobile-layout="1"' : ''
-    const tableBackground = isPhoneLayout
-      ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND
-      : ACTIVE_ROOM_TABLE_BACKGROUND
+    const tableBackground = getActiveRoomTableBackground(isPhoneLayout)
 
     lastKnownWinningBid = computeNextLastKnownWinningBid(lastKnownWinningBid, activeRoomState.game)
 
@@ -3785,6 +3784,12 @@ export function createActiveRoomFlowController(
             isLocalPlayerCutter,
             isCutSubmissionPending,
             tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+            // Фаза 10 — тематичната маса/гръб на картите не влиза в нищо
+            // от полетата по-горе, затова без това поле active_campaign_
+            // theme push по време на cutting щеше да се игнорира от fast
+            // dedup клона долу (нищо "cutting-specific" не се е променило),
+            // оставяйки стар фон/гръб до следваща ИГРОВА промяна.
+            activeCampaignTheme: getActiveCampaignTheme(),
           })
         : null
 
@@ -4383,6 +4388,8 @@ export function createActiveRoomFlowController(
         handCounts,
         ownHandIds: ownHand.map((card) => card.id),
         tournamentBotReplacements: activeRoomState.tournamentBotReplacements,
+        // Фаза 10 — виж аналогичния коментар в cuttingStableRenderKey по-горе.
+        activeCampaignTheme: getActiveCampaignTheme(),
       })
 
       if (
@@ -6744,6 +6751,12 @@ export function createActiveRoomFlowController(
         tournamentRoundResultFeederScoreB = message.scoreTeamB
         scheduleActiveRoomRender()
       }
+      return false
+    }
+
+    if (message.type === 'active_campaign_theme') {
+      setActiveCampaignTheme(message.theme)
+      scheduleActiveRoomRender()
       return false
     }
 

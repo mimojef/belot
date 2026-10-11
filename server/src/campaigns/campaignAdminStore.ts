@@ -7,6 +7,16 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 export type CampaignAdminGameKind = 'belot' | 'ludo'
 export type CampaignAdminRewardType = 'yellow_coins' | 'vip_days' | 'gift_item'
 
+// Фаза 10 — четирите тематични визуални ресурса. Козметична конфигурация:
+// редактируема за draft/scheduled/active/finished/stopped кампания (виж
+// updateThemeAsset doc коментара по-долу за rationale) — НИКОГА заключена
+// като earn rules/tiers/базовите полета (saveCampaignConfiguration), mirror
+// на updateMarketingSender's "always editable" философия, но дори по-широко
+// (marketing sender е заключен за finished/stopped; тематичните изображения
+// — §3 от задачата — трябва да могат да се сменят по всяко време, стига
+// кампанията да не е soft-deleted).
+export type CampaignThemeAssetKind = 'unit_icon' | 'table_bg_desktop' | 'table_bg_mobile' | 'card_back'
+
 export type CampaignAdminEarnRule = {
   gameKind: CampaignAdminGameKind
   stakeAmount: number
@@ -98,6 +108,12 @@ export type CampaignAdminStore = {
   updateMarketingSender: (
     campaignId: string,
     giftSenderProfileId: string | null,
+    actor: CampaignActionActor,
+  ) => CampaignAdminStoreResult<CampaignAdminCampaignSnapshot>
+  updateThemeAsset: (
+    campaignId: string,
+    kind: CampaignThemeAssetKind,
+    url: string | null,
     actor: CampaignActionActor,
   ) => CampaignAdminStoreResult<CampaignAdminCampaignSnapshot>
   validateCampaignReady: (campaignId: string) => CampaignAdminStoreResult<CampaignAdminCampaignSnapshot>
@@ -287,6 +303,30 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     SET gift_sender_profile_id = ?, updated_at = CURRENT_TIMESTAMP
     WHERE campaign_id = ?;
   `)
+
+  // Фаза 10 — по една prepared statement на ресурс (не динамично генериран
+  // SQL с interpolated column име) — explicit, одитируем набор от 4
+  // statement-а, всеки с фиксирана колона. THEME_ASSET_UPDATE_STATEMENTS
+  // по-долу маппва kind -> statement БЕЗ interpolation на каквото и да е
+  // user-/caller-подадено в самия SQL текст.
+  const updateUnitIconStatement = database.prepare(`
+    UPDATE campaigns SET unit_icon_url = ?, updated_at = CURRENT_TIMESTAMP WHERE campaign_id = ?;
+  `)
+  const updateTableBgDesktopStatement = database.prepare(`
+    UPDATE campaigns SET table_bg_desktop_url = ?, updated_at = CURRENT_TIMESTAMP WHERE campaign_id = ?;
+  `)
+  const updateTableBgMobileStatement = database.prepare(`
+    UPDATE campaigns SET table_bg_mobile_url = ?, updated_at = CURRENT_TIMESTAMP WHERE campaign_id = ?;
+  `)
+  const updateCardBackStatement = database.prepare(`
+    UPDATE campaigns SET card_back_url = ?, updated_at = CURRENT_TIMESTAMP WHERE campaign_id = ?;
+  `)
+  const themeAssetUpdateStatements: Record<CampaignThemeAssetKind, ReturnType<SqliteDatabase['prepare']>> = {
+    unit_icon: updateUnitIconStatement,
+    table_bg_desktop: updateTableBgDesktopStatement,
+    table_bg_mobile: updateTableBgMobileStatement,
+    card_back: updateCardBackStatement,
+  }
 
   const insertEventStatement = database.prepare(`
     INSERT INTO campaign_events (event_id, campaign_id, event_type, actor_profile_id, payload_json)
@@ -905,10 +945,57 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     }
   }
 
+  /**
+   * Фаза 10 — качва/премахва ЕДИН от четирите тематични ресурса. За разлика
+   * от updateMarketingSender (заключен за finished/stopped), тук е
+   * редактируем за ВСЕКИ нормален статус (§3: "трябва да могат да се
+   * сменят дори след активиране на кампанията" — и неявно, след приключване,
+   * тъй като тематичните изображения са чисто козметични, не бизнес-критични
+   * параметри). Единствената забрана е soft-deleted кампания. `url: null`
+   * премахва персонализацията (връща се стандартния ресурс) — файлово
+   * cleanup-ът (delete на стария upload, ако има) е отговорност на HTTP
+   * caller-а (index.ts), не на тоя чист DB store.
+   */
+  function updateThemeAsset(
+    campaignIdInput: string,
+    kind: CampaignThemeAssetKind,
+    urlInput: string | null,
+    actor: CampaignActionActor,
+  ): CampaignAdminStoreResult<CampaignAdminCampaignSnapshot> {
+    const campaignId = normalizeText(campaignIdInput, 96)
+    const url = normalizeOptionalText(urlInput, 512)
+    const statement = themeAssetUpdateStatements[kind]
+
+    if (statement === undefined) {
+      return resultError('Невалиден тип тематичен ресурс.', 'invalid_theme_asset_kind')
+    }
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const existing = getCampaignRecord(campaignId)
+      if (existing === null || existing.deletedAt !== null) {
+        rollback()
+        return resultError('Кампанията не беше намерена.', 'campaign_not_found')
+      }
+
+      statement.run(url, campaignId)
+      insertEvent(campaignId, 'campaign_theme_asset_updated', actor, { kind, url })
+      database.exec('COMMIT;')
+
+      const snapshot = getCampaignSnapshot(campaignId)
+      if (snapshot === null) return resultError('Кампанията беше записана, но не беше прочетена обратно.', 'reload_failed')
+      return { ok: true, value: snapshot }
+    } catch (error) {
+      rollback()
+      throw error
+    }
+  }
+
   return {
     getSnapshot,
     saveCampaignConfiguration,
     updateMarketingSender,
+    updateThemeAsset,
     validateCampaignReady,
     close: () => database.close(),
   }

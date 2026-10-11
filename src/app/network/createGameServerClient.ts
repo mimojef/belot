@@ -1580,6 +1580,24 @@ export type CampaignMatchCreditResultMessage = {
   credit: CampaignMatchCreditSnapshot | null
 }
 
+// Фаза 10 (тематични изображения на кампаниите) — push-only (сървър ->
+// всички локални connections), mirror на server/src/protocol/messageTypes.ts
+// doc коментара. `theme: null` = няма активна тематизирана кампания в
+// момента -> клиентът се връща към стандартните Белот ресурси. Виж
+// src/app/activeRoom/activeRoomShared.ts::setActiveCampaignTheme за
+// consuming страната.
+export type CampaignThemeAssets = {
+  unitIconUrl: string | null
+  tableBgDesktopUrl: string | null
+  tableBgMobileUrl: string | null
+  cardBackUrl: string | null
+}
+
+export type ActiveCampaignThemeMessage = {
+  type: 'active_campaign_theme'
+  theme: CampaignThemeAssets | null
+}
+
 // Фаза 8 (профилен popup "Кампании под Ранг" + "Виж всички награди" +
 // последна приключила кампания) — виж
 // server/src/campaigns/campaignCreditStore.ts::PlayerCampaignProfileSummary
@@ -3078,6 +3096,7 @@ export type ServerMessage =
   | PaidGiftNotificationReceivedMessage
   | PendingPaidGiftNotificationsMessage
   | PendingCampaignRewardNotificationsMessage
+  | ActiveCampaignThemeMessage
   | TournamentPartnerInviteReceivedMessage
   | TournamentPartnerInvitePopupDismissedMessage
   | TournamentPartnerInviteResolvedMessage

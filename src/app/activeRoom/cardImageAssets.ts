@@ -1,6 +1,30 @@
 import type { RoomCardSnapshot } from '../network/createGameServerClient'
+import { getActiveCampaignTheme } from './activeRoomShared'
 
 export const CARD_BACK_IMAGE_PATH = '/images/cards/card-back.webp'
+
+/**
+ * Фаза 10 — заменя литералния `url('${CARD_BACK_IMAGE_PATH}')` на всичките
+ * 3 render места, където играта реално показва гръб на карта (cutting
+ * deck pile, dealing packet анимация, seat panel dealt-card fan-ове —
+ * последният е shared между opponent hands/bottom hand/spectator view).
+ * Темизираният гръб е ДОПЪЛНИТЕЛЕН CSS background-image layer ПРЕД
+ * default-а (не го замества) — ако themed файлът не зареди, браузърът
+ * просто не рисува тоя layer и default-ният гръб отдолу остава изцяло
+ * видим (безопасен fallback, без JS/onerror, mirror на
+ * activeRoomShared.ts::getActiveRoomTableBackground-ия паттерн). Всичките
+ * 3 call sites вече имат собствен единичен background-size/position/repeat
+ * (напр. `cover`/`center`/`no-repeat`) — CSS спецификацията цикли тия
+ * стойности за всеки допълнителен background-image layer, затова не
+ * трябва да се пипат отделно.
+ */
+export function getActiveRoomCardBackImageValue(): string {
+  const themedUrl = getActiveCampaignTheme()?.cardBackUrl ?? null
+  if (!themedUrl) {
+    return `url('${CARD_BACK_IMAGE_PATH}')`
+  }
+  return `url('${themedUrl}'), url('${CARD_BACK_IMAGE_PATH}')`
+}
 
 const SUITS: readonly RoomCardSnapshot['suit'][] = ['clubs', 'diamonds', 'hearts', 'spades']
 const RANKS: readonly RoomCardSnapshot['rank'][] = ['7', '8', '9', '10', 'J', 'Q', 'K', 'A']

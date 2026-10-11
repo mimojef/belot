@@ -4,6 +4,7 @@ import type {
   AdminCampaignRewardType,
   AdminCampaignRow,
   AdminCampaignStatus,
+  AdminCampaignThemeAssetKind,
   AdminCampaignTierReward,
 } from './adminCampaignTypes'
 
@@ -29,6 +30,8 @@ export type AdminCampaignsPanelHandlers = {
   onSave: (draft: AdminCampaignEditorDraft) => void
   onAction: (campaignId: string, action: AdminCampaignAction) => void
   onMarketingSenderSave: (campaignId: string, giftSenderProfileId: string | null) => void
+  onThemeAssetUpload: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
+  onThemeAssetRemove: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
 }
 
 function esc(value: unknown): string {
@@ -134,7 +137,56 @@ function renderRewardEditor(
   `
 }
 
-function renderEditor(draft: AdminCampaignEditorDraft, referenceData: AdminCampaignReferenceData, isLocked: boolean): string {
+const THEME_ASSET_ACCEPT: Record<AdminCampaignThemeAssetKind, string> = {
+  unit_icon: 'image/png,image/jpeg,image/webp,image/gif',
+  table_bg_desktop: 'image/png,image/jpeg,image/webp',
+  table_bg_mobile: 'image/png,image/jpeg,image/webp',
+  card_back: 'image/png,image/jpeg,image/webp',
+}
+
+function renderThemeAssetWidget(kind: AdminCampaignThemeAssetKind, label: string, url: string | null): string {
+  const previewHtml = url
+    ? `<img src="${esc(url)}" alt="${esc(label)}" style="max-width:170px;max-height:96px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);object-fit:cover;background:#000;">`
+    : `<div style="width:170px;height:96px;border-radius:6px;border:1px dashed rgba(255,255,255,0.22);display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.35);font-size:11px;font-weight:800;">По подразбиране</div>`
+
+  return `
+    <div data-admin-campaign-theme-widget="${kind}" style="display:flex;flex-direction:column;gap:8px;min-width:170px;">
+      <div style="font-size:11px;font-weight:900;color:rgba(255,255,255,0.6);">${esc(label)}</div>
+      ${previewHtml}
+      <div style="display:flex;gap:6px;flex-wrap:wrap;">
+        <label style="height:30px;display:inline-flex;align-items:center;padding:0 10px;border:1px solid rgba(147,197,253,0.35);border-radius:6px;background:rgba(30,64,175,0.22);color:#bfdbfe;font-size:11px;font-weight:900;cursor:pointer;">
+          ${url ? 'Замени' : 'Качи'}
+          <input data-admin-campaign-theme-upload="${kind}" type="file" accept="${THEME_ASSET_ACCEPT[kind]}" style="display:none;">
+        </label>
+        ${url ? `<button type="button" data-admin-campaign-theme-remove="${kind}" style="height:30px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.30);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Премахни</button>` : ''}
+      </div>
+    </div>
+  `
+}
+
+function renderThemeAssetsSection(campaignId: string, row: AdminCampaignRow): string {
+  return `
+    <section data-admin-campaign-theme-section="1" data-campaign-id="${esc(campaignId)}" style="border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:rgba(0,0,0,0.34);padding:14px;display:flex;flex-direction:column;gap:12px;">
+      <div style="font-size:14px;font-weight:950;color:#fff;">Тематична визия</div>
+      <div style="color:rgba(255,255,255,0.45);font-size:11px;font-weight:700;line-height:1.5;">
+        Автоматично се прилага върху масата на Белот докато кампанията е активна и изчезва автоматично при край/спиране. Редактируема е независимо от статуса на кампанията. Всеки от 4-те ресурса е по избор — липсващ ресурс пада обратно на стандартната визия.
+      </div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px;">
+        ${renderThemeAssetWidget('unit_icon', 'Иконка (поддържа GIF)', row.unitIconUrl)}
+        ${renderThemeAssetWidget('table_bg_desktop', 'Маса — Desktop', row.tableBgDesktopUrl)}
+        ${renderThemeAssetWidget('table_bg_mobile', 'Маса — Mobile', row.tableBgMobileUrl)}
+        ${renderThemeAssetWidget('card_back', 'Гръб на картите', row.cardBackUrl)}
+      </div>
+    </section>
+  `
+}
+
+function renderEditor(
+  draft: AdminCampaignEditorDraft,
+  referenceData: AdminCampaignReferenceData,
+  isLocked: boolean,
+  themeRow: AdminCampaignRow | null,
+): string {
   const allowedBelotStakes = referenceData.allowedStakes.belot
   const allowedLudoStakes = referenceData.allowedStakes.ludo
   const selectedCampaignId = draft.campaignId ?? ''
@@ -180,6 +232,7 @@ function renderEditor(draft: AdminCampaignEditorDraft, referenceData: AdminCampa
   `).join('')
 
   return `
+    <div style="display:flex;flex-direction:column;gap:14px;">
     <form data-admin-campaign-form="1" data-campaign-id="${esc(selectedCampaignId)}" style="border:1px solid rgba(255,255,255,0.12);border-radius:8px;background:rgba(0,0,0,0.34);padding:14px;display:flex;flex-direction:column;gap:14px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;">
         <div style="font-size:16px;font-weight:950;color:#fff;">${draft.campaignId ? 'Редакция на кампания' : 'Нова кампания'}</div>
@@ -209,6 +262,8 @@ function renderEditor(draft: AdminCampaignEditorDraft, referenceData: AdminCampa
         <div style="display:flex;flex-direction:column;gap:10px;">${tierRows || '<div style="color:rgba(255,255,255,0.45);font-size:12px;font-weight:800;">Няма наградни прагове.</div>'}</div>
       </section>
     </form>
+    ${themeRow ? renderThemeAssetsSection(selectedCampaignId, themeRow) : ''}
+    </div>
   `
 }
 
@@ -275,7 +330,7 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
       </div>
       ${state.adminCampaignsLoading ? '<div style="padding:20px;color:#d4a520;font-size:13px;font-weight:900;text-align:center;">Зареждане…</div>' : ''}
       <div style="display:flex;flex-direction:column;gap:10px;">${rowsHtml}</div>
-      ${state.adminCampaignEditorDraft && referenceData ? renderEditor(state.adminCampaignEditorDraft, referenceData, editorLocked) : ''}
+      ${state.adminCampaignEditorDraft && referenceData ? renderEditor(state.adminCampaignEditorDraft, referenceData, editorLocked, editorRow) : ''}
       ${referenceData && state.adminCampaignEditorDraft ? `
         <div style="display:flex;flex-wrap:wrap;gap:8px;color:rgba(255,255,255,0.44);font-size:11px;font-weight:800;">
           <span>Залози: ${referenceData.allowedStakes.belot.map(formatNumber).join(', ') || 'няма'}</span>
@@ -456,6 +511,31 @@ export function attachAdminCampaignsHandlers(
       const draft = currentDraft(root, state)
       const campaignId = button.dataset.adminCampaignSaveMarketing?.trim() ?? ''
       if (draft && campaignId) handlers.onMarketingSenderSave(campaignId, draft.giftSenderProfileId)
+    })
+  })
+
+  const themeSectionCampaignId = root.querySelector<HTMLElement>('[data-admin-campaign-theme-section="1"]')?.dataset.campaignId?.trim() ?? ''
+
+  root.querySelectorAll<HTMLInputElement>('[data-admin-campaign-theme-upload]').forEach((input) => {
+    input.addEventListener('change', () => {
+      const kind = input.dataset.adminCampaignThemeUpload as AdminCampaignThemeAssetKind | undefined
+      const file = input.files?.[0] ?? null
+      if (!kind || !file || !themeSectionCampaignId) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const dataUrl = typeof reader.result === 'string' ? reader.result : ''
+        if (dataUrl) handlers.onThemeAssetUpload(themeSectionCampaignId, kind, dataUrl)
+      }
+      reader.readAsDataURL(file)
+    })
+  })
+
+  root.querySelectorAll<HTMLElement>('[data-admin-campaign-theme-remove]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const kind = button.dataset.adminCampaignThemeRemove as AdminCampaignThemeAssetKind | undefined
+      if (!kind || !themeSectionCampaignId) return
+      if (!confirm('Премахване на тематичния ресурс?')) return
+      handlers.onThemeAssetRemove(themeSectionCampaignId, kind)
     })
   })
 }

@@ -6,7 +6,7 @@ import type {
   PhraseReactionUiState,
   PlayingUiCache,
 } from './activeRoomTypes'
-import type { Seat } from '../network/createGameServerClient'
+import type { Seat, CampaignThemeAssets as ActiveCampaignThemeAssets } from '../network/createGameServerClient'
 import { getViewportStageMetrics } from '../../ui/layout/viewportStage'
 export { computeNextLastKnownWinningBid, selectWinningBidFromGame } from './winningBidHelpers'
 
@@ -86,6 +86,50 @@ export const ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND = `
   linear-gradient(180deg, #07130a 0%, #020503 100%)
 `
 export const ACTIVE_ROOM_TABLE_STAGE_BACKGROUND = 'transparent'
+
+// ═══════════════ Фаза 10 — тематична визия на кампанията ═══════════════
+// Module-level mutable state (НЕ threaded параметър през десетки render
+// функции/файлове) — установен паттерн за "ambient" cross-cutting
+// стойности в тая директория (виж getBottomHandMobileFanScale по-горе,
+// window.innerWidth-driven, не параметър). Задава се ИЗКЛЮЧИТЕЛНО от
+// createActiveRoomFlowController.ts::handleServerMessage при
+// 'active_campaign_theme' push (bootstrap on connect + realtime след
+// всяка admin/scheduler промяна, виж server/src/index.ts) — никога от
+// самите render функции. Live по дизайн: продължава да се обновява дори
+// докато активна стая е отворена (§7/§8 "промяна без reload", "reconnect
+// възстановява правилната тема").
+let currentActiveCampaignTheme: ActiveCampaignThemeAssets | null = null
+
+export function setActiveCampaignTheme(theme: ActiveCampaignThemeAssets | null): void {
+  currentActiveCampaignTheme = theme
+}
+
+export function getActiveCampaignTheme(): ActiveCampaignThemeAssets | null {
+  return currentActiveCampaignTheme
+}
+
+/**
+ * Замества `isPhoneLayout ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND :
+ * ACTIVE_ROOM_TABLE_BACKGROUND`-ия ternary на всичките call sites (§5/§6/§7).
+ * Темата се слага като ДОПЪЛНИТЕЛЕН, най-горен background layer ВЪРХУ
+ * ПЪЛНИЯ стандартен background string (не го замества) — ако темизираното
+ * изображение не успее да се зареди (счупен/изтрит файл), браузърът просто
+ * не рисува тоя layer и стандартният фон отдолу остава напълно видим, без
+ * JS/onerror нужда (§7 "безопасен fallback"). Мобилният стандартен фон е
+ * чисто gradient (без изображение) — тематичният layer е единствената
+ * реална снимка на mobile, когато е зададена.
+ */
+export function getActiveRoomTableBackground(isPhoneLayout: boolean): string {
+  const theme = currentActiveCampaignTheme
+  const themedUrl = isPhoneLayout ? theme?.tableBgMobileUrl ?? null : theme?.tableBgDesktopUrl ?? null
+  const defaultBackground = isPhoneLayout ? ACTIVE_ROOM_MOBILE_TABLE_BACKGROUND : ACTIVE_ROOM_TABLE_BACKGROUND
+
+  if (!themedUrl) {
+    return defaultBackground
+  }
+
+  return `url('${themedUrl}') center / 100% 100% no-repeat, ${defaultBackground}`
+}
 
 
 export function escapeHtml(value: string): string {

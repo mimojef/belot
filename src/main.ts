@@ -39,7 +39,7 @@ import type { PlayerAccountRole, ActiveProfileBanSnapshot } from './ui/overlays/
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, CpuIncidentSummary, CpuIncidentDetail } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow } from './app/adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind } from './app/adminCampaigns/adminCampaignTypes'
 import type { AdminCampaignAction } from './app/adminCampaigns/renderAdminCampaignsPanel'
 import {
   createGameServerClient,
@@ -2558,6 +2558,41 @@ async function saveAdminCampaignMarketingSender(
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ giftSenderProfileId }),
+    })
+    return await parseAdminCampaignsSnapshotResponse(response)
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function saveAdminCampaignThemeAsset(
+  campaignId: string,
+  kind: AdminCampaignThemeAssetKind,
+  imageDataUrl: string,
+): Promise<AdminCampaignsSnapshotResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/theme-assets/${encodeURIComponent(kind)}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageDataUrl }),
+    })
+    return await parseAdminCampaignsSnapshotResponse(response)
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function removeAdminCampaignThemeAsset(
+  campaignId: string,
+  kind: AdminCampaignThemeAssetKind,
+): Promise<AdminCampaignsSnapshotResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/theme-assets/${encodeURIComponent(kind)}`, {
+      method: 'PATCH',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageDataUrl: null }),
     })
     return await parseAdminCampaignsSnapshotResponse(response)
   } catch {
@@ -7152,6 +7187,8 @@ lobby = createLobbyFlowController({
   onAdminCampaignSaveRequest: (draft) => saveAdminCampaign(draft),
   onAdminCampaignActionRequest: (campaignId, action) => postAdminCampaignAction(campaignId, action),
   onAdminCampaignMarketingSenderSaveRequest: (campaignId, giftSenderProfileId) => saveAdminCampaignMarketingSender(campaignId, giftSenderProfileId),
+  onAdminCampaignThemeAssetUploadRequest: (campaignId, kind, imageDataUrl) => saveAdminCampaignThemeAsset(campaignId, kind, imageDataUrl),
+  onAdminCampaignThemeAssetRemoveRequest: (campaignId, kind) => removeAdminCampaignThemeAsset(campaignId, kind),
   onAdCampaignsLoad: () => loadAdCampaignManagement(),
   onAdCampaignCreateSubmit: (input) => createAdCampaignSubmit(input),
   onAdCampaignSendSubmit: (campaignId) => sendAdCampaignSubmit(campaignId),

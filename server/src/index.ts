@@ -28,7 +28,13 @@ import { dbDateToUtc } from './db/dbDate.js'
 import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
 import { createCampaignsStore } from './campaigns/campaignsStore.js'
-import { createCampaignAdminStore, type CampaignAdminSaveInput } from './campaigns/campaignAdminStore.js'
+import { createCampaignAdminStore, type CampaignAdminSaveInput, type CampaignThemeAssetKind, type CampaignAdminCampaignSnapshot } from './campaigns/campaignAdminStore.js'
+import {
+  decodeCampaignGifUploadDataUrl,
+  isValidCampaignGifBuffer,
+  MAX_CAMPAIGN_GIF_INPUT_BYTES,
+  CAMPAIGN_GIF_MAX_DIMENSION_PX,
+} from './uploads/campaignThemeAssets.js'
 import { createCampaignScheduler } from './campaigns/campaignScheduler.js'
 import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import {
@@ -114,6 +120,7 @@ import {
   GIFT_ITEM_IMAGE_DIMENSION_PX,
   GIFT_ITEM_IMAGE_WEBP_QUALITY,
   IMAGE_ATTACHMENT_FILENAME_PATTERN,
+  IMAGE_ATTACHMENT_WEBP_QUALITY,
   MAX_IMAGE_ATTACHMENT_INPUT_BYTES,
   MAX_IMAGE_ATTACHMENT_JSON_BYTES,
   processImageAttachmentToWebp,
@@ -420,6 +427,7 @@ import type {
   BelotSpectateEndedMessage,
   BelotSpectateEndedReason,
   BelotSpectateStartedMessage,
+  CampaignThemeAssets,
 } from './protocol/messageTypes.js'
 import { validateGuestContactPayload } from './contact/guestContactValidation.js'
 import { sendGuestContactEmail } from './contact/sendGuestContactEmail.js'
@@ -501,6 +509,41 @@ const AD_CAMPAIGN_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'ad-campaigns')
 // Virtual item gift каталог — иконите са публично видими (аналогично на
 // avatars/gallery/ad-campaigns), виж PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.
 const GIFT_ITEM_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'gift-items')
+// Фаза 10 — тематични изображения на кампаниите (иконка/маси/гръб на
+// картите). Публично видими (аналогично на gift-items) — всеки на масата
+// трябва да ги зареди, вкл. гост/guest trial, без автентикация.
+//
+// Фаза 10.1 — всяка кампания получава собствена физическа папка, именувана
+// по campaignId, с подпапки icons/tables/card-backs (вместо общ flat
+// campaign-themes/<file> layout). Папката/файловете на завършена/спряна/
+// soft-deleted кампания НИКОГА не се трият автоматично — виж
+// deleteUploadFileByUrl call sites в theme-assets route handler-а по-долу,
+// които трият единствено КОНКРЕТНИЯ заменен/премахнат файл, никога папка.
+const CAMPAIGN_THEME_UPLOADS_PATH = join(UPLOADS_ROOT_PATH, 'campaign-themes')
+
+// campaignId винаги е server-generated randomUUID() (виж campaignAdminStore
+// ::saveCampaignConfiguration — нов campaignId е ВИНАГИ randomUUID(), а
+// requestedCampaignId от клиента се ползва само за lookup на СЪЩЕСТВУВАЩ
+// ред, никога директно като нова стойност). Тук campaignId идва от URL
+// path segment (атакуем вход) и СЕГА се ползва директно като литерално име
+// на директория — строг UUID-формат whitelist ПРЕДИ всякакъв fs достъп е
+// defense-in-depth срещу path traversal (напр. campaignId = "../../etc").
+const CAMPAIGN_ID_PATH_SEGMENT_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+function isValidCampaignIdPathSegment(campaignId: string): boolean {
+  return CAMPAIGN_ID_PATH_SEGMENT_PATTERN.test(campaignId)
+}
+
+const CAMPAIGN_THEME_ASSET_SUBFOLDER: Record<CampaignThemeAssetKind, 'icons' | 'tables' | 'card-backs'> = {
+  unit_icon: 'icons',
+  table_bg_desktop: 'tables',
+  table_bg_mobile: 'tables',
+  card_back: 'card-backs',
+}
+
+function getCampaignThemeAssetDirectory(campaignId: string, kind: CampaignThemeAssetKind): string {
+  return join(CAMPAIGN_THEME_UPLOADS_PATH, campaignId, CAMPAIGN_THEME_ASSET_SUBFOLDER[kind])
+}
 
 // Личен чат — снимки. Отделна upload директория, НЕ сервирана от публичния
 // handleUploadsRequest (виж handleChatAttachmentRequest) — снимките в
@@ -2982,7 +3025,15 @@ const campaignAdminStore = isCampaignsFeatureEnabled()
   ? await createCampaignAdminStore(databaseBootstrap.databaseFilePath)
   : null
 const campaignScheduler = campaignsStore !== null
-  ? createCampaignScheduler({ store: campaignsStore })
+  ? createCampaignScheduler({
+      store: campaignsStore,
+      // Фаза 10 — автоматично activate/finish (scheduler tick) трябва да
+      // прилага/премахва тематичната визия ЕДНАКВО с ръчно activate/stop от
+      // admin панела (§5: "Автоматично активирана кампания от scheduler
+      // трябва да работи по същия начин като ръчно активирана кампания").
+      onCampaignActivated: () => broadcastActiveCampaignThemeToAllLocalConnections(),
+      onCampaignFinished: () => broadcastActiveCampaignThemeToAllLocalConnections(),
+    })
   : null
 const campaignCreditStore = isCampaignsFeatureEnabled()
   ? await createCampaignCreditStore(databaseBootstrap.databaseFilePath)
@@ -8297,6 +8348,7 @@ const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
   resolve(GALLERY_UPLOADS_PATH),
   resolve(AD_CAMPAIGN_UPLOADS_PATH),
   resolve(GIFT_ITEM_UPLOADS_PATH),
+  resolve(CAMPAIGN_THEME_UPLOADS_PATH),
 ]
 
 function resolveUploadRequestPath(pathname: string): string | null {
@@ -8344,8 +8396,16 @@ async function handleUploadsRequest(
     }
 
     const fileBuffer = await readFile(filePath)
+    // Фаза 10 — до сега ВСЕКИ upload тип (avatars/gallery/ad-campaigns/
+    // gift-items) е бил сервиран само като .webp, затова hardcoded
+    // 'image/webp' никога не е бил проблем. Кампанийната анимирана GIF
+    // иконка (.gif, непроменена от sharp — виж campaignThemeAssets.ts doc
+    // коментара защо) е ПЪРВИЯТ non-webp файл под тая route, затова
+    // Content-Type вече следва реалното разширение — грешен MIME за GIF
+    // би го показал счупен/статичен в браузъра.
+    const contentType = filePath.toLowerCase().endsWith('.gif') ? 'image/gif' : 'image/webp'
     res.writeHead(200, {
-      'Content-Type': 'image/webp',
+      'Content-Type': contentType,
       'Cache-Control': 'public, max-age=31536000, immutable',
     })
     res.end(fileBuffer)
@@ -16525,6 +16585,44 @@ function pushCampaignRewardNotificationRealtime(
   }
 }
 
+// Фаза 10 (тематични изображения на кампаниите) — "коя кампания е активна
+// В МОМЕНТА" е винаги преизчислена директно от campaignsStore (не кеширана
+// тук) — DB-то си остава единственият authoritative източник, mirror на
+// принципа от Фаза 8/9. null когато: флагът е изключен, store-ът не е
+// инстанциран (campaignsStore===null, същата conditional-instantiation
+// гаранция като campaignCreditStore), или просто няма активна кампания.
+function getCurrentActiveCampaignThemeOrNull(): CampaignThemeAssets | null {
+  if (!isCampaignsFeatureEnabled() || campaignsStore === null) {
+    return null
+  }
+  const active = campaignsStore.getActiveCampaign()
+  if (active === null) {
+    return null
+  }
+  return {
+    unitIconUrl: active.unitIconUrl,
+    tableBgDesktopUrl: active.tableBgDesktopUrl,
+    tableBgMobileUrl: active.tableBgMobileUrl,
+    cardBackUrl: active.cardBackUrl,
+  }
+}
+
+// Изпраща се към ВСИЧКИ локално свързани connections (не profile-scoped —
+// Белот масата е тематизирана еднакво за всеки на нея, вкл. гост/guest
+// trial) — mirror на established "inline loop, no reusable wrapper"
+// convention (виж broadcastAdCampaignDeletedToAllLocalConnections за
+// идентичен паттерн). Извиква се след ВСЯКА промяна, която би могла да
+// промени активната тема (admin activate/stop/delete, upload/remove на
+// тематичен ресурс, scheduler-ово automatic activate/finish) — винаги
+// преизчислява текущата истина, никога не предполага "старата" тема.
+function broadcastActiveCampaignThemeToAllLocalConnections(): void {
+  const theme = getCurrentActiveCampaignThemeOrNull()
+  for (const conn of Object.values(serverState.connections)) {
+    if (conn.status !== 'connected') continue
+    safeSendToConnection(conn.id, { type: 'active_campaign_theme', theme })
+  }
+}
+
 async function handleStripeWebhookRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -17710,6 +17808,32 @@ function campaignLifecycleErrorMessage(reason: string): string {
   }
 }
 
+// Фаза 10 — target square-box dimension (sharp resize fit:'inside',
+// aspect-ratio preserved — виж processImageAttachmentToWebp) по ресурс.
+// Масите/гръбът на картите НЕ са квадратни, но 'inside' fit-ът просто
+// capped-ва най-голямата страна до тая стойност, без да изкривява
+// пропорциите — безопасно за landscape (маса) и portrait (гръб) източници
+// еднакво.
+const CAMPAIGN_THEME_ASSET_DIMENSION_PX: Record<CampaignThemeAssetKind, number> = {
+  unit_icon: 256,
+  table_bg_desktop: 2200,
+  table_bg_mobile: 1400,
+  card_back: 500,
+}
+
+function getCampaignThemeAssetUrl(row: CampaignAdminCampaignSnapshot, kind: CampaignThemeAssetKind): string | null {
+  switch (kind) {
+    case 'unit_icon':
+      return row.unitIconUrl
+    case 'table_bg_desktop':
+      return row.tableBgDesktopUrl
+    case 'table_bg_mobile':
+      return row.tableBgMobileUrl
+    case 'card_back':
+      return row.cardBackUrl
+  }
+}
+
 async function handleAdminCampaignsRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -17801,12 +17925,125 @@ async function handleAdminCampaignsRequest(
         })
         return true
       }
+      // Фаза 10 §6 — defense-in-depth: softDeleteCampaign вече отказва за
+      // status==='active' (не може реално да изтрие ТЕКУЩО активната тема),
+      // но broadcast-ваме безусловно при успех все пак — евтин no-op, ако
+      // нищо не е променило активната тема, коректен safety net ако тая
+      // бизнес гаранция някога се промени.
+      broadcastActiveCampaignThemeToAllLocalConnections()
       const deletedSnapshot = campaignAdminStore.validateCampaignReady(campaignId)
       sendJsonResponse(res, 200, { ok: true, campaign: deletedSnapshot.ok ? deletedSnapshot.value : null, ...campaignAdminStore.getSnapshot() })
       return true
     }
 
     sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  const themeAssetMatch = new RegExp(`^${basePath}/([^/]+)/theme-assets/([^/]+)$`).exec(pathname)
+  if (themeAssetMatch !== null) {
+    const campaignId = decodeURIComponent(themeAssetMatch[1] ?? '')
+    const kindRaw = decodeURIComponent(themeAssetMatch[2] ?? '')
+
+    if (req.method !== 'PATCH') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+
+    if (!isValidCampaignIdPathSegment(campaignId)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден campaign ID.' })
+      return true
+    }
+
+    const allowedKinds: CampaignThemeAssetKind[] = ['unit_icon', 'table_bg_desktop', 'table_bg_mobile', 'card_back']
+    if (!(allowedKinds as string[]).includes(kindRaw)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден тип тематичен ресурс.' })
+      return true
+    }
+    const kind = kindRaw as CampaignThemeAssetKind
+
+    const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
+    if (!isRecord(body)) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалидно тяло.' })
+      return true
+    }
+    const imageDataUrl = typeof body.imageDataUrl === 'string' ? body.imageDataUrl : null
+
+    const existingBeforeUpdate = campaignAdminStore.getSnapshot().campaigns.find((row) => row.campaignId === campaignId) ?? null
+    const previousUrl = existingBeforeUpdate ? getCampaignThemeAssetUrl(existingBeforeUpdate, kind) : null
+
+    // imageDataUrl === null -> премахване (връщане към стандартния ресурс).
+    if (imageDataUrl === null) {
+      const result = campaignAdminStore.updateThemeAsset(campaignId, kind, null, actor)
+      if (!result.ok) {
+        sendJsonResponse(res, 400, { ok: false, message: result.message, reason: result.reason })
+        return true
+      }
+      if (previousUrl !== null) void deleteUploadFileByUrl(previousUrl)
+      broadcastActiveCampaignThemeToAllLocalConnections()
+      sendJsonResponse(res, 200, { ok: true, campaign: result.value, ...campaignAdminStore.getSnapshot() })
+      return true
+    }
+
+    // Качване — GIF е позволен ИЗКЛЮЧИТЕЛНО за unit_icon (§2А); останалите
+    // три ресурса минават през стандартния PNG/JPEG/WebP->WebP pipeline
+    // (processImageAttachmentToWebp, същия като gift-items upload-а).
+    let newUrl: string
+    if (kind === 'unit_icon' && imageDataUrl.trim().toLowerCase().startsWith('data:image/gif;')) {
+      const gifBuffer = decodeCampaignGifUploadDataUrl(imageDataUrl)
+      if (gifBuffer === null || !isValidCampaignGifBuffer(gifBuffer)) {
+        sendJsonResponse(res, 400, {
+          ok: false,
+          message: `Невалиден GIF файл (до ${Math.round(MAX_CAMPAIGN_GIF_INPUT_BYTES / 1_000_000)}MB, до ${CAMPAIGN_GIF_MAX_DIMENSION_PX}×${CAMPAIGN_GIF_MAX_DIMENSION_PX}px).`,
+        })
+        return true
+      }
+      const filename = `${randomUUID()}.gif`
+      const subfolder = CAMPAIGN_THEME_ASSET_SUBFOLDER[kind]
+      try {
+        await writeWebpUploadFile(getCampaignThemeAssetDirectory(campaignId, kind), filename, gifBuffer)
+      } catch {
+        sendJsonResponse(res, 500, { ok: false, message: 'Файлът не можа да бъде записан.' })
+        return true
+      }
+      newUrl = createUploadUrl('campaign-themes', campaignId, subfolder, filename)
+    } else {
+      const imageBuffer = decodeImageAttachmentDataUrl(imageDataUrl)
+      if (imageBuffer === null) {
+        sendJsonResponse(res, 400, { ok: false, message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' })
+        return true
+      }
+      const dimensionPx = CAMPAIGN_THEME_ASSET_DIMENSION_PX[kind]
+      const quality = kind === 'unit_icon' || kind === 'card_back' ? GIFT_ITEM_IMAGE_WEBP_QUALITY : IMAGE_ATTACHMENT_WEBP_QUALITY
+      const processed = await processImageAttachmentToWebp(imageBuffer, {
+        enforceSourcePixelLimit: true,
+        dimensionPx,
+        quality,
+      })
+      if (processed === null) {
+        sendJsonResponse(res, 400, { ok: false, message: 'Изображението не може да бъде обработено.' })
+        return true
+      }
+      const filename = `${randomUUID()}.webp`
+      const subfolder = CAMPAIGN_THEME_ASSET_SUBFOLDER[kind]
+      try {
+        await writeWebpUploadFile(getCampaignThemeAssetDirectory(campaignId, kind), filename, processed.buffer)
+      } catch {
+        sendJsonResponse(res, 500, { ok: false, message: 'Файлът не можа да бъде записан.' })
+        return true
+      }
+      newUrl = createUploadUrl('campaign-themes', campaignId, subfolder, filename)
+    }
+
+    const result = campaignAdminStore.updateThemeAsset(campaignId, kind, newUrl, actor)
+    if (!result.ok) {
+      void deleteUploadFileByUrl(newUrl)
+      sendJsonResponse(res, 400, { ok: false, message: result.message, reason: result.reason })
+      return true
+    }
+    if (previousUrl !== null) void deleteUploadFileByUrl(previousUrl)
+    broadcastActiveCampaignThemeToAllLocalConnections()
+    sendJsonResponse(res, 200, { ok: true, campaign: result.value, ...campaignAdminStore.getSnapshot() })
     return true
   }
 
@@ -17878,6 +18115,15 @@ async function handleAdminCampaignsRequest(
       reason,
     })
     return true
+  }
+
+  // Фаза 10 — activate/stop пряко променят "коя е активната тема";
+  // schedule/clone никога не могат (нова кампания никога не "влиза"
+  // активна директно от тях); delete вече broadcast-ва отделно по-горе.
+  // Безусловен re-broadcast и за activate/stop е евтин no-op за
+  // schedule/clone случая, затова не разклоняваме по action тук.
+  if (action === 'activate' || action === 'stop') {
+    broadcastActiveCampaignThemeToAllLocalConnections()
   }
 
   const campaign = campaignAdminStore.getSnapshot().campaigns.find((row) => row.campaignId === lifecycleResult.campaign.campaignId) ?? null
@@ -21582,6 +21828,18 @@ wsServer.on('connection', (socket, request) => {
     type: 'connected',
     clientId: connection.id,
     message: 'Connected to Belot V2 server.',
+  })
+
+  // Фаза 10 — bootstrap flush на всяко ново connection (login/reconnect/
+  // restart), УМИШЛЕНО извън profileId!==null guard-а по-долу: Белот
+  // темата важи за ВСЕКИ на масата, вкл. гост/guest trial connections без
+  // profileId. Покрива §8's "осигури възстановяване на правилната тема и
+  // след reconnect или при пропуснато realtime събитие" — независимо дали
+  // този конкретен connection пропусна предходен broadcast, той винага
+  // получава текущата истина при самото отваряне на socket-а.
+  sendJsonMessage(socket, {
+    type: 'active_campaign_theme',
+    theme: getCurrentActiveCampaignThemeOrNull(),
   })
 
   if (connection.profileId !== null) {

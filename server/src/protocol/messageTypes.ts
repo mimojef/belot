@@ -1005,6 +1005,31 @@ export type CampaignMatchCreditResultMessage = {
   credit: CampaignMatchCreditSnapshot | null
 }
 
+// Фаза 10 (тематични изображения на кампаниите) — push-only (сървър ->
+// ВСИЧКИ локално свързани connections, не profile-scoped — Belot масата
+// е тематизирана за всеки на нея, вкл. гост/guest trial, независимо от
+// profileId). Изпраща се: (1) на всяко ново WS connection (bootstrap,
+// покрива login/reconnect/restart — виж index.ts connection handler-а),
+// и (2) веднага след всяка промяна на активната тема (admin
+// activate/stop/delete на кампания, upload/remove на тематичен ресурс,
+// scheduler-ово automatic activate/finish). `theme: null` значи "няма
+// активна кампания с тематична конфигурация в момента" -> клиентът
+// трябва да се върне към стандартните ресурси. Полетата са 1:1 с
+// campaigns.{unit_icon_url, table_bg_desktop_url, table_bg_mobile_url,
+// card_back_url} на ТЕКУЩАТА активна кампания — чисто визуален slice,
+// никаква финансова/административна информация.
+export type CampaignThemeAssets = {
+  unitIconUrl: string | null
+  tableBgDesktopUrl: string | null
+  tableBgMobileUrl: string | null
+  cardBackUrl: string | null
+}
+
+export type ActiveCampaignThemeMessage = {
+  type: 'active_campaign_theme'
+  theme: CampaignThemeAssets | null
+}
+
 export type MatchmakingQueuedPlayerPreview = {
   id: string
   name: string
