@@ -215,10 +215,34 @@ export async function createCampaignArchiveStore(
 
   // ─── Readiness (campaign-scoped "каквото ВСЕ ОЩЕ не е credit-нато в тоя прозорец") ───
 
+  // Елигибилност (profile_kind='human' AND is_temporary=0) и турнирно
+  // изключване (Белот) МИРОРват точно проверките, прилагани при реалното
+  // начисляване (campaignCreditStore.ts::isProfileEligibleForGameCredit,
+  // campaignGameHooks.ts::recordBelotMatchForCampaign's isTournamentMatch
+  // guard) — defense-in-depth поправка от Фаза 12 §2 одита. Без тях, ред в
+  // belot_match_completion_ledger/ludo_room_matches за ПОСТОЯНЕН каталожен
+  // бот (profile_kind='bot', is_temporary=0 — различен от ефемерен
+  // 'temp-bot-*', който никога не получава ред там) или за турнирен мач
+  // (изрично изключен от начисляване, виж campaignGameHooks.ts doc
+  // коментара) НИКОГА не би удовлетворил NOT EXISTS campaign_unit_ledger
+  // проверката (creditCampaignUnits отказва да пише ред за тях) — readiness
+  // би останал "pending" ЗАВИНАГИ, блокирайки архивирането permanently,
+  // директно противно на задачата: "Недопустимите събития не трябва да
+  // блокират архивирането завинаги."
+  const ELIGIBLE_PROFILE_SQL = `
+          EXISTS (
+            SELECT 1 FROM profiles p
+            WHERE p.profile_id = {alias}.{column} AND p.profile_kind = 'human' AND p.is_temporary = 0
+          )`
+
   const countPendingBelotWinStatement = database.prepare(`
     SELECT COUNT(*) AS c FROM belot_match_completion_ledger bmcl
     WHERE bmcl.did_win = 1 AND bmcl.is_guest_trial = 0 AND bmcl.profile_id IS NOT NULL
       AND datetime(bmcl.ended_at) >= datetime(?) AND datetime(bmcl.ended_at) < datetime(?)
+      AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 'bmcl').replace('{column}', 'profile_id')}
+      AND NOT EXISTS (
+        SELECT 1 FROM tournament_matches tm WHERE tm.room_id = bmcl.room_id
+      )
       AND NOT EXISTS (
         SELECT 1 FROM campaign_unit_ledger cul
         WHERE cul.source_type = 'belot_win' AND cul.profile_id = bmcl.profile_id AND cul.source_id = bmcl.match_scope
@@ -229,6 +253,10 @@ export async function createCampaignArchiveStore(
     SELECT COUNT(*) AS c FROM profile_match_results pmr
     WHERE pmr.did_win = 1 AND pmr.is_guest_trial = 0 AND pmr.profile_id IS NOT NULL
       AND datetime(pmr.completed_at) >= datetime(?) AND datetime(pmr.completed_at) < datetime(?)
+      AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 'pmr').replace('{column}', 'profile_id')}
+      AND NOT EXISTS (
+        SELECT 1 FROM tournament_matches tm WHERE tm.room_id = pmr.room_id
+      )
       AND NOT EXISTS (
         SELECT 1 FROM campaign_unit_ledger cul
         WHERE cul.source_type = 'belot_win' AND cul.profile_id = pmr.profile_id
@@ -244,6 +272,7 @@ export async function createCampaignArchiveStore(
     SELECT COUNT(*) AS c FROM ludo_room_matches lrm
     WHERE lrm.status = 'finished' AND lrm.winner_profile_id IS NOT NULL
       AND datetime(lrm.finished_at) >= datetime(?) AND datetime(lrm.finished_at) < datetime(?)
+      AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 'lrm').replace('{column}', 'winner_profile_id')}
       AND NOT EXISTS (
         SELECT 1 FROM campaign_unit_ledger cul
         WHERE cul.source_type = 'ludo_win' AND cul.source_id = lrm.match_id AND cul.profile_id = lrm.winner_profile_id
@@ -255,6 +284,7 @@ export async function createCampaignArchiveStore(
       SELECT COUNT(*) AS c FROM ${tableName} t
       WHERE t.status = 'paid' AND t.credited_at IS NOT NULL AND t.profile_id IS NOT NULL
         AND datetime(t.credited_at) >= datetime(?) AND datetime(t.credited_at) < datetime(?)
+        AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 't').replace('{column}', 'profile_id')}
         AND NOT EXISTS (
           SELECT 1 FROM campaign_unit_ledger cul
           WHERE cul.source_type = 'package_purchase' AND cul.source_id = t.purchase_id AND cul.profile_id = t.profile_id

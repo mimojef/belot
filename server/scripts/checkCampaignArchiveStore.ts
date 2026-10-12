@@ -203,6 +203,40 @@ async function seedGiftItem(): Promise<string> {
   }
 }
 
+// Фаза 12 §2 одит-регресия — минимален валиден tournament_matches ред (+
+// родителски tournaments/tournament_teams/tournament_rounds редове,
+// изисквани от FK-итата), асоцииран с даден room_id. Единственото поле,
+// което readiness/reconciliation SQL-ите реално ползват, е room_id (UNIQUE
+// колона) — останалите полета са минимално валидни стойности, удовлетворяващи
+// CHECK/FK constraints.
+async function seedTournamentMatchForRoom(roomId: string): Promise<void> {
+  const db = await openRawDb()
+  try {
+    const creatorProfileId = randomUUID()
+    db.prepare(`
+      INSERT INTO profiles (profile_id, display_name, normalized_display_name, is_temporary, profile_kind)
+      VALUES (?, 'Tournament Creator', 'tournament creator', 0, 'human');
+    `).run(creatorProfileId)
+    const tournamentId = randomUUID()
+    db.prepare(`
+      INSERT INTO tournaments (tournament_id, name, creator_profile_id, entry_fee, start_mode, status)
+      VALUES (?, 'Test Tournament', ?, 100, 'fill', 'final_in_progress');
+    `).run(tournamentId, creatorProfileId)
+    const teamAId = randomUUID()
+    const teamBId = randomUUID()
+    db.prepare(`INSERT INTO tournament_teams (team_id, tournament_id, status) VALUES (?, ?, 'locked');`).run(teamAId, tournamentId)
+    db.prepare(`INSERT INTO tournament_teams (team_id, tournament_id, status) VALUES (?, ?, 'locked');`).run(teamBId, tournamentId)
+    const roundId = randomUUID()
+    db.prepare(`INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index) VALUES (?, ?, 'final', 1);`).run(roundId, tournamentId)
+    db.prepare(`
+      INSERT INTO tournament_matches (match_id, tournament_id, round_id, room_id, team_a_id, team_b_id, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'in_progress');
+    `).run(randomUUID(), tournamentId, roundId, roomId, teamAId, teamBId)
+  } finally {
+    db.close()
+  }
+}
+
 const SYSTEM_ACTOR = { type: 'system' as const }
 // Реален profile ред (не случаен randomUUID()) — campaign_events.actor_profile_id
 // има FK към profiles(profile_id); несъществуващ id би чупил всяка
@@ -400,6 +434,40 @@ await check('[A8] getArchivalReadiness: дължима gift-item награда 
   assert(result.ok && result.readiness.pendingGiftRewardGaps === 1, `${JSON.stringify(result)}`)
 })
 
+await check('[A9] getArchivalReadiness: бот (постоянен каталожен, is_temporary=0) печели в прозореца -> НЕ блокира архивирането завинаги (pendingBelotWin=0, pendingLudoWin=0, ready=true)', async () => {
+  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({
+    earnRules: [{ gameKind: 'belot', stake: 100, units: 10 }, { gameKind: 'ludo', stake: 0, units: 10 }],
+  })
+  const botProfileId = await seedProfile('Catalog Bot', { isTemporary: false, profileKind: 'bot' })
+  await seedBelotMatchCompletion({ profileId: botProfileId, roomId: `bot-room-${randomUUID().slice(0, 8)}`, endedAt: eventAtWithinWindow })
+  await seedLudoMatch({ profileId: botProfileId, stake: 0, finishedAt: eventAtWithinWindow })
+  const result = archiveStore.getArchivalReadiness(campaignId)
+  assert(result.ok && result.readiness.pendingBelotWin === 0, `pendingBelotWin should stay 0 for a bot win, not block forever: ${JSON.stringify(result)}`)
+  assert(result.ok && result.readiness.pendingLudoWin === 0, `pendingLudoWin should stay 0 for a bot win, not block forever: ${JSON.stringify(result)}`)
+  assert(result.ok && result.ready, `campaign must remain archivable despite the ineligible bot win: ${JSON.stringify(result)}`)
+  const archiveResult = archiveStore.archiveCampaign(campaignId, ADMIN_ACTOR, null)
+  assert(archiveResult.ok, `archiveCampaign unexpectedly blocked by bot win: ${JSON.stringify(archiveResult)}`)
+})
+
+await check('[A10] getArchivalReadiness: турнирен мач (изрично изключен от кампанийно начисляване) -> НЕ се третира като pending и НЕ се credit-ва впоследствие', async () => {
+  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({
+    earnRules: [{ gameKind: 'belot', stake: 100, units: 10_000 }],
+  })
+  const winner = await seedProfile('A10 tournament winner')
+  const roomId = `tournament-room-${randomUUID().slice(0, 8)}`
+  await seedBelotMatchCompletion({ profileId: winner, roomId, endedAt: eventAtWithinWindow })
+  await seedTournamentMatchForRoom(roomId)
+  const result = archiveStore.getArchivalReadiness(campaignId)
+  assert(result.ok && result.readiness.pendingBelotWin === 0, `tournament match must never count as pending: ${JSON.stringify(result)}`)
+  assert(result.ok && result.ready, `campaign must be archivable despite the excluded tournament match: ${JSON.stringify(result)}`)
+  const archiveResult = archiveStore.archiveCampaign(campaignId, ADMIN_ACTOR, null)
+  assert(archiveResult.ok, `archiveCampaign unexpectedly blocked by tournament match: ${JSON.stringify(archiveResult)}`)
+  if (archiveResult.ok) {
+    assert(archiveResult.detail.summary.totalUnits === 0, `tournament win must never be credited: ${JSON.stringify(archiveResult.detail.summary)}`)
+    assert(archiveResult.detail.summary.participantsCount === 0, `tournament-only winner must not appear as a participant: ${JSON.stringify(archiveResult.detail.summary)}`)
+  }
+})
+
 // ─── B. archiveCampaign ───
 
 await check('[B1] archiveCampaign: not_finished за draft/active кампания', async () => {
@@ -462,6 +530,48 @@ await check('[B5] archiveCampaign: идемпотентно повторно и�
   if (!result.ok) return
   assert(result.detail.summary.unitIconUrlAtArchive === before?.summary.unitIconUrlAtArchive, 'повторен опит не трябва да презапише unitIconUrlAtArchive')
   assert(result.detail.summary.totalUnits === before?.summary.totalUnits, 'totalUnits непроменени')
+})
+
+await check('[B5b] Фаза 12 §3: ред "credit commit ПРЕДИ archive readiness-check" -> credit-ът влиза в архива; ред "archive commit ПРЕДИ credit" -> credit-ът safely отказан (no_eligible_campaign), без throw, без счупен архив', async () => {
+  // Два отделни, детерминистични редоследа (не истинско multi-thread
+  // "състезание" — node:sqlite е синхронно, Node е single-threaded, затова
+  // двата възможни редоследа са изцяло детерминистично тествани, не
+  // зависими от timing/flakiness).
+  const { campaignId: raceCampaignA } = await createFinishedCampaign({
+    earnRules: [{ gameKind: 'belot', stake: 100, units: 10 }],
+  })
+  const racer = await seedProfile('Race winner A')
+  const creditBeforeArchive = campaignCreditStore.creditCampaignUnits({
+    profileId: racer, sourceType: 'belot_win', sourceId: 'race-match-a',
+    eventAt: new Date((Date.parse((campaignsStore.getCampaignById(raceCampaignA)!.startsAt)) + Date.parse(campaignsStore.getCampaignById(raceCampaignA)!.endsAt)) / 2),
+    stakeAmount: 100,
+  })
+  assert(creditBeforeArchive.ok, `credit преди archive трябва да успее: ${JSON.stringify(creditBeforeArchive)}`)
+  const archiveAfterCredit = archiveStore.archiveCampaign(raceCampaignA, ADMIN_ACTOR, null)
+  assert(archiveAfterCredit.ok, `archive след успешен credit не бива да откаже: ${JSON.stringify(archiveAfterCredit)}`)
+  if (archiveAfterCredit.ok) {
+    assert(archiveAfterCredit.detail.summary.totalUnits === 10, `credit-ът, записан ПРЕДИ archive, трябва да влезе в totalUnits: ${JSON.stringify(archiveAfterCredit.detail.summary)}`)
+  }
+
+  const { campaignId: raceCampaignB } = await createFinishedCampaign({
+    earnRules: [{ gameKind: 'belot', stake: 100, units: 10 }],
+  })
+  const archiveBeforeCredit = archiveStore.archiveCampaign(raceCampaignB, ADMIN_ACTOR, null)
+  assert(archiveBeforeCredit.ok, `archive на чисто приключена кампания (0 pending) трябва да успее: ${JSON.stringify(archiveBeforeCredit)}`)
+  const campaignBWindow = { startsAt: campaignsStore.getCampaignById(raceCampaignB)!.startsAt, endsAt: campaignsStore.getCampaignById(raceCampaignB)!.endsAt }
+  const lateCreditAfterArchive = campaignCreditStore.creditCampaignUnits({
+    profileId: racer, sourceType: 'belot_win', sourceId: 'race-match-b',
+    eventAt: new Date((Date.parse(campaignBWindow.startsAt) + Date.parse(campaignBWindow.endsAt)) / 2),
+    stakeAmount: 100,
+  })
+  assert(!lateCreditAfterArchive.ok && lateCreditAfterArchive.reason === 'no_eligible_campaign', `credit СЛЕД archive трябва безопасно да откаже (не throw, не "лъжлив" success): ${JSON.stringify(lateCreditAfterArchive)}`)
+  const checkDb = await openRawDb()
+  try {
+    const ledgerRowAfterArchive = checkDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE campaign_id = ? AND source_id = 'race-match-b';`).get(raceCampaignB)
+    assert(ledgerRowAfterArchive === undefined, 'отказан credit не бива да остави ledger ред')
+  } finally {
+    checkDb.close()
+  }
 })
 
 await check('[B6] Последващо преименуване/промяна на ранг на играч НЕ променя вече замразения Топ 10', async () => {

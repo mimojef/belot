@@ -26,6 +26,15 @@
 //   икономика" маркер (виж tournamentCoordinator.ts), не "доказана нулева
 //   залог-кампания" — да им се задели campaign earn rule e отделно бизнес
 //   решение, невзето досега, затова не го предполагаме едностранно тук.
+//   ФАЗА 12 §2 ОДИТ-ПОПРАВКА: тая изрична exclusion важеше само за
+//   fast-path hook-а (recordBelotMatchForCampaign по-долу) — но
+//   belot_match_completion_ledger/profile_match_results пазят редове
+//   БЕЗУСЛОВНО за ВСЕКИ мач (вкл. турнирни), затова периодичния
+//   reconciliation safety net по-долу щеше да "довърши" точно тия изрично
+//   пропуснати редове, грешно начисляващи кампанийни единици за турнирен
+//   резултат. Поправено чрез NOT_TOURNAMENT_MATCH_SQL (join срещу
+//   tournament_matches.room_id, UNIQUE колона) във ВСИЧКИТЕ 8
+//   reconciliation SQL заявки (4 нови + 4 legacy) по-долу.
 //
 // ВАЖНА КОРЕКЦИЯ (одит след първия Фаза 3 commit, виж §1/§2 от одитната
 // задача): recordLudoMatchForCampaign-ия булев резултат ВЕЧЕ НЕ гейтва
@@ -404,6 +413,22 @@ export async function reconcileMissingBelotCampaignCredits(
               AND cul.source_id = bmcl.match_scope
           )`
 
+    // Фаза 12 §2 одит-поправка: fast-path hook-ът (recordBelotMatchForCampaign
+    // по-горе) изрично изключва турнирни мачове (isTournamentMatch guard) от
+    // кампанийно начисляване — но belot_match_completion_ledger/
+    // profile_match_results пазят редове БЕЗУСЛОВНО за ВСЕКИ мач, вкл.
+    // турнирни (recordCompletedMatch в playerProgressStore.ts няма tournament
+    // филтър). Без тая проверка тук, тоя reconciliation safety net би
+    // "довършил" турнирен мач, който fast-path-ът НАПРАВЛЕНО е пропуснал —
+    // грешно начисление на кампанийни единици за изрично изключен турнирен
+    // резултат. tournament_matches.room_id е UNIQUE (виж
+    // 20260730_001_create_tournament_core_tables.sql) — безопасен join key,
+    // без нужда от нова колона в белот таблиците.
+    const NOT_TOURNAMENT_MATCH_SQL = (roomIdExpr: string): string => `
+          NOT EXISTS (
+            SELECT 1 FROM tournament_matches tm WHERE tm.room_id = ${roomIdExpr}
+          )`
+
     const selectNewMissingCreditsSinceStatement = database.prepare(`
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
              bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
@@ -413,6 +438,7 @@ export async function reconcileMissingBelotCampaignCredits(
         AND bmcl.profile_id IS NOT NULL
         AND bmcl.ended_at >= ?
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
       ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
       LIMIT ?;
     `)
@@ -430,6 +456,7 @@ export async function reconcileMissingBelotCampaignCredits(
           OR (bmcl.ended_at = ? AND bmcl.match_scope = ? AND bmcl.profile_id > ?)
         )
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
       ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
       LIMIT ?;
     `)
@@ -442,6 +469,7 @@ export async function reconcileMissingBelotCampaignCredits(
         AND bmcl.is_guest_trial = 0
         AND bmcl.profile_id IS NOT NULL
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
       ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
       LIMIT ?;
     `)
@@ -459,6 +487,7 @@ export async function reconcileMissingBelotCampaignCredits(
           OR (bmcl.ended_at = ? AND bmcl.match_scope = ? AND bmcl.profile_id <= ?)
         )
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
       ORDER BY bmcl.ended_at ASC, bmcl.match_scope ASC, bmcl.profile_id ASC
       LIMIT ?;
     `)
@@ -605,6 +634,7 @@ export async function reconcileMissingBelotCampaignCredits(
         AND pmr.completed_at >= ?
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -622,6 +652,7 @@ export async function reconcileMissingBelotCampaignCredits(
         )
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -634,6 +665,7 @@ export async function reconcileMissingBelotCampaignCredits(
         AND pmr.profile_id IS NOT NULL
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)
@@ -651,6 +683,7 @@ export async function reconcileMissingBelotCampaignCredits(
         )
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
+        AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
       ORDER BY pmr.completed_at ASC, pmr.room_id ASC, pmr.profile_id ASC
       LIMIT ?;
     `)

@@ -1149,6 +1149,61 @@ await check('[24] Guest Trial ред в profile_match_results -> изключе�
   assert.equal(row, undefined, 'guest trial match никога не влиза в reconciliation-а')
 })
 
+// Фаза 12 §2 одит-регресия: минимален валиден tournament_matches ред (+
+// родителски tournaments/tournament_teams/tournament_rounds, изисквани от
+// FK-итата), асоцииран с даден room_id. room_id е UNIQUE в tournament_matches
+// — достатъчен join key, без нужда от нова колона в белот таблиците.
+function seedTournamentMatchForRoom(roomId: string): void {
+  const creatorProfileId = randomUUID()
+  insertProfile(creatorProfileId, `Tournament Creator ${creatorProfileId.slice(0, 8)}`)
+  const tournamentId = randomUUID()
+  rawDb.prepare(`
+    INSERT INTO tournaments (tournament_id, name, creator_profile_id, entry_fee, start_mode, status)
+    VALUES (?, 'Test Tournament', ?, 100, 'fill', 'final_in_progress');
+  `).run(tournamentId, creatorProfileId)
+  const teamAId = randomUUID()
+  const teamBId = randomUUID()
+  rawDb.prepare(`INSERT INTO tournament_teams (team_id, tournament_id, status) VALUES (?, ?, 'locked');`).run(teamAId, tournamentId)
+  rawDb.prepare(`INSERT INTO tournament_teams (team_id, tournament_id, status) VALUES (?, ?, 'locked');`).run(teamBId, tournamentId)
+  const roundId = randomUUID()
+  rawDb.prepare(`INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index) VALUES (?, ?, 'final', 1);`).run(roundId, tournamentId)
+  rawDb.prepare(`
+    INSERT INTO tournament_matches (match_id, tournament_id, round_id, room_id, team_a_id, team_b_id, status)
+    VALUES (?, ?, ?, ?, ?, ?, 'in_progress');
+  `).run(randomUUID(), tournamentId, roundId, roomId, teamAId, teamBId)
+}
+
+await check('[24b] Турнирен мач (legacy sweep, profile_match_results) -> reconciliation НЕ го credit-ва (fast-path-ът го изключва изрично)', async () => {
+  seedActiveCampaign([{ gameKind: 'belot', stake: 0, units: 99 }])
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T24b tournament winner')
+  const roomId = `belot-room-${randomUUID()}`
+  seedMatchResult(roomId, winnerId, { didWin: true })
+  seedTournamentMatchForRoom(roomId)
+
+  await reconcileMissingBelotCampaignCredits(dbPath, campaignCreditStore)
+  const row = rawDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE profile_id = ? AND source_id = ?;`).get(winnerId, roomId)
+  assert.equal(row, undefined, 'турнирен мач не бива да се credit-ва от reconciliation safety net-а — изрично изключен и от fast-path-а')
+})
+
+await check('[24c] Турнирен мач (нов ledger, belot_match_completion_ledger) -> reconciliation НЕ го credit-ва', async () => {
+  seedActiveCampaign([{ gameKind: 'belot', stake: 100, units: 99 }])
+  const winnerId = randomUUID()
+  insertProfile(winnerId, 'T24c tournament winner')
+  const roomId = `belot-room-${randomUUID()}`
+  const matchScope = `${roomId}:v1`
+  rawDb.prepare(`
+    INSERT INTO belot_match_completion_ledger (match_scope, profile_id, room_id, team, did_win, stake_amount, ended_at, is_guest_trial)
+    VALUES (?, ?, ?, 'A', 1, 100, ?, 0);
+  `).run(matchScope, winnerId, roomId, new Date().toISOString().slice(0, 19).replace('T', ' '))
+  seedTournamentMatchForRoom(roomId)
+
+  const result = await reconcileMissingBelotCampaignCredits(dbPath, campaignCreditStore)
+  const row = rawDb.prepare(`SELECT 1 FROM campaign_unit_ledger WHERE profile_id = ? AND source_id = ?;`).get(winnerId, matchScope)
+  assert.equal(row, undefined, 'турнирен мач (нов ledger) не бива да се credit-ва от reconciliation safety net-а')
+  assert.ok(result.scanned === 0 || row === undefined, `scanned=${result.scanned} не бива да доведе до credit за турнирен мач`)
+})
+
 // ═══════════════════════════════════════════════════════════════════════
 // [25]-[26] Source review — wiring в index.ts (mirror на checkLudoProgressionIntegration.ts's [E1]/[E2])
 // ═══════════════════════════════════════════════════════════════════════
