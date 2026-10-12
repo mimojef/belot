@@ -397,7 +397,10 @@ await check('[A6] getArchivalReadiness: висящ ludo_win -> pendingLudoWin=1'
 })
 
 await check('[A7] getArchivalReadiness: висящи coin/bundle/vip покупки -> съответните броячи', async () => {
-  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({ packageRules: [{ packageKey: 'starter', units: 3 }] })
+  // vip_purchase_ledger.package_id ('vip_30') е packageKey-ят, с който
+  // campaignPurchaseHooks.ts начислява VIP покупка — без правило за него
+  // покупката не е дължима (виж [A12]).
+  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({ packageRules: [{ packageKey: 'starter', units: 3 }, { packageKey: 'vip_30', units: 2 }] })
   const buyer = await seedProfile('A7 buyer')
   await seedPurchase('coin_purchase_ledger', { profileId: buyer, packageKey: 'starter', creditedAt: eventAtWithinWindow })
   await seedPurchase('bundle_purchase_ledger', { profileId: buyer, packageKey: 'starter', creditedAt: eventAtWithinWindow })
@@ -466,6 +469,107 @@ await check('[A10] getArchivalReadiness: турнирен мач (изрично
     assert(archiveResult.detail.summary.totalUnits === 0, `tournament win must never be credited: ${JSON.stringify(archiveResult.detail.summary)}`)
     assert(archiveResult.detail.summary.participantsCount === 0, `tournament-only winner must not appear as a participant: ${JSON.stringify(archiveResult.detail.summary)}`)
   }
+})
+
+// ─── Фаза 12.1 — readiness брои САМО реално дължими (>0 единици) начисления ───
+
+async function seedStakeDebit(roomId: string, profileId: string, amount: number): Promise<void> {
+  const db = await openRawDb()
+  try {
+    db.prepare(`
+      INSERT INTO match_economy_ledger (ledger_id, room_id, profile_id, entry_type, amount, balance_after)
+      VALUES (?, ?, ?, 'stake_debit', ?, 0);
+    `).run(randomUUID(), roomId, profileId, amount)
+  } finally {
+    db.close()
+  }
+}
+
+await check('[A11] Белот/Ludo победа БЕЗ earn rule (или с правило за друга ставка) -> не блокира архива', async () => {
+  const noRules = await createFinishedCampaign({})
+  const winner = await seedProfile('A11 winner')
+  await seedBelotMatchCompletion({ profileId: winner, roomId: `a11-room-${randomUUID().slice(0, 8)}`, endedAt: noRules.eventAtWithinWindow })
+  await seedLudoMatch({ profileId: winner, stake: 50, finishedAt: noRules.eventAtWithinWindow })
+  const result = archiveStore.getArchivalReadiness(noRules.campaignId)
+  assert(result.ok && result.ready && result.readiness.pendingBelotWin === 0 && result.readiness.pendingLudoWin === 0, `no earn rule must not block: ${JSON.stringify(result)}`)
+  const archived = archiveStore.archiveCampaign(noRules.campaignId, ADMIN_ACTOR, null)
+  assert(archived.ok, `archive blocked by a no-rule win: ${JSON.stringify(archived)}`)
+
+  const otherStake = await createFinishedCampaign({ earnRules: [{ gameKind: 'belot', stake: 500, units: 10 }, { gameKind: 'ludo', stake: 500, units: 10 }] })
+  await seedBelotMatchCompletion({ profileId: winner, roomId: `a11b-room-${randomUUID().slice(0, 8)}`, endedAt: otherStake.eventAtWithinWindow, stakeAmount: 100 })
+  await seedLudoMatch({ profileId: winner, stake: 50, finishedAt: otherStake.eventAtWithinWindow })
+  const other = archiveStore.getArchivalReadiness(otherStake.campaignId)
+  assert(other.ok && other.ready, `rule for a different stake must not block: ${JSON.stringify(other)}`)
+
+  const zeroUnits = await createFinishedCampaign({ earnRules: [{ gameKind: 'belot', stake: 100, units: 0 }] })
+  await seedBelotMatchCompletion({ profileId: winner, roomId: `a11c-room-${randomUUID().slice(0, 8)}`, endedAt: zeroUnits.eventAtWithinWindow })
+  const zero = archiveStore.getArchivalReadiness(zeroUnits.campaignId)
+  assert(zero.ok && zero.ready, `0-unit rule must not block: ${JSON.stringify(zero)}`)
+})
+
+await check('[A12] покупка на пакет без earn rule (coin/bundle/vip) -> не блокира архива', async () => {
+  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({ packageRules: [{ packageKey: 'other-package', units: 5 }] })
+  const buyer = await seedProfile('A12 buyer')
+  await seedPurchase('coin_purchase_ledger', { profileId: buyer, packageKey: 'starter', creditedAt: eventAtWithinWindow })
+  await seedPurchase('bundle_purchase_ledger', { profileId: buyer, packageKey: 'starter', creditedAt: eventAtWithinWindow })
+  await seedVipPurchase({ profileId: buyer, creditedAt: eventAtWithinWindow })
+  const result = archiveStore.getArchivalReadiness(campaignId)
+  assert(result.ok && result.ready, `purchases without a matching package rule must not block: ${JSON.stringify(result)}`)
+  const archived = archiveStore.archiveCampaign(campaignId, ADMIN_ACTOR, null)
+  assert(archived.ok, `archive blocked by a no-rule purchase: ${JSON.stringify(archived)}`)
+})
+
+await check('[A13] legacy Белот: неопределима ставка (reconciliation го прескача) не блокира завинаги; доказана ставка с правило -> блокира', async () => {
+  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({ earnRules: [{ gameKind: 'belot', stake: 0, units: 5 }, { gameKind: 'belot', stake: 200, units: 7 }] })
+  const winner = await seedProfile('A13 winner')
+  const opponent = await seedProfile('A13 opponent')
+  // Друг участник е дебитиран, победителят — не: legacy sweep-ът логва
+  // "insufficient info, skipping" и НИКОГА не начислява реда.
+  const unknownStakeRoom = `a13-unknown-${randomUUID().slice(0, 8)}`
+  await seedLegacyMatchResult({ profileId: winner, roomId: unknownStakeRoom, completedAt: eventAtWithinWindow })
+  await seedStakeDebit(unknownStakeRoom, opponent, 200)
+  const skipped = archiveStore.getArchivalReadiness(campaignId)
+  assert(skipped.ok && skipped.ready && skipped.readiness.pendingBelotLegacy === 0, `insufficient-stake legacy row must not block forever: ${JSON.stringify(skipped)}`)
+
+  // Собствен stake_debit 200 + правило за 200 -> реално дължимо -> блокира.
+  const ownStakeRoom = `a13-own-${randomUUID().slice(0, 8)}`
+  await seedLegacyMatchResult({ profileId: winner, roomId: ownStakeRoom, completedAt: eventAtWithinWindow })
+  await seedStakeDebit(ownStakeRoom, winner, 200)
+  const owed = archiveStore.getArchivalReadiness(campaignId)
+  assert(owed.ok && !owed.ready && owed.readiness.pendingBelotLegacy === 1, `owed legacy credit must block: ${JSON.stringify(owed)}`)
+
+  // Възстановяване със същата ставка (както legacy sweep-а) -> отблокира.
+  const credit = campaignCreditStore.creditCampaignUnits({
+    profileId: winner, sourceType: 'belot_win', sourceId: ownStakeRoom, eventAt: eventAtWithinWindow, stakeAmount: 200,
+  })
+  assert(credit.ok && credit.unitsCredited === 7, `recovery credit: ${JSON.stringify(credit)}`)
+  const recovered = archiveStore.getArchivalReadiness(campaignId)
+  assert(recovered.ok && recovered.ready, `recovered campaign must be archivable: ${JSON.stringify(recovered)}`)
+})
+
+await check('[A14] реално дължимо, но пропуснато начисление блокира, докато бъде възстановено; непотвърденото поздравление не блокира', async () => {
+  const { campaignId, eventAtWithinWindow } = await createFinishedCampaign({ earnRules: [{ gameKind: 'belot', stake: 100, units: 10 }] })
+  const db = await openRawDb()
+  try {
+    const tierId = randomUUID()
+    db.prepare(`INSERT INTO campaign_reward_tiers (tier_id, campaign_id, threshold_units) VALUES (?, ?, 10);`).run(tierId, campaignId)
+    db.prepare(`INSERT INTO campaign_tier_rewards (tier_reward_id, tier_id, reward_type, reward_payload_json) VALUES (?, ?, 'yellow_coins', ?);`)
+      .run(randomUUID(), tierId, JSON.stringify({ amount: 100 }))
+  } finally {
+    db.close()
+  }
+  const winner = await seedProfile('A14 winner')
+  const matchScope = await seedBelotMatchCompletion({ profileId: winner, roomId: `a14-room-${randomUUID().slice(0, 8)}`, endedAt: eventAtWithinWindow })
+  const blocked = archiveStore.archiveCampaign(campaignId, ADMIN_ACTOR, null)
+  assert(!blocked.ok && blocked.reason === 'reconciliation_incomplete', `missed owed credit must block: ${JSON.stringify(blocked)}`)
+
+  const credit = campaignCreditStore.creditCampaignUnits({
+    profileId: winner, sourceType: 'belot_win', sourceId: matchScope, eventAt: eventAtWithinWindow, stakeAmount: 100,
+  })
+  assert(credit.ok && credit.unitsCredited === 10 && credit.grantedRewards.length === 1 && credit.notification !== null, `recovery credit with reward: ${JSON.stringify(credit)}`)
+  assert(campaignCreditStore.listPendingNotifications(winner).length === 1, 'congratulation stays unacknowledged')
+  const archived = archiveStore.archiveCampaign(campaignId, ADMIN_ACTOR, null)
+  assert(archived.ok && archived.detail.summary.totalUnits === 10 && archived.detail.summary.rewardsGrantedCount === 1, `unacknowledged popup must not block: ${JSON.stringify(archived)}`)
 })
 
 // ─── B. archiveCampaign ───

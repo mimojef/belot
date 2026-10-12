@@ -50,14 +50,23 @@ fi
 # Твърд guard — никога пряк restore върху реални production пътища в тая
 # фаза ("Не прави реален restore върху продукцията"). Никакъв флаг не го
 # заобикаля умишлено — продукционен restore е ръчна, разгледана стъпка
-# извън обхвата на тоя helper.
+# извън обхвата на тоя helper. Фаза 12.1: проверява се КАНОНИЧНИЯТ път
+# (realpath -m разрешава relative пътища, "..", дублирани "/" и symlink-и),
+# не суровия низ — "/var/../var/www/..." или symlink към production вече не
+# минават. Целевата директория трябва да е нова или празна (никога не
+# смесваме restore с вече съществуващи файлове).
+TARGET_DIR="$(realpath -m -- "$TARGET_DIR")"
 case "$TARGET_DIR" in
-    /var/www/*|/var/backups/*)
-        echo "[restore] ERROR: target-dir looks like a production/backup-storage path ($TARGET_DIR) — refusing."
+    /|/var|/var/www|/var/www/*|/var/backups|/var/backups/*|/etc|/etc/*|/root|/root/*|/home|/usr|/usr/*)
+        echo "[restore] ERROR: target-dir resolves to a production/system/backup-storage path ($TARGET_DIR) — refusing."
         echo "[restore] This phase forbids a real restore onto production. Use a scratch directory."
         exit 2
         ;;
 esac
+if [ -e "$TARGET_DIR" ] && [ -n "$(ls -A -- "$TARGET_DIR" 2>/dev/null)" ]; then
+    echo "[restore] ERROR: target-dir must be new or empty: $TARGET_DIR"
+    exit 2
+fi
 
 if [ ! -f "$DB_ARCHIVE" ]; then
     echo "[restore] ERROR: db archive not found: $DB_ARCHIVE"
@@ -74,12 +83,15 @@ if [ "$SKIP_CHECKSUM" != "1" ]; then
     echo "[restore] Verifying archive checksums..."
     for ARCHIVE in "$DB_ARCHIVE" "$UPLOADS_ARCHIVE"; do
         SHA_FILE="$ARCHIVE.sha256"
-        if [ -f "$SHA_FILE" ]; then
-            (cd "$(dirname "$ARCHIVE")" && sha256sum -c "$(basename "$SHA_FILE")")
-            echo "[restore] checksum_ok=$(basename "$ARCHIVE")"
-        else
-            echo "[restore] WARNING: no .sha256 sidecar found for $(basename "$ARCHIVE") — skipping checksum verification for it"
+        # Фаза 12.1: липсващ .sha256 = непълен backup (pikabg-db-backup пише
+        # sidecar-а едва след успешна валидация) — отказ, не WARNING.
+        # Съзнателен restore без checksum изисква изричен --skip-checksum.
+        if [ ! -f "$SHA_FILE" ]; then
+            echo "[restore] ERROR: no .sha256 sidecar for $(basename "$ARCHIVE") — incomplete backup set, refusing (use --skip-checksum only deliberately)"
+            exit 1
         fi
+        (cd "$(dirname "$ARCHIVE")" && sha256sum -c "$(basename "$SHA_FILE")")
+        echo "[restore] checksum_ok=$(basename "$ARCHIVE")"
     done
 fi
 
@@ -88,6 +100,26 @@ echo "[restore] Validating archive integrity (zstd -t)..."
 zstd -t "$DB_ARCHIVE"
 zstd -t "$UPLOADS_ARCHIVE"
 echo "[restore] archive_integrity=ok"
+echo
+echo "[restore] Validating uploads archive members (before extraction)..."
+# Фаза 12.1: uploads/ съдържа само обикновени файлове и директории. Отказ,
+# ПРЕДИ да се пише каквото и да е, при: symlink/hardlink/device/fifo член,
+# абсолютен път, ".." компонент или член извън "uploads/". Типът се чете от
+# първия символ на mode колоната в `tar -tv` ("-" файл, "d" директория);
+# имената — от отделен `tar -t` listing (без парсване на verbose формата).
+BAD_TYPES="$(zstd -dc "$UPLOADS_ARCHIVE" | tar -tvf - | cut -c1 | grep -v -e '^-$' -e '^d$' | sort -u | tr '\n' ' ' || true)"
+if [ -n "$BAD_TYPES" ]; then
+    echo "[restore] ERROR: uploads archive contains non-regular members (types: $BAD_TYPES) — refusing (symlink/hardlink protection)"
+    exit 1
+fi
+BAD_NAMES="$(zstd -dc "$UPLOADS_ARCHIVE" | tar -tf - | grep -v -E '^uploads(/|$)' || true)"
+BAD_NAMES="$BAD_NAMES$(zstd -dc "$UPLOADS_ARCHIVE" | tar -tf - | grep -E '(^/|(^|/)\.\.(/|$))' || true)"
+if [ -n "$BAD_NAMES" ]; then
+    echo "[restore] ERROR: uploads archive contains unsafe member paths (absolute, '..' or outside uploads/) — refusing:"
+    printf '%s\n' "$BAD_NAMES" | head -20
+    exit 1
+fi
+echo "[restore] archive_members=ok"
 
 echo
 echo "[restore] Restoring SQLite database -> $TARGET_DIR/belot-v2.sqlite"
@@ -99,9 +131,16 @@ if [ "$INTEGRITY" != "ok" ]; then
 fi
 echo "[restore] db_integrity_check=ok"
 
+
 echo
 echo "[restore] Restoring uploads/ -> $TARGET_DIR/uploads/"
-zstd -dc "$UPLOADS_ARCHIVE" | tar --one-file-system -xf - -C "$TARGET_DIR"
+zstd -dc "$UPLOADS_ARCHIVE" | tar --one-file-system --no-same-owner -xf - -C "$TARGET_DIR"
+UNEXPECTED_NODES="$(find "$TARGET_DIR/uploads" ! -type f ! -type d | head -20)"
+if [ -n "$UNEXPECTED_NODES" ]; then
+    echo "[restore] ERROR: restored uploads/ contains non-regular nodes — refusing:"
+    printf '%s\n' "$UNEXPECTED_NODES"
+    exit 1
+fi
 RESTORED_FILE_COUNT="$(find "$TARGET_DIR/uploads" -type f | wc -l)"
 echo "[restore] restored_file_count=$RESTORED_FILE_COUNT"
 

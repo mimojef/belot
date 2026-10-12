@@ -235,6 +235,41 @@ export async function createCampaignArchiveStore(
             WHERE p.profile_id = {alias}.{column} AND p.profile_kind = 'human' AND p.is_temporary = 0
           )`
 
+  // Фаза 12.1 — "дължимо" = събитие, за което creditCampaignUnits() реално
+  // би начислил > 0 единици за ТАЗИ кампания (resolveUnitsAmountForEvent в
+  // campaignCreditStore.ts: точно съвпадение на game_kind+stake_amount /
+  // package_key). Без такова правило начисляването пише 0 единици или
+  // изобщо не пише ред (reconciliation skip) — такова събитие не е дължимо
+  // и не бива да блокира архива (иначе Белот/Ludo/покупка без earn rule
+  // блокира до следващия reconciliation sweep, а legacy ред с неопределима
+  // ставка — ЗАВИНАГИ). Последният `?` на всяка заявка е campaign_id.
+  const GAME_EARN_RULE_SQL = (gameKind: 'belot' | 'ludo', stakeExpr: string): string => `
+          EXISTS (
+            SELECT 1 FROM campaign_earn_rules er
+            WHERE er.campaign_id = ? AND er.game_kind = '${gameKind}'
+              AND er.stake_amount = ${stakeExpr} AND er.units_per_win > 0
+          )`
+
+  // Mirror на legacy sweep-а (campaignGameHooks.ts): собствен stake_debit ->
+  // неговата сума; друг участник в стаята е дебитиран, този не -> NULL
+  // (insufficient info — reconciliation прескача реда, никога не го
+  // начислява, затова не може и да блокира); никой не е дебитиран -> 0.
+  const LEGACY_BELOT_STAKE_SQL = `
+          (CASE
+            WHEN EXISTS (
+              SELECT 1 FROM match_economy_ledger mel
+              WHERE mel.room_id = pmr.room_id AND mel.profile_id = pmr.profile_id AND mel.entry_type = 'stake_debit'
+            ) THEN (
+              SELECT mel.amount FROM match_economy_ledger mel
+              WHERE mel.room_id = pmr.room_id AND mel.profile_id = pmr.profile_id AND mel.entry_type = 'stake_debit'
+              LIMIT 1
+            )
+            WHEN EXISTS (
+              SELECT 1 FROM match_economy_ledger mel WHERE mel.room_id = pmr.room_id AND mel.entry_type = 'stake_debit'
+            ) THEN NULL
+            ELSE 0
+          END)`
+
   const countPendingBelotWinStatement = database.prepare(`
     SELECT COUNT(*) AS c FROM belot_match_completion_ledger bmcl
     WHERE bmcl.did_win = 1 AND bmcl.is_guest_trial = 0 AND bmcl.profile_id IS NOT NULL
@@ -246,7 +281,8 @@ export async function createCampaignArchiveStore(
       AND NOT EXISTS (
         SELECT 1 FROM campaign_unit_ledger cul
         WHERE cul.source_type = 'belot_win' AND cul.profile_id = bmcl.profile_id AND cul.source_id = bmcl.match_scope
-      );
+      )
+      AND ${GAME_EARN_RULE_SQL('belot', 'bmcl.stake_amount')};
   `)
 
   const countPendingBelotLegacyStatement = database.prepare(`
@@ -265,7 +301,8 @@ export async function createCampaignArchiveStore(
       AND NOT EXISTS (
         SELECT 1 FROM belot_match_completion_ledger bmcl2
         WHERE bmcl2.room_id = pmr.room_id AND bmcl2.profile_id = pmr.profile_id
-      );
+      )
+      AND ${GAME_EARN_RULE_SQL('belot', LEGACY_BELOT_STAKE_SQL)};
   `)
 
   const countPendingLudoWinStatement = database.prepare(`
@@ -276,10 +313,16 @@ export async function createCampaignArchiveStore(
       AND NOT EXISTS (
         SELECT 1 FROM campaign_unit_ledger cul
         WHERE cul.source_type = 'ludo_win' AND cul.source_id = lrm.match_id AND cul.profile_id = lrm.winner_profile_id
-      );
+      )
+      AND ${GAME_EARN_RULE_SQL('ludo', 'lrm.stake')};
   `)
 
-  function makePendingPurchaseStatement(tableName: string): ReturnType<SqliteDatabase['prepare']> {
+  // packageKeyColumn — същата колона, която campaignPurchaseHooks.ts
+  // (PURCHASE_LEDGER_CONFIGS) подава като packageKey при начисляване.
+  function makePendingPurchaseStatement(
+    tableName: 'coin_purchase_ledger' | 'bundle_purchase_ledger' | 'vip_purchase_ledger',
+    packageKeyColumn: 'package_key_snapshot' | 'package_id',
+  ): ReturnType<SqliteDatabase['prepare']> {
     return database.prepare(`
       SELECT COUNT(*) AS c FROM ${tableName} t
       WHERE t.status = 'paid' AND t.credited_at IS NOT NULL AND t.profile_id IS NOT NULL
@@ -288,17 +331,22 @@ export async function createCampaignArchiveStore(
         AND NOT EXISTS (
           SELECT 1 FROM campaign_unit_ledger cul
           WHERE cul.source_type = 'package_purchase' AND cul.source_id = t.purchase_id AND cul.profile_id = t.profile_id
+        )
+        AND EXISTS (
+          SELECT 1 FROM campaign_package_earn_rules per
+          WHERE per.campaign_id = ? AND per.package_key = t.${packageKeyColumn} AND per.units_per_purchase > 0
         );
     `)
   }
-  const countPendingCoinStatement = makePendingPurchaseStatement('coin_purchase_ledger')
-  const countPendingBundleStatement = makePendingPurchaseStatement('bundle_purchase_ledger')
-  const countPendingVipStatement = makePendingPurchaseStatement('vip_purchase_ledger')
+  const countPendingCoinStatement = makePendingPurchaseStatement('coin_purchase_ledger', 'package_key_snapshot')
+  const countPendingBundleStatement = makePendingPurchaseStatement('bundle_purchase_ledger', 'package_key_snapshot')
+  const countPendingVipStatement = makePendingPurchaseStatement('vip_purchase_ledger', 'package_id')
 
   function computeReadiness(campaign: CampaignRow): CampaignArchivalReadiness {
     const startsAt = campaign.starts_at
     const effectiveEndIso = getEffectiveWindowEndIso(campaign)
-    const one = (stmt: ReturnType<SqliteDatabase['prepare']>) => (stmt.get(startsAt, effectiveEndIso) as { c: number }).c
+    const one = (stmt: ReturnType<SqliteDatabase['prepare']>) =>
+      (stmt.get(startsAt, effectiveEndIso, campaign.campaign_id) as { c: number }).c
     return {
       pendingBelotWin: one(countPendingBelotWinStatement),
       pendingBelotLegacy: one(countPendingBelotLegacyStatement),

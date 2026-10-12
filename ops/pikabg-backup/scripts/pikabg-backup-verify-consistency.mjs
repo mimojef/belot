@@ -34,7 +34,7 @@
 
 import { DatabaseSync } from 'node:sqlite'
 import { spawnSync } from 'node:child_process'
-import { readdirSync, statSync } from 'node:fs'
+import { lstatSync, readdirSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 
 const STORAGE_FILENAME_SUBDIRS = {
@@ -78,14 +78,16 @@ function listDirectoryEntries(uploadsParentDir) {
   function walk(dir) {
     let stat
     try {
-      stat = statSync(dir)
+      stat = lstatSync(dir)
     } catch {
       return
     }
     if (!stat.isDirectory()) return
     for (const name of readdirSync(dir)) {
       const full = join(dir, name)
-      const s = statSync(full)
+      // lstat — symlink НЕ се брои за наличен файл/директория (Фаза 12.1:
+      // symlink към външен файл не бива да "удовлетворява" DB референция).
+      const s = lstatSync(full)
       if (s.isDirectory()) {
         walk(full)
       } else if (s.isFile()) {

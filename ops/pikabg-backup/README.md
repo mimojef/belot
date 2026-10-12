@@ -307,9 +307,31 @@ scripts/pikabg-restore \
 ```
 
 This never writes to a production path (hard
-guard against `/var/www/*` and `/var/backups/*`
-target directories) and never touches PM2 or
-the live database. Applying the result to
+guard against `/var/www/*`, `/var/backups/*`
+and system directories, checked on the
+canonical `realpath -m` of `--target-dir`, so
+`..`, relative paths and symlinks cannot
+bypass it) and never touches PM2 or the live
+database. The target directory must be new or
+empty.
+
+Phase 12.1 safety rules (all refuse BEFORE
+anything is written to the target):
+
+- a missing `.sha256` sidecar for either
+  archive is treated as an incomplete backup
+  set and refused (only an explicit
+  `--skip-checksum` bypasses checksums);
+- the uploads archive may contain only regular
+  files and directories under `uploads/` —
+  symlinks, hardlinks, devices, absolute paths,
+  `..` components and members outside
+  `uploads/` are refused;
+- after extraction, any non-regular node under
+  `uploads/` fails the restore, and the
+  DB <-> file consistency check counts only
+  real files (symlinks never satisfy a
+  database reference). Applying the result to
 production is a deliberate, separate, manual
 step — copy `<target-dir>/belot-v2.sqlite` and
 `<target-dir>/uploads/` over the real
