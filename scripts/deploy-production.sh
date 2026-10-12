@@ -78,6 +78,20 @@ trap 'exit 143' TERM
 #     компилирани в src/ или server/dist), server/scripts/** (server dev/
 #     check tooling, изрично извън server/tsconfig.json include-а),
 #     *.md навсякъде, CLAUDE.md, .gitignore, .env.example.
+#   - ops/pikabg-backup/ backup tooling: ops/pikabg-backup/README.md вече
+#     съвпада с общия "*.md" шаблон по-горе. Самите скриптове (pikabg-db-backup/
+#     pikabg-db-retention/pikabg-restore/pikabg-backup-verify-consistency.mjs)
+#     НЕ съвпадат с никой съществуващ non-runtime шаблон (не са под scripts/
+#     или server/scripts/) — умишлено: те НЕ се инсталират/активират от този
+#     или от worker скриптовете по никакъв начин (нито systemd unit, нито
+#     backup schedule се пипат тук), а се инсталират РЪЧНО/отделно на VPS
+#     (виж ops/pikabg-backup/README.md). Разпознаваме ги по ТОЧНО, изрично
+#     enumerated име — НЕ през "ops/*" или "ops/pikabg-backup/*" wildcard —
+#     за да НЕ придобие тихо non-runtime статус бъдещ нов файл (напр. нов
+#     backup/restore script, или нещо напълно различно) под ops/, добавен в
+#     по-късен delta. Нов/друг файл под ops/ продължава да пада в "unclassified"
+#     catch-all-а по-долу и STOP-ва deploy-а, точно както всеки друг непознат
+#     path — виж тестовете в scripts/checkDeployProductionClassifyPath.ts.
 # ═══════════════════════════════════════════════════════════════════════════
 
 classify_path() {
@@ -92,6 +106,11 @@ classify_path() {
     public/*)
       echo "frontend" ;;
     docs/*|deploy/*|legacy/*|scripts/*|server/scripts/*|*.md|CLAUDE.md|.gitignore|.env.example|server/.env.example)
+      echo "non-runtime" ;;
+    ops/pikabg-backup/scripts/pikabg-db-backup|ops/pikabg-backup/scripts/pikabg-db-retention|ops/pikabg-backup/scripts/pikabg-restore|ops/pikabg-backup/scripts/pikabg-backup-verify-consistency.mjs)
+      # Точно enumerated backup/restore tooling — виж doc коментара по-горе.
+      # НЕ build-ва/мигрира/рестартира нищо, НЕ инсталира systemd units, НЕ
+      # пипа backup schedule-а. Инсталирането на VPS е отделна, ръчна стъпка.
       echo "non-runtime" ;;
     *)
       echo "unclassified" ;;
