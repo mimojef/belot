@@ -193,6 +193,16 @@ function normalizePositiveInteger(value: unknown, max: number): number | null {
 
 function normalizeIsoDate(value: unknown): string | null {
   if (typeof value !== 'string') return null
+  // Изисква явен UTC/offset суфикс ('Z' или '+HH:MM'/'-HH:MM'). Без него
+  // Date.parse тълкува низа спрямо СИСТЕМНИЯ TZ на Node процеса (production
+  // VPS: обикновено UTC, НЕ Europe/Sofia) — точната причина за реален
+  // production инцидент с изместени начални/крайни дати на кампании
+  // (клиентът пращаше "YYYY-MM-DDTHH:mm" без timezone суфикс). Клиентът
+  // (src/app/adminCampaigns/campaignSofiaDateTime.ts) вече винаги конвертира
+  // явно към Europe/Sofia и праща explicit UTC ISO тук — тая проверка е
+  // defense-in-depth срещу бъдещ caller, който пропусне тая конверсия, не
+  // срещу текущия known caller.
+  if (!/(?:Z|[+-]\d{2}:\d{2})$/.test(value)) return null
   const ms = Date.parse(value)
   if (!Number.isFinite(ms)) return null
   return new Date(ms).toISOString()

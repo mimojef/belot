@@ -7,6 +7,7 @@ import type {
   AdminCampaignThemeAssetKind,
   AdminCampaignTierReward,
 } from './adminCampaignTypes'
+import { sofiaLocalInputToUtcIso, utcIsoToSofiaLocalInput, formatSofiaDisplayDateTime } from './campaignSofiaDateTime'
 
 export type AdminCampaignFilter = AdminCampaignStatus | 'all' | 'deleted'
 export type AdminCampaignAction = 'schedule' | 'activate' | 'stop' | 'clone' | 'delete'
@@ -48,11 +49,11 @@ function formatNumber(value: number): string {
   return value.toLocaleString('bg-BG')
 }
 
+// Europe/Sofia местно време — explicit, НЕ browser/OS timezone на
+// оператора (виж campaignSofiaDateTime.ts doc коментара за пълния
+// production defect, който тая функция поправя).
 function datetimeLocalValue(value: string): string {
-  const date = new Date(value)
-  if (!Number.isFinite(date.getTime())) return ''
-  const offsetMs = date.getTimezoneOffset() * 60_000
-  return new Date(date.getTime() - offsetMs).toISOString().slice(0, 16)
+  return utcIsoToSofiaLocalInput(value)
 }
 
 function statusLabel(status: AdminCampaignStatus): string {
@@ -292,8 +293,8 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
             ${referenceData && campaign.rewardTiers.length > 0 ? `<div style="margin-top:5px;color:rgba(255,255,255,0.4);font-size:11px;font-weight:700;">${campaign.rewardTiers.map((tier) => `${formatNumber(tier.thresholdUnits)}: ${tier.rewards.map((reward) => rewardLabel(reward, referenceData)).join(', ')}`).join(' · ')}</div>` : ''}
           </div>
           <div style="color:rgba(255,255,255,0.68);font-size:12px;font-weight:800;line-height:1.45;">
-            <div>${new Date(campaign.startsAt).toLocaleString('bg-BG')}</div>
-            <div>${new Date(campaign.endsAt).toLocaleString('bg-BG')}</div>
+            <div>${formatSofiaDisplayDateTime(campaign.startsAt)}</div>
+            <div>${formatSofiaDisplayDateTime(campaign.endsAt)}</div>
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:${isMobile ? 'flex-start' : 'flex-end'};">
             <button type="button" data-admin-campaign-edit="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(147,197,253,0.35);border-radius:6px;background:rgba(30,64,175,0.22);color:#bfdbfe;font-size:11px;font-weight:900;cursor:pointer;">Преглед</button>
@@ -380,11 +381,20 @@ function collectDraftFromForm(form: HTMLFormElement, previous: AdminCampaignEdit
     }
   })
 
+  // datetime-local полетата носят "wall clock" низ БЕЗ timezone (напр.
+  // "2026-10-20T10:00") — трябва явно да се тълкуват като Europe/Sofia
+  // местно време и да се конвертират в коректен UTC ISO string ТУК, преди
+  // да влязат в draft-а/да стигнат до backend-а. Иначе Date.parse на
+  // backend-а би ги тълкувал спрямо системния TZ на Node процеса (виж
+  // campaignSofiaDateTime.ts doc коментара за пълния production defect).
+  const startsAtInput = selectedValue(form, '[data-admin-campaign-starts="1"]')
+  const endsAtInput = selectedValue(form, '[data-admin-campaign-ends="1"]')
+
   return {
     ...previous,
     name: selectedValue(form, '[data-admin-campaign-name="1"]', previous.name),
-    startsAt: selectedValue(form, '[data-admin-campaign-starts="1"]', previous.startsAt),
-    endsAt: selectedValue(form, '[data-admin-campaign-ends="1"]', previous.endsAt),
+    startsAt: sofiaLocalInputToUtcIso(startsAtInput) ?? previous.startsAt,
+    endsAt: sofiaLocalInputToUtcIso(endsAtInput) ?? previous.endsAt,
     unitNameSingular: selectedValue(form, '[data-admin-campaign-unit-singular="1"]', previous.unitNameSingular),
     unitNamePlural: selectedValue(form, '[data-admin-campaign-unit-plural="1"]', previous.unitNamePlural),
     giftSenderProfileId: selectedValue(form, '[data-admin-campaign-sender="1"]') || null,
