@@ -3,6 +3,69 @@ export type AdminCampaignGameKind = 'belot' | 'ludo'
 export type AdminCampaignRewardType = 'yellow_coins' | 'vip_days' | 'gift_item'
 export type AdminCampaignThemeAssetKind = 'unit_icon' | 'table_bg_desktop' | 'table_bg_mobile' | 'card_back'
 
+// ─── Фаза 11 — "Приключили кампании" архив ───
+
+export type AdminCampaignArchiveListRow = {
+  campaignId: string
+  name: string
+  status: 'finished' | 'stopped'
+  startsAt: string
+  endsAt: string
+  unitNameSingular: string
+  unitNamePlural: string
+  archivedAt: string | null
+  totalUnits: number | null
+  participantsCount: number | null
+}
+
+export type AdminCampaignArchivalReadiness = {
+  pendingBelotWin: number
+  pendingBelotLegacy: number
+  pendingLudoWin: number
+  pendingPurchaseCoin: number
+  pendingPurchaseBundle: number
+  pendingPurchaseVip: number
+  pendingGiftRewardGaps: number
+}
+
+export type AdminCampaignArchiveSummary = {
+  campaignId: string
+  endedReason: 'expired' | 'stopped'
+  participantsCount: number
+  totalUnits: number
+  unitsFromBelot: number
+  unitsFromLudo: number
+  unitsFromPurchases: number
+  unitsFromAdminAdjustments: number
+  rewardsGrantedCount: number
+  unitIconUrlAtArchive: string | null
+  archivedAt: string
+}
+
+export type AdminCampaignArchiveTop10Entry = {
+  rank: number
+  profileId: string | null
+  displayNameAtArchive: string
+  rankTitleAtArchive: string | null
+  unitsTotal: number
+}
+
+export type AdminCampaignArchiveDetail = {
+  campaignId: string
+  name: string
+  startsAt: string
+  endsAt: string
+  unitNameSingular: string
+  unitNamePlural: string
+  summary: AdminCampaignArchiveSummary
+  top10: AdminCampaignArchiveTop10Entry[]
+}
+
+export type AdminCampaignArchiveDetailResponse =
+  | { ok: true; archived: true; detail: AdminCampaignArchiveDetail }
+  | { ok: true; archived: false; readiness: AdminCampaignArchivalReadiness; ready: boolean }
+  | { ok: false; message?: string; reason?: string }
+
 export type AdminCampaignEarnRule = {
   gameKind: AdminCampaignGameKind
   stakeAmount: number

@@ -39,7 +39,7 @@ import type { PlayerAccountRole, ActiveProfileBanSnapshot } from './ui/overlays/
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, CpuIncidentSummary, CpuIncidentDetail } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind } from './app/adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from './app/adminCampaigns/adminCampaignTypes'
 import type { AdminCampaignAction } from './app/adminCampaigns/renderAdminCampaignsPanel'
 import {
   createGameServerClient,
@@ -2595,6 +2595,44 @@ async function removeAdminCampaignThemeAsset(
       body: JSON.stringify({ imageDataUrl: null }),
     })
     return await parseAdminCampaignsSnapshotResponse(response)
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminCampaignArchiveList(): Promise<
+  | { ok: true; campaigns: AdminCampaignArchiveListRow[] }
+  | { ok: false; message: string; forbidden?: boolean }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/archive`, { method: 'GET', credentials: 'include' })
+    if (response.status === 403) return { ok: false, message: 'Нямаш достъп до архива на кампаниите.', forbidden: true }
+    const data = (await response.json()) as { ok: boolean; campaigns?: AdminCampaignArchiveListRow[]; message?: string }
+    if (!response.ok || !data.ok || !Array.isArray(data.campaigns)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на архива.' }
+    }
+    return { ok: true, campaigns: data.campaigns }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminCampaignArchiveDetail(campaignId: string): Promise<AdminCampaignArchiveDetailResponse> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/archive`, { method: 'GET', credentials: 'include' })
+    const data = (await response.json()) as AdminCampaignArchiveDetailResponse
+    return data
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function triggerAdminCampaignArchiveNow(campaignId: string): Promise<{ ok: true } | { ok: false; message?: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/archive`, { method: 'POST', credentials: 'include' })
+    const data = (await response.json()) as { ok: boolean; message?: string; reason?: string }
+    if (!response.ok || !data.ok) return { ok: false, message: data.message ?? (data.reason === 'reconciliation_incomplete' ? 'Кампанията все още чака reconciliation.' : 'Архивирането не бе завършено.') }
+    return { ok: true }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -7189,6 +7227,9 @@ lobby = createLobbyFlowController({
   onAdminCampaignMarketingSenderSaveRequest: (campaignId, giftSenderProfileId) => saveAdminCampaignMarketingSender(campaignId, giftSenderProfileId),
   onAdminCampaignThemeAssetUploadRequest: (campaignId, kind, imageDataUrl) => saveAdminCampaignThemeAsset(campaignId, kind, imageDataUrl),
   onAdminCampaignThemeAssetRemoveRequest: (campaignId, kind) => removeAdminCampaignThemeAsset(campaignId, kind),
+  onAdminCampaignArchiveListLoad: () => loadAdminCampaignArchiveList(),
+  onAdminCampaignArchiveDetailLoad: (campaignId) => loadAdminCampaignArchiveDetail(campaignId),
+  onAdminCampaignArchiveNowRequest: (campaignId) => triggerAdminCampaignArchiveNow(campaignId),
   onAdCampaignsLoad: () => loadAdCampaignManagement(),
   onAdCampaignCreateSubmit: (input) => createAdCampaignSubmit(input),
   onAdCampaignSendSubmit: (campaignId) => sendAdCampaignSubmit(campaignId),

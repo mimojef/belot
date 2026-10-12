@@ -29,6 +29,7 @@ import { createAdminSettingsStore } from './db/adminSettingsStore.js'
 import { createCampaignCreditStore } from './campaigns/campaignCreditStore.js'
 import { createCampaignsStore } from './campaigns/campaignsStore.js'
 import { createCampaignAdminStore, type CampaignAdminSaveInput, type CampaignThemeAssetKind, type CampaignAdminCampaignSnapshot } from './campaigns/campaignAdminStore.js'
+import { createCampaignArchiveStore, type CampaignArchiveStore } from './campaigns/campaignArchiveStore.js'
 import {
   decodeCampaignGifUploadDataUrl,
   isValidCampaignGifBuffer,
@@ -543,6 +544,38 @@ const CAMPAIGN_THEME_ASSET_SUBFOLDER: Record<CampaignThemeAssetKind, 'icons' | '
 
 function getCampaignThemeAssetDirectory(campaignId: string, kind: CampaignThemeAssetKind): string {
   return join(CAMPAIGN_THEME_UPLOADS_PATH, campaignId, CAMPAIGN_THEME_ASSET_SUBFOLDER[kind])
+}
+
+// Фаза 11 — еднократно, неизменяемо физическо копие на текущата иконка в
+// момента на archiveCampaign(), под ОТДЕЛНА 'archive/' подпапка (НЕ 'icons/'
+// — Фаза 10's updateThemeAsset delete-on-replace логика трие единствено
+// previousUrl-а, който САМА презаписва в campaigns.unit_icon_url; архивното
+// копие никога не е тая стойност, затова никога не се пипа от нея). Копира
+// СУРОВИТЕ байтове, без re-encode (би унищожил GIF анимация) — mirror на
+// Фаза 10's GIF-без-sharp рационал. Null при липсваща оригинална иконка
+// (безопасен fallback, §8) или нечетим source файл (best-effort, никога
+// не чупи целия archiveCampaign опит — connectivity/fs грешка просто
+// отлага архивирането за следващия scheduler tick).
+async function copyCampaignUnitIconToArchive(campaignId: string, currentIconUrl: string | null): Promise<string | null> {
+  if (currentIconUrl === null || !isValidCampaignIdPathSegment(campaignId)) return null
+  const sourcePath = resolveUploadRequestPath(currentIconUrl)
+  if (sourcePath === null) return null
+  let buffer: Buffer
+  try {
+    buffer = await readFile(sourcePath)
+  } catch {
+    return null
+  }
+  const extensionMatch = /\.[a-zA-Z0-9]+$/.exec(currentIconUrl)
+  const extension = extensionMatch ? extensionMatch[0] : '.webp'
+  const archiveDirectory = join(CAMPAIGN_THEME_UPLOADS_PATH, campaignId, 'archive')
+  const filename = `icon${extension}`
+  try {
+    await writeWebpUploadFile(archiveDirectory, filename, buffer)
+  } catch {
+    return null
+  }
+  return createUploadUrl('campaign-themes', campaignId, 'archive', filename)
 }
 
 // Личен чат — снимки. Отделна upload директория, НЕ сервирана от публичния
@@ -3055,6 +3088,50 @@ const campaignCreditReconciliationJob = campaignCreditStore !== null
       reconcilePurchases: reconcileMissingPurchaseCampaignCredits,
     })
   : null
+// Фаза 11 — reconciliation-gated окончателен архив. Собствен periodic job
+// (НЕ campaignScheduler.ts — тоя остава чисто lifecycle/timing, виж doc
+// коментара там; архивирането зависи от campaignCreditStore за gift-reward-
+// gap проверка, mirror на campaignCreditReconciliationJob's dependency
+// shape). Bounded по конструкция — listArchivableCandidateIds() връща
+// finished/stopped+неархивирани+не-изтрити кампании, на практика винаги
+// 0-1 на момент (само ЕДНА активна кампания едновременно е разрешена),
+// никога пълно историческо сканиране.
+const campaignArchiveStore: CampaignArchiveStore | null = campaignCreditStore !== null
+  ? await createCampaignArchiveStore(databaseBootstrap.databaseFilePath, campaignCreditStore)
+  : null
+const CAMPAIGN_ARCHIVAL_SYSTEM_ACTOR = { type: 'system' as const }
+const CAMPAIGN_ARCHIVAL_JOB_INTERVAL_MS = 300_000
+let campaignArchivalJobInFlight = false
+async function runCampaignArchivalJobTick(): Promise<void> {
+  if (campaignArchiveStore === null || !isCampaignsFeatureEnabled() || campaignArchivalJobInFlight) return
+  campaignArchivalJobInFlight = true
+  try {
+    for (const campaignId of campaignArchiveStore.listArchivableCandidateIds()) {
+      try {
+        const campaign = campaignsStore?.getCampaignById(campaignId) ?? null
+        const iconUrlAtArchive = await copyCampaignUnitIconToArchive(campaignId, campaign?.unitIconUrl ?? null)
+        const result = campaignArchiveStore.archiveCampaign(campaignId, CAMPAIGN_ARCHIVAL_SYSTEM_ACTOR, iconUrlAtArchive)
+        if (!result.ok && result.reason === 'reconciliation_incomplete') {
+          console.log(`[campaign-archival] campaign=${campaignId} все още чака reconciliation`, result.readiness)
+        } else if (!result.ok) {
+          console.error(`[campaign-archival] campaign=${campaignId} archive failed`, result)
+        } else if (!result.alreadyArchived) {
+          console.log(`[campaign-archival] campaign=${campaignId} архивирана успешно (totalUnits=${result.detail.summary.totalUnits})`)
+        }
+      } catch (error) {
+        console.error(`[campaign-archival] unexpected error archiving campaign=${campaignId}`, error)
+      }
+    }
+  } finally {
+    campaignArchivalJobInFlight = false
+  }
+}
+let campaignArchivalJobIntervalId: ReturnType<typeof globalThis.setInterval> | null = null
+if (campaignArchiveStore !== null) {
+  void runCampaignArchivalJobTick()
+  campaignArchivalJobIntervalId = globalThis.setInterval(() => { void runCampaignArchivalJobTick() }, CAMPAIGN_ARCHIVAL_JOB_INTERVAL_MS)
+  campaignArchivalJobIntervalId.unref()
+}
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
@@ -17894,6 +17971,23 @@ async function handleAdminCampaignsRequest(
     return true
   }
 
+  // Фаза 11 — "Приключили кампании" списък. ПРЕДИ detailMatch (само точен
+  // literal match на "/archive" суфикса, без wildcard) — иначе detailMatch
+  // би third "archive" като campaignId wildcard и никога не би стигнал до
+  // тоя клон.
+  if (pathname === `${basePath}/archive`) {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    if (campaignArchiveStore === null) {
+      sendJsonResponse(res, 403, { ok: false, message: 'Архивът е изключен от feature flag.' })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, campaigns: campaignArchiveStore.listFinishedCampaignsForAdmin() })
+    return true
+  }
+
   const detailMatch = new RegExp(`^${basePath}/([^/]+)$`).exec(pathname)
   if (detailMatch !== null) {
     const campaignId = decodeURIComponent(detailMatch[1] ?? '')
@@ -18044,6 +18138,51 @@ async function handleAdminCampaignsRequest(
     if (previousUrl !== null) void deleteUploadFileByUrl(previousUrl)
     broadcastActiveCampaignThemeToAllLocalConnections()
     sendJsonResponse(res, 200, { ok: true, campaign: result.value, ...campaignAdminStore.getSnapshot() })
+    return true
+  }
+
+  // Фаза 11 — "Виж резултатите" (GET, детайл или readiness-статус) и ръчен
+  // archive trigger (POST, СЪЩАТА archiveCampaign() функция, която
+  // periodic job-ът вика, виж §5 "ръчен opit = идентичен path"). Позиция
+  // ПРЕДИ actionMatch (mirror на themeAssetMatch-а по-горе) — 'archive' е
+  // literal segment, не generic action name.
+  const archiveDetailMatch = new RegExp(`^${basePath}/([^/]+)/archive$`).exec(pathname)
+  if (archiveDetailMatch !== null) {
+    const archiveCampaignId = decodeURIComponent(archiveDetailMatch[1] ?? '')
+    if (campaignArchiveStore === null) {
+      sendJsonResponse(res, 403, { ok: false, message: 'Архивът е изключен от feature flag.' })
+      return true
+    }
+
+    if (req.method === 'GET') {
+      const detail = campaignArchiveStore.getArchiveDetail(archiveCampaignId)
+      if (detail !== null) {
+        sendJsonResponse(res, 200, { ok: true, archived: true, detail })
+        return true
+      }
+      const readinessResult = campaignArchiveStore.getArchivalReadiness(archiveCampaignId)
+      if (!readinessResult.ok) {
+        sendJsonResponse(res, 404, { ok: false, message: 'Кампанията не е намерена или не е приключила.', reason: readinessResult.reason })
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, archived: false, readiness: readinessResult.readiness, ready: readinessResult.ready })
+      return true
+    }
+
+    if (req.method === 'POST') {
+      const campaignForIcon = campaignsStore?.getCampaignById(archiveCampaignId) ?? null
+      const iconUrlAtArchive = await copyCampaignUnitIconToArchive(archiveCampaignId, campaignForIcon?.unitIconUrl ?? null)
+      const result = campaignArchiveStore.archiveCampaign(archiveCampaignId, actor, iconUrlAtArchive)
+      if (!result.ok) {
+        const status = result.reason === 'campaign_not_found' ? 404 : 400
+        sendJsonResponse(res, status, { ok: false, reason: result.reason, ...(result.reason === 'reconciliation_incomplete' ? { readiness: result.readiness } : {}) })
+        return true
+      }
+      sendJsonResponse(res, 200, { ok: true, alreadyArchived: result.alreadyArchived, detail: result.detail })
+      return true
+    }
+
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
     return true
   }
 
@@ -26868,6 +27007,12 @@ function closeActiveRoomSnapshotStore(): boolean {
   }
   if (campaignScheduler !== null) {
     closeStore('campaignScheduler', () => campaignScheduler.close())
+  }
+  if (campaignArchivalJobIntervalId !== null) {
+    globalThis.clearInterval(campaignArchivalJobIntervalId)
+  }
+  if (campaignArchiveStore !== null) {
+    closeStore('campaignArchiveStore', () => campaignArchiveStore.close())
   }
   if (campaignCreditStore !== null) {
     closeStore('campaignCreditStore', () => campaignCreditStore.close())

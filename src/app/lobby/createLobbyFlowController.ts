@@ -7,7 +7,7 @@ import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tourn
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind } from '../adminCampaigns/adminCampaignTypes.js'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes.js'
 import type { AdminCampaignAction, AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel.js'
 import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload, MarketingDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
@@ -156,6 +156,7 @@ export type LobbyFlowScreen =
   | 'admin-tournaments'
   | 'admin-tournament-detail'
   | 'admin-campaigns'
+  | 'admin-campaign-archive'
   | 'admin-ad-campaigns'
   | 'admin-gift-items'
   | 'tournaments'
@@ -1125,6 +1126,12 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: true; campaigns: AdminCampaignRow[]; referenceData: AdminCampaignReferenceData }
     | { ok: false; message: string; forbidden?: boolean }
   >
+  onAdminCampaignArchiveListLoad?: () => Promise<
+    | { ok: true; campaigns: AdminCampaignArchiveListRow[] }
+    | { ok: false; message: string; forbidden?: boolean }
+  >
+  onAdminCampaignArchiveDetailLoad?: (campaignId: string) => Promise<AdminCampaignArchiveDetailResponse>
+  onAdminCampaignArchiveNowRequest?: (campaignId: string) => Promise<{ ok: true } | { ok: false; message?: string }>
   /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
   onAdminInfoFamilyScreenEnter?: () => void
   onAdminInfoFamilyScreenLeave?: () => void
@@ -2107,6 +2114,12 @@ type InternalLobbyFlowState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
+  adminCampaignArchiveList: AdminCampaignArchiveListRow[]
+  adminCampaignArchiveLoading: boolean
+  adminCampaignArchiveErrorText: string | null
+  adminCampaignArchiveSuccessText: string | null
+  adminCampaignArchiveSelectedId: string | null
+  adminCampaignArchiveDetail: AdminCampaignArchiveDetailResponse | null
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceProcessingIds: Set<string>
   acceptanceErrorText: string | null
@@ -2894,6 +2907,12 @@ function createInitialState(): InternalLobbyFlowState {
     adminCampaignsSuccessText: null,
     adminCampaignsFilter: 'all',
     adminCampaignEditorDraft: null,
+    adminCampaignArchiveList: [],
+    adminCampaignArchiveLoading: false,
+    adminCampaignArchiveErrorText: null,
+    adminCampaignArchiveSuccessText: null,
+    adminCampaignArchiveSelectedId: null,
+    adminCampaignArchiveDetail: null,
     acceptanceNotifications: [],
     acceptanceProcessingIds: new Set<string>(),
     acceptanceErrorText: null,
@@ -3353,6 +3372,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/admin/payments': 'admin-payments',
   '/admin/tournaments': 'admin-tournaments',
   '/admin/campaigns': 'admin-campaigns',
+  '/admin/campaigns/archive': 'admin-campaign-archive',
   '/admin/ad-campaigns': 'admin-ad-campaigns',
   '/admin/gift-items': 'admin-gift-items',
   '/friends': 'friends',
@@ -5130,6 +5150,8 @@ export function createLobbyFlowController(
               ? 'admin-tournament-detail'
             : state.currentScreen === 'admin-campaigns'
               ? 'admin-campaigns'
+            : state.currentScreen === 'admin-campaign-archive'
+              ? 'admin-campaign-archive'
             : state.currentScreen === 'admin-ad-campaigns'
               ? 'admin-ad-campaigns'
             : state.currentScreen === 'admin-gift-items'
@@ -5359,6 +5381,12 @@ export function createLobbyFlowController(
       adminCampaignsSuccessText: state.adminCampaignsSuccessText,
       adminCampaignsFilter: state.adminCampaignsFilter,
       adminCampaignEditorDraft: state.adminCampaignEditorDraft,
+      adminCampaignArchiveList: state.adminCampaignArchiveList,
+      adminCampaignArchiveLoading: state.adminCampaignArchiveLoading,
+      adminCampaignArchiveErrorText: state.adminCampaignArchiveErrorText,
+      adminCampaignArchiveSuccessText: state.adminCampaignArchiveSuccessText,
+      adminCampaignArchiveSelectedId: state.adminCampaignArchiveSelectedId,
+      adminCampaignArchiveDetail: state.adminCampaignArchiveDetail,
       acceptanceNotifications: state.acceptanceNotifications,
       acceptanceErrorText: state.acceptanceErrorText,
       chatConversations: state.chatConversations,
@@ -7812,6 +7840,21 @@ export function createLobbyFlowController(
       },
       onAdminCampaignThemeAssetRemove: (campaignId, kind) => {
         void submitAdminCampaignThemeAssetRemove(campaignId, kind)
+      },
+      onAdminCampaignArchiveOpen: () => {
+        showAdminCampaignArchivePanel()
+      },
+      onAdminCampaignArchiveBack: () => {
+        showAdminCampaignsPanel()
+      },
+      onAdminCampaignArchiveSelect: (campaignId) => {
+        void selectAdminCampaignArchiveDetail(campaignId)
+      },
+      onAdminCampaignArchiveCloseDetail: () => {
+        closeAdminCampaignArchiveDetail()
+      },
+      onAdminCampaignArchiveNow: (campaignId) => {
+        void submitAdminCampaignArchiveNow(campaignId)
       },
       onAdCampaignsOpen: () => {
         showAdCampaignManagementPanel()
@@ -13395,6 +13438,100 @@ export function createLobbyFlowController(
     render()
   }
 
+  // ─── Фаза 11 — "Приключили кампании" архив ───
+
+  function showAdminCampaignArchivePanel(historyMode: 'push' | 'replace' = 'push'): void {
+    const authSession = options.getAuthSession?.() ?? null
+    if (!isFullAdminAuthSession(authSession)) {
+      state.currentScreen = 'lobby'
+      state.errorText = 'Нямаш достъп до админ панела.'
+      render()
+      return
+    }
+    leaveAdminServerIfActive()
+    state.currentScreen = 'admin-campaign-archive'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    options.onAdminInfoFamilyScreenEnter?.()
+    state.adminCampaignArchiveLoading = true
+    state.adminCampaignArchiveErrorText = null
+    state.adminCampaignArchiveSuccessText = null
+    state.adminCampaignArchiveSelectedId = null
+    state.adminCampaignArchiveDetail = null
+    const target = '/admin/campaigns/archive'
+    if (window.location.pathname !== target) {
+      if (historyMode === 'replace') history.replaceState(null, '', target)
+      else history.pushState(null, '', target)
+    }
+    render()
+    void fetchAdminCampaignArchiveList()
+  }
+
+  async function fetchAdminCampaignArchiveList(): Promise<void> {
+    if (!options.onAdminCampaignArchiveListLoad) {
+      state.adminCampaignArchiveLoading = false
+      state.adminCampaignArchiveErrorText = 'Зареждането не е конфигурирано.'
+      if (state.currentScreen === 'admin-campaign-archive') render()
+      return
+    }
+    const result = await options.onAdminCampaignArchiveListLoad()
+    if (state.currentScreen !== 'admin-campaign-archive') return
+    state.adminCampaignArchiveLoading = false
+    if (!result.ok) {
+      if (result.forbidden) {
+        forceLeaveAdminScreenForbidden(result.message)
+        return
+      }
+      state.adminCampaignArchiveErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaignArchiveList = result.campaigns
+    state.adminCampaignArchiveErrorText = null
+    render()
+  }
+
+  async function selectAdminCampaignArchiveDetail(campaignId: string): Promise<void> {
+    state.adminCampaignArchiveSelectedId = campaignId
+    state.adminCampaignArchiveDetail = null
+    state.adminCampaignArchiveErrorText = null
+    render()
+    if (!options.onAdminCampaignArchiveDetailLoad) return
+    const result = await options.onAdminCampaignArchiveDetailLoad(campaignId)
+    if (state.currentScreen !== 'admin-campaign-archive' || state.adminCampaignArchiveSelectedId !== campaignId) return
+    state.adminCampaignArchiveDetail = result
+    render()
+  }
+
+  function closeAdminCampaignArchiveDetail(): void {
+    state.adminCampaignArchiveSelectedId = null
+    state.adminCampaignArchiveDetail = null
+    render()
+  }
+
+  async function submitAdminCampaignArchiveNow(campaignId: string): Promise<void> {
+    if (!options.onAdminCampaignArchiveNowRequest) {
+      state.adminCampaignArchiveErrorText = 'Действието временно не е налично.'
+      render()
+      return
+    }
+    state.adminCampaignArchiveErrorText = null
+    render()
+    const result = await options.onAdminCampaignArchiveNowRequest(campaignId)
+    if (!result.ok) {
+      state.adminCampaignArchiveErrorText = result.message ?? 'Архивирането не бе завършено — проверете reconciliation статуса.'
+      render()
+      return
+    }
+    state.adminCampaignArchiveSuccessText = 'Кампанията е архивирана успешно.'
+    await fetchAdminCampaignArchiveList()
+    await selectAdminCampaignArchiveDetail(campaignId)
+  }
+
   function editAdminCampaign(campaignId: string): void {
     const row = state.adminCampaigns.find((campaign) => campaign.campaignId === campaignId)
     if (!row) return
@@ -17859,6 +17996,7 @@ export function createLobbyFlowController(
     'admin-payments': '/admin/payments',
     'admin-tournaments': '/admin/tournaments',
     'admin-campaigns': '/admin/campaigns',
+    'admin-campaign-archive': '/admin/campaigns/archive',
     'admin-ad-campaigns': '/admin/ad-campaigns',
     tournaments: '/tournaments',
     topics: '/topics',
@@ -17889,6 +18027,7 @@ export function createLobbyFlowController(
     '/admin/payments': 'admin-payments',
     '/admin/tournaments': 'admin-tournaments',
     '/admin/campaigns': 'admin-campaigns',
+    '/admin/campaigns/archive': 'admin-campaign-archive',
     '/admin/ad-campaigns': 'admin-ad-campaigns',
     '/admin/gift-items': 'admin-gift-items',
     '/tournaments': 'tournaments',
@@ -18061,6 +18200,7 @@ export function createLobbyFlowController(
         break
       }
       case 'admin-campaigns': showAdminCampaignsPanel('replace'); break
+      case 'admin-campaign-archive': showAdminCampaignArchivePanel('replace'); break
       case 'admin-ad-campaigns': showAdCampaignManagementPanel('replace'); break
       case 'admin-gift-items': showAdminGiftItemsPanel('replace'); break
       case 'tournaments': void showTournamentsList(); break

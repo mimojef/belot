@@ -32,6 +32,7 @@ export type AdminCampaignsPanelHandlers = {
   onMarketingSenderSave: (campaignId: string, giftSenderProfileId: string | null) => void
   onThemeAssetUpload: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
   onThemeAssetRemove: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
+  onViewArchive: () => void
 }
 
 function esc(value: unknown): string {
@@ -320,6 +321,7 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;">
           <button type="button" data-admin-campaigns-back="1" style="height:36px;border:1px solid rgba(255,255,255,0.14);border-radius:6px;background:rgba(255,255,255,0.06);color:#fff;font-size:12px;font-weight:900;cursor:pointer;">Назад</button>
+          <button type="button" data-admin-campaigns-view-archive="1" style="height:36px;border:1px solid rgba(196,181,253,0.4);border-radius:6px;background:rgba(76,29,149,0.26);color:#ddd6fe;font-size:12px;font-weight:900;cursor:pointer;">Приключили кампании</button>
           <button type="button" data-admin-campaign-create="1" style="height:36px;border:1px solid rgba(52,211,153,0.42);border-radius:6px;background:rgba(6,78,59,0.34);color:#bbf7d0;font-size:12px;font-weight:950;cursor:pointer;">Нова кампания</button>
         </div>
       </div>
@@ -405,6 +407,7 @@ export function attachAdminCampaignsHandlers(
 ): void {
   root.querySelector<HTMLElement>('[data-admin-campaigns-back="1"]')?.addEventListener('click', handlers.onBack)
   root.querySelector<HTMLElement>('[data-admin-campaign-create="1"]')?.addEventListener('click', handlers.onCreate)
+  root.querySelector<HTMLElement>('[data-admin-campaigns-view-archive="1"]')?.addEventListener('click', handlers.onViewArchive)
 
   root.querySelectorAll<HTMLElement>('[data-admin-campaign-filter]').forEach((button) => {
     button.addEventListener('click', () => handlers.onFilter((button.dataset.adminCampaignFilter ?? 'all') as AdminCampaignFilter))

@@ -116,8 +116,9 @@ import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../a
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes'
 import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind } from '../adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes'
 import { renderAdminCampaignsPanel, attachAdminCampaignsHandlers, type AdminCampaignAction, type AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel'
+import { renderAdminCampaignArchivePanel, attachAdminCampaignArchivePanelHandlers } from '../adminCampaigns/renderAdminCampaignArchivePanel'
 import { renderAdCampaignManagementPanel, attachAdCampaignManagementPanelHandlers } from '../adCampaigns/renderAdCampaignManagementPanel'
 import { renderAdCampaignPopup, attachAdCampaignPopupHandlers } from '../adCampaigns/renderAdCampaignPopup'
 import {
@@ -426,7 +427,7 @@ export type GuestContactFormInput = {
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-campaigns' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games' | 'ludo-lobby'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-campaigns' | 'admin-campaign-archive' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games' | 'ludo-lobby'
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -790,6 +791,12 @@ export type LobbyScreenState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
+  adminCampaignArchiveList: AdminCampaignArchiveListRow[]
+  adminCampaignArchiveLoading: boolean
+  adminCampaignArchiveErrorText: string | null
+  adminCampaignArchiveSuccessText: string | null
+  adminCampaignArchiveSelectedId: string | null
+  adminCampaignArchiveDetail: AdminCampaignArchiveDetailResponse | null
   acceptanceNotifications: Array<{ friendshipId: string; fromProfileId: string; fromDisplayName: string; fromAvatarUrl: string | null }>
   acceptanceErrorText: string | null
   chatConversations: ChatConversationSnapshot[]
@@ -1543,6 +1550,11 @@ export type RenderLobbyScreenOptions = {
   onAdminCampaignMarketingSenderSave?: (campaignId: string, giftSenderProfileId: string | null) => void
   onAdminCampaignThemeAssetUpload?: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
   onAdminCampaignThemeAssetRemove?: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
+  onAdminCampaignArchiveOpen?: () => void
+  onAdminCampaignArchiveBack?: () => void
+  onAdminCampaignArchiveSelect?: (campaignId: string) => void
+  onAdminCampaignArchiveCloseDetail?: () => void
+  onAdminCampaignArchiveNow?: (campaignId: string) => void
   onAdCampaignsOpen?: () => void
   onAdCampaignsBack?: () => void
   onAdCampaignCreate?: (input: { imageDataUrl: string; targetUrl: string }) => void
@@ -3375,7 +3387,7 @@ function renderNav(state: LobbyScreenState): string {
   const topicsActive = activeView === 'topics'
   const shopActive = activeView === 'shop'
   const gamesActive = activeView === 'more-games' || activeView === 'ludo-lobby'
-  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-campaigns' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
+  const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-campaigns' || activeView === 'admin-campaign-archive' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = getSupportUnreadRaw(state)
   const notificationsBadgeCount = getNotificationsBadgeCount(state)
@@ -6530,6 +6542,8 @@ function renderMobileLobbyScreenContent(
               })
           : state.view === 'admin-campaigns'
             ? renderAdminCampaignsPanel(state, false)
+          : state.view === 'admin-campaign-archive'
+            ? renderAdminCampaignArchivePanel(state, false)
           : state.view === 'admin-ad-campaigns'
             ? renderAdCampaignManagementPanel({
                 isAdCampaignManager: state.isAdCampaignManager,
@@ -13726,6 +13740,8 @@ export function renderLobbyScreen(
                   })
               : state.view === 'admin-campaigns'
                 ? renderAdminCampaignsPanel(state, true)
+              : state.view === 'admin-campaign-archive'
+                ? renderAdminCampaignArchivePanel(state, true)
               : state.view === 'admin-ad-campaigns'
                 ? renderAdCampaignManagementPanel({
                     isAdCampaignManager: state.isAdCampaignManager,
@@ -18156,6 +18172,14 @@ export function renderLobbyScreen(
     onMarketingSenderSave: (campaignId, giftSenderProfileId) => { options.onAdminCampaignMarketingSenderSave?.(campaignId, giftSenderProfileId) },
     onThemeAssetUpload: (campaignId, kind, imageDataUrl) => { options.onAdminCampaignThemeAssetUpload?.(campaignId, kind, imageDataUrl) },
     onThemeAssetRemove: (campaignId, kind) => { options.onAdminCampaignThemeAssetRemove?.(campaignId, kind) },
+    onViewArchive: () => { options.onAdminCampaignArchiveOpen?.() },
+  })
+
+  attachAdminCampaignArchivePanelHandlers(root, {
+    onBack: () => { options.onAdminCampaignArchiveBack?.() },
+    onSelect: (campaignId) => { options.onAdminCampaignArchiveSelect?.(campaignId) },
+    onCloseDetail: () => { options.onAdminCampaignArchiveCloseDetail?.() },
+    onArchiveNow: (campaignId) => { options.onAdminCampaignArchiveNow?.(campaignId) },
   })
 
   attachAdCampaignManagementPanelHandlers(root, {

@@ -977,6 +977,16 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
         rollback()
         return resultError('Кампанията не беше намерена.', 'campaign_not_found')
       }
+      // Фаза 11 — веднъж архивирана, НИКОЯ част от кампанията не се пипа
+      // повече (§8 "по-късна редакция... да не променя вече архивирания
+      // изглед") — иконата вече си има ОТДЕЛНО, неизменяемо архивно копие
+      // (campaignArchiveStore.ts::archiveCampaign), затова тая заключка не
+      // чупи архивния изглед, само предотвратява безсмислена ПО-НАТАТЪШНА
+      // редакция на вече приключил/архивиран запис.
+      if (existing.archivedAt !== null) {
+        rollback()
+        return resultError('Архивирана кампания не може да бъде редактирана.', 'campaign_archived')
+      }
 
       statement.run(url, campaignId)
       insertEvent(campaignId, 'campaign_theme_asset_updated', actor, { kind, url })
