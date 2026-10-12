@@ -8475,6 +8475,16 @@ client = createGameServerClient({
       return
     }
 
+    // Фаза 9 — realtime push-ът пристига ТОЧНО при края на мача, докато
+    // Белот стаята (End Game) още е активна. Общият fallback по-долу
+    // подава към лобито само без активна стая, което изпускаше известието.
+    // Винаги го опашваме — контролерът сам изчаква безопасен момент
+    // (isSafeToShowCampaignRewardCongratulations / resetToLobby).
+    if (message.type === 'pending_campaign_reward_notifications') {
+      lobby.handleServerMessage(message)
+      return
+    }
+
     if (message.type === 'friend_request_received') {
       lobby.handleServerMessage(message)
       friendRequestNotification.showRequest({

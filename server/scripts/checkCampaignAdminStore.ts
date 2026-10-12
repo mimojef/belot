@@ -508,6 +508,56 @@ try {
     })
   })
 
+  // ─── Залозите в "Правила за игри" идват динамично от match_rooms ───
+  // Пишем в match_rooms (таблицата, която админ панелът за залози управлява)
+  // и четем през СЪЩАТА adminStore инстанция — т.е. без restart/кеш.
+  const NEW_STAKE = 12345
+  async function setMatchRoom(stakeAmount: number, isEnabled: boolean): Promise<void> {
+    const db = await openRawDb()
+    try {
+      db.prepare(
+        `INSERT INTO match_rooms (stake_amount, min_level, prize_amount, is_enabled) VALUES (?, 1, 20000, ?)
+         ON CONFLICT(stake_amount) DO UPDATE SET is_enabled = excluded.is_enabled;`,
+      ).run(stakeAmount, isEnabled ? 1 : 0)
+    } finally {
+      db.close()
+    }
+  }
+  async function enabledStakesFromDb(): Promise<number[]> {
+    const db = await openRawDb()
+    try {
+      return (db.prepare(`SELECT stake_amount FROM match_rooms WHERE is_enabled = 1;`).all() as Array<{ stake_amount: number }>).map((r) => r.stake_amount)
+    } finally {
+      db.close()
+    }
+  }
+
+  await check('[S1] Нов включен залог от админ панела се появява за Belot и Ludo (възходящо, без дубликати) и минава валидацията', async () => {
+    await setMatchRoom(NEW_STAKE, true)
+    const { belot, ludo } = adminStore.getSnapshot().referenceData.allowedStakes
+    const expected = (await enabledStakesFromDb()).sort((a, b) => a - b)
+    assert(belot.includes(NEW_STAKE) && ludo.includes(NEW_STAKE), `нов залог липсва: belot=${belot} ludo=${ludo}`)
+    assert(JSON.stringify(belot) === JSON.stringify(expected), `belot трябва да е = включените match_rooms възходящо: ${belot} vs ${expected}`)
+    assert(JSON.stringify(ludo) === JSON.stringify(expected), `ludo трябва да е същия списък: ${ludo}`)
+    assert(new Set(belot).size === belot.length, `дубликати: ${belot}`)
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({ earnRules: [{ gameKind: 'belot', stakeAmount: NEW_STAKE, unitsPerWin: 2 }, { gameKind: 'ludo', stakeAmount: NEW_STAKE, unitsPerWin: 1 }] }),
+      ADMIN_ACTOR,
+    )
+    assert(result.ok, `правило с новия залог трябва да се приеме: ${JSON.stringify(result)}`)
+  })
+
+  await check('[S2] Изключен залог изчезва от списъка и валидацията го отхвърля (invalid_stake)', async () => {
+    await setMatchRoom(NEW_STAKE, false)
+    const { belot, ludo } = adminStore.getSnapshot().referenceData.allowedStakes
+    assert(!belot.includes(NEW_STAKE) && !ludo.includes(NEW_STAKE), `изключеният залог още се показва: belot=${belot} ludo=${ludo}`)
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({ earnRules: [{ gameKind: 'ludo', stakeAmount: NEW_STAKE, unitsPerWin: 1 }] }),
+      ADMIN_ACTOR,
+    )
+    assert(!result.ok && result.reason === 'invalid_stake', `expected invalid_stake, got ${JSON.stringify(result)}`)
+  })
+
 } finally {
   adminStore?.close()
   campaignsStore?.close()

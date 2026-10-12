@@ -80,8 +80,15 @@ export type CampaignRewardNotificationPayload = {
   campaignName: string
   unitNameSingular: string
   unitNamePlural: string
+  /** Иконата на единицата (за поздравителния popup). Липсва в по-стари редове — listPendingNotifications я допълва от campaigns. */
+  unitIconUrl?: string | null
   unitsTotal: number
   rewards: GrantedRewardSummary[]
+}
+
+function withUnitIconUrl(payload: CampaignRewardNotificationPayload, campaignUnitIconUrl: string | null): CampaignRewardNotificationPayload {
+  if (typeof payload.unitIconUrl === 'string' && payload.unitIconUrl.length > 0) return payload
+  return { ...payload, unitIconUrl: campaignUnitIconUrl }
 }
 
 export type CampaignRewardNotificationForPush = {
@@ -298,6 +305,7 @@ type CampaignRow = {
   unit_name_singular: string
   unit_name_plural: string
   gift_sender_profile_id: string | null
+  unit_icon_url: string | null
   archived_at: string | null
 }
 
@@ -356,7 +364,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
   const selectCampaignByIdStatement = database.prepare(`
     SELECT campaign_id, name, status, starts_at, ends_at, unit_name_singular, unit_name_plural,
-           gift_sender_profile_id, archived_at
+           gift_sender_profile_id, archived_at, unit_icon_url
     FROM campaigns
     WHERE campaign_id = ?
     LIMIT 1;
@@ -364,7 +372,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
 
   const selectCandidateCampaignsStatement = database.prepare(`
     SELECT campaign_id, name, status, starts_at, ends_at, unit_name_singular, unit_name_plural,
-           gift_sender_profile_id, archived_at
+           gift_sender_profile_id, archived_at, unit_icon_url
     FROM campaigns
     WHERE archived_at IS NULL
       AND status IN ('active', 'finished', 'stopped')
@@ -860,6 +868,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
         campaignName: campaign.name,
         unitNameSingular: campaign.unit_name_singular,
         unitNamePlural: campaign.unit_name_plural,
+        unitIconUrl: campaign.unit_icon_url,
         unitsTotal,
         rewards: granted,
       }
@@ -965,10 +974,12 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   // ─── Notifications ───
 
   const selectPendingNotificationsStatement = database.prepare(`
-    SELECT notification_id, campaign_id, status, payload_json, created_at, acknowledged_at
-    FROM campaign_reward_notifications
-    WHERE profile_id = ? AND status = 'pending'
-    ORDER BY created_at ASC;
+    SELECT n.notification_id, n.campaign_id, n.status, n.payload_json, n.created_at, n.acknowledged_at,
+           c.unit_icon_url AS unit_icon_url
+    FROM campaign_reward_notifications n
+    LEFT JOIN campaigns c ON c.campaign_id = n.campaign_id
+    WHERE n.profile_id = ? AND n.status = 'pending'
+    ORDER BY n.created_at ASC;
   `)
 
   const selectNotificationOwnerStatement = database.prepare(`
@@ -989,12 +1000,13 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
       payload_json: string
       created_at: string
       acknowledged_at: string | null
+      unit_icon_url: string | null
     }>
     return rows.map((row) => ({
       notificationId: row.notification_id,
       campaignId: row.campaign_id,
       status: row.status as 'pending' | 'acknowledged',
-      payload: JSON.parse(row.payload_json),
+      payload: withUnitIconUrl(JSON.parse(row.payload_json) as CampaignRewardNotificationPayload, row.unit_icon_url),
       createdAt: row.created_at,
       acknowledgedAt: row.acknowledged_at,
     }))
@@ -1108,6 +1120,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
         campaignName: campaign.name,
         unitNameSingular: campaign.unit_name_singular,
         unitNamePlural: campaign.unit_name_plural,
+        unitIconUrl: campaign.unit_icon_url,
         unitsTotal: getProfileCampaignTotalInternal(campaignId, profileId),
         rewards: [result.summary],
       }

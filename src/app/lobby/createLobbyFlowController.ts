@@ -16171,6 +16171,7 @@ export function createLobbyFlowController(
         campaignName: item.payload.campaignName,
         unitNameSingular: item.payload.unitNameSingular,
         unitNamePlural: item.payload.unitNamePlural,
+        unitIconUrl: item.payload.unitIconUrl ?? null,
         unitsTotal: item.payload.unitsTotal,
         rewards: [...item.payload.rewards],
         notificationIds: [item.notificationId],
@@ -19292,9 +19293,22 @@ export function createLobbyFlowController(
    * да останат на екрана") — нов профил винаги започва от collapsed view.
    */
   function ensureProfilePopupCampaignSummaryLoaded(): void {
-    const profile = state.profilePopupProfile
+    // Собственият профил се отваря с profilePopupProfile=null и се рисува от
+    // локалния preview (виж renderPopupOnly) — резолвваме профила ТОЧНО като
+    // рендера, иначе за собствения профил заявка изобщо не се пращаше, а
+    // карето показваше остатъчното summary на последно отворения чужд профил.
+    const profile = state.profilePopupProfile ?? createLocalProfilePreview(state, options.getAuthSession?.() ?? null)
 
-    if (!state.profilePopupOpen || profile === null || profile.profileId === null) {
+    if (!state.profilePopupOpen) {
+      // Кампанийният прогрес се мени след всяка игра, а кампания може да
+      // стане активна, докато страницата е отворена — затова guard-ът важи
+      // само за ЕДНО отваряне на popup-а. Затворен popup -> следващото
+      // отваряне зарежда свежо summary (иначе остава кеширан стар/празен
+      // резултат или неуспешна заявка до презареждане на страницата).
+      state.profilePopupCampaignSummaryProfileId = null
+      return
+    }
+    if (profile === null || profile.profileId === null) {
       return
     }
     if (state.profilePopupCampaignSummaryProfileId === profile.profileId) {
@@ -20263,6 +20277,14 @@ export function createLobbyFlowController(
     // без нужда от отделен realtime push вариант.
     if (message.type === 'pending_campaign_reward_notifications') {
       enqueueCampaignRewardNotifications(message.notifications)
+      return true
+    }
+
+    // Кампании — темата (вкл. packageUnits за "+X <икона>" в магазина) вече
+    // е записана от activeRoom контролера (setActiveCampaignTheme); тук само
+    // пререндерираме, за да не остане остарял бонус след activate/finish/смяна.
+    if (message.type === 'active_campaign_theme') {
+      render()
       return true
     }
 

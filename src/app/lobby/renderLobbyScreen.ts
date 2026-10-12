@@ -1,3 +1,4 @@
+import { getCampaignPackageUnits, renderCampaignPackageUnitsBadge } from './campaignShopBonus'
 import {
   DEFAULT_HUMAN_TURN_TIMEOUT_MS,
   HUMAN_TURN_TIMEOUT_OPTIONS_MS,
@@ -2422,6 +2423,47 @@ function getComposerEmojiLockState(trigger: HTMLElement): { muted: boolean; nonV
 
 function formatAmount(value: number): string {
   return new Intl.NumberFormat('bg-BG').format(value)
+}
+
+// Оферти в лобито — сумата (+ евентуален кампаниен "+X <икона>") се свива
+// прогресивно според РЕАЛНАТА ширина на текстовата колона (container query
+// единици: колоната е `container-type:inline-size`, 100cqi = нейната ширина)
+// и РЕАЛНАТА дължина на текста: font-size = (ширина − фиксирани px) /
+// (брой знаци × средна ширина на знак), ограничен между minPx и сегашния
+// размер (maxPx) -> кратките суми остават непроменени. С кампаниен бонус:
+// ако сумата + бонусът се побират на един ред при >= OFFER_WRAP_THRESHOLD_PX,
+// остават на един ред; иначе сумата се оразмерява само по себе си (до прага),
+// а бонусът се пренася на нов ред (flex-wrap) вътре в карето. Сумата никога
+// не се реже и не получава многоточие. Без cqi поддръжка остава старият
+// фиксиран размер. Ако колоната е толкова тясна, че и minPx не стига (напр.
+// 320px), числото се пренася под иконката на жълтиците — пак цяло.
+// 0.64em/знак = измерените ~0.60–0.62em за удебелените цифри + резерв.
+const OFFER_AMOUNT_CHAR_EM = 0.64
+const OFFER_WRAP_THRESHOLD_PX = 15
+const OFFER_BADGE_FONT_EM = 0.82
+const OFFER_BADGE_FIXED_PX = 6 + 2 + 22 // margin-left + gap + иконка (виж renderCampaignPackageUnitsBadge)
+
+function renderLobbyOfferAmountRow(
+  pkg: CoinPackageSnapshot,
+  opts: { maxPx: number; minPx: number; coinIconPx: number; gapPx: number; fontWeight: number },
+): string {
+  const amountText = formatAmount(pkg.yellowCoinsAmount)
+  const badgeHtml = renderCampaignPackageUnitsBadge(pkg.packageKey, 22)
+  const amountFixedPx = opts.coinIconPx + opts.gapPx
+  const amountEm = amountText.length * OFFER_AMOUNT_CHAR_EM
+  const fitAlone = `(100cqi - ${amountFixedPx}px) / ${amountEm.toFixed(3)}`
+  let fitted = fitAlone
+  if (badgeHtml) {
+    const badgeLabel = `+${new Intl.NumberFormat('bg-BG', { useGrouping: 'always' }).format(getCampaignPackageUnits(pkg.packageKey))}`
+    const inlineEm = amountEm + badgeLabel.length * OFFER_AMOUNT_CHAR_EM * OFFER_BADGE_FONT_EM
+    const fitInline = `(100cqi - ${amountFixedPx + OFFER_BADGE_FIXED_PX}px) / ${inlineEm.toFixed(3)}`
+    // fitInline >= прага -> един ред; иначе min(fitAlone, прага) > fitInline -> бонусът се пренася.
+    fitted = `max(${fitInline}, min(${fitAlone}, ${OFFER_WRAP_THRESHOLD_PX}px))`
+  }
+  const fittedFontSize = `clamp(${opts.minPx}px, ${fitted}, ${opts.maxPx}px)`
+  return `<div data-lobby-offer-amount="1" style="font-size:${opts.maxPx}px;font-size:${fittedFontSize};line-height:1;font-weight:${opts.fontWeight};color:#d4a520;display:flex;flex-wrap:wrap;align-items:center;column-gap:${opts.gapPx}px;row-gap:4px;max-width:100%;">
+          <img src="/assets/lobby/icon-coin.png" alt="" style="width:${opts.coinIconPx}px;height:${opts.coinIconPx}px;display:block;object-fit:contain;flex:0 0 auto;"><span data-lobby-offer-amount-value="1" style="white-space:nowrap;">${amountText}</span>${badgeHtml}
+        </div>`
 }
 
 export function renderTopOfferBadge(): string {
@@ -5023,11 +5065,8 @@ export function renderBottomSection(
         <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици"
           style="width:80px; height:80px; display:block; object-fit:contain;">
       </div>
-      <div style="display:flex; flex-direction:column; justify-content:center; align-items:flex-start; min-width:0;">
-        <div style="font-size:21px; line-height:1; font-weight:800; color:#d4a520; white-space:nowrap; display:flex; align-items:center; gap:5px;">
-          <img src="/assets/lobby/icon-coin.png" alt="" style="width:20px; height:20px; object-fit:contain; display:block;">
-          ${formatAmount(pkg.yellowCoinsAmount)}
-        </div>
+      <div style="display:flex; flex-direction:column; justify-content:center; align-items:flex-start; min-width:0; container-type:inline-size;">
+        ${renderLobbyOfferAmountRow(pkg, { maxPx: 21, minPx: 12, coinIconPx: 20, gapPx: 5, fontWeight: 800 })}
         <div style="font-size:16px; line-height:1; font-weight:400; color:#ffffff; margin-top:6px; margin-bottom:7px; white-space:nowrap;">
           ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}
         </div>
@@ -5713,11 +5752,8 @@ export function renderMobileOffersSection(lobbyPackages: CoinPackageSnapshot[], 
       ">
         ${pkg.isTopOffer ? renderTopOfferBadge() : ''}
         <img src="${imgSrc}" alt="${formatAmount(pkg.yellowCoinsAmount)} жълтици" style="width:78px;height:78px;display:block;object-fit:contain;">
-        <div style="min-width:0;">
-          <div style="font-size:21px;font-weight:900;color:#d4a520;white-space:nowrap;display:flex;align-items:center;gap:6px;">
-            <img src="/assets/lobby/icon-coin.png" alt="" style="width:20px;height:20px;display:block;object-fit:contain;flex:0 0 auto;">
-            ${formatAmount(pkg.yellowCoinsAmount)}
-          </div>
+        <div style="min-width:0;container-type:inline-size;">
+          ${renderLobbyOfferAmountRow(pkg, { maxPx: 21, minPx: 12, coinIconPx: 20, gapPx: 6, fontWeight: 900 })}
           <div style="margin-top:5px;font-size:14px;font-weight:800;color:#ffffff;white-space:nowrap;">
             ${escapeHtml(formatPackagePrice(pkg.priceCents, pkg.currency))}
           </div>
@@ -6112,6 +6148,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
                 ">
                   ${renderVipPackageImageBlock(vipPackage)}
                   <div style="width:100%;padding:0 16px 18px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;">
+                    ${renderCampaignPackageUnitsBadge(vipPackage.packageId, 22) ? `<div data-shop-campaign-units-row="1" style="margin:2px 0 10px;font-size:20px;line-height:1;margin-left:-6px;">${renderCampaignPackageUnitsBadge(vipPackage.packageId, 22)}</div>` : ''}
                     <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);"></div>
                     <div style="margin-top:12px;font-size:24px;font-weight:900;color:#d4a520;white-space:nowrap;">${escapeHtml(formatPackagePrice(vipPackage.priceCents, vipPackage.currency))}</div>
                     <button
@@ -6119,7 +6156,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
                       data-vip-purchase-package="${escapeHtml(vipPackage.packageId)}"
                       ${isPurchasing ? 'disabled' : ''}
                       style="margin-top:18px;height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};"
-                    >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи VIP' : 'Влез за покупка'}</button>
+                    >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}</button>
                   </div>
                 </article>
               `
@@ -6175,9 +6212,9 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
 
                   <div style="display:flex;flex-direction:column;align-items:flex-start;gap:6px;">
                     <div>
-                      <div style="display:flex;align-items:center;gap:6px;">
-                        <img src="/assets/lobby/icon-coin.png" alt="" style="width:20px;height:20px;object-fit:contain;flex-shrink:0;">
-                        <span style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</span>
+                      <div style="display:flex;align-items:center;flex-wrap:wrap;row-gap:6px;">
+                        <span style="display:inline-flex;align-items:center;gap:6px;"><img src="/assets/lobby/icon-coin.png" alt="" style="width:20px;height:20px;object-fit:contain;flex-shrink:0;">
+                        <span style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</span></span>${renderCampaignPackageUnitsBadge(bundlePackage.packageKey, 22, 18)}
                       </div>
                       <div style="margin-top:2px;font-size:10px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
                     </div>
@@ -6204,7 +6241,7 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
                   data-bundle-purchase-package="${escapeHtml(bundlePackage.packageId)}"
                   ${isPurchasing ? 'disabled' : ''}
                   style="margin-top:16px;height:44px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};"
-                >${isPurchasing ? 'Зарежда...' : isLoggedInBundle ? 'Купи пакет' : 'Влез за покупка'}</button>
+                >${isPurchasing ? 'Зарежда...' : isLoggedInBundle ? 'Купи' : 'Влез за покупка'}</button>
               </article>
             `
           }).join('')}
@@ -6245,11 +6282,11 @@ export function renderMobileShopPanel(state: LobbyScreenState): string {
             <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="width:82px;height:82px;object-fit:contain;">
             <div style="min-width:0;">
               <div style="font-size:12px;font-weight:900;color:rgba(255,255,255,0.48);text-transform:uppercase;">${escapeHtml(coinPackage.title)}</div>
-              <div style="margin-top:4px;font-size:22px;font-weight:900;color:#d4a520;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
+              <div style="margin-top:4px;font-size:22px;font-weight:900;color:#d4a520;display:flex;align-items:center;flex-wrap:wrap;row-gap:4px;">${formatAmount(coinPackage.yellowCoinsAmount)}${renderCampaignPackageUnitsBadge(coinPackage.packageKey, 22)}</div>
               <div style="margin-top:4px;font-size:14px;font-weight:900;color:#ffffff;white-space:nowrap;">
                 ${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}
               </div>
-              <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="margin-top:10px;height:38px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};">${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}</button>
+              <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="margin-top:10px;height:38px;width:100%;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:13px;font-weight:900;opacity:${isPurchasing ? '0.62' : '1'};">${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}</button>
             </div>
           </article>
         `
@@ -7941,6 +7978,7 @@ function renderVipShopPanel(state: LobbyScreenState): string {
             ${renderVipPackageImageBlock(vipPackage)}
 
             <div style="width:100%;padding:0 20px 20px;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;">
+              ${renderCampaignPackageUnitsBadge(vipPackage.packageId, 26) ? `<div data-shop-campaign-units-row="1" style="margin:2px 0 12px;font-size:22px;line-height:1;margin-left:-6px;">${renderCampaignPackageUnitsBadge(vipPackage.packageId, 26)}</div>` : ''}
               <div style="width:100%;height:1px;background:rgba(212,165,32,0.20);"></div>
 
               <div style="margin-top:16px;font-size:28px;font-weight:900;color:#d4a520;line-height:1;white-space:nowrap;">${escapeHtml(formatPackagePrice(vipPackage.priceCents, vipPackage.currency))}</div>
@@ -8074,9 +8112,9 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
 
               <div style="display:flex;flex-direction:column;align-items:flex-start;gap:7px;">
                 <div>
-                  <div style="display:flex;align-items:center;gap:7px;">
-                    <img src="/assets/lobby/icon-coin.png" alt="" style="width:24px;height:24px;object-fit:contain;flex-shrink:0;">
-                    <span style="font-size:26px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</span>
+                  <div style="display:flex;align-items:center;flex-wrap:wrap;row-gap:6px;">
+                    <span style="display:inline-flex;align-items:center;gap:7px;"><img src="/assets/lobby/icon-coin.png" alt="" style="width:24px;height:24px;object-fit:contain;flex-shrink:0;">
+                    <span style="font-size:26px;font-weight:900;color:#d4a520;line-height:1;">${formatAmount(bundlePackage.yellowCoinsAmount)}</span></span>${renderCampaignPackageUnitsBadge(bundlePackage.packageKey, 26, 21)}
                   </div>
                   <div style="margin-top:2px;font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.5);">Жълтици</div>
                 </div>
@@ -8103,7 +8141,7 @@ function renderBundleShopPanel(state: LobbyScreenState): string {
               data-bundle-purchase-package="${escapeHtml(bundlePackage.packageId)}"
               ${isPurchasing ? 'disabled' : ''}
               style="margin-top:20px;height:44px;width:100%;border:0;border-radius:9px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:14px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};opacity:${isPurchasing ? '0.62' : '1'};transition:filter 0.15s;flex-shrink:0;"
-            >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}</button>
+            >${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}</button>
           </article>
           `
         }).join('')}
@@ -8321,19 +8359,20 @@ export function renderShopPanel(state: LobbyScreenState): string {
             ">
               <img src="${getCoinPackageImage(coinPackage.sortOrder)}" alt="" style="position:absolute;bottom:10px;right:10px;width:76px;height:76px;object-fit:contain;opacity:0.88;pointer-events:none;">
 
-              <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="position:absolute;top:14px;right:14px;height:34px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;cursor:${isPurchasing ? 'wait' : 'pointer'};transition:filter 0.15s,transform 0.1s;">
-                ${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи пакет' : 'Влез за покупка'}
-              </button>
-
               ${coinPackage.isTopOffer ? renderTopOfferBadge() : ''}
 
               <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:5px;">Жълтици</div>
-              <div style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;margin-bottom:12px;">${formatAmount(coinPackage.yellowCoinsAmount)}</div>
+              <div style="font-size:22px;font-weight:900;color:#d4a520;line-height:1;margin-bottom:12px;display:flex;align-items:center;flex-wrap:wrap;row-gap:4px;">${formatAmount(coinPackage.yellowCoinsAmount)}${renderCampaignPackageUnitsBadge(coinPackage.packageKey, 24)}</div>
 
               <div style="font-size:10px;font-weight:700;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:0.08em;margin-bottom:4px;">Пакет</div>
               <div style="font-size:15px;font-weight:900;color:#ffffff;margin-bottom:14px;">${escapeHtml(coinPackage.title)}</div>
 
-              <div style="font-size:17px;font-weight:900;color:#ffffff;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
+              <div data-lobby-shop-price-row="1" style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding-right:80px;">
+                <div style="font-size:17px;font-weight:900;color:#ffffff;white-space:nowrap;">${escapeHtml(formatPackagePrice(coinPackage.priceCents, coinPackage.currency))}</div>
+                <button type="button" data-lobby-shop-package="${escapeHtml(coinPackage.packageId)}" ${isPurchasing ? 'disabled' : ''} style="position:relative;z-index:1;flex:0 0 auto;height:34px;padding:0 14px;border:0;border-radius:8px;background:linear-gradient(180deg,#f4c95b 0%,#c98f13 100%);color:#080808;font-size:12px;font-weight:900;white-space:nowrap;cursor:${isPurchasing ? 'wait' : 'pointer'};transition:filter 0.15s,transform 0.1s;">
+                  ${isPurchasing ? 'Зарежда...' : isLoggedIn ? 'Купи' : 'Влез за покупка'}
+                </button>
+              </div>
 
               ${isAdmin ? `
                 <label style="display:flex;align-items:center;gap:7px;margin-top:12px;padding-top:10px;border-top:1px solid rgba(212,165,32,0.22);cursor:pointer;user-select:none;">

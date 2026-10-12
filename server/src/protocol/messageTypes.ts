@@ -1023,6 +1023,13 @@ export type CampaignThemeAssets = {
   tableBgDesktopUrl: string | null
   tableBgMobileUrl: string | null
   cardBackUrl: string | null
+  /**
+   * Публичните бонус единици за покупка на пакет в магазина (package_key ->
+   * units_per_purchase от campaign_package_earn_rules на активната кампания;
+   * само > 0). Чисто визуално ("+20 🎃" до пакета) — същото число, което
+   * campaignPurchaseHooks начислява; без цени/суми/админ данни.
+   */
+  packageUnits: Record<string, number>
 }
 
 export type ActiveCampaignThemeMessage = {

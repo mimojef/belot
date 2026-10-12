@@ -30,6 +30,7 @@ export type CampaignRewardCongratulationsGroup = {
   campaignName: string
   unitNameSingular: string
   unitNamePlural: string
+  unitIconUrl?: string | null
   unitsTotal: number
   rewards: CampaignGrantedRewardSummary[]
   notificationIds: string[]
@@ -45,7 +46,7 @@ function escapeHtml(value: string): string {
 }
 
 function formatNumber(amount: number): string {
-  return new Intl.NumberFormat('bg-BG').format(amount)
+  return new Intl.NumberFormat('bg-BG', { useGrouping: 'always' }).format(amount)
 }
 
 function formatUnitsLabel(amount: number, singular: string, plural: string): string {
@@ -132,19 +133,46 @@ function renderGiftRewardRowWithCountHtml(entry: { reward: Extract<CampaignGrant
   )
 }
 
+/** "Събрахте X {единица}!" — unitsTotal е авторитетният тотал от payload-а. */
+function renderCollectedHtml(group: CampaignRewardCongratulationsGroup): string {
+  return `Събрахте ${formatUnitsLabel(group.unitsTotal, group.unitNameSingular.toLocaleLowerCase('bg-BG'), group.unitNamePlural.toLocaleLowerCase('bg-BG'))}!`
+}
+
 /**
- * Заглавие: при ЕДНА предоставена награда — "Достигна X {unit}!" (точно
- * примера от §2). При НЯКОЛКО (независимо дали от няколко прага в едно
- * начисление, или от слети известия) — генерично "Отключи нови награди!",
- * тъй като самите payload-и не пазят "колко прага" точно (виж doc коментара
- * най-отгоре за rationale) — и двата текста са коректни/истинни спрямо
- * реалните данни, без fabrication.
+ * "Печелите X жълтици!" — X е сумата на ВСИЧКИ показани (вече начислени)
+ * жълтици. При смесени награди се изброяват и VIP периодите/подаръците, за
+ * да не изглежда, че всичко е жълтици.
  */
-function renderSubtitleHtml(group: CampaignRewardCongratulationsGroup, totalRewardCount: number): string {
-  if (totalRewardCount <= 1) {
-    return `Достигна ${formatUnitsLabel(group.unitsTotal, group.unitNameSingular, group.unitNamePlural)}!`
-  }
-  return 'Отключи нови награди!'
+function renderWinningsHeadline(rewards: CampaignGrantedRewardSummary[]): string {
+  const parts: string[] = []
+  const coinsTotal = rewards.reduce((sum, r) => (r.type === 'yellow_coins' ? sum + r.amount : sum), 0)
+  if (coinsTotal > 0) parts.push(`${formatNumber(coinsTotal)} жълтици`)
+
+  const vipTotals: Record<'days' | 'months' | 'years', number> = { days: 0, months: 0, years: 0 }
+  for (const r of rewards) if (r.type === 'vip_days') vipTotals[r.interval.unit] += r.interval.amount
+  const vipParts = (['years', 'months', 'days'] as const)
+    .filter((unit) => vipTotals[unit] > 0)
+    .map((unit) => formatVipIntervalLabel(unit, vipTotals[unit]))
+  if (vipParts.length > 0) parts.push(`${vipParts.join(' и ')} VIP`)
+
+  const giftCount = rewards.filter((r) => r.type === 'gift_item').length
+  if (giftCount === 1) parts.push('подарък')
+  else if (giftCount > 1) parts.push(`${giftCount} подаръка`)
+
+  if (parts.length === 0) return ''
+  const joined = parts.length === 1 ? parts[0]! : `${parts.slice(0, -1).join(', ')} и ${parts[parts.length - 1]}`
+  return `Печелите ${joined}!`
+}
+
+function renderHeroIconHtml(group: CampaignRewardCongratulationsGroup): string {
+  const emojiHtml = `<div data-campaign-congrats-hero-emoji="1" style="font-size:36px;line-height:1;" aria-hidden="true">🎉</div>`
+  if (!group.unitIconUrl) return `<div style="margin-bottom:8px;">${emojiHtml}</div>`
+  return `
+    <div style="display:flex;justify-content:center;margin-bottom:6px;">
+      <img data-campaign-congrats-unit-icon="1" src="${escapeHtml(group.unitIconUrl)}" alt="" style="width:60px;height:60px;object-fit:contain;display:block;" onerror="this.style.display='none';this.nextElementSibling.style.display='block'" />
+      <div style="display:none;">${emojiHtml}</div>
+    </div>
+  `
 }
 
 export function renderCampaignRewardCongratulationsPopup(
@@ -156,7 +184,6 @@ export function renderCampaignRewardCongratulationsPopup(
   const giftRewards = group.rewards.filter((r): r is Extract<CampaignGrantedRewardSummary, { type: 'gift_item' }> => r.type === 'gift_item')
   const nonGiftRewards = group.rewards.filter((r) => r.type !== 'gift_item')
   const groupedGiftRewards = groupGiftItemRewards(giftRewards)
-  const totalRewardCount = nonGiftRewards.length + groupedGiftRewards.length
 
   const rewardRowsHtml = [
     ...nonGiftRewards.map((r) => renderRewardRowHtml(r)),
@@ -212,41 +239,40 @@ export function renderCampaignRewardCongratulationsPopup(
           background:linear-gradient(180deg, rgba(32,32,32,0.98) 0%, rgba(8,8,8,0.99) 100%);
           border:2px solid rgba(212,165,32,0.72);
           box-shadow:0 34px 80px rgba(0,0,0,0.5);
-          padding:28px 24px 24px;
+          padding:22px 20px 20px;
           text-align:center;
           animation:${skipAnimation ? 'none' : 'belot-campaign-congrats-fade-in 180ms ease both'};
         "
       >
-        <div style="font-size:40px;line-height:1;margin-bottom:10px;" aria-hidden="true">🎉</div>
-        <div style="font-size:22px;font-weight:900;color:#f8fafc;line-height:1.25;">Поздравления!</div>
-        <div style="margin-top:6px;font-size:14px;font-weight:800;color:#d4a520;overflow-wrap:anywhere;">${escapeHtml(group.campaignName)}</div>
-        <div style="margin-top:4px;font-size:15px;font-weight:800;color:rgba(226,232,240,0.88);">${renderSubtitleHtml(group, totalRewardCount)}</div>
+        ${renderHeroIconHtml(group)}
+        <div data-campaign-congrats-title="1" style="font-size:24px;font-weight:900;color:#f8fafc;line-height:1.25;">Поздравления!</div>
+        <div data-campaign-congrats-collected="1" style="margin-top:4px;font-size:15px;font-weight:800;color:rgba(226,232,240,0.88);overflow-wrap:anywhere;">${renderCollectedHtml(group)}</div>
 
-        <div style="margin-top:18px;font-size:12px;font-weight:800;letter-spacing:0.1em;text-transform:uppercase;color:rgba(148,163,184,0.85);">
-          Получи${totalRewardCount === 1 ? '' : (giftRewards.length > 0 && nonGiftRewards.length === 0 ? ' подарък' : '')}:
-        </div>
+        <div data-campaign-congrats-rewards-heading="1" style="margin-top:14px;font-size:18px;font-weight:900;color:#d4a520;line-height:1.3;overflow-wrap:anywhere;">${renderWinningsHeadline(group.rewards)}</div>
 
-        <div style="margin-top:12px;display:flex;flex-direction:column;gap:10px;">
+        <div style="margin-top:10px;display:flex;flex-direction:column;gap:8px;">
           ${rewardRowsHtml}
         </div>
+
+        <div data-campaign-congrats-credited-note="1" style="margin-top:12px;font-size:13px;font-weight:400;color:rgba(203,213,225,0.82);">Наградата ви е начислена.</div>
 
         <button
           type="button"
           data-campaign-reward-congratulations-close="1"
           style="
-            margin-top:22px;
-            min-width:160px;
-            min-height:46px;
+            margin-top:14px;
+            width:100%;
+            min-height:50px;
             padding:0 28px;
             border:0;
-            border-radius:10px;
+            border-radius:12px;
             background:linear-gradient(135deg,#f4c95b 0%,#c98f13 100%);
             color:#000000;
-            font-size:15px;
+            font-size:18px;
             font-weight:900;
             cursor:pointer;
           "
-        >Страхотно!</button>
+        >ОК</button>
       </div>
     </div>
   `
@@ -260,9 +286,8 @@ export function attachCampaignRewardCongratulationsPopupEventListeners(
   root: ParentNode,
   options: CampaignRewardCongratulationsPopupOptions,
 ): void {
-  root.querySelector('[data-campaign-reward-congratulations-backdrop="1"]')?.addEventListener('click', (event) => {
-    if (event.target === event.currentTarget) options.onClose()
-  })
+  // Само "ОК" затваря (и потвърждава) — случаен клик извън картата не
+  // трябва да "изяде" известието, преди играчът да е видял наградите.
   root.querySelector('[data-campaign-reward-congratulations-close="1"]')?.addEventListener('click', () => {
     options.onClose()
   })

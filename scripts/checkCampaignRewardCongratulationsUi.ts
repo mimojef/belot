@@ -163,10 +163,17 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     await mount(page, singleCoinsGroup)
     const text = ((await card(page).textContent()) ?? '').replace(/ /g, ' ')
     assert(text.includes('Поздравления!'), 'missing title')
-    assert(text.includes('Хелоуин 2026'), 'missing campaign name')
-    assert(text.includes('Достигна 500 тикви!'), `missing subtitle, got: ${text}`)
+    assert(text.includes('Събрахте 500 тикви!'), `missing collected line, got: ${text}`)
+    assert(text.includes('Печелите 50 000 жълтици!'), `missing winnings headline, got: ${text}`)
+    assert(text.includes('Наградата ви е начислена.'), `missing credited note, got: ${text}`)
+    const noteWeight = await card(page).locator('[data-campaign-congrats-credited-note="1"]').evaluate((el) => getComputedStyle(el).fontWeight)
+    assert(Number(noteWeight) <= 400, `credited note must not be bold, got ${noteWeight}`)
+    assert(text.indexOf('Поздравления!') < text.indexOf('Събрахте') && text.indexOf('Събрахте') < text.indexOf('Печелите') && text.indexOf('Печелите') < text.indexOf('Наградата ви е начислена.'), `wrong order: ${text}`)
     assert(text.includes('50 000') && text.includes('жълтици'), 'missing coin amount')
-    assert(text.includes('Страхотно!'), 'missing close button text')
+    const button = card(page).locator('[data-campaign-reward-congratulations-close="1"]')
+    assert(((await button.textContent()) ?? '').trim() === 'ОК', 'close button must be "ОК"')
+    assert(!text.includes('Прибери'), 'old "Прибери" text must be gone')
+    assert(!text.includes('Страхотно!'), 'old button text must be gone')
   })
 
   await check(`[${viewportLabel}] [D2] VIP дни — единствено и множествено число`, async () => {
@@ -194,14 +201,15 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     assert(text.includes('50 000') && text.includes('жълтици'), 'missing coins')
     assert(text.includes('3 дни'), 'missing VIP days')
     assert(text.includes('Златна тиква'), 'missing gift')
+    assert(text.includes('Печелите 50 000 жълтици, 3 дни VIP и подарък!'), `mixed headline must list all reward kinds, got: ${text}`)
     const rows = card(page).locator('[data-campaign-congrats-reward-row="1"]')
     assert((await rows.count()) === 3, `expected 3 reward rows, got ${await rows.count()}`)
   })
 
-  await check(`[${viewportLabel}] [D5] Няколко слети известия (multi-tier) — генерично заглавие, всички награди`, async () => {
+  await check(`[${viewportLabel}] [D5] Няколко прага наведнъж — един общ popup с всички награди`, async () => {
     await mount(page, multiTierMergedGroup)
     const text = ((await card(page).textContent()) ?? '').replace(/ /g, ' ')
-    assert(text.includes('Отключи нови награди!'), `expected generic multi-reward subtitle, got: ${text}`)
+    assert(text.includes('Събрахте 530 тикви!') && text.includes('Печелите 85 000 жълтици и 3 дни VIP!'), `expected one shared popup with summed coins + VIP, got: ${text}`)
     assert(text.includes('10 000') && text.includes('25 000') && text.includes('50 000'), 'missing one or more coin reward lines')
     assert(text.includes('3 дни'), 'missing VIP reward line')
     const rows = card(page).locator('[data-campaign-congrats-reward-row="1"]')
@@ -212,6 +220,7 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     await mount(page, duplicateGiftGroup)
     const text = (await card(page).textContent()) ?? ''
     assert(text.includes('× 2'), `expected quantity "× 2", got: ${text}`)
+    assert(text.includes('Печелите 2 подаръка!') && !text.includes('жълтици!'), `gift-only headline must not claim coins, got: ${text}`)
     const giftRows = card(page).locator('[data-campaign-congrats-reward-row-gift="1"]')
     assert((await giftRows.count()) === 1, `expected exactly 1 gift row (deduplicated), got ${await giftRows.count()}`)
   })
@@ -226,10 +235,22 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     assert(!(await page.evaluate(() => (window as any).__campaignRewardCongratulationsHarness.isOpen())), 'expected popup closed after close')
   })
 
-  await check(`[${viewportLabel}] [D8] Клик на backdrop -> затваря`, async () => {
+  await check(`[${viewportLabel}] [D8] Клик на backdrop -> НЕ затваря и НЕ потвърждава (само "ОК")`, async () => {
     await mount(page, singleCoinsGroup)
+    const before = await page.evaluate(() => (window as any).__campaignRewardCongratulationsHarness.getCloseCallCount())
     await page.evaluate(() => (window as any).__campaignRewardCongratulationsHarness.clickBackdrop())
-    assert(!(await page.evaluate(() => (window as any).__campaignRewardCongratulationsHarness.isOpen())), 'expected popup closed after backdrop click')
+    assert(await page.evaluate(() => (window as any).__campaignRewardCongratulationsHarness.isOpen()), 'popup must stay open after backdrop click')
+    const after = await page.evaluate(() => (window as any).__campaignRewardCongratulationsHarness.getCloseCallCount())
+    assert(after === before, `backdrop click must not call onClose/ack (before=${before}, after=${after})`)
+  })
+
+  await check(`[${viewportLabel}] [D13] Динамична икона на единицата от кампанията`, async () => {
+    await mount(page, { ...singleCoinsGroup, unitIconUrl: '/assets/lobby/icon-coin.png' })
+    const icon = card(page).locator('[data-campaign-congrats-unit-icon="1"]')
+    assert((await icon.count()) === 1, 'expected unit icon element')
+    assert((await icon.getAttribute('src')) === '/assets/lobby/icon-coin.png', 'unit icon must come from group.unitIconUrl')
+    await mount(page, singleCoinsGroup)
+    assert((await card(page).locator('[data-campaign-congrats-unit-icon="1"]').count()) === 0, 'no icon element without unitIconUrl')
   })
 
   await check(`[${viewportLabel}] [D9] Клик ВЪТРЕ в card-а -> НЕ затваря`, async () => {

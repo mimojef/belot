@@ -140,7 +140,7 @@ async function run(): Promise<void> {
     await h.simulateCoinOverlayComplete()
     assert(await h.isPopupOpen(), 'expected popup to show right after the animation completes')
     const text = (await h.getPopupText()).replace(/ /g, ' ')
-    assert(text.includes('Хелоуин 2026') && text.includes('50 000'), `expected correct reward content, got: ${text}`)
+    assert(text.includes('Печелите 50 000 жълтици!'), `expected correct reward content, got: ${text}`)
   })
 
   await check('[Q2] Известие пристига СЛЕД анимацията -> показва се веднага, автоматично', async () => {
@@ -176,7 +176,7 @@ async function run(): Promise<void> {
     await h.pushNotification('coin-n5', 'camp-5', samplePayload)
     assert(await h.isPopupOpen(), 'expected popup to show (nothing blocking)')
     await h.clickClose()
-    assert(!(await h.isPopupOpen()), 'expected popup closed after clicking "Страхотно!"')
+    assert(!(await h.isPopupOpen()), 'expected popup closed after clicking "ОК"')
     const acked = await h.getAckedNotificationIds()
     assert(acked.includes('coin-n5'), `expected notificationId acked, got: ${JSON.stringify(acked)}`)
   })

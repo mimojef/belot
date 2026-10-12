@@ -16681,6 +16681,7 @@ function getCurrentActiveCampaignThemeOrNull(): CampaignThemeAssets | null {
     tableBgDesktopUrl: active.tableBgDesktopUrl,
     tableBgMobileUrl: active.tableBgMobileUrl,
     cardBackUrl: active.cardBackUrl,
+    packageUnits: campaignsStore.getPackageEarnUnits(active.campaignId),
   }
 }
 
@@ -21238,7 +21239,7 @@ async function handleHttpRequest(
   }
 
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS')
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204)

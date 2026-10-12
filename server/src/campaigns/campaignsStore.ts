@@ -149,6 +149,8 @@ export type CampaignsStore = {
   softDeleteCampaign: (campaignId: CampaignId, actor: CampaignActionActor) => SoftDeleteCampaignResult
   getCampaignById: (campaignId: CampaignId) => CampaignRecord | null
   getActiveCampaign: () => CampaignRecord | null
+  /** Публичен read-only slice: package_key -> единици на покупка (само > 0) за дадената кампания. */
+  getPackageEarnUnits: (campaignId: CampaignId) => Record<string, number>
   listCampaigns: (filter?: ListCampaignsFilter) => CampaignRecord[]
   listDueScheduledCampaignIds: (now: Date, limit: number) => CampaignId[]
   listDueActiveCampaignIds: (now: Date, limit: number) => CampaignId[]
@@ -673,6 +675,19 @@ export async function createCampaignsStore(databaseFilePath: string): Promise<Ca
     return { ok: true, campaign: getCampaignByIdInternal(campaignId)! }
   }
 
+  const selectPackageEarnUnitsStatement = database.prepare(`
+    SELECT package_key, units_per_purchase
+    FROM campaign_package_earn_rules
+    WHERE campaign_id = ? AND units_per_purchase > 0;
+  `)
+
+  function getPackageEarnUnits(campaignId: CampaignId): Record<string, number> {
+    const rows = selectPackageEarnUnitsStatement.all(campaignId) as Array<{ package_key: string; units_per_purchase: number }>
+    const result: Record<string, number> = {}
+    for (const row of rows) result[row.package_key] = row.units_per_purchase
+    return result
+  }
+
   function getActiveCampaign(): CampaignRecord | null {
     const row = selectActiveCampaignStatement.get() as CampaignRow | undefined
     return row === undefined ? null : rowToCampaignRecord(row)
@@ -724,6 +739,7 @@ export async function createCampaignsStore(databaseFilePath: string): Promise<Ca
     softDeleteCampaign,
     getCampaignById: getCampaignByIdInternal,
     getActiveCampaign,
+    getPackageEarnUnits,
     listCampaigns,
     listDueScheduledCampaignIds,
     listDueActiveCampaignIds,

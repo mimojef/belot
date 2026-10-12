@@ -1895,12 +1895,39 @@ function renderCampaignTierRewardStatusBadgeHtml(status: PlayerCampaignTierRewar
   return `<span style="font-size:11px;font-weight:800;color:rgba(226,232,240,0.55);white-space:nowrap;">Заключена</span>`
 }
 
-/** Компактен ред с всички награди на даден праг, БЕЗ статус-бадж — за карето под "Ранг" (§2/§3, "точните награди НАД числовия прогрес"). */
-function renderCampaignTierRewardsCompactHtml(tier: PlayerCampaignTierView): string {
+/** Най-кратък вид на ЕДНА награда за първия ред на компактното каре: жълтици -> иконка + число, VIP -> "N VIP дни", подарък -> картинка + съкратено име. */
+function renderCampaignRewardCompactHtml(reward: PlayerCampaignTierRewardView): string {
+  if (reward.rewardType === 'yellow_coins') {
+    return `
+      <span style="display:inline-flex;align-items:center;gap:4px;white-space:nowrap;">
+        <img src="/assets/lobby/icon-coin.png" alt="" style="width:15px;height:15px;display:block;object-fit:contain;flex:0 0 auto;" />
+        ${escapeHtml(new Intl.NumberFormat('bg-BG', { useGrouping: 'always' }).format(reward.amount))}
+      </span>
+    `
+  }
+  if (reward.rewardType === 'vip_days') {
+    return `<span style="white-space:nowrap;color:#d4a520;">${escapeHtml(String(reward.days))} VIP ${reward.days === 1 ? 'ден' : 'дни'}</span>`
+  }
+  const giftImageHtml = reward.imageUrl
+    ? `<img src="${escapeHtml(reward.imageUrl)}" alt="" style="width:16px;height:16px;display:block;object-fit:contain;flex:0 0 auto;border-radius:3px;" />`
+    : ''
   return `
-    <div data-player-profile-campaign-next-rewards="1" style="display:flex;flex-direction:column;gap:4px;align-items:flex-end;">
-      ${tier.rewards.map((entry) => `<div>${renderCampaignRewardDescriptionHtml(entry.reward)}</div>`).join('')}
-    </div>
+    <span style="display:inline-flex;align-items:center;gap:4px;min-width:0;max-width:110px;">
+      ${giftImageHtml}
+      <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escapeHtml(reward.name ?? 'Подарък')}</span>
+    </span>
+  `
+}
+
+/** Следващата награда в първия ред на карето под "Ранг" — първата награда на прага + "+N", ако има още (пълният списък е във "Виж всички награди"). */
+function renderCampaignTierRewardsCompactHtml(tier: PlayerCampaignTierView): string {
+  const [first, ...rest] = tier.rewards
+  if (first === undefined) return ''
+  return `
+    <span data-player-profile-campaign-next-rewards="1" style="display:inline-flex;align-items:center;gap:6px;min-width:0;">
+      ${renderCampaignRewardCompactHtml(first.reward)}
+      ${rest.length > 0 ? `<span style="flex:0 0 auto;font-size:12px;color:#d4a520;">+${rest.length}</span>` : ''}
+    </span>
   `
 }
 
@@ -1953,32 +1980,24 @@ function renderCampaignAllRewardsPanelHtml(active: ActiveCampaignProfileProgress
 
 /** Активната кампания — карето веднага под "Ранг" (§2/§3). */
 function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewardsExpanded: boolean): string {
-  const iconHtml = active.unitIconUrl
-    ? `<img src="${escapeHtml(active.unitIconUrl)}" alt="" style="width:22px;height:22px;display:block;object-fit:contain;flex:0 0 auto;" onerror="this.style.display='none'" />`
-    : ''
-
   const nextTier = active.nextIncompleteTier
-  // Всички прагове са напълно предоставени — §3: "Всички награди са получени!"
-  const rightSideHtml = nextTier === null
-    ? `<div style="font-size:13px;font-weight:900;color:#86efac;text-align:right;">Всички награди са получени!</div>`
-    : `
-      <div style="display:flex;flex-direction:column;gap:8px;align-items:flex-end;">
-        <div style="font-size:12px;font-weight:800;color:rgba(226,232,240,0.75);text-align:right;">
-          При ${formatCampaignUnitsLabel(nextTier.thresholdUnits, active.unitNameSingular, active.unitNamePlural)} получаваш:
-        </div>
-        ${renderCampaignTierRewardsCompactHtml(nextTier)}
-      </div>
-    `
-
   const progressThreshold = nextTier?.thresholdUnits ?? active.unitsTotal
   const ratio = progressThreshold > 0 ? Math.max(0, Math.min(1, active.unitsTotal / progressThreshold)) : 1
-  const remainingUnits = Math.max(0, progressThreshold - active.unitsTotal)
+  const format = (value: number) => new Intl.NumberFormat('bg-BG').format(value)
+  // Качената иконка на кампанията (динамична; липсваща/счупена -> просто не се показва).
+  const unitIconHtml = (sizePx: number) => active.unitIconUrl
+    ? `<img src="${escapeHtml(active.unitIconUrl)}" alt="" style="width:${sizePx}px;height:${sizePx}px;margin:-8px 0;display:block;object-fit:contain;flex:0 0 auto;" onerror="this.style.display='none'" />`
+    : ''
+  const hintText = `Всяка спечелена игра или покупка ви носи ${escapeHtml(active.unitNamePlural.toLocaleLowerCase('bg-BG'))}`
 
-  const remainingLineHtml = nextTier === null
-    ? ''
-    : remainingUnits > 0
-      ? `<div style="margin-top:9px;font-size:12px;font-weight:800;color:rgba(226,232,240,0.70);">Още ${formatCampaignUnitsLabel(remainingUnits, active.unitNameSingular, active.unitNamePlural)} до следващата награда</div>`
-      : `<div style="margin-top:9px;font-size:12px;font-weight:800;color:#fbbf24;">Очаква предоставяне на наградата</div>`
+  // Компактен първи ред: име вляво; следващата награда + прогрес вдясно.
+  // Всички прагове са напълно предоставени — §3: "Всички награди са получени!"
+  const rightSideHtml = nextTier === null
+    ? `<span style="color:#86efac;white-space:nowrap;">Всички награди са получени!</span>`
+    : `
+      ${renderCampaignTierRewardsCompactHtml(nextTier)}
+      <span data-player-profile-campaign-progress="1" style="flex:0 0 auto;white-space:nowrap;color:#f8fafc;">${format(active.unitsTotal)}/${format(progressThreshold)}</span>
+    `
 
   return `
     <div
@@ -1987,32 +2006,18 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
         border-radius:8px;
         background:linear-gradient(180deg, rgba(22,22,22,0.98) 0%, rgba(8,8,8,0.99) 100%);
         border:1px solid rgba(212,165,32,0.42);
-        padding:16px;
+        padding:10px 12px;
         box-shadow:inset 0 0 18px rgba(212,165,32,0.04);
       "
     >
-      <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;">
-        <div style="min-width:0;">
-          <div style="display:flex;align-items:center;gap:8px;font-size:16px;font-weight:900;color:#f8fafc;overflow:hidden;text-overflow:ellipsis;">
-            ${iconHtml}
-            <span style="overflow:hidden;text-overflow:ellipsis;">${escapeHtml(active.campaignName)}</span>
-          </div>
-          <div style="margin-top:6px;font-size:12px;font-weight:800;letter-spacing:0.08em;text-transform:uppercase;color:rgba(148,163,184,0.85);">
-            Твоят прогрес
-          </div>
-          <div style="margin-top:2px;font-size:18px;font-weight:900;color:#f8fafc;">
-            ${formatCampaignUnitsLabel(active.unitsTotal, active.unitNameSingular, active.unitNamePlural)}
-          </div>
-        </div>
-        <div style="flex:0 0 auto;max-width:60%;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;min-width:0;">
+        <span data-player-profile-campaign-title="1" style="flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:900;color:#f8fafc;">
+          <span title="${escapeHtml(active.campaignName)}" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Събирай</span>
+          ${unitIconHtml(36)}
+        </span>
+        <span style="display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;font-size:13px;font-weight:900;color:#f8fafc;">
           ${rightSideHtml}
-        </div>
-      </div>
-
-      <div style="display:flex;align-items:center;justify-content:flex-end;margin-bottom:6px;">
-        <div style="font-size:14px;font-weight:900;color:#f8fafc;white-space:nowrap;">
-          ${new Intl.NumberFormat('bg-BG').format(active.unitsTotal)} / ${new Intl.NumberFormat('bg-BG').format(progressThreshold)}
-        </div>
+        </span>
       </div>
 
       <div style="height:12px;border-radius:999px;background:#050505;border:1px solid rgba(255,255,255,0.08);overflow:hidden;">
@@ -2027,26 +2032,27 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
         ></div>
       </div>
 
-      ${remainingLineHtml}
-
-      ${active.tiers.length > 0 ? `
-        <button
-          type="button"
-          data-player-profile-campaign-view-all-rewards="1"
-          style="
-            margin-top:12px;
-            min-height:34px;
-            padding:0 14px;
-            border:1px solid rgba(212,165,32,0.45);
-            border-radius:8px;
-            background:rgba(212,165,32,0.08);
-            color:#d4a520;
-            font-size:12px;
-            font-weight:900;
-            cursor:pointer;
-          "
-        >${allRewardsExpanded ? 'Скрий наградите' : 'Виж всички награди'}</button>
-      ` : ''}
+      <div data-player-profile-campaign-actions="1" style="display:flex;align-items:center;flex-wrap:wrap;justify-content:space-between;gap:6px 10px;margin-top:8px;min-width:0;">
+        ${active.tiers.length > 0 ? `
+          <button
+            type="button"
+            data-player-profile-campaign-view-all-rewards="1"
+            style="
+              flex:0 0 auto;
+              min-height:30px;
+              padding:0 12px;
+              border:1px solid rgba(212,165,32,0.45);
+              border-radius:8px;
+              background:rgba(212,165,32,0.08);
+              color:#d4a520;
+              font-size:12px;
+              font-weight:900;
+              cursor:pointer;
+            "
+          >${allRewardsExpanded ? 'Скрий наградите' : 'Виж всички награди'}</button>
+        ` : ''}
+        <span data-player-profile-campaign-hint="1" style="margin-left:auto;max-width:100%;min-width:0;font-size:12px;font-weight:800;line-height:1.25;color:rgba(226,232,240,0.78);text-align:right;">${hintText}</span>
+      </div>
 
       ${renderCampaignAllRewardsPanelHtml(active, allRewardsExpanded)}
     </div>
@@ -2935,23 +2941,20 @@ export function renderPlayerProfilePopup(
           border-bottom:none !important;
         }
 
-        [data-player-profile-campaign-card="1"] > div:first-child {
-          flex-direction:column !important;
-          align-items:stretch !important;
+        [data-player-profile-campaign-actions="1"] {
+          flex-direction:column-reverse !important;
+          align-items:flex-start !important;
         }
 
-        [data-player-profile-campaign-card="1"] > div:first-child > div:last-child {
+        [data-player-profile-campaign-hint="1"] {
+          margin-left:0 !important;
+          text-align:left !important;
+          font-weight:500 !important;
+          font-size:clamp(10px, 3.2vw, 12px) !important;
+          white-space:nowrap !important;
           max-width:100% !important;
-          align-items:flex-start !important;
-          text-align:left !important;
-        }
-
-        [data-player-profile-campaign-card="1"] > div:first-child > div:last-child * {
-          text-align:left !important;
-        }
-
-        [data-player-profile-campaign-next-rewards="1"] {
-          align-items:flex-start !important;
+          overflow:hidden !important;
+          text-overflow:ellipsis !important;
         }
 
         [data-player-profile-nav-bar="1"] {

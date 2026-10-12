@@ -397,6 +397,32 @@ try {
 
     store.softDeleteCampaign(scheduled.campaign.campaignId, ADMIN_ACTOR)
   })
+
+  // ─── 19. getPackageEarnUnits (публичен slice за "+X <икона>" в магазина) ───
+  await check('[19] getPackageEarnUnits: само реалните правила > 0 на ДАДЕНАТА кампания', async () => {
+    const draftA = createTestDraft({ name: 'Магазин A', startsAt: hoursFromNow(1), endsAt: hoursFromNow(700) })
+    const draftB = createTestDraft({ name: 'Магазин B', startsAt: hoursFromNow(800), endsAt: hoursFromNow(900) })
+    assert(draftA.ok && draftB.ok, 'setup failed')
+    if (!draftA.ok || !draftB.ok) return
+    const a = draftA.campaign.campaignId
+    const b = draftB.campaign.campaignId
+    const sqliteModule = await import('node:sqlite')
+    const db = new sqliteModule.DatabaseSync(databaseFilePath, { open: true, enableForeignKeyConstraints: true })
+    try {
+      const insert = db.prepare(`INSERT INTO campaign_package_earn_rules (campaign_id, package_key, units_per_purchase) VALUES (?, ?, ?);`)
+      insert.run(a, 'coins_pack_big', 20)
+      insert.run(a, 'vip_30', 5)
+      insert.run(b, 'coins_pack_small', 7)
+    } finally {
+      db.close()
+    }
+    const unitsA = store.getPackageEarnUnits(a)
+    assert(JSON.stringify(unitsA) === JSON.stringify({ coins_pack_big: 20, vip_30: 5 }) || JSON.stringify(unitsA) === JSON.stringify({ vip_30: 5, coins_pack_big: 20 }), `unexpected units for A: ${JSON.stringify(unitsA)}`)
+    assert(unitsA.coins_pack_small === undefined, 'must not leak another campaign\'s rules')
+    assert(Object.keys(store.getPackageEarnUnits(randomUUID())).length === 0, 'unknown campaign -> empty map')
+    store.softDeleteCampaign(a, ADMIN_ACTOR)
+    store.softDeleteCampaign(b, ADMIN_ACTOR)
+  })
 } finally {
   if (store !== undefined) store.close()
   await cleanup()

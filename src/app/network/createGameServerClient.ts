@@ -1591,6 +1591,8 @@ export type CampaignThemeAssets = {
   tableBgDesktopUrl: string | null
   tableBgMobileUrl: string | null
   cardBackUrl: string | null
+  /** package_key -> бонус единици за покупка в активната кампания (само > 0). */
+  packageUnits?: Record<string, number>
 }
 
 export type ActiveCampaignThemeMessage = {
@@ -1664,6 +1666,7 @@ export type CampaignRewardNotificationPayload = {
   campaignName: string
   unitNameSingular: string
   unitNamePlural: string
+  unitIconUrl?: string | null
   unitsTotal: number
   rewards: CampaignGrantedRewardSummary[]
 }

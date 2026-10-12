@@ -178,18 +178,20 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     // separator (напр. "50 000") — нормализираме към обикновен space
     // за текстовите сравнения тук.
     const text = ((await card(page).textContent()) ?? '').replace(/ /g, ' ')
-    assert(text.includes('Хелоуин 2026'), 'missing campaign name')
-    assert(text.includes('Твоят прогрес'), 'missing "Твоят прогрес"')
-    assert(text.includes('347 тикви'), 'missing "347 тикви"')
-    assert(text.includes('500 тикви'), 'missing threshold "500 тикви" in "При ... получаваш"')
+    assert(!text.includes('Хелоуин 2026'), 'campaign name must not be shown inside the compact card')
     assert(text.includes('50 000'), 'missing reward amount 50 000')
-    assert(text.includes('3 VIP'), 'missing VIP days reward')
-    assert(text.includes('347 / 500'), 'missing numeric progress "347 / 500"')
-    assert(text.includes('Още 153 тикви'), 'missing remaining-units line')
-    // §3: точните награди (coins/VIP) трябва да се появят ПРЕДИ numeric progress в DOM реда.
+    assert(text.includes('+1'), 'missing "+1" for the second reward on the same tier')
+    assert(text.includes('347/500'), 'missing numeric progress "347/500"')
+    // Компактен дизайн: без поясняващи текстове (само име, награда, прогрес, бар, бутон).
+    for (const removed of ['Твоят прогрес', '347 тикви', 'получаваш', 'жълтици', 'до следващата награда']) {
+      assert(!text.includes(removed), `compact card must not contain "${removed}"`)
+    }
+    assert(text.trim().startsWith('Събирай'), 'card title must be just "Събирай" (+ icon)')
+    assert(text.includes('Всяка спечелена игра или покупка ви носи тикви'), 'missing hint "Всяка спечелена игра или покупка ви носи <единици>"')
+    // Първи ред: следващата награда е преди числовия прогрес.
     const rewardsIndex = text.indexOf('50 000')
-    const progressIndex = text.indexOf('347 / 500')
-    assert(rewardsIndex !== -1 && progressIndex !== -1 && rewardsIndex < progressIndex, 'rewards must appear above numeric progress')
+    const progressIndex = text.indexOf('347/500')
+    assert(rewardsIndex !== -1 && progressIndex !== -1 && rewardsIndex < progressIndex, 'rewards must appear before numeric progress')
   })
 
   await check(`[${viewportLabel}] [D2] active:null -> карето не се показва`, async () => {
@@ -203,10 +205,11 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     assert((await page.locator('[data-player-profile-nav-bar="1"]').count()) === 0, 'expected no nav bar when summary=null')
   })
 
-  await check(`[${viewportLabel}] [D4] Единствено число (1 жетон)`, async () => {
+  await check(`[${viewportLabel}] [D4] Компактен прогрес 1/10 с иконка и число на жълтиците`, async () => {
     await mount(page, { own: true, summary: singleUnitSummary })
     const text = (await card(page).textContent()) ?? ''
-    assert(text.includes('1 жетон') && !text.includes('1 жетона'), `expected singular "1 жетон", got: ${text}`)
+    assert(text.includes('1/10') && text.includes('500'), `expected "1/10" and "500", got: ${text}`)
+    assert((await card(page).locator('[data-player-profile-campaign-next-rewards="1"] img[src*="icon-coin"]').count()) === 1, 'expected coin icon next to the reward amount')
   })
 
   await check(`[${viewportLabel}] [D5] Всички прагове изпълнени -> "Всички награди са получени!"`, async () => {
@@ -215,11 +218,14 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     assert(text.includes('Всички награди са получени!'), `expected completion message, got: ${text}`)
   })
 
-  await check(`[${viewportLabel}] [D6] Pending (не locked) награда -> "Очаква предоставяне"`, async () => {
+  await check(`[${viewportLabel}] [D6] Pending (не locked) награда -> подаръкът в картата, "Очаква предоставяне" в списъка с награди`, async () => {
     await mount(page, { own: true, summary: pendingRewardSummary })
     const text = (await card(page).textContent()) ?? ''
-    assert(text.includes('Очаква предоставяне'), `expected pending state text, got: ${text}`)
-    assert(text.includes('Златна тиква'), 'expected real gift item name')
+    assert(text.includes('Златна тиква') && text.includes('50/50'), `expected real gift item name and "50/50", got: ${text}`)
+    await page.evaluate(() => (window as any).__campaignProfilePopupHarness.clickViewAllRewards())
+    const panel = page.locator('[data-player-profile-campaign-all-rewards-panel="1"]')
+    await panel.waitFor({ state: 'visible' })
+    assert(((await panel.textContent()) ?? '').includes('Очаква предоставяне'), 'expected pending status in all-rewards panel')
   })
 
   await check(`[${viewportLabel}] [D7] "Виж всички награди" — реален click wiring разгъва с коректни статуси`, async () => {
@@ -234,6 +240,7 @@ async function runScenarios(page: Page, viewportLabel: string): Promise<void> {
     await panelAfter.waitFor({ state: 'visible' })
     const panelText = (await panelAfter.textContent()) ?? ''
     assert(panelText.includes('Получена'), 'expected granted status text in all-rewards panel')
+    assert(panelText.includes('3 VIP'), 'expected VIP days reward in all-rewards panel')
     assert(panelText.includes('Заключена'), 'expected locked status text in all-rewards panel')
     const tierRows = page.locator('[data-player-profile-campaign-tier-row="1"]')
     assert((await tierRows.count()) === 2, `expected 2 tier rows, got ${await tierRows.count()}`)

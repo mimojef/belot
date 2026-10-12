@@ -128,7 +128,14 @@ export function getActiveRoomTableBackground(isPhoneLayout: boolean): string {
     return defaultBackground
   }
 
-  return `url('${themedUrl}') center / 100% 100% no-repeat, ${defaultBackground}`
+  // Mobile: фазите ползват контейнери с РАЗЛИЧНА височина (100vh при
+  // cutting/dealing/bidding/scoring, calc(100dvh - bottom nav) при playing,
+  // 100dvh при match-ended) — "100% 100%" би преоразмерявал/местил снимката
+  // при всяка смяна на фаза. Оразмеряването спрямо viewport-а (100vw x 100vh,
+  // закотвено горе) я прави идентична във всички фази; 100vh не се променя и
+  // при показване/скриване на адресната лента. Desktop остава непроменен.
+  const themedSizing = isPhoneLayout ? 'center top / 100vw 100vh' : 'center / 100% 100%'
+  return `url('${themedUrl}') ${themedSizing} no-repeat, ${defaultBackground}`
 }
 
 

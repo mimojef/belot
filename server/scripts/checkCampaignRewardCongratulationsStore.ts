@@ -531,6 +531,93 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
   })
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// [N17]-[N19] Няколко прага с ЕДНО начисление -> ЕДНО известие; точно
+// еднократно предоставяне; динамична икона на единицата (нови и стари редове)
+// ═══════════════════════════════════════════════════════════════════════
+{
+  {
+    const db = await openRawDb()
+    try {
+      const activeIds = (db.prepare(`SELECT campaign_id FROM campaigns WHERE status = 'active';`).all() as Array<{ campaign_id: string }>).map((r) => r.campaign_id)
+      for (const id of activeIds) {
+        const stopped = campaignsStore.stopCampaign(id, adminActor)
+        if (!stopped.ok) throw new Error('N17 setup: stopCampaign failed')
+      }
+    } finally {
+      db.close()
+    }
+  }
+  const campaignId = await seedActiveCampaign(campaignsStore, adminActor)
+  const ICON_URL = `/uploads/campaign-themes/${campaignId}/icons/unit.webp`
+  {
+    const db = await openRawDb()
+    try {
+      db.prepare(`UPDATE campaigns SET unit_icon_url = ? WHERE campaign_id = ?;`).run(ICON_URL, campaignId)
+    } finally {
+      db.close()
+    }
+  }
+  // belot stake 0 -> 100 единици на победа; прагове 50 и 100 се прекосяват наведнъж.
+  await addRewardTier(campaignId, 50, [{ type: 'yellow_coins', payload: { amount: 1_000 } }])
+  await addRewardTier(campaignId, 100, [{ type: 'yellow_coins', payload: { amount: 1_500 } }, { type: 'vip_days', payload: { unit: 'days', amount: 3 } }])
+  const profileId = await seedProfile('N17 Player')
+  const sourceId = `room-${randomUUID()}:v1`
+  const creditOnce = () => campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 })
+  const countRows = async () => {
+    const db = await openRawDb()
+    try {
+      const claims = (db.prepare(`SELECT COUNT(*) AS n FROM campaign_reward_claims WHERE campaign_id = ? AND profile_id = ?;`).get(campaignId, profileId) as { n: number }).n
+      const notifications = (db.prepare(`SELECT COUNT(*) AS n FROM campaign_reward_notifications WHERE campaign_id = ? AND profile_id = ?;`).get(campaignId, profileId) as { n: number }).n
+      return { claims, notifications }
+    } finally {
+      db.close()
+    }
+  }
+
+  await check('[N17] Едно начисление прекосява 2 прага -> ЕДНО известие с всички 3 награди и иконата на единицата', async () => {
+    const result = creditOnce()
+    assert(result.ok, `expected ok, got ${JSON.stringify(result)}`)
+    if (!result.ok) return
+    assert(result.notification !== null, 'expected a notification')
+    const payload = result.notification!.payload
+    assert(payload.rewards.length === 3, `expected 3 rewards in ONE payload, got ${payload.rewards.length}`)
+    assert(payload.unitsTotal === 100, `expected unitsTotal=100, got ${payload.unitsTotal}`)
+    assert(payload.unitIconUrl === ICON_URL, `expected unitIconUrl from the campaign, got ${payload.unitIconUrl}`)
+    const counts = await countRows()
+    assert(counts.claims === 3 && counts.notifications === 1, `expected 3 claims + 1 notification, got ${JSON.stringify(counts)}`)
+  })
+
+  await check('[N18] Повторно същото събитие + ack -> без нови награди/известия (точно еднократно)', async () => {
+    const replay = creditOnce()
+    assert(replay.ok && replay.alreadyCredited && replay.notification === null, `replay must be a no-op, got ${JSON.stringify(replay)}`)
+    const pending = campaignCreditStore.listPendingNotifications(profileId)
+    assert(pending.length === 1, `expected 1 pending (survives until "Прибери"), got ${pending.length}`)
+    assert(campaignCreditStore.acknowledgeNotification(pending[0]!.notificationId, profileId).ok, 'ack failed')
+    assert(campaignCreditStore.listPendingNotifications(profileId).length === 0, 'expected no pending after ack')
+    const counts = await countRows()
+    assert(counts.claims === 3 && counts.notifications === 1, `ack must not grant again, got ${JSON.stringify(counts)}`)
+  })
+
+  await check('[N19] По-стар pending ред без unitIconUrl -> listPendingNotifications го допълва от кампанията', async () => {
+    const legacyId = randomUUID()
+    const db = await openRawDb()
+    try {
+      db.prepare(`INSERT INTO campaign_reward_notifications (notification_id, campaign_id, profile_id, status, payload_json) VALUES (?, ?, ?, 'pending', ?);`).run(
+        legacyId,
+        campaignId,
+        profileId,
+        JSON.stringify({ campaignName: 'Legacy', unitNameSingular: 'тиква', unitNamePlural: 'тикви', unitsTotal: 100, rewards: [{ type: 'yellow_coins', amount: 1000 }] }),
+      )
+    } finally {
+      db.close()
+    }
+    const pending = campaignCreditStore.listPendingNotifications(profileId).find((n) => n.notificationId === legacyId)
+    assert(pending !== undefined, 'legacy row must be listed')
+    assert(pending!.payload.unitIconUrl === ICON_URL, `expected enriched unitIconUrl, got ${pending!.payload.unitIconUrl}`)
+  })
+}
+
 campaignCreditStore.close()
 campaignsStore.close()
 await cleanup()
