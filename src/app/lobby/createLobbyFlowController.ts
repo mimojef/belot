@@ -7,7 +7,7 @@ import type { TournamentEconomyNoticeReason } from '../../ui/notifications/tourn
 import type { AdminPaymentPeriod, AdminPaymentListRow, AdminPaymentDetailRow } from '../adminPayments/adminPaymentsTypes.js'
 import { isAdminPaymentPeriod } from '../adminPayments/adminPaymentsTypes.js'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes.js'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes.js'
+import type { AdminCampaignEditorDraft, AdminCampaignLiveTop10Entry, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes.js'
 import type { AdminCampaignAction, AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel.js'
 import type { GiftLimitErrorPayload, PikaTeamDailyGiftLimitErrorPayload, MarketingDailyGiftLimitErrorPayload } from './formatGiftLimitError'
 import { applyRouteSeo } from '../seo/applyRouteSeo'
@@ -1132,6 +1132,10 @@ export type CreateLobbyFlowControllerOptions = {
   >
   onAdminCampaignArchiveDetailLoad?: (campaignId: string) => Promise<AdminCampaignArchiveDetailResponse>
   onAdminCampaignArchiveNowRequest?: (campaignId: string) => Promise<{ ok: true } | { ok: false; message?: string }>
+  onAdminCampaignLiveTop10Request?: (campaignId: string) => Promise<
+    | { ok: true; entries: AdminCampaignLiveTop10Entry[] }
+    | { ok: false; message: string }
+  >
   /** Пуска се при вход в екран от фамилията "Информация" (stats/visitors/payments/detail) — лек role-check polling, за да засече отнет достъп докато потребителят е неактивен. */
   onAdminInfoFamilyScreenEnter?: () => void
   onAdminInfoFamilyScreenLeave?: () => void
@@ -2114,6 +2118,7 @@ type InternalLobbyFlowState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
+  adminCampaignLiveTop10: { campaignId: string; entries: AdminCampaignLiveTop10Entry[] } | null
   adminCampaignArchiveList: AdminCampaignArchiveListRow[]
   adminCampaignArchiveLoading: boolean
   adminCampaignArchiveErrorText: string | null
@@ -2907,6 +2912,7 @@ function createInitialState(): InternalLobbyFlowState {
     adminCampaignsSuccessText: null,
     adminCampaignsFilter: 'all',
     adminCampaignEditorDraft: null,
+    adminCampaignLiveTop10: null,
     adminCampaignArchiveList: [],
     adminCampaignArchiveLoading: false,
     adminCampaignArchiveErrorText: null,
@@ -5381,6 +5387,7 @@ export function createLobbyFlowController(
       adminCampaignsSuccessText: state.adminCampaignsSuccessText,
       adminCampaignsFilter: state.adminCampaignsFilter,
       adminCampaignEditorDraft: state.adminCampaignEditorDraft,
+      adminCampaignLiveTop10: state.adminCampaignLiveTop10,
       adminCampaignArchiveList: state.adminCampaignArchiveList,
       adminCampaignArchiveLoading: state.adminCampaignArchiveLoading,
       adminCampaignArchiveErrorText: state.adminCampaignArchiveErrorText,
@@ -7840,6 +7847,9 @@ export function createLobbyFlowController(
       },
       onAdminCampaignThemeAssetRemove: (campaignId, kind) => {
         void submitAdminCampaignThemeAssetRemove(campaignId, kind)
+      },
+      onAdminCampaignLiveTop10Load: (campaignId) => {
+        void loadAdminCampaignLiveTop10(campaignId)
       },
       onAdminCampaignArchiveOpen: () => {
         showAdminCampaignArchivePanel()
@@ -13510,6 +13520,21 @@ export function createLobbyFlowController(
   function closeAdminCampaignArchiveDetail(): void {
     state.adminCampaignArchiveSelectedId = null
     state.adminCampaignArchiveDetail = null
+    render()
+  }
+
+  // "Топ 10" бутон за АКТИВНА кампания (admin-campaigns екрана, не архива) —
+  // текущо (не замразено) класиране, read-only, без да се чака архивиране.
+  async function loadAdminCampaignLiveTop10(campaignId: string): Promise<void> {
+    if (!options.onAdminCampaignLiveTop10Request) return
+    const result = await options.onAdminCampaignLiveTop10Request(campaignId)
+    if (state.currentScreen !== 'admin-campaigns') return
+    if (!result.ok) {
+      state.adminCampaignsErrorText = result.message
+      render()
+      return
+    }
+    state.adminCampaignLiveTop10 = { campaignId, entries: result.entries }
     render()
   }
 

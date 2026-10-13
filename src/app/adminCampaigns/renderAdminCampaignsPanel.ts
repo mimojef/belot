@@ -1,5 +1,6 @@
 import type {
   AdminCampaignEditorDraft,
+  AdminCampaignLiveTop10Entry,
   AdminCampaignReferenceData,
   AdminCampaignRewardType,
   AdminCampaignRow,
@@ -20,6 +21,8 @@ export type AdminCampaignsPanelState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
+  /** "Топ 10" бутон на активна кампания — само последният заявен campaignId/резултат се пази. */
+  adminCampaignLiveTop10: { campaignId: string; entries: AdminCampaignLiveTop10Entry[] } | null
 }
 
 export type AdminCampaignsPanelHandlers = {
@@ -34,6 +37,7 @@ export type AdminCampaignsPanelHandlers = {
   onThemeAssetUpload: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
   onThemeAssetRemove: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
   onViewArchive: () => void
+  onViewLiveTop10: (campaignId: string) => void
 }
 
 function esc(value: unknown): string {
@@ -192,6 +196,13 @@ function renderEditor(
   const allowedBelotStakes = referenceData.allowedStakes.belot
   const allowedLudoStakes = referenceData.allowedStakes.ludo
   const selectedCampaignId = draft.campaignId ?? ''
+  // Активна кампания вече е частично редактируема (isLocked=false за нея,
+  // виж editorLocked по-долу) — но начална дата и наградни прагове остават
+  // заключени и за active, не само за finished/stopped (campaignAdminStore.ts
+  // doc коментара на saveCampaignConfiguration за пълния "защо": startsAt
+  // вече е отминал момент, а tier/tier_rewards delete+reinsert би хвърлил
+  // FOREIGN KEY constraint failed, ако праг вече е claim-нат от играч).
+  const tiersAndStartLocked = isLocked || themeRow?.status === 'active'
 
   const earnRows = draft.earnRules.map((rule, index) => {
     const stakes = rule.gameKind === 'belot' ? allowedBelotStakes : allowedLudoStakes
@@ -222,14 +233,14 @@ function renderEditor(
     <div data-admin-campaign-tier="1" style="border:1px solid rgba(255,255,255,0.12);border-radius:8px;padding:12px;background:rgba(255,255,255,0.035);display:flex;flex-direction:column;gap:10px;">
       <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;">
         <label style="display:flex;align-items:center;gap:8px;color:rgba(255,255,255,0.72);font-size:12px;font-weight:900;">Праг
-          <input data-admin-campaign-tier-threshold="1" type="number" min="1" value="${tier.thresholdUnits}" ${isLocked ? 'disabled' : ''} style="width:130px;height:34px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 8px;font-size:12px;font-weight:800;">
+          <input data-admin-campaign-tier-threshold="1" type="number" min="1" value="${tier.thresholdUnits}" ${tiersAndStartLocked ? 'disabled' : ''} style="width:130px;height:34px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 8px;font-size:12px;font-weight:800;">
         </label>
         <div style="display:flex;gap:8px;">
-          ${isLocked ? '' : `<button type="button" data-admin-campaign-add-reward="${tierIndex}" style="height:34px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:rgba(6,78,59,0.28);color:#bbf7d0;font-size:11px;font-weight:900;cursor:pointer;">+ Награда</button>`}
-          ${isLocked ? '' : `<button type="button" data-admin-campaign-remove-tier="${tierIndex}" style="height:34px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.32);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Премахни праг</button>`}
+          ${tiersAndStartLocked ? '' : `<button type="button" data-admin-campaign-add-reward="${tierIndex}" style="height:34px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:rgba(6,78,59,0.28);color:#bbf7d0;font-size:11px;font-weight:900;cursor:pointer;">+ Награда</button>`}
+          ${tiersAndStartLocked ? '' : `<button type="button" data-admin-campaign-remove-tier="${tierIndex}" style="height:34px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.32);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Премахни праг</button>`}
         </div>
       </div>
-      <div style="display:flex;flex-direction:column;gap:8px;">${tier.rewards.map((reward, rewardIndex) => renderRewardEditor(reward, tierIndex, rewardIndex, referenceData, isLocked)).join('')}</div>
+      <div style="display:flex;flex-direction:column;gap:8px;">${tier.rewards.map((reward, rewardIndex) => renderRewardEditor(reward, tierIndex, rewardIndex, referenceData, tiersAndStartLocked)).join('')}</div>
     </div>
   `).join('')
 
@@ -245,7 +256,7 @@ function renderEditor(
       </div>
       <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:10px;">
         <label style="display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:900;color:rgba(255,255,255,0.56);">Име<input data-admin-campaign-name="1" value="${esc(draft.name)}" ${isLocked ? 'disabled' : ''} style="height:38px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 10px;font-size:13px;font-weight:800;"></label>
-        <label style="display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:900;color:rgba(255,255,255,0.56);">Старт<input data-admin-campaign-starts="1" type="datetime-local" value="${datetimeLocalValue(draft.startsAt)}" ${isLocked ? 'disabled' : ''} style="height:38px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 10px;font-size:13px;font-weight:800;"></label>
+        <label style="display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:900;color:rgba(255,255,255,0.56);">Старт<input data-admin-campaign-starts="1" type="datetime-local" value="${datetimeLocalValue(draft.startsAt)}" ${tiersAndStartLocked ? 'disabled' : ''} style="height:38px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 10px;font-size:13px;font-weight:800;"></label>
         <label style="display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:900;color:rgba(255,255,255,0.56);">Край<input data-admin-campaign-ends="1" type="datetime-local" value="${datetimeLocalValue(draft.endsAt)}" ${isLocked ? 'disabled' : ''} style="height:38px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 10px;font-size:13px;font-weight:800;"></label>
         <label style="display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:900;color:rgba(255,255,255,0.56);">Единица<input data-admin-campaign-unit-singular="1" value="${esc(draft.unitNameSingular)}" ${isLocked ? 'disabled' : ''} style="height:38px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 10px;font-size:13px;font-weight:800;"></label>
         <label style="display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:900;color:rgba(255,255,255,0.56);">Единици<input data-admin-campaign-unit-plural="1" value="${esc(draft.unitNamePlural)}" ${isLocked ? 'disabled' : ''} style="height:38px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 10px;font-size:13px;font-weight:800;"></label>
@@ -260,7 +271,7 @@ function renderEditor(
         <div style="display:flex;flex-direction:column;gap:8px;">${packageRows || '<div style="color:rgba(255,255,255,0.45);font-size:12px;font-weight:800;">Няма правила за покупки.</div>'}</div>
       </section>
       <section style="display:flex;flex-direction:column;gap:8px;">
-        <div style="display:flex;align-items:center;justify-content:space-between;"><div style="font-size:13px;font-weight:950;color:#fff;">Наградни прагове</div>${isLocked ? '' : `<button type="button" data-admin-campaign-add-tier="1" style="height:32px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:rgba(6,78,59,0.28);color:#bbf7d0;font-size:11px;font-weight:900;cursor:pointer;">+ Праг</button>`}</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;"><div style="font-size:13px;font-weight:950;color:#fff;">Наградни прагове${themeRow?.status === 'active' ? ' (заключени за активна кампания)' : ''}</div>${tiersAndStartLocked ? '' : `<button type="button" data-admin-campaign-add-tier="1" style="height:32px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:rgba(6,78,59,0.28);color:#bbf7d0;font-size:11px;font-weight:900;cursor:pointer;">+ Праг</button>`}</div>
         <div style="display:flex;flex-direction:column;gap:10px;">${tierRows || '<div style="color:rgba(255,255,255,0.45);font-size:12px;font-weight:800;">Няма наградни прагове.</div>'}</div>
       </section>
     </form>
@@ -298,6 +309,7 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
           </div>
           <div style="display:flex;flex-wrap:wrap;gap:6px;justify-content:${isMobile ? 'flex-start' : 'flex-end'};">
             <button type="button" data-admin-campaign-edit="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(147,197,253,0.35);border-radius:6px;background:rgba(30,64,175,0.22);color:#bfdbfe;font-size:11px;font-weight:900;cursor:pointer;">Преглед</button>
+            ${campaign.status === 'active' ? `<button type="button" data-admin-campaign-top10="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(212,165,32,0.4);border-radius:6px;background:rgba(120,90,10,0.26);color:#fde68a;font-size:11px;font-weight:900;cursor:pointer;">Топ 10</button>` : ''}
             ${canSchedule ? `<button type="button" data-admin-campaign-action="schedule" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(251,191,36,0.35);border-radius:6px;background:rgba(120,53,15,0.28);color:#fde68a;font-size:11px;font-weight:900;cursor:pointer;">Планирай</button>` : ''}
             ${canActivate ? `<button type="button" data-admin-campaign-action="activate" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(52,211,153,0.35);border-radius:6px;background:rgba(6,78,59,0.28);color:#bbf7d0;font-size:11px;font-weight:900;cursor:pointer;">Активирай</button>` : ''}
             ${canStop ? `<button type="button" data-admin-campaign-action="stop" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.30);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Спри</button>` : ''}
@@ -305,13 +317,30 @@ export function renderAdminCampaignsPanel(state: AdminCampaignsPanelState, isMob
             ${canDelete ? `<button type="button" data-admin-campaign-action="delete" data-campaign-id="${esc(campaign.campaignId)}" style="height:32px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.30);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Изтрий</button>` : ''}
           </div>
         </article>
+        ${state.adminCampaignLiveTop10?.campaignId === campaign.campaignId ? `
+          <div data-admin-campaign-top10-panel="${esc(campaign.campaignId)}" style="border:1px solid rgba(212,165,32,0.3);border-radius:8px;background:rgba(0,0,0,0.3);padding:12px;">
+            <div style="color:#fde68a;font-size:12px;font-weight:950;margin-bottom:8px;">Топ 10 (текущо, живо класиране)</div>
+            ${state.adminCampaignLiveTop10.entries.length === 0
+              ? '<div style="color:rgba(255,255,255,0.45);font-size:12px;font-weight:800;">Все още няма записани единици.</div>'
+              : `<div style="display:flex;flex-direction:column;gap:4px;">${state.adminCampaignLiveTop10.entries.map((entry) => `
+                  <div style="display:flex;justify-content:space-between;color:rgba(255,255,255,0.78);font-size:12px;font-weight:800;">
+                    <span>${entry.rank}. ${esc(entry.displayName)}</span>
+                    <span>${formatNumber(entry.unitsTotal)}</span>
+                  </div>
+                `).join('')}</div>`
+            }
+          </div>
+        ` : ''}
       `
     }).join('')
 
   const editorRow = state.adminCampaignEditorDraft && referenceData
     ? state.adminCampaigns.find((row) => row.campaignId === state.adminCampaignEditorDraft?.campaignId) ?? null
     : null
-  const editorLocked = editorRow !== null && editorRow.status !== 'draft' && editorRow.status !== 'scheduled'
+  // "active" вече НЕ е напълно заключен (виж tiersAndStartLocked в
+  // renderEditor за частичното заключване start/прагове) — само
+  // finished/stopped остават изцяло read-only.
+  const editorLocked = editorRow !== null && editorRow.status !== 'draft' && editorRow.status !== 'scheduled' && editorRow.status !== 'active'
 
   return `
     <div data-admin-campaigns-panel="1" style="width:100%;max-width:1180px;margin:0 auto;padding:${isMobile ? '12px' : '22px'};box-sizing:border-box;display:flex;flex-direction:column;gap:14px;">
@@ -418,6 +447,13 @@ export function attachAdminCampaignsHandlers(
   root.querySelector<HTMLElement>('[data-admin-campaigns-back="1"]')?.addEventListener('click', handlers.onBack)
   root.querySelector<HTMLElement>('[data-admin-campaign-create="1"]')?.addEventListener('click', handlers.onCreate)
   root.querySelector<HTMLElement>('[data-admin-campaigns-view-archive="1"]')?.addEventListener('click', handlers.onViewArchive)
+
+  root.querySelectorAll<HTMLElement>('[data-admin-campaign-top10]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const campaignId = button.dataset.adminCampaignTop10?.trim() ?? ''
+      if (campaignId) handlers.onViewLiveTop10(campaignId)
+    })
+  })
 
   root.querySelectorAll<HTMLElement>('[data-admin-campaign-filter]').forEach((button) => {
     button.addEventListener('click', () => handlers.onFilter((button.dataset.adminCampaignFilter ?? 'all') as AdminCampaignFilter))

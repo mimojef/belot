@@ -39,7 +39,7 @@ import type { PlayerAccountRole, ActiveProfileBanSnapshot } from './ui/overlays/
 import type { MonitoringSnapshot, MonitoringHistoryResult, HistoryWindow, WsConnectionsResult, CpuIncidentSummary, CpuIncidentDetail } from './app/adminServer/adminServerTypes'
 import { isValidHistoryWindow } from './app/adminServer/adminServerTypes'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from './app/adminTournaments/adminTournamentTypes'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from './app/adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignLiveTop10Entry, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from './app/adminCampaigns/adminCampaignTypes'
 import type { AdminCampaignAction } from './app/adminCampaigns/renderAdminCampaignsPanel'
 import {
   createGameServerClient,
@@ -2622,6 +2622,22 @@ async function loadAdminCampaignArchiveDetail(campaignId: string): Promise<Admin
     const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/archive`, { method: 'GET', credentials: 'include' })
     const data = (await response.json()) as AdminCampaignArchiveDetailResponse
     return data
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function loadAdminCampaignLiveTop10(campaignId: string): Promise<
+  | { ok: true; entries: AdminCampaignLiveTop10Entry[] }
+  | { ok: false; message: string }
+> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/campaigns/${encodeURIComponent(campaignId)}/live-top10`, { method: 'GET', credentials: 'include' })
+    const data = (await response.json()) as { ok: boolean; top10?: AdminCampaignLiveTop10Entry[]; message?: string }
+    if (!response.ok || !data.ok || !Array.isArray(data.top10)) {
+      return { ok: false, message: data.message ?? 'Грешка при зареждане на Топ 10.' }
+    }
+    return { ok: true, entries: data.top10 }
   } catch {
     return { ok: false, message: 'Няма връзка със сървъра.' }
   }
@@ -7226,6 +7242,7 @@ lobby = createLobbyFlowController({
   onAdminCampaignActionRequest: (campaignId, action) => postAdminCampaignAction(campaignId, action),
   onAdminCampaignMarketingSenderSaveRequest: (campaignId, giftSenderProfileId) => saveAdminCampaignMarketingSender(campaignId, giftSenderProfileId),
   onAdminCampaignThemeAssetUploadRequest: (campaignId, kind, imageDataUrl) => saveAdminCampaignThemeAsset(campaignId, kind, imageDataUrl),
+  onAdminCampaignLiveTop10Request: (campaignId) => loadAdminCampaignLiveTop10(campaignId),
   onAdminCampaignThemeAssetRemoveRequest: (campaignId, kind) => removeAdminCampaignThemeAsset(campaignId, kind),
   onAdminCampaignArchiveListLoad: () => loadAdminCampaignArchiveList(),
   onAdminCampaignArchiveDetailLoad: (campaignId) => loadAdminCampaignArchiveDetail(campaignId),

@@ -99,6 +99,18 @@ export type CampaignAdminStoreResult<T> =
   | { ok: true; value: T }
   | { ok: false; message: string; reason?: string }
 
+// Текущо (не замразено) класиране — campaign_profile_totals В МОМЕНТА на
+// извикването, за "Топ 10" бутона на активна кампания (виж доc коментара на
+// getLiveTop10 по-долу). displayName/rankTitle са ТЕКУЩИ (не snapshot) —
+// умишлено различно от campaignArchiveStore.ts's замразен Топ 10, който
+// пази display_name_at_archive/rank_title_at_archive.
+export type CampaignAdminLiveTop10Entry = {
+  rank: number
+  profileId: string
+  displayName: string
+  unitsTotal: number
+}
+
 export type CampaignAdminStore = {
   getSnapshot: () => CampaignAdminSnapshot
   saveCampaignConfiguration: (
@@ -117,6 +129,8 @@ export type CampaignAdminStore = {
     actor: CampaignActionActor,
   ) => CampaignAdminStoreResult<CampaignAdminCampaignSnapshot>
   validateCampaignReady: (campaignId: string) => CampaignAdminStoreResult<CampaignAdminCampaignSnapshot>
+  /** Read-only, винаги преизчислено от campaign_profile_totals — никакъв кеш/snapshot. Null = кампанията не съществува. */
+  getLiveTop10: (campaignId: string) => CampaignAdminLiveTop10Entry[] | null
   close: () => void
 }
 
@@ -691,14 +705,36 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     return row.count > 0
   }
 
-  function deleteConfiguration(campaignId: string): void {
-    database.prepare(`DELETE FROM campaign_tier_rewards WHERE tier_id IN (SELECT tier_id FROM campaign_reward_tiers WHERE campaign_id = ?);`).run(campaignId)
-    database.prepare(`DELETE FROM campaign_reward_tiers WHERE campaign_id = ?;`).run(campaignId)
+  // Разделено на "rules" (earn_rules/package_earn_rules) и "tiers"
+  // (reward_tiers/tier_rewards) — виж doc коментара на saveCampaignConfiguration
+  // за защо активна кампания може да презаписва само "rules" половината.
+  // "Rules" нямат никакъв downstream FK reference (никой ред в
+  // campaign_unit_ledger/campaign_reward_claims сочи към конкретен earn_rule
+  // ред по identity — ledger-ът пази units_amount като замразен snapshot),
+  // затова delete+reinsert е безопасен независимо от статуса.
+  function deleteRulesConfiguration(campaignId: string): void {
     database.prepare(`DELETE FROM campaign_package_earn_rules WHERE campaign_id = ?;`).run(campaignId)
     database.prepare(`DELETE FROM campaign_earn_rules WHERE campaign_id = ?;`).run(campaignId)
   }
 
-  function insertConfiguration(campaignId: string, input: NormalizedCampaignInput): void {
+  // "Tiers" ИМАТ downstream FK reference: campaign_tier_rewards.tier_id ->
+  // campaign_reward_tiers (ON DELETE RESTRICT), и campaign_reward_claims.
+  // tier_reward_id -> campaign_tier_rewards (ON DELETE RESTRICT). Ако праг
+  // вече е бил достигнат от играч (campaign_reward_claims ред съществува),
+  // DELETE FROM campaign_tier_rewards би хвърлил FOREIGN KEY constraint
+  // failed — delete+reinsert е безопасен САМО когато кампанията още няма
+  // claims (draft/scheduled), затова НИКОГА не се вика за активна кампания.
+  function deleteTiersConfiguration(campaignId: string): void {
+    database.prepare(`DELETE FROM campaign_tier_rewards WHERE tier_id IN (SELECT tier_id FROM campaign_reward_tiers WHERE campaign_id = ?);`).run(campaignId)
+    database.prepare(`DELETE FROM campaign_reward_tiers WHERE campaign_id = ?;`).run(campaignId)
+  }
+
+  function deleteConfiguration(campaignId: string): void {
+    deleteTiersConfiguration(campaignId)
+    deleteRulesConfiguration(campaignId)
+  }
+
+  function insertRulesConfiguration(campaignId: string, input: NormalizedCampaignInput): void {
     for (const rule of input.earnRules) {
       insertEarnRuleStatement.run(campaignId, rule.gameKind, rule.stakeAmount, rule.unitsPerWin)
     }
@@ -706,7 +742,9 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     for (const rule of input.packageEarnRules) {
       insertPackageEarnRuleStatement.run(campaignId, rule.packageKey, rule.unitsPerPurchase)
     }
+  }
 
+  function insertTiersConfiguration(campaignId: string, input: NormalizedCampaignInput): void {
     for (const tier of input.rewardTiers) {
       const tierId = randomUUID()
       insertRewardTierStatement.run(tierId, campaignId, tier.thresholdUnits)
@@ -728,6 +766,11 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
         }
       }
     }
+  }
+
+  function insertConfiguration(campaignId: string, input: NormalizedCampaignInput): void {
+    insertRulesConfiguration(campaignId, input)
+    insertTiersConfiguration(campaignId, input)
   }
 
   function attachConfiguration(campaigns: CampaignRecord[]): CampaignAdminCampaignSnapshot[] {
@@ -822,6 +865,52 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     }
   }
 
+  // "Топ 10" бутон за АКТИВНА кампания — текущо класиране, БЕЗ да се чака
+  // архивиране. Mirror на campaignArchiveStore.ts's selectTop10CandidatesStatement
+  // (същия ORDER/LIMIT/бот-филтър), но срещу ЖИВИ display_name/rank_title
+  // (не frozen at_archive snapshot колони — кампанията още не е архивирана,
+  // архивиране не е предпоставка за тоя read). Чисто read-only — никога не
+  // пипа campaign_unit_ledger/campaign_profile_totals.
+  const selectLiveTop10Statement = database.prepare(`
+    SELECT cpt.profile_id AS profile_id, cpt.units_total AS units_total, p.display_name AS display_name
+    FROM campaign_profile_totals cpt
+    JOIN profiles p ON p.profile_id = cpt.profile_id
+    WHERE cpt.campaign_id = ? AND cpt.profile_id IS NOT NULL
+      AND p.profile_kind = 'human' AND p.is_temporary = 0
+    ORDER BY cpt.units_total DESC, cpt.profile_id ASC
+    LIMIT 10;
+  `)
+
+  function getLiveTop10(campaignId: string): CampaignAdminLiveTop10Entry[] | null {
+    if (getCampaignRecord(campaignId) === null) return null
+    const rows = selectLiveTop10Statement.all(campaignId) as Array<{ profile_id: string; units_total: number; display_name: string }>
+    return rows.map((row, index) => ({
+      rank: index + 1,
+      profileId: row.profile_id,
+      displayName: row.display_name,
+      unitsTotal: row.units_total,
+    }))
+  }
+
+  // Активна кампания — РАЗШИРЕНО редактиране (production incident: admin
+  // пропусна да зададе Ludo earn rule и нямаше начин да я поправи без
+  // клониране/спиране). Разрешено: name/endsAt/earnRules/packageEarnRules/
+  // giftSenderProfileId. ЗАКЛЮЧЕНО: startsAt (кампанията вече е почнала —
+  // игнорира се подадената стойност, винаги се пази съществуващата) и
+  // rewardTiers (виж deleteTiersConfiguration doc коментара — DELETE FROM
+  // campaign_reward_tiers би хвърлил FOREIGN KEY constraint failed, ако
+  // праг вече е бил claim-нат от играч; delete+reinsert е безопасен само
+  // докато кампанията още няма claims). Earn/package rules са безопасни да
+  // се презаписват в активна кампания, защото campaign_unit_ledger пази
+  // units_amount като ЗАМРАЗЕН в момента на начисляване snapshot — ново
+  // правило важи само за БЪДЕЩИ начисления (resolveUnitsAmountForEvent го
+  // чете в реално време при всяко ново начисление), никога не презаписва
+  // вече записани ledger редове. 0-единично начислен ред (липсващо правило
+  // в момента на играта) НЕ се преначислява автоматично след добавяне на
+  // правилото — natural-key INSERT OR IGNORE в campaign_unit_ledger вече
+  // съдържа реда (дори с units_amount=0), затова reconciliation job-ът
+  // никога повторно не го пипа (виж checkCampaignAdminActiveEdit.ts [6] за
+  // explicit regression тест на точно тоя инвариант).
   function saveCampaignConfiguration(
     input: CampaignAdminSaveInput,
     actor: CampaignActionActor,
@@ -838,9 +927,10 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
         rollback()
         return resultError('Изтрита кампания не може да се редактира.', 'campaign_deleted')
       }
-      if (existing !== null && existing.status !== 'draft' && existing.status !== 'scheduled') {
+      const isActiveEdit = existing !== null && existing.status === 'active'
+      if (existing !== null && existing.status !== 'draft' && existing.status !== 'scheduled' && !isActiveEdit) {
         rollback()
-        return resultError('Настройките са заключени след активиране на кампанията.', 'not_editable')
+        return resultError('Настройките са заключени след приключване на кампанията.', 'not_editable')
       }
 
       const normalized = normalizeInput(input)
@@ -851,7 +941,15 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
 
       const next = normalized.value
       const campaignId = existing?.campaignId ?? randomUUID()
-      if (existing !== null && existing.status === 'scheduled' && hasOverlap(campaignId, next.startsAt, next.endsAt)) {
+      // startsAt е заключен за активна кампания — игнорира подаденото,
+      // винаги пази съществуващата стойност (не reject, за да не чупи
+      // UI round-trip през datetime-local конверсията на непипнатото поле).
+      const effectiveStartsAt = isActiveEdit ? existing.startsAt : next.startsAt
+      if (isActiveEdit && !isValidPeriod(effectiveStartsAt, next.endsAt)) {
+        rollback()
+        return resultError('Новият краен срок трябва да е след началото на кампанията.', 'invalid_period')
+      }
+      if (existing !== null && (existing.status === 'scheduled' || isActiveEdit) && hasOverlap(campaignId, effectiveStartsAt, next.endsAt)) {
         rollback()
         return resultError('Периодът се застъпва с друга планирана или активна кампания.', 'overlaps_existing_campaign')
       }
@@ -866,24 +964,33 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
           next.unitNamePlural,
           next.giftSenderProfileId,
         )
+        insertConfiguration(campaignId, next)
       } else {
         updateCampaignStatement.run(
           next.name,
-          next.startsAt,
+          effectiveStartsAt,
           next.endsAt,
           next.unitNameSingular,
           next.unitNamePlural,
           next.giftSenderProfileId,
           campaignId,
         )
-        deleteConfiguration(campaignId)
+        if (isActiveEdit) {
+          // Rewardtiers/tier_rewards НЕ се пипат тук — виж doc коментара
+          // по-горе и на deleteTiersConfiguration.
+          deleteRulesConfiguration(campaignId)
+          insertRulesConfiguration(campaignId, next)
+        } else {
+          deleteConfiguration(campaignId)
+          insertConfiguration(campaignId, next)
+        }
       }
 
-      insertConfiguration(campaignId, next)
       insertEvent(campaignId, existing === null ? 'campaign_admin_created' : 'campaign_admin_config_updated', actor, {
         earnRules: next.earnRules.length,
         packageEarnRules: next.packageEarnRules.length,
         rewardTiers: next.rewardTiers.length,
+        activeRestrictedEdit: isActiveEdit,
       })
       database.exec('COMMIT;')
 
@@ -1017,6 +1124,7 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     updateMarketingSender,
     updateThemeAsset,
     validateCampaignReady,
+    getLiveTop10,
     close: () => database.close(),
   }
 }

@@ -366,15 +366,106 @@ try {
     assert(result.value.rewardTiers[0]!.rewards.length === 2, 'и двете награди (gift_item + vip_days) трябва да са записани')
   })
 
-  // ─── 6. Заключване след активиране ───
-  await check('[18] Активирана кампания: saveCampaignConfiguration -> not_editable', async () => {
-    const scheduled = campaignsStore.scheduleCampaign(campaignWithGiftId, ADMIN_ACTOR)
-    assert(scheduled.ok, `setup schedule failed: ${JSON.stringify(scheduled)}`)
-    const activated = campaignsStore.activateCampaign(campaignWithGiftId, new Date(), ADMIN_ACTOR)
-    assert(activated.ok, `setup activate failed: ${JSON.stringify(activated)}`)
+  // ─── 6. Активна кампания — разширено редактиране (production incident:
+  // admin пропусна Ludo earn rule, нямаше начин да я поправи без клониране/
+  // спиране) ───
+  const scheduled = campaignsStore.scheduleCampaign(campaignWithGiftId, ADMIN_ACTOR)
+  assert(scheduled.ok, `setup schedule failed: ${JSON.stringify(scheduled)}`)
+  const activated = campaignsStore.activateCampaign(campaignWithGiftId, new Date(), ADMIN_ACTOR)
+  assert(activated.ok, `setup activate failed: ${JSON.stringify(activated)}`)
+  const beforeActiveEdit = adminStore.getSnapshot().campaigns.find((c) => c.campaignId === campaignWithGiftId)!
 
-    const result = adminStore.saveCampaignConfiguration(minimalSaveInput({ campaignId: campaignWithGiftId }), ADMIN_ACTOR)
-    assert(!result.ok && result.reason === 'not_editable', `expected not_editable, got ${JSON.stringify(result)}`)
+  await check('[18] Активна кампания: name/endsAt/earnRules се обновяват; startsAt остава (игнорира подадено ново); rewardTiers остават непипнати', () => {
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({
+        campaignId: campaignWithGiftId,
+        name: 'Активно редактирано име',
+        startsAt: hoursFromNow(5), // различно от текущото -> трябва да се игнорира
+        endsAt: hoursFromNow(300), // ново, трябва да се приложи
+        earnRules: [
+          { gameKind: 'belot', stakeAmount: ALLOWED_STAKE, unitsPerWin: 10 },
+          { gameKind: 'ludo', stakeAmount: ALLOWED_STAKE, unitsPerWin: 15 }, // новото Ludo правило
+        ],
+        // различни прагове в submission-а -> трябва да бъдат ИГНОРИРАНИ (не presisted)
+        rewardTiers: [{ tierId: null, thresholdUnits: 999, rewards: [{ rewardType: 'yellow_coins', amount: 1 }] }],
+      }),
+      ADMIN_ACTOR,
+    )
+    assert(result.ok, `expected ok (активна кампания вече трябва да е редактируема), got ${JSON.stringify(result)}`)
+    if (!result.ok) return
+    assert(result.value.status === 'active', 'статусът не трябва да се променя от редакция')
+    assert(result.value.name === 'Активно редактирано име', 'името трябва да се обнови')
+    assert(result.value.startsAt === beforeActiveEdit.startsAt, `startsAt трябва да остане непроменен: беше ${beforeActiveEdit.startsAt}, сега ${result.value.startsAt}`)
+    assert(Date.parse(result.value.endsAt) > Date.parse(beforeActiveEdit.endsAt), 'endsAt трябва да се удължи')
+    assert(result.value.earnRules.length === 2 && result.value.earnRules.some((r) => r.gameKind === 'ludo' && r.unitsPerWin === 15), 'ново Ludo earn rule трябва да е записано')
+    assert(result.value.rewardTiers.length === 1 && result.value.rewardTiers[0]!.thresholdUnits === 100, 'rewardTiers трябва да останат ОРИГИНАЛНИТЕ (праг 100), не подадените (999) — активна кампания не пипа прагове')
+  })
+
+  await check('[18b] Активна кампания с ВЕЧЕ ПРЕДОСТАВЕНА награда (campaign_reward_claims) -> saveCampaignConfiguration продължава да работи, без FK crash, claim-ът остава непокътнат', async () => {
+    const snapshotBefore = adminStore.getSnapshot().campaigns.find((c) => c.campaignId === campaignWithGiftId)!
+    const tierRewardId = snapshotBefore.rewardTiers[0]!.rewards.find((r) => r.rewardType === 'vip_days')
+    assert(tierRewardId !== undefined, 'очаквах vip_days награда в съществуващия праг')
+    const db = await openRawDb()
+    let realTierRewardId!: string
+    try {
+      const row = db.prepare(`
+        SELECT ctr.tier_reward_id AS id FROM campaign_tier_rewards ctr
+        JOIN campaign_reward_tiers crt ON crt.tier_id = ctr.tier_id
+        WHERE crt.campaign_id = ? AND ctr.reward_type = 'vip_days' LIMIT 1;
+      `).get(campaignWithGiftId) as { id: string } | undefined
+      assert(row !== undefined, 'не намерих реалния tier_reward_id за vip_days награда')
+      realTierRewardId = row!.id
+      const claimantProfileId = await seedProfile('Reward Claimant')
+      db.prepare(`
+        INSERT INTO campaign_reward_claims (campaign_id, profile_id, tier_reward_id, granted_reward_ref)
+        VALUES (?, ?, ?, NULL);
+      `).run(campaignWithGiftId, claimantProfileId, realTierRewardId)
+    } finally {
+      db.close()
+    }
+
+    // deleteTiersConfiguration (DELETE FROM campaign_tier_rewards) би хвърлил
+    // FOREIGN KEY constraint failed тук, ако активната редакция погрешно
+    // опиташе да презапише прагове — точно рискът, който тая поправка пази.
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({ campaignId: campaignWithGiftId, name: 'Второ активно редактиране' }),
+      ADMIN_ACTOR,
+    )
+    assert(result.ok, `не трябва да хвърли FK грешка, got ${JSON.stringify(result)}`)
+    if (!result.ok) return
+    assert(result.value.name === 'Второ активно редактиране', 'името трябва пак да се обнови')
+
+    const db2 = await openRawDb()
+    try {
+      const claimRow = db2.prepare(`SELECT 1 FROM campaign_reward_claims WHERE campaign_id = ? AND tier_reward_id = ?;`).get(campaignWithGiftId, realTierRewardId)
+      assert(claimRow !== undefined, 'claim-ът трябва да остане непокътнат след активна редакция')
+      const tierRewardRow = db2.prepare(`SELECT 1 FROM campaign_tier_rewards WHERE tier_reward_id = ?;`).get(realTierRewardId)
+      assert(tierRewardRow !== undefined, 'tier_reward редът трябва да остане същия (same UUID), не пресъздаден')
+    } finally {
+      db2.close()
+    }
+  })
+
+  await check('[18c] Активна кампания: нов endsAt преди текущия startsAt -> invalid_period', () => {
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({ campaignId: campaignWithGiftId, endsAt: hoursFromNow(-100) }),
+      ADMIN_ACTOR,
+    )
+    assert(!result.ok && result.reason === 'invalid_period', `expected invalid_period, got ${JSON.stringify(result)}`)
+  })
+
+  await check('[18d] Активна кампания: нов endsAt застъпващ се с друга scheduled кампания -> overlaps_existing_campaign', () => {
+    const other = adminStore.saveCampaignConfiguration(minimalSaveInput({ startsAt: hoursFromNow(400), endsAt: hoursFromNow(450) }), ADMIN_ACTOR)
+    assert(other.ok, `setup: друга кампания failed: ${JSON.stringify(other)}`)
+    if (!other.ok) return
+    const otherScheduled = campaignsStore.scheduleCampaign(other.value.campaignId, ADMIN_ACTOR)
+    assert(otherScheduled.ok, `setup: schedule failed: ${JSON.stringify(otherScheduled)}`)
+
+    const result = adminStore.saveCampaignConfiguration(
+      minimalSaveInput({ campaignId: campaignWithGiftId, endsAt: hoursFromNow(420) }),
+      ADMIN_ACTOR,
+    )
+    assert(!result.ok && result.reason === 'overlaps_existing_campaign', `expected overlaps_existing_campaign, got ${JSON.stringify(result)}`)
   })
 
   // ─── 7. Marketing подател — смяна по отделен path ───
@@ -402,6 +493,11 @@ try {
     assert(stopped.ok, `setup stop failed: ${JSON.stringify(stopped)}`)
     const result = adminStore.updateMarketingSender(campaignWithGiftId, null, ADMIN_ACTOR)
     assert(!result.ok && result.reason === 'not_editable', `expected not_editable (stopped), got ${JSON.stringify(result)}`)
+  })
+
+  await check('[22b] Stopped кампания: saveCampaignConfiguration продължава да е not_editable (само "active" се отключва, не stopped/finished)', () => {
+    const result = adminStore.saveCampaignConfiguration(minimalSaveInput({ campaignId: campaignWithGiftId }), ADMIN_ACTOR)
+    assert(!result.ok && result.reason === 'not_editable', `expected not_editable, got ${JSON.stringify(result)}`)
   })
 
   // ─── 8. validateCampaignReady ───

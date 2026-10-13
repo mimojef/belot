@@ -163,3 +163,13 @@ export type AdminCampaignSnapshotResponse = {
 }
 
 export type AdminCampaignMutationInput = AdminCampaignEditorDraft
+
+// Текущо (не замразено) класиране на активна кампания — "Топ 10" бутон,
+// без да се чака архивиране. Mirror на AdminCampaignArchiveTop10Entry, но
+// без rank-at-archive/displayName-at-archive snapshot полета (тук е live).
+export type AdminCampaignLiveTop10Entry = {
+  rank: number
+  profileId: string
+  displayName: string
+  unitsTotal: number
+}

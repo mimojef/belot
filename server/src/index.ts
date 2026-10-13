@@ -18193,6 +18193,20 @@ async function handleAdminCampaignsRequest(
   const campaignId = decodeURIComponent(actionMatch[1] ?? '')
   const action = decodeURIComponent(actionMatch[2] ?? '')
 
+  if (action === 'live-top10') {
+    if (req.method !== 'GET') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+      return true
+    }
+    const top10 = campaignAdminStore.getLiveTop10(campaignId)
+    if (top10 === null) {
+      sendJsonResponse(res, 404, { ok: false, message: 'Кампанията не беше намерена.' })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true, top10 })
+    return true
+  }
+
   if (action === 'marketing-sender') {
     if (req.method !== 'PATCH') {
       sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })

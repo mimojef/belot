@@ -117,7 +117,7 @@ import { renderAdminPaymentsPanel, attachAdminPaymentsPanelHandlers } from '../a
 import { renderAdminPaymentDetailPanel, attachAdminPaymentDetailHandlers } from '../adminPayments/renderAdminPaymentDetailPanel'
 import type { AdminTournamentDetailRow, AdminTournamentFilters, AdminTournamentSummaryRow } from '../adminTournaments/adminTournamentTypes'
 import { renderAdminTournamentDetailPanel, renderAdminTournamentsPanel, attachAdminTournamentsHandlers } from '../adminTournaments/renderAdminTournamentsPanel'
-import type { AdminCampaignEditorDraft, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes'
+import type { AdminCampaignEditorDraft, AdminCampaignLiveTop10Entry, AdminCampaignReferenceData, AdminCampaignRow, AdminCampaignThemeAssetKind, AdminCampaignArchiveListRow, AdminCampaignArchiveDetailResponse } from '../adminCampaigns/adminCampaignTypes'
 import { renderAdminCampaignsPanel, attachAdminCampaignsHandlers, type AdminCampaignAction, type AdminCampaignFilter } from '../adminCampaigns/renderAdminCampaignsPanel'
 import { renderAdminCampaignArchivePanel, attachAdminCampaignArchivePanelHandlers } from '../adminCampaigns/renderAdminCampaignArchivePanel'
 import { renderAdCampaignManagementPanel, attachAdCampaignManagementPanelHandlers } from '../adCampaigns/renderAdCampaignManagementPanel'
@@ -792,6 +792,7 @@ export type LobbyScreenState = {
   adminCampaignsSuccessText: string | null
   adminCampaignsFilter: AdminCampaignFilter
   adminCampaignEditorDraft: AdminCampaignEditorDraft | null
+  adminCampaignLiveTop10: { campaignId: string; entries: AdminCampaignLiveTop10Entry[] } | null
   adminCampaignArchiveList: AdminCampaignArchiveListRow[]
   adminCampaignArchiveLoading: boolean
   adminCampaignArchiveErrorText: string | null
@@ -1551,6 +1552,7 @@ export type RenderLobbyScreenOptions = {
   onAdminCampaignMarketingSenderSave?: (campaignId: string, giftSenderProfileId: string | null) => void
   onAdminCampaignThemeAssetUpload?: (campaignId: string, kind: AdminCampaignThemeAssetKind, imageDataUrl: string) => void
   onAdminCampaignThemeAssetRemove?: (campaignId: string, kind: AdminCampaignThemeAssetKind) => void
+  onAdminCampaignLiveTop10Load?: (campaignId: string) => void
   onAdminCampaignArchiveOpen?: () => void
   onAdminCampaignArchiveBack?: () => void
   onAdminCampaignArchiveSelect?: (campaignId: string) => void
@@ -18212,6 +18214,7 @@ export function renderLobbyScreen(
     onThemeAssetUpload: (campaignId, kind, imageDataUrl) => { options.onAdminCampaignThemeAssetUpload?.(campaignId, kind, imageDataUrl) },
     onThemeAssetRemove: (campaignId, kind) => { options.onAdminCampaignThemeAssetRemove?.(campaignId, kind) },
     onViewArchive: () => { options.onAdminCampaignArchiveOpen?.() },
+    onViewLiveTop10: (campaignId) => { options.onAdminCampaignLiveTop10Load?.(campaignId) },
   })
 
   attachAdminCampaignArchivePanelHandlers(root, {
