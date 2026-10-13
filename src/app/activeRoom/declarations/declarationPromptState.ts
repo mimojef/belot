@@ -13,13 +13,25 @@ import {
   resolveClientDeclarationConflicts,
 } from './resolveClientDeclarationConflicts'
 
+/**
+ * Маха вече записаните обяви (подадени от този клиент ИЛИ записани от
+ * сървъра за мястото, напр. от бот при поемане — game.ownDeclarationKeys) и
+ * всички кандидати, които използват карта от тях (терца/50/100 с карта от
+ * вече обявено каре). Същото правило за застъпване като сървърния
+ * excludeCandidatesOverlappingDeclared — сървърът остава авторитетът.
+ */
 export function filterAlreadySubmittedDeclarationCandidates(
   candidates: ClientDeclarationCandidate[],
   submittedDeclarationKeys: string[],
 ): ClientDeclarationCandidate[] {
   const submittedKeys = new Set(submittedDeclarationKeys)
+  const submittedCandidates = candidates.filter((candidate) => submittedKeys.has(candidate.key))
 
-  return candidates.filter((candidate) => !submittedKeys.has(candidate.key))
+  return candidates.filter(
+    (candidate) =>
+      !submittedKeys.has(candidate.key) &&
+      !submittedCandidates.some((submitted) => clientDeclarationCandidatesOverlap(candidate, submitted)),
+  )
 }
 
 export function normalizeSelectedDeclarationKeys(

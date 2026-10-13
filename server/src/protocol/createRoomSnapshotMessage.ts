@@ -420,6 +420,12 @@ function createGameSnapshot(
       yourSeat !== null
         ? authoritativeState.hands[yourSeat].map(createCardSnapshot)
         : [],
+    ownDeclarationKeys:
+      yourSeat !== null
+        ? authoritativeState.declarations
+            .filter((declaration) => declaration.seat === yourSeat)
+            .map((declaration) => declaration.key)
+        : [],
   }
 }
 
@@ -538,6 +544,7 @@ function createSpectatorGameSnapshot(game: RoomGameSnapshot): RoomSpectatorGameS
     score: game.score,
     handCounts: game.handCounts,
     ownHand: [],
+    ownDeclarationKeys: [],
   }
 }
 

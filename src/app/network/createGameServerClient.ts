@@ -1428,6 +1428,8 @@ export type RoomGameSnapshot = {
   score: RoomScoreSnapshot
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
+  /** Ключовете на вече записаните обяви на собственото място (вкл. от бот). Само за собственика. */
+  ownDeclarationKeys?: string[]
 }
 
 export type ConnectedMessage = {
@@ -2223,7 +2225,7 @@ export type PrivateGamesListMessage = {
 // spectator playing screen (виж createLobbyFlowController.ts коментара) —
 // затова `game` тук reuse-ва СЪЩИЯ RoomGameSnapshot тип, вместо нов частичен
 // shape, за да не се налага повторно typing при Phase 3B.
-export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'ownHand'> & { ownHand: [] }
+export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'ownHand' | 'ownDeclarationKeys'> & { ownHand: []; ownDeclarationKeys?: [] }
 
 export type BelotSpectatorSnapshotMessage = {
   type: 'belot_spectator_snapshot'

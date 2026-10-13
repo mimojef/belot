@@ -65,9 +65,11 @@ function compareDefaultPriority(
   return left.key.localeCompare(right.key)
 }
 
+type DeclarationCardsRef = Pick<ServerDeclarationCandidate, 'type' | 'cardIds'>
+
 function declarationCandidatesOverlap(
-  left: ServerDeclarationCandidate,
-  right: ServerDeclarationCandidate,
+  left: DeclarationCardsRef,
+  right: DeclarationCardsRef,
 ): boolean {
   if (left.type === 'belote' && right.type !== 'belote') {
     return false
@@ -88,6 +90,22 @@ function overlapsSelectedCards(
 ): boolean {
   return selectedCandidates.some((selectedCandidate) =>
     declarationCandidatesOverlap(candidate, selectedCandidate),
+  )
+}
+
+/**
+ * Изключва кандидатите, които използват карта от ВЕЧЕ записана обява на
+ * същото място (напр. каре, обявено от бота при старта на playing фазата,
+ * спрямо терца/50/100 с обща карта при първия му ход). Същото правило за
+ * застъпване като resolveServerDeclarationConflicts (белот не се застъпва
+ * със square/sequence).
+ */
+export function excludeCandidatesOverlappingDeclared<T extends DeclarationCardsRef>(
+  candidates: T[],
+  declared: DeclarationCardsRef[],
+): T[] {
+  return candidates.filter(
+    (candidate) => !declared.some((existing) => declarationCandidatesOverlap(candidate, existing)),
   )
 }
 

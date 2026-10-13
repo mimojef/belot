@@ -2062,7 +2062,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       cardId,
       completedTricksCount: completedCount,
       currentTrickPlays: snapshotPlays,
-      submittedDeclarationKeys: cache.submittedDeclarationKeys,
+      // Локално подадените + записаните от сървъра за мястото (напр. от бот
+      // преди "Върни се"; оцеляват и при reconnect, когато cache е нулиран).
+      submittedDeclarationKeys: [
+        ...new Set([...cache.submittedDeclarationKeys, ...(game.ownDeclarationKeys ?? [])]),
+      ],
     })
   }
 

@@ -259,6 +259,7 @@
     "check:belot-spectator-ws": "tsx scripts/checkBelotSpectatorWebSocket.ts --server-root=.",
     "check:belot-spectator-vip": "tsx scripts/checkBelotSpectatorVipAuthorization.ts --server-root=.",
     "check:belot-declaration-snapshot-privacy": "tsx scripts/checkBelotDeclarationSnapshotPrivacy.ts",
+    "check:declaration-square-overlap": "tsx scripts/checkDeclarationSquareOverlap.ts",
     "check:partner-suit-all-trumps": "tsx scripts/checkPartnerSuitAllTrumpsLead.ts",
     "check:all-trumps-guaranteed-suit-continuation": "tsx scripts/checkAllTrumpsGuaranteedSuitContinuation.ts",
     "check:strict-mode-bidding": "tsx scripts/checkStrictModeBidding.ts",

@@ -1,6 +1,7 @@
 import type { Seat } from '../core/serverTypes.js'
 import {
   detectServerDeclarationsInHand,
+  excludeCandidatesOverlappingDeclared,
   resolveServerDeclarationConflicts,
   type ServerDeclarationCandidate,
 } from './declarations/index.js'
@@ -140,14 +141,21 @@ export function validateServerDeclarationKeysForPlay(
     selectedCandidates.push(candidate)
   }
 
-  const existingKeysForSeat = new Set(
-    state.declarations
-      .filter((declaration) => declaration.seat === seat)
-      .map((declaration) => declaration.key),
-  )
+  const existingDeclarationsForSeat = state.declarations.filter((declaration) => declaration.seat === seat)
+  const existingKeysForSeat = new Set(existingDeclarationsForSeat.map((declaration) => declaration.key))
 
   if (selectedCandidates.some((candidate) => existingKeysForSeat.has(candidate.key))) {
     return { ok: false, message: 'Този анонс вече е записан.' }
+  }
+
+  // Една физическа карта не може да участва в две признати комбинации —
+  // включително спрямо обява, записана по-рано за същото място (напр. каре,
+  // обявено при старта на playing фазата, и терца с обща карта).
+  if (
+    excludeCandidatesOverlappingDeclared(selectedCandidates, existingDeclarationsForSeat).length !==
+    selectedCandidates.length
+  ) {
+    return { ok: false, message: 'Избраните анонси използват карта от вече записан анонс.' }
   }
 
   const resolved = resolveServerDeclarationConflicts(selectedCandidates)

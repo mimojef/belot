@@ -716,6 +716,14 @@ export type RoomGameSnapshot = {
   score: RoomScoreSnapshot
   handCounts: Record<Seat, number>
   ownHand: RoomCardSnapshot[]
+  /**
+   * Ключовете на ВЕЧЕ записаните обяви на собственото място (вкл. обявени от
+   * бот при поемане). Само за собственика — ключът съдържа id-тата на
+   * собствените му карти, които той вече знае от ownHand. Клиентът ги ползва
+   * да не предлага/подава повторно записана обява и застъпващи я комбинации.
+   * Spectator-ите и другите места получават [].
+   */
+  ownDeclarationKeys: string[]
 }
 
 export type RoomSnapshotMessage = {
@@ -754,8 +762,9 @@ export type RoomSnapshotMessage = {
 
 // Декларациите вече са публичната проекция за всички viewers
 // (RoomDeclarationSnapshot) — spectator-ът ползва същата форма.
-export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'ownHand'> & {
+export type RoomSpectatorGameSnapshot = Omit<RoomGameSnapshot, 'ownHand' | 'ownDeclarationKeys'> & {
   ownHand: []
+  ownDeclarationKeys: []
 }
 
 export type BelotSpectatorSnapshotMessage = {

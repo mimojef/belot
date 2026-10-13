@@ -10,4 +10,7 @@ export type {
 } from './serverDeclarationTypes.js'
 export { buildServerDeclarationLabels } from './buildServerDeclarationLabels.js'
 export { detectServerDeclarationsInHand } from './detectServerDeclarationsInHand.js'
-export { resolveServerDeclarationConflicts } from './resolveServerDeclarationConflicts.js'
+export {
+  excludeCandidatesOverlappingDeclared,
+  resolveServerDeclarationConflicts,
+} from './resolveServerDeclarationConflicts.js'

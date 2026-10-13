@@ -3,6 +3,7 @@ import type { Seat } from '../core/serverTypes.js'
 import type { ServerCard } from './serverGameTypes.js'
 import {
   detectServerDeclarationsInHand,
+  excludeCandidatesOverlappingDeclared,
   resolveServerDeclarationConflicts,
 } from './declarations/index.js'
 import { pickServerBotPlayCard } from './pickServerBotPlayCard.js'
@@ -58,11 +59,8 @@ export function getServerDefaultDeclarationKeysForPlay(
 
   const isFirstTrick = playing.currentTrick.trickIndex === 0
 
-  const alreadyDeclaredKeys = new Set(
-    state.declarations
-      .filter((declaration) => declaration.seat === seat)
-      .map((declaration) => declaration.key),
-  )
+  const alreadyDeclaredForSeat = state.declarations.filter((declaration) => declaration.seat === seat)
+  const alreadyDeclaredKeys = new Set(alreadyDeclaredForSeat.map((declaration) => declaration.key))
 
   const candidates = detectServerDeclarationsInHand(
     state.hands[seat],
@@ -83,7 +81,9 @@ export function getServerDefaultDeclarationKeysForPlay(
     return isFirstTrick
   })
 
-  const resolved = resolveServerDeclarationConflicts(candidates)
+  const resolved = resolveServerDeclarationConflicts(
+    excludeCandidatesOverlappingDeclared(candidates, alreadyDeclaredForSeat),
+  )
 
   return resolved.selectedCandidates.map((candidate) => candidate.key)
 }
