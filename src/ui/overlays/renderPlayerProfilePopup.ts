@@ -1992,8 +1992,9 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
 
   // Компактен първи ред: име вляво; следващата награда + прогрес вдясно.
   // Всички прагове са напълно предоставени — §3: "Всички награди са получени!"
-  const rightSideHtml = nextTier === null
-    ? `<span style="color:#86efac;white-space:nowrap;">Всички награди са получени!</span>`
+  const allCollected = nextTier === null
+  const rightSideHtml = allCollected
+    ? `<span data-player-profile-campaign-all-collected="1" style="color:#86efac;white-space:nowrap;">Всички награди са получени!</span>`
     : `
       ${renderCampaignTierRewardsCompactHtml(nextTier)}
       <span data-player-profile-campaign-progress="1" style="flex:0 0 auto;white-space:nowrap;color:#f8fafc;">${format(active.unitsTotal)}/${format(progressThreshold)}</span>
@@ -2014,6 +2015,7 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
         <span data-player-profile-campaign-title="1" style="flex:1 1 auto;min-width:0;display:inline-flex;align-items:center;gap:6px;font-size:15px;font-weight:900;color:#f8fafc;">
           <span title="${escapeHtml(active.campaignName)}" style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">Събирай</span>
           ${unitIconHtml(36)}
+          ${allCollected ? `<span data-player-profile-campaign-total="1" style="flex:0 0 auto;white-space:nowrap;">${format(active.unitsTotal)}</span>` : ''}
         </span>
         <span style="display:inline-flex;align-items:center;gap:10px;flex:0 0 auto;font-size:13px;font-weight:900;color:#f8fafc;">
           ${rightSideHtml}
@@ -2049,7 +2051,7 @@ function renderActiveCampaignCard(active: ActiveCampaignProfileProgress, allRewa
               font-weight:900;
               cursor:pointer;
             "
-          >${allRewardsExpanded ? 'Скрий наградите' : 'Виж всички награди'}</button>
+          >${allRewardsExpanded ? 'Скрий наградите' : allCollected ? 'Всички събрани награди' : 'Виж всички награди'}</button>
         ` : ''}
         <span data-player-profile-campaign-hint="1" style="margin-left:auto;max-width:100%;min-width:0;font-size:12px;font-weight:800;line-height:1.25;color:rgba(226,232,240,0.78);text-align:right;">${hintText}</span>
       </div>
@@ -2944,6 +2946,10 @@ export function renderPlayerProfilePopup(
         [data-player-profile-campaign-actions="1"] {
           flex-direction:column-reverse !important;
           align-items:flex-start !important;
+        }
+
+        [data-player-profile-campaign-all-collected="1"] {
+          display:none !important;
         }
 
         [data-player-profile-campaign-hint="1"] {
