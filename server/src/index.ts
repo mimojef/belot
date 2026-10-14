@@ -481,6 +481,12 @@ import {
   logAcceptedCardPlayAudit,
   logRejectedGameplayAction,
 } from './game/logGameplayActionAudit.js'
+import {
+  createBelotHandJournal,
+  isBelotHandJournalEnabled,
+  type BelotHandJournal,
+} from './diagnostics/belotHandJournal/createBelotHandJournal.js'
+import { createBelotHandJournalStore } from './diagnostics/belotHandJournal/belotHandJournalStore.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -919,6 +925,24 @@ const botCatalogImport = await importBotProfilesCatalog(
 const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
   databaseBootstrap.databaseFilePath,
 )
+// Belot hand журнал (диагностика на всяко раздаване, вкл. „Долу картите“) —
+// отделна SQLite база в server/database/diagnostics/. Неуспешно отваряне не
+// спира сървъра: журналът просто е изключен (store=null).
+const belotHandJournal: BelotHandJournal = await (async () => {
+  if (!isBelotHandJournalEnabled()) {
+    console.log('[belot-hand-journal] disabled (BELOT_HAND_JOURNAL_ENABLED=0)')
+    return createBelotHandJournal({ store: null })
+  }
+  try {
+    const store = await createBelotHandJournalStore()
+    console.log(`[belot-hand-journal] enabled db=${store.databasePath}`)
+    return createBelotHandJournal({ store })
+  } catch (error) {
+    console.error('[belot-hand-journal] failed to open store — journal disabled', error)
+    return createBelotHandJournal({ store: null })
+  }
+})()
+belotHandJournal.startMaintenance()
 const privateRoomMatchStore = await createPrivateRoomMatchStore(
   databaseBootstrap.databaseFilePath,
 )
@@ -3942,6 +3966,15 @@ function commitServerRoomReplacement(
   room: ServerRoom,
   currentServerState: ServerState = serverState,
 ): ServerState {
+  // Някои извиквания подават currentServerState, който вече съдържа новата
+  // стая — тогава предишното състояние е в каноничния serverState.
+  const previousRoomCandidate = currentServerState.rooms[room.id] ?? null
+  const previousRoom =
+    previousRoomCandidate !== null &&
+    previousRoomCandidate.game.authoritativeState === room.game.authoritativeState
+      ? (serverState.rooms[room.id] ?? previousRoomCandidate)
+      : previousRoomCandidate
+  belotHandJournal.observeRoomTransition(previousRoom, room, 'direct_submit')
   roomRevisionRegistry.ensure(room.id)
   const nextServerState = upsertServerRoom(currentServerState, room)
   roomRevisionRegistry.bump(room.id)
@@ -6079,6 +6112,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
             isHumanManualSubmission: false,
             connectionId: null,
           })
+          belotHandJournal.observeRoomTransition(previousRoom, room, 'worker_tick')
           // Worker-tick batch commits минават покрай commitServerRoomWithSnapshot
           // (виж commitCanonicalRoom по-горе — директен upsertServerRoom), затова
           // feeder score push-ът трябва да се закачи и тук отделно, за да
@@ -22625,6 +22659,12 @@ wsServer.on('connection', (socket, request) => {
             connectionStatus: latestConnection.status,
             reason: result.message,
           })
+          belotHandJournal.recordSweepDecisionRejected(
+            room,
+            latestConnection.currentSeat,
+            message.decision,
+            result.message,
+          )
           safeSendToConnection(connection.id, {
             type: 'error',
             message: result.message,
@@ -27016,6 +27056,8 @@ function closeActiveRoomSnapshotStore(): boolean {
   }
 
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
+  // flush-ва синхронно опашката преди затваряне (PM2 restart/stop).
+  closeStore('belotHandJournal', () => belotHandJournal.close())
   closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())
   if (campaignCreditReconciliationJob !== null) {
     closeStore('campaignCreditReconciliationJob', () => campaignCreditReconciliationJob.close())

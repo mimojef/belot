@@ -44,6 +44,56 @@ type ServerRoundOutcome = {
 type OfficialRoundScoreResult = {
   roundBreakdown: ServerScoreBreakdown
   nextCarryOver: ServerCarryOverPoints
+  trace: ServerOfficialScoreTrace
+}
+
+// ─── Diagnostic trace (само за belot hand journal-а) ───────────────────────
+// Записва междинните стойности и избрания клон на правилата, докато
+// buildOfficialRoundScore смята — НЕ участва в изчислението и не променя
+// резултата. Чете се единствено от explainServerScoring по-долу.
+
+export type ServerScoringRoundingTrace = {
+  teamARaw: number
+  teamBRaw: number
+  threshold: number
+  recordedTotal: number
+  roundedTeamA: number
+  roundedTeamB: number
+  adjustment: 'none' | 'equal_raw_split' | 'decrement_higher_raw' | 'increment_lower_raw'
+  adjustedTeam: Team | null
+  teamA: number
+  teamB: number
+}
+
+export type ServerScoringRuleBranch =
+  | 'made_points_split_by_rounding'
+  | 'made_with_counter_all_points_to_bidder_team'
+  | 'inside_all_points_to_defenders'
+  | 'tie_equal_split_bidder_points_held'
+  | 'tie_rounded_split_bidder_points_held'
+  | 'unknown_outcome_no_points'
+
+export type ServerCarryOverResolutionTrace = {
+  ownerTeam: Team
+  points: number
+  awardedTo: Team
+  reason: 'owner_team_won_round' | 'owner_team_did_not_win_round'
+}
+
+export type ServerOfficialScoreTrace = {
+  ruleBranch: ServerScoringRuleBranch
+  counterMultiplier: number
+  expectedTotalWithPremiums: number
+  recordedTotalWithPremiums: number
+  declarationsRecordedByOwner: ServerRoundScore
+  beloteRecordedByOwner: ServerRoundScore
+  rounding: ServerScoringRoundingTrace | null
+  awardedBeforeMultiplier: ServerRoundScore
+  awardedAfterMultiplier: ServerRoundScore
+  carryOverIn: ServerCarryOverPoints
+  carryOverResolutions: ServerCarryOverResolutionTrace[]
+  nextCarryOver: ServerCarryOverPoints
+  nextCarryOverReason: 'no_tie_nothing_held' | 'tie_bidder_recorded_points_times_multiplier_held'
 }
 
 export type ServerScoringResolution = {
@@ -438,11 +488,28 @@ function convertRawPairToRecordedPair(
   teamBRaw: number,
   expectedTotalPoints: number,
   contract: ServerScoringContract,
+  trace?: { value: ServerScoringRoundingTrace | null },
 ): ServerRoundScore {
   const recordedTotal = getRecordedRoundTotal(expectedTotalPoints)
+  const threshold = getRoundingThreshold(contract)
 
   if (teamARaw === teamBRaw) {
     const lowerHalf = Math.floor(recordedTotal / 2)
+
+    if (trace) {
+      trace.value = {
+        teamARaw,
+        teamBRaw,
+        threshold,
+        recordedTotal,
+        roundedTeamA: lowerHalf,
+        roundedTeamB: recordedTotal - lowerHalf,
+        adjustment: 'equal_raw_split',
+        adjustedTeam: null,
+        teamA: lowerHalf,
+        teamB: recordedTotal - lowerHalf,
+      }
+    }
 
     return {
       teamA: lowerHalf,
@@ -452,19 +519,44 @@ function convertRawPairToRecordedPair(
 
   let teamARecorded = roundRawPointsWithThreshold(teamARaw, contract)
   let teamBRecorded = roundRawPointsWithThreshold(teamBRaw, contract)
+  const roundedTeamA = teamARecorded
+  const roundedTeamB = teamBRecorded
   const currentTotal = teamARecorded + teamBRecorded
+  let adjustment: ServerScoringRoundingTrace['adjustment'] = 'none'
+  let adjustedTeam: Team | null = null
 
   if (currentTotal > recordedTotal) {
+    adjustment = 'decrement_higher_raw'
     if (teamARaw > teamBRaw) {
       teamARecorded -= 1
+      adjustedTeam = 'A'
     } else {
       teamBRecorded -= 1
+      adjustedTeam = 'B'
     }
   } else if (currentTotal < recordedTotal) {
+    adjustment = 'increment_lower_raw'
     if (teamARaw < teamBRaw) {
       teamARecorded += 1
+      adjustedTeam = 'A'
     } else {
       teamBRecorded += 1
+      adjustedTeam = 'B'
+    }
+  }
+
+  if (trace) {
+    trace.value = {
+      teamARaw,
+      teamBRaw,
+      threshold,
+      recordedTotal,
+      roundedTeamA,
+      roundedTeamB,
+      adjustment,
+      adjustedTeam,
+      teamA: teamARecorded,
+      teamB: teamBRecorded,
     }
   }
 
@@ -618,9 +710,13 @@ function buildOfficialRoundScore(input: {
   let awardedTricks = createZeroRoundScore()
   let awardedDeclarations = createZeroRoundScore()
   let awardedBelote = createZeroRoundScore()
+  let ruleBranch: ServerScoringRuleBranch = 'unknown_outcome_no_points'
+  const roundingTrace: { value: ServerScoringRoundingTrace | null } = { value: null }
 
   if (input.roundOutcome.outcome === 'made') {
+    ruleBranch = 'made_points_split_by_rounding'
     if (counterMultiplier > 1 && input.roundOutcome.winningTeam !== null) {
+      ruleBranch = 'made_with_counter_all_points_to_bidder_team'
       const awardedAll = awardEverythingToTeam({
         winningTeam: input.roundOutcome.winningTeam,
         recordedTotalWithPremiums,
@@ -641,6 +737,7 @@ function buildOfficialRoundScore(input: {
           beloteScore.teamB,
         expectedTotalWithPremiums,
         input.contract,
+        roundingTrace,
       )
 
       awardedDeclarations = { ...declarationsRecordedByOwner }
@@ -653,6 +750,7 @@ function buildOfficialRoundScore(input: {
   }
 
   if (input.roundOutcome.outcome === 'inside' && input.roundOutcome.defenderTeam !== null) {
+    ruleBranch = 'inside_all_points_to_defenders'
     const awardedAll = awardEverythingToTeam({
       winningTeam: input.roundOutcome.defenderTeam,
       recordedTotalWithPremiums,
@@ -679,10 +777,12 @@ function buildOfficialRoundScore(input: {
     let bidderRecordedPoints = 0
 
     if (input.roundOutcome.defenderPoints === input.roundOutcome.bidderPoints) {
+      ruleBranch = 'tie_equal_split_bidder_points_held'
       const equalTieScore = getRecordedScoreForEqualTie(expectedTotalWithPremiums)
       defenderRecordedPoints = equalTieScore.defenderRecorded
       bidderRecordedPoints = equalTieScore.bidderRecorded
     } else {
+      ruleBranch = 'tie_rounded_split_bidder_points_held'
       const recordedPair = convertRawPairToRecordedPair(
         input.roundOutcome.defenderTeam === 'A'
           ? input.roundOutcome.defenderPoints
@@ -692,6 +792,7 @@ function buildOfficialRoundScore(input: {
           : input.roundOutcome.bidderPoints,
         expectedTotalWithPremiums,
         input.contract,
+        roundingTrace,
       )
 
       defenderRecordedPoints = getRecordedScoreForTeam(
@@ -739,8 +840,10 @@ function buildOfficialRoundScore(input: {
     addRoundScores(awardedTricks, awardedDeclarations),
     awardedBelote,
   )
+  const awardedBeforeMultiplier = totalScore
 
   totalScore = multiplyRoundScore(totalScore, counterMultiplier)
+  const awardedAfterMultiplier = totalScore
   totalScore = applyResolvedCarryOver(
     totalScore,
     'A',
@@ -754,6 +857,19 @@ function buildOfficialRoundScore(input: {
     input.roundOutcome.winningTeam,
   )
 
+  const carryOverResolutions: ServerCarryOverResolutionTrace[] = []
+  for (const ownerTeam of ['A', 'B'] as const) {
+    const points = getCarryOverForTeam(input.currentCarryOver, ownerTeam)
+    if (points <= 0) continue
+    const ownerWon = input.roundOutcome.winningTeam === ownerTeam
+    carryOverResolutions.push({
+      ownerTeam,
+      points,
+      awardedTo: ownerWon ? ownerTeam : getOpponentTeam(ownerTeam),
+      reason: ownerWon ? 'owner_team_won_round' : 'owner_team_did_not_win_round',
+    })
+  }
+
   return {
     roundBreakdown: {
       ...createZeroBreakdown(),
@@ -763,6 +879,24 @@ function buildOfficialRoundScore(input: {
       total: totalScore,
     },
     nextCarryOver,
+    trace: {
+      ruleBranch,
+      counterMultiplier,
+      expectedTotalWithPremiums,
+      recordedTotalWithPremiums,
+      declarationsRecordedByOwner,
+      beloteRecordedByOwner,
+      rounding: roundingTrace.value,
+      awardedBeforeMultiplier,
+      awardedAfterMultiplier,
+      carryOverIn: { ...input.currentCarryOver },
+      carryOverResolutions,
+      nextCarryOver,
+      nextCarryOverReason:
+        input.roundOutcome.outcome === 'tie'
+          ? 'tie_bidder_recorded_points_times_multiplier_held'
+          : 'no_tie_nothing_held',
+    },
   }
 }
 
@@ -881,5 +1015,184 @@ export function resolveServerScoring(
       outcome: roundOutcome.outcome === 'unknown' ? 'tie' : roundOutcome.outcome,
       counterMultiplier,
     },
+  }
+}
+
+// ─── Diagnostic explanation (belot hand journal) ───────────────────────────
+// Минава през ТОЧНО същия pipeline като resolveServerScoring (същите
+// функции, същия вход), но връща и междинните стойности + избрания клон на
+// правилата, за да може журналът да обясни всяко число. Не се ползва от
+// gameplay-а; резултатът му се сравнява с вече приложения state.scoring.
+
+export type ServerScoringTeamExplanation = {
+  tricksWon: number
+  // Сума на точките на картите във взетите взятки (без ×2 за Без коз).
+  cardPoints: number
+  // 10 за отбора с последната взятка (преди ×2 за Без коз), иначе 0.
+  lastTrickBonus: number
+  noTrumpsMultiplier: number
+  // 90 (180 при Без коз) само при реално капо, иначе 0.
+  capotBonus: number
+  // (cardPoints + lastTrickBonus) × noTrumpsMultiplier + capotBonus.
+  rawPoints: number
+}
+
+export type ServerScoringTrickExplanation = {
+  trickIndex: number
+  winnerSeat: Seat
+  winnerTeam: Team
+  cardPoints: number
+  isLastTrick: boolean
+}
+
+export type ServerScoringExplanation = {
+  contract: ServerScoringContract
+  trumpSuit: ServerSuit | null
+  bidderSeat: Seat
+  bidderTeam: Team
+  defenderTeam: Team
+  doubled: boolean
+  redoubled: boolean
+  tricks: ServerScoringTrickExplanation[]
+  teams: { teamA: ServerScoringTeamExplanation; teamB: ServerScoringTeamExplanation }
+  lastTrickWinnerSeat: Seat | null
+  isComplete: boolean
+  capotTeam: Team | null
+  expectedTotalPoints: number
+  actualTotalPoints: number
+  isPointTotalValid: boolean
+  declarationPoints: ServerRoundScore
+  belotePoints: ServerRoundScore
+  outcome: {
+    outcome: ServerRoundOutcome['outcome']
+    bidderPoints: number
+    defenderPoints: number
+    winningTeam: Team | null
+  }
+  official: ServerOfficialScoreTrace
+  roundBreakdown: ServerScoreBreakdown
+  isCapotRound: boolean
+  isNonCapotRound: boolean
+  matchBefore: ServerRoundScore
+  matchAfter: ServerRoundScore
+  carryOverBefore: ServerCarryOverPoints
+  carryOverAfter: ServerCarryOverPoints
+}
+
+export function explainServerScoring(
+  state: ServerAuthoritativeGameState,
+): ServerScoringExplanation | null {
+  const winningBid = state.bidding.winningBid
+  const playing = state.playing
+
+  if (winningBid === null || playing === null) {
+    return null
+  }
+
+  const contract = winningBid.contract
+  const trumpSuit = winningBid.trumpSuit
+  const completedTricks = playing.completedTricks
+  const baseRoundScore = calculateBaseRoundScore({
+    tricks: completedTricks,
+    contract,
+    trumpSuit,
+  })
+  const { declarationPoints, belotePoints } = scoreServerDeclarations(
+    state.declarations,
+  )
+  const roundOutcome = calculateRoundOutcome({
+    baseRoundScore,
+    bidderSeat: winningBid.seat,
+    declarationsTeamA: declarationPoints.teamA,
+    declarationsTeamB: declarationPoints.teamB,
+    beloteTeamA: belotePoints.teamA,
+    beloteTeamB: belotePoints.teamB,
+  })
+  const counterMultiplier = getServerCounterMultiplier(winningBid)
+  const officialRoundScore = buildOfficialRoundScore({
+    baseRoundScore,
+    roundOutcome,
+    currentCarryOver: state.score.carryOver,
+    declarationsScore: declarationPoints,
+    beloteScore: belotePoints,
+    counterMultiplier,
+    contract,
+  })
+
+  const noTrumpsMultiplier = contract === 'no-trumps' ? 2 : 1
+  const capotTeam = getCapotWinnerTeam(
+    baseRoundScore.isComplete,
+    baseRoundScore.teamA.tricksWon,
+    baseRoundScore.teamB.tricksWon,
+  )
+  const lastTrickIndex = completedTricks.length - 1
+  const tricks: ServerScoringTrickExplanation[] = completedTricks.map((trick, index) => ({
+    trickIndex: trick.trickIndex,
+    winnerSeat: trick.winnerSeat,
+    winnerTeam: getTeamBySeat(trick.winnerSeat),
+    cardPoints: trick.plays.reduce(
+      (sum, play) => sum + getServerCardPoints(play.card.suit, play.card.rank, contract, trumpSuit),
+      0,
+    ),
+    isLastTrick: index === lastTrickIndex,
+  }))
+
+  function explainTeam(team: Team): ServerScoringTeamExplanation {
+    const teamTricks = tricks.filter((trick) => trick.winnerTeam === team)
+    const cardPoints = teamTricks.reduce((sum, trick) => sum + trick.cardPoints, 0)
+    const lastTrickBonus =
+      baseRoundScore.lastTrickWinner !== null && getTeamBySeat(baseRoundScore.lastTrickWinner) === team
+        ? 10
+        : 0
+    const capotBonus = capotTeam === team ? getCapotBonusPoints(contract) : 0
+    return {
+      tricksWon: teamTricks.length,
+      cardPoints,
+      lastTrickBonus,
+      noTrumpsMultiplier,
+      capotBonus,
+      rawPoints: (cardPoints + lastTrickBonus) * noTrumpsMultiplier + capotBonus,
+    }
+  }
+
+  const bidderTeam = getTeamBySeat(winningBid.seat)
+
+  return {
+    contract,
+    trumpSuit,
+    bidderSeat: winningBid.seat,
+    bidderTeam,
+    defenderTeam: getOpponentTeam(bidderTeam),
+    doubled: winningBid.doubled,
+    redoubled: winningBid.redoubled,
+    tricks,
+    teams: { teamA: explainTeam('A'), teamB: explainTeam('B') },
+    lastTrickWinnerSeat: baseRoundScore.lastTrickWinner,
+    isComplete: baseRoundScore.isComplete,
+    capotTeam,
+    expectedTotalPoints: baseRoundScore.expectedTotalPoints,
+    actualTotalPoints: baseRoundScore.actualTotalPoints,
+    isPointTotalValid: baseRoundScore.isPointTotalValid,
+    declarationPoints,
+    belotePoints,
+    outcome: {
+      outcome: roundOutcome.outcome,
+      bidderPoints: roundOutcome.bidderPoints,
+      defenderPoints: roundOutcome.defenderPoints,
+      winningTeam: roundOutcome.winningTeam,
+    },
+    official: officialRoundScore.trace,
+    roundBreakdown: officialRoundScore.roundBreakdown,
+    isCapotRound:
+      baseRoundScore.isComplete &&
+      (baseRoundScore.teamA.tricksWon === 8 || baseRoundScore.teamB.tricksWon === 8),
+    isNonCapotRound:
+      baseRoundScore.isComplete &&
+      baseRoundScore.teamA.tricksWon > 0 &&
+      baseRoundScore.teamB.tricksWon > 0,
+    matchBefore: { ...state.score.match },
+    matchAfter: addRoundScores(state.score.match, officialRoundScore.roundBreakdown.total),
+    carryOverBefore: { ...state.score.carryOver },
+    carryOverAfter: officialRoundScore.nextCarryOver,
   }
 }
