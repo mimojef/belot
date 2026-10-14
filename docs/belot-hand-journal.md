@@ -2,25 +2,36 @@
 
 Постоянен, структуриран сървърен журнал, от който може да се възстанови и провери всяко раздаване в Белот, включително „Долу картите“.
 
-Кодът е в `server/src/diagnostics/belotHandJournal/`. Тестовете са в `server/scripts/checkBelotHandJournal.ts` (`npm run check:belot-hand-journal`).
+- Код: `server/src/diagnostics/belotHandJournal/`
+- Тестове:
+  - `npm run check:belot-hand-journal` — съдържание и проверки
+  - `npm run check:belot-hand-journal-archive` — архивиране, срокове, лимит на диска
+- Сравнение на компресията: `npm run bench:belot-hand-journal-compression -- --matches=150`
 
 ## Къде се пази
 
 | Какво | Път (спрямо `server/`) |
 |---|---|
-| База (SQLite, WAL) | `database/diagnostics/belot-hand-journal.sqlite` |
-| Архиви (gzip JSONL, един файл на UTC ден) | `database/diagnostics/belot-hand-journal-archive/belot-hand-journal-YYYY-MM-DD-<ts>.jsonl.gz` |
+| Активна база (SQLite, WAL) | `database/diagnostics/belot-hand-journal.sqlite` (+ `-wal`, `-shm`) |
+| Архиви (ZSTD JSONL, една UTC дневна партида на файл) | `database/diagnostics/belot-hand-journal-archive/belot-hand-journal-YYYY-MM-DD-id<min>-<max>.jsonl.zst` |
+| Lock на поддръжката | `database/diagnostics/belot-hand-journal-maintenance.lock` |
 
 - Базата е отделна от основната `database/data/belot-v2.sqlite`, затова не влиза в бекъпите и не се конкурира за lock с gameplay таблиците.
 - Директорията е в `.gitignore`.
-- Не е нужна миграция: схемата се създава автоматично при първия старт.
+- Не е нужна миграция: схемата се създава автоматично при първия старт (`auto_vacuum=INCREMENTAL`, WAL, `journal_size_limit` 64 MB).
 - Схемата има версия: колоната `schema_version` на всеки ред и `belot_hand_journal_meta.schema_version` (текущо `1`).
+
+Видове файлове в архивната директория:
+- `*.jsonl.zst` — нормален архив.
+- `*.jsonl.gz` — резервен архив, ако няма ZSTD, или стар архив (`belot-hand-journal-YYYY-MM-DD-<ts>.jsonl.gz`).
+- `*.tmp` — незавършен архив; изтрива се автоматично.
+- `*.corrupt` — повреден архив в карантина.
 
 ## Какво се записва
 
 | Събитие | Кога | Съдържание |
 |---|---|---|
-| `hand_started` | при първото раздаване (deal-first-3) | мач, раздаване, 4-мата играчи (place, team, profile_id, име, човек/бот), раздавач/цепач/позиция на цепене, **всички 32 карти по места**, резултат и висящи точки преди |
+| `hand_started` | при първото раздаване (deal-first-3) | мач, раздаване, 4-мата играчи (място, отбор, profile_id, име, човек/бот), раздавач/цепач/позиция на цепене, **всички 32 карти по места**, резултат и висящи точки преди |
 | `bidding_completed` | край на наддаването | всички обяви по ред, договор, коз, изпълнител, контра/реконтра, ръцете при наддаването |
 | `hand_redeal` | всички пас | причина, непроменен резултат |
 | `trick_completed` | всяка взятка | водещ, 4-те карти по ред с източник (`human_manual`, `human_timeout_auto`, `bot_original`, `bot_takeover`), победител, точки, анонси в тази взятка, натрупано до момента |
@@ -32,6 +43,9 @@
 | `hand_abandoned` | раздаване без точкуване (нова игра/нулиране) | фаза, изиграни взятки, оставащи ръце |
 | `match_ended` | край на мача | победител, краен резултат |
 | `anomaly` | при неуспешна проверка | тип, детайли, данни за разследване |
+| `journal_storage` | състояние на хранилището (roomId `__journal__`) | архивиране, предупреждения за лимита/диска, преждевременни изтривания, пропуснати събития |
+
+Архивирането не съкращава данните. Архивният ред е точно събитието от базата (същия JSON). Тест [3][4] доказва, че всички събития и текстовият отчет са идентични преди и след архивиране.
 
 ### Разбивка на точкуването (`hand_scored.payload.explanation`)
 
@@ -75,62 +89,175 @@
 
 Пълната гаранция за „Долу картите“ се изчислява от engine-а при офертата и отново при приемането. Журналът не я повтаря в реално време, защото търсенето отнема до десетки ms. Независимо офлайн преизчисляване от записаните ръце се пуска с `--verify-sweeps`.
 
-## Извличане от VPS
+## Политика за съхранение: 7 + 23 = 30 дни
+
+| Параметър | Стойност | Env |
+|---|---|---|
+| Активни записи в SQLite | 7 дни | `BELOT_HAND_JOURNAL_ACTIVE_DAYS` |
+| Максимална възраст (общо, не 7 + 30) | 30 дни | `BELOT_HAND_JOURNAL_MAX_AGE_DAYS` |
+| Формат на архивите | `.zst` (ZSTD) | — |
+| ZSTD ниво | 6 (1–19) | `BELOT_HAND_JOURNAL_ZSTD_LEVEL` |
+| Общ дисков лимит | 1536 MB | `BELOT_HAND_JOURNAL_MAX_TOTAL_MB` |
+| Предупреждение | 80% от лимита | `BELOT_HAND_JOURNAL_WARN_PERCENT` |
+| Критично малко свободно място на диска | 1024 MB | `BELOT_HAND_JOURNAL_MIN_FREE_DISK_MB` |
+| Изключване на журнала | — | `BELOT_HAND_JOURNAL_ENABLED=0` |
+| Друга директория | `server/database/diagnostics` | `BELOT_HAND_JOURNAL_DIR` |
+
+Партидите са UTC дни. Поддръжката минава 2 минути след старт и после всеки час, а размерът се проверява всяка минута:
+
+1. **Ден 0–7:** записите са в SQLite. Денят се архивира, когато целият ден е по-стар от 7 дни, т.е. архивира се между 7-ия и 8-ия ден.
+2. **Ден 7–30:** записите са в дневен `.zst` архив и са изтрити от SQLite.
+3. **След 30 дни:** архивът на деня се изтрива, когато целият ден стане по-стар от 30 дни. Така всеки запис живее най-много 30 дни плюс остатъка от своето UTC денонощие (< 24 ч.). Нищо не се задържа по-дълго заради по-нови събития, защото всеки архив съдържа само един ден. Ако архивирането е било невъзможно, редовете в SQLite също се изтриват на 30-ия ден, с предупреждение `expired_without_archive`.
+
+### Безопасно архивиране
+
+1. Записите на деня се четат на страници от 500 реда; event loop-ът остава свободен.
+2. Компресират се поточно във временен `*.jsonl.zst.tmp` със ZSTD content checksum и файлът се `fsync`-ва.
+3. **Проверка:** временният файл се декомпресира изцяло; SHA-256 и броят редове трябва да съвпадат с оригинала. При неуспех временният файл се трие, редовете остават в SQLite и се записва `archive_verification_failed`.
+4. Атомарно `rename` към окончателното име, после `fsync` на директорията.
+5. Едва тогава от SQLite се изтриват точно архивираните id-та.
+
+**Прекъсване или рестарт на всяка стъпка е безопасно:**
+- Заварен `.tmp` се изтрива (`interrupted_archive_cleaned`). Редовете са още в SQLite и ще се архивират отново.
+- Срив след `rename`, но преди изтриването: при следващия старт архивът се чете изцяло и от SQLite се изтриват само id-тата, които реално са в него (`interrupted_archive_reconciled`). Междувременно CLI-то не показва дубликати, защото обединява по уникалното id.
+- Заварен lock от убит процес (мъртъв pid или по-стар от 3 ч.) се поема (`stale_lock_taken_over`).
+- Две поддръжки наведнъж са невъзможни: lock в процеса плюс lock файл с `O_EXCL` между процесите.
+
+### ZSTD — backend-и и поведение при липса
+
+Новите архиви се пишат с първия наличен backend:
+
+1. **`node-zstd`** — вграденият zlib ZSTD в Node.js (Node ≥ 22.15 / ≥ 23.8; локално Node 24.13.1, libzstd 1.5.7). Не изисква нови npm зависимости. Компресията върви в libuv threadpool и не блокира игровия event loop.
+2. **`zstd-cli`** — системният `zstd`, същият инструмент като бекъпите на Pika.bg (`apt install zstd`). Ползва се само ако Node няма вграден ZSTD.
+3. **`node-gzip`** — ако няма нито едното: архивът става `.jsonl.gz`, записва се предупреждение `compression_fallback_gzip`, а данните остават пълни и четими.
+
+Архивите са стандартни ZSTD frame-ове (magic `28 b5 2f fd`) и се четат и с `zstd -dc` на сървъра. При неуспешна компресия няма загуба: редовете остават в SQLite до следващия опит или до 30-ия ден.
+
+## Лимит 1.5 GB и диск
+
+В общия размер влизат:
+- активната база;
+- WAL и SHM файловете;
+- всички `.zst` и `.gz` архиви;
+- `.tmp` и `.corrupt` файловете;
+- lock файлът.
+
+| Състояние | Действие |
+|---|---|
+| ≥ 80% | Предупреждение `storage_usage_warning` (в базата и в PM2 лога, най-често веднъж на 6 ч.) |
+| ≥ 95% | Почистване до 90%, по ред на безопасност за доказателствата (виж след таблицата) |
+| ≥ 100% | Записът на журнала спира (`storage_limit_reached`). Пропуснатите събития се броят, а при възобновяване се записва `events_dropped` с броя им. **Игрите продължават нормално.** |
+| Свободно място на диска < 1024 MB | Записът и архивирането спират (`disk_space_critical` в PM2 лога). Журналът не пише нищо, включително временни файлове, докато мястото не се освободи. После се записва `events_dropped`. |
+
+Ред на почистване при ≥ 95%:
+1. Ранно архивиране на най-старите активни дни, без днешния (`early_archive_due_to_size`). Това е без загуба — само компресира около 20×.
+2. Изтриване на най-старите архиви (`premature_archive_deletion` с име, ден и размер).
+3. Изтриване на най-старите активни дни без архив, без днешния (`premature_active_deletion`).
+
+- Между измерванията размерът се оценява по записаните байтове, така че паузата настъпва веднага при достигане на лимита, без да се чака следващата минута.
+- Физическото освобождаване на място става с `PRAGMA incremental_vacuum` на порции от около 2 MB с паузи между тях, без блокиращ `VACUUM`. WAL се checkpoint-ва в `PASSIVE` режим, който никога не чака, а `journal_size_limit` го ограничава до 64 MB.
+
+## Сравнение GZIP / ZSTD (измерено)
+
+Резултатите са от `npm run bench:belot-hand-journal-compression -- --matches=150`.
+- Среда: Windows dev машина, Node 24.13.1, libzstd 1.5.7.
+- Данни: 150 мача с реалния engine — 2 728 раздавания, 22 454 събития, **32.29 MB** некомпресирани.
+- Времената са медиана от 5 изпълнения, еднонишково.
+
+| Формат | Размер | Съотношение | Компресия | Декомпресия | Идентични данни |
+|---|---:|---:|---:|---:|---|
+| GZIP 6 (досегашният) | 2.11 MB | 15.3× | 249 ms (130 MB/s) | 50 ms | да (SHA-256) |
+| GZIP 9 | 1.99 MB | 16.2× | 344 ms | 47 ms | да |
+| ZSTD 3 | 2.01 MB | 16.1× | 51 ms (630 MB/s) | 42 ms | да |
+| **ZSTD 6** | **1.56 MB** | **20.7×** | 178 ms (181 MB/s) | 38 ms | да |
+| ZSTD 9 | 1.35 MB | 23.8× | 262 ms (123 MB/s) | 37 ms | да |
+| ZSTD 12 | 1.19 MB | 27.0× | 532 ms | 37 ms | да |
+| ZSTD 19 | 0.92 MB | 35.2× | 17 379 ms | 46 ms | да |
+
+Защо ниво 6:
+- Спрямо досегашния GZIP е с 26% по-малък и компресира 1.4× по-бързо.
+- Ниво 9 печели още около 13%, но иска около 1.5× повече CPU. Архивите са малка част от бюджета — основно мястото е в 7-дневната активна база.
+- Нивото се променя с `BELOT_HAND_JOURNAL_ZSTD_LEVEL`.
+
+Ориентировъчно: около 20 KB некомпресирано на изиграно раздаване, около 1 KB в `.zst`.
+
+## Извличане (CLI)
 
 Пътят по-долу е пример (`DEPLOY_ROOT` по подразбиране). Използвай реалния път на сървъра.
 
 ```bash
 cd /var/www/belot-v2/server
 
-# Всички раздавания в една стая (четим отчет)
 npm run -s diagnostics:belot-hands:prod -- --room=<roomId>
-
-# Конкретен мач / раздаване
 npm run -s diagnostics:belot-hands:prod -- --match='<roomId>@<startedAt>'
 npm run -s diagnostics:belot-hands:prod -- --hand=h_<id>
-
-# Всички раздавания на профил за период
-npm run -s diagnostics:belot-hands:prod -- --profile=<profileId> --since=2026-10-01 --until=2026-10-15
-
-# Само аномалиите за последните дни
+npm run -s diagnostics:belot-hands:prod -- --profile=<profileId> --since=2026-10-01
 npm run -s diagnostics:belot-hands:prod -- --anomalies --since=2026-10-10
-
-# Пълни данни (JSON) за прикачване/анализ + офлайн проверка на „Долу картите“
-npm run -s diagnostics:belot-hands:prod -- --room=<roomId> --format=json --verify-sweeps > room.json
-
-# Включи и архивите (по-стари от 30 дни)
-npm run -s diagnostics:belot-hands:prod -- --profile=<profileId> --archives --since=2026-06-01
+npm run -s diagnostics:belot-hands:prod -- --room=<roomId> --format=json --verify-sweeps --archives > room.json
+npm run -s diagnostics:belot-hands:prod -- --status
 ```
 
-- `roomId` и `profileId` се виждат в админ панела и в PM2 логовете (`[gameplay-audit]` редовете съдържат `roomId`).
+- Архивите (`.zst` и стари `.gz`) се търсят по подразбиране само за дните в `[--since, --until]`. `--archives` се приема за съвместимост, `--no-archives` ограничава търсенето до активната база.
+- Събитията от базата и архивите се обединяват по уникално id, така че няма дубликати.
+- Обобщението (брой от база/архиви, пропуснати дубликати) и `--verify-sweeps` отиват в stderr, затова `--format=json > file.json` дава чист JSON.
 - CLI-то отваря базата само за четене и може да се пуска, докато сървърът работи.
-- Директно с SQLite: `sqlite3 database/diagnostics/belot-hand-journal.sqlite "SELECT occurred_at_ms, event_type, payload_json FROM belot_hand_journal_events WHERE room_id='<roomId>' ORDER BY id"`.
-- Архив: `zcat database/diagnostics/belot-hand-journal-archive/belot-hand-journal-2026-09-10-*.jsonl.gz | grep '<roomId>'`.
 
-## Задържане, размер, архивиране
+## Команди за VPS (само четене, безопасни)
 
-Поддръжката тръгва 2 минути след старта и след това на всеки 6 часа, извън gameplay пътя. Настройва се с env променливи:
+```bash
+# ZSTD наличност и версия
+node -v
+node -e "const z=require('zlib');console.log('node zstd:', typeof z.createZstdCompress==='function', process.versions.zstd||'-')"
+command -v zstd && zstd --version
 
-| Env | По подразбиране | Значение |
-|---|---|---|
-| `BELOT_HAND_JOURNAL_ENABLED` | вкл. (`0` изключва) | включване на журнала |
-| `BELOT_HAND_JOURNAL_RETENTION_DAYS` | 30 | след толкова дни редовете се архивират и трият от базата |
-| `BELOT_HAND_JOURNAL_MAX_DB_MB` | 2048 | при надвишаване най-старите дни (без днешния) се архивират по-рано |
-| `BELOT_HAND_JOURNAL_ARCHIVE_RETENTION_DAYS` | 180 | архивите се трият след толкова дни |
-| `BELOT_HAND_JOURNAL_MAX_ARCHIVE_MB` | 1024 | общ лимит за архивите (най-старите се трият първи) |
-| `BELOT_HAND_JOURNAL_DIR` | `server/database/diagnostics` | алтернативна директория |
+# Свободно място и директорията
+df -h /var/www/belot-v2/server/database
+ls -la /var/www/belot-v2/server/database/diagnostics/
+du -sh /var/www/belot-v2/server/database/diagnostics/ /var/www/belot-v2/server/database/diagnostics/belot-hand-journal-archive/
 
-Ориентировъчен обем: около 14 KB на изиграно раздаване в базата (около 1.5–2 KB компресирано в архив). Например 3 600 раздавания на ден са около 50 MB на ден и около 1.5 GB за 30 дни.
+# Състояние: размер (база+WAL+SHM+архиви), активни дни, архиви, ZSTD backend, последни събития на хранилището
+cd /var/www/belot-v2/server && npm run -s diagnostics:belot-hands:prod -- --status
+
+# Работи ли архивирането след deploy (политика и предупреждения в лога)
+pm2 logs --lines 500 --nostream | grep -E 'belot-hand-journal'
+# Първите архиви се появяват, когато най-старият ден в базата стане на 7+ дни.
+
+# Целост на архивите (същата проверка като за бекъпите)
+for f in /var/www/belot-v2/server/database/diagnostics/belot-hand-journal-archive/*.jsonl.zst; do zstd -tq "$f" && echo "OK $f" || echo "BAD $f"; done
+
+# Конкретно раздаване/стая директно от архив (без Node)
+zstd -dc /var/www/belot-v2/server/database/diagnostics/belot-hand-journal-archive/belot-hand-journal-2026-10-07-id*.jsonl.zst | grep '"handId":"h_<id>"'
+zstd -dc .../belot-hand-journal-2026-10-07-id*.jsonl.zst | grep '"roomId":"<roomId>"' > room-2026-10-07.jsonl
+```
+
+## Поведение при грешка
+
+| Ситуация | Резултат |
+|---|---|
+| Грешка при запис в SQLite (напр. пълен диск) | Един повторен опит, после събитията се изхвърлят и се броят (`writeFailures`/`dropped`). Gameplay не се засяга. |
+| Неуспешна компресия или проверка | Временният файл се трие, редовете остават в SQLite, записва се предупреждение. Повторен опит при следващата поддръжка. |
+| Повреден финален архив | Преименува се на `*.corrupt` и не се чете. Ако редовете са още в SQLite, денят се архивира отново. |
+| Липсва ZSTD | `.gz` архиви + `compression_fallback_gzip`. CLI-то показва ясна грешка, ако трябва да чете `.zst` без декомпресор. |
+| Архивната директория е недостъпна | Поддръжката завършва с `failed`/`archive_failed`, редовете остават, lock-ът се освобождава. |
+| Рестарт по време на архивиране | Виж „Безопасно архивиране“. |
+
+### Процедура при повреден архив
+
+1. Намери го: `--status` показва `corrupt`; `zstd -tq` показва `BAD`.
+2. Ако редовете на този ден са още в SQLite, журналът сам ще го архивира отново. Провери с `--status`, че има нов `archive` за същия ден.
+3. Ако денят вече е изтрит от SQLite:
+   - Опитай частично възстановяване: `zstd -dc --no-check <file> 2>/dev/null > partial.jsonl` (редовете преди повредата са валиден JSONL).
+   - Или използвай сървърния бекъп на `database/diagnostics/`, ако директорията се архивира от външен механизъм. Основните бекъпи на Pika.bg НЕ я включват.
+4. Изтрий `.corrupt` файла ръчно след анализа. Иначе той се трие на 30-ия ден или при недостиг на място.
 
 ## Надеждност и производителност
 
-- Изпълнява се в главната нишка при всеки commit на authoritative state: директни действия на играчите (`commitServerRoomReplacement`) и worker tick-ове (`applyAcceptedGameWorkerCandidate.onApplied`).
+- Журналът се изпълнява в главната нишка при всеки commit на authoritative state: директни действия на играчите и worker tick-ове.
 - Само чете state-а (diff prev → next) и слага събитията в опашка.
-- Записът е една SQLite транзакция на event-loop оборот (`setImmediate`). WAL + `synchronous=NORMAL`.
-- При PM2 restart/stop опашката се записва синхронно преди затваряне. При crash на процеса се губят най-много събитията от последния оборот. Активното раздаване така или иначе е в `active_room_snapshots`, а след рестарт журналът продължава. Ако раздаване няма `hand_started`, то се реконструира (`reconstructedMidHand: true`).
-- Ако минат няколко стъпки в един commit (catch-up след дълъг престой), точкуването се реконструира от последното видяно пълно състояние (`observedVia: 'catch_up'`) и се проверява спрямо приложения резултат.
-- Измерено: средно около 30–45 µs на преход, точкуване около 0.2 ms, без пикове над около 2 ms.
-- Грешка в журнала никога не стига до gameplay: всичко е в try/catch и се логва `[belot-hand-journal] ... (gameplay unaffected)`.
+- Записът е една SQLite транзакция на event-loop оборот. WAL + `synchronous=NORMAL`.
+- При PM2 restart/stop опашката се записва синхронно преди затваряне. Ако раздаване няма `hand_started`, то се реконструира (`reconstructedMidHand: true`).
+- Измерено: средно около 30–45 µs на преход, точкуване около 0.2 ms.
+- Архивирането и почистването са асинхронни и извън gameplay пътя.
 
 ## Поверителност
 

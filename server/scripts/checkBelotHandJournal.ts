@@ -40,11 +40,11 @@ import { syncRoomWithAuthoritativeState } from '../src/game/syncRoomWithAuthorit
 import { createBelotHandJournal, type BelotHandJournal } from '../src/diagnostics/belotHandJournal/createBelotHandJournal.js'
 import {
   createBelotHandJournalStore,
-  getBelotHandJournalArchiveDirectory,
-  readBelotHandJournalArchive,
   type BelotHandJournalStore,
   type BelotHandJournalStoredEvent,
 } from '../src/diagnostics/belotHandJournal/belotHandJournalStore.js'
+import { loadBelotHandJournalEvents } from '../src/diagnostics/belotHandJournal/loadBelotHandJournalEvents.js'
+import { runBelotHandJournalMaintenance, type BelotHandJournalStorageConfig } from '../src/diagnostics/belotHandJournal/runBelotHandJournalMaintenance.js'
 import { formatBelotHandJournalReport } from '../src/diagnostics/belotHandJournal/formatBelotHandJournalReport.js'
 import { verifyBelotSweepEventsOffline } from '../src/diagnostics/belotHandJournal/verifyBelotSweepEventsOffline.js'
 
@@ -74,6 +74,16 @@ const realDateNow = Date.now
 Date.now = () => fakeNow
 
 const ABL_CONFIG: ServerAntiBadLuckConfig = { threshold: 5, resetGeneration: 0 } as ServerAntiBadLuckConfig
+const TEST_STORAGE_CONFIG: BelotHandJournalStorageConfig = {
+  activeDays: 7,
+  maxAgeDays: 30,
+  zstdLevel: 6,
+  maxTotalBytes: 1536 * 1024 * 1024,
+  warnRatio: 0.8,
+  startCleanupRatio: 0.95,
+  targetRatio: 0.9,
+  minFreeDiskBytes: 0,
+}
 const PRINT_SAMPLES = process.env.BELOT_JOURNAL_PRINT_SAMPLES === '1'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -705,46 +715,33 @@ await check('[9] цялост: дублирана карта в раздаван
   second.journal.close()
 })
 
-// ─── [10] maintenance ────────────────────────────────────────────────────────
-await check('[10] поддръжка: >30 дни → gzip архив + изтриване; лимит по размер; стари архиви се трият', async () => {
+// ─── [10] maintenance (подробно: checkBelotHandJournalArchive.ts) ───────────
+await check('[10] поддръжка: >7 дни → .zst архив, >30 дни → изтриване; четене от архив', async () => {
   const { dir, store, journal } = await createTempJournal()
-  const { room, plays } = scriptedRoom({ specs: NT47_SPECS, firstLeader: 'bottom' })
   const savedNow = fakeNow
-  fakeNow = savedNow - 40 * 24 * 3600 * 1000
-  playScript(journal, room, plays)
-  journal.flushSync()
-  const oldCount = allEvents(store).length
-  fakeNow = savedNow - 2 * 24 * 3600 * 1000
-  const second = scriptedRoom({ specs: TIE_SPECS, firstLeader: 'bottom' })
-  playScript(journal, second.room, second.plays)
-  journal.flushSync()
+  const DAY = 24 * 3600 * 1000
+  const runAt = (offsetDays: number, specs: TrickSpec[]) => {
+    fakeNow = savedNow - offsetDays * DAY
+    const scripted = scriptedRoom({ specs, firstLeader: 'bottom' })
+    playScript(journal, scripted.room, scripted.plays)
+    journal.flushSync()
+    return scripted.room.id
+  }
+  runAt(40, NT47_SPECS)
+  const expiredCount = allEvents(store).length
+  runAt(10, TIE_SPECS)
+  const archivedCount = allEvents(store).length - expiredCount
+  runAt(2, NT47_SPECS)
   fakeNow = savedNow
   const totalBefore = allEvents(store).length
-
-  // Стар архив (> archiveRetentionDays) за изтриване.
-  const archiveDir = getBelotHandJournalArchiveDirectory(dir)
-  await mkdir(archiveDir, { recursive: true })
-  await writeFile(join(archiveDir, 'belot-hand-journal-2025-01-01-1.jsonl.gz'), 'x')
-
-  const report = await store.runMaintenance(
-    { retentionDays: 30, maxDbBytes: 1024 * 1024 * 1024, archiveRetentionDays: 180, maxArchiveBytes: 1024 * 1024 * 1024 },
-    fakeNow,
-  )
-  assert(report.archivedRows === oldCount && report.deletedRows === oldCount, `archived ${report.archivedRows} of ${oldCount}`)
-  assert(allEvents(store).length === totalBefore - oldCount, 'old rows deleted, recent kept')
-  assert(report.deletedArchiveFiles.includes('belot-hand-journal-2025-01-01-1.jsonl.gz'), 'old archive deleted')
-  const archives = (await readdir(archiveDir)).filter((name) => name.endsWith('.jsonl.gz'))
-  assert(archives.length === 1, `archives ${archives.join(',')}`)
-  const archived = await readBelotHandJournalArchive(join(archiveDir, archives[0]!))
-  assert(archived.length === oldCount && archived.some((e) => e.eventType === 'hand_scored'), 'archive readable')
-
-  // Лимит по размер: всичко освен днешния ден се архивира.
-  const sizeReport = await store.runMaintenance(
-    { retentionDays: 30, maxDbBytes: 1, archiveRetentionDays: 180, maxArchiveBytes: 1024 * 1024 * 1024 },
-    fakeNow,
-  )
-  assert(sizeReport.sizeLimitExceeded && sizeReport.archivedRows === totalBefore - oldCount, `size archived ${sizeReport.archivedRows}`)
-  assert(allEvents(store).length === 0, 'db emptied of past days')
+  const report = await runBelotHandJournalMaintenance(store, TEST_STORAGE_CONFIG, fakeNow)
+  assert(report.status === 'completed', report.status)
+  assert(report.expiredActiveRows === expiredCount, `expired ${report.expiredActiveRows} of ${expiredCount}`)
+  assert(report.archived.length === 1 && report.archived[0]!.rows === archivedCount, JSON.stringify(report.warnings))
+  assert(report.archived[0]!.file.endsWith('.jsonl.zst') && report.archived[0]!.backend === 'node-zstd', report.archived[0]!.file)
+  assert(allEvents(store).length === totalBefore - expiredCount - archivedCount, 'only recent rows stay active')
+  const loaded = await loadBelotHandJournalEvents({ directory: dir, query: { sinceMs: 0 } })
+  assert(loaded.fromArchives === archivedCount && loaded.duplicatesSkipped === 0, JSON.stringify({ ...loaded, events: loaded.events.length }))
   journal.close()
 })
 

@@ -26,6 +26,9 @@ export type BelotHandJournalEventType =
   | 'hand_abandoned'
   | 'match_ended'
   | 'anomaly'
+  // Състояние на самото хранилище (архивиране, лимит, пропуснати записи) —
+  // roomId '__journal__'; предупрежденията са със severity 'anomaly'.
+  | 'journal_storage'
 
 export type BelotHandJournalSeverity = 'info' | 'anomaly'
 

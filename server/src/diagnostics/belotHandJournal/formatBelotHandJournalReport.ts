@@ -140,6 +140,9 @@ function formatEvent(event: BelotHandJournalEvent, lines: string[]): void {
     case 'match_ended':
       lines.push(`  [${time}] КРАЙ НА МАЧА: победител ${p.winnerTeam}, резултат ${pair(p.finalScore)} (до ${p.targetScore})`)
       break
+    case 'journal_storage':
+      lines.push(`  [${time}] ${event.severity === 'anomaly' ? '!!! ' : ''}ХРАНИЛИЩЕ ${p.kind}: ${p.detail}`)
+      break
     case 'anomaly':
       lines.push(`  [${time}] !!! АНОМАЛИЯ ${p.anomalyType}: ${p.check?.name ?? ''} — ${p.check?.detail ?? ''}`)
       break

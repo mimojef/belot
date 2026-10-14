@@ -5,6 +5,13 @@
 // оборот (setImmediate) в една транзакция — без отделен синхронен запис за
 // всяко действие. Нищо тук не хвърля към gameplay кода и нищо не променя
 // state-а: при грешка се пише console.error и (при възможност) anomaly ред.
+//
+// Пазач на хранилището: на всеки 60 s мери всички файлове на журнала и
+// свободното място на диска (между измерванията — оценка по записаните
+// байтове). При достигнат лимит (1.5 GB) или критично малко място записът
+// се спира (игрите продължават), пропуснатите събития се броят и при
+// възобновяване се записва предупреждение. Поддръжката (архивиране/срокове)
+// е на всеки час — виж runBelotHandJournalMaintenance.ts.
 
 import type { Seat, ServerRoom } from '../../core/serverTypes.js'
 import {
@@ -21,14 +28,28 @@ import type {
   BelotHandJournalOrigin,
   BelotHandJournalPlaySource,
 } from './belotHandJournalTypes.js'
-import type {
-  BelotHandJournalMaintenanceReport,
-  BelotHandJournalRetentionConfig,
-  BelotHandJournalStore,
-} from './belotHandJournalStore.js'
+import type { BelotHandJournalStore } from './belotHandJournalStore.js'
+import { selectBelotJournalCompressionBackend } from './belotHandJournalCompression.js'
+import {
+  createBelotHandJournalStorageEvent,
+  defaultBelotHandJournalStatfs,
+  measureBelotHandJournalStorage,
+  resolveBelotHandJournalStorageConfig,
+  runBelotHandJournalMaintenance,
+  type BelotHandJournalMaintenanceDeps,
+  type BelotHandJournalMaintenanceReport,
+  type BelotHandJournalStatfs,
+  type BelotHandJournalStorageConfig,
+  type BelotHandJournalStorageWarningKind,
+} from './runBelotHandJournalMaintenance.js'
 
 const DEFAULT_MAX_QUEUE = 20000
-const MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000
+const MAINTENANCE_INTERVAL_MS = 60 * 60 * 1000
+const STORAGE_CHECK_INTERVAL_MS = 60 * 1000
+// Повторно предупреждение за същото състояние най-често веднъж на 6 часа.
+const WARNING_REPEAT_MS = 6 * 60 * 60 * 1000
+// SQLite индекси/страници над чистия payload — консервативна оценка.
+const ESTIMATED_DB_OVERHEAD_FACTOR = 2
 const MAINTENANCE_FIRST_RUN_DELAY_MS = 2 * 60 * 1000
 // Горни граници за паметта (стаи, видени от старта на процеса). При
 // изтриване на най-старите записи: източникът на картите става 'unknown', а
@@ -52,6 +73,10 @@ export type BelotHandJournalStats = {
   writeFailures: number
   anomalies: number
   lastError: string | null
+  writesPaused: 'size_limit' | 'disk_critical' | null
+  droppedWhilePaused: number
+  lastUsageBytes: number | null
+  lastFreeDiskBytes: number | null
 }
 
 export type BelotHandJournal = {
@@ -60,24 +85,9 @@ export type BelotHandJournal = {
   flushSync: () => void
   startMaintenance: () => void
   runMaintenanceNow: () => Promise<BelotHandJournalMaintenanceReport | null>
+  checkStorageNow: () => Promise<void>
   getStats: () => BelotHandJournalStats
   close: () => void
-}
-
-function readPositiveNumberEnv(name: string, fallback: number): number {
-  const raw = process.env[name]
-  if (!raw) return fallback
-  const value = Number(raw)
-  return Number.isFinite(value) && value > 0 ? value : fallback
-}
-
-export function resolveBelotHandJournalRetentionConfig(): BelotHandJournalRetentionConfig {
-  return {
-    retentionDays: readPositiveNumberEnv('BELOT_HAND_JOURNAL_RETENTION_DAYS', 30),
-    maxDbBytes: readPositiveNumberEnv('BELOT_HAND_JOURNAL_MAX_DB_MB', 2048) * 1024 * 1024,
-    archiveRetentionDays: readPositiveNumberEnv('BELOT_HAND_JOURNAL_ARCHIVE_RETENTION_DAYS', 180),
-    maxArchiveBytes: readPositiveNumberEnv('BELOT_HAND_JOURNAL_MAX_ARCHIVE_MB', 1024) * 1024 * 1024,
-  }
 }
 
 export function isBelotHandJournalEnabled(): boolean {
@@ -88,14 +98,18 @@ export function createBelotHandJournal(options: {
   store: BelotHandJournalStore | null
   now?: () => number
   maxQueue?: number
-  retention?: BelotHandJournalRetentionConfig
+  storage?: BelotHandJournalStorageConfig
+  statfs?: BelotHandJournalStatfs
+  maintenanceDeps?: BelotHandJournalMaintenanceDeps
   // Тестовете подменят асинхронния flush със синхронен.
   scheduleFlush?: (flush: () => void) => void
 }): BelotHandJournal {
   const store = options.store
   const now = options.now ?? Date.now
   const maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE
-  const retention = options.retention ?? resolveBelotHandJournalRetentionConfig()
+  const storage = options.storage ?? resolveBelotHandJournalStorageConfig()
+  const statfsFn = options.statfs ?? defaultBelotHandJournalStatfs
+  const maintenanceDeps: BelotHandJournalMaintenanceDeps = { statfs: statfsFn, ...options.maintenanceDeps }
   const scheduleFlush = options.scheduleFlush ?? ((flush: () => void) => setImmediate(flush))
   const stats: BelotHandJournalStats = {
     enabled: store !== null,
@@ -105,6 +119,10 @@ export function createBelotHandJournal(options: {
     writeFailures: 0,
     anomalies: 0,
     lastError: null,
+    writesPaused: null,
+    droppedWhilePaused: 0,
+    lastUsageBytes: null,
+    lastFreeDiskBytes: null,
   }
 
   let queue: BelotHandJournalEvent[] = []
@@ -113,7 +131,13 @@ export function createBelotHandJournal(options: {
   let closed = false
   let maintenanceTimer: ReturnType<typeof setInterval> | null = null
   let maintenanceFirstTimer: ReturnType<typeof setTimeout> | null = null
-  let maintenanceRunning = false
+  let maintenancePromise: Promise<BelotHandJournalMaintenanceReport | null> | null = null
+  let storageTimer: ReturnType<typeof setInterval> | null = null
+  let storageCheckPromise: Promise<void> | null = null
+  // Оценка на размера между две измервания: последно измерено + записано.
+  let bytesSinceMeasure = 0
+  let droppedSincePause: Record<'size_limit' | 'disk_critical', number> = { size_limit: 0, disk_critical: 0 }
+  const lastWarningAt = new Map<string, number>()
 
   // Източник на всяка карта (ръчно / изтекъл таймер / бот) — само в паметта
   // за текущото раздаване на стаята; след рестарт става 'unknown'.
@@ -151,6 +175,14 @@ export function createBelotHandJournal(options: {
   function enqueue(events: readonly BelotHandJournalEvent[]): void {
     if (store === null || closed || events.length === 0) return
     for (const event of events) {
+      // При спрян запис се пропускат игровите събития; предупрежденията за
+      // хранилището (малки) минават, освен при критично малко място.
+      if (stats.writesPaused !== null && (event.eventType !== 'journal_storage' || stats.writesPaused === 'disk_critical')) {
+        stats.dropped += 1
+        stats.droppedWhilePaused += 1
+        droppedSincePause[stats.writesPaused] += 1
+        continue
+      }
       if (queue.length >= maxQueue) {
         stats.dropped += 1
         continue
@@ -200,6 +232,11 @@ export function createBelotHandJournal(options: {
         },
       }))
       stats.written += result.inserted
+      bytesSinceMeasure += result.bytes * ESTIMATED_DB_OVERHEAD_FACTOR
+      if (stats.lastUsageBytes !== null && stats.writesPaused === null && stats.lastUsageBytes + bytesSinceMeasure >= storage.maxTotalBytes) {
+        pauseWrites('size_limit', `оценка ${((stats.lastUsageBytes + bytesSinceMeasure) / 1048576).toFixed(1)} MB достига лимита`)
+        void checkStorageNow()
+      }
       for (const duplicate of result.duplicates) {
         stats.anomalies += 1
         console.warn(`[belot-hand-journal] anomaly type=duplicate_hand_scoring room=${duplicate.roomId} hand=${duplicate.handId}`)
@@ -297,15 +334,142 @@ export function createBelotHandJournal(options: {
     }
   }
 
-  async function runMaintenanceNow(): Promise<BelotHandJournalMaintenanceReport | null> {
-    if (store === null || maintenanceRunning || closed) return null
-    maintenanceRunning = true
+  // ─── Предупреждения за хранилището ─────────────────────────────────────
+
+  function recordStorageWarning(
+    kind: BelotHandJournalStorageWarningKind | 'maintenance_summary',
+    detail: string,
+    data?: Record<string, unknown>,
+    options: { severity?: 'info' | 'anomaly'; rateLimitKey?: string } = {},
+  ): void {
+    const key = options.rateLimitKey
+    if (key !== undefined) {
+      const last = lastWarningAt.get(key)
+      if (last !== undefined && now() - last < WARNING_REPEAT_MS) return
+      lastWarningAt.set(key, now())
+    }
+    const severity = options.severity ?? 'anomaly'
+    const line = `[belot-hand-journal] storage ${kind}: ${detail}`
+    if (severity === 'anomaly') console.warn(line)
+    else console.log(line)
+    try {
+      enqueue([createBelotHandJournalStorageEvent({ nowMs: now(), severity, kind, detail, data })])
+    } catch (error) {
+      logError('storage warning record failed', error)
+    }
+  }
+
+  function pauseWrites(reason: 'size_limit' | 'disk_critical', detail: string): void {
+    if (stats.writesPaused === reason) return
+    // Предупреждението се записва ПРЕДИ паузата (при size_limit минава).
+    if (reason === 'size_limit') {
+      recordStorageWarning('storage_limit_reached', `записът на журнала е спрян: ${detail}; игрите продължават`, {
+        maxTotalBytes: storage.maxTotalBytes,
+      })
+    } else {
+      console.warn(`[belot-hand-journal] storage disk_space_critical: ${detail} — записът на журнала е спрян; игрите продължават`)
+    }
+    stats.writesPaused = reason
+  }
+
+  function resumeWrites(): void {
+    if (stats.writesPaused === null) return
+    const previous = stats.writesPaused
+    const dropped = droppedSincePause
+    stats.writesPaused = null
+    droppedSincePause = { size_limit: 0, disk_critical: 0 }
+    recordStorageWarning(
+      'events_dropped',
+      `записът е възобновен (беше спрян: ${previous}); пропуснати събития: ${dropped.size_limit + dropped.disk_critical}`,
+      { reason: previous, droppedSizeLimit: dropped.size_limit, droppedDiskCritical: dropped.disk_critical },
+    )
+  }
+
+  // Ако проверка вече тече, връща същото обещание.
+  function checkStorageNow(): Promise<void> {
+    if (store === null || closed) return Promise.resolve()
+    if (storageCheckPromise !== null) return storageCheckPromise
+    storageCheckPromise = checkStorageOnce().finally(() => {
+      storageCheckPromise = null
+    })
+    return storageCheckPromise
+  }
+
+  async function checkStorageOnce(): Promise<void> {
+    if (store === null) return
     try {
       flushSync()
-      const report = await store.runMaintenance(retention, now())
-      if (report.archivedRows > 0 || report.deletedArchiveFiles.length > 0 || report.sizeLimitExceeded) {
-        console.log(
-          `[belot-hand-journal] maintenance archivedDays=${report.archivedDays.join(',') || '-'} archivedRows=${report.archivedRows} deletedArchives=${report.deletedArchiveFiles.length} dbUsedMB=${(report.dbUsedBytesAfter / 1048576).toFixed(1)} sizeLimitExceeded=${report.sizeLimitExceeded}`,
+      const usage = await measureBelotHandJournalStorage(store)
+      let freeDiskBytes: number | null = null
+      try {
+        freeDiskBytes = (await statfsFn(store.directory)).freeBytes
+      } catch {
+        freeDiskBytes = null
+      }
+      if (closed) return
+      stats.lastUsageBytes = usage.totalBytes
+      stats.lastFreeDiskBytes = freeDiskBytes
+      bytesSinceMeasure = 0
+      const percent = Math.round((usage.totalBytes / storage.maxTotalBytes) * 100)
+      if (freeDiskBytes !== null && freeDiskBytes < storage.minFreeDiskBytes) {
+        pauseWrites('disk_critical', `свободно място ${(freeDiskBytes / 1048576).toFixed(0)} MB < ${(storage.minFreeDiskBytes / 1048576).toFixed(0)} MB`)
+        return
+      }
+      if (usage.totalBytes >= storage.maxTotalBytes) {
+        pauseWrites('size_limit', `${(usage.totalBytes / 1048576).toFixed(1)} MB ≥ ${(storage.maxTotalBytes / 1048576).toFixed(0)} MB`)
+        // Опит за освобождаване веднага (архивиране/почистване).
+        void runMaintenanceNow()
+        return
+      }
+      resumeWrites()
+      if (usage.totalBytes >= storage.maxTotalBytes * storage.warnRatio) {
+        recordStorageWarning(
+          'storage_usage_warning',
+          `журналът заема ${(usage.totalBytes / 1048576).toFixed(1)} MB (${percent}% от ${(storage.maxTotalBytes / 1048576).toFixed(0)} MB)`,
+          { totalBytes: usage.totalBytes, percent },
+          { rateLimitKey: 'usage_warning' },
+        )
+        if (usage.totalBytes >= storage.maxTotalBytes * storage.startCleanupRatio) void runMaintenanceNow()
+      }
+    } catch (error) {
+      logError('storage check failed', error)
+    }
+  }
+
+  // Ако поддръжката вече тече, връща същото обещание (никога две наведнъж).
+  function runMaintenanceNow(): Promise<BelotHandJournalMaintenanceReport | null> {
+    if (store === null || closed) return Promise.resolve(null)
+    if (maintenancePromise !== null) return maintenancePromise
+    maintenancePromise = runMaintenanceOnce().finally(() => {
+      maintenancePromise = null
+    })
+    return maintenancePromise
+  }
+
+  async function runMaintenanceOnce(): Promise<BelotHandJournalMaintenanceReport | null> {
+    if (store === null) return null
+    try {
+      flushSync()
+      const report = await runBelotHandJournalMaintenance(store, storage, now(), maintenanceDeps)
+      if (closed) return report
+      for (const warning of report.warnings) {
+        // Тези две се записват от checkStorageNow със собствена логика.
+        if (warning.kind === 'storage_usage_warning' || warning.kind === 'storage_limit_reached') continue
+        if (warning.kind === 'disk_space_critical') continue
+        recordStorageWarning(warning.kind, warning.detail, warning.data)
+      }
+      if (report.archived.length > 0 || report.expiredArchiveFiles.length > 0 || report.reconciledRows > 0) {
+        recordStorageWarning(
+          'maintenance_summary',
+          `поддръжка: архивирани дни ${report.archived.map((item) => item.day).join(', ') || '-'}, изтекли архиви ${report.expiredArchiveFiles.length}, размер ${(report.usageBefore / 1048576).toFixed(1)} → ${(report.usageAfter / 1048576).toFixed(1)} MB`,
+          {
+            archived: report.archived,
+            expiredArchiveFiles: report.expiredArchiveFiles,
+            reconciledRows: report.reconciledRows,
+            usageBefore: report.usageBefore,
+            usageAfter: report.usageAfter,
+          },
+          { severity: 'info' },
         )
       }
       return report
@@ -313,12 +477,24 @@ export function createBelotHandJournal(options: {
       logError('maintenance failed', error)
       return null
     } finally {
-      maintenanceRunning = false
+      if (!closed) void checkStorageNow()
     }
   }
 
   function startMaintenance(): void {
     if (store === null || maintenanceTimer !== null) return
+    const backend = selectBelotJournalCompressionBackend({ zstdLevel: storage.zstdLevel, ...options.maintenanceDeps })
+    console.log(
+      `[belot-hand-journal] storage policy: active ${storage.activeDays}d + archive to ${storage.maxAgeDays}d total, compression=${backend} level=${storage.zstdLevel}, limit=${(storage.maxTotalBytes / 1048576).toFixed(0)}MB (warn ${Math.round(storage.warnRatio * 100)}%), minFreeDisk=${(storage.minFreeDiskBytes / 1048576).toFixed(0)}MB`,
+    )
+    if (backend === 'node-gzip') {
+      console.warn('[belot-hand-journal] няма ZSTD (Node без zlib ZSTD и без `zstd` CLI) — архивите ще са .gz')
+    }
+    void checkStorageNow()
+    storageTimer = setInterval(() => {
+      void checkStorageNow()
+    }, STORAGE_CHECK_INTERVAL_MS)
+    storageTimer.unref?.()
     maintenanceFirstTimer = setTimeout(() => {
       void runMaintenanceNow()
     }, MAINTENANCE_FIRST_RUN_DELAY_MS)
@@ -335,6 +511,9 @@ export function createBelotHandJournal(options: {
     closed = true
     if (maintenanceTimer !== null) clearInterval(maintenanceTimer)
     if (maintenanceFirstTimer !== null) clearTimeout(maintenanceFirstTimer)
+    if (storageTimer !== null) clearInterval(storageTimer)
+    // Прекъсната поддръжка (ако тече) оставя само .tmp файл и lock — и двете
+    // се почистват безопасно при следващото пускане.
     store?.close()
   }
 
@@ -344,6 +523,7 @@ export function createBelotHandJournal(options: {
     flushSync,
     startMaintenance,
     runMaintenanceNow,
+    checkStorageNow,
     getStats: () => ({ ...stats, queued: queue.length }),
     close,
   }
