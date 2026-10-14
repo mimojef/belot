@@ -212,6 +212,7 @@ function buildSchema(db: DatabaseSync): void {
       vip_grant_id TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      hidden_at TEXT, -- 20261019_001 (остарели pending VIP поръчки)
       stripe_payment_intent_id TEXT,
       stripe_charge_id TEXT,
       payment_method_type TEXT,
@@ -227,7 +228,7 @@ function buildSchema(db: DatabaseSync): void {
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_purchase_ledger_pending_package
       ON vip_purchase_ledger(profile_id, package_id, status)
-      WHERE status = 'pending';
+      WHERE status = 'pending' AND hidden_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS vip_grants (
       grant_id TEXT PRIMARY KEY,

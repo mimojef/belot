@@ -218,12 +218,13 @@ function buildSchema(db: DatabaseSync): void {
       deleted_recipient_profile_id_snapshot TEXT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      hidden_at TEXT, -- 20261019_001 (остарели pending VIP поръчки)
       FOREIGN KEY (profile_id) REFERENCES profiles(profile_id) ON DELETE CASCADE
     );
 
     CREATE UNIQUE INDEX IF NOT EXISTS idx_vip_purchase_ledger_pending_package
       ON vip_purchase_ledger(profile_id, package_id, COALESCE(recipient_profile_id, profile_id), status)
-      WHERE status = 'pending';
+      WHERE status = 'pending' AND hidden_at IS NULL;
 
     CREATE TABLE IF NOT EXISTS vip_grants (
       grant_id TEXT PRIMARY KEY,
@@ -452,14 +453,17 @@ await withTempDir(async (dir) => {
     assert(pending.ok, 'pending покупка трябва да успее')
     if (!pending.ok) return
 
-    // "Admin промяна на цената" – нов caller подава различна текуща цена, но
-    // тъй като вече има pending ред за profile-9/vip_30, createPendingPurchase
-    // трябва да reuse-не СЪЩИЯ ред (със старата snapshot цена), не да презапише.
-    const reused = store.createPendingPurchase('profile-9', 'vip_30', 849)
-    assert(reused.ok, 'reuse опитът трябва да успее')
-    if (reused.ok) {
-      assertEqual(reused.purchase.priceCents, 789, 'reuse-натият ред трябва да пази ОРИГИНАЛНАТА snapshot цена (789), не новата (849)')
+    // "Admin промяна на цената" – нов caller подава различна текуща цена.
+    // Съществуващият pending ред НЕ се презаписва (пази 789 за евентуална
+    // още отворена сесия), но и НЕ се reuse-ва за новия checkout (инцидент
+    // Meri86 / 20261019_001): старият се скрива, нов ред е с актуалната цена.
+    const fresh = store.createPendingPurchase('profile-9', 'vip_30', 849)
+    assert(fresh.ok, 'новият опит трябва да успее')
+    if (fresh.ok) {
+      assert(fresh.purchase.purchaseId !== pending.purchase.purchaseId, 'при нова цена трябва да има НОВ ledger ред, не reuse на стария')
+      assertEqual(fresh.purchase.priceCents, 849, 'новият ред трябва да е с актуалната цена (849)')
     }
+    assertEqual(store.getPurchaseById(pending.purchase.purchaseId)?.priceCents ?? -1, 789, 'старият ред пази ОРИГИНАЛНАТА snapshot цена (789)')
   })
 
   await check('[10] fulfillPaidPurchase за несъществуваща checkout сесия → ok:false', () => {

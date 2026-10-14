@@ -81,6 +81,8 @@ export type BundlePurchaseStore = {
     purchaseId: string,
     profileId: string,
   ) => { ok: true; purchase: BundlePurchaseSnapshot } | { ok: false; message: string }
+  /** Mirror на coinPurchaseStore.findProfilePurchaseByCheckoutSessionId (polling, включително скрити). */
+  findProfilePurchaseByCheckoutSessionId: (profileId: string, checkoutSessionId: string) => BundlePurchaseSnapshot | null
   /**
    * Admin payment listing contribution от bundle покупки — mirror на
    * vipPurchaseStore.getAdminPaymentListByPeriod (whole-period, БЕЗ SQL
@@ -204,6 +206,17 @@ function rowToSnapshot(row: BundlePurchaseRow): BundlePurchaseSnapshot {
     recipientDisplayNameSnapshot: row.recipient_display_name_snapshot ?? null,
     payerSuccessText,
   }
+}
+
+function isPendingSnapshotCurrent(row: BundlePurchaseRow, activePackage: ActiveBundlePackageRow): boolean {
+  return (
+    row.package_key_snapshot === activePackage.package_key &&
+    row.title_snapshot === activePackage.title &&
+    row.yellow_coins_amount === activePackage.yellow_coins_amount &&
+    row.vip_days_snapshot === activePackage.vip_days &&
+    row.price_cents === activePackage.price_cents &&
+    row.currency === activePackage.currency
+  )
 }
 
 function normalizeId(value: string): string {
@@ -348,6 +361,14 @@ export async function createBundlePurchaseStore(
     SET status = 'failed', updated_at = CURRENT_TIMESTAMP
     WHERE provider_checkout_session_id = ?
       AND status = 'pending';
+  `)
+
+  const retireStalePendingStatement = database.prepare(`
+    UPDATE bundle_purchase_ledger
+    SET hidden_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE purchase_id = ?
+      AND status = 'pending'
+      AND hidden_at IS NULL;
   `)
 
   const hidePurchaseStatement = database.prepare(`
@@ -515,31 +536,53 @@ export async function createBundlePurchaseStore(
       return { ok: false, message: 'Този пакет не е активен в магазина.' }
     }
 
-    const existingPending = selectPendingPurchaseStatement.get(
-      normalizedProfileId,
-      normalizedPackageId,
-      normalizedRecipientProfileId,
-    ) as BundlePurchaseRow | undefined
-
-    if (existingPending) {
-      return { ok: true, purchase: rowToSnapshot(existingPending) }
-    }
-
     const purchaseId = randomUUID()
 
-    insertPendingPurchaseStatement.run(
-      purchaseId,
-      normalizedProfileId,
-      activePackage.package_id,
-      activePackage.package_key,
-      activePackage.title,
-      activePackage.yellow_coins_amount,
-      activePackage.vip_days,
-      activePackage.price_cents,
-      activePackage.currency,
-      normalizedRecipientProfileId,
-      recipientDisplayName,
-    )
+    try {
+      // Mirror на coinPurchaseStore.createPendingPurchase: четене вътре в
+      // IMMEDIATE транзакция; reuse само при snapshot, съвпадащ с актуалните
+      // условия; остарелият pending ред се скрива (не cancel-ва) атомарно с
+      // INSERT-а на новия.
+      database.exec('BEGIN IMMEDIATE;')
+
+      const existingPending = selectPendingPurchaseStatement.get(
+        normalizedProfileId,
+        normalizedPackageId,
+        normalizedRecipientProfileId,
+      ) as BundlePurchaseRow | undefined
+
+      if (existingPending && isPendingSnapshotCurrent(existingPending, activePackage)) {
+        database.exec('COMMIT;')
+        return { ok: true, purchase: rowToSnapshot(existingPending) }
+      }
+
+      if (existingPending) {
+        retireStalePendingStatement.run(existingPending.purchase_id)
+      }
+
+      insertPendingPurchaseStatement.run(
+        purchaseId,
+        normalizedProfileId,
+        activePackage.package_id,
+        activePackage.package_key,
+        activePackage.title,
+        activePackage.yellow_coins_amount,
+        activePackage.vip_days,
+        activePackage.price_cents,
+        activePackage.currency,
+        normalizedRecipientProfileId,
+        recipientDisplayName,
+      )
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original error
+      }
+      throw error
+    }
 
     const purchase = getPurchaseById(purchaseId)
 
@@ -859,6 +902,22 @@ export async function createBundlePurchaseStore(
     )
   }
 
+  function findProfilePurchaseByCheckoutSessionId(
+    profileId: string,
+    checkoutSessionId: string,
+  ): BundlePurchaseSnapshot | null {
+    const normalizedProfileId = normalizeId(profileId)
+    const normalizedSessionId = checkoutSessionId.trim()
+
+    if (normalizedProfileId.length === 0 || normalizedSessionId.length === 0) {
+      return null
+    }
+
+    const row = getPurchaseWithProfileBySessionId(normalizedSessionId)
+
+    return row !== null && row.profile_id === normalizedProfileId ? rowToSnapshot(row) : null
+  }
+
   function hidePurchaseForUser(
     purchaseId: string,
     profileId: string,
@@ -1141,6 +1200,7 @@ export async function createBundlePurchaseStore(
     needsPaymentMethodSnapshot,
     updatePaymentMethodSnapshot,
     hidePurchaseForUser,
+    findProfilePurchaseByCheckoutSessionId,
     getAdminPaymentListByPeriod,
     getAdminPaymentDetail,
     getAdminPaymentStats,

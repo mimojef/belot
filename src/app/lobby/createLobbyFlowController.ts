@@ -12710,7 +12710,11 @@ export function createLobbyFlowController(
     })
 
     if (!result.ok) {
-      if (result.reason === 'no-package-id' || result.reason === 'package-unavailable') {
+      if (result.reason === 'offer-changed') {
+        state.shopPurchaseMessageText =
+          'Условията на този пакет са променени след създаването на поръчката. Купи пакета отново от магазина, за да получиш актуалното количество жълтици.'
+        render()
+      } else if (result.reason === 'no-package-id' || result.reason === 'package-unavailable') {
         state.shopPurchaseMessageText =
           result.reason === 'package-unavailable' ? 'Пакетът не е наличен.' : 'Не може да се продължи тази покупка.'
         render()

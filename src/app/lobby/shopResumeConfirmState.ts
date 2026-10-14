@@ -8,7 +8,7 @@ export type ShopResumeConfirmInput = {
 
 export type ShopResumeConfirmOpenResult =
   | { ok: true; resumeId: string; packageId: string }
-  | { ok: false; reason: 'not-found' | 'not-pending' | 'no-package-id' | 'package-unavailable' }
+  | { ok: false; reason: 'not-found' | 'not-pending' | 'no-package-id' | 'package-unavailable' | 'offer-changed' }
 
 /**
  * Pure state computation: determines whether a "Плати" resume confirm popup
@@ -33,6 +33,17 @@ export function computeShopResumeConfirmOpen(
     input.lobbyPackages.find((p) => p.packageId === packageId)
 
   if (!coinPackage) return { ok: false, reason: 'package-unavailable' }
+
+  // Confirm модалът рендира ТЕКУЩИЯ пакет — при променени условия би
+  // показал новото количество, докато поръчката е по старото. Сървърът
+  // така или иначе отказва resume на остаряла оферта (409).
+  if (
+    coinPackage.yellowCoinsAmount !== purchase.yellowCoinsAmount ||
+    coinPackage.priceCents !== purchase.priceCents ||
+    coinPackage.currency !== purchase.currency
+  ) {
+    return { ok: false, reason: 'offer-changed' }
+  }
 
   return { ok: true, resumeId: purchaseId, packageId }
 }

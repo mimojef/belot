@@ -992,8 +992,9 @@ async function main(): Promise<void> {
         const walletBefore = (hideStore as unknown as { database?: unknown })
         const fulfillResult = hideStore.fulfillPaidPurchase({
           checkoutSessionId: 'cs_h_comp',
-          yellowCoinsAmount: 30000,
-          profileId: 'hprof-1',
+          purchaseId: '',
+          amountPaidCents: 179,
+          currency: 'eur',
         })
         assert(fulfillResult.ok === true, `webhook трябва да може да кредитира скрита покупка: ${JSON.stringify(fulfillResult)}`)
         if (fulfillResult.ok) {
@@ -1002,8 +1003,9 @@ async function main(): Promise<void> {
         // Idempotent — втори fulfill
         const fulfillResult2 = hideStore.fulfillPaidPurchase({
           checkoutSessionId: 'cs_h_comp',
-          yellowCoinsAmount: 30000,
-          profileId: 'hprof-1',
+          purchaseId: '',
+          amountPaidCents: 179,
+          currency: 'eur',
         })
         assert(fulfillResult2.ok === true, 'втори fulfill трябва да е ok (idempotent)')
         if (fulfillResult2.ok) {
@@ -1160,8 +1162,9 @@ async function main(): Promise<void> {
         // Webhook трябва да може да кредитира
         const fulfillResult = hideStore.fulfillPaidPurchase({
           checkoutSessionId: 'cs_h_exp_err_comp',
-          yellowCoinsAmount: 90000,
-          profileId: 'hprof-2',
+          purchaseId: '',
+          amountPaidCents: 449,
+          currency: 'eur',
         })
         assert(fulfillResult.ok === true, `webhook трябва да кредитира след hide: ${JSON.stringify(fulfillResult)}`)
       })

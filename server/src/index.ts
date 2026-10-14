@@ -11376,6 +11376,31 @@ async function handleLobbyPackagesRequest(
   return true
 }
 
+// ?checkoutSessionId=... на GET историята на покупки — ползва се САМО от
+// client polling-а след Stripe redirect. Историята скрива скритите редове
+// (вкл. остарели pending, заменени от по-нова оферта), но такъв ред все още
+// може да бъде платен по стара отворена сесия — тогава polling-ът трябва да
+// го намери, за да покаже резултата. Само собствени покупки (owner check в
+// store-а).
+function getCheckoutSessionIdQueryParam(req: IncomingMessage): string {
+  try {
+    return (new URL(req.url ?? '/', 'http://localhost').searchParams.get('checkoutSessionId') ?? '').trim()
+  } catch {
+    return ''
+  }
+}
+
+function withPolledCheckoutSessionPurchase<T extends { purchaseId: string }>(
+  purchases: T[],
+  polledPurchase: T | null,
+): T[] {
+  if (polledPurchase === null || purchases.some((item) => item.purchaseId === polledPurchase.purchaseId)) {
+    return purchases
+  }
+
+  return [...purchases, polledPurchase]
+}
+
 async function handleShopPurchasesRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -11399,7 +11424,13 @@ async function handleShopPurchasesRequest(
   if (req.method === 'GET') {
     sendJsonResponse(res, 200, {
       ok: true,
-      purchases: coinPurchaseStore.listProfilePurchases(session.profile.profileId),
+      purchases: withPolledCheckoutSessionPurchase(
+        coinPurchaseStore.listProfilePurchases(session.profile.profileId),
+        coinPurchaseStore.findProfilePurchaseByCheckoutSessionId(
+          session.profile.profileId,
+          getCheckoutSessionIdQueryParam(req),
+        ),
+      ),
     })
     return true
   }
@@ -11948,7 +11979,13 @@ async function handleShopBundlePurchasesRequest(
 
   sendJsonResponse(res, 200, {
     ok: true,
-    purchases: bundlePurchaseStore.listProfilePurchases(session.profile.profileId),
+    purchases: withPolledCheckoutSessionPurchase(
+      bundlePurchaseStore.listProfilePurchases(session.profile.profileId),
+      bundlePurchaseStore.findProfilePurchaseByCheckoutSessionId(
+        session.profile.profileId,
+        getCheckoutSessionIdQueryParam(req),
+      ),
+    ),
   })
   return true
 }
@@ -17009,7 +17046,7 @@ async function handleStripeWebhookRequest(
     if (stripeSession.payment_status === 'paid') {
       const purchaseId = stripeSession.metadata?.purchaseId ?? ''
       const checkoutSessionId = stripeSession.id
-      const amountPaidCents = stripeSession.amount_total ?? 0
+      const amountPaidCents = stripeSession.amount_total ?? -1
       const currency = stripeSession.currency ?? ''
 
       // Step 1: fulfill atomically — this MUST succeed regardless of Stripe enrichment
@@ -17113,6 +17150,12 @@ async function handleStripeWebhookRequest(
     }
   } else if (event.type === 'checkout.session.expired') {
     const stripeSession = event.data.object as Stripe.Checkout.Session
+    // Само идентификатори — за проверка в PM2 логовете дали expired събития
+    // изобщо пристигат. Cancel-ът по-долу е no-op, ако session id-то вече не е
+    // текущото на реда (по-нова сесия е закачена при reuse/resume).
+    console.log(
+      `[stripe/webhook] checkout.session.expired session=${stripeSession.id} purchaseId=${stripeSession.metadata?.purchaseId ?? ''} type=${stripeSession.metadata?.purchaseType ?? 'coin'}`,
+    )
     if (stripeSession.metadata?.purchaseType === 'vip') {
       vipPurchaseStore.markPurchaseCanceledByCheckoutSessionId(stripeSession.id)
     } else if (stripeSession.metadata?.purchaseType === 'bundle') {

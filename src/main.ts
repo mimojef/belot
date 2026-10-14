@@ -1312,12 +1312,21 @@ async function loadShopPackages(): Promise<
   }
 }
 
-async function loadShopPurchases(): Promise<
+// checkoutSessionId (само при polling след Stripe redirect) — сървърът добавя
+// и собствена покупка по тази сесия, дори да е скрита от историята (напр.
+// остаряла поръчка, платена по още отворена стара сесия).
+function withCheckoutSessionQuery(path: string, checkoutSessionId?: string): string {
+  return checkoutSessionId
+    ? `${path}?checkoutSessionId=${encodeURIComponent(checkoutSessionId)}`
+    : path
+}
+
+async function loadShopPurchases(checkoutSessionId?: string): Promise<
   | { ok: true; purchases: CoinPurchaseSnapshot[] }
   | { ok: false; message: string }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/shop/purchases`, {
+    const response = await fetch(`${getApiBaseUrl()}${withCheckoutSessionQuery('/api/shop/purchases', checkoutSessionId)}`, {
       method: 'GET',
       credentials: 'include',
     })
@@ -1521,12 +1530,12 @@ async function loadBundlePackages(): Promise<
   }
 }
 
-async function loadBundlePurchases(): Promise<
+async function loadBundlePurchases(checkoutSessionId?: string): Promise<
   | { ok: true; purchases: BundlePurchaseSnapshot[] }
   | { ok: false; message: string }
 > {
   try {
-    const response = await fetch(`${getApiBaseUrl()}/api/shop/bundle-purchases`, {
+    const response = await fetch(`${getApiBaseUrl()}${withCheckoutSessionQuery('/api/shop/bundle-purchases', checkoutSessionId)}`, {
       method: 'GET',
       credentials: 'include',
     })
@@ -1767,7 +1776,7 @@ async function waitForPaidStripePurchase(
   const timeoutMs = 8500
 
   while (Date.now() - startedAt <= timeoutMs) {
-    const result = await loadShopPurchases()
+    const result = await loadShopPurchases(normalizedSessionId)
 
     if (result.ok) {
       const purchase = result.purchases.find((item) => {
@@ -1835,7 +1844,7 @@ async function waitForPaidBundlePurchase(
   const timeoutMs = 8500
 
   while (Date.now() - startedAt <= timeoutMs) {
-    const result = await loadBundlePurchases()
+    const result = await loadBundlePurchases(normalizedSessionId)
 
     if (result.ok) {
       const purchase = result.purchases.find((item) => {

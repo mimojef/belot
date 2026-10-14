@@ -207,6 +207,18 @@ export type CoinPurchaseStore = {
     purchaseId: string,
     profileId: string,
   ) => { ok: true; purchase: CoinPurchaseSnapshot } | { ok: false; message: string }
+  /**
+   * true САМО ако пакетът на покупката е активен И snapshot-ът (жълтици,
+   * цена, валута, заглавие, ключ) съвпада с текущите му условия в магазина.
+   * Resume checkout не бива да стартира плащане по остаряла оферта.
+   */
+  isPurchaseOfferCurrent: (purchaseId: string) => boolean
+  /**
+   * Собствена покупка по checkout session id, ВКЛЮЧИТЕЛНО скрита — за client
+   * polling след Stripe redirect (скрит остарял pending ред може да бъде
+   * платен по още отворена стара сесия, а историята не го връща).
+   */
+  findProfilePurchaseByCheckoutSessionId: (profileId: string, checkoutSessionId: string) => CoinPurchaseSnapshot | null
   close: () => void
 }
 
@@ -284,6 +296,16 @@ function rowToSnapshot(row: CoinPurchaseRow): CoinPurchaseSnapshot {
   }
 }
 
+function isPendingSnapshotCurrent(row: CoinPurchaseRow, activePackage: ActivePackageRow): boolean {
+  return (
+    row.package_key_snapshot === activePackage.package_key &&
+    row.title_snapshot === activePackage.title &&
+    row.yellow_coins_amount === activePackage.yellow_coins_amount &&
+    row.price_cents === activePackage.price_cents &&
+    row.currency === activePackage.currency
+  )
+}
+
 function normalizeId(value: string): string {
   return value.trim().slice(0, 96)
 }
@@ -299,6 +321,9 @@ export async function createCoinPurchaseStore(
 
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
+  // Mirror на vip/bundlePurchaseStore — BEGIN IMMEDIATE в createPendingPurchase
+  // изчаква чужд write lock вместо веднага да хвърли SQLITE_BUSY.
+  database.exec('PRAGMA busy_timeout = 5000;')
 
   const selectProfilePurchasesStatement = database.prepare(`
     SELECT
@@ -555,6 +580,16 @@ export async function createCoinPurchaseStore(
       AND status = 'pending';
   `)
 
+  const retireStalePendingStatement = database.prepare(`
+    UPDATE coin_purchase_ledger
+    SET
+      hidden_at = CURRENT_TIMESTAMP,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE purchase_id = ?
+      AND status = 'pending'
+      AND hidden_at IS NULL;
+  `)
+
   const hidePurchaseStatement = database.prepare(`
     UPDATE coin_purchase_ledger
     SET
@@ -792,33 +827,63 @@ export async function createCoinPurchaseStore(
       }
     }
 
-    const existingPending = selectPendingPurchaseStatement.get(
-      normalizedProfileId,
-      normalizedPackageId,
-      normalizedRecipientProfileId,
-    ) as CoinPurchaseRow | undefined
-
-    if (existingPending) {
-      return {
-        ok: true,
-        purchase: rowToSnapshot(existingPending),
-      }
-    }
-
     const purchaseId = randomUUID()
 
-    insertPendingPurchaseStatement.run(
-      purchaseId,
-      normalizedProfileId,
-      activePackage.package_id,
-      activePackage.package_key,
-      activePackage.title,
-      activePackage.yellow_coins_amount,
-      activePackage.price_cents,
-      activePackage.currency,
-      normalizedRecipientProfileId,
-      recipientDisplayName,
-    )
+    try {
+      // IMMEDIATE + четене ВЪТРЕ в транзакцията: конкурентна заявка от друга
+      // връзка изчаква и вижда вече създадения актуален ред (reuse), вместо
+      // да се блъсне в unique индекса.
+      database.exec('BEGIN IMMEDIATE;')
+
+      const existingPending = selectPendingPurchaseStatement.get(
+        normalizedProfileId,
+        normalizedPackageId,
+        normalizedRecipientProfileId,
+      ) as CoinPurchaseRow | undefined
+
+      // Reuse само ако snapshot-ът съвпада с АКТУАЛНИТЕ условия на пакета.
+      // Иначе (админ е сменил количество/цена след създаването на pending
+      // реда) старият ред би се платил по стари условия, докато магазинът
+      // показва новите — инцидент Meri86 (Елит: показани 2 250 000, начислени
+      // 1 500 000 от pending ред, създаден 20 дни по-рано).
+      if (existingPending && isPendingSnapshotCurrent(existingPending, activePackage)) {
+        database.exec('COMMIT;')
+        return {
+          ok: true,
+          purchase: rowToSnapshot(existingPending),
+        }
+      }
+
+      // Остарелият pending ред се скрива (НЕ се cancel-ва): ако за него все
+      // още има отворена Stripe сесия и бъде платена, fulfillment-ът го
+      // кредитира по условията, с които е стартирано онова плащане.
+      // hidden_at го изважда от unique индекса и от историята на потребителя.
+      if (existingPending) {
+        retireStalePendingStatement.run(existingPending.purchase_id)
+      }
+
+      insertPendingPurchaseStatement.run(
+        purchaseId,
+        normalizedProfileId,
+        activePackage.package_id,
+        activePackage.package_key,
+        activePackage.title,
+        activePackage.yellow_coins_amount,
+        activePackage.price_cents,
+        activePackage.currency,
+        normalizedRecipientProfileId,
+        recipientDisplayName,
+      )
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original error
+      }
+      throw error
+    }
 
     const purchase = getPurchaseById(purchaseId)
 
@@ -863,23 +928,40 @@ export async function createCoinPurchaseStore(
   ):
     | { ok: true; purchase: CoinPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
     | { ok: false; message: string } {
-    const { checkoutSessionId, purchaseId } = params
+    const { checkoutSessionId, purchaseId, amountPaidCents, currency } = params
 
-    const internalRow = checkoutSessionId
-      ? getPurchaseWithProfileBySessionId(checkoutSessionId)
-      : purchaseId
-        ? getPurchaseWithProfileById(purchaseId)
-        : null
+    // Fallback по purchaseId остава: при reuse на pending ред
+    // attachCheckoutSession презаписва session id-то, а по-ранна (още
+    // отворена) сесия за СЪЩИЯ ред носи purchaseId в metadata-та си.
+    const internalRow =
+      (checkoutSessionId ? getPurchaseWithProfileBySessionId(checkoutSessionId) : null) ??
+      (purchaseId ? getPurchaseWithProfileById(purchaseId) : null)
 
     if (internalRow === null) {
-      if (purchaseId) {
-        const fallback = getPurchaseWithProfileById(purchaseId)
-        if (fallback === null) {
-          return { ok: false, message: 'Покупката не беше намерена.' }
-        }
-        return fulfillByInternalRow(fallback)
-      }
       return { ok: false, message: 'Покупката не беше намерена.' }
+    }
+
+    // already-credited redelivery — идемпотентно потвърждение без повторна
+    // Stripe проверка (mirror на vipPurchaseStore.fulfillPaidPurchase).
+    if (internalRow.status === 'paid' && internalRow.credited_at !== null) {
+      return fulfillByInternalRow(internalRow)
+    }
+
+    // Действително платеното трябва да съвпада ТОЧНО със snapshot-а на тази
+    // поръчка (mirror на VIP/bundle). При несъответствие редът остава
+    // pending и не се кредитира — нужен е ръчен преглед.
+    if (currency.toUpperCase() !== internalRow.currency.toUpperCase()) {
+      return {
+        ok: false,
+        message: `Валутата от Stripe (${currency}) не съвпада с очакваната (${internalRow.currency}).`,
+      }
+    }
+
+    if (amountPaidCents !== internalRow.price_cents) {
+      return {
+        ok: false,
+        message: `Платената сума от Stripe (${amountPaidCents}) не съвпада с очакваната цена (${internalRow.price_cents}).`,
+      }
     }
 
     return fulfillByInternalRow(internalRow)
@@ -1095,6 +1177,34 @@ export async function createCoinPurchaseStore(
     }
 
     return { ok: true, purchase: updated }
+  }
+
+  function findProfilePurchaseByCheckoutSessionId(
+    profileId: string,
+    checkoutSessionId: string,
+  ): CoinPurchaseSnapshot | null {
+    const normalizedProfileId = normalizeId(profileId)
+    const normalizedSessionId = checkoutSessionId.trim()
+
+    if (normalizedProfileId.length === 0 || normalizedSessionId.length === 0) {
+      return null
+    }
+
+    const row = getPurchaseWithProfileBySessionId(normalizedSessionId)
+
+    return row !== null && row.profile_id === normalizedProfileId ? rowToSnapshot(row) : null
+  }
+
+  function isPurchaseOfferCurrent(purchaseId: string): boolean {
+    const row = selectPurchaseStatement.get(normalizeId(purchaseId)) as CoinPurchaseRow | undefined
+
+    if (!row || row.package_id === null) {
+      return false
+    }
+
+    const activePackage = selectActivePackageStatement.get(row.package_id) as ActivePackageRow | undefined
+
+    return activePackage !== undefined && isPendingSnapshotCurrent(row, activePackage)
   }
 
   function getAdminPaymentStats(now: Date = new Date()): AdminPaymentStats {
@@ -1341,6 +1451,8 @@ export async function createCoinPurchaseStore(
     updatePaymentMethodSnapshot,
     getAdminPaymentDetail,
     hidePurchaseForUser,
+    isPurchaseOfferCurrent,
+    findProfilePurchaseByCheckoutSessionId,
     close,
   }
 }

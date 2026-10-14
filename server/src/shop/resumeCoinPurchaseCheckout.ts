@@ -45,6 +45,20 @@ export async function resumeCoinPurchaseCheckout(
     }
   }
 
+  // Остаряла оферта (пакетът е сменен/спрян след създаването на поръчката) —
+  // не стартираме и не връщаме плащане по стари условия. Проверката се
+  // прилага ПРЕДИ отворена или нова сесия; 'complete' сесия (вече платена,
+  // webhook предстои) не се засяга.
+  const staleOfferResult: ResumeCoinPurchaseCheckoutResult | null =
+    store.isPurchaseOfferCurrent(purchase.purchaseId)
+      ? null
+      : {
+          ok: false,
+          status: 409,
+          message:
+            'Условията на този пакет са променени след създаването на поръчката. Купи пакета отново от магазина, за да получиш актуалното количество жълтици.',
+        }
+
   // Ако вече има Stripe сесия — трябва задължително да я retrieve-нем
   if (purchase.providerCheckoutSessionId) {
     let stripeSession: Stripe.Checkout.Session
@@ -62,6 +76,9 @@ export async function resumeCoinPurchaseCheckout(
     }
 
     if (stripeSession.status === 'open') {
+      if (staleOfferResult !== null) {
+        return staleOfferResult
+      }
       if (!stripeSession.url) {
         return {
           ok: false,
@@ -91,6 +108,10 @@ export async function resumeCoinPurchaseCheckout(
     }
 
     // status === 'expired' — продължаваме към нова сесия по-долу
+  }
+
+  if (staleOfferResult !== null) {
+    return staleOfferResult
   }
 
   // Нова Stripe сесия върху СЪЩЕСТВУВАЩИЯ purchase record.

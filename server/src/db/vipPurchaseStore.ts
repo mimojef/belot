@@ -225,6 +225,7 @@ export async function createVipPurchaseStore(
     WHERE profile_id = ?
       AND package_id = ?
       AND status = 'pending'
+      AND hidden_at IS NULL
       -- Mirror на coinPurchaseStore.selectPendingPurchaseStatement коментара:
       -- recipient трябва да съвпада точно, за да не се reuse-не грешен
       -- pending ред между normal/gift или между различни recipients.
@@ -301,6 +302,16 @@ export async function createVipPurchaseStore(
     SET provider_checkout_session_id = ?, updated_at = CURRENT_TIMESTAMP
     WHERE purchase_id = ?
       AND status = 'pending';
+  `)
+
+  // 20261019_001 — остарял pending ред се скрива (не cancel-ва), виж
+  // коментара в createPendingPurchase.
+  const retireStalePendingStatement = database.prepare(`
+    UPDATE vip_purchase_ledger
+    SET hidden_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE purchase_id = ?
+      AND status = 'pending'
+      AND hidden_at IS NULL;
   `)
 
   const markCanceledBySessionStatement = database.prepare(`
@@ -453,29 +464,58 @@ export async function createVipPurchaseStore(
       recipientDisplayName = recipientRow.display_name
     }
 
-    const existingPending = selectPendingPurchaseStatement.get(
-      normalizedProfileId,
-      packageId,
-      normalizedRecipientProfileId,
-    ) as VipPurchaseRow | undefined
-
-    if (existingPending) {
-      return { ok: true, purchase: rowToSnapshot(existingPending) }
-    }
-
     const purchaseId = randomUUID()
     const days = VIP_PACKAGE_CATALOG[packageId].days
 
-    insertPendingPurchaseStatement.run(
-      purchaseId,
-      normalizedProfileId,
-      packageId,
-      days,
-      priceCents,
-      'EUR',
-      normalizedRecipientProfileId,
-      recipientDisplayName,
-    )
+    try {
+      // Mirror на coinPurchaseStore.createPendingPurchase (инцидент Meri86):
+      // pending ред се reuse-ва САМО ако цената/дните/валутата му съвпадат с
+      // актуалните. Иначе се скрива (не cancel-ва — отворена Stripe сесия за
+      // него може още да завърши по първоначалните условия) и се създава нов
+      // ред, атомарно. Четенето е вътре в IMMEDIATE транзакцията заради
+      // конкурентни заявки от други връзки.
+      database.exec('BEGIN IMMEDIATE;')
+
+      const existingPending = selectPendingPurchaseStatement.get(
+        normalizedProfileId,
+        packageId,
+        normalizedRecipientProfileId,
+      ) as VipPurchaseRow | undefined
+
+      if (
+        existingPending &&
+        existingPending.price_cents_snapshot === priceCents &&
+        existingPending.days_snapshot === days &&
+        existingPending.currency === 'EUR'
+      ) {
+        database.exec('COMMIT;')
+        return { ok: true, purchase: rowToSnapshot(existingPending) }
+      }
+
+      if (existingPending) {
+        retireStalePendingStatement.run(existingPending.purchase_id)
+      }
+
+      insertPendingPurchaseStatement.run(
+        purchaseId,
+        normalizedProfileId,
+        packageId,
+        days,
+        priceCents,
+        'EUR',
+        normalizedRecipientProfileId,
+        recipientDisplayName,
+      )
+
+      database.exec('COMMIT;')
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // surface the original error
+      }
+      throw error
+    }
 
     const purchase = getPurchaseById(purchaseId)
     if (purchase === null) {

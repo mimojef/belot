@@ -112,10 +112,14 @@ await withTempDir(async (dir) => {
     assert(!!row && row.sql.includes('hidden_at IS NULL'), `bundle индексът трябва да пази hidden_at IS NULL след 20260923_004 rebuild-а: ${row?.sql}`)
   })
 
-  await check('[M10] idx_vip_purchase_ledger_pending_package НЯМА hidden_at predicate (VIP няма hide-purchase feature)', () => {
+  // До 20261019_001 VIP нямаше hidden_at; оттам насам индексът е с recipient
+  // ключа от 20260923_002 ПЛЮС hidden_at predicate (остарели pending VIP
+  // поръчки се скриват — mirror на coin/bundle).
+  await check('[M10] idx_vip_purchase_ledger_pending_package: recipient ключ + hidden_at predicate (20261019_001)', () => {
     const row = db.prepare(`SELECT sql FROM sqlite_master WHERE name = 'idx_vip_purchase_ledger_pending_package'`).get() as { sql: string } | undefined
     assert(row !== undefined, 'индексът трябва да съществува')
-    assert(!!row && !row.sql.includes('hidden_at'), `VIP индексът НЕ трябва да реферира hidden_at (VIP таблицата няма тази колона): ${row?.sql}`)
+    assert(!!row && row.sql.includes('COALESCE(recipient_profile_id, profile_id)'), `VIP индексът трябва да включва recipient ключа: ${row?.sql}`)
+    assert(!!row && row.sql.includes('hidden_at IS NULL'), `VIP индексът трябва да изключва скритите редове: ${row?.sql}`)
   })
 
   await check('[M7] Повторно прилагане (idempotent) не хвърля грешка', async () => {
