@@ -7058,6 +7058,11 @@ lobby = createLobbyFlowController({
   onLikeProfile: (profileId) => submitProfileLike(profileId),
   onGiftCoinsSubmit: (friendshipId, amount) => submitGiftCoins(friendshipId, amount),
   onGiftCoinsBypassSubmit: (recipientProfileId, amount) => submitGiftCoinsBypass(recipientProfileId, amount),
+  // Mirror на onLudoMatchEndedProfileRefresh по-долу — fresh /api/auth/me,
+  // за да не показва gift modal-ът стар кеширан pikaTeamGiftMaxAmount/
+  // marketingGiftMaxAmount/*DailyGiftLimitStatus, ако admin е сменил
+  // дневния лимит, докато sender-ът вече стои logged-in.
+  onGiftModalOpenRefresh: () => { void loadAuthSession() },
   onAdminGiftItemsLoad: () => loadAdminGiftItems(),
   onAdminGiftItemSubmit: (input) => submitAdminGiftItem(input),
   onAdminGiftItemStatusChange: (giftItemId, isActive) => setAdminGiftItemStatus(giftItemId, isActive),

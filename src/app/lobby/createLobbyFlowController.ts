@@ -831,6 +831,17 @@ export type CreateLobbyFlowControllerOptions = {
    * (authStore.ts) — тук няма собствена role проверка, само UI wiring.
    */
   onGiftCoinsBypassSubmit?: (recipientProfileId: string, amount: number) => Promise<GiftCoinsSubmitResult>
+  /**
+   * Вика се при ОТВАРЯНЕ на gift modal-а (преди submit) — authSession.
+   * pikaTeamGiftMaxAmount/marketingGiftMaxAmount/*DailyGiftLimitStatus се
+   * обновяват САМО при login/след успешен gift (виж doc коментарите на
+   * LobbyAuthSession по-горе); ако admin промени pikaTeamDailyGiftLimit/
+   * marketingDailyGiftLimit, докато sender-ът вече стои logged-in, кешираната
+   * сесия показва СТАРАТА стойност, докато не се опресни. main.ts wire-ва
+   * това към established loadAuthSession() (mirror на
+   * onLudoMatchEndedProfileRefresh) — без нова fetch логика тук.
+   */
+  onGiftModalOpenRefresh?: () => void
   onPikaSupportChatStart?: (recipientProfileId: string) => Promise<
     | { ok: true; friendshipId: string }
     | { ok: false; message: string }
@@ -15216,6 +15227,7 @@ export function createLobbyFlowController(
     state.giftModalFriendName = relationship?.profile.displayName ?? 'приятел'
     state.giftModalErrorText = null
     render()
+    options.onGiftModalOpenRefresh?.()
   }
 
   // pika_team friendship-gate bypass — виж isPikaTeamGiftFriendshipBypassAuthSession
@@ -15230,6 +15242,7 @@ export function createLobbyFlowController(
       : 'играч'
     state.giftModalErrorText = null
     render()
+    options.onGiftModalOpenRefresh?.()
   }
 
   function closeGiftModal(): void {

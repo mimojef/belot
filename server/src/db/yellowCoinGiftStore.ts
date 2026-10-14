@@ -141,7 +141,17 @@ export type YellowCoinGiftStore = {
   markGiftNotificationRead: (giftId: string, profileId: ProfileId) => void
   /** Виж isPikaTeamGiftBypassProfileId дефиницията по-долу за пълния rationale. */
   isPikaTeamGiftBypassProfileId: (profileId: ProfileId) => boolean
-  getPikaTeamGiftMaxAmount: () => number
+  /**
+   * isRoleBased=true (accounts.role='pika_team') -> оставащият днешен баланс
+   * (admin-конфигурируем pikaTeamDailyGiftLimit минус вече подареното днес),
+   * не фиксирана константа — иначе admin-нато зададен лимит >100000 никога
+   * не би могъл реално да се използва в ЕДНА операция (виж doc коментара на
+   * sendGiftCore §4.5 "максимум X жълтици днес" бъг). isRoleBased=false
+   * (legacy pikaTeamGiftBypassProfileId) запазва старата фиксирана
+   * MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER стойност — отделен, по-стар механизъм,
+   * без admin-конфигурируем pool, непроменен.
+   */
+  getPikaTeamGiftMaxAmount: (senderProfileId: ProfileId, isRoleBased: boolean) => number
   /**
    * Informational read-only snapshot за profile popup gift UI (limit/used/
    * remaining, виж CLAUDE.md изискването "Profile gift UI") — sender трябва
@@ -154,8 +164,8 @@ export type YellowCoinGiftStore = {
     used: number
     remaining: number
   }
-  /** Mirror на getPikaTeamGiftMaxAmount по-горе, но за role='marketing'. */
-  getMarketingGiftMaxAmount: () => number
+  /** Mirror на getPikaTeamGiftMaxAmount по-горе, но за role='marketing' — винаги role-based (няма legacy marketing bypass), затова единствен параметър. */
+  getMarketingGiftMaxAmount: (senderProfileId: ProfileId) => number
   /** Mirror на getPikaTeamDailyGiftLimitStatus по-горе, но за role='marketing' (отделен pool). */
   getMarketingDailyGiftLimitStatus: (senderProfileId: ProfileId) => {
     limit: number
@@ -521,7 +531,29 @@ export async function createYellowCoinGiftStore(
     // като pika_team per-transaction max") — НЕ засяга §4.5 дневния лимит
     // по-долу, който е отделен, независим pool за marketing.
     const hasHigherMaxAmount = isPikaTeamSender || isRoleBasedPikaTeamSender || isRoleBasedMarketingSender
-    const maxAmountForSender = hasHigherMaxAmount ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER : MAX_GIFT_AMOUNT
+    // Per-транзакция таван — role-based pika_team/marketing вече имат
+    // собствен, admin-конфигурируем дневен лимит (§4.5/§4.6 по-долу);
+    // единичната сума НЕ трябва да е по-рестриктивна от самия дневен лимит,
+    // иначе admin-нато зададена стойност (напр. 500000) никога не може
+    // реално да се използва в ЕДНА операция (репортнат бъг: HTML input
+    // блокираше на фиксираните 100000, независимо от admin настройката).
+    // Истинският "оставащ дневен баланс" guard си остава §4.5/§4.6 по-долу
+    // (fresh read вътре в транзакцията) — тук само горната граница за
+    // amount-валидацията/съобщението. Legacy pikaTeamGiftBypassProfileId
+    // (без role) остава на старата фиксирана стойност — отделен, по-стар
+    // механизъм, без admin pool, непроменен.
+    // Math.max(MIN_GIFT_AMOUNT, ...) — ако admin зададе дневен лимит 0 (или
+    // друга стойност под MIN_GIFT_AMOUNT), този generic cap не трябва да е
+    // ТОЙ, който отказва (generic съобщение, без code); §4.5/§4.6 по-долу
+    // остава authoritative и връща специфичния *_DAILY_GIFT_LIMIT_EXCEEDED
+    // code (limit=0 edge case, виж checkYellowCoinGiftLimit.ts [48]).
+    const maxAmountForSender = isRoleBasedPikaTeamSender
+      ? Math.max(MIN_GIFT_AMOUNT, adminSettingsStore.getSettings().pikaTeamDailyGiftLimit)
+      : isRoleBasedMarketingSender
+        ? Math.max(MIN_GIFT_AMOUNT, adminSettingsStore.getSettings().marketingDailyGiftLimit)
+        : hasHigherMaxAmount
+          ? MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
+          : MAX_GIFT_AMOUNT
     const amount = isRoleBasedAdminSender
       ? normalizeGiftAmountForAdmin(amountRaw)
       : normalizeGiftAmount(amountRaw, maxAmountForSender)
@@ -534,11 +566,18 @@ export async function createYellowCoinGiftStore(
         }
       }
 
-      // Hardcoded literals (не formatBgNumber) — Intl.NumberFormat('bg-BG')
+      // Hardcoded literals (не formatBgNumber) за непроменените два случая
+      // (обикновен потребител/legacy bypass profile) — Intl.NumberFormat('bg-BG')
       // групира с U+00A0 (non-breaking space), различно byte-wise от
       // established regular-space текста, ползван навсякъде другаде в
-      // кода/тестовете ("1 000", "30 000" с обикновен интервал).
-      const maxAmountText = hasHigherMaxAmount ? '100 000' : '30 000'
+      // кода/тестовете ("1 000", "30 000" с обикновен интервал). Role-based
+      // pika_team/marketing вече имат ДИНАМИЧЕН (admin-конфигурируем) таван
+      // — тук е нужно formatBgNumber вместо literal.
+      const maxAmountText = isRoleBasedPikaTeamSender || isRoleBasedMarketingSender
+        ? formatBgNumber(maxAmountForSender)
+        : hasHigherMaxAmount
+          ? '100 000'
+          : '30 000'
       return {
         ok: false,
         message: `Сумата трябва да е между 1 000 и ${maxAmountText} жълтици.`,
@@ -878,8 +917,9 @@ export async function createYellowCoinGiftStore(
     return pikaTeamGiftBypassProfileId !== null && profileId === pikaTeamGiftBypassProfileId
   }
 
-  function getPikaTeamGiftMaxAmount(): number {
-    return MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
+  function getPikaTeamGiftMaxAmount(senderProfileId: ProfileId, isRoleBased: boolean): number {
+    if (!isRoleBased) return MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
+    return getPikaTeamDailyGiftLimitStatus(senderProfileId).remaining
   }
 
   // Read-only, извън BEGIN IMMEDIATE транзакция умишлено — само за UI
@@ -906,8 +946,8 @@ export async function createYellowCoinGiftStore(
   // "същата стойност като pika_team per-transaction max"), reuse-ва MAX_
   // GIFT_AMOUNT_PIKA_TEAM_SENDER директно (не отделна константа — задачата
   // изрично допуска reuse на СТОЙНОСТТА, само gate-ът е отделен).
-  function getMarketingGiftMaxAmount(): number {
-    return MAX_GIFT_AMOUNT_PIKA_TEAM_SENDER
+  function getMarketingGiftMaxAmount(senderProfileId: ProfileId): number {
+    return getMarketingDailyGiftLimitStatus(senderProfileId).remaining
   }
 
   // Mirror на getPikaTeamDailyGiftLimitStatus по-горе, но за role='marketing'

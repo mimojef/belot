@@ -9076,7 +9076,9 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
   const isRoleBasedMarketing = session.account.role === 'marketing'
   return {
     ...session,
-    pikaTeamGiftMaxAmount: hasHigherMaxAmount ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount() : null,
+    pikaTeamGiftMaxAmount: hasHigherMaxAmount
+      ? yellowCoinGiftStore.getPikaTeamGiftMaxAmount(session.profile.profileId, isRoleBasedPikaTeam)
+      : null,
     // Initial informational snapshot за profile popup gift UI (limit/used/
     // remaining) — само за role='pika_team' (изискването не покрива legacy
     // hardcoded bypass profile, който не е задължително role='pika_team').
@@ -9085,7 +9087,7 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     pikaTeamDailyGiftLimitStatus: isRoleBasedPikaTeam
       ? yellowCoinGiftStore.getPikaTeamDailyGiftLimitStatus(session.profile.profileId)
       : null,
-    marketingGiftMaxAmount: isRoleBasedMarketing ? yellowCoinGiftStore.getMarketingGiftMaxAmount() : null,
+    marketingGiftMaxAmount: isRoleBasedMarketing ? yellowCoinGiftStore.getMarketingGiftMaxAmount(session.profile.profileId) : null,
     marketingDailyGiftLimitStatus: isRoleBasedMarketing
       ? yellowCoinGiftStore.getMarketingDailyGiftLimitStatus(session.profile.profileId)
       : null,
