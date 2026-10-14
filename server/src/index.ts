@@ -479,8 +479,12 @@ import { createGcMetrics, type GcMetrics } from './monitoring/gcMetrics.js'
 import { setSendJsonMessageMonitoringHook } from './core/sendJsonMessage.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
 import { obtainBuyCheckoutSession } from './shop/obtainPendingPurchaseCheckoutSession.js'
-import { buildCoinCheckoutSessionParams } from './shop/buildCoinCheckoutSessionParams.js'
-import { recordUncreditedPaidCheckout } from './shop/recordUncreditedPaidCheckout.js'
+import {
+  buildBundleCheckoutSessionParams,
+  buildCoinCheckoutSessionParams,
+  buildVipCheckoutSessionParams,
+} from './shop/checkoutSessionParams.js'
+import { runFulfillment, settleCreditedPaidCheckout, settleUncreditedPaidCheckout } from './shop/recordUncreditedPaidCheckout.js'
 import { createPaymentReviewIssueStore } from './db/paymentReviewIssueStore.js'
 import type { PaymentReviewIssuePurchaseType } from './db/paymentReviewIssueStore.js'
 import type { PurchaseFulfillmentFailure } from './db/purchaseFulfillmentFailure.js'
@@ -11770,30 +11774,7 @@ async function handleVipCheckoutRequest(
   const obtained = await obtainBuyCheckoutSession({
     stripe,
     purchase,
-    buildCreateParams: (p) => ({
-      mode: 'payment',
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      line_items: [
-        {
-          price_data: {
-            currency: p.currency.toLowerCase(),
-            unit_amount: p.priceCents,
-            product_data: {
-              name: VIP_PACKAGE_CATALOG[p.packageId].title,
-            },
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        purchaseType: 'vip',
-        purchaseId: p.purchaseId,
-        profileId: payerProfileId,
-        recipientProfileId: p.recipientProfileId ?? '',
-        packageId: p.packageId,
-      },
-    }),
+    buildCreateParams: (p) => buildVipCheckoutSessionParams(p, payerProfileId, { successUrl, cancelUrl }),
     retirePendingPurchase: (id) => vipPurchaseStore.retirePendingPurchase(id),
     createReplacementPurchase: () => vipPurchaseStore.createPendingPurchase(payerProfileId, packageId, priceCents, recipientProfileId),
     logLabel: 'vip/checkout',
@@ -12060,33 +12041,7 @@ async function handleShopBundleCheckoutRequest(
   const obtained = await obtainBuyCheckoutSession({
     stripe,
     purchase,
-    buildCreateParams: (p) => ({
-      mode: 'payment',
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      line_items: [
-        {
-          price_data: {
-            currency: p.currency.toLowerCase(),
-            unit_amount: p.priceCents,
-            product_data: {
-              name: p.titleSnapshot,
-            },
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        // purchaseType='bundle' — disambiguator за webhook routing-a (mirror
-        // на VIP checkout-a metadata.purchaseType='vip'), виж
-        // handleStripeWebhookRequest по-долу.
-        purchaseType: 'bundle',
-        purchaseId: p.purchaseId,
-        profileId: payerProfileId,
-        recipientProfileId: p.recipientProfileId ?? '',
-        packageId: p.packageId ?? '',
-      },
-    }),
+    buildCreateParams: (p) => buildBundleCheckoutSessionParams(p, payerProfileId, { successUrl, cancelUrl }),
     retirePendingPurchase: (id) => bundlePurchaseStore.retirePendingPurchase(id),
     createReplacementPurchase: () => bundlePurchaseStore.createPendingPurchase(payerProfileId, packageId, recipientProfileId),
     logLabel: 'shop/bundle-checkout',
@@ -16775,35 +16730,45 @@ function broadcastActiveCampaignThemeToAllLocalConnections(): void {
   }
 }
 
-// Потвърдено плащане, което fulfillment-ът отказа → устойчив запис в
-// payment_review_issues (без кредитиране). false = записът не успя → webhook-ът
-// връща 500, за да опита Stripe отново (fulfillment-ът е идемпотентен).
+// Потвърдено плащане, което fulfillment-ът отказа → класифициран изход
+// (виж settleUncreditedPaidCheckout): окончателен проблем → устойчив запис в
+// payment_review_issues и 200; временна техническа грешка → 500, за да
+// опита Stripe отново; неуспешен запис → 500. Връща HTTP статуса.
 function reportUncreditedPaidCheckout(
   purchaseType: PaymentReviewIssuePurchaseType,
   stripeSession: Stripe.Checkout.Session,
   stripeEventId: string,
   failure: PurchaseFulfillmentFailure,
-): boolean {
-  try {
-    const issue = recordUncreditedPaidCheckout({
-      store: paymentReviewIssueStore,
-      purchaseType,
-      stripeSession,
-      stripeEventId,
-      failure,
-    })
-    if (issue !== null) {
-      console.error(
-        `[stripe/webhook] payment review issue kind=${issue.issueKind} type=${purchaseType} session=${issue.checkoutSessionId} purchaseId=${issue.purchaseId ?? ''} occurrences=${issue.occurrences}`,
-      )
-    }
-    return true
-  } catch (error) {
+): 200 | 500 {
+  const settlement = settleUncreditedPaidCheckout({
+    store: paymentReviewIssueStore,
+    purchaseType,
+    stripeSession,
+    stripeEventId,
+    failure,
+  })
+  if (settlement.issue !== null) {
     console.error(
-      `[stripe/webhook] payment review issue NOT recorded type=${purchaseType} session=${stripeSession.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+      `[stripe/webhook] payment review issue kind=${settlement.issue.issueKind} transient=${settlement.issue.isTransient} type=${purchaseType} session=${settlement.issue.checkoutSessionId} purchaseId=${settlement.issue.purchaseId ?? ''} occurrences=${settlement.issue.occurrences}`,
     )
-    return false
   }
+  if (settlement.error !== null) {
+    console.error(`[stripe/webhook] payment review issue NOT recorded type=${purchaseType} session=${stripeSession.id}: ${settlement.error}`)
+  }
+  if (settlement.httpStatus === 500) {
+    console.error(`[stripe/webhook] responding 500 so Stripe retries type=${purchaseType} session=${stripeSession.id}`)
+  }
+  return settlement.httpStatus
+}
+
+// Успешен fulfillment → затваря временните записи за сесията. false = не
+// успя (webhook-ът ще върне 500; повторението вижда alreadyCredited).
+function settleCreditedWebhookCheckout(checkoutSessionId: string): boolean {
+  const settlement = settleCreditedPaidCheckout({ store: paymentReviewIssueStore, checkoutSessionId })
+  if (settlement.error !== null) {
+    console.error(`[stripe/webhook] could not resolve transient issues session=${checkoutSessionId}: ${settlement.error}`)
+  }
+  return settlement.httpStatus === 200
 }
 
 async function handleStripeWebhookRequest(
@@ -16850,6 +16815,10 @@ async function handleStripeWebhookRequest(
     return true
   }
 
+  // true → кредитирането е успешно, но затварянето на временните записи не
+  // успя; 500 кара Stripe да опита отново (тогава: alreadyCredited, без кредит).
+  let webhookRetryRequested = false
+
   if (event.type === 'checkout.session.completed') {
     const stripeSession = event.data.object as Stripe.Checkout.Session
 
@@ -16857,19 +16826,19 @@ async function handleStripeWebhookRequest(
       const purchaseId = stripeSession.metadata?.purchaseId ?? ''
       const checkoutSessionId = stripeSession.id
 
-      const vipResult = vipPurchaseStore.fulfillPaidPurchase({
+      const vipResult = runFulfillment(() => vipPurchaseStore.fulfillPaidPurchase({
         checkoutSessionId,
         purchaseId,
         stripePaymentStatus: stripeSession.payment_status,
         stripeCurrency: (stripeSession.currency ?? '').toUpperCase(),
         stripeAmountTotalCents: stripeSession.amount_total ?? -1,
-      })
+      }))
 
       if (!vipResult.ok) {
         console.error(
           `[stripe/webhook] VIP fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${vipResult.message}`,
         )
-        if (!reportUncreditedPaidCheckout('vip', stripeSession, event.id, vipResult)) {
+        if (reportUncreditedPaidCheckout('vip', stripeSession, event.id, vipResult) === 500) {
           sendJsonResponse(res, 500, { ok: false })
           return true
         }
@@ -16899,6 +16868,10 @@ async function handleStripeWebhookRequest(
       // успешно ИЛИ alreadyCredited replay — hook-ът е idempotent). Вика се
       // безусловно при vipResult.ok, НЕЗАВИСИМО от payment-method enrichment
       // по-долу (display-only, никога не влияе на начислението).
+      if (vipResult.ok && !settleCreditedWebhookCheckout(checkoutSessionId)) {
+        webhookRetryRequested = true
+      }
+
       if (vipResult.ok && campaignCreditStore !== null) {
         recordPurchaseForCampaign({
           campaignCreditStore,
@@ -16964,7 +16937,7 @@ async function handleStripeWebhookRequest(
         }
       }
 
-      sendJsonResponse(res, 200, { ok: true })
+      sendJsonResponse(res, webhookRetryRequested ? 500 : 200, { ok: !webhookRetryRequested })
       return true
     }
 
@@ -16974,19 +16947,19 @@ async function handleStripeWebhookRequest(
 
       // Единствената atomic settlement точка (coins + VIP extend в ЕДНА
       // транзакция, §8/§9 в брифа) — mirror на VIP branch-а по-горе.
-      const bundleResult = bundlePurchaseStore.fulfillPaidPurchase({
+      const bundleResult = runFulfillment(() => bundlePurchaseStore.fulfillPaidPurchase({
         checkoutSessionId,
         purchaseId,
         stripePaymentStatus: stripeSession.payment_status,
         stripeCurrency: (stripeSession.currency ?? '').toUpperCase(),
         stripeAmountTotalCents: stripeSession.amount_total ?? -1,
-      })
+      }))
 
       if (!bundleResult.ok) {
         console.error(
           `[stripe/webhook] Bundle fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${bundleResult.message}`,
         )
-        if (!reportUncreditedPaidCheckout('bundle', stripeSession, event.id, bundleResult)) {
+        if (reportUncreditedPaidCheckout('bundle', stripeSession, event.id, bundleResult) === 500) {
           sendJsonResponse(res, 500, { ok: false })
           return true
         }
@@ -17012,6 +16985,10 @@ async function handleStripeWebhookRequest(
       // Кампании (Фаза 5) — mirror на VIP branch-а по-горе. payerProfileId
       // може да е null (payer hard-deleted след покупката, 20260923_004) —
       // recordPurchaseForCampaign просто skip-ва в тоя случай.
+      if (bundleResult.ok && !settleCreditedWebhookCheckout(checkoutSessionId)) {
+        webhookRetryRequested = true
+      }
+
       if (bundleResult.ok && campaignCreditStore !== null) {
         recordPurchaseForCampaign({
           campaignCreditStore,
@@ -17073,7 +17050,7 @@ async function handleStripeWebhookRequest(
         }
       }
 
-      sendJsonResponse(res, 200, { ok: true })
+      sendJsonResponse(res, webhookRetryRequested ? 500 : 200, { ok: !webhookRetryRequested })
       return true
     }
 
@@ -17084,22 +17061,26 @@ async function handleStripeWebhookRequest(
       const currency = stripeSession.currency ?? ''
 
       // Step 1: fulfill atomically — this MUST succeed regardless of Stripe enrichment
-      const result = coinPurchaseStore.fulfillPaidPurchase({
+      const result = runFulfillment(() => coinPurchaseStore.fulfillPaidPurchase({
         checkoutSessionId,
         purchaseId,
         amountPaidCents,
         currency,
-      })
+      }))
 
       if (!result.ok) {
         console.error(
           `[stripe/webhook] fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${result.message}`,
         )
-        if (!reportUncreditedPaidCheckout('coin', stripeSession, event.id, result)) {
+        if (reportUncreditedPaidCheckout('coin', stripeSession, event.id, result) === 500) {
           sendJsonResponse(res, 500, { ok: false })
           return true
         }
       } else {
+        if (!settleCreditedWebhookCheckout(checkoutSessionId)) {
+          webhookRetryRequested = true
+        }
+
         if (result.alreadyCredited) {
           console.log(
             `[stripe/webhook] already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
@@ -17203,7 +17184,7 @@ async function handleStripeWebhookRequest(
     }
   }
 
-  sendJsonResponse(res, 200, { ok: true })
+  sendJsonResponse(res, webhookRetryRequested ? 500 : 200, { ok: !webhookRetryRequested })
   return true
 }
 

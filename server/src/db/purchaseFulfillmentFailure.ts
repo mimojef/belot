@@ -19,6 +19,12 @@ export type PurchaseFulfillmentFailure = {
   ok: false
   message: string
   reason?: PurchaseFulfillmentFailureReason
+  /**
+   * Само за 'credit_failed': временна техническа грешка (заключена база,
+   * I/O, прекъснато потвърждение след успешен commit…) — повторение може да
+   * успее, webhook-ът връща 500. Липсва/false = детерминистично.
+   */
+  transient?: boolean
   /** Намереният ledger ред (null/липсва, ако не е намерен). */
   purchaseId?: string | null
   payerProfileId?: string | null

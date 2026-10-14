@@ -27,6 +27,8 @@ export type RecordPaymentReviewIssueInput = {
   metadataPurchaseId: string | null
   payerProfileId: string | null
   issueKind: PaymentReviewIssueKind
+  /** Временна техническа грешка (webhook 500, Stripe retry) — затваря се автоматично при окончателен резултат. */
+  isTransient: boolean
   detail: string
   stripeAmountTotal: number | null
   stripeCurrency: string | null
@@ -44,12 +46,15 @@ export type PaymentReviewIssueSnapshot = {
   metadataPurchaseId: string | null
   payerProfileId: string | null
   issueKind: PaymentReviewIssueKind
+  /** Временна техническа грешка (webhook 500, Stripe retry) — затваря се автоматично при окончателен резултат. */
+  isTransient: boolean
   detail: string
   stripeAmountTotal: number | null
   stripeCurrency: string | null
   expectedAmount: number | null
   expectedCurrency: string | null
   status: 'open' | 'resolved'
+  resolutionNote: string | null
   occurrences: number
   firstSeenAt: string
   lastSeenAt: string
@@ -59,6 +64,11 @@ export type PaymentReviewIssueStore = {
   /** Идемпотентно по (checkoutSessionId, issueKind): повторение увеличава occurrences. */
   recordIssue: (input: RecordPaymentReviewIssueInput) => PaymentReviewIssueSnapshot
   listOpenIssues: () => PaymentReviewIssueSnapshot[]
+  /**
+   * Затваря ОТВОРЕНИТЕ временни записи за сесията, когато повторна доставка
+   * стигне до окончателен резултат. Окончателните проблеми не се пипат.
+   */
+  resolveTransientIssuesForSession: (checkoutSessionId: string, resolutionNote: string) => number
   close: () => void
 }
 
@@ -72,12 +82,14 @@ type PaymentReviewIssueRow = {
   metadata_purchase_id: string | null
   payer_profile_id: string | null
   issue_kind: PaymentReviewIssueKind
+  is_transient: number
   detail: string
   stripe_amount_total: number | null
   stripe_currency: string | null
   expected_amount: number | null
   expected_currency: string | null
   status: 'open' | 'resolved'
+  resolution_note: string | null
   occurrences: number
   first_seen_at: string
   last_seen_at: string
@@ -94,12 +106,14 @@ function rowToSnapshot(row: PaymentReviewIssueRow): PaymentReviewIssueSnapshot {
     metadataPurchaseId: row.metadata_purchase_id,
     payerProfileId: row.payer_profile_id,
     issueKind: row.issue_kind,
+    isTransient: row.is_transient === 1,
     detail: row.detail,
     stripeAmountTotal: row.stripe_amount_total,
     stripeCurrency: row.stripe_currency,
     expectedAmount: row.expected_amount,
     expectedCurrency: row.expected_currency,
     status: row.status,
+    resolutionNote: row.resolution_note,
     occurrences: row.occurrences,
     firstSeenAt: dbDateToUtc(row.first_seen_at),
     lastSeenAt: dbDateToUtc(row.last_seen_at),
@@ -119,19 +133,33 @@ export async function createPaymentReviewIssueStore(
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec('PRAGMA busy_timeout = 5000;')
 
-  // Първото наблюдение пази оригиналните факти; повторенията само броят и
-  // обновяват last_seen_at/stripe_event_id (resolved остава resolved).
+  // Първото наблюдение пази оригиналните факти (суми, сесия, поръчка);
+  // повторенията броят, обновяват last_seen_at/stripe_event_id и ПОСЛЕДНАТА
+  // класификация (is_transient/detail) — напр. временна грешка, повторена
+  // като детерминистична. resolved остава resolved.
   const upsertIssueStatement = database.prepare(`
     INSERT INTO payment_review_issues (
       issue_id, checkout_session_id, stripe_event_id, stripe_payment_intent_id,
       purchase_type, purchase_id, metadata_purchase_id, payer_profile_id,
-      issue_kind, detail, stripe_amount_total, stripe_currency,
+      issue_kind, is_transient, detail, stripe_amount_total, stripe_currency,
       expected_amount, expected_currency
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (checkout_session_id, issue_kind) DO UPDATE SET
       occurrences = occurrences + 1,
       last_seen_at = CURRENT_TIMESTAMP,
-      stripe_event_id = COALESCE(excluded.stripe_event_id, stripe_event_id);
+      stripe_event_id = COALESCE(excluded.stripe_event_id, stripe_event_id),
+      is_transient = excluded.is_transient,
+      detail = excluded.detail;
+  `)
+
+  const resolveTransientIssuesStatement = database.prepare(`
+    UPDATE payment_review_issues
+    SET status = 'resolved',
+      resolved_at = CURRENT_TIMESTAMP,
+      resolution_note = ?
+    WHERE checkout_session_id = ?
+      AND is_transient = 1
+      AND status = 'open';
   `)
 
   const selectIssueStatement = database.prepare(`
@@ -158,6 +186,7 @@ export async function createPaymentReviewIssueStore(
       input.metadataPurchaseId,
       input.payerProfileId,
       input.issueKind,
+      input.isTransient ? 1 : 0,
       input.detail,
       input.stripeAmountTotal,
       input.stripeCurrency,
@@ -178,9 +207,14 @@ export async function createPaymentReviewIssueStore(
     return (selectOpenIssuesStatement.all() as PaymentReviewIssueRow[]).map(rowToSnapshot)
   }
 
+  function resolveTransientIssuesForSession(checkoutSessionId: string, resolutionNote: string): number {
+    const result = resolveTransientIssuesStatement.run(resolutionNote, checkoutSessionId) as { changes?: number }
+    return result.changes ?? 0
+  }
+
   function close(): void {
     database.close()
   }
 
-  return { recordIssue, listOpenIssues, close }
+  return { recordIssue, listOpenIssues, resolveTransientIssuesForSession, close }
 }

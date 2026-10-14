@@ -15,6 +15,7 @@
  * [H7] bundle, грешна валута → currency_mismatch, без кредит
  * [H8] Meri86-подобен платен ред + ръчна компенсация: повторна доставка → без промяна, без запис
  * [H9] невалиден подпис → 400, без запис
+ * [H10] заключена база (временна грешка) → 500; повторението кредитира веднъж, без активни проблеми
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -278,6 +279,32 @@ async function main(): Promise<void> {
         assert(status === 200, `status ${status}`)
         assert(walletOf('h-meri') === 2250000 && issueCount() === before, 'wallet/записи непроменени')
         assert(JSON.stringify(db.prepare(`SELECT * FROM coin_purchase_ledger WHERE purchase_id = 'h-meri-paid'`).get()) === rowBefore, 'редът непроменен')
+      })
+
+      await check('[H10] заключена база (временна грешка) → 500; след освобождаване повторението кредитира веднъж, без активни проблеми', async () => {
+        db.exec(`
+          INSERT INTO profiles (profile_id, display_name, normalized_display_name) VALUES ('h-lock', 'h-lock', 'h-lock');
+          INSERT INTO coin_purchase_ledger (purchase_id, profile_id, package_id, package_key_snapshot, title_snapshot,
+            yellow_coins_amount, price_cents, currency, provider_checkout_session_id, status)
+          VALUES ('h-lock-p', 'h-lock', 'h-pkg', 'h-pkg', 'Елит', 2250000, 1699, 'EUR', 'cs_h_lock', 'pending');
+        `)
+        const session = { ...coinSession('cs_h_lock', 'h-lock-p', 1699), metadata: { purchaseId: 'h-lock-p', profileId: 'h-lock' } }
+        // Write lock > busy_timeout (5 s) на сървъра → SQLITE_BUSY при кредитиране.
+        db.exec('BEGIN IMMEDIATE;')
+        let lockedStatus = 0
+        try {
+          lockedStatus = await postEvent(port, session, { eventId: 'evt_h10' })
+        } finally {
+          db.exec('ROLLBACK;')
+        }
+        assert(lockedStatus === 500, `при заключена база очакван 500, получен ${lockedStatus}`)
+        assert(walletOf('h-lock') === 0 && coinStatus('h-lock-p') === 'pending', 'без кредит, pending')
+
+        assert(await postEvent(port, session, { eventId: 'evt_h10' }) === 200, 'повторение → 200')
+        assert(await postEvent(port, session, { eventId: 'evt_h10' }) === 200, 'второ повторение → 200')
+        assert(walletOf('h-lock') === 2250000, `wallet ${walletOf('h-lock')}`)
+        const open = db.prepare(`SELECT COUNT(*) AS c FROM payment_review_issues WHERE checkout_session_id = 'cs_h_lock' AND status = 'open'`).get() as { c: number }
+        assert(open.c === 0, `активни проблеми: ${open.c}`)
       })
 
       await check('[H9] невалиден подпис → 400, без запис', async () => {

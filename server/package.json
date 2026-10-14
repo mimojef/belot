@@ -232,6 +232,8 @@
     "check:stale-pending-purchase-offer": "tsx scripts/checkStalePendingPurchaseOffer.ts",
     "check:stripe-old-session-and-payment-review": "tsx scripts/checkStripeOldSessionAndPaymentReview.ts",
     "check:stripe-webhook-payment-review-http": "tsx scripts/checkStripeWebhookPaymentReviewHttp.ts --server-root=.",
+    "check:payment-retry-and-checkout-names": "tsx scripts/checkPaymentRetryAndCheckoutNames.ts",
+    "check:payment-migrations-upgrade": "tsx scripts/checkPaymentMigrationsUpgrade.ts",
     "check:gift-recipient-migration": "tsx scripts/checkGiftRecipientMigration.ts",
     "check:paid-gift-shop-stores": "tsx scripts/checkPaidGiftShopStores.ts",
     "check:old-gift-coins-endpoint-denied": "tsx scripts/checkOldGiftCoinsEndpointDeniedForNormalUsers.ts --server-root=.",

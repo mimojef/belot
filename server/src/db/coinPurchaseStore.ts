@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { PurchaseFulfillmentFailure } from './purchaseFulfillmentFailure.js'
+import { isTransientDatabaseError } from './classifyFulfillmentError.js'
 import { dbDateToUtc } from './dbDate.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod as SharedAdminPaymentPeriod } from './sofiaDayBounds.js'
 import { composePayerCoinGiftSuccessText, composeRecipientCoinGiftNotificationText } from './paidGiftNotificationText.js'
@@ -1095,7 +1096,10 @@ export async function createCoinPurchaseStore(
     let recipientNotificationText: string | null = null
 
     try {
-      database.exec('BEGIN;')
+      // IMMEDIATE (mirror на VIP/bundle): write lock още при BEGIN, така че
+      // busy_timeout важи и грешка при заключена база е класифицируема
+      // временна (SQLITE_BUSY), а не по средата на транзакцията.
+      database.exec('BEGIN IMMEDIATE;')
 
       // Defense-in-depth: ако recipient профилът изчезне В ТОЧНИЯ момент
       // между горната explicit проверка и тук (race срещу конкурентен hard
@@ -1130,7 +1134,7 @@ export async function createCoinPurchaseStore(
           return { ok: true, purchase, payerProfileId: fresh.profile_id, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
         }
 
-        return { ok: false, reason: 'credit_failed', message: 'Покупката вече беше обработена от друг процес.' }
+        return { ok: false, reason: 'credit_failed', transient: true, message: 'Покупката вече беше обработена от друг процес.' }
       }
 
       // "Подари авоари" durable recipient notification (Round 3 §5) — СЛЕД
@@ -1166,6 +1170,7 @@ export async function createCoinPurchaseStore(
       return {
         ok: false,
         reason: 'credit_failed',
+        transient: isTransientDatabaseError(error),
         message: error instanceof Error ? error.message : 'Грешка при кредитиране на жълтици.',
       }
     }
@@ -1173,7 +1178,7 @@ export async function createCoinPurchaseStore(
     const fulfilled = getPurchaseById(row.purchase_id)
 
     if (fulfilled === null) {
-      return { ok: false, reason: 'credit_failed', message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
+      return { ok: false, reason: 'credit_failed', transient: true, message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
     }
 
     return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }

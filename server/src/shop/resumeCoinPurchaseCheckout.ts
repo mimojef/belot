@@ -1,6 +1,6 @@
 import type Stripe from 'stripe'
 import type { CoinPurchaseSnapshot, CoinPurchaseStore } from '../db/coinPurchaseStore.js'
-import { buildCoinCheckoutSessionParams } from './buildCoinCheckoutSessionParams.js'
+import { buildCoinCheckoutSessionParams } from './checkoutSessionParams.js'
 import { getPendingPurchaseCheckoutIdempotencyKey } from './obtainPendingPurchaseCheckoutSession.js'
 
 export type ResumeCoinPurchaseCheckoutParams = {

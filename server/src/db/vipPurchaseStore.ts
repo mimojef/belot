@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import type { PurchaseFulfillmentFailure } from './purchaseFulfillmentFailure.js'
+import { isTransientDatabaseError } from './classifyFulfillmentError.js'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
@@ -713,7 +714,7 @@ export async function createVipPurchaseStore(
             recipientNotificationText: null,
           }
         }
-        return { ok: false, reason: 'credit_failed', message: 'Покупката вече беше обработена от друг процес.' }
+        return { ok: false, reason: 'credit_failed', transient: true, message: 'Покупката вече беше обработена от друг процес.' }
       }
 
       const grantId = randomUUID()
@@ -759,13 +760,14 @@ export async function createVipPurchaseStore(
       return {
         ok: false,
         reason: 'credit_failed',
+        transient: isTransientDatabaseError(error),
         message: error instanceof Error ? error.message : 'Грешка при активиране на VIP.',
       }
     }
 
     const fulfilled = getPurchaseById(row.purchase_id)
     if (fulfilled === null) {
-      return { ok: false, reason: 'credit_failed', message: 'VIP беше активиран, но покупката не може да се прочете.' }
+      return { ok: false, reason: 'credit_failed', transient: true, message: 'VIP беше активиран, но покупката не може да се прочете.' }
     }
 
     return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }

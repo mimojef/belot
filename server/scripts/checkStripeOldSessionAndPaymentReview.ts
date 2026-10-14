@@ -58,7 +58,7 @@ import {
   obtainBuyCheckoutSession,
   getPendingPurchaseCheckoutIdempotencyKey,
 } from '../src/shop/obtainPendingPurchaseCheckoutSession.js'
-import { buildCoinCheckoutSessionParams } from '../src/shop/buildCoinCheckoutSessionParams.js'
+import { buildCoinCheckoutSessionParams } from '../src/shop/checkoutSessionParams.js'
 import { resumeCoinPurchaseCheckout } from '../src/shop/resumeCoinPurchaseCheckout.js'
 import { recordUncreditedPaidCheckout } from '../src/shop/recordUncreditedPaidCheckout.js'
 
