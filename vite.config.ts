@@ -33,7 +33,30 @@ function disableServiceWorkerCodeSplitting(options: InlineConfig): void {
   }
 }
 
+// Свара (Етап 2А): всички chunks с модули от анимационния прототип или от
+// pixi.js получават префикс "svara-", за да се изключат от PWA precache-а
+// (виж globIgnores по-долу) — графичните зависимости се свалят само при
+// отваряне на Свара, не от всеки посетител чрез service worker-а.
+const SVARA_CHUNK_MODULE_PATTERN = /[\\/](?:src[\\/]app[\\/]games[\\/]svara[\\/]demo|node_modules[\\/](?:pixi\.js|@pixi))[\\/]/
+
+function isSvaraChunk(moduleIds: readonly string[]): boolean {
+  return moduleIds.some((id) => SVARA_CHUNK_MODULE_PATTERN.test(id))
+}
+
 export default defineConfig({
+  build: {
+    rolldownOptions: {
+      output: {
+        // facadeModuleId покрива и фасадните re-export chunks на pixi.js
+        // (WebGLRenderer/WebGPURenderer), които нямат собствени модули.
+        chunkFileNames: (chunk) => (
+          isSvaraChunk([...chunk.moduleIds, chunk.facadeModuleId ?? ''])
+            ? 'assets/svara-[name]-[hash].js'
+            : 'assets/[name]-[hash].js'
+        ),
+      },
+    },
+  },
   define: {
     __PWA_BUILD_ID__: JSON.stringify(resolveBuildId()),
   },
@@ -79,7 +102,7 @@ export default defineConfig({
       },
       injectManifest: {
         globPatterns: ['**/*.{js,css,html,ico,svg,png,webp,mp3,woff2}'],
-        globIgnores: ['index.html'],
+        globIgnores: ['index.html', 'assets/svara-*'],
         injectionPoint: 'self.__WB_MANIFEST',
         // "Подари авоари" feature добавка бутна главния bundle леко над
         // default 2 MiB precache лимита (2095KB baseline -> 2100KB). Вдигнат

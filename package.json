@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "check:ludo-track-geometry": "npx tsx scripts/checkLudoTrackGeometry.ts",
+    "check:svara-animation-demo": "npx tsx scripts/checkSvaraAnimationDemo.ts",
+    "check:svara-animation-demo-browser": "npx tsx scripts/checkSvaraAnimationDemoBrowser.ts --project-root=.",
     "check:ludo-legal-move-math": "npx tsx scripts/checkLudoLegalMoveMath.ts",
     "check:ludo-stack-capture": "npx tsx scripts/checkLudoStackCapture.ts",
     "check:ludo-safe-cell-capture": "npx tsx scripts/checkLudoSafeCellCapture.ts",
@@ -135,5 +137,8 @@
     "jake": {
       "filelist": "2.0.2"
     }
+  },
+  "dependencies": {
+    "pixi.js": "8.22.0"
   }
 }

@@ -1,5 +1,5 @@
-// "Свара" — начална страница (Етап 1): заглавие, "В разработка" и връзка
-// обратно към "Игри". Без маса/карти/мултиплейър.
+// "Свара" — начална страница: заглавие, "В разработка", връзка обратно към
+// "Игри" и (Етап 2А) mount за анимационния прототип. Без реална игра.
 //
 // status==='checking' рендира само неутрален loader — съдържанието се
 // показва едва при 'granted' (потвърдено от сървъра). При отказ
@@ -19,7 +19,7 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
   }
 
   return `
-    <article data-svara-page="granted" style="padding:${padding};max-width:720px;box-sizing:border-box;">
+    <article data-svara-page="granted" style="padding:${padding};width:100%;max-width:720px;box-sizing:border-box;">
       <div style="
         background:#000000;
         border:2px solid rgba(212,165,32,0.78);
@@ -41,6 +41,8 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
           font-weight:800;
         ">В разработка</div>
       </div>
+      <h2 style="margin:${useMobileLayout ? '22px' : '28px'} 0 0;color:#fff;font-size:${useMobileLayout ? '17px' : '20px'};font-weight:900;">Анимационен прототип</h2>
+      <div data-svara-demo-mount="1"></div>
       <a
         href="/games"
         data-svara-back-to-games="1"

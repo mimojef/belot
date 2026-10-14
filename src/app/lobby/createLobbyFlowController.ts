@@ -8024,6 +8024,47 @@ export function createLobbyFlowController(
     } else if (_ludoLobbyController) {
       closeLudoLobbyOverlay()
     }
+
+    if (state.currentScreen === 'svara' && state.svaraPageStatus === 'granted') {
+      void ensureSvaraAnimationDemo()
+    } else {
+      destroySvaraAnimationDemo()
+    }
+  }
+
+  // Свара анимационен прототип (Етап 2А) — зарежда се с dynamic import САМО
+  // след потвърден от сървъра достъп. Живее в data-svara-demo-mount
+  // placeholder-а; при unrelated re-render на root.innerHTML същият DOM
+  // възел се премества в новия placeholder (без рестарт/загуба на WebGL).
+  let _svaraAnimationDemo: { element: HTMLElement; destroy(): void } | null = null
+  let _isLoadingSvaraAnimationDemo = false
+  async function ensureSvaraAnimationDemo(): Promise<void> {
+    const mount = options.root.querySelector<HTMLElement>('[data-svara-demo-mount="1"]')
+    if (!mount) return
+    if (_svaraAnimationDemo) {
+      if (_svaraAnimationDemo.element.parentElement !== mount) mount.appendChild(_svaraAnimationDemo.element)
+      return
+    }
+    if (_isLoadingSvaraAnimationDemo) return
+    _isLoadingSvaraAnimationDemo = true
+    try {
+      const { createSvaraAnimationDemo } = await import('../games/svara/demo/createSvaraAnimationDemo')
+      if (state.currentScreen !== 'svara' || state.svaraPageStatus !== 'granted' || _svaraAnimationDemo) return
+      const liveMount = options.root.querySelector<HTMLElement>('[data-svara-demo-mount="1"]')
+      if (!liveMount) return
+      _svaraAnimationDemo = createSvaraAnimationDemo()
+      liveMount.appendChild(_svaraAnimationDemo.element)
+    } catch (error) {
+      console.warn('[svara-demo] failed to load', error)
+    } finally {
+      _isLoadingSvaraAnimationDemo = false
+    }
+  }
+
+  function destroySvaraAnimationDemo(): void {
+    if (!_svaraAnimationDemo) return
+    _svaraAnimationDemo.destroy()
+    _svaraAnimationDemo = null
   }
 
   async function submitPresetAvatar(avatarUrl: string): Promise<void> {
