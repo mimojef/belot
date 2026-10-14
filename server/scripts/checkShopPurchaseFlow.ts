@@ -424,8 +424,9 @@ async function main(): Promise<void> {
 
       assert(res1.ok || res2.ok, 'поне едната заявка трябва да успее')
 
-      // Всяко create повикване трябва да носи ТОЧНО ЕДИН idempotency key: resume-{id}-{oldSessionId}
-      const expectedKey = 'resume-p-conc-cs_exp_conc'
+      // Всяко create повикване трябва да носи ТОЧНО ЕДИН idempotency key:
+      // checkout-{id}-{oldSessionId} (общ с /api/shop/checkout „Купи“).
+      const expectedKey = 'checkout-p-conc-cs_exp_conc'
       for (const call of createCalls) {
         const key = (call.options as { idempotencyKey?: string }).idempotencyKey
         assert(key === expectedKey, `idempotency key трябва да е "${expectedKey}", получен: "${key}"`)

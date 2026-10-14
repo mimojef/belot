@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { PurchaseFulfillmentFailure } from './purchaseFulfillmentFailure.js'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
@@ -76,6 +77,12 @@ export type VipPurchaseStore = {
     recipientProfileId?: string | null,
   ) => { ok: true; purchase: VipPurchaseSnapshot } | { ok: false; message: string }
   getPurchaseById: (purchaseId: string) => VipPurchaseSnapshot | null
+  /**
+   * Скрива pending ред, чиято сесия вече е complete, за да може „Купи“ да
+   * създаде нов ред. Webhook-ът за старата сесия пак намира реда по
+   * session id и го кредитира (hidden_at не влияе на fulfillment-а).
+   */
+  retirePendingPurchase: (purchaseId: string) => boolean
   attachCheckoutSession: (purchaseId: string, checkoutSessionId: string) => VipPurchaseSnapshot | null
   findByCheckoutSessionId: (checkoutSessionId: string) => VipPurchaseSnapshot | null
   markPurchaseCanceledByCheckoutSessionId: (checkoutSessionId: string) => void
@@ -90,7 +97,7 @@ export type VipPurchaseStore = {
    */
   fulfillPaidPurchase: (params: FulfillPaidVipPurchaseParams) =>
     | { ok: true; purchase: VipPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
-    | { ok: false; message: string }
+    | PurchaseFulfillmentFailure
   /**
    * Admin payment statistics contribution от VIP покупки — mirror на
    * coinPurchaseStore.getAdminPaymentStats(), reuse-ва СЪЩИЯ
@@ -170,6 +177,17 @@ function rowToSnapshot(row: VipPurchaseRow): VipPurchaseSnapshot {
     recipientProfileId: row.recipient_profile_id ?? null,
     recipientDisplayNameSnapshot: row.recipient_display_name_snapshot ?? null,
     payerSuccessText,
+  }
+}
+
+// Контекст на намерения ledger ред за payment_review_issues (виж
+// purchaseFulfillmentFailure.ts).
+function failureContext(row: VipPurchaseInternalRow): Pick<PurchaseFulfillmentFailure, 'purchaseId' | 'payerProfileId' | 'expectedAmountCents' | 'expectedCurrency'> {
+  return {
+    purchaseId: row.purchase_id,
+    payerProfileId: row.profile_id,
+    expectedAmountCents: row.price_cents_snapshot,
+    expectedCurrency: row.currency,
   }
 }
 
@@ -525,6 +543,11 @@ export async function createVipPurchaseStore(
     return { ok: true, purchase }
   }
 
+  function retirePendingPurchase(purchaseId: string): boolean {
+    const result = retireStalePendingStatement.run(purchaseId) as { changes?: number }
+    return (result.changes ?? 0) > 0
+  }
+
   function attachCheckoutSession(purchaseId: string, checkoutSessionId: string): VipPurchaseSnapshot | null {
     attachCheckoutSessionStatement.run(checkoutSessionId, purchaseId)
     return getPurchaseById(purchaseId)
@@ -569,7 +592,7 @@ export async function createVipPurchaseStore(
          */
         recipientNotificationText: string | null
       }
-    | { ok: false; message: string } {
+    | PurchaseFulfillmentFailure {
     // §15-20/§24 в брифа — наградата (VIP дни) отива на RECIPIENT-а, не на
     // PAYER-а. row.profile_id остава семантично "payer" (Stripe session
     // owner).
@@ -612,6 +635,7 @@ export async function createVipPurchaseStore(
     if (row.status !== 'pending') {
       return {
         ok: false,
+        reason: 'not_creditable',
         message: `Покупката е в статус "${row.status}" и не може да бъде кредитирана.`,
       }
     }
@@ -622,6 +646,7 @@ export async function createVipPurchaseStore(
       // опитваме дори да четем/пипаме vip_status. Редът остава 'pending'.
       return {
         ok: false,
+        reason: 'not_creditable',
         message: 'Получателят на подаръка вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
       }
     }
@@ -688,7 +713,7 @@ export async function createVipPurchaseStore(
             recipientNotificationText: null,
           }
         }
-        return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
+        return { ok: false, reason: 'credit_failed', message: 'Покупката вече беше обработена от друг процес.' }
       }
 
       const grantId = randomUUID()
@@ -733,13 +758,14 @@ export async function createVipPurchaseStore(
       }
       return {
         ok: false,
+        reason: 'credit_failed',
         message: error instanceof Error ? error.message : 'Грешка при активиране на VIP.',
       }
     }
 
     const fulfilled = getPurchaseById(row.purchase_id)
     if (fulfilled === null) {
-      return { ok: false, message: 'VIP беше активиран, но покупката не може да се прочете.' }
+      return { ok: false, reason: 'credit_failed', message: 'VIP беше активиран, но покупката не може да се прочете.' }
     }
 
     return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
@@ -749,7 +775,7 @@ export async function createVipPurchaseStore(
     params: FulfillPaidVipPurchaseParams,
   ):
     | { ok: true; purchase: VipPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
-    | { ok: false; message: string } {
+    | PurchaseFulfillmentFailure {
     const { checkoutSessionId, purchaseId, stripePaymentStatus, stripeCurrency, stripeAmountTotalCents } = params
 
     // Lookup СТРОГО по checkoutSessionId — доказва, че тази конкретна Stripe
@@ -759,17 +785,17 @@ export async function createVipPurchaseStore(
     // подправена/грешна metadata.purchaseId с произволна валидна сесия би
     // могла да сетълне чужд ред.
     if (!checkoutSessionId) {
-      return { ok: false, message: 'Липсва checkout session id.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Липсва checkout session id.' }
     }
 
     const internalRow = getPurchaseWithProfileBySessionId(checkoutSessionId)
 
     if (internalRow === null) {
-      return { ok: false, message: 'Покупката не беше намерена за тази checkout сесия.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Покупката не беше намерена за тази checkout сесия.' }
     }
 
     if (purchaseId && internalRow.purchase_id !== purchaseId) {
-      return { ok: false, message: 'Несъответствие между checkout сесията и purchaseId.' }
+      return { ok: false, reason: 'purchase_id_mismatch', message: 'Несъответствие между checkout сесията и purchaseId.', ...failureContext(internalRow) }
     }
 
     // already-credited redelivery: пускаме БЕЗ повторна Stripe field проверка
@@ -780,12 +806,14 @@ export async function createVipPurchaseStore(
     }
 
     if (stripePaymentStatus !== 'paid') {
-      return { ok: false, message: `Stripe payment_status "${stripePaymentStatus}" не е "paid".` }
+      return { ok: false, reason: 'not_paid', message: `Stripe payment_status "${stripePaymentStatus}" не е "paid".` }
     }
 
     if (stripeCurrency.toUpperCase() !== internalRow.currency.toUpperCase()) {
       return {
         ok: false,
+        reason: 'currency_mismatch',
+        ...failureContext(internalRow),
         message: `Валутата от Stripe (${stripeCurrency}) не съвпада с очакваната (${internalRow.currency}).`,
       }
     }
@@ -793,6 +821,8 @@ export async function createVipPurchaseStore(
     if (stripeAmountTotalCents !== internalRow.price_cents_snapshot) {
       return {
         ok: false,
+        reason: 'amount_mismatch',
+        ...failureContext(internalRow),
         message: `Платената сума от Stripe (${stripeAmountTotalCents}) не съвпада с очакваната цена (${internalRow.price_cents_snapshot}).`,
       }
     }
@@ -1049,6 +1079,7 @@ export async function createVipPurchaseStore(
     listProfilePurchases,
     createPendingPurchase,
     getPurchaseById,
+    retirePendingPurchase,
     attachCheckoutSession,
     findByCheckoutSessionId,
     markPurchaseCanceledByCheckoutSessionId,

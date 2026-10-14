@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { PurchaseFulfillmentFailure } from './purchaseFulfillmentFailure.js'
 import { dbDateToUtc } from './dbDate.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod as SharedAdminPaymentPeriod } from './sofiaDayBounds.js'
 import { composePayerCoinGiftSuccessText, composeRecipientCoinGiftNotificationText } from './paidGiftNotificationText.js'
@@ -197,7 +198,7 @@ export type CoinPurchaseStore = {
   markPurchaseFailedByCheckoutSessionId: (checkoutSessionId: string) => void
   fulfillPaidPurchase: (params: FulfillPaidPurchaseParams) =>
     | { ok: true; purchase: CoinPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
-    | { ok: false; message: string }
+    | PurchaseFulfillmentFailure
   needsPaymentMethodSnapshot: (purchaseId: string) => boolean
   updatePaymentMethodSnapshot: (
     purchaseId: string,
@@ -212,6 +213,12 @@ export type CoinPurchaseStore = {
    * цена, валута, заглавие, ключ) съвпада с текущите му условия в магазина.
    * Resume checkout не бива да стартира плащане по остаряла оферта.
    */
+  /**
+   * Скрива pending ред, чиято сесия вече е complete, за да може „Купи“ да
+   * създаде нов ред. Webhook-ът за старата сесия пак намира реда по
+   * session id и го кредитира (hidden_at не влияе на fulfillment-а).
+   */
+  retirePendingPurchase: (purchaseId: string) => boolean
   isPurchaseOfferCurrent: (purchaseId: string) => boolean
   /**
    * Собствена покупка по checkout session id, ВКЛЮЧИТЕЛНО скрита — за client
@@ -320,10 +327,11 @@ export async function createCoinPurchaseStore(
   })
 
   database.exec('PRAGMA foreign_keys = ON;')
-  database.exec('PRAGMA journal_mode = WAL;')
   // Mirror на vip/bundlePurchaseStore — BEGIN IMMEDIATE в createPendingPurchase
-  // изчаква чужд write lock вместо веднага да хвърли SQLITE_BUSY.
+  // и fulfillment транзакцията изчакват чужд write lock вместо веднага да
+  // хвърлят SQLITE_BUSY. Преди journal_mode, който също може да изисква lock.
   database.exec('PRAGMA busy_timeout = 5000;')
+  database.exec('PRAGMA journal_mode = WAL;')
 
   const selectProfilePurchasesStatement = database.prepare(`
     SELECT
@@ -618,12 +626,16 @@ export async function createCoinPurchaseStore(
       AND status = 'pending';
   `)
 
+  // provider_checkout_session_id = сесията, ПО КОЯТО е платено (може да е
+  // по-стара сесия, намерена през metadata fallback-а) — така повторна
+  // доставка на същото събитие се различава от второ реално плащане.
   const markPaidByPurchaseIdStatement = database.prepare(`
     UPDATE coin_purchase_ledger
     SET
       status = 'paid',
       credited_at = CURRENT_TIMESTAMP,
-      updated_at = CURRENT_TIMESTAMP
+      updated_at = CURRENT_TIMESTAMP,
+      provider_checkout_session_id = COALESCE(NULLIF(?, ''), provider_checkout_session_id)
     WHERE purchase_id = ?
       AND status = 'pending';
   `)
@@ -927,24 +939,46 @@ export async function createCoinPurchaseStore(
     params: FulfillPaidPurchaseParams,
   ):
     | { ok: true; purchase: CoinPurchaseSnapshot; payerProfileId: string; alreadyCredited: boolean; payerSuccessText: string | null; recipientNotificationText: string | null }
-    | { ok: false; message: string } {
+    | PurchaseFulfillmentFailure {
     const { checkoutSessionId, purchaseId, amountPaidCents, currency } = params
 
-    // Fallback по purchaseId остава: при reuse на pending ред
-    // attachCheckoutSession презаписва session id-то, а по-ранна (още
-    // отворена) сесия за СЪЩИЯ ред носи purchaseId в metadata-та си.
+    // Fallback по metadata.purchaseId (legacy, само за coins): сесии, създадени
+    // преди obtainPendingPurchaseCheckoutSession, може да са били презаписани
+    // от по-нова сесия на същия ред. Fallback-ът е безопасен само в комбинация
+    // с проверките по-долу — сума/валута срещу snapshot-а и duplicate_payment
+    // при вече платен ред — иначе подписано, но чуждо/второ плащане би се
+    // приело за „вече кредитирано“ или кредитирало по metadata.
     const internalRow =
       (checkoutSessionId ? getPurchaseWithProfileBySessionId(checkoutSessionId) : null) ??
       (purchaseId ? getPurchaseWithProfileById(purchaseId) : null)
 
     if (internalRow === null) {
-      return { ok: false, message: 'Покупката не беше намерена.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Покупката не беше намерена.' }
     }
 
-    // already-credited redelivery — идемпотентно потвърждение без повторна
-    // Stripe проверка (mirror на vipPurchaseStore.fulfillPaidPurchase).
+    const failureContext = {
+      purchaseId: internalRow.purchase_id,
+      payerProfileId: internalRow.profile_id,
+      expectedAmountCents: internalRow.price_cents,
+      expectedCurrency: internalRow.currency,
+    }
+
     if (internalRow.status === 'paid' && internalRow.credited_at !== null) {
-      return fulfillByInternalRow(internalRow)
+      // Друга checkout сесия за вече кредитирана поръчка = второ РЕАЛНО
+      // плащане, не повторна доставка на същото събитие. Не се кредитира
+      // автоматично и не се „поглъща“ като alreadyCredited — за преглед.
+      if (checkoutSessionId && internalRow.provider_checkout_session_id !== checkoutSessionId) {
+        return {
+          ok: false,
+          reason: 'duplicate_payment',
+          message: `Поръчката вече е платена с друга checkout сесия (${internalRow.provider_checkout_session_id ?? 'неизвестна'}).`,
+          ...failureContext,
+        }
+      }
+
+      // already-credited redelivery — идемпотентно потвърждение без повторна
+      // Stripe проверка (mirror на vipPurchaseStore.fulfillPaidPurchase).
+      return fulfillByInternalRow(internalRow, checkoutSessionId)
     }
 
     // Действително платеното трябва да съвпада ТОЧНО със snapshot-а на тази
@@ -953,22 +987,30 @@ export async function createCoinPurchaseStore(
     if (currency.toUpperCase() !== internalRow.currency.toUpperCase()) {
       return {
         ok: false,
+        reason: 'currency_mismatch',
         message: `Валутата от Stripe (${currency}) не съвпада с очакваната (${internalRow.currency}).`,
+        ...failureContext,
       }
     }
 
     if (amountPaidCents !== internalRow.price_cents) {
       return {
         ok: false,
+        reason: 'amount_mismatch',
         message: `Платената сума от Stripe (${amountPaidCents}) не съвпада с очакваната цена (${internalRow.price_cents}).`,
+        ...failureContext,
       }
     }
 
-    return fulfillByInternalRow(internalRow)
+    const result = fulfillByInternalRow(internalRow, checkoutSessionId)
+
+    return result.ok ? result : { ...failureContext, ...result }
   }
 
   function fulfillByInternalRow(
     row: CoinPurchaseInternalRow,
+    /** Сесията, по която идва плащането — записва се като платилата сесия. */
+    checkoutSessionId = '',
   ):
     | {
         ok: true
@@ -987,7 +1029,7 @@ export async function createCoinPurchaseStore(
         /** Non-null САМО при реален нов fulfillment — виж identичния коментар в vipPurchaseStore.ts. */
         recipientNotificationText: string | null
       }
-    | { ok: false; message: string } {
+    | PurchaseFulfillmentFailure {
     if (row.status === 'paid' && row.credited_at !== null) {
       // alreadyCredited: purchase.payerSuccessText вече е computed от
       // rowToSnapshot (immutable snapshot данни) — безопасно за повторно
@@ -1000,6 +1042,7 @@ export async function createCoinPurchaseStore(
     if (row.status !== 'pending') {
       return {
         ok: false,
+        reason: 'not_creditable',
         message: `Покупката е в статус "${row.status}" и не може да бъде кредитирана.`,
       }
     }
@@ -1040,6 +1083,7 @@ export async function createCoinPurchaseStore(
       // на FK constraint exception по-долу.
       return {
         ok: false,
+        reason: 'not_creditable',
         message: 'Получателят на подаръка вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
       }
     }
@@ -1063,7 +1107,7 @@ export async function createCoinPurchaseStore(
       ensureWalletStatement.run(rewardRecipientProfileId)
       creditWalletStatement.run(row.yellow_coins_amount, rewardRecipientProfileId)
 
-      const updateResult = markPaidByPurchaseIdStatement.run(row.purchase_id) as {
+      const updateResult = markPaidByPurchaseIdStatement.run(checkoutSessionId, row.purchase_id) as {
         changes?: number
       }
 
@@ -1073,11 +1117,20 @@ export async function createCoinPurchaseStore(
         const fresh = getPurchaseWithProfileById(row.purchase_id)
 
         if (fresh?.status === 'paid') {
+          // Конкурентен процес спечели CAS-а. Ако е платил ПО ДРУГА сесия,
+          // това е второ реално плащане, не повторна доставка.
+          if (checkoutSessionId && fresh.provider_checkout_session_id !== checkoutSessionId) {
+            return {
+              ok: false,
+              reason: 'duplicate_payment',
+              message: `Поръчката вече е платена с друга checkout сесия (${fresh.provider_checkout_session_id ?? 'неизвестна'}).`,
+            }
+          }
           const purchase = rowToSnapshot(fresh)
           return { ok: true, purchase, payerProfileId: fresh.profile_id, alreadyCredited: true, payerSuccessText: purchase.payerSuccessText, recipientNotificationText: null }
         }
 
-        return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
+        return { ok: false, reason: 'credit_failed', message: 'Покупката вече беше обработена от друг процес.' }
       }
 
       // "Подари авоари" durable recipient notification (Round 3 §5) — СЛЕД
@@ -1112,6 +1165,7 @@ export async function createCoinPurchaseStore(
 
       return {
         ok: false,
+        reason: 'credit_failed',
         message: error instanceof Error ? error.message : 'Грешка при кредитиране на жълтици.',
       }
     }
@@ -1119,7 +1173,7 @@ export async function createCoinPurchaseStore(
     const fulfilled = getPurchaseById(row.purchase_id)
 
     if (fulfilled === null) {
-      return { ok: false, message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
+      return { ok: false, reason: 'credit_failed', message: 'Жълтиците бяха кредитирани, но покупката не може да се прочете.' }
     }
 
     return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
@@ -1193,6 +1247,11 @@ export async function createCoinPurchaseStore(
     const row = getPurchaseWithProfileBySessionId(normalizedSessionId)
 
     return row !== null && row.profile_id === normalizedProfileId ? rowToSnapshot(row) : null
+  }
+
+  function retirePendingPurchase(purchaseId: string): boolean {
+    const result = retireStalePendingStatement.run(purchaseId) as { changes?: number }
+    return (result.changes ?? 0) > 0
   }
 
   function isPurchaseOfferCurrent(purchaseId: string): boolean {
@@ -1451,6 +1510,7 @@ export async function createCoinPurchaseStore(
     updatePaymentMethodSnapshot,
     getAdminPaymentDetail,
     hidePurchaseForUser,
+    retirePendingPurchase,
     isPurchaseOfferCurrent,
     findProfilePurchaseByCheckoutSessionId,
     close,

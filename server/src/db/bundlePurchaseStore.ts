@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import type { PurchaseFulfillmentFailure } from './purchaseFulfillmentFailure.js'
 import { dbDateToUtc } from './dbDate.js'
 import { addCalendarInterval, type VipInterval } from './vipStore.js'
 import { buildPeriodWhereClause, type AdminPaymentPeriod } from './sofiaDayBounds.js'
@@ -74,9 +75,15 @@ export type BundlePurchaseStore = {
    */
   fulfillPaidPurchase: (params: FulfillPaidBundlePurchaseParams) =>
     | { ok: true; purchase: BundlePurchaseSnapshot; payerProfileId: string | null; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
-    | { ok: false; message: string }
+    | PurchaseFulfillmentFailure
   needsPaymentMethodSnapshot: (purchaseId: string) => boolean
   updatePaymentMethodSnapshot: (purchaseId: string, snapshot: PaymentMethodSnapshot) => void
+  /**
+   * Скрива pending ред, чиято сесия вече е complete, за да може „Купи“ да
+   * създаде нов ред. Webhook-ът за старата сесия пак намира реда по
+   * session id и го кредитира (hidden_at не влияе на fulfillment-а).
+   */
+  retirePendingPurchase: (purchaseId: string) => boolean
   hidePurchaseForUser: (
     purchaseId: string,
     profileId: string,
@@ -217,6 +224,17 @@ function isPendingSnapshotCurrent(row: BundlePurchaseRow, activePackage: ActiveB
     row.price_cents === activePackage.price_cents &&
     row.currency === activePackage.currency
   )
+}
+
+// Контекст на намерения ledger ред за payment_review_issues (виж
+// purchaseFulfillmentFailure.ts).
+function failureContext(row: BundlePurchaseInternalRow): Pick<PurchaseFulfillmentFailure, 'purchaseId' | 'payerProfileId' | 'expectedAmountCents' | 'expectedCurrency'> {
+  return {
+    purchaseId: row.purchase_id,
+    payerProfileId: row.profile_id,
+    expectedAmountCents: row.price_cents,
+    expectedCurrency: row.currency,
+  }
 }
 
 function normalizeId(value: string): string {
@@ -632,7 +650,7 @@ export async function createBundlePurchaseStore(
         /** Non-null САМО при реален нов fulfillment — виж identичния коментар в vipPurchaseStore.ts. */
         recipientNotificationText: string | null
       }
-    | { ok: false; message: string } {
+    | PurchaseFulfillmentFailure {
     // §15-20/§24 в брифа — и двете награди (coins + VIP дни) отиват на
     // RECIPIENT-а, не на PAYER-а. row.profile_id остава семантично "payer".
     //
@@ -668,6 +686,7 @@ export async function createBundlePurchaseStore(
     if (row.status !== 'pending') {
       return {
         ok: false,
+        reason: 'not_creditable',
         message: `Покупката е в статус "${row.status}" и не може да бъде кредитирана.`,
       }
     }
@@ -678,6 +697,7 @@ export async function createBundlePurchaseStore(
       // опитваме дори да пипнем wallet-а/VIP-а. Редът остава 'pending'.
       return {
         ok: false,
+        reason: 'not_creditable',
         message: 'Получателят на подаръка вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
       }
     }
@@ -700,6 +720,7 @@ export async function createBundlePurchaseStore(
     if (!wasGiftPurchase && row.profile_id === null) {
       return {
         ok: false,
+        reason: 'not_creditable',
         message: 'Купувачът вече не съществува. Плащането не е кредитирано автоматично — необходим е ръчен преглед.',
       }
     }
@@ -766,7 +787,7 @@ export async function createBundlePurchaseStore(
             recipientNotificationText: null,
           }
         }
-        return { ok: false, message: 'Покупката вече беше обработена от друг процес.' }
+        return { ok: false, reason: 'credit_failed', message: 'Покупката вече беше обработена от друг процес.' }
       }
 
       // CAS спечелен от ТОЗИ процес — чак СЕГА се пипат наградите
@@ -826,13 +847,14 @@ export async function createBundlePurchaseStore(
       }
       return {
         ok: false,
+        reason: 'credit_failed',
         message: error instanceof Error ? error.message : 'Грешка при активиране на пакета.',
       }
     }
 
     const fulfilled = getPurchaseById(row.purchase_id)
     if (fulfilled === null) {
-      return { ok: false, message: 'Пакетът беше активиран, но покупката не може да се прочете.' }
+      return { ok: false, reason: 'credit_failed', message: 'Пакетът беше активиран, но покупката не може да се прочете.' }
     }
 
     return { ok: true, purchase: fulfilled, payerProfileId: row.profile_id, alreadyCredited: false, newActiveUntil: dbDateToUtc(newActiveUntilSqlite), payerSuccessText: fulfilled.payerSuccessText, recipientNotificationText }
@@ -842,21 +864,21 @@ export async function createBundlePurchaseStore(
     params: FulfillPaidBundlePurchaseParams,
   ):
     | { ok: true; purchase: BundlePurchaseSnapshot; payerProfileId: string | null; alreadyCredited: boolean; newActiveUntil: string; payerSuccessText: string | null; recipientNotificationText: string | null }
-    | { ok: false; message: string } {
+    | PurchaseFulfillmentFailure {
     const { checkoutSessionId, purchaseId, stripePaymentStatus, stripeCurrency, stripeAmountTotalCents } = params
 
     if (!checkoutSessionId) {
-      return { ok: false, message: 'Липсва checkout session id.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Липсва checkout session id.' }
     }
 
     const internalRow = getPurchaseWithProfileBySessionId(checkoutSessionId)
 
     if (internalRow === null) {
-      return { ok: false, message: 'Покупката не беше намерена за тази checkout сесия.' }
+      return { ok: false, reason: 'purchase_not_found', message: 'Покупката не беше намерена за тази checkout сесия.' }
     }
 
     if (purchaseId && internalRow.purchase_id !== purchaseId) {
-      return { ok: false, message: 'Несъответствие между checkout сесията и purchaseId.' }
+      return { ok: false, reason: 'purchase_id_mismatch', message: 'Несъответствие между checkout сесията и purchaseId.', ...failureContext(internalRow) }
     }
 
     if (internalRow.status === 'paid' && internalRow.credited_at !== null) {
@@ -864,12 +886,14 @@ export async function createBundlePurchaseStore(
     }
 
     if (stripePaymentStatus !== 'paid') {
-      return { ok: false, message: `Stripe payment_status "${stripePaymentStatus}" не е "paid".` }
+      return { ok: false, reason: 'not_paid', message: `Stripe payment_status "${stripePaymentStatus}" не е "paid".` }
     }
 
     if (stripeCurrency.toUpperCase() !== internalRow.currency.toUpperCase()) {
       return {
         ok: false,
+        reason: 'currency_mismatch',
+        ...failureContext(internalRow),
         message: `Валутата от Stripe (${stripeCurrency}) не съвпада с очакваната (${internalRow.currency}).`,
       }
     }
@@ -877,6 +901,8 @@ export async function createBundlePurchaseStore(
     if (stripeAmountTotalCents !== internalRow.price_cents) {
       return {
         ok: false,
+        reason: 'amount_mismatch',
+        ...failureContext(internalRow),
         message: `Платената сума от Stripe (${stripeAmountTotalCents}) не съвпада с очакваната цена (${internalRow.price_cents}).`,
       }
     }
@@ -916,6 +942,11 @@ export async function createBundlePurchaseStore(
     const row = getPurchaseWithProfileBySessionId(normalizedSessionId)
 
     return row !== null && row.profile_id === normalizedProfileId ? rowToSnapshot(row) : null
+  }
+
+  function retirePendingPurchase(purchaseId: string): boolean {
+    const result = retireStalePendingStatement.run(purchaseId) as { changes?: number }
+    return (result.changes ?? 0) > 0
   }
 
   function hidePurchaseForUser(
@@ -1199,6 +1230,7 @@ export async function createBundlePurchaseStore(
     fulfillPaidPurchase,
     needsPaymentMethodSnapshot,
     updatePaymentMethodSnapshot,
+    retirePendingPurchase,
     hidePurchaseForUser,
     findProfilePurchaseByCheckoutSessionId,
     getAdminPaymentListByPeriod,

@@ -1,5 +1,7 @@
 import type Stripe from 'stripe'
 import type { CoinPurchaseSnapshot, CoinPurchaseStore } from '../db/coinPurchaseStore.js'
+import { buildCoinCheckoutSessionParams } from './buildCoinCheckoutSessionParams.js'
+import { getPendingPurchaseCheckoutIdempotencyKey } from './obtainPendingPurchaseCheckoutSession.js'
 
 export type ResumeCoinPurchaseCheckoutParams = {
   store: CoinPurchaseStore
@@ -118,39 +120,20 @@ export async function resumeCoinPurchaseCheckout(
   // Данните за цена, пакет и жълтици идват само от server-side snapshot-а —
   // клиентът не подава нито едно от тях.
   //
-  // Idempotency key е обвързан с purchaseId + старата session ID (ако има такава).
-  // При две едновременни заявки след expired — Stripe ще върне същата нова сесия.
-  const oldSessionId = purchase.providerCheckoutSessionId ?? 'none'
-  const idempotencyKey = `resume-${purchase.purchaseId}-${oldSessionId}`
+  // Idempotency key е обвързан с purchaseId + старата session ID (ако има такава)
+  // и е ОБЩ с /api/shop/checkout („Купи“) — при две едновременни заявки след
+  // expired (resume+resume или resume+„Купи“) Stripe връща същата нова сесия.
+  // Параметрите идват от общия builder, иначе Stripe отказва същия key.
+  const idempotencyKey = getPendingPurchaseCheckoutIdempotencyKey(
+    purchase.purchaseId,
+    purchase.providerCheckoutSessionId,
+  )
 
   let newStripeSession: Stripe.Checkout.Session
 
   try {
     newStripeSession = await stripe.checkout.sessions.create(
-      {
-        mode: 'payment',
-        success_url: successUrl,
-        cancel_url: cancelUrl,
-        line_items: [
-          {
-            price_data: {
-              currency: purchase.currency.toLowerCase(),
-              unit_amount: purchase.priceCents,
-              product_data: {
-                name: purchase.title,
-              },
-            },
-            quantity: 1,
-          },
-        ],
-        metadata: {
-          purchaseId: purchase.purchaseId,
-          profileId,
-          packageId: purchase.packageId ?? '',
-          packageKey: purchase.packageKey,
-          coins: String(purchase.yellowCoinsAmount),
-        },
-      },
+      buildCoinCheckoutSessionParams(purchase, profileId, successUrl, cancelUrl),
       { idempotencyKey },
     )
   } catch {

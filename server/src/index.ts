@@ -478,6 +478,12 @@ import { createBackgroundJobMetrics, type BackgroundJobMetrics } from './monitor
 import { createGcMetrics, type GcMetrics } from './monitoring/gcMetrics.js'
 import { setSendJsonMessageMonitoringHook } from './core/sendJsonMessage.js'
 import { resumeCoinPurchaseCheckout } from './shop/resumeCoinPurchaseCheckout.js'
+import { obtainBuyCheckoutSession } from './shop/obtainPendingPurchaseCheckoutSession.js'
+import { buildCoinCheckoutSessionParams } from './shop/buildCoinCheckoutSessionParams.js'
+import { recordUncreditedPaidCheckout } from './shop/recordUncreditedPaidCheckout.js'
+import { createPaymentReviewIssueStore } from './db/paymentReviewIssueStore.js'
+import type { PaymentReviewIssuePurchaseType } from './db/paymentReviewIssueStore.js'
+import type { PurchaseFulfillmentFailure } from './db/purchaseFulfillmentFailure.js'
 import { hideCoinPurchase } from './shop/hideCoinPurchase.js'
 import {
   logAcceptedCardPlayAudit,
@@ -3160,6 +3166,7 @@ if (campaignArchiveStore !== null) {
 }
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
 const vipPurchaseStore = await createVipPurchaseStore(databaseBootstrap.databaseFilePath)
+const paymentReviewIssueStore = await createPaymentReviewIssueStore(databaseBootstrap.databaseFilePath)
 const missionStore = await createMissionStore(databaseBootstrap.databaseFilePath)
 const supportStore = await createSupportStore(databaseBootstrap.databaseFilePath, {
   // Round 3 корекция — "запазване на evidence до terminal state" (виж
@@ -11549,52 +11556,27 @@ async function handleShopCheckoutRequest(
 
   const stripe = new Stripe(stripeSecretKey)
 
-  let checkoutSession: Stripe.Checkout.Session
+  // Reuse на отворената сесия на pending реда (ако има) вместо нова — виж
+  // obtainPendingPurchaseCheckoutSession.ts. Параметрите са общи с resume.
+  const payerProfileId = session.profile.profileId
+  const obtained = await obtainBuyCheckoutSession({
+    stripe,
+    purchase,
+    buildCreateParams: (p) => buildCoinCheckoutSessionParams(p, payerProfileId, successUrl, cancelUrl),
+    retirePendingPurchase: (id) => coinPurchaseStore.retirePendingPurchase(id),
+    createReplacementPurchase: () => coinPurchaseStore.createPendingPurchase(payerProfileId, packageId, recipientProfileId),
+    logLabel: 'shop/checkout',
+  })
 
-  try {
-    checkoutSession = await stripe.checkout.sessions.create({
-      mode: 'payment',
-      success_url: successUrl,
-      cancel_url: cancelUrl,
-      line_items: [
-        {
-          price_data: {
-            currency: purchase.currency.toLowerCase(),
-            unit_amount: purchase.priceCents,
-            product_data: {
-              name: purchase.title,
-            },
-          },
-          quantity: 1,
-        },
-      ],
-      metadata: {
-        // purchaseId е единственият authoritative pointer — webhook
-        // fulfillment зарежда recipient/coins/price ОТ ledger реда по
-        // purchaseId/checkoutSessionId (§24 в брифа), НЕ от тази metadata.
-        // profileId/recipientProfileId тук са само за debugging/Stripe
-        // dashboard visibility.
-        purchaseId: purchase.purchaseId,
-        profileId: session.profile.profileId,
-        recipientProfileId: purchase.recipientProfileId ?? '',
-        packageId: purchase.packageId ?? '',
-        packageKey: purchase.packageKey,
-        coins: String(purchase.yellowCoinsAmount),
-      },
-    })
-  } catch (error) {
-    sendJsonResponse(res, 500, {
-      ok: false,
-      message:
-        error instanceof Error
-          ? error.message
-          : 'Stripe checkout не беше стартиран.',
-    })
+  if (!obtained.ok) {
+    sendJsonResponse(res, obtained.status, { ok: false, message: obtained.message })
     return true
   }
 
+  const checkoutSession = obtained.session
+
   const attached = coinPurchaseStore.attachCheckoutSession(
-    purchase.purchaseId,
+    obtained.purchase.purchaseId,
     checkoutSession.id,
   )
 
@@ -11781,20 +11763,24 @@ async function handleVipCheckoutRequest(
 
   const stripe = new Stripe(stripeSecretKey)
 
-  let checkoutSession: Stripe.Checkout.Session
-
-  try {
-    checkoutSession = await stripe.checkout.sessions.create({
+  // Reuse на отворената сесия на pending реда (ако има) — VIP webhook-ът търси
+  // реда СТРОГО по session id, затова не бива да остава платима „осиротяла“
+  // сесия (виж obtainPendingPurchaseCheckoutSession.ts).
+  const payerProfileId = session.profile.profileId
+  const obtained = await obtainBuyCheckoutSession({
+    stripe,
+    purchase,
+    buildCreateParams: (p) => ({
       mode: 'payment',
       success_url: successUrl,
       cancel_url: cancelUrl,
       line_items: [
         {
           price_data: {
-            currency: purchase.currency.toLowerCase(),
-            unit_amount: purchase.priceCents,
+            currency: p.currency.toLowerCase(),
+            unit_amount: p.priceCents,
             product_data: {
-              name: VIP_PACKAGE_CATALOG[purchase.packageId].title,
+              name: VIP_PACKAGE_CATALOG[p.packageId].title,
             },
           },
           quantity: 1,
@@ -11802,23 +11788,26 @@ async function handleVipCheckoutRequest(
       ],
       metadata: {
         purchaseType: 'vip',
-        purchaseId: purchase.purchaseId,
-        profileId: session.profile.profileId,
-        recipientProfileId: purchase.recipientProfileId ?? '',
-        packageId: purchase.packageId,
+        purchaseId: p.purchaseId,
+        profileId: payerProfileId,
+        recipientProfileId: p.recipientProfileId ?? '',
+        packageId: p.packageId,
       },
-    })
-  } catch (error) {
-    sendJsonResponse(res, 500, {
-      ok: false,
-      message:
-        error instanceof Error ? error.message : 'Stripe checkout не беше стартиран.',
-    })
+    }),
+    retirePendingPurchase: (id) => vipPurchaseStore.retirePendingPurchase(id),
+    createReplacementPurchase: () => vipPurchaseStore.createPendingPurchase(payerProfileId, packageId, priceCents, recipientProfileId),
+    logLabel: 'vip/checkout',
+  })
+
+  if (!obtained.ok) {
+    sendJsonResponse(res, obtained.status, { ok: false, message: obtained.message })
     return true
   }
 
+  const checkoutSession = obtained.session
+
   const attached = vipPurchaseStore.attachCheckoutSession(
-    purchase.purchaseId,
+    obtained.purchase.purchaseId,
     checkoutSession.id,
   )
 
@@ -12065,20 +12054,23 @@ async function handleShopBundleCheckoutRequest(
 
   const stripe = new Stripe(stripeSecretKey)
 
-  let checkoutSession: Stripe.Checkout.Session
-
-  try {
-    checkoutSession = await stripe.checkout.sessions.create({
+  // Mirror на VIP checkout-а: reuse на отворената сесия (bundle webhook-ът
+  // също търси реда СТРОГО по session id).
+  const payerProfileId = session.profile.profileId
+  const obtained = await obtainBuyCheckoutSession({
+    stripe,
+    purchase,
+    buildCreateParams: (p) => ({
       mode: 'payment',
       success_url: successUrl,
       cancel_url: cancelUrl,
       line_items: [
         {
           price_data: {
-            currency: purchase.currency.toLowerCase(),
-            unit_amount: purchase.priceCents,
+            currency: p.currency.toLowerCase(),
+            unit_amount: p.priceCents,
             product_data: {
-              name: purchase.titleSnapshot,
+              name: p.titleSnapshot,
             },
           },
           quantity: 1,
@@ -12089,23 +12081,26 @@ async function handleShopBundleCheckoutRequest(
         // на VIP checkout-a metadata.purchaseType='vip'), виж
         // handleStripeWebhookRequest по-долу.
         purchaseType: 'bundle',
-        purchaseId: purchase.purchaseId,
-        profileId: session.profile.profileId,
-        recipientProfileId: purchase.recipientProfileId ?? '',
-        packageId: purchase.packageId ?? '',
+        purchaseId: p.purchaseId,
+        profileId: payerProfileId,
+        recipientProfileId: p.recipientProfileId ?? '',
+        packageId: p.packageId ?? '',
       },
-    })
-  } catch (error) {
-    sendJsonResponse(res, 500, {
-      ok: false,
-      message:
-        error instanceof Error ? error.message : 'Stripe checkout не беше стартиран.',
-    })
+    }),
+    retirePendingPurchase: (id) => bundlePurchaseStore.retirePendingPurchase(id),
+    createReplacementPurchase: () => bundlePurchaseStore.createPendingPurchase(payerProfileId, packageId, recipientProfileId),
+    logLabel: 'shop/bundle-checkout',
+  })
+
+  if (!obtained.ok) {
+    sendJsonResponse(res, obtained.status, { ok: false, message: obtained.message })
     return true
   }
 
+  const checkoutSession = obtained.session
+
   const attached = bundlePurchaseStore.attachCheckoutSession(
-    purchase.purchaseId,
+    obtained.purchase.purchaseId,
     checkoutSession.id,
   )
 
@@ -16780,6 +16775,37 @@ function broadcastActiveCampaignThemeToAllLocalConnections(): void {
   }
 }
 
+// Потвърдено плащане, което fulfillment-ът отказа → устойчив запис в
+// payment_review_issues (без кредитиране). false = записът не успя → webhook-ът
+// връща 500, за да опита Stripe отново (fulfillment-ът е идемпотентен).
+function reportUncreditedPaidCheckout(
+  purchaseType: PaymentReviewIssuePurchaseType,
+  stripeSession: Stripe.Checkout.Session,
+  stripeEventId: string,
+  failure: PurchaseFulfillmentFailure,
+): boolean {
+  try {
+    const issue = recordUncreditedPaidCheckout({
+      store: paymentReviewIssueStore,
+      purchaseType,
+      stripeSession,
+      stripeEventId,
+      failure,
+    })
+    if (issue !== null) {
+      console.error(
+        `[stripe/webhook] payment review issue kind=${issue.issueKind} type=${purchaseType} session=${issue.checkoutSessionId} purchaseId=${issue.purchaseId ?? ''} occurrences=${issue.occurrences}`,
+      )
+    }
+    return true
+  } catch (error) {
+    console.error(
+      `[stripe/webhook] payment review issue NOT recorded type=${purchaseType} session=${stripeSession.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+    )
+    return false
+  }
+}
+
 async function handleStripeWebhookRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -16843,6 +16869,10 @@ async function handleStripeWebhookRequest(
         console.error(
           `[stripe/webhook] VIP fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${vipResult.message}`,
         )
+        if (!reportUncreditedPaidCheckout('vip', stripeSession, event.id, vipResult)) {
+          sendJsonResponse(res, 500, { ok: false })
+          return true
+        }
       } else if (vipResult.alreadyCredited) {
         console.log(
           `[stripe/webhook] VIP already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
@@ -16956,6 +16986,10 @@ async function handleStripeWebhookRequest(
         console.error(
           `[stripe/webhook] Bundle fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${bundleResult.message}`,
         )
+        if (!reportUncreditedPaidCheckout('bundle', stripeSession, event.id, bundleResult)) {
+          sendJsonResponse(res, 500, { ok: false })
+          return true
+        }
       } else if (bundleResult.alreadyCredited) {
         console.log(
           `[stripe/webhook] Bundle already credited session=${checkoutSessionId} purchaseId=${purchaseId}`,
@@ -17061,6 +17095,10 @@ async function handleStripeWebhookRequest(
         console.error(
           `[stripe/webhook] fulfillPaidPurchase failed session=${checkoutSessionId} purchaseId=${purchaseId} message=${result.message}`,
         )
+        if (!reportUncreditedPaidCheckout('coin', stripeSession, event.id, result)) {
+          sendJsonResponse(res, 500, { ok: false })
+          return true
+        }
       } else {
         if (result.alreadyCredited) {
           console.log(
@@ -27150,6 +27188,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('matchEconomyStore', () => matchEconomyStore.close())
   closeStore('coinPackageStore', () => coinPackageStore.close())
   closeStore('coinPurchaseStore', () => coinPurchaseStore.close())
+  closeStore('paymentReviewIssueStore', () => paymentReviewIssueStore.close())
   closeStore('paidGiftNotificationStore', () => paidGiftNotificationStore.close())
   closeStore('dailyRewardsStore', () => dailyRewardsStore.close())
   closeStore('adCampaignsStore', () => adCampaignsStore.close())
