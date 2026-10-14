@@ -38,6 +38,8 @@ import {
 } from './uploads/campaignThemeAssets.js'
 import { createCampaignScheduler } from './campaigns/campaignScheduler.js'
 import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
+import { canSessionAccessSvara } from './games/svara/svaraAccess.js'
+import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import {
   recordBelotMatchForCampaign,
   recordLudoMatchForCampaign,
@@ -9046,6 +9048,7 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
   pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
   marketingGiftMaxAmount: number | null
   marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
+  svaraTestAccess: boolean
 }) | null {
   if (session === null || session.profile.profileId === null) return session as null
   const isLegacyProfileBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
@@ -9075,11 +9078,16 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     marketingDailyGiftLimitStatus: isRoleBasedMarketing
       ? yellowCoinGiftStore.getMarketingDailyGiftLimitStatus(session.profile.profileId)
       : null,
+    // UI-only сигнал за бутона "Свара" в секция "Игри" (флаг + роля, виж
+    // games/svara/svaraAccess.ts). Authoritative проверката остава
+    // GET /api/games/svara/access и бъдещите Свара операции.
+    svaraTestAccess: canSessionAccessSvara(session),
   } as T extends null ? null : T & {
     pikaTeamGiftMaxAmount: number | null
     pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
     marketingGiftMaxAmount: number | null
     marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
+    svaraTestAccess: boolean
   }
 }
 
@@ -21370,6 +21378,13 @@ async function handleHttpRequest(
   }
 
   if (await handleAuthRequest(req, res, requestUrl.pathname, requestUrl)) {
+    return
+  }
+
+  if (handleSvaraHttpRequest(req, res, requestUrl.pathname, {
+    getSessionFromRequest: (request) => authStore.getSession(getSessionTokenFromCookieHeader(request.headers.cookie)),
+    sendJsonResponse,
+  })) {
     return
   }
 

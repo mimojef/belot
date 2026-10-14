@@ -132,6 +132,8 @@ import type {
   ActiveLudoGiftSnapshot,
 } from '../network/createGameServerClient'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
+import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
+import type { SvaraPageStatus } from '../games/svara/renderSvaraPage'
 import {
   applyTournamentMatchLiveScore,
   isTournamentMatchesLiveRelevant,
@@ -179,6 +181,7 @@ export type LobbyFlowScreen =
   | 'fair-play'
   | 'more-games'
   | 'ludo-lobby'
+  | 'svara'
 export type LobbySocialScreen = LobbyFlowScreen | 'friends' | 'chat'
 
 export type { ProfileAccessBlockCode }
@@ -221,6 +224,8 @@ export type LobbyAuthSession = {
   marketingGiftMaxAmount?: number | null
   /** Mirror на pikaTeamDailyGiftLimitStatus по-горе, но за role==='marketing' (отделен pool). */
   marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
+  /** Server-derived UI сигнал за картата "Свара" (SVARA_TEST_ENABLED + роля). Authoritative е GET /api/games/svara/access. */
+  svaraTestAccess?: boolean
 }
 
 /** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
@@ -2017,6 +2022,8 @@ type InternalLobbyFlowState = {
   bundlePurchasesLoading: boolean
   bundlePurchaseActionPackageId: string | null
   bundlePurchaseMessageText: string | null
+  /** /games/svara — 'granted' едва след потвърждение от сървъра (виж showSvaraPage). */
+  svaraPageStatus: SvaraPageStatus
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -2843,6 +2850,7 @@ function createInitialState(): InternalLobbyFlowState {
     bundlePurchasesLoading: false,
     bundlePurchaseActionPackageId: null,
     bundlePurchaseMessageText: null,
+    svaraPageStatus: 'checking',
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -3371,6 +3379,7 @@ const LOBBY_PATH_TO_SCREEN: Partial<Record<string, LobbySocialScreen>> = {
   '/shop': 'shop',
   '/games': 'more-games',
   '/games/ludo': 'ludo-lobby',
+  '/games/svara': 'svara',
   '/more-games': 'more-games',
   '/admin': 'admin',
   '/admin/guest-contact': 'guest-contact-messages',
@@ -3574,6 +3583,29 @@ export function createLobbyFlowController(
     if (!isLudoFeatureEnabled()) return
     event.preventDefault()
     showLudoLobbyPage()
+  })
+
+  // "Свара" карта в "Игри" + връзката обратно от /games/svara. Картата се
+  // рендира само при canShowSvaraEntry; достъпът така или иначе се
+  // презаверява от сървъра в showSvaraPage.
+  options.root.addEventListener('click', (event) => {
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (target.closest('[data-svara-back-to-games="1"]')) {
+      event.preventDefault()
+      showMoreGamesPage()
+      return
+    }
+    if (!target.closest('[data-svara-play-button="1"]')) return
+    showSvaraPage()
+  })
+  options.root.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    const target = event.target
+    if (!(target instanceof Element)) return
+    if (!target.closest('[data-svara-play-button="1"]')) return
+    event.preventDefault()
+    showSvaraPage()
   })
 
   // Mount-ва createLudoLobbyController в data-ludo-lobby-mount placeholder-а,
@@ -5194,6 +5226,8 @@ export function createLobbyFlowController(
               ? 'more-games'
             : state.currentScreen === 'ludo-lobby'
               ? 'ludo-lobby'
+            : state.currentScreen === 'svara'
+              ? 'svara'
           : state.currentScreen === 'friends'
             ? 'friends'
             : state.currentScreen === 'chat'
@@ -5302,6 +5336,8 @@ export function createLobbyFlowController(
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
+      canShowSvaraEntry: canShowSvaraEntry(authSession),
+      svaraPageStatus: state.svaraPageStatus,
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
@@ -16689,6 +16725,40 @@ export function createLobbyFlowController(
     scrollLobbyRootToTop()
   }
 
+  // "Свара" (Етап 1) — тестова страница. Съдържанието се показва САМО след
+  // 200 от GET /api/games/svara/access (флаг + роля, проверени на сървъра).
+  // Клиентската видимост на картата НЕ е защита: директен URL минава през
+  // същата сървърна проверка, а при отказ потребителят се връща в "Игри".
+  let _svaraAccessRequestSeq = 0
+  function showSvaraPage(): void {
+    leaveAdminServerIfActive()
+    closeLudoLobbyOverlay()
+    state.currentScreen = 'svara'
+    state.svaraPageStatus = 'checking'
+    state.isSearching = false
+    state.errorText = null
+    state.profilePopupOpen = false
+    state.profilePopupProfile = null
+    state.profilePopupCanEdit = true
+    stopWaitingRoomActivity()
+    resetFinalFillSequence()
+    render()
+    scrollLobbyRootToTop()
+
+    const requestSeq = ++_svaraAccessRequestSeq
+    void fetchSvaraAccess(options.getApiBaseUrl?.() ?? '').then((result) => {
+      // Потребителят може да е навигирал другаде, докато чакаме отговора.
+      if (requestSeq !== _svaraAccessRequestSeq || state.currentScreen !== 'svara') return
+      if (result === 'granted') {
+        state.svaraPageStatus = 'granted'
+        render()
+        return
+      }
+      if (window.location.pathname === '/games/svara') history.replaceState(null, '', '/games')
+      showMoreGamesPage()
+    })
+  }
+
   // Статична страница, но с nested route /tournaments/how-it-works (не flat
   // top-level path като rules/faq/fair-play) — затова управлява собствен
   // URL през pushState, огледално на showTournamentDetail, вместо да мине
@@ -18039,6 +18109,7 @@ export function createLobbyFlowController(
     'fair-play': '/fair-play',
     'more-games': '/games',
     'ludo-lobby': '/games/ludo',
+    svara: '/games/svara',
   }
 
   const PATH_TO_SCREEN: Record<string, LobbySocialScreen> = {
@@ -18072,6 +18143,7 @@ export function createLobbyFlowController(
     '/games': 'more-games',
     '/more-games': 'more-games',
     '/games/ludo': 'ludo-lobby',
+    '/games/svara': 'svara',
   }
 
   const _loadPath = window.location.pathname
@@ -18244,6 +18316,7 @@ export function createLobbyFlowController(
       case 'fair-play': showFairPlayPage(); break
       case 'more-games': showMoreGamesPage(); break
       case 'ludo-lobby': showLudoLobbyPage(); break
+      case 'svara': showSvaraPage(); break
     }
   }
 

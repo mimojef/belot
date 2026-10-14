@@ -85,6 +85,7 @@ import {
 import { renderRulesPage } from './renderRulesPage'
 import { renderMoreGamesScreen } from '../games/ludo/renderMoreGamesScreen'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
+import { renderSvaraPage, type SvaraPageStatus } from '../games/svara/renderSvaraPage'
 import { renderStrategyPage } from './renderStrategyPage'
 import { renderLearnPage } from './renderLearnPage'
 import { renderFaqPage } from './renderFaqPage'
@@ -428,7 +429,7 @@ export type GuestContactFormInput = {
 export type LobbyScreenState = {
   /** Established API origin resolver (main.ts getApiBaseUrl) — виж коментара в createLobbyFlowController.ts за пълния rationale. Prefix-ва се пред protected attachment view/download/viewer URL-и (chat/support/topics), за да не се resolve-ват спрямо Vite dev origin-а (:5173) в local dev split-origin setup. */
   apiBaseUrl: string
-  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-campaigns' | 'admin-campaign-archive' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games' | 'ludo-lobby'
+  view: 'tables' | 'players' | 'friends' | 'chat' | 'leaderboards' | 'shop' | 'admin' | 'admin-info' | 'admin-server' | 'admin-visitors' | 'admin-payments' | 'admin-payment-detail' | 'admin-tournaments' | 'admin-tournament-detail' | 'admin-campaigns' | 'admin-campaign-archive' | 'admin-ad-campaigns' | 'admin-gift-items' | 'tournaments' | 'tournament-detail' | 'tournament-how-it-works' | 'guest-contact-messages' | 'private-rooms' | 'support' | 'topics' | PublicLegalPageKey | 'rules' | 'strategy' | 'learn' | 'faq' | 'about' | 'fair-play' | 'more-games' | 'ludo-lobby' | 'svara'
   topicsLoading: boolean
   topicsErrorText: string | null
   topics: TopicSnapshot[] | null
@@ -714,6 +715,10 @@ export type LobbyScreenState = {
    * "Публикации от Pika.bg" брифа.
    */
   canDeleteLobbyChat: boolean
+  /** Показва картата "Свара" в "Игри" — server-derived (session.svaraTestAccess), виж app/games/svara/svaraAccess.ts. Само UX. */
+  canShowSvaraEntry: boolean
+  /** /games/svara — 'granted' едва след 200 от GET /api/games/svara/access. */
+  svaraPageStatus: SvaraPageStatus
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -3430,7 +3435,7 @@ function renderNav(state: LobbyScreenState): string {
   const tournamentsActive = activeView === 'tournaments' || activeView === 'tournament-detail'
   const topicsActive = activeView === 'topics'
   const shopActive = activeView === 'shop'
-  const gamesActive = activeView === 'more-games' || activeView === 'ludo-lobby'
+  const gamesActive = activeView === 'more-games' || activeView === 'ludo-lobby' || activeView === 'svara'
   const adminActive = activeView === 'admin' || activeView === 'admin-info' || activeView === 'admin-server' || activeView === 'admin-tournaments' || activeView === 'admin-tournament-detail' || activeView === 'admin-campaigns' || activeView === 'admin-campaign-archive' || activeView === 'admin-gift-items' || activeView === 'guest-contact-messages'
   const lobbyActive = activeView === 'tables'
   const mailUnreadCount = getSupportUnreadRaw(state)
@@ -6612,9 +6617,11 @@ function renderMobileLobbyScreenContent(
           : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
             ? renderPublicLegalPage(state.view, true)
           : state.view === 'more-games'
-            ? renderMoreGamesScreen(true, isLudoFeatureEnabled())
+            ? renderMoreGamesScreen(true, isLudoFeatureEnabled(), state.canShowSvaraEntry)
           : state.view === 'ludo-lobby'
             ? '<div data-ludo-lobby-mount="1"></div>'
+          : state.view === 'svara'
+            ? renderSvaraPage(state.svaraPageStatus, true)
           : state.view === 'rules'
             ? renderRulesPage(true)
           : state.view === 'strategy'
@@ -13812,9 +13819,11 @@ export function renderLobbyScreen(
               : state.view === 'terms' || state.view === 'privacy' || state.view === 'contact'
                 ? renderPublicLegalPage(state.view)
               : state.view === 'more-games'
-                ? renderMoreGamesScreen(false, isLudoFeatureEnabled())
+                ? renderMoreGamesScreen(false, isLudoFeatureEnabled(), state.canShowSvaraEntry)
               : state.view === 'ludo-lobby'
                 ? '<div data-ludo-lobby-mount="1"></div>'
+              : state.view === 'svara'
+                ? renderSvaraPage(state.svaraPageStatus)
               : state.view === 'rules'
                 ? renderRulesPage()
               : state.view === 'strategy'

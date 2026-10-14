@@ -506,6 +506,8 @@ type AuthSession = {
   marketingGiftMaxAmount?: number | null
   /** Mirror на pikaTeamDailyGiftLimitStatus по-горе, но за role==='marketing' (отделен pool). */
   marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
+  /** Derived UI-only сигнал от сървъра (server: withPikaTeamGiftBypassFlag → canSessionAccessSvara) — показва картата "Свара" в "Игри". Authoritative проверката е GET /api/games/svara/access. */
+  svaraTestAccess?: boolean
 }
 
 type AuthResponse = {
