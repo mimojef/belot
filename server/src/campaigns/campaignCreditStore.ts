@@ -44,7 +44,13 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 export type CampaignEventSourceType = 'belot_win' | 'ludo_win' | 'package_purchase' | 'admin_adjustment'
 
 export type CreditGameOrPurchaseEventInput =
-  | { profileId: string; sourceType: 'belot_win' | 'ludo_win'; sourceId: string; eventAt: Date; stakeAmount: number }
+  // didWin е ЗАДЪЛЖИТЕЛЕН за игрови събития — "Само при победа" checkbox
+  // (campaign_earn_rules.credit_mode) се решава ТУК, в resolveUnitsAmountForEvent,
+  // не от caller-а (campaignGameHooks.ts вече не филтрира по win/loss преди
+  // извикването — подава ВСЕКИ допустим реален участник, за да работи
+  // 'all_participants' режимът; 'winner_only' си остава 0 единици за
+  // губещите, точно както по-рано просто не бяха извиквани).
+  | { profileId: string; sourceType: 'belot_win' | 'ludo_win'; sourceId: string; eventAt: Date; stakeAmount: number; didWin: boolean }
   | { profileId: string; sourceType: 'package_purchase'; sourceId: string; eventAt: Date; packageKey: string }
 
 export type ManualAdjustmentInput = {
@@ -109,7 +115,15 @@ export type CreditCampaignUnitsResult =
       /** non-null САМО когато ТОЧНО тая извикване реално записа нов durable notification ред (granted.length>0, !alreadyCredited). */
       notification: CampaignRewardNotificationForPush | null
     }
-  | { ok: false; reason: 'no_eligible_campaign' | 'campaign_already_archived' | 'negative_total_rejected' | 'ineligible_profile' }
+  // 'not_winner' — "Само при победа" (credit_mode='winner_only', default):
+  // правило СЪЩЕСТВУВА за тая игра+залог, но входът didWin=false. Чисто
+  // skip, НЕ пише ledger/totals ред (запазва точно досегашното поведение:
+  // преди "Само при победа" checkbox-а, caller-ите просто НЕ викаха
+  // creditCampaignUnits за губещи, значи нямаше изобщо ред — не 0-единичен
+  // ред, mirror на "липсваща конфигурация" прецедента). Третира се като
+  // ОЧАКВАН, не грешка резултат навсякъде, където 'no_eligible_campaign'/
+  // 'ineligible_profile' вече се третират така.
+  | { ok: false; reason: 'no_eligible_campaign' | 'campaign_already_archived' | 'negative_total_rejected' | 'ineligible_profile' | 'not_winner' }
 
 export type CampaignRewardNotificationSnapshot = {
   notificationId: string
@@ -419,12 +433,33 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   // ─── Earn-rule lookup (§3 "Изчисляване на тематичните единици") ───
 
   const selectGameEarnRuleStatement = database.prepare(`
-    SELECT units_per_win FROM campaign_earn_rules WHERE campaign_id = ? AND game_kind = ? AND stake_amount = ? LIMIT 1;
+    SELECT units_per_win, credit_mode FROM campaign_earn_rules WHERE campaign_id = ? AND game_kind = ? AND stake_amount = ? LIMIT 1;
   `)
 
   const selectPackageEarnRuleStatement = database.prepare(`
     SELECT units_per_purchase FROM campaign_package_earn_rules WHERE campaign_id = ? AND package_key = ? LIMIT 1;
   `)
+
+  // "Само при победа" (credit_mode='winner_only', default) — ако правило
+  // СЪЩЕСТВУВА за тая игра+залог и входът didWin=false, резултата е SKIP:
+  // НИКАКЪВ ledger/totals ред не се пише — точно както преди "Само при
+  // победа" checkbox-а (hook-овете просто НЕ викаха creditCampaignUnits за
+  // губещи участници, значи нямаше ред изобщо, не 0-единичен). Това е
+  // РАЗЛИЧНО от "липсваща конфигурация" прецедента (row === undefined по-
+  // долу), където ledger ред СЕ пише с units_amount=0 — там reconciliation
+  // идемпотентността изисква стабилен запис; тук губещ участник просто
+  // никога не е "в обхват" на тая кампания, mirror на no_eligible_campaign/
+  // ineligible_profile semantics (виж CreditCampaignUnitsResult.reason
+  // 'not_winner'). credit_mode='all_participants' -> никога SKIP, пълната
+  // units_per_win стойност, независимо от победа/загуба.
+  function resolveGameEarnRule(
+    campaignId: string, gameKind: 'belot' | 'ludo', stakeAmount: number,
+  ): { unitsPerWin: number; creditMode: string } | null {
+    const row = selectGameEarnRuleStatement.get(campaignId, gameKind, stakeAmount) as
+      | { units_per_win: number; credit_mode: string }
+      | undefined
+    return row === undefined ? null : { unitsPerWin: row.units_per_win, creditMode: row.credit_mode }
+  }
 
   function resolveUnitsAmountForEvent(campaignId: string, input: CreditGameOrPurchaseEventInput): number {
     if (input.sourceType === 'package_purchase') {
@@ -434,10 +469,8 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
       return row?.units_per_purchase ?? 0
     }
     const gameKind = input.sourceType === 'belot_win' ? 'belot' : 'ludo'
-    const row = selectGameEarnRuleStatement.get(campaignId, gameKind, input.stakeAmount) as
-      | { units_per_win: number }
-      | undefined
-    return row?.units_per_win ?? 0
+    const rule = resolveGameEarnRule(campaignId, gameKind, input.stakeAmount)
+    return rule?.unitsPerWin ?? 0
   }
 
   // ─── Ledger / totals ───
@@ -942,6 +975,18 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
       }
       const resolved = resolveCampaignForEvent(input.eventAt)
       if (!resolved.ok) return { ok: false, reason: resolved.reason }
+
+      // "Само при победа" gate — ПРЕДИ creditCore, виж resolveGameEarnRule
+      // doc коментара по-горе за пълния "защо SKIP, не 0-единичен ред"
+      // rationale. package_purchase няма win/loss концепция — не засегнат.
+      if (input.sourceType === 'belot_win' || input.sourceType === 'ludo_win') {
+        const gameKind = input.sourceType === 'belot_win' ? 'belot' : 'ludo'
+        const rule = resolveGameEarnRule(resolved.campaign.campaign_id, gameKind, input.stakeAmount)
+        if (rule !== null && rule.creditMode === 'winner_only' && !input.didWin) {
+          return { ok: false, reason: 'not_winner' }
+        }
+      }
+
       const unitsAmount = resolveUnitsAmountForEvent(resolved.campaign.campaign_id, input)
       return creditCore(resolved.campaign, input.profileId, input.sourceType, input.sourceId, unitsAmount, input.eventAt.toISOString())
     })

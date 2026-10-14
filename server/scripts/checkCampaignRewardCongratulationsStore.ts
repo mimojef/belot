@@ -242,6 +242,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
       sourceId: `room-${randomUUID()}:v1`,
       eventAt: new Date(),
       stakeAmount: 0,
+      didWin: true,
     })
     assert(result.ok, 'expected ok')
     if (!result.ok) return
@@ -260,6 +261,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
       sourceId: `room-${randomUUID()}:v1`,
       eventAt: new Date(),
       stakeAmount: 999, // no earn rule for this stake -> 0 units
+      didWin: true,
     })
     assert(result.ok, 'expected ok')
     if (!result.ok) return
@@ -270,9 +272,9 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
   await check('[N3] Повторно (replay) извикване на СЪЩОТО събитие -> alreadyCredited:true, notification=null (без повторен push)', async () => {
     const profileId = await seedProfile('N3 Player')
     const sourceId = `room-${randomUUID()}:v1`
-    const first = campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 })
+    const first = campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 , didWin: true })
     assert(first.ok && first.notification !== null, 'expected first call to produce a notification')
-    const replay = campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 })
+    const replay = campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 , didWin: true })
     assert(replay.ok, 'expected replay ok')
     if (!replay.ok) return
     assert(replay.alreadyCredited === true, 'expected alreadyCredited=true on replay')
@@ -466,7 +468,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
   await check('[N11] listPendingNotifications връща само profile-ownия pending ред', async () => {
     const profileA = await seedProfile('N11 A')
     const profileB = await seedProfile('N11 B')
-    campaignCreditStore.creditCampaignUnits({ profileId: profileA, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0 })
+    campaignCreditStore.creditCampaignUnits({ profileId: profileA, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0, didWin: true })
     const notificationsA = campaignCreditStore.listPendingNotifications(profileA)
     const notificationsB = campaignCreditStore.listPendingNotifications(profileB)
     assert(notificationsA.length === 1, `expected 1 pending notification for A, got ${notificationsA.length}`)
@@ -476,7 +478,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
   await check('[N12] acknowledgeNotification от друг профил -> not_owner, редът остава pending', async () => {
     const owner = await seedProfile('N12 Owner')
     const stranger = await seedProfile('N12 Stranger')
-    campaignCreditStore.creditCampaignUnits({ profileId: owner, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0 })
+    campaignCreditStore.creditCampaignUnits({ profileId: owner, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0, didWin: true })
     const [notification] = campaignCreditStore.listPendingNotifications(owner)
     assert(notification !== undefined, 'expected a pending notification')
     const result = campaignCreditStore.acknowledgeNotification(notification!.notificationId, stranger)
@@ -487,7 +489,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
 
   await check('[N13] Успешен acknowledge -> изчезва от pending списъка', async () => {
     const profileId = await seedProfile('N13 Player')
-    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0 })
+    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0, didWin: true })
     const [notification] = campaignCreditStore.listPendingNotifications(profileId)
     const result = campaignCreditStore.acknowledgeNotification(notification!.notificationId, profileId)
     assert(result.ok, 'expected ack ok')
@@ -496,7 +498,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
 
   await check('[N14] Повторен acknowledge на СЪЩИЯ ред (идемпотентен) -> ok, без грешка', async () => {
     const profileId = await seedProfile('N14 Player')
-    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0 })
+    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0, didWin: true })
     const [notification] = campaignCreditStore.listPendingNotifications(profileId)
     const first = campaignCreditStore.acknowledgeNotification(notification!.notificationId, profileId)
     const second = campaignCreditStore.acknowledgeNotification(notification!.notificationId, profileId)
@@ -505,7 +507,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
 
   await check('[N15] "Срив преди ack": notification остава pending след "restart" (нов store instance върху същата DB)', async () => {
     const profileId = await seedProfile('N15 Player')
-    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0 })
+    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0, didWin: true })
     // Симулира restart — нов store instance върху СЪЩАТА DB (durable state, не in-memory).
     const restartedStore = await createCampaignCreditStore(databaseFilePath)
     try {
@@ -518,7 +520,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
 
   await check('[N16] Обратен случай: вече потвърдено известие НЕ се появява повторно след "restart"', async () => {
     const profileId = await seedProfile('N16 Player')
-    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0 })
+    campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId: `room-${randomUUID()}:v1`, eventAt: new Date(), stakeAmount: 0, didWin: true })
     const [notification] = campaignCreditStore.listPendingNotifications(profileId)
     campaignCreditStore.acknowledgeNotification(notification!.notificationId, profileId)
     const restartedStore = await createCampaignCreditStore(databaseFilePath)
@@ -563,7 +565,7 @@ const adminActor = { type: 'admin' as const, profileId: await seedProfile('Admin
   await addRewardTier(campaignId, 100, [{ type: 'yellow_coins', payload: { amount: 1_500 } }, { type: 'vip_days', payload: { unit: 'days', amount: 3 } }])
   const profileId = await seedProfile('N17 Player')
   const sourceId = `room-${randomUUID()}:v1`
-  const creditOnce = () => campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 })
+  const creditOnce = () => campaignCreditStore.creditCampaignUnits({ profileId, sourceType: 'belot_win', sourceId, eventAt: new Date(), stakeAmount: 0 , didWin: true })
   const countRows = async () => {
     const db = await openRawDb()
     try {

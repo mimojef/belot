@@ -66,10 +66,13 @@ export type AdminCampaignArchiveDetailResponse =
   | { ok: true; archived: false; readiness: AdminCampaignArchivalReadiness; ready: boolean }
   | { ok: false; message?: string; reason?: string }
 
+export type AdminCampaignEarnRuleCreditMode = 'winner_only' | 'all_participants'
+
 export type AdminCampaignEarnRule = {
   gameKind: AdminCampaignGameKind
   stakeAmount: number
   unitsPerWin: number
+  creditMode: AdminCampaignEarnRuleCreditMode
 }
 
 export type AdminCampaignPackageEarnRule = {

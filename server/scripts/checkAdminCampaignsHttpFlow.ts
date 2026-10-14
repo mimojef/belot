@@ -284,9 +284,9 @@ try {
     assert(campaign?.status === 'active', `очаква се active, получено ${JSON.stringify(campaign)}`)
   })
 
-  await check('E3. PUT /api/admin/campaigns/{id} на active кампания -> 400 not_editable', async () => {
+  await check('E3. PUT /api/admin/campaigns/{id} на active кампания -> 200, но startsAt/rewardTiers остават заключени', async () => {
     const result = await request(port, 'PUT', `/api/admin/campaigns/${campaignId}`, {
-      name: 'Should Not Change',
+      name: 'Should Change',
       startsAt: new Date(Date.now() + 3_600_000).toISOString(),
       endsAt: new Date(Date.now() + 200 * 3_600_000).toISOString(),
       unitNameSingular: 'тиква',
@@ -296,7 +296,14 @@ try {
       packageEarnRules: [],
       rewardTiers: [{ tierId: null, thresholdUnits: 1, rewards: [{ rewardType: 'yellow_coins', amount: 1 }] }],
     }, admin.cookie)
-    assert(result.status === 400 && result.body?.reason === 'not_editable', `${result.status} ${result.text}`)
+    assert(result.status === 200, `${result.status} ${result.text}`)
+    const campaign = result.body?.campaign as Record<string, unknown> | undefined
+    assert(campaign?.status === 'active', `очаква се active, получено ${JSON.stringify(campaign)}`)
+    assert(campaign?.name === 'Should Change', 'името трябва да се обнови за активна кампания')
+    const earnRules = campaign?.earnRules as Array<Record<string, unknown>> | undefined
+    assert(earnRules?.length === 1 && earnRules[0]!.unitsPerWin === 999, 'earn rules трябва да се обновят за активна кампания')
+    const rewardTiers = campaign?.rewardTiers as Array<Record<string, unknown>> | undefined
+    assert(rewardTiers?.length === 1 && rewardTiers[0]!.thresholdUnits === 100, 'reward tiers трябва да останат заключени (старият праг 100, не подадения 1)')
   })
 
   await check('E4. POST .../stop -> status=stopped', async () => {

@@ -412,14 +412,18 @@ try {
     assert(result.status === 200, `${result.status} ${result.text}`)
     assert((result.body?.campaign as Record<string, unknown>).status === 'active', result.text)
   })
-  await check('M2. PUT на активна кампания (бизнес поле) -> 400 not_editable (контролна проверка)', async () => {
+  await check('M2. PUT на активна кампания (бизнес поле) -> 200, но rewardTiers остават заключени (контролна проверка)', async () => {
     const result = await request(port, 'PUT', `/api/admin/campaigns/${campaignId}`, {
-      name: 'Should Not Change', startsAt: new Date(Date.now() + 3_600_000).toISOString(), endsAt: new Date(Date.now() + 200 * 3_600_000).toISOString(),
+      name: 'Should Change', startsAt: new Date(Date.now() + 3_600_000).toISOString(), endsAt: new Date(Date.now() + 200 * 3_600_000).toISOString(),
       unitNameSingular: 'x', unitNamePlural: 'x', giftSenderProfileId: null,
       earnRules: [{ gameKind: 'belot', stakeAmount: ALLOWED_STAKE, unitsPerWin: 1 }], packageEarnRules: [],
-      rewardTiers: [{ tierId: null, thresholdUnits: 1, rewards: [{ rewardType: 'yellow_coins', amount: 1 }] }],
+      rewardTiers: [{ tierId: null, thresholdUnits: 999, rewards: [{ rewardType: 'yellow_coins', amount: 1 }] }],
     }, admin.cookie)
-    assert(result.status === 400 && result.body?.reason === 'not_editable', `${result.status} ${result.text}`)
+    assert(result.status === 200, `${result.status} ${result.text}`)
+    const campaign = result.body?.campaign as Record<string, unknown> | undefined
+    assert(campaign?.name === 'Should Change', 'името трябва да се обнови за активна кампания')
+    const rewardTiers = campaign?.rewardTiers as Array<Record<string, unknown>> | undefined
+    assert(rewardTiers !== undefined && rewardTiers[0]?.thresholdUnits === 1, 'rewardTiers трябва да останат заключени (старият праг 1, не подадения 999)')
   })
   await check('M3. ...но PATCH theme-assets на АКТИВНА кампания -> 200 (темата НЕ е заключена)', async () => {
     const result = await request(port, 'PATCH', `/api/admin/campaigns/${campaignId}/theme-assets/card_back`, { imageDataUrl: TINY_PNG_DATA_URL }, admin.cookie)

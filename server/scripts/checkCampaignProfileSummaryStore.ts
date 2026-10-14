@@ -271,6 +271,7 @@ await check('[S1] Без каквато и да е кампания -> active:nu
       sourceId: `room-${randomUUID()}:v1`,
       eventAt: new Date(),
       stakeAmount: 0,
+      didWin: true,
     })
     // units_per_win=100 за stake=0 -> точно 100 с едно начисление; credit
     // отново 2 пъти повече (3 х 100 - 53 условно не е точно 347) — затова

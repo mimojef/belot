@@ -243,11 +243,19 @@ export async function createCampaignArchiveStore(
   // и не бива да блокира архива (иначе Белот/Ludo/покупка без earn rule
   // блокира до следващия reconciliation sweep, а legacy ред с неопределима
   // ставка — ЗАВИНАГИ). Последният `?` на всяка заявка е campaign_id.
-  const GAME_EARN_RULE_SQL = (gameKind: 'belot' | 'ludo', stakeExpr: string): string => `
+  //
+  // Фаза 13 ("Само при победа" checkbox) — isWinExpr добавен: при
+  // credit_mode='winner_only' (default) губещ ред НИКОГА не е "дължим"
+  // (mirror на resolveUnitsAmountForEvent-ия !didWin -> 0 единици), значи
+  // не бива да блокира архивирането; при 'all_participants' губещ ред Е
+  // дължим точно като победител. isWinExpr е ПЪЛЕН boolean SQL израз
+  // (напр. "bmcl.did_win = 1"), не гола колона.
+  const GAME_EARN_RULE_SQL = (gameKind: 'belot' | 'ludo', stakeExpr: string, isWinExpr: string): string => `
           EXISTS (
             SELECT 1 FROM campaign_earn_rules er
             WHERE er.campaign_id = ? AND er.game_kind = '${gameKind}'
               AND er.stake_amount = ${stakeExpr} AND er.units_per_win > 0
+              AND (${isWinExpr} OR er.credit_mode = 'all_participants')
           )`
 
   // Mirror на legacy sweep-а (campaignGameHooks.ts): собствен stake_debit ->
@@ -272,7 +280,7 @@ export async function createCampaignArchiveStore(
 
   const countPendingBelotWinStatement = database.prepare(`
     SELECT COUNT(*) AS c FROM belot_match_completion_ledger bmcl
-    WHERE bmcl.did_win = 1 AND bmcl.is_guest_trial = 0 AND bmcl.profile_id IS NOT NULL
+    WHERE bmcl.is_guest_trial = 0 AND bmcl.profile_id IS NOT NULL
       AND datetime(bmcl.ended_at) >= datetime(?) AND datetime(bmcl.ended_at) < datetime(?)
       AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 'bmcl').replace('{column}', 'profile_id')}
       AND NOT EXISTS (
@@ -282,12 +290,12 @@ export async function createCampaignArchiveStore(
         SELECT 1 FROM campaign_unit_ledger cul
         WHERE cul.source_type = 'belot_win' AND cul.profile_id = bmcl.profile_id AND cul.source_id = bmcl.match_scope
       )
-      AND ${GAME_EARN_RULE_SQL('belot', 'bmcl.stake_amount')};
+      AND ${GAME_EARN_RULE_SQL('belot', 'bmcl.stake_amount', 'bmcl.did_win = 1')};
   `)
 
   const countPendingBelotLegacyStatement = database.prepare(`
     SELECT COUNT(*) AS c FROM profile_match_results pmr
-    WHERE pmr.did_win = 1 AND pmr.is_guest_trial = 0 AND pmr.profile_id IS NOT NULL
+    WHERE pmr.is_guest_trial = 0 AND pmr.profile_id IS NOT NULL
       AND datetime(pmr.completed_at) >= datetime(?) AND datetime(pmr.completed_at) < datetime(?)
       AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 'pmr').replace('{column}', 'profile_id')}
       AND NOT EXISTS (
@@ -302,19 +310,29 @@ export async function createCampaignArchiveStore(
         SELECT 1 FROM belot_match_completion_ledger bmcl2
         WHERE bmcl2.room_id = pmr.room_id AND bmcl2.profile_id = pmr.profile_id
       )
-      AND ${GAME_EARN_RULE_SQL('belot', LEGACY_BELOT_STAKE_SQL)};
+      AND ${GAME_EARN_RULE_SQL('belot', LEGACY_BELOT_STAKE_SQL, 'pmr.did_win = 1')};
   `)
 
+  // Ludo: за разлика от Белот, ludo_room_matches пази ЕДИН ред на мач, не
+  // на участник — пълният ростер е в players_json (виж doc коментара в
+  // campaignGameHooks.ts::reconcileMissingLudoCampaignCredits за същия
+  // json_each подход, вече доказано наличен). Разгъва по участник, за да
+  // може губещ participant под credit_mode='all_participants' коректно
+  // да блокира архива, докато не е начислен.
   const countPendingLudoWinStatement = database.prepare(`
-    SELECT COUNT(*) AS c FROM ludo_room_matches lrm
+    SELECT COUNT(*) AS c FROM ludo_room_matches lrm, json_each(lrm.players_json) je
     WHERE lrm.status = 'finished' AND lrm.winner_profile_id IS NOT NULL
       AND datetime(lrm.finished_at) >= datetime(?) AND datetime(lrm.finished_at) < datetime(?)
-      AND ${ELIGIBLE_PROFILE_SQL.replace('{alias}', 'lrm').replace('{column}', 'winner_profile_id')}
+      AND EXISTS (
+        SELECT 1 FROM profiles p
+        WHERE p.profile_id = json_extract(je.value, '$.profileId') AND p.profile_kind = 'human' AND p.is_temporary = 0
+      )
       AND NOT EXISTS (
         SELECT 1 FROM campaign_unit_ledger cul
-        WHERE cul.source_type = 'ludo_win' AND cul.source_id = lrm.match_id AND cul.profile_id = lrm.winner_profile_id
+        WHERE cul.source_type = 'ludo_win' AND cul.source_id = lrm.match_id
+          AND cul.profile_id = json_extract(je.value, '$.profileId')
       )
-      AND ${GAME_EARN_RULE_SQL('ludo', 'lrm.stake')};
+      AND ${GAME_EARN_RULE_SQL('ludo', 'lrm.stake', `json_extract(je.value, '$.profileId') = lrm.winner_profile_id`)};
   `)
 
   // packageKeyColumn — същата колона, която campaignPurchaseHooks.ts

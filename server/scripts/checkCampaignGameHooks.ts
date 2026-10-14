@@ -518,7 +518,7 @@ await check('[12] Временен/guest профил (is_temporary=1) -> inelig
   insertProfile(tempProfileId, 'T12 temp', { isTemporary: true })
   const result = campaignCreditStore.creditCampaignUnits({
     profileId: tempProfileId, sourceType: 'belot_win', sourceId: `belot-room-${randomUUID()}`,
-    eventAt: new Date(), stakeAmount: 100,
+    eventAt: new Date(), stakeAmount: 100, didWin: true,
   })
   assert.equal(result.ok, false)
   if (!result.ok) assert.equal(result.reason, 'ineligible_profile')
@@ -843,10 +843,13 @@ await check('[34] Същата временна грешка -> reconciliationJo
   // ludo_room_matches се пише БЕЗУСЛОВНО от index.ts независимо от campaign
   // резултата (виж campaignGameHooks.ts doc коментара) — тук го seed-ваме
   // директно, mirror на реалния ludoRoomMatchStore.recordMatchFinished call site.
+  // players_json трябва да съдържа печелившия профил — reconciliation вече
+  // разгъва тая колона чрез json_each ("Само при победа"), празен масив
+  // прави мача невидим за backfill, независимо от winner_profile_id.
   rawDb.prepare(`
     INSERT INTO ludo_room_matches (match_id, ludo_room_id, status, stake, player_count, players_json, winner_profile_id, finished_at)
-    VALUES (?, ?, 'finished', ?, 2, '[]', ?, ?);
-  `).run(snapshot.matchId, snapshot.ludoRoomId, snapshot.stake, winner, new Date().toISOString().slice(0, 19).replace('T', ' '))
+    VALUES (?, ?, 'finished', ?, 2, ?, ?, ?);
+  `).run(snapshot.matchId, snapshot.ludoRoomId, snapshot.stake, JSON.stringify([{ profileId: winner, displayName: 'Winner', avatarUrl: null, color: 'red' }]), winner, new Date().toISOString().slice(0, 19).replace('T', ' '))
 
   const job = createCampaignCreditReconciliationJob({ databaseFilePath: dbPath, campaignCreditStore })
   try {

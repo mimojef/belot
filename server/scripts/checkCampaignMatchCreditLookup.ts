@@ -251,6 +251,7 @@ await check('[M1] winner profile — exact event_at match returns correct snapsh
     sourceId: 'room-m1',
     eventAt,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
 
@@ -278,6 +279,7 @@ await check('[M3] per-match amount stays distinct from accumulated profile total
     sourceId: 'room-m3-a',
     eventAt: eventAtA,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(resultA.ok, `credit A failed: ${JSON.stringify(resultA)}`)
 
@@ -288,6 +290,7 @@ await check('[M3] per-match amount stays distinct from accumulated profile total
     sourceId: 'room-m3-b',
     eventAt: eventAtB,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(resultB.ok, `credit B failed: ${JSON.stringify(resultB)}`)
 
@@ -315,6 +318,7 @@ await check('[M5] source_type scoping — belot_win lookup does not leak ludo_wi
     sourceId: sharedSourceId,
     eventAt,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(ludoResult.ok, `ludo credit failed: ${JSON.stringify(ludoResult)}`)
 
@@ -344,6 +348,7 @@ await check('[M7] no earn rule for the stake — 0-units ledger row is filtered 
     sourceId: 'room-m7',
     eventAt,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(result.ok === true, `expected creditCampaignUnits to succeed with 0 units: ${JSON.stringify(result)}`)
   assert((result as { unitsCredited: number }).unitsCredited === 0, 'expected 0 units credited (no matching earn rule)')
@@ -366,6 +371,7 @@ await check('[M8] Phase 6.1 scoped source_id (`${roomId}:v${N}`) is found via LI
     sourceId: scopedSourceId,
     eventAt,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
 
@@ -389,6 +395,7 @@ await check('[M9] Two matches in the same room (scoped v1/v2) resolve independen
     sourceId: `${roomId}:v1`,
     eventAt: eventAtMatch1,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(resultMatch1.ok, `match 1 credit failed: ${JSON.stringify(resultMatch1)}`)
 
@@ -398,6 +405,7 @@ await check('[M9] Two matches in the same room (scoped v1/v2) resolve independen
     sourceId: `${roomId}:v2`,
     eventAt: eventAtMatch2,
     stakeAmount: 0,
+    didWin: true,
   })
   assert(resultMatch2.ok, `match 2 credit failed: ${JSON.stringify(resultMatch2)}`)
 

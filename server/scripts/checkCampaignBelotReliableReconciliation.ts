@@ -595,9 +595,14 @@ await check('[S11]-[S12] Повече "срив"-нали мачове от ли
     previousMatch = match
   }
 
-  // Лимит=2 < 5 "срив"-нали мача -> нужни са >= 3 tick-ове с durable cursor.
+  // Лимит=2, 5 мача × 4 седалки = 20 кандидат-реда след "Само при победа"
+  // (Фаза 13) — did_win филтъра премахнат, губещите СЪЩО са кандидати
+  // (просто се skip-ват с 'not_winner', но все пак консумират cursor
+  // budget), затова нужни са >= 10 tick-ове, не >= 3 (преди, когато само
+  // 5 winner-реда бяха кандидати).
+  const candidateRowCount = matchCount * 4
   let totalCredited = 0
-  for (let tick = 0; tick < matchCount + 2; tick += 1) {
+  for (let tick = 0; tick < candidateRowCount + 2; tick += 1) {
     const tickResult = await reconcileMissingBelotCampaignCredits(dbPath, campaignCreditStore, { limit: 2, useDurableCursor: true })
     totalCredited += tickResult.credited
   }
@@ -607,7 +612,7 @@ await check('[S11]-[S12] Повече "срив"-нали мачове от ли
   assert.equal(total, matchCount * 25, `очаквах ${matchCount * 25} след пагинираната reconciliation, получих ${total}`)
 
   // Повторен пълен проход -> без допълнителни промени (без дублиране).
-  for (let tick = 0; tick < matchCount + 2; tick += 1) {
+  for (let tick = 0; tick < candidateRowCount + 2; tick += 1) {
     await reconcileMissingBelotCampaignCredits(dbPath, campaignCreditStore, { limit: 2, useDurableCursor: true })
   }
   const totalAfterSecondPass = campaignCreditStore.getProfileCampaignTotal(campaignId, profileId)
@@ -810,7 +815,26 @@ await check('[S19]-[S20] Durable cursor напредва отвъд постоя
     totalScanned >= ineligibleCount + eligibleCount,
     `очаквах да се сканират поне ${ineligibleCount + eligibleCount} реда общо (напредък отвъд недопустимия префикс), получих ${totalScanned}`,
   )
-  assert.equal(totalCredited, eligibleCount, `очаквах точно ${eligibleCount} credited (само допустимите), получих ${totalCredited}`)
+  // "Само при победа" (Фаза 13) разшири primary-scan кандидатите и до
+  // губещи редове (did_win филтъра е премахнат, виж doc коментара в
+  // campaignGameHooks.ts) — затова ГЛОБАЛНИЯТ 'belot_win' durable cursor
+  // вече може в рамките на тая тест СЪЩО да довлече/credit-не (коректно,
+  // с units_amount=0 — "няма правило за тая ставка" прецедент) останал
+  // backlog от ПО-РАНИШНИ check()-ове в тоя файл (ВСИЧКИ споделят ЕДНА
+  // SQLite база, виж rawDb/dbPath по-горе), който преди СЪЩЕСТВУВАШЕ, но
+  // никога не се сканираше (губещ ред, SQL филтъра го изключваше изцяло).
+  // Суровият tickResult.credited brой затова вече НЕ е надежден proxy
+  // само за ТАЗИ кампания — скопираме директно през campaign_id, за да
+  // изолираме точната инвариантна: точно 10 реално credited (units>0)
+  // реда, принадлежащи на ТАЗИ кампания, без двойно начисление.
+  const creditedForThisCampaign = rawDb
+    .prepare(`SELECT COUNT(*) AS n FROM campaign_unit_ledger WHERE campaign_id = ? AND source_type = 'belot_win' AND units_amount > 0`)
+    .get(campaignId) as { n: number }
+  assert.equal(
+    creditedForThisCampaign.n,
+    eligibleCount,
+    `очаквах точно ${eligibleCount} credited (само допустимите) за тая кампания, получих ${creditedForThisCampaign.n}`,
+  )
   for (const profileId of eligibleProfileIds) {
     const total = campaignCreditStore.getProfileCampaignTotal(campaignId, profileId)
     assert.equal(total, 7, `допустимия ред за profile=${profileId} трябва да е credited 7, получих ${total}`)

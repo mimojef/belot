@@ -252,18 +252,23 @@ assert(
 //
 // Фаза 11 — 20261018_001_add_campaign_archive_icon_and_rank_snapshot.sql
 // прави ALTER TABLE campaign_archive_summary/campaign_archive_top10 (Фаза 0
-// таблици) — за разлика от ВСИЧКИТЕ по-късни campaign_* миграции преди нея
-// (които реферират само profiles/gift_item_transactions, или създават
-// НОВИ, независими таблици), тая има ИСТИНСКА hard dependency върху
-// NEW_MIGRATION_FILENAME. Трябва да се изключи от "преди" bucket-а по
-// СЪЩАТА причина като NEW_MIGRATION_FILENAME самата, и да се приложи
-// ЗАЕДНО с нея по-долу — в реалния runner (сортиран по име, "20261010" <
-// "20261018") тая подредба е гарантирана винаги; тук е explicit, защото
-// тоя тест изкуствено преподрежда "всичко друго" преди Фаза 0 самата.
-const DEPENDENT_MIGRATION_FILENAME = '20261018_001_add_campaign_archive_icon_and_rank_snapshot.sql'
+// таблици); Фаза 13 — 20261022_001_add_credit_mode_to_campaign_earn_rules.sql
+// прави ALTER TABLE campaign_earn_rules (също Фаза 0 таблица) — за разлика
+// от ВСИЧКИТЕ по-късни campaign_* миграции преди тях (които реферират само
+// profiles/gift_item_transactions, или създават НОВИ, независими таблици),
+// тия имат ИСТИНСКА hard dependency върху NEW_MIGRATION_FILENAME. Трябва
+// да се изключат от "преди" bucket-а по СЪЩАТА причина като
+// NEW_MIGRATION_FILENAME самата, и да се приложат ЗАЕДНО с нея по-долу —
+// в реалния runner (сортиран по име, "20261010" < всички по-горни) тая
+// подредба е гарантирана винаги; тук е explicit, защото тоя тест изкуствено
+// преподрежда "всичко друго" преди Фаза 0 самата.
+const DEPENDENT_MIGRATION_FILENAMES = [
+  '20261018_001_add_campaign_archive_icon_and_rank_snapshot.sql',
+  '20261022_001_add_credit_mode_to_campaign_earn_rules.sql',
+]
 {
   const beforeFileNames = realMigrationFileNames.filter(
-    (name) => name !== NEW_MIGRATION_FILENAME && name !== DEPENDENT_MIGRATION_FILENAME,
+    (name) => name !== NEW_MIGRATION_FILENAME && !DEPENDENT_MIGRATION_FILENAMES.includes(name),
   )
   const temp = await createTempServerRoot(beforeFileNames)
   try {
@@ -280,11 +285,14 @@ const DEPENDENT_MIGRATION_FILENAME = '20261018_001_add_campaign_archive_icon_and
     })
 
     await cp(join(sourceMigrationsDirectoryPath, NEW_MIGRATION_FILENAME), join(temp.migrationsDirectoryPath, NEW_MIGRATION_FILENAME))
-    await cp(join(sourceMigrationsDirectoryPath, DEPENDENT_MIGRATION_FILENAME), join(temp.migrationsDirectoryPath, DEPENDENT_MIGRATION_FILENAME))
+    for (const dependentFileName of DEPENDENT_MIGRATION_FILENAMES) {
+      await cp(join(sourceMigrationsDirectoryPath, dependentFileName), join(temp.migrationsDirectoryPath, dependentFileName))
+    }
 
     await check('[B2] "Deploy" на новата миграция (restart) я прилага самостоятелно, без да пипа предходните таблици', async () => {
       const result = await ensureServerDatabaseReady({ serverRootOverride: temp.root })
-      assert(result.appliedCount === 2, `appliedCount=${result.appliedCount}, expected 2 (Фаза 0 + Фаза 11 aditivна миграция)`)
+      const expectedCount = 1 + DEPENDENT_MIGRATION_FILENAMES.length
+      assert(result.appliedCount === expectedCount, `appliedCount=${result.appliedCount}, expected ${expectedCount} (Фаза 0 + зависимите адитивни миграции)`)
       const database = await openDatabase(temp.databaseFilePath)
       try {
         for (const tableName of EXPECTED_TABLES) {

@@ -587,16 +587,16 @@ export async function createCampaignsStore(databaseFilePath: string): Promise<Ca
         source.giftSenderProfileId,
       )
       const earnRows = database.prepare(`
-        SELECT game_kind, stake_amount, units_per_win
+        SELECT game_kind, stake_amount, units_per_win, credit_mode
         FROM campaign_earn_rules
         WHERE campaign_id = ?
         ORDER BY game_kind ASC, stake_amount ASC;
-      `).all(sourceCampaignId) as Array<{ game_kind: string; stake_amount: number; units_per_win: number }>
+      `).all(sourceCampaignId) as Array<{ game_kind: string; stake_amount: number; units_per_win: number; credit_mode: string }>
       for (const row of earnRows) {
         database.prepare(`
-          INSERT INTO campaign_earn_rules (campaign_id, game_kind, stake_amount, units_per_win)
-          VALUES (?, ?, ?, ?);
-        `).run(newCampaignId, row.game_kind, row.stake_amount, row.units_per_win)
+          INSERT INTO campaign_earn_rules (campaign_id, game_kind, stake_amount, units_per_win, credit_mode)
+          VALUES (?, ?, ?, ?, ?);
+        `).run(newCampaignId, row.game_kind, row.stake_amount, row.units_per_win, row.credit_mode)
       }
 
       const packageRows = database.prepare(`

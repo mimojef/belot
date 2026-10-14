@@ -17,10 +17,17 @@ export type CampaignAdminRewardType = 'yellow_coins' | 'vip_days' | 'gift_item'
 // кампанията да не е soft-deleted).
 export type CampaignThemeAssetKind = 'unit_icon' | 'table_bg_desktop' | 'table_bg_mobile' | 'card_back'
 
+// "Само при победа" checkbox — 'winner_only' (default, досегашно
+// поведение) значи само победителите в завършен мач получават тикви;
+// 'all_participants' значи всички допустими реални участници, независимо
+// от резултата. Виж resolveUnitsAmountForEvent (campaignCreditStore.ts).
+export type CampaignAdminEarnRuleCreditMode = 'winner_only' | 'all_participants'
+
 export type CampaignAdminEarnRule = {
   gameKind: CampaignAdminGameKind
   stakeAmount: number
   unitsPerWin: number
+  creditMode: CampaignAdminEarnRuleCreditMode
 }
 
 export type CampaignAdminPackageEarnRule = {
@@ -158,6 +165,7 @@ type CampaignEarnRuleRow = {
   game_kind: CampaignAdminGameKind
   stake_amount: number
   units_per_win: number
+  credit_mode: CampaignAdminEarnRuleCreditMode
 }
 
 type CampaignPackageEarnRuleRow = {
@@ -358,8 +366,16 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
   `)
 
   const insertEarnRuleStatement = database.prepare(`
-    INSERT INTO campaign_earn_rules (campaign_id, game_kind, stake_amount, units_per_win)
-    VALUES (?, ?, ?, ?);
+    INSERT INTO campaign_earn_rules (campaign_id, game_kind, stake_amount, units_per_win, credit_mode)
+    VALUES (?, ?, ?, ?, ?);
+  `)
+
+  // "Само при победа" заключване за активна кампания (одит след риск-проверка,
+  // виж doc коментара на saveCampaignConfiguration за пълния "защо") —
+  // трябва да знаем ТЕКУЩИЯ credit_mode на вече съществуващо правило, за да
+  // го презапазим вместо подаденото от клиента.
+  const selectExistingEarnRuleCreditModesStatement = database.prepare(`
+    SELECT game_kind, stake_amount, credit_mode FROM campaign_earn_rules WHERE campaign_id = ?;
   `)
 
   const insertPackageEarnRuleStatement = database.prepare(`
@@ -609,7 +625,11 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
         return resultError('Има повторено правило за една и съща игра и залог.', 'duplicate_earn_rule')
       }
       earnKeys.add(key)
-      earnRules.push({ gameKind, stakeAmount, unitsPerWin })
+      // Strict allow-list, default 'winner_only' — липсващо/невалидно
+      // поле (напр. по-стар клиент) запазва ДОСЕГАШНОТО поведение, не
+      // грешка (DB колоната има СЪЩИЯ default, виж миграцията).
+      const creditMode: CampaignAdminEarnRuleCreditMode = rawRule.creditMode === 'all_participants' ? 'all_participants' : 'winner_only'
+      earnRules.push({ gameKind, stakeAmount, unitsPerWin, creditMode })
     }
 
     const packageEarnRules: CampaignAdminPackageEarnRule[] = []
@@ -736,7 +756,7 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
 
   function insertRulesConfiguration(campaignId: string, input: NormalizedCampaignInput): void {
     for (const rule of input.earnRules) {
-      insertEarnRuleStatement.run(campaignId, rule.gameKind, rule.stakeAmount, rule.unitsPerWin)
+      insertEarnRuleStatement.run(campaignId, rule.gameKind, rule.stakeAmount, rule.unitsPerWin, rule.creditMode)
     }
 
     for (const rule of input.packageEarnRules) {
@@ -779,7 +799,7 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     const placeholders = ids.map(() => '?').join(', ')
 
     const earnRows = database.prepare(`
-      SELECT campaign_id, game_kind, stake_amount, units_per_win
+      SELECT campaign_id, game_kind, stake_amount, units_per_win, credit_mode
       FROM campaign_earn_rules
       WHERE campaign_id IN (${placeholders})
       ORDER BY game_kind ASC, stake_amount ASC;
@@ -821,7 +841,7 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
     const earnByCampaignId = new Map<string, CampaignAdminEarnRule[]>()
     for (const row of earnRows) {
       const existing = earnByCampaignId.get(row.campaign_id) ?? []
-      existing.push({ gameKind: row.game_kind, stakeAmount: row.stake_amount, unitsPerWin: row.units_per_win })
+      existing.push({ gameKind: row.game_kind, stakeAmount: row.stake_amount, unitsPerWin: row.units_per_win, creditMode: row.credit_mode })
       earnByCampaignId.set(row.campaign_id, existing)
     }
 
@@ -978,8 +998,34 @@ export async function createCampaignAdminStore(databaseFilePath: string): Promis
         if (isActiveEdit) {
           // Rewardtiers/tier_rewards НЕ се пипат тук — виж doc коментара
           // по-горе и на deleteTiersConfiguration.
+          //
+          // "Само при победа" (credit_mode) е ЗАКЛЮЧЕН за активна кампания
+          // (одит, Фаза 13 §корекция): след активиране подаденото credit_mode
+          // от клиента се ИГНОРИРА — за ВЕЧЕ съществуващо (game_kind, stake)
+          // правило се пази ТЕКУЩАТА стойност от базата, а за НОВО правило
+          // (залог, който досега нямаше правило) ВИНАГИ се форсира
+          // 'winner_only' (безопасният default), никога подаденото.
+          // Причина: credit_mode се чете FRESH при всяко извикване на
+          // creditCampaignUnits (reconciliation включително) — промяна СЛЕД
+          // активиране би могла retroactively да credit-не губещи от стари,
+          // вече завършени мачове (reconciliation ги намира като "липсващ
+          // ред" и ги начислява според ТЕКУЩОТО правило, не правилото от
+          // момента на мача). Mirror на effectiveStartsAt заключването
+          // по-горе — заключваме полето, не цялата редакция.
+          const existingCreditModeByKey = new Map<string, CampaignAdminEarnRuleCreditMode>()
+          for (const row of selectExistingEarnRuleCreditModesStatement.all(campaignId) as Array<{
+            game_kind: CampaignAdminGameKind
+            stake_amount: number
+            credit_mode: CampaignAdminEarnRuleCreditMode
+          }>) {
+            existingCreditModeByKey.set(`${row.game_kind}:${row.stake_amount}`, row.credit_mode)
+          }
+          const lockedEarnRules = next.earnRules.map((rule) => ({
+            ...rule,
+            creditMode: existingCreditModeByKey.get(`${rule.gameKind}:${rule.stakeAmount}`) ?? 'winner_only',
+          }))
           deleteRulesConfiguration(campaignId)
-          insertRulesConfiguration(campaignId, next)
+          insertRulesConfiguration(campaignId, { ...next, earnRules: lockedEarnRules })
         } else {
           deleteConfiguration(campaignId)
           insertConfiguration(campaignId, next)

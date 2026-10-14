@@ -339,6 +339,7 @@ try {
       sourceId: 'match-1',
       eventAt: sampleEventAtFor(campaign1),
       stakeAmount: 0,
+      didWin: true,
     })
     assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
     if (!result.ok) return
@@ -355,6 +356,7 @@ try {
       sourceId: 'match-1',
       eventAt: sampleEventAtFor(campaign1),
       stakeAmount: 0,
+      didWin: true,
     })
     assert(result.ok && result.alreadyCredited === true, `expected alreadyCredited=true, got ${JSON.stringify(result)}`)
     if (result.ok) assert(result.unitsTotal === 100, `total must stay 100, got ${result.unitsTotal}`)
@@ -368,6 +370,7 @@ try {
       sourceId: 'match-2',
       eventAt: sampleEventAtFor(campaign1),
       stakeAmount: 0,
+      didWin: true,
     })
     assert(result.ok && result.unitsTotal === 200, `expected 200, got ${JSON.stringify(result)}`)
   })
@@ -376,8 +379,8 @@ try {
   await check('[4] Две отделни connections, различни събития за същия профил — и двете се начисляват коректно', async () => {
     const creditStoreTwo = await createCampaignCreditStore(databaseFilePath)
     try {
-      const resultA = creditStore.creditCampaignUnits({ profileId: player1, sourceType: 'belot_win', sourceId: 'match-3', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 })
-      const resultB = creditStoreTwo.creditCampaignUnits({ profileId: player1, sourceType: 'belot_win', sourceId: 'match-4', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 })
+      const resultA = creditStore.creditCampaignUnits({ profileId: player1, sourceType: 'belot_win', sourceId: 'match-3', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 , didWin: true })
+      const resultB = creditStoreTwo.creditCampaignUnits({ profileId: player1, sourceType: 'belot_win', sourceId: 'match-4', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 , didWin: true })
       assert(resultA.ok && resultB.ok, `both should succeed: ${JSON.stringify([resultA, resultB])}`)
       if (resultA.ok && resultB.ok) {
         assert(resultA.unitsCredited === 100 && resultB.unitsCredited === 100, 'both should credit 100 each')
@@ -443,7 +446,7 @@ try {
     const bystanderBalanceBefore = await getWalletBalance(bystander)
 
     await addRewardTier(campaign1, 50, [{ type: 'yellow_coins', payload: { amount: 7777 } }])
-    const result = creditStore.creditCampaignUnits({ profileId: player3, sourceType: 'belot_win', sourceId: 'match-p3-1', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player3, sourceType: 'belot_win', sourceId: 'match-p3-1', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 , didWin: true })
     assert(result.ok, 'credit failed')
     const balanceAfter = await getWalletBalance(player3)
     assert(balanceAfter === 7777, `expected recipient balance 7777, got ${balanceAfter}`)
@@ -455,7 +458,7 @@ try {
   await check('[10]-[11] Служебно VIP + удължаване без загуба на вече предоставено време', async () => {
     const player4 = await seedProfile('Player Four')
     await addRewardTier(campaign1, 60, [{ type: 'vip_days', payload: { unit: 'days', amount: 5 } }])
-    const result1 = creditStore.creditCampaignUnits({ profileId: player4, sourceType: 'belot_win', sourceId: 'match-p4-vip1', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 })
+    const result1 = creditStore.creditCampaignUnits({ profileId: player4, sourceType: 'belot_win', sourceId: 'match-p4-vip1', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 , didWin: true })
     assert(result1.ok, 'first vip credit failed')
     const activeUntilAfterFirst = await getVipActiveUntil(player4)
     assert(activeUntilAfterFirst !== null, 'expected vip_status row after first grant')
@@ -491,7 +494,7 @@ try {
     const dailyLimitSettingBefore = await querySetting('marketing_daily_gift_limit')
 
     const recipient = await seedProfile('Gift Recipient')
-    const result = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'ludo_win', sourceId: 'ludo-match-1', eventAt: sampleEventAtFor(campaign3), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'ludo_win', sourceId: 'ludo-match-1', eventAt: sampleEventAtFor(campaign3), stakeAmount: 0 , didWin: true })
     assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
     if (!result.ok) return
     assert(result.grantedRewards.some((r) => r.type === 'gift_item'), 'expected a gift_item reward')
@@ -517,7 +520,7 @@ try {
     await addRewardTier(campaign4, 5, [{ type: 'gift_item', payload: { giftItemId } }])
 
     const recipient = await seedProfile('Recipient Invalid Sender')
-    const result = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-invalid-sender', eventAt: sampleEventAtFor(campaign4), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-invalid-sender', eventAt: sampleEventAtFor(campaign4), stakeAmount: 0 , didWin: true })
     assert(result.ok, 'credit itself should succeed (units always credited)')
     if (!result.ok) return
     assert(result.grantedRewards.length === 0, 'gift must NOT be in grantedRewards')
@@ -533,7 +536,7 @@ try {
     await addRewardTier(campaign5, 5, [{ type: 'gift_item', payload: { giftItemId: 'non-existent-gift-id' } }])
 
     const recipient = await seedProfile('Recipient Missing Gift')
-    const result = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-missing-gift', eventAt: sampleEventAtFor(campaign5), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-missing-gift', eventAt: sampleEventAtFor(campaign5), stakeAmount: 0 , didWin: true })
     assert(result.ok, 'credit itself should succeed')
     if (!result.ok) return
     assert(result.skippedRewards.some((s) => s.reason === 'gift_item_unavailable'), `expected gift_item_unavailable, got ${JSON.stringify(result.skippedRewards)}`)
@@ -547,7 +550,7 @@ try {
     await addRewardTier(campaign6, 5, [{ type: 'gift_item', payload: { giftItemId } }])
 
     // marketingSelf е И подател, И получател на наградата.
-    const result = creditStore.creditCampaignUnits({ profileId: marketingSelf, sourceType: 'belot_win', sourceId: 'm-self-gift', eventAt: sampleEventAtFor(campaign6), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: marketingSelf, sourceType: 'belot_win', sourceId: 'm-self-gift', eventAt: sampleEventAtFor(campaign6), stakeAmount: 0 , didWin: true })
     assert(result.ok, 'credit itself should succeed')
     if (!result.ok) return
     assert(result.skippedRewards.some((s) => s.reason === 'sender_equals_recipient'), `expected sender_equals_recipient, got ${JSON.stringify(result.skippedRewards)}`)
@@ -563,8 +566,8 @@ try {
     await addRewardTier(campaign7, 5, [{ type: 'gift_item', payload: { giftItemId } }])
     const recipient = await seedProfile('Recipient Once')
 
-    const first = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-once', eventAt: sampleEventAtFor(campaign7), stakeAmount: 0 })
-    const second = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-once', eventAt: sampleEventAtFor(campaign7), stakeAmount: 0 })
+    const first = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-once', eventAt: sampleEventAtFor(campaign7), stakeAmount: 0 , didWin: true })
+    const second = creditStore.creditCampaignUnits({ profileId: recipient, sourceType: 'belot_win', sourceId: 'm-once', eventAt: sampleEventAtFor(campaign7), stakeAmount: 0 , didWin: true })
     assert(first.ok && second.ok, 'both calls should return ok')
     if (second.ok) assert(second.alreadyCredited === true, 'second call must report alreadyCredited')
     const txCount = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, recipient)
@@ -588,7 +591,7 @@ try {
         // Форсираме грешка директно - затваряме connection-а ПРЕДИ извикването,
         // така че самото BEGIN IMMEDIATE да хвърли.
         poisonedCreditStore.close()
-        poisonedCreditStore.creditCampaignUnits({ profileId: player5, sourceType: 'belot_win', sourceId: 'm-rollback', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 })
+        poisonedCreditStore.creditCampaignUnits({ profileId: player5, sourceType: 'belot_win', sourceId: 'm-rollback', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 , didWin: true })
       } catch {
         threw = true
       }
@@ -607,7 +610,7 @@ try {
     assert(totalsAfterFailure === 0, 'failed attempt must leave NO totals row')
 
     // Retry със здрав store instance — трябва да мине чисто, сякаш нищо не се е случвало.
-    const retryResult = creditStore.creditCampaignUnits({ profileId: player5, sourceType: 'belot_win', sourceId: 'm-rollback', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 })
+    const retryResult = creditStore.creditCampaignUnits({ profileId: player5, sourceType: 'belot_win', sourceId: 'm-rollback', eventAt: sampleEventAtFor(campaign1), stakeAmount: 0 , didWin: true })
     assert(retryResult.ok && retryResult.alreadyCredited === false && retryResult.unitsCredited === 100, `retry should succeed cleanly: ${JSON.stringify(retryResult)}`)
   })
 
@@ -628,7 +631,7 @@ try {
     const player6 = await seedProfile('Player Six Historical')
     // eventAt попада В прозореца на finishedCampaign (-50ч до -10ч), не в текущия "сега".
     const historicalEventAt = new Date(Date.now() - 20 * 3_600_000)
-    const result = creditStore.creditCampaignUnits({ profileId: player6, sourceType: 'belot_win', sourceId: 'm-historical', eventAt: historicalEventAt, stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player6, sourceType: 'belot_win', sourceId: 'm-historical', eventAt: historicalEventAt, stakeAmount: 0 , didWin: true })
     assert(result.ok, `historical credit should succeed: ${JSON.stringify(result)}`)
     if (!result.ok) return
     assert(result.campaignId === finishedCampaign, `expected credit to attach to the ORIGINAL finished campaign (${finishedCampaign}), got ${result.campaignId}`)
@@ -641,7 +644,7 @@ try {
   await check('[22] Събитие след края на ВСИЧКИ кампании -> no_eligible_campaign', async () => {
     const player7 = await seedProfile('Player Seven No Campaign')
     const farFutureEventAt = new Date(Date.now() + 10_000 * 3_600_000)
-    const result = creditStore.creditCampaignUnits({ profileId: player7, sourceType: 'belot_win', sourceId: 'm-no-campaign', eventAt: farFutureEventAt, stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player7, sourceType: 'belot_win', sourceId: 'm-no-campaign', eventAt: farFutureEventAt, stakeAmount: 0 , didWin: true })
     assert(!result.ok && result.reason === 'no_eligible_campaign', `expected no_eligible_campaign, got ${JSON.stringify(result)}`)
   })
 
@@ -663,12 +666,12 @@ try {
     // stopped кампании за един и същ eventAt (виж теста за tie-break по-долу,
     // не е предмет на тази конкретна проверка).
     const beforeStopEventAt = new Date(Date.now() - 15 * 3_600_000)
-    const beforeResult = creditStore.creditCampaignUnits({ profileId: playerBefore, sourceType: 'belot_win', sourceId: 'm-before-stop', eventAt: beforeStopEventAt, stakeAmount: 0 })
+    const beforeResult = creditStore.creditCampaignUnits({ profileId: playerBefore, sourceType: 'belot_win', sourceId: 'm-before-stop', eventAt: beforeStopEventAt, stakeAmount: 0 , didWin: true })
     assert(beforeResult.ok && beforeResult.campaignId === stoppableCampaign, `expected credit before stop to attach to the stopped campaign, got ${JSON.stringify(beforeResult)}`)
 
     const playerAfter = await seedProfile('Player After Stop')
     const afterStopEventAt = new Date(Date.now() + 1 * 3_600_000) // след спирането — ends_at(+500ч) би го направил "допустим", ако грешно се ползва ends_at вместо реалния stop момент
-    const afterResult = creditStore.creditCampaignUnits({ profileId: playerAfter, sourceType: 'belot_win', sourceId: 'm-after-stop', eventAt: afterStopEventAt, stakeAmount: 0 })
+    const afterResult = creditStore.creditCampaignUnits({ profileId: playerAfter, sourceType: 'belot_win', sourceId: 'm-after-stop', eventAt: afterStopEventAt, stakeAmount: 0 , didWin: true })
     assert(
       !afterResult.ok || afterResult.campaignId !== stoppableCampaign,
       `event after the actual stop moment must NOT attach to the stopped campaign (ends_at must not be used as the eligibility boundary), got ${JSON.stringify(afterResult)}`,
@@ -700,7 +703,7 @@ try {
 
   await check('[25] Отрицателна корекция намалява total, но НЕ отнема вече предоставена награда', async () => {
     await addRewardTier(adjustCampaign, 20, [{ type: 'yellow_coins', payload: { amount: 999 } }])
-    const credit = creditStore.creditCampaignUnits({ profileId: adjustPlayer, sourceType: 'belot_win', sourceId: 'm-adjust-trigger', eventAt: sampleEventAtFor(adjustCampaign), stakeAmount: 0 })
+    const credit = creditStore.creditCampaignUnits({ profileId: adjustPlayer, sourceType: 'belot_win', sourceId: 'm-adjust-trigger', eventAt: sampleEventAtFor(adjustCampaign), stakeAmount: 0 , didWin: true })
     assert(credit.ok, 'setup credit failed')
     const balanceAfterGrant = await getWalletBalance(adjustPlayer)
     assert(balanceAfterGrant === 999, `expected 999 after grant, got ${balanceAfterGrant}`)
@@ -746,7 +749,7 @@ try {
       { type: 'gift_item', payload: { giftItemId } },
     ])
     const player8 = await seedProfile('Player Eight Notification')
-    const result = creditStore.creditCampaignUnits({ profileId: player8, sourceType: 'belot_win', sourceId: 'm-notif', eventAt: sampleEventAtFor(notifCampaign), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player8, sourceType: 'belot_win', sourceId: 'm-notif', eventAt: sampleEventAtFor(notifCampaign), stakeAmount: 0 , didWin: true })
     assert(result.ok, 'credit failed')
 
     const pending = creditStore.listPendingNotifications(player8)
@@ -842,7 +845,7 @@ try {
     ])
 
     const player = await seedProfile('Player Multi Gift Tier')
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-multi-gift', eventAt: sampleEventAtFor(campaignMultiGift), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-multi-gift', eventAt: sampleEventAtFor(campaignMultiGift), stakeAmount: 0 , didWin: true })
     assert(result.ok, `credit failed: ${JSON.stringify(result)}`)
     if (!result.ok) return
     assert(result.grantedRewards.filter((r) => r.type === 'gift_item').length === 3, `expected all 3 distinct gifts granted, got ${JSON.stringify(result.grantedRewards)}`)
@@ -858,8 +861,8 @@ try {
     await addRewardTier(campaignReplay, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
     const player = await seedProfile('Player Replay Gift')
 
-    const first = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-replay-1', eventAt: sampleEventAtFor(campaignReplay), stakeAmount: 0 })
-    const second = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-replay-1', eventAt: sampleEventAtFor(campaignReplay), stakeAmount: 0 })
+    const first = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-replay-1', eventAt: sampleEventAtFor(campaignReplay), stakeAmount: 0 , didWin: true })
+    const second = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-replay-1', eventAt: sampleEventAtFor(campaignReplay), stakeAmount: 0 , didWin: true })
     assert(first.ok && second.ok && second.alreadyCredited, `expected idempotent replay, got ${JSON.stringify([first, second])}`)
     const txCount = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)
     assert(txCount === 1, `expected exactly 1 delivery despite replay, got ${txCount}`)
@@ -873,7 +876,7 @@ try {
     const [tierRewardId] = await addRewardTier(campaignRecovery, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
     const player = await seedProfile('Player Recovery 1')
 
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-1', eventAt: sampleEventAtFor(campaignRecovery), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-1', eventAt: sampleEventAtFor(campaignRecovery), stakeAmount: 0 , didWin: true })
     assert(result.ok && result.skippedRewards.length === 1, 'setup: expected the gift to be skipped initially')
 
     const gaps = creditStore.listPendingGiftRewardGaps(campaignRecovery)
@@ -887,7 +890,7 @@ try {
     const player = await seedProfile('Player Recovery 2')
 
     // Начално начисление БЕЗ зададен gift_sender_profile_id -> invalid_sender, пропусната.
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-2', eventAt: sampleEventAtFor(campaignRecovery2), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-2', eventAt: sampleEventAtFor(campaignRecovery2), stakeAmount: 0 , didWin: true })
     assert(result.ok && result.skippedRewards.some((s) => s.reason === 'invalid_sender'), 'setup: expected invalid_sender skip')
     const totalBeforeRetry = creditStore.getProfileCampaignTotal(campaignRecovery2, player)
 
@@ -920,7 +923,7 @@ try {
     const campaignArchivedSim = await seedCampaign(campaignsStore, ADMIN_ACTOR) // без marketing подател -> invalid_sender
     const [tierRewardId] = await addRewardTier(campaignArchivedSim, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
     const player = await seedProfile('Player Recovery 3')
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-3', eventAt: sampleEventAtFor(campaignArchivedSim), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-3', eventAt: sampleEventAtFor(campaignArchivedSim), stakeAmount: 0 , didWin: true })
     assert(result.ok && result.skippedRewards.length === 1, 'setup: expected skip')
 
     // Симулираме архивиране директно (archived_at колоната съществува от Фаза 0; реалният archiving job е бъдеща фаза).
@@ -943,7 +946,7 @@ try {
     const campaignStillBroken = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: nonMarketing })
     const [tierRewardId] = await addRewardTier(campaignStillBroken, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
     const player = await seedProfile('Player Recovery 4')
-    creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-4', eventAt: sampleEventAtFor(campaignStillBroken), stakeAmount: 0 })
+    creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-recovery-4', eventAt: sampleEventAtFor(campaignStillBroken), stakeAmount: 0 , didWin: true })
 
     const notificationsBefore = creditStore.listPendingNotifications(player).length
     const retryResult = creditStore.retryPendingGiftReward(campaignStillBroken, player, tierRewardId)
@@ -975,7 +978,7 @@ try {
     )
     assert(usedBefore === 0, 'sanity: no pre-existing yellow_coin_gift_ledger activity for this fresh sender')
 
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-real-limit', eventAt: sampleEventAtFor(campaignLimit), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-real-limit', eventAt: sampleEventAtFor(campaignLimit), stakeAmount: 0 , didWin: true })
     assert(result.ok && result.grantedRewards.some((r) => r.type === 'gift_item'), 'setup: expected gift granted')
 
     const usedAfter = await countRows(
@@ -998,7 +1001,7 @@ try {
     await addRewardTier(campaignDelivery, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
     const player = await seedProfile('Player Delivery Log Test')
 
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-delivery-log', eventAt: sampleEventAtFor(campaignDelivery), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-delivery-log', eventAt: sampleEventAtFor(campaignDelivery), stakeAmount: 0 , didWin: true })
     assert(result.ok, 'credit failed')
 
     const db = await openRawDb()
@@ -1030,7 +1033,7 @@ try {
     const campaignDeleteRisk = await seedCampaign(campaignsStore, ADMIN_ACTOR, { giftSenderProfileId: marketingSender })
     await addRewardTier(campaignDeleteRisk, 5, [{ type: 'gift_item', payload: { giftItemId: giftId } }])
     const player = await seedProfile('Player Before Sender Delete')
-    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-sender-delete-risk', eventAt: sampleEventAtFor(campaignDeleteRisk), stakeAmount: 0 })
+    const result = creditStore.creditCampaignUnits({ profileId: player, sourceType: 'belot_win', sourceId: 'm-sender-delete-risk', eventAt: sampleEventAtFor(campaignDeleteRisk), stakeAmount: 0 , didWin: true })
     assert(result.ok && result.grantedRewards.some((r) => r.type === 'gift_item'), 'setup: expected gift granted before sender deletion')
 
     const txCountBeforeDelete = await countRows(`SELECT COUNT(*) AS c FROM gift_item_transactions WHERE recipient_profile_id = ?;`, player)

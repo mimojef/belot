@@ -75,7 +75,13 @@ import type { PurchaseCampaignReconciliationResult } from './campaignPurchaseHoo
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
-function getHumanWinnerProfileId(room: ServerRoom, seat: Seat): string | null {
+// Преди "Само при победа" checkbox-а (campaign_earn_rules.credit_mode) тая
+// функция се викаше само за seats от печелившия отбор, оттук и старото
+// име. Сега се вика за ВСЕКИ seat (печеливш и губещ) — "Само при победа"
+// решението живее в resolveUnitsAmountForEvent (campaignCreditStore.ts), не
+// тук. Поведението на самата функция е непроменено: връща profileId само
+// за реален човешки участник (не бот), независимо от резултата на мача.
+function getHumanParticipantProfileId(room: ServerRoom, seat: Seat): string | null {
   const participant = room.seats[seat].participant
   if (participant === null || participant.kind === 'bot') return null
   return participant.identity.profileId ?? participant.publicProfile?.profileId ?? null
@@ -156,10 +162,15 @@ export function recordBelotMatchForCampaign(deps: {
     const winnerTeam = state.matchEnded.winnerTeam
     const matchSourceId = getRoomStakeLedgerScope(room)
 
+    // Итерира ВСИЧКИ seats (не само печелившия отбор) — "Само при победа"
+    // (credit_mode) решението се прави вътре в resolveUnitsAmountForEvent,
+    // спрямо didWin. Губещ участник под credit_mode='winner_only' (default)
+    // получава 0 единици (ledger ред се пише, retry-идемпотентно), точно
+    // както преди просто не се извикваше изобщо.
     for (const seat of SERVER_SEAT_ORDER) {
-      if (getTeamBySeat(seat) !== winnerTeam) continue
-      const profileId = getHumanWinnerProfileId(room, seat)
+      const profileId = getHumanParticipantProfileId(room, seat)
       if (profileId === null) continue
+      const didWin = getTeamBySeat(seat) === winnerTeam
 
       const result = campaignCreditStore.creditCampaignUnits({
         profileId,
@@ -167,9 +178,10 @@ export function recordBelotMatchForCampaign(deps: {
         sourceId: matchSourceId,
         eventAt,
         stakeAmount,
+        didWin,
       })
 
-      if (!result.ok && result.reason !== 'no_eligible_campaign' && result.reason !== 'ineligible_profile') {
+      if (!result.ok && result.reason !== 'no_eligible_campaign' && result.reason !== 'ineligible_profile' && result.reason !== 'not_winner') {
         console.error(
           `[campaign-game-hooks] belot campaign credit failed room=${room.id} match=${matchSourceId} profile=${profileId} reason=${result.reason}`,
         )
@@ -206,27 +218,32 @@ export function recordLudoMatchForCampaign(deps: {
     if (snapshot.state.status !== 'finished') return true
     if (snapshot.state.winnerColor === null) return true
 
-    const winner = snapshot.players.find((player) => player.color === snapshot.state.winnerColor)
-    if (winner === undefined) return true
+    // Итерира ВСИЧКИ играчи (не само победителя) — "Само при победа"
+    // решението живее в resolveUnitsAmountForEvent, спрямо didWin.
+    let allOk = true
+    for (const player of snapshot.players) {
+      const didWin = player.color === snapshot.state.winnerColor
+      const result = campaignCreditStore.creditCampaignUnits({
+        profileId: player.profileId,
+        sourceType: 'ludo_win',
+        sourceId: snapshot.matchId,
+        eventAt,
+        stakeAmount: snapshot.stake,
+        didWin,
+      })
 
-    const result = campaignCreditStore.creditCampaignUnits({
-      profileId: winner.profileId,
-      sourceType: 'ludo_win',
-      sourceId: snapshot.matchId,
-      eventAt,
-      stakeAmount: snapshot.stake,
-    })
-
-    if (!result.ok && result.reason !== 'no_eligible_campaign' && result.reason !== 'ineligible_profile') {
-      console.error(
-        `[campaign-game-hooks] ludo campaign credit failed match=${snapshot.matchId} profile=${winner.profileId} reason=${result.reason} (fast-path miss — reconciliation job ще го довърши)`,
-      )
-      return false
+      if (!result.ok && result.reason !== 'no_eligible_campaign' && result.reason !== 'ineligible_profile' && result.reason !== 'not_winner') {
+        console.error(
+          `[campaign-game-hooks] ludo campaign credit failed match=${snapshot.matchId} profile=${player.profileId} reason=${result.reason} (fast-path miss — reconciliation job ще го довърши)`,
+        )
+        allOk = false
+        continue
+      }
+      if (result.ok && result.notification !== null) {
+        onRewardNotification?.(player.profileId, result.notification)
+      }
     }
-    if (result.ok && result.notification !== null) {
-      onRewardNotification?.(winner.profileId, result.notification)
-    }
-    return true
+    return allOk
   } catch (error) {
     console.error('[campaign-game-hooks] unexpected error crediting ludo match (fast-path miss — reconciliation job ще го довърши)', error)
     return false
@@ -403,6 +420,7 @@ export async function reconcileMissingBelotCampaignCredits(
       room_id: string
       stake_amount: number
       ended_at: string
+      did_win: number
     }
 
     const NOT_ALREADY_CREDITED_NEW_SQL = `
@@ -429,12 +447,21 @@ export async function reconcileMissingBelotCampaignCredits(
             SELECT 1 FROM tournament_matches tm WHERE tm.room_id = ${roomIdExpr}
           )`
 
+    // "Само при победа" (Фаза 13): did_win филтъра е премахнат от ВСИЧКИТЕ
+    // 4 заявки по-долу — губещи участници вече ТРЯБВА да са candidate-и
+    // тук, за да работи reconciliation и за credit_mode='all_participants'
+    // правила. did_win се селектира и подава като didWin на самия
+    // creditCampaignUnits() извикване, което вече самò решава (спрямо
+    // campaign_earn_rules.credit_mode) дали губещ участник реално дължи
+    // единици — "winner_only" (default) продължава да пише 0-единичен
+    // ledger ред за губещ, точно както преди did_win=1 филтъра просто не
+    // го правеше candidate изобщо (идентичен краен резултат за
+    // съществуващи кампании/правила).
     const selectNewMissingCreditsSinceStatement = database.prepare(`
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
       FROM belot_match_completion_ledger bmcl
-      WHERE bmcl.did_win = 1
-        AND bmcl.is_guest_trial = 0
+      WHERE bmcl.is_guest_trial = 0
         AND bmcl.profile_id IS NOT NULL
         AND bmcl.ended_at >= ?
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
@@ -445,10 +472,9 @@ export async function reconcileMissingBelotCampaignCredits(
 
     const selectNewMissingCreditsAfterCursorStatement = database.prepare(`
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
       FROM belot_match_completion_ledger bmcl
-      WHERE bmcl.did_win = 1
-        AND bmcl.is_guest_trial = 0
+      WHERE bmcl.is_guest_trial = 0
         AND bmcl.profile_id IS NOT NULL
         AND (
           bmcl.ended_at > ?
@@ -463,10 +489,9 @@ export async function reconcileMissingBelotCampaignCredits(
 
     const selectNewMissingCreditsFromStartStatement = database.prepare(`
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
       FROM belot_match_completion_ledger bmcl
-      WHERE bmcl.did_win = 1
-        AND bmcl.is_guest_trial = 0
+      WHERE bmcl.is_guest_trial = 0
         AND bmcl.profile_id IS NOT NULL
         AND ${NOT_ALREADY_CREDITED_NEW_SQL}
         AND ${NOT_TOURNAMENT_MATCH_SQL('bmcl.room_id')}
@@ -476,10 +501,9 @@ export async function reconcileMissingBelotCampaignCredits(
 
     const selectNewMissingCreditsThroughCursorStatement = database.prepare(`
       SELECT bmcl.match_scope AS match_scope, bmcl.profile_id AS profile_id, bmcl.room_id AS room_id,
-             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at
+             bmcl.stake_amount AS stake_amount, bmcl.ended_at AS ended_at, bmcl.did_win AS did_win
       FROM belot_match_completion_ledger bmcl
-      WHERE bmcl.did_win = 1
-        AND bmcl.is_guest_trial = 0
+      WHERE bmcl.is_guest_trial = 0
         AND bmcl.profile_id IS NOT NULL
         AND (
           bmcl.ended_at < ?
@@ -542,11 +566,12 @@ export async function reconcileMissingBelotCampaignCredits(
           sourceId: row.match_scope,
           eventAt: new Date(dbDateToUtc(row.ended_at)),
           stakeAmount: row.stake_amount,
+          didWin: row.did_win === 1,
         })
 
         if (creditResult.ok) {
           result.credited += 1
-        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile' && creditResult.reason !== 'not_winner') {
           console.error(
             `[campaign-game-hooks] belot reconciliation credit failed match=${row.match_scope} profile=${row.profile_id} reason=${creditResult.reason}`,
           )
@@ -610,6 +635,7 @@ export async function reconcileMissingBelotCampaignCredits(
       room_id: string
       profile_id: string
       completed_at: string
+      did_win: number
     }
 
     const NOT_ALREADY_CREDITED_LEGACY_SQL = `
@@ -625,11 +651,12 @@ export async function reconcileMissingBelotCampaignCredits(
             WHERE bmcl2.room_id = pmr.room_id AND bmcl2.profile_id = pmr.profile_id
           )`
 
+    // "Само при победа" (Фаза 13) — did_win филтъра премахнат, mirror на
+    // primary scan-а по-горе (виж doc коментара там за пълния rationale).
     const selectLegacyMissingCreditsSinceStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr
-      WHERE pmr.did_win = 1
-        AND pmr.is_guest_trial = 0
+      WHERE pmr.is_guest_trial = 0
         AND pmr.profile_id IS NOT NULL
         AND pmr.completed_at >= ?
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
@@ -640,10 +667,9 @@ export async function reconcileMissingBelotCampaignCredits(
     `)
 
     const selectLegacyMissingCreditsAfterCursorStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr
-      WHERE pmr.did_win = 1
-        AND pmr.is_guest_trial = 0
+      WHERE pmr.is_guest_trial = 0
         AND pmr.profile_id IS NOT NULL
         AND (
           pmr.completed_at > ?
@@ -658,10 +684,9 @@ export async function reconcileMissingBelotCampaignCredits(
     `)
 
     const selectLegacyMissingCreditsFromStartStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr
-      WHERE pmr.did_win = 1
-        AND pmr.is_guest_trial = 0
+      WHERE pmr.is_guest_trial = 0
         AND pmr.profile_id IS NOT NULL
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
@@ -671,10 +696,9 @@ export async function reconcileMissingBelotCampaignCredits(
     `)
 
     const selectLegacyMissingCreditsThroughCursorStatement = database.prepare(`
-      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at
+      SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr
-      WHERE pmr.did_win = 1
-        AND pmr.is_guest_trial = 0
+      WHERE pmr.is_guest_trial = 0
         AND pmr.profile_id IS NOT NULL
         AND (
           pmr.completed_at < ?
@@ -773,11 +797,12 @@ export async function reconcileMissingBelotCampaignCredits(
           sourceId: row.room_id,
           eventAt: new Date(dbDateToUtc(row.completed_at)),
           stakeAmount,
+          didWin: row.did_win === 1,
         })
 
         if (creditResult.ok) {
           result.credited += 1
-        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile' && creditResult.reason !== 'not_winner') {
           console.error(
             `[campaign-game-hooks] belot reconciliation (legacy sweep) credit failed room=${row.room_id} profile=${row.profile_id} reason=${creditResult.reason}`,
           )
@@ -845,88 +870,88 @@ export async function reconcileMissingLudoCampaignCredits(
   database.exec('PRAGMA busy_timeout = 5000;')
 
   try {
+    // "Само при победа" (Фаза 13) — за разлика от Белот,
+    // ludo_room_matches пази ЕДИН ред на мач (не на участник); пълният
+    // ростер е в players_json (JSON масив LudoRoomMatchOccupant, виж
+    // 20260925_001_create_ludo_room_matches.sql doc коментара). За да
+    // работи credit_mode='all_participants' reconciliation, резултата
+    // тук е РАЗВЪРНАТ по участник чрез json_each/json_extract (JSON1,
+    // вече доказано наличен — campaign_tier_rewards.reward_payload_json
+    // CHECK(json_valid(...)) и т.н. го ползват). Cursor-ът вече напредва
+    // по (finished_at, match_id, participant_profile_id) — mirror на
+    // Белот-ия per-участник модел, не per-мач.
     type LudoMissingCreditRow = {
       match_id: string
+      participant_profile_id: string
       winner_profile_id: string
       stake: number
       finished_at: string
     }
 
+    const PARTICIPANT_PROFILE_ID_SQL = `json_extract(je.value, '$.profileId')`
+    const NOT_ALREADY_CREDITED_LUDO_SQL = `
+          NOT EXISTS (
+            SELECT 1 FROM campaign_unit_ledger cul
+            WHERE cul.source_type = 'ludo_win'
+              AND cul.source_id = lrm.match_id
+              AND cul.profile_id = ${PARTICIPANT_PROFILE_ID_SQL}
+          )`
+
     const selectMissingCreditsSinceStatement = database.prepare(`
-      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
-             lrm.stake AS stake, lrm.finished_at AS finished_at
-      FROM ludo_room_matches lrm
+      SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
+             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm, json_each(lrm.players_json) je
       WHERE lrm.status = 'finished'
         AND lrm.winner_profile_id IS NOT NULL
         AND lrm.finished_at >= ?
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'ludo_win'
-            AND cul.source_id = lrm.match_id
-            AND cul.profile_id = lrm.winner_profile_id
-        )
-      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
       LIMIT ?;
     `)
 
     const selectMissingCreditsAfterCursorStatement = database.prepare(`
-      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
-             lrm.stake AS stake, lrm.finished_at AS finished_at
-      FROM ludo_room_matches lrm
+      SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
+             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm, json_each(lrm.players_json) je
       WHERE lrm.status = 'finished'
         AND lrm.winner_profile_id IS NOT NULL
         AND lrm.finished_at IS NOT NULL
         AND (
           lrm.finished_at > ?
           OR (lrm.finished_at = ? AND lrm.match_id > ?)
-          OR (lrm.finished_at = ? AND lrm.match_id = ? AND lrm.winner_profile_id > ?)
+          OR (lrm.finished_at = ? AND lrm.match_id = ? AND ${PARTICIPANT_PROFILE_ID_SQL} > ?)
         )
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'ludo_win'
-            AND cul.source_id = lrm.match_id
-            AND cul.profile_id = lrm.winner_profile_id
-        )
-      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
       LIMIT ?;
     `)
 
     const selectMissingCreditsFromStartStatement = database.prepare(`
-      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
-             lrm.stake AS stake, lrm.finished_at AS finished_at
-      FROM ludo_room_matches lrm
+      SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
+             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm, json_each(lrm.players_json) je
       WHERE lrm.status = 'finished'
         AND lrm.winner_profile_id IS NOT NULL
         AND lrm.finished_at IS NOT NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'ludo_win'
-            AND cul.source_id = lrm.match_id
-            AND cul.profile_id = lrm.winner_profile_id
-        )
-      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
       LIMIT ?;
     `)
 
     const selectMissingCreditsThroughCursorStatement = database.prepare(`
-      SELECT lrm.match_id AS match_id, lrm.winner_profile_id AS winner_profile_id,
-             lrm.stake AS stake, lrm.finished_at AS finished_at
-      FROM ludo_room_matches lrm
+      SELECT lrm.match_id AS match_id, ${PARTICIPANT_PROFILE_ID_SQL} AS participant_profile_id,
+             lrm.winner_profile_id AS winner_profile_id, lrm.stake AS stake, lrm.finished_at AS finished_at
+      FROM ludo_room_matches lrm, json_each(lrm.players_json) je
       WHERE lrm.status = 'finished'
         AND lrm.winner_profile_id IS NOT NULL
         AND lrm.finished_at IS NOT NULL
         AND (
           lrm.finished_at < ?
           OR (lrm.finished_at = ? AND lrm.match_id < ?)
-          OR (lrm.finished_at = ? AND lrm.match_id = ? AND lrm.winner_profile_id <= ?)
+          OR (lrm.finished_at = ? AND lrm.match_id = ? AND ${PARTICIPANT_PROFILE_ID_SQL} <= ?)
         )
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_unit_ledger cul
-          WHERE cul.source_type = 'ludo_win'
-            AND cul.source_id = lrm.match_id
-            AND cul.profile_id = lrm.winner_profile_id
-        )
-      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, lrm.winner_profile_id ASC
+        AND ${NOT_ALREADY_CREDITED_LUDO_SQL}
+      ORDER BY lrm.finished_at ASC, lrm.match_id ASC, participant_profile_id ASC
       LIMIT ?;
     `)
 
@@ -972,24 +997,25 @@ export async function reconcileMissingLudoCampaignCredits(
 
       try {
         const creditResult = campaignCreditStore.creditCampaignUnits({
-          profileId: row.winner_profile_id,
+          profileId: row.participant_profile_id,
           sourceType: 'ludo_win',
           sourceId: row.match_id,
           eventAt: new Date(dbDateToUtc(row.finished_at)),
           stakeAmount: row.stake,
+          didWin: row.participant_profile_id === row.winner_profile_id,
         })
 
         if (creditResult.ok) {
           result.credited += 1
-        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile') {
+        } else if (creditResult.reason !== 'no_eligible_campaign' && creditResult.reason !== 'ineligible_profile' && creditResult.reason !== 'not_winner') {
           console.error(
-            `[campaign-game-hooks] ludo reconciliation credit failed match=${row.match_id} profile=${row.winner_profile_id} reason=${creditResult.reason}`,
+            `[campaign-game-hooks] ludo reconciliation credit failed match=${row.match_id} profile=${row.participant_profile_id} reason=${creditResult.reason}`,
           )
         }
       } catch (error) {
         result.failed += 1
         console.error(
-          `[campaign-game-hooks] ludo reconciliation unexpected failure match=${row.match_id} profile=${row.winner_profile_id}`,
+          `[campaign-game-hooks] ludo reconciliation unexpected failure match=${row.match_id} profile=${row.participant_profile_id}`,
           error,
         )
       } finally {
@@ -997,7 +1023,7 @@ export async function reconcileMissingLudoCampaignCredits(
           saveReconciliationCursor(database, 'ludo_win', {
             eventAt: row.finished_at,
             sourceId: row.match_id,
-            profileId: row.winner_profile_id,
+            profileId: row.participant_profile_id,
           })
         }
       }

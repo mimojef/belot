@@ -206,14 +206,19 @@ function renderEditor(
 
   const earnRows = draft.earnRules.map((rule, index) => {
     const stakes = rule.gameKind === 'belot' ? allowedBelotStakes : allowedLudoStakes
+    const isWinnerOnly = rule.creditMode !== 'all_participants'
     return `
-      <div data-admin-campaign-earn-rule="1" style="display:grid;grid-template-columns:minmax(90px,0.8fr) minmax(110px,1fr) minmax(110px,1fr) auto;gap:8px;align-items:center;">
+      <div data-admin-campaign-earn-rule="1" style="display:grid;grid-template-columns:minmax(90px,0.8fr) minmax(110px,1fr) minmax(110px,1fr) minmax(140px,1fr) auto;gap:8px;align-items:center;">
         <select data-admin-campaign-earn-game="1" ${isLocked ? 'disabled' : ''} style="height:36px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 8px;font-size:12px;font-weight:800;">
           <option value="belot" ${rule.gameKind === 'belot' ? 'selected' : ''}>Belot</option>
           <option value="ludo" ${rule.gameKind === 'ludo' ? 'selected' : ''}>Ludo</option>
         </select>
         <select data-admin-campaign-earn-stake="1" ${isLocked ? 'disabled' : ''} style="height:36px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 8px;font-size:12px;font-weight:800;">${renderStakeOptions(stakes, rule.stakeAmount)}</select>
         <input data-admin-campaign-earn-units="1" type="number" min="1" value="${rule.unitsPerWin}" ${isLocked ? 'disabled' : ''} style="height:36px;border-radius:6px;border:1px solid rgba(255,255,255,0.18);background:#050505;color:#fff;padding:0 8px;font-size:12px;font-weight:800;">
+        <label style="display:flex;align-items:center;gap:6px;color:rgba(255,255,255,0.72);font-size:11px;font-weight:800;" title="${tiersAndStartLocked ? 'Режимът на начисляване се заключва след активиране на кампанията.' : ''}">
+          <input data-admin-campaign-earn-winner-only="1" type="checkbox" ${isWinnerOnly ? 'checked' : ''} ${tiersAndStartLocked ? 'disabled' : ''}>
+          Само при победа
+        </label>
         ${isLocked ? '' : `<button type="button" data-admin-campaign-remove-earn="${index}" style="height:36px;border:1px solid rgba(248,113,113,0.35);border-radius:6px;background:rgba(127,29,29,0.32);color:#fecaca;font-size:11px;font-weight:900;cursor:pointer;">Премахни</button>`}
       </div>
     `
@@ -389,6 +394,9 @@ function collectDraftFromForm(form: HTMLFormElement, previous: AdminCampaignEdit
     gameKind: selectedValue(row, '[data-admin-campaign-earn-game="1"]') === 'ludo' ? 'ludo' as const : 'belot' as const,
     stakeAmount: selectedNumber(row, '[data-admin-campaign-earn-stake="1"]', 0),
     unitsPerWin: selectedNumber(row, '[data-admin-campaign-earn-units="1"]', 1),
+    creditMode: (row.querySelector<HTMLInputElement>('[data-admin-campaign-earn-winner-only="1"]')?.checked ?? true)
+      ? 'winner_only' as const
+      : 'all_participants' as const,
   }))
 
   const packageEarnRules = [...form.querySelectorAll<HTMLElement>('[data-admin-campaign-package-rule="1"]')].map((row) => ({
@@ -491,7 +499,7 @@ export function attachAdminCampaignsHandlers(
   root.querySelector<HTMLElement>('[data-admin-campaign-add-earn="1"]')?.addEventListener('click', () => {
     const draft = currentDraft(root, state)
     const stake = state.adminCampaignsReferenceData?.allowedStakes.belot[0] ?? 1
-    if (draft) handlers.onDraftChange({ ...draft, earnRules: [...draft.earnRules, { gameKind: 'belot', stakeAmount: stake, unitsPerWin: 1 }] })
+    if (draft) handlers.onDraftChange({ ...draft, earnRules: [...draft.earnRules, { gameKind: 'belot', stakeAmount: stake, unitsPerWin: 1, creditMode: 'winner_only' }] })
   })
 
   root.querySelectorAll<HTMLElement>('[data-admin-campaign-remove-earn]').forEach((button) => {

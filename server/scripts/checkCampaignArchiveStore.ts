@@ -132,10 +132,15 @@ async function seedLudoMatch(opts: { profileId: string; stake: number; finishedA
   const db = await openRawDb()
   try {
     const matchId = randomUUID()
+    // players_json трябва да съдържа печелившия профил — countPendingLudoWinStatement
+    // (campaignArchiveStore.ts) разгъва тая колона чрез json_each за "Само
+    // при победа" readiness проверката; празен масив прави мача невидим
+    // за reconciliation/readiness, независимо от winner_profile_id.
+    const playersJson = JSON.stringify([{ profileId: opts.profileId, displayName: 'Ludo Winner', avatarUrl: null, color: 'red' }])
     db.prepare(`
       INSERT INTO ludo_room_matches (match_id, ludo_room_id, status, stake, player_count, players_json, winner_profile_id, finished_at)
-      VALUES (?, ?, 'finished', ?, 2, '[]', ?, ?);
-    `).run(matchId, randomUUID(), opts.stake, opts.profileId, toSqliteTimestamp(opts.finishedAt))
+      VALUES (?, ?, 'finished', ?, 2, ?, ?, ?);
+    `).run(matchId, randomUUID(), opts.stake, playersJson, opts.profileId, toSqliteTimestamp(opts.finishedAt))
     return matchId
   } finally {
     db.close()
@@ -541,6 +546,7 @@ await check('[A13] legacy Белот: неопределима ставка (rec
   // Възстановяване със същата ставка (както legacy sweep-а) -> отблокира.
   const credit = campaignCreditStore.creditCampaignUnits({
     profileId: winner, sourceType: 'belot_win', sourceId: ownStakeRoom, eventAt: eventAtWithinWindow, stakeAmount: 200,
+    didWin: true,
   })
   assert(credit.ok && credit.unitsCredited === 7, `recovery credit: ${JSON.stringify(credit)}`)
   const recovered = archiveStore.getArchivalReadiness(campaignId)
@@ -565,6 +571,7 @@ await check('[A14] реално дължимо, но пропуснато нач
 
   const credit = campaignCreditStore.creditCampaignUnits({
     profileId: winner, sourceType: 'belot_win', sourceId: matchScope, eventAt: eventAtWithinWindow, stakeAmount: 100,
+    didWin: true,
   })
   assert(credit.ok && credit.unitsCredited === 10 && credit.grantedRewards.length === 1 && credit.notification !== null, `recovery credit with reward: ${JSON.stringify(credit)}`)
   assert(campaignCreditStore.listPendingNotifications(winner).length === 1, 'congratulation stays unacknowledged')
@@ -606,9 +613,9 @@ await check('[B4] archiveCampaign: успешно замразяване — sum
   const eventAtWithinWindow = created.eventAtWithinWindow
   b4Winner1 = await seedProfile('B4 Winner One', { rankTitle: 'Майстор' })
   b4Winner2 = await seedProfile('B4 Winner Two', { rankTitle: 'Чирак' })
-  const r1 = campaignCreditStore.creditCampaignUnits({ profileId: b4Winner1, sourceType: 'belot_win', sourceId: 'm1', eventAt: eventAtWithinWindow, stakeAmount: 100 })
+  const r1 = campaignCreditStore.creditCampaignUnits({ profileId: b4Winner1, sourceType: 'belot_win', sourceId: 'm1', eventAt: eventAtWithinWindow, stakeAmount: 100 , didWin: true })
   assert(r1.ok, `credit 1 failed: ${JSON.stringify(r1)}`)
-  const r2 = campaignCreditStore.creditCampaignUnits({ profileId: b4Winner2, sourceType: 'belot_win', sourceId: 'm2', eventAt: eventAtWithinWindow, stakeAmount: 100 })
+  const r2 = campaignCreditStore.creditCampaignUnits({ profileId: b4Winner2, sourceType: 'belot_win', sourceId: 'm2', eventAt: eventAtWithinWindow, stakeAmount: 100 , didWin: true })
   assert(r2.ok, `credit 2 failed: ${JSON.stringify(r2)}`)
 
   const result = archiveStore.archiveCampaign(b4CampaignId, ADMIN_ACTOR, null)
@@ -649,6 +656,7 @@ await check('[B5b] Фаза 12 §3: ред "credit commit ПРЕДИ archive rea
     profileId: racer, sourceType: 'belot_win', sourceId: 'race-match-a',
     eventAt: new Date((Date.parse((campaignsStore.getCampaignById(raceCampaignA)!.startsAt)) + Date.parse(campaignsStore.getCampaignById(raceCampaignA)!.endsAt)) / 2),
     stakeAmount: 100,
+    didWin: true,
   })
   assert(creditBeforeArchive.ok, `credit преди archive трябва да успее: ${JSON.stringify(creditBeforeArchive)}`)
   const archiveAfterCredit = archiveStore.archiveCampaign(raceCampaignA, ADMIN_ACTOR, null)
@@ -667,6 +675,7 @@ await check('[B5b] Фаза 12 §3: ред "credit commit ПРЕДИ archive rea
     profileId: racer, sourceType: 'belot_win', sourceId: 'race-match-b',
     eventAt: new Date((Date.parse(campaignBWindow.startsAt) + Date.parse(campaignBWindow.endsAt)) / 2),
     stakeAmount: 100,
+    didWin: true,
   })
   assert(!lateCreditAfterArchive.ok && lateCreditAfterArchive.reason === 'no_eligible_campaign', `credit СЛЕД archive трябва безопасно да откаже (не throw, не "лъжлив" success): ${JSON.stringify(lateCreditAfterArchive)}`)
   const checkDb = await openRawDb()
