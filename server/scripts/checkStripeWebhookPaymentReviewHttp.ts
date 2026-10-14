@@ -16,6 +16,9 @@
  * [H8] Meri86-подобен платен ред + ръчна компенсация: повторна доставка → без промяна, без запис
  * [H9] невалиден подпис → 400, без запис
  * [H10] заключена база (временна грешка) → 500; повторението кредитира веднъж, без активни проблеми
+ * Adaptive Pricing (EUR цена, плащане в GBP; currency/amount_total в EUR, GBP в presentment_details):
+ * [H11] coin → кредит веднъж; [H12] VIP → 1 grant; [H13] bundle → жълтици + VIP веднъж
+ * [H14] GBP на top-level (несъответстващо) → без кредит, currency_mismatch
  */
 
 import { DatabaseSync } from 'node:sqlite'
@@ -305,6 +308,61 @@ async function main(): Promise<void> {
         assert(walletOf('h-lock') === 2250000, `wallet ${walletOf('h-lock')}`)
         const open = db.prepare(`SELECT COUNT(*) AS c FROM payment_review_issues WHERE checkout_session_id = 'cs_h_lock' AND status = 'open'`).get() as { c: number }
         assert(open.c === 0, `активни проблеми: ${open.c}`)
+      })
+
+      // Adaptive Pricing (Stripe changelog 2025-03-31.basil / 2025-09-30.clover):
+      // за сесии след 2025-03-30 currency/amount_total са във валутата на
+      // интеграцията (EUR), а платеното в местна валута е в presentment_details.
+      db.exec(`
+        INSERT INTO profiles (profile_id, display_name, normalized_display_name) VALUES
+          ('h-gbp-coin', 'h-gbp-coin', 'h-gbp-coin'), ('h-gbp-vip', 'h-gbp-vip', 'h-gbp-vip'),
+          ('h-gbp-bun', 'h-gbp-bun', 'h-gbp-bun'), ('h-gbp-legacy', 'h-gbp-legacy', 'h-gbp-legacy');
+        INSERT INTO coin_purchase_ledger (purchase_id, profile_id, package_id, package_key_snapshot, title_snapshot,
+          yellow_coins_amount, price_cents, currency, provider_checkout_session_id, status)
+        VALUES ('h-gbp-coin-p', 'h-gbp-coin', 'h-pkg', 'h-pkg', 'Елит', 2250000, 1699, 'EUR', 'cs_h_gbp_coin', 'pending'),
+               ('h-gbp-legacy-p', 'h-gbp-legacy', 'h-pkg', 'h-pkg', 'Елит', 2250000, 1699, 'EUR', 'cs_h_gbp_legacy', 'pending');
+        INSERT INTO vip_purchase_ledger (purchase_id, profile_id, package_id, days_snapshot, price_cents_snapshot, currency, provider_checkout_session_id, status)
+          VALUES ('h-gbp-vip-p', 'h-gbp-vip', 'vip_30', 30, 499, 'EUR', 'cs_h_gbp_vip', 'pending');
+        INSERT INTO bundle_purchase_ledger (purchase_id, profile_id, package_id, package_key_snapshot, title_snapshot,
+          yellow_coins_amount, vip_days_snapshot, price_cents, currency, provider_checkout_session_id, status)
+        VALUES ('h-gbp-bun-p', 'h-gbp-bun', 'h-bun-pkg', 'h-bun-pkg', 'Комбо', 500000, 30, 999, 'EUR', 'cs_h_gbp_bun', 'pending');
+      `)
+      const gbpSession = (id: string, purchaseId: string, eurAmount: number, gbpAmount: number, extraMeta: Record<string, string> = {}) => ({
+        id, payment_status: 'paid', amount_total: eurAmount, currency: 'eur', payment_intent: null,
+        presentment_details: { presentment_amount: gbpAmount, presentment_currency: 'gbp' },
+        metadata: { purchaseId, ...extraMeta },
+      })
+      const vipGrantsOf = (profileId: string) =>
+        (db.prepare('SELECT COUNT(*) AS c FROM vip_grants WHERE profile_id = ?').get(profileId) as { c: number }).c
+
+      await check('[H11] coin 16,99 EUR, платени в GBP (presentment_details) → кредит веднъж; повторно → без втори', async () => {
+        const session = gbpSession('cs_h_gbp_coin', 'h-gbp-coin-p', 1699, 1450)
+        assert(await postEvent(port, session) === 200, 'status 1')
+        assert(await postEvent(port, session) === 200, 'status 2')
+        assert(walletOf('h-gbp-coin') === 2250000 && coinStatus('h-gbp-coin-p') === 'paid', `wallet ${walletOf('h-gbp-coin')}`)
+        assert(issue('cs_h_gbp_coin') === undefined, 'без запис за преглед')
+      })
+
+      await check('[H12] VIP в GBP → един VIP grant; повторно → без втори', async () => {
+        const session = gbpSession('cs_h_gbp_vip', 'h-gbp-vip-p', 499, 430, { purchaseType: 'vip' })
+        assert(await postEvent(port, session) === 200, 'status 1')
+        assert(await postEvent(port, session) === 200, 'status 2')
+        assert(vipGrantsOf('h-gbp-vip') === 1 && issue('cs_h_gbp_vip') === undefined, `grants ${vipGrantsOf('h-gbp-vip')}`)
+      })
+
+      await check('[H13] комбиниран пакет в GBP → жълтици + VIP веднъж; повторно → без втори', async () => {
+        const session = gbpSession('cs_h_gbp_bun', 'h-gbp-bun-p', 999, 860, { purchaseType: 'bundle' })
+        assert(await postEvent(port, session) === 200, 'status 1')
+        assert(await postEvent(port, session) === 200, 'status 2')
+        assert(walletOf('h-gbp-bun') === 500000 && vipGrantsOf('h-gbp-bun') === 1, `wallet ${walletOf('h-gbp-bun')} grants ${vipGrantsOf('h-gbp-bun')}`)
+        assert(issue('cs_h_gbp_bun') === undefined, 'без запис за преглед')
+      })
+
+      await check('[H14] GBP сума/валута на top-level (не по документацията) → без кредит, currency_mismatch', async () => {
+        const session = { id: 'cs_h_gbp_legacy', payment_status: 'paid', amount_total: 1450, currency: 'gbp', payment_intent: null, metadata: { purchaseId: 'h-gbp-legacy-p' } }
+        assert(await postEvent(port, session) === 200, 'status')
+        assert(walletOf('h-gbp-legacy') === 0 && coinStatus('h-gbp-legacy-p') === 'pending', 'без кредит')
+        assert(issue('cs_h_gbp_legacy')?.issue_kind === 'currency_mismatch', JSON.stringify(issue('cs_h_gbp_legacy')))
       })
 
       await check('[H9] невалиден подпис → 400, без запис', async () => {
