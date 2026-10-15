@@ -8,6 +8,7 @@
  *  C. Раздаване: 2–4 играчи, по 3 карти, без дубликати, ред на раздаване,
  *     контролирано тесте, невалидни данни, 10 000 случайни раздавания.
  *  D. Оценяване: таблица с ръчно изчислени ръце за всяко правило.
+ *  D2. Две седмици = 23 (вкл. с чечак) — отделни случаи и всички 168 ръце.
  *  E. Всички 4 960 ръце срещу независимо формулиран еталон; инварианти.
  *  F. Сравняване: победители, равенства (2/3/4), антисиметрия, грешки.
  *  G. Изглед за играч: без чужди карти.
@@ -264,13 +265,13 @@ const GOLDEN: Array<[string, number, SvaraHandKind, string]> = [
   ['8S 7S AH', 15, 'suit-sum', '8+7 пика > асо купа'],
   ['AS KH QD', 11, 'suit-sum', 'три бои → най-високата карта'],
   ['9S 8H 7D', 9, 'suit-sum', 'три бои → 9'],
-  ['7S 7H 8D', 8, 'suit-sum', 'две седмици не са специални → 8'],
+  ['7S 7H 8D', 23, 'two-sevens', 'две седмици = 23'],
   ['7C AS KS', 32, 'suit-sum', 'пример на собственика: чечак към пика = 32'],
   ['7C 9H 8D', 20, 'suit-sum', 'пример на собственика: 11 + 9 = 20'],
   ['7C AC KC', 32, 'suit-sum', 'чечак със спатии'],
   ['7C 7S 8S', 26, 'suit-sum', 'чечак + 7♠ + 8♠ = 11 + 15'],
-  ['7C 7S AH', 22, 'suit-sum', 'чечак към асото = 22 (не две аса)'],
-  ['7C AS 7H', 22, 'suit-sum', 'чечак + асо + 7 = 22'],
+  ['7C 7S AH', 23, 'two-sevens', 'две седмици (23) > чечак към асото (22)'],
+  ['7C AS 7H', 23, 'two-sevens', 'две седмици (23) > чечак + асо (22)'],
   ['7C AD 7D', 29, 'suit-sum', 'чечак + асо каро + 7 каро = 29'],
   ['7C KS QS', 31, 'suit-sum', 'чечак + K+Q в една боя'],
 ]
@@ -289,6 +290,63 @@ check('D-inv. невалидни ръце се отхвърлят', () => {
   expectInvalid(() => evaluateSvaraHand([...hand('AS', 'KS'), { suit: 'hearts', rank: '6' } as unknown as SvaraCard]), 'invalid card')
   expectInvalid(() => evaluateSvaraHand(null as unknown as SvaraCard[]), 'null')
   expectInvalid(() => evaluateSvaraHand('AS KS QS' as unknown as SvaraCard[]), 'string')
+})
+
+// ─── D2. Две седмици ────────────────────────────────────────────────────────
+console.log('\n=== D2. две седмици (23, вкл. с чечак) ===')
+
+const TWO_SEVENS: Array<[string, number, SvaraHandKind, string]> = [
+  ['7H 7D KS', 23, 'two-sevens', 'пример на собственика'],
+  ['7C 7H KS', 23, 'two-sevens', 'пример на собственика: с чечак'],
+  ['7S 7D 10D', 23, 'two-sevens', 'пример на собственика: 23 > каро 17'],
+  ['7C 7H 9H', 27, 'suit-sum', 'пример на собственика: чечак + купа 16 = 27 > 23'],
+  ['7S 7H 7D', 34, 'three-sevens', 'пример на собственика: три седмици'],
+  ['7C 7S 7D', 34, 'three-sevens', 'три седмици с чечак'],
+  // всички 6 комбинации от бои с неутрална трета карта
+  ['7C 7D 9S', 23, 'two-sevens', '♣♦ (чечак) + 9♠ (чечак+9 = 20 < 23)'],
+  ['7C 7S 8H', 23, 'two-sevens', '♣♠ (чечак)'],
+  ['7D 7H QS', 23, 'two-sevens', '♦♥'],
+  ['7D 7S QC', 23, 'two-sevens', '♦♠'],
+  ['7H 7S AC', 23, 'two-sevens', '♥♠ + асо спатия'],
+  ['7S 7D AD', 23, 'two-sevens', '23 > каро 18'],
+  // чечак + седмица + карта в боята на седмицата → по-високият сбор
+  ['7C 7D 8D', 26, 'suit-sum', 'чечак + каро 15 = 26'],
+  ['7C 7S AS', 29, 'suit-sum', 'чечак + пика 18 = 29'],
+  ['7C 7H KH', 28, 'suit-sum', 'чечак + купа 17 = 28'],
+  ['7C 7H AD', 23, 'two-sevens', 'асо в друга боя: чечак + асо = 22 < 23'],
+  // взаимодействие с другите правила
+  ['7S 7D AS', 23, 'two-sevens', '23 > пика 18; само едно асо'],
+  ['7C AS AH', 33, 'three-aces', 'чечак + две аса остава 33 (само една седмица)'],
+]
+
+for (const [codes, points, kind, note] of TWO_SEVENS) {
+  check(`D2. ${codes.padEnd(10)} → ${String(points).padStart(2)} ${kind} (${note})`, () => {
+    const evaluation = evaluateSvaraHand(hand(...codes.split(' ')))
+    assert(evaluation.points === points && evaluation.kind === kind, `got ${evaluation.points} ${evaluation.kind} [${evaluation.candidates.map((c) => `${c.kind}:${c.points}`).join(', ')}]`)
+  })
+}
+
+check('D2-all. всички 168 ръце с точно две седмици: без чечак = 23; с чечак = 23 или по-висок сбор (26–29)', () => {
+  let total = 0
+  let twoSevensKind = 0
+  for (let i = 0; i < 32; i += 1) for (let j = i + 1; j < 32; j += 1) for (let k = j + 1; k < 32; k += 1) {
+    const h = [SVARA_ORDERED_DECK[i]!, SVARA_ORDERED_DECK[j]!, SVARA_ORDERED_DECK[k]!]
+    const sevens = h.filter((c) => c.rank === '7')
+    if (sevens.length !== 2) continue
+    total += 1
+    const e = evaluateSvaraHand(h)
+    const third = h.find((c) => c.rank !== '7')!
+    const otherSeven = sevens.find((c) => c.suit !== 'clubs')!
+    const hasChechak = sevens.some((c) => c.suit === 'clubs')
+    // Очаквано, изчислено директно: с чечак и трета карта в боята на другата
+    // седмица → 11 + 7 + стойност; иначе 23.
+    const expected = hasChechak && third.suit === otherSeven.suit ? Math.max(23, 11 + 7 + svaraRankPoints(third.rank)) : 23
+    if (e.points !== expected) throw new Error(`${codesOf(h)}: ${e.points} ≠ ${expected}`)
+    if (e.kind === 'two-sevens') twoSevensKind += 1
+  }
+  // C(4,2)=6 двойки × 28 трети карти = 168; с чечак и карта в боята на
+  // другата седмица: 3 двойки × 7 карти = 21 ръце надхвърлят 23.
+  assert(total === 168 && twoSevensKind === 147, `total ${total}, two-sevens ${twoSevensKind}`)
 })
 
 // ─── E. Всички ръце срещу независим еталон ──────────────────────────────────
@@ -311,6 +369,7 @@ function referencePoints(cards: SvaraCard[]): number {
   else if (tripleRank === 'A') options.push(33)
   else if (tripleRank !== null) options.push(rankCounts.size === 1 ? 3 * value(cards[0]!) : 11 + 2 * value(plain[0]!))
   if ((rankCounts.get('A') ?? 0) >= 2) options.push(22)
+  if ((rankCounts.get('7') ?? 0) >= 2) options.push(23) // две седмици (7♣ също е седмица)
   // Сбор по боя: групи по боя от обикновените карти; чечакът (11) към най-добрата.
   const bySuit: Record<string, number> = { clubs: 0, diamonds: 0, hearts: 0, spades: 0 }
   for (const c of plain) bySuit[c.suit] = (bySuit[c.suit] ?? 0) + value(c)
@@ -369,6 +428,7 @@ check('E5. разпределение по вид (отчет; сумата = 4 
   }
   const total = [...byKind.values()].reduce((a, b) => a + b, 0)
   assert(total === 4960, `total ${total}`)
+  assert(byKind.get('two-sevens') === 147 && byKind.get('three-sevens') === 4 && byKind.get('three-aces') === 10, 'kind counts')
   console.log(`      ${[...byKind.entries()].map(([k, n]) => `${k}=${n}`).join(', ')}`)
 })
 
@@ -384,6 +444,17 @@ check('F1. по-високите точки печелят; 34 > 33 > 32 > 31', 
   assert(result.winners.join() === 'p34' && !result.isTie && result.topPoints === 34, JSON.stringify(result.winners))
   assert(compareSvaraHands(hand('AC', 'AH', 'AD'), hand('7C', 'KS', 'QS')) === 1, '33 > 31 (чечак)')
   assert(compareSvaraHands(hand('7C', 'AS', 'KS'), hand('AH', 'KH', 'QH')) === 1, '32 > 31')
+})
+
+check('F1b. две седмици (23) бият две аса (22) и чечак + асо (22); 23 срещу 23 е равенство', () => {
+  assert(compareSvaraHands(hand('7H', '7D', 'KS'), hand('AS', 'AD', 'QH')) === 1, '23 > 22')
+  assert(compareSvaraHands(hand('7S', '7D', '9C'), hand('7C', 'AH', 'KD')) === 1, '23 > 22 (чечак + асо)')
+  const tie = resolveSvaraShowdown([
+    { playerId: 'plain', cards: hand('7S', '7D', 'KS') },
+    { playerId: 'chechak', cards: hand('7C', '7H', 'QD') },
+  ])
+  assert(tie.isTie && tie.topPoints === 23 && tie.winners.join() === 'plain,chechak', JSON.stringify(tie.winners))
+  assert(compareSvaraHands(hand('7C', '7H', '9H'), hand('7S', '7D', 'AD')) === 1, '27 > 23')
 })
 
 check('F2. равенство от двама: три попа (30) срещу K♠ Q♠ J♠ (30)', () => {

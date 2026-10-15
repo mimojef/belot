@@ -5,6 +5,9 @@
 //   • Обикновена ръка: най-големият сбор от карти в една боя; при три
 //     различни бои това е най-високата карта.
 //   • Две аса = 22 точки.
+//   • Две седмици = 23 точки, независимо от боята, вкл. когато едната е
+//     чечакът (7♣ + 7♥ + K♠ = 23); по-високият сбор с чечака печели
+//     (7♣ + 7♥ + 9♥ = 27). Добавено в корекцията на Етап 2Б.1.
 //   • Чечак (7♣) — жокер за 11 точки, добавя се към най-силната боя
 //     (7♣ + A♠ + K♠ = 32; 7♣ + 9♥ + 8♦ = 20).
 //   • Три седмици = 34 (вкл. 7♣ + 7 + 7). Три аса = 33 (вкл. 7♣ + A + A).
@@ -12,8 +15,8 @@
 //   • Чечак + две еднакви карти = 11 + стойностите им (7♣ + K♥ + K♦ = 31).
 //   • Равни точки = равенство (свара), независимо от състава.
 //
-// Тълкуване (за потвърждение): ръката получава НАЙ-ВИСОКАТА стойност от
-// всички приложими комбинации (напр. A♠ A♥ K♠ = 22 от „две аса“, не 21).
+// Ръката получава НАЙ-ВИСОКАТА стойност от всички приложими комбинации
+// (напр. A♠ A♥ K♠ = 22 от „две аса“, не 21) — потвърдено от собственика.
 
 import { assertValidSvaraCards, isSvaraChechak, SVARA_CHECHAK_POINTS, SVARA_SUITS, svaraCardCode, svaraRankPoints, SvaraInvalidInputError, type SvaraCard, type SvaraSuit } from './svaraCards.js'
 import { SVARA_CARDS_PER_PLAYER, type SvaraPlayerId } from './svaraDeal.js'
@@ -23,6 +26,7 @@ export type SvaraHandKind =
   | 'three-aces'
   | 'chechak-three-of-a-kind'
   | 'three-of-a-kind'
+  | 'two-sevens'
   | 'two-aces'
   | 'suit-sum'
 
@@ -44,6 +48,7 @@ export type SvaraHandEvaluation = {
 
 export const SVARA_THREE_SEVENS_POINTS = 34
 export const SVARA_THREE_ACES_POINTS = 33
+export const SVARA_TWO_SEVENS_POINTS = 23
 export const SVARA_TWO_ACES_POINTS = 22
 
 // Само за етикета при равни кандидати — по-специфичната комбинация първа.
@@ -52,8 +57,9 @@ const KIND_PRIORITY: Record<SvaraHandKind, number> = {
   'three-aces': 1,
   'chechak-three-of-a-kind': 2,
   'three-of-a-kind': 3,
-  'two-aces': 4,
-  'suit-sum': 5,
+  'two-sevens': 4,
+  'two-aces': 5,
+  'suit-sum': 6,
 }
 
 function tripleCandidate(rank: SvaraCard['rank'], points: number, usesChechak: boolean): SvaraHandCandidate {
@@ -78,6 +84,12 @@ export function evaluateSvaraHand(cards: readonly SvaraCard[]): SvaraHandEvaluat
   if (chechak && others.length === 2 && others[0]!.rank === others[1]!.rank) {
     const rank = others[0]!.rank
     candidates.push(tripleCandidate(rank, SVARA_CHECHAK_POINTS + svaraRankPoints(rank) * 2, true))
+  }
+
+  // Две седмици (всякакви бои; 7♣ също е седмица). Три седмици са по-горе.
+  const sevens = cards.filter((card) => card.rank === '7')
+  if (sevens.length >= 2) {
+    candidates.push({ kind: 'two-sevens', points: SVARA_TWO_SEVENS_POINTS, usesChechak: sevens.some(isSvaraChechak) })
   }
 
   // Две аса.
