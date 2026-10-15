@@ -162,13 +162,14 @@ const TIE1 = 'AC KH QD'
 const TIE2 = 'AH KD QC'
 const TIE3 = 'AD KC QS'
 const TIE4 = 'KS QS JH'.replace('QS', 'JC')
+const TIE5 = 'AS 8H 9D' // 11 (самостоятелно асо в пика, без общи карти с TIE1-3)
 const LOW = '9C 8S JD' // 10 (три бои)
 
 console.log('\ncheckSvaraMatch2B2B')
 
 check('0. силата на тестовите ръце', () => {
   assert(ptsOf(H34) === 34 && ptsOf(H33) === 33 && ptsOf(H27) === 27 && ptsOf(H24) === 24, 'strong')
-  assert(ptsOf(TIE1) === 11 && ptsOf(TIE2) === 11 && ptsOf(TIE3) === 11 && ptsOf(LOW) === 10 && ptsOf(TIE4) === 10 && ptsOf(H24) === 24, 'ties')
+  assert(ptsOf(TIE1) === 11 && ptsOf(TIE2) === 11 && ptsOf(TIE3) === 11 && ptsOf(TIE5) === 11 && ptsOf(LOW) === 10 && ptsOf(TIE4) === 10 && ptsOf(H24) === 24, 'ties')
 })
 
 // ─── A. Маса и Вход ─────────────────────────────────────────────────────────
@@ -324,37 +325,69 @@ check('B6. тъмно не може да започне друг освен пъ
   expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'second cannot start')
 })
 
-check('B7. случай №4: непълен ол-ин на тъмно — позволен, не е пълно повишаване, тъмната фаза продължава, минимумът остава 40', () => {
+check('B7. Решение №1: пълна забрана на непълен залог на тъмно (първоначален и следващ); точно достатъчни чипове остава позволено', () => {
+  // Първоначален тъмен залог: Вход 10 → минимум 20; играч има само 15.
+  const short = bet({ p1: 15, p2: 500, d: 500 })
+  const before = JSON.stringify(short.s)
+  expectError(() => applySvaraBettingAction(short.s, 'p1', { kind: 'blind-bet', total: 15 }, 15), 'below-minimum', 'incomplete initial blind bet rejected')
+  expectError(() => applySvaraBettingAction(short.s, 'p1', { kind: 'all-in' }, 15), 'blind-not-allowed', 'incomplete initial blind all-in rejected')
+  assert(JSON.stringify(short.s) === before, 'rejected blind command leaves the betting state unchanged')
+  // Точно достатъчни чипове (20) — позволено, нищо не се е променило от Решение №1.
+  const exact = bet({ p1: 20, p2: 500, d: 500 })
+  exact.go('p1', { kind: 'blind-bet', total: 20 })
+  assert(exact.s.blind.status === 'active' && exact.s.blind.lastBlindTotal === 20, 'exact minimum still allowed')
+
+  // Следващ тъмен залог: последен пълен 20 → минимум 40; играч има само 30.
   const b = bet({ p1: 500, p2: 30, p3: 500, d: 500 })
   b.go('p1', { kind: 'blind-bet', total: 20 })
-  b.go('p2', { kind: 'all-in' }) // 30 < 40
-  assert(b.s.voluntary.p2 === 30 && b.s.allIn.includes('p2') && b.s.currentBet === 30, 'accepted as all-in')
-  assert(b.s.blind.status === 'active' && b.s.blind.lastBlindTotal === 20, 'blind phase continues, base stays 20')
-  expectError(() => applySvaraBettingAction(b.s, 'p3', { kind: 'blind-bet', total: 39 }, 500), 'below-minimum', 'next full blind is 40')
-  b.go('p3', { kind: 'blind-bet', total: 40 }) // 40, не 60
-  assert(b.s.blind.lastBlindTotal === 40 && b.s.raiseLocked.length === 0, 'full blind after the short all-in')
+  const beforeNext = JSON.stringify(b.s)
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'blind-bet', total: 30 }, 30), 'below-minimum', 'incomplete next blind bet rejected')
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'all-in' }, 30), 'blind-not-allowed', 'incomplete next blind all-in rejected')
+  assert(JSON.stringify(b.s) === beforeNext, 'rejected next-blind command leaves the betting state unchanged')
+  // Точно достатъчни чипове (40) — позволено.
+  const c = bet({ p1: 500, p2: 40, p3: 500, d: 500 })
+  c.go('p1', { kind: 'blind-bet', total: 20 })
+  c.go('p2', { kind: 'blind-bet', total: 40 })
+  assert(c.s.blind.lastBlindTotal === 40, 'exact next minimum still allowed')
 })
 
-check('B7b. случай №4: без неправомерно повторно право — вече действалият може само да доплати или да се откаже', () => {
+check('B7b. Решение №2: погледнал играч с недостатъчни чипове → нормален (непълен) ол-ин; тъмната фаза приключва; без ново право за повишаване', () => {
   const b = bet({ p1: 500, p2: 30, d: 500 })
-  b.go('p1', { kind: 'blind-bet', total: 20 })
-  b.go('p2', { kind: 'all-in' }) // непълно
-  b.go('d', { kind: 'fold' })
-  assert(b.s.toAct === 'p1' && b.s.raiseLocked.includes('p1'), 'p1 locked')
-  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 40 }, b.stacks.p1!), 'raise-not-allowed', 'no new raise right')
-  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'all-in' }, b.stacks.p1!), 'raise-not-allowed', 'no all-in raise')
-  b.go('p1', { kind: 'call' }) // доплаща 10
-  assert(b.s.complete && b.s.voluntary.p1 === 30 && b.s.blind.status === 'active', 'called, still blind')
-})
-
-check('B7c. оставащи неуточнени подслучаи → изричен отказ (погледнал играч под минимума; непълен тъмен ол-ин на първия)', () => {
-  const b = bet({ p1: 500, p2: 30, d: 500 })
-  b.go('p1', { kind: 'blind-bet', total: 20 })
+  b.go('p1', { kind: 'blind-bet', total: 20 }) // пълно отваряне; currentBet = 20
   b.s = lookAtSvaraCards(b.s, 'p2')
-  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'all-in' }, 30), 'rule-not-implemented', 'looked short all-in')
-  const c = bet({ p1: 15, p2: 500, d: 500 })
-  expectError(() => applySvaraBettingAction(c.s, 'p1', { kind: 'all-in' }, 15), 'rule-not-implemented', 'first blind all-in < 2E')
-  expectError(() => applySvaraBettingAction(c.s, 'p1', { kind: 'blind-bet', total: 15 }, 15), 'rule-not-implemented', 'first blind short')
+  // p2 погледна; следващ минимум = 2×20 = 40; p2 има само 30.
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'bet', total: 39 }, 30), 'insufficient-chips', 'cannot reach 39 with 30')
+  b.go('p2', { kind: 'all-in' }) // 30 (> 20, < 40) → непълно повишаване, не тъмно
+  assert(b.s.voluntary.p2 === 30 && b.s.allIn.includes('p2') && b.s.currentBet === 30, 'accepted as a plain (incomplete) all-in raise')
+  assert(b.s.blind.status === 'closed', 'the blind phase ends for everyone, even players who have not looked yet')
+  expectError(() => applySvaraBettingAction(b.s, 'd', { kind: 'blind-bet', total: 60 }, 500), 'blind-not-allowed', 'blind already closed for d too, even though d never acted')
+  b.go('d', { kind: 'call' }) // d просто плаща добавените 30; p1 остава единственият чакащ
+  assert(b.s.toAct === 'p1' && JSON.stringify(b.s.raiseLocked) === '["p1"]', `p1 (already acted) may now only call or fold: ${JSON.stringify(b.s.raiseLocked)}`)
+  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'bet', total: 50 }, b.stacks.p1!), 'raise-not-allowed', 'p1 gets no new raise right from the incomplete all-in')
+  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 60 }, b.stacks.p1!), 'blind-not-allowed', 'blind sequence is closed for everyone')
+  b.go('p1', { kind: 'call' }) // p1 вече само плаща/отказва
+  assert(b.s.complete, 'complete')
+})
+
+check('B7c. Решение №1/№2 на ниво команда (applySvaraMatchCommand): директна тъмна команда с недостатъчни чипове се отказва без промяна на състоянието, дори изпратена directно', () => {
+  const t = newTable(['a', 'b'], { dealerIndex: 1 }) // дилър b; ред a, b
+  t.deal({ a: LOW, b: H34 })
+  t.seen('a', { kind: 'bet', total: 175 })
+  t.seen('b', { kind: 'call' }) // b (34 т.) бие a (10 т.): a остава с 15 свободни чипа, b печели всичко
+  assert(t.state.stacks.a === 15 && t.state.stacks.b === 385, t.stacks())
+  t.deal({}) // следващо раздаване; a плаща Вход 10 → остават 5 свободни чипа
+  assert(t.state.stacks.a === 5, `a has 5 free chips: ${t.stacks()}`)
+  const order = (t.state.round as { betting: SvaraBettingState }).betting.order
+  const rich = order.find((id) => id !== 'a')!
+  t.act(rich, { kind: 'blind-bet', total: 20 }) // 2 × Вход; currentBet = 20, lastBlindTotal = 20
+  const before = JSON.stringify(t.state)
+  expectError(() => t.run({ type: 'act', playerId: 'a', action: { kind: 'blind-bet', total: 5 } }), 'betting:below-minimum', 'incomplete blind bet rejected at the command level')
+  expectError(() => t.run({ type: 'act', playerId: 'a', action: { kind: 'all-in' } }), 'betting:blind-not-allowed', 'incomplete blind all-in rejected at the command level')
+  assert(JSON.stringify(t.state) === before, 'no state change whatsoever after the rejected direct commands')
+  // Решение №2: след поглеждане 'a' МОЖЕ да отиде нормален ол-ин с наличните 5.
+  t.run({ type: 'look', playerId: 'a' })
+  t.run({ type: 'act', playerId: 'a', action: { kind: 'all-in' } })
+  assert(t.state.stacks.a === 0, `a went all-in for everything it had: ${t.stacks()}`)
 })
 
 // ─── C. Дилър, ред, специалното 4-то раздаване ──────────────────────────────
@@ -741,6 +774,39 @@ check('E8b. случай №2: равенство в новите залози �
   assert((t.state.round as { kind: string; fee: number }).kind === 'svara-joining' && (t.state.round as { fee: number }).fee === 50, 'old pot continues as an ordinary Svara')
 })
 
+check('E8c. Решение №3 (граница): равенство в повече от един нов спорен слой извън модела „основна + една странична“ → изричен, безопасен отказ без промяна на състоянието', () => {
+  const t = newTable(['p1', 'p2', 'p3', 'p4'], { dealerIndex: 3 })
+  // Разнообразяваме стековете чрез бързи раздавания, докато четиримата не
+  // останат с различни суми свободни чипа (нужно за 4 различни нива).
+  let warmup = 0
+  while (new Set(Object.values(t.state.stacks)).size < 4 && warmup < 10) {
+    warmup += 1
+    const order = t.peekOrder()
+    const [bettor, caller, ...rest] = order
+    t.deal({ [bettor!]: H34 })
+    t.seen(bettor!, { kind: 'bet', total: 10 + warmup * 17 })
+    t.seen(caller!, { kind: 'call' })
+    for (const id of rest) t.seen(id, { kind: 'fold' })
+  }
+  const stacksBefore = Object.values(t.state.stacks)
+  assert(new Set(stacksBefore).size === 4, `expected four distinct stacks after warmup: ${t.stacks()}`)
+  // Финално раздаване: всички отиват ол-ин с различни свободни суми и с
+  // еднакво силни ръце (11 т. всяка) → три различни спорни слоя (4/3/2
+  // правоимащи, вложени), всичките наравно едновременно.
+  const order = t.peekOrder()
+  t.deal({ [order[0]!]: TIE1, [order[1]!]: TIE2, [order[2]!]: TIE3, [order[3]!]: TIE5 })
+  t.seen(order[0]!, { kind: 'all-in' })
+  t.seen(order[1]!, { kind: 'all-in' })
+  t.seen(order[2]!, { kind: 'all-in' })
+  const before = JSON.stringify(t.state)
+  expectError(
+    () => t.run({ type: 'act', playerId: order[3]!, action: { kind: 'all-in' } }),
+    'rule-not-implemented',
+    'equality across several contested layers beyond the single confirmed "main + one side" shape is not specified yet',
+  )
+  assert(JSON.stringify(t.state) === before, 'refused command leaves the whole match state untouched')
+})
+
 // ─── F. Свара с ол-ин ───────────────────────────────────────────────────────
 console.log('\n=== F. Свара с ол-ин ===')
 
@@ -979,7 +1045,7 @@ check('H3. изгледът на играча: собствените карти
 // ─── I. Случайни мачове ─────────────────────────────────────────────────────
 console.log('\n=== I. случайни мачове ===')
 
-check('I1. 300 случайни мача (с отсъствия/изходи): инвариант след всяка команда; всяко обикновено раздаване = еталон „чип по чип“ и = 2Б.2А (svaraChips)', () => {
+check('I1. 450 случайни мача (с отсъствия/изходи): инвариант след всяка команда; всяко обикновено раздаване = еталон „чип по чип“ и = 2Б.2А (svaraChips)', () => {
   const random = createSeededSvaraRandomSourceForTests(2026101503)
   const pick = (n: number) => random.nextInt(n)
   let rounds = 0
@@ -991,7 +1057,7 @@ check('I1. 300 случайни мача (с отсъствия/изходи): �
   let finished = 0
   let absences = 0
   let exits = 0
-  for (let m = 0; m < 300; m += 1) {
+  for (let m = 0; m < 450; m += 1) {
     const players = ['p0', 'p1', 'p2', 'p3'].slice(0, 2 + pick(3))
     const t = new Table(createSvaraMatch({ tableId: `m${m}`, capacity: players.length as 2 | 3 | 4, entryFee: 10 * (10 + pick(40)), entryPercent: ([1, 2, 3, 5] as const)[pick(4)], startMode: 'auto', creatorId: players[0]! }))
     const env: SvaraMatchEnv = { random }
@@ -1078,7 +1144,10 @@ check('I1. 300 случайни мача (с отсъствия/изходи): �
           }
         }
       } catch (error) {
-        if (error instanceof SvaraMatchError && error.code === 'betting:rule-not-implemented') {
+        // 'betting:rule-not-implemented' — вече неизползван (Решения №1/№2 го
+        // премахнаха), запазен тук за устойчивост; 'rule-not-implemented' —
+        // новата граница на Решение №3 (SVARA_MATCH_UNRESOLVED_RULES).
+        if (error instanceof SvaraMatchError && (error.code === 'betting:rule-not-implemented' || error.code === 'rule-not-implemented')) {
           refusals += 1
           break
         }

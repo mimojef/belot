@@ -5,9 +5,9 @@
 //   • Няма обикновен „Пас“: играч с чипове залага или се отказва.
 //   • Минимален първи доброволен залог = 1 Вход; минимално повишаване =
 //     1 Вход над текущия доброволен залог; без ограничение в броя.
-//   • Ол-ин за по-малко е разрешен; непълно ол-ин повишаване НЕ дава ново
-//     право за повишаване на вече действалите (те могат само да платят
-//     или да се откажат).
+//   • Ол-ин за по-малко е разрешен при ОБИКНОВЕНО наддаване; непълно
+//     повишаване НЕ дава ново право за повишаване на вече действалите
+//     (те могат само да платят или да се откажат).
 //   • Наддаването свършва, когато всички с възможност за действие са
 //     изравнили доброволния залог или са ол-ин (или остане един играч).
 //   • Тъмно: само първият действащ, преди да е погледнал; минимум 2 × Вход;
@@ -16,16 +16,21 @@
 //     залог и с това тъмната фаза приключва за всички.
 //   • „Без залог“ — само в специалното 4-то раздаване при двама.
 //
-//   • Непълен ол-ин на тъмно (решение на собственика, случай №4): позволен;
-//     не е пълно повишаване; тъмната фаза продължава; следващият пълен
-//     тъмен минимум остава 2 × последния ПЪЛЕН тъмен залог; вече действалите
-//     не получават ново право за повишаване (могат само да доплатят/откажат —
-//     единственото „плащане“, допустимо в тъмната фаза).
-//
-// Изричен отказ ('rule-not-implemented') за неуточнените подслучаи:
-//   • ол-ин под минимума на тъмната фаза от играч, който е погледнал;
-//   • непълен ол-ин „на тъмно“ от първия играч (под 2 × Вход), който би
-//     започнал тъмната поредица.
+// Окончателни решения на собственика от 15.10.2026 (втора вълна):
+//   • Решение №1 — ПЪЛНА ЗАБРАНА на непълен залог на тъмно: играч без
+//     достатъчно свободни чипове за изискуемия минимум НЯМА право да залага
+//     на тъмно — важи и за първоначалния, и за всеки следващ тъмен залог.
+//     Командата се отказва изцяло ('below-minimum' / 'blind-not-allowed'),
+//     без промяна на състоянието. ОТМЕНЯ старото Решение №4 (по-долу беше:
+//     „непълен ол-ин на тъмно е позволен“ — вече невалидно, виж историята
+//     в temp/svara/Svara_Etap_2B2B_Spec_2026-10-15.md, §5 и §11).
+//   • Решение №2 — нормален ол-ин след поглеждане: играч, който ПОГЛЕДНЕ
+//     картите си и няма достатъчно чипове за следващия изискуем минимум
+//     (2 × последния тъмен залог), може да продължи с нормален (небляндов)
+//     ол-ин за наличните си чипове. Това НЕ е пълно повишаване — вече
+//     действалите не получават ново право за повишаване, само могат да
+//     доплатят или да се откажат. Тъмната фаза приключва за ВСИЧКИ от този
+//     момент нататък (дори някой друг още да не е погледнал).
 //
 // Суми: total = общият ДОБРОВОЛЕН залог на играча в раздаването (без Входа).
 
@@ -87,7 +92,6 @@ export type SvaraBettingErrorCode =
   | 'insufficient-chips'
   | 'look-required'
   | 'blind-not-allowed'
-  | 'rule-not-implemented'
 
 export class SvaraBettingError extends Error {
   constructor(readonly code: SvaraBettingErrorCode, message: string) {
@@ -187,21 +191,6 @@ function applyShortRaise(state: SvaraBettingState, playerId: string, total: numb
   state.acted = [...previouslyActed, playerId]
 }
 
-/**
- * Случай №4: непълен ол-ин на тъмно. Не е пълно повишаване; тъмната фаза
- * продължава; lastBlindTotal (база за следващия пълен минимум) не се променя.
- */
-function applyIncompleteBlindAllIn(state: SvaraBettingState, playerId: string, total: number, commitTotal: (total: number) => void): void {
-  commitTotal(total)
-  if (total > state.currentBet) {
-    applyShortRaise(state, playerId, total)
-  } else {
-    remove(state.pending, playerId)
-    remove(state.raiseLocked, playerId)
-    state.acted.push(playerId)
-  }
-}
-
 export type SvaraBettingResult = { state: SvaraBettingState; added: number }
 
 /**
@@ -246,7 +235,9 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       break
     }
     case 'call': {
-      // В тъмната фаза плащане е допустимо само за доплащане на непълен ол-ин (случай №4).
+      // В активна тъмна фаза няма „плащане“ — залогът винаги е ≥ 2 × предишния
+      // тъмен залог (пълен) или нормален ол-ин под минимума (Решение №2, който
+      // веднага затваря тъмната фаза). raiseLocked е винаги празен тук.
       if (state.blind.status === 'active' && !state.raiseLocked.includes(playerId)) fail('invalid-action', 'during the blind phase a bet must be at least double the last blind bet')
       if (state.currentBet <= voluntary) fail('invalid-action', 'nothing to call')
       const need = state.currentBet - voluntary
@@ -266,13 +257,9 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         if (looked) fail('blind-not-allowed', `${playerId} has already looked at the cards`)
         if (!(isFirstActorOpening || state.blind.status === 'active')) fail('blind-not-allowed', 'a blind sequence can only be started by the first player before any bet')
         const minimum = state.blind.status === 'active' ? 2 * state.blind.lastBlindTotal : 2 * entry
-        if (total < minimum) {
-          if (total !== maxTotal) fail('below-minimum', `blind bet must be at least ${minimum}`)
-          if (state.blind.status !== 'active') fail('rule-not-implemented', `a blind all-in below ${minimum} that would start the blind sequence is not specified yet`)
-          applyIncompleteBlindAllIn(state, playerId, total, commitTotal)
-          blind = true
-          break
-        }
+        // Решение №1: пълна забрана на непълен залог на тъмно — важи за
+        // първоначалния и за всеки следващ (отменя старото Решение №4).
+        if (total < minimum) fail('below-minimum', `blind bet must be at least ${minimum}; a player without enough free chips may not bet blind`)
         if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
         commitTotal(total)
         applyFullRaise(state, playerId, total)
@@ -286,8 +273,14 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
         const minimum = 2 * state.blind.lastBlindTotal
         if (total < minimum) {
-          if (total === maxTotal) fail('rule-not-implemented', `all-in below the blind-phase minimum ${minimum} is not specified yet`)
-          fail('below-minimum', `after looking, the bet must be at least ${minimum}`)
+          if (total !== maxTotal) fail('below-minimum', `after looking, the bet must be at least ${minimum}`)
+          // Решение №2: погледнал играч с недостатъчни чипове за минимума →
+          // нормален ол-ин (не пълно повишаване); тъмната фаза приключва.
+          commitTotal(total)
+          if (total > state.currentBet) applyShortRaise(state, playerId, total)
+          else { remove(state.pending, playerId); remove(state.raiseLocked, playerId); state.acted.push(playerId) }
+          state.blind.status = 'closed'
+          break
         }
         commitTotal(total)
         applyFullRaise(state, playerId, total)
@@ -314,9 +307,16 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       if (state.blind.status === 'active') {
         const minimum = 2 * state.blind.lastBlindTotal
         if (total < minimum) {
-          if (looked) fail('rule-not-implemented', `an all-in below the blind-phase minimum ${minimum} by a player who has looked is not specified yet`)
-          applyIncompleteBlindAllIn(state, playerId, total, commitTotal)
-          blind = true
+          // Решение №1: непогледнал играч с недостатъчни чипове няма право
+          // да продължи на тъмно — отказ, без промяна на състоянието.
+          if (!looked) fail('blind-not-allowed', `${playerId} has only ${total}, below the blind minimum ${minimum}; look at the cards to continue`)
+          // Решение №2: погледнал играч с недостатъчни чипове → нормален
+          // ол-ин (не пълно повишаване); тъмната фаза приключва за всички.
+          if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
+          commitTotal(total)
+          if (total > state.currentBet) applyShortRaise(state, playerId, total)
+          else { remove(state.pending, playerId); remove(state.raiseLocked, playerId); state.acted.push(playerId) }
+          state.blind.status = 'closed'
           break
         }
         if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
@@ -330,7 +330,9 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         break
       }
       if (isFirstActorOpening && !looked) {
-        if (total < 2 * entry) fail('rule-not-implemented', `a blind all-in below ${2 * entry} that would start the blind sequence is not specified yet; look at the cards first`)
+        // Решение №1: непълен тъмен залог/ол-ин на самото начало е забранен;
+        // играчът трябва да погледне (и да залага нормално) или да се откаже.
+        if (total < 2 * entry) fail('blind-not-allowed', `${playerId} has only ${total}, below the blind minimum ${2 * entry}; look at the cards to continue`)
         commitTotal(total)
         applyFullRaise(state, playerId, total)
         state.blind = { status: 'active', lastBlindTotal: total }
@@ -424,8 +426,9 @@ export function describeSvaraBettingOptions(state: SvaraBettingState, playerId: 
     if (locked && state.currentBet > voluntary && state.currentBet - voluntary <= stack) options.call = state.currentBet
     if (!locked && !looked && maxTotal >= minimum) options.blindBet = { min: minimum, max: maxTotal }
     if (!locked && looked && maxTotal >= minimum) options.bet = { min: minimum, max: maxTotal }
-    // Непълен тъмен ол-ин е позволен (случай №4); за погледнал играч — само пълен.
-    if (stack > 0 && (locked ? maxTotal <= state.currentBet : !looked || maxTotal >= minimum)) options.allIn = maxTotal
+    // Решение №1: непогледнал играч под минимума няма опция за ол-ин на тъмно.
+    // Решение №2: погледнал играч може да ол-ин дори под минимума (нормален ол-ин).
+    if (stack > 0 && (locked ? maxTotal <= state.currentBet : looked || maxTotal >= minimum)) options.allIn = maxTotal
     options.lookRequired = !looked && !locked
     return options
   }
