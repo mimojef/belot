@@ -14,6 +14,7 @@
     "tournament:beta-password": "tsx scripts/tournamentBetaPassword.ts",
     "check:tournament-beta-access-gate": "tsx scripts/checkTournamentBetaAccessGate.ts --server-root=.",
     "check:svara-stage1-access": "tsx scripts/checkSvaraStage1Access.ts --server-root=.",
+    "check:svara-engine-2b1": "tsx scripts/checkSvaraEngine2B1.ts",
     "check:ad-campaigns-target-url-validation": "tsx scripts/checkAdCampaignTargetUrlValidation.ts",
     "check:ad-campaigns-client-queue": "tsx scripts/checkAdCampaignClientQueue.ts",
     "check:ad-campaigns-http-and-realtime": "tsx scripts/checkAdCampaignsHttpAndRealtime.ts",
