@@ -6,22 +6,27 @@
 //
 // Без постоянно прерисуване: ticker-ът е спрян, докато няма активни
 // движения; при неподвижна маса се рисува само един кадър след промяна.
-// Траекторията идва от същата sampleSvaraMove(), както в DOM renderer-а.
+// Траекторията идва от същата sampleSvaraTrack(), както в DOM renderer-а,
+// а сянката — от същата svaraShadowFor().
 
 import { Application, Container, Graphics, Sprite, Texture, Ticker } from 'pixi.js'
-import { sampleSvaraMove, stateToSampled, type SvaraMove, type SvaraSampledState, type SvaraSpriteDef } from './svaraDemoMotion'
+import { svaraShadowFor } from './svaraDemoShadow'
+import { buildSvaraTracks, findSvaraTrackMove, sampleSvaraTrack, stateToSampled, type SvaraMove, type SvaraSampledState, type SvaraSpriteDef, type SvaraTrack } from './svaraDemoMotion'
 import type { SvaraDemoRenderer } from './svaraDemoRenderer'
 import { SVARA_DEMO_CARD_BACK_SRC, type SvaraDemoLayout } from './svaraDemoScript'
 
-const CHIP_COLORS: Record<string, { fill: number; edge: number }> = {
-  red: { fill: 0xef4444, edge: 0xb91c1c },
-  blue: { fill: 0x3b82f6, edge: 0x1d4ed8 },
-  green: { fill: 0x22c55e, edge: 0x15803d },
+const CHIP_COLORS: Record<string, { face: number; rim: number }> = {
+  red: { face: 0xe23b3b, rim: 0xa51d1d },
+  blue: { face: 0x2f6fe0, rim: 0x1b44a3 },
+  green: { face: 0x1fae57, rim: 0x137a3b },
 }
 const MAX_RESOLUTION = 2
-// Максималният показан размер на карта е cardWidth(≤72) × REVEAL_SCALE(1.45)
-// × resolution(≤2) ≈ 209px → текстура 220px е достатъчна и пести памет.
-const CARD_TEXTURE_WIDTH = 220
+// Максималният показан размер на карта е cardWidth(≤96) × REVEAL(1.5) ×
+// depth(≤1.2) × resolution(≤2) ≈ 345px → текстура 300px (оригиналния
+// размер) е достатъчна; mipmaps пазят остротата при смаляване.
+const CARD_TEXTURE_WIDTH = 300
+// Сенките са размити форми с поле около тях (виж createShadowTexture).
+const SHADOW_PAD_RATIO = { card: { w: 144 / 120, h: 192 / 168 }, chip: { w: 104 / 80, h: 104 / 80 } }
 
 // PixiJS закача вътрешни услуги (EventTicker, SchedulerSystem/GC) за
 // глобалния Ticker.system, който иначе държи requestAnimationFrame цикъл
@@ -39,15 +44,15 @@ type PixiSprite = {
   def: SvaraSpriteDef
   node: Container
   body: Sprite
+  shadow: Sprite
   front: Texture | null
   faceUp: boolean
 }
 
-type Tween = {
-  move: SvaraMove
+type ActiveTrack = {
+  track: SvaraTrack
   sprite: PixiSprite
-  startedAt: number
-  zApplied: boolean
+  lastMoveIndex: number
   resolve: (completed: boolean) => void
 }
 
@@ -59,7 +64,7 @@ async function loadImage(src: string): Promise<HTMLImageElement> {
   return img
 }
 
-/** Намалена текстура със заоблени ъгли (offscreen canvas → един GPU upload). */
+/** Текстура със заоблени ъгли (offscreen canvas → един GPU upload). */
 async function createCardTexture(src: string): Promise<Texture> {
   const img = await loadImage(src)
   const width = CARD_TEXTURE_WIDTH
@@ -76,14 +81,35 @@ async function createCardTexture(src: string): Promise<Texture> {
   return Texture.from({ resource: canvas, autoGenerateMipmaps: true, scaleMode: 'linear' })
 }
 
+/** Размита черна форма (карта или кръг) за сянката — веднъж, споделена. */
+function createShadowTexture(kind: 'card' | 'chip'): Texture {
+  const w = kind === 'card' ? 120 : 80
+  const h = kind === 'card' ? 168 : 80
+  const pad = 12
+  const canvas = document.createElement('canvas')
+  canvas.width = w + pad * 2
+  canvas.height = h + pad * 2
+  const ctx = canvas.getContext('2d')
+  if (!ctx) throw new Error('2d context unavailable')
+  ctx.filter = 'blur(5px)'
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'
+  ctx.beginPath()
+  if (kind === 'card') ctx.roundRect(pad, pad, w, h, w * 0.09)
+  else ctx.arc(pad + w / 2, pad + h / 2, w / 2, 0, Math.PI * 2)
+  ctx.fill()
+  return Texture.from({ resource: canvas, scaleMode: 'linear' })
+}
+
 export function createSvaraPixiRenderer(): SvaraDemoRenderer {
   let app: Application | null = null
   let layout: SvaraDemoLayout | null = null
   let backTexture: Texture | null = null
   const chipTextures = new Map<string, Texture>()
   const faceTextures = new Map<string, Texture>()
+  const shadowTextures = new Map<string, Texture>()
   const sprites = new Map<string, PixiSprite>()
-  let tweens: Tween[] = []
+  let active: ActiveTrack[] = []
+  let phaseStartedAt = 0
   let drawnFrames = 0
 
   function requestRender(): void {
@@ -95,29 +121,33 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
   function createChipTexture(color: string): Texture {
     if (!app) throw new Error('not mounted')
     const palette = CHIP_COLORS[color] ?? CHIP_COLORS.red!
-    const r = 32
+    const r = 40
     const g = new Graphics()
-    g.circle(r, r, r).fill(palette.edge)
-    for (let i = 0; i < 6; i += 1) {
-      const a = (i / 6) * Math.PI * 2
-      g.circle(r + Math.cos(a) * r * 0.8, r + Math.sin(a) * r * 0.8, r * 0.13).fill(0xffffff)
+    g.circle(r, r, r).fill(palette.rim)
+    // Ивици по ръба (като conic-gradient-а в DOM варианта).
+    for (let i = 0; i < 8; i += 1) {
+      const a0 = (i / 8) * Math.PI * 2
+      g.moveTo(r, r).arc(r, r, r, a0, a0 + Math.PI / 12).lineTo(r, r).fill(0xf8fafc)
     }
-    g.circle(r, r, r * 0.6).fill(0xffffff)
-    g.circle(r, r, r * 0.52).fill(palette.fill)
+    g.circle(r, r, r * 0.6).fill(palette.face)
+    g.circle(r, r, r * 0.53).fill(0xffffff)
+    g.circle(r, r, r * 0.47).fill(palette.face)
     const texture = app.renderer.generateTexture({ target: g, resolution: MAX_RESOLUTION, antialias: true })
     g.destroy()
     return texture
   }
 
+  function baseSize(sprite: PixiSprite): { w: number; h: number } {
+    if (!layout) return { w: 0, h: 0 }
+    return sprite.def.kind === 'card'
+      ? { w: layout.cardWidth, h: layout.cardHeight }
+      : { w: layout.chipSize, h: layout.chipSize }
+  }
+
   function applySpriteSize(sprite: PixiSprite): void {
-    if (!layout) return
-    if (sprite.def.kind === 'card') {
-      sprite.body.width = layout.cardWidth
-      sprite.body.height = layout.cardHeight
-    } else {
-      sprite.body.width = layout.chipSize
-      sprite.body.height = layout.chipSize
-    }
+    const { w, h } = baseSize(sprite)
+    sprite.body.width = w
+    sprite.body.height = h
   }
 
   function setFace(sprite: PixiSprite, faceUp: boolean): void {
@@ -136,46 +166,53 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
     sprite.node.scale.set(s.scaleX, s.scaleY)
     sprite.node.alpha = s.alpha
     setFace(sprite, s.faceUp)
+    const { w, h } = baseSize(sprite)
+    const pad = SHADOW_PAD_RATIO[sprite.def.kind]
+    const sh = svaraShadowFor(s, Math.min(w, h))
+    sprite.shadow.position.set(s.x + sh.dx, s.y + sh.dy)
+    sprite.shadow.rotation = sprite.node.rotation
+    sprite.shadow.width = w * pad.w * Math.abs(s.scaleX) * sh.scale
+    sprite.shadow.height = h * pad.h * s.scaleY * sh.scale
+    sprite.shadow.alpha = sh.alpha
   }
 
-  function finishAllTweens(completed: boolean): void {
-    const pending = tweens
-    tweens = []
-    for (const tween of pending) tween.resolve(completed)
+  function finishAll(completed: boolean): void {
+    const pending = active
+    active = []
+    for (const entry of pending) entry.resolve(completed)
+  }
+
+  function stopTickers(): void {
+    app?.ticker.stop()
+    setPixiSystemTickerActive(false)
   }
 
   function tick(): void {
     if (!app) return
-    const now = performance.now()
-    const stillRunning: Tween[] = []
-    for (const tween of tweens) {
-      const elapsed = now - tween.startedAt - tween.move.delayMs
-      if (elapsed < 0) {
-        stillRunning.push(tween)
-        continue
+    const elapsed = performance.now() - phaseStartedAt
+    const stillRunning: ActiveTrack[] = []
+    for (const entry of active) {
+      const current = findSvaraTrackMove(entry.track, elapsed)
+      if (current && current.index !== entry.lastMoveIndex) {
+        entry.sprite.node.zIndex = current.move.to.z
+        entry.lastMoveIndex = current.index
       }
-      if (!tween.zApplied) {
-        tween.sprite.node.zIndex = tween.move.to.z
-        tween.zApplied = true
-      }
-      const t = elapsed / tween.move.durationMs
-      if (t >= 1) {
-        applySampled(tween.sprite, stateToSampled(tween.move.to))
-        tween.resolve(true)
+      if (elapsed >= entry.track.endMs) {
+        const last = entry.track.moves[entry.track.moves.length - 1]!
+        applySampled(entry.sprite, stateToSampled(last.to))
+        entry.resolve(true)
       } else {
-        applySampled(tween.sprite, sampleSvaraMove(tween.move, t))
-        stillRunning.push(tween)
+        if (current) applySampled(entry.sprite, sampleSvaraTrack(entry.track, elapsed))
+        stillRunning.push(entry)
       }
     }
-    tweens = stillRunning
+    active = stillRunning
     drawnFrames += 1
-    if (tweens.length === 0) {
+    if (active.length === 0) {
       // Последният кадър се рисува от ticker-а след този callback; след това
       // спираме — неподвижната маса не се прерисува.
       queueMicrotask(() => {
-        if (tweens.length > 0) return
-        app?.ticker.stop()
-        setPixiSystemTickerActive(false)
+        if (active.length === 0) stopTickers()
       })
     }
   }
@@ -185,6 +222,10 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
 
     async mount(host, defs, nextLayout) {
       layout = nextLayout
+      // Лобито на desktop е мащабирано с CSS zoom — рисуваме в реалната
+      // екранна резолюция, за да не е canvas-ът размазан или излишно голям.
+      const rect = host.getBoundingClientRect()
+      const zoom = host.offsetWidth > 0 ? rect.width / host.offsetWidth : 1
       const instance = new Application()
       await instance.init({
         width: nextLayout.width,
@@ -192,7 +233,7 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
         backgroundAlpha: 0,
         antialias: true,
         autoDensity: true,
-        resolution: Math.min(window.devicePixelRatio || 1, MAX_RESOLUTION),
+        resolution: Math.min(MAX_RESOLUTION, Math.max(1, (window.devicePixelRatio || 1) * zoom)),
         autoStart: false,
         sharedTicker: false,
         preference: 'webgl',
@@ -201,26 +242,27 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
       app = instance
       instance.canvas.dataset.svaraRenderer = 'pixi'
       instance.canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none;'
-      instance.stage.sortableChildren = true
       instance.stage.eventMode = 'none'
+      const shadowLayer = new Container()
+      const spriteLayer = new Container()
+      spriteLayer.sortableChildren = true
+      instance.stage.addChild(shadowLayer, spriteLayer)
       instance.ticker.add(tick)
       setPixiSystemTickerActive(false)
 
       backTexture = await createCardTexture(SVARA_DEMO_CARD_BACK_SRC)
+      shadowTextures.set('card', createShadowTexture('card'))
+      shadowTextures.set('chip', createShadowTexture('chip'))
       for (const def of defs) {
         if (def.kind === 'card' && def.faceSrc !== null && !faceTextures.has(def.faceSrc)) {
           faceTextures.set(def.faceSrc, await createCardTexture(def.faceSrc))
         }
-        if (def.kind === 'chip' && !chipTextures.has(def.color)) {
-          chipTextures.set(def.color, createChipTexture(def.color))
-        }
+        if (def.kind === 'chip' && !chipTextures.has(def.color)) chipTextures.set(def.color, createChipTexture(def.color))
       }
-
-      // Качваме всички текстури в GPU предварително — иначе лицата на
-      // картите се качват (с mipmaps) лениво при първото обръщане и
-      // предизвикват видимо засичане по средата на анимацията.
+      // Качваме всички текстури в GPU предварително — иначе се качват
+      // (с mipmaps) лениво при първа употреба и засичат анимацията.
       const renderer = instance.renderer as unknown as { texture: { initSource(source: Texture['source']): unknown } }
-      for (const texture of [backTexture, ...faceTextures.values(), ...chipTextures.values()]) {
+      for (const texture of [backTexture, ...faceTextures.values(), ...chipTextures.values(), ...shadowTextures.values()]) {
         renderer.texture.initSource(texture.source)
       }
 
@@ -230,11 +272,15 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
         body.anchor.set(0.5)
         const node = new Container()
         node.addChild(body)
-        instance.stage.addChild(node)
+        spriteLayer.addChild(node)
+        const shadow = new Sprite(shadowTextures.get(def.kind)!)
+        shadow.anchor.set(0.5)
+        shadowLayer.addChild(shadow)
         const sprite: PixiSprite = {
           def,
           node,
           body,
+          shadow,
           front: def.kind === 'card' && def.faceSrc !== null ? faceTextures.get(def.faceSrc)! : null,
           faceUp: false,
         }
@@ -252,9 +298,8 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
     },
 
     applyState(states) {
-      finishAllTweens(false)
-      app?.ticker.stop()
-      setPixiSystemTickerActive(false)
+      finishAll(false)
+      stopTickers()
       for (const [id, state] of Object.entries(states)) {
         const sprite = sprites.get(id)
         if (!sprite) continue
@@ -264,16 +309,17 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
       requestRender()
     },
 
-    play(moves) {
+    play(moves: SvaraMove[]) {
       if (!app || moves.length === 0) return Promise.resolve(true)
-      const startedAt = performance.now()
-      const promises = moves.map((move) => new Promise<boolean>((resolve) => {
-        const sprite = sprites.get(move.id)
+      finishAll(false)
+      phaseStartedAt = performance.now()
+      const promises = buildSvaraTracks(moves).map((track) => new Promise<boolean>((resolve) => {
+        const sprite = sprites.get(track.id)
         if (!sprite) {
           resolve(true)
           return
         }
-        tweens.push({ move, sprite, startedAt, zApplied: false, resolve })
+        active.push({ track, sprite, lastMoveIndex: -1, resolve })
       }))
       setPixiSystemTickerActive(true)
       app.ticker.start()
@@ -281,19 +327,18 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
     },
 
     cancel() {
-      finishAllTweens(false)
-      app?.ticker.stop()
-      setPixiSystemTickerActive(false)
+      finishAll(false)
+      stopTickers()
     },
 
     getDebugInfo() {
       if (!app) return 'PixiJS · не е зареден'
-      const textures = 1 + faceTextures.size + chipTextures.size
-      return `PixiJS ${app.renderer.name} · resolution ${app.renderer.resolution} · ${textures} текстури · рисувани кадри: ${drawnFrames}`
+      const textures = 1 + faceTextures.size + chipTextures.size + shadowTextures.size
+      return `PixiJS ${app.renderer.name} · resolution ${app.renderer.resolution.toFixed(2)} · ${textures} текстури · рисувани кадри: ${drawnFrames}`
     },
 
     destroy() {
-      finishAllTweens(false)
+      finishAll(false)
       sprites.clear()
       if (app) {
         app.ticker.remove(tick)
@@ -302,10 +347,10 @@ export function createSvaraPixiRenderer(): SvaraDemoRenderer {
       }
       backTexture?.destroy(true)
       backTexture = null
-      for (const texture of faceTextures.values()) texture.destroy(true)
-      for (const texture of chipTextures.values()) texture.destroy(true)
-      faceTextures.clear()
-      chipTextures.clear()
+      for (const map of [faceTextures, chipTextures, shadowTextures]) {
+        for (const texture of map.values()) texture.destroy(true)
+        map.clear()
+      }
       // Връщаме глобалния ticker в изходно състояние на PixiJS.
       Ticker.system.autoStart = true
     },

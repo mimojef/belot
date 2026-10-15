@@ -19,7 +19,7 @@ export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false
   }
 
   return `
-    <article data-svara-page="granted" style="padding:${padding};width:100%;max-width:720px;box-sizing:border-box;">
+    <article data-svara-page="granted" style="padding:${padding};width:100%;max-width:${useMobileLayout ? 720 : 1180}px;box-sizing:border-box;">
       <div style="
         background:#000000;
         border:2px solid rgba(212,165,32,0.78);

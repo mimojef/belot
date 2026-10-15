@@ -223,12 +223,12 @@ async function runRenderer(page: Page, label: string, kind: 'dom' | 'pixi', cpuT
     }
     await waitDemoStatus(page, 'running', 30_000)
     if (screenshots) {
-      await page.waitForTimeout(700)
-      await page.screenshot({ path: join(outDir, `${label}-${kind}-deal.png`) })
-      await page.waitForTimeout(1500)
-      await page.screenshot({ path: join(outDir, `${label}-${kind}-reveal.png`) })
-      await page.waitForTimeout(2600)
-      await page.screenshot({ path: join(outDir, `${label}-${kind}-svarka.png`) })
+      // Моменти (ms от старта) — по един кадър във всяка фаза.
+      const startedAt = Date.now()
+      for (const [name, atMs] of [['deal', 900], ['reveal', 2900], ['bet', 4350], ['svarka', 5900], ['collect', 7700]] as const) {
+        await page.waitForTimeout(Math.max(0, atMs - (Date.now() - startedAt)))
+        await page.screenshot({ path: join(outDir, `${label}-${kind}-${name}.png`) })
+      }
     }
     await waitDemoStatus(page, 'done', 40_000)
     if (screenshots) await page.screenshot({ path: join(outDir, `${label}-${kind}-final.png`) })
@@ -377,16 +377,19 @@ async function main(): Promise<void> {
         await page.screenshot({ path: join(outDir, `${viewport.name}-pixi-interrupted.png`) })
       })
 
-      await check(`7. [${viewport.name}] resize по време на анимация → прекъсване и коректно крайно състояние`, async () => {
+      await check(`7. [${viewport.name}] resize по време на анимация → нов layout, пускането продължава до коректен край`, async () => {
         await page.click('[data-svara-demo-renderer="dom"]')
         await waitDemoStatus(page, 'running', 30_000)
         await page.waitForTimeout(500)
         const widthBefore = await page.locator('[data-svara-demo-stage]').evaluate((el) => el.clientWidth)
         await page.setViewportSize({ width: viewport.isMobile ? 330 : 600, height: viewport.height })
         await page.waitForFunction((w) => (document.querySelector('[data-svara-demo-stage]') as HTMLElement | null)?.clientWidth !== w, widthBefore, { timeout: 5000 })
-        await waitDemoStatus(page, 'done', 5000)
+        await waitDemoStatus(page, 'done', 30_000)
         const result = await demoMetrics(page)
-        assert(result.interrupted === true, 'expected interrupted=true after resize')
+        assert(result.resized === true && result.interrupted === false, `expected resized run: ${JSON.stringify(result)}`)
+        const layout = result.layout as { width: number } | null
+        const widthAfter = await page.locator('[data-svara-demo-stage]').evaluate((el) => el.clientWidth)
+        assert(layout !== null && layout.width === widthAfter, `layout width ${layout?.width} vs stage ${widthAfter}`)
         const active = await page.evaluate(() => document.querySelector('[data-svara-renderer="dom"]')?.getAnimations({ subtree: true }).length ?? -1)
         assert(active === 0, `active animations after resize: ${active}`)
         await page.screenshot({ path: join(outDir, `${viewport.name}-dom-after-resize.png`) })
