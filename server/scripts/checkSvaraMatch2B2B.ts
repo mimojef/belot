@@ -774,37 +774,160 @@ check('E8b. случай №2: равенство в новите залози �
   assert((t.state.round as { kind: string; fee: number }).kind === 'svara-joining' && (t.state.round as { fee: number }).fee === 50, 'old pot continues as an ordinary Svara')
 })
 
-check('E8c. Решение №3 (граница): равенство в повече от един нов спорен слой извън модела „основна + една странична“ → изричен, безопасен отказ без промяна на състоянието', () => {
-  const t = newTable(['p1', 'p2', 'p3', 'p4'], { dealerIndex: 3 })
-  // Разнообразяваме стековете чрез бързи раздавания, докато четиримата не
-  // останат с различни суми свободни чипа (нужно за 4 различни нива).
-  let warmup = 0
-  while (new Set(Object.values(t.state.stacks)).size < 4 && warmup < 10) {
-    warmup += 1
-    const order = t.peekOrder()
-    const [bettor, caller, ...rest] = order
-    t.deal({ [bettor!]: H34 })
-    t.seen(bettor!, { kind: 'bet', total: 10 + warmup * 17 })
-    t.seen(caller!, { kind: 'call' })
-    for (const id of rest) t.seen(id, { kind: 'fold' })
-  }
-  const stacksBefore = Object.values(t.state.stacks)
-  assert(new Set(stacksBefore).size === 4, `expected four distinct stacks after warmup: ${t.stacks()}`)
-  // Финално раздаване: всички отиват ол-ин с различни свободни суми и с
-  // еднакво силни ръце (11 т. всяка) → три различни спорни слоя (4/3/2
-  // правоимащи, вложени), всичките наравно едновременно.
-  const order = t.peekOrder()
-  t.deal({ [order[0]!]: TIE1, [order[1]!]: TIE2, [order[2]!]: TIE3, [order[3]!]: TIE5 })
-  t.seen(order[0]!, { kind: 'all-in' })
-  t.seen(order[1]!, { kind: 'all-in' })
-  t.seen(order[2]!, { kind: 'all-in' })
-  const before = JSON.stringify(t.state)
-  expectError(
-    () => t.run({ type: 'act', playerId: order[3]!, action: { kind: 'all-in' } }),
-    'rule-not-implemented',
-    'equality across several contested layers beyond the single confirmed "main + one side" shape is not specified yet',
+// advanceAllInSvara подрежда contenders по МЕСТАТА (seats), не по реда на
+// подаване — за seats = [petar, ivan, georgi, maria] (виж threeLayerWarmup)
+// и eligible = {petar, georgi, maria} (ivan изключен), това е винаги:
+const SIDE_POT_CONTENDERS = ['petar', 'georgi', 'maria']
+const WEAK9 = '9S 8H 7D' // 9 т., без общи карти с 10S/10H/10D и JS/JH/JD
+
+/**
+ * Схема за задължителния пример от §12 (няколко едновременно спорни
+ * странични банки): `y` и `x` отиват ол-ин на различни нива в едно загряващо
+ * раздаване (x повишава над y; y се отказва без да доплаща; x губи от z) —
+ * `y` остава с точно `190 - lowBet` свободни чипа, `x` с `190 - raiseTo`;
+ * `z` печели загряващото раздаване (богат за тестовото раздаване); `w` се
+ * отказва веднага (губи само Входа, също остава богат).
+ */
+function threeLayerWarmup(y: string, x: string, z: string, w: string, lowBet: number, raiseTo: number): Table {
+  const t = newTable([y, x, z, w], { dealerIndex: 3 }) // ред: y, x, z, w (w дилър)
+  t.deal({ [z]: H34 })
+  t.seen(y, { kind: 'bet', total: lowBet })
+  t.seen(x, { kind: 'bet', total: raiseTo })
+  t.seen(z, { kind: 'call' })
+  t.act(w, { kind: 'fold' })
+  t.act(y, { kind: 'fold' })
+  return t
+}
+
+/**
+ * Точният пример от §12: Иван (ол-ин от самия Вход), Петър (ол-ин малко
+ * над Входа), Георги и Мария (наравно отгоре) → основна банка (всички
+ * четирима, Иван печели веднага) + две вложени странични банки:
+ * {Петър, Георги, Мария} и {Георги, Мария}, двете заключени едновременно
+ * като Свара с ол-ин, готови за `advance-allin-svara`.
+ * sideTotal контролира общия принос на Георги/Мария (по подразбиране 30,
+ * колкото в примера); lowBet/raiseTo изместват нивата на Петър/Иван.
+ */
+function setupThreeSidePots(lowBet = 170, raiseTo = 180, sideTotal = 30): Table {
+  const t = threeLayerWarmup('petar', 'ivan', 'georgi', 'maria', lowBet, raiseTo)
+  t.deal({ ivan: H34, georgi: '10S 10H 10D', maria: 'QS QH QD', petar: 'JS JH JD' })
+  t.seen('georgi', { kind: 'bet', total: sideTotal - 10 })
+  t.seen('maria', { kind: 'call' })
+  t.act('petar', { kind: 'all-in' })
+  return t
+}
+
+check('E8c. §12, точният пример 40/30/20: основната се изплаща веднага; двете странични банки — едно общо раздаване', () => {
+  const t = setupThreeSidePots()
+  assert(t.state.stacks.ivan === 40, `главната банка отива директно на Иван: ${t.stacks()}`)
+  const mainAward = t.state.ledger.filter((e) => e.type === 'pot-award' && e.playerId === 'ivan')
+  assert(mainAward.length === 1 && mainAward[0]!.amount === 40, JSON.stringify(mainAward))
+  const kinds = t.state.lockedPots.map((p) => `${p.kind}:${p.amount}:${p.isMain}:${[...p.eligible].sort().join(',')}`)
+  assert(
+    JSON.stringify(kinds) === JSON.stringify(['allin:30:false:georgi,maria,petar', 'allin:20:false:georgi,maria']),
+    JSON.stringify(kinds),
   )
-  assert(JSON.stringify(t.state) === before, 'refused command leaves the whole match state untouched')
+  const round = t.state.round as { kind: string; potIds: string[] }
+  assert(round.kind === 'allin-svara' && round.potIds.length === 2, 'двете странични банки — една обща Свара с ол-ин')
+  const [georgiBefore, mariaBefore, petarBefore] = [t.state.stacks.georgi!, t.state.stacks.maria!, t.state.stacks.petar!]
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { georgi: H34, petar: H27, maria: H24 }) })
+  const step = t.state.history[t.state.history.length - 1]!
+  assert(
+    JSON.stringify(Object.keys(step.shownHands).sort()) === JSON.stringify(['georgi', 'maria', 'petar']),
+    'едно общо раздаване само за правоимащите в спорните банки; Иван не участва (вече няма право върху неразрешена банка)',
+  )
+  assert(t.state.stacks.ivan === 40, 'главната банка не се преразглежда')
+  assert(mainAward.length === 1, 'без повторно изплащане на вече разрешена банка')
+  // Георги печели и двете банки директно (различни по състав, еднакви нови карти).
+  assert(t.state.stacks.georgi === georgiBefore + 50, `georgi +50 (30+20): ${t.stacks()}`)
+  assert(t.state.stacks.maria === mariaBefore, 'maria печели нищо от тях')
+  assert(t.state.stacks.petar === petarBefore, 'petar печели нищо (не е правоимащ за втората банка)')
+  assert(t.state.round === null && t.state.lockedPots.length === 0, 'двете банки разрешени, нищо не остава заключено')
+  assert(total(t.state) + t.state.removedChips === t.state.totalChips, 'запазени 4 × 200 = 800 чипа')
+})
+
+check('E8d. §12: повторно равенство само в първата странична банка — тя се дели, втората има ясен победител', () => {
+  const t = setupThreeSidePots()
+  const [georgiBefore, mariaBefore, petarBefore] = [t.state.stacks.georgi!, t.state.stacks.maria!, t.state.stacks.petar!]
+  // Георги и Петър се равняват (30 т.); Мария е по-слаба (25 т.) → първата
+  // банка {Петър, Георги, Мария} се дели между Георги и Петър; втората
+  // {Георги, Мария} отива изцяло на Георги (по-силен от Мария).
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { georgi: '10S 10H 10D', petar: 'JS JH JD', maria: WEAK9 }) })
+  const step = t.state.history[t.state.history.length - 1]!
+  const split = step.pots.find((p) => p.outcome.kind === 'split')!
+  assert((split.outcome as { tiedPlayers: string[]; share: number; removed: number }).share === 15, JSON.stringify(split))
+  assert(JSON.stringify([...(split.outcome as { tiedPlayers: string[] }).tiedPlayers].sort()) === JSON.stringify(['georgi', 'petar']), 'мария извън подялбата')
+  assert(t.state.stacks.georgi === georgiBefore + 15 + 20, `georgi: +15 (половината от 30) + 20 (цялата втора банка): ${t.stacks()}`)
+  assert(t.state.stacks.petar === petarBefore + 15, 'petar: +15 от първата банка')
+  assert(t.state.stacks.maria === mariaBefore, 'maria печели нищо')
+  assert(t.state.round === null && t.state.lockedPots.length === 0, 'двете банки разрешени')
+})
+
+check('E8e. §12: повторно равенство само във втората странична банка — първата има ясен победител', () => {
+  const t = setupThreeSidePots()
+  const [georgiBefore, mariaBefore, petarBefore] = [t.state.stacks.georgi!, t.state.stacks.maria!, t.state.stacks.petar!]
+  // Петър печели първата банка сам (33 т., три аса); Георги и Мария се
+  // равняват (30 т. всеки) в тази банка, но и двамата участват и във
+  // втората, където наистина се равняват → тя се дели.
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { petar: H33, georgi: '10S 10H 10D', maria: 'QS QH QD' }) })
+  const step = t.state.history[t.state.history.length - 1]!
+  const awardedToPetar = step.pots.find((p) => p.outcome.kind === 'awarded')!
+  assert((awardedToPetar.outcome as { winner: string }).winner === 'petar' && awardedToPetar.amount === 30, JSON.stringify(awardedToPetar))
+  const split = step.pots.find((p) => p.outcome.kind === 'split')!
+  assert((split.outcome as { share: number }).share === 10 && JSON.stringify([...(split.outcome as { tiedPlayers: string[] }).tiedPlayers].sort()) === JSON.stringify(['georgi', 'maria']), JSON.stringify(split))
+  assert(t.state.stacks.petar === petarBefore + 30, 'petar: цялата първа банка')
+  assert(t.state.stacks.georgi === georgiBefore + 10 && t.state.stacks.maria === mariaBefore + 10, `georgi/maria по 10 от втората: ${t.stacks()}`)
+  assert(t.state.round === null && t.state.lockedPots.length === 0, 'двете банки разрешени')
+})
+
+check('E8f. §12: повторно равенство в двете странични банки едновременно — всяка се дели поотделно', () => {
+  const t = setupThreeSidePots()
+  const [georgiBefore, mariaBefore, petarBefore] = [t.state.stacks.georgi!, t.state.stacks.maria!, t.state.stacks.petar!]
+  // Георги, Мария и Петър се равняват всички на 30 т. → и първата банка
+  // (всички трима), и втората (само Георги/Мария) остават наравно.
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { georgi: '10S 10H 10D', maria: 'QS QH QD', petar: 'JS JH JD' }) })
+  const step = t.state.history[t.state.history.length - 1]!
+  const splits = step.pots.filter((p) => p.outcome.kind === 'split')
+  assert(splits.length === 2, JSON.stringify(step.pots))
+  const firstSplit = splits.find((p) => p.amount === 30)!
+  const secondSplit = splits.find((p) => p.amount === 20)!
+  assert((firstSplit.outcome as { share: number }).share === 10 && JSON.stringify([...(firstSplit.outcome as { tiedPlayers: string[] }).tiedPlayers].sort()) === JSON.stringify(['georgi', 'maria', 'petar']), JSON.stringify(firstSplit))
+  assert((secondSplit.outcome as { share: number }).share === 10 && JSON.stringify([...(secondSplit.outcome as { tiedPlayers: string[] }).tiedPlayers].sort()) === JSON.stringify(['georgi', 'maria']), JSON.stringify(secondSplit))
+  assert(t.state.stacks.petar === petarBefore + 10, 'petar: само от първата банка')
+  assert(t.state.stacks.georgi === georgiBefore + 10 + 10 && t.state.stacks.maria === mariaBefore + 10 + 10, `georgi/maria: от двете банки: ${t.stacks()}`)
+  assert(t.state.round === null && t.state.lockedPots.length === 0, 'двете банки разрешени')
+})
+
+check('E8g. §12: подялба с неделим остатък в една от няколко едновременни странични банки', () => {
+  // Петър достига точно 21 (не 20) и Георги/Мария — точно 32, за да се
+  // получи странична банка от 33 чипа (неделима на 2).
+  const t = setupThreeSidePots(169, 180, 32)
+  assert(t.state.stacks.ivan === 40, t.stacks())
+  const sidePots = t.state.lockedPots.map((p) => p.amount).sort((a, b) => a - b)
+  assert(JSON.stringify(sidePots) === JSON.stringify([22, 33]), `expected [22, 33]: ${JSON.stringify(sidePots)}`)
+  const removedBefore = t.state.removedChips
+  // Георги и Петър се равняват (30 т.); Мария по-слаба (25 т.).
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { georgi: '10S 10H 10D', petar: 'JS JH JD', maria: WEAK9 }) })
+  const step = t.state.history[t.state.history.length - 1]!
+  const split = step.pots.find((p) => p.outcome.kind === 'split')!
+  const outcome = split.outcome as { share: number; removed: number; tiedPlayers: string[] }
+  assert(outcome.share === 16 && outcome.removed === 1, JSON.stringify(split))
+  assert(t.state.removedChips === removedBefore + 1, 'неделимият остатък е изваден от играта')
+  assert(t.state.ledger.some((e) => e.type === 'split-remainder-removed' && e.amount === 1), 'записан в счетоводния дневник')
+  assert(total(t.state) + t.state.removedChips === t.state.totalChips, 'запазени всички чипове, вкл. изваденият')
+})
+
+check('E8h. §12: идемпотентност — повторена advance-allin-svara команда не разрешава банките втори път', () => {
+  const t = setupThreeSidePots()
+  const advance = { type: 'advance-allin-svara', commandId: 'adv-shared' } as const
+  const env = { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { georgi: H34, petar: H27, maria: H24 }) }
+  const first = applySvaraMatchCommand(t.state, advance, env)
+  assert(first.status === 'applied' && first.state.lockedPots.length === 0, 'resolved both pots')
+  const restored = JSON.parse(JSON.stringify(first.state)) as SvaraMatchState
+  assertSvaraMatchInvariants(restored)
+  const again = applySvaraMatchCommand(restored, advance, { createDeck: () => buildSvaraDeckForHands(SIDE_POT_CONTENDERS, { georgi: LOW, petar: H34, maria: H33 }) })
+  assert(again.status === 'duplicate' && JSON.stringify(again.state.stacks) === JSON.stringify(first.state.stacks), 'повторената команда игнорира новото тесте, без втора подялба')
+  assert(again.state.ledger.length === first.state.ledger.length, 'без допълнителни записи в дневника')
 })
 
 // ─── F. Свара с ол-ин ───────────────────────────────────────────────────────
@@ -1053,7 +1176,7 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
   let chipsCrossChecked = 0
   let svaras = 0
   let allins = 0
-  let refusals = 0
+  let multiPotAllins = 0
   let finished = 0
   let absences = 0
   let exits = 0
@@ -1068,7 +1191,7 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
       const s = t.state
       const round = s.round
       const alive = s.seats.filter((id) => s.status[id] === 'active' || s.status[id] === 'absent')
-      try {
+      {
         // Случайни събития: отсъствие/завръщане и (рядко) доброволен изход.
         const roll = pick(60)
         if (roll === 0 && alive.length > 0) {
@@ -1110,6 +1233,7 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
           if (candidates.length > 0 && pick(2) === 0) t.run({ type: 'svara-join', playerId: candidates[pick(candidates.length)]! }, env)
           else { t.run({ type: 'svara-start' }, env); svaras += 1 }
         } else if (round.kind === 'allin-svara') {
+          if (round.potIds.length >= 2) multiPotAllins += 1
           t.run({ type: 'advance-allin-svara' }, env)
           allins += 1
         } else {
@@ -1143,15 +1267,6 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
             if (crossCheckWithChipTable(t.state, record.roundId)) chipsCrossChecked += 1
           }
         }
-      } catch (error) {
-        // 'betting:rule-not-implemented' — вече неизползван (Решения №1/№2 го
-        // премахнаха), запазен тук за устойчивост; 'rule-not-implemented' —
-        // новата граница на Решение №3 (SVARA_MATCH_UNRESOLVED_RULES).
-        if (error instanceof SvaraMatchError && (error.code === 'betting:rule-not-implemented' || error.code === 'rule-not-implemented')) {
-          refusals += 1
-          break
-        }
-        throw error
       }
     }
     if (t.state.phase === 'finished') {
@@ -1160,8 +1275,15 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
       assert(total(t.state) + t.state.removedChips === t.state.totalChips, 'final conservation')
     }
   }
-  console.log(`      рундове ${rounds}, обикновени сверени ${ordinaryChecked} (от тях с 2Б.2А ${chipsCrossChecked}), Свари ${svaras}, ол-ин Свари ${allins}, отсъствия ${absences}, изходи ${exits}, завършени ${finished}, спрени на неуточнен подслучай ${refusals}`)
+  console.log(
+    `      рундове ${rounds}, обикновени сверени ${ordinaryChecked} (от тях с 2Б.2А ${chipsCrossChecked}), Свари ${svaras}, ол-ин Свари ${allins} (от тях с 2+ едновременни банки ${multiPotAllins}), отсъствия ${absences}, изходи ${exits}, завършени ${finished}`,
+  )
+  // Без изрична обработка на отказ по-горе: ако двигателят отново започне
+  // да отказва равенство в няколко странични банки, тестът ще хвърли
+  // необработена грешка тук и ще се провали — изрично потвърждение, че
+  // случаят вече не е блокиран (виж §12 за финалния неуреден случай).
   assert(ordinaryChecked > 1500 && chipsCrossChecked > 1000 && svaras > 50 && allins > 10 && finished > 150, 'coverage')
+  assert(multiPotAllins > 0, 'random play reaches the previously blocked multi-side-pot scenario at least once')
 })
 
 /**

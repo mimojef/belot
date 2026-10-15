@@ -8,14 +8,15 @@
 // НЕ е свързано с реалните жълтици, HTTP, WebSocket, SQLite или UI.
 // Наградата за победителя, таймерите, persistence и reconnect са бъдещи етапи.
 //
-// Седемте блокиращи случая от частичния 2Б.2Б (§11) и петте окончателни
+// Седемте блокиращи случая от частичния 2Б.2Б (§11), петте окончателни
 // решения от втората вълна (15.10.2026 — пълна забрана на непълен тъмен
 // ол-ин, нормален ол-ин след поглеждане, многослойна Свара с ол-ин при
-// обикновена Свара, пренесена банка в основната, две независими Свари) са
-// реализирани. Оставащият генуинно неуточнен подслучай (равенство в повече
-// от един нов спорен слой извън модела „основна + точно една странична“) се
-// отказва с 'rule-not-implemented' БЕЗ промяна на състоянието — виж
-// SVARA_MATCH_UNRESOLVED_RULES по-долу.
+// обикновена Свара, пренесена банка в основната, две независими Свари) и
+// финалното решение за няколко едновременно спорни странични банки (§12,
+// трета вълна) са реализирани. Към момента няма известен нерешен подслучай:
+// `advanceAllInSvara` разрешава произволен брой едновременно заключени
+// банки (основна + произволен брой странични) с едно общо раздаване и
+// независима оценка на всяка банка — виж коментарите там.
 
 import { SVARA_ORDERED_DECK, svaraCardCode, parseSvaraCardCode, SvaraInvalidInputError, type SvaraCard, type SvaraCardCode } from './svaraCards.js'
 import { createShuffledSvaraDeck, createSvaraDeckFromCards, dealSvaraHands } from './svaraDeal.js'
@@ -34,25 +35,6 @@ import {
   type SvaraBettingOptions,
   type SvaraBettingState,
 } from './svaraBetting.js'
-
-/**
- * Оставащ генуинно неуточнен подслучай (отказва се в settleOrdinary /
- * settleSvaraDeal по-долу, БЕЗ промяна на състоянието): равенство
- * едновременно в повече от един нов спорен слой при ол-ин, което не се
- * свежда до единствения потвърден модел „основна + точно една странична
- * банка, двете наравно“ (§7, Решение №1/№3). Пример: 4 играча на различни
- * нива на ол-ин, при което две отделни странични банки се равенстват
- * едновременно с частично различни правоимащи — спецификацията не казва
- * дали да се ползва едно общо раздаване за всички засегнати слоеве, или
- * да се третират като отделни продължения. Двете по-рано неуточнени
- * подслучая около тъмната фаза (ол-ин под минимума след поглеждане;
- * непълен тъмен ол-ин на самото начало) са окончателно решени от
- * собственика на 15.10.2026 (Решения №1 и №2) и вече НЕ са в този списък.
- */
-export const SVARA_MATCH_UNRESOLVED_RULES = {
-  multiLayerPartialTie:
-    'Равенство едновременно в повече от един нов спорен слой при ол-ин, извън модела „основна + точно една странична банка, двете наравно“.',
-} as const
 
 // ── Типове ──────────────────────────────────────────────────────────────────
 
@@ -237,7 +219,6 @@ export type SvaraMatchErrorCode =
   | 'no-round-available'
   | 'player-absent'
   | 'invariant-violation'
-  | 'rule-not-implemented'
   | `betting:${string}`
 
 export class SvaraMatchError extends Error {
@@ -665,9 +646,11 @@ function settleOrdinary(ctx: Ctx): void {
   for (const layer of layers) {
     if (layer.kind === 'contested' && layer.eligible.length >= 2 && topPlayers([...layer.eligible], points).length > 1) tied.add(layer.index)
   }
-  assertResolvableTieShape(contested.length, tied.size, round.roundId)
   // Една спорна банка → обикновена Свара; основна + странични (ол-ин) →
-  // Свара с ол-ин (§7), вкл. равенство само в странична банка (случай №1).
+  // Свара с ол-ин (§7), вкл. равенство само в странична банка (случай №1)
+  // и равенство в НЯКОЛКО странични банки едновременно (Решение, §12 —
+  // едно общо раздаване за всички засегнати банки, всяка разрешена
+  // отделно; виж advanceAllInSvara).
   const mode: 'none' | 'ordinary-lock' | 'allin' = tied.size === 0 ? 'none' : contested.length >= 2 ? 'allin' : 'ordinary-lock'
 
   const record: SvaraRoundRecord = baseRecord(round, round.dealerId, remaining, points)
@@ -722,25 +705,6 @@ function settleOrdinary(ctx: Ctx): void {
   if (allinPotIds.length > 0) {
     state.round = { kind: 'allin-svara', roundId: nextRoundId(ctx, 'allin'), potIds: allinPotIds, iteration: 0, sidesEvaluated: false }
   }
-}
-
-/**
- * Пази границата на вече потвърдения модел за Свара с ол-ин (§7, Решения
- * №1/№3): най-много ЕДНА равенствена двойка извън обикновена единична
- * банка — точно „основна + точно една странична“, когато ВСИЧКИ спорни
- * слоеве се равенстват заедно. Равенство в точно един слой (независимо
- * колко общо спорни слоя има) винаги е добре определено и не се засяга.
- * Всяка друга форма (напр. 3+ спорни слоя с равенство само в част от тях,
- * или равенство в 3+ слоя едновременно) е генуинно неуточнена — отказ без
- * промяна на състоянието (виж SVARA_MATCH_UNRESOLVED_RULES).
- */
-function assertResolvableTieShape(contestedCount: number, tiedCount: number, roundId: string): void {
-  if (tiedCount <= 1) return
-  if (contestedCount === 2 && tiedCount === 2) return
-  fail(
-    'rule-not-implemented',
-    `round ${roundId}: equality in ${tiedCount} of ${contestedCount} contested layers beyond the single confirmed "main + one side" shape is not specified yet (§10/§11, SVARA_MATCH_UNRESOLVED_RULES.multiLayerPartialTie)`,
-  )
 }
 
 function baseRecord(round: OrdinaryRound | SvaraDealRound, dealerId: string | null, shown: string[], points: ShowdownPoints): SvaraRoundRecord {
@@ -874,18 +838,16 @@ function settleSvaraDeal(ctx: Ctx): void {
   const points = remaining.length >= 2 ? pointsFor(round.hands, remaining) : {}
   const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded })
   const contested = layers.filter((layer) => layer.kind === 'contested')
-  const tied = new Set<number>()
-  for (const layer of layers) {
-    if (layer.kind === 'contested' && layer.eligible.length >= 2 && topPlayers([...layer.eligible], points).length > 1) tied.add(layer.index)
-  }
-  assertResolvableTieShape(contested.length, tied.size, round.roundId)
   // Решение №3 (§6.13, случай №2): новите залози образуват собствени
   // основна/странични банки, отделно от старата заключена банка, и се
   // оценяват със същите карти. Равенство в тях при няколко слоя (нов
-  // ол-ин) → Свара с ол-ин само за тези банки (§7, случай №1); при един
-  // слой → нова обикновена Свара. Старата заключена банка НЕ се смесва с
-  // новите залози (отделен блок по-долу) — при едновременно равенство в
-  // двете се получават две независими Свари (Решение №5, §6.14/§7).
+  // ол-ин) → Свара с ол-ин само за тези банки (§7, случай №1), включително
+  // равенство в НЯКОЛКО странични банки едновременно (Решение, §12 — едно
+  // общо раздаване, всяка банка разрешена отделно, виж advanceAllInSvara);
+  // при равенство само в един слой → нова обикновена Свара. Старата
+  // заключена банка НЕ се смесва с новите залози (отделен блок по-долу) —
+  // при едновременно равенство в двете се получават две независими Свари
+  // (Решение №5, §6.14/§7).
   const newBetsAllIn = contested.length >= 2
   const allinPotIds: string[] = []
 
@@ -953,6 +915,22 @@ function carryLocked(ctx: Ctx, pot: SvaraMatchLockedPot, roundId: string | null)
 
 // ── Свара с ол-ин (§7) ──────────────────────────────────────────────────────
 
+/**
+ * Поддържа произволен брой едновременно заключени банки от едно раздаване
+ * с ол-ин — не само „основна + точно една странична“ (§12, финално
+ * решение за няколко едновременно спорни странични банки): всички банки в
+ * `allin.potIds` (независимо дали е сред тях заключена основна банка) делят
+ * ЕДНО общо ново раздаване за обединените им правоимащи (contenders);
+ * всяка банка пази собствената си сума и списък правоимащи и се оценява
+ * ОТДЕЛНО (topPlayers само сред собствените си eligible), но със СЪЩИТЕ
+ * нови карти. Най-много ЕДНА банка е `isMain` (основната — единствената
+ * с index === contested[0].index при заключването; структурно не могат да
+ * съществуват две); само тя получава ново раздаване при повторно
+ * равенство (§7.4). Всяка друга (странична) банка — независимо колко общо
+ * има — се разделя поравно при равенство (първо или повторно), без ново
+ * раздаване за нея (§7.5–7.6); вече разрешени банки не се преразглеждат
+ * (премахват се от `allin.potIds` веднага след awardLocked/split).
+ */
 function advanceAllInSvara(ctx: Ctx): void {
   requirePhase(ctx, 'in-progress')
   const { state } = ctx
