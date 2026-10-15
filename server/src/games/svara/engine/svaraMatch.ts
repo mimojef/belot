@@ -8,8 +8,9 @@
 // НЕ е свързано с реалните жълтици, HTTP, WebSocket, SQLite или UI.
 // Наградата за победителя, таймерите, persistence и reconnect са бъдещи етапи.
 //
-// Неуточнени по спецификацията случаи (раздел 10 и сверката) се отказват
-// с код 'rule-not-implemented' БЕЗ промяна на състоянието — виж
+// Седемте блокиращи случая от частичния 2Б.2Б са решени от собственика
+// (спецификацията, §11) и са реализирани. Оставащите неуточнени подслучаи
+// се отказват с 'rule-not-implemented' БЕЗ промяна на състоянието — виж
 // SVARA_MATCH_UNRESOLVED_RULES по-долу.
 
 import { SVARA_ORDERED_DECK, svaraCardCode, parseSvaraCardCode, SvaraInvalidInputError, type SvaraCard, type SvaraCardCode } from './svaraCards.js'
@@ -30,15 +31,14 @@ import {
   type SvaraBettingState,
 } from './svaraBetting.js'
 
-/** Изрично неуточнени случаи; командите, които ги достигат, се отказват. */
+/**
+ * Оставащи неуточнени подслучаи (отказват се в svaraBetting.ts):
+ *   • ол-ин под минимума на тъмната фаза от играч, който вече е погледнал;
+ *   • непълен ол-ин „на тъмно“ от първия играч, който би започнал поредицата.
+ */
 export const SVARA_MATCH_UNRESOLVED_RULES = {
-  tieOnlyInSidePot: 'Равенство само в странична банка, докато основната е разрешена (§7.8, §10).',
-  svaraMultiLayerTie: 'Равенство в обикновена Свара с допълнителни залози и няколко слоя от нов ол-ин (§10).',
-  noVoluntaryBetsSeveralRemaining: 'Обикновено раздаване без доброволни залози, в което остават поне двама неотказали (напр. всички са ол-ин от Входа) — правилото за дилъра срещу сравняване.',
-  blindAllInBelowMinimum: 'Ол-ин под минимума по време на тъмната фаза.',
-  absentDuringSvaraDeal: 'Отсъствие на участник по време на раздаване за обикновена Свара (правата се пазят, но не може да действа).',
-  orphanWithoutOrdinaryDeal: 'Пренесена банка без правоимащ, когато няма следващо обикновено раздаване (§10).',
-  creatorLeavesLobby: 'Създателят напуска масата преди старта.',
+  blindShortAllInAfterLooking: 'Ол-ин под минимума на тъмната фаза от играч, който е погледнал картите си.',
+  blindShortAllInStartingSequence: 'Непълен ол-ин на тъмно (под 2 × Вход) от първия играч, който би започнал тъмната поредица.',
 } as const
 
 // ── Типове ──────────────────────────────────────────────────────────────────
@@ -170,7 +170,8 @@ export type SvaraMatchState = {
   config: SvaraMatchConfig
   startingChips: number
   entryChips: number
-  phase: 'lobby' | 'in-progress' | 'finished'
+  /** 'closed' — масата е закрита преди старта (създателят напусна, случай №7). */
+  phase: 'lobby' | 'in-progress' | 'finished' | 'closed'
   /** Места по часовниковата стрелка (ред на присъединяване). */
   seats: string[]
   status: Record<string, SvaraSeatStatus>
@@ -322,8 +323,9 @@ export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; 
  */
 export function assertSvaraMatchInvariants(state: SvaraMatchState): void {
   const violation = (message: string) => fail('invariant-violation', message)
-  if (state.phase === 'lobby') {
+  if (state.phase === 'lobby' || state.phase === 'closed') {
     if (state.ledger.length !== 0 || state.totalChips !== 0) violation('lobby must have no chips')
+    if (state.phase === 'closed' && state.seats.length !== 0) violation('closed table must release all seats')
     return
   }
   if (state.totalChips !== state.startingChips * state.seats.length) violation('totalChips')
@@ -487,7 +489,15 @@ function joinSeat(ctx: Ctx, playerId: string): void {
 function leaveSeat(ctx: Ctx, playerId: string): void {
   requirePhase(ctx, 'lobby')
   requireSeated(ctx, playerId)
-  if (playerId === ctx.state.config.creatorId) fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.creatorLeavesLobby)
+  if (playerId === ctx.state.config.creatorId) {
+    // Случай №7: масата се закрива, всички чакащи се освобождават; без
+    // прехвърляне на собствеността. Прекъсване на връзката не е напускане —
+    // за него няма команда.
+    ctx.state.phase = 'closed'
+    ctx.state.seats = []
+    ctx.state.status = {}
+    return
+  }
   ctx.state.seats = ctx.state.seats.filter((id) => id !== playerId)
   delete ctx.state.status[playerId]
 }
@@ -532,10 +542,7 @@ function startNextRound(ctx: Ctx): void {
     return
   }
   const participants = state.seats.filter((id) => (state.status[id] === 'active' || state.status[id] === 'absent') && state.stacks[id]! > 0)
-  if (participants.length < 2) {
-    if (state.carried.length > 0) fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.orphanWithoutOrdinaryDeal)
-    fail('no-round-available', 'fewer than two players with chips and no startable Svara')
-  }
+  if (participants.length < 2) fail('no-round-available', 'fewer than two players with chips and no startable Svara')
   startOrdinaryDeal(ctx, participants)
 }
 
@@ -632,10 +639,9 @@ function settleOrdinary(ctx: Ctx): void {
   const round = state.round as OrdinaryRound
   const { betting } = round
   const remaining = round.participants.filter((id) => !betting.folded.includes(id))
-  const bothNoBet = round.isFourthHeadsUp && betting.allowNoBet && betting.noBet.length === 2
-  if (remaining.length >= 2 && !betting.anyVoluntaryBet && !bothNoBet) {
-    fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.noVoluntaryBetsSeveralRemaining)
-  }
+  // Случай №3: ако поне двама неотказали не са могли да направят доброволен
+  // залог (ол-ин от Входа), картите се сравняват автоматично — без печалба на
+  // дилъра. Дилърът печели само когато е единственият останал (§4.7).
   const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded })
   if (round.deadMoney > 0 && layers[0]) {
     layers[0] = { ...layers[0], amount: layers[0].amount + round.deadMoney }
@@ -646,16 +652,9 @@ function settleOrdinary(ctx: Ctx): void {
   for (const layer of layers) {
     if (layer.kind === 'contested' && layer.eligible.length >= 2 && topPlayers([...layer.eligible], points).length > 1) tied.add(layer.index)
   }
-  let mode: 'none' | 'ordinary-lock' | 'allin' = 'none'
-  if (tied.size > 0) {
-    if (contested.length >= 2) {
-      // §7: специалната Свара обхваща основната банка (+ равните странични).
-      if (!tied.has(contested[0]!.index)) fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.tieOnlyInSidePot)
-      mode = 'allin'
-    } else {
-      mode = 'ordinary-lock'
-    }
-  }
+  // Една спорна банка → обикновена Свара; основна + странични (ол-ин) →
+  // Свара с ол-ин (§7), вкл. равенство само в странична банка (случай №1).
+  const mode: 'none' | 'ordinary-lock' | 'allin' = tied.size === 0 ? 'none' : contested.length >= 2 ? 'allin' : 'ordinary-lock'
 
   const record: SvaraRoundRecord = baseRecord(round, round.dealerId, remaining, points)
   const allinPotIds: string[] = []
@@ -768,6 +767,15 @@ function finishRound(ctx: Ctx, record: SvaraRoundRecord | null): void {
     }
   }
   const alive = alivePlayers(state)
+  if (alive.length === 1 && state.lockedPots.length === 0 && state.carried.length > 0) {
+    // Случай №6: последният играч получава всички пренесени банки преди края.
+    const winner = alive[0]!
+    for (const carry of state.carried) {
+      state.stacks[winner] = state.stacks[winner]! + carry.amount
+      pushLedger(ctx, { type: 'pot-award', from: `carried:${carry.carryId}`, to: `stack:${winner}`, amount: carry.amount, roundId: null, potId: carry.fromPotId, playerId: winner })
+    }
+    state.carried = []
+  }
   if (alive.length <= 1 && state.lockedPots.length === 0 && state.carried.length === 0) {
     state.phase = 'finished'
     state.winnerId = alive[0] ?? null
@@ -833,9 +841,12 @@ function settleSvaraDeal(ctx: Ctx): void {
   const points = remaining.length >= 2 ? pointsFor(round.hands, remaining) : {}
   const layers = buildSvaraPotLayers({ participants: round.participants, contributions: round.contributions, folded: betting.folded })
   const contested = layers.filter((layer) => layer.kind === 'contested')
-  const newBetTie = layers.some((layer) => layer.kind === 'contested' && layer.eligible.length >= 2 && topPlayers([...layer.eligible], points).length > 1)
-  // §10: равенство при няколко слоя нови залози (нов ол-ин) — неуточнено.
-  if (newBetTie && contested.length >= 2) fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.svaraMultiLayerTie)
+  // Случай №2: новите залози образуват собствени основна/странични банки,
+  // отделно от старата заключена банка, и се оценяват със същите карти.
+  // Равенство в тях при няколко слоя (нов ол-ин) → Свара с ол-ин само за тези
+  // банки (§7, случай №1); при един слой → нова обикновена Свара.
+  const newBetsAllIn = contested.length >= 2
+  const allinPotIds: string[] = []
 
   const record = baseRecord(round, round.dealerId, remaining, points)
   // Заключената банка: правоимащи са неотказалите участници (§6.7).
@@ -873,12 +884,17 @@ function settleSvaraDeal(ctx: Ctx): void {
         record.pots.push({ ...base, outcome: { kind: 'awarded', winner: best[0]!, byShowdown: true } })
       } else {
         const lockedPotId = `${potId}:locked`
-        lockPot(ctx, round.roundId, potId, lockedPotId, layer.amount, { kind: 'ordinary', eligible: best, originDealerId: round.dealerId, isMain: false })
-        record.pots.push({ ...base, outcome: { kind: 'locked', lockedPotId, tiedPlayers: best, lockKind: 'ordinary' } })
+        const lockKind = newBetsAllIn ? 'allin' : 'ordinary'
+        lockPot(ctx, round.roundId, potId, lockedPotId, layer.amount, { kind: lockKind, eligible: best, originDealerId: round.dealerId, isMain: newBetsAllIn && layer.index === contested[0]!.index })
+        if (lockKind === 'allin') allinPotIds.push(lockedPotId)
+        record.pots.push({ ...base, outcome: { kind: 'locked', lockedPotId, tiedPlayers: best, lockKind } })
       }
     }
   }
   finishRound(ctx, record)
+  if (allinPotIds.length > 0) {
+    state.round = { kind: 'allin-svara', roundId: nextRoundId(ctx, 'allin'), potIds: allinPotIds, iteration: 0, sidesEvaluated: false }
+  }
 }
 
 function awardLocked(ctx: Ctx, pot: SvaraMatchLockedPot, playerId: string, roundId: string | null): void {
@@ -970,9 +986,8 @@ function setAbsent(ctx: Ctx, playerId: string, absent: boolean): void {
     return
   }
   const round = state.round
-  if (round?.kind === 'svara' && round.participants.includes(playerId) && !round.betting.folded.includes(playerId)) {
-    fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.absentDuringSvaraDeal)
-  }
+  // Случай №5: отсъствието в Свара не е отказ — правата се пазят, а ходът
+  // изчаква завръщането (act изисква активен играч).
   state.status[playerId] = 'absent'
   // Отсъстващият автоматично отказва обикновените раздавания.
   if (round?.kind === 'ordinary' && round.participants.includes(playerId)) {
@@ -1037,10 +1052,17 @@ function absenceExpired(ctx: Ctx, playerId: string): void {
   if (state.status[playerId] !== 'absent') fail('not-allowed', `${playerId} is not absent`)
   // §8: последният шанс важи, когато на масата остане само един активен играч.
   if (state.seats.filter((id) => state.status[id] === 'active').length !== 1) fail('not-allowed', 'more than one active player remains')
+  // Случай №5: след последния шанс отсъстващият губи правата си; банките
+  // се разпределят според останалите правоимащи.
   const round = state.round
-  if (round && round.kind !== 'ordinary' && round.kind !== 'svara-joining') fail('rule-not-implemented', SVARA_MATCH_UNRESOLVED_RULES.absentDuringSvaraDeal)
+  let svaraToSettle = false
+  if (round?.kind === 'svara' && round.participants.includes(playerId) && !round.betting.folded.includes(playerId)) {
+    round.betting = forceSvaraFold(round.betting, playerId)
+    svaraToSettle = round.betting.complete
+  }
   dropLockedRights(ctx, playerId)
-  if (!state.round) finishRound(ctx, null)
+  if (svaraToSettle) settleSvaraDeal(ctx)
+  else if (!state.round) finishRound(ctx, null)
 }
 
 // ── Изглед за играч и опции ─────────────────────────────────────────────────

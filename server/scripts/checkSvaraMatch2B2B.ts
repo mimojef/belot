@@ -26,6 +26,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   applySvaraBettingAction,
+  applySvaraChipCommand,
   applySvaraMatchCommand,
   assertSvaraMatchInvariants,
   buildSvaraDeckForHands,
@@ -33,6 +34,7 @@ import {
   createSeededSvaraRandomSourceForTests,
   createShuffledSvaraDeck,
   createSvaraBetting,
+  createSvaraChipTable,
   createSvaraMatch,
   createSvaraMatchPlayerView,
   describeSvaraMatchOptions,
@@ -200,7 +202,6 @@ check('A2. автоматичен старт при запълване; ръче
   expectError(() => manual.run({ type: 'start-match', playerId: 'a' }), 'not-allowed', 'blocked after leave')
   manual.run({ type: 'join-seat', playerId: 'd' })
   expectError(() => manual.run({ type: 'start-match', playerId: 'b' }), 'not-allowed', 'only creator')
-  expectError(() => manual.run({ type: 'leave-seat', playerId: 'a' }), 'rule-not-implemented', 'creator leave')
   manual.run({ type: 'start-match', playerId: 'a' }, { random: fixedDealer(2) })
   assert(manual.state.phase === 'in-progress' && manual.state.firstDealerId === 'd' && JSON.stringify(manual.state.seats) === '["a","b","d"]', 'manual started')
 })
@@ -323,12 +324,37 @@ check('B6. тъмно не може да започне друг освен пъ
   expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'second cannot start')
 })
 
-check('B7. неуточнено: ол-ин под минимума на тъмната фаза → изричен отказ', () => {
+check('B7. случай №4: непълен ол-ин на тъмно — позволен, не е пълно повишаване, тъмната фаза продължава, минимумът остава 40', () => {
+  const b = bet({ p1: 500, p2: 30, p3: 500, d: 500 })
+  b.go('p1', { kind: 'blind-bet', total: 20 })
+  b.go('p2', { kind: 'all-in' }) // 30 < 40
+  assert(b.s.voluntary.p2 === 30 && b.s.allIn.includes('p2') && b.s.currentBet === 30, 'accepted as all-in')
+  assert(b.s.blind.status === 'active' && b.s.blind.lastBlindTotal === 20, 'blind phase continues, base stays 20')
+  expectError(() => applySvaraBettingAction(b.s, 'p3', { kind: 'blind-bet', total: 39 }, 500), 'below-minimum', 'next full blind is 40')
+  b.go('p3', { kind: 'blind-bet', total: 40 }) // 40, не 60
+  assert(b.s.blind.lastBlindTotal === 40 && b.s.raiseLocked.length === 0, 'full blind after the short all-in')
+})
+
+check('B7b. случай №4: без неправомерно повторно право — вече действалият може само да доплати или да се откаже', () => {
   const b = bet({ p1: 500, p2: 30, d: 500 })
   b.go('p1', { kind: 'blind-bet', total: 20 })
-  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'all-in' }, 30), 'rule-not-implemented', 'all-in 30 < 40')
+  b.go('p2', { kind: 'all-in' }) // непълно
+  b.go('d', { kind: 'fold' })
+  assert(b.s.toAct === 'p1' && b.s.raiseLocked.includes('p1'), 'p1 locked')
+  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 40 }, b.stacks.p1!), 'raise-not-allowed', 'no new raise right')
+  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'all-in' }, b.stacks.p1!), 'raise-not-allowed', 'no all-in raise')
+  b.go('p1', { kind: 'call' }) // доплаща 10
+  assert(b.s.complete && b.s.voluntary.p1 === 30 && b.s.blind.status === 'active', 'called, still blind')
+})
+
+check('B7c. оставащи неуточнени подслучаи → изричен отказ (погледнал играч под минимума; непълен тъмен ол-ин на първия)', () => {
+  const b = bet({ p1: 500, p2: 30, d: 500 })
+  b.go('p1', { kind: 'blind-bet', total: 20 })
+  b.s = lookAtSvaraCards(b.s, 'p2')
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'all-in' }, 30), 'rule-not-implemented', 'looked short all-in')
   const c = bet({ p1: 15, p2: 500, d: 500 })
-  expectError(() => applySvaraBettingAction(c.s, 'p1', { kind: 'all-in' }, 15), 'rule-not-implemented', 'blind all-in < 2E')
+  expectError(() => applySvaraBettingAction(c.s, 'p1', { kind: 'all-in' }, 15), 'rule-not-implemented', 'first blind all-in < 2E')
+  expectError(() => applySvaraBettingAction(c.s, 'p1', { kind: 'blind-bet', total: 15 }, 15), 'rule-not-implemented', 'first blind short')
 })
 
 // ─── C. Дилър, ред, специалното 4-то раздаване ──────────────────────────────
@@ -444,18 +470,40 @@ check('D2. непокрит залог се връща (отделен запи�
   assert(entries.some((e) => e.type === 'uncalled-return' && e.amount === 60 && e.playerId === 'a'), 'ledger uncalled')
 })
 
-check('D3. неуточнено: равенство само в страничната банка → отказ без промяна', () => {
+check('D3. случай №1: основната има победител, страничната е равна → нови карти само за равните, без Вход/наддаване/външни; ново равенство → подялба', () => {
+  const t = shapedThree() // ред b, c, a
+  t.deal({ b: H34, c: TIE1, a: TIE2 })
+  t.seen('b', { kind: 'all-in' })
+  t.seen('c', { kind: 'all-in' })
+  t.seen('a', { kind: 'call' })
+  const record = t.state.history[t.state.history.length - 1]!
+  assert(record.pots[0]!.outcome.kind === 'awarded' && (record.pots[0]!.outcome as { winner: string }).winner === 'b' && t.state.stacks.b === 300, 'main paid to b')
+  const side = t.state.lockedPots[0]!
+  assert(t.state.lockedPots.length === 1 && side.kind === 'allin' && !side.isMain && side.amount === 180 && JSON.stringify([...side.eligible].sort()) === '["a","c"]', JSON.stringify(t.state.lockedPots))
+  assert((t.state.round as { kind: string }).kind === 'allin-svara', 'special continuation')
+  expectError(() => t.run({ type: 'svara-join', playerId: 'b' }), 'not-allowed', 'no outside players')
+  expectError(() => t.run({ type: 'act', playerId: 'a', action: { kind: 'bet', total: 10 } }), 'not-allowed', 'no betting')
+  const entriesBefore = t.state.ledger.filter((e) => e.type === 'entry').length
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(['a', 'c'], { a: TIE1, c: TIE2 }) })
+  const step = t.state.history[t.state.history.length - 1]!
+  assert(JSON.stringify(Object.keys(step.shownHands).sort()) === '["a","c"]', 'only the tied get new cards')
+  assert(t.state.ledger.filter((e) => e.type === 'entry').length === entriesBefore, 'no new entry')
+  const split = step.pots[0]!.outcome as { kind: string; share: number; removed: number }
+  assert(split.kind === 'split' && split.share === 90 && split.removed === 0, JSON.stringify(step.pots))
+  assert(t.stacks() === JSON.stringify({ a: 210, b: 300, c: 90 }) && t.state.round === null, t.stacks())
+})
+
+check('D3b. случай №1: странична равна, на новото раздаване има победител → получава цялата странична банка', () => {
   const t = shapedThree()
   t.deal({ b: H34, c: TIE1, a: TIE2 })
   t.seen('b', { kind: 'all-in' })
   t.seen('c', { kind: 'all-in' })
-  t.look('a')
-  const snapshot = JSON.stringify(t.state)
-  expectError(() => t.run({ type: 'act', playerId: 'a', action: { kind: 'call' } }), 'rule-not-implemented', 'side-only tie')
-  assert(JSON.stringify(t.state) === snapshot, 'state unchanged')
+  t.seen('a', { kind: 'call' })
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(['a', 'c'], { a: LOW, c: H27 }) })
+  assert(t.stacks() === JSON.stringify({ a: 120, b: 300, c: 180 }) && t.state.removedChips === 0, t.stacks())
 })
 
-check('D4. неуточнено: обикновено раздаване без доброволни залози с ≥ 2 неотказали (ол-ин от Входа) → изричен отказ', () => {
+check('D4. случай №3: всички ол-ин от Входа → автоматично сравняване (без печалба на дилъра); отсъстващият не печели', () => {
   // Дилър c; ред a, b, c. a и b равни, c по-слаб: всички остават с по 5 чипа.
   const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
   t.deal({ a: TIE1, b: TIE2, c: LOW })
@@ -464,10 +512,25 @@ check('D4. неуточнено: обикновено раздаване без 
   t.seen('c', { kind: 'call' })
   assert(t.stacks() === JSON.stringify({ a: 5, b: 5, c: 5 }) && t.state.lockedPots[0]!.amount === 585, t.stacks())
   t.run({ type: 'set-absent', playerId: 'b', absent: true }) // Сварата изчаква
-  const snapshot = JSON.stringify(t.state)
-  // Обикновено раздаване: всички ол-ин от Входа, b отсъства → a и c остават без доброволни залози.
-  expectError(() => t.run({ type: 'start-next-round' }), 'rule-not-implemented', 'dealer rule vs comparison')
-  assert(JSON.stringify(t.state) === snapshot, 'state unchanged')
+  // Обикновено раздаване: дилър a; ред b, c, a. Всички плащат по 5 (ол-ин); b отсъства → отказва.
+  t.run({ type: 'start-next-round' }, { createDeck: () => buildSvaraDeckForHands(['b', 'c', 'a'], { b: H33, c: H34, a: LOW }) })
+  assert(t.state.round === null, 'settled immediately (nobody can act)')
+  const record = t.state.history[t.state.history.length - 1]!
+  assert(record.dealerId === 'a' && !record.anyVoluntaryBet && record.folded.includes('b'), JSON.stringify(record))
+  const pot = record.pots[0]!
+  assert(pot.amount === 15 && (pot.outcome as { winner: string; byShowdown: boolean }).winner === 'c' && (pot.outcome as { byShowdown: boolean }).byShowdown, 'c wins by comparison, not dealer a; absent b (33) cannot win')
+  assert(t.stacks() === JSON.stringify({ a: 0, b: 0, c: 15 }) && t.state.status.a === 'active' && t.state.status.b === 'absent', 'a, b keep locked rights')
+})
+
+check('D4b. случай №3: равенство при автоматичното сравняване → Свара', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({ a: TIE1, b: TIE2, c: LOW })
+  t.seen('a', { kind: 'bet', total: 185 })
+  t.seen('b', { kind: 'call' })
+  t.seen('c', { kind: 'call' })
+  t.run({ type: 'set-absent', playerId: 'b', absent: true })
+  t.run({ type: 'start-next-round' }, { createDeck: () => buildSvaraDeckForHands(['b', 'c', 'a'], { b: H34, c: TIE3, a: TIE1 }) })
+  assert(t.state.lockedPots.length === 2 && JSON.stringify([...t.state.lockedPots[1]!.eligible].sort()) === '["a","c"]' && t.state.lockedPots[1]!.amount === 15, JSON.stringify(t.state.lockedPots))
 })
 
 check('D5. ако само един може да действа (другите са ол-ин), той трябва да заложи или да се откаже (без „Пас“)', () => {
@@ -597,11 +660,85 @@ check('E6. Свара изчаква отсъстващ правоимащ; дв
   assert((t.state.round as { potId: string }).potId === lock1!.potId, 'lock1 now')
 })
 
-check('E7. неуточнено: отсъствие на участник по време на раздаване за Свара → изричен отказ', () => {
+check('E7. случай №5: отсъствие по време на Свара не е отказ — правата се пазят, ходът изчаква завръщането', () => {
   const t = tiedThree()
   t.run({ type: 'start-next-round' })
   t.run({ type: 'svara-start' }, { createDeck: () => buildSvaraDeckForHands(['b', 'a'], { b: H34, a: LOW }) })
-  expectError(() => t.run({ type: 'set-absent', playerId: 'a', absent: true }), 'rule-not-implemented', 'absent in Svara deal')
+  t.seen('b', { kind: 'bet', total: 10 })
+  t.run({ type: 'set-absent', playerId: 'a', absent: true })
+  const round = t.state.round as { kind: string; betting: SvaraBettingState }
+  assert(round.kind === 'svara' && round.betting.toAct === 'a' && !round.betting.folded.includes('a'), 'not folded, waiting for a')
+  expectError(() => t.run({ type: 'act', playerId: 'a', action: { kind: 'call' } }), 'player-absent', 'absent cannot act')
+  expectError(() => t.run({ type: 'act', playerId: 'b', action: { kind: 'bet', total: 30 } }), 'betting:not-your-turn', 'others wait')
+  assert(t.state.lockedPots[0]!.eligible.includes('a'), 'rights kept')
+  t.run({ type: 'set-absent', playerId: 'a', absent: false })
+  t.seen('a', { kind: 'call' })
+  // b: 170 − 10 + 70 + 20 = 250; a: 170 − 10 = 160.
+  assert(t.stacks() === JSON.stringify({ a: 160, b: 250, c: 190 }), t.stacks())
+})
+
+check('E7b. случай №5: последен шанс — само при един активен; после правата отпадат и банките се разпределят', () => {
+  const t = tiedThree()
+  t.run({ type: 'start-next-round' })
+  t.run({ type: 'svara-start' }, { createDeck: () => buildSvaraDeckForHands(['b', 'a'], { b: LOW, a: H34 }) })
+  t.seen('b', { kind: 'bet', total: 10 })
+  t.run({ type: 'set-absent', playerId: 'a', absent: true })
+  expectError(() => t.run({ type: 'absence-expired', playerId: 'a' }), 'not-allowed', 'b and c are active')
+  t.run({ type: 'set-absent', playerId: 'c', absent: true })
+  t.run({ type: 'absence-expired', playerId: 'a' })
+  // a губи правата → b единствен: заключената банка 70 + непокритият му залог 10 обратно.
+  assert(t.state.round === null && t.state.lockedPots.length === 0 && t.stacks() === JSON.stringify({ a: 170, b: 240, c: 190 }), t.stacks())
+  const pots = t.state.history[t.state.history.length - 1]!.pots
+  assert(pots.some((p) => p.outcome.kind === 'uncalled-return' && p.amount === 10), 'uncalled returned, not won')
+})
+
+check('E8. случай №2: ол-ин в обикновена Свара — стара банка 150 отделно; нови залози 10/30/30 → основна 30 и странична 40', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 }) // ред a, b, c
+  t.deal({ a: LOW, b: H34 })
+  t.seen('a', { kind: 'bet', total: 130 })
+  t.seen('b', { kind: 'call' })
+  t.seen('c', { kind: 'fold' })
+  assert(t.stacks() === JSON.stringify({ a: 60, b: 350, c: 190 }), t.stacks())
+  t.deal({ b: TIE1, c: TIE2, a: TIE3 }) // дилър a; ред b, c, a
+  t.seen('b', { kind: 'bet', total: 40 })
+  t.seen('c', { kind: 'call' })
+  t.seen('a', { kind: 'call' })
+  assert(t.state.lockedPots[0]!.amount === 150 && t.stacks() === JSON.stringify({ a: 10, b: 300, c: 140 }), t.stacks())
+  t.run({ type: 'start-next-round' })
+  // Дилър на Сварата: следващият правоимащ след a → b; ред c, a, b.
+  t.run({ type: 'svara-start' }, { createDeck: () => buildSvaraDeckForHands(['c', 'a', 'b'], { c: H27, a: H34, b: LOW }) })
+  t.seen('c', { kind: 'bet', total: 30 })
+  t.seen('a', { kind: 'all-in' }) // 10
+  t.seen('b', { kind: 'call' })
+  const pots = t.state.history[t.state.history.length - 1]!.pots
+  const summary = pots.map((p) => `${p.source}:${p.amount}:${[...p.eligible].sort().join('')}:${(p.outcome as { winner?: string }).winner ?? p.outcome.kind}`)
+  assert(JSON.stringify(summary) === JSON.stringify(['locked:150:abc:a', 'round:30:abc:a', 'round:40:bc:c']), JSON.stringify(summary))
+  assert(t.stacks() === JSON.stringify({ a: 180, b: 270, c: 150 }), t.stacks())
+})
+
+check('E8b. случай №2: равенство в новите залози при нов ол-ин → Свара с ол-ин само за тях; старата банка остава обикновена', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({ a: LOW, b: H34 })
+  t.seen('a', { kind: 'bet', total: 130 })
+  t.seen('b', { kind: 'call' })
+  t.seen('c', { kind: 'fold' })
+  t.deal({ b: TIE1, c: TIE2, a: TIE3 })
+  t.seen('b', { kind: 'bet', total: 40 })
+  t.seen('c', { kind: 'call' })
+  t.seen('a', { kind: 'call' })
+  t.run({ type: 'start-next-round' })
+  t.run({ type: 'svara-start' }, { createDeck: () => buildSvaraDeckForHands(['c', 'a', 'b'], { c: TIE1, a: TIE2, b: TIE3 }) })
+  t.seen('c', { kind: 'bet', total: 30 })
+  t.seen('a', { kind: 'all-in' })
+  t.seen('b', { kind: 'call' })
+  const kinds = t.state.lockedPots.map((p) => `${p.kind}:${p.amount}:${p.isMain}:${[...p.eligible].sort().join('')}`)
+  assert(JSON.stringify(kinds) === JSON.stringify(['ordinary:150:false:abc', 'allin:30:true:abc', 'allin:40:false:bc']), JSON.stringify(kinds))
+  assert((t.state.round as { kind: string }).kind === 'allin-svara', 'all-in continuation first')
+  t.run({ type: 'advance-allin-svara' }, { createDeck: () => buildSvaraDeckForHands(['a', 'b', 'c'], { a: H34, b: TIE1, c: TIE2 }) })
+  // Основна нова 30 → a; странична нова 40: b и c равни → 20 + 20.
+  assert(t.stacks() === JSON.stringify({ a: 30, b: 290, c: 130 }) && t.state.lockedPots.length === 1 && t.state.lockedPots[0]!.kind === 'ordinary', t.stacks())
+  t.run({ type: 'start-next-round' })
+  assert((t.state.round as { kind: string; fee: number }).kind === 'svara-joining' && (t.state.round as { fee: number }).fee === 50, 'old pot continues as an ordinary Svara')
 })
 
 // ─── F. Свара с ол-ин ───────────────────────────────────────────────────────
@@ -750,6 +887,40 @@ check('G6. последен шанс (15 сек — модел): само при
   assert(t.state.lockedPots.length === 0 && t.state.stacks.b === 240, `b wins the locked pot: ${t.stacks()}`)
 })
 
+check('G7. случай №6: последният останал играч получава пренесените банки преди края; точен запис, без двойно изплащане', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({ a: H34, b: LOW, c: H27 })
+  t.seen('a', { kind: 'bet', total: 30 })
+  t.run({ type: 'exit', playerId: 'a' })
+  t.seen('b', { kind: 'fold' })
+  assert(t.state.carried.length === 1 && t.state.carried[0]!.amount === 30 && t.stacks() === JSON.stringify({ a: 0, b: 190, c: 220 }), t.stacks())
+  t.run({ type: 'exit', playerId: 'b' })
+  assert(t.state.phase === 'finished' && t.state.winnerId === 'c' && t.state.carried.length === 0 && t.state.stacks.c === 250, `${t.state.phase} ${t.stacks()}`)
+  const awards = t.state.ledger.filter((e) => e.from.startsWith('carried:'))
+  const carryIn = t.state.ledger.filter((e) => e.to.startsWith('carried:'))
+  assert(awards.length === 1 && awards[0]!.type === 'pot-award' && awards[0]!.amount === 30 && awards[0]!.playerId === 'c', JSON.stringify(awards))
+  assert(carryIn.reduce((a, e) => a + e.amount, 0) === awards.reduce((a, e) => a + e.amount, 0), 'carried in = carried out')
+  assert(total(t.state) + t.state.removedChips === t.state.totalChips && t.state.removedChips === 350, 'conservation')
+  expectError(() => t.run({ type: 'start-next-round' }), 'wrong-phase', 'finished')
+})
+
+check('G8. случай №7: създателят напуска преди старта → масата се закрива, всички се освобождават, никакви чипове', () => {
+  const t = new Table(createSvaraMatch({ tableId: 't', capacity: 3, entryFee: 1000, startMode: 'manual', creatorId: 'a' }))
+  t.run({ type: 'join-seat', playerId: 'b' })
+  t.run({ type: 'join-seat', playerId: 'c' })
+  t.run({ type: 'leave-seat', playerId: 'b' }) // обикновен играч — масата остава
+  assert(t.state.phase === 'lobby' && JSON.stringify(t.state.seats) === '["a","c"]', 'regular leave')
+  t.run({ type: 'leave-seat', playerId: 'a' })
+  assert(t.state.phase === 'closed' && t.state.seats.length === 0 && Object.keys(t.state.status).length === 0, 'closed and released')
+  assert(t.state.ledger.length === 0 && t.state.totalChips === 0 && t.state.config.creatorId === 'a', 'no chips, no ownership transfer')
+  for (const command of [{ type: 'join-seat', playerId: 'd' }, { type: 'start-match', playerId: 'a' }, { type: 'start-next-round' }] as const) {
+    expectError(() => t.run(command), 'wrong-phase', command.type)
+  }
+  const auto = new Table(createSvaraMatch({ tableId: 't2', capacity: 2, entryFee: 1000, startMode: 'auto', creatorId: 'x' }))
+  auto.run({ type: 'leave-seat', playerId: 'x' })
+  assert(auto.state.phase === 'closed', 'auto table closes too')
+})
+
 // ─── H. Повторени команди и прекъсване ──────────────────────────────────────
 console.log('\n=== H. повторени команди и прекъсване ===')
 
@@ -781,6 +952,18 @@ check('H2. прекъсване: състоянието се сериализи�
   assert(t2.state.round === null && t2.state.stacks.a === 170 + 30 + 40, t2.stacks())
 })
 
+check('H2b. възстановяване по средата на Свара с ол-ин: повторената команда не дели банката втори път', () => {
+  const t = allInFour({ b: TIE1, c: H34, d: TIE2, a: TIE3 })
+  const advance = { type: 'advance-allin-svara', commandId: 'adv-1' } as const
+  const env = { createDeck: () => buildSvaraDeckForHands(['a', 'b', 'd'], { b: H34, d: TIE1, a: TIE2 }) }
+  const first = applySvaraMatchCommand(t.state, advance, env)
+  const restored = JSON.parse(JSON.stringify(first.state)) as SvaraMatchState
+  assertSvaraMatchInvariants(restored)
+  const again = applySvaraMatchCommand(restored, advance, { createDeck: () => buildSvaraDeckForHands(['a', 'b', 'd'], { b: LOW, d: H34, a: H27 }) })
+  assert(again.status === 'duplicate' && JSON.stringify(again.state.stacks) === JSON.stringify(first.state.stacks), 'no second split')
+  assert(again.state.removedChips === 1 && again.state.ledger.length === first.state.ledger.length, 'burn recorded once')
+})
+
 check('H3. изгледът на играча: собствените карти само след поглеждане; чужди карти не се виждат', () => {
   const t = newTable(['a', 'b'], { dealerIndex: 1 })
   t.deal({ a: H34, b: LOW })
@@ -796,31 +979,68 @@ check('H3. изгледът на играча: собствените карти
 // ─── I. Случайни мачове ─────────────────────────────────────────────────────
 console.log('\n=== I. случайни мачове ===')
 
-check('I1. 250 случайни мача: инвариант след всяка команда; всяко обикновено раздаване = еталон „чип по чип“', () => {
-  const random = createSeededSvaraRandomSourceForTests(2026101502)
+check('I1. 300 случайни мача (с отсъствия/изходи): инвариант след всяка команда; всяко обикновено раздаване = еталон „чип по чип“ и = 2Б.2А (svaraChips)', () => {
+  const random = createSeededSvaraRandomSourceForTests(2026101503)
   const pick = (n: number) => random.nextInt(n)
   let rounds = 0
   let ordinaryChecked = 0
+  let chipsCrossChecked = 0
   let svaras = 0
   let allins = 0
   let refusals = 0
   let finished = 0
-  for (let m = 0; m < 250; m += 1) {
+  let absences = 0
+  let exits = 0
+  for (let m = 0; m < 300; m += 1) {
     const players = ['p0', 'p1', 'p2', 'p3'].slice(0, 2 + pick(3))
     const t = new Table(createSvaraMatch({ tableId: `m${m}`, capacity: players.length as 2 | 3 | 4, entryFee: 10 * (10 + pick(40)), entryPercent: ([1, 2, 3, 5] as const)[pick(4)], startMode: 'auto', creatorId: players[0]! }))
     const env: SvaraMatchEnv = { random }
     for (const id of players.slice(1)) t.run({ type: 'join-seat', playerId: id }, env)
     let guard = 0
-    while (t.state.phase === 'in-progress' && guard < 400) {
+    while (t.state.phase === 'in-progress' && guard < 500) {
       guard += 1
       const s = t.state
       const round = s.round
+      const alive = s.seats.filter((id) => s.status[id] === 'active' || s.status[id] === 'absent')
       try {
+        // Случайни събития: отсъствие/завръщане и (рядко) доброволен изход.
+        const roll = pick(60)
+        if (roll === 0 && alive.length > 0) {
+          const id = alive[pick(alive.length)]!
+          t.run({ type: 'set-absent', playerId: id, absent: s.status[id] === 'active' }, env)
+          absences += 1
+          continue
+        }
+        if (roll === 1 && alive.length > 2 && pick(4) === 0) {
+          t.run({ type: 'exit', playerId: alive[pick(alive.length)]! }, env)
+          exits += 1
+          continue
+        }
+        // Последен шанс: когато остане един активен.
+        const absentIds = s.seats.filter((id) => s.status[id] === 'absent')
+        if (absentIds.length > 0 && s.seats.filter((id) => s.status[id] === 'active').length === 1 && pick(3) === 0) {
+          t.run({ type: 'absence-expired', playerId: absentIds[pick(absentIds.length)]! }, env)
+          continue
+        }
         if (!round) {
-          t.run({ type: 'start-next-round' }, env)
-          rounds += 1
+          try {
+            t.run({ type: 'start-next-round' }, env)
+            rounds += 1
+          } catch (error) {
+            if (error instanceof SvaraMatchError && error.code === 'no-round-available' && absentIds.length > 0) {
+              t.run({ type: 'set-absent', playerId: absentIds[0]!, absent: false }, env) // връщане, за да продължи
+              continue
+            }
+            throw error
+          }
         } else if (round.kind === 'svara-joining') {
-          const candidates = s.seats.filter((id) => s.status[id] === 'active' && !s.lockedPots.find((p) => p.potId === round.potId)!.eligible.includes(id) && s.stacks[id]! >= round.fee)
+          const pot = s.lockedPots.find((p) => p.potId === round.potId)!
+          const absentHolder = pot.eligible.find((id) => s.status[id] === 'absent')
+          if (absentHolder) {
+            t.run({ type: 'set-absent', playerId: absentHolder, absent: false }, env)
+            continue
+          }
+          const candidates = s.seats.filter((id) => s.status[id] === 'active' && !pot.eligible.includes(id) && s.stacks[id]! >= round.fee)
           if (candidates.length > 0 && pick(2) === 0) t.run({ type: 'svara-join', playerId: candidates[pick(candidates.length)]! }, env)
           else { t.run({ type: 'svara-start' }, env); svaras += 1 }
         } else if (round.kind === 'allin-svara') {
@@ -828,32 +1048,37 @@ check('I1. 250 случайни мача: инвариант след всяка
           allins += 1
         } else {
           const actor = round.betting.toAct!
+          if (s.status[actor] === 'absent') {
+            // Сварата изчаква отсъстващия (случай №5) — връщаме го.
+            t.run({ type: 'set-absent', playerId: actor, absent: false }, env)
+            continue
+          }
           if (pick(3) === 0 && !round.betting.looked.includes(actor)) t.run({ type: 'look', playerId: actor }, env)
           const options = describeSvaraMatchOptions(t.state, actor)!
+          if (options.lookRequired && !options.blindBet && options.call === null && options.allIn === null) {
+            t.run({ type: 'look', playerId: actor }, env)
+            continue
+          }
           const choices: SvaraBettingAction[] = []
           if (options.fold && pick(4) === 0) choices.push({ kind: 'fold' })
           if (options.noBet) choices.push({ kind: 'no-bet' })
           if (options.call !== null) choices.push({ kind: 'call' })
           if (options.bet) choices.push({ kind: 'bet', total: options.bet.min + pick(Math.min(3, options.bet.max - options.bet.min + 1)) })
           if (options.blindBet) choices.push({ kind: 'blind-bet', total: options.blindBet.min })
-          if (options.allIn !== null && pick(4) === 0) choices.push({ kind: 'all-in' })
-          if (options.lookRequired && !options.blindBet) {
-            t.run({ type: 'look', playerId: actor }, env)
-            continue
-          }
+          if (options.allIn !== null && pick(3) === 0) choices.push({ kind: 'all-in' })
           if (choices.length === 0) choices.push({ kind: 'fold' })
           const action = choices[pick(choices.length)]!
           const historyBefore = t.state.history.length
           t.run({ type: 'act', playerId: actor, action }, env)
-          // Еталон за току-що разрешено обикновено раздаване.
           for (const record of t.state.history.slice(historyBefore)) {
             if (record.kind !== 'ordinary') continue
             verifyOrdinaryAgainstReference(t.state, record.roundId)
             ordinaryChecked += 1
+            if (crossCheckWithChipTable(t.state, record.roundId)) chipsCrossChecked += 1
           }
         }
       } catch (error) {
-        if (error instanceof SvaraMatchError && (error.code === 'rule-not-implemented' || error.code === 'betting:rule-not-implemented' || error.code === 'no-round-available')) {
+        if (error instanceof SvaraMatchError && error.code === 'betting:rule-not-implemented') {
           refusals += 1
           break
         }
@@ -862,12 +1087,48 @@ check('I1. 250 случайни мача: инвариант след всяка
     }
     if (t.state.phase === 'finished') {
       finished += 1
+      assert(t.state.carried.length === 0 && t.state.lockedPots.length === 0, 'finished with open pots')
       assert(total(t.state) + t.state.removedChips === t.state.totalChips, 'final conservation')
     }
   }
-  console.log(`      рундове ${rounds}, обикновени сверени ${ordinaryChecked}, Свари ${svaras}, ол-ин Свари ${allins}, завършени мачове ${finished}, спрени на неуточнен случай ${refusals}`)
-  assert(ordinaryChecked > 1000 && svaras > 30 && finished > 50, 'coverage')
+  console.log(`      рундове ${rounds}, обикновени сверени ${ordinaryChecked} (от тях с 2Б.2А ${chipsCrossChecked}), Свари ${svaras}, ол-ин Свари ${allins}, отсъствия ${absences}, изходи ${exits}, завършени ${finished}, спрени на неуточнен подслучай ${refusals}`)
+  assert(ordinaryChecked > 1500 && chipsCrossChecked > 1000 && svaras > 50 && allins > 10 && finished > 150, 'coverage')
 })
+
+/**
+ * Кръстосана проверка: същото раздаване, подадено на модула от 2Б.2А
+ * (svaraChips), трябва да даде същите присъждания, връщания и заключени суми.
+ * Пропуска раздавания с пренесени/осиротели банки (2Б.2А ги отказва по замисъл).
+ */
+function crossCheckWithChipTable(state: SvaraMatchState, roundId: string): boolean {
+  const record = state.history.find((r) => r.roundId === roundId)!
+  const entries = state.ledger.filter((e) => e.roundId === roundId)
+  if (entries.some((e) => e.type === 'carry-in' || e.type === 'pot-carry')) return false
+  const participants = record.participants
+  const maxContribution = Math.max(...participants.map((id) => record.contributions[id] ?? 0))
+  let chips = createSvaraChipTable({ tableId: 'x', entryFee: 10 * (maxContribution + 1), playerIds: participants })
+  let seq = 0
+  const apply = (command: Record<string, unknown>) => {
+    chips = applySvaraChipCommand(chips, { ...command, commandId: `x${(seq += 1)}` } as never).state
+  }
+  apply({ type: 'begin-deal', dealId: 'd', participants })
+  for (const id of participants) {
+    if ((record.contributions[id] ?? 0) > 0) apply({ type: 'contribute', playerId: id, amount: record.contributions[id], reason: 'bet' })
+  }
+  for (const id of record.folded) apply({ type: 'fold', playerId: id })
+  apply({ type: 'settle-deal', hands: record.shownHands })
+  const sum = (list: Array<{ type: string; amount: number; playerId: string | null }>, type: string) => {
+    const out: Record<string, number> = {}
+    for (const e of list) if (e.type === type && e.playerId) out[e.playerId] = (out[e.playerId] ?? 0) + e.amount
+    return JSON.stringify(Object.entries(out).sort())
+  }
+  const chipEntries = chips.ledger.filter((e) => e.dealId === 'd')
+  const locked = (list: Array<{ type: string; amount: number }>) => list.filter((e) => e.type === 'pot-lock').reduce((a, e) => a + e.amount, 0)
+  if (sum(entries, 'pot-award') !== sum(chipEntries, 'pot-award') || sum(entries, 'uncalled-return') !== sum(chipEntries, 'uncalled-return') || locked(entries) !== locked(chipEntries)) {
+    throw new Error(`${roundId}: match ≠ 2B.2A chips: awards ${sum(entries, 'pot-award')} vs ${sum(chipEntries, 'pot-award')}; uncalled ${sum(entries, 'uncalled-return')} vs ${sum(chipEntries, 'uncalled-return')}; locked ${locked(entries)} vs ${locked(chipEntries)}`)
+  }
+  return true
+}
 
 /** Независим еталон: всяка единица от вноските е малка банка (вкл. мъртвите пари в първата). */
 function verifyOrdinaryAgainstReference(state: SvaraMatchState, roundId: string): void {

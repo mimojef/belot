@@ -16,9 +16,16 @@
 //     залог и с това тъмната фаза приключва за всички.
 //   • „Без залог“ — само в специалното 4-то раздаване при двама.
 //
-// Изричен отказ ('rule-not-implemented') за неуточнените случаи:
-//   • ол-ин под минимума на тъмната фаза (тъмен или с погледнати карти);
-//   • ол-ин „на тъмно“ от първия играч под 2 × Вход.
+//   • Непълен ол-ин на тъмно (решение на собственика, случай №4): позволен;
+//     не е пълно повишаване; тъмната фаза продължава; следващият пълен
+//     тъмен минимум остава 2 × последния ПЪЛЕН тъмен залог; вече действалите
+//     не получават ново право за повишаване (могат само да доплатят/откажат —
+//     единственото „плащане“, допустимо в тъмната фаза).
+//
+// Изричен отказ ('rule-not-implemented') за неуточнените подслучаи:
+//   • ол-ин под минимума на тъмната фаза от играч, който е погледнал;
+//   • непълен ол-ин „на тъмно“ от първия играч (под 2 × Вход), който би
+//     започнал тъмната поредица.
 //
 // Суми: total = общият ДОБРОВОЛЕН залог на играча в раздаването (без Входа).
 
@@ -62,6 +69,7 @@ export type SvaraBettingState = {
   /** Могат само да платят или да се откажат (непълно ол-ин повишаване). */
   raiseLocked: string[]
   toAct: string | null
+  /** lastBlindTotal = последният ПЪЛЕН тъмен залог (непълен ол-ин не го променя). */
   blind: { status: SvaraBlindStatus; lastBlindTotal: number }
   allowNoBet: boolean
   noBet: string[]
@@ -179,6 +187,21 @@ function applyShortRaise(state: SvaraBettingState, playerId: string, total: numb
   state.acted = [...previouslyActed, playerId]
 }
 
+/**
+ * Случай №4: непълен ол-ин на тъмно. Не е пълно повишаване; тъмната фаза
+ * продължава; lastBlindTotal (база за следващия пълен минимум) не се променя.
+ */
+function applyIncompleteBlindAllIn(state: SvaraBettingState, playerId: string, total: number, commitTotal: (total: number) => void): void {
+  commitTotal(total)
+  if (total > state.currentBet) {
+    applyShortRaise(state, playerId, total)
+  } else {
+    remove(state.pending, playerId)
+    remove(state.raiseLocked, playerId)
+    state.acted.push(playerId)
+  }
+}
+
 export type SvaraBettingResult = { state: SvaraBettingState; added: number }
 
 /**
@@ -223,7 +246,8 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       break
     }
     case 'call': {
-      if (state.blind.status === 'active') fail('invalid-action', 'during the blind phase a bet must be at least double the last blind bet')
+      // В тъмната фаза плащане е допустимо само за доплащане на непълен ол-ин (случай №4).
+      if (state.blind.status === 'active' && !state.raiseLocked.includes(playerId)) fail('invalid-action', 'during the blind phase a bet must be at least double the last blind bet')
       if (state.currentBet <= voluntary) fail('invalid-action', 'nothing to call')
       const need = state.currentBet - voluntary
       if (need > stack) fail('insufficient-chips', `call needs ${need}, ${playerId} has ${stack}; use all-in`)
@@ -243,9 +267,13 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         if (!(isFirstActorOpening || state.blind.status === 'active')) fail('blind-not-allowed', 'a blind sequence can only be started by the first player before any bet')
         const minimum = state.blind.status === 'active' ? 2 * state.blind.lastBlindTotal : 2 * entry
         if (total < minimum) {
-          if (total === maxTotal) fail('rule-not-implemented', `blind all-in below the minimum ${minimum} is not specified yet`)
-          fail('below-minimum', `blind bet must be at least ${minimum}`)
+          if (total !== maxTotal) fail('below-minimum', `blind bet must be at least ${minimum}`)
+          if (state.blind.status !== 'active') fail('rule-not-implemented', `a blind all-in below ${minimum} that would start the blind sequence is not specified yet`)
+          applyIncompleteBlindAllIn(state, playerId, total, commitTotal)
+          blind = true
+          break
         }
+        if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
         commitTotal(total)
         applyFullRaise(state, playerId, total)
         state.blind = { status: 'active', lastBlindTotal: total }
@@ -255,6 +283,7 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       // Обикновен (с погледнати карти или след тъмната фаза) залог.
       if (state.blind.status === 'active') {
         if (!looked) fail('look-required', 'during the blind phase look at the cards first or continue blind')
+        if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
         const minimum = 2 * state.blind.lastBlindTotal
         if (total < minimum) {
           if (total === maxTotal) fail('rule-not-implemented', `all-in below the blind-phase minimum ${minimum} is not specified yet`)
@@ -284,7 +313,13 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       const total = maxTotal
       if (state.blind.status === 'active') {
         const minimum = 2 * state.blind.lastBlindTotal
-        if (total < minimum) fail('rule-not-implemented', `all-in below the blind-phase minimum ${minimum} is not specified yet`)
+        if (total < minimum) {
+          if (looked) fail('rule-not-implemented', `an all-in below the blind-phase minimum ${minimum} by a player who has looked is not specified yet`)
+          applyIncompleteBlindAllIn(state, playerId, total, commitTotal)
+          blind = true
+          break
+        }
+        if (state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
         commitTotal(total)
         applyFullRaise(state, playerId, total)
         if (looked) state.blind.status = 'closed'
@@ -295,7 +330,7 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         break
       }
       if (isFirstActorOpening && !looked) {
-        if (total < 2 * entry) fail('rule-not-implemented', `blind all-in below ${2 * entry} is not specified yet; look at the cards first`)
+        if (total < 2 * entry) fail('rule-not-implemented', `a blind all-in below ${2 * entry} that would start the blind sequence is not specified yet; look at the cards first`)
         commitTotal(total)
         applyFullRaise(state, playerId, total)
         state.blind = { status: 'active', lastBlindTotal: total }
@@ -385,10 +420,13 @@ export function describeSvaraBettingOptions(state: SvaraBettingState, playerId: 
   options.noBet = state.allowNoBet && state.currentBet === 0
   if (state.blind.status === 'active') {
     const minimum = 2 * state.blind.lastBlindTotal
-    if (!looked && maxTotal >= minimum) options.blindBet = { min: minimum, max: maxTotal }
-    if (looked && maxTotal >= minimum) options.bet = { min: minimum, max: maxTotal }
-    if (maxTotal >= minimum) options.allIn = maxTotal
-    options.lookRequired = !looked
+    const locked = state.raiseLocked.includes(playerId)
+    if (locked && state.currentBet > voluntary && state.currentBet - voluntary <= stack) options.call = state.currentBet
+    if (!locked && !looked && maxTotal >= minimum) options.blindBet = { min: minimum, max: maxTotal }
+    if (!locked && looked && maxTotal >= minimum) options.bet = { min: minimum, max: maxTotal }
+    // Непълен тъмен ол-ин е позволен (случай №4); за погледнал играч — само пълен.
+    if (stack > 0 && (locked ? maxTotal <= state.currentBet : !looked || maxTotal >= minimum)) options.allIn = maxTotal
+    options.lookRequired = !looked && !locked
     return options
   }
   if (firstOpening && !looked) {
