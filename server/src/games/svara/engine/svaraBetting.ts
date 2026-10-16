@@ -1,4 +1,4 @@
-// Свара — наддаване в едно раздаване (чиста логика, Етап 2Б.2Б).
+// Свара — наддаване в едно раздаване (чиста логика, Етап 2Б.2Б/2Б.3.7.0).
 //
 // Потвърдени правила (спецификация 2Б.2Б, раздели 4–6):
 //   • Първи действа следващият след дилъра; дилърът е последен.
@@ -10,27 +10,36 @@
 //     (те могат само да платят или да се откажат).
 //   • Наддаването свършва, когато всички с възможност за действие са
 //     изравнили доброволния залог или са ол-ин (или остане един играч).
-//   • Тъмно: само първият действащ, преди да е погледнал; минимум 2 × Вход;
-//     всеки следващ тъмен залог ≥ 2 × предишния (общ доброволен залог);
-//     първият погледнал, който продължава, слага ≥ 2 × последния тъмен
-//     залог и с това тъмната фаза приключва за всички.
 //   • „Без залог“ — само в специалното 4-то раздаване при двама.
 //
-// Окончателни решения на собственика от 15.10.2026 (втора вълна):
-//   • Решение №1 — ПЪЛНА ЗАБРАНА на непълен залог на тъмно: играч без
-//     достатъчно свободни чипове за изискуемия минимум НЯМА право да залага
-//     на тъмно — важи и за първоначалния, и за всеки следващ тъмен залог.
-//     Командата се отказва изцяло ('below-minimum' / 'blind-not-allowed'),
-//     без промяна на състоянието. ОТМЕНЯ старото Решение №4 (по-долу беше:
-//     „непълен ол-ин на тъмно е позволен“ — вече невалидно, виж историята
-//     в temp/svara/Svara_Etap_2B2B_Spec_2026-10-15.md, §5 и §11).
-//   • Решение №2 — нормален ол-ин след поглеждане: играч, който ПОГЛЕДНЕ
-//     картите си и няма достатъчно чипове за следващия изискуем минимум
-//     (2 × последния тъмен залог), може да продължи с нормален (небляндов)
-//     ол-ин за наличните си чипове. Това НЕ е пълно повишаване — вече
-//     действалите не получават ново право за повишаване, само могат да
-//     доплатят или да се откажат. Тъмната фаза приключва за ВСИЧКИ от този
-//     момент нататък (дори някой друг още да не е погледнал).
+// Окончателно решение на собственика за тъмно (16.10.2026, Етап 2Б.3.7.0—
+// заменя по-старото „само първият играч“ от §5 на спецификацията):
+//   1. Правото да ОТВОРИ тъмната фаза принадлежи на първия играч след
+//      дилъра, но при отказ БЕЗ залог (fold) правото последователно
+//      преминава към следващия допустим играч — и може да се повтори за
+//      трети, четвърти и т.н., докато остане повече от един неотказал.
+//   2. Поглеждането на картите САМО ПО СЕБЕ СИ не затваря тъмната фаза
+//      глобално и не отнема правото на следващите — но погледналият играч
+//      лично няма право да залага на тъмно (блъф „на тъмно след поглеждане“
+//      е невъзможен). Ако след поглеждане играчът се откаже без залог,
+//      правото пак преминава към следващия.
+//   3. Щом някой заложи на тъмно, следващите МОГАТ да продължат на тъмно
+//      (минимум 2 × предишния тъмен залог), докато фазата е разрешена.
+//   4. Първият ОБИКНОВЕН (небляндов) залог — независимо кой точно играч го
+//      прави и независимо дали преди това е имало тъмни залози — приключва
+//      тъмната фаза ОКОНЧАТЕЛНО за цялото раздаване. Минимумът за този
+//      залог е 1 Вход (ако никой не е залагал на тъмно) или 2 × последния
+//      тъмен залог (ако е имало тъмна поредица). След тази точка никой
+//      няма право да залага на тъмно до следващото раздаване.
+//   5. Решение №1/№2 от втората вълна (15.10.2026) остават в сила непроменени:
+//      пълна забрана на непълен тъмен залог/ол-ин; нормален (непълен) ол-ин
+//      е позволен за погледнал играч с недостатъчни чипове и също окончателно
+//      затваря тъмната фаза (точка 4 по-горе).
+//
+// Автоматично разкриване (Етап 2Б.3.7.0, извършва се от svaraMatch.ts чрез
+// `revealUnlookedHands`, не тук): когато първия обикновен залог приключи
+// тъмната фаза, останалите активни неотказали играчи автоматично получават
+// право да видят собствените си карти, без изрично „Погледни“.
 //
 // Суми: total = общият ДОБРОВОЛЕН залог на играча в раздаването (без Входа).
 
@@ -207,7 +216,10 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
   const voluntary = state.voluntary[playerId] ?? 0
   const maxTotal = voluntary + stack
   const looked = state.looked.includes(playerId)
-  const isFirstActorOpening = state.blind.status === 'available' && playerId === state.firstActor && state.currentBet === 0
+  // Правото да ОТВОРИ тъмната фаза принадлежи на ТОЗИ действащ играч, докато
+  // никой не е заложил нищо (на тъмно или обикновено) — не само на литералния
+  // firstActor. Отказ без залог го предава естествено на следващия (виж 'fold').
+  const canOpenBlind = state.blind.status === 'available' && state.currentBet === 0
   let added = 0
   let blind = false
 
@@ -219,19 +231,21 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
 
   switch (action.kind) {
     case 'fold': {
+      // Решение (16.10.2026): отказ без залог НЕ затваря тъмната фаза — тя
+      // остава 'available' и правото преминава естествено към следващия
+      // чакащ играч (nextPending по-долу), не само към литералния firstActor.
       state.folded.push(playerId)
       remove(state.pending, playerId)
       remove(state.raiseLocked, playerId)
-      if (state.blind.status === 'available' && playerId === state.firstActor) state.blind.status = 'closed'
       break
     }
     case 'no-bet': {
       if (!state.allowNoBet) fail('invalid-action', '"Без залог" is only allowed in the special 4th heads-up deal')
       if (state.currentBet !== 0) fail('invalid-action', '"Без залог" is not possible after a voluntary bet')
+      // Същото решение: „Без залог“ не е залог и не затваря тъмната фаза.
       state.noBet.push(playerId)
       remove(state.pending, playerId)
       state.acted.push(playerId)
-      if (state.blind.status === 'available' && playerId === state.firstActor) state.blind.status = 'closed'
       break
     }
     case 'call': {
@@ -255,7 +269,7 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       if (total > maxTotal) fail('insufficient-chips', `${playerId} can reach at most ${maxTotal}`)
       if (action.kind === 'blind-bet') {
         if (looked) fail('blind-not-allowed', `${playerId} has already looked at the cards`)
-        if (!(isFirstActorOpening || state.blind.status === 'active')) fail('blind-not-allowed', 'a blind sequence can only be started by the first player before any bet')
+        if (!(canOpenBlind || state.blind.status === 'active')) fail('blind-not-allowed', 'a blind bet is only possible while the blind phase is still open and before any voluntary bet')
         const minimum = state.blind.status === 'active' ? 2 * state.blind.lastBlindTotal : 2 * entry
         // Решение №1: пълна забрана на непълен залог на тъмно — важи за
         // първоначалния и за всеки следващ (отменя старото Решение №4).
@@ -287,7 +301,7 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         state.blind.status = 'closed'
         break
       }
-      if (isFirstActorOpening && !looked) fail('look-required', 'the first player must look at the cards or bet blind')
+      if (canOpenBlind && !looked) fail('look-required', 'the current player must look at the cards or bet blind')
       const minimum = state.currentBet === 0 ? entry : state.currentBet + entry
       if (state.currentBet > 0 && state.raiseLocked.includes(playerId)) fail('raise-not-allowed', `${playerId} may only call or fold after an incomplete all-in raise`)
       if (total <= state.currentBet) fail('invalid-action', `total ${total} does not exceed the current bet ${state.currentBet}; use call`)
@@ -329,7 +343,7 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
         }
         break
       }
-      if (isFirstActorOpening && !looked) {
+      if (canOpenBlind && !looked) {
         // Решение №1: непълен тъмен залог/ол-ин на самото начало е забранен;
         // играчът трябва да погледне (и да залага нормално) или да се откаже.
         if (total < 2 * entry) fail('blind-not-allowed', `${playerId} has only ${total}, below the blind minimum ${2 * entry}; look at the cards to continue`)
@@ -358,22 +372,44 @@ export function applySvaraBettingAction(input: SvaraBettingState, playerId: stri
       fail('invalid-action', `unknown action ${String((action as { kind?: unknown }).kind)}`)
   }
 
-  // Първият играч, който не започне тъмна поредица, я затваря.
-  if (state.blind.status === 'available' && playerId === state.firstActor && !blind) state.blind.status = 'closed'
+  // Правило 4 (16.10.2026): първият ОБИКНОВЕН залог (не на тъмно) — от който
+  // и да е играч, докато тъмната фаза е още 'available' — я затваря завинаги
+  // за това раздаване. Отказ/„Без залог“ не достигат дотук с blind=false по
+  // начин, който трябва да затваря фазата (вижте техните отделни клонове).
+  if (state.blind.status === 'available' && !blind && (action.kind === 'bet' || action.kind === 'all-in')) state.blind.status = 'closed'
   state.log.push({ playerId, kind: action.kind, total: state.voluntary[playerId] ?? 0, added, allIn: state.allIn.includes(playerId), blind })
   refreshCompletion(state, playerId)
   return { state, added }
 }
 
-/** Играчът поглежда картите си (по всяко време, докато е в раздаването). */
+/**
+ * Играчът поглежда картите си (по всяко време, докато е в раздаването).
+ * Правило 2 (16.10.2026): поглеждането САМО ПО СЕБЕ СИ не затваря тъмната
+ * фаза глобално — само отнема личното право на ТОЗИ играч да залага на
+ * тъмно (проверено отделно чрез `looked` във `applySvaraBettingAction`).
+ */
 export function lookAtSvaraCards(input: SvaraBettingState, playerId: string): SvaraBettingState {
   if (!input.order.includes(playerId)) fail('invalid-action', `${playerId} is not in this deal`)
   if (input.folded.includes(playerId)) fail('player-folded', `${playerId} has folded`)
   if (input.looked.includes(playerId)) return input
   const state = structuredClone(input)
   state.looked.push(playerId)
-  // Ако първият погледне преди да е действал, тъмна поредица не може да започне.
-  if (state.blind.status === 'available' && playerId === state.firstActor) state.blind.status = 'closed'
+  return state
+}
+
+/**
+ * Автоматично разкриване (Етап 2Б.3.7.0): когато първия обикновен залог
+ * приключи тъмната фаза, всички останали активни неотказали играчи
+ * автоматично получават право да видят собствените си карти, без изрично
+ * „Погледни“. Вика се от svaraMatch.ts след преход на blind.status към
+ * 'closed'; `excludePlayerIds` носи отсъстващите участници (само свараMatch.ts
+ * знае статуса на мястото — тук „активен“ не се проверява пряко).
+ */
+export function revealUnlookedHands(input: SvaraBettingState, excludePlayerIds: readonly string[] = []): SvaraBettingState {
+  const state = structuredClone(input)
+  for (const id of state.order) {
+    if (!state.folded.includes(id) && !state.looked.includes(id) && !excludePlayerIds.includes(id)) state.looked.push(id)
+  }
   return state
 }
 
@@ -385,7 +421,8 @@ export function forceSvaraFold(input: SvaraBettingState, playerId: string): Svar
   remove(state.pending, playerId)
   remove(state.raiseLocked, playerId)
   remove(state.allIn, playerId)
-  if (state.blind.status === 'available' && playerId === state.firstActor) state.blind.status = 'closed'
+  // Същото правило като доброволния 'fold': не затваря тъмната фаза; правото
+  // преминава естествено към следващия чакащ (ако има такъв).
   state.log.push({ playerId, kind: 'forced-fold', total: state.voluntary[playerId] ?? 0, added: 0, allIn: false, blind: false })
   const wasToAct = input.toAct === playerId
   if (state.complete) return state
@@ -417,7 +454,7 @@ export function describeSvaraBettingOptions(state: SvaraBettingState, playerId: 
   const voluntary = state.voluntary[playerId] ?? 0
   const maxTotal = voluntary + stack
   const looked = state.looked.includes(playerId)
-  const firstOpening = state.blind.status === 'available' && playerId === state.firstActor && state.currentBet === 0
+  const canOpenBlind = state.blind.status === 'available' && state.currentBet === 0
   const options: SvaraBettingOptions = { ...none, canAct: true, fold: true }
   options.noBet = state.allowNoBet && state.currentBet === 0
   if (state.blind.status === 'active') {
@@ -432,7 +469,7 @@ export function describeSvaraBettingOptions(state: SvaraBettingState, playerId: 
     options.lookRequired = !looked && !locked
     return options
   }
-  if (firstOpening && !looked) {
+  if (canOpenBlind && !looked) {
     if (maxTotal >= 2 * entry) {
       options.blindBet = { min: 2 * entry, max: maxTotal }
       options.allIn = maxTotal

@@ -30,6 +30,7 @@ import {
   describeSvaraBettingOptions,
   forceSvaraFold,
   lookAtSvaraCards,
+  revealUnlookedHands,
   SvaraBettingError,
   type SvaraBettingAction,
   type SvaraBettingOptions,
@@ -735,8 +736,18 @@ function act(ctx: Ctx, playerId: string, action: SvaraBettingAction): void {
   if (!round.participants.includes(playerId)) fail('not-allowed', `${playerId} is not in this round`)
   if (ctx.state.status[playerId] !== 'active') fail('player-absent', `${playerId} is ${ctx.state.status[playerId]} and cannot act`)
   if (!action || typeof action !== 'object') fail('invalid-command', 'action required')
+  const blindWasOpen = round.betting.blind.status !== 'closed'
   const { state, added } = applySvaraBettingAction(round.betting, playerId, action, ctx.state.stacks[playerId]!)
   round.betting = state
+  // Правило 4 (16.10.2026): щом тъмната фаза приключи от обикновен залог,
+  // всички останали АКТИВНИ неотказали играчи автоматично виждат собствените
+  // си карти, без изрично „Погледни“. Отсъстващите (възможно само в Свара —
+  // §6.14 не ги отказва автоматично) се изключват тук, защото само
+  // svaraMatch.ts, не svaraBetting.ts, знае статуса на мястото.
+  if (blindWasOpen && round.betting.blind.status === 'closed') {
+    const absentIds = round.participants.filter((id) => ctx.state.status[id] !== 'active')
+    round.betting = revealUnlookedHands(round.betting, absentIds)
+  }
   if (added > 0) {
     ctx.state.stacks[playerId] = ctx.state.stacks[playerId]! - added
     round.contributions[playerId] = (round.contributions[playerId] ?? 0) + added
@@ -1138,6 +1149,14 @@ function setAbsent(ctx: Ctx, playerId: string, absent: boolean): void {
   state.pendingReturns = (state.pendingReturns ?? []).filter((id) => id !== playerId)
   if (!absent) {
     state.status[playerId] = 'active'
+    const round = state.round
+    // Ако тъмната фаза вече е приключила, докато този играч е бил отсъстващ
+    // (възможно само в текущо раздаване за Свара — §6.14 не го отказва),
+    // той получава същото автоматично разкриване веднага при завръщането си.
+    if (round && (round.kind === 'ordinary' || round.kind === 'svara') && round.betting.blind.status === 'closed' &&
+        round.participants.includes(playerId) && !round.betting.folded.includes(playerId)) {
+      round.betting = lookAtSvaraCards(round.betting, playerId)
+    }
     if (!state.round) finishRound(ctx, null)
     return
   }

@@ -37,10 +37,12 @@ import {
   createSvaraChipTable,
   createSvaraMatch,
   createSvaraMatchPlayerView,
+  describeSvaraLifecycle,
   describeSvaraMatchOptions,
   evaluateSvaraHand,
   lookAtSvaraCards,
   parseSvaraCardCode,
+  revealUnlookedHands,
   SvaraBettingError,
   SvaraMatchError,
   type SvaraBettingAction,
@@ -317,12 +319,71 @@ check('B5. тъмно: само първият, преди да погледне
   assert(b.s.complete && b.s.currentBet === 90, 'normal betting after blind')
 })
 
-check('B6. тъмно не може да започне друг освен първия, нито след като първият е погледнал', () => {
+check('B6. погледналият няма право сам да залага на тъмно; след обикновен залог тъмната фаза е затворена за всички (включително недействали)', () => {
   const b = bet({ p1: 500, p2: 500, d: 500 })
   b.s = lookAtSvaraCards(b.s, 'p1')
-  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'looked first')
-  b.go('p1', { kind: 'bet', total: 10 })
-  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'second cannot start')
+  expectError(() => applySvaraBettingAction(b.s, 'p1', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'looked player cannot open blind themselves')
+  b.go('p1', { kind: 'bet', total: 10 }) // обикновен залог — затваря тъмната фаза окончателно
+  assert(b.s.blind.status === 'closed', 'blind closes for the whole deal')
+  expectError(() => applySvaraBettingAction(b.s, 'p2', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'nobody can open blind after it has closed, even someone who has not acted yet')
+})
+
+check('B6b. Решение (16.10.2026): отказ без залог предава правото на тъмно на следващия (и може да се повтори за трети/четвърти)', () => {
+  // 4 играча: p1 и p2 се отказват без залог; тъмната фаза остава отворена; p3 я отваря.
+  const b = bet({ p1: 500, p2: 500, p3: 500, d: 500 })
+  b.go('p1', { kind: 'fold' })
+  assert(b.s.blind.status === 'available' && b.s.toAct === 'p2', 'право към p2 след отказ без залог на p1')
+  b.go('p2', { kind: 'fold' })
+  assert(b.s.blind.status === 'available' && b.s.toAct === 'p3', 'право последователно премина и към p3')
+  b.go('p3', { kind: 'blind-bet', total: 20 })
+  assert(b.s.blind.status === 'active' && b.s.blind.lastBlindTotal === 20, 'трети по ред играч успешно отвори на тъмно')
+})
+
+check('B6c. поглеждане, последвано от отказ без залог, също предава правото на тъмно (не го затваря)', () => {
+  const b = bet({ p1: 500, p2: 500, d: 500 })
+  b.s = lookAtSvaraCards(b.s, 'p1')
+  b.go('p1', { kind: 'fold' })
+  assert(b.s.blind.status === 'available', 'погледна, после се отказа без залог — тъмната фаза остава отворена за следващия')
+  b.go('p2', { kind: 'blind-bet', total: 20 })
+  assert(b.s.blind.status === 'active' && b.s.blind.lastBlindTotal === 20, 'p2 отвори на тъмно след отказа на p1')
+})
+
+check('B6d. наследникът на правото залага нормално (не на тъмно) → тъмната фаза пак се затваря завинаги за всички', () => {
+  const b = bet({ p1: 500, p2: 500, d: 500 })
+  b.go('p1', { kind: 'fold' }) // правото премина към p2
+  b.s = lookAtSvaraCards(b.s, 'p2')
+  b.go('p2', { kind: 'bet', total: 10 }) // обикновен залог, не на тъмно
+  assert(b.s.blind.status === 'closed', 'затворена, въпреки че никой още не е заложил на тъмно')
+  expectError(() => applySvaraBettingAction(b.s, 'd', { kind: 'blind-bet', total: 20 }, 500), 'blind-not-allowed', 'дилърът не може да отвори на тъмно след затварянето')
+})
+
+check('B6e. граничен случай при двама: отказ на първия без залог завършва наддаването веднага (няма на кого да се предаде правото)', () => {
+  const b = bet({ p1: 500, d: 500 })
+  b.go('p1', { kind: 'fold' })
+  assert(b.s.complete, 'наддаването приключва с един останал играч; дилърът печели без да е имал избор за тъмно')
+})
+
+check('B6f. граничен случай при трима: отказ на първия без залог предава правото на втория (дилърът е последен, трети по ред)', () => {
+  const b = bet({ p1: 500, p2: 500, d: 500 })
+  b.go('p1', { kind: 'fold' })
+  assert(b.s.blind.status === 'available' && b.s.toAct === 'p2', 'правото е у втория, не у дилъра')
+  b.go('p2', { kind: 'blind-bet', total: 20 })
+  assert(b.s.blind.status === 'active', 'вторият играч отвори на тъмно')
+})
+
+check('B6g. revealUnlookedHands: разкрива останалите активни неотказали, но изключва изрично подадените (отсъстващи) играчи', () => {
+  const b = bet({ p1: 500, p2: 500, p3: 500, d: 500 })
+  b.go('p1', { kind: 'blind-bet', total: 20 })
+  b.go('p2', { kind: 'fold' })
+  b.s = lookAtSvaraCards(b.s, 'p3')
+  b.go('p3', { kind: 'bet', total: 40 }) // обикновен залог — приключва тъмната фаза
+  assert(b.s.blind.status === 'closed', 'blind closed')
+  assert(!b.s.looked.includes('p1') && !b.s.looked.includes('d'), 'преди извикването p1/d още не са маркирани като погледнали')
+  const revealed = revealUnlookedHands(b.s, ['d']) // d се третира като отсъстващ в този пример
+  assert(revealed.looked.includes('p1'), 'p1 (отворил на тъмно, без да е гледал) вече вижда картите си')
+  assert(!revealed.looked.includes('p2'), 'p2 се е отказал — не се разкрива')
+  assert(!revealed.looked.includes('d'), 'd е изрично изключен (отсъстващ) — не се разкрива')
+  assert(revealed.looked.includes('p3'), 'p3 вече беше погледнал явно — остава')
 })
 
 check('B7. Решение №1: пълна забрана на непълен залог на тъмно (първоначален и следващ); точно достатъчни чипове остава позволено', () => {
@@ -1163,6 +1224,47 @@ check('H3. изгледът на играча: собствените карти
   assert(JSON.stringify(after.ownCards) === JSON.stringify(H34.split(' ')), 'own cards after look')
   const other = createSvaraMatchPlayerView(t.state, 'b')
   for (const code of H34.split(' ')) assert(!JSON.stringify(other).includes(`"${code}"`), `b sees ${code}`)
+})
+
+check('H3b. автоматично разкриване: когато обикновен залог приключи тъмната фаза, останалите активни неотказали играчи виждат собствените си карти без „Погледни“', () => {
+  const dCards = 'KS QC JC' // без общи карти с H34/LOW/H27
+  const t = newTable(['a', 'b', 'c', 'd'], { dealerIndex: 3 }) // ред a, b, c, d (d дилър)
+  t.deal({ a: H34, b: LOW, c: H27, d: dCards })
+  t.act('a', { kind: 'blind-bet', total: 20 }) // a отваря на тъмно, без да е гледал
+  t.act('b', { kind: 'fold' }) // b се отказва, без да е гледал и без залог
+  t.look('c')
+  t.act('c', { kind: 'bet', total: 40 }) // обикновен залог след поглеждане → приключва тъмната фаза
+  const round = t.state.round as { betting: SvaraBettingState }
+  assert(round.betting.blind.status === 'closed', 'тъмната фаза е приключена')
+  // d не е гледал изрично, но е активен и неотказал — вижда картите си автоматично.
+  const viewD = createSvaraMatchPlayerView(t.state, 'd')
+  assert(viewD.ownLooked === true && JSON.stringify(viewD.ownCards) === JSON.stringify(dCards.split(' ')), `d auto-revealed: ${JSON.stringify(viewD)}`)
+  // a отвори на тъмно, без изрично да е гледал — също вижда картите си вече.
+  const viewA = createSvaraMatchPlayerView(t.state, 'a')
+  assert(viewA.ownLooked === true && JSON.stringify(viewA.ownCards) === JSON.stringify(H34.split(' ')), `a auto-revealed too: ${JSON.stringify(viewA)}`)
+  // b се е отказал — картите му не се разкриват.
+  const viewB = createSvaraMatchPlayerView(t.state, 'b')
+  assert(viewB.ownLooked === false && viewB.ownCards === null, 'отказал се играч остава скрит')
+  // c вече гледаше явно — непроменено поведение.
+  const viewC = createSvaraMatchPlayerView(t.state, 'c')
+  assert(viewC.ownLooked === true && JSON.stringify(viewC.ownCards) === JSON.stringify(H27.split(' ')), 'c вече гледаше явно')
+  // d (противник) не вижда картите на a, въпреки автоматичното разкриване за самия a.
+  for (const code of H34.split(' ')) assert(!JSON.stringify(viewD).includes(`"${code}"`), `d вижда картата на a: ${code}`)
+})
+
+check('H3c. таймерните данни (actionVersion) не се променят от автоматичното разкриване — не рестартира сървърните срокове', () => {
+  const t = newTable(['a', 'b', 'd'], { dealerIndex: 2 })
+  t.deal({ a: H34, b: LOW, d: H27 })
+  const before = describeSvaraLifecycle(t.state).actionVersion
+  t.act('a', { kind: 'blind-bet', total: 20 })
+  const afterBlind = describeSvaraLifecycle(t.state).actionVersion
+  t.look('b')
+  const afterLook = describeSvaraLifecycle(t.state).actionVersion
+  assert(afterLook === afterBlind, '„Погледни“ не увеличава actionVersion (не рестартира таймера)')
+  t.act('b', { kind: 'bet', total: 40 }) // приключва тъмната фаза и предизвиква автоматичното разкриване за d
+  const afterReveal = describeSvaraLifecycle(t.state).actionVersion
+  assert(afterReveal === afterBlind + 1, 'само реалните доброволни действия (не автоматичното разкриване) увеличават actionVersion')
+  assert(before === 0 && afterBlind === 1, JSON.stringify({ before, afterBlind, afterReveal }))
 })
 
 // ─── I. Случайни мачове ─────────────────────────────────────────────────────
