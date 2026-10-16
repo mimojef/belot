@@ -43,6 +43,7 @@ import {
   createSvaraMatch,
   createSvaraMatchPlayerView,
   describeSvaraMatchOptions,
+  describeSvaraLifecycle,
   type SvaraEntryPercent,
   type SvaraMatchCommand,
   type SvaraMatchEnv,
@@ -92,6 +93,8 @@ export type SvaraParticipantCommand =
   | { type: 'look' }
   | { type: 'act'; action: SvaraBettingAction }
   | { type: 'svara-join' }
+  | { type: 'svara-decline' }
+  | { type: 'request-return' }
   | { type: 'exit' }
 
 /**
@@ -104,8 +107,12 @@ export type SvaraSystemCommand =
   | { type: 'advance-allin-svara' }
   | { type: 'absence-expired'; playerId: string }
   | { type: 'set-absent'; playerId: string; absent: boolean }
+  | { type: 'activate-returns' }
+  | { type: 'turn-timeout'; playerId: string; roundId: string; actionVersion: number }
+  | { type: 'close-svara-joining'; roundId: string }
+  | { type: 'finish-presence-wait'; winnerId: string | null }
 
-export type SvaraAutomaticCommand = Extract<SvaraSystemCommand, { type: 'start-next-round' | 'svara-start' | 'advance-allin-svara' }>
+export type SvaraAutomaticCommand = Extract<SvaraSystemCommand, { type: 'start-next-round' | 'svara-start' | 'advance-allin-svara' | 'activate-returns' | 'turn-timeout' }>
 
 export type SvaraRuntimeCommandResult = {
   status: 'applied' | 'duplicate'
@@ -171,6 +178,7 @@ export type SvaraMatchRuntime = {
   executeParticipantCommand(matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown, expectedRevision?: number): SvaraRuntimeCommandResult
   executeSystemCommand(matchId: string, systemCommandId: string, command: SvaraSystemCommand): SvaraRuntimeCommandResult
   getMatchRevision(matchId: string): number
+  getLifecycleView(matchId: string): ReturnType<typeof describeSvaraLifecycle> & { revision: number }
   /** Server-only orchestration hint. Never closes an available joining opportunity. */
   getAutomaticCommand(matchId: string): SvaraAutomaticCommand | null
   getPlayerView(matchId: string, actor: SvaraTrustedActor): SvaraRuntimePlayerView
@@ -188,8 +196,8 @@ export type SvaraRuntimeClientFacade = Pick<SvaraMatchRuntime, 'hasMatch' | 'isP
 
 // ── Помощни ─────────────────────────────────────────────────────────────────
 
-const PARTICIPANT_TYPES = new Set(['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'exit'])
-const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent'])
+const PARTICIPANT_TYPES = new Set(['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit'])
+const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait'])
 const ACTION_KINDS = new Set(['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet'])
 
 const fail = (code: SvaraRuntimeErrorCode, message: string): never => {
@@ -239,7 +247,16 @@ function normalizeSystemCommand(input: SvaraSystemCommand, commandId: string): S
     case 'start-next-round':
     case 'svara-start':
     case 'advance-allin-svara':
+    case 'activate-returns':
       return { type: input.type, commandId }
+    case 'turn-timeout':
+      if (!Number.isSafeInteger(input.actionVersion) || input.actionVersion < 0) fail('invalid-input', 'invalid action version')
+      return { type: input.type, commandId, playerId: requireId(input.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'playerId'),
+        roundId: requireId(input.roundId, 128, 'roundId'), actionVersion: input.actionVersion }
+    case 'close-svara-joining':
+      return { type: input.type, commandId, roundId: requireId(input.roundId, 128, 'roundId') }
+    case 'finish-presence-wait':
+      return { type: input.type, commandId, winnerId: input.winnerId === null ? null : requireId(input.winnerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'winnerId') }
     case 'absence-expired':
       return { type: 'absence-expired', commandId, playerId: requireId(input.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'playerId') }
     case 'set-absent':
@@ -357,10 +374,19 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       return entryOf(matchId).revision
     },
 
+    getLifecycleView(matchId) {
+      const entry = entryOf(matchId)
+      return { ...describeSvaraLifecycle(entry.state), revision: entry.revision }
+    },
+
     getAutomaticCommand(matchId) {
       const { state } = entryOf(matchId)
       if (state.phase !== 'in-progress') return null
       const round = state.round
+      const view = describeSvaraLifecycle(state)
+      if (view.atBoundary && view.readyPlayerIds.length < 2) return null
+      if (view.atBoundary && view.returningPlayerIds.length > 0) return { type: 'activate-returns' }
+      if (view.actorAbsent && view.actorId && view.roundId) return { type: 'turn-timeout', playerId: view.actorId, roundId: view.roundId, actionVersion: view.actionVersion }
       if (!round) {
         const startable = state.lockedPots.some((pot) => pot.kind === 'ordinary' && pot.eligible.every((id) => state.status[id] === 'active'))
         const funded = state.seats.filter((id) => (state.status[id] === 'active' || state.status[id] === 'absent') && state.stacks[id]! > 0)
@@ -368,13 +394,7 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       }
       if (round.kind === 'allin-svara') return { type: 'advance-allin-svara' }
       if (round.kind !== 'svara-joining') return null
-      const pot = state.lockedPots.find((p) => p.potId === round.potId)!
-      if (pot.eligible.some((id) => state.status[id] !== 'active')) return null
-      // No timer/decline policy in 2Б.3.4. Preserve the opportunity of every
-      // funded outsider (also an absent one); otherwise nobody can still join.
-      const canStillJoin = state.seats.some((id) => !pot.eligible.includes(id) &&
-        (state.status[id] === 'active' || state.status[id] === 'absent') && state.stacks[id]! >= round.fee)
-      return canStillJoin ? null : { type: 'svara-start' }
+      return view.joining?.holdersReady && (!view.joining.open || view.joining.undecided.length === 0) ? { type: 'svara-start' } : null
     },
 
     executeSystemCommand(matchId, systemCommandId, command) {

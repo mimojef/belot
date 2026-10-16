@@ -5,6 +5,7 @@ import { evaluateSvaraAccess, type SvaraAccessSession } from './svaraAccess.js'
 import { SvaraMatchError } from './engine/svaraMatch.js'
 import { createSvaraMatchRuntime, SvaraRuntimeError, type SvaraMatchRuntime } from './runtime/svaraMatchRuntime.js'
 import { createSvaraCommandExecutor } from './runtime/createSvaraCommandExecutor.js'
+import { createSvaraLifecycle, type SvaraClock } from './runtime/createSvaraLifecycle.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient } from './protocol/svaraSnapshotProtocol.js'
 
@@ -21,12 +22,16 @@ export function createSvaraLobby(deps: {
   runtime?: SvaraMatchRuntime
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
+  clock?: SvaraClock
 }) {
   const runtime = deps.runtime ?? createSvaraMatchRuntime()
   const commands = createSvaraCommandExecutor(runtime)
   const connections = new Map<string, Transport>()
   const subscribers = new Set<string>()
-  const continuations = new Map<string, NodeJS.Immediate>()
+  const lifecycle = createSvaraLifecycle(runtime, {
+    clock: deps.clock, onError: deps.onError,
+    onChange: (matchId, before) => publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId))),
+  })
   let stopped = false
 
   function deliver(transport: Transport, payload: SvaraLobbyServerMessage | string) {
@@ -52,6 +57,7 @@ export function createSvaraLobby(deps: {
       stale_action: 'Играта вече е обновена. Поискай текущото състояние.',
       invalid_action: 'Невалидно игрово действие.', not_your_turn: 'Не е твоят ред.',
       insufficient_chips: 'Недостатъчно игрови чипове.', look_required: 'Първо погледни собствените си карти.',
+      player_absent: 'Отсъстваш. Заяви връщане за следващото раздаване.',
     }
     if (gameplay) deliver(transport, { type: 'svara_command_error', code, message: messages[code], ...(commandId ? { commandId } : {}) })
     else deliver(transport, { type: 'svara_lobby_error', code, message: messages[code], ...(requestId ? { requestId } : {}) })
@@ -59,6 +65,7 @@ export function createSvaraLobby(deps: {
   function snapshot(transport: Transport, matchId: string, playerId: string) {
     // Only the branded 2Б.3.2 builder output may cross the socket boundary.
     deliver(transport, serializeSvaraSnapshotForClient(runtime.getPlayerSnapshot(matchId, { playerId })))
+    deliver(transport, lifecycle.timing(matchId))
   }
   function publish(matchId: string, previousPlayers: string[], publicChanged = true) {
     const table = runtime.getPublicTable(matchId)
@@ -80,23 +87,9 @@ export function createSvaraLobby(deps: {
     }
   }
 
-  // Deterministic server commands only. Bounded work per event-loop turn for
-  // repeated automatic all-in ties; setImmediate introduces no reaction deadline.
   function progress(matchId: string) {
-    if (stopped || continuations.has(matchId)) return
-    try {
-      for (let step = 0; step < 16; step++) {
-        const before = runtime.getPublicTable(matchId)
-        if (!commands.advanceOne(matchId)) return
-        const changed = JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId))
-        publish(matchId, before.players.map((p) => p.playerId), changed)
-      }
-      if (runtime.getAutomaticCommand(matchId)) {
-        const pending = setImmediate(() => { continuations.delete(matchId); progress(matchId) })
-        continuations.set(matchId, pending)
-        pending.unref()
-      }
-    } catch (cause) {
+    if (stopped) return
+    try { lifecycle.sync(matchId) } catch (cause) {
       // A participant command already committed must never be reported rejected
       // because a subsequent system transition failed. Preserve state for audit.
       deps.onError?.(cause)
@@ -105,12 +98,23 @@ export function createSvaraLobby(deps: {
 
   return {
     attachConnection(connectionId: string, transport: Transport) { connections.set(connectionId, transport) },
+    reconnect(connectionId: string) {
+      const transport = connections.get(connectionId)
+      if (!transport || stopped) return
+      const session = transport.getSession()
+      if (!evaluateSvaraAccess(session).allowed || session?.profile.profileId !== transport.profileId || !transport.profileId) return
+      const table = findCommitment(transport.profileId)
+      if (!table) return
+      progress(table.matchId)
+      if (runtime.getPublicTable(table.matchId).players.some((p) => p.playerId === transport.profileId && p.status !== 'exited')) {
+        snapshot(transport, table.matchId, transport.profileId)
+      }
+    },
     // Disconnect is NOT leave/exit: no runtime command and no membership change.
     disconnect(connectionId: string) { connections.delete(connectionId); subscribers.delete(connectionId) },
     shutdown() {
       stopped = true
-      for (const pending of continuations.values()) clearImmediate(pending)
-      continuations.clear()
+      lifecycle.shutdown()
     },
     findCommitment,
     handle(connectionId: string, input: SvaraLobbyClientMessage, shuttingDown = false) {
@@ -130,11 +134,15 @@ export function createSvaraLobby(deps: {
       if (!message) { reject('invalid_input'); return }
       const playerId = session!.profile.profileId!
       try {
+        // Expire due work before a command/read/reconnect, even if its Node
+        // timer callback has not been dispatched. Admission stays synchronous.
+        if ('matchId' in message && runtime.hasMatch(message.matchId)) lifecycle.sync(message.matchId)
         if (message.type === 'submit_svara_command') {
           if (!runtime.hasMatch(message.matchId)) { reject('match_not_found'); return }
           const before = runtime.getPublicTable(message.matchId)
           if (!before.players.some((p) => p.playerId === playerId)) { reject('not_a_participant'); return }
           const result = commands.execute({ playerId }, message)
+          lifecycle.refresh(message.matchId)
           deliver(transport, result)
           if (result.status === 'duplicate') {
             if (before.players.some((p) => p.playerId === playerId && p.status !== 'exited')) snapshot(transport, message.matchId, playerId)
@@ -182,6 +190,7 @@ export function createSvaraLobby(deps: {
           : message.type === 'start_svara_table' ? 'start-match'
           : before.phase === 'lobby' ? 'leave-seat' : 'exit'
         runtime.executeParticipantCommand(message.matchId, { playerId }, message.requestId, { type })
+        lifecycle.refresh(message.matchId)
         if (message.type === 'join_svara_table') deps.onAdmission?.(playerId)
         if (message.type === 'leave_svara_table') deliver(transport, { type: 'svara_table_left', matchId: message.matchId, requestId })
         else deliver(transport, { type: 'svara_table_updated', table: runtime.getPublicTable(message.matchId), requestId })
@@ -196,6 +205,7 @@ export function createSvaraLobby(deps: {
             'wrong-phase': 'wrong_phase', 'command-id-conflict': 'command_id_conflict',
             'stale-action': 'stale_action', 'betting:not-your-turn': 'not_your_turn',
             'betting:insufficient-chips': 'insufficient_chips', 'betting:look-required': 'look_required',
+            'player-absent': 'player_absent',
           }
           reject(codes[cause.code] ?? (cause.code.startsWith('betting:') ? 'invalid_action' : 'server_unavailable'))
         } else {

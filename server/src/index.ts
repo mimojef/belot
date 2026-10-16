@@ -22238,6 +22238,7 @@ wsServer.on('connection', (socket, request) => {
   if (connection.profileId !== null) {
     if (!sendSessionInGameIfNeeded(connection.id, connection.profileId)) {
       displaceProfileConnections(connection.profileId, connection.id)
+      svaraLobby.reconnect(connection.id)
     }
 
     const pendingFriendships = friendshipStore.listForProfile(connection.profileId)

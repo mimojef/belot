@@ -56,6 +56,8 @@ export type SvaraMatchConfig = {
 export type SvaraMatchAccount = 'buy-in' | 'removed' | `stack:${string}` | `round:${string}` | `locked:${string}` | `carried:${string}`
 
 export type SvaraMatchLedgerType =
+  | 'absence-pot-award'
+  | 'abandoned-pot-removed'
   | 'starting-chips'
   | 'entry'
   | 'bet'
@@ -143,7 +145,7 @@ type OrdinaryRound = {
   betting: SvaraBettingState
 }
 
-type SvaraJoiningRound = { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[] }
+type SvaraJoiningRound = { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; declined?: string[]; closed?: boolean }
 
 type SvaraDealRound = {
   kind: 'svara'
@@ -182,6 +184,9 @@ export type SvaraMatchState = {
   lockedPots: SvaraMatchLockedPot[]
   carried: SvaraCarriedBalance[]
   winnerId: string | null
+  /** Requests made during a deal never reactivate that deal's player. */
+  pendingReturns?: string[]
+  finishReason?: 'prolonged-absence' | 'all-absent' | null
   /** Archive containers are immutable after commit; live-linked history is copied with the game. */
   ledger: SvaraMatchLedgerEntry[]
   history: SvaraRoundRecord[]
@@ -196,6 +201,12 @@ export type SvaraMatchCommand =
   | { type: 'look'; commandId: string; playerId: string }
   | { type: 'act'; commandId: string; playerId: string; action: SvaraBettingAction }
   | { type: 'svara-join'; commandId: string; playerId: string }
+  | { type: 'svara-decline'; commandId: string; playerId: string }
+  | { type: 'request-return'; commandId: string; playerId: string }
+  | { type: 'activate-returns'; commandId: string }
+  | { type: 'turn-timeout'; commandId: string; playerId: string; roundId: string; actionVersion: number }
+  | { type: 'close-svara-joining'; commandId: string; roundId: string }
+  | { type: 'finish-presence-wait'; commandId: string; winnerId: string | null }
   | { type: 'svara-start'; commandId: string }
   | { type: 'advance-allin-svara'; commandId: string }
   | { type: 'set-absent'; commandId: string; playerId: string; absent: boolean }
@@ -304,6 +315,8 @@ export function createSvaraMatch(input: { tableId: string; capacity: 2 | 3 | 4; 
     lockedPots: [],
     carried: [],
     winnerId: null,
+    pendingReturns: [],
+    finishReason: null,
     ledger: [],
     history: [],
     processedCommands: {},
@@ -324,6 +337,8 @@ export function assertSvaraMatchInvariants(state: SvaraMatchState): void {
     return
   }
   if (state.totalChips !== state.startingChips * state.seats.length) violation('totalChips')
+  const returning = state.pendingReturns ?? []
+  if (new Set(returning).size !== returning.length || returning.some((id) => state.status[id] !== 'absent')) violation('pending returns')
   const balances = new Map<string, number>()
   for (const id of state.seats) {
     if (!isChips(state.stacks[id])) violation(`stack of ${id}: ${String(state.stacks[id])}`)
@@ -506,6 +521,12 @@ function dispatch(ctx: Ctx): void {
     case 'look': return look(ctx, command.playerId)
     case 'act': return act(ctx, command.playerId, command.action)
     case 'svara-join': return svaraJoin(ctx, command.playerId)
+    case 'svara-decline': return svaraDecline(ctx, command.playerId)
+    case 'request-return': return requestReturn(ctx, command.playerId)
+    case 'activate-returns': return activateReturns(ctx)
+    case 'turn-timeout': return timeoutTurn(ctx, command)
+    case 'close-svara-joining': return closeSvaraJoining(ctx, command.roundId)
+    case 'finish-presence-wait': return finishPresenceWait(ctx, command.winnerId)
     case 'svara-start': return svaraStart(ctx)
     case 'advance-allin-svara': return advanceAllInSvara(ctx)
     case 'set-absent': return setAbsent(ctx, command.playerId, command.absent)
@@ -604,12 +625,14 @@ function startNextRound(ctx: Ctx): void {
   requirePhase(ctx, 'in-progress')
   const { state } = ctx
   if (state.round) fail('not-allowed', `round ${state.round.roundId} is still in progress`)
+  if (describeSvaraLifecycle(state).readyPlayerIds.length < 2) fail('no-round-available', 'waiting for a second active player')
+  activateReturns(ctx)
   // §6.12: заключените обикновени Свари се разиграват последователно; Свара
   // с отсъстващ правоимащ може да изчаква (§8).
   const startable = state.lockedPots.find((pot) => pot.kind === 'ordinary' && pot.eligible.every((id) => state.status[id] === 'active'))
   if (startable) {
     const fee = Math.ceil(startable.amount / startable.eligible.length)
-    state.round = { kind: 'svara-joining', roundId: nextRoundId(ctx, 'svara'), potId: startable.potId, fee, joiners: [] }
+    state.round = { kind: 'svara-joining', roundId: nextRoundId(ctx, 'svara'), potId: startable.potId, fee, joiners: [], declined: [], closed: false }
     return
   }
   const participants = state.seats.filter((id) => (state.status[id] === 'active' || state.status[id] === 'absent') && state.stacks[id]! > 0)
@@ -667,6 +690,7 @@ function requireBettingRound(ctx: Ctx): OrdinaryRound | SvaraDealRound {
 function look(ctx: Ctx, playerId: string): void {
   requirePhase(ctx, 'in-progress')
   requireSeated(ctx, playerId)
+  if (ctx.state.status[playerId] !== 'active') fail('player-absent', 'an absent player cannot look during this deal')
   const round = requireBettingRound(ctx)
   if (!round.participants.includes(playerId)) fail('not-allowed', `${playerId} is not in this round`)
   round.betting = lookAtSvaraCards(round.betting, playerId)
@@ -841,7 +865,8 @@ function finishRound(ctx: Ctx, record: SvaraRoundRecord | null): void {
     }
   }
   const alive = alivePlayers(state)
-  if (alive.length === 1 && state.lockedPots.length === 0 && state.carried.length > 0) {
+  state.pendingReturns = (state.pendingReturns ?? []).filter((id) => state.status[id] === 'absent')
+  if (alive.length === 1 && state.status[alive[0]!] === 'active' && state.lockedPots.length === 0 && state.carried.length > 0) {
     // Случай №6: последният играч получава всички пренесени банки преди края.
     const winner = alive[0]!
     for (const carry of state.carried) {
@@ -850,7 +875,7 @@ function finishRound(ctx: Ctx, record: SvaraRoundRecord | null): void {
     }
     state.carried = []
   }
-  if (alive.length <= 1 && state.lockedPots.length === 0 && state.carried.length === 0) {
+  if ((alive.length === 0 || (alive.length === 1 && state.status[alive[0]!] === 'active')) && state.lockedPots.length === 0 && state.carried.length === 0) {
     state.phase = 'finished'
     state.winnerId = alive[0] ?? null
   }
@@ -871,6 +896,7 @@ function svaraJoin(ctx: Ctx, playerId: string): void {
   const round = state.round
   if (!round || round.kind !== 'svara-joining') fail('not-allowed', 'no Svara is open for joining')
   const joining = round as SvaraJoiningRound
+  if (joining.closed || joining.declined?.includes(playerId)) fail('not-allowed', 'the joining decision is closed')
   const pot = lockedPot(state, joining.potId)
   if (pot.eligible.includes(playerId)) fail('not-allowed', `${playerId} already has rights to this Svara`)
   // §6.2: вече участващи в мача и неотпаднали; отсъстващ не прави доброволни действия.
@@ -1077,8 +1103,10 @@ function setAbsent(ctx: Ctx, playerId: string, absent: boolean): void {
   if (typeof absent !== 'boolean') fail('invalid-command', 'absent must be boolean')
   const status = state.status[playerId]
   if (status !== 'active' && status !== 'absent') fail('not-allowed', `${playerId} is ${status}`)
+  state.pendingReturns = (state.pendingReturns ?? []).filter((id) => id !== playerId)
   if (!absent) {
     state.status[playerId] = 'active'
+    if (!state.round) finishRound(ctx, null)
     return
   }
   const round = state.round
@@ -1129,6 +1157,7 @@ function exitMatch(ctx: Ctx, playerId: string): void {
     pushLedger(ctx, { type: 'exit-removed', from: `stack:${playerId}`, to: 'removed', amount: unused, roundId: state.round?.roundId ?? null, potId: null, playerId })
   }
   state.status[playerId] = 'exited'
+  state.pendingReturns = (state.pendingReturns ?? []).filter((id) => id !== playerId)
   const round = state.round
   let roundToSettle: 'ordinary' | 'svara' | null = null
   if ((round?.kind === 'ordinary' || round?.kind === 'svara') && round.participants.includes(playerId)) {
@@ -1159,6 +1188,111 @@ function absenceExpired(ctx: Ctx, playerId: string): void {
   dropLockedRights(ctx, playerId)
   if (svaraToSettle) settleSvaraDeal(ctx)
   else if (!state.round) finishRound(ctx, null)
+}
+
+/** Safe server scheduling facts, without cards, balances, ledger or engine references. */
+export function describeSvaraLifecycle(state: SvaraMatchState) {
+  const round = state.round
+  const activePlayerIds = state.seats.filter((id) => state.status[id] === 'active')
+  const returningPlayerIds = (state.pendingReturns ?? []).filter((id) => state.status[id] === 'absent')
+  const readyPlayerIds = state.seats.filter((id) => activePlayerIds.includes(id) || returningPlayerIds.includes(id))
+  const betting = round && (round.kind === 'ordinary' || round.kind === 'svara') ? round.betting : null
+  const pot = round?.kind === 'svara-joining' ? state.lockedPots.find((p) => p.potId === round.potId) : null
+  const candidates = round?.kind === 'svara-joining' && pot
+    ? state.seats.filter((id) => state.status[id] === 'active' && !pot.eligible.includes(id) && state.stacks[id]! >= round.fee)
+    : []
+  return {
+    phase: state.phase, roundId: round?.roundId ?? null, roundKind: round?.kind ?? null,
+    atBoundary: !round || round.kind === 'svara-joining' || round.kind === 'allin-svara',
+    activePlayerIds, readyPlayerIds, returningPlayerIds,
+    // An off-turn exit/forced fold must not grant the current actor a fresh
+    // deadline. Voluntary actions plus actor/round identify the actual turn.
+    actorId: betting?.toAct ?? null, actionVersion: betting?.log.filter((entry) => entry.kind !== 'forced-fold').length ?? 0,
+    actorAbsent: !!betting?.toAct && state.status[betting.toAct] === 'absent',
+    joining: round?.kind === 'svara-joining' ? {
+      open: !round.closed, candidates,
+      undecided: candidates.filter((id) => !round.declined?.includes(id)),
+      holdersReady: !!pot && pot.eligible.every((id) => state.status[id] === 'active'),
+    } : null,
+  }
+}
+
+function requestReturn(ctx: Ctx, playerId: string): void {
+  requirePhase(ctx, 'in-progress')
+  requireSeated(ctx, playerId)
+  if (ctx.state.status[playerId] !== 'absent') fail('not-allowed', 'only an absent player can request return')
+  if (!ctx.state.pendingReturns?.includes(playerId)) (ctx.state.pendingReturns ??= []).push(playerId)
+}
+
+function activateReturns(ctx: Ctx): void {
+  requirePhase(ctx, 'in-progress')
+  if (!describeSvaraLifecycle(ctx.state).atBoundary) fail('not-allowed', 'returns wait until the next deal')
+  for (const id of ctx.state.pendingReturns ?? []) if (ctx.state.status[id] === 'absent') ctx.state.status[id] = 'active'
+  ctx.state.pendingReturns = []
+}
+
+function svaraDecline(ctx: Ctx, playerId: string): void {
+  requirePhase(ctx, 'in-progress')
+  requireSeated(ctx, playerId)
+  const round = ctx.state.round
+  if (round?.kind !== 'svara-joining' || round.closed) fail('not-allowed', 'no joining decision is open')
+  const joining = round as SvaraJoiningRound
+  const pot = lockedPot(ctx.state, joining.potId)
+  if (ctx.state.status[playerId] !== 'active' || pot.eligible.includes(playerId)) fail('not-allowed', 'not an external active player')
+  if (!joining.declined?.includes(playerId)) (joining.declined ??= []).push(playerId)
+}
+
+function closeSvaraJoining(ctx: Ctx, roundId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = ctx.state.round
+  if (round?.kind !== 'svara-joining' || round.roundId !== roundId || round.closed) fail('not-allowed', 'stale joining window')
+  ;(round as SvaraJoiningRound).closed = true
+}
+
+function timeoutTurn(ctx: Ctx, command: Extract<SvaraMatchCommand, { type: 'turn-timeout' }>): void {
+  requirePhase(ctx, 'in-progress')
+  const round = ctx.state.round
+  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || round.roundId !== command.roundId ||
+      round.betting.toAct !== command.playerId || describeSvaraLifecycle(ctx.state).actionVersion !== command.actionVersion) fail('not-allowed', 'stale turn timeout')
+  const bettingRound = round as OrdinaryRound | SvaraDealRound
+  const status = ctx.state.status[command.playerId]
+  if (status !== 'active' && status !== 'absent') fail('not-allowed', 'player cannot time out')
+  // One atomic engine operation, not two separately committed fold/absence steps.
+  ctx.state.status[command.playerId] = 'absent'
+  bettingRound.betting = forceSvaraFold(bettingRound.betting, command.playerId)
+  if (bettingRound.betting.complete) {
+    if (bettingRound.kind === 'ordinary') settleOrdinary(ctx)
+    else settleSvaraDeal(ctx)
+  }
+}
+
+function finishPresenceWait(ctx: Ctx, winnerId: string | null): void {
+  requirePhase(ctx, 'in-progress')
+  const { state } = ctx
+  const view = describeSvaraLifecycle(state)
+  if (!view.atBoundary) fail('not-allowed', 'the current deal must finish first')
+  if (winnerId === null ? view.readyPlayerIds.length !== 0 : view.readyPlayerIds.length !== 1 || view.readyPlayerIds[0] !== winnerId) {
+    fail('not-allowed', 'presence changed during the wait')
+  }
+  // Free stacks remain their owners' balances. Only unresolved pots transfer;
+  // cancellation closes them into the existing removed account, never a payout.
+  const close = (from: SvaraMatchAccount, amount: number, potId: string) => {
+    if (winnerId !== null) state.stacks[winnerId] = state.stacks[winnerId]! + amount
+    else state.removedChips += amount
+    pushLedger(ctx, { type: winnerId === null ? 'abandoned-pot-removed' : 'absence-pot-award',
+      from, to: winnerId === null ? 'removed' : `stack:${winnerId}`, amount,
+      roundId: state.round?.roundId ?? null, potId, playerId: winnerId })
+  }
+  for (const pot of state.lockedPots) close(`locked:${pot.potId}`, pot.amount, pot.potId)
+  for (const carry of state.carried) close(`carried:${carry.carryId}`, carry.amount, carry.fromPotId)
+  state.lockedPots = []
+  state.carried = []
+  state.round = null
+  state.pendingReturns = []
+  if (winnerId !== null) state.status[winnerId] = 'active'
+  state.winnerId = winnerId
+  state.finishReason = winnerId === null ? 'all-absent' : 'prolonged-absence'
+  state.phase = 'finished'
 }
 
 // ── Изглед за играч и опции ─────────────────────────────────────────────────

@@ -124,7 +124,7 @@ export type SvaraSnapshotBettingRound = {
 
 export type SvaraSnapshotRound =
   | SvaraSnapshotBettingRound
-  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[] }
+  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
   | { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number }
 
 export type SvaraSnapshotLockedPot = {
@@ -179,6 +179,8 @@ export type SvaraMatchSnapshotMessage = {
     status: SvaraSeatStatus
     /** Погледнал ли е зрителят картите си в текущото раздаване. */
     looked: boolean
+    returnPending: boolean
+    svaraDecision: 'joined' | 'declined' | 'undecided' | null
     /** Собствените карти — само след „поглеждане“; иначе null. */
     cards: SvaraCardCode[] | null
     /** Позволените действия в наддаването (само за зрителя, само на негов ход). */
@@ -190,7 +192,8 @@ export type SvaraMatchSnapshotMessage = {
   removedChips: number
   totalChips: number
   history: { totalRounds: number; showdownReveal: typeof SVARA_SNAPSHOT_SHOWDOWN_REVEAL; recent: SvaraSnapshotHistoryRecord[] }
-  result: { finished: boolean; closed: boolean; winnerId: string | null }
+  result: { finished: boolean; closed: boolean; winnerId: string | null;
+    aborted: boolean; reason: 'prolonged-absence' | 'all-absent' | null; message: string | null }
 }
 
 export class SvaraSnapshotAccessError extends Error {
@@ -240,7 +243,7 @@ function publicHistoryRecord(record: SvaraRoundRecord, seats: readonly string[])
 function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
   const round = state.round
   if (!round) return null
-  if (round.kind === 'svara-joining') return { kind: 'svara-joining', roundId: round.roundId, potId: round.potId, fee: round.fee, joiners: [...round.joiners] }
+  if (round.kind === 'svara-joining') return { kind: 'svara-joining', roundId: round.roundId, potId: round.potId, fee: round.fee, joiners: [...round.joiners], closed: round.closed ?? false }
   if (round.kind === 'allin-svara') return { kind: 'allin-svara', roundId: round.roundId, potIds: [...round.potIds], iteration: round.iteration }
   const betting = round.betting
   const carriedIn = round.kind === 'ordinary' ? round.deadMoney : 0
@@ -313,6 +316,11 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
       seatIndex,
       status: state.status[viewerId]!,
       looked: view.ownLooked,
+      returnPending: state.pendingReturns?.includes(viewerId) ?? false,
+      svaraDecision: round?.kind !== 'svara-joining' ? null : round.joiners.includes(viewerId) ? 'joined'
+        : round.declined?.includes(viewerId) ? 'declined'
+        : !round.closed && state.status[viewerId] === 'active' && state.stacks[viewerId]! >= round.fee &&
+          !state.lockedPots.find((p) => p.potId === round.potId)?.eligible.includes(viewerId) ? 'undecided' : null,
       cards: view.ownCards ? [...view.ownCards] : null,
       betting: options
         ? {
@@ -337,7 +345,10 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
       showdownReveal: SVARA_SNAPSHOT_SHOWDOWN_REVEAL,
       recent: state.history.slice(-SVARA_SNAPSHOT_HISTORY_LIMIT).map((record) => publicHistoryRecord(record, state.seats)),
     },
-    result: { finished: state.phase === 'finished', closed: state.phase === 'closed', winnerId: state.winnerId },
+    result: { finished: state.phase === 'finished', closed: state.phase === 'closed', winnerId: state.winnerId,
+      aborted: state.finishReason === 'all-absent', reason: state.finishReason ?? null,
+      message: state.finishReason === 'prolonged-absence' ? 'Победа поради продължително отсъствие на противниците'
+        : state.finishReason === 'all-absent' ? 'Мачът е прекратен, защото всички играчи отсъстват' : null },
   }
   deepFreeze(message)
   builtSnapshots.add(message)

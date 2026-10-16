@@ -12,11 +12,5 @@ export function createSvaraCommandExecutor(runtime: SvaraMatchRuntime) {
         commandId: message.commandId, status: result.status,
         revision: runtime.getMatchRevision(message.matchId), phase: result.phase }
     },
-    advanceOne(matchId: string): boolean {
-      const command = runtime.getAutomaticCommand(matchId)
-      if (!command) return false
-      runtime.executeSystemCommand(matchId, `progress:${runtime.getMatchRevision(matchId)}:${command.type}`, command)
-      return true
-    },
   }
 }
