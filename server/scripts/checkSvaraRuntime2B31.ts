@@ -723,7 +723,7 @@ check('22. runtime импортира само engine/protocol, deadline planner
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
   for (const match of source.matchAll(/from '([^']+)'/g)) {
     assert(/^\.\.\/engine\/svara[A-Za-z]+\.js$/.test(match[1]!) || match[1] === '../protocol/svaraSnapshotProtocol.js' || match[1] === 'node:perf_hooks' ||
-      match[1] === './svaraDeadlines.js' || match[1] === './svaraPersistence.js', `imports ${match[1]}`)
+      match[1] === './svaraDeadlines.js' || match[1] === './svaraPersistence.js' || match[1] === './svaraStoredMatchValidation.js', `imports ${match[1]}`)
   }
   for (const banned of ['WebSocket', 'sqlite', 'setTimeout', 'setInterval', 'process.env', 'buildSvaraDeckForHands', 'createDeck']) {
     assert(!code.includes(banned), `runtime code mentions ${banned}`)

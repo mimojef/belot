@@ -38,11 +38,13 @@
 import { performance } from 'node:perf_hooks'
 import { planSvaraDeadlines, svaraEpochNow, type SvaraDeadline } from './svaraDeadlines.js'
 import { SvaraPersistenceError, type SvaraMatchPersistence, type SvaraStoredMatch } from './svaraPersistence.js'
+import { validateSvaraStoredMatch } from './svaraStoredMatchValidation.js'
 import { SvaraInvalidInputError } from '../engine/svaraCards.js'
 import type { SvaraBettingAction, SvaraBettingOptions } from '../engine/svaraBetting.js'
 import type { SvaraRandomSource } from '../engine/svaraRandom.js'
 import {
   applySvaraMatchCommand,
+  copyRestoredSvaraMatchForServer,
   createSvaraMatch,
   createSvaraMatchPlayerView,
   describeSvaraMatchOptions,
@@ -175,6 +177,8 @@ export type SvaraRegisterMatchInput = {
 
 export type SvaraMatchRuntime = {
   registerMatch(input: SvaraRegisterMatchInput): void
+  /** Atomic server-only batch import. No commands, SQL writes or timer handles. */
+  restoreMatchesForServer(snapshots: readonly SvaraStoredMatch[]): void
   hasMatch(matchId: string): boolean
   listMatchIds(): string[]
   getPublicTable(matchId: string): SvaraPublicTable
@@ -330,6 +334,26 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
   }
 
   const runtime: SvaraMatchRuntime = {
+    restoreMatchesForServer(snapshots) {
+      const prepared = new Map<string, MatchEntry>(), participants = new Set<string>()
+      for (const entry of matches.values()) for (const playerId of entry.state.seats) {
+        if (['active', 'absent'].includes(entry.state.status[playerId]!)) participants.add(playerId)
+      }
+      for (const snapshot of snapshots) {
+        validateSvaraStoredMatch(snapshot)
+        const matchId = snapshot.matchId
+        if (matches.has(matchId) || prepared.has(matchId) || writing.has(matchId)) throw new SvaraPersistenceError('match-exists')
+        if (!['lobby', 'in-progress'].includes(snapshot.state.phase)) throw new SvaraPersistenceError('invalid-snapshot')
+        for (const playerId of snapshot.state.seats) if (['active', 'absent'].includes(snapshot.state.status[playerId]!)) {
+          if (participants.has(playerId)) throw new SvaraPersistenceError('commitment-conflict')
+          participants.add(playerId)
+        }
+        prepared.set(matchId, { state: copyRestoredSvaraMatchForServer(snapshot.state), revision: snapshot.revision,
+          deadlines: structuredClone(snapshot.deadlines), deadlineSequence: snapshot.deadlineSequence,
+          stats: { applied: 0, duplicate: 0, rejected: 0, totalMs: 0, maxMs: 0, lastMs: 0 } })
+      }
+      for (const [matchId, entry] of prepared) matches.set(matchId, entry)
+    },
     registerMatch(input) {
       if (!input || typeof input !== 'object') fail('invalid-input', 'input required')
       const matchId = requireId(input.matchId, SVARA_RUNTIME_LIMITS.maxMatchIdLength, 'matchId')

@@ -6,7 +6,8 @@ import { SvaraMatchError } from './engine/svaraMatch.js'
 import { createSvaraMatchRuntime, SvaraRuntimeError, type SvaraMatchRuntime } from './runtime/svaraMatchRuntime.js'
 import { createSvaraCommandExecutor } from './runtime/createSvaraCommandExecutor.js'
 import { createSvaraLifecycle, type SvaraClock } from './runtime/createSvaraLifecycle.js'
-import type { SvaraMatchPersistence } from './runtime/svaraPersistence.js'
+import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
+import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient } from './protocol/svaraSnapshotProtocol.js'
 
@@ -17,6 +18,7 @@ type Transport = {
   getSession: () => SvaraAccessSession
   send: (message: SvaraLobbyServerMessage | string) => void
 }
+export type SvaraRecoveryState = 'initialization' | 'ready' | 'failed' | 'disabled'
 
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
@@ -38,6 +40,8 @@ export function createSvaraLobby(deps: {
     onChange: (matchId, before) => publish(matchId, before.players.map((p) => p.playerId), JSON.stringify(before) !== JSON.stringify(runtime.getPublicTable(matchId))),
   })
   let stopped = false
+  let recoveryState: SvaraRecoveryState = deps.persistence ? 'initialization' : 'ready'
+  let recoveryAttempted = false
 
   function deliver(transport: Transport, payload: SvaraLobbyServerMessage | string) {
     try { transport.send(payload) } catch (cause) { deps.onError?.(cause) }
@@ -82,6 +86,7 @@ export function createSvaraLobby(deps: {
     deliver(transport, lifecycle.timing(matchId))
   }
   function publish(matchId: string, previousPlayers: string[], publicChanged = true) {
+    if (recoveryState !== 'ready') return
     const table = runtime.getPublicTable(matchId)
     const tables = publicChanged ? publicTables() : []
     const recipients = new Set([...previousPlayers, ...table.players.map((p) => p.playerId)])
@@ -111,10 +116,36 @@ export function createSvaraLobby(deps: {
   }
 
   return {
+    getRecoveryState: () => recoveryState,
+    /** Synchronous startup barrier; call only after the other games' commitments are restored. */
+    initializeRecovery(): SvaraRecoveryState {
+      if (recoveryAttempted || recoveryState !== 'initialization' || stopped) return recoveryState
+      recoveryAttempted = true
+      try {
+        const snapshots = deps.persistence!.loadActiveMatches()
+        for (const snapshot of snapshots) for (const playerId of snapshot.state.seats) {
+          if (['active', 'absent'].includes(snapshot.state.status[playerId]!) && deps.hasOtherGameCommitment(playerId)) {
+            throw new SvaraPersistenceError('commitment-conflict')
+          }
+        }
+        runtime.restoreMatchesForServer(snapshots)
+        // Every state and admission guard is now installed. Real Node callbacks
+        // cannot run during this synchronous barrier. A failed expiry stops all
+        // schedules; committed preceding transitions remain durable for next boot.
+        for (const matchId of runtime.listMatchIds()) lifecycle.sync(matchId)
+        recoveryState = 'ready'
+      } catch (cause) {
+        lifecycle.shutdown()
+        const safe = cause instanceof SvaraPersistenceError ? cause : new SvaraPersistenceError('recovery-failed')
+        recoveryState = safe.code === 'schema-missing' && !isSvaraTestFeatureEnabled() ? 'disabled' : 'failed'
+        if (recoveryState === 'failed') deps.onError?.(safe)
+      }
+      return recoveryState
+    },
     attachConnection(connectionId: string, transport: Transport) { connections.set(connectionId, transport) },
     reconnect(connectionId: string) {
       const transport = connections.get(connectionId)
-      if (!transport || stopped) return
+      if (!transport || stopped || recoveryState !== 'ready') return
       const session = transport.getSession()
       if (!evaluateSvaraAccess(session).allowed || session?.profile.profileId !== transport.profileId || !transport.profileId) return
       const table = findCommitment(transport.profileId)
@@ -142,7 +173,7 @@ export function createSvaraLobby(deps: {
       const reject = (code: SvaraLobbyErrorCode) => error(transport, code, requestId, isGameplay, commandId)
       if (!decision.allowed) { reject(decision.reason); return }
       if (session?.profile.profileId !== transport.profileId) { reject('unauthenticated'); return }
-      if (shuttingDown || stopped) { reject('server_unavailable'); return }
+      if (shuttingDown || stopped || recoveryState !== 'ready') { reject('server_unavailable'); return }
       // Defense in depth for direct callers as well as the network parser.
       const message = parseSvaraLobbyMessage(input)
       if (!message) { reject('invalid_input'); return }

@@ -478,6 +478,38 @@ function sealMatchArchives(next: SvaraMatchState, previous: SvaraMatchState, com
   immutableArchives.add(next.processedCommands)
 }
 
+/** Server restore boundary: detached data and rebuilt immutable archive metadata, no gameplay transition. */
+export function copyRestoredSvaraMatchForServer(state: SvaraMatchState): SvaraMatchState {
+  const copy = structuredClone(state)
+  assertSvaraMatchInvariants(copy)
+  // JSON loses the deliberate alias created by a repeated locked-pot tie:
+  // settleSvaraDeal/advanceAllInSvara assign the SAME best[] to the live pot
+  // and its latest locked-source outcome. Initial round-source locks copy the
+  // array and must NOT be linked. An intervening exit/absence-expired replaces
+  // eligible[], so even a later identical membership must remain detached.
+  const commands = Object.values(copy.processedCommands)
+  const completedAt = new Map<string, number>()
+  commands.forEach((record, index) => record.outcome.completedRounds.forEach((roundId) => completedAt.set(roundId, index)))
+  for (const pot of copy.lockedPots) {
+    for (let index = copy.history.length - 1; index >= 0; index--) {
+      const record = copy.history[index]!
+      const outcome = record.pots.find((item) => item.source === 'locked' && item.outcome.kind === 'locked' && item.outcome.lockedPotId === pot.potId)?.outcome
+      if (!outcome || outcome.kind !== 'locked') continue
+      const at = completedAt.get(record.roundId)
+      if (at !== undefined && JSON.stringify(outcome.tiedPlayers) === JSON.stringify(pot.eligible)) {
+        const detached = commands.slice(at + 1).some((item) => {
+          const command = JSON.parse(item.fingerprint) as SvaraMatchCommand
+          return (command.type === 'exit' || command.type === 'absence-expired') && outcome.tiedPlayers.includes(command.playerId)
+        })
+        if (!detached) outcome.tiedPlayers = pot.eligible
+      }
+      break
+    }
+  }
+  sealMatchArchives(copy, copy, '')
+  return copy
+}
+
 export function applySvaraMatchCommand(state: SvaraMatchState, command: SvaraMatchCommand, env: SvaraMatchEnv = {}): SvaraMatchApplyResult {
   if (!command || typeof command !== 'object') fail('invalid-command', 'command required')
   if (!isNonEmptyString(command.commandId)) fail('invalid-command', 'commandId required')

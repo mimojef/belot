@@ -320,33 +320,38 @@ try {
     assert.throws(() => freshRuntime.registerMatch({ matchId: a.matchId, creator: { playerId: 'a' }, capacity: 2, entryFee: 10, startMode: 'auto' }), (e: unknown) => e instanceof SvaraPersistenceError && e.code === 'match-exists')
     assert(!freshRuntime.hasMatch(a.matchId)); a.roundtrip()
   })
-  await check('orphaned active matches retain cross-game/lobby commitment without restoring tables', () => {
+  await check('before recovery, durable commitments remain protected and commands are unavailable', () => {
     const t = fixture(); assert(store.findActiveMatchId('a'))
     const fresh = createSvaraLobby({ persistence: store, hasOtherGameCommitment: () => false }); shutdowns.push(() => fresh.shutdown())
     const messages: any[] = []
     fresh.attachConnection('fresh', { profileId: 'a', getSession: () => ({ account: { role: 'admin' }, profile: { profileId: 'a' } }), send: (message) => messages.push(message) })
     assert(fresh.findCommitment('a')); fresh.reconnect('fresh'); assert.equal(messages.length, 0)
     fresh.handle('fresh', { type: 'create_svara_table', requestId: 'new-table', capacity: 2, entryFee: 1000, startMode: 'auto' })
-    assert.equal(messages.at(-1).code, 'svara_commitment'); t.roundtrip()
+    assert.equal(messages.at(-1).code, 'server_unavailable'); t.roundtrip()
   })
-  await check('production-style lobby creation/join use the durable runtime before any success frame', () => {
+  await check('production-style lobby creation/join use the durable runtime before any success frame', async () => {
     assert.throws(() => createSvaraLobby({ hasOtherGameCommitment: () => false }), /requires durable persistence/)
     const messages: any[] = [], clock = new Clock(), creatorId = id(), otherId = id()
-    const lobby = createSvaraLobby({ persistence: store, clock, hasOtherGameCommitment: () => false }); shutdowns.push(() => lobby.shutdown())
+    const isolatedPath = join(directory, 'lobby.sqlite')
+    await ensureServerDatabaseReady({ databaseFilePathOverride: isolatedPath })
+    const isolated = await createSvaraMatchSnapshotStore(isolatedPath)
+    const lobby = createSvaraLobby({ persistence: isolated, clock, hasOtherGameCommitment: () => false })
+    shutdowns.push(() => { lobby.shutdown(); isolated.close() })
+    assert.equal(lobby.initializeRecovery(), 'ready')
     for (const playerId of [creatorId, otherId]) lobby.attachConnection(playerId, { profileId: playerId,
       getSession: () => ({ account: { role: 'admin' }, profile: { profileId: playerId } }), send: (message) => {
         const frame = typeof message === 'string' ? JSON.parse(message) : message
-        if (frame.type === 'svara_table_updated') assert(store.load(frame.table.matchId))
-        if (frame.type === 'svara_match_snapshot') assert.equal(store.load(frame.matchId)!.revision, frame.revision)
+        if (frame.type === 'svara_table_updated') assert(isolated.load(frame.table.matchId))
+        if (frame.type === 'svara_match_snapshot') assert.equal(isolated.load(frame.matchId)!.revision, frame.revision)
         privacy(frame); messages.push(frame)
       } })
     lobby.handle(creatorId, { type: 'create_svara_table', requestId: id(), capacity: 2, entryFee: 1000, startMode: 'auto' })
     const matchId = messages.find((m) => m.type === 'svara_table_updated').table.matchId
-    assert.equal(store.load(matchId)!.revision, 0)
+    assert.equal(isolated.load(matchId)!.revision, 0)
     lobby.handle(otherId, { type: 'join_svara_table', matchId, requestId: id() })
-    assert.equal(store.load(matchId)!.state.phase, 'in-progress'); assert.equal(store.load(matchId)!.deadlines[0]!.deadlineAt, clock.now() + 15000)
+    assert.equal(isolated.load(matchId)!.state.phase, 'in-progress'); assert.equal(isolated.load(matchId)!.deadlines[0]!.deadlineAt, clock.now() + 15000)
     const count = messages.length
-    lobby.disconnect(creatorId); lobby.reconnect(otherId); assert(store.findActiveMatchId(creatorId)); assert(messages.length > count)
+    lobby.disconnect(creatorId); lobby.reconnect(otherId); assert(isolated.findActiveMatchId(creatorId)); assert(messages.length > count)
   })
   await check('lossy serialization and invalid formats fail before any partial SQL write', () => {
     const t = fixture(), before = t.stored()

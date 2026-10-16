@@ -12,7 +12,7 @@ export type SvaraStoredMatch = {
 }
 
 export class SvaraPersistenceError extends Error {
-  constructor(readonly code: 'write-failed' | 'revision-conflict' | 'match-exists' | 'invalid-snapshot') {
+  constructor(readonly code: 'write-failed' | 'revision-conflict' | 'match-exists' | 'invalid-snapshot' | 'recovery-failed' | 'commitment-conflict' | 'schema-missing') {
     super(`Svara persistence ${code}`) // No SQL, hidden state or underlying exception in logs/clients.
     this.name = 'SvaraPersistenceError'
   }
@@ -21,8 +21,9 @@ export class SvaraPersistenceError extends Error {
 export interface SvaraMatchPersistence {
   /** Synchronous commit. null inserts only; a revision replaces exactly that revision. */
   save(snapshot: SvaraStoredMatch, expectedRevision: number | null): void
-  /** Strictly server-only; no automatic startup/recovery in 2Б.3.6А. */
+  /** Strictly server-only validated reads; never a client snapshot. */
   load(matchId: string): SvaraStoredMatch | null
-  /** Read-only admission guard until startup recovery exists. */
+  loadActiveMatches(): SvaraStoredMatch[]
+  /** Durable admission guard, including initialization/quarantine. */
   findActiveMatchId(playerId: string): string | null
 }
