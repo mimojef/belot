@@ -68,6 +68,7 @@ export type SvaraRuntimeErrorCode =
   | 'not-a-participant'
   | 'command-not-allowed'
   | 'match-not-finished'
+  | 'stale-action'
 
 /** Грешка на runtime слоя; грешките на правилата идват като SvaraMatchError от двигателя. */
 export class SvaraRuntimeError extends Error {
@@ -103,6 +104,8 @@ export type SvaraSystemCommand =
   | { type: 'advance-allin-svara' }
   | { type: 'absence-expired'; playerId: string }
   | { type: 'set-absent'; playerId: string; absent: boolean }
+
+export type SvaraAutomaticCommand = Extract<SvaraSystemCommand, { type: 'start-next-round' | 'svara-start' | 'advance-allin-svara' }>
 
 export type SvaraRuntimeCommandResult = {
   status: 'applied' | 'duplicate'
@@ -165,8 +168,11 @@ export type SvaraMatchRuntime = {
   getPublicTable(matchId: string): SvaraPublicTable
   isParticipant(matchId: string, playerId: string): boolean
   isMatchFinished(matchId: string): boolean
-  executeParticipantCommand(matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown): SvaraRuntimeCommandResult
+  executeParticipantCommand(matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown, expectedRevision?: number): SvaraRuntimeCommandResult
   executeSystemCommand(matchId: string, systemCommandId: string, command: SvaraSystemCommand): SvaraRuntimeCommandResult
+  getMatchRevision(matchId: string): number
+  /** Server-only orchestration hint. Never closes an available joining opportunity. */
+  getAutomaticCommand(matchId: string): SvaraAutomaticCommand | null
   getPlayerView(matchId: string, actor: SvaraTrustedActor): SvaraRuntimePlayerView
   /** Защитен индивидуален snapshot за клиента (2Б.3.2) — само за самия доверен участник. */
   getPlayerSnapshot(matchId: string, actor: SvaraTrustedActor): SvaraMatchSnapshotMessage
@@ -247,6 +253,7 @@ const isTerminal = (state: SvaraMatchState) => state.phase === 'finished' || sta
 
 type MatchEntry = {
   state: SvaraMatchState
+  revision: number
   stats: { applied: number; duplicate: number; rejected: number; totalMs: number; maxMs: number; lastMs: number }
 }
 
@@ -274,6 +281,7 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
     const elapsed = performance.now() - started
     if (result.status === 'applied') {
       entry.state = result.state
+      entry.revision += 1
       entry.stats.applied += 1
       entry.stats.totalMs += elapsed
       entry.stats.maxMs = Math.max(entry.stats.maxMs, elapsed)
@@ -297,7 +305,7 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
         if (error instanceof SvaraInvalidInputError) fail('invalid-input', error.message)
         throw error
       }
-      matches.set(matchId, { state: state!, stats: { applied: 0, duplicate: 0, rejected: 0, totalMs: 0, maxMs: 0, lastMs: 0 } })
+      matches.set(matchId, { state: state!, revision: 0, stats: { applied: 0, duplicate: 0, rejected: 0, totalMs: 0, maxMs: 0, lastMs: 0 } })
     },
 
     hasMatch(matchId) {
@@ -321,7 +329,7 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       return isTerminal(entryOf(matchId).state)
     },
 
-    executeParticipantCommand(matchId, actor, clientCommandId, command) {
+    executeParticipantCommand(matchId, actor, clientCommandId, command, expectedRevision) {
       const entry = entryOf(matchId)
       const playerId = requireId(actor?.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'actor.playerId')
       const clientId = requireId(clientCommandId, SVARA_RUNTIME_LIMITS.maxClientCommandIdLength, 'clientCommandId')
@@ -331,10 +339,42 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       // playerId) отива към двигателя за идемпотентност/конфликт — напр.
       // повторено „напускане“ след като мястото вече е освободено.
       const alreadyProcessed = Object.hasOwn(entry.state.processedCommands, normalized.commandId)
-      if (!alreadyProcessed && normalized.type !== 'join-seat' && !entry.state.seats.includes(playerId)) {
+      if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+        fail('invalid-input', 'expectedRevision must be a non-negative safe integer')
+      }
+      // Duplicates/conflicts go to the engine BEFORE the stale check: a retry
+      // after a lost response must not debit chips again or become a new move.
+      if (!alreadyProcessed && expectedRevision !== undefined && expectedRevision !== entry.revision) {
+        fail('stale-action', 'the match has advanced')
+      }
+      if (!alreadyProcessed && normalized.type !== 'join-seat' && (!entry.state.seats.includes(playerId) || entry.state.status[playerId] === 'exited')) {
         fail('not-a-participant', `${playerId} is not a participant of ${matchId}`)
       }
       return apply(entry, normalized)
+    },
+
+    getMatchRevision(matchId) {
+      return entryOf(matchId).revision
+    },
+
+    getAutomaticCommand(matchId) {
+      const { state } = entryOf(matchId)
+      if (state.phase !== 'in-progress') return null
+      const round = state.round
+      if (!round) {
+        const startable = state.lockedPots.some((pot) => pot.kind === 'ordinary' && pot.eligible.every((id) => state.status[id] === 'active'))
+        const funded = state.seats.filter((id) => (state.status[id] === 'active' || state.status[id] === 'absent') && state.stacks[id]! > 0)
+        return startable || funded.length >= 2 ? { type: 'start-next-round' } : null
+      }
+      if (round.kind === 'allin-svara') return { type: 'advance-allin-svara' }
+      if (round.kind !== 'svara-joining') return null
+      const pot = state.lockedPots.find((p) => p.potId === round.potId)!
+      if (pot.eligible.some((id) => state.status[id] !== 'active')) return null
+      // No timer/decline policy in 2Б.3.4. Preserve the opportunity of every
+      // funded outsider (also an absent one); otherwise nobody can still join.
+      const canStillJoin = state.seats.some((id) => !pot.eligible.includes(id) &&
+        (state.status[id] === 'active' || state.status[id] === 'absent') && state.stacks[id]! >= round.fee)
+      return canStillJoin ? null : { type: 'svara-start' }
     },
 
     executeSystemCommand(matchId, systemCommandId, command) {
@@ -418,8 +458,8 @@ export function createSvaraRuntimeClientFacade(runtime: SvaraMatchRuntime): Svar
   return Object.freeze({
     hasMatch: (matchId: string) => runtime.hasMatch(matchId),
     isParticipant: (matchId: string, playerId: string) => runtime.isParticipant(matchId, playerId),
-    executeParticipantCommand: (matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown) =>
-      runtime.executeParticipantCommand(matchId, actor, clientCommandId, command),
+    executeParticipantCommand: (matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown, expectedRevision?: number) =>
+      runtime.executeParticipantCommand(matchId, actor, clientCommandId, command, expectedRevision),
     getPlayerView: (matchId: string, actor: SvaraTrustedActor) => runtime.getPlayerView(matchId, actor),
     getPlayerSnapshot: (matchId: string, actor: SvaraTrustedActor) => runtime.getPlayerSnapshot(matchId, actor),
   })

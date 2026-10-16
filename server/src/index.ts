@@ -868,6 +868,7 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'leave_svara_table':
     case 'start_svara_table':
     case 'request_svara_table_state':
+    case 'submit_svara_command':
     case 'request_private_games_list':
     case 'request_ludo_rooms_list':
     case 'request_ludo_games_list':
@@ -22450,7 +22451,9 @@ wsServer.on('connection', (socket, request) => {
           invalidSvaraMessage = isRecord(rawMessage) && typeof rawMessage.type === 'string' && SVARA_LOBBY_MESSAGE_TYPES.has(rawMessage.type)
         } catch { /* malformed JSON uses the existing generic error */ }
         if (invalidSvaraMessage) {
-          safeSendToConnection(connection.id, { type: 'svara_lobby_error', code: 'invalid_input', message: 'Невалидна заявка.' })
+          // Reuse live authentication and the bounded typed error path, even
+          // for recognized Svara envelopes rejected by the network parser.
+          svaraLobby.handle(connection.id, JSON.parse(rawText) as SvaraLobbyClientMessage, isServerShuttingDown)
           return
         }
         sendJsonMessage(socket, {
@@ -27363,6 +27366,7 @@ function shutdownServer(signal: NodeJS.Signals): Promise<void> {
 
     let exitCode = 0
     isServerShuttingDown = true
+    svaraLobby.shutdown()
 
     try {
       wsServer.close((error) => {

@@ -287,10 +287,10 @@ try {
       await joinTable(b, id)
       await ask(a, command('start_svara_table', id), 'svara_table_updated')
       const state = await snapshot(a, id)
-      assert.equal(state.phase, 'in-progress'); assert.equal(state.round, null)
-      assert.equal(state.dealerId, null, 'dealer is exposed with the first deal by the existing snapshot protocol')
+      assert.equal(state.phase, 'in-progress'); assert.equal(state.round.kind, 'ordinary')
+      assert(players.some((player) => player.profileId === state.dealerId), 'first deal exposes its authoritative dealer')
       assert.equal(state.totalChips, capacity * 500)
-      assert(state.seats.every((p: any) => p.stack === 500 && p.cardCount === 0))
+      assert(state.seats.every((p: any) => p.stack === 490 && p.cardCount === 3))
       for (const player of players.slice(1)) {
         await leave(player, id)
         await denied(player, { type: 'request_svara_table_state', matchId: id }, 'not_a_participant')
@@ -330,6 +330,63 @@ try {
     await denied(activeGuest, command('join_svara_table', activeId), 'already_seated')
     assert((await tables(observer)).some((t) => t.matchId === activeId && t.phase === 'in-progress' && t.players.length === 2))
     await leave(activeGuest, activeId)
+  })
+  await check('WS 2Б.3.4: authenticated look/blind bet, stale/conflicting/duplicate moves and reconnect', async () => {
+    const host = await user(), guest = await user(), stranger = await user()
+    const matchId = await createTable(host, 2, 'auto')
+    await joinTable(guest, matchId)
+    const initial = await snapshot(host, matchId)
+    assert.equal(initial.round.kind, 'ordinary', 'first deal is a trusted automatic transition')
+    assert.equal(initial.you.cards, null)
+    assert.equal((await snapshot(guest, matchId)).you.cards, null)
+    const active = initial.toActId === host.profileId ? host : guest
+    const passive = active === host ? guest : host
+    const move = { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: initial.revision,
+      command: { type: 'act', action: { kind: 'blind-bet', total: initial.table.entryChips * 2 }, playerId: passive.profileId }, playerId: passive.profileId }
+    send(active, move)
+    const applied = await frame(active, (f) => f.type === 'svara_command_result' && f.commandId === move.commandId)
+    assert.equal(applied.status, 'applied')
+    const committed = await snapshot(passive, matchId)
+    assert.equal(committed.toActId, passive.profileId)
+    send(active, { ...move, commandId: requestId() })
+    assert.equal((await frame(active, (f) => f.type === 'svara_command_error')).code, 'stale_action')
+    send(active, { ...move, command: { type: 'act', action: { kind: 'blind-bet', total: initial.table.entryChips * 4 } } })
+    assert.equal((await frame(active, (f) => f.type === 'svara_command_error')).code, 'command_id_conflict')
+    active.ws.close()
+    const reconnected = await connect(active.cookie, active.profileId)
+    send(reconnected, move)
+    assert.equal((await frame(reconnected, (f) => f.type === 'svara_command_result' && f.commandId === move.commandId)).status, 'duplicate')
+    assert.deepEqual(await snapshot(passive, matchId), committed)
+    const lookId = requestId()
+    send(passive, { type: 'submit_svara_command', matchId, commandId: lookId, expectedRevision: committed.revision, command: { type: 'look', playerId: active.profileId }, profileId: active.profileId })
+    assert.equal((await frame(passive, (f) => f.type === 'svara_command_result' && f.commandId === lookId)).status, 'applied')
+    const own = await snapshot(passive, matchId), hidden = await snapshot(reconnected, matchId)
+    assert.equal(own.you.cards.length, 3); assert.equal(hidden.you.cards, null)
+    checkPrivacy(own); checkPrivacy(hidden)
+    for (const card of own.you.cards) assert(!JSON.stringify(hidden).includes(`"${card}"`))
+    for (const [client, command, code] of [
+      [stranger, { type: 'look', playerId: passive.profileId }, 'not_a_participant'],
+      [passive, { type: 'start-next-round' }, 'invalid_input'],
+      [passive, { type: 'act', action: { kind: 'bet', total: -1 } }, 'invalid_input'],
+    ] as const) {
+      send(client, { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: own.revision, command })
+      assert.equal((await frame(client, (f) => f.type === 'svara_command_error')).code, code)
+    }
+    // No wallet mutation; disconnect retains commitment and reverse guards.
+    send(reconnected, { type: 'join_matchmaking', stake: 5000 })
+    assert.equal((await frame(reconnected, (f) => f.type === 'error')).code, 'svara_commitment_active')
+    db((database) => database.prepare("UPDATE accounts SET role = 'player' WHERE email = ?").run(passive.email!))
+    send(passive, { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: own.revision, command: { type: 'look' } })
+    assert.equal((await frame(passive, (f) => f.type === 'svara_command_error')).code, 'forbidden_role')
+    db((database) => database.prepare("UPDATE accounts SET role = 'admin' WHERE email = ?").run(passive.email!))
+    await http('/api/auth/logout', {}, stranger.cookie)
+    if (stranger.ws.readyState === WebSocket.OPEN) {
+      send(stranger, { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: own.revision, command: { type: 'look' } })
+      assert.equal((await frame(stranger, (f) => f.type === 'svara_command_error')).code, 'unauthenticated')
+    }
+    assert.deepEqual(await snapshot(passive, matchId), own, 'rejected commands preserve game revision/state')
+    await leave(passive, matchId)
+    assert.equal((await snapshot(reconnected, matchId)).phase, 'finished')
   })
   await check('WS: actual Belot/Ludo admission guards in both directions, including disconnected Svara member', async () => {
     assert.deepEqual(walletBalances(), originalBalances, 'Svara lobby/start/exit must not change wallets')
@@ -428,9 +485,11 @@ try {
   await stop()
   port = await freePort()
   await start('0')
-  await check('WS: feature flag OFF denies all six operations to an allowed authenticated role', async () => {
+  await check('WS: feature flag OFF denies all lobby and gameplay operations to an allowed authenticated role', async () => {
     const off = await connect(cookie, profileId)
     for (const payload of [{ type: 'request_svara_tables_list' }, create(), command('join_svara_table', 'any'), command('leave_svara_table', 'any'), command('start_svara_table', 'any'), { type: 'request_svara_table_state', matchId: 'any' }]) await denied(off, payload, 'feature_disabled')
+    send(off, { type: 'submit_svara_command', matchId: 'any', commandId: requestId(), expectedRevision: 0, command: { type: 'look' } })
+    assert.equal((await frame(off, (f) => f.type === 'svara_command_error')).code, 'feature_disabled')
   })
 } catch (error) {
   failed++; console.error('FAIL isolated WS setup/run:', error)
