@@ -9,7 +9,7 @@
  *
  *  [1]  Кошче само до собствените съобщения, с име/tooltip „Изтрий съобщението“
  *  [2]  Кошчето не променя ширината/подредбата на съобщението
- *  [3]  Десктоп: скрито без hover, видимо при посочване и при клавиатурен фокус;
+ *  [3]  Десктоп: винаги видимо, подчертано при посочване и клавиатурен фокус;
  *       мобилен (без hover): видимо винаги
  *  [4]  Потвърждение с точния текст и бутони „Отказ“/„Изтрий“
  *  [5]  „Отказ“ — нищо не се случва
@@ -107,14 +107,14 @@ async function runScenario(page: Page, label: string, isMobile: boolean): Promis
     assert(result.position === 'absolute' && result.dw < 0.5 && result.dh < 0.5 && result.dx < 0.5, JSON.stringify(result))
   })
 
-  await check(`${label} [3] видимост: ${isMobile ? 'без hover — видимо винаги' : 'скрито → hover/фокус видимо'}`, async () => {
+  await check(`${label} [3] видимост: ${isMobile ? 'без hover — видимо винаги' : 'винаги видимо; hover/фокус подчертава'}`, async () => {
     await page.mouse.move(1, 1)
     const idle = await opacityOf(page, 'own-old')
     if (isMobile) {
       const noHover = await page.evaluate(() => matchMedia('(hover: none)').matches)
       assert(noHover && idle > 0.5, `mobile opacity ${idle}, hover:none=${noHover}`)
     } else {
-      assert(idle === 0, `idle opacity ${idle}`)
+      assert(idle === 0.72, `idle opacity ${idle}`)
       await page.locator('[data-chat-message="own-old"]').hover()
       await page.waitForTimeout(250)
       const hovered = await opacityOf(page, 'own-old')

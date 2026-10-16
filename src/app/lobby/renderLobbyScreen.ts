@@ -6392,11 +6392,11 @@ function renderMobileFriendCard(
 
 // ─── Изтриване на собствено лично съобщение (кошче) ─────────────────────────
 // Кошчето е absolute-позиционирано ВЛЯВО извън собственото балонче — не
-// променя подредбата и ширината на съобщенията. Десктоп: показва се при
-// посочване или клавиатурен фокус; устройства без hover: винаги видимо.
+// променя подредбата и ширината на съобщенията. Винаги видимо, включително
+// на десктоп; посочването и клавиатурният фокус го подчертават допълнително.
 const PERSONAL_CHAT_DELETE_STYLE = `
   <style>
-    .pika-chat-del{opacity:0;transition:opacity .15s ease,background .15s ease,color .15s ease;border:0;border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.62);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+    .pika-chat-del{opacity:0.72;transition:opacity .15s ease,background .15s ease,color .15s ease;border:0;border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.62);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
     .pika-chat-own:hover .pika-chat-del,.pika-chat-own:focus-within .pika-chat-del,.pika-chat-del:focus-visible{opacity:1;}
     .pika-chat-del:hover{color:#fca5a5;background:rgba(239,68,68,0.14);}
     .pika-chat-del:focus-visible{outline:2px solid #d4a520;outline-offset:1px;}
