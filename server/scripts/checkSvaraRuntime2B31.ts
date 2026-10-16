@@ -716,13 +716,14 @@ check('21. едновременни мачове (20, редувани кома�
 // ─── G. Изолация на модула ──────────────────────────────────────────────────
 console.log('\n=== G. изолация на модула ===')
 
-check('22. runtime импортира само модули на двигателя, протокола (2Б.3.2) и node:perf_hooks; без глобално състояние', () => {
+check('22. runtime импортира само engine/protocol, deadline planner, persistence порт и perf_hooks; без DB/transport/handles', () => {
   const file = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'games', 'svara', 'runtime', 'svaraMatchRuntime.ts')
   const source = readFileSync(file, 'utf8')
   // Само кодът, без коментарите (заглавието документира, че няма WebSocket).
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
   for (const match of source.matchAll(/from '([^']+)'/g)) {
-    assert(/^\.\.\/engine\/svara[A-Za-z]+\.js$/.test(match[1]!) || match[1] === '../protocol/svaraSnapshotProtocol.js' || match[1] === 'node:perf_hooks', `imports ${match[1]}`)
+    assert(/^\.\.\/engine\/svara[A-Za-z]+\.js$/.test(match[1]!) || match[1] === '../protocol/svaraSnapshotProtocol.js' || match[1] === 'node:perf_hooks' ||
+      match[1] === './svaraDeadlines.js' || match[1] === './svaraPersistence.js', `imports ${match[1]}`)
   }
   for (const banned of ['WebSocket', 'sqlite', 'setTimeout', 'setInterval', 'process.env', 'buildSvaraDeckForHands', 'createDeck']) {
     assert(!code.includes(banned), `runtime code mentions ${banned}`)

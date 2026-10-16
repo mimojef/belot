@@ -116,10 +116,11 @@ function mount(runtime: ReturnType<typeof createSvaraMatchRuntime>, matchId = 'm
   return { runtime, matchId, clock, lobby, frames, sessions, blocked, attach, send, payload, submit, ok, act, sync, state, view, timing, timer, absent }
 }
 function fixture(capacity: 2 | 3 | 4 = 3, chips = 100, decks: SvaraCard[][] = []) {
-  const rt = createSvaraMatchRuntime({ random: randomFor(decks) })
+  const clock = new Clock()
+  const rt = createSvaraMatchRuntime({ random: randomFor(decks), now: clock.now })
   rt.registerMatch({ matchId: 'm', creator: { playerId: 'a' }, capacity, entryFee: chips * 10, startMode: 'auto' })
   for (const playerId of ['b', 'c', 'd'].slice(0, capacity - 1)) rt.executeParticipantCommand('m', { playerId }, id(), { type: 'join-seat' })
-  const t = mount(rt)
+  const t = mount(rt, 'm', clock)
   t.sync()
   return t
 }
@@ -293,7 +294,8 @@ try {
     assert.equal(t.lobby.findCommitment('a'), null)
   })
   check('sole active with zero free chips wins; unresolvable all-in banks are not redealt while paused', () => {
-    const rt = createSvaraMatchRuntime({ random: randomFor([buildSvaraDeckForHands(['b', 'a'], { a: TIE1, b: TIE2 })]) })
+    const clock = new Clock()
+    const rt = createSvaraMatchRuntime({ now: clock.now, random: randomFor([buildSvaraDeckForHands(['b', 'a'], { a: TIE1, b: TIE2 })]) })
     rt.registerMatch({ matchId: 'm', creator: { playerId: 'a' }, capacity: 2, entryFee: 20, startMode: 'auto' })
     rt.executeParticipantCommand('m', { playerId: 'b' }, id(), { type: 'join-seat' })
     rt.executeSystemCommand('m', id(), { type: 'start-next-round' })
@@ -302,7 +304,7 @@ try {
       rt.executeParticipantCommand('m', { playerId }, id(), { type: 'act', action: { kind: 'all-in' } })
     }
     rt.executeSystemCommand('m', id(), { type: 'set-absent', playerId: 'b', absent: true })
-    const t = mount(rt); t.sync()
+    const t = mount(rt, 'm', clock); t.sync()
     assert.equal(t.state().stacks.a, 0)
     t.clock.advance(300_000); assert.equal(t.state().winnerId, 'a'); assert.equal(t.state().stacks.a, 4)
   })

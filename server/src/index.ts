@@ -41,6 +41,7 @@ import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import { canSessionAccessSvara } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createSvaraLobby } from './games/svara/createSvaraLobby.js'
+import { createSvaraMatchSnapshotStore } from './db/svaraMatchSnapshotStore.js'
 import { SVARA_LOBBY_MESSAGE_TYPES, type SvaraLobbyClientMessage } from './games/svara/protocol/svaraLobbyProtocol.js'
 import {
   recordBelotMatchForCampaign,
@@ -4137,7 +4138,9 @@ let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 let matchmakingCapacityRetryAt = 0
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
+const svaraMatchSnapshotStore = await createSvaraMatchSnapshotStore(databaseBootstrap.databaseFilePath)
 const svaraLobby = createSvaraLobby({
+  persistence: svaraMatchSnapshotStore,
   hasOtherGameCommitment: (profileId) =>
     isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
     findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null ||
@@ -27293,6 +27296,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   }
 
   closeStore('activeRoomSnapshotStore', () => activeRoomSnapshotStore.close())
+  closeStore('svaraMatchSnapshotStore', () => svaraMatchSnapshotStore.close())
   // flush-ва синхронно опашката преди затваряне (PM2 restart/stop).
   closeStore('belotHandJournal', () => belotHandJournal.close())
   closeStore('activeLudoMatchSnapshotStore', () => activeLudoMatchSnapshotStore.close())

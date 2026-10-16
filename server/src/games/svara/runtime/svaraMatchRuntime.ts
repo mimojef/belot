@@ -4,8 +4,9 @@
 // authoritative състояние на всеки мач в паметта и прилага команди атомарно.
 // Правилата, банките и точкуването са САМО в двигателя — тук не се дублират.
 //
-// НЕ е свързано с WebSocket, HTTP, SQLite, реални сесии, таймери или реалните
-// жълтици. Протоколният builder за клиента е Етап 2Б.3.2.
+// Без WebSocket/HTTP, реални сесии, timer handles или реални жълтици.
+// 2Б.3.6А: синхронен persistence порт преди authoritative RAM commit;
+// SQLite адаптерът остава извън runtime-а. Без порт — изолиран engine harness.
 //
 // Сигурност на командите:
 //   • Самоличността на играча идва от доверен сървърен контекст
@@ -35,6 +36,8 @@
 // на една маса → един процес) или външна координация.
 
 import { performance } from 'node:perf_hooks'
+import { planSvaraDeadlines, svaraEpochNow, type SvaraDeadline } from './svaraDeadlines.js'
+import { SvaraPersistenceError, type SvaraMatchPersistence, type SvaraStoredMatch } from './svaraPersistence.js'
 import { SvaraInvalidInputError } from '../engine/svaraCards.js'
 import type { SvaraBettingAction, SvaraBettingOptions } from '../engine/svaraBetting.js'
 import type { SvaraRandomSource } from '../engine/svaraRandom.js'
@@ -157,6 +160,8 @@ export type SvaraMatchDiagnostics = {
 export type SvaraRuntimeOptions = {
   /** Криптографски източник по подразбиране (в двигателя); seeded — само за тестове. */
   random?: SvaraRandomSource
+  persistence?: SvaraMatchPersistence
+  now?: () => number
 }
 
 export type SvaraRegisterMatchInput = {
@@ -178,6 +183,8 @@ export type SvaraMatchRuntime = {
   executeParticipantCommand(matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown, expectedRevision?: number): SvaraRuntimeCommandResult
   executeSystemCommand(matchId: string, systemCommandId: string, command: SvaraSystemCommand): SvaraRuntimeCommandResult
   getMatchRevision(matchId: string): number
+  getDeadlinesForServer(matchId: string): SvaraDeadline[]
+  exportStoredMatchForServer(matchId: string): SvaraStoredMatch
   getLifecycleView(matchId: string): ReturnType<typeof describeSvaraLifecycle> & { revision: number }
   /** Server-only orchestration hint. Never closes an available joining opportunity. */
   getAutomaticCommand(matchId: string): SvaraAutomaticCommand | null
@@ -271,6 +278,8 @@ const isTerminal = (state: SvaraMatchState) => state.phase === 'finished' || sta
 type MatchEntry = {
   state: SvaraMatchState
   revision: number
+  deadlines: SvaraDeadline[]
+  deadlineSequence: number
   stats: { applied: number; duplicate: number; rejected: number; totalMs: number; maxMs: number; lastMs: number }
 }
 
@@ -278,6 +287,10 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
   // Собствено състояние за всяка инстанция — без глобални променливи на модула.
   const matches = new Map<string, MatchEntry>()
   const env: SvaraMatchEnv = options.random ? { random: options.random } : {}
+  const now = options.now ?? svaraEpochNow
+  const writing = new Set<string>()
+  const stored = (matchId: string, entry: Pick<MatchEntry, 'state' | 'revision' | 'deadlines' | 'deadlineSequence'>): SvaraStoredMatch =>
+    ({ formatVersion: 1, matchId, state: entry.state, revision: entry.revision, deadlines: entry.deadlines, deadlineSequence: entry.deadlineSequence })
 
   const entryOf = (matchId: string): MatchEntry => {
     const entry = typeof matchId === 'string' ? matches.get(matchId) : undefined
@@ -287,26 +300,33 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
 
   /** Атомарно: новото състояние се приема само при успех; иначе остава старото. */
   const apply = (entry: MatchEntry, command: SvaraMatchCommand): SvaraRuntimeCommandResult => {
+    const matchId = entry.state.config.tableId
+    if (writing.has(matchId)) throw new SvaraPersistenceError('revision-conflict')
+    writing.add(matchId)
     const started = performance.now()
-    let result
     try {
-      result = applySvaraMatchCommand(entry.state, command, env)
+      const result = applySvaraMatchCommand(entry.state, command, env)
+      if (result.status === 'applied') {
+        const revision = entry.revision + 1
+        const planned = planSvaraDeadlines(result.state, revision, entry.deadlines, entry.deadlineSequence, now())
+        // The candidate remains private until the synchronous SQLite COMMIT returns.
+        // Failure leaves state, revision, IDs and absolute deadlines untouched.
+        options.persistence?.save(stored(matchId, { state: result.state, revision, ...planned }), entry.revision)
+        entry.state = result.state
+        entry.revision = revision
+        entry.deadlines = planned.deadlines
+        entry.deadlineSequence = planned.deadlineSequence
+        const elapsed = performance.now() - started
+        entry.stats.applied += 1
+        entry.stats.totalMs += elapsed
+        entry.stats.maxMs = Math.max(entry.stats.maxMs, elapsed)
+        entry.stats.lastMs = elapsed
+      } else entry.stats.duplicate += 1
+      return { status: result.status, type: result.outcome.type, completedRounds: [...result.outcome.completedRounds], phase: entry.state.phase }
     } catch (error) {
       entry.stats.rejected += 1
       throw error
-    }
-    const elapsed = performance.now() - started
-    if (result.status === 'applied') {
-      entry.state = result.state
-      entry.revision += 1
-      entry.stats.applied += 1
-      entry.stats.totalMs += elapsed
-      entry.stats.maxMs = Math.max(entry.stats.maxMs, elapsed)
-      entry.stats.lastMs = elapsed
-    } else {
-      entry.stats.duplicate += 1
-    }
-    return { status: result.status, type: result.outcome.type, completedRounds: [...result.outcome.completedRounds], phase: entry.state.phase }
+    } finally { writing.delete(matchId) }
   }
 
   const runtime: SvaraMatchRuntime = {
@@ -322,7 +342,13 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
         if (error instanceof SvaraInvalidInputError) fail('invalid-input', error.message)
         throw error
       }
-      matches.set(matchId, { state: state!, revision: 0, stats: { applied: 0, duplicate: 0, rejected: 0, totalMs: 0, maxMs: 0, lastMs: 0 } })
+      if (writing.has(matchId)) throw new SvaraPersistenceError('revision-conflict')
+      writing.add(matchId)
+      try {
+        const entry: MatchEntry = { state: state!, revision: 0, deadlines: [], deadlineSequence: 0, stats: { applied: 0, duplicate: 0, rejected: 0, totalMs: 0, maxMs: 0, lastMs: 0 } }
+        options.persistence?.save(stored(matchId, entry), null)
+        matches.set(matchId, entry)
+      } finally { writing.delete(matchId) }
     },
 
     hasMatch(matchId) {
@@ -373,6 +399,9 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
     getMatchRevision(matchId) {
       return entryOf(matchId).revision
     },
+
+    getDeadlinesForServer(matchId) { return structuredClone(entryOf(matchId).deadlines) },
+    exportStoredMatchForServer(matchId) { return structuredClone(stored(matchId, entryOf(matchId))) },
 
     getLifecycleView(matchId) {
       const entry = entryOf(matchId)
@@ -461,6 +490,7 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
 
     releaseMatch(matchId, releaseOptions = {}) {
       const entry = entryOf(matchId)
+      if (writing.has(matchId)) throw new SvaraPersistenceError('revision-conflict')
       // Без автоматично освобождаване: извикващият решава кога (в 2Б.3.6 —
       // след успешна persistence). Незавършен мач изисква изрично разрешение.
       if (!isTerminal(entry.state) && releaseOptions.allowUnfinished !== true) {

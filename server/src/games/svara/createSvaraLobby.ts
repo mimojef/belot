@@ -6,6 +6,7 @@ import { SvaraMatchError } from './engine/svaraMatch.js'
 import { createSvaraMatchRuntime, SvaraRuntimeError, type SvaraMatchRuntime } from './runtime/svaraMatchRuntime.js'
 import { createSvaraCommandExecutor } from './runtime/createSvaraCommandExecutor.js'
 import { createSvaraLifecycle, type SvaraClock } from './runtime/createSvaraLifecycle.js'
+import type { SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
 import { serializeSvaraSnapshotForClient } from './protocol/svaraSnapshotProtocol.js'
 
@@ -20,11 +21,15 @@ type Transport = {
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
   runtime?: SvaraMatchRuntime
+  persistence?: SvaraMatchPersistence
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
   clock?: SvaraClock
 }) {
-  const runtime = deps.runtime ?? createSvaraMatchRuntime()
+  // An injected runtime is a test/server-owned dependency. Production always supplies persistence.
+  if (deps.runtime && deps.persistence) throw new Error('Provide persistence through the injected Svara runtime')
+  if (!deps.runtime && !deps.persistence) throw new Error('Svara lobby requires durable persistence or an explicitly injected runtime')
+  const runtime = deps.runtime ?? createSvaraMatchRuntime({ persistence: deps.persistence, now: deps.clock?.now })
   const commands = createSvaraCommandExecutor(runtime)
   const connections = new Map<string, Transport>()
   const subscribers = new Set<string>()
@@ -41,7 +46,16 @@ export function createSvaraLobby(deps: {
   const publicTables = () => runtime.listMatchIds().map((id) => runtime.getPublicTable(id))
     .filter((table) => table.phase === 'lobby' || table.phase === 'in-progress')
   function findCommitment(profileId: string) {
-    return publicTables().find((table) => table.players.some((p) => p.playerId === profileId && (p.status === 'active' || p.status === 'absent'))) ?? null
+    const current = publicTables().find((table) => table.players.some((p) => p.playerId === profileId && (p.status === 'active' || p.status === 'absent')))
+    if (current) return current
+    // No recovery yet: retain the durable commitment and never replace an orphaned active match.
+    try {
+      const matchId = deps.persistence?.findActiveMatchId(profileId)
+      return matchId ? { matchId } : null
+    } catch (cause) {
+      deps.onError?.(cause)
+      return { matchId: '' } // fail closed for cross-game admission if the store is unavailable
+    }
   }
   function error(transport: Transport, code: SvaraLobbyErrorCode, requestId?: string, gameplay = false, commandId?: string) {
     // Fixed messages: never echo thrown engine errors, payloads, IDs or hidden state.
@@ -104,7 +118,7 @@ export function createSvaraLobby(deps: {
       const session = transport.getSession()
       if (!evaluateSvaraAccess(session).allowed || session?.profile.profileId !== transport.profileId || !transport.profileId) return
       const table = findCommitment(transport.profileId)
-      if (!table) return
+      if (!table || !runtime.hasMatch(table.matchId)) return
       progress(table.matchId)
       if (runtime.getPublicTable(table.matchId).players.some((p) => p.playerId === transport.profileId && p.status !== 'exited')) {
         snapshot(transport, table.matchId, transport.profileId)
