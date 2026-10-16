@@ -182,6 +182,7 @@ export type SvaraMatchState = {
   lockedPots: SvaraMatchLockedPot[]
   carried: SvaraCarriedBalance[]
   winnerId: string | null
+  /** Archive containers are immutable after commit; live-linked history is copied with the game. */
   ledger: SvaraMatchLedgerEntry[]
   history: SvaraRoundRecord[]
   processedCommands: Record<string, { fingerprint: string; outcome: SvaraMatchOutcome }>
@@ -387,6 +388,81 @@ export function assertSvaraMatchInvariants(state: SvaraMatchState): void {
 
 type Ctx = { state: SvaraMatchState; command: SvaraMatchCommand; env: SvaraMatchEnv; completedRounds: string[] }
 
+// Ledger/command data is shared only after this module has recursively frozen it.
+// Weak metadata is deliberately outside the serializable state. Restored or
+// externally supplied data takes the detached-copy path on its first command.
+const immutableArchives = new WeakSet<object>()
+// Historical records may still alias a live pot after a repeated tie. Those
+// records must be cloned WITH the game, preserving the reference engine's aliases.
+const historyArchives = new WeakMap<SvaraRoundRecord[], readonly number[]>()
+
+function freezeArchiveValue(value: unknown): void {
+  if (!value || typeof value !== 'object') return
+  for (const nested of Object.values(value)) freezeArchiveValue(nested)
+  Object.freeze(value)
+}
+
+function copyMatchForCommand(state: SvaraMatchState): SvaraMatchState {
+  const { ledger, history, processedCommands, ...live } = state
+  const linked = historyArchives.get(history)
+  const cloned = linked === undefined
+    ? structuredClone({ live, history })
+    : structuredClone({ live, history: linked.map((index) => history[index]!) })
+  const nextHistory = linked === undefined ? cloned.history : history.slice()
+  if (linked) linked.forEach((index, position) => { nextHistory[index] = cloned.history[position]! })
+  return {
+    ...state,
+    ...cloned.live,
+    ledger: immutableArchives.has(ledger) ? ledger.slice() : structuredClone(ledger),
+    history: nextHistory,
+    processedCommands: immutableArchives.has(processedCommands) ? { ...processedCommands } : structuredClone(processedCommands),
+  }
+}
+
+function collectObjects(value: unknown, objects: WeakSet<object>): void {
+  if (!value || typeof value !== 'object' || objects.has(value)) return
+  objects.add(value)
+  for (const nested of Object.values(value)) collectObjects(nested, objects)
+}
+
+function touchesObjects(value: unknown, objects: WeakSet<object>): boolean {
+  return !!value && typeof value === 'object' &&
+    (objects.has(value) || Object.values(value).some((nested) => touchesObjects(nested, objects)))
+}
+
+function sealHistory(next: SvaraMatchState, previous: SvaraMatchState): void {
+  const prior = historyArchives.get(previous.history)
+  const candidates = prior ? [...prior] : Array.from(previous.history.keys())
+  for (let i = previous.history.length; i < next.history.length; i++) candidates.push(i)
+  const linked: number[] = []
+  if (candidates.length > 0) {
+    const { ledger: _ledger, history: _history, processedCommands: _commands, ...live } = next
+    const objects = new WeakSet<object>()
+    collectObjects(live, objects)
+    for (const index of candidates) {
+      if (touchesObjects(next.history[index], objects)) linked.push(index)
+      else freezeArchiveValue(next.history[index])
+    }
+  }
+  Object.freeze(next.history)
+  historyArchives.set(next.history, linked)
+}
+
+function sealMatchArchives(next: SvaraMatchState, previous: SvaraMatchState, commandId: string): void {
+  const start = immutableArchives.has(previous.ledger) ? previous.ledger.length : 0
+  for (let i = start; i < next.ledger.length; i++) freezeArchiveValue(next.ledger[i])
+  Object.freeze(next.ledger)
+  immutableArchives.add(next.ledger)
+  sealHistory(next, previous)
+  if (immutableArchives.has(previous.processedCommands)) {
+    freezeArchiveValue(next.processedCommands[commandId])
+    Object.freeze(next.processedCommands)
+  } else {
+    freezeArchiveValue(next.processedCommands)
+  }
+  immutableArchives.add(next.processedCommands)
+}
+
 export function applySvaraMatchCommand(state: SvaraMatchState, command: SvaraMatchCommand, env: SvaraMatchEnv = {}): SvaraMatchApplyResult {
   if (!command || typeof command !== 'object') fail('invalid-command', 'command required')
   if (!isNonEmptyString(command.commandId)) fail('invalid-command', 'commandId required')
@@ -396,7 +472,7 @@ export function applySvaraMatchCommand(state: SvaraMatchState, command: SvaraMat
     if (previous.fingerprint !== fingerprint) fail('command-id-conflict', `commandId ${command.commandId} was used for a different command`)
     return { state, status: 'duplicate', outcome: previous.outcome }
   }
-  const ctx: Ctx = { state: structuredClone(state), command, env, completedRounds: [] }
+  const ctx: Ctx = { state: copyMatchForCommand(state), command, env, completedRounds: [] }
   const ledgerStart = ctx.state.ledger.length
   try {
     dispatch(ctx)
@@ -416,6 +492,7 @@ export function applySvaraMatchCommand(state: SvaraMatchState, command: SvaraMat
   }
   next.processedCommands[command.commandId] = { fingerprint, outcome }
   assertSvaraMatchInvariants(next)
+  sealMatchArchives(next, state, command.commandId)
   return { state: next, status: 'applied', outcome }
 }
 

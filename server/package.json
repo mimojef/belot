@@ -17,6 +17,7 @@
     "check:svara-engine-2b1": "tsx scripts/checkSvaraEngine2B1.ts",
     "check:svara-chips-2b2a": "tsx scripts/checkSvaraChips2B2A.ts",
     "check:svara-match-2b2b": "tsx scripts/checkSvaraMatch2B2B.ts",
+    "check:svara-match-optimization": "tsx scripts/checkSvaraMatchOptimization.ts",
     "check:svara-runtime-2b31": "tsx scripts/checkSvaraRuntime2B31.ts",
     "check:svara-snapshot-2b32": "tsx scripts/checkSvaraSnapshot2B32.ts",
     "check:svara-lobby-2b33": "tsx scripts/checkSvaraLobby2B33.ts",
