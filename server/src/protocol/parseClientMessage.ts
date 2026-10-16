@@ -4,6 +4,7 @@ import {
 } from '../matchmaking/matchmakingTypes.js'
 import { SERVER_SEAT_ORDER, type Seat } from '../core/serverTypes.js'
 import type { ClientBidAction, ClientMessage, PrivateRoomWaitMinutes } from './messageTypes.js'
+import { parseSvaraLobbyMessage, SVARA_LOBBY_MESSAGE_TYPES } from '../games/svara/protocol/svaraLobbyProtocol.js'
 import {
   DEFAULT_HUMAN_TURN_TIMEOUT_MS,
   isHumanTurnTimeoutMs,
@@ -176,6 +177,8 @@ export function parseClientMessage(rawText: string): ClientMessage | null {
     if (!isRecord(parsed) || typeof parsed.type !== 'string') {
       return null
     }
+
+    if (SVARA_LOBBY_MESSAGE_TYPES.has(parsed.type)) return parseSvaraLobbyMessage(parsed)
 
     if (parsed.type === 'ping') {
       return { type: 'ping' }

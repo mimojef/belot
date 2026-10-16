@@ -37,6 +37,31 @@ import {
 } from '../engine/svaraMatch.js'
 
 export const SVARA_SNAPSHOT_MESSAGE_TYPE = 'svara_match_snapshot'
+/** Public lobby projection, separate from the individual game snapshot. */
+export type SvaraPublicTable = {
+  matchId: string
+  phase: SvaraMatchState['phase']
+  capacity: 2 | 3 | 4
+  creatorId: string
+  startMode: SvaraStartMode
+  entryFee: number
+  entryPercent: SvaraEntryPercent
+  startingChips: number
+  entryChips: number
+  players: Array<{ playerId: string; status: SvaraSeatStatus }>
+}
+
+/** Explicit public whitelist; never copies cards or internal state. */
+export function createSvaraPublicTable(matchId: string, state: SvaraMatchState): SvaraPublicTable {
+  return {
+    matchId, phase: state.phase, capacity: state.config.capacity,
+    creatorId: state.config.creatorId, startMode: state.config.startMode,
+    entryFee: state.config.entryFee, entryPercent: state.config.entryPercent,
+    startingChips: state.startingChips, entryChips: state.entryChips,
+    players: state.seats.map((playerId) => ({ playerId, status: state.status[playerId]! })),
+  }
+}
+
 export const SVARA_SNAPSHOT_PROTOCOL_VERSION = 1
 /** Колко от последните приключили раздавания се включват (снимката не расте с мача). */
 export const SVARA_SNAPSHOT_HISTORY_LIMIT = 10

@@ -50,7 +50,7 @@ import {
   type SvaraMatchState,
   type SvaraStartMode,
 } from '../engine/svaraMatch.js'
-import { createSvaraMatchSnapshotMessage, type SvaraMatchSnapshotMessage } from '../protocol/svaraSnapshotProtocol.js'
+import { createSvaraMatchSnapshotMessage, createSvaraPublicTable, type SvaraMatchSnapshotMessage, type SvaraPublicTable } from '../protocol/svaraSnapshotProtocol.js'
 
 // ── Типове ──────────────────────────────────────────────────────────────────
 
@@ -162,6 +162,7 @@ export type SvaraMatchRuntime = {
   registerMatch(input: SvaraRegisterMatchInput): void
   hasMatch(matchId: string): boolean
   listMatchIds(): string[]
+  getPublicTable(matchId: string): SvaraPublicTable
   isParticipant(matchId: string, playerId: string): boolean
   isMatchFinished(matchId: string): boolean
   executeParticipantCommand(matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown): SvaraRuntimeCommandResult
@@ -305,6 +306,10 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
 
     listMatchIds() {
       return [...matches.keys()]
+    },
+
+    getPublicTable(matchId) {
+      return createSvaraPublicTable(matchId, entryOf(matchId).state)
     },
 
     isParticipant(matchId, playerId) {

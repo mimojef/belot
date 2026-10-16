@@ -40,6 +40,8 @@ import { createCampaignScheduler } from './campaigns/campaignScheduler.js'
 import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import { canSessionAccessSvara } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
+import { createSvaraLobby } from './games/svara/createSvaraLobby.js'
+import { SVARA_LOBBY_MESSAGE_TYPES, type SvaraLobbyClientMessage } from './games/svara/protocol/svaraLobbyProtocol.js'
 import {
   recordBelotMatchForCampaign,
   recordLudoMatchForCampaign,
@@ -860,6 +862,12 @@ function isShutdownGuardedClientMessage(message: ClientMessage): boolean {
     case 'cancel_private_room_invite':
     case 'respond_private_room_invite':
     case 'request_private_rooms_list':
+    case 'request_svara_tables_list':
+    case 'create_svara_table':
+    case 'join_svara_table':
+    case 'leave_svara_table':
+    case 'start_svara_table':
+    case 'request_svara_table_state':
     case 'request_private_games_list':
     case 'request_ludo_rooms_list':
     case 'request_ludo_games_list':
@@ -4128,6 +4136,21 @@ let matchmakingState: MatchmakingState = createInitialMatchmakingState()
 let matchmakingCapacityRetryAt = 0
 
 const socketRegistry = new Map<ConnectionId, WebSocket>()
+const svaraLobby = createSvaraLobby({
+  hasOtherGameCommitment: (profileId) =>
+    isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
+    findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null ||
+    (tournamentCoordinator?.getActiveTournamentIdForProfile(profileId) ?? null) !== null,
+  onError: (error) => console.error('[svara-lobby] request failed', error),
+  onAdmission: (profileId) => endBelotSpectatingForProfile(profileId, 'game_commitment'),
+})
+
+// Guard before any other game's admission path, including legacy rooms and invites.
+const SVARA_OTHER_GAME_ADMISSION_TYPES: ReadonlySet<ClientMessage['type']> = new Set([
+  'create_room', 'join_room', 'join_matchmaking', 'join_guest_trial', 'resume_room',
+  'create_private_room', 'join_private_room', 'respond_private_room_invite',
+  'create_ludo_room', 'join_ludo_room',
+])
 const guestIdByConnection = new Map<ConnectionId, string>()
 const roomGameRuntimeRegistry = new Map<string, ServerGameRuntime>()
 
@@ -5013,8 +5036,17 @@ function hasProfileActiveGameCommitment(profileId: string): boolean {
     isProfileInActiveGame(profileId) ||
     findProfileInGameSession(profileId) !== null ||
     findActiveBelotCommitment(profileId) !== null ||
-    findActiveLudoCommitment(profileId) !== null
+    findActiveLudoCommitment(profileId) !== null ||
+    svaraLobby.findCommitment(profileId) !== null
   )
+}
+
+// Tournament registration is also an admission path to future Belot rooms.
+// Check immediately before its synchronous store mutation (after any body read).
+function rejectTournamentEntryForSvara(res: ServerResponse, ...profileIds: string[]): boolean {
+  if (!profileIds.some((id) => svaraLobby.findCommitment(id) !== null)) return false
+  sendJsonResponse(res, 409, { ok: false, code: 'svara_commitment_active', message: 'Участникът вече е на маса за Свара.' })
+  return true
 }
 
 // "Турнирни срещи" — persisted факти за watch_belot_room към турнирна стая
@@ -15355,6 +15387,7 @@ async function handleTournamentPartnerInviteCreateRequest(
     return true
   }
   const tournamentId = decodeURIComponent(match[1] ?? '')
+  if (rejectTournamentEntryForSvara(res, authResult.profileId)) return true
   const result = tournamentEconomyStore.createPartnerInviteAtomically(
     tournamentId,
     authResult.profileId,
@@ -15421,6 +15454,12 @@ async function handleTournamentPartnerInviteActionRequest(
   const tournamentId = decodeURIComponent(match[1] ?? '')
   const inviteId = decodeURIComponent(match[2] ?? '')
   const action = match[3] ?? ''
+  if (action === 'accept') {
+    const invite = tournamentEconomyStore.listPendingPartnerInvitesForProfile(authResult.profileId)
+      .find((item) => item.inviteId === inviteId && item.tournamentId === tournamentId)
+    const profileIds = invite ? [authResult.profileId, invite.inviterProfileId] : [authResult.profileId]
+    if (rejectTournamentEntryForSvara(res, ...profileIds)) return true
+  }
   const result = action === 'accept'
     ? tournamentEconomyStore.acceptPartnerInviteAtomically(tournamentId, inviteId, authResult.profileId)
     : action === 'decline'
@@ -15525,6 +15564,7 @@ async function handleTournamentJoinRequest(
     return true
   }
 
+  if (rejectTournamentEntryForSvara(res, profileId)) return true
   const result = tournamentEconomyStore.joinTournamentSoloAtomically(tournamentId, profileId, {
     password,
   })
@@ -22148,6 +22188,22 @@ wsServer.on('connection', (socket, request) => {
 
   serverState = upsertServerConnection(serverState, connection)
   socketRegistry.set(connection.id, socket)
+  svaraLobby.attachConnection(connection.id, {
+    profileId: connection.profileId,
+    getSession: () => {
+      const live = getConnectionById(serverState, connection.id)
+      if (live?.status !== 'connected' || live.profileId === null) return null
+      const session = authStore.getSession(getSessionTokenFromCookieHeader(request.headers.cookie))
+      if (session === null || session.sessionId !== live.sessionId || session.profile.profileId !== live.profileId) return null
+      if (profileBanStore.getActiveBan(live.profileId) !== null || pendingProfileModerationStore.getPending(live.profileId) !== null) return null
+      return session
+    },
+    send: (payload) => {
+      if (typeof payload === 'string') {
+        if (socket.readyState === WebSocket.OPEN) socket.send(payload)
+      } else safeSendToConnection(connection.id, payload)
+    },
+  })
 
   if (authSession === null) {
     const guestId = getGuestIdFromCookieHeader(request.headers.cookie)
@@ -22387,6 +22443,16 @@ wsServer.on('connection', (socket, request) => {
       const message = parseClientMessage(rawText)
 
       if (message === null) {
+        // Preserve the generic protocol response for other games; Svara has a typed error.
+        let invalidSvaraMessage = false
+        try {
+          const rawMessage: unknown = JSON.parse(rawText)
+          invalidSvaraMessage = isRecord(rawMessage) && typeof rawMessage.type === 'string' && SVARA_LOBBY_MESSAGE_TYPES.has(rawMessage.type)
+        } catch { /* malformed JSON uses the existing generic error */ }
+        if (invalidSvaraMessage) {
+          safeSendToConnection(connection.id, { type: 'svara_lobby_error', code: 'invalid_input', message: 'Невалидна заявка.' })
+          return
+        }
         sendJsonMessage(socket, {
           type: 'error',
           message: 'Invalid message payload.',
@@ -22395,6 +22461,23 @@ wsServer.on('connection', (socket, request) => {
       }
 
       activityCounters.incrementWsInbound(message.type)
+
+      if (SVARA_LOBBY_MESSAGE_TYPES.has(message.type)) {
+        svaraLobby.handle(connection.id, message as SvaraLobbyClientMessage, isServerShuttingDown)
+        return
+      }
+
+      if (SVARA_OTHER_GAME_ADMISSION_TYPES.has(message.type) &&
+          !(message.type === 'respond_private_room_invite' && !message.accept)) {
+        const profileId = getConnectionById(serverState, connection.id)?.profileId
+        if (profileId && svaraLobby.findCommitment(profileId) !== null) {
+          safeSendToConnection(connection.id, {
+            type: 'error', code: 'svara_commitment_active',
+            message: 'Вече участваш на маса за Свара. Напусни я, преди да започнеш друга игра.',
+          })
+          return
+        }
+      }
 
       if (isServerShuttingDown && isShutdownGuardedClientMessage(message)) {
         // submit_bid_action е fire-and-forget за клиента (виж
@@ -23491,7 +23574,8 @@ wsServer.on('connection', (socket, request) => {
           if (
             tokenOwnerProfileId !== null &&
             (pendingProfileModerationStore.getPending(tokenOwnerProfileId) !== null ||
-              profileBanStore.getActiveBan(tokenOwnerProfileId) !== null)
+              profileBanStore.getActiveBan(tokenOwnerProfileId) !== null ||
+              svaraLobby.findCommitment(tokenOwnerProfileId) !== null)
           ) {
             safeSendToConnection(connection.id, {
               type: 'room_resume_failed',
@@ -26365,6 +26449,7 @@ wsServer.on('connection', (socket, request) => {
   })
 
   socket.on('close', (code, reason) => {
+    svaraLobby.disconnect(connection.id)
     // Captured ПРЕДИ handleDisconnect() мутира connection state-а по-долу —
     // това е единствената точка, в която currentRoomId/currentSeat/connectedAt
     // все още отразяват "къде беше connection-ът в момента на затваряне".

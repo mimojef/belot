@@ -1,4 +1,5 @@
 import type { HumanTurnTimeoutMs } from '../shared/humanTurnTimeoutOptions.js'
+import type { SvaraLobbyClientMessage, SvaraLobbyServerMessage } from '../games/svara/protocol/svaraLobbyProtocol.js'
 import type {
   ActiveTableGiftSnapshot,
   PlayerIdentitySnapshot,
@@ -115,6 +116,7 @@ export type ClientBidAction =
     }
 
 export type ClientMessage =
+  | SvaraLobbyClientMessage
   | {
       type: 'ping'
     }
@@ -866,6 +868,7 @@ export type ErrorMessage = {
     | 'private_room_insufficient_balance'
     | 'private_room_level_required'
     | 'spectator_action_forbidden'
+    | 'svara_commitment_active'
     | PrivateRoomActionErrorCode
 }
 
@@ -1730,6 +1733,7 @@ export type ChatMessageDeletedMessage = {
 // (extends ClientMessage union below)
 
 export type ServerMessage =
+  | SvaraLobbyServerMessage
   | ConnectedMessage
   | PongMessage
   | ErrorMessage
