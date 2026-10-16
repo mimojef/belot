@@ -4,8 +4,12 @@ import { describeSvaraLifecycle, type SvaraMatchState } from '../engine/svaraMat
 export const SVARA_TURN_MS = 15_000
 export const SVARA_JOIN_MS = 15_000
 export const SVARA_PRESENCE_WAIT_MS = 300_000
+/** 2Б.3.7.1: прозорец за избор „Покажи“/„Скрий“ след отпадането на всички противници. */
+export const SVARA_REVEAL_CHOICE_MS = 5_000
+/** 2Б.3.7.1: публичен показ на картите, само след „Покажи“. */
+export const SVARA_REVEAL_DISPLAY_MS = 3_000
 export const svaraEpochNow = () => Math.floor(performance.timeOrigin + performance.now())
-export type SvaraDeadlineKind = 'turn' | 'svara-joining' | 'presence-wait'
+export type SvaraDeadlineKind = 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
 export type SvaraDeadline = {
   kind: SvaraDeadlineKind
   key: string
@@ -31,6 +35,8 @@ export function planSvaraDeadlines(state: SvaraMatchState, revision: number,
   }
   if (view.actorId && !view.actorAbsent) want('turn', JSON.stringify(['turn', view.roundId, view.actorId, view.actionVersion]), SVARA_TURN_MS, view.actorId)
   if (view.joining?.open && view.joining.undecided.length > 0) want('svara-joining', JSON.stringify(['join', view.roundId]), SVARA_JOIN_MS, null)
+  if (view.revealChoice?.decision === 'pending') want('reveal-choice', JSON.stringify(['reveal-choice', view.roundId]), SVARA_REVEAL_CHOICE_MS, view.revealChoice.winnerId)
+  if (view.revealChoice?.decision === 'revealed') want('reveal-display', JSON.stringify(['reveal-display', view.roundId]), SVARA_REVEAL_DISPLAY_MS, view.revealChoice.winnerId)
   if (view.atBoundary && view.readyPlayerIds.length < 2) want('presence-wait', JSON.stringify(['wait', view.readyPlayerIds]), SVARA_PRESENCE_WAIT_MS, view.readyPlayerIds[0] ?? null)
   return { deadlines, deadlineSequence: sequence }
 }

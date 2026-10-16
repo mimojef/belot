@@ -152,12 +152,37 @@ try {
     assert.equal(t.state().status.b, 'absent'); assert((t.state().round as any).betting.folded.includes('b'))
     assert.equal(t.timer().playerId, 'c')
     t.clock.advance(15_000)
-    assert.equal(t.state().status.c, 'absent'); assert.equal(t.state().round, null)
+    assert.equal(t.state().status.c, 'absent')
+    // 2Б.3.7.1: a е единствен останал → 5-секунден избор, после автоматично скрива (не отсъствие/отказ).
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    assert.equal(t.timer('reveal-choice').remainingMs, 5_000); assert.equal(t.timer('reveal-choice').playerId, 'a')
+    t.clock.advance(5_000)
+    assert.equal(t.state().round, null); assert.equal(t.state().status.a, 'active', 'expiry never marks the deciding winner absent')
     assert.equal(t.timer('presence-wait').remainingMs, 300_000)
     const count = entries(); t.clock.advance(299_999)
     assert.equal(entries(), count); assert.equal(t.state().phase, 'in-progress')
     t.clock.advance(1); assert.equal(t.state().winnerId, 'a'); assert.equal(t.state().finishReason, 'prolonged-absence')
     assert.equal(entries(), count); assert.equal(t.clock.live().length, 0)
+  })
+  check('reveal choice: 5s to decide, exactly 3s of public display after "show", then the next deal can start', () => {
+    const t = fixture()
+    t.act('b', { kind: 'fold' }); t.act('c', { kind: 'fold' })
+    const pending = t.state().round as any
+    assert.equal(pending.kind, 'reveal-choice'); assert.equal(pending.winnerId, 'a')
+    assert.equal(t.timer('reveal-choice').remainingMs, 5_000); assert.equal(t.timer('reveal-choice').playerId, 'a')
+    assert.equal(t.submit('b', { type: 'reveal-cards' }).code, 'not_allowed', 'only the winner may choose')
+    t.ok('a', { type: 'reveal-cards' })
+    const revealed = t.state().round as any
+    assert.equal(revealed.decision, 'revealed'); assert.equal(t.timer('reveal-choice'), undefined)
+    assert.equal(t.timer('reveal-display').remainingMs, 3_000); assert.equal(t.timer('reveal-display').playerId, 'a')
+    assert.equal(t.view('a').you.cards?.length, 3)
+    t.clock.advance(2_999)
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice', 'display has not closed yet at 2999ms')
+    assert.equal(t.submit('a', { type: 'hide-cards' }).code, 'not_allowed', 'already decided; display is not a new choice window')
+    t.clock.advance(1)
+    // Затварянето на показа веднага позволява (и, тук, автоматично стартира) следващото раздаване.
+    assert.notEqual((t.state().round as any)?.kind, 'reveal-choice', 'display closes exactly at 3s')
+    assert.equal(t.state().status.a, 'active')
   })
   check('an off-turn exit does not restart the current actor deadline or invalidate its timeout', () => {
     const t = fixture(), end = t.timer().deadlineAt
@@ -184,6 +209,9 @@ try {
     const t = fixture()
     t.clock.advance(15_000) // b absent; a,c still active
     t.act('c', { kind: 'fold' })
+    // 2Б.3.7.1: a е единствен останал → избор; скрива, за да продължи автоматично към следващото раздаване.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.ok('a', { type: 'hide-cards' })
     const state = t.state(), round = state.round as any
     assert.equal(round.kind, 'ordinary'); assert.equal(round.contributions.b, 1)
     assert(round.betting.folded.includes('b')); assert.notEqual(t.timer().playerId, 'b')
@@ -199,18 +227,28 @@ try {
     assert.equal(t.submit('b', { type: 'look' }).code, 'player_absent')
     assert.equal(t.submit('b', { type: 'act', action: { kind: 'bet', total: 1 } }).code, 'player_absent')
     t.act('c', { kind: 'fold' })
+    // 2Б.3.7.1: a е единствен останал → избор чака преди границата (activateReturns), не веднага.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice'); assert.equal(t.state().status.b, 'absent')
+    t.ok('a', { type: 'hide-cards' })
     assert.equal(t.state().status.b, 'active'); assert.equal(t.view('b').you.returnPending, false)
     assert.equal(t.state().stacks.b, before! - 1, 'only the next normal entry is charged')
   })
   check('return at a paused boundary resumes; one returned from zero gets a fresh five minutes', () => {
     const t = fixture(2)
     t.clock.advance(15_000)
+    // 2Б.3.7.1: heads-up timeout оставя единствен победител → 5-секунден избор преди границата; изтича автоматично.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.clock.advance(5_000)
     assert.equal(t.state().round, null); assert(t.timer('presence-wait'))
     t.clock.advance(100_000)
     t.ok('b', { type: 'request-return' })
     assert.equal(t.state().round?.kind, 'ordinary'); assert.equal(t.timer('presence-wait'), undefined)
     const z = fixture(2)
-    z.absent('a', 'b'); assert.equal(z.timer('presence-wait').playerId, null)
+    z.absent('a', 'b')
+    // 2Б.3.7.1: първото отсъствие оставя втория играч единствен → избор; изтича автоматично, въпреки отсъствието му.
+    assert.equal((z.state().round as any)?.kind, 'reveal-choice')
+    z.clock.advance(5_000)
+    assert.equal(z.timer('presence-wait').playerId, null)
     z.clock.advance(120_000); z.ok('a', { type: 'request-return' })
     assert.equal(z.timer('presence-wait').playerId, 'a'); assert.equal(z.timer('presence-wait').remainingMs, 300_000)
     const end = z.timer('presence-wait').deadlineAt
@@ -313,6 +351,9 @@ try {
     t.ok('b', { type: 'look' }); t.act('b', { kind: 'bet', total: 30 }); t.ok('b', { type: 'exit' })
     t.absent('a') // c alone; b\'s uncovered, now ownerless layer is carried
     assert.equal(t.state().carried[0]!.amount, 30)
+    // 2Б.3.7.1: c е единствен останал → избор; скрива, за да започне изчакването на присъствие.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.ok('c', { type: 'hide-cards' })
     const before = t.state().stacks.c!, entries = t.state().ledger.filter((e) => e.type === 'entry').length
     const stale = t.clock.live().filter((j) => j.at === t.timer('presence-wait', 'c').deadlineAt)[0]!
     t.clock.advance(300_000)
@@ -337,7 +378,12 @@ try {
   check('last surviving absent player is not automatically declared a winner when others exit', () => {
     const t = fixture(2)
     t.absent('b')
+    // 2Б.3.7.1: a е единствен останал (b отсъства) → избор; изходът на a НЕ го решава вместо него.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
     t.ok('a', { type: 'exit' })
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice', 'изходът на победителя не замества избора му')
+    t.clock.advance(5_000) // автоматично скрива — изтичането не зависи от статуса на a
+    assert.equal(t.state().round, null)
     assert.equal(t.state().phase, 'in-progress'); assert.equal(t.state().winnerId, null)
     assert.equal(t.timer('presence-wait', 'b').playerId, null)
     t.clock.advance(300_000)
@@ -347,6 +393,9 @@ try {
   check('wait owner changes/last active becomes absent fence old callbacks; two returns cancel the wait', () => {
     const t = fixture(2)
     t.clock.advance(15_000)
+    // 2Б.3.7.1: heads-up timeout оставя единствен победител → избор, изтича автоматично след 5 сек.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.clock.advance(5_000)
     const old = t.clock.live().find((j) => j.at === t.timer('presence-wait').deadlineAt)!
     t.clock.advance(100_000); t.absent('a')
     assert.equal(t.timer('presence-wait').playerId, null)
@@ -393,6 +442,9 @@ try {
     apply({ type: 'turn-timeout', playerId: 'b', roundId: round.roundId, actionVersion: round.betting.log.length })
     assert.equal(state.ledger[0], retained.ledger[0]); assert(Object.isFrozen(state.ledger[0]))
     apply({ type: 'set-absent', playerId: 'c', absent: true })
+    // 2Б.3.7.1: a е единствен останал → избор; скрива, за да достигне границата, нужна за finish-presence-wait.
+    assert.equal((state.round as any)?.kind, 'reveal-choice')
+    apply({ type: 'hide-cards', playerId: 'a' })
     const before = state, history = state.history[0], old = JSON.stringify(before)
     const command = { type: 'finish-presence-wait', winnerId: 'a', commandId: 'finish-once' }
     apply(command)

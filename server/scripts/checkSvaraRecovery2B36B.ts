@@ -190,6 +190,42 @@ try {
     const restarted = await boot(overdue, 400000); assert.equal(restarted.lobby.initializeRecovery(), 'ready')
     assert.equal(restarted.saved().state.finishReason, 'all-absent'); assert.equal(restarted.saved().state.ledger.filter((e) => e.type === 'entry').length, 3)
   })
+  await check('unexpired reveal choice restores its remaining time; resolving after recovery pays nothing twice', async () => {
+    const t = await fixture(); t.p('b', { type: 'act', action: { kind: 'fold' } }); t.p('c', { type: 'act', action: { kind: 'fold' } })
+    const before = t.saved()
+    assert.equal(before.state.round?.kind, 'reveal-choice')
+    const awardsBefore = before.state.ledger.filter((e) => e.type === 'pot-award').length
+    const f = await boot(t, 2000); assert.equal(f.lobby.initializeRecovery(), 'ready'); f.lobby.reconnect('a')
+    const timing = f.frames.get('a')!.findLast((m) => m.type === 'svara_match_timing')
+    assert.equal(timing.deadlines.find((d: any) => d.kind === 'reveal-choice').remainingMs, 3000)
+    assert.deepEqual(f.saved(), before)
+    assert.equal(f.command('a', { type: 'hide-cards' }).status, 'applied')
+    assert.equal(f.saved().state.ledger.filter((e) => e.type === 'pot-award').length, awardsBefore, 'no second award from resolving after recovery')
+  })
+  await check('overdue reveal choice auto-hides exactly once on boot; a stale callback cannot repeat it', async () => {
+    const t = await fixture(); t.p('b', { type: 'act', action: { kind: 'fold' } }); t.p('c', { type: 'act', action: { kind: 'fold' } })
+    const before = t.saved(), f = await boot(t, 10000)
+    assert.equal(f.lobby.initializeRecovery(), 'ready')
+    assert.notEqual(f.saved().state.round?.kind, 'reveal-choice', 'the 5s window elapsed during downtime, so it auto-hid on boot')
+    assert.equal(f.saved().state.status.a, 'active', 'auto-hide never marks the winner absent')
+    assert.equal(f.saved().state.ledger.filter((e) => e.type === 'pot-award').length, before.state.ledger.filter((e) => e.type === 'pot-award').length)
+    const callback = f.clock.jobs[0]!.callback, applied = f.saved(); callback(); callback(); f.lobby.initializeRecovery()
+    assert.deepEqual(f.saved(), applied)
+  })
+  await check('unexpired reveal display restores its remaining time; closing it after recovery never re-awards', async () => {
+    const t = await fixture(); t.p('b', { type: 'act', action: { kind: 'fold' } }); t.p('c', { type: 'act', action: { kind: 'fold' } })
+    t.p('a', { type: 'reveal-cards' })
+    const before = t.saved()
+    assert.equal(before.state.round?.kind, 'reveal-choice'); assert.equal((before.state.round as any).decision, 'revealed')
+    const awardsBefore = before.state.ledger.filter((e) => e.type === 'pot-award').length
+    const f = await boot(t, 1000); assert.equal(f.lobby.initializeRecovery(), 'ready'); f.lobby.reconnect('a')
+    const timing = f.frames.get('a')!.findLast((m) => m.type === 'svara_match_timing')
+    assert.equal(timing.deadlines.find((d: any) => d.kind === 'reveal-display').remainingMs, 2000)
+    assert.deepEqual(f.saved(), before)
+    f.clock.advance(2000)
+    assert.notEqual(f.saved().state.round?.kind, 'reveal-choice', 'the display closed on its own absolute deadline')
+    assert.equal(f.saved().state.ledger.filter((e) => e.type === 'pot-award').length, awardsBefore)
+  })
   await check('absent/pending return is restored; reconnect alone never reactivates the player', async () => {
     const t = await fixture(); t.p('b', { type: 'act', action: { kind: 'fold' } }); t.s({ type: 'set-absent', playerId: 'b', absent: true })
     t.p('b', { type: 'request-return' }, 'return-once')
@@ -198,10 +234,17 @@ try {
     assert.equal(snapshot.you.status, 'absent'); assert.equal(snapshot.you.returnPending, true); assert.deepEqual(f.saved(), before)
     assert.equal(f.command('b', { type: 'look' }).code, 'player_absent')
     assert.equal(f.command('b', { type: 'request-return' }, 'return-once', 0).status, 'duplicate')
-    assert.equal(f.command('c', { type: 'act', action: { kind: 'fold' } }).status, 'applied'); assert.equal(f.saved().state.status.b, 'active')
+    assert.equal(f.command('c', { type: 'act', action: { kind: 'fold' } }).status, 'applied')
+    // 2Б.3.7.1: a е единствен останал → избор чака преди границата (activateReturns); скрива.
+    assert.equal(f.saved().state.round?.kind, 'reveal-choice')
+    f.command('a', { type: 'hide-cards' })
+    assert.equal(f.saved().state.status.b, 'active')
   })
   await check('new return request after recovery follows the existing next-deal rule', async () => {
     const t = await fixture(2); t.s({ type: 'set-absent', playerId: 'b', absent: true })
+    // 2Б.3.7.1: b отсъства → a е единствен останал → избор; скрива преди зареждането.
+    assert.equal(t.saved().state.round?.kind, 'reveal-choice')
+    t.p('a', { type: 'hide-cards' })
     const f = await boot(t, 1000); assert.equal(f.lobby.initializeRecovery(), 'ready')
     assert.equal(f.command('b', { type: 'request-return' }).status, 'applied'); assert.equal(f.saved().state.status.b, 'active')
   })
@@ -259,7 +302,11 @@ try {
     assert.throws(() => rt.restoreMatchesForServer([snapshot, other]), SvaraPersistenceError); assert.deepEqual(rt.listMatchIds(), [])
   })
   await check('finished and closed rows are retained with their result but are never active imports', async () => {
-    const t = await fixture(2); t.p('b', { type: 'exit' }); const ended = t.saved(), f = await boot(t)
+    const t = await fixture(2); t.p('b', { type: 'exit' })
+    // 2Б.3.7.1: a е единствен останал → избор преди края; скрива, за да завърши наистина.
+    assert.equal(t.saved().state.round?.kind, 'reveal-choice')
+    t.p('a', { type: 'hide-cards' })
+    const ended = t.saved(), f = await boot(t)
     assert.equal(f.lobby.initializeRecovery(), 'ready'); assert.deepEqual(f.store.loadActiveMatches(), []); assert.deepEqual(f.saved(), ended)
     assert.equal(f.lobby.findCommitment('a'), null)
     assert.throws(() => createSvaraMatchRuntime().restoreMatchesForServer([ended]), SvaraPersistenceError)
@@ -359,7 +406,14 @@ try {
     const tied = buildSvaraDeckForHands(['a', 'b', 'c'], { a: tie1, b: tie2, c: 'KD QD JD' })
     const decided = buildSvaraDeckForHands(['a', 'b', 'c'], { a: '7C 7D 7H', b: tie2, c: low })
     const t = await fixture(3, [[...SVARA_ORDERED_DECK], [...SVARA_ORDERED_DECK], tied, tied, decided], true, 100)
-    for (const pair of [['b', 'c'], ['c', 'a']]) { for (const p of pair) t.p(p, { type: 'act', action: { kind: 'fold' } }); t.s({ type: 'start-next-round' }) }
+    for (const pair of [['b', 'c'], ['c', 'a']]) {
+      for (const p of pair) t.p(p, { type: 'act', action: { kind: 'fold' } })
+      // 2Б.3.7.1: ако отказването остави единствен победител, изборът трябва да
+      // се разреши (скрива), преди следващото раздаване да може да започне.
+      const pending = t.rt.exportInternalStateForServer(t.matchId).round as any
+      if (pending?.kind === 'reveal-choice') t.p(pending.winnerId, { type: 'hide-cards' })
+      t.s({ type: 'start-next-round' })
+    }
     for (const player of ['a', 'b', 'c']) { t.p(player, { type: 'look' }); t.p(player, { type: 'act', action: { kind: 'all-in' } }) }
     assert.equal(t.saved().state.round?.kind, 'allin-svara'); t.s({ type: 'advance-allin-svara' })
     const before = t.saved(), rt = createSvaraMatchRuntime({ persistence: t.store, now: t.clock.now, random: randomFor([decided]) })

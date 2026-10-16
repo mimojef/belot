@@ -15,8 +15,8 @@ const subset = (value: unknown, ids: string[]) => strings(value) && value.every(
 const amounts = (value: unknown, ids: string[]) => object(value) && Object.entries(value).every(([id, amount]) => ids.includes(id) && integer(amount))
 const exactKeys = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 const actions = ['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet']
-const participantTypes = ['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit']
-const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait']
+const participantTypes = ['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards']
+const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display']
 const ledgerTypes = ['absence-pot-award', 'abandoned-pot-removed', 'starting-chips', 'entry', 'bet', 'svara-join-fee', 'carry-in', 'uncalled-return', 'pot-award', 'pot-lock', 'pot-carry', 'pot-split', 'split-remainder-removed', 'exit-removed']
 
 function hands(value: unknown, players: string[], full: boolean): void {
@@ -30,6 +30,24 @@ function hands(value: unknown, players: string[], full: boolean): void {
       require(typeof card === 'string'); parseSvaraCardCode(card as string)
       require(!seen.has(card as string)); seen.add(card as string)
     }
+  }
+}
+
+function validateRecord(record: any, seats: string[]): void {
+  require(object(record) && text(record.roundId))
+  require(['ordinary', 'svara', 'allin-svara'].includes(record.kind) && subset(record.participants, seats) && subset(record.folded, record.participants))
+  require(record.dealerId === null || member(record.dealerId, seats))
+  hands(record.shownHands, record.participants, false)
+  require(amounts(record.points, record.participants) && amounts(record.contributions, record.participants) && typeof record.anyVoluntaryBet === 'boolean' && Array.isArray(record.pots))
+  for (const pot of record.pots) {
+    require(object(pot) && text(pot.potId) && ['round', 'locked'].includes(pot.source) && integer(pot.amount) && amounts(pot.contributions, seats) && subset(pot.eligible, seats) && object(pot.outcome))
+    const out = pot.outcome
+    require(['uncalled-return', 'awarded', 'locked', 'carried', 'split'].includes(out.kind))
+    if (out.kind === 'awarded') require(member(out.winner, seats) && typeof out.byShowdown === 'boolean')
+    if (out.kind === 'uncalled-return') require(member(out.playerId, seats))
+    if (out.kind === 'carried') require(text(out.carryId))
+    if (out.kind === 'locked') require(text(out.lockedPotId) && subset(out.tiedPlayers, seats) && ['ordinary', 'allin'].includes(out.lockKind))
+    if (out.kind === 'split') require(subset(out.tiedPlayers, seats) && integer(out.share) && integer(out.removed))
   }
 }
 
@@ -81,7 +99,7 @@ function validateStructure(state: SvaraMatchState): void {
   const round = s.round
   require(round === null || object(round))
   if (round) {
-    require(text(round.roundId) && ['ordinary', 'svara', 'svara-joining', 'allin-svara'].includes(round.kind) && s.phase === 'in-progress')
+    require(text(round.roundId) && ['ordinary', 'svara', 'svara-joining', 'allin-svara', 'reveal-choice'].includes(round.kind) && s.phase === 'in-progress')
     if (round.kind === 'ordinary' || round.kind === 'svara') {
       require(subset(round.participants, s.seats) && round.participants.length >= 2 && member(round.dealerId, round.participants) && amounts(round.contributions, round.participants))
       hands(round.hands, round.participants, true); betting(round.betting, round.participants)
@@ -90,25 +108,17 @@ function validateStructure(state: SvaraMatchState): void {
       else require(potIds.has(round.potId))
     } else if (round.kind === 'svara-joining') {
       require(potIds.has(round.potId) && integer(round.fee) && round.fee > 0 && subset(round.joiners, s.seats) && subset(round.declined, s.seats) && typeof round.closed === 'boolean')
+    } else if (round.kind === 'reveal-choice') {
+      require(member(round.winnerId, s.seats) && ['pending', 'revealed'].includes(round.decision) && integer(round.points))
+      require(Array.isArray(round.cards) && round.cards.length === 3 && new Set(round.cards).size === 3)
+      for (const card of round.cards) { require(typeof card === 'string'); parseSvaraCardCode(card) }
+      validateRecord(round.record, s.seats)
     } else require(strings(round.potIds) && round.potIds.length > 0 && round.potIds.every((id: string) => potIds.has(id)) && integer(round.iteration) && typeof round.sidesEvaluated === 'boolean')
   }
   const historyIds = new Set<string>()
   for (const record of s.history) {
-    require(object(record) && text(record.roundId) && !historyIds.has(record.roundId)); historyIds.add(record.roundId)
-    require(['ordinary', 'svara', 'allin-svara'].includes(record.kind) && subset(record.participants, s.seats) && subset(record.folded, record.participants))
-    require(record.dealerId === null || member(record.dealerId, s.seats))
-    hands(record.shownHands, record.participants, false)
-    require(amounts(record.points, record.participants) && amounts(record.contributions, record.participants) && typeof record.anyVoluntaryBet === 'boolean' && Array.isArray(record.pots))
-    for (const pot of record.pots) {
-      require(object(pot) && text(pot.potId) && ['round', 'locked'].includes(pot.source) && integer(pot.amount) && amounts(pot.contributions, s.seats) && subset(pot.eligible, s.seats) && object(pot.outcome))
-      const out = pot.outcome
-      require(['uncalled-return', 'awarded', 'locked', 'carried', 'split'].includes(out.kind))
-      if (out.kind === 'awarded') require(member(out.winner, s.seats) && typeof out.byShowdown === 'boolean')
-      if (out.kind === 'uncalled-return') require(member(out.playerId, s.seats))
-      if (out.kind === 'carried') require(text(out.carryId))
-      if (out.kind === 'locked') require(text(out.lockedPotId) && subset(out.tiedPlayers, s.seats) && ['ordinary', 'allin'].includes(out.lockKind))
-      if (out.kind === 'split') require(subset(out.tiedPlayers, s.seats) && integer(out.share) && integer(out.removed))
-    }
+    require(object(record) && !historyIds.has(record.roundId)); historyIds.add(record.roundId)
+    validateRecord(record, s.seats)
   }
   for (const [key, record] of Object.entries(s.processedCommands) as Array<[string, any]>) {
     require(object(record) && text(record.fingerprint) && object(record.outcome))
@@ -137,11 +147,12 @@ export function validateSvaraStoredMatch(value: unknown, full = true): asserts v
     assertSvaraMatchInvariants(state)
     const kinds = new Set<string>(), generations = new Set<number>(), view = describeSvaraLifecycle(state)
     for (const d of snapshot.deadlines) {
-      require(object(d) && state.phase === 'in-progress' && d.phase === 'in-progress' && ['turn', 'svara-joining', 'presence-wait'].includes(d.kind) && !kinds.has(d.kind))
+      require(object(d) && state.phase === 'in-progress' && d.phase === 'in-progress' && ['turn', 'svara-joining', 'presence-wait', 'reveal-choice', 'reveal-display'].includes(d.kind) && !kinds.has(d.kind))
       require(text(d.key) && integer(d.deadlineAt) && d.deadlineAt > 0 && integer(d.generation) && d.generation > 0 && d.generation <= snapshot.deadlineSequence && !generations.has(d.generation))
       require(integer(d.baseRevision) && d.baseRevision <= snapshot.revision && integer(d.actionVersion) && (d.roundId === null || text(d.roundId)))
-      require(d.playerId === (d.kind === 'turn' ? view.actorId : d.kind === 'presence-wait' ? view.readyPlayerIds[0] ?? null : null))
-      if (d.kind === 'turn' || d.kind === 'svara-joining') require(d.roundId === view.roundId && d.actionVersion === view.actionVersion)
+      require(d.playerId === (d.kind === 'turn' ? view.actorId : d.kind === 'presence-wait' ? view.readyPlayerIds[0] ?? null
+        : d.kind === 'reveal-choice' || d.kind === 'reveal-display' ? view.revealChoice?.winnerId ?? null : null))
+      if (d.kind === 'turn' || d.kind === 'svara-joining' || d.kind === 'reveal-choice' || d.kind === 'reveal-display') require(d.roundId === view.roundId && d.actionVersion === view.actionVersion)
       kinds.add(d.kind); generations.add(d.generation)
     }
     const expected = planSvaraDeadlines(state, snapshot.revision, snapshot.deadlines, snapshot.deadlineSequence, 0)

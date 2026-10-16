@@ -99,7 +99,16 @@ class Table {
   }
   /** Следващо обикновено раздаване с контролирани ръце. */
   deal(hands: Record<string, string>): SvaraMatchState {
+    this.resolveRevealChoice()
     return this.run({ type: 'start-next-round' }, { createDeck: () => buildSvaraDeckForHands(this.peekOrder(), hands) })
+  }
+  /** 2Б.3.7.1: избор, несвързан с тестовия сценарий — по подразбиране скрива. */
+  resolveRevealChoice(): SvaraMatchState {
+    const round = this.state.round
+    if (round && (round as { kind: string }).kind === 'reveal-choice') {
+      this.run({ type: 'hide-cards', playerId: (round as { winnerId: string }).winnerId })
+    }
+    return this.state
   }
   peekOrder(): string[] {
     const s = this.state
@@ -172,8 +181,12 @@ function assertSnapshotSafe(snapshot: SvaraMatchSnapshotMessage, state: SvaraMat
   const round = state.round
   const visible = new Set<string>()
   if (round && (round.kind === 'ordinary' || round.kind === 'svara') && round.betting.looked.includes(viewer)) for (const code of round.hands[viewer] ?? []) visible.add(code)
+  // 2Б.3.7.1: докато „Покажи“/„Скрий“ чака, победителят вижда своята вече
+  // погледната ръка (сега в round.cards); веднъж показана — публична за всички.
+  if (round && round.kind === 'reveal-choice' && round.winnerId === viewer) for (const code of round.cards) visible.add(code)
   const hidden = new Set<string>()
   if (round && (round.kind === 'ordinary' || round.kind === 'svara')) for (const cards of Object.values(round.hands)) for (const code of cards) if (!visible.has(code)) hidden.add(code)
+  if (round && round.kind === 'reveal-choice' && round.decision === 'pending') for (const code of round.cards) if (!visible.has(code)) hidden.add(code)
   for (const record of state.history) for (const cards of Object.values(record.shownHands)) for (const code of cards) if (!visible.has(code)) hidden.add(code)
   for (const code of hidden) assert(!json.includes(`"${code}"`), `snapshot of ${viewer} leaks card ${code}`)
   const cards = snapshot.you.cards
@@ -380,6 +393,7 @@ check('10. историята не разкрива показани карти 
     t.deal({})
     t.act(t.state.round!.kind === 'ordinary' ? t.state.round!.betting.toAct! : '', { kind: 'fold' })
   }
+  t.resolveRevealChoice()
   const s = t.snap('a')
   assert(s.history.totalRounds === SVARA_SNAPSHOT_HISTORY_LIMIT + 4 && s.history.recent.length === SVARA_SNAPSHOT_HISTORY_LIMIT, `${s.history.totalRounds} ${s.history.recent.length}`)
   assert(s.history.recent[s.history.recent.length - 1]!.roundId === t.state.history[t.state.history.length - 1]!.roundId, 'most recent last')
@@ -587,6 +601,13 @@ function driveStep(rt: SvaraMatchRuntime, matchId: string, players: string[], pi
     return void sys({ type: 'svara-start' })
   }
   if (round.kind === 'allin-svara') return void sys({ type: 'advance-allin-svara' })
+  if (round.kind === 'reveal-choice') {
+    if (round.decision === 'pending') {
+      if (status[round.winnerId] !== 'active') return void sys({ type: 'set-absent', playerId: round.winnerId, absent: false })
+      return void part(round.winnerId, { type: 'hide-cards' })
+    }
+    return void sys({ type: 'close-reveal-display', roundId: round.roundId })
+  }
   const actor = s.toActId!
   if (status[actor] === 'absent') return void sys({ type: 'set-absent', playerId: actor, absent: false })
   const own = rt.getPlayerSnapshot(matchId, { playerId: actor })

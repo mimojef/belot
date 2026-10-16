@@ -173,7 +173,13 @@ try {
 
   await check('the existing fourth heads-up no-bet action is playable through the wire parser', () => {
     const t = fixture()
-    for (let round = 0; round < 3; round++) t.act(t.actor(), { kind: 'fold' })
+    for (let round = 0; round < 3; round++) {
+      t.act(t.actor(), { kind: 'fold' })
+      // 2Б.3.7.1: heads-up fold оставя единствен победител → избор преди края на рунда; скрива.
+      const pending = t.state().round as any
+      assert.equal(pending.kind, 'reveal-choice')
+      t.ok(pending.winnerId, { type: 'hide-cards' })
+    }
     assert.equal((t.state().round as any).isFourthHeadsUp, true)
     assert.equal(t.view(t.actor()).you.betting?.noBet, true)
     t.act(t.actor(), { kind: 'no-bet' }); t.act(t.actor(), { kind: 'no-bet' })
@@ -245,7 +251,13 @@ try {
       buildSvaraDeckForHands(['a', 'b', 'c'], { a: TIE1, b: TIE2, c: TIE3 }),
       buildSvaraDeckForHands(['a', 'b', 'c'], { a: HIGH, b: TIE2, c: LOW }) ]
     const u = fixture(3, 10, 1, decks)
-    for (const p of ['b', 'c', 'c', 'a']) u.act(p, { kind: 'fold' })
+    for (const p of ['b', 'c', 'c', 'a']) {
+      u.act(p, { kind: 'fold' })
+      // 2Б.3.7.1: ако това отказване остави единствен победител, изборът трябва да
+      // се разреши (скрива), преди да продължи автоматичният преход към следващото раздаване.
+      const pending = u.state().round as any
+      if (pending?.kind === 'reveal-choice') u.ok(pending.winnerId, { type: 'hide-cards' })
+    }
     assert.deepEqual(u.state().stacks, { a: 10, b: 10, c: 7 })
     while (u.state().round?.kind === 'ordinary' && u.state().history.length < 3) {
       const p = u.actor(); u.look(p); u.act(p, { kind: 'all-in' })
@@ -295,6 +307,10 @@ try {
     const before = JSON.stringify(t.runtime.exportInternalStateForServer(other))
     const exit = t.payload({ type: 'exit' })
     t.wire('b', exit)
+    // 2Б.3.7.1: b-ят изход оставя a единствен победител → избор преди края; скрива.
+    const pending = t.state().round as any
+    assert.equal(pending.kind, 'reveal-choice')
+    t.ok('a', { type: 'hide-cards' })
     assert.equal(t.state().phase, 'finished')
     assert.equal(t.lobby.findCommitment('a'), null); assert.equal(t.lobby.findCommitment('b'), null)
     const exitedFrames = t.frames.get('b')!.filter((f) => f.type === 'svara_match_snapshot').length

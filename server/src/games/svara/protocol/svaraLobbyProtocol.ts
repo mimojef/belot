@@ -15,7 +15,7 @@ export type SvaraGameplayClientMessage = {
   matchId: string
   commandId: string
   expectedRevision: number
-  command: Extract<SvaraParticipantCommand, { type: 'look' | 'act' | 'svara-join' | 'svara-decline' | 'request-return' | 'exit' }>
+  command: Extract<SvaraParticipantCommand, { type: 'look' | 'act' | 'svara-join' | 'svara-decline' | 'request-return' | 'exit' | 'reveal-cards' | 'hide-cards' }>
 }
 
 export type SvaraLobbyErrorCode =
@@ -28,7 +28,7 @@ export type SvaraLobbyErrorCode =
 
 export type SvaraLobbyServerMessage =
   | { type: 'svara_match_timing'; matchId: string; revision: number; serverNow: number;
-      deadlines: Array<{ kind: 'turn' | 'svara-joining' | 'presence-wait'; deadlineAt: number; remainingMs: number; playerId: string | null }> }
+      deadlines: Array<{ kind: 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'; deadlineAt: number; remainingMs: number; playerId: string | null }> }
   | { type: 'svara_command_result'; matchId: string; commandId: string; status: 'applied' | 'duplicate'; revision: number; phase: SvaraPublicTable['phase'] }
   | { type: 'svara_command_error'; code: SvaraLobbyErrorCode; message: string; commandId?: string }
   | { type: 'svara_tables_list'; tables: SvaraPublicTable[] }
@@ -54,7 +54,7 @@ export function parseSvaraLobbyMessage(input: Record<string, unknown>): SvaraLob
     if (!command || typeof command !== 'object' || Array.isArray(command)) return null
     const c = command as Record<string, unknown>
     let normalized: SvaraGameplayClientMessage['command']
-    if (c.type === 'look' || c.type === 'svara-join' || c.type === 'svara-decline' || c.type === 'request-return' || c.type === 'exit') normalized = { type: c.type }
+    if (c.type === 'look' || c.type === 'svara-join' || c.type === 'svara-decline' || c.type === 'request-return' || c.type === 'exit' || c.type === 'reveal-cards' || c.type === 'hide-cards') normalized = { type: c.type }
     else if (c.type === 'act') {
       if (!c.action || typeof c.action !== 'object' || Array.isArray(c.action)) return null
       const a = c.action as Record<string, unknown>

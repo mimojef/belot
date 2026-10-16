@@ -88,6 +88,8 @@ await check('adapter: actual dealt cards stay private; live role/flag checks cov
     const count = frames.get('observer')!.length
     lobby.handle('b', { type: 'leave_svara_table', matchId: 'dealt', requestId: 'exit' })
     assert.equal(frames.get('observer')!.length, count, 'no pushes after role demotion')
+    // 2Б.3.7.1: a е единственият останал → избор „Покажи“/„Скрий“ преди края; скрива, за да завърши мачът.
+    lobby.handle('a', { type: 'submit_svara_command', matchId: 'dealt', commandId: 'hide', expectedRevision: runtime.getMatchRevision('dealt'), command: { type: 'hide-cards' } })
     assert.equal(lobby.findCommitment('a'), null, 'finished match releases winner')
     assert.equal(lobby.findCommitment('b'), null, 'voluntary exit releases leaver')
     process.env.SVARA_TEST_ENABLED = '0'
@@ -295,6 +297,9 @@ try {
         await leave(player, id)
         await denied(player, { type: 'request_svara_table_state', matchId: id }, 'not_a_participant')
       }
+      // 2Б.3.7.1: a е единствен останал → избор „Покажи“/„Скрий“ преди края; скрива, за да завърши мачът.
+      const pending = await snapshot(a, id)
+      await ask(a, { type: 'submit_svara_command', matchId: id, commandId: requestId(), expectedRevision: pending.revision, command: { type: 'hide-cards' } }, 'svara_command_result')
       assert(!(await tables(observer)).some((t) => t.matchId === id), 'finished match removed from list')
     }
   })
@@ -313,6 +318,9 @@ try {
     assert.equal(new Set(state.seats.map((p: any) => p.playerId)).size, 3)
     const winner = results[0].type === 'svara_table_updated' ? c : d
     await leave(winner, id); await leave(b, id)
+    // 2Б.3.7.1: a е единствен останал → избор; скрива, за да освободи обвързването му за следващите тестове.
+    const pending = await snapshot(a, id)
+    await ask(a, { type: 'submit_svara_command', matchId: id, commandId: requestId(), expectedRevision: pending.revision, command: { type: 'hide-cards' } }, 'svara_command_result')
   })
   await check('WS: disconnect retains membership; second authenticated session cannot claim another seat', async () => {
     const other = await user()
@@ -392,6 +400,10 @@ try {
     }
     assert.deepEqual(await snapshot(passive, matchId), own, 'rejected commands preserve game revision/state')
     await leave(passive, matchId)
+    // 2Б.3.7.1: active (reconnected) е единствен останал → избор; скрива, за да завърши мачът.
+    const pendingChoice = await snapshot(reconnected, matchId)
+    assert.equal(pendingChoice.round.kind, 'reveal-choice')
+    await ask(reconnected, { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: pendingChoice.revision, command: { type: 'hide-cards' } }, 'svara_command_result')
     assert.equal((await snapshot(reconnected, matchId)).phase, 'finished')
   })
   await check('WS: actual Belot/Ludo admission guards in both directions, including disconnected Svara member', async () => {

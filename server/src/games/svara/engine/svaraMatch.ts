@@ -162,7 +162,28 @@ type SvaraDealRound = {
 
 type AllInSvaraRound = { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number; sidesEvaluated: boolean }
 
-export type SvaraRound = OrdinaryRound | SvaraJoiningRound | SvaraDealRound | AllInSvaraRound
+/**
+ * Етап 2Б.3.7.1: избор на победителя „Покажи“/„Скрий“ картите, когато
+ * всички противници са отказали и остава точно един участник (§4.7). Банката
+ * вече е присъдена (в `creditStack`/`awardLocked`, преди това състояние) —
+ * тук се пази САМО изборът за публично показване, нулево влияние върху
+ * чиповата сметка (виж `assertSvaraMatchInvariants` — няма прибавен слой за
+ * този вид рунд). `record` е завършеният запис за историята, забавен до
+ * решението (или до края на показването), за да не стартира следващо
+ * раздаване, докато прозорецът не приключи (`startNextRound` отказва, щом
+ * `state.round` не е null — същата защита, без нов механизъм).
+ */
+type RevealChoiceRound = {
+  kind: 'reveal-choice'
+  roundId: string
+  winnerId: string
+  cards: SvaraCardCode[]
+  points: number
+  decision: 'pending' | 'revealed'
+  record: SvaraRoundRecord
+}
+
+export type SvaraRound = OrdinaryRound | SvaraJoiningRound | SvaraDealRound | AllInSvaraRound | RevealChoiceRound
 
 export type SvaraMatchState = {
   config: SvaraMatchConfig
@@ -213,6 +234,10 @@ export type SvaraMatchCommand =
   | { type: 'set-absent'; commandId: string; playerId: string; absent: boolean }
   | { type: 'exit'; commandId: string; playerId: string }
   | { type: 'absence-expired'; commandId: string; playerId: string }
+  | { type: 'reveal-cards'; commandId: string; playerId: string }
+  | { type: 'hide-cards'; commandId: string; playerId: string }
+  | { type: 'expire-reveal-choice'; commandId: string; roundId: string }
+  | { type: 'close-reveal-display'; commandId: string; roundId: string }
 
 export type SvaraMatchOutcome = {
   commandId: string
@@ -565,6 +590,10 @@ function dispatch(ctx: Ctx): void {
     case 'set-absent': return setAbsent(ctx, command.playerId, command.absent)
     case 'exit': return exitMatch(ctx, command.playerId)
     case 'absence-expired': return absenceExpired(ctx, command.playerId)
+    case 'reveal-cards': return revealCards(ctx, command.playerId)
+    case 'hide-cards': return hideCards(ctx, command.playerId)
+    case 'expire-reveal-choice': return expireRevealChoice(ctx, command.roundId)
+    case 'close-reveal-display': return closeRevealDisplay(ctx, command.roundId)
     default: fail('invalid-command', `unknown command ${String((command as { type?: unknown }).type)}`)
   }
 }
@@ -845,6 +874,13 @@ function settleOrdinary(ctx: Ctx): void {
   } else {
     state.headsUpNoBetStreak = 0
   }
+  // §4.7/2Б.3.7.1: единственият неотказал печели директно (вече присъдено по-горе) —
+  // тогава всеки слой е или негов, или без правоимащ (виж доказателството в
+  // коментара на RevealChoiceRound), затова allinPotIds тук е винаги празен.
+  if (remaining.length === 1) {
+    openRevealChoice(ctx, remaining[0]!, round.hands[remaining[0]!]!, record)
+    return
+  }
   finishRound(ctx, record)
   if (allinPotIds.length > 0) {
     state.round = { kind: 'allin-svara', roundId: nextRoundId(ctx, 'allin'), potIds: allinPotIds, iteration: 0, sidesEvaluated: false }
@@ -922,6 +958,62 @@ function finishRound(ctx: Ctx, record: SvaraRoundRecord | null): void {
     state.phase = 'finished'
     state.winnerId = alive[0] ?? null
   }
+}
+
+/**
+ * Влиза в избора „Покажи“/„Скрий“ вместо директно да затвори рунда (§4.7,
+ * 2Б.3.7.1). Банката е вече присъдена от повикващия (`settleOrdinary`/
+ * `settleSvaraDeal`); `record` чака в новия рунд до решението.
+ */
+function openRevealChoice(ctx: Ctx, winnerId: string, cards: readonly SvaraCardCode[], record: SvaraRoundRecord): void {
+  const points = evaluateSvaraHand(cards.map(parseSvaraCardCode)).points
+  ctx.state.round = { kind: 'reveal-choice', roundId: nextRoundId(ctx, 'reveal'), winnerId, cards: [...cards], points, decision: 'pending', record }
+}
+
+function requireRevealChoice(ctx: Ctx): RevealChoiceRound {
+  const round = ctx.state.round
+  if (!round || round.kind !== 'reveal-choice') fail('not-allowed', 'no reveal choice is pending')
+  return round as RevealChoiceRound
+}
+
+function requireRevealChoiceActor(ctx: Ctx, playerId: string): RevealChoiceRound {
+  requireSeated(ctx, playerId)
+  const round = requireRevealChoice(ctx)
+  if (round.winnerId !== playerId) fail('not-allowed', 'only the winner can choose whether to show the cards')
+  // Съгласувано с другите доброволни действия (act/look/svara-decline):
+  // само активен играч решава; изтичането по-долу не зависи от това.
+  if (ctx.state.status[playerId] !== 'active') fail('player-absent', `${playerId} is ${ctx.state.status[playerId]} and cannot decide`)
+  if (round.decision !== 'pending') fail('not-allowed', 'the choice was already made')
+  return round
+}
+
+function revealCards(ctx: Ctx, playerId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = requireRevealChoiceActor(ctx, playerId)
+  round.decision = 'revealed'
+}
+
+/** Скриване — изрично от победителя, или автоматично при изтичане на 5 сек (§2Б.3.7.1). */
+function hideCards(ctx: Ctx, playerId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = requireRevealChoiceActor(ctx, playerId)
+  finishRound(ctx, round.record)
+}
+
+/** Сървърен срок (5 сек): изтичането НЕ е отсъствие и не прави отказ — само автоматично скрива. */
+function expireRevealChoice(ctx: Ctx, roundId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = ctx.state.round
+  if (!round || round.kind !== 'reveal-choice' || round.roundId !== roundId || round.decision !== 'pending') fail('not-allowed', 'stale reveal choice timeout')
+  finishRound(ctx, (round as RevealChoiceRound).record)
+}
+
+/** Край на 3-секундния публичен показ (само след „Покажи“); затваря рунда, както скриването. */
+function closeRevealDisplay(ctx: Ctx, roundId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = ctx.state.round
+  if (!round || round.kind !== 'reveal-choice' || round.roundId !== roundId || round.decision !== 'revealed') fail('not-allowed', 'stale reveal display close')
+  finishRound(ctx, (round as RevealChoiceRound).record)
 }
 
 // ── Обикновена Свара (§6) ───────────────────────────────────────────────────
@@ -1039,6 +1131,11 @@ function settleSvaraDeal(ctx: Ctx): void {
         record.pots.push({ ...base, outcome: { kind: 'locked', lockedPotId, tiedPlayers: best, lockKind } })
       }
     }
+  }
+  // §4.7/2Б.3.7.1: same single-survivor deferral as settleOrdinary (see there).
+  if (remaining.length === 1) {
+    openRevealChoice(ctx, remaining[0]!, round.hands[remaining[0]!]!, record)
+    return
   }
   finishRound(ctx, record)
   if (allinPotIds.length > 0) {
@@ -1254,6 +1351,9 @@ export function describeSvaraLifecycle(state: SvaraMatchState) {
     : []
   return {
     phase: state.phase, roundId: round?.roundId ?? null, roundKind: round?.kind ?? null,
+    // 2Б.3.7.1: избора за показване/скриване държи round не-null, но не е
+    // „граница“ — съзнателно изключен, за да изчакат activateReturns/
+    // finishPresenceWait, докато собственото му 5с/3с изтичане не го затвори.
     atBoundary: !round || round.kind === 'svara-joining' || round.kind === 'allin-svara',
     activePlayerIds, readyPlayerIds, returningPlayerIds,
     // An off-turn exit/forced fold must not grant the current actor a fresh
@@ -1265,6 +1365,7 @@ export function describeSvaraLifecycle(state: SvaraMatchState) {
       undecided: candidates.filter((id) => !round.declined?.includes(id)),
       holdersReady: !!pot && pot.eligible.every((id) => state.status[id] === 'active'),
     } : null,
+    revealChoice: round?.kind === 'reveal-choice' ? { winnerId: round.winnerId, decision: round.decision } : null,
   }
 }
 
@@ -1368,16 +1469,22 @@ export function createSvaraMatchPlayerView(state: SvaraMatchState, viewerId: str
   const round = state.round
   const betting = round && (round.kind === 'ordinary' || round.kind === 'svara') ? round : null
   const looked = betting ? betting.betting.looked.includes(viewerId) : false
+  // 2Б.3.7.1: победителят продължава да вижда собствената си (вече погледната
+  // по-рано) ръка по време на избора/показа; за никой друг тя не се разкрива
+  // тук — публичното разкриване (при „Покажи“) е отделна, изрично бяла
+  // политика в protocol/svaraSnapshotProtocol.ts, не през това служебно поле.
+  const reveal = round?.kind === 'reveal-choice' && round.winnerId === viewerId ? round : null
   return {
     phase: state.phase,
     roundKind: round?.kind ?? null,
     dealerId: betting?.dealerId ?? null,
     toAct: betting?.betting.toAct ?? null,
-    ownCards: betting && looked && betting.hands[viewerId] ? [...betting.hands[viewerId]!] : null,
-    ownLooked: looked,
+    ownCards: betting && looked && betting.hands[viewerId] ? [...betting.hands[viewerId]!] : reveal ? [...reveal.cards] : null,
+    ownLooked: looked || !!reveal,
     stacks: { ...state.stacks },
     status: { ...state.status },
-    seatsWithCards: betting ? betting.participants.filter((id) => !betting.betting.folded.includes(id)).map((playerId) => ({ playerId, cardCount: 3 })) : [],
+    seatsWithCards: betting ? betting.participants.filter((id) => !betting.betting.folded.includes(id)).map((playerId) => ({ playerId, cardCount: 3 }))
+      : round?.kind === 'reveal-choice' ? [{ playerId: round.winnerId, cardCount: 3 }] : [],
     lockedPots: state.lockedPots.map((pot) => ({ potId: pot.potId, kind: pot.kind, amount: pot.amount, eligible: [...pot.eligible] })),
     carriedTotal: state.carried.reduce((sum, carry) => sum + carry.amount, 0),
     svaraJoinFee: round?.kind === 'svara-joining' ? round.fee : null,

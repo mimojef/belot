@@ -262,7 +262,13 @@ try {
     const tied = buildSvaraDeckForHands(['a', 'b', 'c'], { a: tie1, b: tie2, c: 'KD QD JD' })
     const decided = buildSvaraDeckForHands(['a', 'b', 'c'], { a: '7C 7D 7H', b: tie2, c: low })
     const t = fixture(3, 100, [[...SVARA_ORDERED_DECK], [...SVARA_ORDERED_DECK], tied, tied, decided])
-    for (const player of ['b', 'c', 'c', 'a']) t.command(player, { type: 'act', action: { kind: 'fold' } })
+    for (const player of ['b', 'c', 'c', 'a']) {
+      t.command(player, { type: 'act', action: { kind: 'fold' } })
+      // 2Б.3.7.1: ако това отказване остави единствен победител, изборът трябва да
+      // се разреши (скрива), преди автоматичният преход към следващото раздаване.
+      const pending = t.state().round as any
+      if (pending?.kind === 'reveal-choice') t.command(pending.winnerId, { type: 'hide-cards' })
+    }
     assert.deepEqual(t.state().stacks, { a: 10, b: 10, c: 7 })
     for (const player of ['a', 'b', 'c']) { t.p(player, { type: 'look' }); t.p(player, { type: 'act', action: { kind: 'all-in' } }) }
     assert.equal(t.state().round?.kind, 'allin-svara'); assert(t.stored().state.lockedPots.length); t.roundtrip()
@@ -274,15 +280,24 @@ try {
     const t = fixture(); t.command('b', { type: 'act', action: { kind: 'fold' } })
     t.s({ type: 'set-absent', playerId: 'b', absent: true }); t.command('b', { type: 'request-return' })
     assert.equal(t.stored().state.status.b, 'absent'); assert.deepEqual(t.stored().state.pendingReturns, ['b']); t.roundtrip()
-    t.command('c', { type: 'act', action: { kind: 'fold' } }); assert.equal(t.stored().state.status.b, 'active'); t.roundtrip()
+    t.command('c', { type: 'act', action: { kind: 'fold' } })
+    // 2Б.3.7.1: a е единствен останал → избор чака преди границата (activateReturns); скрива.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.command('a', { type: 'hide-cards' })
+    assert.equal(t.stored().state.status.b, 'active'); t.roundtrip()
   })
   await check('failed automatic next deal does not undo a committed player action or acknowledge an undealt round', () => {
     const t = fixture(2), before = t.state().roundCounter
-    hook = (candidate) => { if (candidate.matchId === t.matchId && candidate.state.roundCounter > before) throw new SvaraPersistenceError('write-failed') }
+    // 2Б.3.7.1: heads-up отказването само отваря избора (reveal-N) — +1 към
+    // roundCounter веднага; прага по-долу пропуска само ТОЗИ допълнителен
+    // рунд, за да хване единствено провала на истинското следващо раздаване.
+    hook = (candidate) => { if (candidate.matchId === t.matchId && candidate.state.roundCounter > before + 1) throw new SvaraPersistenceError('write-failed') }
     assert.equal(t.command('b', { type: 'act', action: { kind: 'fold' } }, 'committed-fold').status, 'applied')
-    assert.equal(t.stored().state.round, null); assert.equal(t.stored().state.roundCounter, before); t.roundtrip()
+    assert.equal((t.stored().state.round as any)?.kind, 'reveal-choice'); assert.equal(t.stored().state.roundCounter, before + 1)
+    assert.equal(t.command('a', { type: 'hide-cards' }, 'hide-once').status, 'applied')
+    assert.equal(t.stored().state.round, null); assert.equal(t.stored().state.roundCounter, before + 1); t.roundtrip()
     assert(t.stored().state.processedCommands[svaraParticipantCommandKey('b', 'committed-fold')])
-    hook = undefined; t.sync(); assert.equal(t.state().roundCounter, before + 1); t.roundtrip()
+    hook = undefined; t.sync(); assert.equal(t.state().roundCounter, before + 2); t.roundtrip()
   })
   await check('five-minute single-active victory durably awards every unresolved locked bank once', () => {
     const t = joining(); t.s({ type: 'set-absent', playerId: 'b', absent: true }); t.s({ type: 'set-absent', playerId: 'c', absent: true }); t.sync()
@@ -304,13 +319,21 @@ try {
   await check('carried pot survives storage and is durably awarded only once at the presence deadline', () => {
     const t = fixture(); t.command('b', { type: 'look' }); t.command('b', { type: 'act', action: { kind: 'bet', total: 30 } })
     t.command('b', { type: 'exit' }); t.s({ type: 'set-absent', playerId: 'a', absent: true }); t.sync()
-    assert.equal(t.stored().state.carried[0]!.amount, 30); t.roundtrip(); const stack = t.state().stacks.c!
+    assert.equal(t.stored().state.carried[0]!.amount, 30); t.roundtrip()
+    // 2Б.3.7.1: c е единствен останал → избор; изтича автоматично преди изчакването на присъствие.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.clock.advance(5000); assert.equal(t.stored().state.round, null); t.roundtrip()
+    const stack = t.state().stacks.c!
     t.clock.advance(300000); assert.equal(t.stored().state.stacks.c, stack + 30); assert.deepEqual(t.stored().state.carried, []); t.roundtrip()
   })
   await check('voluntary leave/closure and normal exit/finish persist terminal metadata', () => {
     const waiting = fixture(2, 1000, [], false); waiting.p('b', { type: 'leave-seat' }); waiting.roundtrip()
     waiting.p('a', { type: 'leave-seat' }); assert.equal(waiting.stored().state.phase, 'closed'); waiting.roundtrip()
-    const t = fixture(2); t.command('b', { type: 'exit' }); assert.equal(t.stored().state.phase, 'finished'); t.roundtrip()
+    const t = fixture(2); t.command('b', { type: 'exit' })
+    // 2Б.3.7.1: a е единствен останал → избор преди края; скрива, за да завърши мачът.
+    assert.equal((t.state().round as any)?.kind, 'reveal-choice')
+    t.command('a', { type: 'hide-cards' })
+    assert.equal(t.stored().state.phase, 'finished'); t.roundtrip()
     const row = db.prepare('SELECT finished_at FROM svara_match_snapshots WHERE match_id = ?').get(t.matchId) as { finished_at: string }
     assert(row.finished_at)
   })

@@ -100,9 +100,18 @@ function assertViewIsSafe(view: SvaraRuntimePlayerView, state: SvaraMatchState):
   if (round && (round.kind === 'ordinary' || round.kind === 'svara') && round.betting.looked.includes(view.viewerId)) {
     for (const code of round.hands[view.viewerId] ?? []) visibleOwn.add(code)
   }
+  // 2Б.3.7.1: докато изборът „Покажи“/„Скрий“ чака, победителят продължава да
+  // вижда собствената си (вече погледната) ръка — тя живее в round.cards, не
+  // round.hands, след прехода. Веднъж показана, вече не е „скрита“ за никого.
+  if (round && round.kind === 'reveal-choice' && round.winnerId === view.viewerId) {
+    for (const code of round.cards) visibleOwn.add(code)
+  }
   const hidden = new Set<string>()
   if (round && (round.kind === 'ordinary' || round.kind === 'svara')) {
     for (const [id, cards] of Object.entries(round.hands)) for (const code of cards) if (!(id === view.viewerId && visibleOwn.has(code))) hidden.add(code)
+  }
+  if (round && round.kind === 'reveal-choice' && round.decision === 'pending') {
+    for (const code of round.cards) if (!visibleOwn.has(code)) hidden.add(code)
   }
   for (const record of state.history) for (const cards of Object.values(record.shownHands)) for (const code of cards) if (!visibleOwn.has(code)) hidden.add(code)
   for (const code of hidden) assert(!json.includes(`"${code}"`), `view of ${view.viewerId} leaks card ${code}`)
@@ -184,6 +193,19 @@ function driveStep(d: Driver): void {
   }
   if (v.roundKind === 'allin-svara') {
     sys({ type: 'advance-allin-svara' })
+    return
+  }
+  if (v.roundKind === 'reveal-choice') {
+    // 2Б.3.7.1: изборът не борави с карти в самата driver-логика (само
+    // сървърен winnerId/decision), затова се чете директно от състоянието,
+    // както handsOf прави за ръцете по-горе в този файл.
+    const round = rt.exportInternalStateForServer(matchId).round as { decision: 'pending' | 'revealed'; winnerId: string; roundId: string }
+    if (round.decision === 'pending') {
+      if (status[round.winnerId] !== 'active') { sys({ type: 'set-absent', playerId: round.winnerId, absent: false }); return }
+      part(round.winnerId, { type: 'hide-cards' })
+    } else {
+      sys({ type: 'close-reveal-display', roundId: round.roundId })
+    }
     return
   }
   const actor = v.toAct

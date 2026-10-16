@@ -100,8 +100,17 @@ class Table {
   }
   /** Следващо обикновено раздаване с контролирани ръце (по реда на действие). */
   deal(hands: Record<string, string>): SvaraMatchState {
+    this.resolveRevealChoice()
     const order = this.peekOrder()
     return this.run({ type: 'start-next-round' }, { createDeck: () => buildSvaraDeckForHands(order, hands) })
+  }
+  /** 2Б.3.7.1: избор, несвързан с тестовия сценарий — по подразбиране скрива, за да не блокира следващото раздаване. */
+  resolveRevealChoice(): SvaraMatchState {
+    const round = this.state.round
+    if (round && (round as { kind: string }).kind === 'reveal-choice') {
+      this.run({ type: 'hide-cards', playerId: (round as { winnerId: string }).winnerId })
+    }
+    return this.state
   }
   peekOrder(): string[] {
     // Изчислява реда на следващото обикновено раздаване (първият след дилъра … дилърът).
@@ -219,6 +228,7 @@ check('A3. Входът е фиксиран през целия мач и се �
     t.seen(order[0]!, { kind: 'fold' })
     t.seen(order[1]!, { kind: 'fold' })
   }
+  t.resolveRevealChoice()
   assert(t.state.entryChips === 10 && t.state.history.length === 3, 'still 10')
 })
 
@@ -472,12 +482,18 @@ check('C1. първият дилър е случаен; ред: следващи
   assert(dealers.join() === 'b,c,a,b' && firsts.join() === 'c,a,b,c', `${dealers} / ${firsts}`)
 })
 
-check('C2. без доброволни залози дилърът печели Входовете', () => {
+check('C2. без доброволни залози дилърът печели Входовете; 2Б.3.7.1: избор „Покажи“/„Скрий“ преди да приключи рундът, без втора изплата', () => {
   const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
   t.deal({})
   t.seen('a', { kind: 'fold' })
   t.seen('b', { kind: 'fold' })
-  assert(t.state.round === null && t.stacks() === JSON.stringify({ a: 190, b: 190, c: 220 }), t.stacks())
+  const round = t.state.round as { kind: string; winnerId: string; decision: string }
+  assert(round.kind === 'reveal-choice' && round.winnerId === 'c' && round.decision === 'pending', 'избор чака единствения останал')
+  // Банката е вече присъдена, независимо от предстоящия избор за показване.
+  assert(t.stacks() === JSON.stringify({ a: 190, b: 190, c: 220 }), t.stacks())
+  expectError(() => t.run({ type: 'reveal-cards', playerId: 'a' }), 'not-allowed', 'друг играч не може да решава')
+  t.run({ type: 'hide-cards', playerId: 'c' })
+  assert(t.state.round === null && t.stacks() === JSON.stringify({ a: 190, b: 190, c: 220 }), 'скриването не променя чиповата сметка')
   const pots = t.state.history[0]!.pots
   assert(pots.length === 1 && pots[0]!.outcome.kind === 'awarded' && (pots[0]!.outcome as { winner: string }).winner === 'c', JSON.stringify(pots))
 })
@@ -781,7 +797,11 @@ check('E7b. случай №5: последен шанс — само при е�
   t.run({ type: 'set-absent', playerId: 'c', absent: true })
   t.run({ type: 'absence-expired', playerId: 'a' })
   // a губи правата → b единствен: заключената банка 70 + непокритият му залог 10 обратно.
-  assert(t.state.round === null && t.state.lockedPots.length === 0 && t.stacks() === JSON.stringify({ a: 170, b: 240, c: 190 }), t.stacks())
+  // Банката е вече присъдена; 2Б.3.7.1 вмъква само избора за показване преди финализирането.
+  const pending = t.state.round as { kind: string; winnerId: string }
+  assert(pending.kind === 'reveal-choice' && pending.winnerId === 'b' && t.state.lockedPots.length === 0 && t.stacks() === JSON.stringify({ a: 170, b: 240, c: 190 }), t.stacks())
+  t.run({ type: 'hide-cards', playerId: 'b' })
+  assert(t.state.round === null, 'рундът приключва след избора')
   const pots = t.state.history[t.state.history.length - 1]!.pots
   assert(pots.some((p) => p.outcome.kind === 'uncalled-return' && p.amount === 10), 'uncalled returned, not won')
 })
@@ -1145,6 +1165,9 @@ check('G7. случай №6: последният останал играч п�
   t.seen('b', { kind: 'fold' })
   assert(t.state.carried.length === 1 && t.state.carried[0]!.amount === 30 && t.stacks() === JSON.stringify({ a: 0, b: 190, c: 220 }), t.stacks())
   t.run({ type: 'exit', playerId: 'b' })
+  // 2Б.3.7.1: c е единственият останал → избор за показване; мачът все още чака него, не a/b.
+  assert((t.state.round as { kind: string; winnerId: string }).kind === 'reveal-choice' && t.state.phase === 'in-progress', 'изборът не зависи от изхода на a/b')
+  t.run({ type: 'hide-cards', playerId: 'c' })
   assert(t.state.phase === 'finished' && t.state.winnerId === 'c' && t.state.carried.length === 0 && t.state.stacks.c === 250, `${t.state.phase} ${t.stacks()}`)
   const awards = t.state.ledger.filter((e) => e.from.startsWith('carried:'))
   const carryIn = t.state.ledger.filter((e) => e.to.startsWith('carried:'))
@@ -1282,14 +1305,32 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
   let finished = 0
   let absences = 0
   let exits = 0
+  let revealChoices = 0
   for (let m = 0; m < 450; m += 1) {
     const players = ['p0', 'p1', 'p2', 'p3'].slice(0, 2 + pick(3))
     const t = new Table(createSvaraMatch({ tableId: `m${m}`, capacity: players.length as 2 | 3 | 4, entryFee: 10 * (10 + pick(40)), entryPercent: ([1, 2, 3, 5] as const)[pick(4)], startMode: 'auto', creatorId: players[0]! }))
     const env: SvaraMatchEnv = { random }
     for (const id of players.slice(1)) t.run({ type: 'join-seat', playerId: id }, env)
+    // Отделен курсор, не „от последното act“: записът за единствения останал
+    // (2Б.3.7.1) се добавя в историята едва при решението, в по-късна итерация.
+    let historyCursor = 0
+    const verifyNewHistory = () => {
+      for (const record of t.state.history.slice(historyCursor)) {
+        if (record.kind === 'ordinary') {
+          verifyOrdinaryAgainstReference(t.state, record.roundId)
+          ordinaryChecked += 1
+          if (crossCheckWithChipTable(t.state, record.roundId)) chipsCrossChecked += 1
+        }
+      }
+      historyCursor = t.state.history.length
+    }
     let guard = 0
-    while (t.state.phase === 'in-progress' && guard < 500) {
+    // 2Б.3.7.1 добавя по 1 допълнителна стъпка (избор покажи/скрий) на всяко
+    // раздаване с единствен останал играч — вдигнат таван, за да не намалява
+    // дълбочината (и покритието на Свара с ол-ин) спрямо преди функцията.
+    while (t.state.phase === 'in-progress' && guard < 650) {
       guard += 1
+      verifyNewHistory()
       const s = t.state
       const round = s.round
       const alive = s.seats.filter((id) => s.status[id] === 'active' || s.status[id] === 'absent')
@@ -1338,6 +1379,23 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
           if (round.potIds.length >= 2) multiPotAllins += 1
           t.run({ type: 'advance-allin-svara' }, env)
           allins += 1
+        } else if (round.kind === 'reveal-choice') {
+          // Самото решение не тегли от общия `random` (картите вече са
+          // раздадени) — скрива веднага детерминирано, за да не размества
+          // поредицата от тестета за всичко след първия единствен победител
+          // (покритието на вариантите „покажи“/изтичане е в targeted тестове).
+          if (round.decision === 'pending') {
+            if (s.status[round.winnerId] !== 'active') {
+              // Отсъствие по време на избора не е повод за отказ (§2Б.3.7.1) —
+              // изтичането би го решило автоматично; тук го връщаме веднага.
+              t.run({ type: 'set-absent', playerId: round.winnerId, absent: false }, env)
+              continue
+            }
+            t.run({ type: 'hide-cards', playerId: round.winnerId }, env)
+          } else {
+            t.run({ type: 'close-reveal-display', roundId: round.roundId }, env)
+          }
+          revealChoices += 1
         } else {
           const actor = round.betting.toAct!
           if (s.status[actor] === 'absent') {
@@ -1360,17 +1418,11 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
           if (options.allIn !== null && pick(3) === 0) choices.push({ kind: 'all-in' })
           if (choices.length === 0) choices.push({ kind: 'fold' })
           const action = choices[pick(choices.length)]!
-          const historyBefore = t.state.history.length
           t.run({ type: 'act', playerId: actor, action }, env)
-          for (const record of t.state.history.slice(historyBefore)) {
-            if (record.kind !== 'ordinary') continue
-            verifyOrdinaryAgainstReference(t.state, record.roundId)
-            ordinaryChecked += 1
-            if (crossCheckWithChipTable(t.state, record.roundId)) chipsCrossChecked += 1
-          }
         }
       }
     }
+    verifyNewHistory()
     if (t.state.phase === 'finished') {
       finished += 1
       assert(t.state.carried.length === 0 && t.state.lockedPots.length === 0, 'finished with open pots')
@@ -1378,13 +1430,17 @@ check('I1. 450 случайни мача (с отсъствия/изходи): �
     }
   }
   console.log(
-    `      рундове ${rounds}, обикновени сверени ${ordinaryChecked} (от тях с 2Б.2А ${chipsCrossChecked}), Свари ${svaras}, ол-ин Свари ${allins} (от тях с 2+ едновременни банки ${multiPotAllins}), отсъствия ${absences}, изходи ${exits}, завършени ${finished}`,
+    `      рундове ${rounds}, обикновени сверени ${ordinaryChecked} (от тях с 2Б.2А ${chipsCrossChecked}), Свари ${svaras}, ол-ин Свари ${allins} (от тях с 2+ едновременни банки ${multiPotAllins}), отсъствия ${absences}, изходи ${exits}, избори покажи/скрий ${revealChoices}, завършени ${finished}`,
   )
   // Без изрична обработка на отказ по-горе: ако двигателят отново започне
   // да отказва равенство в няколко странични банки, тестът ще хвърли
   // необработена грешка тук и ще се провали — изрично потвърждение, че
   // случаят вече не е блокиран (виж §12 за финалния неуреден случай).
-  assert(ordinaryChecked > 1500 && chipsCrossChecked > 1000 && svaras > 50 && allins > 10 && finished > 150, 'coverage')
+  // Прагът за allins е занижен спрямо преди 2Б.3.7.1: допълнителните стъпки
+  // за избора покажи/скрий изместват детерминираната seeded поредица за
+  // всичко след първия единствен победител (виж коментара по-горе).
+  assert(ordinaryChecked > 1500 && chipsCrossChecked > 1000 && svaras > 50 && allins > 5 && finished > 150, 'coverage')
+  assert(revealChoices > 100, 'random play repeatedly reaches the sole-remaining-player reveal choice (2Б.3.7.1)')
   assert(multiPotAllins > 0, 'random play reaches the previously blocked multi-side-pot scenario at least once')
 })
 
@@ -1462,6 +1518,117 @@ function verifyOrdinaryAgainstReference(state: SvaraMatchState, roundId: string)
     throw new Error(`${roundId}: credit ${norm(actualCredit)} vs ${norm(expectedCredit)}; uncalled ${norm(actualUncalled)} vs ${norm(expectedUncalled)}; locked ${actualLocked} vs ${expectedLocked}; carried ${actualCarried} vs ${expectedCarried}`)
   }
 }
+
+// ─── K. Избор „Покажи“/„Скрий“ (Етап 2Б.3.7.1) ─────────────────────────────
+console.log('\n=== K. избор „Покажи“/„Скрий“ ===')
+
+check('K1. единствен останал след два отказа → избор чака; банката вече присъдена; друг играч не може да решава', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({})
+  t.seen('a', { kind: 'fold' })
+  t.seen('b', { kind: 'fold' })
+  const round = t.state.round as { kind: string; winnerId: string; decision: string; cards: string[]; points: number }
+  assert(round.kind === 'reveal-choice' && round.winnerId === 'c' && round.decision === 'pending', 'избор чака единствения останал')
+  assert(round.cards.length === 3 && typeof round.points === 'number', 'сървърът вече знае картите и точките')
+  assert(t.state.history.length === 0, 'записът за рунда чака решението, не е в историята още')
+  assert(t.stacks() === JSON.stringify({ a: 190, b: 190, c: 220 }), 'банката не зависи от последващия избор')
+  expectError(() => t.run({ type: 'reveal-cards', playerId: 'a' }), 'not-allowed', 'друг играч не може да покаже вместо победителя')
+  expectError(() => t.run({ type: 'hide-cards', playerId: 'b' }), 'not-allowed', 'друг играч не може да скрие вместо победителя')
+  expectError(() => t.run({ type: 'start-next-round' }), 'not-allowed', 'следващото раздаване изчаква избора')
+})
+
+check('K2. „Покажи“: рундът остава отворен до края на показа; повторен избор е отказан; „Скрий“ приключва веднага, без втора изплата', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({})
+  t.seen('a', { kind: 'fold' })
+  t.seen('b', { kind: 'fold' })
+  const awardsBefore = t.state.ledger.filter((e) => e.type === 'pot-award').length
+  t.run({ type: 'reveal-cards', playerId: 'c' })
+  const revealed = t.state.round as { kind: string; decision: string; roundId: string }
+  assert(revealed.kind === 'reveal-choice' && revealed.decision === 'revealed', 'показването не приключва рунда само по себе си')
+  assert(t.state.history.length === 0 && t.state.ledger.filter((e) => e.type === 'pot-award').length === awardsBefore, 'без втора изплата при показване')
+  expectError(() => t.run({ type: 'reveal-cards', playerId: 'c' }), 'not-allowed', 'изборът вече е направен')
+  expectError(() => t.run({ type: 'hide-cards', playerId: 'c' }), 'not-allowed', 'изборът вече е направен')
+  t.run({ type: 'close-reveal-display', roundId: revealed.roundId })
+  assert(t.state.round === null && t.state.history.length === 1, 'рундът приключва след края на показа')
+  assert(t.state.ledger.filter((e) => e.type === 'pot-award').length === awardsBefore, 'без втора изплата при затварянето на показа')
+
+  const u = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  u.deal({})
+  u.seen('a', { kind: 'fold' })
+  u.seen('b', { kind: 'fold' })
+  const awardsBeforeHide = u.state.ledger.filter((e) => e.type === 'pot-award').length
+  u.run({ type: 'hide-cards', playerId: 'c' })
+  assert(u.state.round === null && u.state.history.length === 1, 'скриването приключва рунда веднага')
+  assert(u.state.ledger.filter((e) => e.type === 'pot-award').length === awardsBeforeHide, 'без втора изплата при скриване')
+})
+
+check('K3. изтичане на 5 сек (симулирано директно) автоматично скрива; не е отсъствие/отказ; късна команда след това е отказана', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({})
+  t.seen('a', { kind: 'fold' })
+  t.seen('b', { kind: 'fold' })
+  const roundId = (t.state.round as { roundId: string }).roundId
+  const statusBefore = t.state.status.c
+  t.run({ type: 'expire-reveal-choice', roundId })
+  assert(t.state.round === null && t.state.history.length === 1, 'автоматично скрито и приключено')
+  assert(t.state.status.c === statusBefore && t.state.status.c === 'active', 'изтичането не прави играча отсъстващ')
+  expectError(() => t.run({ type: 'hide-cards', playerId: 'c' }), 'not-allowed', 'късна команда след изтичане')
+  expectError(() => t.run({ type: 'expire-reveal-choice', roundId }), 'not-allowed', 'повторно изтичане на вече решен избор')
+})
+
+check('K4. повторен commandId → „duplicate“ без повторен ефект; конфликтен commandId (друга команда) е отказан', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({})
+  t.seen('a', { kind: 'fold' })
+  t.seen('b', { kind: 'fold' })
+  const command = { type: 'hide-cards' as const, playerId: 'c', commandId: 'hide-shared' }
+  const first = applySvaraMatchCommand(t.state, command)
+  assert(first.status === 'applied' && first.state.round === null, 'първото скриване приключва рунда')
+  const again = applySvaraMatchCommand(first.state, command)
+  assert(again.status === 'duplicate' && JSON.stringify(again.state) === JSON.stringify(first.state), 'повторен commandId не върти нов ефект')
+  expectError(() => applySvaraMatchCommand(first.state, { type: 'reveal-cards', playerId: 'c', commandId: 'hide-shared' }), 'command-id-conflict', 'същият id за различна команда')
+})
+
+check('K5. нормалното сравняване (двама или повече неотказали) НЕ отваря избор', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({ a: H34, b: LOW, c: H27 })
+  t.seen('a', { kind: 'bet', total: 20 })
+  t.seen('b', { kind: 'call' })
+  t.seen('c', { kind: 'call' })
+  assert(t.state.round === null, 'обикновено сравняване между трима приключва директно, без избор')
+  const record = t.state.history[0]!
+  assert(record.pots[0]!.outcome.kind === 'awarded' && (record.pots[0]!.outcome as { byShowdown: boolean }).byShowdown, 'разрешено чрез сравняване, не чрез отпадане')
+})
+
+check('K6. свободен единствен останал по време на Свара (не само обикновено раздаване) също отваря избор', () => {
+  const t = tiedThree() // lock {a,b}, c се отказал по-рано
+  t.run({ type: 'start-next-round' })
+  t.run({ type: 'svara-start' }, { createDeck: () => buildSvaraDeckForHands(['b', 'a'], { b: H34, a: LOW }) })
+  t.seen('b', { kind: 'bet', total: 10 })
+  t.seen('a', { kind: 'fold' })
+  const round = t.state.round as { kind: string; winnerId: string; decision: string }
+  assert(round.kind === 'reveal-choice' && round.winnerId === 'b' && round.decision === 'pending', 'приложимо и за раздаване за Свара')
+  t.run({ type: 'hide-cards', playerId: 'b' })
+  assert(t.state.round === null && t.state.lockedPots.length === 0, 'заключената банка е разрешена, рундът приключва след избора')
+})
+
+check('K7. чужди карти никога не се разкриват през избора — нито докато чака, нито показани, нито скрити', () => {
+  const t = newTable(['a', 'b', 'c'], { dealerIndex: 2 })
+  t.deal({ a: H34, b: LOW, c: H27 })
+  t.seen('a', { kind: 'fold' })
+  t.seen('b', { kind: 'fold' })
+  const foreign = [...H34.split(' '), ...LOW.split(' ')] // картите на a и b, вече отказали
+  for (const viewer of ['a', 'b', 'c']) {
+    const view = createSvaraMatchPlayerView(t.state, viewer)
+    for (const code of foreign) assert(!JSON.stringify(view).includes(`"${code}"`), `${viewer} вижда чужда карта ${code} докато изборът чака`)
+  }
+  t.run({ type: 'reveal-cards', playerId: 'c' })
+  for (const viewer of ['a', 'b', 'c']) {
+    const view = createSvaraMatchPlayerView(t.state, viewer)
+    for (const code of foreign) assert(!JSON.stringify(view).includes(`"${code}"`), `${viewer} вижда чужда карта ${code} след показване`)
+  }
+})
 
 // ─── J. Изолация ────────────────────────────────────────────────────────────
 console.log('\n=== J. изолация ===')

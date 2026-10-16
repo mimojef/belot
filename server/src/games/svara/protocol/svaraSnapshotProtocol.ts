@@ -126,6 +126,12 @@ export type SvaraSnapshotRound =
   | SvaraSnapshotBettingRound
   | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
   | { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number }
+  /**
+   * 2Б.3.7.1: изборът „Покажи“/„Скрий“ — `winnerId`/`decision` са публични за
+   * всички на масата (кой е победил не е скрито, само картите); `cards`/
+   * `points` остават null, докато `decision` не стане 'revealed'.
+   */
+  | { kind: 'reveal-choice'; roundId: string; winnerId: string; decision: 'pending' | 'revealed'; cards: SvaraCardCode[] | null; handPoints: number | null }
 
 export type SvaraSnapshotLockedPot = {
   potId: string
@@ -185,6 +191,8 @@ export type SvaraMatchSnapshotMessage = {
     cards: SvaraCardCode[] | null
     /** Позволените действия в наддаването (само за зрителя, само на негов ход). */
     betting: SvaraBettingOptions | null
+    /** 2Б.3.7.1: само за самия победител, докато изборът чака решение. */
+    revealChoice: { canDecide: boolean } | null
   }
   round: SvaraSnapshotRound | null
   lockedPots: SvaraSnapshotLockedPot[]
@@ -245,6 +253,11 @@ function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
   if (!round) return null
   if (round.kind === 'svara-joining') return { kind: 'svara-joining', roundId: round.roundId, potId: round.potId, fee: round.fee, joiners: [...round.joiners], closed: round.closed ?? false }
   if (round.kind === 'allin-svara') return { kind: 'allin-svara', roundId: round.roundId, potIds: [...round.potIds], iteration: round.iteration }
+  if (round.kind === 'reveal-choice') {
+    const revealed = round.decision === 'revealed'
+    return { kind: 'reveal-choice', roundId: round.roundId, winnerId: round.winnerId, decision: round.decision,
+      cards: revealed ? [...round.cards] : null, handPoints: revealed ? round.points : null }
+  }
   const betting = round.betting
   const carriedIn = round.kind === 'ordinary' ? round.deadMoney : 0
   const contributed = round.participants.reduce((sum, id) => sum + (round.contributions[id] ?? 0), 0)
@@ -334,6 +347,7 @@ export function createSvaraMatchSnapshotMessage(matchId: string, state: SvaraMat
             lookRequired: options.lookRequired,
           }
         : null,
+      revealChoice: round?.kind === 'reveal-choice' && round.winnerId === viewerId ? { canDecide: round.decision === 'pending' } : null,
     },
     round: publicRound(state),
     lockedPots: state.lockedPots.map((pot) => ({ potId: pot.potId, kind: pot.kind, amount: pot.amount, eligible: [...pot.eligible], isMain: pot.isMain, continuation: pot.continuation })),
