@@ -862,6 +862,10 @@ export type CreateLobbyFlowControllerOptions = {
     | { ok: false; message: string }
   >
   onChatMarkRead?: (friendshipId: string) => Promise<void>
+  onChatMessageDelete?: (friendshipId: string, messageId: string) => Promise<
+    | { ok: true; conversation: ChatConversationSnapshot | null }
+    | { ok: false; message: string; code?: string }
+  >
   onChatSend?: (friendshipId: string, body: string, imageDataUrl?: string | null) => Promise<
     | {
         ok: true
@@ -1488,6 +1492,8 @@ export type LobbyFlowController = {
   setPrivateRoomCreatedSoundEnabled: (value: boolean) => void
   setFriendships: (value: FriendshipsSnapshot | null) => void
   setChatConversations: (value: ChatConversationSnapshot[]) => void
+  /** След WS reconnect: презарежда отворения личен разговор (пропуснати нови/изтрити съобщения). */
+  refreshOpenPersonalChatAfterReconnect: () => void
   refreshTopicsDirectoryMetadata: () => Promise<boolean>
   clearTopicsDirectoryMetadata: () => void
   startMatchmaking: (stake: MatchStake, displayName?: string) => void
@@ -2174,6 +2180,10 @@ type InternalLobbyFlowState = {
   chatMessagesHasMore: boolean
   chatOldestMessageCursor: string | null
   chatOlderMessagesLoading: boolean
+  /** Потвърждение за изтриване на СОБСТВЕНО лично съобщение (кошчето). */
+  chatMessageDeleteConfirm: { friendshipId: string; messageId: string } | null
+  chatMessageDeleteBusy: boolean
+  chatMessageDeleteErrorText: string | null
   chatErrorText: string | null
   chatDraftByFriendshipId: Record<string, string>
   // Избрана-но-неизпратена снимка per разговор (за да оцелее при
@@ -2954,6 +2964,9 @@ function createInitialState(): InternalLobbyFlowState {
     chatMessagesHasMore: false,
     chatOldestMessageCursor: null,
     chatOlderMessagesLoading: false,
+    chatMessageDeleteConfirm: null,
+    chatMessageDeleteBusy: false,
+    chatMessageDeleteErrorText: null,
     chatErrorText: null,
     chatDraftByFriendshipId: {},
     chatPendingImageByFriendshipId: {},
@@ -3430,6 +3443,8 @@ export function createLobbyFlowController(
   options: CreateLobbyFlowControllerOptions,
 ): LobbyFlowController {
   const state = createInitialState()
+  // Keep late HTTP history responses from restoring a confirmed deletion.
+  const deletedChatMessageIds = new Set<string>()
   state.privateRoomInGameNotificationsEnabled = options.initialPrivateRoomInGameNotificationsEnabled ?? true
   state.privateRoomCreatedSoundEnabled = options.initialPrivateRoomCreatedSoundEnabled ?? true
   const _initialScreen = LOBBY_PATH_TO_SCREEN[window.location.pathname]
@@ -5454,6 +5469,9 @@ export function createLobbyFlowController(
       chatMessagesLoading: state.chatMessagesLoading,
       chatMessagesHasMore: state.chatMessagesHasMore,
       chatOlderMessagesLoading: state.chatOlderMessagesLoading,
+      chatMessageDeleteConfirm: state.chatMessageDeleteConfirm,
+      chatMessageDeleteBusy: state.chatMessageDeleteBusy,
+      chatMessageDeleteErrorText: state.chatMessageDeleteErrorText,
       chatErrorText: state.chatErrorText,
       chatDraftByFriendshipId: state.chatDraftByFriendshipId,
       chatPendingImageByFriendshipId: state.chatPendingImageByFriendshipId,
@@ -6708,6 +6726,15 @@ export function createLobbyFlowController(
       },
       onChatLoadOlderClick: () => {
         void loadOlderChatMessages()
+      },
+      onChatMessageDeleteClick: (messageId) => {
+        openChatMessageDeleteConfirm(messageId)
+      },
+      onChatMessageDeleteCancel: () => {
+        cancelChatMessageDelete()
+      },
+      onChatMessageDeleteConfirm: () => {
+        void confirmChatMessageDelete()
       },
       onChatSubmit: (friendshipId, body) => {
         void sendChatMessage(friendshipId, body)
@@ -16393,16 +16420,26 @@ export function createLobbyFlowController(
     render()
   }
 
+  async function loadChatConversationSnapshots(includeArchived = false) {
+    let deletionCount: number
+    let result
+    do {
+      deletionCount = deletedChatMessageIds.size
+      result = await options.onChatConversationsLoad?.(includeArchived)
+    } while (deletionCount !== deletedChatMessageIds.size)
+    return result
+  }
+
   async function loadChatConversations(): Promise<boolean> {
     if (!options.onChatConversationsLoad) {
       state.chatErrorText = 'Чатът временно не е наличен.'
       return false
     }
 
-    const result = await options.onChatConversationsLoad()
+    const result = await loadChatConversationSnapshots()
 
-    if (!result.ok) {
-      state.chatErrorText = result.message
+    if (!result?.ok) {
+      state.chatErrorText = result?.message ?? 'Чатът временно не е наличен.'
       return false
     }
 
@@ -16566,7 +16603,7 @@ export function createLobbyFlowController(
       state.chatArchivedLoading = true
       render()
 
-      const result = await options.onChatConversationsLoad?.(true)
+      const result = await loadChatConversationSnapshots(true)
 
       state.chatArchivedLoading = false
 
@@ -16885,7 +16922,7 @@ export function createLobbyFlowController(
       return
     }
 
-    state.chatMessages = result.messages
+    state.chatMessages = mergeChatMessages([], result.messages)
     state.chatMessagesFriendshipId = friendshipId
     state.chatMessagesHasMore = result.hasMore
     state.chatOldestMessageCursor = result.messages[0]?.cursor ?? null
@@ -16901,14 +16938,125 @@ export function createLobbyFlowController(
   // всяко следващо realtime събитие. Chronological sort по createdAt (не
   // cursor value) — cursor е opaque server field, само за pagination request-и,
   // НЕ display ordering key.
+  /**
+   * Merge на НАЙ-НОВАТА страница (без cursor) с вече заредените съобщения +
+   * съгласуване на изтритите: съобщение, което попада в обхвата на свежата
+   * страница (по-ново от най-старото в нея, или цялата история, когато
+   * hasMore=false), но сървърът вече не го връща, е изтрито (напр. пропуснат
+   * chat_message_deleted при прекъсната връзка) — премахва се. По-старите
+   * заредени страници извън обхвата не се пипат (няма информация за тях).
+   */
+  function mergeLatestChatMessagesPage(
+    existing: readonly ChatMessageSnapshot[],
+    incoming: readonly ChatMessageSnapshot[],
+    hasMore: boolean,
+  ): ChatMessageSnapshot[] {
+    const incomingIds = new Set(incoming.map((m) => m.messageId))
+    const oldestIncomingMs = incoming.length > 0 ? new Date(incoming[0]!.createdAt).getTime() : null
+    const kept = existing.filter((m) => {
+      if (incomingIds.has(m.messageId)) return true
+      if (!hasMore) return false
+      if (oldestIncomingMs === null) return true
+      // Строго по-ново: при еднакъв created_at сървърът може да е отрязал
+      // реда по rowid — такова съобщение не се смята за изтрито.
+      return new Date(m.createdAt).getTime() <= oldestIncomingMs
+    })
+    return mergeChatMessages(kept, incoming)
+  }
+
+  function removeChatMessageLocally(friendshipId: string, messageId: string): void {
+    deletedChatMessageIds.add(messageId)
+    if (state.chatMessagesFriendshipId === friendshipId || isActivePersonalChatConversation(friendshipId)) {
+      state.chatMessages = state.chatMessages.filter((m) => m.messageId !== messageId)
+      state.chatOldestMessageCursor = state.chatMessages[0]?.cursor ?? (state.chatMessagesHasMore ? state.chatOldestMessageCursor : null)
+    }
+    if (state.chatMessageDeleteConfirm?.messageId === messageId && !state.chatMessageDeleteBusy) {
+      state.chatMessageDeleteConfirm = null
+      state.chatMessageDeleteErrorText = null
+    }
+  }
+
+  async function refreshChatConversationsAfterDeletion(): Promise<void> {
+    await loadChatConversations()
+    if (state.chatShowArchived || state.chatArchivedConversations.length > 0) {
+      const archived = await loadChatConversationSnapshots(true)
+      if (archived?.ok) state.chatArchivedConversations = archived.conversations.filter((c) => c.isArchived)
+    }
+    render()
+  }
+
+  function openChatMessageDeleteConfirm(messageId: string): void {
+    if (state.chatMessageDeleteBusy) return
+    const message = state.chatMessages.find((m) => m.messageId === messageId) ?? null
+    // Кошчето се рендира само за собствени съобщения; проверката тук е само
+    // UI защита — авторството се проверява на сървъра.
+    if (message === null || !message.isOwnMessage) return
+    state.chatMessageDeleteConfirm = { friendshipId: message.friendshipId, messageId }
+    state.chatMessageDeleteErrorText = null
+    render()
+  }
+
+  function cancelChatMessageDelete(): void {
+    if (state.chatMessageDeleteBusy) return
+    state.chatMessageDeleteConfirm = null
+    state.chatMessageDeleteErrorText = null
+    render()
+  }
+
+  async function confirmChatMessageDelete(): Promise<void> {
+    const pending = state.chatMessageDeleteConfirm
+    if (pending === null || state.chatMessageDeleteBusy) return
+    if (!options.onChatMessageDelete) {
+      state.chatMessageDeleteErrorText = 'Чатът временно не е наличен.'
+      render()
+      return
+    }
+
+    state.chatMessageDeleteBusy = true
+    state.chatMessageDeleteErrorText = null
+    render()
+
+    const result = await options.onChatMessageDelete(pending.friendshipId, pending.messageId)
+    state.chatMessageDeleteBusy = false
+
+    if (result.ok) {
+      state.chatMessageDeleteConfirm = null
+      removeChatMessageLocally(pending.friendshipId, pending.messageId)
+      if (result.conversation !== null && !deletedChatMessageIds.has(result.conversation.lastMessage?.messageId ?? '')) {
+        const updated = result.conversation
+        const replace = (list: ChatConversationSnapshot[]) => list.map((c) => {
+          if (c.friendshipId !== updated.friendshipId) return c
+          return c.friend.isOnline !== undefined ? { ...updated, friend: { ...updated.friend, isOnline: c.friend.isOnline } } : updated
+        })
+        state.chatConversations = replace(state.chatConversations)
+        state.chatArchivedConversations = replace(state.chatArchivedConversations)
+      } else {
+        void refreshChatConversationsAfterDeletion()
+      }
+      render()
+      return
+    }
+
+    if (result.code === 'message_not_found') {
+      // Съобщението вече не съществува на сървъра (напр. изтрито от друг таб)
+      // — синхронизираме с authoritative историята вместо локално премахване.
+      state.chatMessageDeleteConfirm = null
+      render()
+      void refreshChatAfterNotification(pending.friendshipId)
+      return
+    }
+
+    state.chatMessageDeleteErrorText = result.message
+    render()
+  }
+
   function mergeChatMessages(
     existing: readonly ChatMessageSnapshot[],
     incoming: readonly ChatMessageSnapshot[],
   ): ChatMessageSnapshot[] {
-    if (incoming.length === 0) return [...existing]
     const byId = new Map<string, ChatMessageSnapshot>()
-    for (const m of existing) byId.set(m.messageId, m)
-    for (const m of incoming) byId.set(m.messageId, m)
+    for (const m of existing) if (!deletedChatMessageIds.has(m.messageId)) byId.set(m.messageId, m)
+    for (const m of incoming) if (!deletedChatMessageIds.has(m.messageId)) byId.set(m.messageId, m)
     // Sort само по createdAt — cursor е opaque server string тук (server-side
     // keyset ordering key, base64-кодиран (created_at,rowid) chunk), клиентът
     // НЕ го decode-ва/интерпретира. Array.prototype.sort е stable (ES2019+),
@@ -17338,7 +17486,7 @@ export function createLobbyFlowController(
       // последните PERSONAL_CHAT_HISTORY_LIMIT от сървъра; ако потребителят
       // вече е load-нал по-стари страници чрез "Зареди по-стари", директен
       // overwrite би ги изтрил от state-а (виж mergeChatMessages doc коментара).
-      state.chatMessages = mergeChatMessages(state.chatMessages, result.messages)
+      state.chatMessages = mergeLatestChatMessagesPage(state.chatMessages, result.messages, result.hasMore)
       state.chatMessagesFriendshipId = friendshipId
       state.chatMessagesHasMore = result.hasMore
       if (state.chatOldestMessageCursor === null) {
@@ -17352,12 +17500,16 @@ export function createLobbyFlowController(
     const updatedConversation = existingConversation?.friend.isOnline !== undefined
       ? { ...result.conversation, friend: { ...result.conversation.friend, isOnline: existingConversation.friend.isOnline } }
       : result.conversation
-    state.chatConversations = [
-      updatedConversation,
-      ...state.chatConversations.filter((conversation) => {
-        return conversation.friendshipId !== result.conversation.friendshipId
-      }),
-    ]
+    if (deletedChatMessageIds.has(updatedConversation.lastMessage?.messageId ?? '')) {
+      await loadChatConversations()
+    } else {
+      state.chatConversations = [
+        updatedConversation,
+        ...state.chatConversations.filter((conversation) => {
+          return conversation.friendshipId !== result.conversation.friendshipId
+        }),
+      ]
+    }
     const restoreFocus = canRestoreComposerFocus(shouldRefocus)
     render()
     if (restoreFocus) {
@@ -17381,8 +17533,8 @@ export function createLobbyFlowController(
       if (result.ok) {
         // Merge, НЕ overwrite — виж mergeChatMessages doc коментара
         // (§F в task brief-а: realtime incoming не бива да изтрие вече
-        // load-нати по-стари страници).
-        state.chatMessages = mergeChatMessages(state.chatMessages, result.messages)
+        // load-нати по-стари страници); + съгласуване на изтритите.
+        state.chatMessages = mergeLatestChatMessagesPage(state.chatMessages, result.messages, result.hasMore)
         state.chatMessagesFriendshipId = friendshipId
         state.chatMessagesHasMore = result.hasMore
         if (state.chatOldestMessageCursor === null) {
@@ -20993,6 +21145,15 @@ export function createLobbyFlowController(
       return true
     }
 
+    if (message.type === 'chat_message_deleted') {
+      // Изпращачът изтри собствено съобщение (от този или друг таб/профил).
+      // Премахване по messageId; preview/непрочетени — свежо от сървъра.
+      removeChatMessageLocally(message.friendshipId, message.messageId)
+      render()
+      void refreshChatConversationsAfterDeletion()
+      return true
+    }
+
     if (message.type === 'chat_message_received') {
       const isActiveConversation = isActivePersonalChatConversation(message.friendshipId)
       const existingConversation = state.chatConversations.find((c) => c.friendshipId === message.friendshipId) ?? null
@@ -22691,6 +22852,11 @@ export function createLobbyFlowController(
       state.chatErrorText = null
       reconcileActiveChatConversation()
       render()
+    },
+    refreshOpenPersonalChatAfterReconnect: () => {
+      const friendshipId = state.activeChatFriendshipId
+      if (friendshipId === null || !isActivePersonalChatConversation(friendshipId)) return
+      void refreshChatAfterNotification(friendshipId)
     },
     refreshTopicsDirectoryMetadata,
     clearTopicsDirectoryMetadata,

@@ -1774,6 +1774,13 @@ export type ChatMessageReceivedMessage = {
   shouldNotify: boolean
 }
 
+/** Собствено лично съобщение е изтрито от изпращача (за двамата участници). */
+export type ChatMessageDeletedMessage = {
+  type: 'chat_message_deleted'
+  friendshipId: string
+  messageId: string
+}
+
 export type MatchmakingQueuedPlayerPreview = {
   id: string
   name: string
@@ -3030,6 +3037,7 @@ export type ServerMessage =
   | RoomSnapshotMessage
   | PlayerProfileMessage
   | ChatMessageReceivedMessage
+  | ChatMessageDeletedMessage
   | MatchmakingJoinedMessage
   | MatchmakingStatusMessage
   | MatchmakingLeftMessage

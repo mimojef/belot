@@ -1716,6 +1716,16 @@ export type ChatMessageReceivedMessage = {
   shouldNotify: boolean
 }
 
+// --- Личен чат — собствено съобщение е изтрито от изпращача си ---
+// Изпраща се до ВСИЧКИ връзки на двамата участници (вкл. другите табове на
+// изпращача). Без съдържание — клиентът премахва съобщението по messageId и
+// обновява списъка с разговори (preview/непрочетени) с GET.
+export type ChatMessageDeletedMessage = {
+  type: 'chat_message_deleted'
+  friendshipId: string
+  messageId: string
+}
+
 // --- Client messages for private rooms ---
 // (extends ClientMessage union below)
 
@@ -1814,6 +1824,7 @@ export type ServerMessage =
   | LobbyChatMessageDeletedMessage
   | LobbyChatErrorMessage
   | ChatMessageReceivedMessage
+  | ChatMessageDeletedMessage
   | TopicMessageCatchupMessage
   | TopicMessageReceivedMessage
   | TopicMessageErrorMessage

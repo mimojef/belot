@@ -7068,6 +7068,30 @@ function sendChatNotificationToProfile(input: {
   }
 }
 
+// Изтрито лично съобщение — до всички connected връзки на двамата участници
+// (и до останалите табове на изпращача). Без съдържание на съобщението.
+function sendChatMessageDeletedToParticipants(input: {
+  participantProfileIds: readonly string[]
+  friendshipId: string
+  messageId: string
+}): void {
+  for (const connection of Object.values(serverState.connections)) {
+    if (
+      connection.profileId === null ||
+      connection.status !== 'connected' ||
+      !input.participantProfileIds.includes(connection.profileId)
+    ) {
+      continue
+    }
+
+    safeSendToConnection(connection.id, {
+      type: 'chat_message_deleted',
+      friendshipId: input.friendshipId,
+      messageId: input.messageId,
+    })
+  }
+}
+
 function getQueueCountsByStake(): Record<string, number> {
   const counts: Record<string, number> = {}
 
@@ -19032,6 +19056,7 @@ async function handleChatRequest(
   pathname: string,
 ): Promise<boolean> {
   const messagesMatch = /^\/api\/chat\/([^/]+)\/messages$/.exec(pathname)
+  const messageItemMatch = /^\/api\/chat\/([^/]+)\/messages\/([^/]+)$/.exec(pathname)
   const readMatch = /^\/api\/chat\/([^/]+)\/read$/.exec(pathname)
   const attachmentMatch = /^\/api\/chat\/([^/]+)\/attachments\/([^/]+)$/.exec(pathname)
   const isPikaSupportStart = pathname === '/api/chat/pika-support/start'
@@ -19041,6 +19066,7 @@ async function handleChatRequest(
   if (
     pathname !== '/api/chat/conversations' &&
     messagesMatch === null &&
+    messageItemMatch === null &&
     readMatch === null &&
     attachmentMatch === null &&
     !isPikaSupportStart &&
@@ -19319,6 +19345,49 @@ async function handleChatRequest(
     const friendshipId = decodeURIComponent(readMatch[1]).trim()
     chatStore.markConversationRead(profileId, friendshipId)
     sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  // Изтриване на СОБСТВЕНО лично съобщение — и за двамата участници.
+  // Авторството, участието в разговора и вида му се проверяват изцяло в
+  // chatStore.deleteOwnMessage от profileId на СЕСИЯТА; от клиента идват само
+  // friendshipId и messageId (параметри на prepared statement, не SQL текст).
+  if (messageItemMatch !== null) {
+    if (req.method !== 'DELETE') {
+      sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed.' })
+      return true
+    }
+
+    let friendshipId: string
+    let messageId: string
+    try {
+      friendshipId = decodeURIComponent(messageItemMatch[1]).trim()
+      messageId = decodeURIComponent(messageItemMatch[2]).trim()
+    } catch {
+      sendJsonResponse(res, 400, { ok: false, message: 'Invalid request.' })
+      return true
+    }
+
+    const result = chatStore.deleteOwnMessage(profileId, friendshipId, messageId)
+
+    if (!result.ok) {
+      const status = result.code === 'invalid_conversation_kind' ? 403 : 404
+      sendJsonResponse(res, status, result)
+      return true
+    }
+
+    sendChatMessageDeletedToParticipants({
+      participantProfileIds: result.participantProfileIds,
+      friendshipId: result.friendshipId,
+      messageId: result.messageId,
+    })
+
+    sendJsonResponse(res, 200, {
+      ok: true,
+      friendshipId: result.friendshipId,
+      messageId: result.messageId,
+      conversation: result.conversation,
+    })
     return true
   }
 

@@ -817,6 +817,10 @@ export type LobbyScreenState = {
   chatMessagesLoading: boolean
   chatMessagesHasMore: boolean
   chatOlderMessagesLoading: boolean
+  /** Отворено потвърждение за изтриване на собствено лично съобщение. */
+  chatMessageDeleteConfirm: { friendshipId: string; messageId: string } | null
+  chatMessageDeleteBusy: boolean
+  chatMessageDeleteErrorText: string | null
   chatErrorText: string | null
   // Незапратен текст, писан от потребителя за всеки разговор поотделно (keyed по friendshipId).
   // Пази се отделно от chatMessages, за да не се губи при re-render, предизвикан от входящо
@@ -1345,6 +1349,9 @@ export type RenderLobbyScreenOptions = {
   onChatMarkRead: (friendshipId: string) => void
   onChatToggleArchived: () => void
   onChatLoadOlderClick: () => void
+  onChatMessageDeleteClick: (messageId: string) => void
+  onChatMessageDeleteCancel: () => void
+  onChatMessageDeleteConfirm: () => void
   onChatSubmit: (friendshipId: string, body: string) => void
   onChatDraftChange: (friendshipId: string, draft: string) => void
   onChatImageSelect: (friendshipId: string, file: File) => void
@@ -6383,6 +6390,62 @@ function renderMobileFriendCard(
   `
 }
 
+// ─── Изтриване на собствено лично съобщение (кошче) ─────────────────────────
+// Кошчето е absolute-позиционирано ВЛЯВО извън собственото балонче — не
+// променя подредбата и ширината на съобщенията. Десктоп: показва се при
+// посочване или клавиатурен фокус; устройства без hover: винаги видимо.
+const PERSONAL_CHAT_DELETE_STYLE = `
+  <style>
+    .pika-chat-del{opacity:0;transition:opacity .15s ease,background .15s ease,color .15s ease;border:0;border-radius:6px;background:rgba(255,255,255,0.06);color:rgba(255,255,255,0.62);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;}
+    .pika-chat-own:hover .pika-chat-del,.pika-chat-own:focus-within .pika-chat-del,.pika-chat-del:focus-visible{opacity:1;}
+    .pika-chat-del:hover{color:#fca5a5;background:rgba(239,68,68,0.14);}
+    .pika-chat-del:focus-visible{outline:2px solid #d4a520;outline-offset:1px;}
+    @media (hover:none){.pika-chat-del{opacity:0.72;}}
+  </style>
+`
+
+const TRASH_ICON_SVG = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>`
+
+function renderPersonalChatDeleteButton(message: ChatMessageSnapshot, sizePx: number): string {
+  if (!message.isOwnMessage) return ''
+  return `<button type="button" class="pika-chat-del" data-chat-message-delete="${escapeHtml(message.messageId)}" aria-label="Изтрий съобщението" title="Изтрий съобщението" style="position:absolute;top:2px;right:calc(100% + 4px);width:${sizePx}px;height:${sizePx}px;">${TRASH_ICON_SVG}</button>`
+}
+
+export function renderChatMessageDeleteConfirmPopup(state: LobbyScreenState): string {
+  if (state.chatMessageDeleteConfirm === null) return ''
+  const busy = state.chatMessageDeleteBusy
+  return `
+    <div role="dialog" aria-modal="true" aria-labelledby="pika-chat-delete-title" style="
+      position:fixed;inset:0;z-index:9600;
+      display:flex;align-items:center;justify-content:center;
+      background:rgba(0,0,0,0.7);
+    ">
+      <div style="
+        background:#1a1a2e;border:1px solid rgba(212,165,32,0.35);
+        border-radius:16px;padding:28px 28px 24px;max-width:400px;width:90%;
+        box-shadow:0 20px 60px rgba(0,0,0,0.6);
+      ">
+        <div id="pika-chat-delete-title" style="font-size:18px;font-weight:900;color:#fff;margin-bottom:14px;">Изтриване на съобщение</div>
+        <div style="font-size:14px;color:rgba(255,255,255,0.7);line-height:1.5;margin-bottom:${state.chatMessageDeleteErrorText ? '12px' : '24px'};">Искаш ли да изтриеш това съобщение? То ще бъде премахнато и за двамата участници.</div>
+        ${state.chatMessageDeleteErrorText ? `<div role="alert" style="font-size:13px;font-weight:800;color:#fca5a5;line-height:1.4;margin-bottom:18px;">${escapeHtml(state.chatMessageDeleteErrorText)}</div>` : ''}
+        <div style="display:flex;gap:12px;">
+          <button type="button" data-chat-message-delete-cancel="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.07);
+            border-radius:10px;color:rgba(255,255,255,0.7);font-size:14px;font-weight:700;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.6' : '1'};
+          ">Отказ</button>
+          <button type="button" data-chat-message-delete-confirm="1" ${busy ? 'disabled' : ''} style="
+            flex:1;padding:11px;border:1px solid rgba(239,68,68,0.62);
+            background:linear-gradient(180deg,#ef4444 0%,#b91c1c 100%);
+            border-radius:10px;color:#fff;font-size:14px;font-weight:900;
+            cursor:${busy ? 'default' : 'pointer'};opacity:${busy ? '0.7' : '1'};
+          ">${busy ? 'Изчакай…' : 'Изтрий'}</button>
+        </div>
+      </div>
+    </div>
+  `
+}
+
 function renderMobileChatPanel(state: LobbyScreenState): string {
   if (state.chatLoading) return `${renderMobilePageTitle('Чат')}${renderMobileStateMessage('Зареждане на чат...')}`
 
@@ -6413,10 +6476,11 @@ function renderMobileChatPanel(state: LobbyScreenState): string {
       <div style="border:1px solid rgba(212,165,32,0.28);border-radius:8px;background:#080808;overflow:hidden;">
         ${activeConversation === null ? `<div style="min-height:240px;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;padding:18px;">Избери приятел от списъка.</div>` : `
           <div style="padding:10px 12px;border-bottom:1px solid rgba(212,165,32,0.20);font-size:15px;font-weight:900;color:#ffffff;">${escapeHtml(activeConversation.friend.displayName ?? 'Играч')}</div>
+          ${PERSONAL_CHAT_DELETE_STYLE}
           <div data-chat-messages-scroll="1" style="height:360px;overflow-y:auto;padding:10px;display:flex;flex-direction:column;gap:6px;">
             ${state.chatMessagesLoading ? `<div style="margin:auto;color:#d4a520;font-size:14px;font-weight:900;">Зареждане...</div>` : state.chatMessages.length === 0 ? `<div style="margin:auto;color:rgba(255,255,255,0.58);font-size:14px;font-weight:800;text-align:center;">Няма съобщения.</div>` : state.chatMessages.map((message) => {
               const hasText = message.body.trim().length > 0
-              return `<div style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;">${message.attachment ? `
+              return `<div ${message.isOwnMessage ? 'class="pika-chat-own" ' : ''}style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:82%;position:relative;">${renderPersonalChatDeleteButton(message, 32)}${message.attachment ? `
                 <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                   ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
                   ${hasText ? `<div style="padding:0 4px 2px;font-size:17px;font-weight:${message.isOwnMessage ? 700 : 400};line-height:1.35;word-break:break-word;">${renderPersonalChatMessageBody(message.body)}</div>` : ''}
@@ -7600,6 +7664,7 @@ function renderChatPanel(state: LobbyScreenState): string {
             ${activeConversation.friendIsPikaTeam === true ? pikaSupportBadge : ''}
             ${state.chatErrorText ? `<div style="margin-left:auto;color:#fecaca;font-size:12px;font-weight:800;">${escapeHtml(state.chatErrorText)}</div>` : ''}
           </div>
+          ${PERSONAL_CHAT_DELETE_STYLE}
           <div data-chat-messages-scroll="1" style="flex:1 1 0;min-height:0;overflow-y:auto;padding:12px 14px;display:flex;flex-direction:column;gap:6px;scrollbar-width:thin;scrollbar-color:#d4a520 #111111;">
             ${state.chatMessagesLoading ? `
               <div style="margin:auto;color:#d4a520;font-size:15px;font-weight:900;">Зареждане...</div>
@@ -7617,7 +7682,8 @@ function renderChatPanel(state: LobbyScreenState): string {
                 const isEmojiOnly = /^(\[e:\d{2}\])+$/.test(message.body.trim())
                 const hasText = message.body.trim().length > 0
                 return `
-                <div data-chat-message="${escapeHtml(message.messageId)}" style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;">
+                <div data-chat-message="${escapeHtml(message.messageId)}" ${message.isOwnMessage ? 'class="pika-chat-own" ' : ''}style="align-self:${message.isOwnMessage ? 'flex-end' : 'flex-start'};max-width:min(72%,620px);display:grid;gap:3px;position:relative;">
+                  ${renderPersonalChatDeleteButton(message, 28)}
                   ${message.attachment ? `
                     <div style="border-radius:8px;background:${message.isOwnMessage ? 'linear-gradient(180deg,#f4c95b 0%,#c98f13 100%)' : 'rgba(255,255,255,0.08)'};color:${message.isOwnMessage ? '#080808' : '#f8fafc'};padding:6px;display:grid;gap:6px;">
                       ${renderChatAttachmentBubble(message.attachment, state.apiBaseUrl)}
@@ -13633,6 +13699,7 @@ export function renderLobbyScreen(
       ${renderAdminTopicReportsPanel(state)}
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
+      ${renderChatMessageDeleteConfirmPopup(state)}
       ${renderChatAdminActionToast(state)}
       ${renderPikaTeamActionConfirmPopup(state)}
       ${renderPikaTeamActionToast(state)}
@@ -13941,6 +14008,7 @@ export function renderLobbyScreen(
       ${renderAdminTopicReportsPanel(state)}
       ${renderSubadminActionToast(state)}
       ${renderChatAdminActionConfirmPopup(state)}
+      ${renderChatMessageDeleteConfirmPopup(state)}
       ${renderChatAdminActionToast(state)}
       ${renderPikaTeamActionConfirmPopup(state)}
       ${renderPikaTeamActionToast(state)}
@@ -17631,6 +17699,21 @@ export function renderLobbyScreen(
 
   root.querySelector<HTMLButtonElement>('[data-chat-admin-action-confirm="1"]')
     ?.addEventListener('click', options.onChatAdminActionConfirm)
+
+  root.querySelectorAll<HTMLButtonElement>('[data-chat-message-delete]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopPropagation()
+      const messageId = button.dataset.chatMessageDelete
+      if (messageId) options.onChatMessageDeleteClick(messageId)
+    })
+  })
+
+  root.querySelector<HTMLButtonElement>('[data-chat-message-delete-confirm="1"]')
+    ?.addEventListener('click', options.onChatMessageDeleteConfirm)
+
+  root.querySelector<HTMLButtonElement>('[data-chat-message-delete-cancel="1"]')
+    ?.addEventListener('click', options.onChatMessageDeleteCancel)
 
   root.querySelector<HTMLButtonElement>('[data-chat-admin-action-cancel="1"]')
     ?.addEventListener('click', options.onChatAdminActionCancel)

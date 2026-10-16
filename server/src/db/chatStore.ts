@@ -25,6 +25,7 @@ export type ChatStoreErrorCode =
   | 'conversation_not_found'
   | 'invalid_conversation_kind'
   | 'invalid_cursor'
+  | 'message_not_found'
   | 'message_required'
   | 'recipient_not_found'
   | 'self'
@@ -202,6 +203,24 @@ export type ChatStore = {
         newMessage: ChatMessageSnapshot
       }
     | { ok: false; message: string; code?: ChatStoreErrorCode }
+  /**
+   * Изтриване на СОБСТВЕНО лично съобщение — и за двамата участници (виж
+   * имплементацията). Авторството се установява САМО от profileId на
+   * сесията; клиентът подава единствено friendshipId и messageId.
+   */
+  deleteOwnMessage: (
+    profileId: ProfileId,
+    friendshipId: string,
+    messageId: string,
+  ) =>
+    | {
+        ok: true
+        friendshipId: string
+        messageId: string
+        participantProfileIds: [ProfileId, ProfileId]
+        conversation: ChatConversationSnapshot | null
+      }
+    | { ok: false; message: string; code: ChatStoreErrorCode }
   markConversationRead: (profileId: ProfileId, friendshipId: string) => void
   isFirstUnreadMessage: (recipientProfileId: ProfileId, friendshipId: string) => boolean
   isFirstUnreadMessageAfterInsert: (recipientProfileId: ProfileId, friendshipId: string) => boolean
@@ -801,6 +820,26 @@ export async function createChatStore(
   const insertAttachmentDeletionStatement = database.prepare(`
     INSERT INTO friend_chat_attachment_deletions (storage_filename)
     VALUES (?);
+  `)
+
+  // Изтриване на собствено съобщение (deleteOwnMessage по-долу). И двете
+  // заявки изискват ЕДНОВРЕМЕННО message_id, friendship_id И
+  // sender_profile_id — познат чужд message_id или съобщение от друг
+  // разговор просто не съвпада с нито един ред (0 changes).
+  const selectOwnMessageAttachmentFilenameStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM friend_chat_attachments a
+    JOIN friend_chat_messages m ON m.message_id = a.message_id
+    WHERE m.message_id = ?
+      AND m.friendship_id = ?
+      AND m.sender_profile_id = ?;
+  `)
+
+  const deleteOwnMessageStatement = database.prepare(`
+    DELETE FROM friend_chat_messages
+    WHERE message_id = ?
+      AND friendship_id = ?
+      AND sender_profile_id = ?;
   `)
 
   const pruneOldMessagesStatement = database.prepare(`
@@ -1582,6 +1621,99 @@ export async function createChatStore(
     }
   }
 
+  /**
+   * Изтрива собствено съобщение физически — изчезва и за двамата участници,
+   * без заместител. Същият механизъм като prune-а и премахването на
+   * приятелство: friend_chat_attachments редът изчезва чрез ON DELETE
+   * CASCADE, а файлът на снимката се enqueue-ва във
+   * friend_chat_attachment_deletions в СЪЩАТА транзакция (existing worker-ът
+   * го трие; attachmentExistsForFilename пази споделени файлове).
+   *
+   * Позволено само за разговорите на /chat ('friend', 'pika_support');
+   * 'vip_dm' има собствен UI в Теми и е извън обхвата. Чуждо, несъществуващо
+   * или вече изтрито съобщение → еднакъв отговор 'message_not_found' (без
+   * разкриване дали чуждо съобщение съществува) и без никаква промяна.
+   * Непрочетените броячи и preview-то се изчисляват наново от останалите
+   * съобщения (getUnreadCount / selectLatestMessageStatement).
+   */
+  function deleteOwnMessage(
+    profileId: ProfileId,
+    friendshipId: string,
+    messageId: string,
+  ):
+    | {
+        ok: true
+        friendshipId: string
+        messageId: string
+        participantProfileIds: [ProfileId, ProfileId]
+        conversation: ChatConversationSnapshot | null
+      }
+    | { ok: false; message: string; code: ChatStoreErrorCode } {
+    const notFound = { ok: false as const, code: 'message_not_found' as const, message: 'Съобщението не е намерено или вече е изтрито.' }
+
+    if (typeof messageId !== 'string' || messageId.length === 0 || messageId.length > 128) {
+      return notFound
+    }
+
+    const friendship = getAcceptedFriendship(profileId, friendshipId)
+
+    if (friendship === null) {
+      return { ok: false, code: 'conversation_not_found', message: 'Разговорът не е намерен.' }
+    }
+
+    const kind = toConversationKind(friendship.kind)
+
+    if (kind !== 'friend' && kind !== 'pika_support') {
+      return { ok: false, code: 'invalid_conversation_kind', message: 'Съобщенията в този разговор не могат да се изтриват.' }
+    }
+
+    let deleted = false
+
+    database.exec('BEGIN IMMEDIATE;')
+
+    try {
+      const attachmentRows = selectOwnMessageAttachmentFilenameStatement.all(
+        messageId,
+        friendshipId,
+        profileId,
+      ) as { storage_filename: string }[]
+
+      for (const row of attachmentRows) {
+        insertAttachmentDeletionStatement.run(row.storage_filename)
+      }
+
+      const result = deleteOwnMessageStatement.run(messageId, friendshipId, profileId) as { changes?: number }
+      deleted = (result.changes ?? 0) === 1
+
+      if (deleted) {
+        database.exec('COMMIT;')
+      } else {
+        // Нищо за изтриване — анулира и евентуален deletion-intent (няма такъв
+        // без съвпадащ ред, но ROLLBACK е строгото "без промени").
+        database.exec('ROLLBACK;')
+      }
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK;')
+      } catch {
+        // Keep the original write failure visible to the caller.
+      }
+      throw error
+    }
+
+    if (!deleted) {
+      return notFound
+    }
+
+    return {
+      ok: true,
+      friendshipId,
+      messageId,
+      participantProfileIds: [friendship.requester_profile_id, friendship.addressee_profile_id],
+      conversation: createConversationSnapshot(friendship, profileId),
+    }
+  }
+
   function markConversationRead(profileId: ProfileId, friendshipId: string): void {
     upsertReadStatement.run(profileId, friendshipId)
   }
@@ -1746,6 +1878,7 @@ export async function createChatStore(
     canSendMessage,
     listMessages,
     sendMessage,
+    deleteOwnMessage,
     markConversationRead,
     isFirstUnreadMessage,
     isFirstUnreadMessageAfterInsert,

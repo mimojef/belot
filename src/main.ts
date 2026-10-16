@@ -3923,6 +3923,46 @@ async function sendChatMessage(
   }
 }
 
+/**
+ * Изтрива СОБСТВЕНО лично съобщение (и за двамата участници). Сървърът сам
+ * установява авторството от сесията; тук се подават само friendshipId и
+ * messageId. Без оптимистично локално премахване — извикващият премахва
+ * съобщението само при ok: true.
+ */
+async function deleteChatMessage(
+  friendshipId: string,
+  messageId: string,
+): Promise<
+  | { ok: true; conversation: ChatConversationSnapshot | null }
+  | { ok: false; message: string; code?: string }
+> {
+  try {
+    const response = await fetch(
+      `${getApiBaseUrl()}/api/chat/${encodeURIComponent(friendshipId)}/messages/${encodeURIComponent(messageId)}`,
+      {
+        method: 'DELETE',
+        credentials: 'include',
+      },
+    )
+    const data = await readChatMessagesResponse(response)
+
+    if (!response.ok || !data.ok) {
+      return {
+        ok: false,
+        message: data.message ?? 'Съобщението не беше изтрито.',
+        code: data.code,
+      }
+    }
+
+    return { ok: true, conversation: data.conversation ?? null }
+  } catch {
+    return {
+      ok: false,
+      message: 'Няма връзка със сървъра за чат.',
+    }
+  }
+}
+
 type SupportMessagesApiResponse = {
   ok: boolean
   messages?: SupportMessageSnapshot[]
@@ -7082,6 +7122,7 @@ lobby = createLobbyFlowController({
     await markChatConversationRead(friendshipId)
   },
   onChatSend: (friendshipId, body, imageDataUrl) => sendChatMessage(friendshipId, body, imageDataUrl),
+  onChatMessageDelete: (friendshipId, messageId) => deleteChatMessage(friendshipId, messageId),
   onLogout: () => submitLogout(),
   onDailyMissionsLoad: () => loadDailyMissions(),
   onMissionClaim: (missionId) => claimMissionReward(missionId),
@@ -8253,6 +8294,9 @@ client = createGameServerClient({
       // Огледално, но за directory-wide "нова тема се появи" interest
       // (Custom Topic Creation) — mirror на горното.
       lobby.forceTopicsDirectoryResubscribeIfOnTopicsScreen()
+      // Пропуснати по време на прекъсването нови/изтрити лични съобщения —
+      // презарежда САМО реално отворен личен разговор (не сме в игра тук).
+      lobby.refreshOpenPersonalChatAfterReconnect()
       // Огледално на горното, но за членство в частна маса: ако потребителят
       // е бил в чакалня на частна маса (или е избрал "Изчакай в лоби") към
       // момента на прекъсването/презареждането (кратка мобилна връзка,
@@ -8446,6 +8490,18 @@ client = createGameServerClient({
         raterDisplayName: message.raterDisplayName,
         ratingValue: message.ratingValue,
       })
+      return
+    }
+
+    if (message.type === 'chat_message_deleted') {
+      // Като chat_message_received: по време на игра chat GET заявките биха
+      // 403-нали, затова само маркираме, че conversation state е остарял.
+      // След играта разговорът се зарежда наново при отваряне (openChatConversation).
+      if (!activeRoom.hasActiveRoom()) {
+        lobby.handleServerMessage(message)
+      } else {
+        markPendingChatRefresh()
+      }
       return
     }
 
