@@ -23,7 +23,9 @@
 // `createSvaraMatchPlayerView` (собствените карти — едва след „поглеждане“) и
 // `describeSvaraMatchOptions` за самия зрител. Суровото състояние (ръце,
 // история с показани карти, дневник) никога не се връща през клиентските
-// методи — виж `createSvaraRuntimeClientFacade`.
+// методи — виж `createSvaraRuntimeClientFacade`. Протоколният snapshot за
+// клиента (2Б.3.2) се строи от `protocol/svaraSnapshotProtocol.ts` върху
+// вътрешното състояние, без да минава през `exportInternalStateForServer`.
 //
 // ОГРАНИЧЕНИЕ — един процес: всеки runtime е обикновен обект в паметта на
 // ЕДИН Node процес. Ако сървърът работи в няколко PM2 процеса (cluster mode),
@@ -48,6 +50,7 @@ import {
   type SvaraMatchState,
   type SvaraStartMode,
 } from '../engine/svaraMatch.js'
+import { createSvaraMatchSnapshotMessage, type SvaraMatchSnapshotMessage } from '../protocol/svaraSnapshotProtocol.js'
 
 // ── Типове ──────────────────────────────────────────────────────────────────
 
@@ -164,6 +167,8 @@ export type SvaraMatchRuntime = {
   executeParticipantCommand(matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown): SvaraRuntimeCommandResult
   executeSystemCommand(matchId: string, systemCommandId: string, command: SvaraSystemCommand): SvaraRuntimeCommandResult
   getPlayerView(matchId: string, actor: SvaraTrustedActor): SvaraRuntimePlayerView
+  /** Защитен индивидуален snapshot за клиента (2Б.3.2) — само за самия доверен участник. */
+  getPlayerSnapshot(matchId: string, actor: SvaraTrustedActor): SvaraMatchSnapshotMessage
   /** САМО сървърно: дълбоко копие на пълното състояние (за бъдеща persistence). Никога към клиент. */
   exportInternalStateForServer(matchId: string): SvaraMatchState
   getMatchDiagnostics(matchId: string, options?: { measureBytes?: boolean }): SvaraMatchDiagnostics
@@ -172,7 +177,7 @@ export type SvaraMatchRuntime = {
 }
 
 /** Методите, които бъдещ клиентски (WS) слой има право да вика. */
-export type SvaraRuntimeClientFacade = Pick<SvaraMatchRuntime, 'hasMatch' | 'isParticipant' | 'executeParticipantCommand' | 'getPlayerView'>
+export type SvaraRuntimeClientFacade = Pick<SvaraMatchRuntime, 'hasMatch' | 'isParticipant' | 'executeParticipantCommand' | 'getPlayerView' | 'getPlayerSnapshot'>
 
 // ── Помощни ─────────────────────────────────────────────────────────────────
 
@@ -358,6 +363,13 @@ export function createSvaraMatchRuntime(options: SvaraRuntimeOptions = {}): Svar
       }
     },
 
+    getPlayerSnapshot(matchId, actor) {
+      const entry = entryOf(matchId)
+      const viewerId = requireId(actor?.playerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'actor.playerId')
+      if (!entry.state.seats.includes(viewerId)) fail('not-a-participant', `${viewerId} is not a participant of ${matchId}`)
+      return createSvaraMatchSnapshotMessage(matchId, entry.state, viewerId)
+    },
+
     exportInternalStateForServer(matchId) {
       return structuredClone(entryOf(matchId).state)
     },
@@ -404,5 +416,6 @@ export function createSvaraRuntimeClientFacade(runtime: SvaraMatchRuntime): Svar
     executeParticipantCommand: (matchId: string, actor: SvaraTrustedActor, clientCommandId: string, command: unknown) =>
       runtime.executeParticipantCommand(matchId, actor, clientCommandId, command),
     getPlayerView: (matchId: string, actor: SvaraTrustedActor) => runtime.getPlayerView(matchId, actor),
+    getPlayerSnapshot: (matchId: string, actor: SvaraTrustedActor) => runtime.getPlayerSnapshot(matchId, actor),
   })
 }

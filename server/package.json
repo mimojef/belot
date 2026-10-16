@@ -18,6 +18,7 @@
     "check:svara-chips-2b2a": "tsx scripts/checkSvaraChips2B2A.ts",
     "check:svara-match-2b2b": "tsx scripts/checkSvaraMatch2B2B.ts",
     "check:svara-runtime-2b31": "tsx scripts/checkSvaraRuntime2B31.ts",
+    "check:svara-snapshot-2b32": "tsx scripts/checkSvaraSnapshot2B32.ts",
     "check:ad-campaigns-target-url-validation": "tsx scripts/checkAdCampaignTargetUrlValidation.ts",
     "check:ad-campaigns-client-queue": "tsx scripts/checkAdCampaignClientQueue.ts",
     "check:ad-campaigns-http-and-realtime": "tsx scripts/checkAdCampaignsHttpAndRealtime.ts",

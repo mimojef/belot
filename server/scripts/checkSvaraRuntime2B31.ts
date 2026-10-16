@@ -415,7 +415,7 @@ check('11. системни команди не могат да се изпъл�
   assert(round.kind === 'ordinary' && round.betting.looked.join() === 'alice', 'look applied to the trusted actor only')
   // Фасадата за клиентски слой няма системни методи и сурово състояние.
   const facade = createSvaraRuntimeClientFacade(rt) as unknown as Record<string, unknown>
-  assert(Object.keys(facade).sort().join() === 'executeParticipantCommand,getPlayerView,hasMatch,isParticipant', 'facade surface')
+  assert(Object.keys(facade).sort().join() === 'executeParticipantCommand,getPlayerSnapshot,getPlayerView,hasMatch,isParticipant', 'facade surface')
   for (const name of ['executeSystemCommand', 'exportInternalStateForServer', 'getMatchDiagnostics', 'releaseMatch', 'registerMatch']) assert(!(name in facade), `facade exposes ${name}`)
   assert(Object.isFrozen(facade), 'facade frozen')
   // Системен интерфейс отказва участнически типове.
@@ -716,13 +716,13 @@ check('21. едновременни мачове (20, редувани кома�
 // ─── G. Изолация на модула ──────────────────────────────────────────────────
 console.log('\n=== G. изолация на модула ===')
 
-check('22. runtime импортира само модули на двигателя и node:perf_hooks; без глобално състояние', () => {
+check('22. runtime импортира само модули на двигателя, протокола (2Б.3.2) и node:perf_hooks; без глобално състояние', () => {
   const file = join(dirname(fileURLToPath(import.meta.url)), '..', 'src', 'games', 'svara', 'runtime', 'svaraMatchRuntime.ts')
   const source = readFileSync(file, 'utf8')
   // Само кодът, без коментарите (заглавието документира, че няма WebSocket).
   const code = source.replace(/\/\*[\s\S]*?\*\//g, '').split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
   for (const match of source.matchAll(/from '([^']+)'/g)) {
-    assert(/^\.\.\/engine\/svara[A-Za-z]+\.js$/.test(match[1]!) || match[1] === 'node:perf_hooks', `imports ${match[1]}`)
+    assert(/^\.\.\/engine\/svara[A-Za-z]+\.js$/.test(match[1]!) || match[1] === '../protocol/svaraSnapshotProtocol.js' || match[1] === 'node:perf_hooks', `imports ${match[1]}`)
   }
   for (const banned of ['WebSocket', 'sqlite', 'setTimeout', 'setInterval', 'process.env', 'buildSvaraDeckForHands', 'createDeck']) {
     assert(!code.includes(banned), `runtime code mentions ${banned}`)
