@@ -1265,7 +1265,8 @@ export type SvaraBettingOptions = {
   call: number | null
   bet: { min: number; max: number } | null
   blindBet: { min: number; max: number } | null
-  allIn: boolean
+  /** Пълният целеви общ залог при ол-ин (voluntary + stack), НЕ булев флаг — виж server/src/games/svara/engine/svaraBetting.ts's SvaraBettingOptions. */
+  allIn: number | null
   lookRequired: boolean
 }
 

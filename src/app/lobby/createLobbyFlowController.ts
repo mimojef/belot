@@ -133,6 +133,7 @@ import type {
   SvaraPublicTable,
   SvaraMatchSnapshotMessage,
   SvaraMatchTimingMessage,
+  SvaraParticipantCommand,
 } from '../network/createGameServerClient'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
@@ -978,15 +979,17 @@ export type CreateLobbyFlowControllerOptions = {
   /** Belot Spectator Mode ("Гледай", Phase 3A) — mirror на Ludo watch/unwatch по-горе. */
   onWatchBelotRoom?: (roomId: string) => void
   onUnwatchBelotRoom?: (roomId: string) => void
-  // Свара (Етап 2Б.3.7.2) — mirror на Ludo lobby callback-ите по-горе, без
-  // gameplay (бет/фолд) и без spectator/gift/campaign разширения — само
-  // маси, присъединяване, старт и индивидуалния snapshot/timing.
+  // Свара (Етап 2Б.3.7.2/2Б.3.7.4) — mirror на Ludo lobby callback-ите
+  // по-горе, без spectator/gift/campaign разширения — маси, присъединяване,
+  // старт, индивидуалния snapshot/timing и реалните участнически команди
+  // (bet/fold/look/all-in/request-return/...).
   onSvaraTablesOpen?: () => void
   onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number) => void
   onSvaraTableJoin?: (matchId: string) => void
   onSvaraTableLeave?: (matchId: string) => void
   onSvaraTableStart?: (matchId: string) => void
   onSvaraTableStateRequest?: (matchId: string) => void
+  onSvaraSubmitCommand?: (matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand) => void
   /** "Турнирни срещи" (Виж игрите) — live абонамент за резултатите на срещите в турнир. */
   onTournamentMatchesSubscribe?: (tournamentId: string, token: string) => void
   onTournamentMatchesUnsubscribe?: (tournamentId: string) => void
@@ -3621,6 +3624,8 @@ export function createLobbyFlowController(
     showMessage: (message: string) => void
     getMyTableId: () => string | null
     isInActiveMatch: () => boolean
+    onCommandResult: (commandId: string) => void
+    onCommandError: (message: string, commandId?: string) => void
     requestExit: () => void
   } | null = null
   let _isOpeningSvaraLobbyOverlay = false
@@ -3768,6 +3773,7 @@ export function createLobbyFlowController(
         onLeave: (matchId) => options.onSvaraTableLeave?.(matchId),
         onStart: (matchId) => options.onSvaraTableStart?.(matchId),
         onRequestTableState: (matchId) => options.onSvaraTableStateRequest?.(matchId),
+        onSubmitCommand: (matchId, commandId, expectedRevision, command) => options.onSvaraSubmitCommand?.(matchId, commandId, expectedRevision, command),
       })
       // Веднага replay-ваме последния познат snapshot/timing — без да чакаме
       // новия round-trip, който onRefresh()/setTables() auto-detect ще
@@ -20531,11 +20537,19 @@ export function createLobbyFlowController(
       // "applied"/"duplicate" статус + revision/phase — само diagnostic
       // инфо (виж data-svara-diagnostics блока в контролера); самата
       // актуална маса/snapshot идва отделно през table_updated/match_snapshot.
-      // Няма bet/gameplay бутони в този подетап, затова няма допълнителен UI ефект тук.
+      // Етап 2Б.3.7.4 §15 — потвърждава, за да освободи UI-а за следваща
+      // команда (само ако commandId съвпада с текущо чакащата, виж
+      // createSvaraLobbyController.ts's onCommandResult doc коментара).
+      _svaraLobbyController?.onCommandResult(message.commandId)
       return true
     }
     if (message.type === 'svara_command_error') {
-      _svaraLobbyController?.showMessage(message.message)
+      // Отказана команда освобождава UI-а и показва съобщение БЕЗ локална
+      // промяна на баланс/състояние (задание §15) — реалният snapshot остава
+      // единствен извор на истина, следващ валиден опит минава по актуалния
+      // у него state. onCommandError() вече покрива showMessage()'s ефект
+      // (message + render), включително за lobby-level грешки без commandId.
+      _svaraLobbyController?.onCommandError(message.message, message.commandId)
       return true
     }
     if (message.type === 'svara_match_timing') {

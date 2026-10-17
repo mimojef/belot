@@ -15,11 +15,14 @@ import type {
   SvaraMatchTimingMessage,
   SvaraPublicTable,
   SvaraSeatStatus,
+  SvaraSnapshotRound,
   SvaraSnapshotSeat,
 } from '../../../network/createGameServerClient'
 import { assignSvaraVisualSlots, type SvaraVisualSlot } from './svaraSeatLayout'
 import { computeSvaraRingState, SVARA_DEADLINE_LABEL, SVARA_DEADLINE_TOTAL_MS } from './svaraCountdown'
 import { svaraCardCodeToFaceSrc, SVARA_CARD_BACK_SRC, svaraPlaceholderAvatarSrc, svaraPlaceholderName } from './svaraTableAssets'
+import { deriveSvaraActionButtons, type SvaraActionButton } from './svaraBettingActions'
+import { formatSvaraLastBetBadge, getLastSvaraBetBadge } from './svaraBettingBadges'
 
 const esc = (value: unknown) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]!)
 
@@ -37,6 +40,8 @@ export type RenderSvaraActiveTableInput = {
   isFullscreen: boolean
   fullscreenSupported: boolean
   leavePending: boolean
+  /** Задание §15 — докато чака отговор на изпратена команда, никакъв бутон не е активен. */
+  actionPending: boolean
 }
 
 const PANEL_WIDTH_VW_BY_SLOT: Record<SvaraVisualSlot, { base: number; min: number; max: number }> = {
@@ -101,15 +106,19 @@ function seatCardsHtml(
   return Array.from({ length: seat.cardCount }, (_, i) => cardBackHtml(cardSizeClampPx, i, dim)).join('')
 }
 
-function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean): string {
+function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null): string {
   const badges: string[] = []
+  // Постоянен бадж за последния залог (задание §11.А) — отделен от
+  // статусните баджове по смисъл, но визуално в СЪЩИЯ компактен ред; остава
+  // до следващото раздаване (виж svaraBettingBadges.ts doc коментара).
+  if (lastBetLabel) badges.push(lastBetLabel)
   if (seat.folded) badges.push('ОТКАЗАЛ СЕ')
   if (seat.allIn) badges.push('ОЛ-ИН')
   const statusLabel = STATUS_BADGE_LABEL[seat.status]
   if (statusLabel) badges.push(statusLabel)
   if (isLocal && youReturnPending) badges.push('ВРЪЩА СЕ')
   if (badges.length === 0) return ''
-  return `<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:3px;">${badges.map((b) => `<span style="font-size:clamp(8px,2.1vw,10px);font-weight:800;letter-spacing:.02em;padding:1px 5px;border-radius:999px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.18);color:#f4c95b;white-space:nowrap;">${esc(b)}</span>`).join('')}</div>`
+  return `<div data-svara-seat-badges="1" style="display:flex;flex-wrap:wrap;justify-content:center;gap:3px;margin-top:3px;">${badges.map((b) => `<span style="font-size:clamp(8px,2.1vw,10px);font-weight:800;letter-spacing:.02em;padding:1px 5px;border-radius:999px;background:rgba(0,0,0,.55);border:1px solid rgba(255,255,255,.18);color:#f4c95b;white-space:nowrap;">${esc(b)}</span>`).join('')}</div>`
 }
 
 function seatPanelHtml(
@@ -118,6 +127,7 @@ function seatPanelHtml(
   input: RenderSvaraActiveTableInput,
   turnDeadline: SvaraDeadlineInfo | undefined,
   publicReveal: { winnerId: string; cards: string[] } | null,
+  round: SvaraSnapshotRound | null,
 ): string {
   const isLocal = seat.playerId === input.localProfileId
   const sizes = PANEL_WIDTH_VW_BY_SLOT[slot]
@@ -130,6 +140,7 @@ function seatPanelHtml(
   const cardClamp = isLocal || slot === 'bottom' ? 'clamp(28px,min(12vw,10dvh),68px)' : 'clamp(18px,min(7.4vw,6dvh),42px)'
   const ownCards = isLocal ? input.snapshot?.you.cards ?? null : null
   const youReturnPending = isLocal ? (input.snapshot?.you.returnPending ?? false) : false
+  const lastBet = getLastSvaraBetBadge(round, seat.playerId)
 
   let ring = ''
   if (seat.isToAct && turnDeadline) {
@@ -139,16 +150,16 @@ function seatPanelHtml(
   }
 
   return `<div data-svara-seat-anchor="${slot}" data-svara-seat-index="${seat.seatIndex}" style="${slotAnchorStyle(slot, widthClamp)}z-index:${slot === 'bottom' ? 3 : 2};">
-    <div style="box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:2px;padding:3px 6px 4px;border-radius:12px;background:${seat.isToAct ? 'rgba(244,201,91,.12)' : 'rgba(5,5,5,.72)'};border:1px solid ${seat.isToAct ? 'rgba(244,201,91,.6)' : 'rgba(255,255,255,.14)'};backdrop-filter:blur(2px);">
+    <div data-svara-seat-flash-mount="1" style="position:relative;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:2px;padding:3px 6px 4px;border-radius:12px;background:${seat.isToAct ? 'rgba(244,201,91,.12)' : 'rgba(5,5,5,.72)'};border:1px solid ${seat.isToAct ? 'rgba(244,201,91,.6)' : 'rgba(255,255,255,.14)'};backdrop-filter:blur(2px);">
       <div style="position:relative;width:${avatarClamp};height:${avatarClamp};">
         ${ring}
         <img src="${svaraPlaceholderAvatarSrc(seat.playerId)}" alt="" draggable="false" style="width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid ${seat.isDealer ? '#f4c95b' : 'rgba(255,255,255,.25)'};box-sizing:border-box;" />
         ${seat.isDealer ? `<span data-svara-dealer-badge="1" title="Дилър" style="position:absolute;right:-2px;bottom:-2px;width:16px;height:16px;border-radius:50%;background:#d4a520;color:#1a1200;font-size:9px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #090909;">Д</span>` : ''}
       </div>
       <div style="font-size:clamp(9px,2.6vw,13px);font-weight:800;color:#fff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;line-height:1.15;">${esc(svaraPlaceholderName(seat.playerId))}${isLocal ? ' (ти)' : ''}</div>
-      <div style="font-size:clamp(8px,2.3vw,11px);color:#f4c95b;font-weight:700;line-height:1.15;">${seat.stack}${seat.roundContribution > 0 ? ` · залог ${seat.roundContribution}` : ''}</div>
+      <div data-svara-seat-total="1" style="font-size:clamp(8px,2.3vw,11px);color:#f4c95b;font-weight:700;line-height:1.15;" title="Общо внесени в това раздаване (вкл. Вход)">${seat.stack}${seat.roundContribution > 0 ? ` · общо ${seat.roundContribution}` : ''}</div>
       <div style="display:flex;justify-content:center;">${seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp)}</div>
-      ${seatStatusBadges(seat, isLocal, youReturnPending)}
+      ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null)}
     </div>
   </div>`
 }
@@ -183,6 +194,34 @@ function feltCenterHtml(input: RenderSvaraActiveTableInput): string {
   </div>`
 }
 
+const ACTION_BUTTON_STYLE: Record<'default' | 'primary' | 'danger', string> = {
+  default: 'background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.22);color:#f4c95b;',
+  primary: 'background:linear-gradient(135deg,#f6d27a 0%,#d4a520 55%,#c98f13 100%);border:1px solid rgba(244,201,91,.6);color:#1a1200;',
+  danger: 'background:rgba(239,68,68,.14);border:1px solid rgba(239,68,68,.55);color:#fca5a5;',
+}
+
+function actionButtonVariant(kind: SvaraActionButton['kind']): 'default' | 'primary' | 'danger' {
+  if (kind === 'fold') return 'danger'
+  if (kind === 'pay' || kind === 'all-in' || kind === 'look') return 'primary'
+  return 'default'
+}
+
+// Задание §10 — под собствените карти, долу, компактно; НЕ бутон за ръчно
+// въвеждане. Всеки бутон вече носи готовата сървърна команда (виж
+// deriveSvaraActionButtons) — тук само се рендира, wiring-ът е в контролера.
+function actionBarHtml(buttons: SvaraActionButton[], actionPending: boolean, showReturn: boolean): string {
+  if (buttons.length === 0 && !showReturn) return ''
+  const buttonsHtml = buttons.map((b) => `<button
+      data-svara-action-button="${b.kind}"
+      ${b.disabled || actionPending ? 'disabled' : ''}
+      style="min-height:38px;min-width:54px;padding:0 10px;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;${ACTION_BUTTON_STYLE[actionButtonVariant(b.kind)]}${b.disabled || actionPending ? 'opacity:.4;cursor:not-allowed;' : ''}"
+    >${esc(b.label)}</button>`).join('')
+  const returnButton = showReturn
+    ? `<button data-svara-action-button="request-return" ${actionPending ? 'disabled' : ''} style="min-height:38px;min-width:54px;padding:0 10px;border-radius:9px;font-size:12px;font-weight:800;cursor:pointer;${ACTION_BUTTON_STYLE.default}${actionPending ? 'opacity:.4;cursor:not-allowed;' : ''}">Върни се</button>`
+    : ''
+  return `<div data-svara-action-bar="1" style="flex:0 0 auto;display:flex;flex-wrap:wrap;justify-content:center;gap:5px;padding:3px 2px 1px;">${buttonsHtml}${returnButton}</div>`
+}
+
 export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): string {
   const { table } = input
   // Defensive matchId consistency guard: snapshot/timing се кешират и
@@ -199,14 +238,14 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   const seats = snapshot?.seats ?? []
   const localSeatIndex = snapshot?.you.seatIndex ?? null
   const turnDeadline = timing?.deadlines.find((d) => d.kind === 'turn')
-  const round = snapshot?.round
+  const round = snapshot?.round ?? null
   const publicReveal = round && round.kind === 'reveal-choice' && round.decision === 'revealed' && round.cards
     ? { winnerId: round.winnerId, cards: round.cards }
     : null
 
   const seatsHtml = seats.length > 0
     ? assignSvaraVisualSlots(seats, localSeatIndex, table.capacity)
-      .map(({ seat, slot }) => seatPanelHtml(seat, slot, safeInput, turnDeadline, publicReveal))
+      .map(({ seat, slot }) => seatPanelHtml(seat, slot, safeInput, turnDeadline, publicReveal, round))
       .join('')
     : `<div style="grid-area:center;justify-self:center;align-self:center;color:rgba(255,255,255,.55);font-size:13px;">Зареждане на масата…</div>`
 
@@ -217,6 +256,13 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   const fullscreenButton = input.fullscreenSupported
     ? `<button data-svara-fullscreen-toggle="1" title="${input.isFullscreen ? 'Изход от цял екран' : 'Цял екран'}" style="min-height:28px;min-width:28px;border-radius:7px;border:1px solid rgba(255,255,255,.22);background:rgba(0,0,0,.6);color:#f4c95b;font-size:14px;cursor:pointer;display:flex;align-items:center;justify-content:center;">${input.isFullscreen ? '⤡' : '⤢'}</button>`
     : ''
+
+  // Задание §9/§10 — реалните разрешени действия ТОЧНО от you.betting (не
+  // клиентско преизчисление); "Върни се" е независим от betting.canAct,
+  // достъпен докато статусът е 'absent' и все още няма заявен return.
+  const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false)
+  const showReturnButton = snapshot?.you.status === 'absent' && snapshot?.you.returnPending === false
+  const actionBar = actionBarHtml(actionButtons, input.actionPending, showReturnButton)
 
   // Контролният бар е ИЗВЪН филца (отделен ред над него) умишлено — и
   // "Обнови"/"Изход", и бутоните на местата (горе/долу/ляво/дясно) се
@@ -264,5 +310,6 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
       ${resultBanner}
       <div data-svara-diagnostics="1" style="position:absolute;left:6px;bottom:6px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:9px;color:rgba(255,255,255,.35);z-index:1;">rev ${snapshot?.revision ?? '—'}</div>
     </div>
+    ${actionBar}
   </div>`
 }

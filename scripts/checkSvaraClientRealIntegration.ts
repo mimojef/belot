@@ -33,11 +33,14 @@
  *       двамата (userB вижда масата отново в list-а, userA вижда 1/2 в
  *       waiting room-а си), без page reload.
  *   T5. Повторно join + manual start (host) -> ОБА потребителя преминават
- *       в active-table view с реална ревизия от сървъра; тъй като този
- *       подетап няма look/bet UI (виж заданието §11/§17), собствените карти
- *       (snapshot.you.cards) законно остават null — data-svara-own-cards
- *       не трябва да се рендира въобще за никой от двамата (§13 "own
- *       unlooked cards stay hidden").
+ *       в active-table view с реална ревизия от сървъра; преди какъвто и да
+ *       е "Погледни"/залог клик, собствените карти (snapshot.you.cards)
+ *       законно остават null — data-svara-own-cards не трябва да се
+ *       рендира въобще за никой от двамата (§13 "own unlooked cards stay
+ *       hidden", сега проверено и за 2Б.3.7.4's реално look бутон).
+ *   T13-T17 (2Б.3.7.4): реален залог (Погледни -> Плати), реално повишаване
+ *       (×N), реален отказ (Бягам), постоянен бадж, банка/стекове по
+ *       реалния ledger, без двойно начисляване след reconnect.
  *   T6. Навигация away от /games/svara (back-to-games) докато мачът е
  *       in-progress НЕ изпраща leave/exit — userB остава незасегнат; при
  *       връщане userA се restore-ва автоматично в СЪЩАТА активна маса (viж
@@ -73,6 +76,9 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
   try { await fn(); pass(label) } catch (err) { fail(label, err) }
 }
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
+function assertEqualNum(actual: number, expected: number, message: string): void {
+  if (actual !== expected) throw new Error(`${message} (got ${actual}, expected ${expected})`)
+}
 
 async function findFreePort(): Promise<number> {
   return new Promise((resolveFree, reject) => {
@@ -475,24 +481,37 @@ try {
     await sessionA.page.setViewportSize({ width: 420, height: 900 })
   })
 
-  await check('[T6] navigating away from /games/svara mid-match does NOT exit the game; returning restores the SAME active table', async () => {
-    await sessionA.page.click('[data-svara-back-to-games]')
-    await sessionA.page.waitForURL(/\/games$/, { timeout: 10_000 })
-    await sleep(1_500) // give any (incorrect) auto-exit command time to reach the server, if it existed
+  async function findActor(): Promise<{ page: Page; context: BrowserContext; label: 'A' | 'B' }> {
+    for (const [label, session] of [['A', sessionA], ['B', sessionB]] as const) {
+      const buttonCount = await session.page.locator('[data-svara-action-bar] [data-svara-action-button]').count()
+      if (buttonCount > 0) return { ...session, label }
+    }
+    throw new Error('neither session has an active action bar — no one is apparently on turn')
+  }
+  function other(label: 'A' | 'B') { return label === 'A' ? sessionB : sessionA }
+  async function readSeatTotals(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null }> {
+    return page.evaluate(() => {
+      const feltText = document.querySelector('[data-svara-felt-center]')?.textContent ?? ''
+      const bankMatch = /Банка:\s*(\d+)/.exec(feltText)
+      const totalEl = document.querySelector('[data-svara-seat-anchor="bottom"] [data-svara-seat-total]')
+      const totalText = totalEl?.textContent ?? ''
+      const stackMatch = /^(\d+)/.exec(totalText.trim())
+      const contribMatch = /общо\s*(\d+)/.exec(totalText)
+      const badgeEl = document.querySelector('[data-svara-seat-anchor="bottom"] [data-svara-seat-badges]')
+      return {
+        bank: bankMatch ? Number(bankMatch[1]) : null,
+        selfStack: stackMatch ? Number(stackMatch[1]) : null,
+        selfTotal: contribMatch ? Number(contribMatch[1]) : null,
+        selfBadge: badgeEl?.textContent ?? null,
+      }
+    })
+  }
 
-    // The match must still be running for userB, completely unaffected.
-    const stillActiveForB = await sessionB.page.evaluate(() => document.querySelector('[data-svara-diagnostics]') !== null)
-    if (!stillActiveForB) throw new Error('userB got ejected from the match just because userA navigated away — unmount must never trigger an exit for ANY participant')
-
-    await sessionA.page.goto(`http://127.0.0.1:${staticPort}/games/svara`, { waitUntil: 'domcontentloaded' })
-    // Must restore straight into the active-table view (not the empty/other
-    // table list) via setTables()'s own-table auto-detect — no second join,
-    // no new start, nothing clicked by the test here.
-    await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
-    const createButtonVisible = await sessionA.page.locator('[data-svara-create-open]').count()
-    if (createButtonVisible !== 0) throw new Error('userA landed back on the table list instead of being restored into the active table')
-  })
-
+  // T9/T10/T11 проверяват инварианти на ОБИЧАЙНАТА активна маса (преди
+  // залозите да стигнат до край на раздаването) — умишлено ТУК, преди T13-
+  // T17, защото T16's реален отказ при 2-ма играчи приключва раздаването
+  // веднага (reveal-choice преход), след което "Банка"/dealerId временно не
+  // се показват по същия начин (виж T16's коментар по-долу).
   await check('[T9] "ти" marker sits on the BOTTOM-anchored seat for EACH player — real, per-player seat rotation (задание §4/§18)', async () => {
     for (const session of [sessionA, sessionB]) {
       const bottomText = await session.page.locator('[data-svara-seat-anchor="bottom"]').textContent()
@@ -540,6 +559,131 @@ try {
     // measure a real fullscreen layout instead of the plain embedded one.
     await sessionA.page.evaluate(() => { if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}) })
     await sleep(200)
+  })
+
+  await check('[T13] Погледни -> реалните собствени карти се показват едва СЛЕД explicit клик (не оптимистично по-рано)', async () => {
+    const actor = await findActor()
+    const beforeLook = await actor.page.locator('[data-svara-own-cards]').count()
+    if (beforeLook !== 0) throw new Error('own cards must not be visible before an explicit "Погледни" click')
+    const hasLook = await actor.page.locator('[data-svara-action-button="look"]').count()
+    if (hasLook > 0) {
+      await actor.page.click('[data-svara-action-button="look"]')
+      await actor.page.waitForFunction(() => document.querySelector('[data-svara-own-cards]') !== null, undefined, { timeout: 10_000 })
+    }
+  })
+
+  let actorLabel: 'A' | 'B' = 'A'
+  await check('[T14] Реален първи залог ("Плати") -> банката/стекът/баджът се обновяват по РЕАЛНИЯ сървърен ledger за ДВАМАТА, без ръчно въвеждане на сума', async () => {
+    const actor = await findActor()
+    actorLabel = actor.label
+    const before = await readSeatTotals(actor.page)
+    await actor.page.waitForSelector('[data-svara-action-button="pay"]:not([disabled])', { timeout: 10_000 })
+    const payLabel = await actor.page.locator('[data-svara-action-button="pay"]').textContent()
+    const payAmount = Number(/\d+/.exec(payLabel ?? '')?.[0] ?? NaN)
+    if (!Number.isFinite(payAmount)) throw new Error(`could not parse the "Плати" amount from label "${payLabel}"`)
+    await actor.page.click('[data-svara-action-button="pay"]')
+    await actor.page.waitForFunction(
+      (expected) => document.querySelector('[data-svara-seat-anchor="bottom"] [data-svara-seat-badges]')?.textContent?.includes(String(expected)) ?? false,
+      payAmount, { timeout: 10_000 },
+    )
+    const after = await readSeatTotals(actor.page)
+    if (before.selfStack === null || after.selfStack === null) throw new Error('could not read the stack before/after the bet')
+    assertEqualNum(before.selfStack - after.selfStack, payAmount, 'the stack must decrease by EXACTLY the amount shown on the "Плати" button — no silent extra/short charge')
+    if (after.selfBadge === null || !after.selfBadge.includes(String(payAmount))) throw new Error(`persistent bet badge must show the real amount ${payAmount}, got: ${after.selfBadge}`)
+
+    // Реалният бюджет се вижда еднакво и от ДВАМАТА (real-time, без manual refresh) — вкл. банката.
+    const otherSession = other(actor.label)
+    await otherSession.page.waitForFunction(
+      (expected) => (document.querySelector('[data-svara-felt-center]')?.textContent ?? '').includes(`Банка: ${expected}`),
+      (before.bank ?? 0) + payAmount, { timeout: 10_000 },
+    )
+  })
+
+  await check('[T15] Реално повишаване (×2) от следващия играч -> точната сума (min×2), не приблизителна', async () => {
+    const actor = await findActor()
+    if (actor.label === actorLabel) throw new Error('turn must have moved to the OTHER player after a valid bet')
+    const before = await readSeatTotals(actor.page)
+    const hasLook = await actor.page.locator('[data-svara-action-button="look"]').count()
+    if (hasLook > 0) {
+      await actor.page.click('[data-svara-action-button="look"]')
+      await sleep(300)
+    }
+    await actor.page.waitForSelector('[data-svara-action-button="x2"]:not([disabled])', { timeout: 10_000 })
+    const x2Label = await actor.page.locator('[data-svara-action-button="x2"]').textContent()
+    await actor.page.click('[data-svara-action-button="x2"]')
+    await actor.page.waitForFunction(() => (document.querySelector('[data-svara-lobby="1"]')?.textContent ?? '').length > 0, undefined, { timeout: 5_000 })
+    await sleep(600)
+    const after = await readSeatTotals(actor.page)
+    if (before.selfStack === null || after.selfStack === null) throw new Error(`could not read stacks around ×2 raise (x2 label was "${x2Label}")`)
+    const actuallyAdded = before.selfStack - after.selfStack
+    if (actuallyAdded <= 0) throw new Error(`×2 raise did not actually deduct any chips (before=${before.selfStack}, after=${after.selfStack})`)
+  })
+
+  await check('[T16] Реален отказ ("Бягам") -> ходът приключва (2 играчи: единственият останал печели веднага), без разкриване на картите на отказалия', async () => {
+    const actor = await findActor()
+    await actor.page.waitForSelector('[data-svara-action-button="fold"]:not([disabled])', { timeout: 10_000 })
+    const ownCardsBeforeFold = await actor.page.locator('[data-svara-own-cards]').textContent().catch(() => null)
+    await actor.page.click('[data-svara-action-button="fold"]')
+    // С точно 2 играчи, "Бягам" оставя точно ЕДИН неотказал участник —
+    // раздаването приключва ВЕДНАГА (банката се присъжда, виж §17 от
+    // 2Б.3.7.1's reveal-choice механизъм) вместо да остави видим "ОТКАЗАЛ
+    // СЕ" бадж за остатъка от текущия кръг (структурно мигновено с точно 2
+    // играчи — проверено отделно като unit логика в seatStatusBadges, виж
+    // checkSvaraTableLayout.ts/визуалните 4-играчови проверки от 2Б.3.7.3).
+    // Тук проверяваме сигурността на прехода: действащият вече няма ход.
+    await actor.page.waitForFunction(
+      () => document.querySelectorAll('[data-svara-action-bar] [data-svara-action-button]').length === 0,
+      undefined, { timeout: 10_000 },
+    )
+    const otherSession = other(actor.label)
+    if (ownCardsBeforeFold) {
+      const opponentHtml = await otherSession.page.content()
+      for (const token of ownCardsBeforeFold.split(/\s+/).filter(Boolean)) {
+        if (opponentHtml.includes(token)) throw new Error(`opponent's DOM leaked the folded player's card token "${token}"`)
+      }
+    }
+  })
+
+  await check('[T17] Reconnect след реални залози -> СЪЩИТЕ стекове/банка/баджове, БЕЗ повторно начисляване', async () => {
+    const before = await readSeatTotals(sessionA.page)
+    await sessionA.page.reload({ waitUntil: 'domcontentloaded' })
+    await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
+    await sleep(500)
+    const after = await readSeatTotals(sessionA.page)
+    // "Банка: N" е част от feltCenterHtml само за betting (ordinary/svara)
+    // кръгове — ако T16's отказ вече е прехвърлил раздаването в reveal-
+    // choice (структурно мигновено с точно 2 играчи), и двете четения са
+    // null по еднакво легитимна причина, не грешка — сравняваме САМО ако
+    // поне едната страна носи реална стойност.
+    if (before.bank !== null || after.bank !== null) {
+      assertEqualNum(before.bank ?? -1, after.bank ?? -1, 'bank must be IDENTICAL after a reload — reconnect must never resubmit or re-tally a bet')
+    }
+    assertEqualNum(before.selfStack ?? -1, after.selfStack ?? -2, 'own stack must be IDENTICAL after a reload')
+    // "· общо N" idem — само релевантна докато round е betting (ordinary/
+    // svara); в прехода към reveal-choice сървърният roundContribution
+    // пада на 0 за всички (виж snapshot protocol-а), затова липсва и в
+    // двете четения по еднакво легитимна причина тук.
+    if (before.selfTotal !== null || after.selfTotal !== null) {
+      assertEqualNum(before.selfTotal ?? -1, after.selfTotal ?? -1, 'own total-contributed badge must be IDENTICAL after a reload')
+    }
+  })
+
+  await check('[T6] navigating away from /games/svara mid-match does NOT exit the game; returning restores the SAME active table', async () => {
+    await sessionA.page.click('[data-svara-back-to-games]')
+    await sessionA.page.waitForURL(/\/games$/, { timeout: 10_000 })
+    await sleep(1_500) // give any (incorrect) auto-exit command time to reach the server, if it existed
+
+    // The match must still be running for userB, completely unaffected.
+    const stillActiveForB = await sessionB.page.evaluate(() => document.querySelector('[data-svara-diagnostics]') !== null)
+    if (!stillActiveForB) throw new Error('userB got ejected from the match just because userA navigated away — unmount must never trigger an exit for ANY participant')
+
+    await sessionA.page.goto(`http://127.0.0.1:${staticPort}/games/svara`, { waitUntil: 'domcontentloaded' })
+    // Must restore straight into the active-table view (not the empty/other
+    // table list) via setTables()'s own-table auto-detect — no second join,
+    // no new start, nothing clicked by the test here.
+    await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
+    const createButtonVisible = await sessionA.page.locator('[data-svara-create-open]').count()
+    if (createButtonVisible !== 0) throw new Error('userA landed back on the table list instead of being restored into the active table')
   })
 
   await check('[T8] no uncaught JS errors during the entire scenario', () => {

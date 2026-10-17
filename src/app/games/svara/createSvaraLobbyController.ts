@@ -9,11 +9,15 @@
 import type {
   SvaraMatchSnapshotMessage,
   SvaraMatchTimingMessage,
+  SvaraParticipantCommand,
   SvaraPublicTable,
   SvaraSeatStatus,
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
+import { playGameSound } from '../../audio/gameSoundSettings'
 import { renderSvaraActiveTable } from './table/renderSvaraActiveTable'
+import { deriveSvaraActionButtons } from './table/svaraBettingActions'
+import { createSvaraBetAnimationTracker } from './table/svaraBetAnimationTracker'
 
 type Options = {
   root: HTMLElement
@@ -24,6 +28,8 @@ type Options = {
   onLeave: (matchId: string) => void
   onStart: (matchId: string) => void
   onRequestTableState: (matchId: string) => void
+  /** Задание 2Б.3.7.4 §15 — реалните участнически команди (bet/fold/look/all-in/request-return/...). */
+  onSubmitCommand: (matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand) => void
 }
 
 const esc = (value: unknown) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]!)
@@ -44,6 +50,14 @@ export function createSvaraLobbyController(options: Options) {
   let message = ''
   let leavePending = false
   let joinPendingMatchId: string | null = null
+  // Задание §15 — само ЕДНА игрова команда наведнъж; бутоните са неактивни,
+  // докато чакаме отговор (svara_command_result/svara_command_error),
+  // идентифициран по commandId, за да не го обърка закъснял по-стар отговор.
+  let actionPending = false
+  let pendingActionCommandId: string | null = null
+  // Задание §14 — проследява кои записи от round.actions вече са анимирани,
+  // scoped по roundId (reconnect-safe, виж svaraBetAnimationTracker.ts).
+  const betAnimationTracker = createSvaraBetAnimationTracker()
 
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:40px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
@@ -149,7 +163,54 @@ export function createSvaraLobbyController(options: Options) {
       isFullscreen,
       fullscreenSupported,
       leavePending,
+      actionPending,
     })
+  }
+
+  // Задание §13 — floating "+N" над аватара, плавно смалява/избледнява към
+  // баджа отдолу. Чисто презентационно — играе се ПОСЛЕ DOM вече отразява
+  // новото състояние (badge текстът е актуален), само визуален flourish.
+  function playBetFlash(seatIndex: number, amount: number): void {
+    const mount = options.root.querySelector<HTMLElement>(`[data-svara-seat-index="${seatIndex}"] [data-svara-seat-flash-mount]`)
+    if (!mount) return
+    const el = document.createElement('div')
+    el.textContent = `+${amount}`
+    el.style.cssText = 'position:absolute;left:50%;top:4%;transform:translate(-50%,0);font-size:clamp(16px,5vw,26px);font-weight:900;color:#f4c95b;text-shadow:0 2px 6px rgba(0,0,0,.9);pointer-events:none;z-index:10;white-space:nowrap;'
+    mount.appendChild(el)
+    try {
+      const animation = el.animate(
+        [
+          { transform: 'translate(-50%,0) scale(1.3)', opacity: 1, offset: 0 },
+          { transform: 'translate(-50%,36px) scale(0.75)', opacity: 0, offset: 1 },
+        ],
+        { duration: 900, easing: 'ease-out', fill: 'forwards' },
+      )
+      animation.onfinish = () => el.remove()
+      animation.oncancel = () => el.remove()
+    } catch {
+      // Браузър без Element.animate() поддръжка (изключително рядко) — просто
+      // премахваме елемента веднага, без да чупим рендирането.
+      el.remove()
+    }
+  }
+
+  // Задание §13 — кратък системен звук при потвърден залог; реизползва
+  // съществуващия Белот sound-settings hook (уважава mute настройката,
+  // никаква нова аудио зависимост). Ако липсва подходящ файл в бъдеще,
+  // смени само src-а тук — asset hook-ът остава същият.
+  function playBetSound(): void {
+    playGameSound('/audio/game-sounds/coins.mp3', { volume: 0.5 })
+  }
+
+  function flushBetAnimations(): void {
+    const round = snapshot?.round ?? null
+    const newEntries = betAnimationTracker.detectNewEntries(round)
+    if (newEntries.length === 0 || !snapshot) return
+    for (const entry of newEntries) {
+      const seat = snapshot.seats.find((s) => s.playerId === entry.playerId)
+      if (seat) playBetFlash(seat.seatIndex, entry.added)
+    }
+    playBetSound()
   }
 
   function renderCreateModal(): string {
@@ -184,6 +245,23 @@ export function createSvaraLobbyController(options: Options) {
     })
     tableElementRef = options.root.querySelector<HTMLElement>('[data-svara-table="1"]')
     options.root.querySelector('[data-svara-fullscreen-toggle]')?.addEventListener('click', () => { void toggleFullscreen() })
+    options.root.querySelectorAll<HTMLElement>('[data-svara-action-button]').forEach((el) => el.addEventListener('click', () => {
+      const kind = el.dataset.svaraActionButton
+      if (kind === 'request-return') { submitParticipantCommand({ type: 'request-return' }); return }
+      const button = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false).find((b) => b.kind === kind)
+      if (button && !button.disabled) submitParticipantCommand(button.command)
+    }))
+  }
+
+  // Задание §15 — само ЕДНА команда в движение, защитена с commandId/
+  // expectedRevision; никога не намаляваме локален баланс/успех оптимистично.
+  function submitParticipantCommand(command: SvaraParticipantCommand): void {
+    if (actionPending || myTable === null || snapshot === null) return
+    const commandId = crypto.randomUUID()
+    actionPending = true
+    pendingActionCommandId = commandId
+    render()
+    options.onSubmitCommand(myTable.matchId, commandId, snapshot.revision, command)
   }
 
   // Етап 2Б.3.7.3, задание §13 — бутонът само отразява/предизвиква реалния
@@ -249,9 +327,29 @@ export function createSvaraLobbyController(options: Options) {
       joinPendingMatchId = null
       render()
     },
-    setSnapshot(next: SvaraMatchSnapshotMessage | null) { snapshot = next; render() },
+    setSnapshot(next: SvaraMatchSnapshotMessage | null) {
+      snapshot = next
+      render()
+      flushBetAnimations()
+    },
     setTiming(next: SvaraMatchTimingMessage | null) { timing = next; render() },
     showMessage(next: string) { joinPendingMatchId = null; message = next; render() },
+    // Задание §15 — само СЪЩАТА (или вече изчистената) commandId освобождава
+    // бутоните; закъснял отговор за по-стара/отменена команда никога не
+    // засяга по-новото pending действие.
+    onCommandResult(commandId: string) {
+      if (pendingActionCommandId !== commandId) return
+      actionPending = false
+      pendingActionCommandId = null
+      render()
+    },
+    onCommandError(nextMessage: string, commandId?: string) {
+      if (commandId !== undefined && pendingActionCommandId !== commandId) return
+      actionPending = false
+      pendingActionCommandId = null
+      message = nextMessage
+      render()
+    },
     getMyTableId(): string | null { return myTable?.matchId ?? null },
     // Mirror на Ludo's _ludoController !== null сигнала за PWA update
     // safety (виж pwaUpdateCoordinator.ts's hasActiveSvaraMatch doc

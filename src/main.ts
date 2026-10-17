@@ -7189,6 +7189,7 @@ lobby = createLobbyFlowController({
   onSvaraTableLeave: (matchId) => { client.leaveSvaraTable(matchId) },
   onSvaraTableStart: (matchId) => { client.startSvaraTable(matchId) },
   onSvaraTableStateRequest: (matchId) => { client.requestSvaraTableState(matchId) },
+  onSvaraSubmitCommand: (matchId, commandId, expectedRevision, command) => { client.submitSvaraCommand(matchId, commandId, expectedRevision, command) },
   onTournamentMatchesSubscribe: (tournamentId, token) => { client.subscribeTournamentMatches(tournamentId, token) },
   onTournamentMatchesUnsubscribe: (tournamentId) => { client.unsubscribeTournamentMatches(tournamentId) },
   onSupportMessagesLoad: () => loadSupportMessages(),
