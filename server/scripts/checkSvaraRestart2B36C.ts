@@ -260,6 +260,14 @@ async function carried(peers: Client[]) {
   const matchId = await createTable(peers), b = peers[1]!
   await ok(b, matchId, { type: 'look' }); await act(b, matchId, { kind: 'bet', total: 30 }); await ok(b, matchId, { type: 'exit' })
   await advance(15000); await fence(peers[0]!)
+  // 2Б.3.7.1: the 15s timeout that folds the last bettor can leave the sole
+  // remaining active player with a pending reveal choice instead of opening
+  // the presence-wait window directly; hide it so the wait actually starts.
+  const pendingChoice = saved(matchId).state.round as any
+  if (pendingChoice?.kind === 'reveal-choice') {
+    const winner = peers.find((p) => p.user.profileId === pendingChoice.winnerId)!
+    await ok(winner, matchId, { type: 'hide-cards' })
+  }
   const state = saved(matchId)
   assert.equal(state.state.carried[0]?.amount, 30); assert(state.deadlines.some((d) => d.kind === 'presence-wait'))
   return matchId
@@ -285,9 +293,16 @@ try {
     await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 2 }); await advance(3000)
     const before = saved(matchId); await stop(); await start(now + 2000); peers = await reconnect(users.slice(0, 3))
     same(saved(matchId), before, 'Full state changed across graceful restart')
+    // peers[1]'s plain bet above closed the blind phase (commit 4c2a280):
+    // every active, non-folded participant is auto-revealed, not only the
+    // bettor. Expect visibility from the durable `betting.looked` set, not a
+    // single hardcoded peer.
+    const beforeRound = before.state.round as any
     for (const peer of peers) {
       const own = await snapshot(peer, matchId); assert.equal(own.you.playerId, peer.user.profileId)
-      same(own.you.cards, peer === peers[1] ? (before.state.round as any).hands[peer.user.profileId] : null, 'Own card visibility changed')
+      const looked = beforeRound.betting.looked.includes(peer.user.profileId)
+      assert.equal(own.you.looked, looked, 'Looked/auto-reveal status did not survive the restart')
+      same(own.you.cards, looked ? beforeRound.hands[peer.user.profileId] : null, 'Own card visibility changed')
     }
     const time = await timing(peers[2]!, matchId); assert.equal(time.deadlines[0].deadlineAt, before.deadlines[0]!.deadlineAt); assert.equal(time.deadlines[0].remainingMs, 10000)
     await ok(peers[2]!, matchId, { type: 'look' }); await act(peers[2]!, matchId, { kind: 'call' })
@@ -304,6 +319,27 @@ try {
     assert.equal((await play(peers[2]!, matchId, { type: 'act', action: { kind: 'fold' } }, lost.commandId, lost.revision)).code, 'command_id_conflict')
     same(saved(matchId), committed, 'Lost ACK retry/conflict changed durable state')
     await stop(); activeClock = now; activeFixture = await backup('active-confirmed')
+  })
+  await check('auto-reveal on a plain bet looks only active non-folded participants, including after a restart', async () => {
+    await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3))
+    const matchId = await createTable(peers)
+    const byId = (id: string) => peers.find((p) => p.user.profileId === id)!
+    const order = (saved(matchId).state.round as any).betting.order as string[], [first, second] = order
+    await act(byId(first!), matchId, { kind: 'fold' }) // first actor declines before looking or betting
+    await ok(byId(second!), matchId, { type: 'look' }); await act(byId(second!), matchId, { kind: 'bet', total: 2 }) // plain bet closes the blind phase for everyone
+    const before = saved(matchId), beforeRound = before.state.round as any
+    assert(beforeRound.betting.folded.includes(first), 'First actor should have folded')
+    assert(!beforeRound.betting.looked.includes(first), 'A folded participant must not be auto-revealed')
+    for (const id of order.filter((p: string) => p !== first)) assert(beforeRound.betting.looked.includes(id), `${id} must be auto-revealed once the blind phase closed`)
+    await stop(); await start(now + 1000); peers = await reconnect(users.slice(0, 3))
+    same(saved(matchId), before, 'Auto-reveal state changed across restart')
+    for (const peer of peers) {
+      const own = await snapshot(peer, matchId); assert.equal(own.you.playerId, peer.user.profileId)
+      const looked = beforeRound.betting.looked.includes(peer.user.profileId)
+      assert.equal(own.you.looked, looked, 'Looked/auto-reveal status did not survive the restart')
+      same(own.you.cards, looked ? beforeRound.hands[peer.user.profileId] : null, 'Own card visibility changed after restart')
+    }
+    await stop()
   })
   await check('expired real turn, absent/pending return, actual reconnect security and both cross-game guards', async () => {
     await restore(activeFixture); const matchId = db((database) => (database.prepare("SELECT match_id FROM svara_match_snapshots WHERE match_status = 'in-progress'").get() as any).match_id)
@@ -323,6 +359,14 @@ try {
     assert.equal((await play(restoredAbsent, matchId, { type: 'look' })).code, 'player_absent')
     const nextPlayer = peers.find((p) => p.user.profileId === saved(matchId).deadlines[0]!.playerId)!
     await act(nextPlayer, matchId, { kind: 'fold' })
+    // 2Б.3.7.1: that fold can leave the third (still-active) player as the
+    // sole remaining participant, opening a reveal choice before the round
+    // actually closes and the pending return can be activated. Hide it.
+    const pendingChoice = saved(matchId).state.round as any
+    if (pendingChoice?.kind === 'reveal-choice') {
+      const winner = peers.find((p) => p.user.profileId === pendingChoice.winnerId)!
+      await ok(winner, matchId, { type: 'hide-cards' })
+    }
     const returned = saved(matchId)
     assert.equal(returned.state.status[absentId], 'active'); assert(!returned.state.pendingReturns?.includes(absentId))
     assert.notEqual(returned.state.round?.roundId, pending.state.round?.roundId, 'Return activated before a new deal')
@@ -365,7 +409,17 @@ try {
     const tie = deck(ids, { [ids[0]!]: 'KS QS JS', [ids[1]!]: 'KH QH JH', [ids[2]!]: 'KD QD JD' }), decided = deck(ids, { [ids[0]!]: '7C 7D 7H', [ids[1]!]: 'KH QH JH', [ids[2]!]: '8C 9D 10H' })
     await ipc('decks', { decks: [SVARA_ORDERED_DECK.map(svaraCardCode), SVARA_ORDERED_DECK.map(svaraCardCode), tie] })
     const matchId = await createTable(peers, 100)
-    for (const p of [peers[1]!, peers[2]!, peers[2]!, peers[0]!]) await act(p, matchId, { kind: 'fold' })
+    for (const p of [peers[1]!, peers[2]!, peers[2]!, peers[0]!]) {
+      await act(p, matchId, { kind: 'fold' })
+      // 2Б.3.7.1: if that fold left a sole remaining winner, resolve the
+      // reveal choice (hide) before the next scripted fold in this warm-up
+      // sequence, which targets the following deal.
+      const pendingChoice = saved(matchId).state.round as any
+      if (pendingChoice?.kind === 'reveal-choice') {
+        const winner = peers.find((peer) => peer.user.profileId === pendingChoice.winnerId)!
+        await ok(winner, matchId, { type: 'hide-cards' })
+      }
+    }
     for (const p of peers.slice(0, 2)) { await ok(p, matchId, { type: 'look' }); await act(p, matchId, { kind: 'all-in' }) }
     await ok(peers[2]!, matchId, { type: 'look' }); const lost = await trap(peers[2]!, matchId, { type: 'act', action: { kind: 'all-in' } })
     const before = saved(matchId); assert.equal(before.state.round?.kind, 'allin-svara'); assert.equal(before.state.lockedPots.length, 2); await stop('crash')
