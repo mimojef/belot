@@ -7179,6 +7179,16 @@ lobby = createLobbyFlowController({
   onLudoUnwatchMatch: (matchId) => { client.unwatchLudoMatch(matchId) },
   onWatchBelotRoom: (roomId) => { client.watchBelotRoom(roomId) },
   onUnwatchBelotRoom: (roomId) => { client.unwatchBelotRoom(roomId) },
+  onSvaraTablesOpen: () => { client.requestSvaraTablesList() },
+  // Минимален create modal (viж createSvaraLobbyController.ts) събира само
+  // capacity+entryFee — entryPercent/startMode остават фиксирани разумни
+  // defaults до следващ подетап с пълна настройка на масата (§17 — не
+  // добавяме допълнителен UI отвъд заданието за този подетап).
+  onSvaraTableCreate: (capacity, entryFee) => { client.createSvaraTable(capacity, entryFee, 5, 'manual') },
+  onSvaraTableJoin: (matchId) => { client.joinSvaraTable(matchId) },
+  onSvaraTableLeave: (matchId) => { client.leaveSvaraTable(matchId) },
+  onSvaraTableStart: (matchId) => { client.startSvaraTable(matchId) },
+  onSvaraTableStateRequest: (matchId) => { client.requestSvaraTableState(matchId) },
   onTournamentMatchesSubscribe: (tournamentId, token) => { client.subscribeTournamentMatches(tournamentId, token) },
   onTournamentMatchesUnsubscribe: (tournamentId) => { client.unsubscribeTournamentMatches(tournamentId) },
   onSupportMessagesLoad: () => loadSupportMessages(),
@@ -9065,6 +9075,7 @@ const _VALID_PATHS = new Set([
   '/shop',
   '/games',
   '/games/ludo',
+  '/games/svara',
   '/friends',
   '/chat',
   '/admin',

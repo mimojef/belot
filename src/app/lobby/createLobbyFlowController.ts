@@ -130,6 +130,9 @@ import type {
   AdCampaignManagementDto,
   AdCampaignDispatchClientDto,
   ActiveLudoGiftSnapshot,
+  SvaraPublicTable,
+  SvaraMatchSnapshotMessage,
+  SvaraMatchTimingMessage,
 } from '../network/createGameServerClient'
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
@@ -975,6 +978,15 @@ export type CreateLobbyFlowControllerOptions = {
   /** Belot Spectator Mode ("Гледай", Phase 3A) — mirror на Ludo watch/unwatch по-горе. */
   onWatchBelotRoom?: (roomId: string) => void
   onUnwatchBelotRoom?: (roomId: string) => void
+  // Свара (Етап 2Б.3.7.2) — mirror на Ludo lobby callback-ите по-горе, без
+  // gameplay (бет/фолд) и без spectator/gift/campaign разширения — само
+  // маси, присъединяване, старт и индивидуалния snapshot/timing.
+  onSvaraTablesOpen?: () => void
+  onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number) => void
+  onSvaraTableJoin?: (matchId: string) => void
+  onSvaraTableLeave?: (matchId: string) => void
+  onSvaraTableStart?: (matchId: string) => void
+  onSvaraTableStateRequest?: (matchId: string) => void
   /** "Турнирни срещи" (Виж игрите) — live абонамент за резултатите на срещите в турнир. */
   onTournamentMatchesSubscribe?: (tournamentId: string, token: string) => void
   onTournamentMatchesUnsubscribe?: (tournamentId: string) => void
@@ -2041,6 +2053,8 @@ type InternalLobbyFlowState = {
   bundlePurchaseMessageText: string | null
   /** /games/svara — 'granted' едва след потвърждение от сървъра (виж showSvaraPage). */
   svaraPageStatus: SvaraPageStatus
+  /** Етап 2Б.3.7.2 — toggle между реалния WS мултиплейър и запазеното анимационно демо. */
+  svaraViewMode: 'real' | 'demo'
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -2872,6 +2886,7 @@ function createInitialState(): InternalLobbyFlowState {
     bundlePurchaseActionPackageId: null,
     bundlePurchaseMessageText: null,
     svaraPageStatus: 'checking',
+    svaraViewMode: 'real',
     adminStats: null,
     adminStatsLoading: false,
     adminStatsErrorText: null,
@@ -3594,6 +3609,24 @@ export function createLobbyFlowController(
   // duplicate DOM/state). Синхронен check-and-set ПРЕДИ първия await затваря
   // прозореца изцяло.
   let _isOpeningLudoLobbyOverlay = false
+  // Свара (Етап 2Б.3.7.2) — mirror на _ludoLobbyController TOCTOU guard-а
+  // по-горе, за реалния lobby/активна-маса controller.
+  let _svaraLobbyController: {
+    destroy: () => void
+    setTables: (tables: SvaraPublicTable[]) => void
+    setMyTable: (table: SvaraPublicTable | null) => void
+    setSnapshot: (snapshot: SvaraMatchSnapshotMessage | null) => void
+    setTiming: (timing: SvaraMatchTimingMessage | null) => void
+    showMessage: (message: string) => void
+    getMyTableId: () => string | null
+    requestExit: () => void
+  } | null = null
+  let _isOpeningSvaraLobbyOverlay = false
+  // Пази последната приложена ревизия ПО matchId, независимо от mount
+  // lifecycle-а на _svaraLobbyController — пазим срещу презаписване с
+  // по-стар/равен snapshot (напр. duplicate-command resend, виж §15 "never
+  // overwrite with stale revision").
+  let _svaraLastSnapshotRevision: { matchId: string; revision: number } | null = null
   options.root.addEventListener('click', (event) => {
     const target = event.target
     if (!(target instanceof Element)) return
@@ -3620,6 +3653,15 @@ export function createLobbyFlowController(
     if (target.closest('[data-svara-back-to-games="1"]')) {
       event.preventDefault()
       showMoreGamesPage()
+      return
+    }
+    const viewTab = target.closest('[data-svara-view-tab]')
+    if (viewTab instanceof HTMLElement) {
+      const nextMode = viewTab.getAttribute('data-svara-view-tab')
+      if (nextMode === 'real' || nextMode === 'demo') {
+        state.svaraViewMode = nextMode
+        render()
+      }
       return
     }
     if (!target.closest('[data-svara-play-button="1"]')) return
@@ -3683,6 +3725,42 @@ export function createLobbyFlowController(
   function closeLudoLobbyOverlay(): void {
     _ludoLobbyController?.destroy()
     _ludoLobbyController = null
+  }
+
+  // Свара (Етап 2Б.3.7.2) — mirror на openLudoLobbyOverlay/closeLudoLobbyOverlay
+  // по-горе, без games-list/spectator разширения (Свара няма "Играещи"/
+  // "Приключили" табове или spectator mode в този подетап).
+  async function openSvaraLobbyOverlay(): Promise<void> {
+    if (_svaraLobbyController || _isOpeningSvaraLobbyOverlay) return
+    _isOpeningSvaraLobbyOverlay = true
+    try {
+      const profileId = options.getAuthSession?.()?.profile?.profileId
+      if (!profileId) return
+      const mountRoot = options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
+      if (!mountRoot) return
+      const { createSvaraLobbyController } = await import('../games/svara/createSvaraLobbyController')
+      const liveMountRoot = mountRoot.isConnected
+        ? mountRoot
+        : options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
+      if (!liveMountRoot || _svaraLobbyController || state.currentScreen !== 'svara') return
+      _svaraLobbyController = createSvaraLobbyController({
+        root: liveMountRoot,
+        localProfileId: profileId,
+        onRefresh: () => options.onSvaraTablesOpen?.(),
+        onCreate: (capacity, entryFee) => options.onSvaraTableCreate?.(capacity, entryFee),
+        onJoin: (matchId) => options.onSvaraTableJoin?.(matchId),
+        onLeave: (matchId) => options.onSvaraTableLeave?.(matchId),
+        onStart: (matchId) => options.onSvaraTableStart?.(matchId),
+        onRequestTableState: (matchId) => options.onSvaraTableStateRequest?.(matchId),
+      })
+    } finally {
+      _isOpeningSvaraLobbyOverlay = false
+    }
+  }
+
+  function closeSvaraLobbyOverlay(): void {
+    _svaraLobbyController?.destroy()
+    _svaraLobbyController = null
   }
 
   // Гарантиран fresh refresh на "Играещи"/"Приключили" при връщане към Ludo
@@ -5364,6 +5442,7 @@ export function createLobbyFlowController(
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canShowSvaraEntry: canShowSvaraEntry(authSession),
       svaraPageStatus: state.svaraPageStatus,
+      svaraViewMode: state.svaraViewMode,
       canWriteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       isAdCampaignManager: isAdCampaignManagerAuthSession(authSession),
       lobbyChatWriteLockedPopupOpen: state.lobbyChatWriteLockedPopupOpen,
@@ -8064,9 +8143,28 @@ export function createLobbyFlowController(
     }
 
     if (state.currentScreen === 'svara' && state.svaraPageStatus === 'granted') {
-      void ensureSvaraAnimationDemo()
+      if (state.svaraViewMode === 'real') {
+        destroySvaraAnimationDemo()
+        if (_svaraLobbyController) {
+          const mountRoot = options.root.querySelector<HTMLElement>('[data-svara-lobby-mount="1"]')
+          if (mountRoot && mountRoot.childElementCount === 0) {
+            // Mirror на Ludo lobby re-mount guard-а по-горе — unrelated
+            // re-render може да презапише root.innerHTML и да остави
+            // controller-а orphaned (destroy-нат subtree без DOM presence).
+            _svaraLobbyController.destroy()
+            _svaraLobbyController = null
+            void openSvaraLobbyOverlay()
+          }
+        } else {
+          void openSvaraLobbyOverlay()
+        }
+      } else {
+        closeSvaraLobbyOverlay()
+        void ensureSvaraAnimationDemo()
+      }
     } else {
       destroySvaraAnimationDemo()
+      closeSvaraLobbyOverlay()
     }
   }
 
@@ -20361,6 +20459,62 @@ export function createLobbyFlowController(
       void openLudoGameOverlay(message.snapshot, message.activeLudoGifts ?? [])
       return true
     }
+    // Свара (Етап 2Б.3.7.2) — реални lobby/маса съобщения, диспечирани към
+    // _svaraLobbyController (ако е mount-нат; optional chaining — съобщение
+    // получено преди mount, напр. автоматичния svaraLobby.reconnect() push
+    // при connection-establish докато потребителят е на друг екран, просто
+    // се губи тихо, mirror на Ludo-логиката по-горе; следващ onRefresh() при
+    // mount презаявява tables-list-а, от който контролерът сам разпознава
+    // собствена активна/чакаща маса — виж setTables в createSvaraLobbyController).
+    if (message.type === 'svara_tables_list') {
+      _svaraLobbyController?.setTables(message.tables)
+      return true
+    }
+    if (message.type === 'svara_table_updated') {
+      _svaraLobbyController?.setMyTable(message.table)
+      return true
+    }
+    if (message.type === 'svara_table_left') {
+      _svaraLastSnapshotRevision = null
+      _svaraLobbyController?.setMyTable(null)
+      if (state.currentScreen === 'svara') options.onSvaraTablesOpen?.()
+      return true
+    }
+    if (message.type === 'svara_lobby_error') {
+      _svaraLobbyController?.showMessage(message.message)
+      return true
+    }
+    if (message.type === 'svara_command_result') {
+      // "applied"/"duplicate" статус + revision/phase — само diagnostic
+      // инфо (виж data-svara-diagnostics блока в контролера); самата
+      // актуална маса/snapshot идва отделно през table_updated/match_snapshot.
+      // Няма bet/gameplay бутони в този подетап, затова няма допълнителен UI ефект тук.
+      return true
+    }
+    if (message.type === 'svara_command_error') {
+      _svaraLobbyController?.showMessage(message.message)
+      return true
+    }
+    if (message.type === 'svara_match_timing') {
+      _svaraLobbyController?.setTiming(message)
+      return true
+    }
+    if (message.type === 'svara_match_snapshot') {
+      // Никога не презаписваме с равна/по-стара ревизия за СЪЩАТА маса
+      // (напр. duplicate-command resend от сървъра, виж createSvaraLobby.ts
+      // handle() reject-а на duplicate commandId, който пак праща snapshot).
+      if (
+        _svaraLastSnapshotRevision &&
+        _svaraLastSnapshotRevision.matchId === message.matchId &&
+        _svaraLastSnapshotRevision.revision >= message.revision
+      ) {
+        return true
+      }
+      _svaraLastSnapshotRevision = { matchId: message.matchId, revision: message.revision }
+      _svaraLobbyController?.setSnapshot(message)
+      return true
+    }
+
     if (message.type === 'ludo_game_state') {
       _isExpectingLudoMatchRestore = false
       if (_ludoGameplayActionResponsesPending > 0) _ludoGameplayActionResponsesPending -= 1

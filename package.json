@@ -10,6 +10,8 @@
     "check:ludo-track-geometry": "npx tsx scripts/checkLudoTrackGeometry.ts",
     "check:svara-animation-demo": "npx tsx scripts/checkSvaraAnimationDemo.ts",
     "check:svara-animation-demo-browser": "npx tsx scripts/checkSvaraAnimationDemoBrowser.ts --project-root=.",
+    "check:svara-client-lobby": "npx tsx scripts/checkSvaraClientLobby.ts",
+    "check:svara-client-real-integration": "npx tsx scripts/checkSvaraClientRealIntegration.ts",
     "check:ludo-legal-move-math": "npx tsx scripts/checkLudoLegalMoveMath.ts",
     "check:ludo-stack-capture": "npx tsx scripts/checkLudoStackCapture.ts",
     "check:ludo-safe-cell-capture": "npx tsx scripts/checkLudoSafeCellCapture.ts",

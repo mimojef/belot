@@ -1031,6 +1031,17 @@ export type ClientMessage =
   // server/src/protocol/messageTypes.ts Phase 1).
   | { type: 'watch_ludo_match'; matchId: string }
   | { type: 'unwatch_ludo_match'; matchId: string }
+  // Свара (Етап 2Б.3.7.2) — mirror 1:1 на server/src/games/svara/protocol/
+  // svaraLobbyProtocol.ts::SvaraLobbyClientMessage. Достъпно само зад
+  // SVARA_TEST_ENABLED + тестовите роли (виж svaraAccess.ts); сървърът е
+  // единственият авторитет за маси/карти/банки — тук само транспортни типове.
+  | { type: 'request_svara_tables_list' }
+  | { type: 'create_svara_table'; requestId: string; capacity: 2 | 3 | 4; entryFee: number; entryPercent: SvaraEntryPercent; startMode: SvaraStartMode }
+  | { type: 'join_svara_table'; matchId: string; requestId: string }
+  | { type: 'leave_svara_table'; matchId: string; requestId: string }
+  | { type: 'start_svara_table'; matchId: string; requestId: string }
+  | { type: 'request_svara_table_state'; matchId: string }
+  | { type: 'submit_svara_command'; matchId: string; commandId: string; expectedRevision: number; command: SvaraParticipantCommand }
   | {
       // "Играещи"/"Приключили" табове — виж PrivateGamesListMessage.
       type: 'request_private_games_list'
@@ -1204,6 +1215,200 @@ export type LudoRoomSnapshot = {
   createdAt: number
   canManualStart: boolean
 }
+
+// ─── Свара (Етап 2Б.3.7.2) ──────────────────────────────────────────────────
+// Клиентски типове, mirror 1:1 на сървърния протокол (НЕ отделен модел на
+// engine state): server/src/games/svara/protocol/svaraLobbyProtocol.ts и
+// svaraSnapshotProtocol.ts. Сървърът остава единственият авторитет — тук
+// само транспортните форми на вече построените от него публични полета.
+// Чуждите/непогледнати карти никога не достигат до тук (сървърният builder
+// изрично ги пропуска); клиентът не прави собствена видимост/engine логика.
+
+export type SvaraEntryPercent = 1 | 2 | 3 | 5
+export type SvaraStartMode = 'auto' | 'manual'
+export type SvaraSeatStatus = 'active' | 'absent' | 'exited' | 'eliminated'
+/** Самите карти — опаково за клиента (напр. "7S", "AH"); не се парсират тук. */
+export type SvaraCardCode = string
+
+export type SvaraPublicTable = {
+  matchId: string
+  phase: 'lobby' | 'in-progress' | 'finished' | 'closed'
+  capacity: 2 | 3 | 4
+  creatorId: string
+  startMode: SvaraStartMode
+  entryFee: number
+  entryPercent: SvaraEntryPercent
+  startingChips: number
+  entryChips: number
+  players: Array<{ playerId: string; status: SvaraSeatStatus }>
+}
+
+export type SvaraBettingAction =
+  | { kind: 'fold' | 'call' | 'all-in' | 'no-bet' }
+  | { kind: 'bet' | 'blind-bet'; total: number }
+
+/** Само тези участнически команди са позволени през submit_svara_command. */
+export type SvaraParticipantCommand =
+  | { type: 'look' }
+  | { type: 'act'; action: SvaraBettingAction }
+  | { type: 'svara-join' }
+  | { type: 'svara-decline' }
+  | { type: 'request-return' }
+  | { type: 'exit' }
+  | { type: 'reveal-cards' }
+  | { type: 'hide-cards' }
+
+export type SvaraBettingOptions = {
+  canAct: boolean
+  fold: boolean
+  noBet: boolean
+  call: number | null
+  bet: { min: number; max: number } | null
+  blindBet: { min: number; max: number } | null
+  allIn: boolean
+  lookRequired: boolean
+}
+
+export type SvaraSnapshotSeat = {
+  seatIndex: number
+  playerId: string
+  status: SvaraSeatStatus
+  stack: number
+  isDealer: boolean
+  isToAct: boolean
+  inRound: boolean
+  folded: boolean
+  allIn: boolean
+  /** Брой карти в ръката (без самите карти) — публично видимо за всички. */
+  cardCount: number
+  roundContribution: number
+}
+
+export type SvaraSnapshotAction = {
+  playerId: string
+  kind: SvaraBettingAction['kind'] | 'forced-fold'
+  total: number
+  added: number
+  allIn: boolean
+  blind: boolean
+}
+
+export type SvaraSnapshotPotLayer = {
+  index: number
+  amount: number
+  kind: 'uncalled' | 'contested'
+  eligible: string[]
+}
+
+export type SvaraSnapshotBettingRound = {
+  kind: 'ordinary' | 'svara'
+  roundId: string
+  dealerId: string
+  potId: string | null
+  participants: string[]
+  currentBet: number
+  blind: { status: 'available' | 'active' | 'closed'; lastBlindTotal: number }
+  carriedIn: number
+  potTotal: number
+  provisionalPots: SvaraSnapshotPotLayer[]
+  isFourthHeadsUp: boolean
+  noBetAllowed: boolean
+  actions: SvaraSnapshotAction[]
+}
+
+export type SvaraSnapshotRound =
+  | SvaraSnapshotBettingRound
+  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
+  | { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number }
+  /** Избор „Покажи“/„Скрий“ (Етап 2Б.3.7.1) — cards/handPoints само след 'revealed'. */
+  | { kind: 'reveal-choice'; roundId: string; winnerId: string; decision: 'pending' | 'revealed'; cards: SvaraCardCode[] | null; handPoints: number | null }
+
+export type SvaraSnapshotLockedPot = {
+  potId: string
+  kind: 'ordinary' | 'allin'
+  amount: number
+  eligible: string[]
+  isMain: boolean
+  continuation: number
+}
+
+export type SvaraSnapshotPotOutcome =
+  | { kind: 'uncalled-return'; playerId: string }
+  | { kind: 'awarded'; winner: string; byShowdown: boolean }
+  | { kind: 'locked'; lockedPotId: string; tiedPlayers: string[]; lockKind: 'ordinary' | 'allin' }
+  | { kind: 'carried'; carryId: string }
+  | { kind: 'split'; tiedPlayers: string[]; share: number; removed: number }
+
+export type SvaraSnapshotHistoryRecord = {
+  roundId: string
+  kind: 'ordinary' | 'svara' | 'allin-svara'
+  dealerId: string | null
+  participants: string[]
+  folded: string[]
+  contributions: Array<{ playerId: string; amount: number }>
+  anyVoluntaryBet: boolean
+  pots: Array<{ potId: string; source: 'round' | 'locked'; amount: number; eligible: string[]; outcome: SvaraSnapshotPotOutcome }>
+}
+
+/** Собствен индивидуален snapshot, построен от сървъра само за доверения зрител. */
+export type SvaraMatchSnapshotMessage = {
+  type: 'svara_match_snapshot'
+  protocolVersion: number
+  matchId: string
+  /** Монотонен брой приложени команди — за подреждане/игнориране на остарели snapshot-и. */
+  revision: number
+  phase: 'lobby' | 'in-progress' | 'finished' | 'closed'
+  table: {
+    capacity: 2 | 3 | 4
+    startMode: SvaraStartMode
+    creatorId: string
+    entryFee: number
+    entryPercent: SvaraEntryPercent
+    startingChips: number
+    entryChips: number
+  }
+  seats: SvaraSnapshotSeat[]
+  dealerId: string | null
+  toActId: string | null
+  you: {
+    playerId: string
+    seatIndex: number
+    status: SvaraSeatStatus
+    looked: boolean
+    returnPending: boolean
+    svaraDecision: 'joined' | 'declined' | 'undecided' | null
+    /** Собствените карти — само след „поглеждане“/автоматично разкриване; иначе null. */
+    cards: SvaraCardCode[] | null
+    betting: SvaraBettingOptions | null
+    /** Само за самия победител, докато изборът „Покажи“/„Скрий“ чака. */
+    revealChoice: { canDecide: boolean } | null
+  }
+  round: SvaraSnapshotRound | null
+  lockedPots: SvaraSnapshotLockedPot[]
+  carriedTotal: number
+  removedChips: number
+  totalChips: number
+  history: { totalRounds: number; showdownReveal: 'withheld'; recent: SvaraSnapshotHistoryRecord[] }
+  result: {
+    finished: boolean
+    closed: boolean
+    winnerId: string | null
+    aborted: boolean
+    reason: 'prolonged-absence' | 'all-absent' | null
+    message: string | null
+  }
+}
+
+export type SvaraDeadlineKind = 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
+export type SvaraDeadlineInfo = { kind: SvaraDeadlineKind; deadlineAt: number; remainingMs: number; playerId: string | null }
+
+export type SvaraLobbyErrorCode =
+  | 'feature_disabled' | 'unauthenticated' | 'forbidden_role'
+  | 'invalid_input' | 'match_not_found' | 'already_seated' | 'table_full'
+  | 'not_a_participant' | 'not_allowed' | 'wrong_phase' | 'command_id_conflict'
+  | 'other_game_commitment' | 'svara_commitment' | 'server_unavailable'
+  | 'stale_action' | 'invalid_action' | 'not_your_turn' | 'insufficient_chips' | 'look_required'
+  | 'player_absent'
 
 export type PrivateRoomSnapshot = {
   id: string
@@ -1947,6 +2152,28 @@ export type PrivateRoomsListMessage = {
   type: 'private_rooms_list'
   rooms: PrivateRoomSnapshot[]
 }
+
+// ─── Свара (Етап 2Б.3.7.2) — сървърни съобщения ────────────────────────────
+export type SvaraMatchTimingMessage = {
+  type: 'svara_match_timing'
+  matchId: string
+  revision: number
+  serverNow: number
+  deadlines: SvaraDeadlineInfo[]
+}
+export type SvaraCommandResultMessage = {
+  type: 'svara_command_result'
+  matchId: string
+  commandId: string
+  status: 'applied' | 'duplicate'
+  revision: number
+  phase: SvaraPublicTable['phase']
+}
+export type SvaraCommandErrorMessage = { type: 'svara_command_error'; code: SvaraLobbyErrorCode; message: string; commandId?: string }
+export type SvaraTablesListMessage = { type: 'svara_tables_list'; tables: SvaraPublicTable[] }
+export type SvaraTableUpdatedMessage = { type: 'svara_table_updated'; table: SvaraPublicTable; requestId?: string }
+export type SvaraTableLeftMessage = { type: 'svara_table_left'; matchId: string; requestId?: string }
+export type SvaraLobbyErrorMessage = { type: 'svara_lobby_error'; code: SvaraLobbyErrorCode; message: string; requestId?: string }
 
 export type LudoRoomsListMessage = { type: 'ludo_rooms_list'; rooms: LudoRoomSnapshot[] }
 export type LudoRoomUpdatedMessage = { type: 'ludo_room_updated'; room: LudoRoomSnapshot }
@@ -3053,6 +3280,14 @@ export type ServerMessage =
   | TableGiftItemSentMessage
   | TableGiftSendResultMessage
   | PrivateRoomsListMessage
+  | SvaraMatchTimingMessage
+  | SvaraCommandResultMessage
+  | SvaraCommandErrorMessage
+  | SvaraTablesListMessage
+  | SvaraTableUpdatedMessage
+  | SvaraTableLeftMessage
+  | SvaraLobbyErrorMessage
+  | SvaraMatchSnapshotMessage
   | LudoRoomsListMessage
   | LudoRoomUpdatedMessage
   | LudoRoomLeftMessage
@@ -3287,6 +3522,17 @@ export type GameServerClient = {
   unwatchLudoMatch: (matchId: string) => void
   watchBelotRoom: (roomId: string) => void
   unwatchBelotRoom: (roomId: string) => void
+  // Свара (Етап 2Б.3.7.2) — mirror на Ludo методите по-горе. requestId за
+  // create/join/leave/start се генерира тук (crypto.randomUUID()), както при
+  // другите send-and-forget convenience методи в тоя клиент; само
+  // submitSvaraCommand приема commandId от caller-а (идемпотентност/retry).
+  requestSvaraTablesList: () => void
+  createSvaraTable: (capacity: 2 | 3 | 4, entryFee: number, entryPercent: SvaraEntryPercent, startMode: SvaraStartMode) => void
+  joinSvaraTable: (matchId: string) => void
+  leaveSvaraTable: (matchId: string) => void
+  startSvaraTable: (matchId: string) => void
+  requestSvaraTableState: (matchId: string) => void
+  submitSvaraCommand: (matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand) => void
   subscribeTournamentMatches: (tournamentId: string, token: string) => void
   unsubscribeTournamentMatches: (tournamentId: string) => void
   requestPrivateGamesList: () => void
@@ -3705,6 +3951,17 @@ export function createGameServerClient(
   // leave_active_room; spectator няма reconnectToken (виж server-а).
   function watchBelotRoom(roomId: string): void { send({ type: 'watch_belot_room', roomId }) }
   function unwatchBelotRoom(roomId: string): void { send({ type: 'unwatch_belot_room', roomId }) }
+  function requestSvaraTablesList(): void { send({ type: 'request_svara_tables_list' }) }
+  function createSvaraTable(capacity: 2 | 3 | 4, entryFee: number, entryPercent: SvaraEntryPercent, startMode: SvaraStartMode): void {
+    send({ type: 'create_svara_table', requestId: crypto.randomUUID(), capacity, entryFee, entryPercent, startMode })
+  }
+  function joinSvaraTable(matchId: string): void { send({ type: 'join_svara_table', matchId, requestId: crypto.randomUUID() }) }
+  function leaveSvaraTable(matchId: string): void { send({ type: 'leave_svara_table', matchId, requestId: crypto.randomUUID() }) }
+  function startSvaraTable(matchId: string): void { send({ type: 'start_svara_table', matchId, requestId: crypto.randomUUID() }) }
+  function requestSvaraTableState(matchId: string): void { send({ type: 'request_svara_table_state', matchId }) }
+  function submitSvaraCommand(matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand): void {
+    send({ type: 'submit_svara_command', matchId, commandId, expectedRevision, command })
+  }
   function subscribeTournamentMatches(tournamentId: string, token: string): void {
     send({ type: 'subscribe_tournament_matches', tournamentId, token })
   }
@@ -3885,6 +4142,13 @@ export function createGameServerClient(
     unwatchLudoMatch,
     watchBelotRoom,
     unwatchBelotRoom,
+    requestSvaraTablesList,
+    createSvaraTable,
+    joinSvaraTable,
+    leaveSvaraTable,
+    startSvaraTable,
+    requestSvaraTableState,
+    submitSvaraCommand,
     subscribeTournamentMatches,
     unsubscribeTournamentMatches,
     requestPrivateGamesList,

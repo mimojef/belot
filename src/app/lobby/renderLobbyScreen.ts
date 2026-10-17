@@ -719,6 +719,8 @@ export type LobbyScreenState = {
   canShowSvaraEntry: boolean
   /** /games/svara — 'granted' едва след 200 от GET /api/games/svara/access. */
   svaraPageStatus: SvaraPageStatus
+  /** Етап 2Б.3.7.2 — toggle между реалния WS мултиплейър и запазеното анимационно демо. */
+  svaraViewMode: 'real' | 'demo'
   adminStats: AdminStatsSnapshot | null
   adminStatsLoading: boolean
   adminStatsErrorText: string | null
@@ -6685,7 +6687,7 @@ function renderMobileLobbyScreenContent(
           : state.view === 'ludo-lobby'
             ? '<div data-ludo-lobby-mount="1"></div>'
           : state.view === 'svara'
-            ? renderSvaraPage(state.svaraPageStatus, true)
+            ? renderSvaraPage(state.svaraPageStatus, true, state.svaraViewMode)
           : state.view === 'rules'
             ? renderRulesPage(true)
           : state.view === 'strategy'
@@ -13890,7 +13892,7 @@ export function renderLobbyScreen(
               : state.view === 'ludo-lobby'
                 ? '<div data-ludo-lobby-mount="1"></div>'
               : state.view === 'svara'
-                ? renderSvaraPage(state.svaraPageStatus)
+                ? renderSvaraPage(state.svaraPageStatus, false, state.svaraViewMode)
               : state.view === 'rules'
                 ? renderRulesPage()
               : state.view === 'strategy'
