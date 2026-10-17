@@ -1591,6 +1591,7 @@ export type LobbyFlowController = {
     isInPrivateRoomsScreen: boolean
     isConnected: boolean
     hasActiveLudoMatch: boolean
+    hasActiveSvaraMatch: boolean
   }
   /**
    * Реалното съществуване на активния Ludo gameplay controller-a (mirror на
@@ -3619,6 +3620,7 @@ export function createLobbyFlowController(
     setTiming: (timing: SvaraMatchTimingMessage | null) => void
     showMessage: (message: string) => void
     getMyTableId: () => string | null
+    isInActiveMatch: () => boolean
     requestExit: () => void
   } | null = null
   let _isOpeningSvaraLobbyOverlay = false
@@ -3627,6 +3629,20 @@ export function createLobbyFlowController(
   // по-стар/равен snapshot (напр. duplicate-command resend, виж §15 "never
   // overwrite with stale revision").
   let _svaraLastSnapshotRevision: { matchId: string; revision: number } | null = null
+  // Кеш на ПОСЛЕДНИТЕ получени snapshot/timing — АБСОЛЮТНО НЕЗАВИСИМО от
+  // mount/unmount цикъла на _svaraLobbyController (винаги се обновява, дори
+  // докато controller-ът е null). Доказан реален проблем в real-browser QA
+  // (Етап 2Б.3.7.3): НАПЪЛНО несвързани re-render-и някъде другаде в
+  // гигантския lobby state (chat/notifications/monitoring и т.н.) презаписват
+  // options.root.innerHTML изцяло, изхвърляйки Svara mount поддървото;
+  // reconciliation guard-ът (виж render()) детектира това и force remount-ва
+  // контролера. Ако това се случва по-често, отколкото round-trip-ът за нов
+  // snapshot смогва да завърши (request_svara_table_state -> svara_match_snapshot),
+  // нов mount-нат controller instance може безкрайно да остане без snapshot.
+  // Решение: веднага reply-ваме кеша в НОВО mount-натия instance (виж
+  // openSvaraLobbyOverlay) — без да чакаме нов round-trip.
+  let _svaraLastSnapshot: SvaraMatchSnapshotMessage | null = null
+  let _svaraLastTiming: SvaraMatchTimingMessage | null = null
   options.root.addEventListener('click', (event) => {
     const target = event.target
     if (!(target instanceof Element)) return
@@ -3753,6 +3769,17 @@ export function createLobbyFlowController(
         onStart: (matchId) => options.onSvaraTableStart?.(matchId),
         onRequestTableState: (matchId) => options.onSvaraTableStateRequest?.(matchId),
       })
+      // Веднага replay-ваме последния познат snapshot/timing — без да чакаме
+      // новия round-trip, който onRefresh()/setTables() auto-detect ще
+      // стартират и без друго (виж _svaraLastSnapshot doc коментара по-горе
+      // за пълния race, който това затваря). Безопасно дори ако matchId не
+      // съвпада с току-що mount-натата маса — renderSvaraActiveTable.ts
+      // изрично сверява snapshot.matchId === table.matchId, преди да го ползва.
+      if (_svaraLastSnapshot) {
+        _svaraLastSnapshotRevision = { matchId: _svaraLastSnapshot.matchId, revision: _svaraLastSnapshot.revision }
+        _svaraLobbyController.setSnapshot(_svaraLastSnapshot)
+      }
+      if (_svaraLastTiming) _svaraLobbyController.setTiming(_svaraLastTiming)
     } finally {
       _isOpeningSvaraLobbyOverlay = false
     }
@@ -3761,6 +3788,12 @@ export function createLobbyFlowController(
   function closeSvaraLobbyOverlay(): void {
     _svaraLobbyController?.destroy()
     _svaraLobbyController = null
+    // Следващият mount-нат controller instance стартира с чисто snapshot
+    // състояние (нов createSvaraLobbyController() closure) — тракерът на
+    // ревизията трябва да се нулира заедно с него, иначе първият push след
+    // remount (виж race-а, обяснен при svara_match_snapshot handler-а по-горе)
+    // би бил грешно отхвърлен като "вече видяна" ревизия.
+    _svaraLastSnapshotRevision = null
   }
 
   // Гарантиран fresh refresh на "Играещи"/"Приключили" при връщане към Ludo
@@ -8151,8 +8184,13 @@ export function createLobbyFlowController(
             // Mirror на Ludo lobby re-mount guard-а по-горе — unrelated
             // re-render може да презапише root.innerHTML и да остави
             // controller-а orphaned (destroy-нат subtree без DOM presence).
-            _svaraLobbyController.destroy()
-            _svaraLobbyController = null
+            // ЗАДЪЛЖИТЕЛНО през closeSvaraLobbyOverlay() (не директен
+            // .destroy()) — доказан реален бъг в real-browser QA: директен
+            // .destroy() тук пропускаше нулирането на
+            // _svaraLastSnapshotRevision, оставяйки guard-а да отхвърля
+            // ПЪРВИЯ (валиден) snapshot след remount-а завинаги, защото все
+            // още сочи към ревизията на ПРЕДИШНИЯ (вече унищожен) instance.
+            closeSvaraLobbyOverlay()
             void openSvaraLobbyOverlay()
           }
         } else {
@@ -20476,6 +20514,11 @@ export function createLobbyFlowController(
     }
     if (message.type === 'svara_table_left') {
       _svaraLastSnapshotRevision = null
+      // Изчистваме и кеша (не само revision tracker-а) — иначе бъдещ mount
+      // (друга маса) би reply-нал snapshot/timing данни от ВЕЧЕ напуснатата
+      // маса, преди реалният fresh round-trip да пристигне.
+      _svaraLastSnapshot = null
+      _svaraLastTiming = null
       _svaraLobbyController?.setMyTable(null)
       if (state.currentScreen === 'svara') options.onSvaraTablesOpen?.()
       return true
@@ -20496,6 +20539,10 @@ export function createLobbyFlowController(
       return true
     }
     if (message.type === 'svara_match_timing') {
+      // Кешираме БЕЗУСЛОВНО (виж _svaraLastTiming doc коментара при
+      // декларацията) — reply-ва се в openSvaraLobbyOverlay() при mount,
+      // независимо дали контролерът в момента е mount-нат.
+      _svaraLastTiming = message
       _svaraLobbyController?.setTiming(message)
       return true
     }
@@ -20510,6 +20557,13 @@ export function createLobbyFlowController(
       ) {
         return true
       }
+      // Кешираме БЕЗУСЛОВНО, преди mount проверката — виж _svaraLastSnapshot
+      // doc коментара при декларацията за пълния race (чести несвързани
+      // full-root re-render-и могат да force remount-ват controller-а по-
+      // често, отколкото нов round-trip смогва да завърши). Нов mount
+      // instance reply-ва този кеш веднага в openSvaraLobbyOverlay(), без
+      // да чака следващо входящо съобщение.
+      _svaraLastSnapshot = message
       _svaraLastSnapshotRevision = { matchId: message.matchId, revision: message.revision }
       _svaraLobbyController?.setSnapshot(message)
       return true
@@ -23274,6 +23328,10 @@ export function createLobbyFlowController(
       // виж onGameEndAcknowledged) — остава truthy докато end-game popup-ът
       // стои отворен.
       hasActiveLudoMatch: _ludoController !== null,
+      // Етап 2Б.3.7.3 — mirror на hasActiveLudoMatch точно над. Без това
+      // полето координаторът не знаеше нищо за Свара и тихо презареждаше
+      // mid-match (доказан реален проблем в real-browser QA).
+      hasActiveSvaraMatch: _svaraLobbyController?.isInActiveMatch() ?? false,
     }),
     hasActiveLudoMatch: () => _ludoController !== null,
     openGiftBackFromSender: (senderProfileId, displayNameHint) => openGiftBackFromSender(senderProfileId, displayNameHint),

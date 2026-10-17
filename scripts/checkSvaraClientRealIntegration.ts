@@ -322,8 +322,16 @@ try {
     await context.addCookies([{ name: user.cookieName, value: user.cookieValue, domain: '127.0.0.1', path: '/' }])
     const page = await context.newPage()
     page.on('pageerror', (err) => consoleErrors.push(`${err.message}`))
+    const svaraLog: string[] = []
+    page.on('console', (msg) => { if (msg.text().includes('game-server') || msg.text().includes('svara')) svaraLog.push(msg.text()) })
+    ;(page as any)._svaraLog = svaraLog
     await page.goto(`http://127.0.0.1:${staticPort}/games/svara`, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('[data-svara-lobby="1"]', { timeout: 20_000 })
+    // Real cookie-consent banner (unrelated to Svara) otherwise intercepts
+    // later clicks (e.g. "Обратно към Игри") and can eat a full click-retry
+    // timeout, during which an UNRELATED real 15s turn deadline can elapse
+    // and degrade match state out from under the test.
+    await page.getByText('Приеми всички').click({ timeout: 3_000 }).catch(() => {})
     return { context, page }
   }
 
@@ -407,7 +415,7 @@ try {
     // placeholder/dash), for both.
     for (const session of [sessionA, sessionB]) {
       const diagnosticsText = await session.page.locator('[data-svara-diagnostics]').textContent() ?? ''
-      if (!/Ревизия:\s*\d+/.test(diagnosticsText)) throw new Error(`expected a real numeric revision in diagnostics, got: ${diagnosticsText}`)
+      if (!/rev\s*\d+/.test(diagnosticsText)) throw new Error(`expected a real numeric revision in diagnostics, got: ${diagnosticsText}`)
     }
 
     // §13 "own unlooked cards stay hidden" / §17 "no bet/gameplay buttons in
@@ -421,6 +429,50 @@ try {
     if (ownCardsVisibleA !== 0 || ownCardsVisibleB !== 0) {
       throw new Error('own cards must stay hidden until an explicit `look` command (no such UI exists yet) — data-svara-own-cards should not be rendered at all')
     }
+  })
+
+  await check('[T12] the active table never overflows horizontally, and the self (bottom) panel stays within the viewport, across required breakpoints (задание §18)', async () => {
+    // Runs IMMEDIATELY while the match is freshly active (right after T5),
+    // deliberately BEFORE T6/T9-T11 spend extra wall-clock time — nothing in
+    // this sub-stage ever sends an "act" command yet (no bet/fold UI, see
+    // §14), so the real 15s server turn deadline keeps ticking down in the
+    // background regardless of what the test does; this is layout
+    // verification, not a test of how long an un-acted match survives.
+    const viewportsToCheck: Array<{ width: number; height: number }> = [
+      { width: 320, height: 568 },
+      { width: 390, height: 844 },
+      { width: 430, height: 932 },
+      { width: 844, height: 390 },
+      { width: 1280, height: 900 },
+    ]
+    for (const vp of viewportsToCheck) {
+      await sessionA.page.setViewportSize(vp)
+      await sleep(150)
+      const measurement = await sessionA.page.evaluate(() => {
+        const bottomRect = document.querySelector('[data-svara-seat-anchor="bottom"]')?.getBoundingClientRect()
+        return {
+          scrollWidth: document.documentElement.scrollWidth,
+          clientWidth: document.documentElement.clientWidth,
+          bottomPanelBottom: bottomRect?.bottom ?? null,
+          windowHeight: window.innerHeight,
+        }
+      })
+      if (measurement.scrollWidth > measurement.clientWidth) {
+        throw new Error(`horizontal overflow at ${vp.width}x${vp.height}: scrollWidth=${measurement.scrollWidth} > clientWidth=${measurement.clientWidth}`)
+      }
+      if (measurement.bottomPanelBottom === null) {
+        const diag = await sessionA.page.evaluate(() => ({
+          diagnostics: document.querySelector('[data-svara-diagnostics]')?.textContent ?? null,
+          anchorCount: document.querySelectorAll('[data-svara-seat-anchor]').length,
+        }))
+        const recentLog = ((sessionA.page as any)._svaraLog as string[]).slice(-15)
+        throw new Error(`self (bottom) seat panel not found at ${vp.width}x${vp.height} — diag=${JSON.stringify(diag)}\nrecent WS log:\n${recentLog.join('\n')}`)
+      }
+      if (measurement.bottomPanelBottom > measurement.windowHeight) {
+        throw new Error(`self (bottom) seat panel extends past the viewport at ${vp.width}x${vp.height}: bottom=${measurement.bottomPanelBottom.toFixed(0)} > windowHeight=${measurement.windowHeight}`)
+      }
+    }
+    await sessionA.page.setViewportSize({ width: 420, height: 900 })
   })
 
   await check('[T6] navigating away from /games/svara mid-match does NOT exit the game; returning restores the SAME active table', async () => {
@@ -439,6 +491,55 @@ try {
     await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
     const createButtonVisible = await sessionA.page.locator('[data-svara-create-open]').count()
     if (createButtonVisible !== 0) throw new Error('userA landed back on the table list instead of being restored into the active table')
+  })
+
+  await check('[T9] "ти" marker sits on the BOTTOM-anchored seat for EACH player — real, per-player seat rotation (задание §4/§18)', async () => {
+    for (const session of [sessionA, sessionB]) {
+      const bottomText = await session.page.locator('[data-svara-seat-anchor="bottom"]').textContent()
+      if (!bottomText || !bottomText.includes('(ти)')) throw new Error(`expected the bottom-anchored seat to contain the local "(ти)" marker, got: ${bottomText}`)
+    }
+    // And they must NOT be the same seatIndex (two real distinct players).
+    const bottomSeatIndexA = await sessionA.page.locator('[data-svara-seat-anchor="bottom"]').getAttribute('data-svara-seat-index')
+    const bottomSeatIndexB = await sessionB.page.locator('[data-svara-seat-anchor="bottom"]').getAttribute('data-svara-seat-index')
+    if (bottomSeatIndexA === bottomSeatIndexB) throw new Error(`userA and userB must see DIFFERENT seatIndex values at the bottom anchor (each sees themself), got the same value "${bottomSeatIndexA}" for both`)
+  })
+
+  await check('[T10] exactly one dealer badge is rendered on the real table, never duplicated', async () => {
+    for (const session of [sessionA, sessionB]) {
+      const dealerBadgeCount = await session.page.locator('[data-svara-dealer-badge]').count()
+      if (dealerBadgeCount !== 1) throw new Error(`expected exactly 1 dealer badge, got ${dealerBadgeCount}`)
+    }
+  })
+
+  await check('[T11] fullscreen toggle button calls the real Fullscreen API on click (задание §13)', async () => {
+    // Headless Chromium's fullscreen support is environment-dependent — we
+    // assert the REAL browser API was actually invoked (not a fake/no-op
+    // client-side flag), by instrumenting the real requestFullscreen/
+    // exitFullscreen before clicking, rather than asserting document.
+    // fullscreenElement (which can be refused by the headless sandbox for
+    // reasons unrelated to our code).
+    const calls = await sessionA.page.evaluate(async () => {
+      const table = document.querySelector('[data-svara-table]') as HTMLElement | null
+      if (!table) return { hasButton: false, requestCalled: false }
+      let requestCalled = false
+      const original = table.requestFullscreen?.bind(table)
+      table.requestFullscreen = (...args: unknown[]) => {
+        requestCalled = true
+        return original ? (original as any)(...args).catch(() => {}) : Promise.resolve()
+      }
+      const button = document.querySelector('[data-svara-fullscreen-toggle]') as HTMLElement | null
+      if (!button) return { hasButton: false, requestCalled: false }
+      button.click()
+      await new Promise((r) => setTimeout(r, 200))
+      return { hasButton: true, requestCalled }
+    })
+    if (!calls.hasButton) throw new Error('fullscreen toggle button must be rendered when the browser supports the Fullscreen API')
+    if (!calls.requestCalled) throw new Error('clicking the fullscreen button must call the real element.requestFullscreen(), not a fake client-side-only toggle')
+    // Headless Chromium can actually GRANT programmatic fullscreen — leave
+    // it active and the subsequent viewport-resize checks (T12) would
+    // measure a real fullscreen layout instead of the plain embedded one.
+    await sessionA.page.evaluate(() => { if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}) })
+    await sleep(200)
   })
 
   await check('[T8] no uncaught JS errors during the entire scenario', () => {

@@ -28,6 +28,15 @@ export type PwaUpdateSafetyState = {
   // (controller-ът се destroy-ва едва при OK/Exit), и false само докато
   // потребителят разглежда /games/ludo лобито БЕЗ активен match.
   hasActiveLudoMatch: boolean
+  // Етап 2Б.3.7.3 — огледален на hasActiveLudoMatch по-горе. Доказан реален
+  // архитектурен пропуск, намерен при real-browser QA: координаторът
+  // изобщо не знаеше нищо за Свара и би сметнал активен Svara мач за
+  // "безопасен" момент за тихо презареждане на страницата при pending PWA
+  // update — точно каквото Белот/Ludo изрично избягват чрез hasActiveRoom/
+  // hasActiveLudoMatch. Source of truth: _svaraLobbyController.isInActiveMatch() —
+  // true само докато текущата маса е в 'in-progress' фаза, не и докато
+  // потребителят просто разглежда списъка/чакащата стая.
+  hasActiveSvaraMatch: boolean
 }
 
 export type PwaApplyFn = () => void | Promise<void>
@@ -53,6 +62,7 @@ function isSafeToApply(state: PwaUpdateSafetyState): boolean {
   if (!state.bootstrapComplete) return false
   if (state.hasActiveRoom) return false
   if (state.hasActiveLudoMatch) return false
+  if (state.hasActiveSvaraMatch) return false
   if (state.isSearching) return false
   if (state.hasPrivateRoomInvite) return false
   if (state.hasQueuedPrivateRoomInvites) return false

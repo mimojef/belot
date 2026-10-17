@@ -3668,6 +3668,9 @@ export function createGameServerClient(
       if (message.type === 'room_snapshot' || message.type === 'belot_spectator_snapshot') {
         sharedServerClock.recordServerNowSample(message.game?.serverNow, receivedAt)
       }
+      if (message.type === 'svara_match_timing') {
+        sharedServerClock.recordServerNowSample(message.serverNow, receivedAt)
+      }
 
       console.log('[game-server] message', message.type, message)
       options.onMessage?.(message)

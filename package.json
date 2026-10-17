@@ -11,6 +11,7 @@
     "check:svara-animation-demo": "npx tsx scripts/checkSvaraAnimationDemo.ts",
     "check:svara-animation-demo-browser": "npx tsx scripts/checkSvaraAnimationDemoBrowser.ts --project-root=.",
     "check:svara-client-lobby": "npx tsx scripts/checkSvaraClientLobby.ts",
+    "check:svara-table-layout": "npx tsx scripts/checkSvaraTableLayout.ts",
     "check:svara-client-real-integration": "npx tsx scripts/checkSvaraClientRealIntegration.ts",
     "check:ludo-legal-move-math": "npx tsx scripts/checkLudoLegalMoveMath.ts",
     "check:ludo-stack-capture": "npx tsx scripts/checkLudoStackCapture.ts",

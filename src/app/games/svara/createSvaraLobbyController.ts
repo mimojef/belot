@@ -1,22 +1,19 @@
-// Свара — реален мултиплейър лоби/маса (Етап 2Б.3.7.2). Чист view слой,
-// mirror на createLudoLobbyController.ts: само рендира каквото сървърът е
-// изпратил и вика options.onXxx callback-ите при потребителско действие.
-// Няма собствена игрова логика, няма локално генериране на карти/банки/
-// ред на ход — всичко идва от SvaraPublicTable/SvaraMatchSnapshotMessage.
-//
-// Минимален "активна маса" изглед (§11 от заданието): места, статус,
-// дилър/ред, собствени карти само ако сървърът ги е включил в snapshot-а,
-// ревизия и сървърен deadline. Пълната адаптивна композиция, залозите и
-// анимациите остават за следващите подетапи (2Б.3.7.3+).
+// Свара — реален мултиплейър лоби/маса (Етап 2Б.3.7.2/2Б.3.7.3). Чист view
+// слой, mirror на createLudoLobbyController.ts: само рендира каквото
+// сървърът е изпратил и вика options.onXxx callback-ите при потребителско
+// действие. Няма собствена игрова логика, няма локално генериране на
+// карти/банки/ред на ход — всичко идва от SvaraPublicTable/
+// SvaraMatchSnapshotMessage. Визуалното оформление на активната маса (места,
+// карти, дилър, countdown пръстен, fullscreen) е в table/renderSvaraActiveTable.ts.
 
 import type {
-  SvaraDeadlineInfo,
   SvaraMatchSnapshotMessage,
   SvaraMatchTimingMessage,
   SvaraPublicTable,
   SvaraSeatStatus,
-  SvaraSnapshotSeat,
 } from '../../network/createGameServerClient'
+import { sharedServerClock } from '../../network/serverClock'
+import { renderSvaraActiveTable } from './table/renderSvaraActiveTable'
 
 type Options = {
   root: HTMLElement
@@ -53,9 +50,14 @@ export function createSvaraLobbyController(options: Options) {
   const createButtonStyle = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 20px;border:1px solid rgba(244,201,91,.5);border-radius:10px;background:linear-gradient(135deg,#f6d27a 0%,#d4a520 55%,#c98f13 100%);color:#1a1200;font-size:14px;font-weight:800;cursor:pointer;white-space:nowrap;'
 
   function render(): void {
+    const isActiveTable = myTable !== null && myTable.phase !== 'lobby'
+    ensureTick()
     const body = myTable ? (myTable.phase === 'lobby' ? renderWaiting(myTable) : renderActiveTable(myTable)) : renderTableList()
-    options.root.innerHTML = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(14px,3vw,32px);overflow-x:hidden;">
-      <div style="max-width:860px;margin:0 auto;">
+    // Активната маса получава по-широк контейнер (нужно за landscape/desktop
+    // без прекомерно разтягане, виж заданието §11/§12) — списъкът/чакащата
+    // маса остават в по-тесния 860px panel layout от 2Б.3.7.2.
+    options.root.innerHTML = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(10px,2.4vw,32px);overflow-x:hidden;">
+      <div style="max-width:${isActiveTable ? '1100px' : '860px'};margin:0 auto;">
         ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Нова маса</button></div>`}
         ${message ? `<div style="margin-bottom:12px;color:#f4c95b;font-weight:700;">${esc(message)}</div>` : ''}
         ${body}
@@ -115,46 +117,39 @@ export function createSvaraLobbyController(options: Options) {
     </div>`
   }
 
-  function deadlineText(entry: SvaraDeadlineInfo | undefined): string {
-    if (!entry) return '—'
-    const seconds = Math.max(0, Math.ceil(entry.remainingMs / 1000))
-    return `${entry.kind} · ${seconds}s${entry.playerId ? ` (${entry.playerId.slice(0, 8)})` : ''}`
-  }
-
-  function activeSeatHtml(seat: SvaraSnapshotSeat): string {
-    const isLocal = seat.playerId === options.localProfileId
-    const own = isLocal && snapshot?.you.cards ? snapshot.you.cards.join(' ') : null
-    return `<div style="box-sizing:border-box;border:1px solid ${seat.isToAct ? 'rgba(244,201,91,.75)' : 'rgba(255,255,255,.12)'};border-radius:9px;padding:9px 11px;background:${seat.isToAct ? 'rgba(244,201,91,.08)' : 'transparent'};">
-      <div style="display:flex;justify-content:space-between;gap:6px;align-items:center;">
-        <span style="font-weight:800;font-size:12px;">${seat.isDealer ? '🂠 ' : ''}${esc(seat.playerId.slice(0, 8))}${isLocal ? ' (ти)' : ''}</span>
-        <span style="font-size:11px;color:rgba(255,255,255,.55);">${STATUS_LABEL[seat.status]}${seat.folded ? ' · отказал' : ''}${seat.allIn ? ' · ол-ин' : ''}</span>
-      </div>
-      <div style="margin-top:5px;font-size:12px;color:rgba(255,255,255,.75);">Чипове: ${seat.stack} · Залог: ${seat.roundContribution} · Карти: ${seat.cardCount}</div>
-      ${own ? `<div style="margin-top:5px;font-size:13px;font-weight:800;color:#f4c95b;" data-svara-own-cards="1">${esc(own)}</div>` : ''}
-    </div>`
+  // Етап 2Б.3.7.3 — поддържа ли браузърът Fullscreen API изобщо (напр. iOS
+  // Safari не поддържа requestFullscreen за произволен елемент) и дали
+  // МАСАТА в момента е в цял екран; само за видимостта на бутона/иконата —
+  // реалното превключване е browser-native (requestFullscreen/exitFullscreen).
+  const fullscreenSupported = typeof document !== 'undefined' && typeof document.documentElement.requestFullscreen === 'function'
+  let isFullscreen = false
+  let tableElementRef: HTMLElement | null = null
+  // Периодичен re-render САМО докато чака активен сървърен срок (ход/избор и
+  // т.н.) — пръстенът/текстът винаги се извеждат наново от deadlineAt +
+  // sharedServerClock на всеки тик, никога от локален "старт" timestamp,
+  // затова rerender/reconnect никога не го рестартира (виж svaraCountdown.ts).
+  let tickTimer: ReturnType<typeof setInterval> | null = null
+  function ensureTick(): void {
+    const hasActiveDeadline = (timing?.deadlines.length ?? 0) > 0
+    if (hasActiveDeadline && tickTimer === null) {
+      tickTimer = setInterval(() => render(), 250)
+    } else if (!hasActiveDeadline && tickTimer !== null) {
+      clearInterval(tickTimer)
+      tickTimer = null
+    }
   }
 
   function renderActiveTable(table: SvaraPublicTable): string {
-    const seats = snapshot?.seats ?? []
-    const seatsHtml = seats.length > 0
-      ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px;">${seats.map(activeSeatHtml).join('')}</div>`
-      : renderEmptyState('Зареждане на масата…')
-    const turnDeadline = timing?.deadlines.find((d) => d.kind === 'turn')
-    const otherDeadline = timing?.deadlines.find((d) => d.kind !== 'turn')
-    const roundKind = snapshot?.round?.kind ?? null
-    return `<div style="${panel}">
-      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:12px;align-items:center;">
-        <div><strong>Активна маса</strong><div style="color:rgba(255,255,255,.62);margin-top:5px;font-size:13px;">Фаза: ${esc(table.phase)}${roundKind ? ` · Рунд: ${esc(roundKind)}` : ''}</div></div>
-        <div style="display:flex;gap:8px;">
-          <button data-svara-table-refresh="1" style="${button}min-height:34px;padding:0 12px;font-size:12px;">Обнови</button>
-          <button data-svara-table-leave="1" ${leavePending ? 'disabled' : ''} style="${button}min-height:34px;padding:0 12px;font-size:12px;${leavePending ? 'opacity:.55;cursor:wait;' : ''}">${leavePending ? '…' : 'Изход'}</button>
-        </div>
-      </div>
-      ${seatsHtml}
-      <div data-svara-diagnostics="1" style="margin-top:14px;padding-top:10px;border-top:1px solid rgba(255,255,255,.1);font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11px;color:rgba(255,255,255,.5);">
-        Ревизия: ${snapshot?.revision ?? '—'} · Ход: ${deadlineText(turnDeadline)}${otherDeadline ? ` · Срок: ${deadlineText(otherDeadline)}` : ''}
-      </div>
-    </div>`
+    return renderSvaraActiveTable({
+      table,
+      snapshot,
+      timing,
+      localProfileId: options.localProfileId,
+      serverNow: sharedServerClock.getServerNow(),
+      isFullscreen,
+      fullscreenSupported,
+      leavePending,
+    })
   }
 
   function renderCreateModal(): string {
@@ -187,7 +182,35 @@ export function createSvaraLobbyController(options: Options) {
       options.onCreate(Number(data.get('capacity')) as 2 | 3 | 4, Number(data.get('entryFee')))
       render()
     })
+    tableElementRef = options.root.querySelector<HTMLElement>('[data-svara-table="1"]')
+    options.root.querySelector('[data-svara-fullscreen-toggle]')?.addEventListener('click', () => { void toggleFullscreen() })
   }
+
+  // Етап 2Б.3.7.3, задание §13 — бутонът само отразява/предизвиква реалния
+  // browser Fullscreen API; НЕ опитва принудително fullscreen при зареждане,
+  // само вследствие на explicit click. Отказ/липса на поддръжка се поглъща
+  // тихо (напр. браузър без permission) — бутонът просто остава в same state.
+  async function toggleFullscreen(): Promise<void> {
+    if (!fullscreenSupported || !tableElementRef) return
+    try {
+      if (document.fullscreenElement === tableElementRef) {
+        await document.exitFullscreen()
+      } else {
+        await tableElementRef.requestFullscreen()
+      }
+    } catch {
+      // Отказан/неподдържан достъп — без промяна, без throw нагоре.
+    }
+  }
+
+  function handleFullscreenChange(): void {
+    const next = document.fullscreenElement === tableElementRef && tableElementRef !== null
+    if (next !== isFullscreen) {
+      isFullscreen = next
+      render()
+    }
+  }
+  if (fullscreenSupported) document.addEventListener('fullscreenchange', handleFullscreenChange)
 
   function requestExit(): void {
     if (leavePending || myTable === null) return
@@ -230,7 +253,19 @@ export function createSvaraLobbyController(options: Options) {
     setTiming(next: SvaraMatchTimingMessage | null) { timing = next; render() },
     showMessage(next: string) { joinPendingMatchId = null; message = next; render() },
     getMyTableId(): string | null { return myTable?.matchId ?? null },
+    // Mirror на Ludo's _ludoController !== null сигнала за PWA update
+    // safety (виж pwaUpdateCoordinator.ts's hasActiveSvaraMatch doc
+    // коментар) — true само докато масата реално играе, не само докато
+    // потребителят разглежда списъка/чакащата стая.
+    isInActiveMatch(): boolean { return myTable !== null && myTable.phase !== 'lobby' },
     requestExit,
-    destroy() { options.root.innerHTML = '' },
+    destroy() {
+      if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
+      if (fullscreenSupported) document.removeEventListener('fullscreenchange', handleFullscreenChange)
+      if (fullscreenSupported && document.fullscreenElement === tableElementRef && tableElementRef !== null) {
+        void document.exitFullscreen().catch(() => {})
+      }
+      options.root.innerHTML = ''
+    },
   }
 }

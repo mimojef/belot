@@ -9565,6 +9565,7 @@ function getPwaSafetyState(): PwaUpdateSafetyState {
     isConnected: pwaSnapshot.isConnected,
     isReconnecting: pwaIsReconnectingActiveRoom,
     hasActiveLudoMatch: pwaSnapshot.hasActiveLudoMatch,
+    hasActiveSvaraMatch: pwaSnapshot.hasActiveSvaraMatch,
   }
 }
 
