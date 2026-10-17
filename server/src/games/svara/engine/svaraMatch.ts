@@ -755,6 +755,14 @@ function look(ctx: Ctx, playerId: string): void {
   if (ctx.state.status[playerId] !== 'active') fail('player-absent', 'an absent player cannot look during this deal')
   const round = requireBettingRound(ctx)
   if (!round.participants.includes(playerId)) fail('not-allowed', `${playerId} is not in this round`)
+  // Решение на собственика (2Б.3.7.4А): играчът-инициатор на командата
+  // "look" може да поглежда САМО на действителния си ход — важи единствено
+  // за ТОЗИ player-initiated път. lookAtSvaraCards() самата си остава
+  // turn-агностична, защото setAbsent() (връщане от отсъствие, §8) я вика
+  // системно за играч, който НЕ е непременно round.betting.toAct, за да му
+  // приложи вече дължимото автоматично разкриване — тази системна употреба
+  // не минава през look()/тази проверка и остава непроменена.
+  if (round.betting.toAct !== playerId) fail('betting:not-your-turn', `it is ${String(round.betting.toAct)}'s turn, not ${playerId}'s`)
   round.betting = lookAtSvaraCards(round.betting, playerId)
 }
 

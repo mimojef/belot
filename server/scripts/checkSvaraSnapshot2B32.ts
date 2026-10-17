@@ -230,6 +230,10 @@ check('2. собствените карти са скрити преди „по
 check('3. собствените карти са видими след „поглеждане“ — точно трите', () => {
   const t = newTable(['a', 'b', 'c'])
   t.deal({ a: H34, b: H27, c: LOW })
+  // Задание 2Б.3.7.4А — "look" е позволен само на действителния ход; 'a' е
+  // първият действащ (виж newTable/peekOrder) — поглежда и залага минимума,
+  // за да предаде хода на 'b', преди 'b' да може легитимно да погледне.
+  t.seen('a', { kind: 'bet', total: 10 })
   t.look('b')
   const s = t.snap('b')
   assert(s.you.looked && JSON.stringify(s.you.cards) === JSON.stringify(codes(H27)), JSON.stringify(s.you.cards))
@@ -239,7 +243,12 @@ check('3. собствените карти са видими след „пог
 check('4. чуждите карти са недостъпни (и когато всички са погледнали)', () => {
   const t = newTable(['a', 'b', 'c'])
   t.deal({ a: H34, b: H27, c: LOW })
-  for (const id of ['a', 'b', 'c']) t.look(id)
+  // Задание 2Б.3.7.4А — "look" е позволен само на действителния ход; 'a'
+  // отваря, 'b' плаща (и двамата поглеждат по пътя), 'c' поглежда последен,
+  // без да приключва наддаването (round.kind остава 'ordinary' за по-долните проверки).
+  t.seen('a', { kind: 'bet', total: 10 })
+  t.seen('b', { kind: 'call' })
+  t.look('c')
   const hands: Record<string, string> = { a: H34, b: H27, c: LOW }
   for (const id of ['a', 'b', 'c']) {
     const s = t.snap(id)
@@ -442,17 +451,23 @@ check('13. подмяна на идентичността е невъзможн�
   rt.registerMatch({ matchId: 'm', creator: { playerId: 'a' }, capacity: 2, entryFee: 100, startMode: 'auto' })
   rt.executeParticipantCommand('m', { playerId: 'b' }, 'j', { type: 'join-seat' })
   rt.executeSystemCommand('m', 'r1', { type: 'start-next-round' })
-  rt.executeParticipantCommand('m', { playerId: 'b' }, 'l', { type: 'look' })
-  // Опит „от името на“ b чрез допълнителни полета — игнорират се.
-  const spoof = rt.getPlayerSnapshot('m', { playerId: 'a', viewerId: 'b', viewAs: 'b' } as never)
-  assert(spoof.you.playerId === 'a' && spoof.you.cards === null, 'a gets only its own (blind) snapshot')
+  // Задание 2Б.3.7.4А — "look" е позволен само на действителния ход; с
+  // двама играчи и seeded dealer, довереният поглеждащ е реалният toAct
+  // (не хардкоднато 'b').
+  const round0 = rt.exportInternalStateForServer('m').round
+  const toAct = round0 && round0.kind === 'ordinary' ? round0.betting.toAct! : 'b'
+  const notToAct = toAct === 'a' ? 'b' : 'a'
+  rt.executeParticipantCommand('m', { playerId: toAct }, 'l', { type: 'look' })
+  // Опит „от името на“ looked играча чрез допълнителни полета — игнорират се.
+  const spoof = rt.getPlayerSnapshot('m', { playerId: notToAct, viewerId: toAct, viewAs: toAct } as never)
+  assert(spoof.you.playerId === notToAct && spoof.you.cards === null, `${notToAct} gets only its own (blind) snapshot`)
   const state = rt.exportInternalStateForServer('m')
   assertSnapshotSafe(spoof, state)
   expectError(() => rt.getPlayerSnapshot('m', { playerId: ['b'] } as never), 'invalid-input')
   expectError(() => rt.getPlayerSnapshot('m', null as never), 'invalid-input')
-  const real = rt.getPlayerSnapshot('m', { playerId: 'b' })
+  const real = rt.getPlayerSnapshot('m', { playerId: toAct })
   const round = state.round!
-  assert(round.kind === 'ordinary' && JSON.stringify(real.you.cards) === JSON.stringify(round.hands.b), 'b sees own cards only')
+  assert(round.kind === 'ordinary' && JSON.stringify(real.you.cards) === JSON.stringify(round.hands[toAct]), `${toAct} sees own cards only`)
 })
 
 check('14. snapshot-ите са независими, замразени и не споделят обекти със състоянието', () => {
@@ -528,15 +543,20 @@ check('17. изолация между няколко мача (едни и съ
     rt.executeParticipantCommand(id, { playerId: 'b' }, 'j', { type: 'join-seat' })
     rt.executeSystemCommand(id, 'r1', { type: 'start-next-round' })
   }
-  rt.executeParticipantCommand('x', { playerId: 'a' }, 'l', { type: 'look' })
-  const sx = rt.getPlayerSnapshot('x', { playerId: 'a' })
-  const sy = rt.getPlayerSnapshot('y', { playerId: 'a' })
+  // Задание 2Б.3.7.4А — "look" е позволен само на действителния ход; с
+  // двама играчи и seeded dealer, довереният поглеждащ на маса 'x' е
+  // реалният toAct ТАМ (не хардкоднато 'a').
+  const round0X = rt.exportInternalStateForServer('x').round
+  const toActX = round0X && round0X.kind === 'ordinary' ? round0X.betting.toAct! : 'a'
+  rt.executeParticipantCommand('x', { playerId: toActX }, 'l', { type: 'look' })
+  const sx = rt.getPlayerSnapshot('x', { playerId: toActX })
+  const sy = rt.getPlayerSnapshot('y', { playerId: toActX })
   const roundX = rt.exportInternalStateForServer('x').round!
   const roundY = rt.exportInternalStateForServer('y').round!
   assert(sx.matchId === 'x' && sy.matchId === 'y' && sx.table.entryFee === 100 && sy.table.entryFee === 500, 'own match data')
   assert(roundX.kind === 'ordinary' && roundY.kind === 'ordinary', 'ordinary')
-  assert(JSON.stringify(sx.you.cards) === JSON.stringify(roundX.hands.a) && sy.you.cards === null, 'looked only in x')
-  for (const code of roundY.hands.a!) if (!roundX.hands.a!.includes(code)) assert(!JSON.stringify(sx).includes(`"${code}"`), 'y cards in x snapshot')
+  assert(JSON.stringify(sx.you.cards) === JSON.stringify(roundX.hands[toActX]) && sy.you.cards === null, 'looked only in x')
+  for (const code of roundY.hands[toActX]!) if (!roundX.hands[toActX]!.includes(code)) assert(!JSON.stringify(sx).includes(`"${code}"`), 'y cards in x snapshot')
   assertSnapshotSafe(sx, rt.exportInternalStateForServer('x'))
   assertSnapshotSafe(sy, rt.exportInternalStateForServer('y'))
 })

@@ -382,7 +382,8 @@ try {
     assert.equal(retry.saved().state.ledger.filter((e) => e.type === 'absence-pot-award').length, 1)
   })
   await check('immutable archive metadata is rebuilt immediately and remains safe for following commands', async () => {
-    const t = await fixture(); t.p('b', { type: 'look' }); const stored = t.saved(), copy = copyRestoredSvaraMatchForServer(stored.state), before = JSON.stringify(copy)
+    const t = await fixture(); t.p('b', { type: 'look' }); t.p('b', { type: 'act', action: { kind: 'bet', total: 1 } })
+    const stored = t.saved(), copy = copyRestoredSvaraMatchForServer(stored.state), before = JSON.stringify(copy)
     assert(Object.isFrozen(copy.ledger)); assert(Object.isFrozen(copy.processedCommands)); assert(Object.isFrozen(copy.history))
     assert(copy.ledger.every(Object.isFrozen)); assert.equal(JSON.stringify(copy), JSON.stringify(stored.state))
     const next = applySvaraMatchCommand(copy, { type: 'look', playerId: 'c', commandId: JSON.stringify(['p', 'c', id()]) }).state

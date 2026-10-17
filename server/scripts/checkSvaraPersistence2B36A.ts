@@ -204,7 +204,9 @@ try {
     assert.equal(t.command('c', { type: 'look' }, 'new', revision).code, 'stale_action'); assert.deepEqual(t.stored(), before)
   })
   await check('same client ID by two actors and a system ID occupy different durable namespaces', () => {
-    const t = fixture(); t.p('a', { type: 'look' }, 'shared'); t.p('b', { type: 'look' }, 'shared')
+    const t = fixture(); t.p('b', { type: 'look' }, 'shared')
+    t.p('b', { type: 'act', action: { kind: 'bet', total: 1 } }, 'advance-b'); t.p('c', { type: 'act', action: { kind: 'call' } }, 'advance-c')
+    t.p('a', { type: 'look' }, 'shared')
     t.s({ type: 'set-absent', playerId: 'c', absent: true }, 'shared'); t.roundtrip()
     const keys = Object.keys(t.stored().state.processedCommands)
     for (const key of [svaraParticipantCommandKey('a', 'shared'), svaraParticipantCommandKey('b', 'shared'), JSON.stringify(['s', 'shared'])]) assert(keys.includes(key))
@@ -218,7 +220,7 @@ try {
   })
   await check('two queued same-revision commands serialize; only the first changes state', async () => {
     const t = fixture(), revision = t.rt.getMatchRevision(t.matchId)
-    const result = await Promise.all([Promise.resolve().then(() => t.command('a', { type: 'look' }, 'one', revision)), Promise.resolve().then(() => t.command('b', { type: 'look' }, 'two', revision))])
+    const result = await Promise.all([Promise.resolve().then(() => t.command('b', { type: 'look' }, 'one', revision)), Promise.resolve().then(() => t.command('a', { type: 'look' }, 'two', revision))])
     assert.equal(result[0].status, 'applied'); assert.equal(result[1].code, 'stale_action'); assert.equal(t.stored().revision, revision + 1); t.roundtrip()
   })
   await check('SQLite CAS rejects a stale writer and cannot overwrite a newer row', () => {
@@ -228,7 +230,7 @@ try {
     assert.throws(() => store.save(staleCandidate, old.revision), SvaraPersistenceError)
     assert.deepEqual(t.stored(), current)
     // Valid alternate candidate with the old revision also loses the CAS.
-    const alternative = applySvaraMatchCommand(old.state, { type: 'look', playerId: 'a', commandId: svaraParticipantCommandKey('a', 'other-owner') }).state
+    const alternative = applySvaraMatchCommand(old.state, { type: 'look', playerId: 'b', commandId: svaraParticipantCommandKey('b', 'other-owner') }).state
     assert.throws(() => store.save({ ...old, revision: old.revision + 1, state: alternative }, old.revision), (e: unknown) => e instanceof SvaraPersistenceError && e.code === 'revision-conflict')
     assert.deepEqual(t.stored(), current)
   })
@@ -389,14 +391,15 @@ try {
     assert.throws(() => serializeSvaraStoredMatch(bad), SvaraPersistenceError)
   })
   await check('JSON-deserialized archives support subsequent commands without mutating the old state', () => {
-    const t = fixture(); t.p('b', { type: 'look' }); const loaded = t.stored(), saved = JSON.stringify(loaded)
+    const t = fixture(); t.p('b', { type: 'look' }); t.p('b', { type: 'act', action: { kind: 'bet', total: 1 } })
+    const loaded = t.stored(), saved = JSON.stringify(loaded)
     const result = applySvaraMatchCommand(loaded.state, { type: 'look', playerId: 'c', commandId: svaraParticipantCommandKey('c', 'after-read') })
     assert.equal(JSON.stringify(loaded), saved); assert.equal(result.status, 'applied'); assert(Object.isFrozen(result.state.processedCommands))
     assertSvaraMatchInvariants(result.state)
   })
   await check('immutable committed archives remain frozen and old snapshots stay unchanged', () => {
     const t = fixture(); t.p('b', { type: 'look' }); const before = t.stored(), saved = serializeSvaraStoredMatch(before)
-    t.p('a', { type: 'look' }); assert.equal(serializeSvaraStoredMatch(before), saved); t.roundtrip()
+    t.p('b', { type: 'act', action: { kind: 'bet', total: 1 } }); assert.equal(serializeSvaraStoredMatch(before), saved); t.roundtrip()
   })
   await check('short measurement: full snapshot cost at short/long histories and multiple tables', () => {
     const baseline = store.getWriteMetricsForServer(), clock = new Clock(), rt = createSvaraMatchRuntime({ persistence: store, now: clock.now, random: createSeededSvaraRandomSourceForTests(892) })

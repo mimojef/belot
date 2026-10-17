@@ -211,6 +211,38 @@ check('[B14] round === null или не-betting round (напр. svara-joining) 
   assertEqual(getLastSvaraBetBadge(joining, 'p1'), null, 'non-betting round kind')
 })
 
+// 2Б.3.7.4А §3: баджът остава до края на ТЕКУЩАТА обиколка, не до края на раздаването.
+check('[2Б.3.7.4А] Ново повишение (нова обиколка) изчиства бадж на играч, който още не е отговорил в нея', () => {
+  const round = makeRound([
+    { playerId: 'p1', total: 10, added: 10, blind: false }, // обиколка 1 (отваря p1)
+    { playerId: 'p2', total: 10, added: 10, blind: false }, // плащане -> СЪЩА обиколка 1
+    { playerId: 'p1', total: 30, added: 20, blind: false }, // повишение -> нова обиколка 2
+  ])
+  assertEqual(getLastSvaraBetBadge(round, 'p2'), null, 'p2 още не е отговорил в обиколка 2 -> старият бадж (10) изчезва')
+  const p1Badge = getLastSvaraBetBadge(round, 'p1')
+  assertEqual(formatSvaraLastBetBadge(p1Badge!), 'ЗАЛОГ · 30', 'повишаващият веднага вижда новия си бадж в новата обиколка')
+})
+
+check('[2Б.3.7.4А] Плащане (call) в СЪЩАТА обиколка не чисти бадж на вече действал играч', () => {
+  const round = makeRound([
+    { playerId: 'p1', total: 10, added: 10, blind: false }, // обиколка 1
+    { playerId: 'p2', total: 10, added: 10, blind: false }, // плащане -> СЪЩА обиколка 1
+  ])
+  const p1Badge = getLastSvaraBetBadge(round, 'p1')
+  assertEqual(formatSvaraLastBetBadge(p1Badge!), 'ЗАЛОГ · 10', 'плащане от друг играч не изчиства бадж от СЪЩАТА обиколка')
+})
+
+check('[2Б.3.7.4А] Играч, отговорил в новата обиколка, получава нов бадж (не старият)', () => {
+  const round = makeRound([
+    { playerId: 'p1', total: 10, added: 10, blind: false }, // обиколка 1
+    { playerId: 'p2', total: 10, added: 10, blind: false }, // плащане -> обиколка 1
+    { playerId: 'p1', total: 30, added: 20, blind: false }, // повишение -> обиколка 2
+    { playerId: 'p2', total: 30, added: 20, blind: false }, // плащане в обиколка 2
+  ])
+  const p2Badge = getLastSvaraBetBadge(round, 'p2')
+  assertEqual(formatSvaraLastBetBadge(p2Badge!), 'ЗАЛОГ · 30', 'p2 вече е отговорил в обиколка 2 -> вижда се новият бадж')
+})
+
 // ─── B18/B19: защита срещу двойни анимации (reconnect/дублиран snapshot) ──
 
 check('[B18] Initial snapshot (първо виждане на roundId) -> baseline sync БЕЗ анимация', () => {

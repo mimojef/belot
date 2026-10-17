@@ -70,6 +70,47 @@ const C = { playerId: 'carol' }
 const D = { playerId: 'dave' }
 
 const snapshot = (rt: SvaraMatchRuntime, matchId: string) => JSON.stringify(rt.exportInternalStateForServer(matchId))
+const ACTOR_BY_NAME: Record<string, { playerId: string }> = { alice: A, bob: B, carol: C, dave: D }
+
+/** Действителния играч на ход в текущото betting раздаване (или '' ако няма такова). */
+function currentToAct(rt: SvaraMatchRuntime, matchId: string): string {
+  const round = rt.exportInternalStateForServer(matchId).round
+  return round && (round.kind === 'ordinary' || round.kind === 'svara') ? round.betting.toAct ?? '' : ''
+}
+
+/**
+ * Задание 2Б.3.7.4А — "look" е позволен само на действителния ход. За тестове,
+ * на които им трябва МНОГО играчи да са погледнали в едно и също раздаване
+ * (не само действащия в момента), всеки играч поглежда на СВОЯ истински ход
+ * и после прави минимален валиден залог (отваря/плаща точния минимум), за
+ * да предаде хода нататък — НИКОГА fold (би ги извадил от раздаването).
+ * Спира точно преди ПОСЛЕДНИЯТ играч да приключи наддаването, за да остане
+ * round.kind==='ordinary'/'svara' достъпен за по-нататъшни проверки.
+ */
+function lookAllInTurnOrder(rt: SvaraMatchRuntime, matchId: string): void {
+  for (;;) {
+    const toAct = currentToAct(rt, matchId)
+    if (!toAct) return
+    const actor = ACTOR_BY_NAME[toAct]!
+    rt.executeParticipantCommand(matchId, actor, `look-${toAct}`, { type: 'look' })
+    const view = rt.getPlayerView(matchId, actor)
+    const options = view.options
+    if (!options || (!options.bet && !options.call)) return // няма следващ легален ход-advancing избор
+    const remainingAfterThis = currentParticipantsStillPending(rt, matchId, toAct)
+    if (remainingAfterThis === 0) return // последният оставащ играч — спри тук, без да приключваш рундa
+    const command = options.call !== null
+      ? { type: 'act' as const, action: { kind: 'call' as const } }
+      : { type: 'act' as const, action: { kind: 'bet' as const, total: options.bet!.min } }
+    rt.executeParticipantCommand(matchId, actor, `advance-${toAct}`, command)
+  }
+}
+
+/** Брой играчи, които ОЩЕ ще чакат ход, след като текущият (justActed) действа. */
+function currentParticipantsStillPending(rt: SvaraMatchRuntime, matchId: string, justActed: string): number {
+  const round = rt.exportInternalStateForServer(matchId).round
+  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara')) return 0
+  return round.betting.pending.filter((id) => id !== justActed).length
+}
 
 /** Маса за трима с автоматичен старт и първо раздаване. */
 function startedTable(rt: SvaraMatchRuntime, matchId: string): void {
@@ -349,13 +390,23 @@ console.log('\n=== C. commandId: пространства, идемпотент�
 check('7. двама играчи с един и същ клиентски commandId не си пречат', () => {
   const rt = createSvaraMatchRuntime()
   startedTable(rt, 't')
-  const r1 = rt.executeParticipantCommand('t', A, 'same', { type: 'look' })
-  const r2 = rt.executeParticipantCommand('t', B, 'same', { type: 'look' })
-  const r3 = rt.executeParticipantCommand('t', C, 'same', { type: 'look' })
-  assert(r1.status === 'applied' && r2.status === 'applied' && r3.status === 'applied', 'all applied')
+  const toActBefore = rt.exportInternalStateForServer('t').round
+  const toAct = toActBefore && toActBefore.kind === 'ordinary' ? toActBefore.betting.toAct! : ''
+  const others = ['alice', 'bob', 'carol'].filter((id) => id !== toAct) as string[]
+  const actorByName: Record<string, { playerId: string }> = { alice: A, bob: B, carol: C }
+  // Задание 2Б.3.7.4А — "look" е позволен само на действителния ход; тримата
+  // играчи използват СЪЩИЯ клиентски commandId "same", но само действащият
+  // на ход го прилага успешно — другите двама коректно получават
+  // "betting:not-your-turn", НЕ "duplicate" (доказва, че пространствата на
+  // commandId остават изолирани по playerId дори при отхвърлена команда).
+  const r1 = rt.executeParticipantCommand('t', actorByName[toAct]!, 'same', { type: 'look' })
+  assert(r1.status === 'applied', 'the actual toAct player must succeed')
+  for (const id of others) {
+    expectError(() => rt.executeParticipantCommand('t', actorByName[id]!, 'same', { type: 'look' }), 'betting:not-your-turn')
+  }
   const state = rt.exportInternalStateForServer('t')
   const round = state.round!
-  assert(round.kind === 'ordinary' && ['alice', 'bob', 'carol'].every((id) => round.betting.looked.includes(id)), 'each looked')
+  assert(round.kind === 'ordinary' && round.betting.looked.includes(toAct) && others.every((id) => !round.betting.looked.includes(id)), 'only the actual actor looked')
   // Още в началото B и C заеха 'j' за join-seat — също без конфликт.
   assert(Object.hasOwn(state.processedCommands, svaraParticipantCommandKey('bob', 'j')) && Object.hasOwn(state.processedCommands, svaraParticipantCommandKey('carol', 'j')), 'namespaced keys')
 })
@@ -384,9 +435,13 @@ check('8. повторена команда от същия играч не се
 check('9. същият commandId с различно съдържание → command-id-conflict без промяна', () => {
   const rt = createSvaraMatchRuntime()
   startedTable(rt, 't')
-  rt.executeParticipantCommand('t', A, 'k', { type: 'look' })
+  const actorByName: Record<string, { playerId: string }> = { alice: A, bob: B, carol: C }
+  const round0 = rt.exportInternalStateForServer('t').round
+  const toAct = round0 && round0.kind === 'ordinary' ? round0.betting.toAct! : ''
+  const actor = actorByName[toAct]!
+  rt.executeParticipantCommand('t', actor, 'k', { type: 'look' })
   const before = snapshot(rt, 't')
-  expectError(() => rt.executeParticipantCommand('t', A, 'k', { type: 'exit' }), 'command-id-conflict')
+  expectError(() => rt.executeParticipantCommand('t', actor, 'k', { type: 'exit' }), 'command-id-conflict')
   assert(snapshot(rt, 't') === before, 'state unchanged')
   expectError(() => rt.executeSystemCommand('t', 'round-1', { type: 'svara-start' }), 'command-id-conflict')
   assert(snapshot(rt, 't') === before, 'state unchanged (system)')
@@ -400,10 +455,15 @@ check('10. клиентските и системните commandId са в от
   rt.executeParticipantCommand('t', C, 's', { type: 'join-seat' })
   const r = rt.executeSystemCommand('t', 'round-1', { type: 'start-next-round' })
   assert(r.status === 'applied', 'system command applied despite equal client id')
-  // Опит за „фалшифициране“ на системен ключ през клиентски id.
+  // Опит за „фалшифициране“ на системен ключ през клиентски id. Задание
+  // 2Б.3.7.4А — "look" е позволен само на действителния ход, затова
+  // ползваме реалния toAct играч (без seeded random тук, дилърът не е
+  // непременно alice), не хардкоднато A.
+  const toAct10 = currentToAct(rt, 't')
+  const actor10 = ACTOR_BY_NAME[toAct10]!
   const forged = [svaraSystemCommandKey('round-1'), '["s","round-1"]', 's:round-1', '"]', '","', '\\', '\u0000', 'round-1"]']
   for (const id of forged) {
-    const result = rt.executeParticipantCommand('t', A, id, { type: 'look' })
+    const result = rt.executeParticipantCommand('t', actor10, id, { type: 'look' })
     assert(result.status === 'applied' || result.status === 'duplicate', `forged id ${JSON.stringify(id)} handled as a plain client id`)
   }
   const keys = Object.keys(rt.exportInternalStateForServer('t').processedCommands)
@@ -431,10 +491,17 @@ check('11. системни команди не могат да се изпъл�
     expectError(() => rt.executeParticipantCommand('t', A, `x-${type}`, { type, playerId: 'bob', absent: true }), 'command-not-allowed')
   }
   assert(snapshot(rt, 't') === before, 'state unchanged')
-  // Клиентът не може да действа от чуждо име.
-  rt.executeParticipantCommand('t', A, 'look', { type: 'look', playerId: 'bob' })
+  // Клиентът не може да действа от чуждо име. Задание 2Б.3.7.4А — "look" е
+  // позволен само на действителния ход, затова довереният actor тук е
+  // реалният toAct (не хардкоднато A/alice); спуфнатото playerId полето в
+  // payload-а сочи към ДРУГ играч, за да продължи да тества identity-spoof
+  // защитата независимо кой реално е пръв на ход.
+  const toAct11 = currentToAct(rt, 't')
+  const trustedActor11 = ACTOR_BY_NAME[toAct11]!
+  const spoofedId11 = toAct11 === 'bob' ? 'alice' : 'bob'
+  rt.executeParticipantCommand('t', trustedActor11, 'look', { type: 'look', playerId: spoofedId11 })
   const round = rt.exportInternalStateForServer('t').round!
-  assert(round.kind === 'ordinary' && round.betting.looked.join() === 'alice', 'look applied to the trusted actor only')
+  assert(round.kind === 'ordinary' && round.betting.looked.join() === toAct11, 'look applied to the trusted actor only')
   // Фасадата за клиентски слой няма системни методи и сурово състояние.
   const facade = createSvaraRuntimeClientFacade(rt) as unknown as Record<string, unknown>
   assert(Object.keys(facade).sort().join() === 'executeParticipantCommand,getPlayerSnapshot,getPlayerView,hasMatch,isParticipant', 'facade surface')
@@ -451,7 +518,9 @@ console.log('\n=== D. скрити карти ===')
 check('12. чуждите карти са скрити (и след като всички са погледнали)', () => {
   const rt = createSvaraMatchRuntime({ random: createSeededSvaraRandomSourceForTests(12) })
   startedTable(rt, 't')
-  for (const actor of [A, B, C]) rt.executeParticipantCommand('t', actor, 'look', { type: 'look' })
+  // Задание 2Б.3.7.4А — "look" е позволен само на действителния ход, затова
+  // всеки играч поглежда на СВОЯ ред (виж lookAllInTurnOrder doc коментара).
+  lookAllInTurnOrder(rt, 't')
   const hands = handsOf(rt, 't')
   const state = rt.exportInternalStateForServer('t')
   for (const actor of [A, B, C]) {
@@ -482,20 +551,23 @@ check('13. собствените карти са скрити преди „п�
 check('14. след „поглеждане“ — само собствените карти; другите остават скрити', () => {
   const rt = createSvaraMatchRuntime({ random: createSeededSvaraRandomSourceForTests(14) })
   startedTable(rt, 't')
-  rt.executeParticipantCommand('t', B, 'look', { type: 'look' })
+  // Задание 2Б.3.7.4А — поглежда ТОЧНО действащият на ход (не хардкоднат bob).
+  const toAct = currentToAct(rt, 't')
+  const actor = ACTOR_BY_NAME[toAct]!
+  rt.executeParticipantCommand('t', actor, 'look', { type: 'look' })
   const hands = handsOf(rt, 't')
   const state = rt.exportInternalStateForServer('t')
-  const bobView = rt.getPlayerView('t', B)
-  assert(bobView.view.ownLooked && JSON.stringify(bobView.view.ownCards) === JSON.stringify(hands.bob), 'bob sees exactly his cards')
-  assertViewIsSafe(bobView, state)
-  for (const actor of [A, C]) {
-    const view = rt.getPlayerView('t', actor)
+  const actorView = rt.getPlayerView('t', actor)
+  assert(actorView.view.ownLooked && JSON.stringify(actorView.view.ownCards) === JSON.stringify(hands[toAct]), `${toAct} sees exactly own cards`)
+  assertViewIsSafe(actorView, state)
+  for (const other of ['alice', 'bob', 'carol'].filter((id) => id !== toAct)) {
+    const view = rt.getPlayerView('t', ACTOR_BY_NAME[other]!)
     assert(view.view.ownCards === null, 'others still blind')
-    for (const code of hands.bob!) assert(!JSON.stringify(view).includes(`"${code}"`), 'bob cards leaked')
+    for (const code of hands[toAct]!) assert(!JSON.stringify(view).includes(`"${code}"`), 'actor cards leaked')
   }
   // Изгледът е копие: промяната му не засяга сървърното състояние.
-  bobView.view.ownCards!.length = 0
-  bobView.view.stacks.bob = 999999
+  actorView.view.ownCards!.length = 0
+  actorView.view.stacks[toAct] = 999999
   assert(snapshot(rt, 't') === JSON.stringify(state), 'view is a detached copy')
 })
 
@@ -523,19 +595,31 @@ check('15. две маси с едни и същи играчи и commandId и�
   startedTable(rt, 'x')
   startedTable(rt, 'y')
   const y = snapshot(rt, 'y')
-  rt.executeParticipantCommand('x', A, 'look', { type: 'look' })
-  rt.executeParticipantCommand('x', B, 'look', { type: 'look' })
+  // Задание 2Б.3.7.4А — поглежда ТОЧНО действащият на ход на маса 'x' (не
+  // хардкоднати alice/bob — реалният toAct зависи от споделения seeded
+  // random stream на двете последователни startedTable() извиквания).
+  const toActX = currentToAct(rt, 'x')
+  const actorX = ACTOR_BY_NAME[toActX]!
+  rt.executeParticipantCommand('x', actorX, 'look', { type: 'look' })
   assert(snapshot(rt, 'y') === y, 'y untouched by x')
-  const r = rt.executeParticipantCommand('y', A, 'look', { type: 'look' })
+  const toActY = currentToAct(rt, 'y')
+  const r = rt.executeParticipantCommand('y', ACTOR_BY_NAME[toActY]!, 'look', { type: 'look' })
   assert(r.status === 'applied', 'same client id on another table is a new command')
-  const viewX = rt.getPlayerView('x', B)
-  const viewY = rt.getPlayerView('y', B)
-  assert(viewX.view.ownLooked && !viewY.view.ownLooked, 'per-table looked status')
+  // Проверяваме СЪЩИЯ играч (actorX) на двете маси — на 'x' е погледнал
+  // (действителният му ход там); на 'y' не е непременно на ход, затова
+  // проверяваме per-table изолацията му директно: looked on x, независимо
+  // от y, без да предполагаме дали е бил на ход и на 'y'.
+  assert(rt.getPlayerView('x', actorX).view.ownLooked, 'per-table looked status on x')
+  if (toActX !== toActY) {
+    // actorX не е бил на ход на 'y' изобщо — неговото "looked" на 'y' трябва да е непроменено (false).
+    assert(!rt.getPlayerView('y', actorX).view.ownLooked, 'per-table looked status: actorX looking on x must not affect y')
+  }
   // Две отделни инстанции на runtime също не споделят нищо.
   const other = createSvaraMatchRuntime()
   assert(!other.hasMatch('x') && other.listMatchIds().length === 0, 'runtime instances isolated')
   startedTable(other, 'x')
-  assert(snapshot(rt, 'y') !== '' && rt.getPlayerView('x', A).view.ownLooked && !other.getPlayerView('x', A).view.ownLooked, 'same matchId in two runtimes is independent')
+  const otherToActX = currentToAct(other, 'x')
+  assert(snapshot(rt, 'y') !== '' && rt.getPlayerView('x', actorX).view.ownLooked && !other.getPlayerView('x', ACTOR_BY_NAME[otherToActX]!).view.ownLooked, 'same matchId in two runtimes is independent')
 })
 
 check('16. завършването на един мач не засяга другите', () => {

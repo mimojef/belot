@@ -56,7 +56,9 @@ await check('adapter: actual dealt cards stay private; live role/flag checks cov
   const previousFlag = process.env.SVARA_TEST_ENABLED
   process.env.SVARA_TEST_ENABLED = '1'
   try {
-    const runtime = createSvaraMatchRuntime()
+    // Детерминиран dealer/ред (2Б.3.7.4А): "look" вече важи само на действителния ход,
+    // затова тестът не може да разчита на непосят (Math.random) избор на дилър.
+    const runtime = createSvaraMatchRuntime({ random: { nextInt: () => 0 } })
     const lobby = createSvaraLobby({ runtime, hasOtherGameCommitment: () => false })
     const frames = new Map<string, any[]>()
     const sessions = new Map<string, SvaraAccessSession>()
@@ -349,6 +351,13 @@ try {
     assert.equal((await snapshot(guest, matchId)).you.cards, null)
     const active = initial.toActId === host.profileId ? host : guest
     const passive = active === host ? guest : host
+    // 2Б.3.7.4А: "Погледни" е позволено само на действителния ход — чужд (не на ход)
+    // играч трябва да получи отказ и да не промени revision/картите/дедлайна.
+    const beforeForeignLook = await snapshot(active, matchId)
+    const foreignLookId = requestId()
+    send(passive, { type: 'submit_svara_command', matchId, commandId: foreignLookId, expectedRevision: initial.revision, command: { type: 'look' } })
+    assert.equal((await frame(passive, (f) => f.type === 'svara_command_error' && f.commandId === foreignLookId)).code, 'not_your_turn')
+    assert.deepEqual(await snapshot(active, matchId), beforeForeignLook, 'a rejected off-turn look leaves revision/state unchanged')
     const move = { type: 'submit_svara_command', matchId, commandId: requestId(), expectedRevision: initial.revision,
       command: { type: 'act', action: { kind: 'blind-bet', total: initial.table.entryChips * 2 }, playerId: passive.profileId }, playerId: passive.profileId }
     send(active, move)
