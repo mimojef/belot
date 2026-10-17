@@ -1315,6 +1315,8 @@ export type SvaraSnapshotBettingRound = {
   isFourthHeadsUp: boolean
   noBetAllowed: boolean
   actions: SvaraSnapshotAction[]
+  /** 2Б.3.7.4Б: тече ли сървърната фаза на представяне на раздаването (Вход + карти). */
+  dealing: boolean
 }
 
 export type SvaraSnapshotRound =
@@ -1400,7 +1402,7 @@ export type SvaraMatchSnapshotMessage = {
   }
 }
 
-export type SvaraDeadlineKind = 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
+export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
 export type SvaraDeadlineInfo = { kind: SvaraDeadlineKind; deadlineAt: number; remainingMs: number; playerId: string | null }
 
 export type SvaraLobbyErrorCode =

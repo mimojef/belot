@@ -144,6 +144,14 @@ type OrdinaryRound = {
   deadMoneyFrom: string[]
   isFourthHeadsUp: boolean
   betting: SvaraBettingState
+  /**
+   * 2Б.3.7.4Б: сървърна фаза на представяне на раздаването (Вход + карти).
+   * Докато е true — никакви betting команди (look/act), никакъв `toAct`
+   * навън и никакъв 'turn' дедлайн (виж describeSvaraLifecycle/requireBettingRound).
+   * Опционално поле — стари (преди 2Б.3.7.4Б) съхранени раздавания го нямат
+   * и се третират като `false` (вече активен ход), без миграция на данни.
+   */
+  dealing?: boolean
 }
 
 type SvaraJoiningRound = { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; declined?: string[]; closed?: boolean }
@@ -158,6 +166,8 @@ type SvaraDealRound = {
   /** Само новите доброволни залози (заключената банка е отделна). */
   contributions: Record<string, number>
   betting: SvaraBettingState
+  /** 2Б.3.7.4Б: виж OrdinaryRound.dealing — същата семантика. */
+  dealing?: boolean
 }
 
 type AllInSvaraRound = { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number; sidesEvaluated: boolean }
@@ -238,6 +248,7 @@ export type SvaraMatchCommand =
   | { type: 'hide-cards'; commandId: string; playerId: string }
   | { type: 'expire-reveal-choice'; commandId: string; roundId: string }
   | { type: 'close-reveal-display'; commandId: string; roundId: string }
+  | { type: 'finish-dealing'; commandId: string; roundId: string }
 
 export type SvaraMatchOutcome = {
   commandId: string
@@ -257,6 +268,7 @@ export type SvaraMatchErrorCode =
   | 'no-round-available'
   | 'player-absent'
   | 'invariant-violation'
+  | 'dealing-in-progress'
   | `betting:${string}`
 
 export class SvaraMatchError extends Error {
@@ -594,6 +606,7 @@ function dispatch(ctx: Ctx): void {
     case 'hide-cards': return hideCards(ctx, command.playerId)
     case 'expire-reveal-choice': return expireRevealChoice(ctx, command.roundId)
     case 'close-reveal-display': return closeRevealDisplay(ctx, command.roundId)
+    case 'finish-dealing': return finishDealing(ctx, command.roundId)
     default: fail('invalid-command', `unknown command ${String((command as { type?: unknown }).type)}`)
   }
 }
@@ -737,7 +750,7 @@ function startOrdinaryDeal(ctx: Ctx, participants: string[]): void {
     // „Без залог“ само ако и двамата могат да действат (иначе — колизия §10).
     allowNoBet: isFourthHeadsUp && order.every((id) => state.stacks[id]! > 0 && !absent.includes(id)),
   })
-  state.round = { kind: 'ordinary', roundId, dealerId, participants: order, hands: dealTo(ctx, order), contributions, deadMoney, deadMoneyFrom, isFourthHeadsUp, betting }
+  state.round = { kind: 'ordinary', roundId, dealerId, participants: order, hands: dealTo(ctx, order), contributions, deadMoney, deadMoneyFrom, isFourthHeadsUp, betting, dealing: true }
   if (betting.complete) settleOrdinary(ctx)
 }
 
@@ -746,7 +759,21 @@ function startOrdinaryDeal(ctx: Ctx, participants: string[]): void {
 function requireBettingRound(ctx: Ctx): OrdinaryRound | SvaraDealRound {
   const round = ctx.state.round
   if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara')) fail('not-allowed', 'no betting round in progress')
+  // 2Б.3.7.4Б: докато представянето на раздаването тече, никакви betting
+  // команди (look/act) — важи и за look(), и за act(), единствените им
+  // извиквания на тази функция (§6 на заданието).
+  if ((round as OrdinaryRound | SvaraDealRound).dealing) fail('dealing-in-progress', 'the deal animation is still in progress')
   return round as OrdinaryRound | SvaraDealRound
+}
+
+/** Край на сървърната фаза на представяне на раздаването (Вход + карти), §3/§7. */
+function finishDealing(ctx: Ctx, roundId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = ctx.state.round
+  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || round.roundId !== roundId || !round.dealing) {
+    fail('not-allowed', 'stale dealing completion')
+  }
+  ;(round as OrdinaryRound | SvaraDealRound).dealing = false
 }
 
 function look(ctx: Ctx, playerId: string): void {
@@ -1070,7 +1097,7 @@ function svaraStart(ctx: Ctx): void {
   pot.continuation += 1
   const order = clockwiseAfter(state.seats, dealerId, participants)
   const betting = createSvaraBetting({ order, stacks: state.stacks, folded: [], entryChips: state.entryChips, allowNoBet: false })
-  state.round = { kind: 'svara', roundId: joining.roundId, potId: pot.potId, dealerId, participants: order, hands: dealTo(ctx, order), contributions: {}, betting }
+  state.round = { kind: 'svara', roundId: joining.roundId, potId: pot.potId, dealerId, participants: order, hands: dealTo(ctx, order), contributions: {}, betting, dealing: true }
   // §6.9: ако никой правоимащ няма свободни чипове — автоматично сравняване.
   if (betting.complete) settleSvaraDeal(ctx)
 }
@@ -1353,6 +1380,10 @@ export function describeSvaraLifecycle(state: SvaraMatchState) {
   const returningPlayerIds = (state.pendingReturns ?? []).filter((id) => state.status[id] === 'absent')
   const readyPlayerIds = state.seats.filter((id) => activePlayerIds.includes(id) || returningPlayerIds.includes(id))
   const betting = round && (round.kind === 'ordinary' || round.kind === 'svara') ? round.betting : null
+  // 2Б.3.7.4Б: докато представянето на раздаването тече, навън няма
+  // действащ играч/'turn' дедлайн — виж planSvaraDeadlines и requireBettingRound.
+  const dealing = round && (round.kind === 'ordinary' || round.kind === 'svara') ? !!round.dealing : false
+  const dealingParticipantCount = dealing ? (round as OrdinaryRound | SvaraDealRound).participants.length : null
   const pot = round?.kind === 'svara-joining' ? state.lockedPots.find((p) => p.potId === round.potId) : null
   const candidates = round?.kind === 'svara-joining' && pot
     ? state.seats.filter((id) => state.status[id] === 'active' && !pot.eligible.includes(id) && state.stacks[id]! >= round.fee)
@@ -1364,10 +1395,11 @@ export function describeSvaraLifecycle(state: SvaraMatchState) {
     // finishPresenceWait, докато собственото му 5с/3с изтичане не го затвори.
     atBoundary: !round || round.kind === 'svara-joining' || round.kind === 'allin-svara',
     activePlayerIds, readyPlayerIds, returningPlayerIds,
+    dealing, dealingParticipantCount,
     // An off-turn exit/forced fold must not grant the current actor a fresh
     // deadline. Voluntary actions plus actor/round identify the actual turn.
-    actorId: betting?.toAct ?? null, actionVersion: betting?.log.filter((entry) => entry.kind !== 'forced-fold').length ?? 0,
-    actorAbsent: !!betting?.toAct && state.status[betting.toAct] === 'absent',
+    actorId: dealing ? null : (betting?.toAct ?? null), actionVersion: betting?.log.filter((entry) => entry.kind !== 'forced-fold').length ?? 0,
+    actorAbsent: !dealing && !!betting?.toAct && state.status[betting.toAct] === 'absent',
     joining: round?.kind === 'svara-joining' ? {
       open: !round.closed, candidates,
       undecided: candidates.filter((id) => !round.declined?.includes(id)),
@@ -1486,7 +1518,9 @@ export function createSvaraMatchPlayerView(state: SvaraMatchState, viewerId: str
     phase: state.phase,
     roundKind: round?.kind ?? null,
     dealerId: betting?.dealerId ?? null,
-    toAct: betting?.betting.toAct ?? null,
+    // 2Б.3.7.4Б: по време на представянето на раздаването навън няма
+    // действащ играч — виж describeSvaraLifecycle за същата семантика.
+    toAct: betting && !betting.dealing ? betting.betting.toAct ?? null : null,
     ownCards: betting && looked && betting.hands[viewerId] ? [...betting.hands[viewerId]!] : reveal ? [...reveal.cards] : null,
     ownLooked: looked || !!reveal,
     stacks: { ...state.stacks },
@@ -1501,7 +1535,7 @@ export function createSvaraMatchPlayerView(state: SvaraMatchState, viewerId: str
 
 export function describeSvaraMatchOptions(state: SvaraMatchState, playerId: string): SvaraBettingOptions | null {
   const round = state.round
-  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || state.status[playerId] !== 'active') return null
+  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || round.dealing || state.status[playerId] !== 'active') return null
   return describeSvaraBettingOptions(round.betting, playerId, state.stacks[playerId] ?? 0)
 }
 

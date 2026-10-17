@@ -76,6 +76,7 @@ export function createSvaraLobby(deps: {
       invalid_action: 'Невалидно игрово действие.', not_your_turn: 'Не е твоят ред.',
       insufficient_chips: 'Недостатъчно игрови чипове.', look_required: 'Първо погледни собствените си карти.',
       player_absent: 'Отсъстваш. Заяви връщане за следващото раздаване.',
+      dealing_in_progress: 'Картите тепърва се раздават.',
     }
     if (gameplay) deliver(transport, { type: 'svara_command_error', code, message: messages[code], ...(commandId ? { commandId } : {}) })
     else deliver(transport, { type: 'svara_lobby_error', code, message: messages[code], ...(requestId ? { requestId } : {}) })
@@ -250,7 +251,7 @@ export function createSvaraLobby(deps: {
             'wrong-phase': 'wrong_phase', 'command-id-conflict': 'command_id_conflict',
             'stale-action': 'stale_action', 'betting:not-your-turn': 'not_your_turn',
             'betting:insufficient-chips': 'insufficient_chips', 'betting:look-required': 'look_required',
-            'player-absent': 'player_absent',
+            'player-absent': 'player_absent', 'dealing-in-progress': 'dealing_in_progress',
           }
           reject(codes[cause.code] ?? (cause.code.startsWith('betting:') ? 'invalid_action' : 'server_unavailable'))
         } else {

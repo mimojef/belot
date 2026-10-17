@@ -96,7 +96,23 @@ class Table {
     const result = applySvaraMatchCommand(this.state, full, env)
     assertSvaraMatchInvariants(result.state)
     this.state = result.state
+    this.finishDealingIfNeeded()
     return this.state
+  }
+  /**
+   * 2Б.3.7.4Б: тази времево-безразлична (без clock) сюита проверява
+   * състоянието на двигателя, не реалната 15s/дилинг анимация — тук
+   * фазата на представяне на раздаването (виж engine/svaraMatch.ts
+   * `dealing`) се прескача веднага след всяко раздаване, за да останат
+   * съществуващите look/act сценарии валидни. Самата дилинг фаза с реален
+   * fake-clock lifecycle се тества отделно.
+   */
+  private finishDealingIfNeeded(): void {
+    const round = this.state.round
+    if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || !(round as { dealing?: boolean }).dealing) return
+    const result = applySvaraMatchCommand(this.state, { type: 'finish-dealing', commandId: `${this.prefix}${(this.seq += 1)}`, roundId: round.roundId })
+    assertSvaraMatchInvariants(result.state)
+    this.state = result.state
   }
   /** Следващо обикновено раздаване с контролирани ръце (по реда на действие). */
   deal(hands: Record<string, string>): SvaraMatchState {

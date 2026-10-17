@@ -72,10 +72,20 @@ async function fixture(capacity: 2 | 3 | 4 = 3, decks: SvaraCard[][] = [], start
   rt.registerMatch({ matchId, creator: { playerId: 'a' }, capacity, entryFee, startMode: 'manual' })
   const p = (playerId: string, command: any, commandId = id()) => rt.executeParticipantCommand(matchId, { playerId }, commandId, command)
   const s = (command: any, commandId = id()) => rt.executeSystemCommand(matchId, commandId, command)
+  // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation phase
+  // (no look/act accepted yet); skip it directly through the runtime, like
+  // the real lifecycle timer would. The real 15s-after-the-real-wait
+  // behavior and the gate itself have their own dedicated tests.
+  const finishDealingIfNeeded = () => {
+    const round = rt.exportInternalStateForServer(matchId).round
+    if (round && (round.kind === 'ordinary' || round.kind === 'svara') && (round as { dealing?: boolean }).dealing) {
+      s({ type: 'finish-dealing', roundId: round.roundId })
+    }
+  }
   for (const playerId of ['b', 'c', 'd'].slice(0, capacity - 1)) p(playerId, { type: 'join-seat' })
-  if (start) { p('a', { type: 'start-match' }); s({ type: 'start-next-round' }) }
+  if (start) { p('a', { type: 'start-match' }); s({ type: 'start-next-round' }); finishDealingIfNeeded() }
   const saved = () => store.load(matchId)!
-  return { path, store, clock, matchId, rt, p, s, saved }
+  return { path, store, clock, matchId, rt, p, s, saved, finishDealingIfNeeded }
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>
 async function boot(t: Fixture, elapsed = 0, other: (profileId: string) => boolean = () => false) {
@@ -131,6 +141,35 @@ try {
     f.store.loadActiveMatches = () => { assert.equal(f.command('b', { type: 'look' }).code, 'server_unavailable'); return read() }
     assert.equal(f.lobby.initializeRecovery(), 'ready'); assert.deepEqual(t.saved(), before)
   })
+  await check('unexpired dealing phase restores its real remaining time; no look/act accepted until recovery completes it', async () => {
+    const t = await fixture(3, [], false)
+    t.p('a', { type: 'start-match' }); t.s({ type: 'start-next-round' })
+    const before = t.saved()
+    assert.equal((before.state.round as any).dealing, true); assert.equal(before.deadlines[0]!.kind, 'dealing')
+    const f = await boot(t, 2000) // 2000ms into the 3950ms (3-player) dealing window
+    assert.equal(f.lobby.initializeRecovery(), 'ready'); f.lobby.reconnect('a')
+    const timing = f.frames.get('a')!.findLast((m) => m.type === 'svara_match_timing')
+    assert.equal(timing.deadlines[0].kind, 'dealing')
+    assert.equal(timing.deadlines[0].deadlineAt, before.deadlines[0]!.deadlineAt, 'the original absolute dealing deadline must survive the restart')
+    assert.equal(timing.deadlines[0].remainingMs, 1950)
+    assert.deepEqual(f.saved(), before, 'restoring mid-dealing must not itself change state/revision')
+    assert.equal(f.saved().state.round?.dealing, true)
+  })
+  await check('expired dealing phase (while paused) finishes exactly once on boot; no repeated entry charge or re-deal', async () => {
+    const t = await fixture(3, [], false)
+    t.p('a', { type: 'start-match' }); t.s({ type: 'start-next-round' })
+    const before = t.saved(), entriesBefore = before.state.ledger.filter((e) => e.type === 'entry').length
+    const handsBefore = JSON.stringify((before.state.round as any).hands)
+    const f = await boot(t, 10_000) // past the 3950ms dealing window while the process was down
+    assert.equal(f.lobby.initializeRecovery(), 'ready')
+    assert.equal(f.saved().state.round?.dealing, false, 'dealing finishes deterministically once overdue at boot')
+    assert.equal(JSON.stringify((f.saved().state.round as any).hands), handsBefore, 'no re-deal across the restart')
+    assert.equal(f.saved().state.ledger.filter((e) => e.type === 'entry').length, entriesBefore, 'no repeated entry charge')
+    assert.equal(f.saved().revision, before.revision + 1, 'exactly one committed finish-dealing transition')
+    assert.equal(f.saved().deadlines[0]!.kind, 'turn', 'the first actor now has a real turn deadline')
+    const callback = f.clock.jobs[0]!.callback; callback(); callback() // stale re-fire must not repeat the transition
+    assert.equal(f.saved().revision, before.revision + 1)
+  })
   await check('unexpired turn restores its real remaining time, not a fresh 15 seconds', async () => {
     const t = await fixture(), before = t.saved(), f = await boot(t, 7000)
     assert.equal(f.lobby.initializeRecovery(), 'ready'); f.lobby.reconnect('b')
@@ -161,7 +200,10 @@ try {
     const t = await joining(), before = t.saved(), f = await boot(t, 20000)
     assert.equal(f.lobby.initializeRecovery(), 'ready'); assert.equal(f.saved().state.round?.kind, 'svara')
     assert.equal(f.saved().state.stacks.c, before.state.stacks.c); assert.equal(f.saved().state.ledger.filter((e) => e.type === 'entry').length, 3)
-    assert.equal(f.saved().deadlines[0]!.deadlineAt, f.clock.now() + 15000)
+    // 2Б.3.7.4Б: the new Svara deal (2 tied participants) starts in its own
+    // server dealing-presentation phase (800 + 2*3*350 = 2900ms), not 'turn'.
+    assert.equal(f.saved().deadlines[0]!.kind, 'dealing')
+    assert.equal(f.saved().deadlines[0]!.deadlineAt, f.clock.now() + 2900)
   })
   await check('single-active five-minute wait resumes at the original absolute deadline', async () => {
     const t = await joining(); for (const playerId of ['b', 'c']) t.s({ type: 'set-absent', playerId, absent: true })
@@ -393,6 +435,7 @@ try {
     const first = await joining()
     const repeated = await joining([buildSvaraDeckForHands(['a', 'b'], { a: tie1, b: tie2 })])
     repeated.p('c', { type: 'svara-decline' }); repeated.s({ type: 'svara-start' })
+    repeated.finishDealingIfNeeded()
     repeated.p('a', { type: 'look' }); repeated.p('a', { type: 'act', action: { kind: 'bet', total: 1 } }); repeated.p('b', { type: 'act', action: { kind: 'call' } })
     repeated.s({ type: 'start-next-round' })
     for (const t of [first, repeated]) {
@@ -414,6 +457,7 @@ try {
       const pending = t.rt.exportInternalStateForServer(t.matchId).round as any
       if (pending?.kind === 'reveal-choice') t.p(pending.winnerId, { type: 'hide-cards' })
       t.s({ type: 'start-next-round' })
+      t.finishDealingIfNeeded()
     }
     for (const player of ['a', 'b', 'c']) { t.p(player, { type: 'look' }); t.p(player, { type: 'act', action: { kind: 'all-in' } }) }
     assert.equal(t.saved().state.round?.kind, 'allin-svara'); t.s({ type: 'advance-allin-svara' })

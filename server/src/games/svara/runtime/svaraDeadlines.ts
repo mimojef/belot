@@ -8,8 +8,22 @@ export const SVARA_PRESENCE_WAIT_MS = 300_000
 export const SVARA_REVEAL_CHOICE_MS = 5_000
 /** 2Б.3.7.1: публичен показ на картите, само след „Покажи“. */
 export const SVARA_REVEAL_DISPLAY_MS = 3_000
+/**
+ * 2Б.3.7.4Б: сървърно определена продължителност на представянето на
+ * раздаването (Вход + карти), преди първият ход да стане активен. Временни,
+ * леснo променими преди 2Б.3.7.5 стойности (НЕ окончателно художествено
+ * решение) — виж заданието §4: 800ms за анимацията на задължителния Вход
+ * (отделен именуван параметър) + 350ms на карта × 3 карти на участник.
+ */
+export const SVARA_DEAL_ENTRY_ANIMATION_MS = 800
+export const SVARA_DEAL_CARD_ANIMATION_MS = 350
+export const SVARA_DEAL_CARDS_PER_PLAYER = 3
+/** 2/3/4 участници -> 2900/3950/5000ms при текущите временни константи. */
+export function svaraDealingAnimationMs(participantCount: number): number {
+  return SVARA_DEAL_ENTRY_ANIMATION_MS + participantCount * SVARA_DEAL_CARDS_PER_PLAYER * SVARA_DEAL_CARD_ANIMATION_MS
+}
 export const svaraEpochNow = () => Math.floor(performance.timeOrigin + performance.now())
-export type SvaraDeadlineKind = 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
+export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
 export type SvaraDeadline = {
   kind: SvaraDeadlineKind
   key: string
@@ -33,6 +47,7 @@ export function planSvaraDeadlines(state: SvaraMatchState, revision: number,
     deadlines.push(existing ?? { kind, key, generation: ++sequence, phase: 'in-progress', baseRevision: revision,
       deadlineAt: now + duration, playerId, roundId: view.roundId, actionVersion: view.actionVersion })
   }
+  if (view.dealingParticipantCount !== null) want('dealing', JSON.stringify(['dealing', view.roundId]), svaraDealingAnimationMs(view.dealingParticipantCount), null)
   if (view.actorId && !view.actorAbsent) want('turn', JSON.stringify(['turn', view.roundId, view.actorId, view.actionVersion]), SVARA_TURN_MS, view.actorId)
   if (view.joining?.open && view.joining.undecided.length > 0) want('svara-joining', JSON.stringify(['join', view.roundId]), SVARA_JOIN_MS, null)
   if (view.revealChoice?.decision === 'pending') want('reveal-choice', JSON.stringify(['reveal-choice', view.roundId]), SVARA_REVEAL_CHOICE_MS, view.revealChoice.winnerId)

@@ -120,6 +120,8 @@ export type SvaraSnapshotBettingRound = {
   isFourthHeadsUp: boolean
   noBetAllowed: boolean
   actions: SvaraSnapshotAction[]
+  /** 2Б.3.7.4Б: тече ли сървърната фаза на представяне на раздаването (Вход + карти). */
+  dealing: boolean
 }
 
 export type SvaraSnapshotRound =
@@ -276,6 +278,10 @@ function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
     isFourthHeadsUp: round.kind === 'ordinary' ? round.isFourthHeadsUp : false,
     noBetAllowed: betting.allowNoBet,
     actions: betting.log.map((entry) => ({ playerId: entry.playerId, kind: entry.kind, total: entry.total, added: entry.added, allIn: entry.allIn, blind: entry.blind })),
+    // 2Б.3.7.4Б: сървърна фаза на представяне на раздаването — виж timing
+    // съобщението (дедлайн kind:'dealing') за абсолютния край; докато е true,
+    // toActId/isToAct/betting опциите са null за всички (никакъв активен ход).
+    dealing: !!round.dealing,
   }
 }
 

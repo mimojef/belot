@@ -12,7 +12,13 @@
 
 import type { SvaraDeadlineKind } from '../../../network/createGameServerClient'
 
+// 'dealing' (2Б.3.7.4Б) няма ЕДНА фиксирана продължителност — варира по брой
+// участници (2900/3950/5000ms при текущите временни server/src/games/svara/
+// runtime/svaraDeadlines.ts константи). Стойността тук е само за цвета на
+// генеричния "друг дедлайн" текст (deadlineStatusText) — не е авторитетна;
+// 2Б.3.7.5 може да я замени с реалния брой участници от round.participants.
 export const SVARA_DEADLINE_TOTAL_MS: Record<SvaraDeadlineKind, number> = {
+  dealing: 5_000,
   turn: 15_000,
   'svara-joining': 15_000,
   'presence-wait': 300_000,
@@ -21,6 +27,7 @@ export const SVARA_DEADLINE_TOTAL_MS: Record<SvaraDeadlineKind, number> = {
 }
 
 export const SVARA_DEADLINE_LABEL: Record<SvaraDeadlineKind, string> = {
+  dealing: 'Раздаване',
   turn: 'Ход',
   'svara-joining': 'Включване в Свара',
   'presence-wait': 'Изчакване на играч',

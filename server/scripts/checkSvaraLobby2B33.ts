@@ -71,6 +71,9 @@ await check('adapter: actual dealt cards stay private; live role/flag checks cov
     runtime.registerMatch({ matchId: 'dealt', creator: { playerId: 'a' }, capacity: 2, entryFee: 5000, startMode: 'auto' })
     runtime.executeParticipantCommand('dealt', { playerId: 'b' }, 'join', { type: 'join-seat' })
     runtime.executeSystemCommand('dealt', 'deal', { type: 'start-next-round' })
+    // 2Б.3.7.4Б: skip the server dealing-presentation phase so the look below is accepted.
+    const dealtRoundId = (runtime.exportInternalStateForServer('dealt').round as { roundId: string }).roundId
+    runtime.executeSystemCommand('dealt', 'finish-deal', { type: 'finish-dealing', roundId: dealtRoundId })
     runtime.executeParticipantCommand('dealt', { playerId: 'b' }, 'look', { type: 'look' })
     for (const id of ['a', 'b']) lobby.handle(id, { type: 'request_svara_table_state', matchId: 'dealt' })
     const a = frames.get('a')!.findLast((f) => f.type === 'svara_match_snapshot')
@@ -345,10 +348,15 @@ try {
     const host = await user(), guest = await user(), stranger = await user()
     const matchId = await createTable(host, 2, 'auto')
     await joinTable(guest, matchId)
-    const initial = await snapshot(host, matchId)
-    assert.equal(initial.round.kind, 'ordinary', 'first deal is a trusted automatic transition')
-    assert.equal(initial.you.cards, null)
+    const dealing = await snapshot(host, matchId)
+    assert.equal(dealing.round.kind, 'ordinary', 'first deal is a trusted automatic transition')
+    assert.equal(dealing.you.cards, null)
     assert.equal((await snapshot(guest, matchId)).you.cards, null)
+    // 2Б.3.7.4Б: no active turn while the server dealing-presentation phase is open.
+    assert.equal(dealing.round.dealing, true); assert.equal(dealing.toActId, null)
+    await sleep(3200) // 2 players -> 800 + 2*3*350 = 2900ms dealing window (+ margin)
+    const initial = await snapshot(host, matchId)
+    assert.equal(initial.round.dealing, false, 'dealing phase has ended')
     const active = initial.toActId === host.profileId ? host : guest
     const passive = active === host ? guest : host
     // 2Б.3.7.4А: "Погледни" е позволено само на действителния ход — чужд (не на ход)

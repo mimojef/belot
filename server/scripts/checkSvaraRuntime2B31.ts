@@ -118,6 +118,10 @@ function startedTable(rt: SvaraMatchRuntime, matchId: string): void {
   rt.executeParticipantCommand(matchId, B, 'j', { type: 'join-seat' })
   rt.executeParticipantCommand(matchId, C, 'j', { type: 'join-seat' })
   rt.executeSystemCommand(matchId, 'round-1', { type: 'start-next-round' })
+  // 2Б.3.7.4Б: skip the server dealing-presentation phase (fake-clock
+  // lifecycle tests cover the real wait) so look/act are accepted below.
+  const round = rt.exportInternalStateForServer(matchId).round as { roundId: string }
+  rt.executeSystemCommand(matchId, 'finish-dealing-1', { type: 'finish-dealing', roundId: round.roundId })
 }
 
 function handsOf(rt: SvaraMatchRuntime, matchId: string): Record<string, string[]> {
@@ -213,6 +217,13 @@ function driveStep(d: Driver): void {
       throw error
     }
     return
+  }
+  // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation phase
+  // (no toAct exposed, no look/act accepted yet); finish it immediately —
+  // the real 15s-after-the-real-wait behavior has its own fake-clock tests.
+  if (v.roundKind === 'ordinary' || v.roundKind === 'svara') {
+    const round = rt.exportInternalStateForServer(matchId).round as { roundId: string; dealing?: boolean }
+    if (round.dealing) { sys({ type: 'finish-dealing', roundId: round.roundId }); return }
   }
   if (v.roundKind === 'svara-joining') {
     const absentHolder = v.lockedPots.flatMap((pot) => pot.eligible).find((id) => status[id] === 'absent')
@@ -455,6 +466,10 @@ check('10. клиентските и системните commandId са в от
   rt.executeParticipantCommand('t', C, 's', { type: 'join-seat' })
   const r = rt.executeSystemCommand('t', 'round-1', { type: 'start-next-round' })
   assert(r.status === 'applied', 'system command applied despite equal client id')
+  // 2Б.3.7.4Б: skip the server dealing-presentation phase so the forged-id
+  // "look" attempts below are accepted.
+  const dealt10 = rt.exportInternalStateForServer('t').round as { roundId: string }
+  rt.executeSystemCommand('t', 'finish-dealing-10', { type: 'finish-dealing', roundId: dealt10.roundId })
   // Опит за „фалшифициране“ на системен ключ през клиентски id. Задание
   // 2Б.3.7.4А — "look" е позволен само на действителния ход, затова
   // ползваме реалния toAct играч (без seeded random тук, дилърът не е
@@ -469,7 +484,7 @@ check('10. клиентските и системните commandId са в от
   const keys = Object.keys(rt.exportInternalStateForServer('t').processedCommands)
   const parsed = keys.map((key) => JSON.parse(key) as string[])
   assert(parsed.every((p) => (p[0] === 'p' && p.length === 3) || (p[0] === 's' && p.length === 2)), 'every key decodes to exactly one namespace')
-  assert(parsed.filter((p) => p[0] === 's').map((p) => p[1]).join() === 'round-1', 'only the real system command lives in the system namespace')
+  assert(parsed.filter((p) => p[0] === 's').map((p) => p[1]).sort().join() === ['finish-dealing-10', 'round-1'].sort().join(), 'only the real system commands live in the system namespace')
   // Еднозначност при разделители и специални символи.
   const tricky: Array<[string, string]> = [['a","b', 'c'], ['a', 'b","c'], ['a:b', 'c'], ['a', 'b:c'], ['a|b', 'c'], ['a', 'b|c'], ['a\\', '"c'], ['a', '\\"c'], ['p', 's'], ['s', 'p']]
   const encoded = new Set(tricky.map(([p, c]) => svaraParticipantCommandKey(p, c)))

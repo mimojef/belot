@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict'
 import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
 import { createSvaraMatchRuntime } from '../src/games/svara/runtime/svaraMatchRuntime.js'
-import { createSvaraLifecycle, type SvaraClock } from '../src/games/svara/runtime/createSvaraLifecycle.js'
+import { createSvaraLifecycle, svaraDealingAnimationMs, type SvaraClock } from '../src/games/svara/runtime/createSvaraLifecycle.js'
 import { createSvaraMatch, applySvaraMatchCommand, buildSvaraDeckForHands, assertSvaraMatchInvariants, type SvaraMatchCommand } from '../src/games/svara/engine/svaraMatch.js'
 import { SVARA_ORDERED_DECK, svaraCardCode, type SvaraCard } from '../src/games/svara/engine/svaraCards.js'
 import { SVARA_SNAPSHOT_FORBIDDEN_KEYS } from '../src/games/svara/protocol/svaraSnapshotProtocol.js'
@@ -98,7 +98,18 @@ function mount(runtime: ReturnType<typeof createSvaraMatchRuntime>, matchId = 'm
     const message = payload(command, extra); send(player, message)
     return frames.get(player)!.findLast((f) => f.commandId === message.commandId)
   }
+  // 2Б.3.7.4Б: a fresh deal (ordinary or svara) starts in the server
+  // dealing-presentation phase; advance the REAL fake clock through it —
+  // exactly the real lifecycle timer path, not a direct engine shortcut.
+  const finishDealingIfNeeded = () => {
+    const round = state().round
+    if (round && (round.kind === 'ordinary' || round.kind === 'svara') && (round as { dealing?: boolean }).dealing) {
+      clock.advance(svaraDealingAnimationMs(round.participants.length))
+      sync()
+    }
+  }
   const ok = (player: string, command: any, extra = {}) => {
+    finishDealingIfNeeded()
     const result = submit(player, command, extra)
     assert.equal(result?.type, 'svara_command_result', JSON.stringify(result)); assert.equal(result.status, 'applied')
     return result
@@ -113,7 +124,7 @@ function mount(runtime: ReturnType<typeof createSvaraMatchRuntime>, matchId = 'm
     for (const playerId of players) runtime.executeSystemCommand(matchId, id(), { type: 'set-absent', playerId, absent: true })
     sync()
   }
-  return { runtime, matchId, clock, lobby, frames, sessions, blocked, attach, send, payload, submit, ok, act, sync, state, view, timing, timer, absent }
+  return { runtime, matchId, clock, lobby, frames, sessions, blocked, attach, send, payload, submit, ok, act, sync, state, view, timing, timer, absent, finishDealingIfNeeded }
 }
 function fixture(capacity: 2 | 3 | 4 = 3, chips = 100, decks: SvaraCard[][] = []) {
   const clock = new Clock()
@@ -121,6 +132,10 @@ function fixture(capacity: 2 | 3 | 4 = 3, chips = 100, decks: SvaraCard[][] = []
   rt.registerMatch({ matchId: 'm', creator: { playerId: 'a' }, capacity, entryFee: chips * 10, startMode: 'auto' })
   for (const playerId of ['b', 'c', 'd'].slice(0, capacity - 1)) rt.executeParticipantCommand('m', { playerId }, id(), { type: 'join-seat' })
   const t = mount(rt, 'm', clock)
+  t.sync()
+  // 2Б.3.7.4Б: real fake-clock wait through the server dealing-presentation
+  // phase (Вход + карти), exactly as the real lifecycle timer would fire it.
+  clock.advance(svaraDealingAnimationMs(capacity))
   t.sync()
   return t
 }
@@ -212,6 +227,7 @@ try {
     // 2Б.3.7.1: a е единствен останал → избор; скрива, за да продължи автоматично към следващото раздаване.
     assert.equal((t.state().round as any)?.kind, 'reveal-choice')
     t.ok('a', { type: 'hide-cards' })
+    t.finishDealingIfNeeded()
     const state = t.state(), round = state.round as any
     assert.equal(round.kind, 'ordinary'); assert.equal(round.contributions.b, 1)
     assert(round.betting.folded.includes('b')); assert.notEqual(t.timer().playerId, 'b')
@@ -313,6 +329,7 @@ try {
   check('timeout in a Svara deal folds atomically without a bot or replacement bet', () => {
     const t = joining()
     t.ok('c', { type: 'svara-decline' })
+    t.finishDealingIfNeeded()
     const actor = t.view().toActId!
     const bets = t.state().ledger.filter((e) => e.type === 'bet').length
     t.clock.advance(15_000)
@@ -337,6 +354,10 @@ try {
     rt.registerMatch({ matchId: 'm', creator: { playerId: 'a' }, capacity: 2, entryFee: 20, startMode: 'auto' })
     rt.executeParticipantCommand('m', { playerId: 'b' }, id(), { type: 'join-seat' })
     rt.executeSystemCommand('m', id(), { type: 'start-next-round' })
+    // 2Б.3.7.4Б: no lobby/lifecycle exists yet at this point — skip the
+    // dealing phase directly through the runtime, like a timer-fired finish.
+    const dealt338 = rt.exportInternalStateForServer('m').round as { roundId: string }
+    rt.executeSystemCommand('m', id(), { type: 'finish-dealing', roundId: dealt338.roundId })
     for (const playerId of ['b', 'a']) {
       rt.executeParticipantCommand('m', { playerId }, id(), { type: 'look' })
       rt.executeParticipantCommand('m', { playerId }, id(), { type: 'act', action: { kind: 'all-in' } })
@@ -424,6 +445,9 @@ try {
     t.runtime.registerMatch({ matchId: other, creator: { playerId: 'c' }, capacity: 2, entryFee: 1000, startMode: 'auto' })
     t.runtime.executeParticipantCommand(other, { playerId: 'd' }, id(), { type: 'join-seat' })
     t.send('c', { type: 'request_svara_table_state', matchId: other })
+    // 2Б.3.7.4Б: no WS-level helper for 'other' here — skip its dealing phase directly.
+    const dealtOther = t.runtime.exportInternalStateForServer(other).round as { roundId: string } | null
+    if (dealtOther) t.runtime.executeSystemCommand(other, id(), { type: 'finish-dealing', roundId: dealtOther.roundId })
     const before = t.runtime.getMatchRevision(other)
     t.clock.advance(1_000); t.act('b', { kind: 'fold' })
     assert.equal(t.runtime.getMatchRevision(other), before)

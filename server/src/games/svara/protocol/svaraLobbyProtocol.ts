@@ -24,11 +24,11 @@ export type SvaraLobbyErrorCode =
   | 'not_a_participant' | 'not_allowed' | 'wrong_phase' | 'command_id_conflict'
   | 'other_game_commitment' | 'svara_commitment' | 'server_unavailable'
   | 'stale_action' | 'invalid_action' | 'not_your_turn' | 'insufficient_chips' | 'look_required'
-  | 'player_absent'
+  | 'player_absent' | 'dealing_in_progress'
 
 export type SvaraLobbyServerMessage =
   | { type: 'svara_match_timing'; matchId: string; revision: number; serverNow: number;
-      deadlines: Array<{ kind: 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'; deadlineAt: number; remainingMs: number; playerId: string | null }> }
+      deadlines: Array<{ kind: 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'; deadlineAt: number; remainingMs: number; playerId: string | null }> }
   | { type: 'svara_command_result'; matchId: string; commandId: string; status: 'applied' | 'duplicate'; revision: number; phase: SvaraPublicTable['phase'] }
   | { type: 'svara_command_error'; code: SvaraLobbyErrorCode; message: string; commandId?: string }
   | { type: 'svara_tables_list'; tables: SvaraPublicTable[] }

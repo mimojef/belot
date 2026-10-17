@@ -95,7 +95,16 @@ class Table {
     const result = applySvaraMatchCommand(this.state, { ...command, commandId: `c${(this.seq += 1)}` } as SvaraMatchCommand, env)
     assertSvaraMatchInvariants(result.state)
     this.state = result.state
+    this.finishDealingIfNeeded()
     return this.state
+  }
+  /** 2Б.3.7.4Б: виж checkSvaraMatch2B2B.ts — скача фазата на представяне на раздаването; тества се отделно с fake-clock lifecycle. */
+  private finishDealingIfNeeded(): void {
+    const round = this.state.round
+    if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || !(round as { dealing?: boolean }).dealing) return
+    const result = applySvaraMatchCommand(this.state, { type: 'finish-dealing', commandId: `c${(this.seq += 1)}`, roundId: round.roundId })
+    assertSvaraMatchInvariants(result.state)
+    this.state = result.state
   }
   /** Следващо обикновено раздаване с контролирани ръце. */
   deal(hands: Record<string, string>): SvaraMatchState {
@@ -457,6 +466,8 @@ check('13. подмяна на идентичността е невъзможн�
   const round0 = rt.exportInternalStateForServer('m').round
   const toAct = round0 && round0.kind === 'ordinary' ? round0.betting.toAct! : 'b'
   const notToAct = toAct === 'a' ? 'b' : 'a'
+  // 2Б.3.7.4Б: skip the server dealing-presentation phase so the look below is accepted.
+  rt.executeSystemCommand('m', 'finish-dealing-13', { type: 'finish-dealing', roundId: round0!.roundId })
   rt.executeParticipantCommand('m', { playerId: toAct }, 'l', { type: 'look' })
   // Опит „от името на“ looked играча чрез допълнителни полета — игнорират се.
   const spoof = rt.getPlayerSnapshot('m', { playerId: notToAct, viewerId: toAct, viewAs: toAct } as never)
@@ -548,6 +559,8 @@ check('17. изолация между няколко мача (едни и съ
   // реалният toAct ТАМ (не хардкоднато 'a').
   const round0X = rt.exportInternalStateForServer('x').round
   const toActX = round0X && round0X.kind === 'ordinary' ? round0X.betting.toAct! : 'a'
+  // 2Б.3.7.4Б: skip the server dealing-presentation phase on 'x' so the look below is accepted.
+  rt.executeSystemCommand('x', 'finish-dealing-x', { type: 'finish-dealing', roundId: round0X!.roundId })
   rt.executeParticipantCommand('x', { playerId: toActX }, 'l', { type: 'look' })
   const sx = rt.getPlayerSnapshot('x', { playerId: toActX })
   const sy = rt.getPlayerSnapshot('y', { playerId: toActX })
@@ -606,6 +619,12 @@ function driveStep(rt: SvaraMatchRuntime, matchId: string, players: string[], pi
       throw error
     }
     return
+  }
+  // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation phase
+  // (no toActId exposed yet); finish it immediately — the real 15s-after-
+  // the-real-wait behavior has its own fake-clock lifecycle tests.
+  if ((round.kind === 'ordinary' || round.kind === 'svara') && round.dealing) {
+    return void sys({ type: 'finish-dealing', roundId: round.roundId })
   }
   if (round.kind === 'svara-joining') {
     const holder = s.lockedPots.flatMap((p) => p.eligible).find((id) => status[id] === 'absent')

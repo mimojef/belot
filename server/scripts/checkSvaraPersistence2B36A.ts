@@ -101,9 +101,20 @@ function fixture(capacity: 2 | 3 | 4 = 3, entryFee = 1000, decks: SvaraCard[][] 
     assert.equal(serializeSvaraStoredMatch(rt.exportStoredMatchForServer(matchId)), serializeSvaraStoredMatch(stored()))
     assertSvaraMatchInvariants(stored().state)
   }
+  // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation phase
+  // (no look/act accepted yet); skip it directly through the runtime, like
+  // the real lifecycle timer would — not itself a thing most tests here
+  // assert on. The real 15s-after-the-real-wait behavior and the gate
+  // itself have their own dedicated tests/fixtures.
+  const finishDealingIfNeeded = () => {
+    const round = rt.exportInternalStateForServer(matchId).round
+    if (round && (round.kind === 'ordinary' || round.kind === 'svara') && (round as { dealing?: boolean }).dealing) {
+      s({ type: 'finish-dealing', roundId: round.roundId })
+    }
+  }
   for (const playerId of ['b', 'c', 'd'].slice(0, capacity - 1)) p(playerId, { type: 'join-seat' })
-  if (start) { p('a', { type: 'start-match' }); sync() }
-  return { rt, clock, matchId, lobby, frames, faults, command, p, s, sync, state, stored, roundtrip }
+  if (start) { p('a', { type: 'start-match' }); sync(); finishDealingIfNeeded() }
+  return { rt, clock, matchId, lobby, frames, faults, command, p, s, sync, state, stored, roundtrip, finishDealingIfNeeded }
 }
 const tie1 = 'KS QS JS', tie2 = 'KH QH JH', low = '8C 9D 10H'
 function joining() {
@@ -265,6 +276,7 @@ try {
     const decided = buildSvaraDeckForHands(['a', 'b', 'c'], { a: '7C 7D 7H', b: tie2, c: low })
     const t = fixture(3, 100, [[...SVARA_ORDERED_DECK], [...SVARA_ORDERED_DECK], tied, tied, decided])
     for (const player of ['b', 'c', 'c', 'a']) {
+      t.finishDealingIfNeeded()
       t.command(player, { type: 'act', action: { kind: 'fold' } })
       // 2Б.3.7.1: ако това отказване остави единствен победител, изборът трябва да
       // се разреши (скрива), преди автоматичният преход към следващото раздаване.
@@ -272,6 +284,7 @@ try {
       if (pending?.kind === 'reveal-choice') t.command(pending.winnerId, { type: 'hide-cards' })
     }
     assert.deepEqual(t.state().stacks, { a: 10, b: 10, c: 7 })
+    t.finishDealingIfNeeded()
     for (const player of ['a', 'b', 'c']) { t.p(player, { type: 'look' }); t.p(player, { type: 'act', action: { kind: 'all-in' } }) }
     assert.equal(t.state().round?.kind, 'allin-svara'); assert(t.stored().state.lockedPots.length); t.roundtrip()
     t.s({ type: 'advance-allin-svara' }); t.roundtrip()
@@ -374,7 +387,11 @@ try {
     const matchId = messages.find((m) => m.type === 'svara_table_updated').table.matchId
     assert.equal(isolated.load(matchId)!.revision, 0)
     lobby.handle(otherId, { type: 'join_svara_table', matchId, requestId: id() })
-    assert.equal(isolated.load(matchId)!.state.phase, 'in-progress'); assert.equal(isolated.load(matchId)!.deadlines[0]!.deadlineAt, clock.now() + 15000)
+    assert.equal(isolated.load(matchId)!.state.phase, 'in-progress')
+    // 2Б.3.7.4Б: the first deadline after a fresh 2-player deal is now the
+    // server dealing-presentation phase (800 + 2*3*350 = 2900ms), not 'turn'.
+    assert.equal(isolated.load(matchId)!.deadlines[0]!.kind, 'dealing')
+    assert.equal(isolated.load(matchId)!.deadlines[0]!.deadlineAt, clock.now() + 2900)
     const count = messages.length
     lobby.disconnect(creatorId); lobby.reconnect(otherId); assert(isolated.findActiveMatchId(creatorId)); assert(messages.length > count)
   })
@@ -413,7 +430,11 @@ try {
         const state = rt.exportInternalStateForServer(matchId), view = rt.getLifecycleView(matchId)
         if (state.phase !== 'in-progress') break
         if (state.round?.kind === 'svara-joining') rt.executeSystemCommand(matchId, id(), { type: 'close-svara-joining', roundId: state.round.roundId })
-        else {
+        // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation
+        // phase; finish it directly (fake-clock lifecycle tests cover the real wait).
+        else if (state.round && (state.round.kind === 'ordinary' || state.round.kind === 'svara') && (state.round as { dealing?: boolean }).dealing) {
+          rt.executeSystemCommand(matchId, id(), { type: 'finish-dealing', roundId: state.round.roundId })
+        } else {
           assert(view.actorId); const actor = { playerId: view.actorId }, round = state.round
           assert(round && 'betting' in round)
           rt.executeParticipantCommand(matchId, actor, id(), !round.betting.looked.includes(actor.playerId) ? { type: 'look' } :

@@ -16,7 +16,7 @@ const amounts = (value: unknown, ids: string[]) => object(value) && Object.entri
 const exactKeys = (value: Record<string, unknown>, keys: string[]) => Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key))
 const actions = ['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet']
 const participantTypes = ['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards']
-const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display']
+const systemTypes = ['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing']
 const ledgerTypes = ['absence-pot-award', 'abandoned-pot-removed', 'starting-chips', 'entry', 'bet', 'svara-join-fee', 'carry-in', 'uncalled-return', 'pot-award', 'pot-lock', 'pot-carry', 'pot-split', 'split-remainder-removed', 'exit-removed']
 
 function hands(value: unknown, players: string[], full: boolean): void {
@@ -104,6 +104,9 @@ function validateStructure(state: SvaraMatchState): void {
       require(subset(round.participants, s.seats) && round.participants.length >= 2 && member(round.dealerId, round.participants) && amounts(round.contributions, round.participants))
       hands(round.hands, round.participants, true); betting(round.betting, round.participants)
       require(round.betting.entryChips === s.entryChips)
+      // 2Б.3.7.4Б: optional field — a pre-2Б.3.7.4Б stored round legitimately
+      // lacks it entirely (treated as false/already-active, never migrated).
+      require(round.dealing === undefined || typeof round.dealing === 'boolean')
       if (round.kind === 'ordinary') require(integer(round.deadMoney) && strings(round.deadMoneyFrom) && typeof round.isFourthHeadsUp === 'boolean')
       else require(potIds.has(round.potId))
     } else if (round.kind === 'svara-joining') {
@@ -147,12 +150,12 @@ export function validateSvaraStoredMatch(value: unknown, full = true): asserts v
     assertSvaraMatchInvariants(state)
     const kinds = new Set<string>(), generations = new Set<number>(), view = describeSvaraLifecycle(state)
     for (const d of snapshot.deadlines) {
-      require(object(d) && state.phase === 'in-progress' && d.phase === 'in-progress' && ['turn', 'svara-joining', 'presence-wait', 'reveal-choice', 'reveal-display'].includes(d.kind) && !kinds.has(d.kind))
+      require(object(d) && state.phase === 'in-progress' && d.phase === 'in-progress' && ['dealing', 'turn', 'svara-joining', 'presence-wait', 'reveal-choice', 'reveal-display'].includes(d.kind) && !kinds.has(d.kind))
       require(text(d.key) && integer(d.deadlineAt) && d.deadlineAt > 0 && integer(d.generation) && d.generation > 0 && d.generation <= snapshot.deadlineSequence && !generations.has(d.generation))
       require(integer(d.baseRevision) && d.baseRevision <= snapshot.revision && integer(d.actionVersion) && (d.roundId === null || text(d.roundId)))
       require(d.playerId === (d.kind === 'turn' ? view.actorId : d.kind === 'presence-wait' ? view.readyPlayerIds[0] ?? null
         : d.kind === 'reveal-choice' || d.kind === 'reveal-display' ? view.revealChoice?.winnerId ?? null : null))
-      if (d.kind === 'turn' || d.kind === 'svara-joining' || d.kind === 'reveal-choice' || d.kind === 'reveal-display') require(d.roundId === view.roundId && d.actionVersion === view.actionVersion)
+      if (d.kind === 'dealing' || d.kind === 'turn' || d.kind === 'svara-joining' || d.kind === 'reveal-choice' || d.kind === 'reveal-display') require(d.roundId === view.roundId && d.actionVersion === view.actionVersion)
       kinds.add(d.kind); generations.add(d.generation)
     }
     const expected = planSvaraDeadlines(state, snapshot.revision, snapshot.deadlines, snapshot.deadlineSequence, 0)

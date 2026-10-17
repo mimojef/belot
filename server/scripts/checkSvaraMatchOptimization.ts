@@ -69,9 +69,27 @@ function withoutRevealChoiceSnapshotField(message) {
   const { revealChoice, ...you } = message.you
   return { ...message, you }
 }
+// 2Б.3.7.4Б (also after BASELINE) added a server-side dealing-presentation
+// phase: a new 'finish-dealing' command type the reference engine has never
+// heard of, plus a new round.dealing field (state AND snapshot) the
+// reference engine never produces. Same narrow, explicit exclusion pattern
+// as the 2Б.3.7.1 reveal/hide choice above - not an optimization regression.
+const DEALING_PHASE_COMMAND_TYPES = new Set(['finish-dealing'])
+function withoutDealingRoundField(result) {
+  const round = result.state.round
+  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara')) return result
+  const { dealing, ...rest } = round
+  return { ...result, state: { ...result.state, round: rest } }
+}
+function withoutDealingSnapshotField(message) {
+  const round = message.round
+  if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara')) return message
+  const { dealing, ...rest } = round
+  return { ...message, round: rest }
+}
 export function applySvaraMatchCommand(state, command, env = {}) {
   const previous = JSON.stringify(state)
-  if (REVEAL_CHOICE_COMMAND_TYPES.has(command.type)) {
+  if (REVEAL_CHOICE_COMMAND_TYPES.has(command.type) || DEALING_PHASE_COMMAND_TYPES.has(command.type)) {
     // Apply only to the optimized engine. Deliberately do not register a
     // pairing for the result: the next ordinary command resyncs the
     // reference from the (now-identical-shape) current snapshot through the
@@ -112,27 +130,37 @@ export function applySvaraMatchCommand(state, command, env = {}) {
     stats.failures++
     throw afterError
   }
-  if (after.state.round && after.state.round.kind === 'reveal-choice') {
+  const dealingNow = after.state.round && (after.state.round.kind === 'ordinary' || after.state.round.kind === 'svara') && after.state.round.dealing
+  if ((after.state.round && after.state.round.kind === 'reveal-choice') || dealingNow) {
     // This is an otherwise-ordinary command (act/exit/set-absent/
-    // absence-expired/...) whose fold happened to leave exactly one
-    // non-folded participant. BASELINE's engine finishes the round
-    // immediately right here; current HEAD (2Б.3.7.1) defers behind the
-    // reveal/hide choice instead - the intentional, already-tested
-    // behavior difference this whole stage is about, not a regression.
-    // Do not pair: the next ordinary command resyncs the reference from
-    // this snapshot (shape-compatible again once the choice resolves)
-    // through the structuredClone fallback above.
+    // absence-expired/.../start-next-round/svara-start) whose result the
+    // reference engine cannot fully reproduce: either a fold happened to
+    // leave exactly one non-folded participant (BASELINE finishes the round
+    // immediately; current HEAD defers behind the 2Б.3.7.1 reveal/hide
+    // choice instead), or the deal just entered the 2Б.3.7.4Б dealing
+    // phase (BASELINE has no such concept, so its toActId/betting options
+    // are never suppressed the way the optimized engine's are). Neither is
+    // an optimization regression - both are this/an earlier stage's own,
+    // already-tested behavior addition. Do not pair: the next ordinary
+    // command resyncs the reference from this snapshot (shape-compatible
+    // again once the choice resolves / dealing finishes) through the
+    // existing structuredClone fallback above.
     if (after.status === 'duplicate') stats.duplicates++
     stats.revealChoiceOnly++
     for (const id of after.state.seats) { snapshot(after.state.config.tableId, after.state, id); stats.snapshots++ }
     return after
   }
-  assert.equal(JSON.stringify(after), JSON.stringify(before), 'full command result/state differs')
+  // Strip on BOTH sides: when a prior finish-dealing (optimized-only, see
+  // above) left no pairing, the fallback resync clones straight from the
+  // OPTIMIZED state, so before's raw internal round can carry the extra
+  // dealing key forward too (unlike its OWN snapshot builder below, which
+  // only ever emits fields it explicitly lists and so never gains one).
+  assert.equal(JSON.stringify(withoutDealingRoundField(after)), JSON.stringify(withoutDealingRoundField(before)), 'full command result/state differs')
   pairs.set(after.state, before.state)
   if (after.status === 'duplicate') stats.duplicates++
   if (stats.commands % 17 === 0) retained.push([after.state, JSON.stringify(after.state)])
   for (const id of after.state.seats) {
-    assert.equal(JSON.stringify(withoutRevealChoiceSnapshotField(snapshot(after.state.config.tableId, after.state, id))), JSON.stringify(referenceSnapshot(before.state.config.tableId, before.state, id)), 'individual snapshot differs')
+    assert.equal(JSON.stringify(withoutDealingSnapshotField(withoutRevealChoiceSnapshotField(snapshot(after.state.config.tableId, after.state, id)))), JSON.stringify(referenceSnapshot(before.state.config.tableId, before.state, id)), 'individual snapshot differs')
     stats.snapshots++
   }
   return after
@@ -176,7 +204,11 @@ void createShuffledSvaraDeck`)
   // next deal can start, so the same 500-command budget completes fewer
   // rounds than before this stage. Not a performance or correctness
   // regression - the per-command engine call is still what is timed below.
-  assert.equal(long[0]!.history, 99)
+  // 2Б.3.7.4Б: recalibrated again from 99. Every fresh deal now spends one
+  // extra command (finish-dealing) ending the server dealing-presentation
+  // phase before any look/act is accepted - same reasoning, one more
+  // command per round, fewer rounds in the same fixed budget.
+  assert.equal(long[0]!.history, 82)
   const games = ['one', 'two', 'three'].map((tableId) => {
     let state = bridge.createSvaraMatch({ tableId, creatorId: 'a', capacity: 2, entryFee: 10000, startMode: 'auto' })
     state = bridge.applySvaraMatchCommand(state, { type: 'join-seat', commandId: 'join', playerId: 'b' }, { random: { nextInt: () => 0 } }).state
@@ -188,18 +220,25 @@ void createShuffledSvaraDeck`)
     const round = state.round
     const action: current.SvaraMatchCommand = !round
       ? { type: 'start-next-round', commandId: `step-${i}` }
-      // Heads-up: every fold now leaves a sole winner with a reveal choice
-      // instead of an immediately-closed round; hide it to keep dealing.
-      : round.kind === 'reveal-choice'
-        ? { type: 'hide-cards', commandId: `step-${i}`, playerId: round.winnerId }
-        : { type: 'act', commandId: `step-${i}`, playerId: (round as Extract<current.SvaraRound, { kind: 'ordinary' }>).betting.toAct!, action: { kind: 'fold' } }
+      // 2Б.3.7.4Б: a fresh deal now starts in the server dealing-presentation
+      // phase; skip it (fake-clock lifecycle tests cover the real wait).
+      : (round.kind === 'ordinary' || round.kind === 'svara') && (round as { dealing?: boolean }).dealing
+        ? { type: 'finish-dealing', commandId: `step-${i}`, roundId: round.roundId }
+        // Heads-up: every fold now leaves a sole winner with a reveal choice
+        // instead of an immediately-closed round; hide it to keep dealing.
+        : round.kind === 'reveal-choice'
+          ? { type: 'hide-cards', commandId: `step-${i}`, playerId: round.winnerId }
+          : { type: 'act', commandId: `step-${i}`, playerId: (round as Extract<current.SvaraRound, { kind: 'ordinary' }>).betting.toAct!, action: { kind: 'fold' } }
     games[index] = bridge.applySvaraMatchCommand(state, action, { createDeck: () => SVARA_ORDERED_DECK }).state
   }
   // 2Б.3.7.1А: recalibrated from 25. Each heads-up round now costs an extra
   // command (hide-cards) to close the sole-remaining-player reveal choice,
   // so the same 150-command/3-table budget completes fewer rounds per table.
-  assert(games.every((state) => state.history.length === 16))
-  console.log('PASS differential 500-command match (99 rounds), plus three interleaved matches')
+  // 2Б.3.7.4Б: recalibrated again from 16. Every fresh deal now spends one
+  // extra command (finish-dealing) ending the server dealing-presentation
+  // phase before the fold - same reasoning, fewer rounds in the same budget.
+  assert(games.every((state) => state.history.length === 12))
+  console.log('PASS differential 500-command match (82 rounds), plus three interleaved matches')
   console.log('Differential comparison:', bridge.verifyRetainedStates())
 }
 
@@ -208,6 +247,9 @@ function mutationChecks(): void {
   const apply = (command: current.SvaraMatchCommand) => { state = current.applySvaraMatchCommand(state, command, { random: { nextInt: () => 0 }, createDeck: () => SVARA_ORDERED_DECK }).state }
   apply({ type: 'join-seat', commandId: 'join', playerId: 'b' })
   apply({ type: 'start-next-round', commandId: 'deal' })
+  // 2Б.3.7.4Б: skip the server dealing-presentation phase (fake-clock
+  // lifecycle tests cover the real wait) so the fold below is accepted.
+  apply({ type: 'finish-dealing', commandId: 'finish-deal', roundId: (state.round as Extract<current.SvaraRound, { kind: 'ordinary' }>).roundId })
   const liveState = state, liveJson = JSON.stringify(state)
   apply({ type: 'act', commandId: 'fold', playerId: 'b', action: { kind: 'fold' } })
   // 2Б.3.7.1: heads-up fold now opens a 5s reveal choice for the sole
@@ -233,7 +275,10 @@ function mutationChecks(): void {
   // Restored and externally/shallow-frozen data must be detached before sharing.
   const restored = JSON.parse(json) as current.SvaraMatchState
   Object.freeze(restored.history)
-  const resumed = current.applySvaraMatchCommand(restored, { type: 'start-next-round', commandId: 'restore' }, { createDeck: () => SVARA_ORDERED_DECK }).state
+  let resumed = current.applySvaraMatchCommand(restored, { type: 'start-next-round', commandId: 'restore' }, { createDeck: () => SVARA_ORDERED_DECK }).state
+  // 2Б.3.7.4Б: skip the dealing phase so the final tampered-ledger `look`
+  // below reaches the invariant check instead of the (earlier) dealing gate.
+  resumed = current.applySvaraMatchCommand(resumed, { type: 'finish-dealing', commandId: 'finish-restore', roundId: (resumed.round as Extract<current.SvaraRound, { kind: 'ordinary' }>).roundId }).state
   restored.history[0]!.participants.push('external')
   restored.ledger[0]!.amount++
   restored.processedCommands.join!.outcome.completedRounds.push('external')
@@ -273,11 +318,15 @@ function benchmark(engine: typeof current, limit: number): Row[] {
     const round = state.round
     const command: current.SvaraMatchCommand = !round
       ? { type: 'start-next-round', commandId: `command-${count}` }
-      // 2Б.3.7.1: a sole-remaining fold now opens a reveal choice instead of
-      // closing the round immediately; hide it to keep driving fresh deals.
-      : round.kind === 'reveal-choice'
-        ? { type: 'hide-cards', commandId: `command-${count}`, playerId: round.winnerId }
-        : { type: 'act', commandId: `command-${count}`, playerId: (round as Extract<current.SvaraRound, { kind: 'ordinary' }>).betting.toAct!, action: { kind: 'fold' } }
+      // 2Б.3.7.4Б: a fresh deal now starts in the server dealing-presentation
+      // phase; skip it (fake-clock lifecycle tests cover the real wait).
+      : (round.kind === 'ordinary' || round.kind === 'svara') && (round as { dealing?: boolean }).dealing
+        ? { type: 'finish-dealing', commandId: `command-${count}`, roundId: round.roundId }
+        // 2Б.3.7.1: a sole-remaining fold now opens a reveal choice instead of
+        // closing the round immediately; hide it to keep driving fresh deals.
+        : round.kind === 'reveal-choice'
+          ? { type: 'hide-cards', commandId: `command-${count}`, playerId: round.winnerId }
+          : { type: 'act', commandId: `command-${count}`, playerId: (round as Extract<current.SvaraRound, { kind: 'ordinary' }>).betting.toAct!, action: { kind: 'fold' } }
     apply(command)
   }
   engine.assertSvaraMatchInvariants(state)

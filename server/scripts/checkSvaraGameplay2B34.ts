@@ -96,7 +96,19 @@ function fixture(capacity: 2 | 3 | 4 = 2, chips = 100, entryPercent: 1 | 2 | 3 |
     wire(player, message)
     return frames.get(player)!.findLast((f) => f.commandId === message.commandId)
   }
-  const ok = (player: string, command: any, extra = {}) => {
+  // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation phase
+  // (no look/act accepted yet); skip it directly through the runtime (not
+  // the lobby) — this is not itself a player-visible action to assert on,
+  // same as how the real lifecycle timer would fire it. The real 15s-after-
+  // the-real-wait behavior and the rejection itself have their own tests.
+  const finishDealingIfNeeded = (targetMatchId: string = matchId) => {
+    const round = targetMatchId ? runtime.exportInternalStateForServer(targetMatchId).round : null
+    if (round && (round.kind === 'ordinary' || round.kind === 'svara') && (round as { dealing?: boolean }).dealing) {
+      runtime.executeSystemCommand(targetMatchId, id(), { type: 'finish-dealing', roundId: round.roundId })
+    }
+  }
+  const ok = (player: string, command: any, extra: any = {}) => {
+    finishDealingIfNeeded(extra.matchId ?? matchId)
     const result = submit(player, command, extra)
     assert.equal(result?.type, 'svara_command_result', JSON.stringify(result))
     assert.equal(result.status, 'applied')
@@ -112,10 +124,10 @@ function fixture(capacity: 2 | 3 | 4 = 2, chips = 100, entryPercent: 1 | 2 | 3 |
   }
   const state = () => runtime.exportInternalStateForServer(matchId)
   const view = (player: string) => runtime.getPlayerSnapshot(matchId, { playerId: player })
-  const actor = () => view('a').toActId!
+  const actor = () => { finishDealingIfNeeded(); return view('a').toActId! }
   const look = (player: string) => ok(player, { type: 'look' })
   const act = (player: string, action: any) => ok(player, { type: 'act', action })
-  return { runtime, lobby, frames, sessions, blocked, faults, matchId, decks, wire, attach, payload, submit, ok, reject, rawState, state, view, actor, look, act }
+  return { runtime, lobby, frames, sessions, blocked, faults, matchId, decks, wire, attach, payload, submit, ok, reject, rawState, state, view, actor, look, act, finishDealingIfNeeded }
 }
 
 try {
@@ -140,6 +152,7 @@ try {
 
   await check('bet/call/raise/fold; no false broadcasts on turn/phase/action rejection', () => {
     const t = fixture(3)
+    t.finishDealingIfNeeded()
     t.reject('a', { type: 'act', action: { kind: 'fold' } }, 'not_your_turn')
     t.look('b'); t.act('b', { kind: 'bet', total: 2 })
     t.look('c'); t.act('c', { kind: 'bet', total: 3 })
@@ -161,6 +174,7 @@ try {
     // Entry consumes both stacks; automatic all-in comparisons finish the match.
     assert.equal(short.state().phase, 'finished')
     const small = fixture(2, 2, 1)
+    small.finishDealingIfNeeded()
     small.reject('b', { type: 'act', action: { kind: 'blind-bet', total: 2 } }, 'insufficient_chips')
     small.reject('b', { type: 'act', action: { kind: 'all-in' } }, 'invalid_action')
     small.look('b')
@@ -205,6 +219,7 @@ try {
 
   await check('rapid/concurrent commands are serialized; stale second bet cannot apply to a later turn', async () => {
     const t = fixture(3)
+    t.finishDealingIfNeeded()
     const rev = t.runtime.getMatchRevision(t.matchId)
     await Promise.all([
       Promise.resolve().then(() => t.wire('b', t.payload({ type: 'look' }, { commandId: 'first', expectedRevision: rev }))),
@@ -319,6 +334,10 @@ try {
     assert.equal(t.frames.get('b')!.at(-1).status, 'duplicate')
     assert.equal(t.frames.get('b')!.filter((f) => f.type === 'svara_match_snapshot').length, exitedFrames)
     assert.equal(t.rawState(), committed); assert.equal(JSON.stringify(t.runtime.exportInternalStateForServer(other)), before)
+    // 2Б.3.7.4Б: finish dealing for 'other' BEFORE reading its revision below —
+    // otherwise the revision captured here would go stale the instant ok()
+    // skips the dealing phase as its own first step.
+    t.finishDealingIfNeeded(other)
     t.ok('d', { type: 'look' }, { matchId: other, expectedRevision: t.runtime.getMatchRevision(other) })
     assert.equal(t.rawState(), committed)
     t.reject('b', { type: 'look' }, 'not_a_participant')

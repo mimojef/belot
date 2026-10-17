@@ -482,11 +482,18 @@ try {
   })
 
   async function findActor(): Promise<{ page: Page; context: BrowserContext; label: 'A' | 'B' }> {
-    for (const [label, session] of [['A', sessionA], ['B', sessionB]] as const) {
-      const buttonCount = await session.page.locator('[data-svara-action-bar] [data-svara-action-button]').count()
-      if (buttonCount > 0) return { ...session, label }
+    // 2Б.3.7.4Б: a fresh deal now spends a real server dealing-presentation
+    // phase (Вход + карти, 2900-5000ms depending on capacity) before ANY
+    // action bar appears for anyone — poll instead of a single snapshot check.
+    const deadline = Date.now() + 10_000
+    for (;;) {
+      for (const [label, session] of [['A', sessionA], ['B', sessionB]] as const) {
+        const buttonCount = await session.page.locator('[data-svara-action-bar] [data-svara-action-button]').count()
+        if (buttonCount > 0) return { ...session, label }
+      }
+      if (Date.now() >= deadline) throw new Error('neither session has an active action bar — no one is apparently on turn')
+      await sleep(200)
     }
-    throw new Error('neither session has an active action bar — no one is apparently on turn')
   }
   function other(label: 'A' | 'B') { return label === 'A' ? sessionB : sessionA }
   async function readSeatTotals(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null }> {

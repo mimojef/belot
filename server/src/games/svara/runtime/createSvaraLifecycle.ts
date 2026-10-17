@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { svaraEpochNow, type SvaraDeadline, type SvaraDeadlineKind } from './svaraDeadlines.js'
-export { SVARA_TURN_MS, SVARA_JOIN_MS, SVARA_PRESENCE_WAIT_MS, type SvaraDeadline, type SvaraDeadlineKind } from './svaraDeadlines.js'
+export { SVARA_TURN_MS, SVARA_JOIN_MS, SVARA_PRESENCE_WAIT_MS, SVARA_DEAL_ENTRY_ANIMATION_MS, SVARA_DEAL_CARD_ANIMATION_MS,
+  SVARA_DEAL_CARDS_PER_PLAYER, svaraDealingAnimationMs, type SvaraDeadline, type SvaraDeadlineKind } from './svaraDeadlines.js'
 import type { SvaraPublicTable } from '../protocol/svaraSnapshotProtocol.js'
 import type { SvaraMatchRuntime, SvaraSystemCommand } from './svaraMatchRuntime.js'
 
@@ -103,6 +104,7 @@ export function createSvaraLifecycle(runtime: SvaraMatchRuntime, deps: {
         if (expired) {
           let command: SvaraSystemCommand
           if (expired.kind === 'turn') command = { type: 'turn-timeout', playerId: expired.playerId!, roundId: expired.roundId!, actionVersion: expired.actionVersion }
+          else if (expired.kind === 'dealing') command = { type: 'finish-dealing', roundId: expired.roundId! }
           else if (expired.kind === 'svara-joining') command = { type: 'close-svara-joining', roundId: expired.roundId! }
           else if (expired.kind === 'reveal-choice') command = { type: 'expire-reveal-choice', roundId: expired.roundId! }
           else if (expired.kind === 'reveal-display') command = { type: 'close-reveal-display', roundId: expired.roundId! }

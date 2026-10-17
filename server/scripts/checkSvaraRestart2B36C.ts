@@ -13,6 +13,7 @@ import { buildSvaraDeckForHands, assertSvaraMatchInvariants } from '../src/games
 import { SVARA_ORDERED_DECK, svaraCardCode } from '../src/games/svara/engine/svaraCards.js'
 import { SVARA_SNAPSHOT_FORBIDDEN_KEYS } from '../src/games/svara/protocol/svaraSnapshotProtocol.js'
 import type { SvaraStoredMatch } from '../src/games/svara/runtime/svaraPersistence.js'
+import { svaraDealingAnimationMs } from '../src/games/svara/runtime/createSvaraLifecycle.js'
 
 const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const root = await mkdtemp(join(tmpdir(), 'pika-svara-restart-')), serverDir = join(root, 'server')
@@ -223,11 +224,19 @@ async function tables(client: Client) {
   await fence(client); client.frames = client.frames.filter((f) => f.type !== 'svara_tables_list')
   const result = await ask(client, { type: 'request_svara_tables_list' }, 'svara_tables_list'); privacy(result, true); return result.tables as any[]
 }
+// 2Б.3.7.4Б: a fresh deal (ordinary or svara) starts in the server dealing-
+// presentation phase; advance the REAL (IPC-driven fake) clock through it —
+// the real lifecycle timer path, not an engine shortcut. The real 15s-
+// after-the-real-wait behavior and the gate itself have their own tests.
+async function finishDealingIfNeeded(matchId: string) {
+  const round = saved(matchId).state.round as any
+  if (round && (round.kind === 'ordinary' || round.kind === 'svara') && round.dealing) await advance(svaraDealingAnimationMs(round.participants.length))
+}
 async function createTable(peers: Client[], entryFee = 1000, start = true): Promise<string> {
   const result = await ask(peers[0]!, { type: 'create_svara_table', requestId: randomUUID(), capacity: peers.length, entryFee, entryPercent: 1, startMode: 'manual' }, 'svara_table_updated')
   const matchId = result.table.matchId
   for (const peer of peers.slice(1)) await ask(peer, { type: 'join_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
-  if (start) await ask(peers[0]!, { type: 'start_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
+  if (start) { await ask(peers[0]!, { type: 'start_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated'); await finishDealingIfNeeded(matchId) }
   await snapshot(peers[0]!, matchId); return matchId
 }
 async function play(client: Client, matchId: string, command: any, commandId = randomUUID(), expectedRevision = saved(matchId).revision) {
@@ -241,6 +250,7 @@ async function play(client: Client, matchId: string, command: any, commandId = r
   return result
 }
 async function ok(client: Client, matchId: string, command: any, commandId?: string) {
+  await finishDealingIfNeeded(matchId)
   const result = await play(client, matchId, command, commandId); assert.equal(result.type, 'svara_command_result', 'Expected accepted gameplay command'); assert.equal(result.status, 'applied'); return result
 }
 const act = (client: Client, matchId: string, action: any) => ok(client, matchId, { type: 'act', action })
@@ -320,6 +330,28 @@ try {
     same(saved(matchId), committed, 'Lost ACK retry/conflict changed durable state')
     await stop(); activeClock = now; activeFixture = await backup('active-confirmed')
   })
+  await check('forced crash exactly during the server dealing-presentation phase restores the original deadline deterministically', async () => {
+    await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3))
+    // Deliberately NOT createTable()'s own helper, to crash BEFORE any
+    // dealing-phase skip would otherwise advance the clock past it.
+    const created = await ask(peers[0]!, { type: 'create_svara_table', requestId: randomUUID(), capacity: peers.length, entryFee: 1000, entryPercent: 1, startMode: 'manual' }, 'svara_table_updated')
+    const matchId = created.table.matchId
+    for (const peer of peers.slice(1)) await ask(peer, { type: 'join_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
+    await ask(peers[0]!, { type: 'start_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
+    const before = saved(matchId)
+    assert.equal((before.state.round as any).dealing, true); assert.equal(before.deadlines[0]!.kind, 'dealing')
+    await stop('crash')
+    assert((await stat(`${dbFile}-wal`)).size > 0, 'Crash scenario did not leave a real WAL to recover')
+    await start(now); peers = await reconnect(users.slice(0, 3))
+    same(saved(matchId), before, 'Mid-dealing state changed after a forced crash')
+    assert.equal((await timing(peers[1]!, matchId)).deadlines[0].deadlineAt, before.deadlines[0]!.deadlineAt, 'the original absolute dealing deadline must survive a forced crash')
+    await advance(svaraDealingAnimationMs(peers.length))
+    const after = saved(matchId)
+    assert.equal(after.state.round?.dealing, false); assert.equal(after.revision, before.revision + 1, 'exactly one finish-dealing transition')
+    assert.equal(after.state.ledger.filter((e) => e.type === 'entry').length, before.state.ledger.filter((e) => e.type === 'entry').length, 'no repeated entry charge')
+    assert.equal(JSON.stringify((after.state.round as any).hands), JSON.stringify((before.state.round as any).hands), 'no re-deal across the crash')
+    integrity(); await stop()
+  })
   await check('auto-reveal on a plain bet looks only active non-folded participants, including after a restart', async () => {
     await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3))
     const matchId = await createTable(peers)
@@ -381,7 +413,10 @@ try {
     await ipc('decks', { decks: [deck([ids[1]!, ids[2]!, ids[0]!], { [ids[1]!]: 'KS QS JS', [ids[0]!]: 'KH QH JH', [ids[2]!]: '8C 9D 10H' })] })
     const matchId = await createTable(peers); await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 1 }); await act(peers[2]!, matchId, { kind: 'fold' }); await act(peers[0]!, matchId, { kind: 'call' }); await fence(peers[0]!)
     const before = saved(matchId); assert.equal(before.state.round?.kind, 'svara-joining'); const deadline = before.deadlines.find((d) => d.kind === 'svara-joining')!
-    await stop(); await start(BASE + 7000); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), before, 'Joining state reset')
+    // 2Б.3.7.4Б: the match spent svaraDealingAnimationMs(3)=3950ms in the
+    // server dealing-presentation phase before the betting sequence below
+    // could even start; restart 7000ms into the 15s joining window, same as before.
+    await stop(); await start(BASE + svaraDealingAnimationMs(3) + 7000); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), before, 'Joining state reset')
     assert.equal((await timing(peers[2]!, matchId)).deadlines[0].remainingMs, 8000)
     await stop('crash'); await start(deadline.deadlineAt + 1); peers = await reconnect(users.slice(0, 3))
     const after = saved(matchId); assert.equal(after.state.round?.kind, 'svara'); assert.equal(after.revision, before.revision + 2)
