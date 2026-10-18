@@ -102,6 +102,55 @@ async function waitForCondition(label: string, predicate: () => Promise<boolean>
   throw new Error(`Timeout: ${label}`)
 }
 
+// 2Б.3.7.4В: fail fast and clearly if a PREVIOUS (orphaned) run of this same
+// test is still squatting the fixed backend port — without this, a stale
+// process answers /health on behalf of its OWN (unrelated, already-
+// migrated) database, and this test proceeds to query the NEW isolated
+// database as if it were ready, long before the real backend startup it
+// actually spawned has even begun applying migrations. Root cause found via
+// `netstat`: a leftover `tsx .../src/index.ts` child from an earlier
+// interrupted run was LISTENING on the port; the freshly spawned child
+// never got to bind it at all.
+async function assertPortFree(port: number): Promise<void> {
+  await new Promise<void>((resolveFree, reject) => {
+    const probe = createNetServer()
+    probe.once('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        reject(new Error(
+          `Port ${port} is already in use by another process — a previous Svara integration ` +
+          `test run likely did not shut down cleanly. Find and stop it before retrying ` +
+          `(Windows: "netstat -ano | find \":${port}\"" then "taskkill /PID <pid> /F").`,
+        ))
+      } else reject(err)
+    })
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolveFree()))
+  })
+}
+
+// Anchors "ready" to THIS exact spawned child, not to whoever answers the
+// fixed port: ensureServerDatabaseReady() runs synchronously (top-level
+// await) before the HTTP listener even starts, and server/src/index.ts logs
+// its resolved database file path right after — so seeing this exact line
+// in OUR child's own captured stdout proves migrations for OUR isolated
+// database file actually completed, before we ever trust a /health response
+// on the shared port. Fails fast (not after the full timeout) if the child
+// exits early (e.g. a real EADDRINUSE despite the preflight check above).
+async function waitForOwnBackendReady(server: RunningServer, databaseFilePath: string, port: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  const dbReadyMarker = `[db] SQLite ready file=${databaseFilePath} `
+  while (Date.now() < deadline) {
+    if (server.child.exitCode !== null) {
+      throw new Error(`Backend process exited early (code ${server.child.exitCode}) before confirming its own database bootstrap.\n--- server output ---\n${server.output()}`)
+    }
+    if (server.output().includes(dbReadyMarker)) break
+    await sleep(200)
+  }
+  if (!server.output().includes(dbReadyMarker)) {
+    throw new Error(`Timeout: backend did not confirm its own database bootstrap ("${dbReadyMarker.trim()}") within ${timeoutMs}ms.\n--- server output ---\n${server.output()}`)
+  }
+  await waitForBackendHealth(port, Math.max(1000, deadline - Date.now()))
+}
+
 async function httpJson(
   port: number,
   method: string,
@@ -262,10 +311,11 @@ let staticServer: ReturnType<typeof createHttpServer> | null = null
 let browser: Browser | null = null
 
 try {
+  await assertPortFree(BACKEND_PORT)
   console.log(`Starting real backend on fixed port ${BACKEND_PORT} (SVARA_TEST_ENABLED=1)...`)
   server = startServer(isolated.serverDir, BACKEND_PORT)
   try {
-    await waitForBackendHealth(BACKEND_PORT, 30_000)
+    await waitForOwnBackendReady(server, isolated.dbFile, BACKEND_PORT, 30_000)
   } catch (err) {
     console.error('--- server output ---')
     console.error(server.output())
@@ -416,6 +466,15 @@ try {
 
     await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
     await sessionB.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
+
+    // 2Б.3.7.4Б: a fresh deal starts in the server dealing-presentation
+    // phase — BOTH real sessions must see this immediately (no one "on
+    // turn" yet, no action bar for either), proving the server actually
+    // suppressed betting for both, not just coincidentally slow UI.
+    for (const session of [sessionA, sessionB]) {
+      const earlyButtons = await session.page.locator('[data-svara-action-bar] [data-svara-action-button]').count()
+      if (earlyButtons !== 0) throw new Error('an action bar/button must not appear for anyone while the server dealing-presentation phase is still open')
+    }
 
     // Revision must be a real positive number coming from the server (not a
     // placeholder/dash), for both.
