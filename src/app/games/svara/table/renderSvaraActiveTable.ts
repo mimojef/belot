@@ -5,7 +5,7 @@
 // layout — не пресъздава демо сценария/анимациите (тези остават 2Б.3.7.5+).
 //
 // Видимост на картите (задание §6): чужди карти винаги с гръб, освен
-// изричен публичен reveal-choice показ за конкретния победител; собствените
+// изричен публичен showdown/reveal-choice показ от сървъра; собствените
 // непогледнати карти също с гръб; собствените погледнати/разкрити карти —
 // с лице, само за локалния играч.
 
@@ -25,6 +25,7 @@ import { deriveSvaraActionButtons, type SvaraActionButton } from './svaraBetting
 import { formatSvaraLastBetBadge, getLastSvaraBetBadge } from './svaraBettingBadges'
 import { svaraDealingAnimationMs, type SvaraDealingVisualState } from './svaraTableAnimation'
 import { sampleSvaraMove, type SvaraMove, type SvaraSpriteState } from '../demo/svaraDemoMotion'
+import { computeSvaraResultVisualState, type SvaraResultVisualState } from './svaraResultAnimation'
 
 /** Анимацията на летящ чип/карта спрямо вече избран доброволен отказ (задание §11). */
 export type SvaraActiveFoldEffect = { seatIndex: number; voluntary: boolean; elapsedMs: number }
@@ -57,6 +58,8 @@ export type RenderSvaraActiveTableInput = {
   activeLookEffect: SvaraActiveLookEffect | null
   /** Задание §15 — prefers-reduced-motion: без летящи спрайтове/флип завъртане, но СЪЩИЯТ сървърен timeline. */
   reducedMotion: boolean
+  /** Internal presentation sample; callers may omit it. */
+  resultVisual?: SvaraResultVisualState
 }
 
 const PANEL_WIDTH_VW_BY_SLOT: Record<SvaraVisualSlot, { base: number; min: number; max: number }> = {
@@ -176,7 +179,6 @@ function seatCardsHtml(
   lookEffect: SvaraActiveLookEffect | null,
   foldEffect: SvaraActiveFoldEffect | null,
   reducedMotion: boolean,
-  showdownCards: string[] | null,
 ): string {
   // Задание §11/§14 — активно избледняване при отказ има приоритет пред
   // всичко друго: веднъж отказал, нито собствените, нито чуждите карти се
@@ -184,6 +186,7 @@ function seatCardsHtml(
   // коментара в svaraTableAnimation.ts) — тук само завършваме визуално
   // прехода, без реални стойности.
   if (foldEffect) return foldingCardsHtml(cardSizeClampPx, foldEffect.elapsedMs, reducedMotion)
+  if (seat.folded) return ''
   // Задание §3/§4 — по време на активната dealing фаза всички карти (вкл.
   // собствените) са само гръб, прогресивно по броя вече "кацнали"; look
   // изобщо не е възможен по време на дилинга (сървърно отказано), затова
@@ -200,15 +203,6 @@ function seatCardsHtml(
     }).join('')
     return `<span data-svara-own-cards="1" style="display:inline-flex;">${cardsHtml}</span>`
   }
-  // 2Б.3.7.6А §4 — истинско showdown: карти на ВСИЧКИТЕ сравняващи се,
-  // публично за всички на масата (не само за самия играч) — различно от
-  // publicReveal по-долу (reveal-choice, само за единствения победител).
-  if (showdownCards) {
-    return `<span data-svara-showdown-cards="1" style="display:inline-flex;">${showdownCards.map((code, i) => {
-      const src = svaraCardCodeToFaceSrc(code)
-      return src ? cardFaceHtml(src, cardSizeClampPx, i) : cardBackHtml(cardSizeClampPx, i, false)
-    }).join('')}</span>`
-  }
   if (publicReveal && publicReveal.winnerId === seat.playerId) {
     return publicReveal.cards.map((code, i) => {
       const src = svaraCardCodeToFaceSrc(code)
@@ -218,6 +212,94 @@ function seatCardsHtml(
   if (seat.cardCount <= 0) return ''
   const dim = seat.folded || seat.status !== 'active'
   return Array.from({ length: seat.cardCount }, (_, i) => cardBackHtml(cardSizeClampPx, i, dim)).join('')
+}
+
+function resultSeatHtml(seat: SvaraSnapshotSeat, input: RenderSvaraActiveTableInput, cardSize: string) {
+  const round = input.snapshot?.round
+  const visual = input.resultVisual!
+  const compared = round?.kind === 'showdown-display' && round.comparedPlayers.includes(seat.playerId)
+  const revealedWinner = round?.kind === 'reveal-choice' && round.decision === 'revealed' && round.winnerId === seat.playerId
+  const cards = seat.folded || !visual.showCards ? null
+    : compared ? round.cards[seat.playerId] ?? null : revealedWinner ? round.cards : null
+  const points = !cards ? null : compared ? round.comparisonPoints[seat.playerId] ?? null : revealedWinner ? round.handPoints : null
+  const progress = input.reducedMotion ? 1 : visual.flipProgress
+  const faceUp = progress >= 0.5
+  const scaleX = Math.max(0.05, Math.abs(Math.cos(Math.PI * progress)))
+  const cardHtml = cards
+    ? `<span data-svara-${compared ? 'showdown' : 'reveal'}-cards="1" data-svara-result-round="${esc(visual.roundKey)}" data-svara-flip-progress="${progress.toFixed(4)}" style="display:inline-flex;transform:scaleX(${scaleX.toFixed(4)});">${cards.map((code, i) => {
+      const src = faceUp ? svaraCardCodeToFaceSrc(code) : null
+      return src ? cardFaceHtml(src, cardSize, i) : cardBackHtml(cardSize, i, false)
+    }).join('')}</span>`
+    : seat.folded || !visual.showCards ? '' : Array.from({ length: seat.cardCount }, (_, i) => cardBackHtml(cardSize, i, true)).join('')
+  const recipient = visual.payout?.recipients.find((entry) => entry.playerId === seat.playerId)
+  return {
+    cards: cardHtml,
+    points: points === null ? '' : `<span data-svara-${compared ? 'showdown' : 'reveal'}-points="1" style="font-size:clamp(9px,2.4vw,12px);font-weight:900;color:#fff;background:rgba(244,201,91,.22);border-radius:999px;padding:0 6px;">${points}</span>`,
+    bubble: recipient ? `<span data-svara-win-bubble="1" data-svara-payout-key="${esc(visual.payout!.key)}" style="display:inline-block;box-sizing:border-box;max-width:100%;border:1px solid #f4c95b;border-radius:999px;padding:1px 5px;background:#2a210b;color:#ffe49a;font-size:clamp(9px,2.3vw,12px);font-weight:900;line-height:1.2;overflow-wrap:anywhere;pointer-events:none;">Печеля ${recipient.amount}!</span>` : '',
+  }
+}
+
+function isResultRound(input: RenderSvaraActiveTableInput): boolean {
+  const round = input.snapshot?.round
+  return round?.kind === 'showdown-display' || (round?.kind === 'reveal-choice' && round.decision === 'revealed')
+}
+
+function payoutOverlayHtml(input: RenderSvaraActiveTableInput, positions?: Map<number, { x: number; y: number }>): string {
+  const payout = input.resultVisual?.payout
+  if (!payout || input.reducedMotion) return ''
+  const slots = assignSvaraVisualSlots(input.snapshot?.seats ?? [], input.snapshot?.you.seatIndex ?? null, input.table.capacity)
+  const flightProgress = Math.min(1, Math.max(0, (payout.progress - 0.08) / 0.72))
+  if (flightProgress >= 1) return '' // landed before this step's 1200ms deadline
+  const eased = 1 - (1 - flightProgress) ** 3
+  return payout.recipients.map((recipient) => {
+    const target = slots.find(({ seat }) => seat.playerId === recipient.playerId)
+    if (!target) return ''
+    const to = positions?.get(target.seat.seatIndex) ?? SLOT_PERCENT_POSITION[target.slot]
+    const x = 50 + (to.x - 50) * eased
+    const y = 50 + (to.y - 50) * eased
+    return `<div data-svara-payout-flight="${target.seat.seatIndex}" data-svara-payout-key="${esc(payout.key)}" style="position:absolute;left:${x.toFixed(3)}%;top:${y.toFixed(3)}%;transform:translate(-50%,-50%);pointer-events:none;">${[0, 1, 2].map((i) => `<i style="display:block;position:absolute;left:${(i - 1) * 5}px;top:${-i * 3}px;width:clamp(10px,3vw,17px);height:clamp(10px,3vw,17px);border-radius:50%;background:radial-gradient(circle,#ffe49a 0 40%,#c98f13 45% 70%,#fff0b0 75%);box-shadow:0 2px 4px #0008;"></i>`).join('')}</div>`
+  }).join('')
+}
+
+function safeResultInput(input: RenderSvaraActiveTableInput): RenderSvaraActiveTableInput {
+  const snapshot = input.snapshot?.matchId === input.table.matchId ? input.snapshot : null
+  const timing = input.timing?.matchId === input.table.matchId ? input.timing : null
+  return { ...input, snapshot, timing, resultVisual: computeSvaraResultVisualState(snapshot, timing, input.serverNow) }
+}
+
+/** Only presentation mounts change per frame. Avatars, balances, action
+ * listeners and any in-flight bet flash keep their DOM identity. */
+export function patchSvaraResultPresentation(root: HTMLElement, rawInput: RenderSvaraActiveTableInput): void {
+  const input = safeResultInput(rawInput)
+  if (!isResultRound(input)) return
+  const replace = (element: HTMLElement | null, html: string) => {
+    if (element && element.dataset.resultHtml !== html) {
+      element.innerHTML = html
+      element.dataset.resultHtml = html
+    }
+  }
+  for (const anchor of root.querySelectorAll<HTMLElement>('[data-svara-seat-index]')) {
+    const seat = input.snapshot?.seats.find((entry) => entry.seatIndex === Number(anchor.dataset.svaraSeatIndex))
+    if (!seat) continue
+    const mount = anchor.querySelector<HTMLElement>('[data-svara-seat-cards-mount]')
+    const parts = resultSeatHtml(seat, input, mount?.dataset.cardSize ?? '28px')
+    replace(mount, parts.cards)
+    replace(anchor.querySelector('[data-svara-seat-points-mount]'), parts.points)
+    replace(anchor.querySelector('[data-svara-win-bubble-mount]'), parts.bubble)
+  }
+  replace(root.querySelector('[data-svara-felt-center]'), feltCenterContentHtml(input))
+  const felt = root.querySelector<HTMLElement>('[data-svara-felt]')?.getBoundingClientRect()
+  const positions = new Map<number, { x: number; y: number }>()
+  if (input.resultVisual?.payout && !input.reducedMotion && felt && felt.width > 0 && felt.height > 0) {
+    for (const avatar of root.querySelectorAll<HTMLElement>('[data-svara-avatar]')) {
+      const rect = avatar.getBoundingClientRect()
+      positions.set(Number(avatar.dataset.svaraAvatar), {
+        x: (rect.left + rect.width / 2 - felt.left) / felt.width * 100,
+        y: (rect.top + rect.height / 2 - felt.top) / felt.height * 100,
+      })
+    }
+  }
+  replace(root.querySelector('[data-svara-result-overlay]'), payoutOverlayHtml(input, positions))
 }
 
 function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null): string {
@@ -259,24 +341,26 @@ function seatPanelHtml(
   round: SvaraSnapshotRound | null,
 ): string {
   const isLocal = seat.playerId === input.localProfileId
+  const showingResult = isResultRound(input)
   const sizes = PANEL_WIDTH_VW_BY_SLOT[slot]
   const widthClamp = `clamp(${sizes.min}px, ${sizes.base}vw, ${sizes.max}px)`
   // min(Xvw,Ydvh) вместо чист vw — в landscape (широко, НИСКО) viewport-ите
   // чистият vw дава твърде големи панели спрямо оскъдната височина (виж
   // заданието §18, 844×390 реална проверка); dvh член-ът поема управлението
   // точно когато височината е по-ограничаваща от ширината.
-  const avatarClamp = isLocal || slot === 'bottom' ? 'clamp(32px,min(13vw,11dvh),76px)' : 'clamp(24px,min(10vw,8dvh),58px)'
-  const cardClamp = isLocal || slot === 'bottom' ? 'clamp(28px,min(12vw,10dvh),68px)' : 'clamp(18px,min(7.4vw,6dvh),42px)'
+  const avatarClamp = showingResult
+    ? isLocal || slot === 'bottom' ? 'clamp(26px,min(11vw,8dvh),64px)' : 'clamp(22px,min(8vw,6dvh),50px)'
+    : isLocal || slot === 'bottom' ? 'clamp(32px,min(13vw,11dvh),76px)' : 'clamp(24px,min(10vw,8dvh),58px)'
+  const cardClamp = showingResult
+    ? isLocal || slot === 'bottom' ? 'clamp(24px,min(11vw,8dvh),60px)' : 'clamp(16px,min(6.8vw,5dvh),38px)'
+    : isLocal || slot === 'bottom' ? 'clamp(28px,min(12vw,10dvh),68px)' : 'clamp(18px,min(7.4vw,6dvh),42px)'
   const ownCards = isLocal ? input.snapshot?.you.cards ?? null : null
   const youReturnPending = isLocal ? (input.snapshot?.you.returnPending ?? false) : false
   const lastBet = getLastSvaraBetBadge(round, seat.playerId)
   const foldEffect = input.activeFoldEffects.find((e) => e.seatIndex === seat.seatIndex) ?? null
   const lookEffect = isLocal ? input.activeLookEffect : null
   const landedCardCount = input.dealingVisual.active ? input.dealingVisual.landedCardCountBySeatIndex.get(seat.seatIndex) ?? 0 : null
-  const showdownCards = round && round.kind === 'showdown-display' && round.comparedPlayers.includes(seat.playerId)
-    ? round.cards[seat.playerId] ?? null
-    : null
-  const showdownPoints = round && round.kind === 'showdown-display' ? round.comparisonPoints[seat.playerId] ?? null : null
+  const result = resultSeatHtml(seat, input, cardClamp)
 
   let ring = ''
   if (seat.isToAct && turnDeadline) {
@@ -288,15 +372,18 @@ function seatPanelHtml(
   return `<div data-svara-seat-anchor="${slot}" data-svara-seat-index="${seat.seatIndex}" style="${slotAnchorStyle(slot, widthClamp)}z-index:${slot === 'bottom' ? 3 : 2};">
     <div data-svara-seat-flash-mount="1" style="position:relative;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;gap:2px;padding:3px 6px 4px;border-radius:12px;background:${seat.isToAct ? 'rgba(244,201,91,.12)' : 'rgba(5,5,5,.72)'};border:1px solid ${seat.isToAct ? 'rgba(244,201,91,.6)' : 'rgba(255,255,255,.14)'};backdrop-filter:blur(2px);">
       ${foldEffect ? foldSpeechBubbleHtml(foldEffect, input.reducedMotion) : ''}
-      <div style="position:relative;width:${avatarClamp};height:${avatarClamp};">
+      <div data-svara-win-bubble-mount="1" style="text-align:center;width:100%;pointer-events:none;">${result.bubble}</div>
+      <div data-svara-avatar="${seat.seatIndex}" style="position:relative;width:${avatarClamp};height:${avatarClamp};">
         ${ring}
         <img src="${svaraPlaceholderAvatarSrc(seat.playerId)}" alt="" draggable="false" style="width:100%;height:100%;border-radius:50%;object-fit:cover;border:2px solid ${seat.isDealer ? '#f4c95b' : 'rgba(255,255,255,.25)'};box-sizing:border-box;" />
         ${seat.isDealer ? `<span data-svara-dealer-badge="1" title="Дилър" style="position:absolute;right:-2px;bottom:-2px;width:16px;height:16px;border-radius:50%;background:#d4a520;color:#1a1200;font-size:9px;font-weight:900;display:flex;align-items:center;justify-content:center;border:2px solid #090909;">Д</span>` : ''}
       </div>
       <div style="font-size:clamp(9px,2.6vw,13px);font-weight:800;color:#fff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;line-height:1.15;">${esc(svaraPlaceholderName(seat.playerId))}${isLocal ? ' (ти)' : ''}</div>
-      <div data-svara-seat-total="1" style="font-size:clamp(8px,2.3vw,11px);color:#f4c95b;font-weight:700;line-height:1.15;" title="Общо внесени в това раздаване (вкл. Вход)">${seat.stack}${seat.roundContribution > 0 ? ` · общо ${seat.roundContribution}` : ''}</div>
-      ${showdownCards && showdownPoints !== null ? `<div data-svara-showdown-points="1" style="font-size:clamp(9px,2.4vw,12px);font-weight:900;color:#fff;background:rgba(244,201,91,.22);border-radius:999px;padding:0 6px;">${showdownPoints}</div>` : ''}
-      <div style="display:flex;justify-content:center;">${seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp, landedCardCount, lookEffect, foldEffect, input.reducedMotion, showdownCards)}</div>
+      <div style="display:flex;align-items:center;justify-content:center;gap:3px;flex-wrap:wrap;">
+        <div data-svara-seat-total="1" style="font-size:clamp(8px,2.3vw,11px);color:#f4c95b;font-weight:700;line-height:1.15;" title="Общо внесени в това раздаване (вкл. Вход)">${seat.stack}${seat.roundContribution > 0 ? ` · общо ${seat.roundContribution}` : ''}</div>
+        <div data-svara-seat-points-mount="1">${showingResult ? result.points : ''}</div>
+      </div>
+      <div data-svara-seat-cards-mount="1" data-card-size="${cardClamp}" style="display:flex;justify-content:center;">${showingResult ? result.cards : seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp, landedCardCount, lookEffect, foldEffect, input.reducedMotion)}</div>
       ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null)}
     </div>
   </div>`
@@ -320,7 +407,7 @@ function deadlineStatusText(timing: SvaraMatchTimingMessage | null, serverNow: n
 // банки и правоимащите им участници. Участник с вноска НЕ означава
 // непременно правоимащ (отказал се е внесъл, но е извън `eligible`) — тук
 // изрично показваме САМО `eligible` имената от сървъра, никога изведени
-// клиентски. Нарочно БЕЗ анимация/летящи чипове (тези остават 2Б.3.7.6Б).
+// клиентски. Този списък остава статичен; текущото изплащане е в отделния слой.
 function banksBreakdownHtml(input: RenderSvaraActiveTableInput): string {
   const snapshot = input.snapshot
   const round = snapshot?.round ?? null
@@ -340,24 +427,18 @@ function banksBreakdownHtml(input: RenderSvaraActiveTableInput): string {
   </div>`
 }
 
-// 2Б.3.7.6А §4/§8 — текуща фаза на резултата (сравняване/изплащане) и
-// „Свара!“ при неразрешено равенство; само текст/изброяване, без анимация.
-function showdownDisplayStatusHtml(round: SvaraSnapshotRound | null): string {
+function showdownDisplayStatusHtml(round: SvaraSnapshotRound | null, visual: SvaraResultVisualState): string {
   if (!round || round.kind !== 'showdown-display') return ''
   const phaseLabel = round.displayPhase === 'showdown' ? 'Сравняване на картите' : 'Изплащане на банките'
-  const payoutLines = round.payout.map((step) => {
-    const who = step.winners.map((id) => esc(svaraPlaceholderName(id))).join(', ')
-    const amount = step.share !== null ? `${step.share} всеки` : `${step.amount}`
-    return `<div style="font-size:clamp(8px,2.1vw,10px);color:#f4c95b;">${step.isMain ? 'Основна банка' : 'Странична банка'} → ${who}: ${esc(amount)}</div>`
-  }).join('')
+  const step = visual.payout?.step
   return `<div data-svara-showdown-status="1" style="margin-top:2px;">
-    <div style="font-size:clamp(9px,2.4vw,11px);font-weight:800;color:#fff;">${esc(phaseLabel)}</div>
-    ${round.svaraTie ? '<div style="font-size:clamp(10px,2.8vw,13px);font-weight:900;color:#ef4444;text-shadow:0 1px 3px rgba(0,0,0,.8);">СВАРА!</div>' : ''}
-    ${payoutLines}
+    ${!visual.tie && !step ? `<div style="font-size:clamp(9px,2.4vw,11px);font-weight:800;color:#fff;">${esc(phaseLabel)}</div>` : ''}
+    ${visual.tie ? '<div data-svara-tie="1" data-svara-tie-sound-slot="awaiting-owner-asset" style="font-size:clamp(15px,min(4.5vw,5dvh),36px);font-weight:900;line-height:1.1;color:#ffd66e;text-shadow:0 2px 4px #000,0 0 12px #ef4444;pointer-events:none;">СВАРА!</div>' : ''}
+    ${step ? `<div data-svara-active-pot="${esc(step.potId)}" data-svara-payout-key="${esc(visual.payout!.key)}" style="margin-top:2px;padding:2px;border:1px solid #f4c95b;border-radius:6px;background:#33280dcc;font-size:clamp(8px,2.1vw,11px);font-weight:900;color:#ffe49a;">${step.isMain ? 'Основна банка' : 'Странична банка'}: ${step.amount}</div>` : ''}
   </div>`
 }
 
-function feltCenterHtml(input: RenderSvaraActiveTableInput): string {
+function feltCenterContentHtml(input: RenderSvaraActiveTableInput): string {
   const round = input.snapshot?.round ?? null
   const roundLabel = round
     ? round.kind === 'reveal-choice'
@@ -374,18 +455,22 @@ function feltCenterHtml(input: RenderSvaraActiveTableInput): string {
   // Задание §3 — "в центъра на масата винаги се вижда общата сума на
   // ВСИЧКИ текущи банки" (текущ кръг + заключени + пренесени), не само
   // текущия кръг.
-  const grandTotal = (potTotal ?? 0) + lockedTotal + carried
+  const remainingPayoutTotal = input.resultVisual!.remainingSteps.reduce((sum, step) => sum + step.amount, 0)
+  const grandTotal = (potTotal ?? 0) + lockedTotal + carried + remainingPayoutTotal
   // grid-area:center — централната grid клетка (остатъчното пространство
   // между top/bottom редовете и left/right колоните), никога не се
   // застъпва с тях по конструкция (виж slotAnchorStyle по-горе).
-  return `<div data-svara-felt-center="1" style="grid-area:center;justify-self:center;align-self:center;text-align:center;max-width:100%;overflow:hidden;pointer-events:none;padding:0 2px;">
-    <div style="font-size:clamp(9px,2.6vw,14px);font-weight:900;color:rgba(255,255,255,.85);text-shadow:0 1px 3px rgba(0,0,0,.8);white-space:nowrap;">${esc(roundLabel)}</div>
+  return `${round?.kind === 'showdown-display' ? '' : `<div style="font-size:clamp(9px,2.6vw,14px);font-weight:900;color:rgba(255,255,255,.85);text-shadow:0 1px 3px rgba(0,0,0,.8);">${esc(roundLabel)}</div>`}
     ${grandTotal > 0 ? `<div style="margin-top:2px;font-size:clamp(11px,3.2vw,17px);font-weight:900;color:#f4c95b;text-shadow:0 1px 3px rgba(0,0,0,.8);">Банка: ${grandTotal}</div>` : ''}
     ${carried > 0 ? `<div style="margin-top:1px;font-size:clamp(8px,2.1vw,10px);color:rgba(255,255,255,.6);">+ пренесени ${carried}</div>` : ''}
     ${banksBreakdownHtml(input)}
-    ${showdownDisplayStatusHtml(round)}
+    ${showdownDisplayStatusHtml(round, input.resultVisual!)}
     ${deadlineStatusText(input.timing, input.serverNow, round)}
-  </div>`
+  `
+}
+
+function feltCenterHtml(input: RenderSvaraActiveTableInput): string {
+  return `<div data-svara-felt-center="1" style="grid-area:center;justify-self:center;align-self:center;text-align:center;max-width:100%;overflow:hidden;pointer-events:none;padding:0 2px;">${feltCenterContentHtml(input)}</div>`
 }
 
 const ACTION_BUTTON_STYLE: Record<'default' | 'primary' | 'danger', string> = {
@@ -428,7 +513,7 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   // Всички долни helper-и четат snapshot/timing от input — подаваме
   // нормализирания (matchId-проверен) вариант навсякъде, не суровия входен
   // обект, иначе guard-ът по-горе би бил заобиколен.
-  const safeInput: RenderSvaraActiveTableInput = { ...input, snapshot, timing }
+  const safeInput = safeResultInput({ ...input, snapshot, timing })
   const seats = snapshot?.seats ?? []
   const localSeatIndex = snapshot?.you.seatIndex ?? null
   const turnDeadline = timing?.deadlines.find((d) => d.kind === 'turn')
@@ -492,8 +577,8 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
       display:flex;
       flex-direction:column;
       gap:4px;
-      height:min(66dvh,620px);
-      min-height:320px;
+      height:${isResultRound(safeInput) ? 'min(78dvh,720px)' : 'min(66dvh,620px)'};
+      min-height:${isResultRound(safeInput) ? '340px' : '320px'};
       background:#050505;
       border-radius:16px;
       border:2px solid rgba(212,165,32,.4);
@@ -525,6 +610,7 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
       ${feltCenterHtml(safeInput)}
       ${seatsHtml}
       ${dealingOverlayHtml ? `<div data-svara-dealing-overlay="1" style="position:absolute;inset:0;pointer-events:none;z-index:5;">${dealingOverlayHtml}</div>` : ''}
+      <div data-svara-result-overlay="1" style="position:absolute;inset:0;pointer-events:none;z-index:6;">${payoutOverlayHtml(safeInput)}</div>
       ${resultBanner}
       <div data-svara-diagnostics="1" style="position:absolute;left:6px;bottom:6px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:9px;color:rgba(255,255,255,.35);z-index:1;">rev ${snapshot?.revision ?? '—'}</div>
     </div>

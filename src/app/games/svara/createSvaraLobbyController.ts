@@ -17,10 +17,12 @@ import { sharedServerClock } from '../../network/serverClock'
 import { playGameSound } from '../../audio/gameSoundSettings'
 import {
   renderSvaraActiveTable,
+  patchSvaraResultPresentation,
   SVARA_FOLD_BUBBLE_TOTAL_MS,
   SVARA_LOOK_FLIP_TOTAL_MS,
   type SvaraActiveFoldEffect,
   type SvaraActiveLookEffect,
+  type RenderSvaraActiveTableInput,
 } from './table/renderSvaraActiveTable'
 import { deriveSvaraActionButtons } from './table/svaraBettingActions'
 import { createSvaraBetAnimationTracker } from './table/svaraBetAnimationTracker'
@@ -103,6 +105,7 @@ export function createSvaraLobbyController(options: Options) {
     // Активната маса получава по-широк контейнер (нужно за landscape/desktop
     // без прекомерно разтягане, виж заданието §11/§12) — списъкът/чакащата
     // маса остават в по-тесния 860px panel layout от 2Б.3.7.2.
+    const flashes = Array.from(options.root.querySelectorAll<HTMLElement>('[data-svara-bet-flash]'))
     options.root.innerHTML = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(10px,2.4vw,32px);overflow-x:hidden;">
       <div style="max-width:${isActiveTable ? '1100px' : '860px'};margin:0 auto;">
         ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Нова маса</button></div>`}
@@ -111,7 +114,15 @@ export function createSvaraLobbyController(options: Options) {
       </div>
       ${createOpen ? renderCreateModal() : ''}
     </section>`
+    // Preserve the actual WAAPI nodes through countdown/look/fold renders.
+    // Replacing innerHTML used to truncate the 900ms flash at the next tick.
+    const flashScope = JSON.stringify([snapshot?.matchId, snapshot?.round?.roundId])
+    for (const flash of flashes) {
+      if (flash.dataset.svaraBetScope !== flashScope) continue
+      options.root.querySelector(`[data-svara-seat-index="${Number(flash.dataset.svaraBetFlash)}"] [data-svara-seat-flash-mount]`)?.appendChild(flash)
+    }
     wire()
+    ensureResultFrame()
   }
 
   function renderEmptyState(text: string): string {
@@ -177,6 +188,34 @@ export function createSvaraLobbyController(options: Options) {
   // затова rerender/reconnect никога не го рестартира (виж svaraCountdown.ts).
   let tickTimer: ReturnType<typeof setInterval> | null = null
   let tickIntervalMs: number | null = null
+  let resultFrame: number | null = null
+
+  function showingResult(): boolean {
+    const round = snapshot?.round
+    return myTable !== null && myTable.phase !== 'lobby' && snapshot?.matchId === myTable.matchId
+      && (round?.kind === 'showdown-display' || (round?.kind === 'reveal-choice' && round.decision === 'revealed'))
+  }
+
+  function patchResult(): void {
+    if (myTable && showingResult()) patchSvaraResultPresentation(options.root, activeTableInput(myTable))
+  }
+
+  function ensureResultFrame(): void {
+    const deadline = timing?.deadlines.find((entry) => entry.kind === 'showdown-display' || entry.kind === 'payout-display' || entry.kind === 'reveal-display')
+    const hasLiveResultDeadline = timing?.matchId === snapshot?.matchId && timing?.revision === snapshot?.revision
+      && deadline !== undefined && sharedServerClock.getServerNow() < deadline.deadlineAt
+    if (!showingResult() || !hasLiveResultDeadline) {
+      if (resultFrame !== null) cancelAnimationFrame(resultFrame)
+      resultFrame = null
+      return
+    }
+    if (resultFrame !== null || typeof requestAnimationFrame !== 'function') return
+    resultFrame = requestAnimationFrame(() => {
+      resultFrame = null
+      patchResult()
+      ensureResultFrame()
+    })
+  }
 
   // Задание §5/§9/§11 — докато дадена ЧИСТО презентационна анимация реално
   // тече (раздаване/look-flip/fold-fade), тиковете трябва да са достатъчно
@@ -210,7 +249,7 @@ export function createSvaraLobbyController(options: Options) {
     if (needsTick && (tickTimer === null || tickIntervalMs !== desiredIntervalMs)) {
       if (tickTimer !== null) clearInterval(tickTimer)
       tickIntervalMs = desiredIntervalMs
-      tickTimer = setInterval(() => render(), desiredIntervalMs)
+      tickTimer = setInterval(() => { if (showingResult()) patchResult(); else render() }, desiredIntervalMs)
     } else if (!needsTick && tickTimer !== null) {
       clearInterval(tickTimer)
       tickTimer = null
@@ -218,7 +257,7 @@ export function createSvaraLobbyController(options: Options) {
     }
   }
 
-  function renderActiveTable(table: SvaraPublicTable): string {
+  function activeTableInput(table: SvaraPublicTable): RenderSvaraActiveTableInput {
     const serverNow = sharedServerClock.getServerNow()
     const dealingDeadlineAt = timing?.deadlines.find((deadline) => deadline.kind === 'dealing')?.deadlineAt ?? null
     const dealingVisual = computeSvaraDealingVisualState(snapshot?.round ?? null, dealingDeadlineAt, serverNow, snapshot?.seats ?? [])
@@ -230,7 +269,7 @@ export function createSvaraLobbyController(options: Options) {
     const activeLookEffectInput: SvaraActiveLookEffect | null = activeLookEffectStartedAtServerMs === null
       ? null
       : { elapsedMs: serverNow - activeLookEffectStartedAtServerMs }
-    return renderSvaraActiveTable({
+    return {
       table,
       snapshot,
       timing,
@@ -241,10 +280,14 @@ export function createSvaraLobbyController(options: Options) {
       leavePending,
       actionPending,
       dealingVisual,
-      activeFoldEffects: activeFoldEffectsInput,
-      activeLookEffect: activeLookEffectInput,
+      activeFoldEffects: showingResult() ? [] : activeFoldEffectsInput,
+      activeLookEffect: showingResult() ? null : activeLookEffectInput,
       reducedMotion,
-    })
+    }
+  }
+
+  function renderActiveTable(table: SvaraPublicTable): string {
+    return renderSvaraActiveTable(activeTableInput(table))
   }
 
   // Задание §13 — floating "+N" над аватара, плавно смалява/избледнява към
@@ -254,6 +297,8 @@ export function createSvaraLobbyController(options: Options) {
     const mount = options.root.querySelector<HTMLElement>(`[data-svara-seat-index="${seatIndex}"] [data-svara-seat-flash-mount]`)
     if (!mount) return
     const el = document.createElement('div')
+    el.dataset.svaraBetFlash = String(seatIndex)
+    el.dataset.svaraBetScope = JSON.stringify([snapshot?.matchId, snapshot?.round?.roundId])
     el.textContent = `+${amount}`
     el.style.cssText = 'position:absolute;left:50%;top:4%;transform:translate(-50%,0);font-size:clamp(16px,5vw,26px);font-weight:900;color:#f4c95b;text-shadow:0 2px 6px rgba(0,0,0,.9);pointer-events:none;z-index:10;white-space:nowrap;'
     mount.appendChild(el)
@@ -434,8 +479,8 @@ export function createSvaraLobbyController(options: Options) {
     setSnapshot(next: SvaraMatchSnapshotMessage | null) {
       snapshot = next
       render()
-      flushBetAnimations()
       flushFoldAndLookAnimations()
+      flushBetAnimations()
     },
     setTiming(next: SvaraMatchTimingMessage | null) { timing = next; render() },
     showMessage(next: string) { joinPendingMatchId = null; message = next; render() },
@@ -463,6 +508,7 @@ export function createSvaraLobbyController(options: Options) {
     isInActiveMatch(): boolean { return myTable !== null && myTable.phase !== 'lobby' },
     requestExit,
     destroy() {
+      if (resultFrame !== null) { cancelAnimationFrame(resultFrame); resultFrame = null }
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
       reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)
       if (fullscreenSupported) document.removeEventListener('fullscreenchange', handleFullscreenChange)

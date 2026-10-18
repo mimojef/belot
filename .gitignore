@@ -12,6 +12,9 @@ dist
 dist-ssr
 *.local
 
+# Local Chromium component QA artifacts.
+/tmp/svara-result-browser/
+
 # scripts/deployFrontendAtomic.sh runtime artifacts — DEPLOY_ROOT по
 # подразбиране съвпада с repo checkout-а (/var/www/belot-v2), значи тези
 # директории се появяват като sibling-и на src/, server/ и т.н. Leading
