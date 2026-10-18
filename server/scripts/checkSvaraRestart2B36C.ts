@@ -32,6 +32,7 @@ type User = { profileId: string; cookie: string; email: string }
 type Client = { user: User; ws: WebSocket; frames: any[]; received: any[]; protocolFailure?: string }
 type Running = { child: ChildProcess; nonce: string; pid: number; events: any[]; output: string; recovery?: string; exited: Promise<void>; exitCode?: number | null; signal?: string | null; identity: boolean }
 let running: Running | null = null
+const currentRunning = (): Running | null => running
 const clients: Client[] = [], users: User[] = []
 const port = await new Promise<number>((done, reject) => {
   const listener = createServer(); listener.once('error', reject)
@@ -232,6 +233,23 @@ async function finishDealingIfNeeded(matchId: string) {
   const round = saved(matchId).state.round as any
   if (round && (round.kind === 'ordinary' || round.kind === 'svara') && round.dealing) await advance(svaraDealingAnimationMs(round.participants.length))
 }
+// Exercise every real lifecycle boundary; never jump over a presentation phase.
+async function finishShowdownDisplays(matchId: string) {
+  for (let i = 0; i < 16; i++) {
+    const stored = saved(matchId), round = stored.state.round
+    if (round?.kind !== 'showdown-display') return
+    const kind = round.phase === 'showdown' ? 'showdown-display' : 'payout-display'
+    const deadline = stored.deadlines.find((d) => d.kind === kind)
+    assert(deadline, `Missing ${kind} absolute deadline`)
+    const duration = round.phase === 'showdown' ? 3000 : Math.max(1, round.payoutSteps.length) * 1200
+    assert.equal(deadline.deadlineAt - now, duration)
+    await advance(duration - 1)
+    same(saved(matchId), stored, `${kind} closed before its absolute deadline`)
+    await advance(1)
+    assert(saved(matchId).revision > stored.revision, `${kind} did not advance at its deadline`)
+  }
+  throw new Error('Unbounded showdown/all-in continuation')
+}
 async function createTable(peers: Client[], entryFee = 1000, start = true): Promise<string> {
   const result = await ask(peers[0]!, { type: 'create_svara_table', requestId: randomUUID(), capacity: peers.length, entryFee, entryPercent: 1, startMode: 'manual' }, 'svara_table_updated')
   const matchId = result.table.matchId
@@ -239,7 +257,7 @@ async function createTable(peers: Client[], entryFee = 1000, start = true): Prom
   if (start) { await ask(peers[0]!, { type: 'start_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated'); await finishDealingIfNeeded(matchId) }
   await snapshot(peers[0]!, matchId); return matchId
 }
-async function play(client: Client, matchId: string, command: any, commandId = randomUUID(), expectedRevision = saved(matchId).revision) {
+async function play(client: Client, matchId: string, command: any, commandId: string = randomUUID(), expectedRevision = saved(matchId).revision) {
   send(client, { type: 'submit_svara_command', matchId, commandId, expectedRevision, command })
   const result = await frame(client, (f) => ['svara_command_result', 'svara_command_error'].includes(f.type) && f.commandId === commandId)
   if (result.type === 'svara_command_result') {
@@ -347,7 +365,8 @@ try {
     assert.equal((await timing(peers[1]!, matchId)).deadlines[0].deadlineAt, before.deadlines[0]!.deadlineAt, 'the original absolute dealing deadline must survive a forced crash')
     await advance(svaraDealingAnimationMs(peers.length))
     const after = saved(matchId)
-    assert.equal(after.state.round?.dealing, false); assert.equal(after.revision, before.revision + 1, 'exactly one finish-dealing transition')
+    assert(after.state.round?.kind === 'ordinary')
+    assert.equal(after.state.round.dealing, false); assert.equal(after.revision, before.revision + 1, 'exactly one finish-dealing transition')
     assert.equal(after.state.ledger.filter((e) => e.type === 'entry').length, before.state.ledger.filter((e) => e.type === 'entry').length, 'no repeated entry charge')
     assert.equal(JSON.stringify((after.state.round as any).hands), JSON.stringify((before.state.round as any).hands), 'no re-deal across the crash')
     integrity(); await stop()
@@ -412,11 +431,14 @@ try {
     await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3)); const ids = peers.map((p) => p.user.profileId)
     await ipc('decks', { decks: [deck([ids[1]!, ids[2]!, ids[0]!], { [ids[1]!]: 'KS QS JS', [ids[0]!]: 'KH QH JH', [ids[2]!]: '8C 9D 10H' })] })
     const matchId = await createTable(peers); await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 1 }); await act(peers[2]!, matchId, { kind: 'fold' }); await act(peers[0]!, matchId, { kind: 'call' }); await fence(peers[0]!)
+    assert.equal(saved(matchId).state.round?.kind, 'showdown-display')
+    await finishShowdownDisplays(matchId)
     const before = saved(matchId); assert.equal(before.state.round?.kind, 'svara-joining'); const deadline = before.deadlines.find((d) => d.kind === 'svara-joining')!
+    assert.equal(deadline.deadlineAt - now, 15000)
     // 2Б.3.7.4Б: the match spent svaraDealingAnimationMs(3)=3950ms in the
     // server dealing-presentation phase before the betting sequence below
     // could even start; restart 7000ms into the 15s joining window, same as before.
-    await stop(); await start(BASE + svaraDealingAnimationMs(3) + 7000); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), before, 'Joining state reset')
+    await stop(); await start(deadline.deadlineAt - 8000); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), before, 'Joining state reset')
     assert.equal((await timing(peers[2]!, matchId)).deadlines[0].remainingMs, 8000)
     await stop('crash'); await start(deadline.deadlineAt + 1); peers = await reconnect(users.slice(0, 3))
     const after = saved(matchId); assert.equal(after.state.round?.kind, 'svara'); assert.equal(after.revision, before.revision + 2)
@@ -457,8 +479,11 @@ try {
     }
     for (const p of peers.slice(0, 2)) { await ok(p, matchId, { type: 'look' }); await act(p, matchId, { kind: 'all-in' }) }
     await ok(peers[2]!, matchId, { type: 'look' }); const lost = await trap(peers[2]!, matchId, { type: 'act', action: { kind: 'all-in' } })
-    const before = saved(matchId); assert.equal(before.state.round?.kind, 'allin-svara'); assert.equal(before.state.lockedPots.length, 2); await stop('crash')
-    await start(now, '1', [tie, decided]); peers = await reconnect(users.slice(0, 3)); const after = saved(matchId)
+    const before = saved(matchId); assert.equal(before.state.round?.kind, 'showdown-display'); assert.equal(before.state.lockedPots.length, 2); await stop('crash')
+    await start(now, '1', [tie, decided]); peers = await reconnect(users.slice(0, 3))
+    same(saved(matchId), before, 'Pending all-in showdown changed on recovery')
+    await finishShowdownDisplays(matchId)
+    const after = saved(matchId)
     assert.equal(after.state.history.filter((r) => r.kind === 'allin-svara').length, 2); assert.equal(after.state.ledger.filter((e) => e.type === 'entry').length, 11)
     assert.equal((await play(peers[2]!, matchId, { type: 'act', action: { kind: 'all-in' } }, lost.commandId, lost.revision)).status, 'duplicate'); same(saved(matchId), after, 'All-in duplicate changed settled pots')
     await stop(); await start(now); same(saved(matchId), after, 'Settled main/side pots repeated after restart'); integrity(); await stop()
@@ -513,16 +538,17 @@ try {
     assert.equal(db((database) => digest(database.prepare('SELECT * FROM svara_match_snapshots').all())), before); integrity(); await stop()
   })
 } catch {
-  const diagnostic = { case: currentCase, starts, gracefulStops, crashes, passed, failed, pid: running?.pid, recovery: running?.recovery,
-    exited: running?.exitCode, startupReady: running?.output.includes('[http] Belot V2 server is running'), shutdownSeen: running?.output.includes('[shutdown] signal=SIGTERM') }
+  const active = currentRunning()
+  const diagnostic = { case: currentCase, starts, gracefulStops, crashes, passed, failed, pid: active?.pid, recovery: active?.recovery,
+    exited: active?.exitCode, startupReady: active?.output.includes('[http] Belot V2 server is running'), shutdownSeen: active?.output.includes('[shutdown] signal=SIGTERM') }
   await mkdir(join(serverRoot, '../tmp'), { recursive: true })
   const artifact = join(serverRoot, '../tmp', `svara-restart-${randomUUID()}-failure.json`)
   await writeFile(artifact, JSON.stringify(diagnostic, null, 2))
   console.error(`Sanitized diagnostic: ${artifact}`)
   process.exitCode = 1
 } finally {
-  if (running) {
-    const value = running
+  const value = currentRunning()
+  if (value) {
     try { identity(value, false); if (value.exitCode === undefined) value.child.kill('SIGKILL'); await value.exited } finally { for (const client of clients.splice(0)) client.ws.terminate(); running = null }
   }
   await portFree()

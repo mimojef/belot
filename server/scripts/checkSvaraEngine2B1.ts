@@ -21,6 +21,7 @@ import { execFileSync } from 'node:child_process'
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import ts from 'typescript'
 import {
   compareSvaraHands,
   createCryptoSvaraRandomSource,
@@ -536,11 +537,31 @@ console.log('\n=== H. изолация ===')
 const here = dirname(fileURLToPath(import.meta.url))
 const engineDir = join(here, '..', 'src', 'games', 'svara', 'engine')
 
+// Parse module edges, never prose/comments. Include type imports, re-exports,
+// side-effect imports, import() and require(), not just `from '...'`.
+function moduleEdges(source: string): string[] {
+  const file = ts.createSourceFile('guard.ts', source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX)
+  const edges: string[] = []
+  const add = (node: ts.Node | undefined) => {
+    assert(!!node && ts.isStringLiteralLike(node), 'Unresolved module expression in isolation guard')
+    edges.push((node as ts.StringLiteralLike).text)
+  }
+  function visit(node: ts.Node): void {
+    if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) { if (node.moduleSpecifier) add(node.moduleSpecifier) }
+    if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) add(node.moduleReference.expression)
+    if (ts.isImportTypeNode(node) && ts.isLiteralTypeNode(node.argument)) add(node.argument.literal)
+    if (ts.isCallExpression(node) && (node.expression.kind === ts.SyntaxKind.ImportKeyword
+      || ts.isIdentifier(node.expression) && node.expression.text === 'require')) add(node.arguments[0])
+    ts.forEachChild(node, visit)
+  }
+  visit(file)
+  return edges
+}
+
 check('H1. двигателят импортира само собствени модули и node:crypto (без HTTP/WS/DB/UI)', () => {
   for (const file of readdirSync(engineDir).filter((f) => f.endsWith('.ts'))) {
     const source = readFileSync(join(engineDir, file), 'utf8')
-    for (const match of source.matchAll(/from '([^']+)'/g)) {
-      const spec = match[1]!
+    for (const spec of moduleEdges(source)) {
       assert(spec === 'node:crypto' || /^\.\/svara[A-Za-z]+\.js$/.test(spec), `${file} imports ${spec}`)
     }
   }
@@ -548,16 +569,32 @@ check('H1. двигателят импортира само собствени �
 
 check('H2. клиентът не импортира двигателя; Белот/Ludo/Свара-достъп непроменени спрямо 6859a06', () => {
   const projectRoot = join(here, '..', '..')
-  let clientRefs = ''
-  try {
-    clientRefs = execFileSync('git', ['grep', '-l', 'games/svara/engine', '--', 'src'], { cwd: projectRoot, encoding: 'utf8' }).trim()
-  } catch (error) {
-    // git grep връща код 1, когато няма съвпадения — това е очакваното.
-    if ((error as { status?: number }).status !== 1) throw error
+  const clientRefs: string[] = []
+  function scan(directory: string) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory()) scan(path)
+      else if (/\.[cm]?[jt]sx?$/.test(entry.name)) {
+        for (const spec of moduleEdges(readFileSync(path, 'utf8'))) {
+          if (/games\/svara\/engine(?:\/|$)/.test(spec.replaceAll('\\', '/'))) clientRefs.push(`${path}: ${spec}`)
+        }
+      }
+    }
   }
-  assert(clientRefs === '', `client imports engine: ${clientRefs}`)
+  scan(join(projectRoot, 'src'))
+  assert(clientRefs.length === 0, `client imports engine: ${clientRefs.join(', ')}`)
   const changed = execFileSync('git', ['diff', '--name-only', '6859a06', '--', 'src/app/activeRoom', 'src/app/games/ludo', 'server/src/game', 'server/src/games/svara/svaraAccess.ts', 'server/src/games/svara/svaraFeatureFlag.ts', 'server/src/games/svara/handleSvaraHttpRequest.ts'], { cwd: projectRoot, encoding: 'utf8' }).trim()
   assert(changed === '', `changed: ${changed}`)
+})
+
+check('H3. module guard ignores comments/strings and detects every supported import form', () => {
+  assert(moduleEdges(`// import x from 'bad';\n/* require('bad') */\nconst text = "from 'bad'";`).length === 0, 'prose counted as import')
+  const forms = [`import 'bad'`, `import type { X } from 'bad'`, `export * from 'bad'`, `export { x } from 'bad'`,
+    `import('bad')`, `require('bad')`, `type X = import('bad').X`, `import x = require('bad')`]
+  for (const source of forms) assert(moduleEdges(source).join() === 'bad', source)
+  let rejected = false
+  try { moduleEdges('import(variablePath)') } catch { rejected = true }
+  assert(rejected, 'computed imports silently skipped')
 })
 
 console.log(`\nPassed: ${passed}  Failed: ${failed}`)

@@ -15,6 +15,7 @@
     "check:svara-betting-actions": "npx tsx scripts/checkSvaraBettingActions.ts",
     "check:svara-client-real-integration": "npx tsx scripts/checkSvaraClientRealIntegration.ts",
     "check:svara-integration-infrastructure": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraRealIntegrationHarness.ts",
+    "check:svara-multiplayer-real": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraMultiplayerReal.ts",
     "check:svara-dealing-animation": "npx tsx scripts/checkSvaraDealingAnimation.ts",
     "check:svara-result-animation": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraResultAnimation.ts",
     "check:svara-result-animation-browser": "node server/node_modules/tsx/dist/cli.mjs scripts/checkSvaraResultAnimationBrowser.ts",

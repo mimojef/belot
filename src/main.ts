@@ -7180,6 +7180,12 @@ lobby = createLobbyFlowController({
   onWatchBelotRoom: (roomId) => { client.watchBelotRoom(roomId) },
   onUnwatchBelotRoom: (roomId) => { client.unwatchBelotRoom(roomId) },
   onSvaraTablesOpen: () => { client.requestSvaraTablesList() },
+  onSvaraReconnectResolved: () => {
+    shouldReloadLobbyOnReconnect = false
+    pwaIsReconnectingActiveRoom = false
+    hideOfflineConnectionOverlay()
+    requestPwaUpdateApplyAttempt()
+  },
   // Минимален create modal (viж createSvaraLobbyController.ts) събира само
   // capacity+entryFee — entryPercent/startMode остават фиксирани разумни
   // defaults до следващ подетап с пълна настройка на масата (§17 — не
@@ -7818,6 +7824,13 @@ function isBelotSpectatorSessionActive(): boolean {
   return lobby.getSpectatingBelotRoomId() !== null || activeRoom.isSpectatorView()
 }
 
+function isSvaraReconnectContext(): boolean {
+  // A remaining Svara result/cache cannot override another active game.
+  return !activeRoom.hasActiveRoom()
+    && !lobby.hasActiveLudoMatch()
+    && (lobby.hasPendingSvaraReconnect() || lobby.getPwaUpdateSafetySnapshot().hasActiveSvaraMatch)
+}
+
 // Phase 3B.2 (D8): ЕДИНСТВЕНИЯТ server-driven spectator termination път
 // (belot_spectate_ended / belot_spectate_denied). Редът е съществен:
 // 1) activeRoom teardown ПЪРВО (view, анимации, body-level artifacts) — докато
@@ -8250,9 +8263,19 @@ client = createGameServerClient({
       isZombieBidReconnectInFlight: wasZombieBidReconnect,
       isBelotSpectatorReconnectInFlight: wasBelotSpectatorReconnect,
       spectatingBelotRoomId: lobby.getSpectatingBelotRoomId(),
+      hasActiveSvaraMatch: isSvaraReconnectContext(),
       shouldReloadLobbyOnReconnect,
       hasActiveRoom: activeRoom.hasActiveRoom(),
     })
+
+    if (openDecision === 'svara-resync') {
+      shouldReloadLobbyOnReconnect = false
+      // The connected handler requests membership; snapshot + timing finish
+      // recovery. Opening a transport alone does not authorize the old view.
+      if (!lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
+      lobby.setConnected(true)
+      return
+    }
 
     if (openDecision === 'zombie-bid-resume') {
       shouldReloadLobbyOnReconnect = false
@@ -8336,8 +8359,18 @@ client = createGameServerClient({
 
     const closeDecision = decideSocketCloseAction({
       isBelotSpectatorSessionActive: isBelotSpectatorSessionActive(),
+      hasActiveSvaraMatch: isSvaraReconnectContext(),
       hasActiveRoom: activeRoom.hasActiveRoom(),
     })
+
+    if (closeDecision === 'svara-reconnect') {
+      lobby.beginSvaraReconnect()
+      shouldReloadLobbyOnReconnect = false
+      pwaIsReconnectingActiveRoom = true
+      showOfflineConnectionOverlay()
+      scheduleServerReconnect()
+      return
+    }
 
     if (closeDecision === 'belot-spectator-reconnect') {
       // Phase 3B.2 (D2): spectator session state се пази; НЕ се насрочва
@@ -9626,9 +9659,10 @@ void loadGuestTrialStatus().finally(() => {
   let consecutiveNetworkFailures = 0
 
   function showOfflineOverlay(): void {
+    if (isSvaraReconnectContext() && !lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
     // Phase 3B.2 (D2): активна Belot spectator сесия НЕ насрочва forced
     // lobby reload — възстановява се чрез socket reconnect + re-watch.
-    if (shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive())) {
+    if (shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive(), isSvaraReconnectContext())) {
       shouldReloadLobbyOnReconnect = true
     }
     if (overlayEl) return
@@ -9681,7 +9715,11 @@ void loadGuestTrialStatus().finally(() => {
         consecutiveNetworkFailures = 0
         if (overlayEl !== null && shouldReloadLobbyOnReconnect) {
           forceOfflineLobbyReload()
-        } else if (overlayEl !== null && !shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive())) {
+        } else if (overlayEl !== null && isSvaraReconnectContext()) {
+          if (client.isConnected()) {
+            client.requestSvaraTablesList()
+          } else scheduleServerReconnect()
+        } else if (overlayEl !== null && !shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive(), isSvaraReconnectContext())) {
           // Spectator: мрежата е обратно — само махни overlay-я; socket
           // reconnect-ът re-watch-ва същата маса.
           hideOfflineOverlay()
@@ -9702,13 +9740,29 @@ void loadGuestTrialStatus().finally(() => {
   }
 
   function hardReload(): void {
+    if (isSvaraReconnectContext()) {
+      if (!lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
+      shouldReloadLobbyOnReconnect = false
+      // Retry a real transport, then revalidate membership via connected.
+      // Never re-submit a game command or infer that the old seat still exists.
+      client.disconnect()
+      scheduleServerReconnect()
+      return
+    }
     forceOfflineLobbyReload()
     // Изчисти navigation кеша на SW за да се вземе свеж index.html от мрежата
   }
 
   // Автоматично възстановяване при 'online' — за активна spectator сесия без
-  // reload (state-ът е ephemeral); explicit "Опитай отново" остава hard reload.
+  // reload (state-ът е ephemeral). Svara чака сървърно потвърждение; за
+  // останалите екрани explicit "Опитай отново" остава hard reload.
   function handleBrowserOnline(): void {
+    if (isSvaraReconnectContext()) {
+      if (!lobby.hasPendingSvaraReconnect()) lobby.beginSvaraReconnect()
+      if (client.isConnected()) client.requestSvaraTablesList()
+      else scheduleServerReconnect()
+      return
+    }
     if (!shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive())) {
       hideOfflineOverlay()
       return

@@ -2,7 +2,8 @@
 // onClose/onOpen + offline overlay). Изнесени тук, за да са unit-testable
 // без DOM/socket — main.ts само изпълнява ефектите на върнатото решение.
 //
-// Phase 3B.2 (D2): активна Belot spectator сесия е ЕДИНСТВЕНОТО изключение
+// Активна Svara маса се презаверява чрез нейния read-only протокол.
+// Phase 3B.2 (D2): активна Belot spectator сесия е отделно изключение
 // от established global политиката "реален disconnect -> forced lobby
 // reload": spectator state-ът е ephemeral (няма reconnectToken/resume_room),
 // затова reload би го унищожил. Вместо това spectator-ът се reconnect-ва и
@@ -11,6 +12,7 @@
 // behavior equivalent на предишния inline код в main.ts.
 
 export type SocketCloseDecision =
+  | 'svara-reconnect'
   /** Spectator: reconnect без forced lobby reload; spectator session се пази. */
   | 'belot-spectator-reconnect'
   /** Participant в активна стая: established reload-on-reconnect + resume. */
@@ -21,13 +23,16 @@ export type SocketCloseDecision =
 export function decideSocketCloseAction(input: {
   isBelotSpectatorSessionActive: boolean
   hasActiveRoom: boolean
+  hasActiveSvaraMatch?: boolean
 }): SocketCloseDecision {
   if (input.isBelotSpectatorSessionActive) return 'belot-spectator-reconnect'
   if (input.hasActiveRoom) return 'active-room-reconnect'
+  if (input.hasActiveSvaraMatch) return 'svara-reconnect'
   return 'lobby-reconnect'
 }
 
 export type SocketOpenDecision =
+  | 'svara-resync'
   /** Explicit bid-recovery reconnect: тих resume_room в същата стая (непроменено). */
   | 'zombie-bid-resume'
   /** Spectator: re-watch на същата маса (watch_belot_room), НИКОГА resume_room/reload. */
@@ -46,11 +51,13 @@ export function decideSocketOpenAction(input: {
   spectatingBelotRoomId: string | null
   shouldReloadLobbyOnReconnect: boolean
   hasActiveRoom: boolean
+  hasActiveSvaraMatch?: boolean
 }): SocketOpenDecision {
   if (input.isZombieBidReconnectInFlight && input.hasActiveRoom) return 'zombie-bid-resume'
   if (input.isBelotSpectatorReconnectInFlight) {
     return input.spectatingBelotRoomId !== null ? 'belot-spectator-rewatch' : 'belot-spectator-session-lost'
   }
+  if (input.hasActiveSvaraMatch && !input.hasActiveRoom) return 'svara-resync'
   if (input.shouldReloadLobbyOnReconnect) return 'forced-lobby-reload'
   if (input.hasActiveRoom) return 'active-room-resume'
   return 'lobby'
@@ -60,9 +67,10 @@ export function decideSocketOpenAction(input: {
  * Offline overlay-ят (offline event / network health monitor) по дизайн
  * насрочва forced lobby reload при възстановяване. За активна spectator
  * сесия — не: overlay-ят може да се покаже, но възстановяването минава през
- * socket reconnect + re-watch. Explicit "Опитай отново" click остава
+ * socket reconnect + re-watch. Svara изчаква списък с членство, snapshot и
+ * timing; нейният retry възстановява WS. Останалите retry пътища остават
  * user-driven hard reload.
  */
-export function shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive: boolean): boolean {
-  return !isBelotSpectatorSessionActive
+export function shouldOfflineRecoveryForceLobbyReload(isBelotSpectatorSessionActive: boolean, hasActiveSvaraMatch = false): boolean {
+  return !isBelotSpectatorSessionActive && !hasActiveSvaraMatch
 }

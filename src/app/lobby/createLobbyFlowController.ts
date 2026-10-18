@@ -984,6 +984,7 @@ export type CreateLobbyFlowControllerOptions = {
   // старт, индивидуалния snapshot/timing и реалните участнически команди
   // (bet/fold/look/all-in/request-return/...).
   onSvaraTablesOpen?: () => void
+  onSvaraReconnectResolved?: () => void
   onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number) => void
   onSvaraTableJoin?: (matchId: string) => void
   onSvaraTableLeave?: (matchId: string) => void
@@ -1596,6 +1597,8 @@ export type LobbyFlowController = {
     hasActiveLudoMatch: boolean
     hasActiveSvaraMatch: boolean
   }
+  beginSvaraReconnect: () => boolean
+  hasPendingSvaraReconnect: () => boolean
   /**
    * Реалното съществуване на активния Ludo gameplay controller-a (mirror на
    * getPwaUpdateSafetySnapshot's hasActiveLudoMatch поле, вече изложен и
@@ -3648,6 +3651,26 @@ export function createLobbyFlowController(
   // openSvaraLobbyOverlay) — без да чакаме нов round-trip.
   let _svaraLastSnapshot: SvaraMatchSnapshotMessage | null = null
   let _svaraLastTiming: SvaraMatchTimingMessage | null = null
+  // This is only the view to revalidate, never proof of server membership.
+  let _svaraReconnect: { matchId: string; listed: boolean; snapshotRevision: number | null } | null = null
+  const _svaraDismissedMatches = new Set<string>()
+  function beginSvaraReconnect(): boolean {
+    if (state.currentScreen !== 'svara') return false
+    const matchId = _svaraLobbyController?.getMyTableId() ?? _svaraLastSnapshot?.matchId
+    if (!matchId || _svaraDismissedMatches.has(matchId)) return false
+    _svaraReconnect = { matchId, listed: false, snapshotRevision: null }
+    return true
+  }
+  function clearSvaraView(): void {
+    _svaraLastSnapshotRevision = null
+    _svaraLastSnapshot = null
+    _svaraLastTiming = null
+    _svaraLobbyController?.setMyTable(null)
+  }
+  function finishSvaraReconnect(): void {
+    _svaraReconnect = null
+    options.onSvaraReconnectResolved?.()
+  }
   options.root.addEventListener('click', (event) => {
     const target = event.target
     if (!(target instanceof Element)) return
@@ -20420,6 +20443,7 @@ export function createLobbyFlowController(
   function handleServerMessage(message: ServerMessage): boolean {
     if (message.type === 'connected') {
       state.errorText = null
+      if (_svaraReconnect) options.onSvaraTablesOpen?.()
       // Виж _isExpectingLudoMatchRestore doc коментара при декларацията му —
       // тази проба е "blind" (никакво предварително известие от сървъра, че
       // за профила изобщо съществува Ludo match), затова резултантен
@@ -20511,14 +20535,36 @@ export function createLobbyFlowController(
     // mount презаявява tables-list-а, от който контролерът сам разпознава
     // собствена активна/чакаща маса — виж setTables в createSvaraLobbyController).
     if (message.type === 'svara_tables_list') {
+      if (_svaraReconnect) {
+        const profileId = options.getAuthSession?.()?.profile.profileId
+        const owned = message.tables.find((table) => table.matchId === _svaraReconnect!.matchId
+          && table.players.some((p) => p.playerId === profileId && p.status !== 'exited'))
+        if (!owned) {
+          _svaraDismissedMatches.add(_svaraReconnect.matchId)
+          clearSvaraView()
+          finishSvaraReconnect()
+        } else {
+          _svaraReconnect.listed = true
+          options.onSvaraTableStateRequest?.(owned.matchId)
+        }
+      }
       _svaraLobbyController?.setTables(message.tables)
       return true
     }
     if (message.type === 'svara_table_updated') {
+      // A fresh server ACK of an explicit join may re-admit a previously
+      // left waiting table. Passive stale snapshots cannot do so.
+      if (message.requestId && message.table.players.some((p) => p.playerId === options.getAuthSession?.()?.profile.profileId && p.status !== 'exited')) {
+        _svaraDismissedMatches.delete(message.table.matchId)
+      }
       _svaraLobbyController?.setMyTable(message.table)
       return true
     }
     if (message.type === 'svara_table_left') {
+      const currentId = _svaraReconnect?.matchId ?? _svaraLobbyController?.getMyTableId() ?? _svaraLastSnapshot?.matchId
+      if (currentId && currentId !== message.matchId) return true
+      _svaraDismissedMatches.add(message.matchId)
+      if (_svaraReconnect?.matchId === message.matchId) finishSvaraReconnect()
       _svaraLastSnapshotRevision = null
       // Изчистваме и кеша (не само revision tracker-а) — иначе бъдещ mount
       // (друга маса) би reply-нал snapshot/timing данни от ВЕЧЕ напуснатата
@@ -20530,6 +20576,12 @@ export function createLobbyFlowController(
       return true
     }
     if (message.type === 'svara_lobby_error') {
+      if (_svaraReconnect && ['match_not_found', 'not_a_participant', 'unauthenticated', 'forbidden_role', 'feature_disabled'].includes(message.code)) {
+        _svaraDismissedMatches.add(_svaraReconnect.matchId)
+        clearSvaraView()
+        finishSvaraReconnect()
+        if (['unauthenticated', 'forbidden_role', 'feature_disabled'].includes(message.code)) showSvaraPage()
+      }
       _svaraLobbyController?.showMessage(message.message)
       return true
     }
@@ -20553,14 +20605,25 @@ export function createLobbyFlowController(
       return true
     }
     if (message.type === 'svara_match_timing') {
+      const expected = _svaraReconnect?.matchId ?? _svaraLobbyController?.getMyTableId() ?? _svaraLastSnapshot?.matchId
+      if (_svaraDismissedMatches.has(message.matchId) || (expected && expected !== message.matchId)) return true
+      if (_svaraLastSnapshot?.matchId === message.matchId && message.revision < _svaraLastSnapshot.revision) return true
       // Кешираме БЕЗУСЛОВНО (виж _svaraLastTiming doc коментара при
       // декларацията) — reply-ва се в openSvaraLobbyOverlay() при mount,
       // независимо дали контролерът в момента е mount-нат.
       _svaraLastTiming = message
       _svaraLobbyController?.setTiming(message)
+      if (_svaraReconnect?.listed && _svaraReconnect.snapshotRevision === message.revision) finishSvaraReconnect()
       return true
     }
     if (message.type === 'svara_match_snapshot') {
+      const expected = _svaraReconnect?.matchId ?? _svaraLobbyController?.getMyTableId() ?? _svaraLastSnapshot?.matchId
+      if (_svaraDismissedMatches.has(message.matchId) || (expected && expected !== message.matchId)) return true
+      // Equal revisions still confirm a fresh connection, without replaying UI.
+      if (_svaraReconnect?.listed && message.matchId === _svaraReconnect.matchId
+        && (!_svaraLastSnapshot || message.revision >= _svaraLastSnapshot.revision)) {
+        _svaraReconnect.snapshotRevision = message.revision
+      }
       // Никога не презаписваме с равна/по-стара ревизия за СЪЩАТА маса
       // (напр. duplicate-command resend от сървъра, виж createSvaraLobby.ts
       // handle() reject-а на duplicate commandId, който пак праща snapshot).
@@ -23329,6 +23392,8 @@ export function createLobbyFlowController(
       void refreshSupportUnreadNow()
     },
     handleServerMessage,
+    beginSvaraReconnect,
+    hasPendingSvaraReconnect: () => _svaraReconnect !== null,
     getPwaUpdateSafetySnapshot: () => ({
       isSearching: state.isSearching,
       hasPrivateRoomInvite: state.privateRoomInvite !== null,
@@ -23345,7 +23410,11 @@ export function createLobbyFlowController(
       // Етап 2Б.3.7.3 — mirror на hasActiveLudoMatch точно над. Без това
       // полето координаторът не знаеше нищо за Свара и тихо презареждаше
       // mid-match (доказан реален проблем в real-browser QA).
-      hasActiveSvaraMatch: _svaraLobbyController?.isInActiveMatch() ?? false,
+      // A DOM remount must not lose the server-derived recovery context.
+      // This only defers navigation; membership is revalidated after reconnect.
+      hasActiveSvaraMatch: state.currentScreen === 'svara' && ((_svaraLobbyController?.isInActiveMatch() ?? false)
+        || (_svaraLastSnapshot !== null && _svaraLastSnapshot.phase !== 'lobby'
+          && !_svaraDismissedMatches.has(_svaraLastSnapshot.matchId))),
     }),
     hasActiveLudoMatch: () => _ludoController !== null,
     openGiftBackFromSender: (senderProfileId, displayNameHint) => openGiftBackFromSender(senderProfileId, displayNameHint),

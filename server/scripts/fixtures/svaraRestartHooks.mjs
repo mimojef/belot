@@ -3,9 +3,9 @@
 import { randomInt } from 'node:crypto'
 import { SVARA_ORDERED_DECK, svaraCardCode } from './server/dist/games/svara/engine/svaraCards.js'
 
-let configured = false, nonce, now, lostAck = null, blocked = false, service, shuffleRemaining = 0
+let configured = false, nonce, now, lostAck = null, blocked = false, service, runtime, shuffleRemaining = 0
 const jobs = [], decks = [], swaps = []
-const notify = (message) => process.send?.({ nonce, pid: process.pid, ...message })
+const notify = (message) => process.send?.({ nonce, pid: process.pid, parentPid: process.ppid, ...message })
 export const clock = {
   now: () => now,
   schedule(callback, delay) {
@@ -29,6 +29,7 @@ export const random = {
     return 0 // pin the first dealer outside a shuffle
   },
 }
+export function observeRuntime(value) { runtime = value; return value }
 
 export function decorateService(value) {
   if (!configured) throw new Error('Private restart harness is not configured')
@@ -56,7 +57,7 @@ export function decorateService(value) {
 }
 
 export function configure(config) {
-  if (configured || !process.send || !process.connected || process.ppid !== config.parentPid || typeof config.nonce !== 'string' || config.nonce.length < 32 ||
+  if (process.env.NODE_ENV !== 'test' || configured || !process.send || !process.connected || process.ppid !== config.parentPid || typeof config.nonce !== 'string' || config.nonce.length < 32 ||
     !Number.isSafeInteger(config.now)) throw new Error('Refusing non-harness execution')
   configured = true; nonce = config.nonce; now = config.now
   decks.push(...(config.decks ?? []))
@@ -65,6 +66,10 @@ export function configure(config) {
     try {
       let result
       switch (message.command) {
+        case 'runtime-status': {
+          if (!runtime) throw new Error('No observed private runtime')
+          result = { matchIds: runtime.listMatchIds() }; break
+        }
         case 'decks': decks.push(...message.decks); result = { queued: decks.length }; break
         case 'arm-ack': lostAck = message.commandId; result = { armed: true }; break
         case 'clock': {

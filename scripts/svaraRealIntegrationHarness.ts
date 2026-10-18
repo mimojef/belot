@@ -98,13 +98,28 @@ export function verifyHarnessIdentity(value: unknown, nonce: string, pid: number
   assert.equal(identity.parentPid, process.pid, 'Wrong parent PID')
 }
 
-export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typeof createIsolatedSvaraRoot>>) {
+export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typeof createIsolatedSvaraRoot>>, options: { featureFlag?: string | null; deckControl?: boolean } = {}) {
   const nonce = randomUUID()
+  if (options.deckControl) {
+    // Existing restart fixture, installed ONLY in this owned private copy.
+    // Use its deterministic RNG; retain the production real clock/lifecycle.
+    const hook = ownedHarnessPath(isolated.root, join(isolated.root, 'controlled-hooks.mjs'))
+    await cp(join(process.cwd(), 'server/scripts/fixtures/svaraRestartHooks.mjs'), hook)
+    const runtime = ownedHarnessPath(isolated.root, join(isolated.serverDir, 'dist/games/svara/runtime/svaraMatchRuntime.js'))
+    const actual = runtime.replace(/\.js$/, '.actual.js')
+    try { await statFile(actual) } catch { await cp(runtime, actual) }
+    await writeFile(runtime, "export * from './svaraMatchRuntime.actual.js';\nimport { createSvaraMatchRuntime as actual } from './svaraMatchRuntime.actual.js';\nimport { random, observeRuntime } from '../../../../../controlled-hooks.mjs';\nexport function createSvaraMatchRuntime(options = {}) { return observeRuntime(actual({ ...options, random })); }\n")
+    await writeFile(isolated.runnerPath, "import './backend-hooks.mjs';\nimport { configure } from './controlled-hooks.mjs';\nconfigure({ nonce: process.env.SVARA_HARNESS_NONCE, parentPid: Number(process.env.SVARA_HARNESS_PARENT_PID), now: Date.now() });\nawait import('./server/dist/index.js');\n")
+  }
+  const env = backendTestEnv(process.env, process.pid, nonce)
+  if (options.featureFlag === null) delete env.SVARA_TEST_ENABLED
+  else if (options.featureFlag !== undefined) env.SVARA_TEST_ENABLED = options.featureFlag
   const child: ChildProcess = spawn(process.execPath, [isolated.runnerPath], {
-    cwd: isolated.serverDir, env: backendTestEnv(process.env, process.pid, nonce), windowsHide: true,
+    cwd: isolated.serverDir, env, windowsHide: true,
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   })
   let output = '', identitySeen = false, listenerPort = 0, stopped = false, fault: unknown
+  const replies = new Map<string, { result?: unknown; error?: string }>()
   const exited = new Promise<number | null>((done) => child.once('exit', (code) => { stopped = true; done(code) }))
   child.on('error', (error) => { fault = error })
   child.stdout!.on('data', (chunk) => { output += chunk.toString() })
@@ -112,6 +127,8 @@ export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typ
   child.on('message', (message) => {
     try {
       verifyHarnessIdentity(message, nonce, child.pid!)
+      const reply = message as typeof message & { reply?: string; result?: unknown; error?: string }
+      if (reply.reply) replies.set(reply.reply, reply)
       if (message.event === 'identity') identitySeen = true
       if (message.event === 'listening') {
         assert(identitySeen && message.address?.address === '0.0.0.0' && message.address.port > 0)
@@ -146,7 +163,24 @@ export async function startIsolatedSvaraBackend(isolated: Awaited<ReturnType<typ
       const health = await response.json() as { ok?: boolean; gameWorkerLifecycle?: { state: string } }
       return response.ok && health.ok === true && health.gameWorkerLifecycle?.state === 'ready'
     }, 10000)
-    return { child, port: listenerPort, nonce, output: () => output, stop }
+    const fixtureCommand = async (command: string, fields: Record<string, unknown> = {}) => {
+      assert(options.deckControl && child.connected && !stopped, 'No private deck controller')
+      const id = randomUUID()
+      child.send({ nonce, id, command, ...fields })
+      await waitForHarnessCondition('private deck fixture reply', () => { if (fault) throw fault; return replies.has(id) }, 5000)
+      const reply = replies.get(id)!; replies.delete(id)
+      assert(!reply.error, 'Private deck fixture rejected command')
+      return reply.result
+    }
+    const queueDecks = async (decks: string[][]) => { await fixtureCommand('decks', { decks }) }
+    const runtimeStatus = async () => await fixtureCommand('runtime-status') as { matchIds: string[] }
+    const crash = async () => {
+      assert(identitySeen && listenerPort && child.spawnargs[1] === isolated.runnerPath, 'Refusing crash of an unverified backend')
+      assert(!stopped && child.pid, 'Owned backend is already stopped')
+      child.kill('SIGKILL'); await exited
+      await assertWildcardPortFree(listenerPort)
+    }
+    return { child, port: listenerPort, nonce, output: () => output, stop, crash, queueDecks, runtimeStatus }
   } catch (error) {
     try { await stop() } catch { if (!stopped) { child.kill('SIGKILL'); await exited } }
     throw error
@@ -161,11 +195,14 @@ const MIME: Record<string, string> = {
 
 /** Loopback-only same-origin gateway. HTTP bodies, cookies, Origin and real WS
  * upgrades go unchanged to the owned backend. No frame injection or routing to 3001. */
-export async function startSvaraGateway(distDir: string, backendPort: number) {
+export async function startSvaraGateway(distDir: string, backendPort: number | (() => number | null)) {
+  const targetPort = () => typeof backendPort === 'number' ? backendPort : backendPort()
   const sockets = new Set<Socket>()
   const server = createHttpServer(async (req, res) => {
     if (req.url?.startsWith('/api/') || req.url?.startsWith('/uploads/') || req.url === '/health') {
-      const upstream = httpRequest({ hostname: '127.0.0.1', port: backendPort, path: req.url, method: req.method, headers: req.headers }, (response) => {
+      const port = targetPort()
+      if (port === null) { res.writeHead(503); res.end(); return }
+      const upstream = httpRequest({ hostname: '127.0.0.1', port, path: req.url, method: req.method, headers: req.headers }, (response) => {
         res.writeHead(response.statusCode ?? 502, response.headers); response.pipe(res)
       })
       upstream.on('error', () => { res.writeHead(502); res.end() })
@@ -186,7 +223,9 @@ export async function startSvaraGateway(distDir: string, backendPort: number) {
   server.on('connection', (socket) => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)) })
   server.on('upgrade', (req, client, head) => {
     if (req.url !== '/ws') { client.destroy(); return }
-    const upstream = httpRequest({ hostname: '127.0.0.1', port: backendPort, path: req.url, headers: req.headers })
+    const port = targetPort()
+    if (port === null) { client.end('HTTP/1.1 503 Unavailable\r\nConnection: close\r\n\r\n'); return }
+    const upstream = httpRequest({ hostname: '127.0.0.1', port, path: req.url, headers: req.headers })
     upstream.on('upgrade', (response, socket, upstreamHead) => {
       sockets.add(socket); socket.once('close', () => sockets.delete(socket))
       client.write(`HTTP/1.1 101 Switching Protocols\r\n${response.rawHeaders.reduce((lines, value, index, all) => index % 2 === 0 ? `${lines}${value}: ${all[index + 1]}\r\n` : lines, '')}\r\n`)

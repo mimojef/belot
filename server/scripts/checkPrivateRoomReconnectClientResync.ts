@@ -108,11 +108,14 @@ if (onOpenMatch !== null) {
 
   const forceResubIdx = onOpenBody.indexOf('lobby.forceLobbyChatResubscribeIfOnLobbyScreen()')
   const resyncIdx = onOpenBody.indexOf('lobby.resyncPrivateRoomMembership()')
-  const pwaApplyIdx = onOpenBody.indexOf('requestPwaUpdateApplyAttempt()')
+  // Spectator/Svara recovery have separate early-return branches. Their PWA
+  // calls do not establish the effect order on the ordinary lobby path.
+  const cleanReconnectAt = onOpenBody.indexOf('if (!_isStandaloneDedicatedPath)')
+  const pwaApplyIdx = onOpenBody.indexOf('requestPwaUpdateApplyAttempt()', cleanReconnectAt)
 
   check(
-    '[4] resync call sits in the same "clean reconnect" branch as forceLobbyChatResubscribeIfOnLobbyScreen (after activeRoom.hasActiveRoom() early-return, inside the same !_isResetPasswordPath block)',
-    forceResubIdx !== -1 && resyncIdx !== -1 && resyncIdx > forceResubIdx,
+    '[4] resync follows chat resubscription in the ordinary dedicated-path guard',
+    cleanReconnectAt !== -1 && forceResubIdx > cleanReconnectAt && resyncIdx > forceResubIdx,
   )
 
   check(
@@ -122,13 +125,13 @@ if (onOpenMatch !== null) {
 
   // Guard against accidentally placing the call inside the activeRoom.hasActiveRoom()
   // early-return branch, which would wrongly fire it during active-game resume.
-  const activeRoomBranchMatch = onOpenBody.match(
-    /if \(activeRoom\.hasActiveRoom\(\)\) \{([\s\S]*?)\n {4}\}/,
-  )
+  const activeRoomBranches = Array.from(onOpenBody.matchAll(
+    /if \(openDecision === '(zombie-bid-resume|active-room-resume|svara-resync)'\) \{([\s\S]*?)\n {4}\}/g,
+  ))
   check(
-    '[6] resync call is NOT inside the activeRoom.hasActiveRoom() resume branch (must not fire during active-game reconnect)',
-    activeRoomBranchMatch !== null &&
-      !activeRoomBranchMatch[1].includes('resyncPrivateRoomMembership'),
+    '[6] all three active-game recovery branches return without private-room resync',
+    activeRoomBranches.length === 3 && activeRoomBranches.every((branch) =>
+      !branch[2]!.includes('resyncPrivateRoomMembership') && /\breturn\b/.test(branch[2]!)),
   )
 }
 

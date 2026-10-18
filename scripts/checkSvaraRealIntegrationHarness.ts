@@ -5,7 +5,8 @@ import { join, resolve } from 'node:path'
 import { tmpdir } from 'node:os'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
-import { assertWildcardPortFree, backendTestEnv, ownedHarnessPath, verifyHarnessIdentity } from './svaraRealIntegrationHarness'
+import { cp } from 'node:fs/promises'
+import { assertWildcardPortFree, backendTestEnv, createIsolatedSvaraRoot, ownedHarnessPath, verifyHarnessIdentity } from './svaraRealIntegrationHarness'
 
 let passed = 0, failed = 0
 async function check(label: string, run: () => Promise<void> | void) {
@@ -87,6 +88,23 @@ await check('parent disconnect before server startup terminates the owned child 
       assert.equal(code, 1)
     } finally { if (timer) clearTimeout(timer) }
   } finally { if (child.exitCode === null) { child.kill('SIGKILL'); await exited } }
+})
+await check('deterministic deck fixture refuses production, missing IPC and a different parent', async () => {
+  const isolated = await createIsolatedSvaraRoot(process.cwd())
+  try {
+    const hook = join(isolated.root, 'controlled-hooks.mjs')
+    await cp(resolve('server/scripts/fixtures/svaraRestartHooks.mjs'), hook)
+    for (const [mode, ipc, parent] of [['production', true, process.pid], ['test', false, process.pid], ['test', true, process.pid + 1]] as const) {
+      const nonce = randomUUID(), env = backendTestEnv(process.env, process.pid, nonce)
+      env.NODE_ENV = mode
+      const source = `import { configure } from ${JSON.stringify(pathToFileURL(hook).href)}; configure(${JSON.stringify({ nonce, parentPid: parent, now: Date.now() })}); console.log('UNSAFE_BODY_REACHED');`
+      const child = spawn(process.execPath, ['--input-type=module', '-e', source], { env, windowsHide: true, stdio: ipc ? ['ignore', 'pipe', 'pipe', 'ipc'] : ['ignore', 'pipe', 'pipe'] })
+      let output = ''
+      child.stdout!.on('data', (chunk) => { output += chunk.toString() }); child.stderr!.on('data', (chunk) => { output += chunk.toString() })
+      const code = await new Promise<number | null>((done, reject) => { child.once('error', reject); child.once('exit', done) })
+      assert.notEqual(code, 0); assert(output.includes('Refusing non-harness execution')); assert(!output.includes('UNSAFE_BODY_REACHED'))
+    }
+  } finally { await isolated.cleanup() }
 })
 console.log(`Svara real integration infrastructure: ${passed} passed, ${failed} failed`)
 process.exitCode = failed ? 1 : 0

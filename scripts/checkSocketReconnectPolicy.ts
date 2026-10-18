@@ -134,7 +134,7 @@ function sliceBetween(source: string, start: string, end: string): string {
 await check('[R5] main.ts wiring: spectator close/open branches bypass forced reload and resume_room', () => {
   const onClose = stripComments(sliceBetween(mainSource, 'onClose: () => {', 'onMessage:'))
   const spectatorCloseAt = onClose.indexOf("closeDecision === 'belot-spectator-reconnect'")
-  const overlayAt = onClose.indexOf('showOfflineConnectionOverlay()')
+  const overlayAt = onClose.indexOf('showOfflineConnectionOverlay()', spectatorCloseAt)
   assert(spectatorCloseAt !== -1 && overlayAt !== -1 && spectatorCloseAt < overlayAt, 'spectator close branch must run before the overlay schedules a reload')
   const spectatorCloseBranch = onClose.slice(spectatorCloseAt, overlayAt)
   assert(!/shouldReloadLobbyOnReconnect\s*=\s*true/.test(spectatorCloseBranch), 'spectator close must not set the reload flag')
@@ -144,7 +144,7 @@ await check('[R5] main.ts wiring: spectator close/open branches bypass forced re
   assert(/shouldReloadLobbyOnReconnect\s*=\s*false/.test(rewatch), 'rewatch branch clears the reload flag')
 
   const overlay = stripComments(sliceBetween(mainSource, 'function initOfflineOverlay()', 'function showLandingOverlay('))
-  assert(/shouldOfflineRecoveryForceLobbyReload\(isBelotSpectatorSessionActive\(\)\)/.test(overlay), 'offline overlay recovery must be spectator-gated')
+  assert(/shouldOfflineRecoveryForceLobbyReload\(isBelotSpectatorSessionActive\(\),/.test(overlay), 'offline overlay recovery must retain the spectator gate alongside Svara')
   assert(/addEventListener\('online', handleBrowserOnline\)/.test(overlay), "'online' must go through the spectator-aware handler")
 })
 
@@ -161,6 +161,24 @@ await check('[R6] main.ts (D8): activeRoom teardown happens BEFORE the lobby ren
   const manualExitAt = manualExit.indexOf('activeRoom.exitSpectatorView()')
   const unwatchAt = manualExit.indexOf('unwatchBelotSpectatorRoom()')
   assert(manualExitAt !== -1 && unwatchAt !== -1 && manualExitAt < unwatchAt, 'manual Exit must tear down before navigating')
+})
+
+await check('[R7] Svara reconnect overrides global reload; existing policies remain separate', () => {
+  for (const shouldReload of bools) {
+    assert(decideSocketCloseAction({ isBelotSpectatorSessionActive: false, hasActiveRoom: false, hasActiveSvaraMatch: true }) === 'svara-reconnect', 'Svara must keep its view for server revalidation')
+    assert(decideSocketOpenAction({ isZombieBidReconnectInFlight: false, isBelotSpectatorReconnectInFlight: false,
+      spectatingBelotRoomId: null, shouldReloadLobbyOnReconnect: shouldReload, hasActiveRoom: false, hasActiveSvaraMatch: true }) === 'svara-resync', 'Svara must resync even with a stale reload flag')
+    assert(decideSocketCloseAction({ isBelotSpectatorSessionActive: false, hasActiveRoom: true, hasActiveSvaraMatch: true }) === 'active-room-reconnect', 'A stale Svara view must not replace active Belot recovery')
+    assert(decideSocketOpenAction({ isZombieBidReconnectInFlight: false, isBelotSpectatorReconnectInFlight: false,
+      spectatingBelotRoomId: null, shouldReloadLobbyOnReconnect: shouldReload, hasActiveRoom: true, hasActiveSvaraMatch: true }) === legacyOpen({ zombie: false, shouldReload, hasActiveRoom: true }), 'Active Belot must keep its established priority')
+  }
+  assert(!shouldOfflineRecoveryForceLobbyReload(false, true), 'Svara offline recovery must not navigate')
+  assert(shouldOfflineRecoveryForceLobbyReload(false, false), 'ordinary lobby policy changed')
+})
+
+await check('[R8] main.ts scopes Svara recovery away from active Belot and Ludo', () => {
+  const context = stripComments(sliceBetween(mainSource, 'function isSvaraReconnectContext()', '\n}'))
+  assert(context.includes('!activeRoom.hasActiveRoom()') && context.includes('!lobby.hasActiveLudoMatch()'), 'Svara recovery must preserve the other active-game paths')
 })
 
 console.log(`\n${passed} passed, ${failed} failed`)

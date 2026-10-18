@@ -65,3 +65,4 @@ server/uploads/profile-gallery/**
 !server/uploads/chat-attachments/
 server/uploads/chat-attachments/**
 !server/uploads/chat-attachments/.gitkeep
+tmp/svara-multiplayer/
