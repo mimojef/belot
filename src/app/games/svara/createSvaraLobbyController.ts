@@ -15,9 +15,19 @@ import type {
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
 import { playGameSound } from '../../audio/gameSoundSettings'
-import { renderSvaraActiveTable } from './table/renderSvaraActiveTable'
+import {
+  renderSvaraActiveTable,
+  SVARA_FOLD_BUBBLE_TOTAL_MS,
+  SVARA_LOOK_FLIP_TOTAL_MS,
+  type SvaraActiveFoldEffect,
+  type SvaraActiveLookEffect,
+} from './table/renderSvaraActiveTable'
 import { deriveSvaraActionButtons } from './table/svaraBettingActions'
 import { createSvaraBetAnimationTracker } from './table/svaraBetAnimationTracker'
+import { createSvaraFoldAnimationTracker } from './table/svaraFoldAnimationTracker'
+import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTracker'
+import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
+import { playSvaraFoldVoice } from './table/svaraFoldVoice'
 
 type Options = {
   root: HTMLElement
@@ -58,12 +68,35 @@ export function createSvaraLobbyController(options: Options) {
   // Задание §14 — проследява кои записи от round.actions вече са анимирани,
   // scoped по roundId (reconnect-safe, виж svaraBetAnimationTracker.ts).
   const betAnimationTracker = createSvaraBetAnimationTracker()
+  // Задание §11/§13/§14 — отделни tracker instances (виж коментарите в самите
+  // файлове защо не се преизползва betAnimationTracker-а).
+  const foldAnimationTracker = createSvaraFoldAnimationTracker()
+  const lookAnimationTracker = createSvaraLookAnimationTracker()
+  // Активните, все още визуализирани fold/look ефекти — анкетирани към
+  // АБСОЛЮТНО сървърно "сега" в момента на откриване (sharedServerClock), не
+  // локален performance.now()/Date.now() старт; elapsedMs за рендиране се
+  // преизчислява наново на всеки render() (виж §7/§14 reconnect/no-restart).
+  type ActiveFoldEffectState = { seatIndex: number; voluntary: boolean; startedAtServerMs: number }
+  let activeFoldEffects: ActiveFoldEffectState[] = []
+  let activeLookEffectStartedAtServerMs: number | null = null
+  // Задание §15 — prefers-reduced-motion: спира само летящите спрайтове/флип
+  // завъртания (виж renderSvaraActiveTable.ts), НИКОГА сървърния timeline.
+  const reducedMotionQuery = typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia('(prefers-reduced-motion: reduce)')
+    : null
+  let reducedMotion = reducedMotionQuery?.matches ?? false
+  function handleReducedMotionChange(): void {
+    reducedMotion = reducedMotionQuery?.matches ?? false
+    render()
+  }
+  reducedMotionQuery?.addEventListener('change', handleReducedMotionChange)
 
   const button = 'border:1px solid rgba(212,165,32,.55);border-radius:7px;background:#0b0b0b;color:#f4c95b;min-height:40px;padding:0 16px;font-weight:800;cursor:pointer;'
   const panel = 'background:#090909;border:1px solid rgba(212,165,32,.35);border-radius:8px;padding:16px;'
   const createButtonStyle = 'box-sizing:border-box;display:inline-flex;align-items:center;justify-content:center;gap:8px;height:42px;padding:0 20px;border:1px solid rgba(244,201,91,.5);border-radius:10px;background:linear-gradient(135deg,#f6d27a 0%,#d4a520 55%,#c98f13 100%);color:#1a1200;font-size:14px;font-weight:800;cursor:pointer;white-space:nowrap;'
 
   function render(): void {
+    pruneExpiredEffects(sharedServerClock.getServerNow())
     const isActiveTable = myTable !== null && myTable.phase !== 'lobby'
     ensureTick()
     const body = myTable ? (myTable.phase === 'lobby' ? renderWaiting(myTable) : renderActiveTable(myTable)) : renderTableList()
@@ -143,27 +176,74 @@ export function createSvaraLobbyController(options: Options) {
   // sharedServerClock на всеки тик, никога от локален "старт" timestamp,
   // затова rerender/reconnect никога не го рестартира (виж svaraCountdown.ts).
   let tickTimer: ReturnType<typeof setInterval> | null = null
+  let tickIntervalMs: number | null = null
+
+  // Задание §5/§9/§11 — докато дадена ЧИСТО презентационна анимация реално
+  // тече (раздаване/look-flip/fold-fade), тиковете трябва да са достатъчно
+  // чести за плавност (~30fps); извън това старите 250ms са напълно
+  // достатъчни за countdown текст/пръстен. Никога не променя сървърния
+  // дедлайн — само честотата на локалния re-render.
+  function isDealingAnimationActive(): boolean {
+    const round = snapshot?.round ?? null
+    if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara') || !round.dealing) return false
+    return timing?.deadlines.some((deadline) => deadline.kind === 'dealing') ?? false
+  }
+  function hasActiveVisualAnimation(): boolean {
+    if (reducedMotion) return false
+    return activeFoldEffects.length > 0 || activeLookEffectStartedAtServerMs !== null || isDealingAnimationActive()
+  }
+
+  // Задание §11/§14 — изхвърля fold балончета/look-flip ефекти, чиято пълна
+  // визуална продължителност вече е изтекла спрямо АБСОЛЮТНОТО сървърно
+  // "сега" (не локален timeout) — пазят се само докато реално се рисуват.
+  function pruneExpiredEffects(serverNow: number): void {
+    activeFoldEffects = activeFoldEffects.filter((effect) => serverNow - effect.startedAtServerMs < SVARA_FOLD_BUBBLE_TOTAL_MS)
+    if (activeLookEffectStartedAtServerMs !== null && serverNow - activeLookEffectStartedAtServerMs >= SVARA_LOOK_FLIP_TOTAL_MS) {
+      activeLookEffectStartedAtServerMs = null
+    }
+  }
+
   function ensureTick(): void {
     const hasActiveDeadline = (timing?.deadlines.length ?? 0) > 0
-    if (hasActiveDeadline && tickTimer === null) {
-      tickTimer = setInterval(() => render(), 250)
-    } else if (!hasActiveDeadline && tickTimer !== null) {
+    const needsTick = hasActiveDeadline || hasActiveVisualAnimation()
+    const desiredIntervalMs = hasActiveVisualAnimation() ? 33 : 250
+    if (needsTick && (tickTimer === null || tickIntervalMs !== desiredIntervalMs)) {
+      if (tickTimer !== null) clearInterval(tickTimer)
+      tickIntervalMs = desiredIntervalMs
+      tickTimer = setInterval(() => render(), desiredIntervalMs)
+    } else if (!needsTick && tickTimer !== null) {
       clearInterval(tickTimer)
       tickTimer = null
+      tickIntervalMs = null
     }
   }
 
   function renderActiveTable(table: SvaraPublicTable): string {
+    const serverNow = sharedServerClock.getServerNow()
+    const dealingDeadlineAt = timing?.deadlines.find((deadline) => deadline.kind === 'dealing')?.deadlineAt ?? null
+    const dealingVisual = computeSvaraDealingVisualState(snapshot?.round ?? null, dealingDeadlineAt, serverNow, snapshot?.seats ?? [])
+    const activeFoldEffectsInput: SvaraActiveFoldEffect[] = activeFoldEffects.map((effect) => ({
+      seatIndex: effect.seatIndex,
+      voluntary: effect.voluntary,
+      elapsedMs: serverNow - effect.startedAtServerMs,
+    }))
+    const activeLookEffectInput: SvaraActiveLookEffect | null = activeLookEffectStartedAtServerMs === null
+      ? null
+      : { elapsedMs: serverNow - activeLookEffectStartedAtServerMs }
     return renderSvaraActiveTable({
       table,
       snapshot,
       timing,
       localProfileId: options.localProfileId,
-      serverNow: sharedServerClock.getServerNow(),
+      serverNow,
       isFullscreen,
       fullscreenSupported,
       leavePending,
       actionPending,
+      dealingVisual,
+      activeFoldEffects: activeFoldEffectsInput,
+      activeLookEffect: activeLookEffectInput,
+      reducedMotion,
     })
   }
 
@@ -211,6 +291,30 @@ export function createSvaraLobbyController(options: Options) {
       if (seat) playBetFlash(seat.seatIndex, entry.added)
     }
     playBetSound()
+  }
+
+  // Задание §9/§10/§11/§13/§14 — открива РЕАЛНО нови (неанимирани досега)
+  // откази/поглеждания спрямо последния snapshot и стартира съответния
+  // ефект, анкетиран към сървърното "сега" в момента на откриване. Baseline
+  // при първо виждане на даден roundId (reconnect/remount) никога не
+  // анимира тук — виж самите tracker файлове. Гласът „Бягам!“ се пуска
+  // ТОЧНО за доброволните откази, никога за forced-fold (задание §13).
+  function flushFoldAndLookAnimations(): void {
+    if (!snapshot) return
+    const round = snapshot.round
+    const newFolds = foldAnimationTracker.detectNewFolds(round)
+    if (newFolds.length > 0) {
+      const nowServer = sharedServerClock.getServerNow()
+      for (const fold of newFolds) {
+        const seat = snapshot.seats.find((s) => s.playerId === fold.playerId)
+        if (!seat) continue
+        activeFoldEffects.push({ seatIndex: seat.seatIndex, voluntary: fold.voluntary, startedAtServerMs: nowServer })
+        if (fold.voluntary) playSvaraFoldVoice(null)
+      }
+    }
+    const newLook = lookAnimationTracker.detectNewLook(round?.roundId ?? null, snapshot.you.looked)
+    if (newLook) activeLookEffectStartedAtServerMs = sharedServerClock.getServerNow()
+    if (newFolds.length > 0 || newLook) render()
   }
 
   function renderCreateModal(): string {
@@ -331,6 +435,7 @@ export function createSvaraLobbyController(options: Options) {
       snapshot = next
       render()
       flushBetAnimations()
+      flushFoldAndLookAnimations()
     },
     setTiming(next: SvaraMatchTimingMessage | null) { timing = next; render() },
     showMessage(next: string) { joinPendingMatchId = null; message = next; render() },
@@ -359,6 +464,7 @@ export function createSvaraLobbyController(options: Options) {
     requestExit,
     destroy() {
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
+      reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)
       if (fullscreenSupported) document.removeEventListener('fullscreenchange', handleFullscreenChange)
       if (fullscreenSupported && document.fullscreenElement === tableElementRef && tableElementRef !== null) {
         void document.exitFullscreen().catch(() => {})

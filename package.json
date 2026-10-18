@@ -14,6 +14,7 @@
     "check:svara-table-layout": "npx tsx scripts/checkSvaraTableLayout.ts",
     "check:svara-betting-actions": "npx tsx scripts/checkSvaraBettingActions.ts",
     "check:svara-client-real-integration": "npx tsx scripts/checkSvaraClientRealIntegration.ts",
+    "check:svara-dealing-animation": "npx tsx scripts/checkSvaraDealingAnimation.ts",
     "check:ludo-legal-move-math": "npx tsx scripts/checkLudoLegalMoveMath.ts",
     "check:ludo-stack-capture": "npx tsx scripts/checkLudoStackCapture.ts",
     "check:ludo-safe-cell-capture": "npx tsx scripts/checkLudoSafeCellCapture.ts",
