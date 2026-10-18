@@ -76,6 +76,104 @@ async function check(label: string, fn: () => Promise<void> | void): Promise<voi
   try { await fn(); pass(label) } catch (err) { fail(label, err) }
 }
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
+
+// 2Б.3.7.5А §6/§18 — единна atomic (виж T12's root-cause коментара защо
+// atomic, не две отделни round-trips) layout проверка, преизползвана за
+// MULTIPLE реални състояния на масата (по време на раздаването, след
+// активни bet бутони, след доброволен отказ, след reconnect), не само
+// веднъж точно след старта на мача.
+async function measureSvaraLayoutOnce(page: Page) {
+  return page.evaluate(() => {
+    const anchors = Array.from(document.querySelectorAll<HTMLElement>('[data-svara-seat-anchor]')).map((el) => ({
+      slot: el.getAttribute('data-svara-seat-anchor'),
+      seatIndex: el.getAttribute('data-svara-seat-index'),
+      rect: el.getBoundingClientRect().toJSON(),
+    }))
+    const bottom = anchors.find((a) => a.slot === 'bottom') ?? null
+    return {
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+      windowHeight: window.innerHeight,
+      anchorCount: anchors.length,
+      anchors,
+      bottomPanelBottom: bottom?.rect.bottom ?? null,
+      diagnostics: document.querySelector('[data-svara-diagnostics]')?.textContent ?? null,
+      dealingOverlayActive: document.querySelector('[data-svara-dealing-overlay]') !== null,
+      actionButtonCount: document.querySelectorAll('[data-svara-action-bar] [data-svara-action-button]').length,
+    }
+  })
+}
+// Real-browser QA finding (2Б.3.7.5А): `page.setViewportSize()` intermittently
+// throws a CDP "Browser.setWindowBounds: fullscreen window" Protocol error —
+// observed well after T11's own requestFullscreen()/exitFullscreen() cycle,
+// and `document.exitFullscreen()` retrying before the resize did NOT fix it.
+// That rules out Document-level fullscreen: this is the separate CDP
+// Browser-domain windowState bit (headless Chromium can map an element's
+// Fullscreen API request onto the virtual window's actual windowState, and
+// apparently does not always flip it back to 'normal' when the page exits
+// fullscreen at the DOM level) — a Playwright/Chromium headless quirk in the
+// test harness, not an application bug, since the Svara client never touches
+// window bounds itself. Fixed by resetting windowState via a raw CDP session
+// (Browser domain, not Page domain) before retrying the resize.
+async function resetWindowStateToNormal(page: Page): Promise<void> {
+  try {
+    const client = await page.context().newCDPSession(page)
+    const { windowId } = await client.send('Browser.getWindowForTarget')
+    await client.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } })
+    await client.detach().catch(() => {})
+  } catch {
+    // Best-effort — ако CDP session-ът самият не успее, оставяме retry-то в
+    // setSvaraViewportSize да surface-не оригиналната грешка нормално.
+  }
+}
+async function setSvaraViewportSize(page: Page, vp: { width: number; height: number }): Promise<void> {
+  try {
+    await page.setViewportSize(vp)
+  } catch (err) {
+    if (!(err instanceof Error) || !err.message.includes('setWindowBounds')) throw err
+    await resetWindowStateToNormal(page)
+    await sleep(300)
+    await page.setViewportSize(vp)
+  }
+}
+async function measureSvaraLayout(page: Page, vp: { width: number; height: number }) {
+  await setSvaraViewportSize(page, vp)
+  await sleep(150)
+  let measurement = await measureSvaraLayoutOnce(page)
+  // Real-browser QA finding (2Б.3.7.5А): a COMPLETELY empty mount
+  // (anchorCount===0 AND diagnostics===null, i.e. not even the active-table
+  // shell exists) is the signature of createLobbyFlowController.ts's own
+  // DOCUMENTED, already-mitigated reconciliation race — an unrelated full
+  // `options.root.innerHTML` rebuild elsewhere in the giant lobby controller
+  // (chat/notifications polling etc., see the "НАПЪЛНО несвързани re-render-и"
+  // comment at _svaraLastSnapshot's declaration) can momentarily orphan the
+  // Svara mount before its own render() detects `mountRoot.childElementCount
+  // === 0` and re-mounts + replays the cached snapshot. That recovery is a
+  // single microtask (cached dynamic import) + one render call, not a
+  // multi-second wait — polling briefly for it is waiting on a real,
+  // already-self-healing async condition, not masking a permanent failure.
+  // A PARTIAL render (diagnostics present but the bottom anchor specifically
+  // missing/wrong) is a DIFFERENT, genuine-defect signature and must NOT be
+  // retried away.
+  const looksOrphaned = (m: Awaited<ReturnType<typeof measureSvaraLayoutOnce>>) => m.anchorCount === 0 && m.diagnostics === null
+  const deadline = Date.now() + 2_000
+  while (looksOrphaned(measurement) && Date.now() < deadline) {
+    await sleep(100)
+    measurement = await measureSvaraLayoutOnce(page)
+  }
+  return measurement
+}
+function assertSvaraLayoutOk(measurement: Awaited<ReturnType<typeof measureSvaraLayout>>, label: string, recentLog: () => string): void {
+  if (measurement.scrollWidth > measurement.clientWidth) {
+    throw new Error(`horizontal overflow at ${label}: scrollWidth=${measurement.scrollWidth} > clientWidth=${measurement.clientWidth} — diag=${JSON.stringify(measurement)}`)
+  }
+  if (measurement.bottomPanelBottom === null) {
+    throw new Error(`self (bottom) seat panel not found at ${label} — diag=${JSON.stringify(measurement)}\nrecent WS log:\n${recentLog()}`)
+  }
+  if (measurement.bottomPanelBottom > measurement.windowHeight) {
+    throw new Error(`self (bottom) seat panel extends past the viewport at ${label}: bottom=${measurement.bottomPanelBottom.toFixed(0)} > windowHeight=${measurement.windowHeight} — diag=${JSON.stringify(measurement)}`)
+  }
+}
 function assertEqualNum(actual: number, expected: number, message: string): void {
   if (actual !== expected) throw new Error(`${message} (got ${actual}, expected ${expected})`)
 }
@@ -503,6 +601,22 @@ try {
     // §14), so the real 15s server turn deadline keeps ticking down in the
     // background regardless of what the test does; this is layout
     // verification, not a test of how long an un-acted match survives.
+    //
+    // Root-cause note (2Б.3.7.5А): T5 only waits for `[data-svara-diagnostics]`,
+    // which renders UNCONDITIONALLY inside the felt even while
+    // `snapshot.seats` is still empty — the real client legitimately shows a
+    // brief "Зареждане на масата…" placeholder (ZERO seat anchors) during the
+    // narrow window between the `svara_table_updated` (phase: in-progress)
+    // broadcast and the FOLLOWING `svara_match_snapshot` that actually carries
+    // the seats. That is a genuine, clearly-defined async state (not a
+    // disguised sleep) worth waiting for in its own right — proceeding to
+    // viewport-resize measurements before it resolves was the test's bug, not
+    // the app's: it could land mid-placeholder and misreport a missing seat
+    // panel. Waiting for the bottom anchor specifically (not just "some
+    // anchor") also doubles as a minimal regression check for seat-slot
+    // assignment being correct from the very first real render.
+    await sessionA.page.waitForSelector('[data-svara-seat-anchor="bottom"]', { timeout: 10_000 })
+
     const viewportsToCheck: Array<{ width: number; height: number }> = [
       { width: 320, height: 568 },
       { width: 390, height: 844 },
@@ -510,34 +624,12 @@ try {
       { width: 844, height: 390 },
       { width: 1280, height: 900 },
     ]
+    const recentLog = (): string => ((sessionA.page as any)._svaraLog as string[]).slice(-15).join('\n')
     for (const vp of viewportsToCheck) {
-      await sessionA.page.setViewportSize(vp)
-      await sleep(150)
-      const measurement = await sessionA.page.evaluate(() => {
-        const bottomRect = document.querySelector('[data-svara-seat-anchor="bottom"]')?.getBoundingClientRect()
-        return {
-          scrollWidth: document.documentElement.scrollWidth,
-          clientWidth: document.documentElement.clientWidth,
-          bottomPanelBottom: bottomRect?.bottom ?? null,
-          windowHeight: window.innerHeight,
-        }
-      })
-      if (measurement.scrollWidth > measurement.clientWidth) {
-        throw new Error(`horizontal overflow at ${vp.width}x${vp.height}: scrollWidth=${measurement.scrollWidth} > clientWidth=${measurement.clientWidth}`)
-      }
-      if (measurement.bottomPanelBottom === null) {
-        const diag = await sessionA.page.evaluate(() => ({
-          diagnostics: document.querySelector('[data-svara-diagnostics]')?.textContent ?? null,
-          anchorCount: document.querySelectorAll('[data-svara-seat-anchor]').length,
-        }))
-        const recentLog = ((sessionA.page as any)._svaraLog as string[]).slice(-15)
-        throw new Error(`self (bottom) seat panel not found at ${vp.width}x${vp.height} — diag=${JSON.stringify(diag)}\nrecent WS log:\n${recentLog.join('\n')}`)
-      }
-      if (measurement.bottomPanelBottom > measurement.windowHeight) {
-        throw new Error(`self (bottom) seat panel extends past the viewport at ${vp.width}x${vp.height}: bottom=${measurement.bottomPanelBottom.toFixed(0)} > windowHeight=${measurement.windowHeight}`)
-      }
+      const measurement = await measureSvaraLayout(sessionA.page, vp)
+      assertSvaraLayoutOk(measurement, `${vp.width}x${vp.height} (during dealing)`, recentLog)
     }
-    await sessionA.page.setViewportSize({ width: 420, height: 900 })
+    await setSvaraViewportSize(sessionA.page, { width: 420, height: 900 })
   })
 
   async function findActor(): Promise<{ page: Page; context: BrowserContext; label: 'A' | 'B' }> {
@@ -555,22 +647,40 @@ try {
     }
   }
   function other(label: 'A' | 'B') { return label === 'A' ? sessionB : sessionA }
-  async function readSeatTotals(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null }> {
+  async function readSeatTotalsOnce(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null; bottomAnchorPresent: boolean }> {
     return page.evaluate(() => {
       const feltText = document.querySelector('[data-svara-felt-center]')?.textContent ?? ''
       const bankMatch = /Банка:\s*(\d+)/.exec(feltText)
-      const totalEl = document.querySelector('[data-svara-seat-anchor="bottom"] [data-svara-seat-total]')
+      const bottomAnchor = document.querySelector('[data-svara-seat-anchor="bottom"]')
+      const totalEl = bottomAnchor?.querySelector('[data-svara-seat-total]')
       const totalText = totalEl?.textContent ?? ''
       const stackMatch = /^(\d+)/.exec(totalText.trim())
       const contribMatch = /общо\s*(\d+)/.exec(totalText)
-      const badgeEl = document.querySelector('[data-svara-seat-anchor="bottom"] [data-svara-seat-badges]')
+      const badgeEl = bottomAnchor?.querySelector('[data-svara-seat-badges]')
       return {
         bank: bankMatch ? Number(bankMatch[1]) : null,
         selfStack: stackMatch ? Number(stackMatch[1]) : null,
         selfTotal: contribMatch ? Number(contribMatch[1]) : null,
         selfBadge: badgeEl?.textContent ?? null,
+        bottomAnchorPresent: bottomAnchor !== null,
       }
     })
+  }
+  // Real-browser QA finding (2Б.3.7.5А) — same orphan/remount race as
+  // measureSvaraLayout's `looksOrphaned` retry (see its doc comment): the
+  // bottom anchor (and so `seat.stack`, which is ALWAYS rendered once a
+  // match is active, in every round kind) can transiently disappear if an
+  // unrelated full lobby-root rebuild races the exact read, even right after
+  // a `waitForSelector` confirmed it existed a moment earlier. Retrying
+  // briefly here — not on every caller individually — closes that gap once.
+  async function readSeatTotals(page: Page): Promise<{ bank: number | null; selfStack: number | null; selfTotal: number | null; selfBadge: string | null }> {
+    let result = await readSeatTotalsOnce(page)
+    const deadline = Date.now() + 2_000
+    while (!result.bottomAnchorPresent && Date.now() < deadline) {
+      await sleep(100)
+      result = await readSeatTotalsOnce(page)
+    }
+    return result
   }
 
   // T9/T10/T11 проверяват инварианти на ОБИЧАЙНАТА активна маса (преди
@@ -623,8 +733,14 @@ try {
     // Headless Chromium can actually GRANT programmatic fullscreen — leave
     // it active and the subsequent viewport-resize checks (T12) would
     // measure a real fullscreen layout instead of the plain embedded one.
+    // Also resets the CDP Browser-domain windowState (see
+    // resetWindowStateToNormal's doc comment) at the source — exitFullscreen()
+    // alone only clears the Document-level state and was observed to
+    // occasionally leave the virtual window's own windowState stuck, later
+    // breaking unrelated setViewportSize() calls much further into the run.
     await sessionA.page.evaluate(() => { if (document.fullscreenElement) void document.exitFullscreen().catch(() => {}) })
     await sleep(200)
+    await resetWindowStateToNormal(sessionA.page)
   })
 
   await check('[T13] Погледни -> реалните собствени карти се показват едва СЛЕД explicit клик (не оптимистично по-рано)', async () => {
@@ -708,12 +824,45 @@ try {
         if (opponentHtml.includes(token)) throw new Error(`opponent's DOM leaked the folded player's card token "${token}"`)
       }
     }
+    // Задание §6 (2Б.3.7.5А) — landscape mobile СЛЕД доброволен отказ
+    // (с точно 2 играчи вече в reveal-choice преход, не статично "ОТКАЗАЛ
+    // СЕ" състояние, виж коментара по-горе) — различен реален екран от
+    // dealing-прозореца, който T12 покрива. Нарочно винаги на sessionA (не
+    // actor.page, който може да е sessionB) — real-browser QA finding: в
+    // headless Chromium, след T11's requestFullscreen() на sessionA,
+    // setViewportSize() на ДРУГАТА сесия (sessionB) понякога хвърля CDP
+    // "Browser.setWindowBounds: fullscreen window" грешка (общ браузърен
+    // process/window state между контекстите) — sessionA вече е доказано
+    // безопасна за resize (виж T11's собствен exitFullscreen cleanup + T12's
+    // 5 успешни resize-а веднага след това).
+    const foldLog = (): string => ((sessionA.page as any)._svaraLog as string[]).slice(-15).join('\n')
+    assertSvaraLayoutOk(await measureSvaraLayout(sessionA.page, { width: 844, height: 390 }), '844x390 (след доброволен отказ)', foldLog)
+    await setSvaraViewportSize(sessionA.page, { width: 420, height: 900 })
   })
 
   await check('[T17] Reconnect след реални залози -> СЪЩИТЕ стекове/банка/баджове, БЕЗ повторно начисляване', async () => {
+    // Real-browser QA finding (2Б.3.7.5А): readSeatTotals() needs the real
+    // bottom anchor to already be rendered — reading it with no wait, right
+    // as T16's own round-transition (fold -> reveal-choice) and viewport
+    // restore are still settling, occasionally raced a transient state and
+    // produced a false `before.selfStack === null` (symptom identical to the
+    // T6/T12 root cause: the diagnostics shell can render before seats do).
+    // This wait is for that already-real async condition, not a disguised
+    // sleep — readSeatTotals is meaningless without it.
+    try {
+      await sessionA.page.waitForSelector('[data-svara-seat-anchor="bottom"]', { timeout: 10_000 })
+    } catch (err) {
+      const recentLog = ((sessionA.page as any)._svaraLog as string[]).slice(-15).join('\n')
+      throw new Error(`bottom seat anchor missing BEFORE the reload even started — diag unavailable, recent WS log:\n${recentLog}\n(original: ${err instanceof Error ? err.message : String(err)})`)
+    }
     const before = await readSeatTotals(sessionA.page)
     await sessionA.page.reload({ waitUntil: 'domcontentloaded' })
-    await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
+    // Виж T6/T12's root-cause коментар защо чакаме точно bottom anchor-а
+    // (не само diagnostics shell-а, който се рендира дори с 0 места) —
+    // readSeatTotals() по-долу разчита на `[data-svara-seat-anchor="bottom"]`
+    // реално да съществува, иначе и двете четения стават null и сравнението
+    // (-1 vs -2) фалшиво пропада.
+    await sessionA.page.waitForSelector('[data-svara-seat-anchor="bottom"]', { timeout: 15_000 })
     await sleep(500)
     const after = await readSeatTotals(sessionA.page)
     // "Банка: N" е част от feltCenterHtml само за betting (ordinary/svara)
@@ -732,6 +881,12 @@ try {
     if (before.selfTotal !== null || after.selfTotal !== null) {
       assertEqualNum(before.selfTotal ?? -1, after.selfTotal ?? -1, 'own total-contributed badge must be IDENTICAL after a reload')
     }
+    // Задание §6 (2Б.3.7.5А) — landscape mobile СЛЕД reconnect/remount на
+    // контролера (пресъздаден от нулата от createLobbyFlowController.ts
+    // след page.reload()), различен реален lifecycle момент от T12/T16.
+    const reconnectLog = (): string => ((sessionA.page as any)._svaraLog as string[]).slice(-15).join('\n')
+    assertSvaraLayoutOk(await measureSvaraLayout(sessionA.page, { width: 844, height: 390 }), '844x390 (след reconnect)', reconnectLog)
+    await setSvaraViewportSize(sessionA.page, { width: 420, height: 900 })
   })
 
   await check('[T6] navigating away from /games/svara mid-match does NOT exit the game; returning restores the SAME active table', async () => {
@@ -743,13 +898,39 @@ try {
     const stillActiveForB = await sessionB.page.evaluate(() => document.querySelector('[data-svara-diagnostics]') !== null)
     if (!stillActiveForB) throw new Error('userB got ejected from the match just because userA navigated away — unmount must never trigger an exit for ANY participant')
 
+    const reloadStartedAt = Date.now()
     await sessionA.page.goto(`http://127.0.0.1:${staticPort}/games/svara`, { waitUntil: 'domcontentloaded' })
     // Must restore straight into the active-table view (not the empty/other
     // table list) via setTables()'s own-table auto-detect — no second join,
-    // no new start, nothing clicked by the test here.
-    await sessionA.page.waitForSelector('[data-svara-diagnostics]', { timeout: 15_000 })
+    // no new start, nothing clicked by the test here. Waiting for the real
+    // BOTTOM seat anchor (not just the diagnostics shell, which renders even
+    // while seats are still empty — see the T12 root-cause note above) is the
+    // actual "restored into the same active table" signal; a plain
+    // `data-svara-diagnostics` wait would also pass during a transient
+    // zero-seat loading placeholder and mask a genuine stuck restore.
+    try {
+      await sessionA.page.waitForSelector('[data-svara-seat-anchor="bottom"]', { timeout: 15_000 })
+    } catch (err) {
+      const diag = await sessionA.page.evaluate(() => ({
+        url: location.href,
+        hasLobbyRoot: document.querySelector('[data-svara-lobby="1"]') !== null,
+        hasDiagnostics: document.querySelector('[data-svara-diagnostics]') !== null,
+        hasCreateButton: document.querySelector('[data-svara-create-open]') !== null,
+        hasTableList: document.querySelector('[data-svara-table-join]') !== null,
+        anchorCount: document.querySelectorAll('[data-svara-seat-anchor]').length,
+        bodyTextSnippet: document.body.textContent?.slice(0, 300) ?? null,
+      }))
+      const recentLog = ((sessionA.page as any)._svaraLog as string[]).slice(-20).join('\n')
+      throw new Error(`restore after reload timed out ${Date.now() - reloadStartedAt}ms after goto() — diag=${JSON.stringify(diag)}\nrecent WS log:\n${recentLog}\n(original: ${err instanceof Error ? err.message : String(err)})`)
+    }
     const createButtonVisible = await sessionA.page.locator('[data-svara-create-open]').count()
     if (createButtonVisible !== 0) throw new Error('userA landed back on the table list instead of being restored into the active table')
+    // Задание §6 (2Б.3.7.5А) — landscape mobile СЛЕД повторно монтиране на
+    // контролера (fresh createSvaraLobbyController() instance след navigate
+    // away/back, виж openSvaraLobbyOverlay()'s cached-snapshot replay).
+    const remountLog = (): string => ((sessionA.page as any)._svaraLog as string[]).slice(-15).join('\n')
+    assertSvaraLayoutOk(await measureSvaraLayout(sessionA.page, { width: 844, height: 390 }), '844x390 (след повторно монтиране)', remountLog)
+    await setSvaraViewportSize(sessionA.page, { width: 420, height: 900 })
   })
 
   await check('[T8] no uncaught JS errors during the entire scenario', () => {
