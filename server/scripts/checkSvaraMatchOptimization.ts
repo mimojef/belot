@@ -75,6 +75,14 @@ function withoutRevealChoiceSnapshotField(message) {
 // reference engine never produces. Same narrow, explicit exclusion pattern
 // as the 2Б.3.7.1 reveal/hide choice above - not an optimization regression.
 const DEALING_PHASE_COMMAND_TYPES = new Set(['finish-dealing'])
+// 2Б.3.7.6А (also after BASELINE) added a controlled public showdown-display
+// phase (real 2+ participant comparison, distinct from the 2Б.3.7.1 reveal/
+// hide choice above) between settlement and the round actually clearing: two
+// new command types the reference engine has never heard of, plus a new
+// 'showdown-display' round kind (state AND snapshot) it never produces. Same
+// narrow, explicit exclusion pattern as the two cases above — not an
+// optimization regression, this stage's own already-tested feature addition.
+const SHOWDOWN_DISPLAY_COMMAND_TYPES = new Set(['advance-showdown-display', 'close-payout-display'])
 function withoutDealingRoundField(result) {
   const round = result.state.round
   if (!round || (round.kind !== 'ordinary' && round.kind !== 'svara')) return result
@@ -87,9 +95,30 @@ function withoutDealingSnapshotField(message) {
   const { dealing, ...rest } = round
   return { ...message, round: rest }
 }
+// 2Б.3.7.6А added 'isMain' to EVERY SvaraRoundRecord.pots[] entry (main vs
+// side pot, needed to build the new showdown-display payout sequence) —
+// unlike the dealing/reveal-choice/showdown-display round kinds above, this
+// is not a conditionally-present new STATE shape but a new FIELD on an
+// already-compared structure (state.history, and the deferred record a
+// reveal-choice round carries), present on every settled round from now on.
+// The reference engine can never produce it. Stripped here ONLY from pot
+// records (never from SvaraMatchLockedPot.isMain, an unrelated pre-existing
+// field with the same name that both engines already agree on) so real
+// locked-pot coverage is not weakened.
+function stripPotIsMain(pots) {
+  return pots.map(({ isMain, ...rest }) => rest)
+}
+function stripRecordIsMain(record) {
+  return { ...record, pots: stripPotIsMain(record.pots) }
+}
+function withoutPotIsMainField(result) {
+  const round = result.state.round
+  const strippedRound = round && round.kind === 'reveal-choice' ? { ...round, record: stripRecordIsMain(round.record) } : round
+  return { ...result, state: { ...result.state, history: result.state.history.map(stripRecordIsMain), round: strippedRound } }
+}
 export function applySvaraMatchCommand(state, command, env = {}) {
   const previous = JSON.stringify(state)
-  if (REVEAL_CHOICE_COMMAND_TYPES.has(command.type) || DEALING_PHASE_COMMAND_TYPES.has(command.type)) {
+  if (REVEAL_CHOICE_COMMAND_TYPES.has(command.type) || DEALING_PHASE_COMMAND_TYPES.has(command.type) || SHOWDOWN_DISPLAY_COMMAND_TYPES.has(command.type)) {
     // Apply only to the optimized engine. Deliberately do not register a
     // pairing for the result: the next ordinary command resyncs the
     // reference from the (now-identical-shape) current snapshot through the
@@ -131,20 +160,23 @@ export function applySvaraMatchCommand(state, command, env = {}) {
     throw afterError
   }
   const dealingNow = after.state.round && (after.state.round.kind === 'ordinary' || after.state.round.kind === 'svara') && after.state.round.dealing
-  if ((after.state.round && after.state.round.kind === 'reveal-choice') || dealingNow) {
+  const showdownDisplayNow = after.state.round && after.state.round.kind === 'showdown-display'
+  if ((after.state.round && after.state.round.kind === 'reveal-choice') || dealingNow || showdownDisplayNow) {
     // This is an otherwise-ordinary command (act/exit/set-absent/
-    // absence-expired/.../start-next-round/svara-start) whose result the
-    // reference engine cannot fully reproduce: either a fold happened to
-    // leave exactly one non-folded participant (BASELINE finishes the round
-    // immediately; current HEAD defers behind the 2Б.3.7.1 reveal/hide
-    // choice instead), or the deal just entered the 2Б.3.7.4Б dealing
-    // phase (BASELINE has no such concept, so its toActId/betting options
-    // are never suppressed the way the optimized engine's are). Neither is
-    // an optimization regression - both are this/an earlier stage's own,
+    // absence-expired/.../start-next-round/svara-start/advance-allin-svara)
+    // whose result the reference engine cannot fully reproduce: either a
+    // fold happened to leave exactly one non-folded participant (BASELINE
+    // finishes the round immediately; current HEAD defers behind the
+    // 2Б.3.7.1 reveal/hide choice instead), the deal just entered the
+    // 2Б.3.7.4Б dealing phase (BASELINE has no such concept, so its
+    // toActId/betting options are never suppressed the way the optimized
+    // engine's are), or a real 2+ showdown just settled into the 2Б.3.7.6А
+    // display phase instead of clearing immediately. Neither is an
+    // optimization regression - all are this/an earlier stage's own,
     // already-tested behavior addition. Do not pair: the next ordinary
     // command resyncs the reference from this snapshot (shape-compatible
-    // again once the choice resolves / dealing finishes) through the
-    // existing structuredClone fallback above.
+    // again once the choice resolves / dealing finishes / display closes)
+    // through the existing structuredClone fallback above.
     if (after.status === 'duplicate') stats.duplicates++
     stats.revealChoiceOnly++
     for (const id of after.state.seats) { snapshot(after.state.config.tableId, after.state, id); stats.snapshots++ }
@@ -155,7 +187,7 @@ export function applySvaraMatchCommand(state, command, env = {}) {
   // OPTIMIZED state, so before's raw internal round can carry the extra
   // dealing key forward too (unlike its OWN snapshot builder below, which
   // only ever emits fields it explicitly lists and so never gains one).
-  assert.equal(JSON.stringify(withoutDealingRoundField(after)), JSON.stringify(withoutDealingRoundField(before)), 'full command result/state differs')
+  assert.equal(JSON.stringify(withoutPotIsMainField(withoutDealingRoundField(after))), JSON.stringify(withoutPotIsMainField(withoutDealingRoundField(before))), 'full command result/state differs')
   pairs.set(after.state, before.state)
   if (after.status === 'duplicate') stats.duplicates++
   if (stats.commands % 17 === 0) retained.push([after.state, JSON.stringify(after.state)])

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
 import { createSvaraMatchRuntime } from '../src/games/svara/runtime/svaraMatchRuntime.js'
 import { createSvaraLifecycle, svaraDealingAnimationMs, type SvaraClock } from '../src/games/svara/runtime/createSvaraLifecycle.js'
+import { SVARA_SHOWDOWN_DISPLAY_MS, SVARA_PAYOUT_STEP_MS } from '../src/games/svara/runtime/svaraDeadlines.js'
 import { createSvaraMatch, applySvaraMatchCommand, buildSvaraDeckForHands, assertSvaraMatchInvariants, type SvaraMatchCommand } from '../src/games/svara/engine/svaraMatch.js'
 import { SVARA_ORDERED_DECK, svaraCardCode, type SvaraCard } from '../src/games/svara/engine/svaraCards.js'
 import { SVARA_SNAPSHOT_FORBIDDEN_KEYS } from '../src/games/svara/protocol/svaraSnapshotProtocol.js'
@@ -108,10 +109,27 @@ function mount(runtime: ReturnType<typeof createSvaraMatchRuntime>, matchId = 'm
       sync()
     }
   }
+  // 2Б.3.7.6А: a real settled showdown (2+ remaining) now opens a public
+  // display round (3с comparison, then a sequential payout window sized by
+  // its own number of payout steps) before the round actually clears —
+  // advance the SAME real fake clock through it, exactly the real lifecycle
+  // timer path (mirrors finishDealingIfNeeded above, not a direct engine
+  // shortcut). A single advance() call dispatches both chained deadlines in
+  // order, since the clock processes newly-scheduled jobs within its window.
+  const resolveShowdownDisplayIfNeeded = () => {
+    for (;;) {
+      const round = state().round as { kind: string; phase?: 'showdown' | 'payout'; payoutSteps?: unknown[] } | null
+      if (!round || round.kind !== 'showdown-display') return
+      clock.advance(SVARA_SHOWDOWN_DISPLAY_MS + Math.max(1, round.payoutSteps?.length ?? 1) * SVARA_PAYOUT_STEP_MS)
+      sync()
+    }
+  }
   const ok = (player: string, command: any, extra = {}) => {
     finishDealingIfNeeded()
+    resolveShowdownDisplayIfNeeded()
     const result = submit(player, command, extra)
     assert.equal(result?.type, 'svara_command_result', JSON.stringify(result)); assert.equal(result.status, 'applied')
+    resolveShowdownDisplayIfNeeded()
     return result
   }
   const act = (p: string, action: any) => ok(p, { type: 'act', action })
@@ -124,7 +142,7 @@ function mount(runtime: ReturnType<typeof createSvaraMatchRuntime>, matchId = 'm
     for (const playerId of players) runtime.executeSystemCommand(matchId, id(), { type: 'set-absent', playerId, absent: true })
     sync()
   }
-  return { runtime, matchId, clock, lobby, frames, sessions, blocked, attach, send, payload, submit, ok, act, sync, state, view, timing, timer, absent, finishDealingIfNeeded }
+  return { runtime, matchId, clock, lobby, frames, sessions, blocked, attach, send, payload, submit, ok, act, sync, state, view, timing, timer, absent, finishDealingIfNeeded, resolveShowdownDisplayIfNeeded }
 }
 function fixture(capacity: 2 | 3 | 4 = 3, chips = 100, decks: SvaraCard[][] = []) {
   const clock = new Clock()
@@ -365,7 +383,12 @@ try {
     rt.executeSystemCommand('m', id(), { type: 'set-absent', playerId: 'b', absent: true })
     const t = mount(rt, 'm', clock); t.sync()
     assert.equal(t.state().stacks.a, 0)
-    t.clock.advance(300_000); assert.equal(t.state().winnerId, 'a'); assert.equal(t.state().stacks.a, 4)
+    // 2Б.3.7.6А: the tied all-in showdown now opens its own 3с public
+    // display first (no payout steps for a pure tie, so it closes in one
+    // step) — THEN the 5-minute presence-wait is planned from that later
+    // point, pushing its real deadline back by the display's duration too.
+    t.clock.advance(300_000 + SVARA_SHOWDOWN_DISPLAY_MS)
+    assert.equal(t.state().winnerId, 'a'); assert.equal(t.state().stacks.a, 4)
   })
   check('carried balance is awarded exactly once, without another entry', () => {
     const t = fixture()

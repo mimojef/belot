@@ -17,6 +17,9 @@ import type { SvaraDeadlineKind } from '../../../network/createGameServerClient'
 // runtime/svaraDeadlines.ts константи). Стойността тук е само за цвета на
 // генеричния "друг дедлайн" текст (deadlineStatusText) — не е авторитетна;
 // 2Б.3.7.5 може да я замени с реалния брой участници от round.participants.
+// 'showdown-display' (2Б.3.7.6А) е 3с фиксирано (виж SVARA_SHOWDOWN_DISPLAY_MS
+// на сървъра); 'payout-display' варира по брой стъпки на изплащане — стойността
+// тук е само за генеричния цвят, не авторитетна (аналогично на 'dealing').
 export const SVARA_DEADLINE_TOTAL_MS: Record<SvaraDeadlineKind, number> = {
   dealing: 5_000,
   turn: 15_000,
@@ -24,6 +27,8 @@ export const SVARA_DEADLINE_TOTAL_MS: Record<SvaraDeadlineKind, number> = {
   'presence-wait': 300_000,
   'reveal-choice': 5_000,
   'reveal-display': 3_000,
+  'showdown-display': 3_000,
+  'payout-display': 1_200,
 }
 
 export const SVARA_DEADLINE_LABEL: Record<SvaraDeadlineKind, string> = {
@@ -33,6 +38,8 @@ export const SVARA_DEADLINE_LABEL: Record<SvaraDeadlineKind, string> = {
   'presence-wait': 'Изчакване на играч',
   'reveal-choice': 'Избор за показване',
   'reveal-display': 'Публичен показ',
+  'showdown-display': 'Сравняване',
+  'payout-display': 'Изплащане',
 }
 
 /** Последните 5 секунди (или целия срок, ако е по-кратък от 5s) стават червени. */

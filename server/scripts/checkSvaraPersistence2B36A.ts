@@ -112,15 +112,37 @@ function fixture(capacity: 2 | 3 | 4 = 3, entryFee = 1000, decks: SvaraCard[][] 
       s({ type: 'finish-dealing', roundId: round.roundId })
     }
   }
+  // 2Б.3.7.6А: a real settled showdown (2+ remaining) now opens a public
+  // display round before the round actually clears — resolve it directly
+  // through the runtime too (same bypass convention as finishDealingIfNeeded
+  // above), then sync() so the lobby's own lifecycle gets a chance to chain
+  // any resulting automatic command (e.g. start-next-round) exactly as it
+  // normally would; this bypass alone does not trigger that on its own.
+  const resolveShowdownDisplayIfNeeded = () => {
+    for (;;) {
+      const round = rt.exportInternalStateForServer(matchId).round
+      if (!round || round.kind !== 'showdown-display') return
+      s({ type: round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', roundId: round.roundId })
+      // closeShowdownDisplay() already starts 'allin-svara' directly, by
+      // itself, when the showdown's tie mode calls for it — syncing there
+      // too would let the lobby ALSO auto-fire its own automatic
+      // 'advance-allin-svara' immediately, racing ahead of a test that
+      // wants to drive/inspect that continuation manually. Only sync() when
+      // the engine itself left a genuine null boundary (e.g. for
+      // start-next-round to pick up a locked ordinary-Svara pot).
+      if (rt.exportInternalStateForServer(matchId).round === null) sync()
+    }
+  }
   for (const playerId of ['b', 'c', 'd'].slice(0, capacity - 1)) p(playerId, { type: 'join-seat' })
   if (start) { p('a', { type: 'start-match' }); sync(); finishDealingIfNeeded() }
-  return { rt, clock, matchId, lobby, frames, faults, command, p, s, sync, state, stored, roundtrip, finishDealingIfNeeded }
+  return { rt, clock, matchId, lobby, frames, faults, command, p, s, sync, state, stored, roundtrip, finishDealingIfNeeded, resolveShowdownDisplayIfNeeded }
 }
 const tie1 = 'KS QS JS', tie2 = 'KH QH JH', low = '8C 9D 10H'
 function joining() {
   const t = fixture(3, 1000, [buildSvaraDeckForHands(['b', 'c', 'a'], { b: tie1, c: low, a: tie2 })])
   t.command('b', { type: 'look' }); t.command('b', { type: 'act', action: { kind: 'bet', total: 1 } })
   t.command('c', { type: 'act', action: { kind: 'fold' } }); t.command('a', { type: 'act', action: { kind: 'call' } })
+  t.resolveShowdownDisplayIfNeeded()
   assert.equal(t.state().round?.kind, 'svara-joining'); t.roundtrip(); return t
 }
 function failWrites(matchId: string) {
@@ -160,6 +182,7 @@ try {
     t.p('b', { type: 'act', action: { kind: 'blind-bet', total: 2 } }); t.roundtrip()
     t.p('c', { type: 'look' }); t.p('c', { type: 'act', action: { kind: 'bet', total: 4 } }); t.roundtrip()
     t.p('a', { type: 'act', action: { kind: 'fold' } }); t.p('b', { type: 'act', action: { kind: 'call' } }); t.roundtrip()
+    t.resolveShowdownDisplayIfNeeded(); t.roundtrip()
     assert(t.stored().state.history.length > 0); assert(t.stored().state.ledger.some((e) => e.type === 'bet'))
     const allin = fixture(2); allin.p('b', { type: 'look' }); allin.p('b', { type: 'act', action: { kind: 'all-in' } }); allin.roundtrip()
   })
@@ -286,6 +309,7 @@ try {
     assert.deepEqual(t.state().stacks, { a: 10, b: 10, c: 7 })
     t.finishDealingIfNeeded()
     for (const player of ['a', 'b', 'c']) { t.p(player, { type: 'look' }); t.p(player, { type: 'act', action: { kind: 'all-in' } }) }
+    t.resolveShowdownDisplayIfNeeded()
     assert.equal(t.state().round?.kind, 'allin-svara'); assert(t.stored().state.lockedPots.length); t.roundtrip()
     t.s({ type: 'advance-allin-svara' }); t.roundtrip()
     assert(t.state().history.at(-1)!.pots.some((p) => p.outcome.kind === 'split'))
@@ -434,6 +458,11 @@ try {
         // phase; finish it directly (fake-clock lifecycle tests cover the real wait).
         else if (state.round && (state.round.kind === 'ordinary' || state.round.kind === 'svara') && (state.round as { dealing?: boolean }).dealing) {
           rt.executeSystemCommand(matchId, id(), { type: 'finish-dealing', roundId: state.round.roundId })
+        // 2Б.3.7.6А: a real settled showdown (2+ remaining) opens the public
+        // display round before clearing; finish it directly too (its own
+        // real 3с+payout timing has dedicated fake-clock lifecycle tests).
+        } else if (state.round?.kind === 'showdown-display') {
+          rt.executeSystemCommand(matchId, id(), { type: state.round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', roundId: state.round.roundId })
         } else {
           assert(view.actorId); const actor = { playerId: view.actorId }, round = state.round
           assert(round && 'betting' in round)

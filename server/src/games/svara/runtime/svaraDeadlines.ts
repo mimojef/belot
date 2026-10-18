@@ -8,6 +8,15 @@ export const SVARA_PRESENCE_WAIT_MS = 300_000
 export const SVARA_REVEAL_CHOICE_MS = 5_000
 /** 2Б.3.7.1: публичен показ на картите, само след „Покажи“. */
 export const SVARA_REVEAL_DISPLAY_MS = 3_000
+/** 2Б.3.7.6А: публично сравняване при истинско приключило showdown (2+ оставащи) — §6 на заданието. */
+export const SVARA_SHOWDOWN_DISPLAY_MS = 3_000
+/**
+ * 2Б.3.7.6А: продължителност на ЕДНА последователна стъпка на изплащане
+ * (основна банка, после всяка странична поотделно, §7) — временна, лесно
+ * променима стойност преди 2Б.3.7.6Б's реална анимация с летящи чипове.
+ * Общата продължителност на прозореца = (брой стъпки) × тази константа.
+ */
+export const SVARA_PAYOUT_STEP_MS = 1_200
 /**
  * 2Б.3.7.4Б: сървърно определена продължителност на представянето на
  * раздаването (Вход + карти), преди първият ход да стане активен. Временни,
@@ -23,7 +32,7 @@ export function svaraDealingAnimationMs(participantCount: number): number {
   return SVARA_DEAL_ENTRY_ANIMATION_MS + participantCount * SVARA_DEAL_CARDS_PER_PLAYER * SVARA_DEAL_CARD_ANIMATION_MS
 }
 export const svaraEpochNow = () => Math.floor(performance.timeOrigin + performance.now())
-export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
+export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display' | 'showdown-display' | 'payout-display'
 export type SvaraDeadline = {
   kind: SvaraDeadlineKind
   key: string
@@ -52,6 +61,8 @@ export function planSvaraDeadlines(state: SvaraMatchState, revision: number,
   if (view.joining?.open && view.joining.undecided.length > 0) want('svara-joining', JSON.stringify(['join', view.roundId]), SVARA_JOIN_MS, null)
   if (view.revealChoice?.decision === 'pending') want('reveal-choice', JSON.stringify(['reveal-choice', view.roundId]), SVARA_REVEAL_CHOICE_MS, view.revealChoice.winnerId)
   if (view.revealChoice?.decision === 'revealed') want('reveal-display', JSON.stringify(['reveal-display', view.roundId]), SVARA_REVEAL_DISPLAY_MS, view.revealChoice.winnerId)
+  if (view.showdownDisplay?.phase === 'showdown') want('showdown-display', JSON.stringify(['showdown-display', view.roundId]), SVARA_SHOWDOWN_DISPLAY_MS, null)
+  if (view.showdownDisplay?.phase === 'payout') want('payout-display', JSON.stringify(['payout-display', view.roundId]), Math.max(1, view.showdownDisplay.payoutStepCount) * SVARA_PAYOUT_STEP_MS, null)
   if (view.atBoundary && view.readyPlayerIds.length < 2) want('presence-wait', JSON.stringify(['wait', view.readyPlayerIds]), SVARA_PRESENCE_WAIT_MS, view.readyPlayerIds[0] ?? null)
   return { deadlines, deadlineSequence: sequence }
 }

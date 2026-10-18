@@ -121,6 +121,8 @@ export type SvaraSystemCommand =
   | { type: 'expire-reveal-choice'; roundId: string }
   | { type: 'close-reveal-display'; roundId: string }
   | { type: 'finish-dealing'; roundId: string }
+  | { type: 'advance-showdown-display'; roundId: string }
+  | { type: 'close-payout-display'; roundId: string }
 
 export type SvaraAutomaticCommand = Extract<SvaraSystemCommand, { type: 'start-next-round' | 'svara-start' | 'advance-allin-svara' | 'activate-returns' | 'turn-timeout' }>
 
@@ -213,7 +215,7 @@ export type SvaraRuntimeClientFacade = Pick<SvaraMatchRuntime, 'hasMatch' | 'isP
 // ── Помощни ─────────────────────────────────────────────────────────────────
 
 const PARTICIPANT_TYPES = new Set(['join-seat', 'leave-seat', 'start-match', 'look', 'act', 'svara-join', 'svara-decline', 'request-return', 'exit', 'reveal-cards', 'hide-cards'])
-const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing'])
+const SYSTEM_TYPES = new Set(['start-next-round', 'svara-start', 'advance-allin-svara', 'absence-expired', 'set-absent', 'activate-returns', 'turn-timeout', 'close-svara-joining', 'finish-presence-wait', 'expire-reveal-choice', 'close-reveal-display', 'finish-dealing', 'advance-showdown-display', 'close-payout-display'])
 const ACTION_KINDS = new Set(['fold', 'call', 'all-in', 'no-bet', 'bet', 'blind-bet'])
 
 const fail = (code: SvaraRuntimeErrorCode, message: string): never => {
@@ -273,6 +275,8 @@ function normalizeSystemCommand(input: SvaraSystemCommand, commandId: string): S
     case 'expire-reveal-choice':
     case 'close-reveal-display':
     case 'finish-dealing':
+    case 'advance-showdown-display':
+    case 'close-payout-display':
       return { type: input.type, commandId, roundId: requireId(input.roundId, 128, 'roundId') }
     case 'finish-presence-wait':
       return { type: input.type, commandId, winnerId: input.winnerId === null ? null : requireId(input.winnerId, SVARA_RUNTIME_LIMITS.maxPlayerIdLength, 'winnerId') }

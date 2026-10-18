@@ -1319,12 +1319,41 @@ export type SvaraSnapshotBettingRound = {
   dealing: boolean
 }
 
+/** 2Б.3.7.6А §7 — една стъпка от последователното изплащане на показаното сравняване. */
+export type SvaraSnapshotPayoutStep = {
+  stepId: string
+  potId: string
+  isMain: boolean
+  amount: number
+  winners: string[]
+  share: number | null
+  removed: number
+  sequence: number
+}
+
 export type SvaraSnapshotRound =
   | SvaraSnapshotBettingRound
   | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
   | { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number }
   /** Избор „Покажи“/„Скрий“ (Етап 2Б.3.7.1) — cards/handPoints само след 'revealed'. */
   | { kind: 'reveal-choice'; roundId: string; winnerId: string; decision: 'pending' | 'revealed'; cards: SvaraCardCode[] | null; handPoints: number | null }
+  /**
+   * 2Б.3.7.6А — истинско showdown (2+ сравняващи играчи, без избор). Картите
+   * и точките на ВСИЧКИТЕ сравняващи се са публични за всички на масата,
+   * щом този round kind съществува — за разлика от историята (виж
+   * SvaraSnapshotHistoryRecord), където никога не се изпращат.
+   */
+  | {
+      kind: 'showdown-display'
+      roundId: string
+      dealerId: string | null
+      comparedPlayers: string[]
+      cards: Record<string, SvaraCardCode[]>
+      comparisonPoints: Record<string, number>
+      payout: SvaraSnapshotPayoutStep[]
+      svaraTie: boolean
+      displayPhase: 'showdown' | 'payout'
+    }
 
 export type SvaraSnapshotLockedPot = {
   potId: string
@@ -1402,7 +1431,7 @@ export type SvaraMatchSnapshotMessage = {
   }
 }
 
-export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'
+export type SvaraDeadlineKind = 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display' | 'showdown-display' | 'payout-display'
 export type SvaraDeadlineInfo = { kind: SvaraDeadlineKind; deadlineAt: number; remainingMs: number; playerId: string | null }
 
 export type SvaraLobbyErrorCode =

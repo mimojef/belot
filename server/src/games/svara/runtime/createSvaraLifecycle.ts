@@ -108,6 +108,8 @@ export function createSvaraLifecycle(runtime: SvaraMatchRuntime, deps: {
           else if (expired.kind === 'svara-joining') command = { type: 'close-svara-joining', roundId: expired.roundId! }
           else if (expired.kind === 'reveal-choice') command = { type: 'expire-reveal-choice', roundId: expired.roundId! }
           else if (expired.kind === 'reveal-display') command = { type: 'close-reveal-display', roundId: expired.roundId! }
+          else if (expired.kind === 'showdown-display') command = { type: 'advance-showdown-display', roundId: expired.roundId! }
+          else if (expired.kind === 'payout-display') command = { type: 'close-payout-display', roundId: expired.roundId! }
           else command = { type: 'finish-presence-wait', winnerId: expired.playerId }
           // IDs have their own system namespace. Failed transitions retain the
           // expired record: a retry cannot silently grant another 15s/5min.

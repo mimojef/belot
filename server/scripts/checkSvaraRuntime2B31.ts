@@ -260,6 +260,13 @@ function driveStep(d: Driver): void {
     }
     return
   }
+  if (v.roundKind === 'showdown-display') {
+    // 2Б.3.7.6А: истинско showdown с 2+ играчи, без избор — само системният
+    // 3с показ/изплащане-прозорец напред, mirror на reveal-display по-горе.
+    const round = rt.exportInternalStateForServer(matchId).round as { phase: 'showdown' | 'payout'; roundId: string }
+    sys({ type: round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', roundId: round.roundId })
+    return
+  }
   const actor = v.toAct
   assert(actor, 'betting round without toAct')
   if (status[actor] === 'absent') {

@@ -116,6 +116,8 @@ export type SvaraRoundPotRecord = {
   amount: number
   contributions: Record<string, number>
   eligible: string[]
+  /** 2Б.3.7.6А: основна банка срещу странична (§3/§7 на заданието) — index 0 на живия слой, или вече известното isMain на заключената банка. */
+  isMain: boolean
   outcome: SvaraPotOutcome
 }
 
@@ -193,7 +195,53 @@ type RevealChoiceRound = {
   record: SvaraRoundRecord
 }
 
-export type SvaraRound = OrdinaryRound | SvaraJoiningRound | SvaraDealRound | AllInSvaraRound | RevealChoiceRound
+/** Една стъпка от последователното изплащане (§7, 2Б.3.7.6А) — основна банка първа, после всяка странична поотделно. */
+export type SvaraPayoutStep = {
+  stepId: string
+  potId: string
+  isMain: boolean
+  amount: number
+  winners: string[]
+  /** >1 печеливши, поделящи банка (§7.5) — null за единствен победител. */
+  share: number | null
+  /** Остатък, изваден от играта при неделима подялба (§7.6) — 0, ако няма такъв. */
+  removed: number
+  order: number
+}
+
+/**
+ * Етап 2Б.3.7.6А: кратко презентационно състояние СЛЕД истинско приключило
+ * сравняване на карти (2+ оставащи играчи) — ПРЕДИ `finishRound` да изчисти
+ * рунда. Банката/победителите/точките вече са ОКОНЧАТЕЛНО определени от
+ * повикващия (settleOrdinary/settleSvaraDeal/advanceAllInSvara — финалната
+ * итерация без оставащо равенство) — тук се пази САМО вече взетото решение,
+ * за контролиран публичен показ; нулево влияние върху чиповата сметка (виж
+ * assertSvaraMatchInvariants — без нов слой, точно като RevealChoiceRound).
+ * НЕ е свързано с reveal-choice (единствен останал играч избира показване/
+ * скриване на СВОИТЕ карти) — различен сценарий, виж коментара там; тук
+ * ВИНАГИ ≥2 играчи сравняват автоматично, без избор.
+ */
+type ShowdownDisplayRound = {
+  kind: 'showdown-display'
+  roundId: string
+  dealerId: string | null
+  /** Играчите с публично показани карти в това сравняване (винаги ≥2, никога отказали се). */
+  comparedPlayers: string[]
+  /** Именувано различно от вътрешното 'hands' на OrdinaryRound/SvaraDealRound нарочно — протоколният модул не бива да чете суровите ръце директно (виж тест 20 в checkSvaraSnapshot2B32.ts), само вече публично разрешени полета като това. */
+  cards: Record<string, SvaraCardCode[]>
+  points: Record<string, number>
+  /** Само 'awarded'/'split' изходи — заключените/пренесените банки НЕ са "изплащане" (§8). */
+  payoutSteps: SvaraPayoutStep[]
+  /** true, ако поне една банка от това сравняване остава заключена (неразрешено равенство — „Свара!“). */
+  svaraTie: boolean
+  phase: 'showdown' | 'payout'
+  /** Забавеният запис за историята — null, ако повикващият вече го е записал директно (advanceAllInSvara). */
+  record: SvaraRoundRecord | null
+  /** Когато показът приключи, директно започва ново 'allin-svara' продължение (режим 'allin', §7). */
+  nextRound: { potIds: string[] } | null
+}
+
+export type SvaraRound = OrdinaryRound | SvaraJoiningRound | SvaraDealRound | AllInSvaraRound | RevealChoiceRound | ShowdownDisplayRound
 
 export type SvaraMatchState = {
   config: SvaraMatchConfig
@@ -249,6 +297,8 @@ export type SvaraMatchCommand =
   | { type: 'expire-reveal-choice'; commandId: string; roundId: string }
   | { type: 'close-reveal-display'; commandId: string; roundId: string }
   | { type: 'finish-dealing'; commandId: string; roundId: string }
+  | { type: 'advance-showdown-display'; commandId: string; roundId: string }
+  | { type: 'close-payout-display'; commandId: string; roundId: string }
 
 export type SvaraMatchOutcome = {
   commandId: string
@@ -607,6 +657,8 @@ function dispatch(ctx: Ctx): void {
     case 'expire-reveal-choice': return expireRevealChoice(ctx, command.roundId)
     case 'close-reveal-display': return closeRevealDisplay(ctx, command.roundId)
     case 'finish-dealing': return finishDealing(ctx, command.roundId)
+    case 'advance-showdown-display': return advanceShowdownDisplay(ctx, command.roundId)
+    case 'close-payout-display': return closePayoutDisplay(ctx, command.roundId)
     default: fail('invalid-command', `unknown command ${String((command as { type?: unknown }).type)}`)
   }
 }
@@ -836,6 +888,21 @@ function topPlayers(players: string[], points: ShowdownPoints): string[] {
   return players.filter((id) => points[id] === top)
 }
 
+/**
+ * 2Б.3.7.6А: основна срещу странична банка за ВЕЧЕ заключена банка,
+ * производно от стабилния `${roundId}:pot-${index}`/`${roundId}:bets-${index}`
+ * ИД формат (index 0 = основна, непроменено от 2Б.2Б) — НЕ ползва
+ * `SvaraMatchLockedPot.isMain`, което е изрично смислено само за 'allin'
+ * (виж коментара при декларацията му и теста в checkSvaraSnapshot2B32.ts,
+ * който заключва isMain===false за 'ordinary'); тук отделна, вярна за ВСЕКИ
+ * произход производна стойност, само за показа, без да пипа съществуващото
+ * поле/протокол.
+ */
+function isMainLockedPotId(potId: string): boolean {
+  const match = /-(\d+):locked$/.exec(potId)
+  return match !== null && match[1] === '0'
+}
+
 function settleOrdinary(ctx: Ctx): void {
   const { state } = ctx
   const round = state.round as OrdinaryRound
@@ -865,7 +932,7 @@ function settleOrdinary(ctx: Ctx): void {
   const allinPotIds: string[] = []
   for (const layer of layers) {
     const potId = `${round.roundId}:pot-${layer.index}`
-    const base = { potId, source: 'round' as const, amount: layer.amount, contributions: { ...layer.contributions }, eligible: [...layer.eligible] }
+    const base = { potId, source: 'round' as const, amount: layer.amount, contributions: { ...layer.contributions }, eligible: [...layer.eligible], isMain: layer.index === 0 }
     if (layer.kind === 'uncalled') {
       const owner = layer.contributors[0]!
       if (layer.eligible.length === 0) {
@@ -916,10 +983,7 @@ function settleOrdinary(ctx: Ctx): void {
     openRevealChoice(ctx, remaining[0]!, round.hands[remaining[0]!]!, record)
     return
   }
-  finishRound(ctx, record)
-  if (allinPotIds.length > 0) {
-    state.round = { kind: 'allin-svara', roundId: nextRoundId(ctx, 'allin'), potIds: allinPotIds, iteration: 0, sidesEvaluated: false }
-  }
+  openShowdownDisplay(ctx, record, { deferRecordPush: true, nextRound: allinPotIds.length > 0 ? { potIds: allinPotIds } : null })
 }
 
 function baseRecord(round: OrdinaryRound | SvaraDealRound, dealerId: string | null, shown: string[], points: ShowdownPoints): SvaraRoundRecord {
@@ -934,6 +998,54 @@ function baseRecord(round: OrdinaryRound | SvaraDealRound, dealerId: string | nu
     folded: [...round.betting.folded],
     anyVoluntaryBet: round.betting.anyVoluntaryBet,
     pots: [],
+  }
+}
+
+/**
+ * 2Б.3.7.6А §7: само 'awarded'/'split' изходи стават визуални стъпки за
+ * изплащане — заключените (неразрешено равенство, „Свара!“) и пренесените
+ * банки НЕ се изплащат сега (§8), а uncalled-return е връщане, не печалба.
+ * Основната банка винаги първа, после всяка странична — независимо от
+ * вътрешния ред на натрупване в `pots` (виж settleSvaraDeal, където
+ * заключената банка се добавя преди новите залози).
+ */
+function buildPayoutSteps(pots: readonly SvaraRoundPotRecord[]): SvaraPayoutStep[] {
+  type RawStep = { potId: string; isMain: boolean; amount: number; winners: string[]; share: number | null; removed: number }
+  const raw: RawStep[] = pots.flatMap((pot): RawStep[] => {
+    if (pot.outcome.kind === 'awarded') {
+      return [{ potId: pot.potId, isMain: pot.isMain, amount: pot.amount, winners: [pot.outcome.winner], share: null, removed: 0 }]
+    }
+    if (pot.outcome.kind === 'split') {
+      return [{ potId: pot.potId, isMain: pot.isMain, amount: pot.amount, winners: [...pot.outcome.tiedPlayers], share: pot.outcome.share, removed: pot.outcome.removed }]
+    }
+    return []
+  })
+  raw.sort((a, b) => (a.isMain === b.isMain ? 0 : a.isMain ? -1 : 1))
+  return raw.map((step, order) => ({ ...step, stepId: `${step.potId}:payout`, order }))
+}
+
+/**
+ * 2Б.3.7.6А: влиза в контролирания публичен показ вместо директно
+ * `finishRound` (mirror на openRevealChoice по-горе, за истинско showdown с
+ * 2+ сравняващи играчи вместо избора на единствения останал). Банката е
+ * вече присъдена от повикващия; `deferRecordPush` разграничава
+ * settleOrdinary/settleSvaraDeal (record все още не е в history — виж
+ * finishRound) от advanceAllInSvara (вече директно push-нат там).
+ */
+function openShowdownDisplay(ctx: Ctx, record: SvaraRoundRecord, options: { deferRecordPush: boolean; nextRound: { potIds: string[] } | null }): void {
+  const comparedPlayers = Object.keys(record.shownHands)
+  ctx.state.round = {
+    kind: 'showdown-display',
+    roundId: nextRoundId(ctx, 'showdown'),
+    dealerId: record.dealerId,
+    comparedPlayers,
+    cards: { ...record.shownHands },
+    points: Object.fromEntries(comparedPlayers.map((id) => [id, record.points[id]!])),
+    payoutSteps: buildPayoutSteps(record.pots),
+    svaraTie: record.pots.some((pot) => pot.outcome.kind === 'locked'),
+    phase: 'showdown',
+    record: options.deferRecordPush ? record : null,
+    nextRound: options.nextRound,
   }
 }
 
@@ -1051,6 +1163,35 @@ function closeRevealDisplay(ctx: Ctx, roundId: string): void {
   finishRound(ctx, (round as RevealChoiceRound).record)
 }
 
+function requireShowdownDisplay(ctx: Ctx, roundId: string, expectedPhase: 'showdown' | 'payout'): ShowdownDisplayRound {
+  const round = ctx.state.round
+  if (!round || round.kind !== 'showdown-display' || round.roundId !== roundId || round.phase !== expectedPhase) {
+    fail('not-allowed', `stale showdown display ${expectedPhase} transition`)
+  }
+  return round as ShowdownDisplayRound
+}
+
+/** Край на 3-секундното публично сравняване (2Б.3.7.6А §6): продължава към изплащане, ако има стъпки, иначе затваря направо. */
+function advanceShowdownDisplay(ctx: Ctx, roundId: string): void {
+  requirePhase(ctx, 'in-progress')
+  const round = requireShowdownDisplay(ctx, roundId, 'showdown')
+  if (round.payoutSteps.length === 0) { closeShowdownDisplay(ctx, round); return }
+  round.phase = 'payout'
+}
+
+/** Край на последователния прозорец за изплащане; затваря рунда (и евентуалното продължение със Свара с ол-ин). */
+function closePayoutDisplay(ctx: Ctx, roundId: string): void {
+  requirePhase(ctx, 'in-progress')
+  closeShowdownDisplay(ctx, requireShowdownDisplay(ctx, roundId, 'payout'))
+}
+
+function closeShowdownDisplay(ctx: Ctx, round: ShowdownDisplayRound): void {
+  finishRound(ctx, round.record)
+  if (round.nextRound) {
+    ctx.state.round = { kind: 'allin-svara', roundId: nextRoundId(ctx, 'allin'), potIds: round.nextRound.potIds, iteration: 0, sidesEvaluated: false }
+  }
+}
+
 // ── Обикновена Свара (§6) ───────────────────────────────────────────────────
 
 function lockedPot(state: SvaraMatchState, potId: string): SvaraMatchLockedPot {
@@ -1126,7 +1267,7 @@ function settleSvaraDeal(ctx: Ctx): void {
 
   const record = baseRecord(round, round.dealerId, remaining, points)
   // Заключената банка: правоимащи са неотказалите участници (§6.7).
-  const lockedBase = { potId: pot.potId, source: 'locked' as const, amount: pot.amount, contributions: {}, eligible: [...remaining] }
+  const lockedBase = { potId: pot.potId, source: 'locked' as const, amount: pot.amount, contributions: {}, eligible: [...remaining], isMain: isMainLockedPotId(pot.potId) }
   if (remaining.length === 1) {
     awardLocked(ctx, pot, remaining[0]!, round.roundId)
     record.pots.push({ ...lockedBase, outcome: { kind: 'awarded', winner: remaining[0]!, byShowdown: false } })
@@ -1144,7 +1285,7 @@ function settleSvaraDeal(ctx: Ctx): void {
   // Новите доброволни залози — отделна банка/слоеве (§6.8).
   for (const layer of layers) {
     const potId = `${round.roundId}:bets-${layer.index}`
-    const base = { potId, source: 'round' as const, amount: layer.amount, contributions: { ...layer.contributions }, eligible: [...layer.eligible] }
+    const base = { potId, source: 'round' as const, amount: layer.amount, contributions: { ...layer.contributions }, eligible: [...layer.eligible], isMain: layer.index === 0 }
     if (layer.eligible.length === 0) {
       record.pots.push({ ...base, outcome: carryOut(ctx, round.roundId, potId, layer.amount) })
     } else if (layer.kind === 'uncalled') {
@@ -1172,10 +1313,7 @@ function settleSvaraDeal(ctx: Ctx): void {
     openRevealChoice(ctx, remaining[0]!, round.hands[remaining[0]!]!, record)
     return
   }
-  finishRound(ctx, record)
-  if (allinPotIds.length > 0) {
-    state.round = { kind: 'allin-svara', roundId: nextRoundId(ctx, 'allin'), potIds: allinPotIds, iteration: 0, sidesEvaluated: false }
-  }
+  openShowdownDisplay(ctx, record, { deferRecordPush: true, nextRound: allinPotIds.length > 0 ? { potIds: allinPotIds } : null })
 }
 
 function awardLocked(ctx: Ctx, pot: SvaraMatchLockedPot, playerId: string, roundId: string | null): void {
@@ -1234,7 +1372,7 @@ function advanceAllInSvara(ctx: Ctx): void {
     pots: [],
   }
   for (const pot of pots) {
-    const base = { potId: pot.potId, source: 'locked' as const, amount: pot.amount, contributions: {}, eligible: [...pot.eligible] }
+    const base = { potId: pot.potId, source: 'locked' as const, amount: pot.amount, contributions: {}, eligible: [...pot.eligible], isMain: pot.isMain }
     // §7.3: всяка банка само сред своите правоимащи, със същите нови карти.
     const best = topPlayers(pot.eligible, points)
     if (best.length === 1) {
@@ -1266,7 +1404,11 @@ function advanceAllInSvara(ctx: Ctx): void {
   allin.potIds = allin.potIds.filter((id) => state.lockedPots.some((pot) => pot.potId === id))
   state.history.push(record)
   ctx.completedRounds.push(record.roundId)
-  if (allin.potIds.length === 0) finishRound(ctx, null)
+  // 2Б.3.7.6А: само финалната итерация (без оставащо равенство) получава
+  // публичен показ — междинни итерации (главната банка все още равна,
+  // следва ново раздаване веднага) НЯМАТ показ в този подетап (виж
+  // коментара на ShowdownDisplayRound/доклада за известното ограничение).
+  if (allin.potIds.length === 0) openShowdownDisplay(ctx, record, { deferRecordPush: false, nextRound: null })
 }
 
 // ── Отсъствие и изход (§8) ──────────────────────────────────────────────────
@@ -1406,6 +1548,7 @@ export function describeSvaraLifecycle(state: SvaraMatchState) {
       holdersReady: !!pot && pot.eligible.every((id) => state.status[id] === 'active'),
     } : null,
     revealChoice: round?.kind === 'reveal-choice' ? { winnerId: round.winnerId, decision: round.decision } : null,
+    showdownDisplay: round?.kind === 'showdown-display' ? { roundId: round.roundId, phase: round.phase, payoutStepCount: round.payoutSteps.length } : null,
   }
 }
 

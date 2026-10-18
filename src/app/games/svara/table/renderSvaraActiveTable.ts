@@ -176,6 +176,7 @@ function seatCardsHtml(
   lookEffect: SvaraActiveLookEffect | null,
   foldEffect: SvaraActiveFoldEffect | null,
   reducedMotion: boolean,
+  showdownCards: string[] | null,
 ): string {
   // Задание §11/§14 — активно избледняване при отказ има приоритет пред
   // всичко друго: веднъж отказал, нито собствените, нито чуждите карти се
@@ -198,6 +199,15 @@ function seatCardsHtml(
       return src ? cardFaceHtml(src, cardSizeClampPx, i) : cardBackHtml(cardSizeClampPx, i, false)
     }).join('')
     return `<span data-svara-own-cards="1" style="display:inline-flex;">${cardsHtml}</span>`
+  }
+  // 2Б.3.7.6А §4 — истинско showdown: карти на ВСИЧКИТЕ сравняващи се,
+  // публично за всички на масата (не само за самия играч) — различно от
+  // publicReveal по-долу (reveal-choice, само за единствения победител).
+  if (showdownCards) {
+    return `<span data-svara-showdown-cards="1" style="display:inline-flex;">${showdownCards.map((code, i) => {
+      const src = svaraCardCodeToFaceSrc(code)
+      return src ? cardFaceHtml(src, cardSizeClampPx, i) : cardBackHtml(cardSizeClampPx, i, false)
+    }).join('')}</span>`
   }
   if (publicReveal && publicReveal.winnerId === seat.playerId) {
     return publicReveal.cards.map((code, i) => {
@@ -263,6 +273,10 @@ function seatPanelHtml(
   const foldEffect = input.activeFoldEffects.find((e) => e.seatIndex === seat.seatIndex) ?? null
   const lookEffect = isLocal ? input.activeLookEffect : null
   const landedCardCount = input.dealingVisual.active ? input.dealingVisual.landedCardCountBySeatIndex.get(seat.seatIndex) ?? 0 : null
+  const showdownCards = round && round.kind === 'showdown-display' && round.comparedPlayers.includes(seat.playerId)
+    ? round.cards[seat.playerId] ?? null
+    : null
+  const showdownPoints = round && round.kind === 'showdown-display' ? round.comparisonPoints[seat.playerId] ?? null : null
 
   let ring = ''
   if (seat.isToAct && turnDeadline) {
@@ -281,7 +295,8 @@ function seatPanelHtml(
       </div>
       <div style="font-size:clamp(9px,2.6vw,13px);font-weight:800;color:#fff;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:center;line-height:1.15;">${esc(svaraPlaceholderName(seat.playerId))}${isLocal ? ' (ти)' : ''}</div>
       <div data-svara-seat-total="1" style="font-size:clamp(8px,2.3vw,11px);color:#f4c95b;font-weight:700;line-height:1.15;" title="Общо внесени в това раздаване (вкл. Вход)">${seat.stack}${seat.roundContribution > 0 ? ` · общо ${seat.roundContribution}` : ''}</div>
-      <div style="display:flex;justify-content:center;">${seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp, landedCardCount, lookEffect, foldEffect, input.reducedMotion)}</div>
+      ${showdownCards && showdownPoints !== null ? `<div data-svara-showdown-points="1" style="font-size:clamp(9px,2.4vw,12px);font-weight:900;color:#fff;background:rgba(244,201,91,.22);border-radius:999px;padding:0 6px;">${showdownPoints}</div>` : ''}
+      <div style="display:flex;justify-content:center;">${seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp, landedCardCount, lookEffect, foldEffect, input.reducedMotion, showdownCards)}</div>
       ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null)}
     </div>
   </div>`
@@ -301,25 +316,74 @@ function deadlineStatusText(timing: SvaraMatchTimingMessage | null, serverNow: n
   return `<div data-svara-other-deadline="1" style="margin-top:4px;font-size:clamp(10px,2.6vw,12px);color:${state.isDanger ? '#ef4444' : 'rgba(255,255,255,.75)'};font-weight:700;">${esc(SVARA_DEADLINE_LABEL[entry.kind])}: ${state.remainingSeconds}с</div>`
 }
 
+// 2Б.3.7.6А §3/§12 — статично, четливо показване на основната/страничните
+// банки и правоимащите им участници. Участник с вноска НЕ означава
+// непременно правоимащ (отказал се е внесъл, но е извън `eligible`) — тук
+// изрично показваме САМО `eligible` имената от сървъра, никога изведени
+// клиентски. Нарочно БЕЗ анимация/летящи чипове (тези остават 2Б.3.7.6Б).
+function banksBreakdownHtml(input: RenderSvaraActiveTableInput): string {
+  const snapshot = input.snapshot
+  const round = snapshot?.round ?? null
+  const rows: Array<{ label: string; amount: number; eligible: string[] }> = []
+  if (round && 'provisionalPots' in round) {
+    for (const layer of round.provisionalPots) {
+      if (layer.amount <= 0) continue
+      rows.push({ label: layer.index === 0 ? 'Основна банка' : `Странична банка ${layer.index}`, amount: layer.amount, eligible: layer.eligible })
+    }
+  }
+  for (const pot of snapshot?.lockedPots ?? []) {
+    rows.push({ label: 'Заключена банка (Свара)', amount: pot.amount, eligible: pot.eligible })
+  }
+  if (rows.length === 0) return ''
+  return `<div data-svara-banks-breakdown="1" style="margin-top:3px;display:flex;flex-direction:column;gap:1px;max-width:92%;">
+    ${rows.map((row) => `<div style="font-size:clamp(7px,1.9vw,9px);color:rgba(255,255,255,.72);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${esc(row.label)}: ${row.amount} <span style="color:rgba(255,255,255,.5);">(${row.eligible.map((id) => esc(svaraPlaceholderName(id))).join(', ')})</span></div>`).join('')}
+  </div>`
+}
+
+// 2Б.3.7.6А §4/§8 — текуща фаза на резултата (сравняване/изплащане) и
+// „Свара!“ при неразрешено равенство; само текст/изброяване, без анимация.
+function showdownDisplayStatusHtml(round: SvaraSnapshotRound | null): string {
+  if (!round || round.kind !== 'showdown-display') return ''
+  const phaseLabel = round.displayPhase === 'showdown' ? 'Сравняване на картите' : 'Изплащане на банките'
+  const payoutLines = round.payout.map((step) => {
+    const who = step.winners.map((id) => esc(svaraPlaceholderName(id))).join(', ')
+    const amount = step.share !== null ? `${step.share} всеки` : `${step.amount}`
+    return `<div style="font-size:clamp(8px,2.1vw,10px);color:#f4c95b;">${step.isMain ? 'Основна банка' : 'Странична банка'} → ${who}: ${esc(amount)}</div>`
+  }).join('')
+  return `<div data-svara-showdown-status="1" style="margin-top:2px;">
+    <div style="font-size:clamp(9px,2.4vw,11px);font-weight:800;color:#fff;">${esc(phaseLabel)}</div>
+    ${round.svaraTie ? '<div style="font-size:clamp(10px,2.8vw,13px);font-weight:900;color:#ef4444;text-shadow:0 1px 3px rgba(0,0,0,.8);">СВАРА!</div>' : ''}
+    ${payoutLines}
+  </div>`
+}
+
 function feltCenterHtml(input: RenderSvaraActiveTableInput): string {
   const round = input.snapshot?.round ?? null
   const roundLabel = round
     ? round.kind === 'reveal-choice'
       ? round.decision === 'pending' ? 'Избор за показване на карти' : 'Показване на карти'
-      : round.kind === 'allin-svara' ? 'Свара с ол-ин'
-        : round.kind === 'svara-joining' ? 'Включване в Свара'
-          : round.kind === 'svara' ? 'Свара'
-            : 'Обикновено раздаване'
+      : round.kind === 'showdown-display' ? 'Сравняване'
+        : round.kind === 'allin-svara' ? 'Свара с ол-ин'
+          : round.kind === 'svara-joining' ? 'Включване в Свара'
+            : round.kind === 'svara' ? 'Свара'
+              : 'Обикновено раздаване'
     : 'Чакане на следващо раздаване'
   const potTotal = round && 'potTotal' in round ? round.potTotal : null
   const carried = input.snapshot?.carriedTotal ?? 0
+  const lockedTotal = (input.snapshot?.lockedPots ?? []).reduce((sum, pot) => sum + pot.amount, 0)
+  // Задание §3 — "в центъра на масата винаги се вижда общата сума на
+  // ВСИЧКИ текущи банки" (текущ кръг + заключени + пренесени), не само
+  // текущия кръг.
+  const grandTotal = (potTotal ?? 0) + lockedTotal + carried
   // grid-area:center — централната grid клетка (остатъчното пространство
   // между top/bottom редовете и left/right колоните), никога не се
   // застъпва с тях по конструкция (виж slotAnchorStyle по-горе).
   return `<div data-svara-felt-center="1" style="grid-area:center;justify-self:center;align-self:center;text-align:center;max-width:100%;overflow:hidden;pointer-events:none;padding:0 2px;">
     <div style="font-size:clamp(9px,2.6vw,14px);font-weight:900;color:rgba(255,255,255,.85);text-shadow:0 1px 3px rgba(0,0,0,.8);white-space:nowrap;">${esc(roundLabel)}</div>
-    ${potTotal !== null ? `<div style="margin-top:2px;font-size:clamp(11px,3.2vw,17px);font-weight:900;color:#f4c95b;text-shadow:0 1px 3px rgba(0,0,0,.8);">Банка: ${potTotal}</div>` : ''}
+    ${grandTotal > 0 ? `<div style="margin-top:2px;font-size:clamp(11px,3.2vw,17px);font-weight:900;color:#f4c95b;text-shadow:0 1px 3px rgba(0,0,0,.8);">Банка: ${grandTotal}</div>` : ''}
     ${carried > 0 ? `<div style="margin-top:1px;font-size:clamp(8px,2.1vw,10px);color:rgba(255,255,255,.6);">+ пренесени ${carried}</div>` : ''}
+    ${banksBreakdownHtml(input)}
+    ${showdownDisplayStatusHtml(round)}
     ${deadlineStatusText(input.timing, input.serverNow, round)}
   </div>`
 }

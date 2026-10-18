@@ -1,5 +1,6 @@
 import type { SvaraEntryPercent, SvaraStartMode } from '../engine/svaraMatch.js'
 import type { SvaraParticipantCommand } from '../runtime/svaraMatchRuntime.js'
+import type { SvaraDeadlineKind } from '../runtime/svaraDeadlines.js'
 import type { SvaraMatchSnapshotMessage, SvaraPublicTable } from './svaraSnapshotProtocol.js'
 export type { SvaraPublicTable } from './svaraSnapshotProtocol.js'
 
@@ -28,7 +29,7 @@ export type SvaraLobbyErrorCode =
 
 export type SvaraLobbyServerMessage =
   | { type: 'svara_match_timing'; matchId: string; revision: number; serverNow: number;
-      deadlines: Array<{ kind: 'dealing' | 'turn' | 'svara-joining' | 'presence-wait' | 'reveal-choice' | 'reveal-display'; deadlineAt: number; remainingMs: number; playerId: string | null }> }
+      deadlines: Array<{ kind: SvaraDeadlineKind; deadlineAt: number; remainingMs: number; playerId: string | null }> }
   | { type: 'svara_command_result'; matchId: string; commandId: string; status: 'applied' | 'duplicate'; revision: number; phase: SvaraPublicTable['phase'] }
   | { type: 'svara_command_error'; code: SvaraLobbyErrorCode; message: string; commandId?: string }
   | { type: 'svara_tables_list'; tables: SvaraPublicTable[] }

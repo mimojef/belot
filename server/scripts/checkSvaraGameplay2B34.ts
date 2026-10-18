@@ -107,12 +107,40 @@ function fixture(capacity: 2 | 3 | 4 = 2, chips = 100, entryPercent: 1 | 2 | 3 |
       runtime.executeSystemCommand(targetMatchId, id(), { type: 'finish-dealing', roundId: round.roundId })
     }
   }
+  // 2Б.3.7.6А: a real settled showdown (2+ remaining) now enters a public
+  // display round (3с comparison + a sequential payout window) before the
+  // round actually clears — same rationale/pattern as finishDealingIfNeeded
+  // above: this is server-timed, not itself a player-visible action to
+  // assert on here, so skip it directly through the runtime rather than
+  // waiting out real wall-clock seconds in this real-clock lobby fixture.
+  // The real 3s+payout timing itself has its own fake-clock lifecycle tests.
+  const resolveShowdownDisplayIfNeeded = (targetMatchId: string = matchId) => {
+    for (;;) {
+      const round = targetMatchId ? runtime.exportInternalStateForServer(targetMatchId).round : null
+      if (round && round.kind === 'showdown-display') {
+        runtime.executeSystemCommand(targetMatchId, id(), { type: round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', roundId: round.roundId })
+        continue
+      }
+      // Closing the display directly through the runtime (bypassing lobby.handle())
+      // means the lobby's own lifecycle never gets a chance to chain the
+      // resulting automatic command (e.g. start-next-round once round
+      // becomes null) — drain it here too, exactly like the real lifecycle's
+      // own sync() loop would, so callers always see a fully-settled state.
+      const automatic = runtime.getAutomaticCommand(targetMatchId)
+      if (!automatic) return
+      runtime.executeSystemCommand(targetMatchId, id(), automatic)
+    }
+  }
   const ok = (player: string, command: any, extra: any = {}) => {
     finishDealingIfNeeded(extra.matchId ?? matchId)
+    resolveShowdownDisplayIfNeeded(extra.matchId ?? matchId)
     const result = submit(player, command, extra)
     assert.equal(result?.type, 'svara_command_result', JSON.stringify(result))
     assert.equal(result.status, 'applied')
     assert.equal(faults.length, 0, String(faults[0]))
+    // Resolve immediately so an assertion right after THIS call (no further
+    // ok()/actor() in between) never observes the transient display round.
+    resolveShowdownDisplayIfNeeded(extra.matchId ?? matchId)
     return result
   }
   const reject = (player: string, command: any, code: string, extra = {}) => {
@@ -124,10 +152,10 @@ function fixture(capacity: 2 | 3 | 4 = 2, chips = 100, entryPercent: 1 | 2 | 3 |
   }
   const state = () => runtime.exportInternalStateForServer(matchId)
   const view = (player: string) => runtime.getPlayerSnapshot(matchId, { playerId: player })
-  const actor = () => { finishDealingIfNeeded(); return view('a').toActId! }
+  const actor = () => { finishDealingIfNeeded(); resolveShowdownDisplayIfNeeded(); return view('a').toActId! }
   const look = (player: string) => ok(player, { type: 'look' })
   const act = (player: string, action: any) => ok(player, { type: 'act', action })
-  return { runtime, lobby, frames, sessions, blocked, faults, matchId, decks, wire, attach, payload, submit, ok, reject, rawState, state, view, actor, look, act, finishDealingIfNeeded }
+  return { runtime, lobby, frames, sessions, blocked, faults, matchId, decks, wire, attach, payload, submit, ok, reject, rawState, state, view, actor, look, act, finishDealingIfNeeded, resolveShowdownDisplayIfNeeded }
 }
 
 try {
@@ -172,6 +200,10 @@ try {
     assert.equal((t.state().round as any).betting.blind.status, 'closed')
     const short = fixture(2, 1, 1)
     // Entry consumes both stacks; automatic all-in comparisons finish the match.
+    // 2Б.3.7.6А: the instant showdown now settles into the public display
+    // phase first — resolve it explicitly (same convention as
+    // finishDealingIfNeeded below) rather than waiting out its real timers.
+    short.resolveShowdownDisplayIfNeeded()
     assert.equal(short.state().phase, 'finished')
     const small = fixture(2, 2, 1)
     small.finishDealingIfNeeded()
@@ -289,8 +321,29 @@ try {
     const decks = Array.from({ length: 40 }, (_, i) => buildSvaraDeckForHands(i === 0 ? ['b', 'a'] : ['a', 'b'], { a: TIE1, b: TIE2 }))
     const t = fixture(2, 1, 1, decks)
     assert(t.state().phase === 'in-progress')
+    // 2Б.3.7.6А: the very first settlement (instant all-in from Entry alone)
+    // now opens the real, server-timed public display — a GENUINE new wait
+    // this stage intentionally introduces, not a turn timer. Resolve ONLY
+    // that one round here (a single 'advance' fully closes it: a pure tie
+    // has zero payout steps, see advanceShowdownDisplay) — deliberately NOT
+    // via resolveShowdownDisplayIfNeeded's broader drain, which would race
+    // through this test's entire 40-deck repeated-tie chain synchronously
+    // and defeat its actual point (gradual, tick-by-tick automatic
+    // progression with no turn timer, measured from here onward).
+    const firstDisplay = t.state().round
+    if (firstDisplay && firstDisplay.kind === 'showdown-display') {
+      t.runtime.executeSystemCommand(t.matchId, 'test-advance-1', { type: 'advance-showdown-display', roundId: firstDisplay.roundId })
+    }
     const revision = t.runtime.getMatchRevision(t.matchId)
-    await new Promise<void>((done) => setImmediate(done))
+    // The lobby's own automatic (non-turn-timer) chaining still works
+    // normally once the display round itself is out of the way — proven
+    // here explicitly/deterministically (bypassing the lobby exactly like
+    // the display resolution above) rather than via a bare setImmediate
+    // tick, which can no longer reach it without ALSO racing through much
+    // of this fixture's deliberately long repeated-tie deck queue.
+    const automatic = t.runtime.getAutomaticCommand(t.matchId)
+    assert(automatic, 'expected an automatic command to continue the chain without a turn timer')
+    t.runtime.executeSystemCommand(t.matchId, 'test-automatic-1', automatic)
     assert(t.runtime.getMatchRevision(t.matchId) > revision)
     t.lobby.shutdown()
     const frozen = t.rawState()

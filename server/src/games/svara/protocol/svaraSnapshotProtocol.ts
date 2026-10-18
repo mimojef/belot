@@ -124,6 +124,18 @@ export type SvaraSnapshotBettingRound = {
   dealing: boolean
 }
 
+/** 2Б.3.7.6А §7 — една стъпка от последователното изплащане на показаното сравняване. */
+export type SvaraSnapshotPayoutStep = {
+  stepId: string
+  potId: string
+  isMain: boolean
+  amount: number
+  winners: string[]
+  share: number | null
+  removed: number
+  sequence: number
+}
+
 export type SvaraSnapshotRound =
   | SvaraSnapshotBettingRound
   | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
@@ -134,6 +146,27 @@ export type SvaraSnapshotRound =
    * `points` остават null, докато `decision` не стане 'revealed'.
    */
   | { kind: 'reveal-choice'; roundId: string; winnerId: string; decision: 'pending' | 'revealed'; cards: SvaraCardCode[] | null; handPoints: number | null }
+  /**
+   * 2Б.3.7.6А — истинско showdown (2+ сравняващи играчи, без избор, за
+   * разлика от 'reveal-choice'). Собственикът изрично реши: картите и
+   * точките на ВСИЧКИ сравняващи се показват едновременно, публично, за
+   * всички на масата (виж §4 на заданието) — различно поле-име от
+   * историческите 'shownHands'/'points' (изрично withheld там, виж
+   * SVARA_SNAPSHOT_SHOWDOWN_REVEAL), защото тук е НОВО, целево разрешено
+   * разкриване само за точно този, вече приключил, показ.
+   */
+  | {
+      kind: 'showdown-display'
+      roundId: string
+      dealerId: string | null
+      comparedPlayers: string[]
+      cards: Record<string, SvaraCardCode[]>
+      comparisonPoints: Record<string, number>
+      payout: SvaraSnapshotPayoutStep[]
+      /** true, ако поне една банка от това сравняване остава заключена ("Свара!", §8). */
+      svaraTie: boolean
+      displayPhase: 'showdown' | 'payout'
+    }
 
 export type SvaraSnapshotLockedPot = {
   potId: string
@@ -259,6 +292,22 @@ function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
     const revealed = round.decision === 'revealed'
     return { kind: 'reveal-choice', roundId: round.roundId, winnerId: round.winnerId, decision: round.decision,
       cards: revealed ? [...round.cards] : null, handPoints: revealed ? round.points : null }
+  }
+  if (round.kind === 'showdown-display') {
+    return {
+      kind: 'showdown-display',
+      roundId: round.roundId,
+      dealerId: round.dealerId,
+      comparedPlayers: [...round.comparedPlayers],
+      cards: Object.fromEntries(round.comparedPlayers.map((id) => [id, [...round.cards[id]!]])),
+      comparisonPoints: { ...round.points },
+      payout: round.payoutSteps.map((step) => ({
+        stepId: step.stepId, potId: step.potId, isMain: step.isMain, amount: step.amount,
+        winners: [...step.winners], share: step.share, removed: step.removed, sequence: step.order,
+      })),
+      svaraTie: round.svaraTie,
+      displayPhase: round.phase,
+    }
   }
   const betting = round.betting
   const carriedIn = round.kind === 'ordinary' ? round.deadMoney : 0

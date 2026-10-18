@@ -27,6 +27,7 @@
     "check:svara-recovery-2b36b": "tsx scripts/checkSvaraRecovery2B36B.ts",
     "check:svara-restart-2b36c": "tsx scripts/checkSvaraRestart2B36C.ts",
     "check:svara-dealing-2b37": "tsx scripts/checkSvaraDealing2B37.ts",
+    "check:svara-showdown-2b376a": "tsx scripts/checkSvaraShowdown2B376A.ts",
     "check:ad-campaigns-target-url-validation": "tsx scripts/checkAdCampaignTargetUrlValidation.ts",
     "check:ad-campaigns-client-queue": "tsx scripts/checkAdCampaignClientQueue.ts",
     "check:ad-campaigns-http-and-realtime": "tsx scripts/checkAdCampaignsHttpAndRealtime.ts",

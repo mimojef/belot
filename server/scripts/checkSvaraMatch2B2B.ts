@@ -97,7 +97,27 @@ class Table {
     assertSvaraMatchInvariants(result.state)
     this.state = result.state
     this.finishDealingIfNeeded()
+    this.resolveShowdownDisplayIfNeeded()
     return this.state
+  }
+  private applySystem(type: 'advance-showdown-display' | 'close-payout-display', roundId: string): void {
+    const result = applySvaraMatchCommand(this.state, { type, commandId: `${this.prefix}${(this.seq += 1)}`, roundId })
+    assertSvaraMatchInvariants(result.state)
+    this.state = result.state
+  }
+  /**
+   * 2Б.3.7.6А: mirror на finishDealingIfNeeded по-горе — тази времево-
+   * безразлична сюита проверява двигателя, не реалните 3с показ/изплащане
+   * прозорци (тествани отделно с fake clock), затова веднага преминава
+   * докрай след всяко истинско сравняване (2+ оставащи), за да останат
+   * съществуващите deal/act/история assertions валидни непроменени.
+   */
+  private resolveShowdownDisplayIfNeeded(): void {
+    for (;;) {
+      const round = this.state.round
+      if (!round || round.kind !== 'showdown-display') return
+      this.applySystem(round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', round.roundId)
+    }
   }
   /**
    * 2Б.3.7.4Б: тази времево-безразлична (без clock) сюита проверява

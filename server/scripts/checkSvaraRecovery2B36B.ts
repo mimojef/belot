@@ -82,10 +82,23 @@ async function fixture(capacity: 2 | 3 | 4 = 3, decks: SvaraCard[][] = [], start
       s({ type: 'finish-dealing', roundId: round.roundId })
     }
   }
+  // 2Б.3.7.6А: a real settled showdown (2+ remaining) now opens a public
+  // display round before the round actually clears; skip it directly
+  // through the runtime too, same convention as finishDealingIfNeeded —
+  // no lobby/lifecycle exists in this plain fixture, so there is nothing
+  // further to resync afterward (unlike createSvaraLobby-backed helpers
+  // elsewhere): the caller still issues its own next 'start-next-round'.
+  const resolveShowdownDisplayIfNeeded = () => {
+    for (;;) {
+      const round = rt.exportInternalStateForServer(matchId).round
+      if (!round || round.kind !== 'showdown-display') return
+      s({ type: round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', roundId: round.roundId })
+    }
+  }
   for (const playerId of ['b', 'c', 'd'].slice(0, capacity - 1)) p(playerId, { type: 'join-seat' })
   if (start) { p('a', { type: 'start-match' }); s({ type: 'start-next-round' }); finishDealingIfNeeded() }
   const saved = () => store.load(matchId)!
-  return { path, store, clock, matchId, rt, p, s, saved, finishDealingIfNeeded }
+  return { path, store, clock, matchId, rt, p, s, saved, finishDealingIfNeeded, resolveShowdownDisplayIfNeeded }
 }
 type Fixture = Awaited<ReturnType<typeof fixture>>
 async function boot(t: Fixture, elapsed = 0, other: (profileId: string) => boolean = () => false) {
@@ -121,6 +134,7 @@ async function joining(extraDecks: SvaraCard[][] = []) {
   const t = await fixture(3, [buildSvaraDeckForHands(['b', 'c', 'a'], { b: tie1, c: low, a: tie2 }), ...extraDecks])
   t.p('b', { type: 'look' }); t.p('b', { type: 'act', action: { kind: 'bet', total: 1 } })
   t.p('c', { type: 'act', action: { kind: 'fold' } }); t.p('a', { type: 'act', action: { kind: 'call' } })
+  t.resolveShowdownDisplayIfNeeded()
   t.s({ type: 'start-next-round' }); assert.equal(t.saved().state.round?.kind, 'svara-joining'); return t
 }
 function sql(t: Fixture, run: (db: DatabaseSync) => void) { const db = new DatabaseSync(t.path, { enableForeignKeyConstraints: true }); try { run(db) } finally { db.close() } }
@@ -437,6 +451,7 @@ try {
     repeated.p('c', { type: 'svara-decline' }); repeated.s({ type: 'svara-start' })
     repeated.finishDealingIfNeeded()
     repeated.p('a', { type: 'look' }); repeated.p('a', { type: 'act', action: { kind: 'bet', total: 1 } }); repeated.p('b', { type: 'act', action: { kind: 'call' } })
+    repeated.resolveShowdownDisplayIfNeeded()
     repeated.s({ type: 'start-next-round' })
     for (const t of [first, repeated]) {
       const uninterrupted = t.rt.exportInternalStateForServer(t.matchId), restored = copyRestoredSvaraMatchForServer(t.saved().state)
@@ -460,6 +475,7 @@ try {
       t.finishDealingIfNeeded()
     }
     for (const player of ['a', 'b', 'c']) { t.p(player, { type: 'look' }); t.p(player, { type: 'act', action: { kind: 'all-in' } }) }
+    t.resolveShowdownDisplayIfNeeded()
     assert.equal(t.saved().state.round?.kind, 'allin-svara'); t.s({ type: 'advance-allin-svara' })
     const before = t.saved(), rt = createSvaraMatchRuntime({ persistence: t.store, now: t.clock.now, random: randomFor([decided]) })
     rt.restoreMatchesForServer([before]); assert.deepEqual(rt.exportStoredMatchForServer(t.matchId), before)

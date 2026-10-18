@@ -96,6 +96,7 @@ class Table {
     assertSvaraMatchInvariants(result.state)
     this.state = result.state
     this.finishDealingIfNeeded()
+    this.resolveShowdownDisplayIfNeeded()
     return this.state
   }
   /** 2Б.3.7.4Б: виж checkSvaraMatch2B2B.ts — скача фазата на представяне на раздаването; тества се отделно с fake-clock lifecycle. */
@@ -105,6 +106,17 @@ class Table {
     const result = applySvaraMatchCommand(this.state, { type: 'finish-dealing', commandId: `c${(this.seq += 1)}`, roundId: round.roundId })
     assertSvaraMatchInvariants(result.state)
     this.state = result.state
+  }
+  /** 2Б.3.7.6А: виж checkSvaraMatch2B2B.ts — скача докрай публичния показ/изплащане; тества се отделно с fake-clock lifecycle. */
+  private resolveShowdownDisplayIfNeeded(): void {
+    for (;;) {
+      const round = this.state.round
+      if (!round || round.kind !== 'showdown-display') return
+      const type = round.phase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display'
+      const result = applySvaraMatchCommand(this.state, { type, commandId: `c${(this.seq += 1)}`, roundId: round.roundId })
+      assertSvaraMatchInvariants(result.state)
+      this.state = result.state
+    }
   }
   /** Следващо обикновено раздаване с контролирани ръце. */
   deal(hands: Record<string, string>): SvaraMatchState {
@@ -193,10 +205,18 @@ function assertSnapshotSafe(snapshot: SvaraMatchSnapshotMessage, state: SvaraMat
   // 2Б.3.7.1: докато „Покажи“/„Скрий“ чака, победителят вижда своята вече
   // погледната ръка (сега в round.cards); веднъж показана — публична за всички.
   if (round && round.kind === 'reveal-choice' && round.winnerId === viewer) for (const code of round.cards) visible.add(code)
+  // 2Б.3.7.6А: истинско showdown (2+ сравняващи) — публично за ВСИЧКИ на
+  // масата (не само за самите сравняващи, за разлика от reveal-choice по-
+  // горе, и не само за "me", за разлика от "visible" по-долу, което трябва
+  // да остане СТРИКТНО собствената ръка за you.cards инварианта накрая) —
+  // отделно множество, изключено от hidden, но НЕ сметнато в "you.cards
+  // трябва да е точно visible".
+  const publiclyShown = new Set<string>()
+  if (round && round.kind === 'showdown-display') for (const cards of Object.values(round.cards)) for (const code of cards) publiclyShown.add(code)
   const hidden = new Set<string>()
-  if (round && (round.kind === 'ordinary' || round.kind === 'svara')) for (const cards of Object.values(round.hands)) for (const code of cards) if (!visible.has(code)) hidden.add(code)
-  if (round && round.kind === 'reveal-choice' && round.decision === 'pending') for (const code of round.cards) if (!visible.has(code)) hidden.add(code)
-  for (const record of state.history) for (const cards of Object.values(record.shownHands)) for (const code of cards) if (!visible.has(code)) hidden.add(code)
+  if (round && (round.kind === 'ordinary' || round.kind === 'svara')) for (const cards of Object.values(round.hands)) for (const code of cards) if (!visible.has(code) && !publiclyShown.has(code)) hidden.add(code)
+  if (round && round.kind === 'reveal-choice' && round.decision === 'pending') for (const code of round.cards) if (!visible.has(code) && !publiclyShown.has(code)) hidden.add(code)
+  for (const record of state.history) for (const cards of Object.values(record.shownHands)) for (const code of cards) if (!visible.has(code) && !publiclyShown.has(code)) hidden.add(code)
   for (const code of hidden) assert(!json.includes(`"${code}"`), `snapshot of ${viewer} leaks card ${code}`)
   const cards = snapshot.you.cards
   assert(cards === null ? visible.size === 0 : cards.length === visible.size && cards.every((code) => visible.has(code)), 'you.cards must equal exactly the looked own hand')
@@ -646,6 +666,9 @@ function driveStep(rt: SvaraMatchRuntime, matchId: string, players: string[], pi
       return void part(round.winnerId, { type: 'hide-cards' })
     }
     return void sys({ type: 'close-reveal-display', roundId: round.roundId })
+  }
+  if (round.kind === 'showdown-display') {
+    return void sys({ type: round.displayPhase === 'showdown' ? 'advance-showdown-display' : 'close-payout-display', roundId: round.roundId })
   }
   const actor = s.toActId!
   if (status[actor] === 'absent') return void sys({ type: 'set-absent', playerId: actor, absent: false })

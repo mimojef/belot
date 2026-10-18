@@ -10,6 +10,7 @@ import assert from 'node:assert/strict'
 import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
 import { createSvaraMatchRuntime } from '../src/games/svara/runtime/svaraMatchRuntime.js'
 import { createSvaraLifecycle, svaraDealingAnimationMs, SVARA_TURN_MS, type SvaraClock } from '../src/games/svara/runtime/createSvaraLifecycle.js'
+import { SVARA_SHOWDOWN_DISPLAY_MS } from '../src/games/svara/runtime/svaraDeadlines.js'
 import {
   applySvaraMatchCommand, assertSvaraMatchInvariants, buildSvaraDeckForHands, createSvaraMatch,
   describeSvaraLifecycle, type SvaraMatchCommand, type SvaraMatchState,
@@ -300,6 +301,7 @@ try {
     t.clock.advance(svaraDealingAnimationMs(3))
     t.submit('b', { type: 'look' }); t.submit('b', { type: 'act', action: { kind: 'bet', total: 1 } })
     t.submit('c', { type: 'act', action: { kind: 'fold' } }); t.submit('a', { type: 'act', action: { kind: 'call' } })
+    t.clock.advance(SVARA_SHOWDOWN_DISPLAY_MS)
     assert.equal(t.state().round?.kind, 'svara-joining')
     t.submit('c', { type: 'svara-decline' })
     const round = t.state().round as any
@@ -312,7 +314,17 @@ try {
     const tied = buildSvaraDeckForHands(['a', 'b'], { a: tie1, b: tie2 })
     const t = fixture(2, 1, [tied])
     t.clock.advance(svaraDealingAnimationMs(2))
-    // Entry drains both stacks to zero at these chips -> automatic all-in comparison.
+    // Entry drains both stacks to zero at these chips -> automatic all-in
+    // tie, which locks the pot rather than finishing outright. The
+    // automatic chain then replays it (svara-joining/svara-start, no
+    // outside candidates) with the fallback ordered deck, which settles
+    // the lock with a clear winner and finishes the match. 2Б.3.7.6А: EACH
+    // of those two real showdowns now opens its own 3с public display
+    // first (no payout steps either time: a lock isn't a payout, and
+    // neither is the one-shot pot award from a sole-eligible winner) —
+    // advance through both before the match is actually marked finished.
+    t.clock.advance(SVARA_SHOWDOWN_DISPLAY_MS)
+    t.clock.advance(SVARA_SHOWDOWN_DISPLAY_MS)
     assert.equal(t.state().phase, 'finished')
   })
   // ─── 27: без промяна на счетоводните инварианти ──────────────────────────
