@@ -1,6 +1,13 @@
 /**
  * checkSvaraClientRealIntegration.ts
  *
+ * 2B.3.7.8A: compiled backend + fresh SQLite, OS-assigned ports, private
+ * PID/nonce/listener identity, and a loopback-only same-origin HTTP/WS gateway.
+ * Registration uses the real direct mode in the isolated database. I1-I6
+ * verify profile/session ownership, server entry chips, actual WS snapshots
+ * against SQLite and DOM, legal actions, and complete resource cleanup.
+ * No RNG/clock overrides, WS state injection or production configuration.
+ *
  * Real (non-mocked) integration test за Етап 2Б.3.7.2 "Реално клиентско
  * WebSocket свързване" — real spawned backend (SVARA_TEST_ENABLED=1, real
  * SQLite), real built frontend bundle (dist/), real headless browser
@@ -16,8 +23,8 @@
  * hidden-card isolation, revision monotonicity, duplicate-command handling,
  * restart durability) вече е изчерпателно покрито от
  * server/scripts/checkSvaraRestart2B36C.ts (raw-ws, server-focused) — този
- * тест умишлено НЕ дублира тези assertions. Фокусът тук е чисто
- * КЛИЕНТСКИ: реален table list, create/join/leave/start през реалния UI,
+ * тест добавя I1-I6 за HTTP/WS/SQLite/DOM съгласуваността. Покрива
+ * реален table list, create/join/leave/start през реалния UI,
  * real-time update на партньора БЕЗ manual refresh, и критичният "без
  * автоматичен game exit при unmount/navigation away" lifecycle контракт
  * (задание §9).
@@ -54,16 +61,18 @@
  * Изход: process.exit(0) при успех, process.exit(1) с описание на грешката.
  */
 
-import { readFileSync } from 'node:fs'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { cp, mkdir, mkdtemp, rm, symlink, readFile, stat } from 'node:fs/promises'
-import { createServer as createNetServer } from 'node:net'
-import { createServer as createHttpServer } from 'node:http'
-import { extname, join, resolve } from 'node:path'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync } from 'node:fs'
+import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
+import { createIsolatedSvaraRoot, runNode, startIsolatedSvaraBackend, startSvaraGateway } from './svaraRealIntegrationHarness'
+import { createSvaraMatchSnapshotMessage, SVARA_SNAPSHOT_FORBIDDEN_KEYS } from '../server/src/games/svara/protocol/svaraSnapshotProtocol'
+import { validateSvaraStoredMatch } from '../server/src/games/svara/runtime/svaraStoredMatchValidation'
+import type { SvaraStoredMatch } from '../server/src/games/svara/runtime/svaraPersistence'
+import type { SvaraMatchSnapshotMessage } from '../src/app/network/createGameServerClient'
+import { svaraCardCodeToFaceSrc, SVARA_CARD_BACK_SRC } from '../src/app/games/svara/table/svaraTableAssets'
 
 let passed = 0
 let failed = 0
@@ -73,7 +82,7 @@ function fail(label: string, reason: unknown): void {
   console.error(`  FAIL  ${label}: ${reason instanceof Error ? reason.message : String(reason)}`)
 }
 async function check(label: string, fn: () => Promise<void> | void): Promise<void> {
-  try { await fn(); pass(label) } catch (err) { fail(label, err) }
+  try { await fn(); pass(label) } catch (err) { fail(label, err); throw err }
 }
 function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)) }
 
@@ -178,19 +187,6 @@ function assertEqualNum(actual: number, expected: number, message: string): void
   if (actual !== expected) throw new Error(`${message} (got ${actual}, expected ${expected})`)
 }
 
-async function findFreePort(): Promise<number> {
-  return new Promise((resolveFree, reject) => {
-    const srv = createNetServer()
-    srv.once('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address()
-      if (addr === null || typeof addr === 'string') { reject(new Error('no port')); return }
-      const p = addr.port
-      srv.close(() => resolveFree(p))
-    })
-  })
-}
-
 async function waitForCondition(label: string, predicate: () => Promise<boolean> | boolean, timeoutMs: number): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
@@ -198,55 +194,6 @@ async function waitForCondition(label: string, predicate: () => Promise<boolean>
     await sleep(200)
   }
   throw new Error(`Timeout: ${label}`)
-}
-
-// 2Б.3.7.4В: fail fast and clearly if a PREVIOUS (orphaned) run of this same
-// test is still squatting the fixed backend port — without this, a stale
-// process answers /health on behalf of its OWN (unrelated, already-
-// migrated) database, and this test proceeds to query the NEW isolated
-// database as if it were ready, long before the real backend startup it
-// actually spawned has even begun applying migrations. Root cause found via
-// `netstat`: a leftover `tsx .../src/index.ts` child from an earlier
-// interrupted run was LISTENING on the port; the freshly spawned child
-// never got to bind it at all.
-async function assertPortFree(port: number): Promise<void> {
-  await new Promise<void>((resolveFree, reject) => {
-    const probe = createNetServer()
-    probe.once('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        reject(new Error(
-          `Port ${port} is already in use by another process — a previous Svara integration ` +
-          `test run likely did not shut down cleanly. Find and stop it before retrying ` +
-          `(Windows: "netstat -ano | find \":${port}\"" then "taskkill /PID <pid> /F").`,
-        ))
-      } else reject(err)
-    })
-    probe.listen(port, '127.0.0.1', () => probe.close(() => resolveFree()))
-  })
-}
-
-// Anchors "ready" to THIS exact spawned child, not to whoever answers the
-// fixed port: ensureServerDatabaseReady() runs synchronously (top-level
-// await) before the HTTP listener even starts, and server/src/index.ts logs
-// its resolved database file path right after — so seeing this exact line
-// in OUR child's own captured stdout proves migrations for OUR isolated
-// database file actually completed, before we ever trust a /health response
-// on the shared port. Fails fast (not after the full timeout) if the child
-// exits early (e.g. a real EADDRINUSE despite the preflight check above).
-async function waitForOwnBackendReady(server: RunningServer, databaseFilePath: string, port: number, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs
-  const dbReadyMarker = `[db] SQLite ready file=${databaseFilePath} `
-  while (Date.now() < deadline) {
-    if (server.child.exitCode !== null) {
-      throw new Error(`Backend process exited early (code ${server.child.exitCode}) before confirming its own database bootstrap.\n--- server output ---\n${server.output()}`)
-    }
-    if (server.output().includes(dbReadyMarker)) break
-    await sleep(200)
-  }
-  if (!server.output().includes(dbReadyMarker)) {
-    throw new Error(`Timeout: backend did not confirm its own database bootstrap ("${dbReadyMarker.trim()}") within ${timeoutMs}ms.\n--- server output ---\n${server.output()}`)
-  }
-  await waitForBackendHealth(port, Math.max(1000, deadline - Date.now()))
 }
 
 async function httpJson(
@@ -266,118 +213,19 @@ async function httpJson(
   return { status: res.status, body: json, setCookie }
 }
 
-// ─── Isolated real backend (fixed port 3001 — hardcoded in the real client's
-// getDefaultServerUrl() for hostname 127.0.0.1, see createGameServerClient.ts) ──
-
+// Backend PORT=0 and private IPC bind readiness to the actual child socket.
+// A *.localhost gateway uses the production same-origin HTTP/Auth/WS paths.
 const PROJECT_ROOT = process.cwd()
-const BACKEND_PORT = 3001
+const BROWSER_HOST = 'svara-integration.localhost'
+let BACKEND_PORT = 0
+let frontendOrigin = ''
+const receivedSnapshots = new Map<Page, SvaraMatchSnapshotMessage[]>()
+const sentCommands = new Map<Page, Array<{ type: string; command?: { type: string } }>>()
+const transportFaults: string[] = []
 
-async function retryRm(path: string): Promise<void> {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try { await rm(path, { recursive: true, force: true }); return } catch { /* retry */ }
-    await sleep(250)
-  }
-}
-
-async function createIsolatedServerRoot() {
-  const root = await mkdtemp(join(tmpdir(), 'belot-svara-client-'))
-  const serverDir = join(root, 'server')
-  const originalServerRoot = resolve(PROJECT_ROOT, 'server')
-  await mkdir(serverDir, { recursive: true })
-  await cp(join(originalServerRoot, 'src'), join(serverDir, 'src'), { recursive: true, preserveTimestamps: true })
-  await cp(join(originalServerRoot, 'dist'), join(serverDir, 'dist'), { recursive: true, preserveTimestamps: true })
-  await mkdir(join(serverDir, 'database', 'data'), { recursive: true })
-  await cp(join(originalServerRoot, 'database', 'migrations'), join(serverDir, 'database', 'migrations'), { recursive: true, preserveTimestamps: true })
-  await cp(join(originalServerRoot, 'package.json'), join(serverDir, 'package.json'), { preserveTimestamps: true })
-  const linkType = process.platform === 'win32' ? 'junction' : 'dir'
-  await symlink(join(originalServerRoot, 'node_modules'), join(serverDir, 'node_modules'), linkType)
-  await symlink(join(originalServerRoot, '..', 'node_modules'), join(root, 'node_modules'), linkType)
-  return { serverDir, dbFile: join(serverDir, 'database', 'data', 'belot-v2.sqlite'), cleanup: () => retryRm(root) }
-}
-
-type RunningServer = { child: ChildProcessWithoutNullStreams; output(): string }
-
-function startServer(serverDir: string, port: number): RunningServer {
-  const chunks: string[] = []
-  const child = spawn(
-    process.execPath,
-    [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
-    {
-      cwd: serverDir,
-      env: {
-        ...process.env,
-        PORT: String(port),
-        SVARA_TEST_ENABLED: '1',
-        // Required for POST /api/auth/register to not short-circuit with
-        // "Регистрацията временно не е налична." — see server/src/index.ts's
-        // registrationVerificationCodeSecret length>=32 guard.
-        PASSWORD_RESET_RATE_LIMIT_SECRET: 'isolated-svara-client-integration-secret-123456',
-      },
-      stdio: ['ignore', 'pipe', 'pipe'],
-    },
-  )
-  child.stdout.setEncoding('utf8')
-  child.stderr.setEncoding('utf8')
-  child.stdout.on('data', (c) => chunks.push(c))
-  child.stderr.on('data', (c) => chunks.push(c))
-  return { child, output: () => chunks.join('') }
-}
-
-async function stopServer(server: RunningServer | null): Promise<void> {
-  if (!server || server.child.exitCode !== null) return
-  server.child.kill()
-  await new Promise<void>((r) => {
-    const t = setTimeout(() => { try { server.child.kill('SIGKILL') } catch { /* */ }; r() }, 10_000)
-    server.child.once('exit', () => { clearTimeout(t); r() })
-  })
-}
-
-async function waitForBackendHealth(port: number, timeoutMs: number): Promise<void> {
-  await waitForCondition(`backend health on ${port}`, async () => {
-    try {
-      const r = await fetch(`http://127.0.0.1:${port}/health`)
-      const h = await r.json()
-      return r.status === 200 && h.ok === true && h.gameWorkerLifecycle?.state === 'ready'
-    } catch { return false }
-  }, timeoutMs)
-}
-
-const MIME: Record<string, string> = {
-  '.html': 'text/html', '.js': 'text/javascript', '.mjs': 'text/javascript',
-  '.css': 'text/css', '.json': 'application/json', '.webmanifest': 'application/manifest+json',
-  '.png': 'image/png', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.ico': 'image/x-icon',
-  '.mp3': 'audio/mpeg', '.woff2': 'font/woff2', '.txt': 'text/plain', '.xml': 'application/xml',
-}
-
-function startStaticServer(distDir: string, port: number) {
-  return createHttpServer(async (req, res) => {
-    try {
-      const urlPath = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname)
-      let filePath = join(distDir, urlPath === '/' ? '/index.html' : urlPath)
-      try {
-        const st = await stat(filePath)
-        if (st.isDirectory()) filePath = join(filePath, 'index.html')
-      } catch {
-        if (!extname(urlPath)) filePath = join(distDir, 'index.html')
-      }
-      const data = await readFile(filePath)
-      res.writeHead(200, { 'Content-Type': MIME[extname(filePath)] ?? 'application/octet-stream' })
-      res.end(data)
-    } catch {
-      res.writeHead(404, { 'Content-Type': 'text/plain' })
-      res.end('404')
-    }
-  }).listen(port, '127.0.0.1')
-}
-
-function runFrontendBuild(): Promise<void> {
-  return new Promise((resolveBuild, reject) => {
-    const child: ChildProcessWithoutNullStreams = spawn('npx', ['vite', 'build'], { cwd: PROJECT_ROOT, shell: true, stdio: ['ignore', 'pipe', 'pipe'] })
-    let out = ''
-    child.stdout.on('data', (d) => { out += d.toString() })
-    child.stderr.on('data', (d) => { out += d.toString() })
-    child.on('exit', (code) => code === 0 ? resolveBuild() : reject(new Error(out.slice(-2000))))
-  })
+async function runFrontendBuild(): Promise<void> {
+  await runNode(PROJECT_ROOT, ['node_modules/typescript/bin/tsc', '-p', 'server/tsconfig.json'])
+  await runNode(PROJECT_ROOT, ['node_modules/vite/bin/vite.js', 'build'])
 }
 
 // ─── T7 static guard: no `any` in the new Svara client files (checked
@@ -403,23 +251,36 @@ console.log('\ncheckSvaraClientRealIntegration\n')
 console.log('Building frontend (dist/, needed for a real index.html/main bundle)...')
 await runFrontendBuild()
 
-const isolated = await createIsolatedServerRoot()
-let server: RunningServer | null = null
-let staticServer: ReturnType<typeof createHttpServer> | null = null
+const isolated = await createIsolatedSvaraRoot(PROJECT_ROOT)
+let server: Awaited<ReturnType<typeof startIsolatedSvaraBackend>> | null = null
+let staticServer: Awaited<ReturnType<typeof startSvaraGateway>> | null = null
 let browser: Browser | null = null
 
 try {
-  await assertPortFree(BACKEND_PORT)
-  console.log(`Starting real backend on fixed port ${BACKEND_PORT} (SVARA_TEST_ENABLED=1)...`)
-  server = startServer(isolated.serverDir, BACKEND_PORT)
-  try {
-    await waitForOwnBackendReady(server, isolated.dbFile, BACKEND_PORT, 30_000)
-  } catch (err) {
-    console.error('--- server output ---')
-    console.error(server.output())
-    throw err
-  }
+  server = await startIsolatedSvaraBackend(isolated)
+  BACKEND_PORT = server.port
+  console.log(`Owned backend PID=${server.child.pid}, port=${BACKEND_PORT}, db=${isolated.dbFile}`)
   console.log('Backend ready.\n')
+
+  function readStoredMatch(matchId: string): SvaraStoredMatch {
+    const db = new DatabaseSync(isolated.dbFile, { readOnly: true })
+    try {
+      const row = db.prepare('SELECT snapshot_json FROM svara_match_snapshots WHERE match_id = ?').get(matchId) as { snapshot_json: string } | undefined
+      assert(row, 'Browser match must exist in this exact isolated SQLite file')
+      const stored: unknown = JSON.parse(row.snapshot_json)
+      validateSvaraStoredMatch(stored)
+      return stored as SvaraStoredMatch
+    } finally { db.close() }
+  }
+
+  await check('[I1] fresh isolated database has no previous integration profiles or matches', () => {
+    const db = new DatabaseSync(isolated.dbFile, { readOnly: true })
+    try {
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM svara_match_snapshots').get()!.count, 0)
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM accounts WHERE email LIKE 'svara-client-%@example.test'").get()!.count, 0)
+      assert(server!.port > 0 && server!.port !== 3001)
+    } finally { db.close() }
+  })
 
   // Registration defaults to the email_code verification flow (Brevo),
   // which this isolated test env has no transport for — switch to the
@@ -439,9 +300,8 @@ try {
     }
   }
 
-  const staticPort = await findFreePort()
-  staticServer = startStaticServer(join(PROJECT_ROOT, 'dist'), staticPort)
-  await sleep(300)
+  staticServer = await startSvaraGateway(join(PROJECT_ROOT, 'dist'), BACKEND_PORT)
+  frontendOrigin = `http://${BROWSER_HOST}:${staticServer.port}`
 
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
@@ -460,26 +320,65 @@ try {
     // Grant an allowed Svara test role — same mechanism as
     // server/scripts/checkSvaraRestart2B36C.ts's register().
     const db = new DatabaseSync(isolated.dbFile)
-    try { db.prepare("UPDATE accounts SET role = 'admin' WHERE email = ?").run(email) } finally { db.close() }
+    try {
+      const profile = db.prepare('SELECT p.profile_id FROM profiles p JOIN accounts a ON a.account_id = p.account_id WHERE a.email = ?').get(email)
+      assert.equal(profile?.profile_id, reg.body.session.profile.profileId, 'Registration response belongs to a different database')
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM account_sessions WHERE profile_id = ? AND revoked_at IS NULL').get(reg.body.session.profile.profileId)!.count, 1)
+      db.prepare("UPDATE accounts SET role = 'admin' WHERE email = ?").run(email)
+    } finally { db.close() }
     return { cookie, cookieName: cookieName!, cookieValue: cookieValue!, profileId: reg.body.session.profile.profileId, email }
   }
 
   console.log('Registering two real users and granting the Svara test role...')
   const userA = await registerUser('a')
   const userB = await registerUser('b')
+  assert.notEqual(userA.profileId, userB.profileId)
+  assert.notEqual(userA.cookieValue, userB.cookieValue)
+  pass('[I2] two real HTTP registrations created distinct profiles and session rows in the owned database')
 
-  browser = await chromium.launch({ headless: true })
+  browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP *.localhost 127.0.0.1', '--no-proxy-server'] })
   const consoleErrors: string[] = []
 
   async function openSvaraPage(user: { cookieName: string; cookieValue: string }): Promise<{ context: BrowserContext; page: Page }> {
     const context = await browser!.newContext({ viewport: { width: 420, height: 900 } })
-    await context.addCookies([{ name: user.cookieName, value: user.cookieValue, domain: '127.0.0.1', path: '/' }])
+    await context.addCookies([{ name: user.cookieName, value: user.cookieValue, domain: BROWSER_HOST, path: '/', httpOnly: true, sameSite: 'Lax' }])
+    // Never let a broken test URL contact a production API or external service.
+    await context.route('**/*', (route) => new URL(route.request().url()).hostname === BROWSER_HOST ? route.continue() : route.abort())
+    await context.addInitScript('globalThis.__name = (target) => target') // tsx evaluate helper only
     const page = await context.newPage()
+    receivedSnapshots.set(page, []); sentCommands.set(page, [])
+    page.on('request', (request) => {
+      const url = new URL(request.url())
+      if ((url.pathname.startsWith('/api/') || url.pathname === '/ws') && url.origin !== frontendOrigin) transportFaults.push('Client used an unowned API/WS origin')
+    })
+    page.on('websocket', (socket) => {
+      if (socket.url() !== `${frontendOrigin.replace('http:', 'ws:')}/ws`) transportFaults.push('Client used an unowned WebSocket URL')
+      socket.on('framereceived', ({ payload }) => {
+        try {
+          const frame = JSON.parse(String(payload))
+          if (frame.type === 'svara_match_snapshot') {
+            const inspect = (value: unknown): void => {
+              if (!value || typeof value !== 'object') return
+              for (const [key, nested] of Object.entries(value)) {
+                if (SVARA_SNAPSHOT_FORBIDDEN_KEYS.includes(key)) throw new Error('Private engine field in transport')
+                inspect(nested)
+              }
+            }
+            inspect(frame)
+            receivedSnapshots.get(page)!.push(frame as SvaraMatchSnapshotMessage)
+          }
+        } catch { transportFaults.push('Invalid or private WebSocket payload') }
+      })
+      socket.on('framesent', ({ payload }) => {
+        try { const frame = JSON.parse(String(payload)); if (frame.type === 'submit_svara_command') sentCommands.get(page)!.push(frame) }
+        catch { transportFaults.push('Invalid client WebSocket payload') }
+      })
+    })
     page.on('pageerror', (err) => consoleErrors.push(`${err.message}`))
     const svaraLog: string[] = []
     page.on('console', (msg) => { if (msg.text().includes('game-server') || msg.text().includes('svara')) svaraLog.push(msg.text()) })
     ;(page as any)._svaraLog = svaraLog
-    await page.goto(`http://127.0.0.1:${staticPort}/games/svara`, { waitUntil: 'domcontentloaded' })
+    await page.goto(`${frontendOrigin}/games/svara`, { waitUntil: 'domcontentloaded' })
     await page.waitForSelector('[data-svara-lobby="1"]', { timeout: 20_000 })
     // Real cookie-consent banner (unrelated to Svara) otherwise intercepts
     // later clicks (e.g. "Обратно към Игри") and can eat a full click-retry
@@ -492,6 +391,37 @@ try {
   console.log('Opening real pages for both users (direct /games/svara load, real cookie, real WS)...')
   const sessionA = await openSvaraPage(userA)
   const sessionB = await openSvaraPage(userB)
+
+  async function compareBrowserToAuthoritativeSnapshot(page: Page, profileId: string): Promise<SvaraMatchSnapshotMessage> {
+    let snapshot: SvaraMatchSnapshotMessage | undefined
+    let stored: SvaraStoredMatch | undefined
+    await waitForCondition('actual WS snapshot, DOM revision and owned SQLite revision agree', async () => {
+      snapshot = receivedSnapshots.get(page)?.at(-1)
+      if (!snapshot) return false
+      stored = readStoredMatch(snapshot.matchId)
+      const text = await page.locator('[data-svara-diagnostics]').textContent().catch(() => '')
+      return snapshot.revision === stored.revision && text?.trim() === `rev ${snapshot.revision}`
+    }, 5000)
+    assert(snapshot && stored)
+    assert.equal(snapshot.you.playerId, profileId)
+    assert.deepEqual(snapshot, createSvaraMatchSnapshotMessage(snapshot.matchId, stored.state, profileId))
+    const seats = await page.evaluate(() => Array.from(document.querySelectorAll<HTMLElement>('[data-svara-seat-index]')).map((anchor) => ({
+      index: Number(anchor.dataset.svaraSeatIndex),
+      stack: Number(/^(\d+)/.exec(anchor.querySelector('[data-svara-seat-total]')?.textContent?.trim() ?? '')?.[1]),
+      cards: Array.from(anchor.querySelectorAll<HTMLImageElement>('[data-svara-seat-cards-mount] img')).map((img) => new URL(img.src).pathname),
+    })))
+    assert.equal(seats.length, snapshot.seats.length)
+    for (const seat of snapshot.seats) {
+      const rendered = seats.find((entry) => entry.index === seat.seatIndex)!
+      assert.equal(rendered.stack, seat.stack, 'Displayed stack differs from authoritative snapshot')
+      const publicCards = snapshot.round?.kind === 'showdown-display' ? snapshot.round.cards[seat.playerId]
+        : snapshot.round?.kind === 'reveal-choice' && snapshot.round.decision === 'revealed' && snapshot.round.winnerId === seat.playerId ? snapshot.round.cards : null
+      const allowed = publicCards ?? (seat.playerId === profileId ? snapshot.you.cards : null) ?? []
+      for (const src of rendered.cards) assert(src === SVARA_CARD_BACK_SRC || allowed.some((card) => svaraCardCodeToFaceSrc(card) === src), 'DOM displayed an unauthorized card face')
+    }
+    assert.deepEqual(transportFaults, [])
+    return snapshot
+  }
 
   await check('[T1] userA sees the real empty table list on first load', async () => {
     await sessionA.page.waitForFunction(
@@ -590,8 +520,18 @@ try {
     const ownCardsVisibleA = await sessionA.page.locator('[data-svara-own-cards]').count()
     const ownCardsVisibleB = await sessionB.page.locator('[data-svara-own-cards]').count()
     if (ownCardsVisibleA !== 0 || ownCardsVisibleB !== 0) {
-      throw new Error('own cards must stay hidden until an explicit `look` command (no such UI exists yet) — data-svara-own-cards should not be rendered at all')
+      throw new Error('own cards must stay hidden until an explicit `look` command — data-svara-own-cards should not be rendered at all')
     }
+    const firstA = await compareBrowserToAuthoritativeSnapshot(sessionA.page, userA.profileId)
+    await compareBrowserToAuthoritativeSnapshot(sessionB.page, userB.profileId)
+    const firstDeal = readStoredMatch(firstA.matchId)
+    assert(firstDeal.state.round?.kind === 'ordinary' && firstDeal.state.round.dealing, 'Expected the real server dealing phase')
+    for (const id of [userA.profileId, userB.profileId]) {
+      assert.equal(firstDeal.state.stacks[id], firstA.table.startingChips - firstA.table.entryChips)
+      assert.equal(firstDeal.state.round.contributions[id], firstA.table.entryChips)
+    }
+    assert.equal(firstDeal.state.ledger.filter((entry) => entry.type === 'entry').length, 2)
+    pass('[I3] real server entry chips/dealing, individual WS snapshots and displayed balances agree with SQLite')
   })
 
   await check('[T12] the active table never overflows horizontally, and the self (bottom) panel stays within the viewport, across required breakpoints (задание §18)', async () => {
@@ -752,6 +692,15 @@ try {
       await actor.page.click('[data-svara-action-button="look"]')
       await actor.page.waitForFunction(() => document.querySelector('[data-svara-own-cards]') !== null, undefined, { timeout: 10_000 })
     }
+    const ownId = actor.label === 'A' ? userA.profileId : userB.profileId
+    const snapshot = await compareBrowserToAuthoritativeSnapshot(actor.page, ownId)
+    assert.equal(snapshot.you.cards?.length, 3)
+    await actor.page.waitForFunction((expected: string[]) => {
+      const sources = Array.from(document.querySelectorAll<HTMLImageElement>('[data-svara-own-cards] img')).map((img) => new URL(img.src).pathname)
+      return expected.length === sources.length && sources.every((src, i) => src === expected[i])
+    }, snapshot.you.cards!.map((card) => svaraCardCodeToFaceSrc(card)!), { timeout: 3000 })
+    await compareBrowserToAuthoritativeSnapshot(other(actor.label).page, actor.label === 'A' ? userB.profileId : userA.profileId)
+    pass('[I4] each browser sees exactly its permitted real hand; no opponent cards are exposed')
   })
 
   let actorLabel: 'A' | 'B' = 'A'
@@ -779,6 +728,8 @@ try {
       (expected) => (document.querySelector('[data-svara-felt-center]')?.textContent ?? '').includes(`Банка: ${expected}`),
       (before.bank ?? 0) + payAmount, { timeout: 10_000 },
     )
+    await compareBrowserToAuthoritativeSnapshot(actor.page, actor.label === 'A' ? userA.profileId : userB.profileId)
+    await compareBrowserToAuthoritativeSnapshot(otherSession.page, actor.label === 'A' ? userB.profileId : userA.profileId)
   })
 
   await check('[T15] Реално повишаване (×2) от следващия играч -> точната сума (min×2), не приблизителна', async () => {
@@ -799,6 +750,11 @@ try {
     if (before.selfStack === null || after.selfStack === null) throw new Error(`could not read stacks around ×2 raise (x2 label was "${x2Label}")`)
     const actuallyAdded = before.selfStack - after.selfStack
     if (actuallyAdded <= 0) throw new Error(`×2 raise did not actually deduct any chips (before=${before.selfStack}, after=${after.selfStack})`)
+    await compareBrowserToAuthoritativeSnapshot(actor.page, actor.label === 'A' ? userA.profileId : userB.profileId)
+    await compareBrowserToAuthoritativeSnapshot(other(actor.label).page, actor.label === 'A' ? userB.profileId : userA.profileId)
+    assert(sentCommands.get(sessionA.page)!.some((frame) => frame.command?.type === 'act'))
+    assert(sentCommands.get(sessionB.page)!.some((frame) => frame.command?.type === 'act'))
+    pass('[I5] two real legal actions from separate WS sessions are reflected only through authoritative snapshots')
   })
 
   await check('[T16] Реален отказ ("Бягам") -> ходът приключва (2 играчи: единственият останал печели веднага), без разкриване на картите на отказалия', async () => {
@@ -899,7 +855,7 @@ try {
     if (!stillActiveForB) throw new Error('userB got ejected from the match just because userA navigated away — unmount must never trigger an exit for ANY participant')
 
     const reloadStartedAt = Date.now()
-    await sessionA.page.goto(`http://127.0.0.1:${staticPort}/games/svara`, { waitUntil: 'domcontentloaded' })
+    await sessionA.page.goto(`${frontendOrigin}/games/svara`, { waitUntil: 'domcontentloaded' })
     // Must restore straight into the active-table view (not the empty/other
     // table list) via setTables()'s own-table auto-detect — no second join,
     // no new start, nothing clicked by the test here. Waiting for the real
@@ -935,15 +891,21 @@ try {
 
   await check('[T8] no uncaught JS errors during the entire scenario', () => {
     if (consoleErrors.length > 0) throw new Error(`Console errors: ${consoleErrors.join(' | ')}`)
+    assert.deepEqual(transportFaults, [])
   })
 
   await sessionA.context.close()
   await sessionB.context.close()
 } finally {
-  if (browser) await browser.close()
-  if (staticServer) staticServer.close()
-  await stopServer(server)
-  await isolated.cleanup()
+  try { if (browser) await browser.close() }
+  finally {
+    try { if (staticServer) await staticServer.close() }
+    finally {
+      try { if (server) await server.stop() }
+      finally { await isolated.cleanup(); assert(!existsSync(isolated.root), 'Owned test database directory remains after cleanup') }
+    }
+  }
+  pass('[I6] browsers, gateway sockets, owned backend process/listener and isolated database are closed and removed')
 }
 
 console.log(`\n${'═'.repeat(60)}`)
