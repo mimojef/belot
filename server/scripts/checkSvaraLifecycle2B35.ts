@@ -4,13 +4,14 @@ import { createSvaraLobby } from '../src/games/svara/createSvaraLobby.js'
 import { createSvaraMatchRuntime } from '../src/games/svara/runtime/svaraMatchRuntime.js'
 import { createSvaraLifecycle, svaraDealingAnimationMs, type SvaraClock } from '../src/games/svara/runtime/createSvaraLifecycle.js'
 import { SVARA_SHOWDOWN_DISPLAY_MS, SVARA_PAYOUT_STEP_MS } from '../src/games/svara/runtime/svaraDeadlines.js'
-import { createSvaraMatch, applySvaraMatchCommand, buildSvaraDeckForHands, assertSvaraMatchInvariants, type SvaraMatchCommand } from '../src/games/svara/engine/svaraMatch.js'
+import { createSvaraMatch, applySvaraMatchCommand, buildSvaraDeckForHands, assertSvaraMatchInvariants, type SvaraMatchCommand, type SvaraMatchEnv } from '../src/games/svara/engine/svaraMatch.js'
 import { SVARA_ORDERED_DECK, svaraCardCode, type SvaraCard } from '../src/games/svara/engine/svaraCards.js'
-import { SVARA_SNAPSHOT_FORBIDDEN_KEYS } from '../src/games/svara/protocol/svaraSnapshotProtocol.js'
+import { SVARA_SNAPSHOT_FORBIDDEN_KEYS, createSvaraMatchSnapshotMessage } from '../src/games/svara/protocol/svaraSnapshotProtocol.js'
 import { parseClientMessage } from '../src/protocol/parseClientMessage.js'
 import type { SvaraAccessSession } from '../src/games/svara/svaraAccess.js'
 
 type Job = { at: number; callback: () => void; active: boolean; order: number }
+type WithoutCommandId<C> = C extends { commandId: string } ? Omit<C, 'commandId'> : never
 class Clock implements SvaraClock {
   time = 1_000_000
   jobs: Job[] = []
@@ -343,6 +344,90 @@ try {
     assert.equal(t.submit('c', { type: 'svara-join' }).code, 'not_allowed')
     assert.equal(t.submit('c', { type: 'svara-decline' }, { commandId: result.commandId }).status, 'duplicate')
     t.ok('d', { type: 'svara-decline' }); assert.equal(t.state().round?.kind, 'svara')
+  })
+  check('2B377: all authenticated participants see actual declined and undecided statuses, never holders', () => {
+    const t = joining(4)
+    const initial = [{ playerId: 'c', status: 'undecided' }, { playerId: 'd', status: 'undecided' }]
+    for (const player of ['a', 'b', 'c', 'd']) {
+      const round = t.view(player).round
+      assert.equal(round?.kind, 'svara-joining')
+      if (round?.kind === 'svara-joining') assert.deepEqual(round.decisions, initial)
+    }
+    const chips = JSON.stringify(t.state().stacks), end = t.timer('svara-joining').deadlineAt
+    t.ok('c', { type: 'svara-decline' })
+    assert.equal(JSON.stringify(t.state().stacks), chips)
+    assert.equal(t.timer('svara-joining').deadlineAt, end)
+    for (const player of ['a', 'b', 'c', 'd']) {
+      const round = t.view(player).round
+      if (round?.kind !== 'svara-joining') throw new Error('joining closed too early')
+      assert.deepEqual(round.decisions, [{ playerId: 'c', status: 'declined' }, { playerId: 'd', status: 'undecided' }])
+      t.sync(player)
+      assert.deepEqual(t.frames.get(player)!.findLast((frame) => frame.type === 'svara_match_snapshot').round.decisions, round.decisions)
+    }
+  })
+  check('2B377: joined means a real committed fee and rights; duplicate commandId cannot charge twice', () => {
+    const t = joining(4), before = t.state().stacks.c!
+    const initial = t.view('c').round
+    if (initial?.kind !== 'svara-joining') throw new Error('fixture')
+    const result = t.ok('c', { type: 'svara-join' })
+    const round = t.view('a').round
+    if (round?.kind !== 'svara-joining') throw new Error('fixture')
+    assert.deepEqual(round.decisions, [{ playerId: 'c', status: 'joined' }, { playerId: 'd', status: 'undecided' }])
+    assert.equal(t.state().stacks.c, before - initial.fee)
+    assert(t.view('a').lockedPots.find((pot) => pot.potId === round.potId)!.eligible.includes('c'))
+    assert.equal(t.submit('c', { type: 'svara-join' }, { commandId: result.commandId }).status, 'duplicate')
+    assert.equal(t.state().stacks.c, before - initial.fee)
+  })
+  check('2B377: decisions are reconstructed after persistence roundtrip/recovery with identical deadlines and chips', () => {
+    const t = joining(4)
+    t.ok('c', { type: 'svara-decline' })
+    const stored = JSON.parse(JSON.stringify(t.runtime.exportStoredMatchForServer(t.matchId)))
+    assert(!JSON.stringify(stored.state.round).includes('decisions'), 'no new durable field or schema')
+    const restored = createSvaraMatchRuntime({ now: t.clock.now })
+    restored.restoreMatchesForServer([stored])
+    for (const playerId of ['a', 'b', 'c', 'd']) assert.deepEqual(restored.getPlayerSnapshot(t.matchId, { playerId }), t.view(playerId))
+    assert.deepEqual(restored.getDeadlinesForServer(t.matchId), t.runtime.getDeadlinesForServer(t.matchId))
+    assert.deepEqual(restored.exportInternalStateForServer(t.matchId).stacks, t.state().stacks)
+  })
+  check('2B377: public lobby and outsiders never receive decision details; transition drops the field', () => {
+    const t = joining(4)
+    t.ok('c', { type: 'svara-decline' })
+    assert(!JSON.stringify(t.runtime.getPublicTable(t.matchId)).includes('decisions'))
+    assert(!JSON.stringify(t.runtime.getPublicTable(t.matchId)).includes('declined'))
+    assert.throws(() => t.runtime.getPlayerSnapshot(t.matchId, { playerId: 'outsider' }))
+    t.runtime.registerMatch({ matchId: 'another', creator: { playerId: 'another-player' }, capacity: 2, entryFee: 1000, startMode: 'manual' })
+    assert.throws(() => t.runtime.getPlayerSnapshot('another', { playerId: 'a' }))
+    t.clock.advance(15000)
+    t.sync()
+    assert.equal(t.state().round?.kind, 'svara')
+    assert(!JSON.stringify(t.view('a')).includes('decisions'))
+    assert.equal(t.view('a').you.svaraDecision, null)
+  })
+  check('2B377: an actual large tied bank excludes outsiders who cannot afford its full fee', () => {
+    let state = createSvaraMatch({ tableId: 'poor-outsiders', capacity: 4, entryFee: 1000, creatorId: 'a', startMode: 'manual' })
+    let sequence = 0
+    const run = (command: WithoutCommandId<SvaraMatchCommand>, env: SvaraMatchEnv = {}) => {
+      state = applySvaraMatchCommand(state, { ...command, commandId: `poor-${++sequence}` } as SvaraMatchCommand, env).state
+      assertSvaraMatchInvariants(state)
+    }
+    for (const playerId of ['b', 'c', 'd']) run({ type: 'join-seat', playerId })
+    run({ type: 'start-match', playerId: 'a' }, { random: { nextInt: () => 0 } })
+    run({ type: 'start-next-round' }, { createDeck: () => buildSvaraDeckForHands(['b', 'c', 'd', 'a'], {
+      a: TIE1, b: TIE2, c: LOW, d: '8D 9S 10C',
+    }) })
+    run({ type: 'finish-dealing', roundId: state.round!.roundId })
+    run({ type: 'look', playerId: 'b' })
+    run({ type: 'act', playerId: 'b', action: { kind: 'bet', total: 60 } })
+    for (const playerId of ['c', 'd', 'a']) run({ type: 'act', playerId, action: { kind: 'call' } })
+    assert.equal(state.round?.kind, 'showdown-display')
+    run({ type: 'advance-showdown-display', roundId: state.round!.roundId })
+    run({ type: 'start-next-round' })
+    const snapshot = createSvaraMatchSnapshotMessage('poor-outsiders', state, 'c')
+    assert.equal(snapshot.round?.kind, 'svara-joining')
+    if (snapshot.round?.kind !== 'svara-joining') throw new Error('fixture')
+    assert(snapshot.round.fee > snapshot.seats.find((seat) => seat.playerId === 'c')!.stack)
+    assert.deepEqual(snapshot.round.decisions, [])
+    assert.equal(snapshot.you.svaraDecision, null)
   })
   check('timeout in a Svara deal folds atomically without a bot or replacement bet', () => {
     const t = joining()

@@ -26,6 +26,7 @@ import { formatSvaraLastBetBadge, getLastSvaraBetBadge } from './svaraBettingBad
 import { svaraDealingAnimationMs, type SvaraDealingVisualState } from './svaraTableAnimation'
 import { sampleSvaraMove, type SvaraMove, type SvaraSpriteState } from '../demo/svaraDemoMotion'
 import { computeSvaraResultVisualState, type SvaraResultVisualState } from './svaraResultAnimation'
+import { getSvaraDecisionWindow, renderSvaraDecisionWindow, svaraJoiningStatus, svaraDecisionStructureKey } from './svaraDecisionWindows'
 
 /** Анимацията на летящ чип/карта спрямо вече избран доброволен отказ (задание §11). */
 export type SvaraActiveFoldEffect = { seatIndex: number; voluntary: boolean; elapsedMs: number }
@@ -60,6 +61,8 @@ export type RenderSvaraActiveTableInput = {
   reducedMotion: boolean
   /** Internal presentation sample; callers may omit it. */
   resultVisual?: SvaraResultVisualState
+  decisionPending?: boolean
+  decisionMessage?: string
 }
 
 const PANEL_WIDTH_VW_BY_SLOT: Record<SvaraVisualSlot, { base: number; min: number; max: number }> = {
@@ -302,8 +305,9 @@ export function patchSvaraResultPresentation(root: HTMLElement, rawInput: Render
   replace(root.querySelector('[data-svara-result-overlay]'), payoutOverlayHtml(input, positions))
 }
 
-function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null): string {
+function seatStatusBadges(seat: SvaraSnapshotSeat, isLocal: boolean, youReturnPending: boolean, lastBetLabel: string | null, joiningStatus: string | null): string {
   const badges: string[] = []
+  if (joiningStatus) badges.push(joiningStatus)
   // Постоянен бадж за последния залог (задание §11.А) — отделен от
   // статусните баджове по смисъл, но визуално в СЪЩИЯ компактен ред; остава
   // до следващото раздаване (виж svaraBettingBadges.ts doc коментара).
@@ -384,7 +388,7 @@ function seatPanelHtml(
         <div data-svara-seat-points-mount="1">${showingResult ? result.points : ''}</div>
       </div>
       <div data-svara-seat-cards-mount="1" data-card-size="${cardClamp}" style="display:flex;justify-content:center;">${showingResult ? result.cards : seatCardsHtml(seat, isLocal, ownCards, publicReveal, cardClamp, landedCardCount, lookEffect, foldEffect, input.reducedMotion)}</div>
-      ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null)}
+      ${seatStatusBadges(seat, isLocal, youReturnPending, lastBet ? formatSvaraLastBetBadge(lastBet) : null, svaraJoiningStatus(round, seat.playerId))}
     </div>
   </div>`
 }
@@ -465,12 +469,22 @@ function feltCenterContentHtml(input: RenderSvaraActiveTableInput): string {
     ${carried > 0 ? `<div style="margin-top:1px;font-size:clamp(8px,2.1vw,10px);color:rgba(255,255,255,.6);">+ пренесени ${carried}</div>` : ''}
     ${banksBreakdownHtml(input)}
     ${showdownDisplayStatusHtml(round, input.resultVisual!)}
+    ${round?.kind === 'reveal-choice' && round.decision === 'pending' && !input.snapshot?.you.revealChoice?.canDecide ? '<div data-svara-reveal-waiting="1" style="font-size:clamp(9px,2.4vw,12px);color:#f4c95b;">Изчаква се решение на победителя.</div>' : ''}
     ${deadlineStatusText(input.timing, input.serverNow, round)}
   `
 }
 
 function feltCenterHtml(input: RenderSvaraActiveTableInput): string {
   return `<div data-svara-felt-center="1" style="grid-area:center;justify-self:center;align-self:center;text-align:center;max-width:100%;overflow:hidden;pointer-events:none;padding:0 2px;">${feltCenterContentHtml(input)}</div>`
+}
+
+export function patchSvaraDecisionTable(root: HTMLElement, input: RenderSvaraActiveTableInput): void {
+  const center = root.querySelector<HTMLElement>('[data-svara-felt-center]')
+  const html = feltCenterContentHtml(safeResultInput(input))
+  if (center && center.dataset.resultHtml !== html) {
+    center.innerHTML = html
+    center.dataset.resultHtml = html
+  }
 }
 
 const ACTION_BUTTON_STYLE: Record<'default' | 'primary' | 'danger', string> = {
@@ -565,6 +579,9 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   const actionButtons = deriveSvaraActionButtons(snapshot?.you.betting ?? null, snapshot?.you.looked ?? false)
   const showReturnButton = snapshot?.you.status === 'absent' && snapshot?.you.returnPending === false
   const actionBar = actionBarHtml(actionButtons, input.actionPending, showReturnButton)
+  const decisionWindow = getSvaraDecisionWindow(snapshot, timing, input.serverNow, input.localProfileId)
+  const decisionPending = input.decisionPending ?? input.actionPending
+  const decisionMessage = input.decisionMessage ?? ''
 
   // Контролният бар е ИЗВЪН филца (отделен ред над него) умишлено — и
   // "Обнови"/"Изход", и бутоните на местата (горе/долу/ляво/дясно) се
@@ -572,6 +589,7 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
   // редове елиминираме всякакъв риск от визуално застъпване дори на
   // най-тесните поддържани телефони (320px, виж заданието §18).
   return `<div data-svara-table="1" style="
+      position:relative;
       box-sizing:border-box;
       width:100%;
       display:flex;
@@ -615,5 +633,6 @@ export function renderSvaraActiveTable(input: RenderSvaraActiveTableInput): stri
       <div data-svara-diagnostics="1" style="position:absolute;left:6px;bottom:6px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:9px;color:rgba(255,255,255,.35);z-index:1;">rev ${snapshot?.revision ?? '—'}</div>
     </div>
     ${actionBar}
+    <div data-svara-decision-mount="1" data-structure-key="${esc(svaraDecisionStructureKey(decisionWindow, decisionPending, decisionMessage))}" style="position:absolute;inset:42px 6px 6px;display:grid;place-items:center;pointer-events:none;z-index:20;">${renderSvaraDecisionWindow(decisionWindow, decisionPending, decisionMessage)}</div>
   </div>`
 }

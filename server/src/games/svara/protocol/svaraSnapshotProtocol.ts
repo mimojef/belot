@@ -28,6 +28,7 @@ import type { SvaraCardCode } from '../engine/svaraCards.js'
 import {
   createSvaraMatchPlayerView,
   describeSvaraMatchOptions,
+  describeSvaraLifecycle,
   type SvaraEntryPercent,
   type SvaraMatchState,
   type SvaraPotOutcome,
@@ -138,7 +139,8 @@ export type SvaraSnapshotPayoutStep = {
 
 export type SvaraSnapshotRound =
   | SvaraSnapshotBettingRound
-  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
+  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean;
+      decisions: Array<{ playerId: string; status: 'undecided' | 'joined' | 'declined' }> }
   | { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number }
   /**
    * 2Б.3.7.1: изборът „Покажи“/„Скрий“ — `winnerId`/`decision` са публични за
@@ -286,7 +288,21 @@ function publicHistoryRecord(record: SvaraRoundRecord, seats: readonly string[])
 function publicRound(state: SvaraMatchState): SvaraSnapshotRound | null {
   const round = state.round
   if (!round) return null
-  if (round.kind === 'svara-joining') return { kind: 'svara-joining', roundId: round.roundId, potId: round.potId, fee: round.fee, joiners: [...round.joiners], closed: round.closed ?? false }
+  if (round.kind === 'svara-joining') {
+    const pot = state.lockedPots.find((entry) => entry.potId === round.potId)
+    const waiting = new Set(round.closed ? [] : describeSvaraLifecycle(state).joining?.undecided ?? [])
+    // Project existing decisions only in this individual snapshot's ordinary
+    // joining context. No new stored state or inference of declined players.
+    const decisions = pot?.kind !== 'ordinary' ? [] : state.seats.flatMap((playerId):
+      Array<{ playerId: string; status: 'undecided' | 'joined' | 'declined' }> => {
+      if (state.status[playerId] === 'exited') return []
+      if (round.joiners.includes(playerId) && pot.eligible.includes(playerId)) return [{ playerId, status: 'joined' }]
+      if (round.declined?.includes(playerId)) return [{ playerId, status: 'declined' }]
+      return waiting.has(playerId) ? [{ playerId, status: 'undecided' }] : []
+    })
+    return { kind: 'svara-joining', roundId: round.roundId, potId: round.potId, fee: round.fee,
+      joiners: [...round.joiners], closed: round.closed ?? false, decisions }
+  }
   if (round.kind === 'allin-svara') return { kind: 'allin-svara', roundId: round.roundId, potIds: [...round.potIds], iteration: round.iteration }
   if (round.kind === 'reveal-choice') {
     const revealed = round.decision === 'revealed'

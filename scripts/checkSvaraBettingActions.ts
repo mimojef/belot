@@ -207,7 +207,7 @@ check('[B14] Играч без никакъв залог -> null (без бад�
 
 check('[B14] round === null или не-betting round (напр. svara-joining) -> без бадж', () => {
   assertEqual(getLastSvaraBetBadge(null, 'p1'), null, 'null round')
-  const joining: SvaraSnapshotRound = { kind: 'svara-joining', roundId: 'r2', potId: 'pot1', fee: 10, joiners: [], closed: false }
+  const joining: SvaraSnapshotRound = { kind: 'svara-joining', roundId: 'r2', potId: 'pot1', fee: 10, joiners: [], closed: false, decisions: [] }
   assertEqual(getLastSvaraBetBadge(joining, 'p1'), null, 'non-betting round kind')
 })
 

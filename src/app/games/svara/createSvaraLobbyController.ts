@@ -18,6 +18,7 @@ import { playGameSound } from '../../audio/gameSoundSettings'
 import {
   renderSvaraActiveTable,
   patchSvaraResultPresentation,
+  patchSvaraDecisionTable,
   SVARA_FOLD_BUBBLE_TOTAL_MS,
   SVARA_LOOK_FLIP_TOTAL_MS,
   type SvaraActiveFoldEffect,
@@ -30,6 +31,7 @@ import { createSvaraFoldAnimationTracker } from './table/svaraFoldAnimationTrack
 import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTracker'
 import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
 import { playSvaraFoldVoice } from './table/svaraFoldVoice'
+import { getSvaraDecisionWindow, patchSvaraDecisionWindow } from './table/svaraDecisionWindows'
 
 type Options = {
   root: HTMLElement
@@ -67,6 +69,9 @@ export function createSvaraLobbyController(options: Options) {
   // идентифициран по commandId, за да не го обърка закъснял по-стар отговор.
   let actionPending = false
   let pendingActionCommandId: string | null = null
+  // An ACK may arrive before the updated snapshot. Keep this choice locked
+  // until authoritative state resolves it, rather than enabling a second click.
+  let pendingDecision: { key: string; commandId: string } | null = null
   // Задание §14 — проследява кои записи от round.actions вече са анимирани,
   // scoped по roundId (reconnect-safe, виж svaraBetAnimationTracker.ts).
   const betAnimationTracker = createSvaraBetAnimationTracker()
@@ -106,7 +111,7 @@ export function createSvaraLobbyController(options: Options) {
     // без прекомерно разтягане, виж заданието §11/§12) — списъкът/чакащата
     // маса остават в по-тесния 860px panel layout от 2Б.3.7.2.
     const flashes = Array.from(options.root.querySelectorAll<HTMLElement>('[data-svara-bet-flash]'))
-    options.root.innerHTML = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(10px,2.4vw,32px);overflow-x:hidden;">
+    const html = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(10px,2.4vw,32px);overflow-x:hidden;">
       <div style="max-width:${isActiveTable ? '1100px' : '860px'};margin:0 auto;">
         ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Нова маса</button></div>`}
         ${message ? `<div style="margin-bottom:12px;color:#f4c95b;font-weight:700;">${esc(message)}</div>` : ''}
@@ -114,6 +119,17 @@ export function createSvaraLobbyController(options: Options) {
       </div>
       ${createOpen ? renderCreateModal() : ''}
     </section>`
+    // Fullscreen belongs to this exact DOM node. Updating its contents keeps
+    // the decision dialog in fullscreen through snapshots and command ACKs.
+    if (fullscreenSupported && tableElementRef && document.fullscreenElement === tableElementRef && isActiveTable) {
+      const template = document.createElement('template')
+      template.innerHTML = html
+      const nextTable = template.content.querySelector<HTMLElement>('[data-svara-table]')
+      if (nextTable) {
+        tableElementRef.innerHTML = nextTable.innerHTML
+        tableElementRef.style.cssText = nextTable.style.cssText
+      }
+    } else options.root.innerHTML = html
     // Preserve the actual WAAPI nodes through countdown/look/fold renders.
     // Replacing innerHTML used to truncate the 900ms flash at the next tick.
     const flashScope = JSON.stringify([snapshot?.matchId, snapshot?.round?.roundId])
@@ -200,6 +216,35 @@ export function createSvaraLobbyController(options: Options) {
     if (myTable && showingResult()) patchSvaraResultPresentation(options.root, activeTableInput(myTable))
   }
 
+  function showingDecisionPhase(): boolean {
+    const round = snapshot?.round
+    return myTable !== null && snapshot?.matchId === myTable.matchId
+      && (round?.kind === 'svara-joining' || (round?.kind === 'reveal-choice' && round.decision === 'pending'))
+  }
+
+  function currentDecision() {
+    if (!myTable || snapshot?.matchId !== myTable.matchId) return null
+    return getSvaraDecisionWindow(snapshot, timing, sharedServerClock.getServerNow(), options.localProfileId)
+  }
+
+  function patchDecision(): void {
+    if (!myTable) return
+    const model = currentDecision()
+    patchSvaraDecisionWindow(options.root.querySelector('[data-svara-decision-mount]'), model,
+      actionPending || (pendingDecision !== null && pendingDecision.key === model?.key), message)
+    patchSvaraDecisionTable(options.root, activeTableInput(myTable))
+  }
+
+  function handleDecisionClick(event: Event): void {
+    const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('[data-svara-decision-action]') : null
+    if (!target || !options.root.contains(target) || target.disabled || actionPending || pendingDecision) return
+    const model = currentDecision()
+    if (!model || model.key !== target.dataset.svaraDecisionKey) return
+    const action = model.actions.find((entry) => entry.kind === target.dataset.svaraDecisionAction)
+    if (action) { message = ''; submitParticipantCommand(action.command, model.key) }
+  }
+  options.root.addEventListener('click', handleDecisionClick)
+
   function ensureResultFrame(): void {
     const deadline = timing?.deadlines.find((entry) => entry.kind === 'showdown-display' || entry.kind === 'payout-display' || entry.kind === 'reveal-display')
     const hasLiveResultDeadline = timing?.matchId === snapshot?.matchId && timing?.revision === snapshot?.revision
@@ -249,7 +294,11 @@ export function createSvaraLobbyController(options: Options) {
     if (needsTick && (tickTimer === null || tickIntervalMs !== desiredIntervalMs)) {
       if (tickTimer !== null) clearInterval(tickTimer)
       tickIntervalMs = desiredIntervalMs
-      tickTimer = setInterval(() => { if (showingResult()) patchResult(); else render() }, desiredIntervalMs)
+      tickTimer = setInterval(() => {
+        if (showingResult()) patchResult()
+        else if (showingDecisionPhase()) patchDecision()
+        else render()
+      }, desiredIntervalMs)
     } else if (!needsTick && tickTimer !== null) {
       clearInterval(tickTimer)
       tickTimer = null
@@ -283,6 +332,8 @@ export function createSvaraLobbyController(options: Options) {
       activeFoldEffects: showingResult() ? [] : activeFoldEffectsInput,
       activeLookEffect: showingResult() ? null : activeLookEffectInput,
       reducedMotion,
+      decisionPending: actionPending || (pendingDecision !== null && pendingDecision.key === currentDecision()?.key),
+      decisionMessage: message,
     }
   }
 
@@ -404,11 +455,12 @@ export function createSvaraLobbyController(options: Options) {
 
   // Задание §15 — само ЕДНА команда в движение, защитена с commandId/
   // expectedRevision; никога не намаляваме локален баланс/успех оптимистично.
-  function submitParticipantCommand(command: SvaraParticipantCommand): void {
+  function submitParticipantCommand(command: SvaraParticipantCommand, decisionKey?: string): void {
     if (actionPending || myTable === null || snapshot === null) return
     const commandId = crypto.randomUUID()
     actionPending = true
     pendingActionCommandId = commandId
+    if (decisionKey) pendingDecision = { key: decisionKey, commandId }
     render()
     options.onSubmitCommand(myTable.matchId, commandId, snapshot.revision, command)
   }
@@ -471,13 +523,20 @@ export function createSvaraLobbyController(options: Options) {
     /** myTable===null напуска локално (lobby list); иначе актуализира текущата маса (lobby или активна фаза). */
     setMyTable(table: SvaraPublicTable | null) {
       myTable = table
-      if (table === null) { snapshot = null; timing = null }
+      if (table === null) { snapshot = null; timing = null; pendingDecision = null; actionPending = false; pendingActionCommandId = null }
       leavePending = false
       joinPendingMatchId = null
       render()
     },
     setSnapshot(next: SvaraMatchSnapshotMessage | null) {
       snapshot = next
+      if (pendingDecision) {
+        const round = next?.round
+        const resolved = !next || !round || pendingDecision.key !== JSON.stringify([next.matchId, round.roundId, round.kind === 'svara-joining' ? 'joining' : 'reveal'])
+          || (round.kind === 'svara-joining' ? next.you.svaraDecision !== 'undecided' || round.closed
+            : round.kind !== 'reveal-choice' || round.decision !== 'pending')
+        if (resolved) { pendingDecision = null; actionPending = false; pendingActionCommandId = null; message = '' }
+      }
       render()
       flushFoldAndLookAnimations()
       flushBetAnimations()
@@ -496,6 +555,7 @@ export function createSvaraLobbyController(options: Options) {
     onCommandError(nextMessage: string, commandId?: string) {
       if (commandId !== undefined && pendingActionCommandId !== commandId) return
       actionPending = false
+      if (commandId === undefined || pendingDecision?.commandId === commandId) pendingDecision = null
       pendingActionCommandId = null
       message = nextMessage
       render()
@@ -508,6 +568,7 @@ export function createSvaraLobbyController(options: Options) {
     isInActiveMatch(): boolean { return myTable !== null && myTable.phase !== 'lobby' },
     requestExit,
     destroy() {
+      options.root.removeEventListener('click', handleDecisionClick)
       if (resultFrame !== null) { cancelAnimationFrame(resultFrame); resultFrame = null }
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }
       reducedMotionQuery?.removeEventListener('change', handleReducedMotionChange)

@@ -1333,7 +1333,8 @@ export type SvaraSnapshotPayoutStep = {
 
 export type SvaraSnapshotRound =
   | SvaraSnapshotBettingRound
-  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean }
+  | { kind: 'svara-joining'; roundId: string; potId: string; fee: number; joiners: string[]; closed: boolean;
+      decisions: Array<{ playerId: string; status: 'undecided' | 'joined' | 'declined' }> }
   | { kind: 'allin-svara'; roundId: string; potIds: string[]; iteration: number }
   /** Избор „Покажи“/„Скрий“ (Етап 2Б.3.7.1) — cards/handPoints само след 'revealed'. */
   | { kind: 'reveal-choice'; roundId: string; winnerId: string; decision: 'pending' | 'revealed'; cards: SvaraCardCode[] | null; handPoints: number | null }
