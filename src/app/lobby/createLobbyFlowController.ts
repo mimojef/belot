@@ -138,6 +138,7 @@ import type {
 import { isLudoFeatureEnabled } from '../games/ludo/ludoFeatureFlag'
 import { canShowSvaraEntry, fetchSvaraAccess } from '../games/svara/svaraAccess'
 import type { SvaraPageStatus } from '../games/svara/renderSvaraPage'
+import type { SvaraCreateDialogState } from '../games/svara/createSvaraLobbyController'
 import {
   applyTournamentMatchLiveScore,
   isTournamentMatchesLiveRelevant,
@@ -985,7 +986,7 @@ export type CreateLobbyFlowControllerOptions = {
   // (bet/fold/look/all-in/request-return/...).
   onSvaraTablesOpen?: () => void
   onSvaraReconnectResolved?: () => void
-  onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number) => void
+  onSvaraTableCreate?: (capacity: 2 | 3 | 4, entryFee: number, startMode: 'auto' | 'manual') => void
   onSvaraTableJoin?: (matchId: string) => void
   onSvaraTableLeave?: (matchId: string) => void
   onSvaraTableStart?: (matchId: string) => void
@@ -1599,6 +1600,7 @@ export type LobbyFlowController = {
   }
   beginSvaraReconnect: () => boolean
   hasPendingSvaraReconnect: () => boolean
+  hasSvaraTableView: () => boolean
   /**
    * Реалното съществуване на активния Ludo gameplay controller-a (mirror на
    * getPwaUpdateSafetySnapshot's hasActiveLudoMatch поле, вече изложен и
@@ -3632,6 +3634,8 @@ export function createLobbyFlowController(
     requestExit: () => void
   } | null = null
   let _isOpeningSvaraLobbyOverlay = false
+  // A parent UI refresh may remount the view while the user edits this form.
+  const svaraCreateDialogState: SvaraCreateDialogState = { open: false, draft: { capacity: 2, entryFee: 5000, startMode: 'auto' }, options: null }
   // Пази последната приложена ревизия ПО matchId, независимо от mount
   // lifecycle-а на _svaraLobbyController — пазим срещу презаписване с
   // по-стар/равен snapshot (напр. duplicate-command resend, виж §15 "never
@@ -3790,8 +3794,11 @@ export function createLobbyFlowController(
       _svaraLobbyController = createSvaraLobbyController({
         root: liveMountRoot,
         localProfileId: profileId,
+        apiBaseUrl: options.getApiBaseUrl?.() ?? '',
+        createDialogState: svaraCreateDialogState,
+        onOpenProfile: (profileId, displayNameHint) => { void openProtectedProfileById(profileId, displayNameHint, 'other') },
         onRefresh: () => options.onSvaraTablesOpen?.(),
-        onCreate: (capacity, entryFee) => options.onSvaraTableCreate?.(capacity, entryFee),
+        onCreate: (capacity, entryFee, startMode) => options.onSvaraTableCreate?.(capacity, entryFee, startMode),
         onJoin: (matchId) => options.onSvaraTableJoin?.(matchId),
         onLeave: (matchId) => options.onSvaraTableLeave?.(matchId),
         onStart: (matchId) => options.onSvaraTableStart?.(matchId),
@@ -16988,7 +16995,7 @@ export function createLobbyFlowController(
   // "Свара" (Етап 1) — тестова страница. Съдържанието се показва САМО след
   // 200 от GET /api/games/svara/access (флаг + роля, проверени на сървъра).
   // Клиентската видимост на картата НЕ е защита: директен URL минава през
-  // същата сървърна проверка, а при отказ потребителят се връща в "Игри".
+  // същата сървърна проверка, а при отказ се показва обяснение без игрови UI.
   let _svaraAccessRequestSeq = 0
   function showSvaraPage(): void {
     leaveAdminServerIfActive()
@@ -17014,8 +17021,8 @@ export function createLobbyFlowController(
         render()
         return
       }
-      if (window.location.pathname === '/games/svara') history.replaceState(null, '', '/games')
-      showMoreGamesPage()
+      state.svaraPageStatus = result
+      render()
     })
   }
 
@@ -23394,6 +23401,7 @@ export function createLobbyFlowController(
     handleServerMessage,
     beginSvaraReconnect,
     hasPendingSvaraReconnect: () => _svaraReconnect !== null,
+    hasSvaraTableView: () => state.currentScreen === 'svara' && _svaraLobbyController?.getMyTableId() != null,
     getPwaUpdateSafetySnapshot: () => ({
       isSearching: state.isSearching,
       hasPrivateRoomInvite: state.privateRoomInvite !== null,

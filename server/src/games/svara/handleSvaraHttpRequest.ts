@@ -10,6 +10,7 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { evaluateSvaraAccess, type SvaraAccessSession } from './svaraAccess.js'
+import { getSvaraTableCreationOptions } from './svaraTableCreationOptions.js'
 
 export const SVARA_ACCESS_PATH = '/api/games/svara/access'
 
@@ -35,7 +36,7 @@ export function handleSvaraHttpRequest(
 
   const decision = evaluateSvaraAccess(deps.getSessionFromRequest(req))
   if (decision.allowed) {
-    deps.sendJsonResponse(res, 200, { ok: true, access: 'granted' }, NO_STORE_HEADERS)
+    deps.sendJsonResponse(res, 200, { ok: true, access: 'granted', creationOptions: getSvaraTableCreationOptions() }, NO_STORE_HEADERS)
     return true
   }
 

@@ -7186,11 +7186,8 @@ lobby = createLobbyFlowController({
     hideOfflineConnectionOverlay()
     requestPwaUpdateApplyAttempt()
   },
-  // Минимален create modal (viж createSvaraLobbyController.ts) събира само
-  // capacity+entryFee — entryPercent/startMode остават фиксирани разумни
-  // defaults до следващ подетап с пълна настройка на масата (§17 — не
-  // добавяме допълнителен UI отвъд заданието за този подетап).
-  onSvaraTableCreate: (capacity, entryFee) => { client.createSvaraTable(capacity, entryFee, 5, 'manual') },
+  // The form chooses capacity/entry/start mode; new-table admission fixes 1% on the server.
+  onSvaraTableCreate: (capacity, entryFee, startMode) => { client.createSvaraTable(capacity, entryFee, 1, startMode) },
   onSvaraTableJoin: (matchId) => { client.joinSvaraTable(matchId) },
   onSvaraTableLeave: (matchId) => { client.leaveSvaraTable(matchId) },
   onSvaraTableStart: (matchId) => { client.startSvaraTable(matchId) },
@@ -7828,7 +7825,7 @@ function isSvaraReconnectContext(): boolean {
   // A remaining Svara result/cache cannot override another active game.
   return !activeRoom.hasActiveRoom()
     && !lobby.hasActiveLudoMatch()
-    && (lobby.hasPendingSvaraReconnect() || lobby.getPwaUpdateSafetySnapshot().hasActiveSvaraMatch)
+    && (lobby.hasPendingSvaraReconnect() || lobby.hasSvaraTableView() || lobby.getPwaUpdateSafetySnapshot().hasActiveSvaraMatch)
 }
 
 // Phase 3B.2 (D8): ЕДИНСТВЕНИЯТ server-driven spectator termination път

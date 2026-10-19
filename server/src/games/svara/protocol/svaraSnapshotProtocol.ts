@@ -49,7 +49,7 @@ export type SvaraPublicTable = {
   entryPercent: SvaraEntryPercent
   startingChips: number
   entryChips: number
-  players: Array<{ playerId: string; status: SvaraSeatStatus }>
+  players: Array<{ playerId: string; status: SvaraSeatStatus; displayName?: string | null; avatarUrl?: string | null }>
 }
 
 /** Explicit public whitelist; never copies cards or internal state. */

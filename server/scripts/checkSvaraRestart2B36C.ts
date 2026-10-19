@@ -250,7 +250,7 @@ async function finishShowdownDisplays(matchId: string) {
   }
   throw new Error('Unbounded showdown/all-in continuation')
 }
-async function createTable(peers: Client[], entryFee = 1000, start = true): Promise<string> {
+async function createTable(peers: Client[], entryFee = 5000, start = true): Promise<string> {
   const result = await ask(peers[0]!, { type: 'create_svara_table', requestId: randomUUID(), capacity: peers.length, entryFee, entryPercent: 1, startMode: 'manual' }, 'svara_table_updated')
   const matchId = result.table.matchId
   for (const peer of peers.slice(1)) await ask(peer, { type: 'join_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
@@ -286,7 +286,7 @@ async function trap(client: Client, matchId: string, command: any) {
 const deck = (order: string[], hands: Record<string, string>) => buildSvaraDeckForHands(order, hands).map(svaraCardCode)
 async function carried(peers: Client[]) {
   const matchId = await createTable(peers), b = peers[1]!
-  await ok(b, matchId, { type: 'look' }); await act(b, matchId, { kind: 'bet', total: 30 }); await ok(b, matchId, { type: 'exit' })
+  await ok(b, matchId, { type: 'look' }); await act(b, matchId, { kind: 'bet', total: 150 }); await ok(b, matchId, { type: 'exit' })
   await advance(15000); await fence(peers[0]!)
   // 2Б.3.7.1: the 15s timeout that folds the last bettor can leave the sole
   // remaining active player with a pending reveal choice instead of opening
@@ -297,7 +297,7 @@ async function carried(peers: Client[]) {
     await ok(winner, matchId, { type: 'hide-cards' })
   }
   const state = saved(matchId)
-  assert.equal(state.state.carried[0]?.amount, 30); assert(state.deadlines.some((d) => d.kind === 'presence-wait'))
+  assert.equal(state.state.carried[0]?.amount, 150); assert(state.deadlines.some((d) => d.kind === 'presence-wait'))
   return matchId
 }
 async function check(label: string, run: () => Promise<void>) {
@@ -318,7 +318,7 @@ try {
   })
   await check('graceful stop/start preserves the full active deal, seen/hidden cards and remaining deadline', async () => {
     await start(BASE); let peers = await reconnect(users.slice(0, 3)); const matchId = await createTable(peers)
-    await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 2 }); await advance(3000)
+    await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 10 }); await advance(3000)
     const before = saved(matchId); await stop(); await start(now + 2000); peers = await reconnect(users.slice(0, 3))
     same(saved(matchId), before, 'Full state changed across graceful restart')
     // peers[1]'s plain bet above closed the blind phase (commit 4c2a280):
@@ -334,15 +334,15 @@ try {
     }
     const time = await timing(peers[2]!, matchId); assert.equal(time.deadlines[0].deadlineAt, before.deadlines[0]!.deadlineAt); assert.equal(time.deadlines[0].remainingMs, 10000)
     await ok(peers[2]!, matchId, { type: 'look' }); await act(peers[2]!, matchId, { kind: 'call' })
-    await ok(peers[0]!, matchId, { type: 'look' }); await act(peers[0]!, matchId, { kind: 'bet', total: 4 })
+    await ok(peers[0]!, matchId, { type: 'look' }); await act(peers[0]!, matchId, { kind: 'bet', total: 20 })
     const confirmed = saved(matchId); await stop('crash')
     assert((await stat(`${dbFile}-wal`)).size > 0, 'Crash scenario did not leave a real WAL to recover')
     await start(now); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), confirmed, 'Confirmed raise lost after forced crash'); integrity()
     await act(peers[1]!, matchId, { kind: 'call' })
-    const beforeLost = saved(matchId), command = { type: 'act', action: { kind: 'bet', total: 6 } }
+    const beforeLost = saved(matchId), command = { type: 'act', action: { kind: 'bet', total: 30 } }
     const lost = await trap(peers[2]!, matchId, command); await stop('crash'); await start(now); peers = await reconnect(users.slice(0, 3))
     const committed = saved(matchId); assert.equal(committed.revision, beforeLost.revision + 1)
-    assert.equal(committed.state.stacks[users[2]!.profileId], beforeLost.state.stacks[users[2]!.profileId]! - 4)
+    assert.equal(committed.state.stacks[users[2]!.profileId], beforeLost.state.stacks[users[2]!.profileId]! - 20)
     const repeated = await play(peers[2]!, matchId, command, lost.commandId, lost.revision); assert.equal(repeated.status, 'duplicate')
     assert.equal((await play(peers[2]!, matchId, { type: 'act', action: { kind: 'fold' } }, lost.commandId, lost.revision)).code, 'command_id_conflict')
     same(saved(matchId), committed, 'Lost ACK retry/conflict changed durable state')
@@ -352,7 +352,7 @@ try {
     await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3))
     // Deliberately NOT createTable()'s own helper, to crash BEFORE any
     // dealing-phase skip would otherwise advance the clock past it.
-    const created = await ask(peers[0]!, { type: 'create_svara_table', requestId: randomUUID(), capacity: peers.length, entryFee: 1000, entryPercent: 1, startMode: 'manual' }, 'svara_table_updated')
+    const created = await ask(peers[0]!, { type: 'create_svara_table', requestId: randomUUID(), capacity: peers.length, entryFee: 5000, entryPercent: 1, startMode: 'manual' }, 'svara_table_updated')
     const matchId = created.table.matchId
     for (const peer of peers.slice(1)) await ask(peer, { type: 'join_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
     await ask(peers[0]!, { type: 'start_svara_table', requestId: randomUUID(), matchId }, 'svara_table_updated')
@@ -377,7 +377,7 @@ try {
     const byId = (id: string) => peers.find((p) => p.user.profileId === id)!
     const order = (saved(matchId).state.round as any).betting.order as string[], [first, second] = order
     await act(byId(first!), matchId, { kind: 'fold' }) // first actor declines before looking or betting
-    await ok(byId(second!), matchId, { type: 'look' }); await act(byId(second!), matchId, { kind: 'bet', total: 2 }) // plain bet closes the blind phase for everyone
+    await ok(byId(second!), matchId, { type: 'look' }); await act(byId(second!), matchId, { kind: 'bet', total: 10 }) // plain bet closes the blind phase for everyone
     const before = saved(matchId), beforeRound = before.state.round as any
     assert(beforeRound.betting.folded.includes(first), 'First actor should have folded')
     assert(!beforeRound.betting.looked.includes(first), 'A folded participant must not be auto-revealed')
@@ -430,7 +430,7 @@ try {
   await check('real Svara joining window survives before expiry and closes once after restart', async () => {
     await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3)); const ids = peers.map((p) => p.user.profileId)
     await ipc('decks', { decks: [deck([ids[1]!, ids[2]!, ids[0]!], { [ids[1]!]: 'KS QS JS', [ids[0]!]: 'KH QH JH', [ids[2]!]: '8C 9D 10H' })] })
-    const matchId = await createTable(peers); await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 1 }); await act(peers[2]!, matchId, { kind: 'fold' }); await act(peers[0]!, matchId, { kind: 'call' }); await fence(peers[0]!)
+    const matchId = await createTable(peers); await ok(peers[1]!, matchId, { type: 'look' }); await act(peers[1]!, matchId, { kind: 'bet', total: 5 }); await act(peers[2]!, matchId, { kind: 'fold' }); await act(peers[0]!, matchId, { kind: 'call' }); await fence(peers[0]!)
     assert.equal(saved(matchId).state.round?.kind, 'showdown-display')
     await finishShowdownDisplays(matchId)
     const before = saved(matchId); assert.equal(before.state.round?.kind, 'svara-joining'); const deadline = before.deadlines.find((d) => d.kind === 'svara-joining')!
@@ -448,7 +448,7 @@ try {
     await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3)); const matchId = await carried(peers), before = saved(matchId), deadline = before.deadlines.find((d) => d.kind === 'presence-wait')!
     await stop(); await start(deadline.deadlineAt - 1); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), before, 'Presence wait reset on restart'); assert.equal((await timing(peers[0]!, matchId)).deadlines[0].remainingMs, 1)
     await stop(); await start(deadline.deadlineAt + 1); peers = await reconnect(users.slice(0, 3)); const ended = saved(matchId)
-    assert.equal(ended.state.winnerId, users[0]!.profileId); assert.equal(ended.state.finishReason, 'prolonged-absence'); assert.equal(ended.state.stacks[users[0]!.profileId], before.state.stacks[users[0]!.profileId]! + 30)
+    assert.equal(ended.state.winnerId, users[0]!.profileId); assert.equal(ended.state.finishReason, 'prolonged-absence'); assert.equal(ended.state.stacks[users[0]!.profileId], before.state.stacks[users[0]!.profileId]! + 150)
     assert.equal(ended.state.ledger.filter((e) => e.type === 'absence-pot-award').length, 1); assert.equal(ended.state.carried.length, 0); assert.equal(ended.state.lockedPots.length, 0)
     await stop('crash'); await start(now + 1000); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), ended, 'Official win awarded twice'); assert.equal((await tables(peers[0]!)).length, 0); assert.equal(walletHash(), baselineWallet); integrity(); await stop()
   })
@@ -457,7 +457,7 @@ try {
     const before = saved(matchId), deadline = before.deadlines.find((d) => d.kind === 'presence-wait')!; assert.equal(deadline.playerId, null)
     await stop(); await start(deadline.deadlineAt - 1); peers = await reconnect(users.slice(0, 3)); same(saved(matchId), before, 'Zero-active wait reset'); assert.equal((await timing(peers[2]!, matchId)).deadlines[0].remainingMs, 1)
     await stop(); await start(deadline.deadlineAt + 1); peers = await reconnect(users.slice(0, 3)); const ended = saved(matchId)
-    assert.equal(ended.state.winnerId, null); assert.equal(ended.state.finishReason, 'all-absent'); same(ended.state.stacks, before.state.stacks, 'Abort changed free balances'); assert.equal(ended.state.removedChips, before.state.removedChips + 30)
+    assert.equal(ended.state.winnerId, null); assert.equal(ended.state.finishReason, 'all-absent'); same(ended.state.stacks, before.state.stacks, 'Abort changed free balances'); assert.equal(ended.state.removedChips, before.state.removedChips + 150)
     assert.equal(ended.state.ledger.filter((e) => e.type === 'entry').length, before.state.ledger.filter((e) => e.type === 'entry').length); assert.equal(ended.state.ledger.filter((e) => e.type === 'abandoned-pot-removed').length, 1)
     await stop(); await start(now + 1000); same(saved(matchId), ended, 'Abort repeated'); integrity(); await stop()
   })
@@ -465,7 +465,7 @@ try {
     await restore(baseline); await start(BASE); let peers = await reconnect(users.slice(0, 3)); const ids = peers.map((p) => p.user.profileId)
     const tie = deck(ids, { [ids[0]!]: 'KS QS JS', [ids[1]!]: 'KH QH JH', [ids[2]!]: 'KD QD JD' }), decided = deck(ids, { [ids[0]!]: '7C 7D 7H', [ids[1]!]: 'KH QH JH', [ids[2]!]: '8C 9D 10H' })
     await ipc('decks', { decks: [SVARA_ORDERED_DECK.map(svaraCardCode), SVARA_ORDERED_DECK.map(svaraCardCode), tie] })
-    const matchId = await createTable(peers, 100)
+    const matchId = await createTable(peers, 5000)
     for (const p of [peers[1]!, peers[2]!, peers[2]!, peers[0]!]) {
       await act(p, matchId, { kind: 'fold' })
       // 2Б.3.7.1: if that fold left a sole remaining winner, resolve the
@@ -490,7 +490,7 @@ try {
   })
   await check('several real tables restore independently with unchanged IDs and no duplicate lobby entries', async () => {
     await restore(baseline); await start(BASE); let peers = await reconnect(users)
-    const ids = [await createTable(peers.slice(0, 3)), await createTable(peers.slice(3, 5), 1000, false), await createTable(peers.slice(5, 7))]
+    const ids = [await createTable(peers.slice(0, 3)), await createTable(peers.slice(3, 5), 5000, false), await createTable(peers.slice(5, 7))]
     const before = ids.map(saved); await stop(); await start(now + 2000); peers = await reconnect(users)
     ids.forEach((matchId, i) => same(saved(matchId), before[i], 'Independent table changed during recovery'))
     const list = await tables(peers[7]!); assert.equal(list.length, 3); assert.equal(new Set(list.map((t) => t.matchId)).size, 3)

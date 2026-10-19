@@ -9,7 +9,7 @@ import { createSvaraLifecycle, type SvaraClock } from './runtime/createSvaraLife
 import { SvaraPersistenceError, type SvaraMatchPersistence } from './runtime/svaraPersistence.js'
 import { isSvaraTestFeatureEnabled } from './svaraFeatureFlag.js'
 import { parseSvaraLobbyMessage, type SvaraLobbyClientMessage, type SvaraLobbyErrorCode, type SvaraLobbyServerMessage } from './protocol/svaraLobbyProtocol.js'
-import { serializeSvaraSnapshotForClient } from './protocol/svaraSnapshotProtocol.js'
+import { serializeSvaraSnapshotForClient, type SvaraPublicTable } from './protocol/svaraSnapshotProtocol.js'
 
 type Transport = {
   /** Handshake identity used only to skip unrelated connections during broadcast. */
@@ -22,6 +22,7 @@ export type SvaraRecoveryState = 'initialization' | 'ready' | 'failed' | 'disabl
 
 export function createSvaraLobby(deps: {
   hasOtherGameCommitment: (profileId: string) => boolean
+  getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null } | null
   runtime?: SvaraMatchRuntime
   persistence?: SvaraMatchPersistence
   onError?: (error: unknown) => void
@@ -46,8 +47,21 @@ export function createSvaraLobby(deps: {
   let recoveryState: SvaraRecoveryState = deps.persistence ? 'initialization' : 'ready'
   let recoveryAttempted = false
 
+  function tableWithProfiles(table: SvaraPublicTable): SvaraPublicTable {
+    return { ...table, players: table.players.map(({ playerId, status }) => {
+      let profile: ReturnType<NonNullable<typeof deps.getPublicProfile>> = null
+      try { profile = deps.getPublicProfile?.(playerId) ?? null } catch (cause) { deps.onError?.(cause) }
+      // Presentation only: never persist profile data or spread a full profile.
+      return { playerId, status, displayName: profile?.displayName?.trim() || null, avatarUrl: profile?.avatarUrl?.trim() || null }
+    }) }
+  }
+
   function deliver(transport: Transport, payload: SvaraLobbyServerMessage | string) {
-    try { transport.send(payload) } catch (cause) { deps.onError?.(cause) }
+    try {
+      if (typeof payload !== 'string' && payload.type === 'svara_table_updated') payload = { ...payload, table: tableWithProfiles(payload.table) }
+      else if (typeof payload !== 'string' && payload.type === 'svara_tables_list') payload = { ...payload, tables: payload.tables.map(tableWithProfiles) }
+      transport.send(payload)
+    } catch (cause) { deps.onError?.(cause) }
   }
 
   const publicTables = () => runtime.listMatchIds().map((id) => runtime.getPublicTable(id))

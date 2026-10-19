@@ -24,7 +24,7 @@ async function check(label: string, fn: () => unknown | Promise<unknown>) {
 }
 const sleep = (ms: number) => new Promise<void>((done) => setTimeout(done, ms))
 const requestId = () => randomUUID()
-const create = (capacity = 2, startMode = 'manual', extra = {}) => ({ type: 'create_svara_table', requestId: requestId(), capacity, entryFee: 5000, entryPercent: 2, startMode, ...extra })
+const create = (capacity = 2, startMode = 'manual', extra = {}) => ({ type: 'create_svara_table', requestId: requestId(), capacity, entryFee: 5000, entryPercent: 1, startMode, ...extra })
 const command = (type: string, matchId: string, extra = {}) => ({ type, matchId, requestId: requestId(), ...extra })
 
 function checkPrivacy(value: unknown, publicOnly = false): void {
@@ -263,7 +263,7 @@ try {
     const id = await createTable(a, 3, 'manual', { playerId: b.profileId, profileId: b.profileId, creatorId: b.profileId })
     const update = await frame(observer, (f) => f.type === 'svara_tables_list' && f.tables.some((t: any) => t.matchId === id))
     const table = update.tables.find((t: any) => t.matchId === id)
-    assert.equal(table.creatorId, a.profileId); assert.equal(table.startingChips, 500); assert.equal(table.entryChips, 10)
+    assert.equal(table.creatorId, a.profileId); assert.equal(table.startingChips, 500); assert.equal(table.entryChips, 5)
     checkPrivacy(update, true)
     const own = await snapshot(a, id)
     assert.equal(own.you.playerId, a.profileId); assert.equal(own.you.cards, null)
@@ -297,7 +297,7 @@ try {
       assert.equal(state.phase, 'in-progress'); assert.equal(state.round.kind, 'ordinary')
       assert(players.some((player) => player.profileId === state.dealerId), 'first deal exposes its authoritative dealer')
       assert.equal(state.totalChips, capacity * 500)
-      assert(state.seats.every((p: any) => p.stack === 490 && p.cardCount === 3))
+      assert(state.seats.every((p: any) => p.stack === 495 && p.cardCount === 3))
       for (const player of players.slice(1)) {
         await leave(player, id)
         await denied(player, { type: 'request_svara_table_state', matchId: id }, 'not_a_participant')

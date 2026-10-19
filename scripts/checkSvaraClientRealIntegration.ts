@@ -248,8 +248,10 @@ await check('[T7] createGameServerClient.ts Svara type/method block contains no 
 })
 
 console.log('\ncheckSvaraClientRealIntegration\n')
-console.log('Building frontend (dist/, needed for a real index.html/main bundle)...')
-await runFrontendBuild()
+if (!process.argv.includes('--skip-build')) {
+  console.log('Building frontend (dist/, needed for a real index.html/main bundle)...')
+  await runFrontendBuild()
+}
 
 const isolated = await createIsolatedSvaraRoot(PROJECT_ROOT)
 let server: Awaited<ReturnType<typeof startIsolatedSvaraBackend>> | null = null
@@ -305,7 +307,7 @@ try {
 
   const runId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
-  async function registerUser(label: string): Promise<{ cookie: string; cookieName: string; cookieValue: string; profileId: string; email: string }> {
+  async function registerUser(label: string, role: 'admin' | 'player' = 'admin'): Promise<{ cookie: string; cookieName: string; cookieValue: string; profileId: string; email: string }> {
     const email = `svara-client-${label}-${runId}@example.test`
     const reg = await httpJson(BACKEND_PORT, 'POST', '/api/auth/register', {
       email, password: 'SvaraClientDiag1!', displayName: `SC ${label} ${Date.now() % 100000}`, gender: 'male', visitorId: randomUUID(),
@@ -324,7 +326,7 @@ try {
       const profile = db.prepare('SELECT p.profile_id FROM profiles p JOIN accounts a ON a.account_id = p.account_id WHERE a.email = ?').get(email)
       assert.equal(profile?.profile_id, reg.body.session.profile.profileId, 'Registration response belongs to a different database')
       assert.equal(db.prepare('SELECT COUNT(*) AS count FROM account_sessions WHERE profile_id = ? AND revoked_at IS NULL').get(reg.body.session.profile.profileId)!.count, 1)
-      db.prepare("UPDATE accounts SET role = 'admin' WHERE email = ?").run(email)
+      if (role === 'admin') db.prepare("UPDATE accounts SET role = 'admin' WHERE email = ?").run(email)
     } finally { db.close() }
     return { cookie, cookieName: cookieName!, cookieValue: cookieValue!, profileId: reg.body.session.profile.profileId, email }
   }
@@ -332,6 +334,7 @@ try {
   console.log('Registering two real users and granting the Svara test role...')
   const userA = await registerUser('a')
   const userB = await registerUser('b')
+  const deniedUser = await registerUser('denied', 'player')
   assert.notEqual(userA.profileId, userB.profileId)
   assert.notEqual(userA.cookieValue, userB.cookieValue)
   pass('[I2] two real HTTP registrations created distinct profiles and session rows in the owned database')
@@ -392,6 +395,40 @@ try {
   const sessionA = await openSvaraPage(userA)
   const sessionB = await openSvaraPage(userB)
 
+  await check('[A1] allowed admin opens the real Svara lobby from the Games card (desktop and mobile)', async () => {
+    for (const viewport of [{ width: 1280, height: 900 }, { width: 420, height: 900 }]) {
+      await sessionA.page.setViewportSize(viewport)
+      await sessionA.page.goto(`${frontendOrigin}/games`, { waitUntil: 'domcontentloaded' })
+      await sessionA.page.locator('[data-svara-play-button="1"]').click()
+      await sessionA.page.waitForURL(/\/games\/svara$/)
+      await sessionA.page.waitForSelector('[data-svara-lobby="1"]')
+      assert.equal(await sessionA.page.locator('[data-svara-create-open]').count(), 1)
+    }
+  })
+
+  async function checkDeniedPage(user: typeof deniedUser | null, status: 'forbidden' | 'unauthenticated'): Promise<void> {
+    const context = await browser!.newContext({ viewport: { width: 1280, height: 900 } })
+    try {
+      await context.route('**/*', (route) => new URL(route.request().url()).hostname === BROWSER_HOST ? route.continue() : route.abort())
+      if (user) await context.addCookies([{ name: user.cookieName, value: user.cookieValue, domain: BROWSER_HOST, path: '/', httpOnly: true, sameSite: 'Lax' }])
+      const page = await context.newPage()
+      await page.goto(`${frontendOrigin}/games/svara`, { waitUntil: 'domcontentloaded' })
+      await page.waitForSelector(`[data-svara-page="${status}"]`)
+      assert.equal(new URL(page.url()).pathname, '/games/svara', 'denial must preserve the requested route')
+      assert.equal(await page.locator('[data-svara-lobby-mount], [data-svara-demo-mount]').count(), 0)
+      assert((await page.locator('[role="alert"]').textContent())!.trim().length > 0)
+      await page.getByText('Приеми всички').click({ timeout: 3000 }).catch(() => {})
+      await page.locator('[data-svara-play-button="1"]').click()
+      await page.waitForSelector(`[data-svara-page="${status}"]`)
+      await page.locator('[data-svara-back-to-games="1"]').click()
+      await page.waitForURL(/\/games$/)
+      assert.equal(await page.locator('[data-svara-play-card]').count(), 0, 'denied users must not see the card')
+    } finally { await context.close() }
+  }
+
+  await check('[A2] authenticated ordinary player sees a reason, retry and back; no game or Games card', () => checkDeniedPage(deniedUser, 'forbidden'))
+  await check('[A3] anonymous visitor sees the sign-in explanation without a silent redirect or game mount', () => checkDeniedPage(null, 'unauthenticated'))
+
   async function compareBrowserToAuthoritativeSnapshot(page: Page, profileId: string): Promise<SvaraMatchSnapshotMessage> {
     let snapshot: SvaraMatchSnapshotMessage | undefined
     let stored: SvaraStoredMatch | undefined
@@ -434,12 +471,13 @@ try {
     await page.click('[data-svara-create-open]')
     await page.waitForSelector('[data-svara-create-form]', { timeout: 5_000 })
     await page.selectOption('[data-svara-create-form] select[name="capacity"]', String(capacity))
-    await page.fill('[data-svara-create-form] input[name="entryFee"]', String(entryFee))
+    await page.selectOption('[data-svara-create-form] select[name="entryFee"]', String(entryFee))
+    await page.check('[data-svara-create-form] input[name="startMode"][value="manual"]')
     await page.click('[data-svara-create-form] button[type="submit"]')
   }
 
   await check('[T2] userA creates a real table via the UI -> waiting room shows 1/2 participants', async () => {
-    await openCreateModalAndSubmit(sessionA.page, 2, 500)
+    await openCreateModalAndSubmit(sessionA.page, 2, 5000)
     await sessionA.page.waitForFunction(
       () => document.querySelector('[data-svara-lobby="1"]')?.textContent?.includes('1/2') ?? false,
       undefined, { timeout: 10_000 },

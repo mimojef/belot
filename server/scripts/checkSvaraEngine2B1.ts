@@ -567,7 +567,7 @@ check('H1. двигателят импортира само собствени �
   }
 })
 
-check('H2. клиентът не импортира двигателя; Белот/Ludo/Свара-достъп непроменени спрямо 6859a06', () => {
+check('H2. клиентът не импортира двигателя; Белот/Ludo и авторизацията са непроменени (разрешен read-only preview)', () => {
   const projectRoot = join(here, '..', '..')
   const clientRefs: string[] = []
   function scan(directory: string) {
@@ -583,7 +583,15 @@ check('H2. клиентът не импортира двигателя; Бело
   }
   scan(join(projectRoot, 'src'))
   assert(clientRefs.length === 0, `client imports engine: ${clientRefs.join(', ')}`)
-  const changed = execFileSync('git', ['diff', '--name-only', '6859a06', '--', 'src/app/activeRoom', 'src/app/games/ludo', 'server/src/game', 'server/src/games/svara/svaraAccess.ts', 'server/src/games/svara/svaraFeatureFlag.ts', 'server/src/games/svara/handleSvaraHttpRequest.ts'], { cwd: projectRoot, encoding: 'utf8' }).trim()
+  const handlerPath = 'server/src/games/svara/handleSvaraHttpRequest.ts'
+  const baseline = execFileSync('git', ['show', `6859a06:${handlerPath}`], { cwd: projectRoot, encoding: 'utf8' }).replace(/\r\n/g, '\n')
+  // Permit ONLY the explicitly approved extra read-only success field/import.
+  // All status codes, role/flag checks, error bodies and headers stay identical.
+  const current = readFileSync(join(projectRoot, handlerPath), 'utf8').replace(/\r\n/g, '\n')
+    .replace("import { getSvaraTableCreationOptions } from './svaraTableCreationOptions.js'\n", '')
+    .replace(", creationOptions: getSvaraTableCreationOptions()", '')
+  assert(current === baseline, 'Svara HTTP authorization changed beyond the approved read-only preview')
+  const changed = execFileSync('git', ['diff', '--name-only', '6859a06', '--', 'src/app/activeRoom', 'src/app/games/ludo', 'server/src/game', 'server/src/games/svara/svaraAccess.ts', 'server/src/games/svara/svaraFeatureFlag.ts'], { cwd: projectRoot, encoding: 'utf8' }).trim()
   assert(changed === '', `changed: ${changed}`)
 })
 

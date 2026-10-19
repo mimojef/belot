@@ -167,7 +167,9 @@ try {
     assert.equal(timing.deadlines[0].deadlineAt, before.deadlines[0]!.deadlineAt, 'the original absolute dealing deadline must survive the restart')
     assert.equal(timing.deadlines[0].remainingMs, 1950)
     assert.deepEqual(f.saved(), before, 'restoring mid-dealing must not itself change state/revision')
-    assert.equal(f.saved().state.round?.dealing, true)
+    const restoredRound = f.saved().state.round
+    assert(restoredRound?.kind === 'ordinary')
+    assert.equal(restoredRound.dealing, true)
   })
   await check('expired dealing phase (while paused) finishes exactly once on boot; no repeated entry charge or re-deal', async () => {
     const t = await fixture(3, [], false)
@@ -176,7 +178,9 @@ try {
     const handsBefore = JSON.stringify((before.state.round as any).hands)
     const f = await boot(t, 10_000) // past the 3950ms dealing window while the process was down
     assert.equal(f.lobby.initializeRecovery(), 'ready')
-    assert.equal(f.saved().state.round?.dealing, false, 'dealing finishes deterministically once overdue at boot')
+    const restoredRound = f.saved().state.round
+    assert(restoredRound?.kind === 'ordinary')
+    assert.equal(restoredRound.dealing, false, 'dealing finishes deterministically once overdue at boot')
     assert.equal(JSON.stringify((f.saved().state.round as any).hands), handsBefore, 'no re-deal across the restart')
     assert.equal(f.saved().state.ledger.filter((e) => e.type === 'entry').length, entriesBefore, 'no repeated entry charge')
     assert.equal(f.saved().revision, before.revision + 1, 'exactly one committed finish-dealing transition')
@@ -332,7 +336,7 @@ try {
   await check('restored commitments protect disconnected profiles and reject new Svara admissions', async () => {
     const t = await fixture(), f = await boot(t); f.lobby.initializeRecovery(); f.lobby.disconnect('b')
     for (const profileId of ['a', 'b', 'c']) assert.equal(f.lobby.findCommitment(profileId)!.matchId, t.matchId)
-    f.lobby.handle('a', { type: 'create_svara_table', requestId: id(), capacity: 2, entryFee: 1000, startMode: 'auto' })
+    f.lobby.handle('a', { type: 'create_svara_table', requestId: id(), capacity: 2, entryFee: 5000, entryPercent: 1, startMode: 'auto' })
     assert.equal(f.frames.get('a')!.at(-1).code, 'svara_commitment')
   })
   await check('existing Belot/Ludo/tournament conflict fails Svara recovery without altering either game', async () => {
@@ -379,7 +383,7 @@ try {
       (s) => { s.state.round.hands.a[0] = s.state.round.hands.b[0] }, (s) => { s.state.round.betting.toAct = 'outsider' },
       (s) => { s.deadlines[0].playerId = 'a' }, (s) => { s.deadlines[0].roundId = 'other' },
       (s) => { s.deadlines[0].actionVersion++ }, (s) => { s.deadlines[0].key = 'bad' }, (s) => { s.deadlines = [] },
-      (s) => { Object.values(s.state.processedCommands)[0].fingerprint = '{}' },
+      (s) => { Object.values<{ fingerprint: string }>(s.state.processedCommands)[0]!.fingerprint = '{}' },
     ]
     for (const corrupt of corruptions) {
       const snapshot = structuredClone(original); corrupt(snapshot); const rt = createSvaraMatchRuntime()
@@ -493,7 +497,7 @@ try {
     process.env.SVARA_TEST_ENABLED = '1'
     const messages: any[] = []
     off.lobby.attachConnection('a', { profileId: 'a', getSession: () => ({ account: { role: 'admin' }, profile: { profileId: 'a' } }), send: (message) => messages.push(message) })
-    off.lobby.handle('a', { type: 'create_svara_table', requestId: id(), capacity: 2, entryFee: 1000, startMode: 'auto' })
+    off.lobby.handle('a', { type: 'create_svara_table', requestId: id(), capacity: 2, entryFee: 5000, entryPercent: 1, startMode: 'auto' })
     assert.equal(messages.at(-1).code, 'server_unavailable')
     const on = await createPersistentSvaraLobby({ databaseFilePath: path, hasOtherGameCommitment: () => false, onError: (e) => faults.push(e) })
     closes.push(() => { on.lobby.shutdown(); on.close() }); assert.equal(on.lobby.initializeRecovery(), 'failed'); assert.equal(faults.length, 1)

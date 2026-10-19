@@ -138,9 +138,12 @@ const fakeFetch = (status: number, body: unknown): typeof fetch =>
 await check('B3. fetchSvaraAccess: само 200 + {ok:true, access:"granted"} дава granted', async () => {
   assert(await fetchSvaraAccess('', fakeFetch(200, { ok: true, access: 'granted' })) === 'granted', '200 granted')
   assert(await fetchSvaraAccess('', fakeFetch(200, { ok: true })) === 'denied', '200 без access')
-  assert(await fetchSvaraAccess('', fakeFetch(403, { ok: true, access: 'granted' })) === 'denied', '403')
-  assert(await fetchSvaraAccess('', fakeFetch(401, {})) === 'denied', '401')
-  assert(await fetchSvaraAccess('', fakeFetch(404, {})) === 'denied', '404')
+  assert(await fetchSvaraAccess('', fakeFetch(403, { ok: true, access: 'granted' })) === 'forbidden', '403 cannot grant access even with a forged success body')
+  assert(await fetchSvaraAccess('', fakeFetch(401, {})) === 'unauthenticated', '401')
+  assert(await fetchSvaraAccess('', fakeFetch(404, {})) === 'unavailable', '404')
+  assert(await fetchSvaraAccess('', fakeFetch(500, {})) === 'denied', '500')
+  const invalidJson = (async () => new Response('invalid', { status: 200 })) as typeof fetch
+  assert(await fetchSvaraAccess('', invalidJson) === 'denied', 'malformed success remains closed')
   const throwingFetch = (async () => { throw new Error('network') }) as typeof fetch
   assert(await fetchSvaraAccess('', throwingFetch) === 'denied', 'network error → fail closed')
 })
@@ -196,6 +199,23 @@ await check('B7. renderSvaraPage: checking hides both mounts; granted exposes th
   }
 })
 
+await check('B8. отказите имат обяснение и retry/back, без игрови или демо mount (desktop + mobile)', () => {
+  const reasons = {
+    unauthenticated: 'Влез в профила си',
+    forbidden: 'няма разрешение',
+    unavailable: 'не е достъпна на този сървър',
+    denied: 'не завърши успешно',
+  } as const
+  for (const mobile of [false, true]) {
+    for (const reason of Object.keys(reasons) as (keyof typeof reasons)[]) {
+      const html = renderSvaraPage(reason, mobile)
+      assert(html.includes(`data-svara-page="${reason}"`) && html.includes(reasons[reason]), `${reason} explanation mobile=${mobile}`)
+      assert(html.includes('role="alert"') && html.includes('data-svara-play-button="1"') && html.includes('data-svara-back-to-games="1"'), `${reason} recovery actions`)
+      assert(!html.includes('data-svara-lobby-mount') && !html.includes('data-svara-demo-mount'), `${reason} must not mount game`)
+    }
+  }
+})
+
 // ─── C. Source-level ───────────────────────────────────────────────────────
 console.log('\n=== C. source-level ===')
 
@@ -215,7 +235,8 @@ await check('C1. клиентът задава svaraPageStatus="granted" сам�
   const resetIdx = block.indexOf("state.svaraPageStatus = 'checking'")
   assert(resetIdx !== -1 && resetIdx < fetchIdx, 'status трябва да се нулира до checking преди заявката')
   assert(fetchIdx !== -1 && fetchIdx < grantIdx && grantIdx < assignIdx, 'granted трябва да следва сървърния отговор')
-  assert(block.includes("history.replaceState(null, '', '/games')") && block.includes('showMoreGamesPage()'), 'отказ → обратно в Игри')
+  assert(block.includes('state.svaraPageStatus = result'), 'отказът трябва да се показва като сървърен резултат')
+  assert(!block.includes('history.replaceState') && !block.includes('showMoreGamesPage()'), 'отказът не трябва да пренасочва без обяснение')
 })
 
 await check('C2. /games/svara е регистриран в routing картите и navigateFromPath', () => {

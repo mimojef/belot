@@ -4,18 +4,36 @@
 //
 // status==='checking' рендира само неутрален loader — съдържанието се
 // показва едва при 'granted' (потвърдено от сървъра). При отказ
-// контролерът пренасочва към /games и тази страница не се рендира.
+// показва обяснение, без да монтира игровия интерфейс.
 
-export type SvaraPageStatus = 'checking' | 'granted'
+import type { SvaraAccessCheckResult } from './svaraAccess'
+
+export type SvaraPageStatus = 'checking' | SvaraAccessCheckResult
 export type SvaraViewMode = 'real' | 'demo'
 
 export function renderSvaraPage(status: SvaraPageStatus, useMobileLayout = false, viewMode: SvaraViewMode = 'real'): string {
   const padding = useMobileLayout ? '14px 12px 40px' : '28px 40px 60px'
 
-  if (status !== 'granted') {
+  if (status === 'checking') {
     return `
       <article data-svara-page="checking" style="padding:${padding};max-width:720px;box-sizing:border-box;">
         <div style="color:rgba(248,250,252,0.72);font-size:14px;font-weight:700;">Зареждане…</div>
+      </article>
+    `
+  }
+
+  if (status !== 'granted') {
+    const messages = {
+      unauthenticated: 'Влез в профила си, за да проверим тестовия ти достъп.',
+      forbidden: 'Този профил няма разрешение за тестов достъп до Свара.',
+      unavailable: 'Тестовата игра не е достъпна на този сървър.',
+      denied: 'Проверката за достъп не завърши успешно. Опитай отново.',
+    }
+    return `
+      <article data-svara-page="${status}" style="padding:${padding};max-width:720px;box-sizing:border-box;">
+        <p role="alert" style="color:#f8fafc;font-size:14px;">${messages[status]}</p>
+        <button type="button" data-svara-play-button="1">Опитай отново</button>
+        <a href="/games" data-svara-back-to-games="1" style="display:inline-block;margin:12px;color:#f5d06f;">← Обратно към Игри</a>
       </article>
     `
   }

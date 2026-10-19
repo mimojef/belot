@@ -22,7 +22,31 @@ export function canShowSvaraEntry(session: SvaraEntrySession): boolean {
   return session !== null && session.svaraTestAccess === true && isSvaraAllowedRole(session.account.role)
 }
 
-export type SvaraAccessCheckResult = 'granted' | 'denied'
+export type SvaraAccessCheckResult = 'granted' | 'denied' | 'unauthenticated' | 'forbidden' | 'unavailable'
+
+export type SvaraTableCreationOptions = {
+  entryPercent: 1
+  entries: Array<{ entryFee: number; startingChips: number; entryChips: number }>
+}
+
+/** Read-only server configuration; never guess an ante or use stale defaults. */
+export async function fetchSvaraTableCreationOptions(apiBaseUrl: string): Promise<SvaraTableCreationOptions | null> {
+  try {
+    const response = await fetch(`${apiBaseUrl}/api/games/svara/access`, { credentials: 'include', cache: 'no-store' })
+    if (response.status !== 200) return null
+    const body = await response.json()
+    const options = body.creationOptions as SvaraTableCreationOptions | undefined
+    if (body.ok !== true || body.access !== 'granted' || options?.entryPercent !== 1 || !Array.isArray(options.entries) || options.entries.length === 0) return null
+    const seen = new Set<number>()
+    for (const entry of options.entries) {
+      if (!entry || !Number.isSafeInteger(entry.entryFee) || entry.entryFee <= 0 || seen.has(entry.entryFee)
+        || !Number.isSafeInteger(entry.startingChips) || entry.startingChips * 10 !== entry.entryFee
+        || !Number.isSafeInteger(entry.entryChips) || entry.entryChips * 100 !== entry.startingChips) return null
+      seen.add(entry.entryFee)
+    }
+    return options
+  } catch { return null }
+}
 
 export async function fetchSvaraAccess(apiBaseUrl: string, fetchImpl: typeof fetch = fetch): Promise<SvaraAccessCheckResult> {
   try {
@@ -31,6 +55,9 @@ export async function fetchSvaraAccess(apiBaseUrl: string, fetchImpl: typeof fet
       credentials: 'include',
       cache: 'no-store',
     })
+    if (response.status === 401) return 'unauthenticated'
+    if (response.status === 403) return 'forbidden'
+    if (response.status === 404) return 'unavailable'
     if (response.status !== 200) return 'denied'
     const body = (await response.json()) as { ok?: unknown; access?: unknown }
     return body.ok === true && body.access === 'granted' ? 'granted' : 'denied'

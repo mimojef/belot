@@ -7,6 +7,7 @@ import type { SvaraClock } from './runtime/createSvaraLifecycle.js'
 export async function createPersistentSvaraLobby(deps: {
   databaseFilePath: string
   hasOtherGameCommitment: (profileId: string) => boolean
+  getPublicProfile?: (profileId: string) => { displayName: string; avatarUrl: string | null } | null
   onError?: (error: unknown) => void
   onAdmission?: (profileId: string) => void
   clock?: SvaraClock

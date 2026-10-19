@@ -12,6 +12,7 @@ import type {
   SvaraParticipantCommand,
   SvaraPublicTable,
   SvaraSeatStatus,
+  SvaraStartMode,
 } from '../../network/createGameServerClient'
 import { sharedServerClock } from '../../network/serverClock'
 import { playGameSound } from '../../audio/gameSoundSettings'
@@ -32,21 +33,33 @@ import { createSvaraLookAnimationTracker } from './table/svaraLookAnimationTrack
 import { computeSvaraDealingVisualState } from './table/svaraTableAnimation'
 import { playSvaraFoldVoice } from './table/svaraFoldVoice'
 import { getSvaraDecisionWindow, patchSvaraDecisionWindow } from './table/svaraDecisionWindows'
+import { fetchSvaraTableCreationOptions, type SvaraTableCreationOptions } from './svaraAccess'
+
+export type SvaraCreateDialogState = {
+  open: boolean
+  draft: { capacity: 2 | 3 | 4; entryFee: number; startMode: SvaraStartMode }
+  options: SvaraTableCreationOptions | null
+}
 
 type Options = {
   root: HTMLElement
   localProfileId: string
+  apiBaseUrl?: string
+  createDialogState?: SvaraCreateDialogState
   onRefresh: () => void
-  onCreate: (capacity: 2 | 3 | 4, entryFee: number) => void
+  onCreate: (capacity: 2 | 3 | 4, entryFee: number, startMode: SvaraStartMode) => void
   onJoin: (matchId: string) => void
   onLeave: (matchId: string) => void
   onStart: (matchId: string) => void
   onRequestTableState: (matchId: string) => void
+  onOpenProfile?: (profileId: string, displayName: string | null) => void
   /** Задание 2Б.3.7.4 §15 — реалните участнически команди (bet/fold/look/all-in/request-return/...). */
   onSubmitCommand: (matchId: string, commandId: string, expectedRevision: number, command: SvaraParticipantCommand) => void
 }
 
 const esc = (value: unknown) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[char]!)
+const amountFormatter = new Intl.NumberFormat('bg-BG', { useGrouping: 'always' })
+const formatAmount = (value: number): string => amountFormatter.format(value)
 
 const STATUS_LABEL: Record<SvaraSeatStatus, string> = {
   active: 'активен',
@@ -60,7 +73,13 @@ export function createSvaraLobbyController(options: Options) {
   let myTable: SvaraPublicTable | null = null
   let snapshot: SvaraMatchSnapshotMessage | null = null
   let timing: SvaraMatchTimingMessage | null = null
-  let createOpen = false
+  const dialogState: SvaraCreateDialogState = options.createDialogState ?? { open: false, draft: { capacity: 2, entryFee: 5000, startMode: 'auto' }, options: null }
+  let createOpen = dialogState.open
+  let createDialogElement: HTMLDialogElement | null = null
+  let creationOptions: SvaraTableCreationOptions | null = dialogState.options
+  let creationLoading = false
+  let creationRequest = 0
+  let createDraft = dialogState.draft
   let message = ''
   let leavePending = false
   let joinPendingMatchId: string | null = null
@@ -113,7 +132,7 @@ export function createSvaraLobbyController(options: Options) {
     const flashes = Array.from(options.root.querySelectorAll<HTMLElement>('[data-svara-bet-flash]'))
     const html = `<section data-svara-lobby="1" style="background:#030303;color:#fff;font-family:Arial,sans-serif;box-sizing:border-box;padding:clamp(10px,2.4vw,32px);overflow-x:hidden;">
       <div style="max-width:${isActiveTable ? '1100px' : '860px'};margin:0 auto;">
-        ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Нова маса</button></div>`}
+        ${myTable ? '' : `<div style="display:flex;justify-content:flex-end;margin-bottom:16px;"><button data-svara-create-open="1" style="${createButtonStyle}">+ Създай игра</button></div>`}
         ${message ? `<div style="margin-bottom:12px;color:#f4c95b;font-weight:700;">${esc(message)}</div>` : ''}
         ${body}
       </div>
@@ -137,6 +156,11 @@ export function createSvaraLobbyController(options: Options) {
       if (flash.dataset.svaraBetScope !== flashScope) continue
       options.root.querySelector(`[data-svara-seat-index="${Number(flash.dataset.svaraBetFlash)}"] [data-svara-seat-flash-mount]`)?.appendChild(flash)
     }
+    // CSS zoom also scales native top-layer elements while they remain under
+    // the lobby shell. Own this modal under body and remove it on every remount.
+    createDialogElement?.remove()
+    createDialogElement = options.root.querySelector<HTMLDialogElement>('dialog[data-svara-create-backdrop]')
+    if (createDialogElement) document.body.appendChild(createDialogElement)
     wire()
     ensureResultFrame()
   }
@@ -154,7 +178,8 @@ export function createSvaraLobbyController(options: Options) {
       <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;align-items:center;">
         <div>
           <strong>Маса ${esc(table.matchId.slice(0, 8))}</strong>
-          <div style="margin-top:6px;color:rgba(255,255,255,.62);font-size:13px;">${table.players.length}/${table.capacity} · Вход ${table.entryFee} жълтици (${table.entryPercent}%) · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>
+          <div style="margin-top:6px;color:rgba(255,255,255,.62);font-size:13px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>
+          ${tableAmountsHtml(table)}
         </div>
         <button data-svara-table-join="${esc(table.matchId)}" ${disabled ? 'disabled' : ''} style="${button}${disabled ? 'opacity:.55;cursor:not-allowed;' : ''}">${actionLabel}</button>
       </div>
@@ -171,9 +196,25 @@ export function createSvaraLobbyController(options: Options) {
     const player = table.players[index]
     if (!player) return `<div style="box-sizing:border-box;min-height:50px;border-radius:9px;border:1px dashed rgba(255,255,255,.14);background:rgba(255,255,255,.03);color:rgba(255,255,255,.35);font-size:12px;display:flex;align-items:center;justify-content:center;">Свободно място</div>`
     const isCreator = player.playerId === table.creatorId
-    return `<div style="box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:6px;border:1px solid rgba(255,255,255,.12);border-radius:9px;padding:8px 10px;">
-      <span style="font-weight:700;font-size:12px;overflow:hidden;text-overflow:ellipsis;">${esc(player.playerId.slice(0, 8))}${isCreator ? ' ★' : ''}</span>
-      <span style="font-size:11px;color:rgba(255,255,255,.55);">${STATUS_LABEL[player.status]}</span>
+    const displayName = player.displayName?.trim() || 'Профилът не е достъпен'
+    const avatar = player.avatarUrl
+      ? `<img data-svara-player-avatar="1" src="${esc(player.avatarUrl)}" alt="" draggable="false" style="width:100%;height:100%;object-fit:cover;display:block;" />`
+      : `<span data-svara-avatar-placeholder="1" aria-hidden="true">${esc(displayName.charAt(0).toUpperCase())}</span>`
+    return `<div data-svara-waiting-seat="${esc(player.playerId)}" style="box-sizing:border-box;display:flex;align-items:center;justify-content:space-between;gap:8px;min-width:0;border:1px solid rgba(255,255,255,.12);border-radius:9px;padding:8px 10px;">
+      <button type="button" data-svara-profile-id="${esc(player.playerId)}" aria-label="${esc(`Отвори профила на ${displayName}`)}" style="display:flex;align-items:center;gap:8px;flex:1;min-width:0;border:0;padding:0;background:transparent;color:inherit;text-align:left;cursor:pointer;font:inherit;">
+        <span style="width:34px;height:34px;flex:0 0 34px;border-radius:8px;overflow:hidden;display:flex;align-items:center;justify-content:center;background:#101010;border:1px solid rgba(212,165,32,.34);color:#d4a520;font-size:18px;font-weight:900;">${avatar}</span>
+        <span data-svara-player-name="1" title="${esc(displayName)}" style="font-weight:700;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(displayName)}</span>
+        ${isCreator ? '<span data-svara-creator="1" aria-label="Създател на масата" style="color:#f4c95b;flex-shrink:0;">★</span>' : ''}
+      </button>
+      <span data-svara-player-status="1" style="font-size:11px;color:rgba(255,255,255,.65);flex-shrink:0;">${STATUS_LABEL[player.status]}</span>
+    </div>`
+  }
+
+  function tableAmountsHtml(table: SvaraPublicTable): string {
+    const coin = '<img src="/assets/lobby/icon-coin.png" alt="" aria-hidden="true" style="width:17px;height:17px;display:block;object-fit:contain;flex:0 0 auto;" />'
+    return `<div style="display:grid;gap:5px;margin-top:7px;font-size:13px;line-height:1.4;">
+      <div data-svara-waiting-entry="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;">Вход: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee)} жълтици</span></span></div>
+      <div data-svara-waiting-prize="1" style="display:flex;align-items:center;gap:5px;flex-wrap:wrap;color:#f4c95b;">Тестова награда: <span style="display:inline-flex;align-items:center;gap:5px;">${coin}<span>${formatAmount(table.entryFee * table.capacity * 4 / 5)} жълтици</span></span><span style="font-size:11px;color:rgba(255,255,255,.65);">(Не се изплаща)</span></div>
     </div>`
   }
 
@@ -181,12 +222,12 @@ export function createSvaraLobbyController(options: Options) {
     const isHost = table.creatorId === options.localProfileId
     const canManualStart = table.startMode === 'manual' && table.players.length === table.capacity
     const slotsHtml = Array.from({ length: table.capacity }, (_, index) => seatSlotHtml(table, index)).join('')
-    return `<div style="${panel}">
-      <div style="display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
-        <div><strong>Чакаща маса</strong><div style="color:rgba(255,255,255,.62);margin-top:5px;font-size:13px;">${table.players.length}/${table.capacity} · Вход ${table.entryFee} жълтици · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div></div>
+    return `<div data-svara-waiting="1" style="${panel}">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:16px;">
+        <div style="min-width:0;"><strong>Чакаща маса</strong><div data-svara-waiting-capacity="1" style="color:rgba(255,255,255,.62);margin-top:5px;font-size:13px;">${table.players.length}/${table.capacity} · ${table.startMode === 'manual' ? 'Ръчен старт' : 'При запълване'}</div>${tableAmountsHtml(table)}</div>
         <button data-svara-table-leave="1" ${leavePending ? 'disabled' : ''} style="${button}${leavePending ? 'opacity:.55;cursor:wait;' : ''}">${leavePending ? 'Напускане…' : 'Напусни'}</button>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px;">${slotsHtml}</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(280px,100%),1fr));gap:8px;">${slotsHtml}</div>
       ${table.startMode === 'manual' && isHost ? `<button data-svara-table-start="1" ${canManualStart ? '' : 'disabled'} style="${button}width:100%;margin-top:16px;background:${canManualStart ? '#d4a520' : '#242424'};color:${canManualStart ? '#050505' : '#777'};cursor:${canManualStart ? 'pointer' : 'not-allowed'};">Старт</button>` : ''}
     </div>`
   }
@@ -414,17 +455,58 @@ export function createSvaraLobbyController(options: Options) {
   }
 
   function renderCreateModal(): string {
-    return `<div data-svara-create-backdrop="1" style="position:fixed;inset:0;background:rgba(0,0,0,.78);display:grid;place-items:center;padding:14px;z-index:2;"><form data-svara-create-form="1" style="${panel}width:min(100%,380px);max-width:100%;box-sizing:border-box;">
-      <h2 style="margin:0 0 18px;">Нова маса</h2>
-      <label style="display:grid;gap:7px;margin-bottom:14px;">Брой играчи<select name="capacity" style="width:100%;box-sizing:border-box;min-height:40px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;"><option value="2">2</option><option value="3">3</option><option value="4">4</option></select></label>
-      <label style="display:grid;gap:7px;margin-bottom:18px;">Такса за участие (жълтици)<input name="entryFee" type="number" min="10" step="10" value="1000" style="width:100%;box-sizing:border-box;min-height:40px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;" /></label>
-      <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" data-svara-create-close="1" style="${button}">Отказ</button><button type="submit" style="${button}background:#d4a520;color:#050505;">Създай</button></div>
-    </form></div>`
+    // Match Ludo's dialog dimensions/styles without changing its component.
+    const modalButton = `${button}min-height:42px;`
+    const selectStyle = 'width:100%;max-width:100%;min-width:0;box-sizing:border-box;min-height:42px;background:#111;color:#fff;border:1px solid #555;border-radius:7px;padding:0 10px;'
+    const entry = creationOptions?.entries.find((option) => option.entryFee === createDraft.entryFee)
+    const content = entry && creationOptions ? `<form data-svara-create-form="1">
+      <label style="display:grid;gap:7px;margin-bottom:14px;min-width:0;">Брой играчи<select name="capacity" style="${selectStyle}">${[2, 3, 4].map((count) => `<option value="${count}" ${count === createDraft.capacity ? 'selected' : ''}>${count}</option>`).join('')}</select></label>
+      <label style="display:grid;gap:7px;margin-bottom:14px;min-width:0;">Вход<select name="entryFee" style="${selectStyle}">${creationOptions.entries.map((option) => `<option value="${option.entryFee}" ${option.entryFee === createDraft.entryFee ? 'selected' : ''}>${formatAmount(option.entryFee)} жълтици</option>`).join('')}</select></label>
+      <div style="display:grid;gap:4px;margin:0 0 18px;font-size:13px;line-height:1.4;color:#f4c95b;" aria-live="polite">
+        <div data-svara-create-chips="1">Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа</div>
+        <div data-svara-create-ante="1">Анте за раздаване: ${formatAmount(entry.entryChips)} чипа</div>
+        <div data-svara-create-prize="1">Изчислена тестова награда: ${formatAmount(createDraft.entryFee * createDraft.capacity * 4 / 5)} жълтици (не се изплаща)</div>
+      </div>
+      <fieldset style="border:0;padding:0;margin:0 0 18px;display:grid;gap:10px;"><legend style="margin-bottom:8px;">Старт</legend><label><input type="radio" name="startMode" value="auto" ${createDraft.startMode === 'auto' ? 'checked' : ''}> При запълване</label><label><input type="radio" name="startMode" value="manual" ${createDraft.startMode === 'manual' ? 'checked' : ''}> Ръчен старт</label></fieldset>
+      <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" data-svara-create-close="1" style="${modalButton}">Отказ</button><button type="submit" style="${modalButton}background:#d4a520;color:#050505;">Създай</button></div>
+    </form>` : `<p role="status">${creationLoading ? 'Зареждане на настройките…' : 'Настройките за създаване не са достъпни. Опитай отново.'}</p>
+      <div style="display:flex;justify-content:flex-end;gap:8px;"><button type="button" data-svara-create-close="1" style="${modalButton}">Отказ</button>${creationLoading ? '' : `<button type="button" data-svara-create-retry="1" style="${modalButton}">Опитай отново</button>`}</div>`
+    return `<dialog data-svara-create-backdrop="1" aria-labelledby="svara-create-title" style="position:fixed;inset:0;margin:0;border:0;width:100vw;height:100dvh;max-width:none;max-height:none;box-sizing:border-box;background:rgba(0,0,0,.78);color:#fff;font-family:Arial,sans-serif;font-size:16px;display:grid;place-items:center;padding:14px;"><div data-svara-create-panel="1" style="${panel}width:min(100%,420px);max-width:100%;min-width:0;max-height:calc(100dvh - 28px);overflow-y:auto;box-sizing:border-box;">
+      <h2 id="svara-create-title" style="margin:0 0 18px;letter-spacing:0;">Създай игра</h2>${content}</div></dialog>`
+  }
+
+  async function loadCreationOptions(): Promise<void> {
+    const request = ++creationRequest
+    creationLoading = true
+    creationOptions = null
+    dialogState.options = null
+    render()
+    const result = await fetchSvaraTableCreationOptions(options.apiBaseUrl ?? '')
+    if (request !== creationRequest || !createOpen) return
+    creationOptions = result
+    dialogState.options = result
+    creationLoading = false
+    render()
   }
 
   function wire(): void {
-    options.root.querySelector('[data-svara-create-open]')?.addEventListener('click', () => { createOpen = true; render() })
-    options.root.querySelector('[data-svara-create-close]')?.addEventListener('click', () => { createOpen = false; render() })
+    const createDialog = createDialogElement
+    if (createDialog) {
+      if (!createDialog.open) createDialog.showModal()
+      createDialog.addEventListener('cancel', (event) => {
+        event.preventDefault()
+        dialogState.open = createOpen = false
+        creationRequest++
+        render()
+      })
+    }
+    options.root.querySelector('[data-svara-create-open]')?.addEventListener('click', () => {
+      dialogState.open = createOpen = true
+      dialogState.draft = createDraft = { capacity: 2, entryFee: 5000, startMode: 'auto' }
+      void loadCreationOptions()
+    })
+    createDialog?.querySelector('[data-svara-create-retry]')?.addEventListener('click', () => { void loadCreationOptions() })
+    createDialog?.querySelector('[data-svara-create-close]')?.addEventListener('click', () => { dialogState.open = createOpen = false; creationRequest++; render() })
     options.root.querySelectorAll<HTMLElement>('[data-svara-table-join]').forEach((el) => el.addEventListener('click', () => {
       const matchId = el.dataset.svaraTableJoin!
       if (joinPendingMatchId) return
@@ -436,11 +518,35 @@ export function createSvaraLobbyController(options: Options) {
     options.root.querySelector('[data-svara-table-leave]')?.addEventListener('click', () => requestExit())
     options.root.querySelector('[data-svara-table-start]')?.addEventListener('click', () => { if (myTable) options.onStart(myTable.matchId) })
     options.root.querySelector('[data-svara-table-refresh]')?.addEventListener('click', () => { if (myTable) options.onRequestTableState(myTable.matchId) })
-    options.root.querySelector<HTMLFormElement>('[data-svara-create-form]')?.addEventListener('submit', (event) => {
+    options.root.querySelectorAll<HTMLElement>('[data-svara-profile-id]').forEach((element) => element.addEventListener('click', () => {
+      const player = myTable?.players.find((participant) => participant.playerId === element.dataset.svaraProfileId)
+      if (player) options.onOpenProfile?.(player.playerId, player.displayName ?? null)
+    }))
+    const createForm = createDialog?.querySelector<HTMLFormElement>('[data-svara-create-form]')
+    createForm?.addEventListener('change', () => {
+      const data = new FormData(createForm)
+      const capacity = Number(data.get('capacity'))
+      const entry = creationOptions?.entries.find((option) => option.entryFee === Number(data.get('entryFee')))
+      if (!entry || (capacity !== 2 && capacity !== 3 && capacity !== 4)) return
+      dialogState.draft = createDraft = { capacity, entryFee: entry.entryFee, startMode: data.get('startMode') === 'manual' ? 'manual' : 'auto' }
+      const chips = createForm.querySelector('[data-svara-create-chips]')
+      const ante = createForm.querySelector('[data-svara-create-ante]')
+      const prize = createForm.querySelector('[data-svara-create-prize]')
+      if (chips) chips.textContent = `Получаваш: ${formatAmount(entry.startingChips)} виртуални чипа`
+      if (ante) ante.textContent = `Анте за раздаване: ${formatAmount(entry.entryChips)} чипа`
+      if (prize) prize.textContent = `Изчислена тестова награда: ${formatAmount(entry.entryFee * capacity * 4 / 5)} жълтици (не се изплаща)`
+    })
+    createForm?.addEventListener('submit', (event) => {
       event.preventDefault()
       const data = new FormData(event.currentTarget as HTMLFormElement)
-      createOpen = false
-      options.onCreate(Number(data.get('capacity')) as 2 | 3 | 4, Number(data.get('entryFee')))
+      const capacity = Number(data.get('capacity'))
+      const entryFee = Number(data.get('entryFee'))
+      const startMode = data.get('startMode')
+      if ((capacity !== 2 && capacity !== 3 && capacity !== 4) || !creationOptions?.entries.some((entry) => entry.entryFee === entryFee)
+        || (startMode !== 'auto' && startMode !== 'manual')) return
+      dialogState.open = createOpen = false
+      creationRequest++
+      options.onCreate(capacity, entryFee, startMode)
       render()
     })
     tableElementRef = options.root.querySelector<HTMLElement>('[data-svara-table="1"]')
@@ -500,6 +606,7 @@ export function createSvaraLobbyController(options: Options) {
   }
 
   render()
+  if (createOpen && !creationOptions) void loadCreationOptions()
   options.onRefresh()
   return {
     // Автоматично разпознаване на собствена маса от общия списък — покрива
@@ -568,6 +675,10 @@ export function createSvaraLobbyController(options: Options) {
     isInActiveMatch(): boolean { return myTable !== null && myTable.phase !== 'lobby' },
     requestExit,
     destroy() {
+      creationRequest++
+      createOpen = false
+      createDialogElement?.remove()
+      createDialogElement = null
       options.root.removeEventListener('click', handleDecisionClick)
       if (resultFrame !== null) { cancelAnimationFrame(resultFrame); resultFrame = null }
       if (tickTimer !== null) { clearInterval(tickTimer); tickTimer = null }

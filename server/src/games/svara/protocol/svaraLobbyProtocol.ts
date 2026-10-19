@@ -2,6 +2,7 @@ import type { SvaraEntryPercent, SvaraStartMode } from '../engine/svaraMatch.js'
 import type { SvaraParticipantCommand } from '../runtime/svaraMatchRuntime.js'
 import type { SvaraDeadlineKind } from '../runtime/svaraDeadlines.js'
 import type { SvaraMatchSnapshotMessage, SvaraPublicTable } from './svaraSnapshotProtocol.js'
+import { isSvaraTestEntryFee, SVARA_TEST_ENTRY_PERCENT } from '../svaraTableCreationOptions.js'
 export type { SvaraPublicTable } from './svaraSnapshotProtocol.js'
 
 export type SvaraLobbyClientMessage =
@@ -75,10 +76,10 @@ export function parseSvaraLobbyMessage(input: Record<string, unknown>): SvaraLob
   if (!validId(input.requestId)) return null
   if (input.type === 'create_svara_table') {
     if (input.capacity !== 2 && input.capacity !== 3 && input.capacity !== 4) return null
-    if (typeof input.entryFee !== 'number' || !Number.isSafeInteger(input.entryFee) || input.entryFee <= 0 || input.entryFee % 10 !== 0) return null
+    if (!isSvaraTestEntryFee(input.entryFee)) return null
     if (input.startMode !== 'auto' && input.startMode !== 'manual') return null
-    const entryPercent = input.entryPercent === undefined ? 1 : input.entryPercent
-    if (entryPercent !== 1 && entryPercent !== 2 && entryPercent !== 3 && entryPercent !== 5) return null
+    if (input.entryPercent !== undefined && input.entryPercent !== SVARA_TEST_ENTRY_PERCENT) return null
+    const entryPercent = SVARA_TEST_ENTRY_PERCENT
     return { type: input.type, requestId: input.requestId, capacity: input.capacity, entryFee: input.entryFee, entryPercent, startMode: input.startMode }
   }
   if (input.type === 'join_svara_table' || input.type === 'leave_svara_table' || input.type === 'start_svara_table') {

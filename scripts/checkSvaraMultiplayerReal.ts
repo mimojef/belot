@@ -22,8 +22,10 @@ const reports: Array<{ scenario: string; status: string; transport: string; deta
 let current = '', passed = 0, failed = 0
 const selection = process.argv.filter((arg) => arg.startsWith('--scenario=')).map((arg) => arg.slice('--scenario='.length))
 console.log('Svara 2B.3.7.8B — real multiplayer sessions (no scenario retries)')
-await runNode(root, ['node_modules/typescript/bin/tsc', '-p', 'server/tsconfig.json'])
-await runNode(root, ['node_modules/vite/bin/vite.js', 'build'])
+if (!process.argv.includes('--skip-build')) {
+  await runNode(root, ['node_modules/typescript/bin/tsc', '-p', 'server/tsconfig.json'])
+  await runNode(root, ['node_modules/vite/bin/vite.js', 'build'])
+}
 const browser = await chromium.launch({ headless: true, args: ['--host-resolver-rules=MAP *.localhost 127.0.0.1', '--no-proxy-server'] })
 
 async function scenario(label: string, count: 2 | 3 | 4, run: (session: Awaited<ReturnType<typeof game>>) => Promise<void>) {
@@ -207,7 +209,8 @@ async function game(count: 2 | 3 | 4) {
     await backend!.queueDecks(decks)
     await peers[0]!.page.click('[data-svara-create-open]')
     await peers[0]!.page.selectOption('[data-svara-create-form] select[name="capacity"]', String(count))
-    await peers[0]!.page.fill('[data-svara-create-form] input[name="entryFee"]', '1000')
+    await peers[0]!.page.selectOption('[data-svara-create-form] select[name="entryFee"]', '5000')
+    await peers[0]!.page.check('[data-svara-create-form] input[name="startMode"][value="manual"]')
     await peers[0]!.page.click('[data-svara-create-form] button[type="submit"]')
     await wait('real created table', () => !!peers[0]!.frames.findLast((f) => f.type === 'svara_table_updated'), 5000)
     matchId = peers[0]!.frames.findLast((f) => f.type === 'svara_table_updated')!.table.matchId
@@ -220,7 +223,7 @@ async function game(count: 2 | 3 | 4) {
     assert.equal(initial.state.ledger.filter((e) => e.type === 'entry').length, count)
     for (const p of peers) {
       assert.equal(initial.state.entryChips, 5)
-      assert.equal(initial.state.stacks[p.id], 95); assert.equal(r.contributions[p.id], 5)
+      assert.equal(initial.state.stacks[p.id], 495); assert.equal(r.contributions[p.id], 5)
       assert.equal(await p.page.locator('[data-svara-action-button]').count(), 0)
     }
   }
@@ -300,7 +303,7 @@ async function game(count: 2 | 3 | 4) {
     const final = stored().state
     assert.equal(final.phase, 'finished', 'One deal is not a completed match')
     assert.equal(final.lockedPots.length, 0); assert.equal(final.carried.length, 0)
-    assert.equal(Object.values(final.stacks).reduce((a, b) => a + b, 0) + final.removedChips, count * 100)
+    assert.equal(Object.values(final.stacks).reduce((a, b) => a + b, 0) + final.removedChips, count * 500)
     return final
   }
   async function close() {
@@ -464,13 +467,13 @@ try {
     assert.equal(g.stored().state.history.length, 1)
     const final = await g.allInToEnd()
     assert.equal(final.winnerId, g.peers[0]!.id)
-    assert.equal(final.stacks[final.winnerId!], count * 100)
+    assert.equal(final.stacks[final.winnerId!], count * 500)
     await g.leave({ delayed: count === 2, concurrent: count === 4 })
   })
   await scenario('2 players: simultaneous finished exit releases runtime and preserves archive', 2, async (g) => {
     await g.start([g.deck(['AS KS QS', 'AH 8D 9C'])])
     const final = await g.allInToEnd()
-    assert.equal(final.stacks[g.peers[0]!.id], 200)
+    assert.equal(final.stacks[g.peers[0]!.id], 1000)
     await g.leave({ concurrent: true })
   })
   for (const attempt of [1, 2, 3]) await scenario(`2 players: reconnect during betting preserves active Svara view, independent session ${attempt}`, 2, async (g) => {
@@ -498,7 +501,10 @@ try {
     const before = g.stored()
     g.revokeAccess(g.peers[1]!)
     await g.reconnect(g.peers[1]!, false, false)
-    await wait('server access rejection removes Svara view', () => new URL(g.peers[1]!.page.url()).pathname === '/games', 5000)
+    await g.peers[1]!.page.locator('[data-svara-page="forbidden"]').waitFor({ timeout: 5000 })
+    assert.equal(new URL(g.peers[1]!.page.url()).pathname, '/games/svara', 'Access rejection must explain the reason without a silent redirect')
+    assert.equal(await g.peers[1]!.page.locator('[data-svara-lobby-mount], [data-svara-demo-mount], [data-svara-table]').count(), 0, 'Access rejection retained the previous game view')
+    assert((await g.peers[1]!.page.locator('[role="alert"]').textContent())!.includes('няма разрешение'))
     assert.deepEqual(g.stored(), before, 'Access rejection mutated the match')
   })
   await scenario('2 players: reconnect across an expired turn cannot restart its server deadline', 2, async (g) => {
@@ -514,7 +520,7 @@ try {
     assert.equal(after.state.round.record.roundId, oldRound)
     assert(after.state.round.record.folded.includes(timedOut.id))
     assert.equal(after.state.status[timedOut.id], 'absent')
-    assert.deepEqual(g.peers.map((p) => after.state.stacks[p.id]), [95, 105])
+    assert.deepEqual(g.peers.map((p) => after.state.stacks[p.id]), [495, 505])
     assert(!after.deadlines.some((d) => d.kind === 'turn' && d.deadlineAt === deadline.deadlineAt), 'Expired turn deadline remained live')
     assert.equal(after.state.ledger.filter((e) => e.type === 'pot-award' && e.roundId === oldRound).length, 1, 'Timeout award repeated')
     await wait('real reveal window closes into presence wait', () => g.stored().deadlines.some((d) => d.kind === 'presence-wait'), 9000)
@@ -620,18 +626,18 @@ try {
     await g.start([g.deck(warmup), g.deck(allinTie ? tie : decided, 1), ...(allinTie ? [g.deck(decided, -1)] : [])])
     await g.betting(); await g.action('look'); await g.action('x4'); await g.action('pay'); await g.action('fold'); await g.action('fold')
     await g.results(); await g.betting()
-    assert.deepEqual(g.peers.map((p) => g.stored().state.stacks[p.id]), [90, 130, 70, 90])
+    assert.deepEqual(g.peers.map((p) => g.stored().state.stacks[p.id]), [490, 530, 470, 490])
     for (let i = 0; i < 4; i++) {
       if (!g.snapshot(g.actor()).you.looked) await g.action('look')
       await g.action('all-in')
     }
     const settled = g.stored(), round = settled.state.round
     assert(round?.kind === 'showdown-display')
-    assert.deepEqual(round.record!.pots.map((p) => p.amount), [300, 60, 40])
+    assert.deepEqual(round.record!.pots.map((p) => p.amount), [1900, 60, 40])
     assert.deepEqual(round.record!.pots.map((p) => p.eligible.length), [4, 3, 1])
     assert.equal(round.record!.pots[2]!.outcome.kind, 'uncalled-return')
     if (allinTie) {
-      assert.deepEqual(settled.state.lockedPots.map((p) => [p.kind, p.amount]), [['allin', 300], ['allin', 60]])
+      assert.deepEqual(settled.state.lockedPots.map((p) => [p.kind, p.amount]), [['allin', 1900], ['allin', 60]])
       for (const p of g.peers) {
         assert.equal(await p.page.locator('[data-svara-decision-window="joining"]').count(), 0)
         assert.equal(await p.page.locator('[data-svara-tie]').count(), 1)
@@ -641,16 +647,16 @@ try {
       assert(display?.kind === 'showdown-display')
       assert.equal(resolved.state.history.at(-1)!.kind, 'allin-svara')
       assert.equal(resolved.state.lockedPots.length, 0)
-      assert.deepEqual(display.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[300, g.peers[2]!.id], [60, g.peers[0]!.id]])
+      assert.deepEqual(display.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[1900, g.peers[2]!.id], [60, g.peers[0]!.id]])
     } else {
       assert.equal(settled.state.lockedPots.length, 0)
-      assert.deepEqual(round.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[300, g.peers[2]!.id], [60, g.peers[0]!.id]])
+      assert.deepEqual(round.payoutSteps.map((p) => [p.amount, p.winners[0]]), [[1900, g.peers[2]!.id], [60, g.peers[0]!.id]])
     }
     await g.queue([g.deck(['AH 8D 9C', 'AD 8H 9S', 'AS KS QS', 'AC 10D JS'], 2, [0, 1, 2])])
     await g.results({ showdownReconnect: g.peers[2], payoutReconnect: g.peers[0] })
     assert.equal(g.stored().state.removedChips, 0)
     const final = await g.allInToEnd()
-    assert.equal(final.stacks[g.peers[2]!.id], 400)
+    assert.equal(final.stacks[g.peers[2]!.id], 2000)
     await g.leave()
   })
   for (const timeout of [false, true]) await scenario(`4 players: ordinary Svara, paid join, ${timeout ? '15-second timeout' : 'decline'}, reconnect and settlement`, 4, async (g) => {
@@ -699,7 +705,7 @@ try {
     assert.equal(paid.state.ledger.filter((e) => e.type === 'svara-join-fee').length, 1)
     await g.queue([g.deck(resolved, 1)])
     await g.results({ payoutReconnect: candidate })
-    const final = await g.allInToEnd(); assert.equal(final.stacks[g.peers[0]!.id], 400)
+    const final = await g.allInToEnd(); assert.equal(final.stacks[g.peers[0]!.id], 2000)
     await g.leave()
   })
 } catch { process.exitCode = 1 }

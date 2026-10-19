@@ -4139,6 +4139,7 @@ let matchmakingCapacityRetryAt = 0
 const socketRegistry = new Map<ConnectionId, WebSocket>()
 const svaraService = await createPersistentSvaraLobby({
   databaseFilePath: databaseBootstrap.databaseFilePath,
+  getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
   hasOtherGameCommitment: (profileId) =>
     isProfileInActiveGame(profileId) || findProfileInGameSession(profileId) !== null ||
     findActiveBelotCommitment(profileId) !== null || findActiveLudoCommitment(profileId) !== null ||
