@@ -26,6 +26,14 @@ export type BackgroundJobName =
   | 'lobbyChatPoll'
   | 'monitoringHistoryPersist'
   | 'monitoringHistoryPurge'
+  // Tournament/persistence hot-path разбивка (performance audit Phase 0) —
+  // пак фиксиран, краен списък; всяко поле е count/total/max на измерени ms.
+  | 'tournamentCoordinatorSql'
+  | 'tournamentCoordinatorMatch'
+  | 'tournamentCoordinatorCommitRoom'
+  | 'tournamentDetailBuild'
+  | 'roomSnapshotStringify'
+  | 'roomSnapshotWrite'
 
 const JOB_NAMES: readonly BackgroundJobName[] = [
   'matchmakingTick',
@@ -36,6 +44,12 @@ const JOB_NAMES: readonly BackgroundJobName[] = [
   'lobbyChatPoll',
   'monitoringHistoryPersist',
   'monitoringHistoryPurge',
+  'tournamentCoordinatorSql',
+  'tournamentCoordinatorMatch',
+  'tournamentCoordinatorCommitRoom',
+  'tournamentDetailBuild',
+  'roomSnapshotStringify',
+  'roomSnapshotWrite',
 ]
 
 export type BackgroundJobStat = {

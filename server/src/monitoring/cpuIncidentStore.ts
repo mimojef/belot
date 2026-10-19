@@ -119,10 +119,13 @@ function sumBackgroundJobStats(snapshots: BackgroundJobStatsSnapshot[]): Backgro
   const result = emptyBackgroundJobStatsSnapshot()
   for (const snap of snapshots) {
     for (const name of Object.keys(result) as Array<keyof BackgroundJobStatsSnapshot>) {
-      result[name].count += snap[name].count
-      result[name].totalDurationMs += snap[name].totalDurationMs
-      if (snap[name].maxDurationMs > result[name].maxDurationMs) {
-        result[name].maxDurationMs = snap[name].maxDurationMs
+      // Защитно: snapshot без по-ново добавено job име се брои като 0.
+      const stat = snap[name] as BackgroundJobStatsSnapshot[typeof name] | undefined
+      if (stat === undefined) continue
+      result[name].count += stat.count
+      result[name].totalDurationMs += stat.totalDurationMs
+      if (stat.maxDurationMs > result[name].maxDurationMs) {
+        result[name].maxDurationMs = stat.maxDurationMs
       }
     }
   }

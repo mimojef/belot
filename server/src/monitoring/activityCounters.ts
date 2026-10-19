@@ -62,6 +62,17 @@ export type TournamentActivityCounters = {
   tournamentMatchResult: number
   tournamentForceRemoveTeam: number
   tournamentForceRemoveEntry: number
+  // Performance audit Phase 0 — tournament hot-path броячи (без IDs).
+  tournamentDetailRequests: number
+  coordinatorSqlStatements: number
+  coordinatorCommitRooms: number
+  coordinatorSkippedUnchangedCommits: number
+  coordinatorProcessedMatches: number
+  coordinatorProfileLookups: number
+  coordinatorNotifyAssignments: number
+  assignmentLookupIndexHit: number
+  assignmentLookupNoMatch: number
+  assignmentLookupLegacy: number
 }
 
 // WS message.type / HTTP category — bounded enums от протокола/класификатора.
@@ -125,6 +136,16 @@ const TOURNAMENT_KEYS: Array<keyof TournamentActivityCounters> = [
   'tournamentMatchResult',
   'tournamentForceRemoveTeam',
   'tournamentForceRemoveEntry',
+  'tournamentDetailRequests',
+  'coordinatorSqlStatements',
+  'coordinatorCommitRooms',
+  'coordinatorSkippedUnchangedCommits',
+  'coordinatorProcessedMatches',
+  'coordinatorProfileLookups',
+  'coordinatorNotifyAssignments',
+  'assignmentLookupIndexHit',
+  'assignmentLookupNoMatch',
+  'assignmentLookupLegacy',
 ]
 
 type ScalarCounters = ChatActivityCounters &
@@ -174,6 +195,9 @@ export type ActivityCounters = {
   incrementGame(key: keyof GameActivityCounters): void
   incrementRooms(key: keyof RoomsActivityCounters): void
   incrementTournament(key: keyof TournamentActivityCounters): void
+  // Като incrementTournament, но с произволна неотрицателна стойност (напр.
+  // брой SQL statement-и за един coordinator tick).
+  addTournament(key: keyof TournamentActivityCounters, amount: number): void
   incrementWsInbound(messageType: string): void
   incrementWsOutbound(messageType: string): void
   incrementHttpCategory(category: string): void
@@ -231,6 +255,12 @@ export function createActivityCounters(): ActivityCounters {
     incrementTournament(key) {
       incrementBoth((w) => {
         w.scalars[key] += 1
+      })
+    },
+    addTournament(key, amount) {
+      if (!Number.isFinite(amount) || amount <= 0) return
+      incrementBoth((w) => {
+        w.scalars[key] += amount
       })
     },
     incrementWsInbound(messageType) {

@@ -203,6 +203,12 @@ export type BackgroundJobName =
   | 'lobbyChatPoll'
   | 'monitoringHistoryPersist'
   | 'monitoringHistoryPurge'
+  | 'tournamentCoordinatorSql'
+  | 'tournamentCoordinatorMatch'
+  | 'tournamentCoordinatorCommitRoom'
+  | 'tournamentDetailBuild'
+  | 'roomSnapshotStringify'
+  | 'roomSnapshotWrite'
 
 export type BackgroundJobStat = {
   count: number

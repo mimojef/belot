@@ -73,6 +73,12 @@ const BACKGROUND_JOB_LABELS: Record<BackgroundJobName, string> = {
   lobbyChatPoll: 'Lobby chat poll',
   monitoringHistoryPersist: 'Monitoring history запис',
   monitoringHistoryPurge: 'Monitoring history purge',
+  tournamentCoordinatorSql: 'Coordinator SQL',
+  tournamentCoordinatorMatch: 'Coordinator мач',
+  tournamentCoordinatorCommitRoom: 'Coordinator commitRoom',
+  tournamentDetailBuild: 'Tournament detail',
+  roomSnapshotStringify: 'Room snapshot JSON',
+  roomSnapshotWrite: 'Room snapshot запис',
 }
 
 const BACKGROUND_JOB_ORDER: BackgroundJobName[] = [
@@ -84,6 +90,12 @@ const BACKGROUND_JOB_ORDER: BackgroundJobName[] = [
   'lobbyChatPoll',
   'monitoringHistoryPersist',
   'monitoringHistoryPurge',
+  'tournamentCoordinatorSql',
+  'tournamentCoordinatorMatch',
+  'tournamentCoordinatorCommitRoom',
+  'tournamentDetailBuild',
+  'roomSnapshotStringify',
+  'roomSnapshotWrite',
 ]
 
 // Evidence-only рендер — НЕ добавя интерпретация/причинност (напр. "Matchmaking
@@ -102,7 +114,9 @@ function renderBackgroundJobsEvidence(
   const jobSpans = backgroundJobs === null
     ? `<span style="color:rgba(255,255,255,0.35);">—</span>`
     : BACKGROUND_JOB_ORDER.map((name) => {
-        const stat = backgroundJobs[name]
+        // По-стари записани incidents нямат по-новите job имена — показват се
+        // като 0x, вместо да чупят рендера.
+        const stat = backgroundJobs[name] ?? { count: 0, totalDurationMs: 0, maxDurationMs: 0 }
         const label = BACKGROUND_JOB_LABELS[name]
         if (stat.count === 0) {
           return `<span>${esc(label)}: <strong style="color:rgba(255,255,255,0.5);">0x</strong></span>`
@@ -255,7 +269,7 @@ function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) 
     }
     const bgSummary = BACKGROUND_JOB_ORDER
       .map((name) => ({ name, stat: c.backgroundJobs[name] }))
-      .filter(({ stat }) => stat.count > 0)
+      .filter(({ stat }) => stat !== undefined && stat.count > 0)
       .map(({ name, stat }) => `${BACKGROUND_JOB_LABELS[name]} ${stat.count}x/общо ${stat.totalDurationMs.toFixed(0)}мс/макс.${stat.maxDurationMs.toFixed(0)}мс`)
       .join(', ') || '0x'
     const gcSummary = c.gc.available

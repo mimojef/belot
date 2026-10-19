@@ -68,8 +68,15 @@ function parseRoomSnapshot(row: ActiveRoomSnapshotRow): ServerRoom | null {
   }
 }
 
+export type ActiveRoomSnapshotStoreOptions = {
+  // Monitoring-only, best-effort — продължителност на JSON.stringify и на
+  // самия SQLite UPSERT за всеки upsertRoom. Никога не влияе на записа.
+  onUpsertTiming?: (timing: { stringifyMs: number; writeMs: number }) => void
+}
+
 export async function createActiveRoomSnapshotStore(
   databaseFilePath: string,
+  options: ActiveRoomSnapshotStoreOptions = {},
 ): Promise<ActiveRoomSnapshotStore> {
   const sqliteModule = await import('node:sqlite')
   const database: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, {
@@ -157,16 +164,30 @@ export async function createActiveRoomSnapshotStore(
       return
     }
 
+    const stringifyStartedAt = performance.now()
+    const snapshotJson = JSON.stringify(room)
+    const writeStartedAt = performance.now()
     upsertRoomStatement.run(
       room.id,
       ACTIVE_ROOM_SNAPSHOT_VERSION,
       room.status,
       room.game.phase,
       room.game.stateVersion,
-      JSON.stringify(room),
+      snapshotJson,
       room.status,
       room.status,
     )
+    if (options.onUpsertTiming !== undefined) {
+      const writeFinishedAt = performance.now()
+      try {
+        options.onUpsertTiming({
+          stringifyMs: writeStartedAt - stringifyStartedAt,
+          writeMs: writeFinishedAt - writeStartedAt,
+        })
+      } catch {
+        // monitoring hook — никога не влияе на persistence-а
+      }
+    }
   }
 
   function markRoomRemoved(roomId: string): void {

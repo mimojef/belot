@@ -945,6 +945,14 @@ const botCatalogImport = await importBotProfilesCatalog(
 )
 const activeRoomSnapshotStore = await createActiveRoomSnapshotStore(
   databaseBootstrap.databaseFilePath,
+  {
+    // Monitoring-only (performance audit Phase 0) — цената на всеки room
+    // snapshot UPSERT, разделена на JSON.stringify и SQLite запис.
+    onUpsertTiming: ({ stringifyMs, writeMs }) => {
+      backgroundJobMetrics.record('roomSnapshotStringify', stringifyMs)
+      backgroundJobMetrics.record('roomSnapshotWrite', writeMs)
+    },
+  },
 )
 // Belot hand журнал (диагностика на всяко раздаване, вкл. „Долу картите“) —
 // отделна SQLite база в server/database/diagnostics/. Неуспешно отваряне не
@@ -14500,6 +14508,13 @@ function sendTournamentPartnerInviteResolved(invite: {
 }
 
 function buildTournamentDetailDto(tournament: TournamentRecord, viewerProfileId: string | null) {
+  // Monitoring-only (performance audit Phase 0) — цената на целия detail DTO.
+  return backgroundJobMetrics.recordSync('tournamentDetailBuild', () =>
+    buildTournamentDetailDtoUnmeasured(tournament, viewerProfileId),
+  )
+}
+
+function buildTournamentDetailDtoUnmeasured(tournament: TournamentRecord, viewerProfileId: string | null) {
   tournamentEconomyStore.expireDuePartnerInvitesAtomically(tournament.tournamentId)
   const entries = tournamentStore.getEntriesForTournament(tournament.tournamentId)
   const teams = tournamentStore.getTeamsForTournament(tournament.tournamentId)
@@ -15068,6 +15083,7 @@ async function handleTournamentDetailRequest(
     }
   }
 
+  activityCounters.incrementTournament('tournamentDetailRequests')
   sendJsonResponse(res, 200, {
     ok: true,
     tournament: buildTournamentDetailDto(tournament, viewerProfileId),

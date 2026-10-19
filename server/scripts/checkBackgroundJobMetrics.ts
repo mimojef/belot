@@ -17,11 +17,11 @@ function assertEqual<T>(actual: T, expected: T, label: string): void {
   assert(actual === expected, `${label} (got ${String(actual)}, expected ${String(expected)})`)
 }
 
-console.log('\n[1] emptyBackgroundJobStatsSnapshot — all 8 named jobs start at zero')
+console.log('\n[1] emptyBackgroundJobStatsSnapshot — all 14 named jobs start at zero')
 {
   const snap = emptyBackgroundJobStatsSnapshot()
   const names = Object.keys(snap)
-  assertEqual(names.length, 8, 'exactly 8 fixed-cardinality job names, no dynamic registry')
+  assertEqual(names.length, 14, 'exactly 14 fixed-cardinality job names, no dynamic registry')
   for (const name of names) {
     const stat = snap[name as keyof typeof snap]
     assertEqual(stat.count, 0, `${name}.count starts at 0`)
