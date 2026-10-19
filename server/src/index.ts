@@ -26815,10 +26815,13 @@ try {
     databaseFilePath: databaseBootstrap.databaseFilePath,
     intervalMs: localTournamentTestPollIntervalMs,
     getPublicProfile: (profileId) => playerProgressStore.getPublicProfile(profileId),
+    getPublicProfiles: (profileIds) => playerProgressStore.getPublicProfilesByIds(profileIds),
     getRoom: (roomId) => serverState.rooms[roomId] ?? null,
     commitRoom: (room) => {
-      serverState = commitServerRoomWithSnapshot(room)
-      broadcastRoomSnapshots(room, socketRegistry)
+      backgroundJobMetrics.recordSync('tournamentCoordinatorCommitRoom', () => {
+        serverState = commitServerRoomWithSnapshot(room)
+        broadcastRoomSnapshots(room, socketRegistry)
+      })
     },
     // Извиква се веднага след commitRoom(finishedRoom) при completed турнирен
     // мач (walkover или нормално изигран) — премахва runtime стаята
@@ -26890,6 +26893,29 @@ try {
       activityCounters.incrementTournament('tournamentMatchResult')
     },
     onTickTiming: (durationMs) => backgroundJobMetrics.record('tournamentCoordinatorTick', durationMs),
+    // Performance audit Phase 0 — разбивка на tick-а към CPU incident /
+    // admin monitoring контекста (bounded, без IDs).
+    onTickMetrics: (metrics) => {
+      backgroundJobMetrics.record('tournamentCoordinatorSql', metrics.sqlMs)
+      for (const matchDurationMs of metrics.matchDurationsMs) {
+        backgroundJobMetrics.record('tournamentCoordinatorMatch', matchDurationMs)
+      }
+      activityCounters.addTournament('coordinatorSqlStatements', metrics.sqlStatements)
+      activityCounters.addTournament('coordinatorCommitRooms', metrics.commitRooms)
+      activityCounters.addTournament('coordinatorSkippedUnchangedCommits', metrics.skippedUnchangedCommits)
+      activityCounters.addTournament('coordinatorProcessedMatches', metrics.processedMatches)
+      activityCounters.addTournament('coordinatorProfileLookups', metrics.profileLookups + metrics.profileBatchLookups)
+      activityCounters.addTournament('coordinatorNotifyAssignments', metrics.notifyAssignments)
+    },
+    onAssignmentLookup: (outcome) => {
+      activityCounters.incrementTournament(
+        outcome === 'index_hit'
+          ? 'assignmentLookupIndexHit'
+          : outcome === 'no_match'
+            ? 'assignmentLookupNoMatch'
+            : 'assignmentLookupLegacy',
+      )
+    },
   })
   tournamentCoordinator.start()
   console.log('[tournament-coordinator] Coordinator started')

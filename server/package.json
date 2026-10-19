@@ -118,6 +118,7 @@
     "check:tournament-concurrency": "tsx scripts/checkTournamentConcurrency.ts",
     "check:tournament-scheduler-start": "tsx scripts/checkTournamentSchedulerStart.ts",
     "check:tournament-coordinator-source": "tsx scripts/checkTournamentCoordinatorSource.ts",
+    "check:tournament-coordinator-cost": "tsx scripts/checkTournamentCoordinatorCost.ts",
     "check:tournament-stage8-behavior": "tsx scripts/checkTournamentStage8Behavior.ts",
     "check:tournament-settlement-behavior": "tsx scripts/checkTournamentSettlementBehavior.ts",
     "check:tournament-finished-list-ui": "tsx scripts/checkTournamentFinishedListUi.ts",

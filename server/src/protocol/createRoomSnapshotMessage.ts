@@ -1,4 +1,4 @@
-import { SERVER_SEAT_ORDER, type Seat, type ServerRoom } from '../core/serverTypes.js'
+import { SERVER_SEAT_ORDER, type Seat, type ServerRoom, type TournamentAttendanceSnapshot } from '../core/serverTypes.js'
 import { getValidServerBidActions } from '../game/getValidServerBidActions.js'
 import { getServerValidPlayCards } from '../game/getServerValidPlayCards.js'
 import { getServerHumanTurnTimeoutMsForPhase } from '../game/serverTimerStateHelpers.js'
@@ -429,6 +429,30 @@ function createGameSnapshot(
   }
 }
 
+// Performance audit Phase 1A — времевите полета на tournament attendance
+// snapshot-а (serverNow/secondsRemaining/startSecondsRemaining) се
+// изчисляват в момента на ИЗПРАЩАНЕ от абсолютните deadlineAt/gameStartAt,
+// със същата формула като tournamentCoordinator.createAttendanceSnapshot.
+// Така snapshot, изпратен от gameplay broadcast (а не от coordinator commit),
+// не носи остарял serverNow от persist-натия room.config.
+export function deriveTournamentAttendanceForSend(
+  attendance: TournamentAttendanceSnapshot | null | undefined,
+  nowMs: number,
+): TournamentAttendanceSnapshot | null {
+  if (attendance === null || attendance === undefined) return null
+  const secondsUntil = (iso: string | null): number => {
+    if (iso === null) return 0
+    const targetMs = Date.parse(iso)
+    return Number.isFinite(targetMs) ? Math.max(0, Math.ceil((targetMs - nowMs) / 1000)) : 0
+  }
+  return {
+    ...attendance,
+    serverNow: new Date(nowMs).toISOString(),
+    secondsRemaining: secondsUntil(attendance.deadlineAt),
+    startSecondsRemaining: secondsUntil(attendance.gameStartAt),
+  }
+}
+
 export function createRoomSnapshotMessage(
   room: ServerRoom,
   yourSeat: Seat | null,
@@ -450,7 +474,7 @@ export function createRoomSnapshotMessage(
     tournamentId: room.config.tournamentId ?? null,
     tournamentMatchId: room.config.tournamentMatchId ?? null,
     tournamentRoundType: room.config.tournamentRoundType ?? null,
-    tournamentAttendance: room.config.tournamentAttendance ?? null,
+    tournamentAttendance: deriveTournamentAttendanceForSend(room.config.tournamentAttendance, nowMs),
     tournamentBotReplacements: room.config.tournamentBotReplacements ?? [],
     tournamentBanners: room.config.tournamentBanners ?? [],
     // Lazy expiry filtering — reconnect-ващ клиент никога не получава вече

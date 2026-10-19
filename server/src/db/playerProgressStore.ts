@@ -116,7 +116,12 @@ export type PlayerProgressStore = {
   isTemporaryProfile: (profileId: string) => boolean
   profileExists: (profileId: string) => boolean
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
-  listPublicHumanProfiles: (onlineProfileIds?: Set<string>) => PlayerPublicProfileSnapshot[]
+  // Batch вариант на getPublicProfile — СЪЩИЯТ SELECT (без допълнителни
+  // филтри по status/is_temporary, за разлика от getProfileSnapshotsByIds),
+  // само с IN (...). Липсващ id = профилът не съществува, точно както
+  // getPublicProfile би върнал null.
+  getPublicProfilesByIds: (profileIds: readonly ProfileId[]) => Map<ProfileId, PlayerPublicProfileSnapshot>
+  listPublicHumanProfiles:(onlineProfileIds?: Set<string>) => PlayerPublicProfileSnapshot[]
   searchPublicProfiles: (
     normalizedTerm: string,
     onlineProfileIds?: Set<string>,
@@ -1142,6 +1147,72 @@ export async function createPlayerProgressStore(
       ProfileGalleryImageRow[]
 
     return toPublicProfileSnapshot(row, galleryImages)
+  }
+
+  const PUBLIC_PROFILES_BATCH_CHUNK_SIZE = 200
+
+  function getPublicProfilesByIds(
+    profileIds: readonly ProfileId[],
+  ): Map<ProfileId, PlayerPublicProfileSnapshot> {
+    const result = new Map<ProfileId, PlayerPublicProfileSnapshot>()
+    const uniqueIds = [...new Set(profileIds)]
+
+    for (let offset = 0; offset < uniqueIds.length; offset += PUBLIC_PROFILES_BATCH_CHUNK_SIZE) {
+      const chunk = uniqueIds.slice(offset, offset + PUBLIC_PROFILES_BATCH_CHUNK_SIZE)
+      const placeholders = chunk.map(() => '?').join(', ')
+      // Динамична arity — statement-ите се строят прясно (както в
+      // getProfileSnapshotsByIds). Колоните/JOIN-ите са 1:1 с
+      // selectPublicProfileStatement; gallery редът е 1:1 със
+      // selectProfileGalleryImagesStatement (sort_order, created_at) в
+      // рамките на всеки профил.
+      const rows = database.prepare(`
+        SELECT
+          p.profile_id,
+          p.profile_kind,
+          p.display_name,
+          p.avatar_url,
+          p.level,
+          p.rank_title,
+          p.skill_rating,
+          p.average_rating,
+          p.total_ratings_count,
+          COALESCE(pw.yellow_coins_balance, 0) AS yellow_coins_balance,
+          pp.completed_games_count,
+          pp.won_games_count,
+          p.gender
+        FROM profiles p
+        LEFT JOIN profile_wallets pw
+          ON pw.profile_id = p.profile_id
+        LEFT JOIN profile_progress pp
+          ON pp.profile_id = p.profile_id
+        WHERE p.profile_id IN (${placeholders});
+      `).all(...chunk) as Array<Parameters<typeof toPublicProfileSnapshot>[0]>
+
+      const galleryRows = database.prepare(`
+        SELECT
+          profile_id,
+          image_id,
+          image_url,
+          thumbnail_url,
+          sort_order
+        FROM profile_gallery_images
+        WHERE profile_id IN (${placeholders})
+        ORDER BY profile_id ASC, sort_order ASC, created_at ASC;
+      `).all(...chunk) as Array<ProfileGalleryImageRow & { profile_id: string }>
+
+      const galleryByProfileId = new Map<string, ProfileGalleryImageRow[]>()
+      for (const galleryRow of galleryRows) {
+        const list = galleryByProfileId.get(galleryRow.profile_id) ?? []
+        list.push(galleryRow)
+        galleryByProfileId.set(galleryRow.profile_id, list)
+      }
+
+      for (const row of rows) {
+        result.set(row.profile_id, toPublicProfileSnapshot(row, galleryByProfileId.get(row.profile_id) ?? []))
+      }
+    }
+
+    return result
   }
 
   function mapProfileRowsToSnapshots(
@@ -2301,6 +2372,7 @@ export async function createPlayerProgressStore(
     isTemporaryProfile,
     profileExists,
     getPublicProfile,
+    getPublicProfilesByIds,
     listPublicHumanProfiles,
     searchPublicProfiles,
     listEligibleProfileKinds,

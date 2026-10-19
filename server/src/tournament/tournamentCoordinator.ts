@@ -78,7 +78,31 @@ export type TournamentCoordinatorHealth = {
   settlementAttemptsLastTick: number
   tournamentsSettledLastTick: number
   recoveryActionsLastTick: number
+  lastTickMetrics: TournamentCoordinatorTickMetrics | null
+  assignmentIndexWarm: boolean
+  assignmentIndexSize: number
 }
+
+// Performance audit Phase 0 — bounded, без IDs. Изчислява се веднъж на tick.
+export type TournamentCoordinatorTickMetrics = {
+  durationMs: number
+  tournaments: number
+  sqlStatements: number
+  sqlMs: number
+  commitRooms: number
+  commitRoomMs: number
+  skippedUnchangedCommits: number
+  processedMatches: number
+  // Само последователни ms за всеки обработен runnable мач (ограничен от
+  // batchSize × мачове на турнир) — за max единична операция.
+  matchDurationsMs: number[]
+  maxMatchMs: number
+  profileLookups: number
+  profileBatchLookups: number
+  notifyAssignments: number
+}
+
+export type TournamentAssignmentLookupOutcome = 'index_hit' | 'no_match' | 'legacy'
 
 export type TournamentFeederMatchUpdate = {
   tournamentId: TournamentId
@@ -154,6 +178,10 @@ type PublicProfile = PlayerPublicProfileSnapshot
 type TournamentCoordinatorDeps = {
   databaseFilePath: string
   getPublicProfile: (profileId: ProfileId) => PublicProfile | null
+  // Batch вариант (същият SELECT като getPublicProfile, само IN (...)) —
+  // ползва се за prefetch на участниците в runnable мачовете веднъж на
+  // tick. Липсващ id в резултата → fallback към getPublicProfile.
+  getPublicProfiles?: (profileIds: readonly ProfileId[]) => Map<ProfileId, PublicProfile>
   getRoom: (roomId: string) => ServerRoom | null
   commitRoom: (room: ServerRoom) => void
   // Извиква се веднъж, точно когато турнирен мач стане completed (walkover
@@ -213,6 +241,11 @@ type TournamentCoordinatorDeps = {
   // виж diagnostic fix брифа §2). Никога не хвърля, никога не влияе на
   // tournament логиката.
   onTickTiming?: (durationMs: number) => void
+  // Monitoring-only, best-effort (performance audit Phase 0) — разбивка на
+  // tick-а; и getAssignmentForProfile изхода (index hit / няма мач / legacy
+  // scan). Никога не хвърлят навън, никога не влияят на tournament логиката.
+  onTickMetrics?: (metrics: TournamentCoordinatorTickMetrics) => void
+  onAssignmentLookup?: (outcome: TournamentAssignmentLookupOutcome) => void
 }
 
 type TournamentRow = {
@@ -375,6 +408,35 @@ export async function createTournamentCoordinator(
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
 
+  // Performance audit Phase 0 — всеки statement на coordinator-а минава
+  // през тази тънка обвивка (count + ms), за да се вижда SQL цената на
+  // tick-а. Поведението на statement-ите не се променя.
+  type Statement = ReturnType<SqliteDatabase['prepare']>
+  const sqlCounters = { statements: 0, ms: 0 }
+
+  function timeSql<T>(fn: () => T): T {
+    const startedAt = performance.now()
+    try {
+      return fn()
+    } finally {
+      sqlCounters.statements += 1
+      sqlCounters.ms += performance.now() - startedAt
+    }
+  }
+
+  function prepare(sql: string): Statement {
+    const statement = database.prepare(sql)
+    return {
+      get: (...args: Parameters<Statement['get']>) => timeSql(() => statement.get(...args)),
+      all: (...args: Parameters<Statement['all']>) => timeSql(() => statement.all(...args)),
+      run: (...args: Parameters<Statement['run']>) => timeSql(() => statement.run(...args)),
+    } as unknown as Statement
+  }
+
+  function exec(sql: string): void {
+    timeSql(() => database.exec(sql))
+  }
+
   const intervalMs = deps.intervalMs ?? DEFAULT_INTERVAL_MS
   const batchSize = deps.batchSize ?? DEFAULT_BATCH_SIZE
   const setTimer = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms))
@@ -391,7 +453,7 @@ export async function createTournamentCoordinator(
     tr.round_type, tr.round_index
   `
 
-  const selectActiveTournamentsStatement = database.prepare(`
+  const selectActiveTournamentsStatement = prepare(`
     SELECT tournament_id, name, status, player_capacity
     FROM tournaments
     WHERE status IN ('starting', 'semifinal_in_progress', 'final_in_progress')
@@ -399,7 +461,7 @@ export async function createTournamentCoordinator(
     LIMIT ?;
   `)
 
-  const selectSettlementDueTournamentsStatement = database.prepare(`
+  const selectSettlementDueTournamentsStatement = prepare(`
     SELECT DISTINCT t.tournament_id, t.name, t.status, t.player_capacity
     FROM tournaments t
     JOIN tournament_rounds tr
@@ -417,7 +479,7 @@ export async function createTournamentCoordinator(
     LIMIT ?;
   `)
 
-  const selectConfirmedProfileIdsForTournamentStatement = database.prepare(`
+  const selectConfirmedProfileIdsForTournamentStatement = prepare(`
     SELECT DISTINCT profile_id
     FROM tournament_entries
     WHERE tournament_id = ?
@@ -429,7 +491,7 @@ export async function createTournamentCoordinator(
   // трябва да СПРЕ blocking изискването, не да го поддържа). Reuse-ва
   // същите статуси като selectActiveEntryForAccountStatement в
   // tournamentEconomyStore.ts ("one active tournament per account" guard-а).
-  const selectActiveEntryTournamentIdStatement = database.prepare(`
+  const selectActiveEntryTournamentIdStatement = prepare(`
     SELECT tournament_id
     FROM tournament_entries
     WHERE profile_id = ?
@@ -451,12 +513,44 @@ export async function createTournamentCoordinator(
   // match остава 'active' завинаги — точно сигналът, който трябва да
   // persist-не през STATE A/B/следващ match/restart, без нов notification
   // table (reuse на вече съществуващата replacement persistence).
-  const selectUnresolvedReplacementForProfileStatement = database.prepare(`
+  const selectUnresolvedReplacementForProfileStatement = prepare(`
     SELECT replacement_id
     FROM tournament_match_no_show_replacements
     WHERE tournament_id = ?
       AND assigned_profile_id = ?
       AND status IN ('active', 'takeover_pending')
+    LIMIT 1;
+  `)
+
+  // Read-scope вариант на горната заявка (performance audit Phase 1A) —
+  // СЪЩИЯТ предикат (tournament_id + status IN active/takeover_pending), но
+  // за всички профили в турнира наведнъж, вместо по една заявка на играч
+  // на всеки attendance snapshot. Ползва се само в рамките на един tick
+  // (виж ReadScope) и се инвалидира при всеки replacement запис.
+  const selectUnresolvedReplacementProfilesForTournamentStatement = prepare(`
+    SELECT DISTINCT assigned_profile_id
+    FROM tournament_match_no_show_replacements
+    WHERE tournament_id = ?
+      AND status IN ('active', 'takeover_pending');
+  `)
+
+  // getAssignmentForProfile fast path (performance audit Phase 1A) — СЪЩИТЕ
+  // условия, по които legacy scan-ът намира мача на профила: активен турнир
+  // (starting/semifinal_in_progress/final_in_progress), runnable мач
+  // (awaiting_players/countdown/in_progress), entry на профила в един от
+  // двата отбора със статус от selectEntriesForTeamStatement. Няма ред →
+  // legacy scan-ът също не би намерил assignment.
+  const selectRunnableMatchForProfileStatement = prepare(`
+    SELECT tm.match_id, te.team_id
+    FROM tournament_entries te
+    JOIN tournament_matches tm
+      ON tm.tournament_id = te.tournament_id
+     AND (tm.team_a_id = te.team_id OR tm.team_b_id = te.team_id)
+    JOIN tournaments t ON t.tournament_id = tm.tournament_id
+    WHERE te.profile_id = ?
+      AND te.status IN ('confirmed', 'finalist', 'champion', 'eliminated')
+      AND tm.status IN ('awaiting_players', 'countdown', 'in_progress')
+      AND t.status IN ('starting', 'semifinal_in_progress', 'final_in_progress')
     LIMIT 1;
   `)
 
@@ -474,7 +568,7 @@ export async function createTournamentCoordinator(
   // timestamp тук) — 'completed' статус НЕ трие историята, само маркира
   // "вече не е pending obligation". Scoped стриктно по (tournament_id,
   // assigned_profile_id) — никога не пипа други играчи.
-  const closeAllUnresolvedReplacementsForProfileStatement = database.prepare(`
+  const closeAllUnresolvedReplacementsForProfileStatement = prepare(`
     UPDATE tournament_match_no_show_replacements
     SET status = 'completed',
         takeover_completed_at = COALESCE(takeover_completed_at, CURRENT_TIMESTAMP)
@@ -483,7 +577,7 @@ export async function createTournamentCoordinator(
       AND status IN ('active', 'takeover_pending');
   `)
 
-  const selectRunnableMatchesStatement = database.prepare(`
+  const selectRunnableMatchesStatement = prepare(`
     SELECT ${matchSelectColumns}
     FROM tournament_matches tm
     JOIN tournaments t ON t.tournament_id = tm.tournament_id
@@ -493,7 +587,7 @@ export async function createTournamentCoordinator(
     ORDER BY tr.round_type ASC, tr.round_index ASC, tm.created_at ASC;
   `)
 
-  const selectMatchByRoomStatement = database.prepare(`
+  const selectMatchByRoomStatement = prepare(`
     SELECT ${matchSelectColumns}
     FROM tournament_matches tm
     JOIN tournaments t ON t.tournament_id = tm.tournament_id
@@ -502,7 +596,7 @@ export async function createTournamentCoordinator(
     LIMIT 1;
   `)
 
-  const selectMatchByIdStatement = database.prepare(`
+  const selectMatchByIdStatement = prepare(`
     SELECT ${matchSelectColumns}
     FROM tournament_matches tm
     JOIN tournaments t ON t.tournament_id = tm.tournament_id
@@ -516,7 +610,7 @@ export async function createTournamentCoordinator(
   // на споделения downstream мач БЕЗ downstream match row да съществува
   // вече (виж коментара при ensureNextRound: следващият кръг се създава
   // едва след като И ДВАТА sibling мача имат победител).
-  const selectMatchByRoundPositionStatement = database.prepare(`
+  const selectMatchByRoundPositionStatement = prepare(`
     SELECT ${matchSelectColumns}
     FROM tournament_matches tm
     JOIN tournaments t ON t.tournament_id = tm.tournament_id
@@ -531,14 +625,14 @@ export async function createTournamentCoordinator(
   // след като advanceCompletedMatch вече е маркирал загубилия отбор като
   // eliminated в рамките на СЪЩИЯ tick (commitSnapshot се вика за completed
   // мача веднага след advanceCompletedMatch — виж onTournamentRoomCompleted).
-  const selectEntriesForTeamStatement = database.prepare(`
+  const selectEntriesForTeamStatement = prepare(`
     SELECT profile_id, joined_as, created_at
     FROM tournament_entries
     WHERE tournament_id = ? AND team_id = ? AND status IN ('confirmed', 'finalist', 'champion', 'eliminated')
     ORDER BY created_at ASC;
   `)
 
-  const claimRoomIdStatement = database.prepare(`
+  const claimRoomIdStatement = prepare(`
     UPDATE tournament_matches
     SET room_id = ?
     WHERE match_id = ?
@@ -546,7 +640,7 @@ export async function createTournamentCoordinator(
       AND status IN ('awaiting_players', 'countdown', 'in_progress');
   `)
 
-  const updateFinalStartAtStatement = database.prepare(`
+  const updateFinalStartAtStatement = prepare(`
     UPDATE tournament_matches
     SET final_start_at = COALESCE(final_start_at, ?)
     WHERE match_id = ?
@@ -558,28 +652,28 @@ export async function createTournamentCoordinator(
   // semifinal->final), not just the final. COALESCE(...) + "IS NULL" WHERE
   // guard makes this exactly-once and idempotent under repeated coordinator
   // ticks/restarts, same pattern as the legacy final-only statement.
-  const updateNextMatchStartAtStatement = database.prepare(`
+  const updateNextMatchStartAtStatement = prepare(`
     UPDATE tournament_matches
     SET next_match_start_at = COALESCE(next_match_start_at, ?)
     WHERE match_id = ?
       AND next_match_start_at IS NULL;
   `)
 
-  const insertSemifinalAcknowledgementStatement = database.prepare(`
+  const insertSemifinalAcknowledgementStatement = prepare(`
     INSERT INTO tournament_semifinal_result_acknowledgements (
       acknowledgement_id, tournament_id, semifinal_match_id, profile_id
     ) VALUES (?, ?, ?, ?)
     ON CONFLICT(tournament_id, semifinal_match_id, profile_id) DO NOTHING;
   `)
 
-  const selectSemifinalAcknowledgementStatement = database.prepare(`
+  const selectSemifinalAcknowledgementStatement = prepare(`
     SELECT acknowledgement_id
     FROM tournament_semifinal_result_acknowledgements
     WHERE tournament_id = ? AND semifinal_match_id = ? AND profile_id = ?
     LIMIT 1;
   `)
 
-  const countMissingHumanFinalistAcknowledgementsStatement = database.prepare(`
+  const countMissingHumanFinalistAcknowledgementsStatement = prepare(`
     SELECT COUNT(*) AS count
     FROM tournament_entries te
     JOIN profiles p ON p.profile_id = te.profile_id
@@ -605,14 +699,14 @@ export async function createTournamentCoordinator(
       );
   `)
 
-  const selectEntryForProfileStatement = database.prepare(`
+  const selectEntryForProfileStatement = prepare(`
     SELECT entry_id, team_id, status
     FROM tournament_entries
     WHERE tournament_id = ? AND profile_id = ?
     LIMIT 1;
   `)
 
-  const ensureAttendanceStartedStatement = database.prepare(`
+  const ensureAttendanceStartedStatement = prepare(`
     UPDATE tournament_matches
     SET attendance_started_at = COALESCE(attendance_started_at, ?),
         attendance_deadline_at = COALESCE(attendance_deadline_at, ?),
@@ -625,7 +719,7 @@ export async function createTournamentCoordinator(
       AND attendance_started_at IS NULL;
   `)
 
-  const resolveAllPresentStatement = database.prepare(`
+  const resolveAllPresentStatement = prepare(`
     UPDATE tournament_matches
     SET status = 'countdown',
         attendance_resolved_at = COALESCE(attendance_resolved_at, ?),
@@ -637,7 +731,7 @@ export async function createTournamentCoordinator(
       AND attendance_resolution_kind IS NULL;
   `)
 
-  const resolveBotsStatement = database.prepare(`
+  const resolveBotsStatement = prepare(`
     UPDATE tournament_matches
     SET status = 'countdown',
         attendance_resolved_at = COALESCE(attendance_resolved_at, ?),
@@ -649,7 +743,7 @@ export async function createTournamentCoordinator(
       AND attendance_resolution_kind IS NULL;
   `)
 
-  const resolveWalkoverStatement = database.prepare(`
+  const resolveWalkoverStatement = prepare(`
     UPDATE tournament_matches
     SET status = 'completed',
         result_kind = 'walkover',
@@ -666,7 +760,7 @@ export async function createTournamentCoordinator(
       AND (winner_team_id IS NULL OR winner_team_id = ?);
   `)
 
-  const markMatchInProgressStatement = database.prepare(`
+  const markMatchInProgressStatement = prepare(`
     UPDATE tournament_matches
     SET status = 'in_progress', started_at = COALESCE(started_at, ?)
     WHERE match_id = ?
@@ -674,7 +768,7 @@ export async function createTournamentCoordinator(
       AND status = 'countdown';
   `)
 
-  const completeMatchStatement = database.prepare(`
+  const completeMatchStatement = prepare(`
     UPDATE tournament_matches
     SET status = 'completed',
         result_kind = ?,
@@ -692,14 +786,14 @@ export async function createTournamentCoordinator(
   // Общ брой мачове, зачислени за даден round_type (независимо от статус) —
   // ползва се за да разберем дали кръгът вече Е генериран (за да не се
   // опитаме да го генерираме повторно) и дали е напълно завършен.
-  const countMatchesForRoundTypeStatement = database.prepare(`
+  const countMatchesForRoundTypeStatement = prepare(`
     SELECT COUNT(*) as count
     FROM tournament_matches tm
     JOIN tournament_rounds tr ON tr.round_id = tm.round_id
     WHERE tm.tournament_id = ? AND tr.round_type = ?;
   `)
 
-  const insertReplacementStatement = database.prepare(`
+  const insertReplacementStatement = prepare(`
     INSERT INTO tournament_match_no_show_replacements (
       replacement_id, tournament_id, match_id, room_id, assigned_profile_id,
       assigned_seat, status, reconnect_token
@@ -707,7 +801,7 @@ export async function createTournamentCoordinator(
     ON CONFLICT(match_id, assigned_profile_id) DO NOTHING;
   `)
 
-  const selectReplacementsForMatchStatement = database.prepare(`
+  const selectReplacementsForMatchStatement = prepare(`
     SELECT replacement_id, tournament_id, match_id, room_id, assigned_profile_id,
            assigned_seat, status, reconnect_token, inserted_at,
            takeover_requested_at, takeover_completed_at
@@ -716,7 +810,7 @@ export async function createTournamentCoordinator(
     ORDER BY inserted_at ASC;
   `)
 
-  const selectReplacementForTakeoverStatement = database.prepare(`
+  const selectReplacementForTakeoverStatement = prepare(`
     SELECT replacement_id, tournament_id, match_id, room_id, assigned_profile_id,
            assigned_seat, status, reconnect_token, inserted_at,
            takeover_requested_at, takeover_completed_at
@@ -725,7 +819,7 @@ export async function createTournamentCoordinator(
     LIMIT 1;
   `)
 
-  const markReplacementPendingStatement = database.prepare(`
+  const markReplacementPendingStatement = prepare(`
     UPDATE tournament_match_no_show_replacements
     SET status = 'takeover_pending',
         takeover_requested_at = COALESCE(takeover_requested_at, CURRENT_TIMESTAMP)
@@ -733,32 +827,32 @@ export async function createTournamentCoordinator(
       AND status = 'active';
   `)
 
-  const countActiveReplacementsForMatchStatement = database.prepare(`
+  const countActiveReplacementsForMatchStatement = prepare(`
     SELECT COUNT(*) as count
     FROM tournament_match_no_show_replacements
     WHERE match_id = ?;
   `)
 
-  const updateTournamentStatusStatement = database.prepare(`
+  const updateTournamentStatusStatement = prepare(`
     UPDATE tournaments
     SET status = ?, updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND status = ?;
   `)
 
-  const insertFinalRoundStatement = database.prepare(`
+  const insertFinalRoundStatement = prepare(`
     INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index)
     VALUES (?, ?, 'final', 1)
     ON CONFLICT(tournament_id, round_type, round_index) DO NOTHING;
   `)
 
-  const selectFinalRoundStatement = database.prepare(`
+  const selectFinalRoundStatement = prepare(`
     SELECT round_id
     FROM tournament_rounds
     WHERE tournament_id = ? AND round_type = 'final' AND round_index = 1
     LIMIT 1;
   `)
 
-  const insertFinalMatchStatement = database.prepare(`
+  const insertFinalMatchStatement = prepare(`
     INSERT INTO tournament_matches (
       match_id, tournament_id, round_id, room_id, team_a_id, team_b_id,
       status, no_show_deadline_at
@@ -770,20 +864,20 @@ export async function createTournamentCoordinator(
   // за разлика от insertFinalRoundStatement/selectFinalRoundStatement, които
   // остават хардкоднати за 'final'/1 (финалът винаги е round_index=1,
   // независимо от bracket размера — не е "различен" случай за generalize).
-  const insertNextRoundStatement = database.prepare(`
+  const insertNextRoundStatement = prepare(`
     INSERT INTO tournament_rounds (round_id, tournament_id, round_type, round_index)
     VALUES (?, ?, ?, ?)
     ON CONFLICT(tournament_id, round_type, round_index) DO NOTHING;
   `)
 
-  const selectNextRoundIdStatement = database.prepare(`
+  const selectNextRoundIdStatement = prepare(`
     SELECT round_id
     FROM tournament_rounds
     WHERE tournament_id = ? AND round_type = ? AND round_index = ?
     LIMIT 1;
   `)
 
-  const selectMatchesForRoundTypeStatement = database.prepare(`
+  const selectMatchesForRoundTypeStatement = prepare(`
     SELECT ${matchSelectColumns}
     FROM tournament_matches tm
     JOIN tournaments t ON t.tournament_id = tm.tournament_id
@@ -796,19 +890,19 @@ export async function createTournamentCoordinator(
   // средните rounds — round_of_16/quarterfinal — трябва да станат eliminated
   // веднага, не да чакат до финала, за разлика от предишната 4-отборна
   // логика, където единствената elimination точка беше финалът).
-  const updateRoundLosersEliminatedTeamsStatement = database.prepare(`
+  const updateRoundLosersEliminatedTeamsStatement = prepare(`
     UPDATE tournament_teams
     SET status = 'eliminated', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id = ? AND status IN ('locked', 'finalist');
   `)
 
-  const updateRoundLosersEliminatedEntriesStatement = database.prepare(`
+  const updateRoundLosersEliminatedEntriesStatement = prepare(`
     UPDATE tournament_entries
     SET status = 'eliminated', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id = ? AND status = 'confirmed';
   `)
 
-  const selectFinalMatchStatement = database.prepare(`
+  const selectFinalMatchStatement = prepare(`
     SELECT ${matchSelectColumns}
     FROM tournament_matches tm
     JOIN tournaments t ON t.tournament_id = tm.tournament_id
@@ -819,13 +913,13 @@ export async function createTournamentCoordinator(
     LIMIT 1;
   `)
 
-  const updateFinalistTeamsStatement = database.prepare(`
+  const updateFinalistTeamsStatement = prepare(`
     UPDATE tournament_teams
     SET status = 'finalist', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id IN (?, ?) AND status IN ('locked', 'finalist');
   `)
 
-  const updateEliminatedTeamsStatement = database.prepare(`
+  const updateEliminatedTeamsStatement = prepare(`
     UPDATE tournament_teams
     SET status = 'eliminated', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ?
@@ -833,13 +927,13 @@ export async function createTournamentCoordinator(
       AND status IN ('locked', 'finalist');
   `)
 
-  const updateFinalistEntriesStatement = database.prepare(`
+  const updateFinalistEntriesStatement = prepare(`
     UPDATE tournament_entries
     SET status = 'finalist', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id IN (?, ?) AND status = 'confirmed';
   `)
 
-  const updateEliminatedEntriesStatement = database.prepare(`
+  const updateEliminatedEntriesStatement = prepare(`
     UPDATE tournament_entries
     SET status = 'eliminated', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ?
@@ -847,25 +941,25 @@ export async function createTournamentCoordinator(
       AND status = 'confirmed';
   `)
 
-  const updateChampionTeamStatement = database.prepare(`
+  const updateChampionTeamStatement = prepare(`
     UPDATE tournament_teams
     SET status = 'champion', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id = ? AND status IN ('finalist', 'champion');
   `)
 
-  const updateRunnerUpTeamStatement = database.prepare(`
+  const updateRunnerUpTeamStatement = prepare(`
     UPDATE tournament_teams
     SET status = 'finalist', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id = ? AND status IN ('finalist', 'locked');
   `)
 
-  const updateChampionEntriesStatement = database.prepare(`
+  const updateChampionEntriesStatement = prepare(`
     UPDATE tournament_entries
     SET status = 'champion', updated_at = CURRENT_TIMESTAMP
     WHERE tournament_id = ? AND team_id = ? AND status IN ('finalist', 'champion');
   `)
 
-  const insertEventStatement = database.prepare(`
+  const insertEventStatement = prepare(`
     INSERT INTO tournament_events (
       event_id, tournament_id, event_type, actor_profile_id, actor_role, payload_json
     ) VALUES (?, ?, ?, NULL, 'system', ?);
@@ -899,6 +993,108 @@ export async function createTournamentCoordinator(
   // reconnect flow-a на клиента), не чрез този push механизъм.
   const lastNotifiedFeederScoreByMatchId = new Map<string, string>()
 
+  // ─── Read scope (performance audit Phase 1A) ─────────────────────────────
+  // Живее САМО по време на едно синхронно извикване (runTick или legacy
+  // getAssignmentForProfile) и се изхвърля след него — затова няма
+  // cross-tick staleness. В рамките на scope-а:
+  //  - team entries: coordinator-ът сменя само status-а между
+  //    confirmed/finalist/champion/eliminated, всички включени в
+  //    selectEntriesForTeamStatement → множеството и редът не се променят;
+  //  - профили: coordinator-ът не пише в profiles;
+  //  - replacement данни: инвалидират се при всеки replacement запис.
+  type ReadScope = {
+    teamEntries: Map<string, TeamEntryRow[]>
+    seatAssignments: Map<string, SeatAssignment[]>
+    profiles: Map<ProfileId, PublicProfile | null>
+    unresolvedReplacementProfiles: Map<string, Set<string>>
+    replacementsByMatch: Map<string, ReplacementRow[]>
+  }
+  let readScope: ReadScope | null = null
+
+  function withReadScope<T>(fn: () => T): T {
+    if (readScope !== null) return fn()
+    readScope = {
+      teamEntries: new Map(),
+      seatAssignments: new Map(),
+      profiles: new Map(),
+      unresolvedReplacementProfiles: new Map(),
+      replacementsByMatch: new Map(),
+    }
+    try {
+      return fn()
+    } finally {
+      readScope = null
+    }
+  }
+
+  function invalidateReplacementReads(): void {
+    if (readScope === null) return
+    readScope.unresolvedReplacementProfiles.clear()
+    readScope.replacementsByMatch.clear()
+  }
+
+  // ─── Tick metrics (performance audit Phase 0) ────────────────────────────
+  const tickCounters = {
+    commitRooms: 0,
+    commitRoomMs: 0,
+    skippedUnchangedCommits: 0,
+    profileLookups: 0,
+    profileBatchLookups: 0,
+    notifyAssignments: 0,
+  }
+  let lastTickMetrics: TournamentCoordinatorTickMetrics | null = null
+
+  function resetTickCounters(): void {
+    tickCounters.commitRooms = 0
+    tickCounters.commitRoomMs = 0
+    tickCounters.skippedUnchangedCommits = 0
+    tickCounters.profileLookups = 0
+    tickCounters.profileBatchLookups = 0
+    tickCounters.notifyAssignments = 0
+  }
+
+  function commitRoom(room: ServerRoom): void {
+    const startedAt = performance.now()
+    try {
+      deps.commitRoom(room)
+    } finally {
+      tickCounters.commitRooms += 1
+      tickCounters.commitRoomMs += performance.now() - startedAt
+    }
+  }
+
+  // ─── Profile → assignment index (performance audit Phase 1A) ─────────────
+  // Чисто ускорение за getAssignmentForProfile: всеки hit се валидира срещу
+  // свеж DB ред (selectRunnableMatchForProfileStatement + selectMatchById),
+  // всеки miss/несъответствие пада към legacy scan-а. Попълва се от
+  // notifyAssignments (всеки runnable мач на всеки tick + inline при
+  // създаване на стая) и се подменя изцяло в края на успешен пълен tick.
+  type IndexedAssignment = {
+    tournamentId: TournamentId
+    matchId: TournamentMatchId
+    seat: Seat
+    teamId: TournamentTeamId
+    partnerProfileId: ProfileId
+    opponentTeamId: TournamentTeamId
+  }
+  let assignmentIndex = new Map<ProfileId, IndexedAssignment>()
+  let nextAssignmentIndex: Map<ProfileId, IndexedAssignment> | null = null
+  // false до първия успешен ПЪЛЕН tick (start() го пуска веднага при
+  // boot, преди httpServer.listen) — дотогава getAssignmentForProfile
+  // ползва само legacy scan-а (вкл. неговия room recovery fallback).
+  let assignmentIndexWarm = false
+
+  function indexAssignment(profileId: ProfileId, entry: IndexedAssignment): void {
+    assignmentIndex.set(profileId, entry)
+    nextAssignmentIndex?.set(profileId, entry)
+  }
+
+  function removeIndexedAssignmentsForMatch(matchId: string): void {
+    for (const [profileId, entry] of assignmentIndex) {
+      if (entry.matchId === matchId) assignmentIndex.delete(profileId)
+    }
+  }
+
   function appendEvent(
     tournamentId: TournamentId,
     eventType: string,
@@ -917,12 +1113,58 @@ export async function createTournamentCoordinator(
   }
 
   function getTeamEntries(tournamentId: TournamentId, teamId: TournamentTeamId): TeamEntryRow[] {
-    return sortTeamEntries(
+    const cacheKey = `${tournamentId}:${teamId}`
+    const cached = readScope?.teamEntries.get(cacheKey)
+    if (cached !== undefined) return cached
+    const entries = sortTeamEntries(
       selectEntriesForTeamStatement.all(tournamentId, teamId) as TeamEntryRow[],
     )
+    readScope?.teamEntries.set(cacheKey, entries)
+    return entries
+  }
+
+  function getProfile(profileId: ProfileId): PublicProfile | null {
+    if (readScope !== null && readScope.profiles.has(profileId)) {
+      return readScope.profiles.get(profileId) ?? null
+    }
+    tickCounters.profileLookups += 1
+    const profile = deps.getPublicProfile(profileId)
+    readScope?.profiles.set(profileId, profile)
+    return profile
+  }
+
+  // L2 prefetch — един batch SELECT за всички участници в подадените мачове
+  // (вместо по 2 заявки на профил). Само попълва read scope-а; профили,
+  // които batch-ът не върне, остават непопълнени и минават през
+  // getPublicProfile (точно legacy поведението, вкл. null → throw).
+  function prefetchMatchParticipants(matches: MatchRow[]): void {
+    if (readScope === null || deps.getPublicProfiles === undefined) return
+    const missing: ProfileId[] = []
+    for (const match of matches) {
+      for (const teamId of [match.team_a_id, match.team_b_id]) {
+        for (const entry of getTeamEntries(match.tournament_id, teamId)) {
+          if (!readScope.profiles.has(entry.profile_id)) missing.push(entry.profile_id)
+        }
+      }
+    }
+    if (missing.length === 0) return
+    tickCounters.profileBatchLookups += 1
+    const profiles = deps.getPublicProfiles(missing)
+    for (const [profileId, profile] of profiles) {
+      readScope.profiles.set(profileId, profile)
+    }
   }
 
   function getSeatAssignments(match: MatchRow): SeatAssignment[] {
+    const cacheKey = `${match.match_id}:${match.team_a_id}:${match.team_b_id}`
+    const cached = readScope?.seatAssignments.get(cacheKey)
+    if (cached !== undefined) return cached
+    const assignments = computeSeatAssignments(match)
+    readScope?.seatAssignments.set(cacheKey, assignments)
+    return assignments
+  }
+
+  function computeSeatAssignments(match: MatchRow): SeatAssignment[] {
     const teamAEntries = getTeamEntries(match.tournament_id, match.team_a_id)
     const teamBEntries = getTeamEntries(match.tournament_id, match.team_b_id)
     if (teamAEntries.length !== 2 || teamBEntries.length !== 2) {
@@ -939,7 +1181,7 @@ export async function createTournamentCoordinator(
     ]
 
     return seatPlans.map((plan) => {
-      const publicProfile = deps.getPublicProfile(plan.entry.profile_id)
+      const publicProfile = getProfile(plan.entry.profile_id)
       if (publicProfile === null) {
         throw new Error(`Tournament participant profile missing profile=${plan.entry.profile_id}`)
       }
@@ -1001,27 +1243,43 @@ export async function createTournamentCoordinator(
       ? participant.tournamentNoShowReplacement
       : null
     if (!replacement) return null
-    const rows = selectReplacementsForMatchStatement.all(replacement.matchId) as ReplacementRow[]
+    const rows = getReplacementsForMatch(replacement.matchId)
     return rows.find((row) => row.assigned_seat === seat)?.reconnect_token ?? null
   }
 
-  function createAssignments(match: MatchRow, room: ServerRoom): TournamentMatchAssignment[] {
-    return getSeatAssignments(match).map((assignment) => ({
+  function getReplacementsForMatch(matchId: string): ReplacementRow[] {
+    const cached = readScope?.replacementsByMatch.get(matchId)
+    if (cached !== undefined) return cached
+    const rows = selectReplacementsForMatchStatement.all(matchId) as ReplacementRow[]
+    readScope?.replacementsByMatch.set(matchId, rows)
+    return rows
+  }
+
+  function toAssignment(
+    match: MatchRow,
+    room: ServerRoom,
+    seatAssignment: Pick<SeatAssignment, 'seat' | 'teamId' | 'partnerProfileId' | 'opponentTeamId'>,
+  ): TournamentMatchAssignment {
+    return {
       tournamentId: match.tournament_id,
       tournamentName: match.tournament_name,
       matchId: match.match_id,
       roomId: room.id,
       roundType: match.round_type as TournamentRoundType,
-      seat: assignment.seat,
-      teamId: assignment.teamId,
-      partnerProfileId: assignment.partnerProfileId,
-      opponentTeamId: assignment.opponentTeamId,
-      reconnectToken: getReconnectToken(room, assignment.seat),
+      seat: seatAssignment.seat,
+      teamId: seatAssignment.teamId,
+      partnerProfileId: seatAssignment.partnerProfileId,
+      opponentTeamId: seatAssignment.opponentTeamId,
+      reconnectToken: getReconnectToken(room, seatAssignment.seat),
       deadlineKind: match.deadline_kind,
       attendanceDeadlineAt: match.attendance_deadline_at,
       gameStartAt: match.game_start_at,
       matchStatus: toAssignmentMatchStatus(match.status),
-    }))
+    }
+  }
+
+  function createAssignments(match: MatchRow, room: ServerRoom): TournamentMatchAssignment[] {
+    return getSeatAssignments(match).map((assignment) => toAssignment(match, room, assignment))
   }
 
   // createAssignments се вика само за runnable (не completed) мачове (виж
@@ -1037,9 +1295,20 @@ export async function createTournamentCoordinator(
 
   function notifyAssignments(match: MatchRow, room: ServerRoom): void {
     const seatAssignments = getSeatAssignments(match)
+    for (const seatAssignment of seatAssignments) {
+      indexAssignment(seatAssignment.profileId, {
+        tournamentId: match.tournament_id as TournamentId,
+        matchId: match.match_id as TournamentMatchId,
+        seat: seatAssignment.seat,
+        teamId: seatAssignment.teamId,
+        partnerProfileId: seatAssignment.partnerProfileId,
+        opponentTeamId: seatAssignment.opponentTeamId,
+      })
+    }
     for (const assignment of createAssignments(match, room)) {
       const profileId = seatAssignments.find((item) => item.seat === assignment.seat)?.profileId
       if (profileId !== undefined) {
+        tickCounters.notifyAssignments += 1
         deps.notifyAssignment(profileId, assignment)
       }
     }
@@ -1164,7 +1433,7 @@ export async function createTournamentCoordinator(
 
   function createReplacementSnapshots(match: MatchRow, room: ServerRoom): TournamentBotReplacementSnapshot[] {
     const assignments = getSeatAssignments(match)
-    const replacements = selectReplacementsForMatchStatement.all(match.match_id) as ReplacementRow[]
+    const replacements = getReplacementsForMatch(match.match_id)
     return replacements.map((replacement) => {
       const assignment = assignments.find((item) => item.seat === replacement.assigned_seat)
       const summary = assignment !== undefined
@@ -1217,7 +1486,37 @@ export async function createTournamentCoordinator(
 
   function commitSnapshot(match: MatchRow, room: ServerRoom): ServerRoom {
     const refreshed = refreshTournamentRoomSnapshot(match, room)
-    deps.commitRoom(refreshed)
+    commitRoom(refreshed)
+    return refreshed
+  }
+
+  // Signature на tournament-специфичните полета, които refreshTournamentRoomSnapshot
+  // пише в room.config — БЕЗ чисто времевите (serverNow, secondsRemaining,
+  // startSecondsRemaining), които вече се изчисляват при изпращане на
+  // snapshot-а (createRoomSnapshotMessage). Еднакъв signature = commit-ът би
+  // сменил само тези времеви полета + updatedAt.
+  function tournamentViewSignature(room: ServerRoom): string {
+    const attendance = room.config.tournamentAttendance ?? null
+    return JSON.stringify([
+      attendance === null
+        ? null
+        : { ...attendance, serverNow: null, secondsRemaining: null, startSecondsRemaining: null },
+      room.config.tournamentBotReplacements ?? null,
+      room.config.tournamentBanners ?? null,
+    ])
+  }
+
+  // Phase 1A: за мач в 'in_progress' commit (persist + broadcast + revision
+  // bump) се прави само ако tournament view-то реално се е променило
+  // (presence/roster, replacements, banners). Всички останали статуси
+  // запазват досегашното безусловно commitSnapshot поведение (Phase 1C).
+  function commitSnapshotUnlessUnchangedInProgress(match: MatchRow, room: ServerRoom): ServerRoom {
+    const refreshed = refreshTournamentRoomSnapshot(match, room)
+    if (match.status === 'in_progress' && tournamentViewSignature(refreshed) === tournamentViewSignature(room)) {
+      tickCounters.skippedUnchangedCommits += 1
+      return room
+    }
+    commitRoom(refreshed)
     return refreshed
   }
 
@@ -1246,7 +1545,7 @@ export async function createTournamentCoordinator(
 
   function closeCompletedTournamentRoom(match: MatchRow, room: ServerRoom): void {
     const finishedRoom = finishTournamentRoom(match, room)
-    deps.commitRoom(finishedRoom)
+    commitRoom(finishedRoom)
     deps.closeCompletedRoom(finishedRoom)
   }
 
@@ -1306,7 +1605,7 @@ export async function createTournamentCoordinator(
 
     const existingRoom = deps.getRoom(roomId)
     if (existingRoom !== null) {
-      const room = commitSnapshot(match, existingRoom)
+      const room = commitSnapshotUnlessUnchangedInProgress(match, existingRoom)
       const ensureResult = deps.ensureRoomRuntime(room)
       if (!ensureResult.ok) {
         throw new Error(`No runtime capacity for tournament room=${roomId}: ${ensureResult.reason}`)
@@ -1320,7 +1619,7 @@ export async function createTournamentCoordinator(
     if (!ensureResult.ok) {
       throw new Error(`No runtime capacity for tournament room=${room.id}: ${ensureResult.reason}`)
     }
-    deps.commitRoom(room)
+    commitRoom(room)
     notifyAssignments(match, room)
     appendEvent(match.tournament_id, createdByThisTick ? 'tournament_match_room_created' : 'tournament_match_room_recovered', {
       matchId: match.match_id,
@@ -1445,7 +1744,7 @@ export async function createTournamentCoordinator(
 
   function ensureTournamentBotsInRuntime(match: MatchRow, room: ServerRoom): ServerRoom {
     const assignments = getSeatAssignments(match)
-    const replacements = selectReplacementsForMatchStatement.all(match.match_id) as ReplacementRow[]
+    const replacements = getReplacementsForMatch(match.match_id)
     let nextRoom = room
     for (const replacement of replacements) {
       if (replacement.status === 'completed') continue
@@ -1515,7 +1814,7 @@ export async function createTournamentCoordinator(
     // bracket-advancement логиката (advanceCompletedMatch е result-kind-
     // агностична — чете само winner_team_id/result_kind, не presence), но
     // вече не се извикват от no-show резолюцията.
-    database.exec('BEGIN IMMEDIATE;')
+    exec('BEGIN IMMEDIATE;')
     try {
       for (const assignment of missing) {
         const current = room.seats[assignment.seat].participant
@@ -1531,11 +1830,12 @@ export async function createTournamentCoordinator(
           assignment.seat,
           reconnectToken,
         )
+        invalidateReplacementReads()
       }
       const nowIso = utcNow()
       const gameStartAt = computeGameStartAt(match, nowIso)
       resolveBotsStatement.run(nowIso, gameStartAt, match.match_id)
-      database.exec('COMMIT;')
+      exec('COMMIT;')
       attendanceResolvedLastTick += 1
       botFillMatchesLastTick += 1
       appendEvent(match.tournament_id, 'tournament_no_show_bots_inserted', {
@@ -1545,7 +1845,7 @@ export async function createTournamentCoordinator(
         gameStartAt,
       })
     } catch (error) {
-      try { database.exec('ROLLBACK;') } catch {}
+      try { exec('ROLLBACK;') } catch {}
       throw error
     }
 
@@ -1659,7 +1959,7 @@ export async function createTournamentCoordinator(
     if (readyPairs.length === 0) return null
 
     const createdMatchIds: string[] = []
-    database.exec('BEGIN IMMEDIATE;')
+    exec('BEGIN IMMEDIATE;')
     try {
       const isFinal = nextRoundType === 'final'
       for (const pair of readyPairs) {
@@ -1694,9 +1994,9 @@ export async function createTournamentCoordinator(
           })
         }
       }
-      database.exec('COMMIT;')
+      exec('COMMIT;')
     } catch (error) {
-      try { database.exec('ROLLBACK;') } catch {}
+      try { exec('ROLLBACK;') } catch {}
       throw error
     }
 
@@ -1833,7 +2133,9 @@ export async function createTournamentCoordinator(
 
   function reconcileTournament(tournament: TournamentRow): void {
     const matches = selectRunnableMatchesStatement.all(tournament.tournament_id) as MatchRow[]
+    prefetchMatchParticipants(matches)
     for (const initialMatch of matches) {
+      const matchStartedAt = performance.now()
       // No delay/skip here: ensureMatchRoom must run unconditionally for
       // every runnable match, including fresh round-transition matches,
       // because it's what opens the presence window from T0. The old
@@ -1851,6 +2153,7 @@ export async function createTournamentCoordinator(
       match = resolveAttendance(match)
       startResolvedMatchIfDue(match)
       processedLastTick += 1
+      currentTickMatchDurationsMs?.push(performance.now() - matchStartedAt)
     }
 
     if (tournament.status === 'starting') {
@@ -1912,10 +2215,18 @@ export async function createTournamentCoordinator(
     lastError = `tournament settlement pending: ${settlement.reason ?? 'failed'}`
   }
 
+  let currentTickMatchDurationsMs: number[] | null = null
+
   function runTick(): void {
     if (stopped || inFlight) return
     inFlight = true
     const tickStartedAtMs = performance.now()
+    const sqlStatementsAtStart = sqlCounters.statements
+    const sqlMsAtStart = sqlCounters.ms
+    let tournamentsThisTick = 0
+    resetTickCounters()
+    currentTickMatchDurationsMs = []
+    nextAssignmentIndex = new Map()
     lastTickAt = utcNow()
     processedLastTick = 0
     createdRoomsLastTick = 0
@@ -1930,14 +2241,25 @@ export async function createTournamentCoordinator(
     settlementPendingLastTick = false
     recoveryActionsLastTick = 0
     try {
-      const tournaments = selectActiveTournamentsStatement.all(batchSize) as TournamentRow[]
-      for (const tournament of tournaments) {
-        reconcileTournament(tournament)
-      }
-      const settlementDue = selectSettlementDueTournamentsStatement.all(batchSize) as TournamentRow[]
-      for (const tournament of settlementDue) {
-        reconcileSettlementDueTournament(tournament)
-      }
+      withReadScope(() => {
+        const tournaments = selectActiveTournamentsStatement.all(batchSize) as TournamentRow[]
+        tournamentsThisTick = tournaments.length
+        for (const tournament of tournaments) {
+          reconcileTournament(tournament)
+        }
+        // Индексът се подменя само след ПЪЛЕН успешен обход на всички
+        // активни турнири (под batchSize лимита) — иначе остава текущият
+        // (вкл. inline добавените записи), а hit-овете пак се валидират.
+        if (nextAssignmentIndex !== null && tournaments.length < batchSize) {
+          assignmentIndex = nextAssignmentIndex
+          assignmentIndexWarm = true
+        }
+        nextAssignmentIndex = null
+        const settlementDue = selectSettlementDueTournamentsStatement.all(batchSize) as TournamentRow[]
+        for (const tournament of settlementDue) {
+          reconcileSettlementDueTournament(tournament)
+        }
+      })
       lastSuccessAt = utcNow()
       if (!settlementPendingLastTick) {
         lastError = null
@@ -1947,11 +2269,35 @@ export async function createTournamentCoordinator(
       logError('[tournament-coordinator] tick failed', error)
     } finally {
       inFlight = false
+      nextAssignmentIndex = null
+      const durationMs = performance.now() - tickStartedAtMs
+      const matchDurationsMs = currentTickMatchDurationsMs ?? []
+      currentTickMatchDurationsMs = null
+      lastTickMetrics = {
+        durationMs,
+        tournaments: tournamentsThisTick,
+        sqlStatements: sqlCounters.statements - sqlStatementsAtStart,
+        sqlMs: sqlCounters.ms - sqlMsAtStart,
+        commitRooms: tickCounters.commitRooms,
+        commitRoomMs: tickCounters.commitRoomMs,
+        skippedUnchangedCommits: tickCounters.skippedUnchangedCommits,
+        processedMatches: matchDurationsMs.length,
+        matchDurationsMs,
+        maxMatchMs: matchDurationsMs.reduce((max, value) => Math.max(max, value), 0),
+        profileLookups: tickCounters.profileLookups,
+        profileBatchLookups: tickCounters.profileBatchLookups,
+        notifyAssignments: tickCounters.notifyAssignments,
+      }
       try {
-        deps.onTickTiming?.(performance.now() - tickStartedAtMs)
+        deps.onTickTiming?.(durationMs)
       } catch {
         // monitoring hook — никога не влияе на tournament логиката (виж
         // onRoundStarted/onMatchResult pattern-а по-горе)
+      }
+      try {
+        deps.onTickMetrics?.(lastTickMetrics)
+      } catch {
+        // monitoring hook — никога не влияе на tournament логиката
       }
     }
   }
@@ -2073,6 +2419,7 @@ export async function createTournamentCoordinator(
     }
 
     const completed = selectMatchByRoomStatement.get(room.id) as MatchRow
+    removeIndexedAssignmentsForMatch(completed.match_id)
     advanceCompletedMatch(completed)
     closeCompletedTournamentRoom(completed, room)
     notifyMatchesChanged(completed.tournament_id)
@@ -2114,6 +2461,7 @@ export async function createTournamentCoordinator(
     // "БОТ" badge-ът върху avatar-а вече комуникира статуса постоянно, а
     // изчезването му при reclaim (виж по-долу) е самото визуално потвърждение.
     markReplacementPendingStatement.run(replacement.replacement_id)
+    invalidateReplacementReads()
     let pendingRoom = input.room
     const human = createHumanParticipant({
       connectionId: input.connectionId,
@@ -2144,6 +2492,7 @@ export async function createTournamentCoordinator(
     // bot-replaced в повече от един match на същия турнир (напр. пропуснал
     // и semifinal, и final) — виж closeAllUnresolvedReplacementsForProfileStatement.
     closeAllUnresolvedReplacementsForProfileStatement.run(match.tournament_id, input.profileId)
+    invalidateReplacementReads()
     takeoversLastTick += 1
     appendEvent(match.tournament_id, 'tournament_no_show_bot_takeover_completed', {
       matchId: match.match_id,
@@ -2207,7 +2556,53 @@ export async function createTournamentCoordinator(
     return { ok: true, alreadyAcknowledged: false }
   }
 
+  function reportAssignmentLookup(outcome: TournamentAssignmentLookupOutcome): void {
+    try {
+      deps.onAssignmentLookup?.(outcome)
+    } catch {
+      // monitoring hook — никога не влияе на tournament логиката
+    }
+  }
+
+  // Phase 1A fast path. Резултатът е идентичен с legacy scan-а:
+  //  1. selectRunnableMatchForProfileStatement прилага СЪЩИТЕ условия, по
+  //     които legacy scan-ът може изобщо да намери assignment — няма ред →
+  //     legacy също връща null (без нужда от scan по всички мачове).
+  //  2. Има ред и индексът сочи СЪЩИЯ мач/отбор → assignment-ът се строи от
+  //     свежия match ред + runtime стаята (O(1), без entries/profile заявки).
+  //  3. Всичко останало (студен индекс след boot, липсващ/различен запис,
+  //     липсваща стая → нужен room recovery) → непроменения legacy scan.
   function getAssignmentForProfile(profileId: ProfileId): TournamentMatchAssignment | null {
+    if (!assignmentIndexWarm) {
+      reportAssignmentLookup('legacy')
+      return withReadScope(() => getAssignmentForProfileLegacy(profileId))
+    }
+    const located = selectRunnableMatchForProfileStatement.get(profileId) as
+      | { match_id: string; team_id: string }
+      | undefined
+    if (located === undefined) {
+      reportAssignmentLookup('no_match')
+      return null
+    }
+    const indexed = assignmentIndex.get(profileId)
+    if (indexed !== undefined && indexed.matchId === located.match_id && indexed.teamId === located.team_id) {
+      const match = selectMatchByIdStatement.get(indexed.matchId) as MatchRow | undefined
+      const room = match !== undefined && match.room_id !== null ? deps.getRoom(match.room_id) : null
+      if (
+        match !== undefined &&
+        room !== null &&
+        (match.status === 'awaiting_players' || match.status === 'countdown' || match.status === 'in_progress') &&
+        (match.team_a_id === indexed.teamId || match.team_b_id === indexed.teamId)
+      ) {
+        reportAssignmentLookup('index_hit')
+        return toAssignment(match, room, indexed)
+      }
+    }
+    reportAssignmentLookup('legacy')
+    return withReadScope(() => getAssignmentForProfileLegacy(profileId))
+  }
+
+  function getAssignmentForProfileLegacy(profileId: ProfileId): TournamentMatchAssignment | null {
     for (const tournament of selectActiveTournamentsStatement.all(batchSize) as TournamentRow[]) {
       const matches = selectRunnableMatchesStatement.all(tournament.tournament_id) as MatchRow[]
       for (let match of matches) {
@@ -2261,6 +2656,15 @@ export async function createTournamentCoordinator(
   // да показват blocking modal без тази проверка да е TRUE, независимо
   // дали профилът има active tournament participation.
   function hasUnresolvedBotReplacement(tournamentId: TournamentId, profileId: ProfileId): boolean {
+    if (readScope !== null) {
+      let profiles = readScope.unresolvedReplacementProfiles.get(tournamentId)
+      if (profiles === undefined) {
+        const rows = selectUnresolvedReplacementProfilesForTournamentStatement.all(tournamentId) as Array<{ assigned_profile_id: string }>
+        profiles = new Set(rows.map((row) => row.assigned_profile_id))
+        readScope.unresolvedReplacementProfiles.set(tournamentId, profiles)
+      }
+      return profiles.has(profileId)
+    }
     return selectUnresolvedReplacementForProfileStatement.get(tournamentId, profileId) !== undefined
   }
 
@@ -2301,6 +2705,7 @@ export async function createTournamentCoordinator(
     // за да не остане stale по-стар unresolved row от предишен round (напр.
     // semifinal), ако X е бил bot-replaced в повече от един match.
     const result = closeAllUnresolvedReplacementsForProfileStatement.run(tournamentId, profileId) as { changes?: number }
+    invalidateReplacementReads()
     const changed = (result.changes ?? 0) > 0
     if (changed) {
       appendEvent(tournamentId, 'tournament_no_show_bot_takeover_completed', {
@@ -2359,6 +2764,11 @@ export async function createTournamentCoordinator(
         settlementAttemptsLastTick,
         tournamentsSettledLastTick,
         recoveryActionsLastTick,
+        lastTickMetrics: lastTickMetrics === null
+          ? null
+          : { ...lastTickMetrics, matchDurationsMs: [...lastTickMetrics.matchDurationsMs] },
+        assignmentIndexWarm,
+        assignmentIndexSize: assignmentIndex.size,
       }
     },
     close(): void {
