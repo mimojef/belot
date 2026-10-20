@@ -469,6 +469,7 @@ import {
   resolveWsTimingLabel,
   type MainThreadTimingMetrics,
 } from './monitoring/mainThreadTimingMetrics.js'
+import { createGameWorkerBatchMetrics, type GameWorkerBatchMetrics } from './monitoring/gameWorkerBatchMetrics.js'
 import { createEventLoopMonitor } from './monitoring/eventLoopHealth.js'
 import {
   createForensicRingBuffer,
@@ -788,6 +789,9 @@ const backgroundJobMetrics: BackgroundJobMetrics = createBackgroundJobMetrics()
 // runtime/snapshot/completion/journal/jobs). Същите 1s/10s прозорци като
 // backgroundJobMetrics; snapshot-ва се в 1s forensic tick-а заедно с тях.
 const mainThreadTimings: MainThreadTimingMetrics = createMainThreadTimingMetrics()
+// Phase 0C — game worker batch forensics (round trip vs worker wall vs worker
+// thread CPU), същите 1s/10s прозорци.
+const gameWorkerBatchMetrics: GameWorkerBatchMetrics = createGameWorkerBatchMetrics()
 
 // Периодичен main-thread job: синхронната част → 'job', а ако callback-ът
 // върне Promise — wall времето до settle → 'jobAsync'. Същият timer handle и
@@ -26776,6 +26780,7 @@ try {
       maxRoomsPerWorker: gameWorkerPoolMaxRoomsPerWorker,
       workerEntryUrl,
       requestTimeoutMs: 5000,
+      onTickBatchTiming: (workerIndex, timing) => gameWorkerBatchMetrics.record(workerIndex, timing),
     })
 
     await gameWorkerPool.start()
@@ -27159,6 +27164,7 @@ try {
     // Phase 0B — СЪЩИЯТ completed 1s прозорец; reset-ва се на всеки tick
     // (не само при spike), за да няма cumulative false attribution.
     const oneSecondMainThreadTimings = mainThreadTimings.snapshotOneSecondAndReset()
+    const oneSecondGameWorkerBatches = gameWorkerBatchMetrics.snapshotOneSecondAndReset()
 
     if (snap.processCpuNowPercent === null) return
 
@@ -27192,7 +27198,11 @@ try {
             activeMatches: Object.keys(serverState.rooms).length,
             wsConnections: countOpenWebSockets(socketRegistry),
             matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
-            activity: { ...oneSecondActivity, mainThreadTimings: oneSecondMainThreadTimings },
+            activity: {
+              ...oneSecondActivity,
+              mainThreadTimings: oneSecondMainThreadTimings,
+              gameWorkerBatches: oneSecondGameWorkerBatches,
+            },
             backgroundJobs: oneSecondBackgroundJobs,
             gc: oneSecondGc,
           }
@@ -27224,7 +27234,11 @@ try {
       activeMatches: Object.keys(serverState.rooms).length,
       wsConnections: countOpenWebSockets(socketRegistry),
       matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
-      activity: { ...activityCounters.snapshotTenSecondAndReset(), mainThreadTimings: mainThreadTimings.snapshotTenSecondAndReset() },
+      activity: {
+        ...activityCounters.snapshotTenSecondAndReset(),
+        mainThreadTimings: mainThreadTimings.snapshotTenSecondAndReset(),
+        gameWorkerBatches: gameWorkerBatchMetrics.snapshotTenSecondAndReset(),
+      },
       backgroundJobs: backgroundJobMetrics.snapshotTenSecondAndReset(),
       gc: gcMetrics.snapshotTenSecondAndReset(),
     })

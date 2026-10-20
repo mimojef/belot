@@ -249,7 +249,7 @@ export type CpuIncidentSpikeContext = {
   gc: GcStatsSnapshot
   // Сървърът праща целия activity snapshot; UI-ят чете само Phase 0B
   // main-thread timings (липсват в по-стари incidents).
-  activity?: { mainThreadTimings?: MainThreadTimingSnapshot }
+  activity?: { mainThreadTimings?: MainThreadTimingSnapshot; gameWorkerBatches?: GameWorkerBatchSnapshot }
 }
 
 // Phase 0B — огледален на server MainThreadTimingSnapshot (sparse, bounded).
@@ -264,6 +264,44 @@ export type MainThreadTimingStat = {
 }
 
 export type MainThreadTimingSnapshot = Partial<Record<string, Record<string, MainThreadTimingStat>>>
+
+// Phase 0C — огледало на server GameWorkerBatchWindowStat (ключ = 'w1'..'w32'
+// или 'other'). Всички *Ms са продължителности; workerBatchCpu* е CPU на
+// worker thread-а за конкретните batch-ове (не stale 10s worker CPU sample-ът).
+export type GameWorkerBatchWindowStat = {
+  batchCount: number
+  roomCount: number
+  timeoutCount: number
+  errorCount: number
+  diagnosticsMissingCount: number
+  roundTripWallTotalMs: number
+  roundTripWallMaxMs: number
+  requestPostMessageTotalMs: number
+  requestPostMessageMaxMs: number
+  workerBatchWallTotalMs: number
+  workerBatchWallMaxMs: number
+  workerBatchCpuCount: number
+  workerBatchCpuTotalMs: number
+  workerBatchCpuMaxMs: number
+  unaccountedRoundTripTotalMs: number
+  unaccountedRoundTripMaxMs: number
+  sumRoomComputeTotalMs: number
+  maxRoomComputeMs: number
+  slowestRoomPhase: string | null
+  slowestRoomNextPhase: string | null
+  slowestRoomOutcome: string | null
+  slowestRoomId: string | null
+  roundTripSlow50: number
+  roundTripSlow100: number
+  roundTripSlow250: number
+  roundTripSlow500: number
+  workerWallSlow50: number
+  workerWallSlow100: number
+  workerWallSlow250: number
+  workerWallSlow500: number
+}
+
+export type GameWorkerBatchSnapshot = Record<string, GameWorkerBatchWindowStat>
 
 // Огледало на server MAIN_THREAD_HTTP_ACTIVE_TIMING_GROUPS: HTTP wall минус
 // tracked body/io waits — НЕ е доказано CPU време (може да включва event-loop

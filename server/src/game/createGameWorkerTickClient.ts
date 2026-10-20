@@ -6,6 +6,7 @@ import {
   type GameWorkerTickRoomInput,
   type GameWorkerTickRoomResult,
 } from './workerProtocol.js'
+import { sanitizeGameWorkerBatchDiagnostics, type GameWorkerBatchDiagnostics } from './gameWorkerBatchDiagnostics.js'
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -15,9 +16,31 @@ export type GameWorkerTickMessageEndpoint = {
   off(event: 'message', listener: (message: unknown) => void): unknown
 }
 
+// Phase 0C — main-side timing на един compute_tick_rooms request. Всички
+// стойности са продължителности от монотонния часовник на main thread-а.
+export type GameWorkerTickBatchTiming =
+  | {
+      outcome: 'completed'
+      roomCount: number
+      // непосредствено преди postMessage → начало на обработката на response-а
+      roundTripWallMs: number
+      // синхронното postMessage извикване (structured clone на request-а)
+      requestPostMessageMs: number
+      // worker-side diagnostics (null ако липсват/невалидни)
+      diagnostics: GameWorkerBatchDiagnostics | null
+    }
+  | {
+      outcome: 'timeout' | 'error'
+      roomCount: number
+      elapsedMs: number
+    }
+
 export type GameWorkerTickClientConfig = {
   endpoint: GameWorkerTickMessageEndpoint
   requestTimeoutMs?: number
+  // Monitoring-only hook; грешка в него никога не влияе на request-а.
+  onBatchTiming?: (timing: GameWorkerTickBatchTiming) => void
+  now?: () => number
 }
 
 export type GameWorkerTickClient = {
@@ -38,6 +61,8 @@ type PendingTickRequest = {
   resolve: (results: GameWorkerTickRoomResult[]) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
+  dispatchedAt: number
+  requestPostMessageMs: number
 }
 
 // ─── Factory ──────────────────────────────────────────────────────────────────
@@ -60,6 +85,22 @@ export function createGameWorkerTickClient(
   }
 
   const { endpoint } = config
+  const onBatchTiming = config.onBatchTiming ?? null
+  const clockNow = config.now ?? (() => performance.now())
+
+  function reportTiming(timing: GameWorkerTickBatchTiming): void {
+    if (onBatchTiming === null) return
+    try {
+      onBatchTiming(timing)
+    } catch {
+      // monitoring hook — никога не влияе на tick request-а
+    }
+  }
+
+  function reportFailure(req: PendingTickRequest, outcome: 'timeout' | 'error'): void {
+    if (onBatchTiming === null) return
+    reportTiming({ outcome, roomCount: req.expectedRoomIds.size, elapsedMs: clockNow() - req.dispatchedAt })
+  }
 
   let isShuttingDown = false
   let shutdownPromise: Promise<void> | null = null
@@ -69,6 +110,8 @@ export function createGameWorkerTickClient(
   // ─── Message handler ────────────────────────────────────────────────────────
 
   function handleMessage(raw: unknown): void {
+    // Phase 0C: момент на получаване (преди validation на response-а).
+    const receivedAt = onBatchTiming !== null ? clockNow() : 0
     // Handle correlated worker_error
     if (raw !== null && typeof raw === 'object') {
       const msg = raw as Record<string, unknown>
@@ -82,6 +125,7 @@ export function createGameWorkerTickClient(
           if (req !== null) {
             clearTimeout(req.timeout)
             pending.delete(requestId)
+            reportFailure(req, 'error')
             req.reject(
               new Error(
                 `[tick-client] worker_error for requestId=${requestId}: ${String(msg['message'])}`,
@@ -100,6 +144,7 @@ export function createGameWorkerTickClient(
           if (correlated !== null && !isGameWorkerComputeTickRoomsResponseMessage(raw)) {
             clearTimeout(correlated.timeout)
             pending.delete(requestId)
+            reportFailure(correlated, 'error')
             correlated.reject(
               new Error(
                 `[tick-client] malformed compute_tick_rooms_response for requestId=${requestId}`,
@@ -194,6 +239,15 @@ export function createGameWorkerTickClient(
 
     clearTimeout(req.timeout)
     pending.delete(msg.requestId)
+    if (onBatchTiming !== null) {
+      reportTiming({
+        outcome: 'completed',
+        roomCount: req.expectedRoomIds.size,
+        roundTripWallMs: receivedAt - req.dispatchedAt,
+        requestPostMessageMs: req.requestPostMessageMs,
+        diagnostics: sanitizeGameWorkerBatchDiagnostics((raw as { diagnostics?: unknown }).diagnostics, req.expectedRoomIds),
+      })
+    }
     req.resolve(msg.results)
   }
 
@@ -281,7 +335,9 @@ export function createGameWorkerTickClient(
 
     return new Promise<GameWorkerTickRoomResult[]>((resolve, reject) => {
       const timeout = setTimeout(() => {
+        const timedOut = pending.get(requestId)
         pending.delete(requestId)
+        if (timedOut !== undefined) reportFailure(timedOut, 'timeout')
         reject(
           new Error(
             `[tick-client] Request ${requestId} timed out after ${requestTimeoutMs}ms`,
@@ -289,13 +345,16 @@ export function createGameWorkerTickClient(
         )
       }, requestTimeoutMs)
 
-      pending.set(requestId, {
+      const entry: PendingTickRequest = {
         expectedRoomIds: seenIds,
         expectedRevisionByRoomId: revisionByRoomId,
         resolve,
         reject,
         timeout,
-      })
+        dispatchedAt: 0,
+        requestPostMessageMs: 0,
+      }
+      pending.set(requestId, entry)
 
       const message = {
         protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
@@ -307,7 +366,10 @@ export function createGameWorkerTickClient(
       }
 
       try {
+        // Phase 0C: roundTrip започва непосредствено преди postMessage.
+        if (onBatchTiming !== null) entry.dispatchedAt = clockNow()
         endpoint.postMessage(message)
+        if (onBatchTiming !== null) entry.requestPostMessageMs = clockNow() - entry.dispatchedAt
       } catch (err) {
         clearTimeout(timeout)
         pending.delete(requestId)

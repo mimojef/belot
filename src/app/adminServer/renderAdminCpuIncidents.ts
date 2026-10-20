@@ -7,6 +7,7 @@ import type {
   GcStatsSnapshot,
   MainThreadTimingSnapshot,
   MainThreadTimingStat,
+  GameWorkerBatchSnapshot,
 } from './adminServerTypes.js'
 import { MAIN_THREAD_HTTP_ACTIVE_TIMING_GROUPS, MAIN_THREAD_WALL_TIMING_GROUPS } from './adminServerTypes.js'
 
@@ -292,6 +293,34 @@ export function summarizeMainThreadTimings(
     .join(', ')
 }
 
+// Phase 0C — game worker batches за 1s spike прозореца, по worker:
+// round trip (main) vs worker wall vs worker thread CPU vs unaccounted
+// (= round trip − worker wall: postMessage/clone, опашка на worker-а,
+// чакане на main event loop-а). Само evidence, без интерпретация.
+export function summarizeGameWorkerBatches(snapshot: GameWorkerBatchSnapshot | undefined): string {
+  if (snapshot === undefined) return ''
+  const ms = (value: number) => value.toFixed(0)
+  const parts = Object.entries(snapshot)
+    .filter(([, stat]) => stat !== undefined && (stat.batchCount > 0 || stat.timeoutCount > 0 || stat.errorCount > 0))
+    .sort(([a], [b]) => a.localeCompare(b, 'en', { numeric: true }))
+    .map(([worker, s]) => {
+      const cpu = s.workerBatchCpuCount > 0 ? `${ms(s.workerBatchCpuTotalMs)}/${ms(s.workerBatchCpuMaxMs)}мс` : '—'
+      const slow = s.roundTripSlow500 > 0 ? ` ≥500мс:${s.roundTripSlow500}`
+        : s.roundTripSlow250 > 0 ? ` ≥250мс:${s.roundTripSlow250}`
+        : s.roundTripSlow100 > 0 ? ` ≥100мс:${s.roundTripSlow100}`
+        : s.roundTripSlow50 > 0 ? ` ≥50мс:${s.roundTripSlow50}` : ''
+      const slowest = s.slowestRoomOutcome === null
+        ? ''
+        : `, най-бавна стая ${ms(s.maxRoomComputeMs)}мс (${s.slowestRoomPhase ?? '?'}→${s.slowestRoomNextPhase ?? '?'}, ${s.slowestRoomOutcome}${s.slowestRoomId !== null ? `, room ${s.slowestRoomId}` : ''})`
+      const failures = s.timeoutCount + s.errorCount > 0 ? `, timeout ${s.timeoutCount}/error ${s.errorCount}` : ''
+      const missing = s.diagnosticsMissingCount > 0 ? `, без diag ${s.diagnosticsMissingCount}` : ''
+      return `${worker}: ${s.batchCount} batch/${s.roomCount} стаи, round trip общо/макс ${ms(s.roundTripWallTotalMs)}/${ms(s.roundTripWallMaxMs)}мс` +
+        `, worker wall ${ms(s.workerBatchWallTotalMs)}/${ms(s.workerBatchWallMaxMs)}мс, worker CPU ${cpu}` +
+        `, unaccounted ${ms(s.unaccountedRoundTripTotalMs)}/${ms(s.unaccountedRoundTripMaxMs)}мс${slowest}${slow}${failures}${missing}`
+    })
+  return parts.length === 0 ? '0x' : parts.join('; ')
+}
+
 function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) => string): string {
   const { spikeSamples } = detail
   if (spikeSamples.length === 0) return ''
@@ -339,6 +368,14 @@ function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) 
         <td></td>
         <td colspan="6" style="padding:0 8px 6px;font-size:11px;color:rgba(255,255,255,0.35);">Async wall/wait (1s, не е main-thread CPU): ${esc(asyncWallSummary)}</td>
       </tr>`
+    const workerBatchSummary = summarizeGameWorkerBatches(c.activity?.gameWorkerBatches)
+    const workerBatchRow = workerBatchSummary === ''
+      ? ''
+      : `
+      <tr>
+        <td></td>
+        <td colspan="6" style="padding:0 8px 6px;font-size:11px;color:rgba(255,255,255,0.45);">Game workers (1s; round trip = main wall, worker CPU = thread CPU на batch-а, unaccounted = round trip − worker wall): ${esc(workerBatchSummary)}</td>
+      </tr>`
     return `
       <tr>
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${esc(timeStr)}.${msStr}</td>
@@ -348,7 +385,7 @@ function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) 
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${c.onlinePlayers ?? '—'}</td>
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.55);">${esc(bgSummary)}</td>
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.55);white-space:nowrap;">GC: ${esc(gcSummary)}</td>
-      </tr>${mainThreadRow}
+      </tr>${mainThreadRow}${workerBatchRow}
     `
   }).join('')
 

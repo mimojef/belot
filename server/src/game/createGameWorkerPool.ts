@@ -5,6 +5,7 @@ import {
 } from './createGameWorkerLifecycleClient.js'
 import {
   createGameWorkerTickClient,
+  type GameWorkerTickBatchTiming,
   type GameWorkerTickClient,
 } from './createGameWorkerTickClient.js'
 import {
@@ -42,6 +43,9 @@ export type GameWorkerPoolConfig = {
   maxRoomsPerWorker: number
   workerEntryUrl: URL
   requestTimeoutMs?: number
+  // Phase 0C — monitoring-only: timing на всеки compute_tick_rooms batch,
+  // с 0-based индекса на worker-а (bounded от workerCount).
+  onTickBatchTiming?: (workerIndex: number, timing: GameWorkerTickBatchTiming) => void
 }
 
 export type GameWorkerPoolWorkerHealth = {
@@ -300,9 +304,13 @@ export function createGameWorkerPool(
 
     try {
       await lifecycleClient.start()
+      const onTickBatchTiming = config.onTickBatchTiming
       tickClient = createGameWorkerTickClient({
         endpoint: lifecycleClient.getMessageEndpoint(),
         requestTimeoutMs,
+        ...(onTickBatchTiming !== undefined
+          ? { onBatchTiming: (timing: GameWorkerTickBatchTiming) => onTickBatchTiming(index, timing) }
+          : {}),
       })
       shadowSynchronizer = createRoomShadowSynchronizer({
         client: lifecycleClient,

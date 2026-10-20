@@ -8,6 +8,14 @@ import {
 } from './workerProtocol.js'
 import { advanceRoomAuthoritativeGame } from './advanceRoomAuthoritativeGame.js'
 import { isServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
+import {
+  getThreadCpuUsageFn,
+  startGameWorkerBatchDiagnostics,
+  type GameWorkerBatchDiagnostics,
+  type GameWorkerBatchDiagnosticsCollector,
+  type GameWorkerRoomOutcome,
+} from './gameWorkerBatchDiagnostics.js'
+import type { ServerRoom } from '../core/serverTypes.js'
 
 // ─── Startup validation ───────────────────────────────────────────────────────
 
@@ -136,6 +144,47 @@ function normalizeWorkerErrorMessage(error: unknown): string {
   return String(error)
 }
 
+// ─── Phase 0C batch diagnostics ───────────────────────────────────────────────
+// Само измерване — никога не влияе на резултатите или реда на compute-а. Всяка
+// грешка в diagnostics кода изключва diagnostics за този batch (поле липсва).
+
+const threadCpuUsage = getThreadCpuUsageFn()
+const diagnosticsNow = () => performance.now()
+
+function startDiagnostics(): GameWorkerBatchDiagnosticsCollector | null {
+  try {
+    return startGameWorkerBatchDiagnostics(diagnosticsNow, threadCpuUsage)
+  } catch {
+    return null
+  }
+}
+
+function recordRoomDiagnostics(
+  collector: GameWorkerBatchDiagnosticsCollector | null,
+  startedAt: number,
+  roomId: string,
+  room: ServerRoom,
+  nextRoom: ServerRoom | null,
+  outcome: GameWorkerRoomOutcome,
+): GameWorkerBatchDiagnosticsCollector | null {
+  if (collector === null) return null
+  try {
+    collector.recordRoom(startedAt, roomId, room, nextRoom, outcome)
+    return collector
+  } catch {
+    return null
+  }
+}
+
+function finishDiagnostics(collector: GameWorkerBatchDiagnosticsCollector | null): GameWorkerBatchDiagnostics | undefined {
+  if (collector === null) return undefined
+  try {
+    return collector.finish()
+  } catch {
+    return undefined
+  }
+}
+
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 parentPort.on('message', (raw: unknown) => {
@@ -217,9 +266,11 @@ parentPort.on('message', (raw: unknown) => {
 
   if (message.type === 'compute_tick_rooms') {
     const results: GameWorkerTickRoomResult[] = []
+    let diagnostics = startDiagnostics()
 
     for (const input of message.rooms) {
       const { roomId, baseRevision, room } = input
+      const roomStartedAt = diagnostics !== null ? diagnosticsNow() : 0
 
       if (!roomIds.has(roomId)) {
         results.push({
@@ -229,6 +280,7 @@ parentPort.on('message', (raw: unknown) => {
           code: 'not_assigned',
           message: 'Room is not assigned to this worker.',
         })
+        diagnostics = recordRoomDiagnostics(diagnostics, roomStartedAt, roomId, room, null, 'not_assigned')
         continue
       }
 
@@ -236,8 +288,10 @@ parentPort.on('message', (raw: unknown) => {
         const nextRoom = advanceRoomAuthoritativeGame(room, message.now, message.antiBadLuckConfig)
         if (nextRoom === room) {
           results.push({ roomId, baseRevision, result: 'unchanged' })
+          diagnostics = recordRoomDiagnostics(diagnostics, roomStartedAt, roomId, room, null, 'unchanged')
         } else {
           results.push({ roomId, baseRevision, result: 'advanced', room: nextRoom })
+          diagnostics = recordRoomDiagnostics(diagnostics, roomStartedAt, roomId, room, nextRoom, 'advanced')
         }
       } catch (error: unknown) {
         results.push({
@@ -247,14 +301,17 @@ parentPort.on('message', (raw: unknown) => {
           code: 'compute_failed',
           message: normalizeWorkerErrorMessage(error),
         })
+        diagnostics = recordRoomDiagnostics(diagnostics, roomStartedAt, roomId, room, null, 'compute_failed')
       }
     }
 
+    const batchDiagnostics = finishDiagnostics(diagnostics)
     sendMessage({
       type: 'compute_tick_rooms_response',
       protocolVersion: GAME_WORKER_PROTOCOL_VERSION,
       requestId: message.requestId,
       results,
+      ...(batchDiagnostics !== undefined ? { diagnostics: batchDiagnostics } : {}),
     })
     return
   }

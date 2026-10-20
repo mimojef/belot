@@ -1,5 +1,6 @@
 import type { ServerRoom } from '../core/serverTypes.js'
 import type { ServerAntiBadLuckConfig } from './antiBadLuck/serverAntiBadLuckTypes.js'
+import type { GameWorkerBatchDiagnostics } from './gameWorkerBatchDiagnostics.js'
 
 // 4: compute_tick_rooms носи задължителен antiBadLuckConfig (admin setting).
 export const GAME_WORKER_PROTOCOL_VERSION = 4
@@ -145,6 +146,10 @@ export type GameWorkerComputeTickRoomsResponseMessage = {
   type: 'compute_tick_rooms_response'
   requestId: WorkerRequestId
   results: GameWorkerTickRoomResult[]
+  // Phase 0C — optional, само диагностика. Не участва във валидацията на
+  // response-а; main страната го приема само през
+  // sanitizeGameWorkerBatchDiagnostics(). Не изисква protocol version bump.
+  diagnostics?: GameWorkerBatchDiagnostics
 }
 
 export type GameWorkerToGatewayMessage =

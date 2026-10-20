@@ -1,4 +1,5 @@
 import type { MainThreadTimingSnapshot } from './mainThreadTimingMetrics.js'
+import type { GameWorkerBatchSnapshot } from './gameWorkerBatchMetrics.js'
 // Централен, in-memory, O(1) брояч за "logical business activity" —
 // отделен от WS/HTTP transport fan-out. Bounded по конструкция: всеки
 // counter е фиксирано поле в Record, никога Map с произволни ключове.
@@ -96,6 +97,9 @@ export type ActivityCountersSnapshot = ChatActivityCounters &
     // forensic tick-а в index.ts; createActivityCounters() не ги попълва).
     // Optional: по-стари записани incidents нямат това поле.
     mainThreadTimings?: MainThreadTimingSnapshot
+    // Phase 0C — game worker batch forensics за същия прозорец (по worker
+    // индекс). Optional: по-стари incidents нямат това поле.
+    gameWorkerBatches?: GameWorkerBatchSnapshot
   }
 
 const CHAT_KEYS: Array<keyof ChatActivityCounters> = [
