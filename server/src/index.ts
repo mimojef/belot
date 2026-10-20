@@ -470,6 +470,7 @@ import {
   type MainThreadTimingMetrics,
 } from './monitoring/mainThreadTimingMetrics.js'
 import { createGameWorkerBatchMetrics, type GameWorkerBatchMetrics } from './monitoring/gameWorkerBatchMetrics.js'
+import { createStartupTimeline, type StartupShadowTotals, type StartupTimeline } from './monitoring/startupTimeline.js'
 import { createEventLoopMonitor } from './monitoring/eventLoopHealth.js'
 import {
   createForensicRingBuffer,
@@ -792,6 +793,9 @@ const mainThreadTimings: MainThreadTimingMetrics = createMainThreadTimingMetrics
 // Phase 0C — game worker batch forensics (round trip vs worker wall vs worker
 // thread CPU), същите 1s/10s прозорци.
 const gameWorkerBatchMetrics: GameWorkerBatchMetrics = createGameWorkerBatchMetrics()
+// Startup timeline diagnostics — само startup, in-memory, един log ред на
+// първия реален event-loop turn след seedRestoredActiveRooms().
+const startupTimeline: StartupTimeline = createStartupTimeline()
 
 // Периодичен main-thread job: синхронната част → 'job', а ако callback-ът
 // върне Promise — wall времето до settle → 'jobAsync'. Същият timer handle и
@@ -8909,7 +8913,7 @@ function handleAdminMonitoringCurrentRequest(
     return true
   }
 
-  sendJsonResponse(res, 200, { ok: true, snapshot: monitoringSampler.getSnapshot() })
+  sendJsonResponse(res, 200, { ok: true, snapshot: monitoringSampler.getSnapshot(), startupTimeline: startupTimeline.getSnapshot() })
   return true
 }
 
@@ -26733,6 +26737,39 @@ let gameWorkerTickOrchestrator: GameWorkerTickOrchestrator
 // (quarantine + loud log), never a thrown error that would crash the
 // entire server over one room — see quarantineRoomTick()/§6 for the full
 // rationale.
+// Startup timeline: измерва seed-а и веднага след него насрочва (БЕЗ await)
+// setImmediate/setTimeout(0) probe-ове, които само отчитат кога event
+// loop-ът реално се връща. Не променя ordering-а на startup-а.
+function seedRestoredActiveRoomsWithStartupTimeline(): number {
+  const restoredRoomCount = startupTimeline.measure('seedRestoredActiveRooms', () => seedRestoredActiveRooms())
+  startupTimeline.armFirstLoopTurnProbes({
+    restoredRoomCount,
+    workerCount: gameWorkerPool !== null ? gameWorkerPoolWorkerCount : 1,
+    readShadowTotals: readStartupShadowTotals,
+  })
+  return restoredRoomCount
+}
+
+// Read-only сума на shadow health (без side effects, без room IDs).
+function readStartupShadowTotals(): StartupShadowTotals | null {
+  const shadows = gameWorkerPool !== null
+    ? gameWorkerPool.getHealth().workers.map((worker) => worker.shadow)
+    : roomShadowSynchronizer !== null ? [roomShadowSynchronizer.getHealth()] : []
+  if (shadows.length === 0) return null
+  const totals: StartupShadowTotals = {
+    desiredRooms: 0, confirmedRooms: 0, pendingOperations: 0, scheduledRetries: 0, assignFailureCount: 0, assignRetryCount: 0,
+  }
+  for (const shadow of shadows) {
+    totals.desiredRooms += shadow.desiredRooms
+    totals.confirmedRooms += shadow.confirmedRooms
+    totals.pendingOperations += shadow.pendingOperations
+    totals.scheduledRetries += shadow.scheduledRetries
+    totals.assignFailureCount += shadow.assignFailureCount
+    totals.assignRetryCount += shadow.assignRetryCount
+  }
+  return totals
+}
+
 function seedRestoredActiveRooms(): number {
   let seededCount = 0
 
@@ -26792,7 +26829,7 @@ try {
       tickClient: gameWorkerPool,
     })
 
-    const restoredRoomCount = seedRestoredActiveRooms()
+    const restoredRoomCount = seedRestoredActiveRoomsWithStartupTimeline()
 
     console.log(
       `[game-worker-pool] workers=${gameWorkerPoolWorkerCount} maxRoomsPerWorker=${gameWorkerPoolMaxRoomsPerWorker} seededRooms=${restoredRoomCount}`,
@@ -26843,7 +26880,7 @@ try {
       syncTickTarget: activeRoomRuntime,
     })
 
-    const restoredRoomCount = seedRestoredActiveRooms()
+    const restoredRoomCount = seedRestoredActiveRoomsWithStartupTimeline()
 
     console.log(
       `[room-shadow-sync] created seededRooms=${restoredRoomCount}`,
@@ -26891,7 +26928,7 @@ const matchmakingTickInterval = setInterval(() => {
 // Мют lifecycle: еднократен sweep при старт (мютове, изтекли докато
 // сървърът е бил спрян -> 'expired' известия в DB за следващ connect) +
 // един глобален интервал. Стартира СЛЕД serverState/всички helper-и.
-runMuteExpirySweep()
+startupTimeline.measure('runMuteExpirySweep', () => runMuteExpirySweep())
 let muteExpirySweepInterval: ReturnType<typeof setInterval> | null = timedSetInterval('muteExpirySweep', () => {
   if (isServerShuttingDown) {
     return
@@ -26920,6 +26957,7 @@ const gameRuntimeTickInterval = setInterval(() => {
 const localTournamentTestPollIntervalMs = isLocalTournamentTestModeEnabled() ? 1_000 : undefined
 
 try {
+  const createTournamentSchedulerStartedAt = startupTimeline.now()
   tournamentScheduler = await createTournamentScheduler({
     databaseFilePath: databaseBootstrap.databaseFilePath,
     economyStore: tournamentEconomyStore,
@@ -26947,15 +26985,21 @@ try {
         }
       }
     },
-    onTickTiming: (durationMs) => backgroundJobMetrics.record('tournamentSchedulerTick', durationMs),
+    onTickTiming: (durationMs) => {
+      backgroundJobMetrics.record('tournamentSchedulerTick', durationMs)
+      startupTimeline.captureSchedulerTick({ durationMs })
+    },
   })
-  tournamentScheduler.start()
+  startupTimeline.recordSince('createTournamentScheduler', createTournamentSchedulerStartedAt)
+  const startedScheduler = tournamentScheduler
+  startupTimeline.measure('tournamentScheduler.start', () => startedScheduler.start())
   console.log('[tournament-scheduler] Scheduler started')
 } catch (error) {
   console.error('[tournament-scheduler] Failed to start scheduler:', sanitizeErrorMessage(error))
 }
 
 try {
+  const createTournamentCoordinatorStartedAt = startupTimeline.now()
   tournamentCoordinator = await createTournamentCoordinator({
     databaseFilePath: databaseBootstrap.databaseFilePath,
     intervalMs: localTournamentTestPollIntervalMs,
@@ -27041,6 +27085,7 @@ try {
     // Performance audit Phase 0 — разбивка на tick-а към CPU incident /
     // admin monitoring контекста (bounded, без IDs).
     onTickMetrics: (metrics) => {
+      startupTimeline.captureCoordinatorTick(metrics)
       backgroundJobMetrics.record('tournamentCoordinatorSql', metrics.sqlMs)
       for (const matchDurationMs of metrics.matchDurationsMs) {
         backgroundJobMetrics.record('tournamentCoordinatorMatch', matchDurationMs)
@@ -27062,7 +27107,9 @@ try {
       )
     },
   })
-  tournamentCoordinator.start()
+  startupTimeline.recordSince('createTournamentCoordinator', createTournamentCoordinatorStartedAt)
+  const startedCoordinator = tournamentCoordinator
+  startupTimeline.measure('tournamentCoordinator.start', () => startedCoordinator.start())
   console.log('[tournament-coordinator] Coordinator started')
 } catch (error) {
   console.error('[tournament-coordinator] Failed to start coordinator:', sanitizeErrorMessage(error))
@@ -27071,7 +27118,7 @@ try {
 // ─── Monitoring sampler ───────────────────────────────────────────────────────
 
 try {
-  monitoringSampler = createMonitoringSampler({
+  monitoringSampler = startupTimeline.measure('createMonitoringSampler', () => createMonitoringSampler({
     backendStartedAtMs,
     getWsConnectionCount: () => countOpenWebSockets(socketRegistry),
     getUniqueOnlineRealPlayers: () => countUniqueOnlineRealPlayers(serverState.connections),
@@ -27093,9 +27140,13 @@ try {
     getWorkerPoolHealth: () => gameWorkerPool?.getHealth() ?? null,
     getWorkerCpuUsages: () => gameWorkerPool?.getWorkerCpuUsages() ?? Promise.resolve([]),
     sampleEventLoopHealth: () => eventLoopMonitor.sample(),
-    onTiming: (label, durationMs) =>
-      mainThreadTimings.record(label === 'monitoringWorkerCpu' ? 'jobAsync' : 'job', label, durationMs),
-  })
+    onTiming: (label, durationMs) => {
+      mainThreadTimings.record(label === 'monitoringWorkerCpu' ? 'jobAsync' : 'job', label, durationMs)
+      // Първият sync sample се изпълнява вътре в createMonitoringSampler();
+      // само той се записва (startup timeline пази първото измерване).
+      if (label === 'monitoringSample') startupTimeline.recordSince('monitoring.initialCollectSample', startupTimeline.now() - durationMs)
+    },
+  }))
   console.log('[monitoring] Sampler started')
 } catch (error) {
   console.error('[monitoring] Failed to start sampler:', sanitizeErrorMessage(error))
@@ -27104,10 +27155,13 @@ try {
 // ─── Monitoring history ───────────────────────────────────────────────────────
 
 try {
+  const createMonitoringHistoryStoreStartedAt = startupTimeline.now()
   monitoringHistoryStore = await createMonitoringHistoryStore(databaseBootstrap.databaseFilePath)
+  startupTimeline.recordSince('createMonitoringHistoryStore', createMonitoringHistoryStoreStartedAt)
   console.log('[monitoring] History store ready')
 
-  monitoringHistoryStore.purgeOlderThan(getDefaultRetentionCutoffMs())
+  const startedHistoryStore = monitoringHistoryStore
+  startupTimeline.measure('monitoringHistoryStore.purgeOlderThan', () => startedHistoryStore.purgeOlderThan(getDefaultRetentionCutoffMs()))
 
   monitoringHistoryIntervalId = setInterval(() => {
     if (monitoringSampler === null || monitoringHistoryStore === null) return
@@ -27136,10 +27190,14 @@ try {
 // само при реален затворен incident.
 
 try {
+  const createCpuIncidentStoreStartedAt = startupTimeline.now()
   cpuIncidentStore = await createCpuIncidentStore(databaseBootstrap.databaseFilePath)
+  startupTimeline.recordSince('createCpuIncidentStore', createCpuIncidentStoreStartedAt)
   console.log('[monitoring] CPU incident store ready')
 
-  cpuIncidentStore.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs())
+  const startedIncidentStore = cpuIncidentStore
+  startupTimeline.measure('cpuIncidentStore.purgeOlderThan', () =>
+    startedIncidentStore.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs()))
 
   cpuForensicSampleIntervalId = timedSetInterval('cpuForensicSample', () => {
     if (monitoringSampler === null) return
@@ -27663,8 +27721,8 @@ process.once('SIGTERM', () => {
 
 // All game/tournament startup work and admission guards are installed. This
 // synchronous barrier finishes (or isolates Svara) before accepting any socket.
-console.log(`[svara-recovery] status=${svaraLobby.initializeRecovery()}`)
-httpServer.listen(PORT, HOST, () => {
+console.log(`[svara-recovery] status=${startupTimeline.measure('svaraLobby.initializeRecovery', () => svaraLobby.initializeRecovery())}`)
+startupTimeline.measure('httpServer.listen', () => httpServer.listen(PORT, HOST, () => {
   console.log(`[http] Belot V2 server is running at http://${HOST}:${PORT}`)
   console.log(`[ws] WebSocket endpoint is ws://localhost:${PORT}/ws`)
   console.log('[http] Health check: /health')
@@ -27681,6 +27739,13 @@ httpServer.listen(PORT, HOST, () => {
   // httpServer.listen() callback-а (fire-and-forget) и извън game-worker
   // tick loop-а. Job/store се създават само ако CAMPAIGNS_FEATURE_ENABLED=1
   // при startup; при изключен flag няма допълнителна campaign DB connection.
-  campaignScheduler?.start()
-  campaignCreditReconciliationJob?.start()
-})
+  // Startup timeline: само ако subsystem-ът съществува (иначе label-ът е null).
+  if (campaignScheduler) {
+    const startedCampaignScheduler = campaignScheduler
+    startupTimeline.measure('campaignScheduler.start', () => startedCampaignScheduler.start())
+  }
+  if (campaignCreditReconciliationJob) {
+    const startedReconciliationJob = campaignCreditReconciliationJob
+    startupTimeline.measure('campaignCreditReconciliationJob.start', () => startedReconciliationJob.start())
+  }
+}))

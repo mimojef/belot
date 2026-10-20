@@ -79,6 +79,7 @@
     "check:main-thread-timing-metrics": "tsx scripts/checkMainThreadTimingMetrics.ts",
     "check:game-worker-batch-forensics": "tsx scripts/checkGameWorkerBatchForensics.ts",
     "check:room-shadow-synchronizer": "tsx scripts/checkRoomShadowSynchronizer.ts",
+    "check:startup-timeline": "tsx scripts/checkStartupTimeline.ts",
     "bench:main-thread-timing-overhead": "tsx scripts/benchMainThreadTimingOverhead.ts",
     "bench:game-worker-batch-forensics": "tsx scripts/benchGameWorkerBatchForensics.ts",
     "check:gc-metrics": "tsx scripts/checkGcMetrics.ts",
