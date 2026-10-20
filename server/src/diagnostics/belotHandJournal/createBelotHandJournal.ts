@@ -29,6 +29,7 @@ import type {
   BelotHandJournalPlaySource,
 } from './belotHandJournalTypes.js'
 import type { BelotHandJournalStore } from './belotHandJournalStore.js'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../../monitoring/mainThreadTimingMetrics.js'
 import { selectBelotJournalCompressionBackend } from './belotHandJournalCompression.js'
 import {
   createBelotHandJournalStorageEvent,
@@ -103,6 +104,9 @@ export function createBelotHandJournal(options: {
   maintenanceDeps?: BelotHandJournalMaintenanceDeps
   // Тестовете подменят асинхронния flush със синхронен.
   scheduleFlush?: (flush: () => void) => void
+  // Phase 0B — monitoring-only timings (label: observe | derive | flush |
+  // serialize | write | storageCheck | maintenance). Никога не влияе на журнала.
+  onTiming?: MainThreadTimingHook
 }): BelotHandJournal {
   const store = options.store
   const now = options.now ?? Date.now
@@ -111,6 +115,7 @@ export function createBelotHandJournal(options: {
   const statfsFn = options.statfs ?? defaultBelotHandJournalStatfs
   const maintenanceDeps: BelotHandJournalMaintenanceDeps = { statfs: statfsFn, ...options.maintenanceDeps }
   const scheduleFlush = options.scheduleFlush ?? ((flush: () => void) => setImmediate(flush))
+  const timingHook = options.onTiming ?? null
   const stats: BelotHandJournalStats = {
     enabled: store !== null,
     queued: 0,
@@ -211,10 +216,21 @@ export function createBelotHandJournal(options: {
 
   function flushSync(): void {
     if (store === null || queue.length === 0) return
+    const flushStartedAt = timingHook !== null ? performance.now() : 0
+    try {
+      flushSyncUnmeasured()
+    } finally {
+      if (timingHook !== null) safeInvokeTimingHook(timingHook, 'flush', performance.now() - flushStartedAt)
+    }
+  }
+
+  function flushSyncUnmeasured(): void {
+    if (store === null || queue.length === 0) return
     const batch = queue
     queue = []
     stats.queued = 0
     try {
+      const writeStartedAt = timingHook !== null ? performance.now() : 0
       const result = store.insertEvents(batch, (event, claim) => ({
         ...event,
         eventType: 'anomaly',
@@ -231,6 +247,12 @@ export function createBelotHandJournal(options: {
           },
         },
       }))
+      if (timingHook !== null) {
+        const insertMs = performance.now() - writeStartedAt
+        const serializeMs = result.serializeMs ?? 0
+        safeInvokeTimingHook(timingHook, 'serialize', serializeMs)
+        safeInvokeTimingHook(timingHook, 'write', Math.max(0, insertMs - serializeMs))
+      }
       stats.written += result.inserted
       bytesSinceMeasure += result.bytes * ESTIMATED_DB_OVERHEAD_FACTOR
       if (stats.lastUsageBytes !== null && stats.writesPaused === null && stats.lastUsageBytes + bytesSinceMeasure >= storage.maxTotalBytes) {
@@ -274,6 +296,19 @@ export function createBelotHandJournal(options: {
 
   function observeRoomTransition(prevRoom: ServerRoom | null, nextRoom: ServerRoom, origin: BelotHandJournalOrigin): void {
     if (store === null || closed) return
+    if (timingHook === null) {
+      observeRoomTransitionUnmeasured(prevRoom, nextRoom, origin)
+      return
+    }
+    const observeStartedAt = performance.now()
+    try {
+      observeRoomTransitionUnmeasured(prevRoom, nextRoom, origin)
+    } finally {
+      safeInvokeTimingHook(timingHook, 'observe', performance.now() - observeStartedAt)
+    }
+  }
+
+  function observeRoomTransitionUnmeasured(prevRoom: ServerRoom | null, nextRoom: ServerRoom, origin: BelotHandJournalOrigin): void {
     try {
       if (prevRoom !== null && prevRoom.game.authoritativeState === nextRoom.game.authoritativeState) {
         return
@@ -284,6 +319,7 @@ export function createBelotHandJournal(options: {
       }
       seenRoomIds.add(nextRoom.id)
       trimOldest(seenRoomIds, MAX_SEEN_ROOM_IDS)
+      const deriveStartedAt = timingHook !== null ? performance.now() : 0
       const derived = deriveBelotHandJournalEvents({
         prevRoom,
         nextRoom,
@@ -291,6 +327,7 @@ export function createBelotHandJournal(options: {
         nowMs: now(),
         playSources: createPlaySourceRegistry(nextRoom.id),
       })
+      if (timingHook !== null) safeInvokeTimingHook(timingHook, 'derive', performance.now() - deriveStartedAt)
       // Дубликат на hand_started (напр. стая, видяна за първи път веднага
       // след рестарт, когато prevRoom е null) — пропускаме го.
       for (const event of derived) {
@@ -389,8 +426,10 @@ export function createBelotHandJournal(options: {
   function checkStorageNow(): Promise<void> {
     if (store === null || closed) return Promise.resolve()
     if (storageCheckPromise !== null) return storageCheckPromise
+    const storageCheckStartedAt = performance.now()
     storageCheckPromise = checkStorageOnce().finally(() => {
       storageCheckPromise = null
+      safeInvokeTimingHook(timingHook, 'storageCheck', performance.now() - storageCheckStartedAt)
     })
     return storageCheckPromise
   }
@@ -436,12 +475,44 @@ export function createBelotHandJournal(options: {
     }
   }
 
+  // Phase 0B: maintenance е async (wall → 'maintenance'), но между await-ите
+  // прави SYNC SQLite работа (DELETE на ден, COUNT, listDays…). Всеки sync
+  // store метод, извикан от maintenance, се мери като 'maintenance.<метод>'
+  // (фиксирани имена от кода). Методи, връщащи Promise/async iterator, не се
+  // записват тук: тяхната sync работа е на bounded стъпки (страница от
+  // ARCHIVE_PAGE_SIZE реда / VACUUM_PAGES_PER_STEP страници с setImmediate
+  // между тях) и попада в wall-а на 'maintenance'.
+  function withSyncStoreMethodTiming(target: BelotHandJournalStore, hook: MainThreadTimingHook): BelotHandJournalStore {
+    return new Proxy(target, {
+      get(object, property, receiver) {
+        const value: unknown = Reflect.get(object, property, receiver)
+        if (typeof value !== 'function' || typeof property !== 'string') return value
+        const method = value as (...args: unknown[]) => unknown
+        return (...args: unknown[]): unknown => {
+          const startedAt = performance.now()
+          let result: unknown
+          let isAsyncResult = false
+          try {
+            result = method.apply(object, args)
+            isAsyncResult = result !== null && typeof result === 'object' &&
+              (typeof (result as { then?: unknown }).then === 'function' || Symbol.asyncIterator in result)
+            return result
+          } finally {
+            if (!isAsyncResult) safeInvokeTimingHook(hook, `maintenance.${property}`, performance.now() - startedAt)
+          }
+        }
+      },
+    })
+  }
+
   // Ако поддръжката вече тече, връща същото обещание (никога две наведнъж).
   function runMaintenanceNow(): Promise<BelotHandJournalMaintenanceReport | null> {
     if (store === null || closed) return Promise.resolve(null)
     if (maintenancePromise !== null) return maintenancePromise
+    const maintenanceStartedAt = performance.now()
     maintenancePromise = runMaintenanceOnce().finally(() => {
       maintenancePromise = null
+      safeInvokeTimingHook(timingHook, 'maintenance', performance.now() - maintenanceStartedAt)
     })
     return maintenancePromise
   }
@@ -450,7 +521,8 @@ export function createBelotHandJournal(options: {
     if (store === null) return null
     try {
       flushSync()
-      const report = await runBelotHandJournalMaintenance(store, storage, now(), maintenanceDeps)
+      const maintenanceStore = timingHook === null ? store : withSyncStoreMethodTiming(store, timingHook)
+      const report = await runBelotHandJournalMaintenance(maintenanceStore, storage, now(), maintenanceDeps)
       if (closed) return report
       for (const warning of report.warnings) {
         // Тези две се записват от checkStorageNow със собствена логика.

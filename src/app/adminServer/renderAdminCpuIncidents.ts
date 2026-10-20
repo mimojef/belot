@@ -5,7 +5,10 @@ import type {
   BackgroundJobStatsSnapshot,
   BackgroundJobName,
   GcStatsSnapshot,
+  MainThreadTimingSnapshot,
+  MainThreadTimingStat,
 } from './adminServerTypes.js'
+import { MAIN_THREAD_HTTP_ACTIVE_TIMING_GROUPS, MAIN_THREAD_WALL_TIMING_GROUPS } from './adminServerTypes.js'
 
 function fmtPercent(v: number | null): string {
   if (v === null || !isFinite(v)) return '—'
@@ -250,6 +253,45 @@ function sparklinePoints(values: Array<number | null>, width: number, height: nu
 // extreme_spike incident, 10s bucket timeline-ът НЕ съдържа реалния прозорец
 // (виж diagnostic fix брифа §5 — "не е достатъчно тези данни да съществуват
 // само в 10-second pre-context row"). Evidence-only, без интерпретация.
+export type MainThreadTimingSection = 'sync' | 'httpActive' | 'wall'
+
+export function getMainThreadTimingSection(group: string): MainThreadTimingSection {
+  if (MAIN_THREAD_WALL_TIMING_GROUPS.includes(group)) return 'wall'
+  if (MAIN_THREAD_HTTP_ACTIVE_TIMING_GROUPS.includes(group)) return 'httpActive'
+  return 'sync'
+}
+
+// Phase 0B — топ записи (group:label) за 1s spike прозореца, подредени по
+// общо време, за ЕДНА от трите секции:
+//   'sync'       — директно измерено sync main-thread време;
+//   'httpActive' — HTTP wall минус tracked waits (НЕ е доказано CPU време);
+//   'wall'       — async wall/wait (I/O, мрежа, worker-и), не е main-thread CPU.
+// Секциите НЕ се смесват и НЕ се събират. Само evidence, без интерпретация.
+export function summarizeMainThreadTimings(
+  snapshot: MainThreadTimingSnapshot | undefined,
+  section: MainThreadTimingSection,
+  limit = 10,
+): string {
+  if (snapshot === undefined) return ''
+  const entries: Array<{ key: string; stat: MainThreadTimingStat }> = []
+  for (const [group, labels] of Object.entries(snapshot)) {
+    if (labels === undefined) continue
+    if (getMainThreadTimingSection(group) !== section) continue
+    for (const [label, stat] of Object.entries(labels)) {
+      if (stat !== undefined && stat.count > 0) entries.push({ key: `${group}:${label}`, stat })
+    }
+  }
+  if (entries.length === 0) return '0x'
+  return entries
+    .sort((a, b) => b.stat.totalDurationMs - a.stat.totalDurationMs)
+    .slice(0, limit)
+    .map(({ key, stat }) => {
+      const slow = stat.slow250 > 0 ? ` ≥250мс:${stat.slow250}` : stat.slow100 > 0 ? ` ≥100мс:${stat.slow100}` : ''
+      return `${key} ${stat.count}x/общо ${stat.totalDurationMs.toFixed(0)}мс/макс.${stat.maxDurationMs.toFixed(0)}мс${slow}`
+    })
+    .join(', ')
+}
+
 function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) => string): string {
   const { spikeSamples } = detail
   if (spikeSamples.length === 0) return ''
@@ -279,6 +321,24 @@ function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) 
     // представя като "измерена точно в тази секунда", age е винаги видим до
     // самата стойност.
     const workerCpuWithAge = fmtPercentWithAge(c.gameWorkerCpuPercent, c.gameWorkerCpuSampleAgeMs)
+    const mainThreadSummary = summarizeMainThreadTimings(c.activity?.mainThreadTimings, 'sync')
+    const httpActiveSummary = summarizeMainThreadTimings(c.activity?.mainThreadTimings, 'httpActive')
+    const asyncWallSummary = summarizeMainThreadTimings(c.activity?.mainThreadTimings, 'wall')
+    const mainThreadRow = mainThreadSummary === ''
+      ? ''
+      : `
+      <tr>
+        <td></td>
+        <td colspan="6" style="padding:0 8px 2px;font-size:11px;color:rgba(255,255,255,0.55);">Main thread sync (1s): ${esc(mainThreadSummary)}</td>
+      </tr>
+      <tr>
+        <td></td>
+        <td colspan="6" style="padding:0 8px 2px;font-size:11px;color:rgba(255,255,255,0.45);">HTTP active wall (1s, tracked waits excluded; не е доказано CPU време): ${esc(httpActiveSummary)}</td>
+      </tr>
+      <tr>
+        <td></td>
+        <td colspan="6" style="padding:0 8px 6px;font-size:11px;color:rgba(255,255,255,0.35);">Async wall/wait (1s, не е main-thread CPU): ${esc(asyncWallSummary)}</td>
+      </tr>`
     return `
       <tr>
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${esc(timeStr)}.${msStr}</td>
@@ -288,7 +348,7 @@ function renderSpikeSamplesEvidence(detail: CpuIncidentDetail, esc: (s: string) 
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.5);white-space:nowrap;">${c.onlinePlayers ?? '—'}</td>
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.55);">${esc(bgSummary)}</td>
         <td style="padding:4px 8px;font-size:11px;color:rgba(255,255,255,0.55);white-space:nowrap;">GC: ${esc(gcSummary)}</td>
-      </tr>
+      </tr>${mainThreadRow}
     `
   }).join('')
 

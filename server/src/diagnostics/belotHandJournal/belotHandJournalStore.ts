@@ -93,7 +93,7 @@ export type BelotHandJournalStore = {
   insertEvents: (
     events: readonly BelotHandJournalEvent[],
     buildDuplicateAnomaly?: BelotHandJournalDuplicateAnomalyBuilder,
-  ) => { inserted: number; bytes: number; duplicates: BelotHandJournalEvent[] }
+  ) => { inserted: number; bytes: number; duplicates: BelotHandJournalEvent[]; serializeMs?: number }
   hasEventForHand: (handId: string, eventType: string) => boolean
   queryEvents: (query: BelotHandJournalQuery) => BelotHandJournalStoredEvent[]
   listDays: () => string[]
@@ -311,12 +311,16 @@ export async function createBelotHandJournalStore(options: {
   function insertEvents(
     events: readonly BelotHandJournalEvent[],
     buildDuplicateAnomaly?: BelotHandJournalDuplicateAnomalyBuilder,
-  ): { inserted: number; bytes: number; duplicates: BelotHandJournalEvent[] } {
+  ): { inserted: number; bytes: number; duplicates: BelotHandJournalEvent[]; serializeMs: number } {
     const duplicates: BelotHandJournalEvent[] = []
-    if (insertEventStatement === null || events.length === 0) return { inserted: 0, bytes: 0, duplicates }
+    if (insertEventStatement === null || events.length === 0) return { inserted: 0, bytes: 0, duplicates, serializeMs: 0 }
     let bytes = 0
+    // Monitoring-only: сумарно време на payload JSON.stringify в batch-а.
+    let serializeMs = 0
     const insertOne = (event: BelotHandJournalEvent) => {
+      const serializeStartedAt = performance.now()
       const payloadJson = JSON.stringify(event.payload)
+      serializeMs += performance.now() - serializeStartedAt
       bytes += payloadJson.length
       insertEventStatement.run(
         event.schemaVersion,
@@ -347,7 +351,7 @@ export async function createBelotHandJournalStore(options: {
         }
       }
       database.exec('COMMIT;')
-      return { inserted, bytes, duplicates }
+      return { inserted, bytes, duplicates, serializeMs }
     } catch (error) {
       try {
         database.exec('ROLLBACK;')

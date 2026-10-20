@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws'
 import { createRoomSnapshotMessage } from '../protocol/createRoomSnapshotMessage.js'
-import { sendJsonMessage } from './sendJsonMessage.js'
+import { sendSerializedJsonMessage } from './sendJsonMessage.js'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../monitoring/mainThreadTimingMetrics.js'
 import {
   SERVER_SEAT_ORDER,
   type ConnectionId,
@@ -28,11 +29,22 @@ export function setBroadcastRoomSnapshotsSpectatorHook(hook: ((room: ServerRoom)
   spectatorFanoutHook = hook
 }
 
+// Phase 0B — monitoring-only transport timings (label: build | stringify |
+// send | spectatorFanout | total). Отделни от persistence stringify-а
+// (roomSnapshotStringify в activeRoomSnapshotStore). null → без измерване.
+let timingHook: MainThreadTimingHook | null = null
+
+export function setBroadcastRoomSnapshotsTimingHook(hook: MainThreadTimingHook | null): void {
+  timingHook = hook
+}
+
 export function broadcastRoomSnapshots(
   room: ServerRoom,
   socketRegistry: Map<ConnectionId, WebSocket>,
 ): void {
   onBroadcastHook?.()
+  const hook = timingHook
+  const broadcastStartedAt = hook !== null ? performance.now() : 0
   for (const seat of SERVER_SEAT_ORDER) {
     const participant = room.seats[seat].participant
 
@@ -61,7 +73,21 @@ export function broadcastRoomSnapshots(
     }
 
     try {
-      sendJsonMessage(socket, createRoomSnapshotMessage(room, seat))
+      // Същото като sendJsonMessage(socket, createRoomSnapshotMessage(...)):
+      // build → JSON.stringify → socket.send → monitoring hook с payload.type —
+      // само разделено на стъпки, за да се мерят поотделно.
+      const buildStartedAt = hook !== null ? performance.now() : 0
+      const message = createRoomSnapshotMessage(room, seat)
+      const stringifyStartedAt = hook !== null ? performance.now() : 0
+      const serialized = JSON.stringify(message)
+      const sendStartedAt = hook !== null ? performance.now() : 0
+      sendSerializedJsonMessage(socket, serialized, message.type)
+      if (hook !== null) {
+        const sentAt = performance.now()
+        safeInvokeTimingHook(hook, 'build', stringifyStartedAt - buildStartedAt)
+        safeInvokeTimingHook(hook, 'stringify', sendStartedAt - stringifyStartedAt)
+        safeInvokeTimingHook(hook, 'send', sentAt - sendStartedAt)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(
@@ -71,11 +97,15 @@ export function broadcastRoomSnapshots(
   }
 
   if (spectatorFanoutHook !== null) {
+    const spectatorStartedAt = hook !== null ? performance.now() : 0
     try {
       spectatorFanoutHook(room)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[room-snapshot] spectator fan-out failed room=${room.id}: ${message}`)
     }
+    if (hook !== null) safeInvokeTimingHook(hook, 'spectatorFanout', performance.now() - spectatorStartedAt)
   }
+
+  if (hook !== null) safeInvokeTimingHook(hook, 'total', performance.now() - broadcastStartedAt)
 }

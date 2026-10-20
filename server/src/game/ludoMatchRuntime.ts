@@ -1,3 +1,4 @@
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../monitoring/mainThreadTimingMetrics.js'
 import { randomInt } from 'node:crypto'
 import type { LudoRoom } from './ludoRoomsStore.js'
 import { reduceLudoGame } from './ludoEngine/ludoEngineReducer.js'
@@ -160,6 +161,9 @@ type Options = {
   // timing/control flow решение — премахването на callback-а (или липсата
   // му, optional) не променя кога/дали cleanup-ът реално се случва.
   onMatchRemoved?: (match: Pick<LudoMatchSnapshot, 'matchId' | 'ludoRoomId' | 'revision' | 'state'>) => void
+  // Phase 0B — monitoring-only: продължителност на main-thread timer
+  // callback-ите (label: ludoDeadline | ludoFinishedCleanup).
+  onTimerTiming?: MainThreadTimingHook
 }
 
 const ROOM_COLORS: readonly LudoColor[] = ['red', 'blue', 'green', 'yellow']
@@ -219,6 +223,16 @@ export function createLudoMatchRuntime(options: Options) {
     const expectedActiveColor = match.state.activeColor
     const expectedTurnPhase = match.state.turnPhase
     match.deadlineTimer = setTimeout(() => {
+      const timerStartedAt = performance.now()
+      try {
+        runDeadline()
+      } finally {
+        safeInvokeTimingHook(options.onTimerTiming, 'ludoDeadline', performance.now() - timerStartedAt)
+      }
+    }, delay)
+    match.deadlineTimer.unref()
+
+    function runDeadline(): void {
       if (
         match.state.status === 'finished' ||
         match.deadlineAt !== expectedDeadlineAt ||
@@ -238,13 +252,22 @@ export function createLudoMatchRuntime(options: Options) {
           applyMove(match, move.slot, takeoverEvents)
         }
       }
-    }, delay)
-    match.deadlineTimer.unref()
+    }
   }
 
   function scheduleFinishedCleanup(match: Match): void {
     if (match.state.status !== 'finished' || match.finishedCleanupTimer) return
     match.finishedCleanupTimer = setTimeout(() => {
+      const timerStartedAt = performance.now()
+      try {
+        runFinishedCleanup()
+      } finally {
+        safeInvokeTimingHook(options.onTimerTiming, 'ludoFinishedCleanup', performance.now() - timerStartedAt)
+      }
+    }, finishedMatchRetentionMs)
+    match.finishedCleanupTimer.unref()
+
+    function runFinishedCleanup(): void {
       if (matches.get(match.matchId) !== match || match.state.status !== 'finished') return
       matches.delete(match.matchId)
       match.players.forEach((player) => {
@@ -267,8 +290,7 @@ export function createLudoMatchRuntime(options: Options) {
         // (delete-ът, profileToMatch release-а) вече е приключил преди
         // този блок, gameplay/runtime state е недокоснато.
       }
-    }, finishedMatchRetentionMs)
-    match.finishedCleanupTimer.unref()
+    }
   }
 
   function commit(match: Match, state: LudoGameState, events: readonly LudoEngineEvent[]): void {

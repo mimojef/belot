@@ -4,6 +4,7 @@ export { SVARA_TURN_MS, SVARA_JOIN_MS, SVARA_PRESENCE_WAIT_MS, SVARA_DEAL_ENTRY_
   SVARA_DEAL_CARDS_PER_PLAYER, svaraDealingAnimationMs, type SvaraDeadline, type SvaraDeadlineKind } from './svaraDeadlines.js'
 import type { SvaraPublicTable } from '../protocol/svaraSnapshotProtocol.js'
 import type { SvaraMatchRuntime, SvaraSystemCommand } from './svaraMatchRuntime.js'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../../../monitoring/mainThreadTimingMetrics.js'
 
 export interface SvaraClock {
   /** Monotonic epoch milliseconds, also suitable for client deadline display. */
@@ -15,15 +16,33 @@ export interface SvaraClock {
 type Entry = SvaraDeadline & { cancel: () => void }
 
 function realClock(): SvaraClock {
+  return createSvaraRealClock()
+}
+
+// Реалният часовник; по избор с Phase 0B timing hook за sync callback-ите на
+// таймерите ('svaraDeadline' за schedule, 'svaraContinuation' за defer).
+// Без hook поведението е идентично с досегашния realClock().
+export function createSvaraRealClock(onTiming?: MainThreadTimingHook): SvaraClock {
+  const timed = (label: string, callback: () => void): (() => void) => {
+    if (!onTiming) return callback
+    return () => {
+      const startedAt = performance.now()
+      try {
+        callback()
+      } finally {
+        safeInvokeTimingHook(onTiming, label, performance.now() - startedAt)
+      }
+    }
+  }
   return {
     now: svaraEpochNow,
     schedule(callback, delay) {
-      const handle = setTimeout(callback, delay)
+      const handle = setTimeout(timed('svaraDeadline', callback), delay)
       handle.unref()
       return () => clearTimeout(handle)
     },
     defer(callback) {
-      const handle = setImmediate(callback)
+      const handle = setImmediate(timed('svaraContinuation', callback))
       handle.unref()
       return () => clearImmediate(handle)
     },

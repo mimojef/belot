@@ -41,6 +41,7 @@ import { isCampaignsFeatureEnabled } from './campaigns/campaignsFeatureFlag.js'
 import { canSessionAccessSvara } from './games/svara/svaraAccess.js'
 import { handleSvaraHttpRequest } from './games/svara/handleSvaraHttpRequest.js'
 import { createPersistentSvaraLobby } from './games/svara/createPersistentSvaraLobby.js'
+import { createSvaraRealClock } from './games/svara/runtime/createSvaraLifecycle.js'
 import { SVARA_LOBBY_MESSAGE_TYPES, type SvaraLobbyClientMessage } from './games/svara/protocol/svaraLobbyProtocol.js'
 import {
   recordBelotMatchForCampaign,
@@ -251,6 +252,7 @@ import { attachConnectionToRoomSeat } from './core/attachConnectionToRoomSeat.js
 import {
   broadcastRoomSnapshots,
   setBroadcastRoomSnapshotsMonitoringHook,
+  setBroadcastRoomSnapshotsTimingHook,
   setBroadcastRoomSnapshotsSpectatorHook,
 } from './core/broadcastRoomSnapshots.js'
 import {
@@ -460,6 +462,13 @@ import {
 } from './monitoring/monitoringHistoryStore.js'
 import { createActivityCounters, type ActivityCounters } from './monitoring/activityCounters.js'
 import { classifyHttpRequestPath } from './monitoring/httpCategoryClassifier.js'
+import { classifyHttpRoute } from './monitoring/httpRouteClassifier.js'
+import { beginHttpWait, endHttpWait, timeHttpRequest, trackHttpWait } from './monitoring/httpRequestTiming.js'
+import {
+  createMainThreadTimingMetrics,
+  resolveWsTimingLabel,
+  type MainThreadTimingMetrics,
+} from './monitoring/mainThreadTimingMetrics.js'
 import { createEventLoopMonitor } from './monitoring/eventLoopHealth.js'
 import {
   createForensicRingBuffer,
@@ -775,6 +784,36 @@ const cpuIncidentDetector: CpuIncidentDetector = createCpuIncidentDetector()
 // Diagnostic fix (виж forensic audit) — bounded background job timing и GC
 // forensic metrics, четени само в extreme-spike snapshot-а по-долу.
 const backgroundJobMetrics: BackgroundJobMetrics = createBackgroundJobMetrics()
+// Phase 0B — bounded labeled main-thread timings (HTTP/WS/gameplay/commit/
+// runtime/snapshot/completion/journal/jobs). Същите 1s/10s прозорци като
+// backgroundJobMetrics; snapshot-ва се в 1s forensic tick-а заедно с тях.
+const mainThreadTimings: MainThreadTimingMetrics = createMainThreadTimingMetrics()
+
+// Периодичен main-thread job: синхронната част → 'job', а ако callback-ът
+// върне Promise — wall времето до settle → 'jobAsync'. Същият timer handle и
+// аргументи като setInterval/setTimeout; поведението на callback-а не се мени.
+function timedSetInterval(label: string, fn: () => unknown, ms: number): ReturnType<typeof setInterval> {
+  return setInterval(() => {
+    mainThreadTimings.timeSyncAndAsync('job', 'jobAsync', label, fn)
+  }, ms)
+}
+
+function timedSetTimeout(label: string, fn: () => unknown, ms: number): ReturnType<typeof setTimeout> {
+  return setTimeout(() => {
+    mainThreadTimings.timeSyncAndAsync('job', 'jobAsync', label, fn)
+  }, ms)
+}
+
+// Еднократен per-entity таймер (expiry/deadline): sync callback → 'timer'.
+// Връща callback за setTimeout; поведението на fn не се мени.
+function timedTimerCallback(label: string, fn: () => void): () => void {
+  return () => mainThreadTimings.time('timer', label, fn)
+}
+
+// Human gameplay фаза: записва (now - startedAt) и връща now за следващата фаза.
+function recordGameplayPhase(label: string, startedAt: number): number {
+  return mainThreadTimings.recordSince('gameplay', label, startedAt)
+}
 const gcMetrics: GcMetrics = createGcMetrics()
 let cpuIncidentStore: CpuIncidentStore | null = null
 let cpuForensicBucketIntervalId: ReturnType<typeof setInterval> | null = null
@@ -828,7 +867,8 @@ function runMatchCompletionSideEffect(
   effect: () => void,
 ): boolean {
   try {
-    effect()
+    // Phase 0B — label е литерал от call site-а (bounded).
+    mainThreadTimings.time('completion', label, effect)
     return true
   } catch (error) {
     console.error(
@@ -965,7 +1005,16 @@ const belotHandJournal: BelotHandJournal = await (async () => {
   try {
     const store = await createBelotHandJournalStore()
     console.log(`[belot-hand-journal] enabled db=${store.databasePath}`)
-    return createBelotHandJournal({ store })
+    return createBelotHandJournal({
+      store,
+      // storageCheck/maintenance са async (wall) → journalAsync; останалите sync.
+      onTiming: (label, durationMs) =>
+        mainThreadTimings.record(
+          label === 'storageCheck' || label === 'maintenance' ? 'journalAsync' : 'journal',
+          label,
+          durationMs,
+        ),
+    })
   } catch (error) {
     console.error('[belot-hand-journal] failed to open store — journal disabled', error)
     return createBelotHandJournal({ store: null })
@@ -985,7 +1034,7 @@ const likeStore = await createLikeStore(databaseBootstrap.databaseFilePath)
 const blockStore = await createBlockStore(databaseBootstrap.databaseFilePath)
 const playersPageSnapshotStore = createPlayersPageSnapshotStore()
 playerProgressStore.seedCatalogBotsIfNeeded()
-catalogBotRefillInterval = setInterval(() => {
+catalogBotRefillInterval = timedSetInterval('catalogBotRefill', () => {
   if (isServerShuttingDown) {
     return
   }
@@ -1031,7 +1080,7 @@ function refreshAntiBadLuckRuntimeConfig(reason: string): void {
   }
 }
 
-let antiBadLuckConfigRefreshInterval: ReturnType<typeof setInterval> | null = setInterval(
+let antiBadLuckConfigRefreshInterval: ReturnType<typeof setInterval> | null = timedSetInterval('antiBadLuckConfigRefresh',
   () => refreshAntiBadLuckRuntimeConfig('periodic'),
   ANTI_BAD_LUCK_CONFIG_REFRESH_INTERVAL_MS,
 )
@@ -1445,11 +1494,11 @@ function runLobbyChatRetentionCleanup(): void {
   }
 }
 
-let lobbyChatRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+let lobbyChatRetentionStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('lobbyChatRetention',
   runLobbyChatRetentionCleanup,
   LOBBY_CHAT_RETENTION_STARTUP_DELAY_MS,
 )
-let lobbyChatRetentionInterval: ReturnType<typeof setInterval> | null = setInterval(
+let lobbyChatRetentionInterval: ReturnType<typeof setInterval> | null = timedSetInterval('lobbyChatRetention',
   runLobbyChatRetentionCleanup,
   LOBBY_CHAT_RETENTION_INTERVAL_MS,
 )
@@ -2507,7 +2556,7 @@ function runTopicMessageLikePoll(): void {
   }
 }
 
-let topicMessageLikePollInterval: ReturnType<typeof setInterval> | null = setInterval(
+let topicMessageLikePollInterval: ReturnType<typeof setInterval> | null = timedSetInterval('topicMessageLikePoll',
   runTopicMessageLikePoll,
   TOPIC_MESSAGE_LIKE_POLL_INTERVAL_MS,
 )
@@ -2764,7 +2813,7 @@ function runTopicsDirectoryCrossInstancePoll(): void {
   }
 }
 
-let topicsDirectoryPollInterval: ReturnType<typeof setInterval> | null = setInterval(
+let topicsDirectoryPollInterval: ReturnType<typeof setInterval> | null = timedSetInterval('topicsDirectoryPoll',
   runTopicsDirectoryCrossInstancePoll,
   TOPICS_DIRECTORY_POLL_INTERVAL_MS,
 )
@@ -2895,20 +2944,20 @@ async function runChatAttachmentOrphanScan(): Promise<void> {
   }
 }
 
-let chatAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runChatAttachmentCleanup() },
+let chatAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('chatAttachmentCleanup',
+  () => runChatAttachmentCleanup(),
   CHAT_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS,
 )
-let chatAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runChatAttachmentCleanup() },
+let chatAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = timedSetInterval('chatAttachmentCleanup',
+  () => runChatAttachmentCleanup(),
   CHAT_ATTACHMENT_CLEANUP_INTERVAL_MS,
 )
-let chatAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runChatAttachmentOrphanScan() },
+let chatAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('chatAttachmentOrphanScan',
+  () => runChatAttachmentOrphanScan(),
   CHAT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS,
 )
-let chatAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runChatAttachmentOrphanScan() },
+let chatAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = timedSetInterval('chatAttachmentOrphanScan',
+  () => runChatAttachmentOrphanScan(),
   CHAT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
 )
 
@@ -2936,11 +2985,11 @@ function runFriendshipRetentionCleanup(): void {
   }
 }
 
-let friendshipRetentionCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+let friendshipRetentionCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('friendshipRetention',
   runFriendshipRetentionCleanup,
   FRIENDSHIP_RETENTION_CLEANUP_STARTUP_DELAY_MS,
 )
-let friendshipRetentionCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
+let friendshipRetentionCleanupInterval: ReturnType<typeof setInterval> | null = timedSetInterval('friendshipRetention',
   runFriendshipRetentionCleanup,
   FRIENDSHIP_RETENTION_CLEANUP_INTERVAL_MS,
 )
@@ -3024,8 +3073,8 @@ async function runGiftItemImageOrphanSweep(): Promise<void> {
   }
 }
 
-let giftItemOrphanSweepStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runGiftItemImageOrphanSweep() },
+let giftItemOrphanSweepStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('giftItemOrphanSweep',
+  () => runGiftItemImageOrphanSweep(),
   GIFT_ITEM_ORPHAN_SWEEP_STARTUP_DELAY_MS,
 )
 
@@ -3046,8 +3095,8 @@ async function runDeletedGiftItemImageReconciliation(): Promise<void> {
   }
 }
 
-let deletedGiftItemImageReconcileStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runDeletedGiftItemImageReconciliation() },
+let deletedGiftItemImageReconcileStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('deletedGiftItemImageReconcile',
+  () => runDeletedGiftItemImageReconciliation(),
   DELETED_GIFT_ITEM_IMAGE_RECONCILE_STARTUP_DELAY_MS,
 )
 
@@ -3075,11 +3124,11 @@ function runOversizedChatPruneJob(): void {
   }
 }
 
-let oversizedChatPruneStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+let oversizedChatPruneStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('oversizedChatPrune',
   runOversizedChatPruneJob,
   OVERSIZED_CHAT_PRUNE_STARTUP_DELAY_MS,
 )
-let oversizedChatPruneInterval: ReturnType<typeof setInterval> | null = setInterval(
+let oversizedChatPruneInterval: ReturnType<typeof setInterval> | null = timedSetInterval('oversizedChatPrune',
   runOversizedChatPruneJob,
   OVERSIZED_CHAT_PRUNE_INTERVAL_MS,
 )
@@ -3119,6 +3168,7 @@ const campaignScheduler = campaignsStore !== null
       // трябва да работи по същия начин като ръчно активирана кампания").
       onCampaignActivated: () => broadcastActiveCampaignThemeToAllLocalConnections(),
       onCampaignFinished: () => broadcastActiveCampaignThemeToAllLocalConnections(),
+      setInterval: (fn, ms) => timedSetInterval('campaignScheduler', fn, ms),
     })
   : null
 const campaignCreditStore = isCampaignsFeatureEnabled()
@@ -3139,6 +3189,7 @@ const campaignCreditReconciliationJob = campaignCreditStore !== null
       // внася cursor helper-ите от campaignGameHooks.ts, затова последният
       // не прави статичен value import обратно).
       reconcilePurchases: reconcileMissingPurchaseCampaignCredits,
+      setInterval: (fn, ms) => timedSetInterval('campaignCreditReconciliation', fn, ms),
     })
   : null
 // Фаза 11 — reconciliation-gated окончателен архив. Собствен periodic job
@@ -3182,7 +3233,7 @@ async function runCampaignArchivalJobTick(): Promise<void> {
 let campaignArchivalJobIntervalId: ReturnType<typeof globalThis.setInterval> | null = null
 if (campaignArchiveStore !== null) {
   void runCampaignArchivalJobTick()
-  campaignArchivalJobIntervalId = globalThis.setInterval(() => { void runCampaignArchivalJobTick() }, CAMPAIGN_ARCHIVAL_JOB_INTERVAL_MS)
+  campaignArchivalJobIntervalId = timedSetInterval('campaignArchival', () => runCampaignArchivalJobTick(), CAMPAIGN_ARCHIVAL_JOB_INTERVAL_MS)
   campaignArchivalJobIntervalId.unref()
 }
 const vipStore = await createVipStore(databaseBootstrap.databaseFilePath)
@@ -3268,12 +3319,12 @@ async function runSiteVisitRetentionCleanup(): Promise<void> {
   }
 }
 
-siteVisitRetentionStartupTimeout = setTimeout(
-  () => { void runSiteVisitRetentionCleanup() },
+siteVisitRetentionStartupTimeout = timedSetTimeout('siteVisitRetention',
+  () => runSiteVisitRetentionCleanup(),
   SITE_VISIT_RETENTION_STARTUP_DELAY_MS,
 )
-siteVisitRetentionInterval = setInterval(
-  () => { void runSiteVisitRetentionCleanup() },
+siteVisitRetentionInterval = timedSetInterval('siteVisitRetention',
+  () => runSiteVisitRetentionCleanup(),
   SITE_VISIT_RETENTION_INTERVAL_MS,
 )
 
@@ -3288,7 +3339,7 @@ function runSupportCleanup(): void {
   }
 }
 runSupportCleanup()
-supportCleanupInterval = setInterval(runSupportCleanup, 24 * 60 * 60 * 1000)
+supportCleanupInterval = timedSetInterval('supportCleanup', runSupportCleanup, 24 * 60 * 60 * 1000)
 
 async function runSupportAttachmentCleanup(): Promise<void> {
   if (isServerShuttingDown) {
@@ -3388,20 +3439,20 @@ async function runSupportAttachmentOrphanScan(): Promise<void> {
   }
 }
 
-let supportAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runSupportAttachmentCleanup() },
+let supportAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('supportAttachmentCleanup',
+  () => runSupportAttachmentCleanup(),
   SUPPORT_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS,
 )
-let supportAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runSupportAttachmentCleanup() },
+let supportAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = timedSetInterval('supportAttachmentCleanup',
+  () => runSupportAttachmentCleanup(),
   SUPPORT_ATTACHMENT_CLEANUP_INTERVAL_MS,
 )
-let supportAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runSupportAttachmentOrphanScan() },
+let supportAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('supportAttachmentOrphanScan',
+  () => runSupportAttachmentOrphanScan(),
   SUPPORT_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS,
 )
-let supportAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runSupportAttachmentOrphanScan() },
+let supportAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = timedSetInterval('supportAttachmentOrphanScan',
+  () => runSupportAttachmentOrphanScan(),
   SUPPORT_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
 )
 
@@ -3516,20 +3567,20 @@ async function runTopicAttachmentOrphanScan(): Promise<void> {
   }
 }
 
-let topicAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runTopicAttachmentCleanup() },
+let topicAttachmentCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('topicAttachmentCleanup',
+  () => runTopicAttachmentCleanup(),
   TOPIC_ATTACHMENT_CLEANUP_STARTUP_DELAY_MS,
 )
-let topicAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runTopicAttachmentCleanup() },
+let topicAttachmentCleanupInterval: ReturnType<typeof setInterval> | null = timedSetInterval('topicAttachmentCleanup',
+  () => runTopicAttachmentCleanup(),
   TOPIC_ATTACHMENT_CLEANUP_INTERVAL_MS,
 )
-let topicAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runTopicAttachmentOrphanScan() },
+let topicAttachmentOrphanScanStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('topicAttachmentOrphanScan',
+  () => runTopicAttachmentOrphanScan(),
   TOPIC_ATTACHMENT_ORPHAN_SCAN_STARTUP_DELAY_MS,
 )
-let topicAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runTopicAttachmentOrphanScan() },
+let topicAttachmentOrphanScanInterval: ReturnType<typeof setInterval> | null = timedSetInterval('topicAttachmentOrphanScan',
+  () => runTopicAttachmentOrphanScan(),
   TOPIC_ATTACHMENT_ORPHAN_SCAN_INTERVAL_MS,
 )
 
@@ -3580,11 +3631,11 @@ function runTopicRetentionPurge(): void {
   }
 }
 
-let topicRetentionPurgeStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
+let topicRetentionPurgeStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('topicRetentionPurge',
   runTopicRetentionPurge,
   TOPIC_RETENTION_PURGE_STARTUP_DELAY_MS,
 )
-let topicRetentionPurgeInterval: ReturnType<typeof setInterval> | null = setInterval(
+let topicRetentionPurgeInterval: ReturnType<typeof setInterval> | null = timedSetInterval('topicRetentionPurge',
   runTopicRetentionPurge,
   TOPIC_RETENTION_PURGE_INTERVAL_MS,
 )
@@ -3784,12 +3835,12 @@ async function runTopicInactivityCleanup(): Promise<void> {
   }
 }
 
-let topicInactivityCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = setTimeout(
-  () => { void runTopicInactivityCleanup() },
+let topicInactivityCleanupStartupTimeout: ReturnType<typeof setTimeout> | null = timedSetTimeout('topicInactivityCleanup',
+  () => runTopicInactivityCleanup(),
   TOPIC_INACTIVITY_CLEANUP_STARTUP_DELAY_MS,
 )
-let topicInactivityCleanupInterval: ReturnType<typeof setInterval> | null = setInterval(
-  () => { void runTopicInactivityCleanup() },
+let topicInactivityCleanupInterval: ReturnType<typeof setInterval> | null = timedSetInterval('topicInactivityCleanup',
+  () => runTopicInactivityCleanup(),
   TOPIC_INACTIVITY_CLEANUP_INTERVAL_MS,
 )
 
@@ -3816,7 +3867,7 @@ function scheduleMidnightMissionRotation(): void {
 
   const delay = msUntilNextSofiaMidnight()
   console.log(`[missions] Next midnight rotation in ${Math.round(delay / 60000)} min`)
-  missionRotationTimeout = setTimeout(() => {
+  missionRotationTimeout = timedSetTimeout('missionRotation', () => {
     missionRotationTimeout = null
 
     if (isServerShuttingDown) {
@@ -4015,7 +4066,11 @@ function commitServerRoomWithSnapshot(
   room: ServerRoom,
   currentServerState: ServerState = serverState,
 ): ServerState {
+  let commitPhaseAt = performance.now()
   persistRoomSnapshot(room)
+  const persistedAt = performance.now()
+  mainThreadTimings.record('commit', 'persist', persistedAt - commitPhaseAt)
+  commitPhaseAt = persistedAt
   // Единствената наистина универсална точка, през която минава всяко
   // authoritative room state advance (worker-tick batch commits И direct
   // submit_play_card/submit_bid_action/submit_cut handlers) — coordinator-ът
@@ -4024,7 +4079,11 @@ function commitServerRoomWithSnapshot(
   // notifyFeederScoreProgress коментара в tournamentCoordinator.ts).
   tournamentCoordinator?.notifyFeederScoreProgress(room)
   notifyTournamentMatchesViewersScore(room)
-  return commitServerRoomReplacement(room, currentServerState)
+  const notifiedAt = performance.now()
+  mainThreadTimings.record('commit', 'tournamentNotify', notifiedAt - commitPhaseAt)
+  const nextState = commitServerRoomReplacement(room, currentServerState)
+  mainThreadTimings.record('commit', 'replace', performance.now() - notifiedAt)
+  return nextState
 }
 
 // "Турнирни срещи" — live резултат към абонатите на турнира. Евтин no-op за
@@ -4154,6 +4213,7 @@ const svaraService = await createPersistentSvaraLobby({
     tournamentCoordinator === null || tournamentCoordinator.getActiveTournamentIdForProfile(profileId) !== null,
   onError: (error) => console.error('[svara-lobby] request failed', error),
   onAdmission: (profileId) => endBelotSpectatingForProfile(profileId, 'game_commitment'),
+  clock: createSvaraRealClock((label, durationMs) => mainThreadTimings.record('timer', label, durationMs)),
 })
 const svaraLobby = svaraService.lobby
 
@@ -4794,7 +4854,7 @@ function schedulePrivateRoomInviteExpiry(
   expiresAt: number,
 ): void {
   const delay = Math.max(0, expiresAt - Date.now())
-  const timer = setTimeout(() => {
+  const timer = setTimeout(timedTimerCallback('privateRoomInviteExpiry', () => {
     privateRoomInviteTimers.delete(inviteId)
 
     if (isServerShuttingDown) {
@@ -4808,7 +4868,7 @@ function schedulePrivateRoomInviteExpiry(
     if (targetConn) {
       safeSendToConnection(targetConn.id, { type: 'private_room_invite_expired', inviteId })
     }
-  }, delay)
+  }), delay)
   privateRoomInviteTimers.set(inviteId, timer)
 }
 
@@ -4864,6 +4924,7 @@ const privateRoomsStore = createPrivateRoomsStore({
   onRoomClosed: (room) => handlePrivateRoomClosed(room),
   onMemberLeft: (room, occupant) => handlePrivateRoomMemberLeft(room, occupant),
   onMemberKicked: (room, occupant) => handlePrivateRoomMemberKicked(room, occupant),
+  onTimerTiming: (label, durationMs) => mainThreadTimings.record('timer', label, durationMs),
 })
 
 function buildLudoRoomSnapshot(room: LudoRoom): LudoRoomSnapshot {
@@ -5316,7 +5377,7 @@ function scheduleLudoGiftExpiryFinalization(
 ): void {
   const key = `${matchId}:${recipientColor}`
   clearLudoGiftExpiryTimer(matchId, recipientColor)
-  const timerId = setTimeout(() => {
+  const timerId = setTimeout(timedTimerCallback('ludoGiftExpiry', () => {
     ludoGiftExpiryTimers.delete(key)
     const gifts = activeLudoGiftsByMatchId.get(matchId)
     if (!gifts) return
@@ -5327,7 +5388,7 @@ function scheduleLudoGiftExpiryFinalization(
       activeLudoGiftsByMatchId.delete(matchId)
     }
     void tryFinalizeDeletedGiftImage(imageUrl)
-  }, delayMs)
+  }), delayMs)
   ludoGiftExpiryTimers.set(key, timerId)
 }
 
@@ -5559,6 +5620,7 @@ const ludoMatchRuntime = createLudoMatchRuntime({
       activeLudoGiftsByMatchId.delete(match.matchId)
     }
   },
+  onTimerTiming: (label, durationMs) => mainThreadTimings.record('timer', label, durationMs),
 })
 
 const ludoRoomsStore = createLudoRoomsStore({
@@ -6089,11 +6151,18 @@ async function tickRoomGameRuntimes(): Promise<void> {
   }
 
   if (roomsToTick.length > 0) {
-    const batchResult = await gameWorkerTickOrchestrator.computeCandidates({
+    const dispatchStartedAt = performance.now()
+    const batchPromise = gameWorkerTickOrchestrator.computeCandidates({
       now,
       rooms: roomsToTick,
       antiBadLuckConfig: antiBadLuckRuntimeConfig,
     })
+    // Синхронната част (input validation + structuredClone/postMessage към
+    // workers) е main-thread работа; чакането на worker-ите не е.
+    const dispatchedAt = performance.now()
+    mainThreadTimings.record('runtime', 'computeDispatch', dispatchedAt - dispatchStartedAt)
+    const batchResult = await batchPromise
+    mainThreadTimings.record('runtimeWait', 'workerCompute', performance.now() - dispatchedAt)
 
     if (isServerShuttingDown) {
       return
@@ -6147,6 +6216,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
         continue
       }
 
+      const applyStartedAt = performance.now()
       const applyResult = applyAcceptedGameWorkerCandidate({
         serverState,
         roomId,
@@ -6157,12 +6227,18 @@ async function tickRoomGameRuntimes(): Promise<void> {
           serverState = upsertServerRoom(serverState, room)
         },
         persist: (room) => {
-          activeRoomSnapshotStore.upsertRoom(room)
+          mainThreadTimings.time('runtime', 'applyPersist', () => activeRoomSnapshotStore.upsertRoom(room))
         },
         broadcast: (room) => {
-          broadcastRoomSnapshots(room, socketRegistry)
+          mainThreadTimings.time('runtime', 'applyBroadcast', () => broadcastRoomSnapshots(room, socketRegistry))
         },
         onApplied: (previousRoom, room) => {
+          mainThreadTimings.time('runtime', 'applyOnApplied', () => onAppliedUnmeasured(previousRoom, room))
+        },
+      })
+      mainThreadTimings.record('runtime', 'applyTotal', performance.now() - applyStartedAt)
+
+      function onAppliedUnmeasured(previousRoom: ServerRoom, room: ServerRoom): void {
           logAcceptedCardPlayAudit({
             previousRoom,
             nextRoom: room,
@@ -6314,8 +6390,7 @@ async function tickRoomGameRuntimes(): Promise<void> {
               applyPendingModerationForRoomParticipants(room)
             },
           )
-        },
-      })
+      }
 
       if (applyResult.kind === 'persist_failed') {
         console.error(
@@ -7558,21 +7633,27 @@ function readJsonRequestBody(
   req: IncomingMessage,
   maxBytes: number = 64_000,
 ): Promise<unknown> {
+  // Phase 0B: чакането на body-то (до 'end'/'error'/'close') е httpBodyWait,
+  // не main-thread време; JSON.parse след 'end' остава в HTTP active.
+  const bodyWait = beginHttpWait('body')
   return new Promise((resolve, reject) => {
     let body = ''
 
     req.setEncoding('utf8')
+    req.once('close', () => endHttpWait(bodyWait))
 
     req.on('data', (chunk: string) => {
       body += chunk
 
       if (Buffer.byteLength(body, 'utf8') > maxBytes) {
+        endHttpWait(bodyWait)
         reject(new Error('Request body is too large.'))
         req.destroy()
       }
     })
 
     req.on('end', () => {
+      endHttpWait(bodyWait)
       if (!body.trim()) {
         resolve({})
         return
@@ -7585,7 +7666,10 @@ function readJsonRequestBody(
       }
     })
 
-    req.on('error', reject)
+    req.on('error', (error) => {
+      endHttpWait(bodyWait)
+      reject(error)
+    })
   })
 }
 
@@ -7593,25 +7677,34 @@ function readRawRequestBody(
   req: IncomingMessage,
   maxBytes: number = 64_000,
 ): Promise<Buffer> {
+  // Phase 0B: виж readJsonRequestBody — чакането на body-то е httpBodyWait.
+  const bodyWait = beginHttpWait('body')
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = []
     let total = 0
+
+    req.once('close', () => endHttpWait(bodyWait))
 
     req.on('data', (chunk: Buffer) => {
       chunks.push(chunk)
       total += chunk.length
 
       if (total > maxBytes) {
+        endHttpWait(bodyWait)
         reject(new Error('Request body is too large.'))
         req.destroy()
       }
     })
 
     req.on('end', () => {
+      endHttpWait(bodyWait)
       resolve(Buffer.concat(chunks))
     })
 
-    req.on('error', reject)
+    req.on('error', (error) => {
+      endHttpWait(bodyWait)
+      reject(error)
+    })
   })
 }
 
@@ -8581,13 +8674,13 @@ async function handleUploadsRequest(
   }
 
   try {
-    const fileStats = await stat(filePath)
+    const fileStats = await trackHttpWait('io', stat(filePath))
 
     if (!fileStats.isFile()) {
       return false
     }
 
-    const fileBuffer = await readFile(filePath)
+    const fileBuffer = await trackHttpWait('io', readFile(filePath))
     // Фаза 10 — до сега ВСЕКИ upload тип (avatars/gallery/ad-campaigns/
     // gift-items) е бил сервиран само като .webp, затова hardcoded
     // 'image/webp' никога не е бил проблем. Кампанийната анимирана GIF
@@ -8669,7 +8762,7 @@ async function handleGuestContactRequest(
   activityCounters.incrementChat('guestContactMessages')
 
   try {
-    const result = await sendGuestContactEmail(validation.value)
+    const result = await trackHttpWait('io', sendGuestContactEmail(validation.value))
 
     if (!result.ok) {
       guestContactStore.markGuestContactEmailFailed(storedMessage.messageId, result.message)
@@ -9298,14 +9391,14 @@ async function handleAuthRequest(
       return true
     }
 
-    const emailResult = await sendRegistrationVerificationEmail({
+    const emailResult = await trackHttpWait('io', sendRegistrationVerificationEmail({
       toEmail: getStringField(body, 'email').trim(),
       code: pendingResult.rawCode,
       expiresAt: pendingResult.expiresAt,
       verificationPageUrl: registrationVerificationPageUrl || undefined,
       pendingRegistrationId: pendingResult.pendingRegistrationId,
       registrationSecret: registrationVerificationCodeSecret,
-    })
+    }))
 
     if (!emailResult.ok) {
       // Brevo провали — pending реда УМИШЛЕНО НЕ се discard-ва (транзиентен
@@ -9664,12 +9757,12 @@ async function handleProfileRequest(
       return true
     }
 
-    const avatarResult = await createCroppedAvatarWebp({
+    const avatarResult = await trackHttpWait('io', createCroppedAvatarWebp({
       imageBuffer,
       cropX,
       cropY,
       cropSize,
-    })
+    }))
 
     if (!avatarResult.ok) {
       logProfileImageUploadFailure({
@@ -9690,11 +9783,11 @@ async function handleProfileRequest(
     const oldAvatarUrl = session.profile.avatarUrl
     const avatarFilename = `${randomUUID()}.webp`
 
-    await writeWebpUploadFile(
+    await trackHttpWait('io', writeWebpUploadFile(
       AVATAR_UPLOADS_PATH,
       avatarFilename,
       avatarResult.buffer,
-    )
+    ))
 
     const avatarUrl = createUploadUrl('avatars', avatarFilename)
     const result = playerProgressStore.updateProfileAvatar(
@@ -9807,7 +9900,7 @@ async function handleProfileRequest(
       return true
     }
 
-    const galleryResult = await createGalleryImageWebp(imageBuffer)
+    const galleryResult = await trackHttpWait('io', createGalleryImageWebp(imageBuffer))
 
     if (!galleryResult.ok) {
       logProfileImageUploadFailure({
@@ -9831,7 +9924,7 @@ async function handleProfileRequest(
       session.profile.profileId,
     )
 
-    await writeWebpUploadFile(profileGalleryPath, `${imageId}.webp`, galleryResult.buffer)
+    await trackHttpWait('io', writeWebpUploadFile(profileGalleryPath, `${imageId}.webp`, galleryResult.buffer))
 
     const imageUrl = createUploadUrl(
       'profile-gallery',
@@ -9994,12 +10087,12 @@ async function handleAdminProfileModerationRequest(
       return true
     }
 
-    const avatarResult = await createCroppedAvatarWebp({
+    const avatarResult = await trackHttpWait('io', createCroppedAvatarWebp({
       imageBuffer,
       cropX,
       cropY,
       cropSize,
-    })
+    }))
 
     if (!avatarResult.ok) {
       logProfileImageUploadFailure({
@@ -10018,7 +10111,7 @@ async function handleAdminProfileModerationRequest(
     }
 
     const avatarFilename = `${randomUUID()}.webp`
-    await writeWebpUploadFile(AVATAR_UPLOADS_PATH, avatarFilename, avatarResult.buffer)
+    await trackHttpWait('io', writeWebpUploadFile(AVATAR_UPLOADS_PATH, avatarFilename, avatarResult.buffer))
     const avatarUrl = createUploadUrl('avatars', avatarFilename)
     const result = playerProgressStore.updateProfileAvatar(targetProfileId, avatarUrl)
     if (!result.ok) {
@@ -12361,7 +12454,7 @@ async function createTopicAttachmentUpload(
     return { ok: false, code: 'invalid_image', message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' }
   }
 
-  const processed = await processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true })
+  const processed = await trackHttpWait('io', processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true }))
 
   if (processed === null) {
     return { ok: false, code: 'invalid_image', message: 'Снимката не може да бъде обработена.' }
@@ -12370,7 +12463,7 @@ async function createTopicAttachmentUpload(
   const storageFilename = `${randomUUID()}.webp`
 
   try {
-    await writeWebpAttachmentFile(TOPIC_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+    await trackHttpWait('io', writeWebpAttachmentFile(TOPIC_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer))
   } catch {
     return { ok: false, code: 'attachment_upload_failed', message: 'Снимката не можа да бъде записана.' }
   }
@@ -12822,14 +12915,14 @@ async function handleTopicAttachmentDownloadRequest(
   const filePath = join(TOPIC_ATTACHMENT_UPLOADS_PATH, attachment.storageFilename)
 
   try {
-    const fileStats = await stat(filePath)
+    const fileStats = await trackHttpWait('io', stat(filePath))
 
     if (!fileStats.isFile()) {
       sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
       return true
     }
 
-    const fileBuffer = await readFile(filePath)
+    const fileBuffer = await trackHttpWait('io', readFile(filePath))
     const url = new URL(req.url ?? '', 'http://localhost')
     const isDownload = url.searchParams.get('download') !== null
 
@@ -12891,14 +12984,14 @@ async function handleTopicMuteEvidenceAttachmentDownloadRequest(
   const filePath = join(TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH, filename)
 
   try {
-    const fileStats = await stat(filePath)
+    const fileStats = await trackHttpWait('io', stat(filePath))
 
     if (!fileStats.isFile()) {
       sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
       return true
     }
 
-    const fileBuffer = await readFile(filePath)
+    const fileBuffer = await trackHttpWait('io', readFile(filePath))
 
     res.writeHead(200, {
       'Content-Type': 'image/webp',
@@ -16986,15 +17079,15 @@ async function handleStripeWebhookRequest(
 
         if (vipPaymentIntentId && vipPurchaseStore.needsPaymentMethodSnapshot(vipFulfilledPurchaseId)) {
           try {
-            const vipPi = await stripe.paymentIntents.retrieve(vipPaymentIntentId, {
+            const vipPi = await trackHttpWait('io', stripe.paymentIntents.retrieve(vipPaymentIntentId, {
               expand: ['latest_charge'],
-            })
+            }))
 
             let vipCharge: Stripe.Charge | null = null
             if (vipPi.latest_charge && typeof vipPi.latest_charge === 'object') {
               vipCharge = vipPi.latest_charge as Stripe.Charge
             } else if (vipPi.latest_charge && typeof vipPi.latest_charge === 'string') {
-              vipCharge = await stripe.charges.retrieve(vipPi.latest_charge)
+              vipCharge = await trackHttpWait('io', stripe.charges.retrieve(vipPi.latest_charge))
             }
 
             const vipPmd = vipCharge?.payment_method_details ?? null
@@ -17099,15 +17192,15 @@ async function handleStripeWebhookRequest(
 
         if (bundlePaymentIntentId && bundlePurchaseStore.needsPaymentMethodSnapshot(bundleFulfilledPurchaseId)) {
           try {
-            const bundlePi = await stripe.paymentIntents.retrieve(bundlePaymentIntentId, {
+            const bundlePi = await trackHttpWait('io', stripe.paymentIntents.retrieve(bundlePaymentIntentId, {
               expand: ['latest_charge'],
-            })
+            }))
 
             let bundleCharge: Stripe.Charge | null = null
             if (bundlePi.latest_charge && typeof bundlePi.latest_charge === 'object') {
               bundleCharge = bundlePi.latest_charge as Stripe.Charge
             } else if (bundlePi.latest_charge && typeof bundlePi.latest_charge === 'string') {
-              bundleCharge = await stripe.charges.retrieve(bundlePi.latest_charge)
+              bundleCharge = await trackHttpWait('io', stripe.charges.retrieve(bundlePi.latest_charge))
             }
 
             const bundlePmd = bundleCharge?.payment_method_details ?? null
@@ -17210,16 +17303,16 @@ async function handleStripeWebhookRequest(
 
         if (paymentIntentId && coinPurchaseStore.needsPaymentMethodSnapshot(fulfilledPurchaseId)) {
           try {
-            const pi = await stripe.paymentIntents.retrieve(paymentIntentId, {
+            const pi = await trackHttpWait('io', stripe.paymentIntents.retrieve(paymentIntentId, {
               expand: ['latest_charge'],
-            })
+            }))
 
             // latest_charge may be an expanded Charge object or a bare string ID
             let charge: Stripe.Charge | null = null
             if (pi.latest_charge && typeof pi.latest_charge === 'object') {
               charge = pi.latest_charge as Stripe.Charge
             } else if (pi.latest_charge && typeof pi.latest_charge === 'string') {
-              charge = await stripe.charges.retrieve(pi.latest_charge)
+              charge = await trackHttpWait('io', stripe.charges.retrieve(pi.latest_charge))
             }
             // charge remains null if latest_charge is null
 
@@ -17693,7 +17786,7 @@ function scheduleTableGiftExpiryFinalization(
   imageUrl: string,
   delayMs: number,
 ): void {
-  setTimeout(() => {
+  setTimeout(timedTimerCallback('tableGiftExpiry', () => {
     const room = serverState.rooms[roomId]
 
     if (room === undefined) {
@@ -17719,7 +17812,7 @@ function scheduleTableGiftExpiryFinalization(
     delete activeGifts[recipientSeat]
 
     void tryFinalizeDeletedGiftImage(imageUrl)
-  }, delayMs)
+  }), delayMs)
 }
 
 // Room teardown hook (§5 от брифа "room end/room destruction").
@@ -17929,12 +18022,12 @@ async function handleAdminGiftItemsRequest(
       return true
     }
 
-    const processed = await processImageAttachmentToWebp(imageBuffer, {
+    const processed = await trackHttpWait('io', processImageAttachmentToWebp(imageBuffer, {
       enforceSourcePixelLimit: true,
       quality: GIFT_ITEM_IMAGE_WEBP_QUALITY,
       dimensionPx: GIFT_ITEM_IMAGE_DIMENSION_PX,
       allowEnlargement: true,
-    })
+    }))
 
     if (processed === null) {
       sendJsonResponse(res, 400, { ok: false, message: 'Снимката не може да бъде обработена.' })
@@ -17944,7 +18037,7 @@ async function handleAdminGiftItemsRequest(
     const filename = `${randomUUID()}.webp`
 
     try {
-      await writeWebpUploadFile(GIFT_ITEM_UPLOADS_PATH, filename, processed.buffer)
+      await trackHttpWait('io', writeWebpUploadFile(GIFT_ITEM_UPLOADS_PATH, filename, processed.buffer))
     } catch {
       sendJsonResponse(res, 500, { ok: false, message: 'Снимката не можа да бъде записана.' })
       return true
@@ -18286,7 +18379,7 @@ async function handleAdminCampaignsRequest(
       const filename = `${randomUUID()}.gif`
       const subfolder = CAMPAIGN_THEME_ASSET_SUBFOLDER[kind]
       try {
-        await writeWebpUploadFile(getCampaignThemeAssetDirectory(campaignId, kind), filename, gifBuffer)
+        await trackHttpWait('io', writeWebpUploadFile(getCampaignThemeAssetDirectory(campaignId, kind), filename, gifBuffer))
       } catch {
         sendJsonResponse(res, 500, { ok: false, message: 'Файлът не можа да бъде записан.' })
         return true
@@ -18300,11 +18393,11 @@ async function handleAdminCampaignsRequest(
       }
       const dimensionPx = CAMPAIGN_THEME_ASSET_DIMENSION_PX[kind]
       const quality = kind === 'unit_icon' || kind === 'card_back' ? GIFT_ITEM_IMAGE_WEBP_QUALITY : IMAGE_ATTACHMENT_WEBP_QUALITY
-      const processed = await processImageAttachmentToWebp(imageBuffer, {
+      const processed = await trackHttpWait('io', processImageAttachmentToWebp(imageBuffer, {
         enforceSourcePixelLimit: true,
         dimensionPx,
         quality,
-      })
+      }))
       if (processed === null) {
         sendJsonResponse(res, 400, { ok: false, message: 'Изображението не може да бъде обработено.' })
         return true
@@ -18312,7 +18405,7 @@ async function handleAdminCampaignsRequest(
       const filename = `${randomUUID()}.webp`
       const subfolder = CAMPAIGN_THEME_ASSET_SUBFOLDER[kind]
       try {
-        await writeWebpUploadFile(getCampaignThemeAssetDirectory(campaignId, kind), filename, processed.buffer)
+        await trackHttpWait('io', writeWebpUploadFile(getCampaignThemeAssetDirectory(campaignId, kind), filename, processed.buffer))
       } catch {
         sendJsonResponse(res, 500, { ok: false, message: 'Файлът не можа да бъде записан.' })
         return true
@@ -19304,7 +19397,7 @@ async function handleChatRequest(
         return true
       }
 
-      const processed = await createChatAttachmentWebp(imageBuffer)
+      const processed = await trackHttpWait('io', createChatAttachmentWebp(imageBuffer))
 
       if (processed === null) {
         sendJsonResponse(res, 400, {
@@ -19317,7 +19410,7 @@ async function handleChatRequest(
       const storageFilename = `${randomUUID()}.webp`
 
       try {
-        await writeWebpAttachmentFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+        await trackHttpWait('io', writeWebpAttachmentFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer))
         writtenAttachmentFilename = storageFilename
       } catch {
         sendJsonResponse(res, 500, {
@@ -19350,7 +19443,7 @@ async function handleChatRequest(
       // вече записания файл на диска — изтрий го веднага, аналогично на
       // обикновения send handler по-долу.
       if (writtenAttachmentFilename !== null) {
-        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+        await trackHttpWait('io', deleteChatAttachmentFileByFilename(writtenAttachmentFilename))
       }
 
       throw error
@@ -19362,7 +19455,7 @@ async function handleChatRequest(
       // (resolveVipDmFriendshipRow не INSERT-ва при неуспешна проверка), но
       // файлът на диска трябва да се изтрие изрично тук.
       if (writtenAttachmentFilename !== null) {
-        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+        await trackHttpWait('io', deleteChatAttachmentFileByFilename(writtenAttachmentFilename))
       }
 
       sendJsonResponse(res, 403, result)
@@ -19537,7 +19630,7 @@ async function handleChatRequest(
         return true
       }
 
-      const processed = await createChatAttachmentWebp(imageBuffer)
+      const processed = await trackHttpWait('io', createChatAttachmentWebp(imageBuffer))
 
       if (processed === null) {
         sendJsonResponse(res, 400, {
@@ -19550,7 +19643,7 @@ async function handleChatRequest(
       const storageFilename = `${randomUUID()}.webp`
 
       try {
-        await writeWebpAttachmentFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+        await trackHttpWait('io', writeWebpAttachmentFile(CHAT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer))
         writtenAttachmentFilename = storageFilename
       } catch {
         sendJsonResponse(res, 500, {
@@ -19595,7 +19688,7 @@ async function handleChatRequest(
       // по-късно — grace period-ът му е достатъчно дълъг да не удари
       // in-flight upload-и, а достатъчно кратък да чисти реални orphans.
       if (writtenAttachmentFilename !== null) {
-        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+        await trackHttpWait('io', deleteChatAttachmentFileByFilename(writtenAttachmentFilename))
       }
 
       throw error
@@ -19606,7 +19699,7 @@ async function handleChatRequest(
       // напр. blocking или "нито текст, нито снимка") — файлът вече е на
       // диска, трябва да се изтрие незабавно, за да не остане orphan.
       if (writtenAttachmentFilename !== null) {
-        await deleteChatAttachmentFileByFilename(writtenAttachmentFilename)
+        await trackHttpWait('io', deleteChatAttachmentFileByFilename(writtenAttachmentFilename))
       }
 
       sendJsonResponse(res, 400, result)
@@ -19673,14 +19766,14 @@ async function handleChatAttachmentDownloadRequest(
   const filePath = join(CHAT_ATTACHMENT_UPLOADS_PATH, attachment.storageFilename)
 
   try {
-    const fileStats = await stat(filePath)
+    const fileStats = await trackHttpWait('io', stat(filePath))
 
     if (!fileStats.isFile()) {
       sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
       return true
     }
 
-    const fileBuffer = await readFile(filePath)
+    const fileBuffer = await trackHttpWait('io', readFile(filePath))
     const url = new URL(req.url ?? '', 'http://localhost')
     const isDownload = url.searchParams.get('download') !== null
 
@@ -20731,7 +20824,7 @@ async function handleAdminAdCampaignsRequest(
       return true
     }
 
-    const processed = await processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true })
+    const processed = await trackHttpWait('io', processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true }))
     if (processed === null) {
       sendJsonResponse(res, 400, { ok: false, message: 'Снимката не може да бъде обработена.' })
       return true
@@ -20740,7 +20833,7 @@ async function handleAdminAdCampaignsRequest(
     const filename = `${randomUUID()}.webp`
 
     try {
-      await writeWebpAttachmentFile(AD_CAMPAIGN_UPLOADS_PATH, filename, processed.buffer)
+      await trackHttpWait('io', writeWebpAttachmentFile(AD_CAMPAIGN_UPLOADS_PATH, filename, processed.buffer))
     } catch {
       sendJsonResponse(res, 500, { ok: false, message: 'Снимката не можа да бъде записана.' })
       return true
@@ -20909,7 +21002,7 @@ function runAdCampaignEventsCrossInstancePoll(): void {
 }
 
 const AD_CAMPAIGN_EVENTS_POLL_INTERVAL_MS = 700
-let adCampaignEventsPollInterval: ReturnType<typeof setInterval> | null = setInterval(
+let adCampaignEventsPollInterval: ReturnType<typeof setInterval> | null = timedSetInterval('adCampaignEventsPoll',
   runAdCampaignEventsCrossInstancePoll,
   AD_CAMPAIGN_EVENTS_POLL_INTERVAL_MS,
 )
@@ -21041,7 +21134,7 @@ async function createSupportAttachmentUpload(
     return { ok: false, statusCode: 400, message: 'Поддържат се само JPEG, PNG и WebP снимки до 10 MB.' }
   }
 
-  const processed = await processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true })
+  const processed = await trackHttpWait('io', processImageAttachmentToWebp(imageBuffer, { enforceSourcePixelLimit: true }))
 
   if (processed === null) {
     return { ok: false, statusCode: 400, message: 'Снимката не може да бъде обработена.' }
@@ -21050,7 +21143,7 @@ async function createSupportAttachmentUpload(
   const storageFilename = `${randomUUID()}.webp`
 
   try {
-    await writeWebpAttachmentFile(SUPPORT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer)
+    await trackHttpWait('io', writeWebpAttachmentFile(SUPPORT_ATTACHMENT_UPLOADS_PATH, storageFilename, processed.buffer))
   } catch {
     return { ok: false, statusCode: 500, message: 'Снимката не можа да бъде записана.' }
   }
@@ -21090,14 +21183,14 @@ async function handleSupportAttachmentDownloadRequest(
   const filePath = join(SUPPORT_ATTACHMENT_UPLOADS_PATH, attachment.storageFilename)
 
   try {
-    const fileStats = await stat(filePath)
+    const fileStats = await trackHttpWait('io', stat(filePath))
 
     if (!fileStats.isFile()) {
       sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
       return true
     }
 
-    const fileBuffer = await readFile(filePath)
+    const fileBuffer = await trackHttpWait('io', readFile(filePath))
     const url = new URL(req.url ?? '', 'http://localhost')
     const isDownload = url.searchParams.get('download') !== null
 
@@ -21225,7 +21318,7 @@ async function handleSupportRequest(
       message = supportStore.sendUserMessage(profileId, text, upload.attachmentInput)
     } catch (error) {
       if (upload.writtenAttachmentFilename !== null) {
-        await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
+        await trackHttpWait('io', deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename))
       }
       throw error
     }
@@ -21329,13 +21422,13 @@ async function handleSupportRequest(
       message = supportStore.sendAdminReply(profileId, text, upload.attachmentInput)
     } catch (error) {
       if (upload.writtenAttachmentFilename !== null) {
-        await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
+        await trackHttpWait('io', deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename))
       }
       throw error
     }
     if (!message) {
       if (upload.writtenAttachmentFilename !== null) {
-        await deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename)
+        await trackHttpWait('io', deleteSupportAttachmentFileByFilename(upload.writtenAttachmentFilename))
       }
       // spec §C: архивиран разговор (hard-deleted профил) отхвърля нови
       // съобщения със same null return като "потребителят няма съобщения"
@@ -22058,6 +22151,10 @@ setBroadcastRoomSnapshotsMonitoringHook(() => {
   activityCounters.incrementGame('roomSnapshotBroadcasts')
 })
 
+setBroadcastRoomSnapshotsTimingHook((label, durationMs) => {
+  mainThreadTimings.record('snapshot', label, durationMs)
+})
+
 // Belot Spectator Mode ("Гледай", Phase 2A) — централен spectator fan-out
 // след player snapshot-ите на всеки broadcastRoomSnapshots (виж hook-а там).
 setBroadcastRoomSnapshotsSpectatorHook((room) => {
@@ -22071,7 +22168,10 @@ setBroadcastRoomSnapshotsSpectatorHook((room) => {
 })
 
 const httpServer = createServer((req, res) => {
-  void handleHttpRequest(req, res).catch((error) => {
+  // Phase 0B — 'http' = HTTP active wall (wall − tracked body/io wait, не е
+  // доказано CPU време), 'httpWall' = end-to-end,
+  // по bounded route family; оригиналният promise/.catch се запазват непроменени.
+  void timeHttpRequest(mainThreadTimings, classifyHttpRoute(req.method, req.url), () => handleHttpRequest(req, res)).catch((error) => {
     const message = error instanceof Error ? error.message : 'Unexpected server error.'
 
     if (!res.headersSent) {
@@ -22139,6 +22239,12 @@ function logWsCloseDiagnostics(input: {
 }
 
 wsServer.on('connection', (socket, request) => {
+  // Phase 0B — синхронният connection bootstrap (auth, pending notifications,
+  // tournament assignment, ...) като ws:connection.
+  mainThreadTimings.time('ws', 'connection', () => handleWsConnectionUnmeasured(socket, request))
+})
+
+function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessage): void {
   if (isServerShuttingDown) {
     socket.close()
     return
@@ -22444,6 +22550,9 @@ wsServer.on('connection', (socket, request) => {
   }
 
   socket.on('message', (raw: RawData) => {
+    // Phase 0B — sync handler duration по parse-нат ClientMessage type.
+    const wsTimingStartedAt = performance.now()
+    let wsTimingLabel = 'unparsed'
     try {
       const currentConnection = getConnectionById(serverState, connection.id)
 
@@ -22462,6 +22571,7 @@ wsServer.on('connection', (socket, request) => {
 
       const rawText = rawDataToText(raw)
       const message = parseClientMessage(rawText)
+      wsTimingLabel = resolveWsTimingLabel(message)
 
       if (message === null) {
         // Preserve the generic protocol response for other games; Svara has a typed error.
@@ -22620,11 +22730,13 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        let gameplayPhaseAt = mainThreadTimings.now()
         const result = activeRoomRuntime.submitBid({
           room,
           seat: latestConnection.currentSeat,
           action: message.action,
         })
+        gameplayPhaseAt = recordGameplayPhase('bid.compute', gameplayPhaseAt)
 
         if (!result.ok) {
           logRejectedGameplayAction({
@@ -22644,8 +22756,11 @@ wsServer.on('connection', (socket, request) => {
 
         activityCounters.incrementGame('gameplayBidAccepted')
         serverState = commitServerRoomWithSnapshot(result.room)
+        gameplayPhaseAt = recordGameplayPhase('bid.commit', gameplayPhaseAt)
         activeRoomRuntime.ensureRoom(result.room)
+        gameplayPhaseAt = recordGameplayPhase('bid.ensureRoom', gameplayPhaseAt)
         broadcastRoomSnapshots(result.room, socketRegistry)
+        gameplayPhaseAt = recordGameplayPhase('bid.broadcast', gameplayPhaseAt)
         return
       }
 
@@ -22702,11 +22817,13 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        let gameplayPhaseAt = mainThreadTimings.now()
         const result = activeRoomRuntime.submitCut({
           room,
           seat: latestConnection.currentSeat,
           cutIndex: message.cutIndex,
         })
+        gameplayPhaseAt = recordGameplayPhase('cut.compute', gameplayPhaseAt)
 
         if (!result.ok) {
           logRejectedGameplayAction({
@@ -22726,8 +22843,11 @@ wsServer.on('connection', (socket, request) => {
 
         activityCounters.incrementGame('gameplayCutAccepted')
         serverState = commitServerRoomWithSnapshot(result.room)
+        gameplayPhaseAt = recordGameplayPhase('cut.commit', gameplayPhaseAt)
         activeRoomRuntime.ensureRoom(result.room)
+        gameplayPhaseAt = recordGameplayPhase('cut.ensureRoom', gameplayPhaseAt)
         broadcastRoomSnapshots(result.room, socketRegistry)
+        gameplayPhaseAt = recordGameplayPhase('cut.broadcast', gameplayPhaseAt)
         return
       }
 
@@ -22791,12 +22911,14 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        let gameplayPhaseAt = mainThreadTimings.now()
         const result = activeRoomRuntime.submitPlay({
           room,
           seat: latestConnection.currentSeat,
           cardId: message.cardId,
           declarationKeys: message.declarationKeys,
         })
+        gameplayPhaseAt = recordGameplayPhase('play.compute', gameplayPhaseAt)
 
         if (!result.ok) {
           logRejectedGameplayAction({
@@ -22822,9 +22944,13 @@ wsServer.on('connection', (socket, request) => {
           isHumanManualSubmission: true,
           connectionId: connection.id,
         })
+        gameplayPhaseAt = recordGameplayPhase('play.audit', gameplayPhaseAt)
         serverState = commitServerRoomWithSnapshot(result.room)
+        gameplayPhaseAt = recordGameplayPhase('play.commit', gameplayPhaseAt)
         activeRoomRuntime.ensureRoom(result.room)
+        gameplayPhaseAt = recordGameplayPhase('play.ensureRoom', gameplayPhaseAt)
         broadcastRoomSnapshots(result.room, socketRegistry)
+        gameplayPhaseAt = recordGameplayPhase('play.broadcast', gameplayPhaseAt)
         // Direct human submit_play_card commit минава покрай
         // applyAcceptedGameWorkerCandidate/onApplied (виж коментара при
         // shouldRunMatchCompletionSideEffects) — затова "Играещи" score push
@@ -22838,6 +22964,7 @@ wsServer.on('connection', (socket, request) => {
         } else {
           notifyPrivateGameScoreProgress(result.room)
         }
+        recordGameplayPhase('play.post', gameplayPhaseAt)
         return
       }
 
@@ -22897,11 +23024,13 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        let gameplayPhaseAt = mainThreadTimings.now()
         const result = activeRoomRuntime.submitSweepDecision({
           room,
           seat: latestConnection.currentSeat,
           decision: message.decision,
         })
+        gameplayPhaseAt = recordGameplayPhase('sweep.compute', gameplayPhaseAt)
 
         if (!result.ok) {
           logRejectedGameplayAction({
@@ -22928,8 +23057,11 @@ wsServer.on('connection', (socket, request) => {
 
         activityCounters.incrementGame('gameplaySweepDecisionAccepted')
         serverState = commitServerRoomWithSnapshot(result.room)
+        gameplayPhaseAt = recordGameplayPhase('sweep.commit', gameplayPhaseAt)
         activeRoomRuntime.ensureRoom(result.room)
+        gameplayPhaseAt = recordGameplayPhase('sweep.ensureRoom', gameplayPhaseAt)
         broadcastRoomSnapshots(result.room, socketRegistry)
+        gameplayPhaseAt = recordGameplayPhase('sweep.broadcast', gameplayPhaseAt)
         // Same reasoning as submit_play_card above — a direct human
         // submit_sweep_decision commit bypasses the worker-tick
         // applyAcceptedGameWorkerCandidate path, so "Играещи" score push
@@ -22943,6 +23075,7 @@ wsServer.on('connection', (socket, request) => {
         } else {
           notifyPrivateGameScoreProgress(result.room)
         }
+        recordGameplayPhase('sweep.post', gameplayPhaseAt)
         return
       }
 
@@ -22983,10 +23116,12 @@ wsServer.on('connection', (socket, request) => {
           return
         }
 
+        let gameplayPhaseAt = mainThreadTimings.now()
         const result = activeRoomRuntime.resumeHumanControl({
           room,
           seat: latestConnection.currentSeat,
         })
+        gameplayPhaseAt = recordGameplayPhase('resume.compute', gameplayPhaseAt)
 
         if (!result.ok) {
           safeSendToConnection(connection.id, {
@@ -22997,8 +23132,11 @@ wsServer.on('connection', (socket, request) => {
         }
 
         serverState = commitServerRoomWithSnapshot(result.room)
+        gameplayPhaseAt = recordGameplayPhase('resume.commit', gameplayPhaseAt)
         activeRoomRuntime.ensureRoom(result.room)
+        gameplayPhaseAt = recordGameplayPhase('resume.ensureRoom', gameplayPhaseAt)
         broadcastRoomSnapshots(result.room, socketRegistry)
+        gameplayPhaseAt = recordGameplayPhase('resume.broadcast', gameplayPhaseAt)
         return
       }
 
@@ -23260,7 +23398,7 @@ wsServer.on('connection', (socket, request) => {
               (s) => replayRoom.seats[s].participant?.kind === 'bot',
             )
             botSeats.forEach((botSeat, index) => {
-              setTimeout(() => {
+              setTimeout(timedTimerCallback('botReplayVote', () => {
                 if (isServerShuttingDown) return
 
                 const latestRoom = serverState.rooms[message.roomId] ?? null
@@ -23296,7 +23434,7 @@ wsServer.on('connection', (socket, request) => {
                   serverState = commitServerRoomReplacement(botVotedRoom)
                   broadcastRoomSnapshots(botVotedRoom, socketRegistry)
                 }
-              }, (index + 1) * 1000)
+              }), (index + 1) * 1000)
             })
           }
         }
@@ -26468,10 +26606,12 @@ wsServer.on('connection', (socket, request) => {
         type: 'error',
         message,
       })
+    } finally {
+      mainThreadTimings.record('ws', wsTimingLabel, performance.now() - wsTimingStartedAt)
     }
   })
 
-  socket.on('close', (code, reason) => {
+  socket.on('close', (code, reason) => mainThreadTimings.time('ws', 'close', () => {
     svaraLobby.disconnect(connection.id)
     // Captured ПРЕДИ handleDisconnect() мутира connection state-а по-долу —
     // това е единствената точка, в която currentRoomId/currentSeat/connectedAt
@@ -26559,12 +26699,12 @@ wsServer.on('connection', (socket, request) => {
       socketRegistry.delete(connection.id)
       console.error(`[ws] disconnect error: ${connection.id}`, error)
     }
-  })
+  }))
 
   socket.on('error', (error) => {
     console.error(`[ws] client error: ${connection.id}`, error)
   })
-})
+}
 
 // ─── Game worker lifecycle ────────────────────────────────────────────────────
 
@@ -26747,7 +26887,7 @@ const matchmakingTickInterval = setInterval(() => {
 // сървърът е бил спрян -> 'expired' известия в DB за следващ connect) +
 // един глобален интервал. Стартира СЛЕД serverState/всички helper-и.
 runMuteExpirySweep()
-let muteExpirySweepInterval: ReturnType<typeof setInterval> | null = setInterval(() => {
+let muteExpirySweepInterval: ReturnType<typeof setInterval> | null = timedSetInterval('muteExpirySweep', () => {
   if (isServerShuttingDown) {
     return
   }
@@ -26948,6 +27088,8 @@ try {
     getWorkerPoolHealth: () => gameWorkerPool?.getHealth() ?? null,
     getWorkerCpuUsages: () => gameWorkerPool?.getWorkerCpuUsages() ?? Promise.resolve([]),
     sampleEventLoopHealth: () => eventLoopMonitor.sample(),
+    onTiming: (label, durationMs) =>
+      mainThreadTimings.record(label === 'monitoringWorkerCpu' ? 'jobAsync' : 'job', label, durationMs),
   })
   console.log('[monitoring] Sampler started')
 } catch (error) {
@@ -26994,7 +27136,7 @@ try {
 
   cpuIncidentStore.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs())
 
-  cpuForensicSampleIntervalId = setInterval(() => {
+  cpuForensicSampleIntervalId = timedSetInterval('cpuForensicSample', () => {
     if (monitoringSampler === null) return
     const snap = monitoringSampler.getSnapshot()
 
@@ -27014,6 +27156,9 @@ try {
     const oneSecondActivity = activityCounters.snapshotOneSecondAndReset()
     const oneSecondBackgroundJobs = backgroundJobMetrics.snapshotOneSecondAndReset()
     const oneSecondGc = gcMetrics.snapshotOneSecondAndReset()
+    // Phase 0B — СЪЩИЯТ completed 1s прозорец; reset-ва се на всеки tick
+    // (не само при spike), за да няма cumulative false attribution.
+    const oneSecondMainThreadTimings = mainThreadTimings.snapshotOneSecondAndReset()
 
     if (snap.processCpuNowPercent === null) return
 
@@ -27047,7 +27192,7 @@ try {
             activeMatches: Object.keys(serverState.rooms).length,
             wsConnections: countOpenWebSockets(socketRegistry),
             matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
-            activity: oneSecondActivity,
+            activity: { ...oneSecondActivity, mainThreadTimings: oneSecondMainThreadTimings },
             backgroundJobs: oneSecondBackgroundJobs,
             gc: oneSecondGc,
           }
@@ -27072,14 +27217,14 @@ try {
     })
   }, 1_000)
 
-  cpuForensicBucketIntervalId = setInterval(() => {
+  cpuForensicBucketIntervalId = timedSetInterval('cpuForensicBucket', () => {
     const bucketStartMs = Date.now()
     const bucket = cpuBucketAccumulator.flush(bucketStartMs, {
       onlinePlayers: countUniqueOnlineRealPlayers(serverState.connections),
       activeMatches: Object.keys(serverState.rooms).length,
       wsConnections: countOpenWebSockets(socketRegistry),
       matchmakingWaiters: Object.values(getQueueCountsByStake()).reduce((s, n) => s + n, 0),
-      activity: activityCounters.snapshotTenSecondAndReset(),
+      activity: { ...activityCounters.snapshotTenSecondAndReset(), mainThreadTimings: mainThreadTimings.snapshotTenSecondAndReset() },
       backgroundJobs: backgroundJobMetrics.snapshotTenSecondAndReset(),
       gc: gcMetrics.snapshotTenSecondAndReset(),
     })
@@ -27097,7 +27242,7 @@ try {
     }
   }, CPU_INCIDENT_SAMPLING.bucketMs)
 
-  cpuIncidentPurgeIntervalId = setInterval(() => {
+  cpuIncidentPurgeIntervalId = timedSetInterval('cpuIncidentPurge', () => {
     cpuIncidentStore?.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs())
   }, 60 * 60 * 1000)
 

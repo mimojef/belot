@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../monitoring/mainThreadTimingMetrics.js'
 import type { MatchStake } from '../matchmaking/matchmakingTypes.js'
 import type { PrivateRoomActionErrorCode, PrivateRoomWaitMinutes } from '../protocol/messageTypes.js'
 import {
@@ -359,6 +360,9 @@ type StoreCallbacks = {
   // към host-а (тя вече знае, тя самата kick-на). Вика се само от
   // kickMember(), никога от leaveRoom().
   onMemberKicked: (room: PrivateRoom, occupant: PrivateRoomHumanOccupant) => void
+  // Phase 0B — optional timing hook за expiry таймера (sync callback, label
+  // 'privateRoomExpiry'). Никога не влияе на поведението.
+  onTimerTiming?: MainThreadTimingHook
 }
 
 export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRoomsStore {
@@ -370,6 +374,17 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
     const delay = room.expiresAt - Date.now()
 
     const timer = setTimeout(() => {
+      const startedAt = callbacks.onTimerTiming ? performance.now() : 0
+      try {
+        runExpiry()
+      } finally {
+        if (callbacks.onTimerTiming) {
+          safeInvokeTimingHook(callbacks.onTimerTiming, 'privateRoomExpiry', performance.now() - startedAt)
+        }
+      }
+    }, Math.max(delay, 0))
+
+    function runExpiry(): void {
       const current = rooms.get(room.id)
       if (current) {
         rooms.delete(current.id)
@@ -382,7 +397,7 @@ export function createPrivateRoomsStore(callbacks: StoreCallbacks): PrivateRooms
         callbacks.onRoomExpired(current)
         callbacks.onRoomsChanged()
       }
-    }, Math.max(delay, 0))
+    }
 
     expiryTimers.set(room.id, timer)
   }

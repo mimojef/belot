@@ -76,6 +76,8 @@
     "check:cpu-incident-detector": "tsx scripts/checkCpuIncidentDetector.ts",
     "check:cpu-incident-store": "tsx scripts/checkCpuIncidentStore.ts",
     "check:background-job-metrics": "tsx scripts/checkBackgroundJobMetrics.ts",
+    "check:main-thread-timing-metrics": "tsx scripts/checkMainThreadTimingMetrics.ts",
+    "bench:main-thread-timing-overhead": "tsx scripts/benchMainThreadTimingOverhead.ts",
     "check:gc-metrics": "tsx scripts/checkGcMetrics.ts",
     "check:on-tick-timing-safety": "tsx scripts/checkOnTickTimingSafety.ts",
     "check:http-category-classifier": "tsx scripts/checkHttpCategoryClassifier.ts",

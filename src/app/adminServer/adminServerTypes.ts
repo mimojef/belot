@@ -247,7 +247,40 @@ export type CpuIncidentSpikeContext = {
   matchmakingWaiters: number | null
   backgroundJobs: BackgroundJobStatsSnapshot
   gc: GcStatsSnapshot
+  // Сървърът праща целия activity snapshot; UI-ят чете само Phase 0B
+  // main-thread timings (липсват в по-стари incidents).
+  activity?: { mainThreadTimings?: MainThreadTimingSnapshot }
 }
+
+// Phase 0B — огледален на server MainThreadTimingSnapshot (sparse, bounded).
+export type MainThreadTimingStat = {
+  count: number
+  totalDurationMs: number
+  maxDurationMs: number
+  slow50: number
+  slow100: number
+  slow250: number
+  slow500: number
+}
+
+export type MainThreadTimingSnapshot = Partial<Record<string, Record<string, MainThreadTimingStat>>>
+
+// Огледало на server MAIN_THREAD_HTTP_ACTIVE_TIMING_GROUPS: HTTP wall минус
+// tracked body/io waits — НЕ е доказано CPU време (може да включва event-loop
+// scheduling delay и untracked async waits).
+export const MAIN_THREAD_HTTP_ACTIVE_TIMING_GROUPS: readonly string[] = ['http']
+
+// Огледало на server MAIN_THREAD_WALL_TIMING_GROUPS: wall/wait време на async
+// операции (I/O, мрежа, worker-и) — НЕ е main-thread CPU. Всички останали
+// групи са директно измерено sync main-thread време.
+export const MAIN_THREAD_WALL_TIMING_GROUPS: readonly string[] = [
+  'httpWall',
+  'httpBodyWait',
+  'httpIoWait',
+  'runtimeWait',
+  'journalAsync',
+  'jobAsync',
+]
 
 export type CpuIncidentSpikeSampleDetail = {
   sampledAtMs: number

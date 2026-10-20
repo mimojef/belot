@@ -1,3 +1,4 @@
+import type { MainThreadTimingSnapshot } from './mainThreadTimingMetrics.js'
 // Централен, in-memory, O(1) брояч за "logical business activity" —
 // отделен от WS/HTTP transport fan-out. Bounded по конструкция: всеки
 // counter е фиксирано поле в Record, никога Map с произволни ключове.
@@ -90,7 +91,12 @@ export type ActivityCountersSnapshot = ChatActivityCounters &
   GameActivityCounters &
   RoomsActivityCounters &
   TournamentActivityCounters &
-  TransportActivityCounters
+  TransportActivityCounters & {
+    // Phase 0B — labeled main-thread timings за СЪЩИЯ прозорец (добавят се от
+    // forensic tick-а в index.ts; createActivityCounters() не ги попълва).
+    // Optional: по-стари записани incidents нямат това поле.
+    mainThreadTimings?: MainThreadTimingSnapshot
+  }
 
 const CHAT_KEYS: Array<keyof ChatActivityCounters> = [
   'lobbyChatMessages',

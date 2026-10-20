@@ -245,14 +245,43 @@ export function createMonitoringSampler(
     }
   }
 
-  intervalId = deps.setInterval(collectSample, SAMPLE_INTERVAL_MS)
-  collectSample()
+  // Phase 0B timing: без hook — същите callback-и както преди.
+  const onTiming = context.onTiming
+  const reportTiming = (label: 'monitoringSample' | 'monitoringWorkerCpu', startedAt: number): void => {
+    try {
+      onTiming?.(label, performance.now() - startedAt)
+    } catch {
+      // monitoring hook — никога не влияе на sampler-а
+    }
+  }
+  const timedCollectSample = onTiming === undefined
+    ? collectSample
+    : (): void => {
+        const startedAt = performance.now()
+        try {
+          collectSample()
+        } finally {
+          reportTiming('monitoringSample', startedAt)
+        }
+      }
+  const timedCollectWorkerCpuSample = onTiming === undefined
+    ? collectWorkerCpuSample
+    : (): Promise<void> => {
+        const startedAt = performance.now()
+        const promise = collectWorkerCpuSample()
+        const settle = () => reportTiming('monitoringWorkerCpu', startedAt)
+        promise.then(settle, settle)
+        return promise
+      }
+
+  intervalId = deps.setInterval(timedCollectSample, SAMPLE_INTERVAL_MS)
+  timedCollectSample()
 
   if (context.getWorkerCpuUsages !== undefined) {
     workerCpuIntervalId = deps.setInterval(() => {
-      void collectWorkerCpuSample()
+      void timedCollectWorkerCpuSample()
     }, WORKER_CPU_SAMPLE_INTERVAL_MS)
-    void collectWorkerCpuSample()
+    void timedCollectWorkerCpuSample()
   }
 
   return {

@@ -124,4 +124,7 @@ export type MonitoringContext = {
   // Инжектиран event-loop sampler, за да остане createMonitoringSampler
   // тестваем чрез dependency injection (аналог на останалите MonitoringDeps).
   sampleEventLoopHealth?: () => EventLoopHealthSnapshot
+  // Phase 0B — optional timing hook: 'monitoringSample' (sync collectSample) и
+  // 'monitoringWorkerCpu' (async wall до settle на worker CPU sample-а).
+  onTiming?: (label: 'monitoringSample' | 'monitoringWorkerCpu', durationMs: number) => void
 }
