@@ -395,6 +395,25 @@ export function createGameWorkerPool(
     return startPromise
   }
 
+  // Re-assert на desired state за вече assigned стая към СЪЩИЯ worker
+  // (ownership не се променя). При converged стая е евтин no-op в shadow
+  // synchronizer-а; при непотвърдена/изчерпана стая стартира нов bounded
+  // retry цикъл. Пропуска се, докато тече release (не възкресява стаята) или
+  // ако worker-ът не е ready (recovery пипалината поема мъртъв worker).
+  function reassertExistingAssignment(roomId: string, workerId: string): void {
+    if (releasePromisesByRoomId.has(roomId)) return
+
+    const bundle = bundleByWorkerId.get(workerId) ?? null
+
+    if (bundle === null || bundle.lifecycleClient.getState() !== 'ready') return
+
+    try {
+      bundle.shadowSynchronizer.desireRoom(roomId)
+    } catch (error: unknown) {
+      bundle.lastError = normalizeError(error)
+    }
+  }
+
   function ensureRoom(roomId: string): EnsurePoolRoomResult {
     if (!isValidRoomId(roomId)) {
       throw new Error(
@@ -405,6 +424,7 @@ export function createGameWorkerPool(
     const existingWorkerId = roomAssignments.get(roomId) ?? null
 
     if (existingWorkerId !== null) {
+      reassertExistingAssignment(roomId, existingWorkerId)
       return {
         ok: true,
         workerId: existingWorkerId,

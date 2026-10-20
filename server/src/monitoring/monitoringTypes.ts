@@ -24,6 +24,13 @@ export type MonitoringWorkerPoolSnapshot = {
       isConsistent: boolean
       isShuttingDown: boolean
       lastError: string | null
+      // Bounded retry diagnostics (optional: по-стари history snapshots нямат).
+      scheduledRetries?: number
+      assignRetryCount?: number
+      releaseRetryCount?: number
+      assignFailureCount?: number
+      releaseFailureCount?: number
+      retriesExhaustedCount?: number
     }
     lastError: string | null
   }>

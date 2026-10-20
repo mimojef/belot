@@ -57,6 +57,14 @@ export function createWorkerBackedActiveRoomRuntime(
       if (existingWorkerId !== null) {
         const existingResult = delegate.ensureRoom(room)
         if (existingResult.ok) {
+          // Re-assert към worker manager-а при съществуващ assignment: връща
+          // същия worker (без смяна на ownership); worker pool-ът го ползва, за
+          // да рестартира bounded shadow sync на непотвърдена стая.
+          try {
+            workerManager.ensureRoom(room.id)
+          } catch {
+            // Best-effort re-assert — никога не влияе на ensure резултата.
+          }
           notifyRoomDesired(room.id)
         }
         return existingResult
