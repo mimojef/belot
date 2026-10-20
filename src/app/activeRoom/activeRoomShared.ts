@@ -219,6 +219,7 @@ export function createPlayingUiCache(): PlayingUiCache {
     hasRenderedSnapshot: false,
     animationToken: 0,
     pendingPlayCardSent: false,
+    pendingPlayCardId: null,
     wasMyTurn: false,
     observedPlayKeys: [],
     showBotTakeover: false,
@@ -256,6 +257,7 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
     document.body.querySelector('[data-playing-bottom-hand-host]')?.remove()
     document.body.querySelector('[data-sweep-offer-prompt-root]')?.remove()
     document.body.querySelector('[data-sweep-throw-down-overlay]')?.remove()
+    document.body.querySelector('[data-playing-input-notice]')?.remove()
     const seatPanelsHost = document.body.querySelector<HTMLElement>('[data-seat-panels-host="1"]')
     if (seatPanelsHost) {
       seatPanelsHost.style.position = ''
@@ -274,6 +276,7 @@ export function resetPlayingUiCache(cache: PlayingUiCache): void {
   cache.hasRenderedSnapshot = false
   cache.animationToken += 1
   cache.pendingPlayCardSent = false
+  cache.pendingPlayCardId = null
   cache.wasMyTurn = false
   cache.observedPlayKeys = []
   cache.showBotTakeover = false

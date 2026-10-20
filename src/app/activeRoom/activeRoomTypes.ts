@@ -249,6 +249,8 @@ export type PlayingUiCache = {
   hasRenderedSnapshot: boolean
   animationToken: number
   pendingPlayCardSent: boolean
+  /** cardId на изпратената, още непотвърдена карта. Валиден само докато pendingPlayCardSent е true. */
+  pendingPlayCardId: string | null
   wasMyTurn: boolean
   observedPlayKeys: string[]
   showBotTakeover: boolean

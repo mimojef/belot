@@ -119,6 +119,9 @@ function mount(options: { groups: HandGroup[]; isMyTurn: boolean }): { hand: Roo
     game,
     seats: buildSeats(),
     localSeat: 'bottom',
+    // Phase 3B (05.10): click eligibility се гейтва от controlledSeat, не от
+    // localSeat — без него isMyTurn е винаги false и нито една карта не е активна.
+    controlledSeat: 'bottom',
     roomId: 'room-overlap-test',
     winningBid: game.playing!.winningBid,
     stageScale: 1,

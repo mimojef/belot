@@ -76,6 +76,7 @@ type PopupState = {
 type H = {
   enter: (roomId: string) => Promise<void>
   snapshot: (roomId: string, game: any) => Promise<void>
+  resumed: (roomId: string) => Promise<void>
   serverError: (message: string) => Promise<void>
   biddingGame: (overrides?: any) => Promise<any>
   dealLastThreeGame: () => Promise<any>
@@ -93,6 +94,7 @@ async function harness(page: Page): Promise<H> {
   return {
     enter: (roomId) => page.evaluate((r) => (window as any).__biddingLifecycleHarness.enter(r), roomId),
     snapshot: (roomId, game) => page.evaluate(([r, g]: any) => (window as any).__biddingLifecycleHarness.snapshot(r, g), [roomId, game] as any),
+    resumed: (roomId) => page.evaluate((r) => (window as any).__biddingLifecycleHarness.resumed(r), roomId),
     serverError: (message) => page.evaluate((m) => (window as any).__biddingLifecycleHarness.serverError(m), message),
     biddingGame: (overrides) => page.evaluate((o) => (window as any).__biddingLifecycleHarness.biddingGame(o ?? {}), overrides),
     dealLastThreeGame: () => page.evaluate(() => (window as any).__biddingLifecycleHarness.dealLastThreeGame()),
@@ -222,6 +224,7 @@ try {
       await waitForResyncRequested(h, page)
       // Resync-ът връща СЪЩОТО bidding състояние -> bid-ът никога не е бил
       // приложен server-side (case C).
+      await h.resumed('room-4')
       await h.snapshot('room-4', original)
       assert((await h.biddingPopupHostCount()) === 1, 'очаквах точно един активен popup след resync case C')
       const state = await h.biddingPopupState()
@@ -273,17 +276,63 @@ try {
       assert((await h.biddingPopupHostCount()) === 0, 'повторна late snapshot не трябва да пресъздава popup')
     })
 
-    // ─── [8] shutdown/explicit error: pending cleared immediately ──────────
-    await check(`[${vp.label}][8] shutdown error: pending cleared immediately, no permanent faded board`, async () => {
+    // ─── [8] shutdown/explicit error: immediate resync, no permanent faded board ─
+    // error-ът няма корелация с командата (може да е за друго съобщение,
+    // докато обявата още чака) — затова НЕ отключваме веднага (втора обява),
+    // а питаме сървъра веднага, без да чакаме watchdog таймера.
+    await check(`[${vp.label}][8] error while bid is pending: immediate resync (no watchdog wait), unlock only on the resync answer`, async () => {
       await h.reset()
-      await enterAtBidding(h, page, 'room-8')
+      const original = await enterAtBidding(h, page, 'room-8')
       await h.clickBidAction('pass')
       assert((await h.biddingPopupState()).buttonsDisabled === true, 'веднага след tap трябва да е pending/disabled')
       await h.serverError('Сървърът рестартира. Моля опитайте отново.')
+      assert((await h.getResyncRequestCount()) === 1, 'error по време на чакаща обява -> незабавен resync')
+      assert((await h.biddingPopupState()).buttonsDisabled !== false, 'преди отговора на resync popup-ът не е активен')
+      assert(!(await h.clickBidAction('pass')), 'втора обява не трябва да е възможна преди отговора')
+      await h.resumed('room-8')
+      await h.snapshot('room-8', original)
       const state = await h.biddingPopupState()
-      assert(state.exists, 'popup трябва да остане видим (все още bidding, все още ред на играча)')
-      assert(state.buttonsDisabled === false, 'бутоните трябва да са активни веднага след error-а, без чакане на watchdog')
-      assert((await h.getResyncRequestCount()) === 0, 'watchdog-ът трябваше да е cancel-нат от error handler-а, resync не биваше да стартира')
+      assert(state.exists, 'popup трябва да е видим (все още bidding, все още ред на играча)')
+      assert(state.buttonsDisabled === false, 'бутоните трябва да са активни след отговора на resync')
+      assert((await h.getBidCommands()) === 1, 'без автоматична втора обява')
+    })
+
+    // ─── [13] "Пас не ще": snapshot отпреди обработката на PASS ────────────
+    // При забавен сървър snapshot, генериран ПРЕДИ обработката на обявата
+    // (напр. emoji на друг играч), пристига след tap-а. Преди корекцията той
+    // връщаше активния popup + "Обявата не беше потвърдена", докато PASS
+    // още чакаше на сървъра (а втори tap можеше да стане втора обява).
+    await check(`[${vp.label}][13] snapshot generated before PASS was processed keeps the popup pending (no error, no second bid)`, async () => {
+      await h.reset()
+      const original = await enterAtBidding(h, page, 'room-13')
+      assert(await h.clickBidAction('pass'), 'реалният click трябваше да уцели Пас')
+      await h.snapshot('room-13', original)
+      const state = await h.biddingPopupState()
+      assert(state.buttonsDisabled !== false, 'не трябва да има активен popup след in-flight snapshot (обявата още чака)')
+      assert(state.errorText === null, `не трябва да има грешка, получено "${state.errorText}"`)
+      assert(!(await h.clickBidAction('pass')), 'втори Пас не трябва да е възможен')
+      const next = await h.biddingGame()
+      next.bidding.entries = [{ seat: 'bottom', action: { type: 'pass' } }]
+      next.bidding.currentBidderSeat = 'left'
+      next.bidding.canSubmitBid = false
+      await h.snapshot('room-13', next)
+      assert((await h.biddingPopupHostCount()) === 0, 'след обработката popup-ът изчезва')
+      assert((await h.getBidCommands()) === 1, 'точно една обява')
+    })
+
+    // ─── [14] in-flight snapshot СЛЕД resync заявката, но преди отговора ───
+    await check(`[${vp.label}][14] only the snapshot after room_resumed (resync answer) may unlock the popup`, async () => {
+      await h.reset()
+      const original = await enterAtBidding(h, page, 'room-14')
+      await h.clickBidAction('pass')
+      await waitForResyncRequested(h, page)
+      await h.snapshot('room-14', original)
+      assert((await h.biddingPopupState()).buttonsDisabled !== false, 'snapshot преди room_resumed не отключва')
+      await h.resumed('room-14')
+      await h.snapshot('room-14', original)
+      const state = await h.biddingPopupState()
+      assert(state.buttonsDisabled === false, 'resync отговорът показва, че обявата не е приложена -> отключване')
+      assert((await h.getBidCommands()) === 1, 'без автоматична втора обява')
     })
 
     // ─── [9] resync gets no response: exactly one reconnect fallback ───────
@@ -316,6 +365,7 @@ try {
       })
       await h.clickBidAction('pass')
       await waitForResyncRequested(h, page)
+      await h.resumed('room-10')
       await h.snapshot('room-10', original)
       const state = await h.biddingPopupState()
       assert((await h.biddingPopupHostCount()) === 1, 'first-bidder recovery: очаквах точно един popup')
@@ -344,6 +394,7 @@ try {
       await page.waitForTimeout(2_000)
       assert((await h.getResyncRequestCount()) === 0, 'bubble-expiry render не трябва сам да предизвиква resync')
       await waitForResyncRequested(h, page)
+      await h.resumed('room-11')
       await h.snapshot('room-11', withPriorEntry)
       const state = await h.biddingPopupState()
       assert((await h.biddingPopupHostCount()) === 1, 'recovery след bubble-timer interference: очаквах точно един popup')
@@ -356,6 +407,7 @@ try {
       const original = await enterAtBidding(h, page, 'room-12a')
       await h.clickBidAction('pass')
       await waitForResyncRequested(h, page)
+      await h.resumed('room-12a')
       await h.snapshot('room-12a', original)
       assert((await h.biddingPopupState()).buttonsDisabled === false, 'PASS: recovery трябва да работи')
     })
@@ -364,6 +416,7 @@ try {
       const original = await enterAtBidding(h, page, 'room-12b')
       await h.clickBidAction('all-trumps')
       await waitForResyncRequested(h, page)
+      await h.resumed('room-12b')
       await h.snapshot('room-12b', original)
       assert((await h.biddingPopupState()).buttonsDisabled === false, 'contract action: recovery трябва да работи')
     })

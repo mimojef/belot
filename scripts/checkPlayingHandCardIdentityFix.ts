@@ -115,7 +115,10 @@ await check(
 await check(
   "[3] per-button 'click' listener remains, with cardId captured from button.dataset.cardId at render time (closure)",
   () => {
-    const clickWiringPattern = /const cardId = button\.dataset\.cardId\s*\n\s*if \(!cardId\) \{\s*\n\s*return\s*\n\s*\}\s*\n\s*\n\s*button\.addEventListener\('click', \(\) => \{\s*\n\s*handleHandCardChoice\(button, cardId\)/
+    // listenersBound guard-ът (reused node-ове в syncBottomHandOverlay) е
+    // допустим в същия if; shape-ът "cardId се чете веднъж и се подава от
+    // closure" е непроменен.
+    const clickWiringPattern = /const cardId = button\.dataset\.cardId\s*\n\s*if \(!cardId(?: \|\| button\.dataset\.listenersBound === '1')?\) \{\s*\n\s*return\s*\n\s*\}\s*\n(?:\s*button\.dataset\.listenersBound = '1'\s*\n)?\s*\n\s*button\.addEventListener\('click', \(\) => \{\s*\n\s*handleHandCardChoice\(button, cardId\)/
     assert(
       clickWiringPattern.test(source),
       'expected per-button click listener with closure-bound cardId (button.dataset.cardId read once at render time, then passed to handleHandCardChoice) not found in the expected shape',
@@ -138,7 +141,9 @@ await check(
   () => {
     const fnStart = source.indexOf('function canSubmitHandCard')
     assert(fnStart !== -1, 'canSubmitHandCard function not found')
-    const fnBody = source.slice(fnStart, fnStart + 400)
+    // До следващата function декларация (тялото нарасна с sweep коментара).
+    const fnEnd = source.indexOf('\n  function ', fnStart + 1)
+    const fnBody = source.slice(fnStart, fnEnd === -1 ? fnStart + 2000 : fnEnd)
     assert(fnBody.includes('validCardIds'), 'canSubmitHandCard no longer checks validCardIds')
     assert(fnBody.includes('sortedHand.some'), 'canSubmitHandCard no longer checks sortedHand membership')
   },

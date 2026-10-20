@@ -174,6 +174,19 @@ const SEAT_LABELS: Record<Seat, string> = {
 // седи дълго на заклещен UI.
 const BID_RESPONSE_WATCHDOG_MS = 5_000
 const BID_RESYNC_RESPONSE_TIMEOUT_MS = 5_000
+// Огледален watchdog за изиграване на карта (виж submitPlayCardFromUi).
+const PLAY_RESPONSE_WATCHDOG_MS = 5_000
+// Частните маси могат да имат 5/10 сек ход — тогава 5 сек watchdog би
+// проверил едва в края на хода. Първата проверка (идемпотентен resync) е
+// ~30% от времето за ход, в [1.5, 5] сек. Таймерът за реакция НЕ се променя;
+// отключване става само по отговора на resync-а, така че по-ранна проверка
+// не може да доведе до двойно действие.
+const SUBMIT_WATCHDOG_TURN_FRACTION = 0.3
+const SUBMIT_WATCHDOG_MIN_MS = 1_500
+
+function getSubmitWatchdogDelayMs(turnTimeoutMs: number, maxMs: number): number {
+  return Math.min(maxMs, Math.max(SUBMIT_WATCHDOG_MIN_MS, Math.round(turnTimeoutMs * SUBMIT_WATCHDOG_TURN_FRACTION)))
+}
 
 // Огледало на server round ladder-а (round_of_16/quarterfinal/semifinal/final),
 // виж tournamentRoundTypeLabel в renderTournamentsScreen.ts — дублирано тук
@@ -219,11 +232,38 @@ export function createActiveRoomFlowController(
     bidResponseTimerId: number | null
     resyncTimeoutId: number | null
     resyncRequested: boolean
+    // room_resumed за НАШАТА resync заявка е получен: сървърът обработва
+    // съобщенията от един socket синхронно и по ред, значи snapshot-ът след
+    // него отразява състоянието СЛЕД изпратената обява. Само той може да
+    // отключи UI-я — по-ранен (in-flight) snapshot не доказва нищо.
+    resyncAnswered: boolean
     reconnectFallbackTriggered: boolean
   } = {
     bidResponseTimerId: null,
     resyncTimeoutId: null,
     resyncRequested: false,
+    resyncAnswered: false,
+    reconnectFallbackTriggered: false,
+  }
+  // Същият watchdog за submit_play_card. Преди него изгубена команда (zombie
+  // mobile socket, send при не-OPEN socket) оставяше pendingPlayCardSent=true
+  // до края на хода: всички следващи tap-ове се игнорираха и след 15 сек
+  // ботът играеше друга карта. Никога не изпраща картата повторно.
+  const playWatchdog: {
+    responseTimerId: number | null
+    resyncTimeoutId: number | null
+    resyncRequested: boolean
+    resyncAnswered: boolean
+    // Сървърът е върнал error, докато картата чака — error-ите нямат
+    // корелация с командата, затова не отключваме веднага, а през resync.
+    rejectedByServer: boolean
+    reconnectFallbackTriggered: boolean
+  } = {
+    responseTimerId: null,
+    resyncTimeoutId: null,
+    resyncRequested: false,
+    resyncAnswered: false,
+    rejectedByServer: false,
     reconnectFallbackTriggered: false,
   }
   const emojiReactionUiState: EmojiReactionUiState = createEmojiReactionUiState()
@@ -2455,6 +2495,7 @@ export function createActiveRoomFlowController(
       bidWatchdog.resyncTimeoutId = null
     }
     bidWatchdog.resyncRequested = false
+    bidWatchdog.resyncAnswered = false
     bidWatchdog.reconnectFallbackTriggered = false
   }
 
@@ -2486,12 +2527,143 @@ export function createActiveRoomFlowController(
     )
   }
 
+  // При server error, докато обявата чака: error-ът няма корелация с
+  // командата (може да е за друго, по-рано изпратено съобщение) — питаме
+  // сървъра веднага и отключваме само по отговора на resync-а.
+  function requestBidResyncNow(): void {
+    if (bidWatchdog.bidResponseTimerId !== null) {
+      window.clearTimeout(bidWatchdog.bidResponseTimerId)
+      bidWatchdog.bidResponseTimerId = null
+    }
+    if (bidWatchdog.resyncRequested) {
+      return
+    }
+    bidWatchdog.resyncRequested = true
+    options.requestBidResync()
+    bidWatchdog.resyncTimeoutId = window.setTimeout(
+      handleBidResyncTimedOut,
+      BID_RESYNC_RESPONSE_TIMEOUT_MS,
+    )
+  }
+
   function startBidResponseWatchdog(): void {
     cancelBidWatchdog()
     bidWatchdog.bidResponseTimerId = window.setTimeout(
       handleBidWatchdogExpired,
-      BID_RESPONSE_WATCHDOG_MS,
+      getSubmitWatchdogDelayMs(resolveHumanTurnTimeoutMs(activeRoomState?.game), BID_RESPONSE_WATCHDOG_MS),
     )
+  }
+
+  function cancelPlayWatchdog(): void {
+    if (playWatchdog.responseTimerId !== null) {
+      window.clearTimeout(playWatchdog.responseTimerId)
+      playWatchdog.responseTimerId = null
+    }
+    if (playWatchdog.resyncTimeoutId !== null) {
+      window.clearTimeout(playWatchdog.resyncTimeoutId)
+      playWatchdog.resyncTimeoutId = null
+    }
+    playWatchdog.resyncRequested = false
+    playWatchdog.resyncAnswered = false
+    playWatchdog.rejectedByServer = false
+    playWatchdog.reconnectFallbackTriggered = false
+  }
+
+  // Незабавна resync заявка (без да чакаме response таймера) — при server
+  // error, докато картата чака. Отключването пак минава само през отговора.
+  function requestPlayResyncNow(): void {
+    if (playWatchdog.responseTimerId !== null) {
+      window.clearTimeout(playWatchdog.responseTimerId)
+      playWatchdog.responseTimerId = null
+    }
+    if (playWatchdog.resyncRequested) {
+      return
+    }
+    playWatchdog.resyncRequested = true
+    options.requestBidResync()
+    playWatchdog.resyncTimeoutId = window.setTimeout(
+      handlePlayResyncTimedOut,
+      BID_RESYNC_RESPONSE_TIMEOUT_MS,
+    )
+  }
+
+  function handlePlayResyncTimedOut(): void {
+    playWatchdog.resyncTimeoutId = null
+    if (!activeRoomState || !playingCache.pendingPlayCardSent) {
+      return
+    }
+    if (playWatchdog.reconnectFallbackTriggered) {
+      return
+    }
+    playWatchdog.reconnectFallbackTriggered = true
+    // close -> setConnected(false) отключва ръката; reconnect -> тих resume.
+    options.forceReconnectForZombieConnection()
+  }
+
+  function handlePlayWatchdogExpired(): void {
+    playWatchdog.responseTimerId = null
+    if (!activeRoomState || !playingCache.pendingPlayCardSent) {
+      return
+    }
+    // resume_room е идемпотентен; room_resumed + snapshot идват СЛЕД
+    // евентуално забавената карта (същият socket, синхронна обработка по
+    // ред), затова само те еднозначно показват дали картата е приложена.
+    requestPlayResyncNow()
+  }
+
+  function submitPlayCardFromUi(roomId: string, cardId: string, declarationKeys?: string[]): boolean {
+    if (!activeRoomState) {
+      return false
+    }
+
+    if (!options.isConnected()) {
+      showPlayingInputNotice('Няма връзка със сървъра. Картата не е изиграна.')
+      return false
+    }
+
+    options.submitPlayCard(roomId, cardId, declarationKeys)
+    cancelPlayWatchdog()
+    playWatchdog.responseTimerId = window.setTimeout(
+      handlePlayWatchdogExpired,
+      getSubmitWatchdogDelayMs(resolveHumanTurnTimeoutMs(activeRoomState.game), PLAY_RESPONSE_WATCHDOG_MS),
+    )
+    return true
+  }
+
+  function releasePendingPlayCard(): void {
+    cancelPlayWatchdog()
+    if (!playingCache.pendingPlayCardSent) {
+      return
+    }
+    playingCache.pendingPlayCardSent = false
+    playingCache.pendingPlayCardId = null
+    // Неприложена карта = неприложени анонси; сървърният списък е авторитетът.
+    playingCache.submittedDeclarationKeys = [...(activeRoomState?.game?.ownDeclarationKeys ?? [])]
+  }
+
+  function showPlayingInputNotice(text: string): void {
+    document.body.querySelector('[data-playing-input-notice]')?.remove()
+    const notice = document.createElement('div')
+    notice.setAttribute('data-playing-input-notice', '1')
+    notice.textContent = text
+    notice.style.cssText = [
+      'position:fixed',
+      'left:50%',
+      'top:18px',
+      'transform:translateX(-50%)',
+      'z-index:10000',
+      'max-width:min(92vw,520px)',
+      'padding:10px 16px',
+      'border-radius:12px',
+      'background:rgba(127,29,29,0.92)',
+      'border:1px solid rgba(248,113,113,0.4)',
+      'color:#fee2e2',
+      'font:700 14px/1.35 Inter, system-ui, sans-serif',
+      'text-align:center',
+      'pointer-events:none',
+    ].join(';')
+    document.body.appendChild(notice)
+    window.setTimeout(() => notice.remove(), 2600)
   }
 
   function clearBiddingUiState(): void {
@@ -4792,7 +4964,7 @@ export function createActiveRoomFlowController(
         stageScale,
         scaledStageWidth,
         scaledStageHeight,
-        submitPlayCard: options.submitPlayCard,
+        submitPlayCard: submitPlayCardFromUi,
         submitSweepDecision: options.submitSweepDecision,
         onDeclarationBubbleShown: (seat, lines) => {
           options.gameAudio?.playDeclarationBubble(lines, getSeatGender(seat))
@@ -6224,16 +6396,17 @@ export function createActiveRoomFlowController(
       return false
     }
 
-    // Всеки реален snapshot за активната стая доказва, че връзката е жива —
-    // bid-watchdog-ът (виж submitBidActionFromUi/BID_RESPONSE_WATCHDOG_MS)
-    // вече е изпълнил единствената си задача, независимо дали ТОЗИ snapshot
-    // разрешава pending bid-а. wasPendingBidSentBeforeSnapshot се пази
-    // отделно, за да различим по-долу "bid-ът никога не е бил приложен"
-    // (currentBidderSeat все още сочи локалния играч) от нормалното
-    // разрешаване (нов entry за локалния seat, вече обработено от
-    // syncBiddingUiState по-надолу в renderActiveRoomScreen).
+    // wasPendingBidSentBeforeSnapshot различава по-долу "bid-ът никога не е
+    // бил приложен" (currentBidderSeat все още сочи локалния играч) от
+    // нормалното разрешаване (нов entry за локалния seat, обработено от
+    // syncBiddingUiState в renderActiveRoomScreen). Snapshot, генериран
+    // ПРЕДИ сървърът да обработи обявата (напр. emoji на друг играч при
+    // забавен сървър), също показва "още е твой ред" — затова отключва само
+    // snapshot-ът след room_resumed на нашия resync (resyncAnswered).
     const wasPendingBidSentBeforeSnapshot = biddingUiState.pendingBidSent
-    cancelBidWatchdog()
+    const wasBidResyncAnswered = bidWatchdog.resyncAnswered
+    const wasPlayResyncAnswered = playWatchdog.resyncAnswered
+    const wasPlayRejectedByServer = playWatchdog.rejectedByServer
 
     activeRoomState.roomStatus = message.roomStatus
     activeRoomState.reconnectToken = message.reconnectToken
@@ -6272,20 +6445,48 @@ export function createActiveRoomFlowController(
       shouldSilenceNextBiddingSnapshot = false
     }
 
-    // Fresh snapshot (нормален или resync-предизвикан) показва, че сървърът
-    // ВСЕ ОЩЕ чака точно от този играч обява — т.е. предишният bid никога не
-    // е бил приложен server-side (иначе currentBidderSeat щеше да се смени
-    // или щеше да има нов entry, което syncBiddingUiState вече би обработил
-    // по-долу). Разблокирай UI-я вместо да оставяш popup-а в заклещено
-    // pending/faded състояние — НЕ пращаме автоматично втори bid.
-    if (
+    // Resync отговорът показва, че сървърът ВСЕ ОЩЕ чака точно от този играч
+    // обява — предишният bid никога не е бил приложен. Разблокирай UI-я —
+    // НЕ пращаме автоматично втори bid. По-ранен snapshot оставя popup-а
+    // pending и watchdog-а активен.
+    const isStillAwaitingThisBid =
       wasPendingBidSentBeforeSnapshot &&
       biddingUiState.pendingBidSent &&
       activeRoomState.game?.authoritativePhase === 'bidding' &&
       activeRoomState.game.bidding?.currentBidderSeat === activeRoomState.controlledSeat
-    ) {
+    if (!isStillAwaitingThisBid) {
+      cancelBidWatchdog()
+    } else if (wasBidResyncAnswered) {
+      cancelBidWatchdog()
       biddingUiState.pendingBidSent = false
       activeRoomState.errorText = 'Обявата не беше потвърдена. Опитайте отново.'
+    }
+
+    // Изпратена карта: същото правило — отключва само snapshot-ът след
+    // room_resumed на нашия resync, ако ходът все още е наш и картата е в
+    // ръката (т.е. командата е отхвърлена или изгубена).
+    if (playingCache.pendingPlayCardSent) {
+      const game = activeRoomState.game
+      const pendingCardId = playingCache.pendingPlayCardId
+      const isStillAwaitingThisPlay =
+        game !== null &&
+        game.authoritativePhase === 'playing' &&
+        game.playing?.currentTurnSeat === activeRoomState.controlledSeat &&
+        pendingCardId !== null &&
+        (game.ownHand ?? []).some((card) => card.id === pendingCardId)
+
+      if (!isStillAwaitingThisPlay) {
+        cancelPlayWatchdog()
+      } else if (wasPlayResyncAnswered) {
+        releasePendingPlayCard()
+        showPlayingInputNotice(
+          wasPlayRejectedByServer
+            ? 'Ходът не беше приет. Опитайте отново.'
+            : 'Картата не беше потвърдена от сървъра. Изберете отново.',
+        )
+      }
+    } else {
+      cancelPlayWatchdog()
     }
 
     scheduleActiveRoomRender(
@@ -6871,6 +7072,11 @@ export function createActiveRoomFlowController(
     }
 
     if (message.type === 'room_resumed' && message.roomId === activeRoomState.roomId) {
+      // Отговор на resync заявка: сървърът е обработил всичко изпратено преди
+      // нея; следващият room_snapshot (изпратен синхронно веднага след това)
+      // е авторитетен за изпратената обява/карта.
+      if (bidWatchdog.resyncRequested) bidWatchdog.resyncAnswered = true
+      if (playWatchdog.resyncRequested) playWatchdog.resyncAnswered = true
       activeRoomState.isConnected = true
       activeRoomState.errorText = null
       scheduleActiveRoomRender()
@@ -6929,8 +7135,24 @@ export function createActiveRoomFlowController(
 
     if (message.type === 'error') {
       clearPendingCutSubmission()
-      clearPendingBidSubmission()
-      playingCache.pendingPlayCardSent = false
+      if (biddingUiState.pendingBidSent) {
+        // Същото правило като при картата по-долу: без незабавно отключване
+        // (иначе втора обява, докато първата още чака), а resync.
+        requestBidResyncNow()
+      } else {
+        clearPendingBidSubmission()
+      }
+      if (playingCache.pendingPlayCardSent) {
+        // error-ът няма корелация с командата — може да е отговор на друго,
+        // по-рано изпратено съобщение, докато картата още чака на сървъра.
+        // Незабавно отключване би позволило втора карта за същия ход, затова
+        // питаме сървъра (resync) и отключваме само по неговия отговор.
+        // errorText не се рисува в playing фазата — съобщението идва от
+        // snapshot handler-а при отключване.
+        console.warn('[active-room] error while a card play is pending:', message.message)
+        playWatchdog.rejectedByServer = true
+        requestPlayResyncNow()
+      }
       // Defense-in-depth: ако table gift request-ът получи generic
       // {type:'error'} response вместо изричен table_gift_send_result
       // (напр. заради бъдещ подобен parser/routing gap, мрежова грешка на
@@ -7048,7 +7270,7 @@ export function createActiveRoomFlowController(
     if (!value) {
       clearPendingCutSubmission()
       clearPendingBidSubmission()
-      playingCache.pendingPlayCardSent = false
+      releasePendingPlayCard()
       // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
       belotSpectatorViewersHydrated = false
     }
@@ -7065,7 +7287,7 @@ export function createActiveRoomFlowController(
     if (message) {
       clearPendingCutSubmission()
       clearPendingBidSubmission()
-      playingCache.pendingPlayCardSent = false
+      releasePendingPlayCard()
     }
 
     activeRoomState.errorText = message
@@ -7081,6 +7303,11 @@ export function createActiveRoomFlowController(
       clearPendingCutSubmission()
       clearPendingBidSubmission()
     }
+    // Затворен socket никога няма да отговори на изпратената карта — иначе
+    // ръката остава заключена и след reconnect (zombie-resume пътя минава
+    // само през setConnectionState). Ако картата е приложена преди close-а,
+    // resume snapshot-ът я показва; втори tap би бил отхвърлен от сървъра.
+    if (!isConnected) releasePendingPlayCard()
     // Viewer-indicator: списъкът след reconnect/resume е hydration (без звук).
     if (!isConnected) belotSpectatorViewersHydrated = false
 

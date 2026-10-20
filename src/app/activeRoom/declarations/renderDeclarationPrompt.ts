@@ -84,6 +84,19 @@ export function renderDeclarationPrompt(params: {
   onContinue: (selectedKeys: string[]) => void
 }): void {
   const { root, prompt, onSelectionChange, onContinue } = params
+  // renderPlayingScreen вика това при ВСЕКИ render (snapshot, emoji, край на
+  // fly/collection анимация...). Пресъздаването на overlay-я между pointerdown
+  // и pointerup губи tap-а върху "Продължи" (браузърът не синтезира click на
+  // detached node) — затова при непроменено съдържание DOM-ът се запазва.
+  const promptKey = JSON.stringify([
+    prompt.cardId,
+    prompt.options.map((option) => option.key),
+    prompt.selectedKeys,
+  ])
+  const existingOverlay = root.querySelector<HTMLElement>(PROMPT_SELECTOR)
+  if (existingOverlay !== null && existingOverlay.dataset.declarationPromptKey === promptKey) {
+    return
+  }
   removeDeclarationPrompt(root)
 
   const selectedKeys = new Set(prompt.selectedKeys)
@@ -97,6 +110,7 @@ export function renderDeclarationPrompt(params: {
 
   const overlay = document.createElement('div')
   overlay.setAttribute('data-declaration-prompt-root', '1')
+  overlay.dataset.declarationPromptKey = promptKey
   overlay.innerHTML = `
     <div
       style="

@@ -98,6 +98,11 @@ const MOBILE_TRICK_LAYER_Z_INDEX = 3
 const MOBILE_BUBBLE_LAYER_Z_INDEX = 4
 const ACTIVE_HAND_CARD_LIFT = ' translateY(-5px)'
 const ACTIVE_HAND_CARD_FILTER = 'brightness(1.03) drop-shadow(0 8px 12px rgba(0,0,0,0.18))'
+// Незабавна обратна връзка за регистриран tap: изпратената карта остава
+// повдигната и осветена, докато сървърът потвърди (или отхвърли) хода.
+// Картата НЕ се мести оптимистично на масата — сървърът е авторитетът.
+const PENDING_HAND_CARD_LIFT = ' translateY(-28px)'
+const PENDING_HAND_CARD_FILTER = 'brightness(1.08) drop-shadow(0 0 10px rgba(253,224,71,0.9))'
 // Дискретно затъмняване САМО за карти, които в момента не могат да се
 // изиграят, докато Е ред на локалния играч (isMyTurn && !isValid) — виж
 // forensic report §B/§2. Не се ползва, когато изобщо не е ред на играча
@@ -1142,8 +1147,9 @@ function renderBottomHandOverlay(options: {
   isMyTurn: boolean
   stageScale: number
   hoveredHandCardId: string | null
+  pendingCardId: string | null
 }): string {
-  const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId } = options
+  const { cards, validCardIds, isMyTurn, stageScale, hoveredHandCardId, pendingCardId } = options
   const isMobileLayout = isPhoneLayoutViewport()
   const bottomHandFanScale = isMobileLayout ? getBottomHandMobileFanScale(stageScale) : 1
   const bottomInset = isMobileLayout ? ACTIVE_ROOM_MOBILE_BOTTOM_NAV_HEIGHT : 0
@@ -1163,8 +1169,12 @@ function renderBottomHandOverlay(options: {
     const baseTransform = `translate(-50%,-50%) translate(${offset.x}px,${offset.y}px) rotate(${offset.rotate}deg)`
     const isValid = !isMyTurn || validCardIds === null || validCardIds.includes(card.id)
     const canClick = isMyTurn && isValid
-    const isHovered = canClick && card.id === hoveredHandCardId
-    const cardTransform = isHovered ? `${baseTransform}${ACTIVE_HAND_CARD_LIFT}` : baseTransform
+    const isPending = card.id === pendingCardId
+    const isHovered = !isPending && canClick && card.id === hoveredHandCardId
+    const cardTransform = isPending
+      ? `${baseTransform}${PENDING_HAND_CARD_LIFT}`
+      : isHovered ? `${baseTransform}${ACTIVE_HAND_CARD_LIFT}` : baseTransform
+    const cardFilter = isPending ? PENDING_HAND_CARD_FILTER : isHovered ? ACTIVE_HAND_CARD_FILTER : 'none'
     // Само за визуално затъмняване — НЕ управлява click/submit eligibility
     // (това продължава да е canClick/disabled/canSubmitHandCard).
     const isDimmedIneligible = isMyTurn && !isValid
@@ -1192,7 +1202,7 @@ function renderBottomHandOverlay(options: {
           cursor:${canClick ? 'pointer' : 'default'};
           pointer-events:auto;
           opacity:${isDimmedIneligible ? INVALID_HAND_CARD_OPACITY : '1'};
-          filter:${isHovered ? ACTIVE_HAND_CARD_FILTER : 'none'};
+          filter:${cardFilter};
           transition:transform 0.12s ease,filter 0.12s ease,opacity 0.12s ease;
           z-index:${60 + index};
         "
@@ -1438,6 +1448,7 @@ function resetCacheForFreshSnapshot(
   cache.hasRenderedSnapshot = true
   cache.animationToken += 1
   cache.pendingPlayCardSent = false
+  cache.pendingPlayCardId = null
   cache.wasMyTurn = false
   cache.observedPlayKeys = []
   cache.showBotTakeover = false
@@ -1570,6 +1581,43 @@ function syncPlayingBotTakeoverState(options: {
 const MOBILE_TRICK_LAYER_HOST_ATTR = 'data-mobile-trick-layer-host'
 const MOBILE_BUBBLE_LAYER_HOST_ATTR = 'data-mobile-bubble-layer-host'
 const BOTTOM_HAND_HOST_ATTR = 'data-playing-bottom-hand-host'
+
+// Mobile "докосвам една карта, играе друга": ветрилото е силно застъпено и
+// завъртяно (видима ивица ~26-38px на телефон), а при touch браузърът
+// таргетира synthesized 'click' по площта на пръста — близо до ръба click-ът
+// може да отиде на съседната карта с по-висок z-index, включително когато
+// докоснатата карта е затъмнена/неиграема. Възпроизведено с реален CDP touch
+// (checkPlayingInputReliability.ts [9]). Записваме картата ТОЧНО под центъра
+// на touch pointerdown-а; click към друга карта се игнорира (по-добре нищо,
+// отколкото грешна карта). Mouse (desktop) не се засяга.
+const TOUCH_TAP_MATCH_WINDOW_MS = 1500
+let lastHandTouchDown: { cardIdAtPoint: string | null; at: number } | null = null
+let isHandTouchDownListenerInstalled = false
+
+function installHandTouchDownListener(): void {
+  if (isHandTouchDownListenerInstalled || typeof document === 'undefined') return
+  isHandTouchDownListenerInstalled = true
+  document.addEventListener('pointerdown', (event) => {
+    if (event.pointerType === 'mouse') {
+      lastHandTouchDown = null
+      return
+    }
+    const element = document.elementFromPoint(event.clientX, event.clientY)
+    const card = element?.closest<HTMLElement>(`[${BOTTOM_HAND_HOST_ATTR}] [data-card-id]`) ?? null
+    lastHandTouchDown = { cardIdAtPoint: card?.dataset.cardId ?? null, at: performance.now() }
+  }, { capture: true, passive: true })
+}
+
+// Сравнява с ПОСЛЕДНОТО touch докосване, без да го консумира: при бързи
+// застъпени tap-ове (down A, down B, click A, click B) click A се отхвърля
+// (последният пръст е върху B), а click B остава защитен срещу retarget.
+function isTouchClickRetargetedAwayFrom(cardId: string): boolean {
+  const down = lastHandTouchDown
+  if (down === null || performance.now() - down.at > TOUCH_TAP_MATCH_WINDOW_MS) return false
+  // Докосване извън карти (между/до тях) -> браузърът е избрал най-близката;
+  // под пръста няма друга карта, затова е безопасно.
+  return down.cardIdAtPoint !== null && down.cardIdAtPoint !== cardId
+}
 
 // Bottom-hand card buttons живеят в собствен host, синхронизиран с
 // incremental DOM diffing (по data-card-id), вместо да минават през
@@ -1808,7 +1856,8 @@ export type RenderPlayingScreenOptions = {
   stageScale: number
   scaledStageWidth: number
   scaledStageHeight: number
-  submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void
+  /** false = командата НЕ е изпратена (напр. няма връзка) — UI-ят не се заключва. */
+  submitPlayCard: (roomId: string, cardId: string, declarationKeys?: string[]) => void | boolean
   submitSweepDecision?: (roomId: string, decision: 'accept' | 'decline') => void
   onDeclarationBubbleShown?: (seat: Seat, lines: string[]) => void
   onPlayedCardLanded?: () => void
@@ -2331,6 +2380,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
         isMyTurn,
         stageScale,
         hoveredHandCardId: cache.hoveredHandCardId,
+        pendingCardId: cache.pendingPlayCardSent ? cache.pendingPlayCardId : null,
       }))
 
   if (isPhoneLayout) {
@@ -2444,13 +2494,29 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       physicalWidth: sourceSize.width,
       physicalHeight: sourceSize.height,
     })
+    const previousSubmittedDeclarationKeys = cache.submittedDeclarationKeys
     cache.pendingPlayCardSent = true
+    cache.pendingPlayCardId = cardId
     if (declarationKeys.length > 0) {
       cache.submittedDeclarationKeys = [
         ...new Set([...cache.submittedDeclarationKeys, ...declarationKeys]),
       ]
     }
-    submitPlayCard(roomId, cardId, declarationKeys)
+
+    if (submitPlayCard(roomId, cardId, declarationKeys) === false) {
+      // Командата не е тръгнала (няма връзка) — не заключваме ръката до края
+      // на хода; играчът може да опита отново веднага щом връзката се върне.
+      cache.pendingPlayCardSent = false
+      cache.pendingPlayCardId = null
+      cache.submittedDeclarationKeys = previousSubmittedDeclarationKeys
+      cache.lastPlayedCardRect = null
+      playedCardFlySourceByCache.delete(cache)
+      return
+    }
+
+    // Видимо потвърждение на tap-а веднага (без да чакаме следващ render).
+    button.style.transform = `${button.dataset.baseTransform ?? ''}${PENDING_HAND_CARD_LIFT}`
+    button.style.filter = PENDING_HAND_CARD_FILTER
   }
 
   function renderPendingDeclarationPrompt(): void {
@@ -2530,6 +2596,10 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   }
 
   function handleHandCardChoice(button: HTMLButtonElement, cardId: string): void {
+    if (isTouchClickRetargetedAwayFrom(cardId)) {
+      return
+    }
+
     if (
       cache.pendingPlayCardSent ||
       cache.pendingDeclarationPrompt !== null ||
@@ -2574,6 +2644,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
   // data-listeners-bound, за да не се закачат дублирани listeners на
   // reused node-ове. Нови/newly-active node-ове (marker липсва) винаги
   // получават listener-и.
+  if (bottomHandHost) installHandTouchDownListener()
   bottomHandHost?.querySelectorAll<HTMLButtonElement>('.play-hand-card--active').forEach((button) => {
     const cardId = button.dataset.cardId
     if (!cardId || button.dataset.listenersBound === '1') {
@@ -2585,7 +2656,11 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
       handleHandCardChoice(button, cardId)
     })
 
+    const isPendingButton = (): boolean =>
+      cache.pendingPlayCardSent && cache.pendingPlayCardId === button.dataset.cardId
+
     button.addEventListener('pointerenter', () => {
+      if (isPendingButton()) return
       const baseTransform = button.dataset.baseTransform ?? ''
       const baseZIndex = Number.parseInt(button.dataset.z ?? '50', 10)
       cache.hoveredHandCardId = button.dataset.cardId ?? null
@@ -2595,6 +2670,7 @@ export function renderPlayingScreen(options: RenderPlayingScreenOptions): void {
     })
 
     button.addEventListener('pointerleave', () => {
+      if (isPendingButton()) return
       const baseTransform = button.dataset.baseTransform ?? ''
       const baseZIndex = Number.parseInt(button.dataset.z ?? '50', 10)
       if (cache.hoveredHandCardId === button.dataset.cardId) {
