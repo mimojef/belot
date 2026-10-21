@@ -281,6 +281,7 @@
     "check:session-fast-lookup": "tsx scripts/checkSessionFastLookup.ts",
     "check:password-reset": "tsx scripts/checkPasswordReset.ts",
     "check:password-reset-http": "tsx scripts/checkPasswordResetHttp.ts",
+    "check:profile-deletion-infrastructure": "tsx scripts/checkProfileDeletionInfrastructure.ts --server-root=.",
     "check:friend-acceptance": "tsx scripts/checkFriendAcceptanceNotifications.ts",
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",
     "check:sweep-down-the-cards": "tsx scripts/checkSweepDownTheCards.ts",
