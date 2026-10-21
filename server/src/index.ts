@@ -264,6 +264,7 @@ import { broadcastBelotSpectatorPublicEvent, broadcastBelotSpectatorSnapshot } f
 import { buildBelotRoomSpectatorsMessage } from './core/buildBelotRoomSpectatorsMessage.js'
 import { evaluateBelotSpectatorWatchEligibility } from './core/evaluateBelotSpectatorWatchEligibility.js'
 import { isBelotSpectatorFeatureEnabled } from './core/belotSpectatorFeatureFlag.js'
+import { createTopicsPersonalDisabledResponse, isTopicsPersonalServerEnabled } from './core/topicsPersonalFeatureGate.js'
 import {
   createTournamentMatchesLiveTokenSigner,
   createTournamentMatchesViewerRegistry,
@@ -19333,6 +19334,13 @@ async function handleChatRequest(
     return true
   }
 
+  // "Теми → Лични" временно изключени (TOPICS_PERSONAL_ENABLED) — само двата
+  // vip_dm-специфични endpoint-а; friend/pika_support пътищата не се докосват.
+  if ((isVipDmStart || isVipDmStartWithMessage) && req.method === 'POST' && !isTopicsPersonalServerEnabled()) {
+    sendJsonResponse(res, 403, createTopicsPersonalDisabledResponse())
+    return true
+  }
+
   if (isVipDmStart && req.method === 'POST') {
     const body = await readJsonRequestBody(req, MAX_IMAGE_ATTACHMENT_JSON_BYTES)
 
@@ -19627,6 +19635,14 @@ async function handleChatRequest(
     const conversationKindForMuteGuard = chatStore
       .listConversations(profileId)
       .find((c) => c.friendshipId === friendshipId)?.kind ?? null
+
+    // "Теми → Лични" временно изключени — същият kind-условен lookup като
+    // mute guard-а по-долу (vip_dm никога не е архивиран, виж
+    // isConversationArchived); friend/pika_support изпращанията не се засягат.
+    if (conversationKindForMuteGuard === 'vip_dm' && !isTopicsPersonalServerEnabled()) {
+      sendJsonResponse(res, 403, createTopicsPersonalDisabledResponse())
+      return true
+    }
 
     if (conversationKindForMuteGuard === 'vip_dm') {
       const vipDmSendMuteSnapshot = topicModerationStore.getSectionMuteSnapshot(profileId)

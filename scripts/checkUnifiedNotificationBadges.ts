@@ -11,6 +11,12 @@ import {
   getTopicsPersonalUnreadRaw,
   getTopicsTotalUnreadRaw,
 } from '../src/app/lobby/renderLobbyScreen.ts'
+import { __setTopicsPersonalEnabledOverrideForTests } from '../server/src/shared/topicsPersonalFeatureFlag.ts'
+
+// vip_dm ("Теми → Лични") badge семантиката е зад TOPICS_PERSONAL_ENABLED
+// (изключен по подразбиране) — suite-ът я проверява във включено състояние.
+// Browser частта ползва topicsComposerVipGateHarness, който също го включва.
+__setTopicsPersonalEnabledOverrideForTests(true)
 
 let passed = 0
 let failed = 0

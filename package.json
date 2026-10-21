@@ -112,6 +112,7 @@
     "check:tournament-return-destination-resolver": "npx tsx scripts/checkTournamentReturnDestinationResolver.ts",
     "check:tournament-final-prize-popup": "npx tsx scripts/checkTournamentFinalPrizePopup.ts",
     "check:private-room-mobile-responsive": "npx tsx scripts/checkPrivateRoomMobileResponsive.ts",
+    "check:topics-personal-disabled-browser": "npx tsx scripts/checkTopicsPersonalDisabledBrowser.ts",
     "check:match-ended-prize-display": "npx tsx scripts/checkMatchEndedPrizeDisplay.ts",
     "check:campaign-match-credit-display": "npx tsx scripts/checkCampaignMatchCreditDisplay.ts",
     "check:ludo-game-end-campaign-credit": "npx tsx scripts/checkLudoGameEndCampaignCredit.ts",

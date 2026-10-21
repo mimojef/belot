@@ -12,6 +12,7 @@ import {
   COMPOSER_EMOJI_KEY_REPLY,
 } from './renderLobbyScreen'
 import { renderVipRequiredPopup } from '../../ui/overlays/renderVipRequiredPopup'
+import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 
 // Read-only Етап 1 — root history + navigation. Етап 2 добави real composer
 // (root send, VIP gate, launch gift). Етап 3 добавя реални likes (root +
@@ -262,6 +263,8 @@ export function renderTopicReplyButton(rootMessageId: string, replyCount: number
 //    транзакцията, виж deleteOwnMessage()) — клиентският replyCount е само
 //    UX hint за disabled state, не security boundary.
 function renderTopicPersonalMessageButton(state: LobbyScreenState, senderProfileId: string, senderDisplayName: string): string {
+  // "Теми → Лични" временно изключени (TOPICS_PERSONAL_ENABLED) — без бутон.
+  if (!isTopicsPersonalEnabled()) return ''
   const ownProfileId = state.profile.profileId
   if (ownProfileId === null || senderProfileId === ownProfileId) return ''
   const isPending = state.topicsPersonalMessagePendingProfileId === senderProfileId
@@ -2050,6 +2053,9 @@ function renderTopicsHeader(state: LobbyScreenState): string {
   const lafcheButtonStyle = isLafcheActive
     ? 'border-color:#d4a520;background:rgba(212,165,32,0.16);color:#d4a520;'
     : 'border-color:rgba(212,165,32,0.34);background:#050505;color:#f8fafc;'
+  // "Теми → Лични" временно изключени (TOPICS_PERSONAL_ENABLED) — бутонът
+  // "Лични" не се рендира (flex row-ът се свива, без празно място).
+  const isPersonalEnabled = isTopicsPersonalEnabled()
 
   if (state.topicsMode === 'thread') {
     return `
@@ -2063,6 +2069,7 @@ function renderTopicsHeader(state: LobbyScreenState): string {
           >&larr; <span>Общи</span></button>
           <h1 style="margin:0;font-size:20px;font-weight:900;color:#f8fafc;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Теми</h1>
         </div>
+        ${isPersonalEnabled ? `
         <button
           type="button"
           data-topics-personal-open="1"
@@ -2073,11 +2080,12 @@ function renderTopicsHeader(state: LobbyScreenState): string {
           <span>Лични</span>
           ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span>` : ''}
         </button>
+        ` : ''}
       </div>
     `
   }
 
-  if (state.topicsMode === 'personal') {
+  if (state.topicsMode === 'personal' && isPersonalEnabled) {
     return `
       <div data-topics-header-row="1" data-topics-personal-header="1" style="display:flex;align-items:center;justify-content:space-between;gap:12px;min-width:0;">
         <div style="display:flex;align-items:center;gap:10px;min-width:0;">
@@ -2135,6 +2143,7 @@ function renderTopicsHeader(state: LobbyScreenState): string {
           <span data-topics-general-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:${generalUnreadBadge !== null ? 'inline-flex' : 'none'};align-items:center;justify-content:center;padding:0 5px;line-height:1;">${generalUnreadBadge !== null ? escapeHtml(generalUnreadBadge) : ''}</span>
           <span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${generalUnreadBadge !== null ? escapeHtml(`${generalUnreadTotal} непрочетени в Общ чат`) : ''}</span>
         </button>
+        ${isPersonalEnabled ? `
         <button
           type="button"
           data-topics-personal-open="1"
@@ -2149,6 +2158,7 @@ function renderTopicsHeader(state: LobbyScreenState): string {
           <span>Лични</span>
           ${personalUnreadBadge !== null ? `<span data-topics-personal-badge="1" aria-hidden="true" style="min-width:18px;height:18px;border-radius:9px;background:#ef4444;color:#fff;font-size:10px;font-weight:900;display:inline-flex;align-items:center;justify-content:center;padding:0 5px;line-height:1;">${escapeHtml(personalUnreadBadge)}</span><span style="position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0;">${escapeHtml(`${personalUnreadTotal} непрочетени лични съобщения`)}</span>` : ''}
         </button>
+        ` : ''}
       </div>
     </div>
   `
@@ -2265,7 +2275,10 @@ export function renderTopicsScreen(state: LobbyScreenState): string {
   //      vertical scroll container (виж renderTopicMessageStream)
   //   3) composer form (Етап 2) — flex:0 0 auto, фиксиран на дъното
   const activeTopicId = state.activeTopicId
-  const isPersonalMode = state.topicsMode === 'personal'
+  // Defense-in-depth: при изключен flag личният панел никога не се рендира,
+  // дори ако state.topicsMode остане 'personal' (controller-ът пренасочва
+  // към "Лафче", виж redirectTopicsPersonalToLafche).
+  const isPersonalMode = state.topicsMode === 'personal' && isTopicsPersonalEnabled()
   const isThreadMode = state.topicsMode === 'thread'
   return `
     <section data-topics-screen="1" style="flex:1;min-height:0;display:flex;flex-direction:column;padding:0 4px;overflow:hidden;">

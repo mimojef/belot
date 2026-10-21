@@ -160,7 +160,8 @@ function startSrv(serverDir: string, port: number): { child: ChildProcessWithout
     [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')],
     {
       cwd: serverDir,
-      env: { ...process.env, PORT: String(port), BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' },
+      // TOPICS_PERSONAL_ENABLED=1 — [H4] покрива vip_dm пътищата, изключени по подразбиране.
+      env: { ...process.env, PORT: String(port), BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1', TOPICS_PERSONAL_ENABLED: '1' },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
   )

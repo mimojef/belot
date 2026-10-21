@@ -7,6 +7,13 @@
 // върху Етап 2: composer/VIP gate/realtime merge поведение.
 import { createLobbyFlowController, type LobbyAuthSession } from '/src/app/lobby/createLobbyFlowController.ts'
 import type { ChatConversationSnapshot, FriendshipsSnapshot, TopicSnapshot, TopicMessageSnapshot, TopicReplySnapshot, ServerMessage } from '/src/app/network/createGameServerClient.ts'
+import { __setTopicsPersonalEnabledOverrideForTests } from '/server/src/shared/topicsPersonalFeatureFlag.ts'
+
+// Suite-ите върху този harness проверяват "Теми → Лични" поведението, което е
+// зад TOPICS_PERSONAL_ENABLED (изключен по подразбиране) — затова тук се
+// включва изрично. ?topicsPersonal=0 оставя flag-а изключен (виж
+// checkTopicsPersonalDisabledBrowser.ts).
+__setTopicsPersonalEnabledOverrideForTests(new URLSearchParams(window.location.search).get('topicsPersonal') !== '0')
 
 const root = document.createElement('div')
 document.body.appendChild(root)

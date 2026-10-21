@@ -45,6 +45,11 @@ import {
   type LobbyScreenState,
 } from '../../src/app/lobby/renderLobbyScreen.js'
 import type { ChatConversationSnapshot } from '../../src/app/network/createGameServerClient.js'
+import { __setTopicsPersonalEnabledOverrideForTests } from '../src/shared/topicsPersonalFeatureFlag.js'
+
+// [7] проверява vip_dm badge-а, който е зад TOPICS_PERSONAL_ENABLED (изключен
+// по подразбиране) — включваме го изрично за тази проверка.
+__setTopicsPersonalEnabledOverrideForTests(true)
 
 const PROJECT_ROOT = resolve(import.meta.dirname, '..', '..')
 

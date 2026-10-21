@@ -92,6 +92,8 @@ function startServer(serverDir: string, port: number): RunningServer {
         PORT: String(port),
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
+        // vip_dm пътищата са зад TOPICS_PERSONAL_ENABLED (изключен по подразбиране).
+        TOPICS_PERSONAL_ENABLED: '1',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },

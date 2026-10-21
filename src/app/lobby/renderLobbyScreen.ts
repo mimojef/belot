@@ -5,6 +5,7 @@ import {
   isHumanTurnTimeoutMs,
   type HumanTurnTimeoutMs,
 } from '../../../server/src/shared/humanTurnTimeoutOptions'
+import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 import type {
   AdminSettingsSnapshot,
   AdminStatsSnapshot,
@@ -4698,6 +4699,9 @@ export function getFriendChatUnreadRaw(state: LobbyScreenState): number {
 }
 
 export function getTopicsPersonalUnreadRaw(state: LobbyScreenState): number {
+  // "Теми → Лични" временно изключени — непрочетените vip_dm не се броят в
+  // "Теми" badge-а (секцията е недостъпна). Chat badge-ът не ползва тази функция.
+  if (!isTopicsPersonalEnabled()) return 0
   return sumConversationUnreadByKind(state, 'vip_dm')
 }
 

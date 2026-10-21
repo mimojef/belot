@@ -1,4 +1,5 @@
 import type { HumanTurnTimeoutMs } from '../../../server/src/shared/humanTurnTimeoutOptions'
+import { isTopicsPersonalEnabled } from '../../../server/src/shared/topicsPersonalFeatureFlag'
 import { formatGiftLimitError, formatPikaTeamDailyGiftLimitError, formatMarketingDailyGiftLimitError } from './formatGiftLimitError'
 import { mergeIncomingAdCampaignDispatches, dequeueNextAdCampaignPopup } from '../adCampaigns/adCampaignPendingQueue'
 import { OFFICIAL_PIKA_PROFILE_ID } from './profileDisplayNameValidation'
@@ -10062,9 +10063,13 @@ export function createLobbyFlowController(
     // handleTopicCreatedBroadcast е idempotent за двата случая.
     subscribeToTopicsDirectory()
 
-    // При вход в "Теми" отваряме "Общ чат" по подразбиране (т.2/8 от брифа).
-    const generalTopic = result.topics.find((t) => t.isGeneral) ?? result.topics[0] ?? null
-    state.activeTopicId = generalTopic?.topicId ?? null
+    // При вход в "Теми" отваряме "Лафче" по подразбиране; "Общи" остава
+    // достъпен с бутона. Fallback към "Общ чат", ако "Лафче" липсва.
+    const defaultTopic = result.topics.find((t) => t.topicId === LAFCHE_TOPIC_ID)
+      ?? result.topics.find((t) => t.isGeneral)
+      ?? result.topics[0]
+      ?? null
+    state.activeTopicId = defaultTopic?.topicId ?? null
     if (state.activeTopicId !== null && !isGeneralTopicId(state.activeTopicId)) {
       updateTopicUnreadCount(state.activeTopicId, 0)
     }
@@ -10082,7 +10087,7 @@ export function createLobbyFlowController(
     // текущата сесия/refresh никога не се виждаше от composer-а. Realtime
     // push-ът (виж handleServerMessage) продължава да важи за НОВ mute,
     // наложен докато потребителят вече е в "Теми".
-    state.activeTopicLock = generalTopic ? deriveTopicLockSnapshot(generalTopic) : null
+    state.activeTopicLock = defaultTopic ? deriveTopicLockSnapshot(defaultTopic) : null
     state.activeTopicViewerMute = result.viewerSectionMute
       ? { isMuted: result.viewerSectionMute.isMuted, mutedUntil: result.viewerSectionMute.mutedUntil, mutedByAccountId: null, reason: result.viewerSectionMute.reason }
       : null
@@ -15584,6 +15589,10 @@ export function createLobbyFlowController(
   // (без friendshipId, без backend write); реалният vip_dm ред се създава
   // атомарно едва при първия успешен SEND, виж startVipDmFirstMessage.
   async function openTopicsPersonalMessageFromPost(recipientProfileId: string, recipientDisplayName: string): Promise<void> {
+    if (!isTopicsPersonalEnabled()) {
+      redirectTopicsPersonalToLafche()
+      return
+    }
     if (recipientProfileId.trim().length === 0) return
     const authSession = options.getAuthSession?.() ?? null
     if (authSession?.profile.profileId === recipientProfileId) return
@@ -16678,7 +16687,17 @@ export function createLobbyFlowController(
     )
   }
 
+  // "Теми → Лични" временно изключени (TOPICS_PERSONAL_ENABLED) — всеки опит
+  // за отваряне (бутон, "Лично", chat известие за vip_dm) води в "Лафче".
+  function redirectTopicsPersonalToLafche(): void {
+    void showTopicsDirectory()
+  }
+
   async function showTopicsPersonalChat(targetFriendshipId: string | null = null): Promise<void> {
+    if (!isTopicsPersonalEnabled()) {
+      redirectTopicsPersonalToLafche()
+      return
+    }
     const authSession = options.getAuthSession?.() ?? null
 
     if (authSession === null) {
