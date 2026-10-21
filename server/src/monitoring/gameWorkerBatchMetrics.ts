@@ -64,6 +64,12 @@ export type GameWorkerBatchWindowStat = {
   workerWallSlow100: number
   workerWallSlow250: number
   workerWallSlow500: number
+  // „Долу картите“ solver (computeServerSweepEligibility) в worker-а.
+  sweepEligibilityCount: number
+  sweepEligibilityTotalMs: number
+  sweepEligibilityMaxMs: number
+  sweepEligibilityGuardHits: number
+  sweepEligibilityMaxNodes: number
 }
 
 // Sparse: само worker-и с поне един batch/failure в прозореца.
@@ -114,6 +120,11 @@ function zeroStat(): GameWorkerBatchWindowStat {
     workerWallSlow100: 0,
     workerWallSlow250: 0,
     workerWallSlow500: 0,
+    sweepEligibilityCount: 0,
+    sweepEligibilityTotalMs: 0,
+    sweepEligibilityMaxMs: 0,
+    sweepEligibilityGuardHits: 0,
+    sweepEligibilityMaxNodes: 0,
   }
 }
 
@@ -182,6 +193,14 @@ function recordInto(window: Map<string, GameWorkerBatchWindowStat>, key: string,
   const unaccounted = Math.max(0, roundTrip - workerWall)
   stat.unaccountedRoundTripTotalMs += unaccounted
   if (unaccounted > stat.unaccountedRoundTripMaxMs) stat.unaccountedRoundTripMaxMs = unaccounted
+  const sweep = diagnostics.sweepEligibility
+  if (sweep !== undefined) {
+    stat.sweepEligibilityCount += sweep.count
+    stat.sweepEligibilityTotalMs += sweep.totalMs
+    if (sweep.maxMs > stat.sweepEligibilityMaxMs) stat.sweepEligibilityMaxMs = sweep.maxMs
+    stat.sweepEligibilityGuardHits += sweep.guardHits
+    if (sweep.maxNodes > stat.sweepEligibilityMaxNodes) stat.sweepEligibilityMaxNodes = sweep.maxNodes
+  }
   stat.sumRoomComputeTotalMs += diagnostics.sumRoomComputeMs
   if (diagnostics.slowestRoomOutcome !== null && (stat.slowestRoomOutcome === null || diagnostics.maxRoomComputeMs > stat.maxRoomComputeMs)) {
     stat.maxRoomComputeMs = diagnostics.maxRoomComputeMs

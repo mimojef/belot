@@ -16,6 +16,7 @@ import {
   type GameWorkerRoomOutcome,
 } from './gameWorkerBatchDiagnostics.js'
 import type { ServerRoom } from '../core/serverTypes.js'
+import { setServerSweepEligibilityObserver } from './computeServerSweepEligibility.js'
 
 // ─── Startup validation ───────────────────────────────────────────────────────
 
@@ -176,6 +177,13 @@ function recordRoomDiagnostics(
   }
 }
 
+// „Долу картите“ solver: агрегати в diagnostics на текущия batch (само числа,
+// без лог на всяко извикване). Извън batch (activeDiagnostics=null) — нищо.
+let activeDiagnostics: GameWorkerBatchDiagnosticsCollector | null = null
+setServerSweepEligibilityObserver((observation) => {
+  activeDiagnostics?.recordSweepEligibility(observation)
+})
+
 function finishDiagnostics(collector: GameWorkerBatchDiagnosticsCollector | null): GameWorkerBatchDiagnostics | undefined {
   if (collector === null) return undefined
   try {
@@ -267,6 +275,7 @@ parentPort.on('message', (raw: unknown) => {
   if (message.type === 'compute_tick_rooms') {
     const results: GameWorkerTickRoomResult[] = []
     let diagnostics = startDiagnostics()
+    activeDiagnostics = diagnostics
 
     for (const input of message.rooms) {
       const { roomId, baseRevision, room } = input
@@ -305,6 +314,7 @@ parentPort.on('message', (raw: unknown) => {
       }
     }
 
+    activeDiagnostics = null
     const batchDiagnostics = finishDiagnostics(diagnostics)
     sendMessage({
       type: 'compute_tick_rooms_response',

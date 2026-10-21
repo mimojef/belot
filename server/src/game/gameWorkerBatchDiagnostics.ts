@@ -48,6 +48,17 @@ export type GameWorkerBatchDiagnostics = {
   slowestRoomNextPhase: GameWorkerRoomPhaseLabel | null
   slowestRoomOutcome: GameWorkerRoomOutcome | null
   slowestRoomId?: string
+  // „Долу картите“ solver (computeServerSweepEligibility) в този batch.
+  // Optional: стар worker / batch без нито едно извикване.
+  sweepEligibility?: GameWorkerSweepEligibilityStats
+}
+
+export type GameWorkerSweepEligibilityStats = {
+  count: number
+  totalMs: number
+  maxMs: number
+  guardHits: number
+  maxNodes: number
 }
 
 const PHASE_SET: ReadonlySet<string> = new Set(GAME_WORKER_ROOM_PHASE_LABELS)
@@ -79,6 +90,8 @@ export function getThreadCpuUsageFn(): ThreadCpuUsageFn | null {
 export type GameWorkerBatchDiagnosticsCollector = {
   // Записва една room операция (startedAt = now() преди compute-а).
   recordRoom(startedAt: number, roomId: string, room: ServerRoom, nextRoom: ServerRoom | null, outcome: GameWorkerRoomOutcome): void
+  // Едно извикване на sweep solver-а (само числа).
+  recordSweepEligibility(observation: { durationMs: number; nodes: number; guardHit: boolean }): void
   finish(): GameWorkerBatchDiagnostics
 }
 
@@ -94,8 +107,18 @@ export function startGameWorkerBatchDiagnostics(
   let sumRoomComputeMs = 0
   let maxRoomComputeMs = 0
   let slowest: { roomId: string; room: ServerRoom; nextRoom: ServerRoom | null; outcome: GameWorkerRoomOutcome } | null = null
+  let sweep: GameWorkerSweepEligibilityStats | null = null
 
   return {
+    recordSweepEligibility(observation) {
+      if (!isDuration(observation.durationMs) || !isCount(observation.nodes)) return
+      sweep ??= { count: 0, totalMs: 0, maxMs: 0, guardHits: 0, maxNodes: 0 }
+      sweep.count += 1
+      sweep.totalMs += observation.durationMs
+      if (observation.durationMs > sweep.maxMs) sweep.maxMs = observation.durationMs
+      if (observation.guardHit) sweep.guardHits += 1
+      if (observation.nodes > sweep.maxNodes) sweep.maxNodes = observation.nodes
+    },
     recordRoom(roomStartedAt, roomId, room, nextRoom, outcome) {
       const durationMs = now() - roomStartedAt
       roomCount += 1
@@ -126,6 +149,7 @@ export function startGameWorkerBatchDiagnostics(
         slowestRoomOutcome: slowest === null ? null : slowest.outcome,
       }
       if (slowest !== null && batchWallMs >= SLOW_BATCH_ROOM_ID_THRESHOLD_MS) diagnostics.slowestRoomId = slowest.roomId
+      if (sweep !== null) diagnostics.sweepEligibility = { ...sweep }
       return diagnostics
     },
   }
@@ -133,6 +157,26 @@ export function startGameWorkerBatchDiagnostics(
 
 function isDuration(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
+}
+
+function isCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+// Невалидно sweep поле се изпуска самостоятелно (останалите diagnostics остават).
+function sanitizeSweepEligibilityStats(raw: unknown): GameWorkerSweepEligibilityStats | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const value = raw as Record<string, unknown>
+  if (!isCount(value['count']) || !isDuration(value['totalMs']) || !isDuration(value['maxMs'])) return null
+  if (!isCount(value['guardHits']) || !isCount(value['maxNodes'])) return null
+  if (value['guardHits'] > value['count']) return null
+  return {
+    count: value['count'],
+    totalMs: value['totalMs'],
+    maxMs: value['maxMs'],
+    guardHits: value['guardHits'],
+    maxNodes: value['maxNodes'],
+  }
 }
 
 // Main-side строга валидация. Всичко невалидно → null (diagnostics липсват),
@@ -167,6 +211,8 @@ export function sanitizeGameWorkerBatchDiagnostics(
     }
     const roomId = value['slowestRoomId']
     if (typeof roomId === 'string' && expectedRoomIds.has(roomId)) diagnostics.slowestRoomId = roomId
+    const sweep = sanitizeSweepEligibilityStats(value['sweepEligibility'])
+    if (sweep !== null) diagnostics.sweepEligibility = sweep
     return diagnostics
   } catch {
     return null

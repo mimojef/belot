@@ -463,6 +463,7 @@ import {
 import { createActivityCounters, type ActivityCounters } from './monitoring/activityCounters.js'
 import { classifyHttpRequestPath } from './monitoring/httpCategoryClassifier.js'
 import { classifyHttpRoute } from './monitoring/httpRouteClassifier.js'
+import { setServerSweepEligibilityObserver } from './game/computeServerSweepEligibility.js'
 import { beginHttpWait, endHttpWait, timeHttpRequest, trackHttpWait } from './monitoring/httpRequestTiming.js'
 import {
   createMainThreadTimingMetrics,
@@ -795,6 +796,14 @@ const mainThreadTimings: MainThreadTimingMetrics = createMainThreadTimingMetrics
 // Phase 0C — game worker batch forensics (round trip vs worker wall vs worker
 // thread CPU), същите 1s/10s прозорци.
 const gameWorkerBatchMetrics: GameWorkerBatchMetrics = createGameWorkerBatchMetrics()
+// „Долу картите“ solver на MAIN thread-а (human 4-та карта, sweep accept
+// revalidation, in-process runtime, journal recheck): sync време в групата
+// 'gameplay' с фиксирани label-и; guard hit-овете отделно. Worker-ите имат
+// собствен observer (gameWorkerThread → Phase 0C batch diagnostics).
+setServerSweepEligibilityObserver((observation) => {
+  mainThreadTimings.record('gameplay', 'sweepEligibility', observation.durationMs)
+  if (observation.guardHit) mainThreadTimings.record('gameplay', 'sweepEligibility.guardHit', observation.durationMs)
+})
 // Startup timeline diagnostics — само startup, in-memory, един log ред на
 // първия реален event-loop turn след seedRestoredActiveRooms().
 const startupTimeline: StartupTimeline = createStartupTimeline()
