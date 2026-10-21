@@ -91,8 +91,28 @@ export type PendingRegistrationCreatedResult =
   | {
       ok: false
       message: string
-      code?: ProfileIdentityValidationCode | 'EMAIL_VERIFICATION_PENDING' | 'DISPLAY_NAME_TAKEN' | 'RATE_LIMITED'
+      code?:
+        | ProfileIdentityValidationCode
+        | 'EMAIL_VERIFICATION_PENDING'
+        | 'DISPLAY_NAME_TAKEN'
+        | 'EMAIL_TAKEN'
+        | 'EMAIL_AND_DISPLAY_NAME_TAKEN'
+        | 'RATE_LIMITED'
     }
+
+// Самоизтриване, Етап 2 — единни съобщения за заети идентификатори при
+// регистрация (submit, direct режим и email verification). Профил, подаден
+// за изтриване, държи имейла/името си през 45-дневния период и се отчита
+// ИДЕНТИЧНО на активен профил — съобщенията никога не разкриват състоянието
+// на чужд профил.
+export const REGISTRATION_EMAIL_TAKEN_MESSAGE =
+  'Този имейл адрес вече е свързан с профил. Ако профилът е ваш, можете да влезете със съществуващите си данни.'
+export const REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE = 'Това потребителско име не е свободно. Моля, изберете друго.'
+export const REGISTRATION_EMAIL_AND_DISPLAY_NAME_TAKEN_MESSAGE =
+  'Посоченият имейл адрес вече е свързан с профил, а потребителското име не е свободно.'
+
+/** Login отказ за профил с активна заявка за изтриване — само след валидна парола (няма enumeration). */
+export const PROFILE_PENDING_DELETION_LOGIN_MESSAGE = 'Профилът е подаден за изтриване и временно е блокиран.'
 
 export type ResendRegistrationCodeResult =
   /** email е РЕАЛНИЯТ (normalized) адрес — само за caller-а да го подаде на sendRegistrationVerificationEmail(); HTTP response-ът към клиента трябва да ползва maskedEmail, никога email. */
@@ -139,6 +159,8 @@ export type VerifyRegistrationEmailResult =
       ok: false
       reason: 'not_found' | 'expired' | 'invalid_code' | 'too_many_attempts' | 'email_taken' | 'display_name_taken' | 'rate_limited'
       attemptsRemaining?: number
+      /** Само при reason 'email_taken' — името също е заето (за комбинираното съобщение). */
+      displayNameAlsoTaken?: boolean
     }
 
 /**
@@ -696,6 +718,12 @@ export type AuthStore = {
         /** Pending registration за този email СЪЩЕСТВУВА, но вече е expired (>24ч) — паролата съвпада, значи е легитимният регистрант, не enumeration risk. */
         ok: false
         code: 'REGISTRATION_EXPIRED'
+        message: string
+      }
+    | {
+        /** Самоизтриване, Етап 2 — валидна парола, но профилът е с активна заявка за изтриване; без сесия. */
+        ok: false
+        code: 'PROFILE_PENDING_DELETION'
         message: string
       }
   changePassword: (input: {
@@ -1585,12 +1613,34 @@ export async function createAuthStore(
     WHERE created_at <= datetime('now', '-172800 seconds');
   `)
 
+  // Без филтър по profiles.status (Самоизтриване, Етап 2) — същото покритие
+  // като UNIQUE индексите idx_profiles_normalized_display_name_unique/
+  // idx_profiles_normalized_username_unique, които важат за ВСИЧКИ редове.
+  // Иначе профил с нестандартен статус изглеждаше "свободен" и конфликтът
+  // излизаше чак като UNIQUE грешка при INSERT (в email_code режим — едва
+  // при verify). Профил, подаден за изтриване, остава със status='active' и
+  // така или иначе държи името си през 45-дневния период.
   const nameConflictStatement = database.prepare(`
     SELECT profile_id FROM profiles
-    WHERE status = 'active'
-      AND (normalized_display_name = ? OR normalized_username = ?)
+    WHERE normalized_display_name = ? OR normalized_username = ?
     LIMIT 1;
   `)
+
+  /**
+   * Името е заето от съществуващ профил ИЛИ от активна (неизтекла) чужда
+   * pending регистрация. Само четене — expired pending редовете се игнорират
+   * от самия statement (expires_at > now), без да се трият тук.
+   */
+  function isRegistrationDisplayNameTaken(normalizedDisplayName: string, ownPendingRegistrationId: string | null): boolean {
+    if (nameConflictStatement.get(normalizedDisplayName, normalizedDisplayName) !== undefined) {
+      return true
+    }
+    return selectActivePendingReservationConflictStatement.get(
+      normalizedDisplayName,
+      ownPendingRegistrationId,
+      ownPendingRegistrationId,
+    ) !== undefined
+  }
 
   function createSession(account: AccountRow | SessionRow, profileId: ProfileId, rememberMe: boolean): {
     sessionToken: string
@@ -1731,10 +1781,17 @@ export async function createAuthStore(
     userAgent: string | null
     /** FINAL PLAN v5 — нужен за own-reservation ownership проверката веднага по-долу. */
     pendingRegistrationId: string
-  }): { accountRow: AccountRow; profileId: ProfileId } | { conflict: 'email_taken' | 'display_name_taken' } {
+  }):
+    | { accountRow: AccountRow; profileId: ProfileId }
+    | { conflict: 'email_taken'; displayNameAlsoTaken: boolean }
+    | { conflict: 'display_name_taken' } {
     const existingAccount = selectAccountByEmailStatement.get(input.normalizedEmail) as AccountRow | undefined
     if (existingAccount) {
-      return { conflict: 'email_taken' }
+      const takenCheck = validateProfileDisplayName(input.displayName)
+      return {
+        conflict: 'email_taken',
+        displayNameAlsoTaken: takenCheck.ok && isRegistrationDisplayNameTaken(takenCheck.normalizedKey, input.pendingRegistrationId),
+      }
     }
 
     const displayNameResult = validateProfileDisplayName(input.displayName)
@@ -1866,7 +1923,7 @@ export async function createAuthStore(
       ) as { pending_registration_id: string } | undefined
       if (pendingNameConflict !== undefined) {
         database.exec('ROLLBACK;')
-        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE }
       }
 
       const nameConflict = nameConflictStatement.get(input.normalizedDisplayName, normalizedUsername) as
@@ -1874,7 +1931,7 @@ export async function createAuthStore(
         | undefined
       if (nameConflict !== undefined) {
         database.exec('ROLLBACK;')
-        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE }
       }
 
       const materialized = materializeAccountAndProfileInOpenTransaction({
@@ -1911,12 +1968,12 @@ export async function createAuthStore(
       // тази транзакция (TOCTOU, extremely tight window — SQLite BEGIN
       // IMMEDIATE все пак сериализира истински-конкурентни опити).
       if (message.includes('accounts.email')) {
-        return { ok: false, message: 'Вече има регистрация с този email.' }
+        return { ok: false, code: 'EMAIL_TAKEN', message: REGISTRATION_EMAIL_TAKEN_MESSAGE }
       }
       // UNIQUE(profiles.normalized_display_name) race — mirror на
       // createVerifiedAccountAndProfileInOpenTransaction's аналогичен catch.
       if (message.includes('normalized_display_name') || message.includes('normalized_username')) {
-        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE }
       }
 
       return { ok: false, message: 'Регистрацията не беше успешна.' }
@@ -1991,9 +2048,19 @@ export async function createAuthStore(
     }
     const visitorId = input.visitorId.toLowerCase()
 
+    // Самоизтриване, Етап 2 — при зает имейл проверяваме и името, за да
+    // върнем точното от трите съобщения (имейл / име / и двете). Отделният
+    // случай "само името е заето" остава по-долу (вътре в транзакцията).
     const existingAccount = selectAccountByEmailStatement.get(email) as AccountRow | undefined
     if (existingAccount) {
-      return { ok: false, message: 'Вече има регистрация с този email.' }
+      if (isRegistrationDisplayNameTaken(displayNameResult.normalizedKey, null)) {
+        return {
+          ok: false,
+          code: 'EMAIL_AND_DISPLAY_NAME_TAKEN',
+          message: REGISTRATION_EMAIL_AND_DISPLAY_NAME_TAKEN_MESSAGE,
+        }
+      }
+      return { ok: false, code: 'EMAIL_TAKEN', message: REGISTRATION_EMAIL_TAKEN_MESSAGE }
     }
 
     const gender = input.gender === 'male' || input.gender === 'female' ? input.gender : null
@@ -2072,7 +2139,7 @@ export async function createAuthStore(
       ) as { profile_id: string } | undefined
       if (earlyNameConflict !== undefined) {
         database.exec('ROLLBACK;')
-        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE }
       }
 
       // FINAL PLAN v5 — Display Name Reservation. Authoritative pending↔pending
@@ -2090,7 +2157,7 @@ export async function createAuthStore(
       ) as { pending_registration_id: string } | undefined
       if (pendingNameConflict !== undefined) {
         database.exec('ROLLBACK;')
-        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE }
       }
 
       // Единствен INSERT/COMMIT долу claim-ва И email-а (normalized_email
@@ -2150,7 +2217,7 @@ export async function createAuthStore(
       // все пак се сериализират от SQLite, но този catch е defense-in-depth,
       // не primary defense).
       if (message.includes('normalized_display_name')) {
-        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: 'Това име вече е заето.' }
+        return { ok: false, code: 'DISPLAY_NAME_TAKEN', message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE }
       }
 
       return { ok: false, message: 'Регистрацията не беше успешна.' }
@@ -2400,7 +2467,9 @@ export async function createAuthStore(
 
       if ('conflict' in creationResult) {
         database.exec('ROLLBACK;')
-        return { ok: false, reason: creationResult.conflict === 'email_taken' ? 'email_taken' : 'display_name_taken' }
+        return creationResult.conflict === 'email_taken'
+          ? { ok: false, reason: 'email_taken', displayNameAlsoTaken: creationResult.displayNameAlsoTaken }
+          : { ok: false, reason: 'display_name_taken' }
       }
 
       // Consume-on-success — DELETE ВЪТРЕ в СЪЩАТА транзакция като account
@@ -2609,7 +2678,8 @@ export async function createAuthStore(
         remainingDays: number
       }
     | { ok: false; code: 'EMAIL_VERIFICATION_REQUIRED'; pendingRegistrationId: string; maskedEmail: string }
-    | { ok: false; code: 'REGISTRATION_EXPIRED'; message: string } {
+    | { ok: false; code: 'REGISTRATION_EXPIRED'; message: string }
+    | { ok: false; code: 'PROFILE_PENDING_DELETION'; message: string } {
     const email = normalizeEmail(input.email)
 
     if (email === null) {
@@ -2686,6 +2756,13 @@ export async function createAuthStore(
       }
     }
 
+    // Самоизтриване, Етап 2 — след валидна парола и след ban gate-а: не се
+    // създава сесия. Popup-ът за възстановяване е следващ етап; тук само
+    // отказваме входа без да разкриваме нищо на трети лица.
+    if (playerProgressStore.isProfileHiddenForDeletion(profileIdRow.profile_id)) {
+      return { ok: false, code: 'PROFILE_PENDING_DELETION', message: PROFILE_PENDING_DELETION_LOGIN_MESSAGE }
+    }
+
     return {
       ok: true,
       ...createSession(account, profileIdRow.profile_id, input.rememberMe),
@@ -2741,6 +2818,14 @@ export async function createAuthStore(
 
   function toSessionSnapshot(row: SessionRow): AuthSessionSnapshot | null {
     if (row.status !== 'active') {
+      return null
+    }
+
+    // Самоизтриване, Етап 2 — профил с активна заявка за изтриване не може да
+    // ползва платформата със стари сесии (HTTP и нови WS връзки минават през
+    // getSession()). Сесийните редове НЕ се пипат тук — при отмяна на
+    // заявката достъпът се връща чрез нов вход.
+    if (playerProgressStore.isProfileHiddenForDeletion(row.profile_id)) {
       return null
     }
 

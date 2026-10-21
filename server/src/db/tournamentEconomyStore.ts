@@ -36,6 +36,7 @@ import {
   calculateTournamentPrizePreview,
   TOURNAMENT_FINANCIAL_RULES_VERSION,
 } from '../tournament/tournamentPrizeRules.js'
+import { sqlProfileVisibleForDeletion } from './profileDeletionVisibility.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -1434,10 +1435,14 @@ export async function createTournamentEconomyStore(
     LIMIT 1;
   `)
 
+  // Самоизтриване, Етап 2 — профил с активна заявка за изтриване не е
+  // валиден partner кандидат/поканен (третира се като несъществуващ) и не се
+  // появява в friends/global search списъците по-долу.
   const selectProfileEligibilityStatement = database.prepare(`
     SELECT profile_id, account_id, display_name, avatar_url, profile_kind, status, is_temporary
     FROM profiles
     WHERE profile_id = ?
+      AND ${sqlProfileVisibleForDeletion('profiles.profile_id')}
     LIMIT 1;
   `)
 
@@ -1452,6 +1457,7 @@ export async function createTournamentEconomyStore(
     WHERE f.status = 'accepted'
       AND f.kind = 'friend'
       AND (f.requester_profile_id = ? OR f.addressee_profile_id = ?)
+      AND ${sqlProfileVisibleForDeletion('p.profile_id')}
     ORDER BY lower(p.display_name) ASC;
   `)
 
@@ -1471,6 +1477,7 @@ export async function createTournamentEconomyStore(
     SELECT p.profile_id, p.account_id, p.display_name, p.avatar_url, p.profile_kind, p.status, p.is_temporary
     FROM profiles p
     WHERE p.status = 'active'
+      AND ${sqlProfileVisibleForDeletion('p.profile_id')}
       AND p.is_temporary = 0
       AND p.profile_kind = 'human'
       AND p.account_id IS NOT NULL

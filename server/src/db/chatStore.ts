@@ -899,7 +899,10 @@ export async function createChatStore(
     ownProfileId: ProfileId,
     onlineProfileIds?: Set<string>,
   ): ChatConversationSnapshot | null {
-    const friendProfile = playerProgressStore.getPublicProfile(
+    // Самоизтриване, Етап 2 — разговор с профил, подаден за изтриване, е
+    // невидим за другата страна (и за двамата — скритият няма сесия).
+    // Съобщенията/файловете остават непокътнати в базата.
+    const friendProfile = playerProgressStore.getVisiblePublicProfile(
       getFriendProfileId(friendship, ownProfileId),
     )
 
@@ -946,8 +949,26 @@ export async function createChatStore(
       profileId,
     ) as FriendshipRow | undefined
 
-    return row ?? null
+    if (row === undefined) {
+      return null
+    }
+
+    // Самоизтриване, Етап 2 — единен guard за listMessages/send/
+    // deleteOwnMessage/getAttachmentForDownload: разговор със скрит
+    // контрагент се третира като несъществуващ (без промяна на данните).
+    if (playerProgressStore.isProfileHiddenForDeletion(getFriendProfileId(row, profileId))) {
+      return null
+    }
+
+    return row
   }
+
+  const selectFriendshipParticipantsForReadStatement = database.prepare(`
+    SELECT requester_profile_id, addressee_profile_id
+    FROM profile_friendships
+    WHERE friendship_id = ?
+    LIMIT 1;
+  `)
 
   function listConversations(
     profileId: ProfileId,
@@ -1715,6 +1736,20 @@ export async function createChatStore(
   }
 
   function markConversationRead(profileId: ProfileId, friendshipId: string): void {
+    // Самоизтриване, Етап 2 — маркерът за прочетено на скрит разговор не се
+    // пипа, за да са непрочетените съобщения същите и след отмяна на заявката.
+    const participants = selectFriendshipParticipantsForReadStatement.get(friendshipId) as
+      | { requester_profile_id: string; addressee_profile_id: string }
+      | undefined
+    if (participants !== undefined) {
+      const counterpartProfileId = participants.requester_profile_id === profileId
+        ? participants.addressee_profile_id
+        : participants.requester_profile_id
+      if (playerProgressStore.isProfileHiddenForDeletion(counterpartProfileId)) {
+        return
+      }
+    }
+
     upsertReadStatement.run(profileId, friendshipId)
   }
 

@@ -860,6 +860,11 @@ export async function createYellowCoinGiftStore(
         return { ok: false, message: 'Можеш да подаряваш жълтици само на приятели.' }
       }
 
+      // Самоизтриване, Етап 2 — скрит профил не може да получава подаръци.
+      if (playerProgressStore.isProfileHiddenForDeletion(getRecipientProfileId(friendship, senderProfileId))) {
+        return { ok: false, message: 'Можеш да подаряваш жълтици само на приятели.' }
+      }
+
       // 2. Определяне на получателя
       return { ok: true, recipientProfileId: getRecipientProfileId(friendship, senderProfileId) }
     }, isRoleBasedPikaTeamSender, isRoleBasedMarketingSender, isRoleBasedAdminSender)
@@ -883,7 +888,7 @@ export async function createYellowCoinGiftStore(
     isRoleBasedMarketingSender: boolean = false,
   ) {
     return sendGiftCore(senderProfileId, null, amountRaw, () => {
-      if (playerProgressStore.getPublicProfile(recipientProfileId) === null) {
+      if (playerProgressStore.getVisiblePublicProfile(recipientProfileId) === null) {
         return { ok: false, message: 'Играчът не е намерен.' }
       }
 

@@ -1,5 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { AuthStore, AuthSessionSnapshot } from '../db/authStore.js'
+import {
+  REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE,
+  REGISTRATION_EMAIL_AND_DISPLAY_NAME_TAKEN_MESSAGE,
+  REGISTRATION_EMAIL_TAKEN_MESSAGE,
+} from '../db/authStore.js'
 import { normalizeEmail } from '../db/authHelpers.js'
 import { sendRegistrationVerificationEmail } from './sendRegistrationVerificationEmail.js'
 import { resolveRegistrationVerificationLocator } from './registrationVerificationLinkToken.js'
@@ -381,7 +386,13 @@ export async function handleVerifyRegistrationEmail(
       return
     }
     if (result.reason === 'email_taken') {
-      ctx.sendJson(res, 409, { ok: false, code: 'EMAIL_TAKEN', message: 'Вече има регистрация с този email.' })
+      ctx.sendJson(res, 409, {
+        ok: false,
+        code: 'EMAIL_TAKEN',
+        message: result.displayNameAlsoTaken === true
+          ? REGISTRATION_EMAIL_AND_DISPLAY_NAME_TAKEN_MESSAGE
+          : REGISTRATION_EMAIL_TAKEN_MESSAGE,
+      })
       return
     }
     if (result.reason === 'display_name_taken') {
@@ -392,7 +403,7 @@ export async function handleVerifyRegistrationEmail(
       ctx.sendJson(res, 409, {
         ok: false,
         code: 'DISPLAY_NAME_TAKEN',
-        message: 'Това потребителско име вече е заето. Моля, изберете друго име.',
+        message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE,
       })
       return
     }
@@ -505,7 +516,7 @@ export async function handleUpdatePendingRegistrationDisplayName(
       ctx.sendJson(res, 409, {
         ok: false,
         code: 'DISPLAY_NAME_TAKEN',
-        message: 'Това потребителско име вече е заето. Моля, изберете друго име.',
+        message: REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE,
       })
       return
     }

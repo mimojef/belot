@@ -108,6 +108,12 @@ function makeMockProgressStore(): PlayerProgressStore {
       hasLikedByMe: null,
       isBlockedByMe: null,
     }),
+    // Самоизтриване, Етап 2 — нищо не е скрито в този тест; публичният
+    // вариант делегира към getPublicProfile.
+    getVisiblePublicProfile(profileId: string) {
+      return (this as unknown as PlayerProgressStore).getPublicProfile(profileId)
+    },
+    isProfileHiddenForDeletion: () => false,
   } as unknown as PlayerProgressStore
 }
 

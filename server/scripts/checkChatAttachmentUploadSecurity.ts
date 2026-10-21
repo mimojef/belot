@@ -732,6 +732,9 @@ async function runFileAtomicityUnitChecks(): Promise<void> {
     gamesUntilNextRank: null, rankProgressRatio: null, averageRating: null, totalRatingsCount: null,
     yellowCoinsBalance: 0, galleryImages: [], gender: null, likesCount: 0, hasLikedByMe: false, isBlockedByMe: false,
   }) } as any
+  // Самоизтриване, Етап 2 — нищо не е скрито в този тест.
+  fakeProgressStore.getVisiblePublicProfile = (id: string) => fakeProgressStore.getPublicProfile(id)
+  fakeProgressStore.isProfileHiddenForDeletion = () => false
 
   const store = await createChatStore(databaseFile, fakeProgressStore, { isBlocked: () => false }, { isRegisteredHumanProfile: () => true })
 

@@ -649,7 +649,9 @@ export async function createGiftItemStore(
       }
 
       // 3. recipient profile съществува
-      const recipientProfile = playerProgressStore.getPublicProfile(recipientProfileId)
+      // Самоизтриване, Етап 2 — скрит профил не може да получава подаръци
+      // (неразличимо от несъществуващ).
+      const recipientProfile = playerProgressStore.getVisiblePublicProfile(recipientProfileId)
 
       if (recipientProfile === null) {
         database.exec('ROLLBACK;')

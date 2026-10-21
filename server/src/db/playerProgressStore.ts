@@ -24,8 +24,14 @@ import { getSofiaDayBoundsUtc } from './sofiaDayBounds.js'
 // за real-money stake/payout ledger-а (виж matchEconomyStore.ts doc
 // коментара) — belot_match_completion_ledger's PRIMARY KEY компонент.
 import { getRoomStakeLedgerScope } from './matchEconomyStore.js'
+import { createProfileDeletionVisibilityReader, sqlProfileVisibleForDeletion } from './profileDeletionVisibility.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
+
+// Самоизтриване, Етап 2 — профил с активна заявка за изтриване не участва в
+// публичните списъци (търсене, класации, players директория). Виж
+// profileDeletionVisibility.ts.
+const PUBLIC_PROFILE_VISIBLE_SQL = sqlProfileVisibleForDeletion('p.profile_id')
 
 type ProfileDisplayNameMutationError = {
   ok: false
@@ -115,7 +121,20 @@ export type PlayerProgressStore = {
   cleanupAllTemporaryBotProfiles: () => number
   isTemporaryProfile: (profileId: string) => boolean
   profileExists: (profileId: string) => boolean
+  /**
+   * ВЪТРЕШЕН достъп — връща профила независимо от заявка за изтриване
+   * (admin, финанси, собствената сесия, диагностика). За показване на ДРУГ
+   * потребител ползвай getVisiblePublicProfile.
+   */
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
+  /**
+   * ПУБЛИЧНА видимост — null и за несъществуващ профил, и за профил с
+   * активна заявка за изтриване (неразличимо отвън). Самоизтриване, Етап 2.
+   */
+  getVisiblePublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
+  isProfileHiddenForDeletion: (profileId: string) => boolean
+  listProfileIdsHiddenForDeletion: () => string[]
+  isUploadPathHiddenForDeletion: (uploadPathname: string) => boolean
   // Batch вариант на getPublicProfile — СЪЩИЯТ SELECT (без допълнителни
   // филтри по status/is_temporary, за разлика от getProfileSnapshotsByIds),
   // само с IN (...). Липсващ id = профилът не съществува, точно както
@@ -357,6 +376,8 @@ export async function createPlayerProgressStore(
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
 
+  const profileDeletionVisibility = createProfileDeletionVisibilityReader(database)
+
   const upsertTemporaryProfileStatement = database.prepare(`
     INSERT INTO profiles (
       profile_id,
@@ -507,6 +528,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -540,6 +562,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -566,6 +589,7 @@ export async function createPlayerProgressStore(
     SELECT p.profile_id, p.profile_kind
     FROM profiles p
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -593,6 +617,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -624,6 +649,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -656,6 +682,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -687,6 +714,7 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.status = 'active'
+      AND ${PUBLIC_PROFILE_VISIBLE_SQL}
       AND p.is_temporary = 0
       AND (
         (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -1149,6 +1177,13 @@ export async function createPlayerProgressStore(
     return toPublicProfileSnapshot(row, galleryImages)
   }
 
+  function getVisiblePublicProfile(profileId: ProfileId): PlayerPublicProfileSnapshot | null {
+    if (profileId !== null && profileDeletionVisibility.isProfileHidden(profileId)) {
+      return null
+    }
+    return getPublicProfile(profileId)
+  }
+
   const PUBLIC_PROFILES_BATCH_CHUNK_SIZE = 200
 
   function getPublicProfilesByIds(
@@ -1302,6 +1337,7 @@ export async function createPlayerProgressStore(
       LEFT JOIN profile_progress pp
         ON pp.profile_id = p.profile_id
       WHERE p.status = 'active'
+        AND ${PUBLIC_PROFILE_VISIBLE_SQL}
         AND p.is_temporary = 0
         AND (
           (p.profile_kind = 'human' AND p.account_id IS NOT NULL)
@@ -2372,6 +2408,10 @@ export async function createPlayerProgressStore(
     isTemporaryProfile,
     profileExists,
     getPublicProfile,
+    getVisiblePublicProfile,
+    isProfileHiddenForDeletion: profileDeletionVisibility.isProfileHidden,
+    listProfileIdsHiddenForDeletion: profileDeletionVisibility.listHiddenProfileIds,
+    isUploadPathHiddenForDeletion: profileDeletionVisibility.isUploadPathHidden,
     getPublicProfilesByIds,
     listPublicHumanProfiles,
     searchPublicProfiles,

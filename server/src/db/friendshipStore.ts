@@ -5,6 +5,7 @@ import type {
 } from '../core/serverTypes.js'
 import type { PlayerProgressStore } from './playerProgressStore.js'
 import { dbDateToUtc } from './dbDate.js'
+import { createProfileDeletionVisibilityReader, sqlProfileVisibleForDeletion } from './profileDeletionVisibility.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -212,6 +213,13 @@ export async function createFriendshipStore(
   database.exec('PRAGMA foreign_keys = ON;')
   database.exec('PRAGMA journal_mode = WAL;')
 
+  // Самоизтриване, Етап 2 — профил с активна заявка за изтриване е скрит:
+  // не може да получава нови покани/лични разговори, а редовете, в които е
+  // контрагент, са невидими и неизменими за другата страна. Статусът на
+  // самите приятелства НЕ се променя (иначе би стартирал 90-дневния
+  // retention), затова при отмяна всичко е отново налично без възстановяване.
+  const profileDeletionVisibility = createProfileDeletionVisibilityReader(database)
+
   const selectRegisteredHumanProfileStatement = database.prepare(`
     SELECT profile_id
     FROM profiles
@@ -219,8 +227,27 @@ export async function createFriendshipStore(
       AND profile_kind = 'human'
       AND status = 'active'
       AND account_id IS NOT NULL
+      AND ${sqlProfileVisibleForDeletion('profiles.profile_id')}
     LIMIT 1;
   `)
+
+  const selectFriendshipParticipantsStatement = database.prepare(`
+    SELECT requester_profile_id, addressee_profile_id
+    FROM profile_friendships
+    WHERE friendship_id = ?
+    LIMIT 1;
+  `)
+
+  function isFriendshipCounterpartHidden(friendshipId: string, profileId: ProfileId): boolean {
+    const row = selectFriendshipParticipantsStatement.get(friendshipId) as
+      | { requester_profile_id: string; addressee_profile_id: string }
+      | undefined
+    if (row === undefined) return false
+    const counterpartProfileId = row.requester_profile_id === profileId
+      ? row.addressee_profile_id
+      : row.requester_profile_id
+    return profileDeletionVisibility.isProfileHidden(counterpartProfileId)
+  }
 
   // 'kind = friend' на всяка заявка по-долу изолира истинските приятелски
   // редове от служебните pika_support разговори (виж chatStore.ts /
@@ -624,6 +651,9 @@ export async function createFriendshipStore(
 
     for (const row of rows) {
       const counterpartProfileId = getCounterpartProfileId(row, profileId)
+      if (profileDeletionVisibility.isProfileHidden(counterpartProfileId)) {
+        continue
+      }
       const profile = playerProgressStore.getPublicProfile(counterpartProfileId)
 
       if (profile === null) {
@@ -654,6 +684,7 @@ export async function createFriendshipStore(
 
     for (const row of rows) {
       const friendProfileId = row.addressee_profile_id
+      if (profileDeletionVisibility.isProfileHidden(friendProfileId)) continue
       const profile = playerProgressStore.getPublicProfile(friendProfileId)
       if (profile === null) continue
       result.push({ friendshipId: row.friendship_id, friendProfile: profile })
@@ -668,6 +699,10 @@ export async function createFriendshipStore(
   ): MarkAcceptanceReadResult {
     if (!/^[a-zA-Z0-9_-]{1,128}$/.test(friendshipId)) {
       return { ok: false, reason: 'invalid_id' }
+    }
+
+    if (isFriendshipCounterpartHidden(friendshipId, requesterProfileId)) {
+      return { ok: false, reason: 'not_found' }
     }
 
     const row = selectFriendshipForReadStatement.get(friendshipId) as
@@ -793,6 +828,10 @@ export async function createFriendshipStore(
   ):
     | { ok: true; friendships: FriendshipsSnapshot; requesterProfileId: ProfileId | null }
     | { ok: false; message: string } {
+    if (isFriendshipCounterpartHidden(friendshipId, profileId)) {
+      return { ok: false, message: 'Поканата не беше намерена или вече е обработена.' }
+    }
+
     database.exec('BEGIN IMMEDIATE;')
 
     let requesterProfileId: string | null = null
@@ -886,6 +925,10 @@ export async function createFriendshipStore(
   ):
     | { ok: true; friendships: FriendshipsSnapshot; requesterProfileId: ProfileId | null }
     | { ok: false; message: string } {
+    if (isFriendshipCounterpartHidden(friendshipId, profileId)) {
+      return { ok: false, message: 'Поканата не беше намерена или вече е обработена.' }
+    }
+
     // Read requester before deleting so we can notify them via WS.
     const existingRow = database.prepare(`
       SELECT requester_profile_id
@@ -938,6 +981,10 @@ export async function createFriendshipStore(
   ):
     | { ok: true; friendships: FriendshipsSnapshot; addresseeProfileId: ProfileId }
     | { ok: false; message: string } {
+    if (isFriendshipCounterpartHidden(friendshipId, profileId)) {
+      return { ok: false, message: 'Поканата не беше намерена или вече е обработена.' }
+    }
+
     const row = selectOutgoingPendingFriendshipStatement.get(
       friendshipId,
       profileId,
@@ -987,6 +1034,10 @@ export async function createFriendshipStore(
     // затова няма нужда от explicit BEGIN/COMMIT транзакция тук, нито от
     // attachment deletion-intent enqueue (history/attachments остават
     // непокътнати за 90-дневния retention прозорец, виж runRetentionCleanup).
+    if (isFriendshipCounterpartHidden(friendshipId, profileId)) {
+      return { ok: false, message: 'Приятелството не беше намерено.' }
+    }
+
     const result = softRemoveAcceptedFriendshipStatement.run(
       friendshipId,
       profileId,

@@ -93,6 +93,9 @@ function makeProfile(profileId: ProfileId): PlayerPublicProfileSnapshot {
 function createFakeProgressStore(): PlayerProgressStore {
   return {
     getPublicProfile: (profileId: ProfileId) => makeProfile(profileId),
+    // Самоизтриване, Етап 2 — нищо не е скрито в този тест.
+    getVisiblePublicProfile: (profileId: ProfileId) => makeProfile(profileId),
+    isProfileHiddenForDeletion: () => false,
   } as PlayerProgressStore
 }
 

@@ -1814,7 +1814,7 @@ function hydrateTopicMessagesWithCurrentAvatars(
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = messages.map((m) => m.messageId)
-  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, null)
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, null, getTopicSenderExclusionsForDeletion())
   // Batch attachment lookup — ЕДНА заявка за целия batch, не N+1 (виж
   // getAttachmentsByMessageIds коментара в topicMessageStore.ts).
   const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
@@ -1921,11 +1921,9 @@ function broadcastTopicMessageToLocalSubscribers(
       liveRecipients.map((r) => r.profileId).filter((id): id is string => id !== null),
     )]
 
-    // Празни exclusions за всички viewers (mirror на emptyExclusions в
-    // broadcastTopicReplyToLocalSubscribers по-долу) — excludedSenderProfileIdsByViewer
-    // остава generic/reusable параметър на store функциите, просто вече не
-    // го захранваме с viewer block-list тук.
-    const excludedSendersByViewer = new Map<string, ReadonlySet<string>>()
+    // Без viewer block-list exclusions (непроменена политика) — само
+    // скритите профили (Самоизтриване, Етап 2), за replyCount/unread.
+    const excludedSendersByViewer = buildTopicSenderExclusionsByViewerForDeletion(uniqueViewerProfileIds)
     const viewerDataByProfileId = topicMessageStore.getBroadcastViewerDataForProfiles(
       snapshot.messageId,
       uniqueViewerProfileIds,
@@ -2065,16 +2063,40 @@ function broadcastToProfileConnections(profileId: string, payload: unknown): voi
   }
 }
 
+// Самоизтриване, Етап 2 — съобщенията на профили с активна заявка за
+// изтриване са невидими в Теми/Лафче (история, отговори, броячи, непрочетени)
+// чрез СЪЩИЯ generic excludedSenderProfileIds параметър на topic store-овете.
+// Данните не се променят; при отмяна на заявката всичко е видимо отново.
+// (Блокиранията продължават да НЕ филтрират Теми — непроменена политика.)
+function getTopicSenderExclusionsForDeletion(): string[] {
+  return playerProgressStore.listProfileIdsHiddenForDeletion()
+}
+
+function buildTopicSenderExclusionsByViewerForDeletion(
+  viewerProfileIds: readonly string[],
+): Map<string, ReadonlySet<string>> {
+  const hiddenProfileIds = getTopicSenderExclusionsForDeletion()
+  const exclusionsByViewer = new Map<string, ReadonlySet<string>>()
+  if (hiddenProfileIds.length === 0) return exclusionsByViewer
+  const hiddenSet: ReadonlySet<string> = new Set(hiddenProfileIds)
+  for (const viewerProfileId of viewerProfileIds) {
+    exclusionsByViewer.set(viewerProfileId, hiddenSet)
+  }
+  return exclusionsByViewer
+}
+
 // Block relationship НЕ филтрира Topics unread (виж
 // broadcastTopicMessageToLocalSubscribers коментара за политиката) —
 // excludedSenderProfileIds параметърът на topicReadStateStore остава
-// generic/reusable, тук просто не го захранваме с block-list.
+// generic/reusable, тук не го захранваме с block-list (само със скритите
+// профили, виж getTopicSenderExclusionsForDeletion).
 function getTopicUnreadCountForProfile(profileId: string, topicId: string): number {
   const topic = topicStore.getTopicById(topicId)
+  const hiddenSenders = getTopicSenderExclusionsForDeletion()
   if (topic?.isGeneral) {
-    return topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topicId, [])
+    return topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topicId, hiddenSenders)
   }
-  return topicReadStateStore.getUnreadCountsByTopicIds(profileId, [topicId], []).get(topicId) ?? 0
+  return topicReadStateStore.getUnreadCountsByTopicIds(profileId, [topicId], hiddenSenders).get(topicId) ?? 0
 }
 
 // Batch вариант — за N профила наведнъж, с фиксиран малък брой SQL
@@ -2097,11 +2119,12 @@ function getTopicUnreadCountsForProfiles(
 function topicsWithUnreadCountsForProfile(profileId: string, topics: TopicSnapshot[]): TopicSnapshot[] {
   const topicIds = topics.map((topic) => topic.topicId)
   topicReadStateStore.ensureReadStateForTopics(profileId, topicIds)
-  const counts = topicReadStateStore.getUnreadCountsByTopicIds(profileId, topicIds, [])
+  const hiddenSenders = getTopicSenderExclusionsForDeletion()
+  const counts = topicReadStateStore.getUnreadCountsByTopicIds(profileId, topicIds, hiddenSenders)
   return topics.map((topic) => ({
     ...topic,
     unreadCount: topic.isGeneral
-      ? topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topic.topicId, [])
+      ? topicReadStateStore.getGeneralThreadUnreadTotal(profileId, topic.topicId, hiddenSenders)
       : counts.get(topic.topicId) ?? 0,
   }))
 }
@@ -2116,7 +2139,7 @@ function broadcastTopicSeenUpdatedToProfile(profileId: string, topicId: string, 
 }
 
 function getTopicThreadUnreadCountForProfile(profileId: string, rootMessageId: string): number {
-  return topicReadStateStore.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], []).get(rootMessageId) ?? 0
+  return topicReadStateStore.getUnreadCountsByRootMessageIds(profileId, [rootMessageId], getTopicSenderExclusionsForDeletion()).get(rootMessageId) ?? 0
 }
 
 // Batch вариант — за N профила наведнъж, ЕДИН thread (rootMessageId),
@@ -2232,10 +2255,9 @@ function reconcileTopicUnreadForDirectorySubscribers(topicId: string, senderProf
   if (readRecipients.length === 0) return
 
   const uniqueProfileIds = [...new Set(readRecipients.map((r) => r.profileId))]
-  // Празни exclusions — виж broadcastTopicMessageToLocalSubscribers
-  // коментара (excludedSenderProfileIdsByViewer остава generic параметър,
-  // просто вече не се захранва с block-list за Topics unread).
-  const excludedSendersByViewer = new Map<string, ReadonlySet<string>>()
+  // Без block-list exclusions — виж broadcastTopicMessageToLocalSubscribers
+  // коментара; само скритите профили (Самоизтриване, Етап 2).
+  const excludedSendersByViewer = buildTopicSenderExclusionsByViewerForDeletion(uniqueProfileIds)
 
   const topicUnreadCountByProfileId = getTopicUnreadCountsForProfiles(topicId, uniqueProfileIds, excludedSendersByViewer)
   const threadUnreadCountByProfileId = (topic?.isGeneral && rootMessageId !== undefined)
@@ -8697,6 +8719,13 @@ async function handleUploadsRequest(
     return false
   }
 
+  // Самоизтриване, Етап 2 — аватар/снимка от галерия, принадлежащи само на
+  // профил с активна заявка за изтриване, не се сервират (404). Файлът
+  // остава непокътнат на диска.
+  if (playerProgressStore.isUploadPathHiddenForDeletion(pathname)) {
+    return false
+  }
+
   try {
     const fileStats = await trackHttpWait('io', stat(filePath))
 
@@ -9498,6 +9527,10 @@ async function handleAuthRequest(
       // "EXPIRED PENDING + LOGIN").
       if ('code' in result && result.code === 'REGISTRATION_EXPIRED') {
         sendJsonResponse(res, 410, result)
+        return true
+      }
+      if ('code' in result && result.code === 'PROFILE_PENDING_DELETION') {
+        sendJsonResponse(res, 403, result)
         return true
       }
       sendJsonResponse(res, 400, result)
@@ -10929,7 +10962,7 @@ async function handleProfileBlockRequest(
   if (isBlocksList && req.method === 'GET') {
     const profileIds = blockStore.getBlockedProfileIds(myProfileId)
     const profiles = profileIds.flatMap((id) => {
-      const p = playerProgressStore.getPublicProfile(id)
+      const p = playerProgressStore.getVisiblePublicProfile(id)
       return p ? [p] : []
     })
     sendJsonResponse(res, 200, {
@@ -10956,7 +10989,9 @@ async function handleProfileBlockRequest(
     // денайъл логиката, която точно това action трябва да заобиколи).
     // Lightweight profileExists() е единственото разширено изискване — target
     // да съществува — без да добавя друг authorization permission.
-    if (!playerProgressStore.profileExists(targetProfileId)) {
+    // Самоизтриване, Етап 2 — скрит профил е "несъществуващ" и тук; вече
+    // съществуващите блокирания към него остават непокътнати за отмяна.
+    if (!playerProgressStore.profileExists(targetProfileId) || playerProgressStore.isProfileHiddenForDeletion(targetProfileId)) {
       sendJsonResponse(res, 404, { ok: false, message: 'Потребителят не беше намерен.' })
       return true
     }
@@ -11035,6 +11070,12 @@ async function handleProfileLikeRequest(
   }
   if (likerProfileId === likedProfileId) {
     sendJsonResponse(res, 400, { ok: false, message: 'Не може да харесаш себе си.' })
+    return true
+  }
+
+  // Самоизтриване, Етап 2 — скрит профил не може да получава харесвания.
+  if (playerProgressStore.isProfileHiddenForDeletion(likedProfileId)) {
+    sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
     return true
   }
 
@@ -11209,6 +11250,18 @@ function getProfileAccessDenial(
   return null
 }
 
+// Самоизтриване, Етап 2 — профил за показване на конкретен viewer: профил с
+// активна заявка за изтриване е неразличим от несъществуващ (404) за всички
+// освен admin/subadmin, които го виждат за модерация (вътрешен достъп).
+function getProfileForViewerSession(
+  session: AuthSessionSnapshot | null,
+  profileId: string,
+): PlayerPublicProfileSnapshot | null {
+  return isAdminOrSubadminSession(session)
+    ? playerProgressStore.getPublicProfile(profileId)
+    : playerProgressStore.getVisiblePublicProfile(profileId)
+}
+
 async function handleProfileByIdRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -11224,7 +11277,7 @@ async function handleProfileByIdRequest(
   const currentProfileId = session?.profile.profileId ?? null
 
   const profileId = decodeURIComponent(match[1] ?? '')
-  const profile = playerProgressStore.getPublicProfile(profileId)
+  const profile = getProfileForViewerSession(session, profileId)
 
   if (profile === null) {
     sendJsonResponse(res, 404, {
@@ -11290,7 +11343,7 @@ async function handleProfileCampaignSummaryRequest(
   }
 
   const profileId = decodeURIComponent(match[1] ?? '')
-  const profile = playerProgressStore.getPublicProfile(profileId)
+  const profile = getProfileForViewerSession(session, profileId)
 
   if (profile === null) {
     sendJsonResponse(res, 404, { ok: false, message: 'Профилът не беше намерен.' })
@@ -11715,6 +11768,14 @@ async function handleShopCheckoutRequest(
     return true
   }
 
+  // Самоизтриване, Етап 2 — скрит профил не може да получава платени
+  // подаръци (същото съобщение като store-овия recipient eligibility отказ).
+  // Кредитирането на вече платени покупки (webhook) остава непроменено.
+  if (recipientProfileId.trim().length > 0 && playerProgressStore.isProfileHiddenForDeletion(recipientProfileId.trim())) {
+    sendJsonResponse(res, 400, { ok: false, message: "Получателят не може да приеме подарък в момента." })
+    return true
+  }
+
   const pendingResult = coinPurchaseStore.createPendingPurchase(
     session.profile.profileId,
     packageId,
@@ -11918,6 +11979,14 @@ async function handleVipCheckoutRequest(
 
   // Belot Spectator Mode — виж identичния guard в handleShopCheckoutRequest.
   if (recipientProfileId.trim().length > 0 && rejectHttpGiftIfBelotSpectator(res, session.profile.profileId)) {
+    return true
+  }
+
+  // Самоизтриване, Етап 2 — скрит профил не може да получава платени
+  // подаръци (същото съобщение като store-овия recipient eligibility отказ).
+  // Кредитирането на вече платени покупки (webhook) остава непроменено.
+  if (recipientProfileId.trim().length > 0 && playerProgressStore.isProfileHiddenForDeletion(recipientProfileId.trim())) {
+    sendJsonResponse(res, 400, { ok: false, message: "Получателят не може да приеме подарък в момента." })
     return true
   }
 
@@ -12187,6 +12256,14 @@ async function handleShopBundleCheckoutRequest(
 
   // Belot Spectator Mode — виж identичния guard в handleShopCheckoutRequest.
   if (recipientProfileId.trim().length > 0 && rejectHttpGiftIfBelotSpectator(res, session.profile.profileId)) {
+    return true
+  }
+
+  // Самоизтриване, Етап 2 — скрит профил не може да получава платени
+  // подаръци (същото съобщение като store-овия recipient eligibility отказ).
+  // Кредитирането на вече платени покупки (webhook) остава непроменено.
+  if (recipientProfileId.trim().length > 0 && playerProgressStore.isProfileHiddenForDeletion(recipientProfileId.trim())) {
+    sendJsonResponse(res, 400, { ok: false, message: "Получателят не може да приеме подарък в момента." })
     return true
   }
 
@@ -12631,7 +12708,10 @@ async function handleTopicThreadSeenRequest(
     rootMessage === null ||
     rootMessage.topicId !== topicId ||
     rootMessage.parentMessageId !== null ||
-    rootMessage.deletedAt !== null
+    rootMessage.deletedAt !== null ||
+    // Самоизтриване, Етап 2 — нишка на скрит профил е невидима (без промяна
+    // на read state-а, за да са непрочетените същите след отмяна).
+    playerProgressStore.isProfileHiddenForDeletion(rootMessage.senderProfileId)
   ) {
     sendJsonResponse(res, 404, {
       ok: false,
@@ -12720,8 +12800,8 @@ async function handleTopicMessagesRequest(
     : clampTopicMessagesLimit(requestUrl.searchParams.get('limit'))
 
   const page = beforeSeq !== null && Number.isInteger(beforeSeq)
-    ? topicMessageStore.getMessagesBefore(topicId, beforeSeq, limit, [])
-    : topicMessageStore.getRecentMessages(topicId, limit, [])
+    ? topicMessageStore.getMessagesBefore(topicId, beforeSeq, limit, getTopicSenderExclusionsForDeletion())
+    : topicMessageStore.getRecentMessages(topicId, limit, getTopicSenderExclusionsForDeletion())
 
   // Avatar е derived от canonical profile data (виж коментара в
   // TopicMessageSnapshot.senderAvatarUrl) — не се пази в topic_messages,
@@ -12744,12 +12824,13 @@ async function handleTopicMessagesRequest(
   // handleTopicMessagesRequest коментара по-горе за политиката) — generic
   // exclusion параметърът остава, просто не се захранва с block-list.
   const messageIds = page.messages.map((m) => m.messageId)
-  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, [])
+  const hiddenSenders = getTopicSenderExclusionsForDeletion()
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, hiddenSenders)
   const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
   const unreadCountsByMessageId = topicReadStateStore.getUnreadCountsByRootMessageIds(
     auth.profileId,
     messageIds,
-    [],
+    hiddenSenders,
   )
 
   const enrichedMessages = page.messages.map((message) => {
@@ -12833,7 +12914,14 @@ async function handleTopicRepliesRequest(
   }
 
   const rootMessage = topicMessageStore.getMessageById(rootMessageId)
-  if (rootMessage === null || rootMessage.topicId !== topicId || rootMessage.deletedAt !== null) {
+  if (
+    rootMessage === null ||
+    rootMessage.topicId !== topicId ||
+    rootMessage.deletedAt !== null ||
+    // Самоизтриване, Етап 2 — отговорите под публикация на скрит профил са
+    // недостъпни заедно с нея.
+    playerProgressStore.isProfileHiddenForDeletion(rootMessage.senderProfileId)
+  ) {
     sendJsonResponse(res, 404, { ok: false, message: 'Съобщението не беше намерено.' })
     return true
   }
@@ -12846,8 +12934,8 @@ async function handleTopicRepliesRequest(
 
   const isGapClosingReconcile = afterSeq !== null && Number.isInteger(afterSeq)
   const page = isGapClosingReconcile
-    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, [])
-    : topicMessageStore.getReplies(rootMessageId, limit, [])
+    ? topicMessageStore.getRepliesAfter(rootMessageId, afterSeq!, limit, getTopicSenderExclusionsForDeletion())
+    : topicMessageStore.getReplies(rootMessageId, limit, getTopicSenderExclusionsForDeletion())
 
   // Reopen reconciliation (виж createLobbyFlowController.ts expandReplyThread):
   // getRepliesAfter само добавя НОВИ redове (seq > afterSeq) — soft-delete
@@ -12865,7 +12953,7 @@ async function handleTopicRepliesRequest(
   const activeSectionMutedProfileIds = topicModerationStore.getActiveSectionMutedProfileIds(uniqueSenderProfileIds)
 
   const messageIds = page.messages.map((m) => m.messageId)
-  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId)
+  const aggregatesByMessageId = topicMessageStore.getMessageAggregatesByIds(messageIds, auth.profileId, getTopicSenderExclusionsForDeletion())
   const attachmentsByMessageId = topicMessageStore.getAttachmentsByMessageIds(messageIds)
 
   const enrichedReplies = page.messages.map((message) => {
@@ -12931,7 +13019,9 @@ async function handleTopicAttachmentDownloadRequest(
 
   const attachment = topicMessageStore.getAttachmentForDownload(topicId, filename)
 
-  if (attachment === null) {
+  // Самоизтриване, Етап 2 — прикачен файл към публикация на скрит профил не
+  // се сервира (неразличимо от липсващ). Файлът остава на диска.
+  if (attachment === null || playerProgressStore.isProfileHiddenForDeletion(attachment.senderProfileId)) {
     sendJsonResponse(res, 404, { ok: false, message: 'Файлът не беше намерен.' })
     return true
   }
@@ -25740,9 +25830,12 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         lobbyChatSubscriberConnectionIds.add(connection.id)
 
         const latestConnection = getConnectionById(serverState, connection.id)
-        const excludedSenderProfileIds = latestConnection?.profileId != null
-          ? [...getLobbyChatBlockedSet(latestConnection.profileId)]
-          : []
+        // Самоизтриване, Етап 2 — съобщенията на скрити профили не влизат в
+        // историята (за всички, вкл. гости), заедно с блокираните от viewer-а.
+        const excludedSenderProfileIds = [...new Set([
+          ...(latestConnection?.profileId != null ? getLobbyChatBlockedSet(latestConnection.profileId) : []),
+          ...playerProgressStore.listProfileIdsHiddenForDeletion(),
+        ])]
 
         const history = lobbyChatStore.listRecentMessages(
           LOBBY_CHAT_HISTORY_LIMIT,
@@ -25988,7 +26081,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           message.topicId,
           message.afterSeq,
           TOPIC_MESSAGES_REALTIME_CATCHUP_LIMIT,
-          [],
+          getTopicSenderExclusionsForDeletion(),
         )
 
         const hydratedCatchup = hydrateTopicMessagesWithCurrentAvatars(page.messages).map((m) => ({
@@ -26320,7 +26413,13 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         }
 
         const parent = topicMessageStore.getMessageById(message.parentMessageId)
-        if (parent === null || parent.topicId !== message.topicId || parent.deletedAt !== null) {
+        if (
+          parent === null ||
+          parent.topicId !== message.topicId ||
+          parent.deletedAt !== null ||
+          // Самоизтриване, Етап 2 — без нови отговори под скрита публикация.
+          playerProgressStore.isProfileHiddenForDeletion(parent.senderProfileId)
+        ) {
           sendTopicReplyError('parent_not_found', 'Съобщението, на което отговаряш, не беше намерено.')
           return
         }
@@ -26466,7 +26565,12 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         // никакъв vipStore.getStatus() lookup тук.
 
         const targetMessage = topicMessageStore.getMessageById(message.messageId)
-        if (targetMessage === null || targetMessage.deletedAt !== null) {
+        if (
+          targetMessage === null ||
+          targetMessage.deletedAt !== null ||
+          // Самоизтриване, Етап 2 — скрито съобщение не може да се харесва.
+          playerProgressStore.isProfileHiddenForDeletion(targetMessage.senderProfileId)
+        ) {
           sendTopicLikeError('message_not_found', 'Съобщението не беше намерено.')
           return
         }

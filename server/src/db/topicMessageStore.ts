@@ -321,7 +321,7 @@ export type TopicMessageStore = {
   getAttachmentForDownload: (
     topicId: string,
     storageFilename: string,
-  ) => { storageFilename: string; contentType: string } | null
+  ) => { storageFilename: string; contentType: string; senderProfileId: string } | null
   attachmentExistsForFilename: (storageFilename: string) => boolean
   /** Deletion-intent запис — extra safety net за orphan file (виж index.ts: не се очаква нормално да е нужен, тъй като insertMessage/insertReply вече изтриват файла синхронно при DB грешка; за бъдещ message-delete flow. */
   enqueueAttachmentDeletion: (storageFilename: string) => void
@@ -1658,7 +1658,7 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
   }
 
   const selectAttachmentForDownloadStatement = database.prepare(`
-    SELECT a.storage_filename, a.content_type
+    SELECT a.storage_filename, a.content_type, m.sender_profile_id
     FROM topic_message_attachments a
     INNER JOIN topic_messages m ON m.message_id = a.message_id
     WHERE a.storage_filename = ? AND m.topic_id = ?
@@ -1668,12 +1668,12 @@ export async function createTopicMessageStore(databaseFilePath: string): Promise
   function getAttachmentForDownload(
     topicId: string,
     storageFilename: string,
-  ): { storageFilename: string; contentType: string } | null {
+  ): { storageFilename: string; contentType: string; senderProfileId: string } | null {
     const row = selectAttachmentForDownloadStatement.get(storageFilename, topicId) as
-      | { storage_filename: string; content_type: string }
+      | { storage_filename: string; content_type: string; sender_profile_id: string }
       | undefined
     if (row === undefined) return null
-    return { storageFilename: row.storage_filename, contentType: row.content_type }
+    return { storageFilename: row.storage_filename, contentType: row.content_type, senderProfileId: row.sender_profile_id }
   }
 
   const selectAttachmentExistsStatement = database.prepare(`

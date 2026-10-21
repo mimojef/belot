@@ -61,6 +61,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { verifyVerificationCode } from '../src/db/authHelpers.js'
+import { REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE } from '../src/db/authStore.js'
 
 const PASSWORD = 'EmailVerifySmoke1!'
 const TEST_REGISTRATION_SECRET = 'email-verification-registration-test-secret-01'
@@ -876,8 +877,9 @@ try {
     const result = await postJson(port, '/api/auth/update-pending-registration-display-name', { pendingRegistrationId, displayName: takenName })
     assert(result.status === 409, `очаквах 409, получих ${result.status} body=${JSON.stringify(result.body)}`)
     assert(result.body?.code === 'DISPLAY_NAME_TAKEN', `очаквах code=DISPLAY_NAME_TAKEN, получих ${JSON.stringify(result.body)}`)
+    // Самоизтриване, Етап 2 — единното съобщение за заето име.
     assert(
-      typeof result.body?.message === 'string' && (result.body.message as string).includes('заето'),
+      result.body?.message === REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE,
       `очаквах ясно "заето" съобщение, получих ${JSON.stringify(result.body)}`,
     )
 

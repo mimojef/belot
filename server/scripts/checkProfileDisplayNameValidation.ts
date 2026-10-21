@@ -16,7 +16,7 @@ import {
   type ProfileIdentityValidationCode,
 } from '../src/db/normalizeProfileIdentityText.js'
 import { randomUUID } from 'node:crypto'
-import { createAuthStore, type AuthSessionSnapshot } from '../src/db/authStore.js'
+import { createAuthStore, REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE, type AuthSessionSnapshot } from '../src/db/authStore.js'
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 
 // Email verification pending-first flow (виж authStore.ts's register() doc
@@ -622,7 +622,8 @@ async function main(): Promise<void> {
         gender: 'male',
       })
       assert(result?.ok === false, 'registration with reserved username succeeded')
-      if (result?.ok === false) assert(result.message === 'Това име вече е заето.', `message=${result.message}`)
+      // Самоизтриване, Етап 2 — единно съобщение за заето име при регистрация.
+      if (result?.ok === false) assert(result.message === REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE, `message=${result.message}`)
     })
 
     await check('[10b] admin rename uses the same mixed-script and reserved PIKABG validator', () => {
@@ -752,7 +753,8 @@ async function main(): Promise<void> {
       assert(r1?.ok === true, 'race1 registration failed')
       const r2 = registerAndVerify({ email: 'race2@example.test', password: 'secret1', displayName: 'RaceName', gender: 'male' })
       assert(r2?.ok === false, 'race2 registration succeeded (race not protected)')
-      if (r2?.ok === false) assert(r2.message.includes('заето') || r2.message.includes('заета'), `message=${r2.message}`)
+      // Самоизтриване, Етап 2 — единното съобщение за заето име.
+      if (r2?.ok === false) assert(r2.message === REGISTRATION_DISPLAY_NAME_TAKEN_MESSAGE, `message=${r2.message}`)
     })
 
     await check('[14] cross-column rename race: rename blocks on name taken inside transaction, wallet not debited', () => {
