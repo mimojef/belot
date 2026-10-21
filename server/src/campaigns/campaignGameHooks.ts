@@ -374,6 +374,38 @@ export function resetReconciliationCursor(database: SqliteDatabase, sourceType: 
   saveReconciliationCursor(database, sourceType, RECONCILIATION_INITIAL_CURSOR)
 }
 
+// Performance fix B1 — durable cursor-ът се записва ВЕДНЪЖ след batch-а, не
+// след всеки ред (всеки autocommit запис е отделен fsync; ~1.08 ms × ~1672
+// реда/tick в production). Семантика, идентична с предишния per-row finally:
+//   - lastProcessed напредва в НАЧАЛОТО на всяка итерация, т.е. и за
+//     credited, skipped (no_eligible_campaign/ineligible/not_winner/
+//     insufficient stake info → `return` от processRow) и failed редове;
+//   - finally записва cursor-а на последния опитан ред и при нормален край,
+//     и при неочаквано exception (което след това се препредава);
+//   - ако самият запис се провали, cursor-ът остава на предишната позиция и
+//     следващият tick повтаря batch-а — безопасно, защото credit-ите са
+//     идемпотентни (INSERT OR IGNORE по UNIQUE(campaign_id, profile_id,
+//     source_type, source_id)) и вече credit-натите редове се филтрират от
+//     NOT EXISTS.
+// НЕ увива batch-а в обща транзакция: creditCampaignUnits() пише през ДРУГА
+// връзка с BEGIN IMMEDIATE, която би чакала (busy_timeout) отворена write
+// транзакция на тази.
+export function runReconciliationBatch<Row>(
+  rows: readonly Row[],
+  processRow: (row: Row) => void,
+  saveCursorForRow: ((row: Row) => void) | null,
+): void {
+  let lastProcessed: { row: Row } | null = null
+  try {
+    for (const row of rows) {
+      lastProcessed = { row }
+      processRow(row)
+    }
+  } finally {
+    if (lastProcessed !== null && saveCursorForRow !== null) saveCursorForRow(lastProcessed.row)
+  }
+}
+
 export async function reconcileMissingBelotCampaignCredits(
   databaseFilePath: string,
   campaignCreditStore: CampaignCreditStore,
@@ -556,7 +588,7 @@ export async function reconcileMissingBelotCampaignCredits(
       newRows = selectNewMissingCreditsSinceStatement.all(sinceIso, limit) as BelotNewMissingCreditRow[]
     }
 
-    for (const row of newRows) {
+    runReconciliationBatch(newRows, (row) => {
       result.scanned += 1
 
       try {
@@ -582,16 +614,14 @@ export async function reconcileMissingBelotCampaignCredits(
           `[campaign-game-hooks] belot reconciliation unexpected failure match=${row.match_scope} profile=${row.profile_id}`,
           error,
         )
-      } finally {
-        if (bounds.useDurableCursor === true) {
-          saveReconciliationCursor(database, 'belot_win', {
-            eventAt: row.ended_at,
-            sourceId: row.match_scope,
-            profileId: row.profile_id,
-          })
-        }
       }
-    }
+    }, bounds.useDurableCursor === true
+      ? (row) => saveReconciliationCursor(database, 'belot_win', {
+          eventAt: row.ended_at,
+          sourceId: row.match_scope,
+          profileId: row.profile_id,
+        })
+      : null)
 
     // ─── Фаза 6.1/6.2 — LEGACY sweep: profile_match_results ───
     // СОБСТВЕН durable cursor ('belot_win_legacy', виж
@@ -666,16 +696,20 @@ export async function reconcileMissingBelotCampaignCredits(
       LIMIT ?;
     `)
 
+    // Seek-based cursor (performance fix C1): row-value сравнение по
+    // ТОЧНО cursor ключа (completed_at, room_id, profile_id) — семантично
+    // идентично с предишната OR форма (completed_at/room_id са NOT NULL, а
+    // profile_id IS NOT NULL е отделен филтър), но позволява seek по
+    // idx_profile_match_results_campaign_reconciliation_seek
+    // (is_guest_trial, completed_at, room_id, profile_id, did_win) в реда на
+    // ORDER BY — без пълно обхождане и TEMP B-TREE (виж
+    // 20261021_001_create_profile_match_results_campaign_reconciliation_seek_index.sql).
     const selectLegacyMissingCreditsAfterCursorStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr
       WHERE pmr.is_guest_trial = 0
         AND pmr.profile_id IS NOT NULL
-        AND (
-          pmr.completed_at > ?
-          OR (pmr.completed_at = ? AND pmr.room_id > ?)
-          OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id > ?)
-        )
+        AND (pmr.completed_at, pmr.room_id, pmr.profile_id) > (?, ?, ?)
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
         AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
@@ -700,11 +734,7 @@ export async function reconcileMissingBelotCampaignCredits(
       FROM profile_match_results pmr
       WHERE pmr.is_guest_trial = 0
         AND pmr.profile_id IS NOT NULL
-        AND (
-          pmr.completed_at < ?
-          OR (pmr.completed_at = ? AND pmr.room_id < ?)
-          OR (pmr.completed_at = ? AND pmr.room_id = ? AND pmr.profile_id <= ?)
-        )
+        AND (pmr.completed_at, pmr.room_id, pmr.profile_id) <= (?, ?, ?)
         AND ${NOT_ALREADY_CREDITED_LEGACY_SQL}
         AND ${NOT_IN_NEW_LEDGER_SQL}
         AND ${NOT_TOURNAMENT_MATCH_SQL('pmr.room_id')}
@@ -730,18 +760,12 @@ export async function reconcileMissingBelotCampaignCredits(
       } else {
         legacyRows = selectLegacyMissingCreditsAfterCursorStatement.all(
           legacyCursor.eventAt,
-          legacyCursor.eventAt,
-          legacyCursor.sourceId,
-          legacyCursor.eventAt,
           legacyCursor.sourceId,
           legacyCursor.profileId,
           limit,
         ) as BelotLegacyMissingCreditRow[]
         if (legacyRows.length < limit) {
           const wrappedLegacyRows = selectLegacyMissingCreditsThroughCursorStatement.all(
-            legacyCursor.eventAt,
-            legacyCursor.eventAt,
-            legacyCursor.sourceId,
             legacyCursor.eventAt,
             legacyCursor.sourceId,
             legacyCursor.profileId,
@@ -762,7 +786,12 @@ export async function reconcileMissingBelotCampaignCredits(
       legacyRows = selectLegacyMissingCreditsSinceStatement.all(sinceIso, limit) as BelotLegacyMissingCreditRow[]
     }
 
-    for (const row of legacyRows) {
+    // Cursor-ът напредва на ВСЕКИ обработен ред — credited, skipped
+    // (no_eligible_campaign/ineligible_profile/insufficient stake info), ИЛИ
+    // failed — виж doc коментара най-отгоре за пълния "защо" (иначе
+    // постоянно недопустим prefix блокира напредването). Записва се веднъж
+    // след batch-а (runReconciliationBatch), не на всеки ред.
+    runReconciliationBatch(legacyRows, (row) => {
       result.scanned += 1
 
       try {
@@ -782,7 +811,9 @@ export async function reconcileMissingBelotCampaignCredits(
               `[campaign-game-hooks] belot reconciliation (legacy sweep): room=${row.room_id} profile=${row.profile_id} has no stake_debit while another participant does — insufficient info, skipping`,
             )
             result.skippedInsufficientStakeInfo += 1
-            continue
+            // (беше `continue`; редът вече е отчетен като обработен от
+            // runReconciliationBatch, т.е. cursor-ът минава след него)
+            return
           }
           // Никой в стаята няма stake_debit ред -> доказана нулева ставка
           // (ТОЗИ heuristic е ограничен до pre-Фаза-6.2 исторически редове
@@ -813,20 +844,14 @@ export async function reconcileMissingBelotCampaignCredits(
           `[campaign-game-hooks] belot reconciliation (legacy sweep) unexpected failure room=${row.room_id} profile=${row.profile_id}`,
           error,
         )
-      } finally {
-        // Cursor-ът напредва на ВСЕКИ обработен ред — credited, skipped
-        // (no_eligible_campaign/ineligible_profile/insufficient stake
-        // info), ИЛИ failed — виж doc коментара най-отгоре за пълния "защо"
-        // (иначе постоянно недопустим prefix блокира напредването).
-        if (bounds.useDurableCursor === true) {
-          saveReconciliationCursor(database, 'belot_win_legacy', {
-            eventAt: row.completed_at,
-            sourceId: row.room_id,
-            profileId: row.profile_id,
-          })
-        }
       }
-    }
+    }, bounds.useDurableCursor === true
+      ? (row) => saveReconciliationCursor(database, 'belot_win_legacy', {
+          eventAt: row.completed_at,
+          sourceId: row.room_id,
+          profileId: row.profile_id,
+        })
+      : null)
   } finally {
     database.close()
   }
@@ -992,7 +1017,7 @@ export async function reconcileMissingLudoCampaignCredits(
       rows = selectMissingCreditsSinceStatement.all(sinceIso, limit) as LudoMissingCreditRow[]
     }
 
-    for (const row of rows) {
+    runReconciliationBatch(rows, (row) => {
       result.scanned += 1
 
       try {
@@ -1018,16 +1043,14 @@ export async function reconcileMissingLudoCampaignCredits(
           `[campaign-game-hooks] ludo reconciliation unexpected failure match=${row.match_id} profile=${row.participant_profile_id}`,
           error,
         )
-      } finally {
-        if (bounds.useDurableCursor === true) {
-          saveReconciliationCursor(database, 'ludo_win', {
-            eventAt: row.finished_at,
-            sourceId: row.match_id,
-            profileId: row.participant_profile_id,
-          })
-        }
       }
-    }
+    }, bounds.useDurableCursor === true
+      ? (row) => saveReconciliationCursor(database, 'ludo_win', {
+          eventAt: row.finished_at,
+          sourceId: row.match_id,
+          profileId: row.participant_profile_id,
+        })
+      : null)
   } finally {
     database.close()
   }
@@ -1040,8 +1063,8 @@ export async function reconcileMissingLudoCampaignCredits(
 // Архитектурен модел — mirror на campaignScheduler.ts: setInterval tick,
 // inFlight guard (предотвратява overlapping runs), error isolation (грешка в
 // един tick не събаря сървъра/следващите tick-ове), .unref() (не държи
-// процеса жив), tickNow() връща Promise (await-able за тестове и за
-// незабавния boot-time first run). Feature flag-ът НЕ спира стартирането на
+// процеса жив), tickNow() връща Promise (await-able за тестове). Първият
+// tick след start() е отложен с initialDelayMs (виж start()). Feature flag-ът НЕ спира стартирането на
 // job-а самия (mirror на campaignScheduler.ts доктрината) — проверява се
 // ВЪТРЕ във всеки reconcile* извикване (евтино, без DB connection, ако е
 // изключен — виж §3 от одитната задача "без съществена допълнителна работа,
@@ -1065,7 +1088,7 @@ export type CampaignCreditReconciliationHealth = {
 export type CampaignCreditReconciliationJob = {
   start: () => void
   stop: () => void
-  /** Връща Promise, await-able за тестове/boot-time immediate run. */
+  /** Връща Promise, await-able за тестове/ръчно извикване. */
   tickNow: () => Promise<void>
   getHealth: () => CampaignCreditReconciliationHealth
   close: () => void
@@ -1080,6 +1103,10 @@ export type CampaignCreditReconciliationJobDeps = {
   now?: () => Date
   setInterval?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setInterval>
   clearInterval?: (id: ReturnType<typeof globalThis.setInterval>) => void
+  /** Отлагане на първия tick след start() (default 30 s) — виж start(). */
+  initialDelayMs?: number
+  setTimeout?: (fn: () => void, ms: number) => ReturnType<typeof globalThis.setTimeout>
+  clearTimeout?: (id: ReturnType<typeof globalThis.setTimeout>) => void
   /**
    * Фаза 5 — инжектирана зависимост (не статичен import, виж доc коментара
    * най-отгоре за circular-import rationale). index.ts подава
@@ -1095,6 +1122,7 @@ export type CampaignCreditReconciliationJobDeps = {
 }
 
 const DEFAULT_RECONCILIATION_INTERVAL_MS = 300_000
+const DEFAULT_RECONCILIATION_INITIAL_DELAY_MS = 30_000
 const DEFAULT_RECONCILIATION_LIMIT = 500
 
 function sanitizeReconciliationError(error: unknown): string {
@@ -1109,8 +1137,12 @@ export function createCampaignCreditReconciliationJob(
   const now = deps.now ?? (() => new Date())
   const setTimer = deps.setInterval ?? ((fn, ms) => globalThis.setInterval(fn, ms))
   const clearTimer = deps.clearInterval ?? ((id) => globalThis.clearInterval(id))
+  const initialDelayMs = deps.initialDelayMs ?? DEFAULT_RECONCILIATION_INITIAL_DELAY_MS
+  const setInitialTimer = deps.setTimeout ?? ((fn, ms) => globalThis.setTimeout(fn, ms))
+  const clearInitialTimer = deps.clearTimeout ?? ((id) => globalThis.clearTimeout(id))
 
   let intervalId: ReturnType<typeof globalThis.setInterval> | null = null
+  let initialTimeoutId: ReturnType<typeof globalThis.setTimeout> | null = null
   let inFlight = false
   let stopped = false
   let lastTickAt: string | null = null
@@ -1167,7 +1199,19 @@ export function createCampaignCreditReconciliationJob(
   function start(): void {
     if (intervalId !== null) return
     stopped = false
-    void runTick()
+    // Performance fix A — първият tick НЕ се изпълнява в startup event-loop
+    // итерацията (production: ~7 s синхронна работа там блокираше worker
+    // assign ACK-овете). Реален setTimeout с отлагане, не microtask/
+    // nextTick/setImmediate (setImmediate се изпълнява в check phase на СЪЩАТА
+    // итерация, преди poll pass-а с ACK-овете). Отлагането е безопасно:
+    // изходните ledger-и са durable, а credit-ите — идемпотентни.
+    initialTimeoutId = setInitialTimer(() => {
+      initialTimeoutId = null
+      void runTick()
+    }, initialDelayMs)
+    if (typeof initialTimeoutId === 'object' && initialTimeoutId !== null && 'unref' in initialTimeoutId) {
+      ;(initialTimeoutId as { unref: () => void }).unref()
+    }
     intervalId = setTimer(() => { void runTick() }, intervalMs)
     if (typeof intervalId === 'object' && intervalId !== null && 'unref' in intervalId) {
       ;(intervalId as { unref: () => void }).unref()
@@ -1176,6 +1220,10 @@ export function createCampaignCreditReconciliationJob(
 
   function stop(): void {
     stopped = true
+    if (initialTimeoutId !== null) {
+      clearInitialTimer(initialTimeoutId)
+      initialTimeoutId = null
+    }
     if (intervalId !== null) {
       clearTimer(intervalId)
       intervalId = null

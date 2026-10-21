@@ -36,6 +36,7 @@ import {
   getReconciliationCursor,
   saveReconciliationCursor,
   resetReconciliationCursor,
+  runReconciliationBatch,
   normalizeReconciliationLimit,
   type ReconciliationSourceType,
 } from './campaignGameHooks.js'
@@ -225,7 +226,7 @@ function scanAndCreditPurchaseLedger(
   const { rows, cursorWrapped } = scanPurchaseLedgerWithCursor(database, config, limit)
   result.cursorWrapped = cursorWrapped
 
-  for (const row of rows) {
+  runReconciliationBatch(rows, (row) => {
     result.scanned += 1
 
     try {
@@ -250,14 +251,12 @@ function scanAndCreditPurchaseLedger(
         `[campaign-purchase-hooks] reconciliation (${config.tableName}) unexpected failure purchaseId=${row.purchase_id} profile=${row.profile_id}`,
         error,
       )
-    } finally {
-      saveReconciliationCursor(database, config.cursorSourceType, {
-        eventAt: row.credited_at,
-        sourceId: row.purchase_id,
-        profileId: row.profile_id,
-      })
     }
-  }
+  }, (row) => saveReconciliationCursor(database, config.cursorSourceType, {
+    eventAt: row.credited_at,
+    sourceId: row.purchase_id,
+    profileId: row.profile_id,
+  }))
 
   return result
 }

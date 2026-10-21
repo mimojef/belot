@@ -1239,7 +1239,11 @@ await check('[42] index.ts вика recordLudoMatchForCampaign ТОЧНО 2 пъ
 
 await check('[43] index.ts стартира campaignCreditReconciliationJob в httpServer.listen() и го затваря при shutdown', () => {
   const createIdx = indexTsSource.indexOf('createCampaignCreditReconciliationJob({')
-  const startIdx = indexTsSource.indexOf('campaignCreditReconciliationJob?.start()')
+  // От startup timeline diagnostics (928e2ce) насам извикването е обвито в
+  // startupTimeline.measure(...) като startedReconciliationJob.start() — още
+  // вътре в listen callback-а; приемаме и двете форми.
+  const directStartIdx = indexTsSource.indexOf('campaignCreditReconciliationJob?.start()')
+  const startIdx = directStartIdx !== -1 ? directStartIdx : indexTsSource.indexOf('startedReconciliationJob.start()')
   const closeIdx = indexTsSource.indexOf("closeStore('campaignCreditReconciliationJob'")
   const flagGateIdx = indexTsSource.indexOf('const campaignCreditStore = isCampaignsFeatureEnabled()')
   const listenIdx = indexTsSource.indexOf('httpServer.listen(PORT, HOST, () => {')

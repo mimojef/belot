@@ -112,6 +112,7 @@
     "check:campaign-match-credit-lookup": "tsx scripts/checkCampaignMatchCreditLookup.ts --server-root=.",
     "check:campaign-belot-replay-match-identity": "tsx scripts/checkCampaignBelotReplayMatchIdentity.ts",
     "check:campaign-belot-reliable-reconciliation": "tsx scripts/checkCampaignBelotReliableReconciliation.ts --server-root=.",
+    "check:campaign-reconciliation-performance-fix": "tsx scripts/checkCampaignReconciliationPerformanceFix.ts",
     "check:campaign-match-credit-ws-authorization": "tsx scripts/checkCampaignMatchCreditWebSocketAuthorization.ts --server-root=.",
     "check:campaign-profile-summary-store": "tsx scripts/checkCampaignProfileSummaryStore.ts --server-root=.",
     "check:campaign-profile-summary-http-authorization": "tsx scripts/checkCampaignProfileSummaryHttpAuthorization.ts --server-root=.",

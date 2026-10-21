@@ -3198,6 +3198,8 @@ const campaignCreditReconciliationJob = campaignCreditStore !== null
       // не прави статичен value import обратно).
       reconcilePurchases: reconcileMissingPurchaseCampaignCredits,
       setInterval: (fn, ms) => timedSetInterval('campaignCreditReconciliation', fn, ms),
+      // Отложеният първи tick (performance fix A) — същото Phase 0B timing.
+      setTimeout: (fn, ms) => timedSetTimeout('campaignCreditReconciliation', fn, ms),
     })
   : null
 // Фаза 11 — reconciliation-gated окончателен архив. Собствен periodic job
