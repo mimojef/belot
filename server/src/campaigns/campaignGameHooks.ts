@@ -703,7 +703,7 @@ export async function reconcileMissingBelotCampaignCredits(
     // idx_profile_match_results_campaign_reconciliation_seek
     // (is_guest_trial, completed_at, room_id, profile_id, did_win) в реда на
     // ORDER BY — без пълно обхождане и TEMP B-TREE (виж
-    // 20261021_001_create_profile_match_results_campaign_reconciliation_seek_index.sql).
+    // 20261021_002_create_profile_match_results_campaign_reconciliation_seek_index.sql).
     const selectLegacyMissingCreditsAfterCursorStatement = database.prepare(`
       SELECT pmr.room_id AS room_id, pmr.profile_id AS profile_id, pmr.completed_at AS completed_at, pmr.did_win AS did_win
       FROM profile_match_results pmr

@@ -62,7 +62,7 @@ async function check(label: string, fn: () => void | Promise<void>): Promise<voi
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const migrationsDir = resolve(__dirname, '..', 'database', 'migrations')
-const SEEK_MIGRATION = '20261021_001_create_profile_match_results_campaign_reconciliation_seek_index.sql'
+const SEEK_MIGRATION = '20261021_002_create_profile_match_results_campaign_reconciliation_seek_index.sql'
 const SEEK_INDEX = 'idx_profile_match_results_campaign_reconciliation_seek'
 const tempDirs: string[] = []
 
