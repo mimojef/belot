@@ -286,6 +286,8 @@
     "check:belot-hand-journal-archive": "tsx scripts/checkBelotHandJournalArchive.ts",
     "bench:belot-hand-journal-compression": "tsx scripts/benchBelotHandJournalCompression.ts",
     "check:belot-hand-journal-chunked-delete": "tsx scripts/checkBelotHandJournalChunkedDelete.ts",
+    "bench:belot-hand-journal-chunked-delete": "tsx scripts/benchBelotHandJournalChunkedDelete.ts",
+    "bench:belot-hand-journal-checkpoint": "tsx scripts/benchBelotHandJournalCheckpoint.ts",
     "diagnostics:belot-hands": "tsx src/diagnostics/belotHandJournal/belotHandJournalCli.ts",
     "diagnostics:belot-hands:prod": "node dist/diagnostics/belotHandJournal/belotHandJournalCli.js",
     "check:belot-spectator-projection": "tsx scripts/checkBelotSpectatorSnapshotProjection.ts",
