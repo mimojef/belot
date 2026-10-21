@@ -254,8 +254,8 @@ await check('[5] стари .gz архиви се четат (стар и нов
   const secondStats = store.getDayStats(second!)!
   await writeFile(join(archiveDir, `belot-hand-journal-${second}-id${secondStats.minId}-${secondStats.maxId}.jsonl.gz`), toGzip(second!))
   // Активните редове се премахват ръчно, за да остане само архивът.
-  store.deleteDay(first!)
-  store.deleteDay(second!)
+  await store.deleteDay(first!)
+  await store.deleteDay(second!)
   const loaded = await loadAll(dir)
   assert(loaded.fromArchives === all.length && loaded.errors.length === 0, `${loaded.fromArchives}/${all.length} ${loaded.errors.join(';')}`)
   assert(serialize(loaded.events) === serialize(all), 'gz events identical')

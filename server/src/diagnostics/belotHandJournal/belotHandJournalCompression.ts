@@ -18,6 +18,8 @@ import { createInterface } from 'node:readline'
 import { PassThrough, Readable, Transform, type Writable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import * as zlib from 'node:zlib'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../../monitoring/mainThreadTimingMetrics.js'
+import { BELOT_HAND_JOURNAL_TIMING_LABELS } from './belotHandJournalTimingLabels.js'
 
 export type BelotJournalCompressionBackend = 'node-zstd' | 'zstd-cli' | 'node-gzip'
 
@@ -160,6 +162,8 @@ export async function compressBelotJournalLines(params: {
   backend: BelotJournalCompressionBackend
   zstdLevel: number
   hooks?: BelotJournalCompressHooks
+  // Monitoring-only: wall времето на fsync-а на временния файл (async).
+  onTiming?: MainThreadTimingHook
 }): Promise<BelotJournalCompressResult> {
   const hash = createHash('sha256')
   let lineCount = 0
@@ -182,7 +186,9 @@ export async function compressBelotJournalLines(params: {
   const handle = await open(params.targetPath, 'r+')
   let compressedBytes = 0
   try {
+    const syncStartedAt = performance.now()
     await handle.sync()
+    if (params.onTiming) safeInvokeTimingHook(params.onTiming, BELOT_HAND_JOURNAL_TIMING_LABELS.archiveFileSync, performance.now() - syncStartedAt)
     compressedBytes = (await handle.stat()).size
   } finally {
     await handle.close()

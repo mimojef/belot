@@ -37,7 +37,13 @@ import {
   type BelotJournalCompressHooks,
   type BelotJournalCompressionBackend,
 } from './belotHandJournalCompression.js'
-import { toUtcDay, type BelotHandJournalStore } from './belotHandJournalStore.js'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../../monitoring/mainThreadTimingMetrics.js'
+import {
+  toUtcDay,
+  type BelotHandJournalDeleteOptions,
+  type BelotHandJournalStore,
+} from './belotHandJournalStore.js'
+import { BELOT_HAND_JOURNAL_TIMING_LABELS } from './belotHandJournalTimingLabels.js'
 import {
   BELOT_HAND_JOURNAL_SCHEMA,
   BELOT_HAND_JOURNAL_SCHEMA_VERSION,
@@ -148,6 +154,7 @@ export type BelotHandJournalStorageWarningKind =
   | 'archive_failed'
   | 'archive_verification_failed'
   | 'archive_quarantined_corrupt'
+  | 'archive_delete_incomplete'
   | 'interrupted_archive_cleaned'
   | 'interrupted_archive_reconciled'
   | 'stale_lock_taken_over'
@@ -183,6 +190,8 @@ export type BelotHandJournalMaintenanceHooks = BelotJournalCompressHooks & {
   corruptTmpBeforeVerify?: boolean
   // Тестове: „срив“ след финализиране на архива, преди изтриване на редовете.
   crashAfterFinalize?: boolean
+  // Тестове: „срив“ след N commit-нати порции на изтриването на архивиран ден.
+  failDeleteAfterChunks?: number
 }
 
 export type BelotHandJournalMaintenanceDeps = {
@@ -190,6 +199,10 @@ export type BelotHandJournalMaintenanceDeps = {
   disableNodeZstd?: boolean
   disableZstdCli?: boolean
   hooks?: BelotHandJournalMaintenanceHooks
+  // Monitoring-only (Phase 0B): фиксирани label-и от belotHandJournalTimingLabels.
+  onTiming?: MainThreadTimingHook
+  // Размер на порцията при изтриване (по подразбиране от store-а). Тестове/benchmark.
+  deleteChunkRows?: number
 }
 
 export type BelotHandJournalArchivedDay = {
@@ -216,9 +229,56 @@ export type BelotHandJournalMaintenanceReport = {
   freeDiskBytes: number | null
   overLimit: boolean
   diskCritical: boolean
+  // Monitoring-only числа (bounded): порции на всички изтривания в run-а,
+  // най-дългата синхронна порция, освободени страници от reclaimSpace,
+  // размер на WAL файла в началото/края.
+  deleteChunks: number
+  maxDeleteChunkMs: number
+  reclaimFreedPages: number
+  walBytesBefore: number | null
+  walBytesAfter: number | null
 }
 
 const runningDirectories = new Set<string>()
+
+// Общ контекст за под-стъпките на един run (timing + броячи на порциите).
+type MaintenanceRun = {
+  store: BelotHandJournalStore
+  deps: BelotHandJournalMaintenanceDeps
+  report: BelotHandJournalMaintenanceReport
+}
+
+// Броячите в report-а се обновяват след ВСЯКА commit-ната порция (не от
+// крайния резултат) — точни и при прекъснато изтриване.
+function deleteOptions(run: MaintenanceRun, extra: Partial<BelotHandJournalDeleteOptions> = {}): BelotHandJournalDeleteOptions {
+  return {
+    ...(run.deps.deleteChunkRows !== undefined ? { chunkRows: run.deps.deleteChunkRows } : {}),
+    ...(run.deps.onTiming ? { onTiming: run.deps.onTiming } : {}),
+    onChunkCommitted: (chunk) => {
+      run.report.deleteChunks += 1
+      run.report.maxDeleteChunkMs = Math.max(run.report.maxDeleteChunkMs, chunk.durationMs)
+    },
+    ...extra,
+  }
+}
+
+async function timeWall<T>(run: MaintenanceRun, label: string, fn: () => Promise<T>): Promise<T> {
+  const onTiming = run.deps.onTiming
+  if (!onTiming) return fn()
+  const startedAt = performance.now()
+  try {
+    return await fn()
+  } finally {
+    safeInvokeTimingHook(onTiming, label, performance.now() - startedAt)
+  }
+}
+
+async function reclaim(run: MaintenanceRun, label: string): Promise<void> {
+  const result = await timeWall(run, label, () =>
+    run.store.reclaimSpace(run.deps.onTiming ? { onTiming: run.deps.onTiming } : {}),
+  )
+  run.report.reclaimFreedPages += result.freedPages
+}
 
 export async function runBelotHandJournalMaintenance(
   store: BelotHandJournalStore,
@@ -240,10 +300,16 @@ export async function runBelotHandJournalMaintenance(
     freeDiskBytes: null,
     overLimit: false,
     diskCritical: false,
+    deleteChunks: 0,
+    maxDeleteChunkMs: 0,
+    reclaimFreedPages: 0,
+    walBytesBefore: null,
+    walBytesAfter: null,
   }
   const warn = (kind: BelotHandJournalStorageWarningKind, detail: string, data?: Record<string, unknown>) => {
     report.warnings.push({ kind, detail, ...(data ? { data } : {}) })
   }
+  const run: MaintenanceRun = { store, deps, report }
 
   // Lock в процеса (две извиквания едновременно) + lock файл (два процеса).
   if (runningDirectories.has(store.directory)) {
@@ -274,7 +340,9 @@ export async function runBelotHandJournalMaintenance(
         return null
       }
     }
-    report.usageBefore = (await measureBelotHandJournalStorage(store)).totalBytes
+    const usageBefore = await measureBelotHandJournalStorage(store)
+    report.usageBefore = usageBefore.totalBytes
+    report.walBytesBefore = usageBefore.walBytes
     report.freeDiskBytes = await readFreeDisk()
     report.diskCritical = report.freeDiskBytes !== null && report.freeDiskBytes < config.minFreeDiskBytes
     if (report.diskCritical) {
@@ -291,7 +359,7 @@ export async function runBelotHandJournalMaintenance(
 
     // 2) Срив между финализиран архив и изтриване на редовете: редовете с
     //    id-та, които СА в проверения архив, се изтриват (без дублиране).
-    report.reconciledRows += await reconcileArchivedRows(store, deps, warn)
+    report.reconciledRows += await reconcileArchivedRows(run, warn)
 
     // 3) Общ срок 30 дни.
     const maxAgeCutoffDay = toUtcDay(nowMs - config.maxAgeDays * DAY_MS)
@@ -301,7 +369,7 @@ export async function runBelotHandJournalMaintenance(
         report.expiredArchiveFiles.push(file.name)
       }
     }
-    const expired = store.deleteDaysBefore(maxAgeCutoffDay)
+    const expired = await store.deleteDaysBefore(maxAgeCutoffDay, deleteOptions(run))
     if (expired.deletedRows > 0) {
       report.expiredActiveRows = expired.deletedRows
       warn('expired_without_archive', `${expired.deletedRows} реда (дни ${expired.days.join(', ')}) достигнаха 30 дни без успешен архив и са изтрити`, {
@@ -309,24 +377,25 @@ export async function runBelotHandJournalMaintenance(
         rows: expired.deletedRows,
       })
     }
-    store.deleteScoredHandsBefore(nowMs - config.maxAgeDays * DAY_MS)
+    await store.deleteScoredHandsBefore(nowMs - config.maxAgeDays * DAY_MS, deleteOptions(run))
 
     // 4) Архивиране на дните извън активния прозорец (7 дни).
     const activeCutoffDay = toUtcDay(nowMs - config.activeDays * DAY_MS)
     if (!report.diskCritical) {
       for (const day of store.listDays().filter((item) => item < activeCutoffDay)) {
-        await archiveDay(store, config, day, 'age', deps, report, warn)
+        await archiveDay(run, config, day, 'age', warn)
       }
     }
 
     // 5) Лимит на диска.
-    await enforceSizeLimit(store, config, nowMs, deps, report, warn, readFreeDisk)
+    await enforceSizeLimit(run, config, nowMs, warn, readFreeDisk)
 
     // 6) Физическо освобождаване на място (на порции, без VACUUM).
-    await store.reclaimSpace()
+    await reclaim(run, BELOT_HAND_JOURNAL_TIMING_LABELS.reclaimFinal)
 
     const usageAfter = await measureBelotHandJournalStorage(store)
     report.usageAfter = usageAfter.totalBytes
+    report.walBytesAfter = usageAfter.walBytes
     report.overLimit = usageAfter.totalBytes >= config.maxTotalBytes
     if (report.overLimit) {
       warn('storage_limit_reached', `журналът заема ${(usageAfter.totalBytes / MB).toFixed(1)} MB ≥ лимита ${(config.maxTotalBytes / MB).toFixed(0)} MB — новият запис спира`, {
@@ -349,10 +418,10 @@ export async function runBelotHandJournalMaintenance(
 }
 
 async function reconcileArchivedRows(
-  store: BelotHandJournalStore,
-  deps: BelotHandJournalMaintenanceDeps,
+  run: MaintenanceRun,
   warn: (kind: BelotHandJournalStorageWarningKind, detail: string, data?: Record<string, unknown>) => void,
 ): Promise<number> {
+  const { store, deps } = run
   let reconciled = 0
   for (const file of await listBelotJournalArchiveFiles(store.archiveDirectory)) {
     if (file.kind !== 'archive' || file.minId === null || file.maxId === null) continue
@@ -375,7 +444,7 @@ async function reconcileArchivedRows(
       })
       continue
     }
-    const deleted = store.deleteDayIds(file.day, archivedIds)
+    const deleted = (await store.deleteDayIds(file.day, archivedIds, deleteOptions(run))).deletedRows
     reconciled += deleted
     warn('interrupted_archive_reconciled', `${deleted} реда от ${file.day} вече са в ${file.name} (прекъснато архивиране) — изтрити от SQLite`, {
       file: file.name,
@@ -386,14 +455,14 @@ async function reconcileArchivedRows(
 }
 
 async function archiveDay(
-  store: BelotHandJournalStore,
+  run: MaintenanceRun,
   config: BelotHandJournalStorageConfig,
   day: string,
   reason: 'age' | 'size_limit',
-  deps: BelotHandJournalMaintenanceDeps,
-  report: BelotHandJournalMaintenanceReport,
   warn: (kind: BelotHandJournalStorageWarningKind, detail: string, data?: Record<string, unknown>) => void,
 ): Promise<boolean> {
+  const { store, deps, report } = run
+  const onTiming = deps.onTiming
   const stats = store.getDayStats(day)
   if (stats === null) return true
   const backend = selectBelotJournalCompressionBackend({
@@ -408,14 +477,18 @@ async function archiveDay(
   const finalPath = join(store.archiveDirectory, name)
   const tmpPath = `${finalPath}.tmp`
   await rm(tmpPath, { force: true })
+  let finalized = false
   try {
-    const result = await compressBelotJournalLines({
-      lines: store.iterateDayArchiveLines(day, stats.minId, stats.maxId),
-      targetPath: tmpPath,
-      backend,
-      zstdLevel: config.zstdLevel,
-      hooks: deps.hooks,
-    })
+    const result = await timeWall(run, BELOT_HAND_JOURNAL_TIMING_LABELS.archiveCompress, () =>
+      compressBelotJournalLines({
+        lines: store.iterateDayArchiveLines(day, stats.minId, stats.maxId, onTiming ? { onTiming } : {}),
+        targetPath: tmpPath,
+        backend,
+        zstdLevel: config.zstdLevel,
+        hooks: deps.hooks,
+        ...(onTiming ? { onTiming } : {}),
+      }),
+    )
     if (deps.hooks?.corruptTmpBeforeVerify) {
       const handle = await open(tmpPath, 'r+')
       const size = (await handle.stat()).size
@@ -425,18 +498,34 @@ async function archiveDay(
     if (result.lineCount !== stats.count) {
       throw new Error(`archived ${result.lineCount} rows, expected ${stats.count}`)
     }
-    const verification = await verifyBelotJournalArchive(tmpPath, result, deps)
+    const verification = await timeWall(run, BELOT_HAND_JOURNAL_TIMING_LABELS.archiveVerify, () =>
+      verifyBelotJournalArchive(tmpPath, result, deps),
+    )
     if (!verification.ok) {
       await rm(tmpPath, { force: true })
       warn('archive_verification_failed', `архивът за ${day} не мина проверката (${verification.reason}) — редовете остават в SQLite`, { day })
       return false
     }
     await rename(tmpPath, finalPath)
-    await syncDirectory(store.archiveDirectory)
+    await timeWall(run, BELOT_HAND_JOURNAL_TIMING_LABELS.archiveDirectorySync, () => syncDirectory(store.archiveDirectory))
     if (deps.hooks?.crashAfterFinalize) {
       throw new Error('injected crash after finalize (test hook)')
     }
-    const deleted = store.deleteDayRange(day, stats.minId, stats.maxId)
+    // ARCHIVE DURABLE FIRST → едва сега изтриване на редовете (на порции).
+    finalized = true
+    const failAfter = deps.hooks?.failDeleteAfterChunks
+    const deleted = (
+      await store.deleteDayRange(
+        day,
+        stats.minId,
+        stats.maxId,
+        deleteOptions(run, failAfter === undefined ? {} : {
+          afterChunk: (chunksDone) => {
+            if (chunksDone >= failAfter) throw new Error('injected crash during delete (test hook)')
+          },
+        }),
+      )
+    ).deletedRows
     report.archived.push({
       day,
       file: name,
@@ -448,8 +537,19 @@ async function archiveDay(
     })
     return true
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (finalized) {
+      // Архивът е траен и проверен; част от редовете може вече да са
+      // изтрити. Следващата поддръжка (reconcile) довършва — трие само
+      // id-тата, които реално са в архива. Четецът дедупликира по id.
+      warn('archive_delete_incomplete', `архивът ${name} е финализиран, но изтриването на редовете от ${day} е прекъснато (${message}) — ще бъде довършено при следващата поддръжка`, {
+        day,
+        file: name,
+      })
+      return false
+    }
     await rm(tmpPath, { force: true }).catch(() => undefined)
-    warn('archive_failed', `архивирането на ${day} е неуспешно (${error instanceof Error ? error.message : String(error)}) — редовете остават в SQLite`, { day })
+    warn('archive_failed', `архивирането на ${day} е неуспешно (${message}) — редовете остават в SQLite`, { day })
     return false
   }
 }
@@ -478,18 +578,20 @@ async function syncDirectory(directory: string): Promise<void> {
 //   г) ако и днешният ден сам надхвърля лимита — report.overLimit → новите
 //      записи се спират до освобождаване (runtime-ът брои пропуснатите).
 async function enforceSizeLimit(
-  store: BelotHandJournalStore,
+  run: MaintenanceRun,
   config: BelotHandJournalStorageConfig,
   nowMs: number,
-  deps: BelotHandJournalMaintenanceDeps,
-  report: BelotHandJournalMaintenanceReport,
   warn: (kind: BelotHandJournalStorageWarningKind, detail: string, data?: Record<string, unknown>) => void,
   readFreeDisk: () => Promise<number | null>,
 ): Promise<void> {
+  const { store, report } = run
   const startBytes = config.maxTotalBytes * config.startCleanupRatio
   const targetBytes = config.maxTotalBytes * config.targetRatio
+  // Първото измерване (преди архивиране) е 'pre'; всички следващи — 'post'.
+  let reclaimLabel: string = BELOT_HAND_JOURNAL_TIMING_LABELS.reclaimPre
   const total = async () => {
-    await store.reclaimSpace()
+    await reclaim(run, reclaimLabel)
+    reclaimLabel = BELOT_HAND_JOURNAL_TIMING_LABELS.reclaimPost
     return (await measureBelotHandJournalStorage(store)).totalBytes
   }
   let current = await total()
@@ -502,7 +604,7 @@ async function enforceSizeLimit(
   if (canCompress) {
     for (const day of store.listDays().filter((item) => item < today)) {
       if (current <= targetBytes) break
-      const ok = await archiveDay(store, config, day, 'size_limit', deps, report, warn)
+      const ok = await archiveDay(run, config, day, 'size_limit', warn)
       if (ok) {
         warn('early_archive_due_to_size', `денят ${day} е архивиран преди 7-ия ден поради лимита на диска`, { day })
       }
@@ -527,7 +629,7 @@ async function enforceSizeLimit(
   // в) най-старите активни дни без архив
   for (const day of store.listDays().filter((item) => item < today)) {
     if (current <= targetBytes) break
-    const deleted = store.deleteDay(day)
+    const deleted = (await store.deleteDay(day, deleteOptions(run))).deletedRows
     report.prematureDeletedActiveRows += deleted
     warn('premature_active_deletion', `${deleted} реда от ${day} са изтрити БЕЗ архив поради лимита на диска`, { day, rows: deleted })
     current = await total()

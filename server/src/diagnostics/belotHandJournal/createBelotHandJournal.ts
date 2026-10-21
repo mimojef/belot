@@ -113,9 +113,16 @@ export function createBelotHandJournal(options: {
   const maxQueue = options.maxQueue ?? DEFAULT_MAX_QUEUE
   const storage = options.storage ?? resolveBelotHandJournalStorageConfig()
   const statfsFn = options.statfs ?? defaultBelotHandJournalStatfs
-  const maintenanceDeps: BelotHandJournalMaintenanceDeps = { statfs: statfsFn, ...options.maintenanceDeps }
-  const scheduleFlush = options.scheduleFlush ?? ((flush: () => void) => setImmediate(flush))
   const timingHook = options.onTiming ?? null
+  // Phase 0B: maintenance получава същия hook за вътрешните sync стъпки
+  // (порции на изтриването, reclaim, архивни страници) и async wall-ове.
+  const maintenanceTimingHook = options.maintenanceDeps?.onTiming ?? timingHook
+  const maintenanceDeps: BelotHandJournalMaintenanceDeps = {
+    statfs: statfsFn,
+    ...options.maintenanceDeps,
+    ...(maintenanceTimingHook !== null ? { onTiming: maintenanceTimingHook } : {}),
+  }
+  const scheduleFlush = options.scheduleFlush ?? ((flush: () => void) => setImmediate(flush))
   const stats: BelotHandJournalStats = {
     enabled: store !== null,
     queued: 0,
@@ -476,12 +483,12 @@ export function createBelotHandJournal(options: {
   }
 
   // Phase 0B: maintenance е async (wall → 'maintenance'), но между await-ите
-  // прави SYNC SQLite работа (DELETE на ден, COUNT, listDays…). Всеки sync
-  // store метод, извикан от maintenance, се мери като 'maintenance.<метод>'
-  // (фиксирани имена от кода). Методи, връщащи Promise/async iterator, не се
-  // записват тук: тяхната sync работа е на bounded стъпки (страница от
-  // ARCHIVE_PAGE_SIZE реда / VACUUM_PAGES_PER_STEP страници с setImmediate
-  // между тях) и попада в wall-а на 'maintenance'.
+  // прави SYNC SQLite работа (COUNT, listDays…). Всеки sync store метод,
+  // извикан от maintenance, се мери като 'maintenance.<метод>' (фиксирани
+  // имена от кода). Методи, връщащи Promise/async iterator, не се записват
+  // тук — тяхната sync работа (порции на изтриването, reclaim стъпки,
+  // архивни страници) се мери отвътре с фиксираните label-и от
+  // belotHandJournalTimingLabels.ts (maintenanceDeps.onTiming).
   function withSyncStoreMethodTiming(target: BelotHandJournalStore, hook: MainThreadTimingHook): BelotHandJournalStore {
     return new Proxy(target, {
       get(object, property, receiver) {
@@ -540,6 +547,11 @@ export function createBelotHandJournal(options: {
             reconciledRows: report.reconciledRows,
             usageBefore: report.usageBefore,
             usageAfter: report.usageAfter,
+            deleteChunks: report.deleteChunks,
+            maxDeleteChunkMs: Math.round(report.maxDeleteChunkMs * 1000) / 1000,
+            reclaimFreedPages: report.reclaimFreedPages,
+            walBytesBefore: report.walBytesBefore,
+            walBytesAfter: report.walBytesAfter,
           },
           { severity: 'info' },
         )

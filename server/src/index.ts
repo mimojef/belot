@@ -513,6 +513,7 @@ import {
   type BelotHandJournal,
 } from './diagnostics/belotHandJournal/createBelotHandJournal.js'
 import { createBelotHandJournalStore } from './diagnostics/belotHandJournal/belotHandJournalStore.js'
+import { isBelotHandJournalAsyncTimingLabel } from './diagnostics/belotHandJournal/belotHandJournalTimingLabels.js'
 
 const HOST = '0.0.0.0'
 const PORT = Number(process.env.PORT ?? 3001)
@@ -1016,10 +1017,12 @@ const belotHandJournal: BelotHandJournal = await (async () => {
     console.log(`[belot-hand-journal] enabled db=${store.databasePath}`)
     return createBelotHandJournal({
       store,
-      // storageCheck/maintenance са async (wall) → journalAsync; останалите sync.
+      // Async wall label-и (storageCheck, maintenance, archive.compress/verify/
+      // fileSync/directorySync, maintenance.reclaim.*) → journalAsync;
+      // останалите са реална sync работа → journal.
       onTiming: (label, durationMs) =>
         mainThreadTimings.record(
-          label === 'storageCheck' || label === 'maintenance' ? 'journalAsync' : 'journal',
+          isBelotHandJournalAsyncTimingLabel(label) ? 'journalAsync' : 'journal',
           label,
           durationMs,
         ),

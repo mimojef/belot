@@ -14,11 +14,13 @@ import { stat } from 'node:fs/promises'
 import { mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { safeInvokeTimingHook, type MainThreadTimingHook } from '../../monitoring/mainThreadTimingMetrics.js'
 import {
   BELOT_HAND_JOURNAL_SCHEMA,
   BELOT_HAND_JOURNAL_SCHEMA_VERSION,
   type BelotHandJournalEvent,
 } from './belotHandJournalTypes.js'
+import { BELOT_HAND_JOURNAL_TIMING_LABELS } from './belotHandJournalTimingLabels.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -32,6 +34,87 @@ const ARCHIVE_PAGE_SIZE = 500
 const VACUUM_PAGES_PER_STEP = 512
 // WAL файлът се съкращава до този размер след checkpoint.
 const WAL_SIZE_LIMIT_BYTES = 64 * 1024 * 1024
+// Изтриване на порции: всяка порция е отделна autocommit транзакция (или
+// кратка BEGIN/COMMIT за списък от id-та) — нищо не държи write транзакция
+// през setImmediate. Размерът е избран с benchmark върху production-like
+// схема (scripts/benchBelotHandJournalChunkedDelete.ts, 130k реда/ден):
+// 1000 реда ≈ 17–20 ms медиана / 25–40 ms max на порция без checkpoint
+// (2000 → ≈ 37/48 ms, без резерв). Порциите, в които SQLite прави
+// autocheckpoint, струват колкото самия checkpoint — почти изцяло fsync
+// (scripts/benchBelotHandJournalCheckpoint.ts), независимо от размера.
+export const BELOT_HAND_JOURNAL_DELETE_CHUNK_ROWS = 1000
+const MAX_DELETE_CHUNK_ROWS = 100000
+
+export type BelotHandJournalDeleteOptions = {
+  // Брой редове на порция (по подразбиране BELOT_HAND_JOURNAL_DELETE_CHUNK_ROWS).
+  chunkRows?: number
+  // Monitoring-only: синхронното време на всяка порция (фиксиран label).
+  onTiming?: MainThreadTimingHook
+  // Monitoring-only: веднага след всяка commit-ната порция (преди паузата) —
+  // броячите остават точни дори ако по-късна порция се провали/прекъсне.
+  // Грешка в callback-а се игнорира.
+  onChunkCommitted?: (chunk: { deletedRows: number; durationMs: number }) => void
+  // Пауза между порциите (по подразбиране setImmediate). Тестове.
+  yieldControl?: () => Promise<void>
+  // Тестове: вика се след всяка commit-ната порция (може да хвърли, за да
+  // имитира срив по средата на изтриването).
+  afterChunk?: (chunksDone: number) => void
+}
+
+export type BelotHandJournalDeleteResult = { deletedRows: number; chunks: number; maxChunkMs: number }
+
+export type BelotHandJournalTimingOptions = { onTiming?: MainThreadTimingHook }
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolveImmediate) => setImmediate(resolveImmediate))
+}
+
+function normalizeChunkRows(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return BELOT_HAND_JOURNAL_DELETE_CHUNK_ROWS
+  return Math.min(MAX_DELETE_CHUNK_ROWS, Math.max(1, Math.floor(value)))
+}
+
+function emptyDeleteResult(): BelotHandJournalDeleteResult {
+  return { deletedRows: 0, chunks: 0, maxChunkMs: 0 }
+}
+
+// Отчита commit-ната порция в резултата и в monitoring callback-а.
+function recordCommittedChunk(
+  result: BelotHandJournalDeleteResult,
+  options: BelotHandJournalDeleteOptions,
+  label: string,
+  deletedRows: number,
+  durationMs: number,
+): void {
+  safeInvokeTimingHook(options.onTiming, label, durationMs)
+  result.deletedRows += deletedRows
+  result.chunks += 1
+  result.maxChunkMs = Math.max(result.maxChunkMs, durationMs)
+  if (options.onChunkCommitted) {
+    try {
+      options.onChunkCommitted({ deletedRows, durationMs })
+    } catch {
+      // monitoring callback — никога не влияе на изтриването
+    }
+  }
+}
+
+function addDeleteResult(total: BelotHandJournalDeleteResult, part: BelotHandJournalDeleteResult): void {
+  total.deletedRows += part.deletedRows
+  total.chunks += part.chunks
+  total.maxChunkMs = Math.max(total.maxChunkMs, part.maxChunkMs)
+}
+
+// Мери fn само ако има hook (без hook — нулев overhead).
+function timeSync<T>(onTiming: MainThreadTimingHook | undefined, label: string, fn: () => T): T {
+  if (onTiming === undefined) return fn()
+  const startedAt = performance.now()
+  try {
+    return fn()
+  } finally {
+    safeInvokeTimingHook(onTiming, label, performance.now() - startedAt)
+  }
+}
 
 export const BELOT_HAND_JOURNAL_DB_FILE_NAME = 'belot-hand-journal.sqlite'
 
@@ -101,14 +184,23 @@ export type BelotHandJournalStore = {
   countRowsInRange: (day: string, minId: number, maxId: number) => number
   // Редовете на деня (id в [minId, maxId]) като архивни JSONL редове, на
   // страници с пауза между тях.
-  iterateDayArchiveLines: (day: string, minId: number, maxId: number) => AsyncGenerator<string>
-  deleteDayRange: (day: string, minId: number, maxId: number) => number
-  deleteDayIds: (day: string, ids: readonly number[]) => number
-  deleteDaysBefore: (cutoffDay: string) => { deletedRows: number; days: string[] }
-  deleteDay: (day: string) => number
-  deleteScoredHandsBefore: (cutoffMs: number) => number
+  iterateDayArchiveLines: (
+    day: string,
+    minId: number,
+    maxId: number,
+    options?: BelotHandJournalTimingOptions,
+  ) => AsyncGenerator<string>
+  // Всички delete методи работят на порции (виж BelotHandJournalDeleteOptions):
+  // между порциите event loop-ът е свободен и нови записи минават нормално.
+  // Горната граница на id-тата се фиксира в началото — редове, записани
+  // по време на изтриването, не се засягат.
+  deleteDayRange: (day: string, minId: number, maxId: number, options?: BelotHandJournalDeleteOptions) => Promise<BelotHandJournalDeleteResult>
+  deleteDayIds: (day: string, ids: readonly number[], options?: BelotHandJournalDeleteOptions) => Promise<BelotHandJournalDeleteResult>
+  deleteDaysBefore: (cutoffDay: string, options?: BelotHandJournalDeleteOptions) => Promise<BelotHandJournalDeleteResult & { days: string[] }>
+  deleteDay: (day: string, options?: BelotHandJournalDeleteOptions) => Promise<BelotHandJournalDeleteResult>
+  deleteScoredHandsBefore: (cutoffMs: number, options?: BelotHandJournalDeleteOptions) => Promise<BelotHandJournalDeleteResult>
   // Физическо освобождаване: incremental_vacuum на порции + съкращаване на WAL.
-  reclaimSpace: () => Promise<{ freedPages: number }>
+  reclaimSpace: (options?: BelotHandJournalTimingOptions) => Promise<{ freedPages: number }>
   getDbFileUsage: () => Promise<BelotHandJournalDbFileUsage>
   getUsedBytes: () => number
   close: () => void
@@ -263,6 +355,8 @@ export async function createBelotHandJournalStore(options: {
           (schema_version, occurred_at_ms, day, event_type, severity, room_id, match_id, hand_id, profile_ids, payload_json)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
+
+  let closed = false
 
   function pragmaNumber(name: string): number {
     const row = database.prepare(`PRAGMA ${name}`).get() as Record<string, number>
@@ -445,7 +539,12 @@ export async function createBelotHandJournalStore(options: {
     return Number(row.count)
   }
 
-  async function* iterateDayArchiveLines(day: string, minId: number, maxId: number): AsyncGenerator<string> {
+  async function* iterateDayArchiveLines(
+    day: string,
+    minId: number,
+    maxId: number,
+    options: BelotHandJournalTimingOptions = {},
+  ): AsyncGenerator<string> {
     const selectPage = database.prepare(`
       SELECT ${EVENT_COLUMNS}
       FROM belot_hand_journal_events
@@ -453,70 +552,204 @@ export async function createBelotHandJournalStore(options: {
       ORDER BY id ASC
       LIMIT ${ARCHIVE_PAGE_SIZE}
     `)
+    const onTiming = options.onTiming
     let lastId = minId - 1
     for (;;) {
-      const rows = selectPage.all(day, lastId, maxId) as EventRow[]
+      const rows = timeSync(onTiming, BELOT_HAND_JOURNAL_TIMING_LABELS.archivePageRead, () => selectPage.all(day, lastId, maxId) as EventRow[])
       if (rows.length === 0) return
-      for (const row of rows) yield rowToArchiveLine(row)
+      const lines = timeSync(onTiming, BELOT_HAND_JOURNAL_TIMING_LABELS.archivePageEncode, () => rows.map(rowToArchiveLine))
+      for (const line of lines) yield line
       lastId = rows[rows.length - 1]!.id
-      await new Promise((resolveImmediate) => setImmediate(resolveImmediate))
+      await yieldToEventLoop()
     }
   }
 
-  function deleteDayRange(day: string, minId: number, maxId: number): number {
-    const result = database
-      .prepare('DELETE FROM belot_hand_journal_events WHERE day = ? AND id BETWEEN ? AND ?')
-      .run(day, minId, maxId)
-    return Number(result.changes)
+  // ─── Изтриване на порции ──────────────────────────────────────────────
+
+  let selectDayChunkUpperIdStatement: ReturnType<SqliteDatabase['prepare']> | null = null
+  let deleteDayIdRangeStatement: ReturnType<SqliteDatabase['prepare']> | null = null
+  let deleteDayIdStatement: ReturnType<SqliteDatabase['prepare']> | null = null
+  let deleteScoredHandsChunkStatement: ReturnType<SqliteDatabase['prepare']> | null = null
+
+  function assertOpen(): void {
+    if (closed) throw new Error('belot hand journal store is closed')
   }
 
-  function deleteDayIds(day: string, idsToDelete: readonly number[]): number {
-    let deleted = 0
-    const statement = database.prepare('DELETE FROM belot_hand_journal_events WHERE day = ? AND id = ?')
-    database.exec('BEGIN IMMEDIATE;')
-    try {
-      for (const id of idsToDelete) deleted += Number(statement.run(day, id).changes)
-      database.exec('COMMIT;')
-    } catch (error) {
-      database.exec('ROLLBACK;')
-      throw error
+  // Една порция: до chunkRows реда на деня с id в (afterId, maxId]. Горната
+  // граница hi е id-то на последния от първите chunkRows реда на деня, така
+  // че DELETE по rowid диапазона (afterId, hi] трие ТОЧНО тези редове
+  // (между SELECT и DELETE няма yield → няма нови записи). Без DELETE … LIMIT
+  // (изисква SQLITE_ENABLE_UPDATE_DELETE_LIMIT).
+  async function deleteDayIdRangeChunked(
+    day: string,
+    minId: number,
+    maxId: number,
+    options: BelotHandJournalDeleteOptions,
+    label: string,
+  ): Promise<BelotHandJournalDeleteResult> {
+    const result = emptyDeleteResult()
+    const chunkRows = normalizeChunkRows(options.chunkRows)
+    const yieldControl = options.yieldControl ?? yieldToEventLoop
+    selectDayChunkUpperIdStatement ??= database.prepare(`
+      SELECT MAX(id) AS hi FROM (
+        SELECT id FROM belot_hand_journal_events
+        WHERE day = ? AND id > ? AND id <= ?
+        ORDER BY id ASC
+        LIMIT ?
+      )
+    `)
+    deleteDayIdRangeStatement ??= database.prepare('DELETE FROM belot_hand_journal_events WHERE day = ? AND id > ? AND id <= ?')
+    const selectUpper = selectDayChunkUpperIdStatement
+    const deleteRange = deleteDayIdRangeStatement
+    let afterId = minId - 1
+    while (afterId < maxId) {
+      assertOpen()
+      const startedAt = performance.now()
+      const row = selectUpper.get(day, afterId, maxId, chunkRows) as { hi: number | null } | undefined
+      const hi = row?.hi ?? null
+      if (hi === null) break
+      const deleted = Number(deleteRange.run(day, afterId, hi).changes)
+      const chunkMs = performance.now() - startedAt
+      recordCommittedChunk(result, options, label, deleted, chunkMs)
+      afterId = Number(hi)
+      options.afterChunk?.(result.chunks)
+      await yieldControl()
     }
-    return deleted
+    return result
   }
 
-  function deleteDaysBefore(cutoffDay: string): { deletedRows: number; days: string[] } {
+  async function deleteDayRange(
+    day: string,
+    minId: number,
+    maxId: number,
+    options: BelotHandJournalDeleteOptions = {},
+  ): Promise<BelotHandJournalDeleteResult> {
+    return deleteDayIdRangeChunked(day, minId, maxId, options, BELOT_HAND_JOURNAL_TIMING_LABELS.deleteDayChunk)
+  }
+
+  // Само подадените id-та (възстановяване след срив: id-тата от проверения
+  // архив). Липсващи id-та са безвредни (0 changes). Порция = кратка
+  // BEGIN IMMEDIATE … COMMIT, приключена преди паузата.
+  async function deleteDayIds(
+    day: string,
+    idsToDelete: readonly number[],
+    options: BelotHandJournalDeleteOptions = {},
+  ): Promise<BelotHandJournalDeleteResult> {
+    const result = emptyDeleteResult()
+    const chunkRows = normalizeChunkRows(options.chunkRows)
+    const yieldControl = options.yieldControl ?? yieldToEventLoop
+    deleteDayIdStatement ??= database.prepare('DELETE FROM belot_hand_journal_events WHERE day = ? AND id = ?')
+    const statement = deleteDayIdStatement
+    for (let offset = 0; offset < idsToDelete.length; offset += chunkRows) {
+      assertOpen()
+      const startedAt = performance.now()
+      let deleted = 0
+      database.exec('BEGIN IMMEDIATE;')
+      try {
+        const end = Math.min(idsToDelete.length, offset + chunkRows)
+        for (let index = offset; index < end; index += 1) deleted += Number(statement.run(day, idsToDelete[index]!).changes)
+        database.exec('COMMIT;')
+      } catch (error) {
+        try {
+          database.exec('ROLLBACK;')
+        } catch {
+          // вече rollback-нато
+        }
+        throw error
+      }
+      const chunkMs = performance.now() - startedAt
+      recordCommittedChunk(result, options, BELOT_HAND_JOURNAL_TIMING_LABELS.deleteDayIdsChunk, deleted, chunkMs)
+      options.afterChunk?.(result.chunks)
+      await yieldControl()
+    }
+    return result
+  }
+
+  // Целият ден към момента на извикване (id ≤ текущия MAX за деня).
+  async function deleteDay(day: string, options: BelotHandJournalDeleteOptions = {}): Promise<BelotHandJournalDeleteResult> {
+    assertOpen()
+    const stats = getDayStats(day)
+    if (stats === null) return emptyDeleteResult()
+    return deleteDayIdRangeChunked(day, stats.minId, stats.maxId, options, BELOT_HAND_JOURNAL_TIMING_LABELS.deleteDayChunk)
+  }
+
+  async function deleteDaysBefore(
+    cutoffDay: string,
+    options: BelotHandJournalDeleteOptions = {},
+  ): Promise<BelotHandJournalDeleteResult & { days: string[] }> {
+    assertOpen()
     const days = listDays().filter((day) => day < cutoffDay)
-    if (days.length === 0) return { deletedRows: 0, days }
-    const result = database.prepare('DELETE FROM belot_hand_journal_events WHERE day < ?').run(cutoffDay)
-    return { deletedRows: Number(result.changes), days }
+    const total = emptyDeleteResult()
+    for (const day of days) {
+      const chunksBefore = total.chunks
+      const part = await deleteDay(day, {
+        ...options,
+        afterChunk: options.afterChunk ? (chunksDone) => options.afterChunk!(chunksBefore + chunksDone) : undefined,
+      })
+      addDeleteResult(total, part)
+    }
+    return { ...total, days }
   }
 
-  function deleteDay(day: string): number {
-    return Number(database.prepare('DELETE FROM belot_hand_journal_events WHERE day = ?').run(day).changes)
+  // belot_hand_journal_scored_hands е rowid таблица; порцията се избира по
+  // индекса на scored_at_ms (LIMIT в подзаявка — стандартен SQLite).
+  async function deleteScoredHandsBefore(
+    cutoffMs: number,
+    options: BelotHandJournalDeleteOptions = {},
+  ): Promise<BelotHandJournalDeleteResult> {
+    const result = emptyDeleteResult()
+    const chunkRows = normalizeChunkRows(options.chunkRows)
+    const yieldControl = options.yieldControl ?? yieldToEventLoop
+    deleteScoredHandsChunkStatement ??= database.prepare(`
+      DELETE FROM belot_hand_journal_scored_hands
+      WHERE rowid IN (
+        SELECT rowid FROM belot_hand_journal_scored_hands
+        WHERE scored_at_ms < ?
+        ORDER BY scored_at_ms ASC
+        LIMIT ?
+      )
+    `)
+    const statement = deleteScoredHandsChunkStatement
+    for (;;) {
+      assertOpen()
+      const startedAt = performance.now()
+      const deleted = Number(statement.run(cutoffMs, chunkRows).changes)
+      const chunkMs = performance.now() - startedAt
+      if (deleted === 0) break
+      recordCommittedChunk(result, options, BELOT_HAND_JOURNAL_TIMING_LABELS.deleteScoredHandsChunk, deleted, chunkMs)
+      options.afterChunk?.(result.chunks)
+      await yieldControl()
+      if (deleted < chunkRows) break
+    }
+    return result
   }
 
-  function deleteScoredHandsBefore(cutoffMs: number): number {
-    return Number(database.prepare('DELETE FROM belot_hand_journal_scored_hands WHERE scored_at_ms < ?').run(cutoffMs).changes)
-  }
-
-  async function reclaimSpace(): Promise<{ freedPages: number }> {
+  // Поведението е непроменено; timing label-ите само мерят синхронните
+  // SQLite извиквания (freelist четене, vacuum стъпка, checkpoint).
+  async function reclaimSpace(options: BelotHandJournalTimingOptions = {}): Promise<{ freedPages: number }> {
+    const onTiming = options.onTiming
+    const readFreelist = () => timeSync(onTiming, BELOT_HAND_JOURNAL_TIMING_LABELS.reclaimFreelistRead, () => pragmaNumber('freelist_count'))
     let freedPages = 0
     if (autoVacuumIncremental) {
       for (let step = 0; step < 100000; step += 1) {
-        const before = pragmaNumber('freelist_count')
+        const before = readFreelist()
         if (before === 0) break
-        database.exec(`PRAGMA incremental_vacuum(${VACUUM_PAGES_PER_STEP});`)
-        const after = pragmaNumber('freelist_count')
+        timeSync(onTiming, BELOT_HAND_JOURNAL_TIMING_LABELS.reclaimVacuumStep, () => {
+          database.exec(`PRAGMA incremental_vacuum(${VACUUM_PAGES_PER_STEP});`)
+        })
+        const after = readFreelist()
         freedPages += before - after
         if (after >= before) break
-        await new Promise((resolveImmediate) => setImmediate(resolveImmediate))
+        await yieldToEventLoop()
       }
     }
     try {
       // PASSIVE никога не чака читатели/писатели (TRUNCATE/RESTART биха
       // могли да чакат busy_timeout в главната нишка). Размерът на WAL файла
       // се ограничава от journal_size_limit при следващото му нулиране.
-      database.exec('PRAGMA wal_checkpoint(PASSIVE);')
+      timeSync(onTiming, BELOT_HAND_JOURNAL_TIMING_LABELS.reclaimCheckpoint, () => {
+        database.exec('PRAGMA wal_checkpoint(PASSIVE);')
+      })
     } catch {
       // checkpoint е оптимизация
     }
@@ -552,6 +785,7 @@ export async function createBelotHandJournalStore(options: {
     getDbFileUsage,
     getUsedBytes,
     close: () => {
+      closed = true
       database.close()
     },
   }

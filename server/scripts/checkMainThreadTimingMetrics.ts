@@ -641,9 +641,15 @@ console.log('\n[13] timer instrumentation')
   await rm(directory, { recursive: true, force: true })
   const sliceLabels = journalTimings.filter((label) => label.startsWith('maintenance.'))
   check('maintenance wall recorded', journalTimings.includes('maintenance'), journalTimings.join(','))
-  check('maintenance sync store slices recorded (e.g. deleteDaysBefore/listDays)',
-    sliceLabels.includes('maintenance.deleteDaysBefore') && sliceLabels.includes('maintenance.listDays'), sliceLabels.join(','))
-  check('maintenance slice labels bounded', sliceLabels.every((label) => SAFE_KEY.test(label)))
+  check('maintenance sync store slices recorded (e.g. listDays)',
+    sliceLabels.includes('maintenance.listDays'), sliceLabels.join(','))
+  // Delete методите вече са async (порции) — не се записват като
+  // 'maintenance.<метод>'; тяхната sync работа е 'maintenance.delete*Chunk'.
+  check('async delete methods are not recorded as one sync slice',
+    !sliceLabels.includes('maintenance.deleteDaysBefore') && !sliceLabels.includes('maintenance.deleteDayRange'), sliceLabels.join(','))
+  check('reclaim sync steps + reclaim wall recorded',
+    journalTimings.includes('reclaim.checkpoint') && journalTimings.includes('maintenance.reclaim.final'), journalTimings.join(','))
+  check('maintenance slice labels bounded', journalTimings.every((label) => SAFE_KEY.test(label)))
 }
 
 // ─── [14] bounded HTTP route labels ──────────────────────────────────────────
