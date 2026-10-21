@@ -9,6 +9,13 @@
 // пътя, по който main.ts подава реални WS кадри. Самият екран/DOM/CSS под
 // тест е 100% истинският production render код, не мокап.
 import { createLobbyFlowController } from '/src/app/lobby/createLobbyFlowController.ts'
+import { __setBelotPrivateBotFillOverrideForTests } from '/src/app/lobby/privateRoomBotFillFeatureFlag.ts'
+
+// Suite-ът проверява поведението на "Запълни с бот" бутона — той е зад
+// BELOT_PRIVATE_BOT_FILL_ENABLED (изключен по подразбиране), затова тук се
+// включва изрично. Изключеното състояние се покрива от
+// server/scripts/checkPrivateRoomBotFillFeatureFlag.ts.
+__setBelotPrivateBotFillOverrideForTests(true)
 
 const root = document.createElement('div')
 document.body.appendChild(root)

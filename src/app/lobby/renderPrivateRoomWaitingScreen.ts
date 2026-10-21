@@ -8,6 +8,7 @@ import {
   renderPrivateRoomKickConfirmPopup,
   type PrivateRoomInviteEligibleFriend,
 } from './privateRoomPopupMarkup'
+import { isBelotPrivateBotFillEnabled } from './privateRoomBotFillFeatureFlag'
 
 export type PrivateRoomWaitingOccupantSnapshot = {
   profileId: string | null
@@ -303,6 +304,9 @@ function renderTeamColumn(
   const control = computeTeamBotControlState(slots, team, localTeam)
   const isLoading = botActionLoadingTeam === team
   const teamLabel = team === 'A' ? 'Отбор А' : 'Отбор Б'
+  // При изключен flag редът изобщо не се рендира (без празно място), освен
+  // ако в отбора вече има бот — тогава "Махни бот" остава достъпен.
+  const showBotRow = isBelotPrivateBotFillEnabled() || control.mode === 'remove'
 
   return `
     <div class="prw-team">
@@ -311,6 +315,7 @@ function renderTeamColumn(
         ${renderSlotCard(slotA, localProfileId, viewerRole, isLocalHost)}
         ${renderSlotCard(slotB, localProfileId, viewerRole, isLocalHost)}
       </div>
+      ${showBotRow ? `
       <div class="prw-bot-row">
         <button
           type="button"
@@ -320,6 +325,7 @@ function renderTeamColumn(
           ${control.enabled && !isLoading ? '' : 'disabled'}
         >${isLoading ? '...' : control.label}</button>
       </div>
+      ` : ''}
     </div>
   `
 }
