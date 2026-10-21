@@ -9,6 +9,11 @@ export const CPU_INCIDENT_THRESHOLDS = {
   extremeSpikePercent: 100,
   // Gap между extreme семпли, под който се сливат в един и същ spike incident.
   extremeSpikeMergeGapMs: 5_000,
+  // SEVERE EVENT-LOOP DELAY: 1s семпъл с event-loop P99 >= прага се третира
+  // като spike семпъл (forensic context се снема и persist-ва) независимо от
+  // CPU — дълъг main-thread блок (напр. IO-bound SQLite/fsync) може да е под
+  // CPU прага, а 1s timings прозорецът иначе се губи безвъзвратно.
+  severeEventLoopDelayMs: 1_000,
 
   // SUSTAINED HIGH: bucket-aligned state machine.
   warningPercent: 80,

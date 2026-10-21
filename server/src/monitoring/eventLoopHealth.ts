@@ -58,8 +58,12 @@ export function createEventLoopMonitor(): EventLoopMonitor {
 
     try {
       if (getElu !== null && eluBaseline !== null) {
-        const curr = getElu(eluBaseline)
-        utilization = curr.utilization
+        // Interval ELU: делта между тази и предишната снимка (същият прозорец
+        // като delay histogram-а, който също се нулира тук), НЕ средно от
+        // старта на процеса.
+        const current = getElu()
+        utilization = getElu(current, eluBaseline).utilization
+        eluBaseline = current
       }
     } catch {
       utilization = null

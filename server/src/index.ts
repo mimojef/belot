@@ -476,11 +476,12 @@ import {
   createForensicRingBuffer,
   createBucketAccumulator,
   createCpuIncidentDetector,
+  shouldCaptureForensicContext,
   type ForensicRingBuffer,
   type BucketAccumulator,
   type CpuIncidentDetector,
 } from './monitoring/cpuIncidentDetector.js'
-import { CPU_INCIDENT_SAMPLING, CPU_INCIDENT_THRESHOLDS, type SpikeContext } from './monitoring/cpuIncidentTypes.js'
+import { CPU_INCIDENT_SAMPLING, type SpikeContext } from './monitoring/cpuIncidentTypes.js'
 import {
   createCpuIncidentStore,
   getDefaultSummaryRetentionCutoffMs,
@@ -27201,6 +27202,11 @@ try {
   startupTimeline.measure('cpuIncidentStore.purgeOlderThan', () =>
     startedIncidentStore.purgeOlderThan(getDefaultSummaryRetentionCutoffMs(), getDefaultTimelineRetentionCutoffMs()))
 
+  // Кой процес е записал spike context-а (pid + старт) — за да се различават
+  // writer-и при бъдещ incident (два процеса / рестарт) без schema промяна:
+  // пази се в activity_json.
+  const forensicProcessIdentity = { pid: process.pid, startedAtMs: backendStartedAtMs }
+
   cpuForensicSampleIntervalId = timedSetInterval('cpuForensicSample', () => {
     if (monitoringSampler === null) return
     const snap = monitoringSampler.getSnapshot()
@@ -27234,8 +27240,10 @@ try {
     // детектиран). activity/backgroundJobs/gc обаче ВИНАГИ се вземат от
     // completed one-second snapshot-а по-горе — reset-ват се на всеки tick,
     // независимо дали spike има или не, за да пазим dual-window инварианта.
+    // Incident 18536: context се снема и при SEVERE event-loop delay (под CPU
+    // прага), иначе 1s timings прозорецът на дълъг блок се губи.
     const context: SpikeContext | null =
-      snap.processCpuNowPercent >= CPU_INCIDENT_THRESHOLDS.extremeSpikePercent
+      shouldCaptureForensicContext(snap.processCpuNowPercent, snap.eventLoopDelayP99Ms)
         ? {
             serverCpuPercent: snap.serverCpuNowPercent,
             gameWorkerCpuPercent: snap.gameWorkerCpuNowPercent,
@@ -27262,6 +27270,7 @@ try {
               ...oneSecondActivity,
               mainThreadTimings: oneSecondMainThreadTimings,
               gameWorkerBatches: oneSecondGameWorkerBatches,
+              processIdentity: forensicProcessIdentity,
             },
             backgroundJobs: oneSecondBackgroundJobs,
             gc: oneSecondGc,

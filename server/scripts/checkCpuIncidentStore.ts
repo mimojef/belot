@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { createCpuIncidentStore } from '../src/monitoring/cpuIncidentStore.js'
-import { emptyForensicBucket } from '../src/monitoring/cpuIncidentDetector.js'
+import { createCpuIncidentDetector, emptyForensicBucket } from '../src/monitoring/cpuIncidentDetector.js'
 import type { ClosedIncident } from '../src/monitoring/cpuIncidentDetector.js'
 import { emptyActivityCountersSnapshot } from '../src/monitoring/activityCounters.js'
 import type { ForensicBucket, RawCpuSample, SpikeContext } from '../src/monitoring/cpuIncidentTypes.js'
@@ -714,6 +714,33 @@ await withTempDb(async (dbPath) => {
     threw = true
   }
   assert(threw, 'persistIncident throws (does not silently swallow) when the underlying write fails — caller (index.ts) already wraps this in try/catch for logging')
+})
+
+console.log('\n[S1] Severe event-loop delay под CPU прага: detector → persist пази spike sample-а с timings и process identity')
+await withTempDb(async (dbPath) => {
+  const store = await createCpuIncidentStore(dbPath)
+  const detector = createCpuIncidentDetector()
+  const context = makeSpikeContext({
+    eventLoopDelayP99Ms: 3789.6,
+    activity: {
+      ...emptyActivityCountersSnapshot(),
+      mainThreadTimings: { journal: { 'maintenance.deleteDayChunk': { count: 1, totalMs: 3718.8, maxMs: 3718.8 } } },
+      processIdentity: { pid: 4242, startedAtMs: 1_000 },
+    } as SpikeContext['activity'],
+  })
+  detector.observeCpuSample({ sampledAtMs: 50_000, processCpuPercent: 22, context }, [])
+  detector.observeBucket(makeBucket(50_000 + CPU_INCIDENT_THRESHOLDS.extremeSpikeMergeGapMs + 1000, 20), [])
+  for (const incident of detector.drainClosedIncidents()) store.persistIncident(incident)
+  const list = store.listIncidents(50)
+  assertEqual(list.length, 1, 'stall incident persisted')
+  const detail = store.getIncidentDetail(list[0]!.id)
+  assertEqual(detail?.spikeSamples.length, 1, 'spike sample row persisted')
+  assertEqual(detail?.spikeSamples[0]?.processCpuPercent, 22, 'real (low) CPU value kept — no clamp/rewrite')
+  assertEqual(detail?.spikeSamples[0]?.context?.eventLoopDelayP99Ms, 3789.6, 'event-loop delay persisted')
+  const activity = detail?.spikeSamples[0]?.context?.activity as (SpikeContext['activity'] & { processIdentity?: { pid: number } }) | undefined
+  assert(JSON.stringify(activity?.mainThreadTimings ?? null).includes('maintenance.deleteDayChunk'), 'main-thread timings of the stall window persisted')
+  assertEqual(activity?.processIdentity?.pid, 4242, 'process identity persisted in activity_json (no schema change)')
+  store.close()
 })
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

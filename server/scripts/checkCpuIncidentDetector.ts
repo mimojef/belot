@@ -2,9 +2,13 @@ import {
   createCpuIncidentDetector,
   emptyForensicBucket,
   createForensicRingBuffer,
+  shouldCaptureForensicContext,
   type ForensicBucket,
 } from '../src/monitoring/cpuIncidentDetector.js'
-import { CPU_INCIDENT_THRESHOLDS, CPU_INCIDENT_SAMPLING } from '../src/monitoring/cpuIncidentTypes.js'
+import { CPU_INCIDENT_THRESHOLDS, CPU_INCIDENT_SAMPLING, type SpikeContext } from '../src/monitoring/cpuIncidentTypes.js'
+import { emptyActivityCountersSnapshot } from '../src/monitoring/activityCounters.js'
+import { emptyBackgroundJobStatsSnapshot } from '../src/monitoring/backgroundJobMetrics.js'
+import { emptyGcStatsSnapshot } from '../src/monitoring/gcMetrics.js'
 
 let passed = 0
 let failed = 0
@@ -350,6 +354,81 @@ console.log('\n[D2] Ring buffer evicts oldest entries first (FIFO)')
   assertEqual(arr.length, 3, 'still 3 entries')
   assertEqual(arr[0]?.processCpuAvg, 2, 'oldest (cpu=1) was evicted, cpu=2 is now first')
   assertEqual(arr[2]?.processCpuAvg, 4, 'most recent entry is last')
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// S) SEVERE EVENT-LOOP DELAY (incident 18536): context се пази и под CPU прага
+// ═══════════════════════════════════════════════════════════════════════════
+
+function makeContext(eventLoopDelayP99Ms: number | null): SpikeContext {
+  return {
+    serverCpuPercent: 10,
+    gameWorkerCpuPercent: 5,
+    nonGameWorkerProcessCpuPercent: 15,
+    gameWorkerCpuSampleAgeMs: 0,
+    nonGameWorkerProcessCpuSampleAgeMs: 0,
+    eventLoopUtilization: 0.97,
+    eventLoopDelayP99Ms,
+    rssMb: 100,
+    heapUsedMb: 50,
+    onlinePlayers: 1,
+    activeMatches: 1,
+    wsConnections: 1,
+    matchmakingWaiters: 0,
+    activity: { ...emptyActivityCountersSnapshot(), mainThreadTimings: { journal: { 'maintenance.deleteDayChunk': { count: 1, totalMs: 3700, maxMs: 3700 } } } } as SpikeContext['activity'],
+    backgroundJobs: emptyBackgroundJobStatsSnapshot(),
+    gc: emptyGcStatsSnapshot(),
+  }
+}
+
+console.log('\n[S1] shouldCaptureForensicContext: extreme CPU ИЛИ severe event-loop delay')
+{
+  const severe = CPU_INCIDENT_THRESHOLDS.severeEventLoopDelayMs
+  assertEqual(severe, 1000, 'severe threshold is 1000 ms')
+  assertEqual(shouldCaptureForensicContext(100, 10), true, 'CPU 100% captures')
+  assertEqual(shouldCaptureForensicContext(20, severe), true, 'CPU 20% + P99 at threshold captures')
+  assertEqual(shouldCaptureForensicContext(20, 3718.8), true, 'CPU 20% + P99 3718.8 ms captures')
+  assertEqual(shouldCaptureForensicContext(20, severe - 0.1), false, 'CPU 20% + P99 just below threshold does not capture')
+  assertEqual(shouldCaptureForensicContext(null, null), false, 'unknown CPU and delay does not capture')
+  assertEqual(shouldCaptureForensicContext(null, 5000), true, 'unknown CPU but severe delay captures')
+}
+
+console.log('\n[S2] severe delay sample at LOW CPU opens a spike and its context is kept for persistence')
+{
+  const detector = createCpuIncidentDetector()
+  const context = makeContext(3718.8)
+  detector.observeCpuSample({ sampledAtMs: 1000, processCpuPercent: 18, context }, [])
+  detector.observeBucket(makeBucket(1000 + CPU_INCIDENT_THRESHOLDS.extremeSpikeMergeGapMs + 1000, 20), [])
+  const closed = detector.drainClosedIncidents()
+  assertEqual(closed.length, 1, 'one incident created for the stall sample')
+  assertEqual(closed[0]?.rawSpikeSamples.length, 1, 'raw sample retained')
+  assertEqual(closed[0]?.rawSpikeSamples[0]?.context?.eventLoopDelayP99Ms, 3718.8, 'context (with event-loop delay) retained')
+  assert(
+    closed[0]?.rawSpikeSamples[0]?.context?.activity.mainThreadTimings !== undefined,
+    'main-thread timings of the stall window retained',
+  )
+  assertEqual(closed[0]?.rawSpikeSamples[0]?.processCpuPercent, 18, 'CPU value is NOT rewritten (no data hiding)')
+}
+
+console.log('\n[S3] low CPU + normal delay (with or without context) is still ignored')
+{
+  const detector = createCpuIncidentDetector()
+  detector.observeCpuSample({ sampledAtMs: 1000, processCpuPercent: 18, context: makeContext(999) }, [])
+  detector.observeCpuSample({ sampledAtMs: 2000, processCpuPercent: 18, context: null }, [])
+  detector.observeBucket(makeBucket(2000 + CPU_INCIDENT_THRESHOLDS.extremeSpikeMergeGapMs + 1000, 20), [])
+  assertEqual(detector.drainClosedIncidents().length, 0, 'no incident')
+}
+
+console.log('\n[S4] stall sample merges with neighbouring CPU spike samples (same merge-gap rules)')
+{
+  const detector = createCpuIncidentDetector()
+  detector.observeCpuSample({ sampledAtMs: 1000, processCpuPercent: 105, context: makeContext(30) }, [])
+  detector.observeCpuSample({ sampledAtMs: 2000, processCpuPercent: 40, context: makeContext(2500) }, [])
+  detector.observeCpuSample({ sampledAtMs: 3000, processCpuPercent: 104, context: makeContext(25) }, [])
+  detector.observeBucket(makeBucket(3000 + CPU_INCIDENT_THRESHOLDS.extremeSpikeMergeGapMs + 1000, 20), [])
+  const closed = detector.drainClosedIncidents()
+  assertEqual(closed.length, 1, 'one merged incident')
+  assertEqual(closed[0]?.rawSpikeSamples.length, 3, 'all three samples (incl. low-CPU stall) retained')
 }
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

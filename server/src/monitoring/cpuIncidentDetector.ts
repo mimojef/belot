@@ -188,6 +188,23 @@ export type ClosedIncident = {
   postBuffer: ForensicBucket[]
 }
 
+// ─── Кога 1s семпълът носи forensic context ───────────────────────────────────
+//
+// Extreme CPU ИЛИ severe event-loop delay. Едно и също правило за двете места:
+// forensic tick-а (дали да снеме context) и spike tracker-а (дали семпълът
+// отваря/удължава spike) — иначе context, снет заради delay, би бил изхвърлен.
+export function shouldCaptureForensicContext(
+  processCpuPercent: number | null,
+  eventLoopDelayP99Ms: number | null,
+): boolean {
+  if (processCpuPercent !== null && processCpuPercent >= CPU_INCIDENT_THRESHOLDS.extremeSpikePercent) return true
+  return eventLoopDelayP99Ms !== null && eventLoopDelayP99Ms >= CPU_INCIDENT_THRESHOLDS.severeEventLoopDelayMs
+}
+
+function isForensicSpikeSample(sample: RawCpuSample): boolean {
+  return shouldCaptureForensicContext(sample.processCpuPercent, sample.context?.eventLoopDelayP99Ms ?? null)
+}
+
 // ─── EXTREME SPIKE tracker ──────────────────────────────────────────────────────
 //
 // Работи изцяло на 1s резолюция, независимо от sustained bucket state
@@ -237,7 +254,7 @@ export function createExtremeSpikeTracker(): ExtremeSpikeTracker {
 
   return {
     observeSample(sample, recentBuckets) {
-      if (sample.processCpuPercent >= CPU_INCIDENT_THRESHOLDS.extremeSpikePercent) {
+      if (isForensicSpikeSample(sample)) {
         if (open !== null) {
           const gap = sample.sampledAtMs - open.lastSampleAtMs
           if (gap <= CPU_INCIDENT_THRESHOLDS.extremeSpikeMergeGapMs) {

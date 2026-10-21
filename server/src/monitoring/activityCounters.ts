@@ -100,6 +100,9 @@ export type ActivityCountersSnapshot = ChatActivityCounters &
     // Phase 0C — game worker batch forensics за същия прозорец (по worker
     // индекс). Optional: по-стари incidents нямат това поле.
     gameWorkerBatches?: GameWorkerBatchSnapshot
+    // Кой процес е записал snapshot-а (само spike context-ите; добавя се от
+    // forensic tick-а). Optional: по-стари incidents нямат това поле.
+    processIdentity?: { pid: number; startedAtMs: number }
   }
 
 const CHAT_KEYS: Array<keyof ChatActivityCounters> = [

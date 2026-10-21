@@ -91,6 +91,56 @@ console.log('\n[5] sample() after stop() does not throw (degrades gracefully)')
   assert(snap !== null, 'sample() after stop() still returns a snapshot object (possibly with null fields)')
 }
 
+function busyWait(ms: number): void {
+  const end = performance.now() + ms
+  while (performance.now() < end) {
+    // умишлено блокира главната нишка
+  }
+}
+
+console.log('\n[6] utilization е за ИНТЕРВАЛА от предишния sample(), не от създаването на монитора')
+{
+  const monitor = createEventLoopMonitor()
+  // Дълъг idle период → кумулативна ELU би останала ниска след кратко натоварване.
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  const idle = monitor.sample()
+  // Интервал, почти изцяло зает от синхронна работа.
+  busyWait(300)
+  const busy = monitor.sample()
+  assert(idle.utilization === null || idle.utilization < 0.5, `idle interval utilization is low (got ${idle.utilization})`)
+  // Кумулативно: ≈300/1300 ≈ 0.23; интервално: ≈1.0.
+  assert(busy.utilization === null || busy.utilization > 0.8, `busy interval utilization is high (got ${busy.utilization})`)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  const idleAgain = monitor.sample()
+  // Кумулативно след busy би било ≈ 300/1700 ≈ 0.18 — тук проверяваме, че
+  // натоварването НЕ се пренася в следващия idle интервал.
+  assert(idleAgain.utilization === null || idleAgain.utilization < 0.5, `next idle interval does not inherit the busy period (got ${idleAgain.utilization})`)
+  monitor.stop()
+}
+
+console.log('\n[7] утилизацията и delay histogram-ът покриват един и същ прозорец (и двата се нулират в sample())')
+{
+  const monitor = createEventLoopMonitor()
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  monitor.sample()
+  // Пауза преди блока: блок, започнал в СЪЩИЯ turn веднага след reset(), е
+  // невидим за histogram-а (reset нулира и предишния timestamp — известно
+  // ограничение на monitorEventLoopDelay, виж incident 18536 audit).
+  await new Promise((resolve) => setTimeout(resolve, 60))
+  busyWait(250)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  const blocked = monitor.sample()
+  await new Promise((resolve) => setTimeout(resolve, 200))
+  const after = monitor.sample()
+  assert(blocked.delayP99Ms === null || blocked.delayP99Ms >= 200, `blocked window shows the stall (p99 ${blocked.delayP99Ms})`)
+  assert(after.delayP99Ms === null || after.delayP99Ms < 200, `next window does not carry the stall (p99 ${after.delayP99Ms})`)
+  assert(
+    blocked.utilization === null || after.utilization === null || blocked.utilization > after.utilization,
+    `blocked window utilization (${blocked.utilization}) > following window (${after.utilization})`,
+  )
+  monitor.stop()
+}
+
 // ─── Summary ──────────────────────────────────────────────────────────────────
 
 console.log(`\n${'─'.repeat(60)}`)
