@@ -317,13 +317,19 @@ try {
   // ═══ [A] Миграционна съвместимост ═══════════════════════════════════════
   console.log('\n[A] Миграционна съвместимост')
 
-  await check('[A1] Новата миграция е последна по ред на runner-а (сортиране localeCompare en)', () => {
-    assert(allMigrations.includes(NEW_MIGRATION), `${NEW_MIGRATION} липсва в database/migrations`)
-    assertEqual(allMigrations[allMigrations.length - 1], NEW_MIGRATION, 'последна миграция')
+  // Етап 3 добави допълващата 20261025_001 СЛЕД тази миграция — затова
+  // проверката е "всички по-ранни миграции се сортират преди нея", а не
+  // "тя е последна".
+  const newMigrationIndex = allMigrations.indexOf(NEW_MIGRATION)
+  await check('[A1] Миграцията се изпълнява след всички по-стари миграции (сортиране localeCompare en)', () => {
+    assert(newMigrationIndex > 0, `${NEW_MIGRATION} липсва в database/migrations`)
+    assert(allMigrations.slice(0, newMigrationIndex).every((name) => name.localeCompare(NEW_MIGRATION, 'en') < 0), 'по-стара миграция след новата')
+    assert(allMigrations.slice(newMigrationIndex + 1).every((name) => name.localeCompare('20261024_999', 'en') > 0), 'миграция със същата дата след новата')
   })
 
-  // Upgrade път: база с ВСИЧКИ предишни миграции + реални данни, после новата.
-  const previousMigrations = allMigrations.filter((name) => name !== NEW_MIGRATION)
+  // Upgrade път: база с ВСИЧКИ по-ранни миграции + реални данни, после новата
+  // (по-късните допълващи миграции зависят от нея и не участват тук).
+  const previousMigrations = allMigrations.slice(0, newMigrationIndex)
   const upgradeRoot = await createTempServerRoot(previousMigrations)
   const firstRun = await ensureServerDatabaseReady({ serverRootOverride: upgradeRoot })
   const upgradeDb = await openDatabase(firstRun.databaseFilePath)

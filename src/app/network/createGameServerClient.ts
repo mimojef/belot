@@ -2077,6 +2077,19 @@ export type SessionDeletedMessage = {
   reason: string
 }
 
+// Самоизтриване — профилът току-що подаде заявка за изтриване от друг
+// таб/устройство; сесията вече е отнета. Локален изход без popup.
+export type SessionDeletionRequestedMessage = {
+  type: 'session_deletion_requested'
+}
+
+// Самоизтриване — контрагент (приятел/разговор) е скрит или възстановен.
+export type ProfileVisibilityChangedMessage = {
+  type: 'profile_visibility_changed'
+  profileId: string
+  hidden: boolean
+}
+
 export type SessionInGameMessage = {
   type: 'session_in_game'
   roomId: string
@@ -3306,6 +3319,8 @@ export type ServerMessage =
   | SessionDisplacedMessage
   | SessionBannedMessage
   | SessionDeletedMessage
+  | SessionDeletionRequestedMessage
+  | ProfileVisibilityChangedMessage
   | SessionInGameMessage
   | CrossGameCommitmentBlockedMessage
   | EmojiReactionMessage

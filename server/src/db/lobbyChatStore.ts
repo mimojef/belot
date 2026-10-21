@@ -56,6 +56,11 @@ export type LobbyChatStore = {
     | { ok: true; senderProfileId: string }
     | { ok: false; code: 'not_found' | 'already_deleted' }
   getMaxSeq: () => number
+  /**
+   * Самоизтриване, Етап 3 — само четене: последните неизтрити съобщения на
+   * подателя (за realtime скриване в отворените клиенти; базата не се пипа).
+   */
+  listRecentMessageIdsBySender: (senderProfileId: string, limit: number) => string[]
   getMaxDeletionEventSeq: () => number
   pollNewMessages: (afterSeq: number, limit: number) => LobbyChatMessageSnapshot[]
   pollDeletionEvents: (afterEventSeq: number, limit: number) => LobbyChatDeletionEvent[]
@@ -291,6 +296,18 @@ export async function createLobbyChatStore(
     return row.maxSeq
   }
 
+  const selectRecentMessageIdsBySenderStatement = database.prepare(`
+    SELECT message_id FROM lobby_chat_messages
+    WHERE sender_profile_id = ? AND deleted_at IS NULL
+    ORDER BY seq DESC
+    LIMIT ?;
+  `)
+
+  function listRecentMessageIdsBySender(senderProfileId: string, limit: number): string[] {
+    return (selectRecentMessageIdsBySenderStatement.all(senderProfileId, limit) as Array<{ message_id: string }>)
+      .map((row) => row.message_id)
+  }
+
   function getMaxDeletionEventSeq(): number {
     const row = selectMaxDeletionEventSeqStatement.get() as { maxSeq: number }
     return row.maxSeq
@@ -349,6 +366,7 @@ export async function createLobbyChatStore(
     listRecentMessages,
     deleteMessage,
     getMaxSeq,
+    listRecentMessageIdsBySender,
     getMaxDeletionEventSeq,
     pollNewMessages,
     pollDeletionEvents,

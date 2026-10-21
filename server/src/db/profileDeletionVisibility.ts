@@ -47,8 +47,11 @@ export type ProfileDeletionVisibilityReader = {
   /** Всички скрити profileId-та — малко множество, за exclusion списъци (Теми, лоби чат). */
   listHiddenProfileIds: () => string[]
   /**
-   * true, ако uploadPath (pathname под /uploads/) е аватар или снимка от
-   * галерия, принадлежащи САМО на скрит профил.
+   * true, ако uploadPath (pathname под /uploads/) е снимка от галерията на
+   * скрит профил. Аватарите НАРОЧНО не се крият (Етап 3): изрично
+   * разрешените изключения — историята на завършени турнири и
+   * "Приключили" частни маси (2 часа) — показват аватара на участника.
+   * Самият профил (и галерията) остава недостъпен.
    */
   isUploadPathHidden: (uploadPathname: string) => boolean
 }
@@ -64,26 +67,6 @@ export function createProfileDeletionVisibilityReader(database: SqliteDatabase):
   const listHiddenStatement = database.prepare(`
     SELECT DISTINCT profile_id FROM profile_deletion_requests
     WHERE status IN (${HIDDEN_STATUS_SQL_LIST});
-  `)
-
-  // CROSS JOIN фиксира реда: първо малкото множество активни заявки, после
-  // profiles по PRIMARY KEY — никакъв scan по avatar_url (няма индекс).
-  const selectHiddenAvatarStatement = database.prepare(`
-    SELECT 1
-    FROM profile_deletion_requests r
-    CROSS JOIN profiles p ON p.profile_id = r.profile_id
-    WHERE r.status IN (${HIDDEN_STATUS_SQL_LIST})
-      AND p.avatar_url = ?
-    LIMIT 1;
-  `)
-
-  // Изпълнява се само ако аватарът вече е съвпаднал със скрит профил (рядко):
-  // ако същият файл се ползва и от видим профил, не го крием.
-  const selectVisibleAvatarStatement = database.prepare(`
-    SELECT 1 FROM profiles p
-    WHERE p.avatar_url = ?
-      AND ${sqlProfileVisibleForDeletion('p.profile_id')}
-    LIMIT 1;
   `)
 
   function isProfileHidden(profileId: string): boolean {
@@ -106,11 +89,6 @@ export function createProfileDeletionVisibilityReader(database: SqliteDatabase):
     const galleryMatch = /^\/uploads\/profile-gallery\/([^/]+)\//.exec(decoded)
     if (galleryMatch !== null) {
       return isProfileHidden(galleryMatch[1])
-    }
-
-    if (decoded.startsWith('/uploads/avatars/')) {
-      if (selectHiddenAvatarStatement.get(uploadPathname) === undefined) return false
-      return selectVisibleAvatarStatement.get(uploadPathname) === undefined
     }
 
     return false

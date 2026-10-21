@@ -304,8 +304,10 @@ try {
     assert(after.attachmentStatus === 404 || after.attachmentStatus === 403, `прикачен файл: ${after.attachmentStatus}`)
   })
 
-  await check('[H4] Аватар и галерия по директен URL: 404; галерията на Bob: 200', async () => {
-    assert(after.avatarStatus === 404, `аватар: ${after.avatarStatus}`)
+  // Етап 3: аватарът се сервира (изключенията турнири/частни маси го
+  // показват); галерията — не.
+  await check('[H4] Галерия по директен URL: 404; аватарът (изключения) и галерията на Bob: 200', async () => {
+    assert(after.avatarStatus === 200, `аватар: ${after.avatarStatus}`)
     assert(after.galleryStatus === 404, `галерия: ${after.galleryStatus}`)
     const bobGallery = await fetch(`${base}${bobGalleryUrl}`)
     assert(bobGallery.status === 200, `галерия на Bob: ${bobGallery.status}`)

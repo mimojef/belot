@@ -275,10 +275,12 @@ try {
 
   console.log('\n[U] Директни адреси към файлове')
 
-  await check('[U1] Галерия и аватар на скрит профил са скрити; споделен аватар с видим профил и чужди файлове — не', () => {
+  // Етап 3: аватарите НЕ се крият — изключенията (завършени турнири и
+  // "Приключили" частни маси за 2 часа) показват аватара на участника.
+  await check('[U1] Галерията на скрит профил е скрита; аватарът (изключения: турнири/частни маси) и чуждите файлове — не', () => {
     assertEqual(progressStore.isUploadPathHiddenForDeletion(hiddenGallery), true, 'галерия на скрит')
     assertEqual(progressStore.isUploadPathHiddenForDeletion(encodeURI(hiddenGallery)), true, 'кодиран път на галерия')
-    assertEqual(progressStore.isUploadPathHiddenForDeletion(hiddenAvatar), true, 'аватар на скрит')
+    assertEqual(progressStore.isUploadPathHiddenForDeletion(hiddenAvatar), false, 'аватар на скрит')
     assertEqual(progressStore.isUploadPathHiddenForDeletion(bobGallery), false, 'галерия на Bob')
     assertEqual(progressStore.isUploadPathHiddenForDeletion(sharedAvatar), false, 'аватар, споделен с видим профил')
     assertEqual(progressStore.isUploadPathHiddenForDeletion('/uploads/gift-items/x.webp'), false, 'подаръчна снимка')

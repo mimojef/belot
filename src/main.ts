@@ -8482,6 +8482,14 @@ client = createGameServerClient({
       return
     }
 
+    if (message.type === 'session_deletion_requested') {
+      // Самоизтриване — заявка за изтриване, подадена от друг таб/устройство:
+      // сесията вече е отнета на сървъра. Локален изход без popup (финалните
+      // popup-и са бъдещ етап).
+      performLocalLogoutAfterBanOrDelete()
+      return
+    }
+
     if (message.type === 'session_deleted') {
       // Immediate/deferred-then-fired access cutoff за online профил, тъкмо
       // hard-deleted от admin (round 4 брифа §4/§6) — същият споделен
@@ -8623,6 +8631,11 @@ client = createGameServerClient({
         fromDisplayName: message.fromDisplayName,
         fromAvatarUrl: message.fromAvatarUrl,
       })
+      return
+    }
+
+    if (message.type === 'profile_visibility_changed') {
+      lobby.handleServerMessage(message)
       return
     }
 

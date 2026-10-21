@@ -690,6 +690,8 @@ export type AuthStore = {
     password: string
     /** Remember-me семантика (production report-а "REMEMBER ME — SERVER SEMANTICS") — подава се към createSession() за да реши cookie shape-а (persistent Max-Age vs browser session-only), НЕ променя server-side expires_at/revocation модела. */
     rememberMe: boolean
+    /** Само за rate limit-а на неуспешни опити (HMAC субект, суровият IP не се пази). */
+    ipAddress?: string | null
   }) =>
     | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
     | { ok: false; message: string }
@@ -721,9 +723,21 @@ export type AuthStore = {
         message: string
       }
     | {
-        /** Самоизтриване, Етап 2 — валидна парола, но профилът е с активна заявка за изтриване; без сесия. */
+        /**
+         * Самоизтриване — валидна парола, но профилът е с активна заявка за
+         * изтриване; без сесия. profileId/isBanned са ВЪТРЕШНИ полета за
+         * HTTP слоя (издаване на токен за отмяна) — не се пращат на клиента.
+         */
         ok: false
         code: 'PROFILE_PENDING_DELETION'
+        message: string
+        profileId: string
+        isBanned: boolean
+      }
+    | {
+        /** Твърде много неуспешни опити за този имейл/IP — еднакво за съществуващи и несъществуващи имейли. */
+        ok: false
+        code: 'LOGIN_RATE_LIMITED'
         message: string
       }
   changePassword: (input: {
@@ -756,6 +770,14 @@ export type AuthStore = {
    * ревокирани сесии (за diagnostics/тестове).
    */
   revokeAllSessionsForProfile: (profileId: string) => number
+  /** Самоизтриване — повторно въвеждане на паролата за потвърждение (без сесия, без странични ефекти). */
+  verifyAccountPassword: (accountId: string, password: string) => boolean
+  /**
+   * Профилът, който login() избира за този акаунт (най-старият human
+   * профил). Заявка за изтриване се приема само за него, за да има винаги
+   * път за възстановяване чрез вход (един акаунт може да има няколко профила).
+   */
+  getPrimaryHumanProfileIdForAccount: (accountId: string) => string | null
   /**
    * Назначава/премахва субадмин роля за профила зад `targetProfileId`.
    * Ролята принадлежи на АКАУНТА (не профила) — виж AccountRow.role.
@@ -955,6 +977,16 @@ const PENDING_REGISTRATION_STATUS_IP_WINDOW_SECONDS = 60 * 60
  * IP (NAT/mobile carrier/офис) с неколцина различни хора, регистриращи се
  * близо във времето, не бива да удари лимита.
  */
+/**
+ * Самоизтриване, Етап 3 — rate limit на НЕУСПЕШНИ входове (виж login()):
+ * 10 грешни опита за имейл / 50 за IP в рамките на 15 минути. Успешните
+ * входове не се броят, затова нормалният вход не е засегнат.
+ */
+const LOGIN_FAILURE_WINDOW_SECONDS = 15 * 60
+const LOGIN_FAILURE_EMAIL_MAX_PER_WINDOW = 10
+const LOGIN_FAILURE_IP_MAX_PER_WINDOW = 50
+export const LOGIN_RATE_LIMITED_MESSAGE = 'Твърде много неуспешни опити за вход. Опитайте отново след няколко минути.'
+
 const REGISTRATION_DIRECT_IP_MAX_PER_WINDOW = 10
 const REGISTRATION_DIRECT_IP_WINDOW_SECONDS = 60 * 60
 
@@ -1367,6 +1399,16 @@ export async function createAuthStore(
     SELECT account_id, email, password_hash, role, status, created_at
     FROM accounts
     WHERE account_id = ?
+    LIMIT 1;
+  `)
+
+  // Профилът, в който login() влиза за даден акаунт (най-старият human).
+  const selectPrimaryHumanProfileStatement = database.prepare(`
+    SELECT profile_id
+    FROM profiles
+    WHERE account_id = ?
+      AND profile_kind = 'human'
+    ORDER BY created_at ASC
     LIMIT 1;
   `)
 
@@ -2666,6 +2708,7 @@ export async function createAuthStore(
     email: string
     password: string
     rememberMe: boolean
+    ipAddress?: string | null
   }):
     | { ok: true; sessionToken: string; session: AuthSessionSnapshot }
     | { ok: false; message: string }
@@ -2679,16 +2722,26 @@ export async function createAuthStore(
       }
     | { ok: false; code: 'EMAIL_VERIFICATION_REQUIRED'; pendingRegistrationId: string; maskedEmail: string }
     | { ok: false; code: 'REGISTRATION_EXPIRED'; message: string }
-    | { ok: false; code: 'PROFILE_PENDING_DELETION'; message: string } {
+    | { ok: false; code: 'PROFILE_PENDING_DELETION'; message: string; profileId: string; isBanned: boolean }
+    | { ok: false; code: 'LOGIN_RATE_LIMITED'; message: string } {
     const email = normalizeEmail(input.email)
 
     if (email === null) {
       return { ok: false, message: 'Невалиден email адрес.' }
     }
 
+    // Самоизтриване, Етап 3 — rate limit само на НЕУСПЕШНИТЕ опити (срещу
+    // изпробване на пароли, вкл. за отмяна на заявка). Проверява се ПРЕДИ
+    // паролата и важи еднакво за съществуващи и несъществуващи имейли, затова
+    // не издава нищо за самия акаунт. Нормален успешен вход не се брои.
+    if (isLoginFailureRateLimited(email, input.ipAddress ?? null)) {
+      return { ok: false, code: 'LOGIN_RATE_LIMITED', message: LOGIN_RATE_LIMITED_MESSAGE }
+    }
+
     const account = selectAccountByEmailStatement.get(email) as AccountRow | undefined
 
     if (!account || !verifyPassword(input.password, account.password_hash)) {
+      recordLoginFailure(email, input.ipAddress ?? null)
       // "Затваря сайта преди кода" сценарий (production report-а §"ЗАТВАРЯ
       // САЙТА ПРЕДИ КОДА"/"EXPIRED PENDING + LOGIN") — active account НЯМА
       // за този email (ако имаше, горният verifyPassword branch вече би
@@ -2727,24 +2780,34 @@ export async function createAuthStore(
       return { ok: false, message: 'Профилът е деактивиран.' }
     }
 
-    const profileIdRow = database.prepare(`
-      SELECT profile_id
-      FROM profiles
-      WHERE account_id = ?
-        AND profile_kind = 'human'
-      ORDER BY created_at ASC
-      LIMIT 1;
-    `).get(account.account_id) as { profile_id: string } | undefined
+    const primaryProfileId = getPrimaryHumanProfileIdForAccount(account.account_id)
 
-    if (!profileIdRow) {
+    if (primaryProfileId === null) {
       return { ok: false, message: 'Профилът не беше намерен.' }
+    }
+    const profileIdRow = { profile_id: primaryProfileId }
+
+    const activeBan = options.getActiveBanForProfile?.(profileIdRow.profile_id) ?? null
+
+    // Самоизтриване, Етап 3 — ПРЕДИ ban gate-а: собственикът на профил с
+    // активна заявка трябва да може да я отмени дори при действащ бан (банът
+    // остава — след отмяната следващият вход пак връща PROFILE_BANNED). Без
+    // сесия; HTTP слоят издава краткосрочен токен за отмяна. Само след
+    // валидна парола — трети лица не научават нищо.
+    if (playerProgressStore.isProfileHiddenForDeletion(profileIdRow.profile_id)) {
+      return {
+        ok: false,
+        code: 'PROFILE_PENDING_DELETION',
+        message: PROFILE_PENDING_DELETION_LOGIN_MESSAGE,
+        profileId: profileIdRow.profile_id,
+        isBanned: activeBan !== null,
+      }
     }
 
     // Ban gate — ПРЕДИ нормалното допускане в authenticated app/session
     // (spec §5A), но СЛЕД валидиране на credentials (не изтичаме информация
     // за ban статус на грешна парола/несъществуващ email). Активен бан
     // напълно спира login-а — не се създава сесия.
-    const activeBan = options.getActiveBanForProfile?.(profileIdRow.profile_id) ?? null
     if (activeBan !== null) {
       return {
         ok: false,
@@ -2754,13 +2817,6 @@ export async function createAuthStore(
         reason: activeBan.reason,
         remainingDays: activeBan.remainingDays,
       }
-    }
-
-    // Самоизтриване, Етап 2 — след валидна парола и след ban gate-а: не се
-    // създава сесия. Popup-ът за възстановяване е следващ етап; тук само
-    // отказваме входа без да разкриваме нищо на трети лица.
-    if (playerProgressStore.isProfileHiddenForDeletion(profileIdRow.profile_id)) {
-      return { ok: false, code: 'PROFILE_PENDING_DELETION', message: PROFILE_PENDING_DELETION_LOGIN_MESSAGE }
     }
 
     return {
@@ -2952,6 +3008,53 @@ export async function createAuthStore(
   function revokeAllSessionsForProfile(profileId: string): number {
     const result = revokeAllSessionsForProfileStatement.run(profileId)
     return result.changes as number
+  }
+
+  function verifyAccountPassword(accountId: string, password: string): boolean {
+    const account = selectAccountByIdStatement.get(accountId) as AccountRow | undefined
+    if (!account || typeof password !== 'string' || password.length === 0) return false
+    return verifyPassword(password, account.password_hash)
+  }
+
+  function getPrimaryHumanProfileIdForAccount(accountId: string): string | null {
+    const row = selectPrimaryHumanProfileStatement.get(accountId) as { profile_id: string } | undefined
+    return row?.profile_id ?? null
+  }
+
+  // Самоизтриване, Етап 3 — rate limit на неуспешни входове (виж login()).
+  // Същата registration_rate_limit_events таблица и HMAC субекти като
+  // регистрацията — споделено между процесите, суровите имейл/IP не се пазят.
+  // Без конфигуриран secret — не ограничаваме (fail-open), за да не се
+  // счупи нормалният вход при липсваща конфигурация.
+  function isLoginFailureRateLimited(normalizedEmail: string, ipAddress: string | null): boolean {
+    if (!isRegistrationSecretConfigured) return false
+    const emailCount = (countRegistrationRateLimitEventsStatement.get(
+      'login-failure-email',
+      hmacRateLimitSubject('login-failure-email', normalizedEmail, registrationSecret),
+      `-${LOGIN_FAILURE_WINDOW_SECONDS}`,
+    ) as { cnt: number } | undefined)?.cnt ?? 0
+    if (emailCount >= LOGIN_FAILURE_EMAIL_MAX_PER_WINDOW) return true
+    if (ipAddress === null) return false
+    const ipCount = (countRegistrationRateLimitEventsStatement.get(
+      'login-failure-ip',
+      hmacRateLimitSubject('login-failure-ip', ipAddress, registrationSecret),
+      `-${LOGIN_FAILURE_WINDOW_SECONDS}`,
+    ) as { cnt: number } | undefined)?.cnt ?? 0
+    return ipCount >= LOGIN_FAILURE_IP_MAX_PER_WINDOW
+  }
+
+  function recordLoginFailure(normalizedEmail: string, ipAddress: string | null): void {
+    if (!isRegistrationSecretConfigured) return
+    try {
+      insertRegistrationRateLimitEventStatement.run(randomUUID(), 'login-failure-email', hmacRateLimitSubject('login-failure-email', normalizedEmail, registrationSecret))
+      if (ipAddress !== null) {
+        insertRegistrationRateLimitEventStatement.run(randomUUID(), 'login-failure-ip', hmacRateLimitSubject('login-failure-ip', ipAddress, registrationSecret))
+      }
+    } catch (error) {
+      // Записът е защитен механизъм, не част от самия вход — грешка (напр.
+      // SQLITE_BUSY) не трябва да промени отговора за грешна парола.
+      console.warn('[authStore] login failure rate-limit write failed:', error instanceof Error ? error.message : String(error))
+    }
   }
 
   function getAccountRoleForProfile(profileId: string): AccountRoleValue | null {
@@ -3218,6 +3321,8 @@ export async function createAuthStore(
     touchSession,
     logout,
     revokeAllSessionsForProfile,
+    verifyAccountPassword,
+    getPrimaryHumanProfileIdForAccount,
     setSubadminRole,
     setChatAdminRole,
     setPikaTeamRole,

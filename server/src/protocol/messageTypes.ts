@@ -1131,6 +1131,28 @@ export type SessionDeletedMessage = {
   reason: string
 }
 
+/**
+ * Самоизтриване, Етап 3 — изпраща се на всички живи socket-и на профил,
+ * който току-що е подал заявка за изтриване (сесиите вече са отнети);
+ * socket-ът се затваря веднага след това. Клиентът прави локален изход без
+ * popup (финалните popup-и са бъдещ етап).
+ */
+export type SessionDeletionRequestedMessage = {
+  type: 'session_deletion_requested'
+}
+
+/**
+ * Самоизтриване, Етап 3 — до контрагентите (приятели/разговори) на профил,
+ * който е скрит (hidden:true) или възстановен (hidden:false). Клиентът
+ * премахва профила локално или презарежда приятелите/разговорите от
+ * сървъра (който вече филтрира). Не носи други данни за профила.
+ */
+export type ProfileVisibilityChangedMessage = {
+  type: 'profile_visibility_changed'
+  profileId: string
+  hidden: boolean
+}
+
 export type SessionInGameMessage = {
   type: 'session_in_game'
   roomId: RoomId
@@ -1742,6 +1764,8 @@ export type ServerMessage =
   | SessionDisplacedMessage
   | SessionBannedMessage
   | SessionDeletedMessage
+  | SessionDeletionRequestedMessage
+  | ProfileVisibilityChangedMessage
   | SessionInGameMessage
   | CrossGameCommitmentBlockedMessage
   | PlayerProfileMessage

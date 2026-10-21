@@ -17167,6 +17167,19 @@ export function createLobbyFlowController(
     }
   }
 
+  // Самоизтриване — след отмяна на заявка на контрагент: презареждане на
+  // вече заредените приятели/разговори от сървъра.
+  async function refreshAfterProfileVisibilityRestored(): Promise<void> {
+    if (state.friendships !== null && options.onFriendshipsLoad) {
+      const result = await options.onFriendshipsLoad()
+      if (result.ok) state.friendships = result.friendships
+    }
+    if (state.chatConversations.length > 0 || state.currentScreen === 'chat') {
+      await loadChatConversations()
+    }
+    render()
+  }
+
   async function refreshChatConversationsAfterDeletion(): Promise<void> {
     await loadChatConversations()
     if (state.chatShowArchived || state.chatArchivedConversations.length > 0) {
@@ -21002,6 +21015,32 @@ export function createLobbyFlowController(
         render()
       }
       return false // let main.ts also handle it (show popup)
+    }
+
+    if (message.type === 'profile_visibility_changed') {
+      // Самоизтриване — контрагент е скрит или възстановен. При скриване го
+      // махаме локално веднага; при възстановяване презареждаме от сървъра
+      // (той винаги е източникът на истината и вече филтрира).
+      if (message.hidden) {
+        const hiddenProfileId = message.profileId
+        const isVisibleRelationship = (relationship: { profile: { profileId: string | null } }) =>
+          relationship.profile.profileId !== hiddenProfileId
+        state.pendingFriendRequests = state.pendingFriendRequests.filter((r) => r.fromProfileId !== hiddenProfileId)
+        if (state.friendships !== null) {
+          state.friendships = {
+            ...state.friendships,
+            friends: state.friendships.friends.filter(isVisibleRelationship),
+            incomingPending: state.friendships.incomingPending.filter(isVisibleRelationship),
+            outgoingPending: state.friendships.outgoingPending.filter(isVisibleRelationship),
+          }
+        }
+        state.chatConversations = state.chatConversations.filter((c) => c.friend.profileId !== hiddenProfileId)
+        reconcileActiveChatConversation()
+        render()
+      } else {
+        void refreshAfterProfileVisibilityRestored()
+      }
+      return true
     }
 
     if (message.type === 'friend_request_cancelled') {

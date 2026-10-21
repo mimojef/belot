@@ -22,6 +22,8 @@ import { createLudoRoomMatchStore, type LudoRoomMatchOccupant, type LudoRoomMatc
 import { logLudoDiagnosticEvent } from './diagnostics/ludoDiagnosticsLog.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
+import { createProfileDeletionRequestStore, type ProfileDeletionVisibilityEvent } from './db/profileDeletionRequestStore.js'
+import { isProfileSelfDeletionFeatureEnabled } from './core/profileSelfDeletionFeatureFlag.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
 import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
@@ -238,7 +240,7 @@ import {
   isVipPackageId,
   type VipPackageId,
 } from './db/vipPurchaseStore.js'
-import { normalizeProfileSearchTerm } from './db/normalizeProfileIdentityText.js'
+import { getConfiguredOfficialPikaProfileId, normalizeProfileSearchTerm, OFFICIAL_PIKA_PROFILE_ID } from './db/normalizeProfileIdentityText.js'
 import {
   computePlayersPageOrder,
   generatePlayersPageSeed,
@@ -1230,6 +1232,12 @@ const chatStore = await createChatStore(
   },
 )
 const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFilePath)
+// Самоизтриване, Етап 3 — заявки/токени за отмяна. Rate limit-ът ползва
+// СЪЩИЯ secret като регистрацията; без него подаването/отмяната отказват
+// (fail-closed), без да засягат останалата платформа.
+const profileDeletionRequestStore = await createProfileDeletionRequestStore(databaseBootstrap.databaseFilePath, {
+  rateLimitSecret: registrationVerificationCodeSecret,
+})
 const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
 const topicMessageStore = await createTopicMessageStore(databaseBootstrap.databaseFilePath)
 const topicReadStateStore = await createTopicReadStateStore(databaseBootstrap.databaseFilePath)
@@ -1497,6 +1505,73 @@ function runLobbyChatCrossInstancePollUnsafe(): void {
 let lobbyChatPollInterval: ReturnType<typeof setInterval> | null = setInterval(
   runLobbyChatCrossInstancePoll,
   LOBBY_CHAT_POLL_INTERVAL_MS,
+)
+
+// ─── Самоизтриване, Етап 3 — realtime прилагане на заявка/отмяна ───────────
+// Сесиите на профила се отнемат в базата (authStore.revokeAllSessionsForProfile),
+// затова ВСЕКИ процес вече отказва нови HTTP/WS действия. Тук всеки процес
+// прилага събитията (requested/cancelled) към СОБСТВЕНИТЕ си WS връзки:
+// процесът, приел HTTP заявката — веднага ('local'); останалите PM2 процеси
+// — чрез poll на append-only profile_deletion_events ('poll'), mirror на
+// lobby chat cross-instance poll-а. Не се пипат никакви данни — само
+// затваряне на socket-и и realtime сигнали към отворените клиенти.
+const PROFILE_DELETION_VISIBILITY_POLL_INTERVAL_MS = 1000
+const PROFILE_DELETION_VISIBILITY_POLL_BATCH_SIZE = 100
+// Колко от последните съобщения в лоби чата на профила да се изтеглят от
+// отворените клиенти (историята при ново зареждане вече ги изключва).
+const PROFILE_DELETION_LOBBY_CHAT_RETRACT_LIMIT = 200
+let profileDeletionVisibilityCursor = profileDeletionRequestStore.getMaxEventSeq()
+const locallyAppliedProfileDeletionEventSeqs = new Set<number>()
+
+function applyProfileDeletionVisibilityEvent(event: ProfileDeletionVisibilityEvent, origin: 'local' | 'poll'): void {
+  // Събитие, вече приложено локално от HTTP handler-а в този процес.
+  if (origin === 'poll' && locallyAppliedProfileDeletionEventSeqs.delete(event.eventSeq)) {
+    return
+  }
+  const hidden = event.eventType === 'requested'
+  if (hidden) {
+    closeAllProfileConnections(event.profileId, { type: 'session_deletion_requested' })
+    for (const messageId of lobbyChatStore.listRecentMessageIdsBySender(event.profileId, PROFILE_DELETION_LOBBY_CHAT_RETRACT_LIMIT)) {
+      broadcastLobbyChatDeletionToLocalSubscribers(messageId)
+    }
+  }
+  for (const counterpartProfileId of profileDeletionRequestStore.listRelationshipCounterpartIds(event.profileId)) {
+    sendToOpenProfileConnections(counterpartProfileId, {
+      type: 'profile_visibility_changed',
+      profileId: event.profileId,
+      hidden,
+    })
+  }
+  if (origin === 'local') {
+    locallyAppliedProfileDeletionEventSeqs.add(event.eventSeq)
+  }
+}
+
+function runProfileDeletionVisibilityPoll(): void {
+  if (isServerShuttingDown) {
+    return
+  }
+  try {
+    for (;;) {
+      const events = profileDeletionRequestStore.listVisibilityEventsAfter(
+        profileDeletionVisibilityCursor,
+        PROFILE_DELETION_VISIBILITY_POLL_BATCH_SIZE,
+      )
+      for (const event of events) {
+        applyProfileDeletionVisibilityEvent(event, 'poll')
+        profileDeletionVisibilityCursor = event.eventSeq
+      }
+      if (events.length < PROFILE_DELETION_VISIBILITY_POLL_BATCH_SIZE) break
+    }
+  } catch (error) {
+    console.error('[profile-deletion] visibility poll failed:', error)
+  }
+}
+
+let profileDeletionVisibilityPollInterval: ReturnType<typeof setInterval> | null = timedSetInterval(
+  'profileDeletionVisibilityPoll',
+  runProfileDeletionVisibilityPoll,
+  PROFILE_DELETION_VISIBILITY_POLL_INTERVAL_MS,
 )
 
 function runLobbyChatRetentionCleanup(): void {
@@ -2072,6 +2147,25 @@ function getTopicSenderExclusionsForDeletion(): string[] {
   return playerProgressStore.listProfileIdsHiddenForDeletion()
 }
 
+// Самоизтриване, Етап 3 — тема, създадена от профил с активна заявка за
+// изтриване, не се показва в директорията и публичните пътища (история,
+// отговори, абонамент, публикуване). Нищо не се изтрива: при отмяна темата
+// (вкл. чуждите публикации в нея) е видима отново; retention правилата за
+// Темите (72 ч неактивност и т.н.) продължават непроменени. Модераторските
+// пътища ползват непроменения topicStore.getTopicById.
+function isTopicHiddenForDeletion(topic: TopicSnapshot): boolean {
+  return topic.createdByProfileId !== null && playerProgressStore.isProfileHiddenForDeletion(topic.createdByProfileId)
+}
+
+function listActiveTopicsVisibleForDeletion(): TopicSnapshot[] {
+  return topicStore.listActiveTopics().filter((topic) => !isTopicHiddenForDeletion(topic))
+}
+
+function getTopicByIdVisibleForDeletion(topicId: string): TopicSnapshot | null {
+  const topic = topicStore.getTopicById(topicId)
+  return topic !== null && !isTopicHiddenForDeletion(topic) ? topic : null
+}
+
 function buildTopicSenderExclusionsByViewerForDeletion(
   viewerProfileIds: readonly string[],
 ): Map<string, ReadonlySet<string>> {
@@ -2171,7 +2265,7 @@ function markTopicSeenForActiveProfile(profileId: string, topicId: string): void
 }
 
 function broadcastTopicUnreadCountsToProfile(profileId: string): void {
-  const topics = topicStore.listActiveTopics()
+  const topics = listActiveTopicsVisibleForDeletion()
   const enriched = topicsWithUnreadCountsForProfile(profileId, topics)
   for (const topic of enriched) {
     broadcastToProfileConnections(profileId, {
@@ -6935,7 +7029,8 @@ function closeAllProfileConnections(
   profileId: string,
   message:
     | { type: 'session_banned'; bannedUntil: string; reason: string; remainingDays: number }
-    | { type: 'session_deleted'; reason: string },
+    | { type: 'session_deleted'; reason: string }
+    | { type: 'session_deletion_requested' },
 ): void {
   for (const conn of Object.values(serverState.connections)) {
     if (conn.profileId !== profileId || conn.status !== 'connected') {
@@ -8719,9 +8814,10 @@ async function handleUploadsRequest(
     return false
   }
 
-  // Самоизтриване, Етап 2 — аватар/снимка от галерия, принадлежащи само на
-  // профил с активна заявка за изтриване, не се сервират (404). Файлът
-  // остава непокътнат на диска.
+  // Самоизтриване — снимка от галерията на профил с активна заявка за
+  // изтриване не се сервира (404); файлът остава непокътнат на диска.
+  // Аватарите НЕ се крият (Етап 3): историята на завършени турнири и
+  // "Приключили" частни маси (2 часа) изрично продължават да ги показват.
   if (playerProgressStore.isUploadPathHiddenForDeletion(pathname)) {
     return false
   }
@@ -9499,10 +9595,12 @@ async function handleAuthRequest(
     // persistent cookie-то, липсващо поле/друг тип се третира като true.
     const rememberMe = body.rememberMe !== false
 
+    const loginResolvedIp = getRequestIp(req)
     const result = authStore.login({
       email: getStringField(body, 'email'),
       password: getStringField(body, 'password'),
       rememberMe,
+      ipAddress: loginResolvedIp === 'unknown' ? null : loginResolvedIp,
     })
 
     if (!result.ok) {
@@ -9529,8 +9627,37 @@ async function handleAuthRequest(
         sendJsonResponse(res, 410, result)
         return true
       }
+      // Самоизтриване, Етап 3 — вярна парола за профил с активна заявка: без
+      // сесия, но с краткосрочен еднократен токен за отмяна (само в тялото на
+      // отговора, никога в URL/логове). Вътрешният profileId не се връща.
       if ('code' in result && result.code === 'PROFILE_PENDING_DELETION') {
-        sendJsonResponse(res, 403, result)
+        const issued = profileDeletionRequestStore.issueRestoreToken(result.profileId)
+        if (!issued.ok) {
+          // Срокът е изтекъл (или заявката е обработена) между двете проверки
+          // — отмяна вече не е възможна; профилът остава блокиран.
+          sendJsonResponse(res, 403, {
+            ok: false,
+            code: 'PROFILE_PENDING_DELETION',
+            message: result.message,
+            restoreAvailable: false,
+          })
+          return true
+        }
+        sendJsonResponse(res, 403, {
+          ok: false,
+          code: 'PROFILE_PENDING_DELETION',
+          message: result.message,
+          restoreAvailable: true,
+          restoreToken: issued.restoreToken,
+          restoreTokenExpiresAt: issued.expiresAt,
+          scheduledFor: issued.request.scheduledFor,
+          remainingMs: Math.max(0, Date.parse(issued.request.scheduledFor) - Date.now()),
+          isBanned: result.isBanned,
+        })
+        return true
+      }
+      if ('code' in result && result.code === 'LOGIN_RATE_LIMITED') {
+        sendJsonResponse(res, 429, result)
         return true
       }
       sendJsonResponse(res, 400, result)
@@ -11045,6 +11172,258 @@ async function handleProfileBlockRequest(
   }
 
   return false
+}
+
+// ─── Самоизтриване, Етап 3 — подаване и отмяна на заявка ────────────────────
+//
+// POST /api/account/deletion-request          — подаване (само при включен
+//   PROFILE_SELF_DELETION_ENABLED=1; собствената сесия, повторна парола,
+//   изрично потвърждение, само роля player, не официалния профил, само
+//   основния профил на акаунта, без активна игра/незавършен турнир).
+// POST /api/account/deletion-request/cancel   — отмяна с краткосрочния токен,
+//   издаден при вход (не зависи от флага — път за възстановяване винаги има).
+// POST /api/account/deletion-request/keep     — "Остави заявката активна":
+//   обезсилва токена, заявката остава.
+//
+// Никакви данни на профила не се трият или променят тук — само заявката,
+// журналът, токените и отнемането на сесиите. Токенът не се логва.
+
+const PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE =
+  'В момента участвате в активна игра или незавършил турнир. За да подадете заявка за изтриване на профила, първо трябва да приключите участието си.'
+const PROFILE_DELETION_INVALID_TOKEN_MESSAGE =
+  'Връзката за възстановяване е невалидна или изтекла. Влезте отново с имейла и паролата си.'
+const PROFILE_DELETION_WINDOW_CLOSED_MESSAGE = 'Срокът за отмяна на заявката за изтриване е изтекъл.'
+
+function isProfileSelfDeletionStaffOrOfficialProfile(session: AuthSessionSnapshot, profileId: string): boolean {
+  if (session.account.role !== 'player') return true
+  return profileId === OFFICIAL_PIKA_PROFILE_ID || profileId === getConfiguredOfficialPikaProfileId()
+}
+
+// Реалните състояния на игрите: in-memory (Белот стаи/сесии, чакащи маси,
+// matchmaking, Не се сърди човече, Свара — вкл. нейния постоянен snapshot,
+// fail-closed), персистираните snapshot-и за Белот/Не се сърди човече (рестарт
+// или друг процес) и незавършени турнири (creator или активно участие).
+function hasActiveParticipationForProfileDeletion(profileId: string): boolean {
+  return (
+    hasProfileActiveGameCommitment(profileId) ||
+    profileDeletionRequestStore.hasActiveGameSnapshot(profileId) ||
+    profileHardDeleteService.hasActiveTournamentDependency(profileId)
+  )
+}
+
+// Чакащи ВХОДЯЩИ покани за турнирен партньор към профила се отказват по
+// стандартния път (същото като ръчен отказ: поканата -> declined, отборът на
+// поканилия -> solo, турнирно събитие и известие). Потвърдени участия не се
+// пипат. Изходящите покани изискват потвърден запис на поканилия, който вече
+// е отказал подаването (незавършен турнир), затова тук такива няма.
+function declineIncomingPartnerInvitesForProfileDeletion(profileId: string): void {
+  try {
+    for (const invite of tournamentEconomyStore.listPendingPartnerInvitesForProfile(profileId)) {
+      if (invite.inviteeProfileId !== profileId) continue
+      const result = tournamentEconomyStore.declinePartnerInviteAtomically(invite.tournamentId, invite.inviteId, profileId)
+      if (result.ok && result.alreadyResolved !== true) {
+        sendTournamentPartnerInviteResolved(result.invite)
+      }
+    }
+  } catch (error) {
+    console.error(`[profile-deletion] declining partner invites failed profileId=${profileId}:`, error)
+  }
+}
+
+async function handleAccountDeletionRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  const isSubmit = pathname === '/api/account/deletion-request'
+  const isCancel = pathname === '/api/account/deletion-request/cancel'
+  const isKeep = pathname === '/api/account/deletion-request/keep'
+  if (!isSubmit && !isCancel && !isKeep) return false
+
+  if (req.method !== 'POST') {
+    sendJsonResponse(res, 405, { ok: false, message: 'Method not allowed' })
+    return true
+  }
+
+  if (!isAllowedVisitorRequestOrigin(req)) {
+    sendJsonResponse(res, 403, { ok: false, message: 'Заявката е отхвърлена.' })
+    return true
+  }
+
+  const resolvedIp = getRequestIp(req)
+
+  if (isSubmit) {
+    return handleAccountDeletionSubmit(req, res, resolvedIp)
+  }
+  return handleAccountDeletionTokenAction(req, res, resolvedIp, isCancel ? 'cancel' : 'keep')
+}
+
+async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResponse, resolvedIp: string): Promise<boolean> {
+  if (!isProfileSelfDeletionFeatureEnabled()) {
+    sendJsonResponse(res, 404, { ok: false, code: 'PROFILE_SELF_DELETION_DISABLED', message: 'Функцията не е налична.' })
+    return true
+  }
+
+  const sessionToken = getSessionTokenFromCookieHeader(req.headers.cookie)
+  if (authStore.getSession(sessionToken) === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['password', 'confirm', 'profileId']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволени са само полетата password, confirm и profileId.' })
+    return true
+  }
+
+  // От тук нататък — синхронно до записа и прилагането (без await), за да
+  // не може в този процес да се вмъкне присъединяване към игра между
+  // проверката за активно участие и записа на заявката. Сесията се чете
+  // наново СЛЕД await-а на тялото.
+  const session = authStore.getSession(sessionToken)
+  const profileId = session?.profile.profileId ?? null
+  if (session === null || profileId === null) {
+    sendJsonResponse(res, 401, { ok: false, message: 'Трябва да влезеш в профила си.' })
+    return true
+  }
+
+  // Само собственият профил — profileId от клиента е само за проверка, никога източник.
+  if (body.profileId !== undefined && body.profileId !== profileId) {
+    sendJsonResponse(res, 403, { ok: false, code: 'FORBIDDEN_PROFILE', message: 'Можете да подадете заявка само за собствения си профил.' })
+    return true
+  }
+
+  if (
+    profileDeletionRequestStore.isRateLimited({ scope: 'profile-deletion-submit-profile', subject: profileId, windowSeconds: 60 * 60, maxEvents: 5 }) ||
+    profileDeletionRequestStore.isRateLimited({ scope: 'profile-deletion-submit-ip', subject: resolvedIp, windowSeconds: 60 * 60, maxEvents: 20 })
+  ) {
+    sendJsonResponse(res, 429, { ok: false, code: 'RATE_LIMITED', message: 'Твърде много опити. Опитайте отново по-късно.' })
+    return true
+  }
+
+  if (isProfileSelfDeletionStaffOrOfficialProfile(session, profileId)) {
+    sendJsonResponse(res, 403, { ok: false, code: 'ROLE_NOT_ALLOWED', message: 'Този профил не може да подаде заявка за самоизтриване.' })
+    return true
+  }
+
+  if (authStore.getPrimaryHumanProfileIdForAccount(session.account.accountId) !== profileId) {
+    sendJsonResponse(res, 409, { ok: false, code: 'PROFILE_NOT_PRIMARY', message: 'Заявка за изтриване може да се подаде само от основния профил на акаунта.' })
+    return true
+  }
+
+  if (!authStore.verifyAccountPassword(session.account.accountId, getStringField(body, 'password'))) {
+    sendJsonResponse(res, 401, { ok: false, code: 'INVALID_PASSWORD', message: 'Грешна парола.' })
+    return true
+  }
+
+  if (body.confirm !== true) {
+    sendJsonResponse(res, 400, { ok: false, code: 'CONFIRMATION_REQUIRED', message: 'Необходимо е изрично потвърждение на последствията.' })
+    return true
+  }
+
+  if (hasActiveParticipationForProfileDeletion(profileId)) {
+    sendJsonResponse(res, 409, { ok: false, code: 'ACTIVE_GAME_OR_TOURNAMENT', message: PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE })
+    return true
+  }
+
+  const result = profileDeletionRequestStore.createRequest({ profileId, accountId: session.account.accountId })
+  if (!result.ok) {
+    if (result.code === 'already_pending') {
+      sendJsonResponse(res, 409, { ok: false, code: 'ALREADY_PENDING', message: 'Вече има подадена заявка за изтриване на този профил.' })
+    } else {
+      sendJsonResponse(res, 403, { ok: false, code: 'PROFILE_NOT_ELIGIBLE', message: 'Този профил не може да подаде заявка за самоизтриване.' })
+    }
+    return true
+  }
+
+  // Блокиране веднага: сесии (всички процеси), WS връзки и realtime
+  // скриване (този процес; другите — чрез poll-а), после чакащите покани.
+  authStore.revokeAllSessionsForProfile(profileId)
+  applyProfileDeletionVisibilityEvent({
+    eventSeq: result.eventSeq,
+    requestId: result.request.requestId,
+    profileId,
+    eventType: 'requested',
+  }, 'local')
+  declineIncomingPartnerInvitesForProfileDeletion(profileId)
+
+  console.log(`[profile-deletion] mode=requested profileId=${profileId} requestId=${result.request.requestId} scheduledFor=${result.request.scheduledFor}`)
+
+  sendJsonResponse(
+    res,
+    200,
+    {
+      ok: true,
+      scheduledFor: result.request.scheduledFor,
+      remainingMs: Math.max(0, Date.parse(result.request.scheduledFor) - Date.now()),
+    },
+    { 'Set-Cookie': createClearSessionCookieHeader() },
+  )
+  return true
+}
+
+async function handleAccountDeletionTokenAction(
+  req: IncomingMessage,
+  res: ServerResponse,
+  resolvedIp: string,
+  action: 'cancel' | 'keep',
+): Promise<boolean> {
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' })
+    return true
+  }
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['restoreToken']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволено е само полето restoreToken.' })
+    return true
+  }
+
+  if (profileDeletionRequestStore.isRateLimited({ scope: 'profile-deletion-token-ip', subject: resolvedIp, windowSeconds: 15 * 60, maxEvents: 30 })) {
+    sendJsonResponse(res, 429, { ok: false, code: 'RATE_LIMITED', message: 'Твърде много опити. Опитайте отново по-късно.' })
+    return true
+  }
+
+  const restoreToken = getStringField(body, 'restoreToken')
+
+  if (action === 'keep') {
+    const kept = profileDeletionRequestStore.keepWithToken(restoreToken)
+    if (!kept.ok) {
+      sendJsonResponse(res, 400, { ok: false, code: 'INVALID_RESTORE_TOKEN', message: PROFILE_DELETION_INVALID_TOKEN_MESSAGE })
+      return true
+    }
+    sendJsonResponse(res, 200, { ok: true })
+    return true
+  }
+
+  const cancelled = profileDeletionRequestStore.cancelWithToken(restoreToken)
+  if (!cancelled.ok) {
+    sendJsonResponse(res, 400, cancelled.code === 'window_closed'
+      ? { ok: false, code: 'DELETION_WINDOW_CLOSED', message: PROFILE_DELETION_WINDOW_CLOSED_MESSAGE }
+      : { ok: false, code: 'INVALID_RESTORE_TOKEN', message: PROFILE_DELETION_INVALID_TOKEN_MESSAGE })
+    return true
+  }
+
+  applyProfileDeletionVisibilityEvent({
+    eventSeq: cancelled.eventSeq,
+    requestId: cancelled.requestId,
+    profileId: cancelled.profileId,
+    eventType: 'cancelled',
+  }, 'local')
+
+  console.log(`[profile-deletion] mode=cancelled profileId=${cancelled.profileId} requestId=${cancelled.requestId}`)
+
+  // Нормална сесия НЕ се създава тук — следващият вход минава по обичайния
+  // път (и при действащ бан връща PROFILE_BANNED).
+  sendJsonResponse(res, 200, { ok: true })
+  return true
 }
 
 async function handleProfileLikeRequest(
@@ -12602,7 +12981,7 @@ async function handleTopicsListRequest(
     return true
   }
 
-  const topics = topicsWithUnreadCountsForProfile(auth.profileId, topicStore.listActiveTopics())
+  const topics = topicsWithUnreadCountsForProfile(auth.profileId, listActiveTopicsVisibleForDeletion())
 
   // Current-viewer own section-wide mute snapshot (regression fix — composer
   // mute-lock брифа §6) — при вход/refresh на "Теми" НЯМА друг proactive
@@ -12772,7 +13151,7 @@ async function handleTopicMessagesRequest(
   }
 
   const topicId = decodeURIComponent(match[1] ?? '')
-  const topic = topicStore.getTopicById(topicId)
+  const topic = getTopicByIdVisibleForDeletion(topicId)
 
   if (topic === null) {
     sendJsonResponse(res, 404, {
@@ -12907,7 +13286,7 @@ async function handleTopicRepliesRequest(
   const topicId = decodeURIComponent(match[1] ?? '')
   const rootMessageId = decodeURIComponent(match[2] ?? '')
 
-  const topic = topicStore.getTopicById(topicId)
+  const topic = getTopicByIdVisibleForDeletion(topicId)
   if (topic === null) {
     sendJsonResponse(res, 404, { ok: false, message: 'Темата не беше намерена.' })
     return true
@@ -21863,6 +22242,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleAccountDeletionRequest(req, res, requestUrl.pathname)) {
+    return
+  }
+
   if (await handleProfileLikeRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -26047,7 +26430,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
         }
 
         const profileId = latestConnection.profileId
-        const topic = topicStore.getTopicById(message.topicId)
+        const topic = getTopicByIdVisibleForDeletion(message.topicId)
         if (topic === null) {
           safeSendToConnection(connection.id, {
             type: 'topic_message_error',
@@ -26164,7 +26547,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           return
         }
 
-        const topic = topicStore.getTopicById(message.topicId)
+        const topic = getTopicByIdVisibleForDeletion(message.topicId)
 
         // removed третираме идентично на unknown (т.6 от корекциите) — НЕ
         // topic_locked за premahnata тема.
@@ -26373,7 +26756,7 @@ function handleWsConnectionUnmeasured(socket: WebSocket, request: IncomingMessag
           return
         }
 
-        const topic = topicStore.getTopicById(message.topicId)
+        const topic = getTopicByIdVisibleForDeletion(message.topicId)
         if (topic === null || topic.status === 'removed') {
           sendTopicReplyError('topic_not_found', 'Темата не беше намерена.')
           return
@@ -27508,6 +27891,11 @@ function clearMutationTimersForShutdown(): void {
   if (lobbyChatPollInterval !== null) {
     clearInterval(lobbyChatPollInterval)
     lobbyChatPollInterval = null
+  }
+
+  if (profileDeletionVisibilityPollInterval !== null) {
+    clearInterval(profileDeletionVisibilityPollInterval)
+    profileDeletionVisibilityPollInterval = null
   }
 
   if (adCampaignEventsPollInterval !== null) {
