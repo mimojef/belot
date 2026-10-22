@@ -1,0 +1,128 @@
+# Аварийна nginx защита на личните качени файлове
+
+**Статус: ВРЕМЕННА защитна мярка, активна на production.**
+Правилата са в [`nginx-private-uploads-emergency-block.conf`](nginx-private-uploads-emergency-block.conf) — точно копие на приложеното на VPS. Пълната production nginx конфигурация умишлено НЕ е в Git (server-специфични настройки, сертификати, домейни).
+
+## Какво се случи
+
+nginx сервираше директно от диска, **без потребителско удостоверяване**, четири директории под `/uploads/`. Всяка от тях връщаше HTTP 206 при директна заявка:
+
+| Директория | Съдържание |
+|---|---|
+| `/uploads/chat-attachments/` | снимки от личните разговори |
+| `/uploads/support-attachments/` | снимки към поддръжката |
+| `/uploads/topic-mute-evidence-attachments/` | evidence копия за модерация |
+| `/uploads/profile-gallery/` | галериите на профилите |
+
+В активната конфигурация (`/etc/nginx/sites-enabled/belot-v2` към момента на инцидента) ръчно са добавени четири `location ^~ ... { return 403; }` блока. Проверено на production след `nginx -t` и `systemctl reload nginx`: четирите директории → **403**, публичен аватар → 206, начална страница → 200.
+
+## Какво блокира и легитимния достъп
+
+- **`/uploads/profile-gallery/`** — клиентът зарежда снимките от галерията директно по този URL. **Докато блокировката е активна, галериите не се показват на никого**, включително на собственика и на приятелите.
+- **`chat-attachments`, `support-attachments`, `topic-mute-evidence-attachments`** — приложението ги зарежда през удостоверени endpoint-и (`/api/.../attachments/...`, `/api/topics/mute-evidence/attachments/...`), които Node чете директно от диска. Блокировката по `/uploads/...` не би трябвало да ги засяга, но това трябва да се провери на production (отваряне на снимка в личен разговор, в поддръжката и в модераторския evidence изглед).
+- Остават публични по замисъл: `/uploads/avatars/`, `/uploads/gift-items/`, `/uploads/ad-campaigns/`, `/uploads/campaign-themes/`.
+- `/uploads/topic-attachments/` **не е част от аварийните правила**. Провери го с командите по-долу; при 200/206 е нужна отделна мярка (не добавяй правило „на сляпо“ без проверка).
+
+## Кога може да се премахне
+
+**Нито едно от четирите правила не се премахва**, преди трайното решение с удостоверен достъп (галерия и лични файлове само през Node с проверка на сесия/видимост, вкл. скриване при заявка за самоизтриване) да е:
+
+1. внедрено на production и
+2. проверено: директен `/uploads/...` към личните директории не връща съдържание, а легитимните изгледи работят.
+
+Само тогава правилата се махат (или заменят), отделно и с нов backup.
+
+## Не се прилага автоматично
+
+`scripts/deploy-production.sh`, `deploy-backend-production.sh` и `deploy-frontend-production.sh` не пипат `/etc/nginx/` и не правят reload/restart на nginx. Така трябва и да остане: тази защита се прилага само ръчно, по процедурата по-долу.
+
+## Ръчно прилагане (нов VPS или възстановяване от backup)
+
+Всички команди са на VPS-а, като root или със `sudo`.
+
+### 1. Намери реално активния конфигурационен файл
+
+Не приемай, че `sites-enabled/` съдържа symlink към `sites-available/`. Там може да има обикновен файл (копие), а в `nginx.conf` може да има и други `include`.
+
+```bash
+# Всички файлове, които nginx реално зарежда (в реда на зареждане):
+sudo nginx -T 2>/dev/null | grep '^# configuration file'
+
+# Кои директории/шаблони се включват автоматично:
+sudo nginx -T 2>/dev/null | grep -nE '^\s*include\s'
+
+# Тип на записите в sites-enabled (symlink ли са и накъде сочат):
+sudo ls -la /etc/nginx/sites-enabled/
+for f in /etc/nginx/sites-enabled/*; do echo "$f -> $(readlink -f "$f")"; done
+
+# Кой файл съдържа server блока на сайта и location-а за /uploads/:
+sudo nginx -T 2>/dev/null | grep -nE '^# configuration file|server_name|location[^{]*/uploads'
+```
+
+Редактира се **файлът, към който реално сочи** записът в `sites-enabled/` (`readlink -f`). Ако е обикновен файл, редактира се самият той.
+
+### 2. Backup — само извън директориите, които nginx зарежда
+
+Backup в `sites-enabled/`, `conf.d/` или в която и да е директория от `include` реда по-горе се зарежда като **втора активна конфигурация**. Резултатът е дублирани `server_name` (вече се е случвало) или по-лошо. Пази backup-ите извън `/etc/nginx/`:
+
+```bash
+ACTIVE_CONF="$(readlink -f /etc/nginx/sites-enabled/belot-v2)"   # името според стъпка 1
+sudo mkdir -p /root/nginx-config-backups
+sudo chmod 700 /root/nginx-config-backups
+sudo cp -a "$ACTIVE_CONF" "/root/nginx-config-backups/$(basename "$ACTIVE_CONF").$(date -u +%Y%m%dT%H%M%SZ)"
+sudo ls -la /root/nginx-config-backups/
+
+# Контролна проверка: в /etc/nginx не трябва да има забравени копия
+sudo find /etc/nginx -maxdepth 2 \( -name '*.bak' -o -name '*backup*' -o -name '*.orig' -o -name '*~' \) -print
+```
+
+### 3. Добави правилата
+
+Постави четирите `location` блока от `nginx-private-uploads-emergency-block.conf` **вътре** в `server { ... }` блока, който обслужва сайта (HTTPS блокът с `server_name` на pika.bg и съществуващия `location /uploads/`). Ако сайтът се обслужва от повече от един такъв server блок (напр. отделни блокове за `www` и без `www`), правилата трябват във всеки от тях. Блок, който само пренасочва към HTTPS, не ги изисква.
+
+Редът спрямо другите `location` блокове няма значение: за `^~` префикси nginx избира най-дългото съвпадение и не проверява regex location-ите. Не махай `^~`.
+
+Алтернатива без копиране на текст: файлът се слага в `/etc/nginx/snippets/` (обикновено не се зарежда автоматично, провери със стъпка 1) и в server блока се добавя `include snippets/nginx-private-uploads-emergency-block.conf;`. **Никога** в `conf.d/` или `sites-enabled/`: там би се заредил на ниво `http`.
+
+### 4. Провери синтаксиса и презареди (без restart)
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+systemctl is-active nginx
+```
+
+При грешка от `nginx -t` не прави reload. Върни backup-а (стъпка 6).
+
+### 5. Проверка след прилагане
+
+Вземи реални имена на файлове от диска. Пътят до `uploads/` се вижда от `root`/`alias` на `location /uploads/` в стъпка 1, например `/var/www/belot-v2/server/uploads`:
+
+```bash
+UPLOADS=/var/www/belot-v2/server/uploads   # според стъпка 1
+code() { curl -s -o /dev/null -w '%{http_code}' -r 0-0 "$1"; }
+
+for dir in chat-attachments support-attachments topic-mute-evidence-attachments; do
+  f="$(sudo ls "$UPLOADS/$dir" 2>/dev/null | head -1)"
+  [ -n "$f" ] && echo "$dir: $(code "https://pika.bg/uploads/$dir/$f")   # очаквано 403"
+done
+g="$(sudo find "$UPLOADS/profile-gallery" -type f | head -1)"
+[ -n "$g" ] && echo "profile-gallery: $(code "https://pika.bg/uploads/profile-gallery/${g#"$UPLOADS/profile-gallery/"}")   # очаквано 403"
+t="$(sudo ls "$UPLOADS/topic-attachments" 2>/dev/null | head -1)"
+[ -n "$t" ] && echo "topic-attachments: $(code "https://pika.bg/uploads/topic-attachments/$t")   # НЕ е в аварийните правила — докладвай резултата"
+a="$(sudo ls "$UPLOADS/avatars" | head -1)"
+echo "avatar: $(code "https://pika.bg/uploads/avatars/$a")   # очаквано 200/206"
+echo "home: $(code https://pika.bg/)   # очаквано 200"
+```
+
+Повтори проверката и за `https://www.pika.bg/`, ако домейнът се обслужва.
+
+Кеш: файловете под `/uploads/` се отдаваха с дълъг кеш (`immutable`). Вече изтеглени копия могат да останат в браузърите и в евентуален CDN/proxy кеш. Ако има CDN, изчисти кеша за четирите префикса.
+
+### 6. Връщане назад (само при счупена конфигурация)
+
+```bash
+sudo cp -a /root/nginx-config-backups/<файл>.<timestamp> "$ACTIVE_CONF"
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+Връщането **маха и защитата**. Използвай го само ако nginx не стартира/презарежда, след което приложи правилата наново.

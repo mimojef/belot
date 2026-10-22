@@ -52,7 +52,12 @@ Production checkout-ът Е `/var/www/belot-v2` директно — backend/PM2
 
 ```bash
 sudo cp -a /var/www/belot-v2/dist /var/www/belot-v2/dist.backup-$(date -u +%Y%m%d%H%M%S)
-sudo cp -a /etc/nginx/sites-available/pika.bg /etc/nginx/sites-available/pika.bg.backup-$(date -u +%Y%m%d%H%M%S)
+# nginx backup — САМО извън директориите, които nginx зарежда (не в
+# sites-enabled/, conf.d/ и т.н.); активният файл се определя с `nginx -T`
+# (виж deploy/NGINX_PRIVATE_UPLOADS_EMERGENCY.md, стъпки 1–2):
+ACTIVE_CONF="$(readlink -f /etc/nginx/sites-enabled/<активният-файл>)"
+sudo mkdir -p /root/nginx-config-backups && sudo chmod 700 /root/nginx-config-backups
+sudo cp -a "$ACTIVE_CONF" "/root/nginx-config-backups/$(basename "$ACTIVE_CONF").$(date -u +%Y%m%dT%H%M%SZ)"
 ```
 
 ### 2. Създай baseline release от ТЕКУЩИЯ работещ dist (без нов build)
@@ -227,8 +232,10 @@ PROJECT_ROOT=/var/www/belot-v2 DEPLOY_ROOT=/var/www/belot-v2 \
 # Extreme fallback — връщане към СТАРИЯ nginx config + СТАРИЯ dist/ (само
 # ако нещо е дълбоко счупено в самия release/pool модел, не за обикновен
 # "предпочитам предишната версия" случай — за това ползвай --rollback):
-sudo cp -a /etc/nginx/sites-available/pika.bg.backup-<timestamp> /etc/nginx/sites-available/pika.bg
+sudo cp -a "/root/nginx-config-backups/<файл>.<timestamp>" "$ACTIVE_CONF"
 sudo nginx -t && sudo systemctl reload nginx
+# ВНИМАНИЕ: backup отпреди аварийната защита на /uploads/ НЕ съдържа
+# четирите блокировки — приложи ги наново (deploy/NGINX_PRIVATE_UPLOADS_EMERGENCY.md).
 # nginx отново сочи към dist/ (root директивата от backup-натия config) —
 # /var/www/belot-v2/dist.backup-<timestamp> е непокътнат резерв, ако и
 # самият dist/ по някаква причина е бил променен междувременно:

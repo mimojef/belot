@@ -139,6 +139,9 @@ server {
     # location /api/ { ... }     — непроменена (proxy_pass към backend).
     # location /health { ... }   — непроменена.
     # location /uploads/ { ... } — непроменена.
+    # АВАРИЙНИТЕ `location ^~ /uploads/<лична-директория>/ { return 403; }`
+    # блокове (deploy/nginx-private-uploads-emergency-block.conf) остават в
+    # server блока — `^~` ги пази и от regex location-а за \.(png|webp|...)$ по-горе.
     # location /ws { ... }       — непроменена (WebSocket upgrade proxy).
 
     # ─── SPA fallback — последен, най-нисък приоритет ────────────────────────
