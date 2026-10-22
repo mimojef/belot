@@ -1,0 +1,10 @@
+[Unit]
+Description=PikaBG profile deletion ledger backup to Google Drive
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Environment=RCLONE_CONFIG=/root/.config/rclone/rclone.conf
+ExecStart=/usr/local/sbin/pikabg-ledger-backup

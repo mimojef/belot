@@ -26,7 +26,11 @@ import { createProfileHardDeleteService } from './db/profileHardDeleteService.js
 import { createProfileDeletionRequestStore, type ProfileDeletionVisibilityEvent } from './db/profileDeletionRequestStore.js'
 import { isProfileSelfDeletionFeatureEnabled, isProfileSelfDeletionWorkerEnabled } from './core/profileSelfDeletionFeatureFlag.js'
 import { createProfileDeletionExecutor } from './db/profileDeletionExecutor.js'
-import { appendProfileDeletionLedgerEntry, getDefaultProfileDeletionLedgerPath } from './db/profileDeletionLedger.js'
+import {
+  ensureProfileDeletionLedgerEntry,
+  getDefaultProfileDeletionLedgerPath,
+  isProfileDeletionLedgerRequestConfirmedOffsite,
+} from './db/profileDeletionLedger.js'
 import { createProfileDeletionWorker } from './core/profileDeletionWorker.js'
 import { removeProfileDeletionFile } from './uploads/profileDeletionFileRemoval.js'
 import {
@@ -1612,6 +1616,10 @@ const PROFILE_DELETION_WORKER_INTERVAL_MS = 10 * 60 * 1000
 const PROFILE_DELETION_WORKER_STARTUP_DELAY_MS = 2 * 60 * 1000
 const PROFILE_DELETION_LEDGER_PATH =
   process.env.PROFILE_DELETION_LEDGER_PATH?.trim() || getDefaultProfileDeletionLedgerPath(SERVER_ROOT_PATH)
+// Етап 4C: изтриване в базата САМО след като записът в регистъра е
+// потвърдено копиран извън VPS (ack от ops/pikabg-backup/scripts/pikabg-ledger-backup).
+// Изключва се единствено с точно "0" (локална разработка без backup timer).
+const PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED = process.env.PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED !== '0'
 const profileDeletionExecutor = isProfileSelfDeletionWorkerEnabled()
   ? await createProfileDeletionExecutor(databaseBootstrap.databaseFilePath, {
       protectedProfileIds: [OFFICIAL_PIKA_PROFILE_ID, getConfiguredOfficialPikaProfileId()].filter(
@@ -1633,11 +1641,14 @@ const profileDeletionWorker = profileDeletionExecutor === null
         supportAttachments: SUPPORT_ATTACHMENT_UPLOADS_PATH,
       },
       removeFile: removeProfileDeletionFile,
-      appendLedgerEntry: (entry) => appendProfileDeletionLedgerEntry(PROFILE_DELETION_LEDGER_PATH, entry),
+      appendLedgerEntry: (entry) => { ensureProfileDeletionLedgerEntry(PROFILE_DELETION_LEDGER_PATH, entry) },
+      isLedgerEntryConfirmedOffsite: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED
+        ? (requestId) => isProfileDeletionLedgerRequestConfirmedOffsite(PROFILE_DELETION_LEDGER_PATH, requestId)
+        : undefined,
       isProfileInActiveGameLocally: (profileId) => hasProfileActiveGameCommitment(profileId),
       log: (message) => console.log(message),
     })
-console.log(`[profile-deletion-worker] enabled=${profileDeletionWorker !== null}`)
+console.log(`[profile-deletion-worker] enabled=${profileDeletionWorker !== null} ledgerOffsiteRequired=${PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED}`)
 
 async function runProfileDeletionWorker(): Promise<void> {
   if (isServerShuttingDown || profileDeletionWorker === null || !isProfileSelfDeletionWorkerEnabled()) {

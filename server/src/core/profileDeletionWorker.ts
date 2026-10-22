@@ -5,7 +5,9 @@
 //
 // Ред за всяка заявка:
 //   claim -> (ако базата още не е изтрита) игра в паметта на ТОЗИ процес ->
-//   запис в независимия регистър -> DB фаза -> файлове -> completed.
+//   запис в независимия регистър (идемпотентно) -> [Етап 4C] потвърждение,
+//   че записът е копиран извън VPS (иначе blocked 'ledger_offsite_pending'
+//   и нов опит) -> DB фаза -> файлове -> completed.
 //
 // Логовете съдържат само request_id и технически кодове — без имена, имейли,
 // пътища до файлове или токени.
@@ -26,8 +28,14 @@ export type ProfileDeletionWorkerDeps = {
   workerId: string
   uploadRoots: ProfileDeletionUploadRoots
   removeFile: (kind: ProfileDeletionFileKind, storageRef: string, roots: ProfileDeletionUploadRoots) => Promise<ProfileDeletionFileRemovalOutcome>
-  /** Регистър извън SQLite; null = без регистър (само тестове). */
+  /** Регистър извън SQLite (идемпотентен запис); null = без регистър (само тестове и процедурата след restore). */
   appendLedgerEntry: ((entry: ProfileDeletionLedgerEntry) => void) | null
+  /**
+   * Етап 4C: true само ако записът за заявката вече е потвърдено копиран
+   * извън VPS. Подаден -> изтриване в базата САМО след потвърждение.
+   * undefined = без това условие (тестове, процедурата след restore).
+   */
+  isLedgerEntryConfirmedOffsite?: (requestId: string) => boolean
   /** Игра/маса/опашка в паметта на ТОЗИ процес (hasProfileActiveGameCommitment). */
   isProfileInActiveGameLocally?: (profileId: string) => boolean
   log?: (message: string) => void
@@ -101,6 +109,20 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
           deps.executor.failRequest(request.requestId, deps.workerId, 'ledger_write_failed')
           summary.failed += 1
           log(`[profile-deletion-worker] failed requestId=${request.requestId} code=ledger_write_failed`)
+          return
+        }
+      }
+      if (deps.isLedgerEntryConfirmedOffsite !== undefined) {
+        let confirmed = false
+        try {
+          confirmed = deps.isLedgerEntryConfirmedOffsite(request.requestId)
+        } catch {
+          confirmed = false
+        }
+        if (!confirmed) {
+          deps.executor.blockRequest(request.requestId, deps.workerId, 'ledger_offsite_pending')
+          summary.blocked += 1
+          log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=ledger_offsite_pending`)
           return
         }
       }

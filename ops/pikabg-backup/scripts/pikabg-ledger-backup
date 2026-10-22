@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+# Етап 4C — архивиране на регистъра на окончателните изтривания извън VPS
+# (виж README.md, "Deletion ledger"). Отделно от pikabg-db-backup (собствен
+# timer на 5 минути), за да не зависи от по-тежкия backup на базата/uploads.
+#
+# Ред:
+#   1. snapshot (Node CLI) — само пълните редове; повреден регистър -> грешка.
+#      Без промяна спрямо последното потвърждение -> изход 0, нищо не се качва.
+#   2. rclone copyto на snapshot + manifest в PikaBG-Backups/deletion-ledger/<ден>/.
+#   3. Проверка на MD5 на отдалеченото копие спрямо manifest-а.
+#   4. confirm (Node CLI) — едва СЛЕД проверката пише ack за точния префикс.
+# Worker-ът изтрива в базата само заявки, покрити от ack-а — затова при
+# отпадане на мрежата/Drive изтриванията ЧАКАТ, а не продължават без копие.
+#
+# Production defaults; PIKABG_* overrides са САМО за изолирания тестов
+# harness (server/scripts/checkProfileDeletionLedgerArchive.ts) — systemd
+# unit-ът не ги задава.
+SERVER_DIR="${PIKABG_SERVER_DIR:-/var/www/belot-v2/server}"
+LEDGER="${PIKABG_LEDGER_PATH:-$SERVER_DIR/database/deletion-ledger/profile-deletions.jsonl}"
+ACK="${PIKABG_LEDGER_ACK_PATH:-$(dirname "$LEDGER")/profile-deletions.offsite-ack.json}"
+CLI="${PIKABG_LEDGER_CLI:-$SERVER_DIR/dist/ops/profileDeletionLedgerCli.js}"
+LOCAL_ROOT="${PIKABG_LEDGER_LOCAL_ROOT:-/var/backups/pikabg-deletion-ledger}"
+REMOTE_ROOT="${PIKABG_REMOTE_LEDGER_ROOT:-pikabg-drive:PikaBG-Backups/deletion-ledger}"
+LOCK_FILE="${PIKABG_LEDGER_LOCK_FILE:-/var/lock/pikabg-ledger-backup.lock}"
+RCLONE="${PIKABG_RCLONE:-rclone}"
+NODE="${PIKABG_NODE:-node}"
+
+exec 9>"$LOCK_FILE"
+if ! flock -n 9; then
+    echo "[ledger-backup] Another run is in progress — skip."
+    exit 0
+fi
+
+PENDING_DIR="$LOCAL_ROOT/pending"
+UPLOADED_DIR="$LOCAL_ROOT/uploaded"
+mkdir -p "$PENDING_DIR" "$UPLOADED_DIR"
+chmod 700 "$LOCAL_ROOT" "$PENDING_DIR" "$UPLOADED_DIR"
+# Остатъци от неуспешни опити (никога не са потвърдени) — само локално.
+find "$PENDING_DIR" -type f -mtime +7 -delete 2>/dev/null || true
+
+if [ ! -f "$CLI" ]; then
+    echo "[ledger-backup] ERROR: CLI missing: $CLI (server dist not built?)"
+    exit 2
+fi
+
+json_field() {
+    # $1 = JSON ред, $2 = поле (само прости стойности, без вложени обекти)
+    "$NODE" -e 'const o = JSON.parse(process.argv[1]); const v = o[process.argv[2]]; process.stdout.write(v === undefined || v === null ? "" : String(v))' "$1" "$2"
+}
+
+# Не е грешка: при първо пускане (преди първото изтриване) регистърът липсва —
+# snapshot-ът е празен и се качва, за да има потвърдено начално състояние.
+SNAPSHOT_JSON="$("$NODE" "$CLI" snapshot --ledger="$LEDGER" --out-dir="$PENDING_DIR" --ack="$ACK")" || {
+    echo "[ledger-backup] ERROR: snapshot failed: $SNAPSHOT_JSON"
+    exit 2
+}
+STATUS="$(json_field "$SNAPSHOT_JSON" status)"
+if [ "$STATUS" = "unchanged" ]; then
+    echo "[ledger-backup] unchanged sha256=$(json_field "$SNAPSHOT_JSON" sha256) — nothing to upload"
+    exit 0
+fi
+if [ "$STATUS" != "created" ]; then
+    echo "[ledger-backup] ERROR: unexpected snapshot status: $SNAPSHOT_JSON"
+    exit 2
+fi
+
+SNAPSHOT="$(json_field "$SNAPSHOT_JSON" snapshot)"
+MANIFEST="$(json_field "$SNAPSHOT_JSON" manifest)"
+FILE="$(json_field "$SNAPSHOT_JSON" file)"
+EXPECTED_MD5="$(json_field "$SNAPSHOT_JSON" md5)"
+DAY="$(date -u +%Y-%m-%d)"
+REMOTE_DIR="$REMOTE_ROOT/$DAY"
+REMOTE_FILE="$REMOTE_DIR/$FILE"
+
+echo "[ledger-backup] uploading $FILE entries=$(json_field "$SNAPSHOT_JSON" entryCount) bytes=$(json_field "$SNAPSHOT_JSON" bytes)"
+"$RCLONE" mkdir "$REMOTE_DIR"
+"$RCLONE" copyto "$SNAPSHOT" "$REMOTE_FILE" --transfers 1 --retries 5
+"$RCLONE" copyto "$MANIFEST" "$REMOTE_FILE.manifest.json" --transfers 1 --retries 5
+
+REMOTE_MD5="$("$RCLONE" md5sum "$REMOTE_FILE" | awk 'NR==1 {print $1}')"
+REMOTE_MANIFEST_MD5="$("$RCLONE" md5sum "$REMOTE_FILE.manifest.json" | awk 'NR==1 {print $1}')"
+# stdin: без име на файл в изхода (md5sum слага обратна наклонена черта пред
+# хеша, когато пътят съдържа специални символи).
+LOCAL_MANIFEST_MD5="$(md5sum < "$MANIFEST" | awk '{print $1}')"
+echo "[ledger-backup] expected_md5=$EXPECTED_MD5 remote_md5=$REMOTE_MD5"
+if [ -z "$REMOTE_MD5" ] || [ "$REMOTE_MD5" != "$EXPECTED_MD5" ] || [ "$REMOTE_MANIFEST_MD5" != "$LOCAL_MANIFEST_MD5" ]; then
+    echo "[ledger-backup] ERROR: remote checksum mismatch — ack NOT updated"
+    exit 3
+fi
+
+"$NODE" "$CLI" confirm --ledger="$LEDGER" --snapshot="$SNAPSHOT" --manifest="$MANIFEST" --remote-path="$REMOTE_FILE" --ack="$ACK" >/dev/null || {
+    echo "[ledger-backup] ERROR: confirm failed — ack NOT updated"
+    exit 2
+}
+
+mv -f "$SNAPSHOT" "$MANIFEST" "$UPLOADED_DIR/"
+echo "[ledger-backup] OK confirmed $REMOTE_FILE"

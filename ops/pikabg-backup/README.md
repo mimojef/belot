@@ -276,6 +276,22 @@ instead of depending on real timing luck — it
 was used to prove the retry mechanism actually
 recovers.
 
+## Deletion ledger (Етап 4C)
+
+Регистърът на окончателните изтривания на профили
+(`server/database/deletion-ledger/`) се архивира
+отделно от базата — `scripts/pikabg-ledger-backup`
+(собствен timer на 5 минути, същият
+`pikabg-drive:` remote, папка
+`PikaBG-Backups/deletion-ledger/`), а при restore
+`scripts/pikabg-ledger-restore` обединява ВСИЧКИ
+външни копия, не копието от датата на backup-а.
+Worker-ът за самоизтриване изтрива в базата
+само след потвърдено външно копие на записа.
+Инсталация, проверки и restore runbook:
+[DELETION_LEDGER.md](DELETION_LEDGER.md). Не е
+инсталирано на production.
+
 ## Security
 
 Never commit rclone.conf, OAuth credentials,

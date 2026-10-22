@@ -1,0 +1,11 @@
+[Unit]
+Description=Run PikaBG profile deletion ledger backup every 5 minutes
+
+[Timer]
+OnCalendar=*:0/5
+Persistent=true
+AccuracySec=1s
+Unit=pikabg-ledger-backup.service
+
+[Install]
+WantedBy=timers.target

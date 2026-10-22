@@ -68,6 +68,8 @@ export type ProfileDeletionBlockCode =
   | 'pending_tournament_invite'
   | 'role_not_allowed'
   | 'campaign_gift_sender_protected'
+  /** Етап 4C: записът в регистъра още не е потвърдено копиран извън VPS. */
+  | 'ledger_offsite_pending'
 
 export type ProfileDeletionFailCode =
   | 'identity_mismatch'
@@ -135,7 +137,17 @@ export type ProfileDeletionExecutor = {
    * същото изтриване в базата за профил, чиято заявка липсва във
    * възстановената база. Без опашка/събития — връща файловете.
    */
-  replayDeletionForRestore: (identity: { profileId: string; accountIdSnapshot: string; profileCreatedAtSnapshot: string }) => ProfileDeletionReplayResult
+  replayDeletionForRestore: (
+    identity: { profileId: string; accountIdSnapshot: string; profileCreatedAtSnapshot: string },
+    hooks?: { beforeCommit?: (files: Array<{ fileKind: ProfileDeletionFileKind; storageRef: string }>) => void },
+  ) => ProfileDeletionReplayResult
+  /**
+   * Само за процедурата след restore (спрян сървър): заявка от
+   * възстановената база става веднага годна за claim — blocked/failed
+   * получават next_attempt_at = сега, executing — изтекъл lease. Статусът,
+   * идентичността и графикът не се променят (тригерите го гарантират).
+   */
+  prepareRequestForRestoreReconcile: (requestId: string) => boolean
   close: () => void
 }
 
@@ -1007,7 +1019,10 @@ export async function createProfileDeletionExecutor(
     }
   }
 
-  function replayDeletionForRestore(identity: { profileId: string; accountIdSnapshot: string; profileCreatedAtSnapshot: string }): ProfileDeletionReplayResult {
+  function replayDeletionForRestore(
+    identity: { profileId: string; accountIdSnapshot: string; profileCreatedAtSnapshot: string },
+    hooks: { beforeCommit?: (files: Array<{ fileKind: ProfileDeletionFileKind; storageRef: string }>) => void } = {},
+  ): ProfileDeletionReplayResult {
     database.exec('BEGIN IMMEDIATE;')
     try {
       const profile = selectProfileStatement.get(identity.profileId) as ProfileRow | undefined
@@ -1033,8 +1048,34 @@ export async function createProfileDeletionExecutor(
           files.push({ fileKind, storageRef })
         }
       })
+      // Процедурата след restore записва файловете в собствен журнал ПРЕДИ
+      // COMMIT — при срив след COMMIT те не "изчезват" (редовете вече ги няма).
+      hooks.beforeCommit?.(files)
       database.exec('COMMIT;')
       return { kind: 'deleted', files, accountDeleted }
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
+  }
+
+  const prepareBlockedOrFailedForRestoreStatement = database.prepare(`
+    UPDATE profile_deletion_requests SET next_attempt_at = ?1, updated_at = ?1
+    WHERE request_id = ?2 AND status IN ('blocked', 'failed');
+  `)
+  const prepareExecutingForRestoreStatement = database.prepare(`
+    UPDATE profile_deletion_requests SET lease_expires_at = ?1, updated_at = ?2
+    WHERE request_id = ?3 AND status = 'executing';
+  `)
+
+  function prepareRequestForRestoreReconcile(requestId: string): boolean {
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const now = dbNow()
+      const a = prepareBlockedOrFailedForRestoreStatement.run(now, requestId) as { changes: number }
+      const b = prepareExecutingForRestoreStatement.run(isoPlus(now, -1), now, requestId) as { changes: number }
+      database.exec('COMMIT;')
+      return Number(a.changes) + Number(b.changes) > 0
     } catch (error) {
       rollbackQuietly()
       throw error
@@ -1058,6 +1099,7 @@ export async function createProfileDeletionExecutor(
       finishFile(file, workerId, profileId, 'failed', 'file_failed', { code, permanent }, code.slice(0, 200), permanent),
     finishRequest,
     replayDeletionForRestore,
+    prepareRequestForRestoreReconcile,
     close: () => database.close(),
   }
 }

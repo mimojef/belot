@@ -1524,7 +1524,10 @@ try {
       [backupBeforeRequests, 'request_missing', 'request_missing'],
     ] as const) {
       const result = runReconcile([`--db=${backup}`, `--ledger=${ledgerPath}`])
-      assertEqual(result.status, 0, `exit (${result.stdout.slice(-300)})`)
+      // Тестовата база съдържа и изтривания, направени без регистър (worker без
+      // ledger) — Етап 4C ги отчита като ledger_stale и отчетът завършва с 1.
+      assertEqual(result.status, 1, `exit (${result.stdout.slice(-300)})`)
+      assert(result.stdout.includes('ledger_stale requestId='), 'остарелият регистър е отчетен')
       assert(result.stdout.includes(`${expectA} requestId=${requestA}`), `A: ${expectA}`)
       assert(result.stdout.includes(`${expectB} requestId=${requestB}`), `B: ${expectB}`)
       assert(result.stdout.includes('report-only'), 'режим')
@@ -1547,7 +1550,7 @@ try {
     const tamper = new sqliteModule.DatabaseSync(backupWithRequestA, { open: true })
     tamper.prepare(`UPDATE profiles SET created_at = '2001-01-01 00:00:00' WHERE profile_id = ?;`).run(restoreC.profileId)
     tamper.close()
-    const result = runReconcile([`--db=${backupWithRequestA}`, `--ledger=${ledgerPath}`, '--apply', '--confirm=REAPPLY-PROFILE-DELETIONS', `--uploads-root=${restoredUploads}`])
+    const result = runReconcile([`--db=${backupWithRequestA}`, `--ledger=${ledgerPath}`, '--apply', '--confirm=REAPPLY-PROFILE-DELETIONS', `--uploads-root=${restoredUploads}`, '--accept-stale-ledger'])
     assertEqual(result.status, 1, `exit 1 заради identity_mismatch (${result.stdout.slice(-400)})`)
     assert(result.stdout.includes(`identity_mismatch requestId=${requestC}`), 'C е identity_mismatch')
     const restored = new sqliteModule.DatabaseSync(backupWithRequestA, { readOnly: true })

@@ -1,0 +1,106 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+# Етап 4C — най-новото надеждно състояние на регистъра на окончателните
+# изтривания при restore (виж README.md, "Deletion ledger" и runbook-а).
+#
+#   pikabg-ledger-restore --target-dir <scratch> \
+#       [--local-ledger <жив регистър, ако VPS/дискът е оцелял>] \
+#       [--snapshots-dir <вече изтеглени snapshot-и>] \
+#       [--restored-db <възстановена belot-v2.sqlite> — само отчет] \
+#       [--accept-missing-newest] [--confirm-no-deletions-ever]
+#
+# 1. Изтегля ВСИЧКИ snapshot-и от PikaBG-Backups/deletion-ledger/ (не само
+#    копието "от датата на backup-а") в <target>/snapshots/.
+# 2. merge (Node CLI): проверка на sha256/md5/съдържанието на всеки snapshot,
+#    обединение по request_id (+ живия регистър). Fail-closed: няма регистър,
+#    повреден най-нов snapshot, разклонена история, конфликт -> изход != 0.
+# 3. По желание: отчет (reconcile, САМО четене) срещу възстановената база.
+#
+# Пише само в --target-dir (нов/празен, не production/system път). Никога
+# не прилага изтривания и не пипа живата база — това е отделна, изрична
+# стъпка при спрян сървър (README, runbook стъпки 5–7).
+SERVER_DIR="${PIKABG_SERVER_DIR:-/var/www/belot-v2/server}"
+CLI="${PIKABG_LEDGER_CLI:-$SERVER_DIR/dist/ops/profileDeletionLedgerCli.js}"
+REMOTE_ROOT="${PIKABG_REMOTE_LEDGER_ROOT:-pikabg-drive:PikaBG-Backups/deletion-ledger}"
+RCLONE="${PIKABG_RCLONE:-rclone}"
+NODE="${PIKABG_NODE:-node}"
+
+TARGET_DIR=""
+LOCAL_LEDGER=""
+SNAPSHOTS_DIR=""
+RESTORED_DB=""
+MERGE_FLAGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target-dir) TARGET_DIR="$2"; shift 2 ;;
+        --local-ledger) LOCAL_LEDGER="$2"; shift 2 ;;
+        --snapshots-dir) SNAPSHOTS_DIR="$2"; shift 2 ;;
+        --restored-db) RESTORED_DB="$2"; shift 2 ;;
+        --accept-missing-newest) MERGE_FLAGS+=("--accept-missing-newest"); shift ;;
+        --confirm-no-deletions-ever) MERGE_FLAGS+=("--confirm-no-deletions-ever"); shift ;;
+        *) echo "[ledger-restore] ERROR: unknown argument: $1"; exit 2 ;;
+    esac
+done
+
+if [ -z "$TARGET_DIR" ]; then
+    echo "[ledger-restore] ERROR: --target-dir is required"
+    exit 2
+fi
+TARGET_DIR="$(realpath -m -- "$TARGET_DIR")"
+case "$TARGET_DIR" in
+    /|/var|/var/www|/var/www/*|/var/backups|/var/backups/*|/etc|/etc/*|/root|/home|/usr|/usr/*)
+        echo "[ledger-restore] ERROR: target-dir resolves to a production/system path ($TARGET_DIR) — refusing."
+        exit 2
+        ;;
+esac
+if [ -e "$TARGET_DIR" ] && [ -n "$(ls -A -- "$TARGET_DIR" 2>/dev/null)" ]; then
+    echo "[ledger-restore] ERROR: target-dir must be new or empty: $TARGET_DIR"
+    exit 2
+fi
+if [ ! -f "$CLI" ]; then
+    echo "[ledger-restore] ERROR: CLI missing: $CLI (build server dist first)"
+    exit 2
+fi
+mkdir -p "$TARGET_DIR"
+
+if [ -z "$SNAPSHOTS_DIR" ]; then
+    SNAPSHOTS_DIR="$TARGET_DIR/snapshots"
+    mkdir -p "$SNAPSHOTS_DIR"
+    echo "[ledger-restore] downloading all ledger snapshots from $REMOTE_ROOT"
+    if ! "$RCLONE" copy "$REMOTE_ROOT" "$SNAPSHOTS_DIR" --transfers 2 --retries 5; then
+        echo "[ledger-restore] ERROR: download failed — restore must NOT continue without the newest ledger"
+        exit 3
+    fi
+fi
+
+MERGED="$TARGET_DIR/merged-ledger.jsonl"
+LOCAL_ARGS=()
+if [ -n "$LOCAL_LEDGER" ]; then
+    LOCAL_ARGS+=("--local-ledger=$LOCAL_LEDGER")
+fi
+set +e
+"$NODE" "$CLI" merge --snapshot-dir="$SNAPSHOTS_DIR" --out="$MERGED" ${LOCAL_ARGS[@]+"${LOCAL_ARGS[@]}"} ${MERGE_FLAGS[@]+"${MERGE_FLAGS[@]}"} > "$TARGET_DIR/merge-report.json"
+MERGE_STATUS=$?
+set -e
+cat "$TARGET_DIR/merge-report.json"
+if [ "$MERGE_STATUS" -ne 0 ]; then
+    rm -f "$MERGED"
+    echo "[ledger-restore] ERROR: ledger merge failed (exit $MERGE_STATUS) — restore must NOT continue"
+    exit 4
+fi
+echo "[ledger-restore] merged ledger: $MERGED"
+
+if [ -n "$RESTORED_DB" ]; then
+    echo "[ledger-restore] reconcile report (read-only) against $RESTORED_DB"
+    set +e
+    "$NODE" "$CLI" reconcile --db="$RESTORED_DB" --ledger="$MERGED"
+    REPORT_STATUS=$?
+    set -e
+    if [ "$REPORT_STATUS" -ne 0 ]; then
+        echo "[ledger-restore] reconcile report needs attention (exit $REPORT_STATUS) — see README runbook"
+        exit 5
+    fi
+fi
+echo "[ledger-restore] OK — next: reconcile --apply (server stopped), then reconcile --verify-only"
