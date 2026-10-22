@@ -24,8 +24,29 @@
 //     показва "Играч" за липсващ профил);
 //   * подаръците на други потребители — gift_item_transactions е SET NULL
 //     (20261026_001), името на изпращача в известията се заменя;
-//   * support разговорите, private_room_matches, profile_ip_links/
-//     profile_visitor_links — непроменени (въпрос за решение, виж отчета).
+//   * support разговорите — непроменени (въпрос за следващ етап на P5).
+//
+// Етап 4E1 (одит P5, одобрени решения):
+//   * profile_ip_links / profile_visitor_links (без FK) — редовете на
+//     профила се изтриват в същата транзакция; връзките на други профили със
+//     същия IP/visitor остават. Нищо не ги пресъздава след това (източниците
+//     са site_visit_events.profile_id, който става NULL, и admin snapshot-ите,
+//     които самоизтриването не създава);
+//   * private_room_matches (team_a_json/team_b_json) — участникът, намерен
+//     по ТОЧНО съвпадение на profileId, става { profileId: null,
+//     displayName: "Изтрит профил", avatarUrl: null, isBot: false }; мачът,
+//     другите участници, резултатите и датите остават;
+//   * ludo_room_matches (players_json/winner_profile_id) — participant-ът
+//     получава НЕСВЪРЗАН случаен идентификатор ('deleted-' + 32 hex, нов за
+//     всеки мач), име "Изтрит профил" и avatarUrl null; winner_profile_id,
+//     ако е бил изтрития, става СЪЩИЯТ идентификатор. Така "кой е победил"
+//     и всички зависимости остават коректни: кампанийният reconciliation
+//     (ludo_win, разгъва players_json и сравнява с winner_profile_id) и
+//     архивът продължават да начисляват/броят загубилите, а заместителят не
+//     съществува в profiles и се пропуска като ineligible — както досега за
+//     изтрит ID. NULL би извадил мача от reconciliation-а изцяло.
+//   Невалидна структура на архивен запис с профила = грешка (ROLLBACK), не
+//   "успешно" изтриване.
 //
 // Теми и Лафче (Етап 4B, одобрени решения А1 и Б1) — собствените публикации
 // и отговори се изтриват физически (с прикачените файлове):
@@ -45,6 +66,7 @@
 //     непроменен, няма parent връзка между различни теми, а собствените
 //     теми са напълно изчезнали — иначе ROLLBACK (failed, повторен опит).
 
+import { randomBytes } from 'node:crypto'
 import type { ProfileDeletionFileKind } from '../uploads/profileDeletionFileRemoval.js'
 import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
 import { computeProfileDeletionRetryDelayMs } from './profileDeletionSchedule.js'
@@ -508,6 +530,88 @@ export async function createProfileDeletionExecutor(
         OR friendship_id IN (SELECT friendship_id FROM profile_friendships WHERE requester_profile_id = ?1 OR addressee_profile_id = ?1);`,
   ].map(prepareWithArity)
 
+  // ─── Етап 4E1: IP/visitor връзки и история на игрите ─────────────────────
+  // Изпълняват се СЛЕД инвалидирането на risk cache-а (то чете visitor
+  // връзките, за да намери засегнатите профили).
+  const deleteIdentityLinkStatements = [
+    `DELETE FROM profile_ip_links WHERE profile_id = ?1;`,
+    `DELETE FROM profile_visitor_links WHERE profile_id = ?1;`,
+  ].map((sql) => database.prepare(sql))
+
+  // instr() е само предварителен филтър; съвпадението е по точен profileId
+  // след JSON парсване.
+  const selectPrivateMatchCandidatesStatement = database.prepare(`
+    SELECT room_id, team_a_json, team_b_json FROM private_room_matches
+    WHERE instr(team_a_json, ?1) > 0 OR instr(team_b_json, ?1) > 0;
+  `)
+  const updatePrivateMatchTeamsStatement = database.prepare(`
+    UPDATE private_room_matches SET team_a_json = ?, team_b_json = ? WHERE room_id = ?;
+  `)
+  const selectLudoMatchCandidatesStatement = database.prepare(`
+    SELECT match_id, players_json, winner_profile_id FROM ludo_room_matches
+    WHERE instr(players_json, ?1) > 0 OR winner_profile_id = ?1;
+  `)
+  const updateLudoMatchStatement = database.prepare(`
+    UPDATE ludo_room_matches SET players_json = ?, winner_profile_id = ? WHERE match_id = ?;
+  `)
+
+  function parseOccupantArray(json: string): Array<Record<string, unknown>> {
+    const parsed = JSON.parse(json) as unknown
+    if (!Array.isArray(parsed) || parsed.some((item) => item === null || typeof item !== 'object' || Array.isArray(item))) {
+      throw new Error('profile_deletion_match_history_unparseable')
+    }
+    return parsed as Array<Record<string, unknown>>
+  }
+
+  /** true, ако някоя стойност (рекурсивно, вкл. вложени полета) е ТОЧНО needle. */
+  function containsExactValue(value: unknown, needle: string): boolean {
+    if (value === needle) return true
+    if (Array.isArray(value)) return value.some((item) => containsExactValue(item, needle))
+    if (value !== null && typeof value === 'object') return Object.values(value).some((item) => containsExactValue(item, needle))
+    return false
+  }
+
+  function anonymizePrivateRoomMatches(profileId: string): number {
+    let changed = 0
+    for (const row of selectPrivateMatchCandidatesStatement.all(profileId) as Array<{ room_id: string; team_a_json: string; team_b_json: string }>) {
+      let touched = false
+      const anonymizeTeam = (json: string): Array<Record<string, unknown>> =>
+        parseOccupantArray(json).map((occupant) => {
+          if (occupant.profileId !== profileId) return occupant
+          touched = true
+          return { profileId: null, displayName: PROFILE_DELETION_DELETED_LABEL, avatarUrl: null, isBot: false }
+        })
+      const teamA = anonymizeTeam(row.team_a_json)
+      const teamB = anonymizeTeam(row.team_b_json)
+      // ID-то не е стойност в архивния запис (среща се само като подниз на друга стойност).
+      if (!touched && !containsExactValue(teamA, profileId) && !containsExactValue(teamB, profileId)) continue
+      // Остатъчно точно ID (напр. вложено поле) = непозната структура -> ROLLBACK.
+      if (containsExactValue(teamA, profileId) || containsExactValue(teamB, profileId)) throw new Error('profile_deletion_match_history_residual_id')
+      updatePrivateMatchTeamsStatement.run(JSON.stringify(teamA), JSON.stringify(teamB), row.room_id)
+      changed += 1
+    }
+    return changed
+  }
+
+  function anonymizeLudoMatches(profileId: string): number {
+    let changed = 0
+    for (const row of selectLudoMatchCandidatesStatement.all(profileId) as Array<{ match_id: string; players_json: string; winner_profile_id: string | null }>) {
+      const placeholder = `deleted-${randomBytes(16).toString('hex')}`
+      let touched = row.winner_profile_id === profileId
+      const players = parseOccupantArray(row.players_json).map((player) => {
+        if (player.profileId !== profileId) return player
+        touched = true
+        return { profileId: placeholder, displayName: PROFILE_DELETION_DELETED_LABEL, avatarUrl: null, color: player.color }
+      })
+      if (!touched && !containsExactValue(players, profileId)) continue
+      if (containsExactValue(players, profileId)) throw new Error('profile_deletion_match_history_residual_id')
+      const winner = row.winner_profile_id === profileId ? placeholder : row.winner_profile_id
+      updateLudoMatchStatement.run(JSON.stringify(players), winner, row.match_id)
+      changed += 1
+    }
+    return changed
+  }
+
   const deleteProfileStatement = database.prepare(`DELETE FROM profiles WHERE profile_id = ?;`)
   const countAccountProfilesStatement = database.prepare(`SELECT COUNT(*) AS cnt FROM profiles WHERE account_id = ?;`)
   const deleteAccountStatement = database.prepare(`DELETE FROM accounts WHERE account_id = ?;`)
@@ -727,7 +831,7 @@ export async function createProfileDeletionExecutor(
   function deleteProfileDataInTransaction(
     profile: ProfileRow,
     enqueue: (fileKind: ProfileDeletionFileKind, storageRef: string) => void,
-  ): { accountDeleted: boolean } {
+  ): { accountDeleted: boolean; identityLinksDeleted: number; privateMatchesAnonymized: number; ludoMatchesAnonymized: number } {
     const profileId = profile.profile_id
     const topicPlan = planTopicCleanup(profileId)
 
@@ -792,6 +896,14 @@ export async function createProfileDeletionExecutor(
       }
     }
 
+    // Етап 4E1 — след risk cache-а (той чете visitor връзките по-горе).
+    let identityLinksDeleted = 0
+    for (const statement of deleteIdentityLinkStatements) {
+      identityLinksDeleted += Number((statement.run(profileId) as { changes: number }).changes)
+    }
+    const privateMatchesAnonymized = anonymizePrivateRoomMatches(profileId)
+    const ludoMatchesAnonymized = anonymizeLudoMatches(profileId)
+
     // Б1: темите на профила — изцяло, вкл. чуждите публикации (каскада от
     // topics: съобщения, отговори, файлови редове, харесвания, read state,
     // mutes, reports, root агрегати).
@@ -828,7 +940,7 @@ export async function createProfileDeletionExecutor(
         accountDeleted = true
       }
     }
-    return { accountDeleted }
+    return { accountDeleted, identityLinksDeleted, privateMatchesAnonymized, ludoMatchesAnonymized }
   }
 
   function runDatabasePhase(request: ClaimedProfileDeletionRequest, workerId: string): ProfileDeletionDbPhaseResult {
@@ -885,14 +997,22 @@ export async function createProfileDeletionExecutor(
 
       let enqueuedFileCount = 0
       const requestId = row.request_id
-      const { accountDeleted } = deleteProfileDataInTransaction(profile, (fileKind, storageRef) => {
+      const deletion = deleteProfileDataInTransaction(profile, (fileKind, storageRef) => {
         const result = insertFileStatement.run(requestId, fileKind, storageRef) as { changes: number }
         enqueuedFileCount += Number(result.changes)
       })
+      const { accountDeleted } = deletion
 
       const marked = markDbDeletedStatement.run(now, isoPlus(now, PROFILE_DELETION_WORKER_LEASE_MS), row.request_id, workerId) as { changes: number }
       if (Number(marked.changes) !== 1) throw new Error('profile_deletion_mark_db_deleted_failed')
-      insertEvent(row.request_id, row.profile_id, 'db_deleted', workerId, { files: enqueuedFileCount, accountDeleted, alreadyDeletedByAdmin: false })
+      insertEvent(row.request_id, row.profile_id, 'db_deleted', workerId, {
+        files: enqueuedFileCount,
+        accountDeleted,
+        alreadyDeletedByAdmin: false,
+        identityLinks: deletion.identityLinksDeleted,
+        privateMatches: deletion.privateMatchesAnonymized,
+        ludoMatches: deletion.ludoMatchesAnonymized,
+      })
       if (enqueuedFileCount > 0) insertEvent(row.request_id, row.profile_id, 'file_enqueued', workerId, { count: enqueuedFileCount })
 
       options.testHooks?.beforeDatabasePhaseCommit?.(row.request_id)

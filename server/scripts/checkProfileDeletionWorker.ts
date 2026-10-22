@@ -318,10 +318,8 @@ function findOccurrences(needle: string): string[] {
 }
 
 const DELETION_BOOKKEEPING_TABLES = new Set(['profile_deletion_requests', 'profile_deletion_events', 'profile_deletion_restore_tokens', 'profile_deletion_file_queue'])
-// Компактните anti-abuse връзки (без FK) се запазват и при административното
-// изтриване. Дали да се пазят при самоизтриване е правен въпрос за решение
-// (финален отчет) — Етап 4 НЕ ги променя и не създава нови копия.
-const RETAINED_PENDING_DECISION_TABLES = new Set(['profile_visitor_links', 'profile_ip_links'])
+// Етап 4E1 (P5): profile_ip_links / profile_visitor_links на изтрития профил
+// вече се изтриват — не са в никакъв списък с изключения.
 
 try {
   console.log('\n[S] Миграция 20261026_001')
@@ -750,11 +748,11 @@ try {
     assertEqual(count('SELECT COUNT(*) AS c FROM paid_gift_notification_log WHERE purchase_id = ?;', giftPurchaseForTarget), 0, 'известието КЪМ target е изтрито')
   })
 
-  await check('[D9] Няма сираци и счупени FK; ID/акаунт/име/имейл на target не остават извън snapshot колоните, журнала и anti-abuse връзките (за решение)', () => {
+  await check('[D9] Няма сираци и счупени FK; ID/акаунт/име/имейл на target не остават извън snapshot колоните и журнала (вкл. IP/visitor връзките, 4E1)', () => {
     assertEqual((db.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length, 0, 'foreign_key_check')
     const unexpected = (needle: string) => findOccurrences(needle).filter((hit) => {
       const [table, column] = hit.split('.')
-      return !DELETION_BOOKKEEPING_TABLES.has(table) && !RETAINED_PENDING_DECISION_TABLES.has(table) && !/^deleted_.*_snapshot$/.test(column)
+      return !DELETION_BOOKKEEPING_TABLES.has(table) && !/^deleted_.*_snapshot$/.test(column)
     })
     assertEqual(unexpected(target.profileId).join(', '), '', 'profile_id')
     assertEqual(unexpected(target.accountId).join(', '), '', 'account_id')
