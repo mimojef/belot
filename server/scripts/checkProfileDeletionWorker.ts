@@ -26,6 +26,8 @@ import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createAuthStore } from '../src/db/authStore.js'
 import { createProfileBanStore } from '../src/db/profileBanStore.js'
 import { createProfileDeletionRequestStore } from '../src/db/profileDeletionRequestStore.js'
+import { createTournamentStore } from '../src/db/tournamentStore.js'
+import { createTournamentEconomyStore } from '../src/db/tournamentEconomyStore.js'
 import {
   createProfileDeletionExecutor,
   PROFILE_DELETION_DELETED_LABEL,
@@ -129,6 +131,8 @@ const authStore = await createAuthStore(databaseFilePath, progressStore, {
 const requestStore = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
 const executor = await createProfileDeletionExecutor(databaseFilePath)
 const executor2 = await createProfileDeletionExecutor(databaseFilePath) // втори Node процес
+const tournamentStore = await createTournamentStore(databaseFilePath)
+const tournamentEconomy = await createTournamentEconomyStore(databaseFilePath) // отделна връзка (друг процес)
 
 const localGames = new Set<string>()
 function makeWorker(exec: ProfileDeletionExecutor, workerId: string, onlyRequestIds?: string[], withLedger = true) {
@@ -1074,6 +1078,92 @@ try {
     assertEqual((db.prepare('SELECT status FROM tournament_partner_invites WHERE invite_id = ?;').get(inviteId) as { status: string }).status, 'pending', 'поканата е още валидна')
     db.prepare(`INSERT INTO tournament_entries (entry_id, tournament_id, profile_id, team_id, joined_as, status) VALUES (?, ?, ?, ?, 'partner_invitee', 'confirmed');`).run(randomUUID(), tournamentId, invitee.profileId, teamId)
     assertEqual(count(`SELECT COUNT(*) AS c FROM tournament_entries WHERE tournament_id = ? AND profile_id = ?;`, tournamentId, invitee.profileId), 1, 'участие след отмяна')
+  })
+
+  await check('[R6] Турнирни пътища при активна заявка (заявката е записана от друга връзка/процес): solo, повторно записване, приемане и създаване на покана -> profile_deletion_pending без грешка; нищо не е записано/таксувано; след отмяна — нормално', () => {
+    const fund = (profileId: string) => db.prepare(`
+      INSERT INTO profile_wallets (profile_id, yellow_coins_balance) VALUES (?, 1000000)
+      ON CONFLICT(profile_id) DO UPDATE SET yellow_coins_balance = 1000000;`).run(profileId)
+    const balance = (profileId: string) => (db.prepare('SELECT yellow_coins_balance AS b FROM profile_wallets WHERE profile_id = ?;').get(profileId) as { b: number }).b
+    // Отделен създател за всеки турнир (лимит на активните турнири на създател).
+    const newTournament = (name: string) => {
+      const creator = registerUser('P6Creator')
+      const created = tournamentStore.createTournament({ name, creatorProfileId: creator.profileId, visibility: 'public', entryFee: 100, startMode: 'fill', playerCapacity: 8 })
+      if (!created.ok) throw new Error(`турнир: ${created.reason}`)
+      return created.tournament.tournamentId
+    }
+    const submit = (user: User) => {
+      const created = requestStore.createRequest({ profileId: user.profileId, accountId: user.accountId })
+      if (!created.ok) throw new Error(`заявка: ${JSON.stringify(created)}`)
+    }
+    const entryCount = (tournamentId: string, profileId: string, status = 'confirmed') =>
+      count(`SELECT COUNT(*) AS c FROM tournament_entries WHERE tournament_id = ? AND profile_id = ? AND status = ?;`, tournamentId, profileId, status)
+    const befriend = (a: User, b: User) => {
+      const [lower, higher] = [a.profileId, b.profileId].sort()
+      db.prepare(`INSERT INTO profile_friendships (friendship_id, requester_profile_id, addressee_profile_id, lower_profile_id, higher_profile_id, status) VALUES (?, ?, ?, ?, ?, 'accepted');`)
+        .run(randomUUID(), a.profileId, b.profileId, lower, higher)
+    }
+
+    // a) Самостоятелно записване.
+    const solo = registerUser('P6Solo')
+    fund(solo.profileId)
+    const soloTournament = newTournament('P6 solo')
+    submit(solo)
+    const soloResult = tournamentEconomy.joinTournamentSoloAtomically(soloTournament, solo.profileId)
+    assert(!soloResult.ok && soloResult.reason === 'profile_deletion_pending', `solo: ${JSON.stringify(soloResult)}`)
+    assertEqual(entryCount(soloTournament, solo.profileId), 0, 'solo: без участие')
+    assertEqual(balance(solo.profileId), 1000000, 'solo: без таксуване')
+    assertEqual(count(`SELECT COUNT(*) AS c FROM tournament_economy_ledger WHERE profile_id = ?;`, solo.profileId), 0, 'solo: без ledger ред')
+
+    // b) Повторно записване (refunded -> confirmed през UPDATE).
+    const rejoin = registerUser('P6Rejoin')
+    fund(rejoin.profileId)
+    const rejoinTournament = newTournament('P6 rejoin')
+    const firstJoin = tournamentEconomy.joinTournamentSoloAtomically(rejoinTournament, rejoin.profileId)
+    assert(firstJoin.ok, `първо записване: ${JSON.stringify(firstJoin)}`)
+    db.prepare(`UPDATE tournament_entries SET status = 'refunded', refunded_at = CURRENT_TIMESTAMP WHERE tournament_id = ? AND profile_id = ?;`).run(rejoinTournament, rejoin.profileId)
+    const balanceBeforeRejoin = balance(rejoin.profileId)
+    submit(rejoin)
+    const rejoinResult = tournamentEconomy.joinTournamentSoloAtomically(rejoinTournament, rejoin.profileId)
+    assert(!rejoinResult.ok && rejoinResult.reason === 'profile_deletion_pending', `повторно: ${JSON.stringify(rejoinResult)}`)
+    assertEqual(entryCount(rejoinTournament, rejoin.profileId, 'refunded'), 1, 'повторно: участието остава refunded')
+    assertEqual(balance(rejoin.profileId), balanceBeforeRejoin, 'повторно: без таксуване')
+
+    // c) Приемане на покана от поканения с активна заявка.
+    const inviter = registerUser('P6Inviter')
+    const invitee = registerUser('P6Invitee')
+    fund(inviter.profileId)
+    fund(invitee.profileId)
+    befriend(inviter, invitee)
+    const inviteTournament = newTournament('P6 accept')
+    const invite = tournamentEconomy.createPartnerInviteAtomically(inviteTournament, inviter.profileId, invitee.profileId)
+    if (!invite.ok) throw new Error(`покана: ${JSON.stringify(invite)}`)
+    submit(invitee)
+    const acceptResult = tournamentEconomy.acceptPartnerInviteAtomically(inviteTournament, invite.invite.inviteId, invitee.profileId)
+    assert(!acceptResult.ok && acceptResult.reason === 'profile_deletion_pending', `приемане: ${JSON.stringify(acceptResult)}`)
+    assertEqual(entryCount(inviteTournament, invitee.profileId), 0, 'приемане: без участие')
+    assertEqual(balance(invitee.profileId), 1000000, 'приемане: без таксуване')
+    assertEqual((db.prepare('SELECT status FROM tournament_partner_invites WHERE invite_id = ?;').get(invite.invite.inviteId) as { status: string }).status, 'pending', 'приемане: поканата остава pending')
+
+    // d) Създаване на покана от поканил с активна заявка (участието му се създава при поканата).
+    const pendingInviter = registerUser('P6PendInviter')
+    const friend = registerUser('P6Friend')
+    fund(pendingInviter.profileId)
+    befriend(pendingInviter, friend)
+    const createTournament = newTournament('P6 create')
+    submit(pendingInviter)
+    const createResult = tournamentEconomy.createPartnerInviteAtomically(createTournament, pendingInviter.profileId, friend.profileId)
+    assert(!createResult.ok && createResult.reason === 'profile_deletion_pending', `създаване: ${JSON.stringify(createResult)}`)
+    assertEqual(entryCount(createTournament, pendingInviter.profileId), 0, 'създаване: без участие')
+    assertEqual(count(`SELECT COUNT(*) AS c FROM tournament_partner_invites WHERE tournament_id = ?;`, createTournament), 0, 'създаване: без покана')
+    assertEqual(balance(pendingInviter.profileId), 1000000, 'създаване: без таксуване')
+
+    // e) След отмяна guard-ът не пречи — самостоятелното записване минава.
+    const issued = requestStore.issueRestoreToken(solo.profileId)
+    assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    const afterCancel = tournamentEconomy.joinTournamentSoloAtomically(soloTournament, solo.profileId)
+    assert(afterCancel.ok, `след отмяна: ${JSON.stringify(afterCancel)}`)
+    assertEqual(entryCount(soloTournament, solo.profileId), 1, 'след отмяна: участие')
   })
 
   console.log('\n[L] Регистър и процедурата след restore')

@@ -29,6 +29,13 @@ import { createProfileDeletionExecutor } from './db/profileDeletionExecutor.js'
 import { appendProfileDeletionLedgerEntry, getDefaultProfileDeletionLedgerPath } from './db/profileDeletionLedger.js'
 import { createProfileDeletionWorker } from './core/profileDeletionWorker.js'
 import { removeProfileDeletionFile } from './uploads/profileDeletionFileRemoval.js'
+import {
+  deletePublicUploadFile,
+  resolvePublicUploadRequestPath,
+  resolveRealPublicUploadFilePath,
+  type PublicUploadPathResolution,
+} from './uploads/publicUploadPath.js'
+import { createProfileUploadReferenceReader } from './db/profileUploadReferenceReader.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
 import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
@@ -600,7 +607,8 @@ function getCampaignThemeAssetDirectory(campaignId: string, kind: CampaignThemeA
 // отлага архивирането за следващия scheduler tick).
 async function copyCampaignUnitIconToArchive(campaignId: string, currentIconUrl: string | null): Promise<string | null> {
   if (currentIconUrl === null || !isValidCampaignIdPathSegment(campaignId)) return null
-  const sourcePath = resolveUploadRequestPath(currentIconUrl)
+  const sourceResolution = resolveUploadRequestPath(currentIconUrl)
+  const sourcePath = sourceResolution === null ? null : await resolveRealPublicUploadFilePath(sourceResolution)
   if (sourcePath === null) return null
   let buffer: Buffer
   try {
@@ -1135,6 +1143,9 @@ const adCampaignsStore = await createAdCampaignsStore(
   databaseBootstrap.databaseFilePath,
 )
 const profileBanStore = await createProfileBanStore(databaseBootstrap.databaseFilePath)
+// Аватар/снимка от галерията, която още се реферира от жив ред, не се трие
+// физически (виж deleteUploadFileByUrl по-долу).
+const profileUploadReferenceReader = await createProfileUploadReferenceReader(databaseBootstrap.databaseFilePath)
 const profileHardDeleteService = await createProfileHardDeleteService(databaseBootstrap.databaseFilePath, {
   // deleteUploadFileByUrl е function declaration по-долу в този модул (hoisted,
   // затова е ползваем тук въпреки textual реда) — единствен canonical
@@ -8474,22 +8485,23 @@ async function deleteUploadFileByUrl(uploadUrl: string): Promise<void> {
     return
   }
 
-  const filePath = resolveUploadRequestPath(trimmedUrl)
-
-  if (filePath === null) {
-    return
-  }
-
+  // publicUploadPath.ts: само whitelisted публични root-ове, каноничен URL,
+  // без symlink и без файл извън root-а. Аватар/снимка, която още се
+  // реферира от жив ред (споделен файл), остава. Липсващ файл = вече чисто
+  // (DB редът е източникът на истината).
   try {
-    await unlink(filePath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-      // The DB row is the source of truth; a missing upload file is already clean.
-      return
+    const outcome = await deletePublicUploadFile(trimmedUrl, {
+      uploadsRoot: UPLOADS_ROOT_PATH,
+      publicRoots: PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS,
+      isStillReferenced: () => profileUploadReferenceReader.isProfileUploadUrlReferenced(trimmedUrl),
+    })
+    if (outcome.startsWith('refused_')) {
+      console.error(`[uploads] Отказано изтриване (${outcome}) на ${trimmedUrl}`)
     }
+  } catch (error) {
     // Реална fs грешка (permissions, disk-и т.н.) — не се крие тихо, но и
     // не chупи caller-а (best-effort cleanup, mirror на deleteAttachmentFileByFilename).
-    console.error(`[uploads] Неуспешно изтриване на ${filePath}:`, error)
+    console.error(`[uploads] Неуспешно изтриване на ${trimmedUrl}:`, error)
   }
 }
 
@@ -8852,26 +8864,16 @@ const PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS = [
   resolve(CAMPAIGN_THEME_UPLOADS_PATH),
 ]
 
-function resolveUploadRequestPath(pathname: string): string | null {
-  if (!pathname.startsWith(UPLOADS_ROUTE_PREFIX)) {
-    return null
-  }
-
-  const relativePath = decodeURIComponent(
-    pathname.slice(UPLOADS_ROUTE_PREFIX.length),
-  )
-  const resolvedPath = resolve(UPLOADS_ROOT_PATH, relativePath)
-
-  const isUnderPublicSubdirectory = PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS.some((publicRoot) => {
-    const publicRootWithSeparator = `${publicRoot}${/[/\\]$/.test(publicRoot) ? '' : '\\'}`
-    return resolvedPath.startsWith(publicRootWithSeparator) || resolvedPath === publicRoot
+// Платформено коректно (path.relative) — предишната проверка долепяше
+// Windows разделител и под Linux никога не съвпадаше. Изисква каноничен URL
+// (без '..', '.', празни сегменти, обратна наклонена черта, ':', '%' след
+// декодиране), за да не могат проверките по URL (скрита галерия) да бъдат
+// заобиколени — виж uploads/publicUploadPath.ts.
+function resolveUploadRequestPath(pathname: string): PublicUploadPathResolution | null {
+  return resolvePublicUploadRequestPath(pathname, {
+    uploadsRoot: UPLOADS_ROOT_PATH,
+    publicRoots: PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS,
   })
-
-  if (!isUnderPublicSubdirectory) {
-    return null
-  }
-
-  return resolvedPath
 }
 
 async function handleUploadsRequest(
@@ -8883,9 +8885,9 @@ async function handleUploadsRequest(
     return false
   }
 
-  const filePath = resolveUploadRequestPath(pathname)
+  const resolution = resolveUploadRequestPath(pathname)
 
-  if (filePath === null) {
+  if (resolution === null) {
     return false
   }
 
@@ -8893,7 +8895,15 @@ async function handleUploadsRequest(
   // изтриване не се сервира (404); файлът остава непокътнат на диска.
   // Аватарите НЕ се крият (Етап 3): историята на завършени турнири и
   // "Приключили" частни маси (2 часа) изрично продължават да ги показват.
-  if (playerProgressStore.isUploadPathHiddenForDeletion(pathname)) {
+  // Проверява се КАНОНИЧНИЯТ URL (същият файл не може да се достигне през
+  // друга, неканонична форма — такава изобщо не се разрешава).
+  if (playerProgressStore.isUploadPathHiddenForDeletion(resolution.canonicalPathname)) {
+    return false
+  }
+
+  // Symlink/junction, който води извън публичния root, не се сервира.
+  const filePath = await trackHttpWait('io', resolveRealPublicUploadFilePath(resolution))
+  if (filePath === null) {
     return false
   }
 
@@ -15767,6 +15777,12 @@ function isTournamentEntryActionRateLimited(profileId: string, now: number): boo
   return false
 }
 
+// Самоизтриване, Етап 4: SQLite guard-ът (20261026_001) отказва ново
+// турнирно участие при активна заявка за изтриване — очакван отказ (403),
+// не HTTP 500 (виж isProfileDeletionAdmissionError в tournamentEconomyStore.ts).
+const PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE =
+  'Профилът ви е подаден за изтриване. Не можете да участвате в турнир, докато заявката е активна.'
+
 const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   tournament_not_found: 'Турнирът не е намерен.',
   tournament_not_open: 'Турнирът вече не приема записвания.',
@@ -15780,6 +15796,7 @@ const JOIN_FAILURE_MESSAGES: Record<string, string> = {
   requires_password: 'Този турнир е защитен с парола.',
   participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
   shuffle_already_completed: 'Този турнир вече е разбъркан и не приема нови участници.',
+  profile_deletion_pending: PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE,
 }
 
 const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
@@ -15808,13 +15825,14 @@ const PARTNER_INVITE_FAILURE_MESSAGES: Record<string, string> = {
   insufficient_funds: 'Нямаш достатъчно жълтици за входа.',
   team_invalid: 'Отборът вече не е валиден.',
   participation_blocked: 'Създателят не желае вие да участвате в неговия турнир',
+  profile_deletion_pending: PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE,
 }
 
 function getPartnerInviteFailureStatus(reason: string): number {
   if (reason === 'tournament_not_found' || reason === 'invite_not_found') return 404
   if (
     reason === 'requires_password' || reason === 'not_invitee' || reason === 'not_inviter'
-    || reason === 'participation_blocked'
+    || reason === 'participation_blocked' || reason === 'profile_deletion_pending'
   ) return 403
   if (reason === 'insufficient_funds') return 402
   return 409
@@ -16245,7 +16263,8 @@ async function handleTournamentJoinRequest(
 
   if (!result.ok) {
     const status = result.reason === 'tournament_not_found' ? 404
-      : result.reason === 'requires_password' || result.reason === 'participation_blocked' ? 403
+      : result.reason === 'requires_password' || result.reason === 'participation_blocked'
+        || result.reason === 'profile_deletion_pending' ? 403
       : result.reason === 'insufficient_funds' ? 402
       : result.reason === 'tournament_full' || result.reason === 'already_participating_elsewhere'
         || result.reason === 'tournament_not_open' || result.reason === 'rejoin_not_allowed'

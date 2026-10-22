@@ -42,6 +42,17 @@ type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 type TournamentLedgerEntryType = 'entry_fee_debit' | 'entry_fee_refund' | 'prize_payout' | 'system_fee'
 
+// Самоизтриване, Етап 4 (20261026_001): тригерите върху tournament_entries
+// отказват НОВО активно участие на профил с активна заявка за изтриване
+// (вкл. при race с подаване от друг процес). Очакван отказ, не сривов —
+// транзакцията се връща и извикващият получава reason 'profile_deletion_pending'.
+// Самият SQL guard остава единствената защита (тук само се разпознава).
+const PROFILE_DELETION_ADMISSION_ERROR_CODE = 'profile_deletion_pending_tournament_admission'
+
+function isProfileDeletionAdmissionError(error: unknown): boolean {
+  return error instanceof Error && error.message.includes(PROFILE_DELETION_ADMISSION_ERROR_CODE)
+}
+
 export type PartnerCandidateRecord = {
   profileId: ProfileId
   displayName: string
@@ -95,6 +106,8 @@ export type JoinTournamentSoloResult =
         | 'requires_password'
         | 'participation_blocked'
         | 'shuffle_already_completed'
+        /** Профилът има активна заявка за самоизтриване (SQLite guard 20261026_001). */
+        | 'profile_deletion_pending'
       /** Общ за Case A и Case B — турнирът, заради чиято близка регистрация
        * join-ът е блокиран (виж resolveActiveEntryBlock), за да отвори
        * клиентът точно него. */
@@ -326,6 +339,9 @@ export type PartnerInviteMutationResult =
         | 'insufficient_funds'
         | 'team_invalid'
         | 'participation_blocked'
+        /** Действащият профил (inviter при create, invitee при accept) има
+         * активна заявка за самоизтриване (SQLite guard 20261026_001). */
+        | 'profile_deletion_pending'
       /** Общ за двата case-а (A и B) — турнирът, заради чиято близка
        * регистрация опитът е блокиран. */
       blockingTournamentId?: TournamentId
@@ -1443,6 +1459,16 @@ export async function createTournamentEconomyStore(
     FROM profiles
     WHERE profile_id = ?
       AND ${sqlProfileVisibleForDeletion('profiles.profile_id')}
+    LIMIT 1;
+  `)
+
+  // Самоизтриване, Етап 4 — когато скритият профил е САМИЯТ действащ
+  // потребител (поканеният при приемане), той получава собственото си
+  // съобщение (profile_deletion_pending), а не "Избраният профил не може да
+  // бъде поканен" от validateInvitee.
+  const selectProfilePendingDeletionStatement = database.prepare(`
+    SELECT 1 AS pending FROM profiles p
+    WHERE p.profile_id = ? AND NOT ${sqlProfileVisibleForDeletion('p.profile_id')}
     LIMIT 1;
   `)
 
@@ -3200,6 +3226,7 @@ export async function createTournamentEconomyStore(
         } catch {
           // keep original error
         }
+        if (isProfileDeletionAdmissionError(error)) return { ok: false, reason: 'profile_deletion_pending' }
         throw error
       }
       return result
@@ -3265,6 +3292,10 @@ export async function createTournamentEconomyStore(
         if (teamRow === undefined || teamRow.status !== 'forming' || teamMembers.length !== 1) {
           database.exec('ROLLBACK;')
           return { ok: false, reason: 'team_invalid' }
+        }
+        if (selectProfilePendingDeletionStatement.get(inviteeProfileId) !== undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, reason: 'profile_deletion_pending' }
         }
         const inviteeValidation = validateInvitee(
           tournamentId,
@@ -3337,6 +3368,7 @@ export async function createTournamentEconomyStore(
         }
       } catch (error) {
         try { database.exec('ROLLBACK;') } catch {}
+        if (isProfileDeletionAdmissionError(error)) return { ok: false, reason: 'profile_deletion_pending' }
         throw error
       }
     },
@@ -3641,9 +3673,10 @@ export async function createTournamentEconomyStore(
         if (existingInTx === undefined) {
           try {
             insertEntryStatement.run(entryId, tournamentId, profileId, targetTeamId)
-          } catch {
+          } catch (error) {
             // UNIQUE(tournament_id, profile_id) or active-profile partial index.
             database.exec('ROLLBACK;')
+            if (isProfileDeletionAdmissionError(error)) return { ok: false, reason: 'profile_deletion_pending' }
             return { ok: false, reason: 'already_participating_elsewhere' }
           }
         } else {
@@ -3699,6 +3732,7 @@ export async function createTournamentEconomyStore(
         } catch {
           // surface original failure
         }
+        if (isProfileDeletionAdmissionError(error)) return { ok: false, reason: 'profile_deletion_pending' }
         throw error
       }
 

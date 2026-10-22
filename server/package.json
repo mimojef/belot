@@ -287,6 +287,7 @@
     "check:profile-deletion-request-store": "tsx scripts/checkProfileDeletionRequestStore.ts --server-root=.",
     "check:profile-deletion-request-http": "tsx scripts/checkProfileDeletionRequestHttp.ts --server-root=.",
     "check:profile-deletion-worker": "tsx scripts/checkProfileDeletionWorker.ts --server-root=.",
+    "check:public-upload-path-security": "tsx scripts/checkPublicUploadPathSecurity.ts --server-root=.",
     "ops:reconcile-profile-deletion-ledger": "tsx scripts/reconcileProfileDeletionLedger.ts",
     "check:friend-acceptance": "tsx scripts/checkFriendAcceptanceNotifications.ts",
     "check:round-capot-mission": "tsx scripts/checkRoundCapotMission.ts",

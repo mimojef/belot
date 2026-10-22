@@ -11,6 +11,7 @@
  *     "остави заявката активна", отмяна, конкурентна отмяна, граници на срока.
  * [M] Миграция 20261025_001: тригери и инварианти на токените.
  * [G] Активни игри в персистираните snapshot-и (Белот / Не се сърди човече).
+ * [GS] Липсваща схема на Свара: стартът не се срива, подаването е fail-closed.
  * [L] Вход: PROFILE_PENDING_DELETION, бан + заявка, rate limit на неуспешни
  *     опити, проверка на паролата, основен профил при няколко профила.
  * [P] Rate limit, журнал за realtime, контрагенти.
@@ -26,6 +27,7 @@ import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createAuthStore, LOGIN_RATE_LIMITED_MESSAGE, PROFILE_PENDING_DELETION_LOGIN_MESSAGE } from '../src/db/authStore.js'
 import { createProfileBanStore } from '../src/db/profileBanStore.js'
 import { createProfileDeletionRequestStore, PROFILE_DELETION_RESTORE_TOKEN_TTL_MS } from '../src/db/profileDeletionRequestStore.js'
+import { createProfileDeletionExecutor } from '../src/db/profileDeletionExecutor.js'
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -488,6 +490,35 @@ try {
     pair(a, b, 'accepted')
     pair(c, a, 'pending')
     assertEqual(store.listRelationshipCounterpartIds(a.profileId).sort().join(','), [b.profileId, c.profileId].sort().join(','), 'контрагенти')
+  })
+
+  console.log('\n[GS] Липсваща схема на Свара (svara_match_snapshots)')
+
+  await check('[GS1] Без svara_match_snapshots: store и executor се създават (стартът не се срива); подаването е fail-closed; след възстановяване на таблицата — нормално', async () => {
+    const user = registerUser('NoSvara')
+    const copyPath = join(root, 'no-svara.sqlite')
+    db.exec(`VACUUM INTO '${copyPath.replace(/'/g, "''")}';`)
+    const copy: SqliteDatabase = new sqliteModule.DatabaseSync(copyPath, { open: true, enableForeignKeyConstraints: true })
+    const schema = copy.prepare(`SELECT type, sql FROM sqlite_master WHERE tbl_name = 'svara_match_snapshots' AND sql IS NOT NULL ORDER BY type = 'table' DESC;`).all() as Array<{ type: string; sql: string }>
+    assert(schema.length > 0 && schema[0].type === 'table', 'схемата на Свара липсва още преди теста')
+    copy.exec('DROP TABLE svara_match_snapshots;')
+    const copyStore = await createProfileDeletionRequestStore(copyPath, { rateLimitSecret: SECRET })
+    const copyExecutor = await createProfileDeletionExecutor(copyPath)
+    try {
+      assertEqual(copyStore.hasActiveGameSnapshot(user.profileId), true, 'без таблицата — "има активна игра" (fail-closed)')
+      const refused = copyStore.createRequest({ profileId: user.profileId, accountId: user.accountId })
+      assert(!refused.ok && refused.code === 'active_participation', `очакван отказ active_participation, получено ${JSON.stringify(refused)}`)
+      assertEqual((copy.prepare('SELECT COUNT(*) AS cnt FROM profile_deletion_requests WHERE profile_id = ?;').get(user.profileId) as { cnt: number }).cnt, 0, 'не е създадена заявка')
+      // Неуспешната подготовка не се кешира: таблицата се появява отново.
+      for (const entry of schema) copy.exec(entry.sql)
+      assertEqual(copyStore.hasActiveGameSnapshot(user.profileId), false, 'с таблицата — няма активна игра')
+      const accepted = copyStore.createRequest({ profileId: user.profileId, accountId: user.accountId })
+      assert(accepted.ok, `след възстановяване подаването минава: ${JSON.stringify(accepted)}`)
+    } finally {
+      copyExecutor.close()
+      copyStore.close()
+      copy.close()
+    }
   })
 
   console.log('\n[D] Цялост на данните')

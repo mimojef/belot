@@ -22,6 +22,7 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import type { Readable } from 'node:stream'
 import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -30,6 +31,7 @@ import { ensureServerDatabaseReady } from '../src/db/ensureServerDatabaseReady.j
 import { createPasswordHash } from '../src/db/authHelpers.js'
 import { OFFICIAL_PIKA_PROFILE_ID } from '../src/db/normalizeProfileIdentityText.js'
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
+import { createProfileDeletionRequestStore } from '../src/db/profileDeletionRequestStore.js'
 
 const SECRET = 'profile-deletion-request-http-secret-0123456789'
 const PASSWORD = 'secret123'
@@ -426,6 +428,42 @@ try {
       refused = error instanceof Error && error.message.includes('profile_deletion_pending_tournament_admission')
     }
     assert(refused, 'приемане на поканата през периода не беше отказано')
+  })
+
+  // P6: заявката е записана от ДРУГ процес (отделна връзка към базата, без
+  // отнемане на сесиите в този процес) — записването в турнир завършва с
+  // очакван отказ, никога с HTTP 500 / необработена SQL грешка.
+  await check('[E18b] Записване в турнир при активна заявка от друг процес: без HTTP 500; при 403 — точното съобщение; без участие', async () => {
+    const racer = await register('P6Race')
+    db.prepare(`UPDATE profile_wallets SET yellow_coins_balance = 1000000 WHERE profile_id = ?;`).run(racer.profileId)
+    const raceCreator = await register('P6Creator')
+    const raceTournamentId = randomUUID()
+    db.prepare(`INSERT INTO tournaments (tournament_id, name, entry_fee, start_mode, status, creator_profile_id) VALUES (?, 'P6 турнир', 100, 'fill', 'open', ?);`).run(raceTournamentId, raceCreator.profileId)
+    const otherProcessStore = await createProfileDeletionRequestStore(bootstrap.databaseFilePath, { rateLimitSecret: SECRET })
+    try {
+      const created = otherProcessStore.createRequest({ profileId: racer.profileId, accountId: racer.accountId })
+      assert(created.ok, `заявка: ${JSON.stringify(created)}`)
+    } finally {
+      otherProcessStore.close()
+    }
+    const res = await api(`/api/tournaments/${raceTournamentId}/join`, { method: 'POST', cookie: racer.cookie, body: {} })
+    assert(res.status !== 500, `HTTP 500: ${JSON.stringify(res.json)}`)
+    assert([401, 403].includes(res.status), `неочакван статус ${res.status} ${JSON.stringify(res.json)}`)
+    if (res.status === 403) {
+      assert(res.json.reason === 'profile_deletion_pending', `reason=${res.json.reason}`)
+      assert(res.json.message === 'Профилът ви е подаден за изтриване. Не можете да участвате в турнир, докато заявката е активна.', `message=${res.json.message}`)
+    }
+    const entries = db.prepare('SELECT COUNT(*) AS c FROM tournament_entries WHERE tournament_id = ? AND profile_id = ?;').get(raceTournamentId, racer.profileId) as { c: number }
+    assert(entries.c === 0, 'участие')
+    console.log(`        (статус при сесия, валидна до проверката: ${res.status})`)
+  })
+
+  await check('[E18c] Съобщението и статусът за profile_deletion_pending са в JOIN и PARTNER_INVITE картите (403)', () => {
+    const source = readFileSync(join(originalServerRoot, 'src', 'index.ts'), 'utf8').replace(/\r\n/g, '\n')
+    assert(source.includes("const PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE =\n  'Профилът ви е подаден за изтриване. Не можете да участвате в турнир, докато заявката е активна.'"), 'текст')
+    assert((source.match(/profile_deletion_pending: PROFILE_DELETION_PENDING_TOURNAMENT_MESSAGE,/g) ?? []).length === 2, 'двете карти')
+    assert(source.includes("|| reason === 'participation_blocked' || reason === 'profile_deletion_pending'\n  ) return 403"), 'покани: 403')
+    assert(source.includes("|| result.reason === 'profile_deletion_pending' ? 403"), 'solo: 403')
   })
 
   await check('[E19] Данните на профила са непроменени (жълтици, VIP, статистики, приятелство, разговор, лоби, тема, профил)', () => {

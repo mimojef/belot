@@ -54,10 +54,26 @@ export function createProfileDeletionParticipationChecks(database: SqliteDatabas
 
   // Свара пази всеки мач (lobby и in-progress) — mirror на
   // svaraMatchSnapshotStore.findActiveMatchId (active/absent място = ангажимент).
-  const selectSvaraCandidatesStatement = database.prepare(`
+  // Подготвя се отложено: svara_match_snapshots е схема на feature-а Свара и
+  // липсата ѝ НЕ трябва да спира стартирането на платформата (виж
+  // check:svara-restart-2b36c). Неуспешна подготовка не се кешира (таблицата
+  // може да се появи по-късно) и проверката е fail-closed — виж hasSvaraGame.
+  const SELECT_SVARA_CANDIDATES_SQL = `
     SELECT match_status, snapshot_json FROM svara_match_snapshots
     WHERE match_status IN ('lobby', 'in-progress') AND instr(snapshot_json, ?) > 0;
-  `)
+  `
+  let selectSvaraCandidatesStatement: ReturnType<SqliteDatabase['prepare']> | null = null
+
+  function getSvaraCandidatesStatement(): ReturnType<SqliteDatabase['prepare']> | null {
+    if (selectSvaraCandidatesStatement === null) {
+      try {
+        selectSvaraCandidatesStatement = database.prepare(SELECT_SVARA_CANDIDATES_SQL)
+      } catch {
+        return null
+      }
+    }
+    return selectSvaraCandidatesStatement
+  }
 
   const selectActiveCreatorStatement = database.prepare(`
     SELECT 1 FROM tournaments
@@ -113,7 +129,18 @@ export function createProfileDeletionParticipationChecks(database: SqliteDatabas
   }
 
   function hasSvaraGame(profileId: string): boolean {
-    for (const { snapshot_json } of selectSvaraCandidatesStatement.all(profileId) as Array<{ match_status: string; snapshot_json: string }>) {
+    // Без проверима схема на Свара не може да се докаже липса на активна
+    // игра — fail-closed ("има активна игра"): подаването се отказва, а
+    // worker-ът блокира и опитва отново.
+    const statement = getSvaraCandidatesStatement()
+    if (statement === null) return true
+    let rows: Array<{ match_status: string; snapshot_json: string }>
+    try {
+      rows = statement.all(profileId) as Array<{ match_status: string; snapshot_json: string }>
+    } catch {
+      return true
+    }
+    for (const { snapshot_json } of rows) {
       try {
         const snapshot = JSON.parse(snapshot_json) as { state?: { seats?: unknown; status?: Record<string, unknown> } }
         const seats = snapshot.state?.seats

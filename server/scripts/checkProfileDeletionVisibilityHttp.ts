@@ -245,9 +245,12 @@ try {
     const attachment = await fetch(`${base}/api/chat/${friendshipId}/attachments/${chatFilename}`, { headers: { Cookie: viewer.cookie } })
     const avatar = await fetch(`${base}${avatarUrl}`)
     const gallery = await fetch(`${base}${galleryUrl}`)
+    // P2: неканонична форма към СЪЩИЯ файл в галерията (през avatars/) —
+    // никога не се сервира (иначе би заобиколила скриването по URL).
+    const galleryBypass = await fetch(`${base}/uploads/avatars/..%2Fprofile-gallery%2F${hidden.profileId}%2F${galleryName}`)
     const lafche = await api('/api/topics/topic-lafche/messages', { cookie: viewer.cookie })
     const replies = await api(`/api/topics/topic-lafche/messages/${lafcheRootId}/replies`, { cookie: viewer.cookie })
-    return { profile, search, friends, conversations, messages, attachmentStatus: attachment.status, avatarStatus: avatar.status, galleryStatus: gallery.status, lafche, replies }
+    return { profile, search, friends, conversations, messages, attachmentStatus: attachment.status, avatarStatus: avatar.status, galleryStatus: gallery.status, galleryBypassStatus: galleryBypass.status, lafche, replies }
   }
 
   const containsId = (value: unknown, id: string) => JSON.stringify(value).includes(id)
@@ -263,6 +266,7 @@ try {
     assert(before.messages.status === 200, `съобщения ${before.messages.status}`)
     assert(before.attachmentStatus === 200, `прикачен файл ${before.attachmentStatus}`)
     assert(before.avatarStatus === 200 && before.galleryStatus === 200, `аватар ${before.avatarStatus} / галерия ${before.galleryStatus}`)
+    assert(before.galleryBypassStatus === 404, `неканоничен URL: ${before.galleryBypassStatus}`)
     assert(containsId(before.lafche.json, lafcheRootId), 'Лафче')
     assert(before.replies.status === 200, `отговори ${before.replies.status}`)
   })
@@ -309,6 +313,7 @@ try {
   await check('[H4] Галерия по директен URL: 404; аватарът (изключения) и галерията на Bob: 200', async () => {
     assert(after.avatarStatus === 200, `аватар: ${after.avatarStatus}`)
     assert(after.galleryStatus === 404, `галерия: ${after.galleryStatus}`)
+    assert(after.galleryBypassStatus === 404, `галерия през avatars/..%2F: ${after.galleryBypassStatus}`)
     const bobGallery = await fetch(`${base}${bobGalleryUrl}`)
     assert(bobGallery.status === 200, `галерия на Bob: ${bobGallery.status}`)
   })
