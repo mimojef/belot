@@ -235,7 +235,7 @@ PROJECT_ROOT=/var/www/belot-v2 DEPLOY_ROOT=/var/www/belot-v2 \
 sudo cp -a "/root/nginx-config-backups/<файл>.<timestamp>" "$ACTIVE_CONF"
 sudo nginx -t && sudo systemctl reload nginx
 # ВНИМАНИЕ: backup отпреди аварийната защита на /uploads/ НЕ съдържа
-# четирите блокировки — приложи ги наново (deploy/NGINX_PRIVATE_UPLOADS_EMERGENCY.md).
+# петте блокировки — приложи ги наново (deploy/NGINX_PRIVATE_UPLOADS_EMERGENCY.md).
 # nginx отново сочи към dist/ (root директивата от backup-натия config) —
 # /var/www/belot-v2/dist.backup-<timestamp> е непокътнат резерв, ако и
 # самият dist/ по някаква причина е бил променен междувременно:
