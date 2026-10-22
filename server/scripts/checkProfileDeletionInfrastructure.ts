@@ -218,7 +218,12 @@ function insertExecutingRequest(database: SqliteDatabase, workerId = 'worker-a')
   return fixture
 }
 
-/** UPDATE, който задава статус + всички колони, които CHECK-овете изискват за целевия статус. */
+/**
+ * UPDATE, който задава статус + всички колони, които CHECK-овете изискват за целевия статус.
+ * Етап 4 (20261026_001): executing -> completed изисква и db_deleted_at, затова
+ * то се задава в същия UPDATE само за легалния преход (от executing) — при
+ * нелегален преход тригерът за преходите остава този, който отказва.
+ */
 function setRequestStatus(database: SqliteDatabase, requestId: string, to: ProfileDeletionRequestStatus): void {
   const now = dbNow(database)
   database.prepare(`
@@ -226,6 +231,7 @@ function setRequestStatus(database: SqliteDatabase, requestId: string, to: Profi
     SET status = ?,
         lease_owner = ?, lease_expires_at = ?,
         cancelled_at = ?, completed_at = ?,
+        db_deleted_at = CASE WHEN ? = 'completed' AND status = 'executing' AND db_deleted_at IS NULL THEN ? ELSE db_deleted_at END,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE request_id = ?;
   `).run(
@@ -234,6 +240,8 @@ function setRequestStatus(database: SqliteDatabase, requestId: string, to: Profi
     to === 'executing' ? isoPlus(now, LEASE_MS) : null,
     to === 'cancelled' ? now : null,
     to === 'completed' ? now : null,
+    to,
+    now,
     requestId,
   )
 }
@@ -679,6 +687,9 @@ try {
     assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET lease_owner = 'w', lease_expires_at = ? WHERE request_id = ?;`).run(isoPlus(dbNow(db), LEASE_MS), requestId), 'CHECK constraint failed', 'lease при pending')
     assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET completed_at = ? WHERE request_id = ?;`).run(dbNow(db), requestId), 'CHECK constraint failed', 'completed_at при pending')
     const executing = insertExecutingRequest(db).requestId
+    // Етап 4: без db_deleted_at тригерът (20261026_001) отказва още преди CHECK-а —
+    // задаваме го, за да провери CHECK инварианта самостоятелно.
+    db.prepare('UPDATE profile_deletion_requests SET db_deleted_at = ? WHERE request_id = ?;').run(dbNow(db), executing)
     assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'completed' WHERE request_id = ?;`).run(executing), 'CHECK constraint failed', 'completed без completed_at и с lease')
   })
 
@@ -883,11 +894,14 @@ try {
     assert(mismatches.length === 0, mismatches.join(' | '))
   })
 
-  await check('[I5] Повторни опити: processing -> failed -> processing -> done; опашката оцелява completed заявката', () => {
+  await check('[I5] Повторни опити: processing -> failed -> processing -> done; completed едва след като файлът е обработен (Етап 4)', () => {
     const { requestId } = insertExecutingRequest(db)
     const queueId = enqueueFile(db, requestId, '/uploads/gallery/p/x.webp', 'gallery_image')
-    // Заявката приключва в базата (същата транзакция, в която се enqueue-ват файловете).
-    setRequestStatus(db, requestId, 'completed')
+    // Изтриването в базата е завършено (същата транзакция, в която се
+    // enqueue-ват файловете), но заявката НЕ може да стане completed, докато
+    // файлът чака (20261026_001 — поправка на пропуска от Етап 1).
+    db.prepare('UPDATE profile_deletion_requests SET db_deleted_at = ? WHERE request_id = ?;').run(dbNow(db), requestId)
+    assertRejects(() => setRequestStatus(db, requestId, 'completed'), 'profile_deletion_completion_files_pending', 'completed с чакащ файл')
     const takeFile = db.prepare(`
       UPDATE profile_deletion_file_queue
       SET status = 'processing', lease_owner = ?, lease_expires_at = ?, attempt_count = attempt_count + 1
@@ -909,6 +923,8 @@ try {
     assertEqual(row.attempt_count, 2, 'attempt_count')
     assertEqual(row.last_error_code, 'EBUSY', 'последна грешка се пази')
     assert(isCanonicalUtcIsoTimestamp(String(row.completed_at)), 'completed_at')
+    setRequestStatus(db, requestId, 'completed')
+    assertEqual(getRequest(db, requestId).status, 'completed', 'completed след done')
   })
 
   await check('[I6] Файлов lease: жив не може да се отнеме; запис не може да започне извън pending; идентичността е неизменима', () => {

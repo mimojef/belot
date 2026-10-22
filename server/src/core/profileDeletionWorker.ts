@@ -1,0 +1,162 @@
+// Самоизтриване на профили — Етап 4: един цикъл на worker-а за окончателно
+// изтриване. Състоянието е изцяло в SQLite (lease, статуси, опашка), затова
+// цикълът е безопасен при няколко Node процеса и продължава след рестарт на
+// PM2 — нищо не се пази само в паметта.
+//
+// Ред за всяка заявка:
+//   claim -> (ако базата още не е изтрита) игра в паметта на ТОЗИ процес ->
+//   запис в независимия регистър -> DB фаза -> файлове -> completed.
+//
+// Логовете съдържат само request_id и технически кодове — без имена, имейли,
+// пътища до файлове или токени.
+
+import type {
+  ClaimedProfileDeletionRequest,
+  ProfileDeletionExecutor,
+} from '../db/profileDeletionExecutor.js'
+import type { ProfileDeletionLedgerEntry } from '../db/profileDeletionLedger.js'
+import type {
+  ProfileDeletionFileKind,
+  ProfileDeletionFileRemovalOutcome,
+  ProfileDeletionUploadRoots,
+} from '../uploads/profileDeletionFileRemoval.js'
+
+export type ProfileDeletionWorkerDeps = {
+  executor: ProfileDeletionExecutor
+  workerId: string
+  uploadRoots: ProfileDeletionUploadRoots
+  removeFile: (kind: ProfileDeletionFileKind, storageRef: string, roots: ProfileDeletionUploadRoots) => Promise<ProfileDeletionFileRemovalOutcome>
+  /** Регистър извън SQLite; null = без регистър (само тестове). */
+  appendLedgerEntry: ((entry: ProfileDeletionLedgerEntry) => void) | null
+  /** Игра/маса/опашка в паметта на ТОЗИ процес (hasProfileActiveGameCommitment). */
+  isProfileInActiveGameLocally?: (profileId: string) => boolean
+  log?: (message: string) => void
+  maxRequestsPerRun?: number
+  /** Само тези заявки (процедурата след restore); по подразбиране — всички с изтекъл срок. */
+  onlyRequestIds?: readonly string[]
+}
+
+export type ProfileDeletionWorkerRunSummary = {
+  claimed: number
+  completed: number
+  blocked: number
+  failed: number
+  filesDeleted: number
+  filesSkippedShared: number
+  filesFailed: number
+}
+
+export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { runOnce: () => Promise<ProfileDeletionWorkerRunSummary> } {
+  const log = deps.log ?? (() => {})
+  const maxRequests = deps.maxRequestsPerRun ?? 5
+  let running = false
+
+  async function processFiles(request: ClaimedProfileDeletionRequest, summary: ProfileDeletionWorkerRunSummary): Promise<boolean> {
+    for (const file of deps.executor.listFilesToProcess(request.requestId)) {
+      if (!deps.executor.extendLease(request.requestId, deps.workerId)) return false
+      if (!deps.executor.claimFile(file.queueId, deps.workerId)) continue
+      if (deps.executor.isStorageRefReferenced(file.fileKind, file.storageRef)) {
+        deps.executor.markFileSkippedShared(file, deps.workerId, request.profileId)
+        summary.filesSkippedShared += 1
+        continue
+      }
+      let outcome: ProfileDeletionFileRemovalOutcome
+      try {
+        outcome = await deps.removeFile(file.fileKind, file.storageRef, deps.uploadRoots)
+      } catch {
+        outcome = { outcome: 'error', code: 'fs_error' }
+      }
+      if (outcome.outcome === 'deleted' || outcome.outcome === 'missing') {
+        deps.executor.markFileDone(file, deps.workerId, request.profileId, outcome.outcome)
+        summary.filesDeleted += 1
+      } else {
+        deps.executor.markFileFailed(file, deps.workerId, request.profileId, outcome.code, outcome.outcome === 'rejected')
+        summary.filesFailed += 1
+      }
+    }
+    return true
+  }
+
+  async function processRequest(request: ClaimedProfileDeletionRequest, summary: ProfileDeletionWorkerRunSummary): Promise<void> {
+    if (request.dbDeletedAt === null) {
+      if (deps.isProfileInActiveGameLocally?.(request.profileId) === true) {
+        deps.executor.blockRequest(request.requestId, deps.workerId, 'active_game_local')
+        summary.blocked += 1
+        log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=active_game_local`)
+        return
+      }
+      if (deps.appendLedgerEntry !== null) {
+        try {
+          deps.appendLedgerEntry({
+            v: 1,
+            requestId: request.requestId,
+            profileId: request.profileId,
+            accountIdSnapshot: request.accountIdSnapshot,
+            profileCreatedAtSnapshot: request.profileCreatedAtSnapshot,
+            requestedAt: request.requestedAt,
+            scheduledFor: request.scheduledFor,
+            recordedAt: new Date().toISOString(),
+          })
+        } catch {
+          deps.executor.failRequest(request.requestId, deps.workerId, 'ledger_write_failed')
+          summary.failed += 1
+          log(`[profile-deletion-worker] failed requestId=${request.requestId} code=ledger_write_failed`)
+          return
+        }
+      }
+      const result = deps.executor.runDatabasePhase(request, deps.workerId)
+      if (result.kind === 'blocked') {
+        summary.blocked += 1
+        log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=${result.code}`)
+        return
+      }
+      if (result.kind === 'failed') {
+        summary.failed += 1
+        log(`[profile-deletion-worker] failed requestId=${request.requestId} code=${result.code} retry=${result.willRetry}`)
+        return
+      }
+      if (result.kind === 'lease_lost') return
+    }
+
+    if (!(await processFiles(request, summary))) return
+    const finished = deps.executor.finishRequest(request.requestId, deps.workerId)
+    if (finished.kind === 'completed') {
+      summary.completed += 1
+      log(`[profile-deletion-worker] completed requestId=${request.requestId}`)
+    } else if (finished.kind === 'files_pending') {
+      summary.failed += 1
+      log(`[profile-deletion-worker] files pending requestId=${request.requestId} retry=${finished.willRetry}`)
+    }
+  }
+
+  async function runOnce(): Promise<ProfileDeletionWorkerRunSummary> {
+    const summary: ProfileDeletionWorkerRunSummary = {
+      claimed: 0, completed: 0, blocked: 0, failed: 0, filesDeleted: 0, filesSkippedShared: 0, filesFailed: 0,
+    }
+    // Един цикъл наведнъж в процеса; между процесите защитава lease-ът в SQLite.
+    if (running) return summary
+    running = true
+    try {
+      if (deps.onlyRequestIds !== undefined) {
+        for (const requestId of deps.onlyRequestIds) {
+          const request = deps.executor.claimNextDueRequest(deps.workerId, requestId)
+          if (request === null) continue
+          summary.claimed += 1
+          await processRequest(request, summary)
+        }
+      } else {
+        for (let index = 0; index < maxRequests; index += 1) {
+          const request = deps.executor.claimNextDueRequest(deps.workerId)
+          if (request === null) break
+          summary.claimed += 1
+          await processRequest(request, summary)
+        }
+      }
+    } finally {
+      running = false
+    }
+    return summary
+  }
+
+  return { runOnce }
+}

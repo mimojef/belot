@@ -38,6 +38,9 @@ dist-ssr
 
 # Runtime database files
 server/database/data/
+# Самоизтриване, Етап 4 — независим регистър на необратимите изтривания
+# (runtime файл извън SQLite базата; виж src/db/profileDeletionLedger.ts).
+server/database/deletion-ledger/
 
 # Database backups — генерирани на сървъра, не в git
 server/database/backups/

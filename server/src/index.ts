@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { randomUUID } from 'node:crypto'
+import { hostname } from 'node:os'
 import { mkdir, readdir, readFile, stat, unlink, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -23,7 +24,11 @@ import { logLudoDiagnosticEvent } from './diagnostics/ludoDiagnosticsLog.js'
 import { createProfileBanStore } from './db/profileBanStore.js'
 import { createProfileHardDeleteService } from './db/profileHardDeleteService.js'
 import { createProfileDeletionRequestStore, type ProfileDeletionVisibilityEvent } from './db/profileDeletionRequestStore.js'
-import { isProfileSelfDeletionFeatureEnabled } from './core/profileSelfDeletionFeatureFlag.js'
+import { isProfileSelfDeletionFeatureEnabled, isProfileSelfDeletionWorkerEnabled } from './core/profileSelfDeletionFeatureFlag.js'
+import { createProfileDeletionExecutor } from './db/profileDeletionExecutor.js'
+import { appendProfileDeletionLedgerEntry, getDefaultProfileDeletionLedgerPath } from './db/profileDeletionLedger.js'
+import { createProfileDeletionWorker } from './core/profileDeletionWorker.js'
+import { removeProfileDeletionFile } from './uploads/profileDeletionFileRemoval.js'
 import { createPendingProfileModerationStore } from './db/pendingProfileModerationStore.js'
 import { createAdminProfileRiskStore } from './db/adminProfileRiskStore.js'
 import { dbDateToUtc } from './db/dbDate.js'
@@ -1528,6 +1533,19 @@ function applyProfileDeletionVisibilityEvent(event: ProfileDeletionVisibilityEve
   if (origin === 'poll' && locallyAppliedProfileDeletionEventSeqs.delete(event.eventSeq)) {
     return
   }
+  // Етап 4 — race между процесите: заявката е записана от ДРУГ процес, а
+  // профилът междувременно е приет в игра/маса/опашка в паметта на ТОЗИ
+  // процес (персистираните snapshot-и и турнирите вече са проверени в
+  // транзакцията на подаването). Правилото "без заявка при активна игра" се
+  // възстановява чрез системна отмяна; връзките НЕ се затварят. Синхронно —
+  // без interleave с WS съобщения в този процес.
+  if (origin === 'poll' && event.eventType === 'requested' && hasProfileActiveGameCommitment(event.profileId)) {
+    const cancelled = profileDeletionRequestStore.cancelForActiveParticipation(event.requestId)
+    if (cancelled.ok) {
+      console.log(`[profile-deletion] mode=auto_cancelled_active_participation requestId=${event.requestId}`)
+      return
+    }
+  }
   const hidden = event.eventType === 'requested'
   if (hidden) {
     closeAllProfileConnections(event.profileId, { type: 'session_deletion_requested' })
@@ -1573,6 +1591,63 @@ let profileDeletionVisibilityPollInterval: ReturnType<typeof setInterval> | null
   runProfileDeletionVisibilityPoll,
   PROFILE_DELETION_VISIBILITY_POLL_INTERVAL_MS,
 )
+
+// ─── Самоизтриване, Етап 4 — автоматично окончателно изтриване ─────────────
+// Само при PROFILE_SELF_DELETION_WORKER_ENABLED=1 (независим от флага за
+// подаване). Без флага executor-ът дори не се създава — нито един
+// автоматичен DELETE. Състоянието е в SQLite (lease/статуси/опашка), затова
+// е безопасно при няколко процеса и продължава след рестарт на PM2.
+const PROFILE_DELETION_WORKER_INTERVAL_MS = 10 * 60 * 1000
+const PROFILE_DELETION_WORKER_STARTUP_DELAY_MS = 2 * 60 * 1000
+const PROFILE_DELETION_LEDGER_PATH =
+  process.env.PROFILE_DELETION_LEDGER_PATH?.trim() || getDefaultProfileDeletionLedgerPath(SERVER_ROOT_PATH)
+const profileDeletionExecutor = isProfileSelfDeletionWorkerEnabled()
+  ? await createProfileDeletionExecutor(databaseBootstrap.databaseFilePath, {
+      protectedProfileIds: [OFFICIAL_PIKA_PROFILE_ID, getConfiguredOfficialPikaProfileId()].filter(
+        (profileId): profileId is string => typeof profileId === 'string' && profileId.length > 0,
+      ),
+    })
+  : null
+const profileDeletionWorker = profileDeletionExecutor === null
+  ? null
+  : createProfileDeletionWorker({
+      executor: profileDeletionExecutor,
+      workerId: `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
+      uploadRoots: {
+        avatars: AVATAR_UPLOADS_PATH,
+        profileGallery: GALLERY_UPLOADS_PATH,
+        chatAttachments: CHAT_ATTACHMENT_UPLOADS_PATH,
+        topicAttachments: TOPIC_ATTACHMENT_UPLOADS_PATH,
+        topicMuteEvidenceAttachments: TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH,
+        supportAttachments: SUPPORT_ATTACHMENT_UPLOADS_PATH,
+      },
+      removeFile: removeProfileDeletionFile,
+      appendLedgerEntry: (entry) => appendProfileDeletionLedgerEntry(PROFILE_DELETION_LEDGER_PATH, entry),
+      isProfileInActiveGameLocally: (profileId) => hasProfileActiveGameCommitment(profileId),
+      log: (message) => console.log(message),
+    })
+console.log(`[profile-deletion-worker] enabled=${profileDeletionWorker !== null}`)
+
+async function runProfileDeletionWorker(): Promise<void> {
+  if (isServerShuttingDown || profileDeletionWorker === null || !isProfileSelfDeletionWorkerEnabled()) {
+    return
+  }
+  try {
+    const summary = await profileDeletionWorker.runOnce()
+    if (summary.claimed > 0) {
+      console.log(`[profile-deletion-worker] run ${JSON.stringify(summary)}`)
+    }
+  } catch (error) {
+    console.error('[profile-deletion-worker] run failed:', error instanceof Error ? error.message : 'unknown error')
+  }
+}
+
+let profileDeletionWorkerStartupTimeout: ReturnType<typeof setTimeout> | null = profileDeletionWorker === null
+  ? null
+  : timedSetTimeout('profileDeletionWorker', () => runProfileDeletionWorker(), PROFILE_DELETION_WORKER_STARTUP_DELAY_MS)
+let profileDeletionWorkerInterval: ReturnType<typeof setInterval> | null = profileDeletionWorker === null
+  ? null
+  : timedSetInterval('profileDeletionWorker', () => runProfileDeletionWorker(), PROFILE_DELETION_WORKER_INTERVAL_MS)
 
 function runLobbyChatRetentionCleanup(): void {
   if (isServerShuttingDown) {
@@ -11201,8 +11276,10 @@ function isProfileSelfDeletionStaffOrOfficialProfile(session: AuthSessionSnapsho
 
 // Реалните състояния на игрите: in-memory (Белот стаи/сесии, чакащи маси,
 // matchmaking, Не се сърди човече, Свара — вкл. нейния постоянен snapshot,
-// fail-closed), персистираните snapshot-и за Белот/Не се сърди човече (рестарт
-// или друг процес) и незавършени турнири (creator или активно участие).
+// fail-closed), персистираните snapshot-и за Белот/Не се сърди човече/Свара
+// (рестарт или друг процес) и незавършени турнири (creator или активно
+// участие). Етап 4: персистираните проверки се повтарят ВЪТРЕ в транзакцията
+// на createRequest; паметта на другите процеси — при realtime reconcile.
 function hasActiveParticipationForProfileDeletion(profileId: string): boolean {
   return (
     hasProfileActiveGameCommitment(profileId) ||
@@ -11211,24 +11288,13 @@ function hasActiveParticipationForProfileDeletion(profileId: string): boolean {
   )
 }
 
-// Чакащи ВХОДЯЩИ покани за турнирен партньор към профила се отказват по
-// стандартния път (същото като ръчен отказ: поканата -> declined, отборът на
-// поканилия -> solo, турнирно събитие и известие). Потвърдени участия не се
-// пипат. Изходящите покани изискват потвърден запис на поканилия, който вече
-// е отказал подаването (незавършен турнир), затова тук такива няма.
-function declineIncomingPartnerInvitesForProfileDeletion(profileId: string): void {
-  try {
-    for (const invite of tournamentEconomyStore.listPendingPartnerInvitesForProfile(profileId)) {
-      if (invite.inviteeProfileId !== profileId) continue
-      const result = tournamentEconomyStore.declinePartnerInviteAtomically(invite.tournamentId, invite.inviteId, profileId)
-      if (result.ok && result.alreadyResolved !== true) {
-        sendTournamentPartnerInviteResolved(result.invite)
-      }
-    }
-  } catch (error) {
-    console.error(`[profile-deletion] declining partner invites failed profileId=${profileId}:`, error)
-  }
-}
+// Етап 4: чакащите ВХОДЯЩИ покани за турнирен партньор НЕ се отказват при
+// подаване (необратима промяна). През 45-дневния период те не могат да бъдат
+// приети — профилът няма сесия, а тригерът върху tournament_entries
+// (20261026_001) отказва ново активно участие при активна заявка. Нормалното
+// изтичане продължава; при отмяна все още валидните покани са отново
+// достъпни. Worker-ът не изтрива профил с чакаща покана (блокира и опитва
+// отново, докато системата я затвори).
 
 async function handleAccountDeletionRequest(
   req: IncomingMessage,
@@ -11336,6 +11402,9 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
   if (!result.ok) {
     if (result.code === 'already_pending') {
       sendJsonResponse(res, 409, { ok: false, code: 'ALREADY_PENDING', message: 'Вече има подадена заявка за изтриване на този профил.' })
+    } else if (result.code === 'active_participation') {
+      // Повторната проверка ВЪТРЕ в транзакцията (видима за всички процеси).
+      sendJsonResponse(res, 409, { ok: false, code: 'ACTIVE_GAME_OR_TOURNAMENT', message: PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE })
     } else {
       sendJsonResponse(res, 403, { ok: false, code: 'PROFILE_NOT_ELIGIBLE', message: 'Този профил не може да подаде заявка за самоизтриване.' })
     }
@@ -11343,7 +11412,7 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
   }
 
   // Блокиране веднага: сесии (всички процеси), WS връзки и realtime
-  // скриване (този процес; другите — чрез poll-а), после чакащите покани.
+  // скриване (този процес; другите — чрез poll-а).
   authStore.revokeAllSessionsForProfile(profileId)
   applyProfileDeletionVisibilityEvent({
     eventSeq: result.eventSeq,
@@ -11351,7 +11420,6 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
     profileId,
     eventType: 'requested',
   }, 'local')
-  declineIncomingPartnerInvitesForProfileDeletion(profileId)
 
   console.log(`[profile-deletion] mode=requested profileId=${profileId} requestId=${result.request.requestId} scheduledFor=${result.request.scheduledFor}`)
 
@@ -27896,6 +27964,16 @@ function clearMutationTimersForShutdown(): void {
   if (profileDeletionVisibilityPollInterval !== null) {
     clearInterval(profileDeletionVisibilityPollInterval)
     profileDeletionVisibilityPollInterval = null
+  }
+
+  if (profileDeletionWorkerStartupTimeout !== null) {
+    clearTimeout(profileDeletionWorkerStartupTimeout)
+    profileDeletionWorkerStartupTimeout = null
+  }
+
+  if (profileDeletionWorkerInterval !== null) {
+    clearInterval(profileDeletionWorkerInterval)
+    profileDeletionWorkerInterval = null
   }
 
   if (adCampaignEventsPollInterval !== null) {

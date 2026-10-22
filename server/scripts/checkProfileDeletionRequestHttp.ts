@@ -411,11 +411,21 @@ try {
     guestSocket.ws.close()
   })
 
-  await check('[E18] Чакащата покана за турнирен партньор е отказана (declined); потвърденото участие на поканилия е непокътнато', async () => {
+  // Етап 4: поканата НЕ се отказва необратимо — остава pending, но не може да
+  // бъде приета през периода (общ SQLite guard върху tournament_entries).
+  await check('[E18] Чакащата покана за турнирен партньор остава pending и не може да бъде приета; потвърденото участие на поканилия е непокътнато', async () => {
     const invite = db.prepare('SELECT status FROM tournament_partner_invites WHERE invite_id = ?;').get(inviteId) as { status: string }
-    assert(invite.status === 'declined', `status=${invite.status}`)
+    assert(invite.status === 'pending', `status=${invite.status}`)
     const entry = db.prepare(`SELECT status FROM tournament_entries WHERE tournament_id = ? AND profile_id = ?;`).get(openTournamentId, inviter.profileId) as { status: string }
     assert(entry.status === 'confirmed', `inviter entry=${entry.status}`)
+    let refused = false
+    try {
+      db.prepare(`INSERT INTO tournament_entries (entry_id, tournament_id, profile_id, team_id, joined_as, status) VALUES (?, ?, ?, ?, 'partner_invitee', 'confirmed');`)
+        .run(randomUUID(), openTournamentId, hidden.profileId, formingTeamId)
+    } catch (error) {
+      refused = error instanceof Error && error.message.includes('profile_deletion_pending_tournament_admission')
+    }
+    assert(refused, 'приемане на поканата през периода не беше отказано')
   })
 
   await check('[E19] Данните на профила са непроменени (жълтици, VIP, статистики, приятелство, разговор, лоби, тема, профил)', () => {
@@ -475,6 +485,8 @@ try {
     assert(JSON.stringify((await api('/api/chat/conversations', { cookie: friend.cookie })).json).includes(friendshipId), 'разговор')
     assert(JSON.stringify((await api('/api/topics', { cookie: friend.cookie })).json).includes(topicId), 'тема')
     assert(dataFingerprint() === fingerprintBefore, 'данните са променени')
+    const invite = db.prepare('SELECT status FROM tournament_partner_invites WHERE invite_id = ?;').get(inviteId) as { status: string }
+    assert(invite.status === 'pending', `поканата след отмяна: ${invite.status}`)
   })
 
   await check('[R7] Бан + заявка: токен с isBanned=true; отмяната не маха бана; следващият вход -> PROFILE_BANNED', async () => {

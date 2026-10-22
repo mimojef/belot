@@ -5,7 +5,7 @@
 // Единственият източник на истината за "скрит" профил остава
 // profile_deletion_requests (виж profileDeletionVisibility.ts);
 // profiles.status НЕ се пипа. Тук НЕ се трият данни — окончателното
-// изтриване е отделен, бъдещ етап.
+// изтриване е в profileDeletionExecutor.ts (Етап 4).
 //
 // Всички времена са каноничен UTC ISO от часовника на SQLite
 // (strftime('%Y-%m-%dT%H:%M:%fZ','now')), за да няма разминаване между
@@ -13,6 +13,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { generateRawResetToken, hashResetToken, hmacRateLimitSubject, validateRateLimitSecret } from './authHelpers.js'
+import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
 import { computeProfileDeletionSchedule, PROFILE_DELETION_ACTIVE_REQUEST_STATUSES } from './profileDeletionSchedule.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
@@ -32,7 +33,7 @@ export type ProfileDeletionPendingRequest = {
 
 export type CreateProfileDeletionRequestResult =
   | { ok: true; request: ProfileDeletionPendingRequest; eventSeq: number }
-  | { ok: false; code: 'already_pending' | 'profile_not_eligible' }
+  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_participation' }
 
 export type IssueProfileDeletionRestoreTokenResult =
   | { ok: true; restoreToken: string; expiresAt: string; request: ProfileDeletionPendingRequest }
@@ -58,12 +59,18 @@ export type ProfileDeletionRequestStore = {
   cancelWithToken: (rawToken: string) => CancelProfileDeletionResult
   keepWithToken: (rawToken: string) => KeepProfileDeletionResult
   /**
+   * Етап 4 — системна отмяна, когато процес открие, че профилът е бил приет
+   * в игра в собствената му памет МЕЖДУ проверката и записа на заявката
+   * (race между процесите). Само pending и само преди scheduled_for.
+   */
+  cancelForActiveParticipation: (requestId: string) => { ok: true; eventSeq: number } | { ok: false }
+  /**
    * Споделен между процесите rate limit (registration_rate_limit_events,
    * HMAC субект). true = ограничено (не се записва нов опит). Без валиден
    * secret — fail-closed (true).
    */
   isRateLimited: (input: { scope: string; subject: string; windowSeconds: number; maxEvents: number }) => boolean
-  /** true, ако в персистираните snapshot-и има активен Белот/Не се сърди човече с този профил (или snapshot-ът е нечетим — fail-closed). */
+  /** true, ако в персистираните snapshot-и има активен Белот/Не се сърди човече/Свара с този профил (или snapshot-ът е нечетим — fail-closed). */
   hasActiveGameSnapshot: (profileId: string) => boolean
   listVisibilityEventsAfter: (afterEventSeq: number, limit: number) => ProfileDeletionVisibilityEvent[]
   getMaxEventSeq: () => number
@@ -164,16 +171,15 @@ export async function createProfileDeletionRequestStore(
     INSERT INTO registration_rate_limit_events (event_id, scope, subject_hash) VALUES (?, ?, ?);
   `)
 
-  // instr() е само груб предварителен филтър; истинската проверка е JSON
-  // парсване по-долу (mirror на isProfileInActiveGame / ludo players).
-  const selectBelotSnapshotCandidatesStatement = database.prepare(`
-    SELECT snapshot_json FROM active_room_snapshots
-    WHERE is_active = 1 AND room_status = 'playing' AND instr(snapshot_json, ?) > 0;
+  const participationChecks = createProfileDeletionParticipationChecks(database)
+
+  const insertSystemEventStatement = database.prepare(`
+    INSERT INTO profile_deletion_events (request_id, profile_id, event_type, actor_kind, detail_json)
+    VALUES (?, ?, ?, 'system', ?);
   `)
 
-  const selectLudoSnapshotCandidatesStatement = database.prepare(`
-    SELECT snapshot_json FROM active_ludo_match_snapshots
-    WHERE is_active = 1 AND match_status = 'in_progress' AND instr(snapshot_json, ?) > 0;
+  const selectRequestByIdStatement = database.prepare(`
+    SELECT request_id, profile_id, status FROM profile_deletion_requests WHERE request_id = ? LIMIT 1;
   `)
 
   const selectVisibilityEventsStatement = database.prepare(`
@@ -228,6 +234,16 @@ export async function createProfileDeletionRequestStore(
       if (selectActiveRequestStatement.get(input.profileId) !== undefined) {
         database.exec('ROLLBACK;')
         return { ok: false, code: 'already_pending' }
+      }
+      // Етап 4: проверките, видими за всички процеси, са ВЪТРЕ в writer
+      // lock-а. Турнирно записване в друг процес е или преди нас (виждаме го
+      // тук), или след нас (тригерът върху tournament_entries го отказва).
+      if (
+        participationChecks.hasActiveTournamentDependency(profile.profile_id) ||
+        participationChecks.hasPersistedActiveGame(profile.profile_id)
+      ) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'active_participation' }
       }
       const schedule = computeProfileDeletionSchedule(new Date(dbNow()))
       const requestId = randomUUID()
@@ -344,6 +360,36 @@ export async function createProfileDeletionRequestStore(
     }
   }
 
+  function cancelForActiveParticipation(requestId: string): { ok: true; eventSeq: number } | { ok: false } {
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const row = selectRequestByIdStatement.get(requestId) as { request_id: string; profile_id: string; status: string } | undefined
+      if (row === undefined || row.status !== 'pending') {
+        database.exec('ROLLBACK;')
+        return { ok: false }
+      }
+      const cancelled = cancelRequestStatement.run(requestId) as { changes: number }
+      if (Number(cancelled.changes) !== 1) {
+        database.exec('ROLLBACK;')
+        return { ok: false }
+      }
+      const eventResult = insertSystemEventStatement.run(
+        requestId,
+        row.profile_id,
+        'cancelled',
+        JSON.stringify({ source: 'system', reason: 'active_participation' }),
+      ) as { lastInsertRowid: number | bigint }
+      database.exec('COMMIT;')
+      return { ok: true, eventSeq: Number(eventResult.lastInsertRowid) }
+    } catch (error) {
+      rollbackQuietly()
+      if (error instanceof Error && error.message.includes('profile_deletion_cancel_window_closed')) {
+        return { ok: false }
+      }
+      throw error
+    }
+  }
+
   function isRateLimited(input: { scope: string; subject: string; windowSeconds: number; maxEvents: number }): boolean {
     if (!isRateLimitSecretValid) return true
     const subjectHash = hmacRateLimitSubject(input.scope, input.subject, rateLimitSecret)
@@ -354,30 +400,7 @@ export async function createProfileDeletionRequestStore(
   }
 
   function hasActiveGameSnapshot(profileId: string): boolean {
-    for (const { snapshot_json } of selectBelotSnapshotCandidatesStatement.all(profileId) as Array<{ snapshot_json: string }>) {
-      try {
-        const room = JSON.parse(snapshot_json) as { status?: string; seats?: Record<string, { participant?: { kind?: string; identity?: { profileId?: string | null }; publicProfile?: { profileId?: string | null } | null; permanentlyLeftAt?: number | null } | null }> }
-        if (room.status !== 'playing' || room.seats === undefined) continue
-        for (const seat of Object.values(room.seats)) {
-          const participant = seat?.participant
-          const participantProfileId = participant?.identity?.profileId ?? participant?.publicProfile?.profileId ?? null
-          if (participant?.kind === 'human' && participantProfileId === profileId && participant.permanentlyLeftAt == null) {
-            return true
-          }
-        }
-      } catch {
-        return true
-      }
-    }
-    for (const { snapshot_json } of selectLudoSnapshotCandidatesStatement.all(profileId) as Array<{ snapshot_json: string }>) {
-      try {
-        const match = JSON.parse(snapshot_json) as { players?: Array<{ profileId?: string }> }
-        if (!Array.isArray(match.players) || match.players.some((player) => player?.profileId === profileId)) return true
-      } catch {
-        return true
-      }
-    }
-    return false
+    return participationChecks.hasPersistedActiveGame(profileId)
   }
 
   function listVisibilityEventsAfter(afterEventSeq: number, limit: number): ProfileDeletionVisibilityEvent[] {
@@ -399,6 +422,7 @@ export async function createProfileDeletionRequestStore(
     issueRestoreToken,
     cancelWithToken,
     keepWithToken,
+    cancelForActiveParticipation,
     isRateLimited,
     hasActiveGameSnapshot,
     listVisibilityEventsAfter,

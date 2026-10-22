@@ -374,6 +374,15 @@ export async function createProfileHardDeleteService(
     DELETE FROM player_blocks WHERE blocker_profile_id = ? OR blocked_profile_id = ?;
   `)
 
+  // 20261026_001: gift_item_transactions вече е ON DELETE SET NULL (чуждите
+  // подаръци оцеляват), затова неговият CASCADE към gift_item_delivery_log не
+  // премахва повече чакащите известия КЪМ изтрития получател — а
+  // recipient_profile_id там няма FK. Чистим ги изрично (същият краен
+  // резултат за получателя като преди миграцията).
+  const deleteGiftDeliveryLogForRecipientStatement = database.prepare(`
+    DELETE FROM gift_item_delivery_log WHERE recipient_profile_id = ?;
+  `)
+
   // chat_conversation_reads (profile_id, friendship_id) НЯМА FOREIGN KEY изобщо
   // (виж 20260520_001 migration-а) — за разлика от friend_chat_messages/
   // friend_chat_attachments (ON DELETE CASCADE през profile_friendships),
@@ -1047,6 +1056,7 @@ export async function createProfileHardDeleteService(
       // Таблици без FK към profiles — cascade НЯМА да ги пипне, чистим ръчно
       // за да няма orphan rows (spec §8/§11).
       deletePlayerBlocksStatement.run(input.targetProfileId, input.targetProfileId)
+      deleteGiftDeliveryLogForRecipientStatement.run(input.targetProfileId)
 
       // Виж selectProfileAttachmentFilenamesStatement doc коментара — трябва
       // да се изпълни ПРЕДИ deleteProfileStatement.run() по-долу
