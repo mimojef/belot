@@ -779,25 +779,315 @@ try {
     assert(types.includes('db_deleted') && types.includes('file_enqueued') && types.at(-1) === 'completed', types.join(','))
   })
 
-  await check('[D12] Чужди отговори под съобщение на профила БЛОКИРАТ изтриването (без каскада); след премахването им — изтрива се', async () => {
+  await check('[D12] Чужд отговор под root на профила (А1): става самостоятелна root публикация; root-ът на профила е изтрит; профилът е изтрит', async () => {
     const author = registerUser('TopicAuthor')
     const replier = registerUser('Replier')
-    const ownTopic = createTopic(author)
-    const authorRoot = addTopicMessage(ownTopic, author, null)
-    const foreignReply = addTopicMessage(ownTopic, replier, authorRoot)
+    const otherTopic = createTopic(null)
+    const authorRoot = addTopicMessage(otherTopic, author, null)
+    const foreignReply = addTopicMessage(otherTopic, replier, authorRoot)
     const requestId = insertDueRequest(author)
-    const summary = await makeWorker(executor, 'w-topic', [requestId]).runOnce()
-    assertEqual(summary.blocked, 1, 'blocked')
-    const row = requestRow(requestId)
-    assertEqual(row.status, 'blocked', 'статус')
-    assertEqual(row.last_error_code, 'topic_foreign_replies', 'код')
-    assert(profileExists(author.profileId), 'профилът е непокътнат')
-    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id IN (?, ?);', authorRoot, foreignReply), 2, 'нищо от Теми не е изтрито')
-    // Модератор премахва чуждия отговор (напр. обичайното почистване) — повторен опит.
-    db.prepare('DELETE FROM topic_messages WHERE message_id = ?;').run(foreignReply)
-    makeRetryDue(requestId)
-    assertEqual((await makeWorker(executor, 'w-topic', [requestId]).runOnce()).completed, 1, 'изтриване при повторен опит')
+    assertEqual((await makeWorker(executor, 'w-topic', [requestId]).runOnce()).completed, 1, 'completed')
     assert(!profileExists(author.profileId), 'изтрит')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id = ?;', authorRoot), 0, 'root-ът на профила')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id = ? AND parent_message_id IS NULL AND sender_profile_id = ?;', foreignReply, replier.profileId), 1, 'чуждият отговор е root')
+  })
+
+  console.log('\n[TP] Теми и Лафче — окончателно изтриване без засягане на чуждо съдържание (Етап 4B)')
+
+  const topicMessageExists = (messageId: string) => count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id = ?;', messageId) === 1
+  const parentOf = (messageId: string) => (db.prepare('SELECT parent_message_id AS p FROM topic_messages WHERE message_id = ?;').get(messageId) as { p: string | null }).p
+  const softDeleteTopicMessage = (messageId: string) => db.prepare(`UPDATE topic_messages SET deleted_at = CURRENT_TIMESTAMP WHERE message_id = ?;`).run(messageId)
+  async function attachTopicFile(messageId: string): Promise<string> {
+    const name = `${randomUUID()}.webp`
+    const path = await writeUpload(roots.topicAttachments, name)
+    db.prepare(`INSERT INTO topic_message_attachments (message_id, storage_filename, width, height, byte_size) VALUES (?, ?, 1, 1, 11);`).run(messageId, name)
+    return path
+  }
+  const foreignSnapshot = (topicId: string, excludedProfileId: string) => JSON.stringify(
+    db.prepare(`SELECT message_id, parent_message_id, sender_profile_id, body, deleted_at FROM topic_messages WHERE topic_id = ? AND sender_profile_id <> ? ORDER BY seq;`).all(topicId, excludedProfileId),
+  )
+  const generalTopic = createTopic(null) // системна тема (като "Общи"/Лафче) — без създател
+
+  await check('[TP1] Публикация без отговори (с прикачен файл): след 45 дни — изтрита заедно с файла; completed', async () => {
+    const author = registerUser('TpSolo')
+    const root = addTopicMessage(generalTopic, author, null)
+    const file = await attachTopicFile(root)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp1', [requestId]).runOnce()).completed, 1, 'completed')
+    assert(!topicMessageExists(root), 'публикацията е изтрита')
+    assert(!existsSync(file), 'файлът е изтрит')
+    assertEqual(requestRow(requestId).status, 'completed', 'статус')
+  })
+
+  await check('[TP2] А1: root на профила с няколко живи чужди отговора — те стават самостоятелни root-ове (автор, текст, дата, файл, харесвания, агрегат); root-ът и файлът му са изтрити', async () => {
+    const author = registerUser('TpA1')
+    const a = registerUser('TpA1a')
+    const b = registerUser('TpA1b')
+    const root = addTopicMessage(generalTopic, author, null)
+    const ownFile = await attachTopicFile(root)
+    const replyA = addTopicMessage(generalTopic, a, root)
+    const replyB = addTopicMessage(generalTopic, b, root)
+    const ownReply = addTopicMessage(generalTopic, author, root)
+    const fileA = await attachTopicFile(replyA)
+    db.prepare(`INSERT INTO topic_message_likes (message_id, liker_profile_id) VALUES (?, ?), (?, ?);`).run(replyA, b.profileId, replyB, a.profileId)
+    db.prepare(`INSERT INTO topic_thread_read_state (profile_id, root_message_id, last_seen_seq) VALUES (?, ?, 1);`).run(a.profileId, root)
+    const snapshot = (id: string) => JSON.stringify(db.prepare('SELECT message_id, topic_id, sender_profile_id, sender_display_name, body, created_at, deleted_at FROM topic_messages WHERE message_id = ?;').get(id))
+    const beforeA = snapshot(replyA)
+    const beforeB = snapshot(replyB)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp2', [requestId]).runOnce()).completed, 1, 'completed')
+    assert(!topicMessageExists(root) && !topicMessageExists(ownReply), 'root-ът и отговорът на профила')
+    assert(!existsSync(ownFile), 'файлът на профила')
+    for (const [id, before] of [[replyA, beforeA], [replyB, beforeB]] as const) {
+      assertEqual(parentOf(id), null, `${id} е root`)
+      assertEqual(snapshot(id), before, 'автор, текст, дата — непроменени')
+      const latest = db.prepare('SELECT latest_seq AS s FROM topic_root_latest_seq WHERE root_message_id = ?;').get(id) as { s: number } | undefined
+      const ownSeq = (db.prepare('SELECT seq FROM topic_messages WHERE message_id = ?;').get(id) as { seq: number }).seq
+      assert(latest !== undefined && latest.s === ownSeq, 'агрегат на новия root')
+    }
+    assert(existsSync(fileA), 'файлът на A')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_attachments WHERE message_id = ?;', replyA), 1, 'редът за файла на A')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_likes WHERE message_id IN (?, ?);', replyA, replyB), 2, 'харесванията')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_thread_read_state WHERE root_message_id = ?;', root), 0, 'read state за изтрития root')
+  })
+
+  await check('[TP3] Няколко вложени нива от различни автори: собствените се изтриват; чуждите наследници се пренасочват към най-близкия оцелял чужд предшественик', async () => {
+    const author = registerUser('TpNest')
+    const a = registerUser('TpNestA')
+    const b = registerUser('TpNestB')
+    const c = registerUser('TpNestC')
+    const foreignRoot = addTopicMessage(generalTopic, a, null)          // A
+    const ownReply = addTopicMessage(generalTopic, author, foreignRoot)  // P
+    const foreignUnderOwn = addTopicMessage(generalTopic, a, ownReply)   // A (жив) под P
+    const deeper = addTopicMessage(generalTopic, b, foreignUnderOwn)     // B под A
+    const ownReply2 = addTopicMessage(generalTopic, author, foreignRoot) // P
+    const ownReply3 = addTopicMessage(generalTopic, author, ownReply2)   // P под P
+    const deletedForeign = addTopicMessage(generalTopic, c, ownReply3)   // C (изтрит) под P под P
+    softDeleteTopicMessage(deletedForeign)
+    const before = count('SELECT COUNT(*) AS c FROM topic_messages WHERE topic_id = ? AND sender_profile_id <> ?;', generalTopic, author.profileId)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp3', [requestId]).runOnce()).completed, 1, 'completed')
+    for (const own of [ownReply, ownReply2, ownReply3]) assert(!topicMessageExists(own), `собствено ${own}`)
+    assertEqual(parentOf(foreignUnderOwn), foreignRoot, 'A -> чуждия root')
+    assertEqual(parentOf(deeper), foreignUnderOwn, 'B остава под A')
+    assertEqual(parentOf(deletedForeign), foreignRoot, 'изтритият C -> чуждия root (през две нива на профила)')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id = ? AND deleted_at IS NOT NULL;', deletedForeign), 1, 'C остава изтрит (невидим)')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE topic_id = ? AND sender_profile_id <> ?;', generalTopic, author.profileId), before, 'броят чужди съобщения е непроменен')
+  })
+
+  await check('[TP4] Собствени отговори: под собствен root и под чужд root — всички изтрити; агрегатът на чуждия root е преизчислен', async () => {
+    const author = registerUser('TpOwn')
+    const other = registerUser('TpOwnOther')
+    const ownRoot = addTopicMessage(generalTopic, author, null)
+    const ownReplyUnderOwn = addTopicMessage(generalTopic, author, ownRoot)
+    const foreignRoot = addTopicMessage(generalTopic, other, null)
+    const ownReplyUnderForeign = addTopicMessage(generalTopic, author, foreignRoot)
+    const seqOf = (id: string) => (db.prepare('SELECT seq FROM topic_messages WHERE message_id = ?;').get(id) as { seq: number }).seq
+    db.prepare(`INSERT INTO topic_root_latest_seq (root_message_id, topic_id, latest_seq) VALUES (?, ?, ?);`).run(foreignRoot, generalTopic, seqOf(ownReplyUnderForeign))
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp4', [requestId]).runOnce()).completed, 1, 'completed')
+    for (const own of [ownRoot, ownReplyUnderOwn, ownReplyUnderForeign]) assert(!topicMessageExists(own), `собствено ${own}`)
+    assert(topicMessageExists(foreignRoot), 'чуждият root')
+    const latest = (db.prepare('SELECT latest_seq AS s FROM topic_root_latest_seq WHERE root_message_id = ?;').get(foreignRoot) as { s: number }).s
+    assertEqual(latest, seqOf(foreignRoot), 'latest_seq вече не сочи изтрития отговор')
+  })
+
+  await check('[TP5] Смесена дискусия с няколко участници (файлове и харесвания): изтрити са само отговорите и харесванията на профила', async () => {
+    const author = registerUser('TpMix')
+    const a = registerUser('TpMixA')
+    const b = registerUser('TpMixB')
+    const root = addTopicMessage(generalTopic, a, null)
+    const replyA = addTopicMessage(generalTopic, a, root)
+    const replyP1 = addTopicMessage(generalTopic, author, root)
+    const replyB = addTopicMessage(generalTopic, b, root)
+    const replyP2 = addTopicMessage(generalTopic, author, root)
+    const fileB = await attachTopicFile(replyB)
+    const fileP = await attachTopicFile(replyP2)
+    db.prepare(`INSERT INTO topic_message_likes (message_id, liker_profile_id) VALUES (?, ?), (?, ?), (?, ?);`)
+      .run(root, author.profileId, replyP1, b.profileId, replyA, b.profileId)
+    const foreignBefore = foreignSnapshot(generalTopic, author.profileId)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp5', [requestId]).runOnce()).completed, 1, 'completed')
+    assert(!topicMessageExists(replyP1) && !topicMessageExists(replyP2), 'отговорите на профила')
+    assertEqual(foreignSnapshot(generalTopic, author.profileId), foreignBefore, 'чуждите съобщения са байт по байт непроменени')
+    assert(existsSync(fileB) && !existsSync(fileP), 'файлът на B остава, на профила — изтрит')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_attachments WHERE message_id = ?;', replyB), 1, 'редът за файла на B')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_likes WHERE liker_profile_id = ?;', author.profileId), 0, 'харесванията на профила')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_message_likes WHERE message_id = ? AND liker_profile_id = ?;', replyA, b.profileId), 1, 'чуждото харесване на чужд отговор')
+  })
+
+  await check('[TP6] Б1: тема на профила — изтрита изцяло, вкл. чуждите публикации и файловете на всички участници; другите теми с публикации на същите хора — непокътнати', async () => {
+    const author = registerUser('TpB1')
+    const guest = registerUser('TpB1Guest')
+    const ownTopic = createTopic(author)
+    db.prepare('UPDATE topics SET title = ? WHERE topic_id = ?;').run('Заглавие-B1-уникално', ownTopic)
+    const ownPost = addTopicMessage(ownTopic, author, null)
+    const guestPost = addTopicMessage(ownTopic, guest, null)
+    const guestReply = addTopicMessage(ownTopic, guest, ownPost)
+    const ownFile = await attachTopicFile(ownPost)
+    const guestFile = await attachTopicFile(guestPost)
+    db.prepare(`INSERT INTO topic_message_likes (message_id, liker_profile_id) VALUES (?, ?);`).run(guestPost, author.profileId)
+    db.prepare(`INSERT INTO topic_root_latest_seq (root_message_id, topic_id, latest_seq) VALUES (?, ?, 1);`).run(guestPost, ownTopic)
+    db.prepare(`INSERT INTO topic_moderation_audit_log (log_id, actor_role, action, topic_id) VALUES (?, 'admin', 'topic_lock', ?);`).run(randomUUID(), ownTopic)
+    // Друга (системна) тема с публикации на госта и на профила — А1, не Б1.
+    const guestElsewhere = addTopicMessage(generalTopic, guest, null)
+    const guestElsewhereFile = await attachTopicFile(guestElsewhere)
+    const ownElsewhere = addTopicMessage(generalTopic, author, guestElsewhere)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp6', [requestId]).runOnce()).completed, 1, 'completed')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topics WHERE topic_id = ?;', ownTopic), 0, 'темата')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE topic_id = ?;', ownTopic), 0, 'всички публикации в темата')
+    assert(!topicMessageExists(guestPost) && !topicMessageExists(guestReply), 'чуждите публикации в темата')
+    assert(!existsSync(ownFile) && !existsSync(guestFile), 'файловете на всички участници')
+    for (const table of ['topic_root_latest_seq', 'topic_moderation_audit_log', 'topic_read_state']) {
+      assertEqual(count(`SELECT COUNT(*) AS c FROM ${table} WHERE topic_id = ?;`, ownTopic), 0, table)
+    }
+    assertEqual(count('SELECT COUNT(*) AS c FROM topics WHERE title = ?;', 'Заглавие-B1-уникално'), 0, 'заглавието не се появява отново')
+    assert(topicMessageExists(guestElsewhere) && existsSync(guestElsewhereFile), 'публикацията и файлът на госта в друга тема')
+    assert(!topicMessageExists(ownElsewhere), 'отговорът на профила в другата тема')
+    assert(profileExists(guest.profileId), 'гостът')
+  })
+
+  await check('[TP7] Root на профила с ИЗТРИТИ (модерирани) чужди отговори: не блокира; отговорите стават невидими root-ове до обичайното почистване', async () => {
+    const author = registerUser('TpMod')
+    const other = registerUser('TpModOther')
+    const root = addTopicMessage(generalTopic, author, null)
+    const removedReply = addTopicMessage(generalTopic, other, root)
+    softDeleteTopicMessage(root)
+    softDeleteTopicMessage(removedReply)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp7', [requestId]).runOnce()).completed, 1, 'completed')
+    assert(!topicMessageExists(root), 'root-ът на профила')
+    assertEqual(parentOf(removedReply), null, 'чуждият изтрит отговор е root')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id = ? AND deleted_at IS NOT NULL AND sender_profile_id = ?;', removedReply, other.profileId), 1, 'остава изтрит, авторът е непроменен')
+  })
+
+  await check('[TP8] Отмяна преди 45 дни: worker-ът не взема заявката; публикациите, отговорите и файловете са непроменени; профилът не е скрит', async () => {
+    const author = registerUser('TpCancel')
+    const other = registerUser('TpCancelOther')
+    const root = addTopicMessage(generalTopic, author, null)
+    const file = await attachTopicFile(root)
+    const foreignReply = addTopicMessage(generalTopic, other, root)
+    const before = JSON.stringify(db.prepare('SELECT * FROM topic_messages WHERE message_id IN (?, ?) ORDER BY seq;').all(root, foreignReply))
+    const created = requestStore.createRequest({ profileId: author.profileId, accountId: author.accountId })
+    if (!created.ok) throw new Error(JSON.stringify(created))
+    assertEqual((await makeWorker(executor, 'w-tp8', [created.request.requestId]).runOnce()).claimed, 0, 'не е взета преди срока')
+    const issued = requestStore.issueRestoreToken(author.profileId)
+    assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    assertEqual((await makeWorker(executor, 'w-tp8', [created.request.requestId]).runOnce()).claimed, 0, 'отменена — никога')
+    assertEqual(JSON.stringify(db.prepare('SELECT * FROM topic_messages WHERE message_id IN (?, ?) ORDER BY seq;').all(root, foreignReply)), before, 'непроменени')
+    assert(existsSync(file), 'файлът')
+    assertEqual(count(`SELECT COUNT(*) AS c FROM profile_deletion_requests WHERE profile_id = ? AND status IN ('pending', 'executing', 'blocked', 'failed');`, author.profileId), 0, 'няма активна заявка (видим)')
+  })
+
+  await check('[TP9] Повторно изпълнение на worker-а след изтриване: нищо ново не се взема и чуждото съдържание остава непроменено', async () => {
+    const author = registerUser('TpRerun')
+    const other = registerUser('TpRerunOther')
+    const foreignRoot = addTopicMessage(generalTopic, other, null)
+    addTopicMessage(generalTopic, author, foreignRoot)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp9', [requestId]).runOnce()).completed, 1, 'първи пуск')
+    const after = foreignSnapshot(generalTopic, author.profileId)
+    const second = await makeWorker(executor2, 'w-tp9b', [requestId]).runOnce()
+    assertEqual(second.claimed, 0, 'втори пуск — нищо')
+    assertEqual(foreignSnapshot(generalTopic, author.profileId), after, 'непроменено')
+    assertEqual(requestRow(requestId).status, 'completed', 'статус')
+  })
+
+  await check('[TP10] Защита: ако чуждо съобщение изчезне по време на изтриването — ROLLBACK, failed (не completed), профилът и съдържанието са непокътнати', async () => {
+    const author = registerUser('TpGuard')
+    const other = registerUser('TpGuardOther')
+    const foreignRoot = addTopicMessage(generalTopic, other, null)
+    const ownReply = addTopicMessage(generalTopic, author, foreignRoot)
+    const victim = addTopicMessage(generalTopic, other, null)
+    // Симулира непредвидена каскада: постоянен тригер (видим и за връзката на
+    // executor-а) трие чуждо съобщение, когато се трие съобщение на профила.
+    db.exec(`CREATE TRIGGER tp_guard_cascade AFTER DELETE ON topic_messages WHEN OLD.sender_profile_id = '${author.profileId}'
+      BEGIN DELETE FROM topic_messages WHERE message_id = '${victim}'; END;`)
+    let requestId = ''
+    try {
+      requestId = insertDueRequest(author)
+      const summary = await makeWorker(executor, 'w-tp10', [requestId]).runOnce()
+      assertEqual(summary.completed, 0, 'не е completed')
+      assertEqual(summary.failed, 1, 'failed')
+    } finally {
+      db.exec('DROP TRIGGER IF EXISTS tp_guard_cascade;')
+    }
+    const row = requestRow(requestId)
+    assertEqual(row.status, 'failed', 'статус')
+    assertEqual(row.last_error_code, 'db_phase_error', 'код')
+    assertEqual(row.db_deleted_at, null, 'базата не е маркирана като изтрита')
+    assert(profileExists(author.profileId), 'профилът')
+    assert(topicMessageExists(ownReply) && topicMessageExists(victim) && topicMessageExists(foreignRoot), 'съдържанието')
+    // Без симулираната каскада повторният опит изтрива нормално.
+    makeRetryDue(requestId)
+    assertEqual((await makeWorker(executor, 'w-tp10', [requestId]).runOnce()).completed, 1, 'повторен опит')
+    assert(topicMessageExists(victim) && topicMessageExists(foreignRoot) && !topicMessageExists(ownReply), 'само собственото е изтрито')
+  })
+
+  await check('[TP11] Прекъсване преди COMMIT (А1+Б1): нищо не е пренасочено/изтрито; след изтекъл lease друг worker довършва', async () => {
+    const author = registerUser('TpCrash')
+    const other = registerUser('TpCrashOther')
+    const ownTopic = createTopic(author)
+    const guestPost = addTopicMessage(ownTopic, other, null)
+    const root = addTopicMessage(generalTopic, author, null)
+    const foreignReply = addTopicMessage(generalTopic, other, root)
+    const requestId = insertDueRequest(author)
+    const crashing = await createProfileDeletionExecutor(databaseFilePath, {
+      testHooks: { beforeDatabasePhaseCommit: () => { throw Object.assign(new Error('simulated crash'), { profileDeletionSimulatedCrash: true }) } },
+    })
+    try {
+      let crashed = false
+      try { await makeWorker(crashing, 'w-tp11', [requestId]).runOnce() } catch { crashed = true }
+      assert(crashed, 'сривът прекъсна worker-а')
+    } finally {
+      crashing.close()
+    }
+    assert(profileExists(author.profileId), 'профилът')
+    assertEqual(parentOf(foreignReply), root, 'няма пренасочване')
+    assert(topicMessageExists(guestPost) && count('SELECT COUNT(*) AS c FROM topics WHERE topic_id = ?;', ownTopic) === 1, 'темата е на място')
+    expireRequestLease(requestId)
+    assertEqual((await makeWorker(executor2, 'w-tp11b', [requestId]).runOnce()).completed, 1, 'довършено')
+    assertEqual(parentOf(foreignReply), null, 'А1 приложено')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topics WHERE topic_id = ?;', ownTopic), 0, 'Б1 приложено')
+  })
+
+  await check('[TP12] replayDeletionForRestore (процедурата след restore) прилага същите А1/Б1 и връща файловете на всички участници в изтритата тема', async () => {
+    const author = registerUser('TpReplay')
+    const other = registerUser('TpReplayOther')
+    const ownTopic = createTopic(author)
+    const guestPost = addTopicMessage(ownTopic, other, null)
+    await attachTopicFile(guestPost)
+    const guestFileName = (db.prepare('SELECT storage_filename AS f FROM topic_message_attachments WHERE message_id = ?;').get(guestPost) as { f: string }).f
+    const root = addTopicMessage(generalTopic, author, null)
+    const foreignReply = addTopicMessage(generalTopic, other, root)
+    const createdAt = (db.prepare('SELECT created_at FROM profiles WHERE profile_id = ?;').get(author.profileId) as { created_at: string }).created_at
+    const result = executor.replayDeletionForRestore({ profileId: author.profileId, accountIdSnapshot: author.accountId, profileCreatedAtSnapshot: createdAt })
+    assert(result.kind === 'deleted', `резултат: ${result.kind}`)
+    if (result.kind === 'deleted') {
+      assert(result.files.some((file) => file.fileKind === 'topic_attachment' && file.storageRef === guestFileName), 'файлът на чуждата публикация в изтритата тема')
+    }
+    assertEqual(parentOf(foreignReply), null, 'А1')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topics WHERE topic_id = ?;', ownTopic), 0, 'Б1')
+  })
+
+  await check('[TP13] Нищо от изтрития профил не се появява отново: нито публикации/отговори, нито заглавия на теми, нито текстове', async () => {
+    const author = registerUser('TpGone')
+    const other = registerUser('TpGoneOther')
+    const marker = `маркер-${randomUUID()}`
+    const ownTopic = createTopic(author)
+    db.prepare('UPDATE topics SET title = ? WHERE topic_id = ?;').run(`Тема ${marker}`, ownTopic)
+    const root = addTopicMessage(generalTopic, author, null)
+    db.prepare('UPDATE topic_messages SET body = ? WHERE message_id = ?;').run(`Текст ${marker}`, root)
+    const reply = addTopicMessage(generalTopic, author, addTopicMessage(generalTopic, other, null))
+    db.prepare('UPDATE topic_messages SET body = ? WHERE message_id = ?;').run(`Отговор ${marker}`, reply)
+    addTopicMessage(generalTopic, other, root)
+    const requestId = insertDueRequest(author)
+    assertEqual((await makeWorker(executor, 'w-tp13', [requestId]).runOnce()).completed, 1, 'completed')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE sender_profile_id = ?;', author.profileId), 0, 'съобщения на профила')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE instr(body, ?) > 0;', marker), 0, 'текстове')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topics WHERE instr(title, ?) > 0 OR created_by_profile_id = ?;', marker, author.profileId), 0, 'заглавия/теми')
+    assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE sender_display_name = ?;', author.displayName), 0, 'името като автор')
   })
 
   await check('[D13] Няколко профила на един акаунт: изтрива се само профилът; акаунтът и другият профил остават', async () => {

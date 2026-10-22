@@ -26,13 +26,30 @@
 //     (20261026_001), името на изпращача в известията се заменя;
 //   * support разговорите, private_room_matches, profile_ip_links/
 //     profile_visitor_links — непроменени (въпрос за решение, виж отчета).
-// Чужди отговори в Теми под съобщение на профила блокират изтриването
-// ('topic_foreign_replies'), вместо каскадата да ги унищожи.
+//
+// Теми и Лафче (Етап 4B, одобрени решения А1 и Б1) — собствените публикации
+// и отговори се изтриват физически (с прикачените файлове):
+//   * А1 — topic_messages.parent_message_id е ON DELETE CASCADE, затова ПРЕДИ
+//     DELETE FROM profiles всеки чужд пряк наследник на собствено съобщение
+//     се пренасочва към най-близкия оцелял (чужд) предшественик, а при липса
+//     — става самостоятелна root публикация в същата тема (автор, текст,
+//     дати, файлове и харесвания остават). Изтрити (модерирани) чужди
+//     съобщения остават изтрити и невидими;
+//   * Б1 — тема (topics), създадена от профила, се изтрива ИЗЦЯЛО, вкл.
+//     чуждите публикации в нея и техните файлове (изрично бизнес
+//     изключение само за цяла тема на окончателно изтривания профил);
+//     резервираните теми (is_general, Лафче) никога не се трият;
+//   * без системен автор/заместител; заглавието и текстовете на изтрития
+//     профил не остават;
+//   * преди COMMIT: броят чужди съобщения във всички ДРУГИ засегнати теми е
+//     непроменен, няма parent връзка между различни теми, а собствените
+//     теми са напълно изчезнали — иначе ROLLBACK (failed, повторен опит).
 
 import type { ProfileDeletionFileKind } from '../uploads/profileDeletionFileRemoval.js'
 import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
 import { computeProfileDeletionRetryDelayMs } from './profileDeletionSchedule.js'
 import { createProfileVisitLinkReader } from './profileVisitLinks.js'
+import { LAFCHE_TOPIC_ID } from './topicHardDeleteService.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -51,7 +68,6 @@ export type ProfileDeletionBlockCode =
   | 'pending_tournament_invite'
   | 'role_not_allowed'
   | 'campaign_gift_sender_protected'
-  | 'topic_foreign_replies'
 
 export type ProfileDeletionFailCode =
   | 'identity_mismatch'
@@ -256,21 +272,115 @@ export async function createProfileDeletionExecutor(
     SELECT 1 FROM gift_item_transactions WHERE sender_profile_id = ? AND context = 'campaign_reward' LIMIT 1;
   `)
 
-  // Всички съобщения в Теми, които DELETE FROM profiles би изтрил каскадно:
-  // собствените (sender_profile_id CASCADE) + всичките им наследници
-  // (parent_message_id CASCADE).
-  const TOPIC_CASCADE_CTE = `
-    WITH RECURSIVE cascade_set(message_id) AS (
-      SELECT message_id FROM topic_messages WHERE sender_profile_id = ?1
-      UNION
-      SELECT m.message_id FROM topic_messages m JOIN cascade_set c ON m.parent_message_id = c.message_id
-    )`
+  // ─── Теми и Лафче (виж А1/Б1 в началото на файла) ───────────────────────
+  // Чужди преки наследници на собствени съобщения — само те биха били
+  // засегнати от parent_message_id CASCADE (по-дълбоките чужди наследници
+  // следват своя чужд родител, който остава).
+  const selectForeignChildrenOfOwnMessagesStatement = database.prepare(`
+    SELECT child.message_id, child.topic_id, child.deleted_at
+    FROM topic_messages child
+    JOIN topic_messages parent ON parent.message_id = child.parent_message_id
+    WHERE parent.sender_profile_id = ?1 AND child.sender_profile_id <> ?1
+    ORDER BY child.seq ASC;
+  `)
 
-  const selectForeignTopicDescendantStatement = database.prepare(`
-    ${TOPIC_CASCADE_CTE}
-    SELECT 1 FROM topic_messages t JOIN cascade_set c ON c.message_id = t.message_id
-    WHERE t.sender_profile_id <> ?1
-    LIMIT 1;
+  const selectTopicMessageLinkStatement = database.prepare(`
+    SELECT parent_message_id, sender_profile_id FROM topic_messages WHERE message_id = ? LIMIT 1;
+  `)
+
+  // ?3 — защита: пренасочва се само ЧУЖДО съобщение.
+  const reparentTopicMessageStatement = database.prepare(`
+    UPDATE topic_messages SET parent_message_id = ?1 WHERE message_id = ?2 AND sender_profile_id <> ?3;
+  `)
+
+  // Б1: теми на профила. Резервираните (is_general / Лафче) не се трият.
+  const selectCreatedTopicsStatement = database.prepare(`
+    SELECT topic_id, is_general FROM topics WHERE created_by_profile_id = ?1;
+  `)
+
+  const selectAttachmentsForTopicStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM topic_message_attachments a
+    JOIN topic_messages m ON m.message_id = a.message_id
+    WHERE m.topic_id = ?;
+  `)
+
+  // topic_moderation_audit_log.topic_id е без FK — mirror на
+  // topicHardDeleteService.hardDeleteTopic (автоматично почистване без actor).
+  const deleteTopicModerationAuditStatement = database.prepare(`
+    DELETE FROM topic_moderation_audit_log WHERE topic_id = ?;
+  `)
+
+  const deleteOwnTopicStatement = database.prepare(`
+    DELETE FROM topics
+    WHERE topic_id = ?1 AND created_by_profile_id = ?2 AND is_general = 0 AND topic_id <> ?3;
+  `)
+
+  const selectAffectedTopicIdsStatement = database.prepare(`
+    SELECT topic_id FROM topic_messages WHERE sender_profile_id = ?1
+    UNION
+    SELECT topic_id FROM topics WHERE created_by_profile_id = ?1;
+  `)
+
+  const countForeignTopicMessagesStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM topic_messages
+    WHERE sender_profile_id <> ?1 AND topic_id IN (SELECT value FROM json_each(?2));
+  `)
+
+  const countTopicMessagesInTopicsStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM topic_messages WHERE topic_id IN (SELECT value FROM json_each(?1));
+  `)
+
+  const countTopicsStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM topics WHERE topic_id IN (SELECT value FROM json_each(?1));
+  `)
+
+  const countCrossTopicParentLinksStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt
+    FROM topic_messages child
+    JOIN topic_messages parent ON parent.message_id = child.parent_message_id
+    WHERE child.topic_id <> parent.topic_id AND child.topic_id IN (SELECT value FROM json_each(?1));
+  `)
+
+  // Чужди root-ове, под които профилът има отговори — агрегатът им
+  // (topic_root_latest_seq) се преизчислява след изтриването.
+  const selectForeignParentsOfOwnRepliesStatement = database.prepare(`
+    SELECT DISTINCT parent.message_id
+    FROM topic_messages own
+    JOIN topic_messages parent ON parent.message_id = own.parent_message_id
+    WHERE own.sender_profile_id = ?1 AND parent.sender_profile_id <> ?1;
+  `)
+
+  // Mirror на topicMessageStore recomputeRootLatestSeqStatement +
+  // bumpOrSetRootLatestSeqStatement (само за редове, които съществуват).
+  const recomputeRootLatestSeqStatement = database.prepare(`
+    UPDATE topic_root_latest_seq
+    SET latest_seq = (
+          SELECT MAX(m.seq) FROM topic_messages m
+          WHERE (m.message_id = ?1 OR m.parent_message_id = ?1) AND m.deleted_at IS NULL
+        ),
+        updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now')
+    WHERE root_message_id = ?1
+      AND EXISTS (
+        SELECT 1 FROM topic_messages m
+        WHERE (m.message_id = ?1 OR m.parent_message_id = ?1) AND m.deleted_at IS NULL
+      );
+  `)
+
+  // А1: жив чужд отговор, станал root — получава свой ред (mirror на
+  // insertRootLatestSeqStatement; само за жив root, latest_seq по живите
+  // съобщения в нишката му).
+  const upsertPromotedRootLatestSeqStatement = database.prepare(`
+    INSERT INTO topic_root_latest_seq (root_message_id, topic_id, latest_seq)
+    SELECT m.message_id, m.topic_id, (
+      SELECT MAX(x.seq) FROM topic_messages x
+      WHERE (x.message_id = ?1 OR x.parent_message_id = ?1) AND x.deleted_at IS NULL
+    )
+    FROM topic_messages m
+    WHERE m.message_id = ?1 AND m.parent_message_id IS NULL AND m.deleted_at IS NULL
+    ON CONFLICT(root_message_id) DO UPDATE SET
+      latest_seq = excluded.latest_seq,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%f', 'now');
   `)
 
   // ─── Файлове ─────────────────────────────────────────────────────────────
@@ -289,9 +399,13 @@ export async function createProfileDeletionExecutor(
     WHERE f.requester_profile_id = ?1 OR f.addressee_profile_id = ?1;
   `)
 
+  // След пренасочването каскадата засяга САМО собствени съобщения (и
+  // собствени теми без чуждо съдържание) — техните файлове.
   const selectTopicAttachmentsStatement = database.prepare(`
-    ${TOPIC_CASCADE_CTE}
-    SELECT a.storage_filename FROM topic_message_attachments a JOIN cascade_set c ON c.message_id = a.message_id;
+    SELECT a.storage_filename
+    FROM topic_message_attachments a
+    JOIN topic_messages m ON m.message_id = a.message_id
+    WHERE m.sender_profile_id = ?1;
   `)
 
   // topic_mute_evidence.profile_id е ON DELETE CASCADE — evidence копието
@@ -532,6 +646,43 @@ export async function createProfileDeletionExecutor(
     }
   }
 
+  type TopicCleanupPlan = {
+    /** А1: чужди преки наследници на собствени съобщения извън изтриваните теми -> нов родител (null = root). */
+    reparent: Array<{ messageId: string; newParentMessageId: string | null; promotedLiveRoot: boolean }>
+    /** Б1: теми на профила, които се изтриват изцяло (без резервираните). */
+    ownTopicIdsToDelete: string[]
+  }
+
+  /** Вика се ВЪТРЕ в отворена транзакция (четенето и записът виждат едно и също състояние). */
+  function planTopicCleanup(profileId: string): TopicCleanupPlan {
+    const ownTopicIdsToDelete = (selectCreatedTopicsStatement.all(profileId) as Array<{ topic_id: string; is_general: number }>)
+      .filter((topic) => topic.is_general === 0 && topic.topic_id !== LAFCHE_TOPIC_ID)
+      .map((topic) => topic.topic_id)
+    const deletedTopics = new Set(ownTopicIdsToDelete)
+
+    const reparent: TopicCleanupPlan['reparent'] = []
+    const children = selectForeignChildrenOfOwnMessagesStatement.all(profileId) as Array<{ message_id: string; topic_id: string; deleted_at: string | null }>
+    for (const child of children) {
+      if (deletedTopics.has(child.topic_id)) continue // изтрива се заедно с темата (Б1)
+      // Нагоре по веригата, докато предшествениците са на профила; първият
+      // чужд предшественик оцелява. Продуктът има едно ниво (root + отговори),
+      // но базата позволява повече — guard срещу цикъл в данните.
+      let ancestorId = (selectTopicMessageLinkStatement.get(child.message_id) as { parent_message_id: string | null }).parent_message_id
+      for (let depth = 0; ancestorId !== null; depth += 1) {
+        if (depth > 10_000) throw new Error('profile_deletion_topic_parent_cycle')
+        const ancestor = selectTopicMessageLinkStatement.get(ancestorId) as { parent_message_id: string | null; sender_profile_id: string } | undefined
+        if (ancestor === undefined || ancestor.sender_profile_id !== profileId) break
+        ancestorId = ancestor.parent_message_id
+      }
+      reparent.push({
+        messageId: child.message_id,
+        newParentMessageId: ancestorId,
+        promotedLiveRoot: ancestorId === null && child.deleted_at === null,
+      })
+    }
+    return { reparent, ownTopicIdsToDelete }
+  }
+
   type BlockerResult = { blocked: ProfileDeletionBlockCode } | null
 
   function findBlocker(profile: ProfileRow): BlockerResult {
@@ -543,7 +694,6 @@ export async function createProfileDeletionExecutor(
     if (participationChecks.hasPendingTournamentInvite(profile.profile_id)) return { blocked: 'pending_tournament_invite' }
     if (participationChecks.hasPersistedActiveGame(profile.profile_id)) return { blocked: 'active_game' }
     if (selectCampaignGiftSenderStatement.get(profile.profile_id) !== undefined) return { blocked: 'campaign_gift_sender_protected' }
-    if (selectForeignTopicDescendantStatement.get(profile.profile_id) !== undefined) return { blocked: 'topic_foreign_replies' }
     return null
   }
 
@@ -567,6 +717,7 @@ export async function createProfileDeletionExecutor(
     enqueue: (fileKind: ProfileDeletionFileKind, storageRef: string) => void,
   ): { accountDeleted: boolean } {
     const profileId = profile.profile_id
+    const topicPlan = planTopicCleanup(profileId)
 
     if (profile.avatar_url !== null && profile.avatar_url.startsWith('/uploads/avatars/')) {
       enqueue('avatar', profile.avatar_url)
@@ -581,8 +732,35 @@ export async function createProfileDeletionExecutor(
     for (const row of selectTopicAttachmentsStatement.all(profileId) as Array<{ storage_filename: string }>) {
       enqueue('topic_attachment', row.storage_filename)
     }
+    // Б1: файловете на ВСИЧКИ участници в изтриваните теми — преди редовете
+    // им да изчезнат с темата.
+    for (const topicId of topicPlan.ownTopicIdsToDelete) {
+      for (const row of selectAttachmentsForTopicStatement.all(topicId) as Array<{ storage_filename: string }>) {
+        enqueue('topic_attachment', row.storage_filename)
+      }
+    }
     for (const row of selectEvidenceAttachmentsStatement.all(profileId) as Array<{ storage_filename: string; is_copy: number }>) {
       enqueue(row.is_copy === 1 ? 'topic_mute_evidence_attachment' : 'topic_attachment', row.storage_filename)
+    }
+
+    // ─── Теми: пренасочване на чуждите наследници ПРЕДИ каскадата (А1) ───
+    const deletedTopicIds = new Set(topicPlan.ownTopicIdsToDelete)
+    const deletedTopicIdsJson = JSON.stringify(topicPlan.ownTopicIdsToDelete)
+    const preservedTopicIdsJson = JSON.stringify(
+      (selectAffectedTopicIdsStatement.all(profileId) as Array<{ topic_id: string }>)
+        .map((row) => row.topic_id)
+        .filter((topicId) => !deletedTopicIds.has(topicId)),
+    )
+    const foreignTopicMessagesBefore = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt
+    const rootsToRecompute = new Set(
+      (selectForeignParentsOfOwnRepliesStatement.all(profileId) as Array<{ message_id: string }>).map((row) => row.message_id),
+    )
+    const promotedRoots: string[] = []
+    for (const move of topicPlan.reparent) {
+      const moved = reparentTopicMessageStatement.run(move.newParentMessageId, move.messageId, profileId) as { changes: number }
+      if (Number(moved.changes) !== 1) throw new Error('profile_deletion_topic_reparent_failed')
+      if (move.newParentMessageId !== null) rootsToRecompute.add(move.newParentMessageId)
+      if (move.promotedLiveRoot) promotedRoots.push(move.messageId)
     }
 
     for (const statement of attributionSnapshotStatements) statement.run(profileId)
@@ -602,7 +780,33 @@ export async function createProfileDeletionExecutor(
       }
     }
 
+    // Б1: темите на профила — изцяло, вкл. чуждите публикации (каскада от
+    // topics: съобщения, отговори, файлови редове, харесвания, read state,
+    // mutes, reports, root агрегати).
+    for (const topicId of topicPlan.ownTopicIdsToDelete) {
+      deleteTopicModerationAuditStatement.run(topicId)
+      const deleted = deleteOwnTopicStatement.run(topicId, profileId, LAFCHE_TOPIC_ID) as { changes: number }
+      if (Number(deleted.changes) !== 1) throw new Error('profile_deletion_own_topic_delete_failed')
+    }
+
     deleteProfileStatement.run(profileId)
+
+    // Инварианти преди COMMIT — нарушение = ROLLBACK (failed, повторен опит).
+    const foreignTopicMessagesAfter = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt
+    if (foreignTopicMessagesAfter !== foreignTopicMessagesBefore) {
+      throw new Error('profile_deletion_foreign_topic_messages_changed')
+    }
+    if ((countCrossTopicParentLinksStatement.get(preservedTopicIdsJson) as { cnt: number }).cnt !== 0) {
+      throw new Error('profile_deletion_cross_topic_parent_link')
+    }
+    if (
+      (countTopicsStatement.get(deletedTopicIdsJson) as { cnt: number }).cnt !== 0 ||
+      (countTopicMessagesInTopicsStatement.get(deletedTopicIdsJson) as { cnt: number }).cnt !== 0
+    ) {
+      throw new Error('profile_deletion_own_topic_not_removed')
+    }
+    for (const rootMessageId of rootsToRecompute) recomputeRootLatestSeqStatement.run(rootMessageId)
+    for (const rootMessageId of promotedRoots) upsertPromotedRootLatestSeqStatement.run(rootMessageId)
 
     let accountDeleted = false
     if (profile.account_id !== null) {
