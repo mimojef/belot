@@ -53,10 +53,17 @@
  *  - [round 5 §2] reconnect policy: нова WS connection за profile с pending
  *    moderation не се authenticate-ва (connect-time gate), join_matchmaking
  *    връща "трябва да влезеш" (auth вече отхвърлен); resume_room sanity check
+ *  - [Етап 4F2A] реалният HTTP път с ВКЛЮЧЕНА offsite защита в изолиран
+ *    регистър: DELETE -> "насрочено" (съответства на състоянието) ->
+ *    контролиран ack (същия формат като backup-а) -> runner -> одит, файлова
+ *    фаза done, регистър без дублиране; липсващ/невалиден ack -> нищо не се
+ *    изтрива; само role===admin (subadmin/pika_team/marketing/top_chat_admin/
+ *    player/guest/отнета роля -> 403, без висящ ред и без запис в регистъра)
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
@@ -65,6 +72,13 @@ import { tmpdir } from 'node:os'
 import { WebSocket } from 'ws'
 import { join, resolve } from 'node:path'
 import { verifyVerificationCode } from '../src/db/authHelpers.js'
+import {
+  getProfileDeletionLedgerOffsiteAckPath,
+  isProfileDeletionLedgerRecordConfirmedOffsite,
+  readProfileDeletionLedger,
+  writeProfileDeletionLedgerOffsiteAck,
+  type ProfileDeletionLedgerOffsiteAck,
+} from '../src/db/profileDeletionLedger.js'
 
 const PASSWORD = 'BanDeleteSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -204,6 +218,7 @@ async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
   root: string
   serverDir: string
   databaseFile: string
+  ledgerPath: string
   cleanup(): Promise<void>
 }> {
   const root = await mkdtemp(join(tmpdir(), 'belot-ban-delete-smoke-'))
@@ -226,11 +241,13 @@ async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
     root,
     serverDir,
     databaseFile,
+    // Етап 4F2A — изолиран регистър на изтриванията (временна директория).
+    ledgerPath: join(root, 'deletion-ledger', 'profile-deletions.jsonl'),
     cleanup: async () => { await rm(root, { recursive: true, force: true }) },
   }
 }
 
-function startServer(serverDir: string, port: number): RunningServer {
+function startServer(serverDir: string, port: number, ledgerPath: string): RunningServer {
   const chunks: string[] = []
   const child = spawn(
     process.execPath,
@@ -243,6 +260,13 @@ function startServer(serverDir: string, port: number): RunningServer {
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
         PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
+        // Етап 4F2A — реалната offsite защита остава ВКЛЮЧЕНА (изрично, без
+        // значение от наследената среда); тестът сам играе ролята на backup-а,
+        // който записва ack (confirmLedgerOffsite). Само runner-ът е по-чест.
+        PROFILE_DELETION_LEDGER_PATH: ledgerPath,
+        PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED: '1',
+        ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS: '250',
+        ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS: '250',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -268,6 +292,79 @@ function promoteRole(databaseFile: string, email: string, role: string): void {
   db.exec('PRAGMA journal_mode = WAL;')
   db.prepare(`UPDATE accounts SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?`).run(role, email)
   db.close()
+}
+
+/**
+ * Етап 4F2A — контролирано тестово offsite потвърждение. Записва ack файла
+ * точно както backup скриптът (ops/pikabg-backup/scripts/pikabg-ledger-backup):
+ * брой байтове + SHA-256 на потвърдения префикс на регистъра. Сървърът го
+ * проверява със СЪЩИЯ production код (isProfileDeletionLedgerRecordConfirmedOffsite)
+ * — нищо не се заобикаля. `tamper` създава умишлено невалиден ack.
+ */
+function confirmLedgerOffsite(ledgerPath: string, tamper: 'none' | 'wrong_sha' | 'truncated' = 'none'): void {
+  const buffer = readFileSync(ledgerPath)
+  const parsed = readProfileDeletionLedger(ledgerPath)
+  const confirmed = tamper === 'truncated' ? buffer.subarray(0, buffer.length - 1) : buffer
+  const ack: ProfileDeletionLedgerOffsiteAck = {
+    v: 1,
+    bytes: confirmed.length,
+    sha256: tamper === 'wrong_sha' ? '0'.repeat(64) : createHash('sha256').update(confirmed).digest('hex'),
+    lineCount: parsed.lineCount,
+    entryCount: parsed.records.length,
+    remotePath: 'test-offsite:/belot-ban-delete-smoke/profile-deletions.jsonl',
+    confirmedAt: new Date().toISOString(),
+  }
+  // Windows: atomic rename-ът върху ack файла може да получи EPERM/EBUSY,
+  // докато runner-ът на сървъра го чете в същия момент — кратък повторен опит.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      writeProfileDeletionLedgerOffsiteAck(getProfileDeletionLedgerOffsiteAckPath(ledgerPath), ack)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 20 || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+}
+
+/** Записите в регистъра за една административна операция (по вид). */
+function countAdminLedgerRecords(ledgerPath: string, operationId: string): { intent: number; completed: number } {
+  const records = readProfileDeletionLedger(ledgerPath).records as unknown as Array<{ kind?: string; operationId?: string }>
+  return {
+    intent: records.filter((r) => r.kind === 'admin_delete_intent' && r.operationId === operationId).length,
+    completed: records.filter((r) => r.kind === 'admin_delete_completed' && r.operationId === operationId).length,
+  }
+}
+
+type AdminDeletionDbState = {
+  profileExists: boolean
+  pendingOperationId: string | null
+  pendingRequestedBy: string | null
+  pendingReason: string | null
+  auditFileCleanupStatus: string | null | undefined
+}
+
+function readAdminDeletionDbState(databaseFile: string, profileId: string, operationId: string | null): AdminDeletionDbState {
+  const db = new DatabaseSync(databaseFile, { open: true })
+  try {
+    const pending = db.prepare(`
+      SELECT ledger_operation_id, requested_by_profile_id, reason FROM pending_profile_moderation
+      WHERE target_profile_id = ? AND action = 'delete'
+    `).get(profileId) as { ledger_operation_id: string | null; requested_by_profile_id: string | null; reason: string } | undefined
+    const audit = operationId === null
+      ? undefined
+      : db.prepare(`SELECT file_cleanup_status FROM admin_profile_deletions WHERE log_id = ?`).get(operationId) as { file_cleanup_status: string | null } | undefined
+    return {
+      profileExists: db.prepare(`SELECT 1 FROM profiles WHERE profile_id = ?`).get(profileId) !== undefined,
+      pendingOperationId: pending?.ledger_operation_id ?? null,
+      pendingRequestedBy: pending?.requested_by_profile_id ?? null,
+      pendingReason: pending?.reason ?? null,
+      auditFileCleanupStatus: audit === undefined ? undefined : audit.file_cleanup_status,
+    }
+  } finally {
+    db.close()
+  }
 }
 
 type RegisteredUser = { cookie: string; profileId: string; accountId: string; email: string; displayName: string }
@@ -400,7 +497,7 @@ const port = await getFreePort()
 let server: RunningServer | null = null
 
 try {
-  server = startServer(isolated.serverDir, port)
+  server = startServer(isolated.serverDir, port, isolated.ledgerPath)
 
   console.log(`\n[startup] Чакам сървъра на порт ${port}...`)
   await waitFor('server health ready', async () => {
@@ -440,27 +537,109 @@ try {
   const adminCookie = await login(port, adminCandidate.email)
   const subadminCookie = await login(port, subadminCandidate.email)
 
-  console.log('  Регистрирани: player, ban-target, delete-target, admin, subadmin.')
+  // Етап 4F2A — останалите служебни роли и admin, чиято роля е отнета СЛЕД
+  // издаването на сесията.
+  const pikaTeamCandidate = await register(port, isolated.databaseFile, runId, 'pikateam')
+  const marketingCandidate = await register(port, isolated.databaseFile, runId, 'marketing')
+  const topChatAdminCandidate = await register(port, isolated.databaseFile, runId, 'topchatadmin')
+  const demotedAdminCandidate = await register(port, isolated.databaseFile, runId, 'demotedadmin')
+  promoteRole(isolated.databaseFile, pikaTeamCandidate.email, 'pika_team')
+  promoteRole(isolated.databaseFile, marketingCandidate.email, 'marketing')
+  promoteRole(isolated.databaseFile, topChatAdminCandidate.email, 'top_chat_admin')
+  promoteRole(isolated.databaseFile, demotedAdminCandidate.email, 'admin')
+  const pikaTeamCookie = await login(port, pikaTeamCandidate.email)
+  const marketingCookie = await login(port, marketingCandidate.email)
+  const topChatAdminCookie = await login(port, topChatAdminCandidate.email)
+  const demotedAdminCookie = await login(port, demotedAdminCandidate.email)
+  promoteRole(isolated.databaseFile, demotedAdminCandidate.email, 'subadmin')
+
+  console.log('  Регистрирани: player, ban-target, delete-target, admin, subadmin, pika_team, marketing, top_chat_admin, demoted admin.')
+
+  const ledgerPath = isolated.ledgerPath
+
+  /**
+   * Етап 4F2A — реалният HTTP път на административното изтриване: DELETE
+   * връща "насрочено" (pending:true), защото намерението току-що е записано
+   * в регистъра и още НЕ е потвърдено offsite. Проверява, че отговорът
+   * съответства на реалното състояние (профилът съществува, висящ ред с
+   * операцията, намерение в регистъра, без offsite потвърждение).
+   */
+  async function scheduleAdminDelete(targetProfileId: string, reason: string): Promise<string> {
+    const r = await httpRequest(port, `/api/admin/profiles/${targetProfileId}`, 'DELETE', adminCookie, { reason })
+    const b = r.body as { ok?: boolean; pending?: boolean }
+    if (r.status !== 200 || b.ok !== true || b.pending !== true) throw new Error(`DELETE: status=${r.status}, body=${JSON.stringify(r.body)}`)
+    const state = readAdminDeletionDbState(isolated.databaseFile, targetProfileId, null)
+    if (!state.profileExists) throw new Error('"насрочено", но профилът вече го няма')
+    if (state.pendingOperationId === null) throw new Error('"насрочено", но няма висящ ред с операция')
+    if (state.pendingRequestedBy !== adminCandidate.profileId || state.pendingReason !== reason) {
+      throw new Error(`висящият ред не носи администратора/причината: ${JSON.stringify(state)}`)
+    }
+    const counts = countAdminLedgerRecords(ledgerPath, state.pendingOperationId)
+    if (counts.intent !== 1 || counts.completed !== 0) throw new Error(`регистър: ${JSON.stringify(counts)}`)
+    if (isProfileDeletionLedgerRecordConfirmedOffsite(ledgerPath, `admin_delete_intent:${state.pendingOperationId}`)) {
+      throw new Error('намерението не би трябвало още да е потвърдено offsite')
+    }
+    return state.pendingOperationId
+  }
+
+  /** Offsite ack -> runner-ът изпълнява -> одит + файлова фаза done + completed в регистъра (без дублиране). */
+  async function confirmAndAwaitAdminDelete(targetProfileId: string, operationId: string): Promise<void> {
+    confirmLedgerOffsite(ledgerPath)
+    await waitFor(`административното изтриване ${operationId} е изпълнено`, async () => {
+      const state = readAdminDeletionDbState(isolated.databaseFile, targetProfileId, operationId)
+      return !state.profileExists && state.pendingOperationId === null && state.auditFileCleanupStatus === 'done'
+    }, 15_000)
+    await waitFor(`admin_delete_completed за ${operationId}`, async () => countAdminLedgerRecords(ledgerPath, operationId).completed >= 1, 5_000)
+    const counts = countAdminLedgerRecords(ledgerPath, operationId)
+    if (counts.intent !== 1 || counts.completed !== 1) throw new Error(`регистърът е дублиран: ${JSON.stringify(counts)}`)
+  }
+
+  async function adminDeleteViaOffsite(targetProfileId: string, reason: string): Promise<string> {
+    const operationId = await scheduleAdminDelete(targetProfileId, reason)
+    await confirmAndAwaitAdminDelete(targetProfileId, operationId)
+    return operationId
+  }
 
   // ── non-admin/subadmin direct API call -> 403 ───────────────────────────
-  console.log('\n[authz] Само role===admin минава — player/subadmin => 403, guest => 403')
-  const NON_ADMIN_SESSIONS: Array<{ label: string; cookie: string }> = [
-    { label: 'player', cookie: player.cookie },
-    { label: 'subadmin', cookie: subadminCookie },
+  console.log('\n[authz] Само role===admin минава — player/subadmin/pika_team/marketing/top_chat_admin/отнет admin => 403, guest => 403')
+  const ledgerSizeBeforeAuthz = readProfileDeletionLedger(ledgerPath).records.length
+  const NON_ADMIN_SESSIONS: Array<{ label: string; cookie: string; banToo: boolean }> = [
+    { label: 'player', cookie: player.cookie, banToo: true },
+    { label: 'subadmin', cookie: subadminCookie, banToo: true },
+    { label: 'pika_team', cookie: pikaTeamCookie, banToo: false },
+    { label: 'marketing', cookie: marketingCookie, banToo: false },
+    { label: 'top_chat_admin', cookie: topChatAdminCookie, banToo: false },
+    { label: 'admin с отнета роля (сесия отпреди смяната)', cookie: demotedAdminCookie, banToo: false },
   ]
-  for (const { label, cookie } of NON_ADMIN_SESSIONS) {
-    await check(`[authz] ${label} -> POST ban => 403`, async () => {
-      const r = await httpRequest(port, `/api/admin/profiles/${banTarget.profileId}/ban`, 'POST', cookie, { days: 7, reason: 'test' })
-      if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
-    })
+  for (const { label, cookie, banToo } of NON_ADMIN_SESSIONS) {
+    if (banToo) {
+      await check(`[authz] ${label} -> POST ban => 403`, async () => {
+        const r = await httpRequest(port, `/api/admin/profiles/${banTarget.profileId}/ban`, 'POST', cookie, { days: 7, reason: 'test' })
+        if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+      })
+    }
     await check(`[authz] ${label} -> DELETE profile => 403`, async () => {
       const r = await httpRequest(port, `/api/admin/profiles/${deleteTarget.profileId}`, 'DELETE', cookie, { reason: 'test' })
+      if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    })
+    await check(`[authz] ${label} -> DELETE по support заявка (supportRequestMessageId) => 403`, async () => {
+      const r = await httpRequest(port, `/api/admin/profiles/${deleteTarget.profileId}`, 'DELETE', cookie, { reason: 'test', supportRequestMessageId: randomUUID() })
       if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
     })
   }
   await check('[authz] guest (без cookie) -> POST ban => 403', async () => {
     const r = await httpRequest(port, `/api/admin/profiles/${banTarget.profileId}/ban`, 'POST', undefined, { days: 7, reason: 'test' })
     if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+  await check('[authz] guest (без cookie) -> DELETE profile => 403', async () => {
+    const r = await httpRequest(port, `/api/admin/profiles/${deleteTarget.profileId}`, 'DELETE', undefined, { reason: 'test' })
+    if (r.status !== 403) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+  await check('[authz] отказаните заявки не създават висящ ред, запис в регистъра или промяна по профила', () => {
+    const state = readAdminDeletionDbState(isolated.databaseFile, deleteTarget.profileId, null)
+    if (!state.profileExists || state.pendingOperationId !== null) throw new Error(JSON.stringify(state))
+    const after = readProfileDeletionLedger(ledgerPath).records.length
+    if (after !== ledgerSizeBeforeAuthz) throw new Error(`регистър: ${ledgerSizeBeforeAuthz} -> ${after}`)
   })
 
   // ── self-ban / self-delete -> 400 ────────────────────────────────────────
@@ -585,9 +764,13 @@ try {
 
   // ── hard delete -> username/email веднага свободни ──────────────────────
   console.log('\n[delete-flow] hard delete -> username/email свободни -> audit ред, без profiles row')
-  await check('[delete-flow] admin -> DELETE profile {reason} => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${deleteTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing hard delete' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  // Етап 4F2A — до 4F1 очакването беше незабавно изтриване в същия HTTP
+  // отговор. От 4F1 намерението се изпълнява едва след offsite потвърждение
+  // на регистъра, затова реалният отговор е "насрочено"; изтриването се
+  // проверява след контролирания ack.
+  let deleteFlowOperationId = ''
+  await check('[delete-flow] admin -> DELETE profile {reason} => 200 насрочено -> offsite ack -> изпълнено', async () => {
+    deleteFlowOperationId = await adminDeleteViaOffsite(deleteTarget.profileId, 'testing hard delete')
   })
   await check('[delete-flow] изтрит профил -> login => 400 (грешен email/парола, профилът вече не съществува)', async () => {
     const r = await loginRaw(port, deleteTarget.email)
@@ -623,14 +806,16 @@ try {
   console.log('\n[audit] admin_profile_deletions + profiles row вече не съществува')
   const auditDb = new DatabaseSync(isolated.databaseFile, { open: true })
   const deletionRows = auditDb.prepare(`
-    SELECT deleted_profile_id, username_snapshot, deleted_by_profile_id, reason
+    SELECT log_id, deleted_profile_id, username_snapshot, deleted_by_profile_id, reason, file_cleanup_status
     FROM admin_profile_deletions
     WHERE deleted_profile_id = ?
   `).all(deleteTarget.profileId) as Array<{
+    log_id: string
     deleted_profile_id: string
     username_snapshot: string
     deleted_by_profile_id: string | null
     reason: string
+    file_cleanup_status: string | null
   }>
   const remainingProfileRow = auditDb.prepare(`SELECT profile_id FROM profiles WHERE profile_id = ?`).get(deleteTarget.profileId)
   const remainingAccountRow = auditDb.prepare(`SELECT account_id FROM accounts WHERE account_id = ?`).get(deleteTarget.accountId)
@@ -644,6 +829,11 @@ try {
     if (!row || row.deleted_by_profile_id !== adminCandidate.profileId) throw new Error(`deleted_by_profile_id=${row?.deleted_by_profile_id}`)
     if (row.reason !== 'testing hard delete') throw new Error(`reason=${row.reason}`)
     if (row.username_snapshot !== deleteTarget.displayName) throw new Error(`username_snapshot=${row.username_snapshot}, очаквах ${deleteTarget.displayName}`)
+  })
+  await check('[audit] одитният ред е самата операция от регистъра; файловата фаза е done', () => {
+    const row = deletionRows[0]
+    if (!row || row.log_id !== deleteFlowOperationId) throw new Error(`log_id=${row?.log_id}, операция=${deleteFlowOperationId}`)
+    if (row.file_cleanup_status !== 'done') throw new Error(`file_cleanup_status=${row.file_cleanup_status}`)
   })
   await check('[audit] profiles row вече не съществува (реален hard delete, не soft)', () => {
     if (remainingProfileRow !== undefined) throw new Error(`profiles row все още съществува: ${JSON.stringify(remainingProfileRow)}`)
@@ -682,9 +872,11 @@ try {
     if (r.status !== 200 || b.ok !== true || !b.session) throw new Error(`status=${r.status}, body=${JSON.stringify(b)}`)
   })
 
-  await check('[blocker-3] admin -> DELETE profile (online target) {reason} => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${onlineDeleteTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing online hard delete' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  // Етап 4F2 §10 — извън игра достъпът се спира ВЕДНАГА при насрочването
+  // (сесии + живи socket-и), а изтриването следва след offsite потвърждението.
+  let onlineDeleteOperationId = ''
+  await check('[blocker-3] admin -> DELETE profile (online target) {reason} => 200 насрочено', async () => {
+    onlineDeleteOperationId = await scheduleAdminDelete(onlineDeleteTarget.profileId, 'testing online hard delete')
   })
 
   await check('[blocker-3] живият WS socket получава "session_deleted" преди close', async () => {
@@ -709,6 +901,10 @@ try {
   await check('[blocker-3] старият session СЛЕД delete => 401 на друг authenticated endpoint (/api/profile/me)', async () => {
     const r = await httpRequest(port, '/api/profile/me', 'GET', onlineDeleteTarget.cookie)
     if (r.status !== 401) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  })
+
+  await check('[blocker-3] offsite ack -> изтриването е изпълнено (одит, файлова фаза done, регистър без дублиране)', async () => {
+    await confirmAndAwaitAdminDelete(onlineDeleteTarget.profileId, onlineDeleteOperationId)
   })
 
   await check('[blocker-3] username/email на online-изтрития профил веднага освободени', async () => {
@@ -798,14 +994,12 @@ try {
     if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
   })
 
-  await check('[blocker-r2-1] admin -> DELETE profile (forensicDeleteTarget) => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${forensicDeleteTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing forensic identity preservation' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[blocker-r2-1] admin -> DELETE profile (forensicDeleteTarget) => насрочено -> offsite ack -> изпълнено', async () => {
+    await adminDeleteViaOffsite(forensicDeleteTarget.profileId, 'testing forensic identity preservation')
   })
 
-  await check('[blocker-r2-1] admin -> DELETE profile (banHistoryDeleteTarget) => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${banHistoryDeleteTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing ban history identity preservation' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[blocker-r2-1] admin -> DELETE profile (banHistoryDeleteTarget, с активен бан) => насрочено -> offsite ack -> изпълнено', async () => {
+    await adminDeleteViaOffsite(banHistoryDeleteTarget.profileId, 'testing ban history identity preservation')
   })
 
   const forensicDb = new DatabaseSync(isolated.databaseFile, { open: true })
@@ -838,6 +1032,10 @@ try {
   const liveEventRows = forensicDb.prepare(`
     SELECT profile_id FROM site_visit_events WHERE anonymous_visitor_id = ? ORDER BY occurred_at
   `).all(visitorId) as Array<{ profile_id: string | null }>
+  const forensicCompactLinkCount = (forensicDb.prepare(`
+    SELECT (SELECT COUNT(*) FROM profile_visitor_links WHERE profile_id = ?1)
+         + (SELECT COUNT(*) FROM profile_ip_links WHERE profile_id = ?1) AS n
+  `).get(forensicDeleteTarget.profileId) as { n: number }).n
   const banHistoryRows = forensicDb.prepare(`
     SELECT ban_id, profile_id, deleted_profile_id_snapshot, reason, banned_until
     FROM profile_bans
@@ -893,18 +1091,14 @@ try {
       throw new Error(`test setup грешка: forensicDeleteTarget не биваше да е first/last_profile_id: ${JSON.stringify(liveVisitorRow)}`)
     }
   })
-  await check('[blocker-r2-1] admin_profile_deletion_visitor_snapshots съдържа 2 агрегирани реда (по IP), с правилен event_count/first/last_seen', () => {
-    if (visitorSnapshotRows.length !== 2) throw new Error(`Брой redове=${visitorSnapshotRows.length}: ${JSON.stringify(visitorSnapshotRows)}`)
-    const [row1, row2] = visitorSnapshotRows as [typeof visitorSnapshotRows[0], typeof visitorSnapshotRows[0]]
-    if (row1.anonymous_visitor_id !== visitorId || row2.anonymous_visitor_id !== visitorId) {
-      throw new Error(`anonymous_visitor_id несъответствие: ${JSON.stringify(visitorSnapshotRows)}`)
-    }
-    // '203.0.113.5' -> 2 events (агрегирани в 1 ред), '203.0.113.9' -> 1 event
-    const ip5 = visitorSnapshotRows.find((r) => r.ip_address === '203.0.113.5')
-    const ip9 = visitorSnapshotRows.find((r) => r.ip_address === '203.0.113.9')
-    if (!ip5 || ip5.event_count !== 2) throw new Error(`IP 203.0.113.5 event_count=${ip5?.event_count}, очаквах 2 (агрегация, не copy на всеки ред)`)
-    if (!ip9 || ip9.event_count !== 1) throw new Error(`IP 203.0.113.9 event_count=${ip9?.event_count}, очаквах 1`)
-    if (!ip5.first_seen_at || !ip5.last_seen_at) throw new Error(`first/last_seen_at липсват за IP5: ${JSON.stringify(ip5)}`)
+  // Етап 4F2 (P5) — административното изтриване прилага правилата на
+  // самоизтриването: НОВ visitor/IP forensic snapshot не се създава, а
+  // compact visitor/IP връзките на изтрития се премахват. Старото очакване
+  // (2 агрегирани snapshot реда) описваше поведението отпреди 4F2.
+  await check('[blocker-r2-1] 4F2: без нов visitor snapshot; compact visitor/IP връзките на изтрития са премахнати; събитията са без profile_id', () => {
+    if (visitorSnapshotRows.length !== 0) throw new Error(`snapshot редове=${visitorSnapshotRows.length}: ${JSON.stringify(visitorSnapshotRows)}`)
+    if (forensicCompactLinkCount !== 0) throw new Error(`compact връзки=${forensicCompactLinkCount}`)
+    if (liveEventRows.some((row) => row.profile_id !== null)) throw new Error(`site_visit_events.profile_id: ${JSON.stringify(liveEventRows)}`)
   })
   await check('[blocker-r2-1] profile_bans: точно 1 ред attributable към deleted_profile_id_snapshot (profile_id вече е NULL)', () => {
     if (banHistoryRows.length !== 1) throw new Error(`Брой redове=${banHistoryRows.length}: ${JSON.stringify(banHistoryRows)}`)
@@ -996,13 +1190,11 @@ try {
     finishedTournamentId = t.tournamentId
   })
 
-  await check('[blocker-r2-2] admin -> DELETE profile (finished tournament creator) => 200 (не е блокирано, турнирът е terminal)', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${tournamentFinishedCreator.profileId}`, 'DELETE', adminCookie, { reason: 'creator of finished tournament' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[blocker-r2-2] admin -> DELETE profile (finished tournament creator) => насрочено -> изпълнено (не е блокирано, турнирът е terminal)', async () => {
+    await adminDeleteViaOffsite(tournamentFinishedCreator.profileId, 'creator of finished tournament')
   })
-  await check('[blocker-r2-2] admin -> DELETE profile (finished tournament participant) => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${tournamentFinishedParticipant.profileId}`, 'DELETE', adminCookie, { reason: 'participant of finished tournament' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[blocker-r2-2] admin -> DELETE profile (finished tournament participant) => насрочено -> изпълнено', async () => {
+    await adminDeleteViaOffsite(tournamentFinishedParticipant.profileId, 'participant of finished tournament')
   })
 
   const finishedDb = new DatabaseSync(isolated.databaseFile, { open: true })
@@ -1063,10 +1255,11 @@ try {
   })
 
   // [B] DELETE offline -> next login -> normal invalid credentials, БЕЗ special delete code.
-  await check('[round4-B] admin -> DELETE offline профил => 200, pending:false', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${offlineDeleteTarget.profileId}`, 'DELETE', adminCookie, { reason: 'offline delete test' })
-    const b = r.body as { ok?: boolean; pending?: boolean }
-    if (r.status !== 200 || b.ok !== true || b.pending !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  // Етап 4F2A — pending:false в същия отговор е невъзможно при задължително
+  // offsite потвърждение (намерението се записва в тази заявка); реалният
+  // отговор е pending:true, а изтриването следва след ack-а.
+  await check('[round4-B] admin -> DELETE offline профил => 200, pending:true -> offsite ack -> изпълнено', async () => {
+    await adminDeleteViaOffsite(offlineDeleteTarget.profileId, 'offline delete test')
   })
   await check('[round4-B] offline изтрит профил -> следващ login => 400 generic invalid credentials, БЕЗ delete-specific code', async () => {
     const r = await loginRaw(port, offlineDeleteTarget.email)
@@ -1110,13 +1303,16 @@ try {
   await check('[round4-D] online-not-playing WS connect => "connected" frame', async () => {
     await waitFor('connected frame', async () => onlineNpDelMessages.some((m) => m.type === 'connected'), 5000)
   })
-  await check('[round4-D] admin -> DELETE (online, НЕ в игра) => 200, pending:false (immediate enforcement)', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${onlineNotPlayingDeleteTarget.profileId}`, 'DELETE', adminCookie, { reason: 'online not-playing delete test' })
-    const b = r.body as { ok?: boolean; pending?: boolean }
-    if (r.status !== 200 || b.ok !== true || b.pending !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  let onlineNpDeleteOperationId = ''
+  await check('[round4-D] admin -> DELETE (online, НЕ в игра) => 200, pending:true (насрочено; достъпът се спира веднага)', async () => {
+    onlineNpDeleteOperationId = await scheduleAdminDelete(onlineNotPlayingDeleteTarget.profileId, 'online not-playing delete test')
   })
-  await check('[round4-D] живият socket получава "session_deleted" ВЕДНАГА (не отложено)', async () => {
+  await check('[round4-D] живият socket получава "session_deleted" ВЕДНАГА (преди offsite потвърждението)', async () => {
     await waitFor('session_deleted frame', async () => onlineNpDelMessages.some((m) => m.type === 'session_deleted'), 5000)
+    if (countAdminLedgerRecords(ledgerPath, onlineNpDeleteOperationId).completed !== 0) throw new Error('изтриването вече е изпълнено — проверката не доказва незабавно спиране')
+  })
+  await check('[round4-D] offsite ack -> изтриването е изпълнено', async () => {
+    await confirmAndAwaitAdminDelete(onlineNotPlayingDeleteTarget.profileId, onlineNpDeleteOperationId)
   })
 
   await check('[round4-D] "session_deleted" frame носи точния admin reason', () => {
@@ -1161,10 +1357,8 @@ try {
     await waitFor('bystander admin connected frame', async () => bystanderAdminMessages.some((m) => m.type === 'connected'), 5000)
   })
 
-  await check('[WS-Invalidation] admin -> DELETE (offline target, immediate) => 200, pending:false', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${wsInvalidationTarget.profileId}`, 'DELETE', adminCookie, { reason: 'ws invalidation broadcast test' })
-    const b = r.body as { ok?: boolean; pending?: boolean }
-    if (r.status !== 200 || b.ok !== true || b.pending !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[WS-Invalidation] admin -> DELETE (offline target) => 200, pending:true -> offsite ack -> изпълнено от runner-а', async () => {
+    await adminDeleteViaOffsite(wsInvalidationTarget.profileId, 'ws invalidation broadcast test')
   })
 
   await check('[WS-Invalidation] bystander admin (subadmin) socket получава admin_aggregate_data_changed', async () => {
@@ -1178,12 +1372,13 @@ try {
     if (extraKeys.length > 0) throw new Error(`admin_aggregate_data_changed носи неочаквани полета: ${JSON.stringify(extraKeys)}`)
   })
 
-  await check('[WS-Invalidation] initiating admin-ският СОБСТВЕН socket НЕ получава admin_aggregate_data_changed (dedup чрез excludeSessionId)', async () => {
-    // Кратка допълнителна пауза, за да сме сигурни, че broadcast-ът (ако би бил изпратен и към този socket) вече е пристигнал.
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 300))
-    if (adminSelfMessages.some((m) => m.type === 'admin_aggregate_data_changed')) {
-      throw new Error('admin-ският собствен socket получи admin_aggregate_data_changed — dedup-ът (excludeSessionId) не работи')
-    }
+  // Етап 4F2A — dedup-ът (excludeSessionId) важи само за изтриване,
+  // изпълнено в самия HTTP отговор (тогава табът на администратора се
+  // обновява локално). При изпълнение от runner-а след offsite потвърждението
+  // HTTP отговорът е бил "насрочено", затова и собственият таб на
+  // администратора ТРЯБВА да получи сигнала — иначе списъците му остават стари.
+  await check('[WS-Invalidation] при отложено изпълнение и собственият socket на администратора получава admin_aggregate_data_changed', async () => {
+    await waitFor('admin self admin_aggregate_data_changed frame', async () => adminSelfMessages.some((m) => m.type === 'admin_aggregate_data_changed'), 5000)
   })
 
   if (adminSelfSocket.readyState === WebSocket.OPEN || adminSelfSocket.readyState === WebSocket.CONNECTING) adminSelfSocket.close()
@@ -1270,16 +1465,33 @@ try {
   // чиято connection БЕШЕ established ПРЕДИ pending маркера (напр. живата
   // игрова connection) — тук нямаме такава, затова очакваме connect-time
   // отказ (socket се затваря без 'connected'), не message-level error frame.
-  await check('[round4-F] pendingDeleteTarget -> нова WS connection се отхвърля НА connect-time (pending delete блокира reconnect/нова игра още преди handshake-а да завърши)', async () => {
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: pendingDeleteCookie } })
+  // Етап 4F2A — двата валидни пътя (виж assertNewWsNotAuthenticatedAsProfile):
+  // докато сесията още е жива — connect-time reject; след като runner-ът
+  // (onWaiting) я отнеме — гост връзка. Кой от двата се случи зависи само от
+  // момента на цикъла на runner-а; и в двата случая профилът не се удостоверява.
+  async function assertNewWsNotAuthenticatedAsProfile(cookie: string): Promise<void> {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: cookie } })
     const messages: Array<{ type?: string; message?: string }> = []
     let closed = false
     socket.on('close', () => { closed = true })
     socket.on('message', (raw) => { try { messages.push(JSON.parse(raw.toString('utf8'))) } catch { /* ignore */ } })
-    await waitFor('socket close (connect-time reject) без "connected" frame', async () => closed, 5000)
-    if (messages.some((m) => m.type === 'connected')) {
-      throw new Error(`connection не биваше да получи "connected" frame: ${JSON.stringify(messages)}`)
+    await waitFor('socket close или "connected" frame', async () => closed || messages.some((m) => m.type === 'connected'), 5000)
+    if (closed) {
+      if (messages.some((m) => m.type === 'connected')) throw new Error(`затворена след "connected": ${JSON.stringify(messages)}`)
+      return
     }
+    socket.send(JSON.stringify({ type: 'join_matchmaking', stake: 5000 }))
+    try {
+      await waitFor('отказ "Трябва да влезеш" за join_matchmaking', async () => messages.some((m) => m.type === 'error' && typeof m.message === 'string' && m.message.startsWith('Трябва да влезеш')), 5000)
+    } catch (error) {
+      throw new Error(`${error instanceof Error ? error.message : String(error)}; frames=${JSON.stringify(messages.map((m) => ({ type: m.type, message: m.message })))}`)
+    } finally {
+      socket.close()
+    }
+  }
+
+  await check('[round4-F] pendingDeleteTarget -> нова WS connection НЕ се удостоверява като профила (connect-time reject или гост след отнемане на сесиите) — нова игра е блокирана', async () => {
+    await assertNewWsNotAuthenticatedAsProfile(pendingDeleteCookie)
   })
 
   await check('[round4-EF] pending_profile_moderation съдържа точно 2 реда (ban + delete), UNIQUE(target_profile_id) idempotent upsert работи', () => {
@@ -1335,18 +1547,17 @@ try {
   // различен fresh login+connect опит) — потвърждава, че connect-time
   // gate-ът е idempotent/repeatable, не консумира pending реда само защото
   // веднъж вече е отхвърлил connection.
-  await check('[round5-2] повторен login отказан + нов WS connect опит (съществуващата сесия) за pendingDeleteTarget пак се отхвърля (idempotent connect-time gate, pending row не се консумира)', async () => {
+  // Етап 4F2A — изолираният тест не може да постави профила в реална игра,
+  // затова runner-ът (onWaiting, Етап 4F2 §10) вижда насрочено изтриване
+  // извън игра и ОТНЕМА сесиите му. Тогава старата бисквитка вече не
+  // удостоверява никого и връзката е гост връзка (connect-time gate-ът за
+  // висяща модерация не е нужен). Валидното очакване е същото по смисъл:
+  // нова връзка НЕ се удостоверява като pendingDeleteTarget — или се затваря
+  // на connect-time, или е гост и действие, изискващо профил, се отказва.
+  await check('[round5-2] повторен login отказан + нов WS connect опит (съществуващата бисквитка) за pendingDeleteTarget НЕ се удостоверява като профила (connect-time reject или гост), pending row не се консумира', async () => {
     const freshLogin = await loginRaw(port, pendingDeleteTarget.email)
     if (freshLogin.status !== 403 || freshLogin.cookie !== null) throw new Error(`login: status=${freshLogin.status}`)
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: pendingDeleteTarget.cookie } })
-    const messages: Array<{ type?: string }> = []
-    let closed = false
-    socket.on('close', () => { closed = true })
-    socket.on('message', (raw) => { try { messages.push(JSON.parse(raw.toString('utf8'))) } catch { /* ignore */ } })
-    await waitFor('socket close (connect-time reject)', async () => closed, 5000)
-    if (messages.some((m) => m.type === 'connected')) {
-      throw new Error(`connection не биваше да получи "connected" frame: ${JSON.stringify(messages)}`)
-    }
+    await assertNewWsNotAuthenticatedAsProfile(pendingDeleteTarget.cookie)
   })
   await check('[round5-2] pending_profile_moderation ред за pendingDeleteTarget все още съществува (connect-опитите не го чистят)', () => {
     const verifyDb = new DatabaseSync(isolated.databaseFile, { open: true })
@@ -1453,16 +1664,13 @@ try {
     }
   })
 
-  await check('[file-cleanup] admin -> DELETE profile (fileCleanupTarget) => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${fileCleanupTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing physical file cleanup' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  // Етап 4F2 — файловете минават през надеждната опашка; adminDeleteViaOffsite
+  // изчаква file_cleanup_status='done', т.е. всички файлови операции са
+  // приключили (done/skipped_shared), преди проверките по-долу.
+  await check('[file-cleanup] admin -> DELETE profile (fileCleanupTarget) => насрочено -> изпълнено, файловата фаза done', async () => {
+    await adminDeleteViaOffsite(fileCleanupTarget.profileId, 'testing physical file cleanup')
   })
 
-  // hardDeleteProfile() вече await-ва физическия cleanup ПРЕДИ да resolve-не
-  // (не fire-and-forget — виж deleteUploadedFilesBestEffort коментара в
-  // profileHardDeleteService.ts), а HTTP handler-ът await-ва hardDeleteProfile()
-  // ПРЕДИ да прати 200 отговора — затова unlink-ите гарантирано вече са
-  // изпълнени в тази точка, immediate check, без polling wait.
   await check('[file-cleanup] target avatar файлът вече не съществува на диска', async () => {
     if (await pathExists(targetAvatarFilePath)) throw new Error(`Файлът все още съществува: ${targetAvatarFilePath}`)
   })
@@ -1481,9 +1689,8 @@ try {
   await check('[file-cleanup] unrelated control avatar файлът остава недокоснат (targeted cleanup, не global)', async () => {
     if (!(await pathExists(controlAvatarFilePath))) throw new Error(`Control файлът неочаквано изчезна: ${controlAvatarFilePath}`)
   })
-  await check('[file-cleanup] admin -> DELETE profile (fileCleanupDefaultAvatarTarget, никога не е качвал avatar/gallery) => 200, без грешка (NULL avatar_url се игнорира безопасно)', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${fileCleanupDefaultAvatarTarget.profileId}`, 'DELETE', adminCookie, { reason: 'testing default avatar skip' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[file-cleanup] admin -> DELETE profile (fileCleanupDefaultAvatarTarget, никога не е качвал avatar/gallery) => изпълнено, без грешка (NULL avatar_url се игнорира безопасно)', async () => {
+    await adminDeleteViaOffsite(fileCleanupDefaultAvatarTarget.profileId, 'testing default avatar skip')
   })
 
   // ── SHARED AVATAR SAFETY: двама профила сочат към ЕДИН И СЪЩ uploaded
@@ -1507,9 +1714,8 @@ try {
     db.close()
   }
 
-  await check('[file-cleanup-shared] admin -> DELETE profile (sharedAvatarProfileA) => 200', async () => {
-    const r = await httpRequest(port, `/api/admin/profiles/${sharedAvatarProfileA.profileId}`, 'DELETE', adminCookie, { reason: 'testing shared avatar safety' })
-    if (r.status !== 200) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+  await check('[file-cleanup-shared] admin -> DELETE profile (sharedAvatarProfileA) => изпълнено (споделеният файл -> skipped_shared, файловата фаза done)', async () => {
+    await adminDeleteViaOffsite(sharedAvatarProfileA.profileId, 'testing shared avatar safety')
   })
   await check('[file-cleanup-shared] споделеният avatar файл остава на диска (все още реферира от sharedAvatarProfileB)', async () => {
     if (!(await pathExists(sharedAvatarFilePath))) throw new Error(`Споделеният файл неочаквано изчезна: ${sharedAvatarFilePath}`)
@@ -1519,6 +1725,62 @@ try {
     const row = db.prepare(`SELECT avatar_url FROM profiles WHERE profile_id = ?`).get(sharedAvatarProfileB.profileId) as { avatar_url: string | null } | undefined
     db.close()
     if (!row || row.avatar_url !== sharedAvatarUrl) throw new Error(`sharedAvatarProfileB.avatar_url=${row?.avatar_url}, очаквах ${sharedAvatarUrl}`)
+  })
+
+  // ── Етап 4F2A: offsite потвърждението през реалния HTTP път ─────────────
+  // Без валиден ack нищо не се изтрива (fail-closed), колкото и пъти да мине
+  // runner-ът; "насрочено" отговаря на реалното състояние през цялото време.
+  console.log('\n[offsite] липсващо / невалидно / валидно offsite потвърждение (реалната проверка на регистъра)')
+  const offsiteTarget = await register(port, isolated.databaseFile, runId, 'offsitetarget')
+  const RUNNER_TICKS_WAIT_MS = 1_500 // ≥ 5 цикъла на runner-а (250 ms)
+  let offsiteOperationId = ''
+
+  const assertStillScheduled = (label: string): void => {
+    const state = readAdminDeletionDbState(isolated.databaseFile, offsiteTarget.profileId, offsiteOperationId)
+    if (!state.profileExists || state.pendingOperationId !== offsiteOperationId || state.auditFileCleanupStatus !== undefined) {
+      throw new Error(`${label}: ${JSON.stringify(state)}`)
+    }
+    if (countAdminLedgerRecords(ledgerPath, offsiteOperationId).completed !== 0) throw new Error(`${label}: completed запис в регистъра`)
+  }
+
+  await check('[offsite] admin -> DELETE => 200 насрочено (профил, висящ ред, намерение в регистъра — без потвърждение)', async () => {
+    offsiteOperationId = await scheduleAdminDelete(offsiteTarget.profileId, 'offsite confirmation test')
+  })
+  await check('[offsite] насроченият профил няма действаща сесия (нови игри/покупки изискват сесия) и не може да влезе', async () => {
+    const me = await httpRequest(port, '/api/profile/me', 'GET', offsiteTarget.cookie)
+    if (me.status !== 401) throw new Error(`/api/profile/me status=${me.status}`)
+    const relogin = await loginRaw(port, offsiteTarget.email)
+    const body = relogin.body as { code?: string }
+    if (relogin.status !== 403 || body.code !== 'PROFILE_DELETION_SCHEDULED' || relogin.cookie !== null) {
+      throw new Error(`login: status=${relogin.status}, body=${JSON.stringify(relogin.body)}`)
+    }
+  })
+  await check('[offsite] липсващо потвърждение: след няколко цикъла на runner-а изтриването НЕ е изпълнено', async () => {
+    await sleep(RUNNER_TICKS_WAIT_MS)
+    assertStillScheduled('липсващ ack')
+  })
+  await check('[offsite] невалидно потвърждение (грешен SHA-256): изтриването НЕ е изпълнено', async () => {
+    confirmLedgerOffsite(ledgerPath, 'wrong_sha')
+    await sleep(RUNNER_TICKS_WAIT_MS)
+    assertStillScheduled('грешен SHA-256')
+  })
+  await check('[offsite] невалидно потвърждение (префикс без последния байт): изтриването НЕ е изпълнено', async () => {
+    confirmLedgerOffsite(ledgerPath, 'truncated')
+    await sleep(RUNNER_TICKS_WAIT_MS)
+    assertStillScheduled('отрязан префикс')
+  })
+  await check('[offsite] валидно потвърждение -> изпълнено: одит от името на администратора, файловата фаза done, регистърът без дублиране', async () => {
+    await confirmAndAwaitAdminDelete(offsiteTarget.profileId, offsiteOperationId)
+    const db = new DatabaseSync(isolated.databaseFile, { open: true })
+    const audit = db.prepare(`SELECT deleted_profile_id, deleted_by_profile_id, reason FROM admin_profile_deletions WHERE log_id = ?`).get(offsiteOperationId) as Record<string, unknown> | undefined
+    db.close()
+    if (audit?.deleted_profile_id !== offsiteTarget.profileId || audit.deleted_by_profile_id !== adminCandidate.profileId || audit.reason !== 'offsite confirmation test') {
+      throw new Error(`одит: ${JSON.stringify(audit)}`)
+    }
+  })
+  await check('[offsite] след изпълнението входът връща generic невалидни данни (профилът го няма)', async () => {
+    const r = await loginRaw(port, offsiteTarget.email)
+    if (r.status !== 400) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
   })
 
 } catch (err) {

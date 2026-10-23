@@ -31,6 +31,7 @@ export type HardDeleteProfileResult =
         | 'active_tournament_dependency'
         | 'invalid_support_request_message'
         | 'campaign_gift_sender_protected'
+        | 'forbidden'
     }
 
 export type AdminFileCleanupRunSummary = {

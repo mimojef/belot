@@ -12,9 +12,10 @@
  *   ... --server-root=/path/to/server    (по подразбиране: папката над scripts/)
  *   ... --batch-size=500                 (профила на batch транзакция)
  *
- * Две фази: (1) raw site_visit_events на batch-ове; (2) hard-deleted
- * профили от admin_profile_deletion_visitor_snapshots (raw profile_id им вече
- * е NULL — snapshot-ът е единственият оцелял източник).
+ * Само raw site_visit_events на batch-ове. Етап 4F2A — окончателно изтрити
+ * профили НЕ се внасят обратно (admin_profile_deletion_visitor_snapshots
+ * остават непроменени като доказателство, но не се превръщат в активни
+ * compact връзки).
  *
  * Безопасност:
  *   * всеки batch е кратка BEGIN IMMEDIATE транзакция (keyset по profile_id);
@@ -83,11 +84,7 @@ if (!execute) {
     SELECT COUNT(*) AS n FROM (SELECT 1 FROM site_visit_events
       WHERE profile_id IS NOT NULL AND ip_address IS NOT NULL AND length(trim(ip_address)) > 0 GROUP BY profile_id, ip_address);
   `)
-  const deletedSnapshotProfiles = count(`
-    SELECT COUNT(DISTINCT s.deleted_profile_id) AS n FROM admin_profile_deletion_visitor_snapshots s
-    WHERE NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = s.deleted_profile_id);
-  `)
-  console.log(`[backfill] DRY-RUN: raw уникални profile<->visitor=${expectedVisitorLinks}, profile<->ip=${expectedIpLinks}; hard-deleted профили със snapshot=${deletedSnapshotProfiles}.`)
+  console.log(`[backfill] DRY-RUN: raw уникални profile<->visitor=${expectedVisitorLinks}, profile<->ip=${expectedIpLinks}.`)
   console.log('[backfill] Нищо не е записано. Добави --execute за реален backfill.')
   database.close()
   process.exit(0)
@@ -107,5 +104,4 @@ const after = {
 database.close()
 
 console.log(`[backfill] Готово за ${Date.now() - startedAt}ms: batches=${result.batches}, профили=${result.profilesProcessed}, upsert-нати visitor links=${result.visitorLinkRowsWritten}, ip links=${result.ipLinkRowsWritten}.`)
-console.log(`[backfill] Hard-deleted профили (от admin_profile_deletion_visitor_snapshots): visitor links=${result.deletedSnapshotVisitorLinkRowsWritten}, ip links=${result.deletedSnapshotIpLinkRowsWritten}.`)
 console.log(`[backfill] compact след: visitor links=${after.visitorLinks}, ip links=${after.ipLinks}. Провери с scripts/verifyProfileVisitLinks.ts.`)

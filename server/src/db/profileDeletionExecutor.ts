@@ -192,6 +192,21 @@ export type ProfileDeletionQueuedFile = {
   attemptCount: number
 }
 
+/**
+ * Етап 4F2A — окончателно административно изтриване инициира САМО роля
+ * `admin`. Authoritative проверка по базата (не по сесията): акаунтът е
+ * admin и профилът на актьора е негов. Параметри: ?1 actorAccountId,
+ * ?2 actorProfileId. Ползва се при насрочване (координатора) и при директно
+ * изпълнение (executor-а); вече насрочена операция се довършва и без
+ * интерактивна сесия.
+ */
+export const ADMIN_HARD_DELETE_ACTOR_AUTHORIZED_SQL = `
+  SELECT 1 FROM accounts a
+  JOIN profiles p ON p.account_id = a.account_id
+  WHERE a.account_id = ?1 AND p.profile_id = ?2 AND a.role = 'admin'
+  LIMIT 1;
+`
+
 /** Етап 4F2 — вход на административното окончателно изтриване (mirror на hardDeleteProfile). */
 export type AdminHardDeleteInput = {
   targetProfileId: string
@@ -216,6 +231,7 @@ export type AdminHardDeleteResult =
         | 'active_tournament_dependency'
         | 'invalid_support_request_message'
         | 'campaign_gift_sender_protected'
+        | 'forbidden'
     }
 
 export type AdminFileCleanupFinishResult =
@@ -1104,6 +1120,14 @@ export async function createProfileDeletionExecutor(
     FROM profiles WHERE profile_id = ? LIMIT 1;
   `)
   const selectProfileExistsStatement = database.prepare(`SELECT 1 FROM profiles WHERE profile_id = ? LIMIT 1;`)
+  const selectAdminActorAuthorizedStatement = database.prepare(ADMIN_HARD_DELETE_ACTOR_AUTHORIZED_SQL)
+  // Вече насрочена операция (висящ ред, създаден от упълномощен admin при
+  // schedule) — изпълнението не изисква актьорът да е още в активна сесия.
+  const selectScheduledAdminDeleteStatement = database.prepare(`
+    SELECT 1 FROM pending_profile_moderation
+    WHERE ledger_operation_id = ? AND action = 'delete' AND target_profile_id = ?
+    LIMIT 1;
+  `)
   const selectSupportRequestMessageStatement = database.prepare(`
     SELECT message_id, profile_id, is_from_admin, created_at FROM support_messages WHERE message_id = ? LIMIT 1;
   `)
@@ -1548,6 +1572,16 @@ export async function createProfileDeletionExecutor(
       if (target.profile_id === input.actorProfileId) {
         database.exec('ROLLBACK;')
         return { ok: false, code: 'self' }
+      }
+      // Етап 4F2A — само admin. Replay повтаря вече ЗАВЪРШЕНА (доказана в
+      // регистъра) операция; насрочената е упълномощена при schedule.
+      if (input.replay === undefined) {
+        const scheduled = input.auditLogId !== undefined
+          && selectScheduledAdminDeleteStatement.get(input.auditLogId, target.profile_id) !== undefined
+        if (!scheduled && selectAdminActorAuthorizedStatement.get(input.actorAccountId, input.actorProfileId) === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, code: 'forbidden' }
+        }
       }
       // Незавършен турнир / кампаниен подател — отказ без частични промени
       // (досегашните административни правила; провереят се в writer lock-а).

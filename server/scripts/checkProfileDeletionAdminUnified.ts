@@ -23,7 +23,7 @@ import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createAuthStore } from '../src/db/authStore.js'
 import { createPendingProfileModerationStore } from '../src/db/pendingProfileModerationStore.js'
 import { createProfileHardDeleteService } from '../src/db/profileHardDeleteService.js'
-import { createProfileDeletionExecutor, PROFILE_DELETION_DELETED_LABEL } from '../src/db/profileDeletionExecutor.js'
+import { createProfileDeletionExecutor, PROFILE_DELETION_DELETED_LABEL, PROFILE_DELETION_MAX_FILE_ATTEMPTS } from '../src/db/profileDeletionExecutor.js'
 import { createLudoEconomyStore } from '../src/db/ludoEconomyStore.js'
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
 import {
@@ -533,6 +533,40 @@ try {
     }
   })
 
+  await check('[F7] Постоянен отказ (опасен път): файловата фаза остава pending и откриваема; без повторни опити; лог file_cleanup_stuck', async () => {
+    const user = registerUser('FileStuck')
+    const name = webp()
+    const path = await writeUpload(roots.avatars, name)
+    db.prepare('UPDATE profiles SET avatar_url = ? WHERE profile_id = ?;').run(`/uploads/avatars/${name}`, user.profileId)
+    let removeCalls = 0
+    const refusing = await createProfileHardDeleteService(databaseFilePath, {
+      uploadRoots: roots,
+      removeFile: async () => { removeCalls += 1; return { outcome: 'rejected', code: 'symlink_refused' } },
+    })
+    const errors: string[] = []
+    const originalError = console.error
+    console.error = (...args: unknown[]) => { errors.push(args.map(String).join(' ')) }
+    try {
+      const r = await refusing.hardDeleteProfile({ targetProfileId: user.profileId, actorProfileId: admin.profileId, actorAccountId: admin.accountId, reason: 'x' })
+      assert(r.ok && r.filesPending === 1, JSON.stringify(r))
+      if (!r.ok) return
+      const row = db.prepare('SELECT status, attempt_count, last_error_code, next_attempt_at FROM profile_deletion_file_queue WHERE admin_operation_id = ?;').get(r.operationId) as Record<string, unknown>
+      assert(row.status === 'failed' && row.last_error_code === 'symlink_refused' && Number(row.attempt_count) >= PROFILE_DELETION_MAX_FILE_ATTEMPTS && row.next_attempt_at === null, JSON.stringify(row))
+      const finished = selfExecutor.finishAdminFileCleanup(r.operationId)
+      assert(finished.kind === 'files_pending' && finished.willRetry === false, JSON.stringify(finished))
+      assert(selfExecutor.listAdminOperationsPendingFileCleanup().some((op) => op.operationId === r.operationId), 'операцията е в списъка с недовършени')
+      await refusing.processPendingAdminFileCleanup()
+      assertEqual(removeCalls, 1, 'без повторни опити на постоянния отказ')
+      assertEqual((db.prepare('SELECT file_cleanup_status FROM admin_profile_deletions WHERE log_id = ?;').get(r.operationId) as { file_cleanup_status: string }).file_cleanup_status, 'pending', 'статус')
+      assert(errors.some((line) => line.includes(`file_cleanup_stuck operationId=${r.operationId}`)), `лог: ${JSON.stringify(errors)}`)
+      assert(!errors.some((line) => line.includes(name)), 'файловият път не се логва')
+      assert(existsSync(path), 'файлът не е пипнат')
+    } finally {
+      console.error = originalError
+      refusing.close()
+    }
+  })
+
   await check('[F5] Тригери: done само без чакащи файлове; ред в опашката само за pending операция; точно един собственик', () => {
     db.prepare(`INSERT INTO admin_profile_deletions (log_id, deleted_profile_id, username_snapshot, reason, file_cleanup_status) VALUES ('op-guard', 'ghost', 'ghost', 'x', 'pending');`).run()
     db.prepare(`INSERT INTO profile_deletion_file_queue (admin_operation_id, file_kind, storage_ref) VALUES ('op-guard', 'avatar', '/uploads/avatars/g.webp');`).run()
@@ -640,6 +674,94 @@ try {
       const state = readProfileDeletionLedger(ledgerPath).records.filter((record) => 'operationId' in record && record.operationId === scheduled.operationId).map((record) => record.kind)
       assert(state.includes('admin_delete_intent') && state.includes('admin_delete_completed'), state.join(','))
       assertEqual(count(`SELECT COUNT(*) AS c FROM admin_profile_deletions WHERE log_id = ?;`, scheduled.operationId), 1, 'един одитен ред = operationId')
+    } finally {
+      coordinator.close()
+    }
+  })
+
+  console.log('\n[P] Права (Етап 4F2A): само роля admin инициира окончателно административно изтриване')
+
+  await check('[P1] schedule: subadmin/pika_team/marketing/top_chat_admin/chat_admin/player, admin с чужд профил, празна причина -> отказ без висящ ред и без запис в регистъра', async () => {
+    const target = registerUser('RoleTarget')
+    const coordinator = await createAdminProfileDeletionCoordinator({
+      databaseFilePath, hardDeleteService: hardDelete, pendingStore, ledgerPath, offsiteRequired: true, isTargetInActiveGame: () => false,
+    })
+    try {
+      const ledgerBefore = readProfileDeletionLedger(ledgerPath).records.length
+      for (const role of ['subadmin', 'pika_team', 'marketing', 'top_chat_admin', 'chat_admin', 'player']) {
+        const actor = registerUser(`Role${role.replace(/_/g, '')}`)
+        db.prepare(`UPDATE accounts SET role = ? WHERE account_id = ?;`).run(role, actor.accountId)
+        const r = coordinator.schedule({ targetProfileId: target.profileId, actorProfileId: actor.profileId, actorAccountId: actor.accountId, reason: 'опит', supportRequestMessageId: null })
+        assert(!r.ok && r.code === 'forbidden', `${role}: ${JSON.stringify(r)}`)
+      }
+      const other = registerUser('RoleOther')
+      const foreign = coordinator.schedule({ targetProfileId: target.profileId, actorProfileId: other.profileId, actorAccountId: admin.accountId, reason: 'опит', supportRequestMessageId: null })
+      assert(!foreign.ok && foreign.code === 'forbidden', `admin акаунт + чужд профил: ${JSON.stringify(foreign)}`)
+      const emptyReason = coordinator.schedule({ targetProfileId: target.profileId, actorProfileId: admin.profileId, actorAccountId: admin.accountId, reason: '   ', supportRequestMessageId: null })
+      assert(!emptyReason.ok && emptyReason.code === 'invalid_reason', `празна причина: ${JSON.stringify(emptyReason)}`)
+      assertEqual(count(`SELECT COUNT(*) AS c FROM pending_profile_moderation WHERE target_profile_id = ?;`, target.profileId), 0, 'висящ ред')
+      assertEqual(readProfileDeletionLedger(ledgerPath).records.length, ledgerBefore, 'записи в регистъра')
+      assertEqual(count('SELECT COUNT(*) AS c FROM profiles WHERE profile_id = ?;', target.profileId), 1, 'профилът')
+    } finally {
+      coordinator.close()
+    }
+  })
+
+  await check('[P2] Директно hardDeleteProfile от неупълномощен актьор (вкл. по support заявка) -> forbidden, нищо не е променено', async () => {
+    const target = registerUser('DirectTarget')
+    const request = await supportMessage(target, false)
+    const subadmin = registerUser('DirectSubadmin')
+    db.prepare(`UPDATE accounts SET role = 'subadmin' WHERE account_id = ?;`).run(subadmin.accountId)
+    const auditBefore = count('SELECT COUNT(*) AS c FROM admin_profile_deletions;')
+    for (const input of [
+      { actorProfileId: subadmin.profileId, actorAccountId: subadmin.accountId, supportRequestMessageId: null },
+      { actorProfileId: subadmin.profileId, actorAccountId: subadmin.accountId, supportRequestMessageId: request.messageId },
+      { actorProfileId: 'nobody', actorAccountId: '', supportRequestMessageId: null },
+    ]) {
+      const r = await hardDelete.hardDeleteProfile({ targetProfileId: target.profileId, reason: 'опит', ...input })
+      assert(!r.ok && r.code === 'forbidden', JSON.stringify(r))
+    }
+    assertEqual(count('SELECT COUNT(*) AS c FROM profiles WHERE profile_id = ?;', target.profileId), 1, 'профилът')
+    assertEqual(count('SELECT COUNT(*) AS c FROM admin_profile_deletions;'), auditBefore, 'одит')
+    assertEqual(count('SELECT COUNT(*) AS c FROM support_messages WHERE message_id = ?;', request.messageId), 1, 'support съобщението')
+  })
+
+  await check('[P3] Насрочена от admin операция се довършва от координатора без интерактивна сесия на администратора', async () => {
+    const user = registerUser('NoSession')
+    const coordinator = await createAdminProfileDeletionCoordinator({
+      databaseFilePath, hardDeleteService: hardDelete, pendingStore, ledgerPath, offsiteRequired: true, isTargetInActiveGame: () => false,
+    })
+    try {
+      const scheduled = coordinator.schedule({ targetProfileId: user.profileId, actorProfileId: admin.profileId, actorAccountId: admin.accountId, reason: 'без сесия', supportRequestMessageId: null })
+      assert(scheduled.ok, JSON.stringify(scheduled))
+      if (!scheduled.ok) return
+      authStore.revokeAllSessionsForProfile(admin.profileId)
+      ackLedger(ledgerPath)
+      const run = await coordinator.runOnce()
+      assert(run.executed >= 1 && run.refused === 0, JSON.stringify(run))
+      assertEqual(count('SELECT COUNT(*) AS c FROM profiles WHERE profile_id = ?;', user.profileId), 0, 'профилът')
+      assertEqual(count(`SELECT COUNT(*) AS c FROM admin_profile_deletions WHERE log_id = ? AND deleted_by_profile_id = ?;`, scheduled.operationId, admin.profileId), 1, 'одит')
+    } finally {
+      coordinator.close()
+    }
+  })
+
+  await check('[P4] Наследен висящ ред отпреди 4F1 (без requested_by_account_id) се довършва; сам по себе си hardDeleteProfile без насрочване би бил отказан', async () => {
+    const user = registerUser('LegacyPending')
+    const direct = await hardDelete.hardDeleteProfile({ targetProfileId: user.profileId, actorProfileId: admin.profileId, actorAccountId: '', reason: 'наследено' })
+    assert(!direct.ok && direct.code === 'forbidden', `без насрочване: ${JSON.stringify(direct)}`)
+    db.prepare(`INSERT INTO pending_profile_moderation (pending_id, target_profile_id, action, requested_by_profile_id, requested_by_account_id, reason) VALUES (?, ?, 'delete', ?, NULL, 'наследено');`)
+      .run(randomUUID(), user.profileId, admin.profileId)
+    const coordinator = await createAdminProfileDeletionCoordinator({
+      databaseFilePath, hardDeleteService: hardDelete, pendingStore, ledgerPath, offsiteRequired: true, isTargetInActiveGame: () => false,
+    })
+    try {
+      const first = await coordinator.runOnce()
+      assertEqual(first.waiting, 1, 'намерението е записано и чака offsite')
+      ackLedger(ledgerPath)
+      const second = await coordinator.runOnce()
+      assert(second.executed === 1 && second.refused === 0, JSON.stringify(second))
+      assertEqual(count('SELECT COUNT(*) AS c FROM profiles WHERE profile_id = ?;', user.profileId), 0, 'профилът')
     } finally {
       coordinator.close()
     }

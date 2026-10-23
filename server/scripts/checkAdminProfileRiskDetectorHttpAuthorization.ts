@@ -27,7 +27,8 @@
  *      кеширани profile ids (unchanged checked_at между двете заявки)
  */
 
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { cp, mkdir, mkdtemp, rm, symlink } from 'node:fs/promises'
 import { request } from 'node:http'
 import { createServer } from 'node:net'
@@ -37,6 +38,41 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { join, resolve } from 'node:path'
 import { verifyVerificationCode } from '../src/db/authHelpers.js'
 import { backfillProfileVisitLinks } from '../src/db/profileVisitLinks.js'
+import {
+  getProfileDeletionLedgerOffsiteAckPath,
+  readProfileDeletionLedger,
+  writeProfileDeletionLedgerOffsiteAck,
+} from '../src/db/profileDeletionLedger.js'
+
+/**
+ * Етап 4F2A — контролирано тестово offsite потвърждение (същият формат като
+ * backup скрипта: байтове + SHA-256 на префикса на регистъра). Сървърът го
+ * проверява с реалния production код; нищо не се заобикаля.
+ */
+function confirmLedgerOffsite(ledgerPath: string): void {
+  const buffer = readFileSync(ledgerPath)
+  const parsed = readProfileDeletionLedger(ledgerPath)
+  const ack = {
+    v: 1 as const,
+    bytes: buffer.length,
+    sha256: createHash('sha256').update(buffer).digest('hex'),
+    lineCount: parsed.lineCount,
+    entryCount: parsed.records.length,
+    remotePath: 'test-offsite:/belot-risk-detector-smoke/profile-deletions.jsonl',
+    confirmedAt: new Date().toISOString(),
+  }
+  // Windows: rename-ът може да получи EPERM/EBUSY, докато сървърът чете ack-а.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      writeProfileDeletionLedgerOffsiteAck(getProfileDeletionLedgerOffsiteAckPath(ledgerPath), ack)
+      return
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code
+      if (attempt >= 20 || (code !== 'EPERM' && code !== 'EBUSY' && code !== 'EACCES')) throw error
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25)
+    }
+  }
+}
 
 const PASSWORD = 'RiskSmoke1!'
 const SERVER_READY_TIMEOUT_MS = 30_000
@@ -174,6 +210,7 @@ async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
   root: string
   serverDir: string
   databaseFile: string
+  ledgerPath: string
   cleanup(): Promise<void>
 }> {
   const root = await mkdtemp(join(tmpdir(), 'belot-risk-detector-smoke-'))
@@ -196,11 +233,12 @@ async function createIsolatedServerRoot(originalServerRoot: string): Promise<{
     root,
     serverDir,
     databaseFile,
+    ledgerPath: join(root, 'deletion-ledger', 'profile-deletions.jsonl'),
     cleanup: async () => { await rm(root, { recursive: true, force: true }) },
   }
 }
 
-function startServer(serverDir: string, port: number): RunningServer {
+function startServer(serverDir: string, port: number, ledgerPath: string): RunningServer {
   const chunks: string[] = []
   const child = spawn(
     process.execPath,
@@ -213,6 +251,12 @@ function startServer(serverDir: string, port: number): RunningServer {
         BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
         BELOT_GAME_WORKER_COUNT: '1',
         PASSWORD_RESET_RATE_LIMIT_SECRET: TEST_REGISTRATION_SECRET,
+        // Етап 4F2A — изолиран регистър, offsite защитата изрично включена;
+        // тестът сам записва ack-а (confirmLedgerOffsite).
+        PROFILE_DELETION_LEDGER_PATH: ledgerPath,
+        PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED: '1',
+        ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS: '250',
+        ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS: '250',
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     },
@@ -351,7 +395,7 @@ const port = await getFreePort()
 let server: RunningServer | null = null
 
 try {
-  server = startServer(isolated.serverDir, port)
+  server = startServer(isolated.serverDir, port, isolated.ledgerPath)
 
   console.log(`\n[startup] Чакам сървъра на порт ${port}...`)
   await waitFor('server health ready', async () => {
@@ -1080,10 +1124,24 @@ try {
   }
 
   await sleep(1100)
-  await check('[hard-delete-invalidate] admin -> DELETE /api/admin/profiles/:invB (реален hard-delete endpoint) => 200, pending:false', async () => {
+  // Етап 4F2A — от 4F1 изтриването се изпълнява след offsite потвърждение на
+  // регистъра: реалният отговор е "насрочено" (pending:true), а изтриването
+  // следва след контролирания ack (виж confirmLedgerOffsite).
+  await check('[hard-delete-invalidate] admin -> DELETE /api/admin/profiles/:invB (реален hard-delete endpoint) => 200 насрочено -> offsite ack -> изпълнено', async () => {
     const r = await httpRequest(port, `/api/admin/profiles/${invB.profileId}`, 'DELETE', adminCookie, { reason: 'risk cache invalidation regression' })
     const b = r.body as { ok?: boolean; pending?: boolean }
-    if (r.status !== 200 || b.ok !== true || b.pending !== false) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    if (r.status !== 200 || b.ok !== true || b.pending !== true) throw new Error(`status=${r.status}, body=${JSON.stringify(r.body)}`)
+    confirmLedgerOffsite(isolated.ledgerPath)
+    await waitFor('изтриването на invB е изпълнено', async () => {
+      const db = new DatabaseSync(isolated.databaseFile, { open: true })
+      try {
+        const profileGone = db.prepare(`SELECT 1 FROM profiles WHERE profile_id = ?`).get(invB.profileId) === undefined
+        const audit = db.prepare(`SELECT file_cleanup_status FROM admin_profile_deletions WHERE deleted_profile_id = ?`).get(invB.profileId) as { file_cleanup_status: string | null } | undefined
+        return profileGone && audit?.file_cleanup_status === 'done'
+      } finally {
+        db.close()
+      }
+    }, 15_000)
   })
 
   await check('[hard-delete-invalidate] СЛЕД delete: invA cache row -> check_complete=0 (targeted invalidation, преди какъвто и да е нов list fetch)', () => {

@@ -36,12 +36,13 @@ import {
 } from '../db/profileDeletionLedger.js'
 import type { PendingProfileModeration, PendingProfileModerationStore } from '../db/pendingProfileModerationStore.js'
 import type { HardDeleteProfileResult, ProfileHardDeleteService } from '../db/profileHardDeleteService.js'
+import { ADMIN_HARD_DELETE_ACTOR_AUTHORIZED_SQL } from '../db/profileDeletionExecutor.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export type AdminProfileDeletionScheduleResult =
   | { ok: true; operationId: string }
-  | { ok: false; code: 'not_found' | 'ledger_unavailable' }
+  | { ok: false; code: 'not_found' | 'ledger_unavailable' | 'forbidden' | 'invalid_reason' }
 
 export type AdminProfileDeletionExecuteResult =
   | { status: 'completed'; result: Extract<HardDeleteProfileResult, { ok: true }> }
@@ -120,6 +121,7 @@ export async function createAdminProfileDeletionCoordinator(
   const selectProfileIdentityStatement = database.prepare(`
     SELECT account_id, created_at FROM profiles WHERE profile_id = ? LIMIT 1;
   `)
+  const selectActorAuthorizedStatement = database.prepare(ADMIN_HARD_DELETE_ACTOR_AUTHORIZED_SQL)
   const selectAuditByLogIdStatement = database.prepare(`
     SELECT deleted_profile_id, deleted_at FROM admin_profile_deletions WHERE log_id = ? LIMIT 1;
   `)
@@ -153,6 +155,13 @@ export async function createAdminProfileDeletionCoordinator(
   }
 
   function schedule(input: Parameters<AdminProfileDeletionCoordinator['schedule']>[0]): AdminProfileDeletionScheduleResult {
+    // Етап 4F2A — ново окончателно изтриване инициира само роля admin
+    // (по базата, независимо от извикващия), със задължителна причина.
+    if (selectActorAuthorizedStatement.get(input.actorAccountId, input.actorProfileId) === undefined) {
+      log(`[admin-profile-delete] schedule_forbidden targetProfileId=${input.targetProfileId} actorProfileId=${input.actorProfileId}`)
+      return { ok: false, code: 'forbidden' }
+    }
+    if (input.reason.trim().length === 0) return { ok: false, code: 'invalid_reason' }
     const identity = selectProfileIdentityStatement.get(input.targetProfileId) as { account_id: string | null; created_at: string } | undefined
     if (identity === undefined) return { ok: false, code: 'not_found' }
     const operationId = randomUUID()

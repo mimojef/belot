@@ -1661,8 +1661,18 @@ console.log(`[profile-deletion-worker] enabled=${profileDeletionWorker !== null}
 // се регистрира (admin_delete_intent) и се изпълнява едва след offsite
 // потвърждението на записа (PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED, същото
 // като при worker-а) и извън активна игра. Виж adminProfileDeletionCoordinator.ts.
-const ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS = 60 * 1000
-const ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS = 30 * 1000
+// Етап 4F2A — само честотата може да се промени (изолираните HTTP тестове);
+// никоя проверка (offsite потвърждение, активна игра, роля) не се пропуска.
+const ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS = parsePositiveIntegerEnv(
+  'ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS',
+  process.env.ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS,
+  60 * 1000,
+)
+const ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS = parsePositiveIntegerEnv(
+  'ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS',
+  process.env.ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS,
+  30 * 1000,
+)
 const adminProfileDeletionCoordinator = await createAdminProfileDeletionCoordinator({
   databaseFilePath: databaseBootstrap.databaseFilePath,
   hardDeleteService: profileHardDeleteService,
@@ -11104,6 +11114,12 @@ async function handleAdminProfileHardDeleteRequest(
   if (!scheduled.ok) {
     if (scheduled.code === 'not_found') {
       sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Профилът не беше намерен.' })
+    } else if (scheduled.code === 'forbidden') {
+      // Етап 4F2A — authoritative проверка по базата (напр. ролята е сменена
+      // след издаването на сесията).
+      sendJsonResponse(res, 403, { ok: false, code: 'forbidden', message: 'Само администратор може да трие профили.' })
+    } else if (scheduled.code === 'invalid_reason') {
+      sendJsonResponse(res, 400, { ok: false, code: 'invalid_reason', message: 'Причината е задължителна.' })
     } else {
       // Fail-closed: без запис в регистъра изтриване няма.
       console.error(`[admin-profile-delete] mode=ledger_unavailable targetProfileId=${targetProfileId} at=${new Date().toISOString()}`)
@@ -11133,8 +11149,10 @@ async function handleAdminProfileHardDeleteRequest(
         active_tournament_dependency: 409,
         invalid_support_request_message: 400,
         campaign_gift_sender_protected: 409,
+        forbidden: 403,
       }
       const messageByCode: Record<string, string> = {
+        forbidden: 'Само администратор може да трие профили.',
         not_found: 'Профилът не беше намерен.',
         self: 'Не можеш да изтриеш себе си.',
         invalid_reason: 'Причината е задължителна.',

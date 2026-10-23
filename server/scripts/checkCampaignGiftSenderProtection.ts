@@ -161,7 +161,9 @@ let hardDeleteService!: ProfileHardDeleteService
 
 try {
   hardDeleteService = await createProfileHardDeleteService(databaseFilePath, { deleteUploadFileByUrl: async () => {} })
-  const { profileId: adminProfileId } = await seedProfile(databaseFilePath, 'Admin Actor')
+  // Етап 4F2A — актьорът трябва да е реален admin (акаунт с роля admin + негов профил).
+  const { profileId: adminProfileId, accountId: adminAccountIdOrNull } = await seedProfile(databaseFilePath, 'Admin Actor', { accountRole: 'admin' })
+  const adminAccountId = adminAccountIdOrNull as string
 
   // ─── 1. Marketing профил БЕЗ кампанийни подаръци — изтрива се нормално ───
   await check('[1] Marketing профил без кампанийни подаръци може да бъде изтрит според действащите правила', async () => {
@@ -169,7 +171,7 @@ try {
     const result = await hardDeleteService.hardDeleteProfile({
       targetProfileId: profileId,
       actorProfileId: adminProfileId,
-      actorAccountId: adminProfileId,
+      actorAccountId: adminAccountId,
       reason: 'test cleanup',
     })
     assert(result.ok, `expected successful delete, got ${JSON.stringify(result)}`)
@@ -191,7 +193,7 @@ try {
     const result = await hardDeleteService.hardDeleteProfile({
       targetProfileId: protectedProfileId,
       actorProfileId: adminProfileId,
-      actorAccountId: adminProfileId,
+      actorAccountId: adminAccountId,
       reason: 'attempted deletion',
     })
     assert(!result.ok && result.code === 'campaign_gift_sender_protected', `expected campaign_gift_sender_protected, got ${JSON.stringify(result)}`)
@@ -211,7 +213,7 @@ try {
     const result = await hardDeleteService.hardDeleteProfile({
       targetProfileId: profileId,
       actorProfileId: adminProfileId,
-      actorAccountId: adminProfileId,
+      actorAccountId: adminAccountId,
       reason: 'attempted deletion',
     })
     assert(!result.ok && result.code === 'campaign_gift_sender_protected', `expected protection, got ${JSON.stringify(result)}`)
@@ -235,7 +237,7 @@ try {
     const result = await hardDeleteService.hardDeleteProfile({
       targetProfileId: profileId,
       actorProfileId: adminProfileId,
-      actorAccountId: adminProfileId,
+      actorAccountId: adminAccountId,
       reason: 'attempted deletion after role change',
     })
     assert(!result.ok && result.code === 'campaign_gift_sender_protected', `expected protection despite role change, got ${JSON.stringify(result)}`)
@@ -251,7 +253,7 @@ try {
     const result = await hardDeleteService.hardDeleteProfile({
       targetProfileId: profileId,
       actorProfileId: adminProfileId,
-      actorAccountId: adminProfileId,
+      actorAccountId: adminAccountId,
       reason: 'ordinary gift sender deletion',
     })
     assert(result.ok, `ordinary ("profile" context) gift history must NOT trigger the campaign protection, got ${JSON.stringify(result)}`)
@@ -292,7 +294,7 @@ try {
       const result = await hardDeleteService.hardDeleteProfile({
         targetProfileId: protectedProfileId,
         actorProfileId: adminProfileId,
-        actorAccountId: adminProfileId,
+        actorAccountId: adminAccountId,
         reason: 'attempted deletion with flag off',
       })
       assert(!result.ok && result.code === 'campaign_gift_sender_protected', `expected protection regardless of feature flag, got ${JSON.stringify(result)}`)
@@ -353,7 +355,7 @@ try {
     const result = await hardDeleteService.hardDeleteProfile({
       targetProfileId: profileId,
       actorProfileId: adminProfileId,
-      actorAccountId: adminProfileId,
+      actorAccountId: adminAccountId,
       reason: 'ordinary unrelated deletion',
     })
     assert(result.ok, `ordinary profile deletion must be unaffected by the new protection, got ${JSON.stringify(result)}`)

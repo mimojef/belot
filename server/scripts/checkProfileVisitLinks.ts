@@ -378,10 +378,10 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   db.close()
 }
 
-// ═══ 18–21. Наследени административни изтривания: backfill от deletion snapshots ═
+// ═══ 18–21. Наследени административни изтривания и backfill ════════════════
 // Етап 4F2: новото административно изтриване вече НЕ създава forensic
-// snapshot и трие връзките (виж [11] и [18b]). Backfill механизмът за
-// изтривания отпреди 4F2 е непроменен — покрива се със симулирано наследено
+// snapshot и трие връзките (виж [11] и [18b]). Етап 4F2A: backfill-ът вече
+// не внася наследените snapshot-и като активни връзки — покрива се със симулирано наследено
 // изтриване (snapshot + одитен ред + DELETE, точно като стария път).
 function legacyAdminDelete(db: InstanceType<typeof import('node:sqlite').DatabaseSync>, profileId: string): void {
   db.prepare(`
@@ -427,16 +427,25 @@ function legacyAdminDelete(db: InstanceType<typeof import('node:sqlite').Databas
   check('[18] deletion snapshot е записан', countRows(db, `SELECT COUNT(*) AS n FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'del-a';`) > 0)
   check('[18] преди backfill compact няма нищо за изтрития профил', countRows(db, `SELECT COUNT(*) AS n FROM profile_visitor_links WHERE profile_id = 'del-a';`) === 0)
 
-  const backfillResult = backfillProfileVisitLinks(db)
-  const actualVisitor = db.prepare(`SELECT anonymous_visitor_id AS k, first_seen_at AS f, last_seen_at AS l, event_count AS n FROM profile_visitor_links WHERE profile_id = 'del-a' ORDER BY k;`).all()
-  const actualIp = db.prepare(`SELECT ip_address AS k, first_seen_at AS f, last_seen_at AS l, event_count AS n FROM profile_ip_links WHERE profile_id = 'del-a' ORDER BY k;`).all()
-  check('[18] backfill възстановява visitor връзките на изтрития профил ТОЧНО (first/last/count)', JSON.stringify(actualVisitor) === JSON.stringify(expectedVisitor), `${JSON.stringify(actualVisitor)} vs ${JSON.stringify(expectedVisitor)}`)
-  check('[18] backfill възстановява IP връзките ТОЧНО (NULL/празни IP изключени)', JSON.stringify(actualIp) === JSON.stringify(expectedIp), `${JSON.stringify(actualIp)} vs ${JSON.stringify(expectedIp)}`)
-  check('[18] backfill отчита snapshot фазата', backfillResult.deletedSnapshotVisitorLinkRowsWritten === 2 && backfillResult.deletedSnapshotIpLinkRowsWritten === 2, JSON.stringify(backfillResult))
+  // Етап 4F2A — backfill НЕ внася данни на окончателно изтрит профил като
+  // активни compact връзки (преди: втора фаза от snapshot-ите). Snapshot-ът
+  // остава непроменен като доказателство и се чете директно от forensic
+  // справките.
+  const dumpSnapshots = () => JSON.stringify(db.prepare(`SELECT * FROM admin_profile_deletion_visitor_snapshots ORDER BY snapshot_id;`).all())
+  const snapshotsBeforeBackfill = dumpSnapshots()
+  check('[18] fixture: snapshot-ът покрива историята (visitor + IP групи)', expectedVisitor.length === 2 && expectedIp.length === 2, `${JSON.stringify(expectedVisitor)} | ${JSON.stringify(expectedIp)}`)
+  backfillProfileVisitLinks(db)
+  check('[18] backfill НЕ създава visitor/IP връзки за изтрития профил от snapshot-а',
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_visitor_links WHERE profile_id = 'del-a';`) === 0 &&
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_ip_links WHERE profile_id = 'del-a';`) === 0)
+  check('[18] историческият snapshot е непроменен (доказателството не се трие)', dumpSnapshots() === snapshotsBeforeBackfill)
+  check('[18] връзката на другия профил със същия visitor/IP е непроменена',
+    visitorLink(db, 'del-b', 'shared-pc')?.event_count === 1 && ipLink(db, 'del-b', '198.51.100.1')?.event_count === 1)
 
   const reader = createProfileVisitLinkReader(db)
   check('[18] current-only reader НЕ показва изтрития профил (както raw днес)', !reader.getDetailedLinkedProfiles('del-b').some((row) => row.profileId === 'del-a'))
-  check('[18] forensic reader вижда изтрития профил', reader.findVisitorLinksForProfileIncludingDeleted('del-a').length === 2)
+  check('[18] forensic справката по visitor пак намира изтрития профил (от snapshot-а)',
+    hardDeleteService.findDeletedProfileIdsForVisitorId('shared-pc').includes('del-a') && hardDeleteService.findDeletedProfileIdsForVisitorId('phone-a').includes('del-a'))
 
   // [19] Изтрит СЛЕД deploy-а на Фаза 1, но ПРЕДИ backfill-а: стари raw (N) + dual-written (M).
   const store = await createSiteVisitStore(dbPath)
@@ -459,15 +468,18 @@ function legacyAdminDelete(db: InstanceType<typeof import('node:sqlite').Databas
   check('[18b] без нов snapshot; връзките са изтрити', countRows(db, `SELECT COUNT(*) AS n FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'del-new';`) === 0 &&
     visitorLink(db, 'del-new', 'tablet-n') === undefined && ipLink(db, 'del-new', '192.0.2.50') === undefined)
   backfillProfileVisitLinks(db)
-  check('[19] след backfill: count = N+M = 5 (от snapshot-а), first = най-старото raw', visitorLink(db, 'del-c', 'laptop-c')?.event_count === 5 &&
-    visitorLink(db, 'del-c', 'laptop-c')?.first_seen_at === '2026-08-01 07:00:00' && ipLink(db, 'del-c', '192.0.2.7')?.event_count === 5,
+  // Етап 4F2A — наследеният compact ред (отпреди 4F2) не се пипа от backfill:
+  // нито се допълва от snapshot-а (без повторно внасяне), нито се трие
+  // (политиката за наследените следи е отделен въпрос).
+  check('[19] след backfill наследеният compact ред е непроменен (M=2, без допълване от snapshot-а)', visitorLink(db, 'del-c', 'laptop-c')?.event_count === 2 &&
+    ipLink(db, 'del-c', '192.0.2.7')?.event_count === 2,
   JSON.stringify(visitorLink(db, 'del-c', 'laptop-c')))
 
   // [20] Идемпотентност на двете фази.
   const afterBackfill = dumpLinks(db)
   backfillProfileVisitLinks(db)
   backfillProfileVisitLinks(db, { batchSize: 1 })
-  check('[20] повторен backfill (вкл. snapshot фазата) → идентични таблици', dumpLinks(db) === afterBackfill)
+  check('[20] повторен backfill → идентични таблици', dumpLinks(db) === afterBackfill)
   check('[18b] backfill НЕ връща връзките на изтрития след 4F2 профил', visitorLink(db, 'del-new', 'tablet-n') === undefined && ipLink(db, 'del-new', '192.0.2.50') === undefined)
 
   // [21] Snapshot ред за профил, който още съществува, се игнорира (raw е източникът).

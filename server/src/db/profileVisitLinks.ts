@@ -320,8 +320,6 @@ export type ProfileVisitLinkBackfillResult = {
   profilesProcessed: number
   visitorLinkRowsWritten: number
   ipLinkRowsWritten: number
-  deletedSnapshotVisitorLinkRowsWritten: number
-  deletedSnapshotIpLinkRowsWritten: number
 }
 
 /**
@@ -342,18 +340,15 @@ export type ProfileVisitLinkBackfillResult = {
  * транзакция, така че паралелен dual-write не може да бъде пропуснат или
  * преброен двойно.
  *
- * Втора фаза — hard-deleted профили: след hard delete raw
- * site_visit_events.profile_id е SET NULL, затова raw фазата не ги вижда.
- * Единственият оцелял източник е admin_profile_deletion_visitor_snapshots
- * (записан от profileHardDeleteService В МОМЕНТА на изтриване, преди
- * cascade-а; въведен в същия commit като самия hard delete — всеки hard
- * delete има snapshot). Редовете там са (profile, visitor, ip) → MIN/MAX/
- * COUNT върху raw събитията към момента на изтриване, т.е. точно това, което
- * raw историята е съдържала. Агрегацията по visitor (SUM по IP групите) и по
- * IP (SUM по visitor групите) възстановява compact връзките ТОЧНО, без
- * измислени данни. Само профили, които вече НЕ съществуват в profiles.
- * Същото merge правило (max count) — идемпотентно и безопасно за профили,
- * изтрити след deploy-а на Фаза 1 (compact вече има dual-written редове).
+ * Окончателно изтрити профили НЕ се внасят: raw site_visit_events.profile_id
+ * им е SET NULL, затова raw фазата не ги вижда. Етап 4F2A — премахната е
+ * предишната втора фаза, която пресъздаваше compact връзки за изтрити
+ * профили от admin_profile_deletion_visitor_snapshots: данни на окончателно
+ * изтрит профил не бива да се връщат като активни profile/IP или
+ * profile/visitor връзки (същото правило като при самото изтриване от 4F2).
+ * Историческите snapshot-и остават непроменени като доказателство и се четат
+ * директно от forensic справките (profileHardDeleteService); съществуващите
+ * наследени compact редове на изтрити профили не се пипат тук.
  */
 export function backfillProfileVisitLinks(
   database: SqliteDatabase,
@@ -393,39 +388,11 @@ export function backfillProfileVisitLinks(
       event_count = max(event_count, excluded.event_count);
   `)
 
-  const mergeDeletedSnapshotVisitorLinksStatement = database.prepare(`
-    INSERT INTO profile_visitor_links (profile_id, anonymous_visitor_id, first_seen_at, last_seen_at, event_count)
-    SELECT s.deleted_profile_id, s.anonymous_visitor_id, MIN(s.first_seen_at), MAX(s.last_seen_at), SUM(s.event_count)
-    FROM admin_profile_deletion_visitor_snapshots s
-    WHERE length(s.anonymous_visitor_id) > 0
-      AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = s.deleted_profile_id)
-    GROUP BY s.deleted_profile_id, s.anonymous_visitor_id
-    ON CONFLICT (profile_id, anonymous_visitor_id) DO UPDATE SET
-      first_seen_at = min(first_seen_at, excluded.first_seen_at),
-      last_seen_at = max(last_seen_at, excluded.last_seen_at),
-      event_count = max(event_count, excluded.event_count);
-  `)
-
-  const mergeDeletedSnapshotIpLinksStatement = database.prepare(`
-    INSERT INTO profile_ip_links (profile_id, ip_address, first_seen_at, last_seen_at, event_count)
-    SELECT s.deleted_profile_id, s.ip_address, MIN(s.first_seen_at), MAX(s.last_seen_at), SUM(s.event_count)
-    FROM admin_profile_deletion_visitor_snapshots s
-    WHERE s.ip_address IS NOT NULL AND length(trim(s.ip_address)) > 0
-      AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = s.deleted_profile_id)
-    GROUP BY s.deleted_profile_id, s.ip_address
-    ON CONFLICT (profile_id, ip_address) DO UPDATE SET
-      first_seen_at = min(first_seen_at, excluded.first_seen_at),
-      last_seen_at = max(last_seen_at, excluded.last_seen_at),
-      event_count = max(event_count, excluded.event_count);
-  `)
-
   const result: ProfileVisitLinkBackfillResult = {
     batches: 0,
     profilesProcessed: 0,
     visitorLinkRowsWritten: 0,
     ipLinkRowsWritten: 0,
-    deletedSnapshotVisitorLinkRowsWritten: 0,
-    deletedSnapshotIpLinkRowsWritten: 0,
   }
   let afterProfileId = ''
 
@@ -458,25 +425,6 @@ export function backfillProfileVisitLinks(
       }
       throw error
     }
-  }
-
-  // Втора фаза — hard-deleted профили (виж doc коментара). Snapshot
-  // таблицата е малка (записва се само при рядкото admin hard delete) —
-  // една кратка транзакция.
-  database.exec('BEGIN IMMEDIATE;')
-  try {
-    const visitorChanges = mergeDeletedSnapshotVisitorLinksStatement.run() as { changes?: number }
-    const ipChanges = mergeDeletedSnapshotIpLinksStatement.run() as { changes?: number }
-    database.exec('COMMIT;')
-    result.deletedSnapshotVisitorLinkRowsWritten = Number(visitorChanges.changes ?? 0)
-    result.deletedSnapshotIpLinkRowsWritten = Number(ipChanges.changes ?? 0)
-  } catch (error) {
-    try {
-      database.exec('ROLLBACK;')
-    } catch {
-      // Preserve the original failure.
-    }
-    throw error
   }
 
   return result
