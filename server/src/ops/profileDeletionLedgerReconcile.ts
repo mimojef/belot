@@ -310,16 +310,13 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
     // 1b. Етап 4F1 — доказано завършени административни изтривания, които
     //     backup-ът е върнал: същият административен път (replay режим),
     //     ПРЕДИ самоизтриванията (те виждат профила като вече изтрит).
+    //     Етап 4F2 — същото ядро и същата файлова опашка като на живо: файловете
+    //     се записват в опашката на възстановената база и се обработват с
+    //     възстановените uploads (вкл. недовършени файлови фази от backup,
+    //     направен между COMMIT и изтриването на файловете).
     const adminMissing = before.adminClassified.filter((item) => item.category === 'admin_missing')
-    if (adminMissing.length > 0) {
-      const hardDeleteService = await createProfileHardDeleteService(dbPath, {
-        deleteUploadFileByUrl: async (url: string) => {
-          const kind = url.startsWith('/uploads/avatars/') ? 'avatar' : url.startsWith('/uploads/profile-gallery/') ? 'gallery_image' : null
-          if (kind === null) return
-          const outcome = await removeProfileDeletionFile(kind, url, roots)
-          if (outcome.outcome !== 'deleted' && outcome.outcome !== 'missing') fileFailures += 1
-        },
-      })
+    {
+      const hardDeleteService = await createProfileHardDeleteService(dbPath, { uploadRoots: roots })
       try {
         for (const item of adminMissing) {
           const operation = item.operation
@@ -332,8 +329,11 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
             auditLogId: operation.operationId,
             replay: { deletedAt: canonicalIsoToSqliteDateTime(operation.deletedAt as string) },
           })
-          io.log(`[reconcile] admin_replay operationId=${operation.operationId} profileId=${operation.profileId} result=${result.ok ? 'deleted' : result.code}`)
+          io.log(`[reconcile] admin_replay operationId=${operation.operationId} profileId=${operation.profileId} result=${result.ok ? `deleted filesPending=${result.filesPending}` : result.code}`)
         }
+        const files = await hardDeleteService.processPendingAdminFileCleanup()
+        fileFailures += files.filesFailed
+        if (files.operations > 0) io.log(`[reconcile] admin_file_cleanup ${JSON.stringify(files)}`)
       } finally {
         hardDeleteService.close()
       }

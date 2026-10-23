@@ -413,9 +413,9 @@ try {
     assertEqual(profile!.totalRatingsCount, 4, 'брой в отговора')
   })
 
-  console.log('\n[H] Административно изтриване (съвместима поправка)')
+  console.log('\n[H] Административно изтриване (Етап 4F2 — същите правила като самоизтриването)')
 
-  await check('[H1] Административно изтриване на оценяващ: оценките му се премахват (досегашното поведение), а кешът на оценения се преизчислява (без остаряла средна)', async () => {
+  await check('[H1] Административно изтриване на оценяващ: оценките му остават анонимни (както при самоизтриването), кешът на оценения е коректен', async () => {
     const admin = registerUser('Admin')
     db.prepare(`UPDATE accounts SET role = 'admin' WHERE account_id = ?;`).run(admin.accountId)
     const rater = registerUser('AdminRater')
@@ -425,8 +425,8 @@ try {
     expectCache(rated.profileId, [1, 5], 'преди')
     const result = await hardDeleteService.hardDeleteProfile({ targetProfileId: rater.profileId, actorProfileId: admin.profileId, actorAccountId: admin.accountId, reason: 'test' })
     assert(result.ok, JSON.stringify(result))
-    expectCache(rated.profileId, [5], 'след административното изтриване')
-    assertEqual(Number((db.prepare('SELECT COUNT(*) AS c FROM profile_partner_ratings WHERE rated_by_profile_id IS NULL AND rated_profile_id = ?;').get(rated.profileId) as { c: number }).c), 0, 'без анонимни редове при административно изтриване')
+    expectCache(rated.profileId, [1, 5], 'след административното изтриване')
+    assertEqual(Number((db.prepare('SELECT COUNT(*) AS c FROM profile_partner_ratings WHERE rated_by_profile_id IS NULL AND rated_profile_id = ?;').get(rated.profileId) as { c: number }).c), 1, 'дадената оценка остава анонимна')
     assert(allCachesConsistent(), 'всички кешове')
   })
 

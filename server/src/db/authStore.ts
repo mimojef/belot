@@ -113,6 +113,8 @@ export const REGISTRATION_EMAIL_AND_DISPLAY_NAME_TAKEN_MESSAGE =
 
 /** Login отказ за профил с активна заявка за изтриване — само след валидна парола (няма enumeration). */
 export const PROFILE_PENDING_DELETION_LOGIN_MESSAGE = 'Профилът е подаден за изтриване и временно е блокиран.'
+/** Етап 4F2 — насрочено административно окончателно изтриване. */
+export const PROFILE_DELETION_SCHEDULED_LOGIN_MESSAGE = 'Профилът е насрочен за окончателно изтриване и достъпът до него е спрян.'
 
 export type ResendRegistrationCodeResult =
   /** email е РЕАЛНИЯТ (normalized) адрес — само за caller-а да го подаде на sendRegistrationVerificationEmail(); HTTP response-ът към клиента трябва да ползва maskedEmail, никога email. */
@@ -833,6 +835,13 @@ type CreateAuthStoreOptions = {
     reason: string
     remainingDays: number
   } | null
+  /**
+   * Самоизтриване, Етап 4F2 — true, ако за профила има насрочено
+   * административно окончателно изтриване (чака offsite потвърждение или края
+   * на текущата игра). Тогава вход не се допуска — без нова сесия до
+   * изпълнението.
+   */
+  isProfileScheduledForAdminDeletion?: (profileId: string) => boolean
   /**
    * Email verification pending-registration flow — HMAC secret за
    * verification-code hashing (hashVerificationCode/verifyVerificationCode
@@ -2723,6 +2732,7 @@ export async function createAuthStore(
     | { ok: false; code: 'EMAIL_VERIFICATION_REQUIRED'; pendingRegistrationId: string; maskedEmail: string }
     | { ok: false; code: 'REGISTRATION_EXPIRED'; message: string }
     | { ok: false; code: 'PROFILE_PENDING_DELETION'; message: string; profileId: string; isBanned: boolean }
+    | { ok: false; code: 'PROFILE_DELETION_SCHEDULED'; message: string }
     | { ok: false; code: 'LOGIN_RATE_LIMITED'; message: string } {
     const email = normalizeEmail(input.email)
 
@@ -2802,6 +2812,13 @@ export async function createAuthStore(
         profileId: profileIdRow.profile_id,
         isBanned: activeBan !== null,
       }
+    }
+
+    // Етап 4F2 — насрочено административно окончателно изтриване: без сесия
+    // (самоизтриването по-горе има предимство — собственикът пак вижда своя
+    // поток). Само след валидна парола.
+    if (options.isProfileScheduledForAdminDeletion?.(profileIdRow.profile_id) === true) {
+      return { ok: false, code: 'PROFILE_DELETION_SCHEDULED', message: PROFILE_DELETION_SCHEDULED_LOGIN_MESSAGE }
     }
 
     // Ban gate — ПРЕДИ нормалното допускане в authenticated app/session

@@ -15,6 +15,7 @@
 import type {
   ClaimedProfileDeletionRequest,
   ProfileDeletionExecutor,
+  ProfileDeletionQueuedFile,
 } from '../db/profileDeletionExecutor.js'
 import type { ProfileDeletionLedgerEntry } from '../db/profileDeletionLedger.js'
 import type {
@@ -44,6 +45,50 @@ export type ProfileDeletionWorkerDeps = {
   onlyRequestIds?: readonly string[]
 }
 
+/**
+ * Обработка на файлови редове от опашката — ЕДИНСТВЕНАТА реализация, обща
+ * за самоизтриването (по заявка) и административното изтриване (по
+ * операция, Етап 4F2): claim с lease, споделен файл -> skipped_shared,
+ * безопасно изтриване (path/symlink защити в removeFile), липсващ файл =
+ * done, временна грешка -> failed с повторен опит, постоянен отказ -> failed
+ * без автоматичен опит. beforeEach — напр. удължаване на lease-а на заявката
+ * (false = спиране).
+ */
+export async function processQueuedProfileDeletionFiles(
+  deps: Pick<ProfileDeletionWorkerDeps, 'executor' | 'workerId' | 'uploadRoots' | 'removeFile'>,
+  files: readonly ProfileDeletionQueuedFile[],
+  profileId: string,
+  beforeEach?: () => boolean,
+): Promise<{ deleted: number; skippedShared: number; failed: number; leaseLost: boolean }> {
+  const result = { deleted: 0, skippedShared: 0, failed: 0, leaseLost: false }
+  for (const file of files) {
+    if (beforeEach !== undefined && !beforeEach()) {
+      result.leaseLost = true
+      break
+    }
+    if (!deps.executor.claimFile(file.queueId, deps.workerId)) continue
+    if (deps.executor.isStorageRefReferenced(file.fileKind, file.storageRef)) {
+      deps.executor.markFileSkippedShared(file, deps.workerId, profileId)
+      result.skippedShared += 1
+      continue
+    }
+    let outcome: ProfileDeletionFileRemovalOutcome
+    try {
+      outcome = await deps.removeFile(file.fileKind, file.storageRef, deps.uploadRoots)
+    } catch {
+      outcome = { outcome: 'error', code: 'fs_error' }
+    }
+    if (outcome.outcome === 'deleted' || outcome.outcome === 'missing') {
+      deps.executor.markFileDone(file, deps.workerId, profileId, outcome.outcome)
+      result.deleted += 1
+    } else {
+      deps.executor.markFileFailed(file, deps.workerId, profileId, outcome.code, outcome.outcome === 'rejected')
+      result.failed += 1
+    }
+  }
+  return result
+}
+
 export type ProfileDeletionWorkerRunSummary = {
   claimed: number
   completed: number
@@ -60,29 +105,16 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
   let running = false
 
   async function processFiles(request: ClaimedProfileDeletionRequest, summary: ProfileDeletionWorkerRunSummary): Promise<boolean> {
-    for (const file of deps.executor.listFilesToProcess(request.requestId)) {
-      if (!deps.executor.extendLease(request.requestId, deps.workerId)) return false
-      if (!deps.executor.claimFile(file.queueId, deps.workerId)) continue
-      if (deps.executor.isStorageRefReferenced(file.fileKind, file.storageRef)) {
-        deps.executor.markFileSkippedShared(file, deps.workerId, request.profileId)
-        summary.filesSkippedShared += 1
-        continue
-      }
-      let outcome: ProfileDeletionFileRemovalOutcome
-      try {
-        outcome = await deps.removeFile(file.fileKind, file.storageRef, deps.uploadRoots)
-      } catch {
-        outcome = { outcome: 'error', code: 'fs_error' }
-      }
-      if (outcome.outcome === 'deleted' || outcome.outcome === 'missing') {
-        deps.executor.markFileDone(file, deps.workerId, request.profileId, outcome.outcome)
-        summary.filesDeleted += 1
-      } else {
-        deps.executor.markFileFailed(file, deps.workerId, request.profileId, outcome.code, outcome.outcome === 'rejected')
-        summary.filesFailed += 1
-      }
-    }
-    return true
+    const result = await processQueuedProfileDeletionFiles(
+      deps,
+      deps.executor.listFilesToProcess(request.requestId),
+      request.profileId,
+      () => deps.executor.extendLease(request.requestId, deps.workerId),
+    )
+    summary.filesDeleted += result.deleted
+    summary.filesSkippedShared += result.skippedShared
+    summary.filesFailed += result.failed
+    return !result.leaseLost
   }
 
   async function processRequest(request: ClaimedProfileDeletionRequest, summary: ProfileDeletionWorkerRunSummary): Promise<void> {

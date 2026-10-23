@@ -1151,13 +1151,20 @@ const profileBanStore = await createProfileBanStore(databaseBootstrap.databaseFi
 // Аватар/снимка от галерията, която още се реферира от жив ред, не се трие
 // физически (виж deleteUploadFileByUrl по-долу).
 const profileUploadReferenceReader = await createProfileUploadReferenceReader(databaseBootstrap.databaseFilePath)
+// Етап 4F2 — разрешените директории на надеждната файлова опашка, общи за
+// административното изтриване и за worker-а на самоизтриването.
+const PROFILE_DELETION_UPLOAD_ROOTS = {
+  avatars: AVATAR_UPLOADS_PATH,
+  profileGallery: GALLERY_UPLOADS_PATH,
+  chatAttachments: CHAT_ATTACHMENT_UPLOADS_PATH,
+  topicAttachments: TOPIC_ATTACHMENT_UPLOADS_PATH,
+  topicMuteEvidenceAttachments: TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH,
+  supportAttachments: SUPPORT_ATTACHMENT_UPLOADS_PATH,
+}
+// Етап 4F2 — административното изтриване използва същото ядро и същата
+// файлова опашка като самоизтриването (вместо best-effort по URL).
 const profileHardDeleteService = await createProfileHardDeleteService(databaseBootstrap.databaseFilePath, {
-  // deleteUploadFileByUrl е function declaration по-долу в този модул (hoisted,
-  // затова е ползваем тук въпреки textual реда) — единствен canonical
-  // upload-path safety helper за avatar/gallery physical cleanup при hard
-  // delete (виж ProfileHardDeleteFileCleanupDeps коментара в
-  // profileHardDeleteService.ts).
-  deleteUploadFileByUrl,
+  uploadRoots: PROFILE_DELETION_UPLOAD_ROOTS,
 })
 const pendingProfileModerationStore = await createPendingProfileModerationStore(databaseBootstrap.databaseFilePath)
 const adminProfileRiskStore = await createAdminProfileRiskStore(databaseBootstrap.databaseFilePath)
@@ -1207,6 +1214,11 @@ const authStore = await createAuthStore(
         remainingDays: activeBan.remainingDays,
       }
     },
+    // Етап 4F2 — насрочено административно окончателно изтриване: без нов
+    // вход (иначе профилът би започнал нови игри/покупки до изпълнението).
+    // (Една цел може да има и висящ бан — затова изрично само изтриванията.)
+    isProfileScheduledForAdminDeletion: (profileId) =>
+      pendingProfileModerationStore.listPendingDeletes().some((pending) => pending.targetProfileId === profileId),
     registrationVerificationCodeSecret,
   },
 )
@@ -1633,14 +1645,7 @@ const profileDeletionWorker = profileDeletionExecutor === null
   : createProfileDeletionWorker({
       executor: profileDeletionExecutor,
       workerId: `${hostname()}:${process.pid}:${randomUUID().slice(0, 8)}`,
-      uploadRoots: {
-        avatars: AVATAR_UPLOADS_PATH,
-        profileGallery: GALLERY_UPLOADS_PATH,
-        chatAttachments: CHAT_ATTACHMENT_UPLOADS_PATH,
-        topicAttachments: TOPIC_ATTACHMENT_UPLOADS_PATH,
-        topicMuteEvidenceAttachments: TOPIC_MUTE_EVIDENCE_ATTACHMENT_UPLOADS_PATH,
-        supportAttachments: SUPPORT_ATTACHMENT_UPLOADS_PATH,
-      },
+      uploadRoots: PROFILE_DELETION_UPLOAD_ROOTS,
       removeFile: removeProfileDeletionFile,
       appendLedgerEntry: (entry) => { ensureProfileDeletionLedgerEntry(PROFILE_DELETION_LEDGER_PATH, entry) },
       isLedgerEntryConfirmedOffsite: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED
@@ -1676,8 +1681,14 @@ async function runAdminProfileDeletionRunner(): Promise<void> {
         broadcastAdminAggregateDataChangedToAdminConnections(null)
         deleteProfileConnections(pending.targetProfileId, pending.reason)
       },
+      // Етап 4F2 — чака offsite потвърждение, профилът не е в игра: достъпът
+      // остава спрян (покрива и рестарт/друг процес); идемпотентно.
+      onWaiting: (pending) => {
+        authStore.revokeAllSessionsForProfile(pending.targetProfileId)
+        deleteProfileConnections(pending.targetProfileId, pending.reason)
+      },
     })
-    if (summary.executed > 0 || summary.refused > 0 || summary.finalized > 0) {
+    if (summary.executed > 0 || summary.refused > 0 || summary.finalized > 0 || summary.fileCleanupCompleted > 0) {
       console.log(`[admin-profile-delete] runner ${JSON.stringify(summary)}`)
     }
   } catch (error) {
@@ -7277,6 +7288,9 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
         console.log(
           `[admin-profile-delete] mode=deferred-waiting targetProfileId=${participantProfileId} status=${outcome.status}`,
         )
+        // Етап 4F2 — мачът е приключил, изтриването още чака: без нови действия.
+        authStore.revokeAllSessionsForProfile(participantProfileId)
+        deleteProfileConnections(participantProfileId, pending.reason)
       }
     }).catch((error) => {
       // DB/транзакционна грешка — висящият ред остава, runner-ът опитва пак.
@@ -9785,6 +9799,11 @@ async function handleAuthRequest(
         sendJsonResponse(res, 429, result)
         return true
       }
+      // Етап 4F2 — насрочено административно окончателно изтриване: без сесия.
+      if ('code' in result && result.code === 'PROFILE_DELETION_SCHEDULED') {
+        sendJsonResponse(res, 403, result)
+        return true
+      }
       sendJsonResponse(res, 400, result)
       return true
     }
@@ -11141,6 +11160,15 @@ async function handleAdminProfileHardDeleteRequest(
       sendJsonResponse(res, 200, { ok: true, pending: false })
       return true
     }
+  }
+
+  // Етап 4F2 — до изпълнението профилът не бива да започва нови игри,
+  // покупки или действия: вход вече не се допуска (authStore), а извън
+  // активна игра сесиите се отнемат и връзките се затварят веднага. Активен
+  // мач НЕ се прекъсва — достъпът се спира в края му (match-end hook-ът).
+  if (!inActiveGame) {
+    authStore.revokeAllSessionsForProfile(targetProfileId)
+    deleteProfileConnections(targetProfileId, reason)
   }
 
   // Отложено: активна игра (изпълнява се в края й) или изчакване на offsite

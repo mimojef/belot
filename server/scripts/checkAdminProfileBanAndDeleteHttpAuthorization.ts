@@ -1250,10 +1250,18 @@ try {
     if (pendingBanCookie !== null) throw new Error('login не биваше да успее за баннат профил')
   })
 
-  const pendingDeleteCookie = await login(port, pendingDeleteTarget.email)
-  await check('[round4-F] pendingDeleteTarget login РАБОТИ (профилът все още съществува, само delete-ът е pending)', () => {
-    if (!pendingDeleteCookie) throw new Error('login трябваше да работи — профилът не е физически изтрит още')
+  // Етап 4F2 (§10) — насроченото административно изтриване спира и НОВИЯ
+  // вход (не само новите WS връзки): иначе профилът би могъл да прави
+  // покупки/HTTP действия до изпълнението. WS проверката по-долу ползва
+  // вече съществуващата сесия от регистрацията.
+  const pendingDeleteLogin = await loginRaw(port, pendingDeleteTarget.email)
+  await check('[round4-F] pendingDeleteTarget нов login се отказва (403 PROFILE_DELETION_SCHEDULED) — профилът още съществува, изтриването е насрочено', () => {
+    const body = pendingDeleteLogin.body as { code?: string }
+    if (pendingDeleteLogin.status !== 403 || body.code !== 'PROFILE_DELETION_SCHEDULED' || pendingDeleteLogin.cookie !== null) {
+      throw new Error(`status=${pendingDeleteLogin.status}, body=${JSON.stringify(pendingDeleteLogin.body)}`)
+    }
   })
+  const pendingDeleteCookie = pendingDeleteTarget.cookie
   // round 5 §2 корекция — след добавянето на connect-time pending-moderation
   // gate-а (wsServer.on('connection', ...)), нова WS connection за
   // pendingDeleteCookie вече се отхвърля НА connect-time, ПРЕДИ дори
@@ -1327,9 +1335,10 @@ try {
   // различен fresh login+connect опит) — потвърждава, че connect-time
   // gate-ът е idempotent/repeatable, не консумира pending реда само защото
   // веднъж вече е отхвърлил connection.
-  await check('[round5-2] повторен fresh login + нов WS connect опит за pendingDeleteTarget пак се отхвърля (idempotent connect-time gate, pending row не се консумира)', async () => {
-    const freshCookie = await login(port, pendingDeleteTarget.email)
-    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: freshCookie } })
+  await check('[round5-2] повторен login отказан + нов WS connect опит (съществуващата сесия) за pendingDeleteTarget пак се отхвърля (idempotent connect-time gate, pending row не се консумира)', async () => {
+    const freshLogin = await loginRaw(port, pendingDeleteTarget.email)
+    if (freshLogin.status !== 403 || freshLogin.cookie !== null) throw new Error(`login: status=${freshLogin.status}`)
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { headers: { Cookie: pendingDeleteTarget.cookie } })
     const messages: Array<{ type?: string }> = []
     let closed = false
     socket.on('close', () => { closed = true })

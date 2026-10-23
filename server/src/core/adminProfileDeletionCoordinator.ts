@@ -63,14 +63,22 @@ export type AdminProfileDeletionCoordinator = {
   tryExecute: (pending: PendingProfileModeration) => Promise<AdminProfileDeletionExecuteResult>
   /** Намерения без краен запис -> completed / resolved_by_self / aborted. */
   finalizeOperations: () => number
-  /** finalize + всички висящи изтривания извън активна игра. */
-  runOnce: (options?: { onExecuted?: (pending: PendingProfileModeration) => void }) => Promise<{ executed: number; waiting: number; refused: number; finalized: number }>
+  /**
+   * finalize + всички висящи изтривания извън активна игра + (Етап 4F2)
+   * повторни опити за недовършената файлова фаза. onWaiting — изтриване,
+   * което чака offsite потвърждение (профилът НЕ е в игра): извикващият
+   * прекъсва достъпа, за да няма нови действия до изпълнението.
+   */
+  runOnce: (options?: {
+    onExecuted?: (pending: PendingProfileModeration) => void
+    onWaiting?: (pending: PendingProfileModeration) => void
+  }) => Promise<{ executed: number; waiting: number; refused: number; finalized: number; fileCleanupCompleted: number }>
   close: () => void
 }
 
 export type AdminProfileDeletionCoordinatorDeps = {
   databaseFilePath: string
-  hardDeleteService: Pick<ProfileHardDeleteService, 'hardDeleteProfile'>
+  hardDeleteService: Pick<ProfileHardDeleteService, 'hardDeleteProfile'> & Partial<Pick<ProfileHardDeleteService, 'processPendingAdminFileCleanup'>>
   pendingStore: Pick<
     PendingProfileModerationStore,
     'recordPendingDelete' | 'listPendingDeletes' | 'getPendingDeleteByOperation' | 'assignLedgerOperation' | 'clearPendingDeleteForOperation'
@@ -303,8 +311,8 @@ export async function createAdminProfileDeletionCoordinator(
     return finalized
   }
 
-  async function runOnce(options: { onExecuted?: (pending: PendingProfileModeration) => void } = {}): Promise<{ executed: number; waiting: number; refused: number; finalized: number }> {
-    const summary = { executed: 0, waiting: 0, refused: 0, finalized: 0 }
+  async function runOnce(options: Parameters<AdminProfileDeletionCoordinator['runOnce']>[0] = {}): Promise<{ executed: number; waiting: number; refused: number; finalized: number; fileCleanupCompleted: number }> {
+    const summary = { executed: 0, waiting: 0, refused: 0, finalized: 0, fileCleanupCompleted: 0 }
     summary.finalized = finalizeOperations()
     for (const pending of deps.pendingStore.listPendingDeletes()) {
       if (deps.isTargetInActiveGame(pending.targetProfileId)) continue
@@ -313,8 +321,16 @@ export async function createAdminProfileDeletionCoordinator(
         summary.executed += 1
         options.onExecuted?.(pending)
       }
-      else if (outcome.status === 'waiting_offsite' || outcome.status === 'ledger_unavailable') summary.waiting += 1
+      else if (outcome.status === 'waiting_offsite' || outcome.status === 'ledger_unavailable') {
+        summary.waiting += 1
+        options.onWaiting?.(pending)
+      }
       else if (outcome.status === 'refused') summary.refused += 1
+    }
+    // Етап 4F2 — DB COMMIT-ът не значи, че файловете са изтрити: недовършената
+    // файлова фаза (вкл. от възстановено копие) се довършва тук.
+    if (deps.hardDeleteService.processPendingAdminFileCleanup !== undefined) {
+      summary.fileCleanupCompleted = (await deps.hardDeleteService.processPendingAdminFileCleanup()).completed
     }
     return summary
   }

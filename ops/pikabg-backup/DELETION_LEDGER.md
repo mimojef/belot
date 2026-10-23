@@ -181,7 +181,19 @@ sudo node dist/ops/profileDeletionLedgerCli.js reconcile --db=/srv/restore-<да
 2. До 5 мин `pikabg-ledger-backup` потвърждава записа. Сървърът (на всяка минута) изпълнява изтриването, ако профилът не е в активна игра; иначе — в края на мача.
 3. След COMMIT → `admin_delete_completed`. Одитният ред в `admin_profile_deletions` е със същия `log_id` = `operationId`.
    - Срив между COMMIT и записа се довършва автоматично по одитния ред.
+   - **Етап 4F2:** `admin_delete_completed` означава, че **данните в базата** са изтрити (същото ядро като самоизтриването). Физическите файлове са в същата надеждна опашка (`profile_deletion_file_queue.admin_operation_id`) и се обработват веднага, а при грешка — с повторни опити от runner-а на всяка минута. Състоянието на файловата фаза е в `admin_profile_deletions.file_cleanup_status`: `pending` (не е приключила), `done` (всички файлове са изтрити, липсващи или споделени), `NULL` (изтриване отпреди 4F2, стар best-effort механизъм).
 4. Отказ (напр. незавършил турнир) → `admin_delete_aborted`. Приключване чрез самоизтриване (Етап 4E6C) → `admin_delete_resolved_by_self`.
+
+Диагностика на недовършени файлови фази (само четене):
+
+```sql
+SELECT a.log_id, a.deleted_at, q.status, q.attempt_count, q.last_error_code, q.next_attempt_at
+FROM admin_profile_deletions a
+JOIN profile_deletion_file_queue q ON q.admin_operation_id = a.log_id
+WHERE a.file_cleanup_status = 'pending' AND q.status NOT IN ('done', 'skipped_shared');
+```
+
+`failed` без `next_attempt_at` (или с изчерпани опити) е постоянен отказ — напр. опасен път или символна връзка — и изисква ръчна проверка. Restore на backup, направен между COMMIT и файловете, довършва файловата фаза автоматично (runner-ът и `reconcile`).
 
 В регистъра има само UUID-та, времена и кодове. **Без имена, имейли, IP или причината.** Причината остава само в одита в базата.
 

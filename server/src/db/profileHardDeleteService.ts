@@ -1,11 +1,27 @@
 import { randomUUID } from 'node:crypto'
 import type { ProfileId } from '../core/serverTypes.js'
-import { createProfileVisitLinkReader } from './profileVisitLinks.js'
+import { processQueuedProfileDeletionFiles } from '../core/profileDeletionWorker.js'
+import {
+  removeProfileDeletionFile,
+  type ProfileDeletionFileKind,
+  type ProfileDeletionFileRemovalOutcome,
+  type ProfileDeletionUploadRoots,
+} from '../uploads/profileDeletionFileRemoval.js'
+import { createProfileDeletionExecutor, type ProfileDeletionExecutorOptions } from './profileDeletionExecutor.js'
+import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
 export type HardDeleteProfileResult =
-  | { ok: true; deletedProfileId: ProfileId; deletedAccountId: string | null }
+  | {
+      ok: true
+      deletedProfileId: ProfileId
+      deletedAccountId: string | null
+      /** Етап 4F2 — log_id на одитния ред = собственик на файловете в опашката. */
+      operationId: string
+      /** Етап 4F2 — файлови операции, които още не са приключили (0 = файловата фаза е done). */
+      filesPending: number
+    }
   | {
       ok: false
       code:
@@ -17,133 +33,36 @@ export type HardDeleteProfileResult =
         | 'campaign_gift_sender_protected'
     }
 
-/**
- * Non-terminal турнирни статуси (mirror на selectActiveEntryForAccountStatement
- * в tournamentEconomyStore.ts — единственият established "какво значи active
- * турнир" списък в кодовата база, reuse-нат тук вместо дублиран). Турнир в
- * този lifecycle все още може да получи нови действия (join/start/settle) —
- * hard delete на creator/participant тук би оставил живия турнир (или
- * останалите участници) в неконсистентно състояние.
- */
-const ACTIVE_TOURNAMENT_STATUSES = ['open', 'starting', 'semifinal_in_progress', 'final_in_progress'] as const
-
-/** Non-terminal entry статуси (профилът все още реално участва). */
-const ACTIVE_ENTRY_STATUSES = ['confirmed', 'finalist'] as const
+export type AdminFileCleanupRunSummary = {
+  operations: number
+  completed: number
+  filesDeleted: number
+  filesSkippedShared: number
+  filesFailed: number
+}
 
 export type ProfileHardDeleteService = {
   /**
-   * Единствен canonical hard-delete primitive за пълно, необратимо
-   * премахване на човешки профил (admin moderation, spec §7-9) — mirror на
-   * topicHardDeleteService.hardDeleteTopic-ия pattern (BEGIN IMMEDIATE, defense-
-   * in-depth re-check вътре в транзакцията, audit ред ПРЕДИ destructive delete,
-   * COMMIT; ROLLBACK+rethrow при грешка).
+   * Административното окончателно изтриване (Етап 4F2 — уеднаквено със
+   * самоизтриването). Реалното заличаване е profileDeletionExecutor.
+   * executeAdminHardDelete: административните проверки (незавършен турнир,
+   * кампаниен подател, валидна support заявка), одитен ред ПРЕДИ
+   * заличаването (log_id = auditLogId/operationId, file_cleanup_status =
+   * 'pending'), support архив само при изрично валидирано съобщение, и СЪЩОТО
+   * ядро (deleteProfileDataInTransaction) със СЪЩАТА файлова опашка като
+   * самоизтриването — Теми (А1/Б1), лични разговори, поддръжка, история на
+   * игрите, имена, кампании, оценки, модераторски записи, IP/visitor връзки,
+   * финансови и модераторски инварианти, всичко в ЕДНА BEGIN IMMEDIATE
+   * транзакция.
    *
-   * Account cardinality (spec §8): profiles.account_id няма UNIQUE
-   * constraint — един акаунт МОЖЕ да има повече от един профил (виж
-   * authStore.login()'s "ORDER BY created_at ASC LIMIT 1" избор). Затова
-   * акаунтът/email-ът се трие само ако това е ЕДИНСТВЕНИЯТ профил на този
-   * акаунт (преброено вътре в СЪЩАТА транзакция) — иначе email-ът НЕ се
-   * освобождава, а само self профилът изчезва (останалите профили на
-   * акаунта, ако има такива, не се пипат).
+   * Физическите файлове: записани в опашката в същата транзакция; веднага
+   * след COMMIT се прави опит (когато са подадени uploadRoots), а
+   * недовършените се довършват от processPendingAdminFileCleanup
+   * (периодичния runner на adminProfileDeletionCoordinator) с повторни
+   * опити. filesPending > 0 = базата е изтрита, файловата фаза — още не.
    *
-   * Active tournament guard (blocker fix round 2, §2): ако target е creator
-   * на турнир с non-terminal status ИЛИ има active entry (status IN
-   * confirmed/finalist) в такъв турнир, delete-ът се ОТКАЗВА с
-   * 'active_tournament_dependency' — DELETE FROM profiles никога не бива да
-   * каскадно изтрие/повреди ЖИВ (все още играещ се) турнир само защото
-   * target е негов creator/participant, нито да остави останалите
-   * участници в неконсистентно състояние. Admin трябва първо да BAN-не
-   * профила (spec: "Admin може първо да BAN-не профила") — hard delete
-   * остава възможен само след като турнирът стигне terminal lifecycle
-   * (finished/cancelled/admin_cancelled/auto_cancelled/failed).
-   *
-   * Immutable deleted-profile identity (blocker fix round 2, §1/§2):
-   * "historical row survives" != "historical identity survives" — преди
-   * destructive DELETE FROM profiles снапваме target profileId в
-   * *_snapshot колони БЕЗ FK (deleted_profile_id_snapshot / deleted_sender_
-   * profile_id_snapshot / deleted_recipient_profile_id_snapshot / deleted_
-   * creator_profile_id_snapshot, виж 20260902_002/20260902_003 migration-ите)
-   * върху profile_bans, tournaments, tournament_entries,
-   * tournament_economy_ledger, yellow_coin_gift_ledger (ОТДЕЛНО за sender И
-   * recipient страна), match_economy_ledger, coin_purchase_ledger,
-   * profile_name_change_ledger, vip_grants, vip_purchase_ledger,
-   * bundle_purchase_ledger (20260923_004 — payer снапшот, mirror на coin/vip;
-   * bundle-ово наследеният profile_id ON DELETE CASCADE от
-   * 20260923_001_create_shop_bundle_packages.sql остана незабелязан при
-   * 20260902_002-ия sweep, защото таблицата тогава още не съществуваше),
-   * table_exit_penalties, profile_match_results, belot_match_completion_ledger
-   * (Фаза 6.2, mirror на profile_match_results) — за да остане
-   * forensic-reconstructable "този ban/турнир/entry/ledger ред е бил на
-   * deleted profile UUID X" дори след като живата FK колона се нулира от
-   * cascade-а. Amount/balance/economy/резултат/timestamp/reason стойностите
-   * НИКОГА не се променят — само атрибуцията се snapshot-ва.
-   *
-   * Плюс АГРЕГИРАН site_visit forensic snapshot (виж
-   * captureVisitorForensicSnapshot по-долу) — директен източник е
-   * site_visit_events.profile_id (round 2 корекция; site_visitors.first/
-   * last_profile_id би пропуснал "A -> TARGET -> B" middle-profile сценарий,
-   * виж коментара при captureVisitorForensicSnapshot). site_visit_events/
-   * site_visitors НЕ се rebuild-ват (голяма/непрекъснато растяща analytics
-   * таблица), вместо това at-delete-time snapshot агрегира по
-   * (anonymous_visitor_id, ip_address) -> first/last seen + event_count в
-   * нова dedicated таблица — reuse-ва съществуващия
-   * idx_site_visit_events_profile_time индекс, никакъв нов индекс върху
-   * high-write таблицата.
-   *
-   * FK cascade (server/database/migrations, verified inventory): DELETE FROM
-   * profiles каскадно премахва ЖИВО/operational profile-owned state —
-   * wallet/gallery/progress/friendships/лични и лоби чат съобщения/topic
-   * съдържание/mission+reward progress и т.н. (ON DELETE CASCADE, категория
-   * A). Financial/historical/forensic state (категория B) е ON DELETE SET
-   * NULL, виж 20260902_002/20260902_003/20260923_004: profile_bans,
-   * yellow_coin_gift_ledger, match_economy_ledger, coin_purchase_ledger,
-   * profile_name_change_ledger, vip_grants, vip_purchase_ledger,
-   * bundle_purchase_ledger, table_exit_penalties,
-   * profile_match_results, belot_match_completion_ledger, tournaments.creator_profile_id,
-   * tournament_entries.profile_id. Плюс site_visit_events/ad_campaign audit
-   * полета/topics.created_by_profile_id/tournament_economy_ledger/
-   * tournament_events, които вече бяха SET NULL от самото начало. Всички
-   * тези redове ПРЕЖИВЯВАТ delete-а непокътнати, СЪС запазена snapshot
-   * атрибуция (умишлено, spec §9). Таблиците БЕЗ FK въобще —
-   * player_blocks (blocker/blocked по profile_id) — се чистят ръчно тук, за
-   * да няма orphan rows; private_room_matches пази profileId само вътре в
-   * JSON snapshot колони (team_a_json/team_b_json), е документирана
-   * permanent-history таблица без cleanup job (виж migration коментара) —
-   * исторически завършени мачове НЕ се пипат тук. support_messages/
-   * support_archived/support_message_attachments също нямат FK ("Връзка с
-   * екипа" support chat) — умишлено НЕ се трият/пипат тук.
-   *
-   * Support deletion archive (EXPLICIT ATTRIBUTION ONLY, round 2 корекция):
-   * support_deletion_archives ред се записва ПРЕДИ DELETE FROM profiles
-   * ЕДИНСТВЕНО когато input.supportRequestMessageId е подаден И валидиран
-   * вътре в тази транзакция (виж selectSupportRequestMessageForValidationStatement
-   * по-долу — съобщението трябва да съществува, да принадлежи на target
-   * profile_id, и да е is_from_admin=0). Provенансът е "admin изрично избра
-   * ТОВА user съобщение като deletion request" (support chat UI-я "Изтрий
-   * профила по тази заявка" бутон) — НЕ automatic "последно съобщение в
-   * разговора". Ако supportRequestMessageId липсва (нормален profile-popup
-   * delete flow) ИЛИ валидацията се провали, НЕ се създава archive ред —
-   * при провалена валидация ЦЕЛИЯТ delete се отказва (ROLLBACK, код
-   * 'invalid_support_request_message'), не просто се пропуска archive-а.
-   *
-   * Avatar/gallery physical file cleanup (production gap fix): DELETE FROM
-   * profiles каскадно чисти profile_gallery_images DB редовете (ON DELETE
-   * CASCADE), но НЕ пипа физическите файлове на диска — нито тях, нито
-   * target-овия качен avatar. Виж collectUploadedFileUrlsForProfile/
-   * deleteUploadedFilesBestEffort по-долу: canonical URL списъкът се събира
-   * ПРЕДИ DELETE FROM profiles (докато DB attribution още е налична),
-   * физическият unlink се await-ва СЛЕД успешен COMMIT (затова функцията е
-   * async — виж call site-а: НАРОЧНО извън transaction try/catch-а, за да
-   * не се опита ROLLBACK след вече успешен COMMIT и за да не превърне fs
-   * грешка в подвеждащ "delete failed" за профил, вече физически изтрит от
-   * DB), reuse-вайки СЪЩИЯ upload-path safety helper като normal
-   * avatar-swap/gallery-delete flow-овете (index.ts's deleteUploadFileByUrl,
-   * инжектиран през ProfileHardDeleteFileCleanupDeps) — default preset
-   * avatars (`/assets/avatars/...`) и path traversal са защитени там, не
-   * тук. Shared-avatar safety: avatar uploads живеят в ЕДНА flat директория
-   * (за разлика от gallery, per-profile subdirectory) — ако друг CURRENT
-   * profile реферира СЪЩИЯ avatar_url, физическият файл НЕ се unlink-ва
-   * (виж isAvatarUrlSharedWithAnotherProfile).
+   * Account cardinality: акаунтът се трие само ако това е бил единственият
+   * му профил (преброено в същата транзакция).
    */
   hardDeleteProfile: (input: {
     targetProfileId: ProfileId
@@ -152,105 +71,75 @@ export type ProfileHardDeleteService = {
     reason: string
     /**
      * Optional — само когато admin е натиснал "Изтрий профила по тази
-     * заявка" от вътре в конкретен support разговор (виж doc коментара
-     * по-горе). Validate-ва се authoritative вътре в транзакцията, НЕ се
-     * приема на доверие от клиента.
+     * заявка" от вътре в конкретен support разговор. Validate-ва се
+     * authoritative вътре в транзакцията, НЕ се приема на доверие от клиента.
      */
     supportRequestMessageId?: string | null
-    /** Етап 4F1 — log_id на одитния ред = operationId в регистъра. */
+    /**
+     * Етап 4F1 — log_id на одитния ред = operationId в регистъра на
+     * изтриванията (иначе нов UUID).
+     */
     auditLogId?: string
-    /** Етап 4F1 — повторно прилагане след restore (виж имплементацията). */
+    /**
+     * Етап 4F1 — повторно прилагане след restore на вече ЗАВЪРШЕНО
+     * административно изтриване: оригиналният момент (SQLite datetime);
+     * липсващ актьор -> NULL; support заявка, която я няма във
+     * възстановеното копие -> без архивен ред (вместо отказ).
+     */
     replay?: { deletedAt: string }
   }) => Promise<HardDeleteProfileResult>
   /**
-   * Reuse-ва СЪЩИТЕ prepared statements/SQL като active tournament dependency
-   * guard-а вътре в hardDeleteProfile (виж коментара там) — extracted като
-   * публичен read-only pre-check (round 4 blocker fix), за да може
-   * handleAdminProfileHardDeleteRequest да провери active tournament
-   * dependency ПРЕДИ да реши дали да запише pending DELETE (при
-   * isProfileInActiveGame===true target), вместо да рискува pending DELETE
-   * да чака игра, чийто completion hook после да получи
-   * 'active_tournament_dependency' от самия hardDeleteProfile и pending
-   * реда да остане завинаги неизпълним. Няма собствена транзакция (чист
-   * SELECT) — hardDeleteProfile пак re-check-ва authoritative вътре в своя
-   * BEGIN IMMEDIATE при реалното изпълнение, за race-safety.
+   * Етап 4F2 — повторни опити за всички административни операции с
+   * недовършена файлова фаза (file_cleanup_status = 'pending'). Без
+   * uploadRoots — no-op (файловете остават в опашката).
+   */
+  processPendingAdminFileCleanup: () => Promise<AdminFileCleanupRunSummary>
+  /**
+   * Read-only pre-check: незавършен турнир (creator или активно участие).
+   * hardDeleteProfile проверява отново authoritative в транзакцията.
    */
   hasActiveTournamentDependency: (profileId: ProfileId) => boolean
   /**
-   * Фаза 2.1 — true ако profileId фигурира като sender_profile_id в поне
-   * един gift_item_transactions ред с context='campaign_reward' (реално
-   * предоставена кампанийна награда, не обикновен peer-to-peer подарък).
-   * Защитава по ИСТОРИЧЕСКО участие, не по текуща роля — профил, който
-   * впоследствие е загубил marketing ролята, остава защитен (§2 от
-   * задачата). Публичен read-only pre-check (mirror на
-   * hasActiveTournamentDependency) — index.ts го ползва ПРЕДИ да запише
-   * pending delete marker за target в активна игра, за да не остане
-   * неизпълним завинаги pending ред (за разлика от турнирната зависимост,
-   * тази защита никога не "изчезва" сама). hardDeleteProfile() пак
-   * re-check-ва authoritative вътре в своята BEGIN IMMEDIATE транзакция.
+   * Read-only pre-check: профилът е предоставял кампанийни награди
+   * (gift_item_transactions.context='campaign_reward'). Защитата не "изчезва"
+   * сама; hardDeleteProfile проверява отново в транзакцията.
    */
   hasCampaignGiftSenderHistory: (profileId: ProfileId) => boolean
   /**
-   * Forensic/hard-delete-evidence query (по-рано ползвана от registration
-   * anti-evasion gate-а, премахнат — вече без call site, запазена за
-   * admin/support reference) — distinct deleted_profile_id стойности,
-   * някога свързани с този anonymous_visitor_id
-   * (admin_profile_deletion_visitor_snapshots — forensic snapshot, populated
-   * ЕДИНСТВЕНО в момента на hard delete, виж captureVisitorForensicSnapshot
-   * doc коментара по-долу). Reuse-ва idx_admin_profile_deletion_visitor_snapshots_visitor.
-   * Целта: свързва visitor_id с профил, който вече НЕ съществува в profiles
-   * (site_visit_events.profile_id вече е SET NULL за такива редове) — тази
-   * таблица е ЕДИНСТВЕНИЯТ оцелял мост visitor_id -> стар profile_id.
+   * Forensic справка (без call site в runtime): изтрити профили, свързани с
+   * този anonymous_visitor_id (стари admin snapshot-и + compact връзки).
+   * Етап 4F2: нови snapshot-и не се създават, а връзките на изтрития профил
+   * се трият — справката обхваща само наследени записи.
    */
   findDeletedProfileIdsForVisitorId: (visitorId: string) => ProfileId[]
-  /**
-   * Forensic/hard-delete-evidence query (по-рано ползвана от registration
-   * anti-evasion gate-а, премахнат — вече без call site, запазена за
-   * admin/support reference) — same като
-   * findDeletedProfileIdsForVisitorId, но по ip_address, ПЛЮС 48h recency
-   * филтър (пети follow-up brief §2/§3/§4): само snapshot редове, чийто
-   * last_seen_at (реалният MAX(occurred_at) от site_visit_events, агрегиран
-   * ПРЕДИ hard-delete cascade-а — виж captureVisitorForensicSnapshot) е в
-   * последните 48 часа. Стар IP-usage (>48h) от отдавна hard-deleted профил
-   * вече не блокира само по IP — избягва "стар IP отпреди месеци става
-   * recent само защото профилът е изтрит днес". Таблицата е малка и bounded
-   * (population само при рядкото admin hard-delete действие) — умишлено
-   * БЕЗ нов индекс тук (виж production report-а "Performance" секцията за
-   * пълния rationale защо unindexed scan на ТАЗИ конкретна таблица е приемлив,
-   * за разлика от continuously-growing site_visit_events).
-   */
+  /** Като findDeletedProfileIdsForVisitorId, по ip_address, с 48h recency. */
   findDeletedProfileIdsForIp: (ipAddress: string) => ProfileId[]
   /**
-   * Forensic/hard-delete-evidence query (по-рано ползвана от registration
-   * anti-evasion gate-а, премахнат — вече без call site, запазена за
-   * admin/support reference) — true, ако deletedProfileId е имал активен
-   * Topics/Лафче mute В МОМЕНТА на hard delete-а, И оригиналният
-   * muted_until все още не е минал (сравнено срещу CURRENT_TIMESTAMP at
-   * read time — временен restriction, не permanent block). Lookup по
-   * PRIMARY KEY(deleted_profile_id) на admin_profile_deletion_moderation_snapshots
-   * — O(1) индексиран single-row lookup, без scan.
+   * true, ако изтритият профил е имал активно заглушаване в Теми/Лафче в
+   * момента на административното изтриване и то още не е изтекло.
    */
   hasActiveMuteSnapshotForDeletedProfile: (deletedProfileId: ProfileId) => boolean
   close: () => void
 }
 
-const MAX_REASON_LENGTH = 2000
-
 export type ProfileHardDeleteFileCleanupDeps = {
   /**
-   * Reuse-ва СЪЩИЯ helper като avatar-swap/gallery-delete flow-овете в
-   * index.ts (index.ts's deleteUploadFileByUrl) — единствен source на
-   * upload-path safety тук: no-op за всичко извън UPLOADS_ROUTE_PREFIX
-   * (защитава default `/assets/avatars/...` presets от случайно unlink),
-   * resolve()+whitelist-check срещу PUBLIC_UPLOAD_SUBDIRECTORY_ROOTS (защита
-   * от path traversal дори при повреден/подправен DB URL), ENOENT
-   * third-party-safe (missing file = вече чисто). Инжектирана като функция
-   * (не import на index.ts константи/helper-и) — profileHardDeleteService.ts
-   * е db-слой модул, index.ts вече го import-ва обратно (createProfileHardDeleteService),
-   * затова директен import в обратната посока би бил circular; DI по същия
-   * начин като databaseFilePath избягва това изцяло.
+   * Етап 4F2 — разрешените upload директории (същите като за
+   * самоизтриването). С тях файловете се изтриват веднага след COMMIT и при
+   * повторните опити; без тях остават в опашката, докато процес с
+   * директориите ги обработи.
    */
-  deleteUploadFileByUrl: (uploadUrl: string) => Promise<void>
+  uploadRoots?: ProfileDeletionUploadRoots
+  /** Само за тестове: подмяна на физическото изтриване (симулирани грешки). */
+  removeFile?: (kind: ProfileDeletionFileKind, storageRef: string, roots: ProfileDeletionUploadRoots) => Promise<ProfileDeletionFileRemovalOutcome>
+  /**
+   * Остарял (до Етап 4F1): best-effort изтриване на аватар/галерия по URL.
+   * Вече НЕ се използва — всички файлове минават през надеждната опашка.
+   * Приема се само за съвместимост на съществуващите извиквания.
+   */
+  deleteUploadFileByUrl?: (uploadUrl: string) => Promise<void>
+  /** Само за тестове: hooks на executor-а (симулиран срив преди COMMIT). */
+  executorOptions?: ProfileDeletionExecutorOptions
 }
 
 export async function createProfileHardDeleteService(
@@ -267,65 +156,18 @@ export async function createProfileHardDeleteService(
   database.exec('PRAGMA journal_mode = WAL;')
   database.exec('PRAGMA busy_timeout = 5000;')
 
-  const selectProfileForDeleteStatement = database.prepare(`
-    SELECT profile_id, account_id, display_name, username, avatar_url
-    FROM profiles
-    WHERE profile_id = ?
-    LIMIT 1;
-  `)
+  const executor = await createProfileDeletionExecutor(databaseFilePath, fileCleanup.executorOptions ?? {})
+  const participationChecks = createProfileDeletionParticipationChecks(database)
+  const workerId = `admin-delete:${process.pid}:${randomUUID().slice(0, 8)}`
+  const removeFile = fileCleanup.removeFile ?? removeProfileDeletionFile
 
-  const countProfilesForAccountStatement = database.prepare(`
-    SELECT COUNT(*) as cnt FROM profiles WHERE account_id = ?;
-  `)
-
-  const ACTIVE_STATUS_PLACEHOLDERS = ACTIVE_TOURNAMENT_STATUSES.map(() => '?').join(', ')
-  const ACTIVE_ENTRY_STATUS_PLACEHOLDERS = ACTIVE_ENTRY_STATUSES.map(() => '?').join(', ')
-
-  const selectActiveTournamentDependencyStatement = database.prepare(`
-    SELECT tournament_id FROM tournaments
-    WHERE creator_profile_id = ?
-      AND status IN (${ACTIVE_STATUS_PLACEHOLDERS})
-    LIMIT 1;
-  `)
-
-  const selectActiveEntryDependencyStatement = database.prepare(`
-    SELECT te.entry_id
-    FROM tournament_entries te
-    JOIN tournaments t ON t.tournament_id = te.tournament_id
-    WHERE te.profile_id = ?
-      AND te.status IN (${ACTIVE_ENTRY_STATUS_PLACEHOLDERS})
-      AND t.status IN (${ACTIVE_STATUS_PLACEHOLDERS})
-    LIMIT 1;
-  `)
-
-  // Фаза 2.1 — виж hasCampaignGiftSenderHistory doc коментара в типа по-горе.
-  // Индексиран lookup (idx_gift_item_transactions_sender(sender_profile_id, created_at),
-  // виж 20260909_001_create_gift_item_catalog.sql) — O(log n), не table scan.
   const selectCampaignGiftSenderHistoryStatement = database.prepare(`
     SELECT 1 FROM gift_item_transactions
     WHERE sender_profile_id = ? AND context = 'campaign_reward'
     LIMIT 1;
   `)
 
-  // Mirror на RAISE(ABORT, 'campaign_gift_sender_protected') текста от
-  // 20261013_001_protect_campaign_gift_sender_profiles.sql trigger-а — DB-level
-  // backstop detection (виж catch блока в hardDeleteProfile по-долу).
-  const CAMPAIGN_GIFT_SENDER_PROTECTED_TRIGGER_MESSAGE = 'campaign_gift_sender_protected'
-
-  // Registration anti-evasion gate (hard-delete evasion fix) — виж
-  // findDeletedProfileIdsForVisitorId/findDeletedProfileIdsForIp doc
-  // коментарите в ProfileHardDeleteService типа по-горе. Reuse-ва
-  // idx_admin_profile_deletion_visitor_snapshots_visitor индекса (visitor
-  // lookup); IP lookup е нарочно unindexed (виж коментара там).
-  //
-  // Фаза 2 (raw retention SITE_VISIT_RETENTION_DAYS, 35 от Фаза 2B): at-delete snapshot-ът се агрегира от raw
-  // site_visit_events, затова за профил, неактивен > retention прозореца
-  // преди изтриването, snapshot-ът е празен. UNION с compact
-  // profile_visitor_links (оцеляват hard delete — без FK) пази дългосрочния
-  // мост visitor_id -> изтрит профил. "Изтрит" = има admin_profile_deletions
-  // ред (същият източник като snapshot-а; temporary guest профили, трити
-  // от playerProgressStore, НЕ са hard-deleted и не се връщат). UNION
-  // дедупликира — профил, присъстващ и в двата източника, се връща веднъж.
+  // Forensic справки върху наследени записи (виж типа по-горе).
   const selectDeletedProfileIdsForVisitorIdStatement = database.prepare(`
     SELECT deleted_profile_id
     FROM admin_profile_deletion_visitor_snapshots
@@ -338,17 +180,6 @@ export async function createProfileHardDeleteService(
       AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = l.profile_id);
   `)
 
-  // 48h recency (пети follow-up brief §2/§3/§4) — last_seen_at ВЕЧЕ пази
-  // истинския MAX(occurred_at) от site_visit_events, агрегиран ПРЕДИ
-  // cascade-а (captureVisitorForensicSnapshot по-долу) — НЕ deletion/ban/
-  // mute дата. Стар (>48h) реален IP-usage вече не блокира само по IP,
-  // независимо кога е станал hard delete-ът — избягва точно "стар IP
-  // отпреди месеци става 'recent' само защото профилът е изтрит днес".
-  // Никаква schema/snapshot промяна не беше нужна — last_seen_at вече
-  // съществуваше и вече пазеше правилния timestamp (виж 20260902_003
-  // migration-а — captureVisitorForensicSnapshot's MAX(occurred_at) агрегация).
-  // Фаза 2: същият UNION с compact profile_ip_links (last_seen_at там е
-  // точният MAX(occurred_at) на връзката — същата 48h семантика).
   const selectDeletedProfileIdsForIpStatement = database.prepare(`
     SELECT deleted_profile_id
     FROM admin_profile_deletion_visitor_snapshots
@@ -363,9 +194,6 @@ export async function createProfileHardDeleteService(
       AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = l.profile_id);
   `)
 
-  // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
-  // виж hasActiveMuteSnapshotForDeletedProfile doc коментара по-горе.
-  // PRIMARY KEY(deleted_profile_id) lookup — O(1), не scan.
   const selectActiveMuteSnapshotForDeletedProfileStatement = database.prepare(`
     SELECT 1
     FROM admin_profile_deletion_moderation_snapshots
@@ -374,866 +202,89 @@ export async function createProfileHardDeleteService(
     LIMIT 1;
   `)
 
-  const deletePlayerBlocksStatement = database.prepare(`
-    DELETE FROM player_blocks WHERE blocker_profile_id = ? OR blocked_profile_id = ?;
-  `)
-
-  // 20261026_001: gift_item_transactions вече е ON DELETE SET NULL (чуждите
-  // подаръци оцеляват), затова неговият CASCADE към gift_item_delivery_log не
-  // премахва повече чакащите известия КЪМ изтрития получател — а
-  // recipient_profile_id там няма FK. Чистим ги изрично (същият краен
-  // резултат за получателя като преди миграцията).
-  const deleteGiftDeliveryLogForRecipientStatement = database.prepare(`
-    DELETE FROM gift_item_delivery_log WHERE recipient_profile_id = ?;
-  `)
-
-  // Етап 4E4 (20261028_001): rated_by_profile_id вече е ON DELETE SET NULL
-  // (самоизтриването пази дадените оценки анонимно). Административното
-  // изтриване ЗАПАЗВА досегашното си поведение — дадените от target-а оценки
-  // се премахват изрично — и вече преизчислява кеша на засегнатите играчи
-  // (преди каскадата оставяше profiles.average_rating остарял).
-  const selectRatedProfilesByTargetStatement = database.prepare(`
-    SELECT DISTINCT rated_profile_id FROM profile_partner_ratings
-    WHERE rated_by_profile_id = ?1 AND rated_profile_id <> ?1;
-  `)
-  const deleteRatingsGivenByTargetStatement = database.prepare(`
-    DELETE FROM profile_partner_ratings WHERE rated_by_profile_id = ?;
-  `)
-  // Същата формула като playerProgressStore.refreshRatingAggregate.
-  const refreshRatingCacheStatement = database.prepare(`
-    UPDATE profiles
-    SET average_rating = (SELECT COALESCE(AVG(rating_value), 0) FROM profile_partner_ratings WHERE rated_profile_id = profiles.profile_id),
-        total_ratings_count = (SELECT COUNT(*) FROM profile_partner_ratings WHERE rated_profile_id = profiles.profile_id),
-        updated_at = CURRENT_TIMESTAMP
-    WHERE profile_id IN (SELECT value FROM json_each(?1));
-  `)
-
-  // Етап 4E6B (20261029_001): topic_reports.reporter_profile_id и
-  // tournament_participation_blocks.actor_profile_id вече са ON DELETE SET
-  // NULL (самоизтриването пази неразгледаните сигнали и наложените
-  // блокировки анонимно). Административното изтриване ЗАПАЗВА досегашното
-  // си поведение (каскадата) — редовете на target-а се премахват изрично.
-  const deleteReportsByTargetStatement = database.prepare(`
-    DELETE FROM topic_reports WHERE reporter_profile_id = ?;
-  `)
-  const deleteParticipationBlocksByTargetActorStatement = database.prepare(`
-    DELETE FROM tournament_participation_blocks WHERE actor_profile_id = ?;
-  `)
-
-  // chat_conversation_reads (profile_id, friendship_id) НЯМА FOREIGN KEY изобщо
-  // (виж 20260520_001 migration-а) — за разлика от friend_chat_messages/
-  // friend_chat_attachments (ON DELETE CASCADE през profile_friendships),
-  // read-marker редовете преживяват DELETE FROM profiles/profile_friendships
-  // непокътнати, orphaned. Два отделни случая тук:
-  //  1) profile_id = target — собствените read-marker редове на target профила
-  //     (за ВСЕКИ негов friendship_id, независимо дали target е requester или
-  //     addressee там).
-  //  2) friendship_id IN (target-овите friendships) — read-marker редовете на
-  //     ДРУГАТА страна от разговора, за друг profile_id, но за friendship_id,
-  //     който тъкмо изчезва cascade-но заедно с target профила.
-  // Нарочно БЕЗ status филтър — обхваща еднакво 'accepted' и 'removed'
-  // (retained) redовете, като selectProfileAttachmentFilenamesStatement
-  // по-горе — hard delete е immediate, не чака retention deadline-а.
-  const deleteProfileChatReadsStatement = database.prepare(`
-    DELETE FROM chat_conversation_reads
-    WHERE profile_id = ?
-      OR friendship_id IN (
-        SELECT friendship_id FROM profile_friendships
-        WHERE requester_profile_id = ? OR addressee_profile_id = ?
-      );
-  `)
-
-  // Deletion-intent за attachment файловете на ВСИЧКИ лични разговори на
-  // target профила, ПРЕДИ deleteProfileStatement по-долу — profiles ->
-  // profile_friendships -> friend_chat_messages -> friend_chat_attachments
-  // е ON DELETE CASCADE (виж migrations), затова DB редовете иначе биха
-  // изчезнали БЕЗ да enqueue-нат storage_filename за физическо изтриване
-  // (същия проблем и fix pattern като chatStore.ts's
-  // selectPrunedAttachmentFilenamesStatement / friendshipStore.ts's
-  // selectFriendshipAttachmentFilenamesStatement при unfriend).
-  //
-  // Нарочно БЕЗ status филтър тук — обхваща еднакво 'accepted' (active) И
-  // 'removed' (unfriended, still-in-90-day-retention) redовете (виж 90-дневния
-  // retention модел в friendshipStore.ts). Profile hard delete е immediate
-  // destructive cleanup, който НЕ чака retention deadline-а — DELETE FROM
-  // profiles по-долу каскадно трие profile_friendships независимо от status.
-  const selectProfileAttachmentFilenamesStatement = database.prepare(`
-    SELECT a.storage_filename
-    FROM friend_chat_attachments a
-    JOIN friend_chat_messages m ON m.message_id = a.message_id
-    JOIN profile_friendships f ON f.friendship_id = m.friendship_id
-    WHERE f.requester_profile_id = ? OR f.addressee_profile_id = ?;
-  `)
-
-  const insertAttachmentDeletionStatement = database.prepare(`
-    INSERT INTO friend_chat_attachment_deletions (storage_filename)
-    VALUES (?);
-  `)
-
-  // Етап 4F1: deleted_at може да бъде подаден (restore replay запазва
-  // оригиналния момент от регистъра); NULL -> CURRENT_TIMESTAMP както досега.
-  const insertDeletionAuditStatement = database.prepare(`
-    INSERT INTO admin_profile_deletions (
-      log_id, deleted_profile_id, deleted_account_id, username_snapshot,
-      deleted_by_profile_id, reason, deleted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP));
-  `)
-  const selectActorProfileExistsStatement = database.prepare(`
-    SELECT 1 FROM profiles WHERE profile_id = ? LIMIT 1;
-  `)
-
-  // support_messages/support_archived нямат FK към profiles (виж
-  // 20260903_003 migration коментара) — DELETE FROM profiles не ги пипа
-  // изобщо, разговорът просто остава orphaned БЕЗ маркер, че профилът е
-  // изтрит.
-  //
-  // EXPLICIT ATTRIBUTION ONLY (round 2 корекция) — support_deletion_archives
-  // ред се създава ЕДИНСТВЕНО когато admin изрично е избрал конкретно
-  // user-authored съобщение ("Изтрий профила по тази заявка" бутон в
-  // support chat UI-я), НЕ automatic "последно съобщение в разговора"
-  // (предишен design, отхвърлен — несвързан стар support разговор би могъл
-  // подвеждащо да изглежда като доказателство за user-initiated delete,
-  // дори когато admin-ът трие профила по съвсем друга причина). Клиентът
-  // подава supportRequestMessageId като arbitrary string — hard-delete
-  // service-ът е authoritative и ГО validate-ва тук, ВЪТРЕ в транзакцията,
-  // срещу самата profiles/support_messages истина (не приема client claim
-  // на доверие):
-  //   1. съобщението съществува;
-  //   2. message.profile_id === target profile_id (не чуждо съобщение);
-  //   3. is_from_admin = 0 (user-authored, не admin reply);
-  // Ако валидацията се провали, целият hard delete се отказва (ROLLBACK,
-  // без partial archive, без profile deletion) — виж hardDeleteProfile.
-  const selectSupportRequestMessageForValidationStatement = database.prepare(`
-    SELECT message_id, profile_id, is_from_admin, created_at FROM support_messages
-    WHERE message_id = ?
-    LIMIT 1;
-  `)
-
-  const insertSupportDeletionArchiveStatement = database.prepare(`
-    INSERT INTO support_deletion_archives (
-      archive_id, profile_id, username_snapshot, display_name_snapshot,
-      request_message_id, requested_at, deleted_by_profile_id, reason, deleted_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP));
-  `)
-
-  // Immutable identity snapshot — попълва се ПРЕДИ DELETE FROM profiles, за
-  // да остане "този ban/турнир/entry е бил на deleted profile UUID X"
-  // reconstructable дори след като cascade-ът нулира живата FK колона.
-  const snapshotProfileBansStatement = database.prepare(`
-    UPDATE profile_bans
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotTournamentsCreatorStatement = database.prepare(`
-    UPDATE tournaments
-    SET deleted_creator_profile_id_snapshot = ?
-    WHERE creator_profile_id = ?;
-  `)
-
-  const snapshotTournamentEntriesStatement = database.prepare(`
-    UPDATE tournament_entries
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  // tournament_economy_ledger.profile_id беше SET NULL от 20260730_002, но
-  // табличният CHECK constraint реално НИКОГА не е позволявал NULL за
-  // не-system_fee редове (latent bug, виж 20260902_003 migration коментара)
-  // — снапваме ПРЕДИ delete-а, за да satisfy-нем поправения CHECK
-  // (profile_id IS NULL е валиден само когато deleted_profile_id_snapshot
-  // IS NOT NULL).
-  const snapshotTournamentEconomyLedgerStatement = database.prepare(`
-    UPDATE tournament_economy_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  // Financial/game-history immutable attribution (round 2 §2) — mirror на
-  // profile_bans/tournaments pattern-а по-горе, за всяка от 8-те таблици,
-  // конвертирани към SET NULL в 20260902_002. yellow_coin_gift_ledger има
-  // ДВЕ независими snapshot колони (sender/recipient) — target профилът
-  // може да е замесен като изпращач, получател, или и двете (различни
-  // gift транзакции), затова двата UPDATE-а изпълняват независимо.
-  const snapshotGiftLedgerSenderStatement = database.prepare(`
-    UPDATE yellow_coin_gift_ledger
-    SET deleted_sender_profile_id_snapshot = ?
-    WHERE sender_profile_id = ?;
-  `)
-
-  const snapshotGiftLedgerRecipientStatement = database.prepare(`
-    UPDATE yellow_coin_gift_ledger
-    SET deleted_recipient_profile_id_snapshot = ?
-    WHERE recipient_profile_id = ?;
-  `)
-
-  const snapshotMatchEconomyLedgerStatement = database.prepare(`
-    UPDATE match_economy_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotCoinPurchaseLedgerStatement = database.prepare(`
-    UPDATE coin_purchase_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotProfileNameChangeLedgerStatement = database.prepare(`
-    UPDATE profile_name_change_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotVipGrantsStatement = database.prepare(`
-    UPDATE vip_grants
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotVipPurchaseLedgerStatement = database.prepare(`
-    UPDATE vip_purchase_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  // 20260923_004 — bundle_purchase_ledger PAYER snapshot, mirror ТОЧНО на
-  // coin/vip statement-ите по-горе (виж migration коментара за пълния
-  // rationale защо тази таблица не беше включена в оригиналния 20260902_002
-  // sweep). recipient-side snapshot (deleted_recipient_profile_id_snapshot)
-  // НЕ се пипа тук — това е ОТДЕЛЕН FK/атрибуция от payer-а (Paid Gift Shop,
-  // 20260923_002).
-  const snapshotBundlePurchaseLedgerStatement = database.prepare(`
-    UPDATE bundle_purchase_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotTableExitPenaltiesStatement = database.prepare(`
-    UPDATE table_exit_penalties
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  const snapshotProfileMatchResultsStatement = database.prepare(`
-    UPDATE profile_match_results
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  // Фаза 6.2 — belot_match_completion_ledger mirror-ва profile_match_results's
-  // "historical game results" категория (виж 20261016_001_create_belot_match_completion_ledger.sql
-  // doc коментара) — forensic-reconstructable дори след hard delete.
-  const snapshotBelotMatchCompletionLedgerStatement = database.prepare(`
-    UPDATE belot_match_completion_ledger
-    SET deleted_profile_id_snapshot = ?
-    WHERE profile_id = ?;
-  `)
-
-  // Forensic visitor snapshot (blocker round 2 корекция, spec: "deleted_profile_id
-  // -> anonymous_visitor_id -> IP history / first_seen / last_seen / event_count").
-  // Директен източник е site_visit_events.profile_id, НЕ site_visitors.first/
-  // last_profile_id — site_visitors пази само first/last owner за ЦЕЛИЯ
-  // visitor живот, затова "A -> TARGET -> B" сценарий (TARGET нито е first,
-  // нито last owner на visitor V) би пропуснал TARGET изцяло, въпреки реални
-  // TARGET events в site_visit_events. Query план (verified с EXPLAIN QUERY
-  // PLAN): SEARCH site_visit_events USING INDEX idx_site_visit_events_profile_time
-  // (profile_id=?) — вече съществуващ индекс, НЕ добавяме нов върху тази
-  // high-write таблица (rare admin operation, bounded по единичния
-  // profile_id, никакъв постоянен gameplay write overhead). GROUP BY минава
-  // през temp B-tree, но обемът е bounded до events-ите САМО на този profile,
-  // не целия table scan.
-  //
-  // COALESCE(ip_address, '') в GROUP BY — SQL NULL никога не се счита равен
-  // на друг NULL, затова без coalesce множество събития без captured IP
-  // биха създали дублирани редове вместо да се агрегират в един.
-  //
-  // Фаза 2: snapshot-ът остава НЕПРОМЕНЕН (raw източник, (visitor, IP)
-  // гранулярност, която compact таблиците нямат) — покрива raw retention
-  // прозореца към момента на изтриване. Дългосрочната история е в compact
-  // profile_visitor_links/profile_ip_links: без FK → hard delete НЕ ги
-  // cascade-ва, редовете на изтрития профил остават непроменени. Умишлено НЕ
-  // копираме compact редове в snapshot-а — backfillProfileVisitLinks merge-ва
-  // snapshot-а обратно в compact с max(event_count), а смесен източник би
-  // дал двойно броене.
-  const selectVisitorAggregatesForProfileStatement = database.prepare(`
-    SELECT
-      anonymous_visitor_id,
-      ip_address,
-      MIN(occurred_at) as first_seen_at,
-      MAX(occurred_at) as last_seen_at,
-      COUNT(*) as event_count
-    FROM site_visit_events
-    WHERE profile_id = ?
-    GROUP BY anonymous_visitor_id, COALESCE(ip_address, '');
-  `)
-
-  const insertVisitorSnapshotStatement = database.prepare(`
-    INSERT INTO admin_profile_deletion_visitor_snapshots (
-      snapshot_id, deleted_profile_id, anonymous_visitor_id,
-      ip_address, first_seen_at, last_seen_at, event_count
-    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT (deleted_profile_id, anonymous_visitor_id, ip_address) DO UPDATE SET
-      first_seen_at = excluded.first_seen_at,
-      last_seen_at = excluded.last_seen_at,
-      event_count = excluded.event_count;
-  `)
-
-  // Targeted risk-cache invalidation (production bug fix — hard delete
-  // променя topology-то на linked group-ата, но cache редовете на
-  // останалите linked profiles не бяха invalidated). Фаза 2: чете от
-  // compact profile_visitor_links — СЪЩИЯ източник, от който
-  // adminProfileRiskStore вече строи linked групата (вкл. връзки, по-стари
-  // от raw retention прозореца); иначе partner, свързан само чрез стара
-  // история, би останал с stale check_complete=1.
-  const linkReader = createProfileVisitLinkReader(database)
-
-  // Avatar/gallery physical file cleanup (production gap fix) — profiles.
-  // avatar_url вече е прочетен през selectProfileForDeleteStatement.
-  // profile_gallery_images.image_url/thumbnail_url трябва да се прочетат
-  // ТУК, ПРЕДИ DELETE FROM profiles по-долу — редовете са ON DELETE CASCADE
-  // (виж 20260510_004 migration-а), затова физически изчезват от DB веднага
-  // след delete-а (правилно за DB attribution), но ако не сме прочели
-  // image_url стойностите преди това, губим единствения source за кои
-  // физически файлове да unlink-нем.
-  const selectGalleryImageUrlsForProfileStatement = database.prepare(`
-    SELECT image_url, thumbnail_url
-    FROM profile_gallery_images
-    WHERE profile_id = ?;
-  `)
-
-  // Shared-avatar safety — avatar uploads живеят в ЕДНА flat директория
-  // (AVATAR_UPLOADS_PATH), споделена между ВСИЧКИ профили (за разлика от
-  // gallery, което е per-profile subdirectory и структурно не може да
-  // колизира между профили). Няма UNIQUE constraint върху profiles.avatar_url
-  // — ако друг CURRENT профил случайно/бъдещо реферира СЪЩИЯ URL, unlink на
-  // target-овия avatar би счупил чужд, все още жив avatar. profile_id != ?
-  // изключва target-а самия (по дизайн винаги "споделя" URL-а със себе си).
-  // Няма индекс върху avatar_url — рядка admin операция, table scan е ОК.
-  const selectOtherProfileUsingAvatarUrlStatement = database.prepare(`
-    SELECT profile_id
-    FROM profiles
-    WHERE avatar_url = ?
-      AND profile_id != ?
-    LIMIT 1;
-  `)
-
-  // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
-  // snapshot-ва активен Topics/Лафче mute ПРЕДИ DELETE FROM profiles по-долу
-  // (topic_section_mutes е ON DELETE CASCADE — редът изчезва напълно,
-  // munted_until-ът трябва да се прочете, докато still съществува). "Активен"
-  // тук means muted_until > CURRENT_TIMESTAMP В МОМЕНТА на изтриването —
-  // same read-time semantics като topicModerationStore.ts's
-  // isProfileMutedInTopicsSection, само snapshot-нат еднократно.
-  const selectActiveTopicsMuteForProfileStatement = database.prepare(`
-    SELECT muted_until
-    FROM topic_section_mutes
-    WHERE profile_id = ?
-      AND muted_until > CURRENT_TIMESTAMP
-    LIMIT 1;
-  `)
-
-  const insertModerationSnapshotStatement = database.prepare(`
-    INSERT INTO admin_profile_deletion_moderation_snapshots (
-      deleted_profile_id, active_topics_mute_until
-    ) VALUES (?, ?)
-    ON CONFLICT (deleted_profile_id) DO UPDATE SET
-      active_topics_mute_until = excluded.active_topics_mute_until;
-  `)
-
-  const deleteProfileStatement = database.prepare(`
-    DELETE FROM profiles WHERE profile_id = ?;
-  `)
-
-  const deleteAccountStatement = database.prepare(`
-    DELETE FROM accounts WHERE account_id = ?;
-  `)
-
-  // Registration anti-evasion gate (hard-delete evasion fix, mute case) —
-  // виж selectActiveTopicsMuteForProfileStatement/insertModerationSnapshotStatement
-  // doc коментарите по-горе. No-op, ако профилът няма активен mute в момента
-  // на delete-а (clean-откъм-Topics профил не получава ред тук изобщо).
-  function captureModerationSnapshot(profileId: string): void {
-    const row = selectActiveTopicsMuteForProfileStatement.get(profileId) as { muted_until: string } | undefined
-    if (row === undefined) {
-      return
-    }
-    insertModerationSnapshotStatement.run(profileId, row.muted_until)
-  }
-
-  function captureVisitorForensicSnapshot(profileId: string): void {
-    const rows = selectVisitorAggregatesForProfileStatement.all(profileId) as Array<{
-      anonymous_visitor_id: string
-      ip_address: string | null
-      first_seen_at: string
-      last_seen_at: string
-      event_count: number
-    }>
-
-    for (const row of rows) {
-      insertVisitorSnapshotStatement.run(
-        randomUUID(),
+  /** Файловата фаза на една операция: обработка на готовите редове + приключване при нужда. */
+  async function runAdminFileCleanup(operationId: string, profileId: string, summary: AdminFileCleanupRunSummary): Promise<void> {
+    const roots = fileCleanup.uploadRoots
+    if (roots !== undefined) {
+      const result = await processQueuedProfileDeletionFiles(
+        { executor, workerId, uploadRoots: roots, removeFile },
+        executor.listAdminFilesToProcess(operationId),
         profileId,
-        row.anonymous_visitor_id,
-        row.ip_address,
-        row.first_seen_at,
-        row.last_seen_at,
-        row.event_count,
       )
+      summary.filesDeleted += result.deleted
+      summary.filesSkippedShared += result.skippedShared
+      summary.filesFailed += result.failed
+    }
+    const finished = executor.finishAdminFileCleanup(operationId)
+    if (finished.kind === 'done') {
+      summary.completed += 1
+    } else if (finished.kind === 'files_pending' && !finished.willRetry) {
+      // Постоянен отказ (напр. опасен път/symlink) — ръчна проверка; без файлови пътища в лога.
+      console.error(`[admin-profile-delete] file_cleanup_stuck operationId=${operationId}`)
     }
   }
 
-  /**
-   * Targeted invalidation (spec: НЕ global scan) на risk cache редове за
-   * останалите CURRENT profiles, споделящи поне един от target-овите
-   * visitor ids — извиква се ПРЕДИ deleteProfileStatement.run() по-долу
-   * (target-ът е още CURRENT, затова reader-ът го вижда). И двете стъпки
-   * са reader-ските заявки на adminProfileRiskStore (PK / idx_profile_
-   * visitor_links_visitor) — bounded само към target-овите visitor ids, не
-   * whole-table scan. JOIN към profiles гарантира "CURRENT profiles".
-   *
-   * Само маркира check_complete=0 — НЕ пипа linked_profiles_count тук.
-   * Existing lazy list flow (computeAndCacheRiskForProfiles) прави пълен
-   * recompute самò когато affected профилът реално попадне в admin list
-   * (Днес/Вчера/Всички), точно както при обикновен "нов linked partner"
-   * discovery. Профил без съществуващ cache ред просто не се засяга от
-   * UPDATE-а — няма какво да се invalidate-ва.
-   */
-  function invalidateAffectedRiskCache(targetProfileId: string): void {
-    const visitorIds = [...(linkReader.findVisitorIdsForProfiles([targetProfileId]).get(targetProfileId) ?? [])]
-    if (visitorIds.length === 0) return
-
-    const affectedProfileIdSet = new Set<string>()
-    for (const profileIds of linkReader.findProfilesForVisitorIds(visitorIds).values()) {
-      for (const profileId of profileIds) {
-        if (profileId !== targetProfileId) affectedProfileIdSet.add(profileId)
-      }
-    }
-
-    if (affectedProfileIdSet.size === 0) return
-
-    const affectedProfileIds = [...affectedProfileIdSet]
-    const affectedPlaceholders = affectedProfileIds.map(() => '?').join(', ')
-
-    database.prepare(`
-      UPDATE admin_profile_risk_checks
-      SET check_complete = 0
-      WHERE profile_id IN (${affectedPlaceholders});
-    `).run(...affectedProfileIds)
-  }
-
-  /**
-   * true, ако СЪЩИЯТ avatarUrl все още е реферира от друг (различен от
-   * excludeProfileId) CURRENT профил — извиква се ПРЕДИ delete-а, докато
-   * target-овият собствен ред все още съществува (изключен explicit по
-   * profile_id, не разчита на реда вече да е трит).
-   */
-  function isAvatarUrlSharedWithAnotherProfile(avatarUrl: string, excludeProfileId: string): boolean {
-    return selectOtherProfileUsingAvatarUrlStatement.get(avatarUrl, excludeProfileId) !== undefined
-  }
-
-  /**
-   * Canonical list на target-овите upload-ed (НЕ default preset) файлове —
-   * извикано ПРЕДИ deleteProfileStatement.run(), докато profile_gallery_images
-   * редовете още не са cascade-delete-нати. avatar_url може да е default
-   * preset (`/assets/avatars/...`, client-side static asset — НЕ живее под
-   * server upload директориите) или реален upload (`/uploads/avatars/...`)
-   * — не филтрираме тук explicit по префикс, защото fileCleanup.deleteUploadFileByUrl
-   * вече прави точно тази проверка (no-op за всичко извън `/uploads/`).
-   * Avatar-ът допълнително се пропуска, ако друг CURRENT профил го споделя
-   * (виж isAvatarUrlSharedWithAnotherProfile) — gallery images НЯМАТ такава
-   * проверка, защото живеят в per-profile subdirectory (структурно
-   * unshareable между профили). Set дедупликира в случай
-   * image_url===thumbnail_url (винаги е така в текущия upload flow, но
-   * schema-та технически позволява различни стойности).
-   */
-  function collectUploadedFileUrlsForProfile(profileId: string, avatarUrl: string | null): string[] {
-    const urls = new Set<string>()
-
-    if (
-      avatarUrl !== null &&
-      avatarUrl.trim().length > 0 &&
-      !isAvatarUrlSharedWithAnotherProfile(avatarUrl, profileId)
-    ) {
-      urls.add(avatarUrl)
-    }
-
-    const galleryRows = selectGalleryImageUrlsForProfileStatement.all(profileId) as Array<{
-      image_url: string
-      thumbnail_url: string
-    }>
-    for (const row of galleryRows) {
-      urls.add(row.image_url)
-      urls.add(row.thumbnail_url)
-    }
-
-    return [...urls]
-  }
-
-  /**
-   * Физическият unlink се await-ва ТУК, best-effort, СЛЕД успешен COMMIT
-   * (виж call site-а в hardDeleteProfile, НАРОЧНО извън transaction
-   * try/catch-а) — SQLite транзакция не може да rollback-не filesystem
-   * unlink, а commit-ът вече е необратим success в тази точка, затова целта
-   * е "когато hardDeleteProfile() приключи, всички възможни filesystem
-   * delete attempts вече да са изпълнени", НЕ fire-and-forget. Best-effort
-   * остава best-effort на per-file ниво (не общо): missing file (ENOENT) и
-   * реална fs грешка се обработват вътре в deleteUploadFileByUrl самия
-   * (ENOENT тихо success, реална грешка логната веднъж, никога не се крие);
-   * fileCleanup.deleteUploadFileByUrl по договор никога не reject-ва,
-   * затова Promise.all тук не може да хвърли — call site-ът все пак пази
-   * defensive try/catch (виж коментара там), за да не превърне евентуална
-   * бъдеща промяна в contract-а в подвеждащ "delete failed" за профил, вече
-   * физически изтрит от DB.
-   */
-  async function deleteUploadedFilesBestEffort(urls: string[]): Promise<void> {
-    if (urls.length === 0) return
-    await Promise.all(urls.map((url) => fileCleanup.deleteUploadFileByUrl(url)))
-  }
-
-  function hasActiveTournamentDependency(profileId: ProfileId): boolean {
-    const tournamentDependency = selectActiveTournamentDependencyStatement.get(
-      profileId,
-      ...ACTIVE_TOURNAMENT_STATUSES,
-    )
-    if (tournamentDependency !== undefined) {
-      return true
-    }
-
-    const entryDependency = selectActiveEntryDependencyStatement.get(
-      profileId,
-      ...ACTIVE_ENTRY_STATUSES,
-      ...ACTIVE_TOURNAMENT_STATUSES,
-    )
-    return entryDependency !== undefined
-  }
-
-  function hasCampaignGiftSenderHistory(profileId: ProfileId): boolean {
-    return selectCampaignGiftSenderHistoryStatement.get(profileId) !== undefined
-  }
-
-  function findDeletedProfileIdsForVisitorId(visitorId: string): ProfileId[] {
-    const rows = selectDeletedProfileIdsForVisitorIdStatement.all(visitorId, visitorId) as Array<{ deleted_profile_id: string }>
-    return rows.map((row) => row.deleted_profile_id)
-  }
-
-  function findDeletedProfileIdsForIp(ipAddress: string): ProfileId[] {
-    const rows = selectDeletedProfileIdsForIpStatement.all(ipAddress, ipAddress) as Array<{ deleted_profile_id: string }>
-    return rows.map((row) => row.deleted_profile_id)
-  }
-
-  function hasActiveMuteSnapshotForDeletedProfile(deletedProfileId: ProfileId): boolean {
-    return selectActiveMuteSnapshotForDeletedProfileStatement.get(deletedProfileId) !== undefined
-  }
-
-  async function hardDeleteProfile(input: {
-    targetProfileId: ProfileId
-    actorProfileId: ProfileId
-    actorAccountId: string
-    reason: string
-    supportRequestMessageId?: string | null
-    /**
-     * Етап 4F1 — log_id на одитния ред = operationId в регистъра на
-     * изтриванията (иначе нов UUID, както досега).
-     */
-    auditLogId?: string
-    /**
-     * Етап 4F1 — повторно прилагане след restore на вече ЗАВЪРШЕНО
-     * административно изтриване: оригиналният момент (SQLite datetime);
-     * липсващ актьор -> NULL; support заявка, която я няма във
-     * възстановеното копие -> без архивен ред (вместо отказ). Всички други
-     * защити (турнир, кампанийни награди, тригери) остават.
-     */
-    replay?: { deletedAt: string }
-  }): Promise<HardDeleteProfileResult> {
-    if (input.targetProfileId === input.actorProfileId) {
-      return { ok: false, code: 'self' }
-    }
-
-    const reason = input.reason.trim()
-    if (reason.length === 0 || reason.length > MAX_REASON_LENGTH) {
-      return { ok: false, code: 'invalid_reason' }
-    }
-
-    // Попълва се само по success-пътя вътре в try-а по-долу, ПРЕДИ COMMIT —
-    // всеки друг път (not_found/self/active_tournament_dependency) връща
-    // директно ОТВЪТРЕ try-а, затова кодът СЛЕД try/catch-а долу се
-    // изпълнява само когато committedResult реално е зададен.
-    let committedResult: { deletedProfileId: string; deletedAccountId: string | null } | null = null
-    let uploadedFileUrlsToDelete: string[] = []
-
-    database.exec('BEGIN IMMEDIATE;')
-    try {
-      const profileRow = selectProfileForDeleteStatement.get(input.targetProfileId) as
-        | { profile_id: string; account_id: string | null; display_name: string; username: string | null; avatar_url: string | null }
-        | undefined
-
-      if (profileRow === undefined) {
-        database.exec('ROLLBACK;')
-        return { ok: false, code: 'not_found' }
-      }
-
-      // Defense-in-depth self-check вътре в транзакцията — mirror на
-      // topicHardDeleteService-ия "guard-вай authoritative вътре в самия
-      // primitive, не само upstream" convention.
-      if (profileRow.profile_id === input.actorProfileId) {
-        database.exec('ROLLBACK;')
-        return { ok: false, code: 'self' }
-      }
-
-      // Active tournament dependency guard (spec §2A) — re-checked вътре в
-      // транзакцията (BEGIN IMMEDIATE вече е взел writer lock-а), race-safe
-      // спрямо конкурентен join/start/settle. Отказваме delete-а изцяло,
-      // вместо да импровизираме auto-cancel/refund логика тук. Reuse-ва
-      // СЪЩАТА hasActiveTournamentDependency функция като публичния
-      // pre-check по-горе — единствен source на тази SQL логика.
-      if (hasActiveTournamentDependency(profileRow.profile_id)) {
-        database.exec('ROLLBACK;')
-        return { ok: false, code: 'active_tournament_dependency' }
-      }
-
-      // Фаза 2.1 — campaign gift sender protection (re-checked authoritative
-      // вътре в транзакцията, race-safe спрямо конкурентно начисляване на
-      // нова кампанийна награда от същия подател между upstream pre-check-а
-      // и реалното изпълнение тук). Отказваме delete-а изцяло — никаква
-      // snapshot/partial логика, профилът остава напълно непипнат.
-      if (hasCampaignGiftSenderHistory(profileRow.profile_id)) {
-        database.exec('ROLLBACK;')
-        return { ok: false, code: 'campaign_gift_sender_protected' }
-      }
-
-      // Support deletion archive — EXPLICIT ATTRIBUTION ONLY (виж primitive-ия
-      // doc коментар по-горе). supportRequestMessageId идва от клиента като
-      // arbitrary string — authoritative validation ТУК, вътре в транзакцията,
-      // срещу самата support_messages истина, преди какъвто и да е destructive
-      // ред по-долу. Провал на КОЯТО и да е проверка отказва ЦЕЛИЯ delete
-      // (ROLLBACK, без partial archive, без profile deletion) — не деградира
-      // тихо до "просто без archive".
-      let validatedSupportRequestMessage: { message_id: string; created_at: string } | null = null
-      if (input.supportRequestMessageId != null && input.supportRequestMessageId !== '') {
-        const messageRow = selectSupportRequestMessageForValidationStatement.get(
-          input.supportRequestMessageId,
-        ) as
-          | { message_id: string; profile_id: string; is_from_admin: number; created_at: string }
-          | undefined
-
-        const isValid =
-          messageRow !== undefined &&
-          messageRow.profile_id === profileRow.profile_id && // (2) принадлежи на target profile
-          messageRow.is_from_admin === 0 // (3) user-authored, не admin reply
-
-        if (!isValid && input.replay === undefined) {
-          database.exec('ROLLBACK;')
-          return { ok: false, code: 'invalid_support_request_message' }
-        }
-
-        validatedSupportRequestMessage = isValid ? { message_id: messageRow.message_id, created_at: messageRow.created_at } : null
-      }
-
-      // Етап 4F1 (replay): актьорът може да липсва във възстановеното копие.
-      const auditActorProfileId = input.replay !== undefined && selectActorProfileExistsStatement.get(input.actorProfileId) === undefined
-        ? null
-        : input.actorProfileId
-      const auditDeletedAt = input.replay?.deletedAt ?? null
-
-      const usernameSnapshot = profileRow.username?.trim() || profileRow.display_name
-
-      // Audit редът се пише ПРЕДИ destructive delete-а, в СЪЩАТА транзакция
-      // (spec §9) — deleted_profile_id/deleted_account_id нямат FK (виж
-      // migration коментара), затова физически преживяват DELETE-ите по-долу
-      // непокътнати, дори ако delete-ът се провали и rollback-не, audit
-      // insert-ът се rollback-ва заедно с него (atomic "или всичко, или нищо").
-      insertDeletionAuditStatement.run(
-        input.auditLogId ?? randomUUID(),
-        profileRow.profile_id,
-        profileRow.account_id,
-        usernameSnapshot,
-        auditActorProfileId,
-        reason,
-        auditDeletedAt,
-      )
-
-      // Support chat evidence preservation (spec §A/§B) — archive редът се
-      // пише ЕДИНСТВЕНО когато supportRequestMessageId е бил подаден И
-      // валидиран по-горе (validatedSupportRequestMessage !== null).
-      // support_messages няма FK към profiles (виж 20260903_003 migration
-      // коментара), затова редовете физически преживяват DELETE FROM
-      // profiles по-долу без никаква промяна — archive редът тук е
-      // ЕДИНСТВЕНО marker+snapshot (кой профил е бил, кое КОНКРЕТНО user
-      // съобщение е поискало изтриването, кога е изпълнено), НЕ copy на
-      // самите съобщения (spec §E "минимален архив"). Нормален admin
-      // hard-delete БЕЗ supportRequestMessageId НЕ създава archive ред тук
-      // изобщо, дори ако профилът има support история — избягва подвеждащо
-      // representation на несвързан разговор като "user request" evidence.
-      if (validatedSupportRequestMessage !== null) {
-        insertSupportDeletionArchiveStatement.run(
-          randomUUID(),
-          profileRow.profile_id,
-          usernameSnapshot,
-          profileRow.display_name,
-          validatedSupportRequestMessage.message_id,
-          validatedSupportRequestMessage.created_at,
-          auditActorProfileId,
-          reason,
-          auditDeletedAt,
-        )
-      }
-
-      // Immutable identity snapshot — ПРЕДИ DELETE FROM profiles (виж
-      // primitive-ия doc коментар по-горе).
-      snapshotProfileBansStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotTournamentsCreatorStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotTournamentEntriesStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotTournamentEconomyLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotGiftLedgerSenderStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotGiftLedgerRecipientStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotMatchEconomyLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotCoinPurchaseLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotProfileNameChangeLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotVipGrantsStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotVipPurchaseLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotBundlePurchaseLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotTableExitPenaltiesStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotProfileMatchResultsStatement.run(profileRow.profile_id, profileRow.profile_id)
-      snapshotBelotMatchCompletionLedgerStatement.run(profileRow.profile_id, profileRow.profile_id)
-      captureVisitorForensicSnapshot(profileRow.profile_id)
-      // Виж captureModerationSnapshot doc коментара — трябва да се изпълни
-      // ПРЕДИ deleteProfileStatement.run() по-долу (topic_section_mutes
-      // редът все още съществува в тази точка, ще бъде CASCADE-нат заедно
-      // с profiles реда).
-      captureModerationSnapshot(profileRow.profile_id)
-
-      // Виж invalidateAffectedRiskCache doc коментара — трябва да се
-      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (target-ът още е
-      // CURRENT профил в тази точка).
-      invalidateAffectedRiskCache(profileRow.profile_id)
-
-      // Виж collectUploadedFileUrlsForProfile doc коментара — трябва да се
-      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (profile_gallery_images
-      // редовете още не са cascade-delete-нати в тази точка).
-      uploadedFileUrlsToDelete = collectUploadedFileUrlsForProfile(
-        profileRow.profile_id,
-        profileRow.avatar_url,
-      )
-
-      // Таблици без FK към profiles — cascade НЯМА да ги пипне, чистим ръчно
-      // за да няма orphan rows (spec §8/§11).
-      deletePlayerBlocksStatement.run(input.targetProfileId, input.targetProfileId)
-      deleteGiftDeliveryLogForRecipientStatement.run(input.targetProfileId)
-
-      // Виж selectProfileAttachmentFilenamesStatement doc коментара — трябва
-      // да се изпълни ПРЕДИ deleteProfileStatement.run() по-долу
-      // (friend_chat_attachments редовете още не са cascade-delete-нати в
-      // тази точка).
-      const profileAttachmentRows = selectProfileAttachmentFilenamesStatement.all(
-        input.targetProfileId,
-        input.targetProfileId,
-      ) as { storage_filename: string }[]
-
-      for (const attachmentRow of profileAttachmentRows) {
-        insertAttachmentDeletionStatement.run(attachmentRow.storage_filename)
-      }
-
-      // Виж deleteProfileChatReadsStatement doc коментара — трябва да се
-      // изпълни ПРЕДИ deleteProfileStatement.run() по-долу (profile_friendships
-      // редовете на target профила още не са cascade-delete-нати в тази точка,
-      // subquery-то разчита на тяхното присъствие).
-      deleteProfileChatReadsStatement.run(
-        input.targetProfileId,
-        input.targetProfileId,
-        input.targetProfileId,
-      )
-
-      // Етап 4E4 — оценките, дадени от target-а: премахват се (досегашното
-      // поведение), а кешът на засегнатите играчи се преизчислява.
-      const ratedProfileIdsJson = JSON.stringify(
-        (selectRatedProfilesByTargetStatement.all(input.targetProfileId) as Array<{ rated_profile_id: string }>)
-          .map((row) => row.rated_profile_id),
-      )
-      deleteRatingsGivenByTargetStatement.run(input.targetProfileId)
-      // Етап 4E6B — досегашното поведение за сигналите и блокировките на target-а.
-      deleteReportsByTargetStatement.run(input.targetProfileId)
-      deleteParticipationBlocksByTargetActorStatement.run(input.targetProfileId)
-
-      deleteProfileStatement.run(input.targetProfileId)
-
-      refreshRatingCacheStatement.run(ratedProfileIdsJson)
-
-      let deletedAccountId: string | null = null
-      if (profileRow.account_id !== null) {
-        const remainingProfilesForAccount = (
-          countProfilesForAccountStatement.get(profileRow.account_id) as { cnt: number }
-        ).cnt
-        // profiles.account_id няма UNIQUE constraint (spec §7: 1 акаунт : N
-        // профила) — акаунтът/email-ът се трие САМО ако профилът, който
-        // тъкмо изтрихме по-горе, е бил ЕДИНСТВЕНИЯТ, свързан с този акаунт.
-        // account_sessions каскадно изчезва с accounts (виж migration-а),
-        // затова не е нужен отделен DELETE тук.
-        if (remainingProfilesForAccount === 0) {
-          deleteAccountStatement.run(profileRow.account_id)
-          deletedAccountId = profileRow.account_id
-        }
-      }
-
-      database.exec('COMMIT;')
-
-      committedResult = { deletedProfileId: profileRow.profile_id, deletedAccountId }
-    } catch (error) {
+  async function hardDeleteProfile(input: Parameters<ProfileHardDeleteService['hardDeleteProfile']>[0]): Promise<HardDeleteProfileResult> {
+    const result = executor.executeAdminHardDelete(input)
+    if (!result.ok) return result
+    let filesPending = 0
+    if (result.enqueuedFileCount > 0) {
+      // DB COMMIT вече е необратим — грешка тук не прави изтриването "неуспешно";
+      // файловете остават в опашката за повторните опити.
       try {
-        database.exec('ROLLBACK;')
-      } catch {
-        // keep original error
+        const summary: AdminFileCleanupRunSummary = { operations: 1, completed: 0, filesDeleted: 0, filesSkippedShared: 0, filesFailed: 0 }
+        await runAdminFileCleanup(result.operationId, result.deletedProfileId, summary)
+        filesPending = summary.completed === 1 ? 0 : countPendingFiles(result.operationId)
+      } catch (error) {
+        console.error(`[admin-profile-delete] file_cleanup_failed operationId=${result.operationId}:`, error instanceof Error ? error.message : 'unknown error')
+        filesPending = countPendingFiles(result.operationId)
       }
-
-      // Фаза 2.1 defense-in-depth backstop — ако application-level
-      // проверката по-горе по някаква причина е пропусната/байпасната (напр.
-      // бъдещ код path, директен SQL), DB trigger-ът
-      // (20261013_001_protect_campaign_gift_sender_profiles.sql) все пак
-      // блокира самия DELETE FROM profiles statement с точно тоя RAISE
-      // текст. Превеждаме го в същия graceful резултат, вместо да позволим
-      // суров SQLite error да изтече навън — профилът вече е непипнат
-      // (ROLLBACK по-горе е върнал ЦЯЛАТА транзакция, вкл. всички snapshot
-      // UPDATE-и, в оригиналното й състояние).
-      if (error instanceof Error && error.message.includes(CAMPAIGN_GIFT_SENDER_PROTECTED_TRIGGER_MESSAGE)) {
-        return { ok: false, code: 'campaign_gift_sender_protected' }
-      }
-
-      throw error
     }
-
-    // Физическият cleanup стои НАРОЧНО извън transaction try/catch-а по-горе
-    // (виж deleteUploadedFilesBestEffort doc коментара) — DB commit-ът вече
-    // е необратим success в тази точка (committedResult е зададен само по
-    // success-пътя, всеки друг път вече е return-нал отвътре try-а по-горе).
-    // Defensive try/catch тук (не разчитаме единствено на
-    // deleteUploadFileByUrl's "никога не reject-ва" договор) — реална fs
-    // грешка се логва, но НИКОГА не прави hardDeleteProfile да throw-не/
-    // върне "not ok" за профил, вече физически изтрит от DB; НЕ опитваме
-    // ROLLBACK тук — commit-ът вече е committed, rollback след COMMIT е
-    // невалидна операция.
-    try {
-      await deleteUploadedFilesBestEffort(uploadedFileUrlsToDelete)
-    } catch (error) {
-      console.error(
-        `[profile-hard-delete] Physical file cleanup неуспешен profileId=${committedResult.deletedProfileId}:`,
-        error,
-      )
+    return {
+      ok: true,
+      deletedProfileId: result.deletedProfileId,
+      deletedAccountId: result.deletedAccountId,
+      operationId: result.operationId,
+      filesPending,
     }
-
-    return { ok: true, deletedProfileId: committedResult.deletedProfileId, deletedAccountId: committedResult.deletedAccountId }
   }
 
-  function close(): void {
-    database.close()
+  const countPendingFilesStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM profile_deletion_file_queue
+    WHERE admin_operation_id = ? AND status NOT IN ('done', 'skipped_shared');
+  `)
+
+  function countPendingFiles(operationId: string): number {
+    return (countPendingFilesStatement.get(operationId) as { cnt: number }).cnt
+  }
+
+  async function processPendingAdminFileCleanup(): Promise<AdminFileCleanupRunSummary> {
+    const summary: AdminFileCleanupRunSummary = { operations: 0, completed: 0, filesDeleted: 0, filesSkippedShared: 0, filesFailed: 0 }
+    for (const operation of executor.listAdminOperationsPendingFileCleanup()) {
+      summary.operations += 1
+      try {
+        await runAdminFileCleanup(operation.operationId, operation.profileId, summary)
+      } catch (error) {
+        console.error(`[admin-profile-delete] file_cleanup_failed operationId=${operation.operationId}:`, error instanceof Error ? error.message : 'unknown error')
+      }
+    }
+    return summary
   }
 
   return {
     hardDeleteProfile,
-    hasActiveTournamentDependency,
-    hasCampaignGiftSenderHistory,
-    findDeletedProfileIdsForVisitorId,
-    findDeletedProfileIdsForIp,
-    hasActiveMuteSnapshotForDeletedProfile,
-    close,
+    processPendingAdminFileCleanup,
+    hasActiveTournamentDependency: (profileId) => participationChecks.hasActiveTournamentDependency(profileId),
+    hasCampaignGiftSenderHistory: (profileId) => selectCampaignGiftSenderHistoryStatement.get(profileId) !== undefined,
+    findDeletedProfileIdsForVisitorId: (visitorId) =>
+      (selectDeletedProfileIdsForVisitorIdStatement.all(visitorId, visitorId) as Array<{ deleted_profile_id: string }>).map((row) => row.deleted_profile_id),
+    findDeletedProfileIdsForIp: (ipAddress) =>
+      (selectDeletedProfileIdsForIpStatement.all(ipAddress, ipAddress) as Array<{ deleted_profile_id: string }>).map((row) => row.deleted_profile_id),
+    hasActiveMuteSnapshotForDeletedProfile: (deletedProfileId) =>
+      selectActiveMuteSnapshotForDeletedProfileStatement.get(deletedProfileId) !== undefined,
+    close: () => {
+      executor.close()
+      database.close()
+    },
   }
 }

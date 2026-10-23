@@ -614,17 +614,19 @@ try {
     }
   })
 
-  console.log('\n[H] Административно изтриване (непроменено поведение)')
+  console.log('\n[H] Административно изтриване (Етап 4F2 — същите правила като самоизтриването)')
 
-  await check('[H1] Административно изтриване: сигналите и наложените турнирни блокировки на target-а се премахват (както преди миграцията)', async () => {
+  await check('[H1] Административно изтриване: неразгледаният сигнал за чуждо съдържание остава анонимен; наложената на друг блокировка остава без автор', async () => {
     const target = registerUser('AdminTarget')
     const report = modStore.createReport({ topicId: foreignTopic, reporterProfileId: target.profileId, reason: 'admin' })
     if (!report.ok) throw new Error('сигнал')
     const blockId = blockInTournament(createTournament(otherAuthor, 'finished'), bystander, target, 'player')
     const result = await hardDeleteService.hardDeleteProfile({ targetProfileId: target.profileId, actorProfileId: admin.profileId, actorAccountId: admin.accountId, reason: 'test' })
     assert(result.ok, JSON.stringify(result))
-    assertEqual(reportRow(report.report.reportId), undefined, 'сигналът')
-    assertEqual(blockRow(blockId), undefined, 'блокировката')
+    const reportAfter = reportRow(report.report.reportId)
+    assert(reportAfter !== undefined && reportAfter.reporter_profile_id === null && reportAfter.status === 'pending', `сигналът: ${JSON.stringify(reportAfter)}`)
+    const blockAfter = blockRow(blockId)
+    assert(blockAfter !== undefined && blockAfter.actor_profile_id === null && blockAfter.blocked_profile_id === bystander.profileId, `блокировката: ${JSON.stringify(blockAfter)}`)
     assertEqual((db.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length, 0, 'foreign_key_check')
   })
 

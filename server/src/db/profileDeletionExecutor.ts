@@ -127,7 +127,7 @@
 //     непроменени, кешът profiles.average_rating/total_ratings_count е
 //     преизчислен от таблицата, нищо не сочи към профила — иначе ROLLBACK.
 
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import type { ProfileDeletionFileKind } from '../uploads/profileDeletionFileRemoval.js'
 import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
 import { computeProfileDeletionRetryDelayMs } from './profileDeletionSchedule.js'
@@ -184,11 +184,44 @@ export type ProfileDeletionDbPhaseResult =
 
 export type ProfileDeletionQueuedFile = {
   queueId: number
-  requestId: string
+  /** Собственик: заявка за самоизтриване ИЛИ административна операция (20261031_001). */
+  requestId: string | null
+  adminOperationId: string | null
   fileKind: ProfileDeletionFileKind
   storageRef: string
   attemptCount: number
 }
+
+/** Етап 4F2 — вход на административното окончателно изтриване (mirror на hardDeleteProfile). */
+export type AdminHardDeleteInput = {
+  targetProfileId: string
+  actorProfileId: string
+  actorAccountId: string
+  reason: string
+  supportRequestMessageId?: string | null
+  /** log_id на одитния ред = operationId в регистъра (иначе нов UUID). */
+  auditLogId?: string
+  /** Повторно прилагане след restore: оригиналният момент (SQLite datetime). */
+  replay?: { deletedAt: string }
+}
+
+export type AdminHardDeleteResult =
+  | { ok: true; deletedProfileId: string; deletedAccountId: string | null; operationId: string; enqueuedFileCount: number }
+  | {
+      ok: false
+      code:
+        | 'not_found'
+        | 'self'
+        | 'invalid_reason'
+        | 'active_tournament_dependency'
+        | 'invalid_support_request_message'
+        | 'campaign_gift_sender_protected'
+    }
+
+export type AdminFileCleanupFinishResult =
+  | { kind: 'done' }
+  | { kind: 'files_pending'; willRetry: boolean }
+  | { kind: 'not_pending' }
 
 export type ProfileDeletionFinishResult =
   | { kind: 'completed' }
@@ -233,6 +266,18 @@ export type ProfileDeletionExecutor = {
    * идентичността и графикът не се променят (тригерите го гарантират).
    */
   prepareRequestForRestoreReconcile: (requestId: string) => boolean
+  /**
+   * Етап 4F2 — административното окончателно изтриване: административните
+   * проверки + одитен ред (file_cleanup_status='pending') + СЪЩОТО ядро
+   * (deleteProfileDataInTransaction) + СЪЩАТА файлова опашка (собственик
+   * admin_operation_id), в ЕДНА BEGIN IMMEDIATE транзакция.
+   */
+  executeAdminHardDelete: (input: AdminHardDeleteInput) => AdminHardDeleteResult
+  listAdminFilesToProcess: (operationId: string) => ProfileDeletionQueuedFile[]
+  /** Административни операции, чиято файлова фаза не е приключила (диагностика + повторни опити). */
+  listAdminOperationsPendingFileCleanup: () => Array<{ operationId: string; profileId: string }>
+  /** pending -> done, само ако всички файлове на операцията са done/skipped_shared (тригерът го гарантира). */
+  finishAdminFileCleanup: (operationId: string) => AdminFileCleanupFinishResult
   close: () => void
 }
 
@@ -240,7 +285,10 @@ export type ProfileDeletionExecutorOptions = {
   /** Профили, които никога не се изтриват автоматично (официалният профил на Pika). */
   protectedProfileIds?: readonly string[]
   /** Само за тестове: извиква се вътре в DB транзакцията точно преди COMMIT. */
-  testHooks?: { beforeDatabasePhaseCommit?: (requestId: string) => void }
+  testHooks?: {
+    beforeDatabasePhaseCommit?: (requestId: string) => void
+    beforeAdminCommit?: (operationId: string) => void
+  }
 }
 
 type ProfileRow = {
@@ -1043,6 +1091,79 @@ export async function createProfileDeletionExecutor(
   const countAccountProfilesStatement = database.prepare(`SELECT COUNT(*) AS cnt FROM profiles WHERE account_id = ?;`)
   const deleteAccountStatement = database.prepare(`DELETE FROM accounts WHERE account_id = ?;`)
 
+  // ─── Етап 4F2: административно окончателно изтриване ─────────────────────
+  // Разлики спрямо самоизтриването САМО в проверките и одита: без срок, без
+  // парола, без блокировките на самоизтриването (роля, активен бан, покани —
+  // активната игра се проверява от извикващия/координатора); собствени
+  // откази за незавършен турнир и кампаниен подател; одитен ред с log_id =
+  // operationId; support архив само при изрично валидирано съобщение.
+  // Реалното заличаване — същото ядро и същата опашка.
+  const ADMIN_DELETE_MAX_REASON_LENGTH = 2000
+  const selectAdminTargetStatement = database.prepare(`
+    SELECT profile_id, account_id, created_at, profile_kind, is_temporary, avatar_url, display_name, username
+    FROM profiles WHERE profile_id = ? LIMIT 1;
+  `)
+  const selectProfileExistsStatement = database.prepare(`SELECT 1 FROM profiles WHERE profile_id = ? LIMIT 1;`)
+  const selectSupportRequestMessageStatement = database.prepare(`
+    SELECT message_id, profile_id, is_from_admin, created_at FROM support_messages WHERE message_id = ? LIMIT 1;
+  `)
+  // Файловата фаза започва като 'pending' — insert guard-ът на опашката
+  // приема административни редове само за такъв одитен ред.
+  const insertAdminAuditStatement = database.prepare(`
+    INSERT INTO admin_profile_deletions (
+      log_id, deleted_profile_id, deleted_account_id, username_snapshot,
+      deleted_by_profile_id, reason, deleted_at, file_cleanup_status
+    ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), 'pending');
+  `)
+  const insertSupportDeletionArchiveStatement = database.prepare(`
+    INSERT INTO support_deletion_archives (
+      archive_id, profile_id, username_snapshot, display_name_snapshot,
+      request_message_id, requested_at, deleted_by_profile_id, reason, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP));
+  `)
+  // Минимален модераторски запис (само UUID + края на активното заглушаване) —
+  // досегашното административно поведение.
+  const selectActiveSectionMuteStatement = database.prepare(`
+    SELECT muted_until FROM topic_section_mutes
+    WHERE profile_id = ? AND muted_until > CURRENT_TIMESTAMP LIMIT 1;
+  `)
+  const insertModerationSnapshotStatement = database.prepare(`
+    INSERT INTO admin_profile_deletion_moderation_snapshots (deleted_profile_id, active_topics_mute_until)
+    VALUES (?, ?)
+    ON CONFLICT (deleted_profile_id) DO UPDATE SET active_topics_mute_until = excluded.active_topics_mute_until;
+  `)
+  const insertAdminFileStatement = database.prepare(`
+    INSERT OR IGNORE INTO profile_deletion_file_queue (admin_operation_id, file_kind, storage_ref) VALUES (?, ?, ?);
+  `)
+  const selectAdminFilesToProcessStatement = database.prepare(`
+    SELECT queue_id, request_id, admin_operation_id, file_kind, storage_ref, attempt_count
+    FROM profile_deletion_file_queue
+    WHERE admin_operation_id = ?1
+      AND (
+        (status IN ('pending', 'failed') AND attempt_count < ?2 AND (next_attempt_at IS NULL OR next_attempt_at <= ?3))
+        OR (status = 'processing' AND lease_expires_at <= ?3)
+      )
+    ORDER BY queue_id ASC;
+  `)
+  const countUnfinishedAdminFilesStatement = database.prepare(`
+    SELECT
+      SUM(CASE WHEN status NOT IN ('done', 'skipped_shared') THEN 1 ELSE 0 END) AS unfinished,
+      SUM(CASE WHEN status = 'processing' OR (status IN ('pending', 'failed') AND attempt_count < ?2) THEN 1 ELSE 0 END) AS retryable
+    FROM profile_deletion_file_queue WHERE admin_operation_id = ?1;
+  `)
+  const selectAdminFileCleanupStatusStatement = database.prepare(`
+    SELECT file_cleanup_status FROM admin_profile_deletions WHERE log_id = ? LIMIT 1;
+  `)
+  const markAdminFileCleanupDoneStatement = database.prepare(`
+    UPDATE admin_profile_deletions SET file_cleanup_status = 'done'
+    WHERE log_id = ? AND file_cleanup_status = 'pending';
+  `)
+  const selectAdminOperationsPendingFileCleanupStatement = database.prepare(`
+    SELECT log_id, deleted_profile_id FROM admin_profile_deletions
+    WHERE file_cleanup_status = 'pending'
+    ORDER BY deleted_at ASC, log_id ASC;
+  `)
+
   // ─── Файлова опашка ──────────────────────────────────────────────────────
   const selectFilesToProcessStatement = database.prepare(`
     SELECT queue_id, request_id, file_kind, storage_ref, attempt_count
@@ -1411,6 +1532,100 @@ export async function createProfileDeletionExecutor(
     return { accountDeleted, identityLinksDeleted, privateMatchesAnonymized, ludoMatchesAnonymized, pendingAdminDeleteResolved }
   }
 
+  function executeAdminHardDelete(input: AdminHardDeleteInput): AdminHardDeleteResult {
+    if (input.targetProfileId === input.actorProfileId) return { ok: false, code: 'self' }
+    const reason = input.reason.trim()
+    if (reason.length === 0 || reason.length > ADMIN_DELETE_MAX_REASON_LENGTH) return { ok: false, code: 'invalid_reason' }
+    const operationId = input.auditLogId ?? randomUUID()
+
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const target = selectAdminTargetStatement.get(input.targetProfileId) as (ProfileRow & { display_name: string; username: string | null }) | undefined
+      if (target === undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'not_found' }
+      }
+      if (target.profile_id === input.actorProfileId) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'self' }
+      }
+      // Незавършен турнир / кампаниен подател — отказ без частични промени
+      // (досегашните административни правила; провереят се в writer lock-а).
+      if (participationChecks.hasActiveTournamentDependency(target.profile_id)) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'active_tournament_dependency' }
+      }
+      if (selectCampaignGiftSenderStatement.get(target.profile_id) !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'campaign_gift_sender_protected' }
+      }
+
+      // Support заявка: само изрично подадено и валидирано потребителско
+      // съобщение на target-а (при replay липсващото съобщение -> без архив).
+      let validatedSupportRequest: { message_id: string; created_at: string } | null = null
+      if (input.supportRequestMessageId != null && input.supportRequestMessageId !== '') {
+        const message = selectSupportRequestMessageStatement.get(input.supportRequestMessageId) as
+          | { message_id: string; profile_id: string; is_from_admin: number; created_at: string }
+          | undefined
+        const isValid = message !== undefined && message.profile_id === target.profile_id && message.is_from_admin === 0
+        if (!isValid && input.replay === undefined) {
+          database.exec('ROLLBACK;')
+          return { ok: false, code: 'invalid_support_request_message' }
+        }
+        validatedSupportRequest = isValid && message !== undefined ? { message_id: message.message_id, created_at: message.created_at } : null
+      }
+
+      const actorProfileId = input.replay !== undefined && selectProfileExistsStatement.get(input.actorProfileId) === undefined
+        ? null
+        : input.actorProfileId
+      const deletedAt = input.replay?.deletedAt ?? null
+      const usernameSnapshot = target.username?.trim() || target.display_name
+
+      // Одитният ред ПРЕДИ заличаването, в същата транзакция.
+      insertAdminAuditStatement.run(operationId, target.profile_id, target.account_id, usernameSnapshot, actorProfileId, reason, deletedAt)
+      if (validatedSupportRequest !== null) {
+        insertSupportDeletionArchiveStatement.run(
+          randomUUID(),
+          target.profile_id,
+          usernameSnapshot,
+          target.display_name,
+          validatedSupportRequest.message_id,
+          validatedSupportRequest.created_at,
+          actorProfileId,
+          reason,
+          deletedAt,
+        )
+      }
+      const activeMute = selectActiveSectionMuteStatement.get(target.profile_id) as { muted_until: string } | undefined
+      if (activeMute !== undefined) insertModerationSnapshotStatement.run(target.profile_id, activeMute.muted_until)
+
+      // Същото ядро и същата опашка като самоизтриването.
+      let enqueuedFileCount = 0
+      const { accountDeleted } = deleteProfileDataInTransaction(target, (fileKind, storageRef) => {
+        enqueuedFileCount += Number((insertAdminFileStatement.run(operationId, fileKind, storageRef) as { changes: number }).changes)
+      })
+      // Без файлове файловата фаза е приключила веднага.
+      if (enqueuedFileCount === 0) markAdminFileCleanupDoneStatement.run(operationId)
+
+      options.testHooks?.beforeAdminCommit?.(operationId)
+      database.exec('COMMIT;')
+      return {
+        ok: true,
+        deletedProfileId: target.profile_id,
+        deletedAccountId: accountDeleted ? target.account_id : null,
+        operationId,
+        enqueuedFileCount,
+      }
+    } catch (error) {
+      rollbackQuietly()
+      // Последната защита в базата (20261013_001).
+      if (error instanceof Error && error.message.includes('campaign_gift_sender_protected')) {
+        return { ok: false, code: 'campaign_gift_sender_protected' }
+      }
+      throw error
+    }
+  }
+
   function runDatabasePhase(request: ClaimedProfileDeletionRequest, workerId: string): ProfileDeletionDbPhaseResult {
     database.exec('BEGIN IMMEDIATE;')
     let row: RequestRow | undefined
@@ -1523,10 +1738,55 @@ export async function createProfileDeletionExecutor(
     }>).map((row) => ({
       queueId: row.queue_id,
       requestId: row.request_id,
+      adminOperationId: null,
       fileKind: row.file_kind,
       storageRef: row.storage_ref,
       attemptCount: row.attempt_count,
     }))
+  }
+
+  function listAdminFilesToProcess(operationId: string): ProfileDeletionQueuedFile[] {
+    return (selectAdminFilesToProcessStatement.all(operationId, PROFILE_DELETION_MAX_FILE_ATTEMPTS, dbNow()) as Array<{
+      queue_id: number
+      admin_operation_id: string
+      file_kind: ProfileDeletionFileKind
+      storage_ref: string
+      attempt_count: number
+    }>).map((row) => ({
+      queueId: row.queue_id,
+      requestId: null,
+      adminOperationId: row.admin_operation_id,
+      fileKind: row.file_kind,
+      storageRef: row.storage_ref,
+      attemptCount: row.attempt_count,
+    }))
+  }
+
+  function listAdminOperationsPendingFileCleanup(): Array<{ operationId: string; profileId: string }> {
+    return (selectAdminOperationsPendingFileCleanupStatement.all() as Array<{ log_id: string; deleted_profile_id: string }>)
+      .map((row) => ({ operationId: row.log_id, profileId: row.deleted_profile_id }))
+  }
+
+  function finishAdminFileCleanup(operationId: string): AdminFileCleanupFinishResult {
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const row = selectAdminFileCleanupStatusStatement.get(operationId) as { file_cleanup_status: string | null } | undefined
+      if (row === undefined || row.file_cleanup_status !== 'pending') {
+        database.exec('ROLLBACK;')
+        return { kind: 'not_pending' }
+      }
+      const counts = countUnfinishedAdminFilesStatement.get(operationId, PROFILE_DELETION_MAX_FILE_ATTEMPTS) as { unfinished: number | null; retryable: number | null }
+      if ((counts.unfinished ?? 0) > 0) {
+        database.exec('ROLLBACK;')
+        return { kind: 'files_pending', willRetry: (counts.retryable ?? 0) > 0 }
+      }
+      markAdminFileCleanupDoneStatement.run(operationId)
+      database.exec('COMMIT;')
+      return { kind: 'done' }
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
   }
 
   function claimFile(queueId: number, workerId: string): boolean {
@@ -1569,7 +1829,11 @@ export async function createProfileDeletionExecutor(
         database.exec('ROLLBACK;')
         return false
       }
-      insertEvent(file.requestId, profileId, eventType, workerId, { queueId: file.queueId, kind: file.fileKind, ...detail })
+      // Журналът е по заявка (FK); административните файлови редове се
+      // диагностицират от самата опашка (статус, опити, last_error_code).
+      if (file.requestId !== null) {
+        insertEvent(file.requestId, profileId, eventType, workerId, { queueId: file.queueId, kind: file.fileKind, ...detail })
+      }
       database.exec('COMMIT;')
       return true
     } catch (error) {
@@ -1689,6 +1953,10 @@ export async function createProfileDeletionExecutor(
     finishRequest,
     replayDeletionForRestore,
     prepareRequestForRestoreReconcile,
+    executeAdminHardDelete,
+    listAdminFilesToProcess,
+    listAdminOperationsPendingFileCleanup,
+    finishAdminFileCleanup,
     close: () => database.close(),
   }
 }

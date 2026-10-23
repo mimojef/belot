@@ -211,7 +211,10 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   db.close()
 }
 
-// ═══ 11. Hard delete не унищожава compact forensic историята ═════════════
+// ═══ 11. Hard delete (Етап 4F2): IP/visitor връзките на изтрития се трият ══
+// Административното изтриване прилага същото почистване като самоизтриването
+// (одит P5): връзките на изтрития изчезват, тези на други профили със същия
+// visitor/IP остават, нов forensic snapshot не се създава.
 {
   const { dbPath, db } = await createMigratedDatabase('belot-visit-links-delete-')
   const store = await createSiteVisitStore(dbPath)
@@ -229,14 +232,25 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   check('[11] профилът е изтрит', countRows(db, `SELECT COUNT(*) AS n FROM profiles WHERE profile_id = 'victim';`) === 0)
   check('[11] raw site_visit_events.profile_id е SET NULL (текущо поведение, непроменено)',
     countRows(db, `SELECT COUNT(*) AS n FROM site_visit_events WHERE profile_id = 'victim';`) === 0)
-  check('[11] compact visitor/IP връзките на изтрития профил ОЦЕЛЯВАТ непроменени', dumpLinks(db) === linksBefore)
+  const buddyLinksBefore = JSON.stringify([
+    db.prepare(`SELECT * FROM profile_visitor_links WHERE profile_id = 'buddy' ORDER BY anonymous_visitor_id;`).all(),
+    db.prepare(`SELECT * FROM profile_ip_links WHERE profile_id = 'buddy' ORDER BY ip_address;`).all(),
+  ])
+  check('[11] fixture: преди изтриването връзките на изтрития съществуват', linksBefore.includes('victim'))
+  check('[11] compact visitor/IP връзките на изтрития профил са ИЗТРИТИ (4F2 — както при самоизтриването)',
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_visitor_links WHERE profile_id = 'victim';`) === 0 &&
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_ip_links WHERE profile_id = 'victim';`) === 0)
+  check('[11] връзките на друг профил със същия visitor/IP са непокътнати', JSON.stringify([
+    db.prepare(`SELECT * FROM profile_visitor_links WHERE profile_id = 'buddy' ORDER BY anonymous_visitor_id;`).all(),
+    db.prepare(`SELECT * FROM profile_ip_links WHERE profile_id = 'buddy' ORDER BY ip_address;`).all(),
+  ]) === buddyLinksBefore)
+  check('[11] нов forensic snapshot НЕ се създава', countRows(db, `SELECT COUNT(*) AS n FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'victim';`) === 0)
 
   const reader = createProfileVisitLinkReader(db)
-  check('[11] forensic reader (вкл. изтрити) вижда visitor връзката', reader.findVisitorLinksForProfileIncludingDeleted('victim').some((link) => link.anonymousVisitorId === 'shared-device' && link.eventCount === 2))
-  check('[11] forensic reader (вкл. изтрити) вижда и двата IP-та', reader.findIpLinksForProfileIncludingDeleted('victim').length === 2)
+  check('[11] forensic reader (вкл. изтрити) не намира нищо за изтрития', reader.findVisitorLinksForProfileIncludingDeleted('victim').length === 0 && reader.findIpLinksForProfileIncludingDeleted('victim').length === 0)
   check('[11] current-only reader НЕ връща изтрития профил като linked (mirror на raw)', !reader.getDetailedLinkedProfiles('buddy').some((row) => row.profileId === 'victim'))
   const verify = verifyProfileVisitLinks(db)
-  check('[11] verification OK — изтритият профил е допустим „extra“', verify.ok && verify.visitor.deletedProfileExtras === 1 && verify.ip.deletedProfileExtras === 2, verify.failures.join(' | '))
+  check('[11] verification OK — без „extras“ за изтрития профил', verify.ok && verify.visitor.deletedProfileExtras === 0 && verify.ip.deletedProfileExtras === 0, verify.failures.join(' | '))
 
   hardDeleteService.close()
   store.close()
@@ -364,11 +378,26 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   db.close()
 }
 
-// ═══ 18–21. Hard-deleted профили: backfill от deletion snapshots ═════════
+// ═══ 18–21. Наследени административни изтривания: backfill от deletion snapshots ═
+// Етап 4F2: новото административно изтриване вече НЕ създава forensic
+// snapshot и трие връзките (виж [11] и [18b]). Backfill механизмът за
+// изтривания отпреди 4F2 е непроменен — покрива се със симулирано наследено
+// изтриване (snapshot + одитен ред + DELETE, точно като стария път).
+function legacyAdminDelete(db: InstanceType<typeof import('node:sqlite').DatabaseSync>, profileId: string): void {
+  db.prepare(`
+    INSERT INTO admin_profile_deletion_visitor_snapshots (snapshot_id, deleted_profile_id, anonymous_visitor_id, ip_address, first_seen_at, last_seen_at, event_count)
+    SELECT lower(hex(randomblob(16))), profile_id, anonymous_visitor_id, ip_address, MIN(occurred_at), MAX(occurred_at), COUNT(*)
+    FROM site_visit_events WHERE profile_id = ?
+    GROUP BY anonymous_visitor_id, COALESCE(ip_address, '');
+  `).run(profileId)
+  db.prepare(`INSERT INTO admin_profile_deletions (log_id, deleted_profile_id, username_snapshot, reason) VALUES (?, ?, ?, 'наследено изтриване');`).run(randomUUID(), profileId, profileId)
+  db.prepare('DELETE FROM profiles WHERE profile_id = ?;').run(profileId)
+}
+
 {
   const { dbPath, db } = await createMigratedDatabase('belot-visit-links-deleted-')
   insertProfile(db, 'admin', 'admin')
-  for (const id of ['del-a', 'del-b', 'del-c']) insertProfile(db, id)
+  for (const id of ['del-a', 'del-b', 'del-c', 'del-new']) insertProfile(db, id)
   const hardDeleteService = await createProfileHardDeleteService(dbPath, { deleteUploadFileByUrl: async () => {} })
 
   // [18] Профил, изтрит ПРЕДИ Фаза 1: raw историята е записана без dual-write.
@@ -392,8 +421,8 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
     GROUP BY ip_address ORDER BY k;
   `).all()
 
-  const deletionA = await hardDeleteService.hardDeleteProfile({ targetProfileId: 'del-a', actorProfileId: 'admin', actorAccountId: 'admin', reason: 'Регресионен тест: изтрит преди Фаза 1' })
-  check('[18] hard delete преди Фаза 1 успешен', deletionA.ok === true, JSON.stringify(deletionA))
+  legacyAdminDelete(db, 'del-a')
+  check('[18] наследено hard delete преди Фаза 1 (симулирано)', countRows(db, `SELECT COUNT(*) AS n FROM profiles WHERE profile_id = 'del-a';`) === 0)
   check('[18] raw profile_id е NULL (raw фазата не вижда профила)', countRows(db, `SELECT COUNT(*) AS n FROM site_visit_events WHERE profile_id = 'del-a';`) === 0)
   check('[18] deletion snapshot е записан', countRows(db, `SELECT COUNT(*) AS n FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'del-a';`) > 0)
   check('[18] преди backfill compact няма нищо за изтрития профил', countRows(db, `SELECT COUNT(*) AS n FROM profile_visitor_links WHERE profile_id = 'del-a';`) === 0)
@@ -417,8 +446,18 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   store.recordPageView(pageView({ anonymousVisitorId: 'laptop-c', profileId: 'del-c', ipAddress: '192.0.2.7' }))
   store.recordPageView(pageView({ anonymousVisitorId: 'laptop-c', profileId: 'del-c', ipAddress: '192.0.2.7' }))
   check('[19] преди изтриване compact има само dual-written (M=2)', visitorLink(db, 'del-c', 'laptop-c')?.event_count === 2)
-  const deletionC = await hardDeleteService.hardDeleteProfile({ targetProfileId: 'del-c', actorProfileId: 'admin', actorAccountId: 'admin', reason: 'Регресионен тест: изтрит преди backfill' })
-  check('[19] hard delete успешен', deletionC.ok === true)
+  legacyAdminDelete(db, 'del-c')
+  check('[19] наследено hard delete (симулирано)', countRows(db, `SELECT COUNT(*) AS n FROM profiles WHERE profile_id = 'del-c';`) === 0)
+
+  // [18b] Етап 4F2 — ново административно изтриване: без snapshot, връзките
+  // са изтрити и backfill НЕ ги връща (raw profile_id е NULL).
+  insertRawEvent(db, { visitorId: 'tablet-n', profileId: 'del-new', ip: '192.0.2.50', at: '2026-08-04 07:00:00' })
+  store.recordPageView(pageView({ anonymousVisitorId: 'tablet-n', profileId: 'del-new', ipAddress: '192.0.2.50' }))
+  check('[18b] fixture: dual-written връзка за del-new', visitorLink(db, 'del-new', 'tablet-n') !== undefined)
+  const deletionNew = await hardDeleteService.hardDeleteProfile({ targetProfileId: 'del-new', actorProfileId: 'admin', actorAccountId: 'admin', reason: 'Етап 4F2' })
+  check('[18b] административно изтриване (4F2) успешно', deletionNew.ok === true, JSON.stringify(deletionNew))
+  check('[18b] без нов snapshot; връзките са изтрити', countRows(db, `SELECT COUNT(*) AS n FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'del-new';`) === 0 &&
+    visitorLink(db, 'del-new', 'tablet-n') === undefined && ipLink(db, 'del-new', '192.0.2.50') === undefined)
   backfillProfileVisitLinks(db)
   check('[19] след backfill: count = N+M = 5 (от snapshot-а), first = най-старото raw', visitorLink(db, 'del-c', 'laptop-c')?.event_count === 5 &&
     visitorLink(db, 'del-c', 'laptop-c')?.first_seen_at === '2026-08-01 07:00:00' && ipLink(db, 'del-c', '192.0.2.7')?.event_count === 5,
@@ -429,6 +468,7 @@ function insertRawEvent(db: DatabaseSync, input: { visitorId: string; profileId:
   backfillProfileVisitLinks(db)
   backfillProfileVisitLinks(db, { batchSize: 1 })
   check('[20] повторен backfill (вкл. snapshot фазата) → идентични таблици', dumpLinks(db) === afterBackfill)
+  check('[18b] backfill НЕ връща връзките на изтрития след 4F2 профил', visitorLink(db, 'del-new', 'tablet-n') === undefined && ipLink(db, 'del-new', '192.0.2.50') === undefined)
 
   // [21] Snapshot ред за профил, който още съществува, се игнорира (raw е източникът).
   db.prepare(`INSERT INTO admin_profile_deletion_visitor_snapshots (snapshot_id, deleted_profile_id, anonymous_visitor_id, ip_address, first_seen_at, last_seen_at, event_count)

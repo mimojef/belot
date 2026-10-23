@@ -361,20 +361,29 @@ async function buildGraphDatabase(prefix: string): Promise<{ dbPath: string; db:
   const hardDeleteService = await createProfileHardDeleteService(dbPath, { deleteUploadFileByUrl: async () => {} })
   const deletion = await hardDeleteService.hardDeleteProfile({ targetProfileId: 'x', actorProfileId: 'admin', actorAccountId: 'admin', reason: 'Фаза 2 регресионен тест' })
   check('[5] hard delete успешен', deletion.ok === true, JSON.stringify(deletion))
-  check('[5] compact visitor/IP връзките (вкл. отпреди raw retention) оцеляват НЕПРОМЕНЕНИ — без CASCADE загуба', dumpLinks(db) === linksBefore)
-  check('[5] risk cache на y е invalidated чрез compact връзката (raw вече я няма)',
+  // Етап 4F2 — административното изтриване прилага същото почистване като
+  // самоизтриването (одит P5): връзките на изтрития се трият, на другите —
+  // не; нов forensic snapshot не се създава.
+  const othersLinks = () => JSON.stringify([
+    db.prepare(`SELECT * FROM profile_visitor_links WHERE profile_id <> 'x' ORDER BY profile_id, anonymous_visitor_id;`).all(),
+    db.prepare(`SELECT * FROM profile_ip_links WHERE profile_id <> 'x' ORDER BY profile_id, ip_address;`).all(),
+  ])
+  check('[5] fixture: x е имал compact връзки (вкл. отпреди raw retention)', linksBefore.includes('"x"') || linksBefore.includes('old-dev'))
+  check('[5] compact visitor/IP връзките на изтрития x са ИЗТРИТИ (4F2)',
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_visitor_links WHERE profile_id = 'x';`) === 0 &&
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_ip_links WHERE profile_id = 'x';`) === 0)
+  const othersAfterDelete = othersLinks()
+  check('[5] risk cache на y е invalidated чрез compact връзката (преди изтриването ѝ; raw вече я няма)',
     (db.prepare(`SELECT check_complete FROM admin_profile_risk_checks WHERE profile_id = 'y';`).get() as { check_complete: number }).check_complete === 0)
-  const snapshotRows = db.prepare(`SELECT anonymous_visitor_id, ip_address, event_count FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'x';`).all() as Array<{ anonymous_visitor_id: string; ip_address: string; event_count: number }>
-  check('[5] deletion snapshot механизмът е непроменен (raw прозорецът: x-dev/192.0.2.99 ×1)',
-    snapshotRows.length === 1 && snapshotRows[0]!.anonymous_visitor_id === 'x-dev' && snapshotRows[0]!.event_count === 1, JSON.stringify(snapshotRows))
-  check('[5] findDeletedProfileIdsForVisitorId(old-dev) = [x] — стар мост през compact, temporary профилът НЕ е hard-deleted',
-    JSON.stringify(hardDeleteService.findDeletedProfileIdsForVisitorId('old-dev')) === '["x"]', JSON.stringify(hardDeleteService.findDeletedProfileIdsForVisitorId('old-dev')))
-  check('[5] findDeletedProfileIdsForVisitorId(x-dev) = [x] веднъж (snapshot + compact, без дубликат)',
-    JSON.stringify(hardDeleteService.findDeletedProfileIdsForVisitorId('x-dev')) === '["x"]')
-  check('[5] findDeletedProfileIdsForIp(recent) = [x] веднъж; стар IP (>48h) → []',
-    JSON.stringify(hardDeleteService.findDeletedProfileIdsForIp('192.0.2.99')) === '["x"]' && hardDeleteService.findDeletedProfileIdsForIp('192.0.2.10').length === 0)
+  check('[5] нов deletion snapshot НЕ се създава', countRows(db, `SELECT COUNT(*) AS n FROM admin_profile_deletion_visitor_snapshots WHERE deleted_profile_id = 'x';`) === 0)
+  check('[5] forensic справките вече не свързват visitor/IP с изтрития x',
+    hardDeleteService.findDeletedProfileIdsForVisitorId('old-dev').length === 0 &&
+    hardDeleteService.findDeletedProfileIdsForVisitorId('x-dev').length === 0 &&
+    hardDeleteService.findDeletedProfileIdsForIp('192.0.2.99').length === 0 &&
+    hardDeleteService.findDeletedProfileIdsForIp('192.0.2.10').length === 0)
   backfillProfileVisitLinks(db)
-  check('[5] backfill след delete (snapshot merge) НЕ удвоява compact event_count', dumpLinks(db) === linksBefore)
+  check('[5] backfill след delete НЕ връща връзките на x и не пипа чуждите',
+    countRows(db, `SELECT COUNT(*) AS n FROM profile_visitor_links WHERE profile_id = 'x';`) === 0 && othersLinks() === othersAfterDelete)
   const verify = verifyProfileVisitLinks(db)
   check('[5] verification OK след purge + hard delete', verify.ok, verify.failures.join(' | '))
 
@@ -382,8 +391,8 @@ async function buildGraphDatabase(prefix: string): Promise<{ dbPath: string; db:
   const yAfter = riskStore.recheckSingleProfile('y')
   check('[6] recheck(y) след delete: без risk, 0 linked', !yAfter.riskDetected && yAfter.linkedProfilesCount === 0)
   const reader = createProfileVisitLinkReader(db)
-  check('[6] forensic reader (вкл. изтрити) пази старата x<->old-dev връзка (2 събития)',
-    reader.findVisitorLinksForProfileIncludingDeleted('x').some((link) => link.anonymousVisitorId === 'old-dev' && link.eventCount === 2))
+  check('[6] forensic reader (вкл. изтрити) няма връзки за изтрития x (4F2)',
+    reader.findVisitorLinksForProfileIncludingDeleted('x').length === 0 && reader.findIpLinksForProfileIncludingDeleted('x').length === 0)
 
   hardDeleteService.close()
   legacy.close()
