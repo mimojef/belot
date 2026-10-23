@@ -1070,6 +1070,13 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
   // праг е вече исторически факт (campaign_profile_totals), задължението за
   // наградата надживява архивирането на кампанията. Нито една от двете
   // функции не пипа campaign_unit_ledger/campaign_profile_totals.
+  //
+  // cpt.profile_id IS NOT NULL (самоизтриване, Етап 4E2): след окончателно
+  // изтриване на профил редовете му в campaign_profile_totals и
+  // campaign_reward_claims имат profile_id NULL, а NULL никога не съвпада в
+  // LEFT JOIN-а — вече ПРЕДОСТАВЕНИТЕ му награди биха изглеждали "дължими"
+  // (без получател), биха блокирали архивирането завинаги и биха се появили
+  // в retry списъка. Несъществуващ профил не може да има дължима награда.
 
   const selectAllPendingGiftGapsStatement = database.prepare(`
     SELECT crt.campaign_id, cpt.profile_id, ctr.tier_reward_id, crt.threshold_units, ctr.reward_payload_json
@@ -1078,7 +1085,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     JOIN campaign_tier_rewards ctr ON ctr.tier_id = crt.tier_id AND ctr.reward_type = 'gift_item'
     LEFT JOIN campaign_reward_claims crc
       ON crc.campaign_id = crt.campaign_id AND crc.profile_id = cpt.profile_id AND crc.tier_reward_id = ctr.tier_reward_id
-    WHERE crc.tier_reward_id IS NULL
+    WHERE crc.tier_reward_id IS NULL AND cpt.profile_id IS NOT NULL
     ORDER BY crt.campaign_id ASC, crt.threshold_units ASC;
   `)
 
@@ -1089,7 +1096,7 @@ export async function createCampaignCreditStore(databaseFilePath: string): Promi
     JOIN campaign_tier_rewards ctr ON ctr.tier_id = crt.tier_id AND ctr.reward_type = 'gift_item'
     LEFT JOIN campaign_reward_claims crc
       ON crc.campaign_id = crt.campaign_id AND crc.profile_id = cpt.profile_id AND crc.tier_reward_id = ctr.tier_reward_id
-    WHERE crc.tier_reward_id IS NULL AND crt.campaign_id = ?
+    WHERE crc.tier_reward_id IS NULL AND crt.campaign_id = ? AND cpt.profile_id IS NOT NULL
     ORDER BY crt.threshold_units ASC;
   `)
 

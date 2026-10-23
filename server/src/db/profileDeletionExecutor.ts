@@ -487,6 +487,12 @@ export async function createProfileDeletionExecutor(
     `UPDATE table_exit_penalties SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
     `UPDATE profile_match_results SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
     `UPDATE belot_match_completion_ledger SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
+    // Етап 4E2 (20261027_001): Ludo финансовият регистър и кампанийната
+    // атрибуция (единици, предоставени награди, ръчни корекции).
+    `UPDATE ludo_match_economy_ledger SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
+    `UPDATE campaign_unit_ledger SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
+    `UPDATE campaign_reward_claims SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
+    `UPDATE campaign_manual_adjustments SET deleted_profile_id_snapshot = ?1 WHERE profile_id = ?1;`,
     // Подаръци (жълтици/VIP/пакет), платени от ДРУГ потребител за този
     // профил: псевдонимният UUID се snapshot-ва, а името му в чуждия запис
     // се заменя с неутрален етикет (не е платежен идентификатор).
@@ -611,6 +617,58 @@ export async function createProfileDeletionExecutor(
     }
     return changed
   }
+
+  // ─── Етап 4E2: финансов инвариант ────────────────────────────────────────
+  // Преди DELETE: редовете на профила; след DELETE (преди COMMIT): същият
+  // брой/сума трябва да е под snapshot-а с profile_id NULL, а общите
+  // стойности на регистъра — непроменени (никой ред не е изгубен/дублиран).
+  // Нарушение = ROLLBACK (failed), профилът НЕ се маркира като изтрит.
+  const FINANCIAL_LEDGERS = [
+    { table: 'ludo_match_economy_ledger', sum: 'amount' },
+    { table: 'campaign_unit_ledger', sum: 'units_amount' },
+    { table: 'campaign_reward_claims', sum: '0' },
+    { table: 'campaign_manual_adjustments', sum: 'units_delta' },
+  ] as const
+  const financialInvariantStatements = FINANCIAL_LEDGERS.map(({ table, sum }) => ({
+    table,
+    own: database.prepare(`SELECT COUNT(*) AS cnt, COALESCE(SUM(${sum}), 0) AS total FROM ${table} WHERE profile_id = ?;`),
+    snapshotted: database.prepare(`SELECT COUNT(*) AS cnt, COALESCE(SUM(${sum}), 0) AS total FROM ${table} WHERE profile_id IS NULL AND deleted_profile_id_snapshot = ?;`),
+    all: database.prepare(`SELECT COUNT(*) AS cnt, COALESCE(SUM(${sum}), 0) AS total FROM ${table};`),
+  }))
+
+  type LedgerTotals = { cnt: number; total: number }
+  function readFinancialTotals(profileId: string): Array<{ table: string; own: LedgerTotals; snapshotted: LedgerTotals; all: LedgerTotals }> {
+    return financialInvariantStatements.map((statements) => ({
+      table: statements.table,
+      own: statements.own.get(profileId) as LedgerTotals,
+      snapshotted: statements.snapshotted.get(profileId) as LedgerTotals,
+      all: statements.all.get() as LedgerTotals,
+    }))
+  }
+
+  function assertFinancialInvariant(before: ReturnType<typeof readFinancialTotals>, profileId: string): void {
+    const after = readFinancialTotals(profileId)
+    for (let index = 0; index < before.length; index += 1) {
+      const b = before[index]
+      const a = after[index]
+      const expectedSnapshotted = { cnt: b.snapshotted.cnt + b.own.cnt, total: b.snapshotted.total + b.own.total }
+      if (
+        a.own.cnt !== 0 ||
+        a.snapshotted.cnt !== expectedSnapshotted.cnt ||
+        a.snapshotted.total !== expectedSnapshotted.total ||
+        a.all.cnt !== b.all.cnt ||
+        a.all.total !== b.all.total
+      ) {
+        throw new Error(`profile_deletion_financial_invariant_violated:${b.table}`)
+      }
+    }
+  }
+
+  // Известията за кампанийни награди на изтрития — UI съобщения без одитна
+  // стойност (наградата е в campaign_reward_claims); иначе остават сираци.
+  const deleteCampaignRewardNotificationsStatement = database.prepare(`
+    DELETE FROM campaign_reward_notifications WHERE profile_id = ?;
+  `)
 
   const deleteProfileStatement = database.prepare(`DELETE FROM profiles WHERE profile_id = ?;`)
   const countAccountProfilesStatement = database.prepare(`SELECT COUNT(*) AS cnt FROM profiles WHERE account_id = ?;`)
@@ -879,7 +937,10 @@ export async function createProfileDeletionExecutor(
       if (move.promotedLiveRoot) promotedRoots.push(move.messageId)
     }
 
+    // Етап 4E2 — финансовите стойности ПРЕДИ snapshot-а и DELETE-а.
+    const financialTotalsBefore = readFinancialTotals(profileId)
     for (const statement of attributionSnapshotStatements) statement.run(profileId)
+    deleteCampaignRewardNotificationsStatement.run(profileId)
     for (const statement of anonymizeStatements) statement.run(profileId)
     for (const statement of deleteWithoutFkStatements) statement.run(profileId)
 
@@ -914,6 +975,9 @@ export async function createProfileDeletionExecutor(
     }
 
     deleteProfileStatement.run(profileId)
+    // Етап 4E2 — след SET NULL каскадата: атрибуцията е под snapshot-а, нищо
+    // не е изгубено/дублирано (иначе ROLLBACK).
+    assertFinancialInvariant(financialTotalsBefore, profileId)
 
     // Инварианти преди COMMIT — нарушение = ROLLBACK (failed, повторен опит).
     const foreignTopicMessagesAfter = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt
