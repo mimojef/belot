@@ -74,6 +74,14 @@
 //     преизчислява. И двете — ПРЕДИ DELETE FROM profiles (после profile_id е
 //     NULL); принадлежност само по profile_id / snapshot, никога по име;
 //     нарушен инвариант преди COMMIT -> ROLLBACK.
+//
+// Етап 4E4 (одит P5) — партньорски оценки (миграция 20261028_001):
+//   * дадените от профила оценки остават в рейтингите на другите — FK
+//     rated_by_profile_id е ON DELETE SET NULL (без snapshot на ID-то);
+//   * получените от профила изчезват (rated_profile_id ON DELETE CASCADE);
+//   * преди COMMIT: броят и сумата на оценките на всеки засегнат играч са
+//     непроменени, кешът profiles.average_rating/total_ratings_count е
+//     преизчислен от таблицата, нищо не сочи към профила — иначе ROLLBACK.
 
 import { randomBytes } from 'node:crypto'
 import type { ProfileDeletionFileKind } from '../uploads/profileDeletionFileRemoval.js'
@@ -749,6 +757,75 @@ export async function createProfileDeletionExecutor(
     }
   }
 
+  // ─── Етап 4E4: партньорски оценки ───────────────────────────────────────
+  type RatingAggregate = { profile_id: string; cnt: number; total: number }
+  const selectRatedByProfileAggregatesStatement = database.prepare(`
+    SELECT r.rated_profile_id AS profile_id, COUNT(*) AS cnt, COALESCE(SUM(r.rating_value), 0) AS total
+    FROM profile_partner_ratings r
+    WHERE r.rated_profile_id IN (
+      SELECT DISTINCT rated_profile_id FROM profile_partner_ratings WHERE rated_by_profile_id = ?1 AND rated_profile_id <> ?1
+    )
+    GROUP BY r.rated_profile_id
+    ORDER BY r.rated_profile_id;
+  `)
+  const selectRatingAggregatesForProfilesStatement = database.prepare(`
+    SELECT rated_profile_id AS profile_id, COUNT(*) AS cnt, COALESCE(SUM(rating_value), 0) AS total
+    FROM profile_partner_ratings
+    WHERE rated_profile_id IN (SELECT value FROM json_each(?1))
+    GROUP BY rated_profile_id
+    ORDER BY rated_profile_id;
+  `)
+  const selectRatingTotalsStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt, COALESCE(SUM(rating_value), 0) AS total,
+      COALESCE(SUM(CASE WHEN rated_profile_id = ?1 THEN 1 ELSE 0 END), 0) AS received_cnt,
+      COALESCE(SUM(CASE WHEN rated_profile_id = ?1 THEN rating_value ELSE 0 END), 0) AS received_total,
+      COALESCE(SUM(CASE WHEN rated_by_profile_id = ?1 OR rated_profile_id = ?1 THEN 1 ELSE 0 END), 0) AS linked_cnt
+    FROM profile_partner_ratings;
+  `)
+  // Същата формула като playerProgressStore.refreshRatingAggregate.
+  const refreshRatingCacheStatement = database.prepare(`
+    UPDATE profiles
+    SET average_rating = (SELECT COALESCE(AVG(rating_value), 0) FROM profile_partner_ratings WHERE rated_profile_id = profiles.profile_id),
+        total_ratings_count = (SELECT COUNT(*) FROM profile_partner_ratings WHERE rated_profile_id = profiles.profile_id),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE profile_id IN (SELECT value FROM json_each(?1));
+  `)
+  const countStaleRatingCachesStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM profiles p
+    WHERE p.profile_id IN (SELECT value FROM json_each(?1))
+      AND (
+        p.total_ratings_count <> (SELECT COUNT(*) FROM profile_partner_ratings WHERE rated_profile_id = p.profile_id)
+        OR abs(p.average_rating - (SELECT COALESCE(AVG(rating_value), 0) FROM profile_partner_ratings WHERE rated_profile_id = p.profile_id)) > 1e-9
+      );
+  `)
+
+  type RatingState = { affected: RatingAggregate[]; totals: { cnt: number; total: number; received_cnt: number; received_total: number } }
+  function readRatingState(profileId: string): RatingState {
+    return {
+      affected: selectRatedByProfileAggregatesStatement.all(profileId) as RatingAggregate[],
+      totals: selectRatingTotalsStatement.get(profileId) as RatingState['totals'],
+    }
+  }
+
+  /** След DELETE FROM profiles: проверка + преизчисляване на кеша на засегнатите играчи. */
+  function finalizePartnerRatings(before: RatingState, profileId: string): void {
+    const affectedIdsJson = JSON.stringify(before.affected.map((row) => row.profile_id))
+    const after = selectRatingAggregatesForProfilesStatement.all(affectedIdsJson) as RatingAggregate[]
+    const totals = selectRatingTotalsStatement.get(profileId) as RatingState['totals'] & { linked_cnt: number }
+    if (
+      JSON.stringify(after) !== JSON.stringify(before.affected) ||
+      totals.linked_cnt !== 0 ||
+      totals.cnt !== before.totals.cnt - before.totals.received_cnt ||
+      totals.total !== before.totals.total - before.totals.received_total
+    ) {
+      throw new Error('profile_deletion_partner_rating_invariant_violated')
+    }
+    refreshRatingCacheStatement.run(affectedIdsJson)
+    if ((countStaleRatingCachesStatement.get(affectedIdsJson) as { cnt: number }).cnt !== 0) {
+      throw new Error('profile_deletion_partner_rating_cache_stale')
+    }
+  }
+
   // Известията за кампанийни награди на изтрития — UI съобщения без одитна
   // стойност (наградата е в campaign_reward_claims); иначе остават сираци.
   const deleteCampaignRewardNotificationsStatement = database.prepare(`
@@ -1026,6 +1103,8 @@ export async function createProfileDeletionExecutor(
     const financialTotalsBefore = readFinancialTotals(profileId)
     // Етап 4E3 — архивните редове на профила ПРЕДИ анонимизирането.
     const nameArchiveBefore = readNameArchiveState(profileId)
+    // Етап 4E4 — оценките, които профилът е дал/получил, ПРЕДИ каскадата.
+    const ratingStateBefore = readRatingState(profileId)
     for (const statement of attributionSnapshotStatements) statement.run(profileId)
     deleteCampaignRewardNotificationsStatement.run(profileId)
     for (const statement of anonymizeStatements) statement.run(profileId)
@@ -1067,6 +1146,8 @@ export async function createProfileDeletionExecutor(
     assertFinancialInvariant(financialTotalsBefore, profileId)
     // Етап 4E3 — имената в историята/архива са заличени, нищо друго не е пипнато.
     assertNameArchiveInvariant(nameArchiveBefore, profileId)
+    // Етап 4E4 — дадените оценки са анонимни и в сила, кешът е коректен.
+    finalizePartnerRatings(ratingStateBefore, profileId)
 
     // Инварианти преди COMMIT — нарушение = ROLLBACK (failed, повторен опит).
     const foreignTopicMessagesAfter = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt

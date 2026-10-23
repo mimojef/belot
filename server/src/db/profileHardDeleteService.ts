@@ -383,6 +383,27 @@ export async function createProfileHardDeleteService(
     DELETE FROM gift_item_delivery_log WHERE recipient_profile_id = ?;
   `)
 
+  // Етап 4E4 (20261028_001): rated_by_profile_id вече е ON DELETE SET NULL
+  // (самоизтриването пази дадените оценки анонимно). Административното
+  // изтриване ЗАПАЗВА досегашното си поведение — дадените от target-а оценки
+  // се премахват изрично — и вече преизчислява кеша на засегнатите играчи
+  // (преди каскадата оставяше profiles.average_rating остарял).
+  const selectRatedProfilesByTargetStatement = database.prepare(`
+    SELECT DISTINCT rated_profile_id FROM profile_partner_ratings
+    WHERE rated_by_profile_id = ?1 AND rated_profile_id <> ?1;
+  `)
+  const deleteRatingsGivenByTargetStatement = database.prepare(`
+    DELETE FROM profile_partner_ratings WHERE rated_by_profile_id = ?;
+  `)
+  // Същата формула като playerProgressStore.refreshRatingAggregate.
+  const refreshRatingCacheStatement = database.prepare(`
+    UPDATE profiles
+    SET average_rating = (SELECT COALESCE(AVG(rating_value), 0) FROM profile_partner_ratings WHERE rated_profile_id = profiles.profile_id),
+        total_ratings_count = (SELECT COUNT(*) FROM profile_partner_ratings WHERE rated_profile_id = profiles.profile_id),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE profile_id IN (SELECT value FROM json_each(?1));
+  `)
+
   // chat_conversation_reads (profile_id, friendship_id) НЯМА FOREIGN KEY изобщо
   // (виж 20260520_001 migration-а) — за разлика от friend_chat_messages/
   // friend_chat_attachments (ON DELETE CASCADE през profile_friendships),
@@ -1081,7 +1102,17 @@ export async function createProfileHardDeleteService(
         input.targetProfileId,
       )
 
+      // Етап 4E4 — оценките, дадени от target-а: премахват се (досегашното
+      // поведение), а кешът на засегнатите играчи се преизчислява.
+      const ratedProfileIdsJson = JSON.stringify(
+        (selectRatedProfilesByTargetStatement.all(input.targetProfileId) as Array<{ rated_profile_id: string }>)
+          .map((row) => row.rated_profile_id),
+      )
+      deleteRatingsGivenByTargetStatement.run(input.targetProfileId)
+
       deleteProfileStatement.run(input.targetProfileId)
+
+      refreshRatingCacheStatement.run(ratedProfileIdsJson)
 
       let deletedAccountId: string | null = null
       if (profileRow.account_id !== null) {
