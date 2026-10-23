@@ -75,6 +75,30 @@
 //     NULL); принадлежност само по profile_id / snapshot, никога по име;
 //     нарушен инвариант преди COMMIT -> ROLLBACK.
 //
+// Етап 4E6B (одит 4E6A, одобрени правила; миграция 20261029_001) —
+// модераторски записи. Активен БАН отлага окончателното изтриване
+// ('active_ban', blocked с повторен опит) до изтичането или премахването
+// му — подаване на заявка при активен бан се отказва още в request store-а.
+// Заглушаване или минали нарушения НЕ блокират. Пази се само минималната
+// следа:
+//   * profile_bans — редът остава (дата, срок, основание, кой е наложил);
+//     profile_id става NULL, остава само псевдонимният UUID в
+//     deleted_profile_id_snapshot. Банът не може да се приложи към друг
+//     профил (търси се само по profile_id);
+//   * topic_reports — неразгледаните сигнали на профила остават без подател
+//     (reporter_profile_id = NULL, FK SET NULL); вече разгледаните се
+//     изтриват (досегашното поведение, без ново съхранение);
+//   * tournament_participation_blocks — блокировка, наложена ОТ профила,
+//     остава в сила (actor_profile_id = NULL); блокировката НА профила
+//     изчезва (CASCADE);
+//   * заглушавания, известията за тях и доказателствата (topic_mute_evidence)
+//     на профила изчезват; файловете им са в опашката (виж по-горе);
+//   * одитните журнали (topic_moderation_audit_log, lobby_chat_deletion_
+//     audit_log) остават без връзка към профила (SET NULL);
+//   * преди COMMIT: чуждите модераторски записи са непроменени, запазените
+//     са точно очакваните (анонимни), нищо модераторско не сочи към профила
+//     и всеки файл на доказателствата му е в опашката — иначе ROLLBACK.
+//
 // Етап 4E5 (одит P5) — кореспонденцията с поддръжката ("Връзка с екипа"):
 //   * support_messages (без FK към profiles; разговорът е един на профил,
 //     ключ profile_id; отговорите на екипа са в същия разговор,
@@ -128,6 +152,8 @@ export type ProfileDeletionBlockCode =
   | 'ledger_offsite_pending'
   /** Етап 4E5: отложено административно изтриване пази support доказателство. */
   | 'support_evidence_hold'
+  /** Етап 4E6B: активен бан — окончателното изтриване чака изтичането/премахването му. */
+  | 'active_ban'
 
 export type ProfileDeletionFailCode =
   | 'identity_mismatch'
@@ -895,6 +921,116 @@ export async function createProfileDeletionExecutor(
     }
   }
 
+  // ─── Етап 4E6B: модераторски записи ─────────────────────────────────────
+  // Вече разгледаните сигнали на профила — досегашното поведение (CASCADE);
+  // неразгледаните остават анонимни чрез FK SET NULL (20261029_001).
+  // Същата семантика като profileBanStore.getActiveBan.
+  const selectActiveBanStatement = database.prepare(`
+    SELECT 1 FROM profile_bans
+    WHERE profile_id = ?1 AND lifted_at IS NULL AND banned_until > CURRENT_TIMESTAMP
+    LIMIT 1;
+  `)
+  const deleteReviewedOwnReportsStatement = database.prepare(`
+    DELETE FROM topic_reports WHERE reporter_profile_id = ?1 AND status <> 'pending';
+  `)
+  // Очакваното състояние СЛЕД изтриването, изчислено ПРЕДИ него, и
+  // действителното СЛЕД него — една и съща заявка: преди нея редовете на
+  // профила се трансформират така, както каскадата/изтриването ще ги
+  // промени; след нея такива редове няма и трансформацията е празна.
+  // ?1 = profile_id, ?2 = JSON на изтриваните собствени теми (Б1),
+  const selectModerationStateStatement = database.prepare(`
+    SELECT
+      (SELECT json_group_array(json_array(report_id, topic_id,
+          CASE WHEN reporter_profile_id IS ?1 THEN NULL ELSE reporter_profile_id END,
+          reason, status,
+          reviewed_by_account_id,
+          reviewed_at, created_at))
+       FROM (SELECT * FROM topic_reports
+             WHERE topic_id NOT IN (SELECT value FROM json_each(?2))
+               AND NOT (reporter_profile_id IS ?1 AND status <> 'pending')
+             ORDER BY report_id)) AS reports,
+      (SELECT json_group_array(json_array(block_id, tournament_id, blocked_profile_id,
+          CASE WHEN actor_profile_id IS ?1 THEN NULL ELSE actor_profile_id END,
+          actor_role, reason, created_at))
+       FROM (SELECT * FROM tournament_participation_blocks
+             WHERE blocked_profile_id IS NOT ?1
+             ORDER BY block_id)) AS blocks,
+      (SELECT json_group_array(json_array(ban_id,
+          CASE WHEN profile_id IS ?1 THEN NULL ELSE profile_id END,
+          CASE WHEN profile_id IS ?1 THEN ?1 ELSE deleted_profile_id_snapshot END,
+          banned_at, banned_until, reason,
+          CASE WHEN banned_by_profile_id IS ?1 THEN NULL ELSE banned_by_profile_id END,
+          lifted_at,
+          CASE WHEN lifted_by_profile_id IS ?1 THEN NULL ELSE lifted_by_profile_id END))
+       FROM (SELECT * FROM profile_bans ORDER BY ban_id)) AS bans,
+      (SELECT json_group_array(json_array(mute_history_id, mute_audit_log_id, profile_id,
+          source_topic_id, source_body_snapshot, source_attachment_storage_filename,
+          source_attachment_is_evidence_copy, status, muted_until, reason_text))
+       FROM (SELECT * FROM topic_mute_evidence WHERE profile_id IS NOT ?1 ORDER BY mute_history_id)) AS evidence,
+      (SELECT json_group_array(json_array(topic_id, profile_id, muted_until, reason))
+       FROM (SELECT * FROM topic_mutes
+             WHERE profile_id IS NOT ?1 AND topic_id NOT IN (SELECT value FROM json_each(?2))
+             ORDER BY topic_id, profile_id)) AS topic_mutes,
+      (SELECT json_group_array(json_array(profile_id, muted_until, reason))
+       FROM (SELECT * FROM topic_section_mutes WHERE profile_id IS NOT ?1 ORDER BY profile_id)) AS section_mutes,
+      (SELECT json_group_array(json_array(log_id, action, topic_id,
+          CASE WHEN target_profile_id IS ?1 THEN NULL ELSE target_profile_id END,
+          reason, expires_at, created_at))
+       FROM (SELECT * FROM topic_moderation_audit_log
+             WHERE topic_id NOT IN (SELECT value FROM json_each(?2))
+             ORDER BY log_id)) AS topic_audit,
+      (SELECT json_group_array(json_array(log_id, message_id,
+          CASE WHEN sender_profile_id IS ?1 THEN NULL ELSE sender_profile_id END,
+          actor_role_at_deletion, created_at))
+       FROM (SELECT * FROM lobby_chat_deletion_audit_log ORDER BY log_id)) AS lobby_audit,
+      (SELECT json_group_array(json_array(pending_id, target_profile_id, action, ban_id, reason, support_request_message_id))
+       FROM (SELECT * FROM pending_profile_moderation WHERE target_profile_id IS NOT ?1 ORDER BY pending_id)) AS pending;
+  `)
+  // Модераторски записи, които след изтриването НЕ бива да сочат към профила
+  // (единствената разрешена следа е profile_bans.deleted_profile_id_snapshot).
+  const countModerationLinksStatement = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM profile_bans WHERE profile_id = ?1 OR banned_by_profile_id = ?1 OR lifted_by_profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_reports WHERE reporter_profile_id = ?1)
+      + (SELECT COUNT(*) FROM tournament_participation_blocks WHERE blocked_profile_id = ?1 OR actor_profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_mutes WHERE profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_section_mutes WHERE profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_mute_evidence WHERE profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_mute_end_notices WHERE profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_moderation_audit_log WHERE target_profile_id = ?1)
+      + (SELECT COUNT(*) FROM lobby_chat_deletion_audit_log WHERE sender_profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_message_deletion_audit_log WHERE sender_profile_id = ?1)
+      + (SELECT COUNT(*) FROM topic_message_self_deletion_audit_log WHERE sender_profile_id = ?1)
+      + (SELECT COUNT(*) FROM pending_profile_moderation WHERE target_profile_id = ?1)
+      + (SELECT COUNT(*) FROM player_blocks WHERE blocker_profile_id = ?1 OR blocked_profile_id = ?1)
+      + (SELECT COUNT(*) FROM admin_profile_risk_checks WHERE profile_id = ?1) AS cnt;
+  `)
+
+  type ModerationState = { expected: string; evidenceFiles: string[] }
+  function readModerationState(profileId: string, ownTopicIdsJson: string): ModerationState {
+    return {
+      expected: JSON.stringify(selectModerationStateStatement.get(profileId, ownTopicIdsJson)),
+      evidenceFiles: (selectEvidenceAttachmentsStatement.all(profileId) as Array<{ storage_filename: string; is_copy: number }>)
+        .map((row) => `${row.is_copy === 1 ? 'topic_mute_evidence_attachment' : 'topic_attachment'}\n${row.storage_filename}`),
+    }
+  }
+
+  function assertModerationInvariant(
+    before: ModerationState,
+    profileId: string,
+    ownTopicIdsJson: string,
+    enqueuedFiles: ReadonlySet<string>,
+  ): void {
+    const actual = JSON.stringify(selectModerationStateStatement.get(profileId, ownTopicIdsJson))
+    if (
+      actual !== before.expected ||
+      (countModerationLinksStatement.get(profileId) as { cnt: number }).cnt !== 0 ||
+      before.evidenceFiles.some((key) => !enqueuedFiles.has(key))
+    ) {
+      throw new Error('profile_deletion_moderation_invariant_violated')
+    }
+  }
+
   // Известията за кампанийни награди на изтрития — UI съобщения без одитна
   // стойност (наградата е в campaign_reward_claims); иначе остават сираци.
   const deleteCampaignRewardNotificationsStatement = database.prepare(`
@@ -1099,6 +1235,7 @@ export async function createProfileDeletionExecutor(
     if (participationChecks.hasPendingTournamentInvite(profile.profile_id)) return { blocked: 'pending_tournament_invite' }
     if (participationChecks.hasPersistedActiveGame(profile.profile_id)) return { blocked: 'active_game' }
     if (selectCampaignGiftSenderStatement.get(profile.profile_id) !== undefined) return { blocked: 'campaign_gift_sender_protected' }
+    if (selectActiveBanStatement.get(profile.profile_id) !== undefined) return { blocked: 'active_ban' }
     if (selectSupportEvidenceHoldStatement.get(profile.profile_id) !== undefined) return { blocked: 'support_evidence_hold' }
     return null
   }
@@ -1124,6 +1261,15 @@ export async function createProfileDeletionExecutor(
   ): { accountDeleted: boolean; identityLinksDeleted: number; privateMatchesAnonymized: number; ludoMatchesAnonymized: number } {
     const profileId = profile.profile_id
     const topicPlan = planTopicCleanup(profileId)
+    const enqueuedFiles = new Set<string>()
+    const enqueueFile = enqueue
+    enqueue = (fileKind, storageRef) => {
+      enqueuedFiles.add(`${fileKind}\n${storageRef}`)
+      enqueueFile(fileKind, storageRef)
+    }
+    // Етап 4E6B — очакваното състояние на модераторските записи ПРЕДИ всичко.
+    const ownTopicIdsJson = JSON.stringify(topicPlan.ownTopicIdsToDelete)
+    const moderationBefore = readModerationState(profileId, ownTopicIdsJson)
 
     if (profile.avatar_url !== null && profile.avatar_url.startsWith('/uploads/avatars/')) {
       enqueue('avatar', profile.avatar_url)
@@ -1185,6 +1331,9 @@ export async function createProfileDeletionExecutor(
     for (const statement of deleteWithoutFkStatements) statement.run(profileId)
     // Етап 4E5 — кореспонденцията с поддръжката (без FK към profiles).
     const supportBefore = deleteSupportCorrespondence(profileId)
+    // Етап 4E6B — вече разгледаните сигнали на профила (неразгледаните
+    // остават анонимни чрез FK SET NULL при DELETE FROM profiles).
+    deleteReviewedOwnReportsStatement.run(profileId)
 
     // Risk cache на свързаните профили (mirror на hard delete) — само маркер.
     const visitorIds = [...(linkReader.findVisitorIdsForProfiles([profileId]).get(profileId) ?? [])]
@@ -1226,6 +1375,9 @@ export async function createProfileDeletionExecutor(
     finalizePartnerRatings(ratingStateBefore, profileId)
     // Етап 4E5 — нищо от поддръжката не сочи към профила; чуждото е непокътнато.
     assertSupportInvariant(supportBefore, profileId)
+    // Етап 4E6B — модераторските записи: точно очакваното, без връзки към
+    // профила, файловете на доказателствата му — в опашката.
+    assertModerationInvariant(moderationBefore, profileId, ownTopicIdsJson, enqueuedFiles)
 
     // Инварианти преди COMMIT — нарушение = ROLLBACK (failed, повторен опит).
     const foreignTopicMessagesAfter = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt

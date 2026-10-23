@@ -404,6 +404,18 @@ export async function createProfileHardDeleteService(
     WHERE profile_id IN (SELECT value FROM json_each(?1));
   `)
 
+  // Етап 4E6B (20261029_001): topic_reports.reporter_profile_id и
+  // tournament_participation_blocks.actor_profile_id вече са ON DELETE SET
+  // NULL (самоизтриването пази неразгледаните сигнали и наложените
+  // блокировки анонимно). Административното изтриване ЗАПАЗВА досегашното
+  // си поведение (каскадата) — редовете на target-а се премахват изрично.
+  const deleteReportsByTargetStatement = database.prepare(`
+    DELETE FROM topic_reports WHERE reporter_profile_id = ?;
+  `)
+  const deleteParticipationBlocksByTargetActorStatement = database.prepare(`
+    DELETE FROM tournament_participation_blocks WHERE actor_profile_id = ?;
+  `)
+
   // chat_conversation_reads (profile_id, friendship_id) НЯМА FOREIGN KEY изобщо
   // (виж 20260520_001 migration-а) — за разлика от friend_chat_messages/
   // friend_chat_attachments (ON DELETE CASCADE през profile_friendships),
@@ -1109,6 +1121,9 @@ export async function createProfileHardDeleteService(
           .map((row) => row.rated_profile_id),
       )
       deleteRatingsGivenByTargetStatement.run(input.targetProfileId)
+      // Етап 4E6B — досегашното поведение за сигналите и блокировките на target-а.
+      deleteReportsByTargetStatement.run(input.targetProfileId)
+      deleteParticipationBlocksByTargetActorStatement.run(input.targetProfileId)
 
       deleteProfileStatement.run(input.targetProfileId)
 

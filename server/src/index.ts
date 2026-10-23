@@ -11426,6 +11426,9 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
     } else if (result.code === 'active_participation') {
       // Повторната проверка ВЪТРЕ в транзакцията (видима за всички процеси).
       sendJsonResponse(res, 409, { ok: false, code: 'ACTIVE_GAME_OR_TOURNAMENT', message: PROFILE_DELETION_ACTIVE_PARTICIPATION_MESSAGE })
+    } else if (result.code === 'active_ban') {
+      // Етап 4E6B — проверката е в транзакцията на request store-а.
+      sendJsonResponse(res, 409, { ok: false, code: 'PROFILE_BANNED', message: 'Профилът има активен бан. Заявка за изтриване може да се подаде след изтичането или премахването му.' })
     } else {
       sendJsonResponse(res, 403, { ok: false, code: 'PROFILE_NOT_ELIGIBLE', message: 'Този профил не може да подаде заявка за самоизтриване.' })
     }

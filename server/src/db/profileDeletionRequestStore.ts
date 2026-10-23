@@ -33,7 +33,7 @@ export type ProfileDeletionPendingRequest = {
 
 export type CreateProfileDeletionRequestResult =
   | { ok: true; request: ProfileDeletionPendingRequest; eventSeq: number }
-  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_participation' }
+  | { ok: false; code: 'already_pending' | 'profile_not_eligible' | 'active_participation' | 'active_ban' }
 
 export type IssueProfileDeletionRestoreTokenResult =
   | { ok: true; restoreToken: string; expiresAt: string; request: ProfileDeletionPendingRequest }
@@ -101,6 +101,16 @@ export async function createProfileDeletionRequestStore(
     SELECT request_id, profile_id, requested_at, scheduled_for
     FROM profile_deletion_requests
     WHERE profile_id = ? AND status = 'pending'
+    LIMIT 1;
+  `)
+
+  // Етап 4E6B (бизнес правило): докато профилът има активен бан, заявка за
+  // самоизтриване не може да бъде подадена. Същата семантика като
+  // profileBanStore.getActiveBan (lifted_at IS NULL И banned_until > сега по
+  // часовника на SQLite).
+  const selectActiveBanStatement = database.prepare(`
+    SELECT 1 FROM profile_bans
+    WHERE profile_id = ? AND lifted_at IS NULL AND banned_until > CURRENT_TIMESTAMP
     LIMIT 1;
   `)
 
@@ -234,6 +244,10 @@ export async function createProfileDeletionRequestStore(
       if (selectActiveRequestStatement.get(input.profileId) !== undefined) {
         database.exec('ROLLBACK;')
         return { ok: false, code: 'already_pending' }
+      }
+      if (selectActiveBanStatement.get(profile.profile_id) !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'active_ban' }
       }
       // Етап 4: проверките, видими за всички процеси, са ВЪТРЕ в writer
       // lock-а. Турнирно записване в друг процес е или преди нас (виждаме го

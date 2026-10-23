@@ -6190,7 +6190,7 @@ async function reportTopic(
 type TopicReportSnapshot = {
   reportId: string
   topicId: string
-  reporterProfileId: string
+  reporterProfileId: string | null
   reason: string
   status: 'pending' | 'reviewed' | 'dismissed'
   reviewedByAccountId: string | null

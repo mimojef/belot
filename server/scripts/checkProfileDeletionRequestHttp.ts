@@ -359,6 +359,16 @@ try {
     await expectActiveRefusal('турнир')
   })
 
+  await check('[E11b] Активен бан (Етап 4E6B) -> 409 PROFILE_BANNED при жива сесия; без заявка; сесията остава', async () => {
+    const banned = await register('Banned')
+    // Директно в базата — механизмът за налагане (който отнема сесиите) не се ползва тук.
+    db.prepare(`INSERT INTO profile_bans (ban_id, profile_id, banned_until, reason, banned_by_profile_id) VALUES (?, ?, datetime('now', '+1 day'), 'тест', NULL);`).run(randomUUID(), banned.profileId)
+    const res = await submit(banned)
+    assert(res.status === 409 && res.json.code === 'PROFILE_BANNED', `${res.status} ${JSON.stringify(res.json)}`)
+    assert(requestCount(banned.profileId) === 0, 'създадена заявка')
+    assert((await api('/api/friends', { cookie: banned.cookie })).status === 200, 'сесията е отнета')
+  })
+
   // WS връзки преди успешното подаване.
   const hiddenSocket = await openSocket(hidden.cookie)
   const friendSocket = await openSocket(friend.cookie)

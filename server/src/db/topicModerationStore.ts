@@ -112,7 +112,8 @@ export type TopicReportStatus = 'pending' | 'reviewed' | 'dismissed'
 export type TopicReportSnapshot = {
   reportId: string
   topicId: string
-  reporterProfileId: string
+  /** null — подателят е изтрил профила си (Етап 4E6B); сигналът остава. */
+  reporterProfileId: string | null
   reason: string
   status: TopicReportStatus
   reviewedByAccountId: string | null
@@ -385,7 +386,7 @@ function toSqliteDateTimeString(date: Date): string {
 type TopicReportRow = {
   report_id: string
   topic_id: string
-  reporter_profile_id: string
+  reporter_profile_id: string | null
   reason: string
   status: TopicReportStatus
   reviewed_by_account_id: string | null

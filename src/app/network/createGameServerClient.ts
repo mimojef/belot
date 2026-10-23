@@ -3139,7 +3139,7 @@ export type TopicReportStatus = 'pending' | 'reviewed' | 'dismissed'
 export type TopicReportSnapshot = {
   reportId: string
   topicId: string
-  reporterProfileId: string
+  reporterProfileId: string | null
   reason: string
   status: TopicReportStatus
   reviewedByAccountId: string | null
