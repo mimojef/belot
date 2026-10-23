@@ -34,6 +34,7 @@ import { join, resolve } from 'node:path'
 import { createProfileDeletionWorker } from '../core/profileDeletionWorker.js'
 import { createProfileDeletionExecutor } from '../db/profileDeletionExecutor.js'
 import { readProfileDeletionLedger, type ProfileDeletionLedgerEntry } from '../db/profileDeletionLedger.js'
+import { listPendingMigrationsForDatabase } from './profileDeletionRestoredDbMigrations.js'
 import {
   removeProfileDeletionFile,
   type ProfileDeletionFileKind,
@@ -100,6 +101,15 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   const stateDir = resolve(readArg(argv, 'state-dir') ?? `${dbPath}.reconcile-state`)
   const journalPath = join(stateDir, 'journal.jsonl')
   if (!existsSync(dbPath)) return fail('db_missing', 'базата не съществува')
+  // Етап 4E2: схемата на възстановената база трябва да е на текущата версия
+  // (executor-ът и проверките ползват колоните от новите миграции).
+  const pendingMigrations = await listPendingMigrationsForDatabase(dbPath)
+  if (pendingMigrations.length > 0) {
+    return fail(
+      'restored_db_migrations_pending',
+      `${pendingMigrations.length} неприложени миграции (напр. ${pendingMigrations.slice(-3).join(', ')}) — първо: profileDeletionLedgerCli migrate --db=<възстановената база>`,
+    )
+  }
   if (apply) {
     if (confirmation !== REAPPLY_CONFIRMATION_PHRASE) return fail('confirmation_required', `--apply изисква --confirm=${REAPPLY_CONFIRMATION_PHRASE}`)
     if (uploadsRoot === null || !existsSync(uploadsRoot)) return fail('uploads_root_missing', '--apply изисква съществуващ --uploads-root=<директория>')

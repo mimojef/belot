@@ -15,6 +15,7 @@
  * [D] merge: обединение, дубликати, повреден/непълен най-нов snapshot,
  *     разклонена история, конфликт, липса.
  * [E] Restore: стар backup + изтривания след него, повторно изпълнение,
+ *     база отпреди нови миграции (migrate преди съгласуването),
  *     остарял/липсващ/повреден регистър, прекъсване по време на съгласуване,
  *     недостъпно хранилище, запазване на останалите данни.
  */
@@ -86,7 +87,7 @@ console.log('\ncheckProfileDeletionLedgerArchive')
 
 // dist трябва да отговаря на src (bash скриптовете ползват dist).
 {
-  const newestSource = ['src/ops/profileDeletionLedgerCli.ts', 'src/ops/profileDeletionLedgerArchive.ts', 'src/ops/profileDeletionLedgerReconcile.ts', 'src/db/profileDeletionLedger.ts', 'src/db/profileDeletionExecutor.ts']
+  const newestSource = ['src/ops/profileDeletionLedgerCli.ts', 'src/ops/profileDeletionLedgerArchive.ts', 'src/ops/profileDeletionLedgerReconcile.ts', 'src/ops/profileDeletionRestoredDbMigrations.ts', 'src/db/profileDeletionLedger.ts', 'src/db/profileDeletionExecutor.ts']
     .map((file) => statSync(join(serverRoot, file)).mtimeMs)
     .reduce((a, b) => Math.max(a, b), 0)
   if (!existsSync(CLI) || statSync(CLI).mtimeMs < newestSource) {
@@ -589,6 +590,25 @@ try {
     const accepted = runBash(RESTORE_SCRIPT, ['--target-dir', toPosix(join(root, 'ledger-restore-e7b')), '--snapshots-dir', toPosix(remoteCopy), '--accept-missing-newest'])
     assertEqual(accepted.status, 0, `приет (${accepted.out.slice(-300)})`)
     assert(accepted.out.includes('newest_snapshot_invalid_accepted'), 'предупреждението е в отчета')
+  })
+
+  await check('[E8] База отпреди нова миграция (20261027_001): reconcile отказва (exit 2) със списък; migrate отказва живата база без промяна; мигрира копието; reconcile продължава', async () => {
+    const oldRoot = join(root, 'old-schema-root')
+    mkdirSync(join(oldRoot, 'database', 'migrations'), { recursive: true })
+    for (const name of readdirSync(join(serverRoot, 'database', 'migrations'))) {
+      if (name.endsWith('.sql') && name < '20261027_001') cpSync(join(serverRoot, 'database', 'migrations', name), join(oldRoot, 'database', 'migrations', name))
+    }
+    const { databaseFilePath: oldDb } = await ensureServerDatabaseReady({ serverRootOverride: oldRoot })
+    const ledger = join(root, 'ledger-restore-e1', 'merged-ledger.jsonl')
+    const refused = runCli(['reconcile', `--db=${oldDb}`, `--ledger=${ledger}`])
+    assert(refused.status === 2 && refused.out.includes('restored_db_migrations_pending') && refused.out.includes('20261027_001'), `отказ (${refused.out.slice(-300)})`)
+    const before = readFileSync(oldDb)
+    const liveRefused = runCli(['migrate', `--db=${oldDb}`], { PROFILE_DELETION_LIVE_DB_PATH: oldDb })
+    assert(liveRefused.status === 2 && liveRefused.out.includes('live_db_refused'), `живата база (${liveRefused.out.slice(-200)})`)
+    assert(readFileSync(oldDb).equals(before), 'живата база е непроменена')
+    const migrated = runCli(['migrate', `--db=${oldDb}`], { PROFILE_DELETION_LIVE_DB_PATH: join(root, 'not-this.sqlite') })
+    assert(migrated.status === 0 && migrated.out.includes('20261027_001'), `migrate (${migrated.out.slice(-300)})`)
+    assertEqual(runCli(['reconcile', `--db=${oldDb}`, `--ledger=${ledger}`]).status, 0, 'reconcile след migrate')
   })
 } catch (error) {
   failed += 1

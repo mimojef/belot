@@ -262,9 +262,13 @@ assert(
 // в реалния runner (сортиран по име, "20261010" < всички по-горни) тая
 // подредба е гарантирана винаги; тук е explicit, защото тоя тест изкуствено
 // преподрежда "всичко друго" преди Фаза 0 самата.
+// Самоизтриване, Етап 4E2 — 20261027_001 прави ALTER TABLE
+// campaign_unit_ledger/campaign_reward_claims/campaign_manual_adjustments
+// (Фаза 0 таблици) — същата hard dependency.
 const DEPENDENT_MIGRATION_FILENAMES = [
   '20261018_001_add_campaign_archive_icon_and_rank_snapshot.sql',
   '20261022_001_add_credit_mode_to_campaign_earn_rules.sql',
+  '20261027_001_preserve_ludo_and_campaign_financial_attribution.sql',
 ]
 {
   const beforeFileNames = realMigrationFileNames.filter(

@@ -6,6 +6,7 @@
 //   confirm   --ledger=<jsonl> --snapshot=<file> --manifest=<file> --remote-path=<str> [--ack=<json>]
 //   merge     --snapshot-dir=<dir> --out=<jsonl> [--local-ledger=<jsonl>]
 //             [--accept-missing-newest] [--confirm-no-deletions-ever]
+//   migrate   --db=<ВЪЗСТАНОВЕНА sqlite> — миграциите на текущата версия (живата база се отказва)
 //   reconcile --db=<sqlite> --ledger=<jsonl> [--apply --confirm=... --uploads-root=<dir>]
 //             [--verify-only] [--state-dir=<dir>] [--accept-stale-ledger]
 //
@@ -21,6 +22,7 @@ import {
   writeMergedLedger,
 } from './profileDeletionLedgerArchive.js'
 import { runProfileDeletionLedgerReconcile } from './profileDeletionLedgerReconcile.js'
+import { migrateRestoredDatabase, RestoredDbMigrationError } from './profileDeletionRestoredDbMigrations.js'
 
 function readArg(argv: readonly string[], name: string): string | null {
   const prefix = `--${name}=`
@@ -73,16 +75,21 @@ export async function runProfileDeletionLedgerCli(argv: readonly string[]): Prom
         console.log(JSON.stringify({ ok: true, status: 'merged', ...report }))
         return 0
       }
+      case 'migrate': {
+        const result = await migrateRestoredDatabase(required(rest, 'db'))
+        console.log(JSON.stringify({ ok: result.pendingAfter.length === 0, status: 'migrated', applied: result.applied, pendingAfter: result.pendingAfter }))
+        return result.pendingAfter.length === 0 ? 0 : 2
+      }
       case 'reconcile':
         return await runProfileDeletionLedgerReconcile(rest, {
           log: (line) => console.log(line),
           error: (line) => console.error(line),
         })
       default:
-        throw new LedgerArchiveError('usage', 'команда: snapshot | confirm | merge | reconcile')
+        throw new LedgerArchiveError('usage', 'команда: snapshot | confirm | merge | migrate | reconcile')
     }
   } catch (error) {
-    const code = error instanceof LedgerArchiveError ? error.code : 'unexpected'
+    const code = error instanceof LedgerArchiveError || error instanceof RestoredDbMigrationError ? error.code : 'unexpected'
     const message = error instanceof Error ? error.message : String(error)
     console.log(JSON.stringify({ ok: false, code, message }))
     console.error(`[profile-deletion-ledger] ERROR ${message}`)
