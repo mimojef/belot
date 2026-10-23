@@ -109,10 +109,13 @@
 //   * support_deletion_archives НЕ се пипа — отделен доказателствен запис на
 //     административно изтриване по изрична заявка (не възниква при
 //     самоизтриване);
-//   * защитено доказателство: отложено административно изтриване с
-//     посочена support заявка (pending_profile_moderation, action='delete',
-//     support_request_message_id) — окончателното самоизтриване ИЗЧАКВА
-//     ('support_evidence_hold'), за да не унищожи доказателството;
+//   * отложено административно изтриване на СЪЩИЯ профил
+//     (pending_profile_moderation, action='delete', със или без support
+//     заявка) — Етап 4E6C (одобрен вариант А): окончателното самоизтриване
+//     приключва и двете процедури в същата транзакция — pending редът се
+//     изтрива изрично, без нов ред в support_deletion_archives и без
+//     admin_profile_deletions (административното изтриване не се е
+//     случило). Активен бан и другите блокери се проверяват ПРЕДИ това;
 //   * преди COMMIT: нищо от поддръжката не сочи към профила, а чуждите
 //     разговори и файлови редове са непроменени — иначе ROLLBACK.
 //
@@ -150,8 +153,6 @@ export type ProfileDeletionBlockCode =
   | 'campaign_gift_sender_protected'
   /** Етап 4C: записът в регистъра още не е потвърдено копиран извън VPS. */
   | 'ledger_offsite_pending'
-  /** Етап 4E5: отложено административно изтриване пази support доказателство. */
-  | 'support_evidence_hold'
   /** Етап 4E6B: активен бан — окончателното изтриване чака изтичането/премахването му. */
   | 'active_ban'
 
@@ -884,10 +885,11 @@ export async function createProfileDeletionExecutor(
   const deleteSupportArchivedStatement = database.prepare(`
     DELETE FROM support_archived WHERE profile_id = ?1;
   `)
-  const selectSupportEvidenceHoldStatement = database.prepare(`
-    SELECT 1 FROM pending_profile_moderation
-    WHERE target_profile_id = ?1 AND action = 'delete' AND support_request_message_id IS NOT NULL
-    LIMIT 1;
+  // Етап 4E6C — висящото административно изтриване на същия профил се
+  // приключва от самоизтриването (вариант А). Само action='delete' и само
+  // за този профил; pending бан се обработва от правилото за активен бан.
+  const deletePendingAdminDeleteStatement = database.prepare(`
+    DELETE FROM pending_profile_moderation WHERE target_profile_id = ?1 AND action = 'delete';
   `)
   const selectSupportStateStatement = database.prepare(`
     SELECT
@@ -1236,7 +1238,6 @@ export async function createProfileDeletionExecutor(
     if (participationChecks.hasPersistedActiveGame(profile.profile_id)) return { blocked: 'active_game' }
     if (selectCampaignGiftSenderStatement.get(profile.profile_id) !== undefined) return { blocked: 'campaign_gift_sender_protected' }
     if (selectActiveBanStatement.get(profile.profile_id) !== undefined) return { blocked: 'active_ban' }
-    if (selectSupportEvidenceHoldStatement.get(profile.profile_id) !== undefined) return { blocked: 'support_evidence_hold' }
     return null
   }
 
@@ -1258,7 +1259,7 @@ export async function createProfileDeletionExecutor(
   function deleteProfileDataInTransaction(
     profile: ProfileRow,
     enqueue: (fileKind: ProfileDeletionFileKind, storageRef: string) => void,
-  ): { accountDeleted: boolean; identityLinksDeleted: number; privateMatchesAnonymized: number; ludoMatchesAnonymized: number } {
+  ): { accountDeleted: boolean; identityLinksDeleted: number; privateMatchesAnonymized: number; ludoMatchesAnonymized: number; pendingAdminDeleteResolved: number } {
     const profileId = profile.profile_id
     const topicPlan = planTopicCleanup(profileId)
     const enqueuedFiles = new Set<string>()
@@ -1331,6 +1332,9 @@ export async function createProfileDeletionExecutor(
     for (const statement of deleteWithoutFkStatements) statement.run(profileId)
     // Етап 4E5 — кореспонденцията с поддръжката (без FK към profiles).
     const supportBefore = deleteSupportCorrespondence(profileId)
+    // Етап 4E6C — висящото административно изтриване на същия профил е
+    // приключено от тази процедура (изрично, не чрез каскадата).
+    const pendingAdminDeleteResolved = Number((deletePendingAdminDeleteStatement.run(profileId) as { changes: number }).changes)
     // Етап 4E6B — вече разгледаните сигнали на профила (неразгледаните
     // остават анонимни чрез FK SET NULL при DELETE FROM profiles).
     deleteReviewedOwnReportsStatement.run(profileId)
@@ -1404,7 +1408,7 @@ export async function createProfileDeletionExecutor(
         accountDeleted = true
       }
     }
-    return { accountDeleted, identityLinksDeleted, privateMatchesAnonymized, ludoMatchesAnonymized }
+    return { accountDeleted, identityLinksDeleted, privateMatchesAnonymized, ludoMatchesAnonymized, pendingAdminDeleteResolved }
   }
 
   function runDatabasePhase(request: ClaimedProfileDeletionRequest, workerId: string): ProfileDeletionDbPhaseResult {
@@ -1476,6 +1480,7 @@ export async function createProfileDeletionExecutor(
         identityLinks: deletion.identityLinksDeleted,
         privateMatches: deletion.privateMatchesAnonymized,
         ludoMatches: deletion.ludoMatchesAnonymized,
+        pendingAdminDeleteResolved: deletion.pendingAdminDeleteResolved,
       })
       if (enqueuedFileCount > 0) insertEvent(row.request_id, row.profile_id, 'file_enqueued', workerId, { count: enqueuedFileCount })
 

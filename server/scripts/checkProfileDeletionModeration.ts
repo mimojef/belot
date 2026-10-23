@@ -575,7 +575,7 @@ try {
     assertEqual(count('SELECT COUNT(*) AS c FROM topic_mute_evidence WHERE profile_id = ?;', bystander.profileId), 2, 'доказателствата на третото лице')
   })
 
-  await check('[P7] Отложено административно действие: pending бан — blocked active_ban, после (бан премахнат) минава и pending редът изчезва; pending изтриване без support заявка НЕ блокира; със support заявка — blocked support_evidence_hold без промени (решение предстои)', async () => {
+  await check('[P7] Отложено административно действие: pending бан — blocked active_ban, после (бан премахнат) минава и pending редът изчезва; pending изтриване без/със support заявка НЕ блокира и се приключва (Етап 4E6C)', async () => {
     const withBan = registerUser('PendingBan')
     const banRequestId = insertDueRequest(withBan)
     const ban = banStore.banProfile({ targetProfileId: withBan.profileId, actorProfileId: admin.profileId, days: 10, reason: 'отложен' })
@@ -599,16 +599,9 @@ try {
     db.prepare(`INSERT INTO support_messages (message_id, profile_id, body, is_from_admin) VALUES (?, ?, 'Изтрийте профила ми', 0);`).run('sup-msg-1', withSupport.profileId)
     db.prepare(`INSERT INTO pending_profile_moderation (pending_id, target_profile_id, action, requested_by_profile_id, reason, support_request_message_id) VALUES (?, ?, 'delete', ?, 'по заявка', 'sup-msg-1');`)
       .run(randomUUID(), withSupport.profileId, admin.profileId)
-    const requestId = insertDueRequest(withSupport)
-    assertEqual((await makeWorker(executor, [requestId]).runOnce()).blocked, 1, 'blocked')
-    const row = requestRow(requestId)
-    assert(row.status === 'blocked' && row.last_error_code === 'support_evidence_hold', JSON.stringify(row))
-    assert(profileExists(withSupport.profileId), 'профилът')
-    assertEqual(count('SELECT COUNT(*) AS c FROM support_messages WHERE profile_id = ?;', withSupport.profileId), 1, 'доказателството')
-    // Почистване, за да не пречи на [P8].
-    db.prepare('DELETE FROM pending_profile_moderation WHERE target_profile_id = ?;').run(withSupport.profileId)
-    db.prepare('UPDATE profile_deletion_requests SET next_attempt_at = ? WHERE request_id = ?;').run(new Date(Date.parse(dbNow()) - 1000).toISOString(), requestId)
-    assertEqual((await makeWorker(executor, [requestId]).runOnce()).completed, 1, 'след освобождаване')
+    await deleteViaWorker(withSupport)
+    assertEqual(count('SELECT COUNT(*) AS c FROM pending_profile_moderation WHERE target_profile_id IN (?, ?);', withDelete.profileId, withSupport.profileId), 0, 'pending изтривания')
+    assertEqual(count('SELECT COUNT(*) AS c FROM support_messages WHERE profile_id = ?;', withSupport.profileId), 0, 'support разговорът')
   })
 
   await check('[P8] Остатъчни идентификатори: ID, акаунт, имейл и име на изтритите не се срещат в нито една таблица (освен регистъра на изтриването и псевдонимния UUID в атрибуционните deleted_*_snapshot колони, вкл. profile_bans)', () => {
