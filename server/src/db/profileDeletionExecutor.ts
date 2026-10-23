@@ -24,7 +24,7 @@
 //     показва "Играч" за липсващ профил);
 //   * подаръците на други потребители — gift_item_transactions е SET NULL
 //     (20261026_001), името на изпращача в известията се заменя;
-//   * support разговорите — непроменени (въпрос за следващ етап на P5).
+//   * support разговорите — виж Етап 4E5 по-долу.
 //
 // Етап 4E1 (одит P5, одобрени решения):
 //   * profile_ip_links / profile_visitor_links (без FK) — редовете на
@@ -75,6 +75,23 @@
 //     NULL); принадлежност само по profile_id / snapshot, никога по име;
 //     нарушен инвариант преди COMMIT -> ROLLBACK.
 //
+// Етап 4E5 (одит P5) — кореспонденцията с поддръжката ("Връзка с екипа"):
+//   * support_messages (без FK към profiles; разговорът е един на профил,
+//     ключ profile_id; отговорите на екипа са в същия разговор,
+//     is_from_admin = 1) — изтриват се всички съобщения на профила;
+//     support_message_attachments изчезват каскадно, а файловете им са в
+//     опашката ПРЕДИ това (support_attachment, обичайните защити);
+//     support_archived (маркер "архивиран") — изтрива се;
+//   * support_deletion_archives НЕ се пипа — отделен доказателствен запис на
+//     административно изтриване по изрична заявка (не възниква при
+//     самоизтриване);
+//   * защитено доказателство: отложено административно изтриване с
+//     посочена support заявка (pending_profile_moderation, action='delete',
+//     support_request_message_id) — окончателното самоизтриване ИЗЧАКВА
+//     ('support_evidence_hold'), за да не унищожи доказателството;
+//   * преди COMMIT: нищо от поддръжката не сочи към профила, а чуждите
+//     разговори и файлови редове са непроменени — иначе ROLLBACK.
+//
 // Етап 4E4 (одит P5) — партньорски оценки (миграция 20261028_001):
 //   * дадените от профила оценки остават в рейтингите на другите — FK
 //     rated_by_profile_id е ON DELETE SET NULL (без snapshot на ID-то);
@@ -109,6 +126,8 @@ export type ProfileDeletionBlockCode =
   | 'campaign_gift_sender_protected'
   /** Етап 4C: записът в регистъра още не е потвърдено копиран извън VPS. */
   | 'ledger_offsite_pending'
+  /** Етап 4E5: отложено административно изтриване пази support доказателство. */
+  | 'support_evidence_hold'
 
 export type ProfileDeletionFailCode =
   | 'identity_mismatch'
@@ -826,6 +845,56 @@ export async function createProfileDeletionExecutor(
     }
   }
 
+  // ─── Етап 4E5: кореспонденцията с поддръжката ──────────────────────────
+  const selectSupportAttachmentsStatement = database.prepare(`
+    SELECT a.storage_filename
+    FROM support_message_attachments a
+    JOIN support_messages m ON m.message_id = a.message_id
+    WHERE m.profile_id = ?1;
+  `)
+  const deleteSupportMessagesStatement = database.prepare(`
+    DELETE FROM support_messages WHERE profile_id = ?1;
+  `)
+  const deleteSupportArchivedStatement = database.prepare(`
+    DELETE FROM support_archived WHERE profile_id = ?1;
+  `)
+  const selectSupportEvidenceHoldStatement = database.prepare(`
+    SELECT 1 FROM pending_profile_moderation
+    WHERE target_profile_id = ?1 AND action = 'delete' AND support_request_message_id IS NOT NULL
+    LIMIT 1;
+  `)
+  const selectSupportStateStatement = database.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM support_messages WHERE profile_id = ?1) AS own_messages,
+      (SELECT COUNT(*) FROM support_message_attachments a JOIN support_messages m ON m.message_id = a.message_id WHERE m.profile_id = ?1) AS own_attachments,
+      (SELECT COUNT(*) FROM support_archived WHERE profile_id = ?1) AS own_archived,
+      (SELECT COUNT(*) FROM support_messages) AS all_messages,
+      (SELECT COUNT(*) FROM support_message_attachments) AS all_attachments,
+      (SELECT COUNT(*) FROM support_archived) AS all_archived;
+  `)
+  type SupportState = { own_messages: number; own_attachments: number; own_archived: number; all_messages: number; all_attachments: number; all_archived: number }
+
+  function deleteSupportCorrespondence(profileId: string): SupportState {
+    const before = selectSupportStateStatement.get(profileId) as SupportState
+    deleteSupportMessagesStatement.run(profileId)
+    deleteSupportArchivedStatement.run(profileId)
+    return before
+  }
+
+  function assertSupportInvariant(before: SupportState, profileId: string): void {
+    const after = selectSupportStateStatement.get(profileId) as SupportState
+    if (
+      after.own_messages !== 0 ||
+      after.own_attachments !== 0 ||
+      after.own_archived !== 0 ||
+      after.all_messages !== before.all_messages - before.own_messages ||
+      after.all_attachments !== before.all_attachments - before.own_attachments ||
+      after.all_archived !== before.all_archived - before.own_archived
+    ) {
+      throw new Error('profile_deletion_support_invariant_violated')
+    }
+  }
+
   // Известията за кампанийни награди на изтрития — UI съобщения без одитна
   // стойност (наградата е в campaign_reward_claims); иначе остават сираци.
   const deleteCampaignRewardNotificationsStatement = database.prepare(`
@@ -1030,6 +1099,7 @@ export async function createProfileDeletionExecutor(
     if (participationChecks.hasPendingTournamentInvite(profile.profile_id)) return { blocked: 'pending_tournament_invite' }
     if (participationChecks.hasPersistedActiveGame(profile.profile_id)) return { blocked: 'active_game' }
     if (selectCampaignGiftSenderStatement.get(profile.profile_id) !== undefined) return { blocked: 'campaign_gift_sender_protected' }
+    if (selectSupportEvidenceHoldStatement.get(profile.profile_id) !== undefined) return { blocked: 'support_evidence_hold' }
     return null
   }
 
@@ -1064,6 +1134,10 @@ export async function createProfileDeletionExecutor(
     }
     for (const row of selectChatAttachmentsStatement.all(profileId) as Array<{ storage_filename: string }>) {
       enqueue('chat_attachment', row.storage_filename)
+    }
+    // Етап 4E5 — файловете към support съобщенията (на потребителя и на екипа).
+    for (const row of selectSupportAttachmentsStatement.all(profileId) as Array<{ storage_filename: string }>) {
+      enqueue('support_attachment', row.storage_filename)
     }
     for (const row of selectTopicAttachmentsStatement.all(profileId) as Array<{ storage_filename: string }>) {
       enqueue('topic_attachment', row.storage_filename)
@@ -1109,6 +1183,8 @@ export async function createProfileDeletionExecutor(
     deleteCampaignRewardNotificationsStatement.run(profileId)
     for (const statement of anonymizeStatements) statement.run(profileId)
     for (const statement of deleteWithoutFkStatements) statement.run(profileId)
+    // Етап 4E5 — кореспонденцията с поддръжката (без FK към profiles).
+    const supportBefore = deleteSupportCorrespondence(profileId)
 
     // Risk cache на свързаните профили (mirror на hard delete) — само маркер.
     const visitorIds = [...(linkReader.findVisitorIdsForProfiles([profileId]).get(profileId) ?? [])]
@@ -1148,6 +1224,8 @@ export async function createProfileDeletionExecutor(
     assertNameArchiveInvariant(nameArchiveBefore, profileId)
     // Етап 4E4 — дадените оценки са анонимни и в сила, кешът е коректен.
     finalizePartnerRatings(ratingStateBefore, profileId)
+    // Етап 4E5 — нищо от поддръжката не сочи към профила; чуждото е непокътнато.
+    assertSupportInvariant(supportBefore, profileId)
 
     // Инварианти преди COMMIT — нарушение = ROLLBACK (failed, повторен опит).
     const foreignTopicMessagesAfter = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt
