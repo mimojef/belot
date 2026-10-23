@@ -65,6 +65,15 @@
 //   * преди COMMIT: броят чужди съобщения във всички ДРУГИ засегнати теми е
 //     непроменен, няма parent връзка между различни теми, а собствените
 //     теми са напълно изчезнали — иначе ROLLBACK (failed, повторен опит).
+//
+// Етап 4E3 (одит P5) — исторически имена на профила:
+//   * profile_name_change_ledger — old/new_display_name стават неутралният
+//     етикет; сумата, балансът, датата, change_id и snapshot-ът остават;
+//   * campaign_archive_top10 — display_name_at_archive на реда на профила
+//     става етикетът; мястото, единиците и титлата остават, класацията не се
+//     преизчислява. И двете — ПРЕДИ DELETE FROM profiles (после profile_id е
+//     NULL); принадлежност само по profile_id / snapshot, никога по име;
+//     нарушен инвариант преди COMMIT -> ROLLBACK.
 
 import { randomBytes } from 'node:crypto'
 import type { ProfileDeletionFileKind } from '../uploads/profileDeletionFileRemoval.js'
@@ -522,6 +531,17 @@ export async function createProfileDeletionExecutor(
     // Лайковете, дадени ОТ профила, се броят в чужди тотали
     // (SUM(total_given)) — пазят се, но с несвързан случаен идентификатор.
     `UPDATE profile_likes SET liker_profile_id = 'deleted-' || lower(hex(randomblob(16))) WHERE liker_profile_id = ?1;`,
+    // Етап 4E3: историята на платените смени на име — двете имена стават
+    // неутралният етикет; сумата, балансът, датата, change_id и snapshot-ът
+    // остават. Принадлежност САМО по profile_id / snapshot на същия UUID
+    // (никога по съвпадение на име).
+    `UPDATE profile_name_change_ledger SET old_display_name = ?2, new_display_name = ?2
+     WHERE profile_id = ?1 OR (profile_id IS NULL AND deleted_profile_id_snapshot = ?1);`,
+    // Етап 4E3: архивът на кампаниите — само името на реда на профила
+    // (мястото, единиците и титлата остават; класацията не се преизчислява).
+    // Трябва да е ПРЕДИ DELETE FROM profiles: след него profile_id е NULL
+    // (ON DELETE SET NULL) и редът вече не може да бъде свързан с профила.
+    `UPDATE campaign_archive_top10 SET display_name_at_archive = ?2 WHERE profile_id = ?1;`,
   ].map(prepareWithArity)
 
   // ─── Лични данни без FK (cascade НЕ ги пипа) ─────────────────────────────
@@ -628,6 +648,8 @@ export async function createProfileDeletionExecutor(
     { table: 'campaign_unit_ledger', sum: 'units_amount' },
     { table: 'campaign_reward_claims', sum: '0' },
     { table: 'campaign_manual_adjustments', sum: 'units_delta' },
+    // Етап 4E3: платените смени на име (сумата и балансът остават).
+    { table: 'profile_name_change_ledger', sum: 'price_amount' },
   ] as const
   const financialInvariantStatements = FINANCIAL_LEDGERS.map(({ table, sum }) => ({
     table,
@@ -661,6 +683,69 @@ export async function createProfileDeletionExecutor(
       ) {
         throw new Error(`profile_deletion_financial_invariant_violated:${b.table}`)
       }
+    }
+  }
+
+  // ─── Етап 4E3: имена в историята и архивите ──────────────────────────────
+  // Преди DELETE: редовете на профила в архива (място, единици, титла) и
+  // общите стойности; след DELETE (преди COMMIT): същите редове са без
+  // profile_id и с неутралния етикет, нищо друго в архива не е променено, а
+  // в регистъра за смяна на име не е останало оригинално име на профила.
+  type ArchiveRow = { campaign_id: string; rank: number; units_total: number; rank_title_at_archive: string | null }
+  const selectOwnArchiveRowsStatement = database.prepare(`
+    SELECT campaign_id, rank, units_total, rank_title_at_archive
+    FROM campaign_archive_top10 WHERE profile_id = ? ORDER BY campaign_id, rank;
+  `)
+  const selectArchiveRowStatement = database.prepare(`
+    SELECT profile_id, display_name_at_archive, units_total, rank_title_at_archive
+    FROM campaign_archive_top10 WHERE campaign_id = ? AND rank = ?;
+  `)
+  const selectArchiveTotalsStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt, COALESCE(SUM(units_total), 0) AS units, COALESCE(SUM(rank), 0) AS ranks,
+      COALESCE(SUM(CASE WHEN display_name_at_archive = ?1 THEN 1 ELSE 0 END), 0) AS labelled
+    FROM campaign_archive_top10;
+  `)
+  const countNameLedgerOriginalNamesStatement = database.prepare(`
+    SELECT COUNT(*) AS cnt FROM profile_name_change_ledger
+    WHERE (profile_id = ?1 OR deleted_profile_id_snapshot = ?1)
+      AND (old_display_name <> ?2 OR new_display_name <> ?2);
+  `)
+
+  type NameArchiveState = { rows: ArchiveRow[]; totals: { cnt: number; units: number; ranks: number; labelled: number } }
+  function readNameArchiveState(profileId: string): NameArchiveState {
+    return {
+      rows: selectOwnArchiveRowsStatement.all(profileId) as ArchiveRow[],
+      totals: selectArchiveTotalsStatement.get(PROFILE_DELETION_DELETED_LABEL) as NameArchiveState['totals'],
+    }
+  }
+
+  function assertNameArchiveInvariant(before: NameArchiveState, profileId: string): void {
+    for (const row of before.rows) {
+      const after = selectArchiveRowStatement.get(row.campaign_id, row.rank) as
+        | { profile_id: string | null; display_name_at_archive: string; units_total: number; rank_title_at_archive: string | null }
+        | undefined
+      if (
+        after === undefined ||
+        after.profile_id !== null ||
+        after.display_name_at_archive !== PROFILE_DELETION_DELETED_LABEL ||
+        after.units_total !== row.units_total ||
+        after.rank_title_at_archive !== row.rank_title_at_archive
+      ) {
+        throw new Error('profile_deletion_name_archive_invariant_violated:campaign_archive_top10')
+      }
+    }
+    const totals = selectArchiveTotalsStatement.get(PROFILE_DELETION_DELETED_LABEL) as NameArchiveState['totals']
+    const newlyLabelled = before.rows.length
+    if (
+      totals.cnt !== before.totals.cnt ||
+      totals.units !== before.totals.units ||
+      totals.ranks !== before.totals.ranks ||
+      totals.labelled > before.totals.labelled + newlyLabelled
+    ) {
+      throw new Error('profile_deletion_name_archive_invariant_violated:campaign_archive_top10_totals')
+    }
+    if ((countNameLedgerOriginalNamesStatement.get(profileId, PROFILE_DELETION_DELETED_LABEL) as { cnt: number }).cnt !== 0) {
+      throw new Error('profile_deletion_name_archive_invariant_violated:profile_name_change_ledger')
     }
   }
 
@@ -939,6 +1024,8 @@ export async function createProfileDeletionExecutor(
 
     // Етап 4E2 — финансовите стойности ПРЕДИ snapshot-а и DELETE-а.
     const financialTotalsBefore = readFinancialTotals(profileId)
+    // Етап 4E3 — архивните редове на профила ПРЕДИ анонимизирането.
+    const nameArchiveBefore = readNameArchiveState(profileId)
     for (const statement of attributionSnapshotStatements) statement.run(profileId)
     deleteCampaignRewardNotificationsStatement.run(profileId)
     for (const statement of anonymizeStatements) statement.run(profileId)
@@ -978,6 +1065,8 @@ export async function createProfileDeletionExecutor(
     // Етап 4E2 — след SET NULL каскадата: атрибуцията е под snapshot-а, нищо
     // не е изгубено/дублирано (иначе ROLLBACK).
     assertFinancialInvariant(financialTotalsBefore, profileId)
+    // Етап 4E3 — имената в историята/архива са заличени, нищо друго не е пипнато.
+    assertNameArchiveInvariant(nameArchiveBefore, profileId)
 
     // Инварианти преди COMMIT — нарушение = ROLLBACK (failed, повторен опит).
     const foreignTopicMessagesAfter = (countForeignTopicMessagesStatement.get(profileId, preservedTopicIdsJson) as { cnt: number }).cnt

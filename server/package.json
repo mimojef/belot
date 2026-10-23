@@ -289,6 +289,7 @@
     "check:profile-deletion-worker": "tsx scripts/checkProfileDeletionWorker.ts --server-root=.",
     "check:profile-deletion-match-history": "tsx scripts/checkProfileDeletionMatchHistory.ts --server-root=.",
     "check:profile-deletion-financial-attribution": "tsx scripts/checkProfileDeletionFinancialAttribution.ts --server-root=.",
+    "check:profile-deletion-name-history": "tsx scripts/checkProfileDeletionNameHistory.ts --server-root=.",
     "check:public-upload-path-security": "tsx scripts/checkPublicUploadPathSecurity.ts --server-root=.",
     "check:profile-deletion-ledger-archive": "tsx scripts/checkProfileDeletionLedgerArchive.ts --server-root=.",
     "ops:reconcile-profile-deletion-ledger": "tsx scripts/reconcileProfileDeletionLedger.ts",
