@@ -129,6 +129,7 @@ import {
   PRIVATE_ROOM_CHAT_MAX_BODY_CODE_POINTS,
 } from './protocol/privateRoomChatValidation.js'
 import { createSupportStore, type SupportMessageSnapshot, type SupportConversationSnapshot } from './db/supportStore.js'
+import { createAdminProfileDeletionCoordinator } from './core/adminProfileDeletionCoordinator.js'
 import { createGuestContactStore } from './db/guestContactStore.js'
 import {
   createGuestTrialStore,
@@ -1649,6 +1650,45 @@ const profileDeletionWorker = profileDeletionExecutor === null
       log: (message) => console.log(message),
     })
 console.log(`[profile-deletion-worker] enabled=${profileDeletionWorker !== null} ledgerOffsiteRequired=${PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED}`)
+
+// ─── Етап 4F1 — административно окончателно изтриване през регистъра ──────
+// Независимо от флаговете за самоизтриване: всяко административно изтриване
+// се регистрира (admin_delete_intent) и се изпълнява едва след offsite
+// потвърждението на записа (PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED, същото
+// като при worker-а) и извън активна игра. Виж adminProfileDeletionCoordinator.ts.
+const ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS = 60 * 1000
+const ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS = 30 * 1000
+const adminProfileDeletionCoordinator = await createAdminProfileDeletionCoordinator({
+  databaseFilePath: databaseBootstrap.databaseFilePath,
+  hardDeleteService: profileHardDeleteService,
+  pendingStore: pendingProfileModerationStore,
+  ledgerPath: PROFILE_DELETION_LEDGER_PATH,
+  offsiteRequired: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED,
+  isTargetInActiveGame: (profileId) => isProfileInActiveGame(profileId),
+  log: (line) => console.log(line),
+})
+
+async function runAdminProfileDeletionRunner(): Promise<void> {
+  if (isServerShuttingDown) return
+  try {
+    const summary = await adminProfileDeletionCoordinator.runOnce({
+      onExecuted: (pending) => {
+        broadcastAdminAggregateDataChangedToAdminConnections(null)
+        deleteProfileConnections(pending.targetProfileId, pending.reason)
+      },
+    })
+    if (summary.executed > 0 || summary.refused > 0 || summary.finalized > 0) {
+      console.log(`[admin-profile-delete] runner ${JSON.stringify(summary)}`)
+    }
+  } catch (error) {
+    console.error('[admin-profile-delete] runner failed:', error)
+  }
+}
+
+let adminProfileDeletionRunnerStartupTimeout: ReturnType<typeof setTimeout> | null =
+  timedSetTimeout('adminProfileDeletionRunner', () => runAdminProfileDeletionRunner(), ADMIN_PROFILE_DELETION_RUNNER_STARTUP_DELAY_MS)
+let adminProfileDeletionRunnerInterval: ReturnType<typeof setInterval> | null =
+  timedSetInterval('adminProfileDeletionRunner', () => runAdminProfileDeletionRunner(), ADMIN_PROFILE_DELETION_RUNNER_INTERVAL_MS)
 
 async function runProfileDeletionWorker(): Promise<void> {
   if (isServerShuttingDown || profileDeletionWorker === null || !isProfileSelfDeletionWorkerEnabled()) {
@@ -7213,44 +7253,33 @@ function applyPendingModerationForRoomParticipants(room: ServerRoom): void {
     // mode=immediate/committed в handleAdminProfileHardDeleteRequest, за да
     // може реалният "кога match-end hook-ът реално е приложил отложения
     // delete" да се провери от логовете, не само от manual/QA наблюдение.
+    // Етап 4F1 — същият координатор: изпълнява се САМО ако намерението в
+    // регистъра е потвърдено offsite; иначе висящият ред остава и
+    // периодичният runner го изпълнява по-късно (профилът вече не е в игра).
     console.log(
       `[admin-profile-delete] mode=deferred-start targetProfileId=${pending.targetProfileId} at=${new Date().toISOString()}`,
     )
-    void profileHardDeleteService.hardDeleteProfile({
-      targetProfileId: pending.targetProfileId,
-      actorProfileId: pending.requestedByProfileId,
-      actorAccountId: pending.requestedByAccountId ?? '',
-      reason: pending.reason,
-      supportRequestMessageId: pending.supportRequestMessageId,
-    }).then((result) => {
-      pendingProfileModerationStore.clearPending(participantProfileId)
-      if (result.ok) {
+    void adminProfileDeletionCoordinator.tryExecute(pending).then((outcome) => {
+      if (outcome.status === 'completed') {
         console.log(
           `[admin-profile-delete] mode=deferred-committed targetProfileId=${participantProfileId} at=${new Date().toISOString()}`,
         )
         // Admin Information/Registered Profiles aggregate refresh fix — тук
         // е ЕДИНСТВЕНИЯТ hook, който сигнализира завършването на deferred
-        // delete-а: admin-ът, поискал го, е бил на друг HTTP request отдавна
-        // (виж handleAdminProfileHardDeleteRequest-овия pending клон) и
-        // няма никакъв друг client-side начин да научи, че мачът е
-        // приключил и delete-ът реално се е случил. excludeSessionId=null —
-        // няма "текуща заявка" за изключване тук, и няма едновременен local
-        // refresh, с който да се дублира.
+        // delete-а (admin-ът е бил на друг HTTP request отдавна).
         broadcastAdminAggregateDataChangedToAdminConnections(null)
         deleteProfileConnections(participantProfileId, pending.reason)
-      } else {
+      } else if (outcome.status === 'refused') {
         console.error(
-          `[pending-moderation] deferred hard delete failed profileId=${participantProfileId} code=${result.code}`,
+          `[pending-moderation] deferred hard delete failed profileId=${participantProfileId} code=${outcome.code}`,
+        )
+      } else {
+        console.log(
+          `[admin-profile-delete] mode=deferred-waiting targetProfileId=${participantProfileId} status=${outcome.status}`,
         )
       }
     }).catch((error) => {
-      // hardDeleteProfile() reject-на (DB/transaction грешка — ROLLBACK вече
-      // се е случил вътре в самата функция, ПРЕДИ throw-а). НАРОЧНО не
-      // clear-ваме pending реда и не disconnect-ваме тук (за разлика от
-      // success/logical-failure клона по-горе) — pending реда остава
-      // непроменен, следващият match-end hook за същия target ще опита
-      // delete-а отново safely. Само log, за да не остане unhandled
-      // promise rejection в game-tick процеса.
+      // DB/транзакционна грешка — висящият ред остава, runner-ът опитва пак.
       console.error(
         `[pending-moderation] deferred hard delete rejected profileId=${participantProfileId}:`,
         error,
@@ -11002,163 +11031,131 @@ async function handleAdminProfileHardDeleteRequest(
     return true
   }
 
-  // Round 4 брифа — ако target е РЕАЛЕН human участник в момента играеща се
-  // стая, отлагаме ЦЯЛОТО физическо DELETE FROM profiles (не само socket
-  // disconnect-а, за разлика от BAN — тук профилът трябва да продължи да
-  // съществува, докато играе). Не викаме profileHardDeleteService изобщо —
-  // само записваме pending маркер, приложен по-късно от
-  // applyPendingModerationForRoomParticipants на match-ended edge-а.
+  if (targetProfileId === actorProfileId) {
+    sendJsonResponse(res, 400, { ok: false, code: 'self', message: 'Не можеш да изтриеш себе си.' })
+    return true
+  }
+
+  // Етап 4F1 — всяко административно изтриване е висяща операция в
+  // регистъра на изтриванията: изпълнява се едва когато намерението е
+  // потвърдено копирано извън VPS (restore защита) и профилът не е в
+  // активна игра (Round 4 брифа — играта не се прекъсва). Затова проверките,
+  // които досега се правеха само преди отлагане, важат винаги — висяща
+  // операция, която никога не може да бъде изпълнена, не се създава.
   //
-  // Round 3 корекция (deferred hard-delete вече НЕ губи supportRequestMessageId
-  // — pending_profile_moderation.support_request_message_id пренася explicit
-  // attribution context до terminal completion, виж recordPendingDelete
-  // по-долу и applyPendingModerationForRoom's hardDeleteProfile извикване).
-  if (isProfileInActiveGame(targetProfileId)) {
-    // Blocker fix (round 4 §1) — БЕЗ тази проверка pending DELETE би могъл
-    // да заседне неизпълним завинаги: ако target играе tournament semifinal/
-    // final, completion hook-ът по-късно ще извика hardDeleteProfile(), но
-    // турнирът може все още да е non-terminal (semifinal завършва, final
-    // тепърва предстои) — hardDeleteProfile() би върнал
-    // 'active_tournament_dependency' и pending реда никога не би се
-    // изпълнил. Затова проверяваме СЪЩАТА authoritative зависимост
-    // (hasActiveTournamentDependency — reuse-ва точно тези SQL statements,
-    // не дублирана логика) ПРЕДИ изобщо да запишем pending маркер. Ако има
-    // зависимост, отказваме веднага (409), профилът остава непроменен,
-    // admin-ът може да BAN-не вместо това (spec: "Admin може първо да
-    // BAN-не профила").
-    if (profileHardDeleteService.hasActiveTournamentDependency(targetProfileId)) {
-      sendJsonResponse(res, 409, {
-        ok: false,
-        code: 'active_tournament_dependency',
-        message: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
-      })
-      return true
-    }
-
-    // Фаза 2.1 — за разлика от турнирната зависимост (която изчезва сама
-    // след terminal completion), campaign gift sender защитата е постоянна
-    // — профилът НИКОГА няма да стане изтриваем сам по себе си. Без тази
-    // pre-check проверка ТУК, pending delete маркерът би се записал и после
-    // би се опитвал (и провалял) завинаги при всеки следващ match-end hook
-    // за target-а (виж applyPendingModerationForRoomParticipants). Отказваме
-    // веднага вместо да записваме неизпълним pending ред.
-    if (profileHardDeleteService.hasCampaignGiftSenderHistory(targetProfileId)) {
-      sendJsonResponse(res, 409, {
-        ok: false,
-        code: 'campaign_gift_sender_protected',
-        message: 'Този профил е изпращал кампанийни награди и не може да бъде изтрит окончателно — историята на предоставените награди трябва да се запази.',
-      })
-      return true
-    }
-
-    // Round 3 корекция — pre-check ПРЕДИ да запишем pending маркера (не
-    // само при terminal completion): ако supportRequestMessageId е подаден,
-    // но не е валиден user-authored съобщение на ТОЗИ target, ЦЯЛОТО pending
-    // delete се отказва тук — target профилът остава напълно непроменен
-    // (не се създава pending ред, не се изпълнява delete). Без този
-    // pre-check, manipulated/невалиден message id би записал pending delete
-    // с невалидна атрибуция, чиято грешка admin-ът би видял едва при terminal
-    // completion (минути/часове по-късно), вместо веднага. Terminal
-    // completion (applyPendingModerationForRoom) пак re-validate-ва
-    // authoritative вътре в hardDeleteProfile-овата транзакция — тук е само
-    // defense-in-depth/по-добър UX, не единствената защита.
-    if (supportRequestMessageId !== null && !supportStore.isValidUserRequestMessage(targetProfileId, supportRequestMessageId)) {
-      sendJsonResponse(res, 400, {
-        ok: false,
-        code: 'invalid_support_request_message',
-        message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
-      })
-      return true
-    }
-
-    pendingProfileModerationStore.recordPendingDelete({
-      targetProfileId,
-      requestedByProfileId: actorProfileId,
-      requestedByAccountId: session.account.accountId,
-      reason,
-      supportRequestMessageId,
-    })
-    // Diagnostic logging (admin hard-delete UX/reliability fix, production
-    // report §H) — единствената следа server-side, че delete-ът е бил
-    // ЗАЯВЕН, но отложен; без нея intermittent "pending" случаи (target в
-    // активна игра) са недиагностируеми след факта. Само profileId-та —
-    // без email/IP/visitor_id/reason текст.
-    console.log(
-      `[admin-profile-delete] mode=pending targetProfileId=${targetProfileId} actorProfileId=${actorProfileId} at=${new Date().toISOString()}`,
-    )
-    sendJsonResponse(res, 200, {
-      ok: true,
-      pending: true,
-      message: 'Профилът ще бъде изтрит след края на текущата игра.',
+  // Blocker fix (round 4 §1) — турнир, който още не е приключил:
+  // hardDeleteProfile() би отказал с 'active_tournament_dependency'.
+  if (profileHardDeleteService.hasActiveTournamentDependency(targetProfileId)) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: 'active_tournament_dependency',
+      message: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
     })
     return true
   }
 
-  console.log(
-    `[admin-profile-delete] mode=immediate targetProfileId=${targetProfileId} actorProfileId=${actorProfileId} at=${new Date().toISOString()}`,
-  )
+  // Фаза 2.1 — campaign gift sender защитата е постоянна.
+  if (profileHardDeleteService.hasCampaignGiftSenderHistory(targetProfileId)) {
+    sendJsonResponse(res, 409, {
+      ok: false,
+      code: 'campaign_gift_sender_protected',
+      message: 'Този профил е изпращал кампанийни награди и не може да бъде изтрит окончателно — историята на предоставените награди трябва да се запази.',
+    })
+    return true
+  }
 
-  const result = await profileHardDeleteService.hardDeleteProfile({
+  // Round 3 корекция — невалидна support заявка се отказва веднага;
+  // hardDeleteProfile пак проверява authoritative в транзакцията.
+  if (supportRequestMessageId !== null && !supportStore.isValidUserRequestMessage(targetProfileId, supportRequestMessageId)) {
+    sendJsonResponse(res, 400, {
+      ok: false,
+      code: 'invalid_support_request_message',
+      message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
+    })
+    return true
+  }
+
+  const scheduled = adminProfileDeletionCoordinator.schedule({
     targetProfileId,
     actorProfileId,
     actorAccountId: session.account.accountId,
     reason,
     supportRequestMessageId,
   })
-
-  if (!result.ok) {
-    console.error(
-      `[admin-profile-delete] mode=failed targetProfileId=${targetProfileId} code=${result.code} at=${new Date().toISOString()}`,
-    )
-    const statusByCode: Record<typeof result.code, number> = {
-      not_found: 404,
-      self: 400,
-      invalid_reason: 400,
-      active_tournament_dependency: 409,
-      invalid_support_request_message: 400,
-      campaign_gift_sender_protected: 409,
+  if (!scheduled.ok) {
+    if (scheduled.code === 'not_found') {
+      sendJsonResponse(res, 404, { ok: false, code: 'not_found', message: 'Профилът не беше намерен.' })
+    } else {
+      // Fail-closed: без запис в регистъра изтриване няма.
+      console.error(`[admin-profile-delete] mode=ledger_unavailable targetProfileId=${targetProfileId} at=${new Date().toISOString()}`)
+      sendJsonResponse(res, 503, {
+        ok: false,
+        code: 'ledger_unavailable',
+        message: 'Регистърът на изтриванията е недостъпен. Профилът НЕ е изтрит — опитай отново по-късно.',
+      })
     }
-    const messageByCode: Record<typeof result.code, string> = {
-      not_found: 'Профилът не беше намерен.',
-      self: 'Не можеш да изтриеш себе си.',
-      invalid_reason: 'Причината е задължителна.',
-      active_tournament_dependency: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
-      invalid_support_request_message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
-      campaign_gift_sender_protected: 'Този профил е изпращал кампанийни награди и не може да бъде изтрит окончателно — историята на предоставените награди трябва да се запази.',
-    }
-    sendJsonResponse(res, statusByCode[result.code], { ok: false, code: result.code, message: messageByCode[result.code] })
     return true
   }
 
+  const inActiveGame = isProfileInActiveGame(targetProfileId)
+  if (!inActiveGame) {
+    const pending = pendingProfileModerationStore.getPendingDeleteByOperation(scheduled.operationId)
+    const outcome = pending === null ? null : await adminProfileDeletionCoordinator.tryExecute(pending)
+
+    if (outcome !== null && (outcome.status === 'refused' || outcome.status === 'not_found')) {
+      const code = outcome.status === 'not_found' ? 'not_found' : outcome.code
+      console.error(
+        `[admin-profile-delete] mode=failed targetProfileId=${targetProfileId} code=${code} at=${new Date().toISOString()}`,
+      )
+      const statusByCode: Record<string, number> = {
+        not_found: 404,
+        self: 400,
+        invalid_reason: 400,
+        active_tournament_dependency: 409,
+        invalid_support_request_message: 400,
+        campaign_gift_sender_protected: 409,
+      }
+      const messageByCode: Record<string, string> = {
+        not_found: 'Профилът не беше намерен.',
+        self: 'Не можеш да изтриеш себе си.',
+        invalid_reason: 'Причината е задължителна.',
+        active_tournament_dependency: 'Профилът е creator или участник в турнир, който все още не е приключил. Банни профила първо или изчакай турнирът да приключи.',
+        invalid_support_request_message: 'Невалидно support съобщение — заявката за изтриване не съответства на този профил.',
+        campaign_gift_sender_protected: 'Този профил е изпращал кампанийни награди и не може да бъде изтрит окончателно — историята на предоставените награди трябва да се запази.',
+      }
+      sendJsonResponse(res, statusByCode[code] ?? 409, { ok: false, code, message: messageByCode[code] ?? 'Изтриването не беше изпълнено.' })
+      return true
+    }
+
+    if (outcome !== null && outcome.status === 'completed') {
+      console.log(
+        `[admin-profile-delete] mode=committed targetProfileId=${targetProfileId} at=${new Date().toISOString()}`,
+      )
+      // Admin Information/Registered Profiles aggregate refresh fix — WS
+      // invalidation към ДРУГИ admin/subadmin connections (excludeSessionId
+      // = този таб, който получава synchronous local refresh).
+      broadcastAdminAggregateDataChangedToAdminConnections(session.sessionId)
+      // Сесиите вече ги няма (account_sessions CASCADE); живите socket-и се
+      // прекратяват веднага (spec §11).
+      deleteProfileConnections(targetProfileId, reason)
+      sendJsonResponse(res, 200, { ok: true, pending: false })
+      return true
+    }
+  }
+
+  // Отложено: активна игра (изпълнява се в края й) или изчакване на offsite
+  // потвърждението на регистъра (периодичният runner го изпълнява). Само
+  // profileId-та в лога — без email/IP/visitor_id/reason текст.
   console.log(
-    `[admin-profile-delete] mode=committed targetProfileId=${targetProfileId} at=${new Date().toISOString()}`,
+    `[admin-profile-delete] mode=pending targetProfileId=${targetProfileId} actorProfileId=${actorProfileId} operationId=${scheduled.operationId} inActiveGame=${inActiveGame} at=${new Date().toISOString()}`,
   )
-
-  // Admin Information/Registered Profiles aggregate refresh fix — WS
-  // invalidation към ДРУГИ admin/subadmin connections (виж
-  // broadcastAdminAggregateDataChangedToAdminConnections doc коментара);
-  // excludeSessionId=session.sessionId, за да не получи ТОЗИ таб излишен
-  // втори fetch (вече получава synchronous local refresh от своя HTTP
-  // response).
-  broadcastAdminAggregateDataChangedToAdminConnections(session.sessionId)
-
-  // Session revocation — за разлика от BAN (профилът/акаунтът продължават да
-  // съществуват, затова трябва explicit revokeAllSessionsForProfile), тук
-  // account_sessions редовете на профила вече физически НЕ съществуват:
-  // account_sessions.profile_id е ON DELETE CASCADE към profiles.profile_id
-  // (20260510_003 migration-а) и profileHardDeleteService.hardDeleteProfile()
-  // изпълнява DELETE FROM profiles в СЪЩАТА транзакция по-горе — cascade-ът
-  // вече е изчистил всички сесии на профила преди COMMIT-а. Всеки стар
-  // session cookie/token за този профил вече проваля getSession()'s JOIN
-  // (редът просто липсва), без нужда от отделен revoke извикване тук.
-  //
-  // Immediate access cutoff (spec §11 "delete на online profile прекратява
-  // active access") — профилът вече не съществува в DB, но живите му
-  // socket-и трябва да бъдат прекратени веднага, не само при следваща
-  // getSession() проверка.
-  deleteProfileConnections(targetProfileId, reason)
-
-  sendJsonResponse(res, 200, { ok: true, pending: false })
+  sendJsonResponse(res, 200, {
+    ok: true,
+    pending: true,
+    message: inActiveGame
+      ? 'Профилът ще бъде изтрит след края на текущата игра.'
+      : 'Изтриването е насрочено и ще бъде изпълнено автоматично след потвърждение на защитното копие на регистъра на изтриванията (обикновено до няколко минути).',
+  })
   return true
 }
 
@@ -28002,6 +27999,16 @@ function clearMutationTimersForShutdown(): void {
   if (profileDeletionWorkerStartupTimeout !== null) {
     clearTimeout(profileDeletionWorkerStartupTimeout)
     profileDeletionWorkerStartupTimeout = null
+  }
+
+  if (adminProfileDeletionRunnerStartupTimeout !== null) {
+    clearTimeout(adminProfileDeletionRunnerStartupTimeout)
+    adminProfileDeletionRunnerStartupTimeout = null
+  }
+
+  if (adminProfileDeletionRunnerInterval !== null) {
+    clearInterval(adminProfileDeletionRunnerInterval)
+    adminProfileDeletionRunnerInterval = null
   }
 
   if (profileDeletionWorkerInterval !== null) {

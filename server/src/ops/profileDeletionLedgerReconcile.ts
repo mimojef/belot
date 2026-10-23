@@ -27,13 +27,39 @@
 // които са във възстановената база, минават през същия worker и неговата
 // постоянна файлова опашка.
 //
+// Етап 4F1 — административните окончателни изтривания (същият регистър):
+//   * доказано завършени (admin_delete_completed / admin_delete_historical)
+//     — профилът трябва да липсва; ако backup-ът го е "възкресил" и
+//     идентичността съвпада (UUID + акаунт/дата на създаване, когато са
+//     известни) -> --apply го изтрива отново със СЪЩИЯ административен път
+//     (profileHardDeleteService, replay режим: одитният ред е със същия
+//     log_id = operationId и оригиналния момент). Активен бан в стария
+//     backup НЕ пречи — административното изтриване не зависи от бана.
+//     Изпълнява се ПРЕДИ самоизтриванията;
+//   * само намерение (admin_delete_intent без краен запис) и профилът е в
+//     базата -> admin_unresolved: регистрираното намерение НЕ доказва
+//     изтриване, затова нищо не се трие автоматично — fail-closed;
+//   * admin_delete_resolved_by_self — довършва се от записа на
+//     самоизтриването; admin_delete_aborted — пренебрегва се;
+//   * одитен ред (admin_profile_deletions) във възстановената база, чиято
+//     операция липсва в регистъра -> admin_ledger_stale (регистърът е
+//     по-стар от базата, или старите изтривания не са добавени с
+//     `admin-backfill`) — --apply се отказва като при ledger_stale.
+//
 // Изход: само request_id/profile_id и кодове — без имена, имейли или токени.
 
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { createProfileDeletionWorker } from '../core/profileDeletionWorker.js'
 import { createProfileDeletionExecutor } from '../db/profileDeletionExecutor.js'
-import { readProfileDeletionLedger, type ProfileDeletionLedgerEntry } from '../db/profileDeletionLedger.js'
+import { createProfileHardDeleteService } from '../db/profileHardDeleteService.js'
+import { canonicalIsoToSqliteDateTime } from '../core/adminProfileDeletionCoordinator.js'
+import {
+  readProfileDeletionLedger,
+  summarizeAdminLedgerOperations,
+  type AdminLedgerOperation,
+  type ProfileDeletionLedgerEntry,
+} from '../db/profileDeletionLedger.js'
 import { listPendingMigrationsForDatabase } from './profileDeletionRestoredDbMigrations.js'
 import {
   removeProfileDeletionFile,
@@ -46,6 +72,15 @@ export const REAPPLY_CONFIRMATION_PHRASE = 'REAPPLY-PROFILE-DELETIONS'
 export type ReconcileIo = { log: (line: string) => void; error: (line: string) => void }
 
 type Category = 'absent' | 'request_present' | 'request_missing' | 'identity_mismatch'
+type AdminCategory =
+  | 'admin_absent'
+  | 'admin_missing'
+  | 'admin_identity_mismatch'
+  | 'admin_unresolved'
+  | 'admin_via_self'
+  | 'admin_ignored'
+
+export const ADMIN_REPLAY_AUDIT_REASON = 'Повторно приложено административно изтриване след възстановяване от backup (оригиналната причина е в одита на живата база)'
 
 type JournalRecord =
   | { type: 'planned'; requestId: string; profileId: string; files: Array<{ fileKind: ProfileDeletionFileKind; storageRef: string }> }
@@ -122,14 +157,21 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
     return fail('ledger_corrupt', `invalidLines=${ledger.invalidLineCount} conflictingDuplicates=${ledger.conflictingDuplicateCount}`)
   }
   if (ledger.trailingPartialBytes > 0) io.log(`[reconcile] WARNING ledger_trailing_partial_ignored bytes=${ledger.trailingPartialBytes}`)
+  const adminOperations = summarizeAdminLedgerOperations(ledger.records)
+  const conflictingAdmin = [...adminOperations.values()].filter((operation) => operation.state === 'conflict')
+  if (conflictingAdmin.length > 0) {
+    return fail('ledger_corrupt', `admin_operation_conflict operationIds=${conflictingAdmin.map((operation) => operation.operationId).slice(0, 5).join(',')}`)
+  }
   const mode = apply ? 'APPLY' : verifyOnly ? 'verify-only' : 'report-only'
-  io.log(`[reconcile] mode=${mode} ledgerEntries=${ledger.entries.length}`)
+  io.log(`[reconcile] mode=${mode} ledgerEntries=${ledger.entries.length} adminOperations=${adminOperations.size}`)
 
   const { DatabaseSync } = await import('node:sqlite')
 
   type Snapshot = {
     classified: Array<{ entry: ProfileDeletionLedgerEntry; category: Category; requestStatus: string | null; pendingFiles: number }>
     staleRequestIds: string[]
+    adminClassified: Array<{ operation: AdminLedgerOperation; category: AdminCategory }>
+    adminStaleLogIds: string[]
   }
   const inspect = (): Snapshot | { integrity: string } => {
     const readDb = new DatabaseSync(dbPath, { readOnly: true })
@@ -158,7 +200,26 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
       const staleRequestIds = (readDb.prepare('SELECT request_id FROM profile_deletion_requests WHERE db_deleted_at IS NOT NULL;').all() as Array<{ request_id: string }>)
         .map((row) => row.request_id)
         .filter((requestId) => !ledgerIds.has(requestId))
-      return { classified, staleRequestIds }
+      // Етап 4F1 — административните операции (идентификация САМО по UUID +
+      // акаунт/дата на създаване, когато са записани; никога по име).
+      const adminClassified = [...adminOperations.values()].map((operation) => {
+        const profile = selectProfile.get(operation.profileId) as { account_id: string | null; created_at: string } | undefined
+        let category: AdminCategory
+        if (operation.state === 'aborted') category = 'admin_ignored'
+        else if (profile === undefined) category = 'admin_absent'
+        else if (operation.state === 'intent_only') category = 'admin_unresolved'
+        else if (operation.state === 'resolved_by_self') category = 'admin_via_self'
+        else if (
+          (operation.accountIdSnapshot !== null && profile.account_id !== operation.accountIdSnapshot) ||
+          (operation.profileCreatedAtSnapshot !== null && profile.created_at !== operation.profileCreatedAtSnapshot)
+        ) category = 'admin_identity_mismatch'
+        else category = 'admin_missing'
+        return { operation, category }
+      })
+      const adminStaleLogIds = (readDb.prepare('SELECT log_id FROM admin_profile_deletions;').all() as Array<{ log_id: string }>)
+        .map((row) => row.log_id)
+        .filter((logId) => !adminOperations.has(logId))
+      return { classified, staleRequestIds, adminClassified, adminStaleLogIds }
     } finally {
       readDb.close()
     }
@@ -171,8 +232,17 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
     for (const requestId of snapshot.staleRequestIds) {
       io.log(`[reconcile] ledger_stale requestId=${requestId} (изтрита в базата, липсва в регистъра)`)
     }
+    for (const item of snapshot.adminClassified) {
+      if (item.category === 'admin_ignored') continue
+      io.log(`[reconcile] ${item.category} operationId=${item.operation.operationId} profileId=${item.operation.profileId} state=${item.operation.state}`)
+    }
+    for (const logId of snapshot.adminStaleLogIds) {
+      io.log(`[reconcile] admin_ledger_stale operationId=${logId} (административно изтриване в базата, липсва в регистъра)`)
+    }
     const counts = snapshot.classified.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.category]: (acc[item.category] ?? 0) + 1 }), {})
     counts.ledger_stale = snapshot.staleRequestIds.length
+    for (const item of snapshot.adminClassified) counts[item.category] = (counts[item.category] ?? 0) + 1
+    counts.admin_ledger_stale = snapshot.adminStaleLogIds.length
     io.log(`[reconcile] summary ${JSON.stringify(counts)}`)
     return counts
   }
@@ -184,19 +254,24 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   if (pendingJournal.size > 0) io.log(`[reconcile] journal_pending=${pendingJournal.size}`)
   const isClean = (snapshot: Snapshot, journalPending: number): boolean =>
     snapshot.staleRequestIds.length === 0 &&
+    snapshot.adminStaleLogIds.length === 0 &&
     journalPending === 0 &&
-    snapshot.classified.every((item) => item.category === 'absent')
+    snapshot.classified.every((item) => item.category === 'absent') &&
+    snapshot.adminClassified.every((item) => item.category === 'admin_absent' || item.category === 'admin_ignored')
 
   if (!apply && !verifyOnly) {
     io.log('[reconcile] Нищо не е променено (report-only).')
-    return (counts.ledger_stale ?? 0) > 0 || (counts.identity_mismatch ?? 0) > 0 ? 1 : 0
+    return (counts.ledger_stale ?? 0) > 0 || (counts.identity_mismatch ?? 0) > 0 ||
+      (counts.admin_ledger_stale ?? 0) > 0 || (counts.admin_identity_mismatch ?? 0) > 0 || (counts.admin_unresolved ?? 0) > 0
+      ? 1
+      : 0
   }
   if (verifyOnly) {
     const clean = isClean(before, pendingJournal.size)
     io.log(`[reconcile] verify ${clean ? 'OK' : 'FAILED'}`)
     return clean ? 0 : 1
   }
-  if (before.staleRequestIds.length > 0 && !acceptStale) {
+  if ((before.staleRequestIds.length > 0 || before.adminStaleLogIds.length > 0) && !acceptStale) {
     io.error('[reconcile] ERROR ledger_stale: регистърът е по-стар от базата — нищо не е променено (виж runbook-а; --accept-stale-ledger само след ръчна проверка)')
     return 1
   }
@@ -230,6 +305,38 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
     const presentIds = new Set(before.classified.filter((item) => item.category !== 'absent').map((item) => item.entry.profileId))
     for (const record of pendingJournal.values()) {
       if (!presentIds.has(record.profileId)) await deleteJournalFiles(record)
+    }
+
+    // 1b. Етап 4F1 — доказано завършени административни изтривания, които
+    //     backup-ът е върнал: същият административен път (replay режим),
+    //     ПРЕДИ самоизтриванията (те виждат профила като вече изтрит).
+    const adminMissing = before.adminClassified.filter((item) => item.category === 'admin_missing')
+    if (adminMissing.length > 0) {
+      const hardDeleteService = await createProfileHardDeleteService(dbPath, {
+        deleteUploadFileByUrl: async (url: string) => {
+          const kind = url.startsWith('/uploads/avatars/') ? 'avatar' : url.startsWith('/uploads/profile-gallery/') ? 'gallery_image' : null
+          if (kind === null) return
+          const outcome = await removeProfileDeletionFile(kind, url, roots)
+          if (outcome.outcome !== 'deleted' && outcome.outcome !== 'missing') fileFailures += 1
+        },
+      })
+      try {
+        for (const item of adminMissing) {
+          const operation = item.operation
+          const result = await hardDeleteService.hardDeleteProfile({
+            targetProfileId: operation.profileId,
+            actorProfileId: operation.actorProfileId ?? '',
+            actorAccountId: '',
+            reason: ADMIN_REPLAY_AUDIT_REASON,
+            supportRequestMessageId: operation.supportRequestMessageId,
+            auditLogId: operation.operationId,
+            replay: { deletedAt: canonicalIsoToSqliteDateTime(operation.deletedAt as string) },
+          })
+          io.log(`[reconcile] admin_replay operationId=${operation.operationId} profileId=${operation.profileId} result=${result.ok ? 'deleted' : result.code}`)
+        }
+      } finally {
+        hardDeleteService.close()
+      }
     }
 
     // 2. Заявки във възстановената база -> същият worker и файлова опашка.

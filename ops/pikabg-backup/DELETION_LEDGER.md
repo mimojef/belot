@@ -24,7 +24,8 @@ Restore на стара база би „възкресил“ профил, и�
 | Файл | Роля |
 |---|---|
 | `server/src/db/profileDeletionLedger.ts` | Запис (идемпотентен, fsync), четене, проверка на ack |
-| `server/src/ops/profileDeletionLedgerCli.ts` → `server/dist/ops/profileDeletionLedgerCli.js` | `snapshot`, `confirm`, `merge`, `migrate` (само възстановено копие), `reconcile` (пуска се с `node`, без tsx) |
+| `server/src/ops/profileDeletionLedgerCli.ts` → `server/dist/ops/profileDeletionLedgerCli.js` | `snapshot`, `confirm`, `merge`, `migrate` (само възстановено копие), `reconcile`, `admin-backfill` (пуска се с `node`, без tsx) |
+| `server/src/core/adminProfileDeletionCoordinator.ts` | Етап 4F1: административното изтриване през регистъра (т. 8) |
 | `ops/pikabg-backup/scripts/pikabg-ledger-backup` | Качване на всеки 5 мин; ack само след MD5 проверка |
 | `ops/pikabg-backup/scripts/pikabg-ledger-restore` | Изтегляне на **всички** snapshot-и и fail-closed обединение |
 | `ops/pikabg-backup/systemd/pikabg-ledger-backup.{service,timer}` | Таймер на 5 минути (root, същият `RCLONE_CONFIG`) |
@@ -166,6 +167,55 @@ sudo node dist/ops/profileDeletionLedgerCli.js reconcile --db=/srv/restore-<да
 4. `PRAGMA integrity_check` е `ok` (reconcile го проверява).
 5. Файловете: `journalPending=0` и `fileFailures=0` в изхода на `--apply`.
 6. Таймерът `pikabg-ledger-backup.timer` е активен и първото пускане е `OK`/`unchanged`.
+
+## 8. Административни окончателни изтривания (Етап 4F1)
+
+Административното изтриване („Изтрий профила“, вкл. „по тази заявка“ от поддръжката) използва **същия регистър и същото offsite потвърждение**.
+
+**Зависимост за deploy:** след deploy на 4F1 административното изтриване **се изпълнява само при работещ `pikabg-ledger-backup.timer`** (т. 1). Без потвърждение операцията остава „насрочена“ и **не** се изпълнява (fail-closed). Админът вижда съобщение, че изтриването е насрочено. `PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED=0` е само за локална разработка.
+
+### Поток
+
+1. Админът потвърждава изтриването → висящ ред в `pending_profile_moderation` (`ledger_operation_id`) и запис `admin_delete_intent` в регистъра.
+   - Ако записът в регистъра е невъзможен → HTTP 503, без висящ ред, нищо не е изтрито.
+2. До 5 мин `pikabg-ledger-backup` потвърждава записа. Сървърът (на всяка минута) изпълнява изтриването, ако профилът не е в активна игра; иначе — в края на мача.
+3. След COMMIT → `admin_delete_completed`. Одитният ред в `admin_profile_deletions` е със същия `log_id` = `operationId`.
+   - Срив между COMMIT и записа се довършва автоматично по одитния ред.
+4. Отказ (напр. незавършил турнир) → `admin_delete_aborted`. Приключване чрез самоизтриване (Етап 4E6C) → `admin_delete_resolved_by_self`.
+
+В регистъра има само UUID-та, времена и кодове. **Без имена, имейли, IP или причината.** Причината остава само в одита в базата.
+
+### Еднократно след deploy: старите административни изтривания
+
+Изтриванията отпреди 4F1 са само в `admin_profile_deletions`. Докато не бъдат добавени, `reconcile` отказва restore с `admin_ledger_stale` (fail-closed).
+
+```bash
+cd /var/www/belot-v2/server
+# Преглед (базата само се чете, регистърът не се променя):
+sudo -u <потребителят на Node> node dist/ops/profileDeletionLedgerCli.js admin-backfill \
+  --db=database/data/belot-v2.sqlite --ledger=database/deletion-ledger/profile-deletions.jsonl
+# Запис в регистъра (идемпотентно):
+sudo -u <потребителят на Node> node dist/ops/profileDeletionLedgerCli.js admin-backfill \
+  --db=database/data/belot-v2.sqlite --ledger=database/deletion-ledger/profile-deletions.jsonl \
+  --apply --confirm=BACKFILL-ADMIN-DELETIONS
+```
+
+- Добавят се само редове, чийто профил **наистина липсва** в базата. Идентификацията е по UUID, никога по име.
+- `insufficient` (невалиден идентификатор/дата) и `profile_present` **не** се добавят (exit 1). Те изискват ръчна проверка.
+- След това следващото пускане на `pikabg-ledger-backup` ги качва извън VPS.
+
+### Restore — нови резултати на `reconcile`
+
+| Резултат | Значение | `--apply` |
+|---|---|---|
+| `admin_missing` | Доказано завършено административно изтриване, профилът е „възкресен“ | Изтрива се отново със същия административен път (оригиналният момент, същият `log_id`). Активен бан в стария backup не пречи |
+| `admin_unresolved` | Само намерение, без доказано изпълнение, а профилът е в базата | **Не** се трие. Verify остава неуспешен — провери в живата база/логовете дали изтриването е станало |
+| `admin_identity_mismatch` | Същият UUID, друга идентичност (акаунт/дата на създаване) | **Не** се трие — ръчна проверка |
+| `admin_ledger_stale` | Одитен ред в базата, чиято операция липсва в регистъра | `--apply` се отказва (както `ledger_stale`) — по-ново копие на регистъра или `admin-backfill` |
+
+Висящ ред от стар backup за операция, която в регистъра вече е приключена, **не** се изпълнява повторно. Сървърът го премахва.
+
+**Връщане към версия отпреди 4F1:** по-старият код не разпознава административните записи и приема регистъра за повреден. Тогава самоизтриването и архивирането спират (fail-closed). Не връщай сървъра към такава версия, след като в регистъра има административни записи.
 
 ## Какво не може да се провери без production
 

@@ -9,6 +9,8 @@
 //   migrate   --db=<ВЪЗСТАНОВЕНА sqlite> — миграциите на текущата версия (живата база се отказва)
 //   reconcile --db=<sqlite> --ledger=<jsonl> [--apply --confirm=... --uploads-root=<dir>]
 //             [--verify-only] [--state-dir=<dir>] [--accept-stale-ledger]
+//   admin-backfill --db=<sqlite> --ledger=<jsonl> [--apply --confirm=BACKFILL-ADMIN-DELETIONS]
+//             — Етап 4F1: старите административни изтривания в регистъра (базата само се чете)
 //
 // Изход: един JSON ред за snapshot/confirm/merge (машинно четим от bash);
 // exit 0 = успех, 1 = нужна намеса, 2 = грешка/отказ.
@@ -22,6 +24,7 @@ import {
   writeMergedLedger,
 } from './profileDeletionLedgerArchive.js'
 import { runProfileDeletionLedgerReconcile } from './profileDeletionLedgerReconcile.js'
+import { runProfileDeletionAdminBackfill } from './profileDeletionAdminBackfill.js'
 import { migrateRestoredDatabase, RestoredDbMigrationError } from './profileDeletionRestoredDbMigrations.js'
 
 function readArg(argv: readonly string[], name: string): string | null {
@@ -85,8 +88,13 @@ export async function runProfileDeletionLedgerCli(argv: readonly string[]): Prom
           log: (line) => console.log(line),
           error: (line) => console.error(line),
         })
+      case 'admin-backfill':
+        return await runProfileDeletionAdminBackfill(rest, {
+          log: (line) => console.log(line),
+          error: (line) => console.error(line),
+        })
       default:
-        throw new LedgerArchiveError('usage', 'команда: snapshot | confirm | merge | migrate | reconcile')
+        throw new LedgerArchiveError('usage', 'команда: snapshot | confirm | merge | migrate | reconcile | admin-backfill')
     }
   } catch (error) {
     const code = error instanceof LedgerArchiveError || error instanceof RestoredDbMigrationError ? error.code : 'unexpected'

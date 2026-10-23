@@ -601,7 +601,8 @@ try {
     const { databaseFilePath: oldDb } = await ensureServerDatabaseReady({ serverRootOverride: oldRoot })
     const ledger = join(root, 'ledger-restore-e1', 'merged-ledger.jsonl')
     const refused = runCli(['reconcile', `--db=${oldDb}`, `--ledger=${ledger}`])
-    assert(refused.status === 2 && refused.out.includes('restored_db_migrations_pending') && refused.out.includes('20261027_001'), `отказ (${refused.out.slice(-300)})`)
+    // Съобщението изброява броя и последните неприложени миграции (не непременно 20261027_001).
+    assert(refused.status === 2 && refused.out.includes('restored_db_migrations_pending') && /\d+ неприложени миграции/.test(refused.out), `отказ (${refused.out.slice(-300)})`)
     const before = readFileSync(oldDb)
     const liveRefused = runCli(['migrate', `--db=${oldDb}`], { PROFILE_DELETION_LIVE_DB_PATH: oldDb })
     assert(liveRefused.status === 2 && liveRefused.out.includes('live_db_refused'), `живата база (${liveRefused.out.slice(-200)})`)

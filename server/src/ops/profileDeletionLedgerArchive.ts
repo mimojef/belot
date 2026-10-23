@@ -20,14 +20,15 @@ import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { basename, join } from 'node:path'
 import {
-  isSameProfileDeletionIdentity,
+  isSameProfileDeletionLedgerRecord,
   parseProfileDeletionLedgerBuffer,
+  profileDeletionLedgerRecordKey,
   readProfileDeletionLedgerOffsiteAck,
   serializeProfileDeletionLedgerEntry,
   sha256Hex,
   writeFileAtomicallySync,
   writeProfileDeletionLedgerOffsiteAck,
-  type ProfileDeletionLedgerEntry,
+  type ProfileDeletionLedgerRecord,
 } from '../db/profileDeletionLedger.js'
 
 export const LEDGER_SNAPSHOT_KIND = 'pikabg-profile-deletion-ledger-snapshot'
@@ -117,7 +118,8 @@ export function createLedgerSnapshot(input: {
     sha256,
     md5: md5Hex(complete),
     lineCount: parsed.lineCount,
-    entryCount: parsed.entries.length,
+    // Етап 4F1: всички записи (самоизтриване + административни).
+    entryCount: parsed.records.length,
     createdAt,
   }
   mkdirSync(input.outDir, { recursive: true, mode: 0o700 })
@@ -140,7 +142,7 @@ export function readLedgerSnapshotManifest(manifestPath: string): LedgerSnapshot
 }
 
 /** Проверява snapshot файла спрямо manifest-а (байтове, sha256, md5, съдържание). */
-export function verifyLedgerSnapshot(snapshotPath: string, manifest: LedgerSnapshotManifest): ProfileDeletionLedgerEntry[] {
+export function verifyLedgerSnapshot(snapshotPath: string, manifest: LedgerSnapshotManifest): ProfileDeletionLedgerRecord[] {
   const buffer = readExisting(snapshotPath)
   if (buffer === null) throw new LedgerArchiveError('snapshot_missing', manifest.file)
   if (buffer.length !== manifest.bytes || sha256Hex(buffer) !== manifest.sha256 || md5Hex(buffer) !== manifest.md5) {
@@ -149,11 +151,11 @@ export function verifyLedgerSnapshot(snapshotPath: string, manifest: LedgerSnaps
   const parsed = parseProfileDeletionLedgerBuffer(buffer)
   if (
     parsed.trailingPartialBytes !== 0 || parsed.invalidLineCount !== 0 || parsed.conflictingDuplicateCount !== 0 ||
-    parsed.lineCount !== manifest.lineCount || parsed.entries.length !== manifest.entryCount
+    parsed.lineCount !== manifest.lineCount || parsed.records.length !== manifest.entryCount
   ) {
     throw new LedgerArchiveError('snapshot_content_invalid', manifest.file)
   }
-  return parsed.entries
+  return parsed.records
 }
 
 // ─── 3. confirm (ack) ──────────────────────────────────────────────────────
@@ -217,7 +219,7 @@ export function mergeLedgerSnapshots(input: {
   acceptMissingNewest?: boolean
   /** Няма нито един snapshot и няма жив регистър — изрично потвърждение, че изтривания не е имало. */
   confirmNoDeletionsEver?: boolean
-}): { entries: ProfileDeletionLedgerEntry[]; report: LedgerMergeReport } {
+}): { entries: ProfileDeletionLedgerRecord[]; report: LedgerMergeReport } {
   const warnings: string[] = []
   const candidates: Array<{ manifest: LedgerSnapshotManifest; snapshotPath: string; manifestPath: string }> = []
   const invalidSnapshots: LedgerMergeReport['invalidSnapshots'] = []
@@ -242,7 +244,7 @@ export function mergeLedgerSnapshots(input: {
   }
 
   candidates.sort((a, b) => a.manifest.createdAt.localeCompare(b.manifest.createdAt) || a.manifest.bytes - b.manifest.bytes)
-  const valid: Array<{ manifest: LedgerSnapshotManifest; buffer: Buffer; entries: ProfileDeletionLedgerEntry[] }> = []
+  const valid: Array<{ manifest: LedgerSnapshotManifest; buffer: Buffer; entries: ProfileDeletionLedgerRecord[] }> = []
   for (const candidate of candidates) {
     try {
       const entries = verifyLedgerSnapshot(candidate.snapshotPath, candidate.manifest)
@@ -268,7 +270,7 @@ export function mergeLedgerSnapshots(input: {
     }
   }
 
-  let localEntries: ProfileDeletionLedgerEntry[] = []
+  let localEntries: ProfileDeletionLedgerRecord[] = []
   let localLedger: LedgerMergeReport['localLedger'] = 'absent'
   if (input.localLedgerPath) {
     const localBuffer = readExisting(input.localLedgerPath)
@@ -284,7 +286,7 @@ export function mergeLedgerSnapshots(input: {
         throw new LedgerArchiveError('local_ledger_diverged', 'живият регистър и най-новият snapshot не са префикс един на друг')
       }
       if (complete.length < newestValid.length) warnings.push('local_ledger_older_than_newest_snapshot')
-      localEntries = parsed.entries
+      localEntries = parsed.records
       localLedger = 'used'
     }
   }
@@ -296,12 +298,13 @@ export function mergeLedgerSnapshots(input: {
     warnings.push('confirmed_no_deletions_ever')
   }
 
-  const merged = new Map<string, ProfileDeletionLedgerEntry>()
+  const merged = new Map<string, ProfileDeletionLedgerRecord>()
   for (const entry of [...valid.flatMap((item) => item.entries), ...localEntries]) {
-    const existing = merged.get(entry.requestId)
-    if (existing === undefined) merged.set(entry.requestId, entry)
-    else if (!isSameProfileDeletionIdentity(existing, entry)) {
-      throw new LedgerArchiveError('ledger_conflict', `requestId=${entry.requestId}`)
+    const key = profileDeletionLedgerRecordKey(entry)
+    const existing = merged.get(key)
+    if (existing === undefined) merged.set(key, entry)
+    else if (!isSameProfileDeletionLedgerRecord(existing, entry)) {
+      throw new LedgerArchiveError('ledger_conflict', `key=${key}`)
     }
   }
 
@@ -318,6 +321,6 @@ export function mergeLedgerSnapshots(input: {
   }
 }
 
-export function writeMergedLedger(outPath: string, entries: readonly ProfileDeletionLedgerEntry[]): void {
+export function writeMergedLedger(outPath: string, entries: readonly ProfileDeletionLedgerRecord[]): void {
   writeFileAtomicallySync(outPath, entries.map(serializeProfileDeletionLedgerEntry).join(''), 0o600)
 }

@@ -26,6 +26,11 @@ export type PendingProfileModeration = {
    * да е станал невалиден междувременно).
    */
   supportRequestMessageId: string | null
+  /**
+   * Етап 4F1 — операцията в регистъра на изтриванията (admin_delete_intent),
+   * само за action='delete'. NULL за pending бан и за редове отпреди 4F1.
+   */
+  ledgerOperationId: string | null
 }
 
 export type PendingProfileModerationStore = {
@@ -63,9 +68,19 @@ export type PendingProfileModerationStore = {
     requestedByAccountId: string
     reason: string
     supportRequestMessageId?: string | null
+    /** Етап 4F1 — операцията в регистъра (записва се ПРЕДИ намерението). */
+    ledgerOperationId?: string | null
   }) => void
   /** Pending enforcement за конкретен профил, ако има такъв — null иначе. */
   getPending: (targetProfileId: ProfileId) => PendingProfileModeration | null
+  /** Етап 4F1 — всички висящи административни изтривания. */
+  listPendingDeletes: () => PendingProfileModeration[]
+  /** Етап 4F1 — висящото изтриване на тази операция (ако още го има). */
+  getPendingDeleteByOperation: (ledgerOperationId: string) => PendingProfileModeration | null
+  /** Етап 4F1 — задава операция на висящо изтриване без такава (редове отпреди 4F1). */
+  assignLedgerOperation: (pendingId: string, ledgerOperationId: string) => boolean
+  /** Етап 4F1 — премахва висящото изтриване САМО ако е още същата операция. */
+  clearPendingDeleteForOperation: (ledgerOperationId: string) => void
   /** Премахва pending реда след успешно приложено enforcement (game-end hook-а). */
   clearPending: (targetProfileId: ProfileId) => void
   close: () => void
@@ -87,17 +102,41 @@ export async function createPendingProfileModerationStore(
   const selectPendingStatement = database.prepare(`
     SELECT pending_id, target_profile_id, action, ban_id,
            requested_by_profile_id, requested_by_account_id, reason, requested_at,
-           support_request_message_id
+           support_request_message_id, ledger_operation_id
     FROM pending_profile_moderation
     WHERE target_profile_id = ?
     LIMIT 1;
+  `)
+  const selectPendingDeletesStatement = database.prepare(`
+    SELECT pending_id, target_profile_id, action, ban_id,
+           requested_by_profile_id, requested_by_account_id, reason, requested_at,
+           support_request_message_id, ledger_operation_id
+    FROM pending_profile_moderation
+    WHERE action = 'delete'
+    ORDER BY requested_at, pending_id;
+  `)
+  const selectPendingDeleteByOperationStatement = database.prepare(`
+    SELECT pending_id, target_profile_id, action, ban_id,
+           requested_by_profile_id, requested_by_account_id, reason, requested_at,
+           support_request_message_id, ledger_operation_id
+    FROM pending_profile_moderation
+    WHERE ledger_operation_id = ? AND action = 'delete'
+    LIMIT 1;
+  `)
+  const assignLedgerOperationStatement = database.prepare(`
+    UPDATE pending_profile_moderation SET ledger_operation_id = ?
+    WHERE pending_id = ? AND action = 'delete' AND ledger_operation_id IS NULL;
+  `)
+  const deletePendingForOperationStatement = database.prepare(`
+    DELETE FROM pending_profile_moderation WHERE ledger_operation_id = ?;
   `)
 
   const upsertPendingStatement = database.prepare(`
     INSERT INTO pending_profile_moderation (
       pending_id, target_profile_id, action, ban_id,
-      requested_by_profile_id, requested_by_account_id, reason, support_request_message_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      requested_by_profile_id, requested_by_account_id, reason, support_request_message_id,
+      ledger_operation_id
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT (target_profile_id) DO UPDATE SET
       action = excluded.action,
       ban_id = excluded.ban_id,
@@ -105,6 +144,7 @@ export async function createPendingProfileModerationStore(
       requested_by_account_id = excluded.requested_by_account_id,
       reason = excluded.reason,
       support_request_message_id = excluded.support_request_message_id,
+      ledger_operation_id = excluded.ledger_operation_id,
       requested_at = CURRENT_TIMESTAMP;
   `)
 
@@ -122,6 +162,7 @@ export async function createPendingProfileModerationStore(
     reason: string
     requested_at: string
     support_request_message_id: string | null
+    ledger_operation_id: string | null
   }): PendingProfileModeration {
     return {
       pendingId: row.pending_id,
@@ -133,6 +174,7 @@ export async function createPendingProfileModerationStore(
       reason: row.reason,
       requestedAt: row.requested_at,
       supportRequestMessageId: row.support_request_message_id,
+      ledgerOperationId: row.ledger_operation_id,
     }
   }
 
@@ -148,9 +190,27 @@ export async function createPendingProfileModerationStore(
           reason: string
           requested_at: string
           support_request_message_id: string | null
+          ledger_operation_id: string | null
         }
       | undefined
     return row === undefined ? null : toPending(row)
+  }
+
+  function listPendingDeletes(): PendingProfileModeration[] {
+    return (selectPendingDeletesStatement.all() as Parameters<typeof toPending>[0][]).map(toPending)
+  }
+
+  function getPendingDeleteByOperation(ledgerOperationId: string): PendingProfileModeration | null {
+    const row = selectPendingDeleteByOperationStatement.get(ledgerOperationId) as Parameters<typeof toPending>[0] | undefined
+    return row === undefined ? null : toPending(row)
+  }
+
+  function assignLedgerOperation(pendingId: string, ledgerOperationId: string): boolean {
+    return Number((assignLedgerOperationStatement.run(ledgerOperationId, pendingId) as { changes: number }).changes) === 1
+  }
+
+  function clearPendingDeleteForOperation(ledgerOperationId: string): void {
+    deletePendingForOperationStatement.run(ledgerOperationId)
   }
 
   function recordPendingBan(input: {
@@ -170,6 +230,7 @@ export async function createPendingProfileModerationStore(
       // показван на клиента. trim(reason)<>'' CHECK изисква non-blank.
       'pending ban enforcement',
       null, // support_request_message_id — не се прилага за action='ban'
+      null, // ledger_operation_id — само за action='delete'
     )
   }
 
@@ -179,6 +240,7 @@ export async function createPendingProfileModerationStore(
     requestedByAccountId: string
     reason: string
     supportRequestMessageId?: string | null
+    ledgerOperationId?: string | null
   }): void {
     upsertPendingStatement.run(
       randomUUID(),
@@ -189,6 +251,7 @@ export async function createPendingProfileModerationStore(
       input.requestedByAccountId,
       input.reason,
       input.supportRequestMessageId ?? null,
+      input.ledgerOperationId ?? null,
     )
   }
 
@@ -204,6 +267,10 @@ export async function createPendingProfileModerationStore(
     recordPendingBan,
     recordPendingDelete,
     getPending,
+    listPendingDeletes,
+    getPendingDeleteByOperation,
+    assignLedgerOperation,
+    clearPendingDeleteForOperation,
     clearPending,
     close,
   }

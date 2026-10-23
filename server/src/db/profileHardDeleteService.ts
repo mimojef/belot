@@ -157,6 +157,10 @@ export type ProfileHardDeleteService = {
      * приема на доверие от клиента.
      */
     supportRequestMessageId?: string | null
+    /** Етап 4F1 — log_id на одитния ред = operationId в регистъра. */
+    auditLogId?: string
+    /** Етап 4F1 — повторно прилагане след restore (виж имплементацията). */
+    replay?: { deletedAt: string }
   }) => Promise<HardDeleteProfileResult>
   /**
    * Reuse-ва СЪЩИТЕ prepared statements/SQL като active tournament dependency
@@ -466,11 +470,16 @@ export async function createProfileHardDeleteService(
     VALUES (?);
   `)
 
+  // Етап 4F1: deleted_at може да бъде подаден (restore replay запазва
+  // оригиналния момент от регистъра); NULL -> CURRENT_TIMESTAMP както досега.
   const insertDeletionAuditStatement = database.prepare(`
     INSERT INTO admin_profile_deletions (
       log_id, deleted_profile_id, deleted_account_id, username_snapshot,
-      deleted_by_profile_id, reason
-    ) VALUES (?, ?, ?, ?, ?, ?);
+      deleted_by_profile_id, reason, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP));
+  `)
+  const selectActorProfileExistsStatement = database.prepare(`
+    SELECT 1 FROM profiles WHERE profile_id = ? LIMIT 1;
   `)
 
   // support_messages/support_archived нямат FK към profiles (виж
@@ -503,8 +512,8 @@ export async function createProfileHardDeleteService(
   const insertSupportDeletionArchiveStatement = database.prepare(`
     INSERT INTO support_deletion_archives (
       archive_id, profile_id, username_snapshot, display_name_snapshot,
-      request_message_id, requested_at, deleted_by_profile_id, reason
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+      request_message_id, requested_at, deleted_by_profile_id, reason, deleted_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP));
   `)
 
   // Immutable identity snapshot — попълва се ПРЕДИ DELETE FROM profiles, за
@@ -923,6 +932,19 @@ export async function createProfileHardDeleteService(
     actorAccountId: string
     reason: string
     supportRequestMessageId?: string | null
+    /**
+     * Етап 4F1 — log_id на одитния ред = operationId в регистъра на
+     * изтриванията (иначе нов UUID, както досега).
+     */
+    auditLogId?: string
+    /**
+     * Етап 4F1 — повторно прилагане след restore на вече ЗАВЪРШЕНО
+     * административно изтриване: оригиналният момент (SQLite datetime);
+     * липсващ актьор -> NULL; support заявка, която я няма във
+     * възстановеното копие -> без архивен ред (вместо отказ). Всички други
+     * защити (турнир, кампанийни награди, тригери) остават.
+     */
+    replay?: { deletedAt: string }
   }): Promise<HardDeleteProfileResult> {
     if (input.targetProfileId === input.actorProfileId) {
       return { ok: false, code: 'self' }
@@ -1000,13 +1022,19 @@ export async function createProfileHardDeleteService(
           messageRow.profile_id === profileRow.profile_id && // (2) принадлежи на target profile
           messageRow.is_from_admin === 0 // (3) user-authored, не admin reply
 
-        if (!isValid) {
+        if (!isValid && input.replay === undefined) {
           database.exec('ROLLBACK;')
           return { ok: false, code: 'invalid_support_request_message' }
         }
 
-        validatedSupportRequestMessage = { message_id: messageRow.message_id, created_at: messageRow.created_at }
+        validatedSupportRequestMessage = isValid ? { message_id: messageRow.message_id, created_at: messageRow.created_at } : null
       }
+
+      // Етап 4F1 (replay): актьорът може да липсва във възстановеното копие.
+      const auditActorProfileId = input.replay !== undefined && selectActorProfileExistsStatement.get(input.actorProfileId) === undefined
+        ? null
+        : input.actorProfileId
+      const auditDeletedAt = input.replay?.deletedAt ?? null
 
       const usernameSnapshot = profileRow.username?.trim() || profileRow.display_name
 
@@ -1016,12 +1044,13 @@ export async function createProfileHardDeleteService(
       // непокътнати, дори ако delete-ът се провали и rollback-не, audit
       // insert-ът се rollback-ва заедно с него (atomic "или всичко, или нищо").
       insertDeletionAuditStatement.run(
-        randomUUID(),
+        input.auditLogId ?? randomUUID(),
         profileRow.profile_id,
         profileRow.account_id,
         usernameSnapshot,
-        input.actorProfileId,
+        auditActorProfileId,
         reason,
+        auditDeletedAt,
       )
 
       // Support chat evidence preservation (spec §A/§B) — archive редът се
@@ -1044,8 +1073,9 @@ export async function createProfileHardDeleteService(
           profileRow.display_name,
           validatedSupportRequestMessage.message_id,
           validatedSupportRequestMessage.created_at,
-          input.actorProfileId,
+          auditActorProfileId,
           reason,
+          auditDeletedAt,
         )
       }
 
