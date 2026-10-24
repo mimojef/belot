@@ -1,21 +1,29 @@
-// Самоизтриване на профили — Етап 1: чисти, детерминирани помощни функции за
-// 45-дневния срок и статусните преходи на profile_deletion_requests /
-// profile_deletion_file_queue (виж миграция
-// 20261024_001_create_profile_deletion_infrastructure.sql).
+// Самоизтриване на профили — чисти, детерминирани помощни функции за срока
+// за отмяна и статусните преходи на profile_deletion_requests /
+// profile_deletion_file_queue (виж миграции
+// 20261024_001_create_profile_deletion_infrastructure.sql и
+// 20261101_001_voluntary_deletion_30_day_grace_period.sql).
 //
-// Неактивна инфраструктура: на този етап НИКОЙ runtime модул (index.ts,
-// stores) не import-ва този файл — ползва се само от
-// scripts/checkProfileDeletionInfrastructure.ts. Таблиците на преходите тук
-// са огледало на тригерите в миграцията; тестът сравнява двете за всички
-// двойки статуси, за да не се разминат.
+// Таблиците на преходите тук са огледало на тригерите в миграциите;
+// scripts/checkProfileDeletionInfrastructure.ts сравнява двете за всички
+// двойки статуси, за да не се разминат. Срокът се ползва от
+// profileDeletionRequestStore при подаване на заявка.
 //
 // Всички времена са каноничен UTC ISO-8601 с милисекунди
 // ('YYYY-MM-DDTHH:MM:SS.sssZ') — формата на Date.prototype.toISOString() и на
 // strftime('%Y-%m-%dT%H:%M:%fZ', 'now') в SQLite. Часовата зона на процеса
 // (TZ) не влияе на изчисленията.
 
-export const PROFILE_DELETION_GRACE_PERIOD_DAYS = 45
+// Етап 4G — срокът за отмяна на НОВА доброволна заявка: точно 30 × 24 часа
+// (2 592 000 секунди). Единственият източник на стойността в кода; базата я
+// налага чрез insert guard-а (grace_period_days = 30).
+export const PROFILE_DELETION_GRACE_PERIOD_DAYS = 30
 export const PROFILE_DELETION_GRACE_PERIOD_MS = PROFILE_DELETION_GRACE_PERIOD_DAYS * 24 * 60 * 60 * 1000
+
+// Заявки, подадени преди Етап 4G, пазят оригиналния си 45-дневен срок
+// (grace_period_days = 45 в базата). Нов код НЕ създава такива заявки —
+// стойността е само за разпознаване/диагностика на историческите редове.
+export const PROFILE_DELETION_LEGACY_GRACE_PERIOD_DAYS = 45
 
 export const PROFILE_DELETION_REQUEST_STATUSES = [
   'pending',
@@ -93,9 +101,10 @@ function parseCanonicalUtcIso(value: string): number {
 }
 
 /**
- * requested_at + точно 45 × 24 часа (не "45 календарни дни" в локална зона —
- * при смяна на лятно/зимно време локалният час на изтичане се измества с 1 ч,
- * но реалната продължителност остава еднаква за всички).
+ * requested_at + точно PROFILE_DELETION_GRACE_PERIOD_DAYS × 24 часа в UTC
+ * (реално изминало време, не "календарни дни" в локална зона — при смяна на
+ * лятно/зимно време локалният час на изтичане се измества с 1 ч, но реалната
+ * продължителност остава еднаква за всички).
  */
 export function computeProfileDeletionSchedule(requestedAt: Date): { requestedAt: string; scheduledFor: string } {
   const requestedAtMs = requestedAt.getTime()

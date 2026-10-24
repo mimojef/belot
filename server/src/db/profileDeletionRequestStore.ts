@@ -14,7 +14,11 @@
 import { randomUUID } from 'node:crypto'
 import { generateRawResetToken, hashResetToken, hmacRateLimitSubject, validateRateLimitSecret } from './authHelpers.js'
 import { createProfileDeletionParticipationChecks } from './profileDeletionParticipationChecks.js'
-import { computeProfileDeletionSchedule, PROFILE_DELETION_ACTIVE_REQUEST_STATUSES } from './profileDeletionSchedule.js'
+import {
+  computeProfileDeletionSchedule,
+  PROFILE_DELETION_ACTIVE_REQUEST_STATUSES,
+  PROFILE_DELETION_GRACE_PERIOD_DAYS,
+} from './profileDeletionSchedule.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -29,6 +33,8 @@ export type ProfileDeletionPendingRequest = {
   profileId: string
   requestedAt: string
   scheduledFor: string
+  /** Етап 4G — срокът на ТАЗИ заявка от базата: 30 (нови) или 45 (исторически). */
+  gracePeriodDays: number
 }
 
 export type CreateProfileDeletionRequestResult =
@@ -98,7 +104,7 @@ export async function createProfileDeletionRequestStore(
   const selectNowStatement = database.prepare(`SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now') AS now;`)
 
   const selectPendingRequestStatement = database.prepare(`
-    SELECT request_id, profile_id, requested_at, scheduled_for
+    SELECT request_id, profile_id, requested_at, scheduled_for, grace_period_days
     FROM profile_deletion_requests
     WHERE profile_id = ? AND status = 'pending'
     LIMIT 1;
@@ -129,8 +135,8 @@ export async function createProfileDeletionRequestStore(
 
   const insertRequestStatement = database.prepare(`
     INSERT INTO profile_deletion_requests (
-      request_id, profile_id, account_id_snapshot, profile_created_at_snapshot, requested_at, scheduled_for
-    ) VALUES (?, ?, ?, ?, ?, ?);
+      request_id, profile_id, account_id_snapshot, profile_created_at_snapshot, requested_at, scheduled_for, grace_period_days
+    ) VALUES (?, ?, ?, ?, ?, ?, ?);
   `)
 
   const insertEventStatement = database.prepare(`
@@ -212,8 +218,14 @@ export async function createProfileDeletionRequestStore(
     return (selectNowStatement.get() as { now: string }).now
   }
 
-  function toPendingRequest(row: { request_id: string; profile_id: string; requested_at: string; scheduled_for: string }): ProfileDeletionPendingRequest {
-    return { requestId: row.request_id, profileId: row.profile_id, requestedAt: row.requested_at, scheduledFor: row.scheduled_for }
+  function toPendingRequest(row: { request_id: string; profile_id: string; requested_at: string; scheduled_for: string; grace_period_days: number }): ProfileDeletionPendingRequest {
+    return {
+      requestId: row.request_id,
+      profileId: row.profile_id,
+      requestedAt: row.requested_at,
+      scheduledFor: row.scheduled_for,
+      gracePeriodDays: Number(row.grace_period_days),
+    }
   }
 
   function getPendingRequest(profileId: string): ProfileDeletionPendingRequest | null {
@@ -259,14 +271,24 @@ export async function createProfileDeletionRequestStore(
         database.exec('ROLLBACK;')
         return { ok: false, code: 'active_participation' }
       }
+      // Етап 4G — срокът тече от часовника на базата в момента на приемане
+      // (клиентският часовник не участва); повторна заявка при вече активна
+      // се отказва по-горе (already_pending), т.е. срокът не може да бъде
+      // удължен/съкратен с повторно подаване.
       const schedule = computeProfileDeletionSchedule(new Date(dbNow()))
       const requestId = randomUUID()
-      insertRequestStatement.run(requestId, profile.profile_id, profile.account_id, profile.created_at, schedule.requestedAt, schedule.scheduledFor)
+      insertRequestStatement.run(requestId, profile.profile_id, profile.account_id, profile.created_at, schedule.requestedAt, schedule.scheduledFor, PROFILE_DELETION_GRACE_PERIOD_DAYS)
       const eventResult = insertEventStatement.run(requestId, profile.profile_id, 'requested', JSON.stringify({ source: 'self' })) as { lastInsertRowid: number | bigint }
       database.exec('COMMIT;')
       return {
         ok: true,
-        request: { requestId, profileId: profile.profile_id, requestedAt: schedule.requestedAt, scheduledFor: schedule.scheduledFor },
+        request: {
+          requestId,
+          profileId: profile.profile_id,
+          requestedAt: schedule.requestedAt,
+          scheduledFor: schedule.scheduledFor,
+          gracePeriodDays: PROFILE_DELETION_GRACE_PERIOD_DAYS,
+        },
         eventSeq: Number(eventResult.lastInsertRowid),
       }
     } catch (error) {
@@ -349,7 +371,7 @@ export async function createProfileDeletionRequestStore(
       return { ok: true, profileId: row.profile_id, requestId: row.request_id, eventSeq: Number(eventResult.lastInsertRowid) }
     } catch (error) {
       rollbackQuietly()
-      // Тригерът в базата е последната защита за 45-дневния прозорец.
+      // Тригерът в базата е последната защита за прозореца за отмяна.
       if (error instanceof Error && error.message.includes('profile_deletion_cancel_window_closed')) {
         return { ok: false, code: 'window_closed' }
       }

@@ -15,7 +15,7 @@
  * [A] Миграционна съвместимост (чиста база, upgrade на съществуваща база,
  *     идемпотентен повторен старт, profiles/accounts непроменени,
  *     integrity_check, foreign_key_check).
- * [B] 45-дневен срок, граници, UTC (чисти функции).
+ * [B] 30-дневен срок (Етап 4G), граници, UTC (чисти функции).
  * [C] Създаване на заявка и тригер за идентичност/начален статус/прозорец.
  * [D] Уникалност на активната заявка.
  * [E] Статусни преходи (пълна матрица DB ↔ TS) и времеви граници в базата.
@@ -421,18 +421,18 @@ try {
   const db = await openDatabase(workRun.databaseFilePath)
 
   // ═══ [B] Срок, граници, UTC (чисти функции) ═════════════════════════════
-  console.log('\n[B] 45-дневен срок, граници, UTC')
+  console.log('\n[B] 30-дневен срок (Етап 4G), граници, UTC')
 
-  await check('[B1] 45 дни = точно 3 888 000 000 ms', () => {
-    assertEqual(PROFILE_DELETION_GRACE_PERIOD_MS, 3_888_000_000, 'PROFILE_DELETION_GRACE_PERIOD_MS')
+  await check('[B1] 30 дни = точно 2 592 000 000 ms', () => {
+    assertEqual(PROFILE_DELETION_GRACE_PERIOD_MS, 2_592_000_000, 'PROFILE_DELETION_GRACE_PERIOD_MS')
   })
 
   await check('[B2] computeProfileDeletionSchedule: точни очаквани дати (обикновен, високосен, нов година)', () => {
     const cases: Array<[string, string]> = [
-      ['2026-10-21T12:34:56.789Z', '2026-12-05T12:34:56.789Z'],
-      ['2028-02-01T00:00:00.000Z', '2028-03-17T00:00:00.000Z'], // високосна 2028
-      ['2027-02-01T00:00:00.000Z', '2027-03-18T00:00:00.000Z'], // невисокосна 2027
-      ['2026-12-20T23:59:59.999Z', '2027-02-03T23:59:59.999Z'], // през нова година
+      ['2026-10-21T12:34:56.789Z', '2026-11-20T12:34:56.789Z'],
+      ['2028-02-01T00:00:00.000Z', '2028-03-02T00:00:00.000Z'], // високосна 2028
+      ['2027-02-01T00:00:00.000Z', '2027-03-03T00:00:00.000Z'], // невисокосна 2027
+      ['2026-12-20T23:59:59.999Z', '2027-01-19T23:59:59.999Z'], // през нова година
     ]
     for (const [requestedAt, expected] of cases) {
       const schedule = computeProfileDeletionSchedule(new Date(requestedAt))
@@ -441,9 +441,9 @@ try {
     }
   })
 
-  await check('[B3] Смяна на часовото време (Европа/София, 25.10.2026): 45 × 24 ч в UTC, локалният час се измества с 1 ч', () => {
+  await check('[B3] Смяна на часовото време (Европа/София, 25.10.2026): 30 × 24 ч в UTC, локалният час се измества с 1 ч', () => {
     const schedule = computeProfileDeletionSchedule(new Date('2026-10-01T10:00:00.000Z'))
-    assertEqual(schedule.scheduledFor, '2026-11-15T10:00:00.000Z', 'scheduledFor')
+    assertEqual(schedule.scheduledFor, '2026-10-31T10:00:00.000Z', 'scheduledFor')
     const sofiaHour = (iso: string) => new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Sofia', hour: '2-digit', hourCycle: 'h23' }).format(new Date(iso))
     assertEqual(sofiaHour(schedule.requestedAt), '13', 'локален час на подаване (EEST)')
     assertEqual(sofiaHour(schedule.scheduledFor), '12', 'локален час на изтичане (EET)')
@@ -475,7 +475,7 @@ try {
       else process.env.TZ = originalTz
     }
     assertEqual(results.size, 1, 'различни резултати при различни TZ')
-    assertEqual([...results][0], '2026-10-21T21:30:00.000Z|2026-12-05T21:30:00.000Z', 'резултат')
+    assertEqual([...results][0], '2026-10-21T21:30:00.000Z|2026-11-20T21:30:00.000Z', 'резултат')
   })
 
   await check('[B6] isCanonicalUtcIsoTimestamp приема само каноничен UTC формат', () => {
@@ -503,7 +503,7 @@ try {
   // ═══ [C] Създаване на заявка ════════════════════════════════════════════
   console.log('\n[C] Създаване на заявка')
 
-  await check('[C1] Валидна заявка: pending, 0 опита, без lease, scheduled_for = requested_at + 45 дни', () => {
+  await check('[C1] Валидна заявка: pending, 0 опита, без lease, scheduled_for = requested_at + 30 дни, grace_period_days = 30', () => {
     const profile = insertHumanProfile(db)
     const requestId = insertRequest(db, profile)
     const row = getRequest(db, requestId)
@@ -511,15 +511,16 @@ try {
     assertEqual(row.attempt_count, 0, 'attempt_count')
     assertEqual(row.lease_owner, null, 'lease_owner')
     assertEqual(Date.parse(String(row.scheduled_for)) - Date.parse(String(row.requested_at)), PROFILE_DELETION_GRACE_PERIOD_MS, 'разлика')
+    assertEqual(row.grace_period_days, 30, 'grace_period_days')
     assertEqual(row.account_id_snapshot, profile.accountId, 'account snapshot')
     assertEqual(row.profile_created_at_snapshot, profile.createdAt, 'created_at snapshot')
     assert(isCanonicalUtcIsoTimestamp(String(row.created_at)) && isCanonicalUtcIsoTimestamp(String(row.updated_at)), 'created_at/updated_at DEFAULT в UTC ISO')
   })
 
-  await check('[C2] Срок, различен от точно 45 дни (±1 ms, 44 дни), се отхвърля от CHECK', () => {
+  await check('[C2] Срок, различен от точно 30 дни (±1 ms, 29 дни, 45 дни), се отхвърля от CHECK', () => {
     const profile = insertHumanProfile(db)
     const requestedAt = dbNow(db)
-    for (const scheduledFor of [isoPlus(requestedAt, PROFILE_DELETION_GRACE_PERIOD_MS + 1), isoPlus(requestedAt, PROFILE_DELETION_GRACE_PERIOD_MS - 1), isoPlus(requestedAt, 44 * DAY_MS)]) {
+    for (const scheduledFor of [isoPlus(requestedAt, PROFILE_DELETION_GRACE_PERIOD_MS + 1), isoPlus(requestedAt, PROFILE_DELETION_GRACE_PERIOD_MS - 1), isoPlus(requestedAt, 29 * DAY_MS), isoPlus(requestedAt, 45 * DAY_MS)]) {
       assertRejects(() => db.prepare(`
         INSERT INTO profile_deletion_requests (request_id, profile_id, account_id_snapshot, profile_created_at_snapshot, requested_at, scheduled_for)
         VALUES (?, ?, ?, ?, ?, ?);
@@ -704,7 +705,7 @@ try {
       ['profile_id = ?', [randomUUID()]],
       ['account_id_snapshot = ?', [randomUUID()]],
       ['profile_created_at_snapshot = ?', ['2000-01-01 00:00:00']],
-      // Валиден 45-дневен чифт, изместен с 1 ден назад — все пак трябва да се откаже.
+      // Валиден 30-дневен чифт, изместен с 1 ден назад — все пак трябва да се откаже.
       ['requested_at = ?, scheduled_for = ?', [shifted.requestedAt, shifted.scheduledFor]],
     ]
     for (const [setClause, params] of updates) {
@@ -838,7 +839,7 @@ try {
 
   await check('[I1] Файл може да влезе в опашката само за заявка в статус executing', () => {
     const pending = insertRequest(db, insertHumanProfile(db))
-    assertRejects(() => enqueueFile(db, pending, '/uploads/avatars/a.webp'), 'profile_deletion_file_requires_executing_request', 'pending (45-дневен период)')
+    assertRejects(() => enqueueFile(db, pending, '/uploads/avatars/a.webp'), 'profile_deletion_file_requires_executing_request', 'pending (период за отмяна)')
     const cancelled = buildRequestInStatus(db, 'cancelled', true)
     assertRejects(() => enqueueFile(db, cancelled, '/uploads/avatars/b.webp'), 'profile_deletion_file_requires_executing_request', 'cancelled')
     const completed = buildRequestInStatus(db, 'completed', false)

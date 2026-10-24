@@ -172,7 +172,7 @@ function withTriggerDropped<T>(name: string, fn: () => T): T {
   try { return fn() } finally { db.exec(sql) }
 }
 
-/** Заявка с изтекъл (или близък) срок — requested_at назад с точно 45 × 24 ч (insert guard-ът нормално го забранява). */
+/** Заявка с изтекъл (или близък) срок — requested_at назад с точно 30 × 24 ч (insert guard-ът нормално го забранява). */
 function insertRequestScheduledAt(user: User, scheduledForIso: string): string {
   const requestId = randomUUID()
   const createdAt = (db.prepare('SELECT created_at FROM profiles WHERE profile_id = ?;').get(user.profileId) as { created_at: string }).created_at
@@ -390,12 +390,12 @@ try {
 
   console.log('\n[T] Срок и заявки')
 
-  await check('[T1] Изтриване точно след 45 × 24 ч: преди scheduled_for не се взема, след него — изтрива', async () => {
+  await check('[T1] Изтриване точно след 30 × 24 ч: преди scheduled_for не се взема, след него — изтрива', async () => {
     const user = registerUser('Exact')
     const scheduledFor = isoPlus(dbNow(), 1500)
     const requestId = insertRequestScheduledAt(user, scheduledFor)
     const row = requestRow(requestId)
-    assertEqual(Date.parse(String(row.scheduled_for)) - Date.parse(String(row.requested_at)), PROFILE_DELETION_GRACE_PERIOD_MS, '45 × 24 ч')
+    assertEqual(Date.parse(String(row.scheduled_for)) - Date.parse(String(row.requested_at)), PROFILE_DELETION_GRACE_PERIOD_MS, '30 × 24 ч')
     assertEqual(executor.claimNextDueRequest('w-exact', requestId), null, 'claim преди срока')
     while (dbNow() < scheduledFor) await sleep(100)
     const summary = await makeWorker(executor, 'w-exact', [requestId]).runOnce()
@@ -645,7 +645,7 @@ try {
   db.prepare(`INSERT INTO player_blocks (blocker_profile_id, blocked_profile_id) VALUES (?, ?);`).run(stranger2.profileId, target.profileId)
   const stranger1LikesBefore = count('SELECT COALESCE(SUM(total_given), 0) AS c FROM profile_likes WHERE liked_profile_id = ?;', stranger1.profileId)
 
-  // Заявка с изтекъл 45-дневен срок (сесиите са отнети при подаването).
+  // Заявка с изтекъл срок за отмяна (сесиите са отнети при подаването).
   authStore.revokeAllSessionsForProfile(target.profileId)
   const targetRequestId = insertDueRequest(target)
   const targetSummary = await makeWorker(executor, 'w-data', [targetRequestId]).runOnce()
@@ -806,7 +806,7 @@ try {
   )
   const generalTopic = createTopic(null) // системна тема (като "Общи"/Лафче) — без създател
 
-  await check('[TP1] Публикация без отговори (с прикачен файл): след 45 дни — изтрита заедно с файла; completed', async () => {
+  await check('[TP1] Публикация без отговори (с прикачен файл): след срока — изтрита заедно с файла; completed', async () => {
     const author = registerUser('TpSolo')
     const root = addTopicMessage(generalTopic, author, null)
     const file = await attachTopicFile(root)
@@ -960,7 +960,7 @@ try {
     assertEqual(count('SELECT COUNT(*) AS c FROM topic_messages WHERE message_id = ? AND deleted_at IS NOT NULL AND sender_profile_id = ?;', removedReply, other.profileId), 1, 'остава изтрит, авторът е непроменен')
   })
 
-  await check('[TP8] Отмяна преди 45 дни: worker-ът не взема заявката; публикациите, отговорите и файловете са непроменени; профилът не е скрит', async () => {
+  await check('[TP8] Отмяна преди срока: worker-ът не взема заявката; публикациите, отговорите и файловете са непроменени; профилът не е скрит', async () => {
     const author = registerUser('TpCancel')
     const other = registerUser('TpCancelOther')
     const root = addTopicMessage(generalTopic, author, null)

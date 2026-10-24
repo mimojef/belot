@@ -5,7 +5,7 @@
  * ИЗОЛИРАНА temp база с всички реални миграции (ensureServerDatabaseReady()).
  * Никога реалната база.
  *
- * [Q] Подаване: валидна заявка, 45 дни, журнал, дублиране, конкурентност,
+ * [Q] Подаване: валидна заявка, 30 дни, журнал, дублиране, конкурентност,
  *     недопустими профили.
  * [K] Токени за отмяна: само хеш, еднократност, изтичане, замяна,
  *     "остави заявката активна", отмяна, конкурентна отмяна, граници на срока.
@@ -149,14 +149,14 @@ function snapshotTables(exclude: (name: string) => boolean): string {
 try {
   console.log('\n[Q] Подаване')
 
-  await check('[Q1] Валидна заявка: pending, точно 45 × 24 ч в UTC, събитие requested (actor user) с върнат event_seq', () => {
+  await check('[Q1] Валидна заявка: pending, точно 30 × 24 ч в UTC, събитие requested (actor user) с върнат event_seq', () => {
     const user = registerUser('Valid')
     const result = store.createRequest({ profileId: user.profileId, accountId: user.accountId })
     assert(result.ok, JSON.stringify(result))
     if (!result.ok) return
     const row = requestRow(result.request.requestId)
     assertEqual(row.status, 'pending', 'status')
-    assertEqual(Date.parse(String(row.scheduled_for)) - Date.parse(String(row.requested_at)), PROFILE_DELETION_GRACE_PERIOD_MS, '45 дни')
+    assertEqual(Date.parse(String(row.scheduled_for)) - Date.parse(String(row.requested_at)), PROFILE_DELETION_GRACE_PERIOD_MS, '30 дни')
     assert(String(row.requested_at).endsWith('Z'), 'UTC')
     const event = db.prepare('SELECT event_seq, event_type, actor_kind FROM profile_deletion_events WHERE request_id = ?;').get(result.request.requestId) as { event_seq: number; event_type: string; actor_kind: string }
     assertEqual(event.event_type, 'requested', 'event_type')

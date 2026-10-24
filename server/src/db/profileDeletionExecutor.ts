@@ -1689,7 +1689,7 @@ export async function createProfileDeletionExecutor(
       const profile = selectProfileStatement.get(row.profile_id) as ProfileRow | undefined
       if (profile === undefined) {
         if (selectAdminDeletionStatement.get(row.profile_id) !== undefined) {
-          // Профилът вече е изтрит от администратор през 45-дневния период.
+          // Профилът вече е изтрит от администратор през периода за отмяна.
           markDbDeletedStatement.run(now, isoPlus(now, PROFILE_DELETION_WORKER_LEASE_MS), row.request_id, workerId)
           insertEvent(row.request_id, row.profile_id, 'db_deleted', workerId, { files: 0, accountDeleted: false, alreadyDeletedByAdmin: true })
           database.exec('COMMIT;')

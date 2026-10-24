@@ -381,14 +381,28 @@ try {
   })
 
   let submitResult: Awaited<ReturnType<typeof submit>> | null = null
-  await check('[E13] Успешно подаване: 200, срок точно 45 дни, cookie изчистено, заявка pending', async () => {
+  // Етап 4G — клиентът не определя срока: полета за дата в тялото се отказват.
+  await check('[E12b] Клиентска дата в тялото (scheduledFor/requestedAt) -> 400, без заявка', async () => {
+    const tamper = await register('ClientDate')
+    for (const extra of [{ scheduledFor: '2030-01-01T00:00:00.000Z' }, { requestedAt: '2020-01-01T00:00:00.000Z' }, { gracePeriodDays: 1 }]) {
+      const res = await submit(tamper, { password: PASSWORD, confirm: true, ...extra })
+      assert(res.status === 400, `${JSON.stringify(extra)}: ${res.status} ${JSON.stringify(res.json)}`)
+    }
+    assert(requestCount(tamper.profileId) === 0, 'създадена заявка')
+  })
+
+  await check('[E13] Успешно подаване: 200, срок точно 30 дни (2 592 000 s), отговорът = реда в базата, cookie изчистено, заявка pending', async () => {
     submitResult = await submit(hidden)
     const res = submitResult
     assert(res.status === 200 && res.json.ok === true, `${res.status} ${JSON.stringify(res.json)}`)
-    const row = db.prepare(`SELECT * FROM profile_deletion_requests WHERE profile_id = ?;`).get(hidden.profileId) as Record<string, string>
+    const row = db.prepare(`SELECT * FROM profile_deletion_requests WHERE profile_id = ?;`).get(hidden.profileId) as Record<string, string | number>
     assert(row.status === 'pending', 'status')
-    assert(Date.parse(row.scheduled_for) - Date.parse(row.requested_at) === PROFILE_DELETION_GRACE_PERIOD_MS, '45 дни')
+    assert(PROFILE_DELETION_GRACE_PERIOD_MS === 2_592_000_000, 'константата е 30 дни')
+    assert(Date.parse(String(row.scheduled_for)) - Date.parse(String(row.requested_at)) === PROFILE_DELETION_GRACE_PERIOD_MS, '30 дни')
+    assert(Number(row.grace_period_days) === 30 && res.json.gracePeriodDays === 30, `gracePeriodDays: ${res.json.gracePeriodDays}`)
     assert(res.json.scheduledFor === row.scheduled_for, 'scheduledFor в отговора')
+    const expectedRemaining = Date.parse(String(row.scheduled_for)) - Date.now()
+    assert(Math.abs(res.json.remainingMs - expectedRemaining) < 60_000, `remainingMs ${res.json.remainingMs} vs ${expectedRemaining}`)
     assert(/belot_session=;|Max-Age=0|Expires=Thu, 01 Jan 1970/i.test(res.setCookie), `Set-Cookie: ${res.setCookie}`)
   })
 
@@ -487,7 +501,9 @@ try {
     const res = await login(hidden.email)
     assert(res.status === 403 && res.json.code === 'PROFILE_PENDING_DELETION' && res.json.restoreAvailable === true, `${res.status} ${JSON.stringify(res.json)}`)
     assert(/^[A-Za-z0-9_-]{43}$/.test(res.json.restoreToken), 'токен')
-    assert(res.json.remainingMs > PROFILE_DELETION_GRACE_PERIOD_MS - 60_000, 'оставащ срок')
+    assert(res.json.remainingMs > PROFILE_DELETION_GRACE_PERIOD_MS - 60_000 && res.json.remainingMs <= PROFILE_DELETION_GRACE_PERIOD_MS, 'оставащ срок (30 дни)')
+    const row = db.prepare(`SELECT scheduled_for, grace_period_days FROM profile_deletion_requests WHERE profile_id = ? AND status = 'pending';`).get(hidden.profileId) as { scheduled_for: string; grace_period_days: number }
+    assert(res.json.scheduledFor === row.scheduled_for && res.json.gracePeriodDays === row.grace_period_days, `срокът в отговора = базата: ${JSON.stringify({ scheduledFor: res.json.scheduledFor, gracePeriodDays: res.json.gracePeriodDays })}`)
     assert(res.json.isBanned === false, 'isBanned')
     assert(res.json.profileId === undefined, 'вътрешният profileId е изтекъл към клиента')
     assert(!/belot_session=[^;]/.test(res.cookie), 'издадена сесия')

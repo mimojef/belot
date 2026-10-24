@@ -290,6 +290,7 @@
     "check:profile-deletion-match-history": "tsx scripts/checkProfileDeletionMatchHistory.ts --server-root=.",
     "check:profile-deletion-financial-attribution": "tsx scripts/checkProfileDeletionFinancialAttribution.ts --server-root=.",
     "check:profile-deletion-admin-unified": "tsx scripts/checkProfileDeletionAdminUnified.ts --server-root=.",
+    "check:profile-deletion-30-day-grace-period": "tsx scripts/checkProfileDeletion30DayGracePeriod.ts --server-root=.",
     "check:profile-deletion-name-history": "tsx scripts/checkProfileDeletionNameHistory.ts --server-root=.",
     "check:profile-deletion-partner-ratings": "tsx scripts/checkProfileDeletionPartnerRatings.ts --server-root=.",
     "check:profile-deletion-support": "tsx scripts/checkProfileDeletionSupport.ts --server-root=.",

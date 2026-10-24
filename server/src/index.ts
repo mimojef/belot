@@ -9801,6 +9801,8 @@ async function handleAuthRequest(
           restoreTokenExpiresAt: issued.expiresAt,
           scheduledFor: issued.request.scheduledFor,
           remainingMs: Math.max(0, Date.parse(issued.request.scheduledFor) - Date.now()),
+          // Етап 4G — срокът на тази заявка от базата (30; 45 за исторически).
+          gracePeriodDays: issued.request.gracePeriodDays,
           isBanned: result.isBanned,
         })
         return true
@@ -11353,7 +11355,7 @@ function hasActiveParticipationForProfileDeletion(profileId: string): boolean {
 }
 
 // Етап 4: чакащите ВХОДЯЩИ покани за турнирен партньор НЕ се отказват при
-// подаване (необратима промяна). През 45-дневния период те не могат да бъдат
+// подаване (необратима промяна). През периода за отмяна те не могат да бъдат
 // приети — профилът няма сесия, а тригерът върху tournament_entries
 // (20261026_001) отказва ново активно участие при активна заявка. Нормалното
 // изтичане продължава; при отмяна все още валидните покани са отново
@@ -11497,6 +11499,7 @@ async function handleAccountDeletionSubmit(req: IncomingMessage, res: ServerResp
       ok: true,
       scheduledFor: result.request.scheduledFor,
       remainingMs: Math.max(0, Date.parse(result.request.scheduledFor) - Date.now()),
+      gracePeriodDays: result.request.gracePeriodDays,
     },
     { 'Set-Cookie': createClearSessionCookieHeader() },
   )

@@ -126,7 +126,7 @@ function isoPlus(iso: string, ms: number): string {
   return new Date(Date.parse(iso) + ms).toISOString()
 }
 
-/** Заявка с даден scheduled_for (requested_at назад с точно 45 × 24 ч; insert guard-ът временно е свален). */
+/** Заявка с даден scheduled_for (requested_at назад с точно 30 × 24 ч; insert guard-ът временно е свален). */
 function insertRequestScheduledAt(user: User, scheduledForIso: string): string {
   const requestId = randomUUID()
   const createdAt = (db.prepare('SELECT created_at FROM profiles WHERE profile_id = ?;').get(user.profileId) as { created_at: string }).created_at

@@ -102,7 +102,7 @@ export type PendingRegistrationCreatedResult =
 
 // Самоизтриване, Етап 2 — единни съобщения за заети идентификатори при
 // регистрация (submit, direct режим и email verification). Профил, подаден
-// за изтриване, държи имейла/името си през 45-дневния период и се отчита
+// за изтриване, държи имейла/името си през периода за отмяна и се отчита
 // ИДЕНТИЧНО на активен профил — съобщенията никога не разкриват състоянието
 // на чужд профил.
 export const REGISTRATION_EMAIL_TAKEN_MESSAGE =
@@ -1670,7 +1670,7 @@ export async function createAuthStore(
   // Иначе профил с нестандартен статус изглеждаше "свободен" и конфликтът
   // излизаше чак като UNIQUE грешка при INSERT (в email_code режим — едва
   // при verify). Профил, подаден за изтриване, остава със status='active' и
-  // така или иначе държи името си през 45-дневния период.
+  // така или иначе държи името си през периода за отмяна.
   const nameConflictStatement = database.prepare(`
     SELECT profile_id FROM profiles
     WHERE normalized_display_name = ? OR normalized_username = ?
