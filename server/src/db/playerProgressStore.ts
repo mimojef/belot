@@ -24,6 +24,7 @@ import { getSofiaDayBoundsUtc } from './sofiaDayBounds.js'
 // за real-money stake/payout ledger-а (виж matchEconomyStore.ts doc
 // коментара) — belot_match_completion_ledger's PRIMARY KEY компонент.
 import { getRoomStakeLedgerScope } from './matchEconomyStore.js'
+import { buildProfileGalleryImageApiUrl } from '../uploads/profileGalleryImageAccess.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -116,6 +117,8 @@ export type PlayerProgressStore = {
   isTemporaryProfile: (profileId: string) => boolean
   profileExists: (profileId: string) => boolean
   getPublicProfile: (profileId: ProfileId) => PlayerPublicProfileSnapshot | null
+  /** Записаният URL на файла (thumbnail_url, иначе image_url) на снимка от галерията на ТОЗИ профил; null = няма такава. */
+  getProfileGalleryImageStoredUrl: (profileId: ProfileId, imageId: string) => string | null
   // Batch вариант на getPublicProfile — СЪЩИЯТ SELECT (без допълнителни
   // филтри по status/is_temporary, за разлика от getProfileSnapshotsByIds),
   // само с IN (...). Липсващ id = профилът не съществува, точно както
@@ -302,9 +305,12 @@ function toPublicProfileSnapshot(row: {
     yellowCoinsBalance: row.yellow_coins_balance,
     gender,
     isBot: row.profile_kind === 'bot',
+    // Снимките от галерията се отдават само през Node маршрута
+    // (виж uploads/profileGalleryImageAccess.ts) — записаният /uploads/... URL
+    // остава в базата (за изтриването на файла), но не стига до клиента.
     galleryImages: galleryImages.map((image) => ({
       imageId: image.image_id,
-      imageUrl: image.thumbnail_url || image.image_url,
+      imageUrl: buildProfileGalleryImageApiUrl(row.profile_id, image.image_id),
       sortOrder: image.sort_order,
     })),
     likesCount: null,
@@ -472,6 +478,13 @@ export async function createPlayerProgressStore(
     LEFT JOIN profile_progress pp
       ON pp.profile_id = p.profile_id
     WHERE p.profile_id = ?
+    LIMIT 1;
+  `)
+
+  const selectProfileGalleryImageStoredUrlStatement = database.prepare(`
+    SELECT image_url, thumbnail_url
+    FROM profile_gallery_images
+    WHERE profile_id = ? AND image_id = ?
     LIMIT 1;
   `)
 
@@ -2372,6 +2385,12 @@ export async function createPlayerProgressStore(
     isTemporaryProfile,
     profileExists,
     getPublicProfile,
+    getProfileGalleryImageStoredUrl: (profileId, imageId) => {
+      const row = selectProfileGalleryImageStoredUrlStatement.get(profileId, imageId) as
+        | { image_url: string; thumbnail_url: string | null }
+        | undefined
+      return row === undefined ? null : (row.thumbnail_url || row.image_url)
+    },
     getPublicProfilesByIds,
     listPublicHumanProfiles,
     searchPublicProfiles,
