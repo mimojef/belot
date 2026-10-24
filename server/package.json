@@ -296,6 +296,7 @@
     "check:profile-deletion-admin-oversight": "tsx scripts/checkProfileDeletionAdminOversight.ts --server-root=.",
     "check:profile-deletion-durable-cancellation": "tsx scripts/checkProfileDeletionDurableCancellation.ts --server-root=.",
     "check:profile-deletion-ledger-concurrency": "tsx scripts/checkProfileDeletionLedgerConcurrency.ts --server-root=.",
+    "check:profile-deletion-disaster-recovery": "tsx scripts/checkProfileDeletionDisasterRecovery.ts --server-root=.",
     "check:profile-deletion-name-history": "tsx scripts/checkProfileDeletionNameHistory.ts --server-root=.",
     "check:profile-deletion-partner-ratings": "tsx scripts/checkProfileDeletionPartnerRatings.ts --server-root=.",
     "check:profile-deletion-support": "tsx scripts/checkProfileDeletionSupport.ts --server-root=.",

@@ -12,11 +12,17 @@
 // Етап 4J1: преди записа на намерението worker-ът проверява регистъра за
 // отмяна на заявката ("request_cancelled", напр. база, възстановена отпреди
 // отмяната) — ако има, НЕ изтрива, а възстановява трайната защита в базата.
-// Етап 4J1A: доказателството "request_db_deleted" се записва в регистъра
-// ВЪТРЕ в транзакцията на изтриването, непосредствено преди COMMIT (срив
-// между двете не може да остави изтриване без доказателство; неуспешен запис
-// = ROLLBACK). По-късна отмяна е недопустима, а reconcile дава предимство на
-// изтриването.
+// Етап 4J1B — двуфазно необратимо изтриване:
+//   1. намерение потвърдено offsite -> проверки в транзакцията (decisionOnly,
+//      нищо не се променя) -> запис "request_deletion_decided" (необратимото
+//      решение) -> blocked 'decision_offsite_pending';
+//   2. следващ опит: решението е потвърдено offsite -> изтриване (блокировките
+//      се проверяват отново) -> COMMIT -> "request_db_deleted" (завършване).
+// Така всяко изтриване има решение ИЗВЪН VPS преди COMMIT: restore от
+// изоставащ архив не може да "възкреси" профила (отмяна след решението е
+// недопустима, reconcile/worker го изтриват отново). Шлюзът на историята
+// (historyGate) спира всичко необратимо, докато историята не е проверена, а
+// при restore без живото копие нови решения не се вземат до освобождаване.
 //
 // Логовете съдържат само request_id и технически кодове — без имена, имейли,
 // пътища до файлове или токени.
@@ -30,6 +36,7 @@ import type {
   ProfileDeletionLedgerEntry,
   ProfileDeletionRequestCancelledRecord,
   ProfileDeletionRequestDbDeletedRecord,
+  ProfileDeletionRequestDecidedRecord,
 } from '../db/profileDeletionLedger.js'
 import type {
   ProfileDeletionFileKind,
@@ -58,12 +65,27 @@ export type ProfileDeletionWorkerDeps = {
    */
   findLedgerCancellation?: (requestId: string) => ProfileDeletionRequestCancelledRecord | null
   /**
-   * Етап 4J1/4J1A: идемпотентен запис "request_db_deleted" — задължително
-   * преди COMMIT на изтриването (грешка -> ROLLBACK); за заявка, изтрита в
-   * базата от по-стара версия — допълване при продължаване (без да спира
-   * файловата фаза).
+   * Етап 4J1: идемпотентен запис "request_db_deleted" СЛЕД COMMIT на
+   * изтриването (доказателство за завършване); грешка не спира файловата
+   * фаза, допълва се при продължаване.
    */
   recordDbDeletion?: (record: ProfileDeletionRequestDbDeletedRecord) => void
+  /**
+   * Етап 4J1B — необратимото решение в регистъра. Подадено -> изтриване САМО
+   * след записано решение (и, ако isDecisionConfirmedOffsite е подадено —
+   * потвърдено извън VPS). hasDecision хвърля при нечетим регистър.
+   */
+  decision?: {
+    hasDecision: (requestId: string) => boolean
+    appendDecision: (record: ProfileDeletionRequestDecidedRecord) => void
+    isDecisionConfirmedOffsite?: (requestId: string) => boolean
+  }
+  /**
+   * Етап 4J1B — шлюз на историята (изчислява се от базата и регистъра, не е
+   * съхранен флаг). verified=false -> нищо не се взема; restoreHold -> нови
+   * решения не се вземат (вече решените се довършват).
+   */
+  historyGate?: () => { verified: boolean; restoreHold: boolean }
   /** Игра/маса/опашка в паметта на ТОЗИ процес (hasProfileActiveGameCommitment). */
   isProfileInActiveGameLocally?: (profileId: string) => boolean
   log?: (message: string) => void
@@ -153,6 +175,21 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
     }
   }
 
+  /** false -> обработката на заявката спира (блокирана, неуспешна или загубен lease). */
+  function handlePhaseResult(request: ClaimedProfileDeletionRequest, result: ReturnType<ProfileDeletionExecutor['runDatabasePhase']>, summary: ProfileDeletionWorkerRunSummary): boolean {
+    if (result.kind === 'blocked') {
+      summary.blocked += 1
+      log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=${result.code}`)
+      return false
+    }
+    if (result.kind === 'failed') {
+      summary.failed += 1
+      log(`[profile-deletion-worker] failed requestId=${request.requestId} code=${result.code} retry=${result.willRetry}`)
+      return false
+    }
+    return result.kind !== 'lease_lost'
+  }
+
   async function processRequest(request: ClaimedProfileDeletionRequest, summary: ProfileDeletionWorkerRunSummary): Promise<void> {
     if (request.dbDeletedAt === null) {
       if (deps.findLedgerCancellation !== undefined) {
@@ -211,24 +248,64 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
           return
         }
       }
-      const result = deps.executor.runDatabasePhase(request, deps.workerId, deps.recordDbDeletion === undefined ? {} : {
-        beforeCommit: (dbDeletedAt) => deps.recordDbDeletion!({
-          v: 1, kind: 'request_db_deleted', requestId: request.requestId, profileId: request.profileId, dbDeletedAt, recordedAt: new Date().toISOString(),
-        }),
-      })
-      if (result.kind === 'blocked') {
-        summary.blocked += 1
-        log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=${result.code}`)
-        return
+      // Етап 4J1B — необратимото решение преди изтриването.
+      let deletedByCheck = false
+      if (deps.decision !== undefined) {
+        let decided: boolean
+        try {
+          decided = deps.decision.hasDecision(request.requestId)
+        } catch {
+          deps.executor.failRequest(request.requestId, deps.workerId, 'ledger_write_failed')
+          summary.failed += 1
+          log(`[profile-deletion-worker] failed requestId=${request.requestId} code=ledger_unreadable`)
+          return
+        }
+        if (!decided) {
+          if (deps.historyGate?.().restoreHold === true) {
+            deps.executor.blockRequest(request.requestId, deps.workerId, 'restore_hold')
+            summary.blocked += 1
+            log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=restore_hold`)
+            return
+          }
+          const check = deps.executor.runDatabasePhase(request, deps.workerId, { decisionOnly: true })
+          if (check.kind !== 'decidable') {
+            if (!handlePhaseResult(request, check, summary)) return
+            // Профилът вече е изтрит от администратор — само отбелязване, без решение.
+            deletedByCheck = true
+          } else {
+            try {
+              deps.decision.appendDecision({ v: 1, kind: 'request_deletion_decided', requestId: request.requestId, profileId: request.profileId, recordedAt: new Date().toISOString() })
+            } catch {
+              deps.executor.failRequest(request.requestId, deps.workerId, 'ledger_write_failed')
+              summary.failed += 1
+              log(`[profile-deletion-worker] failed requestId=${request.requestId} code=ledger_write_failed`)
+              return
+            }
+            log(`[profile-deletion-worker] decided requestId=${request.requestId}`)
+          }
+        }
+        if (!deletedByCheck && deps.decision.isDecisionConfirmedOffsite !== undefined) {
+          let confirmed = false
+          try {
+            confirmed = deps.decision.isDecisionConfirmedOffsite(request.requestId)
+          } catch {
+            confirmed = false
+          }
+          if (!confirmed) {
+            deps.executor.blockRequest(request.requestId, deps.workerId, 'decision_offsite_pending')
+            summary.blocked += 1
+            log(`[profile-deletion-worker] blocked requestId=${request.requestId} code=decision_offsite_pending`)
+            return
+          }
+        }
       }
-      if (result.kind === 'failed') {
-        summary.failed += 1
-        log(`[profile-deletion-worker] failed requestId=${request.requestId} code=${result.code} retry=${result.willRetry}`)
-        return
+      if (!deletedByCheck) {
+        const result = deps.executor.runDatabasePhase(request, deps.workerId)
+        if (!handlePhaseResult(request, result, summary)) return
+        if (result.kind === 'db_deleted') recordDbDeletion(request, result.dbDeletedAt)
       }
-      if (result.kind === 'lease_lost') return
     } else {
-      // Изтрита в базата преди този опит (напр. от версия отпреди 4J1A) — допълване.
+      // Изтрита в базата преди този опит (срив след COMMIT) — допълване на доказателството.
       recordDbDeletion(request, request.dbDeletedAt)
     }
 
@@ -249,6 +326,12 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
     }
     // Един цикъл наведнъж в процеса; между процесите защитава lease-ът в SQLite.
     if (running) return summary
+    // Етап 4J1B — непроверена история (restore без reconcile, липсващ/подменен
+    // регистър...) -> нищо не се взема.
+    if (deps.historyGate !== undefined && !deps.historyGate().verified) {
+      log('[profile-deletion-worker] history_unverified — нищо не се изпълнява')
+      return summary
+    }
     running = true
     try {
       if (deps.onlyRequestIds !== undefined) {

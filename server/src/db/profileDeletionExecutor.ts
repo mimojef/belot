@@ -158,6 +158,10 @@ export type ProfileDeletionBlockCode =
   | 'active_ban'
   /** Етап 4J1: приета отмяна (защита в дълбочина — claim и тригерът я изключват). */
   | 'cancellation_pending'
+  /** Етап 4J1B: необратимото решение е записано, чака offsite потвърждение. */
+  | 'decision_offsite_pending'
+  /** Етап 4J1B: регистърът е възстановен без живото копие — нови решения чакат освобождаването от оператора. */
+  | 'restore_hold'
 
 export type ProfileDeletionFailCode =
   | 'identity_mismatch'
@@ -184,6 +188,8 @@ export type ProfileDeletionDbPhaseResult =
   | { kind: 'blocked'; code: ProfileDeletionBlockCode }
   | { kind: 'failed'; code: ProfileDeletionFailCode; willRetry: boolean }
   | { kind: 'lease_lost' }
+  /** Етап 4J1B — само при decisionOnly: всички проверки минаха, нищо не е променено. */
+  | { kind: 'decidable' }
 
 export type ProfileDeletionQueuedFile = {
   queueId: number
@@ -257,15 +263,15 @@ export type ProfileDeletionExecutor = {
   /** onlyRequestId — само тази заявка (процедурата след restore обработва само заявките от регистъра). */
   claimNextDueRequest: (workerId: string, onlyRequestId?: string) => ClaimedProfileDeletionRequest | null
   /**
-   * hooks.beforeCommit (Етап 4J1A) — вика се ВЪТРЕ в транзакцията, след всички
-   * проверки и непосредствено преди COMMIT на изтриването (worker-ът записва
-   * доказателството "request_db_deleted" в регистъра). Хвърля -> ROLLBACK,
-   * нищо не е изтрито, заявката е failed 'ledger_write_failed' с нов опит.
+   * options.decisionOnly (Етап 4J1B) — същите проверки в транзакцията (lease,
+   * отмяна, идентичност, всички блокировки), но без изтриване: при успех
+   * ROLLBACK и { kind: 'decidable' } — worker-ът записва необратимото решение
+   * в регистъра и изтрива едва след offsite потвърждението му.
    */
   runDatabasePhase: (
     request: ClaimedProfileDeletionRequest,
     workerId: string,
-    hooks?: { beforeCommit?: (dbDeletedAt: string) => void },
+    options?: { decisionOnly?: boolean },
   ) => ProfileDeletionDbPhaseResult
   /** Защитна блокировка, открита извън транзакцията (напр. игра в паметта на този процес). */
   blockRequest: (requestId: string, workerId: string, code: ProfileDeletionBlockCode) => boolean
@@ -1698,16 +1704,8 @@ export async function createProfileDeletionExecutor(
   function runDatabasePhase(
     request: ClaimedProfileDeletionRequest,
     workerId: string,
-    hooks: { beforeCommit?: (dbDeletedAt: string) => void } = {},
+    phaseOptions: { decisionOnly?: boolean } = {},
   ): ProfileDeletionDbPhaseResult {
-    const runBeforeCommit = (dbDeletedAt: string): void => {
-      if (hooks.beforeCommit === undefined) return
-      try {
-        hooks.beforeCommit(dbDeletedAt)
-      } catch (error) {
-        throw Object.assign(new Error(`profile_deletion_ledger_write_failed: ${error instanceof Error ? error.message : String(error)}`), { profileDeletionLedgerWriteFailed: true })
-      }
-    }
     database.exec('BEGIN IMMEDIATE;')
     let row: RequestRow | undefined
     try {
@@ -1745,7 +1743,6 @@ export async function createProfileDeletionExecutor(
           // Профилът вече е изтрит от администратор през периода за отмяна.
           markDbDeletedStatement.run(now, isoPlus(now, PROFILE_DELETION_WORKER_LEASE_MS), row.request_id, workerId)
           insertEvent(row.request_id, row.profile_id, 'db_deleted', workerId, { files: 0, accountDeleted: false, alreadyDeletedByAdmin: true })
-          runBeforeCommit(now)
           database.exec('COMMIT;')
           return { kind: 'db_deleted', enqueuedFileCount: 0, accountDeleted: false, alreadyDeletedByAdmin: true, dbDeletedAt: now }
         }
@@ -1764,6 +1761,11 @@ export async function createProfileDeletionExecutor(
         const released = releaseInTransaction(row, workerId, 'blocked', blocker.blocked, true, now)
         database.exec(released ? 'COMMIT;' : 'ROLLBACK;')
         return released ? { kind: 'blocked', code: blocker.blocked } : { kind: 'lease_lost' }
+      }
+      if (phaseOptions.decisionOnly === true) {
+        // Етап 4J1B — всички проверки минаха; нищо не се променя тук.
+        database.exec('ROLLBACK;')
+        return { kind: 'decidable' }
       }
 
       let enqueuedFileCount = 0
@@ -1787,9 +1789,6 @@ export async function createProfileDeletionExecutor(
       })
       if (enqueuedFileCount > 0) insertEvent(row.request_id, row.profile_id, 'file_enqueued', workerId, { count: enqueuedFileCount })
 
-      // Етап 4J1A — доказателството е в регистъра (fsync) ПРЕДИ COMMIT: срив
-      // след COMMIT не може да остави изтриване без доказателство.
-      runBeforeCommit(now)
       options.testHooks?.beforeDatabasePhaseCommit?.(row.request_id)
       database.exec('COMMIT;')
       return { kind: 'db_deleted', enqueuedFileCount, accountDeleted, alreadyDeletedByAdmin: false, dbDeletedAt: now }
@@ -1799,11 +1798,6 @@ export async function createProfileDeletionExecutor(
       // executing с висящ lease (точно като при истински срив/рестарт).
       if ((error as { profileDeletionSimulatedCrash?: boolean } | null)?.profileDeletionSimulatedCrash === true) {
         throw error
-      }
-      if ((error as { profileDeletionLedgerWriteFailed?: boolean } | null)?.profileDeletionLedgerWriteFailed === true) {
-        return releaseRequest(request.requestId, workerId, 'failed', 'ledger_write_failed', true)
-          ? { kind: 'failed', code: 'ledger_write_failed', willRetry: true }
-          : { kind: 'lease_lost' }
       }
       // Защитата в базата (20261013_001) е последната линия за кампанийни подаръци.
       if (error instanceof Error && error.message.includes('campaign_gift_sender_protected')) {

@@ -9,9 +9,11 @@ import { existsSync, appendFileSync, writeFileSync } from 'node:fs'
 import { createProfileDeletionExecutor } from '../../src/db/profileDeletionExecutor.js'
 import { createProfileDeletionWorker } from '../../src/core/profileDeletionWorker.js'
 import { createProfileDeletionCancellationStore } from '../../src/db/profileDeletionCancellationStore.js'
+import { createProfileDeletionHistoryGuard } from '../../src/core/profileDeletionHistoryGuard.js'
 import {
   ensureProfileDeletionLedgerEntry,
   ensureProfileDeletionLedgerRecord,
+  isProfileDeletionLedgerRecordConfirmedOffsite,
   isProfileDeletionLedgerRequestConfirmedOffsite,
   readProfileDeletionLedger,
   withProfileDeletionLedgerLock,
@@ -79,10 +81,14 @@ async function main(): Promise<void> {
       return
     }
     case 'worker': {
-      // Production конфигурацията на worker-а (index.ts) + точка на срив.
+      // Production конфигурацията на worker-а (index.ts): шлюз на историята
+      // (initialize при старт + оценка преди цикъла), необратимо решение,
+      // offsite потвърждения + точка на срив.
+      const guard = await createProfileDeletionHistoryGuard({ databaseFilePath: args.databaseFilePath, ledgerPath: args.ledgerPath, offsiteRequired: true })
+      const initialized = guard.initialize()
       const executor = await createProfileDeletionExecutor(args.databaseFilePath, {
         testHooks: args.crashAt === 'before_commit'
-          ? { beforeDatabasePhaseCommit: () => process.exit(9) } // доказателството вече е в регистъра
+          ? { beforeDatabasePhaseCommit: () => process.exit(9) } // решението е offsite, изтриването не е COMMIT-нато
           : {},
       })
       const worker = createProfileDeletionWorker({
@@ -101,11 +107,30 @@ async function main(): Promise<void> {
           return (ledger.records.find((r) => 'kind' in r && r.kind === 'request_cancelled' && r.requestId === requestId) as ProfileDeletionRequestCancelledRecord | undefined) ?? null
         },
         recordDbDeletion: (record) => { ensureProfileDeletionLedgerRecord(args.ledgerPath, record) },
+        decision: {
+          hasDecision: (requestId) => {
+            const ledger = readProfileDeletionLedger(args.ledgerPath)
+            if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) throw new Error('profile_deletion_ledger_corrupt')
+            return ledger.records.some((r) => 'kind' in r && r.kind === 'request_deletion_decided' && r.requestId === requestId)
+          },
+          appendDecision: (record) => {
+            ensureProfileDeletionLedgerRecord(args.ledgerPath, record)
+            if (args.crashAt === 'after_decision') process.exit(9) // решението е записано, lease-ът виси
+          },
+          isDecisionConfirmedOffsite: (requestId) => isProfileDeletionLedgerRecordConfirmedOffsite(args.ledgerPath, `request_deletion_decided:${requestId}`),
+        },
+        historyGate: () => {
+          const assessment = guard.assess()
+          return { verified: assessment.verified, restoreHold: assessment.restoreHold }
+        },
         onlyRequestIds: args.requestIds,
       })
       const summary = await worker.runOnce()
+      const assessment = guard.assess()
       executor.close()
+      guard.close()
       process.stdout.write(`SUMMARY ${JSON.stringify(summary)}\n`)
+      process.stdout.write(`HISTORY ${JSON.stringify({ binding: initialized.binding, restoreDetected: initialized.restoreDetected, verified: assessment.verified, restoreHold: assessment.restoreHold, reasons: assessment.reasons })}\n`)
       return
     }
     case 'finalizer-crash-after-append': {

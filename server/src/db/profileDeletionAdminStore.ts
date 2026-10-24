@@ -18,7 +18,7 @@
 //   * актьорът е admin ПО БАЗАТА (не по сесията) и профилът е негов;
 //   * заявката е pending/blocked/failed, без lease, преди db_deleted_at,
 //     профилът още съществува, няма вече приета отмяна;
-//   * регистърът не съдържа доказано изтриване ("request_db_deleted");
+//   * регистърът не съдържа необратимо решение или доказано изтриване;
 //   * одитен ред (причина + администратор) + ред в
 //     profile_deletion_cancellations — всичко или нищо. От този момент
 //     worker-ът не може да изтрие профила.
@@ -103,7 +103,7 @@ export type ProfileDeletionAdminRow = {
 }
 
 export type ProfileDeletionLedgerView = {
-  /** Регистърът съдържа доказано изтриване ("request_db_deleted") за заявката. Нечетим регистър -> false (решава базата). */
+  /** Регистърът съдържа необратимо решение или доказано изтриване за заявката. Нечетим регистър -> false (решава базата). */
   hasDbDeletedRecord: (requestId: string) => boolean
   /** Отмяната на заявката е потвърдено копирана извън VPS (точен префикс + SHA-256). */
   isCancellationConfirmedOffsite: (requestId: string) => boolean
@@ -128,7 +128,7 @@ export function loadProfileDeletionLedgerView(ledgerPath: string, ackPath: strin
     const parsed = parseProfileDeletionLedgerBuffer(buffer)
     if (parsed.invalidLineCount === 0 && parsed.conflictingDuplicateCount === 0) {
       for (const record of parsed.records) {
-        if (isRequestLifecycleLedgerRecord(record) && record.kind === 'request_db_deleted') dbDeletedRequestIds.add(record.requestId)
+        if (isRequestLifecycleLedgerRecord(record) && (record.kind === 'request_db_deleted' || record.kind === 'request_deletion_decided')) dbDeletedRequestIds.add(record.requestId)
       }
     }
   }

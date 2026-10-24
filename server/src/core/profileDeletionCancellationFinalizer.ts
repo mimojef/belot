@@ -13,13 +13,14 @@
 // Всяка стъпка е идемпотентна: срив между тях се довършва при следващото
 // изпълнение (периодично във всеки процес + веднага след приемането).
 //
-// Регистърът съдържа доказано изтриване ("request_db_deleted") за заявката —
+// Регистърът съдържа необратимо решение или доказано изтриване за заявката —
 // базата е възстановена и reconcile не е изпълнен: отмяната НЕ се записва и
 // не се финализира (изтриването има предимство); приетият ред продължава да
 // блокира worker-а, а операторът вижда конфликта (виж runbook-а).
 
 import {
   appendProfileDeletionLedgerEntry,
+  isRequestDeletionIrreversibleInLedger,
   withProfileDeletionLedgerLock,
   isProfileDeletionLedgerRecordConfirmedOffsite,
   profileDeletionCancellationLedgerKey,
@@ -68,8 +69,7 @@ export function createProfileDeletionCancellationFinalizer(deps: ProfileDeletion
     const ledger = readProfileDeletionLedger(deps.ledgerPath)
     if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) throw new Error('profile_deletion_ledger_corrupt')
     const cancelKey = profileDeletionCancellationLedgerKey(row.requestId)
-    const deletedKey = `request_db_deleted:${row.requestId}`
-    if (ledger.records.some((record) => profileDeletionLedgerRecordKey(record) === deletedKey)) throw new LedgerDeletionProvenError()
+    if (isRequestDeletionIrreversibleInLedger(ledger.records, row.requestId)) throw new LedgerDeletionProvenError()
     if (ledger.records.some((record) => profileDeletionLedgerRecordKey(record) === cancelKey)) return
     const record: ProfileDeletionRequestCancelledRecord = {
       v: 1,

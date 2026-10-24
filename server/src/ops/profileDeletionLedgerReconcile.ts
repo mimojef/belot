@@ -70,6 +70,7 @@ import { canonicalIsoToSqliteDateTime } from '../core/adminProfileDeletionCoordi
 import {
   readProfileDeletionLedger,
   summarizeAdminLedgerOperations,
+  summarizeLedgerControl,
   summarizeRequestLedgerState,
   type AdminLedgerOperation,
   type ProfileDeletionLedgerEntry,
@@ -183,7 +184,8 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   // Намерения, които НЕ се прилагат повторно: отменени или с конфликтна последователност.
   const intentEntries = ledger.entries.filter((entry) => {
     const resolution = requestStates.get(entry.requestId)?.resolution
-    return resolution !== 'cancelled' && resolution !== 'cancel_conflict'
+    // Етап 4J1B — 'undecided' (намерение без решение след ledger_genesis) не е изтриване.
+    return resolution !== 'cancelled' && resolution !== 'cancel_conflict' && resolution !== 'undecided'
   })
   const cancelStates = [...requestStates.values()].filter((state) => state.resolution === 'cancelled' || state.resolution === 'cancel_conflict')
   for (const state of requestStates.values()) {
@@ -191,6 +193,9 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   }
   const mode = apply ? 'APPLY' : verifyOnly ? 'verify-only' : 'report-only'
   io.log(`[reconcile] mode=${mode} ledgerEntries=${ledger.entries.length} cancellations=${cancelStates.length} adminOperations=${adminOperations.size}`)
+  // Етап 4J1B — restore hold: нови необратими решения чакат release-restore (reconcile не го освобождава).
+  const unreleasedRestores = summarizeLedgerControl(ledger.records).unreleasedRestoreIds
+  if (unreleasedRestores.length > 0) io.log(`[reconcile] restore_hold unreleased=${unreleasedRestores.length} — след проверка: release-restore`)
 
   const { DatabaseSync } = await import('node:sqlite')
 

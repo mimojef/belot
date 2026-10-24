@@ -11,11 +11,18 @@
 //             [--verify-only] [--state-dir=<dir>] [--accept-stale-ledger]
 //   admin-backfill --db=<sqlite> --ledger=<jsonl> [--apply --confirm=BACKFILL-ADMIN-DELETIONS]
 //             — Етап 4F1: старите административни изтривания в регистъра (базата само се чете)
+//   release-restore --db=<sqlite> --ledger=<jsonl> [--confirm=RELEASE-PROFILE-DELETION-RESTORE-HOLD]
+//             — Етап 4J1B: освобождаване на restore hold след проверка (виж profileDeletionRestoreRelease.ts)
+//
+// Етап 4J1B: merge БЕЗ --local-ledger (живото копие е изгубено) добавя маркер
+// ledger_restored -> нови необратими решения чакат release-restore.
 //
 // Изход: един JSON ред за snapshot/confirm/merge (машинно четим от bash);
 // exit 0 = успех, 1 = нужна намеса, 2 = грешка/отказ.
 
+import { randomUUID } from 'node:crypto'
 import { getProfileDeletionLedgerOffsiteAckPath } from '../db/profileDeletionLedger.js'
+import { runProfileDeletionRestoreRelease } from './profileDeletionRestoreRelease.js'
 import {
   confirmLedgerSnapshotOffsite,
   createLedgerSnapshot,
@@ -74,8 +81,16 @@ export async function runProfileDeletionLedgerCli(argv: readonly string[]): Prom
           acceptMissingNewest: rest.includes('--accept-missing-newest'),
           confirmNoDeletionsEver: rest.includes('--confirm-no-deletions-ever'),
         })
+        // Етап 4J1B — без живото копие последните събития може да липсват:
+        // маркерът спира новите необратими решения до release-restore.
+        let restoreMarker: string | null = null
+        if (report.localLedger === 'absent') {
+          restoreMarker = randomUUID()
+          const newest = report.validSnapshots.length > 0 ? report.validSnapshots[report.validSnapshots.length - 1]!.createdAt : null
+          entries.push({ v: 1, kind: 'ledger_restored', restoreId: restoreMarker, origin: 'merge', newestSnapshotCreatedAt: newest, recordedAt: new Date().toISOString() })
+        }
         writeMergedLedger(required(rest, 'out'), entries)
-        console.log(JSON.stringify({ ok: true, status: 'merged', ...report }))
+        console.log(JSON.stringify({ ok: true, status: 'merged', ...report, restoreMarker }))
         return 0
       }
       case 'migrate': {
@@ -88,13 +103,18 @@ export async function runProfileDeletionLedgerCli(argv: readonly string[]): Prom
           log: (line) => console.log(line),
           error: (line) => console.error(line),
         })
+      case 'release-restore':
+        return await runProfileDeletionRestoreRelease(rest, {
+          log: (line) => console.log(line),
+          error: (line) => console.error(line),
+        })
       case 'admin-backfill':
         return await runProfileDeletionAdminBackfill(rest, {
           log: (line) => console.log(line),
           error: (line) => console.error(line),
         })
       default:
-        throw new LedgerArchiveError('usage', 'команда: snapshot | confirm | merge | migrate | reconcile | admin-backfill')
+        throw new LedgerArchiveError('usage', 'команда: snapshot | confirm | merge | migrate | reconcile | admin-backfill | release-restore')
     }
   } catch (error) {
     const code = error instanceof LedgerArchiveError || error instanceof RestoredDbMigrationError ? error.code : 'unexpected'

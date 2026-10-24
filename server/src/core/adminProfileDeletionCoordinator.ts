@@ -24,6 +24,14 @@
 //
 // Идентификация САМО по immutable profile UUID (+ акаунт и дата на
 // създаване в намерението). Без имена, имейли, IP или причина в регистъра.
+//
+// Етап 4J1B — шлюз на историята (historyGate): докато историята не е
+// проверена (restore без reconcile, липсващ/подменен регистър) или тече
+// restore hold, нито се изпълнява изтриване, нито се финализират
+// намерения като "отказани" — finalizeOne върху база, възстановена отпреди
+// насрочването, иначе би записал "aborted" за вече изпълнено изтриване.
+// Намерението (потвърдено offsite преди изпълнението) е необратимото
+// решение за административното изтриване.
 
 import { randomUUID } from 'node:crypto'
 import {
@@ -51,6 +59,8 @@ export type AdminProfileDeletionExecuteResult =
   | { status: 'not_found' }
   | { status: 'busy' }
   | { status: 'ledger_unavailable' }
+  /** Етап 4J1B — историята не е проверена или тече restore hold: висящият ред остава. */
+  | { status: 'history_unverified' }
 
 export type AdminProfileDeletionCoordinator = {
   schedule: (input: {
@@ -90,6 +100,8 @@ export type AdminProfileDeletionCoordinatorDeps = {
   isTargetInActiveGame: (profileId: string) => boolean
   /** Само за тестове: подмяна на записа в регистъра (симулиран неуспех). */
   appendRecord?: (ledgerPath: string, record: ProfileDeletionLedgerRecord) => void
+  /** Етап 4J1B — шлюз на историята; без него — без ограничение (тестове на по-ранните етапи). */
+  historyGate?: () => { verified: boolean; restoreHold: boolean }
   now?: () => Date
   log?: (line: string) => void
 }
@@ -223,8 +235,19 @@ export async function createAdminProfileDeletionCoordinator(
     return { v: 1, kind: 'admin_delete_completed', operationId, profileId, deletedAt, recordedAt: now().toISOString() }
   }
 
+  /** Етап 4J1B — необратими действия само при проверена история и без restore hold. */
+  function isIrreversibleAllowed(): boolean {
+    if (deps.historyGate === undefined) return true
+    const gate = deps.historyGate()
+    return gate.verified && !gate.restoreHold
+  }
+
   async function tryExecute(pending: PendingProfileModeration): Promise<AdminProfileDeletionExecuteResult> {
     if (pending.action !== 'delete') return { status: 'refused', code: 'not_a_delete' }
+    if (!isIrreversibleAllowed()) {
+      log(`[admin-profile-delete] history_unverified targetProfileId=${pending.targetProfileId} — изпълнението чака`)
+      return { status: 'history_unverified' }
+    }
     const key = pending.ledgerOperationId ?? `pending:${pending.pendingId}`
     if (inFlight.has(key)) return { status: 'busy' }
     inFlight.add(key)
@@ -307,6 +330,7 @@ export async function createAdminProfileDeletionCoordinator(
   }
 
   function finalizeOperations(): number {
+    if (!isIrreversibleAllowed()) return 0
     const ledger = readProfileDeletionLedger(deps.ledgerPath)
     if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) {
       log('[admin-profile-delete] ledger_corrupt — finalize пропуснат')
@@ -330,7 +354,7 @@ export async function createAdminProfileDeletionCoordinator(
         summary.executed += 1
         options.onExecuted?.(pending)
       }
-      else if (outcome.status === 'waiting_offsite' || outcome.status === 'ledger_unavailable') {
+      else if (outcome.status === 'waiting_offsite' || outcome.status === 'ledger_unavailable' || outcome.status === 'history_unverified') {
         summary.waiting += 1
         options.onWaiting?.(pending)
       }

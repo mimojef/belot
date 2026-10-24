@@ -37,12 +37,15 @@ import {
   ensureProfileDeletionLedgerEntry,
   ensureProfileDeletionLedgerRecord,
   getDefaultProfileDeletionLedgerPath,
+  isProfileDeletionLedgerRecordConfirmedOffsite,
   isProfileDeletionLedgerRequestConfirmedOffsite,
+  isRequestDeletionIrreversibleInLedger,
   isRequestLifecycleLedgerRecord,
   readProfileDeletionLedger,
   type ProfileDeletionRequestCancelledRecord,
 } from './db/profileDeletionLedger.js'
 import { createProfileDeletionCancellationStore } from './db/profileDeletionCancellationStore.js'
+import { createProfileDeletionHistoryGuard, type ProfileDeletionHistoryAssessment } from './core/profileDeletionHistoryGuard.js'
 import {
   createProfileDeletionCancellationFinalizer,
   type ProfileDeletionCancellationOutcome,
@@ -1235,7 +1238,9 @@ const authStore = await createAuthStore(
     // вход (иначе профилът би започнал нови игри/покупки до изпълнението).
     // (Една цел може да има и висящ бан — затова изрично само изтриванията.)
     isProfileScheduledForAdminDeletion: (profileId) =>
-      pendingProfileModerationStore.listPendingDeletes().some((pending) => pending.targetProfileId === profileId),
+      pendingProfileModerationStore.listPendingDeletes().some((pending) => pending.targetProfileId === profileId) ||
+      // Етап 4J1B — регистърът доказва изтриване, а профилът е във възстановената база.
+      profileDeletionHistoryBlockedProfileIds.has(profileId),
     registrationVerificationCodeSecret,
   },
 )
@@ -1699,7 +1704,8 @@ function applyProfileDeletionCancellationOutcome(outcome: ProfileDeletionCancell
 function isProfileDeletionProvenInLedger(requestId: string): boolean {
   try {
     const ledger = readProfileDeletionLedger(PROFILE_DELETION_LEDGER_PATH)
-    return ledger.records.some((record) => isRequestLifecycleLedgerRecord(record) && record.kind === 'request_db_deleted' && record.requestId === requestId)
+    // Етап 4J1B — необратимо решение или COMMIT-нато изтриване.
+    return isRequestDeletionIrreversibleInLedger(ledger.records, requestId)
   } catch {
     return false
   }
@@ -1727,6 +1733,76 @@ let profileDeletionCancellationFinalizerInterval: ReturnType<typeof setInterval>
   runProfileDeletionCancellationFinalizer,
   PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS,
 )
+
+// ─── Етап 4J1B — шлюз на историята след restore ────────────────────────────
+// Необратимите операции (решения/изтриване от worker-а, административно
+// изпълнение и финализиране) са разрешени само при съответствие между базата
+// и регистъра — оценката се изчислява наново преди всеки цикъл (не е
+// съхранен флаг, който стар backup би върнал). Профилите, които регистърът
+// доказва като изтрити, а базата ги има, нямат достъп до reconcile.
+const profileDeletionHistoryGuard = await createProfileDeletionHistoryGuard({
+  databaseFilePath: databaseBootstrap.databaseFilePath,
+  ledgerPath: PROFILE_DELETION_LEDGER_PATH,
+  offsiteRequired: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED,
+  log: (line) => console.log(line),
+})
+const profileDeletionHistoryBlockedProfileIds = new Set<string>()
+let lastProfileDeletionHistorySignature = ''
+
+function refreshProfileDeletionHistory(): ProfileDeletionHistoryAssessment {
+  let assessment: ProfileDeletionHistoryAssessment
+  try {
+    assessment = profileDeletionHistoryGuard.assess()
+  } catch (error) {
+    assessment = { verified: false, restoreHold: true, reasons: [`assess_failed:${error instanceof Error ? error.message : String(error)}`], blockedProfileIds: [], unreleasedRestoreIds: [] }
+  }
+  for (const profileId of assessment.blockedProfileIds) {
+    if (profileDeletionHistoryBlockedProfileIds.has(profileId)) continue
+    profileDeletionHistoryBlockedProfileIds.add(profileId)
+    authStore.revokeAllSessionsForProfile(profileId)
+    // При старт още няма WS връзки (и регистърът им може да не е създаден).
+    try { closeAllProfileConnections(profileId, { type: 'session_deletion_requested' }) } catch { /* няма връзки */ }
+  }
+  for (const profileId of [...profileDeletionHistoryBlockedProfileIds]) {
+    if (!assessment.blockedProfileIds.includes(profileId)) profileDeletionHistoryBlockedProfileIds.delete(profileId)
+  }
+  const signature = JSON.stringify([assessment.verified, assessment.restoreHold, assessment.reasons.slice(0, 20)])
+  if (signature !== lastProfileDeletionHistorySignature) {
+    lastProfileDeletionHistorySignature = signature
+    console.log(`[profile-deletion-history] verified=${assessment.verified} restoreHold=${assessment.restoreHold} reasons=${JSON.stringify(assessment.reasons.slice(0, 20))}`)
+  }
+  return assessment
+}
+
+const profileDeletionHistoryGate = (): { verified: boolean; restoreHold: boolean } => {
+  const assessment = refreshProfileDeletionHistory()
+  return { verified: assessment.verified, restoreHold: assessment.restoreHold }
+}
+
+let profileDeletionHistoryBinding = 'refused'
+function initializeProfileDeletionHistory(): void {
+  try {
+    const initialized = profileDeletionHistoryGuard.initialize()
+    profileDeletionHistoryBinding = initialized.binding
+    console.log(`[profile-deletion-history] ledger binding=${initialized.binding} restoreDetected=${initialized.restoreDetected}`)
+  } catch (error) {
+    console.error('[profile-deletion-history] initialize failed:', error instanceof Error ? error.message : String(error))
+  }
+}
+initializeProfileDeletionHistory()
+refreshProfileDeletionHistory()
+
+let profileDeletionHistoryInterval: ReturnType<typeof setInterval> | null = timedSetInterval(
+  'profileDeletionHistoryGuard',
+  () => {
+    if (isServerShuttingDown) return
+    // Отказано обвързване (напр. регистърът още липсва, а базата има история) —
+    // повтаря се, след като операторът възстанови/попълни регистъра (merge/admin-backfill).
+    if (profileDeletionHistoryBinding === 'refused') initializeProfileDeletionHistory()
+    refreshProfileDeletionHistory()
+  },
+  60 * 1000,
+)
 const profileDeletionExecutor = isProfileSelfDeletionWorkerEnabled()
   ? await createProfileDeletionExecutor(databaseBootstrap.databaseFilePath, {
       protectedProfileIds: [OFFICIAL_PIKA_PROFILE_ID, getConfiguredOfficialPikaProfileId()].filter(
@@ -1747,6 +1823,19 @@ const profileDeletionWorker = profileDeletionExecutor === null
         : undefined,
       findLedgerCancellation: findProfileDeletionLedgerCancellation,
       recordDbDeletion: (record) => { ensureProfileDeletionLedgerRecord(PROFILE_DELETION_LEDGER_PATH, record) },
+      // Етап 4J1B — необратимото решение, потвърдено извън VPS преди COMMIT.
+      decision: {
+        hasDecision: (requestId) => {
+          const ledger = readProfileDeletionLedger(PROFILE_DELETION_LEDGER_PATH)
+          if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) throw new Error('profile_deletion_ledger_corrupt')
+          return ledger.records.some((record) => isRequestLifecycleLedgerRecord(record) && record.kind === 'request_deletion_decided' && record.requestId === requestId)
+        },
+        appendDecision: (record) => { ensureProfileDeletionLedgerRecord(PROFILE_DELETION_LEDGER_PATH, record) },
+        isDecisionConfirmedOffsite: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED
+          ? (requestId) => isProfileDeletionLedgerRecordConfirmedOffsite(PROFILE_DELETION_LEDGER_PATH, `request_deletion_decided:${requestId}`)
+          : undefined,
+      },
+      historyGate: profileDeletionHistoryGate,
       isProfileInActiveGameLocally: (profileId) => hasProfileActiveGameCommitment(profileId),
       log: (message) => console.log(message),
     })
@@ -1776,6 +1865,7 @@ const adminProfileDeletionCoordinator = await createAdminProfileDeletionCoordina
   ledgerPath: PROFILE_DELETION_LEDGER_PATH,
   offsiteRequired: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED,
   isTargetInActiveGame: (profileId) => isProfileInActiveGame(profileId),
+  historyGate: profileDeletionHistoryGate,
   log: (line) => console.log(line),
 })
 
@@ -28394,6 +28484,10 @@ function clearMutationTimersForShutdown(): void {
     lobbyChatPollInterval = null
   }
 
+  if (profileDeletionHistoryInterval !== null) {
+    clearInterval(profileDeletionHistoryInterval)
+    profileDeletionHistoryInterval = null
+  }
   if (profileDeletionCancellationFinalizerInterval !== null) {
     clearInterval(profileDeletionCancellationFinalizerInterval)
     profileDeletionCancellationFinalizerInterval = null
@@ -28644,6 +28738,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('lobbyChatStore', () => lobbyChatStore.close())
   closeStore('profileDeletionAdminStore', () => profileDeletionAdminStore.close())
   closeStore('profileDeletionCancellationStore', () => profileDeletionCancellationStore.close())
+  closeStore('profileDeletionHistoryGuard', () => profileDeletionHistoryGuard.close())
   closeStore('yellowCoinGiftStore', () => yellowCoinGiftStore.close())
   closeStore('giftItemStore', () => giftItemStore.close())
   closeStore('tableExitPenaltyStore', () => tableExitPenaltyStore.close())
