@@ -195,6 +195,25 @@ export async function createPasswordResetStore(
       AND revoked_at IS NULL;
   `)
 
+  // Самоизтриване, Етап 4H — смяната на паролата обезсилва и неизползваните
+  // краткосрочни токени за отмяна/запазване на заявка за изтриване (издадени
+  // при вход със СТАРАТА парола — напр. на някой, който я е знаел). Самата
+  // заявка (статус, requested_at, scheduled_for, grace_period_days) НЕ се
+  // пипа: смяната на паролата не отменя и не отлага изтриването. Новият вход
+  // с новата парола издава нов токен по обичайния ограничен път.
+  const hasRestoreTokensTable = database.prepare(`
+    SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'profile_deletion_restore_tokens' LIMIT 1;
+  `).get() !== undefined
+  const supersedeDeletionRestoreTokensStmt = hasRestoreTokensTable
+    ? database.prepare(`
+        UPDATE profile_deletion_restore_tokens
+        SET consumed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
+            consumed_reason = 'superseded'
+        WHERE consumed_at IS NULL
+          AND profile_id IN (SELECT profile_id FROM profiles WHERE account_id = ?);
+      `)
+    : null
+
   const cleanupOldTokensStmt = database.prepare(`
     DELETE FROM password_reset_tokens
     WHERE (used_at IS NOT NULL OR revoked_at IS NOT NULL OR expires_at <= CURRENT_TIMESTAMP)
@@ -319,6 +338,9 @@ export async function createPasswordResetStore(
 
       // 7. Обезсилване на всички останали неизползвани token-и за акаунта.
       revokeAllActiveTokensForAccountStmt.run(tokenRow.account_id)
+
+      // 7a. Етап 4H — и на неизползваните токени за отмяна на заявка за изтриване.
+      supersedeDeletionRestoreTokensStmt?.run(tokenRow.account_id)
 
       // 8. COMMIT.
       database.exec('COMMIT;')

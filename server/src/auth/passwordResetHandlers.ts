@@ -47,6 +47,11 @@ export type PasswordResetHandlerContext = {
   getRequestIp: (req: IncomingMessage) => string
   sendJson: (res: ServerResponse, status: number, body: unknown) => void
   readBody: (req: IncomingMessage) => Promise<unknown>
+  /**
+   * Транспорт за имейла — по подразбиране реалният (Brevo). Подава се само
+   * от изолираните тестове (тестов транспорт), никога от production пътя.
+   */
+  sendEmail?: typeof sendPasswordResetEmail
 }
 
 // ─── POST /api/auth/forgot-password ──────────────────────────────────────────
@@ -117,7 +122,10 @@ export async function handleForgotPassword(
   }
 
   // Изпращаме имейл.
-  const emailResult = await sendPasswordResetEmail({
+  // Само до регистрирания имейл на акаунта (от базата), никога до въведения
+  // от клиента текст. Профил с активна заявка за изтриване получава същия
+  // отговор и същия имейл като всеки друг — състоянието му не се разкрива.
+  const emailResult = await (ctx.sendEmail ?? sendPasswordResetEmail)({
     toEmail: account.email,
     rawToken: tokenResult.rawToken,
     resetUrl: ctx.resetUrl,

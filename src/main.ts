@@ -132,6 +132,10 @@ import {
   type ResetPasswordScreenState,
 } from './app/passwordReset/renderResetPasswordScreen'
 import {
+  showPendingDeletionPrompt,
+  type PendingDeletionActionResult,
+} from './app/profileDeletion/showPendingDeletionPrompt'
+import {
   extractAndClearVerificationLocator,
   renderRegistrationVerificationPage,
   type RegistrationVerificationPageState,
@@ -523,6 +527,12 @@ type AuthResponse = {
   maskedEmail?: string
   expiresAt?: string
   attemptsRemaining?: number
+  /** Самоизтриване (Етап 3/4H) — PROFILE_PENDING_DELETION: без сесия, само краткосрочен токен за отмяна и срокът на заявката от сървъра. */
+  restoreAvailable?: boolean
+  restoreToken?: string
+  scheduledFor?: string
+  gracePeriodDays?: number
+  isBanned?: boolean
 }
 
 type AdminProfileResponse = {
@@ -911,6 +921,8 @@ async function submitLoginRequest(
   bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
   /** Активен account НЯМА за този email, но unexpired pending registration + правилна парола -> клиентът автоматично отваря verification popup-а (spec §"ЗАТВАРЯ САЙТА ПРЕДИ КОДА"). */
   verificationRequired?: { pendingRegistrationId: string; maskedEmail: string } | null
+  /** Етап 4H — показан е ограниченият екран за чакащо изтриване (без сесия). */
+  pendingDeletionPromptShown?: boolean
 }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/auth/login`, {
@@ -935,6 +947,16 @@ async function submitLoginRequest(
           verificationRequired: { pendingRegistrationId: data.pendingRegistrationId, maskedEmail: data.maskedEmail },
         }
       }
+      // Етап 4H — активна заявка за самоизтриване (вкл. след "Забравена
+      // парола"): ограниченият екран с изричен избор, без нормален вход.
+      if (data.code === 'PROFILE_PENDING_DELETION') {
+        showPendingDeletionPrompt(data, {
+          cancelRequest: (restoreToken) => postPendingDeletionAction('cancel', restoreToken),
+          keepRequest: (restoreToken) => postPendingDeletionAction('keep', restoreToken),
+          onGoToLogin: () => lobby.openAuthModal('login'),
+        })
+        return { errorText: null, pendingDeletionPromptShown: true }
+      }
       return { errorText: data.message ?? 'Заявката не беше успешна.' }
     }
 
@@ -942,6 +964,22 @@ async function submitLoginRequest(
     return { errorText: null }
   } catch {
     return { errorText: 'Няма връзка със сървъра за профили.' }
+  }
+}
+
+async function postPendingDeletionAction(action: 'cancel' | 'keep', restoreToken: string): Promise<PendingDeletionActionResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/account/deletion-request/${action}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ restoreToken }),
+    })
+    const data = (await response.json().catch(() => null)) as { ok?: boolean; code?: string; message?: string } | null
+    if (response.ok && data?.ok === true) return { ok: true }
+    return { ok: false, code: data?.code ?? null, message: data?.message ?? null }
+  } catch {
+    return { ok: false, code: null, message: null }
   }
 }
 

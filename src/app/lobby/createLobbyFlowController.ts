@@ -467,6 +467,8 @@ export type CreateLobbyFlowControllerOptions = {
     bannedInfo?: { bannedUntil: string; reason: string; remainingDays: number } | null
     /** "Затваря сайта преди кода" сценарий (production report-а) — active account НЯМА, но unexpired pending registration + правилна парола -> автоматично отваря verification popup-а вместо generic error. */
     verificationRequired?: { pendingRegistrationId: string; maskedEmail: string } | null
+    /** Самоизтриване, Етап 4H — main.ts е показал ограничения екран за чакащо изтриване (без сесия). */
+    pendingDeletionPromptShown?: boolean
   }>
   onRegisterSubmit?: (
     displayName: string,
@@ -17773,6 +17775,15 @@ export function createLobbyFlowController(
         maskedEmail: loginResult.verificationRequired.maskedEmail,
         expiresAt: '',
       })
+      return
+    }
+
+    // Самоизтриване, Етап 4H — ограниченият екран (запази/остави заявката) е
+    // показан от main.ts; сесия няма, затова само затваряме login модала.
+    if (loginResult.pendingDeletionPromptShown) {
+      state.authSubmitInFlight = false
+      state.authModalMode = 'closed'
+      render()
       return
     }
 
