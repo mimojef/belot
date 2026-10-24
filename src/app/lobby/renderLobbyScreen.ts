@@ -1561,6 +1561,8 @@ export type RenderLobbyScreenOptions = {
   onAdminGiftItemDelete?: (giftItemId: string) => void
   onAdminGiftItemImageUpload?: (file: File) => void
   onAdminCampaignsOpen?: () => void
+  /** Етап 4J — "Заявки за изтриване" (само пълен admin; правата са на сървъра). */
+  onAdminProfileDeletionsOpen?: () => void
   onAdminCampaignsBack?: () => void
   onAdminCampaignCreate?: () => void
   onAdminCampaignEdit?: (campaignId: string) => void
@@ -3777,6 +3779,20 @@ function renderNav(state: LobbyScreenState): string {
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19V5"/><path d="M4 5h14l-2 4 2 4H4"/></svg>
                   Кампании
                 </button>
+                <button type="button" data-lobby-nav-admin-profile-deletions="1" style="
+                  display:flex; align-items:center; gap:10px;
+                  width:100%; background:none; border:none;
+                  padding:13px 18px; cursor:pointer; text-align:left;
+                  font-size:13px; font-weight:700; letter-spacing:0.04em; text-transform:uppercase;
+                  color:rgba(255,255,255,0.82);
+                  transition:background 0.12s, color 0.12s;
+                "
+                onmouseenter="this.style.background='rgba(212,165,32,0.09)';this.style.color='#d4a520'"
+                onmouseleave="this.style.background='none';this.style.color='rgba(255,255,255,0.82)'"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M8 6V4h8v2"/><path d="M6 6l1 14h10l1-14"/></svg>
+                  Заявки за изтриване
+                </button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="
                   display:flex; align-items:center; gap:10px;
@@ -5527,6 +5543,7 @@ function renderMobileMenu(state: LobbyScreenState): string {
                 ${state.isAdmin ? `
                 <button type="button" data-lobby-nav-admin="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ настройки')}</button>
                 <button type="button" data-lobby-nav-admin-campaigns="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Кампании')}</button>
+                <button type="button" data-lobby-nav-admin-profile-deletions="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Заявки за изтриване')}</button>
                 ` : ''}
                 <button type="button" data-lobby-nav-admin-info="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Админ информация')}</button>
                 <button type="button" data-lobby-nav-admin-server="1" style="${mobileMenuButtonStyle()}">${mobileMenuSvgItemContent('admin', 'Сървър')}</button>
@@ -15281,6 +15298,13 @@ export function renderLobbyScreen(
       if (adminDropdown) adminDropdown.style.display = 'none'
       options.onAdminCampaignsOpen?.()
     })
+
+  root
+    .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-admin-profile-deletions="1"]')
+    .forEach((button) => button.addEventListener('click', () => {
+      if (adminDropdown) adminDropdown.style.display = 'none'
+      options.onAdminProfileDeletionsOpen?.()
+    }))
 
   root
     .querySelectorAll<HTMLButtonElement>('[data-lobby-nav-ad-campaigns="1"]')

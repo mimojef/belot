@@ -110,16 +110,20 @@ try {
     assert((await page.locator('[data-player-profile-self-delete="1"]').count()) === 0, 'бутонът е в чужд профил')
   })
 
-  await check('[3] Административното изтриване остава отделно: admin вижда своя бутон за чужд профил (без "Изтрий" на собственика), а в собствения — само самоизтриването', async () => {
-    await h(page, 'renderPopup', { isOwnProfile: false, canSelfDelete: true, viewerIsFullAdmin: true })
+  // Етап 4J — реалната admin сесия: сървърът дава profileSelfDeletionAvailable
+  // САМО на роля player (виж [E5]/[E5b] в checkProfileDeletionRequestHttp.ts),
+  // затова за admin canSelfDelete е винаги false.
+  await check('[3] Административното изтриване остава отделно: admin вижда своя бутон само за чужд профил; в собствения профил на admin няма "Изтрий" (нито самоизтриване, нито административно)', async () => {
+    await h(page, 'renderPopup', { isOwnProfile: false, canSelfDelete: false, viewerIsFullAdmin: true })
     assert((await page.locator('[data-player-profile-delete-open]').count()) === 1, 'административният бутон липсва')
     assert((await page.locator('[data-player-profile-self-delete="1"]').count()) === 0, 'самоизтриване в чужд профил')
     await h(page, 'clearCalls')
     await page.locator('[data-player-profile-delete-open]').click()
     assert(!(await callNames(page)).includes('onSelfDeleteClick'), 'административният бутон вика самоизтриването')
-    await h(page, 'renderPopup', { isOwnProfile: true, canSelfDelete: true, viewerIsFullAdmin: true })
+    await h(page, 'renderPopup', { isOwnProfile: true, canSelfDelete: false, viewerIsFullAdmin: true })
     assert((await page.locator('[data-player-profile-delete-open]').count()) === 0, 'административен бутон в собствения профил')
-    assert((await page.locator('[data-player-profile-self-delete="1"]').count()) === 1, 'самоизтриване в собствения профил')
+    assert((await page.locator('[data-player-profile-self-delete="1"]').count()) === 0, 'самоизтриване в собствения профил на admin')
+    assert(await page.locator('[data-player-profile-edit="1"]').isVisible(), '"Редакция" в собствения профил на admin')
   })
 
   await check('[4/21] Изключен флаг: няма "Изтрий"; "Редакция" и галерията са непроменени', async () => {

@@ -27,6 +27,13 @@ import { createProfileDeletionRequestStore, type ProfileDeletionVisibilityEvent 
 import { isProfileSelfDeletionFeatureEnabled, isProfileSelfDeletionWorkerEnabled } from './core/profileSelfDeletionFeatureFlag.js'
 import { createProfileDeletionExecutor } from './db/profileDeletionExecutor.js'
 import {
+  PROFILE_DELETION_ADMIN_CATEGORIES,
+  PROFILE_DELETION_ADMIN_LIST_MAX,
+  createProfileDeletionAdminStore,
+  loadProfileDeletionLedgerView,
+  type ProfileDeletionAdminCategory,
+} from './db/profileDeletionAdminStore.js'
+import {
   ensureProfileDeletionLedgerEntry,
   getDefaultProfileDeletionLedgerPath,
   isProfileDeletionLedgerRequestConfirmedOffsite,
@@ -1272,6 +1279,8 @@ const lobbyChatStore = await createLobbyChatStore(databaseBootstrap.databaseFile
 const profileDeletionRequestStore = await createProfileDeletionRequestStore(databaseBootstrap.databaseFilePath, {
   rateLimitSecret: registrationVerificationCodeSecret,
 })
+// Етап 4J — административен преглед и отмяна на доброволни заявки.
+const profileDeletionAdminStore = await createProfileDeletionAdminStore(databaseBootstrap.databaseFilePath)
 const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
 const topicMessageStore = await createTopicMessageStore(databaseBootstrap.databaseFilePath)
 const topicReadStateStore = await createTopicReadStateStore(databaseBootstrap.databaseFilePath)
@@ -11013,6 +11022,137 @@ async function handleAdminProfileBanRequest(
   })
 
   sendJsonResponse(res, 200, { ok: true, ban: result.ban, pending: false })
+  return true
+}
+
+const ADMIN_PROFILE_DELETION_CANCEL_ERRORS: Record<string, { status: number; message: string }> = {
+  forbidden: { status: 403, message: 'Само администратор може да преглежда и отменя заявки за изтриване.' },
+  invalid_reason: { status: 400, message: 'Причината за отмяната е задължителна (до 500 символа).' },
+  not_found: { status: 404, message: 'Заявката не е намерена.' },
+  not_voluntary: { status: 409, message: 'Административните изтривания не могат да бъдат отменяни оттук.' },
+  status_not_cancellable: { status: 409, message: 'Заявката вече е отменена, приключена или в процес на изпълнение.' },
+  irreversible: { status: 409, message: 'Профилът вече е окончателно изтрит в базата — отмяната не е възможна.' },
+  lease_held: { status: 409, message: 'В момента заявката се обработва от автоматичното изтриване. Опитай отново след малко.' },
+  profile_missing: { status: 409, message: 'Профилът вече не съществува — отмяната не е възможна.' },
+  ledger_intent_recorded: {
+    status: 409,
+    message: 'Намерението за окончателно изтриване вече е записано в регистъра на изтриванията (копира се извън сървъра). Безопасна отмяна на този етап не е възможна.',
+  },
+  ledger_unavailable: { status: 503, message: 'Регистърът на изтриванията не може да бъде проверен — отмяната е отказана от съображения за безопасност.' },
+}
+
+/**
+ * Етап 4J — "Заявки за изтриване" (само пълен admin; ролята се проверява и
+ * по базата):
+ *   GET  /api/admin/profile-deletions?kind=&category=  — последните 300
+ *        (лимитът е в SQL), най-новите първи; без лични данни на изтрити
+ *        профили (виж profileDeletionAdminStore.ts).
+ *   POST /api/admin/profile-deletions/:requestId/cancel  { reason }
+ *        — отмяна САМО на доброволна заявка преди необратимата граница;
+ *        атомарна (одит + статус + събитие) или отказ без промяна.
+ */
+async function handleAdminProfileDeletionsRequest(
+  req: IncomingMessage,
+  res: ServerResponse,
+  pathname: string,
+  searchParams: URLSearchParams,
+): Promise<boolean> {
+  const isList = pathname === '/api/admin/profile-deletions'
+  const cancelMatch = pathname.match(/^\/api\/admin\/profile-deletions\/([^/]+)\/cancel$/)
+  if (!isList && cancelMatch === null) return false
+  const noStore = { 'Cache-Control': 'no-store' }
+  if ((isList && req.method !== 'GET') || (cancelMatch !== null && req.method !== 'POST')) {
+    sendJsonResponse(res, 405, { ok: false, message: 'Методът не е позволен.' }, noStore)
+    return true
+  }
+
+  const forbidden = ADMIN_PROFILE_DELETION_CANCEL_ERRORS.forbidden!
+  const session = authStore.getSession(getSessionTokenFromCookieHeader(req.headers.cookie))
+  if (!isFullAdminSession(session) || session.profile.profileId === null) {
+    sendJsonResponse(res, forbidden.status, { ok: false, code: 'forbidden', message: forbidden.message }, noStore)
+    return true
+  }
+  const actorProfileId = session.profile.profileId
+  const actorAccountId = session.account.accountId
+
+  if (isList) {
+    // Повторна проверка на актуалната роля по базата.
+    if (!profileDeletionAdminStore.isActorAdmin(actorAccountId, actorProfileId)) {
+      sendJsonResponse(res, forbidden.status, { ok: false, code: 'forbidden', message: forbidden.message }, noStore)
+      return true
+    }
+    const kindParam = searchParams.get('kind')
+    const categoryParam = searchParams.get('category')
+    const kind = kindParam === null || kindParam === '' ? null : kindParam
+    const category = categoryParam === null || categoryParam === '' ? null : categoryParam
+    if ((kind !== null && kind !== 'voluntary' && kind !== 'admin')
+      || (category !== null && !(PROFILE_DELETION_ADMIN_CATEGORIES as readonly string[]).includes(category))) {
+      sendJsonResponse(res, 400, { ok: false, message: 'Невалиден филтър.' }, noStore)
+      return true
+    }
+    const rows = profileDeletionAdminStore.listOverview({
+      limit: PROFILE_DELETION_ADMIN_LIST_MAX,
+      kind,
+      category: category as ProfileDeletionAdminCategory | null,
+      ledger: loadProfileDeletionLedgerView(PROFILE_DELETION_LEDGER_PATH),
+    })
+    sendJsonResponse(res, 200, { ok: true, limit: PROFILE_DELETION_ADMIN_LIST_MAX, rows }, noStore)
+    return true
+  }
+
+  let requestId: string
+  try {
+    requestId = decodeURIComponent((cancelMatch![1] ?? '').trim())
+  } catch {
+    requestId = ''
+  }
+  if (!/^[a-zA-Z0-9-]{1,64}$/.test(requestId)) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' }, noStore)
+    return true
+  }
+  let body: unknown
+  try {
+    body = await readJsonRequestBody(req, 8_000)
+  } catch {
+    sendJsonResponse(res, 400, { ok: false, message: 'Невалидна заявка.' }, noStore)
+    return true
+  }
+  if (!isRecord(body) || !hasOnlyAllowedFields(body, new Set(['reason']))) {
+    sendJsonResponse(res, 400, { ok: false, message: 'Позволено е само полето reason.' }, noStore)
+    return true
+  }
+
+  let result: ReturnType<typeof profileDeletionAdminStore.cancelVoluntaryRequestByAdmin>
+  try {
+    result = profileDeletionAdminStore.cancelVoluntaryRequestByAdmin({
+      requestId,
+      actorProfileId,
+      actorAccountId,
+      reason: typeof body.reason === 'string' ? body.reason : '',
+      loadLedger: () => loadProfileDeletionLedgerView(PROFILE_DELETION_LEDGER_PATH),
+    })
+  } catch (error) {
+    // Транзакцията е върната изцяло — нищо не е променено.
+    console.error('[profile-deletion] admin cancel failed:', error instanceof Error ? error.message : String(error))
+    sendJsonResponse(res, 500, { ok: false, code: 'internal', message: 'Отмяната не беше извършена поради вътрешна грешка. Нищо не е променено.' }, noStore)
+    return true
+  }
+  if (!result.ok) {
+    const failure = ADMIN_PROFILE_DELETION_CANCEL_ERRORS[result.code] ?? { status: 409, message: 'Отмяната не е възможна.' }
+    sendJsonResponse(res, failure.status, { ok: false, code: result.code, message: failure.message }, noStore)
+    return true
+  }
+
+  // Видимостта се връща по същия път като при потребителска отмяна; банът и
+  // останалите ограничения остават; сесия не се създава.
+  applyProfileDeletionVisibilityEvent({
+    eventSeq: result.eventSeq,
+    requestId: result.requestId,
+    profileId: result.profileId,
+    eventType: 'cancelled',
+  }, 'local')
+  console.log(`[profile-deletion] mode=admin_cancelled profileId=${result.profileId} requestId=${result.requestId} actorProfileId=${actorProfileId} cancellationId=${result.cancellationId}`)
+  sendJsonResponse(res, 200, { ok: true, requestId: result.requestId }, noStore)
   return true
 }
 
@@ -22483,6 +22623,10 @@ async function handleHttpRequest(
     return
   }
 
+  if (await handleAdminProfileDeletionsRequest(req, res, requestUrl.pathname, requestUrl.searchParams)) {
+    return
+  }
+
   if (await handleFriendsRequest(req, res, requestUrl.pathname)) {
     return
   }
@@ -28394,6 +28538,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('friendshipStore', () => friendshipStore.close())
   closeStore('chatStore', () => chatStore.close())
   closeStore('lobbyChatStore', () => lobbyChatStore.close())
+  closeStore('profileDeletionAdminStore', () => profileDeletionAdminStore.close())
   closeStore('yellowCoinGiftStore', () => yellowCoinGiftStore.close())
   closeStore('giftItemStore', () => giftItemStore.close())
   closeStore('tableExitPenaltyStore', () => tableExitPenaltyStore.close())

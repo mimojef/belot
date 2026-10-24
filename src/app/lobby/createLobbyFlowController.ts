@@ -573,6 +573,8 @@ export type CreateLobbyFlowControllerOptions = {
    */
   /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил: main.ts отваря прозореца за потвърждение. */
   onProfileSelfDeleteRequest?: () => void
+  /** Етап 4J — admin меню "Заявки за изтриване": main.ts отваря панела. */
+  onAdminProfileDeletionsRequest?: () => void
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
@@ -8045,6 +8047,10 @@ export function createLobbyFlowController(
       },
       onAdminCampaignsOpen: () => {
         showAdminCampaignsPanel()
+      },
+      onAdminProfileDeletionsOpen: () => {
+        if (!isFullAdminAuthSession(options.getAuthSession?.() ?? null)) return
+        options.onAdminProfileDeletionsRequest?.()
       },
       onAdminCampaignsBack: () => {
         void showAdminPanel()

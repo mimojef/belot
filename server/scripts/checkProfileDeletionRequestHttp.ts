@@ -318,6 +318,25 @@ try {
     assert(me.json.session?.profileSelfDeletionAvailable === false, `служебна роля: ${JSON.stringify(me.json?.session?.profileSelfDeletionAvailable)}`)
   })
 
+  await check('[E5b] Етап 4J — никоя служебна роля (admin, subadmin, marketing, top_chat_admin, chat_admin) не получава самоизтриване: сесията без "Изтрий", подаването -> 403', async () => {
+    // Опитите не трябва да изразходват rate limit-а на следващите проверки.
+    const rateLimitMark = Number((db.prepare('SELECT COALESCE(MAX(rowid), 0) AS m FROM registration_rate_limit_events;').get() as { m: number }).m)
+    try {
+      for (const role of ['admin', 'subadmin', 'marketing', 'top_chat_admin', 'chat_admin']) {
+        db.prepare('DELETE FROM registration_rate_limit_events WHERE rowid > ?;').run(rateLimitMark)
+        db.prepare(`UPDATE accounts SET role = ? WHERE account_id = ?;`).run(role, staff.accountId)
+        const me = await api('/api/auth/me', { cookie: staff.cookie })
+        assert(me.status === 200 && me.json.session?.profileSelfDeletionAvailable === false, `${role}: ${JSON.stringify(me.json?.session?.profileSelfDeletionAvailable)}`)
+        const res = await submit(staff)
+        assert(res.status === 403 && res.json.code === 'ROLE_NOT_ALLOWED', `${role}: ${res.status} ${JSON.stringify(res.json)}`)
+        assert(requestCount(staff.profileId) === 0, `${role}: заявка`)
+      }
+    } finally {
+      db.prepare('DELETE FROM registration_rate_limit_events WHERE rowid > ?;').run(rateLimitMark)
+      db.prepare(`UPDATE accounts SET role = 'pika_team' WHERE account_id = ?;`).run(staff.accountId)
+    }
+  })
+
   await check('[E6] Официалният профил Pika.bg -> 403 ROLE_NOT_ALLOWED', async () => {
     const officialLogin = await login(officialEmail)
     assert(officialLogin.status === 200, `вход ${officialLogin.status}`)

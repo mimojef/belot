@@ -140,6 +140,12 @@ import {
   type SelfDeletionSubmitResult,
 } from './app/profileDeletion/showSelfDeletionDialog'
 import {
+  describeAdminProfileDeletionCancelError,
+  showAdminProfileDeletionsPanel,
+  type AdminProfileDeletionFilters,
+  type AdminProfileDeletionRow,
+} from './app/adminProfileDeletions/showAdminProfileDeletionsPanel'
+import {
   extractAndClearVerificationLocator,
   renderRegistrationVerificationPage,
   type RegistrationVerificationPageState,
@@ -1046,6 +1052,47 @@ function openSelfDeletionDialog(): void {
     // стар екран с достъп.
     onAcceptedClose: () => { window.location.replace('/lobby') },
   })
+}
+
+/** Етап 4J — "Заявки за изтриване": само четене; правата и лимитът са на сървъра. */
+async function fetchAdminProfileDeletions(filters: AdminProfileDeletionFilters): Promise<{ ok: true; rows: AdminProfileDeletionRow[]; limit: number } | { ok: false; message: string }> {
+  try {
+    const query = new URLSearchParams()
+    if (filters.kind !== '') query.set('kind', filters.kind)
+    if (filters.category !== '') query.set('category', filters.category)
+    const suffix = query.toString() === '' ? '' : `?${query.toString()}`
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/profile-deletions${suffix}`, { credentials: 'include', cache: 'no-store' })
+    const data = (await response.json().catch(() => null)) as { ok?: boolean; rows?: AdminProfileDeletionRow[]; limit?: number; message?: string } | null
+    if (response.ok && data?.ok === true && Array.isArray(data.rows)) {
+      return { ok: true, rows: data.rows, limit: typeof data.limit === 'number' ? data.limit : data.rows.length }
+    }
+    return { ok: false, message: data?.message ?? 'Списъкът не може да бъде зареден.' }
+  } catch {
+    return { ok: false, message: 'Няма връзка със сървъра.' }
+  }
+}
+
+async function postAdminProfileDeletionCancel(requestId: string, reason: string): Promise<{ ok: true } | { ok: false; code: string | null; message: string }> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/admin/profile-deletions/${encodeURIComponent(requestId)}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ reason }),
+    })
+    const data = (await response.json().catch(() => null)) as { ok?: boolean; code?: string; message?: string } | null
+    if (response.ok && data?.ok === true) return { ok: true }
+    const code = typeof data?.code === 'string' ? data.code : null
+    return { ok: false, code, message: describeAdminProfileDeletionCancelError(code, data?.message ?? null) }
+  } catch {
+    return { ok: false, code: null, message: describeAdminProfileDeletionCancelError(null, null) }
+  }
+}
+
+function openAdminProfileDeletionsPanel(): void {
+  // Само UI предпазител — сървърът проверява ролята при всяка заявка.
+  if (currentAuthSession?.account.role !== 'admin') return
+  showAdminProfileDeletionsPanel({ fetchList: fetchAdminProfileDeletions, cancelRequest: postAdminProfileDeletionCancel })
 }
 
 async function submitRegisterRequest(body: Record<string, string>): Promise<{
@@ -7105,6 +7152,7 @@ lobby = createLobbyFlowController({
   },
   onLoginSubmit: (email, password, rememberMe) => submitLoginRequest(email, password, rememberMe),
   onProfileSelfDeleteRequest: () => openSelfDeletionDialog(),
+  onAdminProfileDeletionsRequest: () => openAdminProfileDeletionsPanel(),
   onRegisterSubmit: (displayName, email, password, gender) =>
     {
       const validation = validateProfileDisplayName(displayName)

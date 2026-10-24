@@ -98,8 +98,9 @@ tempRoots.push(root)
 await mkdir(join(root, 'database', 'migrations'), { recursive: true })
 await mkdir(join(root, 'database', 'data'), { recursive: true })
 for (const entry of await readdir(join(sourceServerRoot, 'database', 'migrations'), { withFileTypes: true })) {
-  // Базата "отпреди 4G": всички миграции без 20261101_001.
-  if (entry.isFile() && extname(entry.name).toLowerCase() === '.sql' && entry.name !== MIGRATION_4G) {
+  // Базата "отпреди 4G": само миграциите преди 20261101_001 (по-новите,
+  // напр. 4J, зависят от 4G и не могат да бъдат приложени преди нея).
+  if (entry.isFile() && extname(entry.name).toLowerCase() === '.sql' && entry.name < MIGRATION_4G) {
     await cp(join(sourceServerRoot, 'database', 'migrations', entry.name), join(root, 'database', 'migrations', entry.name))
   }
 }
@@ -641,7 +642,8 @@ try {
     const copy = join(backupDir, 'restore-post4g.sqlite')
     vacuumInto(mdb, copy)
     const result = await migrateRestoredDatabase(copy, { liveDbPath: databaseFilePath })
-    assertEqual(result.applied.length, 0, 'приложени')
+    // 4G не се прилага повторно; прилагат се само по-новите миграции (напр. 4J).
+    assert(result.applied.every((name) => name > MIGRATION_4G) && result.pendingAfter.length === 0, `приложени: ${JSON.stringify(result.applied)}`)
     const restored = new sqliteModule.DatabaseSync(copy, { readOnly: true })
     try {
       const row = requestRow(restored, freshRequestId)!

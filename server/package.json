@@ -293,6 +293,7 @@
     "check:profile-deletion-30-day-grace-period": "tsx scripts/checkProfileDeletion30DayGracePeriod.ts --server-root=.",
     "check:profile-deletion-password-recovery": "tsx scripts/checkProfileDeletionPasswordRecovery.ts --server-root=.",
     "check:profile-gallery-secure-access": "tsx scripts/checkProfileGallerySecureAccess.ts --server-root=.",
+    "check:profile-deletion-admin-oversight": "tsx scripts/checkProfileDeletionAdminOversight.ts --server-root=.",
     "check:profile-deletion-name-history": "tsx scripts/checkProfileDeletionNameHistory.ts --server-root=.",
     "check:profile-deletion-partner-ratings": "tsx scripts/checkProfileDeletionPartnerRatings.ts --server-root=.",
     "check:profile-deletion-support": "tsx scripts/checkProfileDeletionSupport.ts --server-root=.",

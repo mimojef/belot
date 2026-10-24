@@ -14,6 +14,10 @@
  *   [E3] "Разбрах" -> чисто презареждане; "Назад" не връща достъп.
  *   [E4] Нов вход -> екранът от 4H с крайната дата; "Запази профила ми" ->
  *        заявката е отменена; следващ вход е нормален.
+ *   [E6] Етап 4J — admin: собственият профил без "Изтрий"; менюто "Заявки
+ *        за изтриване" (настолно и мобилно) отваря панела с реалните данни;
+ *        отмяна с причина през UI (статус + одит в базата); subadmin няма
+ *        пункта.
  *   [E5] Изключен флаг (друго изолирано копие): бутонът не се показва, а
  *        директна заявка към API се отказва (клиентът не заобикаля сървъра).
  *
@@ -268,6 +272,60 @@ try {
     const relogin = await fetch(`http://127.0.0.1:${backendPort}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user.email, password: PASSWORD }) })
     const reloginBody: any = await relogin.json()
     assert(relogin.status === 200 && reloginBody.ok === true, `вход след запазване: ${relogin.status} ${JSON.stringify(reloginBody)}`)
+  })
+
+  await check('[E6] Етап 4J — admin: в собствения профил няма "Изтрий"; менюто "Заявки за изтриване" отваря панела с реалните данни; отмяна с причина през UI; subadmin няма пункта', async () => {
+    // Rate limit-ът за регистрации (10/час от IP) е извън обхвата на теста.
+    backend!.db.prepare('DELETE FROM registration_rate_limit_events;').run()
+    const target = await register(backendPort, 'admtarget')
+    const submitted = await fetch(`http://127.0.0.1:${backendPort}/api/account/deletion-request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Cookie: `belot_session=${target.cookie}` },
+      body: JSON.stringify({ password: PASSWORD, confirm: true }),
+    })
+    assert(submitted.status === 200, `подаване: ${submitted.status}`)
+    const admin = await register(backendPort, 'adm')
+    backend!.db.prepare(`UPDATE accounts SET role = 'admin' WHERE account_id = ?;`).run(admin.accountId)
+    const { page: adminPage } = await openApp(admin.cookie)
+    const profileButton = adminPage.locator('[data-lobby-profile-button="1"]:visible').first()
+    await profileButton.waitFor({ state: 'visible', timeout: 30_000 })
+    await profileButton.click()
+    await adminPage.locator('[data-player-profile-edit="1"]').first().waitFor({ state: 'visible', timeout: 15_000 })
+    assert((await adminPage.locator('[data-player-profile-self-delete="1"]').count()) === 0, '"Изтрий" в собствения профил на admin')
+    await adminPage.keyboard.press('Escape')
+    await adminPage.reload()
+    await adminPage.locator('[data-lobby-nav-admin-toggle="1"]:visible').first().click({ timeout: 30_000 })
+    await adminPage.locator('[data-lobby-nav-admin-profile-deletions="1"]:visible').first().click({ timeout: 10_000 })
+    await adminPage.locator('#admin-profile-deletions-panel').waitFor({ state: 'visible', timeout: 15_000 })
+    const requestId = (backend!.db.prepare('SELECT request_id FROM profile_deletion_requests WHERE profile_id = ?;').get(target.profileId) as { request_id: string }).request_id
+    const row = adminPage.locator(`[data-admin-deletion-row="${requestId}"]`)
+    await row.waitFor({ state: 'visible', timeout: 15_000 })
+    assert(await row.getAttribute('data-admin-deletion-category') === 'pending_cancellable', 'категория')
+    await row.locator('[data-admin-deletion-cancel-open]').click()
+    await adminPage.locator('[data-admin-deletion-cancel-reason="1"]').fill('Потребителят се обади в поддръжката')
+    await adminPage.locator('[data-admin-deletion-cancel-confirm="1"]').click()
+    await adminPage.waitForFunction((id) => document.querySelector(`[data-admin-deletion-row="${id}"]`)?.getAttribute('data-admin-deletion-category') === 'cancelled', requestId, { timeout: 15_000 })
+    const dbRow = backend!.db.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { status: string }
+    const audit = backend!.db.prepare('SELECT reason, actor_profile_id FROM profile_deletion_admin_cancellations WHERE request_id = ?;').get(requestId) as { reason: string; actor_profile_id: string } | undefined
+    assert(dbRow.status === 'cancelled' && audit?.reason === 'Потребителят се обади в поддръжката' && audit.actor_profile_id === admin.profileId, `${JSON.stringify(dbRow)} ${JSON.stringify(audit)}`)
+
+    // Мобилно меню на admin.
+    const { page: mobileAdmin } = await openApp(admin.cookie, '/lobby', { width: 390, height: 844 })
+    await mobileAdmin.locator('[data-lobby-mobile-menu="1"] > summary').first().click({ timeout: 30_000 })
+    const mobileItem = mobileAdmin.locator('[data-lobby-mobile-menu="1"] [data-lobby-nav-admin-profile-deletions="1"]')
+    await mobileItem.waitFor({ state: 'visible', timeout: 10_000 })
+    await mobileItem.click()
+    await mobileAdmin.locator('#admin-profile-deletions-panel').waitFor({ state: 'visible', timeout: 15_000 })
+    const overflow = await mobileAdmin.evaluate(() => document.documentElement.scrollWidth - window.innerWidth)
+    assert(overflow <= 1, `хоризонтален скрол: ${overflow}`)
+
+    // Subadmin: админ менюто е налично, но без "Заявки за изтриване".
+    const sub = await register(backendPort, 'sub')
+    backend!.db.prepare(`UPDATE accounts SET role = 'subadmin' WHERE account_id = ?;`).run(sub.accountId)
+    const { page: subPage } = await openApp(sub.cookie)
+    await subPage.locator('[data-lobby-nav-admin-toggle="1"]:visible').first().click({ timeout: 30_000 })
+    await subPage.locator('[data-lobby-nav-admin-info="1"]:visible').first().waitFor({ state: 'visible', timeout: 10_000 })
+    assert((await subPage.locator('[data-lobby-nav-admin-profile-deletions="1"]').count()) === 0, 'пунктът е видим за subadmin')
   })
 
   await check('[E5] Изключен флаг: бутонът не се показва; директна заявка към API се отказва', async () => {
