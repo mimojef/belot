@@ -222,6 +222,10 @@ try {
     assert(res.status === 404 && res.json.code === 'PROFILE_SELF_DELETION_DISABLED', `${res.status} ${JSON.stringify(res.json)}`)
     assert(requestCount(flagUser.profileId) === 0, 'създадена заявка')
   })
+  await check('[F1b] Етап 4I — сесията не предлага "Изтрий" при изключен флаг (profileSelfDeletionAvailable=false)', async () => {
+    const me = await api('/api/auth/me', { cookie: flagUser.cookie })
+    assert(me.status === 200 && me.json.session?.profileSelfDeletionAvailable === false, JSON.stringify(me.json?.session?.profileSelfDeletionAvailable))
+  })
   await check('[F2] Пътят за отмяна остава наличен (невалиден токен -> 400 INVALID_RESTORE_TOKEN, не 404)', async () => {
     const res = await api('/api/account/deletion-request/cancel', { method: 'POST', body: { restoreToken: 'x'.repeat(43) } })
     assert(res.status === 400 && res.json.code === 'INVALID_RESTORE_TOKEN', `${res.status} ${JSON.stringify(res.json)}`)
@@ -301,10 +305,17 @@ try {
     assert(requestCount(friend.profileId) === 0 && requestCount(hidden.profileId) === 0, 'заявка')
   })
 
-  await check('[E5] Служебна роля (pika_team) -> 403 ROLE_NOT_ALLOWED', async () => {
+  await check('[E4b] Етап 4I — при включен флаг сесията на играч предлага "Изтрий" (profileSelfDeletionAvailable=true)', async () => {
+    const me = await api('/api/auth/me', { cookie: gamer.cookie })
+    assert(me.status === 200 && me.json.session?.profileSelfDeletionAvailable === true, JSON.stringify(me.json?.session?.profileSelfDeletionAvailable))
+  })
+
+  await check('[E5] Служебна роля (pika_team) -> 403 ROLE_NOT_ALLOWED; сесията не предлага "Изтрий"', async () => {
     db.prepare(`UPDATE accounts SET role = 'pika_team' WHERE account_id = ?;`).run(staff.accountId)
     const res = await submit(staff)
     assert(res.status === 403 && res.json.code === 'ROLE_NOT_ALLOWED', `${res.status} ${JSON.stringify(res.json)}`)
+    const me = await api('/api/auth/me', { cookie: staff.cookie })
+    assert(me.json.session?.profileSelfDeletionAvailable === false, `служебна роля: ${JSON.stringify(me.json?.session?.profileSelfDeletionAvailable)}`)
   })
 
   await check('[E6] Официалният профил Pika.bg -> 403 ROLE_NOT_ALLOWED', async () => {
@@ -313,6 +324,8 @@ try {
     const res = await api('/api/account/deletion-request', { method: 'POST', cookie: officialLogin.cookie, body: { password: PASSWORD, confirm: true } })
     assert(res.status === 403 && res.json.code === 'ROLE_NOT_ALLOWED', `${res.status} ${JSON.stringify(res.json)}`)
     assert(requestCount(OFFICIAL_PIKA_PROFILE_ID) === 0, 'заявка')
+    const me = await api('/api/auth/me', { cookie: officialLogin.cookie })
+    assert(me.json.session?.profileSelfDeletionAvailable === false, `официален профил: ${JSON.stringify(me.json?.session?.profileSelfDeletionAvailable)}`)
   })
 
   await check('[E7] Без изрично потвърждение -> 400 CONFIRMATION_REQUIRED', async () => {

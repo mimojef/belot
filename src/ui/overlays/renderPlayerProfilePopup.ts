@@ -17,6 +17,13 @@ export type RenderPlayerProfilePopupOptions = {
   isLoading?: boolean
   canEdit?: boolean
   isOwnProfile?: boolean
+  /**
+   * Самоизтриване (Етап 4I) — "Изтрий" до "Редакция" в СОБСТВЕНИЯ профил.
+   * Server-derived (session.profileSelfDeletionAvailable: флаг + роля);
+   * никога за чужд профил. Отделно от административното "Изтрий"
+   * (data-player-profile-delete-open). Сървърът проверява всичко при подаване.
+   */
+  canSelfDelete?: boolean
   isAdmin?: boolean
   friendshipAction?: PlayerProfileFriendshipAction | null
   /**
@@ -796,7 +803,7 @@ function renderForeignVipRow(profile: PlayerPublicProfileSnapshot, viewerIsFullA
  * вместо computeVipRemainingDays(undefined), който би върнал невярно "0
  * дни" (root cause на flash бъга: null/undefined бяха неразличими).
  */
-function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null | undefined): string {
+function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipActiveUntil: string | null | undefined, canSelfDelete: boolean): string {
   const hasBalance = profile.yellowCoinsBalance !== null && profile.yellowCoinsBalance !== undefined
   const isVipStatusLoading = ownVipActiveUntil === undefined
   const vipDaysText = isVipStatusLoading ? '…' : formatVipDaysWords(computeVipRemainingDays(ownVipActiveUntil))
@@ -826,24 +833,47 @@ function renderOwnProfileSummary(profile: PlayerPublicProfileSnapshot, ownVipAct
         data-vip-status-loading="${isVipStatusLoading ? '1' : '0'}"
         style="font-size:13px;letter-spacing:0.01em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
       ><span style="color:#d4a520;font-weight:800;">VIP · </span><span style="color:#f8fafc;font-weight:400;">${escapeHtml(vipDaysText)}</span></div>
-      <span
-        data-player-profile-edit="1"
-        style="
-          display:inline-flex;
-          align-items:center;
-          gap:7px;
-          color:#f8fafc;
-          font-size:15px;
-          font-weight:400;
-          cursor:pointer;
-          white-space:nowrap;
-          width:fit-content;
-          margin-top:6px;
-        "
-      >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        Редакция
-      </span>
+      <div data-player-profile-own-actions="1" style="display:flex;align-items:center;flex-wrap:wrap;column-gap:18px;row-gap:6px;margin-top:6px;">
+        <span
+          data-player-profile-edit="1"
+          style="
+            display:inline-flex;
+            align-items:center;
+            gap:7px;
+            color:#f8fafc;
+            font-size:15px;
+            font-weight:400;
+            cursor:pointer;
+            white-space:nowrap;
+            width:fit-content;
+          "
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+          Редакция
+        </span>
+        ${canSelfDelete ? `
+          <span
+            data-player-profile-self-delete="1"
+            role="button"
+            tabindex="0"
+            aria-label="Изтрий профила"
+            style="
+              display:inline-flex;
+              align-items:center;
+              gap:7px;
+              color:#fca5a5;
+              font-size:15px;
+              font-weight:400;
+              cursor:pointer;
+              white-space:nowrap;
+              width:fit-content;
+            "
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            Изтрий
+          </span>
+        ` : ''}
+      </div>
     </div>
   `
 }
@@ -2167,6 +2197,7 @@ function renderProfileContent(
   giftShopRecipientProfileId: string | null,
   campaignSummary: PlayerCampaignProfileSummary | null | undefined,
   campaignAllRewardsExpanded: boolean,
+  canSelfDelete: boolean,
 ): string {
   const displayName = profile.displayName?.trim() || formatSeatLabel(seat)
 
@@ -2274,7 +2305,7 @@ function renderProfileContent(
 
           ${renderVipGrantForm(profile.profileId, isOwnProfile, viewerIsFullAdmin, vipGrantOpen, vipGrantSubmitting, vipGrantErrorText)}
 
-          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
+          ${isOwnProfile ? renderOwnProfileSummary(profile, ownVipActiveUntil, canSelfDelete) : renderForeignProfileSummary(profile, viewerIsFullAdmin)}
 
           <div data-player-profile-rating="1" style="display:flex;align-items:center;gap:6px;">
             <div style="font-size:13px;font-weight:400;color:rgba(148,163,184,0.80);">Рейтинг:</div>
@@ -2697,6 +2728,7 @@ export function renderPlayerProfilePopup(
           options.giftShopRecipientProfileId ?? null,
           options.campaignSummary ?? null,
           options.campaignAllRewardsExpanded ?? false,
+          (options.isOwnProfile ?? false) && (options.canSelfDelete ?? false),
         )
       : renderEmptyContent(options.seat, options.emptyMessage ?? null)
 

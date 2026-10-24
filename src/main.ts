@@ -136,6 +136,10 @@ import {
   type PendingDeletionActionResult,
 } from './app/profileDeletion/showPendingDeletionPrompt'
 import {
+  showSelfDeletionDialog,
+  type SelfDeletionSubmitResult,
+} from './app/profileDeletion/showSelfDeletionDialog'
+import {
   extractAndClearVerificationLocator,
   renderRegistrationVerificationPage,
   type RegistrationVerificationPageState,
@@ -423,6 +427,14 @@ let isSessionDisplaced = false
  * в onClose, докато popup-ът реално стои.
  */
 let isModerationForcedExitPending = false
+/**
+ * Самоизтриване (Етап 4I) — true от изпращането на заявката от ТОЗИ таб до
+ * отговора (и завинаги след приемането ѝ, до чистото презареждане от
+ * "Разбрах"). Сървърът затваря socket-а при приемане
+ * (session_deletion_requested); без флага onClose() би стартирал
+ * reconnect/forceOfflineLobbyReload и би махнал потвърждението с крайната дата.
+ */
+let isSelfDeletionExitPending = false
 let shouldReloadLobbyOnReconnect = false
 let offlineLobbyReloadScheduled = false
 let pwaBootstrapAuthSessionLoaded = false
@@ -512,6 +524,8 @@ type AuthSession = {
   marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
   /** Derived UI-only сигнал от сървъра (server: withPikaTeamGiftBypassFlag → canSessionAccessSvara) — показва картата "Свара" в "Игри". Authoritative проверката е GET /api/games/svara/access. */
   svaraTestAccess?: boolean
+  /** Самоизтриване (Етап 4I) — derived UI-only сигнал (server: withPikaTeamGiftBypassFlag → canSessionOfferProfileSelfDeletion) за бутона "Изтрий" в собствения профил. Authoritative проверката е POST /api/account/deletion-request. */
+  profileSelfDeletionAvailable?: boolean
 }
 
 type AuthResponse = {
@@ -981,6 +995,57 @@ async function postPendingDeletionAction(action: 'cancel' | 'keep', restoreToken
   } catch {
     return { ok: false, code: null, message: null }
   }
+}
+
+/** Самоизтриване (Етап 4I) — съществуващият API; сървърът проверява сесията, паролата и всички правила. */
+async function postSelfDeletionRequest(password: string): Promise<SelfDeletionSubmitResult> {
+  try {
+    const response = await fetch(`${getApiBaseUrl()}/api/account/deletion-request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        password,
+        confirm: true,
+        ...(currentAuthSession?.profile.profileId ? { profileId: currentAuthSession.profile.profileId } : {}),
+      }),
+    })
+    const data = (await response.json().catch(() => null)) as {
+      ok?: boolean
+      code?: string
+      message?: string
+      scheduledFor?: string
+      gracePeriodDays?: number
+    } | null
+    if (response.ok && data?.ok === true) {
+      return {
+        ok: true,
+        scheduledFor: typeof data.scheduledFor === 'string' ? data.scheduledFor : null,
+        gracePeriodDays: typeof data.gracePeriodDays === 'number' ? data.gracePeriodDays : null,
+      }
+    }
+    return { ok: false, code: data?.code ?? (response.status === 401 && !data?.code ? 'NOT_AUTHENTICATED' : null), message: data?.message ?? null }
+  } catch {
+    return { ok: false, code: null, message: null }
+  }
+}
+
+function openSelfDeletionDialog(): void {
+  if (currentAuthSession === null || currentAuthSession.profileSelfDeletionAvailable !== true) return
+  showSelfDeletionDialog({
+    submit: postSelfDeletionRequest,
+    onSubmitStart: () => { isSelfDeletionExitPending = true },
+    onSubmitFailed: () => { isSelfDeletionExitPending = false },
+    onAccepted: () => {
+      // Сървърът вече е отнел сесиите и затваря socket-ите; тук само
+      // изчистваме локалното състояние (идемпотентно спрямо
+      // session_deletion_requested, ако WS съобщението е пристигнало първо).
+      if (currentAuthSession !== null) performLocalLogoutAfterBanOrDelete()
+    },
+    // Чисто презареждане без запис в историята — "Назад" не може да върне
+    // стар екран с достъп.
+    onAcceptedClose: () => { window.location.replace('/lobby') },
+  })
 }
 
 async function submitRegisterRequest(body: Record<string, string>): Promise<{
@@ -7039,6 +7104,7 @@ lobby = createLobbyFlowController({
     showModerationForcedExitPopup(input)
   },
   onLoginSubmit: (email, password, rememberMe) => submitLoginRequest(email, password, rememberMe),
+  onProfileSelfDeleteRequest: () => openSelfDeletionDialog(),
   onRegisterSubmit: (displayName, email, password, gender) =>
     {
       const validation = validateProfileDisplayName(displayName)
@@ -8381,7 +8447,7 @@ client = createGameServerClient({
     requestPwaUpdateApplyAttempt()
   },
   onClose: () => {
-    if (isSessionDisplaced || isPageUnloading || isModerationForcedExitPending) {
+    if (isSessionDisplaced || isPageUnloading || isModerationForcedExitPending || isSelfDeletionExitPending) {
       return
     }
 

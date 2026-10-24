@@ -9531,6 +9531,7 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
   marketingGiftMaxAmount: number | null
   marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
   svaraTestAccess: boolean
+  profileSelfDeletionAvailable: boolean
 }) | null {
   if (session === null || session.profile.profileId === null) return session as null
   const isLegacyProfileBypass = yellowCoinGiftStore.isPikaTeamGiftBypassProfileId(session.profile.profileId)
@@ -9566,12 +9567,18 @@ function withPikaTeamGiftBypassFlag<T extends { profile: { profileId: string | n
     // games/svara/svaraAccess.ts). Authoritative проверката остава
     // GET /api/games/svara/access и бъдещите Свара операции.
     svaraTestAccess: canSessionAccessSvara(session),
+    // Самоизтриване, Етап 4I — UI-only сигнал за бутона "Изтрий" в собствения
+    // профил (флаг + същите правила за роля/официален профил като
+    // handleAccountDeletionSubmit). Authoritative проверките остават в
+    // POST /api/account/deletion-request.
+    profileSelfDeletionAvailable: canSessionOfferProfileSelfDeletion(session),
   } as T extends null ? null : T & {
     pikaTeamGiftMaxAmount: number | null
     pikaTeamDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
     marketingGiftMaxAmount: number | null
     marketingDailyGiftLimitStatus: { limit: number; used: number; remaining: number } | null
     svaraTestAccess: boolean
+    profileSelfDeletionAvailable: boolean
   }
 }
 
@@ -11350,6 +11357,16 @@ const PROFILE_DELETION_WINDOW_CLOSED_MESSAGE = 'Срокът за отмяна �
 function isProfileSelfDeletionStaffOrOfficialProfile(session: AuthSessionSnapshot, profileId: string): boolean {
   if (session.account.role !== 'player') return true
   return profileId === OFFICIAL_PIKA_PROFILE_ID || profileId === getConfiguredOfficialPikaProfileId()
+}
+
+// Етап 4I — дали интерфейсът да предложи "Изтрий" в собствения профил:
+// включен флаг + същите правила за роля/официален профил като подаването.
+// Само UI сигнал — сървърът проверява всичко отново при подаване.
+function canSessionOfferProfileSelfDeletion(session: { profile: { profileId: string | null }; account: { role: string } }): boolean {
+  const profileId = session.profile.profileId
+  if (!isProfileSelfDeletionFeatureEnabled() || profileId === null) return false
+  if (session.account.role !== 'player') return false
+  return profileId !== OFFICIAL_PIKA_PROFILE_ID && profileId !== getConfiguredOfficialPikaProfileId()
 }
 
 // Реалните състояния на игрите: in-memory (Белот стаи/сесии, чакащи маси,

@@ -706,6 +706,8 @@ export type LobbyScreenState = {
   isAdmin: boolean
   /** Admin ИЛИ subadmin — вижда "⚙ Админ" менюто (само "Информация"/"Сървър" вътре, ако не е isAdmin). */
   isAdminOrSubadmin: boolean
+  /** Самоизтриване (Етап 4I) — server-derived: да се покаже ли "Изтрий" в собствения профил. */
+  canSelfDeleteProfile?: boolean
   /**
    * admin ИЛИ pika_team — единствено за показване на бутона "(×)" в
    * "Публикации от Pika.bg". НЕ дава достъп до нищо друго (виж isAdmin/
@@ -1148,6 +1150,8 @@ export type RenderLobbyScreenOptions = {
   onProfileDeleteOpen: (profileId: string | null) => void
   onProfileDeleteCancel: () => void
   onProfileDeleteSubmit: (profileId: string | null, reason: string) => void
+  /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил (НЕ административното изтриване по-горе). */
+  onProfileSelfDeleteClick: () => void
   onProfileRiskRecheckClick: (profileId: string | null) => void
   onProfileRiskLinkedProfileClick: (profileId: string) => void
   onProfileCampaignsNavClick: (profileId: string | null) => void
@@ -1708,6 +1712,7 @@ export type ProfilePopupCallbacks = {
   onRiskLinkedProfileClick: (profileId: string) => void
   onCampaignsNavClick: (profileId: string | null) => void
   onCampaignViewAllRewardsToggle: (profileId: string | null) => void
+  onSelfDeleteClick: () => void
 }
 
 function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profileId: string | null): void {
@@ -1715,6 +1720,15 @@ function attachPopupListeners(el: HTMLElement, cb: ProfilePopupCallbacks, profil
     ?.addEventListener('click', cb.onClose)
   el.querySelector<HTMLElement>('[data-player-profile-popup-backdrop="1"]')
     ?.addEventListener('click', cb.onClose)
+  // Самоизтриване (Етап 4I) — само в собствения профил; отделно от
+  // административното "Изтрий" (data-player-profile-delete-open).
+  const selfDeleteEl = el.querySelector<HTMLElement>('[data-player-profile-self-delete="1"]')
+  if (selfDeleteEl) {
+    selfDeleteEl.addEventListener('click', () => { cb.onSelfDeleteClick() })
+    selfDeleteEl.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cb.onSelfDeleteClick() }
+    })
+  }
   const editEl = el.querySelector<HTMLElement>('[data-player-profile-edit="1"]')
   if (editEl) {
     editEl.addEventListener('click', () => {
@@ -1992,6 +2006,8 @@ export function syncProfilePopup(
     targetAccountRole?: PlayerAccountRole | null
     showPikaSupportChatButton?: boolean
     showTopicsPersonalMessageButton?: boolean
+    /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил. */
+    canSelfDelete?: boolean
     /** Tri-state — виж LobbyScreenState.ownVipActiveUntil за discriminator semantics-а. Подава се explicit undefined за "not loaded yet", НЕ се пропуска/coerce-ва към null тук (виж renderPlayerProfilePopup.ts). */
     ownVipActiveUntil?: string | null | undefined
     vipGrantOpen?: boolean
@@ -2058,6 +2074,7 @@ export function syncProfilePopup(
     canEdit: popupState.canEdit,
     isAdmin: popupState.isAdmin ?? false,
     isOwnProfile: popupState.isOwnProfile ?? false,
+    canSelfDelete: (popupState.isOwnProfile ?? false) && (popupState.canSelfDelete ?? false),
     friendshipAction: popupState.friendshipAction,
     skipAnimation: !isFirstOpen || (popupState.skipAnimation ?? false),
     viewerIsFullAdmin: popupState.viewerIsFullAdmin ?? false,
@@ -16219,6 +16236,7 @@ export function renderLobbyScreen(
       canEdit: state.profilePopupCanEdit,
       isAdmin: state.isAdmin,
       isOwnProfile: profilePopupIsOwnProfile,
+      canSelfDelete: profilePopupIsOwnProfile && state.canSelfDeleteProfile === true,
       friendshipAction: state.friendshipAction,
       viewerIsFullAdmin: state.isAdmin,
       viewerCanProfileMute: state.isProfileMuteModerator ?? false,
@@ -16300,6 +16318,7 @@ export function renderLobbyScreen(
       onRiskLinkedProfileClick: options.onProfileRiskLinkedProfileClick,
       onCampaignsNavClick: options.onProfileCampaignsNavClick,
       onCampaignViewAllRewardsToggle: options.onProfileCampaignViewAllRewardsToggle,
+      onSelfDeleteClick: options.onProfileSelfDeleteClick,
     },
   )
 

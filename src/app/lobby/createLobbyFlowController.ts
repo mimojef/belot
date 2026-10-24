@@ -232,6 +232,8 @@ export type LobbyAuthSession = {
   marketingDailyGiftLimitStatus?: { limit: number; used: number; remaining: number } | null
   /** Server-derived UI сигнал за картата "Свара" (SVARA_TEST_ENABLED + роля). Authoritative е GET /api/games/svara/access. */
   svaraTestAccess?: boolean
+  /** Самоизтриване (Етап 4I) — server-derived UI сигнал за бутона "Изтрий" в собствения профил. Authoritative е POST /api/account/deletion-request. */
+  profileSelfDeletionAvailable?: boolean
 }
 
 /** Пълен администратор — единствената роля с достъп до "Настройки", редакция на профили, чат с поддръжката, управление на роли. */
@@ -569,6 +571,8 @@ export type CreateLobbyFlowControllerOptions = {
    * network layer-а (main.ts) и admin-ът виждаше идентично "успешно"
    * поведение за двата случая.
    */
+  /** Самоизтриване (Етап 4I) — "Изтрий" в собствения профил: main.ts отваря прозореца за потвърждение. */
+  onProfileSelfDeleteRequest?: () => void
   onAdminHardDeleteProfile?: (
     targetProfileId: string,
     reason: string,
@@ -5511,6 +5515,7 @@ export function createLobbyFlowController(
       bundlePurchaseMessageText: state.bundlePurchaseMessageText,
       isAdmin: isFullAdminAuthSession(authSession),
       isAdminOrSubadmin: isAdminOrSubadminAuthSession(authSession),
+      canSelfDeleteProfile: authSession?.profileSelfDeletionAvailable === true,
       canDeleteLobbyChat: isPikaAnnouncementAuthorAuthSession(authSession),
       canShowSvaraEntry: canShowSvaraEntry(authSession),
       svaraPageStatus: state.svaraPageStatus,
@@ -6190,6 +6195,9 @@ export function createLobbyFlowController(
       },
       onProfileDeleteOpen: (profileId) => {
         getPopupCallbacks().onDeleteOpen(profileId)
+      },
+      onProfileSelfDeleteClick: () => {
+        getPopupCallbacks().onSelfDeleteClick()
       },
       onProfileDeleteCancel: () => {
         getPopupCallbacks().onDeleteCancel()
@@ -19698,6 +19706,9 @@ export function createLobbyFlowController(
         state.profilePopupCampaignHistoryOpen = !state.profilePopupCampaignHistoryOpen
         renderPopupOnly()
       },
+      onSelfDeleteClick: () => {
+        options.onProfileSelfDeleteRequest?.()
+      },
       onCampaignViewAllRewardsToggle: (_profileId) => {
         // §4: "Виж всички награди" разгъва/свива списъка В РАМКИТЕ на
         // същия profile popup — не нов модален прозорец.
@@ -20422,6 +20433,7 @@ export function createLobbyFlowController(
         canEdit: state.profilePopupCanEdit,
         isAdmin: isFullAdminAuthSession(authSession),
         isOwnProfile,
+        canSelfDelete: isOwnProfile && authSession?.profileSelfDeletionAvailable === true,
         friendshipAction: buildPopupFriendshipAction(),
         viewerIsFullAdmin: isFullAdminAuthSession(authSession),
         viewerCanProfileMute: isProfileMuteModeratorAuthSession(authSession),

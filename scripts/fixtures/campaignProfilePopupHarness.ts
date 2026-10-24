@@ -88,6 +88,7 @@ const NOOP_CALLBACKS: ProfilePopupCallbacks = {
   onRiskLinkedProfileClick: () => {},
   onCampaignsNavClick: () => {},
   onCampaignViewAllRewardsToggle: () => {},
+  onSelfDeleteClick: () => {},
 }
 
 function render(): void {

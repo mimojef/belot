@@ -117,6 +117,8 @@
     "check:campaign-match-credit-display": "npx tsx scripts/checkCampaignMatchCreditDisplay.ts",
     "check:ludo-game-end-campaign-credit": "npx tsx scripts/checkLudoGameEndCampaignCredit.ts",
     "check:campaign-profile-popup-ui": "npx tsx scripts/checkCampaignProfilePopupUi.ts",
+    "check:profile-self-deletion-ui": "npx tsx scripts/checkProfileSelfDeletionUi.ts",
+    "check:profile-self-deletion-e2e": "npx tsx scripts/checkProfileSelfDeletionE2E.ts",
     "check:campaign-own-profile-summary": "npx tsx scripts/checkCampaignOwnProfileSummary.ts",
     "check:campaign-reward-congratulations-ui": "npx tsx scripts/checkCampaignRewardCongratulationsUi.ts",
     "check:campaign-reward-congratulations-coin-purchase": "npx tsx scripts/checkCampaignRewardCongratulationsCoinPurchase.ts",
