@@ -42,6 +42,7 @@ import { createProfileDeletionWorker } from '../src/core/profileDeletionWorker.j
 import { migrateRestoredDatabase } from '../src/ops/profileDeletionRestoredDbMigrations.js'
 import { REAPPLY_CONFIRMATION_PHRASE, runProfileDeletionLedgerReconcile } from '../src/ops/profileDeletionLedgerReconcile.js'
 import { removeProfileDeletionFile, type ProfileDeletionUploadRoots } from '../src/uploads/profileDeletionFileRemoval.js'
+import { createProfileDeletionCancellationKit, type ProfileDeletionCancellationKit } from './fixtures/profileDeletionCancellationKit.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -215,6 +216,7 @@ const otherTables = new Set(['profile_deletion_requests', 'server_migrations'])
 
 let requestStore: ProfileDeletionRequestStore | null = null
 let executor: ProfileDeletionExecutor | null = null
+let cancellationKit: ProfileDeletionCancellationKit | null = null
 
 try {
   // ─── Фаза 1: база отпреди 4G с исторически заявки ──────────────────────
@@ -278,7 +280,12 @@ try {
   console.log('\n[M] Миграция 20261101_001')
   // Отпечатък на всички останали таблици непосредствено преди миграцията.
   const othersBefore = snapshotTables(db, otherTables)
-  await copyFile(join(sourceServerRoot, 'database', 'migrations', MIGRATION_4G), join(root, 'database', 'migrations', MIGRATION_4G))
+  // 4G и по-новите миграции (4J/4J1 зависят от 4G) — прилагат се по ред.
+  for (const entry of await readdir(join(sourceServerRoot, 'database', 'migrations'), { withFileTypes: true })) {
+    if (entry.isFile() && extname(entry.name).toLowerCase() === '.sql' && entry.name >= MIGRATION_4G) {
+      await copyFile(join(sourceServerRoot, 'database', 'migrations', entry.name), join(root, 'database', 'migrations', entry.name))
+    }
+  }
   await ensureServerDatabaseReady({ serverRootOverride: root })
   db.close()
   const dbMigrated: SqliteDatabase = new sqliteModule.DatabaseSync(databaseFilePath, { open: true, enableForeignKeyConstraints: true })
@@ -313,14 +320,17 @@ try {
   })
 
   await check('[G21] Финансовите, административните и всички останали таблици са непроменени от миграцията', () => {
-    const after = snapshotTables(mdb, otherTables).split('|')
     const before = othersBefore.split('|')
+    const beforeTables = new Set(before.map((entry) => entry.split(':')[0]))
+    // Новите таблици на по-късните миграции (4J/4J1) са празни и не се сравняват.
+    const after = snapshotTables(mdb, otherTables).split('|').filter((entry) => beforeTables.has(entry.split(':')[0]))
     const changed = after.filter((entry) => !before.includes(entry)).map((entry) => entry.split(':')[0])
     assert(changed.length === 0 && after.length === before.length, `променени таблици: ${changed.join(', ')}`)
   })
 
   requestStore = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
   executor = await createProfileDeletionExecutor(databaseFilePath)
+  cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath })
   const store = requestStore
   const exec = executor
 
@@ -414,7 +424,7 @@ try {
 
   console.log('\n[C] Отмяна около крайния срок')
 
-  await check('[G3] Отмяна непосредствено преди крайния срок: разрешена', () => {
+  await check('[G3] Отмяна непосредствено преди крайния срок: разрешена (и потвърдена след срока)', async () => {
     const user = registerUser('CancelBefore')
     const requestId = mInsertNew(user, isoPlus(mNow(), 3000))
     const issued = store.issueRestoreToken(user.profileId)
@@ -422,6 +432,9 @@ try {
     if (!issued.ok) return
     const cancelled = store.cancelWithToken(issued.restoreToken)
     assert(cancelled.ok, JSON.stringify(cancelled))
+    // Етап 4J1 — приета преди срока; финализирането след него е валидно.
+    await new Promise((r) => setTimeout(r, 3200))
+    cancellationKit!.confirmAll()
     assertEqual(requestRow(mdb, requestId)!.status, 'cancelled', 'status')
   })
 
@@ -434,7 +447,8 @@ try {
     const requestId = mInsertNew(user, mNow())
     const none = store.issueRestoreToken(user.profileId)
     assert(!none.ok && none.code === 'no_pending_request', 'токен на границата')
-    assertRejects(() => mdb.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId), 'profile_deletion_cancel_window_closed', 'тригер')
+    assertRejects(() => mdb.prepare(`INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status) VALUES (?, ?, ?, 'user', 'pending');`).run(randomUUID(), requestId, user.profileId), 'profile_deletion_cancel_window_closed', 'тригер при приемането')
+    assertRejects(() => mdb.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId), 'profile_deletion_cancellation_not_finalized', 'тригер без трайна отмяна')
     assertEqual(requestRow(mdb, requestId)!.status, 'pending', 'статусът е непроменен')
   })
 
@@ -570,6 +584,7 @@ try {
     assert(store.cancelWithToken(issued.restoreToken).ok, 'отмяна')
     const summary = await makeWorker('w-cancelled', [created.request.requestId]).runOnce()
     assertEqual(summary.claimed, 0, 'worker')
+    cancellationKit!.confirmAll()
     assert(profileExists(mdb, user.profileId), 'профилът съществува')
     await new Promise((r) => setTimeout(r, 5))
     const second = store.createRequest({ profileId: user.profileId, accountId: user.accountId })
@@ -663,6 +678,7 @@ try {
 } finally {
   try { requestStore?.close() } catch { /* ignore */ }
   try { executor?.close() } catch { /* ignore */ }
+  try { cancellationKit?.close() } catch { /* ignore */ }
   for (const dir of tempRoots) await rm(dir, { recursive: true, force: true }).catch(() => {})
 }
 

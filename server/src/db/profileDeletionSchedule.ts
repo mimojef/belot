@@ -44,11 +44,14 @@ export const PROFILE_DELETION_ACTIVE_REQUEST_STATUSES: readonly ProfileDeletionR
   'failed',
 ]
 
+// Етап 4J1: blocked/failed -> cancelled са базово допустими (административна
+// отмяна / отмяна от регистъра), но базата изисква ФИНАЛИЗИРАНА трайна отмяна
+// (profile_deletion_cancellations) за всеки преход към 'cancelled'.
 const ALLOWED_REQUEST_TRANSITIONS: Record<ProfileDeletionRequestStatus, readonly ProfileDeletionRequestStatus[]> = {
   pending: ['cancelled', 'executing'],
   executing: ['completed', 'pending', 'blocked', 'failed'],
-  blocked: ['executing'],
-  failed: ['executing'],
+  blocked: ['executing', 'cancelled'],
+  failed: ['executing', 'cancelled'],
   cancelled: [],
   completed: [],
 }

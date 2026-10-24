@@ -995,8 +995,11 @@ async function postPendingDeletionAction(action: 'cancel' | 'keep', restoreToken
       credentials: 'include',
       body: JSON.stringify({ restoreToken }),
     })
-    const data = (await response.json().catch(() => null)) as { ok?: boolean; code?: string; message?: string } | null
-    if (response.ok && data?.ok === true) return { ok: true }
+    const data = (await response.json().catch(() => null)) as { ok?: boolean; code?: string; message?: string; state?: string } | null
+    if (response.ok && data?.ok === true) {
+      // Етап 4J1 — "cancelled" само при окончателна отмяна; всичко друго е междинно.
+      return { ok: true, state: data.state === 'cancelled' ? 'cancelled' : 'pending_confirmation', message: data.message ?? null }
+    }
     return { ok: false, code: data?.code ?? null, message: data?.message ?? null }
   } catch {
     return { ok: false, code: null, message: null }
@@ -1072,7 +1075,7 @@ async function fetchAdminProfileDeletions(filters: AdminProfileDeletionFilters):
   }
 }
 
-async function postAdminProfileDeletionCancel(requestId: string, reason: string): Promise<{ ok: true } | { ok: false; code: string | null; message: string }> {
+async function postAdminProfileDeletionCancel(requestId: string, reason: string): Promise<{ ok: true; state: 'cancelled' | 'pending_confirmation' } | { ok: false; code: string | null; message: string }> {
   try {
     const response = await fetch(`${getApiBaseUrl()}/api/admin/profile-deletions/${encodeURIComponent(requestId)}/cancel`, {
       method: 'POST',
@@ -1080,8 +1083,8 @@ async function postAdminProfileDeletionCancel(requestId: string, reason: string)
       credentials: 'include',
       body: JSON.stringify({ reason }),
     })
-    const data = (await response.json().catch(() => null)) as { ok?: boolean; code?: string; message?: string } | null
-    if (response.ok && data?.ok === true) return { ok: true }
+    const data = (await response.json().catch(() => null)) as { ok?: boolean; code?: string; message?: string; state?: string } | null
+    if (response.ok && data?.ok === true) return { ok: true, state: data.state === 'cancelled' ? 'cancelled' : 'pending_confirmation' }
     const code = typeof data?.code === 'string' ? data.code : null
     return { ok: false, code, message: describeAdminProfileDeletionCancelError(code, data?.message ?? null) }
   } catch {

@@ -25,6 +25,7 @@ import { createProfileHardDeleteService } from '../src/db/profileHardDeleteServi
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
 import { createProfileDeletionWorker } from '../src/core/profileDeletionWorker.js'
 import { removeProfileDeletionFile, type ProfileDeletionUploadRoots } from '../src/uploads/profileDeletionFileRemoval.js'
+import { createProfileDeletionCancellationKit } from './fixtures/profileDeletionCancellationKit.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -90,6 +91,8 @@ try {
     ).get(profileId) !== undefined,
   })
   const requestStore = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
+  // Етап 4J1 — отмяната е окончателна след запис в регистъра + offsite ack.
+  const cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath: `${databaseFilePath}-cancellation-ledger/profile-deletions.jsonl` })
   const executor = await createProfileDeletionExecutor(databaseFilePath)
   const hardDeleteService = await createProfileHardDeleteService(databaseFilePath, { deleteUploadFileByUrl: async () => {} })
 
@@ -257,6 +260,7 @@ try {
     if (!created.ok) throw new Error(JSON.stringify(created))
     const issued = requestStore.issueRestoreToken(scenario.user.profileId)
     assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     assertEqual(requestRow(created.request.requestId).status, 'cancelled', 'статус')
     assertEqual((await makeWorker(executor, [created.request.requestId]).runOnce()).claimed, 0, 'не е взета')
     assert(profileExists(scenario.user.profileId), 'профилът')

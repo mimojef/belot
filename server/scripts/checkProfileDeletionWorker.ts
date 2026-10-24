@@ -26,6 +26,7 @@ import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createAuthStore } from '../src/db/authStore.js'
 import { createProfileBanStore } from '../src/db/profileBanStore.js'
 import { createProfileDeletionRequestStore } from '../src/db/profileDeletionRequestStore.js'
+import { createProfileDeletionCancellationKit } from './fixtures/profileDeletionCancellationKit.js'
 import { createTournamentStore } from '../src/db/tournamentStore.js'
 import { createTournamentEconomyStore } from '../src/db/tournamentEconomyStore.js'
 import {
@@ -131,6 +132,8 @@ const authStore = await createAuthStore(databaseFilePath, progressStore, {
 const requestStore = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
 const executor = await createProfileDeletionExecutor(databaseFilePath)
 const executor2 = await createProfileDeletionExecutor(databaseFilePath) // втори Node процес
+// Етап 4J1 — отмяната е окончателна след запис в регистъра + offsite ack.
+const cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath })
 const tournamentStore = await createTournamentStore(databaseFilePath)
 const tournamentEconomy = await createTournamentEconomyStore(databaseFilePath) // отделна връзка (друг процес)
 
@@ -427,6 +430,9 @@ try {
     if (!issued.ok) return
     assert(requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
     while (dbNow() < scheduledFor) await sleep(100)
+    // Етап 4J1 — приетата отмяна блокира worker-а и ПРЕДИ финализирането (offsite още не е потвърдил).
+    assertEqual(executor.claimNextDueRequest('w-cancel', requestId), null, 'claim на приета (нефинализирана) отмяна')
+    cancellationKit.confirmAll()
     assertEqual(executor.claimNextDueRequest('w-cancel', requestId), null, 'claim на отменена')
     await makeWorker(executor, 'w-cancel').runOnce()
     assert(profileExists(user.profileId), 'профилът съществува')
@@ -972,6 +978,7 @@ try {
     assertEqual((await makeWorker(executor, 'w-tp8', [created.request.requestId]).runOnce()).claimed, 0, 'не е взета преди срока')
     const issued = requestStore.issueRestoreToken(author.profileId)
     assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     assertEqual((await makeWorker(executor, 'w-tp8', [created.request.requestId]).runOnce()).claimed, 0, 'отменена — никога')
     assertEqual(JSON.stringify(db.prepare('SELECT * FROM topic_messages WHERE message_id IN (?, ?) ORDER BY seq;').all(root, foreignReply)), before, 'непроменени')
     assert(existsSync(file), 'файлът')
@@ -1305,11 +1312,14 @@ try {
     assert(issued.ok, 'токен')
     const cancelled = requestStore.cancelForActiveParticipation(created.request.requestId)
     assert(cancelled.ok, 'системна отмяна')
+    // Етап 4J1 — приета (worker-ът е блокиран), окончателна след потвърждението.
+    assertEqual(requestRow(created.request.requestId).status, 'pending', 'статус преди потвърждението')
+    assertEqual(requestStore.cancelForActiveParticipation(created.request.requestId).ok, false, 'идемпотентно')
+    cancellationKit.confirmAll()
     assertEqual(requestRow(created.request.requestId).status, 'cancelled', 'статус')
     const event = db.prepare(`SELECT actor_kind, detail_json FROM profile_deletion_events WHERE request_id = ? AND event_type = 'cancelled';`).get(created.request.requestId) as Record<string, string>
     assertEqual(event.actor_kind, 'system', 'actor')
-    assert(event.detail_json.includes('active_participation'), 'причина')
-    assertEqual(requestStore.cancelForActiveParticipation(created.request.requestId).ok, false, 'идемпотентно')
+    assert(event.detail_json.includes('"source":"system"'), 'източник')
     if (issued.ok) assertEqual(requestStore.cancelWithToken(issued.restoreToken).ok, false, 'токенът е затворен')
     const due = registerUser('RaceDue')
     const dueId = insertDueRequest(due)
@@ -1363,6 +1373,7 @@ try {
       'profile_deletion_pending_tournament_admission', 'приемане през периода')
     const issued = requestStore.issueRestoreToken(invitee.profileId)
     assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     assertEqual((db.prepare('SELECT status FROM tournament_partner_invites WHERE invite_id = ?;').get(inviteId) as { status: string }).status, 'pending', 'поканата е още валидна')
     db.prepare(`INSERT INTO tournament_entries (entry_id, tournament_id, profile_id, team_id, joined_as, status) VALUES (?, ?, ?, ?, 'partner_invitee', 'confirmed');`).run(randomUUID(), tournamentId, invitee.profileId, teamId)
     assertEqual(count(`SELECT COUNT(*) AS c FROM tournament_entries WHERE tournament_id = ? AND profile_id = ?;`, tournamentId, invitee.profileId), 1, 'участие след отмяна')
@@ -1449,6 +1460,7 @@ try {
     // e) След отмяна guard-ът не пречи — самостоятелното записване минава.
     const issued = requestStore.issueRestoreToken(solo.profileId)
     assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     const afterCancel = tournamentEconomy.joinTournamentSoloAtomically(soloTournament, solo.profileId)
     assert(afterCancel.ok, `след отмяна: ${JSON.stringify(afterCancel)}`)
     assertEqual(entryCount(soloTournament, solo.profileId), 1, 'след отмяна: участие')

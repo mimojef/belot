@@ -32,6 +32,7 @@ import {
   REGISTRATION_EMAIL_AND_DISPLAY_NAME_TAKEN_MESSAGE,
   REGISTRATION_EMAIL_TAKEN_MESSAGE,
 } from '../src/db/authStore.js'
+import { cancelRequestDirectlyForTest } from './fixtures/profileDeletionCancellationKit.js'
 
 const TEST_REGISTRATION_SECRET = 'profile-deletion-visibility-http-secret-0123456789'
 const PASSWORD = 'secret123'
@@ -378,7 +379,8 @@ try {
   })
 
   // ─── Отмяна ──────────────────────────────────────────────────────────
-  db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId)
+  // Етап 4J1 — финализирана трайна отмяна (пряк SQL, тригерите се спазват).
+  cancelRequestDirectlyForTest(db, requestId)
 
   console.log('\n[X] След отмяна')
   const restored = await visibleState(alice)

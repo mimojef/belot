@@ -35,9 +35,18 @@ import {
 } from './db/profileDeletionAdminStore.js'
 import {
   ensureProfileDeletionLedgerEntry,
+  ensureProfileDeletionLedgerRecord,
   getDefaultProfileDeletionLedgerPath,
   isProfileDeletionLedgerRequestConfirmedOffsite,
+  isRequestLifecycleLedgerRecord,
+  readProfileDeletionLedger,
+  type ProfileDeletionRequestCancelledRecord,
 } from './db/profileDeletionLedger.js'
+import { createProfileDeletionCancellationStore } from './db/profileDeletionCancellationStore.js'
+import {
+  createProfileDeletionCancellationFinalizer,
+  type ProfileDeletionCancellationOutcome,
+} from './core/profileDeletionCancellationFinalizer.js'
 import { createProfileDeletionWorker } from './core/profileDeletionWorker.js'
 import { removeProfileDeletionFile } from './uploads/profileDeletionFileRemoval.js'
 import {
@@ -1281,6 +1290,8 @@ const profileDeletionRequestStore = await createProfileDeletionRequestStore(data
 })
 // Етап 4J — административен преглед и отмяна на доброволни заявки.
 const profileDeletionAdminStore = await createProfileDeletionAdminStore(databaseBootstrap.databaseFilePath)
+// Етап 4J1 — трайни отмени (приета -> записана в регистъра -> окончателна).
+const profileDeletionCancellationStore = await createProfileDeletionCancellationStore(databaseBootstrap.databaseFilePath)
 const topicStore = await createTopicStore(databaseBootstrap.databaseFilePath)
 const topicMessageStore = await createTopicMessageStore(databaseBootstrap.databaseFilePath)
 const topicReadStateStore = await createTopicReadStateStore(databaseBootstrap.databaseFilePath)
@@ -1580,7 +1591,10 @@ function applyProfileDeletionVisibilityEvent(event: ProfileDeletionVisibilityEve
   if (origin === 'poll' && event.eventType === 'requested' && hasProfileActiveGameCommitment(event.profileId)) {
     const cancelled = profileDeletionRequestStore.cancelForActiveParticipation(event.requestId)
     if (cancelled.ok) {
-      console.log(`[profile-deletion] mode=auto_cancelled_active_participation requestId=${event.requestId}`)
+      // Етап 4J1 — приета (worker-ът вече не може да изтрие профила);
+      // окончателна след записа в регистъра и offsite потвърждението.
+      console.log(`[profile-deletion] mode=auto_cancel_accepted_active_participation requestId=${event.requestId}`)
+      queueMicrotask(() => applyProfileDeletionCancellationOutcome(processProfileDeletionCancellation(cancelled.cancellationId)))
       return
     }
   }
@@ -1643,6 +1657,76 @@ const PROFILE_DELETION_LEDGER_PATH =
 // потвърдено копиран извън VPS (ack от ops/pikabg-backup/scripts/pikabg-ledger-backup).
 // Изключва се единствено с точно "0" (локална разработка без backup timer).
 const PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED = process.env.PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED !== '0'
+
+// ─── Етап 4J1 — трайни отмени на доброволни заявки ─────────────────────────
+// Независимо от флаговете (отмяната трябва да работи винаги). Всеки процес
+// довършва приетите отмени периодично (записът в регистъра е под writer
+// lock-а на SQLite — без дублиране); финализирането чака offsite
+// потвърждението на записа (същата настройка като worker-а).
+const PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS = parsePositiveIntegerEnv(
+  'PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS',
+  process.env.PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS,
+  30 * 1000,
+)
+const profileDeletionCancellationFinalizer = createProfileDeletionCancellationFinalizer({
+  store: profileDeletionCancellationStore,
+  ledgerPath: PROFILE_DELETION_LEDGER_PATH,
+  offsiteRequired: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED,
+  log: (line) => console.log(line),
+})
+
+function processProfileDeletionCancellation(cancellationId: string): ProfileDeletionCancellationOutcome {
+  try {
+    return profileDeletionCancellationFinalizer.process(cancellationId)
+  } catch (error) {
+    console.error('[profile-deletion-cancellation] process failed:', error instanceof Error ? error.message : String(error))
+    return { state: 'ledger_failed', requestId: '', code: 'error' }
+  }
+}
+
+function applyProfileDeletionCancellationOutcome(outcome: ProfileDeletionCancellationOutcome): void {
+  if (outcome.state !== 'finalized') return
+  // Видимостта се връща по обичайния път (другите процеси — чрез poll-а).
+  applyProfileDeletionVisibilityEvent({
+    eventSeq: outcome.eventSeq,
+    requestId: outcome.requestId,
+    profileId: outcome.profileId,
+    eventType: 'cancelled',
+  }, 'local')
+}
+
+/** Регистърът съдържа доказано изтриване на заявката (нечетим регистър -> false: решава базата). */
+function isProfileDeletionProvenInLedger(requestId: string): boolean {
+  try {
+    const ledger = readProfileDeletionLedger(PROFILE_DELETION_LEDGER_PATH)
+    return ledger.records.some((record) => isRequestLifecycleLedgerRecord(record) && record.kind === 'request_db_deleted' && record.requestId === requestId)
+  } catch {
+    return false
+  }
+}
+
+/** За worker-а: отмяна на заявката в регистъра; хвърля при нечетим/повреден регистър (fail-closed). */
+function findProfileDeletionLedgerCancellation(requestId: string): ProfileDeletionRequestCancelledRecord | null {
+  const ledger = readProfileDeletionLedger(PROFILE_DELETION_LEDGER_PATH)
+  if (ledger.invalidLineCount > 0 || ledger.conflictingDuplicateCount > 0) throw new Error('profile_deletion_ledger_corrupt')
+  const found = ledger.records.find((record) => isRequestLifecycleLedgerRecord(record) && record.kind === 'request_cancelled' && record.requestId === requestId)
+  return (found as ProfileDeletionRequestCancelledRecord | undefined) ?? null
+}
+
+function runProfileDeletionCancellationFinalizer(): void {
+  if (isServerShuttingDown) return
+  try {
+    for (const outcome of profileDeletionCancellationFinalizer.runOnce()) applyProfileDeletionCancellationOutcome(outcome)
+  } catch (error) {
+    console.error('[profile-deletion-cancellation] run failed:', error instanceof Error ? error.message : String(error))
+  }
+}
+
+let profileDeletionCancellationFinalizerInterval: ReturnType<typeof setInterval> | null = timedSetInterval(
+  'profileDeletionCancellationFinalizer',
+  runProfileDeletionCancellationFinalizer,
+  PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS,
+)
 const profileDeletionExecutor = isProfileSelfDeletionWorkerEnabled()
   ? await createProfileDeletionExecutor(databaseBootstrap.databaseFilePath, {
       protectedProfileIds: [OFFICIAL_PIKA_PROFILE_ID, getConfiguredOfficialPikaProfileId()].filter(
@@ -1661,6 +1745,8 @@ const profileDeletionWorker = profileDeletionExecutor === null
       isLedgerEntryConfirmedOffsite: PROFILE_DELETION_LEDGER_OFFSITE_REQUIRED
         ? (requestId) => isProfileDeletionLedgerRequestConfirmedOffsite(PROFILE_DELETION_LEDGER_PATH, requestId)
         : undefined,
+      findLedgerCancellation: findProfileDeletionLedgerCancellation,
+      recordDbDeletion: (record) => { ensureProfileDeletionLedgerRecord(PROFILE_DELETION_LEDGER_PATH, record) },
       isProfileInActiveGameLocally: (profileId) => hasProfileActiveGameCommitment(profileId),
       log: (message) => console.log(message),
     })
@@ -9808,6 +9894,20 @@ async function handleAuthRequest(
       // сесия, но с краткосрочен еднократен токен за отмяна (само в тялото на
       // отговора, никога в URL/логове). Вътрешният profileId не се връща.
       if ('code' in result && result.code === 'PROFILE_PENDING_DELETION') {
+        // Етап 4J1 — отмяната вече е приета и се потвърждава: без токен и без
+        // сесия; профилът няма да бъде изтрит.
+        if (profileDeletionCancellationStore.getPendingForProfile(result.profileId) !== null) {
+          sendJsonResponse(res, 403, {
+            ok: false,
+            code: 'PROFILE_PENDING_DELETION',
+            message: result.message,
+            restoreAvailable: false,
+            cancellationPending: true,
+            cancellationMessage: PROFILE_DELETION_CANCELLATION_PENDING_MESSAGE,
+            isBanned: result.isBanned,
+          })
+          return true
+        }
         const issued = profileDeletionRequestStore.issueRestoreToken(result.profileId)
         if (!issued.ok) {
           // Срокът е изтекъл (или заявката е обработена) между двете проверки
@@ -11034,12 +11134,11 @@ const ADMIN_PROFILE_DELETION_CANCEL_ERRORS: Record<string, { status: number; mes
   irreversible: { status: 409, message: 'Профилът вече е окончателно изтрит в базата — отмяната не е възможна.' },
   lease_held: { status: 409, message: 'В момента заявката се обработва от автоматичното изтриване. Опитай отново след малко.' },
   profile_missing: { status: 409, message: 'Профилът вече не съществува — отмяната не е възможна.' },
-  ledger_intent_recorded: {
-    status: 409,
-    message: 'Намерението за окончателно изтриване вече е записано в регистъра на изтриванията (копира се извън сървъра). Безопасна отмяна на този етап не е възможна.',
-  },
-  ledger_unavailable: { status: 503, message: 'Регистърът на изтриванията не може да бъде проверен — отмяната е отказана от съображения за безопасност.' },
+  cancellation_pending: { status: 409, message: 'За тази заявка вече има приета отмяна — тя се потвърждава.' },
 }
+
+const PROFILE_DELETION_CANCELLATION_PENDING_MESSAGE =
+  'Отмяната е приета и профилът няма да бъде изтрит. Потвърждаваме я в защитения регистър — след няколко минути ще можете да влезете нормално.'
 
 /**
  * Етап 4J — "Заявки за изтриване" (само пълен admin; ролята се проверява и
@@ -11129,7 +11228,7 @@ async function handleAdminProfileDeletionsRequest(
       actorProfileId,
       actorAccountId,
       reason: typeof body.reason === 'string' ? body.reason : '',
-      loadLedger: () => loadProfileDeletionLedgerView(PROFILE_DELETION_LEDGER_PATH),
+      isDeletionProven: isProfileDeletionProvenInLedger,
     })
   } catch (error) {
     // Транзакцията е върната изцяло — нищо не е променено.
@@ -11143,16 +11242,14 @@ async function handleAdminProfileDeletionsRequest(
     return true
   }
 
-  // Видимостта се връща по същия път като при потребителска отмяна; банът и
-  // останалите ограничения остават; сесия не се създава.
-  applyProfileDeletionVisibilityEvent({
-    eventSeq: result.eventSeq,
-    requestId: result.requestId,
-    profileId: result.profileId,
-    eventType: 'cancelled',
-  }, 'local')
-  console.log(`[profile-deletion] mode=admin_cancelled profileId=${result.profileId} requestId=${result.requestId} actorProfileId=${actorProfileId} cancellationId=${result.cancellationId}`)
-  sendJsonResponse(res, 200, { ok: true, requestId: result.requestId }, noStore)
+  // Етап 4J1 — приета; окончателна след записа в регистъра и offsite
+  // потвърждението (видимостта се връща едва тогава; банът и останалите
+  // ограничения остават; сесия не се създава).
+  const outcome = processProfileDeletionCancellation(result.cancellationId)
+  applyProfileDeletionCancellationOutcome(outcome)
+  const state = outcome.state === 'finalized' ? 'cancelled' : 'pending_confirmation'
+  console.log(`[profile-deletion] mode=admin_cancel_accepted profileId=${result.profileId} requestId=${result.requestId} actorProfileId=${actorProfileId} cancellationId=${result.cancellationId} state=${state}`)
+  sendJsonResponse(res, 200, { ok: true, requestId: result.requestId, state }, noStore)
   return true
 }
 
@@ -11710,26 +11807,29 @@ async function handleAccountDeletionTokenAction(
     return true
   }
 
-  const cancelled = profileDeletionRequestStore.cancelWithToken(restoreToken)
+  const cancelled = profileDeletionRequestStore.cancelWithToken(restoreToken, { isDeletionProven: isProfileDeletionProvenInLedger })
   if (!cancelled.ok) {
-    sendJsonResponse(res, 400, cancelled.code === 'window_closed'
+    sendJsonResponse(res, 400, cancelled.code === 'window_closed' || cancelled.code === 'deletion_proven'
       ? { ok: false, code: 'DELETION_WINDOW_CLOSED', message: PROFILE_DELETION_WINDOW_CLOSED_MESSAGE }
       : { ok: false, code: 'INVALID_RESTORE_TOKEN', message: PROFILE_DELETION_INVALID_TOKEN_MESSAGE })
     return true
   }
 
-  applyProfileDeletionVisibilityEvent({
-    eventSeq: cancelled.eventSeq,
-    requestId: cancelled.requestId,
-    profileId: cancelled.profileId,
-    eventType: 'cancelled',
-  }, 'local')
+  // Етап 4J1 — отмяната е ПРИЕТА (трайна защита: worker-ът не може да изтрие
+  // профила, дори offsite backup-ът да не работи). Окончателна е едва след
+  // записа в регистъра и offsite потвърждението — дотогава клиентът показва
+  // междинно състояние, а профилът остава скрит.
+  const outcome = processProfileDeletionCancellation(cancelled.cancellationId)
+  applyProfileDeletionCancellationOutcome(outcome)
+  const state = outcome.state === 'finalized' ? 'cancelled' : 'pending_confirmation'
 
-  console.log(`[profile-deletion] mode=cancelled profileId=${cancelled.profileId} requestId=${cancelled.requestId}`)
+  console.log(`[profile-deletion] mode=cancel_accepted profileId=${cancelled.profileId} requestId=${cancelled.requestId} state=${state}`)
 
   // Нормална сесия НЕ се създава тук — следващият вход минава по обичайния
   // път (и при действащ бан връща PROFILE_BANNED).
-  sendJsonResponse(res, 200, { ok: true })
+  sendJsonResponse(res, 200, state === 'cancelled'
+    ? { ok: true, state }
+    : { ok: true, state, message: PROFILE_DELETION_CANCELLATION_PENDING_MESSAGE })
   return true
 }
 
@@ -28294,6 +28394,10 @@ function clearMutationTimersForShutdown(): void {
     lobbyChatPollInterval = null
   }
 
+  if (profileDeletionCancellationFinalizerInterval !== null) {
+    clearInterval(profileDeletionCancellationFinalizerInterval)
+    profileDeletionCancellationFinalizerInterval = null
+  }
   if (profileDeletionVisibilityPollInterval !== null) {
     clearInterval(profileDeletionVisibilityPollInterval)
     profileDeletionVisibilityPollInterval = null
@@ -28539,6 +28643,7 @@ function closeActiveRoomSnapshotStore(): boolean {
   closeStore('chatStore', () => chatStore.close())
   closeStore('lobbyChatStore', () => lobbyChatStore.close())
   closeStore('profileDeletionAdminStore', () => profileDeletionAdminStore.close())
+  closeStore('profileDeletionCancellationStore', () => profileDeletionCancellationStore.close())
   closeStore('yellowCoinGiftStore', () => yellowCoinGiftStore.close())
   closeStore('giftItemStore', () => giftItemStore.close())
   closeStore('tableExitPenaltyStore', () => tableExitPenaltyStore.close())

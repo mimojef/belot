@@ -9,6 +9,13 @@
 //   че записът е копиран извън VPS (иначе blocked 'ledger_offsite_pending'
 //   и нов опит) -> DB фаза -> файлове -> completed.
 //
+// Етап 4J1: преди записа на намерението worker-ът проверява регистъра за
+// отмяна на заявката ("request_cancelled", напр. база, възстановена отпреди
+// отмяната) — ако има, НЕ изтрива, а възстановява трайната защита в базата.
+// След COMMIT на изтриването записва доказателството "request_db_deleted"
+// (защита в дълбочина: по-късна отмяна е недопустима, а reconcile дава
+// предимство на изтриването).
+//
 // Логовете съдържат само request_id и технически кодове — без имена, имейли,
 // пътища до файлове или токени.
 
@@ -17,7 +24,11 @@ import type {
   ProfileDeletionExecutor,
   ProfileDeletionQueuedFile,
 } from '../db/profileDeletionExecutor.js'
-import type { ProfileDeletionLedgerEntry } from '../db/profileDeletionLedger.js'
+import type {
+  ProfileDeletionLedgerEntry,
+  ProfileDeletionRequestCancelledRecord,
+  ProfileDeletionRequestDbDeletedRecord,
+} from '../db/profileDeletionLedger.js'
 import type {
   ProfileDeletionFileKind,
   ProfileDeletionFileRemovalOutcome,
@@ -37,6 +48,15 @@ export type ProfileDeletionWorkerDeps = {
    * undefined = без това условие (тестове, процедурата след restore).
    */
   isLedgerEntryConfirmedOffsite?: (requestId: string) => boolean
+  /**
+   * Етап 4J1: отмяна на заявката в регистъра (null = няма). Хвърля при
+   * нечетим/повреден регистър -> нищо не се изтрива (fail-closed).
+   * undefined = без проверка (само процедурата след restore — reconcile
+   * обработва отмените преди worker-а).
+   */
+  findLedgerCancellation?: (requestId: string) => ProfileDeletionRequestCancelledRecord | null
+  /** Етап 4J1: идемпотентен запис "request_db_deleted" след COMMIT на изтриването (грешка не спира файловата фаза). */
+  recordDbDeletion?: (record: ProfileDeletionRequestDbDeletedRecord) => void
   /** Игра/маса/опашка в паметта на ТОЗИ процес (hasProfileActiveGameCommitment). */
   isProfileInActiveGameLocally?: (profileId: string) => boolean
   log?: (message: string) => void
@@ -117,8 +137,34 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
     return !result.leaseLost
   }
 
+  function recordDbDeletion(request: ClaimedProfileDeletionRequest, dbDeletedAt: string): void {
+    if (deps.recordDbDeletion === undefined) return
+    try {
+      deps.recordDbDeletion({ v: 1, kind: 'request_db_deleted', requestId: request.requestId, profileId: request.profileId, dbDeletedAt, recordedAt: new Date().toISOString() })
+    } catch {
+      log(`[profile-deletion-worker] db_deleted_record_failed requestId=${request.requestId}`)
+    }
+  }
+
   async function processRequest(request: ClaimedProfileDeletionRequest, summary: ProfileDeletionWorkerRunSummary): Promise<void> {
     if (request.dbDeletedAt === null) {
+      if (deps.findLedgerCancellation !== undefined) {
+        let recorded: ProfileDeletionRequestCancelledRecord | null
+        try {
+          recorded = deps.findLedgerCancellation(request.requestId)
+        } catch {
+          deps.executor.failRequest(request.requestId, deps.workerId, 'ledger_write_failed')
+          summary.failed += 1
+          log(`[profile-deletion-worker] failed requestId=${request.requestId} code=ledger_unreadable`)
+          return
+        }
+        if (recorded !== null) {
+          deps.executor.applyRecordedCancellation(request.requestId, deps.workerId, recorded)
+          summary.blocked += 1
+          log(`[profile-deletion-worker] cancellation_recorded requestId=${request.requestId}`)
+          return
+        }
+      }
       if (deps.isProfileInActiveGameLocally?.(request.profileId) === true) {
         deps.executor.blockRequest(request.requestId, deps.workerId, 'active_game_local')
         summary.blocked += 1
@@ -170,6 +216,9 @@ export function createProfileDeletionWorker(deps: ProfileDeletionWorkerDeps): { 
         return
       }
       if (result.kind === 'lease_lost') return
+      if (result.kind === 'db_deleted') recordDbDeletion(request, result.dbDeletedAt)
+    } else {
+      recordDbDeletion(request, request.dbDeletedAt)
     }
 
     if (!(await processFiles(request, summary))) return

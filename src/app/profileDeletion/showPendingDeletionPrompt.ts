@@ -6,6 +6,11 @@
 //   "Запази профила ми"       -> POST /api/account/deletion-request/cancel
 //   "Остави заявката активна" -> POST /api/account/deletion-request/keep
 // Токенът живее само в паметта на този екран (не се записва и не се логва).
+//
+// Етап 4J1 — отмяната е двуфазна: сървърът я ПРИЕМА веднага (профилът вече
+// няма да бъде изтрит), но окончателна е едва след записа в защитения
+// регистър и offsite потвърждението. Докато чака, екранът показва междинно
+// съобщение, а не окончателен успех.
 
 export type PendingDeletionLoginResponse = {
   restoreAvailable?: boolean
@@ -13,11 +18,17 @@ export type PendingDeletionLoginResponse = {
   scheduledFor?: string
   gracePeriodDays?: number
   isBanned?: boolean
+  /** Етап 4J1 — отмяната вече е приета и се потвърждава (без токен). */
+  cancellationPending?: boolean
+  cancellationMessage?: string
 }
 
 export type PendingDeletionActionResult =
-  | { ok: true }
+  | { ok: true; state?: 'cancelled' | 'pending_confirmation'; message?: string | null }
   | { ok: false; code: string | null; message: string | null }
+
+const CANCELLATION_PENDING_TEXT =
+  'Отмяната е приета и профилът няма да бъде изтрит. Потвърждаваме я в защитения регистър — след няколко минути ще можете да влезете нормално.'
 
 export type PendingDeletionPromptCallbacks = {
   cancelRequest: (restoreToken: string) => Promise<PendingDeletionActionResult>
@@ -106,6 +117,15 @@ export function showPendingDeletionPrompt(
     host.querySelector('[data-pending-deletion-close="1"]')?.addEventListener('click', close)
   }
 
+  if (response.cancellationPending === true) {
+    renderFinal(
+      `<div data-pending-deletion-cancellation-pending="1">${paragraph(response.cancellationMessage ?? CANCELLATION_PENDING_TEXT)}</div>`
+        + (response.isBanned === true ? paragraph('Банът остава активен до изтичането или премахването му.', 'rgba(252,165,165,0.92)') : ''),
+      false,
+    )
+    return
+  }
+
   if (restoreToken === null) {
     // Срокът за отмяна е изтекъл или заявката вече се обработва.
     renderFinal(
@@ -134,6 +154,15 @@ export function showPendingDeletionPrompt(
     if (busy) return
     setBusy(true)
     void callbacks.cancelRequest(restoreToken).then((result) => {
+      if (result.ok && result.state === 'pending_confirmation') {
+        // Приета, но още не окончателна — без "Към вход" (входът ще покаже същото).
+        renderFinal(
+          `<div data-pending-deletion-cancellation-pending="1">${paragraph(result.message ?? CANCELLATION_PENDING_TEXT)}</div>`
+            + (response.isBanned === true ? paragraph('Банът остава активен до изтичането или премахването му.', 'rgba(252,165,165,0.92)') : ''),
+          false,
+        )
+        return
+      }
       if (result.ok) {
         renderFinal(
           paragraph('Заявката за изтриване е отменена и профилът е запазен. Влезте отново с паролата си.')

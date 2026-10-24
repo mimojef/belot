@@ -29,6 +29,11 @@
  *     видимостта се връща, банът остава, без нова/стара сесия, без лични
  *     данни и файлови пътища в отговора.
  *
+ * Етап 4J1: административната отмяна е двуфазна (приета -> окончателна
+ * след запис в регистъра + offsite ack) и вече е възможна и при записано
+ * намерение за изтриване (бан/чакащо offsite). Пълните restore/crash
+ * сценарии са в checkProfileDeletionDurableCancellation.ts.
+ *
  * Употреба (от server/): npx tsx scripts/checkProfileDeletionAdminOversight.ts --server-root=.
  */
 
@@ -64,6 +69,8 @@ import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSched
 import { createProfileDeletionWorker } from '../src/core/profileDeletionWorker.js'
 import { REAPPLY_CONFIRMATION_PHRASE, runProfileDeletionLedgerReconcile } from '../src/ops/profileDeletionLedgerReconcile.js'
 import type { ProfileDeletionUploadRoots } from '../src/uploads/profileDeletionFileRemoval.js'
+import { createProfileDeletionCancellationKit, writeTestLedgerAck } from './fixtures/profileDeletionCancellationKit.js'
+import { summarizeRequestLedgerState, appendProfileDeletionLedgerEntry } from '../src/db/profileDeletionLedger.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -104,6 +111,7 @@ const DAY_MS = 24 * 60 * 60 * 1000
 const FORTY_FIVE_DAYS_MS = 45 * DAY_MS
 const MIGRATION_4G = '20261101_001_voluntary_deletion_30_day_grace_period.sql'
 const MIGRATION_4J = '20261102_001_admin_profile_deletion_cancellations.sql'
+const MIGRATION_4J1 = '20261103_001_durable_profile_deletion_cancellations.sql'
 const SECRET = 'profile-deletion-admin-oversight-secret-0123456789'
 const PASSWORD = 'secret123'
 const REASON_HTTP = 'Отмяна по искане на потребителя, потвърдено по телефона.'
@@ -172,7 +180,7 @@ try {
   // ═══ [M] Миграция ════════════════════════════════════════════════════════
   console.log('\n[M] Миграция 20261102_001 върху временни копия')
 
-  await check('[M1] Копие отпреди 4G (историческа 45-дневна чакаща): 4G + 4J се прилагат, заявката е непроменена, интегритет и външни ключове', async () => {
+  await check('[M1] Копие отпреди 4G (историческа 45-дневна чакаща): 4G + 4J + 4J1 се прилагат, заявката е непроменена, интегритет и външни ключове', async () => {
     const root = await makeRoot('belot-4j-pre4g-', (name) => name < MIGRATION_4G)
     const { databaseFilePath } = await ensureServerDatabaseReady({ serverRootOverride: root })
     const pre = openDb(databaseFilePath)
@@ -185,17 +193,17 @@ try {
     })
     const before = pre.prepare('SELECT * FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as Record<string, unknown>
     pre.close()
-    for (const name of [MIGRATION_4G, MIGRATION_4J]) await cp(join(sourceServerRoot, 'database', 'migrations', name), join(root, 'database', 'migrations', name))
+    for (const name of [MIGRATION_4G, MIGRATION_4J, MIGRATION_4J1]) await cp(join(sourceServerRoot, 'database', 'migrations', name), join(root, 'database', 'migrations', name))
     await ensureServerDatabaseReady({ serverRootOverride: root })
     const post = openDb(databaseFilePath)
     try {
-      for (const name of [MIGRATION_4G, MIGRATION_4J]) assert(post.prepare('SELECT 1 FROM server_migrations WHERE filename = ?;').get(name) !== undefined, `не е записана ${name}`)
+      for (const name of [MIGRATION_4G, MIGRATION_4J, MIGRATION_4J1]) assert(post.prepare('SELECT 1 FROM server_migrations WHERE filename = ?;').get(name) !== undefined, `не е записана ${name}`)
       assertEqual((post.prepare('PRAGMA integrity_check;').get() as { integrity_check: string }).integrity_check, 'ok', 'integrity_check')
       assertEqual((post.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length, 0, 'foreign_key_check')
       const after = post.prepare('SELECT * FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as Record<string, unknown>
       for (const [column, value] of Object.entries(before)) assertEqual(after[column], value, column)
       assertEqual(Number(after.grace_period_days), 45, 'grace_period_days')
-      for (const name of ['profile_deletion_admin_cancellations', 'trg_profile_deletion_admin_cancellations_insert_guard', 'trg_profile_deletion_admin_cancellations_no_update', 'trg_profile_deletion_admin_cancellations_no_delete', 'trg_profile_deletion_requests_status_transition']) {
+      for (const name of ['profile_deletion_admin_cancellations', 'trg_profile_deletion_admin_cancellations_insert_guard', 'trg_profile_deletion_admin_cancellations_no_update', 'trg_profile_deletion_admin_cancellations_no_delete', 'trg_profile_deletion_requests_status_transition', 'profile_deletion_cancellations', 'trg_profile_deletion_cancellations_insert_guard']) {
         assert(post.prepare('SELECT 1 FROM sqlite_master WHERE name = ?;').get(name) !== undefined, `липсва ${name}`)
       }
     } finally {
@@ -203,34 +211,41 @@ try {
     }
   })
 
-  await check('[M2] Копие след 4G, отпреди 4J (30-дневна чакаща, отменена): 4J не променя нито един ред; поведението без одитен ред е както преди', async () => {
+  await check('[M2] Копие след 4G, отпреди 4J (30-дневна чакаща, отменена): 4J + 4J1 не променят нито един ред; без трайна отмяна преходът към cancelled е невъзможен', async () => {
     const root = await makeRoot('belot-4j-post4g-', (name) => name < MIGRATION_4J)
     const { databaseFilePath } = await ensureServerDatabaseReady({ serverRootOverride: root })
     const pre = openDb(databaseFilePath)
     const a = insertRawUser(pre, 'Post4gA')
     const b = insertRawUser(pre, 'Post4gB')
-    const store = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
-    const pending = store.createRequest({ profileId: a.profileId, accountId: a.accountId })
-    const toCancel = store.createRequest({ profileId: b.profileId, accountId: b.accountId })
-    assert(pending.ok && toCancel.ok, 'заявки')
-    const token = store.issueRestoreToken(b.profileId)
-    assert(token.ok && store.cancelWithToken(token.ok ? token.restoreToken : '').ok, 'отмяна')
-    store.close()
+    const insertPre = (user: { profileId: string; accountId: string; createdAt: string }) => {
+      const requestId = randomUUID()
+      const requestedAt = dbNow(pre)
+      pre.prepare(`INSERT INTO profile_deletion_requests (request_id, profile_id, account_id_snapshot, profile_created_at_snapshot, requested_at, scheduled_for, grace_period_days) VALUES (?, ?, ?, ?, ?, ?, 30);`)
+        .run(requestId, user.profileId, user.accountId, user.createdAt, requestedAt, isoPlus(requestedAt, PROFILE_DELETION_GRACE_PERIOD_MS))
+      return requestId
+    }
+    const pendingId = insertPre(a)
+    const cancelledId = insertPre(b)
+    // Старата схема: отмяна преди срока директно (досегашното поведение).
+    pre.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(pre), cancelledId)
+    const pending = { ok: true as const, request: { requestId: pendingId } }
     const hashes = ['profile_deletion_requests', 'profile_deletion_events', 'profile_deletion_restore_tokens', 'accounts', 'profiles'].map((t) => `${t}:${tableHash(pre, t)}`).join('|')
     pre.close()
-    await cp(join(sourceServerRoot, 'database', 'migrations', MIGRATION_4J), join(root, 'database', 'migrations', MIGRATION_4J))
+    for (const name of [MIGRATION_4J, MIGRATION_4J1]) await cp(join(sourceServerRoot, 'database', 'migrations', name), join(root, 'database', 'migrations', name))
     await ensureServerDatabaseReady({ serverRootOverride: root })
     const post = openDb(databaseFilePath)
     try {
-      assert(post.prepare('SELECT 1 FROM server_migrations WHERE filename = ?;').get(MIGRATION_4J) !== undefined, 'server_migrations')
+      for (const name of [MIGRATION_4J, MIGRATION_4J1]) assert(post.prepare('SELECT 1 FROM server_migrations WHERE filename = ?;').get(name) !== undefined, `server_migrations ${name}`)
+      assertEqual(Number((post.prepare('SELECT COUNT(*) AS c FROM profile_deletion_cancellations;').get() as { c: number }).c), 0, 'старите отмени не се превръщат автоматично')
       assertEqual((post.prepare('PRAGMA integrity_check;').get() as { integrity_check: string }).integrity_check, 'ok', 'integrity_check')
       assertEqual((post.prepare('PRAGMA foreign_key_check;').all() as unknown[]).length, 0, 'foreign_key_check')
       assertEqual(['profile_deletion_requests', 'profile_deletion_events', 'profile_deletion_restore_tokens', 'accounts', 'profiles'].map((t) => `${t}:${tableHash(post, t)}`).join('|'), hashes, 'редовете са променени')
-      const pendingId = pending.ok ? pending.request.requestId : ''
       // Без одитен ред: pending -> blocked/failed/completed остават забранени,
       // pending -> executing преди срока — not_due.
       assertRejects(() => post.prepare(`UPDATE profile_deletion_requests SET status = 'completed' WHERE request_id = ?;`).run(pendingId), 'profile_deletion_invalid_status_transition', 'pending -> completed')
       assertRejects(() => post.prepare(`UPDATE profile_deletion_requests SET status = 'executing', lease_owner = 'w', lease_expires_at = ? WHERE request_id = ?;`).run(isoPlus(dbNow(post), 60_000), pendingId), 'profile_deletion_not_due', 'not_due')
+      assertRejects(() => post.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(post), pendingId), 'profile_deletion_cancellation_not_finalized', 'без трайна отмяна')
+      void pending
     } finally {
       post.close()
     }
@@ -257,6 +272,9 @@ try {
   closers.push(() => adminStore.close())
   const adminStore2 = await createProfileDeletionAdminStore(databaseFilePath)
   closers.push(() => adminStore2.close())
+  // Етап 4J1 — отмяната е окончателна след запис в регистъра + offsite ack.
+  const cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath: join(root, 'deletion-ledger', 'profile-deletions.jsonl') })
+  closers.push(() => cancellationKit.close())
 
   const uploadsRoot = join(root, 'uploads')
   const roots: ProfileDeletionUploadRoots = {
@@ -336,19 +354,19 @@ try {
   db.prepare(`UPDATE accounts SET role = 'admin' WHERE account_id = ?;`).run(admin.accountId)
   const REASON = 'Потребителят се обади в поддръжката и потвърди, че иска да запази профила.'
 
-  function cancel(store: ProfileDeletionAdminStore, requestId: string, extra: { reason?: string; actor?: User; beforeCommit?: () => void; ledgerPath?: string } = {}) {
+  function cancel(store: ProfileDeletionAdminStore, requestId: string, extra: { reason?: string; actor?: User; beforeCommit?: () => void; deletionProven?: boolean } = {}) {
     const actor = extra.actor ?? admin
     return store.cancelVoluntaryRequestByAdmin({
       requestId,
       actorProfileId: actor.profileId,
       actorAccountId: actor.accountId,
       reason: 'reason' in extra ? extra.reason as string : REASON,
-      loadLedger: () => loadProfileDeletionLedgerView(extra.ledgerPath ?? ledgerPath),
+      isDeletionProven: () => extra.deletionProven === true,
       ...(extra.beforeCommit !== undefined ? { beforeCommit: extra.beforeCommit } : {}),
     })
   }
   const ledgerBytes = () => (existsSync(ledgerPath) ? createHash('sha256').update(readFileSync(ledgerPath)).digest('hex') : 'missing')
-  const stateFingerprint = () => ['profile_deletion_requests', 'profile_deletion_events', 'profile_deletion_admin_cancellations', 'account_sessions', 'profiles', 'profile_bans']
+  const stateFingerprint = () => ['profile_deletion_requests', 'profile_deletion_events', 'profile_deletion_admin_cancellations', 'profile_deletion_cancellations', 'account_sessions', 'profiles', 'profile_bans']
     .map((t) => `${t}:${tableHash(db, t)}`).join('|') + `|ledger:${ledgerBytes()}`
   const list = (input: { kind?: 'voluntary' | 'admin' | null; category?: any; limit?: number } = {}) =>
     adminStore.listOverview({ ...input, ledger: loadProfileDeletionLedgerView(ledgerPath) })
@@ -409,6 +427,7 @@ try {
   const userCancelledId = userCancelledReq.ok ? userCancelledReq.request.requestId : ''
   const tok = requestStore.issueRestoreToken(uUserCancelled.profileId)
   assert(tok.ok && requestStore.cancelWithToken(tok.ok ? tok.restoreToken : '').ok, 'потребителска отмяна')
+  cancellationKit.confirmAll()
 
   const uExecuting = registerUser('Executing')
   const executingId = overdue(uExecuting)
@@ -460,7 +479,8 @@ try {
   await check('[L2] Право на отмяна и причина за отказ на всеки ред (административните — само преглед)', () => {
     const expected: Array<[string, boolean, string | null]> = [
       [windowId, true, null], [legacyId, true, null], [overdueId, true, null], [localGameId, true, null], [ledgerFailId, true, null],
-      [offsiteId, false, 'ledger_intent_recorded'], [banId, false, 'ledger_intent_recorded'], [executingId, false, 'lease_held'],
+      // Етап 4J1 — записаното намерение (бан/чакащо offsite) вече не пречи.
+      [offsiteId, true, null], [banId, true, null], [executingId, false, 'lease_held'],
       [filesId, false, 'irreversible'], [doneId, false, 'irreversible'], [userCancelledId, false, 'status_not_cancellable'],
       [adminPendingOpId, false, 'not_voluntary'], [adminDoneLogId, false, 'not_voluntary'],
     ]
@@ -534,10 +554,14 @@ try {
     assertEqual(stateFingerprint(), before, 'състояние')
   })
 
-  await check('[C3] Заявка в срока: отмяна с причина — статус, одит (актьор, причина, предишен статус), събитие admin; без сесия; регистърът не се пипа', () => {
-    const ledgerBefore = ledgerBytes()
+  await check('[C3] Заявка в срока: приета отмяна с причина (одит: актьор, причина, предишен статус) -> в регистъра само технически запис -> окончателна след offsite ack (събитие admin); без сесия', () => {
     const result = cancel(adminStore, windowId, { reason: `  ${REASON}\u0007  ` })
     assert(result.ok, JSON.stringify(result))
+    assertEqual(requestRow(windowId).status, 'pending', 'статус преди потвърждението')
+    assertEqual(rowFor(windowId)!.category, 'cancellation_pending', 'в прегледа: потвърждава се')
+    cancellationKit.confirmAll()
+    const ledgerText = readFileSync(ledgerPath, 'utf8')
+    assert(ledgerText.includes(`"request_cancelled"`) && ledgerText.includes(windowId) && !ledgerText.includes(REASON) && !ledgerText.includes(admin.profileId), 'регистърът: без причина и без администратор')
     const row = requestRow(windowId)
     assertEqual(row.status, 'cancelled', 'статус')
     assert(row.cancelled_at !== null && row.lease_owner === null && row.next_attempt_at === null, 'полета')
@@ -550,7 +574,6 @@ try {
     assertEqual(event.actor_kind, 'admin', 'actor_kind')
     assert(!String(event.detail_json).includes(REASON), 'причината не се дублира в журнала')
     assertEqual(Number((db.prepare('SELECT COUNT(*) AS c FROM account_sessions WHERE profile_id = ? AND revoked_at IS NULL;').get(uWindow.profileId) as { c: number }).c), 0, 'активна сесия')
-    assertEqual(ledgerBytes(), ledgerBefore, 'регистър')
     const listed = rowFor(windowId)!
     assert(listed.category === 'cancelled' && listed.cancelledBy === 'admin' && listed.adminCancellation?.reason === REASON && listed.adminCancellation.actorDisplayName === admin.displayName, `в прегледа: ${JSON.stringify(listed)}`)
   })
@@ -558,6 +581,7 @@ try {
   await check('[C4] Историческа 45-дневна заявка: отмяната е разрешена', () => {
     const result = cancel(adminStore, legacyId)
     assert(result.ok, JSON.stringify(result))
+    cancellationKit.confirmAll()
     assertEqual(requestRow(legacyId).status, 'cancelled', 'статус')
     assertEqual(Number(requestRow(legacyId).grace_period_days), 45, 'срокът не е пипан')
   })
@@ -570,12 +594,15 @@ try {
     await new Promise((r) => setTimeout(r, 3000))
     const userCancel = requestStore.cancelWithToken(issued.ok ? issued.restoreToken : '')
     assert(!userCancel.ok && userCancel.code === 'window_closed', `потребител: ${JSON.stringify(userCancel)}`)
-    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(db), requestId), 'profile_deletion_cancel_window_closed', 'тригер без одит')
+    assertRejects(() => db.prepare(`INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status) VALUES (?, ?, ?, 'user', 'pending');`).run(randomUUID(), requestId, user.profileId), 'profile_deletion_cancel_window_closed', 'тригер: потребителска отмяна след срока')
+    assertRejects(() => db.prepare(`INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status) VALUES (?, ?, ?, 'admin', 'pending');`).run(randomUUID(), requestId, user.profileId), 'profile_deletion_admin_cancellation_audit_required', 'тригер: административна без одит')
     assertEqual(requestRow(requestId).status, 'pending', 'непроменена')
     const result = cancel(adminStore, overdueId)
     assert(result.ok, `админ: ${JSON.stringify(result)}`)
     const adminAfterDeadline = cancel(adminStore, requestId)
     assert(adminAfterDeadline.ok, `админ след срока: ${JSON.stringify(adminAfterDeadline)}`)
+    cancellationKit.confirmAll()
+    assertEqual(requestRow(requestId).status, 'cancelled', 'окончателна')
   })
 
   await check('[C6] Блокирана преди регистъра (активна игра в процеса) и неуспешен запис в регистъра: отмяната е разрешена (няма намерение в регистъра)', () => {
@@ -586,19 +613,26 @@ try {
     const auditA = db.prepare('SELECT previous_status FROM profile_deletion_admin_cancellations WHERE request_id = ?;').get(localGameId) as { previous_status: string }
     const auditB = db.prepare('SELECT previous_status FROM profile_deletion_admin_cancellations WHERE request_id = ?;').get(ledgerFailId) as { previous_status: string }
     assert(auditA.previous_status === 'blocked' && auditB.previous_status === 'failed', 'предишни статуси')
+    cancellationKit.confirmAll()
+    assert(requestRow(localGameId).status === 'cancelled' && requestRow(ledgerFailId).status === 'cancelled', 'окончателни')
   })
 
-  await check('[C7] Бан след регистъра и чакащо offsite потвърждение: намерението е в регистъра -> отказ ledger_intent_recorded, без никаква промяна (вкл. регистъра)', () => {
-    const before = stateFingerprint()
+  await check('[C7] Етап 4J1 — бан след записа в регистъра и чакащо offsite потвърждение: отмяната е разрешена; старото намерение е непроменено, отмяната е по-късен запис; банът остава', () => {
+    const ledgerBefore = readFileSync(ledgerPath)
     for (const requestId of [banId, offsiteId]) {
       const result = cancel(adminStore, requestId)
-      assert(!result.ok && result.code === 'ledger_intent_recorded', `${requestId}: ${JSON.stringify(result)}`)
+      assert(result.ok, `${requestId}: ${JSON.stringify(result)}`)
     }
-    assertEqual(stateFingerprint(), before, 'състояние')
-    // Offsite потвърждението пристига — пак отказ (намерението е необратимо потвърдено).
-    ackLedger()
-    const again = cancel(adminStore, offsiteId)
-    assert(!again.ok && again.code === 'ledger_intent_recorded', JSON.stringify(again))
+    cancellationKit.confirmAll()
+    const ledgerAfter = readFileSync(ledgerPath)
+    assert(ledgerAfter.subarray(0, ledgerBefore.length).equals(ledgerBefore), 'по-ранните записи са променени')
+    const states = summarizeRequestLedgerState(readProfileDeletionLedger(ledgerPath).records)
+    for (const requestId of [banId, offsiteId]) {
+      const state = states.get(requestId)!
+      assert(state.intent !== null && state.cancel !== null && state.cancelIndex > state.intentIndex && state.resolution === 'cancelled', `ред в регистъра: ${JSON.stringify(state)}`)
+      assertEqual(requestRow(requestId).status, 'cancelled', 'статус')
+    }
+    assert(db.prepare(`SELECT 1 FROM profile_bans WHERE profile_id = ? AND lifted_at IS NULL;`).get(uBan.profileId) !== undefined, 'банът остава')
   })
 
   await check('[C8] Активен lease, файлова фаза, приключена, вече отменена от потребителя, административна операция, непозната -> отказ без промяна', () => {
@@ -615,43 +649,24 @@ try {
     assert(!profileExists(uDone.profileId), 'изтритият профил не се възстановява')
   })
 
-  await check('[C9] Регистърът не може да бъде проверен -> отказ ledger_unavailable (повреден ред; липсващ файл при вече взимана заявка); следа от недовършен запис -> отказ', () => {
-    const user = registerUser('LedgerCheck')
+  await check('[C9] Етап 4J1 — доказано изтриване в регистъра -> отказ irreversible; вече приета отмяна -> cancellation_pending; без промяна', () => {
+    const user = registerUser('Proven')
     const requestId = overdue(user)
-    const corruptPath = join(root, 'corrupt-ledger', 'profile-deletions.jsonl')
-    return (async () => {
-      await mkdir(join(root, 'corrupt-ledger'), { recursive: true })
-      writeFileSync(corruptPath, 'not json\n')
-      const corrupt = cancel(adminStore, requestId, { ledgerPath: corruptPath })
-      assert(!corrupt.ok && corrupt.code === 'ledger_unavailable', `повреден: ${JSON.stringify(corrupt)}`)
-      const listedCorrupt = adminStore.listOverview({ ledger: loadProfileDeletionLedgerView(corruptPath) }).find((row) => row.operationId === requestId)!
-      assertEqual(listedCorrupt.cancelBlocker, 'ledger_unavailable', 'в прегледа')
-      // Липсващ регистър: заявка, която worker-ът вече е взимал -> не може да се докаже.
-      makeRetryDue(requestId)
-      await makeWorker([requestId], { activeGame: true }).runOnce()
-      const missingPath = join(root, 'missing-ledger', 'profile-deletions.jsonl')
-      const missing = cancel(adminStore, requestId, { ledgerPath: missingPath })
-      assert(!missing.ok && missing.code === 'ledger_unavailable', `липсващ: ${JSON.stringify(missing)}`)
-      // Недовършен (без '\n') ред, съдържащ requestId-то.
-      const partialPath = join(root, 'corrupt-ledger', 'partial.jsonl')
-      writeFileSync(partialPath, `{"v":1,"requestId":"${requestId}","profileId":"`)
-      const partial = cancel(adminStore, requestId, { ledgerPath: partialPath })
-      assert(!partial.ok && partial.code === 'ledger_intent_recorded', `недовършен: ${JSON.stringify(partial)}`)
-      assertEqual(requestRow(requestId).status, 'blocked', 'статус')
-      // Липсващ регистър и никога невзимана заявка -> доказано без запис.
-      const fresh = registerUser('NeverClaimed')
-      const freshId = overdue(fresh)
-      const ok = cancel(adminStore, freshId, { ledgerPath: missingPath })
-      assert(ok.ok, `невзимана: ${JSON.stringify(ok)}`)
-      // Почистване: основната заявка се отменя с реалния регистър.
-      assert(cancel(adminStore, requestId).ok, 'отмяна с реалния регистър')
-    })()
+    const before = stateFingerprint()
+    const proven = cancel(adminStore, requestId, { deletionProven: true })
+    assert(!proven.ok && proven.code === 'irreversible', JSON.stringify(proven))
+    assertEqual(stateFingerprint(), before, 'състояние')
+    assert(cancel(adminStore, requestId).ok, 'приета')
+    const again = cancel(adminStore2, requestId, { reason: 'Втори опит' })
+    assert(!again.ok && again.code === 'cancellation_pending', JSON.stringify(again))
+    assertEqual(rowFor(requestId)!.cancelBlocker, 'cancellation_pending', 'в прегледа')
+    cancellationKit.confirmAll()
   })
 
   // ═══ [R] Състезания ════════════════════════════════════════════════════
   console.log('\n[R] Състезания и атомарност')
 
-  await check('[R1] Две едновременни отмени: втората чака writer lock-а и после получава status_not_cancellable; точно един одитен ред и едно събитие', () => {
+  await check('[R1] Две едновременни отмени: втората чака writer lock-а и после получава cancellation_pending; точно един одитен ред, една трайна отмяна и едно събитие', () => {
     const user = registerUser('Concurrent')
     const requestId = overdue(user)
     let lockHeld = false
@@ -667,8 +682,10 @@ try {
     second = cancel(adminStore2, requestId, { reason: 'Втори администратор' })
     assert(first.ok, `първа: ${JSON.stringify(first)}`)
     assert(lockHeld, 'writer lock-ът не е държан до COMMIT')
-    assert(!second.ok && second.code === 'status_not_cancellable', `втора: ${JSON.stringify(second)}`)
+    assert(!second.ok && second.code === 'cancellation_pending', `втора: ${JSON.stringify(second)}`)
+    cancellationKit.confirmAll()
     assertEqual(Number((db.prepare('SELECT COUNT(*) AS c FROM profile_deletion_admin_cancellations WHERE request_id = ?;').get(requestId) as { c: number }).c), 1, 'одитни редове')
+    assertEqual(Number((db.prepare('SELECT COUNT(*) AS c FROM profile_deletion_cancellations WHERE request_id = ?;').get(requestId) as { c: number }).c), 1, 'трайни отмени')
     assertEqual(Number((db.prepare(`SELECT COUNT(*) AS c FROM profile_deletion_events WHERE request_id = ? AND event_type = 'cancelled';`).get(requestId) as { c: number }).c), 1, 'събития')
   })
 
@@ -692,13 +709,14 @@ try {
     assert(result.ok, JSON.stringify(result))
     assert(typeof claimDuringCancel === 'string' && /locked|busy/i.test(claimDuringCancel), `claim по време на отмяната: ${claimDuringCancel}`)
     const summary = await makeWorker([requestId]).runOnce()
-    assertEqual(summary.claimed, 0, 'worker взе отменена заявка')
+    assertEqual(summary.claimed, 0, 'worker взе приета отмяна')
+    cancellationKit.confirmAll()
     assertEqual(requestRow(requestId).status, 'cancelled', 'статус')
     assert(!readProfileDeletionLedger(ledgerPath).entries.some((e) => e.requestId === requestId), 'запис в регистъра')
     assert(profileExists(user.profileId), 'профилът е запазен')
   })
 
-  await check('[R3] Worker срещу отмяна: worker-ът взема първи (lease) -> отказ lease_held; след записа в регистъра -> отказ ledger_intent_recorded', async () => {
+  await check('[R3] Worker срещу отмяна: worker-ът взема първи (lease) -> отказ lease_held; след записа на намерението и освобождаването — отмяната е разрешена и спазена', async () => {
     const user = registerUser('ClaimVsCancel')
     const requestId = overdue(user)
     const claimedRow = executor.claimNextDueRequest('race-worker', requestId)
@@ -712,8 +730,12 @@ try {
     })
     executor.blockRequest(requestId, 'race-worker', 'ledger_offsite_pending')
     const after = cancel(adminStore, requestId)
-    assert(!after.ok && after.code === 'ledger_intent_recorded', JSON.stringify(after))
-    assertEqual(requestRow(requestId).status, 'blocked', 'статус')
+    assert(after.ok, JSON.stringify(after))
+    makeRetryDue(requestId)
+    assertEqual((await makeWorker([requestId]).runOnce()).claimed, 0, 'worker след приета отмяна')
+    cancellationKit.confirmAll()
+    assertEqual(requestRow(requestId).status, 'cancelled', 'статус')
+    assert(profileExists(user.profileId), 'профилът е запазен')
   })
 
   await check('[R4] Грешка в базата преди COMMIT: всичко се връща (статус, одит, събитие, сесии, регистър)', () => {
@@ -731,6 +753,7 @@ try {
     assertEqual(requestRow(requestId).status, 'pending', 'статус')
     // Store-ът остава използваем след грешката.
     assert(cancel(adminStore, requestId).ok, 'повторен опит')
+    cancellationKit.confirmAll()
   })
 
   // ═══ [T] Тригери ═══════════════════════════════════════════════════════
@@ -740,16 +763,22 @@ try {
     const anyAudit = db.prepare('SELECT cancellation_id FROM profile_deletion_admin_cancellations LIMIT 1;').get() as { cancellation_id: string }
     assertRejects(() => db.prepare(`UPDATE profile_deletion_admin_cancellations SET reason = 'x' WHERE cancellation_id = ?;`).run(anyAudit.cancellation_id), 'append_only', 'UPDATE')
     assertRejects(() => db.prepare('DELETE FROM profile_deletion_admin_cancellations WHERE cancellation_id = ?;').run(anyAudit.cancellation_id), 'append_only', 'DELETE')
+    const overdueOther = overdue(registerUser('AuditGuard'))
     const insertAudit = (requestId: string, previous: string) => db.prepare(`INSERT INTO profile_deletion_admin_cancellations (cancellation_id, request_id, actor_profile_id, actor_account_id, reason, previous_status) VALUES (?, ?, ?, ?, 'r', ?);`)
       .run(randomUUID(), requestId, admin.profileId, admin.accountId, previous)
     assertRejects(() => insertAudit(executingId, 'pending'), 'profile_deletion_admin_cancellation_not_allowed', 'executing')
     assertRejects(() => insertAudit(filesId, 'failed'), 'profile_deletion_admin_cancellation_not_allowed', 'db_deleted')
     assertRejects(() => insertAudit(doneId, 'pending'), 'profile_deletion_admin_cancellation_not_allowed', 'completed')
-    assertRejects(() => insertAudit(banId, 'pending'), 'profile_deletion_admin_cancellation_not_allowed', 'грешен предишен статус')
-    assertRejects(() => db.prepare(`INSERT INTO profile_deletion_admin_cancellations (cancellation_id, request_id, actor_profile_id, actor_account_id, reason, previous_status) VALUES (?, ?, ?, ?, '   ', 'blocked');`).run(randomUUID(), banId, admin.profileId, admin.accountId), 'CHECK constraint failed', 'празна причина')
-    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ?, next_attempt_at = NULL WHERE request_id = ?;`).run(dbNow(db), banId), 'profile_deletion_invalid_status_transition', 'blocked -> cancelled без одит')
+    assertRejects(() => insertAudit(overdueOther, 'blocked'), 'profile_deletion_admin_cancellation_not_allowed', 'грешен предишен статус')
+    assertRejects(() => db.prepare(`INSERT INTO profile_deletion_admin_cancellations (cancellation_id, request_id, actor_profile_id, actor_account_id, reason, previous_status) VALUES (?, ?, ?, ?, '   ', 'pending');`).run(randomUUID(), overdueOther, admin.profileId, admin.accountId), 'CHECK constraint failed', 'празна причина')
+    const blockedUser = registerUser('BlockedNoAudit')
+    const blockedId = overdue(blockedUser)
+    makeRetryDue(blockedId)
+    db.prepare(`UPDATE profile_deletion_requests SET status = 'executing', lease_owner = 't1', lease_expires_at = ? WHERE request_id = ?;`).run(isoPlus(dbNow(db), 60_000), blockedId)
+    db.prepare(`UPDATE profile_deletion_requests SET status = 'blocked', lease_owner = NULL, lease_expires_at = NULL WHERE request_id = ?;`).run(blockedId)
+    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ?, next_attempt_at = NULL WHERE request_id = ?;`).run(dbNow(db), blockedId), 'profile_deletion_cancellation_not_finalized', 'blocked -> cancelled без трайна отмяна')
     assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(db), doneId), 'profile_deletion_invalid_status_transition', 'completed -> cancelled')
-    assertEqual(requestRow(banId).status, 'blocked', 'бан заявката')
+    assertEqual(requestRow(blockedId).status, 'blocked', 'блокираната заявка')
   })
 
   await check('[T2] Необратимата граница: отмяна след db_deleted_at се отказва и с одитен ред (тригерът)', () => {
@@ -777,11 +806,12 @@ try {
     db.prepare(`UPDATE profile_deletion_requests SET next_attempt_at = ? WHERE status IN ('blocked', 'failed');`).run(isoPlus(dbNow(db), -1000))
     await makeWorker(undefined).runOnce()
     await makeWorker(undefined).runOnce()
-    const ledgerIds = new Set(readProfileDeletionLedger(ledgerPath).entries.map((e) => e.requestId))
+    const states = summarizeRequestLedgerState(readProfileDeletionLedger(ledgerPath).records)
     for (const { request_id, profile_id } of cancelledIds) {
       assertEqual(requestRow(request_id).status, 'cancelled', 'статус')
       assert(profileExists(profile_id), `профилът ${profile_id} е изтрит`)
-      assert(!ledgerIds.has(request_id), 'запис в регистъра за отменена заявка')
+      // Етап 4J1 — всяка отменена заявка има отмяна в регистъра (след евентуалното намерение).
+      assertEqual(states.get(request_id)?.resolution, 'cancelled', `регистър ${request_id}`)
     }
   })
 
@@ -806,23 +836,24 @@ try {
     }
   })
 
-  await check('[W3] Известно ограничение (документирано): отмяната не е в регистъра — копие ОТПРЕДИ отмяната възстановява чакащата заявка; reconcile не я изтрива', async () => {
+  await check('[W3] Етап 4J1 — копие ОТПРЕДИ отмяната: reconcile възстановява трайната отмяна от регистъра; профилът не се изтрива', async () => {
     const user = registerUser('PreCancelBackup')
     const requestId = overdue(user)
     const copy = join(root, 'restore-before-cancel.sqlite')
     await mkdir(join(root, 'restored-uploads-2'), { recursive: true })
     db.exec(`VACUUM INTO '${copy.replace(/'/g, "''")}';`)
     assert(cancel(adminStore, requestId).ok, 'отмяна')
+    cancellationKit.confirmAll()
     const lines: string[] = []
     const code = await runProfileDeletionLedgerReconcile(
-      [`--db=${copy}`, `--ledger=${ledgerPath}`, '--apply', `--confirm=${REAPPLY_CONFIRMATION_PHRASE}`, `--uploads-root=${join(root, 'restored-uploads-2')}`],
+      [`--db=${copy}`, `--ledger=${ledgerPath}`, '--apply', `--confirm=${REAPPLY_CONFIRMATION_PHRASE}`, `--uploads-root=${join(root, 'restored-uploads-2')}`, '--accept-stale-ledger'],
       { log: (line) => lines.push(line), error: (line) => lines.push(line) },
     )
     assert(code === 0 || code === 1, `exit ${code}`)
     const restored = new sqliteModule.DatabaseSync(copy, { readOnly: true })
     try {
       assert(restored.prepare('SELECT 1 FROM profiles WHERE profile_id = ?;').get(user.profileId) !== undefined, 'reconcile изтри профил без запис в регистъра')
-      assertEqual((restored.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { status: string }).status, 'pending', 'ограничението вече не съществува — обнови доклада')
+      assert(restored.prepare('SELECT 1 FROM profile_deletion_cancellations WHERE request_id = ? AND recovered_from_ledger = 1;').get(requestId) !== undefined, `трайната отмяна не е възстановена: ${lines.slice(-4).join(' | ')}`)
     } finally {
       restored.close()
     }
@@ -833,7 +864,7 @@ try {
     assert(db.prepare('SELECT 1 FROM admin_profile_deletions WHERE log_id = ?;').get(adminDoneLogId) !== undefined, 'одитът')
     const parsed = readProfileDeletionLedger(ledgerPath)
     assertEqual(parsed.invalidLineCount + parsed.conflictingDuplicateCount, 0, 'регистърът е валиден')
-    assert(!readFileSync(ledgerPath, 'utf8').includes('cancel'), 'в регистъра има запис за отмяна')
+    assert(!readFileSync(ledgerPath, 'utf8').includes('Потребителят се обади'), 'причината е в регистъра')
   })
 
   await check('[W5] Интегритет и външни ключове на основната временна база', () => {
@@ -895,6 +926,7 @@ async function runHttpPhase(): Promise<void> {
     PASSWORD_RESET_RATE_LIMIT_SECRET: SECRET,
     PROFILE_SELF_DELETION_ENABLED: '1',
     PROFILE_DELETION_LEDGER_PATH: ledgerPath,
+    PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS: '300',
   }
   delete env.PROFILE_SELF_DELETION_WORKER_ENABLED
   const child: ChildProcessByStdio<null, Readable, Readable> = spawn(process.execPath, [join('node_modules', 'tsx', 'dist', 'cli.mjs'), join('src', 'index.ts')], {
@@ -946,6 +978,13 @@ async function runHttpPhase(): Promise<void> {
     }
     const requestIdOf = (profileId: string) => (db.prepare(`SELECT request_id FROM profile_deletion_requests WHERE profile_id = ? ORDER BY requested_at DESC LIMIT 1;`).get(profileId) as { request_id: string }).request_id
     const statusOf = (requestId: string) => (db.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { status: string }).status
+    const waitStatus = async (requestId: string, status: string) => {
+      const limit = Date.now() + 15_000
+      while (statusOf(requestId) !== status) {
+        if (Date.now() > limit) throw new Error(`статус ${statusOf(requestId)} вместо ${status}`)
+        await new Promise((r) => setTimeout(r, 150))
+      }
+    }
 
     const adminUser = await register('Admin')
     db.prepare(`UPDATE accounts SET role = 'admin' WHERE account_id = ?;`).run(adminUser.accountId)
@@ -1016,7 +1055,11 @@ async function runHttpPhase(): Promise<void> {
       const res = await api(`/api/admin/profile-deletions/${targetRequestId}/cancel`, { method: 'POST', cookie: adminUser.cookie, body: { reason: REASON_HTTP } })
       assert(res.status === 200 && res.json.ok === true, `${res.status} ${res.text}`)
       assert(res.setCookie === '', 'Set-Cookie при отмяна')
-      assertEqual(statusOf(targetRequestId), 'cancelled', 'статус')
+      // Етап 4J1 — приета, профилът остава скрит до offsite потвърждението.
+      assertEqual(res.json.state, 'pending_confirmation', 'междинно състояние')
+      assert((await api(`/api/profiles/${target.profileId}`, { cookie: viewer.cookie })).status !== 200, 'видим преди потвърждението')
+      writeTestLedgerAck(ledgerPath)
+      await waitStatus(targetRequestId, 'cancelled')
       const audit = db.prepare('SELECT reason, actor_profile_id FROM profile_deletion_admin_cancellations WHERE request_id = ?;').get(targetRequestId) as { reason: string; actor_profile_id: string }
       assert(audit.reason === REASON_HTTP && audit.actor_profile_id === adminUser.profileId, 'одит')
       assert((await api(`/api/profiles/${target.profileId}`, { cookie: viewer.cookie })).status === 200, 'видимостта не е възстановена')
@@ -1036,11 +1079,13 @@ async function runHttpPhase(): Promise<void> {
       const res = await api(`/api/admin/profile-deletions/${requestId}/cancel`, { method: 'POST', cookie: adminUser.cookie, body: { reason: REASON_HTTP } })
       assert(res.status === 200, `${res.status} ${res.text}`)
       assert(db.prepare('SELECT 1 FROM profile_bans WHERE ban_id = ?;').get(banRowId) !== undefined, 'банът е изтрит')
+      writeTestLedgerAck(ledgerPath)
+      await waitStatus(requestId, 'cancelled')
       const after = await login(banned.email)
       assert(after.status === 403 && after.json.code === 'PROFILE_BANNED', `${after.status} ${JSON.stringify(after.json)}`)
     })
 
-    await check('[H7] Намерение в регистъра (симулиран запис) -> 409 ledger_intent_recorded с обяснение; повреден регистър -> 503', async () => {
+    await check('[H7] Етап 4J1 — намерение в регистъра: отмяната е приета; доказано изтриване в регистъра -> 409 irreversible; повреден регистър: приета, но остава неокончателна', async () => {
       const user = await register('Ledger')
       assert((await submitDeletion(user)).status === 200, 'подаване')
       const requestId = requestIdOf(user.profileId)
@@ -1051,13 +1096,26 @@ async function runHttpPhase(): Promise<void> {
         requestedAt: row.requested_at!, scheduledFor: row.scheduled_for!, recordedAt: new Date().toISOString(),
       })
       const res = await api(`/api/admin/profile-deletions/${requestId}/cancel`, { method: 'POST', cookie: adminUser.cookie, body: { reason: REASON_HTTP } })
-      assert(res.status === 409 && res.json.code === 'ledger_intent_recorded' && /регистъра/.test(res.json.message), `${res.status} ${res.text}`)
+      assert(res.status === 200 && res.json.state === 'pending_confirmation', `${res.status} ${res.text}`)
+      writeTestLedgerAck(ledgerPath)
+      await waitStatus(requestId, 'cancelled')
+      // Доказано изтриване в регистъра (база, възстановена без reconcile) -> отказ.
+      const proven = await register('Proven')
+      assert((await submitDeletion(proven)).status === 200, 'подаване 3')
+      const provenId = requestIdOf(proven.profileId)
+      appendProfileDeletionLedgerEntry(ledgerPath, { v: 1, kind: 'request_db_deleted', requestId: provenId, profileId: proven.profileId, dbDeletedAt: new Date().toISOString(), recordedAt: new Date().toISOString() })
+      const refused = await api(`/api/admin/profile-deletions/${provenId}/cancel`, { method: 'POST', cookie: adminUser.cookie, body: { reason: REASON_HTTP } })
+      assert(refused.status === 409 && refused.json.code === 'irreversible', `${refused.status} ${refused.text}`)
+      assert(db.prepare('SELECT 1 FROM profile_deletion_cancellations WHERE request_id = ?;').get(provenId) === undefined, 'трайна отмяна при доказано изтриване')
       appendFileSync(ledgerPath, 'garbage\n')
       const other = await register('Ledger2')
       assert((await submitDeletion(other)).status === 200, 'подаване 2')
-      const corrupt = await api(`/api/admin/profile-deletions/${requestIdOf(other.profileId)}/cancel`, { method: 'POST', cookie: adminUser.cookie, body: { reason: REASON_HTTP } })
-      assert(corrupt.status === 503 && corrupt.json.code === 'ledger_unavailable', `${corrupt.status} ${corrupt.text}`)
-      assertEqual(statusOf(requestId), 'pending', 'статус')
+      const otherId = requestIdOf(other.profileId)
+      const corrupt = await api(`/api/admin/profile-deletions/${otherId}/cancel`, { method: 'POST', cookie: adminUser.cookie, body: { reason: REASON_HTTP } })
+      assert(corrupt.status === 200 && corrupt.json.state === 'pending_confirmation', `${corrupt.status} ${corrupt.text}`)
+      await new Promise((r) => setTimeout(r, 1000))
+      assertEqual(statusOf(otherId), 'pending', 'не е окончателна при повреден регистър')
+      assert(db.prepare('SELECT 1 FROM profile_deletion_cancellations WHERE request_id = ? AND ledger_recorded_at IS NULL;').get(otherId) !== undefined, 'трайната защита е налице, записът чака')
     })
   } finally {
     db.close()

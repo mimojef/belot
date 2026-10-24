@@ -97,15 +97,17 @@ try {
   await check('[1] Списъкът показва реалните статуси; "Отмени заявката" само при canCancel; обяснение защо при останалите; административните — само преглед', async () => {
     await openPanel(page)
     assert((await page.locator('#admin-profile-deletions-title').textContent())?.trim() === 'Заявки за изтриване', 'заглавие')
-    assert((await page.locator('[data-admin-deletion-row]').count()) === 13, 'брой редове')
-    for (const id of ['req-window', 'req-legacy', 'req-overdue', 'req-game', 'req-xss']) {
+    assert((await page.locator('[data-admin-deletion-row]').count()) === 14, 'брой редове')
+    // Етап 4J1 — бан и чакащо offsite (вече записано намерение) също се отменят.
+    for (const id of ['req-window', 'req-legacy', 'req-overdue', 'req-game', 'req-xss', 'req-ban', 'req-offsite']) {
       assert((await row(page, id).locator('[data-admin-deletion-cancel-open]').count()) === 1, `бутон за ${id}`)
     }
-    for (const [id, blocker] of [['req-ban', 'ledger_intent_recorded'], ['req-offsite', 'ledger_intent_recorded'], ['req-exec', 'lease_held'], ['req-files', 'irreversible'], ['adm-pending', 'not_voluntary']] as const) {
+    for (const [id, blocker] of [['req-pending-cancel', 'cancellation_pending'], ['req-exec', 'lease_held'], ['req-files', 'irreversible'], ['adm-pending', 'not_voluntary']] as const) {
       assert((await row(page, id).locator('[data-admin-deletion-cancel-open]').count()) === 0, `бутон при ${id}`)
       assert((await row(page, id).locator(`[data-admin-deletion-blocker="${blocker}"]`).count()) === 1, `обяснение ${id}`)
     }
-    assert(/регистъра на изтриванията/.test((await row(page, 'req-ban').textContent()) ?? ''), 'текст за регистъра')
+    const pendingText = (await row(page, 'req-pending-cancel').textContent()) ?? ''
+    assert(/Отмяната е приета — потвърждава се/.test(pendingText) && /Чака потвърждение извън сървъра/.test(pendingText) && /от потребителя/.test(pendingText), `приета отмяна: ${pendingText}`)
     assert(/само за преглед/.test((await row(page, 'adm-pending').textContent()) ?? ''), 'административно — само преглед')
     for (const id of ['req-done', 'req-cancelled', 'adm-done']) {
       assert((await row(page, id).locator('[data-admin-deletion-cancel-open], [data-admin-deletion-blocker]').count()) === 0, `краен ред ${id}`)
@@ -141,9 +143,9 @@ try {
     await page.waitForFunction(() => document.querySelectorAll('[data-admin-deletion-row]').length === 1)
     assert((await row(page, 'req-offsite').count()) === 1, 'филтър по статус')
     await page.selectOption('[data-admin-deletions-filter-category="1"]', '')
-    await page.waitForFunction(() => document.querySelectorAll('[data-admin-deletion-row]').length === 13)
+    await page.waitForFunction(() => document.querySelectorAll('[data-admin-deletion-row]').length === 14)
     await page.click('[data-admin-deletions-refresh="1"]')
-    await page.waitForFunction(() => document.querySelectorAll('[data-admin-deletion-row]').length === 13)
+    await page.waitForFunction(() => document.querySelectorAll('[data-admin-deletion-row]').length === 14)
     const fetches = (await getCalls(page)).filter((c) => c.name === 'fetchList').map((c) => c.args[0] as { kind: string; category: string })
     assert(fetches.length === 5, `зареждания: ${fetches.length}`)
     assert(fetches[0]!.kind === 'admin' && fetches[2]!.category === 'awaiting_offsite' && fetches[4]!.kind === '' && fetches[4]!.category === '', JSON.stringify(fetches))
@@ -192,17 +194,19 @@ try {
       harness.resolveCancel({ ok: true })
     })
     await page.locator('#admin-profile-deletion-cancel-dialog').waitFor({ state: 'detached' })
-    await page.waitForFunction(() => /Заявката е отменена/.test(document.querySelector('[data-admin-deletions-notice="1"]')?.textContent ?? ''))
+    // Етап 4J1 — сървърът е приел отмяната; окончателна е след offsite потвърждение.
+    await page.waitForFunction(() => /Отмяната е приета/.test(document.querySelector('[data-admin-deletions-notice="1"]')?.textContent ?? ''))
+    assert(!/Заявката е отменена/.test((await page.locator('[data-admin-deletions-notice="1"]').textContent()) ?? ''), 'окончателен успех при приета отмяна')
     assert((await getCalls(page)).filter((c) => c.name === 'fetchList').length >= 1, 'списъкът не е обновен')
   })
 
-  await check('[7] Отказ от сървъра (намерение в регистъра): обяснението е в прозореца, нищо не се затваря, списъкът се обновява', async () => {
-    await h(page, 'setCancelMode', { ok: false, code: 'ledger_intent_recorded', message: 'Намерението за окончателно изтриване вече е записано в регистъра на изтриванията и се копира извън сървъра. Безопасна отмяна на този етап не е възможна.' })
+  await check('[7] Отказ от сървъра (активен lease): обяснението е в прозореца, нищо не се затваря, списъкът се обновява', async () => {
+    await h(page, 'setCancelMode', { ok: false, code: 'lease_held', message: 'Заявката се обработва в момента от автоматичното изтриване. Обнови след малко.' })
     await h(page, 'clearCalls')
     await row(page, 'req-overdue').locator('[data-admin-deletion-cancel-open]').click()
     await page.fill('[data-admin-deletion-cancel-reason="1"]', 'Опит')
     await page.click('[data-admin-deletion-cancel-confirm="1"]')
-    await page.waitForFunction(() => /регистъра/.test(document.querySelector('[data-admin-deletion-cancel-error="1"]')?.textContent ?? ''))
+    await page.waitForFunction(() => /обработва/.test(document.querySelector('[data-admin-deletion-cancel-error="1"]')?.textContent ?? ''))
     assert((await page.locator('#admin-profile-deletion-cancel-dialog').count()) === 1, 'прозорецът се затвори')
     assert(await page.locator('[data-admin-deletion-cancel-confirm="1"]').isEnabled(), 'бутонът остава неактивен')
     await page.waitForFunction(() => true)
@@ -249,7 +253,7 @@ try {
     assert(dialogOverflow <= 1, `хоризонтален скрол в прозореца: ${dialogOverflow}`)
     await confirm.tap()
     await dialog.waitFor({ state: 'detached' })
-    await mobile.waitForFunction(() => document.querySelector('[data-admin-deletion-row="req-window"]')?.getAttribute('data-admin-deletion-category') === 'cancelled')
+    await mobile.waitForFunction(() => document.querySelector('[data-admin-deletion-row="req-window"]')?.getAttribute('data-admin-deletion-category') === 'cancellation_pending')
     assertNoPageErrors(mobile, '[9]')
   })
 } catch (error) {

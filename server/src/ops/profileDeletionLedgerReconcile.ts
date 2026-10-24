@@ -46,6 +46,18 @@
 //     по-стар от базата, или старите изтривания не са добавени с
 //     `admin-backfill`) — --apply се отказва като при ledger_stale.
 //
+// Етап 4J1 — отмени на доброволни заявки (запис "request_cancelled"):
+//   * отмяна СЛЕД намерението (или без намерение) -> намерението е
+//     невалидно: профилът НЕ се изтрива; ако във възстановената база заявката
+//     е активна, --apply възстановява трайната защита (recovered_from_ledger)
+//     — финализира я обичайният finalizer след offsite потвърждение;
+//   * отмяна ПРЕДИ намерението -> cancel_conflict (невалидна
+//     последователност): нищо не се трие и нищо не се отменя автоматично —
+//     fail-closed, нужна е ръчна проверка;
+//   * доказано изтриване ("request_db_deleted") има предимство пред отмяна
+//     (cancel_ignored) — профилът не се възстановява;
+//   * финализирана отмяна в базата, която липсва в регистъра -> ledger_stale.
+//
 // Изход: само request_id/profile_id и кодове — без имена, имейли или токени.
 
 import { appendFileSync, closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync } from 'node:fs'
@@ -53,12 +65,15 @@ import { join, resolve } from 'node:path'
 import { createProfileDeletionWorker } from '../core/profileDeletionWorker.js'
 import { createProfileDeletionExecutor } from '../db/profileDeletionExecutor.js'
 import { createProfileHardDeleteService } from '../db/profileHardDeleteService.js'
+import { createProfileDeletionCancellationStore } from '../db/profileDeletionCancellationStore.js'
 import { canonicalIsoToSqliteDateTime } from '../core/adminProfileDeletionCoordinator.js'
 import {
   readProfileDeletionLedger,
   summarizeAdminLedgerOperations,
+  summarizeRequestLedgerState,
   type AdminLedgerOperation,
   type ProfileDeletionLedgerEntry,
+  type ProfileDeletionRequestCancelledRecord,
 } from '../db/profileDeletionLedger.js'
 import { listPendingMigrationsForDatabase } from './profileDeletionRestoredDbMigrations.js'
 import {
@@ -72,6 +87,8 @@ export const REAPPLY_CONFIRMATION_PHRASE = 'REAPPLY-PROFILE-DELETIONS'
 export type ReconcileIo = { log: (line: string) => void; error: (line: string) => void }
 
 type Category = 'absent' | 'request_present' | 'request_missing' | 'identity_mismatch'
+/** Етап 4J1 — заявки с отмяна в регистъра. */
+type CancelCategory = 'cancelled' | 'cancel_restore_needed' | 'cancel_conflict'
 type AdminCategory =
   | 'admin_absent'
   | 'admin_missing'
@@ -162,13 +179,24 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   if (conflictingAdmin.length > 0) {
     return fail('ledger_corrupt', `admin_operation_conflict operationIds=${conflictingAdmin.map((operation) => operation.operationId).slice(0, 5).join(',')}`)
   }
+  const requestStates = summarizeRequestLedgerState(ledger.records)
+  // Намерения, които НЕ се прилагат повторно: отменени или с конфликтна последователност.
+  const intentEntries = ledger.entries.filter((entry) => {
+    const resolution = requestStates.get(entry.requestId)?.resolution
+    return resolution !== 'cancelled' && resolution !== 'cancel_conflict'
+  })
+  const cancelStates = [...requestStates.values()].filter((state) => state.resolution === 'cancelled' || state.resolution === 'cancel_conflict')
+  for (const state of requestStates.values()) {
+    if (state.cancelIgnored) io.log(`[reconcile] cancel_ignored requestId=${state.requestId} (доказано изтриване има предимство)`)
+  }
   const mode = apply ? 'APPLY' : verifyOnly ? 'verify-only' : 'report-only'
-  io.log(`[reconcile] mode=${mode} ledgerEntries=${ledger.entries.length} adminOperations=${adminOperations.size}`)
+  io.log(`[reconcile] mode=${mode} ledgerEntries=${ledger.entries.length} cancellations=${cancelStates.length} adminOperations=${adminOperations.size}`)
 
   const { DatabaseSync } = await import('node:sqlite')
 
   type Snapshot = {
     classified: Array<{ entry: ProfileDeletionLedgerEntry; category: Category; requestStatus: string | null; pendingFiles: number }>
+    cancelClassified: Array<{ requestId: string; record: ProfileDeletionRequestCancelledRecord; category: CancelCategory; requestStatus: string | null }>
     staleRequestIds: string[]
     adminClassified: Array<{ operation: AdminLedgerOperation; category: AdminCategory }>
     adminStaleLogIds: string[]
@@ -182,7 +210,7 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
       const selectRequest = readDb.prepare('SELECT status, db_deleted_at FROM profile_deletion_requests WHERE request_id = ? LIMIT 1;')
       const selectPendingFiles = readDb.prepare(`SELECT COUNT(*) AS c FROM profile_deletion_file_queue WHERE request_id = ? AND status NOT IN ('done', 'skipped_shared');`)
       const ledgerIds = new Set(ledger.entries.map((entry) => entry.requestId))
-      const classified = ledger.entries.map((entry) => {
+      const classified = intentEntries.map((entry) => {
         const profile = selectProfile.get(entry.profileId) as { account_id: string | null; created_at: string } | undefined
         const request = selectRequest.get(entry.requestId) as { status: string; db_deleted_at: string | null } | undefined
         const pendingFiles = request === undefined ? 0 : Number((selectPendingFiles.get(entry.requestId) as { c: number }).c)
@@ -197,9 +225,28 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
         }
         return { entry, category, requestStatus: request?.status ?? null, pendingFiles }
       })
+      const selectCancellationRow = readDb.prepare('SELECT 1 FROM profile_deletion_cancellations WHERE request_id = ? LIMIT 1;')
+      const cancelClassified = cancelStates.map((state) => {
+        const record = state.cancel as ProfileDeletionRequestCancelledRecord
+        const request = selectRequest.get(state.requestId) as { status: string; db_deleted_at: string | null } | undefined
+        let category: CancelCategory
+        if (state.resolution === 'cancel_conflict') category = 'cancel_conflict'
+        else if (
+          request !== undefined && request.db_deleted_at === null &&
+          ['pending', 'blocked', 'failed', 'executing'].includes(request.status) &&
+          selectCancellationRow.get(state.requestId) === undefined
+        ) category = 'cancel_restore_needed'
+        else category = 'cancelled'
+        return { requestId: state.requestId, record, category, requestStatus: request?.status ?? null }
+      })
+      const ledgerCancelIds = new Set(cancelStates.map((state) => state.requestId))
       const staleRequestIds = (readDb.prepare('SELECT request_id FROM profile_deletion_requests WHERE db_deleted_at IS NOT NULL;').all() as Array<{ request_id: string }>)
         .map((row) => row.request_id)
         .filter((requestId) => !ledgerIds.has(requestId))
+        // Финализирана отмяна в базата, която липсва в регистъра — регистърът е по-стар от базата.
+        .concat((readDb.prepare('SELECT request_id FROM profile_deletion_cancellations WHERE finalized_at IS NOT NULL;').all() as Array<{ request_id: string }>)
+          .map((row) => row.request_id)
+          .filter((requestId) => !ledgerCancelIds.has(requestId)))
       // Етап 4F1 — административните операции (идентификация САМО по UUID +
       // акаунт/дата на създаване, когато са записани; никога по име).
       const adminClassified = [...adminOperations.values()].map((operation) => {
@@ -219,7 +266,7 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
       const adminStaleLogIds = (readDb.prepare('SELECT log_id FROM admin_profile_deletions;').all() as Array<{ log_id: string }>)
         .map((row) => row.log_id)
         .filter((logId) => !adminOperations.has(logId))
-      return { classified, staleRequestIds, adminClassified, adminStaleLogIds }
+      return { classified, cancelClassified, staleRequestIds, adminClassified, adminStaleLogIds }
     } finally {
       readDb.close()
     }
@@ -228,6 +275,9 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   const report = (snapshot: Snapshot): Record<string, number> => {
     for (const item of snapshot.classified) {
       io.log(`[reconcile] ${item.category} requestId=${item.entry.requestId} profileId=${item.entry.profileId}${item.requestStatus === null ? '' : ` requestStatus=${item.requestStatus}`}${item.pendingFiles > 0 ? ` pendingFiles=${item.pendingFiles}` : ''}`)
+    }
+    for (const item of snapshot.cancelClassified) {
+      io.log(`[reconcile] ${item.category} requestId=${item.requestId} profileId=${item.record.profileId} source=${item.record.source}${item.requestStatus === null ? '' : ` requestStatus=${item.requestStatus}`}`)
     }
     for (const requestId of snapshot.staleRequestIds) {
       io.log(`[reconcile] ledger_stale requestId=${requestId} (изтрита в базата, липсва в регистъра)`)
@@ -240,6 +290,7 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
       io.log(`[reconcile] admin_ledger_stale operationId=${logId} (административно изтриване в базата, липсва в регистъра)`)
     }
     const counts = snapshot.classified.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.category]: (acc[item.category] ?? 0) + 1 }), {})
+    for (const item of snapshot.cancelClassified) counts[item.category] = (counts[item.category] ?? 0) + 1
     counts.ledger_stale = snapshot.staleRequestIds.length
     for (const item of snapshot.adminClassified) counts[item.category] = (counts[item.category] ?? 0) + 1
     counts.admin_ledger_stale = snapshot.adminStaleLogIds.length
@@ -257,12 +308,14 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
     snapshot.adminStaleLogIds.length === 0 &&
     journalPending === 0 &&
     snapshot.classified.every((item) => item.category === 'absent') &&
+    snapshot.cancelClassified.every((item) => item.category === 'cancelled') &&
     snapshot.adminClassified.every((item) => item.category === 'admin_absent' || item.category === 'admin_ignored')
 
   if (!apply && !verifyOnly) {
     io.log('[reconcile] Нищо не е променено (report-only).')
     return (counts.ledger_stale ?? 0) > 0 || (counts.identity_mismatch ?? 0) > 0 ||
-      (counts.admin_ledger_stale ?? 0) > 0 || (counts.admin_identity_mismatch ?? 0) > 0 || (counts.admin_unresolved ?? 0) > 0
+      (counts.admin_ledger_stale ?? 0) > 0 || (counts.admin_identity_mismatch ?? 0) > 0 || (counts.admin_unresolved ?? 0) > 0 ||
+      (counts.cancel_conflict ?? 0) > 0 || (counts.cancel_restore_needed ?? 0) > 0
       ? 1
       : 0
   }
@@ -301,6 +354,21 @@ export async function runProfileDeletionLedgerReconcile(argv: readonly string[],
   }
 
   try {
+    // 0. Етап 4J1 — отмени от регистъра: ПРЕДИ всяко изтриване трайната
+    //    защита се възстановява във възстановената база (worker-ът по-долу и
+    //    живият worker след старта не могат да вземат тези заявки).
+    {
+      const cancellationStore = await createProfileDeletionCancellationStore(dbPath)
+      try {
+        for (const item of before.cancelClassified.filter((candidate) => candidate.category === 'cancel_restore_needed')) {
+          const result = cancellationStore.applyRecoveredCancellation(item.record, { releaseExecuting: true })
+          io.log(`[reconcile] cancel_restore requestId=${item.requestId} result=${result.ok ? result.state : result.code}`)
+        }
+      } finally {
+        cancellationStore.close()
+      }
+    }
+
     // 1. Довършване на прекъснато предишно изпълнение (профилът вече липсва).
     const presentIds = new Set(before.classified.filter((item) => item.category !== 'absent').map((item) => item.entry.profileId))
     for (const record of pendingJournal.values()) {

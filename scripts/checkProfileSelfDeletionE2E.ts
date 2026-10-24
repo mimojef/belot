@@ -34,6 +34,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 import { createServer as createViteServer, type ViteDevServer } from 'vite'
 import { ensureServerDatabaseReady } from '../server/src/db/ensureServerDatabaseReady.js'
+import { writeTestLedgerAck } from '../server/scripts/fixtures/profileDeletionCancellationKit.js'
 
 let passed = 0
 let failed = 0
@@ -69,7 +70,7 @@ const projectRoot = process.cwd()
 const SECRET = 'profile-self-deletion-e2e-secret-0123456789abcdef'
 const PASSWORD = 'SelfDelete1!'
 
-type Backend = { child: ChildProcessWithoutNullStreams; port: number; db: DatabaseSync; tempRoot: string; output: string[] }
+type Backend = { child: ChildProcessWithoutNullStreams; port: number; db: DatabaseSync; tempRoot: string; output: string[]; ledgerPath: string }
 
 async function startBackend(flagEnabled: boolean): Promise<Backend> {
   const tempRoot = await mkdtemp(join(tmpdir(), 'belot-self-deletion-e2e-'))
@@ -87,7 +88,12 @@ async function startBackend(flagEnabled: boolean): Promise<Backend> {
   db.exec('PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;')
   db.prepare(`UPDATE admin_settings SET setting_value = 'direct' WHERE setting_key = 'registration_verification_mode';`).run()
   const port = await freePort()
-  const env: NodeJS.ProcessEnv = { ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: SECRET, BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1' }
+  // Етап 4J1 — изолиран регистър; отмяната е окончателна след offsite ack (пише го тестът).
+  const ledgerPath = join(tempRoot, 'deletion-ledger', 'profile-deletions.jsonl')
+  const env: NodeJS.ProcessEnv = {
+    ...process.env, PORT: String(port), PASSWORD_RESET_RATE_LIMIT_SECRET: SECRET, BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate', BELOT_GAME_WORKER_COUNT: '1',
+    PROFILE_DELETION_LEDGER_PATH: ledgerPath, PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS: '300',
+  }
   delete env.PROFILE_SELF_DELETION_ENABLED
   delete env.PROFILE_SELF_DELETION_WORKER_ENABLED
   if (flagEnabled) env.PROFILE_SELF_DELETION_ENABLED = '1'
@@ -96,7 +102,7 @@ async function startBackend(flagEnabled: boolean): Promise<Backend> {
   child.stdout.on('data', (chunk) => output.push(String(chunk)))
   child.stderr.on('data', (chunk) => output.push(String(chunk)))
   await waitFor(() => fetch(`http://127.0.0.1:${port}/health`).then((r) => r.ok).catch(() => false), 'backend health', 90_000)
-  return { child, port, db, tempRoot, output }
+  return { child, port, db, tempRoot, output, ledgerPath }
 }
 
 async function stopBackend(backend: Backend | null): Promise<void> {
@@ -266,7 +272,11 @@ try {
     assert(promptText.includes(shownDeadline), `крайната дата в 4H екрана: ${promptText}`)
     assert((await loginPage.locator('form[data-lobby-auth-form="login"]').count()) === 0 || !(await form.isVisible()), 'login модалът остана отворен')
     await loginPage.locator('[data-pending-deletion-cancel="1"]').click()
-    await loginPage.waitForFunction(() => (document.querySelector('#pending-deletion-prompt')?.textContent ?? '').includes('отменена'), undefined, { timeout: 15_000 })
+    // Етап 4J1 — без offsite потвърждение: приета, но не окончателна.
+    await loginPage.locator('[data-pending-deletion-cancellation-pending="1"]').waitFor({ state: 'visible', timeout: 15_000 })
+    assert(!((await loginPage.locator('#pending-deletion-prompt').textContent()) ?? '').includes('отменена и профилът е запазен'), 'окончателен успех преди потвърждението')
+    writeTestLedgerAck(backend!.ledgerPath)
+    await waitFor(async () => (backend!.db.prepare(`SELECT status FROM profile_deletion_requests WHERE profile_id = ?;`).get(user.profileId) as { status: string }).status === 'cancelled', 'финализиране след offsite ack', 15_000)
     const row = backend!.db.prepare(`SELECT status FROM profile_deletion_requests WHERE profile_id = ?;`).get(user.profileId) as { status: string }
     assert(row.status === 'cancelled', `статус: ${row.status}`)
     const relogin = await fetch(`http://127.0.0.1:${backendPort}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: user.email, password: PASSWORD }) })
@@ -304,7 +314,9 @@ try {
     await row.locator('[data-admin-deletion-cancel-open]').click()
     await adminPage.locator('[data-admin-deletion-cancel-reason="1"]').fill('Потребителят се обади в поддръжката')
     await adminPage.locator('[data-admin-deletion-cancel-confirm="1"]').click()
-    await adminPage.waitForFunction((id) => document.querySelector(`[data-admin-deletion-row="${id}"]`)?.getAttribute('data-admin-deletion-category') === 'cancelled', requestId, { timeout: 15_000 })
+    await adminPage.waitForFunction((id) => document.querySelector(`[data-admin-deletion-row="${id}"]`)?.getAttribute('data-admin-deletion-category') === 'cancellation_pending', requestId, { timeout: 15_000 })
+    writeTestLedgerAck(backend!.ledgerPath)
+    await waitFor(async () => (backend!.db.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { status: string }).status === 'cancelled', 'финализиране', 15_000)
     const dbRow = backend!.db.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { status: string }
     const audit = backend!.db.prepare('SELECT reason, actor_profile_id FROM profile_deletion_admin_cancellations WHERE request_id = ?;').get(requestId) as { reason: string; actor_profile_id: string } | undefined
     assert(dbRow.status === 'cancelled' && audit?.reason === 'Потребителят се обади в поддръжката' && audit.actor_profile_id === admin.profileId, `${JSON.stringify(dbRow)} ${JSON.stringify(audit)}`)

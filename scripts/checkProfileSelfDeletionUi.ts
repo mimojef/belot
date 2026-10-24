@@ -258,12 +258,37 @@ try {
   })
 
   await check('[17] "Запази профила ми" през съществуващия екран: отмяна с токена, после вход', async () => {
+    await h(page, 'setPendingActionResult', { ok: true, state: 'cancelled' })
     await page.locator('[data-pending-deletion-cancel="1"]').click()
     await page.waitForFunction(() => (document.querySelector('#pending-deletion-prompt')?.textContent ?? '').includes('отменена'))
     const calls = await h<Array<{ name: string; args: unknown[] }>>(page, 'getCalls')
     assert(calls.some((entry) => entry.name === 'cancelRequest' && entry.args[0] === 'tok-45'), JSON.stringify(calls))
     await page.locator('[data-pending-deletion-login="1"]').click()
     assert((await callNames(page)).includes('onGoToLogin'), 'вход')
+  })
+
+  // Етап 4J1 — отмяната е приета, но още не е окончателна (чака offsite потвърждение).
+  await check('[17b] Приета, неокончателна отмяна: междинно съобщение, БЕЗ "отменена" и без "Към вход"', async () => {
+    await h(page, 'openPendingPrompt', { restoreAvailable: true, restoreToken: 'tok-pending', scheduledFor: '2026-12-05T08:00:00.000Z', gracePeriodDays: 30, isBanned: true })
+    await h(page, 'setPendingActionResult', { ok: true, state: 'pending_confirmation', message: null })
+    await page.locator('[data-pending-deletion-cancel="1"]').click()
+    await page.locator('[data-pending-deletion-cancellation-pending="1"]').waitFor()
+    const text = (await page.locator('#pending-deletion-prompt').textContent()) ?? ''
+    assert(text.includes('Отмяната е приета') && text.includes('няма да бъде изтрит'), `текст: ${text}`)
+    assert(!text.includes('отменена и профилът е запазен'), 'окончателен успех при чакаща отмяна')
+    assert(text.includes('Банът остава'), 'банът')
+    assert((await page.locator('[data-pending-deletion-login="1"]').count()) === 0, '"Към вход"')
+    assert((await page.locator('[data-pending-deletion-close="1"]').count()) === 1, '"Затвори"')
+    await h(page, 'setPendingActionResult', { ok: true })
+    await h(page, 'removeOverlays')
+  })
+
+  await check('[17c] Вход при вече приета отмяна (cancellationPending): само съобщение, без бутони за отмяна/запазване', async () => {
+    await h(page, 'openPendingPrompt', { restoreAvailable: false, cancellationPending: true, cancellationMessage: 'Отмяната е приета и профилът няма да бъде изтрит.', isBanned: false })
+    assert((await page.locator('[data-pending-deletion-cancellation-pending="1"]').count()) === 1, 'междинно съобщение')
+    assert((await page.locator('[data-pending-deletion-cancel="1"], [data-pending-deletion-keep="1"]').count()) === 0, 'бутони')
+    assert(!((await page.locator('#pending-deletion-prompt').textContent()) ?? '').includes('Срокът за отмяна'), 'грешно "изтекъл срок"')
+    await h(page, 'removeOverlays')
   })
 
   await check('[18] Изтекъл срок: няма активен бутон за отмяна', async () => {

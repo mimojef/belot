@@ -133,6 +133,7 @@ import { createProfileDeletionParticipationChecks } from './profileDeletionParti
 import { computeProfileDeletionRetryDelayMs } from './profileDeletionSchedule.js'
 import { createProfileVisitLinkReader } from './profileVisitLinks.js'
 import { LAFCHE_TOPIC_ID } from './topicHardDeleteService.js'
+import type { ProfileDeletionRequestCancelledRecord } from './profileDeletionLedger.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -155,6 +156,8 @@ export type ProfileDeletionBlockCode =
   | 'ledger_offsite_pending'
   /** Етап 4E6B: активен бан — окончателното изтриване чака изтичането/премахването му. */
   | 'active_ban'
+  /** Етап 4J1: приета отмяна (защита в дълбочина — claim и тригерът я изключват). */
+  | 'cancellation_pending'
 
 export type ProfileDeletionFailCode =
   | 'identity_mismatch'
@@ -176,7 +179,7 @@ export type ClaimedProfileDeletionRequest = {
 }
 
 export type ProfileDeletionDbPhaseResult =
-  | { kind: 'db_deleted'; enqueuedFileCount: number; accountDeleted: boolean; alreadyDeletedByAdmin: boolean }
+  | { kind: 'db_deleted'; enqueuedFileCount: number; accountDeleted: boolean; alreadyDeletedByAdmin: boolean; dbDeletedAt: string }
   | { kind: 'already_db_deleted' }
   | { kind: 'blocked'; code: ProfileDeletionBlockCode }
   | { kind: 'failed'; code: ProfileDeletionFailCode; willRetry: boolean }
@@ -283,6 +286,13 @@ export type ProfileDeletionExecutor = {
    */
   prepareRequestForRestoreReconcile: (requestId: string) => boolean
   /**
+   * Етап 4J1 — worker-ът е взел заявка, а регистърът вече съдържа отмяна за
+   * нея (restore на база отпреди отмяната): lease-ът се освобождава
+   * (blocked, без нов опит) и в СЪЩАТА транзакция се записва трайната
+   * защита (recovered_from_ledger = 1). Финализира се от finalizer-а.
+   */
+  applyRecordedCancellation: (requestId: string, workerId: string, record: ProfileDeletionRequestCancelledRecord) => boolean
+  /**
    * Етап 4F2 — административното окончателно изтриване: административните
    * проверки + одитен ред (file_cleanup_status='pending') + СЪЩОТО ядро
    * (deleteProfileDataInTransaction) + СЪЩАТА файлова опашка (собственик
@@ -356,10 +366,15 @@ export async function createProfileDeletionExecutor(
   const REQUEST_COLUMNS = `request_id, profile_id, account_id_snapshot, profile_created_at_snapshot, status,
     requested_at, scheduled_for, attempt_count, lease_owner, lease_expires_at, db_deleted_at`
 
+  const NO_CANCELLATION_SQL = `NOT EXISTS (
+        SELECT 1 FROM profile_deletion_cancellations c WHERE c.request_id = profile_deletion_requests.request_id
+      )`
+
   const selectClaimCandidateStatement = database.prepare(`
     SELECT ${REQUEST_COLUMNS}
     FROM profile_deletion_requests
     WHERE (?2 IS NULL OR request_id = ?2)
+      AND ${NO_CANCELLATION_SQL}
       AND (
         (status = 'pending' AND scheduled_for <= ?1)
         OR (status = 'blocked' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?1)
@@ -375,6 +390,7 @@ export async function createProfileDeletionExecutor(
     SET status = 'executing', lease_owner = ?1, lease_expires_at = ?2,
         attempt_count = attempt_count + 1, next_attempt_at = NULL, updated_at = ?3
     WHERE request_id = ?4 AND status = ?5
+      AND ${NO_CANCELLATION_SQL}
       AND (
         (status = 'pending' AND scheduled_for <= ?3)
         OR (status IN ('blocked', 'failed') AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?3)
@@ -415,6 +431,15 @@ export async function createProfileDeletionExecutor(
   const insertEventStatement = database.prepare(`
     INSERT INTO profile_deletion_events (request_id, profile_id, event_type, actor_kind, worker_id, detail_json)
     VALUES (?, ?, ?, 'system', ?, ?);
+  `)
+
+  const selectCancellationStatement = database.prepare(`
+    SELECT 1 FROM profile_deletion_cancellations WHERE request_id = ? LIMIT 1;
+  `)
+
+  const insertRecoveredCancellationStatement = database.prepare(`
+    INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, recovered_from_ledger, previous_status, ledger_recorded_at)
+    VALUES (?, ?, ?, ?, 1, 'blocked', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
   `)
 
   // ─── Идентичност и защитни проверки ──────────────────────────────────────
@@ -1685,6 +1710,12 @@ export async function createProfileDeletionExecutor(
         database.exec('ROLLBACK;')
         return { kind: 'lease_lost' }
       }
+      if (selectCancellationStatement.get(row.request_id) !== undefined) {
+        // Етап 4J1 — невъзможно (claim и тригерът го изключват); защита в дълбочина.
+        const released = releaseInTransaction(row, workerId, 'blocked', 'cancellation_pending', false, now)
+        database.exec(released ? 'COMMIT;' : 'ROLLBACK;')
+        return released ? { kind: 'blocked', code: 'cancellation_pending' } : { kind: 'lease_lost' }
+      }
 
       const profile = selectProfileStatement.get(row.profile_id) as ProfileRow | undefined
       if (profile === undefined) {
@@ -1693,7 +1724,7 @@ export async function createProfileDeletionExecutor(
           markDbDeletedStatement.run(now, isoPlus(now, PROFILE_DELETION_WORKER_LEASE_MS), row.request_id, workerId)
           insertEvent(row.request_id, row.profile_id, 'db_deleted', workerId, { files: 0, accountDeleted: false, alreadyDeletedByAdmin: true })
           database.exec('COMMIT;')
-          return { kind: 'db_deleted', enqueuedFileCount: 0, accountDeleted: false, alreadyDeletedByAdmin: true }
+          return { kind: 'db_deleted', enqueuedFileCount: 0, accountDeleted: false, alreadyDeletedByAdmin: true, dbDeletedAt: now }
         }
         const released = releaseInTransaction(row, workerId, 'failed', 'identity_profile_missing', false, now)
         database.exec(released ? 'COMMIT;' : 'ROLLBACK;')
@@ -1735,7 +1766,7 @@ export async function createProfileDeletionExecutor(
 
       options.testHooks?.beforeDatabasePhaseCommit?.(row.request_id)
       database.exec('COMMIT;')
-      return { kind: 'db_deleted', enqueuedFileCount, accountDeleted, alreadyDeletedByAdmin: false }
+      return { kind: 'db_deleted', enqueuedFileCount, accountDeleted, alreadyDeletedByAdmin: false, dbDeletedAt: now }
     } catch (error) {
       rollbackQuietly()
       // Само за тестове: симулиран срив на процеса — заявката остава
@@ -1969,9 +2000,39 @@ export async function createProfileDeletionExecutor(
     }
   }
 
+  function applyRecordedCancellation(requestId: string, workerId: string, record: ProfileDeletionRequestCancelledRecord): boolean {
+    database.exec('BEGIN IMMEDIATE;')
+    try {
+      const row = selectRequestStatement.get(requestId) as RequestRow | undefined
+      if (
+        row === undefined || row.status !== 'executing' || row.lease_owner !== workerId ||
+        row.db_deleted_at !== null || row.profile_id !== record.profileId || record.requestId !== requestId
+      ) {
+        database.exec('ROLLBACK;')
+        return false
+      }
+      if (!releaseInTransaction(row, workerId, 'blocked', 'cancellation_recorded', false, dbNow())) {
+        database.exec('ROLLBACK;')
+        return false
+      }
+      insertRecoveredCancellationStatement.run(
+        /^[A-Za-z0-9_.:-]{1,64}$/.test(record.cancellationId) ? record.cancellationId : randomUUID(),
+        requestId,
+        row.profile_id,
+        record.source,
+      )
+      database.exec('COMMIT;')
+      return true
+    } catch (error) {
+      rollbackQuietly()
+      throw error
+    }
+  }
+
   return {
     claimNextDueRequest,
     runDatabasePhase,
+    applyRecordedCancellation,
     blockRequest: (requestId, workerId, code) => releaseRequest(requestId, workerId, 'blocked', code),
     failRequest: (requestId, workerId, code) => releaseRequest(requestId, workerId, 'failed', code),
     extendLease,

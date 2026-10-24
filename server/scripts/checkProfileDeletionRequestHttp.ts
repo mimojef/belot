@@ -32,6 +32,7 @@ import { createPasswordHash } from '../src/db/authHelpers.js'
 import { OFFICIAL_PIKA_PROFILE_ID } from '../src/db/normalizeProfileIdentityText.js'
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
 import { createProfileDeletionRequestStore } from '../src/db/profileDeletionRequestStore.js'
+import { writeTestLedgerAck } from './fixtures/profileDeletionCancellationKit.js'
 
 const SECRET = 'profile-deletion-request-http-secret-0123456789'
 const PASSWORD = 'secret123'
@@ -75,6 +76,8 @@ async function getFreePort(): Promise<number> {
 }
 
 const isolatedRoot = await mkdtemp(join(tmpdir(), 'belot-deletion-request-http-'))
+// Етап 4J1 — изолиран регистър: отмяната е окончателна след offsite ack (пише го тестът).
+const ledgerPath = join(isolatedRoot, 'deletion-ledger', 'profile-deletions.jsonl')
 const serverDir = join(isolatedRoot, 'server')
 await mkdir(serverDir, { recursive: true })
 await cp(join(originalServerRoot, 'src'), join(serverDir, 'src'), { recursive: true, preserveTimestamps: true })
@@ -96,6 +99,8 @@ function startServer(port: number, flagEnabled: boolean): RunningServer {
     BELOT_GAME_WORKER_TICK_MODE: 'worker-candidate',
     BELOT_GAME_WORKER_COUNT: '1',
     PASSWORD_RESET_RATE_LIMIT_SECRET: SECRET,
+    PROFILE_DELETION_LEDGER_PATH: ledgerPath,
+    PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS: '300',
   }
   delete env.PROFILE_SELF_DELETION_ENABLED
   if (flagEnabled) env.PROFILE_SELF_DELETION_ENABLED = '1'
@@ -564,6 +569,11 @@ try {
     secondToken = res.json.restoreToken
     const cancel = await api('/api/account/deletion-request/cancel', { method: 'POST', body: { restoreToken: secondToken } })
     assert(cancel.status === 200 && cancel.json.ok === true, `${cancel.status} ${JSON.stringify(cancel.json)}`)
+    // Етап 4J1 — приета; профилът остава скрит до offsite потвърждението на записа.
+    assert(cancel.json.state === 'pending_confirmation', `състояние: ${JSON.stringify(cancel.json)}`)
+    await new Promise((r) => setTimeout(r, 800))
+    assert(!friendSocket.messages.some((m) => m.type === 'profile_visibility_changed' && m.profileId === hidden.profileId && m.hidden === false), 'видим преди потвърждението')
+    writeTestLedgerAck(ledgerPath)
     await waitFor(() => friendSocket.messages.some((m) => m.type === 'profile_visibility_changed' && m.profileId === hidden.profileId && m.hidden === false), 'visibility restored')
   })
 
@@ -593,6 +603,8 @@ try {
     assert(pending.status === 403 && pending.json.code === 'PROFILE_PENDING_DELETION' && pending.json.isBanned === true, JSON.stringify(pending.json))
     const cancel = await api('/api/account/deletion-request/cancel', { method: 'POST', body: { restoreToken: pending.json.restoreToken } })
     assert(cancel.status === 200, `отмяна ${cancel.status}`)
+    writeTestLedgerAck(ledgerPath)
+    await waitFor(() => (db.prepare(`SELECT status FROM profile_deletion_requests WHERE profile_id = ? ORDER BY requested_at DESC LIMIT 1;`).get(banned.profileId) as { status: string }).status === 'cancelled', 'финализиране')
     const after = await login(banned.email)
     assert(after.status === 403 && after.json.code === 'PROFILE_BANNED', `${after.status} ${JSON.stringify(after.json)}`)
   })
@@ -621,6 +633,7 @@ try {
     const pending = await login(remoteHidden.email)
     const cancel = await api('/api/account/deletion-request/cancel', { method: 'POST', body: { restoreToken: pending.json.restoreToken } })
     assert(cancel.status === 200, `отмяна ${cancel.status}`)
+    writeTestLedgerAck(ledgerPath)
     await waitFor(() => remoteFriendSocket.messages.some((m) => m.type === 'profile_visibility_changed' && m.profileId === remoteHidden.profileId && m.hidden === false), 'restored в B')
   })
 

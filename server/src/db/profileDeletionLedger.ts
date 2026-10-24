@@ -23,6 +23,15 @@
 // Етап 4F1: в същия регистър са и административните окончателни изтривания
 // (записи с поле kind — виж AdminProfileDeletionLedgerRecord по-долу).
 //
+// Етап 4J1: жизнен цикъл на доброволната заявка в същия регистър (поле kind,
+// виж ProfileDeletionRequestLifecycleLedgerRecord):
+//   * request_cancelled — отмяна; reconcile/worker я спазват, ако е СЛЕД
+//     намерението за изтриване (или намерение няма);
+//   * request_db_deleted — изтриването в базата е COMMIT-нато (доказателство;
+//     има предимство пред по-късна отмяна).
+// Редът на редовете е значим: файлът е append-only, архивите са байтови
+// префикси един на друг, а parse/merge пазят реда на първото срещане.
+//
 // Формат на файла: всеки ред завършва с '\n'. Непълна "опашка" без '\n'
 // (срив по средата на запис) не е записан ред — игнорира се при четене и се
 // отрязва преди следващия запис. Невалиден ПЪЛЕН ред е повреда.
@@ -94,16 +103,51 @@ export type AdminProfileDeletionLedgerRecord =
 
 export type AdminProfileDeletionLedgerKind = AdminProfileDeletionLedgerRecord['kind']
 
-/** Всеки запис в регистъра: самоизтриване (без kind) или административен. */
-export type ProfileDeletionLedgerRecord = ProfileDeletionLedgerEntry | AdminProfileDeletionLedgerRecord
+// ─── Етап 4J1: жизнен цикъл на доброволната заявка ────────────────────────
+// Само технически идентификатори: без причина (свободен текст), имейл, име,
+// IP или токени. Източникът е само вид (потребител/администратор/система).
+export type ProfileDeletionCancellationSource = 'user' | 'admin' | 'system'
+
+export type ProfileDeletionRequestLifecycleLedgerRecord =
+  | {
+      v: 1
+      kind: 'request_cancelled'
+      requestId: string
+      profileId: string
+      cancellationId: string
+      source: ProfileDeletionCancellationSource
+      recordedAt: string
+    }
+  | { v: 1; kind: 'request_db_deleted'; requestId: string; profileId: string; dbDeletedAt: string; recordedAt: string }
+
+export type ProfileDeletionRequestCancelledRecord = Extract<ProfileDeletionRequestLifecycleLedgerRecord, { kind: 'request_cancelled' }>
+export type ProfileDeletionRequestDbDeletedRecord = Extract<ProfileDeletionRequestLifecycleLedgerRecord, { kind: 'request_db_deleted' }>
+
+/** Всеки запис в регистъра: намерение за самоизтриване (без kind), жизнен цикъл на заявката или административен. */
+export type ProfileDeletionLedgerRecord = ProfileDeletionLedgerEntry | AdminProfileDeletionLedgerRecord | ProfileDeletionRequestLifecycleLedgerRecord
 
 export function isAdminProfileDeletionLedgerRecord(record: ProfileDeletionLedgerRecord): record is AdminProfileDeletionLedgerRecord {
-  return 'kind' in record
+  return 'kind' in record && record.kind.startsWith('admin_')
 }
 
-/** Ключ за дедупликация: requestId за самоизтриване, kind:operationId за административните. */
+export function isRequestLifecycleLedgerRecord(record: ProfileDeletionLedgerRecord): record is ProfileDeletionRequestLifecycleLedgerRecord {
+  return 'kind' in record && record.kind.startsWith('request_')
+}
+
+/** Намерението за самоизтриване (записът без kind). */
+export function isProfileDeletionLedgerIntentEntry(record: ProfileDeletionLedgerRecord): record is ProfileDeletionLedgerEntry {
+  return !('kind' in record)
+}
+
+/** Ключ за дедупликация: requestId за намерението, kind:requestId за жизнения цикъл, kind:operationId за административните. */
 export function profileDeletionLedgerRecordKey(record: ProfileDeletionLedgerRecord): string {
-  return isAdminProfileDeletionLedgerRecord(record) ? `${record.kind}:${record.operationId}` : record.requestId
+  if (isAdminProfileDeletionLedgerRecord(record)) return `${record.kind}:${record.operationId}`
+  if (isRequestLifecycleLedgerRecord(record)) return `${record.kind}:${record.requestId}`
+  return record.requestId
+}
+
+export function profileDeletionCancellationLedgerKey(requestId: string): string {
+  return `request_cancelled:${requestId}`
 }
 
 export const PROFILE_DELETION_LEDGER_FILENAME = 'profile-deletions.jsonl'
@@ -196,8 +240,37 @@ export function isValidAdminProfileDeletionLedgerRecord(value: unknown): value i
   }
 }
 
+const LIFECYCLE_RECORD_KEYS: Record<ProfileDeletionRequestLifecycleLedgerRecord['kind'], string[]> = {
+  request_cancelled: ['v', 'kind', 'requestId', 'profileId', 'cancellationId', 'source', 'recordedAt'],
+  request_db_deleted: ['v', 'kind', 'requestId', 'profileId', 'dbDeletedAt', 'recordedAt'],
+}
+
+export function isValidRequestLifecycleLedgerRecord(value: unknown): value is ProfileDeletionRequestLifecycleLedgerRecord {
+  if (value === null || typeof value !== 'object') return false
+  const record = value as Record<string, unknown>
+  const kind = record.kind as ProfileDeletionRequestLifecycleLedgerRecord['kind']
+  const expectedKeys = LIFECYCLE_RECORD_KEYS[kind]
+  if (expectedKeys === undefined) return false
+  // Точно определените полета — нищо повече (без лични данни "по погрешка").
+  const keys = Object.keys(record).sort()
+  if (keys.length !== expectedKeys.length || [...expectedKeys].sort().some((key, index) => keys[index] !== key)) return false
+  if (record.v !== 1) return false
+  if (typeof record.requestId !== 'string' || !ID_RE.test(record.requestId)) return false
+  if (typeof record.profileId !== 'string' || !ID_RE.test(record.profileId)) return false
+  if (typeof record.recordedAt !== 'string' || !isCanonicalUtcIsoTimestamp(record.recordedAt)) return false
+  if (kind === 'request_cancelled') {
+    return (
+      typeof record.cancellationId === 'string' && ID_RE.test(record.cancellationId) &&
+      (record.source === 'user' || record.source === 'admin' || record.source === 'system')
+    )
+  }
+  return typeof record.dbDeletedAt === 'string' && isCanonicalUtcIsoTimestamp(record.dbDeletedAt)
+}
+
 export function isValidProfileDeletionLedgerRecord(value: unknown): value is ProfileDeletionLedgerRecord {
   if (value !== null && typeof value === 'object' && 'kind' in (value as Record<string, unknown>)) {
+    const kind = (value as Record<string, unknown>).kind
+    if (typeof kind === 'string' && kind.startsWith('request_')) return isValidRequestLifecycleLedgerRecord(value)
     return isValidAdminProfileDeletionLedgerRecord(value)
   }
   return isValidProfileDeletionLedgerEntry(value)
@@ -205,8 +278,8 @@ export function isValidProfileDeletionLedgerRecord(value: unknown): value is Pro
 
 /** Един и същ запис (recordedAt може да се различава). */
 export function isSameProfileDeletionLedgerRecord(a: ProfileDeletionLedgerRecord, b: ProfileDeletionLedgerRecord): boolean {
-  if (isAdminProfileDeletionLedgerRecord(a) !== isAdminProfileDeletionLedgerRecord(b)) return false
-  if (!isAdminProfileDeletionLedgerRecord(a)) return isSameProfileDeletionIdentity(a, b as ProfileDeletionLedgerEntry)
+  if (isProfileDeletionLedgerIntentEntry(a) !== isProfileDeletionLedgerIntentEntry(b)) return false
+  if (isProfileDeletionLedgerIntentEntry(a)) return isSameProfileDeletionIdentity(a, b as ProfileDeletionLedgerEntry)
   const canonical = (record: ProfileDeletionLedgerRecord) => JSON.stringify(
     Object.entries(record).filter(([key]) => key !== 'recordedAt').sort(([x], [y]) => x.localeCompare(y)),
   )
@@ -260,7 +333,7 @@ export function parseProfileDeletionLedgerBuffer(buffer: Buffer): ParsedProfileD
   const records = [...byKey.values()]
   return {
     records,
-    entries: records.filter((record): record is ProfileDeletionLedgerEntry => !isAdminProfileDeletionLedgerRecord(record)),
+    entries: records.filter(isProfileDeletionLedgerIntentEntry),
     lineCount,
     invalidLineCount,
     conflictingDuplicateCount,
@@ -345,6 +418,62 @@ export function ensureProfileDeletionLedgerRecord(ledgerPath: string, record: Pr
   }
   appendProfileDeletionLedgerEntry(ledgerPath, record)
   return 'appended'
+}
+
+// ─── Етап 4J1: състояние на доброволните заявки по регистъра ─────────────
+export type RequestLedgerState = {
+  requestId: string
+  /** Позиция в реда на записите (първо срещане), -1 = няма. */
+  intentIndex: number
+  intent: ProfileDeletionLedgerEntry | null
+  cancelIndex: number
+  cancel: ProfileDeletionRequestCancelledRecord | null
+  dbDeletedIndex: number
+  dbDeleted: ProfileDeletionRequestDbDeletedRecord | null
+  /**
+   * 'deleted' — доказано изтриване (има предимство; отмяна е недопустима);
+   * 'cancelled' — отмяна след намерението (или без намерение): намерението е невалидно;
+   * 'cancel_conflict' — отмяна ПРЕДИ намерението: невалидна последователност (fail-closed — нито изтриване, нито отмяна);
+   * 'intent' — само намерение (досегашното поведение: изтриването се прилага повторно).
+   */
+  resolution: 'deleted' | 'cancelled' | 'cancel_conflict' | 'intent'
+  /** Има и изтриване, и отмяна — отмяната се пренебрегва (за отчета). */
+  cancelIgnored: boolean
+}
+
+export function summarizeRequestLedgerState(records: readonly ProfileDeletionLedgerRecord[]): Map<string, RequestLedgerState> {
+  const result = new Map<string, RequestLedgerState>()
+  const stateFor = (requestId: string): RequestLedgerState => {
+    let state = result.get(requestId)
+    if (state === undefined) {
+      state = { requestId, intentIndex: -1, intent: null, cancelIndex: -1, cancel: null, dbDeletedIndex: -1, dbDeleted: null, resolution: 'intent', cancelIgnored: false }
+      result.set(requestId, state)
+    }
+    return state
+  }
+  records.forEach((record, index) => {
+    if (isAdminProfileDeletionLedgerRecord(record)) return
+    const state = stateFor(record.requestId)
+    if (isProfileDeletionLedgerIntentEntry(record)) {
+      if (state.intent === null) { state.intent = record; state.intentIndex = index }
+    } else if (record.kind === 'request_cancelled') {
+      if (state.cancel === null) { state.cancel = record; state.cancelIndex = index }
+    } else if (state.dbDeleted === null) {
+      state.dbDeleted = record
+      state.dbDeletedIndex = index
+    }
+  })
+  for (const state of result.values()) {
+    if (state.dbDeleted !== null) {
+      state.resolution = 'deleted'
+      state.cancelIgnored = state.cancel !== null
+    } else if (state.cancel !== null) {
+      state.resolution = state.intent !== null && state.cancelIndex < state.intentIndex ? 'cancel_conflict' : 'cancelled'
+    } else {
+      state.resolution = 'intent'
+    }
+  }
+  return result
 }
 
 // ─── Етап 4F1: състояние на административните операции ───────────────────

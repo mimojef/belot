@@ -223,7 +223,7 @@ try {
       const old = await createProfileDeletionExecutor(oldPath)
       old.close()
     } catch (error) {
-      refused = error instanceof Error && /no such column|deleted_profile_id_snapshot/.test(error.message)
+      refused = error instanceof Error && /no such column|no such table|deleted_profile_id_snapshot/.test(error.message)
     }
     assert(refused, 'executor-ът се създаде върху стара схема')
   })

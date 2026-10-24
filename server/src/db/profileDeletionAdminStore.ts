@@ -13,26 +13,28 @@
 // операцията (request_id / log_id); никога snapshot имена, имейли, IP,
 // visitor ID, файлови пътища, ledger съдържание.
 //
-// Отмяна (cancelVoluntaryRequestByAdmin) — атомарна, в една BEGIN IMMEDIATE
-// транзакция (същият writer lock като worker-а):
+// Отмяна (cancelVoluntaryRequestByAdmin) — Етап 4J1, фаза 1 (ПРИЕМАНЕ) в една
+// BEGIN IMMEDIATE транзакция (същият writer lock като worker-а):
 //   * актьорът е admin ПО БАЗАТА (не по сесията) и профилът е негов;
 //   * заявката е pending/blocked/failed, без lease, преди db_deleted_at,
-//     профилът още съществува;
-//   * в регистъра на изтриванията НЯМА запис за заявката (регистърът е
-//     append-only и се копира извън VPS — вече записано намерение не може да
-//     бъде оттеглено без отделен протокол; worker-ът пише в него само след
-//     като е взел заявката в SQLite, затова проверката под writer lock-а е
-//     без race); нечетим/повреден регистър -> отказ (fail-closed);
-//   * одитен ред (profile_deletion_admin_cancellations) + статус cancelled +
-//     събитие 'cancelled' (actor_kind 'admin') — всичко или нищо.
+//     профилът още съществува, няма вече приета отмяна;
+//   * регистърът не съдържа доказано изтриване ("request_db_deleted");
+//   * одитен ред (причина + администратор) + ред в
+//     profile_deletion_cancellations — всичко или нищо. От този момент
+//     worker-ът не може да изтрие профила.
+// Записът в регистъра и финализирането след offsite потвърждение са в
+// core/profileDeletionCancellationFinalizer.ts. Вече записано намерение за
+// изтриване (бан/чакащо offsite) НЕ пречи: отмяната е по-късен запис в
+// същия регистър и reconcile я спазва.
 
 import { randomUUID } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import { ADMIN_HARD_DELETE_ACTOR_AUTHORIZED_SQL } from './profileDeletionExecutor.js'
 import {
   getProfileDeletionLedgerOffsiteAckPath,
-  isAdminProfileDeletionLedgerRecord,
+  isRequestLifecycleLedgerRecord,
   parseProfileDeletionLedgerBuffer,
+  profileDeletionCancellationLedgerKey,
   profileDeletionLedgerRecordKey,
   readProfileDeletionLedgerOffsiteAck,
   sha256Hex,
@@ -44,6 +46,7 @@ export const PROFILE_DELETION_ADMIN_LIST_MAX = 300
 export const PROFILE_DELETION_ADMIN_CANCEL_REASON_MAX = 500
 
 export const PROFILE_DELETION_ADMIN_CATEGORIES = [
+  'cancellation_pending',
   'pending_cancellable',
   'pending_overdue',
   'blocked_ban',
@@ -65,8 +68,7 @@ export type ProfileDeletionAdminCancelBlocker =
   | 'irreversible'
   | 'lease_held'
   | 'profile_missing'
-  | 'ledger_intent_recorded'
-  | 'ledger_unavailable'
+  | 'cancellation_pending'
 
 export type ProfileDeletionAdminRow = {
   kind: 'voluntary' | 'admin'
@@ -89,17 +91,22 @@ export type ProfileDeletionAdminRow = {
   fileCleanupStatus: string | null
   awaitingOffsite: boolean
   adminCancellation: { reason: string; createdAt: string; actorDisplayName: string | null } | null
+  /** Етап 4J1 — приета отмяна (фаза: чака запис в регистъра / offsite потвърждение / окончателна). */
+  cancellation: {
+    source: 'user' | 'admin' | 'system'
+    acceptedAt: string
+    stage: 'awaiting_ledger' | 'awaiting_offsite' | 'finalized'
+    recoveredFromLedger: boolean
+  } | null
   canCancel: boolean
   cancelBlocker: ProfileDeletionAdminCancelBlocker | null
 }
 
 export type ProfileDeletionLedgerView = {
-  /**
-   * true — регистърът съдържа запис за заявката (или следа от недовършен
-   * запис); false — доказано няма; null — не може да се докаже (нечетим или
-   * повреден регистър; липсващ файл при заявка, която worker-ът вече е взимал).
-   */
-  hasRequestEntry: (requestId: string, attemptCount: number) => boolean | null
+  /** Регистърът съдържа доказано изтриване ("request_db_deleted") за заявката. Нечетим регистър -> false (решава базата). */
+  hasDbDeletedRecord: (requestId: string) => boolean
+  /** Отмяната на заявката е потвърдено копирана извън VPS (точен префикс + SHA-256). */
+  isCancellationConfirmedOffsite: (requestId: string) => boolean
   /** Дали намерението на административна операция е потвърдено извън VPS. */
   isAdminIntentConfirmedOffsite: (operationId: string) => boolean
 }
@@ -111,23 +118,20 @@ export type ProfileDeletionLedgerView = {
  */
 export function loadProfileDeletionLedgerView(ledgerPath: string, ackPath: string = getProfileDeletionLedgerOffsiteAckPath(ledgerPath)): ProfileDeletionLedgerView {
   let buffer: Buffer | null = null
-  let unreadable = false
   try {
     buffer = readFileSync(ledgerPath)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') unreadable = true
+  } catch {
+    buffer = null
   }
-  let requestIds = new Set<string>()
-  let partialTail = ''
+  const dbDeletedRequestIds = new Set<string>()
   if (buffer !== null) {
     const parsed = parseProfileDeletionLedgerBuffer(buffer)
-    if (parsed.invalidLineCount > 0 || parsed.conflictingDuplicateCount > 0) unreadable = true
-    requestIds = new Set(parsed.entries.map((entry) => entry.requestId))
-    // Недовършен ред от прекъснат запис не е запис, но може да е започнат
-    // запис за тази заявка — консервативно се брои като "има".
-    partialTail = buffer.subarray(parsed.completeBytes).toString('utf8')
+    if (parsed.invalidLineCount === 0 && parsed.conflictingDuplicateCount === 0) {
+      for (const record of parsed.records) {
+        if (isRequestLifecycleLedgerRecord(record) && record.kind === 'request_db_deleted') dbDeletedRequestIds.add(record.requestId)
+      }
+    }
   }
-  const missing = buffer === null && !unreadable
 
   let confirmedKeys: Set<string> | null = null
   const loadConfirmedKeys = (): Set<string> => {
@@ -140,9 +144,7 @@ export function loadProfileDeletionLedgerView(ledgerPath: string, ackPath: strin
         if (prefix[prefix.length - 1] === 0x0a && sha256Hex(prefix) === ack.sha256) {
           const parsedPrefix = parseProfileDeletionLedgerBuffer(prefix)
           if (parsedPrefix.invalidLineCount === 0 && parsedPrefix.conflictingDuplicateCount === 0) {
-            for (const record of parsedPrefix.records) {
-              if (isAdminProfileDeletionLedgerRecord(record)) confirmedKeys.add(profileDeletionLedgerRecordKey(record))
-            }
+            for (const record of parsedPrefix.records) confirmedKeys.add(profileDeletionLedgerRecordKey(record))
           }
         }
       }
@@ -153,19 +155,14 @@ export function loadProfileDeletionLedgerView(ledgerPath: string, ackPath: strin
   }
 
   return {
-    hasRequestEntry: (requestId, attemptCount) => {
-      if (unreadable) return null
-      if (missing) return attemptCount === 0 ? false : null
-      if (requestIds.has(requestId)) return true
-      if (partialTail.includes(requestId)) return true
-      return false
-    },
+    hasDbDeletedRecord: (requestId) => dbDeletedRequestIds.has(requestId),
+    isCancellationConfirmedOffsite: (requestId) => loadConfirmedKeys().has(profileDeletionCancellationLedgerKey(requestId)),
     isAdminIntentConfirmedOffsite: (operationId) => loadConfirmedKeys().has(`admin_delete_intent:${operationId}`),
   }
 }
 
 export type CancelVoluntaryRequestByAdminResult =
-  | { ok: true; requestId: string; profileId: string; eventSeq: number; cancellationId: string; revokedSessions: number }
+  | { ok: true; requestId: string; profileId: string; cancellationId: string; revokedSessions: number }
   | {
       ok: false
       code:
@@ -188,8 +185,8 @@ export type ProfileDeletionAdminStore = {
     actorProfileId: string
     actorAccountId: string
     reason: string
-    /** Зарежда регистъра ВЪТРЕ в транзакцията (след като writer lock-ът е взет). */
-    loadLedger: () => ProfileDeletionLedgerView
+    /** Регистърът съдържа доказано изтриване на заявката -> отказ 'irreversible'. */
+    isDeletionProven?: (requestId: string) => boolean
     /** Само тестове: точка за симулиране на грешка преди COMMIT. */
     beforeCommit?: () => void
   }) => CancelVoluntaryRequestByAdminResult
@@ -229,6 +226,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
           WHEN r.status = 'completed' THEN 'completed'
           WHEN r.db_deleted_at IS NOT NULL THEN 'files_pending'
           WHEN r.status = 'executing' THEN 'executing'
+          WHEN pc.request_id IS NOT NULL AND pc.finalized_at IS NULL THEN 'cancellation_pending'
           WHEN r.status = 'blocked' AND r.last_error_code = 'active_ban' THEN 'blocked_ban'
           WHEN r.status = 'blocked' AND r.last_error_code = 'ledger_offsite_pending' THEN 'awaiting_offsite'
           WHEN r.status = 'blocked' AND r.last_error_code IN (${participationList}) THEN 'blocked_participation'
@@ -261,11 +259,17 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         ac.reason AS admin_cancel_reason,
         ac.created_at AS admin_cancel_at,
         ap.display_name AS admin_cancel_actor_name,
+        pc.source AS cancellation_source,
+        pc.accepted_at AS cancellation_accepted_at,
+        pc.ledger_recorded_at AS cancellation_ledger_recorded_at,
+        pc.finalized_at AS cancellation_finalized_at,
+        pc.recovered_from_ledger AS cancellation_recovered,
         strftime('%Y-%m-%dT%H:%M:%fZ', r.requested_at) AS sort_at
       FROM profile_deletion_requests r
       LEFT JOIN profiles p ON p.profile_id = r.profile_id
       LEFT JOIN profile_deletion_admin_cancellations ac ON ac.request_id = r.request_id
       LEFT JOIN profiles ap ON ap.profile_id = ac.actor_profile_id
+      LEFT JOIN profile_deletion_cancellations pc ON pc.request_id = r.request_id
 
       UNION ALL
 
@@ -293,6 +297,11 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         NULL AS admin_cancel_reason,
         NULL AS admin_cancel_at,
         NULL AS admin_cancel_actor_name,
+        NULL AS cancellation_source,
+        NULL AS cancellation_accepted_at,
+        NULL AS cancellation_ledger_recorded_at,
+        NULL AS cancellation_finalized_at,
+        NULL AS cancellation_recovered,
         strftime('%Y-%m-%dT%H:%M:%fZ', m.requested_at) AS sort_at
       FROM pending_profile_moderation m
       LEFT JOIN profiles p ON p.profile_id = m.target_profile_id
@@ -326,6 +335,11 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         NULL AS admin_cancel_reason,
         NULL AS admin_cancel_at,
         NULL AS admin_cancel_actor_name,
+        NULL AS cancellation_source,
+        NULL AS cancellation_accepted_at,
+        NULL AS cancellation_ledger_recorded_at,
+        NULL AS cancellation_finalized_at,
+        NULL AS cancellation_recovered,
         strftime('%Y-%m-%dT%H:%M:%fZ', d.deleted_at) AS sort_at
       FROM admin_profile_deletions d
     )
@@ -336,8 +350,9 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
   `)
 
   const selectRequestForCancelStatement = database.prepare(`
-    SELECT r.request_id, r.profile_id, r.status, r.lease_owner, r.db_deleted_at, r.attempt_count,
-           EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = r.profile_id) AS profile_exists
+    SELECT r.request_id, r.profile_id, r.status, r.lease_owner, r.db_deleted_at,
+           EXISTS (SELECT 1 FROM profiles p WHERE p.profile_id = r.profile_id) AS profile_exists,
+           EXISTS (SELECT 1 FROM profile_deletion_cancellations c WHERE c.request_id = r.request_id) AS has_cancellation
     FROM profile_deletion_requests r
     WHERE r.request_id = ?
     LIMIT 1;
@@ -346,23 +361,15 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
     INSERT INTO profile_deletion_admin_cancellations (cancellation_id, request_id, actor_profile_id, actor_account_id, reason, previous_status)
     VALUES (?, ?, ?, ?, ?, ?);
   `)
-  const cancelRequestStatement = database.prepare(`
-    UPDATE profile_deletion_requests
-    SET status = 'cancelled',
-        cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-        next_attempt_at = NULL,
-        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE request_id = ? AND status IN ('pending', 'blocked', 'failed') AND lease_owner IS NULL AND db_deleted_at IS NULL;
+  const insertCancellationStatement = database.prepare(`
+    INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status)
+    VALUES (?, ?, ?, 'admin', ?);
   `)
   // Защитно: сесиите са отнети при подаването и никога не се възстановяват;
   // отмяната не създава и не "съживява" сесия — следва нов вход.
   const revokeSessionsStatement = database.prepare(`
     UPDATE account_sessions SET revoked_at = CURRENT_TIMESTAMP
     WHERE profile_id = ? AND revoked_at IS NULL;
-  `)
-  const insertAdminEventStatement = database.prepare(`
-    INSERT INTO profile_deletion_events (request_id, profile_id, event_type, actor_kind, detail_json)
-    VALUES (?, ?, 'cancelled', 'admin', ?);
   `)
 
   function isActorAdmin(actorAccountId: string, actorProfileId: string): boolean {
@@ -393,6 +400,11 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
     admin_cancel_reason: string | null
     admin_cancel_at: string | null
     admin_cancel_actor_name: string | null
+    cancellation_source: 'user' | 'admin' | 'system' | null
+    cancellation_accepted_at: string | null
+    cancellation_ledger_recorded_at: string | null
+    cancellation_finalized_at: string | null
+    cancellation_recovered: number | null
   }
 
   function cancelBlockerFor(row: OverviewRow, ledger: ProfileDeletionLedgerView): ProfileDeletionAdminCancelBlocker | null {
@@ -400,10 +412,9 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
     if (row.db_deleted_at !== null || row.status === 'completed') return 'irreversible'
     if (row.lease_owner !== null) return 'lease_held'
     if (!['pending', 'blocked', 'failed'].includes(row.status)) return 'status_not_cancellable'
+    if (row.cancellation_source !== null) return 'cancellation_pending'
     if (row.live_profile_id === null) return 'profile_missing'
-    const hasEntry = ledger.hasRequestEntry(row.operation_id, Number(row.attempt_count ?? 0))
-    if (hasEntry === null) return 'ledger_unavailable'
-    if (hasEntry) return 'ledger_intent_recorded'
+    if (ledger.hasDbDeletedRecord(row.operation_id)) return 'irreversible'
     return null
   }
 
@@ -439,6 +450,18 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         adminCancellation: row.live_profile_id !== null && row.admin_cancel_reason !== null && row.admin_cancel_at !== null
           ? { reason: row.admin_cancel_reason, createdAt: row.admin_cancel_at, actorDisplayName: row.admin_cancel_actor_name }
           : null,
+        cancellation: row.cancellation_source !== null && row.cancellation_accepted_at !== null
+          ? {
+              source: row.cancellation_source,
+              acceptedAt: row.cancellation_accepted_at,
+              stage: row.cancellation_finalized_at !== null
+                ? 'finalized'
+                : row.cancellation_ledger_recorded_at !== null || input.ledger.isCancellationConfirmedOffsite(row.operation_id)
+                  ? 'awaiting_offsite'
+                  : 'awaiting_ledger',
+              recoveredFromLedger: Number(row.cancellation_recovered) === 1,
+            }
+          : null,
         canCancel: blocker === null,
         cancelBlocker: blocker,
       }
@@ -460,7 +483,7 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         return { ok: false, code: 'forbidden' }
       }
       const row = selectRequestForCancelStatement.get(input.requestId) as
-        | { request_id: string; profile_id: string; status: string; lease_owner: string | null; db_deleted_at: string | null; attempt_count: number; profile_exists: number }
+        | { request_id: string; profile_id: string; status: string; lease_owner: string | null; db_deleted_at: string | null; profile_exists: number; has_cancellation: number }
         | undefined
       if (row === undefined) {
         database.exec('ROLLBACK;')
@@ -470,33 +493,18 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
       if (row.db_deleted_at !== null || row.status === 'completed') blocker = 'irreversible'
       else if (row.lease_owner !== null) blocker = 'lease_held'
       else if (!['pending', 'blocked', 'failed'].includes(row.status)) blocker = 'status_not_cancellable'
+      else if (Number(row.has_cancellation) === 1) blocker = 'cancellation_pending'
       else if (Number(row.profile_exists) !== 1) blocker = 'profile_missing'
-      if (blocker === null) {
-        let hasEntry: boolean | null
-        try {
-          hasEntry = input.loadLedger().hasRequestEntry(row.request_id, Number(row.attempt_count))
-        } catch {
-          hasEntry = null
-        }
-        if (hasEntry === null) blocker = 'ledger_unavailable'
-        else if (hasEntry) blocker = 'ledger_intent_recorded'
-      }
+      else if (input.isDeletionProven?.(row.request_id) === true) blocker = 'irreversible'
       if (blocker !== null) {
         database.exec('ROLLBACK;')
         return { ok: false, code: blocker }
       }
       const cancellationId = randomUUID()
+      // Одитът (причина + администратор) остава само в базата; в регистъра
+      // отива единствено техническият запис "request_cancelled" (source admin).
       insertAdminCancellationStatement.run(cancellationId, row.request_id, input.actorProfileId, input.actorAccountId, reason, row.status)
-      const updated = cancelRequestStatement.run(row.request_id) as { changes: number }
-      if (Number(updated.changes) !== 1) {
-        database.exec('ROLLBACK;')
-        return { ok: false, code: 'status_not_cancellable' }
-      }
-      const event = insertAdminEventStatement.run(
-        row.request_id,
-        row.profile_id,
-        JSON.stringify({ source: 'admin', cancellationId, previousStatus: row.status }),
-      ) as { lastInsertRowid: number | bigint }
+      insertCancellationStatement.run(cancellationId, row.request_id, row.profile_id, row.status)
       const revoked = revokeSessionsStatement.run(row.profile_id) as { changes: number }
       input.beforeCommit?.()
       database.exec('COMMIT;')
@@ -504,7 +512,6 @@ export async function createProfileDeletionAdminStore(databaseFilePath: string):
         ok: true,
         requestId: row.request_id,
         profileId: row.profile_id,
-        eventSeq: Number(event.lastInsertRowid),
         cancellationId,
         revokedSessions: Number(revoked.changes),
       }

@@ -33,6 +33,13 @@ export type AdminProfileDeletionRow = {
   fileCleanupStatus: string | null
   awaitingOffsite: boolean
   adminCancellation: { reason: string; createdAt: string; actorDisplayName: string | null } | null
+  /** Етап 4J1 — приета отмяна и нейната фаза. */
+  cancellation?: {
+    source: 'user' | 'admin' | 'system'
+    acceptedAt: string
+    stage: 'awaiting_ledger' | 'awaiting_offsite' | 'finalized'
+    recoveredFromLedger: boolean
+  } | null
   canCancel: boolean
   cancelBlocker: string | null
 }
@@ -41,12 +48,13 @@ export type AdminProfileDeletionFilters = { kind: '' | 'voluntary' | 'admin'; ca
 
 export type AdminProfileDeletionsPanelDeps = {
   fetchList: (filters: AdminProfileDeletionFilters) => Promise<{ ok: true; rows: AdminProfileDeletionRow[]; limit: number } | { ok: false; message: string }>
-  cancelRequest: (requestId: string, reason: string) => Promise<{ ok: true } | { ok: false; code: string | null; message: string }>
+  cancelRequest: (requestId: string, reason: string) => Promise<{ ok: true; state?: 'cancelled' | 'pending_confirmation' } | { ok: false; code: string | null; message: string }>
 }
 
 export const ADMIN_PROFILE_DELETION_REASON_MAX = 500
 
 export const ADMIN_PROFILE_DELETION_CATEGORY_LABELS: Record<string, string> = {
+  cancellation_pending: 'Отмяната е приета — потвърждава се',
   pending_cancellable: 'Чака — в срока за отмяна',
   pending_overdue: 'Срокът изтече — чака изпълнение',
   blocked_ban: 'Блокирана — активен бан',
@@ -62,6 +70,7 @@ export const ADMIN_PROFILE_DELETION_CATEGORY_LABELS: Record<string, string> = {
 }
 
 const CATEGORY_COLORS: Record<string, string> = {
+  cancellation_pending: '#86efac',
   pending_cancellable: '#fde68a',
   pending_overdue: '#fdba74',
   blocked_ban: '#fca5a5',
@@ -96,8 +105,7 @@ export const ADMIN_PROFILE_DELETION_BLOCKER_TEXTS: Record<string, string> = {
   irreversible: 'Профилът вече е изтрит от базата — отмяната не е възможна.',
   lease_held: 'Заявката се обработва в момента от автоматичното изтриване. Обнови след малко.',
   profile_missing: 'Профилът вече не съществува — отмяната не е възможна.',
-  ledger_intent_recorded: 'Намерението за окончателно изтриване вече е записано в регистъра на изтриванията и се копира извън сървъра. Безопасна отмяна на този етап не е възможна.',
-  ledger_unavailable: 'Регистърът на изтриванията не може да бъде проверен — отмяната е спряна от съображения за безопасност.',
+  cancellation_pending: 'Отмяната вече е приета и профилът няма да бъде изтрит; чака потвърждение в защитения регистър.',
 }
 
 const CANCELLED_BY_LABELS: Record<string, string> = {
@@ -159,6 +167,10 @@ function renderRow(row: AdminProfileDeletionRow): string {
   }
   if (row.kind === 'admin' && row.category === 'admin_scheduled') {
     fields.push(field('Регистър', row.awaitingOffsite ? 'Чака копие извън сървъра' : 'Потвърдено извън сървъра'))
+  }
+  if (row.cancellation != null && row.cancellation.stage !== 'finalized') {
+    const stage = row.cancellation.stage === 'awaiting_ledger' ? 'Записва се в регистъра' : 'Чака потвърждение извън сървъра'
+    fields.push(field('Отмяна', `${escapeHtml(stage)} <span style="color:rgba(226,232,240,0.6);">(приета ${escapeHtml(formatDate(row.cancellation.acceptedAt))} ${escapeHtml(CANCELLED_BY_LABELS[row.cancellation.source] ?? '')})</span>`))
   }
   const technical = [
     `статус ${escapeHtml(row.status)}`,
@@ -386,7 +398,10 @@ export function showAdminProfileDeletionsPanel(deps: AdminProfileDeletionsPanelD
         dialogHost.removeAttribute('data-busy')
         if (result.ok) {
           closeDialog()
-          showNotice('Заявката е отменена. Профилът е запазен.', 'ok')
+          // Етап 4J1 — окончателна само след потвърждение в защитения регистър.
+          showNotice(result.state === 'cancelled'
+            ? 'Заявката е отменена. Профилът е запазен.'
+            : 'Отмяната е приета — профилът няма да бъде изтрит. Ще стане окончателна след потвърждение в защитения регистър (обикновено до няколко минути).', 'ok')
           void load()
           return
         }

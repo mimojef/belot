@@ -43,11 +43,17 @@ export type CreateProfileDeletionRequestResult =
 
 export type IssueProfileDeletionRestoreTokenResult =
   | { ok: true; restoreToken: string; expiresAt: string; request: ProfileDeletionPendingRequest }
-  | { ok: false; code: 'no_pending_request' }
+  | { ok: false; code: 'no_pending_request' | 'cancellation_pending' }
 
+/**
+ * Етап 4J1 — отмяната е ПРИЕТА (трайна защита срещу изтриване в базата);
+ * окончателна е едва след записа в регистъра и offsite потвърждението
+ * (core/profileDeletionCancellationFinalizer.ts). alreadyAccepted — заявката
+ * вече има приета отмяна (повторно подаване, без втора логическа отмяна).
+ */
 export type CancelProfileDeletionResult =
-  | { ok: true; profileId: string; requestId: string; eventSeq: number }
-  | { ok: false; code: 'invalid_token' | 'window_closed' }
+  | { ok: true; profileId: string; requestId: string; cancellationId: string; alreadyAccepted: boolean }
+  | { ok: false; code: 'invalid_token' | 'window_closed' | 'deletion_proven' }
 
 export type KeepProfileDeletionResult = { ok: true } | { ok: false; code: 'invalid_token' }
 
@@ -62,14 +68,19 @@ export type ProfileDeletionRequestStore = {
   getPendingRequest: (profileId: string) => ProfileDeletionPendingRequest | null
   createRequest: (input: { profileId: string; accountId: string }) => CreateProfileDeletionRequestResult
   issueRestoreToken: (profileId: string) => IssueProfileDeletionRestoreTokenResult
-  cancelWithToken: (rawToken: string) => CancelProfileDeletionResult
+  /**
+   * isDeletionProven — регистърът съдържа доказано изтриване на заявката
+   * (възстановена, още не reconcile-ната база) -> отказ.
+   */
+  cancelWithToken: (rawToken: string, options?: { isDeletionProven?: (requestId: string) => boolean }) => CancelProfileDeletionResult
   keepWithToken: (rawToken: string) => KeepProfileDeletionResult
   /**
    * Етап 4 — системна отмяна, когато процес открие, че профилът е бил приет
    * в игра в собствената му памет МЕЖДУ проверката и записа на заявката
    * (race между процесите). Само pending и само преди scheduled_for.
+   * Етап 4J1 — също двуфазна (приета -> окончателна).
    */
-  cancelForActiveParticipation: (requestId: string) => { ok: true; eventSeq: number } | { ok: false }
+  cancelForActiveParticipation: (requestId: string) => { ok: true; cancellationId: string } | { ok: false }
   /**
    * Споделен между процесите rate limit (registration_rate_limit_events,
    * HMAC субект). true = ограничено (не се записва нов опит). Без валиден
@@ -170,12 +181,15 @@ export async function createProfileDeletionRequestStore(
     WHERE token_hash = ? AND consumed_at IS NULL;
   `)
 
-  const cancelRequestStatement = database.prepare(`
-    UPDATE profile_deletion_requests
-    SET status = 'cancelled',
-        cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now'),
-        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE request_id = ? AND status = 'pending';
+  // Етап 4J1 — приемане на отмяната (фаза 1). Статусът на заявката не се
+  // променя тук; тригерът проверява срока, lease-а и необратимата граница.
+  const insertCancellationStatement = database.prepare(`
+    INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status)
+    VALUES (?, ?, ?, ?, 'pending');
+  `)
+
+  const selectCancellationForRequestStatement = database.prepare(`
+    SELECT cancellation_id FROM profile_deletion_cancellations WHERE request_id = ? LIMIT 1;
   `)
 
   const countRateLimitEventsStatement = database.prepare(`
@@ -188,11 +202,6 @@ export async function createProfileDeletionRequestStore(
   `)
 
   const participationChecks = createProfileDeletionParticipationChecks(database)
-
-  const insertSystemEventStatement = database.prepare(`
-    INSERT INTO profile_deletion_events (request_id, profile_id, event_type, actor_kind, detail_json)
-    VALUES (?, ?, ?, 'system', ?);
-  `)
 
   const selectRequestByIdStatement = database.prepare(`
     SELECT request_id, profile_id, status FROM profile_deletion_requests WHERE request_id = ? LIMIT 1;
@@ -311,6 +320,10 @@ export async function createProfileDeletionRequestStore(
         database.exec('ROLLBACK;')
         return { ok: false, code: 'no_pending_request' }
       }
+      if (selectCancellationForRequestStatement.get(row.request_id) !== undefined) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'cancellation_pending' }
+      }
       supersedeTokensStatement.run(row.request_id)
       const restoreToken = generateRawResetToken()
       const expiresAt = new Date(Date.parse(now) + PROFILE_DELETION_RESTORE_TOKEN_TTL_MS).toISOString()
@@ -351,7 +364,7 @@ export async function createProfileDeletionRequestStore(
     return { row }
   }
 
-  function cancelWithToken(rawToken: string): CancelProfileDeletionResult {
+  function cancelWithToken(rawToken: string, options: { isDeletionProven?: (requestId: string) => boolean } = {}): CancelProfileDeletionResult {
     database.exec('BEGIN IMMEDIATE;')
     try {
       const loaded = loadUsableToken(rawToken, dbNow())
@@ -360,20 +373,31 @@ export async function createProfileDeletionRequestStore(
         return { ok: false, code: loaded.error }
       }
       const { row } = loaded
+      const existing = selectCancellationForRequestStatement.get(row.request_id) as { cancellation_id: string } | undefined
+      if (existing === undefined && options.isDeletionProven?.(row.request_id) === true) {
+        database.exec('ROLLBACK;')
+        return { ok: false, code: 'deletion_proven' }
+      }
       const consumed = consumeTokenStatement.run('cancelled', row.token_hash) as { changes: number }
-      const cancelled = cancelRequestStatement.run(row.request_id) as { changes: number }
-      if (Number(consumed.changes) !== 1 || Number(cancelled.changes) !== 1) {
+      if (Number(consumed.changes) !== 1) {
         database.exec('ROLLBACK;')
         return { ok: false, code: 'invalid_token' }
       }
-      const eventResult = insertEventStatement.run(row.request_id, row.profile_id, 'cancelled', JSON.stringify({ source: 'self' })) as { lastInsertRowid: number | bigint }
+      let cancellationId = existing?.cancellation_id ?? null
+      if (cancellationId === null) {
+        cancellationId = randomUUID()
+        insertCancellationStatement.run(cancellationId, row.request_id, row.profile_id, 'user')
+      }
       database.exec('COMMIT;')
-      return { ok: true, profileId: row.profile_id, requestId: row.request_id, eventSeq: Number(eventResult.lastInsertRowid) }
+      return { ok: true, profileId: row.profile_id, requestId: row.request_id, cancellationId, alreadyAccepted: existing !== undefined }
     } catch (error) {
       rollbackQuietly()
       // Тригерът в базата е последната защита за прозореца за отмяна.
       if (error instanceof Error && error.message.includes('profile_deletion_cancel_window_closed')) {
         return { ok: false, code: 'window_closed' }
+      }
+      if (error instanceof Error && error.message.includes('profile_deletion_cancellation_not_allowed')) {
+        return { ok: false, code: 'invalid_token' }
       }
       throw error
     }
@@ -396,30 +420,21 @@ export async function createProfileDeletionRequestStore(
     }
   }
 
-  function cancelForActiveParticipation(requestId: string): { ok: true; eventSeq: number } | { ok: false } {
+  function cancelForActiveParticipation(requestId: string): { ok: true; cancellationId: string } | { ok: false } {
     database.exec('BEGIN IMMEDIATE;')
     try {
       const row = selectRequestByIdStatement.get(requestId) as { request_id: string; profile_id: string; status: string } | undefined
-      if (row === undefined || row.status !== 'pending') {
+      if (row === undefined || row.status !== 'pending' || selectCancellationForRequestStatement.get(requestId) !== undefined) {
         database.exec('ROLLBACK;')
         return { ok: false }
       }
-      const cancelled = cancelRequestStatement.run(requestId) as { changes: number }
-      if (Number(cancelled.changes) !== 1) {
-        database.exec('ROLLBACK;')
-        return { ok: false }
-      }
-      const eventResult = insertSystemEventStatement.run(
-        requestId,
-        row.profile_id,
-        'cancelled',
-        JSON.stringify({ source: 'system', reason: 'active_participation' }),
-      ) as { lastInsertRowid: number | bigint }
+      const cancellationId = randomUUID()
+      insertCancellationStatement.run(cancellationId, requestId, row.profile_id, 'system')
       database.exec('COMMIT;')
-      return { ok: true, eventSeq: Number(eventResult.lastInsertRowid) }
+      return { ok: true, cancellationId }
     } catch (error) {
       rollbackQuietly()
-      if (error instanceof Error && error.message.includes('profile_deletion_cancel_window_closed')) {
+      if (error instanceof Error && (error.message.includes('profile_deletion_cancel_window_closed') || error.message.includes('profile_deletion_cancellation_not_allowed'))) {
         return { ok: false }
       }
       throw error

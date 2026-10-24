@@ -8,7 +8,7 @@ import {
   type AdminProfileDeletionRow,
 } from '/src/app/adminProfileDeletions/showAdminProfileDeletionsPanel.ts'
 
-type CancelResult = { ok: true } | { ok: false; code: string | null; message: string }
+type CancelResult = { ok: true; state?: 'cancelled' | 'pending_confirmation' } | { ok: false; code: string | null; message: string }
 
 const calls: Array<{ name: string; args: unknown[] }> = []
 let rows: AdminProfileDeletionRow[] = []
@@ -50,8 +50,10 @@ function sampleRows(): AdminProfileDeletionRow[] {
     base({ operationId: 'req-window', profile: { profileId: 'p1', displayName: 'Иван Тестов' }, canCancel: true }),
     base({ operationId: 'req-legacy', profile: { profileId: 'p2', displayName: 'Стар Профил' }, gracePeriodDays: 45, scheduledFor: '2026-12-01T10:00:00.000Z', canCancel: true }),
     base({ operationId: 'req-overdue', category: 'pending_overdue', profile: { profileId: 'p3', displayName: 'Просрочен' }, canCancel: true }),
-    base({ operationId: 'req-ban', category: 'blocked_ban', status: 'blocked', lastErrorCode: 'active_ban', attemptCount: 2, nextAttemptAt: '2026-10-25T10:00:00.000Z', profile: { profileId: 'p4', displayName: 'Баннат' }, cancelBlocker: 'ledger_intent_recorded' }),
-    base({ operationId: 'req-offsite', category: 'awaiting_offsite', status: 'blocked', lastErrorCode: 'ledger_offsite_pending', profile: { profileId: 'p5', displayName: 'Чака Офсайт' }, cancelBlocker: 'ledger_intent_recorded' }),
+    base({ operationId: 'req-ban', category: 'blocked_ban', status: 'blocked', lastErrorCode: 'active_ban', attemptCount: 2, nextAttemptAt: '2026-10-25T10:00:00.000Z', profile: { profileId: 'p4', displayName: 'Баннат' }, canCancel: true }),
+    base({ operationId: 'req-offsite', category: 'awaiting_offsite', status: 'blocked', lastErrorCode: 'ledger_offsite_pending', profile: { profileId: 'p5', displayName: 'Чака Офсайт' }, canCancel: true }),
+    // Етап 4J1 — приета отмяна, чака offsite потвърждение.
+    base({ operationId: 'req-pending-cancel', category: 'cancellation_pending', profile: { profileId: 'p11', displayName: 'Потвърждава Се' }, cancellation: { source: 'user', acceptedAt: '2026-10-23T09:00:00.000Z', stage: 'awaiting_offsite', recoveredFromLedger: false }, cancelBlocker: 'cancellation_pending' }),
     base({ operationId: 'req-game', category: 'blocked_participation', status: 'blocked', lastErrorCode: 'active_game_local', profile: { profileId: 'p6', displayName: 'В Игра' }, canCancel: true }),
     base({ operationId: 'req-exec', category: 'executing', status: 'executing', profile: { profileId: 'p7', displayName: 'Изпълнява' }, cancelBlocker: 'lease_held' }),
     base({ operationId: 'req-files', category: 'files_pending', status: 'failed', lastErrorCode: 'files_pending', dbDeletedAt: '2026-10-22T10:00:00.000Z', filesPending: 2, filesFailed: 1, cancelBlocker: 'irreversible' }),
@@ -75,8 +77,9 @@ const cancelRequest = (requestId: string, reason: string): Promise<CancelResult>
   calls.push({ name: 'cancelRequest', args: [requestId, reason] })
   if (cancelMode === 'manual') return new Promise((resolve) => { pendingCancel = resolve })
   if (cancelMode === 'ok') {
-    rows = rows.map((row) => row.operationId === requestId ? { ...row, category: 'cancelled', status: 'cancelled', canCancel: false, cancelBlocker: 'status_not_cancellable', cancelledBy: 'admin', cancelledAt: new Date().toISOString(), adminCancellation: { reason, createdAt: new Date().toISOString(), actorDisplayName: 'Главен Админ' } } : row)
-    return Promise.resolve({ ok: true })
+    // Етап 4J1 — като сървъра: приета, окончателна след offsite потвърждение.
+    rows = rows.map((row) => row.operationId === requestId ? { ...row, category: 'cancellation_pending', canCancel: false, cancelBlocker: 'cancellation_pending', cancellation: { source: 'admin', acceptedAt: new Date().toISOString(), stage: 'awaiting_offsite', recoveredFromLedger: false }, adminCancellation: { reason, createdAt: new Date().toISOString(), actorDisplayName: 'Главен Админ' } } : row)
+    return Promise.resolve({ ok: true, state: 'pending_confirmation' })
   }
   return Promise.resolve(cancelMode)
 }

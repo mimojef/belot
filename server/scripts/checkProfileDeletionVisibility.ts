@@ -43,6 +43,7 @@ import { createAdminSettingsStore } from '../src/db/adminSettingsStore.js'
 import { createYellowCoinGiftStore } from '../src/db/yellowCoinGiftStore.js'
 import { computeProfileDeletionSchedule } from '../src/db/profileDeletionSchedule.js'
 import { sqlProfileVisibleForDeletion } from '../src/db/profileDeletionVisibility.js'
+import { cancelRequestDirectlyForTest } from './fixtures/profileDeletionCancellationKit.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -138,12 +139,9 @@ function hideProfile(user: User): string {
   return requestId
 }
 
+// Етап 4J1 — изход от активна заявка само през финализирана трайна отмяна.
 function cancelHide(requestId: string): void {
-  db.prepare(`
-    UPDATE profile_deletion_requests
-    SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-    WHERE request_id = ?;
-  `).run(requestId)
+  cancelRequestDirectlyForTest(db, requestId)
 }
 
 /** SHA-256 на всички редове на всяка таблица (освен profile_deletion_*), сортирани детерминирано. */

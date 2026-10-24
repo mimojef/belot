@@ -224,7 +224,37 @@ function insertExecutingRequest(database: SqliteDatabase, workerId = 'worker-a')
  * то се задава в същия UPDATE само за легалния преход (от executing) — при
  * нелегален преход тригерът за преходите остава този, който отказва.
  */
+/**
+ * Етап 4J1 — преходът към 'cancelled' изисква финализирана трайна отмяна.
+ * Тук — пътят "отмяна, вече записана в регистъра" (recovered_from_ledger = 1,
+ * без проверка на срока); при неотменим статус вмъкването се отказва и
+ * самият преход после се проверява от тригера.
+ */
+function insertFinalizedCancellation(database: SqliteDatabase, requestId: string): void {
+  const row = database.prepare('SELECT profile_id, status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { profile_id: string; status: string } | undefined
+  if (row === undefined) return
+  try {
+    database.prepare(`
+      INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, recovered_from_ledger, previous_status, ledger_recorded_at)
+      VALUES (?, ?, ?, 'user', 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
+    `).run(randomUUID(), requestId, row.profile_id, row.status)
+    database.prepare(`UPDATE profile_deletion_cancellations SET finalized_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId)
+  } catch {
+    // неотменим статус — тригерът на прехода дава очакваната грешка
+  }
+}
+
+/** Етап 4J1 — приемане на потребителска отмяна (тук се проверява срокът). */
+function insertUserCancellation(database: SqliteDatabase, requestId: string): void {
+  const row = database.prepare('SELECT profile_id, status FROM profile_deletion_requests WHERE request_id = ?;').get(requestId) as { profile_id: string; status: string }
+  database.prepare(`
+    INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status)
+    VALUES (?, ?, ?, 'user', ?);
+  `).run(randomUUID(), requestId, row.profile_id, row.status)
+}
+
 function setRequestStatus(database: SqliteDatabase, requestId: string, to: ProfileDeletionRequestStatus): void {
+  if (to === 'cancelled') insertFinalizedCancellation(database, requestId)
   const now = dbNow(database)
   database.prepare(`
     UPDATE profile_deletion_requests
@@ -661,9 +691,10 @@ try {
     assertEqual(claim(db, requestId, 'worker-a'), 0, 'claim заявка преди срока')
   })
 
-  await check('[E4] Отмяна след изтичане на срока се отхвърля от базата (profile_deletion_cancel_window_closed)', () => {
+  await check('[E4] Отмяна след изтичане на срока се отхвърля от базата (profile_deletion_cancel_window_closed при приемането); статус cancelled без финализирана отмяна е невъзможен', () => {
     const { requestId } = insertDueRequest(db)
-    assertRejects(() => setRequestStatus(db, requestId, 'cancelled'), 'profile_deletion_cancel_window_closed', 'pending (изтекла) -> cancelled')
+    assertRejects(() => insertUserCancellation(db, requestId), 'profile_deletion_cancel_window_closed', 'приемане след срока')
+    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(db), requestId), 'profile_deletion_cancellation_not_finalized', 'pending (изтекла) -> cancelled без трайна отмяна')
   })
 
   await check('[E5] Точна граница в базата: при scheduled_for = now отмяната е затворена, изпълнението е позволено', () => {
@@ -671,7 +702,7 @@ try {
     const boundary = dbNow(db)
     const requestId = insertBackdatedRequest(db, profile, isoPlus(boundary, -PROFILE_DELETION_GRACE_PERIOD_MS))
     assertEqual(getRequest(db, requestId).scheduled_for, boundary, 'scheduled_for = момента на границата')
-    assertRejects(() => setRequestStatus(db, requestId, 'cancelled'), 'profile_deletion_cancel_window_closed', 'отмяна на границата')
+    assertRejects(() => insertUserCancellation(db, requestId), 'profile_deletion_cancel_window_closed', 'отмяна на границата')
     assertEqual(claim(db, requestId, 'worker-a'), 1, 'claim на границата')
   })
 
@@ -679,7 +710,11 @@ try {
     const profile = insertHumanProfile(db)
     const requestId = insertBackdatedRequest(db, profile, isoPlus(dbNow(db), -PROFILE_DELETION_GRACE_PERIOD_MS + 30_000))
     assertEqual(claim(db, requestId, 'worker-a'), 0, 'claim 30 s преди срока')
-    setRequestStatus(db, requestId, 'cancelled')
+    insertUserCancellation(db, requestId)
+    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(db), requestId), 'profile_deletion_cancellation_not_finalized', 'отмяна преди финализирането')
+    db.prepare(`UPDATE profile_deletion_cancellations SET ledger_recorded_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId)
+    db.prepare(`UPDATE profile_deletion_cancellations SET finalized_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId)
+    db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = ? WHERE request_id = ?;`).run(dbNow(db), requestId)
     assertEqual(getRequest(db, requestId).status, 'cancelled', 'status след отмяна')
   })
 

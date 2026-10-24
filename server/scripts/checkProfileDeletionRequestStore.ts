@@ -26,6 +26,7 @@ import { ensureServerDatabaseReady } from '../src/db/ensureServerDatabaseReady.j
 import { createPlayerProgressStore } from '../src/db/playerProgressStore.js'
 import { createAuthStore, LOGIN_RATE_LIMITED_MESSAGE, PROFILE_PENDING_DELETION_LOGIN_MESSAGE } from '../src/db/authStore.js'
 import { createProfileBanStore } from '../src/db/profileBanStore.js'
+import { createProfileDeletionCancellationKit } from './fixtures/profileDeletionCancellationKit.js'
 import { createProfileDeletionRequestStore, PROFILE_DELETION_RESTORE_TOKEN_TTL_MS } from '../src/db/profileDeletionRequestStore.js'
 import { createProfileDeletionExecutor } from '../src/db/profileDeletionExecutor.js'
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
@@ -100,6 +101,8 @@ const authStore = await createAuthStore(databaseFilePath, progressStore, {
 })
 const store = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
 const store2 = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET }) // втори процес
+// Етап 4J1 — отмяната е окончателна едва след запис в регистъра + offsite ack.
+const cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath: join(root, 'deletion-ledger', 'profile-deletions.jsonl') })
 
 type User = { profileId: string; accountId: string; email: string; displayName: string }
 let counter = 0
@@ -240,7 +243,12 @@ try {
     assert(created.ok && issued.ok, 'fixture')
     if (!created.ok || !issued.ok) return
     const cancelled = store.cancelWithToken(issued.restoreToken)
-    assert(cancelled.ok, JSON.stringify(cancelled))
+    assert(cancelled.ok && !cancelled.alreadyAccepted, JSON.stringify(cancelled))
+    // Етап 4J1 — приета: трайна защита, заявката още е pending до потвърждението.
+    assertEqual(requestRow(created.request.requestId).status, 'pending', 'status преди потвърждението')
+    assert(db.prepare('SELECT 1 FROM profile_deletion_cancellations WHERE request_id = ? AND finalized_at IS NULL;').get(created.request.requestId) !== undefined, 'приета отмяна')
+    const outcomes = cancellationKit.confirmAll()
+    assert(outcomes.some((o) => o.state === 'finalized' && o.requestId === created.request.requestId), JSON.stringify(outcomes))
     const row = requestRow(created.request.requestId)
     assertEqual(row.status, 'cancelled', 'status')
     assert(row.cancelled_at !== null, 'cancelled_at')
@@ -293,6 +301,7 @@ try {
     assert(issued.ok, JSON.stringify(issued))
     if (!issued.ok) return
     assert(store.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     assertEqual(requestRow(requestId).status, 'cancelled', 'status')
   })
 
@@ -338,7 +347,10 @@ try {
     const tokenHash = createHash('sha256').update(issued.restoreToken).digest('hex')
     assertRejects(() => db.prepare('DELETE FROM profile_deletion_restore_tokens WHERE token_hash = ?;').run(tokenHash), 'profile_deletion_restore_token_no_delete', 'DELETE')
     assertRejects(() => db.prepare(`UPDATE profile_deletion_restore_tokens SET expires_at = ? WHERE token_hash = ?;`).run(dbNow(), tokenHash), 'profile_deletion_restore_token_immutable', 'смяна на expires_at')
-    db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(created.request.requestId)
+    // Етап 4J1 — изход от pending само през финализирана трайна отмяна (тук системната).
+    assert(store.cancelForActiveParticipation(created.request.requestId).ok, 'системна отмяна')
+    cancellationKit.confirmAll()
+    assertEqual(requestRow(created.request.requestId).status, 'cancelled', 'status')
     const token = db.prepare('SELECT consumed_reason FROM profile_deletion_restore_tokens WHERE token_hash = ?;').get(tokenHash) as { consumed_reason: string }
     assertEqual(token.consumed_reason, 'request_closed', 'автоматично затваряне')
     assertRejects(() => db.prepare(`UPDATE profile_deletion_restore_tokens SET consumed_reason = 'kept' WHERE token_hash = ?;`).run(tokenHash), 'profile_deletion_restore_token_immutable', 'промяна на consumed_reason')
@@ -403,6 +415,7 @@ try {
     assert(!pending.ok && 'code' in pending && pending.code === 'PROFILE_PENDING_DELETION' && pending.isBanned === true, JSON.stringify(pending))
     const issued = store.issueRestoreToken(user.profileId)
     assert(issued.ok && store.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     const after = authStore.login({ email: user.email, password: PASSWORD, rememberMe: true })
     assert(!after.ok && 'code' in after && after.code === 'PROFILE_BANNED', JSON.stringify(after))
     assert(banStore.getActiveBan(user.profileId) !== null, 'банът е премахнат')
@@ -473,6 +486,7 @@ try {
     const created = store.createRequest({ profileId: user.profileId, accountId: user.accountId })
     const issued = store.issueRestoreToken(user.profileId)
     assert(created.ok && issued.ok && store.cancelWithToken(issued.restoreToken).ok, 'fixture')
+    cancellationKit.confirmAll()
     const events = store2.listVisibilityEventsAfter(from, 100).filter((e) => e.profileId === user.profileId)
     assertEqual(events.map((e) => e.eventType).join(','), 'requested,cancelled', 'събития')
     assert(store.getMaxEventSeq() >= events[1].eventSeq, 'max seq')

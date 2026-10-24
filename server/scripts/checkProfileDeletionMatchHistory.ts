@@ -27,6 +27,7 @@ import { createProfileDeletionExecutor, PROFILE_DELETION_DELETED_LABEL, type Pro
 import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSchedule.js'
 import { createProfileDeletionWorker } from '../src/core/profileDeletionWorker.js'
 import { removeProfileDeletionFile, type ProfileDeletionUploadRoots } from '../src/uploads/profileDeletionFileRemoval.js'
+import { createProfileDeletionCancellationKit } from './fixtures/profileDeletionCancellationKit.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -91,6 +92,8 @@ const authStore = await createAuthStore(databaseFilePath, progressStore, {
   getActiveBanForProfile: () => null,
 })
 const requestStore = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
+// Етап 4J1 — отмяната е окончателна след запис в регистъра + offsite ack.
+const cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath: `${databaseFilePath}-cancellation-ledger/profile-deletions.jsonl` })
 const executor = await createProfileDeletionExecutor(databaseFilePath)
 
 function makeWorker(exec: ProfileDeletionExecutor, onlyRequestIds: string[], offsiteConfirmed?: (requestId: string) => boolean) {
@@ -261,6 +264,7 @@ try {
       // Отмяна (т. 11): нищо не се променя; после нова, изтичаща заявка.
       const issued = requestStore.issueRestoreToken(target.profileId)
       assert(issued.ok && requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+      cancellationKit.confirmAll()
     }
   })
 

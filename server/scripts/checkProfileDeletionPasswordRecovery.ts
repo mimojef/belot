@@ -36,6 +36,7 @@ import { PROFILE_DELETION_GRACE_PERIOD_MS } from '../src/db/profileDeletionSched
 import { createProfileDeletionWorker } from '../src/core/profileDeletionWorker.js'
 import { handleForgotPassword, handleResetPassword, type PasswordResetHandlerContext } from '../src/auth/passwordResetHandlers.js'
 import { removeProfileDeletionFile, type ProfileDeletionUploadRoots } from '../src/uploads/profileDeletionFileRemoval.js'
+import { createProfileDeletionCancellationKit, writeTestLedgerAck } from './fixtures/profileDeletionCancellationKit.js'
 
 type SqliteDatabase = InstanceType<typeof import('node:sqlite').DatabaseSync>
 
@@ -113,6 +114,8 @@ const authStore = await createAuthStore(databaseFilePath, progressStore, {
 })
 const resetStore = await createPasswordResetStore(databaseFilePath, { rateLimitHashSecret: SECRET })
 const requestStore = await createProfileDeletionRequestStore(databaseFilePath, { rateLimitSecret: SECRET })
+// Етап 4J1 — отмяната е окончателна след запис в регистъра + offsite ack.
+const cancellationKit = await createProfileDeletionCancellationKit({ databaseFilePath, ledgerPath: `${databaseFilePath}-cancellation-ledger/profile-deletions.jsonl` })
 const executor = await createProfileDeletionExecutor(databaseFilePath)
 
 const uploadsRoot = join(root, 'uploads')
@@ -337,7 +340,8 @@ try {
     assert(!result.ok && result.code === 'PROFILE_PENDING_DELETION', 'ограничено състояние')
     const issued = requestStore.issueRestoreToken(user.profileId)
     assert(!issued.ok && issued.code === 'no_pending_request', 'след срока: токен за отмяна не се издава')
-    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId), 'profile_deletion_cancel_window_closed', 'отмяна след срока')
+    assertRejects(() => db.prepare(`INSERT INTO profile_deletion_cancellations (cancellation_id, request_id, profile_id, source, previous_status) VALUES (?, ?, ?, 'user', 'pending');`).run(randomUUID(), requestId, user.profileId), 'profile_deletion_cancel_window_closed', 'отмяна след срока (приемане)')
+    assertRejects(() => db.prepare(`UPDATE profile_deletion_requests SET status = 'cancelled', cancelled_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now') WHERE request_id = ?;`).run(requestId), 'profile_deletion_cancellation_not_finalized', 'отмяна без трайна отмяна')
     const atDeadline = registerUser('AtDeadline')
     insertRequestScheduledAt(atDeadline, dbNow())
     const none = requestStore.issueRestoreToken(atDeadline.profileId)
@@ -375,6 +379,7 @@ try {
     assert(issued.ok, 'токен')
     if (!issued.ok) return
     assert(requestStore.cancelWithToken(issued.restoreToken).ok, 'отмяна')
+    cancellationKit.confirmAll()
     const afterCancel = login(user.email, NEW_PASSWORD)
     assert(!afterCancel.ok && afterCancel.code === 'PROFILE_BANNED' && afterCancel.sessionToken === undefined, JSON.stringify(afterCancel))
     const ban = db.prepare('SELECT lifted_at FROM profile_bans WHERE ban_id = ?;').get(banId) as { lifted_at: string | null }
@@ -531,6 +536,7 @@ try {
   // (тестов транспорт — без реален Brevo); смяната минава през реалния HTTP.
   const hResetStore = await createPasswordResetStore(bootstrap.databaseFilePath, { rateLimitHashSecret: SECRET })
   const hRequestStore = await createProfileDeletionRequestStore(bootstrap.databaseFilePath, { rateLimitSecret: SECRET })
+  const hLedgerPath = join(isolatedRoot, 'deletion-ledger', 'profile-deletions.jsonl')
 
   const port = await getFreePort()
   const base = `http://127.0.0.1:${port}`
@@ -542,6 +548,9 @@ try {
     BELOT_GAME_WORKER_COUNT: '1',
     PASSWORD_RESET_RATE_LIMIT_SECRET: SECRET,
     PASSWORD_RESET_URL: RESET_URL,
+    // Етап 4J1 — изолиран регистър; finalizer-ът проверява често (реалният offsite ack се пише от теста).
+    PROFILE_DELETION_LEDGER_PATH: hLedgerPath,
+    PROFILE_DELETION_CANCELLATION_FINALIZER_INTERVAL_MS: '300',
   }
   // Подаването на заявки не се ползва (заявките се създават от store-а) —
   // флагът за самоизтриване остава изключен.
@@ -660,6 +669,16 @@ try {
     const cancelled = await api('/api/account/deletion-request/cancel', { method: 'POST', body: { restoreToken: res.json.restoreToken } })
     assert(cancelled.status === 200 && cancelled.json.ok === true, `${cancelled.status} ${JSON.stringify(cancelled.json)}`)
     assert(!/belot_session=[^;]/.test(cancelled.setCookie), 'отмяната не издава сесия')
+    // Етап 4J1 — без offsite потвърждение: приета, не окончателна; входът го казва.
+    assertEqual(cancelled.json.state, 'pending_confirmation', 'междинно състояние')
+    const pendingLogin = await loginHttp(user.email, NEW_PASSWORD)
+    assert(pendingLogin.status === 403 && pendingLogin.json.cancellationPending === true && pendingLogin.json.restoreToken === undefined, JSON.stringify(pendingLogin.json))
+    writeTestLedgerAck(hLedgerPath)
+    const confirmDeadline = Date.now() + 15_000
+    while ((hdb.prepare('SELECT status FROM profile_deletion_requests WHERE request_id = ?;').get(created.request.requestId) as { status: string }).status !== 'cancelled') {
+      if (Date.now() > confirmDeadline) throw new Error('отмяната не беше финализирана след offsite потвърждението')
+      await new Promise((r) => setTimeout(r, 200))
+    }
     const row = hdb.prepare('SELECT status, cancelled_at FROM profile_deletion_requests WHERE request_id = ?;').get(created.request.requestId) as { status: string; cancelled_at: string | null }
     assert(row.status === 'cancelled' && row.cancelled_at !== null, JSON.stringify(row))
     const event = hdb.prepare(`SELECT actor_kind FROM profile_deletion_events WHERE request_id = ? AND event_type = 'cancelled';`).get(created.request.requestId) as { actor_kind: string } | undefined
